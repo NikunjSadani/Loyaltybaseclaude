@@ -6,6 +6,7 @@ import { RequirePermission } from '../common/decorators/require-permission.decor
 import {
   SetHolidaysDto,
   SetPointsExpiryDto,
+  SetReportRecipientsDto,
   SetVisibilityCaptureModeDto,
   UpsertSettingDto,
 } from './dto/settings.dto';
@@ -120,5 +121,34 @@ export class AdminSettingsController {
   @RequirePermission('tenancy:write')
   setHolidays(@CurrentUser() user: JwtPayload, @Body() dto: SetHolidaysDto) {
     return this.svc.setNationalHolidays(user, dto);
+  }
+
+  /**
+   * GET /v1/admin/settings/report-recipients — the PLATFORM-global per-report recipient lists
+   * (which email addresses receive each Gifsy-configured scheduled report). GIFSY_ADMIN or
+   * CLIENT_ADMIN may read. Returns { recipients: { creditsPayouts: [], kycActionables: [] } } —
+   * the stored value normalized, else empty lists when unset.
+   */
+  // GIFSY-only on BOTH read and write: the recipient list is Gifsy's internal ops distribution
+  // list, with no tenant-admin relevance (unlike the holiday calendar, which tenant admins read
+  // because it drives their KYC list). Least-privilege — don't expose internal emails to tenants.
+  @Get('report-recipients')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('tenancy:read')
+  getReportRecipients() {
+    return this.svc.getReportRecipients();
+  }
+
+  /**
+   * PUT /v1/admin/settings/report-recipients — replace the platform report-recipient lists.
+   * GIFSY_ADMIN only (it is platform-level operator config, not per-tenant). Body:
+   * { creditsPayouts: string[], kycActionables: string[] }. Returns the saved, lowercased,
+   * de-duped lists.
+   */
+  @Put('report-recipients')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('tenancy:write')
+  setReportRecipients(@CurrentUser() user: JwtPayload, @Body() dto: SetReportRecipientsDto) {
+    return this.svc.setReportRecipients(user, dto);
   }
 }

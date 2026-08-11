@@ -908,6 +908,61 @@ describe('AdminCoreService', () => {
     });
   });
 
+  describe('reportRecipients (platform store)', () => {
+    it('getReportRecipients returns empty lists when no row exists', async () => {
+      mockPrisma.programSetting.findFirst.mockResolvedValue(null);
+      const { recipients } = await service.getReportRecipients();
+      expect(recipients).toEqual({ creditsPayouts: [], kycActionables: [] });
+      // Read from the platform (gifsy) row, not the caller's tenant.
+      expect(mockPrisma.programSetting.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { clientId: 'gifsy', settingKey: 'reportRecipients' } }),
+      );
+    });
+
+    it('getReportRecipients normalizes, lowercases, de-dups and drops invalid emails', async () => {
+      mockPrisma.programSetting.findFirst.mockResolvedValue({
+        settingValue: {
+          creditsPayouts: ['Finance@Gifsy.in', 'finance@gifsy.in', 'not-an-email', ''],
+          kycActionables: ['Ops@Gifsy.in'],
+        },
+      });
+      const { recipients } = await service.getReportRecipients();
+      expect(recipients).toEqual({
+        creditsPayouts: ['finance@gifsy.in'],
+        kycActionables: ['ops@gifsy.in'],
+      });
+    });
+
+    it('setReportRecipients (GIFSY) normalizes and upserts the platform row', async () => {
+      mockPrisma.programSetting.upsert.mockResolvedValue({ id: 'ps' });
+      const { recipients } = await service.setReportRecipients(gifsy, {
+        creditsPayouts: ['  Finance@Gifsy.in ', 'finance@gifsy.in', 'bad'],
+        kycActionables: ['Ops@Gifsy.in'],
+      });
+      expect(recipients).toEqual({
+        creditsPayouts: ['finance@gifsy.in'],
+        kycActionables: ['ops@gifsy.in'],
+      });
+      const call = mockPrisma.programSetting.upsert.mock.calls[0][0];
+      expect(call.where).toEqual({
+        clientId_settingKey: { clientId: 'gifsy', settingKey: 'reportRecipients' },
+      });
+      expect(call.create.settingValue).toEqual(recipients);
+      expect(call.create.category).toBe('reports');
+      expect(call.update.settingValue).toEqual(recipients);
+    });
+
+    it('setReportRecipients forbids a non-GIFSY caller', async () => {
+      await expect(
+        service.setReportRecipients(clientAdmin, {
+          creditsPayouts: ['finance@gifsy.in'],
+          kycActionables: [],
+        }),
+      ).rejects.toThrow(/Gifsy Admin only/);
+      expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+  });
+
   describe('kycDashboard', () => {
     const HOUR = 60 * 60 * 1000;
     // Fixed Friday so the business-hours SLA clock is DETERMINISTIC: every fixture below looks

@@ -20,6 +20,12 @@ import {
   normalizeHolidays,
 } from '../common/holiday-calendar';
 import {
+  REPORTS_CLIENT_ID,
+  REPORT_RECIPIENTS_KEY,
+  ReportRecipients,
+  normalizeReportRecipients,
+} from '../common/report-recipients';
+import {
   BulkEditUsersDto,
   CreateUserDto,
   ListUsersQueryDto,
@@ -28,6 +34,7 @@ import {
 import {
   SetHolidaysDto,
   SetPointsExpiryDto,
+  SetReportRecipientsDto,
   SetVisibilityCaptureModeDto,
   UpsertSettingDto,
 } from './dto/settings.dto';
@@ -622,6 +629,53 @@ export class AdminCoreService {
       update: { settingValue },
     });
     return { holidays };
+  }
+
+  // ── Report recipients (platform-global) ────────────────────────────────────
+  // Per Gifsy-configured scheduled report, the list of email addresses that receive it. Storage +
+  // defaults + normalizer live in the shared common/report-recipients module (used identically by
+  // the scheduled-report runner), so the configured list and the send logic can never drift.
+  // GIFSY_ADMIN edits it; CLIENT_ADMIN can read it.
+
+  /**
+   * The platform report-recipient lists, for the settings UI. Returns the stored value normalized
+   * (valid, lowercased, de-duped emails), else empty lists when no row exists.
+   */
+  async getReportRecipients(): Promise<{ recipients: ReportRecipients }> {
+    const row = await this.prisma.programSetting.findFirst({
+      where: { clientId: REPORTS_CLIENT_ID, settingKey: REPORT_RECIPIENTS_KEY },
+      select: { settingValue: true },
+    });
+    return { recipients: normalizeReportRecipients(row?.settingValue) };
+  }
+
+  /**
+   * Replace the platform report-recipient lists. GIFSY_ADMIN only (role-enforced on the controller;
+   * re-checked here). Normalizes each list (valid, lowercased, de-duped emails) and upserts the
+   * single platform row.
+   */
+  async setReportRecipients(
+    user: JwtPayload,
+    dto: SetReportRecipientsDto,
+  ): Promise<{ recipients: ReportRecipients }> {
+    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Gifsy Admin only');
+
+    const recipients = normalizeReportRecipients(dto);
+
+    // ReportRecipients is a plain JSON object; cast to Prisma's JSON input type (the interface
+    // lacks the index signature Prisma's InputJsonValue expects).
+    const settingValue = recipients as unknown as Prisma.InputJsonValue;
+    await this.prisma.programSetting.upsert({
+      where: { clientId_settingKey: { clientId: REPORTS_CLIENT_ID, settingKey: REPORT_RECIPIENTS_KEY } },
+      create: {
+        clientId: REPORTS_CLIENT_ID,
+        settingKey: REPORT_RECIPIENTS_KEY,
+        settingValue,
+        category: 'reports',
+      },
+      update: { settingValue },
+    });
+    return { recipients };
   }
 
   async getSettings(user: JwtPayload) {

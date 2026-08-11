@@ -234,3 +234,102 @@ describe('Msg91Service.sendOtp — per-tenant template override', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+// Covers Msg91Service.sendEmail — the MSG91 v5 Email path used by the report runner.
+// Same conventions as sendWhatsappTemplate: missing-authKey dev bypass (log + return,
+// no throw), the request URL + authkey header + body shape, the "HTTP 200 + {type:'error'}"
+// failure throw, and the REPORTS_FROM_EMAIL → domain derivation.
+describe('Msg91Service.sendEmail', () => {
+  const realFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    jest.restoreAllMocks();
+  });
+
+  it('dev bypass: no authKey → logs + returns WITHOUT calling fetch', async () => {
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(makeConfig({})); // MSG91_AUTH_KEY undefined
+    await expect(
+      service.sendEmail({ to: ['a@b.com'], subject: 'Daily report', html: '<p>hi</p>' }),
+    ).resolves.toBeUndefined();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('no-op (no fetch) when the recipient list is empty', async () => {
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    await expect(
+      service.sendEmail({ to: [], subject: 'Daily report', html: '<p>hi</p>' }),
+    ).resolves.toBeUndefined();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('posts to the MSG91 email endpoint with the authkey header + recipients/subject/body', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue({ ok: true, status: 200, json: async () => ({ type: 'success' }) });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    await service.sendEmail({
+      to: ['owner@acme.com', 'ops@acme.com'],
+      subject: 'Weekly summary',
+      html: '<h1>Report</h1>',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://control.msg91.com/api/v5/email/send');
+    // authkey rides in the header, never the body (mirrors sendWhatsappTemplate).
+    expect(init.method).toBe('POST');
+    expect(init.headers.authkey).toBe('key-123');
+
+    const body = JSON.parse(init.body);
+    expect(body.recipients).toEqual([
+      { to: [{ email: 'owner@acme.com' }] },
+      { to: [{ email: 'ops@acme.com' }] },
+    ]);
+    expect(body.subject).toBe('Weekly summary');
+    expect(body.body).toBe('<h1>Report</h1>');
+    // Default from address + its derived domain.
+    expect(body.from).toEqual({ email: 'reports@notify.gifsy.in' });
+    expect(body.domain).toBe('notify.gifsy.in');
+  });
+
+  it('throws when MSG91 returns HTTP 200 with {type:"error"}', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ type: 'error', message: 'bad domain' }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    await expect(
+      service.sendEmail({ to: ['a@b.com'], subject: 'Daily report', html: '<p>hi</p>' }),
+    ).rejects.toThrow(/bad domain/);
+  });
+
+  it('uses REPORTS_FROM_EMAIL when set and derives the domain from it', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(
+      makeConfig({ MSG91_AUTH_KEY: 'key-123', REPORTS_FROM_EMAIL: 'noreply@mail.deoleo.in' }),
+    );
+    await service.sendEmail({ to: ['a@b.com'], subject: 'Daily report', html: '<p>hi</p>' });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.from).toEqual({ email: 'noreply@mail.deoleo.in' });
+    expect(body.domain).toBe('mail.deoleo.in');
+  });
+});

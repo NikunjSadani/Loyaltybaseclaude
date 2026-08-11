@@ -185,11 +185,16 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   sent from a **`notify.gifsy.in` subdomain** (own SPF/DKIM/MX/CNAME/DMARC → no Zoho-Mail conflict; Zoho MX on root untouched). Scope = **two
   INTERNAL Gifsy reports** (recipients configurable from a Gifsy-admin page): **①Credits/Payouts summary (all-tenant)** + **③KYC actionables
   digest (all-tenant, daily Mon–Sat, with SLA)** — two SEPARATE scheduled reports (Cloud Scheduler → internal endpoint). Framework built to
-  add tenant-specific scheduled reports later. Partners are NOT an email audience (phone-first). **Workstream B = business-day KYC SLA DONE +
-  gate-green + audited (see WHAT'S NEXT).** Remaining: A (MSG91 `sendEmail`), C (report framework + Gifsy recipient UI), D/E (the two reports).
-  Owner prereqs to build A/D/E: MSG91 email API key (via Secret Manager) + `notify.gifsy.in` DNS + recipient lists.
-- **(context) queue drainer still PUSH-only** — the genuinely-dead SMS/EMAIL legs (credit-batch EMAIL, KYC UNDER_REVIEW SMS, redemption SMS)
-  each have a paired PUSH/WhatsApp leg that DOES fire; reviving the SMS legs is out of the current email-only scope.
+  add tenant-specific scheduled reports later. Partners are NOT an email audience (phone-first). **Workstream B = business-day KYC SLA
+  ✅ LIVE STAGING `e1c809d`.** **Workstreams A/C/D/E = BUILT on develop, gate-green (jest 2254 / vitest 2109), adversarial-audited, FAIL-CLOSED**
+  (`Msg91Service.sendEmail` reusing `MSG91_AUTH_KEY` · `POST /v1/reports/run` secret-gated · report framework + 2 all-tenant reports
+  #1 Credits/Payouts + #3 KYC-actionables daily Mon–Sat · platform recipients store GIFSY-only + Gifsy-admin recipients UI). MSG91 Email Free 5k/mo,
+  domain `notify.gifsy.in` VERIFIED (DNS on Cloudflare). ▶ **owner to activate** (nothing sends until then): confirm the MSG91 v5 email payload vs the
+  dashboard API-Integration tab (`msg91.service.sendEmail` flagged block) → create `REPORTS_RUN_SECRET` + set recipients + Cloud Scheduler — runbook
+  `runbooks/email-reports-activation.md`. ⚠️ owner decision open: KYC PENDING_GIFSY SLA clock uses the EARLIEST queue-entry (report matches the LIVE
+  dashboard) — "restart on bounce-back" = latest is a shared-semantic change to BOTH. Detail: memory [[email-reports-business-day-sla]].
+- **(context) queue drainer still PUSH-only** — the dead SMS legs (KYC UNDER_REVIEW SMS, redemption SMS) each have a paired PUSH/WhatsApp leg that
+  DOES fire; the dead credit-batch EMAIL is now SUPERSEDED by the new Credits/Payouts report. Reviving the SMS legs is out of the email-only scope.
 - **#74 owner-ops residual:** optional cred/secret rotation + real prod MSG91 (monitoring + backups/PITR already ON).
 - **POST-GO-LIVE-BACKLOG (later):** multi-tenant SSR branding, configurable RBAC (AF-12 kept OFF), WhatsApp per-tenant
   generalization, OTel O3, DB-RLS, invoice-PDF/email, TDS filing, DPDP, analytics.

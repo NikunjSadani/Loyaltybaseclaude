@@ -44,8 +44,9 @@ function istWeekday(ms: number): number {
   return new Date(ms + IST_OFFSET_MS).getUTCDay();
 }
 
-/** UTC-milliseconds of IST midnight (00:00 IST) of the IST-day containing `ms`. */
-function istStartOfDay(ms: number): number {
+/** UTC-milliseconds of IST midnight (00:00 IST) of the IST-day containing `ms`. Exported so
+ *  daily reports can day-scope "today IST" as `[istStartOfDay(now), +24h)` on a UTC column. */
+export function istStartOfDay(ms: number): number {
   const shifted = ms + IST_OFFSET_MS;
   const midnightShifted = Math.floor(shifted / DAY_MS) * DAY_MS;
   return midnightShifted - IST_OFFSET_MS;

@@ -21,6 +21,7 @@ import {
 } from '@/lib/visibility-capture-mode'
 import { useAdminSession } from '@/lib/admin-session'
 import { fetchHolidays, saveHolidays, type Holiday } from '@/lib/holidays'
+import { fetchReportRecipients, saveReportRecipients, type ReportRecipients } from '@/lib/report-recipients'
 
 interface Settings {
   holdingPeriodDays: number
@@ -496,6 +497,75 @@ export default function SettingsPage() {
     setHolidays(sortHolidays(deduped))
     setHolidaysSaved(true)
     setTimeout(() => setHolidaysSaved(false), 3000)
+  }
+
+  // ── Report recipients (per-report email distribution lists for the scheduled internal
+  // reports — the daily Mon–Sat operator digests) ──
+  // Round-trips via GET/PUT /api/admin/settings/report-recipients through the
+  // fetchReportRecipients/saveReportRecipients client. Both GET and PUT are GIFSY_ADMIN-only (the
+  // recipient list is Gifsy's internal ops distribution list — no tenant-admin relevance), so the
+  // whole card renders only for a Gifsy Admin and we skip the fetch for anyone else.
+  // `recipientsLoaded` gates the Save so we can never PUT the placeholder before the fetch resolves.
+  // Client-side each row must be a valid email (mirroring the backend rule) so a save can't 400.
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+  type RecipientList = keyof ReportRecipients // 'creditsPayouts' | 'kycActionables'
+
+  const [creditsPayouts, setCreditsPayouts] = useState<string[]>([])
+  const [kycActionables, setKycActionables] = useState<string[]>([])
+  const [recipientsLoaded, setRecipientsLoaded] = useState(false)
+  const [recipientsSaved,  setRecipientsSaved]  = useState(false)
+  const [recipientsError,  setRecipientsError]  = useState<string | null>(null)
+
+  useEffect(() => {
+    // GIFSY-only endpoint — don't even request it as a tenant admin (the card is hidden anyway).
+    if (!isGifsyAdmin) return
+    fetchReportRecipients()
+      .then(({ creditsPayouts, kycActionables }) => {
+        setCreditsPayouts(creditsPayouts)
+        setKycActionables(kycActionables)
+      })
+      .finally(() => setRecipientsLoaded(true))
+  }, [isGifsyAdmin])
+
+  // Every row of BOTH lists must be a valid, non-empty email for a save to be allowed.
+  const recipientsValid =
+    [...creditsPayouts, ...kycActionables].every((e) => EMAIL_RE.test(e.trim()))
+
+  function setRecipientList(which: RecipientList, next: string[]) {
+    if (which === 'creditsPayouts') setCreditsPayouts(next); else setKycActionables(next)
+  }
+  function updateRecipient(which: RecipientList, index: number, value: string) {
+    const list = which === 'creditsPayouts' ? creditsPayouts : kycActionables
+    setRecipientList(which, list.map((e, i) => (i === index ? value : e)))
+  }
+  function addRecipientRow(which: RecipientList) {
+    const list = which === 'creditsPayouts' ? creditsPayouts : kycActionables
+    setRecipientList(which, [...list, ''])
+  }
+  function removeRecipientRow(which: RecipientList, index: number) {
+    const list = which === 'creditsPayouts' ? creditsPayouts : kycActionables
+    setRecipientList(which, list.filter((_, i) => i !== index))
+  }
+
+  async function handleRecipientsSave() {
+    setRecipientsError(null)
+    const cleanCredits = creditsPayouts.map((e) => e.trim())
+    const cleanKyc     = kycActionables.map((e) => e.trim())
+    const bad = [...cleanCredits, ...cleanKyc].find((e) => !EMAIL_RE.test(e))
+    if (bad !== undefined) {
+      setRecipientsError(bad === '' ? 'Every recipient row needs an email address.' : `"${bad}" is not a valid email address.`)
+      return
+    }
+    const ok = await saveReportRecipients({ creditsPayouts: cleanCredits, kycActionables: cleanKyc })
+    if (!ok) {
+      setRecipientsError('Could not save — report recipients can only be changed by a Gifsy Admin.')
+      return
+    }
+    // Reflect the trimmed values locally.
+    setCreditsPayouts(cleanCredits)
+    setKycActionables(cleanKyc)
+    setRecipientsSaved(true)
+    setTimeout(() => setRecipientsSaved(false), 3000)
   }
 
   // ── Conversion rate (per-tenant; Points→₹). saveGifsySettings PUTs /v1/admin/settings
@@ -1019,6 +1089,111 @@ export default function SettingsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* ── Report Recipients — GIFSY_ADMIN only (internal Gifsy ops distribution list) ── */}
+      {isGifsyAdmin && (
+      <Card data-testid="report-recipients-card">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2">
+                <CalendarDays className="h-4 w-4 text-[var(--brand-primary)]" /> Report Recipients
+              </CardTitle>
+              <CardDescription className="mt-1">
+                These addresses receive the daily internal reports (Mon–Sat). Gifsy-operated setting.
+              </CardDescription>
+            </div>
+            {isGifsyAdmin && (
+              <button
+                data-testid="recipients-save"
+                onClick={handleRecipientsSave}
+                disabled={!recipientsLoaded || !recipientsValid}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all shrink-0 ${
+                  recipientsSaved
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                    : 'bg-[var(--brand-primary)] text-white hover:bg-[var(--brand-primary-dark)] disabled:opacity-50 disabled:cursor-not-allowed'
+                }`}
+              >
+                {recipientsSaved ? '✓ Saved' : <><Save className="h-3.5 w-3.5" /> Save</>}
+              </button>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          {!recipientsLoaded ? (
+            <p className="text-sm text-gray-400">Loading recipients…</p>
+          ) : (
+            <div className="space-y-6">
+              {([
+                ['creditsPayouts', 'Credits & Payouts summary', creditsPayouts] as const,
+                ['kycActionables', 'KYC actionables digest',    kycActionables] as const,
+              ]).map(([which, title, list]) => (
+                <div key={which} data-testid={`recipients-group-${which}`}>
+                  <p className="text-sm font-medium text-gray-900 mb-2">{title}</p>
+                  {isGifsyAdmin ? (
+                    <>
+                      {list.length === 0 ? (
+                        <p className="text-xs text-gray-400 italic mb-3">No recipients yet — add one below.</p>
+                      ) : (
+                        <div className="space-y-2 mb-3">
+                          {list.map((email, i) => (
+                            <div key={i} data-testid={`recipient-row-${which}`} className="flex items-center gap-2">
+                              <input
+                                type="email"
+                                data-testid={`recipient-input-${which}`}
+                                aria-label={`${title} recipient email`}
+                                value={email}
+                                onChange={(e) => updateRecipient(which, i, e.target.value)}
+                                placeholder="name@example.com"
+                                className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)]"
+                              />
+                              <button
+                                type="button"
+                                aria-label={`Remove ${email || 'recipient'}`}
+                                onClick={() => removeRecipientRow(which, i)}
+                                className="text-gray-400 hover:text-red-500 transition-colors shrink-0"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <button
+                        data-testid={`recipient-add-${which}`}
+                        type="button"
+                        onClick={() => addRecipientRow(which)}
+                        className="flex items-center gap-1 px-3 py-1.5 bg-[var(--brand-primary)] text-white text-xs font-semibold rounded-lg hover:bg-[var(--brand-primary-dark)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      >
+                        <Plus className="h-3.5 w-3.5" /> Add recipient
+                      </button>
+                    </>
+                  ) : list.length === 0 ? (
+                    <p className="text-xs text-gray-400 italic">No recipients configured.</p>
+                  ) : (
+                    <div className="divide-y divide-gray-100">
+                      {list.map((email, i) => (
+                        <div key={`${email}-${i}`} data-testid={`recipient-row-${which}`} className="flex items-center justify-between gap-4 py-2.5">
+                          <span className="text-sm font-medium text-gray-900">{email}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {isGifsyAdmin && recipientsError && (
+                <p className="text-xs text-red-600">{recipientsError}</p>
+              )}
+              {!isGifsyAdmin && (
+                <p className="text-xs text-gray-400">
+                  Report recipients are a Gifsy-operated setting — only a Gifsy Admin can change them.
+                </p>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+      )}
 
       {/* Visibility Duplicate Detection */}
       <Card>

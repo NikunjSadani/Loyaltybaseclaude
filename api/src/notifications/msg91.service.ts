@@ -186,4 +186,90 @@ export class Msg91Service {
       throw new Error(`Failed to send WhatsApp template ${templateName}: ${reason}`);
     }
   }
+
+  /**
+   * Send a transactional EMAIL via the MSG91 v5 Email API. Used by the report
+   * runner to deliver generated reports.
+   *
+   * Mirrors sendWhatsappTemplate's conventions exactly:
+   *   - authkey from MSG91_AUTH_KEY (.trim() — defends against a BOM/whitespace
+   *     that would make `fetch` throw a ByteString error on the header).
+   *   - DEV bypass: when no authKey is configured we LOG and RETURN so a non-prod
+   *     env without MSG91 wiring never errors (do NOT throw when unconfigured).
+   *   - 10s AbortSignal timeout → fail fast with a clear error, never an endless hang.
+   *   - "HTTP 200 + {type:'error'}" body check → throw on the MSG91-reported failure.
+   *
+   * On success logs a single info line. On failure THROWS — the caller (report
+   * runner) catches it so one failed report doesn't block the others.
+   *
+   * @param params.to      recipient email addresses (no-op when empty)
+   * @param params.subject the email subject line
+   * @param params.html    the email body (HTML)
+   */
+  async sendEmail(params: { to: string[]; subject: string; html: string }): Promise<void> {
+    const { to, subject, html } = params;
+
+    // Nothing to send — no-op (never errors on an empty recipient list).
+    if (to.length === 0) {
+      return;
+    }
+
+    const authKey = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
+
+    // DEV bypass — same shape as sendWhatsappTemplate's missing-authKey path: a
+    // non-prod env without MSG91 configured logs and returns instead of throwing.
+    if (!authKey) {
+      this.logger.warn(
+        `[DEV] MSG91 not configured — email "${subject}" to ${to.join(', ')} skipped`,
+      );
+      return;
+    }
+
+    // The MSG91-verified sending address; the sending domain is the part after the @.
+    const fromEmail =
+      this.config.get<string>('REPORTS_FROM_EMAIL')?.trim() || 'reports@notify.gifsy.in';
+    const domain = fromEmail.split('@')[1];
+
+    // ⚠️ CONFIRM against MSG91 dashboard → API Integration tab before the first real
+    // send — the exact field names of the v5 Email API aren't 100%-verified yet, so
+    // the endpoint + payload construction are isolated in THIS one block for an easy
+    // runtime-verify / tweak against the real API.
+    const url = 'https://control.msg91.com/api/v5/email/send';
+    const body = {
+      recipients: to.map((email) => ({ to: [{ email }] })),
+      from: { email: fromEmail },
+      domain,
+      subject,
+      body: html,
+    };
+    // ── end MSG91 v5 Email payload block ─────────────────────────────────────────
+
+    // Never hang the request on an unresponsive MSG91 — 10s timeout, then fail fast.
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { authkey: authKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (e) {
+      const reason =
+        (e as Error)?.name === 'TimeoutError'
+          ? 'MSG91 did not respond within 10s (timeout — check MSG91 IP whitelisting / egress)'
+          : String(e);
+      this.logger.error(`MSG91 email "${subject}" request failed: ${reason}`);
+      throw new Error(`Failed to send email "${subject}": ${reason}`);
+    }
+
+    // MSG91 can return HTTP 200 with {"type":"error"} — check the body too.
+    const json = (await res.json()) as { type?: string; message?: string };
+    if (!res.ok || json?.type === 'error') {
+      const reason = json?.message ?? `HTTP ${res.status}`;
+      this.logger.error(`MSG91 email "${subject}" failed: ${reason}`);
+      throw new Error(`Failed to send email "${subject}": ${reason}`);
+    }
+
+    this.logger.log(`Email "${subject}" sent to ${to.length} recipient(s)`);
+  }
 }
