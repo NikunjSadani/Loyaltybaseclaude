@@ -205,6 +205,168 @@ describe('Admin User Accounts page', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
+  it('AU7: the Edit modal pre-fills, PATCHes /api/admin/users/:id with name/phone/role/email, and refreshes', async () => {
+    mockSession.userId = 'self-op'; // not a listed user → every row shows the Edit action
+    const { calls } = installFetch((url, init) => {
+      if (/\/api\/admin\/users\/u1$/.test(url) && init?.method === 'PATCH') {
+        return jsonRes(true, 200, { success: true, data: { user: { id: 'u1' } } });
+      }
+      return undefined;
+    });
+    render(<AdminUsersPage />);
+    await screen.findByText('Priya Sharma');
+
+    await userEvent.click(screen.getByRole('button', { name: /edit priya sharma/i }));
+    const dialog = await screen.findByRole('dialog');
+    const scope = within(dialog);
+
+    // Pre-filled from the row.
+    expect((scope.getByPlaceholderText('e.g. Priya Sharma') as HTMLInputElement).value).toBe('Priya Sharma');
+    expect((scope.getByPlaceholderText('9830011252') as HTMLInputElement).value).toBe('9830011252');
+    expect((scope.getByPlaceholderText('user@company.com') as HTMLInputElement).value).toBe('priya@deoleo.com');
+    expect((scope.getByLabelText('Role') as HTMLSelectElement).value).toBe('CLIENT_ADMIN');
+
+    // Rename and save.
+    await userEvent.clear(scope.getByPlaceholderText('e.g. Priya Sharma'));
+    await userEvent.type(scope.getByPlaceholderText('e.g. Priya Sharma'), 'Priya S');
+    await userEvent.click(scope.getByRole('button', { name: /^save changes$/i }));
+
+    await waitFor(() => {
+      const patch = calls.find((c) => /\/api\/admin\/users\/u1$/.test(c.url) && c.init?.method === 'PATCH');
+      expect(patch).toBeTruthy();
+      const body = JSON.parse(String(patch!.init!.body));
+      // Rename only (role unchanged) → sends name/phone/email but NOT role (the backend runs its
+      // role-assignable guard on presence, so sending an unchanged role would 403 a CLIENT_ADMIN
+      // editing a fellow admin). Never status.
+      expect(body).toEqual({ name: 'Priya S', phone: '9830011252', email: 'priya@deoleo.com' });
+      expect(body).not.toHaveProperty('role');
+      expect(body).not.toHaveProperty('status');
+    });
+
+    // Modal closes + list re-fetched (>1 GET).
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      const gets = calls.filter((c) => c.url.startsWith('/api/admin/users') && (!c.init || !c.init.method || c.init.method === 'GET'));
+      expect(gets.length).toBeGreaterThan(1);
+    });
+  });
+
+  it('AU8: an Edit PATCH clearing the email sends email:null', async () => {
+    mockSession.userId = 'self-op';
+    const { calls } = installFetch((url, init) => {
+      if (/\/api\/admin\/users\/u1$/.test(url) && init?.method === 'PATCH') {
+        return jsonRes(true, 200, { success: true, data: { user: { id: 'u1' } } });
+      }
+      return undefined;
+    });
+    render(<AdminUsersPage />);
+    await screen.findByText('Priya Sharma');
+
+    await userEvent.click(screen.getByRole('button', { name: /edit priya sharma/i }));
+    const scope = within(await screen.findByRole('dialog'));
+    await userEvent.clear(scope.getByPlaceholderText('user@company.com'));
+    await userEvent.click(scope.getByRole('button', { name: /^save changes$/i }));
+
+    await waitFor(() => {
+      const patch = calls.find((c) => /\/api\/admin\/users\/u1$/.test(c.url) && c.init?.method === 'PATCH');
+      expect(patch).toBeTruthy();
+      const body = JSON.parse(String(patch!.init!.body));
+      expect(body.email).toBeNull();
+    });
+  });
+
+  it('AU9: the Edit role select always includes the user CURRENT role, even if the caller cannot assign it', async () => {
+    // A CLIENT_ADMIN caller can only assign MIS_USER, but must still SEE + keep u1's CLIENT_ADMIN role.
+    mockSession.role = 'CLIENT_ADMIN';
+    mockSession.userId = 'self-op';
+    installFetch();
+    render(<AdminUsersPage />);
+    await screen.findByText('Priya Sharma');
+
+    await userEvent.click(screen.getByRole('button', { name: /edit priya sharma/i }));
+    const select = await within(await screen.findByRole('dialog')).findByLabelText('Role');
+    const options = within(select).getAllByRole('option').map((o) => (o as HTMLOptionElement).value);
+    expect(options).toContain('MIS_USER');       // assignable
+    expect(options).toContain('CLIENT_ADMIN');   // current role, kept even though not assignable
+    expect((select as HTMLSelectElement).value).toBe('CLIENT_ADMIN'); // pre-selected to current
+  });
+
+  it('AU9b: a CLIENT_ADMIN editing a fellow CLIENT_ADMIN\'s name does NOT send role (would 403 on the backend)', async () => {
+    // Regression lock: the backend runs assertRoleAssignable on dto.role PRESENCE. A CLIENT_ADMIN
+    // caller cannot assign CLIENT_ADMIN, so if the modal echoed the unchanged current role the
+    // save would 403 with a misleading role error. The body must omit role when it didn't change.
+    mockSession.role = 'CLIENT_ADMIN';
+    mockSession.userId = 'self-op';
+    const { calls } = installFetch((url, init) => {
+      if (/\/api\/admin\/users\/u1$/.test(url) && init?.method === 'PATCH') {
+        return jsonRes(true, 200, { success: true, data: { user: { id: 'u1' } } });
+      }
+      return undefined;
+    });
+    render(<AdminUsersPage />);
+    await screen.findByText('Priya Sharma');
+
+    await userEvent.click(screen.getByRole('button', { name: /edit priya sharma/i }));
+    const scope = within(await screen.findByRole('dialog'));
+    await userEvent.clear(scope.getByPlaceholderText('e.g. Priya Sharma'));
+    await userEvent.type(scope.getByPlaceholderText('e.g. Priya Sharma'), 'Priya S');
+    await userEvent.click(scope.getByRole('button', { name: /^save changes$/i }));
+
+    await waitFor(() => {
+      const patch = calls.find((c) => /\/api\/admin\/users\/u1$/.test(c.url) && c.init?.method === 'PATCH');
+      expect(patch).toBeTruthy();
+      const body = JSON.parse(String(patch!.init!.body));
+      expect(body).not.toHaveProperty('role'); // unchanged role is NOT sent → no spurious 403
+      expect(body.name).toBe('Priya S');
+    });
+  });
+
+  it('AU9c: a GIFSY_ADMIN who CHANGES the role sends role in the PATCH body', async () => {
+    mockSession.role = 'GIFSY_ADMIN';
+    mockSession.userId = 'self-op';
+    const { calls } = installFetch((url, init) => {
+      if (/\/api\/admin\/users\/u1$/.test(url) && init?.method === 'PATCH') {
+        return jsonRes(true, 200, { success: true, data: { user: { id: 'u1' } } });
+      }
+      return undefined;
+    });
+    render(<AdminUsersPage />);
+    await screen.findByText('Priya Sharma');
+
+    await userEvent.click(screen.getByRole('button', { name: /edit priya sharma/i }));
+    const scope = within(await screen.findByRole('dialog'));
+    await userEvent.selectOptions(scope.getByLabelText('Role'), 'MIS_USER');
+    await userEvent.click(scope.getByRole('button', { name: /^save changes$/i }));
+
+    await waitFor(() => {
+      const patch = calls.find((c) => /\/api\/admin\/users\/u1$/.test(c.url) && c.init?.method === 'PATCH');
+      expect(patch).toBeTruthy();
+      const body = JSON.parse(String(patch!.init!.body));
+      expect(body.role).toBe('MIS_USER'); // changed role IS sent
+    });
+  });
+
+  it('AU10: an Edit backend 409 (phone clash) surfaces verbatim and the modal stays open', async () => {
+    mockSession.userId = 'self-op';
+    installFetch((url, init) => {
+      if (/\/api\/admin\/users\/u1$/.test(url) && init?.method === 'PATCH') {
+        return jsonRes(false, 409, { success: false, error: 'Phone number already in use' });
+      }
+      return undefined;
+    });
+    render(<AdminUsersPage />);
+    await screen.findByText('Priya Sharma');
+
+    await userEvent.click(screen.getByRole('button', { name: /edit priya sharma/i }));
+    const scope = within(await screen.findByRole('dialog'));
+    await userEvent.clear(scope.getByPlaceholderText('9830011252'));
+    await userEvent.type(scope.getByPlaceholderText('9830011252'), '9900000041');
+    await userEvent.click(scope.getByRole('button', { name: /^save changes$/i }));
+
+    expect(await screen.findByText('Phone number already in use')).toBeInTheDocument();
+    expect(screen.getByRole('dialog')).toBeInTheDocument(); // stays open to correct
+  });
+
   it('AU4: a backend 400/403 surfaces the error message inline (not swallowed)', async () => {
     installFetch((url, init) => {
       if (url.startsWith('/api/admin/users') && init?.method === 'POST') {

@@ -256,6 +256,13 @@ export class AdminCoreService {
     const existing = await this.prisma.user.findFirst({ where: { phone: dto.phone, clientId } });
     if (existing) throw new BadRequestException('User with this phone already exists');
 
+    // Email-uniqueness pre-check: @@unique([clientId, email]) would otherwise surface a colliding
+    // email as a Prisma P2002 → HTTP 500. Pre-check so it's a clean, honest 400 like the phone case.
+    if (dto.email) {
+      const emailTaken = await this.prisma.user.findFirst({ where: { email: dto.email, clientId } });
+      if (emailTaken) throw new BadRequestException('User with this email already exists');
+    }
+
     // GLB-4: reject disallowed role assignments before any write
     this.assertRoleAssignable(user, dto.role);
 
@@ -329,6 +336,15 @@ export class AdminCoreService {
         where: { phone: dto.phone, clientId, id: { not: id } },
       });
       if (clash) throw new ConflictException('Phone number already in use');
+    }
+
+    // Email-uniqueness guard: same pre-check for @@unique([clientId, email]) so a colliding
+    // email is a clean 409, not a Prisma P2002 → HTTP 500. Only when setting a new non-null email.
+    if (dto.email && dto.email !== target.email) {
+      const emailClash = await this.prisma.user.findFirst({
+        where: { email: dto.email, clientId, id: { not: id } },
+      });
+      if (emailClash) throw new ConflictException('Email address already in use');
     }
 
     // GLB-4: validate the requested role change BEFORE any write; silently skip

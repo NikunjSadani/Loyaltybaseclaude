@@ -118,6 +118,18 @@ describe('AdminCoreService', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
+    it('rejects a duplicate email within the tenant (clean 400, not a P2002 → 500)', async () => {
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce(null)          // phone free
+        .mockResolvedValueOnce({ id: 'dup' }); // email taken
+      await expect(
+        service.createUser(clientAdmin, {
+          phone: '9000000000', name: 'A', role: 'SALES_SO' as never, email: 'taken@deoleo.com',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.user.create).not.toHaveBeenCalled();
+    });
+
     it('creates the user scoped to clientId and writes an audit log', async () => {
       mockPrisma.user.findFirst.mockResolvedValue(null);
       mockPrisma.user.create.mockResolvedValue({ id: 'u1' });
@@ -221,6 +233,16 @@ describe('AdminCoreService', () => {
       await expect(
         service.updateUser(clientAdmin, 'u1', { phone: '2222222222' }),
       ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('throws Conflict when the new email clashes with another user (clean 409, not P2002 → 500)', async () => {
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce({ id: 'u1', phone: '1111111111', email: 'old@deoleo.com' }) // target
+        .mockResolvedValueOnce({ id: 'other' }); // email clash
+      await expect(
+        service.updateUser(clientAdmin, 'u1', { email: 'taken@deoleo.com' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
     });
 
     it('revokes all sessions for the user when the phone changes', async () => {

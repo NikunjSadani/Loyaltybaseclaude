@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  UserPlus, Search, Building2, ShieldCheck, AlertTriangle, X, CheckCircle2,
+  UserPlus, Search, Building2, ShieldCheck, AlertTriangle, X, CheckCircle2, SquarePen,
 } from 'lucide-react';
 import { useAdminSession, type AdminRole } from '@/lib/admin-session';
 import { useClientConfig } from '@/lib/platform/client-config-context';
@@ -223,6 +223,173 @@ function CreateUserModal({
   );
 }
 
+// ── Edit-User modal ───────────────────────────────────────────────────────────────
+
+function EditUserModal({
+  user,
+  roles,
+  onClose,
+  onSaved,
+}: {
+  user:    AdminUser;
+  roles:   string[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name,  setName]  = useState(user.name);
+  const [phone, setPhone] = useState(user.phone);
+  const [email, setEmail] = useState(user.email ?? '');
+  const [role,  setRole]  = useState(user.role);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Role options = the caller-assignable set PLUS the user's CURRENT role (so a role the
+  // caller can't assign still shows and can be KEPT). De-duped, current appended if absent.
+  // Every non-current option is caller-assignable, so a plain select already enforces
+  // "only assignable roles are pickable to switch to" while keeping the current always
+  // selectable. Backend re-checks via assertRoleAssignable and 403s a disallowed change.
+  const roleOptions = useMemo(
+    () => (roles.includes(user.role) ? roles : [...roles, user.role]),
+    [roles, user.role],
+  );
+
+  const phoneValid   = /^\d{10}$/.test(phone);
+  const canSubmit    = name.trim().length > 0 && phoneValid && !!role && !submitting;
+  const phoneChanged = phone.trim() !== user.phone;
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/admin/users/${user.id}`, {
+        method:  'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          name:  name.trim(),
+          phone: phone.trim(),
+          // Send `role` ONLY when it actually changed. The backend runs its role-assignable
+          // guard on PRESENCE (dto.role !== undefined), not on change — so always sending the
+          // role would 403 a CLIENT_ADMIN who merely edited a fellow admin's name/email (their
+          // current role, e.g. CLIENT_ADMIN, isn't in the tenant-assignable set).
+          ...(role !== user.role ? { role } : {}),
+          // Trimmed value, or null to clear. Never send `status` — the row toggle owns it.
+          email: email.trim() ? email.trim() : null,
+        }),
+      });
+      const body = await res.json().catch(() => ({ success: false, error: 'Unexpected response' }));
+      if (res.ok && body.success) {
+        onSaved();
+        onClose();
+      } else {
+        // Surface the backend's real message (e.g. phone-clash 409, disallowed-role 403)
+        // verbatim — never swallow it.
+        setError(body?.error ?? `Could not save changes (HTTP ${res.status})`);
+      }
+    } catch {
+      setError('Network error — please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <h2 className="text-base font-semibold text-gray-900">Edit User</h2>
+          <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors" aria-label="Close">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="px-6 py-5 space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Full name</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Priya Sharma"
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 focus:outline-none focus:border-[var(--brand-primary)]"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Phone (10 digits)</label>
+            <input
+              type="tel"
+              inputMode="numeric"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
+              placeholder="9830011252"
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 focus:outline-none focus:border-[var(--brand-primary)]"
+            />
+            {phone.length > 0 && !phoneValid && (
+              <p className="text-xs text-red-600 mt-1">Enter a valid 10-digit phone number.</p>
+            )}
+            {phoneValid && phoneChanged && (
+              <p className="text-xs text-amber-600 mt-1">
+                Changing the phone signs this user out on their next refresh.
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Role</label>
+            <select
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              aria-label="Role"
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white focus:outline-none focus:border-[var(--brand-primary)]"
+            >
+              {roleOptions.map((r) => (
+                <option key={r} value={r}>{ROLE_META[r]?.label ?? r}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Email <span className="text-gray-400 font-normal">(optional)</span></label>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="user@company.com"
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 focus:outline-none focus:border-[var(--brand-primary)]"
+            />
+          </div>
+
+          {error && (
+            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5 text-xs text-red-700">
+              <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-sm font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={!canSubmit}
+              className="px-4 py-2 text-sm font-semibold bg-[var(--brand-primary)] text-white rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {submitting ? 'Saving…' : 'Save changes'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 // ── Page ────────────────────────────────────────────────────────────────────────
 
 export default function AdminUsersPage() {
@@ -236,6 +403,7 @@ export default function AdminUsersPage() {
   const [page,    setPage]    = useState(1);
   const [pagination, setPagination] = useState<Pagination | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [editTarget, setEditTarget] = useState<AdminUser | null>(null);
   const [toast,   setToast]   = useState<string | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   // "Revoke sessions" — the user whose sessions are being revoked (confirm modal),
@@ -458,6 +626,14 @@ export default function AdminUsersPage() {
                     ) : canCreate ? (
                       <div className="flex items-center justify-end gap-3">
                         <button
+                          onClick={() => setEditTarget(u)}
+                          className="text-gray-500 hover:text-[var(--brand-primary)] transition-colors"
+                          aria-label={`Edit ${u.name}`}
+                          title="Edit user"
+                        >
+                          <SquarePen className="w-4 h-4" />
+                        </button>
+                        <button
                           onClick={() => setRevokeTarget(u)}
                           className="text-xs font-medium text-gray-500 hover:text-[var(--brand-primary)] transition-colors"
                         >
@@ -515,6 +691,15 @@ export default function AdminUsersPage() {
           tenantLabel={tenantLabel}
           onClose={() => setShowCreate(false)}
           onCreated={() => { showToast('User created.'); loadUsers(); }}
+        />
+      )}
+
+      {editTarget && canCreate && (
+        <EditUserModal
+          user={editTarget}
+          roles={roles}
+          onClose={() => setEditTarget(null)}
+          onSaved={() => { showToast('User updated.'); loadUsers(); }}
         />
       )}
 
