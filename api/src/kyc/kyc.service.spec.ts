@@ -870,6 +870,9 @@ describe('KycService', () => {
       expect(mockTx.kycSubmission.create.mock.calls[0][0].data.partnerId).toBe('cp-new');
       // Address-proof-waiver: the mismatch flag defaults to false when the rep does not declare it.
       expect(mockTx.kycSubmission.create.mock.calls[0][0].data.addressNameMismatch).toBe(false);
+      // Deactivate-frees-phone (decision #3): the employee-clash probe (first salesUser.findFirst)
+      // only counts an ACTIVE sales employee — a DEACTIVATED employee's number is reusable.
+      expect(mockPrisma.salesUser.findFirst.mock.calls[0][0].where.user.status).toBe('ACTIVE');
     });
 
     it('persists addressNameMismatch=true when the rep declares the shop-board/address-proof names differ', async () => {
@@ -1818,6 +1821,10 @@ describe('KycService', () => {
       await service.create(so, { ...groupedDto, mobile: '919000000002' } as never);
       const where = mockTx.user.findFirst.mock.calls[0][0].where;
       expect(where.phone).toEqual({ endsWith: '9000000002' });
+      // Deactivate-frees-phone: only an ACTIVE holder counts as a live login to reuse
+      // (deletedAt:null is kept alongside the new status filter).
+      expect(where.status).toBe('ACTIVE');
+      expect(where.deletedAt).toBeNull();
       expect(mockTx.user.create).not.toHaveBeenCalled();
       expect(mockTx.channelPartner.create.mock.calls[0][0].data.userId).toBeNull();
     });
@@ -3279,6 +3286,11 @@ describe('KycService', () => {
       const revokeArg = mockTx.userSession.updateMany.mock.calls[0][0];
       expect(revokeArg.where).toMatchObject({ userId: 'owner-9', revokedAt: null });
       expect(revokeArg.data.revokedAt).toBeInstanceOf(Date);
+      // Deactivate-frees-phone: the login-phone-sync clash lookup (the sole tx.user.findFirst on
+      // this path) only counts an ACTIVE holder — a deactivated holder doesn't block the sync.
+      const clashWhere = mockTx.user.findFirst.mock.calls[0][0].where;
+      expect(clashWhere.status).toBe('ACTIVE');
+      expect(clashWhere.deletedAt).toBeNull();
     });
 
     // ── Wave-4: group-LEAVE via re-KYC (Option A) at approval ────────────────────
@@ -3451,6 +3463,11 @@ describe('KycService', () => {
         where: { id: 'outlet-1' },
         data: { parentId: null },
       });
+      // Deactivate-frees-phone: the departing-shop phone-taken guard (first tx.user.findFirst)
+      // only treats an ACTIVE holder as blocking — a deactivated holder's number is available.
+      const phoneTakenWhere = mockTx.user.findFirst.mock.calls[0][0].where;
+      expect(phoneTakenWhere.status).toBe('ACTIVE');
+      expect(phoneTakenWhere.deletedAt).toBeNull();
     });
 
     it('LOGIN-LESS sibling DEPARTURE keeping the shared group phone → BLOCKED (no login possible), tx rolls back', async () => {

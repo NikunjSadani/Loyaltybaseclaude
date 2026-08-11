@@ -3,6 +3,7 @@ import { KycStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { isActivePhoneConflict, ACTIVE_PHONE_IN_USE_MSG } from '../common/phone-conflict';
 import {
   acquireIdentityLocks,
   checkGroupUniqueness,
@@ -398,6 +399,12 @@ export class ParentsService {
 
         return u;
       } catch (e) {
+        // The parent-activation update above is an ACTIVE-maker: if the parent's phone is already
+        // held by another ACTIVE user, the failure is the PHONE partial index, not identity —
+        // surface the correct message rather than a misleading identity one.
+        if (isActivePhoneConflict(e)) {
+          throw new BadRequestException(ACTIVE_PHONE_IN_USE_MSG);
+        }
         if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
           throw new BadRequestException(
             "This parent's identity details (PAN/GST/bank/UPI) are already registered in this tenant.",

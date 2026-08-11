@@ -12,6 +12,7 @@ import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { businessHoursBetween, isValidIsoDate } from '../common/business-hours';
+import { isActivePhoneConflict, ACTIVE_PHONE_IN_USE_MSG } from '../common/phone-conflict';
 import {
   HOLIDAY_CLIENT_ID,
   Holiday,
@@ -253,7 +254,11 @@ export class AdminCoreService {
   async createUser(user: JwtPayload, dto: CreateUserDto) {
     const clientId = user.clientId;
 
-    const existing = await this.prisma.user.findFirst({ where: { phone: dto.phone, clientId } });
+    // Only an ACTIVE user reserves a phone (partial unique index users_clientId_phone_active_key).
+    // A deactivated/suspended/pending row frees the number, so it must not block a new user here.
+    const existing = await this.prisma.user.findFirst({
+      where: { phone: dto.phone, clientId, status: 'ACTIVE' },
+    });
     if (existing) throw new BadRequestException('User with this phone already exists');
 
     // Email-uniqueness pre-check: @@unique([clientId, email]) would otherwise surface a colliding
@@ -266,16 +271,25 @@ export class AdminCoreService {
     // GLB-4: reject disallowed role assignments before any write
     this.assertRoleAssignable(user, dto.role);
 
-    const created = await this.prisma.user.create({
-      data: {
-        phone: dto.phone,
-        name: dto.name,
-        role: dto.role,
-        email: dto.email ?? null,
-        status: 'ACTIVE',
-        clientId,
-      },
-    });
+    // The ACTIVE-scoped pre-check above no longer pre-blocks an INACTIVE/PENDING holder, so a
+    // race (two concurrent creates, or a create racing a reactivation) can reach the partial
+    // unique index. Map that P2002 to a clean 400 instead of leaking a 500.
+    let created;
+    try {
+      created = await this.prisma.user.create({
+        data: {
+          phone: dto.phone,
+          name: dto.name,
+          role: dto.role,
+          email: dto.email ?? null,
+          status: 'ACTIVE',
+          clientId,
+        },
+      });
+    } catch (e) {
+      if (isActivePhoneConflict(e)) throw new BadRequestException(ACTIVE_PHONE_IN_USE_MSG);
+      throw e;
+    }
 
     await this.prisma.auditLog.create({
       data: {
@@ -330,10 +344,28 @@ export class AdminCoreService {
       }
     }
 
-    // Phone-uniqueness guard: check BEFORE update to avoid Prisma P2002
+    // Reactivation re-check: reactivating a non-ACTIVE user (INACTIVE/SUSPENDED/PENDING) must
+    // fail cleanly if the phone it would reclaim is now held by another ACTIVE user in the tenant.
+    // Placed after the deactivation guard, before the phone-clash guard. Only an ACTIVE holder
+    // reserves the number (partial index users_clientId_phone_active_key).
+    const reactivating = dto.status === 'ACTIVE' && target.status !== 'ACTIVE';
+    if (reactivating) {
+      const phoneToActivate = dto.phone ?? target.phone;
+      const activeHolder = await this.prisma.user.count({
+        where: { clientId, phone: phoneToActivate, status: 'ACTIVE', id: { not: id } },
+      });
+      if (activeHolder > 0) {
+        throw new BadRequestException(
+          'This phone number is already in use by another active user. Change the phone number before reactivating this account.',
+        );
+      }
+    }
+
+    // Phone-uniqueness guard: check BEFORE update to avoid Prisma P2002. Only an ACTIVE user
+    // reserves a phone, so collide only with an ACTIVE holder (a freed number is reusable).
     if (dto.phone && dto.phone !== target.phone) {
       const clash = await this.prisma.user.findFirst({
-        where: { phone: dto.phone, clientId, id: { not: id } },
+        where: { phone: dto.phone, clientId, status: 'ACTIVE', id: { not: id } },
       });
       if (clash) throw new ConflictException('Phone number already in use');
     }
@@ -363,13 +395,33 @@ export class AdminCoreService {
     if (dto.status   !== undefined) updateData.status = dto.status;
     if (dto.role     !== undefined) updateData.role   = dto.role;
     if (dto.phone    !== undefined) updateData.phone  = dto.phone;
+    // On reactivation, fully restore a soft-deleted account by clearing deletedAt (owner decision
+    // #2). Only on reactivation — a plain deactivation/soft-delete must never clear deletedAt.
+    if (reactivating) updateData.deletedAt = null;
 
     // Defense-in-depth: scope the write to the tenant so a race between the
     // findFirst gate above and the write cannot affect a row from another tenant.
-    const { count } = await this.prisma.user.updateMany({
-      where: { id, clientId },
-      data: updateData,
-    });
+    // Belt-and-suspenders: the partial unique index users_clientId_phone_active_key is the real
+    // guard — if two reactivations race past the pre-check above, one hits P2002. Map it to the
+    // same clean English error instead of leaking a Prisma 500.
+    let count: number;
+    try {
+      ({ count } = await this.prisma.user.updateMany({
+        where: { id, clientId },
+        data: updateData,
+      }));
+    } catch (e) {
+      // Backstops BOTH a racing reactivation and a racing plain phone-edit past the pre-check.
+      // Path-aware copy: only mention "reactivating" when that's what happened.
+      if (isActivePhoneConflict(e)) {
+        throw new BadRequestException(
+          reactivating
+            ? 'This phone number is already in use by another active user. Change the phone number before reactivating this account.'
+            : ACTIVE_PHONE_IN_USE_MSG,
+        );
+      }
+      throw e;
+    }
     if (count === 0) {
       // Row vanished between the gate and the write (race), or clientId mismatch.
       throw new NotFoundException('User not found');

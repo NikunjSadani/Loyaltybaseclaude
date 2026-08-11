@@ -239,25 +239,30 @@ describe('AuthService', () => {
     });
 
     // ── Option B: check-first registration gate ──────────────────────────────
-    it('Option B: refuses to send (401) to a number with NO account under the tenant', async () => {
-      mockPrisma.user.findFirst.mockResolvedValue(null as any); // unregistered under this tenant
+    it('Option B: refuses to send (401) to a number with NO ACTIVE account under the tenant', async () => {
+      // Under ACTIVE-only phone reservation, a number held only by an INACTIVE/soft-deleted
+      // user has NO ACTIVE holder → the status:'ACTIVE' lookup returns null → refuse to send.
+      mockPrisma.user.findFirst.mockResolvedValue(null as any); // no ACTIVE holder under this tenant
       await expect(service.sendOtp('9876543210', 'SMS', 'deoleo')).rejects.toMatchObject({
         status: 401,
       });
-      // Tenant-scoped, non-deleted lookup.
+      // Tenant-scoped, ACTIVE-only lookup (a freed/deactivated number does not receive an OTP).
       const where = (mockPrisma.user.findFirst as jest.Mock).mock.calls[0][0].where;
-      expect(where).toMatchObject({ phone: '9876543210', clientId: 'deoleo', deletedAt: null });
+      expect(where).toMatchObject({ phone: '9876543210', clientId: 'deoleo', status: 'ACTIVE' });
       // No OTP created + no SMS sent for an unregistered number.
       expect(mockPrisma.otpCode.create).not.toHaveBeenCalled();
       expect(global.fetch as jest.Mock).not.toHaveBeenCalled();
     });
 
-    it('Option B: sends to a REGISTERED number (tenant-scoped account exists)', async () => {
-      mockPrisma.user.findFirst.mockResolvedValue({ id: 'u1' } as any);
+    it('Option B: sends to a REGISTERED number (tenant-scoped ACTIVE account exists)', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'u1' } as any); // ACTIVE holder exists
       mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
       mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp_1' });
       const result = await service.sendOtp('9876543210', 'SMS', 'deoleo');
       expect(result.success).toBe(true);
+      // Gate keyed on the ACTIVE status (not deletedAt), so only a live account is OTP-eligible.
+      const where = (mockPrisma.user.findFirst as jest.Mock).mock.calls[0][0].where;
+      expect(where).toMatchObject({ phone: '9876543210', clientId: 'deoleo', status: 'ACTIVE' });
       expect(mockPrisma.otpCode.create).toHaveBeenCalled();
     });
 
@@ -296,6 +301,72 @@ describe('AuthService', () => {
 
       expect(result.accessToken).toBe('mock.jwt.token');
       expect(result.refreshToken).toBeTruthy();
+    });
+
+    // ── ACTIVE-only phone reservation: DETERMINISTIC login resolution ──────────
+    // Now that a deactivated user keeps deletedAt=null (only status→INACTIVE), an ACTIVE
+    // and an INACTIVE row can share (clientId, phone). Login MUST resolve to the ACTIVE
+    // user via an ACTIVE-first query — never the nondeterministic old findFirst.
+    it('resolves to the ACTIVE user when an ACTIVE + INACTIVE duplicate share the phone', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      // Step 1 (status:'ACTIVE') returns the ACTIVE user; the INACTIVE duplicate is never consulted.
+      mockPrisma.user.findFirst.mockResolvedValueOnce({
+        id: 'active_user', role: 'RETAILER', clientId, status: 'ACTIVE', name: 'A', phone,
+      });
+      mockPrisma.user.update.mockResolvedValue({});
+      mockPrisma.userSession.create.mockResolvedValue({ id: 'sess_1' });
+
+      const result = await service.verifyOtp(phone, '1234', clientId);
+
+      // Tokens are minted for the ACTIVE user's id.
+      expect(result.user.id).toBe('active_user');
+      // The FIRST user lookup is the ACTIVE-scoped query — proves ACTIVE is consulted first.
+      const firstWhere = (mockPrisma.user.findFirst as jest.Mock).mock.calls[0][0].where;
+      expect(firstWhere).toMatchObject({ phone, clientId, status: 'ACTIVE' });
+      // With an ACTIVE hit, the deletedAt fallback query is never reached.
+      expect(mockPrisma.user.findFirst as jest.Mock).toHaveBeenCalledTimes(1);
+    });
+
+    it('throws the existing "account is inactive" error for a single INACTIVE user (no ACTIVE)', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      // Step 1 (ACTIVE) → none; Step 2 (fallback, deletedAt:null) → the INACTIVE row (message only).
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ id: 'u_inactive', role: 'RETAILER', clientId, status: 'INACTIVE' });
+
+      await expect(service.verifyOtp(phone, '1234', clientId)).rejects.toThrow(
+        'Your account is inactive. Please contact your Deoleo representative.',
+      );
+      // No token minted on the fallback branch.
+      expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
+    });
+
+    it('throws the existing "pending activation" error for a single PENDING_VERIFICATION user', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ id: 'u_pending', role: 'RETAILER', clientId, status: 'PENDING_VERIFICATION' });
+
+      await expect(service.verifyOtp(phone, '1234', clientId)).rejects.toThrow(
+        'Your account is pending activation. Please contact your Deoleo representative.',
+      );
+      expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
+    });
+
+    it('throws "No account found" when neither an ACTIVE nor any non-deleted user exists', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce(null)  // no ACTIVE
+        .mockResolvedValueOnce(null); // no fallback (deletedAt:null) either
+
+      await expect(service.verifyOtp(phone, '1234', clientId)).rejects.toThrow(
+        'No account found. Please contact your sales representative to complete KYC first.',
+      );
+      expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
     });
 
     // ── Deactivated-outlet login gate (owner: a deactivated outlet must not log in) ──

@@ -18,11 +18,11 @@ import {
 type ExistingUser = { phone: string; salesUser: { employeeCode: string } | null };
 
 /**
- * Minimal Prisma.TransactionClient mock that records the user.upsert phones.
+ * Minimal Prisma.TransactionClient mock that records the phones of newly-created users.
  *
  * `existingSalesUsersByCode` maps an employeeCode → its existing SalesUser row (the userId the
  * persist loop resolves via salesUser.findUnique). Codes absent from the map are treated as
- * brand-new employees (findUnique → null → the create-branch phone-keyed upsert runs).
+ * brand-new employees (findUnique → null → resolve-ACTIVE-holder (none) → user.create runs).
  */
 function makeTx(
   existingUsers: ExistingUser[] = [],
@@ -35,8 +35,10 @@ function makeTx(
     user: {
       findMany: jest.fn().mockResolvedValue(existingUsers),
       findUnique: jest.fn().mockResolvedValue(null),
-      upsert: jest.fn().mockImplementation((args: any) => {
-        upsertedUserPhones.push(args.where.clientId_phone.phone);
+      // Brand-new employee → resolve ACTIVE holder (none here) then create; records created phones.
+      findFirst: jest.fn().mockResolvedValue(null),
+      create: jest.fn().mockImplementation((args: any) => {
+        upsertedUserPhones.push(args.data.phone);
         return Promise.resolve({ id: `user-${userSeq++}` });
       }),
       update: jest
@@ -108,6 +110,20 @@ describe('persistHierarchy — phone ↔ employeeCode guard', () => {
     ).rejects.toThrow(/already used by another account/i);
   });
 
+  it("scopes the DB phone-conflict scan to ACTIVE users (a deactivated user's freed phone no longer blocks)", async () => {
+    // Deactivate-frees-phone: only an ACTIVE user reserves a (clientId, phone). The freed
+    // number of an INACTIVE user must no longer be returned by the conflict scan — the DB
+    // (ACTIVE-only) yields no holder here, so a brand-new employee on that phone uploads clean.
+    const employees = [emp({ id: 'XSR-NEW', mobile: '9875436349' })];
+    const { tx } = makeTx([]); // ACTIVE-only query finds no holder
+    await persistHierarchy(CLIENT, employees, DEOLEO_HIERARCHY, tx);
+    expect(tx.user.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ status: 'ACTIVE' }),
+      }),
+    );
+  });
+
   it('allows an idempotent re-upload of the SAME (code, phone)', async () => {
     const employees = [emp({ id: 'XSR-1', mobile: '9900000001' })];
     const { tx } = makeTx([{ phone: '9900000001', salesUser: { employeeCode: 'XSR-1' } }]);
@@ -154,7 +170,7 @@ describe('persistHierarchy — phone ↔ employeeCode guard', () => {
       data: expect.objectContaining({ phone: '9900000002' }),
     });
     // (b) …and NO new User was created for this existing employee (no orphan left behind).
-    expect(tx.user.upsert).not.toHaveBeenCalled();
+    expect(tx.user.create).not.toHaveBeenCalled();
     expect(upsertedUserPhones).toEqual([]);
     // the SalesUser is re-pointed at the SAME resolved user id, not a fresh one.
     expect(tx.salesUser.upsert).toHaveBeenCalledWith(

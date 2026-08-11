@@ -530,7 +530,11 @@ model User {
   pwaInstalls                PwaInstall[]
   activityDays               UserActivityDay[]
 
-  @@unique([clientId, phone]) // same phone can exist across different clients
+  // NOTE: the old `@@unique([clientId, phone])` is REPLACED by a PARTIAL unique index
+  // `users_clientId_phone_active_key` WHERE status = 'ACTIVE' — defined in the migration
+  // 20260811120000_user_phone_active_partial, not here (Prisma can't express partial indexes).
+  // Only an ACTIVE user reserves a (clientId, phone); a deactivated/suspended/pending row frees
+  // it so another user in the same tenant can reuse the number. The @@index([phone]) below stays.
   @@unique([clientId, email]) // email scoped per client (nullable handled by Postgres partial index)
   @@index([clientId])
   @@index([phone])

@@ -150,7 +150,11 @@ export class AuthService {
     // controller's per-IP @Throttle (5/60s) bounds probing (verifyOtp remains the authoritative gate).
     if (clientId) {
       const account = await this.prisma.user.findFirst({
-        where: { phone: cleanPhone, clientId, deletedAt: null },
+        // ACTIVE-only reservation (partial unique index `users_clientId_phone_active_key`):
+        // a deactivated user's number is freed, so only a LIVE (ACTIVE) account here should
+        // receive a login OTP. If only an INACTIVE/soft-deleted user holds the number, the
+        // "no account" outcome below is the correct, safe result (no OTP to a freed number).
+        where: { phone: cleanPhone, clientId, status: 'ACTIVE' },
         select: { id: true },
       });
       if (!account) {
@@ -270,22 +274,44 @@ export class AuthService {
       data:  { verifiedAt: new Date() },
     });
 
-    // Fetch or auto-register user
-    let user = await this.prisma.user.findFirst({
-      where: { phone: cleanPhone, clientId, deletedAt: null },
+    // Resolve the login user — TWO-STEP so it is DETERMINISTIC now that ACTIVE + INACTIVE
+    // rows can share a phone (deactivation frees the number: it flips status→INACTIVE while
+    // leaving deletedAt=null). The old single `findFirst({ deletedAt: null })` had NO orderBy,
+    // so over such a duplicate it could nondeterministically return the INACTIVE row and
+    // wrongly reject a valid ACTIVE login.
+    //
+    // Step 1 — the ACTIVE user IS the login. The partial unique index
+    // `users_clientId_phone_active_key` (WHERE status = 'ACTIVE') guarantees at most one
+    // ACTIVE row per (clientId, phone), so this resolves to exactly the right account.
+    const user = await this.prisma.user.findFirst({
+      where: { phone: cleanPhone, clientId, status: 'ACTIVE' },
     });
 
     if (!user) {
-      // Auto-register as RETAILER if self-enrollment is on, else throw
+      // Step 2 — no ACTIVE account. Fall back to the prior lookup SOLELY to choose the
+      // correct user-facing message; NEVER mint a token on this branch. Messages are
+      // byte-identical to the pre-refactor strings.
+      const fallback = await this.prisma.user.findFirst({
+        where: { phone: cleanPhone, clientId, deletedAt: null },
+      });
+
+      if (fallback?.status === 'INACTIVE') {
+        throw new ForbiddenException('Your account is inactive. Please contact your Deoleo representative.');
+      }
+
+      if (fallback?.status === 'PENDING_VERIFICATION') {
+        throw new ForbiddenException('Your account is pending activation. Please contact your Deoleo representative.');
+      }
+
+      if (fallback?.status === 'SUSPENDED') {
+        // A suspended account is blocked from login (previously it fell through and was — wrongly —
+        // issued a token). Its phone is freed under the ACTIVE-only reservation, but the account
+        // itself cannot log in until reactivated.
+        throw new ForbiddenException('Your account is suspended. Please contact your Deoleo representative.');
+      }
+
+      // No account (fallback null) or any other residual non-ACTIVE status → "no account found".
       throw new UnauthorizedException('No account found. Please contact your sales representative to complete KYC first.');
-    }
-
-    if (user.status === 'INACTIVE') {
-      throw new ForbiddenException('Your account is inactive. Please contact your Deoleo representative.');
-    }
-
-    if (user.status === 'PENDING_VERIFICATION') {
-      throw new ForbiddenException('Your account is pending activation. Please contact your Deoleo representative.');
     }
 
     // Deactivated-outlet gate (see assertPartnerNotDeactivated). Runs on BOTH the

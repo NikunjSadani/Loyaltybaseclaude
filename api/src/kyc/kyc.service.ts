@@ -21,6 +21,7 @@ import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
 import { sniffFileType } from '../common/file-signature';
+import { isActivePhoneConflict } from '../common/phone-conflict';
 import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
 import { businessHoursBetween } from '../common/business-hours';
 import { loadHolidaySet } from '../common/holiday-calendar';
@@ -356,7 +357,9 @@ export class KycService {
     // Sales-employee phone clash is ALWAYS blocked, regardless of policy/grouping — an
     // outlet KYC can never reuse a team member's number.
     const employeeClash = await this.prisma.salesUser.findFirst({
-      where: { deletedAt: null, user: { clientId, phone: { endsWith: mobile } } },
+      // Decision #3: only an ACTIVE sales employee reserves a number — a DEACTIVATED
+      // employee's number becomes reusable for an outlet KYC.
+      where: { deletedAt: null, user: { clientId, phone: { endsWith: mobile }, status: 'ACTIVE' } },
       select: { user: { select: { name: true } } },
     });
     if (employeeClash) {
@@ -393,7 +396,10 @@ export class KycService {
     }
 
     const employeeClash = await this.prisma.salesUser.findFirst({
-      where: { deletedAt: null, user: { clientId: user.clientId, phone: { endsWith: mobile } } },
+      // status:'ACTIVE' — a DEACTIVATED sales employee's number is reusable (deactivate frees the
+      // phone), so this pre-submit probe must agree with the submit-time assertPhoneAvailable guard
+      // and NOT block a freed number. Without it the FE phone-available check over-blocks.
+      where: { deletedAt: null, user: { clientId: user.clientId, phone: { endsWith: mobile }, status: 'ACTIVE' } },
       select: { id: true },
     });
 
@@ -1535,7 +1541,9 @@ export class KycService {
         // User @@unique([clientId, phone]) keys on the FULL string — would then create a
         // SECOND login for the same number instead of reusing the group's login-less sibling.
         const existingUser = await tx.user.findFirst({
-          where: { clientId: user.clientId, phone: { endsWith: this.phoneLast10(dto.mobile) }, deletedAt: null },
+          // Only an ACTIVE user reserves a phone (deactivate-frees-phone feature) — a
+          // deactivated sibling's freed number must not be reused as a live login here.
+          where: { clientId: user.clientId, phone: { endsWith: this.phoneLast10(dto.mobile) }, deletedAt: null, status: 'ACTIVE' },
           select: { id: true, status: true, role: true },
         });
 
@@ -3915,7 +3923,9 @@ export class KycService {
             // that phone is still held by the group's login User, so this catches it. Fail-closed → the
             // whole approval tx rolls back, the shop stays grouped and reachable.
             const phoneTaken = await tx.user.findFirst({
-              where: { clientId, phone: { endsWith: this.phoneLast10(departurePhone) }, deletedAt: null },
+              // Only an ACTIVE user reserves a phone (deactivate-frees-phone feature) — a
+              // deactivated holder's freed number is available for the departing shop's login.
+              where: { clientId, phone: { endsWith: this.phoneLast10(departurePhone) }, deletedAt: null, status: 'ACTIVE' },
               select: { id: true },
             });
             if (phoneTaken) {
@@ -3999,7 +4009,9 @@ export class KycService {
         // submit→approval window could let another account claim it). If taken, keep
         // the existing login and log it — the contact number still updated.
         const clash = await tx.user.findFirst({
-          where: { clientId: ownerRow.clientId, phone: newPhone, deletedAt: null, id: { not: ownerUserId } },
+          // Only an ACTIVE user reserves a phone (deactivate-frees-phone feature) — a
+          // deactivated holder does not block syncing the login phone to the new number.
+          where: { clientId: ownerRow.clientId, phone: newPhone, deletedAt: null, status: 'ACTIVE', id: { not: ownerUserId } },
           select: { id: true },
         });
         if (clash) {
@@ -4011,10 +4023,43 @@ export class KycService {
         }
       }
 
-      await tx.user.update({
-        where: { id: ownerUserId },
-        data: { status: 'ACTIVE', ...(loginPhoneChanged && newPhone ? { phone: newPhone } : {}) },
-      });
+      // Guard the ACTIVE-maker: approval flips the owner to ACTIVE, which now hits the partial
+      // unique index (WHERE status='ACTIVE'). If ANOTHER active user already holds the owner's
+      // effective phone (e.g. an admin created an active account on this number while the KYC
+      // owner sat PENDING_VERIFICATION), the raw index P2002 would 500 and leave the outlet
+      // permanently un-approvable. Pre-check and block with a clear message so the approver
+      // resolves the conflict; the try/catch below is the race backstop.
+      const effectivePhone = loginPhoneChanged && newPhone ? newPhone : ownerRow?.phone;
+      if (ownerRow && effectivePhone) {
+        const activeClash = await tx.user.findFirst({
+          where: {
+            clientId: ownerRow.clientId,
+            phone: effectivePhone,
+            status: 'ACTIVE',
+            id: { not: ownerUserId },
+          },
+          select: { id: true },
+        });
+        if (activeClash) {
+          throw new BadRequestException(
+            "Cannot approve — the owner's phone number is already in use by another active user. Deactivate that user or change the phone before approving.",
+          );
+        }
+      }
+
+      try {
+        await tx.user.update({
+          where: { id: ownerUserId },
+          data: { status: 'ACTIVE', ...(loginPhoneChanged && newPhone ? { phone: newPhone } : {}) },
+        });
+      } catch (e) {
+        if (isActivePhoneConflict(e)) {
+          throw new BadRequestException(
+            "Cannot approve — the owner's phone number is already in use by another active user. Deactivate that user or change the phone before approving.",
+          );
+        }
+        throw e;
+      }
       if (loginPhoneChanged) {
         await tx.userSession.updateMany({
           where: { userId: ownerUserId, revokedAt: null },

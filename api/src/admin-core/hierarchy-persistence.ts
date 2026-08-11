@@ -192,7 +192,9 @@ export async function persistHierarchy(
   const phones = [...realPhoneByCode.values()];
   if (phones.length > 0) {
     const existingUsers = await tx.user.findMany({
-      where: { clientId, phone: { in: phones } },
+      // Only an ACTIVE user reserves a phone (deactivate-frees-phone feature). An INACTIVE
+      // user's freed number must no longer block a hierarchy upload.
+      where: { clientId, phone: { in: phones }, status: 'ACTIVE' },
       select: { phone: true, salesUser: { select: { employeeCode: true } } },
     });
     const conflicts: string[] = [];
@@ -284,16 +286,34 @@ export async function persistHierarchy(
       where: { clientId_employeeCode: { clientId, employeeCode: emp.id } },
       select: { userId: true },
     });
-    const user = existingSU
-      ? await tx.user.update({
-          where: { id: existingSU.userId },
-          data: { phone, name, role: userRole, status: userStatus },
-        })
-      : await tx.user.upsert({
-          where: { clientId_phone: { clientId, phone } },
-          update: { name, role: userRole, status: userStatus },
-          create: { clientId, phone, name, role: userRole, status: userStatus },
-        });
+    // Brand-new employee (no SalesUser yet): resolve the ACTIVE holder of this phone, if any,
+    // and reclaim it in place; otherwise create a fresh User. Phone uniqueness is now the PARTIAL
+    // index (WHERE status='ACTIVE'), so the old `clientId_phone` compound upsert no longer exists —
+    // and multiple INACTIVE rows may share a phone, so there is no single row to upsert against.
+    // §0b already rejected any upload whose phone belongs to a DIFFERENT code or a non-sales
+    // account, so an ACTIVE holder here would be a residual edge; reclaiming it (rather than a
+    // create that would P2002 on the partial index) keeps the upload robust. A freed INACTIVE
+    // number simply creates a fresh row (the stale INACTIVE row no longer reserves the phone).
+    let user: { id: string };
+    if (existingSU) {
+      user = await tx.user.update({
+        where: { id: existingSU.userId },
+        data: { phone, name, role: userRole, status: userStatus },
+      });
+    } else {
+      const activeHolder = await tx.user.findFirst({
+        where: { clientId, phone, status: 'ACTIVE' },
+        select: { id: true },
+      });
+      user = activeHolder
+        ? await tx.user.update({
+            where: { id: activeHolder.id },
+            data: { name, role: userRole, status: userStatus },
+          })
+        : await tx.user.create({
+            data: { clientId, phone, name, role: userRole, status: userStatus },
+          });
+    }
     usersUpserted++;
 
     const salesUser = await tx.salesUser.upsert({

@@ -10,6 +10,7 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { AdminCoreService } from './admin-core.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
@@ -113,6 +114,43 @@ describe('AdminCoreService', () => {
   describe('createUser', () => {
     it('rejects a duplicate phone within the tenant', async () => {
       mockPrisma.user.findFirst.mockResolvedValue({ id: 'dup' });
+      await expect(
+        service.createUser(clientAdmin, { phone: '9000000000', name: 'A', role: 'SALES_SO' as never }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('scopes the phone-existence check to ACTIVE holders only (a freed number is reusable)', async () => {
+      // Only an ACTIVE user reserves the number, so the pre-check must carry status:'ACTIVE'.
+      mockPrisma.user.findFirst.mockResolvedValue(null); // no ACTIVE holder
+      mockPrisma.user.create.mockResolvedValue({ id: 'u1' });
+      await service.createUser(clientAdmin, { phone: '9000000000', name: 'A', role: 'SALES_SO' as never });
+      expect(mockPrisma.user.findFirst.mock.calls[0][0].where).toEqual({
+        phone: '9000000000',
+        clientId: 'deoleo',
+        status: 'ACTIVE',
+      });
+    });
+
+    it('does NOT collide when the only holder of the phone is INACTIVE (create proceeds)', async () => {
+      // An INACTIVE holder no longer matches the ACTIVE-scoped pre-check → the DB returns null,
+      // so the create goes through (the freed number is reused).
+      mockPrisma.user.findFirst.mockResolvedValue(null);
+      mockPrisma.user.create.mockResolvedValue({ id: 'u1' });
+      await expect(
+        service.createUser(clientAdmin, { phone: '9000000000', name: 'A', role: 'SALES_SO' as never }),
+      ).resolves.toBeDefined();
+      expect(mockPrisma.user.create).toHaveBeenCalled();
+    });
+
+    it('maps a racing active-phone P2002 on create to a clean 400 (not a 500)', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue(null); // pre-check sees no ACTIVE holder
+      mockPrisma.user.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('unique', {
+          code: 'P2002',
+          clientVersion: 'test',
+          meta: { target: 'users_clientId_phone_active_key' },
+        }),
+      );
       await expect(
         service.createUser(clientAdmin, { phone: '9000000000', name: 'A', role: 'SALES_SO' as never }),
       ).rejects.toBeInstanceOf(BadRequestException);
@@ -382,15 +420,25 @@ describe('AdminCoreService', () => {
     });
 
     it('DEACT-5: reactivating (status ACTIVE) is never blocked by the deactivation guards', async () => {
-      // target is the caller AND the only admin — but status is ACTIVE, so no guard fires.
+      // target is the caller AND the only admin — but status is ACTIVE, so the self-deactivate
+      // and last-admin guards never fire. The ONLY count on this path is the reactivation phone
+      // re-check (see REACT-*), not the last-admin count — assert its shape to prove that.
       mockPrisma.user.findFirst
-        .mockResolvedValueOnce({ id: 'ca1', phone: '1111111111', role: 'CLIENT_ADMIN' }) // target (self)
-        .mockResolvedValueOnce({ id: 'ca1', status: 'ACTIVE' });                          // re-fetch
+        .mockResolvedValueOnce({ id: 'ca1', phone: '1111111111', role: 'CLIENT_ADMIN', status: 'INACTIVE' }) // target (self)
+        .mockResolvedValueOnce({ id: 'ca1', status: 'ACTIVE' });                                              // re-fetch
+      mockPrisma.user.count.mockResolvedValueOnce(0); // no other ACTIVE holder of the phone
       mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
       await expect(
         service.updateUser(clientAdmin, 'ca1', { status: 'ACTIVE' as never }),
       ).resolves.toBeDefined();
-      expect(mockPrisma.user.count).not.toHaveBeenCalled();
+      // The single count is the phone re-check (no role / in-roles filter → not the last-admin guard).
+      expect(mockPrisma.user.count).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.user.count.mock.calls[0][0].where).toEqual({
+        clientId: 'deoleo',
+        phone: '1111111111',
+        status: 'ACTIVE',
+        id: { not: 'ca1' },
+      });
       expect(mockPrisma.user.updateMany).toHaveBeenCalled();
     });
 
@@ -409,6 +457,109 @@ describe('AdminCoreService', () => {
         service.updateUser(clientAdmin, 'u2', { status: 'SUSPENDED' as never }),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
+    });
+
+    // ── Phone freed on deactivation: ACTIVE-scoped clash guard + reactivation re-check ──────────
+    it('PHONE-1: the phone-clash guard collides only with an ACTIVE holder (freed numbers reusable)', async () => {
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce({ id: 'u1', phone: '1111111111', status: 'ACTIVE' }) // target
+        .mockResolvedValueOnce(null)                                                 // no ACTIVE clash
+        .mockResolvedValueOnce({ id: 'u1', phone: '2222222222' });                   // re-fetch
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+      await service.updateUser(clientAdmin, 'u1', { phone: '2222222222' });
+      // The clash lookup (2nd findFirst) must be scoped to ACTIVE holders, excluding self.
+      expect(mockPrisma.user.findFirst.mock.calls[1][0].where).toEqual({
+        phone: '2222222222',
+        clientId: 'deoleo',
+        status: 'ACTIVE',
+        id: { not: 'u1' },
+      });
+    });
+
+    it('REACT-1: reactivation is BLOCKED when the phone is held by another ACTIVE user', async () => {
+      mockPrisma.user.findFirst.mockResolvedValueOnce({
+        id: 'u1', phone: '1111111111', role: 'MIS_USER', status: 'INACTIVE',
+      }); // target (currently inactive)
+      mockPrisma.user.count.mockResolvedValueOnce(1); // an ACTIVE user now holds the phone
+      const err = await service
+        .updateUser(clientAdmin, 'u1', { status: 'ACTIVE' as never })
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect(err.message).toBe(
+        'This phone number is already in use by another active user. Change the phone number before reactivating this account.',
+      );
+      // The re-check counts ACTIVE holders of the reclaimed phone, excluding self.
+      expect(mockPrisma.user.count.mock.calls[0][0].where).toEqual({
+        clientId: 'deoleo',
+        phone: '1111111111',
+        status: 'ACTIVE',
+        id: { not: 'u1' },
+      });
+      expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('REACT-2: reactivation is ALLOWED when no other ACTIVE user holds the phone, and clears deletedAt', async () => {
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce({ id: 'u1', phone: '1111111111', role: 'MIS_USER', status: 'INACTIVE' }) // target
+        .mockResolvedValueOnce({ id: 'u1', status: 'ACTIVE' });                                          // re-fetch
+      mockPrisma.user.count.mockResolvedValueOnce(0); // no ACTIVE holder → free to reclaim
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+      await service.updateUser(clientAdmin, 'u1', { status: 'ACTIVE' as never });
+      const data = mockPrisma.user.updateMany.mock.calls[0][0].data;
+      expect(data.status).toBe('ACTIVE');
+      // A soft-deleted account is fully restored — deletedAt cleared on reactivation.
+      expect(data.deletedAt).toBeNull();
+    });
+
+    it('REACT-3: a plain deactivation (INACTIVE) never sets deletedAt and skips the reactivation count', async () => {
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce({ id: 'u3', phone: '1111111111', role: 'MIS_USER', status: 'ACTIVE' }) // target
+        .mockResolvedValueOnce({ id: 'u3', status: 'INACTIVE' });                                      // re-fetch
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+      await service.updateUser(clientAdmin, 'u3', { status: 'INACTIVE' as never });
+      const data = mockPrisma.user.updateMany.mock.calls[0][0].data;
+      expect(data.status).toBe('INACTIVE');
+      expect('deletedAt' in data).toBe(false); // deleteUser owns deletedAt — deactivate never touches it
+      // No count call at all: non-admin target skips last-admin guard, and it's not a reactivation.
+      expect(mockPrisma.user.count).not.toHaveBeenCalled();
+    });
+
+    it('REACT-4: a P2002 race on the phone index surfaces the clean reactivation error, not a 500', async () => {
+      mockPrisma.user.findFirst.mockResolvedValueOnce({
+        id: 'u1', phone: '1111111111', role: 'MIS_USER', status: 'INACTIVE',
+      }); // target
+      mockPrisma.user.count.mockResolvedValueOnce(0); // pre-check passes, but a racer grabs it first
+      const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'test',
+        meta: { target: 'users_clientId_phone_active_key' },
+      });
+      mockPrisma.user.updateMany.mockRejectedValueOnce(p2002);
+      const err = await service
+        .updateUser(clientAdmin, 'u1', { status: 'ACTIVE' as never })
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect(err.message).toBe(
+        'This phone number is already in use by another active user. Change the phone number before reactivating this account.',
+      );
+    });
+
+    it('REACT-5: an unrelated P2002 (different index) is NOT swallowed — it re-throws', async () => {
+      mockPrisma.user.findFirst.mockResolvedValueOnce({
+        id: 'u1', phone: '1111111111', role: 'MIS_USER', status: 'INACTIVE',
+      }); // target
+      mockPrisma.user.count.mockResolvedValueOnce(0);
+      const emailClash = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'test',
+        meta: { target: 'users_clientId_email_key' },
+      });
+      mockPrisma.user.updateMany.mockRejectedValueOnce(emailClash);
+      const err = await service
+        .updateUser(clientAdmin, 'u1', { status: 'ACTIVE' as never })
+        .catch((e) => e);
+      // Not remapped to the phone message — the original Prisma error propagates.
+      expect(err).toBe(emailClash);
     });
   });
 
