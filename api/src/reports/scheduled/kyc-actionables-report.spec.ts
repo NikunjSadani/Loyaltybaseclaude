@@ -68,8 +68,8 @@ describe('buildKycActionablesReport (two-stage)', () => {
     expect(res.html).toContain('Awaiting Gifsy');
     expect(res.html).toContain('Gifsy SLA breached');
     expect(res.html).toContain('Field SLA breached');
-    // Oldest business hours = 171 (Mon 19 09:00 → Wed 28 12:00, weekend frozen).
-    expect(res.html).toContain('171');
+    // The Gifsy-stage breach is counted (1) and rendered red in the tenant row.
+    expect(res.html).toContain('color:#b91c1c;">1</span>');
   });
 
   it('uses the LATEST PENDING_GIFSY entry (restart on re-entry) for the Gifsy clock', async () => {
@@ -89,9 +89,10 @@ describe('buildKycActionablesReport (two-stage)', () => {
     ]);
 
     const res = await buildKycActionablesReport(prisma as any, makeCtx(), holidays, slaTargets);
-    // Latest entry Wed 06:00 → 6 business hours < 96 → NOT breached; oldest shows 6, not 171.
-    expect(res.html).toContain('6');
-    expect(res.html).not.toContain('171');
+    // Latest entry Wed 06:00 → 6 business hours < 96 → awaiting but NOT breached:
+    // the tenant's Gifsy-breached count is 0 (neutral), with no red breach span.
+    expect(res.html).toContain('color:#374151;">0</span>');
+    expect(res.html).not.toContain('color:#b91c1c;">1</span>');
   });
 
   it('HTML-escapes a malicious tenant display name (no raw <script>)', async () => {

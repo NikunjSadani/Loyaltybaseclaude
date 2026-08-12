@@ -50,10 +50,9 @@ interface TenantAgg {
   awaitingGifsy: number;
   gifsyBreached: number;
   fieldBreached: number;
-  oldestHrs: number;
 }
 
-const emptyAgg = (): TenantAgg => ({ pending: 0, awaitingGifsy: 0, gifsyBreached: 0, fieldBreached: 0, oldestHrs: 0 });
+const emptyAgg = (): TenantAgg => ({ pending: 0, awaitingGifsy: 0, gifsyBreached: 0, fieldBreached: 0 });
 
 export const buildKycActionablesReport: KycActionablesBuilder = async (
   prisma: PrismaService,
@@ -146,7 +145,6 @@ export const buildKycActionablesReport: KycActionablesBuilder = async (
       a.fieldBreached += 1;
       totalFieldBreached += 1;
     }
-    if (sla.ageHrs > a.oldestHrs) a.oldestHrs = sla.ageHrs;
   }
 
   const stats = statRow([
@@ -165,7 +163,6 @@ export const buildKycActionablesReport: KycActionablesBuilder = async (
       `<span style="font-weight:700;color:${a.awaitingGifsy > 0 ? '#b45309' : '#374151'};">${esc(intIN(a.awaitingGifsy))}</span>`,
       `<span style="font-weight:700;color:${a.gifsyBreached > 0 ? '#b91c1c' : '#374151'};">${esc(intIN(a.gifsyBreached))}</span>`,
       esc(intIN(a.fieldBreached)),
-      esc(intIN(a.oldestHrs)),
     ]);
 
   const body =
@@ -177,7 +174,6 @@ export const buildKycActionablesReport: KycActionablesBuilder = async (
         { label: 'Awaiting Gifsy', align: 'right' },
         { label: 'Gifsy breached', align: 'right' },
         { label: 'Field breached', align: 'right' },
-        { label: 'Oldest (business hrs)', align: 'right' },
       ],
       rows,
       'No per-tenant pending KYC.',
