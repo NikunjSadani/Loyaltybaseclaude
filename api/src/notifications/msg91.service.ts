@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import * as nodemailer from 'nodemailer';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 
 /**
@@ -188,19 +189,24 @@ export class Msg91Service {
   }
 
   /**
-   * Send a transactional EMAIL via the MSG91 v5 Email API. Used by the report
-   * runner to deliver generated reports.
+   * Send a transactional EMAIL via the MSG91 SMTP RELAY (Domain Settings → SMTP
+   * Integration), using nodemailer. Used by the report runner to deliver generated
+   * report HTML. NOT the MSG91 v5 email HTTP API — that path is TEMPLATE-only
+   * (template_id + short variables) and can't carry our rich, dynamic-length report
+   * tables; SMTP accepts the full rendered HTML unchanged.
    *
-   * Mirrors sendWhatsappTemplate's conventions exactly:
-   *   - authkey from MSG91_AUTH_KEY (.trim() — defends against a BOM/whitespace
-   *     that would make `fetch` throw a ByteString error on the header).
-   *   - DEV bypass: when no authKey is configured we LOG and RETURN so a non-prod
-   *     env without MSG91 wiring never errors (do NOT throw when unconfigured).
-   *   - 10s AbortSignal timeout → fail fast with a clear error, never an endless hang.
-   *   - "HTTP 200 + {type:'error'}" body check → throw on the MSG91-reported failure.
+   * Conventions:
+   *   - Credential = the MSG91_SMTP_PASS secret. Host/port/user default to MSG91's
+   *     relay for the verified `notify.gifsy.in` domain (smtp.mailer91.com:587,
+   *     emailer@notify.gifsy.in) and are env-overridable; from = REPORTS_FROM_EMAIL.
+   *   - requireTLS (STARTTLS) on 587 so the password can never be sent in cleartext.
+   *   - DEV bypass: when MSG91_SMTP_PASS is unset we LOG and RETURN so a non-prod env
+   *     without SMTP wiring never errors (do NOT throw when unconfigured).
+   *   - Bounded connection/greeting/socket timeouts → fail fast, never an endless hang.
    *
    * On success logs a single info line. On failure THROWS — the caller (report
-   * runner) catches it so one failed report doesn't block the others.
+   * runner) catches it so one failed report doesn't block the others. The password
+   * is never logged.
    *
    * @param params.to      recipient email addresses (no-op when empty)
    * @param params.subject the email subject line
@@ -214,62 +220,54 @@ export class Msg91Service {
       return;
     }
 
-    const authKey = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
+    // MSG91 email sends over SMTP relay (Domain Settings → SMTP Integration), NOT the v5
+    // HTTP API: the v5 API is TEMPLATE-based (template_id + short variables) and can't carry
+    // our rich, dynamic-length report HTML. SMTP accepts the full rendered HTML unchanged.
+    // Auth = the SMTP password (secret); host/port/user default to MSG91's relay for the
+    // verified `notify.gifsy.in` domain and are env-overridable.
+    const pass = this.config.get<string>('MSG91_SMTP_PASS')?.trim();
 
-    // DEV bypass — same shape as sendWhatsappTemplate's missing-authKey path: a
-    // non-prod env without MSG91 configured logs and returns instead of throwing.
-    if (!authKey) {
+    // DEV bypass — mirrors the OTP path's missing-credential behavior: a non-prod env
+    // without SMTP configured logs and returns instead of throwing (so local/CI never send).
+    if (!pass) {
       this.logger.warn(
-        `[DEV] MSG91 not configured — email "${subject}" to ${to.join(', ')} skipped`,
+        `[DEV] MSG91 SMTP not configured — email "${subject}" to ${to.join(', ')} skipped`,
       );
       return;
     }
 
-    // The MSG91-verified sending address; the sending domain is the part after the @.
-    const fromEmail =
+    const host = this.config.get<string>('MSG91_SMTP_HOST')?.trim() || 'smtp.mailer91.com';
+    const port = Number(this.config.get<string>('MSG91_SMTP_PORT')?.trim() || '587');
+    const user = this.config.get<string>('MSG91_SMTP_USER')?.trim() || 'emailer@notify.gifsy.in';
+    // The from-address must be on the MSG91-verified sending domain (notify.gifsy.in).
+    const from =
       this.config.get<string>('REPORTS_FROM_EMAIL')?.trim() || 'reports@notify.gifsy.in';
-    const domain = fromEmail.split('@')[1];
 
-    // ⚠️ CONFIRM against MSG91 dashboard → API Integration tab before the first real
-    // send — the exact field names of the v5 Email API aren't 100%-verified yet, so
-    // the endpoint + payload construction are isolated in THIS one block for an easy
-    // runtime-verify / tweak against the real API.
-    const url = 'https://control.msg91.com/api/v5/email/send';
-    const body = {
-      recipients: to.map((email) => ({ to: [{ email }] })),
-      from: { email: fromEmail },
-      domain,
-      subject,
-      body: html,
-    };
-    // ── end MSG91 v5 Email payload block ─────────────────────────────────────────
+    const transporter = nodemailer.createTransport({
+      host,
+      port,
+      secure: port === 465, // 465 = implicit TLS
+      // 587 = STARTTLS: require it (not opportunistic) so the SMTP password can NEVER be sent
+      // in cleartext if the relay/path fails to advertise STARTTLS — fail the send instead.
+      requireTLS: port !== 465,
+      auth: { user, pass },
+      // Never hang the pipeline on an unresponsive relay — bound every phase.
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 20_000,
+    });
 
-    // Never hang the request on an unresponsive MSG91 — 10s timeout, then fail fast.
-    let res: Response;
     try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers: { authkey: authKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(10_000),
-      });
+      const info = await transporter.sendMail({ from, to, subject, html });
+      this.logger.log(
+        `Email "${subject}" sent to ${to.length} recipient(s) via SMTP (id ${info.messageId})`,
+      );
     } catch (e) {
-      const reason =
-        (e as Error)?.name === 'TimeoutError'
-          ? 'MSG91 did not respond within 10s (timeout — check MSG91 IP whitelisting / egress)'
-          : String(e);
-      this.logger.error(`MSG91 email "${subject}" request failed: ${reason}`);
+      const reason = (e as Error)?.message ?? String(e);
+      this.logger.error(`MSG91 SMTP email "${subject}" failed: ${reason}`);
       throw new Error(`Failed to send email "${subject}": ${reason}`);
+    } finally {
+      transporter.close();
     }
-
-    // MSG91 can return HTTP 200 with {"type":"error"} — check the body too.
-    const json = (await res.json()) as { type?: string; message?: string };
-    if (!res.ok || json?.type === 'error') {
-      const reason = json?.message ?? `HTTP ${res.status}`;
-      this.logger.error(`MSG91 email "${subject}" failed: ${reason}`);
-      throw new Error(`Failed to send email "${subject}": ${reason}`);
-    }
-
-    this.logger.log(`Email "${subject}" sent to ${to.length} recipient(s)`);
   }
 }

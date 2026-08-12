@@ -4,7 +4,10 @@
 // Run: npx jest src/notifications/msg91.service.spec.ts
 
 import { ConfigService } from '@nestjs/config';
+import * as nodemailer from 'nodemailer';
 import { Msg91Service } from './msg91.service';
+
+jest.mock('nodemailer');
 
 /** A ConfigService stub backed by a plain map. */
 function makeConfig(values: Record<string, string | undefined>): ConfigService {
@@ -235,101 +238,94 @@ describe('Msg91Service.sendOtp — per-tenant template override', () => {
   });
 });
 
-// Covers Msg91Service.sendEmail — the MSG91 v5 Email path used by the report runner.
-// Same conventions as sendWhatsappTemplate: missing-authKey dev bypass (log + return,
-// no throw), the request URL + authkey header + body shape, the "HTTP 200 + {type:'error'}"
-// failure throw, and the REPORTS_FROM_EMAIL → domain derivation.
-describe('Msg91Service.sendEmail', () => {
-  const realFetch = global.fetch;
+// Covers Msg91Service.sendEmail — the MSG91 SMTP RELAY path (Domain Settings → SMTP
+// Integration) used by the report runner. MSG91's v5 email HTTP API is template-only and
+// can't carry our rich report HTML, so email sends over SMTP (nodemailer). Same dev-bypass
+// convention (missing credential → log + return, no throw), plus the relay config + from
+// derivation and the SMTP-failure throw.
+describe('Msg91Service.sendEmail (SMTP relay)', () => {
+  const createTransport = nodemailer.createTransport as unknown as jest.Mock;
+  let sendMail: jest.Mock;
+  let close: jest.Mock;
 
-  afterEach(() => {
-    global.fetch = realFetch;
-    jest.restoreAllMocks();
+  beforeEach(() => {
+    sendMail = jest.fn().mockResolvedValue({ messageId: '<id@smtp.mailer91.com>' });
+    close = jest.fn();
+    createTransport.mockReturnValue({ sendMail, close });
   });
+  afterEach(() => jest.clearAllMocks());
 
-  it('dev bypass: no authKey → logs + returns WITHOUT calling fetch', async () => {
-    const fetchMock = jest.fn();
-    global.fetch = fetchMock as unknown as typeof fetch;
-
-    const service = new Msg91Service(makeConfig({})); // MSG91_AUTH_KEY undefined
+  it('dev bypass: no MSG91_SMTP_PASS → logs + returns WITHOUT connecting', async () => {
+    const service = new Msg91Service(makeConfig({})); // no SMTP password
     await expect(
       service.sendEmail({ to: ['a@b.com'], subject: 'Daily report', html: '<p>hi</p>' }),
     ).resolves.toBeUndefined();
 
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(createTransport).not.toHaveBeenCalled();
+    expect(sendMail).not.toHaveBeenCalled();
   });
 
-  it('no-op (no fetch) when the recipient list is empty', async () => {
-    const fetchMock = jest.fn();
-    global.fetch = fetchMock as unknown as typeof fetch;
-
-    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+  it('no-op (no connection) when the recipient list is empty', async () => {
+    const service = new Msg91Service(makeConfig({ MSG91_SMTP_PASS: 'pw' }));
     await expect(
       service.sendEmail({ to: [], subject: 'Daily report', html: '<p>hi</p>' }),
     ).resolves.toBeUndefined();
 
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(createTransport).not.toHaveBeenCalled();
   });
 
-  it('posts to the MSG91 email endpoint with the authkey header + recipients/subject/body', async () => {
-    const fetchMock = jest
-      .fn()
-      .mockResolvedValue({ ok: true, status: 200, json: async () => ({ type: 'success' }) });
-    global.fetch = fetchMock as unknown as typeof fetch;
-
-    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+  it('sends over SMTP with the default relay config + from address, then closes', async () => {
+    const service = new Msg91Service(makeConfig({ MSG91_SMTP_PASS: 'secret-pw' }));
     await service.sendEmail({
       to: ['owner@acme.com', 'ops@acme.com'],
       subject: 'Weekly summary',
       html: '<h1>Report</h1>',
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe('https://control.msg91.com/api/v5/email/send');
-    // authkey rides in the header, never the body (mirrors sendWhatsappTemplate).
-    expect(init.method).toBe('POST');
-    expect(init.headers.authkey).toBe('key-123');
+    // Default MSG91 relay for the verified notify.gifsy.in domain, port 587 (STARTTLS).
+    expect(createTransport).toHaveBeenCalledTimes(1);
+    const cfg = createTransport.mock.calls[0][0];
+    expect(cfg.host).toBe('smtp.mailer91.com');
+    expect(cfg.port).toBe(587);
+    expect(cfg.secure).toBe(false);
+    expect(cfg.auth).toEqual({ user: 'emailer@notify.gifsy.in', pass: 'secret-pw' });
 
-    const body = JSON.parse(init.body);
-    expect(body.recipients).toEqual([
-      { to: [{ email: 'owner@acme.com' }] },
-      { to: [{ email: 'ops@acme.com' }] },
-    ]);
-    expect(body.subject).toBe('Weekly summary');
-    expect(body.body).toBe('<h1>Report</h1>');
-    // Default from address + its derived domain.
-    expect(body.from).toEqual({ email: 'reports@notify.gifsy.in' });
-    expect(body.domain).toBe('notify.gifsy.in');
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    expect(sendMail.mock.calls[0][0]).toEqual({
+      from: 'reports@notify.gifsy.in',
+      to: ['owner@acme.com', 'ops@acme.com'],
+      subject: 'Weekly summary',
+      html: '<h1>Report</h1>',
+    });
+    expect(close).toHaveBeenCalled();
   });
 
-  it('throws when MSG91 returns HTTP 200 with {type:"error"}', async () => {
-    const fetchMock = jest.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({ type: 'error', message: 'bad domain' }),
-    });
-    global.fetch = fetchMock as unknown as typeof fetch;
-
-    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+  it('throws a clear error when the SMTP send fails (and still closes the transport)', async () => {
+    sendMail.mockRejectedValue(new Error('535 auth failed'));
+    const service = new Msg91Service(makeConfig({ MSG91_SMTP_PASS: 'pw' }));
     await expect(
       service.sendEmail({ to: ['a@b.com'], subject: 'Daily report', html: '<p>hi</p>' }),
-    ).rejects.toThrow(/bad domain/);
+    ).rejects.toThrow(/535 auth failed/);
+    expect(close).toHaveBeenCalled();
   });
 
-  it('uses REPORTS_FROM_EMAIL when set and derives the domain from it', async () => {
-    const fetchMock = jest
-      .fn()
-      .mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
-    global.fetch = fetchMock as unknown as typeof fetch;
-
+  it('honors REPORTS_FROM_EMAIL + SMTP host/port/user overrides (465 → implicit TLS)', async () => {
     const service = new Msg91Service(
-      makeConfig({ MSG91_AUTH_KEY: 'key-123', REPORTS_FROM_EMAIL: 'noreply@mail.deoleo.in' }),
+      makeConfig({
+        MSG91_SMTP_PASS: 'pw',
+        REPORTS_FROM_EMAIL: 'noreply@notify.gifsy.in',
+        MSG91_SMTP_HOST: 'smtp.example.com',
+        MSG91_SMTP_PORT: '465',
+        MSG91_SMTP_USER: 'custom@notify.gifsy.in',
+      }),
     );
     await service.sendEmail({ to: ['a@b.com'], subject: 'Daily report', html: '<p>hi</p>' });
 
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(body.from).toEqual({ email: 'noreply@mail.deoleo.in' });
-    expect(body.domain).toBe('mail.deoleo.in');
+    const cfg = createTransport.mock.calls[0][0];
+    expect(cfg.host).toBe('smtp.example.com');
+    expect(cfg.port).toBe(465);
+    expect(cfg.secure).toBe(true); // 465 = implicit TLS
+    expect(cfg.auth.user).toBe('custom@notify.gifsy.in');
+    expect(sendMail.mock.calls[0][0].from).toBe('noreply@notify.gifsy.in');
   });
 });
