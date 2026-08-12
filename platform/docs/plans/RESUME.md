@@ -200,7 +200,7 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   a tenant-added email never reaches the runner). 🐛 **Fixed along the way:** both `REPORTS_RUN_SECRET_STAGING` **and** prod `REPORTS_RUN_SECRET` had a trailing
   `\r`(0d) from Windows-shell creation → header auth could never match → 403; both cleaned to **v2** (CR-stripped, byte-verified) + staging revision rolled.
   `MSG91_SMTP_PASS` is a single shared secret, proven clean by staging's successful auth → prod SMTP will work identically. ▶ **REMAINING:** (1) owner confirms
-  the staging email arrived + renders; (2) **prod cutover carries the SMTP commits** (`362cae0`/`b0ae0a2`); (3) create the **PROD-ONLY** Cloud Scheduler cron
+  the staging email arrived + renders (✅ **owner confirmed 2026-08-12** — KYC digest landed + rendered; owner then dropped the "Oldest (business hrs)" column → `73914cb`, and the Report Recipients card got a **"Platform-wide · all tenants"** badge + reworded desc so it's not mistaken for the per-tenant Credits&Payouts "Notify emails" → `f915852`); (2) **prod cutover carries the SMTP + report-polish commits** (`362cae0`/`b0ae0a2`/`73914cb`/`f915852`); (3) create the **PROD-ONLY** Cloud Scheduler cron
   (`30 9 * * 1-6` Asia/Kolkata) with the **CLEAN** `REPORTS_RUN_SECRET` v2 value in the `x-reports-run-secret` header; (4) set prod recipients from the GIFSY
   operator login. (Staging has no cron by design, so it never auto-sends.) Runbook `runbooks/email-reports-activation.md`.
 - **🗓️ KYC SLA → TWO-STAGE (owner 2026-08-11) — ✅ LIVE IN PROD #28 (`5961d96`), gate-green (api jest 2276 · nest 0 · FE tsc 0 ·
