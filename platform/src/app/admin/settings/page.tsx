@@ -1,7 +1,7 @@
 ﻿'use client'
 
 import { useState, useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone, Clock, Coins, Lock, Fingerprint, CalendarDays } from 'lucide-react'
+import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone, Clock, Coins, Lock, Fingerprint, CalendarDays, Globe } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { fetchTaskConfig, updateTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig, type CustomTaskItem } from '@/lib/task-config'
@@ -1117,11 +1117,19 @@ export default function SettingsPage() {
         <CardHeader>
           <div className="flex items-center justify-between">
             <div>
-              <CardTitle className="text-base flex items-center gap-2">
+              <CardTitle className="text-base flex items-center gap-2 flex-wrap">
                 <CalendarDays className="h-4 w-4 text-[var(--brand-primary)]" /> Report Recipients
+                <span
+                  data-testid="report-recipients-platform-badge"
+                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full"
+                >
+                  <Globe className="h-3 w-3" /> Platform-wide · all tenants
+                </span>
               </CardTitle>
               <CardDescription className="mt-1">
-                These addresses receive the daily internal reports (Mon–Sat). Gifsy-operated setting.
+                One internal Gifsy distribution list for the daily reports (Mon–Sat) — <strong>not</strong> per-tenant.
+                These addresses apply across every tenant, regardless of which client you&apos;re viewing. (Different
+                from the per-tenant &ldquo;Notify emails&rdquo; under Credits &amp; Payouts.)
               </CardDescription>
             </div>
             {isGifsyAdmin && (
