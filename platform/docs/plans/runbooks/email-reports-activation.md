@@ -14,6 +14,9 @@ This runbook turns it on. Mirrors the push-drain provisioning pattern (scheduler
   tab's endpoint + sample request; adjust that one block if the field names differ, then re-run the gate.
 
 ## 1. Create the shared trigger secret (Secret Manager)
+> **✅ ALREADY DONE (2026-08-12):** both `REPORTS_RUN_SECRET` (prod) and `REPORTS_RUN_SECRET_STAGING` exist and were
+> **cleaned to v2** (see the CR warning below). Steps 1–2 are complete; the staging test-send passed. What's left is
+> step 3 (prod cron) after the prod cutover carries the SMTP commits.
 ```bash
 PROJECT=gifsy-platform
 SECRET=$(python -c "import secrets;print(secrets.token_hex(32))")   # 64-hex
@@ -21,6 +24,13 @@ printf "%s" "$SECRET" | gcloud secrets create REPORTS_RUN_SECRET --project "$PRO
   || printf "%s" "$SECRET" | gcloud secrets versions add REPORTS_RUN_SECRET --project "$PROJECT" --data-file=-
 ```
 Keep `$SECRET` — the Cloud Scheduler job (step 3) needs the same value.
+> **🐛 TRAILING-`\r` TRAP (bit us on both run-secrets, 2026-08-12):** `printf "%s"` above is safe, but any value created
+> from a Windows/PowerShell shell (or `echo`) can carry a trailing carriage-return. Cloud Run keeps the `\r` in the env
+> value, but **no HTTP client can send a trailing `\r` in a header** → the gate 403s forever even with the "right" secret.
+> Whenever you set `SECRET` from the store for step 3, strip it: `SECRET=$(gcloud secrets versions access latest
+> --secret=REPORTS_RUN_SECRET | tr -d '\r\n')`, and byte-verify a stored secret with `… | wc -c` (expect 64) +
+> `tail -c1 | od -An -tx1` (must NOT be `0d`/`0a`). If a stored version is dirty, add a stripped version and roll a new
+> Cloud Run revision so instances re-read `:latest`.
 
 ## 2. Bind the secret + from-address onto Cloud Run (CI)
 In **`.github/workflows/deploy.yml`** (prod) and **`.github/workflows/deploy-staging.yml`** (staging):

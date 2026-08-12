@@ -194,9 +194,15 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   relay + nodemailer** (`smtp.mailer91.com:587`, user `emailer@notify.gifsy.in`, `requireTLS`, from `reports@notify.gifsy.in`) — NOT the `MSG91_AUTH_KEY`
   HTTP path. Secrets `MSG91_SMTP_PASS` (owner-created, shared) + `REPORTS_RUN_SECRET`(`_STAGING`) created + wired into both deploy YAMLs + SA-granted;
   independent-audited (requireTLS + doc/env fixes applied); gate-green (api jest 2296). Domain `notify.gifsy.in` VERIFIED (DNS Cloudflare); Zoho-free has
-  NO SMTP; MSG91 "Connections" tab ≠ SMTP relay (it's Domain Settings → SMTP Integration). ▶ **PENDING:** staging deploy of `362cae0` lands → a real
-  **staging test-send** (`POST /reports/run` w/ the run-secret; owner confirms the email arrives + renders) → create the **PROD-ONLY** Cloud Scheduler
-  cron (`30 9 * * 1-6` Asia/Kolkata) → email reports go live. (Staging has no cron by design, so it never auto-sends.) Runbook `runbooks/email-reports-activation.md`.
+  NO SMTP; MSG91 "Connections" tab ≠ SMTP relay (it's Domain Settings → SMTP Integration). ✅ **STAGING TEST-SEND PASSED (2026-08-12, rev `gifsy-api-staging-00459`):**
+  `POST /v1/reports/run` → `creditsPayouts:suppressed-empty` + `kycActionables:{status:"sent",recipients:1}` → the KYC digest was delivered via MSG91 SMTP to
+  `nikunj.sadani@gifsy.in` (recipient set from the **GIFSY operator** login `PUT /admin/settings/report-recipients`; the GIFSY-global row, NOT a tenant view —
+  a tenant-added email never reaches the runner). 🐛 **Fixed along the way:** both `REPORTS_RUN_SECRET_STAGING` **and** prod `REPORTS_RUN_SECRET` had a trailing
+  `\r`(0d) from Windows-shell creation → header auth could never match → 403; both cleaned to **v2** (CR-stripped, byte-verified) + staging revision rolled.
+  `MSG91_SMTP_PASS` is a single shared secret, proven clean by staging's successful auth → prod SMTP will work identically. ▶ **REMAINING:** (1) owner confirms
+  the staging email arrived + renders; (2) **prod cutover carries the SMTP commits** (`362cae0`/`b0ae0a2`); (3) create the **PROD-ONLY** Cloud Scheduler cron
+  (`30 9 * * 1-6` Asia/Kolkata) with the **CLEAN** `REPORTS_RUN_SECRET` v2 value in the `x-reports-run-secret` header; (4) set prod recipients from the GIFSY
+  operator login. (Staging has no cron by design, so it never auto-sends.) Runbook `runbooks/email-reports-activation.md`.
 - **🗓️ KYC SLA → TWO-STAGE (owner 2026-08-11) — ✅ LIVE IN PROD #28 (`5961d96`), gate-green (api jest 2276 · nest 0 · FE tsc 0 ·
   FE vitest 2114), DUAL-AUDITED + all fixable findings FIXED.** Field SLA (submitted→reaching Gifsy, default **24h**) + Gifsy SLA (**LATEST**
   PENDING_GIFSY entry→decision, default **96h**, restart-on-re-entry) — two per-tenant `field/gifsySlaTargetHours` settings REPLACING the single 48
