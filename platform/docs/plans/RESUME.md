@@ -188,11 +188,15 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   INTERNAL Gifsy reports** (recipients configurable from a Gifsy-admin page): **①Credits/Payouts summary (all-tenant)** + **③KYC actionables
   digest (all-tenant, daily Mon–Sat, with SLA)** — two SEPARATE scheduled reports (Cloud Scheduler → internal endpoint). Framework built to
   add tenant-specific scheduled reports later. Partners are NOT an email audience (phone-first).
-  **📧 EMAIL REPORTS (A/C/D/E) = ✅ LIVE IN PROD #28 (`7190ed6`) BUT DORMANT, FAIL-CLOSED** (`Msg91Service.sendEmail` reusing `MSG91_AUTH_KEY` ·
-  `POST /v1/reports/run` secret-gated · framework + #1 Credits/Payouts + #3 KYC-actionables daily Mon–Sat · platform recipients store GIFSY-only +
-  Gifsy-admin recipients UI). Domain `notify.gifsy.in` VERIFIED (DNS Cloudflare). ▶ **owner to activate** (nothing sends until then): confirm the MSG91
-  v5 email payload vs the dashboard API-Integration tab (`msg91.service.sendEmail` flagged block) → create `REPORTS_RUN_SECRET` + set recipients +
-  Cloud Scheduler — runbook `runbooks/email-reports-activation.md`.
+  **📧 EMAIL REPORTS = ✅ LIVE IN PROD #28 (`7190ed6`) BUT DORMANT, FAIL-CLOSED** (`POST /v1/reports/run` secret-gated · framework + #1 Credits/Payouts
+  + #3 KYC-actionables daily Mon–Sat · platform recipients store GIFSY-only + Gifsy-admin recipients UI). **TRANSPORT RESOLVED + PUSHED STAGING
+  `362cae0` (2026-08-11):** MSG91's v5 email API is TEMPLATE-only (can't carry rich report HTML), so `Msg91Service.sendEmail` now sends via **MSG91 SMTP
+  relay + nodemailer** (`smtp.mailer91.com:587`, user `emailer@notify.gifsy.in`, `requireTLS`, from `reports@notify.gifsy.in`) — NOT the `MSG91_AUTH_KEY`
+  HTTP path. Secrets `MSG91_SMTP_PASS` (owner-created, shared) + `REPORTS_RUN_SECRET`(`_STAGING`) created + wired into both deploy YAMLs + SA-granted;
+  independent-audited (requireTLS + doc/env fixes applied); gate-green (api jest 2296). Domain `notify.gifsy.in` VERIFIED (DNS Cloudflare); Zoho-free has
+  NO SMTP; MSG91 "Connections" tab ≠ SMTP relay (it's Domain Settings → SMTP Integration). ▶ **PENDING:** staging deploy of `362cae0` lands → a real
+  **staging test-send** (`POST /reports/run` w/ the run-secret; owner confirms the email arrives + renders) → create the **PROD-ONLY** Cloud Scheduler
+  cron (`30 9 * * 1-6` Asia/Kolkata) → email reports go live. (Staging has no cron by design, so it never auto-sends.) Runbook `runbooks/email-reports-activation.md`.
 - **🗓️ KYC SLA → TWO-STAGE (owner 2026-08-11) — ✅ LIVE IN PROD #28 (`5961d96`), gate-green (api jest 2276 · nest 0 · FE tsc 0 ·
   FE vitest 2114), DUAL-AUDITED + all fixable findings FIXED.** Field SLA (submitted→reaching Gifsy, default **24h**) + Gifsy SLA (**LATEST**
   PENDING_GIFSY entry→decision, default **96h**, restart-on-re-entry) — two per-tenant `field/gifsySlaTargetHours` settings REPLACING the single 48
