@@ -34,6 +34,9 @@ export default function GifsyOverviewPage() {
   const [overview, setOverview] = useState<Overview>(EMPTY);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Security-breach metric — GIFSY platform home ONLY. Fail-closed: any
+  // non-success / 403 / network error leaves the count at 0 and renders nothing.
+  const [securityCount, setSecurityCount] = useState(0);
 
   useEffect(() => {
     fetch('/api/gifsy/overview', { headers: { Authorization: `Bearer ${getToken() ?? ''}` } })
@@ -44,6 +47,15 @@ export default function GifsyOverviewPage() {
       })
       .catch(() => setError('Could not load platform overview'))
       .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    fetch('/api/gifsy/security-events', { headers: { Authorization: `Bearer ${getToken() ?? ''}` } })
+      .then((r) => r.json())
+      .then((j) => {
+        if (j?.success && typeof j.data?.count === 'number') setSecurityCount(j.data.count);
+      })
+      .catch(() => { /* fail-closed: no error surface, count stays 0 */ });
   }, []);
 
   return (
@@ -70,6 +82,18 @@ export default function GifsyOverviewPage() {
           </div>
         ))}
       </div>
+
+      {/* Security-breach alert — reuses the file's red/AlertCircle affordance.
+          Rendered ONLY when count > 0; otherwise nothing (no noise). */}
+      {securityCount > 0 && (
+        <Link href="/gifsy/security-events"
+          className="flex items-center gap-3 bg-red-500/20 border border-red-500/30 rounded-xl p-4 hover:bg-red-500/25 transition-colors">
+          <AlertCircle className="w-5 h-5 shrink-0 text-red-400" />
+          <p className="text-sm font-semibold text-red-400">
+            Security · {securityCount} refresh-token reuse events (last 30d)
+          </p>
+        </Link>
+      )}
 
       {/* Client cards */}
       <div>

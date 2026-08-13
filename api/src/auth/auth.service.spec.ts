@@ -981,6 +981,102 @@ describe('AuthService', () => {
       // revokedAt === null → not reuse → the user-wide revoke + stamp must NOT run.
       expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
       expect(mockPrisma.user.update).not.toHaveBeenCalled();
+      // …and NO platform security-event row is written on a non-reuse path.
+      expect(securityEventCalls()).toHaveLength(0);
+    });
+
+    // ── platform-level security-event audit (BE-1) ────────────────────────────
+    // Every SECURITY_EVENT AuditLog write for refresh-token reuse; the report filters on
+    // exactly this (entityType + metadata.event), so the tests assert on the same shape.
+    const securityEventCalls = () =>
+      mockPrisma.auditLog.create.mock.calls.filter(
+        (c: any) =>
+          c[0]?.data?.entityType === 'SECURITY_EVENT' &&
+          c[0]?.data?.metadata?.event === 'refresh_token_reuse',
+      );
+
+    it('reuse (>5s grace, no live successor) writes ONE SECURITY_EVENT audit row AND still throws 401', async () => {
+      const staleRevoked = {
+        id: 'sess_x', clientId: 'deoleo', refreshToken: 'rt',
+        revokedAt: new Date(Date.now() - 7_000),
+        createdAt: new Date(Date.now() - 60_000),
+        expiresAt: new Date(Date.now() + 3600_000),
+        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+      };
+      mockPrisma.userSession.findFirst
+        .mockResolvedValueOnce(staleRevoked)
+        .mockResolvedValueOnce(null);
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 3 });
+      mockPrisma.user.update.mockResolvedValue({});
+
+      await expect(service.refreshToken('rt')).rejects.toThrow('Session expired');
+
+      const calls = securityEventCalls();
+      expect(calls).toHaveLength(1);
+      const data = calls[0][0].data;
+      expect(data.action).toBe('LOGOUT');
+      expect(data.entityType).toBe('SECURITY_EVENT');
+      expect(data.targetUserId).toBe('u1');
+      expect(data.entityId).toBe('u1');
+      expect(data.actorId).toBe('u1');
+      expect(data.metadata.event).toBe('refresh_token_reuse');
+      // Which TENANT the reuse belongs to (AuditLog has no clientId column).
+      expect(data.metadata.clientId).toBe('deoleo');
+      expect(data.metadata.sessionId).toBe('sess_x');
+    });
+
+    it('best-effort: a failed SECURITY_EVENT audit write does NOT mask the 401', async () => {
+      const staleRevoked = {
+        id: 'sess_x', clientId: 'deoleo', refreshToken: 'rt',
+        revokedAt: new Date(Date.now() - 7_000),
+        createdAt: new Date(Date.now() - 60_000),
+        expiresAt: new Date(Date.now() + 3600_000),
+        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+      };
+      mockPrisma.userSession.findFirst
+        .mockResolvedValueOnce(staleRevoked)
+        .mockResolvedValueOnce(null);
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 3 });
+      mockPrisma.user.update.mockResolvedValue({});
+      // Audit write blows up — the caller must still get the 401, not a 500.
+      mockPrisma.auditLog.create.mockRejectedValueOnce(new Error('audit db down'));
+
+      await expect(service.refreshToken('rt')).rejects.toThrow('Session expired');
+    });
+
+    it('legit collision (>5s grace WITH a live successor) writes NO SECURITY_EVENT row', async () => {
+      const revokedPredecessor = {
+        id: 'sess_x', clientId: 'deoleo', refreshToken: 'rt',
+        revokedAt: new Date(Date.now() - 7_000),
+        createdAt: new Date(Date.now() - 3600_000),
+        expiresAt: new Date(Date.now() + 3600_000),
+        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+      };
+      const successor = { id: 'sess_y', token: 'succ.access', refreshToken: 'succ-refresh', revokedAt: null };
+      mockPrisma.userSession.findFirst
+        .mockResolvedValueOnce(revokedPredecessor)
+        .mockResolvedValueOnce(successor);
+
+      await service.refreshToken('rt');
+      expect(securityEventCalls()).toHaveLength(0);
+    });
+
+    it('in-grace loser (revoked < 5s ago, no live successor) writes NO SECURITY_EVENT row', async () => {
+      const recentlyRevoked = {
+        id: 'sess_x', clientId: 'deoleo', refreshToken: 'rt',
+        revokedAt: new Date(Date.now() - 1_000), // 1s ago — INSIDE the 5s grace
+        createdAt: new Date(Date.now() - 60_000),
+        expiresAt: new Date(Date.now() + 3600_000),
+        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+      };
+      mockPrisma.userSession.findFirst
+        .mockResolvedValueOnce(recentlyRevoked)
+        .mockResolvedValueOnce(null);
+
+      await expect(service.refreshToken('rt')).rejects.toThrow('Session expired');
+      // Transient in-grace loser → not reuse → no lineage kill, no security-event row.
+      expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
+      expect(securityEventCalls()).toHaveLength(0);
     });
   });
 

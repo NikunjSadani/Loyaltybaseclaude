@@ -23,6 +23,7 @@ const mockPrisma = {
   client: { findMany: jest.fn(), findUnique: jest.fn(), findFirst: jest.fn(), update: jest.fn(), create: jest.fn() },
   outletType: { findMany: jest.fn(), findFirst: jest.fn() },
   outletTypeClientConfig: { findMany: jest.fn(), upsert: jest.fn() },
+  auditLog: { count: jest.fn(), findMany: jest.fn() },
   clientDomain: {
     findFirst: jest.fn(),
     findMany: jest.fn(),
@@ -70,8 +71,12 @@ describe('GifsyService', () => {
     jest.clearAllMocks();
     // $transaction runs the callback with the mock client as the tx handle so
     // tx.client.* / tx.clientDomain.* resolve against the same sub-mocks.
-    mockPrisma.$transaction.mockImplementation(async (cb: (tx: typeof mockPrisma) => unknown) =>
-      cb(mockPrisma),
+    mockPrisma.$transaction.mockImplementation(async (arg: unknown) =>
+      // Callback form (client create/update) runs the cb with the mock tx handle;
+      // array form (getSecurityEvents count+findMany) resolves each queued promise.
+      typeof arg === 'function'
+        ? (arg as (tx: typeof mockPrisma) => unknown)(mockPrisma)
+        : Promise.all(arg as Promise<unknown>[]),
     );
     // Default: no custom domains (getClientDetail + non-domain paths never crash).
     mockPrisma.clientDomain.findMany.mockResolvedValue([]);
@@ -1064,6 +1069,69 @@ describe('GifsyService', () => {
         minBankTransferAmount: 250,
         minVoucherFreeAmount: 250,
       });
+    });
+  });
+
+  // ── getSecurityEvents (BE-2) — platform-wide refresh-token-reuse feed ─────────
+  // The gate is platformWide() (NOT assertGifsy): un-assumed GIFSY only. This is a
+  // cross-tenant view that must never be served to a CLIENT_ADMIN or to an ASSUMED
+  // GIFSY operator (pinned to a tenant) — proving @Roles('GIFSY_ADMIN') alone is
+  // insufficient here.
+  describe('getSecurityEvents', () => {
+    const assumedGifsy: JwtPayload = {
+      sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', assumed: true, phone: '', name: '',
+    } as JwtPayload;
+
+    it('un-assumed GIFSY → returns { windowDays, count, events } aggregated platform-wide', async () => {
+      mockPrisma.auditLog.count.mockResolvedValue(2);
+      mockPrisma.auditLog.findMany.mockResolvedValue([
+        {
+          id: 'ev1',
+          targetUserId: 'u1',
+          entityId: 'u1',
+          metadata: { event: 'refresh_token_reuse', clientId: 'deoleo' },
+          createdAt: new Date('2026-08-10T00:00:00Z'),
+        },
+        {
+          id: 'ev2',
+          targetUserId: null, // falls back to entityId
+          entityId: 'u9',
+          metadata: { event: 'refresh_token_reuse' }, // no clientId → null
+          createdAt: new Date('2026-08-09T00:00:00Z'),
+        },
+      ]);
+
+      const res = await service.getSecurityEvents(gifsy);
+
+      expect(res.windowDays).toBe(30);
+      expect(res.count).toBe(2);
+      expect(res.events).toEqual([
+        { id: 'ev1', userId: 'u1', clientId: 'deoleo', at: new Date('2026-08-10T00:00:00Z') },
+        { id: 'ev2', userId: 'u9', clientId: null, at: new Date('2026-08-09T00:00:00Z') },
+      ]);
+
+      // Filters on the SECURITY_EVENT/LOGOUT + metadata discriminator the writer stamps.
+      const findWhere = mockPrisma.auditLog.findMany.mock.calls[0][0].where;
+      expect(findWhere).toMatchObject({
+        entityType: 'SECURITY_EVENT',
+        action: 'LOGOUT',
+        metadata: { path: ['event'], equals: 'refresh_token_reuse' },
+      });
+    });
+
+    it('CLIENT_ADMIN → Forbidden, no DB read', async () => {
+      const clientAdmin: JwtPayload = {
+        sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '',
+      } as JwtPayload;
+      await expect(service.getSecurityEvents(clientAdmin)).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.auditLog.findMany).not.toHaveBeenCalled();
+      expect(mockPrisma.auditLog.count).not.toHaveBeenCalled();
+    });
+
+    it('ASSUMED GIFSY (assumed:true) → Forbidden — @Roles alone would admit them; platformWide rejects', async () => {
+      await expect(service.getSecurityEvents(assumedGifsy)).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.auditLog.findMany).not.toHaveBeenCalled();
+      expect(mockPrisma.auditLog.count).not.toHaveBeenCalled();
     });
   });
 });

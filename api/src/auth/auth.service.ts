@@ -631,6 +631,28 @@ export class AuthService {
       this.logger.warn(
         `Refresh-token reuse detected for user ${session.user.id} — revoked all sessions`,
       );
+      // Platform-level security-event audit row (best-effort — a failed audit write
+      // must NEVER mask the 401 below). Queryable via the [entityType, entityId] index
+      // and filtered by metadata.event in the GIFSY security-events report.
+      try {
+        await this.prisma.auditLog.create({
+          data: {
+            action: 'LOGOUT', // valid AuditAction enum; matches session-kill semantics
+            entityType: 'SECURITY_EVENT', // distinctive, queryable via [entityType,entityId] index
+            entityId: session.user.id,
+            actorId: session.user.id,
+            targetUserId: session.user.id,
+            metadata: {
+              event: 'refresh_token_reuse', // discriminator the report filters on
+              clientId: session.user.clientId, // which TENANT (AuditLog has no clientId column)
+              sessionId: session.id,
+              detectedAt: now.toISOString(),
+            },
+          },
+        });
+      } catch {
+        /* best-effort security audit — never mask the 401 */
+      }
     }
 
     throw new UnauthorizedException('Session expired — please log in again.');

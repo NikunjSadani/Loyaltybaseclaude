@@ -13,6 +13,7 @@ import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { sniffFileType } from '../common/file-signature';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { platformWide } from '../common/tenant-scope';
 import {
   CreateClientDto,
   UpdateClientDto,
@@ -139,6 +140,41 @@ export class GifsyService {
 
   private assertGifsy(user: JwtPayload): void {
     if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden');
+  }
+
+  /**
+   * GET /v1/gifsy/security-events — platform-wide refresh-token-reuse feed (last 30
+   * days), aggregated across ALL tenants. Gated by platformWide() (NOT assertGifsy):
+   * an ASSUMED GIFSY operator or a CLIENT_ADMIN is rejected, because this is a
+   * cross-tenant platform view that must never be served in a tenant-pinned context.
+   * Accepts NO clientId param — platform-wide aggregate only.
+   */
+  async getSecurityEvents(user: JwtPayload) {
+    if (!platformWide(user)) throw new ForbiddenException('Forbidden');
+
+    const since = new Date(Date.now() - 30 * 864e5); // 30 days
+    const where = {
+      entityType: 'SECURITY_EVENT',
+      action: 'LOGOUT' as const,
+      metadata: { path: ['event'], equals: 'refresh_token_reuse' },
+    };
+    const windowed = { ...where, createdAt: { gte: since } };
+    const [count, rows] = await this.prisma.$transaction([
+      this.prisma.auditLog.count({ where: windowed }),
+      // Same 30-day window as the count so the metric and the list can never disagree.
+      this.prisma.auditLog.findMany({ where: windowed, orderBy: { createdAt: 'desc' }, take: 25 }),
+    ]);
+
+    return {
+      windowDays: 30,
+      count,
+      events: rows.map((r) => ({
+        id: r.id,
+        userId: r.targetUserId ?? r.entityId,
+        clientId: (r.metadata as any)?.clientId ?? null,
+        at: r.createdAt,
+      })),
+    };
   }
 
   // ════════════════════════════════════════════════════════════════════════

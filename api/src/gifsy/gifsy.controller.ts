@@ -40,6 +40,19 @@ export class GifsyController {
     return this.gifsy.getOverview(user);
   }
 
+  /**
+   * GET /v1/gifsy/security-events — platform-wide security-event feed (refresh-token
+   * reuse detections, last 30 days). GIFSY_ADMIN only AND platform-context only: the
+   * service re-gates with platformWide() so an ASSUMED GIFSY operator (pinned to a
+   * tenant) is rejected — @Roles alone would admit them.
+   */
+  @Get('security-events')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('tenancy:read')
+  getSecurityEvents(@CurrentUser() user: JwtPayload) {
+    return this.gifsy.getSecurityEvents(user);
+  }
+
   @Post('clients')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('tenancy:write')
