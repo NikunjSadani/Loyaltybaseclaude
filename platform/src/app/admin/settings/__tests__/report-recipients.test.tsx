@@ -19,13 +19,24 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 // Mutable role for the mocked session — set per-test before rendering.
 let mockRole: 'GIFSY_ADMIN' | 'CLIENT_ADMIN' = 'GIFSY_ADMIN';
+// Mutable assumed-tenant brand — null = platform (un-assumed) mode (the default). Set to a
+// brand name to simulate a GIFSY operator assumed into a tenant, which hides platform-global cards.
+let mockAssumedBrand: string | null = null;
 vi.mock('@/lib/auth-client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/auth-client')>();
   return {
     ...actual,
     getStoredUser: () => ({ id: 'u1', name: 'Admin', role: mockRole, phone: '900' }),
+    getAssumedBrand: () => mockAssumedBrand,
   };
 });
+
+// Assumed-tenant signal (server action). Default un-assumed; a test flips mockAssumedBrand
+// to exercise the assumed path. Mocked wholesale so the real 'use server' module (next/headers)
+// never loads in jsdom.
+vi.mock('@/lib/auth-actions', () => ({
+  getAssumedContext: vi.fn(async () => ({ brandName: mockAssumedBrand })),
+}));
 
 // Control the report-recipients GET/PUT directly.
 vi.mock('@/lib/report-recipients', async (importOriginal) => {
@@ -74,12 +85,14 @@ vi.mock('@/lib/gifsy-settings', async (importOriginal) => {
 
 import SettingsPage from '../page';
 import { fetchReportRecipients, saveReportRecipients } from '@/lib/report-recipients';
+import { getAssumedContext } from '@/lib/auth-actions';
 
 describe('Report Recipients settings card', () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
     mockRole = 'GIFSY_ADMIN';
+    mockAssumedBrand = null;
     (fetchReportRecipients as ReturnType<typeof vi.fn>).mockResolvedValue({
       creditsPayouts: ['finance@acme.test', 'ops@acme.test'],
       kycActionables: ['kyc@acme.test'],
@@ -127,5 +140,87 @@ describe('Report Recipients settings card', () => {
     // GIFSY-only endpoint — a tenant admin should not even request it.
     expect(fetchReportRecipients).not.toHaveBeenCalled();
     expect(saveReportRecipients).not.toHaveBeenCalled();
+  });
+
+  it('R4: a GIFSY_ADMIN assumed into a tenant sees the PLACEHOLDER (not the editable card, not nothing)', async () => {
+    mockRole = 'GIFSY_ADMIN';
+    mockAssumedBrand = 'Deoleo'; // operator is assumed into a tenant
+    render(<SettingsPage />);
+    // The holiday card renders for everyone — use it to let the page settle.
+    await screen.findByTestId('holiday-calendar-card');
+    // While assumed: the placeholder is shown, the editable card + inputs are NOT.
+    await waitFor(() =>
+      expect(screen.getByTestId('report-recipients-placeholder')).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/exit the tenant to manage them/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('report-recipients-card')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('recipient-input-creditsPayouts')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('recipients-save')).not.toBeInTheDocument();
+    // Security & Platform Config shows its placeholder too (platform-global, hidden while assumed).
+    expect(screen.getByTestId('security-config-placeholder')).toBeInTheDocument();
+    expect(screen.getByText(/exit the tenant to view\/manage/i)).toBeInTheDocument();
+  });
+
+  it('R5: in platform (un-assumed) mode the card is the full editable card (no placeholder)', async () => {
+    mockRole = 'GIFSY_ADMIN';
+    mockAssumedBrand = null; // platform mode
+    render(<SettingsPage />);
+    expect(await screen.findByTestId('report-recipients-card')).toBeInTheDocument();
+    // Editable: the email inputs render bound to the fetched values, plus the Save button.
+    await waitFor(() =>
+      expect(screen.getAllByTestId('recipient-input-creditsPayouts')).toHaveLength(2),
+    );
+    expect(screen.getByTestId('recipients-save')).toBeInTheDocument();
+    // No placeholder in platform mode.
+    expect(screen.queryByTestId('report-recipients-placeholder')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('security-config-placeholder')).not.toBeInTheDocument();
+  });
+
+  it('R6: a cross-tab Exit (storage/focus) un-hides the editable card without a remount', async () => {
+    mockRole = 'GIFSY_ADMIN';
+    mockAssumedBrand = 'Deoleo'; // start assumed → placeholder
+    render(<SettingsPage />);
+    await screen.findByTestId('holiday-calendar-card');
+    await waitFor(() =>
+      expect(screen.getByTestId('report-recipients-placeholder')).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId('report-recipients-card')).not.toBeInTheDocument();
+
+    // Operator Exits to platform in ANOTHER tab: the localStorage hint clears and the
+    // server reconcile now reports platform level. Simulate the cross-tab signals WITHOUT
+    // re-rendering/remounting the settings page.
+    mockAssumedBrand = null;
+    fireEvent(window, new Event('storage')); // sync hint re-read
+    fireEvent(window, new Event('focus'));    // full server reconcile
+
+    // The SAME mounted page swaps the placeholder for the full editable card.
+    await waitFor(() =>
+      expect(screen.getByTestId('report-recipients-card')).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId('report-recipients-placeholder')).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getAllByTestId('recipient-input-creditsPayouts')).toHaveLength(2),
+    );
+    expect(screen.getByTestId('recipients-save')).toBeInTheDocument();
+    // Security placeholder is gone too, back to platform level.
+    expect(screen.queryByTestId('security-config-placeholder')).not.toBeInTheDocument();
+  });
+
+  it('R7: a stale hint (server says un-assumed) is scrubbed on reconcile, so it can\'t re-flip the card', async () => {
+    mockRole = 'GIFSY_ADMIN';
+    // Stale localStorage hint present AND the optimistic read sees it (assumed → placeholder first)…
+    localStorage.setItem('assumedBrand', 'Deoleo');
+    mockAssumedBrand = 'Deoleo';
+    // …but SERVER TRUTH says un-assumed (assumed token expired / a failed exit left the hint).
+    (getAssumedContext as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ brandName: null });
+    render(<SettingsPage />);
+    // Reconcile clears the stale hint itself (no dependency on the OperatorBanner being mounted),
+    // so a later cross-tab 'storage' event can't re-read it and flip back to the placeholder.
+    await waitFor(() => expect(localStorage.getItem('assumedBrand')).toBeNull());
+    // And the editable card is shown (platform level).
+    await waitFor(() =>
+      expect(screen.getByTestId('report-recipients-card')).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId('report-recipients-placeholder')).not.toBeInTheDocument();
   });
 });

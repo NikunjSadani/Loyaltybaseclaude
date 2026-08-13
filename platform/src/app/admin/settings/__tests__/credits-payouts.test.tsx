@@ -16,8 +16,14 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 let mockRole: 'GIFSY_ADMIN' | 'CLIENT_ADMIN' = 'GIFSY_ADMIN';
 vi.mock('@/lib/auth-client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/auth-client')>();
-  return { ...actual, getStoredUser: () => ({ id: 'u1', name: 'Admin', role: mockRole, phone: '900' }) };
+  return { ...actual, getStoredUser: () => ({ id: 'u1', name: 'Admin', role: mockRole, phone: '900' }), getAssumedBrand: () => null };
 });
+
+// Un-assumed by default so the new platform-mode effect resolves to platform mode and never
+// loads the real 'use server' auth-actions module (next/headers) in jsdom.
+vi.mock('@/lib/auth-actions', () => ({
+  getAssumedContext: vi.fn(async () => ({ brandName: null })),
+}));
 vi.mock('@/lib/points-expiry', () => ({
   fetchPointsExpiry: vi.fn().mockResolvedValue({ pointsExpiryDays: 90 }),
   savePointsExpiry: vi.fn().mockResolvedValue(true),

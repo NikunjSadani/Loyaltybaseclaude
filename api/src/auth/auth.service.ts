@@ -18,10 +18,21 @@ import {
   OTP_MAX_ATTEMPTS,
   OTP_RESEND_WINDOW_HOURS,
   OTP_MAX_RESENDS_PER_WINDOW,
-  REFRESH_TTL_DAYS,
-  ASSUMED_SESSION_TTL_HOURS,
+  SESSION_TTL_DAYS,
+  ACCESS_TTL,
 } from './auth.constants';
 import * as crypto from 'crypto';
+
+/**
+ * Idempotent-rotation grace window (ms). A refresh token that has JUST been rotated
+ * (single-use claim already consumed by a concurrent tab) may still be replayed for a
+ * few seconds by a slow second tab. Within this window, if the rotated-from predecessor
+ * has a live (non-revoked) successor, that successor's STORED tokens are returned instead
+ * of a 401 — so parallel tabs converge on one token set instead of logging each other out.
+ * Outside the window, a replay is treated as genuine reuse (→ 401), preserving reuse
+ * detection. Kept short so the reuse-detection window stays tight.
+ */
+const ROTATION_GRACE_MS = 5_000;
 
 // ─── Business rule constants — single source of truth ─────────────────────────
 // TDS under 194C: ₹30,000 single / ₹1,00,000 annual
@@ -352,7 +363,7 @@ export class AuthService {
    */
   async generateTokens(
     user: User,
-    opts?: { clientIdOverride?: string; assumed?: boolean; expiresIn?: string },
+    opts?: { clientIdOverride?: string; assumed?: boolean; expiresIn?: string; rotatedFromId?: string },
   ): Promise<{ accessToken: string; refreshToken: string }> {
     const clientId = opts?.clientIdOverride ?? user.clientId;
     // Pre-generate the session id so it can be embedded in the JWT (`sid`) AND used as
@@ -369,18 +380,24 @@ export class AuthService {
       ...(opts?.assumed ? { assumed: true } : {}),
     };
 
-    // expiresIn accepts the `ms` StringValue | number; the config value widens to
-    // string|number, so cast (the original used an untyped config.get for this).
-    const expiresIn = (opts?.expiresIn ?? this.config.get('JWT_EXPIRES_IN') ?? '7d') as string;
+    // SHORT access-token lifetime — DECOUPLED from the 7-day session/refresh window so
+    // the rolling session actually rolls. Both the normal and the assumed (A2) paths sign
+    // a 60m (ACCESS_TTL) access token; env JWT_EXPIRES_IN may override in a deployment (set
+    // to 60m everywhere), and the CODE default is ACCESS_TTL — NEVER the old 7d, which made
+    // the feature inert. The session ROW below still lives SESSION_TTL_DAYS (7d), sliding on
+    // each refresh/guard hit. expiresIn accepts the `ms` StringValue | number; cast to string.
+    const expiresIn = (opts?.expiresIn ?? this.config.get('JWT_EXPIRES_IN') ?? ACCESS_TTL) as string;
     const accessToken  = this.jwt.sign(payload, {
       secret:    this.config.get('JWT_SECRET'),
       expiresIn: expiresIn as unknown as number,
     });
 
     const refreshToken = crypto.randomBytes(40).toString('hex');
-    const ttlMs        = opts?.assumed
-      ? ASSUMED_SESSION_TTL_HOURS * 60 * 60 * 1000       // assumed sessions: ASSUMED_SESSION_TTL_HOURS
-      : REFRESH_TTL_DAYS * 24 * 60 * 60 * 1000;          // normal: 30 days
+    // Sliding-session idle window — both the assumed (ASSUMED_SESSION_TTL_HOURS = 168h)
+    // and normal (SESSION_TTL_DAYS = 7d) branches are now exactly 7 days. Each refresh
+    // calls generateTokens, so expiresAt is re-minted to now+7d on every refresh (roll-on-
+    // refresh); the jwt.strategy guard slides it the same way on ordinary access.
+    const ttlMs        = SESSION_TTL_DAYS * 24 * 60 * 60 * 1000;   // 7 days (assumed == normal)
     const expiresAt    = new Date(Date.now() + ttlMs);
 
     await this.prisma.userSession.create({
@@ -391,6 +408,10 @@ export class AuthService {
         token:        accessToken,
         refreshToken,
         expiresAt,
+        // Idempotent-rotation chain: link this successor back to the refresh row it rotated
+        // from, so a slow second tab replaying the (just-revoked) predecessor within the
+        // grace window can be handed THIS successor's stored tokens instead of a 401.
+        ...(opts?.rotatedFromId ? { rotatedFromId: opts.rotatedFromId } : {}),
       },
     });
 
@@ -409,7 +430,8 @@ export class AuthService {
    *   - target must be a REAL, ACTIVE tenant (never `gifsy` itself);
    *   - `sub` stays the real operator → audit logs attribute actions to them;
    *   - every assume is audit-logged (action LOGIN + metadata.event=ASSUME_TENANT);
-   *   - the token is short-lived (ASSUMED_SESSION_TTL_HOURS) and flagged `assumed:true` (FE banner).
+   *   - the access token is short-lived (ACCESS_TTL, 60m) and flagged `assumed:true` (FE banner);
+   *     the assumed SESSION row still lives the 7-day sliding window (ASSUMED_SESSION_TTL_HOURS==7d).
    */
   async assumeTenant(
     operator: JwtPayload,
@@ -453,7 +475,9 @@ export class AuthService {
     const tokens = await this.generateTokens(opUser, {
       clientIdOverride: targetClientId,
       assumed: true,
-      expiresIn: `${ASSUMED_SESSION_TTL_HOURS}h`,
+      // Access token is the SHORT ACCESS_TTL (60m) — same as the normal path. The session
+      // row is 7d (SESSION_TTL_DAYS) inside generateTokens, so the assumed session slides.
+      expiresIn: ACCESS_TTL,
     });
 
     this.logger.log(
@@ -466,51 +490,150 @@ export class AuthService {
   // ── Refresh token ────────────────────────────────────────────────────────────
 
   async refreshToken(refreshToken: string): Promise<{ accessToken: string; refreshToken: string }> {
-    // Read the session (with its user) so the A2 assumed-tenant scope can be
-    // carried onto the new token. This read alone is NOT the gate — the atomic
-    // claim below is.
+    // Read the session (with its user) IGNORING revokedAt, so a JUST-revoked
+    // predecessor is visible for the idempotent-rotation grace path below (a slow
+    // second tab replaying a token its sibling already rotated). This read alone is
+    // NOT the gate — the atomic claim on the live path is.
     const session = await this.prisma.userSession.findFirst({
-      where:   { refreshToken, revokedAt: null },
+      where:   { refreshToken },
       include: { user: true },
     });
 
-    if (!session || new Date() > session.expiresAt) {
+    // Unknown token → 401 (genuine bad/forged token). Nothing to rotate or grace.
+    if (!session) {
       throw new UnauthorizedException('Session expired — please log in again.');
     }
 
-    // ATOMIC single-use claim (token-reuse / session-fixation fix): revoke the
-    // row by its refreshToken in one statement and only proceed if THIS call
-    // won the revoke. Two concurrent refreshes with the same token both pass the
-    // findFirst above, but the DB serialises this updateMany — exactly one sees
-    // count===1; the loser sees count===0 and is rejected, so a single refresh
-    // token can mint at most one new token set.
-    const claim = await this.prisma.userSession.updateMany({
-      where: { refreshToken, revokedAt: null },
-      data:  { revokedAt: new Date() },
+    // ── logout-all authority (1b), predecessor-predates-sweep guard ──────────────
+    // If a "log out everywhere" was stamped on the user AFTER this session was created,
+    // the predecessor predates the sweep and is dead — refuse regardless of the grace/
+    // reuse machinery below, so a session that existed at logout time can never be rolled
+    // forward. (The DURING-refresh race is closed by the re-read after the mint.)
+    if (
+      session.user.sessionsInvalidBefore &&
+      session.createdAt < session.user.sessionsInvalidBefore
+    ) {
+      throw new UnauthorizedException('Session expired — please log in again.');
+    }
+
+    // ── Live path: the token is unrevoked and unexpired ──────────────────────────
+    if (session.revokedAt === null && new Date() <= session.expiresAt) {
+      // ATOMIC single-use claim (token-reuse / session-fixation fix): revoke the
+      // row by its refreshToken in one statement and only proceed if THIS call won
+      // the revoke. Two concurrent refreshes both pass the read above, but the DB
+      // serialises this updateMany — exactly one sees count===1; the loser sees
+      // count===0 and falls through to the idempotent-rotation grace below.
+      const claim = await this.prisma.userSession.updateMany({
+        where: { refreshToken, revokedAt: null },
+        data:  { revokedAt: new Date() },
+      });
+
+      if (claim.count === 1) {
+        // Preserve the operator-context (A2): an assumed session's row carries the
+        // TENANT clientId while its user's home clientId is `gifsy`. Refresh must keep
+        // the assumed tenant scope (otherwise the operator is silently reverted to the
+        // platform context mid-flow). Only preserve while the operator is still a
+        // GIFSY_ADMIN — a demoted operator falls back to their home scope.
+        const isAssumed =
+          session.clientId !== session.user.clientId && session.user.role === 'GIFSY_ADMIN';
+
+        // Re-apply the deactivated-outlet gate on every refresh. The session row was
+        // already revoked by the atomic claim above, so a deactivated partner who
+        // tries to refresh is denied AND loses the session (must re-login, which is
+        // also blocked). Scoped to the user's HOME tenant — an assumed operator is a
+        // GIFSY_ADMIN with no ChannelPartner, so this is a no-op for that flow.
+        await this.assertPartnerNotDeactivated(session.user.id, session.user.clientId);
+
+        // Mint the successor, chaining rotatedFromId back to THIS predecessor so a
+        // slow sibling replay can be handed the successor's stored tokens (grace).
+        // The assumed access token uses the SHORT ACCESS_TTL (60m) — same as normal;
+        // the successor SESSION row is 7d (SESSION_TTL_DAYS) inside generateTokens.
+        const tokens = await this.generateTokens(
+          session.user,
+          isAssumed
+            ? { clientIdOverride: session.clientId, assumed: true, expiresIn: ACCESS_TTL, rotatedFromId: session.id }
+            : { rotatedFromId: session.id },
+        );
+
+        // ── logout-all authority (1b), DURING-refresh race — clock-skew robust ─────
+        // A concurrent "log out everywhere" can land AFTER our predecessor read but
+        // AROUND the successor create — the classic "successor survives the sweep" hole.
+        // RE-READ the stamp now and compare it to the PREDECESSOR's createdAt. BOTH are
+        // DB-written timestamps and the predecessor was created well before any logout, so
+        // this is robust to cross-instance app-clock skew (unlike comparing the stamp to
+        // THIS instance's wall clock). If a logout-all whose stamp post-dates the refreshed
+        // lineage's start is now visible, the successor we just minted is illegitimate →
+        // revoke it and 401, so nothing live survives "log out everywhere". (Stampers write
+        // sessionsInvalidBefore BEFORE revoking, so a sweep that missed our successor is
+        // always preceded by a committed stamp this re-read observes.)
+        const fresh = await this.prisma.user.findUnique({
+          where:  { id: session.user.id },
+          select: { sessionsInvalidBefore: true },
+        });
+        if (fresh?.sessionsInvalidBefore && session.createdAt < fresh.sessionsInvalidBefore) {
+          await this.prisma.userSession.updateMany({
+            where: { refreshToken: tokens.refreshToken, revokedAt: null },
+            data:  { revokedAt: new Date() },
+          });
+          throw new UnauthorizedException('Session expired — please log in again.');
+        }
+
+        return tokens;
+      }
+      // claim LOST (count===0): a concurrent winner revoked this row ~now — fall
+      // through to the grace path (predecessorRevokedAt resolves to now below).
+    }
+
+    // ── Revoked/expired predecessor: converge on a LIVE successor if one exists ───
+    // The token is revoked (an already-revoked replay, or a concurrent winner just revoked
+    // it out from under our claim) or naturally expired. FIRST look for a LIVE successor
+    // (the row this predecessor rotated INTO, still non-revoked) — REGARDLESS of the grace
+    // window. If one exists, this is a benign concurrent/rotated refresh (multi-tab, or a
+    // page-nav proxy refresh colliding with an in-flight XHR/prefetch refresh — which under
+    // the 60m access token can be MORE than the grace window apart), so hand back the
+    // successor's STORED tokens and converge instead of nuking a legit active user. A
+    // successor revoked by a logout-all is excluded by revokedAt:null, so a swept lineage
+    // is never resurrected here.
+    const successor = await this.prisma.userSession.findFirst({
+      where: { rotatedFromId: session.id, revokedAt: null },
     });
-    if (claim.count === 0) {
-      throw new UnauthorizedException('Session expired — please log in again.');
+    if (successor && successor.refreshToken) {
+      return { accessToken: successor.token, refreshToken: successor.refreshToken };
     }
 
-    // Preserve the operator-context (A2): an assumed session's row carries the
-    // TENANT clientId while its user's home clientId is `gifsy`. Refresh must keep
-    // the assumed tenant scope (otherwise the operator is silently reverted to the
-    // platform context mid-flow). Only preserve while the operator is still a
-    // GIFSY_ADMIN — a demoted operator falls back to their home scope.
-    const isAssumed =
-      session.clientId !== session.user.clientId && session.user.role === 'GIFSY_ADMIN';
+    // No live successor. Distinguish a transient in-grace loser from genuine reuse.
+    const predecessorRevokedAt = session.revokedAt ?? new Date(); // lost-claim → ~now
+    const withinGrace = Date.now() - predecessorRevokedAt.getTime() <= ROTATION_GRACE_MS;
 
-    // Re-apply the deactivated-outlet gate on every refresh. The session row was
-    // already revoked by the atomic claim above, so a deactivated partner who
-    // tries to refresh is denied AND loses the session (must re-login, which is
-    // also blocked). Scoped to the user's HOME tenant — an assumed operator is a
-    // GIFSY_ADMIN with no ChannelPartner, so this is a no-op for that flow.
-    await this.assertPartnerNotDeactivated(session.user.id, session.user.clientId);
+    // ── Reuse detection (1c) ─────────────────────────────────────────────────────
+    // Nuke the lineage ONLY when the predecessor was ALREADY REVOKED (previously rotated),
+    // is being replayed AFTER the grace window, AND has NO live successor to hand back — a
+    // single-use rotated token resurfacing with its successor gone is a strong theft signal.
+    // STAMP sessionsInvalidBefore FIRST, then revoke every live session (stamp-before-revoke,
+    // same authority logout-all uses), so any in-flight refresh's post-mint re-read observes
+    // the stamp and drops its successor. A merely EXPIRED-but-never-revoked session
+    // (revokedAt === null) is NOT reuse, and an in-grace loser is transient — both just 401.
+    // Best-effort: a failed lineage-kill must never mask the 401 below.
+    if (!withinGrace && session.revokedAt !== null) {
+      const now = new Date();
+      try {
+        await this.prisma.user.update({
+          where: { id: session.user.id },
+          data:  { sessionsInvalidBefore: now },
+        });
+        await this.prisma.userSession.updateMany({
+          where: { userId: session.user.id, revokedAt: null },
+          data:  { revokedAt: now },
+        });
+      } catch {
+        /* best-effort lineage kill — never mask the 401 below */
+      }
+      this.logger.warn(
+        `Refresh-token reuse detected for user ${session.user.id} — revoked all sessions`,
+      );
+    }
 
-    return this.generateTokens(
-      session.user,
-      isAssumed ? { clientIdOverride: session.clientId, assumed: true, expiresIn: `${ASSUMED_SESSION_TTL_HOURS}h` } : undefined,
-    );
+    throw new UnauthorizedException('Session expired — please log in again.');
   }
 
   // ── Self-service "log out everywhere" (#101 / Feature 10-i) ──────────────────
@@ -529,9 +652,22 @@ export class AuthService {
    * refresh — not immediately. UI copy must reflect this.
    */
   async logoutAllSessions(user: JwtPayload): Promise<{ revoked: number }> {
+    const now = new Date();
+
+    // AUTHORITATIVE (1b): STAMP BEFORE REVOKE. A concurrent refresh's mint+re-read must
+    // never slot inside a revoke→stamp gap and survive. Stamping sessionsInvalidBefore
+    // FIRST guarantees that any sweep which misses a just-minted successor is necessarily
+    // PRECEDED by a committed stamp that the refresh's post-mint re-read observes (→ it
+    // revokes its own successor). refreshToken compares that stamp to the predecessor's
+    // createdAt (both DB timestamps) so the check is robust to cross-instance clock skew.
+    await this.prisma.user.update({
+      where: { id: user.sub },
+      data:  { sessionsInvalidBefore: now },
+    });
+
     const result = await this.prisma.userSession.updateMany({
       where: { userId: user.sub, revokedAt: null },
-      data:  { revokedAt: new Date() },
+      data:  { revokedAt: now },
     });
 
     await this.prisma.auditLog.create({

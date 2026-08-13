@@ -28,6 +28,8 @@ const mockTx = {
   // so its reads (parent PAN via findUnique, sibling PAN via findFirst, clash search via
   // findMany) + the advisory lock ($executeRaw) resolve against the tx client, not prisma.
   channelPartner: { findMany: jest.fn(), findUnique: jest.fn() },
+  // user.updateMany added for the stranded-owner sessionsInvalidBefore stamp (auth 1b).
+  user: { updateMany: jest.fn() },
   userSession: { updateMany: jest.fn() },
   auditLog: { create: jest.fn() },
   $executeRaw: jest.fn(),
@@ -1113,6 +1115,7 @@ describe('AdminOutletsService', () => {
       mockTx.outlet.findMany.mockResolvedValue([{ partnerId: 'cp1' }]);       // deactivated outlet belongs to cp1
       mockTx.outlet.groupBy.mockResolvedValue([]);                            // cp1 has NO remaining active outlet
       mockTx.channelPartner.findMany.mockResolvedValue([{ userId: 'u1' }]);
+      mockTx.user.updateMany.mockResolvedValue({ count: 1 });
       mockTx.userSession.updateMany.mockResolvedValue({ count: 1 });
 
       await service.deactivate(admin, { outletCodes: ['OUT-1'] });
@@ -1122,6 +1125,15 @@ describe('AdminOutletsService', () => {
       );
       expect(mockTx.userSession.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: { userId: { in: ['u1'] }, revokedAt: null } }),
+      );
+      // AUTHORITATIVE (1b): stranded owners are STAMPED (before the revoke) so a concurrent
+      // refresh can't mint a surviving successor of the deactivated outlet's owner.
+      expect(mockTx.user.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: { in: ['u1'] } }, data: { sessionsInvalidBefore: expect.any(Date) } }),
+      );
+      // STAMP-BEFORE-REVOKE (Fix 2).
+      expect(mockTx.user.updateMany.mock.invocationCallOrder[0]).toBeLessThan(
+        mockTx.userSession.updateMany.mock.invocationCallOrder[0],
       );
     });
 

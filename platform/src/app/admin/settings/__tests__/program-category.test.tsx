@@ -24,8 +24,15 @@ vi.mock('@/lib/auth-client', async (importOriginal) => {
   return {
     ...actual,
     getStoredUser: () => ({ id: 'u1', name: 'Gifsy Admin', role: 'GIFSY_ADMIN', phone: '900' }),
+    getAssumedBrand: () => null,
   };
 });
+
+// Un-assumed by default so the new platform-mode effect resolves to platform mode and never
+// loads the real 'use server' auth-actions module (next/headers) in jsdom.
+vi.mock('@/lib/auth-actions', () => ({
+  getAssumedContext: vi.fn(async () => ({ brandName: null })),
+}));
 
 // Spy on saveGifsySettings while keeping getGifsySettings/useGifsySettings real (defaults seed
 // the card). The save is stubbed to succeed so the optimistic update sticks.

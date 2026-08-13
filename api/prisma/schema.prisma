@@ -498,6 +498,11 @@ model User {
   fcmToken          String?
   lastLoginAt       DateTime?
   loginCount        Int        @default(0)
+  // "Log out everywhere" high-water mark. logoutAllSessions / forceLogoutAll stamp this to
+  // `now` alongside revoking session rows; refreshToken refuses any predecessor session whose
+  // createdAt precedes it AND revokes any successor minted during a concurrent logout-all, so a
+  // sweep can never be out-raced by an in-flight refresh. Additive + nullable, no backfill.
+  sessionsInvalidBefore DateTime?
   createdAt         DateTime   @default(now())
   updatedAt         DateTime   @updatedAt
   deletedAt         DateTime?
@@ -555,9 +560,19 @@ model UserSession {
   deviceName   String?
   ipAddress    String?
   userAgent    String?
-  expiresAt    DateTime // sliding idle marker: bumped to now+365d on every valid request
+  // Sliding 7-day idle window (SESSION_TTL_DAYS). Re-minted to now+7d on every valid
+  // access (jwt.strategy guard, throttled to ~once/day) AND on every refresh
+  // (auth.service.generateTokens), so an actively-used session never expires while an
+  // idle one lapses after 7 days of inactivity.
+  expiresAt    DateTime
   lastSeenAt   DateTime? // last activity timestamp (display / audit)
   revokedAt    DateTime?
+  // Idempotent-rotation chain: on refresh, the newly-minted successor row stores the id
+  // of the predecessor session it rotated from. Lets a slow second tab that replays a
+  // just-revoked refresh token (within a grace window) be handed the live successor's
+  // stored tokens instead of a 401 — so parallel tabs converge instead of logging each
+  // other out. Nullable (login-minted rows have no predecessor); additive, no backfill.
+  rotatedFromId String?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
@@ -567,6 +582,7 @@ model UserSession {
   @@index([clientId])
   @@index([token])
   @@index([expiresAt])
+  @@index([rotatedFromId])
   @@map("user_sessions")
 }
 

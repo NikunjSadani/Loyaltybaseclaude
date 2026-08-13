@@ -19,13 +19,23 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 // Mutable role for the mocked session — set per-test before rendering.
 let mockRole: 'GIFSY_ADMIN' | 'CLIENT_ADMIN' = 'GIFSY_ADMIN';
+// Mutable assumed-tenant brand — null = platform (un-assumed) mode (the default). A brand name
+// simulates a GIFSY operator assumed into a tenant, which drops edit affordances on this card.
+let mockAssumedBrand: string | null = null;
 vi.mock('@/lib/auth-client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/auth-client')>();
   return {
     ...actual,
     getStoredUser: () => ({ id: 'u1', name: 'Admin', role: mockRole, phone: '900' }),
+    getAssumedBrand: () => mockAssumedBrand,
   };
 });
+
+// Assumed-tenant signal (server action). Mocked wholesale so the real 'use server' module
+// (next/headers) never loads in jsdom; default un-assumed.
+vi.mock('@/lib/auth-actions', () => ({
+  getAssumedContext: vi.fn(async () => ({ brandName: mockAssumedBrand })),
+}));
 
 // Control the holiday calendar GET/PUT directly.
 vi.mock('@/lib/holidays', async (importOriginal) => {
@@ -70,6 +80,7 @@ describe('National Holiday Calendar settings card', () => {
     localStorage.clear();
     vi.clearAllMocks();
     mockRole = 'GIFSY_ADMIN';
+    mockAssumedBrand = null;
     (fetchHolidays as ReturnType<typeof vi.fn>).mockResolvedValue([
       { date: '2026-01-26', label: 'Republic Day' },
       { date: '2026-08-15', label: 'Independence Day' },
@@ -115,5 +126,33 @@ describe('National Holiday Calendar settings card', () => {
     expect(screen.queryByTestId('holiday-add')).not.toBeInTheDocument();
     expect(screen.queryByTestId('holiday-date-input')).not.toBeInTheDocument();
     expect(saveHolidays).not.toHaveBeenCalled();
+  });
+
+  it('H4: a GIFSY_ADMIN assumed into a tenant sees the calendar READ-ONLY (values shown, no edit affordances)', async () => {
+    mockRole = 'GIFSY_ADMIN';
+    mockAssumedBrand = 'Deoleo'; // assumed into a tenant → platform-global edits hidden
+    render(<SettingsPage />);
+    // Card stays visible and the values render (tenant admins legitimately read it)…
+    expect(await screen.findByText('Republic Day')).toBeInTheDocument();
+    expect(screen.getByText('Independence Day')).toBeInTheDocument();
+    // …but every edit affordance is gone while assumed.
+    await waitFor(() =>
+      expect(screen.queryByTestId('holiday-save')).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId('holiday-add')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('holiday-date-input')).not.toBeInTheDocument();
+    // The assumed-aware hint guides the operator to exit first.
+    expect(screen.getByText('Exit tenant to edit the platform holiday calendar.')).toBeInTheDocument();
+  });
+
+  it('H5: un-assumed GIFSY_ADMIN keeps edit + save affordances (platform mode)', async () => {
+    mockRole = 'GIFSY_ADMIN';
+    mockAssumedBrand = null;
+    render(<SettingsPage />);
+    expect(await screen.findByTestId('holiday-save')).toBeInTheDocument();
+    expect(screen.getByTestId('holiday-add')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getAllByTestId('holiday-date-input')).toHaveLength(2),
+    );
   });
 });

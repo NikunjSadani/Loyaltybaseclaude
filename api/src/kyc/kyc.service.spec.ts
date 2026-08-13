@@ -2956,7 +2956,7 @@ describe('KycService', () => {
       expect(mockNotifications.enqueue).toHaveBeenCalled();
     });
 
-    it('login-phone change on approval: syncs User.phone to the re-KYC number AND revokes the partner sessions', async () => {
+    it('login-phone change on approval: syncs User.phone, STAMPS sessionsInvalidBefore (before) AND revokes the partner sessions', async () => {
       seedApproveHappyPath();
       // Re-KYC changed the partner's contact phone; the owner's login phone is still the old one.
       mockTx.channelPartner.findUnique.mockResolvedValueOnce({ phone: '9000088888' });
@@ -2971,10 +2971,24 @@ describe('KycService', () => {
         where: { id: 'owner-9' },
         data: { status: 'ACTIVE', phone: '9000088888' },
       });
+      // AUTHORITATIVE (1b): the owner is STAMPED so a concurrent refresh can't mint a
+      // surviving successor of the OLD identity (auth.service.refreshToken's post-mint
+      // re-read observes the stamp and drops such a successor).
+      expect(mockTx.user.update).toHaveBeenCalledWith({
+        where: { id: 'owner-9' },
+        data: { sessionsInvalidBefore: expect.any(Date) },
+      });
       // Old sessions revoked → forced re-login on the new number.
       const revokeArg = mockTx.userSession.updateMany.mock.calls[0][0];
       expect(revokeArg.where).toMatchObject({ userId: 'owner-9', revokedAt: null });
       expect(revokeArg.data.revokedAt).toBeInstanceOf(Date);
+      // STAMP-BEFORE-REVOKE (Fix 2): the stamp write precedes the session revoke.
+      const stampCallIdx = mockTx.user.update.mock.calls.findIndex(
+        (c: any) => c[0]?.data?.sessionsInvalidBefore !== undefined,
+      );
+      const stampOrder = mockTx.user.update.mock.invocationCallOrder[stampCallIdx];
+      const revokeOrder = mockTx.userSession.updateMany.mock.invocationCallOrder[0];
+      expect(stampOrder).toBeLessThan(revokeOrder);
     });
 
     it('login-phone change skipped (no revoke) when the new number is already used by another account', async () => {

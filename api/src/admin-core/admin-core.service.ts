@@ -60,6 +60,7 @@ import {
   OTP_MAX_RESENDS_PER_WINDOW,
   REFRESH_TTL_DAYS,
   ASSUMED_SESSION_TTL_HOURS,
+  ACCESS_TTL,
 } from '../auth/auth.constants';
 
 /**
@@ -135,9 +136,19 @@ export class AdminCoreService {
 
   /** Revoke all non-revoked sessions for a single user. Returns the count. */
   private async revokeAllSessionsForUser(userId: string): Promise<number> {
+    const now = new Date();
+    // AUTHORITATIVE (1b): STAMP BEFORE REVOKE (see auth.service.logoutAllSessions). This
+    // shared helper backs admin per-user "log out of all devices" AND the phone-change
+    // force-logout in updateUser. Stamping sessionsInvalidBefore FIRST guarantees a sweep
+    // that misses a just-minted successor is preceded by a committed stamp that the
+    // refresh's post-mint re-read observes (predecessor.createdAt < stamp → drops it).
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { sessionsInvalidBefore: now },
+    });
     const result = await this.prisma.userSession.updateMany({
       where: { userId, revokedAt: null },
-      data: { revokedAt: new Date() },
+      data: { revokedAt: now },
     });
     return result.count;
   }
@@ -793,7 +804,7 @@ export class AdminCoreService {
     // displayed value diverge from the enforced one — these fields are not editable
     // via the settings API (managed via deployment/env).
     Object.assign(settings, {
-      jwtAccessTtl: process.env.JWT_EXPIRES_IN ?? '7d',
+      jwtAccessTtl: process.env.JWT_EXPIRES_IN ?? ACCESS_TTL,
       refreshTtlDays: REFRESH_TTL_DAYS,
       assumedSessionTtlHours: ASSUMED_SESSION_TTL_HOURS,
       otpExpiryMinutes: OTP_EXPIRY_MINUTES,
@@ -1101,6 +1112,12 @@ export class AdminCoreService {
   // ════════════════════════════════════════════════════════════════════════
 
   async forceLogoutAll(user: JwtPayload) {
+    // AUTHORITATIVE (1b): STAMP BEFORE REVOKE — stamp EVERY user's sessionsInvalidBefore
+    // FIRST, then revoke every session, so a refresh minting a successor concurrently with
+    // this global kill switch is invalidated (its post-mint re-read sees the committed
+    // stamp). Global — no where filter — matching the platform-wide scope of the revoke.
+    await this.prisma.user.updateMany({ data: { sessionsInvalidBefore: new Date() } });
+
     const count = await this.revokeAllSessions();
 
     await this.prisma.auditLog.create({

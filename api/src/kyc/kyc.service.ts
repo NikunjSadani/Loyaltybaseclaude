@@ -4061,6 +4061,17 @@ export class KycService {
         throw e;
       }
       if (loginPhoneChanged) {
+        // AUTHORITATIVE (1b): STAMP BEFORE REVOKE. The owner's login identity (phone) just
+        // changed, so every session of the OLD identity must die AND no concurrent refresh
+        // may mint a surviving successor of it. Stamping sessionsInvalidBefore FIRST (inside
+        // this tx) guarantees a refresh's post-mint re-read observes the stamp
+        // (predecessor.createdAt < stamp) and revokes its successor; the revoke then clears
+        // the live rows. Without the stamp, a refresh could mint a live successor of the
+        // pre-change identity that outlives the phone change.
+        await tx.user.update({
+          where: { id: ownerUserId },
+          data: { sessionsInvalidBefore: now },
+        });
         await tx.userSession.updateMany({
           where: { userId: ownerUserId, revokedAt: null },
           data: { revokedAt: now },

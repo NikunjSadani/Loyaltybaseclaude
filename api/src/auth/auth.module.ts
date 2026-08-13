@@ -7,6 +7,7 @@ import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { ActivityTrackingService } from '../activity/activity-tracking.service';
 import { PrismaModule } from '../prisma/prisma.module';
+import { ACCESS_TTL } from './auth.constants';
 
 @Module({
   imports: [
@@ -17,7 +18,10 @@ import { PrismaModule } from '../prisma/prisma.module';
       inject:     [ConfigService],
       useFactory: (config: ConfigService) => ({
         secret:      config.get('JWT_SECRET'),
-        signOptions: { expiresIn: config.get('JWT_EXPIRES_IN') ?? '7d' },
+        // Default access-token lifetime is the SHORT ACCESS_TTL (60m), not 7d — decoupled
+        // from the 7-day session window so the rolling session actually rolls. (AuthService
+        // .generateTokens signs with an explicit expiresIn, so this is the module-level default.)
+        signOptions: { expiresIn: config.get('JWT_EXPIRES_IN') ?? ACCESS_TTL },
       }),
     }),
   ],

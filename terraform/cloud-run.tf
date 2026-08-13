@@ -159,12 +159,11 @@ resource "google_cloud_run_v2_service" "api_prod" {
         value = "gifsy.in"
       }
       env {
+        # SHORT access-token lifetime (60m), decoupled from the 7d sliding session/refresh
+        # window so the rolling session actually rolls. (JWT_REFRESH_EXPIRES_IN removed —
+        # it was never read by api/src; the refresh window is SESSION_TTL_DAYS = 7d.)
         name  = "JWT_EXPIRES_IN"
-        value = "7d"
-      }
-      env {
-        name  = "JWT_REFRESH_EXPIRES_IN"
-        value = "30d"
+        value = "60m"
       }
       env {
         name  = "POINTS_TO_INR_RATE"
@@ -420,12 +419,11 @@ resource "google_cloud_run_v2_service" "api_staging" {
         value = "gifsy.in"
       }
       env {
+        # SHORT access-token lifetime (60m), decoupled from the 7d sliding session/refresh
+        # window so the rolling session actually rolls. (JWT_REFRESH_EXPIRES_IN removed —
+        # it was never read by api/src; the refresh window is SESSION_TTL_DAYS = 7d.)
         name  = "JWT_EXPIRES_IN"
-        value = "7d"
-      }
-      env {
-        name  = "JWT_REFRESH_EXPIRES_IN"
-        value = "30d"
+        value = "60m"
       }
       env {
         name  = "POINTS_TO_INR_RATE"

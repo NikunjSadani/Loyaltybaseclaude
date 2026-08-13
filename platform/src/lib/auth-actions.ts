@@ -18,18 +18,14 @@ import { cookies } from 'next/headers';
 import { jwtVerify } from 'jose';
 import { resolveClientConfig } from '@/lib/platform/tenant-resolution';
 import { refreshIfStale } from '@/lib/platform/tenant-routing-cache';
+import {
+  REFRESH_MAX_AGE,
+  accessCookieMaxAge,
+  refreshTokensViaBackend,
+  sessionCookieOptions as cookieOptions,
+} from '@/lib/auth-refresh';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
-const WEEK = 60 * 60 * 24 * 7;
-const MONTH = 60 * 60 * 24 * 30;
-
-const cookieOptions = (maxAge: number) => ({
-  httpOnly: true as const,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: 'lax' as const,
-  maxAge,
-  path: '/',
-});
 
 /**
  * GIFSY operator enters a tenant's context. Exchanges the current (home) token for
@@ -62,12 +58,19 @@ export async function assumeTenantAction(
     // Stash the home (operator) session ONCE — both token AND refresh token — so Exit
     // restores the exact home session and refresh works in either context.
     if (!cookieStore.get('home_token')) {
-      cookieStore.set('home_token', token, cookieOptions(WEEK));
+      // Stash home_token at the 7d REFRESH_MAX_AGE (NOT the access token's own ~60m exp): the
+      // access token is now short-lived, so a maxAge of accessCookieMaxAge(token) would drop the
+      // home_token cookie after ~60m of assumed work — then Exit's `if (home)` restore block would
+      // be skipped, stranding the operator on the assumed tenant token under platform chrome. The
+      // stashed VALUE may be an expired access token, but that's fine: on Exit it is restored
+      // alongside home_refresh_token, and the proxy's page-nav silent refresh exchanges the home
+      // refresh token for a fresh home session on the next navigation. Matches its sibling below.
+      cookieStore.set('home_token', token, cookieOptions(REFRESH_MAX_AGE));
       const homeRefresh = cookieStore.get('refresh_token')?.value;
-      if (homeRefresh) cookieStore.set('home_refresh_token', homeRefresh, cookieOptions(MONTH));
+      if (homeRefresh) cookieStore.set('home_refresh_token', homeRefresh, cookieOptions(REFRESH_MAX_AGE));
     }
-    cookieStore.set('token', newToken, cookieOptions(WEEK));
-    if (newRefresh) cookieStore.set('refresh_token', newRefresh, cookieOptions(MONTH));
+    cookieStore.set('token', newToken, cookieOptions(accessCookieMaxAge(newToken)));
+    if (newRefresh) cookieStore.set('refresh_token', newRefresh, cookieOptions(REFRESH_MAX_AGE));
     return { success: true, brandName };
   } catch {
     return { success: false, error: 'Network error switching brand context' };
@@ -79,9 +82,9 @@ export async function exitTenantAction(): Promise<{ success: boolean }> {
   const cookieStore = await cookies();
   const home = cookieStore.get('home_token')?.value;
   if (home) {
-    cookieStore.set('token', home, cookieOptions(WEEK));
+    cookieStore.set('token', home, cookieOptions(accessCookieMaxAge(home)));
     const homeRefresh = cookieStore.get('home_refresh_token')?.value;
-    if (homeRefresh) cookieStore.set('refresh_token', homeRefresh, cookieOptions(MONTH));
+    if (homeRefresh) cookieStore.set('refresh_token', homeRefresh, cookieOptions(REFRESH_MAX_AGE));
     cookieStore.delete('home_token');
     cookieStore.delete('home_refresh_token');
   }
@@ -93,33 +96,26 @@ export async function exitTenantAction(): Promise<{ success: boolean }> {
  * refresh-token cookie. Called by SessionExpiryGuard on a 401 BEFORE bouncing to login,
  * so a normal session-expiry doesn't interrupt the user. On success the new access +
  * refresh cookies are set and `{ ok: true }` is returned; the caller retries the request.
- * On any failure the refresh cookie is cleared so the next 401 goes straight to login.
+ * On failure the cookies are LEFT INTACT: with the backend returning the successor tokens on a
+ * contended/just-rotated refresh (multi-tab), deleting the refresh cookie here would strand the
+ * other tabs on a session that is actually still alive. A genuinely dead session simply keeps
+ * 401ing and SessionExpiryGuard bounces to login; logoutAction still clears cookies on real logout.
  */
 export async function refreshSession(): Promise<{ ok: boolean }> {
   const cookieStore = await cookies();
   const refreshToken = cookieStore.get('refresh_token')?.value;
   if (!refreshToken) return { ok: false };
 
-  try {
-    const res = await fetch(`${API_URL}/v1/auth/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refreshToken }),
-      signal: AbortSignal.timeout(12_000),
-    });
-    const body = await res.json().catch(() => null);
-    const newToken: string | undefined = body?.data?.accessToken;
-    const newRefresh: string | undefined = body?.data?.refreshToken;
-    if (!res.ok || !newToken) {
-      cookieStore.delete('refresh_token');
-      return { ok: false };
-    }
-    cookieStore.set('token', newToken, cookieOptions(WEEK));
-    if (newRefresh) cookieStore.set('refresh_token', newRefresh, cookieOptions(MONTH));
-    return { ok: true };
-  } catch {
+  const refreshed = await refreshTokensViaBackend(refreshToken);
+  if (!refreshed) {
+    // Do NOT delete the refresh cookie here: a contended/just-rotated refresh (multi-tab) can
+    // fail transiently while the session is still alive. Leave the cookies intact — a truly dead
+    // session keeps 401ing and SessionExpiryGuard bounces to login.
     return { ok: false };
   }
+  cookieStore.set('token', refreshed.accessToken, cookieOptions(accessCookieMaxAge(refreshed.accessToken)));
+  if (refreshed.refreshToken) cookieStore.set('refresh_token', refreshed.refreshToken, cookieOptions(REFRESH_MAX_AGE));
+  return { ok: true };
 }
 
 /**

@@ -28,14 +28,22 @@ vi.mock('@/lib/platform/tenant-routing-cache', () => ({
   ensureWarm: vi.fn(() => Promise.resolve()),
   refreshIfStale: vi.fn(() => Promise.resolve()),
 }));
+// Only the backend fetch is mocked; the pure cookie/maxAge helpers stay real so the
+// silent-refresh path exercises the actual cookie-option shape.
+vi.mock('@/lib/auth-refresh', async (importActual) => {
+  const actual = await importActual<typeof import('@/lib/auth-refresh')>();
+  return { ...actual, refreshTokensViaBackend: vi.fn() };
+});
 
 import { NextRequest } from 'next/server';
 import { proxy } from '@/proxy';
 import { resolveTenantSync } from '@/lib/platform/tenant-resolution';
 import { jwtVerify } from 'jose';
+import { refreshTokensViaBackend } from '@/lib/auth-refresh';
 
 const mockResolve = vi.mocked(resolveTenantSync);
 const mockJwt = vi.mocked(jwtVerify);
+const mockRefresh = vi.mocked(refreshTokensViaBackend);
 
 const VALID_TENANT = {
   slug: 'deoleo',
@@ -319,5 +327,109 @@ describe('proxy — DEMO_MODE auth bypass', () => {
     expect(fwd(res, 'x-user-id')).toBe('demo-admin-id');
     expect(fwd(res, 'x-user-role')).toBe('GIFSY_ADMIN');
     expect(mockJwt).not.toHaveBeenCalled();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Server-side silent refresh on FULL PAGE navigation.
+//
+// The access token is now short-lived (~60m). When it expires the browser DROPS the
+// `token` cookie (maxAge tracks the JWT exp), so a hard reload arrives with NO access
+// token but a still-valid 7d `refresh_token` cookie. The proxy must silently refresh
+// against the backend and CONTINUE the navigation instead of bouncing to login.
+describe('proxy — page-nav silent refresh (expired/absent access + valid refresh)', () => {
+  it('absent access + valid refresh → refreshes, forwards new Bearer, sets rotated cookies, NO redirect', async () => {
+    mockRefresh.mockResolvedValue({ accessToken: 'new.jwt.tok', refreshToken: 'r-new' });
+    // The refreshed access token verifies to a valid identity.
+    mockJwt.mockResolvedValue({ payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } } as never);
+
+    const res = await run(makeReq('/admin/users', { cookies: { refresh_token: 'r-valid' } }));
+
+    expect(mockRefresh).toHaveBeenCalledWith('r-valid');
+    expect(isNext(res)).toBe(true); // continued the navigation
+    expect(res.headers.get('x-middleware-rewrite')).toBeNull();
+    expect(fwd(res, 'authorization')).toBe('Bearer new.jwt.tok');
+    expect(fwd(res, 'x-user-role')).toBe('CLIENT_ADMIN');
+    // Rotated pair persisted on the outgoing response.
+    expect(res.cookies.get('token')?.value).toBe('new.jwt.tok');
+    expect(res.cookies.get('refresh_token')?.value).toBe('r-new');
+  });
+
+  it('EXPIRED access (verify throws) + valid refresh → refreshes and continues (no login bounce)', async () => {
+    // 1st jwtVerify (the expired cookie token) throws; 2nd (the refreshed token) succeeds.
+    mockJwt
+      .mockRejectedValueOnce(new Error('exp'))
+      .mockResolvedValueOnce({ payload: { role: 'GIFSY_ADMIN', sub: 'g-1' } } as never);
+    mockRefresh.mockResolvedValue({ accessToken: 'fresh.jwt.tok', refreshToken: 'r-rotated' });
+
+    const res = await run(
+      makeReq('/admin', { cookies: { token: 'expired.jwt.tok', refresh_token: 'r-valid' } }),
+    );
+
+    expect(mockRefresh).toHaveBeenCalledTimes(1);
+    expect(isNext(res)).toBe(true);
+    expect(res.status).not.toBe(307);
+    expect(fwd(res, 'authorization')).toBe('Bearer fresh.jwt.tok');
+    expect(res.cookies.get('token')?.value).toBe('fresh.jwt.tok');
+  });
+
+  it('expired access + DEAD refresh (backend refresh fails) → redirect to /auth/login?expired=1', async () => {
+    mockJwt.mockRejectedValue(new Error('exp'));
+    mockRefresh.mockResolvedValue(null); // refresh token truly dead
+
+    const res = await run(
+      makeReq('/admin', { cookies: { token: 'expired.jwt.tok', refresh_token: 'r-dead' } }),
+    );
+
+    expect(mockRefresh).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(307);
+    const loc = new URL(res.headers.get('location') as string);
+    expect(loc.pathname).toBe('/auth/login');
+    expect(loc.searchParams.get('expired')).toBe('1');
+    // Must NOT wipe the refresh cookie on a (possibly transient) failure.
+    expect(res.cookies.get('refresh_token')?.value).toBeUndefined();
+  });
+
+  it('a failed refresh does NOT expose new cookies (good cookie is never overwritten with empties)', async () => {
+    mockJwt.mockRejectedValue(new Error('exp'));
+    mockRefresh.mockResolvedValue(null);
+
+    const res = await run(
+      makeReq('/sales/outlets', { cookies: { token: 'expired', refresh_token: 'r-dead' } }),
+    );
+
+    expect(res.status).toBe(307);
+    expect(res.cookies.get('token')?.value).toBeUndefined();
+  });
+
+  it('page with NO token and NO refresh cookie → plain /auth/login (not ?expired=1, never logged in)', async () => {
+    const res = await run(makeReq('/admin'));
+    expect(mockRefresh).not.toHaveBeenCalled();
+    expect(res.status).toBe(307);
+    const loc = new URL(res.headers.get('location') as string);
+    expect(loc.pathname).toBe('/auth/login');
+    expect(loc.searchParams.get('expired')).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The XHR path is UNCHANGED: /api/* still 401s so SessionExpiryGuard drives the
+// client-side refresh+retry. The proxy must NOT server-refresh an /api/* request.
+describe('proxy — /api/* keeps 401ing (XHR SessionExpiryGuard path unchanged)', () => {
+  it('/api/* with EXPIRED token + valid refresh → 401 "Invalid token", NO server refresh', async () => {
+    mockJwt.mockRejectedValue(new Error('exp'));
+    const res = await run(
+      makeReq('/api/wallet/me', { cookies: { token: 'expired', refresh_token: 'r-valid' } }),
+    );
+    expect(res.status).toBe(401);
+    await expect(res.json()).resolves.toEqual({ success: false, error: 'Invalid token' });
+    expect(mockRefresh).not.toHaveBeenCalled();
+  });
+
+  it('/api/* with NO token but a refresh cookie → 401 "Unauthorized", NO server refresh', async () => {
+    const res = await run(makeReq('/api/wallet/me', { cookies: { refresh_token: 'r-valid' } }));
+    expect(res.status).toBe(401);
+    await expect(res.json()).resolves.toEqual({ success: false, error: 'Unauthorized' });
+    expect(mockRefresh).not.toHaveBeenCalled();
   });
 });

@@ -3,6 +3,9 @@
 import { cookies, headers } from 'next/headers';
 import { resolveTenant } from '@/lib/platform/tenant-resolution';
 import { resolveTrustedHost } from '@/lib/platform/edge-trust';
+// Reuse the single shared derivation instead of re-implementing it here (it drifted; the access
+// token is now ~60m, not 7d). accessCookieMaxAge tracks the JWT's real exp; REFRESH_MAX_AGE is 7d.
+import { accessCookieMaxAge, REFRESH_MAX_AGE } from '@/lib/auth-refresh';
 
 interface SendOTPResult {
   success: boolean;
@@ -137,13 +140,16 @@ export async function verifyOTP(
       sameSite: 'lax' as const,
       path: '/',
     };
-    cookieStore.set('token', token, { ...cookieBase, maxAge: 60 * 60 * 24 * 7 }); // 7 days
+    // Access cookie maxAge tracks the token's REAL exp (drift-proof) so it can never outlive
+    // the ~60m access JWT; falls back to the shared default if the token can't be decoded.
+    cookieStore.set('token', token, { ...cookieBase, maxAge: accessCookieMaxAge(token) });
     // AF-6 refresh: the (single-use, rotating) refresh token also lives ONLY in an
     // httpOnly cookie (NOT localStorage — that would re-open the XSS exposure AF-6 closed).
-    // SessionExpiryGuard uses it to silently refresh an expired access token before
-    // bouncing to login. TTL matches the backend refresh-token lifetime (30 days).
+    // SessionExpiryGuard (XHR) and the proxy (page-nav) use it to silently refresh an expired
+    // ~60m access token before bouncing to login. TTL tracks the backend's SLIDING 7-day session
+    // (REFRESH_MAX_AGE) — NOT 30d, which outlived the real session and masked expiry.
     if (refreshToken) {
-      cookieStore.set('refresh_token', refreshToken, { ...cookieBase, maxAge: 60 * 60 * 24 * 30 });
+      cookieStore.set('refresh_token', refreshToken, { ...cookieBase, maxAge: REFRESH_MAX_AGE });
     }
 
     return { success: true, role: user?.role, token, user };

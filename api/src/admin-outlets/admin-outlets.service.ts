@@ -1320,6 +1320,14 @@ export class AdminOutletsService {
           });
           const userIds = partners.map((p) => p.userId).filter((u): u is string => !!u);
           if (userIds.length > 0) {
+            // AUTHORITATIVE (1b): STAMP BEFORE REVOKE — stamp the stranded owners so a
+            // concurrent refresh can't mint a surviving successor of a now-deactivated
+            // outlet's owner, then revoke their live sessions. Consistent with logout-all /
+            // KYC-phone-change (see auth.service.refreshToken's post-mint re-read).
+            await tx.user.updateMany({
+              where: { id: { in: userIds } },
+              data: { sessionsInvalidBefore: now },
+            });
             await tx.userSession.updateMany({
               where: { userId: { in: userIds }, revokedAt: null },
               data: { revokedAt: now },

@@ -584,11 +584,17 @@ describe('AdminCoreService', () => {
   describe('forceLogoutAll', () => {
     it('revokes EVERY session globally (no userId/clientId filter) and audits with entityId ALL', async () => {
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 7 });
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 42 });
       const res = await service.forceLogoutAll(gifsy);
 
       expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({
         where: { revokedAt: null },
         data: { revokedAt: expect.any(Date) },
+      });
+      // AUTHORITATIVE (1b): stamps EVERY user's sessionsInvalidBefore so a concurrent refresh
+      // can't out-race the global kill switch (no where filter → all users).
+      expect(mockPrisma.user.updateMany).toHaveBeenCalledWith({
+        data: { sessionsInvalidBefore: expect.any(Date) },
       });
       expect(res).toEqual({ message: 'All users logged out', revoked: 7 });
 
@@ -706,14 +712,14 @@ describe('AdminCoreService', () => {
       const res = await service.getSettings(clientAdmin);
       // Values come from auth.constants (single source of truth) + env JWT TTL.
       expect(res.settings).toMatchObject({
-        refreshTtlDays: 30,
+        refreshTtlDays: 7, // sliding-session idle window (SESSION_TTL_DAYS)
         assumedSessionTtlHours: 168,
         otpExpiryMinutes: 10,
         maxOtpAttempts: 3,
         otpResendWindowHours: 1,
         otpMaxResendsPerWindow: 5,
       });
-      // jwtAccessTtl falls back to '7d' when JWT_EXPIRES_IN is unset.
+      // jwtAccessTtl falls back to ACCESS_TTL (60m) when JWT_EXPIRES_IN is unset.
       expect(typeof res.settings.jwtAccessTtl).toBe('string');
     });
 

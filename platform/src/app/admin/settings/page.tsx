@@ -20,6 +20,7 @@ import {
   type VisibilityCaptureMode,
 } from '@/lib/visibility-capture-mode'
 import { useAdminSession } from '@/lib/admin-session'
+import { useAssumedContext } from '@/lib/use-assumed-context'
 import { fetchHolidays, saveHolidays, type Holiday } from '@/lib/holidays'
 import { fetchReportRecipients, saveReportRecipients, type ReportRecipients } from '@/lib/report-recipients'
 
@@ -231,6 +232,25 @@ export default function SettingsPage() {
   // ── Role gate — visibility capture mode toggle is GIFSY_ADMIN-only ──
   const adminSession = useAdminSession()
   const isGifsyAdmin = adminSession.role === 'GIFSY_ADMIN'
+
+  // ── Assumed-tenant signal (shared hook — mirrors the OperatorBanner AF-6 self-heal) ──
+  // A GIFSY operator can "assume" a tenant to view its data. While assumed, the
+  // PLATFORM-GLOBAL settings cards (Security & Platform Config, Report Recipients,
+  // and the holiday-calendar EDIT affordances) operate on the platform, not the viewed
+  // tenant, so rendering them editable in tenant context would mislead the operator into
+  // thinking they edit that one brand. useAssumedContext() encapsulates the optimistic
+  // localStorage seed + server reconcile + the cross-tab 'storage'/'focus' self-heal, so
+  // an Exit-to-platform in another tab un-hides these cards here WITHOUT a manual reload
+  // (the prior mount-only effect left them stuck-hidden → the "can't find the recipients"
+  // pain). Shared with the OperatorBanner's behaviour so the two can never drift.
+  const { assumed } = useAssumedContext()
+
+  // Platform (un-assumed) mode: the platform-global cards render/edit ONLY here.
+  const platformMode = isGifsyAdmin && !assumed
+  // A GIFSY operator assumed into a tenant: the platform-global cards can't be edited
+  // here, but rather than vanish silently (a dead-end for an operator who came to edit
+  // recipients), we render a lightweight placeholder pointing them back to platform level.
+  const assumedGifsy = isGifsyAdmin && assumed
 
   // ── Read-only Security & Platform Config (#101; GIFSY_ADMIN only) ──
   // Sourced from GET /api/admin/settings (backend reads the enforced auth constants +
@@ -900,8 +920,8 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      {/* ── Security & Platform Config (read-only; GIFSY_ADMIN only) ── */}
-      {isGifsyAdmin && securityConfig && (
+      {/* ── Security & Platform Config (read-only; platform mode only — hidden while assumed) ── */}
+      {platformMode && securityConfig && (
         <Card data-testid="security-config-card">
           <CardHeader>
             <CardTitle className="text-base flex items-center gap-2">
@@ -936,6 +956,22 @@ export default function SettingsPage() {
             </div>
             <p className="text-xs text-gray-400 mt-3">
               Platform-global — managed via deployment/env, not editable here.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── Security & Platform Config — PLACEHOLDER while assumed (don't vanish silently) ── */}
+      {assumedGifsy && (
+        <Card data-testid="security-config-placeholder">
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Lock className="h-4 w-4 text-[var(--brand-primary)]" /> Security &amp; Platform Config
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-gray-500">
+              Platform security settings — exit the tenant to view/manage.
             </p>
           </CardContent>
         </Card>
@@ -1022,7 +1058,7 @@ export default function SettingsPage() {
                 Gifsy-operated setting — only a Gifsy Admin can change it.
               </CardDescription>
             </div>
-            {isGifsyAdmin && (
+            {platformMode && (
               <button
                 data-testid="holiday-save"
                 onClick={handleHolidaysSave}
@@ -1041,7 +1077,7 @@ export default function SettingsPage() {
         <CardContent>
           {!holidaysLoaded ? (
             <p className="text-sm text-gray-400">Loading holidays…</p>
-          ) : isGifsyAdmin ? (
+          ) : platformMode ? (
             <>
               {holidays.length === 0 ? (
                 <p className="text-xs text-gray-400 italic mb-3">No holidays yet — add one below.</p>
@@ -1104,15 +1140,17 @@ export default function SettingsPage() {
                 ))}
               </div>
               <p className="text-xs text-gray-400 mt-3">
-                The national holiday calendar is a Gifsy-operated setting — only a Gifsy Admin can change it.
+                {assumed
+                  ? 'Exit tenant to edit the platform holiday calendar.'
+                  : 'The national holiday calendar is a Gifsy-operated setting — only a Gifsy Admin can change it.'}
               </p>
             </>
           )}
         </CardContent>
       </Card>
 
-      {/* ── Report Recipients — GIFSY_ADMIN only (internal Gifsy ops distribution list) ── */}
-      {isGifsyAdmin && (
+      {/* ── Report Recipients — platform mode only (internal Gifsy ops distribution list; hidden while assumed) ── */}
+      {platformMode && (
       <Card data-testid="report-recipients-card">
         <CardHeader>
           <div className="flex items-center justify-between">
@@ -1222,6 +1260,22 @@ export default function SettingsPage() {
           )}
         </CardContent>
       </Card>
+      )}
+
+      {/* ── Report Recipients — PLACEHOLDER while assumed (don't vanish silently) ── */}
+      {assumedGifsy && (
+        <Card data-testid="report-recipients-placeholder">
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <CalendarDays className="h-4 w-4 text-[var(--brand-primary)]" /> Report Recipients
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-gray-500">
+              Report recipients are platform-wide — exit the tenant to manage them.
+            </p>
+          </CardContent>
+        </Card>
       )}
 
       {/* Visibility Duplicate Detection */}

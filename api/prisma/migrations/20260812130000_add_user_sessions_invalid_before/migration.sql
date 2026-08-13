@@ -1,0 +1,11 @@
+-- "Log out everywhere" authority high-water mark (auth FIX 1b).
+-- logoutAllSessions / forceLogoutAll stamp this column to `now` in the SAME operation that
+-- revokes the user's session rows; refreshToken then (a) refuses any predecessor session
+-- whose createdAt precedes this timestamp and (b) revokes any successor it minted during a
+-- concurrent logout-all — so a "log out everywhere" sweep can never be out-raced by an
+-- in-flight refresh that creates a surviving successor row.
+--
+-- Additive + nullable, NO backfill: existing rows keep sessionsInvalidBefore = NULL (no prior
+-- logout-all high-water mark → every current session remains valid). Table is "users"
+-- (Prisma @@map of model User).
+ALTER TABLE "users" ADD COLUMN "sessionsInvalidBefore" TIMESTAMP(3);
