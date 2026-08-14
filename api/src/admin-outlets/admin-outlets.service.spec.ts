@@ -25,9 +25,9 @@ const mockTx = {
   },
   salesUserAssignment: { updateMany: jest.fn(), create: jest.fn() },
   // The add-to-parent uniqueness check now runs INSIDE the row transaction (advisory-locked),
-  // so its reads (parent PAN via findUnique, sibling PAN via findFirst, clash search via
-  // findMany) + the advisory lock ($executeRaw) resolve against the tx client, not prisma.
-  channelPartner: { findMany: jest.fn(), findUnique: jest.fn() },
+  // so its reads (parent PAN via findFirst (clientId-scoped, FIX 5), sibling PAN via outlet.findFirst,
+  // clash search via findMany) + the advisory lock ($executeRaw) resolve against the tx client, not prisma.
+  channelPartner: { findMany: jest.fn(), findUnique: jest.fn(), findFirst: jest.fn() },
   // user.updateMany added for the stranded-owner sessionsInvalidBefore stamp (auth 1b).
   user: { updateMany: jest.fn() },
   userSession: { updateMany: jest.fn() },
@@ -82,6 +82,7 @@ describe('AdminOutletsService', () => {
     mockTx.outlet.groupBy.mockResolvedValue([]);
     mockTx.channelPartner.findMany.mockResolvedValue([]);
     mockTx.channelPartner.findUnique.mockResolvedValue(null);
+    mockTx.channelPartner.findFirst.mockResolvedValue(null); // resolveGroupPan parent read (FIX 5)
     // Default: UPI disabled for the tenant (matches the platform default). uniquenessPolicy
     // all-on so the owner-group grouping tests exercise every enforced field.
     mockTenantSettings.getEffectiveSettings.mockResolvedValue({
@@ -769,7 +770,7 @@ describe('AdminOutletsService', () => {
         },
       ]);
       // The uniqueness check now runs INSIDE the tx: resolveGroupPan reads the parent's PAN on tx.
-      mockTx.channelPartner.findUnique.mockResolvedValueOnce({ panNumber: 'GROUPPAN99Z' });
+      mockTx.channelPartner.findFirst.mockResolvedValueOnce({ panNumber: 'GROUPPAN99Z' });
 
       const res = await service.upsert(admin, {
         rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', parentId: 'CPP01' }],
@@ -821,7 +822,7 @@ describe('AdminOutletsService', () => {
           partner: { id: 'cp1', panNumber: 'GROUPPAN99Z', gstNumber: null, bankAccountNumber: null, upiId: null },
         },
       ]);
-      mockTx.channelPartner.findUnique.mockResolvedValueOnce({ panNumber: 'GROUPPAN99Z' }); // group PAN matches
+      mockTx.channelPartner.findFirst.mockResolvedValueOnce({ panNumber: 'GROUPPAN99Z' }); // group PAN matches
       const execOrder: string[] = [];
       mockTx.$executeRaw.mockImplementation(async () => {
         execOrder.push('lock');
@@ -889,7 +890,7 @@ describe('AdminOutletsService', () => {
           partner: { id: 'cp1', panNumber: 'GROUPPAN99Z', gstNumber: null, bankAccountNumber: null, upiId: null },
         },
       ]);
-      mockTx.channelPartner.findUnique.mockResolvedValueOnce({ panNumber: 'GROUPPAN99Z' }); // group PAN matches
+      mockTx.channelPartner.findFirst.mockResolvedValueOnce({ panNumber: 'GROUPPAN99Z' }); // group PAN matches
       mockTx.outlet.findUnique.mockResolvedValue({ id: 'o1' }); // existing → UPDATE
       mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
 

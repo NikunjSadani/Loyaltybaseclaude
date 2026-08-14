@@ -8,6 +8,7 @@ import {
   resolveActivePartnerId,
   resolveGroupParentByPhone,
   resolveGroupIdentity,
+  resolveGroupClassification,
   type UniquenessPolicy,
 } from './partner-group.helper';
 
@@ -54,7 +55,8 @@ function mockDb(opts: {
   return {
     channelPartner: {
       findMany: jest.fn().mockResolvedValue(opts.candidates ?? []),
-      findUnique: jest.fn().mockResolvedValue({ panNumber: opts.parentPan ?? null }),
+      // resolveGroupPan's parent read is now a clientId-scoped findFirst (defense-in-depth, FIX 5).
+      findFirst: jest.fn().mockResolvedValue({ panNumber: opts.parentPan ?? null }),
     },
     outlet: {
       findFirst: jest.fn().mockResolvedValue(
@@ -246,6 +248,68 @@ describe('partner-group.helper — resolveGroupIdentity', () => {
   it('returns null when nothing in the group is verified yet (no parent details, no approved sibling)', async () => {
     const db = idDb({ parent: { onboardedAt: null }, sibling: null });
     expect(await resolveGroupIdentity(db, 'deoleo', 'PARENT1')).toBeNull();
+  });
+});
+
+describe('partner-group.helper — resolveGroupClassification', () => {
+  // Both reads go through channelPartner.findFirst — route by the where shape (parent has where.id).
+  const clsDb = (opts: { parent?: unknown; sibling?: unknown }) => {
+    const findFirst = jest
+      .fn()
+      .mockImplementation(({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(where.id ? (opts.parent ?? null) : (opts.sibling ?? null)),
+      );
+    return { channelPartner: { findFirst } } as never;
+  };
+  const mock = (db: never) =>
+    (db as unknown as { channelPartner: { findFirst: jest.Mock } }).channelPartner.findFirst;
+
+  it('uses the APPROVED parent carrying BOTH classification fields (sibling never queried)', async () => {
+    const db = clsDb({
+      parent: { onboardedAt: new Date(), entityType: 'COMPANY', gstRegistrationType: 'REGULAR' },
+      sibling: { id: 'sib', entityType: 'INDIVIDUAL', gstRegistrationType: 'COMPOSITE' },
+    });
+    const r = await resolveGroupClassification(db, 'deoleo', 'PARENT1');
+    expect(r).toEqual({ entityType: 'COMPANY', gstRegistrationType: 'REGULAR', sourcePartnerId: 'PARENT1' });
+    expect(mock(db)).toHaveBeenCalledTimes(1); // sibling branch short-circuited
+  });
+
+  it('falls back to the most-recent APPROVED SIBLING when the parent is unapproved — gated on KYC APPROVED + both fields', async () => {
+    const db = clsDb({
+      parent: { onboardedAt: null, entityType: 'COMPANY', gstRegistrationType: 'REGULAR' },
+      sibling: { id: 'sib-1', entityType: 'FIRM', gstRegistrationType: 'COMPOSITE' },
+    });
+    const r = await resolveGroupClassification(db, 'deoleo', 'PARENT1');
+    expect(r).toEqual({ entityType: 'FIRM', gstRegistrationType: 'COMPOSITE', sourcePartnerId: 'sib-1' });
+    const sibWhere = mock(db).mock.calls[1][0].where;
+    expect(sibWhere.kycSubmissions).toEqual({ some: { status: 'APPROVED' } });
+    expect(sibWhere.entityType).toEqual({ not: null });
+    expect(sibWhere.gstRegistrationType).toEqual({ not: null });
+    expect(sibWhere.isParent).toBe(false);
+    expect(sibWhere.clientId).toBe('deoleo');
+  });
+
+  it('falls back to a SIBLING when the approved parent has NO classification', async () => {
+    const db = clsDb({
+      parent: { onboardedAt: new Date(), entityType: null, gstRegistrationType: null },
+      sibling: { id: 'sib-2', entityType: 'HUF', gstRegistrationType: 'UNREGISTERED' },
+    });
+    const r = await resolveGroupClassification(db, 'deoleo', 'PARENT1');
+    expect(r?.sourcePartnerId).toBe('sib-2');
+    expect(r?.entityType).toBe('HUF');
+  });
+
+  it('requires BOTH fields on the parent — a parent with only entityType does NOT lock the group', async () => {
+    const db = clsDb({
+      parent: { onboardedAt: new Date(), entityType: 'COMPANY', gstRegistrationType: null },
+      sibling: null,
+    });
+    expect(await resolveGroupClassification(db, 'deoleo', 'PARENT1')).toBeNull();
+  });
+
+  it('returns null when neither the parent nor any sibling carries classification', async () => {
+    const db = clsDb({ parent: { onboardedAt: null }, sibling: null });
+    expect(await resolveGroupClassification(db, 'deoleo', 'PARENT1')).toBeNull();
   });
 });
 

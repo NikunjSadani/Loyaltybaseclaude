@@ -230,6 +230,9 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
         status: 'PENDING_GIFSY',
         user: { name: 'Suresh', phone: '9820100001' },
         partner: {
+          // Classification set → passes the compulsory approve gate (C5).
+          entityType: 'INDIVIDUAL',
+          gstRegistrationType: 'REGULAR',
           outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }],
         },
       });
@@ -259,6 +262,21 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
       const result = await service.bulkVerify(gifsy, file, true) as { committed: boolean; results: Array<{ outcome: string }> };
       expect(result.committed).toBe(true);
       expect(result.results[0].outcome).toBe('approved');
+    });
+
+    it('C5: BLOCKS the terminal approve when classification is null → row errors, no status flip', async () => {
+      // Override the primed partner with a NULL-classification one (the bulk terminal-approve path
+      // funnels through applyBridgeOutcome exactly like approve()/verifyField()).
+      mockTx.kycSubmission.findFirst.mockResolvedValue({
+        id: SUB_ID, userId: 'user-1', partnerId: 'partner-1', status: 'PENDING_GIFSY',
+        user: { name: 'Suresh', phone: '9820100001' },
+        partner: { entityType: null, gstRegistrationType: null, outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+      });
+      const file = { buffer: makeXlsx([allApproveRow(SUB_ID)]), size: 1 } as Express.Multer.File;
+      const result = await service.bulkVerify(gifsy, file, true) as { results: Array<{ outcome: string; detail?: string }> };
+      expect(result.results[0].outcome).toBe('error');
+      expect(result.results[0].detail).toMatch(/Set Entity Type and GST Registration Type/i);
+      expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
     });
 
     it('activates the user (User.status → ACTIVE)', async () => {
@@ -358,6 +376,8 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
         user: { name: 'Suresh', phone: '9820100001' },
         partner: {
           clientId: 'deoleo',
+          entityType: 'INDIVIDUAL',
+          gstRegistrationType: 'REGULAR',
           ownerName: 'Acme Owner',
           phone: '9000000001',
           outlets: [

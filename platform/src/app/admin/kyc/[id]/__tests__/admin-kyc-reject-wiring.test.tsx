@@ -27,6 +27,10 @@ const SUBMISSION = {
   id: TEST_UUID,
   status: 'PENDING_GIFSY',
   submittedAt: '2026-06-01T00:00:00.000Z',
+  // Classification already set + persisted so the Approve control is un-gated (F5): the
+  // approve-wiring assertions here are about the POST, not the classification gate.
+  entityType: 'INDIVIDUAL',
+  gstRegistrationType: 'UNREGISTERED',
   user: { id: 'u1', name: 'Rep Anil', phone: '9000000003', role: 'XSR' },
   partner: {
     id: 'p1', businessName: 'Verma Traders', ownerName: 'Suresh',

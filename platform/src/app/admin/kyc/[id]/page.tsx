@@ -39,7 +39,9 @@ type KycFieldDecision = 'PENDING' | 'APPROVED' | 'REJECTED';
 interface KycFieldState {
   decision: KycFieldDecision;
   remark?: string;
-  source?: 'EXCEL' | 'PORTAL';
+  // 'GROUP_INHERITED' = the field was auto-verified from the outlet's approved owner group
+  // (grouped child: PAYMENT / GST_VALIDATION / GST_DOCUMENT carry the group's decision).
+  source?: 'EXCEL' | 'PORTAL' | 'GROUP_INHERITED';
 }
 
 const KYC_FIELD_ORDER: KycFieldKey[] = [
@@ -108,6 +110,12 @@ interface ApiKycDetail {
   // proposed PAN differs from the group PAN, so approving DETACHES the outlet from its owner
   // group (re-establishes it as an independent shop). Default false / absent = normal.
   willLeaveGroup?: boolean;
+  // Gifsy-set classification (current stored values; null until an admin saves them).
+  entityType?: EntityType | null;
+  gstRegistrationType?: GSTRegistrationType | null;
+  // Non-null when the outlet's owner-group already has an APPROVED classification — the
+  // fields are LOCKED to these values (one entity/registration type per organisation).
+  classificationLock?: { entityType: EntityType; gstRegistrationType: GSTRegistrationType; sourcePartnerId: string } | null;
   // KYC-captured geo (Prisma Decimal → JSON string on the wire).
   boardPhotoLat?: string | number | null; boardPhotoLng?: string | number | null;
   paymentLat?: string | number | null; paymentLng?: string | number | null;
@@ -167,6 +175,11 @@ type KycDetailShape = {
   // Wave-4: true iff approving this re-KYC detaches the outlet from its owner group
   // (proposed PAN differs from the group PAN). Drives the group-leave warning banner.
   willLeaveGroup: boolean;
+  // Gifsy classification (current stored values; null until saved). Seeds the two selects.
+  entityType: EntityType | null;
+  gstRegistrationType: GSTRegistrationType | null;
+  // Non-null when the owner-group already has an APPROVED classification → selects locked.
+  classificationLock: { entityType: EntityType; gstRegistrationType: GSTRegistrationType; sourcePartnerId: string } | null;
 };
 
 /* ─── Re-KYC proposed-change diff (stage-at-approval) ─────────────────────────── */
@@ -300,6 +313,25 @@ function VerifiedOnParentBadge({ verified }: { verified?: boolean }): ReactNode 
   );
 }
 
+/**
+ * Grouped child: a small badge shown on a verification field whose decision was
+ * AUTO-VERIFIED from the outlet's approved owner group (source === 'GROUP_INHERITED').
+ * On a grouped child the PAYMENT / GST_VALIDATION / GST_DOCUMENT items inherit the group's
+ * decision (the reviewer still handles address/photo items). Styled to mirror the emerald
+ * VerifiedOnParentBadge. Renders nothing when the field wasn't group-inherited.
+ */
+function GroupInheritedBadge({ inherited }: { inherited?: boolean }): ReactNode {
+  if (!inherited) return null;
+  return (
+    <span
+      data-testid="group-inherited-badge"
+      className="ml-1.5 inline-flex items-center gap-0.5 text-[10px] font-sans font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full whitespace-nowrap align-middle"
+    >
+      <CheckCircle className="w-2.5 h-2.5" /> Auto-verified from group
+    </span>
+  );
+}
+
 /** Coerce a KYC-captured lat/lng pair (Prisma Decimal → JSON string) into numbers.
  *  Returns null unless BOTH are present and finite. */
 function parseGeo(lat: unknown, lng: unknown): { lat: number; lng: number } | null {
@@ -333,6 +365,9 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     proposedChanges,
     parentVerified:   s.parentVerified ?? undefined,
     willLeaveGroup:   s.willLeaveGroup === true,
+    entityType:       s.entityType ?? null,
+    gstRegistrationType: s.gstRegistrationType ?? null,
+    classificationLock: s.classificationLock ?? null,
     verificationItems: s.verificationItems ?? [],
     // Human outlet ID for the header (KYC is partner-keyed → the enrolled outlet's code).
     // Prefer the real Outlet code; fall back to the partner code if no outlet is linked yet.
@@ -442,6 +477,10 @@ function KycFieldVerificationPanel({
     () => Object.fromEntries(KYC_FIELD_ORDER.map(k => [k, ''])) as Record<KycFieldKey, string>
   );
   const [derivedStatus, setDerivedStatus] = useState<string | null>(null);
+  // Set when the backend PERSISTS the last field decision but holds the submission at
+  // PENDING_GIFSY because the Gifsy classification is still unset (classificationRequired).
+  // This is NOT a field error — it points the reviewer up to the Classification section.
+  const [classificationRequired, setClassificationRequired] = useState(false);
 
   const applyField = useCallback(
     async (key: KycFieldKey, decision: 'APPROVED' | 'REJECTED', remark?: string) => {
@@ -459,12 +498,17 @@ function KycFieldVerificationPanel({
           fieldKey: KycFieldKey;
           fieldDecision: 'APPROVED' | 'REJECTED';
           derivedStatus: string;
+          // true = all fields verified but classification unset; decision IS persisted.
+          classificationRequired?: boolean;
         }>(res);
         setFields(prev => ({
           ...prev,
           [key]: { decision: data.fieldDecision, remark, source: 'PORTAL' as const },
         }));
         setDerivedStatus(data.derivedStatus);
+        // The decision was persisted (chip shows APPROVED); the submission is held pending
+        // classification. Surface the pointer notice instead of a per-field error.
+        setClassificationRequired(data.classificationRequired === true);
         // Clear the remark input after a successful reject
         if (decision === 'REJECTED') {
           setRemarkInputs(prev => ({ ...prev, [key]: '' }));
@@ -509,6 +553,16 @@ function KycFieldVerificationPanel({
         </div>
       )}
 
+      {classificationRequired && (
+        <div
+          data-testid="classification-required-notice"
+          className="mb-3 text-xs px-3 py-2 rounded flex items-center gap-2 bg-amber-50 border border-amber-200 text-amber-800"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          All fields verified — set &amp; save Entity Type and GST Registration Type above to finalize approval.
+        </div>
+      )}
+
       <p className="text-[10px] text-gray-400 mb-3">
         These decisions call <code>POST /api/kyc/{submissionId}/verify</code> directly.
         The backend runs the bridge after each field — if all 7 are terminal it auto-transitions
@@ -527,7 +581,10 @@ function KycFieldVerificationPanel({
             <div key={key} className="py-3 flex flex-col gap-1.5 sm:flex-row sm:items-start sm:gap-4">
               {/* Label + chip */}
               <div className="sm:w-44 shrink-0">
-                <p className="text-xs font-medium text-gray-700">{KYC_FIELD_LABELS[key]}</p>
+                <p className="text-xs font-medium text-gray-700">
+                  {KYC_FIELD_LABELS[key]}
+                  <GroupInheritedBadge inherited={state.source === 'GROUP_INHERITED'} />
+                </p>
                 <div className="mt-1">
                   <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ${
                     state.decision === 'APPROVED' ? 'bg-green-100 text-green-800' :
@@ -599,10 +656,12 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
   const [actionResult, setActionResult] = useState<string | null>(null);
   const [actionError, setActionError]   = useState<string | null>(null);
 
-  // Gifsy-admin-only fields set during KYC approval
-  const [entityType, setEntityType] = useState<EntityType>('INDIVIDUAL');
-  const [gstRegType, setGstRegType] = useState<GSTRegistrationType>('UNREGISTERED');
-  const [taxFieldsSaved, setTaxFieldsSaved] = useState(false);
+  // Gifsy-admin-only classification, set during KYC review. No pre-selected default — the
+  // empty placeholder is shown until the reviewer picks (or the stored value seeds it).
+  const [entityType, setEntityType] = useState<EntityType | ''>('');
+  const [gstRegType, setGstRegType] = useState<GSTRegistrationType | ''>('');
+  const [savingClassification, setSavingClassification] = useState(false);
+  const [classificationError, setClassificationError] = useState<string | null>(null);
 
   const loadKyc = useCallback(async () => {
     const res = await fetch(`/api/kyc/${id}`);
@@ -623,6 +682,17 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
       .catch(() => setError('Failed to load KYC submission'))
       .finally(() => setLoading(false));
   }, [id, loadKyc]);
+
+  // Seed the classification selects from the loaded submission (re-runs on every reload,
+  // e.g. after a save). A locked group classification wins; otherwise the stored values,
+  // falling back to the empty placeholder when nothing is set yet. The saved/dirty state is
+  // derived (current selection vs persisted values) — no separate one-way flag to drift.
+  useEffect(() => {
+    if (!kyc) return;
+    setEntityType(kyc.classificationLock?.entityType ?? kyc.entityType ?? '');
+    setGstRegType(kyc.classificationLock?.gstRegistrationType ?? kyc.gstRegistrationType ?? '');
+    setClassificationError(null);
+  }, [kyc]);
 
   if (loading) {
     return (
@@ -681,6 +751,47 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
       { reason, status: 'RE_UPLOAD_REQUIRED' },
       `Re-upload requested. Partner notified. Reason: ${reason}`,
     );
+
+  const classificationLock = kyc.classificationLock;
+  // Persist the Gifsy classification. Both enums are required; the backend 400s if a value
+  // diverges from a locked group classification (surfaced inline). On success the submission
+  // is re-fetched so the selects reflect what is actually stored.
+  const handleSaveClassification = async () => {
+    if (!entityType || !gstRegType || savingClassification) return;
+    setSavingClassification(true);
+    setClassificationError(null);
+    try {
+      const res = await fetch(`/api/kyc/${id}/gst-details`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entityType, gstRegistrationType: gstRegType }),
+      });
+      const json = (await res.json().catch(() => ({ success: false }))) as {
+        success: boolean; error?: string; message?: string;
+      };
+      if (!res.ok || !json.success) {
+        throw new Error(json.error ?? json.message ?? `Request failed (${res.status})`);
+      }
+      await loadKyc();
+    } catch (err) {
+      setClassificationError(err instanceof Error ? err.message : 'Could not save classification.');
+    } finally {
+      setSavingClassification(false);
+    }
+  };
+
+  // Approve is compulsory-gated on a SET + PERSISTED classification. A locked group
+  // classification counts as persisted (authoritative from the group). Otherwise the stored
+  // values must both exist AND equal the currently-selected values (no unsaved edits).
+  const classificationComplete = Boolean(entityType && gstRegType);
+  const classificationPersisted = Boolean(classificationLock) || (
+    kyc.entityType != null && kyc.gstRegistrationType != null &&
+    kyc.entityType === entityType && kyc.gstRegistrationType === gstRegType
+  );
+  const approveBlocked = !classificationComplete || !classificationPersisted;
+  // The Save button's ✓-saved label is DERIVED (current selection === persisted), so reverting
+  // a dirty edit back to the stored value clears "Saved" in lock-step with Approve re-enabling.
+  const classificationSaved = classificationComplete && classificationPersisted;
 
   return (
     <div className="space-y-5 fade-in">
@@ -861,20 +972,24 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
               </div>
             </div>
 
-            {/* ── Gifsy Admin fields — set at time of KYC approval ── */}
-            <div className="mt-4 pt-4 border-t border-gray-100">
+            {/* ── Gifsy Admin classification — compulsory before approval ── */}
+            <div className="mt-4 pt-4 border-t border-gray-100" data-testid="classification-section">
               <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-3">
                 Classification · Set by Gifsy Admin
               </p>
               <div className="space-y-3">
                 {/* Entity Type */}
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">Entity Type</label>
+                  <label htmlFor="kyc-entity-type" className="block text-xs text-gray-500 mb-1">Entity Type</label>
                   <select
+                    id="kyc-entity-type"
+                    data-testid="entity-type-select"
                     value={entityType}
-                    onChange={(e) => { setEntityType(e.target.value as EntityType); setTaxFieldsSaved(false); }}
-                    className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-2 bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30 focus:border-[var(--brand-primary)]"
+                    disabled={Boolean(classificationLock) || savingClassification}
+                    onChange={(e) => setEntityType(e.target.value as EntityType)}
+                    className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-2 bg-white text-gray-800 disabled:bg-gray-50 disabled:text-gray-500 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30 focus:border-[var(--brand-primary)]"
                   >
+                    <option value="" disabled>— Select —</option>
                     {(Object.keys(ENTITY_TYPE_LABELS) as EntityType[]).map((k) => (
                       <option key={k} value={k}>{ENTITY_TYPE_LABELS[k]}</option>
                     ))}
@@ -883,12 +998,16 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
 
                 {/* GST Registration Type */}
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">GST Registration Type</label>
+                  <label htmlFor="kyc-gst-reg-type" className="block text-xs text-gray-500 mb-1">GST Registration Type</label>
                   <select
+                    id="kyc-gst-reg-type"
+                    data-testid="gst-reg-type-select"
                     value={gstRegType}
-                    onChange={(e) => { setGstRegType(e.target.value as GSTRegistrationType); setTaxFieldsSaved(false); }}
-                    className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-2 bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30 focus:border-[var(--brand-primary)]"
+                    disabled={Boolean(classificationLock) || savingClassification}
+                    onChange={(e) => setGstRegType(e.target.value as GSTRegistrationType)}
+                    className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-2 bg-white text-gray-800 disabled:bg-gray-50 disabled:text-gray-500 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30 focus:border-[var(--brand-primary)]"
                   >
+                    <option value="" disabled>— Select —</option>
                     {(Object.keys(GST_REG_LABELS) as GSTRegistrationType[]).map((k) => (
                       <option key={k} value={k}>{GST_REG_LABELS[k]}</option>
                     ))}
@@ -905,12 +1024,48 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
                   )}
                 </div>
 
-                <button
-                  onClick={() => setTaxFieldsSaved(true)}
-                  className="w-full text-xs py-1.5 rounded-lg border border-[var(--brand-primary)] text-[var(--brand-primary)] hover:bg-green-50 transition-colors font-medium"
-                >
-                  {taxFieldsSaved ? '✓ Classification Saved' : 'Save Classification'}
-                </button>
+                {classificationLock ? (
+                  // Group-inherited: authoritative from the owner group — locked, no save action.
+                  <p
+                    data-testid="classification-lock-note"
+                    className="text-[10px] text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-2.5 py-2"
+                  >
+                    🔒 Inherited from group — one registration/entity type per organization (cannot be changed here).
+                  </p>
+                ) : (
+                  <>
+                    <button
+                      data-testid="save-classification-btn"
+                      onClick={handleSaveClassification}
+                      disabled={!classificationComplete || classificationSaved || savingClassification}
+                      className="w-full text-xs py-1.5 rounded-lg border border-[var(--brand-primary)] text-[var(--brand-primary)] hover:bg-green-50 disabled:opacity-50 disabled:hover:bg-transparent transition-colors font-medium flex items-center justify-center gap-1.5"
+                    >
+                      {savingClassification && <RefreshCw className="w-3 h-3 animate-spin" />}
+                      {savingClassification
+                        ? 'Saving…'
+                        : classificationSaved ? '✓ Classification Saved' : 'Save Classification'}
+                    </button>
+                    {classificationError && (
+                      <p
+                        data-testid="classification-error"
+                        className="text-[10px] text-red-600 flex items-center gap-1"
+                      >
+                        <AlertTriangle className="w-3 h-3 flex-shrink-0" />{classificationError}
+                      </p>
+                    )}
+                    {/* Visible, reachable copy of the approve gate (a disabled button isn't
+                        announced to screen readers) — sits right by the Classification controls. */}
+                    {approveBlocked && (
+                      <p
+                        data-testid="classification-approve-hint"
+                        className="text-[10px] text-amber-700 flex items-start gap-1"
+                      >
+                        <AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                        Set &amp; save Entity Type and GST Registration Type before approving.
+                      </p>
+                    )}
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -1038,6 +1193,8 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
               flaggedDocTypes={hasReKycFlags(kyc.reKycFlags) ? flaggedDocTypes(kyc.reKycFlags) : undefined}
               flaggedLabels={hasReKycFlags(kyc.reKycFlags) ? flaggedLabels(kyc.reKycFlags) : undefined}
               reKycRemarks={reKycRemarks(kyc.reKycFlags) || undefined}
+              approveDisabled={approveBlocked}
+              approveDisabledReason="Set & save Entity Type and GST Registration Type before approving."
             />
           </div>
 

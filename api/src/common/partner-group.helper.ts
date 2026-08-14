@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client';
+import type { Prisma, EntityType, GstRegistrationType } from '@prisma/client';
 
 /**
  * Partner-child owner GROUP resolution + identity-detail UNIQUENESS.
@@ -141,7 +141,9 @@ export async function resolveGroupPan(
   parentId: string,
   exceptPartnerId?: string | null,
 ): Promise<string | null> {
-  const parent = await db.channelPartner.findUnique({ where: { id: parentId }, select: { panNumber: true } });
+  // clientId-scoped (defense-in-depth, consistent with resolveGroupIdentity/resolveGroupClassification):
+  // parentId is already a same-tenant Outlet.parentId, but never resolve a group PAN across tenants.
+  const parent = await db.channelPartner.findFirst({ where: { id: parentId, clientId }, select: { panNumber: true } });
   if (parent?.panNumber) return normalizeIdentityValue('pan', parent.panNumber);
 
   const sibling = await db.outlet.findFirst({
@@ -245,6 +247,74 @@ export async function resolveGroupIdentity(
     },
   });
   return sibling ? pickGroupIdentity(sibling, sibling.id) : null;
+}
+
+/**
+ * The group's canonical KYC CLASSIFICATION (Entity Type + GST Registration Type) — the pair the
+ * whole owner group MUST share (one registration/entity type per organization). Resolved from the
+ * SAME source precedence as `resolveGroupIdentity`, but requires BOTH classification fields to be
+ * non-null on the source (an approved member with no classification yet cannot lock the group):
+ *   1. the APPROVED parent (`onboardedAt != null`) carrying both fields;
+ *   2. else the most-recently-updated APPROVED grouped SIBLING carrying both fields;
+ *   3. else null (nothing to lock to yet).
+ * Tenant-scoped by clientId. Returned to LOCK+prefill a grouped child's classification and to enforce
+ * one-per-org even under races / direct API calls (see kyc.service gstDetails guard).
+ */
+export interface GroupClassification {
+  entityType: EntityType;
+  gstRegistrationType: GstRegistrationType;
+  /** The APPROVED parent/sibling ChannelPartner the classification was resolved from. */
+  sourcePartnerId: string;
+}
+
+export async function resolveGroupClassification(
+  db: Db,
+  clientId: string,
+  parentId: string,
+): Promise<GroupClassification | null> {
+  // 1. The PARENT's own classification, but ONLY when the parent is APPROVED (`onboardedAt` set)
+  //    AND carries BOTH fields (mirrors resolveGroupIdentity's parent precedence).
+  const parent = await db.channelPartner.findFirst({
+    where: { id: parentId, clientId },
+    select: { onboardedAt: true, entityType: true, gstRegistrationType: true },
+  });
+  if (
+    parent &&
+    parent.onboardedAt != null &&
+    parent.entityType != null &&
+    parent.gstRegistrationType != null
+  ) {
+    return {
+      entityType: parent.entityType,
+      gstRegistrationType: parent.gstRegistrationType,
+      sourcePartnerId: parentId,
+    };
+  }
+
+  // 2. Most-recently-updated APPROVED grouped SIBLING carrying BOTH classification fields.
+  //    ⚠️ An outlet owner's approval is its KYC status = APPROVED (NOT ChannelPartner.onboardedAt,
+  //    a parent-only marker) — the same reasoning as resolveGroupIdentity's sibling branch.
+  const sibling = await db.channelPartner.findFirst({
+    where: {
+      clientId,
+      isParent: false,
+      deletedAt: null,
+      kycSubmissions: { some: { status: 'APPROVED' } },
+      outlets: { some: { parentId, clientId, deletedAt: null } },
+      entityType: { not: null },
+      gstRegistrationType: { not: null },
+    },
+    orderBy: { updatedAt: 'desc' },
+    select: { id: true, entityType: true, gstRegistrationType: true },
+  });
+  if (sibling && sibling.entityType != null && sibling.gstRegistrationType != null) {
+    return {
+      entityType: sibling.entityType,
+      gstRegistrationType: sibling.gstRegistrationType,
+      sourcePartnerId: sibling.id,
+    };
+  }
+  return null;
 }
 
 /** Project a partner row onto the GroupIdentity shape (identity text only) + its source partner id. */
@@ -431,6 +501,26 @@ export async function acquireIdentityLocks(
     // means two unrelated values occasionally share a lock (a harmless extra serialization).
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key})::bigint)`;
   }
+}
+
+/**
+ * Serialize concurrent APPROVALS of siblings in the SAME owner group so the one-per-org classification
+ * convergence (resolveGroupClassification READ → persist) can't race. Two divergent same-group children
+ * approved in OVERLAPPING transactions could otherwise BOTH read lock=null under READ COMMITTED and each
+ * commit a divergent classification. Takes a transaction-scoped Postgres advisory lock per
+ * (clientId, parentId) — auto-released at commit/rollback (never orphaned). MUST be called INSIDE the
+ * approval `$transaction`, BEFORE resolveGroupClassification. Uses the SAME `hashtext` key convention as
+ * acquireIdentityLocks so the advisory-lock domain stays consistent; a distinct `classification` field
+ * keeps this key space disjoint from the identity-value locks. Only take it for a GROUPED child (a real
+ * parentId) — an ungrouped approval needs no lock and must stay lock-free.
+ */
+export async function acquireGroupClassificationLock(
+  tx: Prisma.TransactionClient,
+  clientId: string,
+  parentId: string,
+): Promise<void> {
+  const key = `${clientId}:classification:${parentId}`;
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key})::bigint)`;
 }
 
 // ── Un-group SHARE check (the un-group guard ⇔ the group-detail canUngroup flag) ────────────

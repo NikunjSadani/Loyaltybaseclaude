@@ -38,6 +38,11 @@ interface KYCReviewerProps {
   flaggedLabels?: string[];
   /** The admin's free-text re-KYC remark, shown in the banner. Optional. */
   reKycRemarks?: string;
+  /** When true the Approve control is blocked (e.g. the Gifsy classification isn't set +
+   *  saved yet). The Reject / Re-upload actions stay available. Optional (default false). */
+  approveDisabled?: boolean;
+  /** Helper text shown beneath the disabled Approve button explaining why. Optional. */
+  approveDisabledReason?: string;
 }
 
 // Single source of truth shared with the sales senior-reject modal (the admin keeps
@@ -84,6 +89,8 @@ export function KYCReviewer({
   flaggedDocTypes,
   flaggedLabels,
   reKycRemarks,
+  approveDisabled = false,
+  approveDisabledReason,
 }: KYCReviewerProps) {
   // doc.type is the lower-cased Prisma documentType (see admin/kyc/[id] mapping); the
   // flagged list carries Prisma types (e.g. STORE_BOARD_PHOTO) — compare case-insensitively.
@@ -107,6 +114,7 @@ export function KYCReviewer({
   const finalReason = selectedReason === 'Other (specify below)' ? customReason : selectedReason;
 
   const handleApprove = () => {
+    if (approveDisabled) return;
     if (approveConfirm) {
       onApprove(partnerId);
       setApproveConfirm(false);
@@ -281,17 +289,27 @@ export function KYCReviewer({
           <div className="space-y-2">
             <button
               onClick={handleApprove}
-              className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all ${
+              disabled={approveDisabled}
+              aria-describedby={approveDisabled && approveDisabledReason ? 'approve-disabled-reason' : undefined}
+              data-testid="approve-kyc-btn"
+              className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
                 approveConfirm
                   ? 'bg-green-600 text-white hover:bg-green-700'
-                  : 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100'
+                  : 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 disabled:hover:bg-green-50'
               }`}
             >
               <CheckSquare className="w-4 h-4" />
               {approveConfirm ? 'Confirm Approve' : 'Approve KYC'}
             </button>
 
-            {approveConfirm && (
+            {approveDisabled && approveDisabledReason && (
+              <p id="approve-disabled-reason" data-testid="approve-disabled-reason" className="text-[11px] text-amber-700 flex items-start gap-1">
+                <AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                {approveDisabledReason}
+              </p>
+            )}
+
+            {approveConfirm && !approveDisabled && (
               <button
                 onClick={() => setApproveConfirm(false)}
                 className="w-full py-2 rounded-lg text-xs text-gray-500 hover:bg-gray-100 transition-colors"

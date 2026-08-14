@@ -8,7 +8,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, KycFieldKey, KycDocumentType, KycFieldSource, KycStatus } from '@prisma/client';
+import { Prisma, KycFieldKey, KycDocumentType, KycFieldSource, KycStatus, EntityType, GstRegistrationType } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as XLSX from 'xlsx';
@@ -62,6 +62,8 @@ import {
   resolveGroupPan,
   resolveGroupIdentity,
   resolveGroupCarryForwardDocs,
+  resolveGroupClassification,
+  acquireGroupClassificationLock,
   type CarryForwardDoc,
 } from '../common/partner-group.helper';
 import { StorageService } from '../storage/storage.service';
@@ -983,6 +985,11 @@ export class KycService {
       // DERIVED group key, set inline at create to avoid a NULL window before the outlets
       // trigger fires (null = ungrouped → hosts the (clientId,gst/pan) partial-unique index).
       groupId: string | null;
+      // KYC classification INHERITED from an approved owner group (one registration/entity type per
+      // organization) — set at create for a grouped child so it carries the lock immediately and the
+      // compulsory approve gate passes with no reviewer pick. Null/undefined for ungrouped/first member.
+      entityType?: EntityType | null;
+      gstRegistrationType?: GstRegistrationType | null;
       details: {
         businessName: string;
         ownerName: string;
@@ -1026,6 +1033,8 @@ export class KycService {
           partnerCode,
           isActive: true,
           groupId: args.groupId,
+          ...(args.entityType != null ? { entityType: args.entityType } : {}),
+          ...(args.gstRegistrationType != null ? { gstRegistrationType: args.gstRegistrationType } : {}),
           ...args.details,
         },
         select: { id: true },
@@ -1333,7 +1342,21 @@ export class KycService {
     //     section (guarded by `outlet.partnerId`).
     let groupCarryGstCert: CarryForwardDoc | null = null;
     let groupCarryCheque: CarryForwardDoc | null = null;
+    // C6: group-inheritance auto-verification (brand-new grouped child only). These are decided in the
+    // carry-forward block below (reusing its already-computed match booleans) and CONSUMED inside the
+    // create tx (after the submission row exists) to pre-seed APPROVED GROUP_INHERITED verification
+    // items for the fields already vetted on the group's APPROVED source. Null source ⇒ inherit nothing.
+    let groupInheritSourcePartnerId: string | null = null;
+    let inheritGstValidation = false;
+    let inheritGstDocument = false;
+    let inheritPayment = false;
+    // The owner group's APPROVED classification (Entity Type + GST Registration Type), when one exists.
+    // Written onto the new child ChannelPartner at create so a grouped child inherits+locks the group's
+    // classification immediately (the reviewer only picks for the FIRST/ungrouped member). Null otherwise.
+    let groupClassification: { entityType: EntityType; gstRegistrationType: GstRegistrationType } | null = null;
     if (outlet.parentId && !outlet.partnerId) {
+      const gc = await resolveGroupClassification(this.prisma, user.clientId, outlet.parentId);
+      if (gc) groupClassification = { entityType: gc.entityType, gstRegistrationType: gc.gstRegistrationType };
       const providedTypes = new Set(
         (dto.documents ?? []).filter((d) => d.type).map((d) => d.type as KycDocumentType),
       );
@@ -1413,6 +1436,35 @@ export class KycService {
         throw new BadRequestException(
           'Cancelled cheque is required — it could not be inherited from the group because this outlet’s bank details differ from the group. Please upload the cheque.',
         );
+      }
+
+      // C6: decide which of the 3 group-shareable fields this child inherits as APPROVED. Gated on an
+      // APPROVED parent/sibling existing (sourcePartnerId — the SAME provenance the doc carry-forward
+      // uses); an ungrouped/first-in-group child has none → inherits nothing. NEVER inherits ADDRESS /
+      // ADDRESS_DOCUMENT / BOARD_PHOTO / OWNER_PHOTO (per-store, always reviewer-verified).
+      if (groupIdentity?.sourcePartnerId) {
+        groupInheritSourcePartnerId = groupIdentity.sourcePartnerId;
+        // GST_VALIDATION (FIX 2 — never auto-approve without a REAL matching group PAN). The in-tx
+        // checkPanMatchesGroup NO-OPS when the group source has a null PAN, so a null-group-PAN source
+        // would otherwise let an arbitrary child PAN ride through as APPROVED and key TDS 194 bucketing
+        // on an unverified PAN. Require a NON-NULL group PAN AND child PAN === group PAN, PLUS a real
+        // matching GST (removes the old "both GST absent → inherit" free pass). Everything else →
+        // reviewer verifies GST_VALIDATION.
+        const groupPan = normalizeIdentityValue('pan', groupIdentity.panNumber);
+        inheritGstValidation =
+          groupPan != null &&
+          childPan === groupPan &&
+          groupGst != null &&
+          childGst === groupGst;
+        // GST_DOCUMENT: the group's GST certificate was inherited (attached above).
+        inheritGstDocument = !!groupCarryGstCert;
+        // PAYMENT: bank → the group's cancelled cheque was inherited; upi → child UPI == group UPI
+        // (both non-null), computed the same trimmed way as the bank match.
+        const childUpi = trimOrNull(partnerDetails.upiId);
+        const groupUpi = trimOrNull(groupIdentity.upiId);
+        inheritPayment =
+          (effectiveMode === 'bank' && !!groupCarryCheque) ||
+          (effectiveMode === 'upi' && childUpi != null && childUpi === groupUpi);
       }
     }
 
@@ -1640,6 +1692,9 @@ export class KycService {
           userId: ownerUserId,
           outletCode: outlet.outletCode,
           details: partnerDetails,
+          // Inherit the owner group's APPROVED classification at create (null for ungrouped/first member).
+          entityType: groupClassification?.entityType ?? null,
+          gstRegistrationType: groupClassification?.gstRegistrationType ?? null,
           // Set the DERIVED group key inline at CREATE so a grouped-before-KYC sibling enters
           // already-grouped — excluded from the (clientId,gst/pan) partial-unique index
           // (WHERE groupId IS NULL) with NO NULL window (the outlets trigger would otherwise
@@ -1673,7 +1728,7 @@ export class KycService {
       // 3c. Create the submission (duplicate guard scoped to THIS partner). The re-KYC
       //     PROPOSED patch (undefined for a brand-new-outlet draft) rides along as
       //     `proposedPartner` — the values applied to the live partner only at approval.
-      return this.createSubmissionRow(tx, {
+      const created = await this.createSubmissionRow(tx, {
         user,
         dto,
         status,
@@ -1682,6 +1737,37 @@ export class KycService {
         inFlightStatuses: [...IN_FLIGHT_STATUSES],
         proposedPartner: proposedSnapshot,
       });
+
+      // 3d. C6 — pre-seed APPROVED GROUP_INHERITED verification items for the group-shareable fields
+      //     already vetted on the group's APPROVED source. Runs AFTER the submission row exists (FK)
+      //     and inside the SAME tx so a rolled-back create never leaves orphan items. Only the 3
+      //     group fields are ever seeded; address/photos stay lazily-PENDING so the bridge keeps the
+      //     submission PENDING_GIFSY until a reviewer approves them. REVERSIBLE: verifyField's upsert
+      //     overwrites source→PORTAL + decision on a later manual verify/reject (no special-casing).
+      if (groupInheritSourcePartnerId) {
+        const sourcePartnerId = groupInheritSourcePartnerId;
+        const inheritedKeys = [
+          inheritGstValidation ? ('GST_VALIDATION' as KycFieldKey) : null,
+          inheritGstDocument ? ('GST_DOCUMENT' as KycFieldKey) : null,
+          inheritPayment ? ('PAYMENT' as KycFieldKey) : null,
+        ].filter((k): k is KycFieldKey => k != null);
+        if (inheritedKeys.length > 0) {
+          const inheritedAt = new Date();
+          await tx.kycVerificationItem.createMany({
+            data: inheritedKeys.map((fieldKey) => ({
+              kycSubmissionId: created.id,
+              fieldKey,
+              decision: 'APPROVED' as const,
+              source: 'GROUP_INHERITED' as const,
+              verifiedAt: inheritedAt,
+              evidence: { groupInherited: true, sourcePartnerId } as Prisma.InputJsonValue,
+            })),
+            skipDuplicates: true,
+          });
+        }
+      }
+
+      return created;
     });
 
     // 6. Log initial status history (DRAFT — not yet routed; consent() records the
@@ -2300,6 +2386,16 @@ export class KycService {
       approvedParent,
     );
 
+    // ── C3: KYC classification + group lock ──────────────────────────────────
+    // Surface the partner's current classification (entityType / gstRegistrationType) AND — when the
+    // outlet belongs to an owner group with an APPROVED classification — the LOCKED group values the
+    // FE must prefill + lock the gst-details form to (one registration/entity type per organization).
+    // Null classificationLock ⇒ no parent, or the group has no approved classification yet ⇒ FE lets
+    // the Gifsy admin pick freely. Reuses `parentIdForVerify` (the primary outlet's group parentId).
+    const classificationLock = parentIdForVerify && submission.partner
+      ? await resolveGroupClassification(this.prisma, submission.partner.clientId, parentIdForVerify)
+      : null;
+
     // ── Wave-4: group-leave-via-re-KYC preview flag ──────────────────────────
     // `willLeaveGroup` = true iff this submission STAGES a group departure: the outlet is currently
     // grouped (primary outlet's parentId set) AND the re-KYC proposes a PAN that DIFFERS from the
@@ -2325,7 +2421,20 @@ export class KycService {
         : false;
 
     return {
-      submission: { ...submission, partner, proposedPartner, documents, reKycFlags, parentVerified, willLeaveGroup },
+      submission: {
+        ...submission,
+        partner,
+        proposedPartner,
+        documents,
+        reKycFlags,
+        parentVerified,
+        willLeaveGroup,
+        // C3: classification (from the partner) + the group lock (null when free to pick).
+        entityType: (submission.partner?.entityType as EntityType | null | undefined) ?? null,
+        gstRegistrationType:
+          (submission.partner?.gstRegistrationType as GstRegistrationType | null | undefined) ?? null,
+        classificationLock,
+      },
     };
   }
 
@@ -2472,6 +2581,38 @@ export class KycService {
     if (!submission) throw new NotFoundException('KYC submission not found');
 
     const updated = await this.prisma.$transaction(async (tx) => {
+      // FIX 1 (gate bypass): PATCH is a raw status writer and PATCH_STATUSES includes 'APPROVED', so a
+      // direct PATCH status=APPROVED would otherwise skip the compulsory classification gate + one-per-
+      // org invariant that applyBridgeOutcome enforces (and that unclassified partner would then seed
+      // resolveGroupIdentity). Apply the SAME classification path here for a →APPROVED transition:
+      // auto-inherit/overwrite the owner-group lock, then throw the same 400 if still unclassified.
+      // (Deliberately NOT adding activation/wallet here — that pre-existing PATCH gap is out of scope.)
+      if (status === 'APPROVED') {
+        const withPartner = await tx.kycSubmission.findFirst({
+          where: { id },
+          select: {
+            partnerId: true,
+            partner: {
+              select: {
+                clientId: true,
+                entityType: true,
+                gstRegistrationType: true,
+                outlets: {
+                  where: { deletedAt: null },
+                  orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+                  take: 1,
+                  select: { parentId: true },
+                },
+              },
+            },
+          },
+        });
+        if (withPartner) {
+          await this.ensureGroupClassification(tx, withPartner);
+          this.assertClassificationSet(withPartner.partner);
+        }
+      }
+
       const result = await tx.kycSubmission.update({
         where: { id },
         data: {
@@ -2816,7 +2957,24 @@ export class KycService {
 
       // ── (d) Apply bridge outcome (only fires if all 7 are terminal) ───────
       let applied: { outcome: 'approved' | 'reupload' | 'recorded' | 'skipped'; notification?: CommitNotifyIntent } = { outcome: 'recorded' };
-      if (bridgeResult.next !== 'PENDING_GIFSY') {
+      // FIX 4 (no data-loss): when the grid is complete (bridge → APPROVED) but classification is
+      // unset AND the owner group has no lock to inherit, we must NOT throw — that would roll back the
+      // field decision just committed above in this shared tx. Instead pre-resolve the group lock
+      // (fills/overwrites classification when a lock exists) and, if the partner is STILL unclassified,
+      // HOLD at PENDING_GIFSY (skip the transition) and signal the FE via `classificationRequired`. The
+      // field decision persists (the reviewer's work is never lost). approve()/bulk keep throwing — an
+      // explicit approve action has nothing to lose. When classification is set (or a lock filled it),
+      // this proceeds to applyBridgeOutcome exactly as before → APPROVED.
+      let classificationRequired = false;
+      if (bridgeResult.next === 'APPROVED') {
+        const classified = await this.ensureGroupClassification(tx, submission);
+        if (!classified) {
+          classificationRequired = true; // hold at PENDING_GIFSY; do NOT throw, do NOT transition
+        } else {
+          applied = await this.applyBridgeOutcome(tx, submission, bridgeResult, 'PORTAL', user.sub, now);
+        }
+      } else if (bridgeResult.next !== 'PENDING_GIFSY') {
+        // RE_UPLOAD_REQUIRED (a rejected field) — unchanged.
         applied = await this.applyBridgeOutcome(tx, submission, bridgeResult, 'PORTAL', user.sub, now);
       }
 
@@ -2826,6 +2984,7 @@ export class KycService {
         decision,
         bridgeResult,
         applied,
+        classificationRequired,
       };
     });
 
@@ -2839,10 +2998,14 @@ export class KycService {
       submissionId: result.submissionId,
       fieldKey: result.fieldKey,
       fieldDecision: result.decision,
-      derivedStatus: result.bridgeResult.next,
+      // When held for classification the submission STAYS PENDING_GIFSY (not transitioned to APPROVED),
+      // so report the real status; `classificationRequired` tells the FE to point the reviewer at the
+      // Classification section. The 7-field grid is still complete (approvedCount reflects that).
+      derivedStatus: result.classificationRequired ? 'PENDING_GIFSY' : result.bridgeResult.next,
       approvedCount: result.bridgeResult.approvedCount,
       rejectedFields: result.bridgeResult.rejectedFields,
       outcome: result.applied.outcome,
+      classificationRequired: result.classificationRequired,
     };
   }
 
@@ -3555,14 +3718,42 @@ export class KycService {
 
     const { entityType, gstRegistrationType, gstLegalName, gstStatus } = dto;
 
-    // Load submission — tenant-scoped.
+    // Load submission — tenant-scoped. Also resolve the outlet's owner-GROUP (parentId) so the
+    // group-classification lock below can enforce one-per-org.
     const submission = await this.prisma.kycSubmission.findFirst({
       where: { id, ...this.kycTenantFilter(user) },
-      include: { partner: { select: { id: true, clientId: true } } },
+      include: {
+        partner: {
+          select: {
+            id: true,
+            clientId: true,
+            outlets: {
+              where: { deletedAt: null },
+              orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+              take: 1,
+              select: { parentId: true },
+            },
+          },
+        },
+      },
     });
 
     if (!submission) throw new NotFoundException('KYC submission not found');
     if (!submission.partner) throw new NotFoundException('No ChannelPartner linked to this submission');
+
+    // C4: GROUP-CLASSIFICATION LOCK — a grouped outlet under an approved group classification may
+    // only carry the group's (entityType, gstRegistrationType). This backstops the FE lock+prefill
+    // so a direct API call / stale-prefill race can't set a divergent pair (one registration/entity
+    // type per organization). No group or no approved classification yet → nothing to lock.
+    const gstLockParentId = submission.partner.outlets?.[0]?.parentId ?? null;
+    if (gstLockParentId) {
+      const lock = await resolveGroupClassification(this.prisma, submission.partner.clientId, gstLockParentId);
+      if (lock && (entityType !== lock.entityType || gstRegistrationType !== lock.gstRegistrationType)) {
+        throw new BadRequestException(
+          'Classification is locked to the group — one registration/entity type per organization.',
+        );
+      }
+    }
 
     // Persist entityType + gstRegistrationType on the partner.
     await this.prisma.channelPartner.update({
@@ -3732,6 +3923,72 @@ export class KycService {
    * @param now        Timestamp for approvedAt / verifiedAt fields.
    * @returns { outcome, notification? } — the notification intent is absent for PENDING_GIFSY.
    */
+  /**
+   * C5 COMPULSORY CLASSIFICATION GATE (single choke point). Throws unless the partner carries BOTH
+   * Entity Type + GST Registration Type. A null partner (structurally a parent owner — never a real
+   * outlet owner reaching terminal approve) has no ChannelPartner to classify → no-op (the wallet /
+   * activation block is likewise gated on a non-null partner). Kept tiny + private so every
+   * terminal-approve path funnels through the SAME check via applyBridgeOutcome.
+   */
+  private assertClassificationSet(
+    partner: { entityType: EntityType | null; gstRegistrationType: GstRegistrationType | null } | null,
+  ): void {
+    if (!partner) return;
+    if (partner.entityType == null || partner.gstRegistrationType == null) {
+      throw new BadRequestException('Set Entity Type and GST Registration Type before approving this KYC.');
+    }
+  }
+
+  /**
+   * Resolve the owner-group's APPROVED classification lock and ENFORCE one-per-org on the partner:
+   *  - partner classification NULL          → fill it from the lock;
+   *  - partner classification DIVERGES       → OVERWRITE to the lock (first-approved-wins — the group
+   *                                            lock is authoritative over a later child's divergent pick;
+   *                                            without this two children set before any approval could
+   *                                            leave the group with two classifications);
+   *  - matches / no lock                     → leave as-is.
+   * Persists to the DB AND mutates the in-memory partner (so a subsequent gate/read sees it). Returns
+   * true when the partner ends CLASSIFIED (both fields set) OR the partner is null (defense-in-depth
+   * no-op). Shared by every terminal-approve path so the gate + one-per-org invariant never diverge.
+   */
+  private async ensureGroupClassification(
+    tx: Prisma.TransactionClient,
+    submission: {
+      partnerId: string | null;
+      partner: {
+        clientId: string;
+        entityType: EntityType | null;
+        gstRegistrationType: GstRegistrationType | null;
+        outlets: Array<{ parentId: string | null }>;
+      } | null;
+    },
+  ): Promise<boolean> {
+    const partner = submission.partner;
+    if (!partner) return true; // null partner → the gate no-ops (defense-in-depth)
+    const lockParentId = partner.outlets[0]?.parentId ?? null;
+    if (lockParentId && submission.partnerId) {
+      // CONCURRENCY: serialize approvals of same-group siblings BEFORE the lock-free
+      // resolveGroupClassification read + write, so two divergent children approved in overlapping
+      // txns can't both read lock=null and commit divergent classifications. The xact lock auto-
+      // releases at commit; the second txn then reads the first's committed lock and converges.
+      // ONLY for a grouped child (real parentId) — ungrouped stays lock-free.
+      await acquireGroupClassificationLock(tx, partner.clientId, lockParentId);
+      const lock = await resolveGroupClassification(tx, partner.clientId, lockParentId);
+      if (
+        lock &&
+        (partner.entityType !== lock.entityType || partner.gstRegistrationType !== lock.gstRegistrationType)
+      ) {
+        await tx.channelPartner.update({
+          where: { id: submission.partnerId },
+          data: { entityType: lock.entityType, gstRegistrationType: lock.gstRegistrationType },
+        });
+        partner.entityType = lock.entityType;
+        partner.gstRegistrationType = lock.gstRegistrationType;
+      }
+    }
+    return partner.entityType != null && partner.gstRegistrationType != null;
+  }
+
   private async applyBridgeOutcome(
     tx: Prisma.TransactionClient,
     submission: {
@@ -3756,6 +4013,10 @@ export class KycService {
         // WhatsApp recipient on approval. Distinct from `user` (the submitting rep).
         ownerName: string | null;
         phone: string | null;
+        // KYC classification (set via gst-details). The COMPULSORY APPROVE GATE below reads these:
+        // a submission may not reach APPROVED until BOTH are set (GIFSY-stage requirement).
+        entityType: EntityType | null;
+        gstRegistrationType: GstRegistrationType | null;
         outlets: Array<{
           id: string;
           // The outlet's GROUP key — its owner group (parentId) for the re-KYC apply's
@@ -3775,6 +4036,14 @@ export class KycService {
     const sourceLabel = source === 'EXCEL' ? 'EXCEL_BULK' : 'PORTAL';
 
     if (bridgeResult.next === 'APPROVED') {
+      // AUTO-INHERIT + one-per-org overwrite of classification from the owner-group lock (fills a null
+      // classification / overwrites a divergent one), then the COMPULSORY GATE. This is the SINGLE
+      // terminal-approve choke point — approve() and the bulk path reach APPROVED only through here and
+      // THROW if still unclassified with no lock. verifyField pre-checks the SAME helper BEFORE calling
+      // this so it can hold at PENDING_GIFSY without rolling back the just-committed field decision.
+      await this.ensureGroupClassification(tx, submission);
+      this.assertClassificationSet(submission.partner);
+
       // Conditional flip — race hardening (§6 NIT #5): only one concurrent writer
       // can win; count===0 means we lost the race → skip side-effects.
       const { count } = await tx.kycSubmission.updateMany({

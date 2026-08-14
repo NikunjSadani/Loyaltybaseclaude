@@ -139,6 +139,10 @@ enum KycFieldDecision {
 enum KycFieldSource {
   EXCEL
   PORTAL
+  // A field auto-verified by GROUP INHERITANCE at KYC create (a brand-new grouped child
+  // reusing an APPROVED parent/sibling's already-vetted GST / GST-cert / payment). Reviewer
+  // can still overwrite it (the verifyField upsert flips source→PORTAL on a manual decision).
+  GROUP_INHERITED
 }
 
 // ── Persisted at KYC approval; promote of the lib/invoice string-unions (P3.4a) ──

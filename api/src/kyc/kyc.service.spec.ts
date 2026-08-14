@@ -1314,7 +1314,8 @@ describe('KycService', () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null); // phone partner-clash
       mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);      // employee-clash
       // Parent PAN lookup (consumed only when the dto carries a PAN → checkPanMatchesGroup).
-      mockTx.channelPartner.findUnique.mockResolvedValue({ panNumber: opts?.parentPan ?? null });
+      // resolveGroupPan's parent read is now a clientId-scoped findFirst (FIX 5).
+      mockTx.channelPartner.findFirst.mockResolvedValue({ panNumber: opts?.parentPan ?? null });
       mockTx.user.findFirst.mockResolvedValueOnce(null);
       mockTx.user.create.mockResolvedValueOnce({ id: 'owner-2' });
       mockTx.channelPartner.create.mockResolvedValueOnce({ id: 'cp-2' });
@@ -1367,8 +1368,9 @@ describe('KycService', () => {
       });
       mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null); // phone partner-clash
       mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);      // employee-clash
-      // resolveGroupPan (inside isGroupDeparture) reads the group's canonical PAN off the parent.
-      mockTx.channelPartner.findUnique.mockResolvedValue({ panNumber: parentPan });
+      // resolveGroupPan (inside isGroupDeparture) reads the group's canonical PAN off the parent
+      // (clientId-scoped findFirst, FIX 5).
+      mockTx.channelPartner.findFirst.mockResolvedValue({ panNumber: parentPan });
       mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
       mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-dep' });
       mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
@@ -1624,6 +1626,8 @@ describe('KycService', () => {
       gstNumber: '29ABCDE1234F1Z5', panNumber: 'ABCDE1234F',
       bankName: 'HDFC', bankAccountNumber: '50100', bankAccountHolder: 'Group Owner',
       ifscCode: 'HDFC0001', upiId: 'owner@upi',
+      // Approved group classification → a grouped child inherits+locks it at create (C-integration).
+      entityType: 'COMPANY', gstRegistrationType: 'REGULAR',
     };
     const SOURCE_DOCS = {
       documents: [
@@ -1649,9 +1653,10 @@ describe('KycService', () => {
       mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
       mockTx.channelPartner.findMany.mockResolvedValue([]); // no uniqueness clash + free partnerCode
       // The carry tests assert a PAN (childPan != null is now required to inherit any doc). The in-tx
-      // checkPanMatchesGroup → resolveGroupPan reads the group's canonical PAN off the parent here;
-      // it must MATCH the asserted child PAN ('ABCDE1234F' = GROUP_SOURCE.panNumber) so create proceeds.
-      mockTx.channelPartner.findUnique.mockResolvedValue({ panNumber: 'ABCDE1234F' });
+      // checkPanMatchesGroup → resolveGroupPan reads the group's canonical PAN off the parent here
+      // (clientId-scoped findFirst, FIX 5); it must MATCH the asserted child PAN ('ABCDE1234F' =
+      // GROUP_SOURCE.panNumber) so create proceeds.
+      mockTx.channelPartner.findFirst.mockResolvedValue({ panNumber: 'ABCDE1234F' });
       mockTx.user.findFirst.mockResolvedValueOnce(null);
       mockTx.user.create.mockResolvedValueOnce({ id: 'owner-2' });
       mockTx.channelPartner.create.mockResolvedValueOnce({ id: 'cp-2' });
@@ -1766,6 +1771,148 @@ describe('KycService', () => {
       } as never);
       expect(createdDocs().find((d) => d.documentType === 'CANCELLED_CHEQUE')).toBeUndefined();
       mockUpiEnabled = false;
+    });
+
+    // ── C6: GROUP-INHERITANCE AUTO-VERIFICATION (brand-new grouped child) ─────────
+    // A brand-new grouped child under an APPROVED source auto-seeds APPROVED GROUP_INHERITED
+    // verification items for the 3 group-shareable fields (GST validation / GST cert / payment)
+    // whose values it kept from the group — the reviewer only has to verify address + photos.
+    const inheritedItems = (): Array<Record<string, unknown>> =>
+      (mockTx.kycVerificationItem.createMany.mock.calls[0]?.[0]?.data ?? []) as Array<Record<string, unknown>>;
+
+    it('C6: seeds APPROVED GROUP_INHERITED items for GST_VALIDATION + GST_DOCUMENT + PAYMENT (gst + bank match)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeCarryForward();
+      // Unchanged GST + bank (== GROUP_SOURCE) + the asserted group PAN → all 3 group fields inherit.
+      await service.create(so, { ...groupedDto, panNumber: 'ABCDE1234F', gstNumber: '29ABCDE1234F1Z5' } as never);
+      const items = inheritedItems();
+      const keys = items.map((i) => i.fieldKey).sort();
+      expect(keys).toEqual(['GST_DOCUMENT', 'GST_VALIDATION', 'PAYMENT']);
+      for (const it of items) {
+        expect(it).toMatchObject({
+          kycSubmissionId: 'sub-2',
+          decision: 'APPROVED',
+          source: 'GROUP_INHERITED',
+          evidence: { groupInherited: true, sourcePartnerId: 'parent-1' },
+        });
+      }
+    });
+
+    it('C6: NEVER inherits address/photo fields (they stay lazily-PENDING for the reviewer)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeCarryForward();
+      await service.create(so, { ...groupedDto, panNumber: 'ABCDE1234F', gstNumber: '29ABCDE1234F1Z5' } as never);
+      const keys = inheritedItems().map((i) => i.fieldKey);
+      for (const forbidden of ['ADDRESS', 'ADDRESS_DOCUMENT', 'BOARD_PHOTO', 'OWNER_PHOTO']) {
+        expect(keys).not.toContain(forbidden);
+      }
+    });
+
+    it('C6: PAYMENT is inherited via a UPI match (child UPI == group UPI), no cheque involved', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      mockUpiEnabled = true;
+      primeCarryForward({ requiredPaymentType: 'UPI' });
+      // paymentMode upi + upiId == GROUP_SOURCE.upiId ('owner@upi') → PAYMENT inherits on the UPI match.
+      await service.create(so, {
+        ...groupedDto, panNumber: 'ABCDE1234F', gstNumber: '29ABCDE1234F1Z5', paymentMode: 'upi', upiId: 'owner@upi',
+      } as never);
+      const items = inheritedItems();
+      const payment = items.find((i) => i.fieldKey === 'PAYMENT');
+      expect(payment).toMatchObject({ source: 'GROUP_INHERITED', decision: 'APPROVED' });
+      mockUpiEnabled = false;
+    });
+
+    it('C6: a UPI MISMATCH does NOT inherit PAYMENT (GST fields still inherit)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      mockUpiEnabled = true;
+      primeCarryForward({ requiredPaymentType: 'UPI' });
+      await service.create(so, {
+        ...groupedDto, panNumber: 'ABCDE1234F', gstNumber: '29ABCDE1234F1Z5', paymentMode: 'upi', upiId: 'different@upi',
+      } as never);
+      const keys = inheritedItems().map((i) => i.fieldKey);
+      expect(keys).not.toContain('PAYMENT');
+      expect(keys).toContain('GST_VALIDATION'); // GST still matches → still inherited
+      mockUpiEnabled = false;
+    });
+
+    it('C6: seeds NOTHING when no APPROVED group source exists (grouped child, unapproved parent)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      // primeGroupedCreate primes NO approved parent/sibling → resolveGroupIdentity → null source.
+      primeGroupedCreate();
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      await service.create(so, { ...groupedDto } as never);
+      expect(mockTx.kycVerificationItem.createMany).not.toHaveBeenCalled();
+    });
+
+    it('C6: seeds NOTHING for an UNGROUPED brand-new outlet (no group to inherit from)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeUngroupedCreate();
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      await service.create(so, { ...groupedDto, panNumber: 'ABCDE1234F' } as never);
+      expect(mockTx.kycVerificationItem.createMany).not.toHaveBeenCalled();
+    });
+
+    it('FIX 2: GST_VALIDATION is NOT inherited when the group source has a NULL PAN (even with both GST absent); other inheritable fields still seed', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      // Brand-new grouped child. The APPROVED group source carries NO PAN and NO GST (bank-only
+      // identity) but DOES have a cancelled cheque → PAYMENT can inherit (proves createMany fires),
+      // while GST_VALIDATION must NOT (no real matching group PAN → the in-tx PAN check is a no-op).
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-2', clientId: 'deoleo', partnerId: null, parentId: 'parent-1',
+        outletCode: 'OUT-2', outletType: { code: 'SSS' }, requiredPaymentType: 'BANK',
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null); // phone-clash
+      const NOPAN_SOURCE = {
+        onboardedAt: new Date('2024-01-01T00:00:00.000Z'), businessName: 'G', ownerName: 'G',
+        gstNumber: null, panNumber: null,
+        bankName: 'HDFC', bankAccountNumber: '50100', bankAccountHolder: 'G', ifscCode: 'HDFC0001', upiId: null,
+        entityType: 'COMPANY', gstRegistrationType: 'REGULAR',
+      };
+      // resolveGroupClassification + resolveGroupIdentity both read the APPROVED parent (persistent).
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(NOPAN_SOURCE);
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      mockTx.channelPartner.findFirst.mockResolvedValue({ panNumber: null }); // resolveGroupPan → null group PAN
+      mockTx.user.findFirst.mockResolvedValueOnce(null);
+      mockTx.user.create.mockResolvedValueOnce({ id: 'owner-2' });
+      mockTx.channelPartner.create.mockResolvedValueOnce({ id: 'cp-2' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null); // in-tx dup guard
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-2' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockPrisma.kycDocument.create.mockResolvedValue({});
+      // resolveGroupCarryForwardDocs → a cheque only (no GST cert, so no "cert required" throw).
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        documents: [
+          { documentType: 'CANCELLED_CHEQUE', fileUrl: 'cu', fileKey: 'kyc/deoleo/SRC/cheque.pdf', fileName: 'c.pdf', mimeType: 'application/pdf', fileSizeBytes: 22 },
+        ],
+      });
+      // Child asserts its OWN PAN (the group has none) + no GST + matching bank.
+      await service.create(so, { ...groupedDto, panNumber: 'CHILDPAN99F' } as never);
+      const items = (mockTx.kycVerificationItem.createMany.mock.calls[0]?.[0]?.data ?? []) as Array<Record<string, unknown>>;
+      const keys = items.map((i) => i.fieldKey);
+      expect(keys).toContain('PAYMENT');           // proves createMany fired (bank + cheque match)
+      expect(keys).not.toContain('GST_VALIDATION'); // FIX 2: no real matching group PAN → never auto-approved
+    });
+
+    it('WRITE-AT-CREATE: a grouped child under an approved group classification carries entityType/gstRegistrationType on its new partner', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      // GROUP_SOURCE (the APPROVED parent read by resolveGroupClassification) carries (COMPANY, REGULAR).
+      primeCarryForward();
+      await service.create(so, { ...groupedDto, panNumber: 'ABCDE1234F', gstNumber: '29ABCDE1234F1Z5' } as never);
+      const data = mockTx.channelPartner.create.mock.calls[0][0].data;
+      expect(data.entityType).toBe('COMPANY');
+      expect(data.gstRegistrationType).toBe('REGULAR');
+    });
+
+    it('WRITE-AT-CREATE: an UNGROUPED brand-new child gets NO classification (reviewer must pick)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeUngroupedCreate();
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      await service.create(so, { ...groupedDto, panNumber: 'ABCDE1234F' } as never);
+      const data = mockTx.channelPartner.create.mock.calls[0][0].data;
+      expect(data.entityType).toBeUndefined();
+      expect(data.gstRegistrationType).toBeUndefined();
     });
 
     it('persists PAN/GST upper-cased + trimmed (write-side normalization, F5)', async () => {
@@ -2178,6 +2325,9 @@ describe('KycService', () => {
       const partnerWithOwner = {
         userId: 'owner-9',
         clientId: 'deoleo',
+        // Classification set → passes the compulsory approve gate (C5).
+        entityType: 'INDIVIDUAL',
+        gstRegistrationType: 'REGULAR',
         ownerName: 'Acme Owner',
         phone: '9000000001',
         outlets: [
@@ -2236,6 +2386,9 @@ describe('KycService', () => {
       const partnerWithOwner = {
         userId: 'owner-9',
         clientId: 'deoleo',
+        // Classification set → passes the compulsory approve gate (C5).
+        entityType: 'INDIVIDUAL',
+        gstRegistrationType: 'REGULAR',
         ownerName: 'Acme Owner',
         phone: '9000000001',
         outlets: [
@@ -2901,7 +3054,7 @@ describe('KycService', () => {
         status: 'PENDING_GIFSY',
         partnerId: 'p1',
         user: { name: 'n', phone: 'p' },
-        partner: { userId: 'owner-9', outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+        partner: { userId: 'owner-9', entityType: 'INDIVIDUAL', gstRegistrationType: 'REGULAR', outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
       });
       // In-tx re-assert
       mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
@@ -2910,7 +3063,7 @@ describe('KycService', () => {
         status: 'PENDING_GIFSY',
         partnerId: 'p1',
         user: { name: 'n', phone: 'p' },
-        partner: { userId: 'owner-9', outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+        partner: { userId: 'owner-9', entityType: 'INDIVIDUAL', gstRegistrationType: 'REGULAR', outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
       });
       // Step 1: load existing items (none yet, so all 7 are missing)
       mockTx.kycVerificationItem.findMany.mockResolvedValueOnce([]);
@@ -3082,7 +3235,7 @@ describe('KycService', () => {
         status: 'PENDING_GIFSY',
         partnerId: 'p1',
         user: { name: 'n', phone: 'p' },
-        partner: { outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+        partner: { entityType: 'INDIVIDUAL', gstRegistrationType: 'REGULAR', outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
       });
       // In-tx re-assert
       mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
@@ -3091,7 +3244,7 @@ describe('KycService', () => {
         status: 'PENDING_GIFSY',
         partnerId: 'p1',
         user: { name: 'n', phone: 'p' },
-        partner: { outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+        partner: { entityType: 'INDIVIDUAL', gstRegistrationType: 'REGULAR', outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
       });
       // Existing items: 6 APPROVED + 1 REJECTED (OWNER_PHOTO)
       const existingItems = KYC_FIELD_KEYS.map((k) => ({
@@ -3130,7 +3283,7 @@ describe('KycService', () => {
         status: 'PENDING_GIFSY',
         partnerId: 'p1',
         user: { name: 'n', phone: 'p' },
-        partner: { outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+        partner: { entityType: 'INDIVIDUAL', gstRegistrationType: 'REGULAR', outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
       });
       // In-tx re-assert
       mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
@@ -3139,7 +3292,7 @@ describe('KycService', () => {
         status: 'PENDING_GIFSY',
         partnerId: 'p1',
         user: { name: 'n', phone: 'p' },
-        partner: { outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+        partner: { entityType: 'INDIVIDUAL', gstRegistrationType: 'REGULAR', outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
       });
       mockTx.kycVerificationItem.findMany.mockResolvedValueOnce([]);
       mockTx.kycVerificationItem.updateMany.mockResolvedValueOnce({ count: 0 });
@@ -3175,6 +3328,8 @@ describe('KycService', () => {
         userId: 'owner-9',
         clientId: 'deoleo',
         isParent: false,
+        entityType: 'INDIVIDUAL',
+        gstRegistrationType: 'REGULAR',
         ownerName: 'Old Owner',
         phone: CURRENT_PHONE,
         outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, parentId: null, reKycFlags: null }],
@@ -3318,6 +3473,7 @@ describe('KycService', () => {
     const seedGroupedReKycApprove = (proposed: Record<string, unknown>, groupPan: string) => {
       const partner = {
         userId: 'owner-9', clientId: 'deoleo', isParent: false,
+        entityType: 'INDIVIDUAL', gstRegistrationType: 'REGULAR',
         ownerName: 'Old Owner', phone: CURRENT_PHONE,
         outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, parentId: 'parent-1', reKycFlags: null }],
       };
@@ -3332,7 +3488,12 @@ describe('KycService', () => {
       mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 7 });
       mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
       mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
-      // findUnique routed by id: parent → group PAN (resolveGroupPan); the partner → applied phone.
+      // resolveGroupPan's parent PAN read is now findFirst (FIX 5); resolveGroupClassification also
+      // reads findFirst (parent → no classification here → no lock). Route by id → group PAN.
+      mockTx.channelPartner.findFirst.mockImplementation(async (args: any) =>
+        args?.where?.id === 'parent-1' ? { panNumber: groupPan } : null,
+      );
+      // findUnique now serves only the login-phone-sync partner read (partner id → applied phone).
       mockTx.channelPartner.findUnique.mockImplementation(async (args: any) =>
         args?.where?.id === 'parent-1' ? { panNumber: groupPan } : { phone: CURRENT_PHONE },
       );
@@ -3416,6 +3577,7 @@ describe('KycService', () => {
       const partner = {
         userId: null, // LOGIN-LESS sibling (reachable only via the group login's picker)
         clientId: 'deoleo', isParent: false,
+        entityType: 'INDIVIDUAL', gstRegistrationType: 'REGULAR',
         ownerName: 'Old Owner', phone: partnerPhone,
         outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, parentId: 'parent-1', reKycFlags: null }],
       };
@@ -3431,7 +3593,11 @@ describe('KycService', () => {
       mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
       mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
       mockTx.channelPartner.findMany.mockResolvedValue([]); // standalone uniqueness → clean
-      // findUnique routed by id: parent → group PAN; the partner (login-sync) → effective phone.
+      // resolveGroupPan's parent PAN read is now findFirst (FIX 5); route by id → group PAN.
+      mockTx.channelPartner.findFirst.mockImplementation(async (args: any) =>
+        args?.where?.id === 'parent-1' ? { panNumber: groupPan } : null,
+      );
+      // findUnique now serves only the login-phone-sync partner read (partner id → effective phone).
       mockTx.channelPartner.findUnique.mockImplementation(async (args: any) =>
         args?.where?.id === 'parent-1' ? { panNumber: groupPan } : { phone: effectivePhone },
       );
@@ -3522,6 +3688,198 @@ describe('KycService', () => {
     });
   });
 
+  // ─── C5: COMPULSORY CLASSIFICATION GATE at terminal approve ──────────────────
+  describe('compulsory classification gate (C5)', () => {
+    /** Seed an all-7-APPROVED approve() whose partner classification is caller-controlled. */
+    const seedApproveGate = (cls: { entityType: unknown; gstRegistrationType: unknown }) => {
+      const partner = {
+        userId: 'owner-9', clientId: 'deoleo', isParent: false,
+        entityType: cls.entityType, gstRegistrationType: cls.gstRegistrationType,
+        ownerName: 'Owner', phone: '9000000001',
+        outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, parentId: null, reKycFlags: null }],
+      };
+      const row = {
+        id: 's1', userId: 'user1', status: 'PENDING_GIFSY', partnerId: 'p1',
+        user: { name: 'n', phone: 'p' }, partner,
+      };
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(row);
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(row);
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce([]);
+      mockTx.kycVerificationItem.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 7 });
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
+      mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.wallet.findFirst.mockResolvedValueOnce(null);
+      mockTx.wallet.create.mockResolvedValueOnce({ id: 'w1' });
+      mockTx.user.update.mockResolvedValueOnce({});
+      mockTx.outlet.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+    };
+
+    it('approve() BLOCKS the transition when entityType is null (no flip, no activation, no notify)', async () => {
+      seedApproveGate({ entityType: null, gstRegistrationType: 'REGULAR' });
+      await expect(service.approve(gifsy, 's1')).rejects.toThrow(/Set Entity Type and GST Registration Type/i);
+      expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
+      expect(mockTx.user.update).not.toHaveBeenCalled();
+      expect(mockNotifications.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('approve() BLOCKS the transition when gstRegistrationType is null', async () => {
+      seedApproveGate({ entityType: 'COMPANY', gstRegistrationType: null });
+      await expect(service.approve(gifsy, 's1')).rejects.toThrow(/Set Entity Type and GST Registration Type/i);
+      expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('approve() ALLOWS the transition when BOTH classification fields are set', async () => {
+      seedApproveGate({ entityType: 'COMPANY', gstRegistrationType: 'REGULAR' });
+      const res = await service.approve(gifsy, 's1');
+      expect(res).toEqual({ message: 'KYC approved successfully' });
+      expect(mockTx.kycSubmission.updateMany).toHaveBeenCalled(); // the status flip ran
+    });
+
+    it('FIX 4: verifyField() on the terminal field with null classification + no lock PERSISTS the field decision, HOLDS at PENDING_GIFSY, and returns classificationRequired=true (no rollback)', async () => {
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1', userId: 'user1', status: 'PENDING_GIFSY', partnerId: 'p1',
+        user: { name: 'n', phone: 'p' },
+        // Ungrouped (parentId null) → no group lock to inherit → classification genuinely unset.
+        partner: { clientId: 'deoleo', entityType: null, gstRegistrationType: null, outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, parentId: null, reKycFlags: null }] },
+      });
+      mockTx.kycVerificationItem.upsert.mockResolvedValueOnce({});
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED); // bridge → APPROVED
+      const res = await service.verifyField(gifsy, 's1', { fieldKey: 'OWNER_PHOTO', decision: 'APPROVED' });
+      // The field decision was committed (upsert ran) and NOT rolled back — no throw.
+      expect(mockTx.kycVerificationItem.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({ create: expect.objectContaining({ decision: 'APPROVED' }) }),
+      );
+      // Held at PENDING_GIFSY (no status flip), signalled to the FE.
+      expect(res.classificationRequired).toBe(true);
+      expect(res.derivedStatus).toBe('PENDING_GIFSY');
+      expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
+      expect(mockNotifications.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('verifyField() ALLOWS the terminal approve when classification is set', async () => {
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1', userId: 'user1', status: 'PENDING_GIFSY', partnerId: 'p1',
+        user: { name: 'n', phone: 'p' },
+        partner: { entityType: 'COMPANY', gstRegistrationType: 'REGULAR', outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+      });
+      mockTx.kycVerificationItem.upsert.mockResolvedValueOnce({});
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
+      mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.wallet.findFirst.mockResolvedValueOnce(null);
+      mockTx.wallet.create.mockResolvedValueOnce({ id: 'w1' });
+      mockTx.user.update.mockResolvedValueOnce({});
+      mockTx.outlet.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+      const res = await service.verifyField(gifsy, 's1', { fieldKey: 'OWNER_PHOTO', decision: 'APPROVED' });
+      expect(res.derivedStatus).toBe('APPROVED');
+      expect(mockTx.kycSubmission.updateMany).toHaveBeenCalled();
+    });
+
+    /** Seed an all-7-APPROVED approve() for a grouped child (primary outlet parentId) with NULL
+     *  classification — the auto-persist-at-approval path. `opts.lock` = what resolveGroupClassification
+     *  (the tx parent read) returns; null → no approved group classification exists yet. */
+    const seedGroupedApproveNoClassification = (opts: {
+      lock: { entityType: string; gstRegistrationType: string } | null;
+      partnerCls?: { entityType: string | null; gstRegistrationType: string | null };
+    }) => {
+      const cls = opts.partnerCls ?? { entityType: null, gstRegistrationType: null };
+      const partner = {
+        userId: 'owner-9', clientId: 'deoleo', isParent: false,
+        entityType: cls.entityType, gstRegistrationType: cls.gstRegistrationType,
+        ownerName: 'Owner', phone: '9000000001',
+        outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, parentId: 'parent-1', reKycFlags: null }],
+      };
+      const row = {
+        id: 's1', userId: 'user1', status: 'PENDING_GIFSY', partnerId: 'p1',
+        user: { name: 'n', phone: 'p' }, partner,
+      };
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(row);
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(row);
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce([]);
+      mockTx.kycVerificationItem.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 7 });
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
+      // resolveGroupClassification (tx) parent read → the lock (or null = no approved group classification).
+      mockTx.channelPartner.findFirst.mockResolvedValue(
+        opts.lock ? { onboardedAt: new Date(), ...opts.lock } : null,
+      );
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'p1' });
+      mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.wallet.findFirst.mockResolvedValueOnce(null);
+      mockTx.wallet.create.mockResolvedValueOnce({ id: 'w1' });
+      mockTx.user.update.mockResolvedValueOnce({});
+      mockTx.outlet.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+    };
+
+    it('AUTO-PERSIST: grouped child with null classification + an approved group lock → approval SUCCEEDS and writes the locked values to the partner', async () => {
+      seedGroupedApproveNoClassification({ lock: { entityType: 'COMPANY', gstRegistrationType: 'REGULAR' } });
+      const res = await service.approve(gifsy, 's1');
+      expect(res).toEqual({ message: 'KYC approved successfully' });
+      // The lock was persisted onto the child partner in the same tx…
+      expect(mockTx.channelPartner.update).toHaveBeenCalledWith({
+        where: { id: 'p1' },
+        data: { entityType: 'COMPANY', gstRegistrationType: 'REGULAR' },
+      });
+      // …and the status flip proceeded (gate passed).
+      expect(mockTx.kycSubmission.updateMany).toHaveBeenCalled();
+    });
+
+    it('AUTO-PERSIST: grouped child with null classification but NO group lock → approval still BLOCKED', async () => {
+      seedGroupedApproveNoClassification({ lock: null });
+      await expect(service.approve(gifsy, 's1')).rejects.toThrow(/Set Entity Type and GST Registration Type/i);
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+      expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('FIX 3 (one-per-org): a grouped child with a DIVERGENT pre-set classification is OVERWRITTEN to the group lock at approval', async () => {
+      seedGroupedApproveNoClassification({
+        lock: { entityType: 'COMPANY', gstRegistrationType: 'REGULAR' },
+        partnerCls: { entityType: 'INDIVIDUAL', gstRegistrationType: 'COMPOSITE' }, // diverges from the lock
+      });
+      const res = await service.approve(gifsy, 's1');
+      expect(res).toEqual({ message: 'KYC approved successfully' });
+      // First-approved-wins: the divergent pick is overwritten to the group's authoritative classification.
+      expect(mockTx.channelPartner.update).toHaveBeenCalledWith({
+        where: { id: 'p1' },
+        data: { entityType: 'COMPANY', gstRegistrationType: 'REGULAR' },
+      });
+      expect(mockTx.kycSubmission.updateMany).toHaveBeenCalled();
+    });
+
+    it('FIX 3: a grouped child whose classification MATCHES the lock is NOT re-written', async () => {
+      seedGroupedApproveNoClassification({
+        lock: { entityType: 'COMPANY', gstRegistrationType: 'REGULAR' },
+        partnerCls: { entityType: 'COMPANY', gstRegistrationType: 'REGULAR' }, // already matches
+      });
+      await service.approve(gifsy, 's1');
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled(); // no divergence → no write
+      expect(mockTx.kycSubmission.updateMany).toHaveBeenCalled();
+    });
+
+    it('CONCURRENCY: takes the per-(clientId,parentId) advisory xact-lock for a GROUPED child before resolving classification', async () => {
+      seedGroupedApproveNoClassification({ lock: { entityType: 'COMPANY', gstRegistrationType: 'REGULAR' } });
+      await service.approve(gifsy, 's1');
+      // The classification advisory lock is issued on the tx client with the shared hashtext key
+      // convention `${clientId}:classification:${parentId}` (serializes same-group sibling approvals).
+      expect(mockTx.$executeRaw).toHaveBeenCalled();
+      const lockKeys = mockTx.$executeRaw.mock.calls.map((c: any[]) => c[1]);
+      expect(lockKeys).toContain('deoleo:classification:parent-1');
+    });
+
+    it('CONCURRENCY: does NOT take the advisory lock for an UNGROUPED child (parentId null)', async () => {
+      // seedApproveGate uses an ungrouped primary outlet (parentId null) with classification set.
+      seedApproveGate({ entityType: 'COMPANY', gstRegistrationType: 'REGULAR' });
+      await service.approve(gifsy, 's1');
+      expect(mockTx.$executeRaw).not.toHaveBeenCalled();
+    });
+  });
+
   describe('verifyField (POST /v1/kyc/:id/verify)', () => {
     /** Seed a in-tx PENDING_GIFSY re-assert. */
     const seedVerifyTx = (overrides?: Partial<{ outlets: unknown[] }>) => {
@@ -3532,7 +3890,8 @@ describe('KycService', () => {
         status: 'PENDING_GIFSY',
         partnerId: 'p1',
         user: { name: 'n', phone: 'p' },
-        partner: { outlets },
+        // Classification set → the all-7-APPROVED case clears the compulsory approve gate (C5).
+        partner: { entityType: 'INDIVIDUAL', gstRegistrationType: 'REGULAR', outlets },
       });
     };
 
@@ -4059,6 +4418,108 @@ describe('KycService', () => {
         }),
       );
     });
+
+    // ── C4: GROUP-CLASSIFICATION LOCK ────────────────────────────────────────────
+    it('C4 lock: REJECTS a divergent pick when the group classification is locked (no write)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 'sub-gst-lock',
+        userId: 'user1',
+        partner: { id: 'pg', clientId: 'deoleo', outlets: [{ parentId: 'parent-1' }] },
+      });
+      // resolveGroupClassification → APPROVED parent locks the group to (COMPANY, REGULAR).
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce({
+        onboardedAt: new Date(), entityType: 'COMPANY', gstRegistrationType: 'REGULAR',
+      });
+      await expect(
+        service.gstDetails(gifsy, 'sub-gst-lock', { entityType: 'INDIVIDUAL', gstRegistrationType: 'REGULAR' }),
+      ).rejects.toThrow(/locked to the group/i);
+      expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+    });
+
+    it('C4 lock: ALLOWS a pick that MATCHES the locked group classification', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 'sub-gst-lock2',
+        userId: 'user1',
+        partner: { id: 'pg2', clientId: 'deoleo', outlets: [{ parentId: 'parent-1' }] },
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce({
+        onboardedAt: new Date(), entityType: 'COMPANY', gstRegistrationType: 'REGULAR',
+      });
+      mockPrisma.channelPartner.update.mockResolvedValueOnce({ id: 'pg2' });
+      const res = await service.gstDetails(gifsy, 'sub-gst-lock2', {
+        entityType: 'COMPANY', gstRegistrationType: 'REGULAR',
+      });
+      expect(res.entityType).toBe('COMPANY');
+      expect(mockPrisma.channelPartner.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { entityType: 'COMPANY', gstRegistrationType: 'REGULAR' } }),
+      );
+    });
+
+    it('C4 lock: an UNGROUPED outlet (no parentId) is free to pick any classification', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 'sub-gst-free',
+        userId: 'user1',
+        partner: { id: 'pf', clientId: 'deoleo', outlets: [{ parentId: null }] },
+      });
+      mockPrisma.channelPartner.update.mockResolvedValueOnce({ id: 'pf' });
+      const res = await service.gstDetails(gifsy, 'sub-gst-free', {
+        entityType: 'INDIVIDUAL', gstRegistrationType: 'COMPOSITE',
+      });
+      expect(res.entityType).toBe('INDIVIDUAL');
+      // No group → the classification lock is never resolved.
+      expect(mockPrisma.channelPartner.findFirst).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── FIX 1: PATCH /v1/kyc/:id → APPROVED must not bypass the classification gate ──
+  describe('update() PATCH status=APPROVED classification gate (FIX 1)', () => {
+    /** Prime update() up to the tx classification check + the status write. */
+    const seedPatchApprove = (partner: Record<string, unknown> | null) => {
+      // Outer tenant-scoped load (no partner include).
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({ id: 's1', status: 'PENDING_GIFSY', userId: 'u1' });
+      // The in-tx classification load (partnerId + partner classification + primary outlet parentId).
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce({ partnerId: partner ? 'p1' : null, partner });
+      mockTx.kycSubmission.update.mockResolvedValueOnce({ id: 's1', status: 'APPROVED' });
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+    };
+
+    it('BLOCKS PATCH status=APPROVED when classification is null and there is NO group lock (no status write)', async () => {
+      seedPatchApprove({ clientId: 'deoleo', entityType: null, gstRegistrationType: null, outlets: [{ parentId: null }] });
+      await expect(service.update(gifsy, 's1', { status: 'APPROVED' } as never)).rejects.toThrow(
+        /Set Entity Type and GST Registration Type/i,
+      );
+      expect(mockTx.kycSubmission.update).not.toHaveBeenCalled();
+    });
+
+    it('ALLOWS PATCH status=APPROVED when classification is already set', async () => {
+      seedPatchApprove({ clientId: 'deoleo', entityType: 'COMPANY', gstRegistrationType: 'REGULAR', outlets: [{ parentId: null }] });
+      await service.update(gifsy, 's1', { status: 'APPROVED' } as never);
+      expect(mockTx.kycSubmission.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ status: 'APPROVED' }) }),
+      );
+    });
+
+    it('ALLOWS PATCH status=APPROVED for a grouped child with null classification when the group has a lock (auto-persists it)', async () => {
+      seedPatchApprove({ clientId: 'deoleo', entityType: null, gstRegistrationType: null, outlets: [{ parentId: 'parent-1' }] });
+      // resolveGroupClassification (tx) → APPROVED parent lock.
+      mockTx.channelPartner.findFirst.mockResolvedValueOnce({ onboardedAt: new Date(), entityType: 'COMPANY', gstRegistrationType: 'REGULAR' });
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'p1' });
+      await service.update(gifsy, 's1', { status: 'APPROVED' } as never);
+      expect(mockTx.channelPartner.update).toHaveBeenCalledWith({
+        where: { id: 'p1' },
+        data: { entityType: 'COMPANY', gstRegistrationType: 'REGULAR' },
+      });
+      expect(mockTx.kycSubmission.update).toHaveBeenCalled();
+    });
+
+    it('does NOT run the classification gate for a non-APPROVED PATCH (e.g. reviewerNotes only)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({ id: 's1', status: 'PENDING_GIFSY', userId: 'u1' });
+      mockTx.kycSubmission.update.mockResolvedValueOnce({ id: 's1' });
+      await service.update(gifsy, 's1', { reviewerNotes: 'note' } as never);
+      // No →APPROVED transition → no in-tx classification load.
+      expect(mockTx.kycSubmission.findFirst).not.toHaveBeenCalled();
+      expect(mockTx.kycSubmission.update).toHaveBeenCalled();
+    });
   });
 
   // ── Task 3.4e: DPDP masking in getOne() ──────────────────────────────────────
@@ -4342,7 +4803,11 @@ describe('KycService', () => {
       const res = (await service.getOne(mis, 's1')) as {
         submission: { parentVerified: Record<string, boolean> };
       };
-      expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledTimes(1);
+      // The parentVerified read is the onboardedAt-gated approved-parent lookup (first findFirst
+      // call). getOne now ALSO resolves the C3 group classificationLock (further findFirst reads),
+      // so assert the specific parentVerified query ran rather than a total call count.
+      expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalled();
+      expect(mockPrisma.channelPartner.findFirst.mock.calls[0][0].where.onboardedAt).toEqual({ not: null });
       expect(res.submission.parentVerified.panNumber).toBe(false);
       expect(res.submission.parentVerified.gstNumber).toBe(false);
     });
@@ -4371,15 +4836,15 @@ describe('KycService', () => {
 
     it('is TRUE when the outlet is grouped and the proposed PAN differs from the group PAN', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(submissionWith({ panNumber: 'DIFFERENT9F' }));
-      // resolveGroupPan reads the group's canonical PAN off the parent (findUnique by parentId).
-      mockPrisma.channelPartner.findUnique.mockResolvedValue({ panNumber: 'GROUPPAN01F' });
+      // resolveGroupPan reads the group's canonical PAN off the parent (clientId-scoped findFirst, FIX 5).
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ panNumber: 'GROUPPAN01F' });
       const res = (await service.getOne(mis, 's1')) as { submission: { willLeaveGroup: boolean } };
       expect(res.submission.willLeaveGroup).toBe(true);
     });
 
     it('is FALSE when the proposed PAN EQUALS the group PAN (non-departure re-KYC)', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(submissionWith({ panNumber: 'GROUPPAN01F' }));
-      mockPrisma.channelPartner.findUnique.mockResolvedValue({ panNumber: 'GROUPPAN01F' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ panNumber: 'GROUPPAN01F' });
       const res = (await service.getOne(mis, 's1')) as { submission: { willLeaveGroup: boolean } };
       expect(res.submission.willLeaveGroup).toBe(false);
     });
@@ -4393,7 +4858,8 @@ describe('KycService', () => {
       );
       const res = (await service.getOne(mis, 's1')) as { submission: { willLeaveGroup: boolean } };
       expect(res.submission.willLeaveGroup).toBe(false);
-      expect(mockPrisma.channelPartner.findUnique).not.toHaveBeenCalled();
+      // Ungrouped → the group PAN is never resolved (resolveGroupPan's parent read is findFirst, FIX 5).
+      expect(mockPrisma.channelPartner.findFirst).not.toHaveBeenCalled();
     });
 
     it('is FALSE when there is NO proposedPartner (brand-new / non-re-KYC submission)', async () => {
@@ -4405,7 +4871,7 @@ describe('KycService', () => {
     it('ships ONLY the boolean — the group PAN never appears in the payload', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(submissionWith({ panNumber: 'DIFFERENT9F' }));
       // A distinctive sentinel group PAN that appears nowhere else in the fixture.
-      mockPrisma.channelPartner.findUnique.mockResolvedValue({ panNumber: 'ZZLEAKSENTINEL9F' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ panNumber: 'ZZLEAKSENTINEL9F' });
       const res = (await service.getOne(mis, 's1')) as { submission: Record<string, unknown> };
       expect(res.submission.willLeaveGroup).toBe(true);
       expect(JSON.stringify(res.submission)).not.toContain('ZZLEAKSENTINEL9F');
