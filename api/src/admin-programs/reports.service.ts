@@ -161,8 +161,12 @@ export class ReportsService {
    * one active-assignment query (with the SalesUser reportingTo chain), one
    * submissions+documents+statusHistory query — then assembled in memory.
    *
-   * Doc links (#53-55) are signed doc-view tokens pointed at the FE `/api/*`
-   * proxy (→ backend `/v1/*`), so they open without an app login for 30 days.
+   * Doc links (#53-55) are signed doc-view tokens pointed DIRECTLY at the backend's
+   * versioned `/v1/*` @Public surface (NOT the FE `/api/*` proxy prefix). The report is
+   * fetched via `/api/admin/reports/outlet-master` → rewritten to the backend, so the host
+   * we resolve (x-forwarded-host / host) is the API host the rewrite forwarded to (e.g.
+   * api.gifsy.in), which serves `/v1/...`, never `/api/...`. Using `/api/...` produced a 404
+   * (historical bug); `/v1/...` opens without an app login for 30 days, no FE-edge dependency.
    */
   async outletMaster(user: JwtPayload, req?: Request): Promise<StreamableFile> {
     const clientId = user.clientId;
@@ -500,7 +504,7 @@ export class ReportsService {
   ): string {
     const doc = sub?.documents.find((d) => d.documentType === type);
     if (!doc) return '';
-    return `${base}/api/kyc/documents/view?token=${this.kyc.signDocViewToken(doc.id, clientId)}`;
+    return `${base}/v1/kyc/documents/view?token=${this.kyc.signDocViewToken(doc.id, clientId)}`;
   }
 
   // ── Points Ledger ────────────────────────────────────────────────────────────

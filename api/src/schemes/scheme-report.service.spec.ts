@@ -240,7 +240,7 @@ describe('buildEnrollmentExportRows (pure)', () => {
 
   it('renders a media field as an ABSOLUTE hyperlink when the mintLink resolves a host', () => {
     const absLink = (sub: string, fid: string) =>
-      `https://deoleo.example.com/api/schemes/media/view?token=tok_${sub}_${fid}`;
+      `https://deoleo.example.com/v1/schemes/media/view?token=tok_${sub}_${fid}`;
     const roster: ExportRosterRow[] = [
       row({ outletRef: 'A', enrollment: enrolled({ formValues: { f_photo: 'gcs/p.jpg' } }) }),
     ];
@@ -248,7 +248,7 @@ describe('buildEnrollmentExportRows (pure)', () => {
     expect(rows[0]['Photo']).toEqual({
       __hyperlink: true,
       text: 'View image',
-      target: 'https://deoleo.example.com/api/schemes/media/view?token=tok_enr_A_f_photo',
+      target: 'https://deoleo.example.com/v1/schemes/media/view?token=tok_enr_A_f_photo',
     });
   });
 
@@ -270,14 +270,14 @@ describe('buildEnrollmentExportRows (pure)', () => {
 // ── Bug 2: buildXlsx emits a real hyperlink cell (`.l.Target`) ────────────────
 describe('buildXlsx hyperlink cells (bug 2)', () => {
   it('writes a HyperlinkCell as a SheetJS cell with .l.Target set + cellSafe display text', () => {
-    const link: HyperlinkCell = { __hyperlink: true, text: 'View image', target: 'https://h/api/schemes/media/view?token=T' };
+    const link: HyperlinkCell = { __hyperlink: true, text: 'View image', target: 'https://h/v1/schemes/media/view?token=T' };
     expect(isHyperlinkCell(link)).toBe(true);
     const buf = buildXlsx([{ name: 'S', rows: [{ Name: 'Shop', Photo: link }] }]);
     const wb = XLSX.read(buf, { type: 'buffer' });
     const ws = wb.Sheets['S'];
     const cell = cellByHeader(ws, 'Photo', 0);
     expect(cell?.v).toBe('View image');
-    expect(cell?.l?.Target).toBe('https://h/api/schemes/media/view?token=T');
+    expect(cell?.l?.Target).toBe('https://h/v1/schemes/media/view?token=T');
   });
 });
 
@@ -444,10 +444,10 @@ describe('SchemeReportService', () => {
       const rows = XLSX.utils.sheet_to_json<Record<string, string>>(ws);
 
       // Media cell displays "View image" and carries a real hyperlink to the PUBLIC
-      // tokenized view route (proxy-relative form — no host threaded in).
+      // tokenized backend route (path-relative form — no host threaded in).
       const photoCell = cellByHeader(ws, 'Photo', 0);
       expect(photoCell?.v).toBe('View image');
-      expect(photoCell?.l?.Target).toBe('/api/schemes/media/view?token=TESTTOKEN');
+      expect(photoCell?.l?.Target).toBe('/v1/schemes/media/view?token=TESTTOKEN');
       // The token is minted with the enrollment id, tenant, field id, and type gate.
       expect(mockJwt.sign).toHaveBeenCalledWith(
         { sub: 'enr1', clientId: 'deoleo', fieldId: 'f_photo', typ: 'schememedia' },
@@ -485,7 +485,7 @@ describe('SchemeReportService', () => {
       const wb = XLSX.read(await streamToBuffer(file), { type: 'buffer' });
       const ws = wb.Sheets['Enrollments'];
       const photoCell = cellByHeader(ws, 'Photo', 0);
-      expect(photoCell?.l?.Target).toBe('https://deoleo.gifsy.in/api/schemes/media/view?token=TESTTOKEN');
+      expect(photoCell?.l?.Target).toBe('https://deoleo.gifsy.in/v1/schemes/media/view?token=TESTTOKEN');
     });
 
     it('surfaces the submitting rep employee code + falls back Outlet Name; a soft-deleted enrollment leaks NOTHING', async () => {

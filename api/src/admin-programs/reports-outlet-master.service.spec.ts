@@ -4,7 +4,7 @@
 // Asserts: the 57 header strings in exact order (leading columns mirror the upload
 // template's order); the hierarchy-rung mapping by hierarchyLevel.code (a skipped level
 // leaves blanks, not a shift); the derived Profile Status (real lifecycle stage); and that
-// a doc cell carries a /api/kyc/documents/view link.
+// a doc cell carries a /v1/kyc/documents/view link.
 
 import { Test, TestingModule } from '@nestjs/testing';
 import { StreamableFile } from '@nestjs/common';
@@ -207,10 +207,10 @@ describe('ReportsService.outletMaster (57 columns)', () => {
     // Remarks (no rejectionReason → reviewerNotes).
     expect(r1[idx('Remarks')]).toBe('looks good');
 
-    // Doc links point at the FE /api proxy and carry the signed token.
-    expect(String(r1[idx('GST Certificate')])).toBe('https://app.example.com/api/kyc/documents/view?token=TOK_docGST');
-    expect(String(r1[idx('Address Proof')])).toContain('/api/kyc/documents/view?token=');
-    expect(String(r1[idx('Self-Declaration')])).toContain('/api/kyc/documents/view?token=');
+    // Doc links point DIRECTLY at the backend /v1 @Public route and carry the signed token.
+    expect(String(r1[idx('GST Certificate')])).toBe('https://app.example.com/v1/kyc/documents/view?token=TOK_docGST');
+    expect(String(r1[idx('Address Proof')])).toContain('/v1/kyc/documents/view?token=');
+    expect(String(r1[idx('Self-Declaration')])).toContain('/v1/kyc/documents/view?token=');
 
     // o2 has no partner/assignment/submission → those cells blank.
     expect(r2[idx('XSR ID')]).toBe('');

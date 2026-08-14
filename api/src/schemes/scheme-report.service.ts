@@ -416,16 +416,20 @@ export class SchemeReportService {
    * (`typ:'schememedia'`) so it can never be replayed at the doc-view endpoint (and a
    * docview/access token can never be replayed here).
    *
-   * The URL is the app-PROXY path (/api/… → backend /v1/…), made ABSOLUTE against the
-   * tenant host the admin downloaded from so the link is clickable from a .xlsx opened
-   * outside the browser. No host → proxy-relative (still the correct, UNauthenticated path).
+   * The URL targets the backend's versioned `/v1/*` surface DIRECTLY (not the FE `/api/*`
+   * proxy prefix). The report is proxied `/api/schemes/:id/report/export` → backend, so the
+   * host we resolve here (x-forwarded-host / host) is the API host the rewrite forwarded to
+   * (e.g. api.gifsy.in), NOT the tenant FE host — and the API host serves `/v1/...`, never
+   * `/api/...`. Using `/api/...` here produced a 404 (the historical bug); `/v1/...` hits the
+   * @Public endpoint directly, so the link is clickable from a .xlsx opened outside the
+   * browser with no session and no dependence on the FE edge. No host → path-relative fallback.
    */
   private mediaViewLink(enrollmentId: string, clientId: string, fieldId: string, host: string): string {
     const token = this.jwt.sign(
       { sub: enrollmentId, clientId, fieldId, typ: 'schememedia' },
       { secret: this.config.get('JWT_SECRET'), expiresIn: '30d' },
     );
-    const path = `/api/schemes/media/view?token=${encodeURIComponent(token)}`;
+    const path = `/v1/schemes/media/view?token=${encodeURIComponent(token)}`;
     return host ? `https://${host}${path}` : path;
   }
 
