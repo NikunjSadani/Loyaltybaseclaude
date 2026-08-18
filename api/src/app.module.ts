@@ -13,7 +13,7 @@ import { JwtAuthGuard }   from './common/guards/jwt-auth.guard';
 import { RolesGuard }     from './common/guards/roles.guard';
 import { TenantGuard }    from './common/guards/tenant.guard';
 import { PermissionGuard } from './common/guards/permission.guard';
-import { GifsyRoleService } from './common/rbac/gifsy-role.service';
+import { RbacModule } from './common/rbac/rbac.module';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { AllExceptionsFilter }  from './common/filters/all-exceptions.filter';
 
@@ -74,6 +74,7 @@ import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
       skipIf: () => isFixedOtpAllowed() && !!process.env.FIXED_OTP,
     }),
     PrismaModule,
+    RbacModule,
     StorageModule,
     NotificationsModule,
     AuthModule,
@@ -119,9 +120,10 @@ import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
     { provide: APP_GUARD, useClass: TenantGuard },
     // RBAC permission enforcement — flag-gated, no-op unless @RequirePermission + flags on
     { provide: APP_GUARD, useClass: PermissionGuard },
-    // RBAC Option-X — resolves a GIFSY_STAFF user's GifsyRole permissions (injected by
-    // PermissionGuard). PrismaModule is @Global, so no extra imports are needed.
-    GifsyRoleService,
+    // RBAC Option-X — GifsyRoleService (resolves a GIFSY_STAFF user's GifsyRole permissions,
+    // injected by PermissionGuard AND GifsyRolesService) is provided by the @Global RbacModule
+    // above, so it is one shared singleton available to both. (Providing it here instead left
+    // it invisible to GifsyModule's providers → the container failed to boot.)
   ],
 })
 export class AppModule {}
