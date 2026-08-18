@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Get,
   Headers,
+  Param,
   Post,
   Query,
 } from '@nestjs/common';
@@ -12,7 +13,7 @@ import { WalletService } from './wallet.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Public, Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { AdjustWalletDto, ListTransactionsQueryDto } from './dto/wallet.dto';
+import { AdjustWalletDto, AdminOutletTxQueryDto, ListTransactionsQueryDto } from './dto/wallet.dto';
 
 /**
  * Wallet & Points API — re-homed from platform/src/app/api/wallet/* onto /v1.
@@ -53,6 +54,35 @@ export class WalletController {
     @Headers('x-active-partner-id') activePartnerId?: string,
   ) {
     return this.wallet.listTransactions(user, query, activePartnerId);
+  }
+
+  /**
+   * GET /v1/wallet/admin/outlet/:outletCode/summary — GIFSY-only wallet summary BY OUTLET.
+   * Support/ops tooling: resolve any outlet's wallet by outlet CODE, tenant-scoped to the
+   * operator's clientId (a foreign-tenant outlet code 404s). A pre-KYC outlet with no
+   * partner yet returns hasWallet:false + a zeroed summary. Static `admin/outlet/...`
+   * prefix — no collision with @Get()/@Get('transactions').
+   */
+  @Get('admin/outlet/:outletCode/summary')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('wallet:read')
+  adminOutletWallet(@CurrentUser() user: JwtPayload, @Param('outletCode') outletCode: string) {
+    return this.wallet.adminOutletWallet(user, outletCode);
+  }
+
+  /**
+   * GET /v1/wallet/admin/outlet/:outletCode/transactions — GIFSY-only passbook BY OUTLET.
+   * Same tenant-scope + pre-KYC (empty page) semantics as the summary route above.
+   */
+  @Get('admin/outlet/:outletCode/transactions')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('wallet:read')
+  adminOutletTransactions(
+    @CurrentUser() user: JwtPayload,
+    @Param('outletCode') outletCode: string,
+    @Query() query: AdminOutletTxQueryDto,
+  ) {
+    return this.wallet.adminOutletTransactions(user, outletCode, query);
   }
 
   /**

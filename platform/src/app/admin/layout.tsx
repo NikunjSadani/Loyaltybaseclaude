@@ -88,6 +88,9 @@ const ALL_NAV_ITEMS = [
     ],
   },
   { href: '/admin/schemes',  label: 'Scheme Management',icon: Tag,          featureFlag: null, gifsyOnly: true  },
+  // Outlet Wallet — GIFSY-only points wallet viewer + manual credit/debit adjust (money-adjacent).
+  // Page guarded to GIFSY_ADMIN via admin/outlet-wallet/layout.tsx; nav hidden for CLIENT_ADMIN.
+  { href: '/admin/outlet-wallet', label: 'Outlet Wallet', icon: Wallet, featureFlag: null, gifsyOnly: true },
   // Tenant read-only scheme coverage reports (D2/D26). Shown to tenant admins
   // (CLIENT_ADMIN / MIS_USER) only — GIFSY manages + reports from /admin/schemes.
   { href: '/admin/scheme-reports', label: 'Scheme Reports', icon: FileBarChart2, featureFlag: null, tenantReportOnly: true },

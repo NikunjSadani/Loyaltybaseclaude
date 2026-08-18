@@ -75,6 +75,13 @@ export class WalletService {
       description?: string | null;
       sourceType?: string | null;
       sourceId?: string | null;
+      // When true on a DEBIT, decrement redeemablePoints ATOMICALLY via a guarded
+      // conditional update (WHERE redeemablePoints >= magnitude) and reject if the
+      // balance is insufficient — closing the read-then-write TOCTOU race (two
+      // concurrent debits, or a debit racing a redemption, driving redeemable
+      // negative). Opt-in so the existing floor-to-0 callers (expiry sweep) are
+      // byte-unchanged; only the admin adjust DEBIT sets it today.
+      requireSufficientRedeemable?: boolean;
     },
   ): Promise<{ transactionId: string; newRedeemable: number; ledgerId: string }> {
     const {
@@ -90,11 +97,12 @@ export class WalletService {
       description = null,
       sourceType = null,
       sourceId = null,
+      requireSufficientRedeemable = false,
     } = params;
 
     const isCredit = points > 0;
     const magnitude = Math.abs(points);
-    const balanceBefore = wallet.redeemablePoints;
+    let balanceBefore = wallet.redeemablePoints;
 
     // Aggregate updates per the invariant. earnedPoints/lifetimeEarned are bumped
     // ONLY for true earning movements (EARN/credit-adjust/bonus), never on reversal
@@ -108,6 +116,16 @@ export class WalletService {
         data.earnedPoints = { increment: magnitude };
         data.lifetimeEarned = { increment: magnitude };
       }
+    } else if (requireSufficientRedeemable) {
+      // Atomic-guarded debit: decrement by the FULL magnitude (the guarded WHERE
+      // below ensures redeemable >= magnitude, so this can never go negative even
+      // under a concurrent debit). No flooring.
+      data.redeemablePoints = { decrement: magnitude };
+      if (ledgerType === PointsLedgerType.REDEEM) {
+        data.redeemedPoints = { increment: magnitude };
+        data.lifetimeRedeemed = { increment: magnitude };
+      }
+      // DEBIT_ADJUSTMENT (ledgerType ADJUST) only decrements redeemable.
     } else {
       // Floor redeemable at 0 — guards the expiry sweep against over-decrementing.
       const decrement = Math.min(magnitude, balanceBefore);
@@ -123,7 +141,24 @@ export class WalletService {
       // redeemable — it has no dedicated running counter.
     }
 
-    const updatedWallet = await tx.wallet.update({ where: { id: wallet.id }, data });
+    let updatedWallet: Awaited<ReturnType<typeof tx.wallet.update>>;
+    if (!isCredit && requireSufficientRedeemable) {
+      // Conditional update: only decrements when the CURRENT balance still covers it.
+      // count===0 means a concurrent debit consumed the balance between our read and
+      // this write → reject cleanly instead of going negative.
+      const guarded = await tx.wallet.updateMany({
+        where: { id: wallet.id, redeemablePoints: { gte: magnitude } },
+        data,
+      });
+      if (guarded.count !== 1) {
+        throw new BadRequestException('Insufficient wallet balance for debit');
+      }
+      updatedWallet = await tx.wallet.findUniqueOrThrow({ where: { id: wallet.id } });
+      // Keep the recorded before/after pair internally consistent under concurrency.
+      balanceBefore = updatedWallet.redeemablePoints + magnitude;
+    } else {
+      updatedWallet = await tx.wallet.update({ where: { id: wallet.id }, data });
+    }
 
     const txRecord = await tx.walletTransaction.create({
       data: {
@@ -206,11 +241,9 @@ export class WalletService {
 
   // ─── Public read paths ──────────────────────────────────────────────────────
 
-  /** GET /v1/wallet — the ACTIVE partner's wallet summary (zeros if no partner/wallet). */
-  async getWallet(user: JwtPayload, requestedPartnerId?: string) {
-    // Per-tenant points→₹ rate (was a per-deploy env constant).
-    const conversionRate = await this.tenantSettings.getConversionRate(user.clientId);
-    const emptyWallet = {
+  /** The zeroed wallet summary (no partner / no wallet row yet). Carries the tenant rate. */
+  private zeroedSummary(conversionRate: number) {
+    return {
       earnedPoints: 0,
       lockedPoints: 0,
       redeemablePoints: 0,
@@ -222,22 +255,19 @@ export class WalletService {
       currency: 'POINTS',
       conversionRate,
     };
+  }
 
-    // Wave 3: resolve the ACTIVE partner (own, or an authorized switched-to sibling). The selector is
-    // re-authorized here — a forged/foreign id can NEVER surface another partner's wallet balance.
-    const { partnerId, forbidden } = await resolveActivePartnerId(this.prisma, {
-      clientId: user.clientId,
-      userSub: user.sub,
-      phone: user.phone,
-      requestedPartnerId,
-    });
-    if (forbidden) throw new ForbiddenException('You cannot act on that outlet.');
-    if (!partnerId) return emptyWallet; // no operable partner → graceful zeros (unchanged)
-
-    const wallet = await this.prisma.wallet.findFirst({
-      where: { partnerId },
-    });
-    if (!wallet) return emptyWallet;
+  /**
+   * SHARED wallet-summary builder — the single source of truth for the summary shape,
+   * used by BOTH the partner-facing getWallet and the GIFSY admin outlet route so the
+   * two can never diverge. Resolves the per-tenant points→₹ rate, loads the partner's
+   * wallet, and returns the summary (zeroed — but still rate-carrying — when absent).
+   * Tenant scope / partner authorization is the CALLER's responsibility.
+   */
+  private async loadWalletSummary(partnerId: string, clientId: string) {
+    const conversionRate = await this.tenantSettings.getConversionRate(clientId);
+    const wallet = await this.prisma.wallet.findFirst({ where: { partnerId } });
+    if (!wallet) return this.zeroedSummary(conversionRate);
 
     return {
       earnedPoints: wallet.earnedPoints,
@@ -253,8 +283,37 @@ export class WalletService {
     };
   }
 
-  /** GET /v1/wallet/transactions — paginated passbook for the caller (or another user, GIFSY-only). */
-  async listTransactions(user: JwtPayload, q: ListTransactionsQueryDto, requestedPartnerId?: string) {
+  /** GET /v1/wallet — the ACTIVE partner's wallet summary (zeros if no partner/wallet). */
+  async getWallet(user: JwtPayload, requestedPartnerId?: string) {
+    // Wave 3: resolve the ACTIVE partner (own, or an authorized switched-to sibling). The selector is
+    // re-authorized here — a forged/foreign id can NEVER surface another partner's wallet balance.
+    const { partnerId, forbidden } = await resolveActivePartnerId(this.prisma, {
+      clientId: user.clientId,
+      userSub: user.sub,
+      phone: user.phone,
+      requestedPartnerId,
+    });
+    if (forbidden) throw new ForbiddenException('You cannot act on that outlet.');
+    if (!partnerId) {
+      // No operable partner → graceful zeros (unchanged), still carrying the tenant rate.
+      const conversionRate = await this.tenantSettings.getConversionRate(user.clientId);
+      return this.zeroedSummary(conversionRate);
+    }
+
+    return this.loadWalletSummary(partnerId, user.clientId);
+  }
+
+  /**
+   * SHARED passbook builder — the single source of truth for the paginated passbook,
+   * used by BOTH the partner-facing listTransactions and the GIFSY admin outlet route
+   * so the two can never diverge. Includes the CREDIT_BATCH field-name resolution.
+   * Tenant scope / partner authorization is the CALLER's responsibility.
+   */
+  private async loadPassbook(
+    partnerId: string,
+    clientId: string,
+    q: { page?: number; limit?: number; type?: WalletTransactionType },
+  ) {
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
     const skip = (page - 1) * limit;
@@ -263,32 +322,6 @@ export class WalletService {
       transactions: [],
       pagination: { page, limit, total: 0, pages: 0 },
     };
-
-    // Two DISTINCT resolution paths:
-    //  - GIFSY admin targeting ANOTHER user via ?userId= → admin support tooling, NOT outlet-switching.
-    //    Resolve the partner straight from the target user; the Wave 3 selector does not apply here.
-    //  - Everyone else → the ACTIVE partner from the login-picker selector (own, or an authorized
-    //    same-group same-phone sibling), re-authorized so a forged header can't reach another passbook.
-    const isAdminTargeting = !!q.userId && user.role === 'GIFSY_ADMIN';
-
-    let partnerId: string | null;
-    if (isAdminTargeting) {
-      const target = await this.prisma.channelPartner.findFirst({
-        where: { userId: q.userId, user: { clientId: user.clientId } },
-        select: { id: true },
-      });
-      partnerId = target?.id ?? null;
-    } else {
-      const active = await resolveActivePartnerId(this.prisma, {
-        clientId: user.clientId,
-        userSub: user.sub,
-        phone: user.phone,
-        requestedPartnerId,
-      });
-      if (active.forbidden) throw new ForbiddenException('You cannot act on that outlet.');
-      partnerId = active.partnerId;
-    }
-    if (!partnerId) return emptyResult;
 
     const wallet = await this.prisma.wallet.findFirst({
       where: { partnerId },
@@ -316,7 +349,7 @@ export class WalletService {
     // this wallet's CREDIT_BATCH txns (a separate lightweight query), then apply the
     // Map to the page → pagination-robust, page boundaries can never mis-map.
     const outlet = await this.prisma.outlet.findFirst({
-      where: { clientId: user.clientId, partnerId, deletedAt: null },
+      where: { clientId, partnerId, deletedAt: null },
       orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
       select: { outletCode: true },
     });
@@ -335,7 +368,7 @@ export class WalletService {
     });
     const fieldNameByTxId = await resolveCreditFieldNames(
       this.prisma,
-      user.clientId,
+      clientId,
       outletCode,
       allCreditTxns,
     );
@@ -361,6 +394,83 @@ export class WalletService {
       transactions: passbook,
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     };
+  }
+
+  /** GET /v1/wallet/transactions — paginated passbook for the caller's ACTIVE partner. */
+  async listTransactions(user: JwtPayload, q: ListTransactionsQueryDto, requestedPartnerId?: string) {
+    // Resolve the ACTIVE partner from the login-picker selector (own, or an authorized
+    // same-group same-phone sibling), re-authorized so a forged header can't reach another passbook.
+    const active = await resolveActivePartnerId(this.prisma, {
+      clientId: user.clientId,
+      userSub: user.sub,
+      phone: user.phone,
+      requestedPartnerId,
+    });
+    if (active.forbidden) throw new ForbiddenException('You cannot act on that outlet.');
+    if (!active.partnerId) {
+      const page = q.page ?? 1;
+      const limit = q.limit ?? 20;
+      return { transactions: [], pagination: { page, limit, total: 0, pages: 0 } };
+    }
+
+    return this.loadPassbook(active.partnerId, user.clientId, q);
+  }
+
+  // ─── GIFSY-only admin: wallet BY OUTLET ─────────────────────────────────────
+  //
+  // Support/ops tooling: a GIFSY operator (optionally assumed into a tenant) inspects
+  // ANY outlet's wallet by outlet CODE. Tenant scope is user.clientId — a foreign-tenant
+  // outlet code 404s (never surfaces another tenant's wallet). `Outlet` has a
+  // @@unique([clientId, outletCode]) so the (tenant, code) lookup is unique. A pre-KYC
+  // outlet with no partner yet (partnerId null) has no wallet → zeroed summary / empty page.
+
+  /**
+   * Resolve an outlet by CODE within the operator's tenant. 404s a foreign-tenant /
+   * missing / soft-deleted outlet — this tenant-scope invariant must not be widened.
+   * `partnerId` may be null (an outlet created pre-KYC has no ChannelPartner / wallet yet).
+   */
+  private async resolveAdminOutlet(user: JwtPayload, outletCode: string) {
+    const outlet = await this.prisma.outlet.findFirst({
+      where: { clientId: user.clientId, outletCode, deletedAt: null },
+      select: { outletCode: true, name: true, ownerName: true, partnerId: true },
+    });
+    if (!outlet) throw new NotFoundException('Outlet not found in this tenant.');
+    return {
+      outlet: { outletCode: outlet.outletCode, name: outlet.name, ownerName: outlet.ownerName },
+      partnerId: outlet.partnerId,
+    };
+  }
+
+  /** GET /v1/wallet/admin/outlet/:outletCode/summary — GIFSY-only wallet summary by outlet code. */
+  async adminOutletWallet(user: JwtPayload, outletCode: string) {
+    const { outlet, partnerId } = await this.resolveAdminOutlet(user, outletCode);
+    if (!partnerId) {
+      // Pre-KYC outlet: no partner/wallet yet → zeroed summary (still carries the tenant rate).
+      const conversionRate = await this.tenantSettings.getConversionRate(user.clientId);
+      return { outlet, partnerId: null, hasWallet: false, wallet: this.zeroedSummary(conversionRate) };
+    }
+    return {
+      outlet,
+      partnerId,
+      hasWallet: true,
+      wallet: await this.loadWalletSummary(partnerId, user.clientId),
+    };
+  }
+
+  /** GET /v1/wallet/admin/outlet/:outletCode/transactions — GIFSY-only passbook by outlet code. */
+  async adminOutletTransactions(
+    user: JwtPayload,
+    outletCode: string,
+    q: { page?: number; limit?: number; type?: WalletTransactionType },
+  ) {
+    const { partnerId } = await this.resolveAdminOutlet(user, outletCode);
+    if (!partnerId) {
+      // Pre-KYC outlet: no partner/wallet yet → empty page.
+      const page = q.page ?? 1;
+      const limit = q.limit ?? 20;
+      return { transactions: [], pagination: { page, limit, total: 0, pages: 0 } };
+    }
+    return this.loadPassbook(partnerId, user.clientId, q);
   }
 
   // ─── Core mutations (composable: pass `tx` to compose inside a caller's $transaction) ─
@@ -493,6 +603,9 @@ export class WalletService {
         description: `Manual ${dto.type.toLowerCase()} by admin. Reason: ${dto.reason}`,
         sourceType: 'ADMIN_ADJUSTMENT',
         sourceId: user.sub,
+        // Atomic-guarded debit: the pre-tx check above is a fast UX reject; this closes
+        // the TOCTOU so a concurrent redemption can't drive redeemable negative.
+        requireSufficientRedeemable: !isCredit,
       });
 
       await tx.auditLog.create({

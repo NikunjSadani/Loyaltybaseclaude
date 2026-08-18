@@ -17,7 +17,7 @@ const mockTenantSettings = { getConversionRate: async () => 1 };
 
 // The transaction client mock — every mutation composes through this inside $transaction.
 const mockTx = {
-  wallet: { findFirst: jest.fn(), update: jest.fn() },
+  wallet: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findUniqueOrThrow: jest.fn() },
   walletTransaction: { create: jest.fn() },
   pointsLedger: { create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
   pointExpiryConfig: { findFirst: jest.fn() },
@@ -271,14 +271,17 @@ describe('WalletService', () => {
       expect(mockTx.auditLog.create).toHaveBeenCalled();
     });
 
-    // Regression test for bug #1: a DEBIT adjust must NOT decrement earnedPoints/lifetimeEarned.
-    it('on DEBIT decrements redeemable ONLY (earned/lifetimeEarned untouched) and writes the ADJUST ledger', async () => {
+    // Regression test for bug #1 + the atomic-guard hardening: a DEBIT adjust must NOT
+    // decrement earnedPoints/lifetimeEarned, and must use a GUARDED conditional update
+    // (WHERE redeemablePoints >= amount) rather than an unconditional decrement.
+    it('on DEBIT uses an atomic guarded decrement (redeemable ONLY; earned/lifetime untouched) and writes the ADJUST ledger', async () => {
       mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 50 });
-      mockTx.wallet.update.mockResolvedValue({ id: 'w1', redeemablePoints: 40 });
+      mockTx.wallet.updateMany.mockResolvedValue({ count: 1 });
+      mockTx.wallet.findUniqueOrThrow.mockResolvedValue({ id: 'w1', redeemablePoints: 40 });
       mockTx.walletTransaction.create.mockResolvedValue({ id: 'tx2' });
       mockTx.pointsLedger.create.mockResolvedValue({ id: 'pl2' });
 
-      await service.adjust(gifsy, {
+      const res = await service.adjust(gifsy, {
         partnerId: 'cp1',
         amount: 10,
         type: AdjustType.DEBIT,
@@ -286,13 +289,35 @@ describe('WalletService', () => {
         approvedBy: 'a',
       });
 
-      const data = mockTx.wallet.update.mock.calls[0][0].data;
-      expect(data.redeemablePoints).toEqual({ decrement: 10 });
-      expect(data.earnedPoints).toBeUndefined();
-      expect(data.lifetimeEarned).toBeUndefined();
+      expect(res).toEqual({ transactionId: 'tx2', newBalance: 40 });
+      // Guarded conditional update — only decrements when the CURRENT balance still covers it.
+      const call = mockTx.wallet.updateMany.mock.calls[0][0];
+      expect(call.where).toEqual({ id: 'w1', redeemablePoints: { gte: 10 } });
+      expect(call.data.redeemablePoints).toEqual({ decrement: 10 });
+      expect(call.data.earnedPoints).toBeUndefined();
+      expect(call.data.lifetimeEarned).toBeUndefined();
+      // The guarded DEBIT never uses the plain (unconditional) update.
+      expect(mockTx.wallet.update).not.toHaveBeenCalled();
       expect(mockTx.pointsLedger.create.mock.calls[0][0].data).toEqual(
         expect.objectContaining({ transactionType: 'ADJUST', points: -10 }),
       );
+    });
+
+    // TOCTOU: pre-tx read shows enough, but a concurrent debit consumed the balance
+    // before our guarded update ran → the WHERE guard matches 0 rows → clean reject,
+    // never a negative balance.
+    it('on DEBIT rejects (BadRequest) when the guarded update matches no row (concurrent depletion)', async () => {
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 50 });
+      mockTx.wallet.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        service.adjust(gifsy, { partnerId: 'cp1', amount: 40, type: AdjustType.DEBIT, reason: 'race', approvedBy: 'a' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      // No balance was read-back and no ledger/audit rows were written.
+      expect(mockTx.wallet.findUniqueOrThrow).not.toHaveBeenCalled();
+      expect(mockTx.walletTransaction.create).not.toHaveBeenCalled();
+      expect(mockTx.auditLog.create).not.toHaveBeenCalled();
     });
   });
 
@@ -381,9 +406,8 @@ describe('WalletService', () => {
   describe('listTransactions', () => {
     it('targets the caller’s own partner by default', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
-      const res = await service.listTransactions(partner, { userId: 'someoneElse' });
-      // Non-admins cannot inspect another user — userId is ignored; the active partner is resolved
-      // via the Wave 3 access-boundary helper (own by default).
+      const res = await service.listTransactions(partner, {});
+      // The active partner is resolved via the Wave 3 access-boundary helper (own by default).
       expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledWith({
         where: { userId: 'user1', clientId: 'deoleo', deletedAt: null, isParent: false },
         select: { id: true, groupId: true },
@@ -391,15 +415,10 @@ describe('WalletService', () => {
       expect(res).toEqual({ transactions: [], pagination: { page: 1, limit: 20, total: 0, pages: 0 } });
     });
 
-    it('lets a GIFSY admin target another user via userId', async () => {
-      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
-      await service.listTransactions(gifsy, { userId: 'user1' });
-      // Admin ?userId targeting resolves the partner straight from the target user (unchanged feature).
-      expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledWith({
-        where: { userId: 'user1', user: { clientId: 'deoleo' } },
-        select: { id: true },
-      });
-    });
+    // NOTE: the legacy GIFSY-admin `?userId=` passbook branch was REMOVED — it was
+    // unreachable (the /wallet/transactions route is @Roles('SSS','WHOLESALER','SUB_STOCKIST'))
+    // and no caller ever passed userId. Admin inspection now goes through the dedicated
+    // `admin outlet wallet` routes below (keyed on outlet CODE + tenant scope).
 
     it('threads the x-active-partner-id selector to a SWITCHED sibling passbook (non-admin)', async () => {
       mockPrisma.channelPartner.findFirst.mockImplementation((args: any) =>
@@ -415,16 +434,6 @@ describe('WalletService', () => {
       await service.listTransactions(switcher, {}, 'sib1');
       // The passbook wallet belongs to the SIBLING, not the login's own partner.
       expect(mockPrisma.wallet.findFirst).toHaveBeenCalledWith({ where: { partnerId: 'sib1' } });
-    });
-
-    it('GIFSY-admin ?userId targeting IGNORES the outlet selector (separate support feature)', async () => {
-      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
-      // A selector is passed, but admin-targeting resolves from the target user and never consults it.
-      await service.listTransactions(gifsy, { userId: 'user9' }, 'sib1');
-      expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledWith({
-        where: { userId: 'user9', user: { clientId: 'deoleo' } },
-        select: { id: true },
-      });
     });
 
     it('returns a paginated passbook with default descriptions', async () => {
@@ -557,6 +566,131 @@ describe('WalletService', () => {
       expect(res.transactions[0].narration).toBe('Redeemed a voucher');
       // No CREDIT_BATCH txns → the batch lookup is skipped entirely.
       expect(mockPrisma.creditBatch.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── GIFSY-only admin: wallet BY OUTLET (keyed on outlet CODE + tenant scope) ──────
+  describe('admin outlet wallet', () => {
+    const wsummary = {
+      earnedPoints: 100, lockedPoints: 0, redeemablePoints: 90, redeemedPoints: 10,
+      expiredPoints: 0, lifetimeEarned: 100, lifetimeRedeemed: 10, lifetimeExpired: 0,
+    };
+
+    describe('adminOutletWallet (summary)', () => {
+      it('404s a foreign-tenant / missing outlet code (tenant scope holds)', async () => {
+        // resolveAdminOutlet finds nothing for (clientId, outletCode) → NotFound.
+        mockPrisma.outlet.findFirst.mockResolvedValue(null);
+        await expect(service.adminOutletWallet(gifsy, 'OUT-FOREIGN')).rejects.toBeInstanceOf(
+          NotFoundException,
+        );
+        // Lookup is tenant-scoped to the operator's clientId + code + not-deleted.
+        expect(mockPrisma.outlet.findFirst).toHaveBeenCalledWith({
+          where: { clientId: 'deoleo', outletCode: 'OUT-FOREIGN', deletedAt: null },
+          select: { outletCode: true, name: true, ownerName: true, partnerId: true },
+        });
+        // No wallet ever loaded for a 404 outlet.
+        expect(mockPrisma.wallet.findFirst).not.toHaveBeenCalled();
+      });
+
+      it('outlet WITH partner+wallet → summary balances + conversionRate + identity + hasWallet:true', async () => {
+        mockPrisma.outlet.findFirst.mockResolvedValue({
+          outletCode: 'OUT-1', name: 'Shop One', ownerName: 'Alice', partnerId: 'cp1',
+        });
+        mockPrisma.wallet.findFirst.mockResolvedValue(wsummary);
+
+        const res = await service.adminOutletWallet(gifsy, 'OUT-1');
+
+        expect(res.hasWallet).toBe(true);
+        expect(res.partnerId).toBe('cp1');
+        expect(res.outlet).toEqual({ outletCode: 'OUT-1', name: 'Shop One', ownerName: 'Alice' });
+        // Balances + tenant rate come through the SHARED loadWalletSummary.
+        expect(res.wallet.redeemablePoints).toBe(90);
+        expect(res.wallet.lifetimeEarned).toBe(100);
+        expect(res.wallet.currency).toBe('POINTS');
+        expect(res.wallet.conversionRate).toBe(1);
+        // The wallet is loaded for the outlet's partner.
+        expect(mockPrisma.wallet.findFirst).toHaveBeenCalledWith({ where: { partnerId: 'cp1' } });
+      });
+
+      it('pre-KYC outlet (partnerId null) → hasWallet:false + zeroed (rate-carrying) summary, no wallet query', async () => {
+        mockPrisma.outlet.findFirst.mockResolvedValue({
+          outletCode: 'OUT-2', name: 'Shop Two', ownerName: 'Bob', partnerId: null,
+        });
+
+        const res = await service.adminOutletWallet(gifsy, 'OUT-2');
+
+        expect(res.hasWallet).toBe(false);
+        expect(res.partnerId).toBeNull();
+        expect(res.outlet).toEqual({ outletCode: 'OUT-2', name: 'Shop Two', ownerName: 'Bob' });
+        expect(res.wallet.redeemablePoints).toBe(0);
+        expect(res.wallet.lifetimeExpired).toBe(0);
+        expect(res.wallet.conversionRate).toBe(1);
+        // No partner → never touches the wallet table.
+        expect(mockPrisma.wallet.findFirst).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('adminOutletTransactions (passbook)', () => {
+      it('404s a foreign-tenant / missing outlet code (tenant scope holds)', async () => {
+        mockPrisma.outlet.findFirst.mockResolvedValue(null);
+        await expect(
+          service.adminOutletTransactions(gifsy, 'OUT-FOREIGN', {}),
+        ).rejects.toBeInstanceOf(NotFoundException);
+        expect(mockPrisma.wallet.findFirst).not.toHaveBeenCalled();
+      });
+
+      it('pre-KYC outlet (partnerId null) → empty page, no wallet query', async () => {
+        mockPrisma.outlet.findFirst.mockResolvedValue({
+          outletCode: 'OUT-2', name: 'Shop Two', ownerName: 'Bob', partnerId: null,
+        });
+
+        const res = await service.adminOutletTransactions(gifsy, 'OUT-2', { page: 2, limit: 5 });
+
+        expect(res).toEqual({ transactions: [], pagination: { page: 2, limit: 5, total: 0, pages: 0 } });
+        expect(mockPrisma.wallet.findFirst).not.toHaveBeenCalled();
+      });
+
+      it('outlet WITH partner → paginated passbook via the SHARED loadPassbook (row shape preserved)', async () => {
+        // resolveAdminOutlet (outlet lookup) then loadPassbook (outlet lookup for outletCode).
+        mockPrisma.outlet.findFirst
+          .mockResolvedValueOnce({ outletCode: 'OUT-1', name: 'Shop One', ownerName: 'Alice', partnerId: 'cp1' })
+          .mockResolvedValueOnce({ outletCode: 'OUT-1' });
+        mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1' });
+        mockPrisma.walletTransaction.findMany.mockResolvedValue([
+          {
+            id: 't1',
+            transactionType: 'CREDIT_POINTS_EARNED',
+            description: null,
+            points: 10,
+            createdAt: new Date('2026-01-01'),
+            balanceType: 'REDEEMABLE',
+            balanceAfter: 10,
+            referenceType: null,
+            referenceId: null,
+          },
+        ]);
+        mockPrisma.walletTransaction.count.mockResolvedValue(1);
+
+        const res = await service.adminOutletTransactions(gifsy, 'OUT-1', {});
+
+        expect(res.pagination).toEqual({ page: 1, limit: 20, total: 1, pages: 1 });
+        // Identical passbook row shape as the partner-facing route (shared builder).
+        expect(res.transactions[0]).toEqual({
+          id: 't1',
+          transactionType: 'CREDIT_POINTS_EARNED',
+          description: 'Points earned',
+          points: 10,
+          date: new Date('2026-01-01'),
+          balanceType: 'REDEEMABLE',
+          balanceAfter: 10,
+          referenceType: null,
+          referenceId: null,
+          fieldName: null,
+          narration: null,
+        });
+        // The passbook wallet belongs to the outlet's partner.
+        expect(mockPrisma.wallet.findFirst).toHaveBeenCalledWith({ where: { partnerId: 'cp1' } });
+      });
     });
   });
 });
