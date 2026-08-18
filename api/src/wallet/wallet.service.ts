@@ -82,6 +82,9 @@ export class WalletService {
       // negative). Opt-in so the existing floor-to-0 callers (expiry sweep) are
       // byte-unchanged; only the admin adjust DEBIT sets it today.
       requireSufficientRedeemable?: boolean;
+      // Caller-specific message for the guarded-insufficient reject, so a redemption
+      // race reads "for redemption" while an admin debit reads "for debit".
+      insufficientMessage?: string;
     },
   ): Promise<{ transactionId: string; newRedeemable: number; ledgerId: string }> {
     const {
@@ -98,6 +101,7 @@ export class WalletService {
       sourceType = null,
       sourceId = null,
       requireSufficientRedeemable = false,
+      insufficientMessage = 'Insufficient wallet balance for debit',
     } = params;
 
     const isCredit = points > 0;
@@ -151,7 +155,7 @@ export class WalletService {
         data,
       });
       if (guarded.count !== 1) {
-        throw new BadRequestException('Insufficient wallet balance for debit');
+        throw new BadRequestException(insufficientMessage);
       }
       updatedWallet = await tx.wallet.findUniqueOrThrow({ where: { id: wallet.id } });
       // Keep the recorded before/after pair internally consistent under concurrency.
@@ -313,6 +317,11 @@ export class WalletService {
     partnerId: string,
     clientId: string,
     q: { page?: number; limit?: number; type?: WalletTransactionType },
+    // When the caller already knows the exact outlet in context (the GIFSY admin route
+    // resolves it by code), pass it so CREDIT_BATCH field-name resolution replays THAT
+    // outlet's rows — not the partner's primary outlet. Omitted (partner path) → derive
+    // the primary as before.
+    knownOutletCode?: string,
   ) {
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
@@ -348,12 +357,15 @@ export class WalletService {
     // a page boundary (consumption order would be wrong). So we resolve over ALL of
     // this wallet's CREDIT_BATCH txns (a separate lightweight query), then apply the
     // Map to the page → pagination-robust, page boundaries can never mis-map.
-    const outlet = await this.prisma.outlet.findFirst({
-      where: { clientId, partnerId, deletedAt: null },
-      orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
-      select: { outletCode: true },
-    });
-    const outletCode = outlet?.outletCode ?? '';
+    let outletCode = knownOutletCode ?? '';
+    if (!knownOutletCode) {
+      const outlet = await this.prisma.outlet.findFirst({
+        where: { clientId, partnerId, deletedAt: null },
+        orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+        select: { outletCode: true },
+      });
+      outletCode = outlet?.outletCode ?? '';
+    }
 
     const allCreditTxns = await this.prisma.walletTransaction.findMany({
       where: { walletId: wallet.id, referenceType: 'CREDIT_BATCH' },
@@ -463,14 +475,16 @@ export class WalletService {
     outletCode: string,
     q: { page?: number; limit?: number; type?: WalletTransactionType },
   ) {
-    const { partnerId } = await this.resolveAdminOutlet(user, outletCode);
+    const { outlet, partnerId } = await this.resolveAdminOutlet(user, outletCode);
     if (!partnerId) {
       // Pre-KYC outlet: no partner/wallet yet → empty page.
       const page = q.page ?? 1;
       const limit = q.limit ?? 20;
       return { transactions: [], pagination: { page, limit, total: 0, pages: 0 } };
     }
-    return this.loadPassbook(partnerId, user.clientId, q);
+    // Resolve credit field-names against THIS outlet's rows (the one the admin selected),
+    // not the partner's primary outlet.
+    return this.loadPassbook(partnerId, user.clientId, q, outlet.outletCode);
   }
 
   // ─── Core mutations (composable: pass `tx` to compose inside a caller's $transaction) ─
@@ -524,6 +538,11 @@ export class WalletService {
   /**
    * Debit redeemable points for a redemption (DEBIT_REDEMPTION / ledger REDEEM).
    * Throws BadRequest (400) when redeemablePoints < amount. Used by 5.4 redeem.
+   *
+   * The pre-check below is a fast reject; the actual decrement is ATOMICALLY GUARDED
+   * (requireSufficientRedeemable) so two concurrent redemptions (or a redemption racing
+   * an admin debit) on the same wallet can never both pass the check and drive the
+   * balance negative — the loser's guarded update matches 0 rows and rejects cleanly.
    */
   async debitRedeem(
     partnerId: string,
@@ -546,6 +565,9 @@ export class WalletService {
         referenceType: 'REDEMPTION_ORDER',
         referenceId: opts.referenceId ?? null,
         description: opts.description ?? null,
+        // Close the TOCTOU: decrement only if the CURRENT balance still covers it.
+        requireSufficientRedeemable: true,
+        insufficientMessage: 'Insufficient wallet balance for redemption',
       });
     });
   }

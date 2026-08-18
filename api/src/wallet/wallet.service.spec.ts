@@ -179,28 +179,45 @@ describe('WalletService', () => {
       expect(mockTx.pointsLedger.create).not.toHaveBeenCalled();
     });
 
-    it('debits redeemable and writes a REDEEM ledger row', async () => {
+    it('debits redeemable via an ATOMIC GUARDED update and writes a REDEEM ledger row', async () => {
       mockTx.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 50 });
-      mockTx.wallet.update.mockResolvedValue({ id: 'w1', redeemablePoints: 40 });
+      mockTx.wallet.updateMany.mockResolvedValue({ count: 1 });
+      mockTx.wallet.findUniqueOrThrow.mockResolvedValue({ id: 'w1', redeemablePoints: 40 });
       mockTx.walletTransaction.create.mockResolvedValue({ id: 'tx1' });
       mockTx.pointsLedger.create.mockResolvedValue({ id: 'pl1' });
 
       const res = await service.debitRedeem('cp1', 10, { referenceId: 'order1' });
 
       expect(res.newRedeemable).toBe(40);
-      // Debit decrements redeemable + bumps redeemed/lifetimeRedeemed; NEVER earned.
-      expect(mockTx.wallet.update).toHaveBeenCalledWith({
-        where: { id: 'w1' },
-        data: {
-          lastTransactionAt: expect.any(Date),
-          redeemablePoints: { decrement: 10 },
-          redeemedPoints: { increment: 10 },
-          lifetimeRedeemed: { increment: 10 },
-        },
+      // Guarded conditional decrement (WHERE redeemablePoints >= amount) + redeemed counters; NEVER earned.
+      const call = mockTx.wallet.updateMany.mock.calls[0][0];
+      expect(call.where).toEqual({ id: 'w1', redeemablePoints: { gte: 10 } });
+      expect(call.data).toEqual({
+        lastTransactionAt: expect.any(Date),
+        redeemablePoints: { decrement: 10 },
+        redeemedPoints: { increment: 10 },
+        lifetimeRedeemed: { increment: 10 },
       });
+      expect(mockTx.wallet.update).not.toHaveBeenCalled();
       expect(mockTx.pointsLedger.create.mock.calls[0][0].data).toEqual(
         expect.objectContaining({ transactionType: 'REDEEM', points: -10 }),
       );
+    });
+
+    // TOCTOU on the LIVE redemption path: the pre-check passed on a stale read, but a
+    // concurrent debit drained the balance before our guarded update ran → 0 rows matched
+    // → clean reject, never a negative balance.
+    it('rejects a concurrent redemption when the guarded update matches no row (no negative balance)', async () => {
+      mockTx.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 50 });
+      mockTx.wallet.updateMany.mockResolvedValue({ count: 0 });
+
+      // The race-loser surfaces the REDEMPTION-specific message (not the generic "for debit").
+      await expect(
+        service.debitRedeem('cp1', 40, { referenceId: 'order2' }),
+      ).rejects.toThrow('Insufficient wallet balance for redemption');
+
+      expect(mockTx.wallet.findUniqueOrThrow).not.toHaveBeenCalled();
+      expect(mockTx.pointsLedger.create).not.toHaveBeenCalled();
     });
   });
 
@@ -650,44 +667,39 @@ describe('WalletService', () => {
         expect(mockPrisma.wallet.findFirst).not.toHaveBeenCalled();
       });
 
-      it('outlet WITH partner → paginated passbook via the SHARED loadPassbook (row shape preserved)', async () => {
-        // resolveAdminOutlet (outlet lookup) then loadPassbook (outlet lookup for outletCode).
-        mockPrisma.outlet.findFirst
-          .mockResolvedValueOnce({ outletCode: 'OUT-1', name: 'Shop One', ownerName: 'Alice', partnerId: 'cp1' })
-          .mockResolvedValueOnce({ outletCode: 'OUT-1' });
+      it('resolves credit field-names against the SELECTED outlet and SKIPS the primary-derive (item-2 fix)', async () => {
+        // resolveAdminOutlet resolves OUT-1; loadPassbook must reuse THAT code (not re-derive a primary).
+        mockPrisma.outlet.findFirst.mockResolvedValue({
+          outletCode: 'OUT-1', name: 'Shop One', ownerName: 'Alice', partnerId: 'cp1',
+        });
         mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1' });
         mockPrisma.walletTransaction.findMany.mockResolvedValue([
           {
             id: 't1',
             transactionType: 'CREDIT_POINTS_EARNED',
-            description: null,
+            description: 'Diwali bonus',
             points: 10,
             createdAt: new Date('2026-01-01'),
             balanceType: 'REDEEMABLE',
             balanceAfter: 10,
-            referenceType: null,
-            referenceId: null,
+            referenceType: 'CREDIT_BATCH',
+            referenceId: 'b1',
           },
         ]);
         mockPrisma.walletTransaction.count.mockResolvedValue(1);
+        // The batch carries a POINTS row for the SELECTED outlet OUT-1 → its field name resolves.
+        mockPrisma.creditBatch.findMany.mockResolvedValue([
+          { id: 'b1', rows: [{ outletId: 'OUT-1', awardType: 'POINTS', amount: 10, narration: 'Diwali bonus', fieldName: 'Festive Incentive' }] },
+        ]);
 
         const res = await service.adminOutletTransactions(gifsy, 'OUT-1', {});
 
         expect(res.pagination).toEqual({ page: 1, limit: 20, total: 1, pages: 1 });
-        // Identical passbook row shape as the partner-facing route (shared builder).
-        expect(res.transactions[0]).toEqual({
-          id: 't1',
-          transactionType: 'CREDIT_POINTS_EARNED',
-          description: 'Points earned',
-          points: 10,
-          date: new Date('2026-01-01'),
-          balanceType: 'REDEEMABLE',
-          balanceAfter: 10,
-          referenceType: null,
-          referenceId: null,
-          fieldName: null,
-          narration: null,
-        });
+        // Field name resolved against OUT-1's rows — proving the admin's selected outlet is used.
+        expect(res.transactions[0].fieldName).toBe('Festive Incentive');
+        expect(res.transactions[0].narration).toBe('Diwali bonus');
+        // The primary-outlet derive is SKIPPED: outlet.findFirst runs ONCE (only resolveAdminOutlet).
+        expect(mockPrisma.outlet.findFirst).toHaveBeenCalledTimes(1);
         // The passbook wallet belongs to the outlet's partner.
         expect(mockPrisma.wallet.findFirst).toHaveBeenCalledWith({ where: { partnerId: 'cp1' } });
       });
