@@ -43,7 +43,8 @@ export class TicketsService {
    * scoped to their own tickets.
    */
   private isSupportAdmin(user: JwtPayload): boolean {
-    return user.role === 'GIFSY_ADMIN' || user.role === 'CLIENT_ADMIN' || user.role === 'MIS_USER';
+    // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
+    return user.role === 'GIFSY_ADMIN' || user.role === 'GIFSY_STAFF' || user.role === 'CLIENT_ADMIN' || user.role === 'MIS_USER';
   }
 
   async list(user: JwtPayload, q: ListTicketsQueryDto) {

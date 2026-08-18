@@ -12,7 +12,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { platformWide } from '../common/tenant-scope';
+import { platformWide, isGifsyOperator } from '../common/tenant-scope';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { descendantSalesUserIds, SalesUserEdge } from '../sales/sales-hierarchy-access.helper';
 import { generateNumericOtp } from '../common/otp';
@@ -122,7 +122,8 @@ export class SchemeEnrollmentService {
   ) {}
 
   private isGifsyAdmin(user: JwtPayload): boolean {
-    return user.role === 'GIFSY_ADMIN';
+    // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
+    return isGifsyOperator(user);
   }
 
   /**
@@ -132,7 +133,8 @@ export class SchemeEnrollmentService {
    * stricter isGifsyAdmin: reject/edit/delete/restore stay Gifsy-only.
    */
   private canReadEnrollments(user: JwtPayload): boolean {
-    return user.role === 'GIFSY_ADMIN' || user.role === 'CLIENT_ADMIN';
+    // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
+    return user.role === 'GIFSY_ADMIN' || user.role === 'GIFSY_STAFF' || user.role === 'CLIENT_ADMIN';
   }
 
   // ───────────────────────────────────────────────────────────────────────────

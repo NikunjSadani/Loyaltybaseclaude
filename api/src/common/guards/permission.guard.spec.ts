@@ -1,18 +1,28 @@
-// RBAC Option-X — PermissionGuard (flag-gated enforcement + GIFSY_STAFF resolution).
+// RBAC Option-X — PermissionGuard.
+// GIFSY_STAFF is ALWAYS enforced (fail-closed), independent of the RBAC_ENFORCEMENT flags;
+// LEGACY roles stay flag-gated (env + per-tenant); @Public routes are never permission-gated.
 // Run: npx jest src/common/guards/permission.guard.spec.ts
 
 import { ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import type { ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { PermissionGuard } from './permission.guard';
+import { PERMISSION_KEY } from '../decorators/require-permission.decorator';
 import type { TenantService } from '../../tenant/tenant.service';
 import type { GifsyRoleService } from '../rbac/gifsy-role.service';
 import type { Permission } from '../rbac/permissions';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function makeReflector(permission: Permission | undefined): Reflector {
-  return { getAllAndOverride: jest.fn().mockReturnValue(permission) } as unknown as Reflector;
+// The guard reads TWO metadata keys: PERMISSION_KEY (the required permission) and 'isPublic'.
+// The mock must answer each key correctly (a single mockReturnValue would leak the permission
+// string into the isPublic check and short-circuit every test).
+function makeReflector(permission: Permission | undefined, isPublic = false): Reflector {
+  return {
+    getAllAndOverride: jest.fn((key: string) =>
+      key === 'isPublic' ? isPublic : permission,
+    ),
+  } as unknown as Reflector;
 }
 
 function makeTenant(enabled: boolean): TenantService {
@@ -44,75 +54,83 @@ describe('PermissionGuard', () => {
     jest.clearAllMocks();
   });
 
-  // ── A. No-op paths (the live default) ─────────────────────────────────────
-  describe('A – no-op unless enforcement is fully on', () => {
+  // ── A. Universal short-circuits ──────────────────────────────────────────────
+  describe('A – short-circuits', () => {
     it('A1: route without @RequirePermission → allow', async () => {
       const guard = new PermissionGuard(makeReflector(undefined), makeTenant(true), makeGifsyRoles([]));
       await expect(guard.canActivate(makeContext(STAFF))).resolves.toBe(true);
     });
 
-    it('A2: RBAC_ENFORCEMENT env off (default) → allow even for staff lacking the perm', async () => {
+    it('A2: @Public route → allow even for a staff lacking the perm (never permission-gated)', async () => {
       delete process.env.RBAC_ENFORCEMENT;
-      const guard = new PermissionGuard(makeReflector('kyc:read'), makeTenant(true), makeGifsyRoles([]));
-      await expect(guard.canActivate(makeContext(STAFF))).resolves.toBe(true);
-    });
-
-    it('A3: env on but tenant flag off → allow (fail-open)', async () => {
-      process.env.RBAC_ENFORCEMENT = 'true';
-      const guard = new PermissionGuard(makeReflector('kyc:read'), makeTenant(false), makeGifsyRoles([]));
+      const guard = new PermissionGuard(makeReflector('kyc:read', true), makeTenant(true), makeGifsyRoles([]));
       await expect(guard.canActivate(makeContext(STAFF))).resolves.toBe(true);
     });
   });
 
-  // ── B. Enforcement ON ──────────────────────────────────────────────────────
-  describe('B – enforcement fully on', () => {
-    beforeEach(() => {
-      process.env.RBAC_ENFORCEMENT = 'true';
+  // ── B. GIFSY_STAFF is ALWAYS enforced (flag-independent) ─────────────────────
+  describe('B – GIFSY_STAFF always-on (fail-closed)', () => {
+    it('B1: env OFF + staff LACKS perm → Forbidden (not a no-op for staff)', async () => {
+      delete process.env.RBAC_ENFORCEMENT;
+      const guard = new PermissionGuard(makeReflector('kyc:approve'), makeTenant(false), makeGifsyRoles(['kyc:read']));
+      await expect(guard.canActivate(makeContext(STAFF))).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it('B1: missing user → Unauthorized', async () => {
-      const guard = new PermissionGuard(makeReflector('kyc:read'), makeTenant(true), makeGifsyRoles([]));
-      await expect(guard.canActivate(makeContext(null))).rejects.toBeInstanceOf(UnauthorizedException);
-    });
-
-    // GIFSY_STAFF — resolved from the assigned GifsyRole
-    it('B2: GIFSY_STAFF whose role HAS the permission → allow', async () => {
+    it('B2: env OFF + staff HAS perm → allow', async () => {
+      delete process.env.RBAC_ENFORCEMENT;
       const roles = makeGifsyRoles(['kyc:read']);
-      const guard = new PermissionGuard(makeReflector('kyc:read'), makeTenant(true), roles);
+      const guard = new PermissionGuard(makeReflector('kyc:read'), makeTenant(false), roles);
       await expect(guard.canActivate(makeContext(STAFF))).resolves.toBe(true);
       expect(roles.getPermissions).toHaveBeenCalledWith('role-1');
     });
 
-    it('B3: GIFSY_STAFF whose role LACKS the permission → Forbidden', async () => {
-      const guard = new PermissionGuard(
-        makeReflector('kyc:approve'),
-        makeTenant(true),
-        makeGifsyRoles(['kyc:read']),
-      );
+    it('B3: env ON + tenant flag OFF + staff lacks perm → still Forbidden (independent of per-tenant flag)', async () => {
+      process.env.RBAC_ENFORCEMENT = 'true';
+      const guard = new PermissionGuard(makeReflector('kyc:approve'), makeTenant(false), makeGifsyRoles(['kyc:read']));
       await expect(guard.canActivate(makeContext(STAFF))).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it('B4: GIFSY_STAFF with null gifsyRoleId → Forbidden (fail-closed)', async () => {
-      const roles = makeGifsyRoles([]); // resolver returns empty for a null id
-      const guard = new PermissionGuard(makeReflector('kyc:read'), makeTenant(true), roles);
+    it('B4: staff with null gifsyRoleId → Forbidden (fail-closed)', async () => {
+      delete process.env.RBAC_ENFORCEMENT;
+      const guard = new PermissionGuard(makeReflector('kyc:read'), makeTenant(true), makeGifsyRoles([]));
       await expect(
         guard.canActivate(makeContext({ role: 'GIFSY_STAFF', clientId: 'gifsy', gifsyRoleId: null })),
       ).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it('B5: a role holding a RESERVED key resolves it (grant honored at the fine gate)', async () => {
-      // Confirms resolution honors the grant; the coarse @Roles floor (not tested
-      // here — no route wiring in P0) is what actually hard-blocks staff on reserved routes.
-      const guard = new PermissionGuard(
-        makeReflector('wallet:adjust'),
-        makeTenant(true),
-        makeGifsyRoles(['wallet:adjust']),
-      );
+    it('B5: a knowingly-granted RESERVED key is honored at the fine gate (Lock-2 dropped)', async () => {
+      delete process.env.RBAC_ENFORCEMENT;
+      const guard = new PermissionGuard(makeReflector('wallet:adjust'), makeTenant(false), makeGifsyRoles(['wallet:adjust']));
       await expect(guard.canActivate(makeContext(STAFF))).resolves.toBe(true);
     });
+  });
 
-    // Other roles — unchanged static can() path
-    it('B6: GIFSY_ADMIN has ALL permissions (never touches the resolver)', async () => {
+  // ── C. LEGACY roles stay flag-gated ──────────────────────────────────────────
+  describe('C – legacy roles flag-gated', () => {
+    it('C1: env OFF → allow even for a legacy role lacking the perm (no-op default)', async () => {
+      delete process.env.RBAC_ENFORCEMENT;
+      const guard = new PermissionGuard(makeReflector('tenancy:write'), makeTenant(true), makeGifsyRoles([]));
+      await expect(
+        guard.canActivate(makeContext({ role: 'CLIENT_ADMIN', clientId: 'deoleo' })),
+      ).resolves.toBe(true);
+    });
+
+    it('C2: env ON + tenant flag OFF → allow (fail-open)', async () => {
+      process.env.RBAC_ENFORCEMENT = 'true';
+      const guard = new PermissionGuard(makeReflector('tenancy:write'), makeTenant(false), makeGifsyRoles([]));
+      await expect(
+        guard.canActivate(makeContext({ role: 'CLIENT_ADMIN', clientId: 'deoleo' })),
+      ).resolves.toBe(true);
+    });
+
+    it('C3: env ON + no user (non-@Public) → Unauthorized', async () => {
+      process.env.RBAC_ENFORCEMENT = 'true';
+      const guard = new PermissionGuard(makeReflector('kyc:read'), makeTenant(true), makeGifsyRoles([]));
+      await expect(guard.canActivate(makeContext(null))).rejects.toBeInstanceOf(UnauthorizedException);
+    });
+
+    it('C4: env ON + tenant ON — GIFSY_ADMIN has ALL perms and never touches the resolver', async () => {
+      process.env.RBAC_ENFORCEMENT = 'true';
       const roles = makeGifsyRoles([]);
       const guard = new PermissionGuard(makeReflector('wallet:adjust'), makeTenant(true), roles);
       await expect(
@@ -121,13 +139,13 @@ describe('PermissionGuard', () => {
       expect(roles.getPermissions).not.toHaveBeenCalled();
     });
 
-    it('B7: CLIENT_ADMIN allowed on a perm it holds, denied on one it lacks', async () => {
+    it('C5: env ON + tenant ON — CLIENT_ADMIN allowed on a held perm, denied on one it lacks', async () => {
+      process.env.RBAC_ENFORCEMENT = 'true';
       const g1 = new PermissionGuard(makeReflector('kyc:read'), makeTenant(true), makeGifsyRoles([]));
       await expect(
         g1.canActivate(makeContext({ role: 'CLIENT_ADMIN', clientId: 'deoleo' })),
       ).resolves.toBe(true);
 
-      // tenancy:write is GIFSY-operated → CLIENT_ADMIN does NOT have it
       const g2 = new PermissionGuard(makeReflector('tenancy:write'), makeTenant(true), makeGifsyRoles([]));
       await expect(
         g2.canActivate(makeContext({ role: 'CLIENT_ADMIN', clientId: 'deoleo' })),

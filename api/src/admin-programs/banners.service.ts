@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { CreateBannerDto } from './dto/banners.dto';
+import { isGifsyOperator } from '../common/tenant-scope';
 
 /**
  * Banners admin — ported from platform/src/app/api/admin/banners/route.ts.
@@ -22,7 +23,8 @@ export class BannersService {
   /** GET /v1/admin/banners */
   async list(user: JwtPayload) {
     const where: Prisma.BannerManagementWhereInput = { clientId: user.clientId };
-    if (user.role !== 'GIFSY_ADMIN') {
+    // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
+    if (!isGifsyOperator(user)) {
       where.status = 'ACTIVE';
       where.OR = [{ endDate: null }, { endDate: { gte: new Date() } }];
     }

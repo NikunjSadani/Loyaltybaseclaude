@@ -13,7 +13,7 @@ import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { sniffFileType } from '../common/file-signature';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { platformWide } from '../common/tenant-scope';
+import { platformWide, isGifsyOperator } from '../common/tenant-scope';
 import {
   CreateClientDto,
   UpdateClientDto,
@@ -139,7 +139,8 @@ export class GifsyService {
   ) {}
 
   private assertGifsy(user: JwtPayload): void {
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden');
+    // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden');
   }
 
   /**

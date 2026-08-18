@@ -252,9 +252,14 @@ export class KycController {
     return this.kyc.getOne(user, id);
   }
 
+  // PATCH is a Gifsy-side RAW status writer (PATCH_STATUSES incl. APPROVED/REJECTED), so it is
+  // gated at the Gifsy-terminal tier `kyc:gifsy_approve` — the same tier as /approve, /verify,
+  // /re-kyc — NOT the field-approver `kyc:approve`. This matters once RBAC Option-X makes routes
+  // reachable by a GIFSY_STAFF: a field-tier `kyc:approve` grant must not drive a terminal status
+  // via this raw writer. (GIFSY_ADMIN has all permissions, so its behavior is unchanged.)
   @Patch(':id')
   @Roles('GIFSY_ADMIN')
-  @RequirePermission('kyc:approve')
+  @RequirePermission('kyc:gifsy_approve')
   update(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: UpdateKycDto) {
     return this.kyc.update(user, id, dto);
   }

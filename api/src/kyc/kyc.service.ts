@@ -68,7 +68,7 @@ import {
 } from '../common/partner-group.helper';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { platformWide } from '../common/tenant-scope';
+import { platformWide, isGifsyOperator } from '../common/tenant-scope';
 import { KYC_FIELD_KEYS, BridgeResult } from './kyc-verification.helper';
 import { evaluateSubmission } from './kyc-verification.helper';
 import {
@@ -514,7 +514,9 @@ export class KycService {
   }
 
   private isAdmin(role: string): boolean {
-    return role === 'GIFSY_ADMIN' || role === 'CLIENT_ADMIN';
+    // RBAC Option-X: a GIFSY_STAFF (permission-gated upstream) is a platform operator, treated
+    // as admin for KYC read/view breadth — same as the owner. Write actions keep their own gates.
+    return role === 'GIFSY_ADMIN' || role === 'GIFSY_STAFF' || role === 'CLIENT_ADMIN';
   }
 
   /**
@@ -2564,7 +2566,7 @@ export class KycService {
   // ─── PATCH /v1/kyc/:id ───────────────────────────────────────────────────────
   async update(user: JwtPayload, id: string, dto: UpdateKycDto) {
     // GIFSY-only is enforced by @Roles on the controller; re-checked logically here.
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Admin only');
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden - Admin only');
 
     const { status, rejectionReason, reviewerNotes } = dto;
 
@@ -2726,7 +2728,7 @@ export class KycService {
    */
   async approve(user: JwtPayload, id: string) {
     // GIFSY-only is enforced by @Roles on the controller; re-checked logically here.
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden — Gifsy Admin only');
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden — Gifsy Admin only');
 
     const submission = await this.prisma.kycSubmission.findFirst({
       where: { id, ...this.kycTenantFilter(user) },
@@ -2881,7 +2883,7 @@ export class KycService {
    * S1: RE_UPLOAD outlet-before-flip throw inside applyBridgeOutcome.
    */
   async verifyField(user: JwtPayload, id: string, dto: VerifyKycFieldDto) {
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden — Gifsy Admin only');
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden — Gifsy Admin only');
 
     const now = new Date();
     const { fieldKey, decision, remark } = dto;
@@ -3023,7 +3025,7 @@ export class KycService {
 
     // Gifsy admin can reject at any stage. Field approvers can only reject when
     // the submission is currently awaiting them.
-    const isGifsyAdmin = user.role === 'GIFSY_ADMIN';
+    const isGifsyAdmin = isGifsyOperator(user);
     const isFieldApprover = canFirstApprove(user.role, submission.status);
 
     if (!isGifsyAdmin && !isFieldApprover) {
@@ -3396,7 +3398,7 @@ export class KycService {
   // ─── GET /v1/kyc/sla-metrics ─────────────────────────────────────────────────
   async slaMetrics(user: JwtPayload) {
     // GIFSY-only is enforced by @Roles on the controller; re-checked logically here.
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Gifsy Admin only');
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
 
     // Two per-tenant SLA targets (business hours): field stage + Gifsy stage.
     const { fieldHrs: fieldTarget, gifsyHrs: gifsyTarget } =
@@ -3580,7 +3582,7 @@ export class KycService {
    * re-KYC is likewise a Gifsy-only workflow gate so it reuses the same perm.
    */
   async reKyc(user: JwtPayload, id: string, dto: ReKycDto) {
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden — Gifsy Admin only');
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden — Gifsy Admin only');
 
     const { reason, fieldKeys } = dto;
     const now = new Date();
@@ -3714,7 +3716,7 @@ export class KycService {
    * computation in this task — leave this comment as the integration point.
    */
   async gstDetails(user: JwtPayload, id: string, dto: GstDetailsDto) {
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden — Gifsy Admin only');
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden — Gifsy Admin only');
 
     const { entityType, gstRegistrationType, gstLegalName, gstStatus } = dto;
 
@@ -3816,7 +3818,7 @@ export class KycService {
     file: Express.Multer.File,
     apply: boolean,
   ): Promise<BulkVerifyResult | BulkVerifyDryRunResult> {
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden — Gifsy Admin only');
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden — Gifsy Admin only');
 
     if (!file?.buffer?.length) throw new BadRequestException('No file uploaded or file is empty');
 
@@ -4654,7 +4656,7 @@ export class KycService {
    * and the dumpFieldStates helper so the two paths stay in sync.
    */
   async reviewQueue(user: JwtPayload) {
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden — Gifsy Admin only');
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden — Gifsy Admin only');
 
     const submissions = await this.prisma.kycSubmission.findMany({
       where: { status: 'PENDING_GIFSY', ...this.kycTenantFilter(user) },
@@ -4749,7 +4751,7 @@ export class KycService {
    * layout in kyc-review-dump.ts; this assembles entries from real data.
    */
   async reviewDump(user: JwtPayload): Promise<Buffer> {
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Gifsy Admin only');
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
 
     const submissions = await this.prisma.kycSubmission.findMany({
       where: { status: 'PENDING_GIFSY', ...this.kycTenantFilter(user) },
@@ -4846,7 +4848,7 @@ export class KycService {
    * from changedByUserId. Overall reason = KycSubmission.rejectionReason.
    */
   async rejectedExport(user: JwtPayload): Promise<Buffer> {
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Gifsy Admin only');
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
 
     // The "SLA Age (hrs)" column counts BUSINESS hours (Mon–Fri minus the national holiday
     // calendar), matching the KYC list badge + slaMetrics — otherwise the export would disagree

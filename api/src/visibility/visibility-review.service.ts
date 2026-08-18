@@ -16,6 +16,7 @@ import {
   AdminListCapturesQueryDto,
   VISIBILITY_REJECT_REASON_CODES,
 } from './dto/visibility-capture.dto';
+import { isGifsyOperator } from '../common/tenant-scope';
 
 /**
  * The controlled reject-reason vocabulary for the Visibility review queue (D12).
@@ -43,7 +44,8 @@ export class VisibilityReviewService {
   ) {}
 
   private assertGifsy(user: JwtPayload): void {
-    if (user.role !== 'GIFSY_ADMIN') {
+    // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
+    if (!isGifsyOperator(user)) {
       throw new ForbiddenException('Forbidden - Gifsy Admin only');
     }
   }

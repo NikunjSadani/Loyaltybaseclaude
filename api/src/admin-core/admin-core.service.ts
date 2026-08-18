@@ -34,6 +34,7 @@ import {
   KYC_SLA_MIN_HOURS,
   KYC_SLA_MAX_HOURS,
 } from '../common/kyc-sla-stage';
+import { isGifsyOperator } from '../common/tenant-scope';
 import {
   BulkEditUsersDto,
   CreateUserDto,
@@ -697,7 +698,8 @@ export class AdminCoreService {
    * label), de-dups by date, sorts, and upserts the single platform row.
    */
   async setNationalHolidays(user: JwtPayload, dto: SetHolidaysDto): Promise<{ holidays: Holiday[] }> {
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Gifsy Admin only');
+    // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
 
     const byDate = new Map<string, string>();
     for (const h of dto.holidays ?? []) {
@@ -758,7 +760,8 @@ export class AdminCoreService {
     user: JwtPayload,
     dto: SetReportRecipientsDto,
   ): Promise<{ recipients: ReportRecipients }> {
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Gifsy Admin only');
+    // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
 
     const recipients = normalizeReportRecipients(dto);
 
@@ -1112,6 +1115,13 @@ export class AdminCoreService {
   // ════════════════════════════════════════════════════════════════════════
 
   async forceLogoutAll(user: JwtPayload) {
+    // OWNER-ONLY, defense-in-depth: this is a platform-wide, no-WHERE destructive session kill.
+    // The route (@Roles('GIFSY_ADMIN'), no @RequirePermission) already 403s a GIFSY_STAFF, but a
+    // global kill switch must never rest on a single gate — re-check the owner tier here so it
+    // stays owner-only even if the route were ever made permission-grantable. NOT isGifsyOperator.
+    if (user.role !== 'GIFSY_ADMIN') {
+      throw new ForbiddenException('Forbidden - Gifsy Admin only');
+    }
     // AUTHORITATIVE (1b): STAMP BEFORE REVOKE — stamp EVERY user's sessionsInvalidBefore
     // FIRST, then revoke every session, so a refresh minting a successor concurrently with
     // this global kill switch is invalidated (its post-mint re-read sees the committed

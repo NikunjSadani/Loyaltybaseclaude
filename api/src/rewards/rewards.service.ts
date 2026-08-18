@@ -20,6 +20,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { roundToRupeePaise } from '../tds/tds.helpers';
 import { resolveEffectiveKycStatus, isPartnerPayable } from '../kyc/kyc-eligibility';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
+import { isGifsyOperator } from '../common/tenant-scope';
 import {
   AdminListCatalogQueryDto,
   CreateRewardCatalogDto,
@@ -67,7 +68,8 @@ export class RewardsService {
   ) {}
 
   private isGifsy(user: JwtPayload): boolean {
-    return user.role === 'GIFSY_ADMIN';
+    // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
+    return isGifsyOperator(user);
   }
 
   /** Map a redemption mode to the tenant channel toggle that governs it. */

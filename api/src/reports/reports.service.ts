@@ -5,6 +5,7 @@ import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ReportFormat, ReportRangeQueryDto, TdsReportQueryDto } from './dto/reports.dto';
 import { buildXlsx, ReportSheet } from '../common/xlsx';
+import { platformWide } from '../common/tenant-scope';
 
 /**
  * Reporting & Analytics — ported from platform/src/app/api/reports/*.
@@ -40,7 +41,8 @@ export class ReportsService {
    * platform context (`!assumed`).
    */
   private async assertVisibilityEnabled(user: JwtPayload): Promise<void> {
-    if (user.role === 'GIFSY_ADMIN' && !user.assumed) return;
+    // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
+    if (platformWide(user)) return;
     if (!(await this.tenant.resolveVisibilityEnabled(user.clientId))) {
       throw new ForbiddenException('Visibility is not enabled for this tenant.');
     }

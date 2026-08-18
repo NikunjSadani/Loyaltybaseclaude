@@ -11,6 +11,7 @@ import { buildXlsx } from '../common/xlsx';
 import { currentWindowKey, isWindowClosed } from './visibility-window.helper';
 import { readMediaValue } from './visibility-form.helper';
 import { evaluatePhotoFence, haversineMeters } from './geo-fence.helper';
+import { isGifsyOperator } from '../common/tenant-scope';
 
 /**
  * VisibilityReportService — Visibility (POSM) coverage reporting + export (Stream B,
@@ -120,7 +121,8 @@ export class VisibilityReportService {
 
   /** GIFSY admin coverage report for a window (default = current). */
   async gifsyReport(user: JwtPayload, windowKey?: string) {
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Gifsy Admin only');
+    // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
     await this.assertEnabled(user.clientId);
     return this.computeCoverage(user.clientId, windowKey);
   }

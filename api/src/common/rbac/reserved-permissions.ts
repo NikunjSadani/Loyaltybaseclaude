@@ -51,8 +51,13 @@ export const RESERVED_PERMISSIONS: Permission[] = [
   'tenancy:read',
   'tenancy:write',
   'tenancy:manage_flags',
-  // Role management itself (staff/role admin surface).
+  // Role management + destructive user lifecycle (staff/role admin surface). users:delete is
+  // reserved alongside users:manage_roles: deactivating/soft-deleting operator users is a
+  // sensitive lifecycle power that must require the conscious allowReserved override to grant
+  // (P2 red-team Finding 1 — it is GIFSY-operated + not in any seed role, so it is otherwise
+  // lightly delegable without intent).
   'users:manage_roles',
+  'users:delete',
 ];
 
 const _RESERVED_SET = new Set<string>(RESERVED_PERMISSIONS);

@@ -4,6 +4,7 @@ import * as XLSX from 'xlsx';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { platformWide } from '../common/tenant-scope';
 import { ListVisibilityRecordsQueryDto } from './dto/visibility.dto';
 import {
   parseExcelDate,
@@ -52,7 +53,8 @@ export class VisibilityService {
    * photo service's gate.
    */
   private async assertVisibilityEnabled(user: JwtPayload): Promise<void> {
-    if (user.role === 'GIFSY_ADMIN' && !user.assumed) return;
+    // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
+    if (platformWide(user)) return;
     const enabled = await this.tenant.resolveVisibilityEnabled(user.clientId);
     if (!enabled) {
       throw new ForbiddenException('Visibility is not enabled for this tenant.');

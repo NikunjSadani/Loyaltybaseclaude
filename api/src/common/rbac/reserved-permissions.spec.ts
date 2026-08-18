@@ -25,15 +25,16 @@ describe('RESERVED_PERMISSIONS', () => {
     'tenancy:write',
     'tenancy:manage_flags',
     'users:manage_roles',
+    'users:delete',
   ];
 
   it('matches the design-doc reserved set exactly (order-independent)', () => {
     expect([...RESERVED_PERMISSIONS].sort()).toEqual([...EXPECTED].sort());
   });
 
-  it('has 18 entries and no duplicates', () => {
-    expect(RESERVED_PERMISSIONS).toHaveLength(18);
-    expect(new Set(RESERVED_PERMISSIONS).size).toBe(18);
+  it('has 19 entries and no duplicates', () => {
+    expect(RESERVED_PERMISSIONS).toHaveLength(19);
+    expect(new Set(RESERVED_PERMISSIONS).size).toBe(19);
   });
 
   it('contains only valid Permission keys', () => {

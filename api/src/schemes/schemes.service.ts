@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ListSchemesQueryDto } from './dto/schemes.dto';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
+import { isGifsyOperator } from '../common/tenant-scope';
 
 /**
  * Schemes — ported from platform/src/app/api/schemes/*.
@@ -18,7 +19,8 @@ export class SchemesService {
   constructor(private readonly prisma: PrismaService) {}
 
   private isAdmin(user: JwtPayload): boolean {
-    return user.role === 'GIFSY_ADMIN' || user.role === 'CLIENT_ADMIN';
+    // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
+    return user.role === 'GIFSY_ADMIN' || user.role === 'GIFSY_STAFF' || user.role === 'CLIENT_ADMIN';
   }
 
   async list(user: JwtPayload, q: ListSchemesQueryDto, requestedPartnerId?: string) {
@@ -122,7 +124,8 @@ export class SchemesService {
 
   async remove(user: JwtPayload, id: string) {
     // GIFSY_ADMIN only — enforced at the controller; re-stated here for safety.
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Gifsy Admin only');
+    // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
 
     const existingScheme = await this.prisma.scheme.findFirst({ where: { id, clientId: user.clientId } });
     if (!existingScheme) throw new NotFoundException('Scheme not found');

@@ -5,6 +5,7 @@
 import { ForbiddenException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { RolesGuard } from './roles.guard';
+import { PERMISSION_KEY } from '../decorators/require-permission.decorator';
 import type { ExecutionContext } from '@nestjs/common';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -12,6 +13,15 @@ import type { ExecutionContext } from '@nestjs/common';
 function makeReflector(roles: string[] | undefined): Reflector {
   return {
     getAllAndOverride: jest.fn().mockReturnValue(roles),
+  } as unknown as Reflector;
+}
+
+// Key-aware reflector for the GIFSY_STAFF branch (which reads BOTH ROLES_KEY and PERMISSION_KEY).
+function makeReflector2(roles: string[] | undefined, permission: string | undefined): Reflector {
+  return {
+    getAllAndOverride: jest.fn((key: string) =>
+      key === PERMISSION_KEY ? permission : roles,
+    ),
   } as unknown as Reflector;
 }
 
@@ -114,6 +124,36 @@ describe('RolesGuard', () => {
     it('D2: unauthenticated request also rejected on public-but-role-listed route', () => {
       const guard = new RolesGuard(makeReflector(['SALES_SO', 'RETAILER']));
       expect(() => guard.canActivate(makeContext(null))).toThrow(ForbiddenException);
+    });
+  });
+
+  // ── E. GIFSY_STAFF defers the coarse floor to @RequirePermission (RBAC Option-X P2) ──
+  describe('E – GIFSY_STAFF defers to @RequirePermission', () => {
+    it('E1: admitted past an owner-only @Roles when the route has a (non-manage_roles) @RequirePermission', () => {
+      // e.g. @Roles('GIFSY_ADMIN') + @RequirePermission('kyc:read') → staff passes the coarse
+      // floor here; PermissionGuard then enforces the actual grant.
+      const guard = new RolesGuard(makeReflector2(['GIFSY_ADMIN'], 'kyc:read'));
+      expect(guard.canActivate(makeContext('GIFSY_STAFF'))).toBe(true);
+    });
+
+    it('E2: BLOCKED on staff/role administration (users:manage_roles) regardless of grant', () => {
+      const guard = new RolesGuard(makeReflector2(['GIFSY_ADMIN'], 'users:manage_roles'));
+      expect(() => guard.canActivate(makeContext('GIFSY_STAFF'))).toThrow(ForbiddenException);
+    });
+
+    it('E3: BLOCKED on a route with NO @RequirePermission (no fine gate to defer to)', () => {
+      const guard = new RolesGuard(makeReflector2(['GIFSY_ADMIN'], undefined));
+      expect(() => guard.canActivate(makeContext('GIFSY_STAFF'))).toThrow(ForbiddenException);
+    });
+
+    it('E4: a route with no @Roles stays open (unchanged) — PermissionGuard still gates it', () => {
+      const guard = new RolesGuard(makeReflector2(undefined, 'kyc:read'));
+      expect(guard.canActivate(makeContext('GIFSY_STAFF'))).toBe(true);
+    });
+
+    it('E5: an explicit @Roles listing GIFSY_STAFF admits it even with no @RequirePermission', () => {
+      const guard = new RolesGuard(makeReflector2(['GIFSY_STAFF'], undefined));
+      expect(guard.canActivate(makeContext('GIFSY_STAFF'))).toBe(true);
     });
   });
 });
