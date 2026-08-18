@@ -52,6 +52,11 @@ export const GIFSY_OPERATED_PERMISSIONS: Permission[] = [
 
 export type UserRole =
   | 'GIFSY_ADMIN'
+  // RBAC Option-X — Gifsy staff below the Owner tier. Empty by default here; a
+  // GIFSY_STAFF user's REAL access is their assigned GifsyRole, resolved in
+  // PermissionGuard (not via this static map). Kept in the union so the schema
+  // enum and DEFAULT_ROLE_PERMISSIONS stay exhaustively in sync.
+  | 'GIFSY_STAFF'
   | 'CLIENT_ADMIN'
   | 'MIS_USER'
   | 'SALES_HO'
@@ -135,6 +140,9 @@ const SALES_VISIBILITY_PERMISSIONS: Permission[] = ['visibility:read', 'visibili
 
 export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   GIFSY_ADMIN:       GIFSY_ADMIN_PERMISSIONS,
+  // GIFSY_STAFF grants NOTHING by default — access comes from the assigned
+  // GifsyRole, resolved per-request in PermissionGuard (never via can()).
+  GIFSY_STAFF:       EMPTY_PERMISSIONS,
   CLIENT_ADMIN:      CLIENT_ADMIN_PERMISSIONS,
   MIS_USER:          MIS_USER_PERMISSIONS,
   // Sales roles — only the Visibility (POSM) capture permissions by default (see rationale

@@ -12,6 +12,10 @@ datasource db {
 
 enum UserRole {
   GIFSY_ADMIN
+  // Gifsy staff (below the GIFSY_ADMIN owner tier). Empty permissions by default; the
+  // real access comes from the assigned GifsyRole (user.gifsyRoleId). See
+  // RBAC-OPTION-X-STAFF.md. Additive enum value (ALTER TYPE ADD VALUE).
+  GIFSY_STAFF
   CLIENT_ADMIN
   MIS_USER
   SALES_HO
@@ -507,11 +511,16 @@ model User {
   // createdAt precedes it AND revokes any successor minted during a concurrent logout-all, so a
   // sweep can never be out-raced by an in-flight refresh. Additive + nullable, no backfill.
   sessionsInvalidBefore DateTime?
+  // RBAC Option-X: for a GIFSY_STAFF user, the assigned custom role whose permission set
+  // is their effective access. Null for every other role (and a GIFSY_STAFF with null role
+  // has NO permissions — fail-closed). SetNull if the role is deleted.
+  gifsyRoleId       String?
   createdAt         DateTime   @default(now())
   updatedAt         DateTime   @updatedAt
   deletedAt         DateTime?
 
   // Relations
+  gifsyRole                  GifsyRole?          @relation(fields: [gifsyRoleId], references: [id], onDelete: SetNull)
   sessions                   UserSession[]
   otpCodes                   OtpCode[]
   auditLogs                  AuditLog[]          @relation("AuditActor")
@@ -551,7 +560,38 @@ model User {
   @@index([role])
   @@index([status])
   @@index([deletedAt])
+  @@index([gifsyRoleId])
   @@map("users")
+}
+
+/// RBAC Option-X — a custom Gifsy operator role (self-service, DB-backed). Holds a curated
+/// set of Permission keys (see api/src/common/rbac/permissions.ts). Assigned to GIFSY_STAFF
+/// users via User.gifsyRoleId; the guard resolves a staff member's access from it per-request.
+/// clientId is always 'gifsy' (operator-owned). `isSystem` marks the seeded Ops / Project
+/// Manager roles (renamable/editable, delete blocked). Reserved permissions (money-execution /
+/// tenancy / users:manage_roles) are enforced NOT-grantable on the backend unless the owner
+/// explicitly overrides — see RBAC-OPTION-X-STAFF.md.
+model GifsyRole {
+  id          String   @id @default(cuid())
+  clientId    String
+  name        String
+  description String?
+  // Curated Permission keys (api/src/common/rbac/permissions.ts). Stored as Postgres
+  // text[] — the resolver validates each key via isPermission() and ignores unknowns.
+  permissions String[]
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  // Soft delete: a role in use can be retired without breaking users.gifsyRoleId (FK
+  // SetNull). The resolver treats deletedAt != null as an empty permission set (fail-closed).
+  deletedAt   DateTime?
+
+  users User[]
+
+  @@unique([clientId, name])
+  @@index([clientId])
+  @@index([deletedAt])
+  @@map("gifsy_roles")
 }
 
 model UserSession {

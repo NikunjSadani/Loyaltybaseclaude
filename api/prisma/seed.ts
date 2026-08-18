@@ -43,6 +43,7 @@ import {
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import * as bcrypt from 'bcrypt';
+import { seedGifsyRoles } from './seed-gifsy-roles';
 
 // Construct PrismaClient with the pg driver adapter — required under Prisma 7
 // (a bare `new PrismaClient()` throws "must provide a driver adapter").
@@ -184,6 +185,9 @@ async function main() {
 
   // 5. §A-DOMAIN client_domains routing rows (deoleo + clientb) ─────────────────
   await seedClientDomains();
+
+  // 6. RBAC Option-X — isSystem Gifsy operator roles (Ops, Project Manager) ──────
+  await seedGifsyRoles(prisma);
 
   console.log('\n✅  Seed complete.');
 }

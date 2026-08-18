@@ -378,6 +378,11 @@ export class AuthService {
       name:     user.name,
       sid,
       ...(opts?.assumed ? { assumed: true } : {}),
+      // RBAC Option-X — carry the staff member's assigned GifsyRole id so the
+      // PermissionGuard can resolve GIFSY_STAFF permissions without a user lookup.
+      // Rides both login and refresh (refresh re-mints from the full session.user).
+      // Null for every non-staff user → omitted from the token.
+      ...(user.gifsyRoleId ? { gifsyRoleId: user.gifsyRoleId } : {}),
     };
 
     // SHORT access-token lifetime — DECOUPLED from the 7-day session/refresh window so

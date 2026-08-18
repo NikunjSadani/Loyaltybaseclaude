@@ -21,6 +21,14 @@ export interface JwtPayload {
    * before this change have no `sid` and fall back to the legacy (user+tenant) match.
    */
   sid?:     string;
+  /**
+   * RBAC Option-X — for a GIFSY_STAFF user, the id of their assigned GifsyRole.
+   * Carried on the token so PermissionGuard can resolve the staff member's
+   * effective permission set without an extra DB user lookup. Present only when
+   * the user has a role assigned (omitted otherwise); every non-staff role
+   * ignores it.
+   */
+  gifsyRoleId?: string;
   iat?:     number;
   exp?:     number;
 }

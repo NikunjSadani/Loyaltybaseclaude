@@ -10,6 +10,7 @@ import { PERMISSION_KEY } from '../decorators/require-permission.decorator';
 import { can } from '../rbac/can';
 import type { Permission } from '../rbac/permissions';
 import { TenantService } from '../../tenant/tenant.service';
+import { GifsyRoleService } from '../rbac/gifsy-role.service';
 
 /**
  * RBAC permission enforcement — the Nest port of lib/rbac/require-permission.ts.
@@ -26,6 +27,7 @@ export class PermissionGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly tenant: TenantService,
+    private readonly gifsyRoles: GifsyRoleService,
   ) {}
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
@@ -42,13 +44,24 @@ export class PermissionGuard implements CanActivate {
     if (process.env.RBAC_ENFORCEMENT !== 'true') return true;
 
     const user = ctx.switchToHttp().getRequest().user as
-      | { role?: string; clientId?: string }
+      | { role?: string; clientId?: string; gifsyRoleId?: string | null }
       | undefined;
     if (!user) throw new UnauthorizedException('Authentication required.');
 
     // Level 2 — per-tenant opt-in (fail-open if not enabled / unknown tenant).
     const enabled = await this.tenant.isFeatureEnabled(user.clientId ?? '', 'rbacEnforcement');
     if (!enabled) return true;
+
+    // RBAC Option-X — a GIFSY_STAFF user has NO static permissions; their effective
+    // access is the permission set of their assigned GifsyRole (users.gifsyRoleId,
+    // carried on the JWT). Resolved via a short-TTL cache. A null/unknown/soft-deleted
+    // role → empty set → denied (fail-closed). GIFSY_ADMIN and every other role keep
+    // the existing static can() path unchanged.
+    if (user.role === 'GIFSY_STAFF') {
+      const perms = await this.gifsyRoles.getPermissions(user.gifsyRoleId);
+      if (perms.has(permission)) return true;
+      throw new ForbiddenException(`Forbidden: missing permission ${permission}`);
+    }
 
     if (can(user.role ?? '', permission)) return true;
     throw new ForbiddenException(`Forbidden: missing permission ${permission}`);
