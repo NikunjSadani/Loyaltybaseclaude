@@ -46,6 +46,14 @@ export interface UsePermissions {
    * For GIFSY_STAFF, TRUE only when the permission is in their granted set.
    */
   has: (permission: string) => boolean;
+  /**
+   * True when the staff permission fetch FAILED (transient) and no set is cached — the caller
+   * should show a "couldn't load your permissions — retry" state, NOT a genuine access denial.
+   * Always false for non-staff. (MED-1: never conflate a network blip with "no permission".)
+   */
+  error: boolean;
+  /** Re-attempt the staff permission fetch (clears the transient error). No-op for non-staff. */
+  retry: () => void;
 }
 
 /**
@@ -66,6 +74,10 @@ export function hasPermissionFor(
 
 // ── module-level cache (fetched once per session, like gifsy-settings) ────────
 let cache: { permissions: string[] } | null = null;
+// MED-1: a FAILED fetch is a TRANSIENT error, NOT "no permissions" — we do NOT cache it as a
+// terminal empty set (which would strand a legit staff on AccessDenied for the whole session).
+// It stays retryable (cache null) and surfaces `error` so the UI shows a retry state, not a denial.
+let loadError = false;
 let inflight: Promise<void> | null = null;
 const listeners = new Set<() => void>();
 
@@ -77,25 +89,32 @@ interface Snapshot {
   role: string | null;
   permissions: string[];
   ready: boolean;
+  error: boolean;
 }
 
 /** Synchronous snapshot: role from localStorage, permissions from the cache. */
 function readSnapshot(): Snapshot {
   const role = getStoredUser()?.role ?? null;
   if (role !== STAFF_ROLE) {
-    // Non-staff: inert — always ready, no permissions consulted.
-    return { role, permissions: [], ready: true };
+    // Non-staff: inert — always ready, never in error, no permissions consulted.
+    return { role, permissions: [], ready: true, error: false };
   }
-  // Staff: a decision needs the granted keys, so ready only once loaded.
-  return { role, permissions: cache?.permissions ?? [], ready: cache !== null };
+  // Staff: a decision needs the granted keys, so ready only once loaded. `error` is true when
+  // the fetch failed and nothing is cached → the caller shows a retry state (not AccessDenied).
+  return {
+    role,
+    permissions: cache?.permissions ?? [],
+    ready: cache !== null,
+    error: loadError && cache === null,
+  };
 }
 
 /**
- * Ensure the staff permission list is loaded (idempotent, single-flight). No-ops for
- * non-staff — they never trigger the fetch, keeping the feature free for them. On a
- * fetch failure the cache is set to an EMPTY list (fail-CLOSED for the UX layer): a
- * staff whose /me we cannot read sees AccessDenied rather than a page whose data the
- * backend will 403 anyway. The backend remains the real enforcement either way.
+ * Ensure the staff permission list is loaded (idempotent, single-flight). No-ops for non-staff —
+ * they never trigger the fetch, keeping the feature free for them. On a fetch failure we set the
+ * transient `loadError` flag but DO NOT cache a result, so the next mount / an explicit retry()
+ * re-attempts (MED-1) — a network blip never becomes a permanent, misdiagnosed access denial.
+ * The backend remains the real enforcement boundary either way.
  */
 function ensureLoaded(): Promise<void> {
   if (typeof window === 'undefined') return Promise.resolve();
@@ -104,22 +123,41 @@ function ensureLoaded(): Promise<void> {
   if (cache !== null) return Promise.resolve();
   if (inflight) return inflight;
 
+  loadError = false; // fresh attempt
   inflight = api
     .get<{ permissions?: unknown }>('/api/auth/me')
     .then((res) => {
-      const raw = res.success ? (res.data?.permissions as unknown) : null;
+      // NOTE: api.get NEVER rejects — a network error OR a non-2xx both resolve as
+      // { success:false } (api-client.ts). So a FAILURE must be handled HERE, not only in
+      // .catch: treat !success as a TRANSIENT error (retryable, uncached) — caching an empty
+      // set here was the real MED-1 bug (a blip → permanent AccessDenied for the whole session).
+      if (!res.success) {
+        loadError = true;
+        notify();
+        return;
+      }
+      const raw = res.data?.permissions as unknown;
       const perms = Array.isArray(raw) ? raw.filter((p): p is string => typeof p === 'string') : [];
       cache = { permissions: perms };
+      loadError = false;
       notify();
     })
     .catch(() => {
-      cache = { permissions: [] };
+      // Defensive (api.get shouldn't reach here) — same transient, retryable, uncached handling.
+      loadError = true;
       notify();
     })
     .finally(() => {
       inflight = null;
     });
   return inflight;
+}
+
+/** Re-attempt the staff permission fetch after a transient failure. No-op for non-staff. */
+function retryLoad(): void {
+  if (getStoredUser()?.role !== STAFF_ROLE) return;
+  loadError = false;
+  void ensureLoaded();
 }
 
 /**
@@ -152,13 +190,15 @@ export function usePermissions(): UsePermissions {
     (permission: string) => hasPermissionFor(snap.role, snap.permissions, permission),
     [snap.role, snap.permissions],
   );
+  const retry = useCallback(() => retryLoad(), []);
 
-  return { role: snap.role, permissions: snap.permissions, ready: snap.ready, has };
+  return { role: snap.role, permissions: snap.permissions, ready: snap.ready, error: snap.error, has, retry };
 }
 
 /** Test-only: reset the module cache + subscribers between test cases. */
 export function __resetPermissionsForTests(): void {
   cache = null;
+  loadError = false;
   inflight = null;
   listeners.clear();
 }

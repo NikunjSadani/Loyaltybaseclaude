@@ -70,17 +70,30 @@ export function PermissionButton({
   const staffPending = role === 'GIFSY_STAFF' && !ready;
   const denied = !has(permission) || staffPending;
 
-  return (
+  const button = (
     <button
       {...rest}
       disabled={disabled || denied}
-      title={denied ? deniedTitle : title}
+      // When permission-denied the title lives on the wrapping span (below), not here — a
+      // DISABLED button fires no hover events, so a title on it never shows (MED-2).
+      title={denied ? undefined : title}
       aria-disabled={disabled || denied || undefined}
       onClick={denied ? undefined : onClick}
     >
       {children}
     </button>
   );
+
+  // Permission-denied → wrap in a (non-disabled) span that DOES receive hover, so the
+  // "You don't have permission" tooltip is actually discoverable. `inline-block` hugs the button.
+  if (denied) {
+    return (
+      <span title={deniedTitle} aria-label={deniedTitle} className="inline-block cursor-not-allowed">
+        {button}
+      </span>
+    );
+  }
+  return button;
 }
 
 export default PermissionGate;

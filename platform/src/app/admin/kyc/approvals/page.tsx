@@ -515,6 +515,17 @@ export default function KycApprovalsPage() {
             )}
           </div>
 
+          {/* P6 — a visible, honest reason the decision/commit controls are disabled for a staff
+              who lacks kyc:gifsy_approve (a disabled button's title tooltip never shows on hover). */}
+          {!canApprove && (
+            <div
+              role="note"
+              className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+            >
+              You don&apos;t have permission to approve, reject, or commit KYC. Ask your admin to grant it.
+            </div>
+          )}
+
           {/* Step 3 — Commit (only enabled after a clean preview) */}
           {previewResult && (
             <div className="flex flex-wrap items-center gap-3">

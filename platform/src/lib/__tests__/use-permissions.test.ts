@@ -102,6 +102,29 @@ describe('usePermissions() — hook', () => {
     expect(result.current.permissions).toEqual(['kyc:read', 'kyc:gifsy_approve']);
   });
 
+  it('staff: a FAILED /me surfaces error (not a denial), stays uncached, and retry() recovers (MED-1)', async () => {
+    login('GIFSY_STAFF');
+    // api.get never rejects — a non-2xx resolves as { success:false }. This must NOT be cached
+    // as an empty permission set (which would strand the staff on AccessDenied for the session).
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve({ ok: false, status: 500, statusText: 'err', json: () => Promise.resolve({}) }),
+      ),
+    );
+    const { result } = renderHook(() => usePermissions());
+    await waitFor(() => expect(result.current.error).toBe(true));
+    expect(result.current.ready).toBe(false);           // not "loaded" → guard shows RETRY, not denial
+    expect(result.current.has('kyc:read')).toBe(false);
+
+    // Retry with a working /me → recovers to the granted set (proves the failure was NOT cached).
+    installMe(['kyc:read']);
+    result.current.retry();
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    expect(result.current.error).toBe(false);
+    expect(result.current.has('kyc:read')).toBe(true);
+  });
+
   it('staff: fetches /me at most once across multiple hook mounts (cached)', async () => {
     login('GIFSY_STAFF');
     installMe(['kyc:read']);
