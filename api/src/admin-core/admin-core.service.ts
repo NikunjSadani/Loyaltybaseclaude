@@ -126,6 +126,26 @@ export class AdminCoreService {
     }
   }
 
+  /**
+   * Validates that the caller may MANAGE (mutate / deactivate / delete / revoke-sessions)
+   * the given TARGET user through the generic admin/users surface. Complements
+   * assertRoleAssignable (which gates the assigned ROLE) by gating the target's TIER.
+   *
+   * A GIFSY_ADMIN (the platform owner) may manage anyone. Any OTHER caller — in practice a
+   * GIFSY_STAFF, the only non-owner that shares the 'gifsy' operator tenant and can thus
+   * resolve an operator row through the caller-clientId scope — may NOT act on a platform
+   * OPERATOR account (GIFSY_ADMIN or GIFSY_STAFF). Operator lifecycle flows exclusively
+   * through GifsyStaffService (owner-only, users:manage_roles). Without this, a staff granted
+   * the (non-reserved) users:write could PATCH the owner's login phone and OTP-login as the
+   * GIFSY_ADMIN — full account takeover (RBAC Option-X P4 red-team, Finding A).
+   */
+  private assertCanManageTarget(caller: JwtPayload, target: { role: UserRole }): void {
+    if (caller.role === 'GIFSY_ADMIN') return;
+    if (target.role === 'GIFSY_ADMIN' || target.role === 'GIFSY_STAFF') {
+      throw new ForbiddenException('Operator accounts can only be managed by the platform owner.');
+    }
+  }
+
   // ─── ProgramSetting setting keys (mirror the Next routes) ───────────────────
   private static readonly HIERARCHY_KEY = 'employee_hierarchy';
   private static readonly TASK_CONFIG_KEY = 'task_config';
@@ -190,9 +210,13 @@ export class AdminCoreService {
 
     const target = await this.prisma.user.findFirst({
       where: { id: targetUserId, clientId },
-      select: { id: true },
+      select: { id: true, role: true },
     });
     if (!target) throw new NotFoundException('User not found');
+
+    // A non-owner (e.g. a GIFSY_STAFF with users:write) must not be able to force-logout a
+    // platform-operator account through this surface (Finding A family).
+    this.assertCanManageTarget(caller, target);
 
     const revoked = await this.revokeAllSessionsForUser(targetUserId);
 
@@ -331,6 +355,10 @@ export class AdminCoreService {
     const target = await this.prisma.user.findFirst({ where: { id, clientId } });
     if (!target) throw new NotFoundException('User not found');
 
+    // Operator-row guard — a non-owner (e.g. a GIFSY_STAFF with users:write) must never
+    // mutate a platform-operator account via this surface (Finding A — owner takeover).
+    this.assertCanManageTarget(user, target);
+
     // Deactivation guards — fire when the status is set to anything other than
     // ACTIVE (INACTIVE / SUSPENDED / PENDING_VERIFICATION), so a SUSPEND can't
     // bypass the self-lockout / last-admin protections. Never fire on
@@ -442,8 +470,15 @@ export class AdminCoreService {
     // Re-fetch the full row to return the correct updated state.
     const updated = await this.prisma.user.findFirst({ where: { id, clientId } });
 
-    // Force re-login on all devices when login identity (phone) changes
-    if (phoneChanged) {
+    // Force re-login on all devices when the account's authority changes: a phone (login
+    // identity) change, a deactivation/suspension, OR a role change. Mirrors the dedicated
+    // staff-panel path (gifsy-staff.service) so deactivating/demoting a user via THIS generic
+    // admin path can't leave a live, renewable session behind — the refresh path does NOT
+    // re-check status, so an un-swept deactivated user would keep minting successors for the
+    // full 7-day window (RBAC Option-X P4 red-team, Finding B). revokeAllSessionsForUser
+    // stamps sessionsInvalidBefore BEFORE the sweep so an in-flight refresh can't out-race it.
+    const roleChanged = dto.role !== undefined && dto.role !== target.role;
+    if (phoneChanged || deactivating || roleChanged) {
       await this.revokeAllSessionsForUser(id);
     }
 
@@ -468,6 +503,11 @@ export class AdminCoreService {
     const target = await this.prisma.user.findFirst({ where: { id, clientId } });
     if (!target) throw new NotFoundException('User not found');
 
+    // Operator-row guard — deleting an operator account is owner-only (Finding A family).
+    // DELETE already requires the reserved users:delete, but defense-in-depth: a granted
+    // reserved key must still not let a staff soft-delete the owner / a fellow operator.
+    this.assertCanManageTarget(user, target);
+
     // Soft delete — scoped to tenant for defense-in-depth.
     const { count: deleteCount } = await this.prisma.user.updateMany({
       where: { id, clientId },
@@ -476,6 +516,11 @@ export class AdminCoreService {
     if (deleteCount === 0) {
       throw new NotFoundException('User not found');
     }
+
+    // A soft-deleted (deactivated) account must lose its live sessions too — the refresh path
+    // does not re-check status, so without this the deleted user keeps renewing for up to 7d
+    // (same hole as the deactivate path, Finding B). Stamp-before-sweep via the shared helper.
+    await this.revokeAllSessionsForUser(id);
 
     await this.prisma.auditLog.create({
       data: {

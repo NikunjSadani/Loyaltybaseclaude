@@ -64,12 +64,19 @@ const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deole
 const gifsyHome: JwtPayload = { sub: 'admin0', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: '' };
 const clientAdmin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const misUser: JwtPayload  = { sub: 'mis1',  role: 'MIS_USER',     clientId: 'deoleo', phone: '', name: '' };
+// A GIFSY_STAFF operator — un-assumed, so clientId 'gifsy' (shares the owner's tenant).
+const gifsyStaff: JwtPayload = { sub: 'st1', role: 'GIFSY_STAFF' as never, clientId: 'gifsy', phone: '', name: '', gifsyRoleId: 'role1' } as JwtPayload;
 
 describe('AdminCoreService', () => {
   let service: AdminCoreService;
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    // Safe defaults so revokeAllSessionsForUser (now also called on deactivate / role-change /
+    // delete — RBAC Option-X P4 Finding B — not only on phone change) never NPEs on
+    // result.count. Individual tests still override these where they assert specific values.
+    mockPrisma.userSession.updateMany.mockResolvedValue({ count: 0 });
+    mockPrisma.user.update.mockResolvedValue({});
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AdminCoreService,
@@ -306,6 +313,66 @@ describe('AdminCoreService', () => {
       mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
       await service.updateUser(clientAdmin, 'u1', { name: 'New Name' });
       expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
+    });
+
+    // ── P4 Finding A — operator-row target guard (owner-takeover block) ────────
+    it('P4-GUARD: a GIFSY_STAFF cannot edit a GIFSY_ADMIN target (blocks owner phone-swap takeover)', async () => {
+      mockPrisma.user.findFirst.mockResolvedValueOnce({ id: 'owner', role: 'GIFSY_ADMIN', phone: '9830011252' });
+      await expect(
+        service.updateUser(gifsyStaff, 'owner', { phone: '9999999999' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      // Guard fires before any write.
+      expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
+      expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('P4-GUARD: a GIFSY_STAFF cannot edit another GIFSY_STAFF target', async () => {
+      mockPrisma.user.findFirst.mockResolvedValueOnce({ id: 'st2', role: 'GIFSY_STAFF', phone: '9800000002' });
+      await expect(
+        service.updateUser(gifsyStaff, 'st2', { name: 'X' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('P4-GUARD: the GIFSY_ADMIN owner CAN edit an operator target (guard exempts the owner)', async () => {
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce({ id: 'st2', role: 'GIFSY_STAFF', phone: '9800000002' }) // target
+        .mockResolvedValueOnce({ id: 'st2', name: 'Renamed' });                          // re-fetch
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+      await expect(service.updateUser(gifsyHome, 'st2', { name: 'Renamed' })).resolves.toBeDefined();
+      expect(mockPrisma.user.updateMany).toHaveBeenCalled();
+    });
+
+    // ── P4 Finding B — deactivate / role-change revoke sessions (staff-panel parity) ──
+    it('P4-REVOKE: deactivation revokes sessions via this generic admin path', async () => {
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce({ id: 'u3', phone: '1111111111', role: 'MIS_USER', status: 'ACTIVE' }) // target
+        .mockResolvedValueOnce({ id: 'u3', status: 'INACTIVE' });                                      // re-fetch
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 3 });
+      await service.updateUser(clientAdmin, 'u3', { status: 'INACTIVE' as never });
+      // Session sweep fired (stamp-before-sweep via revokeAllSessionsForUser).
+      expect(mockPrisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'u3' },
+        data: { sessionsInvalidBefore: expect.any(Date) },
+      });
+      expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'u3', revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    it('P4-REVOKE: a role change revokes sessions (a demoted token must not survive)', async () => {
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce({ id: 'u4', phone: '1111111111', role: 'SALES_ISR' }) // target
+        .mockResolvedValueOnce({ id: 'u4', role: 'MIS_USER' });                        // re-fetch
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+      await service.updateUser(gifsyHome, 'u4', { role: 'MIS_USER' as never });
+      expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'u4', revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
     });
 
     // ── GLB-4 role-assignment guard via updateUser ────────────────────────────
@@ -579,6 +646,23 @@ describe('AdminCoreService', () => {
       expect(call.where).toEqual({ id: 'u1', clientId: 'deoleo' });
       expect(mockPrisma.auditLog.create).toHaveBeenCalled();
     });
+
+    it('P4-REVOKE: soft-delete revokes the target\'s sessions (deleted user must not keep renewing)', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'u1' });
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 2 });
+      await service.deleteUser(gifsy, 'u1');
+      expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'u1', revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    it('P4-GUARD: a GIFSY_STAFF cannot delete an operator account even with users:delete', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'owner', role: 'GIFSY_ADMIN' });
+      await expect(service.deleteUser(gifsyStaff, 'owner')).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
+    });
   });
 
   describe('forceLogoutAll', () => {
@@ -640,6 +724,14 @@ describe('AdminCoreService', () => {
       expect(audit.entityId).toBe('u9');
       expect(audit.actorId).toBe('ca1');
       expect(audit.metadata).toMatchObject({ event: 'admin_revoke_sessions', targetUserId: 'u9', by: 'ca1' });
+    });
+
+    it('P4-GUARD: a GIFSY_STAFF cannot force-logout an operator (owner) account', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'owner', role: 'GIFSY_ADMIN' });
+      await expect(service.revokeUserSessions(gifsyStaff, 'owner')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
     });
   });
 
