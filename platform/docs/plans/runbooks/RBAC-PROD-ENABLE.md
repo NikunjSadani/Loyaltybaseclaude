@@ -1,7 +1,7 @@
 # RBAC Option-X — PROD ENABLE runbook (owner-gated; execute nothing without explicit go)
 
-**Status:** DRAFT for owner review (updated 2026-08-19 for P5). Nothing here runs until the owner
-explicitly authorizes each irreversible step. RBAC P0–P5 are done + DUAL-audited + verified on
+**Status:** DRAFT for owner review (updated 2026-08-19 for P5+P6). Nothing here runs until the owner
+explicitly authorizes each irreversible step. RBAC P0–P6 are done + DUAL-audited + verified on
 staging; ALL DORMANT (no `GIFSY_STAFF` exists in prod). Detail: memory `[[rbac-option-x-staff]]`.
 
 > **Key fact:** GIFSY_STAFF enforcement is **always-on / fail-closed** — there is NO feature flag
@@ -15,19 +15,20 @@ staging; ALL DORMANT (no `GIFSY_STAFF` exists in prod). Detail: memory `[[rbac-o
 ---
 
 ## 0. Preconditions (all ✅ as of 2026-08-19)
-- develop HEAD `db9622e` carries RBAC P0–P5 + all security fixes + the outlet-wallet bundle.
-- Gates green on develop: api jest 2480 · nest 0 · FE tsc 0 · FE vitest 2181.
-- P4 walk 58/58; P5 isolation walk 23/23; dual auth audit + cross-tenant write-sweep = CLEAN
-  (all findings fixed + re-verified). No open blocking decisions — D-B4 is RESOLVED by P5 (staff
-  work per-brand by ASSUMING a granted tenant; the previously-inert writes work once assumed).
-- Deferred (non-blocking): permission-aware admin nav for staff (P6), D-B2 (tenancy:write
-  overloading), write-sweep LOW-1 self-guarding `where` hardening.
+- develop HEAD `b6f86bb` carries RBAC P0–P6 + all security fixes + the outlet-wallet bundle.
+- Gates green on develop: api jest 2482 · nest 0 · FE tsc 0 · FE vitest 2201.
+- P4 walk 58/58; P5 isolation walk 23/23; P6 /me contract 10/10; dual auth audit + cross-tenant
+  write-sweep + P6 UI/UX audit = CLEAN (all findings fixed + re-verified). No open BLOCKING
+  decisions — D-B4 resolved by P5; P6 adds the clear "no permission" messaging.
+- OPEN (non-blocking) owner decision: P6 nav volume — with the narrow seed roles an Ops staff
+  hits AccessDenied on ~half the visible sidebar (broaden the seed roles, or hide zero-overlap
+  nav items). Deferred: D-B2 (tenancy:write overloading), write-sweep LOW-1 self-guarding `where`.
 
 ---
 
 ## 1. Cutover #32 — ship code + migrations to prod  *(owner-gated: merges develop→main)*
 This is the normal prod cutover; it carries the additive+dormant bundles together:
-(A) RBAC P0–P5, (B) outlet-wallet + money-hardening, and the RBAC migrations.
+(A) RBAC P0–P6, (B) outlet-wallet + money-hardening, and the RBAC migrations.
 
 1. Owner gives explicit go to merge `develop` → `main`.
 2. Merge; CI runs the FULL suite (a red suite silently SKIPS deploy via `needs: test` — confirm green).
