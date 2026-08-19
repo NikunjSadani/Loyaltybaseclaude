@@ -138,11 +138,15 @@ describe('Sales Tasks — real sales-assisted scheme enrollment', () => {
     expect(await screen.findByText('Enrolled')).toBeInTheDocument();
   });
 
-  it('does not render the scheme group for a non-enroll manager (RSM)', async () => {
+  it('renders the scheme group for a manager (RSM) — the backend scopes targets to their downline', async () => {
+    // Fix: scheme "Activations / Tasks" is no longer gated to field roles. A manager
+    // (RSM/ZNM/NSM) tagged on a roster row now sees the group and can Select→enroll; the
+    // backend (getSalesTargets / assertSalesReachRoster) scopes visibility to their downline.
     mockRole = 'RSM';
     render(<TasksPage />);
-    await screen.findByText('All clear!');
-    expect(screen.queryByText('Activations / Tasks')).not.toBeInTheDocument();
+    const group = await screen.findByText('Activations / Tasks');
+    fireEvent.click(group);
+    expect(await screen.findByText('Summer Activation')).toBeInTheDocument();
   });
 });
 

@@ -498,8 +498,10 @@ export default function SalesDashboard() {
     return groups;
   }, [outlets, kycSubs, visibilityItems, visibilityMode, taskConfig, role]);
 
-  const isFieldRole = canEnroll(role);
-  const schemeCount = isFieldRole ? schemes.length : 0;
+  // Scheme "Activations / Tasks" is visible to EVERY sales role — the backend scopes
+  // each person's targets to their own downline reach, so a tagged manager (RSM/ZNM/NSM)
+  // sees them too. (The "New Enrollment" KYC button below stays field-only via canEnroll.)
+  const schemeCount = schemes.length;
   const totalTasks  = taskGroups.reduce((s, g) => s + g.items.length, 0) + schemeCount;
 
   return (
@@ -601,7 +603,7 @@ export default function SalesDashboard() {
                       </Link>
                     );
                   })}
-                  {/* Scheme Enrollment — field roles only */}
+                  {/* Scheme Enrollment — visible to every sales role (backend scopes to downline) */}
                   {schemeCount > 0 && (
                     <Link
                       href="/sales/tasks"

@@ -526,9 +526,8 @@ export default function TasksPage() {
     return groups;
   }, [outlets, kycSubs, taskConfig, role, visibilityItems, visibilityMode]);
 
-  const isFieldRole  = canEnroll(role);
   const schemeCount  = schemes.length;
-  const totalTasks   = taskGroups.reduce((s, g) => s + g.items.length, 0) + (isFieldRole ? schemeCount : 0);
+  const totalTasks   = taskGroups.reduce((s, g) => s + g.items.length, 0) + schemeCount;
 
   return (
     <div className="fade-in">
@@ -555,7 +554,7 @@ export default function TasksPage() {
         <div className="flex items-center justify-center py-20">
           <Loader2 className="h-6 w-6 animate-spin text-[var(--brand-primary)]" />
         </div>
-      ) : taskGroups.length === 0 && (!isFieldRole || schemeCount === 0) ? (
+      ) : taskGroups.length === 0 && schemeCount === 0 ? (
         <div className="flex flex-col items-center gap-3 py-16 bg-white rounded-2xl border border-gray-100">
           <CheckCircle2 className="h-10 w-10 text-emerald-400" />
           <p className="text-sm font-semibold text-gray-700">All clear!</p>
@@ -566,8 +565,10 @@ export default function TasksPage() {
           {taskGroups.map((group) => (
             <TaskGroupRow key={group.id} group={group} />
           ))}
-          {/* Dynamic scheme enrollment — field roles only */}
-          {isFieldRole && schemeCount > 0 && (
+          {/* Scheme enrollment — visible to EVERY sales role (managers included). The
+              backend scopes each person's targets to their own downline reach, so a
+              tagged manager (RSM/ZNM/NSM) sees + can Select→enroll their tagged outlets. */}
+          {schemeCount > 0 && (
             <SchemeEnrollmentGroup
               schemes={schemes}
               enrolled={schemeEnrolled}
