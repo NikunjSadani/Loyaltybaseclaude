@@ -1,8 +1,6 @@
 # RBAC Option-X — PROD ENABLE runbook (owner-gated; execute nothing without explicit go)
 
-**Status:** DRAFT for owner review (updated 2026-08-19 for P5+P6). Nothing here runs until the owner
-explicitly authorizes each irreversible step. RBAC P0–P6 are done + DUAL-audited + verified on
-staging; ALL DORMANT (no `GIFSY_STAFF` exists in prod). Detail: memory `[[rbac-option-x-staff]]`.
+**Status (2026-08-19): ✅ §1 CUTOVER #32 DONE — RBAC P0–P6 + outlet-wallet are LIVE IN PROD (`12fc22a`, `gifsy-migrate-xqtd2` applied the 3 migrations, both services verified, `/health/ready` 200), ALL DORMANT.** REMAINING (owner, in the prod console): §2 seed roles (or use the built-in Ops/PM) + **§3 create the 2 staff + assign brand grants** — that turns access on — then §4 the prod isolation walk. RBAC P0–P6 done + DUAL-audited + staging-verified. Detail: memory `[[rbac-option-x-staff]]`.
 
 > **Key fact:** GIFSY_STAFF enforcement is **always-on / fail-closed** — there is NO feature flag
 > to flip. "Enabling RBAC in prod" = **(1)** the RBAC tables reach prod (via the cutover
