@@ -1,5 +1,7 @@
 # RBAC Option-X — Gifsy staff roles + self-service role editor (Flavour B)
 
+> **STATUS (2026-08-19, develop `db9622e`): P0–P5 built + DUAL-audited + runtime-verified on staging; DORMANT (no staff in prod).** Two orthogonal axes — FEATURE (GifsyRole permissions) × TENANT (P5: per-staff `GifsyStaffTenantGrant`, **deny-by-default**, staff work a brand by **assuming** it). P5 flipped `platformWide()` so an un-assumed staff is no longer platform-wide (closes the "Bajaj cliff" cross-tenant exposure). Cross-tenant write-sweep CLEAN; isolation walk 23/23. Authoritative current state + full chronology (P0→P5, audits, decisions) lives in memory `[[rbac-option-x-staff]]`; prod-enable steps in `runbooks/RBAC-PROD-ENABLE.md`. The design below is the original owner-locked spec.
+
 **Owner-locked 2026-08-18.** Adds a limited Gifsy-staff tier below the all-powerful Owner
 (`GIFSY_ADMIN`), a self-service role editor, and a platform-only staff-management panel.
 Additive + DORMANT until enforcement is explicitly enabled for the `gifsy` tenant — building
