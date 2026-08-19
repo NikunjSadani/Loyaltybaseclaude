@@ -93,9 +93,14 @@ Mirror the staging walks (`scratchpad/p4_walk.py` + `p5_isolation.py`) but again
 - **(P6, recommended follow-up) permission-aware admin nav for staff** — an assumed staff currently
   sees the operator nav with unpermitted items returning a backend 403 (safe, backend-enforced; same
   posture the whole nav already carries). Build per-item nav-hiding driven by the staff's permissions.
-- **M3 (minor):** an assumed staff lands on `/admin/dashboard`, which may 403 for a limited role —
-  confirm in the §4 prod walk and, if needed, land them on a guaranteed-permitted page.
-- **D-B2 (optional):** split cross-tenant conversion-rate/expiry writes out from `tenancy:write` into
-  a finance/wallet reserved key. Reserved + dormant today → deferrable.
-- **write-sweep LOW-1 (hardening):** adopt self-guarding `where:{id,clientId}` on operator mutations
-  (safe today via the preceding scoped findFirst; protects against a future refactor).
+- **M3 (minor) — RESOLVED (#34):** verified P6 `AdminRouteGuard` renders AccessDenied (no crash) for a
+  limited assumed staff on `/admin/dashboard`; no code change needed.
+- **D-B2 — ✅ DONE (cutover #34, `f578b6e`, 2026-08-19):** conversion-rate/points-expiry/`wallet-settings`
+  money writes now require the new reserved `tenancy:write_finance`, split off `tenancy:write`.
+- **write-sweep LOW-1 — ✅ DONE (#34):** `gifsy-roles.deleteRole` self-guards `where:{id,clientId}`.
+- **Four-eyes / maker-checker on credit-batch confirm — POST-STAFF item (needs ≥2 distinct Gifsy operators;
+  owner deferred 2026-08-19).** `creditsPayouts.fourEyesEnabled` persists (round-tripped, no UI toggle) but is
+  intentionally NOT enforced (`credits.service` `createBatch`/`confirmBatch`). A real second-approver gate is
+  unsatisfiable with one Gifsy account → blocked on RBAC staff existing. When staff exist AND the owner wants it:
+  enforce on confirm (maker ≠ checker; checker holds `credits:confirm_payout`) + add the Settings toggle + an
+  approve step + audit. Money path → DUAL adversarial audit.
