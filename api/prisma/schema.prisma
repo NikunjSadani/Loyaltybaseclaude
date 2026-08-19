@@ -1318,7 +1318,9 @@ model Wallet {
   updatedAt         DateTime  @updatedAt
 
   partner      ChannelPartner      @relation(fields: [partnerId], references: [id], onDelete: Cascade)
-  account      RewardAccount?      @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  // Restrict (not SetNull): a funded wallet's account must never be deletable out from under
+  // it (Phase-2 employee wallets are account-only-owned → SetNull would strand money).
+  account      RewardAccount?      @relation(fields: [accountId], references: [id], onDelete: Restrict)
   transactions WalletTransaction[]
   pointsLedger PointsLedger[]
 
@@ -1492,7 +1494,7 @@ model RedemptionOrder {
   updatedAt            DateTime         @updatedAt
 
   partner       ChannelPartner            @relation(fields: [partnerId], references: [id], onDelete: Restrict)
-  account       RewardAccount?            @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  account       RewardAccount?            @relation(fields: [accountId], references: [id], onDelete: Restrict)
   reward        RewardCatalog             @relation(fields: [rewardId], references: [id])
   statusHistory RedemptionStatusHistory[]
 

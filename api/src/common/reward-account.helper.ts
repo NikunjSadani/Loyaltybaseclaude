@@ -18,6 +18,13 @@ export async function ensureOutletAccount(
   tx: Prisma.TransactionClient,
   partnerId: string,
 ): Promise<string> {
+  // Serialize per-partner (advisory xact lock, held to end of tx) so concurrent FIRST
+  // wallet-creates for the same partner — KYC-approval vs a credit-batch confirm, or two
+  // credit batches — cannot both pass the check-then-act below and mint TWO accounts /
+  // split ownership (partner.accountId != wallet.accountId). Without this the split is
+  // permanent: the NULL-only back-fill can't heal two non-null-but-divergent links.
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`reward_account:${partnerId}`}, 0))`;
+
   const partner = await tx.channelPartner.findUnique({
     where: { id: partnerId },
     select: { accountId: true, clientId: true },

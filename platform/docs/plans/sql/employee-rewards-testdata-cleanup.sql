@@ -15,6 +15,14 @@
 --      clientId 'deoleo' (+ their child credit_payout_entries / credit_reversals),
 --      keyed on the EXPLICIT batchCode list. Guarded to also assert period='2026-06'.
 --
+-- Audit L4 (informational — pre-exec check, not a blocker): the 4 payout test batches
+-- (CB-2026-06-002..005) MAY have `credit_payout_downloads` and/or the entries may carry an
+-- `autoInvoiceId` (194C). Those parent rows are NOT deleted here (the deleted rows are the
+-- children; the FKs point outward, so no FK error) and do NOT affect the zero-balance wallet
+-- slate. For a truly spotless slate, the executor should confirm the 5 batches have no
+-- download/auto-invoice children (194C is dormant in prod, so autoInvoiceId is expected NULL);
+-- extend the delete only if such residue is found + a clean sweep is wanted.
+--
 -- What it MUST NEVER touch:
 --   * Any wallet / channel_partner where deletedAt IS NULL  → the 6 real Gawde Sir
 --     wallets (each 0 balance) stay 100% intact.

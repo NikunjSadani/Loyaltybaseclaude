@@ -3,6 +3,7 @@ import { ensureOutletAccount } from './reward-account.helper';
 describe('ensureOutletAccount (Employee Rewards Phase 1)', () => {
   const makeTx = (partner: { accountId: string | null; clientId: string } | null) => {
     const tx = {
+      $executeRaw: jest.fn().mockResolvedValue(0), // per-partner advisory lock
       channelPartner: {
         findUnique: jest.fn().mockResolvedValue(partner),
         update: jest.fn().mockResolvedValue({}),
