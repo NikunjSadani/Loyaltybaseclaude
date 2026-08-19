@@ -16,6 +16,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { AdminCoreService } from '../admin-core/admin-core.service';
 import { TenantService } from '../tenant/tenant.service';
+import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
@@ -89,6 +90,16 @@ describe('GifsyService', () => {
         { provide: AdminCoreService, useValue: mockAdminCore },
         { provide: TenantSettingsService, useValue: mockTenantSettings },
         { provide: TenantService, useValue: mockTenant },
+        // P5 tenant-grant resolver — used by myAssumableClients (owner path returns 'ALL').
+        {
+          provide: GifsyTenantGrantService,
+          useValue: {
+            grantedTenantIds: jest.fn().mockResolvedValue(new Set<string>()),
+            mayOperateOnTenant: jest.fn().mockResolvedValue(false),
+            invalidate: jest.fn(),
+            clearCache: jest.fn(),
+          },
+        },
       ],
     }).compile();
     service = module.get(GifsyService);

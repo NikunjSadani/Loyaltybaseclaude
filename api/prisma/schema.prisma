@@ -521,6 +521,8 @@ model User {
 
   // Relations
   gifsyRole                  GifsyRole?          @relation(fields: [gifsyRoleId], references: [id], onDelete: SetNull)
+  // RBAC Option-X (P5): tenants this GIFSY_STAFF may assume/operate in (empty = none, deny-by-default).
+  gifsyTenantGrants          GifsyStaffTenantGrant[] @relation("GifsyStaffTenantGrants")
   sessions                   UserSession[]
   otpCodes                   OtpCode[]
   auditLogs                  AuditLog[]          @relation("AuditActor")
@@ -592,6 +594,32 @@ model GifsyRole {
   @@index([clientId])
   @@index([deletedAt])
   @@map("gifsy_roles")
+}
+
+/// RBAC Option-X (P5) — which tenants a GIFSY_STAFF operator may work in.
+///
+/// The TENANT axis of staff access, orthogonal to the FEATURE axis (GifsyRole.permissions).
+/// A staff acts on a tenant ONLY by ASSUMING it, and may assume ONLY a tenant they hold a
+/// grant row for (auth.service.assumeTenant enforces this). Un-assumed staff are NOT
+/// platform-wide (see common/tenant-scope.ts) → deny-by-default: a staff with zero grants
+/// can operate on nothing. `clientId` is a bare tenant slug (= Client.id), no FK to Client,
+/// matching the clientId convention on every other model; the service validates it against a
+/// live Client row on grant. FK to User is CASCADE so deleting a staff drops their grants.
+/// Extension point: add a nullable `roleId` here later for per-tenant-per-feature roles, or
+/// union team-derived grants inside GifsyTenantGrantService — neither changes call sites.
+model GifsyStaffTenantGrant {
+  id        String   @id @default(cuid())
+  userId    String
+  clientId  String
+  grantedBy String? // the owner (user id) who granted it — audit only
+  createdAt DateTime @default(now())
+
+  user User @relation("GifsyStaffTenantGrants", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, clientId])
+  @@index([userId])
+  @@index([clientId])
+  @@map("gifsy_staff_tenant_grants")
 }
 
 model UserSession {

@@ -24,7 +24,21 @@ const mockPrisma = {
   },
   userSession: { updateMany: jest.fn() },
   gifsyRole: { findFirst: jest.fn() },
+  gifsyStaffTenantGrant: {
+    findMany: jest.fn().mockResolvedValue([]),
+    deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+    createMany: jest.fn().mockResolvedValue({ count: 0 }),
+  },
+  client: { findMany: jest.fn().mockResolvedValue([]) },
   auditLog: { create: jest.fn().mockResolvedValue({}) },
+};
+
+// P5 tenant-grant resolver — a stub; individual grant tests assert its invalidate() call.
+const mockGrants = {
+  grantedTenantIds: jest.fn().mockResolvedValue(new Set<string>()),
+  mayOperateOnTenant: jest.fn().mockResolvedValue(false),
+  invalidate: jest.fn(),
+  clearCache: jest.fn(),
 };
 
 const owner: JwtPayload = {
@@ -52,7 +66,16 @@ describe('GifsyStaffService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    service = new GifsyStaffService(mockPrisma as unknown as PrismaService);
+    // Re-arm default resolved values cleared by clearAllMocks.
+    mockPrisma.gifsyStaffTenantGrant.findMany.mockResolvedValue([]);
+    mockPrisma.gifsyStaffTenantGrant.deleteMany.mockResolvedValue({ count: 0 });
+    mockPrisma.gifsyStaffTenantGrant.createMany.mockResolvedValue({ count: 0 });
+    mockPrisma.client.findMany.mockResolvedValue([]);
+    mockPrisma.auditLog.create.mockResolvedValue({});
+    service = new GifsyStaffService(
+      mockPrisma as unknown as PrismaService,
+      mockGrants as never,
+    );
   });
 
   describe('owner gating (platformWide)', () => {
@@ -96,7 +119,8 @@ describe('GifsyStaffService', () => {
         gifsyRoleId: 'r1',
       });
 
-      expect(res).toEqual({ id: 'u1', name: 'Alice' });
+      // No grants passed → assumableClientIds defaults to [] in the returned shape.
+      expect(res).toEqual({ id: 'u1', name: 'Alice', assumableClientIds: [] });
       const arg = mockPrisma.user.create.mock.calls[0][0];
       expect(arg.data).toMatchObject({
         clientId: 'gifsy',
@@ -243,6 +267,110 @@ describe('GifsyStaffService', () => {
       const arg = mockPrisma.auditLog.create.mock.calls[0][0];
       expect(arg.data.metadata.reassignedRole).toEqual({ from: 'r1', to: 'r2' });
       expect(arg.data.metadata.sessionsRevoked).toBe(true);
+    });
+  });
+
+  // ── RBAC Option-X (P5) — tenant grants (the TENANT axis) ────────────────────────────
+  describe('tenant grants', () => {
+    it('createStaff validates the brands, creates grants, and returns assumableClientIds', async () => {
+      mockPrisma.gifsyRole.findFirst.mockResolvedValue({ id: 'r1', name: 'Ops' });
+      mockPrisma.user.create.mockResolvedValue({ id: 'u1', name: 'Alice' });
+      mockPrisma.client.findMany.mockResolvedValue([{ id: 'deoleo' }, { id: 'bajaj' }]);
+
+      const res = await service.createStaff(owner, {
+        name: 'Alice',
+        phone: '9000000010',
+        gifsyRoleId: 'r1',
+        assumableClientIds: ['deoleo', 'bajaj'],
+      });
+
+      // Brands validated against live Client rows.
+      expect(mockPrisma.client.findMany).toHaveBeenCalledWith({
+        where: { id: { in: ['deoleo', 'bajaj'] } },
+        select: { id: true },
+      });
+      // Grant rows created for both brands.
+      const createManyArg = mockPrisma.gifsyStaffTenantGrant.createMany.mock.calls[0][0];
+      expect(createManyArg.data).toEqual([
+        { userId: 'u1', clientId: 'deoleo', grantedBy: 'owner_1' },
+        { userId: 'u1', clientId: 'bajaj', grantedBy: 'owner_1' },
+      ]);
+      expect(mockGrants.invalidate).toHaveBeenCalledWith('u1');
+      expect(res.assumableClientIds).toEqual(['deoleo', 'bajaj']);
+    });
+
+    it('createStaff rejects an unknown brand slug with BadRequest and creates no user', async () => {
+      mockPrisma.gifsyRole.findFirst.mockResolvedValue({ id: 'r1', name: 'Ops' });
+      mockPrisma.client.findMany.mockResolvedValue([{ id: 'deoleo' }]); // 'ghost' missing
+      await expect(
+        service.createStaff(owner, {
+          name: 'A',
+          phone: '9000000011',
+          gifsyRoleId: 'r1',
+          assumableClientIds: ['deoleo', 'ghost'],
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.user.create).not.toHaveBeenCalled();
+    });
+
+    it('listStaff flattens gifsyTenantGrants → assumableClientIds', async () => {
+      mockPrisma.user.findMany.mockResolvedValue([
+        {
+          id: 'u1',
+          name: 'Alice',
+          gifsyTenantGrants: [{ clientId: 'deoleo' }, { clientId: 'bajaj' }],
+        },
+      ]);
+      const res = await service.listStaff(owner);
+      expect(res[0].assumableClientIds).toEqual(['deoleo', 'bajaj']);
+      expect((res[0] as Record<string, unknown>).gifsyTenantGrants).toBeUndefined();
+    });
+
+    it('updateStaff ADD-only grant does NOT revoke sessions (access only widened)', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue({
+        id: 'u1', name: 'Alice', phone: '9000000001', status: 'ACTIVE', gifsyRoleId: 'r1',
+      });
+      mockPrisma.user.update.mockResolvedValue({ id: 'u1' });
+      mockPrisma.client.findMany.mockResolvedValue([{ id: 'deoleo' }]);
+      mockPrisma.gifsyStaffTenantGrant.findMany.mockResolvedValue([]); // no current grants
+
+      await service.updateStaff(owner, 'u1', { assumableClientIds: ['deoleo'] });
+
+      // Widening access never cuts the session.
+      expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
+      expect(mockPrisma.user.update.mock.calls[0][0].data.sessionsInvalidBefore).toBeUndefined();
+      // Grant written + cache invalidated.
+      expect(mockPrisma.gifsyStaffTenantGrant.createMany).toHaveBeenCalled();
+      expect(mockGrants.invalidate).toHaveBeenCalledWith('u1');
+    });
+
+    it('updateStaff grant REMOVAL revokes sessions (stamp before sweep) and deletes the grant', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue({
+        id: 'u1', name: 'Alice', phone: '9000000001', status: 'ACTIVE', gifsyRoleId: 'r1',
+      });
+      mockPrisma.user.update.mockResolvedValue({ id: 'u1' });
+      mockPrisma.client.findMany.mockResolvedValue([{ id: 'deoleo' }]);
+      // Currently granted deoleo + bajaj; new set drops bajaj.
+      mockPrisma.gifsyStaffTenantGrant.findMany.mockResolvedValue([
+        { clientId: 'deoleo' }, { clientId: 'bajaj' },
+      ]);
+
+      await service.updateStaff(owner, 'u1', { assumableClientIds: ['deoleo'] });
+
+      // Removal strips access → stamp + sweep.
+      expect(mockPrisma.user.update.mock.calls[0][0].data.sessionsInvalidBefore).toBeInstanceOf(Date);
+      expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'u1', revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+      const stampOrder = mockPrisma.user.update.mock.invocationCallOrder[0];
+      const sweepOrder = mockPrisma.userSession.updateMany.mock.invocationCallOrder[0];
+      expect(stampOrder).toBeLessThan(sweepOrder);
+      // The dropped brand's grant row is deleted.
+      expect(mockPrisma.gifsyStaffTenantGrant.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'u1', clientId: { in: ['bajaj'] } },
+      });
+      expect(mockGrants.invalidate).toHaveBeenCalledWith('u1');
     });
   });
 });

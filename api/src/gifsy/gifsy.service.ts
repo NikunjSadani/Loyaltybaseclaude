@@ -14,6 +14,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { sniffFileType } from '../common/file-signature';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide, isGifsyOperator } from '../common/tenant-scope';
+import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
 import {
   CreateClientDto,
   UpdateClientDto,
@@ -136,6 +137,8 @@ export class GifsyService {
     // @Global TenantService — used to bust the resolveClient feature/status cache
     // after a console edit so a stale 5-min-cached config can't be served.
     private readonly tenant: TenantService,
+    // RBAC Option-X (P5) — resolve a staff's granted tenants for the brand switcher.
+    private readonly grants: GifsyTenantGrantService,
   ) {}
 
   private assertGifsy(user: JwtPayload): void {
@@ -798,6 +801,42 @@ export class GifsyService {
     });
 
     return { clients };
+  }
+
+  /**
+   * GET /v1/gifsy/my-assumable-clients — the brands the CALLER may switch into (assume), for the
+   * operator brand-switcher. RBAC Option-X (P5): the OWNER (un-assumed GIFSY_ADMIN) may assume any
+   * ACTIVE/ONBOARDING tenant; a GIFSY_STAFF sees ONLY the ACTIVE/ONBOARDING tenants they hold a
+   * grant for (deny-by-default → empty list if none). Callable by any operator for their OWN list
+   * (no tenancy:read needed — it never exposes brands the caller can't already assume).
+   */
+  async myAssumableClients(user: JwtPayload) {
+    this.assertGifsy(user);
+
+    let allowed: 'ALL' | Set<string>;
+    if (platformWide(user)) {
+      allowed = 'ALL'; // un-assumed owner
+    } else if (user.role === 'GIFSY_STAFF') {
+      allowed = await this.grants.grantedTenantIds(user.sub);
+    } else {
+      allowed = new Set(); // an already-assumed operator has nothing to switch to from here
+    }
+
+    const rows = await this.prisma.client.findMany({
+      where: { status: { in: ['ACTIVE', 'ONBOARDING'] } },
+      orderBy: { onboardedAt: 'asc' },
+      select: { id: true, internalName: true, status: true },
+    });
+    const filtered = allowed === 'ALL' ? rows : rows.filter((r) => allowed.has(r.id));
+
+    return {
+      clients: filtered.map((c) => ({
+        id: c.id,
+        slug: c.id,
+        internalName: c.internalName,
+        status: c.status,
+      })),
+    };
   }
 
   /**

@@ -1,4 +1,6 @@
 import {
+  ArrayUnique,
+  IsArray,
   IsEmail,
   IsEnum,
   IsOptional,
@@ -34,6 +36,17 @@ export class CreateGifsyStaffDto {
   @IsString()
   @MinLength(1)
   gifsyRoleId!: string;
+
+  /**
+   * RBAC Option-X (P5) — tenant slugs (Client.id) this staff may assume/operate in. Optional;
+   * omit or [] to create a staff with NO tenant access yet (deny-by-default). The service
+   * validates each slug against a live Client row.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @IsString({ each: true })
+  assumableClientIds?: string[];
 }
 
 /**
@@ -64,4 +77,16 @@ export class UpdateGifsyStaffDto {
   @IsOptional()
   @IsEnum(UserStatus)
   status?: UserStatus;
+
+  /**
+   * RBAC Option-X (P5) — set-semantics: when PRESENT, replaces the staff's tenant grants with
+   * EXACTLY this set ([] revokes all). When OMITTED (undefined), grants are left untouched.
+   * Removing a tenant here revokes the staff's live sessions (they must re-login and can only
+   * re-assume a still-granted tenant). Each slug is validated against a live Client row.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @IsString({ each: true })
+  assumableClientIds?: string[];
 }

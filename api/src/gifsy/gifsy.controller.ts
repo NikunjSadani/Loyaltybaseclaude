@@ -97,6 +97,18 @@ export class GifsyController {
     return this.gifsy.listClients(user);
   }
 
+  /**
+   * GET /v1/gifsy/my-assumable-clients — the CALLER's own switchable brands for the operator
+   * brand-switcher. RBAC Option-X (P5): admits GIFSY_STAFF too (owner → all assumable; staff →
+   * their granted subset). No @RequirePermission — it only ever returns brands the caller may
+   * already assume, so it needs no tenancy:read grant.
+   */
+  @Get('my-assumable-clients')
+  @Roles('GIFSY_ADMIN', 'GIFSY_STAFF')
+  myAssumableClients(@CurrentUser() user: JwtPayload) {
+    return this.gifsy.myAssumableClients(user);
+  }
+
   @Get('clients/:slug')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('tenancy:read')

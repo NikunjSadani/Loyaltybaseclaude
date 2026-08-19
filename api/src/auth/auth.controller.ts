@@ -64,9 +64,12 @@ export class AuthController {
   /**
    * POST /v1/auth/assume-tenant — A2 operator-context switcher (#51).
    * A GIFSY operator exchanges their session for one scoped to a tenant's context.
-   * GIFSY_ADMIN-only (global RolesGuard); the service re-checks + audit-logs.
+   * RBAC Option-X (P5): admits GIFSY_ADMIN (any assumable tenant) AND GIFSY_STAFF (ONLY a
+   * tenant they hold a grant for — the service enforces the per-staff grant + audit-logs).
+   * @Roles is the coarse floor; the real per-staff authorization is the grant check in the
+   * service (mirrors the gifsy-staff controllers' service-re-gate pattern).
    */
-  @Roles('GIFSY_ADMIN')
+  @Roles('GIFSY_ADMIN', 'GIFSY_STAFF')
   @Post('assume-tenant')
   @HttpCode(HttpStatus.OK)
   assumeTenant(@CurrentUser() user: JwtPayload, @Body() dto: AssumeTenantDto) {

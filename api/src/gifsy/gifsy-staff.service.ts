@@ -15,6 +15,7 @@ import {
   ACTIVE_PHONE_IN_USE_MSG,
 } from '../common/phone-conflict';
 import { CreateGifsyStaffDto, UpdateGifsyStaffDto } from './dto/gifsy-staff.dto';
+import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
 
 /**
  * RBAC Option-X (P1) — Gifsy STAFF management.
@@ -47,7 +48,65 @@ export class GifsyStaffService {
 
   private readonly logger = new Logger(GifsyStaffService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly grants: GifsyTenantGrantService,
+  ) {}
+
+  /**
+   * Validate that every slug is a real tenant (Client row). Rejects typos up-front rather than
+   * silently persisting a grant that can never be assumed. Any status is allowed (an ONBOARDING
+   * brand like a pre-launch Bajaj is a valid grant target); assume-time re-checks ACTIVE/ONBOARDING.
+   */
+  private async assertClientsExist(clientIds: string[]): Promise<void> {
+    if (clientIds.length === 0) return;
+    const found = await this.prisma.client.findMany({
+      where: { id: { in: clientIds } },
+      select: { id: true },
+    });
+    const known = new Set(found.map((c) => c.id));
+    const unknown = clientIds.filter((c) => !known.has(c));
+    if (unknown.length > 0) {
+      throw new BadRequestException(`Unknown brand(s): ${unknown.join(', ')}`);
+    }
+  }
+
+  /**
+   * Replace a staff's tenant grants with EXACTLY `clientIds` (set-semantics). Deletes rows no
+   * longer present and inserts new ones, then invalidates the resolver cache so the change is
+   * effective on the next request. Returns the set that was REMOVED (for the revoke decision).
+   * The caller owns session revocation when the removed set is non-empty.
+   */
+  private async setGrants(
+    userId: string,
+    clientIds: string[],
+    grantedBy: string,
+  ): Promise<{ removed: string[] }> {
+    const current = await this.prisma.gifsyStaffTenantGrant.findMany({
+      where: { userId },
+      select: { clientId: true },
+    });
+    const currentSet = new Set(current.map((g) => g.clientId));
+    const nextSet = new Set(clientIds);
+    const removed = [...currentSet].filter((c) => !nextSet.has(c));
+    const added = clientIds.filter((c) => !currentSet.has(c));
+
+    if (removed.length > 0) {
+      await this.prisma.gifsyStaffTenantGrant.deleteMany({
+        where: { userId, clientId: { in: removed } },
+      });
+    }
+    if (added.length > 0) {
+      await this.prisma.gifsyStaffTenantGrant.createMany({
+        data: added.map((clientId) => ({ userId, clientId, grantedBy })),
+        skipDuplicates: true,
+      });
+    }
+    // Invalidate immediately so a removed tenant stops resolving on the next request (the
+    // refresh backstop + the session sweep below then cut any live assumed session to it).
+    this.grants.invalidate(userId);
+    return { removed };
+  }
 
   /** Shared owner-context gate — reject non-owner and assumed-tenant operators. */
   private assertOwner(user: JwtPayload): void {
@@ -80,18 +139,26 @@ export class GifsyStaffService {
     gifsyRole: { select: { id: true, name: true } },
   } as const;
 
-  /** List all (non-deleted) Gifsy staff with their assigned role name for display. */
+  /** List all (non-deleted) Gifsy staff with their assigned role name + tenant grants for display. */
   async listStaff(user: JwtPayload) {
     this.assertOwner(user);
-    return this.prisma.user.findMany({
+    const staff = await this.prisma.user.findMany({
       where: {
         clientId: GifsyStaffService.GIFSY_CLIENT_ID,
         role: 'GIFSY_STAFF',
         deletedAt: null,
       },
       orderBy: { name: 'asc' },
-      select: GifsyStaffService.STAFF_SELECT,
+      select: {
+        ...GifsyStaffService.STAFF_SELECT,
+        gifsyTenantGrants: { select: { clientId: true } },
+      },
     });
+    // Flatten grants → assumableClientIds (the FE contract) and drop the raw relation.
+    return staff.map(({ gifsyTenantGrants, ...s }) => ({
+      ...s,
+      assumableClientIds: (gifsyTenantGrants ?? []).map((g) => g.clientId),
+    }));
   }
 
   /** Create a new GIFSY_STAFF user assigned to an existing GifsyRole. */
@@ -107,6 +174,10 @@ export class GifsyStaffService {
       },
     });
     if (!role) throw new BadRequestException('Assigned role not found.');
+
+    // Validate any tenant grants up-front (before creating the user) so a typo fails cleanly.
+    const grantClientIds = dto.assumableClientIds ?? [];
+    await this.assertClientsExist(grantClientIds);
 
     let created;
     try {
@@ -141,6 +212,11 @@ export class GifsyStaffService {
       throw e;
     }
 
+    // Create the initial tenant grants (if any). New user → no live sessions → no revoke needed.
+    if (grantClientIds.length > 0) {
+      await this.setGrants(created.id, grantClientIds, user.sub);
+    }
+
     await this.audit({
       action: 'CREATE',
       entityType: 'GIFSY_STAFF',
@@ -152,10 +228,11 @@ export class GifsyStaffService {
         gifsyRoleId: dto.gifsyRoleId,
         roleName: role.name,
         phone: dto.phone,
+        assumableClientIds: grantClientIds,
       },
     });
 
-    return created;
+    return { ...created, assumableClientIds: grantClientIds };
   }
 
   /**
@@ -232,9 +309,26 @@ export class GifsyStaffService {
     // Only on reactivation — a plain deactivation must not clear deletedAt.
     if (reactivating) updateData.deletedAt = null;
 
-    // Deactivate / reassign / phone-change all strip the authority the live JWT carries,
-    // so those paths stamp + revoke; a pure name/email edit does not.
-    const mustRevoke = deactivating || reassigning || phoneChanging;
+    // RBAC Option-X (P5) — tenant grants (set-semantics; undefined = leave untouched). Validate
+    // up-front, and pre-read whether this change REMOVES any tenant: a removal strips access the
+    // live (possibly assumed) session carries, so it joins the revoke set. The grant rows
+    // themselves are written AFTER a successful row update (below) so a failed edit (e.g. phone
+    // conflict) leaves grants untouched.
+    const changingGrants = dto.assumableClientIds !== undefined;
+    let grantsReduced = false;
+    if (changingGrants) {
+      await this.assertClientsExist(dto.assumableClientIds!);
+      const currentGrants = await this.prisma.gifsyStaffTenantGrant.findMany({
+        where: { userId: id },
+        select: { clientId: true },
+      });
+      const nextSet = new Set(dto.assumableClientIds!);
+      grantsReduced = currentGrants.some((g) => !nextSet.has(g.clientId));
+    }
+
+    // Deactivate / reassign / phone-change / tenant-grant-removal all strip authority the live
+    // JWT carries, so those paths stamp + revoke; a pure name/email edit (or a grant ADD-only) does not.
+    const mustRevoke = deactivating || reassigning || phoneChanging || grantsReduced;
     const now = new Date();
 
     const staffSelect = {
@@ -276,6 +370,14 @@ export class GifsyStaffService {
         });
       }
 
+      // Apply the tenant-grant set change ONLY after the row update + session sweep succeeded,
+      // so a failed edit above never mutates grants. setGrants writes + invalidates the resolver
+      // cache; any removed tenant's live session was already cut by the sweep (grantsReduced ⊆
+      // mustRevoke), and the refresh backstop covers a missed sweep.
+      if (changingGrants) {
+        await this.setGrants(id, dto.assumableClientIds!, user.sub);
+      }
+
       await this.audit({
         action: 'UPDATE',
         entityType: 'GIFSY_STAFF',
@@ -291,10 +393,15 @@ export class GifsyStaffService {
           ...(deactivating ? { deactivated: dto.status } : {}),
           ...(reactivating ? { reactivated: true } : {}),
           ...(phoneChanging ? { phoneChanged: true } : {}),
+          ...(changingGrants
+            ? { assumableClientIds: dto.assumableClientIds, grantsReduced }
+            : {}),
         },
       });
 
-      return updated;
+      return changingGrants
+        ? { ...updated, assumableClientIds: dto.assumableClientIds }
+        : updated;
     } catch (e) {
       // Backstops a phone edit/reactivation that races past the pre-check into the partial index.
       if (isActivePhoneConflict(e)) {

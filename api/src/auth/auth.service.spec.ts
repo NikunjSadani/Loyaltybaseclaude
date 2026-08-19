@@ -11,6 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { Msg91Service } from '../notifications/msg91.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
+import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
 
 // getMe surfaces the tenant visibility-capture mode; default PHOTO_APPROVAL for tests.
 const mockTenant = { resolveVisibilityCaptureMode: jest.fn(async () => 'PHOTO_APPROVAL') };
@@ -73,6 +74,16 @@ describe('AuthService', () => {
         // so getMe's conversionRate still reflects POINTS_CONVERSION_RATE env in these tests).
         TenantSettingsService,
         { provide: TenantService, useValue: mockTenant },
+        // P5 tenant-grant resolver — stub (existing tests use GIFSY_ADMIN, which skips grant checks).
+        {
+          provide: GifsyTenantGrantService,
+          useValue: {
+            grantedTenantIds: jest.fn().mockResolvedValue(new Set<string>()),
+            mayOperateOnTenant: jest.fn().mockResolvedValue(false),
+            invalidate: jest.fn(),
+            clearCache: jest.fn(),
+          },
+        },
       ],
     }).compile();
 

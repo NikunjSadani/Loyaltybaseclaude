@@ -13,6 +13,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
+import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
 import {
   OTP_EXPIRY_MINUTES,
   OTP_MAX_ATTEMPTS,
@@ -52,6 +53,7 @@ export class AuthService {
     private readonly msg91:   Msg91Service,
     private readonly tenantSettings: TenantSettingsService,
     private readonly tenant:  TenantService,
+    private readonly gifsyTenantGrants: GifsyTenantGrantService,
   ) {}
 
   // ── Current user (enriched) ───────────────────────────────────────────────────
@@ -442,11 +444,23 @@ export class AuthService {
     operator: JwtPayload,
     targetClientId: string,
   ): Promise<{ accessToken: string; refreshToken: string; clientId: string; brandName: string }> {
-    if (operator.role !== 'GIFSY_ADMIN') {
+    if (operator.role !== 'GIFSY_ADMIN' && operator.role !== 'GIFSY_STAFF') {
       throw new ForbiddenException('Only Gifsy operators may switch brand context');
     }
     if (targetClientId === operator.clientId) {
       throw new BadRequestException('Already in this context');
+    }
+
+    // RBAC Option-X (P5) — TENANT axis: a GIFSY_STAFF may assume ONLY a tenant they hold a
+    // grant for (the owner assigns brands per-staff via GifsyStaffTenantGrant). The owner
+    // (GIFSY_ADMIN) may assume any assumable tenant. This is the authorization gate for staff
+    // cross-tenant work — an un-granted staff is refused here (deny-by-default), and because
+    // un-assumed staff are not platform-wide (tenant-scope.ts) they have no other path in.
+    if (operator.role === 'GIFSY_STAFF') {
+      const granted = await this.gifsyTenantGrants.grantedTenantIds(operator.sub);
+      if (!granted.has(targetClientId)) {
+        throw new ForbiddenException('You do not have access to this brand');
+      }
     }
 
     // ONBOARDING tenants are assumable so a GIFSY operator can configure the
@@ -539,8 +553,27 @@ export class AuthService {
         // the assumed tenant scope (otherwise the operator is silently reverted to the
         // platform context mid-flow). Only preserve while the operator is still a
         // GIFSY_ADMIN — a demoted operator falls back to their home scope.
+        // RBAC Option-X (P5): an ASSUMED session is one whose token clientId differs from the
+        // operator's home clientId. Both the owner (GIFSY_ADMIN) AND a scoped GIFSY_STAFF can be
+        // assumed into a tenant — this MUST include GIFSY_STAFF, otherwise a staff's assumed
+        // token silently reverts to their home ('gifsy') context on the next (~hourly) refresh,
+        // dropping their tenant scope. A demoted/regular user never matches (clientId == home).
         const isAssumed =
-          session.clientId !== session.user.clientId && session.user.role === 'GIFSY_ADMIN';
+          session.clientId !== session.user.clientId &&
+          (session.user.role === 'GIFSY_ADMIN' || session.user.role === 'GIFSY_STAFF');
+
+        // Defense-in-depth (P5): if a staff's grant for the assumed tenant was revoked, do NOT
+        // roll the assumed scope forward. Grant removal already revokes the staff's sessions
+        // (GifsyStaffService stamp-before-sweep), so a swept token 401s before reaching here;
+        // this is the backstop for a missed sweep — the predecessor is already revoked by the
+        // atomic claim above, so the staff must re-login (and can only re-assume a still-granted
+        // tenant). Cached resolver → no hot-path DB cost in the common case.
+        if (isAssumed && session.user.role === 'GIFSY_STAFF') {
+          const granted = await this.gifsyTenantGrants.grantedTenantIds(session.user.id);
+          if (!granted.has(session.clientId)) {
+            throw new UnauthorizedException('Session expired — please log in again.');
+          }
+        }
 
         // Re-apply the deactivated-outlet gate on every refresh. The session row was
         // already revoked by the atomic claim above, so a deactivated partner who

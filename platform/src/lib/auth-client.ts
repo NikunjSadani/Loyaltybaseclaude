@@ -67,15 +67,23 @@ export const PORTAL_ROLES: Record<'admin' | 'partner' | 'sales' | 'gifsy', strin
   // brand's context (A2/#51) operates per-brand surfaces that live in the admin
   // shell (e.g. /admin/payouts, GIFSY-only per Q1). At platform level the operator
   // uses /gifsy; in a tenant context they reach admin pages scoped to that tenant.
-  admin: ['CLIENT_ADMIN', 'MIS_USER', 'GIFSY_ADMIN'],
+  // GIFSY_STAFF (RBAC Option-X P5) is a limited operator who works the SAME way — by
+  // assuming one granted brand at a time — so it is admitted to admin (its stored role
+  // is unchanged while assuming) and to the /gifsy launchpad shell. There is no
+  // all-brands view for staff; the /gifsy layout renders them a brand-picker launchpad.
+  admin: ['CLIENT_ADMIN', 'MIS_USER', 'GIFSY_ADMIN', 'GIFSY_STAFF'],
   partner: ['SSS', 'WHOLESALER', 'SUB_STOCKIST'],
   sales: ['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'],
-  gifsy: ['GIFSY_ADMIN'],
+  gifsy: ['GIFSY_ADMIN', 'GIFSY_STAFF'],
 };
 
 /** The home dashboard for a role — where the guard sends a user who lands on a portal they can't use. */
 export function getRoleHome(role?: string | null): string {
   if (!role) return '/auth/login';
+  // GIFSY_STAFF's home is the platform launchpad (/gifsy), even though it is ALSO
+  // admitted to the admin shell while assuming a brand. Check it before admin so a
+  // portal bounce lands staff on their launchpad, not an un-assumed admin dashboard.
+  if (role === 'GIFSY_STAFF') return '/gifsy';
   if (PORTAL_ROLES.admin.includes(role)) return '/admin/dashboard';
   if (PORTAL_ROLES.partner.includes(role)) return '/partner/dashboard';
   if (PORTAL_ROLES.sales.includes(role)) return '/sales/dashboard';

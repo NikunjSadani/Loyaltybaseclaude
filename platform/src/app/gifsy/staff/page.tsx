@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react';
 import { Modal } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
@@ -10,6 +10,8 @@ import { api } from '@/lib/api-client';
 // ── Types ─────────────────────────────────────────────────────────────────────
 // RBAC Option-X P3 — the Gifsy Staff Panel. Backend GET /api/gifsy/staff → /v1/gifsy/staff.
 // A staff member is a platform user (GIFSY_STAFF tier) assigned a custom GifsyRole.
+// RBAC Option-X P5 — a staff is also scoped to specific client brands ("assumable
+// clients") they may assume, one at a time. The grants are brand SLUGS.
 
 interface GifsyRole {
   id:   string;
@@ -24,6 +26,85 @@ interface StaffMember {
   status:      string;
   gifsyRoleId?: string | null;
   gifsyRole:   { id: string; name: string } | null;
+  // P5: brand slugs this staff may assume. Omitted by older payloads → treat as [].
+  assumableClientIds?: string[];
+}
+
+// A brand option for the "Assumable brands" grant control (from GET /api/gifsy/clients).
+interface ClientBrand {
+  slug:         string;
+  internalName: string;
+  displayName?: string;
+  status:       'ACTIVE' | 'ONBOARDING' | 'INACTIVE';
+}
+
+const brandLabel = (c: ClientBrand) => c.displayName || c.internalName;
+
+// Sort weight so ACTIVE brands read first, then ONBOARDING, then INACTIVE.
+const rank = (status: ClientBrand['status']) =>
+  status === 'ACTIVE' ? 0 : status === 'ONBOARDING' ? 1 : 2;
+
+// ── Assumable-brands grant control (multi-select checkbox list) ──────────────────
+// Light-styled to match the shared (white) Modal. Value + onChange are brand slugs.
+
+function BrandGrantSelect({
+  brands,
+  value,
+  onChange,
+}: {
+  brands:   ClientBrand[];
+  value:    string[];
+  onChange: (slugs: string[]) => void;
+}) {
+  const selected = new Set(value);
+  const toggle = (slug: string) => {
+    const next = new Set(selected);
+    if (next.has(slug)) next.delete(slug); else next.add(slug);
+    onChange([...next]);
+  };
+
+  return (
+    <div>
+      <label className="block text-xs font-medium text-gray-600 mb-1">
+        Assumable brands <span className="text-gray-400 font-normal">(optional)</span>
+      </label>
+      {brands.length === 0 ? (
+        <p className="text-xs text-gray-400 border border-gray-200 rounded-lg px-3 py-2">
+          No brands available to assign.
+        </p>
+      ) : (
+        <div
+          role="group"
+          aria-label="Assumable brands"
+          className="max-h-40 overflow-auto border border-gray-200 rounded-lg divide-y divide-gray-100"
+        >
+          {brands.map((b) => (
+            <label
+              key={b.slug}
+              className="flex items-center gap-2.5 px-3 py-2 text-sm text-gray-800 hover:bg-gray-50 cursor-pointer"
+            >
+              <input
+                type="checkbox"
+                checked={selected.has(b.slug)}
+                onChange={() => toggle(b.slug)}
+                aria-label={brandLabel(b)}
+                className="rounded border-gray-300 text-[var(--brand-primary)] focus:ring-[var(--brand-primary)]"
+              />
+              <span className="flex-1 min-w-0 truncate">{brandLabel(b)}</span>
+              {b.status === 'ONBOARDING' && (
+                <span className="shrink-0 text-[9px] uppercase tracking-wide text-amber-600 bg-amber-50 border border-amber-200 rounded px-1 py-px">
+                  Onboarding
+                </span>
+              )}
+            </label>
+          ))}
+        </div>
+      )}
+      <p className="text-xs text-gray-400 mt-1">
+        The staff member can assume (work in) only the brands you select.
+      </p>
+    </div>
+  );
 }
 
 // ── Status badge (dark shell idiom) ─────────────────────────────────────────────
@@ -56,10 +137,12 @@ function StatusBadge({ status }: { status: string }) {
 
 function AddStaffModal({
   roles,
+  brands,
   onClose,
   onAdded,
 }: {
   roles:   GifsyRole[];
+  brands:  ClientBrand[];
   onClose: () => void;
   onAdded: () => void;
 }) {
@@ -67,6 +150,7 @@ function AddStaffModal({
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
   const [gifsyRoleId, setGifsyRoleId] = useState('');
+  const [assumableClientIds, setAssumableClientIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -86,6 +170,7 @@ function AddStaffModal({
       name:  name.trim(),
       phone: phone.trim(),
       gifsyRoleId,
+      assumableClientIds,
       ...(email.trim() ? { email: email.trim() } : {}),
     });
     setSubmitting(false);
@@ -164,6 +249,8 @@ function AddStaffModal({
           />
         </div>
 
+        <BrandGrantSelect brands={brands} value={assumableClientIds} onChange={setAssumableClientIds} />
+
         {error && (
           <div role="alert" className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5 text-xs text-red-700">
             <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
@@ -185,18 +272,23 @@ function AddStaffModal({
 function EditStaffModal({
   staff,
   roles,
+  brands,
   onClose,
   onSaved,
 }: {
   staff:   StaffMember;
   roles:   GifsyRole[];
+  brands:  ClientBrand[];
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const originalBrands = useMemo(() => staff.assumableClientIds ?? [], [staff.assumableClientIds]);
+
   const [name,  setName]  = useState(staff.name);
   const [phone, setPhone] = useState(staff.phone);
   const [email, setEmail] = useState(staff.email ?? '');
   const [gifsyRoleId, setGifsyRoleId] = useState(staff.gifsyRoleId ?? staff.gifsyRole?.id ?? '');
+  const [assumableClientIds, setAssumableClientIds] = useState<string[]>(originalBrands);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [noChange, setNoChange] = useState(false);
@@ -204,6 +296,10 @@ function EditStaffModal({
   const phoneValid   = /^\d{10}$/.test(phone);
   const originalRole = staff.gifsyRoleId ?? staff.gifsyRole?.id ?? '';
   const roleChanged  = gifsyRoleId !== originalRole;
+  // Order-insensitive set comparison — a re-selection to the same set is not a change.
+  const brandsChanged =
+    assumableClientIds.length !== originalBrands.length ||
+    [...assumableClientIds].sort().join(',') !== [...originalBrands].sort().join(',');
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -215,12 +311,14 @@ function EditStaffModal({
 
     // Send only the fields that actually changed — the backend runs its guards on
     // presence, so sending an unchanged reassign would revoke sessions needlessly.
-    const patch: Record<string, string | null> = {};
+    // (assumableClientIds is omitted unless changed → "omit = unchanged" per the contract.)
+    const patch: Record<string, string | string[] | null> = {};
     if (name.trim() !== staff.name) patch.name = name.trim();
     if (phone.trim() !== staff.phone) patch.phone = phone.trim();
     const trimmedEmail = email.trim();
     if (trimmedEmail !== (staff.email ?? '')) patch.email = trimmedEmail || null;
     if (roleChanged) patch.gifsyRoleId = gifsyRoleId;
+    if (brandsChanged) patch.assumableClientIds = assumableClientIds;
 
     // Nothing to save — give the user feedback instead of closing silently.
     if (Object.keys(patch).length === 0) { setNoChange(true); return; }
@@ -304,6 +402,8 @@ function EditStaffModal({
           />
         </div>
 
+        <BrandGrantSelect brands={brands} value={assumableClientIds} onChange={setAssumableClientIds} />
+
         {error && (
           <div role="alert" className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5 text-xs text-red-700">
             <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
@@ -385,6 +485,7 @@ function DeactivateModal({
 export default function GifsyStaffPage() {
   const [staff,   setStaff]   = useState<StaffMember[]>([]);
   const [roles,   setRoles]   = useState<GifsyRole[]>([]);
+  const [brands,  setBrands]  = useState<ClientBrand[]>([]);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
 
@@ -398,9 +499,12 @@ export default function GifsyStaffPage() {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const [staffRes, rolesRes] = await Promise.all([
+    // Clients feed the "Assumable brands" grant control + the slug→name mapping in the
+    // list. GET /api/gifsy/clients returns { clients: [...] } (owner has tenancy:read).
+    const [staffRes, rolesRes, clientsRes] = await Promise.all([
       api.get<StaffMember[]>('/api/gifsy/staff'),
       api.get<GifsyRole[]>('/api/gifsy/roles'),
+      api.get<{ clients: ClientBrand[] }>('/api/gifsy/clients'),
     ]);
     if (!staffRes.success) {
       setError(staffRes.error || 'Failed to load staff');
@@ -409,10 +513,23 @@ export default function GifsyStaffPage() {
     }
     setStaff(staffRes.data ?? []);
     setRoles(rolesRes.success ? (rolesRes.data ?? []) : []);
+    // ACTIVE/ONBOARDING first (assignable), then the rest; INACTIVE stays selectable so
+    // an existing grant to a now-inactive brand still renders, but sinks to the bottom.
+    const clientList = clientsRes.success ? (clientsRes.data?.clients ?? []) : [];
+    setBrands(
+      [...clientList].sort((a, b) => rank(a.status) - rank(b.status)),
+    );
     setLoading(false);
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Map a brand slug → its display name for the list. Falls back to the slug if a grant
+  // points at a brand we can't see (e.g. filtered/removed) so the row never renders blank.
+  const brandName = useMemo(() => {
+    const m = new Map(brands.map((b) => [b.slug, brandLabel(b)]));
+    return (slug: string) => m.get(slug) ?? slug;
+  }, [brands]);
 
   function showToast(msg: string, type: 'success' | 'error' = 'success') {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -463,6 +580,7 @@ export default function GifsyStaffPage() {
               <th className="text-left px-4 py-3 text-xs font-medium text-white/40">Phone</th>
               <th className="text-left px-4 py-3 text-xs font-medium text-white/40">Email</th>
               <th className="text-left px-4 py-3 text-xs font-medium text-white/40">Role</th>
+              <th className="text-left px-4 py-3 text-xs font-medium text-white/40">Brands</th>
               <th className="text-center px-4 py-3 text-xs font-medium text-white/40">Status</th>
               <th className="px-4 py-3" />
             </tr>
@@ -474,6 +592,22 @@ export default function GifsyStaffPage() {
                 <td className="px-4 py-3 text-white/60 font-mono text-xs">{s.phone}</td>
                 <td className="px-4 py-3 text-white/50 text-xs">{s.email || '—'}</td>
                 <td className="px-4 py-3 text-white/70 text-xs">{s.gifsyRole?.name ?? '— none —'}</td>
+                <td className="px-4 py-3 text-white/60 text-xs">
+                  {(s.assumableClientIds ?? []).length === 0 ? (
+                    <span className="text-white/30">—</span>
+                  ) : (
+                    <div className="flex flex-wrap gap-1 max-w-[16rem]">
+                      {(s.assumableClientIds ?? []).map((slug) => (
+                        <span
+                          key={slug}
+                          className="inline-flex items-center rounded-full bg-white/10 border border-white/15 px-2 py-0.5 text-[11px] text-white/70"
+                        >
+                          {brandName(slug)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </td>
                 <td className="px-4 py-3 text-center"><StatusBadge status={s.status} /></td>
                 <td className="px-4 py-3 text-right">
                   <div className="inline-flex items-center gap-3 justify-end">
@@ -504,14 +638,14 @@ export default function GifsyStaffPage() {
               </tr>
             ))}
             {loading && (
-              <tr><td colSpan={6} className="px-4 py-12 text-center">
+              <tr><td colSpan={7} className="px-4 py-12 text-center">
                 <div className="flex items-center justify-center">
                   <Spinner size="lg" />
                 </div>
               </td></tr>
             )}
             {error && (
-              <tr><td colSpan={6} className="px-4 py-12 text-center text-red-400 text-sm">
+              <tr><td colSpan={7} className="px-4 py-12 text-center text-red-400 text-sm">
                 <div className="flex flex-col items-center gap-3">
                   <span>{error}</span>
                   <button
@@ -524,7 +658,7 @@ export default function GifsyStaffPage() {
               </td></tr>
             )}
             {!loading && !error && staff.length === 0 && (
-              <tr><td colSpan={6} className="px-4 py-12 text-center text-white/30 text-sm">
+              <tr><td colSpan={7} className="px-4 py-12 text-center text-white/30 text-sm">
                 No staff yet — add one.
               </td></tr>
             )}
@@ -535,6 +669,7 @@ export default function GifsyStaffPage() {
       {showAdd && (
         <AddStaffModal
           roles={roles}
+          brands={brands}
           onClose={() => setShowAdd(false)}
           onAdded={() => { showToast('Staff member added.'); load(); }}
         />
@@ -544,6 +679,7 @@ export default function GifsyStaffPage() {
         <EditStaffModal
           staff={editTarget}
           roles={roles}
+          brands={brands}
           onClose={() => setEditTarget(null)}
           onSaved={() => { showToast('Staff updated.'); load(); }}
         />
