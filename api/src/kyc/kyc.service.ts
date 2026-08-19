@@ -21,6 +21,7 @@ import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
 import { sniffFileType } from '../common/file-signature';
+import { ensureOutletAccount } from '../common/reward-account.helper';
 import { isActivePhoneConflict } from '../common/phone-conflict';
 import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
 import { businessHoursBetween } from '../common/business-hours';
@@ -4359,7 +4360,9 @@ export class KycService {
           where: { partnerId: submission.partnerId },
         });
         if (!existingWallet) {
-          await tx.wallet.create({ data: { partnerId: submission.partnerId } });
+          // Employee Rewards Phase 1 — link the unified account owner at wallet birth.
+          const accountId = await ensureOutletAccount(tx, submission.partnerId);
+          await tx.wallet.create({ data: { partnerId: submission.partnerId, accountId } });
         }
 
         // Activate the owning partner's outlet(s). Outlets are created PENDING

@@ -14,6 +14,12 @@ import { ConfigService } from '@nestjs/config';
 import { KycService } from './kyc.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { Prisma } from '@prisma/client';
+
+// Employee Rewards Phase 1 — stub the account dual-write helper (own tests in
+// reward-account.helper.spec.ts) so bulk-verify tests aren't coupled to its internal tx calls.
+jest.mock('../common/reward-account.helper', () => ({
+  ensureOutletAccount: jest.fn().mockResolvedValue('acc-x'),
+}));
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
@@ -291,7 +297,7 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
     it('creates a wallet when none exists', async () => {
       const file = { buffer: makeXlsx([allApproveRow(SUB_ID)]), size: 1 } as Express.Multer.File;
       await service.bulkVerify(gifsy, file, true);
-      expect(mockTx.wallet.create).toHaveBeenCalledWith({ data: { partnerId: 'partner-1' } });
+      expect(mockTx.wallet.create).toHaveBeenCalledWith({ data: { partnerId: 'partner-1', accountId: 'acc-x' } });
     });
 
     it('item #2: activates the partner\'s outlet(s) on approval (isActive=true)', async () => {

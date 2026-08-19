@@ -30,6 +30,12 @@ import {
 // ─── Shared transaction mock ──────────────────────────────────────────────────
 // Includes all table operations needed by the new approve(), verifyField(),
 // and the shared applyBridgeOutcome() helper.
+// Employee Rewards Phase 1 — stub the account dual-write helper (own tests in
+// reward-account.helper.spec.ts) so KYC tests aren't coupled to its internal tx calls.
+jest.mock('../common/reward-account.helper', () => ({
+  ensureOutletAccount: jest.fn().mockResolvedValue('acc-x'),
+}));
+
 const mockTx = {
   // findUnique + delete added for the 48h stale-draft cleanup (cleanupOneStaleDraft).
   kycSubmission: { update: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn(), updateMany: jest.fn(), delete: jest.fn() },
@@ -3104,7 +3110,7 @@ describe('KycService', () => {
         where: { id: 'owner-9' },
         data: { status: 'ACTIVE' },
       });
-      expect(mockTx.wallet.create).toHaveBeenCalledWith({ data: { partnerId: 'p1' } });
+      expect(mockTx.wallet.create).toHaveBeenCalledWith({ data: { partnerId: 'p1', accountId: 'acc-x' } });
       // B1: notification enqueued via service.notify, not inside the tx
       expect(mockNotifications.enqueue).toHaveBeenCalled();
     });
@@ -3958,7 +3964,7 @@ describe('KycService', () => {
       expect(res.derivedStatus).toBe('APPROVED');
       expect(res.outcome).toBe('approved');
       expect(mockTx.user.update).toHaveBeenCalledWith({ where: { id: 'user1' }, data: { status: 'ACTIVE' } });
-      expect(mockTx.wallet.create).toHaveBeenCalledWith({ data: { partnerId: 'p1' } });
+      expect(mockTx.wallet.create).toHaveBeenCalledWith({ data: { partnerId: 'p1', accountId: 'acc-x' } });
       // B1: notification enqueued post-tx, not inside tx
       expect(mockNotifications.enqueue).toHaveBeenCalledWith(
         expect.objectContaining({ variables: expect.objectContaining({ event: 'KYC_APPROVED' }) }),

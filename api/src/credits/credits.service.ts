@@ -14,6 +14,7 @@ import {
   allocateProRataRecovery,
 } from '../tds/tds-methodology.helper';
 import { grossUpTdsPaise, rate194C, rate194R, TdsRate } from '../tds/tds.helpers';
+import { ensureOutletAccount } from '../common/reward-account.helper';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { paiseToRupees, toPaiseBigInt } from '../common/money';
 import { monthYearIST, formatDateIST } from '../common/ist-date';
@@ -1064,9 +1065,13 @@ export class CreditsService {
         // Disbursement is still gated on KYC-APPROVED at payout time
         // (createPayoutDownload holds non-approved entries), so accruing points to a
         // not-yet-approved partner's wallet here is correct.
+        // Employee Rewards Phase 1 — dual-write the unified account owner so a
+        // newly-created wallet is account-linked from birth (idempotent; existing
+        // wallets are back-filled separately). Outlet path otherwise unchanged.
+        const walletAccountId = await ensureOutletAccount(tx, outlet.partnerId);
         await tx.wallet.upsert({
           where: { partnerId: outlet.partnerId },
-          create: { partnerId: outlet.partnerId },
+          create: { partnerId: outlet.partnerId, accountId: walletAccountId },
           update: {},
         });
 

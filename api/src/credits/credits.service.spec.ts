@@ -31,6 +31,13 @@ import { PAYOUT_FILE_HEADERS } from './credits.helpers';
 
 // ─── Mock wallet service ──────────────────────────────────────────────────────
 
+// Employee Rewards Phase 1 — the account dual-write helper has its own unit tests
+// (reward-account.helper.spec.ts); stub it here so these tests aren't coupled to its
+// internal channelPartner/rewardAccount tx calls. The service still writes accountId.
+jest.mock('../common/reward-account.helper', () => ({
+  ensureOutletAccount: jest.fn().mockResolvedValue('acc-x'),
+}));
+
 const mockWalletService = {
   creditEarn: jest.fn().mockResolvedValue({ transactionId: 'wt1', newRedeemable: 50, ledgerId: 'l1' }),
   clawbackAward: jest.fn().mockResolvedValue({ transactionId: 'wt2', newRedeemable: 0, ledgerId: 'l2', shortfall: 0 }),
@@ -360,7 +367,7 @@ describe('CreditsService', () => {
       // Wallet is get-or-created (race-safe upsert) before crediting.
       expect(mockTx.wallet.upsert).toHaveBeenCalledWith({
         where: { partnerId: 'p1' },
-        create: { partnerId: 'p1' },
+        create: { partnerId: 'p1', accountId: 'acc-x' },
         update: {},
       });
       expect(mockWalletService.creditEarn).toHaveBeenCalledTimes(1);
@@ -462,7 +469,7 @@ describe('CreditsService', () => {
       expect(res.skipped).toEqual([]);
       expect(mockTx.wallet.upsert).toHaveBeenCalledWith({
         where: { partnerId: 'p1' },
-        create: { partnerId: 'p1' },
+        create: { partnerId: 'p1', accountId: 'acc-x' },
         update: {},
       });
       expect(mockWalletService.creditEarn).toHaveBeenCalledTimes(1);

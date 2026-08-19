@@ -12,6 +12,7 @@ import { PayoutMode, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
+import { ensureOutletAccount } from '../common/reward-account.helper';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -476,9 +477,11 @@ export class RewardsService {
       await tx.otpCode.deleteMany({
         where: { userId: otpUserId, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null },
       });
+      const orderAccountId = await ensureOutletAccount(tx, partner.id);
       const created = await tx.redemptionOrder.create({
         data: {
           partnerId: partner.id,
+          accountId: orderAccountId, // Employee Rewards Phase 1 — unified account owner (dual-write)
           rewardId: item.id,
           orderNumber,
           quantity,
@@ -935,9 +938,11 @@ export class RewardsService {
       await tx.otpCode.deleteMany({
         where: { userId: user.sub, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null },
       });
+      const orderAccountId = await ensureOutletAccount(tx, activePartnerId);
       const created = await tx.redemptionOrder.create({
         data: {
           partnerId: activePartnerId,
+          accountId: orderAccountId, // Employee Rewards Phase 1 — unified account owner (dual-write)
           rewardId: item.id,
           orderNumber,
           quantity,

@@ -23,6 +23,12 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { AdminListCatalogQueryDto, UpdatableOrderStatus } from './dto/rewards.dto';
 import { parseFulfilmentUploadBuffer } from './rewards-fulfilment.helpers';
 
+// Employee Rewards Phase 1 — stub the account dual-write helper (own tests in
+// reward-account.helper.spec.ts) so redeem tests aren't coupled to its internal tx calls.
+jest.mock('../common/reward-account.helper', () => ({
+  ensureOutletAccount: jest.fn().mockResolvedValue('acc-x'),
+}));
+
 const mockPrisma = {
   channelPartner: { findFirst: jest.fn() },
   salesUser: { findFirst: jest.fn() },
