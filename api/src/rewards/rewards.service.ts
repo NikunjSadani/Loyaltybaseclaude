@@ -1392,6 +1392,9 @@ export class RewardsService {
       // M2 — refund at most ONCE: atomically claim the debited points
       // (pointsDeducted > 0 → 0). Only the tx that wins the claim re-credits, so
       // two concurrent refund-bound transitions can't double-refund.
+      // STOCK: intentionally NOT restored here (owner decision 2026-08-19) — a
+      // confirmed redemption consumes its stock unit permanently; cancel / return
+      // / failed refunds POINTS only. See the STOCK RULE note near the catalog CRUD.
       if (isRefundTarget) {
         const refundClaim = await tx.redemptionOrder.updateMany({
           where: { id, pointsDeducted: { gt: 0 } },
@@ -1682,8 +1685,18 @@ export class RewardsService {
   // service forces status = OUT_OF_STOCK so the partner read (filters
   // status='ACTIVE') drops the item; setting stock > 0 again does NOT auto-flip
   // status back to ACTIVE — an admin re-activates explicitly (avoids resurrecting
-  // a DISCONTINUED item). Stock is NOT decremented on redemption here — that is
-  // 5.4's redeem path (see TODO in createCatalogItem).
+  // a DISCONTINUED item). Stock is NOT decremented on this CRUD path — the
+  // CONFIRM path does it: confirmRedeem / confirmRedeemForOutlet atomically
+  // decrement stockQuantity (guarded `updateMany` WHERE stockQuantity >= quantity
+  // → rejects the last-unit race, oversell-safe) and flip status to OUT_OF_STOCK
+  // when it reaches 0.
+  //
+  // ⚠️ DELIBERATE, NON-OBVIOUS (owner decision 2026-08-19): a confirmed
+  // redemption CONSUMES its stock unit PERMANENTLY. Stock is intentionally NOT
+  // restored on cancel/return/failed — `transitionOrder` refunds the POINTS only
+  // and never re-increments stockQuantity. An item that flipped OUT_OF_STOCK
+  // stays out until an admin explicitly re-stocks / re-activates it. This is by
+  // design (not a gap) — do NOT add a stock-restore to the refund path.
   // ───────────────────────────────────────────────────────────────────────────
 
   /** POST /v1/admin/rewards/categories — create a tenant-scoped category. */
@@ -1858,8 +1871,10 @@ export class RewardsService {
     const status =
       dto.stockQuantity === 0 ? 'OUT_OF_STOCK' : dto.status ?? 'ACTIVE';
 
-    // TODO(5.4): redeem path decrements stockQuantity and flips OUT_OF_STOCK
-    // when it hits 0. CRUD here only sets the initial value.
+    // Stock decrement lives in the CONFIRM path (confirmRedeem /
+    // confirmRedeemForOutlet): guarded atomic decrement + OUT_OF_STOCK flip at 0.
+    // This CRUD path only sets the initial value. By design, stock is NOT restored
+    // on cancel/return/failed (owner 2026-08-19) — see the STOCK RULE note above.
     const item = await this.prisma.rewardCatalog.create({
       data: {
         clientId: user.clientId,
