@@ -846,6 +846,7 @@ model ChannelPartner {
   // a hard, race-proof DB rule for UNGROUPED owners, while grouped siblings (groupId set) are
   // excepted so they may share GST/PAN. Cross-group is app-enforced (checkGroupUniqueness + lock).
   groupId             String?
+  accountId           String?              @unique // Employee Rewards Phase 1 — this outlet's RewardAccount (additive)
   onboardedAt         DateTime?
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
@@ -857,6 +858,7 @@ model ChannelPartner {
   childOutlets          Outlet[]               @relation("OutletParent")
   kycSubmissions        KycSubmission[]
   wallets               Wallet[]
+  account               RewardAccount?         @relation(fields: [accountId], references: [id], onDelete: SetNull)
   salesAssignments      SalesUserAssignment[]
   redemptionOrders      RedemptionOrder[]
   payoutTransactions    PayoutTransaction[]
@@ -1272,9 +1274,37 @@ model SchemeEligibility {
 // MODULE 9: WALLET & POINTS
 // ============================================================
 
+/// Employee Rewards Phase 1 — the unified reward-holder the wallet attaches to.
+/// ONE model for every earner: accountType OUTLET (profile = ChannelPartner) or
+/// EMPLOYEE (profile = SalesUser, wired in Phase 2). The points engine (Wallet /
+/// WalletTransaction / PointsLedger / redemption) operates on the account/wallet and
+/// is earner-agnostic. ADDITIVE: outlets keep ChannelPartner + Wallet.partnerId as
+/// the profile; the account is layered on as the owner (no compliance-code churn).
+model RewardAccount {
+  id          String      @id @default(cuid())
+  clientId    String
+  accountType AccountType
+  status      String      @default("ACTIVE")
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  wallet        Wallet?
+  orders        RedemptionOrder[]
+  outletProfile ChannelPartner?
+
+  @@index([clientId])
+  @@map("reward_accounts")
+}
+
+enum AccountType {
+  OUTLET
+  EMPLOYEE
+}
+
 model Wallet {
   id                String    @id @default(cuid())
   partnerId         String    @unique
+  accountId         String?   @unique // Employee Rewards Phase 1 — unified owner (additive; partnerId kept as the outlet profile)
   earnedPoints      Int       @default(0)
   lockedPoints      Int       @default(0)
   redeemablePoints  Int       @default(0)
@@ -1288,6 +1318,7 @@ model Wallet {
   updatedAt         DateTime  @updatedAt
 
   partner      ChannelPartner      @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  account      RewardAccount?      @relation(fields: [accountId], references: [id], onDelete: SetNull)
   transactions WalletTransaction[]
   pointsLedger PointsLedger[]
 
@@ -1425,6 +1456,7 @@ model RewardCatalog {
 model RedemptionOrder {
   id                   String           @id @default(cuid())
   partnerId            String
+  accountId            String?          // Employee Rewards Phase 1 — unified owner (additive; partnerId kept)
   rewardId             String
   orderNumber          String           @unique
   status               RedemptionStatus @default(PENDING)
@@ -1460,10 +1492,12 @@ model RedemptionOrder {
   updatedAt            DateTime         @updatedAt
 
   partner       ChannelPartner            @relation(fields: [partnerId], references: [id], onDelete: Restrict)
+  account       RewardAccount?            @relation(fields: [accountId], references: [id], onDelete: SetNull)
   reward        RewardCatalog             @relation(fields: [rewardId], references: [id])
   statusHistory RedemptionStatusHistory[]
 
   @@index([partnerId])
+  @@index([accountId])
   @@index([rewardId])
   @@index([status])
   @@index([orderNumber])
