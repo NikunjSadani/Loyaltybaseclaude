@@ -58,6 +58,18 @@ $guard$;
 
 BEGIN;  -- ⇩ DRY RUN: this transaction ends in ROLLBACK at the bottom. ⇩
 
+-- ── GUARD 1b (IN-TXN — re-audit HIGH finding): re-assert the database INSIDE the
+-- transaction so a wrong-DB run fails CLOSED even without `-v ON_ERROR_STOP=1`. The
+-- pre-BEGIN GUARD 1 raises but does not abort the txn without that flag; this one does
+-- (an exception here poisons the txn → every later DELETE + the COMMIT are skipped).
+DO $guardtx$
+BEGIN
+  IF current_database() <> 'gifsy_prod' THEN
+    RAISE EXCEPTION 'ABORT (in-txn): targets gifsy_prod only; current_database() = %', current_database();
+  END IF;
+END
+$guardtx$;
+
 -- ── GUARD 2: the 5 named batches must all be period '2026-06' (else abort) ────
 -- Defends against deleting a same-code batch that isn't the 2026-06 test set.
 DO $period$
