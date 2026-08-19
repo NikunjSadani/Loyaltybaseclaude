@@ -57,6 +57,16 @@ const mockConfig = {
 
 // â”€â”€â”€ Suite â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+// P5 tenant-grant resolver stub. hasGrantUncached is the AUTHORITATIVE assume/refresh gate;
+// default false (no grant) — staff-assume tests override it per case.
+const mockGrants = {
+  grantedTenantIds: jest.fn().mockResolvedValue(new Set<string>()),
+  mayOperateOnTenant: jest.fn().mockResolvedValue(false),
+  hasGrantUncached: jest.fn().mockResolvedValue(false),
+  invalidate: jest.fn(),
+  clearCache: jest.fn(),
+};
+
 describe('AuthService', () => {
   let service: AuthService;
 
@@ -77,12 +87,7 @@ describe('AuthService', () => {
         // P5 tenant-grant resolver — stub (existing tests use GIFSY_ADMIN, which skips grant checks).
         {
           provide: GifsyTenantGrantService,
-          useValue: {
-            grantedTenantIds: jest.fn().mockResolvedValue(new Set<string>()),
-            mayOperateOnTenant: jest.fn().mockResolvedValue(false),
-            invalidate: jest.fn(),
-            clearCache: jest.fn(),
-          },
+          useValue: mockGrants,
         },
       ],
     }).compile();
@@ -1156,6 +1161,28 @@ describe('AuthService', () => {
 
     it('400s assuming the operator’s own context', async () => {
       await expect(service.assumeTenant(gifsyOp, 'gifsy')).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    // ── RBAC Option-X (P5) — GIFSY_STAFF may assume ONLY a granted tenant (authoritative check) ──
+    it('P5: a GIFSY_STAFF WITHOUT a grant for the target is refused (403), authoritative uncached check', async () => {
+      const staff = { ...gifsyOp, role: 'GIFSY_STAFF', sub: 'st1', clientId: 'gifsy' };
+      mockGrants.hasGrantUncached.mockResolvedValueOnce(false);
+      await expect(service.assumeTenant(staff, 'deoleo')).rejects.toBeInstanceOf(ForbiddenException);
+      // Authorized via the uncached DB check (not the 30s cache), keyed on the staff + target.
+      expect(mockGrants.hasGrantUncached).toHaveBeenCalledWith('st1', 'deoleo');
+      expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('P5: a GIFSY_STAFF WITH a grant assumes the tenant — token pinned, role stays GIFSY_STAFF', async () => {
+      const staff = { ...gifsyOp, role: 'GIFSY_STAFF', sub: 'st1', clientId: 'gifsy' };
+      mockGrants.hasGrantUncached.mockResolvedValueOnce(true);
+      mockPrisma.user.findFirst.mockResolvedValue({
+        id: 'st1', role: 'GIFSY_STAFF', clientId: 'gifsy', phone: '97', name: 'Staff', gifsyRoleId: 'r1',
+      });
+      const res = await service.assumeTenant(staff, 'deoleo');
+      expect(res.clientId).toBe('deoleo');
+      const payload = mockJwt.sign.mock.calls[0][0];
+      expect(payload).toMatchObject({ sub: 'st1', role: 'GIFSY_STAFF', clientId: 'deoleo', assumed: true });
     });
   });
 

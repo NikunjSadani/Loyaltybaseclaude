@@ -15,14 +15,15 @@
 import { useState, useEffect } from 'react';
 import { getStoredUser } from './auth-client';
 
-export type AdminRole = 'GIFSY_ADMIN' | 'CLIENT_ADMIN' | 'MIS_USER';
+export type AdminRole = 'GIFSY_ADMIN' | 'CLIENT_ADMIN' | 'MIS_USER' | 'GIFSY_STAFF';
 
-const ADMIN_ROLES: readonly AdminRole[] = ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER'];
+const ADMIN_ROLES: readonly AdminRole[] = ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER', 'GIFSY_STAFF'];
 
 /** Human-readable role label for the admin shell header. */
 export function adminRoleLabel(role: AdminRole): string {
   switch (role) {
     case 'GIFSY_ADMIN':  return 'Gifsy Admin';
+    case 'GIFSY_STAFF':  return 'Gifsy Staff';
     case 'MIS_USER':     return 'MIS User';
     case 'CLIENT_ADMIN': return 'Client Admin';
     default:             return 'Client Admin';
@@ -45,12 +46,16 @@ export interface AdminSession {
 // ─── Pure access-control helpers ─────────────────────────────────────────────
 
 /**
- * Scheme management is a platform-level capability reserved for GIFSY_ADMIN.
- * CLIENT_ADMIN (tenant admin) is intentionally excluded — schemes are created
- * by the platform operator (Gifsy), not by individual tenants.
+ * Scheme management is a platform-OPERATOR capability. GIFSY_ADMIN (owner) and, RBAC Option-X
+ * (P5), GIFSY_STAFF (a limited operator, who reaches the admin shell only while ASSUMED into a
+ * granted brand) both qualify — the seed Ops/PM roles carry scheme permissions. CLIENT_ADMIN
+ * (tenant admin) is intentionally excluded. NOTE: this gates the OPERATOR nav profile; per-item
+ * permission-aware hiding for staff (so a staff sees only the operator surfaces their role can
+ * use, rather than the full set with unpermitted items returning a backend 403) is the tracked
+ * follow-up — the same "refine once roles are wired" posture the rest of this nav already carries.
  */
 export function canManageSchemes(role: AdminRole | string | null): boolean {
-  return role === 'GIFSY_ADMIN';
+  return role === 'GIFSY_ADMIN' || role === 'GIFSY_STAFF';
 }
 
 // ─── Demo sessions ───────────────────────────────────────────────────────────
@@ -76,6 +81,15 @@ const DEMO_SESSIONS: Record<AdminRole, AdminSession> = {
     name:             'MIS User',
     userId:           '',
     canManageSchemes: false,
+  },
+  // RBAC Option-X (P5): a Gifsy operator BELOW the owner. Real identity comes from the stored
+  // JWT user (this is only the pre-hydration / not-logged-in placeholder, never a live persona).
+  GIFSY_STAFF: {
+    role:             'GIFSY_STAFF',
+    clientId:         'gifsy',
+    name:             'Gifsy Staff',
+    userId:           '',
+    canManageSchemes: true,
   },
 };
 

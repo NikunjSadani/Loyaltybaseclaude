@@ -37,8 +37,12 @@ export function BrandSwitcher({ variant = 'menu' }: { variant?: Variant } = {}) 
   const [loading, setLoading] = useState(variant === 'panel');
   const [loaded, setLoaded] = useState(false);
   const [switching, setSwitching] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);        // LOAD error (fetch failed)
+  const [switchError, setSwitchError] = useState<string | null>(null); // ASSUME error (pick failed)
   const ref = useRef<HTMLDivElement>(null);
+  // Synchronous latch so a fast double-click can't fire two assume calls before `switching`
+  // state flushes (P5 UI/UX audit L5). Reset on a failed switch so the user can retry.
+  const switchingRef = useRef(false);
 
   const loadBrands = useCallback(() => {
     setLoading(true);
@@ -79,15 +83,21 @@ export function BrandSwitcher({ variant = 'menu' }: { variant?: Variant } = {}) 
   }, []);
 
   const pick = useCallback(async (slug: string) => {
+    if (switchingRef.current) return; // ignore a second click before state flushes (L5)
+    switchingRef.current = true;
     setSwitching(slug);
-    setError(null);
+    setSwitchError(null);
     try {
       await assumeTenant(slug);
-      // Land the operator in the admin shell for the brand they just entered.
+      // Land the operator in the admin shell for the brand they just entered. (No latch reset —
+      // we navigate away on success.)
       window.location.href = '/admin/dashboard';
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Switch failed');
+      // Show the switch failure INLINE (keep the brand list visible) rather than replacing the
+      // whole picker with a Retry that re-fetches the list — a failed ASSUME, not a failed load (L4).
+      setSwitchError(e instanceof Error ? e.message : 'Switch failed');
       setSwitching(null);
+      switchingRef.current = false;
     }
   }, []);
 
@@ -126,6 +136,8 @@ export function BrandSwitcher({ variant = 'menu' }: { variant?: Variant } = {}) 
     if (brands.length === 1) {
       const only = brands[0];
       return (
+        <div className="space-y-2">
+        {switchError && <p className="text-sm text-red-400" role="alert">{switchError}</p>}
         <button
           onClick={() => pick(only.slug)}
           disabled={!!switching}
@@ -144,11 +156,13 @@ export function BrandSwitcher({ variant = 'menu' }: { variant?: Variant } = {}) 
             ? <Loader2 className="w-4 h-4 animate-spin shrink-0" />
             : <ArrowRight className="w-4 h-4 text-white/40 shrink-0" />}
         </button>
+        </div>
       );
     }
     // Multiple granted brands → a picker.
     return (
       <div className="space-y-2">
+        {switchError && <p className="text-sm text-red-400" role="alert">{switchError}</p>}
         <p className="text-xs font-medium text-white/40 mb-1">Choose a brand to work in</p>
         {brands.map((b) => (
           <button
@@ -201,6 +215,7 @@ export function BrandSwitcher({ variant = 'menu' }: { variant?: Variant } = {}) 
             </div>
           )}
           {error && <div className="px-3 py-2 text-xs text-red-400">{error}</div>}
+          {switchError && <div className="px-3 py-2 text-xs text-red-400" role="alert">{switchError}</div>}
           {!loading && !error && brands.length === 0 && (
             <div className="px-3 py-2 text-xs text-white/40">No brands available.</div>
           )}

@@ -51,9 +51,25 @@ export class GifsyTenantGrantService {
     return clientIds;
   }
 
-  /** True iff this staff may assume/operate in `clientId`. */
+  /** True iff this staff may assume/operate in `clientId` (CACHED — for the switcher list only). */
   async mayOperateOnTenant(userId: string, clientId: string): Promise<boolean> {
     return (await this.grantedTenantIds(userId)).has(clientId);
+  }
+
+  /**
+   * AUTHORITATIVE (uncached) single-grant check — for the assume-tenant AUTHORIZATION gate and
+   * the refresh backstop. Reads the row directly so a grant JUST revoked on ANOTHER instance
+   * cannot be honored from this instance's stale 30s cache (there is no cross-instance cache
+   * invalidation — Redis was removed for cost). assume-tenant + refresh are not hot paths, so a
+   * direct indexed lookup here is the right trade: correctness over a micro-optimisation.
+   */
+  async hasGrantUncached(userId: string, clientId: string): Promise<boolean> {
+    if (!userId || !clientId) return false;
+    const row = await this.prisma.gifsyStaffTenantGrant.findUnique({
+      where: { userId_clientId: { userId, clientId } },
+      select: { userId: true },
+    });
+    return row !== null;
   }
 
   /** Drop one user's cached grant set — call on any grant change (add/remove). */

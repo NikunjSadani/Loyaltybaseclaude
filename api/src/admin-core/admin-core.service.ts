@@ -245,6 +245,13 @@ export class AdminCoreService {
     const where: Prisma.UserWhereInput = { clientId: user.clientId };
     if (q.role) where.role = q.role;
     if (q.status) where.status = q.status;
+    // RBAC Option-X (P5 audit F2): a GIFSY_STAFF's tenant is 'gifsy', which holds ONLY operator
+    // accounts (the owner + fellow staff). A non-owner must not enumerate operators via admin/users
+    // (it would expose the owner's login phone — the takeover recon P4 otherwise closes). Operator
+    // lifecycle is the owner-only staff panel, so a staff caller sees no operator rows here.
+    if (user.role === 'GIFSY_STAFF') {
+      where.role = { notIn: ['GIFSY_ADMIN', 'GIFSY_STAFF'] };
+    }
     if (q.search) {
       where.OR = [
         { name: { contains: q.search, mode: 'insensitive' } },
@@ -346,6 +353,11 @@ export class AdminCoreService {
       include: { channelPartner: true, salesUser: true },
     });
     if (!found) throw new NotFoundException('User not found');
+    // P5 audit F2: a non-owner must not read an operator account's details (mirrors listUsers +
+    // assertCanManageTarget). A staff's tenant is 'gifsy' = operators only → NotFound for them.
+    if (user.role === 'GIFSY_STAFF' && (found.role === 'GIFSY_ADMIN' || found.role === 'GIFSY_STAFF')) {
+      throw new NotFoundException('User not found');
+    }
     return { user: found };
   }
 

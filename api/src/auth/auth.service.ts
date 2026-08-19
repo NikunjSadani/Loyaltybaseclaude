@@ -457,8 +457,9 @@ export class AuthService {
     // cross-tenant work — an un-granted staff is refused here (deny-by-default), and because
     // un-assumed staff are not platform-wide (tenant-scope.ts) they have no other path in.
     if (operator.role === 'GIFSY_STAFF') {
-      const granted = await this.gifsyTenantGrants.grantedTenantIds(operator.sub);
-      if (!granted.has(targetClientId)) {
+      // AUTHORITATIVE (uncached) grant check — a grant just revoked on another instance must not
+      // be honored from a stale 30s cache (no cross-instance invalidation; Redis removed). P5 audit F1.
+      if (!(await this.gifsyTenantGrants.hasGrantUncached(operator.sub, targetClientId))) {
         throw new ForbiddenException('You do not have access to this brand');
       }
     }
@@ -569,8 +570,9 @@ export class AuthService {
         // atomic claim above, so the staff must re-login (and can only re-assume a still-granted
         // tenant). Cached resolver → no hot-path DB cost in the common case.
         if (isAssumed && session.user.role === 'GIFSY_STAFF') {
-          const granted = await this.gifsyTenantGrants.grantedTenantIds(session.user.id);
-          if (!granted.has(session.clientId)) {
+          // AUTHORITATIVE (uncached) — a revoked grant must not roll forward from a stale cache
+          // even if the session-sweep was somehow missed on this instance (P5 audit F1).
+          if (!(await this.gifsyTenantGrants.hasGrantUncached(session.user.id, session.clientId))) {
             throw new UnauthorizedException('Session expired — please log in again.');
           }
         }

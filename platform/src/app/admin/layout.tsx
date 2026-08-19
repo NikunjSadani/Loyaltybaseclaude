@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   LayoutDashboard,
   FileCheck,
@@ -36,7 +36,8 @@ import { useTenantFeatures } from '@/lib/tenant-features';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import { useAdminSession, adminRoleLabel } from '@/lib/admin-session';
 import { RequireAuth } from '@/components/auth/require-auth';
-import { logout, PORTAL_ROLES } from '@/lib/auth-client';
+import { logout, PORTAL_ROLES, getStoredUser } from '@/lib/auth-client';
+import { useAssumedContext } from '@/lib/use-assumed-context';
 import { OperatorBanner } from '@/components/operator/operator-banner';
 import { SiteFooter } from '@/components/layout/site-footer';
 
@@ -170,6 +171,18 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   // Master Visibility switch (per-tenant, default OFF). Lives in GifsySettings, NOT ClientConfig
   // features — so it is gated here directly rather than via the featureFlag map below.
   const visibilityEnabled = useGifsySettings().visibilityEnabled === true;
+
+  // RBAC Option-X (P5 UI/UX audit M2): a GIFSY_STAFF reaches the admin shell ONLY while assumed
+  // into a granted brand. An un-assumed staff who lands on /admin/* has no coherent state here
+  // (owner nav they can't use, backend-403'd widgets) → bounce them to their /gifsy launchpad.
+  // `assumed` is optimistic (localStorage hint) then reconciled to server truth, so an actually-
+  // assumed staff is never bounced. Non-staff roles are unaffected.
+  const { assumed } = useAssumedContext();
+  useEffect(() => {
+    if (getStoredUser()?.role === 'GIFSY_STAFF' && !assumed) {
+      router.replace('/gifsy');
+    }
+  }, [assumed, router]);
 
   function handleLogout() {
     if (typeof window !== 'undefined') {

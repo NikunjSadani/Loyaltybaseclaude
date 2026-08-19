@@ -116,6 +116,15 @@ describe('AdminCoreService', () => {
       expect(where.status).toBe('ACTIVE');
       expect(where.OR).toHaveLength(3);
     });
+
+    it('P5-F2: a GIFSY_STAFF caller cannot enumerate operator accounts (excludes GIFSY_ADMIN/GIFSY_STAFF)', async () => {
+      mockPrisma.user.findMany.mockResolvedValue([]);
+      mockPrisma.user.count.mockResolvedValue(0);
+      await service.listUsers(gifsyStaff, {});
+      const where = mockPrisma.user.findMany.mock.calls[0][0].where;
+      expect(where.clientId).toBe('gifsy');
+      expect(where.role).toEqual({ notIn: ['GIFSY_ADMIN', 'GIFSY_STAFF'] });
+    });
   });
 
   describe('createUser', () => {
@@ -260,6 +269,13 @@ describe('AdminCoreService', () => {
       mockPrisma.user.findFirst.mockResolvedValue({ id: 'u1' });
       await service.getUser(clientAdmin, 'u1');
       expect(mockPrisma.user.findFirst.mock.calls[0][0].where).toEqual({ id: 'u1', clientId: 'deoleo' });
+    });
+
+    it('P5-F2: a GIFSY_STAFF caller cannot read an operator account (NotFound), but can read a non-operator', async () => {
+      mockPrisma.user.findFirst.mockResolvedValueOnce({ id: 'owner', role: 'GIFSY_ADMIN' });
+      await expect(service.getUser(gifsyStaff, 'owner')).rejects.toBeInstanceOf(NotFoundException);
+      mockPrisma.user.findFirst.mockResolvedValueOnce({ id: 'u9', role: 'SALES_SO' });
+      await expect(service.getUser(gifsyStaff, 'u9')).resolves.toBeDefined();
     });
   });
 
