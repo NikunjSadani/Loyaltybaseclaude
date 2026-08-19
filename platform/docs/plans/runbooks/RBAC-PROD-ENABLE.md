@@ -98,9 +98,7 @@ Mirror the staging walks (`scratchpad/p4_walk.py` + `p5_isolation.py`) but again
 - **D-B2 — ✅ DONE (cutover #34, `f578b6e`, 2026-08-19):** conversion-rate/points-expiry/`wallet-settings`
   money writes now require the new reserved `tenancy:write_finance`, split off `tenancy:write`.
 - **write-sweep LOW-1 — ✅ DONE (#34):** `gifsy-roles.deleteRole` self-guards `where:{id,clientId}`.
-- **Four-eyes / maker-checker on credit-batch confirm — POST-STAFF item (needs ≥2 distinct Gifsy operators;
-  owner deferred 2026-08-19).** `creditsPayouts.fourEyesEnabled` persists (round-tripped, no UI toggle) but is
-  intentionally NOT enforced (`credits.service` `createBatch`/`confirmBatch`). A real second-approver gate is
-  unsatisfiable with one Gifsy account → blocked on RBAC staff existing. When staff exist AND the owner wants it:
-  enforce on confirm (maker ≠ checker; checker holds `credits:confirm_payout`) + add the Settings toggle + an
-  approve step + audit. Money path → DUAL adversarial audit.
+- **Four-eyes / maker-checker on credit-batch confirm — DECIDED NOT NEEDED (owner, 2026-08-19).** Money moves
+  via the single Gifsy operator; a 2nd-approver gate adds no value while there is exactly one approver. The
+  `creditsPayouts.fourEyesEnabled` flag stays inert by design (round-tripped, unenforced in `credits.service`
+  `createBatch`/`confirmBatch`). NOT a pending item — revisit only if the owner later wants a distinct checker.
