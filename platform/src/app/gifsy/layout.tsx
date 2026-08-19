@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation';
 import {
   LayoutGrid, Users, Settings, Building2,
   ChevronRight, LogOut, Globe, ShoppingBag,
+  ShieldCheck, UserCog,
 } from 'lucide-react';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES } from '@/lib/auth-client';
@@ -16,6 +17,8 @@ const NAV = [
   { href: '/gifsy/clients',       label: 'Clients',        icon: Building2   },
   { href: '/gifsy/outlet-types',  label: 'Outlet Types',   icon: ShoppingBag },
   { href: '/gifsy/users',         label: 'Platform Users', icon: Users       },
+  { href: '/gifsy/roles',         label: 'Roles',          icon: ShieldCheck },
+  { href: '/gifsy/staff',         label: 'Staff',          icon: UserCog     },
   { href: '/gifsy/settings',      label: 'Settings',       icon: Settings    },
 ];
 
