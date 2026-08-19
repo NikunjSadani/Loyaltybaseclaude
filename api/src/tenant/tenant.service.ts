@@ -3,6 +3,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from './tenant-settings.service';
+import { LoyaltyType } from '../common/loyalty-capabilities.helper';
 
 /**
  * The two supported visibility capture modes for a tenant.
@@ -33,6 +34,8 @@ export interface ClientFeatures {
 export interface ClientConfig {
   slug:     string;
   name:     string;
+  /** Employee Rewards Phase 0 — the earner-model switch (defaults TRADE_LOYALTY). */
+  loyaltyType: LoyaltyType;
   features: ClientFeatures;
   branding: { primaryColor: string; displayName: string; logoUrl?: string };
   isActive: boolean;
@@ -64,6 +67,7 @@ export class TenantService {
     id: string;
     internalName: string;
     status: string;
+    loyaltyType?: string | null;
     branding: unknown;
     features: unknown;
   }): ClientConfig {
@@ -75,6 +79,7 @@ export class TenantService {
     return {
       slug:     client.id,
       name:     client.internalName,
+      loyaltyType: (client.loyaltyType as LoyaltyType) ?? 'TRADE_LOYALTY',
       isActive: client.status !== 'INACTIVE',
       branding: {
         primaryColor: b.primaryColor ?? '#16a34a',

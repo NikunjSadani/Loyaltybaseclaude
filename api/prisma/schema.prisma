@@ -432,6 +432,16 @@ enum ClientStatus {
   ONBOARDING
 }
 
+/// Employee Rewards Phase 0 — selects the earner model + capability set for a client.
+/// TRADE_LOYALTY   = outlet earner (ChannelPartner; KYC/GST/TDS/payouts ON) — every client today.
+/// EMPLOYEE_REWARDS = employee earner (SalesUser; the compliance stack OFF).
+/// Code reads the resolved capability set (features), never this value directly, except to
+/// select the earner model. Additive + default TRADE_LOYALTY → existing clients unchanged.
+enum LoyaltyType {
+  TRADE_LOYALTY
+  EMPLOYEE_REWARDS
+}
+
 // ============================================================
 // MODULE 1: USERS & AUTH
 // ============================================================
@@ -453,6 +463,7 @@ model Client {
   id           String       @id // e.g. "deoleo" — NOT a cuid
   internalName String
   status       ClientStatus
+  loyaltyType  LoyaltyType   @default(TRADE_LOYALTY) // Employee Rewards Phase 0 — earner-model switch
   onboardedAt  DateTime
 
   // Nested config blocks stored as JSON for schema flexibility.
