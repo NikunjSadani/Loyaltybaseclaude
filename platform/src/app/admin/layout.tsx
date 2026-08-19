@@ -40,6 +40,7 @@ import { logout, PORTAL_ROLES, getStoredUser } from '@/lib/auth-client';
 import { useAssumedContext } from '@/lib/use-assumed-context';
 import { OperatorBanner } from '@/components/operator/operator-banner';
 import { SiteFooter } from '@/components/layout/site-footer';
+import { AdminRouteGuard } from '@/components/rbac/admin-route-guard';
 
 // All possible nav items — feature flags control which are visible
 const ALL_NAV_ITEMS = [
@@ -438,7 +439,11 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
         {/* Page content */}
         <main className="flex-1 overflow-y-auto p-6">
-          <RequireAuth allowedRoles={PORTAL_ROLES.admin}>{children}</RequireAuth>
+          <RequireAuth allowedRoles={PORTAL_ROLES.admin}>
+            {/* RBAC Option-X P6: a GIFSY_STAFF landing on a route their role lacks sees a
+                clear AccessDenied message instead of a raw 403. INERT for every other role. */}
+            <AdminRouteGuard>{children}</AdminRouteGuard>
+          </RequireAuth>
           <SiteFooter />
         </main>
       </div>

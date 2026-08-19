@@ -12,6 +12,7 @@ import InstallPrompt from '@/components/pwa/InstallPrompt';
 import PushSubscriptionManager from '@/components/pwa/PushSubscriptionManager';
 import InstallBeacon from '@/components/pwa/InstallBeacon';
 import SessionExpiryGuard from '@/components/auth/SessionExpiryGuard';
+import PermissionDeniedToast from '@/components/rbac/permission-denied-toast';
 import type { PwaScope } from '@/lib/pwa/manifest';
 
 const inter = Inter({
@@ -86,7 +87,12 @@ export default async function RootLayout({
         className="min-h-full flex flex-col bg-gray-50 text-gray-900 font-sans overflow-x-hidden"
       >
         <ClientConfigProvider config={config}>
-          <ToastProvider>{children}</ToastProvider>
+          <ToastProvider>
+            {children}
+            {/* RBAC Option-X P6: turns a global /api 403 into a clear "no permission"
+                toast (staff-scoped). Inside ToastProvider so it can raise toasts. */}
+            <PermissionDeniedToast />
+          </ToastProvider>
         </ClientConfigProvider>
         {/* Bounce to /auth/login on any /api 401 (expired/invalid token) instead of
             surfacing a cryptic "Invalid token" / blank data. App-wide. */}

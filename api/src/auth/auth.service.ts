@@ -14,6 +14,8 @@ import { TenantService } from '../tenant/tenant.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
 import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
+import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
+import { ALL_PERMISSIONS } from '../common/rbac/permissions';
 import {
   OTP_EXPIRY_MINUTES,
   OTP_MAX_ATTEMPTS,
@@ -54,6 +56,7 @@ export class AuthService {
     private readonly tenantSettings: TenantSettingsService,
     private readonly tenant:  TenantService,
     private readonly gifsyTenantGrants: GifsyTenantGrantService,
+    private readonly gifsyRoles: GifsyRoleService,
   ) {}
 
   // ── Current user (enriched) ───────────────────────────────────────────────────
@@ -106,12 +109,25 @@ export class AuthService {
         })
       : null;
 
+    // RBAC Option-X (P6): the caller's EFFECTIVE permission keys, so the FE can show a clear
+    // "you don't have permission" message (page + action level) instead of a raw 403 — the FE
+    // gates only GIFSY_STAFF by this; the backend remains the real enforcement boundary. Owner
+    // (GIFSY_ADMIN) = all permissions (unrestricted); a GIFSY_STAFF = their assigned GifsyRole's
+    // set; every other (legacy) role = [] (their existing, un-permission-gated UX is untouched).
+    const permissions: string[] =
+      user.role === 'GIFSY_ADMIN'
+        ? ALL_PERMISSIONS
+        : user.role === 'GIFSY_STAFF'
+          ? Array.from(await this.gifsyRoles.getPermissions(user.gifsyRoleId))
+          : [];
+
     return {
       id: user.sub,
       role: user.role,
       clientId: user.clientId,
       name: user.name,
       assumed: user.assumed ?? false,
+      permissions,
       // Authoritative points→₹ conversion rate so the partner FE previews points
       // and shows the ₹ minimum from the server, not its stale localStorage rate.
       // Now per-tenant (TenantSettingsService), defaulting to the env rate.

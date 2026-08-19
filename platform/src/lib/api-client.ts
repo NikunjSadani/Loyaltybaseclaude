@@ -38,7 +38,15 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<ApiRespo
       },
     });
     const body = await res.json();
-    if (!res.ok) return { success: false, error: body?.error ?? res.statusText };
+    if (!res.ok) {
+      // RBAC Option-X P6: a 403 with no explicit body error gets a clear default
+      // message instead of a bare "Forbidden" status text. The backend is the real
+      // enforcement; this only improves how api.* consumers surface a denial.
+      if (res.status === 403) {
+        return { success: false, error: body?.error ?? "You don't have permission to do that" };
+      }
+      return { success: false, error: body?.error ?? res.statusText };
+    }
     return body as ApiResponse<T>;
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : 'Network error' };

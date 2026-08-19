@@ -12,6 +12,7 @@ import { Msg91Service } from '../notifications/msg91.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
 import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
+import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
 
 // getMe surfaces the tenant visibility-capture mode; default PHOTO_APPROVAL for tests.
 const mockTenant = { resolveVisibilityCaptureMode: jest.fn(async () => 'PHOTO_APPROVAL') };
@@ -66,6 +67,11 @@ const mockGrants = {
   invalidate: jest.fn(),
   clearCache: jest.fn(),
 };
+// P6 role→permissions resolver stub (feeds getMe's `permissions[]`).
+const mockRoleSvc = {
+  getPermissions: jest.fn().mockResolvedValue(new Set<string>()),
+  clearCache: jest.fn(),
+};
 
 describe('AuthService', () => {
   let service: AuthService;
@@ -88,6 +94,10 @@ describe('AuthService', () => {
         {
           provide: GifsyTenantGrantService,
           useValue: mockGrants,
+        },
+        {
+          provide: GifsyRoleService,
+          useValue: mockRoleSvc,
         },
       ],
     }).compile();
@@ -155,6 +165,32 @@ describe('AuthService', () => {
 
       const result = await service.getMe(partnerUser);
       expect((result as any).conversionRate).toBe(1);
+    });
+
+    // ── P6 — getMe exposes the caller's effective permissions[] for FE access-messaging ──
+    it('P6: a GIFSY_STAFF getMe returns their assigned role permissions', async () => {
+      (mockPrisma as any).user.findUnique = jest.fn().mockResolvedValue({ name: 'S', phone: '97' });
+      (mockPrisma as any).channelPartner.findUnique.mockResolvedValue(null);
+      (mockPrisma as any).salesUser.findUnique.mockResolvedValue(null);
+      mockRoleSvc.getPermissions.mockResolvedValueOnce(new Set(['kyc:read', 'schemes:read']));
+      const staff = { sub: 'st1', role: 'GIFSY_STAFF', clientId: 'gifsy', phone: '97', name: 'S', gifsyRoleId: 'r1' } as never;
+      const result = await service.getMe(staff);
+      expect(mockRoleSvc.getPermissions).toHaveBeenCalledWith('r1');
+      expect((result as any).permissions.sort()).toEqual(['kyc:read', 'schemes:read']);
+    });
+
+    it('P6: a GIFSY_ADMIN getMe returns ALL permissions (owner unrestricted); a partner returns []', async () => {
+      (mockPrisma as any).user.findUnique = jest.fn().mockResolvedValue({ name: 'A', phone: '98' });
+      (mockPrisma as any).channelPartner.findUnique.mockResolvedValue(null);
+      (mockPrisma as any).salesUser.findUnique.mockResolvedValue(null);
+      const owner = { sub: 'ow', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'A' } as never;
+      const ownerRes = await service.getMe(owner);
+      expect((ownerRes as any).permissions).toContain('kyc:read');
+      expect((ownerRes as any).permissions.length).toBeGreaterThan(10);
+      // A non-operator role is not permission-gated on the FE → empty list.
+      (mockPrisma as any).channelPartner.findUnique.mockResolvedValue(null);
+      const partnerRes = await service.getMe(partnerUser);
+      expect((partnerRes as any).permissions).toEqual([]);
     });
   });
 

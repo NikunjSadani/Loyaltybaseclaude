@@ -34,6 +34,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton'
 import { downloadBlob } from '@/lib/download'
+import { usePermissions } from '@/lib/use-permissions'
 
 // ─── Local types ──────────────────────────────────────────────────────────────
 
@@ -227,6 +228,14 @@ function FieldDots({ fields }: { fields: Record<KycFieldKey, KycFieldState> }) {
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function KycApprovalsPage() {
+  // RBAC Option-X P6 — action-level gating for the KYC decision + commit writes.
+  // canApprove is TRUE for the owner + every non-staff role (has() is always true
+  // for them); only a GIFSY_STAFF lacking kyc:gifsy_approve gets the controls
+  // disabled with a "no permission" tooltip. The backend still enforces the 403.
+  const { has: hasPermission } = usePermissions()
+  const canApprove = hasPermission('kyc:gifsy_approve')
+  const noPermTitle = "You don't have permission"
+
   // ── Entry list ─────────────────────────────────────────────────────────────
   const [entries, setEntries] = useState<KycApprovalEntry[]>([])
   const [listLoading, setListLoading] = useState(true)
@@ -512,7 +521,8 @@ export default function KycApprovalsPage() {
               <span className="text-xs font-bold text-gray-500 w-20">Step 3</span>
               <Button
                 onClick={handleCommit}
-                disabled={commitLoading || !!commitResult}
+                disabled={commitLoading || !!commitResult || !canApprove}
+                title={!canApprove ? noPermTitle : undefined}
                 size="sm"
                 className="flex items-center gap-1.5 bg-green-700 hover:bg-green-800 text-white disabled:opacity-40"
               >
@@ -813,7 +823,8 @@ export default function KycApprovalsPage() {
                         <div className="flex flex-wrap items-center gap-2">
                           <Button
                             size="sm"
-                            disabled={isLoading}
+                            disabled={isLoading || !canApprove}
+                            title={!canApprove ? noPermTitle : undefined}
                             onClick={() => applyFieldDecision(selected.submissionId, key, 'APPROVED')}
                             className="flex items-center gap-1 bg-green-600 hover:bg-green-700 text-white text-xs h-7 px-3 disabled:opacity-50"
                           >
@@ -834,13 +845,13 @@ export default function KycApprovalsPage() {
                             />
                             <Button
                               size="sm"
-                              disabled={!canReject || isLoading}
+                              disabled={!canReject || isLoading || !canApprove}
                               onClick={() => {
                                 const r = remark.trim()
                                 applyFieldDecision(selected.submissionId, key, 'REJECTED', r)
                                 setRemark(selected.submissionId, key, '')
                               }}
-                              title={canReject ? undefined : 'Enter a remark before rejecting'}
+                              title={!canApprove ? noPermTitle : canReject ? undefined : 'Enter a remark before rejecting'}
                               className="flex items-center gap-1 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white text-xs h-7 px-3"
                             >
                               <XCircle className="h-3 w-3" />Reject

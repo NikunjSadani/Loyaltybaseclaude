@@ -26,6 +26,21 @@ export function shouldRedirectOnAuth(
   return true;
 }
 
+/**
+ * Pure decision: should a 403 surface a "no permission" notice (RBAC Option-X P6)?
+ *
+ * ONLY 403 (authenticated but forbidden) on a same-origin /api/* call, EXCLUDING
+ * /api/auth/* (its 4xx are the login/OTP flow, not RBAC). 403 is NOT a redirect —
+ * the page stays put and a clear toast is shown instead of a raw error. The toast
+ * listener further scopes the notice to GIFSY_STAFF.
+ */
+export function shouldNotifyForbidden(status: number, url: string): boolean {
+  if (status !== 403) return false;
+  if (!url.includes('/api/')) return false;
+  if (url.includes('/api/auth/')) return false;
+  return true;
+}
+
 function extractUrl(input: RequestInfo | URL): string {
   if (typeof input === 'string') return input;
   if (input instanceof URL) return input.toString();
@@ -73,6 +88,12 @@ export default function SessionExpiryGuard() {
     const patched: typeof window.fetch = async (input, init) => {
       const res = await originalFetch(input, init);
       try {
+        // RBAC Option-X P6: a forbidden (403) /api call surfaces a clear "no permission"
+        // toast instead of a raw error. Fire-and-forget event; the listener (staff-scoped)
+        // decides whether to show it. Never blocks or alters the response.
+        if (shouldNotifyForbidden(res.status, extractUrl(input))) {
+          window.dispatchEvent(new CustomEvent('api:forbidden', { detail: { url: extractUrl(input) } }));
+        }
         if (
           !redirecting &&
           shouldRedirectOnAuth(res.status, extractUrl(input), window.location.pathname)
