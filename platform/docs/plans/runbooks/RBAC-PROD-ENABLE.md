@@ -20,9 +20,9 @@ staging; ALL DORMANT (no `GIFSY_STAFF` exists in prod). Detail: memory `[[rbac-o
 - P4 walk 58/58; P5 isolation walk 23/23; P6 /me contract 10/10; dual auth audit + cross-tenant
   write-sweep + P6 UI/UX audit = CLEAN (all findings fixed + re-verified). No open BLOCKING
   decisions — D-B4 resolved by P5; P6 adds the clear "no permission" messaging.
-- OPEN (non-blocking) owner decision: P6 nav volume — with the narrow seed roles an Ops staff
-  hits AccessDenied on ~half the visible sidebar (broaden the seed roles, or hide zero-overlap
-  nav items). Deferred: D-B2 (tenancy:write overloading), write-sweep LOW-1 self-guarding `where`.
+- P6 nav-volume decision RESOLVED (owner): keep show + explain (nav all visible; clear message
+  on the ones a staff lacks) — no hiding, no seed-role broadening. Deferred: D-B2 (tenancy:write
+  overloading), write-sweep LOW-1 self-guarding `where`.
 
 ---
 
