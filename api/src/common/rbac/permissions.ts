@@ -50,6 +50,11 @@ const USERS = {
 const TENANCY = {
   READ:             'tenancy:read',
   WRITE:            'tenancy:write',
+  // Financial/program-money tenant config (conversion rate, points expiry,
+  // credit caps/floors). Split out of WRITE (D-B2) so a role delegated benign
+  // tenant writes (branding, holidays, report recipients) cannot also move the
+  // money dials. Reserved + Gifsy-operated.
+  WRITE_FINANCE:    'tenancy:write_finance',
   MANAGE_FLAGS:     'tenancy:manage_flags',
 } as const;
 
@@ -173,8 +178,10 @@ const REWARDS = {
 const VISIBILITY = {
   READ:             'visibility:read',
   WRITE:            'visibility:write',
-  APPROVE:          'visibility:approve',
-  REJECT:           'visibility:reject',
+  // NOTE: approve/reject of a capture are gated by visibility:write (the review
+  // decision endpoint). Dedicated approve/reject keys were defined but wired to
+  // no route (dead keys) and were removed (A3 cleanup); re-add + wire together
+  // if granular approve≠write is ever needed.
   VIEW_FRAUD_LOG:   'visibility:view_fraud_log',
 } as const;
 
@@ -251,7 +258,9 @@ const SUPPORT = {
   READ:             'support:read',
   WRITE:            'support:write',
   ESCALATE:         'support:escalate',
-  MANAGE:           'support:manage',
+  // NOTE: 'support:manage' was defined but wired to no route (dead key) and was
+  // removed (A3 cleanup) — ticket management uses support:write/escalate. Re-add
+  // + wire together if a distinct manage action is introduced.
 } as const;
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -14,12 +14,12 @@ import { seedGifsyRoles } from '../../../prisma/seed-gifsy-roles';
 // The exact sets from the design doc "Seed roles" section.
 const EXPECTED_OPS = [
   'kyc:read', 'kyc:approve', 'kyc:reject', 'kyc:gifsy_approve', 'kyc:view_documents',
-  'visibility:read', 'visibility:write', 'visibility:approve', 'visibility:reject', 'visibility:view_fraud_log',
+  'visibility:read', 'visibility:write', 'visibility:view_fraud_log',
   'sales_org:read', 'sales_org:write', 'sales_org:manage_hierarchy', 'sales_org:manage_tasks',
   'partners:read', 'partners:write', 'partners:delete', 'partners:manage_outlets',
   'schemes:read', 'schemes:write', 'schemes:delete', 'schemes:manage_enrollments', 'schemes:export',
   'targets:read', 'targets:write', 'targets:upload', 'targets:manage_config',
-  'support:read', 'support:write', 'support:escalate', 'support:manage',
+  'support:read', 'support:write', 'support:escalate',
 ];
 
 const EXPECTED_PM_EXTRA = [

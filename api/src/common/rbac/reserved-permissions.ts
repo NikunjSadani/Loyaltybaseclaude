@@ -50,6 +50,9 @@ export const RESERVED_PERMISSIONS: Permission[] = [
   // Tenancy & platform configuration.
   'tenancy:read',
   'tenancy:write',
+  // Tenant financial config (conversion rate, points expiry, caps/floors) — split
+  // out of tenancy:write (D-B2) so it is separately, consciously grantable.
+  'tenancy:write_finance',
   'tenancy:manage_flags',
   // Role management + destructive user lifecycle (staff/role admin surface). users:delete is
   // reserved alongside users:manage_roles: deactivating/soft-deleting operator users is a

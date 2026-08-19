@@ -23,6 +23,7 @@ describe('RESERVED_PERMISSIONS', () => {
     'invoices:upload',
     'tenancy:read',
     'tenancy:write',
+    'tenancy:write_finance',
     'tenancy:manage_flags',
     'users:manage_roles',
     'users:delete',
@@ -32,9 +33,9 @@ describe('RESERVED_PERMISSIONS', () => {
     expect([...RESERVED_PERMISSIONS].sort()).toEqual([...EXPECTED].sort());
   });
 
-  it('has 19 entries and no duplicates', () => {
-    expect(RESERVED_PERMISSIONS).toHaveLength(19);
-    expect(new Set(RESERVED_PERMISSIONS).size).toBe(19);
+  it('has 20 entries and no duplicates', () => {
+    expect(RESERVED_PERMISSIONS).toHaveLength(20);
+    expect(new Set(RESERVED_PERMISSIONS).size).toBe(20);
   });
 
   it('contains only valid Permission keys', () => {

@@ -32,6 +32,7 @@ describe('GifsyRolesService', () => {
       findFirst: jest.Mock;
       create: jest.Mock;
       update: jest.Mock;
+      updateMany: jest.Mock;
     };
     user: { groupBy: jest.Mock; count: jest.Mock };
     auditLog: { create: jest.Mock };
@@ -47,6 +48,7 @@ describe('GifsyRolesService', () => {
         findFirst: jest.fn(),
         create: jest.fn(),
         update: jest.fn(),
+        updateMany: jest.fn(),
       },
       user: { groupBy: jest.fn(), count: jest.fn() },
       auditLog: { create: jest.fn().mockResolvedValue({}) },
@@ -158,18 +160,18 @@ describe('GifsyRolesService', () => {
         isSystem: true,
         deletedAt: null,
       });
-      const updated = { id: 'sys1', permissions: ['kyc:read', 'visibility:approve'] };
+      const updated = { id: 'sys1', permissions: ['kyc:read', 'visibility:write'] };
       prisma.gifsyRole.update.mockResolvedValue(updated);
 
       const result = await svc.updateRole(OWNER, 'sys1', {
-        permissions: ['kyc:read', 'visibility:approve'],
+        permissions: ['kyc:read', 'visibility:write'],
       });
 
       expect(result).toBe(updated);
       // Allow-listed data — no isSystem field ever passed through.
       const call = prisma.gifsyRole.update.mock.calls[0][0];
       expect(call.where).toEqual({ id: 'sys1' });
-      expect(call.data).toEqual({ permissions: ['kyc:read', 'visibility:approve'] });
+      expect(call.data).toEqual({ permissions: ['kyc:read', 'visibility:write'] });
       expect(call.data.isSystem).toBeUndefined();
       expect(cache.clearCache).toHaveBeenCalledTimes(1);
     });
@@ -284,13 +286,14 @@ describe('GifsyRolesService', () => {
         deletedAt: null,
       });
       prisma.user.count.mockResolvedValue(0);
-      prisma.gifsyRole.update.mockResolvedValue({ id: 'r1' });
+      prisma.gifsyRole.updateMany.mockResolvedValue({ count: 1 });
 
       const result = await svc.deleteRole(OWNER, 'r1');
 
       expect(result).toEqual({ id: 'r1', deleted: true });
-      const call = prisma.gifsyRole.update.mock.calls[0][0];
-      expect(call.where).toEqual({ id: 'r1' });
+      // Self-guarding where (write-sweep LOW-1): the soft-delete is scoped to the gifsy tenant.
+      const call = prisma.gifsyRole.updateMany.mock.calls[0][0];
+      expect(call.where).toEqual({ id: 'r1', clientId: 'gifsy' });
       expect(call.data.deletedAt).toBeInstanceOf(Date);
       // The stored name is mangled with the id so the (clientId, name) slot frees up for reuse.
       expect(call.data.name).toContain('Contractor');

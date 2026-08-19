@@ -63,6 +63,24 @@ describe('TicketsService', () => {
       const where = mockPrisma.ticket.findMany.mock.calls[0][0].where;
       expect(where).toEqual({ clientId: 'deoleo' });
     });
+
+    // Security/cosmetic: the message-count badge for a non-support reader must exclude
+    // internal notes (they can't open them — see getOne), so it isn't over-counted.
+    it('counts only non-internal messages for a non-support reader', async () => {
+      mockPrisma.ticket.findMany.mockResolvedValue([]);
+      mockPrisma.ticket.count.mockResolvedValue(0);
+      await service.list(partner, {});
+      const include = mockPrisma.ticket.findMany.mock.calls[0][0].include;
+      expect(include._count.select.messages).toEqual({ where: { isInternal: false } });
+    });
+
+    it('counts ALL messages for a support admin', async () => {
+      mockPrisma.ticket.findMany.mockResolvedValue([]);
+      mockPrisma.ticket.count.mockResolvedValue(0);
+      await service.list(gifsy, {});
+      const include = mockPrisma.ticket.findMany.mock.calls[0][0].include;
+      expect(include._count.select.messages).toBe(true);
+    });
   });
 
   describe('getOne', () => {
@@ -85,6 +103,30 @@ describe('TicketsService', () => {
     it('returns a ticket created by another user for a CLIENT_ADMIN', async () => {
       mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1', createdById: 'someoneElse' });
       await expect(service.getOne(clientAdmin, 't1')).resolves.toEqual({ ticket: { id: 't1', createdById: 'someoneElse' } });
+    });
+
+    // Security: internal notes must NOT leak to a non-support reader (the ticket creator).
+    // The DB-level filter is applied via a where clause on the messages include.
+    it('filters internal messages out for a non-support reader (ticket creator)', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1', createdById: 'user1' });
+      await service.getOne(partner, 't1');
+      const include = mockPrisma.ticket.findFirst.mock.calls[0][0].include;
+      expect(include.messages.where).toEqual({ isInternal: false });
+    });
+
+    // Security: a support admin sees ALL messages — no internal-note filter applied.
+    it('does NOT filter internal messages for a support admin (GIFSY_ADMIN)', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1', createdById: 'someoneElse' });
+      await service.getOne(gifsy, 't1');
+      const include = mockPrisma.ticket.findFirst.mock.calls[0][0].include;
+      expect(include.messages.where).toBeUndefined();
+    });
+
+    it('does NOT filter internal messages for a support admin (CLIENT_ADMIN)', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1', createdById: 'someoneElse' });
+      await service.getOne(clientAdmin, 't1');
+      const include = mockPrisma.ticket.findFirst.mock.calls[0][0].include;
+      expect(include.messages.where).toBeUndefined();
     });
   });
 

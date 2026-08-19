@@ -35,7 +35,9 @@ export class AdminSettingsController {
 
   @Put()
   @Roles('GIFSY_ADMIN') // settings PUT is Gifsy-Admin-only in the source route
-  @RequirePermission('tenancy:write')
+  // Money/program config (conversion rate, credit caps/floors, etc.) → the
+  // finance-specific reserved key (D-B2), not the general tenancy:write.
+  @RequirePermission('tenancy:write_finance')
   upsert(@CurrentUser() user: JwtPayload, @Body() dto: UpsertSettingDto) {
     return this.svc.upsertSetting(user, dto);
   }
@@ -93,7 +95,8 @@ export class AdminSettingsController {
    */
   @Put('points-expiry')
   @Roles('GIFSY_ADMIN')
-  @RequirePermission('tenancy:write')
+  // Points expiry changes the redeemable value of every wallet → finance key (D-B2).
+  @RequirePermission('tenancy:write_finance')
   setPointsExpiry(@CurrentUser() user: JwtPayload, @Body() dto: SetPointsExpiryDto) {
     return this.svc.setPointsExpiry(user, dto);
   }

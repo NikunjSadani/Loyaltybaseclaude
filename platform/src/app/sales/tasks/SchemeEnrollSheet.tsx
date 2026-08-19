@@ -362,12 +362,6 @@ export function SchemeEnrollSheet({
                           <p className="text-[11px] text-gray-400 mt-0.5 truncate">
                             {t.outletRef} · {targetKind(t)}
                           </p>
-                          {t.standalone && (
-                            <p className="text-[10px] text-amber-600 mt-0.5 flex items-center gap-1">
-                              <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
-                              Standalone roster row — you&apos;ll enter any OTP number
-                            </p>
-                          )}
                           {status === 'REJECTED' && t.rejectionReason && (
                             <p className="text-[10px] text-red-500 mt-0.5 truncate">{t.rejectionReason}</p>
                           )}

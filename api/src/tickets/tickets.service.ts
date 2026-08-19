@@ -51,10 +51,18 @@ export class TicketsService {
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
     const where: Prisma.TicketWhereInput = { clientId: user.clientId };
+    const isSupportAdmin = this.isSupportAdmin(user);
     // Field roles see only their own tickets; support admins see all tenant tickets.
-    if (!this.isSupportAdmin(user)) where.createdById = user.sub;
+    if (!isSupportAdmin) where.createdById = user.sub;
     if (q.status) where.status = q.status;
     if (q.category) where.category = q.category;
+
+    // Non-support readers never see internal notes (see getOne), so the message
+    // count must exclude them too — otherwise the badge over-counts messages the
+    // reader can't open. Support admins count all messages.
+    const messagesCount: Prisma.TicketCountOutputTypeSelect['messages'] = isSupportAdmin
+      ? true
+      : { where: { isInternal: false } };
 
     const [tickets, total] = await Promise.all([
       this.prisma.ticket.findMany({
@@ -62,7 +70,7 @@ export class TicketsService {
         include: {
           createdBy: { select: { id: true, name: true, phone: true } },
           assignedTo: { select: { id: true, name: true } },
-          _count: { select: { messages: true } },
+          _count: { select: { messages: messagesCount } },
         },
         skip: (page - 1) * limit,
         take: limit,
@@ -107,13 +115,19 @@ export class TicketsService {
   }
 
   async getOne(user: JwtPayload, id: string) {
+    // Security: internal notes (isInternal=true) — support's private escalation notes
+    // and admin-only notes — must NEVER reach a non-support reader (the ticket creator).
+    // Filter them out at the DB layer for non-support readers; support admins see all.
+    const messages: Prisma.Ticket$messagesArgs = {
+      include: { sender: { select: { id: true, name: true, role: true } } },
+      orderBy: { createdAt: 'asc' },
+    };
+    if (!this.isSupportAdmin(user)) messages.where = { isInternal: false };
+
     const ticket = await this.loadAccessible(user, id, {
       createdBy: { select: { id: true, name: true, phone: true } },
       assignedTo: { select: { id: true, name: true } },
-      messages: {
-        include: { sender: { select: { id: true, name: true, role: true } } },
-        orderBy: { createdAt: 'asc' },
-      },
+      messages,
     });
     return { ticket };
   }

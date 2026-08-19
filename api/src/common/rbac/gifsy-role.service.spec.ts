@@ -11,13 +11,13 @@ function makePrisma(findFirst: jest.Mock): PrismaService {
 describe('GifsyRoleService', () => {
   it('resolves a role to its validated permission set', async () => {
     const findFirst = jest.fn().mockResolvedValue({
-      permissions: ['kyc:read', 'visibility:approve'],
+      permissions: ['kyc:read', 'visibility:write'],
     });
     const svc = new GifsyRoleService(makePrisma(findFirst));
 
     const perms = await svc.getPermissions('role-1');
     expect(perms.has('kyc:read')).toBe(true);
-    expect(perms.has('visibility:approve')).toBe(true);
+    expect(perms.has('visibility:write')).toBe(true);
     expect(perms.size).toBe(2);
   });
 

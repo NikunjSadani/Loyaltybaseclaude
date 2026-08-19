@@ -36,7 +36,7 @@ import { ALL_PERMISSIONS, type Permission } from './permissions';
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const GIFSY_OPERATED_PERMISSIONS: Permission[] = [
-  'tenancy:write', 'tenancy:manage_flags',
+  'tenancy:write', 'tenancy:write_finance', 'tenancy:manage_flags',
   'invoices:read', 'invoices:manage', 'invoices:upload',
   'credits:download_bank_file', 'credits:mark_paid', 'credits:approve_reversal',
   'payouts:manage_fund', 'payouts:process_batch', 'payouts:reconcile', 'payouts:view_tds',

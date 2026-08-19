@@ -28,11 +28,9 @@ export const OPS_PERMISSIONS: Permission[] = [
   'kyc:reject',
   'kyc:gifsy_approve',
   'kyc:view_documents',
-  // Visibility (POSM)
+  // Visibility (POSM) — approve/reject of a capture are gated by visibility:write
   'visibility:read',
   'visibility:write',
-  'visibility:approve',
-  'visibility:reject',
   'visibility:view_fraud_log',
   // Sales organization
   'sales_org:read',
@@ -55,11 +53,10 @@ export const OPS_PERMISSIONS: Permission[] = [
   'targets:write',
   'targets:upload',
   'targets:manage_config',
-  // Support (tickets)
+  // Support (tickets) — management uses support:write/escalate
   'support:read',
   'support:write',
   'support:escalate',
-  'support:manage',
 ];
 
 /**

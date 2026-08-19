@@ -136,7 +136,8 @@ export class GifsyController {
    */
   @Put('clients/:slug/wallet-settings')
   @Roles('GIFSY_ADMIN')
-  @RequirePermission('tenancy:write')
+  // Per-tenant conversion rate / points expiry / floors = money path → finance key (D-B2).
+  @RequirePermission('tenancy:write_finance')
   updateWalletSettings(
     @CurrentUser() user: JwtPayload,
     @Param('slug') slug: string,

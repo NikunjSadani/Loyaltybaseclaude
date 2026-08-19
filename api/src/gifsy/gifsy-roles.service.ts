@@ -337,10 +337,13 @@ export class GifsyRolesService {
     // name. The mangled name is never shown (every read filters deletedAt: null). We keep the
     // full @@unique([clientId, name]) (the seed upserts by that natural key), so freeing the
     // slot this way is what makes a same-name recreate possible.
-    await this.prisma.gifsyRole.update({
-      where: { id },
+    // Self-guarding where (write-sweep LOW-1): scope the mutation itself to the
+    // gifsy tenant, not only the preceding findFirst. count!==1 → treat as absent.
+    const { count } = await this.prisma.gifsyRole.updateMany({
+      where: { id, clientId: GifsyRolesService.GIFSY_CLIENT_ID },
       data: { deletedAt: new Date(), name: `${role.name} (deleted ${role.id})` },
     });
+    if (count !== 1) throw new NotFoundException('Role not found.');
     this.gifsyRoles.clearCache();
 
     await this.audit({
