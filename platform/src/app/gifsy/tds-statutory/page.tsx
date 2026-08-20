@@ -23,10 +23,40 @@ interface TdsEntry {
   thr194rFyRupees: number;
 }
 
+/** The backend's resolved-for-current-FY shape: rates as {num,den}, thresholds as paise strings —
+ *  distinct from the editor-row (pct + rupees) shape, so it must be mapped before display. */
+interface RawResolved {
+  r194rWithPan: { num: number; den: number };
+  r194rNoPan: { num: number; den: number };
+  c194cIndividual: { num: number; den: number };
+  c194cOther: { num: number; den: number };
+  c194cNoPan: { num: number; den: number };
+  thr194cSinglePaise: string;
+  thr194cFyPaise: string;
+  thr194rFyPaise: string;
+}
+
 interface StatutoryPayload {
   entries: TdsEntry[];
-  defaults: TdsEntry;
-  resolvedForCurrentFy: TdsEntry;
+  /** built-in defaults in the pct/rupees view shape (no effectiveFromFy). */
+  defaults: Omit<TdsEntry, 'effectiveFromFy'>;
+  resolvedForCurrentFy: RawResolved;
+  currentFyLabel: string;
+}
+
+/** Map the backend resolved shape into the editor-row (pct/rupees) shape for the reference card. */
+function resolvedToEntry(r: RawResolved, fy: string): TdsEntry {
+  return {
+    effectiveFromFy: fy,
+    r194rWithPanPct: r.r194rWithPan.num,
+    r194rNoPanPct: r.r194rNoPan.num,
+    c194cIndividualPct: r.c194cIndividual.num,
+    c194cOtherPct: r.c194cOther.num,
+    c194cNoPanPct: r.c194cNoPan.num,
+    thr194cSingleRupees: Number(r.thr194cSinglePaise) / 100,
+    thr194cFyRupees: Number(r.thr194cFyPaise) / 100,
+    thr194rFyRupees: Number(r.thr194rFyPaise) / 100,
+  };
 }
 
 // The editable numeric fields are held as raw strings while editing so inline
@@ -165,8 +195,10 @@ export default function GifsyTdsStatutoryPage() {
     const loaded = (p.entries ?? []).map(entryToRow);
     setRows(loaded.length ? loaded : [emptyRow()]);
     setInitialRows(loaded);
-    setDefaults(p.defaults ?? null);
-    setResolved(p.resolvedForCurrentFy ?? null);
+    setDefaults(p.defaults ? { effectiveFromFy: '— built-in default —', ...p.defaults } : null);
+    setResolved(
+      p.resolvedForCurrentFy ? resolvedToEntry(p.resolvedForCurrentFy, p.currentFyLabel) : null,
+    );
   }, []);
 
   const load = useCallback(async () => {

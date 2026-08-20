@@ -39,10 +39,23 @@ const ENTRY = {
   thr194rFyRupees: 20000,
 };
 
+// resolvedForCurrentFy comes from the backend as {num,den} rates + paise strings (distinct shape).
+const RESOLVED = {
+  r194rWithPan: { num: 10, den: 90 },
+  r194rNoPan: { num: 20, den: 80 },
+  c194cIndividual: { num: 1, den: 99 },
+  c194cOther: { num: 2, den: 98 },
+  c194cNoPan: { num: 20, den: 80 },
+  thr194cSinglePaise: '3000000',
+  thr194cFyPaise: '10000000',
+  thr194rFyPaise: '2000000',
+};
+
 const PAYLOAD = {
   entries: [ENTRY],
   defaults: ENTRY,
-  resolvedForCurrentFy: ENTRY,
+  resolvedForCurrentFy: RESOLVED,
+  currentFyLabel: '2026-27',
 };
 
 function okJson(data: unknown) {
