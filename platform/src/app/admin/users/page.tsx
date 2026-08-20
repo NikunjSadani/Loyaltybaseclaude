@@ -272,8 +272,21 @@ function EditUserModal({
   );
 
   const phoneValid   = /^\d{10}$/.test(phone);
-  const canSubmit    = name.trim().length > 0 && phoneValid && !!role && !submitting;
   const phoneChanged = phone.trim() !== user.phone;
+  // Require a valid phone only when it actually changed — so an employee's level / reports-to
+  // can be edited even for a row whose stored phone is a non-standard placeholder (vacant slot).
+  const canSubmit    = name.trim().length > 0 && (phoneValid || !phoneChanged) && !!role && !submitting;
+
+  // Reports-to options: the active managers, PLUS the current manager if it has since been
+  // deactivated (otherwise the select would falsely read "None" for an employee who has one).
+  const managerOptions = useMemo(() => {
+    const list = employeeOptions?.managers ?? [];
+    const cur = user.salesUser?.reportingToId ?? '';
+    if (cur && !list.some((m) => m.id === cur)) {
+      return [{ id: cur, name: 'Current manager (inactive)', employeeCode: '—', hierarchyLevelId: null }, ...list];
+    }
+    return list;
+  }, [employeeOptions, user.salesUser?.reportingToId]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -287,10 +300,13 @@ function EditUserModal({
         ? await fetch(`/api/admin/sales-users/${user.salesUser!.id}`, {
             method:  'PATCH',
             headers: { 'Content-Type': 'application/json' },
+            // Diff-send: only the fields that changed. This avoids resending a placeholder
+            // phone (vacant slots) through the 10-digit validator and avoids needless
+            // session revokes when only the level / reports-to is edited.
             body:    JSON.stringify({
-              name:  name.trim(),
-              phone: phone.trim(),
-              email: email.trim() ? email.trim() : null,
+              ...(name.trim() !== user.name ? { name: name.trim() } : {}),
+              ...(phoneChanged ? { phone: phone.trim() } : {}),
+              ...((email.trim() || null) !== (user.email ?? null) ? { email: email.trim() ? email.trim() : null } : {}),
               ...(levelId && levelId !== (user.salesUser?.hierarchyLevelId ?? '') ? { hierarchyLevelId: levelId } : {}),
               ...(reportsTo !== (user.salesUser?.reportingToId ?? '')
                 ? { reportingToId: reportsTo === '' ? null : reportsTo }
@@ -399,7 +415,7 @@ function EditUserModal({
                   className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white focus:outline-none focus:border-[var(--brand-primary)] disabled:bg-gray-50"
                 >
                   <option value="">— None (top of hierarchy) —</option>
-                  {(employeeOptions?.managers ?? [])
+                  {managerOptions
                     .filter((m) => m.id !== user.salesUser?.id)
                     .map((m) => (
                       <option key={m.id} value={m.id}>{m.name} ({m.employeeCode})</option>

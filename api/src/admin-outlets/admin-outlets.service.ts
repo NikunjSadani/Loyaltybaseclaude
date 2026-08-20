@@ -320,6 +320,9 @@ const OUTLET_LIST_SELECT = {
   outletCode: true,
   name: true,
   outletTypeId: true,
+  // The human-readable type CODE (e.g. "SSS") — the FE list + edit dropdown key on the
+  // code, NOT the OutletType cuid. Returning the cuid showed a raw id in the UI.
+  outletType: { select: { code: true } },
   city: true,
   state: true,
   isActive: true,
@@ -365,7 +368,7 @@ function mapOutletListRow(o: OutletListRow, latestStatusByPartnerId: Map<string,
   return {
     outletId: o.outletCode,
     outletName: o.name,
-    outletType: o.outletTypeId,
+    outletType: o.outletType?.code ?? '',
     programName: o.programName ?? '',
     programCategory: o.programCategory ?? '',
     beat: o.beat ?? '',
