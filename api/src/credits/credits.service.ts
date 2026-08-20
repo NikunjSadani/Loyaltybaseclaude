@@ -13,7 +13,8 @@ import {
   computeGrossUpTdsInvoiceBasePaise,
   allocateProRataRecovery,
 } from '../tds/tds-methodology.helper';
-import { grossUpTdsPaise, rate194C, rate194R, TdsRate } from '../tds/tds.helpers';
+import { grossUpTdsPaise, rate194CFrom, rate194RFrom, TdsRate, type ResolvedTdsStatutory } from '../tds/tds.helpers';
+import { TdsStatutoryConfigService } from '../tds/tds-statutory.config.service';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { paiseToRupees, toPaiseBigInt } from '../common/money';
@@ -148,15 +149,17 @@ export class CreditsService {
     private readonly walletService: WalletService,
     private readonly tenantSettings: TenantSettingsService,
     private readonly invoicesService: InvoicesService,
+    private readonly statutory: TdsStatutoryConfigService,
   ) {}
 
   // ─── Visibility-payout TDS constants + helpers (Stream B) ──────────────────
   // Statutory thresholds in integer paise. These MIRROR the private constants in
   // tds.service.ts (Stream A owns that file; a single-source consolidation into
   // tds.helpers is a follow-up) — keep them in lock-step.
-  private static readonly TDS_194C_SINGLE_THRESHOLD_PAISE = 3_000_000n; // ₹30,000 single payment
-  private static readonly TDS_194C_FY_THRESHOLD_PAISE = 10_000_000n; // ₹1,00,000 FY aggregate
-  private static readonly TDS_194R_FY_THRESHOLD_PAISE = 2_000_000n; // ₹20,000 FY aggregate
+  // Statutory rates + thresholds now come from the single platform-level source of truth
+  // (TdsStatutoryConfigService.getForFy), resolved per the payout's financial year — see the
+  // resolved `cfg` threaded through buildPayoutTdsPlan. No local copies (they used to be
+  // hand-kept "in lock-step" with tds.service; that duplication is removed).
   /** Sentinel PAN PREFIX for the no-PAN recovery ledger (mirrors tds.service NO_PAN_KEY). */
   private static readonly NO_PAN_KEY = '__NO_PAN__';
 
@@ -185,20 +188,34 @@ export class CreditsService {
     };
   }
 
-  /** 194C: FY-aggregate OR single-payment threshold; 194R: FY-aggregate only. */
-  private tdsThresholdMet(section: TdsSection, cumulativeBasePaise: bigint, maxSinglePaise: bigint): boolean {
+  /** 194C: FY-aggregate OR single-payment threshold; 194R: FY-aggregate only. Thresholds from
+   *  the FY-resolved statutory config (single source of truth). */
+  private tdsThresholdMet(
+    section: TdsSection,
+    cumulativeBasePaise: bigint,
+    maxSinglePaise: bigint,
+    cfg: ResolvedTdsStatutory,
+  ): boolean {
     if (section === TdsSection.SEC_194C) {
       return (
-        cumulativeBasePaise > CreditsService.TDS_194C_FY_THRESHOLD_PAISE ||
-        maxSinglePaise > CreditsService.TDS_194C_SINGLE_THRESHOLD_PAISE
+        cumulativeBasePaise > cfg.thr194cFyPaise ||
+        maxSinglePaise > cfg.thr194cSinglePaise
       );
     }
-    return cumulativeBasePaise > CreditsService.TDS_194R_FY_THRESHOLD_PAISE;
+    return cumulativeBasePaise > cfg.thr194rFyPaise;
   }
 
-  /** The {num,den} rate fraction for a frozen section (194C entity-aware; 194R PAN-aware). */
-  private tdsRateFor(section: TdsSection, hasPan: boolean, entityType: string | null): TdsRate {
-    return section === TdsSection.SEC_194C ? rate194C(hasPan, entityType) : rate194R(hasPan);
+  /** The {num,den} rate fraction for a frozen section (194C entity-aware; 194R PAN-aware),
+   *  from the FY-resolved statutory config. */
+  private tdsRateFor(
+    section: TdsSection,
+    hasPan: boolean,
+    entityType: string | null,
+    cfg: ResolvedTdsStatutory,
+  ): TdsRate {
+    return section === TdsSection.SEC_194C
+      ? rate194CFrom(cfg, hasPan, entityType)
+      : rate194RFrom(cfg, hasPan);
   }
 
   /**
@@ -249,6 +266,9 @@ export class CreditsService {
     if (engineEntries.length === 0) return plan;
 
     const { fyLabel, startPeriod, endPeriod } = this.fyForPeriod(period);
+    // Statutory rates + thresholds for THIS payout's financial year (single source of truth;
+    // effective-by-FY, so past FYs are unaffected by a later change). Resolved once per plan.
+    const cfg = await this.statutory.getForFy(fyLabel);
     const SEP = '|';
 
     // Group this event by (PAN, section, methodology). Real-PAN entries only; the no-PAN
@@ -433,8 +453,8 @@ export class CreditsService {
       const priorMaxSingle = priorMaxSingleByPS.get(ps) ?? 0n;
       const combinedMaxSingle = eventMaxSingle > priorMaxSingle ? eventMaxSingle : priorMaxSingle;
       const methodologyCumulativeBase = (priorBaseByPSM.get(psm) ?? 0n) + thisEventBase;
-      const rate = this.tdsRateFor(g.section, true, g.entityType);
-      const thresholdMet = this.tdsThresholdMet(g.section, combinedCumulativeBase, combinedMaxSingle);
+      const rate = this.tdsRateFor(g.section, true, g.entityType, cfg);
+      const thresholdMet = this.tdsThresholdMet(g.section, combinedCumulativeBase, combinedMaxSingle, cfg);
 
       if (g.methodology === TdsMethodology.DEDUCT) {
         const priorDeducted = priorDeductedByPS.get(ps) ?? 0n;
@@ -626,7 +646,7 @@ export class CreditsService {
 
       // No-PAN 194C rate is 20/80 (grossed-up). Once the outlet's cumulative base crosses, the
       // TARGET recovery is grossUp20(cumulative); the DELTA to record = target − already-recorded.
-      const noPanRate = rate194C(false, null);
+      const noPanRate = rate194CFrom(cfg, false, null);
       for (const ng of noPanGroups.values()) {
         const os = `${ng.outletCode}${SEP}${ng.section}`;
         const thisEventBase = ng.entries.reduce((s, e) => s + e.amountPaise, 0n);
@@ -635,7 +655,7 @@ export class CreditsService {
         const eventMaxSingle = ng.entries.reduce((m, e) => (e.amountPaise > m ? e.amountPaise : m), 0n);
         const priorMaxSingle = priorNoPanMaxByOS.get(os) ?? 0n;
         const cumMaxSingle = eventMaxSingle > priorMaxSingle ? eventMaxSingle : priorMaxSingle;
-        const nowCrossed = this.tdsThresholdMet(ng.section, cumulativeBase, cumMaxSingle);
+        const nowCrossed = this.tdsThresholdMet(ng.section, cumulativeBase, cumMaxSingle, cfg);
         if (!nowCrossed) continue;
         const encodedKey = CreditsService.noPanRecoveryKey(ng.outletCode);
         const alreadyRecovered = noPanRecByKS.get(`${encodedKey}${SEP}${ng.section}`) ?? 0n;

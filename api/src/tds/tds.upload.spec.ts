@@ -11,6 +11,11 @@ import * as XLSX from 'xlsx';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TdsService } from './tds.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { TdsStatutoryConfigService } from './tds-statutory.config.service';
+import { DEFAULT_RESOLVED_TDS_STATUTORY } from './tds.helpers';
+
+// Resolver mock → built-in code defaults (identical to the pre-refactor hardcoded values).
+const mockStatutory = { getForFy: jest.fn().mockResolvedValue(DEFAULT_RESOLVED_TDS_STATUTORY) };
 import {
   parseOffPlatformUpload,
   parseDepositUpload,
@@ -244,6 +249,7 @@ describe('TdsService — uploadOffPlatform', () => {
       providers: [
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
+        { provide: TdsStatutoryConfigService, useValue: mockStatutory },
       ],
     }).compile();
     service = module.get(TdsService);
@@ -421,6 +427,7 @@ describe('TdsService — uploadDeposit', () => {
       providers: [
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
+        { provide: TdsStatutoryConfigService, useValue: mockStatutory },
       ],
     }).compile();
     service = module.get(TdsService);
@@ -542,6 +549,7 @@ describe('TdsService — getLiability (liability tracker)', () => {
       providers: [
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
+        { provide: TdsStatutoryConfigService, useValue: mockStatutory },
       ],
     }).compile();
     service = module.get(TdsService);

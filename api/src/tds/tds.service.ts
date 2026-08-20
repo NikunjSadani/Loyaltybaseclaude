@@ -34,8 +34,8 @@ import {
   fyLabelForPeriod,
   periodWindowForFy,
   grossUpTdsPaise,
-  rate194R,
-  rate194C,
+  rate194RFrom,
+  rate194CFrom,
   roundToRupeePaise,
   sectionParamToEnum,
   effectiveEntrySection,
@@ -47,6 +47,7 @@ import {
   depositFileHash,
   cellSafe,
 } from './tds.helpers';
+import { TdsStatutoryConfigService } from './tds-statutory.config.service';
 import { withholdingTdsPaise } from './tds-methodology.helper';
 import type { UploadResult } from './dto/tds.dto';
 import { buildXlsx } from '../common/xlsx';
@@ -137,15 +138,18 @@ interface PanAccum194C {
 
 // ─── Thresholds (paise) ──────────────────────────────────────────────────────
 
-const TDS_194R_THRESHOLD_PAISE = 2_000_000n;    // ₹20,000
-const TDS_194C_SINGLE_THRESHOLD_PAISE = 3_000_000n; // ₹30,000
-const TDS_194C_FY_THRESHOLD_PAISE = 10_000_000n;   // ₹1,00,000
+// Statutory rates + thresholds are resolved per financial year from the single platform-level
+// source of truth (TdsStatutoryConfigService.getForFy) inside compute194R/compute194C — no local
+// copies here (this used to duplicate the constants in credits.service; that drift risk is gone).
 
 @Injectable()
 export class TdsService {
   private readonly logger = new Logger(TdsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly statutory: TdsStatutoryConfigService,
+  ) {}
 
   // ─── 194R ───────────────────────────────────────────────────────────────────
 
@@ -155,6 +159,7 @@ export class TdsService {
    * subtracts actual deposits to produce outstanding.
    */
   async compute194R(clientId: string, fyLabel: string): Promise<TdsRow194R[]> {
+    const cfg = await this.statutory.getForFy(fyLabel);
     const fy = fyFromLabel(fyLabel);
     const { start, endExclusive } = fy;
     // FIX-4: VISIBILITY entries frozen 194R are anchored by their payout PERIOD's FY (matching
@@ -303,9 +308,9 @@ export class TdsService {
     const rows: TdsRow194R[] = [];
     for (const [key, a] of accum) {
       const fyTotal = a.totalPaise;
-      const thresholdMet = fyTotal > TDS_194R_THRESHOLD_PAISE;
+      const thresholdMet = fyTotal > cfg.thr194rFyPaise;
       const liabilityPaise = thresholdMet
-        ? grossUpTdsPaise(fyTotal, rate194R(a.hasPan))
+        ? grossUpTdsPaise(fyTotal, rate194RFrom(cfg, a.hasPan))
         : 0n;
       const depositedPaise = deposited.get(key) ?? 0n;
       const outstandingPaise = liabilityPaise - depositedPaise;
@@ -322,8 +327,8 @@ export class TdsService {
 
     // Sort: threshold-met first (descending by base), then below-threshold
     rows.sort((a, b) => {
-      const aAbove = a.baseFyTotalPaise > TDS_194R_THRESHOLD_PAISE;
-      const bAbove = b.baseFyTotalPaise > TDS_194R_THRESHOLD_PAISE;
+      const aAbove = a.baseFyTotalPaise > cfg.thr194rFyPaise;
+      const bAbove = b.baseFyTotalPaise > cfg.thr194rFyPaise;
       if (aAbove !== bAbove) return aAbove ? -1 : 1;
       if (b.baseFyTotalPaise > a.baseFyTotalPaise) return 1;
       if (a.baseFyTotalPaise > b.baseFyTotalPaise) return -1;
@@ -366,6 +371,7 @@ export class TdsService {
    * (GROSS-UP), both read from the typed ledgers.
    */
   async compute194C(fyLabel: string): Promise<TdsRow194C[]> {
+    const cfg = await this.statutory.getForFy(fyLabel);
     // FIX-4: VISIBILITY 194C entries are anchored by their payout PERIOD's FY (matching the
     // credits ledger WRITE), NOT paidAt — so a period=2026-03 payout banked in April 2026
     // still lands in FY 2025-26 on both the base READ and the DEDUCT/recovery ledger. All
@@ -550,10 +556,10 @@ export class TdsService {
     for (const [key, a] of accum) {
       const fyTotal = a.totalPaise;
       const thresholdMet =
-        a.maxSinglePaise > TDS_194C_SINGLE_THRESHOLD_PAISE ||
-        fyTotal > TDS_194C_FY_THRESHOLD_PAISE;
+        a.maxSinglePaise > cfg.thr194cSinglePaise ||
+        fyTotal > cfg.thr194cFyPaise;
 
-      const rateForPan = rate194C(a.hasPan, a.entityType);
+      const rateForPan = rate194CFrom(cfg, a.hasPan, a.entityType);
 
       // FIX-2: liability is METHODOLOGY-AWARE. A DEDUCT PAN's statutory TDS is WITHHOLDING
       // (base × rate/100); a GROSS_UP (or legacy/unstamped) PAN's is the payer-borne GROSS-UP

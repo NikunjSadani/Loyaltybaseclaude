@@ -400,23 +400,127 @@ export function grossUpTdsPaise(basePaise: bigint, rate: TdsRate): bigint {
   return roundToRupeePaise(rawPaise / BigInt(den));
 }
 
-// ─── Section-specific rate factories ────────────────────────────────────────
+// ─── Statutory config: defaults + resolved-rate shape ────────────────────────
 
-/** 194R rate for a PAN holder (10/90) or no-PAN (20/80). */
-export function rate194R(hasPan: boolean): TdsRate {
-  return hasPan ? { num: 10, den: 90 } : { num: 20, den: 80 };
+/**
+ * The single source of the BUILT-IN statutory defaults — the values that were previously
+ * hardcoded in rate194R/rate194C (as fractions) and duplicated as threshold constants in
+ * tds.service.ts + credits.service.ts. Rates are stored as whole PERCENTAGES; thresholds as
+ * integer PAISE (BigInt). An editable, FY-effective config (TdsStatutoryConfigService) overlays
+ * these; when nothing is configured for an FY the resolver returns exactly these values, so
+ * behaviour is byte-identical to today.
+ *
+ *   194R with-PAN 10%  → 10/90    194R no-PAN 20%    → 20/80
+ *   194C individual 1% → 1/99     194C other 2%      → 2/98     194C no-PAN 20% → 20/80
+ *   194C single threshold ₹30,000 (3_000_000p) · 194C FY ₹1,00,000 (10_000_000p)
+ *   194R FY threshold     ₹20,000 (2_000_000p)
+ */
+export interface TdsStatutoryDefaults {
+  r194rWithPanPct: number;
+  r194rNoPanPct: number;
+  c194cIndividualPct: number;
+  c194cOtherPct: number;
+  c194cNoPanPct: number;
+  thr194cSinglePaise: bigint;
+  thr194cFyPaise: bigint;
+  thr194rFyPaise: bigint;
+}
+
+export const DEFAULT_TDS_STATUTORY: TdsStatutoryDefaults = {
+  r194rWithPanPct: 10,
+  r194rNoPanPct: 20,
+  c194cIndividualPct: 1,
+  c194cOtherPct: 2,
+  c194cNoPanPct: 20,
+  thr194cSinglePaise: 3_000_000n,
+  thr194cFyPaise: 10_000_000n,
+  thr194rFyPaise: 2_000_000n,
+};
+
+/**
+ * Turn a whole-percent rate into the existing grossing-up {num, den} fraction:
+ * TDS = base × pct / (100 − pct). e.g. 10 → {10, 90}, 20 → {20, 80}, 1 → {1, 99}.
+ * (Pure — den must stay positive, which the 0..95 validation on config writes guarantees.)
+ */
+export function toTdsRate(pct: number): TdsRate {
+  return { num: pct, den: 100 - pct };
 }
 
 /**
- * 194C rate:
- *   - no PAN           → 20/80
- *   - INDIVIDUAL / HUF → 1/99
- *   - everything else  → 2/98
+ * A fully-resolved statutory config for one financial year: every rate pre-expanded into the
+ * {num, den} grossing-up fraction the engines already consume, and every threshold in integer
+ * paise. This is the object TdsStatutoryConfigService.getForFy returns and the engines pass to
+ * rate194RFrom / rate194CFrom.
  */
-export function rate194C(hasPan: boolean, entityType?: string | null): TdsRate {
-  if (!hasPan) return { num: 20, den: 80 };
-  if (entityType === 'INDIVIDUAL' || entityType === 'HUF') return { num: 1, den: 99 };
-  return { num: 2, den: 98 };
+export interface ResolvedTdsStatutory {
+  r194rWithPan: TdsRate;
+  r194rNoPan: TdsRate;
+  c194cIndividual: TdsRate;
+  c194cOther: TdsRate;
+  c194cNoPan: TdsRate;
+  thr194cSinglePaise: bigint;
+  thr194cFyPaise: bigint;
+  thr194rFyPaise: bigint;
+}
+
+/** The DEFAULT_TDS_STATUTORY defaults, pre-resolved — used whenever no FY config applies. */
+export const DEFAULT_RESOLVED_TDS_STATUTORY: ResolvedTdsStatutory = {
+  r194rWithPan:       toTdsRate(DEFAULT_TDS_STATUTORY.r194rWithPanPct),
+  r194rNoPan:         toTdsRate(DEFAULT_TDS_STATUTORY.r194rNoPanPct),
+  c194cIndividual:    toTdsRate(DEFAULT_TDS_STATUTORY.c194cIndividualPct),
+  c194cOther:         toTdsRate(DEFAULT_TDS_STATUTORY.c194cOtherPct),
+  c194cNoPan:         toTdsRate(DEFAULT_TDS_STATUTORY.c194cNoPanPct),
+  thr194cSinglePaise: DEFAULT_TDS_STATUTORY.thr194cSinglePaise,
+  thr194cFyPaise:     DEFAULT_TDS_STATUTORY.thr194cFyPaise,
+  thr194rFyPaise:     DEFAULT_TDS_STATUTORY.thr194rFyPaise,
+};
+
+// ─── Section-specific rate factories ────────────────────────────────────────
+
+/** 194R rate from a resolved config: with-PAN (default 10/90) or no-PAN (default 20/80). */
+export function rate194RFrom(cfg: ResolvedTdsStatutory, hasPan: boolean): TdsRate {
+  return hasPan ? cfg.r194rWithPan : cfg.r194rNoPan;
+}
+
+/**
+ * 194C rate from a resolved config:
+ *   - no PAN           → cfg.c194cNoPan     (default 20/80)
+ *   - INDIVIDUAL / HUF → cfg.c194cIndividual (default 1/99)
+ *   - everything else  → cfg.c194cOther     (default 2/98)
+ */
+export function rate194CFrom(
+  cfg: ResolvedTdsStatutory,
+  hasPan: boolean,
+  entityType?: string | null,
+): TdsRate {
+  if (!hasPan) return cfg.c194cNoPan;
+  if (entityType === 'INDIVIDUAL' || entityType === 'HUF') return cfg.c194cIndividual;
+  return cfg.c194cOther;
+}
+
+/**
+ * 194R rate for a PAN holder (10/90) or no-PAN (20/80).
+ * BACK-COMPAT: `cfg` is optional and defaults to the built-in statutory defaults, so every
+ * existing caller/test keeps working unchanged; a caller may pass an FY-resolved config to
+ * apply editable rates. Pure.
+ */
+export function rate194R(
+  hasPan: boolean,
+  cfg: ResolvedTdsStatutory = DEFAULT_RESOLVED_TDS_STATUTORY,
+): TdsRate {
+  return rate194RFrom(cfg, hasPan);
+}
+
+/**
+ * 194C rate (no-PAN 20/80, INDIVIDUAL/HUF 1/99, else 2/98 by default).
+ * BACK-COMPAT: `cfg` is optional and defaults to the built-in statutory defaults (see rate194R).
+ */
+export function rate194C(
+  hasPan: boolean,
+  entityType?: string | null,
+  cfg: ResolvedTdsStatutory = DEFAULT_RESOLVED_TDS_STATUTORY,
+): TdsRate {
+  return rate194CFrom(cfg, hasPan, entityType);
 }
 
 // ─── Financial-year helpers ──────────────────────────────────────────────────

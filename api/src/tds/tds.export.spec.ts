@@ -18,6 +18,11 @@ import * as XLSX from 'xlsx';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TdsService, TdsRow194R, TdsRow194C } from './tds.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { TdsStatutoryConfigService } from './tds-statutory.config.service';
+import { DEFAULT_RESOLVED_TDS_STATUTORY } from './tds.helpers';
+
+// Resolver mock → built-in code defaults (identical to the pre-refactor hardcoded values).
+const mockStatutory = { getForFy: jest.fn().mockResolvedValue(DEFAULT_RESOLVED_TDS_STATUTORY) };
 
 // ─── Mock Prisma ─────────────────────────────────────────────────────────────
 
@@ -164,6 +169,7 @@ describe('TdsService — export194R (P6.5c)', () => {
       providers: [
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
+        { provide: TdsStatutoryConfigService, useValue: mockStatutory },
       ],
     }).compile();
     service = module.get(TdsService);
@@ -351,6 +357,7 @@ describe('TdsService — export194C (P6.5c)', () => {
       providers: [
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
+        { provide: TdsStatutoryConfigService, useValue: mockStatutory },
       ],
     }).compile();
     service = module.get(TdsService);

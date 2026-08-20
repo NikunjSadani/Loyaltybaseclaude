@@ -5,6 +5,12 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { TdsService } from './tds.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { TdsStatutoryConfigService } from './tds-statutory.config.service';
+import { DEFAULT_RESOLVED_TDS_STATUTORY } from './tds.helpers';
+
+// The statutory resolver falls back to the built-in code defaults; these specs assert against
+// exactly those default rates/thresholds, so a mock returning DEFAULT keeps behavior identical.
+const mockStatutory = { getForFy: jest.fn().mockResolvedValue(DEFAULT_RESOLVED_TDS_STATUTORY) };
 
 // ─── Mock Prisma ─────────────────────────────────────────────────────────────
 
@@ -67,6 +73,7 @@ describe('TdsService', () => {
       providers: [
         TdsService,
         { provide: PrismaService, useValue: mockPrisma },
+        { provide: TdsStatutoryConfigService, useValue: mockStatutory },
       ],
     }).compile();
     service = module.get(TdsService);

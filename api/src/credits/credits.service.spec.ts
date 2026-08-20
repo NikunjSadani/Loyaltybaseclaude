@@ -16,6 +16,12 @@ import { Msg91Service } from '../notifications/msg91.service';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { InvoicesService } from '../invoices/invoices.service';
+import { TdsStatutoryConfigService } from '../tds/tds-statutory.config.service';
+import { DEFAULT_RESOLVED_TDS_STATUTORY } from '../tds/tds.helpers';
+
+// Statutory resolver mock → the built-in code defaults, so the withholding math is identical
+// to the pre-refactor hardcoded values these specs assert against.
+const mockStatutory = { getForFy: jest.fn().mockResolvedValue(DEFAULT_RESOLVED_TDS_STATUTORY) };
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   CreateBatchDto,
@@ -208,6 +214,7 @@ describe('CreditsService', () => {
         { provide: WalletService, useValue: mockWalletService },
         { provide: TenantSettingsService, useValue: mockTenantSettings },
         { provide: InvoicesService, useValue: mockInvoicesService },
+        { provide: TdsStatutoryConfigService, useValue: mockStatutory },
       ],
     }).compile();
     service = module.get(CreditsService);
