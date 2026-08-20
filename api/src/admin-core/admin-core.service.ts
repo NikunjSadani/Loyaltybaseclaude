@@ -1097,8 +1097,23 @@ export class AdminCoreService {
     return { settings };
   }
 
-  async upsertSetting(user: JwtPayload, dto: UpsertSettingDto) {
+  async upsertSetting(
+    user: JwtPayload,
+    dto: UpsertSettingDto,
+    opts?: { allowPlatformOnlyKey?: boolean },
+  ) {
     const clientId = user.clientId;
+
+    // OWNER-ONLY money config at the DATA boundary: the platform TDS statutory config
+    // (settingKey 'tdsStatutory') must ONLY be written through the dedicated, strictly-validated,
+    // GIFSY_ADMIN-only + un-assumed endpoint (which passes allowPlatformOnlyKey). Blocking it here
+    // stops the generic PUT /v1/admin/settings (reachable by a GIFSY_STAFF holding
+    // tenancy:write_finance) from poisoning the same row and bypassing the owner-only guarantee.
+    if (dto.key === 'tdsStatutory' && !opts?.allowPlatformOnlyKey) {
+      throw new ForbiddenException(
+        'The TDS statutory config can only be changed via the dedicated owner-only TDS Statutory screen.',
+      );
+    }
 
     // Key-specific guard: the two KYC review-SLA targets drive the breach buckets on the
     // KYC dashboard (kycDashboard()). A non-integer / out-of-range value would poison those
@@ -1117,7 +1132,8 @@ export class AdminCoreService {
 
     // For the TDS policy (a money-path config), capture the PRIOR value BEFORE the write so
     // the dedicated audit row below records the exact old→new transition (W0-C).
-    const isTdsPolicyWrite = dto.key === 'tdsPolicy' || dto.key === 'tds';
+    const isTdsPolicyWrite =
+      dto.key === 'tdsPolicy' || dto.key === 'tds' || dto.key === 'tdsStatutory';
     let priorTdsPolicyValue: unknown = null;
     if (isTdsPolicyWrite) {
       const prior = await this.prisma.programSetting.findUnique({
@@ -1157,7 +1173,7 @@ export class AdminCoreService {
       await this.prisma.auditLog.create({
         data: {
           action: 'UPDATE',
-          entityType: 'TdsPolicy',
+          entityType: dto.key === 'tdsStatutory' ? 'TdsStatutory' : 'TdsPolicy',
           entityId: clientId,
           actorId: user.sub,
           oldValues: (priorTdsPolicyValue ?? undefined) as Prisma.InputJsonValue | undefined,

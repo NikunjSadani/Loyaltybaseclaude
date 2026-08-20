@@ -17,7 +17,11 @@ import { SetTdsStatutoryDto } from './dto/tds-statutory.dto';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const adminCore = { upsertSetting: jest.fn().mockResolvedValue({}) };
-const statutory = { getAll: jest.fn(), invalidate: jest.fn() };
+const statutory = {
+  getAll: jest.fn(),
+  invalidate: jest.fn(),
+  assertClosedFyImmutable: jest.fn().mockResolvedValue(undefined),
+};
 
 const GIFSY: JwtPayload = { sub: 'op', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '9', name: 'Op' };
 const CLIENT: JwtPayload = { sub: 'ca', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '8', name: 'CA' };

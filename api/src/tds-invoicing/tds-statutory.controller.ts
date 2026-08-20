@@ -59,6 +59,9 @@ export class TdsStatutoryController {
     // Strict money-path validation (throws BadRequest naming the offending field).
     const entries = validateStatutoryEntries(dto.entries);
 
+    // Closed (past) financial years are immutable — can't rewrite what was already withheld/filed.
+    await this.statutory.assertClosedFyImmutable(entries);
+
     const settingDto: UpsertSettingDto = {
       key: TDS_STATUTORY_SETTING_KEY,
       value: { entries },
@@ -69,7 +72,11 @@ export class TdsStatutoryController {
 
     // Write under the platform ('gifsy') scope; the real operator identity is preserved for the
     // audit. upsertSetting appends the PROGRAM_SETTINGS AuditLog and busts the tenant-settings cache.
-    await this.adminCore.upsertSetting({ ...user, clientId: TDS_STATUTORY_CLIENT_ID }, settingDto);
+    await this.adminCore.upsertSetting(
+      { ...user, clientId: TDS_STATUTORY_CLIENT_ID },
+      settingDto,
+      { allowPlatformOnlyKey: true },
+    );
 
     // Bust THIS service's resolver cache so the new config is effective immediately.
     this.statutory.invalidate();

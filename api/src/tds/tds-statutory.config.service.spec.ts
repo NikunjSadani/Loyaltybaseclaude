@@ -13,7 +13,15 @@ import {
   validateStatutoryEntries,
   StoredStatutoryEntry,
 } from './tds-statutory.config.service';
-import { DEFAULT_RESOLVED_TDS_STATUTORY, toTdsRate } from './tds.helpers';
+import { DEFAULT_RESOLVED_TDS_STATUTORY, toTdsRate, fyOfToday } from './tds.helpers';
+
+// FY labels relative to "now" (date-relative so the tests never rot): a clearly-CLOSED past FY,
+// the current FY, and a clearly-future FY.
+const CUR_FY = fyOfToday().fyLabel;
+const CUR_START = parseInt(CUR_FY.slice(0, 4), 10);
+const fyLabelFor = (start: number) => `${start}-${String((start + 1) % 100).padStart(2, '0')}`;
+const PAST_FY = fyLabelFor(CUR_START - 5);
+const FUTURE_FY = fyLabelFor(CUR_START + 5);
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -235,5 +243,60 @@ describe('TdsStatutoryConfigService.getAll', () => {
     const all = await service.getAll();
     expect(all.entries).toHaveLength(1);
     expect(all.entries[0].r194rWithPanPct).toBe(7);
+  });
+});
+
+// ─── threshold must be > 0 (money footgun guard) ─────────────────────────────
+
+describe('validateStatutoryEntries — threshold lower bound', () => {
+  it('rejects a 0 threshold (would withhold on every payout)', () => {
+    expect(() =>
+      validateStatutoryEntries([entry({ effectiveFromFy: CUR_FY, thr194rFyRupees: 0 })]),
+    ).toThrow(/greater than 0/);
+  });
+  it('accepts a threshold of 1 rupee', () => {
+    const out = validateStatutoryEntries([entry({ effectiveFromFy: CUR_FY, thr194cSingleRupees: 1 })]);
+    expect(out[0].thr194cSingleRupees).toBe(1);
+  });
+});
+
+// ─── closed-FY immutability (WRITE-path guard) ───────────────────────────────
+
+describe('TdsStatutoryConfigService.assertClosedFyImmutable', () => {
+  it('allows adding the current and a future FY when nothing is stored', async () => {
+    const { service } = makeService(undefined);
+    await expect(
+      service.assertClosedFyImmutable([entry({ effectiveFromFy: CUR_FY }), entry({ effectiveFromFy: FUTURE_FY })]),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects ADDING a closed (past) FY', async () => {
+    const { service } = makeService(undefined);
+    await expect(
+      service.assertClosedFyImmutable([entry({ effectiveFromFy: PAST_FY })]),
+    ).rejects.toThrow(/closed financial year/i);
+  });
+
+  it('rejects MODIFYING a stored closed FY', async () => {
+    const stored = entry({ effectiveFromFy: PAST_FY, c194cOtherPct: 2 });
+    const { service } = makeService({ entries: [stored] });
+    await expect(
+      service.assertClosedFyImmutable([entry({ effectiveFromFy: PAST_FY, c194cOtherPct: 5 })]),
+    ).rejects.toThrow(/closed financial year/i);
+  });
+
+  it('rejects REMOVING a stored closed FY', async () => {
+    const { service } = makeService({ entries: [entry({ effectiveFromFy: PAST_FY })] });
+    await expect(
+      service.assertClosedFyImmutable([entry({ effectiveFromFy: CUR_FY })]),
+    ).rejects.toThrow(/closed financial year/i);
+  });
+
+  it('allows an UNCHANGED closed FY alongside a current-FY edit', async () => {
+    const past = entry({ effectiveFromFy: PAST_FY });
+    const { service } = makeService({ entries: [past] });
+    await expect(
+      service.assertClosedFyImmutable([past, entry({ effectiveFromFy: CUR_FY, c194cOtherPct: 3 })]),
+    ).resolves.toBeUndefined();
   });
 });

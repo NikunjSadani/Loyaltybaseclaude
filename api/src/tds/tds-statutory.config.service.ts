@@ -113,9 +113,11 @@ export function validateStatutoryEntries(entries: unknown): StoredStatutoryEntry
     }
     for (const f of RUPEE_FIELDS) {
       const v = e[f];
-      if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
+      // Must be a POSITIVE integer: a 0 threshold would make EVERY payout cross (withhold from
+      // the first rupee) — a silent money footgun — so it is rejected outright.
+      if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
         throw new BadRequestException(
-          `entries[${i}].${f} must be an integer number of rupees >= 0 (got ${JSON.stringify(v)}).`,
+          `entries[${i}].${f} must be a whole number of rupees greater than 0 (got ${JSON.stringify(v)}).`,
         );
       }
     }
@@ -264,6 +266,43 @@ export class TdsStatutoryConfigService {
     }
 
     return chosen ? resolveEntry(chosen) : DEFAULT_RESOLVED_TDS_STATUTORY;
+  }
+
+  /**
+   * WRITE-PATH guard: closed (past) financial years are IMMUTABLE. Once an FY has ended, its
+   * rates/thresholds are what payouts were actually withheld at (frozen in the ledgers); letting an
+   * owner rewrite a closed FY would make the CA reports recompute at a rate that no longer matches
+   * the frozen withholding — a filing divergence. So a submitted config may freely add/edit the
+   * CURRENT or a FUTURE FY, but every PAST-FY entry must be present AND identical to what's stored
+   * (no add, edit, or removal of a closed year). Throws BadRequest naming the FY on any violation.
+   * (Effective-by-FY changes are prospective by nature, so this never blocks a legitimate edit.)
+   */
+  async assertClosedFyImmutable(submitted: StoredStatutoryEntry[]): Promise<void> {
+    const currentStart = fyStartYear(fyOfToday().fyLabel);
+    if (Number.isNaN(currentStart)) return; // can't determine "now" → don't block (fail-open on the guard only)
+    const stored = (await this.loadEntries()) ?? [];
+    const keyOf = (e: StoredStatutoryEntry) =>
+      JSON.stringify([
+        e.effectiveFromFy, e.r194rWithPanPct, e.r194rNoPanPct, e.c194cIndividualPct,
+        e.c194cOtherPct, e.c194cNoPanPct, e.thr194cSingleRupees, e.thr194cFyRupees, e.thr194rFyRupees,
+      ]);
+    const isPast = (fy: string) => fyStartYear(fy) < currentStart;
+    const storedPast = new Map(stored.filter((e) => isPast(e.effectiveFromFy)).map((e) => [e.effectiveFromFy, keyOf(e)]));
+    const submittedPast = new Map(submitted.filter((e) => isPast(e.effectiveFromFy)).map((e) => [e.effectiveFromFy, keyOf(e)]));
+
+    for (const [fy, k] of submittedPast) {
+      if (!storedPast.has(fy)) {
+        throw new BadRequestException(`Cannot add a closed financial year (${fy}). Only the current or a future FY can be added or edited.`);
+      }
+      if (storedPast.get(fy) !== k) {
+        throw new BadRequestException(`Cannot modify a closed financial year (${fy}). Closed years are immutable (their payouts were already withheld at the stored rates).`);
+      }
+    }
+    for (const fy of storedPast.keys()) {
+      if (!submittedPast.has(fy)) {
+        throw new BadRequestException(`Cannot remove a closed financial year (${fy}). Closed years are immutable.`);
+      }
+    }
   }
 
   /**
