@@ -241,12 +241,12 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   };
 
   return (
-    <div className="flex flex-col h-screen bg-gray-50 overflow-hidden">
+    <div className="flex flex-col h-screen bg-gray-50 overflow-hidden print:h-auto print:overflow-visible print:block">
       {/* Operator-context banner — shown when a GIFSY operator is working in a brand (A2/#51) */}
       <div className="print:hidden">
         <OperatorBanner />
       </div>
-      <div className="flex flex-1 min-h-0 overflow-hidden">
+      <div className="flex flex-1 min-h-0 overflow-hidden print:overflow-visible print:min-h-0 print:block">
       {/* Sidebar */}
       <aside
         className={`flex flex-col bg-[#1A1A2E] text-slate-200 transition-all duration-300 ${
@@ -380,7 +380,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       </aside>
 
       {/* Main content */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden print:overflow-visible print:block">
         {/* Header */}
         <header className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between flex-shrink-0 z-10 print:hidden">
           <div>
@@ -445,7 +445,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         </header>
 
         {/* Page content */}
-        <main className="flex-1 overflow-y-auto p-6">
+        <main className="flex-1 overflow-y-auto p-6 print:overflow-visible print:p-0">
           <RequireAuth allowedRoles={PORTAL_ROLES.admin}>
             {/* RBAC Option-X P6: a GIFSY_STAFF landing on a route their role lacks sees a
                 clear AccessDenied message instead of a raw 403. INERT for every other role. */}

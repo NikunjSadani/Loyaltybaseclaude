@@ -282,6 +282,6 @@ export const config = {
     // `brand/` holds the per-tenant wordmarks (public/brand/*.png) — the LOGIN page (no
     // token) renders them, so without this exclusion each wordmark 307s to /auth/login →
     // broken image on the sign-in screen.
-    '/((?!_next/static|_next/image|favicon.ico|logos/|favicons/|icons/|images/|brand/|guides/|sw.js|offline.html).*)',
+    '/((?!_next/static|_next/image|favicon.ico|logos/|favicons/|icons/|images/|brand/|sw.js|offline.html).*)',
   ],
 }

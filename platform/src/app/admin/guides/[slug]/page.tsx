@@ -57,7 +57,11 @@ export default function GuideViewerPage() {
               <h2 className="text-lg font-bold text-gray-900 mt-8 mb-2 border-t border-gray-100 pt-6">{children}</h2>
             ),
             h3: ({ children }) => <h3 className="text-base font-semibold text-gray-900 mt-5 mb-2">{children}</h3>,
+            h4: ({ children }) => <h4 className="text-sm font-semibold text-gray-900 mt-4 mb-1">{children}</h4>,
             p: ({ children }) => <p className="text-sm text-gray-700 leading-relaxed my-3">{children}</p>,
+            pre: ({ children }) => (
+              <pre className="bg-gray-50 border border-gray-200 rounded-lg p-3 my-3 overflow-x-auto text-xs">{children}</pre>
+            ),
             ul: ({ children }) => <ul className="list-disc pl-6 my-3 space-y-1 text-sm text-gray-700">{children}</ul>,
             ol: ({ children }) => <ol className="list-decimal pl-6 my-3 space-y-2 text-sm text-gray-700">{children}</ol>,
             li: ({ children }) => <li className="leading-relaxed">{children}</li>,

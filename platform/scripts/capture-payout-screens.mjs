@@ -22,6 +22,18 @@ const OP_PHONE = process.env.OP_PHONE ?? '9830011252';
 const OTP = process.env.OTP ?? '123456';
 const BRAND = process.env.BRAND ?? 'deoleo';
 
+// SAFETY: these screenshots ship inside the app and load in the ops portal. They must ONLY ever
+// contain STAGING TEST DATA — never real outlet PAN / bank / UTR / payout amounts. Refuse to run
+// against anything but the staging operator host so a prod-data capture can't happen by accident.
+// (Override for a legitimately different staging host with ALLOW_NONSTAGING=1.)
+if (!/uat\.app\.gifsy\.in/i.test(BASE_URL) && process.env.ALLOW_NONSTAGING !== '1') {
+  console.error(
+    `Refusing to capture from ${BASE_URL}: screenshots must come from staging test data only ` +
+      `(expected uat.app.gifsy.in). Set ALLOW_NONSTAGING=1 only if you are sure the target holds no real data.`,
+  );
+  process.exit(1);
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.resolve(__dirname, '..', 'public', 'guides', 'payouts');
 
