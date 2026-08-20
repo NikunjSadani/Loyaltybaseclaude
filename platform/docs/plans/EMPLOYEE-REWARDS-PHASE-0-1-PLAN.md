@@ -1,5 +1,13 @@
 # Employee Rewards — Phase 0 / 1 Build Plan (unified `RewardAccount`, additive)
 
+> ✅ **STATUS: DONE + LIVE IN PROD — cutover #35 (`54a84c2`, 2026-08-20).** All of Phase 0 + 1 shipped
+> additive + DORMANT (Deoleo byte-identical): loyaltyType + capability resolver, unified RewardAccount +
+> dual-write (advisory-locked) + onDelete Restrict, 3 additive migrations. Prod data ops done (backup):
+> cleanup (2 test wallets + 5 test batches) + 6-row back-fill → 6/6 linked, balances byte-identical,
+> idempotent. Independent 3-lane audit + dual re-audit → ship-safe, all findings fixed. Gates: api jest
+> 2497 · nest 0 · FE tsc 0 · FE vitest 2201. **Phase 2 (deferred to conversion): §3 items + the onboarding
+> `loyaltyType` selector UX (not built).** Detail: `[[employee-rewards-product]]` · `[[deoleo-go-live-bundle]]` #35.
+
 > Scope: **only the earner-model foundation** — the piece worth doing now while the prod wallet is
 > effectively empty. NOT the employee app / admin redesign / vendor portal (those are Phase 2+).
 > Supersedes the earner-architecture section of [EMPLOYEE-REWARDS-DESIGN.md](./EMPLOYEE-REWARDS-DESIGN.md)
