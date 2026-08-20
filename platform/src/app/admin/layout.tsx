@@ -30,6 +30,7 @@ import {
   Coins,
   Landmark,
   Smartphone,
+  BookOpen,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useTenantFeatures } from '@/lib/tenant-features';
@@ -158,6 +159,10 @@ const ALL_NAV_ITEMS = [
   { href: '/admin/banners',  label: 'Banners',          icon: Megaphone,     featureFlag: null },
   { href: '/admin/reports',  label: 'Reports',          icon: FileBarChart2, featureFlag: null },
   { href: '/admin/app-adoption', label: 'App Adoption', icon: Smartphone,    featureFlag: null },
+  // Help & Guides — internal operating guides for the Gifsy ops team. gifsyOnly: shown to
+  // GIFSY_ADMIN + GIFSY_STAFF (canManageSchemes), hidden from CLIENT_ADMIN / MIS_USER; the
+  // pages are also role-guarded via admin/guides/layout.tsx.
+  { href: '/admin/guides', label: 'Help & Guides', icon: BookOpen, featureFlag: null, gifsyOnly: true },
   { href: '/admin/settings', label: 'Settings',         icon: Settings,      featureFlag: null },
 ];
 
@@ -238,13 +243,15 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   return (
     <div className="flex flex-col h-screen bg-gray-50 overflow-hidden">
       {/* Operator-context banner — shown when a GIFSY operator is working in a brand (A2/#51) */}
-      <OperatorBanner />
+      <div className="print:hidden">
+        <OperatorBanner />
+      </div>
       <div className="flex flex-1 min-h-0 overflow-hidden">
       {/* Sidebar */}
       <aside
         className={`flex flex-col bg-[#1A1A2E] text-slate-200 transition-all duration-300 ${
           collapsed ? 'w-16' : 'w-64'
-        } flex-shrink-0`}
+        } flex-shrink-0 print:hidden`}
       >
         {/* Logo */}
         <div className="flex items-center justify-between px-4 py-4 border-b border-slate-700">
@@ -375,7 +382,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Header */}
-        <header className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between flex-shrink-0 z-10">
+        <header className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between flex-shrink-0 z-10 print:hidden">
           <div>
             <h1 className="text-lg font-semibold text-gray-900">
               {(() => {
