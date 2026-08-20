@@ -17,10 +17,11 @@ export interface Guide {
   markdown: string;
 }
 
-// payouts.ts imports only the `Guide` TYPE from here (erased at build) — no runtime cycle.
+// payouts.ts / tds.ts import only the `Guide` TYPE from here (erased at build) — no runtime cycle.
 import { payoutsGuide } from './payouts';
+import { tdsGuide } from './tds';
 
-export const GUIDES: Guide[] = [payoutsGuide];
+export const GUIDES: Guide[] = [payoutsGuide, tdsGuide];
 
 export function getGuide(slug: string): Guide | undefined {
   return GUIDES.find((g) => g.slug === slug);
