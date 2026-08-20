@@ -176,12 +176,12 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
 `/v1/auth/assume-tenant` {clientId}).
 
 ## OPEN THREADS
-- **💸 INFRA COST-REDUCTION — remaining LEVERS (owner-gated, blocked on 2 owner answers). Full detail = memory [[infra-cost-reduction]].**
-  Done this session (~₹10k/mo / ~57%, zero prod impact): Redis deleted, VPC connector → Direct-VPC-egress, Artifact Registry
-  cleanup policy live. **Remaining levers (owner decision open, if go-live slips post-Sept):** prod Cloud Run min=1→0 + pause
-  prod schedulers (~₹800/mo — note push-drain pings every minute, so staging isn't truly idle); stop `gifsy-db`/`gifsy-db-dev`
-  when fully frozen (needs the staging-UAT?/dev-continuing? answers). All prod/staging infra changes owner-gated. Architecture
-  record `INFRA-ARCHITECTURE.md`.
+- **💸 INFRA COST-REDUCTION — ✅ THREAD CLOSED (owner decision 2026-08-20: we are LIVE → the remaining freeze levers will NOT be pulled).**
+  Permanent wins DONE + staying (~₹10k/mo / ~57%, zero prod impact): Redis deleted, VPC connector → Direct-VPC-egress, Artifact
+  Registry cleanup policy live. **The freeze/downgrade levers are DECIDED-AGAINST, not deferred:** prod Cloud Run min=1→0 + pause
+  prod schedulers, and stopping/downsizing `gifsy-db`/`gifsy-db-dev` — all rejected because Deoleo is in production and needs the
+  always-on posture (no cold-starts, no paused schedulers, no stopped DB). Do NOT resurface these as "open." Full detail = memory
+  [[infra-cost-reduction]]; architecture record `INFRA-ARCHITECTURE.md`.
 - **🚧 NOTIFICATIONS & AUTOMATED EMAILS epic (IN PROGRESS on `develop`, NOT cut).** Construct today: TWO delivery paths — a DB-queue
   outbox (`NotificationsService.enqueue` → `notification_queue`) whose ONLY drainer is PUSH (SMS/EMAIL/WHATSAPP rows enqueue but never
   send), and a DIRECT `Msg91Service` path (OTP-SMS + WhatsApp templates DO deliver). Email delivery did not exist at all. **Decisions (owner,

@@ -107,10 +107,12 @@ attachment (they proxy `/api/*` → the backend and never touch the DB).
 ---
 
 ## Leftover / open infra items (pick-up list)
-The three cost-reduction changes above are DONE. What remains is **owner-decision-gated**, not blocked on
-engineering — nothing here is half-built:
+The three cost-reduction changes above are DONE and stay. **The cost-reduction thread is now CLOSED (owner
+2026-08-20): Deoleo is LIVE, so the freeze/downgrade levers in items 0–1 below will NOT be pulled — a live
+tenant needs the always-on posture.** Items 0–1 are retained as the analysis-of-record (decided-against, not
+deferred); nothing here is open or half-built.
 
-0. **Cloud SQL cost analysis — DECISION: KEEP AS-IS (2026-07-22).** After the Redis/connector/LB cuts, the
+0. **Cloud SQL cost analysis — DECISION: KEEP AS-IS (2026-07-22, reaffirmed 2026-08-20 now that we are LIVE — no downgrade).** After the Redis/connector/LB cuts, the
    **~₹4,500/mo Cloud SQL forecast is the single biggest line** — owner asked whether to reduce it. Reconciled
    (est., no live billing access — SA lacks perms, Billing API disabled): the ₹4,500 is the WHOLE Cloud SQL
    category = **both** instances + storage + backups, NOT `db-g1-small` alone: `gifsy-db` all-in ≈ ₹2,700–2,900
@@ -121,19 +123,19 @@ engineering — nothing here is half-built:
    RAM running two DBs is "not for production" → OOM/thrash under load; viable ONLY pre-launch, reversible
    (~1–2 min restart); (ii) stop `gifsy-db-dev` (~₹1,000/mo, zero prod impact if dev idle); (iii) CUD — likely
    **NOT eligible** for shared-core tiers. **OWNER DECISION 2026-07-22: keep everything as-is — no client update
-   received yet, so not pausing/downgrading.** Revisit if the launch slips (then the pause levers below apply).
-   Free micro-win still open: `gifsy-db` `storageAutoResizeLimit=0` (uncapped) — could set a 50GB ceiling to
-   avoid a runaway-growth bill; zero downside.
-1. **Idle-cost "pause levers" (for a possible post-Sept Deoleo postponement).** Reversible; only worth doing
-   if the launch actually slips. **Needs two owner answers first: (a) is staging-UAT needed during the pause?
-   (b) is dev continuing?**
-   - Prod Cloud Run `min-instances 1→0` + pause the prod schedulers (`push-drain-prod`, `expire-sweep-prod`)
-     → ~₹800/mo. Instant/reversible; first hit after idle cold-starts ~10–20s (the `/health/ready` startup
-     probe gates the DB path, so no failed requests). Safe pre-launch (no users).
-   - Stop `gifsy-db-dev` (~₹1,000/mo) — only if dev is idle.
-   - Stop `gifsy-db` (prod+staging shared, ~₹2,000/mo) — **only** if no staging UAT during the freeze; take a
-     backup first. This is the deepest lever (prod DB offline) — do last, and only in a full freeze.
-   - Bring-up from a full freeze ≈ under an hour, no data loss. Detail: memory `[[infra-cost-reduction]]`.
+   received yet, so not pausing/downgrading.** **→ Launch did NOT slip; Deoleo is LIVE (2026-08-20) → the downgrade
+   is now permanently off the table (a live prod DB is not put on f1-micro / not stopped).**
+   Free micro-win still available (independent of the freeze decision): `gifsy-db` `storageAutoResizeLimit=0`
+   (uncapped) — could set a 50GB ceiling to avoid a runaway-growth bill; zero downside.
+1. **Idle-cost "pause levers" — ❌ DECIDED-AGAINST (owner 2026-08-20). NOT an open item.** These only ever made
+   sense for a *pre-launch postponement*; Deoleo is now in production, so none will be pulled — the always-on
+   posture (warm instances, running schedulers, live DB) is required. Retained here only as the record of what
+   was considered:
+   - Prod Cloud Run `min-instances 1→0` + pausing the prod schedulers (`push-drain-prod`, `expire-sweep-prod`)
+     → **rejected** (cold-start latency for live users; the crons must keep running push-drain/expire-sweep/reports).
+   - Stop `gifsy-db-dev` (~₹1,000/mo) → **rejected** (dev continuing).
+   - Stop/downsize `gifsy-db` (prod+staging shared) → **rejected** (prod DB must stay up).
+   - Detail: memory `[[infra-cost-reduction]]`.
 2. **✅ Cutover #12 + #13 DONE (2026-07-22)** — the KYC address-proof waiver (semantics-corrected) + the
    per-outlet payout mandate are LIVE in prod (`2187498`), incl. the prod `kycAddressProofWaiver` flag. Both
    migrations applied; the Direct-VPC-egress deploy.yml carried prod cleanly. (Was the pending item here.)
