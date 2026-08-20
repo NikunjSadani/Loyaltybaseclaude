@@ -1246,6 +1246,175 @@ describe('AdminOutletsService', () => {
     });
   });
 
+  describe('updateOne — single-record master edit (PATCH /:outletCode)', () => {
+    // The current Outlet row returned by the FIRST findFirst (the editable-column lookup).
+    const existingRow = () => ({
+      id: 'o1',
+      outletTypeId: 'type1',
+      name: 'Old Name',
+      city: 'Old City',
+      state: 'MH',
+      distributorCode: null,
+      distributorName: null,
+      beat: null,
+      metro: null,
+      zone: null,
+      programName: null,
+      programCategory: null,
+      requiredPaymentType: 'BANK',
+    });
+    // The row returned by the SECOND findFirst (getOutletDetail, OUTLET_LIST_SELECT shape).
+    const detailRow = (over: Record<string, unknown> = {}) => ({
+      outletCode: 'OUT-1',
+      name: 'New Name',
+      outletTypeId: 'type1',
+      city: 'New City',
+      state: 'MH',
+      isActive: true,
+      createdAt: new Date('2026-05-01T09:00:00Z'),
+      distributorCode: null,
+      beat: null,
+      metro: null,
+      programName: null,
+      programCategory: null,
+      partnerId: null,
+      reKycFlags: null,
+      kycIntent: null,
+      parentId: null,
+      parent: null,
+      salesAssignments: [],
+      ...over,
+    });
+
+    it('HAPPY PATH: updates the allowed fields, writes an audit row, returns the list shape', async () => {
+      mockPrisma.outlet.findFirst
+        .mockResolvedValueOnce(existingRow()) // (1) editable-column lookup
+        .mockResolvedValueOnce(detailRow()); // (2) detail re-fetch
+      mockTx.outlet.update.mockResolvedValue({ id: 'o1' });
+
+      const res = await service.updateOne(admin, 'OUT-1', {
+        name: '  New Name  ',
+        city: 'New City',
+        beat: '', // blank clears the nullable column (nullIfBlank) — mirrors bulk
+      });
+
+      // The write carries ONLY the provided (normalized) columns.
+      const updateArgs = mockTx.outlet.update.mock.calls[0][0];
+      expect(updateArgs.where).toEqual({ id: 'o1' });
+      expect(updateArgs.data).toEqual({ name: 'New Name', city: 'New City', beat: null });
+      // Audit row mirrors the ungroup audit (UPDATE / OUTLET / actor / before-after / metadata).
+      const audit = mockTx.auditLog.create.mock.calls[0][0].data;
+      expect(audit).toMatchObject({
+        action: 'UPDATE',
+        entityType: 'OUTLET',
+        entityId: 'o1',
+        actorId: 'actor1',
+        metadata: { action: 'edit-outlet', outletCode: 'OUT-1' },
+      });
+      expect(audit.oldValues).toEqual({ name: 'Old Name', city: 'Old City', beat: null });
+      expect(audit.newValues).toEqual({ name: 'New Name', city: 'New City', beat: null });
+      // Returns the SAME shape list() renders (via the shared mapper).
+      expect(res).toMatchObject({ outletId: 'OUT-1', outletName: 'New Name', city: 'New City' });
+    });
+
+    it('404s an unknown / cross-tenant outletCode (scoped by clientId + deletedAt:null), no write', async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValue(null); // not in the caller's tenant
+      await expect(service.updateOne(admin, 'OUT-OTHER', { name: 'x' })).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      const where = mockPrisma.outlet.findFirst.mock.calls[0][0].where;
+      expect(where).toMatchObject({ clientId: TENANT_A, outletCode: 'OUT-OTHER', deletedAt: null });
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+      expect(mockTx.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('IGNORES excluded fields (phone / parentId / isActive) — never written even if sent in the body', async () => {
+      mockPrisma.outlet.findFirst
+        .mockResolvedValueOnce(existingRow())
+        .mockResolvedValueOnce(detailRow());
+      mockTx.outlet.update.mockResolvedValue({ id: 'o1' });
+
+      // Cast through unknown to smuggle excluded keys past the DTO type (simulating a raw body
+      // that the global forbidNonWhitelisted pipe would already 400 — belt-and-suspenders at the
+      // service layer: even if they arrive, the service reads only the whitelisted columns).
+      await service.updateOne(admin, 'OUT-1', {
+        name: 'New Name',
+        phone: '9999999999',
+        parentId: 'parentX',
+        isActive: false,
+        outletCode: 'HACKED',
+      } as unknown as Parameters<typeof service.updateOne>[2]);
+
+      const data = mockTx.outlet.update.mock.calls[0][0].data;
+      expect(data).toEqual({ name: 'New Name' });
+      expect(data.phone).toBeUndefined();
+      expect(data.parentId).toBeUndefined();
+      expect(data.isActive).toBeUndefined();
+      expect(data.outletCode).toBeUndefined();
+    });
+
+    it('resolves outletTypeId by CODE to a tenant-ENABLED, active type (mirrors the bulk path)', async () => {
+      mockPrisma.outlet.findFirst
+        .mockResolvedValueOnce(existingRow())
+        .mockResolvedValueOnce(detailRow());
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletType: { id: 'type2', code: 'WHOLESALER', isActive: true } },
+      ]);
+      mockTx.outlet.update.mockResolvedValue({ id: 'o1' });
+
+      await service.updateOne(admin, 'OUT-1', { outletTypeId: 'wholesaler' }); // case-insensitive
+      expect(mockTx.outlet.update.mock.calls[0][0].data.outletTypeId).toBe('type2');
+    });
+
+    it('REJECTS an outletTypeId that is not an enabled type (BadRequest, no write)', async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce(existingRow());
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]); // none enabled
+      await expect(
+        service.updateOne(admin, 'OUT-1', { outletTypeId: 'GHOST' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+    });
+
+    it('REJECTS an invalid requiredPaymentType value (BadRequest, no write)', async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce(existingRow());
+      await expect(
+        service.updateOne(admin, 'OUT-1', { requiredPaymentType: 'CASH' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+    });
+
+    it('REJECTS requiredPaymentType=UPI when the tenant has UPI disabled (same gate as bulk)', async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce(existingRow());
+      mockTenantSettings.getEffectiveSettings.mockResolvedValue({ salesApp: { upiEnabled: false } });
+      await expect(
+        service.updateOne(admin, 'OUT-1', { requiredPaymentType: 'UPI' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+    });
+
+    it('ACCEPTS requiredPaymentType=UPI when the tenant has UPI enabled → writes the mandate', async () => {
+      mockPrisma.outlet.findFirst
+        .mockResolvedValueOnce(existingRow())
+        .mockResolvedValueOnce(detailRow());
+      mockTenantSettings.getEffectiveSettings.mockResolvedValue({ salesApp: { upiEnabled: true } });
+      mockTx.outlet.update.mockResolvedValue({ id: 'o1' });
+
+      await service.updateOne(admin, 'OUT-1', { requiredPaymentType: 'upi' }); // case-insensitive
+      expect(mockTx.outlet.update.mock.calls[0][0].data.requiredPaymentType).toBe('UPI');
+    });
+
+    it('NO-OP for an empty body: returns the current outlet, no write, no audit', async () => {
+      mockPrisma.outlet.findFirst
+        .mockResolvedValueOnce(existingRow()) // editable lookup
+        .mockResolvedValueOnce(detailRow()); // detail re-fetch
+      const res = await service.updateOne(admin, 'OUT-1', {});
+      expect(res).toMatchObject({ outletId: 'OUT-1' });
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+      expect(mockTx.auditLog.create).not.toHaveBeenCalled();
+    });
+  });
+
   describe('unpark — clear the PARKED intent', () => {
     it('clears kycIntent/by/at where kycIntent=PARKED (tenant-scoped), returning { unparked, notFound }', async () => {
       mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1', outletCode: 'OUT-1' }]);

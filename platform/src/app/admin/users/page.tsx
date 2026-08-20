@@ -18,6 +18,15 @@ interface AdminUser {
   role:      string;
   status:    string;
   createdAt?: string;
+  // Present when this user is a sales EMPLOYEE (has a linked SalesUser). Drives the
+  // employee-aware edit form (Level + Reports-to instead of the raw Role dropdown).
+  salesUser?: { id: string; hierarchyLevelId: string | null; reportingToId: string | null } | null;
+}
+
+/** Dropdown sources for the employee edit form (GET /api/admin/sales-users/options). */
+interface EmployeeOptions {
+  levels:   { id: string; code: string; name: string; level: number }[];
+  managers: { id: string; name: string; employeeCode: string; hierarchyLevelId: string | null }[];
 }
 
 interface Pagination {
@@ -228,18 +237,27 @@ function CreateUserModal({
 function EditUserModal({
   user,
   roles,
+  employeeOptions,
   onClose,
   onSaved,
 }: {
-  user:    AdminUser;
-  roles:   string[];
-  onClose: () => void;
-  onSaved: () => void;
+  user:            AdminUser;
+  roles:           string[];
+  employeeOptions: EmployeeOptions | null;
+  onClose:         () => void;
+  onSaved:         () => void;
 }) {
+  // An employee is a user with a linked SalesUser. For employees we edit the HIERARCHY
+  // (level + reports-to) instead of the raw login role — the backend updates User.role
+  // from the level so the two can't drift. reports-to/level flow through the dedicated
+  // employee endpoint (PATCH /admin/sales-users/:id); non-employees use /admin/users/:id.
+  const isEmployee = !!user.salesUser;
   const [name,  setName]  = useState(user.name);
   const [phone, setPhone] = useState(user.phone);
   const [email, setEmail] = useState(user.email ?? '');
   const [role,  setRole]  = useState(user.role);
+  const [levelId, setLevelId] = useState(user.salesUser?.hierarchyLevelId ?? '');
+  const [reportsTo, setReportsTo] = useState(user.salesUser?.reportingToId ?? '');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -263,21 +281,37 @@ function EditUserModal({
     setSubmitting(true);
     setError(null);
     try {
-      const res = await fetch(`/api/admin/users/${user.id}`, {
-        method:  'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({
-          name:  name.trim(),
-          phone: phone.trim(),
-          // Send `role` ONLY when it actually changed. The backend runs its role-assignable
-          // guard on PRESENCE (dto.role !== undefined), not on change — so always sending the
-          // role would 403 a CLIENT_ADMIN who merely edited a fellow admin's name/email (their
-          // current role, e.g. CLIENT_ADMIN, isn't in the tenant-assignable set).
-          ...(role !== user.role ? { role } : {}),
-          // Trimmed value, or null to clear. Never send `status` — the row toggle owns it.
-          email: email.trim() ? email.trim() : null,
-        }),
-      });
+      // EMPLOYEE: route through the dedicated endpoint that updates the login (User) and
+      // hierarchy (SalesUser) rows atomically. Send level/reports-to only when changed.
+      const res = isEmployee
+        ? await fetch(`/api/admin/sales-users/${user.salesUser!.id}`, {
+            method:  'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({
+              name:  name.trim(),
+              phone: phone.trim(),
+              email: email.trim() ? email.trim() : null,
+              ...(levelId && levelId !== (user.salesUser?.hierarchyLevelId ?? '') ? { hierarchyLevelId: levelId } : {}),
+              ...(reportsTo !== (user.salesUser?.reportingToId ?? '')
+                ? { reportingToId: reportsTo === '' ? null : reportsTo }
+                : {}),
+            }),
+          })
+        : await fetch(`/api/admin/users/${user.id}`, {
+            method:  'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({
+              name:  name.trim(),
+              phone: phone.trim(),
+              // Send `role` ONLY when it actually changed. The backend runs its role-assignable
+              // guard on PRESENCE (dto.role !== undefined), not on change — so always sending the
+              // role would 403 a CLIENT_ADMIN who merely edited a fellow admin's name/email (their
+              // current role, e.g. CLIENT_ADMIN, isn't in the tenant-assignable set).
+              ...(role !== user.role ? { role } : {}),
+              // Trimmed value, or null to clear. Never send `status` — the row toggle owns it.
+              email: email.trim() ? email.trim() : null,
+            }),
+          });
       const body = await res.json().catch(() => ({ success: false, error: 'Unexpected response' }));
       if (res.ok && body.success) {
         onSaved();
@@ -336,19 +370,58 @@ function EditUserModal({
             )}
           </div>
 
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Role</label>
-            <select
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              aria-label="Role"
-              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white focus:outline-none focus:border-[var(--brand-primary)]"
-            >
-              {roleOptions.map((r) => (
-                <option key={r} value={r}>{ROLE_META[r]?.label ?? r}</option>
-              ))}
-            </select>
-          </div>
+          {isEmployee ? (
+            <>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Level</label>
+                <select
+                  value={levelId}
+                  onChange={(e) => setLevelId(e.target.value)}
+                  aria-label="Level"
+                  disabled={!employeeOptions}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white focus:outline-none focus:border-[var(--brand-primary)] disabled:bg-gray-50"
+                >
+                  {!levelId && <option value="">Select a level…</option>}
+                  {(employeeOptions?.levels ?? []).map((l) => (
+                    <option key={l.id} value={l.id}>{l.name}</option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-gray-400 mt-1">Changing the level updates the employee&apos;s role and signs them out on next refresh.</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Reports to</label>
+                <select
+                  value={reportsTo}
+                  onChange={(e) => setReportsTo(e.target.value)}
+                  aria-label="Reports to"
+                  disabled={!employeeOptions}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white focus:outline-none focus:border-[var(--brand-primary)] disabled:bg-gray-50"
+                >
+                  <option value="">— None (top of hierarchy) —</option>
+                  {(employeeOptions?.managers ?? [])
+                    .filter((m) => m.id !== user.salesUser?.id)
+                    .map((m) => (
+                      <option key={m.id} value={m.id}>{m.name} ({m.employeeCode})</option>
+                    ))}
+                </select>
+              </div>
+            </>
+          ) : (
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Role</label>
+              <select
+                value={role}
+                onChange={(e) => setRole(e.target.value)}
+                aria-label="Role"
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white focus:outline-none focus:border-[var(--brand-primary)]"
+              >
+                {roleOptions.map((r) => (
+                  <option key={r} value={r}>{ROLE_META[r]?.label ?? r}</option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">Email <span className="text-gray-400 font-normal">(optional)</span></label>
@@ -404,6 +477,10 @@ export default function AdminUsersPage() {
   const [pagination, setPagination] = useState<Pagination | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [editTarget, setEditTarget] = useState<AdminUser | null>(null);
+  // Dropdown sources for the employee edit form (levels + candidate managers). Loaded
+  // once; harmless (empty) for tenants with no sales hierarchy. 403 for a caller lacking
+  // the hierarchy permission just leaves it null (the modal disables those selects).
+  const [employeeOptions, setEmployeeOptions] = useState<EmployeeOptions | null>(null);
   const [toast,   setToast]   = useState<string | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   // "Revoke sessions" — the user whose sessions are being revoked (confirm modal),
@@ -459,6 +536,16 @@ export default function AdminUsersPage() {
     const t = setTimeout(loadUsers, 250);
     return () => clearTimeout(t);
   }, [loadUsers]);
+
+  // Employee edit dropdown sources (levels + managers) — fetched once. On 403 (caller
+  // lacks the hierarchy permission) or error, stays null and the employee selects render
+  // disabled; editing name/phone/email still works.
+  useEffect(() => {
+    fetch('/api/admin/sales-users/options')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => { if (j?.success && j.data) setEmployeeOptions(j.data as EmployeeOptions); })
+      .catch(() => {});
+  }, []);
 
   // A new search starts from page 1 (the previous page index is meaningless for a
   // different result set). loadUsers re-fires via its `page` dep.
@@ -698,6 +785,7 @@ export default function AdminUsersPage() {
         <EditUserModal
           user={editTarget}
           roles={roles}
+          employeeOptions={employeeOptions}
           onClose={() => setEditTarget(null)}
           onSaved={() => { showToast('User updated.'); loadUsers(); }}
         />

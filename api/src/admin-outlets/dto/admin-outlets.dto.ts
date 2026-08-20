@@ -164,6 +164,42 @@ export class ReKycFlagRowDto {
   @IsOptional() @IsString() remarks?: string = '';
 }
 
+/**
+ * PATCH /admin/outlets/:outletCode — edit ONE outlet's master fields directly (the
+ * single-record equivalent of the bulk "Outlet Master" upsert). Every field is OPTIONAL:
+ * only the keys PRESENT in the body are written (a true PATCH); an omitted key is left
+ * unchanged. The set of editable fields is EXACTLY the columns the bulk upsert can change
+ * (see AdminOutletsService.buildOutletUpdate / OutletWriteData) — nothing sensitive.
+ *
+ * Deliberately EXCLUDED (rejected by the global forbidNonWhitelisted ValidationPipe, since
+ * they are not declared here): outletCode + any ids (identity keys), parentId/grouping
+ * (POST /:outletCode/ungroup owns that), isActive/deactivatedAt/kycIntent/reKycFlags (state,
+ * with their own endpoints), and ALL ChannelPartner identity/money/address fields
+ * (phone, ownerName, PAN, GST, bank, UPI, addressLine1/2, pincode, district) — those are
+ * KYC-owned. This endpoint touches only the Outlet master row.
+ *
+ * `outletTypeId` accepts an OutletType id OR code (case-insensitive); the service resolves it
+ * to a tenant-ENABLED, active OutletType (mirrors the bulk path's code→id resolution).
+ * `requiredPaymentType` carries the raw "BANK"/"UPI"/"ANY" (case-insensitive); the service
+ * parses + UPI-gates it with the SAME helper the bulk path uses (parseOutletPaymentType +
+ * the tenant salesApp.upiEnabled gate). `metro` is a string cell (mirrors the Outlet column
+ * the bulk mapping writes — the list surfaces it as a boolean).
+ */
+export class UpdateOutletDto {
+  @IsOptional() @IsString() name?: string;
+  @IsOptional() @IsString() city?: string;
+  @IsOptional() @IsString() state?: string;
+  @IsOptional() @IsString() distributorCode?: string;
+  @IsOptional() @IsString() distributorName?: string;
+  @IsOptional() @IsString() beat?: string;
+  @IsOptional() @IsString() metro?: string;
+  @IsOptional() @IsString() zone?: string;
+  @IsOptional() @IsString() programName?: string;
+  @IsOptional() @IsString() programCategory?: string;
+  @IsOptional() @IsString() outletTypeId?: string;
+  @IsOptional() @IsString() requiredPaymentType?: string;
+}
+
 /** POST /rekyc-flag — persists the Re-KYC flag upload (max 500 rows/request). */
 export class ReKycFlagDto {
   @IsArray()

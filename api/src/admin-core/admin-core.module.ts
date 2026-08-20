@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { AdminCoreService } from './admin-core.service';
 import { AdminUsersController } from './users.controller';
+import { AdminSalesUsersController } from './sales-users.controller';
 import { AdminSettingsController } from './settings.controller';
 import { AdminHierarchyConfigController } from './hierarchy-config.controller';
 import { AdminForceLogoutAllController } from './force-logout-all.controller';
@@ -26,6 +27,7 @@ import { TdsModule } from '../tds/tds.module';
   imports: [PrismaModule, PayoutsModule, TdsModule],
   controllers: [
     AdminUsersController,
+    AdminSalesUsersController,
     AdminSettingsController,
     AdminHierarchyConfigController,
     AdminForceLogoutAllController,

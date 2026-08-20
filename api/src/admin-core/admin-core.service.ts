@@ -52,8 +52,11 @@ import { HierarchyConfigDto, TaskConfigDto } from './dto/config.dto';
 import {
   DEOLEO_HIERARCHY,
   HierarchyEmployee,
+  mapRoleCodeToUserRole,
   persistHierarchy,
 } from './hierarchy-persistence';
+import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
+import { UpdateEmployeeDto } from './dto/sales-users.dto';
 import {
   OTP_EXPIRY_MINUTES,
   OTP_MAX_ATTEMPTS,
@@ -271,7 +274,9 @@ export class AdminCoreService {
           role: true,
           status: true,
           createdAt: true,
-          salesUser: { select: { id: true } },
+          // salesUser presence marks an employee; the level/reporting ids prefill the
+          // employee edit form (Level + Reports-to) without a second fetch per row.
+          salesUser: { select: { id: true, hierarchyLevelId: true, reportingToId: true } },
         },
         skip,
         take: limit,
@@ -694,6 +699,222 @@ export class AdminCoreService {
     throw new BadRequestException(
       `Unknown action: ${action}. Valid actions: resign, reassign_outlet`,
     );
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // SALES-USERS — single-record employee edit (admin/sales-users/:id)
+  // ════════════════════════════════════════════════════════════════════════
+
+  /**
+   * PATCH /v1/admin/sales-users/:id (`:id` = the SalesUser id) — edit ONE employee
+   * directly. An employee = a `User` (login) linked 1:1 to a `SalesUser` (hierarchy)
+   * via `SalesUser.userId`. Today the hierarchy side is only editable via the bulk
+   * "Employee Hierarchy" Excel upload (saveHierarchyConfig → persistHierarchy); this
+   * is the in-app single-record equivalent, mirroring exactly what that upload writes.
+   *
+   * EDITABLE: name / phone / email (User) + hierarchyLevelId / reportingToId (SalesUser).
+   * The User and SalesUser rows are updated together in ONE $transaction so they can
+   * never drift. Session revocation (phone / role change) reuses the shared
+   * revokeAllSessionsForUser helper AFTER the commit — identical to updateUser, so
+   * the stamp-before-sweep guarantee is preserved and the logic is not duplicated.
+   *
+   * Guards reuse updateUser's exactly (no duplicate-and-drift):
+   *   - assertCanManageTarget — a non-owner (GIFSY_STAFF) may not edit an operator account.
+   *   - ACTIVE-scoped phone-uniqueness pre-check + isActivePhoneConflict P2002 mapping,
+   *     updating the SAME User row IN PLACE by id (never a create → no orphan-User bug).
+   *   - email uniqueness pre-check (@@unique([clientId, email])).
+   *
+   * ROLE/LEVEL drift trap: role lives in TWO places. A hierarchyLevelId change updates
+   * SalesUser.hierarchyLevelId AND sets User.role to the matching coarse bucket via
+   * mapRoleCodeToUserRole — in the SAME transaction — and revokes sessions on the role change.
+   *
+   * REPORTS-TO cycle guard: reportingToId must reference an existing ACTIVE SalesUser in
+   * the tenant, must not equal the employee itself, and must NOT be inside the employee's
+   * own descendant subtree (reuses descendantSalesUserIds from the sales access helper).
+   */
+  async updateEmployee(caller: JwtPayload, salesUserId: string, dto: UpdateEmployeeDto) {
+    const clientId = caller.clientId;
+
+    // Load the SalesUser + its linked User, scoped to the caller's tenant. 404 for an
+    // unknown id or one in another tenant (never leak / edit a cross-tenant employee).
+    const salesUser = await this.prisma.salesUser.findFirst({
+      where: { id: salesUserId, clientId },
+      include: { user: true },
+    });
+    if (!salesUser || !salesUser.user) throw new NotFoundException('Employee not found');
+    const target = salesUser.user;
+
+    // Operator-row guard — a non-owner (e.g. a GIFSY_STAFF with the hierarchy permission)
+    // must never mutate a platform-operator login through this surface (Finding A family).
+    this.assertCanManageTarget(caller, target);
+
+    // ── Phone uniqueness (ACTIVE-scoped) — mirror updateUser ──────────────────
+    // Only an ACTIVE user reserves a phone (partial index users_clientId_phone_active_key),
+    // so collide only with an ACTIVE holder other than this same User row.
+    const phoneChanged = Boolean(dto.phone && dto.phone !== target.phone);
+    if (phoneChanged) {
+      const clash = await this.prisma.user.findFirst({
+        where: { phone: dto.phone, clientId, status: 'ACTIVE', id: { not: target.id } },
+      });
+      if (clash) throw new ConflictException('Phone number already in use');
+    }
+
+    // ── Email uniqueness — mirror updateUser ──────────────────────────────────
+    if (dto.email && dto.email !== target.email) {
+      const emailClash = await this.prisma.user.findFirst({
+        where: { email: dto.email, clientId, id: { not: target.id } },
+      });
+      if (emailClash) throw new ConflictException('Email address already in use');
+    }
+
+    // ── Level change → SalesUser.hierarchyLevelId + User.role (drift trap) ────
+    const levelChanged =
+      dto.hierarchyLevelId !== undefined && dto.hierarchyLevelId !== salesUser.hierarchyLevelId;
+    let newUserRole: UserRole | undefined;
+    if (levelChanged) {
+      // The target level MUST belong to this tenant (SalesHierarchyLevel is per-tenant).
+      const level = await this.prisma.salesHierarchyLevel.findFirst({
+        where: { id: dto.hierarchyLevelId, clientId },
+        select: { id: true, code: true },
+      });
+      if (!level) throw new BadRequestException('Hierarchy level not found in this tenant');
+      // Role is stored in TWO places — keep the coarse User.role bucket in lock-step with the
+      // fine SalesUser level, exactly as the bulk upload does (persistHierarchy).
+      newUserRole = mapRoleCodeToUserRole(level.code);
+      // Defense-in-depth: the derived bucket is always a sales role, but re-assert the caller
+      // is permitted to assign it (never lets this path mint a privileged role).
+      this.assertRoleAssignable(caller, newUserRole);
+    }
+
+    // ── Reporting-to cycle guard ──────────────────────────────────────────────
+    // undefined → no change; null → clear (top of tree); a string → validate + cycle-check.
+    const reportingProvided = dto.reportingToId !== undefined;
+    const newReportingToId: string | null = dto.reportingToId ?? null;
+    if (reportingProvided && newReportingToId !== null) {
+      // (b) must not be the employee itself.
+      if (newReportingToId === salesUserId) {
+        throw new BadRequestException('An employee cannot report to themselves');
+      }
+      // (a) must reference an existing ACTIVE SalesUser in the same tenant.
+      const manager = await this.prisma.salesUser.findFirst({
+        where: { id: newReportingToId, clientId, isActive: true, deletedAt: null },
+        select: { id: true },
+      });
+      if (!manager) {
+        throw new BadRequestException('Reporting manager not found or is inactive in this tenant');
+      }
+      // (c) must NOT be inside the employee's own descendant subtree (would create a cycle).
+      const edges = await this.prisma.salesUser.findMany({
+        where: { clientId },
+        select: { id: true, reportingToId: true },
+      });
+      const subtree = descendantSalesUserIds(salesUserId, edges);
+      if (subtree.has(newReportingToId)) {
+        throw new BadRequestException(
+          'Cannot set the reporting manager to the employee or one of their own reports (would create a cycle)',
+        );
+      }
+    }
+
+    // ── Build the two allow-listed update payloads ───────────────────────────
+    const userData: Prisma.UserUpdateInput = { updatedAt: new Date() };
+    if (dto.name !== undefined) userData.name = dto.name;
+    if (dto.email !== undefined) userData.email = dto.email;
+    if (dto.phone !== undefined) userData.phone = dto.phone;
+    if (levelChanged && newUserRole !== undefined) userData.role = newUserRole;
+
+    const salesData: Prisma.SalesUserUncheckedUpdateInput = {};
+    if (levelChanged) salesData.hierarchyLevelId = dto.hierarchyLevelId;
+    if (reportingProvided) salesData.reportingToId = newReportingToId;
+
+    const roleChanged = levelChanged && newUserRole !== undefined && newUserRole !== target.role;
+
+    // ── ONE transaction: User + SalesUser updated together (can't drift) + audit ──
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        // UPDATE the existing User row IN PLACE by id — NEVER create a new one (the
+        // documented orphan-User bug: a phone-keyed upsert would strand the old row and
+        // its reserved phone). §phone guard above already cleared any ACTIVE clash.
+        await tx.user.update({ where: { id: target.id }, data: userData });
+        await tx.salesUser.update({ where: { id: salesUserId }, data: salesData });
+
+        await tx.auditLog.create({
+          data: {
+            action: 'UPDATE',
+            entityType: 'SALES_USER',
+            entityId: salesUserId,
+            actorId: caller.sub,
+            metadata: {
+              event: 'admin_edit_employee',
+              userId: target.id,
+              employeeCode: salesUser.employeeCode,
+              changes: {
+                ...(dto.name !== undefined ? { name: dto.name } : {}),
+                ...(dto.email !== undefined ? { email: dto.email } : {}),
+                ...(dto.phone !== undefined ? { phone: dto.phone } : {}),
+                ...(levelChanged ? { hierarchyLevelId: dto.hierarchyLevelId, role: newUserRole } : {}),
+                ...(reportingProvided ? { reportingToId: newReportingToId } : {}),
+              },
+            },
+          },
+        });
+      });
+    } catch (e) {
+      // Belt-and-suspenders: a race past the ACTIVE-phone pre-check hits the partial unique
+      // index. Map it to the same clean domain error updateUser/createUser use, not a 500.
+      if (isActivePhoneConflict(e)) throw new BadRequestException(ACTIVE_PHONE_IN_USE_MSG);
+      throw e;
+    }
+
+    // Force re-login on all devices when the login identity (phone) or the account's
+    // authority (role) changes — identical to updateUser. Reuses the shared
+    // stamp-before-sweep helper so an in-flight refresh can't out-race the revoke.
+    if (phoneChanged || roleChanged) {
+      await this.revokeAllSessionsForUser(target.id);
+    }
+
+    // Re-fetch the joined row to return the correct updated state.
+    const updated = await this.prisma.salesUser.findFirst({
+      where: { id: salesUserId, clientId },
+      include: { user: true, hierarchyLevel: true },
+    });
+
+    return { employee: updated };
+  }
+
+  /**
+   * Options for the single-employee edit form: the tenant's hierarchy levels and the
+   * list of active employees (as candidate reporting managers). Tenant-scoped. Drives
+   * the Level + Reports-to dropdowns; the PATCH re-validates level-in-tenant + cycle.
+   */
+  async getEmployeeOptions(caller: JwtPayload) {
+    const clientId = caller.clientId;
+    const [levels, managers] = await Promise.all([
+      this.prisma.salesHierarchyLevel.findMany({
+        where: { clientId },
+        select: { id: true, code: true, name: true, level: true },
+        orderBy: { level: 'asc' },
+      }),
+      this.prisma.salesUser.findMany({
+        where: { clientId, isActive: true, deletedAt: null },
+        select: {
+          id: true,
+          employeeCode: true,
+          hierarchyLevelId: true,
+          user: { select: { name: true } },
+        },
+        orderBy: { user: { name: 'asc' } },
+      }),
+    ]);
+    return {
+      levels,
+      managers: managers.map((m) => ({
+        id: m.id,
+        name: m.user?.name ?? m.employeeCode,
+        employeeCode: m.employeeCode,
+        hierarchyLevelId: m.hierarchyLevelId,
+      })),
+    };
   }
 
   // ════════════════════════════════════════════════════════════════════════

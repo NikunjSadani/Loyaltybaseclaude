@@ -22,6 +22,7 @@ import {
   OutletKycFilter,
   ReKycFlagDto,
   ReKycFlagRowDto,
+  UpdateOutletDto,
   UpsertOutletsDto,
 } from './dto/admin-outlets.dto';
 
@@ -202,7 +203,7 @@ function buildOutletCreate(
  *  parentIdChange: `undefined` = leave grouping unchanged; a string = link to that parent;
  *  `null` = un-map (un-group) — only reached after the un-group guard passed. */
 function buildOutletUpdate(
-  data: OutletWriteData,
+  data: Partial<OutletWriteData>,
   requiredPaymentType: OutletPaymentType | null,
   parentIdChange?: string | null,
 ): Prisma.OutletUncheckedUpdateInput {
@@ -308,6 +309,83 @@ export interface ReKycRowResult {
  * DB error (which must still surface).
  */
 class RowGroupingError extends Error {}
+
+/**
+ * The Prisma select for one outlet row in the admin list / single-detail projection.
+ * Extracted so list() and the single-record updateOne() return the IDENTICAL shape via the
+ * shared mapOutletListRow — the two can never drift. `satisfies` keeps the literal field
+ * types so OutletListRow (below) can be derived from it.
+ */
+const OUTLET_LIST_SELECT = {
+  outletCode: true,
+  name: true,
+  outletTypeId: true,
+  city: true,
+  state: true,
+  isActive: true,
+  createdAt: true,
+  distributorCode: true,
+  distributorName: true,
+  beat: true,
+  metro: true,
+  zone: true,
+  programName: true,
+  programCategory: true,
+  // Fields needed for real KYC-status derivation
+  partnerId: true,
+  reKycFlags: true,
+  kycIntent: true,
+  // Owner-group link (the admin grouping UI): the raw parent FK + the parent's
+  // partnerCode/businessName (via the OutletParent relation, flattened below).
+  parentId: true,
+  parent: { select: { partnerCode: true, businessName: true } },
+  salesAssignments: {
+    where: { unassignedAt: null },
+    take: 1,
+    orderBy: { assignedAt: 'desc' },
+    select: {
+      salesUser: {
+        select: { employeeCode: true, user: { select: { name: true } } },
+      },
+    },
+  },
+} satisfies Prisma.OutletSelect;
+
+/** The row shape returned by a findMany/findFirst using OUTLET_LIST_SELECT. */
+type OutletListRow = Prisma.OutletGetPayload<{ select: typeof OUTLET_LIST_SELECT }>;
+
+/**
+ * Map one selected outlet row to the admin list/detail response shape. SINGLE source of
+ * truth for the projection so list() (paginated page) and updateOne() (single record) always
+ * agree. `latestStatusByPartnerId` carries the batched latest-submission lookup used by
+ * deriveKycStatus.
+ */
+function mapOutletListRow(o: OutletListRow, latestStatusByPartnerId: Map<string, KycStatus>) {
+  const xsr = o.salesAssignments[0]?.salesUser;
+  return {
+    outletId: o.outletCode,
+    outletName: o.name,
+    outletType: o.outletTypeId,
+    programName: o.programName ?? '',
+    programCategory: o.programCategory ?? '',
+    beat: o.beat ?? '',
+    distributorId: o.distributorCode ?? '',
+    distributorName: o.distributorName ?? '',
+    zone: o.zone ?? '',
+    city: o.city,
+    state: o.state,
+    metro: !!(o.metro && o.metro.trim()),
+    xsrId: xsr?.employeeCode ?? '',
+    xsrName: xsr?.user?.name ?? '',
+    kycStatus: deriveKycStatus(o.reKycFlags, o.kycIntent, o.partnerId, latestStatusByPartnerId),
+    isActive: o.isActive,
+    addedDate: o.createdAt.toISOString().slice(0, 10),
+    // Owner-group grouping fields (null when the outlet is ungrouped).
+    parentId: o.parentId ?? null,
+    parentCode: o.parent?.partnerCode ?? null,
+    parentBusinessName: o.parent?.businessName ?? null,
+  };
+}
 
 /**
  * Admin · Outlets — ported from platform/src/app/api/admin/outlets/* onto /v1.
@@ -570,38 +648,7 @@ export class AdminOutletsService {
         where,
         skip,
         take: limit,
-        select: {
-          outletCode: true,
-          name: true,
-          outletTypeId: true,
-          city: true,
-          state: true,
-          isActive: true,
-          createdAt: true,
-          distributorCode: true,
-          beat: true,
-          metro: true,
-          programName: true,
-          programCategory: true,
-          // Fields needed for real KYC-status derivation
-          partnerId: true,
-          reKycFlags: true,
-          kycIntent: true,
-          // Owner-group link (the admin grouping UI): the raw parent FK + the parent's
-          // partnerCode/businessName (via the OutletParent relation, flattened below).
-          parentId: true,
-          parent: { select: { partnerCode: true, businessName: true } },
-          salesAssignments: {
-            where: { unassignedAt: null },
-            take: 1,
-            orderBy: { assignedAt: 'desc' },
-            select: {
-              salesUser: {
-                select: { employeeCode: true, user: { select: { name: true } } },
-              },
-            },
-          },
-        },
+        select: OUTLET_LIST_SELECT,
         orderBy: { createdAt: 'desc' },
       }),
       this.prisma.outlet.count({ where }),
@@ -632,30 +679,7 @@ export class AdminOutletsService {
       }
     }
 
-    const mapped = outlets.map((o) => {
-      const xsr = o.salesAssignments[0]?.salesUser;
-      return {
-        outletId: o.outletCode,
-        outletName: o.name,
-        outletType: o.outletTypeId,
-        programName: o.programName ?? '',
-        programCategory: o.programCategory ?? '',
-        beat: o.beat ?? '',
-        distributorId: o.distributorCode ?? '',
-        city: o.city,
-        state: o.state,
-        metro: !!(o.metro && o.metro.trim()),
-        xsrId: xsr?.employeeCode ?? '',
-        xsrName: xsr?.user?.name ?? '',
-        kycStatus: deriveKycStatus(o.reKycFlags, o.kycIntent, o.partnerId, latestStatusByPartnerId),
-        isActive: o.isActive,
-        addedDate: o.createdAt.toISOString().slice(0, 10),
-        // Owner-group grouping fields (null when the outlet is ungrouped).
-        parentId: o.parentId ?? null,
-        parentCode: o.parent?.partnerCode ?? null,
-        parentBusinessName: o.parent?.businessName ?? null,
-      };
-    });
+    const mapped = outlets.map((o) => mapOutletListRow(o, latestStatusByPartnerId));
 
     // The tenant's enabled outlet-type codes — the FE validates uploads against THESE
     // (not a hardcoded list) so it never green-lights a type the upsert will reject as
@@ -1151,6 +1175,180 @@ export class AdminOutletsService {
     });
 
     return { outletCode: code, ungrouped: true };
+  }
+
+  /**
+   * Resolve an OutletType id-OR-code to a tenant-ENABLED, active OutletType's id, or null when
+   * it doesn't match one. Mirrors the bulk upsert's resolution (outletTypeClientConfig where
+   * isEnabled + outletType.isActive) but also accepts an exact id (the single-edit UI may send
+   * either). Case-insensitive on the code, exactly like the bulk path's typeIdByCode map.
+   */
+  private async resolveEnabledOutletTypeId(
+    clientId: string,
+    idOrCode: string,
+  ): Promise<string | null> {
+    const raw = (idOrCode ?? '').trim();
+    if (!raw) return null;
+    const typeConfigs = await this.prisma.outletTypeClientConfig.findMany({
+      where: { clientId, isEnabled: true },
+      select: { outletType: { select: { id: true, code: true, isActive: true } } },
+    });
+    const enabled = typeConfigs.map((c) => c.outletType).filter((t) => t.isActive);
+    // Accept an exact id match first, then fall back to a case-insensitive code match.
+    const byId = enabled.find((t) => t.id === raw);
+    if (byId) return byId.id;
+    const upper = raw.toUpperCase();
+    const byCode = enabled.find((t) => t.code.toUpperCase() === upper);
+    return byCode ? byCode.id : null;
+  }
+
+  /**
+   * Fetch ONE outlet (tenant-scoped, non-deleted) and map it to the SAME shape list() returns
+   * (via the shared OUTLET_LIST_SELECT + mapOutletListRow). Used as the response of updateOne so
+   * the single-edit and the list can never render a different outlet shape. 404 if not found.
+   */
+  private async getOutletDetail(clientId: string, outletCode: string) {
+    const o = await this.prisma.outlet.findFirst({
+      where: { clientId, outletCode, deletedAt: null },
+      select: OUTLET_LIST_SELECT,
+    });
+    if (!o) throw new NotFoundException(`Outlet ${outletCode} not found`);
+
+    // Latest-submission lookup for the single owner (mirrors list()'s batched map, size 1).
+    const latestStatusByPartnerId = new Map<string, KycStatus>();
+    if (o.partnerId) {
+      const subs = await this.prisma.kycSubmission.findMany({
+        where: { partnerId: o.partnerId },
+        select: { partnerId: true, status: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      for (const s of subs) {
+        if (s.partnerId && !latestStatusByPartnerId.has(s.partnerId)) {
+          latestStatusByPartnerId.set(s.partnerId, s.status);
+        }
+      }
+    }
+    return mapOutletListRow(o, latestStatusByPartnerId);
+  }
+
+  /**
+   * PATCH /v1/admin/outlets/:outletCode — edit ONE outlet's MASTER fields directly (the
+   * single-record equivalent of the bulk Outlet Master upsert). Writes ONLY the Outlet row,
+   * and ONLY the columns the bulk upsert can change — reusing buildOutletUpdate + the SAME
+   * field normalization (trim / nullIfBlank), the SAME outlet-type resolution, and the SAME
+   * requiredPaymentType parse + UPI gate — so the single-edit and bulk paths can't diverge.
+   *
+   * A true PATCH: only the keys PRESENT in the body are written; omitted keys are left as-is.
+   * Identity keys (outletCode/ids), grouping (parentId), lifecycle state (isActive/kycIntent/
+   * reKycFlags/…), and every ChannelPartner KYC field are NOT accepted here (the DTO doesn't
+   * declare them, so the global forbidNonWhitelisted ValidationPipe 400s an attempt to send
+   * one) and NEVER written. Tenant-scoped by the outlet's own clientId → a cross-tenant
+   * outletCode 404s. GIFSY_ADMIN / CLIENT_ADMIN only (controller @Roles + @RequirePermission).
+   */
+  async updateOne(user: JwtPayload, outletCode: string, dto: UpdateOutletDto) {
+    const clientId = user.clientId;
+    const code = (outletCode ?? '').trim();
+
+    // 1. Resolve the target outlet in the CALLER'S tenant (404 otherwise — incl. cross-tenant).
+    //    Select the current values of every editable column for the audit before/after.
+    const existing = await this.prisma.outlet.findFirst({
+      where: { clientId, outletCode: code, deletedAt: null },
+      select: {
+        id: true,
+        outletTypeId: true,
+        name: true,
+        city: true,
+        state: true,
+        distributorCode: true,
+        distributorName: true,
+        beat: true,
+        metro: true,
+        zone: true,
+        programName: true,
+        programCategory: true,
+        requiredPaymentType: true,
+      },
+    });
+    if (!existing) throw new NotFoundException(`Outlet ${code} not found`);
+
+    // 2. Build the PARTIAL Outlet write data from ONLY the provided fields, applying the SAME
+    //    normalization the bulk path uses (trim for the required strings; nullIfBlank for the
+    //    nullable columns so a "" clears rather than writing an empty string).
+    const data: Partial<OutletWriteData> = {};
+    if (dto.name !== undefined) data.name = dto.name.trim();
+    if (dto.city !== undefined) data.city = dto.city.trim();
+    if (dto.state !== undefined) data.state = dto.state.trim();
+    if (dto.distributorCode !== undefined) data.distributorCode = nullIfBlank(dto.distributorCode);
+    if (dto.distributorName !== undefined) data.distributorName = nullIfBlank(dto.distributorName);
+    if (dto.beat !== undefined) data.beat = nullIfBlank(dto.beat);
+    if (dto.metro !== undefined) data.metro = nullIfBlank(dto.metro);
+    if (dto.zone !== undefined) data.zone = nullIfBlank(dto.zone);
+    if (dto.programName !== undefined) data.programName = nullIfBlank(dto.programName);
+    if (dto.programCategory !== undefined) data.programCategory = nullIfBlank(dto.programCategory);
+
+    // 3. outletTypeId — resolve to a tenant-ENABLED, active OutletType (id OR code), like bulk.
+    if (dto.outletTypeId !== undefined) {
+      const resolved = await this.resolveEnabledOutletTypeId(clientId, dto.outletTypeId);
+      if (!resolved) {
+        throw new BadRequestException(`Unknown or disabled outlet type: ${dto.outletTypeId}`);
+      }
+      data.outletTypeId = resolved;
+    }
+
+    // 4. requiredPaymentType — SAME parse + tenant UPI gate as the bulk path's payout column.
+    let requiredPaymentType: OutletPaymentType | null = null;
+    if (dto.requiredPaymentType !== undefined) {
+      const parsed = parseOutletPaymentType(dto.requiredPaymentType);
+      if (parsed === null) {
+        throw new BadRequestException(
+          `Invalid Payout Method "${dto.requiredPaymentType}" — must be BANK, UPI, or ANY`,
+        );
+      }
+      if (parsed === OutletPaymentType.UPI) {
+        const settings = await this.tenantSettings.getEffectiveSettings(clientId);
+        if (settings.salesApp?.upiEnabled !== true) {
+          throw new BadRequestException('UPI is disabled for this tenant — cannot set outlet to UPI');
+        }
+      }
+      requiredPaymentType = parsed;
+    }
+
+    // 5. Reuse the bulk mapping — buildOutletUpdate assembles the Prisma update payload from the
+    //    partial data + the (optional) mandate. parentId is deliberately NOT passed (grouping is
+    //    owned by /:outletCode/ungroup) so it can never be written here.
+    const updateData = buildOutletUpdate(data, requiredPaymentType);
+
+    // No editable field supplied → no-op: return the current outlet unchanged (no write/audit).
+    if (Object.keys(updateData).length === 0) {
+      return this.getOutletDetail(clientId, code);
+    }
+
+    // 6. Audit before/after over exactly the changed columns (mirrors the ungroup audit row).
+    const oldValues: Record<string, string | null> = {};
+    const newValues: Record<string, string | null> = {};
+    const existingRecord = existing as unknown as Record<string, string | null>;
+    const updateRecord = updateData as Record<string, string | null>;
+    for (const key of Object.keys(updateData)) {
+      oldValues[key] = existingRecord[key];
+      newValues[key] = updateRecord[key];
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.outlet.update({ where: { id: existing.id }, data: updateData });
+      await tx.auditLog.create({
+        data: {
+          action: 'UPDATE',
+          entityType: 'OUTLET',
+          entityId: existing.id,
+          actorId: user.sub,
+          oldValues: oldValues as Prisma.InputJsonObject,
+          newValues: newValues as Prisma.InputJsonObject,
+          metadata: { action: 'edit-outlet', outletCode: code },
+        },
+      });
+    });
+
+    return this.getOutletDetail(clientId, code);
   }
 
   /**

@@ -4,9 +4,10 @@
 // Run: npx jest src/admin-outlets/dto/admin-outlets.dto.spec.ts
 
 import 'reflect-metadata'; // polyfill Reflect.* for the class-transformer @Type decorator
+import { ArgumentMetadata, ValidationPipe } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
-import { ListOutletsQueryDto } from './admin-outlets.dto';
+import { ListOutletsQueryDto, UpdateOutletDto } from './admin-outlets.dto';
 
 // Returns the constraint keys that failed for a given property (empty when valid).
 async function errorsFor(input: Record<string, unknown>, property: string): Promise<string[]> {
@@ -48,5 +49,39 @@ describe('ListOutletsQueryDto', () => {
 
   it('accepts an optional search string', async () => {
     expect(await errorsFor({ search: 'Verma' }, 'search')).toEqual([]);
+  });
+});
+
+describe('UpdateOutletDto — single-record master edit', () => {
+  // Reproduce the GLOBAL pipe config (main.ts): whitelist + forbidNonWhitelisted + transform,
+  // so this test proves the endpoint actually 400s the EXCLUDED (identity/KYC/state) fields.
+  const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true });
+  const meta: ArgumentMetadata = { type: 'body', metatype: UpdateOutletDto, data: '' };
+
+  it('accepts a body of only the editable fields', async () => {
+    const out = await pipe.transform(
+      { name: 'Verma', city: 'Mumbai', outletTypeId: 'RETAILER', requiredPaymentType: 'UPI' },
+      meta,
+    );
+    expect(out).toMatchObject({ name: 'Verma', city: 'Mumbai', outletTypeId: 'RETAILER' });
+  });
+
+  it('accepts an empty body (all fields optional → a no-op PATCH)', async () => {
+    await expect(pipe.transform({}, meta)).resolves.toEqual({});
+  });
+
+  it.each([
+    ['phone', { phone: '9999999999' }],
+    ['outletCode', { outletCode: 'OUT-9' }],
+    ['parentId', { parentId: 'parentX' }],
+    ['isActive', { isActive: false }],
+    ['panNumber', { panNumber: 'ABCDE1234F' }],
+    ['reKycFlags', { reKycFlags: {} }],
+  ])('REJECTS an excluded field (%s) via forbidNonWhitelisted', async (_label, body) => {
+    await expect(pipe.transform(body, meta)).rejects.toThrow();
+  });
+
+  it('rejects a non-string editable field (name as a number)', async () => {
+    await expect(pipe.transform({ name: 123 }, meta)).rejects.toThrow();
   });
 });

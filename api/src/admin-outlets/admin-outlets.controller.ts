@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import { AdminOutletsService } from './admin-outlets.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -8,6 +8,7 @@ import {
   ListOutletsQueryDto,
   OutletCodesDto,
   ReKycFlagDto,
+  UpdateOutletDto,
   UpsertOutletsDto,
 } from './dto/admin-outlets.dto';
 
@@ -116,5 +117,22 @@ export class AdminOutletsController {
   @RequirePermission('partners:manage_outlets')
   ungroup(@CurrentUser() user: JwtPayload, @Param('outletCode') outletCode: string) {
     return this.outlets.ungroupOutlet(user, outletCode);
+  }
+
+  /**
+   * PATCH /:outletCode — edit ONE outlet's MASTER fields directly (the single-record
+   * equivalent of the bulk Outlet Master upsert). Only the Outlet-row columns the bulk upsert
+   * can change are accepted (see UpdateOutletDto); identity/grouping/lifecycle/KYC fields are
+   * NOT. Same admin gate as the bulk upsert (partners:manage_outlets); tenant-scoped in the
+   * service (a cross-tenant outletCode 404s).
+   */
+  @Patch(':outletCode')
+  @RequirePermission('partners:manage_outlets')
+  updateOne(
+    @CurrentUser() user: JwtPayload,
+    @Param('outletCode') outletCode: string,
+    @Body() dto: UpdateOutletDto,
+  ) {
+    return this.outlets.updateOne(user, outletCode, dto);
   }
 }

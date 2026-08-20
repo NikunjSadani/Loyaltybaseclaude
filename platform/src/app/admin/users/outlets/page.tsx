@@ -6,7 +6,7 @@ import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import {
   Store, Search, Upload, Download, X, AlertCircle, CheckCircle2,
   Loader2, Building2, MapPin, Users, FileText, ArrowRightLeft,
-  RefreshCw, Eye, Clock, XCircle, CheckCircle, Archive,
+  RefreshCw, Eye, Clock, XCircle, CheckCircle, Archive, SquarePen,
 } from 'lucide-react';
 import {
   validateOutletUploadHeaders,
@@ -125,6 +125,8 @@ interface MockOutlet {
   programCategory: string;
   beat:            string;
   distributorId:   string;
+  distributorName: string;
+  zone:            string;
   city:            string;
   state:           string;
   metro:           boolean;
@@ -471,6 +473,173 @@ type TabId = 'master' | 'rekyc' | 'deactivate' | 'parked';
 /** Backend result of a park / un-park POST — count applied + codes the backend skipped. */
 interface ParkResult { count: number; notFound: string[]; }
 
+// ── Outlet edit modal ───────────────────────────────────────────────────────────
+// Single-record edit of the OUTLET MASTER fields only — exactly the columns the bulk
+// "Outlet Master" Excel upload can change. Sensitive identity/money/address fields
+// (owner name, phone, PAN, GST, bank, address) are NOT here by design — they stay on
+// the KYC / Re-KYC flow. Grouping + active-state keep their dedicated actions.
+function OutletEditModal({
+  outlet,
+  outletTypes,
+  onClose,
+  onSaved,
+}: {
+  outlet:      MockOutlet;
+  outletTypes: string[];
+  onClose:     () => void;
+  onSaved:     (msg: string) => void;
+}) {
+  const [outletType, setOutletType]           = useState(outlet.outletType);
+  const [name, setName]                        = useState(outlet.outletName);
+  const [programName, setProgramName]          = useState(outlet.programName);
+  const [programCategory, setProgramCategory]  = useState(outlet.programCategory);
+  const [city, setCity]                        = useState(outlet.city);
+  const [state, setState]                      = useState(outlet.state);
+  const [beat, setBeat]                        = useState(outlet.beat);
+  const [zone, setZone]                        = useState(outlet.zone);
+  const [distributorCode, setDistributorCode]  = useState(outlet.distributorId);
+  const [distributorName, setDistributorName]  = useState(outlet.distributorName);
+  const [metro, setMetro]                      = useState(outlet.metro);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Keep the current type selectable even if it's not in the enabled-types list.
+  const typeOptions = useMemo(
+    () => (outletTypes.includes(outletType) ? outletTypes : [outletType, ...outletTypes].filter(Boolean)),
+    [outletTypes, outletType],
+  );
+
+  const canSubmit = name.trim().length > 0 && !submitting;
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setSubmitting(true);
+    setError(null);
+    // Send ONLY changed fields (a PATCH; unsent fields are left untouched by the backend).
+    const body: Record<string, string> = {};
+    if (name.trim() !== outlet.outletName) body.name = name.trim();
+    if (outletType !== outlet.outletType) body.outletTypeId = outletType;
+    if (programName !== outlet.programName) body.programName = programName;
+    if (programCategory !== outlet.programCategory) body.programCategory = programCategory;
+    if (city !== outlet.city) body.city = city;
+    if (state !== outlet.state) body.state = state;
+    if (beat !== outlet.beat) body.beat = beat;
+    if (zone !== outlet.zone) body.zone = zone;
+    if (distributorCode !== outlet.distributorId) body.distributorCode = distributorCode;
+    if (distributorName !== outlet.distributorName) body.distributorName = distributorName;
+    if (metro !== outlet.metro) body.metro = metro ? 'Yes' : '';
+    if (Object.keys(body).length === 0) { onClose(); return; }
+    try {
+      const res = await fetch(`/api/admin/outlets/${encodeURIComponent(outlet.outletId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const j = await res.json().catch(() => ({ success: false, error: 'Unexpected response' }));
+      if (res.ok && j.success) {
+        onSaved('Outlet updated.');
+        onClose();
+      } else {
+        setError(j?.error ?? `Could not save changes (HTTP ${res.status})`);
+      }
+    } catch {
+      setError('Network error — please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const field = (label: string, value: string, set: (v: string) => void) => (
+    <div>
+      <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => set(e.target.value)}
+        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 focus:outline-none focus:border-[var(--brand-primary)]"
+      />
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <div>
+            <h2 className="text-base font-semibold text-gray-900">Edit Outlet</h2>
+            <p className="text-xs font-mono text-gray-400">{outlet.outletId}</p>
+          </div>
+          <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors" aria-label="Close">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="px-6 py-5 space-y-4">
+          {field('Outlet name', name, setName)}
+
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Outlet type</label>
+            <select
+              value={outletType}
+              onChange={(e) => setOutletType(e.target.value)}
+              aria-label="Outlet type"
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white focus:outline-none focus:border-[var(--brand-primary)]"
+            >
+              {typeOptions.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            {field('Program name', programName, setProgramName)}
+            {field('Program category', programCategory, setProgramCategory)}
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            {field('City', city, setCity)}
+            {field('State', state, setState)}
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            {field('Beat', beat, setBeat)}
+            {field('Zone', zone, setZone)}
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            {field('Distributor code', distributorCode, setDistributorCode)}
+            {field('Distributor name', distributorName, setDistributorName)}
+          </div>
+
+          <label className="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" checked={metro} onChange={(e) => setMetro(e.target.checked)} className="rounded border-gray-300" />
+            Metro outlet
+          </label>
+
+          <p className="text-[11px] text-gray-400">
+            Owner name, phone, PAN, GST, bank and address are verified fields — change them via Re-KYC.
+          </p>
+
+          {error && (
+            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5 text-xs text-red-700">
+              <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={!canSubmit} className="px-4 py-2 text-sm font-semibold bg-[var(--brand-primary)] text-white rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed">
+              {submitting ? 'Saving…' : 'Save changes'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 export default function OutletsPage() {
   const [activeTab, setActiveTab] = useState<TabId>('master');
 
@@ -484,6 +653,8 @@ export default function OutletsPage() {
   // `outlets` = the CURRENT server page (drives the table). Server-paginated +
   // server-filtered (search + KYC status), so it is NOT the full tenant list.
   const [outlets, setOutlets]         = useState<MockOutlet[]>([]);
+  const [editOutlet, setEditOutlet]   = useState<MockOutlet | null>(null);
+  const [editToast, setEditToast]     = useState<string | null>(null);
   const [pagination, setPagination]   = useState<Pagination | null>(null);
   const [page,          setPage]      = useState(1);
   const [outletTypes, setOutletTypes] = useState<string[]>([]);
@@ -1272,12 +1443,13 @@ export default function OutletsPage() {
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Assigned ISR</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">KYC Status</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Added</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wide">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
                   {outlets.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="px-4 py-16 text-center">
+                      <td colSpan={9} className="px-4 py-16 text-center">
                         <Store className="w-8 h-8 text-gray-200 mx-auto mb-2" />
                         <p className="text-sm text-gray-400">No outlets match your filters</p>
                       </td>
@@ -1347,6 +1519,16 @@ export default function OutletsPage() {
                           )}
                         </td>
                         <td className="px-4 py-3 text-xs text-gray-500">{o.addedDate}</td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            onClick={() => setEditOutlet(o)}
+                            className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-[var(--brand-primary)] border border-gray-200 hover:border-[var(--brand-primary)] rounded-lg px-2.5 py-1.5 transition-colors"
+                            aria-label={`Edit ${o.outletName}`}
+                          >
+                            <SquarePen className="w-3.5 h-3.5" />
+                            Edit
+                          </button>
+                        </td>
                       </tr>
                     );
                   })}
@@ -1769,6 +1951,22 @@ export default function OutletsPage() {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {editOutlet && (
+        <OutletEditModal
+          outlet={editOutlet}
+          outletTypes={outletTypes}
+          onClose={() => setEditOutlet(null)}
+          onSaved={(msg) => { setEditToast(msg); setTimeout(() => setEditToast(null), 3000); void loadOutlets(); }}
+        />
+      )}
+
+      {editToast && (
+        <div className="fixed bottom-6 right-6 z-[60] bg-gray-900 text-white text-sm px-4 py-2.5 rounded-lg shadow-lg flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-green-400" />
+          {editToast}
         </div>
       )}
     </div>
