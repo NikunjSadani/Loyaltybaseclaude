@@ -1,4 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from './notifications.service';
 import {
@@ -33,13 +34,25 @@ import {
  * is still harmless (the worker sends to 0 endpoints).
  */
 @Injectable()
-export class SalesNotificationsService {
+export class SalesNotificationsService implements OnModuleInit {
   private readonly logger = new Logger(SalesNotificationsService.name);
+
+  // Lazily-resolved via ModuleRef (NOT constructor-injected) to break the provider
+  // cycle SalesNotificationsService → NotificationsService → (lazy)NotificationTemplatesService
+  // → AdminCoreService → SalesNotificationsService. A hard constructor edge here left
+  // NotificationsService undefined at container boot (Nest can't resolve the cycle);
+  // resolving it in onModuleInit (after the container is built) fixes it. Mirrors the
+  // same pattern NotificationsService already uses for NotificationTemplatesService.
+  private notifications!: NotificationsService;
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly notifications: NotificationsService,
+    private readonly moduleRef: ModuleRef,
   ) {}
+
+  onModuleInit(): void {
+    this.notifications = this.moduleRef.get(NotificationsService, { strict: false });
+  }
 
   /* ── Event 1: outlets assigned to a rep (aggregated, one push per rep) ─────── */
 

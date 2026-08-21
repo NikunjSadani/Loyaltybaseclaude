@@ -27,7 +27,11 @@ describe('SalesNotificationsService', () => {
       salesUserAssignment: { findFirst: jest.fn(), findMany: jest.fn() },
       outlet: { findFirst: jest.fn() },
     };
-    service = new SalesNotificationsService(prisma as any, notifications as any);
+    // NotificationsService is resolved lazily via ModuleRef in onModuleInit (breaks a
+    // provider cycle) — provide a ModuleRef stub whose get() returns the mock, then init.
+    const moduleRef = { get: jest.fn().mockReturnValue(notifications) };
+    service = new SalesNotificationsService(prisma as any, moduleRef as any);
+    service.onModuleInit();
   });
 
   /* ── Event 1: outletsAssigned ──────────────────────────────────────────── */
