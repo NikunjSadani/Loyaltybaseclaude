@@ -189,6 +189,92 @@ export class Msg91Service {
   }
 
   /**
+   * Send a transactional SMS via the MSG91 v5 FLOW API (DLT-registered template).
+   *
+   * Mirrors sendOtp's conventions EXACTLY:
+   *   - authkey from MSG91_AUTH_KEY (.trim() — defends against a BOM/whitespace that
+   *     would make `fetch` throw a ByteString error when set as the header).
+   *   - DEV bypass: when no authKey is configured (non-prod without MSG91) we LOG and
+   *     RETURN so a tenant without MSG91 wiring never errors. (There is no FIXED_OTP
+   *     analogue — a transactional SMS has no code to fake — so the missing-authKey
+   *     bypass is the only one.)
+   *   - 10s AbortSignal timeout → fail fast with a clear error, never an endless hang.
+   *   - "HTTP 200 + {type:'error'}" body check → throw on the MSG91-reported failure.
+   *   - Bare-10-digit recipient guard (mirrors sendWhatsappTemplate): the body prepends
+   *     `91`, so a malformed number is dropped with a log rather than double-prefixed.
+   *
+   * MSG91 v5 FLOW request shape (control.msg91.com/api/v5/flow/):
+   *   body { template_id, recipients: [{ mobiles: '91'+phone, <VAR>: <value>, … }] }
+   * The per-recipient object carries `mobiles` plus the DLT template's NAMED variables
+   * (spread from `variables`). ⚠️ RUNTIME-VERIFY the exact variable KEY NAMES against the
+   * DLT template registered in MSG91 — they must match the template's `##VAR##` names.
+   *
+   * @param phone     recipient's bare 10-digit mobile (country code prepended → `91<phone>`)
+   * @param templateId the MSG91 flow/DLT template id
+   * @param variables the template's named variables → spread into the recipient object
+   */
+  async sendSms(
+    phone: string,
+    templateId: string,
+    variables: Record<string, string> = {},
+  ): Promise<void> {
+    const authKey = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
+
+    // DEV bypass — same shape as sendOtp's missing-authKey path: a non-prod env without
+    // MSG91 configured logs and returns instead of throwing.
+    if (!authKey) {
+      this.logger.warn(
+        `[DEV] MSG91 not configured — SMS template "${templateId}" for ${phone} not sent (vars: ${JSON.stringify(variables)})`,
+      );
+      return;
+    }
+
+    // Recipient sanity guard (mirrors sendWhatsappTemplate): the body prepends `91`, so a
+    // malformed value (already-prefixed, +91…, non-numeric, legacy import) would become an
+    // invalid number — drop it with a log rather than send to a bad address. No-op, no throw.
+    if (!/^\d{10}$/.test(phone)) {
+      this.logger.warn(
+        `SMS template "${templateId}" skipped — recipient is not a bare 10-digit mobile.`,
+      );
+      return;
+    }
+
+    // MSG91 v5 flow API — authkey in the header (never the body), template_id + recipients
+    // in the body. Each recipient carries `mobiles` plus the template's named variables.
+    const url = 'https://control.msg91.com/api/v5/flow/';
+    const body = {
+      template_id: templateId,
+      recipients: [{ mobiles: `91${phone}`, ...variables }],
+    };
+
+    // Never hang the request on an unresponsive MSG91 — 10s timeout, then fail fast.
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { authkey: authKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (e) {
+      const reason =
+        (e as Error)?.name === 'TimeoutError'
+          ? 'MSG91 did not respond within 10s (timeout — check MSG91 IP whitelisting / egress)'
+          : String(e);
+      this.logger.error(`MSG91 SMS template "${templateId}" request failed for ${phone}: ${reason}`);
+      throw new Error(`Failed to send SMS template ${templateId}: ${reason}`);
+    }
+
+    // MSG91 can return HTTP 200 with {"type":"error"} — check the body too.
+    const json = (await res.json()) as { type?: string; message?: string };
+    if (!res.ok || json?.type === 'error') {
+      const reason = json?.message ?? `HTTP ${res.status}`;
+      this.logger.error(`MSG91 SMS template "${templateId}" failed for ${phone}: ${reason}`);
+      throw new Error(`Failed to send SMS template ${templateId}: ${reason}`);
+    }
+  }
+
+  /**
    * Send a transactional EMAIL via the MSG91 SMTP RELAY (Domain Settings → SMTP
    * Integration), using nodemailer. Used by the report runner to deliver generated
    * report HTML. NOT the MSG91 v5 email HTTP API — that path is TEMPLATE-only

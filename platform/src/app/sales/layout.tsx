@@ -15,6 +15,7 @@ import {
 import { RequireAuth } from '@/components/auth/require-auth';
 import { PORTAL_ROLES, getStoredUser } from '@/lib/auth-client';
 import { useClientConfig } from '@/lib/platform/client-config-context';
+import { NotificationBell } from '@/components/notifications/notification-bell';
 
 const BASE_NAV: NavItem[] = [
   { href: '/sales/dashboard',   label: 'Dashboard', icon: LayoutDashboard },
@@ -90,7 +91,8 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {/* Notifications hidden until P7 notification worker (#21) */}
+            {/* Notification bell (real feed — Phase 1) */}
+            <NotificationBell tone="dark" fallbackUrl="/sales/dashboard" />
             <Link
               href="/sales/profile"
               className="flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-full hover:bg-white/10 transition-colors"

@@ -17,6 +17,7 @@ import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { EventKey } from '../notification-templates/notification-templates.config';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { roundToRupeePaise } from '../tds/tds.helpers';
 import { resolveEffectiveKycStatus, isPartnerPayable } from '../kyc/kyc-eligibility';
@@ -812,28 +813,28 @@ export class RewardsService {
       }
     });
 
-    // Notify on commit — the confirmation goes to the OUTLET's phone.
-    await this.notifications
-      .enqueue({
-        userId: partner.userId,
-        channel: 'SMS',
-        recipientPhone: partner.user?.phone ?? undefined,
-        body: `Your redemption ${order.orderNumber} (${order.reward?.name ?? ''}) is confirmed for ${requiredPoints} points.`,
-        variables: { orderId: order.id, orderNumber: order.orderNumber, points: requiredPoints },
-      })
-      .catch((e) => this.logger.error(`[confirmRedeemForOutlet] notify failed: ${e}`));
-
-    // Best-effort PUSH trigger (PWA F5) to the OUTLET's partner user. Never throws.
-    await this.notifications
-      .enqueue({
-        userId: partner.userId,
-        channel: 'PUSH',
-        subject: 'Redemption confirmed',
-        body: 'Your redemption is confirmed.',
-        // url = deep-link so a tapped push opens a real authenticated route (a urless push falls back to '/' → /auth/login).
-        variables: { event: 'REDEMPTION_CONFIRMED', orderId: order.id, orderNumber: order.orderNumber, url: '/partner/rewards' },
-      })
-      .catch((e) => this.logger.error(`[confirmRedeemForOutlet] push enqueue failed: ${e}`));
+    // Redemption-confirmed notification on commit: bell feed (IN_APP) + PUSH to the outlet's
+    // partner user, PLUS the config-driven SMS/WhatsApp to the OUTLET OWNER — via the single
+    // canonical notifyUserWithChannels path. The dead direct SMS enqueue is removed; SMS now flows
+    // through the config path (default OFF until a tenant enables it). Fire-and-forget.
+    await this.notifications.notifyUserWithChannels({
+      clientId: user.clientId,
+      userId: partner.userId,
+      eventKey: 'REDEMPTION_CONFIRMED',
+      // Paid-channel recipient = the OUTLET OWNER (partner.phone), consistent with every other
+      // event. Previously this addressed the outlet's LOGIN user (partner.user.phone), which can
+      // differ from the owner. Free channels still target partner.userId (the acting user) above.
+      recipientPhone: partner.phone ?? null,
+      vars: {
+        ownerName: partner.ownerName ?? 'Partner',
+        rewardName: order.reward?.name ?? '',
+        points: requiredPoints,
+      },
+      subject: 'Redemption confirmed',
+      body: 'Your redemption is confirmed.',
+      url: '/partner/rewards',
+      event: 'REDEMPTION_CONFIRMED',
+    });
 
     return {
       orderId: order.id,
@@ -1036,6 +1037,9 @@ export class RewardsService {
             userId: true,
             isActive: true,
             deletedAt: true,
+            // Outlet OWNER identity for the paid-channel redemption notification (below).
+            phone: true,
+            ownerName: true,
             // Beneficiary rails for the pre-debit presence check (cash modes).
             bankAccountNumber: true,
             ifscCode: true,
@@ -1293,27 +1297,30 @@ export class RewardsService {
       }
     });
 
-    await this.notifications
-      .enqueue({
-        userId: user.sub,
-        channel: 'SMS',
-        recipientPhone: user.phone,
-        body: `Your redemption ${order.orderNumber} (${order.reward?.name ?? ''}) is confirmed for ${requiredPoints} points.`,
-        variables: { orderId: order.id, orderNumber: order.orderNumber, points: requiredPoints },
-      })
-      .catch((e) => this.logger.error(`[confirmRedeem] notify failed: ${e}`));
-
-    // Best-effort PUSH trigger (PWA F5) to the partner who redeemed. Never throws.
-    await this.notifications
-      .enqueue({
-        userId: user.sub,
-        channel: 'PUSH',
-        subject: 'Redemption confirmed',
-        body: 'Your redemption is confirmed.',
-        // url = deep-link so a tapped push opens a real authenticated route (a urless push falls back to '/' → /auth/login).
-        variables: { event: 'REDEMPTION_CONFIRMED', orderId: order.id, orderNumber: order.orderNumber, url: '/partner/rewards' },
-      })
-      .catch((e) => this.logger.error(`[confirmRedeem] push enqueue failed: ${e}`));
+    // Redemption-confirmed notification on commit: bell feed (IN_APP) + PUSH to the redeeming
+    // partner user, PLUS the config-driven SMS/WhatsApp to the OWNER — via the single canonical
+    // notifyUserWithChannels path. The dead direct SMS enqueue is removed; SMS now flows through
+    // the config path (default OFF until a tenant enables it). Fire-and-forget.
+    await this.notifications.notifyUserWithChannels({
+      clientId: user.clientId,
+      // Free channels (IN_APP + PUSH) still address the acting user (self-redeem submitter).
+      userId: user.sub,
+      eventKey: 'REDEMPTION_CONFIRMED',
+      // Paid-channel recipient = the OUTLET OWNER, consistent with every other event. For a
+      // switched-sibling redemption the acting login (user.phone/name) can differ from the outlet
+      // owner; the paid message must reach the owner. Falls back to the acting user if the owner
+      // fields are somehow absent.
+      recipientPhone: order.partner?.phone ?? user.phone ?? null,
+      vars: {
+        ownerName: order.partner?.ownerName ?? user.name ?? 'Partner',
+        rewardName: order.reward?.name ?? '',
+        points: requiredPoints,
+      },
+      subject: 'Redemption confirmed',
+      body: 'Your redemption is confirmed.',
+      url: '/partner/rewards',
+      event: 'REDEMPTION_CONFIRMED',
+    });
 
     return {
       orderId: order.id,
@@ -1438,18 +1445,29 @@ export class RewardsService {
     ) {
       const partner = await this.prisma.channelPartner.findFirst({
         where: { id: order.partnerId },
-        select: { userId: true, phone: true },
+        select: { userId: true, phone: true, ownerName: true },
       });
       if (partner?.userId) {
-        await this.notifications
-          .enqueue({
-            userId: partner.userId,
-            channel: 'SMS',
-            recipientPhone: partner.phone ?? undefined,
-            body: `Your redemption ${order.orderNumber} is now ${toStatus}.`,
-            variables: { orderId: id, orderNumber: order.orderNumber, status: toStatus },
-          })
-          .catch((e) => this.logger.error(`[transitionOrder] notify failed: ${e}`));
+        // Fan the customer-visible milestone out to the bell feed (IN_APP) + PUSH AND the
+        // config-driven SMS/WhatsApp to the OWNER — via the single canonical path. The dead
+        // direct SMS enqueue is removed; the ORDER_* paid channels default OFF until a tenant
+        // enables them. Best-effort: never throws into the transition path.
+        await this.notifications.notifyUserWithChannels({
+          clientId: user.clientId,
+          userId: partner.userId,
+          eventKey: `ORDER_${toStatus}` as EventKey,
+          recipientPhone: partner.phone ?? null,
+          vars: {
+            ownerName: partner.ownerName ?? 'Partner',
+            orderId: order.orderNumber,
+            trackingId: dto.trackingNumber ?? '',
+            reason: dto.notes ?? '',
+          },
+          subject: 'Redemption update',
+          body: `Your redemption ${order.orderNumber} is now ${toStatus}.`,
+          url: '/partner/rewards',
+          event: `REDEMPTION_${toStatus}`,
+        });
       }
     }
 

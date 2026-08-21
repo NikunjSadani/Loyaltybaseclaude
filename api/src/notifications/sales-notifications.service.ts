@@ -236,13 +236,20 @@ export class SalesNotificationsService {
     });
   }
 
-  /** Enqueue a single PUSH row. Never throws (caller already wraps, belt-and-suspenders). */
+  /**
+   * Fan a single sales notification out to the bell feed (IN_APP) AND PUSH. Never throws
+   * (caller already wraps, belt-and-suspenders). The IN_APP row shows in the recipient's
+   * bell immediately; the PUSH row is drained by the push worker (unchanged behaviour).
+   */
   private async enqueuePush(
     userId: string,
     subject: string,
     body: string,
     url?: string,
   ): Promise<void> {
+    // IN_APP bell-feed row (best-effort; writeInApp swallows its own errors).
+    await this.notifications.writeInApp({ userId, subject, body, url });
+    // PUSH row — identical to the prior behaviour.
     await this.notifications
       .enqueue({
         userId,

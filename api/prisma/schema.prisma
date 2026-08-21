@@ -2158,6 +2158,9 @@ model NotificationQueue {
   variables      Json?
   scheduledAt    DateTime?
   processedAt    DateTime?
+  /// IN_APP bell feed: when the recipient marked this row read (null = unread).
+  /// Only meaningful for channel = IN_APP; other channels leave it null.
+  readAt         DateTime?
   retryCount     Int                 @default(0)
   maxRetries     Int                 @default(3)
   createdAt      DateTime            @default(now())
@@ -2172,6 +2175,10 @@ model NotificationQueue {
   @@index([channel])
   @@index([scheduledAt])
   @@index([createdAt])
+  // IN_APP bell feed: page a user's feed newest-first (userId+channel+createdAt).
+  @@index([userId, channel, createdAt])
+  // IN_APP bell feed: unread-count / read-all lookups (userId+channel+readAt).
+  @@index([userId, channel, readAt])
   @@map("notification_queue")
 }
 

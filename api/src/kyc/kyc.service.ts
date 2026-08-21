@@ -17,7 +17,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
-import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
+import { EventKey } from '../notification-templates/notification-templates.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
 import { sniffFileType } from '../common/file-signature';
@@ -118,6 +118,19 @@ const KYC_FIELD_TO_REKYCFLAGS: Record<KycFieldKey, string[]> = {
   ADDRESS_DOCUMENT: ['addressProof', 'selfDeclaration'],
   BOARD_PHOTO: ['storeBoardPhoto'],
   OWNER_PHOTO: ['ownerPhoto'],
+};
+
+// ─── KYC event routing → bell-feed subject + (optional) config-driven paid channel ──
+// `eventKey` present → the event has a per-tenant SMS/WhatsApp contract (notify() routes it
+// through NotificationsService.notifyUserWithChannels: IN_APP + PUSH to the submitter/rep PLUS
+// the paid channels to the OUTLET OWNER). `eventKey` absent → free channels only (IN_APP + PUSH),
+// exactly as before. An event NOT in this map writes nothing (mirrors the prior "no feed" default).
+const KYC_EVENT_ROUTING: Record<string, { eventKey?: EventKey; subject: string }> = {
+  KYC_APPROVED: { eventKey: 'KYC_APPROVED', subject: 'KYC approved' },
+  KYC_UNDER_REVIEW: { eventKey: 'KYC_UNDER_REVIEW', subject: 'KYC under review' },
+  KYC_REJECTED: { eventKey: 'KYC_REJECTED', subject: 'KYC rejected' },
+  KYC_RE_UPLOAD_REQUIRED: { subject: 'KYC re-upload required' },
+  KYC_RE_KYC_REQUIRED: { subject: 'Re-KYC required' },
 };
 
 /** Outcome for a single submission in a bulk-verify commit. */
@@ -842,117 +855,113 @@ export class KycService {
     }
   }
 
-  /** Enqueue a KYC notification, mirroring the source's fire-and-forget semantics. */
-  private async notify(
-    userId: string,
-    event: string,
-    body: string,
-    variables: Record<string, unknown>,
-    recipientPhone?: string,
-  ): Promise<void> {
-    await this.notifications
-      .enqueue({
-        userId,
-        channel: 'SMS',
-        body,
-        recipientPhone,
-        variables: { event, ...variables },
-      })
-      .catch(() => {
-        // Non-critical: notification failures must not fail the request.
-      });
+  /**
+   * The SINGLE KYC notification fan-out. Routes a user-facing KYC lifecycle event to the bell
+   * feed (IN_APP) + PUSH for the submitter/rep (unchanged) AND — for events with a per-tenant
+   * paid-channel contract (KYC_APPROVED / KYC_SUBMITTED-equivalent / KYC_UNDER_REVIEW /
+   * KYC_REJECTED) — to the config-driven SMS + WhatsApp channels addressed to the OUTLET OWNER
+   * (name/phone/program resolved from the partner). Fire-and-forget: never throws into the KYC
+   * request/tx (callers already invoke it post-commit).
+   *
+   * Behaviour-neutral for Deoleo's LIVE approval WhatsApp: KYC_APPROVED resolves through
+   * NotificationTemplatesService whose DEFAULT (no DB row) for a WHATSAPP_KYC tenant is
+   * mode WHATSAPP + template `deoleo_kyc_approval` + masterWhatsapp ON — the exact send as before.
+   *
+   * Owner context: pass it explicitly (from an approval intent's whatsapp* variables) OR pass
+   * clientId+partnerId and notify() loads {ownerName, phone, primary programName} from the partner.
+   */
+  private async notify(opts: {
+    userId: string;
+    event: string;
+    body: string;
+    clientId?: string;
+    partnerId?: string | null;
+    reason?: string | null;
+    ownerName?: string | null;
+    ownerPhone?: string | null;
+    programName?: string | null;
+  }): Promise<void> {
+    const routing = KYC_EVENT_ROUTING[opts.event];
+    if (!routing) return; // unknown/non-user-facing event → write nothing (prior default)
+    const url = '/sales/kyc';
 
-    // Best-effort PUSH trigger (PWA F5): on KYC approval, also enqueue a PUSH row
-    // alongside the SMS so a PWA user is notified. Every approval path routes through
-    // this helper with event='KYC_APPROVED', so this single hook covers them all.
-    // Wrapped so push can NEVER break the KYC path.
-    if (event === 'KYC_APPROVED') {
+    // Free-channel-only event (no per-tenant paid contract) → IN_APP + PUSH only, as before.
+    if (!routing.eventKey) {
       await this.notifications
-        .enqueue({
-          userId,
-          channel: 'PUSH',
-          subject: 'KYC approved',
-          body: 'Your KYC is approved.',
-          // url = deep-link so a tapped push opens a real authenticated route (a urless push falls back to '/' → /auth/login).
-          variables: { event, ...variables, url: '/sales/kyc' },
+        .notifyUser({
+          userId: opts.userId,
+          event: opts.event,
+          subject: routing.subject,
+          body: opts.body,
+          url,
+          variables: opts.reason ? { reason: opts.reason } : undefined,
         })
-        .catch(() => {
-          // Non-critical: push enqueue failures must not fail the request.
-        });
+        .catch(() => undefined);
+      return;
+    }
 
-      // Owner WhatsApp on approval — this is the single canonical approval hook (every
-      // approval path routes through notify() with event='KYC_APPROVED'). The owner
-      // identity rides in `variables` (set by applyBridgeOutcome). sendKycWhatsapp is
-      // tenant-gated + fire-and-forget and never throws, so a missing clientId/phone
-      // (e.g. a legacy partner-less row) simply no-ops.
-      const whatsappClientId = variables.whatsappClientId as string | undefined;
-      if (whatsappClientId) {
-        await this.sendKycWhatsapp(whatsappClientId, 'APPROVED', {
-          ownerName: variables.whatsappOwnerName as string | null | undefined,
-          ownerPhone: variables.whatsappOwnerPhone as string | null | undefined,
-          programName: variables.whatsappProgramName as string | null | undefined,
+    // Config-driven event. Resolve the OWNER recipient for the paid channels (IN_APP + PUSH still
+    // go to opts.userId — the submitter/rep — unchanged). If the owner context wasn't supplied,
+    // load it once from the partner (tenant-scoped, best-effort).
+    let ownerName = opts.ownerName ?? null;
+    let ownerPhone = opts.ownerPhone ?? null;
+    let programName = opts.programName ?? null;
+    if (!ownerPhone && opts.clientId && opts.partnerId) {
+      try {
+        const partner = await this.prisma.channelPartner.findFirst({
+          where: { id: opts.partnerId, clientId: opts.clientId },
+          select: {
+            ownerName: true,
+            phone: true,
+            outlets: {
+              where: { deletedAt: null },
+              orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+              select: { programName: true },
+              take: 1,
+            },
+          },
         });
+        ownerName = ownerName ?? partner?.ownerName ?? null;
+        ownerPhone = ownerPhone ?? partner?.phone ?? null;
+        programName = programName ?? partner?.outlets?.[0]?.programName ?? null;
+      } catch (e) {
+        this.logger.warn(`[kyc-notify] owner-context load failed for partner ${opts.partnerId}: ${e}`);
       }
     }
+
+    await this.notifications
+      .notifyUserWithChannels({
+        clientId: opts.clientId ?? '',
+        userId: opts.userId,
+        eventKey: routing.eventKey,
+        recipientPhone: ownerPhone,
+        vars: {
+          ownerName: ownerName ?? 'Partner',
+          programName: programName ?? '',
+          reason: opts.reason ?? '',
+        },
+        subject: routing.subject,
+        body: opts.body,
+        url,
+        event: opts.event,
+      })
+      .catch((e) => this.logger.warn(`[kyc-notify] ${opts.event} fan-out failed: ${e}`));
   }
 
-  /**
-   * Send the outlet-OWNER a WhatsApp template message on a KYC lifecycle event.
-   *
-   * Fire-and-forget + post-commit: this MUST NEVER throw into — or block — the KYC
-   * request/tx. Every send path is wrapped in try/catch (mirrors notify() /
-   * SalesNotificationsService semantics); a delivery failure is logged and swallowed.
-   *
-   * Tenant gate (config-driven): the per-tenant template names live in WHATSAPP_KYC
-   * (notifications/whatsapp-kyc.config.ts). A clientId with no entry is simply
-   * UNCONFIGURED → no-op, so only configured tenants (currently Deoleo) send.
-   *
-   * Recipient = the OUTLET OWNER (ChannelPartner.ownerName / ChannelPartner.phone =
-   * the KYC contact mobile captured at submit), NOT the submitting rep.
-   *   SUBMITTED → [ownerName, "DD MMM YYYY" submission date, programName]
-   *   APPROVED  → [ownerName, programName]
-   */
-  private async sendKycWhatsapp(
-    clientId: string,
-    event: 'SUBMITTED' | 'APPROVED',
-    data: {
-      ownerName?: string | null;
-      ownerPhone?: string | null;
-      programName?: string | null;
-      submittedAt?: Date | null;
-    },
-  ): Promise<void> {
-    try {
-      const templates = WHATSAPP_KYC[clientId];
-      if (!templates) return; // tenant not configured for WhatsApp KYC → no-op
-
-      const ownerPhone = data.ownerPhone?.trim();
-      if (!ownerPhone) {
-        // No owner contact mobile → nothing to send to. Log, don't throw.
-        this.logger.warn(`[kyc-whatsapp] ${event} skipped — no owner phone (client ${clientId})`);
-        return;
-      }
-
-      const ownerName = data.ownerName?.trim() || 'Partner';
-      const programName = data.programName?.trim() || '';
-
-      if (event === 'SUBMITTED') {
-        const date = this.formatKycDate(data.submittedAt ?? new Date());
-        await this.msg91.sendWhatsappTemplate(ownerPhone, templates.submissionTemplate, [
-          ownerName,
-          date,
-          programName,
-        ]);
-      } else {
-        await this.msg91.sendWhatsappTemplate(ownerPhone, templates.approvalTemplate, [
-          ownerName,
-          programName,
-        ]);
-      }
-    } catch (e) {
-      // Non-critical: a WhatsApp delivery failure must NEVER fail the KYC operation.
-      this.logger.warn(`[kyc-whatsapp] ${event} send failed (client ${clientId}): ${e}`);
-    }
+  /** Map a post-commit CommitNotifyIntent (its whatsapp* variables carry the owner context) to
+   *  the notify() options object. Used by the approve + bulk-verify paths. */
+  private intentToNotifyOpts(n: CommitNotifyIntent): Parameters<KycService['notify']>[0] {
+    const v = (n.variables ?? {}) as Record<string, unknown>;
+    return {
+      userId: n.userId,
+      event: n.event,
+      body: n.body,
+      clientId: (v.whatsappClientId as string | undefined) ?? undefined,
+      ownerName: (v.whatsappOwnerName as string | null | undefined) ?? null,
+      ownerPhone: (v.whatsappOwnerPhone as string | null | undefined) ?? null,
+      programName: (v.whatsappProgramName as string | null | undefined) ?? null,
+      reason: (v.reason as string | undefined) ?? (v.rejectedFields as string | undefined) ?? null,
+    };
   }
 
   /** Format a date as a readable "DD MMM YYYY" (e.g. "30 Jun 2026") for WhatsApp bodies. */
@@ -2701,13 +2710,15 @@ export class KycService {
       });
     });
 
-    await this.notify(
-      submission.userId,
-      'KYC_UNDER_REVIEW',
-      `Your KYC is under review.`,
-      { name: submission.user.name ?? submission.user.phone },
-      submission.user.phone ?? undefined,
-    );
+    await this.notify({
+      userId: submission.userId,
+      event: 'KYC_UNDER_REVIEW',
+      body: `Your KYC is under review.`,
+      // Paid channels (if the tenant enables them) address the OUTLET OWNER — resolved from the
+      // partner by notify(). IN_APP + PUSH still go to the submitter (submission.userId).
+      clientId: user.clientId,
+      partnerId: submission.partnerId,
+    });
 
     return { message: 'KYC first-approval recorded successfully', nextStatus, submissionId: id };
   }
@@ -2860,13 +2871,7 @@ export class KycService {
 
     // B1: enqueue AFTER the tx commits (never inside the tx).
     if (notifyIntent) {
-      await this.notify(
-        notifyIntent.userId,
-        notifyIntent.event,
-        notifyIntent.body,
-        notifyIntent.variables,
-        notifyIntent.phone,
-      );
+      await this.notify(this.intentToNotifyOpts(notifyIntent));
     }
 
     return { message: 'KYC approved successfully' };
@@ -2994,7 +2999,7 @@ export class KycService {
     // B1: enqueue AFTER the tx commits.
     if (result.applied.notification) {
       const n = result.applied.notification;
-      await this.notify(n.userId, n.event, n.body, n.variables, n.phone);
+      await this.notify(this.intentToNotifyOpts(n));
     }
 
     return {
@@ -3073,13 +3078,15 @@ export class KycService {
       });
     });
 
-    await this.notify(
-      submission.userId,
-      'KYC_REJECTED',
-      `Your KYC was rejected. Reason: ${reason}`,
-      { reason, requiredAction: requiredAction ?? '' },
-      submission.user.phone ?? undefined,
-    );
+    await this.notify({
+      userId: submission.userId,
+      event: 'KYC_REJECTED',
+      body: `Your KYC was rejected. Reason: ${reason}`,
+      // Paid channels (if enabled) address the OUTLET OWNER; IN_APP + PUSH go to the submitter.
+      clientId: submission.user.clientId,
+      partnerId: submission.partnerId,
+      reason,
+    });
 
     // Also notify the responsible SALES rep that their KYC was bounced back.
     // Use the SUBMISSION's own tenant (not user.clientId): a GIFSY_ADMIN rejecting
@@ -3312,15 +3319,28 @@ export class KycService {
         submission.partner?.outlets?.[0]?.name ?? '',
       );
 
-      // Notify the OUTLET OWNER via WhatsApp that their KYC was submitted — fired HERE,
-      // AFTER the OTP verifies (the outlet's own confirmation). Recipient = the verified
-      // consent `mobile`. Fire-and-forget; no-op unless the tenant is in WHATSAPP_KYC.
-      await this.sendKycWhatsapp(user.clientId, 'SUBMITTED', {
-        ownerName: submission.partner?.ownerName ?? null,
-        ownerPhone: mobile,
-        programName: submission.partner?.outlets?.[0]?.programName ?? null,
-        submittedAt: verifiedAt,
-      });
+      // Notify the OUTLET OWNER that their KYC was submitted — fired HERE, AFTER the OTP
+      // verifies (the outlet's own confirmation). Recipient = the verified consent `mobile`.
+      // Routed through the config-driven paid channels (SMS/WhatsApp per tenant); for a
+      // WHATSAPP_KYC tenant the default reproduces today's `deoleo_kyc_submission` WhatsApp.
+      // includeFreeChannels:false — submission historically wrote NO bell/push row, only the
+      // owner WhatsApp, so keep it paid-channel-only (behaviour-neutral). Fire-and-forget.
+      await this.notifications
+        .notifyUserWithChannels({
+          clientId: user.clientId,
+          userId: submission.userId,
+          eventKey: 'KYC_SUBMITTED',
+          recipientPhone: mobile,
+          includeFreeChannels: false,
+          vars: {
+            ownerName: submission.partner?.ownerName ?? 'Partner',
+            submissionDate: this.formatKycDate(verifiedAt),
+            programName: submission.partner?.outlets?.[0]?.programName ?? '',
+          },
+          body: 'Your KYC has been submitted.',
+          event: 'KYC_SUBMITTED',
+        })
+        .catch((e) => this.logger.warn(`[kyc-notify] KYC_SUBMITTED fan-out failed: ${e}`));
     }
 
     return { verified: true, submissionId };
@@ -3689,13 +3709,7 @@ export class KycService {
     });
 
     // B1: enqueue AFTER the tx commits.
-    await this.notify(
-      notifyIntent.userId,
-      notifyIntent.event,
-      notifyIntent.body,
-      notifyIntent.variables,
-      notifyIntent.phone,
-    );
+    await this.notify(this.intentToNotifyOpts(notifyIntent));
 
     return {
       message: 'Re-KYC triggered successfully',
@@ -3870,7 +3884,7 @@ export class KycService {
         // that threw never returns a notification, so a rolled-back approval can't notify.
         if (outcome.notification) {
           const n = outcome.notification;
-          await this.notify(n.userId, n.event, n.body, n.variables, n.phone);
+          await this.notify(this.intentToNotifyOpts(n));
         }
         if (outcome.outcome === 'approved') approved++;
         else if (outcome.outcome === 'reupload') reupload++;

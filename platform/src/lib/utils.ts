@@ -55,6 +55,30 @@ export function formatDateTime(date: string | Date): string {
   }).format(new Date(date));
 }
 
+/**
+ * Format a timestamp as a short, human relative string ("just now", "5 min ago",
+ * "3 hrs ago", "2 days ago", "4 wks ago") and fall back to an absolute DD-MM-YYYY
+ * date once it is older than ~5 weeks. `now` is injectable so callers/tests stay
+ * deterministic (never hardcode a fixed clock — pass the reference instant in).
+ */
+export function formatRelativeTime(date: string | Date, now: Date = new Date()): string {
+  const then = new Date(date).getTime();
+  if (Number.isNaN(then)) return '';
+  const diffMs = now.getTime() - then;
+  // Future or clock-skewed timestamps read as "just now" rather than "-3 min ago".
+  const sec = Math.max(0, Math.round(diffMs / 1000));
+  if (sec < 45) return 'just now';
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min} min ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr} hr${hr === 1 ? '' : 's'} ago`;
+  const day = Math.round(hr / 24);
+  if (day < 7) return `${day} day${day === 1 ? '' : 's'} ago`;
+  const wk = Math.round(day / 7);
+  if (wk < 5) return `${wk} wk${wk === 1 ? '' : 's'} ago`;
+  return formatDate(date);
+}
+
 // ─── OTP ──────────────────────────────────────────────────────────────────────
 
 /**

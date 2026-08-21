@@ -9,7 +9,7 @@ import { SalesNotificationsService } from './sales-notifications.service';
  * lists we feed via `salesUser.findMany`, so the mocked rows are shaped to drive it.
  */
 describe('SalesNotificationsService', () => {
-  let notifications: { enqueue: jest.Mock };
+  let notifications: { enqueue: jest.Mock; writeInApp: jest.Mock };
   let prisma: {
     salesUser: { findFirst: jest.Mock; findMany: jest.Mock };
     salesUserAssignment: { findFirst: jest.Mock; findMany: jest.Mock };
@@ -18,7 +18,10 @@ describe('SalesNotificationsService', () => {
   let service: SalesNotificationsService;
 
   beforeEach(() => {
-    notifications = { enqueue: jest.fn().mockResolvedValue({ id: 'n1' }) };
+    notifications = {
+      enqueue: jest.fn().mockResolvedValue({ id: 'n1' }),
+      writeInApp: jest.fn().mockResolvedValue({ id: 'n1' }),
+    };
     prisma = {
       salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
       salesUserAssignment: { findFirst: jest.fn(), findMany: jest.fn() },

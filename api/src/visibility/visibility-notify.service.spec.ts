@@ -30,7 +30,7 @@ const mockTenant = {
   resolveClient: jest.fn(),
 };
 const mockSettings = { getEffectiveSettings: jest.fn() };
-const mockNotifications = { enqueue: jest.fn() };
+const mockNotifications = { enqueue: jest.fn(), writeInApp: jest.fn().mockResolvedValue({ id: 'n1' }) };
 
 const config = {
   outletScope: ['SSS'],

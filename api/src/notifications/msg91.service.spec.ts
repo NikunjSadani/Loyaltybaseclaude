@@ -143,6 +143,80 @@ describe('Msg91Service.sendWhatsappTemplate', () => {
   });
 });
 
+// Unit tests for Msg91Service.sendSms — the MSG91 v5 FLOW API (DLT template) path. Covers the
+// request URL + body shape (template_id + recipients[{mobiles, ...vars}]), the missing-authKey
+// dev bypass, the bare-10-digit recipient guard, and the failure throws (MSG91 error + timeout).
+describe('Msg91Service.sendSms (v5 flow)', () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+    jest.restoreAllMocks();
+  });
+
+  it('builds the correct MSG91 flow URL + body (template_id + recipients with 91-prefixed mobiles + named vars)', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue({ ok: true, status: 200, json: async () => ({ type: 'success' }) });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    await service.sendSms('9000000001', 'dlt-tpl-1', { ownerName: 'Asha', points: '120' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://control.msg91.com/api/v5/flow/');
+    expect(init.method).toBe('POST');
+    // authkey rides in the header, never the body (mirrors sendOtp).
+    expect(init.headers.authkey).toBe('key-123');
+    const body = JSON.parse(init.body);
+    expect(body.template_id).toBe('dlt-tpl-1');
+    expect(body.recipients).toEqual([{ mobiles: '919000000001', ownerName: 'Asha', points: '120' }]);
+  });
+
+  it('dev bypass: no authKey → logs + returns WITHOUT calling fetch', async () => {
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const service = new Msg91Service(makeConfig({})); // MSG91_AUTH_KEY undefined
+    await expect(service.sendSms('9000000001', 'dlt-tpl-1', { a: 'b' })).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('guard: a non-10-digit recipient (already-prefixed / +91 / short / non-numeric) is dropped, no fetch', async () => {
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    for (const bad of ['919830011252', '+919830011252', '98300', '98300112ab']) {
+      await expect(service.sendSms(bad, 'dlt-tpl-1', {})).resolves.toBeUndefined();
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('throws when MSG91 returns HTTP 200 with {type:"error"}', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue({ ok: true, status: 200, json: async () => ({ type: 'error', message: 'bad template' }) });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    await expect(service.sendSms('9000000001', 'dlt-tpl-1', {})).rejects.toThrow(/bad template/);
+  });
+
+  it('throws on a non-ok HTTP response', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    await expect(service.sendSms('9000000001', 'dlt-tpl-1', {})).rejects.toThrow(/HTTP 500/);
+  });
+
+  it('throws a clear timeout error when fetch aborts', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockRejectedValue(Object.assign(new Error('aborted'), { name: 'TimeoutError' }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    await expect(service.sendSms('9000000001', 'dlt-tpl-1', {})).rejects.toThrow(/timeout/i);
+  });
+});
+
 // Covers the per-tenant, per-purpose OTP template override on sendOtp: the templateId
 // param wins when non-empty, else the global env template is used — and the dev bypasses
 // (FIXED_OTP, missing authKey) still short-circuit BEFORE any fetch.

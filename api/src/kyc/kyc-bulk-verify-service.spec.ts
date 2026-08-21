@@ -116,7 +116,12 @@ const mockPrisma = {
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
-const mockNotifications = { enqueue: jest.fn().mockResolvedValue({ id: 'n1' }) };
+const mockNotifications = {
+  enqueue: jest.fn().mockResolvedValue({ id: 'n1' }),
+  writeInApp: jest.fn().mockResolvedValue({ id: 'n1' }),
+  notifyUser: jest.fn().mockResolvedValue(undefined),
+  notifyUserWithChannels: jest.fn().mockResolvedValue(undefined),
+};
 // sendWhatsappTemplate rides the KYC_APPROVED notify() hook → the deoleo_kyc_approval
 // owner message. Needed to assert the approval WhatsApp carries the real programName.
 const mockMsg91 = { sendOtp: jest.fn(), sendWhatsappTemplate: jest.fn().mockResolvedValue(undefined) };
@@ -329,13 +334,13 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
       expect(mockTx.wallet.create).not.toHaveBeenCalled();
     });
 
-    it('enqueues a KYC_APPROVED notification (never sync)', async () => {
+    it('fans out a KYC_APPROVED notification post-tx (never sync)', async () => {
       const file = { buffer: makeXlsx([allApproveRow(SUB_ID)]), size: 1 } as Express.Multer.File;
       await service.bulkVerify(gifsy, file, true);
-      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(
         expect.objectContaining({
           userId: 'user-1',
-          variables: expect.objectContaining({ event: 'KYC_APPROVED' }),
+          eventKey: 'KYC_APPROVED',
         }),
       );
     });
@@ -406,12 +411,13 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
       const result = await service.bulkVerify(gifsy, file, true) as { results: Array<{ outcome: string }> };
       expect(result.results[0].outcome).toBe('approved');
 
-      // The approval WhatsApp must carry [ownerName, programName] with the REAL program.
-      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledWith(
-        '9000000001',
-        'deoleo_kyc_approval',
-        ['Acme Owner', 'Wholesale'],
-      );
+      // The approval fan-out must carry [ownerName, programName] with the REAL program to the owner.
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+      const call = mockNotifications.notifyUserWithChannels.mock.calls[0][0];
+      expect(call.eventKey).toBe('KYC_APPROVED');
+      expect(call.recipientPhone).toBe('9000000001');
+      expect(call.vars.ownerName).toBe('Acme Owner');
+      expect(call.vars.programName).toBe('Wholesale');
     });
   });
 
@@ -465,13 +471,12 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
       expect(mockTx.wallet.create).not.toHaveBeenCalled();
     });
 
-    it('enqueues a KYC_RE_UPLOAD_REQUIRED notification', async () => {
+    it('notifies a KYC_RE_UPLOAD_REQUIRED (free-channel event) post-tx', async () => {
       const file = { buffer: makeXlsx([ownerRejectRow(SUB_ID)]), size: 1 } as Express.Multer.File;
       await service.bulkVerify(gifsy, file, true);
-      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
-        expect.objectContaining({
-          variables: expect.objectContaining({ event: 'KYC_RE_UPLOAD_REQUIRED' }),
-        }),
+      // KYC_RE_UPLOAD_REQUIRED has no paid-channel contract → routed via notifyUser (IN_APP + PUSH).
+      expect(mockNotifications.notifyUser).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'KYC_RE_UPLOAD_REQUIRED' }),
       );
     });
 

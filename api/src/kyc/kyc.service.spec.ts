@@ -95,7 +95,12 @@ const mockPrisma = {
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
-const mockNotifications = { enqueue: jest.fn().mockResolvedValue({ id: 'n1' }) };
+const mockNotifications = {
+  enqueue: jest.fn().mockResolvedValue({ id: 'n1' }),
+  writeInApp: jest.fn().mockResolvedValue({ id: 'n1' }),
+  notifyUser: jest.fn().mockResolvedValue(undefined),
+  notifyUserWithChannels: jest.fn().mockResolvedValue(undefined),
+};
 
 const mockMsg91 = {
   sendOtp: jest.fn().mockResolvedValue(undefined),
@@ -2271,11 +2276,11 @@ describe('KycService', () => {
       mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
     };
 
-    it('SUBMIT create() does NOT send the WhatsApp — it is deferred to consent (post-OTP)', async () => {
+    it('SUBMIT create() does NOT notify — the KYC_SUBMITTED fan-out is deferred to consent (post-OTP)', async () => {
       primeSubmit('deoleo');
       await service.create(isr, baseDto as never);
-      // The "KYC submitted" WhatsApp must NOT fire before the outlet-owner OTP is verified.
-      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
+      // The "KYC submitted" fan-out must NOT fire before the outlet-owner OTP is verified.
+      expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
     });
 
     /** Prime a consent() happy path whose submission carries the WhatsApp owner + program. */
@@ -2298,30 +2303,35 @@ describe('KycService', () => {
       return { sub: 'owner1', role: 'SALES_ISR', clientId, phone: '', name: '' };
     };
 
-    it('CONSENT (deoleo): sends deoleo_kyc_submission to the owner mobile with [ownerName, date, program] AFTER the OTP verifies', async () => {
+    it('CONSENT (deoleo): fans out KYC_SUBMITTED (paid-channel-only) to the owner mobile with [ownerName, date, program] AFTER the OTP verifies', async () => {
       const owner = primeConsent('deoleo');
       await service.consent(owner, { submissionId: 'sub1', mobile: '9000000001', otp: '123456' });
 
-      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledTimes(1);
-      const [phone, template, values] = mockMsg91.sendWhatsappTemplate.mock.calls[0];
-      // Recipient = the just-verified consent mobile (the outlet owner's phone).
-      expect(phone).toBe('9000000001');
-      expect(template).toBe('deoleo_kyc_submission');
-      // [ownerName, submission date (DD MMM YYYY), programName]
-      expect(values[0]).toBe('Acme Owner');
-      expect(values[1]).toMatch(/^\d{2} [A-Z][a-z]{2} \d{4}$/);
-      expect(values[2]).toBe('Olive Oil');
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+      const call = mockNotifications.notifyUserWithChannels.mock.calls[0][0];
+      expect(call.clientId).toBe('deoleo');
+      expect(call.eventKey).toBe('KYC_SUBMITTED');
+      // Recipient = the just-verified consent mobile (the outlet owner's phone); free channels off.
+      expect(call.recipientPhone).toBe('9000000001');
+      expect(call.includeFreeChannels).toBe(false);
+      // vars → ownerName, submissionDate (DD MMM YYYY), programName (mapped to the SMS/WhatsApp contract).
+      expect(call.vars.ownerName).toBe('Acme Owner');
+      expect(call.vars.submissionDate).toMatch(/^\d{2} [A-Z][a-z]{2} \d{4}$/);
+      expect(call.vars.programName).toBe('Olive Oil');
     });
 
-    it('CONSENT (unconfigured tenant clientb): does NOT send a WhatsApp', async () => {
+    it('CONSENT (any tenant): fans out KYC_SUBMITTED with that tenant clientId (paid-channel gating lives in the resolver)', async () => {
       const owner = primeConsent('clientb');
       await service.consent(owner, { submissionId: 'sub1', mobile: '9000000001', otp: '123456' });
-      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+      const call = mockNotifications.notifyUserWithChannels.mock.calls[0][0];
+      expect(call.clientId).toBe('clientb');
+      expect(call.eventKey).toBe('KYC_SUBMITTED');
     });
 
-    it('CONSENT: a thrown sendWhatsappTemplate never fails the consent verification', async () => {
+    it('CONSENT: a thrown fan-out never fails the consent verification', async () => {
       const owner = primeConsent('deoleo');
-      mockMsg91.sendWhatsappTemplate.mockRejectedValueOnce(new Error('MSG91 down'));
+      mockNotifications.notifyUserWithChannels.mockRejectedValueOnce(new Error('MSG91 down'));
       const res = await service.consent(owner, { submissionId: 'sub1', mobile: '9000000001', otp: '123456' });
       expect(res).toMatchObject({ verified: true, submissionId: 'sub1' });
     });
@@ -2362,20 +2372,22 @@ describe('KycService', () => {
       mockTx.auditLog.create.mockResolvedValueOnce({});
     };
 
-    it('APPROVE (deoleo): sends deoleo_kyc_approval to the owner mobile with [ownerName, program]', async () => {
+    it('APPROVE (deoleo): fans out KYC_APPROVED to the owner mobile with vars [ownerName, program]', async () => {
       seedApproveWithOwner();
       await service.approve(gifsy, 's1');
 
-      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledTimes(1);
-      const [phone, template, values] = mockMsg91.sendWhatsappTemplate.mock.calls[0];
-      expect(phone).toBe('9000000001');
-      expect(template).toBe('deoleo_kyc_approval');
-      expect(values).toEqual(['Acme Owner', 'Olive Oil']);
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+      const call = mockNotifications.notifyUserWithChannels.mock.calls[0][0];
+      expect(call.clientId).toBe('deoleo');
+      expect(call.eventKey).toBe('KYC_APPROVED');
+      expect(call.recipientPhone).toBe('9000000001'); // the owner phone from the approval intent
+      expect(call.vars.ownerName).toBe('Acme Owner');
+      expect(call.vars.programName).toBe('Olive Oil');
     });
 
-    it('APPROVE: a thrown sendWhatsappTemplate never fails the KYC approval', async () => {
+    it('APPROVE: a thrown fan-out never fails the KYC approval', async () => {
       seedApproveWithOwner();
-      mockMsg91.sendWhatsappTemplate.mockRejectedValueOnce(new Error('MSG91 down'));
+      mockNotifications.notifyUserWithChannels.mockRejectedValueOnce(new Error('MSG91 down'));
       const res = await service.approve(gifsy, 's1');
       expect(res).toEqual({ message: 'KYC approved successfully' });
     });
@@ -2423,18 +2435,17 @@ describe('KycService', () => {
       mockTx.auditLog.create.mockResolvedValueOnce({});
     };
 
-    it('APPROVE (regression): resolves whatsappProgramName from a NON-primary outlet (real prod shape)', async () => {
+    it('APPROVE (regression): resolves programName from a NON-primary outlet (real prod shape)', async () => {
       seedApproveNonPrimaryOutlet();
       await service.approve(gifsy, 's1');
 
-      // The approval WhatsApp must carry the outlet's real programName — not a blank.
-      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledTimes(1);
-      const [phone, template, values] = mockMsg91.sendWhatsappTemplate.mock.calls[0];
-      expect(phone).toBe('9000000001');
-      expect(template).toBe('deoleo_kyc_approval');
-      // [ownerName, programName] — the 2nd body value must be the outlet's program.
-      expect(values).toEqual(['Acme Owner', 'Wholesale']);
-      expect(values[1]).toBe('Wholesale');
+      // The approval fan-out must carry the outlet's real programName — not a blank.
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+      const call = mockNotifications.notifyUserWithChannels.mock.calls[0][0];
+      expect(call.recipientPhone).toBe('9000000001');
+      expect(call.eventKey).toBe('KYC_APPROVED');
+      expect(call.vars.ownerName).toBe('Acme Owner');
+      expect(call.vars.programName).toBe('Wholesale');
     });
   });
 
@@ -2991,7 +3002,9 @@ describe('KycService', () => {
         where: { id: 's1' },
         data: { status: 'PENDING_GIFSY', reviewedAt: expect.any(Date) },
       });
-      expect(mockNotifications.enqueue).toHaveBeenCalled();
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(
+        expect.objectContaining({ eventKey: 'KYC_UNDER_REVIEW' }),
+      );
     });
 
     it('forbids a same-level manager in a DIFFERENT branch from approving', async () => {
@@ -3111,8 +3124,10 @@ describe('KycService', () => {
         data: { status: 'ACTIVE' },
       });
       expect(mockTx.wallet.create).toHaveBeenCalledWith({ data: { partnerId: 'p1', accountId: 'acc-x' } });
-      // B1: notification enqueued via service.notify, not inside the tx
-      expect(mockNotifications.enqueue).toHaveBeenCalled();
+      // B1: notification fanned out via service.notify, not inside the tx
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(
+        expect.objectContaining({ eventKey: 'KYC_APPROVED' }),
+      );
     });
 
     it('login-phone change on approval: syncs User.phone, STAMPS sessionsInvalidBefore (before) AND revokes the partner sessions', async () => {
@@ -3965,16 +3980,10 @@ describe('KycService', () => {
       expect(res.outcome).toBe('approved');
       expect(mockTx.user.update).toHaveBeenCalledWith({ where: { id: 'user1' }, data: { status: 'ACTIVE' } });
       expect(mockTx.wallet.create).toHaveBeenCalledWith({ data: { partnerId: 'p1', accountId: 'acc-x' } });
-      // B1: notification enqueued post-tx, not inside tx
-      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
-        expect.objectContaining({ variables: expect.objectContaining({ event: 'KYC_APPROVED' }) }),
-      );
-      // The KYC_APPROVED PUSH deep-links to a real authenticated route (a urless push → '/' → /auth/login).
-      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
-        expect.objectContaining({
-          channel: 'PUSH',
-          variables: expect.objectContaining({ event: 'KYC_APPROVED', url: '/sales/kyc' }),
-        }),
+      // B1: notification fanned out post-tx, not inside tx. The KYC_APPROVED fan-out writes
+      // IN_APP + PUSH (deep-link /sales/kyc) internally, plus the config-driven paid channels.
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(
+        expect.objectContaining({ eventKey: 'KYC_APPROVED', event: 'KYC_APPROVED', url: '/sales/kyc' }),
       );
     });
 
@@ -4336,11 +4345,10 @@ describe('KycService', () => {
 
       await service.reKyc(gifsy, 's-approved', { reason: 'doc expired' });
 
-      // notification must have been sent after the tx
-      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
-        expect.objectContaining({
-          variables: expect.objectContaining({ event: 'KYC_RE_KYC_REQUIRED' }),
-        }),
+      // notification must have been sent after the tx. KYC_RE_KYC_REQUIRED has no paid-channel
+      // contract → routed via notifyUser (IN_APP + PUSH).
+      expect(mockNotifications.notifyUser).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'KYC_RE_KYC_REQUIRED' }),
       );
     });
 

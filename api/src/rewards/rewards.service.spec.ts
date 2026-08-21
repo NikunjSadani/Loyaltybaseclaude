@@ -66,6 +66,9 @@ const mockWallet = {
 
 const mockNotifications = {
   enqueue: jest.fn().mockResolvedValue({ id: 'n1' }),
+  writeInApp: jest.fn().mockResolvedValue({ id: 'n1' }),
+  notifyUser: jest.fn().mockResolvedValue(undefined),
+  notifyUserWithChannels: jest.fn().mockResolvedValue(undefined),
 };
 
 // OTP is now sent synchronously via Msg91Service (A-2a) — default: succeeds.
@@ -675,16 +678,49 @@ describe('RewardsService', () => {
       });
       const hist = mockPrisma.redemptionStatusHistory.create.mock.calls?.[0]?.[0];
       expect(hist.data).toMatchObject({ orderId: 'o1', fromStatus: 'PENDING', toStatus: 'CONFIRMED', changedById: 'user1' });
-      // The REDEMPTION_CONFIRMED PUSH deep-links to a real authenticated route
-      // (a urless push falls back to '/' → /auth/login → the signed-in user is bounced out).
-      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
+      // REDEMPTION_CONFIRMED fans out to the redeeming partner: IN_APP + PUSH (inside
+      // notifyUserWithChannels) + config-driven paid channels, deep-linking to /partner/rewards.
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(
         expect.objectContaining({
           userId: 'user1',
-          channel: 'PUSH',
-          variables: expect.objectContaining({ event: 'REDEMPTION_CONFIRMED', url: '/partner/rewards' }),
+          eventKey: 'REDEMPTION_CONFIRMED',
+          event: 'REDEMPTION_CONFIRMED',
+          url: '/partner/rewards',
         }),
       );
       expect(res.status).toBe('CONFIRMED');
+    });
+
+    it('paid-channel recipient is the OUTLET OWNER (partner.phone/ownerName); free channels keep the acting user', async () => {
+      // The outlet owner's phone/name differ from the acting login (a switched-sibling redemption).
+      // The paid channel must reach the OWNER; the free channels still address the acting user.
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        partner: {
+          ...pendingOrder.partner,
+          phone: '9998887777',
+          ownerName: 'Owner Name',
+        },
+      });
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+        expiresAt: new Date(Date.now() + 60000),
+      });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'CONFIRMED' });
+
+      await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
+
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(
+        expect.objectContaining({
+          // Free channels: still the acting user (partner.sub = 'user1', phone 9991112222).
+          userId: 'user1',
+          eventKey: 'REDEMPTION_CONFIRMED',
+          // Paid channel now addresses the outlet owner, NOT the acting login.
+          recipientPhone: '9998887777',
+          vars: expect.objectContaining({ ownerName: 'Owner Name' }),
+        }),
+      );
     });
 
     it('a concurrent double-confirm is blocked (claim count 0 → no debit)', async () => {
@@ -1306,6 +1342,9 @@ describe('RewardsService', () => {
   describe('confirmRedeemForOutlet', () => {
     const outletPartner = {
       id: 'cp-out', userId: 'outletUser1', user: { id: 'outletUser1', phone: '9000000000' },
+      // Outlet OWNER identity (distinct from the login user's phone above) — the paid-channel
+      // recipient for REDEMPTION_CONFIRMED, consistent with every other event.
+      phone: '9000000001', ownerName: 'Outlet Owner',
       // Eligibility fields: this object also doubles as the in-tx TOCTOU freshPartner
       // (wireConfirm sets channelPartner.findFirst = outletPartner). All modes gated.
       isActive: true, deletedAt: null,
@@ -1398,16 +1437,16 @@ describe('RewardsService', () => {
       expect(hist.data).toMatchObject({
         orderId: 'o-out', fromStatus: 'PENDING', toStatus: 'CONFIRMED', changedById: 'salesUser1',
       });
-      // Confirmation notify goes to the OUTLET's phone.
-      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
-        expect.objectContaining({ userId: 'outletUser1', recipientPhone: '9000000000' }),
-      );
-      // The REDEMPTION_CONFIRMED PUSH deep-links to a real authenticated route
-      // (a urless push falls back to '/' → /auth/login → the signed-in user is bounced out).
-      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
+      // Confirmation fan-out: FREE channels (IN_APP + PUSH) address the outlet's partner USER
+      // (userId), but the PAID channel now addresses the OUTLET OWNER's phone (partner.phone),
+      // NOT the login user's phone — consistent with every other event.
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(
         expect.objectContaining({
-          channel: 'PUSH',
-          variables: expect.objectContaining({ event: 'REDEMPTION_CONFIRMED', url: '/partner/rewards' }),
+          userId: 'outletUser1',
+          recipientPhone: '9000000001',
+          eventKey: 'REDEMPTION_CONFIRMED',
+          event: 'REDEMPTION_CONFIRMED',
+          url: '/partner/rewards',
         }),
       );
       expect(res.status).toBe('CONFIRMED');

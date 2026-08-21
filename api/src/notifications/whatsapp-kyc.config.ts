@@ -1,11 +1,14 @@
 /**
  * Per-tenant WhatsApp KYC template configuration.
  *
- * Keyed by clientId (the tenant slug). Only tenants present here send a KYC
- * WhatsApp notification — a clientId absent from this map is simply UNCONFIGURED
- * and `KycService.sendKycWhatsapp` no-ops for it. This keeps the tenant gate
- * config-driven and extensible (no `if (clientId === 'deoleo')` buried in logic):
- * onboarding another tenant's WhatsApp templates is one entry here.
+ * Keyed by clientId (the tenant slug). This map is now the DEFAULT SEED for the per-tenant
+ * notification-templates resolver (notification-templates.config.ts): a tenant present here
+ * defaults its four live events (KYC submission/approval + points/payout credit) to WhatsApp-on
+ * with these template names + masterWhatsapp ON, so an unconfigured tenant sends exactly as it did
+ * before those sends were routed through NotificationsService.notifyUserWithChannels. A clientId
+ * absent from this map defaults every channel OFF. This keeps the tenant gate config-driven and
+ * extensible (no `if (clientId === 'deoleo')` in logic): onboarding a tenant's WhatsApp is one
+ * entry here (a stored program_settings row can then override per event).
  *
  * The template names must match templates already registered + approved in MSG91
  * for that tenant's integrated WhatsApp number. Body-variable contracts:

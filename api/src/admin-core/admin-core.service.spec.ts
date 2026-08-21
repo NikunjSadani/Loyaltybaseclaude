@@ -922,6 +922,30 @@ describe('AdminCoreService', () => {
       expect(call.update.settingValue).toBe('My Program');
     });
 
+    it('REJECTS a raw notificationTemplates write via the generic PUT (no opt-in) and does not persist', async () => {
+      // A GIFSY_STAFF with tenancy:write_finance could reach the generic PUT /v1/admin/settings.
+      // Writing the notificationTemplates key raw (e.g. masterWhatsapp:false to dark a live tenant)
+      // must be blocked here so ALL writes are forced through NotificationTemplatesService.saveConfig.
+      await expect(
+        service.upsertSetting(gifsy, { key: 'notificationTemplates', value: { masterWhatsapp: false } }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+
+    it('ALLOWS a notificationTemplates write when the dedicated path passes allowPlatformOnlyKey', async () => {
+      // The dedicated NotificationTemplatesService.saveConfig opt-in still persists (audit + write).
+      await service.upsertSetting(
+        gifsy,
+        { key: 'notificationTemplates', value: { masterWhatsapp: true, masterSms: false, events: {} } },
+        { allowPlatformOnlyKey: true },
+      );
+      const call = mockPrisma.programSetting.upsert.mock.calls[0][0];
+      expect(call.where).toEqual({
+        clientId_settingKey: { clientId: 'deoleo', settingKey: 'notificationTemplates' },
+      });
+      expect(call.update.settingValue).toEqual({ masterWhatsapp: true, masterSms: false, events: {} });
+    });
+
     it('appends a dedicated TdsPolicy audit (old→new, entityId=clientId) on a tdsPolicy write', async () => {
       mockPrisma.programSetting.findUnique.mockResolvedValue({
         settingValue: { section: 'SEC_194R', methodology: 'DEDUCT' },

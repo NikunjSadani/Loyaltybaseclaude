@@ -1,14 +1,14 @@
 ﻿'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
-  Home, Wallet, Gift, User, Bell, CheckCircle,
-  Coins, Trophy, X, HeadphonesIcon, Target, Banknote, Medal,
+  Home, Wallet, Gift, User, HeadphonesIcon, Target, Medal,
   Store, Users, ChevronDown, Check, ClipboardList,
 } from 'lucide-react';
 import { setActivePartner } from '@/lib/active-partner-actions';
+import { NotificationBell } from '@/components/notifications/notification-bell';
 import { NavBottom } from '@/components/layout/nav-bottom';
 import { Sidebar } from '@/components/layout/sidebar';
 import { SiteFooter } from '@/components/layout/site-footer';
@@ -18,23 +18,6 @@ import { usePartnerIdentity } from '@/lib/partner-identity';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES } from '@/lib/auth-client';
-
-/* ── Notifications ───────────────────────────────────────────────────────────── */
-
-function getNotifications(hasPoints: boolean) {
-  if (hasPoints) {
-    return [
-      { id: 1, icon: Coins,       iconBg: 'bg-emerald-100 text-emerald-600', title: '200 points credited',      body: 'KPI achievement — May 2026 cycle confirmed.',         time: '2 min ago',  unread: true  },
-      { id: 2, icon: Trophy,      iconBg: 'bg-amber-100 text-amber-600',     title: 'Rank improved!',           body: 'You moved up to Rank #12 on the leaderboard.',       time: '1 hr ago',   unread: true  },
-      { id: 3, icon: CheckCircle, iconBg: 'bg-blue-100 text-blue-600',       title: 'Redemption confirmed',     body: 'Amazon Voucher ₹500 — delivery in 3–5 days.',        time: '3 hrs ago',  unread: false },
-    ];
-  }
-  return [
-    { id: 1, icon: Banknote,    iconBg: 'bg-emerald-100 text-emerald-600', title: 'Payout confirmed — ₹8,000',  body: 'UTR 506210001234 · Payment transferred to your bank.', time: '2 min ago',  unread: true  },
-    { id: 2, icon: CheckCircle, iconBg: 'bg-blue-100 text-blue-600',       title: 'KPI achievement confirmed',  body: 'April 2026 — 100% achieved. Payout processing.',       time: '1 day ago',  unread: true  },
-    { id: 3, icon: Target,      iconBg: 'bg-amber-100 text-amber-600',     title: 'Target updated',             body: 'May 2026 target has been set. Check your dashboard.',  time: '3 days ago', unread: false },
-  ];
-}
 
 /* ── Outlet switcher (Wave 3) ───────────────────────────────────────────────────
    Compact header control shown ONLY to a login that operates more than one outlet.
@@ -126,22 +109,6 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
   // Feature gating is DB-sourced from the same authenticated /partner/me response
   // (§A-DOMAIN "P5"), NOT the in-code registry. Branding still comes from clientConfig.
   const features     = identity.features;
-  const [notifOpen,      setNotifOpen]      = useState(false);
-  // Notifications are seeded once on mount; base them on the real points signal
-  // (payout-style otherwise). The identity upgrades async from /partner/me, so the
-  // initial mount uses the loading default (false → payout notifications), which is
-  // the safe generic set; a re-mount after identity loads reflects the real signal.
-  const [notifications,  setNotifications]  = useState(() => getNotifications(identity.hasPointsActivity));
-
-  // Re-seed the (static) notification set once the real points signal resolves from
-  // /partner/me, so a points partner sees points-style notifications and a payout
-  // partner the payout-style set. Keyed on the boolean so it runs only on transition.
-  useEffect(() => {
-    setNotifications(getNotifications(identity.hasPointsActivity));
-  }, [identity.hasPointsActivity]);
-
-  const unreadCount = notifications.filter(n => n.unread).length;
-  const markAllRead = () => setNotifications(prev => prev.map(n => ({ ...n, unread: false })));
 
   const handleLogout = () => {
     // logout() clears the httpOnly cookies server-side + local display state, then redirects.
@@ -248,17 +215,8 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
                 />
               )}
 
-              {/* Notification bell */}
-              <button
-                onClick={() => { setNotifOpen(true); markAllRead(); }}
-                className="p-2 rounded-full hover:bg-gray-100 text-gray-500 transition-colors relative"
-                aria-label="Notifications"
-              >
-                <Bell className="h-5 w-5" />
-                {unreadCount > 0 && (
-                  <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-[var(--brand-primary)] rounded-full" />
-                )}
-              </button>
+              {/* Notification bell (real feed — Phase 1) */}
+              <NotificationBell tone="light" fallbackUrl="/partner/dashboard" />
 
               <Link
                 href="/partner/profile"
@@ -282,46 +240,6 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
 
       {/* Bottom nav */}
       <NavBottom items={mobileNavItems} />
-
-      {/* Notification panel */}
-      {notifOpen && (
-        <div className="fixed inset-0 z-50 flex flex-col justify-end">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setNotifOpen(false)} />
-          <div className="relative bg-white rounded-t-2xl max-h-[75vh] flex flex-col">
-            <div className="flex justify-center pt-3 pb-1">
-              <div className="w-10 h-1 bg-gray-200 rounded-full" />
-            </div>
-            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
-              <h3 className="text-base font-semibold text-gray-900">Notifications</h3>
-              <button onClick={() => setNotifOpen(false)} className="p-1.5 rounded-full hover:bg-gray-100 text-gray-400">
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="overflow-y-auto divide-y divide-gray-50">
-              {notifications.map((n) => {
-                const Icon = n.icon;
-                return (
-                  <div key={n.id} className="flex items-start gap-3 px-5 py-4">
-                    <div className={`w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 ${n.iconBg}`}>
-                      <Icon className="h-4 w-4" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-semibold text-gray-900">{n.title}</p>
-                      <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{n.body}</p>
-                      <p className="text-xs text-gray-400 mt-1">{n.time}</p>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            <div className="px-5 py-3 border-t border-gray-100">
-              <Link href="/partner/wallet" className="text-sm text-[var(--brand-primary)] font-medium" onClick={() => setNotifOpen(false)}>
-                View all activity →
-              </Link>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

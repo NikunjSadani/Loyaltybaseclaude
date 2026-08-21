@@ -197,6 +197,9 @@ export class VisibilityNotifyService {
     body: string,
     url: string,
   ): Promise<void> {
+    // IN_APP bell-feed row (best-effort; writeInApp swallows its own errors).
+    await this.notifications.writeInApp({ userId, subject, body, url });
+    // PUSH row — identical to the prior behaviour.
     await this.notifications
       .enqueue({ userId, channel: 'PUSH', subject, body, variables: { url } })
       .catch((e) => this.logger.warn(`[visibility-notify] enqueue failed for ${userId}: ${e}`));

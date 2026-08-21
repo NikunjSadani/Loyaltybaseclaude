@@ -100,7 +100,12 @@ const mockPrisma = {
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown, _opts?: { timeout?: number; maxWait?: number }) => cb(mockTx)),
 };
 
-const mockNotifications = { enqueue: jest.fn().mockResolvedValue({ id: 'n1' }) };
+const mockNotifications = {
+  enqueue: jest.fn().mockResolvedValue({ id: 'n1' }),
+  writeInApp: jest.fn().mockResolvedValue({ id: 'n1' }),
+  notifyUser: jest.fn().mockResolvedValue(undefined),
+  notifyUserWithChannels: jest.fn().mockResolvedValue(undefined),
+};
 
 // Direct MSG91 WhatsApp sends (deoleo_points_credit / deoleo_payout_credit).
 const mockMsg91 = {
@@ -391,12 +396,13 @@ describe('CreditsService', () => {
         },
         mockTx,   // same tx — atomicity guaranteed
       );
-      // The WALLET_POINTS_EARNED PUSH deep-links to a real authenticated route
-      // (a urless push falls back to '/' → /auth/login → the signed-in user is bounced out).
-      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
+      // The points-credit fan-out carries the WALLET_POINTS_EARNED event + the /partner/wallet
+      // deep-link (IN_APP + PUSH are written inside notifyUserWithChannels).
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(
         expect.objectContaining({
-          channel: 'PUSH',
-          variables: expect.objectContaining({ event: 'WALLET_POINTS_EARNED', url: '/partner/wallet' }),
+          eventKey: 'POINTS_CREDITED',
+          event: 'WALLET_POINTS_EARNED',
+          url: '/partner/wallet',
         }),
       );
     });
@@ -570,13 +576,19 @@ describe('CreditsService', () => {
 
         await service.confirmBatch(admin, 'b1');
 
-        // DIRECT send with the deoleo_points_credit template + ordered bodyValues:
-        //   [ownerName, points, redeemableBalance, "July 2026" (period), "06 Jul 2026" (today)].
-        expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledWith(
-          '9900000041',
-          'deoleo_points_credit',
-          ['Ravi Traders', '50', '500', 'July 2026', '06 Jul 2026'],
-        );
+        // Config-driven POINTS_CREDITED fan-out to the owner; the mapped vars reproduce the
+        // deoleo_points_credit body order [ownerName, points, redeemableBalance, month, date].
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+        const call = mockNotifications.notifyUserWithChannels.mock.calls[0][0];
+        expect(call.eventKey).toBe('POINTS_CREDITED');
+        expect(call.recipientPhone).toBe('9900000041');
+        expect(call.vars).toMatchObject({
+          ownerName: 'Ravi Traders',
+          pointsCredited: 50,
+          redeemableBalance: 500,
+          monthYear: 'July 2026',
+          dateCredited: '06 Jul 2026',
+        });
         // Balance is read scoped to the credited partner.
         expect(mockPrisma.wallet.findFirst).toHaveBeenCalledWith(
           expect.objectContaining({ where: { partnerId: 'p1' } }),
@@ -601,13 +613,13 @@ describe('CreditsService', () => {
       });
       mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'u1', ownerName: 'Ravi', phone: '9900000041' });
-      mockMsg91.sendWhatsappTemplate.mockRejectedValue(new Error('MSG91 down'));
+      mockNotifications.notifyUserWithChannels.mockRejectedValueOnce(new Error('MSG91 down'));
 
       const res = await service.confirmBatch(admin, 'b1');
       expect(res.pointsCredited).toBe(1);
     });
 
-    it('no-ops the points-credit WhatsApp when the partner has no phone', async () => {
+    it('routes the points-credit fan-out with a null recipient phone when the partner has no phone (resolver then skips paid)', async () => {
       mockPrisma.creditBatch.findFirst.mockResolvedValue({
         id: 'b1',
         status: 'PENDING_CONFIRM',
@@ -624,7 +636,45 @@ describe('CreditsService', () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'u1', ownerName: 'Ravi', phone: null });
 
       await service.confirmBatch(admin, 'b1');
-      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
+      // The fan-out is still invoked, but with a null recipient phone → the resolver skips paid channels.
+      const call = mockNotifications.notifyUserWithChannels.mock.calls[0][0];
+      expect(call.eventKey).toBe('POINTS_CREDITED');
+      expect(call.recipientPhone).toBeNull();
+    });
+
+    it('a mid-batch partner LOOKUP failure isolates to that partner — the rest are still notified', async () => {
+      // Two credited partners; the per-partner channelPartner.findFirst THROWS for the first.
+      // Without the per-iteration try/catch that throw would abort the whole loop and starve the
+      // second partner of its notification. It must skip only the failing partner.
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1',
+        status: 'PENDING_CONFIRM',
+        period: '2026-07',
+        uploadedBy: 'admin1',
+        totalOutlets: 2,
+        totalPoints: 100,
+        totalPayoutPaise: BigInt(0),
+        rows: [
+          { outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'Sales', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
+          { outletId: 'O2', outletName: 'B', fieldId: 'f1', fieldName: 'Sales', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
+        ],
+      });
+      // Each row resolves to a DISTINCT partner so creditedByPartner has two entries.
+      mockTx.outlet.findFirst
+        .mockResolvedValueOnce({ partnerId: 'p1' })
+        .mockResolvedValueOnce({ partnerId: 'p2' });
+      // First partner lookup throws; second succeeds.
+      mockPrisma.channelPartner.findFirst
+        .mockRejectedValueOnce(new Error('lookup boom'))
+        .mockResolvedValueOnce({ userId: 'u2', ownerName: 'Second Trader', phone: '9900000002' });
+
+      const res = await service.confirmBatch(admin, 'b1');
+
+      // Batch still fully confirmed (notifications are post-commit + best-effort).
+      expect(res.pointsCredited).toBe(2);
+      // Exactly ONE partner (the survivor) was notified — the failing partner was skipped, not fatal.
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+      expect(mockNotifications.notifyUserWithChannels.mock.calls[0][0].vars.ownerName).toBe('Second Trader');
     });
   });
 
@@ -1269,9 +1319,9 @@ describe('CreditsService', () => {
         data: { status: 'PAID', utr: 'UTR123456', paidAt: expect.any(Date) },
       });
       expect(mockTx.creditPayoutDownload.update.mock.calls[0][0].data.status).toBe('PAID');
-      // The DIRECT payout WhatsApp fires (deoleo_payout_credit); the old dead WHATSAPP
-      // enqueue is gone — the notify() queue never drained non-PUSH.
-      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledTimes(1);
+      // The config-driven PAYOUT_CREDITED fan-out fires once (paid-channel-only); the old dead
+      // WHATSAPP enqueue is gone — the notify() queue never drained non-PUSH.
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
     });
 
     it('sends the deoleo_payout_credit WhatsApp with the right ordered bodyValues (Flow A)', async () => {
@@ -1299,12 +1349,20 @@ describe('CreditsService', () => {
         const file = buildUtrFile([[downloadCode, 'O1', 'UTR123456', 'Success', '']]);
         await service.uploadUtr(gifsy, 'd1', file, true);
 
-        // bodyValues order: [ownerName, points, utr, date-of-payment (today), month (download.period)].
-        expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledWith(
-          '9900000041',
-          'deoleo_payout_credit',
-          ['Ravi Traders', '150', 'UTR123456', '06 Jul 2026', 'May 2026'],
-        );
+        // PAYOUT_CREDITED fan-out to the owner (paid-channel-only); the mapped vars reproduce the
+        // deoleo_payout_credit body order [ownerName, points, utr, date-of-payment, month].
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+        const call = mockNotifications.notifyUserWithChannels.mock.calls[0][0];
+        expect(call.eventKey).toBe('PAYOUT_CREDITED');
+        expect(call.recipientPhone).toBe('9900000041');
+        expect(call.includeFreeChannels).toBe(false);
+        expect(call.vars).toMatchObject({
+          ownerName: 'Ravi Traders',
+          points: 150,
+          utr: 'UTR123456',
+          paymentDate: '06 Jul 2026',
+          month: 'May 2026',
+        });
         // The old dead WHATSAPP enqueue must be gone (queue never drained non-PUSH).
         const whatsappEnqueues = mockNotifications.enqueue.mock.calls
           .map((c) => c[0])

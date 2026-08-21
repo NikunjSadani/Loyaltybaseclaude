@@ -35,6 +35,7 @@ import {
   KYC_SLA_MAX_HOURS,
 } from '../common/kyc-sla-stage';
 import { isGifsyOperator } from '../common/tenant-scope';
+import { NOTIFICATION_TEMPLATES_SETTING_KEY } from '../notification-templates/notification-templates.config';
 import {
   BulkEditUsersDto,
   CreateUserDto,
@@ -1112,6 +1113,19 @@ export class AdminCoreService {
     if (dto.key === 'tdsStatutory' && !opts?.allowPlatformOnlyKey) {
       throw new ForbiddenException(
         'The TDS statutory config can only be changed via the dedicated owner-only TDS Statutory screen.',
+      );
+    }
+
+    // OWNER-ONLY notification config at the DATA boundary: the per-tenant notification-templates
+    // config (settingKey 'notificationTemplates') must ONLY be written through the dedicated,
+    // strictly-validated, GIFSY_ADMIN-only NotificationTemplatesService.saveConfig (which passes
+    // allowPlatformOnlyKey). Blocking it here stops the generic PUT /v1/admin/settings — reachable
+    // by a GIFSY_STAFF holding tenancy:write_finance — from writing the raw key (e.g. flipping
+    // masterWhatsapp:false to DARK a live WhatsApp tenant) and bypassing the owner-only + validated
+    // guarantee. Mirrors the tdsStatutory block above exactly.
+    if (dto.key === NOTIFICATION_TEMPLATES_SETTING_KEY && !opts?.allowPlatformOnlyKey) {
+      throw new ForbiddenException(
+        'Notification templates can only be changed via the dedicated Notification Templates screen.',
       );
     }
 
