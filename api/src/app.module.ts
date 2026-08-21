@@ -44,6 +44,7 @@ import { TdsModule }          from './tds/tds.module';
 import { TdsInvoicingModule } from './tds-invoicing/tds-invoicing.module';
 import { NotificationTemplatesModule } from './notification-templates/notification-templates.module';
 import { PushModule }         from './push/push.module';
+import { WhatsappBroadcastsModule } from './whatsapp-broadcasts/whatsapp-broadcasts.module';
 import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
 // Phase S (S1): World-A domain modules deleted. The real domain (users, partners,
 // kyc, outlets, sales, wallet, payouts, schemes/campaigns, targets, admin, visibility,
@@ -102,6 +103,7 @@ import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
     TdsInvoicingModule,
     NotificationTemplatesModule,
     PushModule,
+    WhatsappBroadcastsModule,
     TenantRoutingModule,
   ],
   controllers: [AppController],

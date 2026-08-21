@@ -5,52 +5,26 @@ import { Msg91Service } from '../notifications/msg91.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide } from '../common/tenant-scope';
 import {
+  ancestorSalesUserIds,
+  matchesOutletFilter,
+  phoneLast10,
+} from '../common/audience/audience.helpers';
+import {
   BroadcastChannel,
   BroadcastDto,
   BroadcastRecipientFilterDto,
 } from './dto/scheme-notify.dto';
 
-/** Minimal reporting edge for the up-hierarchy walk (id → its manager). */
-export interface SalesReportingEdge {
-  id: string;
-  reportingToId: string | null;
-}
-
-/**
- * Pure: given the tagged employees on a scheme's roster, return the set of
- * SalesUser ids that should be notified for the SALES scope — the tagged users
- * themselves PLUS every ANCESTOR up their reporting chain (D20: "the tagged
- * employee and everyone above them"). Walks `reportingToId` upward from each
- * tagged id. Cycle-safe + bounded.
- *
- * Kept local (not in sales-hierarchy-access.helper) so this stream owns it and
- * so it can be unit-tested with plain arrays.
- */
-export function ancestorSalesUserIds(
-  taggedIds: string[],
-  edges: SalesReportingEdge[],
-): Set<string> {
-  const parentOf = new Map<string, string | null>();
-  for (const e of edges) parentOf.set(e.id, e.reportingToId);
-
-  const out = new Set<string>();
-  for (const start of taggedIds) {
-    if (!start || !parentOf.has(start)) continue; // unknown/foreign id — skip
-    const seen = new Set<string>();
-    let current: string | null = start;
-    while (current && !seen.has(current)) {
-      seen.add(current);
-      out.add(current);
-      current = parentOf.get(current) ?? null;
-    }
-  }
-  return out;
-}
-
-/** Canonical last-10-digit phone form (strips +91/91/punctuation). Empty when no digits. */
-function phoneLast10(raw: string | null | undefined): string {
-  return (raw ?? '').replace(/\D/g, '').slice(-10);
-}
+// The audience-resolution primitives (ancestorSalesUserIds, phoneLast10, filter
+// matching) were generalised out of this file into common/audience/audience.helpers.ts
+// so the WhatsApp Broadcasts module reuses the SAME logic. Re-exported here so the
+// existing scheme-notify unit tests (which import ancestorSalesUserIds from this
+// module) keep working unchanged and to document that this file still owns the
+// scheme-roster resolution that consumes them.
+export {
+  ancestorSalesUserIds,
+  type SalesReportingEdge,
+} from '../common/audience/audience.helpers';
 
 /**
  * Scheme notifications (D29) — an ad-hoc broadcast tool inside Scheme Management.
@@ -214,35 +188,24 @@ export class SchemeNotifyService {
       },
     });
 
-    const hasOutletFilter =
-      !!filter &&
-      [
-        filter.zones,
-        filter.programNames,
-        filter.programCategories,
-        filter.outletTypeIds,
-        filter.states,
-      ].some((f) => Array.isArray(f) && f.length > 0);
-
-    const inFilter = (vals?: string[], v?: string | null): boolean =>
-      !vals || vals.length === 0 || (v != null && vals.includes(v));
-
     const phones: string[] = [];
     for (const r of rows) {
       const o = r.matchedOutlet;
       // Standalone rows (no matched outlet) can never satisfy an outlet filter and
       // have no phone to notify.
       if (!o) continue;
-      if (hasOutletFilter) {
-        if (
-          !inFilter(filter?.zones, o.zone) ||
-          !inFilter(filter?.programNames, o.programName) ||
-          !inFilter(filter?.programCategories, o.programCategory) ||
-          !inFilter(filter?.states, o.state) ||
-          !inFilter(filter?.outletTypeIds, o.outletTypeId)
-        ) {
-          continue;
-        }
+      // Shared inclusion-only facet matching (identical semantics to the old inline
+      // hasOutletFilter/inFilter): an absent/empty facet matches all.
+      if (
+        !matchesOutletFilter(filter, {
+          zone: o.zone,
+          programName: o.programName,
+          programCategory: o.programCategory,
+          state: o.state,
+          outletTypeId: o.outletTypeId,
+        })
+      ) {
+        continue;
       }
       const phone = phoneLast10(r.matchedPartner?.phone ?? o.phone);
       if (/^\d{10}$/.test(phone)) phones.push(phone);

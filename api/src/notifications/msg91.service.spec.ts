@@ -86,7 +86,7 @@ describe('Msg91Service.sendWhatsappTemplate', () => {
     const service = new Msg91Service(makeConfig({})); // MSG91_AUTH_KEY undefined
     await expect(
       service.sendWhatsappTemplate('9000000001', 'deoleo_kyc_submission', ['a', 'b', 'c']),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ requestId: null });
 
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -99,7 +99,7 @@ describe('Msg91Service.sendWhatsappTemplate', () => {
     for (const bad of ['919830011252', '+919830011252', '98300', '98300112ab']) {
       await expect(
         service.sendWhatsappTemplate(bad, 'deoleo_kyc_approval', ['Owner', 'Program']),
-      ).resolves.toBeUndefined();
+      ).resolves.toEqual({ requestId: null });
     }
     expect(fetchMock).not.toHaveBeenCalled();
   });

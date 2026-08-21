@@ -2965,3 +2965,133 @@ model CreditReversal {
   @@index([status])
   @@map("credit_reversals")
 }
+
+// ─── MODULE: WhatsApp Broadcasts (Gifsy-operator only) ──────────────────────
+// Additive-only. Three new tables + six enums. NO changes to existing tables.
+// See platform/docs/plans/WHATSAPP-BROADCASTS-DESIGN.md.
+
+enum WhatsappTemplateCategory {
+  MARKETING
+  UTILITY
+  AUTHENTICATION
+}
+
+enum WhatsappTemplateStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum WhatsappBroadcastAudienceMode {
+  FILTER
+  EXCEL
+}
+
+enum WhatsappBroadcastScope {
+  OUTLETS
+  SALES
+  BOTH
+}
+
+enum WhatsappBroadcastStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  CANCELLED
+}
+
+enum WhatsappRecipientStatus {
+  QUEUED
+  SENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  SKIPPED
+}
+
+/// Per-tenant WhatsApp template library. `msg91TemplateName` is the name registered/
+/// approved in MSG91; `variableContract` is the ordered [{index,label}] the body's
+/// {{1}}…{{n}} placeholders map to. Soft-archived on delete (status ARCHIVED) so historical
+/// broadcasts keep their template. createdByUserId is a bare column (no FK) — additive-only,
+/// never touches the users table.
+model WhatsappTemplate {
+  id                String                   @id @default(cuid())
+  clientId          String
+  name              String
+  msg91TemplateName String
+  category          WhatsappTemplateCategory @default(UTILITY)
+  languageCode      String                   @default("en")
+  bodyText          String
+  variableContract  Json?
+  headerType        String?
+  footer            String?
+  status            WhatsappTemplateStatus   @default(ACTIVE)
+  createdByUserId   String?
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+
+  broadcasts WhatsappBroadcast[]
+
+  @@unique([clientId, name])
+  @@index([clientId, status])
+  @@map("whatsapp_templates")
+}
+
+/// One broadcast campaign. audienceMode FILTER derives recipients + per-recipient vars from
+/// the tenant's outlets/sales via audienceConfig; EXCEL takes an uploaded phone+vars list.
+/// Counters (recipient/sent/delivered/read/failed) are rolled by the send worker + status
+/// webhook. templateId FK is Restrict so an in-use template can't be hard-deleted.
+model WhatsappBroadcast {
+  id              String                        @id @default(cuid())
+  clientId        String
+  templateId      String
+  title           String
+  audienceMode    WhatsappBroadcastAudienceMode
+  audienceScope   WhatsappBroadcastScope?
+  audienceConfig  Json?
+  status          WhatsappBroadcastStatus       @default(DRAFT)
+  scheduledAt     DateTime?
+  recipientCount  Int                           @default(0)
+  sentCount       Int                           @default(0)
+  deliveredCount  Int                           @default(0)
+  readCount       Int                           @default(0)
+  failedCount     Int                           @default(0)
+  createdByUserId String?
+  createdAt       DateTime                      @default(now())
+  updatedAt       DateTime                      @updatedAt
+  sentAt          DateTime?
+
+  template   WhatsappTemplate             @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  recipients WhatsappBroadcastRecipient[]
+
+  @@index([clientId, status])
+  @@index([status, scheduledAt])
+  @@map("whatsapp_broadcasts")
+}
+
+/// One row per outbound message. `id` IS the crqid sent to MSG91 (echoed back on the outbound
+/// report webhook → correlation key), so no separate crqid column is needed. msg91RequestId is
+/// captured from the send response for the fallback status-by-requestID reconcile.
+model WhatsappBroadcastRecipient {
+  id             String                  @id @default(cuid())
+  broadcastId    String
+  clientId       String
+  phone          String
+  variables      Json?
+  status         WhatsappRecipientStatus @default(QUEUED)
+  msg91RequestId String?
+  sentAt         DateTime?
+  deliveredAt    DateTime?
+  readAt         DateTime?
+  errorReason    String?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  broadcast WhatsappBroadcast @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
+
+  @@index([broadcastId, status])
+  @@index([clientId, status])
+  @@index([msg91RequestId])
+  @@map("whatsapp_broadcast_recipients")
+}

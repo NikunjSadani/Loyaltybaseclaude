@@ -96,17 +96,29 @@ export class Msg91Service {
    * @param phone        the recipient's 10-digit mobile (country code is prepended → `91<phone>`)
    * @param templateName the MSG91-registered template name (e.g. 'deoleo_kyc_approval')
    * @param bodyValues   ordered body variables → mapped to body_1, body_2, … in template order
+   * @param opts         optional per-message extras:
+   *   - `crqid`        a client reference id ECHOED back on the "On Outbound Report Received"
+   *                    webhook → the correlation key the WhatsApp Broadcasts module uses to map
+   *                    a status callback back to its recipient row. See the ⚠️ RUNTIME-VERIFY
+   *                    note below on the exact field placement + response field name.
+   *   - `languageCode` template language code (defaults to 'en'); a template registered in
+   *                    another language must send its own code or MSG91 rejects the send.
+   * @returns `{ requestId }` — MSG91's returned bulk request id (best-effort; null when the
+   *   DEV bypass fires, the recipient is skipped, or the response carries no id). Existing
+   *   callers (scheme broadcast) ignore the return value, so this is backward-compatible.
    */
   async sendWhatsappTemplate(
     phone: string,
     templateName: string,
     bodyValues: string[],
-  ): Promise<void> {
+    opts?: { crqid?: string; languageCode?: string },
+  ): Promise<{ requestId: string | null }> {
     const authKey = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
     // The integrated WhatsApp number registered with MSG91 for this platform.
     // Configurable via MSG91_WHATSAPP_NUMBER; defaults to the Deoleo-integrated number.
     const integratedNumber =
       this.config.get<string>('MSG91_WHATSAPP_NUMBER')?.trim() || '917003202293';
+    const languageCode = opts?.languageCode?.trim() || 'en';
 
     // DEV bypass — same shape as sendOtp's missing-authKey path: a non-prod env
     // without MSG91 configured logs and returns instead of throwing.
@@ -114,7 +126,7 @@ export class Msg91Service {
       this.logger.warn(
         `[DEV] MSG91 not configured — WhatsApp template "${templateName}" for ${phone} not sent (values: ${JSON.stringify(bodyValues)})`,
       );
-      return;
+      return { requestId: null };
     }
 
     // Recipient sanity guard: the body prepends `91` (country code), so the caller
@@ -125,12 +137,27 @@ export class Msg91Service {
       this.logger.warn(
         `WhatsApp template "${templateName}" skipped — recipient is not a bare 10-digit mobile.`,
       );
-      return;
+      return { requestId: null };
     }
 
     // MSG91 v5 bulk WhatsApp outbound — template message. The payload is built in
     // ONE place (below) for readability; field names mirror the MSG91 docs so the
     // orchestrator can runtime-verify / tweak against the real API in one spot.
+    //
+    // ⚠️ RUNTIME-VERIFY (crqid): per the MSG91 v5 WhatsApp docs a client reference id
+    // is carried on the per-recipient `to_and_components[]` entry as `crqid`, and is
+    // echoed back on the "On Outbound Report Received" webhook. The exact key spelling
+    // (`crqid`) + placement is per the current MSG91 docs — confirm against a real send +
+    // a real webhook payload on staging. The Broadcasts webhook falls back to matching on
+    // the returned requestId if the crqid echo differs, so a mismatch degrades gracefully.
+    const to_and_component: Record<string, unknown> = {
+      to: [`91${phone}`],
+      components: Object.fromEntries(
+        bodyValues.map((value, i) => [`body_${i + 1}`, { type: 'text', value }]),
+      ),
+    };
+    if (opts?.crqid) to_and_component.crqid = opts.crqid;
+
     const url =
       'https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/';
     const body = {
@@ -141,18 +168,8 @@ export class Msg91Service {
         type: 'template',
         template: {
           name: templateName,
-          language: { code: 'en', policy: 'deterministic' },
-          to_and_components: [
-            {
-              to: [`91${phone}`],
-              components: Object.fromEntries(
-                bodyValues.map((value, i) => [
-                  `body_${i + 1}`,
-                  { type: 'text', value },
-                ]),
-              ),
-            },
-          ],
+          language: { code: languageCode, policy: 'deterministic' },
+          to_and_components: [to_and_component],
         },
       },
     };
@@ -178,13 +195,78 @@ export class Msg91Service {
     }
 
     // MSG91 can return HTTP 200 with {"type":"error"} — check the body too.
-    const json = (await res.json()) as { type?: string; message?: string };
+    // ⚠️ RUNTIME-VERIFY (requestId): MSG91 returns the bulk request id in the response
+    // body; the exact field name varies across docs (`request_id` / `requestId`, sometimes
+    // nested under `data`). We read the common shapes and store whatever is present. This
+    // is a best-effort correlation aid — the primary key is the crqid echoed on the webhook.
+    const json = (await res.json()) as {
+      type?: string;
+      message?: string;
+      request_id?: string;
+      requestId?: string;
+      data?: { request_id?: string; requestId?: string };
+    };
     if (!res.ok || json?.type === 'error') {
       const reason = json?.message ?? `HTTP ${res.status}`;
       this.logger.error(
         `MSG91 WhatsApp template "${templateName}" failed for ${phone}: ${reason}`,
       );
       throw new Error(`Failed to send WhatsApp template ${templateName}: ${reason}`);
+    }
+
+    const requestId =
+      json.request_id ??
+      json.requestId ??
+      json.data?.request_id ??
+      json.data?.requestId ??
+      null;
+    return { requestId };
+  }
+
+  /**
+   * Fallback status reconcile — query the MSG91 "status by requestID" API for a single
+   * request id and return a coarse terminal/derived status. Used by the WhatsApp
+   * Broadcasts fallback poll to catch recipients whose outbound-report webhook was
+   * missed. FAIL-SAFE: never throws — returns `null` on any error / DEV-bypass / an
+   * unrecognised body, so a reconcile pass can never crash the scheduler.
+   *
+   * ⚠️ RUNTIME-VERIFY: the MSG91 report/analytics-by-requestID endpoint URL + response
+   * shape are per the current MSG91 v5 docs and MUST be confirmed against a real call on
+   * staging. Implemented to the best-documented shape; wrong shape → null (no false
+   * status flips), so this is safe to ship dormant behind the poll's gate.
+   */
+  async getWhatsappStatusByRequestId(
+    requestId: string,
+  ): Promise<{ status: string; raw: unknown } | null> {
+    const authKey = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
+    if (!authKey || !requestId) return null;
+
+    const base =
+      this.config.get<string>('MSG91_WHATSAPP_REPORT_URL')?.trim() ||
+      'https://control.msg91.com/api/v5/whatsapp/report/';
+    const url = `${base}${encodeURIComponent(requestId)}`;
+
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { authkey: authKey, 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) return null;
+      const json = (await res.json()) as {
+        type?: string;
+        status?: string;
+        data?: { status?: string };
+      };
+      if (json?.type === 'error') return null;
+      const status = json.status ?? json.data?.status;
+      if (typeof status !== 'string' || status.trim() === '') return null;
+      return { status, raw: json };
+    } catch (e) {
+      this.logger.warn(
+        `MSG91 WhatsApp status-by-requestId reconcile failed for ${requestId}: ${e}`,
+      );
+      return null;
     }
   }
 

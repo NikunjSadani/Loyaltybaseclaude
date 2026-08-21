@@ -31,6 +31,7 @@ import {
   Landmark,
   Smartphone,
   BookOpen,
+  MessageSquare,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useTenantFeatures } from '@/lib/tenant-features';
@@ -163,6 +164,11 @@ const ALL_NAV_ITEMS = [
   // GIFSY_ADMIN + GIFSY_STAFF (canManageSchemes), hidden from CLIENT_ADMIN / MIS_USER; the
   // pages are also role-guarded via admin/guides/layout.tsx.
   { href: '/admin/guides', label: 'Help & Guides', icon: BookOpen, featureFlag: null, gifsyOnly: true },
+  // WhatsApp Broadcasts — Gifsy-OWNER console (bulk WhatsApp campaigns for the assumed
+  // tenant). gifsyAdminOnly: shown to GIFSY_ADMIN only (hidden from CLIENT_ADMIN / MIS_USER
+  // AND GIFSY_STAFF); the pages are role-guarded to ['GIFSY_ADMIN'] via
+  // admin/whatsapp-broadcasts/layout.tsx, so nav visibility and the route guard agree.
+  { href: '/admin/whatsapp-broadcasts', label: 'WhatsApp Broadcasts', icon: MessageSquare, featureFlag: null, gifsyAdminOnly: true },
   { href: '/admin/settings', label: 'Settings',         icon: Settings,      featureFlag: null },
 ];
 
@@ -205,6 +211,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       ALL_NAV_ITEMS.filter((item) => {
         // gifsyOnly items (e.g. Scheme Management) are hidden from CLIENT_ADMIN
         if ((item as { gifsyOnly?: boolean }).gifsyOnly && !adminSession.canManageSchemes) return false;
+        // gifsyAdminOnly items (WhatsApp Broadcasts) are owner-only — hidden from GIFSY_STAFF
+        // too, so nav visibility matches the GIFSY_ADMIN-only route guard (no shown-but-blocked gap).
+        if ((item as { gifsyAdminOnly?: boolean }).gifsyAdminOnly && adminSession.role !== 'GIFSY_ADMIN') return false;
         // tenantReportOnly items (Scheme Reports) are hidden from GIFSY_ADMIN, who
         // gets the full management + report surface under Scheme Management instead.
         if ((item as { tenantReportOnly?: boolean }).tenantReportOnly && adminSession.canManageSchemes) return false;
@@ -216,7 +225,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         if (!item.featureFlag) return true;
         return !!(features as unknown as Record<string, boolean>)[item.featureFlag];
       }),
-    [features, adminSession.canManageSchemes, visibilityEnabled],
+    [features, adminSession.canManageSchemes, adminSession.role, visibilityEnabled],
   );
 
   // Auto-expand the parent whose child matches the current path
