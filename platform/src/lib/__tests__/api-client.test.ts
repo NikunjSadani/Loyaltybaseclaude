@@ -109,4 +109,34 @@ describe('api.del', () => {
     expect(init.method).toBe('DELETE');
     expect(init.body).toBeUndefined();
   });
+
+  it('treats a 204 No Content as success (does not parse a bodyless response as an error)', async () => {
+    // A 204 has no JSON body; res.json() would throw. The client must not surface that
+    // as a failure — a bodyless 2xx is a success with no payload.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 204,
+      statusText: 'No Content',
+      json: () => Promise.reject(new SyntaxError('Unexpected end of JSON input')),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await api.del('/api/items/1');
+
+    expect(result.success).toBe(true);
+  });
+
+  it('treats an empty 2xx body as success rather than a parse failure', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: () => Promise.reject(new SyntaxError('Unexpected end of JSON input')),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await api.del('/api/items/1');
+
+    expect(result.success).toBe(true);
+  });
 });

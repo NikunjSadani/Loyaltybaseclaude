@@ -37,7 +37,18 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<ApiRespo
         ...(init.headers as Record<string, string> | undefined ?? {}),
       },
     });
-    const body = await res.json();
+    // A 204 No Content (or any empty 2xx body — e.g. a bodyless DELETE) has no JSON to
+    // parse: res.json() throws on an empty body and would surface a real success as a
+    // spurious error. Skip 204 outright, and tolerate an empty/unparseable body so a
+    // bodyless 2xx is not mistaken for a failure.
+    let body: { success?: boolean; data?: T; error?: string } | null = null;
+    if (res.status !== 204) {
+      try {
+        body = (await res.json()) as { success?: boolean; data?: T; error?: string };
+      } catch {
+        body = null;
+      }
+    }
     if (!res.ok) {
       // RBAC Option-X P6: a 403 with no explicit body error gets a clear default
       // message instead of a bare "Forbidden" status text. The backend is the real
@@ -47,6 +58,8 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<ApiRespo
       }
       return { success: false, error: body?.error ?? res.statusText };
     }
+    // A bodyless 2xx (204 / empty) is a success with no payload.
+    if (body == null) return { success: true, data: undefined as T };
     return body as ApiResponse<T>;
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : 'Network error' };

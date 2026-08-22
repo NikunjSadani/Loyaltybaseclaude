@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Package, CheckCircle, Truck, Clock, XCircle, RotateCcw, Copy, Check, ExternalLink, Ticket } from 'lucide-react';
 import { Badge, type BadgeVariant } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
@@ -26,6 +26,10 @@ interface ApiOrder {
   voucherProvider?: string | null;
   trackingNumber?: string | null;
   trackingUrl?: string | null;
+  // Member-safe courier name (e.g. "Delhivery"). NOTE: the member view deliberately
+  // never reads the ops-only fulfilment fields (fulfilmentChannel, fulfilledByVendorId,
+  // supplierOrderRef, delivery PII) — those live only on the Gifsy ops console.
+  logisticsPartner?: string | null;
   createdAt: string;
   updatedAt: string;
   confirmedAt?: string | null;
@@ -33,6 +37,7 @@ interface ApiOrder {
   dispatchedAt?: string | null;
   deliveredAt?: string | null;
   cancelledAt?: string | null;
+  returnedAt?: string | null;
 }
 
 interface TimelineStep { status: string; date: string; note?: string }
@@ -48,6 +53,7 @@ interface Order {
   voucherProvider?: string | null;
   trackingNumber?: string | null;
   trackingUrl?: string | null;
+  logisticsPartner?: string | null;
   createdAt: string;
   updatedAt: string;
   timeline: TimelineStep[];
@@ -61,6 +67,7 @@ const statusConfig: Record<string, { icon: React.ReactNode; label: string; varia
   DELIVERED:  { icon: <CheckCircle className="h-4 w-4" />, label: 'Delivered',  variant: 'success' },
   FAILED:     { icon: <XCircle className="h-4 w-4" />,    label: 'Failed',     variant: 'danger'  },
   CANCELLED:  { icon: <XCircle className="h-4 w-4" />,    label: 'Cancelled',  variant: 'danger'  },
+  RETURNED:   { icon: <RotateCcw className="h-4 w-4" />,  label: 'Returned',   variant: 'default' },
   REVERSED:   { icon: <RotateCcw className="h-4 w-4" />,  label: 'Reversed',   variant: 'default' },
 };
 
@@ -80,6 +87,7 @@ function buildTimeline(o: ApiOrder): TimelineStep[] {
     });
   }
   if (o.deliveredAt)  steps.push({ status: 'Delivered', date: o.deliveredAt });
+  if (o.returnedAt)   steps.push({ status: 'Returned', date: o.returnedAt });
   if (o.cancelledAt)  steps.push({ status: 'Cancelled', date: o.cancelledAt });
   // Fallback: if no intermediate stamp but the current status is past PENDING,
   // surface it so the timeline reflects the live status.
@@ -101,6 +109,7 @@ function mapApiOrder(o: ApiOrder): Order {
     voucherProvider: o.voucherProvider ?? null,
     trackingNumber:  o.trackingNumber ?? null,
     trackingUrl:     o.trackingUrl ?? null,
+    logisticsPartner: o.logisticsPartner ?? null,
     createdAt:       o.createdAt,
     updatedAt:       o.updatedAt,
     timeline:        buildTimeline(o),
@@ -157,7 +166,9 @@ export default function OrdersPage() {
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
     fetch('/api/rewards/orders', { headers: { ...authHeader() } })
       .then(r => r.json())
       .then((json: { success: boolean; data?: { orders: ApiOrder[] }; error?: string }) => {
@@ -171,6 +182,8 @@ export default function OrdersPage() {
       .finally(() => setLoading(false));
   }, []);
 
+  useEffect(() => { load(); }, [load]);
+
   return (
     <div className="space-y-5 fade-in">
       <div className="flex items-center justify-between">
@@ -183,7 +196,17 @@ export default function OrdersPage() {
           <Spinner size="lg" />
         </div>
       ) : error ? (
-        <div className="text-sm text-red-500 text-center py-8">{error}</div>
+        <div className="text-center py-8">
+          <p className="text-sm text-red-500">{error}</p>
+          <button
+            type="button"
+            onClick={load}
+            data-testid="orders-retry"
+            className="mt-3 px-4 py-1.5 text-xs font-medium border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+          >
+            Retry
+          </button>
+        </div>
       ) : orders.length === 0 ? (
         <EmptyState
           icon={<Package className="h-8 w-8" />}
@@ -196,7 +219,14 @@ export default function OrdersPage() {
             const config = statusFor(order.status);
             const isExpanded = expanded === order.id;
             const isVoucher = VOUCHER_MODES.has(order.redemptionMode ?? '') || !!order.voucherCode;
-            const showVoucher = isVoucher && order.status === 'CONFIRMED' && !!order.voucherCode;
+            // The paid voucher code must stay visible for the WHOLE post-issuance
+            // lifecycle — ops can advance a DIGITAL_VOUCHER order past CONFIRMED to
+            // PROCESSING / DISPATCHED / DELIVERED, and the member still needs the code.
+            // Only pre-issuance / dead states hide it.
+            const showVoucher =
+              isVoucher &&
+              !!order.voucherCode &&
+              !['PENDING', 'CANCELLED', 'FAILED', 'RETURNED', 'REVERSED'].includes(order.status);
 
             return (
               <Card key={order.id}>
@@ -233,10 +263,13 @@ export default function OrdersPage() {
                     <VoucherCodeBlock code={order.voucherCode} provider={order.voucherProvider} />
                   )}
 
-                  {/* Physical-gift tracking */}
+                  {/* Physical-gift tracking (member-safe: courier name + tracking only) */}
                   {!isVoucher && (order.trackingNumber || order.trackingUrl) && (
                     <div className="mt-3 flex items-center gap-2 text-xs">
                       <Truck className="h-3.5 w-3.5 text-gray-500 shrink-0" />
+                      {order.logisticsPartner && (
+                        <span className="text-gray-500" data-testid="carrier">{order.logisticsPartner} ·</span>
+                      )}
                       {order.trackingUrl ? (
                         <a
                           href={order.trackingUrl}

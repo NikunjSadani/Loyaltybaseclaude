@@ -12,6 +12,12 @@ interface ModalProps {
   description?: string;
   children: React.ReactNode;
   className?: string;
+  /**
+   * Overrides the backdrop overlay classes. A NESTED modal (e.g. a confirm step
+   * opened on top of another Modal) can pass `bg-transparent` so the two overlays
+   * don't stack into a double-dark backdrop — the parent's overlay already dims.
+   */
+  overlayClassName?: string;
 }
 
 export function Modal({
@@ -21,11 +27,17 @@ export function Modal({
   description,
   children,
   className,
+  overlayClassName,
 }: ModalProps) {
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/50 z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Overlay
+          className={cn(
+            'fixed inset-0 bg-black/50 z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
+            overlayClassName,
+          )}
+        />
         <Dialog.Content
           className={cn(
             'fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50',

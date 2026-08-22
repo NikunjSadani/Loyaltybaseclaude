@@ -8,7 +8,7 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { PayoutMode, Prisma, RedemptionStatus } from '@prisma/client';
+import { GiftFulfilmentChannel, PayoutMode, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
@@ -19,14 +19,18 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { EventKey } from '../notification-templates/notification-templates.config';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { roundToRupeePaise } from '../tds/tds.helpers';
 import { resolveEffectiveKycStatus, isPartnerPayable } from '../kyc/kyc-eligibility';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
-import { isGifsyOperator } from '../common/tenant-scope';
+import { isGifsyOperator, tenantScope } from '../common/tenant-scope';
+import { generateTenantOrderNumber } from './order-number.helper';
+import { computeFrozenValuePaise } from './gift-value.helper';
+import { computeDispatchSla } from '../common/dispatch-sla';
+import { loadHolidaySet } from '../common/holiday-calendar';
 import {
   AdminListCatalogQueryDto,
   CreateRewardCatalogDto,
   CreateRewardCategoryDto,
+  FulfilmentOrdersQueryDto,
   FulfilmentTemplateQueryDto,
   ListCatalogQueryDto,
   ListOrdersQueryDto,
@@ -57,6 +61,75 @@ import {
  * $transaction; the REDEMPTION_CONFIRM OTP reuses the OtpCode model; confirm +
  * status events enqueue via NotificationsService.
  */
+/**
+ * Default dispatch-SLA budget (BUSINESS hours) for self-fulfilled channels
+ * (GIFSY_WAREHOUSE / BRAND). Amazon / DIGITAL_VOUCHER are exempt (see dispatch-sla.ts).
+ * A single platform default in v1 — a per-channel/per-tenant config is a later addition.
+ */
+export const DISPATCH_SLA_BUSINESS_HOURS = 48;
+
+/**
+ * Member-safe RewardCatalog projection for the partner-facing catalogue reads
+ * (listCatalog / getCatalogItem). Deliberately EXCLUDES ops/internal columns —
+ * sellingValuePaise (194R/cost basis), sourceType, vendorId, giftMasterId,
+ * giftCategoryId and the moderation* fields — that a member must never see.
+ */
+const MEMBER_CATALOG_SELECT = {
+  id: true,
+  code: true,
+  name: true,
+  description: true,
+  imageUrls: true,
+  pointsCost: true,
+  mrpPaise: true,
+  redemptionMode: true,
+  status: true,
+  minRedemptionPoints: true,
+  maxRedemptionPoints: true,
+  stockQuantity: true,
+  termsAndConditions: true,
+  sortOrder: true,
+  createdAt: true,
+  updatedAt: true,
+  category: { select: { name: true } },
+} satisfies Prisma.RewardCatalogSelect;
+
+/**
+ * Member-safe RedemptionOrder projection for the partner-facing order reads
+ * (listOrders / getOrder member path). EXCLUDES the ops-only fulfilment fields
+ * (fulfilmentChannel, supplierOrderRef, fulfilledByVendorId, podUrl, notes) and the
+ * BigInt valuePaise. partnerId is included for the caller-ownership authorization
+ * check (it is the member's own partner, not an ops-only field).
+ */
+const MEMBER_ORDER_SELECT = {
+  id: true,
+  partnerId: true,
+  orderNumber: true,
+  status: true,
+  redemptionMode: true,
+  totalPointsCost: true,
+  quantity: true,
+  voucherCode: true,
+  voucherProvider: true,
+  trackingNumber: true,
+  trackingUrl: true,
+  logisticsPartner: true,
+  dispatchedAt: true,
+  deliveredAt: true,
+  cancelledAt: true,
+  createdAt: true,
+  updatedAt: true,
+  deliveryName: true,
+  deliveryPhone: true,
+  deliveryAddressLine1: true,
+  deliveryAddressLine2: true,
+  deliveryCity: true,
+  deliveryState: true,
+  deliveryPincode: true,
+  reward: { select: { id: true, name: true, imageUrls: true, redemptionMode: true } },
+  partner: { select: { id: true, businessName: true } },
+} satisfies Prisma.RedemptionOrderSelect;
+
 @Injectable()
 export class RewardsService {
   private readonly logger = new Logger(RewardsService.name);
@@ -72,6 +145,21 @@ export class RewardsService {
   private isGifsy(user: JwtPayload): boolean {
     // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
     return isGifsyOperator(user);
+  }
+
+  /**
+   * Data-boundary guard for the DISPATCH-CONSOLE-only reads (listFulfilmentOrders /
+   * getFulfilmentOrder) — parity with GiftCatalogueService.assertOperator. The routes
+   * are already @Roles('GIFSY_ADMIN') + @RequirePermission; this is defence-in-depth at
+   * the service layer. NOT applied to the SHARED transitionOrder/updateOrder, which are
+   * also reached by the legacy /rewards/orders GIFSY_ADMIN endpoints and the bulk
+   * fulfilment upload — those keep their route-level gate to avoid over-constraining a
+   * shared method.
+   */
+  private assertOperator(user: JwtPayload) {
+    if (!isGifsyOperator(user)) {
+      throw new ForbiddenException('Gift dispatch console is Gifsy-operator only');
+    }
   }
 
   /** Map a redemption mode to the tenant channel toggle that governs it. */
@@ -108,6 +196,15 @@ export class RewardsService {
       status: 'ACTIVE',
       deletedAt: null,
       clientId: user.clientId,
+      // Gift Catalogue moderation gate (§4 / review): a PENDING/REJECTED/DRAFT item
+      // must NEVER be browsable. Existing platform rows default APPROVED (live), so
+      // Deoleo's catalogue is unchanged; vendor rows land PENDING until approved.
+      moderationStatus: 'APPROVED',
+      // WAVE-2 SEAM — vendor visibility cascade. When vendor items ship, add here
+      // (for sourceType=VENDOR rows only): require Vendor.status=ACTIVE AND an ACTIVE
+      // VendorTenantGrant for this clientId, so a suspended/revoked vendor's items
+      // stop being browsable immediately (§12 suspend/revoke cascade). PLATFORM rows
+      // are unaffected. e.g. OR:[ {sourceType:'PLATFORM'}, {sourceType:'VENDOR', vendor:{status:'ACTIVE'}, ...grant} ].
     };
     if (q.minPoints !== undefined || q.maxPoints !== undefined) {
       where.pointsCost = {};
@@ -130,7 +227,9 @@ export class RewardsService {
         skip,
         take: limit,
         orderBy: { pointsCost: 'asc' },
-        include: { category: { select: { name: true } } },
+        // Member-safe projection — drops ops/internal columns (sellingValuePaise,
+        // sourceType, vendorId, giftMasterId, giftCategoryId, moderation*).
+        select: MEMBER_CATALOG_SELECT,
       }),
       this.prisma.rewardCatalog.count({ where }),
     ]);
@@ -157,7 +256,19 @@ export class RewardsService {
   /** GET /v1/rewards/catalog/:id — a single active (non-deleted) catalog item in the tenant. */
   async getCatalogItem(user: JwtPayload, id: string, requestedPartnerId?: string) {
     const item = await this.prisma.rewardCatalog.findFirst({
-      where: { id, deletedAt: null, clientId: user.clientId },
+      // Moderation gate: a non-APPROVED item is not viewable even by deep-link/stale
+      // cart. status=ACTIVE parity with listCatalog — a DISCONTINUED/OUT_OF_STOCK/
+      // INACTIVE row must not be deep-linkable. WAVE-2 SEAM: also require vendor ACTIVE
+      // + ACTIVE grant for VENDOR rows.
+      where: {
+        id,
+        deletedAt: null,
+        clientId: user.clientId,
+        status: 'ACTIVE',
+        moderationStatus: 'APPROVED',
+      },
+      // Member-safe projection (same as listCatalog) — no ops/internal columns.
+      select: MEMBER_CATALOG_SELECT,
     });
     if (!item) throw new NotFoundException('Reward item not found');
     // The item is tenant-scoped (not partner-scoped), so the response is identical
@@ -188,11 +299,32 @@ export class RewardsService {
     }
     if (q.status) where.status = q.status;
 
+    // Member-safe projection (§ member view). Deliberately EXCLUDES the ops-only
+    // fulfilment fields (fulfilmentChannel, supplierOrderRef, fulfilledByVendorId, POD)
+    // and delivery PII, and never returns the BigInt valuePaise. logisticsPartner (the
+    // courier name) IS member-safe and included. Also serves the legacy /admin/gifts
+    // console, which reads a strict subset of these fields.
     const [orders, total] = await Promise.all([
       this.prisma.redemptionOrder.findMany({
         where,
-        include: {
-          reward: { select: { id: true, name: true, imageUrls: true } },
+        select: {
+          id: true,
+          orderNumber: true,
+          status: true,
+          redemptionMode: true,
+          totalPointsCost: true,
+          quantity: true,
+          voucherCode: true,
+          voucherProvider: true,
+          trackingNumber: true,
+          trackingUrl: true,
+          logisticsPartner: true,
+          dispatchedAt: true,
+          deliveredAt: true,
+          cancelledAt: true,
+          createdAt: true,
+          updatedAt: true,
+          reward: { select: { id: true, name: true, imageUrls: true, redemptionMode: true } },
           partner: { select: { id: true, businessName: true } },
         },
         skip,
@@ -202,8 +334,14 @@ export class RewardsService {
       this.prisma.redemptionOrder.count({ where }),
     ]);
 
+    // No dedicated returnedAt column — surface it (member-safe) when the order is RETURNED.
+    const mapped = orders.map((o) => ({
+      ...o,
+      returnedAt: o.status === 'RETURNED' ? o.updatedAt : null,
+    }));
+
     return {
-      orders,
+      orders: mapped,
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     };
   }
@@ -212,18 +350,63 @@ export class RewardsService {
   async getOrder(user: JwtPayload, id: string, requestedPartnerId?: string) {
     // Tenant scope by partner.clientId so a switched sibling's order is visible
     // (a login-less sibling has no linked user → partner.user.clientId would miss it).
+    const where = { id, partner: { clientId: user.clientId } };
+
+    // A Gifsy operator may see the full ops detail (this same row is also reachable via
+    // the dispatch console). A MEMBER gets the member-safe projection — the same one
+    // listOrders uses — so ops-only fields (fulfilmentChannel, supplierOrderRef,
+    // fulfilledByVendorId, podUrl, notes, valuePaise) never leak to the partner app.
+    if (this.isGifsy(user)) {
+      const order = await this.prisma.redemptionOrder.findFirst({
+        where,
+        include: {
+          reward: true,
+          partner: { select: { id: true, businessName: true, userId: true } },
+        },
+      });
+      if (!order) throw new NotFoundException('Order not found');
+      return { order };
+    }
+
     const order = await this.prisma.redemptionOrder.findFirst({
-      where: { id, partner: { clientId: user.clientId } },
-      include: {
-        reward: true,
-        partner: { select: { id: true, businessName: true, userId: true } },
-      },
+      where,
+      select: MEMBER_ORDER_SELECT,
     });
     if (!order) throw new NotFoundException('Order not found');
 
     // Non-admins can only see the ACTIVE partner's order. Authorization is the
     // resolved active partner (own or an authorized sibling) — NOT the raw login's
     // userId, which would 403 a legitimately-switched sibling (userId=null).
+    const activePartnerId = await this.resolveActive(user, requestedPartnerId);
+    if (!activePartnerId || order.partnerId !== activePartnerId) {
+      throw new ForbiddenException('Forbidden');
+    }
+
+    return { order };
+  }
+
+  /**
+   * GET /v1/rewards/orders/:id/track — member ORDER TRACKING view (partner app).
+   * Own order only (same scoping as getOrder): status + tracking + the dispatch
+   * timeline. A trimmed, member-safe projection (no internal notes/actor ids) so a
+   * partner can follow their gift from confirmation to delivery.
+   */
+  async trackOrder(user: JwtPayload, id: string, requestedPartnerId?: string) {
+    const order = await this.prisma.redemptionOrder.findFirst({
+      where: { id, partner: { clientId: user.clientId } },
+      include: {
+        reward: { select: { id: true, name: true, imageUrls: true } },
+        statusHistory: {
+          orderBy: { createdAt: 'asc' },
+          // Member-safe timeline: from/to status + timestamp only. Internal `notes`
+          // are ops-only (can carry supplier/vendor context) and must NOT leak here.
+          select: { fromStatus: true, toStatus: true, createdAt: true },
+        },
+      },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+
+    // Non-admins may only track the ACTIVE partner's order (own or authorized sibling).
     if (!this.isGifsy(user)) {
       const activePartnerId = await this.resolveActive(user, requestedPartnerId);
       if (!activePartnerId || order.partnerId !== activePartnerId) {
@@ -231,7 +414,24 @@ export class RewardsService {
       }
     }
 
-    return { order };
+    // NOTE: `fulfilmentChannel` is an ops-only field and is deliberately NOT surfaced on
+    // the member tracking payload (matches the docstring's member-safe promise).
+    return {
+      tracking: {
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        status: order.status,
+        reward: order.reward,
+        quantity: order.quantity,
+        logisticsPartner: order.logisticsPartner,
+        trackingNumber: order.trackingNumber,
+        trackingUrl: order.trackingUrl,
+        dispatchedAt: order.dispatchedAt,
+        deliveredAt: order.deliveredAt,
+        cancelledAt: order.cancelledAt,
+        timeline: order.statusHistory,
+      },
+    };
   }
 
   /**
@@ -241,9 +441,11 @@ export class RewardsService {
    * fulfilment upload reuses this same non-status write.
    */
   async updateOrder(user: JwtPayload, id: string, dto: UpdateOrderDto) {
-    // GIFSY-only is enforced by @Roles on the controller; tenant scope re-checked here.
+    // GIFSY-only is enforced by @Roles on the controller; tenant scope re-checked
+    // here by partner.clientId (§12). platformWide OWNER → cross-tenant console.
+    const scope = tenantScope(user);
     const existingOrder = await this.prisma.redemptionOrder.findFirst({
-      where: { id, partner: { user: { clientId: user.clientId } } },
+      where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
     });
     if (!existingOrder) throw new NotFoundException('Order not found');
 
@@ -255,6 +457,11 @@ export class RewardsService {
         voucherCode: dto.voucherCode,
         voucherProvider: dto.voucherProvider,
         notes: dto.notes,
+        // Dispatch fields (§5) — non-status console/bulk edits.
+        fulfilmentChannel: dto.fulfilmentChannel,
+        logisticsPartner: dto.logisticsPartner,
+        supplierOrderRef: dto.supplierOrderRef,
+        podUrl: dto.podUrl,
       },
     });
 
@@ -400,13 +607,29 @@ export class RewardsService {
 
     // ACTIVE non-deleted catalog item, in-tenant.
     const item = await this.prisma.rewardCatalog.findFirst({
-      where: { id: dto.rewardId, status: 'ACTIVE', deletedAt: null, clientId: user.clientId },
+      // Moderation gate on the REDEEM guard too — a non-APPROVED item must never be
+      // redeemable via a stale cart / deep link. WAVE-2 SEAM: also require vendor
+      // ACTIVE + ACTIVE grant for sourceType=VENDOR rows (§12 suspend cascade).
+      where: {
+        id: dto.rewardId,
+        status: 'ACTIVE',
+        deletedAt: null,
+        clientId: user.clientId,
+        moderationStatus: 'APPROVED',
+      },
     });
     if (!item) throw new NotFoundException('Reward item not found or not available');
 
     // PHYSICAL_GIFT requires a full delivery address; other modes do not.
-    if (item.redemptionMode === 'PHYSICAL_GIFT' && !dto.deliveryAddress) {
-      throw new BadRequestException('Delivery address is required for physical gifts');
+    if (item.redemptionMode === 'PHYSICAL_GIFT') {
+      if (!dto.deliveryAddress) {
+        throw new BadRequestException('Delivery address is required for physical gifts');
+      }
+      // Address quality (§12): validate the pincode at redeem for physical gifts.
+      // The DTO already enforces 6 digits; the service adds the real-India rule
+      // (first digit 1–9 — no Indian PIN starts with 0) so a syntactically-valid
+      // but impossible PIN can't reach dispatch.
+      this.assertValidPincode(dto.deliveryAddress.pincode);
     }
 
     // Per-tenant settings: the points↔₹ rate, channel availability, and the global
@@ -463,9 +686,15 @@ export class RewardsService {
       );
     }
 
-    const orderNumber = `RDM-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
     const addr = dto.deliveryAddress;
     const otp = this.generateOtpCode();
+    // Gift value snapshot (decision §14): freeze the gift's ₹ selling price onto the
+    // order at redeem so a later price/rate change never re-values it. Null for
+    // non-gift / variable-amount items → confirm falls back to points ÷ rate.
+    const giftMetadata =
+      item.sellingValuePaise != null
+        ? ({ sellingValuePaiseSnapshot: item.sellingValuePaise } as Prisma.InputJsonValue)
+        : undefined;
 
     // Single active OTP per OUTLET: supersede the OUTLET's abandoned PENDING orders
     // (never debited) and clear the OUTLET's unverified REDEMPTION_CONFIRM OTPs so
@@ -479,12 +708,16 @@ export class RewardsService {
         where: { userId: otpUserId, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null },
       });
       const orderAccountId = await ensureOutletAccount(tx, partner.id);
+      // Tenant-stamped order number (TENANT-YY-######) via a concurrency-safe
+      // per-(tenant,year) advisory-locked sequence. Inside the tx so the lock holds.
+      const orderNumber = await generateTenantOrderNumber(tx, user.clientId);
       const created = await tx.redemptionOrder.create({
         data: {
           partnerId: partner.id,
           accountId: orderAccountId, // Employee Rewards Phase 1 — unified account owner (dual-write)
           rewardId: item.id,
           orderNumber,
+          metadata: giftMetadata,
           quantity,
           pointsDeducted: 0,
           totalPointsCost: requiredPoints,
@@ -529,7 +762,7 @@ export class RewardsService {
             event: 'SALES_ASSISTED_REDEEM',
             salesUserId: user.sub,
             partnerId: partner.id,
-            orderNumber,
+            orderNumber: order.orderNumber,
           },
         },
       })
@@ -560,7 +793,7 @@ export class RewardsService {
 
     return {
       orderId: order.id,
-      orderNumber,
+      orderNumber: order.orderNumber,
       requiredPoints,
       message:
         "OTP sent to the outlet's registered mobile. Ask the outlet to share it to confirm.",
@@ -667,10 +900,25 @@ export class RewardsService {
       // value(₹) = points ÷ conversionRate; centi-rate integer math avoids
       // truncating a fractional rate. rate 0 (misconfig) → 0 (guard div-by-zero).
       const rateCenti = await this.confirmRateCenti(order, user.clientId);
-      const valuePaise =
-        rateCenti > 0
-          ? roundToRupeePaise((BigInt(requiredPoints) * 10000n) / BigInt(rateCenti))
-          : 0n;
+      // Canonical value freeze (decision §14): a GIFT item freezes valuePaise =
+      // sellingValuePaise × quantity (rate-IMMUNE — a rate change never re-values a
+      // placed gift). The selling price is read from the redeem-time snapshot in
+      // order.metadata (falls back to the live catalog price for pre-snapshot orders).
+      // Cash rails (UPI/BANK_TRANSFER) keep points ÷ rate (= the payout amount).
+      const sellingSnap =
+        typeof (order.metadata as { sellingValuePaiseSnapshot?: unknown } | null)
+          ?.sellingValuePaiseSnapshot === 'number'
+          ? (order.metadata as { sellingValuePaiseSnapshot: number }).sellingValuePaiseSnapshot
+          : (order.reward?.sellingValuePaise ?? null);
+      const valuePaise = computeFrozenValuePaise({
+        isCashMode:
+          order.redemptionMode === PayoutMode.UPI ||
+          order.redemptionMode === PayoutMode.BANK_TRANSFER,
+        sellingValuePaiseSnapshot: sellingSnap,
+        quantity: order.quantity,
+        points: requiredPoints,
+        rateCenti,
+      });
 
       // GLB-2 — ZERO-VALUE HARD FAIL for cash modes (inside the transaction so
       // the claim + wallet debit all roll back). Non-cash modes are unaffected.
@@ -854,13 +1102,29 @@ export class RewardsService {
 
     // ACTIVE non-deleted catalog item, in-tenant.
     const item = await this.prisma.rewardCatalog.findFirst({
-      where: { id: dto.rewardId, status: 'ACTIVE', deletedAt: null, clientId: user.clientId },
+      // Moderation gate on the REDEEM guard too — a non-APPROVED item must never be
+      // redeemable via a stale cart / deep link. WAVE-2 SEAM: also require vendor
+      // ACTIVE + ACTIVE grant for sourceType=VENDOR rows (§12 suspend cascade).
+      where: {
+        id: dto.rewardId,
+        status: 'ACTIVE',
+        deletedAt: null,
+        clientId: user.clientId,
+        moderationStatus: 'APPROVED',
+      },
     });
     if (!item) throw new NotFoundException('Reward item not found or not available');
 
     // PHYSICAL_GIFT requires a full delivery address; other modes do not.
-    if (item.redemptionMode === 'PHYSICAL_GIFT' && !dto.deliveryAddress) {
-      throw new BadRequestException('Delivery address is required for physical gifts');
+    if (item.redemptionMode === 'PHYSICAL_GIFT') {
+      if (!dto.deliveryAddress) {
+        throw new BadRequestException('Delivery address is required for physical gifts');
+      }
+      // Address quality (§12): validate the pincode at redeem for physical gifts.
+      // The DTO already enforces 6 digits; the service adds the real-India rule
+      // (first digit 1–9 — no Indian PIN starts with 0) so a syntactically-valid
+      // but impossible PIN can't reach dispatch.
+      this.assertValidPincode(dto.deliveryAddress.pincode);
     }
 
     // Per-tenant settings: the points↔₹ rate, channel availability, and the global
@@ -919,9 +1183,15 @@ export class RewardsService {
       );
     }
 
-    const orderNumber = `RDM-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
     const addr = dto.deliveryAddress;
     const otp = this.generateOtpCode();
+    // Gift value snapshot (decision §14): freeze the gift's ₹ selling price onto the
+    // order at redeem so a later price/rate change never re-values it. Null for
+    // non-gift / variable-amount items → confirm falls back to points ÷ rate.
+    const giftMetadata =
+      item.sellingValuePaise != null
+        ? ({ sellingValuePaiseSnapshot: item.sellingValuePaise } as Prisma.InputJsonValue)
+        : undefined;
 
     // C2 — bind the OTP to exactly ONE order. A user may have only one redemption
     // awaiting confirmation at a time: superseding any abandoned PENDING orders
@@ -940,12 +1210,16 @@ export class RewardsService {
         where: { userId: user.sub, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null },
       });
       const orderAccountId = await ensureOutletAccount(tx, activePartnerId);
+      // Tenant-stamped order number (TENANT-YY-######) via a concurrency-safe
+      // per-(tenant,year) advisory-locked sequence. Inside the tx so the lock holds.
+      const orderNumber = await generateTenantOrderNumber(tx, user.clientId);
       const created = await tx.redemptionOrder.create({
         data: {
           partnerId: activePartnerId,
           accountId: orderAccountId, // Employee Rewards Phase 1 — unified account owner (dual-write)
           rewardId: item.id,
           orderNumber,
+          metadata: giftMetadata,
           quantity,
           pointsDeducted: 0,
           totalPointsCost: requiredPoints,
@@ -1004,7 +1278,7 @@ export class RewardsService {
 
     return {
       orderId: order.id,
-      orderNumber,
+      orderNumber: order.orderNumber,
       requiredPoints,
       message: 'OTP sent to your registered mobile. Please confirm the redemption.',
     };
@@ -1116,10 +1390,25 @@ export class RewardsService {
       // value(₹) = points ÷ conversionRate. Work in centi-rate (rate×100) integer math so a
       // fractional conversionRate (e.g. 0.5 pts/₹) isn't truncated: paise = points×10000 ÷ (rate×100).
       const rateCenti = await this.confirmRateCenti(order, user.clientId);
-      const valuePaise =
-        rateCenti > 0
-          ? roundToRupeePaise((BigInt(requiredPoints) * 10000n) / BigInt(rateCenti))
-          : 0n;
+      // Canonical value freeze (decision §14): a GIFT item freezes valuePaise =
+      // sellingValuePaise × quantity (rate-IMMUNE — a rate change never re-values a
+      // placed gift). The selling price is read from the redeem-time snapshot in
+      // order.metadata (falls back to the live catalog price for pre-snapshot orders).
+      // Cash rails (UPI/BANK_TRANSFER) keep points ÷ rate (= the payout amount).
+      const sellingSnap =
+        typeof (order.metadata as { sellingValuePaiseSnapshot?: unknown } | null)
+          ?.sellingValuePaiseSnapshot === 'number'
+          ? (order.metadata as { sellingValuePaiseSnapshot: number }).sellingValuePaiseSnapshot
+          : (order.reward?.sellingValuePaise ?? null);
+      const valuePaise = computeFrozenValuePaise({
+        isCashMode:
+          order.redemptionMode === PayoutMode.UPI ||
+          order.redemptionMode === PayoutMode.BANK_TRANSFER,
+        sellingValuePaiseSnapshot: sellingSnap,
+        quantity: order.quantity,
+        points: requiredPoints,
+        rateCenti,
+      });
 
       // GLB-2 — ZERO-VALUE HARD FAIL for cash modes (inside the transaction so
       // the whole tx — claim + wallet debit — rolls back). A zero valuePaise means
@@ -1346,17 +1635,31 @@ export class RewardsService {
    * Inline voucher/tracking entry rides on this call (per-order fulfilment).
    */
   async transitionOrder(user: JwtPayload, id: string, dto: TransitionOrderDto) {
+    // Tenant scope by partner.clientId (§12 — partner.user.clientId misses login-less
+    // sibling outlets). platformWide (un-assumed OWNER) → cross-tenant, which powers
+    // the Gifsy fulfilment console; an assumed operator is pinned to that tenant.
+    const scope = tenantScope(user);
     const order = await this.prisma.redemptionOrder.findFirst({
-      where: { id, partner: { user: { clientId: user.clientId } } },
+      where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
     });
     if (!order) throw new NotFoundException('Order not found');
 
     const toStatus = dto.toStatus as unknown as RedemptionStatus;
+
+    // IDEMPOTENT (§12): a request for the CURRENT state is a no-op — skip the
+    // transition AND the member notification (de-dupes bulk re-uploads / retries).
+    if (order.status === toStatus) {
+      return { order, skipped: true as const };
+    }
+
     const allowed: Record<string, RedemptionStatus[]> = {
       PENDING: [RedemptionStatus.CANCELLED],
       CONFIRMED: [RedemptionStatus.PROCESSING, RedemptionStatus.CANCELLED, RedemptionStatus.RETURNED],
       PROCESSING: [RedemptionStatus.DISPATCHED, RedemptionStatus.FAILED, RedemptionStatus.CANCELLED],
       DISPATCHED: [RedemptionStatus.DELIVERED, RedemptionStatus.RETURNED],
+      // DELIVERED→RETURNED (Gifsy-only) — the v1 value-reversal edge (§12). Gated to
+      // gifts by the cash-mode block below; refunds points + zeroes valuePaise.
+      DELIVERED: [RedemptionStatus.RETURNED],
     };
     const fromStatus = order.status;
     if (!(allowed[fromStatus] ?? []).includes(toStatus)) {
@@ -1395,10 +1698,20 @@ export class RewardsService {
       trackingNumber: dto.trackingNumber,
       trackingUrl: dto.trackingUrl,
       notes: dto.notes,
+      // Dispatch fields (§5) — the fulfilment console stamps these alongside a status
+      // move. All optional; undefined leaves the stored value unchanged.
+      fulfilmentChannel: dto.fulfilmentChannel,
+      logisticsPartner: dto.logisticsPartner,
+      supplierOrderRef: dto.supplierOrderRef,
+      podUrl: dto.podUrl,
     };
     if (toStatus === RedemptionStatus.DISPATCHED) data.dispatchedAt = now;
     if (toStatus === RedemptionStatus.DELIVERED) data.deliveredAt = now;
     if (toStatus === RedemptionStatus.CANCELLED) data.cancelledAt = now;
+    // RETURNED value-reversal (§12): zero valuePaise so 194R Source-2 (sums DELIVERED
+    // valuePaise per PAN) and the Gift Disbursal report drop it — no permanent
+    // over-count. Points are refunded by the isRefundTarget claim below.
+    if (toStatus === RedemptionStatus.RETURNED) data.valuePaise = 0n;
 
     const updated = await this.prisma.$transaction(async (tx) => {
       // M2 — refund at most ONCE: atomically claim the debited points
@@ -1507,8 +1820,10 @@ export class RewardsService {
    * actionable set, narrowable by `?status=` and `?mode=`.
    */
   async getFulfilmentTemplate(user: JwtPayload, q: FulfilmentTemplateQueryDto): Promise<Buffer> {
+    // Tenant scope by partner.clientId (§12); platformWide OWNER → all tenants.
+    const scope = tenantScope(user);
     const where: Prisma.RedemptionOrderWhereInput = {
-      partner: { user: { clientId: user.clientId } },
+      ...(scope ? { partner: { clientId: scope } } : {}),
     };
     if (q.mode) where.redemptionMode = q.mode;
 
@@ -1575,12 +1890,14 @@ export class RewardsService {
     const errors: { row: number; orderNumber: string; message: string }[] = [];
     let succeeded = 0;
     let skipped = 0;
+    // Tenant scope by partner.clientId (§12); platformWide OWNER → cross-tenant.
+    const scope = tenantScope(user);
 
     for (const r of parsed.rows) {
       try {
-        // Resolve the order in-tenant; collect (don't throw) on a miss/cross-tenant.
+        // Resolve the order in-scope; collect (don't throw) on a miss/cross-tenant.
         const order = await this.prisma.redemptionOrder.findFirst({
-          where: { orderNumber: r.orderNumber, partner: { user: { clientId: user.clientId } } },
+          where: { orderNumber: r.orderNumber, ...(scope ? { partner: { clientId: scope } } : {}) },
           select: { id: true },
         });
         if (!order) {
@@ -1646,6 +1963,211 @@ export class RewardsService {
       skipped,
       failed: errors.length,
       errors,
+    };
+  }
+
+  /**
+   * GET /v1/admin/gift-catalogue/dispatch/orders — GIFSY fulfilment console list.
+   *
+   * Cross-tenant for an un-assumed OWNER (platformWide); scoped to the assumed tenant
+   * otherwise (tenantScope). Filters: status, fulfilmentChannel, a specific clientId,
+   * an orderNumber search, and a createdAt date range. Each order is annotated with a
+   * channel-aware dispatch-SLA (GIFSY_WAREHOUSE/BRAND age against the business-hours
+   * clock; Amazon/DIGITAL are exempt). Reuses the platform holiday calendar.
+   */
+  async listFulfilmentOrders(user: JwtPayload, q: FulfilmentOrdersQueryDto) {
+    this.assertOperator(user);
+    const page = q.page ?? 1;
+    const limit = q.limit ?? 50;
+    const skip = (page - 1) * limit;
+
+    const scope = tenantScope(user);
+    // A platformWide OWNER (scope undefined) may narrow to one tenant via q.clientId.
+    // An ASSUMED operator is HARD-pinned to `scope` — q.clientId must NOT override it
+    // (that would be a cross-tenant leak), so it is ignored for a scoped caller.
+    const effectiveClientId = scope ?? q.clientId;
+    const where: Prisma.RedemptionOrderWhereInput = {
+      ...(effectiveClientId ? { partner: { clientId: effectiveClientId } } : {}),
+    };
+    if (q.status) where.status = q.status;
+    if (q.channel) where.fulfilmentChannel = q.channel;
+    if (q.q) where.orderNumber = { contains: q.q, mode: 'insensitive' };
+    // WAVE-2 SEAM: a `vendorId` filter (where.fulfilledByVendorId) lands here for the
+    // vendor-scoped console once vendor fulfilment ships.
+    if (q.from || q.to) {
+      where.createdAt = {};
+      if (q.from) where.createdAt.gte = new Date(q.from);
+      if (q.to) where.createdAt.lte = new Date(q.to);
+    }
+
+    const [orders, total, holidays] = await Promise.all([
+      this.prisma.redemptionOrder.findMany({
+        where,
+        include: {
+          reward: { select: { id: true, name: true, sourceType: true } },
+          partner: { select: { id: true, businessName: true, clientId: true } },
+          statusHistory: {
+            where: { toStatus: 'CONFIRMED' },
+            orderBy: { createdAt: 'asc' },
+            take: 1,
+            select: { createdAt: true },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.redemptionOrder.count({ where }),
+      loadHolidaySet(this.prisma),
+    ]);
+
+    // Tenant display names for the cross-tenant console (clientId → Client.internalName).
+    const clientIds = [...new Set(orders.map((o) => o.partner?.clientId).filter(Boolean))] as string[];
+    const clients = clientIds.length
+      ? await this.prisma.client.findMany({
+          where: { id: { in: clientIds } },
+          select: { id: true, internalName: true },
+        })
+      : [];
+    const tenantName = new Map(clients.map((c) => [c.id, c.internalName]));
+
+    const nowMs = Date.now();
+    const items = orders.map((o) => {
+      const confirmedAt = o.statusHistory[0]?.createdAt ?? null;
+      const sla = computeDispatchSla({
+        fulfilmentChannel: o.fulfilmentChannel,
+        status: o.status,
+        confirmedAtMs: confirmedAt ? confirmedAt.getTime() : null,
+        dispatchedAtMs: o.dispatchedAt ? o.dispatchedAt.getTime() : null,
+        nowMs,
+        slaBusinessHours: DISPATCH_SLA_BUSINESS_HOURS,
+        holidays,
+      });
+      const clientId = o.partner?.clientId ?? null;
+      // GiftOrderSummary — flat wire shape the FE console reads (renamed/derived fields).
+      // valuePaise is BigInt → serialise to string for the JSON envelope.
+      return {
+        id: o.id,
+        orderNumber: o.orderNumber,
+        clientId,
+        tenantName: clientId ? tenantName.get(clientId) ?? clientId : null,
+        status: o.status,
+        redemptionMode: o.redemptionMode,
+        fulfilmentChannel: o.fulfilmentChannel,
+        rewardName: o.reward?.name ?? null,
+        partnerName: o.partner?.businessName ?? null,
+        totalPointsCost: o.totalPointsCost,
+        valuePaise: o.valuePaise != null ? o.valuePaise.toString() : null,
+        trackingNumber: o.trackingNumber,
+        createdAt: o.createdAt,
+        updatedAt: o.updatedAt,
+        dispatchSla: sla,
+      };
+    });
+
+    return {
+      items,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    };
+  }
+
+  /**
+   * GET /v1/admin/gift-catalogue/dispatch/orders/:id — GIFSY console order detail.
+   * Cross-tenant for a platformWide OWNER; assumed-tenant-scoped otherwise. Includes
+   * the full status timeline + the internal "fulfilled by" context (§12).
+   */
+  async getFulfilmentOrder(user: JwtPayload, id: string) {
+    this.assertOperator(user);
+    const scope = tenantScope(user);
+    const order = await this.prisma.redemptionOrder.findFirst({
+      where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
+      include: {
+        reward: { select: { id: true, name: true, sourceType: true, giftMasterId: true, vendorId: true } },
+        partner: { select: { id: true, businessName: true, clientId: true } },
+        fulfilledByVendor: { select: { id: true, name: true, status: true } },
+        statusHistory: {
+          orderBy: { createdAt: 'asc' },
+          select: { fromStatus: true, toStatus: true, changedById: true, notes: true, createdAt: true },
+        },
+      },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+
+    // Resolve actor display names for the status timeline (changedById → User.name).
+    const actorIds = [...new Set(order.statusHistory.map((h) => h.changedById).filter(Boolean))] as string[];
+    const actors = actorIds.length
+      ? await this.prisma.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, name: true } })
+      : [];
+    const actorName = new Map(actors.map((a) => [a.id, a.name]));
+
+    // Tenant display name (clientId → Client.internalName).
+    const clientId = order.partner?.clientId ?? null;
+    const client = clientId
+      ? await this.prisma.client.findUnique({ where: { id: clientId }, select: { internalName: true } })
+      : null;
+
+    // Delivery PII as a single flat block (ops-visible; never on the member tile).
+    const addressLine = [
+      order.deliveryAddressLine1,
+      order.deliveryAddressLine2,
+      order.deliveryCity,
+      order.deliveryState,
+      order.deliveryPincode,
+    ]
+      .filter(Boolean)
+      .join(', ');
+    const delivery =
+      order.deliveryName || addressLine || order.deliveryPhone
+        ? {
+            name: order.deliveryName ?? null,
+            address: addressLine || null,
+            phone: order.deliveryPhone ?? null,
+          }
+        : null;
+
+    const statusHistory = order.statusHistory.map((h) => ({
+      status: h.toStatus,
+      at: h.createdAt,
+      note: h.notes ?? null,
+      byName: h.changedById ? actorName.get(h.changedById) ?? null : null,
+    }));
+
+    // Derive the milestone timestamps the FE reads (no dedicated columns for
+    // confirmed/processed/returned — sourced from the authoritative status history).
+    const stampFor = (status: string) =>
+      order.statusHistory.find((h) => h.toStatus === status)?.createdAt ?? null;
+
+    return {
+      id: order.id,
+      orderNumber: order.orderNumber,
+      clientId,
+      tenantName: client?.internalName ?? clientId,
+      status: order.status,
+      redemptionMode: order.redemptionMode,
+      rewardName: order.reward?.name ?? null,
+      partnerName: order.partner?.businessName ?? null,
+      totalPointsCost: order.totalPointsCost,
+      quantity: order.quantity,
+      valuePaise: order.valuePaise != null ? order.valuePaise.toString() : null,
+      fulfilmentChannel: order.fulfilmentChannel,
+      logisticsPartner: order.logisticsPartner,
+      trackingNumber: order.trackingNumber,
+      trackingUrl: order.trackingUrl,
+      supplierOrderRef: order.supplierOrderRef,
+      voucherCode: order.voucherCode,
+      voucherProvider: order.voucherProvider,
+      fulfilledByVendorId: order.fulfilledByVendorId,
+      fulfilledByVendorName: order.fulfilledByVendor?.name ?? null,
+      delivery,
+      statusHistory,
+      confirmedAt: stampFor('CONFIRMED'),
+      processedAt: stampFor('PROCESSING'),
+      dispatchedAt: order.dispatchedAt,
+      deliveredAt: order.deliveredAt,
+      cancelledAt: order.cancelledAt,
+      returnedAt: stampFor('RETURNED') ?? (order.status === 'RETURNED' ? order.updatedAt : null),
+      createdAt: order.createdAt,
+      updatedAt: order.updatedAt,
     };
   }
 
@@ -2007,6 +2529,20 @@ export class RewardsService {
       data: { deletedAt: new Date() },
     });
     return { item };
+  }
+
+  /**
+   * Address quality (§12) — validate a delivery pincode for a physical gift at
+   * redeem. The DTO already enforces 6 digits; this adds the real-India rule (first
+   * digit 1–9 — no Indian PIN starts with 0). Serviceability lookup is out of scope
+   * (no serviceability dataset in v1); this is format/plausibility only.
+   */
+  private assertValidPincode(pincode?: string | null) {
+    if (!pincode || !/^[1-9]\d{5}$/.test(pincode)) {
+      throw new BadRequestException(
+        'A valid 6-digit delivery pincode is required for physical gifts.',
+      );
+    }
   }
 
   /** min <= max when both bounds are provided (FREE_AMOUNT voucher range). */

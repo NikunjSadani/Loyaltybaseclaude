@@ -27,6 +27,7 @@ import { WalletModule }   from './wallet/wallet.module';
 import { GifsyModule }    from './gifsy/gifsy.module';
 import { VisibilityModule } from './visibility/visibility.module';
 import { RewardsModule }  from './rewards/rewards.module';
+import { GiftCatalogueModule } from './gift-catalogue/gift-catalogue.module';
 import { PartnerModule }  from './partner/partner.module';
 import { KycModule }      from './kyc/kyc.module';
 import { SalesModule }    from './sales/sales.module';
@@ -86,6 +87,7 @@ import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
     GifsyModule,
     VisibilityModule,
     RewardsModule,
+    GiftCatalogueModule,
     PartnerModule,
     KycModule,
     SalesModule,

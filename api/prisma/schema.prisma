@@ -26,6 +26,10 @@ enum UserRole {
   SSS
   WHOLESALER
   SUB_STOCKIST
+  // Gift Catalogue & Dispatch (Wave 0) — a third-party vendor login, hard-scoped to a single
+  // tenant via User.vendorId + a VendorTenantGrant. Additive enum value (ALTER TYPE ADD VALUE,
+  // isolated migration). See docs/plans/GIFT-CATALOGUE-AND-DISPATCH-DESIGN.md §3.
+  VENDOR
 }
 
 enum UserStatus {
@@ -526,12 +530,18 @@ model User {
   // is their effective access. Null for every other role (and a GIFSY_STAFF with null role
   // has NO permissions — fail-closed). SetNull if the role is deleted.
   gifsyRoleId       String?
+  // Gift Catalogue & Dispatch (Wave 0) — for a VENDOR-role user, the Vendor entity this login
+  // belongs to (its role-specific context, mirroring gifsyRoleId/salesUser). Null for every
+  // other role. Restrict on delete so a Vendor with live logins can't be deleted out from under
+  // them. Additive + nullable, no backfill. See GIFT-CATALOGUE-AND-DISPATCH-DESIGN.md §3.
+  vendorId          String?
   createdAt         DateTime   @default(now())
   updatedAt         DateTime   @updatedAt
   deletedAt         DateTime?
 
   // Relations
   gifsyRole                  GifsyRole?          @relation(fields: [gifsyRoleId], references: [id], onDelete: SetNull)
+  vendor                     Vendor?             @relation(fields: [vendorId], references: [id], onDelete: Restrict)
   // RBAC Option-X (P5): tenants this GIFSY_STAFF may assume/operate in (empty = none, deny-by-default).
   gifsyTenantGrants          GifsyStaffTenantGrant[] @relation("GifsyStaffTenantGrants")
   sessions                   UserSession[]
@@ -574,6 +584,7 @@ model User {
   @@index([status])
   @@index([deletedAt])
   @@index([gifsyRoleId])
+  @@index([vendorId])
   @@map("users")
 }
 
@@ -1440,18 +1451,49 @@ model RewardCatalog {
   termsAndConditions  String?
   metadata            Json?
   sortOrder           Int                 @default(0)
+  // ── Gift Catalogue & Dispatch (Wave 0, Option R) — this row IS the per-tenant "live catalogue"
+  // row for gifts. All additive + nullable/defaulted so every existing Deoleo row stays valid: a
+  // pre-existing row reads as sourceType=PLATFORM, moderationStatus=APPROVED (live), no gift links.
+  // See docs/plans/GIFT-CATALOGUE-AND-DISPATCH-DESIGN.md §3 (Option R) + §7.
+  sourceType          GiftSourceType      @default(PLATFORM)
+  // Platform-source item link (sourceType=PLATFORM). Restrict: a GiftMaster with published rows
+  // can't be hard-deleted (archive instead).
+  giftMasterId        String?
+  // Vendor-source item link (sourceType=VENDOR). Restrict: a Vendor with catalogue rows can't be
+  // hard-deleted.
+  vendorId            String?
+  // NEW shared taxonomy link (GiftCategory). Additive — the existing categoryId→RewardCategory FK
+  // is KEPT untouched (§7 / review #13); this is a parallel, nullable link, not a repoint.
+  giftCategoryId      String?
+  // ₹ selling value (paise) — for gifts this derives pointsCost AND is frozen onto the order as
+  // valuePaise at redeem (decision 14). Nullable so existing rows (priced via pointsCost) are valid.
+  sellingValuePaise   Int?
+  // Vendor-item moderation gate. Default APPROVED so existing platform rows stay live; vendor rows
+  // land DRAFT/PENDING per the grant's approvalPolicy (Wave 1+ logic).
+  moderationStatus    GiftModerationStatus @default(APPROVED)
+  moderationByUserId  String?
+  moderatedAt         DateTime?
+  moderationReason    String?
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
   deletedAt           DateTime?
 
-  category RewardCategory    @relation(fields: [categoryId], references: [id])
-  orders   RedemptionOrder[]
+  category     RewardCategory    @relation(fields: [categoryId], references: [id])
+  giftCategory GiftCategory?     @relation(fields: [giftCategoryId], references: [id])
+  giftMaster   GiftMaster?       @relation(fields: [giftMasterId], references: [id], onDelete: Restrict)
+  vendor       Vendor?           @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  orders       RedemptionOrder[]
 
   @@index([clientId])
   @@index([categoryId])
   @@index([status])
   @@index([redemptionMode])
   @@index([deletedAt])
+  @@index([sourceType])
+  @@index([vendorId])
+  @@index([giftMasterId])
+  @@index([giftCategoryId])
+  @@index([moderationStatus])
   @@map("reward_catalog")
 }
 
@@ -1490,13 +1532,28 @@ model RedemptionOrder {
   cancelReason         String?
   notes                String?
   metadata             Json?
+  // ── Gift Catalogue & Dispatch (Wave 0) — dispatch/fulfilment fields. All additive + nullable
+  // so every existing Deoleo order stays valid (a pre-existing order has no fulfilmentChannel etc.).
+  // valuePaise (above) is REUSED as the frozen order value — NOT changed. See §3 + §5.
+  fulfilmentChannel    GiftFulfilmentChannel?
+  logisticsPartner     String?
+  supplierOrderRef     String? // e.g. an Amazon / supplier order id
+  // The vendor fulfilling this order (set when the item is sourceType=VENDOR). Restrict: a Vendor
+  // with in-flight orders can't be hard-deleted.
+  fulfilledByVendorId  String?
+  podUrl               String? // proof-of-delivery URL
+  // DPDP consent (decision 15): timestamp + version of the member's consent to share delivery
+  // name/address/phone with the fulfilment vendor. Set only for vendor-sourced redemptions.
+  vendorPiiConsentAt   DateTime?
+  consentVersion       String?
   createdAt            DateTime         @default(now())
   updatedAt            DateTime         @updatedAt
 
-  partner       ChannelPartner            @relation(fields: [partnerId], references: [id], onDelete: Restrict)
-  account       RewardAccount?            @relation(fields: [accountId], references: [id], onDelete: Restrict)
-  reward        RewardCatalog             @relation(fields: [rewardId], references: [id])
-  statusHistory RedemptionStatusHistory[]
+  partner          ChannelPartner            @relation(fields: [partnerId], references: [id], onDelete: Restrict)
+  account          RewardAccount?            @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  reward           RewardCatalog             @relation(fields: [rewardId], references: [id])
+  fulfilledByVendor Vendor?                  @relation(fields: [fulfilledByVendorId], references: [id], onDelete: Restrict)
+  statusHistory    RedemptionStatusHistory[]
 
   @@index([partnerId])
   @@index([accountId])
@@ -1504,6 +1561,7 @@ model RedemptionOrder {
   @@index([status])
   @@index([orderNumber])
   @@index([createdAt])
+  @@index([fulfilledByVendorId])
   @@map("redemption_orders")
 }
 
@@ -3094,4 +3152,157 @@ model WhatsappBroadcastRecipient {
   @@index([clientId, status])
   @@index([msg91RequestId])
   @@map("whatsapp_broadcast_recipients")
+}
+
+// ============================================================
+// MODULE: GIFT CATALOGUE & DISPATCH (Wave 0 — schema foundation)
+// Multi-source gift catalogue (platform master + per-tenant vendors) + a dispatch/fulfilment
+// layer over redemption orders. ADDITIVE ONLY — see docs/plans/GIFT-CATALOGUE-AND-DISPATCH-DESIGN.md.
+// Waves 1+ add controllers/services/DTOs/logic; this wave is models + one additive migration only.
+// ============================================================
+
+// Where a catalogue row originates (RewardCatalog.sourceType). PLATFORM = a Gifsy-authored
+// GiftMaster published to the tenant; VENDOR = a third-party vendor's item for a granted tenant.
+enum GiftSourceType {
+  PLATFORM
+  VENDOR
+}
+
+enum VendorStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum VendorGrantStatus {
+  ACTIVE
+  REVOKED
+}
+
+// Per-vendor-grant moderation policy for vendor-submitted items. v1 implements AUTO_LIVE +
+// GIFSY_APPROVE; TENANT_APPROVE / EITHER are declared for a later additive follow-up (decision 7).
+enum GiftApprovalPolicy {
+  AUTO_LIVE
+  GIFSY_APPROVE
+  TENANT_APPROVE
+  EITHER
+}
+
+// Moderation lifecycle of a catalogue row (RewardCatalog.moderationStatus). Existing platform
+// rows default APPROVED (live); vendor rows land DRAFT/PENDING per the grant's approvalPolicy.
+enum GiftModerationStatus {
+  DRAFT
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// How a gift order is fulfilled (decision 10). Bank/UPI cash payouts are NOT gifts and stay on
+// the existing payout (UTR) rail — out of this module.
+enum GiftFulfilmentChannel {
+  FULFILLED_BY_AMAZON
+  GIFSY_WAREHOUSE
+  BRAND
+  DIGITAL_VOUCHER
+}
+
+/// A third-party gift vendor — a PLATFORM entity granted to specific tenant(s) via
+/// VendorTenantGrant (deny-by-default, mirrors the RBAC GifsyStaffTenantGrant pattern). No
+/// financial/KYC fields (decisions 8 + 9): onboarding = name + login + status + grant only.
+/// A vendor login = a User with role=VENDOR + User.vendorId → this row.
+model Vendor {
+  id              String       @id @default(cuid())
+  name            String
+  status          VendorStatus @default(ACTIVE)
+  createdByUserId String?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  grants       VendorTenantGrant[]
+  users        User[]
+  catalogItems RewardCatalog[]
+  orders       RedemptionOrder[]
+
+  @@index([status])
+  @@map("vendors")
+}
+
+/// Which tenant(s) a vendor may operate in (the TENANT axis; mirrors GifsyStaffTenantGrant).
+/// Deny-by-default: no ACTIVE grant → the vendor can't touch that tenant. `clientId` is a bare
+/// tenant slug (= Client.id), no FK to Client, matching the clientId convention everywhere else.
+/// `approvalPolicy` is the per-grant moderation setting for that vendor's items in that tenant.
+model VendorTenantGrant {
+  id              String             @id @default(cuid())
+  vendorId        String
+  clientId        String
+  approvalPolicy  GiftApprovalPolicy @default(GIFSY_APPROVE)
+  status          VendorGrantStatus  @default(ACTIVE)
+  createdByUserId String?
+  createdAt       DateTime           @default(now())
+
+  vendor Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@unique([vendorId, clientId])
+  @@index([clientId])
+  @@index([vendorId])
+  @@map("vendor_tenant_grants")
+}
+
+/// PLATFORM-level shared gift taxonomy (one tree Gifsy curates; tenants may hide/reorder, not
+/// fork — decision 3). Distinct from the per-tenant RewardCategory, which is KEPT; RewardCatalog
+/// links to this via the new nullable giftCategoryId (additive, §7).
+model GiftCategory {
+  id        String   @id @default(cuid())
+  parentId  String?
+  code      String
+  name      String
+  imageUrl  String?
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  parent       GiftCategory?   @relation("GiftCategoryHierarchy", fields: [parentId], references: [id])
+  children     GiftCategory[]  @relation("GiftCategoryHierarchy")
+  masters      GiftMaster[]
+  catalogItems RewardCatalog[]
+
+  @@index([parentId])
+  @@map("gift_categories")
+}
+
+/// The PLATFORM-source gift, authored once by Gifsy and published to tenants as RewardCatalog
+/// rows (sourceType=PLATFORM, giftMasterId set). Master content edits propagate to published
+/// rows; per-tenant selling price / pointsCost never auto-overwritten (§4). stockQuantity null
+/// = unlimited. defaultFulfilmentChannel is the suggested channel for orders of this gift.
+model GiftMaster {
+  id                       String                 @id @default(cuid())
+  categoryId               String
+  code                     String
+  name                     String
+  description              String?
+  imageUrls                Json?
+  mrpPaise                 Int?
+  redemptionMode           PayoutMode
+  defaultFulfilmentChannel GiftFulfilmentChannel?
+  termsAndConditions       String?
+  status                   GiftMasterStatus       @default(ACTIVE)
+  stockQuantity            Int? // null = unlimited
+  metadata                 Json?
+  createdByUserId          String?
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+  deletedAt                DateTime?
+
+  category     GiftCategory    @relation(fields: [categoryId], references: [id])
+  catalogItems RewardCatalog[]
+
+  @@index([categoryId])
+  @@index([status])
+  @@index([deletedAt])
+  @@map("gift_masters")
+}
+
+enum GiftMasterStatus {
+  ACTIVE
+  ARCHIVED
 }

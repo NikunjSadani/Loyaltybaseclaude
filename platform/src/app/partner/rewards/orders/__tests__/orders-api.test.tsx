@@ -127,4 +127,43 @@ describe('OR — Orders API wiring (live data)', () => {
     const link = await screen.findByTestId('tracking-link');
     expect(link).toHaveAttribute('href', 'https://track.example.com/DEOLEO-5512');
   });
+
+  // OR8/OR9: the paid voucher code must survive the whole post-issuance lifecycle — ops
+  // can move a DIGITAL_VOUCHER order past CONFIRMED, and the member still needs the code.
+  it('OR8: a voucher code stays visible once the order advances past CONFIRMED (DISPATCHED/DELIVERED)', async () => {
+    for (const status of ['PROCESSING', 'DISPATCHED', 'DELIVERED']) {
+      stubOrders([{ ...VOUCHER_ORDER, id: `v-${status}`, status }]);
+      const { unmount } = render(<OrdersPage />);
+      const code = await screen.findByTestId('voucher-code');
+      expect(code).toHaveTextContent('AMZ-GIFT-7788-CODE');
+      unmount();
+    }
+  });
+
+  it('OR9: a voucher code is hidden for dead / pre-issuance states (RETURNED, CANCELLED, PENDING)', async () => {
+    for (const status of ['PENDING', 'CANCELLED', 'RETURNED', 'REVERSED', 'FAILED']) {
+      stubOrders([{ ...VOUCHER_ORDER, id: `v-${status}`, status }]);
+      const { unmount } = render(<OrdersPage />);
+      await screen.findByText('Amazon Gift Voucher ₹200'); // list rendered
+      expect(screen.queryByTestId('voucher-code')).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it('OR10: an error offers a Retry that reloads the orders', async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error('Network error'))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ success: true, data: { orders: [VOUCHER_ORDER] } }),
+      });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<OrdersPage />);
+    const retry = await screen.findByTestId('orders-retry');
+    await userEvent.click(retry);
+
+    expect(await screen.findByText('Amazon Gift Voucher ₹200')).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });

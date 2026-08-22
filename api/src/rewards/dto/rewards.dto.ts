@@ -17,7 +17,12 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
-import { PayoutMode, RedemptionStatus, RewardCatalogStatus } from '@prisma/client';
+import {
+  GiftFulfilmentChannel,
+  PayoutMode,
+  RedemptionStatus,
+  RewardCatalogStatus,
+} from '@prisma/client';
 
 /**
  * Catalog listing filters — mirror the source query params on
@@ -138,6 +143,23 @@ export class UpdateOrderDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  // ── Dispatch fields (Gift Catalogue & Dispatch §5) — fulfilment console/bulk edits.
+  @IsOptional()
+  @IsEnum(GiftFulfilmentChannel)
+  fulfilmentChannel?: GiftFulfilmentChannel;
+
+  @IsOptional()
+  @IsString()
+  logisticsPartner?: string;
+
+  @IsOptional()
+  @IsString()
+  supplierOrderRef?: string;
+
+  @IsOptional()
+  @IsUrl()
+  podUrl?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -265,6 +287,23 @@ export class TransitionOrderDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  // ── Dispatch fields (Gift Catalogue & Dispatch §5) — stamped alongside a status move.
+  @IsOptional()
+  @IsEnum(GiftFulfilmentChannel)
+  fulfilmentChannel?: GiftFulfilmentChannel;
+
+  @IsOptional()
+  @IsString()
+  logisticsPartner?: string;
+
+  @IsOptional()
+  @IsString()
+  supplierOrderRef?: string;
+
+  @IsOptional()
+  @IsUrl()
+  podUrl?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -286,6 +325,55 @@ export class FulfilmentTemplateQueryDto {
   @IsOptional()
   @IsEnum(PayoutMode)
   mode?: PayoutMode;
+}
+
+/**
+ * GET /v1/admin/gift-catalogue/dispatch/orders — Gifsy fulfilment console filters.
+ * Cross-tenant for a platformWide OWNER; `clientId` narrows to one tenant. Each
+ * returned order is annotated with a channel-aware dispatch-SLA.
+ */
+export class FulfilmentOrdersQueryDto {
+  @IsOptional()
+  @IsEnum(RedemptionStatus)
+  status?: RedemptionStatus;
+
+  /** Fulfilment channel filter. FE param name = `channel`. */
+  @IsOptional()
+  @IsEnum(GiftFulfilmentChannel)
+  channel?: GiftFulfilmentChannel;
+
+  /** Narrow a platform-wide list to one tenant (Client.id slug). */
+  @IsOptional()
+  @IsString()
+  clientId?: string;
+
+  /** Case-insensitive substring match on orderNumber. FE param name = `q`. */
+  @IsOptional()
+  @IsString()
+  q?: string;
+
+  /** ISO date (inclusive) lower bound on createdAt. FE param name = `from`. */
+  @IsOptional()
+  @IsString()
+  from?: string;
+
+  /** ISO date (inclusive) upper bound on createdAt. FE param name = `to`. */
+  @IsOptional()
+  @IsString()
+  to?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number = 1;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  limit?: number = 50;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

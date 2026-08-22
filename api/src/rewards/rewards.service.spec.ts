@@ -54,6 +54,11 @@ const mockPrisma = {
   redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
   redemptionStatusHistory: { create: jest.fn() },
   payoutTransaction: { create: jest.fn() },
+  // Tenant order-number generation (order-number.helper) runs raw SQL inside the
+  // redeem tx: an advisory xact lock + a max-suffix scan. Default: lock ok, no prior
+  // rows → sequence starts at 1.
+  $executeRaw: jest.fn().mockResolvedValue(1),
+  $queryRaw: jest.fn().mockResolvedValue([]),
   // $transaction runs the callback against a tx client that proxies the same mocks.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   $transaction: jest.fn((fn: (tx: any) => unknown) => fn(mockPrisma)),
@@ -120,6 +125,10 @@ const ELIGIBLE_FRESH_PARTNER = {
 };
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '9990001111', name: '' };
+// An ASSUMED Gifsy operator (working inside a tenant) — platformWide=false, so the
+// order write-paths (§12) scope by partner.clientId. An UN-assumed GIFSY_ADMIN is
+// platform-wide (cross-tenant) for those same paths (the fulfilment console).
+const assumedGifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', assumed: true, phone: '9990001111', name: '' };
 const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '9991112222', name: '' };
 const sales: JwtPayload = { sub: 'salesUser1', role: 'SALES_SO', clientId: 'deoleo', phone: '9993334444', name: '' };
 
@@ -170,6 +179,8 @@ describe('RewardsService', () => {
             status: 'ACTIVE',
             deletedAt: null,
             clientId: 'deoleo',
+            // Gift Catalogue moderation gate — only APPROVED items are browsable.
+            moderationStatus: 'APPROVED',
             pointsCost: { gte: 10, lte: 200 },
           },
         }),
@@ -190,12 +201,19 @@ describe('RewardsService', () => {
 
       const res = await service.listCatalog(partner, {});
 
-      // The findMany must request the category relation so the FE can route tabs.
-      expect(mockPrisma.rewardCatalog.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          include: { category: { select: { name: true } } },
-        }),
-      );
+      // Member-safe projection: an explicit `select` (NOT include) that carries the
+      // category relation for the FE tabs but EXCLUDES ops/internal columns.
+      const call = mockPrisma.rewardCatalog.findMany.mock.calls[0][0];
+      expect(call.select).toBeDefined();
+      expect(call.include).toBeUndefined();
+      expect(call.select.category).toEqual({ select: { name: true } });
+      // Ops/internal columns must NOT be selected for members.
+      expect(call.select.sellingValuePaise).toBeUndefined();
+      expect(call.select.sourceType).toBeUndefined();
+      expect(call.select.vendorId).toBeUndefined();
+      expect(call.select.giftMasterId).toBeUndefined();
+      expect(call.select.giftCategoryId).toBeUndefined();
+      expect(call.select.moderationStatus).toBeUndefined();
       // The nested relation is flattened to a plain string label.
       expect(res.items[0].category).toBe('Gift Vouchers');
       expect(res.items[0].redemptionMode).toBe('GIFT_CARD');
@@ -217,9 +235,18 @@ describe('RewardsService', () => {
     it('throws NotFound for an item outside the tenant', async () => {
       mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null);
       await expect(service.getCatalogItem(partner, 'r9')).rejects.toBeInstanceOf(NotFoundException);
-      expect(mockPrisma.rewardCatalog.findFirst).toHaveBeenCalledWith({
-        where: { id: 'r9', deletedAt: null, clientId: 'deoleo' },
+      const call = mockPrisma.rewardCatalog.findFirst.mock.calls[0][0];
+      // status=ACTIVE parity with listCatalog + member-safe select.
+      expect(call.where).toEqual({
+        id: 'r9',
+        deletedAt: null,
+        clientId: 'deoleo',
+        status: 'ACTIVE',
+        moderationStatus: 'APPROVED',
       });
+      expect(call.select).toBeDefined();
+      expect(call.select.sellingValuePaise).toBeUndefined();
+      expect(call.select.moderationStatus).toBeUndefined();
     });
 
     it('returns the item when found', async () => {
@@ -429,16 +456,65 @@ describe('RewardsService', () => {
       const res = await service.getOrder(partner, 'o2', 'cp-sib');
       expect(res.order.id).toBe('o2');
     });
+
+    it('MEMBER path uses a member-safe select (excludes ops-only fields) — audit #4', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'o1', partnerId: 'cp1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      await service.getOrder(partner, 'o1');
+      const call = mockPrisma.redemptionOrder.findFirst.mock.calls[0][0];
+      expect(call.select).toBeDefined();
+      expect(call.include).toBeUndefined();
+      // ops-only fields must NOT be selected for a member
+      expect(call.select.fulfilmentChannel).toBeUndefined();
+      expect(call.select.supplierOrderRef).toBeUndefined();
+      expect(call.select.fulfilledByVendorId).toBeUndefined();
+      expect(call.select.podUrl).toBeUndefined();
+      expect(call.select.notes).toBeUndefined();
+      expect(call.select.valuePaise).toBeUndefined();
+    });
+
+    it('GIFSY path keeps the full detail (include) — audit #4', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'o1', partnerId: 'cp1', reward: {}, partner: {} });
+      const res = await service.getOrder(gifsy, 'o1');
+      const call = mockPrisma.redemptionOrder.findFirst.mock.calls[0][0];
+      expect(call.include).toBeDefined();
+      expect(call.select).toBeUndefined();
+      expect(res.order.id).toBe('o1');
+    });
+  });
+
+  describe('trackOrder (member-safe tracking) — audit #5', () => {
+    it('omits fulfilmentChannel from the payload and notes from the timeline', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        id: 'o1', partnerId: 'cp1', orderNumber: 'D-1', status: 'DISPATCHED',
+        reward: { id: 'r1', name: 'TV', imageUrls: [] }, quantity: 1,
+        fulfilmentChannel: 'GIFSY_WAREHOUSE', logisticsPartner: 'BlueDart',
+        trackingNumber: 'TN1', trackingUrl: null, dispatchedAt: new Date(), deliveredAt: null, cancelledAt: null,
+        statusHistory: [{ fromStatus: 'CONFIRMED', toStatus: 'DISPATCHED', createdAt: new Date() }],
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+
+      const res = await service.trackOrder(partner, 'o1');
+
+      // fulfilmentChannel is ops-only — never on the member tracking payload.
+      expect(res.tracking).not.toHaveProperty('fulfilmentChannel');
+      expect(res.tracking.logisticsPartner).toBe('BlueDart'); // courier name IS member-safe
+      // The statusHistory SELECT must not request `notes`.
+      const call = mockPrisma.redemptionOrder.findFirst.mock.calls[0][0];
+      expect(call.include.statusHistory.select).toEqual({ fromStatus: true, toStatus: true, createdAt: true });
+      expect(call.include.statusHistory.select.notes).toBeUndefined();
+    });
   });
 
   describe('updateOrder', () => {
     it('throws NotFound when the order is outside the tenant', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(null);
+      // An ASSUMED operator scopes by partner.clientId (§12).
       await expect(
-        service.updateOrder(gifsy, 'o9', { trackingNumber: 'TN1' }),
+        service.updateOrder(assumedGifsy, 'o9', { trackingNumber: 'TN1' }),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith({
-        where: { id: 'o9', partner: { user: { clientId: 'deoleo' } } },
+        where: { id: 'o9', partner: { clientId: 'deoleo' } },
       });
     });
 
@@ -689,6 +765,56 @@ describe('RewardsService', () => {
         }),
       );
       expect(res.status).toBe('CONFIRMED');
+    });
+
+    it('GIFT value-freeze: valuePaise = sellingValuePaise × qty from the redeem snapshot, rate-immune (§14)', async () => {
+      // points=1000 @ rate 1 would give 100000n via the fallback; the gift snapshot
+      // (50000 paise × qty 1 = 50000n) must WIN, proving the value is decoupled from rate.
+      mockSettings.conversionRate = 5; // deliberately different — must be ignored for gifts
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        redemptionMode: 'PHYSICAL_GIFT',
+        quantity: 1,
+        metadata: { sellingValuePaiseSnapshot: 50000 },
+        reward: { name: 'Smart TV', stockQuantity: null, sellingValuePaise: 50000 },
+      });
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+        expiresAt: new Date(Date.now() + 60000),
+      });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'CONFIRMED' });
+
+      await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
+
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
+        where: { id: 'o1', status: 'PENDING' },
+        data: { status: 'CONFIRMED', pointsDeducted: 1000, valuePaise: 50000n },
+      });
+    });
+
+    it('GIFT value-freeze handles qty>1 (sellingValuePaise × quantity)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        redemptionMode: 'PHYSICAL_GIFT',
+        quantity: 3,
+        totalPointsCost: 3000,
+        metadata: { sellingValuePaiseSnapshot: 50000 },
+        reward: { name: 'Smart TV', stockQuantity: null, sellingValuePaise: 50000 },
+      });
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+        expiresAt: new Date(Date.now() + 60000),
+      });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'CONFIRMED' });
+
+      await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
+
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
+        where: { id: 'o1', status: 'PENDING' },
+        data: { status: 'CONFIRMED', pointsDeducted: 3000, valuePaise: 150000n }, // 50000 × 3
+      });
     });
 
     it('paid-channel recipient is the OUTLET OWNER (partner.phone/ownerName); free channels keep the acting user', async () => {
@@ -1731,6 +1857,58 @@ describe('RewardsService', () => {
       expect(upd.data.cancelledAt).toBeInstanceOf(Date);
     });
 
+    it('DELIVERED→RETURNED (gift) zeroes valuePaise AND refunds points (§12 reversal)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        id: 'o1', status: 'DELIVERED', partnerId: 'cp1', orderNumber: 'RDM-x',
+        pointsDeducted: 1000, redemptionMode: 'PHYSICAL_GIFT',
+      });
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'RETURNED' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'user1', phone: '9991112222' });
+
+      await service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.RETURNED });
+
+      // valuePaise zeroed so 194R Source-2 + the disbursal report drop it.
+      const upd = mockPrisma.redemptionOrder.update.mock.calls?.[0]?.[0];
+      expect(upd.data.valuePaise).toBe(0n);
+      // Points refunded via the atomic claim + wallet.reverse.
+      expect(mockWallet.reverse).toHaveBeenCalledWith(
+        'cp1', 1000, { referenceId: 'o1', description: 'Refund RDM-x' }, mockPrisma,
+      );
+    });
+
+    it('is IDEMPOTENT — a no-op request for the current status skips write + notification', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        id: 'o1', status: 'DISPATCHED', partnerId: 'cp1', orderNumber: 'RDM-x', pointsDeducted: 1000,
+      });
+      const res = await service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DISPATCHED });
+      expect(res).toMatchObject({ skipped: true });
+      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+      expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+    });
+
+    it('stamps the dispatch fields (channel/partner/supplierOrderRef/POD) alongside a move', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'RDM-x',
+        pointsDeducted: 1000, redemptionMode: 'PHYSICAL_GIFT',
+      });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'PROCESSING' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'user1', phone: '9991112222' });
+
+      await service.transitionOrder(gifsy, 'o1', {
+        toStatus: UpdatableOrderStatus.PROCESSING,
+        fulfilmentChannel: 'GIFSY_WAREHOUSE' as never,
+        logisticsPartner: 'BlueDart',
+        supplierOrderRef: 'AMZ-123',
+      });
+      const upd = mockPrisma.redemptionOrder.update.mock.calls?.[0]?.[0];
+      expect(upd.data).toMatchObject({
+        fulfilmentChannel: 'GIFSY_WAREHOUSE',
+        logisticsPartner: 'BlueDart',
+        supplierOrderRef: 'AMZ-123',
+      });
+    });
+
     it('PROCESSING→DISPATCHED stamps dispatchedAt and writes history', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
         id: 'o1', status: 'PROCESSING', partnerId: 'cp1', orderNumber: 'RDM-x', pointsDeducted: 1000,
@@ -1750,13 +1928,23 @@ describe('RewardsService', () => {
       expect(hist.data).toMatchObject({ orderId: 'o1', fromStatus: 'PROCESSING', toStatus: 'DISPATCHED' });
     });
 
-    it('scopes the order load by clientId (tenant)', async () => {
+    it('scopes the order load by partner.clientId for an ASSUMED operator (tenant)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(null);
+      await expect(
+        service.transitionOrder(assumedGifsy, 'o9', { toStatus: UpdatableOrderStatus.PROCESSING }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith({
+        where: { id: 'o9', partner: { clientId: 'deoleo' } },
+      });
+    });
+
+    it('loads cross-tenant (no partner filter) for an UN-assumed platform OWNER (console)', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(null);
       await expect(
         service.transitionOrder(gifsy, 'o9', { toStatus: UpdatableOrderStatus.PROCESSING }),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith({
-        where: { id: 'o9', partner: { user: { clientId: 'deoleo' } } },
+        where: { id: 'o9' },
       });
     });
   });
@@ -2000,11 +2188,11 @@ describe('RewardsService', () => {
         },
       ]);
 
-      const buf = await service.getFulfilmentTemplate(gifsy, {});
+      const buf = await service.getFulfilmentTemplate(assumedGifsy, {});
 
-      // Tenant scope + default actionable status set (no explicit status/mode filter).
+      // Tenant scope (assumed operator → partner.clientId, §12) + default actionable set.
       const call = mockPrisma.redemptionOrder.findMany.mock.calls?.[0]?.[0];
-      expect(call.where.partner).toEqual({ user: { clientId: 'deoleo' } });
+      expect(call.where.partner).toEqual({ clientId: 'deoleo' });
       expect(call.where.status).toEqual({
         in: expect.arrayContaining(['CONFIRMED', 'PROCESSING', 'DISPATCHED']),
       });
@@ -2074,16 +2262,16 @@ describe('RewardsService', () => {
         [{ orderNumber: 'RDM-1' }],
         { 0: { 'Voucher Code': 'GC-XYZ', 'New Status': 'PROCESSING' } },
       );
-      const res = await service.uploadFulfilment(gifsy, file);
+      const res = await service.uploadFulfilment(assumedGifsy, file);
 
-      // Resolved the order in-tenant by orderNumber.
+      // Resolved the order in-tenant by orderNumber (assumed operator → partner.clientId).
       expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { orderNumber: 'RDM-1', partner: { user: { clientId: 'deoleo' } } },
+          where: { orderNumber: 'RDM-1', partner: { clientId: 'deoleo' } },
         }),
       );
       // Applied via the guarded transition with the row's voucher + target status.
-      expect(spy).toHaveBeenCalledWith(gifsy, 'oid-1', expect.objectContaining({
+      expect(spy).toHaveBeenCalledWith(assumedGifsy, 'oid-1', expect.objectContaining({
         toStatus: 'PROCESSING',
         voucherCode: 'GC-XYZ',
       }));
@@ -2102,11 +2290,11 @@ describe('RewardsService', () => {
         [{ orderNumber: 'RDM-OTHER-TENANT' }],
         { 0: { 'New Status': 'PROCESSING', 'Voucher Code': 'GC-X' } },
       );
-      const res = await service.uploadFulfilment(gifsy, file);
+      const res = await service.uploadFulfilment(assumedGifsy, file);
 
       expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { orderNumber: 'RDM-OTHER-TENANT', partner: { user: { clientId: 'deoleo' } } },
+          where: { orderNumber: 'RDM-OTHER-TENANT', partner: { clientId: 'deoleo' } },
         }),
       );
       expect(tSpy).not.toHaveBeenCalled();
@@ -2577,6 +2765,52 @@ describe('RewardsService', () => {
       const ptCall = mockPrisma.payoutTransaction.create.mock.calls[0][0];
       expect(ptCall.data.payoutMode).toBe('UPI');
       expect(ptCall.data.status).toBe('PENDING');
+    });
+  });
+
+  // ─── Dispatch console (cross-tenant fulfilment queue) ────────────────────────
+  describe('listFulfilmentOrders', () => {
+    it('rejects a non-operator at the data boundary (audit #6)', async () => {
+      await expect(service.listFulfilmentOrders(partner, {})).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.redemptionOrder.findMany).not.toHaveBeenCalled();
+    });
+
+    it('platformWide OWNER may narrow to one tenant via q.clientId', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(0);
+      await service.listFulfilmentOrders(gifsy, { clientId: 'acme' });
+      const call = mockPrisma.redemptionOrder.findMany.mock.calls[0][0];
+      expect(call.where.partner).toEqual({ clientId: 'acme' });
+    });
+
+    it('ASSUMED operator is HARD-pinned — q.clientId cannot override the tenant (no leak)', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(0);
+      await service.listFulfilmentOrders(assumedGifsy, { clientId: 'acme' });
+      const call = mockPrisma.redemptionOrder.findMany.mock.calls[0][0];
+      expect(call.where.partner).toEqual({ clientId: 'deoleo' }); // pinned, NOT acme
+    });
+
+    it('annotates each order with a channel-aware SLA + stringifies BigInt valuePaise', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([
+        {
+          id: 'o1', status: 'CONFIRMED', fulfilmentChannel: 'GIFSY_WAREHOUSE',
+          dispatchedAt: null, valuePaise: 50000n, statusHistory: [{ createdAt: new Date() }],
+        },
+      ]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(1);
+      const res = await service.listFulfilmentOrders(gifsy, {});
+      expect(res.items[0].dispatchSla).toEqual(
+        expect.objectContaining({ applicable: true }),
+      );
+      expect(res.items[0].valuePaise).toBe('50000');
+    });
+  });
+
+  describe('getFulfilmentOrder', () => {
+    it('rejects a non-operator at the data boundary (audit #6)', async () => {
+      await expect(service.getFulfilmentOrder(partner, 'o1')).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.redemptionOrder.findFirst).not.toHaveBeenCalled();
     });
   });
 });

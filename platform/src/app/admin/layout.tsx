@@ -32,6 +32,7 @@ import {
   Smartphone,
   BookOpen,
   MessageSquare,
+  Truck,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useTenantFeatures } from '@/lib/tenant-features';
@@ -126,6 +127,7 @@ const ALL_NAV_ITEMS = [
     ],
   },
   { href: '/admin/gifts',    label: 'Gift Catalogue',  icon: Gift,          featureFlag: 'walletModule' as const },
+  { href: '/admin/gift-catalogue', label: 'Gift Master Catalogue', icon: ShoppingBag, featureFlag: null, gifsyAdminOnly: true },
   { href: process.env.NEXT_PUBLIC_EXCEL_TARGETS_ONLY === 'true' ? '/admin/targets/upload' : '/admin/targets', label: 'Targets', icon: Target, featureFlag: null },
   { href: '/admin/sales',    label: 'Sales Data',       icon: TrendingUp,    featureFlag: null },
   {
@@ -169,6 +171,7 @@ const ALL_NAV_ITEMS = [
   // AND GIFSY_STAFF); the pages are role-guarded to ['GIFSY_ADMIN'] via
   // admin/whatsapp-broadcasts/layout.tsx, so nav visibility and the route guard agree.
   { href: '/admin/whatsapp-broadcasts', label: 'WhatsApp Broadcasts', icon: MessageSquare, featureFlag: null, gifsyAdminOnly: true },
+  { href: '/admin/gift-orders', label: 'Gift Dispatch', icon: Truck, featureFlag: null, gifsyAdminOnly: true },
   { href: '/admin/settings', label: 'Settings',         icon: Settings,      featureFlag: null },
 ];
 

@@ -137,6 +137,17 @@ export class RewardsController {
     return this.rewards.getOrder(user, id, activePartnerId);
   }
 
+  /** Member ORDER-TRACKING view (partner app) — own order status + tracking + timeline. */
+  @Get('orders/:id/track')
+  @RequirePermission('rewards:read')
+  trackOrder(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.rewards.trackOrder(user, id, activePartnerId);
+  }
+
   /** GIFSY-only NON-STATUS edits (tracking / notes / voucher). Status moves go via POST :id/transition. */
   @Patch('orders/:id')
   @Roles('GIFSY_ADMIN')
