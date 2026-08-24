@@ -3,12 +3,13 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   Gift, Search, CheckCircle,
-  X, Shield, Package, Truck, Zap, Heart,
+  Shield, Package, Truck, Zap, Heart,
   Banknote, CreditCard, Tag,
   AlertCircle, Phone,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
+import { Modal } from '@/components/ui/modal';
 import { Badge } from '@/components/ui/badge';
 import { Spinner } from '@/components/ui/spinner';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -71,6 +72,16 @@ interface CatalogueItem {
   /** Min/max redeemable points for FREE_AMOUNT vouchers (server-validated). */
   minRedemptionPoints?: number | null;
   maxRedemptionPoints?: number | null;
+  /**
+   * DPDP consent gate (design decision #15). TRUE when this item is vendor-sourced
+   * (sourceType=VENDOR) and redeeming it shares the member's delivery name/address/phone
+   * with a third-party fulfilment partner → a blocking, default-unticked consent
+   * checkbox is required. Platform/Gifsy-fulfilled items are FALSE (no third party, no
+   * checkbox). The member catalogue deliberately hides the raw sourceType (PII/scoping),
+   * so we key off this dedicated flag — FLAGGED for BE: expose `requiresConsent` on each
+   * GET /api/rewards/catalog item.
+   */
+  requiresConsent?: boolean;
 }
 
 /** Raw item shape returned by GET /api/rewards/catalog. */
@@ -93,6 +104,8 @@ interface ApiCatalogItem {
   fixedAmount?: number | null;
   minRedemptionPoints?: number | null;
   maxRedemptionPoints?: number | null;
+  /** See CatalogueItem.requiresConsent — vendor-sourced items set this true (BE-exposed). */
+  requiresConsent?: boolean | null;
 }
 
 /* Presentational defaults for items the backend returns without imagery. */
@@ -149,6 +162,15 @@ function mapCatalogItem(item: ApiCatalogItem): CatalogueItem {
     fixedAmount:  item.fixedAmount ?? (voucherType === 'FIXED' ? item.pointsCost : undefined),
     minRedemptionPoints: item.minRedemptionPoints ?? null,
     maxRedemptionPoints: item.maxRedemptionPoints ?? null,
+    // DPDP consent gate — FAIL CLOSED for deliverable (physical) items: redeeming one
+    // shares the member's delivery name/address/phone with a third-party fulfilment
+    // partner, so an ABSENT/null flag must NOT silently drop the gate. A physical item
+    // requires consent unless the BE explicitly sends requiresConsent:false (a Gifsy-/
+    // platform-fulfilled item with no third party). Non-deliverable items (vouchers /
+    // cash — no address is shared) keep the gate only when explicitly flagged true.
+    requiresConsent: (item.redemptionMode ?? '') === 'PHYSICAL_GIFT'
+      ? item.requiresConsent !== false
+      : item.requiresConsent === true,
   };
 }
 
@@ -176,6 +198,52 @@ interface RedeemPayload {
     name: string; mobile: string; address: string;
     city: string; state: string; pincode: string;
   };
+  /**
+   * DPDP vendor-PII consent (design decision #15). Sent ONLY for vendor-sourced items
+   * (item.requiresConsent === true), when the member has ticked the blocking consent
+   * checkbox. The BE accepts a single `consent: boolean` flag and stamps its own
+   * `vendorPiiConsentAt` + consent version server-side (demonstrable, versioned consent).
+   */
+  consent?: boolean;
+}
+
+/**
+ * The consent wording the member agrees to. The FE only sends `consent: true`; the BE
+ * stamps its own version server-side so stored consent is auditable against exactly what
+ * was shown (owner/legal own the final wording; the platform records acceptance).
+ */
+export const VENDOR_PII_CONSENT_TEXT =
+  'I agree that my name, delivery address, and phone number will be shared with the fulfilment partner to deliver this gift.';
+
+/** True when redeeming this item requires the vendor-PII consent gate (decision #15). */
+export function requiresVendorConsent(
+  item: Pick<CatalogueItem, 'requiresConsent'>,
+): boolean {
+  return item.requiresConsent === true;
+}
+
+/* ─── Blocking vendor-PII consent checkbox ─────────────────────────────────────
+   Default-unticked; redeem stays disabled until ticked. Rendered only for
+   vendor-sourced items (requiresVendorConsent). */
+function ConsentCheckbox({
+  checked, onChange,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <label className="flex items-start gap-2.5 p-3 rounded-xl border border-amber-200 bg-amber-50 cursor-pointer">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        data-testid="vendor-consent-checkbox"
+        aria-label="Consent to share delivery details with the fulfilment partner"
+        className="mt-0.5 w-4 h-4 accent-[var(--brand-primary)] shrink-0"
+      />
+      <span className="text-xs text-amber-900 leading-relaxed">{VENDOR_PII_CONSENT_TEXT}</span>
+    </label>
+  );
 }
 
 interface RedeemInitResult {
@@ -217,12 +285,13 @@ function GiftImage({ gift, size }: GiftImageProps) {
 type RedemptionStep = 'detail' | 'form' | 'otp' | 'success';
 
 function GiftDetailSheet({
-  gift, onClose, myBalance, mobile, onWishlist, isWishlisted, onRedeemed,
+  gift, onClose, myBalance, mobile, memberName, onWishlist, isWishlisted, onRedeemed,
 }: {
   gift: CatalogueItem;
   onClose: () => void;
   myBalance: number;
   mobile: string;
+  memberName: string;
   onWishlist: (id: string) => void;
   isWishlisted: boolean;
   onRedeemed: (pts: number) => void;
@@ -230,6 +299,17 @@ function GiftDetailSheet({
   const toast = useToast();
   const [step,       setStep]       = useState<RedemptionStep>('detail');
   const [address,    setAddress]    = useState({ line1: '', city: '', state: '', pincode: '' });
+  // Recipient name for the parcel — seeded from the member's real name (never the gift
+  // brand), editable so it can be corrected, but never left blank. If /api/auth/me
+  // resolves AFTER this sheet opens, seed the (untouched) field once the name arrives.
+  const [recipientName, setRecipientName] = useState(memberName);
+  const [recipientTouched, setRecipientTouched] = useState(false);
+  useEffect(() => {
+    if (!recipientTouched && memberName) setRecipientName(memberName);
+  }, [memberName, recipientTouched]);
+  // Vendor-PII consent (decision #15) — default UNTICKED; blocks redeem for vendor items.
+  const [consent,    setConsent]    = useState(false);
+  const needConsent  = requiresVendorConsent(gift);
   const [otp,        setOtp]        = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [orderId,    setOrderId]    = useState<string | null>(null);
@@ -239,24 +319,36 @@ function GiftDetailSheet({
 
   // Step 1: create the PENDING order + trigger OTP.
   const handleSendOtp = async () => {
+    if (!recipientName.trim()) {
+      toast.error('Please enter the recipient name'); return;
+    }
     if (!address.line1 || !address.city || !address.pincode) {
       toast.error('Please fill in all required address fields'); return;
     }
     if (!/^\d{6}$/.test(address.pincode)) {
       toast.error('Enter a valid 6-digit pincode'); return;
     }
+    // Vendor-PII consent is a hard gate for vendor-sourced items (decision #15).
+    if (needConsent && !consent) {
+      toast.error('Please agree to share your delivery details to continue'); return;
+    }
     setSubmitting(true);
     const payload: RedeemPayload = {
       rewardId: gift.id,
       quantity: 1,
       deliveryAddress: {
-        name:    gift.brand || gift.name,
+        // The MEMBER's real name (so the vendor can address the parcel) — NEVER the gift
+        // brand, which the consent text promises is not what gets shared.
+        name:    recipientName.trim(),
         mobile,
         address: address.line1,
         city:    address.city,
         state:   address.state || address.city,
         pincode: address.pincode,
       },
+      // Only attach consent for vendor items that actually require it — platform items
+      // send nothing (no third party involved). The BE stamps the version server-side.
+      ...(needConsent ? { consent: true } : {}),
     };
     const result = await api.post<RedeemInitResult>('/api/rewards/redeem', payload);
     setSubmitting(false);
@@ -285,126 +377,144 @@ function GiftDetailSheet({
     setStep('success');
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex flex-col justify-end">
-      <div className="absolute inset-0 bg-black/50" onClick={step === 'detail' ? onClose : undefined} />
-      <div className="relative bg-white rounded-t-2xl max-h-[92vh] flex flex-col shadow-2xl">
-        <div className="flex justify-center pt-3 pb-0 shrink-0">
-          <div className="w-10 h-1 bg-gray-200 rounded-full" />
-        </div>
-        <button onClick={onClose} className="absolute top-4 right-4 z-10 w-8 h-8 bg-black/10 hover:bg-black/20 rounded-full flex items-center justify-center transition-colors">
-          <X className="h-4 w-4 text-gray-700" />
-        </button>
-        <button onClick={() => onWishlist(gift.id)} className="absolute top-4 right-14 z-10 w-8 h-8 bg-black/10 hover:bg-black/20 rounded-full flex items-center justify-center transition-colors">
-          <Heart className={`h-4 w-4 ${isWishlisted ? 'fill-red-500 text-red-500' : 'text-gray-700'}`} />
-        </button>
+  const title =
+    step === 'form'    ? 'Delivery address'
+    : step === 'otp'   ? 'Confirm redemption'
+    : step === 'success' ? 'Redemption confirmed'
+    : gift.name;
 
-        <div className="overflow-y-auto flex-1">
-          {step === 'detail' && (
-            <>
-              <GiftImage gift={gift} size="large" />
-              <div className="px-5 pb-6 space-y-5">
-                <div>
-                  <div className="flex items-center gap-2 flex-wrap mb-1">
-                    <span className="text-xs text-gray-400 font-medium">{gift.brand}</span>
-                    <span className="text-gray-200">·</span>
-                    <span className="text-xs text-gray-400">{gift.category}</span>
-                    {gift.popular && <Badge variant="warning" className="text-[10px]">Popular</Badge>}
-                  </div>
-                  <h2 className="text-lg font-bold text-gray-900 leading-snug">{gift.name}</h2>
-                </div>
-                <div className="flex items-center gap-3 p-3.5 bg-gray-50 rounded-2xl">
-                  <div className="flex-1">
-                    <p className={`text-2xl font-bold ${canAfford ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`}>
-                      {formatPoints(gift.points)} pts
-                    </p>
-                    {!canAfford && <p className="text-xs text-red-500 mt-0.5 font-semibold">Need {formatPoints(needMore)} more pts</p>}
-                    {canAfford && <p className="text-xs text-emerald-600 mt-0.5 font-medium">{formatPoints(myBalance - gift.points)} pts remaining after</p>}
-                  </div>
-                  <div className="text-right">
-                    <div className="flex items-center gap-1 justify-end text-xs text-gray-500"><Truck className="h-3.5 w-3.5" />{delivery}</div>
-                    <p className="text-xs text-gray-400 mt-0.5">Free delivery</p>
-                  </div>
-                </div>
-                {gift.details && (
-                  <div><h3 className="text-sm font-semibold text-gray-900 mb-1.5">About this reward</h3><p className="text-sm text-gray-600 leading-relaxed">{gift.details}</p></div>
-                )}
-                {gift.features.length > 0 && (
-                  <div>
-                    <h3 className="text-sm font-semibold text-gray-900 mb-2">Key features</h3>
-                    <ul className="space-y-1.5">
-                      {gift.features.map((f, i) => (
-                        <li key={i} className="flex items-start gap-2 text-sm text-gray-600">
-                          <Zap className="h-3.5 w-3.5 text-[var(--brand-primary)] shrink-0 mt-0.5" />{f}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-                <div className="grid grid-cols-3 gap-2">
-                  {[{ icon: Shield, label: 'Genuine' }, { icon: Truck, label: 'Free delivery' }, { icon: Package, label: 'Easy returns' }].map(b => (
-                    <div key={b.label} className="flex flex-col items-center gap-1 p-2.5 bg-gray-50 rounded-xl">
-                      <b.icon className="h-4 w-4 text-[var(--brand-primary)]" />
-                      <span className="text-[10px] text-gray-500 text-center leading-tight">{b.label}</span>
-                    </div>
-                  ))}
+  return (
+    <Modal
+      open
+      onOpenChange={(o) => { if (!o) onClose(); }}
+      title={title}
+      description={step === 'detail' ? `${gift.brand ? `${gift.brand} · ` : ''}${gift.category}` : undefined}
+      className="max-w-md"
+    >
+      <div className="space-y-5">
+        {step === 'detail' && (
+          <>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2 flex-wrap mb-1">
+                  <span className="text-xs text-gray-400 font-medium">{gift.brand}</span>
+                  <span className="text-gray-200">·</span>
+                  <span className="text-xs text-gray-400">{gift.category}</span>
+                  {gift.popular && <Badge variant="warning" className="text-[10px]">Popular</Badge>}
                 </div>
               </div>
-            </>
-          )}
-
-          {step === 'form' && (
-            <div className="px-5 pt-4 pb-6 space-y-4">
-              <h3 className="text-base font-bold text-gray-900">Delivery Address</h3>
-              <p className="text-xs text-gray-500">Enter where you want this delivered</p>
-              {[
-                { key: 'line1',   label: 'Street address *', placeholder: 'Shop no., street name' },
-                { key: 'city',    label: 'City *',           placeholder: 'City' },
-                { key: 'state',   label: 'State',            placeholder: 'State' },
-                { key: 'pincode', label: 'Pincode *',        placeholder: '400001' },
-              ].map(f => (
-                <div key={f.key}>
-                  <label className="text-xs font-medium text-gray-600 block mb-1">{f.label}</label>
-                  <input className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
-                    placeholder={f.placeholder}
-                    value={(address as Record<string,string>)[f.key]}
-                    onChange={e => setAddress(prev => ({ ...prev, [f.key]: e.target.value }))} />
+              <button
+                type="button"
+                onClick={() => onWishlist(gift.id)}
+                aria-label={isWishlisted ? 'Remove from wishlist' : 'Add to wishlist'}
+                aria-pressed={isWishlisted}
+                className="w-8 h-8 bg-black/5 hover:bg-black/10 rounded-full flex items-center justify-center transition-colors shrink-0"
+              >
+                <Heart className={`h-4 w-4 ${isWishlisted ? 'fill-red-500 text-red-500' : 'text-gray-500'}`} />
+              </button>
+            </div>
+            <div className="-mx-6">
+              <GiftImage gift={gift} size="large" />
+            </div>
+            <div className="flex items-center gap-3 p-3.5 bg-gray-50 rounded-2xl">
+              <div className="flex-1">
+                <p className={`text-2xl font-bold ${canAfford ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`}>
+                  {formatPoints(gift.points)} pts
+                </p>
+                {!canAfford && <p className="text-xs text-red-500 mt-0.5 font-semibold">Need {formatPoints(needMore)} more pts</p>}
+                {canAfford && <p className="text-xs text-emerald-600 mt-0.5 font-medium">{formatPoints(myBalance - gift.points)} pts remaining after</p>}
+              </div>
+              <div className="text-right">
+                <div className="flex items-center gap-1 justify-end text-xs text-gray-500"><Truck className="h-3.5 w-3.5" />{delivery}</div>
+                <p className="text-xs text-gray-400 mt-0.5">Free delivery</p>
+              </div>
+            </div>
+            {gift.details && (
+              <div><h3 className="text-sm font-semibold text-gray-900 mb-1.5">About this reward</h3><p className="text-sm text-gray-600 leading-relaxed">{gift.details}</p></div>
+            )}
+            {gift.features.length > 0 && (
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900 mb-2">Key features</h3>
+                <ul className="space-y-1.5">
+                  {gift.features.map((f, i) => (
+                    <li key={i} className="flex items-start gap-2 text-sm text-gray-600">
+                      <Zap className="h-3.5 w-3.5 text-[var(--brand-primary)] shrink-0 mt-0.5" />{f}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <div className="grid grid-cols-3 gap-2">
+              {[{ icon: Shield, label: 'Genuine' }, { icon: Truck, label: 'Free delivery' }, { icon: Package, label: 'Easy returns' }].map(b => (
+                <div key={b.label} className="flex flex-col items-center gap-1 p-2.5 bg-gray-50 rounded-xl">
+                  <b.icon className="h-4 w-4 text-[var(--brand-primary)]" />
+                  <span className="text-[10px] text-gray-500 text-center leading-tight">{b.label}</span>
                 </div>
               ))}
             </div>
-          )}
+          </>
+        )}
 
-          {step === 'otp' && (
-            <div className="px-5 pt-4 pb-6 space-y-4">
-              <h3 className="text-base font-bold text-gray-900">Confirm Redemption</h3>
-              <div className="bg-gray-50 rounded-xl p-4 space-y-2">
-                <div className="flex justify-between text-sm"><span className="text-gray-500">Item</span><span className="font-semibold">{gift.name}</span></div>
-                <div className="flex justify-between text-sm"><span className="text-gray-500">Points</span><span className="font-semibold text-[var(--brand-primary)]">{formatPoints(gift.points)} pts</span></div>
-                <div className="flex justify-between text-sm"><span className="text-gray-500">Delivery to</span><span className="font-medium text-right max-w-[180px]">{address.line1}, {address.city}</span></div>
-              </div>
-              <p className="text-xs text-gray-500 flex items-center gap-1.5"><Phone className="h-3.5 w-3.5" /> OTP sent to your registered mobile</p>
-              <input className="w-full border border-gray-200 rounded-xl px-3 py-3 text-center font-mono text-lg tracking-[0.4em] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
-                placeholder="· · · · · ·" maxLength={6} value={otp}
-                onChange={e => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric"
-                aria-label="OTP" />
+        {step === 'form' && (
+          <div className="space-y-4">
+            <p className="text-xs text-gray-500">Enter who this is for and where to deliver it</p>
+            <div>
+              <label className="text-xs font-medium text-gray-600 block mb-1" htmlFor="recipient-name">Recipient name *</label>
+              <input
+                id="recipient-name"
+                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+                placeholder="Full name for the parcel"
+                value={recipientName}
+                onChange={e => { setRecipientTouched(true); setRecipientName(e.target.value); }}
+              />
             </div>
-          )}
+            {[
+              { key: 'line1',   label: 'Street address *', placeholder: 'Shop no., street name' },
+              { key: 'city',    label: 'City *',           placeholder: 'City' },
+              { key: 'state',   label: 'State',            placeholder: 'State' },
+              { key: 'pincode', label: 'Pincode *',        placeholder: '400001' },
+            ].map(f => (
+              <div key={f.key}>
+                <label className="text-xs font-medium text-gray-600 block mb-1">{f.label}</label>
+                <input className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+                  placeholder={f.placeholder}
+                  value={(address as Record<string,string>)[f.key]}
+                  onChange={e => setAddress(prev => ({ ...prev, [f.key]: e.target.value }))} />
+              </div>
+            ))}
+            {needConsent && <ConsentCheckbox checked={consent} onChange={setConsent} />}
+          </div>
+        )}
 
-          {step === 'success' && (
-            <div className="flex flex-col items-center justify-center py-12 px-5 gap-4 text-center">
-              <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center">
-                <CheckCircle className="h-8 w-8 text-emerald-600" />
-              </div>
-              <div>
-                <h3 className="text-lg font-bold text-gray-900">Redemption Confirmed!</h3>
-                <p className="text-sm text-gray-500 mt-1">{gift.name} is on its way. {delivery}.</p>
-                <p className="text-xs text-gray-400 mt-1">You will receive a WhatsApp confirmation shortly.</p>
-              </div>
+        {step === 'otp' && (
+          <div className="space-y-4">
+            <div className="bg-gray-50 rounded-xl p-4 space-y-2">
+              <div className="flex justify-between text-sm"><span className="text-gray-500">Item</span><span className="font-semibold">{gift.name}</span></div>
+              <div className="flex justify-between text-sm"><span className="text-gray-500">Points</span><span className="font-semibold text-[var(--brand-primary)]">{formatPoints(gift.points)} pts</span></div>
+              <div className="flex justify-between text-sm"><span className="text-gray-500">Deliver to</span><span className="font-medium text-right max-w-[180px]">{recipientName}</span></div>
+              <div className="flex justify-between text-sm"><span className="text-gray-500">Address</span><span className="font-medium text-right max-w-[180px]">{address.line1}, {address.city}</span></div>
             </div>
-          )}
-        </div>
+            <p className="text-xs text-gray-500 flex items-center gap-1.5"><Phone className="h-3.5 w-3.5" /> OTP sent to your registered mobile</p>
+            <input className="w-full border border-gray-200 rounded-xl px-3 py-3 text-center font-mono text-lg tracking-[0.4em] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+              placeholder="· · · · · ·" maxLength={6} value={otp}
+              onChange={e => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric"
+              aria-label="OTP" />
+          </div>
+        )}
 
-        <div className="px-5 pb-6 pt-3 shrink-0 border-t border-gray-100">
+        {step === 'success' && (
+          <div className="flex flex-col items-center justify-center py-6 gap-4 text-center">
+            <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center">
+              <CheckCircle className="h-8 w-8 text-emerald-600" />
+            </div>
+            <div>
+              <p className="text-sm text-gray-500 mt-1">{gift.name} is on its way. {delivery}.</p>
+              <p className="text-xs text-gray-400 mt-1">You will receive a WhatsApp confirmation shortly.</p>
+            </div>
+          </div>
+        )}
+
+        <div className="pt-3 border-t border-gray-100">
           {step === 'detail' && (
             <Button variant="primary" className="w-full" disabled={!canAfford || !gift.available}
               onClick={() => setStep('form')}>
@@ -414,7 +524,15 @@ function GiftDetailSheet({
           {step === 'form' && (
             <div className="flex gap-3">
               <Button variant="outline" className="flex-1" onClick={() => setStep('detail')}>← Back</Button>
-              <Button variant="primary" className="flex-1" loading={submitting} onClick={handleSendOtp}>Send OTP</Button>
+              <Button
+                variant="primary"
+                className="flex-1"
+                loading={submitting}
+                disabled={needConsent && !consent}
+                onClick={handleSendOtp}
+              >
+                Send OTP
+              </Button>
             </div>
           )}
           {step === 'otp' && (
@@ -428,7 +546,7 @@ function GiftDetailSheet({
           )}
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -451,6 +569,9 @@ function VoucherRedeemSheet({
   const [submitting, setSubmitting] = useState(false);
   const [success,    setSuccess]    = useState(false);
   const [orderId,    setOrderId]    = useState<string | null>(null);
+  // Vendor-PII consent (decision #15) — default UNTICKED; blocks redeem for vendor items.
+  const [consent,    setConsent]    = useState(false);
+  const needConsent = requiresVendorConsent(voucher);
 
   const isFixed   = voucher.voucherType === 'FIXED';
   const fixedPts  = isFixed ? voucher.points : 0;
@@ -472,10 +593,15 @@ function VoucherRedeemSheet({
 
   // Step 1: create the order + trigger OTP. FREE_AMOUNT sends `amount`.
   const handleSendOtp = async () => {
+    // Vendor-PII consent is a hard gate for vendor-sourced items (decision #15).
+    if (needConsent && !consent) {
+      toast.error('Please agree to share your delivery details to continue'); return;
+    }
     setSubmitting(true);
+    const consentFields = needConsent ? { consent: true } : {};
     const payload: RedeemPayload = isFixed
-      ? { rewardId: voucher.id, quantity: 1 }
-      : { rewardId: voucher.id, amount: freeAmt };
+      ? { rewardId: voucher.id, quantity: 1, ...consentFields }
+      : { rewardId: voucher.id, amount: freeAmt, ...consentFields };
     const result = await api.post<RedeemInitResult>('/api/rewards/redeem', payload);
     setSubmitting(false);
     if (!result.success) {
@@ -501,16 +627,20 @@ function VoucherRedeemSheet({
     setSuccess(true);
   };
 
-  if (success) {
-    return (
-      <div className="fixed inset-0 z-50 flex flex-col justify-end">
-        <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-        <div className="relative bg-white rounded-t-2xl p-8 flex flex-col items-center gap-4 text-center shadow-2xl">
+  return (
+    <Modal
+      open
+      onOpenChange={(o) => { if (!o) onClose(); }}
+      title={success ? 'Voucher confirmed' : 'Redeem voucher'}
+      description={success ? undefined : `${voucher.brand} voucher`}
+      className="max-w-md"
+    >
+      {success ? (
+        <div className="flex flex-col items-center gap-4 text-center py-4">
           <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center">
             <CheckCircle className="h-8 w-8 text-emerald-600" />
           </div>
           <div>
-            <h3 className="text-lg font-bold text-gray-900">Voucher Confirmed!</h3>
             <p className="text-sm text-gray-500 mt-1">
               {isFixed ? `${voucher.brand} voucher (${fmtInr(fixedPts)})` : `${voucher.brand} voucher (${fmtInr(freeAmt)})`} is being processed. Your voucher code will appear under Orders.
             </p>
@@ -518,20 +648,8 @@ function VoucherRedeemSheet({
           </div>
           <Button variant="primary" className="w-full" onClick={onClose}>Done</Button>
         </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex flex-col justify-end">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative bg-white rounded-t-2xl max-h-[80vh] flex flex-col shadow-2xl">
-        <div className="flex justify-center pt-3"><div className="w-10 h-1 bg-gray-200 rounded-full" /></div>
-        <button onClick={onClose} className="absolute top-4 right-4 w-8 h-8 bg-black/10 rounded-full flex items-center justify-center">
-          <X className="h-4 w-4 text-gray-700" />
-        </button>
-
-        <div className="overflow-y-auto flex-1 px-5 pt-4 pb-2 space-y-4">
+      ) : (
+        <div className="space-y-4">
           {/* Voucher header */}
           <div className="flex items-center gap-3">
             <div className="w-14 h-14 rounded-2xl flex items-center justify-center text-3xl"
@@ -590,6 +708,9 @@ function VoucherRedeemSheet({
             </div>
           )}
 
+          {/* Vendor-PII consent (before OTP is requested) */}
+          {!otpSent && needConsent && <ConsentCheckbox checked={consent} onChange={setConsent} />}
+
           {/* OTP field */}
           {otpSent && (
             <div className="space-y-2">
@@ -601,28 +722,28 @@ function VoucherRedeemSheet({
                 aria-label="OTP" />
             </div>
           )}
-        </div>
 
-        <div className="px-5 pb-6 pt-3 border-t border-gray-100">
-          {!otpSent ? (
-            <Button variant="primary" className="w-full" loading={submitting}
-              disabled={!canAfford || !!amountError || (!isFixed && freeAmt < minFreeAmount)}
-              onClick={handleSendOtp}>
-              {!isFixed && freeAmt > 0 && freeAmt < minFreeAmount
-                ? `Min ${fmtInr(minFreeAmount)} required`
-                : myBalance < ptsNeeded
-                ? 'Insufficient balance'
-                : 'Send OTP'}
-            </Button>
-          ) : (
-            <div className="flex gap-3">
-              <Button variant="outline" className="flex-1" onClick={() => setOtpSent(false)}>← Back</Button>
-              <Button variant="primary" className="flex-1" loading={submitting} disabled={otp.length < 6} onClick={handleConfirm}>Confirm</Button>
-            </div>
-          )}
+          <div className="pt-3 border-t border-gray-100">
+            {!otpSent ? (
+              <Button variant="primary" className="w-full" loading={submitting}
+                disabled={!canAfford || !!amountError || (!isFixed && freeAmt < minFreeAmount) || (needConsent && !consent)}
+                onClick={handleSendOtp}>
+                {!isFixed && freeAmt > 0 && freeAmt < minFreeAmount
+                  ? `Min ${fmtInr(minFreeAmount)} required`
+                  : myBalance < ptsNeeded
+                  ? 'Insufficient balance'
+                  : 'Send OTP'}
+              </Button>
+            ) : (
+              <div className="flex gap-3">
+                <Button variant="outline" className="flex-1" onClick={() => setOtpSent(false)}>← Back</Button>
+                <Button variant="primary" className="flex-1" loading={submitting} disabled={otp.length < 6} onClick={handleConfirm}>Confirm</Button>
+              </div>
+            )}
+          </div>
         </div>
-      </div>
-    </div>
+      )}
+    </Modal>
   );
 }
 
@@ -700,16 +821,20 @@ function CashPayoutSheet({
     ? `${beneficiary.bankName} (${maskAccountNumber(beneficiary.bankAccountNumber ?? '')})`
     : 'your registered account';
 
-  if (success) {
-    return (
-      <div className="fixed inset-0 z-50 flex flex-col justify-end">
-        <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-        <div className="relative bg-white rounded-t-2xl p-8 flex flex-col items-center gap-4 text-center shadow-2xl">
+  return (
+    <Modal
+      open
+      onOpenChange={(o) => { if (!o) onClose(); }}
+      title={success ? 'Payout initiated' : 'Cash payout'}
+      description={success ? undefined : 'Redeem points to your registered account'}
+      className="max-w-md"
+    >
+      {success ? (
+        <div className="flex flex-col items-center gap-4 text-center py-4">
           <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center">
             <CheckCircle className="h-8 w-8 text-emerald-600" />
           </div>
           <div>
-            <h3 className="text-lg font-bold text-gray-900">Payout Initiated!</h3>
             <p className="text-sm text-gray-500 mt-1">
               {fmtInr(inrAmt)} will be paid to {payoutTarget} within 2–3 working days.
             </p>
@@ -717,30 +842,8 @@ function CashPayoutSheet({
           </div>
           <Button variant="primary" className="w-full" onClick={onClose}>Done</Button>
         </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex flex-col justify-end">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative bg-white rounded-t-2xl max-h-[80vh] flex flex-col shadow-2xl">
-        <div className="flex justify-center pt-3"><div className="w-10 h-1 bg-gray-200 rounded-full" /></div>
-        <button onClick={onClose} className="absolute top-4 right-4 w-8 h-8 bg-black/10 rounded-full flex items-center justify-center">
-          <X className="h-4 w-4 text-gray-700" />
-        </button>
-
-        <div className="overflow-y-auto flex-1 px-5 pt-4 pb-2 space-y-4">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 bg-blue-100 rounded-2xl flex items-center justify-center">
-              <Banknote className="h-6 w-6 text-blue-600" />
-            </div>
-            <div>
-              <h3 className="text-base font-bold text-gray-900">Cash Payout</h3>
-              <p className="text-xs text-gray-500">Redeem points to your registered account</p>
-            </div>
-          </div>
-
+      ) : (
+        <div className="space-y-4">
           {/* Beneficiary on file — REAL details (bank and/or UPI). */}
           <div className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 space-y-1.5">
             <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Pay to</p>
@@ -801,22 +904,22 @@ function CashPayoutSheet({
                 aria-label="OTP" />
             </div>
           )}
-        </div>
 
-        <div className="px-5 pb-6 pt-3 border-t border-gray-100">
-          {!otpSent ? (
-            <Button variant="primary" className="w-full" loading={submitting} disabled={!canProceed} onClick={handleSendOtp}>
-              {!canProceed && inrAmt > 0 ? amountError || 'Insufficient balance' : `Redeem ${inrAmt ? fmtInr(inrAmt) : ''}`}
-            </Button>
-          ) : (
-            <div className="flex gap-3">
-              <Button variant="outline" className="flex-1" onClick={() => setOtpSent(false)}>← Back</Button>
-              <Button variant="primary" className="flex-1" loading={submitting} disabled={otp.length < 6} onClick={handleConfirm}>Confirm</Button>
-            </div>
-          )}
+          <div className="pt-3 border-t border-gray-100">
+            {!otpSent ? (
+              <Button variant="primary" className="w-full" loading={submitting} disabled={!canProceed} onClick={handleSendOtp}>
+                {!canProceed && inrAmt > 0 ? amountError || 'Insufficient balance' : `Redeem ${inrAmt ? fmtInr(inrAmt) : ''}`}
+              </Button>
+            ) : (
+              <div className="flex gap-3">
+                <Button variant="outline" className="flex-1" onClick={() => setOtpSent(false)}>← Back</Button>
+                <Button variant="primary" className="flex-1" loading={submitting} disabled={otp.length < 6} onClick={handleConfirm}>Confirm</Button>
+              </div>
+            )}
+          </div>
         </div>
-      </div>
-    </div>
+      )}
+    </Modal>
   );
 }
 
@@ -842,6 +945,9 @@ export default function RewardsPage() {
   const [beneficiary,    setBeneficiary]    = useState<CashBeneficiary | null>(null);
   const [conversionRate, setConversionRate] = useState<number | null>(null);
   const [mobile,         setMobile]         = useState('');
+  // The member's real name (from /api/auth/me) — seeds the physical-gift "Recipient name"
+  // so the vendor can address the parcel (never the gift brand). See GiftDetailSheet.
+  const [memberName,     setMemberName]     = useState('');
   const settings = getGifsySettings();
 
   useEffect(() => {
@@ -865,6 +971,7 @@ export default function RewardsPage() {
     api.get<{
       conversionRate?: number;
       user?: {
+        name?: string | null;
         phone?: string | null;
         channelPartner?: {
           bankName?: string | null;
@@ -881,6 +988,8 @@ export default function RewardsPage() {
         const cp = result.data.user?.channelPartner;
         // Real registered mobile (for the physical-gift delivery address) — no demo literal.
         if (result.data.user?.phone) setMobile(result.data.user.phone);
+        // Real member name — seeds the editable "Recipient name" on the delivery form.
+        if (result.data.user?.name) setMemberName(result.data.user.name);
         if (cp) {
           setBeneficiary({
             bankName:          cp.bankName ?? null,
@@ -1163,7 +1272,13 @@ export default function RewardsPage() {
                     role="button"
                     tabIndex={0}
                     onClick={() => gift.voucherType ? setVoucherDetail(gift) : setDetail(gift)}
-                    onKeyDown={e => e.key === 'Enter' && (gift.voucherType ? setVoucherDetail(gift) : setDetail(gift))}
+                    onKeyDown={e => {
+                      // Activate on Enter OR Space (Space would otherwise just scroll the page).
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        gift.voucherType ? setVoucherDetail(gift) : setDetail(gift);
+                      }
+                    }}
                     className={cn(
                       'bg-white rounded-xl border overflow-hidden shadow-sm text-left cursor-pointer',
                       'flex flex-col transition-all active:scale-[0.98]',
@@ -1222,7 +1337,7 @@ export default function RewardsPage() {
       {detail && (
         <GiftDetailSheet
           gift={detail} onClose={() => setDetail(null)}
-          myBalance={balance} mobile={mobile}
+          myBalance={balance} mobile={mobile} memberName={memberName}
           onWishlist={toggleWishlist} isWishlisted={wishlist.has(detail.id)}
           onRedeemed={handleRedeemed}
         />
@@ -1231,7 +1346,7 @@ export default function RewardsPage() {
         <VoucherRedeemSheet
           voucher={voucherDetail} onClose={() => setVoucherDetail(null)}
           myBalance={balance} minFreeAmount={settings.minVoucherFreeAmount}
-          conversionRate={settings.pointsConversionRate}
+          conversionRate={effectiveRate}
           onRedeemed={handleRedeemed}
         />
       )}

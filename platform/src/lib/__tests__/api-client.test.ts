@@ -62,12 +62,14 @@ describe('api.get', () => {
     expect((init.headers as Record<string, string>)['Content-Type']).toBeUndefined();
   });
 
-  it('returns { success: false, error } on non-ok HTTP response', async () => {
+  it('returns { success: false, error, status } on non-ok HTTP response', async () => {
     vi.stubGlobal('fetch', mockFetch({ error: 'Unauthorized' }, 401));
 
     const result = await api.get('/api/wallet');
 
-    expect(result).toEqual({ success: false, error: 'Unauthorized' });
+    // The HTTP status is now surfaced so callers can distinguish e.g. a real 403
+    // (access removed) from an unrelated error whose message merely mentions permission.
+    expect(result).toEqual({ success: false, error: 'Unauthorized', status: 401 });
   });
 
   it('returns { success: false, error } on network failure', async () => {

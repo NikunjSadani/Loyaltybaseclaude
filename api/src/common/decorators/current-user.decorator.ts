@@ -29,6 +29,15 @@ export interface JwtPayload {
    * ignores it.
    */
   gifsyRoleId?: string;
+  /**
+   * Gift Catalogue & Dispatch (Wave 2) — for a VENDOR-role user, the id of the
+   * Vendor entity this login belongs to. Carried on the token (mirroring gifsyRoleId)
+   * so the vendor portal can HARD-scope every query by vendorId without an extra user
+   * lookup. Present only for a VENDOR user; every other role omits it. The vendor
+   * portal additionally scopes by `clientId` (the vendor's single pinned tenant,
+   * decision #12) so a vendor never sees another vendor's or another tenant's data.
+   */
+  vendorId?: string;
   iat?:     number;
   exp?:     number;
 }

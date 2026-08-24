@@ -226,6 +226,17 @@ export class RedeemDto {
   @ValidateNested()
   @Type(() => RedeemDeliveryAddressDto)
   deliveryAddress?: RedeemDeliveryAddressDto;
+
+  /**
+   * DPDP consent (decision #15) — REQUIRED to be `true` when redeeming a
+   * VENDOR-sourced gift: the member agrees their delivery name/address/phone are
+   * shared with the fulfilment vendor. The service BLOCKS a vendor-item redeem
+   * without it and stores vendorPiiConsentAt + consentVersion on the order. Ignored
+   * for PLATFORM items (no third party → no checkbox).
+   */
+  @IsOptional()
+  @IsBoolean()
+  consent?: boolean;
 }
 
 /** POST /v1/rewards/redeem/confirm — confirm a PENDING order with the OTP. */

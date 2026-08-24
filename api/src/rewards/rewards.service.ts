@@ -69,6 +69,39 @@ import {
 export const DISPATCH_SLA_BUSINESS_HOURS = 48;
 
 /**
+ * DPDP consent version stamped on a VENDOR-sourced redemption (decision #15). Bump
+ * this whenever the consent wording changes so each order records WHICH version of
+ * the "share my delivery details with the fulfilment partner" statement the member
+ * agreed to (demonstrable, versioned consent). Kept as a single platform string in
+ * v1; the exact legal wording is an owner/legal deliverable.
+ */
+export const VENDOR_PII_CONSENT_VERSION = 'v1-2026-08';
+
+/**
+ * Member-catalogue VENDOR visibility filter (review CRITICAL #2 — the suspend/revoke
+ * cascade). A PLATFORM row is always visible; a VENDOR row is visible ONLY while its
+ * Vendor is ACTIVE and holds an ACTIVE VendorTenantGrant for this tenant. Because the
+ * predicate lives on every member read/redeem path, suspending a vendor or revoking
+ * its grant DYNAMICALLY hides its items and blocks their redemption with no sweep.
+ */
+export function vendorVisibilityFilter(clientId: string): Prisma.RewardCatalogWhereInput {
+  return {
+    OR: [
+      { sourceType: 'PLATFORM' },
+      {
+        sourceType: 'VENDOR',
+        vendor: {
+          is: {
+            status: 'ACTIVE',
+            grants: { some: { clientId, status: 'ACTIVE' } },
+          },
+        },
+      },
+    ],
+  };
+}
+
+/**
  * Member-safe RewardCatalog projection for the partner-facing catalogue reads
  * (listCatalog / getCatalogItem). Deliberately EXCLUDES ops/internal columns —
  * sellingValuePaise (194R/cost basis), sourceType, vendorId, giftMasterId,
@@ -200,11 +233,10 @@ export class RewardsService {
       // must NEVER be browsable. Existing platform rows default APPROVED (live), so
       // Deoleo's catalogue is unchanged; vendor rows land PENDING until approved.
       moderationStatus: 'APPROVED',
-      // WAVE-2 SEAM — vendor visibility cascade. When vendor items ship, add here
-      // (for sourceType=VENDOR rows only): require Vendor.status=ACTIVE AND an ACTIVE
-      // VendorTenantGrant for this clientId, so a suspended/revoked vendor's items
-      // stop being browsable immediately (§12 suspend/revoke cascade). PLATFORM rows
-      // are unaffected. e.g. OR:[ {sourceType:'PLATFORM'}, {sourceType:'VENDOR', vendor:{status:'ACTIVE'}, ...grant} ].
+      // WAVE-2 (review CRITICAL #2) — vendor visibility cascade. A VENDOR row is
+      // browsable only while its Vendor is ACTIVE + holds an ACTIVE grant for this
+      // tenant; PLATFORM rows are unaffected. Suspend/revoke hides items dynamically.
+      ...vendorVisibilityFilter(user.clientId),
     };
     if (q.minPoints !== undefined || q.maxPoints !== undefined) {
       where.pointsCost = {};
@@ -228,8 +260,10 @@ export class RewardsService {
         take: limit,
         orderBy: { pointsCost: 'asc' },
         // Member-safe projection — drops ops/internal columns (sellingValuePaise,
-        // sourceType, vendorId, giftMasterId, giftCategoryId, moderation*).
-        select: MEMBER_CATALOG_SELECT,
+        // vendorId, giftMasterId, giftCategoryId, moderation*). sourceType is read
+        // ONLY to derive the member-safe `requiresConsent` boolean below and is
+        // stripped from the response (never leaked to the member).
+        select: { ...MEMBER_CATALOG_SELECT, sourceType: true },
       }),
       this.prisma.rewardCatalog.count({ where }),
     ]);
@@ -237,11 +271,14 @@ export class RewardsService {
     const enriched = items.map((item) => {
       // Flatten the category relation to its label so the partner catalogue UI
       // can display/route by category (the FE expects a flat string, not the
-      // nested relation the admin endpoint returns).
-      const { category, ...rest } = item;
+      // nested relation the admin endpoint returns). Derive `requiresConsent`
+      // (DPDP consent gate, decision #15) from sourceType, then DROP sourceType so
+      // the raw source/vendor origin never reaches the member.
+      const { category, sourceType, ...rest } = item;
       return {
         ...rest,
         category: category?.name,
+        requiresConsent: sourceType === 'VENDOR',
         isAffordable: userBalance >= item.pointsCost,
       };
     });
@@ -258,17 +295,19 @@ export class RewardsService {
     const item = await this.prisma.rewardCatalog.findFirst({
       // Moderation gate: a non-APPROVED item is not viewable even by deep-link/stale
       // cart. status=ACTIVE parity with listCatalog — a DISCONTINUED/OUT_OF_STOCK/
-      // INACTIVE row must not be deep-linkable. WAVE-2 SEAM: also require vendor ACTIVE
-      // + ACTIVE grant for VENDOR rows.
+      // INACTIVE row must not be deep-linkable. WAVE-2 (review CRITICAL #2): a VENDOR
+      // row also requires vendor ACTIVE + ACTIVE grant (suspend/revoke hides it).
       where: {
         id,
         deletedAt: null,
         clientId: user.clientId,
         status: 'ACTIVE',
         moderationStatus: 'APPROVED',
+        ...vendorVisibilityFilter(user.clientId),
       },
       // Member-safe projection (same as listCatalog) — no ops/internal columns.
-      select: MEMBER_CATALOG_SELECT,
+      // sourceType is read ONLY to derive `requiresConsent`; stripped below.
+      select: { ...MEMBER_CATALOG_SELECT, sourceType: true },
     });
     if (!item) throw new NotFoundException('Reward item not found');
     // The item is tenant-scoped (not partner-scoped), so the response is identical
@@ -276,7 +315,10 @@ export class RewardsService {
     // x-active-partner-id is rejected consistently across every rewards endpoint
     // (never silently accepted on one read) — validation only, result unchanged.
     await this.resolveActive(user, requestedPartnerId);
-    return { item };
+    // Derive the DPDP consent gate (decision #15) from sourceType, then DROP
+    // sourceType so the member never sees the raw source/vendor origin.
+    const { sourceType, ...rest } = item;
+    return { item: { ...rest, requiresConsent: sourceType === 'VENDOR' } };
   }
 
   /** GET /v1/rewards/orders — paginated redemption orders (own only for non-admins). */
@@ -484,6 +526,59 @@ export class RewardsService {
   // Points only move at CONFIRM time (the OTP step), never at redeem time.
   // ───────────────────────────────────────────────────────────────────────────
 
+  /**
+   * DPDP consent gate for a VENDOR-sourced redeem (decision #15). A VENDOR item
+   * REQUIRES an explicit truthy consent flag — the member agrees their delivery
+   * name/address/phone are shared with the fulfilment vendor — otherwise the redeem
+   * is blocked with a clear error. Returns the order columns to persist:
+   *  - VENDOR: { fulfilledByVendorId, vendorPiiConsentAt: now, consentVersion }
+   *  - PLATFORM: {} (no third party → no checkbox, no vendor routing).
+   */
+  private resolveVendorConsent(
+    item: { sourceType: unknown; vendorId: string | null },
+    consent: boolean | undefined,
+  ): { fulfilledByVendorId?: string; vendorPiiConsentAt?: Date; consentVersion?: string } {
+    if (item.sourceType !== 'VENDOR') return {};
+    if (consent !== true) {
+      throw new BadRequestException(
+        'Please agree to share your delivery details with the fulfilment partner to redeem this gift.',
+      );
+    }
+    // A VENDOR-sourced item MUST resolve a fulfilment vendor. Without one the order would
+    // stamp consent but route nowhere (no vendor portal, no dispatch) — block it rather
+    // than create an orphaned, undispatchable order (Wave-2 audit LOW#7).
+    if (!item.vendorId) {
+      throw new BadRequestException(
+        'This gift is temporarily unavailable — no fulfilment partner is assigned.',
+      );
+    }
+    return {
+      fulfilledByVendorId: item.vendorId,
+      vendorPiiConsentAt: new Date(),
+      consentVersion: VENDOR_PII_CONSENT_VERSION,
+    };
+  }
+
+  /**
+   * BE DEFENSE (Wave-2 audit HIGH#2): a vendor must always get an ADDRESSABLE recipient.
+   * The FE supplies the delivery name, but a bug had it sending the gift's brand/name
+   * instead of the member. Belt-and-suspenders: fall back to the partner/outlet owner's
+   * real profile name when the sent name is blank OR is literally the gift's own name
+   * (i.e. a product/brand slipped in), so `deliveryName` always names a person.
+   */
+  private resolveDeliveryName(
+    sentName: string | null | undefined,
+    ownerName: string | null | undefined,
+    giftName: string | null | undefined,
+  ): string | undefined {
+    const sent = (sentName ?? '').trim();
+    const owner = (ownerName ?? '').trim();
+    const gift = (giftName ?? '').trim();
+    if (!sent) return owner || undefined;
+    if (gift && sent.toLowerCase() === gift.toLowerCase()) return owner || sent;
+    return sent;
+  }
+
   /** True when the item is a FREE_AMOUNT (variable-amount) voucher. */
   private isFreeAmount(item: { pointsCost: number; minRedemptionPoints: number | null; maxRedemptionPoints: number | null }): boolean {
     return (
@@ -608,17 +703,23 @@ export class RewardsService {
     // ACTIVE non-deleted catalog item, in-tenant.
     const item = await this.prisma.rewardCatalog.findFirst({
       // Moderation gate on the REDEEM guard too — a non-APPROVED item must never be
-      // redeemable via a stale cart / deep link. WAVE-2 SEAM: also require vendor
-      // ACTIVE + ACTIVE grant for sourceType=VENDOR rows (§12 suspend cascade).
+      // redeemable via a stale cart / deep link. WAVE-2 (review CRITICAL #2): a VENDOR
+      // row also requires vendor ACTIVE + ACTIVE grant → suspend/revoke blocks redeem.
       where: {
         id: dto.rewardId,
         status: 'ACTIVE',
         deletedAt: null,
         clientId: user.clientId,
         moderationStatus: 'APPROVED',
+        ...vendorVisibilityFilter(user.clientId),
       },
     });
     if (!item) throw new NotFoundException('Reward item not found or not available');
+
+    // DPDP consent (decision #15): a VENDOR-sourced redeem is BLOCKED without an
+    // explicit consent flag; PLATFORM items need none. Returns the consent columns +
+    // fulfilledByVendorId to stamp on the order (or {} for platform items).
+    const consentData = this.resolveVendorConsent(item, dto.consent);
 
     // PHYSICAL_GIFT requires a full delivery address; other modes do not.
     if (item.redemptionMode === 'PHYSICAL_GIFT') {
@@ -726,12 +827,18 @@ export class RewardsService {
           conversionRateCenti: Math.round(rate * 100),
           redemptionMode: item.redemptionMode,
           status: 'PENDING',
-          deliveryName: addr?.name,
+          // Belt-and-suspenders (audit HIGH#2): never let a gift brand/product become the
+          // ship-to name — fall back to the OUTLET owner's real name.
+          deliveryName: this.resolveDeliveryName(addr?.name, partner.ownerName, item.name),
           deliveryPhone: addr?.mobile,
           deliveryAddressLine1: addr?.address,
           deliveryCity: addr?.city,
           deliveryState: addr?.state,
           deliveryPincode: addr?.pincode,
+          // VENDOR-sourced order routing + DPDP consent (decisions #14/#15): stamp
+          // fulfilledByVendorId (→ the item's vendor portal) + vendorPiiConsentAt +
+          // consentVersion. Empty spread for PLATFORM items (no vendor, no consent).
+          ...consentData,
         },
       });
       await tx.otpCode.create({
@@ -1103,17 +1210,23 @@ export class RewardsService {
     // ACTIVE non-deleted catalog item, in-tenant.
     const item = await this.prisma.rewardCatalog.findFirst({
       // Moderation gate on the REDEEM guard too — a non-APPROVED item must never be
-      // redeemable via a stale cart / deep link. WAVE-2 SEAM: also require vendor
-      // ACTIVE + ACTIVE grant for sourceType=VENDOR rows (§12 suspend cascade).
+      // redeemable via a stale cart / deep link. WAVE-2 (review CRITICAL #2): a VENDOR
+      // row also requires vendor ACTIVE + ACTIVE grant → suspend/revoke blocks redeem.
       where: {
         id: dto.rewardId,
         status: 'ACTIVE',
         deletedAt: null,
         clientId: user.clientId,
         moderationStatus: 'APPROVED',
+        ...vendorVisibilityFilter(user.clientId),
       },
     });
     if (!item) throw new NotFoundException('Reward item not found or not available');
+
+    // DPDP consent (decision #15): a VENDOR-sourced redeem is BLOCKED without an
+    // explicit consent flag; PLATFORM items need none. Returns the consent columns +
+    // fulfilledByVendorId to stamp on the order (or {} for platform items).
+    const consentData = this.resolveVendorConsent(item, dto.consent);
 
     // PHYSICAL_GIFT requires a full delivery address; other modes do not.
     if (item.redemptionMode === 'PHYSICAL_GIFT') {
@@ -1183,6 +1296,13 @@ export class RewardsService {
       );
     }
 
+    // Owner name for the ship-to fallback (audit HIGH#2) — a vendor must get a real
+    // recipient name even if the FE mis-sends the gift brand/product as the name.
+    const activePartner = await this.prisma.channelPartner.findFirst({
+      where: { id: activePartnerId },
+      select: { ownerName: true },
+    });
+
     const addr = dto.deliveryAddress;
     const otp = this.generateOtpCode();
     // Gift value snapshot (decision §14): freeze the gift's ₹ selling price onto the
@@ -1228,12 +1348,18 @@ export class RewardsService {
           conversionRateCenti: Math.round(rate * 100),
           redemptionMode: item.redemptionMode,
           status: 'PENDING',
-          deliveryName: addr?.name,
+          // Belt-and-suspenders (audit HIGH#2): never let a gift brand/product become the
+          // ship-to name — fall back to the outlet owner's real name.
+          deliveryName: this.resolveDeliveryName(addr?.name, activePartner?.ownerName, item.name),
           deliveryPhone: addr?.mobile,
           deliveryAddressLine1: addr?.address,
           deliveryCity: addr?.city,
           deliveryState: addr?.state,
           deliveryPincode: addr?.pincode,
+          // VENDOR-sourced order routing + DPDP consent (decisions #14/#15): stamp
+          // fulfilledByVendorId (→ the item's vendor portal) + vendorPiiConsentAt +
+          // consentVersion. Empty spread for PLATFORM items (no vendor, no consent).
+          ...consentData,
         },
       });
       await tx.otpCode.create({

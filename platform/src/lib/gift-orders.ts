@@ -327,6 +327,12 @@ export interface GiftOrderSummary {
   totalPointsCost?: number | null;
   valuePaise?: number | null;
   trackingNumber?: string | null;
+  /**
+   * Internal "fulfilled by" vendor id. The BE already scopes the vendor list to this
+   * vendor, so it is usually omitted; when present the vendor Orders page uses it as a
+   * cheap defence-in-depth guard (drop a row that isn't this vendor's) against an API slip.
+   */
+  fulfilledByVendorId?: string | null;
   createdAt: string;
   updatedAt?: string | null;
 }

@@ -13,7 +13,7 @@
 
 export type ApiResponse<T> =
   | { success: true; data: T }
-  | { success: false; error: string };
+  | { success: false; error: string; status?: number };
 
 /**
  * AF-6: auth is the httpOnly `token` cookie, which same-origin fetches send
@@ -54,9 +54,9 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<ApiRespo
       // message instead of a bare "Forbidden" status text. The backend is the real
       // enforcement; this only improves how api.* consumers surface a denial.
       if (res.status === 403) {
-        return { success: false, error: body?.error ?? "You don't have permission to do that" };
+        return { success: false, error: body?.error ?? "You don't have permission to do that", status: 403 };
       }
-      return { success: false, error: body?.error ?? res.statusText };
+      return { success: false, error: body?.error ?? res.statusText, status: res.status };
     }
     // A bodyless 2xx (204 / empty) is a success with no payload.
     if (body == null) return { success: true, data: undefined as T };

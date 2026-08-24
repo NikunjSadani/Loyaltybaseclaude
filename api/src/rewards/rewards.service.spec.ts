@@ -182,6 +182,15 @@ describe('RewardsService', () => {
             // Gift Catalogue moderation gate — only APPROVED items are browsable.
             moderationStatus: 'APPROVED',
             pointsCost: { gte: 10, lte: 200 },
+            // Wave-2 vendor visibility cascade (review CRITICAL #2): PLATFORM rows +
+            // VENDOR rows only while the vendor is ACTIVE with an ACTIVE grant.
+            OR: [
+              { sourceType: 'PLATFORM' },
+              {
+                sourceType: 'VENDOR',
+                vendor: { is: { status: 'ACTIVE', grants: { some: { clientId: 'deoleo', status: 'ACTIVE' } } } },
+              },
+            ],
           },
         }),
       );
@@ -209,14 +218,34 @@ describe('RewardsService', () => {
       expect(call.select.category).toEqual({ select: { name: true } });
       // Ops/internal columns must NOT be selected for members.
       expect(call.select.sellingValuePaise).toBeUndefined();
-      expect(call.select.sourceType).toBeUndefined();
       expect(call.select.vendorId).toBeUndefined();
       expect(call.select.giftMasterId).toBeUndefined();
       expect(call.select.giftCategoryId).toBeUndefined();
       expect(call.select.moderationStatus).toBeUndefined();
+      // sourceType IS read (to derive the member-safe `requiresConsent` boolean) but is
+      // STRIPPED from the response — the raw source/vendor origin never reaches members.
+      expect(call.select.sourceType).toBe(true);
+      expect(res.items[0]).not.toHaveProperty('sourceType');
       // The nested relation is flattened to a plain string label.
       expect(res.items[0].category).toBe('Gift Vouchers');
       expect(res.items[0].redemptionMode).toBe('GIFT_CARD');
+    });
+
+    it('derives requiresConsent from sourceType (true for VENDOR) without leaking sourceType', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 100 });
+      mockPrisma.rewardCatalog.findMany.mockResolvedValue([
+        { id: 'r1', pointsCost: 50, sourceType: 'PLATFORM', category: { name: 'A' } },
+        { id: 'r2', pointsCost: 60, sourceType: 'VENDOR', category: { name: 'B' } },
+      ]);
+      mockPrisma.rewardCatalog.count.mockResolvedValue(2);
+
+      const res = await service.listCatalog(partner, {});
+      expect(res.items[0]).toMatchObject({ id: 'r1', requiresConsent: false });
+      expect(res.items[1]).toMatchObject({ id: 'r2', requiresConsent: true });
+      // Never leak the raw origin.
+      expect(res.items[0]).not.toHaveProperty('sourceType');
+      expect(res.items[1]).not.toHaveProperty('sourceType');
     });
 
     it('defaults the balance to 0 when the caller has no partner/wallet', async () => {
@@ -243,16 +272,33 @@ describe('RewardsService', () => {
         clientId: 'deoleo',
         status: 'ACTIVE',
         moderationStatus: 'APPROVED',
+        // Wave-2 vendor visibility cascade (review CRITICAL #2).
+        OR: [
+          { sourceType: 'PLATFORM' },
+          {
+            sourceType: 'VENDOR',
+            vendor: { is: { status: 'ACTIVE', grants: { some: { clientId: 'deoleo', status: 'ACTIVE' } } } },
+          },
+        ],
       });
       expect(call.select).toBeDefined();
       expect(call.select.sellingValuePaise).toBeUndefined();
       expect(call.select.moderationStatus).toBeUndefined();
+      // sourceType selected only to derive requiresConsent (stripped from the response).
+      expect(call.select.sourceType).toBe(true);
     });
 
-    it('returns the item when found', async () => {
-      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({ id: 'r1' });
+    it('returns the item with requiresConsent (false for PLATFORM) and no sourceType', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({ id: 'r1', sourceType: 'PLATFORM' });
       const res = await service.getCatalogItem(partner, 'r1');
-      expect(res).toEqual({ item: { id: 'r1' } });
+      expect(res).toEqual({ item: { id: 'r1', requiresConsent: false } });
+    });
+
+    it('flags requiresConsent true for a VENDOR item without leaking sourceType', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({ id: 'r1', sourceType: 'VENDOR' });
+      const res = await service.getCatalogItem(partner, 'r1');
+      expect(res.item).toMatchObject({ id: 'r1', requiresConsent: true });
+      expect(res.item).not.toHaveProperty('sourceType');
     });
   });
 
@@ -1460,6 +1506,38 @@ describe('RewardsService', () => {
 
       await expect(
         service.redeemForOutlet(sales, { rewardId: 'r1', targetPartnerId: 'cp-out' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+    });
+
+    it('ship-to name falls back to the outlet owner when the FE sends the gift name (HIGH#2)', async () => {
+      wireAssigned();
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({ ...fixedItem, name: 'SuperBrand TV' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ ...outletPartner, ownerName: 'Asha Retail' });
+      await service.redeemForOutlet(sales, {
+        rewardId: 'r1', targetPartnerId: 'cp-out',
+        deliveryAddress: { name: 'SuperBrand TV', mobile: '9000000000', address: '1 MG Rd', city: 'Pune', state: 'MH', pincode: '411001' },
+      } as never);
+      const created = mockPrisma.redemptionOrder.create.mock.calls?.[0]?.[0];
+      expect(created.data.deliveryName).toBe('Asha Retail');
+    });
+
+    it('ship-to name falls back to the outlet owner when the FE sends a blank name (HIGH#2)', async () => {
+      wireAssigned();
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ ...outletPartner, ownerName: 'Asha Retail' });
+      await service.redeemForOutlet(sales, {
+        rewardId: 'r1', targetPartnerId: 'cp-out',
+        deliveryAddress: { name: '   ', mobile: '9000000000', address: '1 MG Rd', city: 'Pune', state: 'MH', pincode: '411001' },
+      } as never);
+      const created = mockPrisma.redemptionOrder.create.mock.calls?.[0]?.[0];
+      expect(created.data.deliveryName).toBe('Asha Retail');
+    });
+
+    it('a VENDOR item with NO vendorId is BLOCKED — no orphan/undispatchable order (LOW#7)', async () => {
+      wireAssigned();
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({ ...fixedItem, sourceType: 'VENDOR', vendorId: null });
+      await expect(
+        service.redeemForOutlet(sales, { rewardId: 'r1', targetPartnerId: 'cp-out', consent: true } as never),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
     });

@@ -348,6 +348,10 @@ export class AuthService {
     // cannot keep minting access tokens via their long-lived refresh token.
     await this.assertPartnerNotDeactivated(user.id, clientId);
 
+    // VENDOR login gate (suspend/revoke cascade) — blocks a vendor whose entity is
+    // suspended or whose grant for this tenant was revoked (review CRITICAL #2).
+    await this.assertVendorLoginAllowed({ id: user.id, role: user.role, vendorId: user.vendorId, clientId });
+
     // Update last login
     await this.prisma.user.update({
       where: { id: user.id },
@@ -401,6 +405,10 @@ export class AuthService {
       // Rides both login and refresh (refresh re-mints from the full session.user).
       // Null for every non-staff user → omitted from the token.
       ...(user.gifsyRoleId ? { gifsyRoleId: user.gifsyRoleId } : {}),
+      // Gift Catalogue & Dispatch (Wave 2) — carry the vendor login's Vendor id so the
+      // vendor portal can HARD-scope by vendorId without a user lookup. Null for every
+      // non-vendor user → omitted from the token.
+      ...(user.vendorId ? { vendorId: user.vendorId } : {}),
     };
 
     // SHORT access-token lifetime — DECOUPLED from the 7-day session/refresh window so
@@ -600,6 +608,17 @@ export class AuthService {
         // GIFSY_ADMIN with no ChannelPartner, so this is a no-op for that flow.
         await this.assertPartnerNotDeactivated(session.user.id, session.user.clientId);
 
+        // VENDOR login gate on refresh too — a vendor suspended/revoked mid-session
+        // loses the ability to roll their session forward (review CRITICAL #2). The
+        // predecessor is already revoked by the atomic claim above, so a blocked vendor
+        // must re-login (which is also blocked) → hard stop within the access-token TTL.
+        await this.assertVendorLoginAllowed({
+          id: session.user.id,
+          role: session.user.role,
+          vendorId: session.user.vendorId,
+          clientId: session.user.clientId,
+        });
+
         // Mint the successor, chaining rotatedFromId back to THIS predecessor so a
         // slow sibling replay can be handed the successor's stored tokens (grace).
         // The assumed access token uses the SHORT ACCESS_TTL (60m) — same as normal;
@@ -773,6 +792,41 @@ export class AuthService {
    * deactivated OR has NO active, non-deleted outlet left. A multi-outlet partner
    * with ≥1 active outlet is never stranded. Tenant-scoped by `clientId`.
    */
+  /**
+   * Gift Catalogue & Dispatch (Wave 2) — VENDOR login gate (suspend/revoke cascade,
+   * review CRITICAL #2). A VENDOR user may authenticate ONLY while their Vendor is
+   * ACTIVE and they hold an ACTIVE VendorTenantGrant for their pinned clientId
+   * (decision #12: one tenant per vendor login). Suspending the vendor or revoking
+   * the grant therefore stops the login on its next OTP-login OR refresh (≤ the 60m
+   * access-token TTL), complementing the immediate data-boundary re-check the vendor
+   * portal runs on every request. A non-VENDOR user is unaffected (no-op).
+   */
+  private async assertVendorLoginAllowed(user: {
+    id: string;
+    role: string;
+    vendorId: string | null;
+    clientId: string;
+  }): Promise<void> {
+    if (user.role !== 'VENDOR') return;
+    if (!user.vendorId) {
+      throw new ForbiddenException('This vendor login is not linked to a vendor. Contact Gifsy support.');
+    }
+    const vendor = await this.prisma.vendor.findFirst({
+      where: { id: user.vendorId },
+      select: { status: true },
+    });
+    if (!vendor || vendor.status !== 'ACTIVE') {
+      throw new ForbiddenException('This vendor account is suspended. Please contact Gifsy support.');
+    }
+    const grant = await this.prisma.vendorTenantGrant.findFirst({
+      where: { vendorId: user.vendorId, clientId: user.clientId, status: 'ACTIVE' },
+      select: { id: true },
+    });
+    if (!grant) {
+      throw new ForbiddenException('This vendor is no longer authorised for this brand. Please contact Gifsy support.');
+    }
+  }
+
   private async assertPartnerNotDeactivated(userId: string, clientId: string): Promise<void> {
     const partner = await this.prisma.channelPartner.findFirst({
       where: { userId, clientId, deletedAt: null },

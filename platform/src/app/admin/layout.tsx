@@ -33,6 +33,7 @@ import {
   BookOpen,
   MessageSquare,
   Truck,
+  Store,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useTenantFeatures } from '@/lib/tenant-features';
@@ -172,6 +173,13 @@ const ALL_NAV_ITEMS = [
   // admin/whatsapp-broadcasts/layout.tsx, so nav visibility and the route guard agree.
   { href: '/admin/whatsapp-broadcasts', label: 'WhatsApp Broadcasts', icon: MessageSquare, featureFlag: null, gifsyAdminOnly: true },
   { href: '/admin/gift-orders', label: 'Gift Dispatch', icon: Truck, featureFlag: null, gifsyAdminOnly: true },
+  // Wave-2 vendor management — GIFSY_ADMIN only (grants, policies, logins, suspend/reactivate).
+  // gifsyAdminOnly matches the ['GIFSY_ADMIN'] route guard in admin/vendors/layout.tsx.
+  { href: '/admin/vendors', label: 'Vendors', icon: Store, featureFlag: null, gifsyAdminOnly: true },
+  // Wave-2 Gift Disbursal report — GIFSY_ADMIN (all tenants/vendors) + CLIENT_ADMIN (own tenant).
+  // giftDisbursal flag gates the nav to exactly those two roles (hidden from GIFSY_STAFF + MIS_USER),
+  // matching the ['GIFSY_ADMIN','CLIENT_ADMIN'] route guard in admin/gift-disbursal/layout.tsx.
+  { href: '/admin/gift-disbursal', label: 'Gift Disbursal', icon: FileBarChart2, featureFlag: null, giftDisbursal: true },
   { href: '/admin/settings', label: 'Settings',         icon: Settings,      featureFlag: null },
 ];
 
@@ -217,6 +225,10 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         // gifsyAdminOnly items (WhatsApp Broadcasts) are owner-only — hidden from GIFSY_STAFF
         // too, so nav visibility matches the GIFSY_ADMIN-only route guard (no shown-but-blocked gap).
         if ((item as { gifsyAdminOnly?: boolean }).gifsyAdminOnly && adminSession.role !== 'GIFSY_ADMIN') return false;
+        // giftDisbursal items are shown to GIFSY_ADMIN (all tenants) + CLIENT_ADMIN (own tenant)
+        // only — hidden from GIFSY_STAFF + MIS_USER — matching the gift-disbursal route guard.
+        if ((item as { giftDisbursal?: boolean }).giftDisbursal
+          && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'CLIENT_ADMIN') return false;
         // tenantReportOnly items (Scheme Reports) are hidden from GIFSY_ADMIN, who
         // gets the full management + report surface under Scheme Management instead.
         if ((item as { tenantReportOnly?: boolean }).tenantReportOnly && adminSession.canManageSchemes) return false;

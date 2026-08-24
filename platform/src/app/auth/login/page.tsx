@@ -20,6 +20,9 @@ function getRoleDashboard(role?: string): string {
   // GIFSY_STAFF (RBAC Option-X P5) lands on the /gifsy launchpad — a brand-picker; a
   // staff has no all-brands view and works by assuming one granted brand at a time.
   if (r === 'GIFSY_STAFF') return '/gifsy';
+  // VENDOR (Gift Catalogue & Dispatch, Wave-2) — a hard-scoped third-party fulfiller
+  // lands in its own scoped portal.
+  if (r === 'VENDOR') return '/vendor/catalogue';
   // Wave 3 — partner logins go through the outlet picker (/partner/select) first. It
   // auto-forwards single-outlet logins straight to /partner/dashboard (today's behaviour),
   // and shows a picker only when the login operates multiple outlets or has a group overview.
