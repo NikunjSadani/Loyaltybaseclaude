@@ -298,5 +298,118 @@ describe('VendorPortalService', () => {
         status: { not: RedemptionStatus.PENDING },
       });
     });
+
+    // ── C2 (HIGH): flat row → display shape the FE consumes ──────────────────────
+    const flatInWindowRow = () => ({
+      id: 'o1', orderNumber: 'D-26-1', status: 'PROCESSING',
+      redemptionMode: 'PHYSICAL_GIFT', quantity: 1,
+      fulfilmentChannel: 'BRAND', logisticsPartner: null, supplierOrderRef: null,
+      trackingNumber: null, trackingUrl: null, voucherCode: null, voucherProvider: null,
+      podUrl: null, dispatchedAt: null, deliveredAt: null, cancelledAt: null,
+      createdAt: new Date(), updatedAt: new Date(),
+      deliveryName: 'Ravi Kumar', deliveryPhone: '9876543210',
+      deliveryAddressLine1: '12 MG Road', deliveryAddressLine2: null,
+      deliveryCity: 'Pune', deliveryState: 'MH', deliveryPincode: '411001',
+      reward: { id: 'rw1', name: 'Bluetooth Speaker', imageUrls: [] },
+      statusHistory: [],
+    });
+
+    it('getOrder MAPS the flat row → delivery.{name,address,phone} + rewardName (C2)', async () => {
+      grantScope();
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(flatInWindowRow());
+      const res = await service.getOrder(vendor, 'o1');
+      expect(res.delivery).toEqual({
+        name: 'Ravi Kumar',
+        address: '12 MG Road, Pune, MH, 411001',
+        phone: '9876543210',
+      });
+      expect(res.rewardName).toBe('Bluetooth Speaker');
+      // PRIVACY (#15): the 194R cost basis must never reach the vendor.
+      expect(res).not.toHaveProperty('valuePaise');
+      expect(res).not.toHaveProperty('pointsDeducted');
+      expect(res).not.toHaveProperty('totalPointsCost');
+      expect(res).not.toHaveProperty('sellingValuePaise');
+      expect(res).not.toHaveProperty('metadata');
+      expect(res).not.toHaveProperty('sourceType');
+      expect(res).not.toHaveProperty('moderationStatus');
+    });
+
+    it('getOrder PAST the retention window → delivery null / piiWithheld (#16)', async () => {
+      grantScope();
+      const longAgo = new Date(Date.now() - 200 * 24 * 60 * 60 * 1000);
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...flatInWindowRow(),
+        status: 'DELIVERED',
+        deliveredAt: longAgo,
+        updatedAt: longAgo,
+        statusHistory: [{ toStatus: 'DELIVERED', createdAt: longAgo }],
+      });
+      const res = await service.getOrder(vendor, 'o1');
+      expect(res.delivery).toBeNull();
+      expect(res.piiWithheld).toBe(true);
+      // Non-PII fields stay visible so the vendor still sees the order.
+      expect(res.rewardName).toBe('Bluetooth Speaker');
+    });
+
+    it('listOrders MAPS rows → rewardName + delivery, no valuePaise (C2 + #15)', async () => {
+      grantScope();
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([flatInWindowRow()]);
+      const res = await service.listOrders(vendor);
+      expect(res.items[0].rewardName).toBe('Bluetooth Speaker');
+      expect(res.items[0].delivery).toMatchObject({ name: 'Ravi Kumar' });
+      expect(res.items[0]).not.toHaveProperty('valuePaise');
+      expect(res.items[0]).not.toHaveProperty('totalPointsCost');
+    });
+
+    // ── BUG-1 (MED): digital voucher must carry a code before DELIVERED ──────────
+    it('transition → DELIVERED on a DIGITAL_VOUCHER order WITHOUT a code is rejected (BUG-1)', async () => {
+      grantScope();
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        id: 'o1', status: 'DISPATCHED', partnerId: 'cp1', orderNumber: 'D-26-1',
+        fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: null,
+      });
+      await expect(
+        service.transition(vendor, 'o1', { toStatus: 'DELIVERED' as never }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+    });
+
+    it('transition → DELIVERED on a DIGITAL_VOUCHER order SUCCEEDS with a code on the dto (BUG-1)', async () => {
+      grantScope();
+      mockPrisma.redemptionOrder.findFirst
+        .mockResolvedValueOnce({
+          id: 'o1', status: 'DISPATCHED', partnerId: 'cp1', orderNumber: 'D-26-1',
+          fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: null,
+        })
+        .mockResolvedValueOnce({
+          id: 'o1', status: 'DELIVERED', deliveredAt: new Date(), cancelledAt: null,
+          updatedAt: new Date(), reward: null, statusHistory: [],
+        });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'DELIVERED' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'm1', phone: '9', ownerName: 'A' });
+      const res = await service.transition(vendor, 'o1', {
+        toStatus: 'DELIVERED' as never,
+        voucherCode: 'AMZ-1234',
+      });
+      expect(mockPrisma.redemptionOrder.update).toHaveBeenCalled();
+      expect(res.order.status).toBe('DELIVERED');
+    });
+
+    it('transition → DELIVERED with a STORED voucher code (none on dto) SUCCEEDS (BUG-1)', async () => {
+      grantScope();
+      mockPrisma.redemptionOrder.findFirst
+        .mockResolvedValueOnce({
+          id: 'o1', status: 'DISPATCHED', partnerId: 'cp1', orderNumber: 'D-26-1',
+          fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: 'STORED-9999',
+        })
+        .mockResolvedValueOnce({
+          id: 'o1', status: 'DELIVERED', deliveredAt: new Date(), cancelledAt: null,
+          updatedAt: new Date(), reward: null, statusHistory: [],
+        });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'DELIVERED' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'm1', phone: '9', ownerName: 'A' });
+      await service.transition(vendor, 'o1', { toStatus: 'DELIVERED' as never });
+      expect(mockPrisma.redemptionOrder.update).toHaveBeenCalled();
+    });
   });
 });

@@ -48,16 +48,21 @@ const ME: VendorMe = {
   approvalPolicy: 'GIFSY_APPROVE',
 };
 
+/**
+ * The REAL mapped vendor BE output (VENDOR_ORDER_SELECT → applyVendorPiiRetention →
+ * toVendorOrderView): a NESTED `delivery.{name,address,phone}` block + `rewardName`, and
+ * DELIBERATELY NO `valuePaise` / `totalPointsCost` — the 194R cost basis stays hidden from
+ * the vendor (decision #15). `piiWithheld` flags whether the retention window has elapsed.
+ */
 function orderWith(overrides: Record<string, unknown> = {}) {
   return {
     id: 'o1',
     orderNumber: 'DEO-26-000123',
     status: 'PROCESSING',
     rewardName: 'Bluetooth Speaker',
-    valuePaise: 199900,
-    totalPointsCost: 1999,
     createdAt: '2026-05-10T00:00:00.000Z',
-    delivery: { name: 'Ravi Kumar', address: '12 MG Road, Pune 411001', phone: '9876543210' },
+    delivery: { name: 'Ravi Kumar', address: '12 MG Road, Pune, MH, 411001', phone: '9876543210' },
+    piiWithheld: false,
     ...overrides,
   };
 }
@@ -106,12 +111,19 @@ describe('Vendor orders list', () => {
 });
 
 describe('Vendor order detail', () => {
-  it('OD1: shows the order + delivery address', async () => {
+  it('OD1: shows the order + delivery PII (name/address/phone) + item name; hides value/points', async () => {
     get.mockResolvedValue({ success: true, data: orderWith({}) });
     render(<VendorOrderDetailPage />);
     expect(await screen.findByText('DEO-26-000123')).toBeInTheDocument();
+    // Delivery PII the vendor needs to SHIP (C2 — this is the core dispatch flow).
     expect(screen.getByText('Ravi Kumar')).toBeInTheDocument();
-    expect(screen.getByText('12 MG Road, Pune 411001')).toBeInTheDocument();
+    expect(screen.getByText('12 MG Road, Pune, MH, 411001')).toBeInTheDocument();
+    expect(screen.getByText('9876543210')).toBeInTheDocument();
+    // Item name resolves from the mapped `rewardName` (was "—" under the old raw shape).
+    expect(screen.getAllByText('Bluetooth Speaker').length).toBeGreaterThan(0);
+    // PRIVACY (#15): the 194R cost basis is never sent → no rupee value / points shown.
+    expect(screen.queryByText('₹1,999')).not.toBeInTheDocument();
+    expect(screen.queryByText('1,999')).not.toBeInTheDocument();
   });
 
   it('OD2: PATCHes the fulfilment with the chosen channel + tracking', async () => {

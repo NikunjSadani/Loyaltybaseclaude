@@ -1061,6 +1061,25 @@ export class RewardsService {
         }
       }
 
+      // DEF-3 — TOCTOU item re-check (ALL sources). Mirrors confirmRedeem: the item can
+      // be REJECTED / its vendor SUSPENDED / its grant REVOKED / de-activated between the
+      // sales-assisted redeem and this confirm. Re-assert the redeem-time filter INSIDE
+      // the tx so the debit + CONFIRMED stamp can never land on an unreachable item.
+      const liveItem = await tx.rewardCatalog.findFirst({
+        where: {
+          id: order.rewardId,
+          status: 'ACTIVE',
+          deletedAt: null,
+          clientId: user.clientId,
+          moderationStatus: 'APPROVED',
+          ...vendorVisibilityFilter(user.clientId),
+        },
+        select: { id: true },
+      });
+      if (!liveItem) {
+        throw new BadRequestException('This gift is no longer available');
+      }
+
       // Atomic claim: only the tx that flips PENDING→CONFIRMED proceeds → a single
       // order can never be debited twice (double-submit matches 0 rows, aborts).
       const claim = await tx.redemptionOrder.updateMany({
@@ -1578,6 +1597,27 @@ export class RewardsService {
         }
       }
 
+      // DEF-3 — TOCTOU item re-check (ALL sources). The moderation + vendor-visibility
+      // gate is applied at redeem (pre-auth), but the item can be REJECTED / its vendor
+      // SUSPENDED / its grant REVOKED / the item de-activated between redeem and this
+      // confirm. Re-assert the SAME filter used at redeem, INSIDE the tx, so the debit +
+      // CONFIRMED stamp can never land on an item that is no longer reachable (an
+      // orphaned order pinned to an unreachable vendor). A throw here rolls the tx back.
+      const liveItem = await tx.rewardCatalog.findFirst({
+        where: {
+          id: order.rewardId,
+          status: 'ACTIVE',
+          deletedAt: null,
+          clientId: user.clientId,
+          moderationStatus: 'APPROVED',
+          ...vendorVisibilityFilter(user.clientId),
+        },
+        select: { id: true },
+      });
+      if (!liveItem) {
+        throw new BadRequestException('This gift is no longer available');
+      }
+
       const claim = await tx.redemptionOrder.updateMany({
         where: { id: order.id, status: 'PENDING' },
         data: { status: 'CONFIRMED', pointsDeducted: requiredPoints, valuePaise },
@@ -1813,6 +1853,39 @@ export class RewardsService {
       throw new BadRequestException(
         'INR redemptions cannot be cancelled, returned or failed manually once confirmed; ' +
           'reversal is driven only by an uploaded UTR=FAILED.',
+      );
+    }
+
+    // C-3 — cash redemptions are OUT of the dispatch module. The forward dispatch edges
+    // (→PROCESSING/DISPATCHED/DELIVERED) are otherwise mode-agnostic, so an operator could
+    // manually march a CASH-mode order (UPI/BANK_TRANSFER) to DELIVERED via the console,
+    // wrongly pulling it into 194R Source-2 (which sums DELIVERED valuePaise). Cash settles
+    // ONLY via the UTR/payout rail (payouts.service sets DELIVERED directly, NOT through
+    // this method), so reject forward dispatch moves here. Refund targets are already
+    // blocked above; this closes the forward direction.
+    const isForwardDispatchTarget =
+      toStatus === RedemptionStatus.PROCESSING ||
+      toStatus === RedemptionStatus.DISPATCHED ||
+      toStatus === RedemptionStatus.DELIVERED;
+    if (isCashMode && isForwardDispatchTarget) {
+      throw new BadRequestException(
+        'Cash redemptions are settled via payout, not the dispatch workflow.',
+      );
+    }
+
+    // BUG-1 — a DIGITAL_VOUCHER order cannot be marked DELIVERED without an actual voucher
+    // code to deliver. The effective channel is the stored one unless this transition
+    // overrides it (same precedence the update below uses: dto value wins, else unchanged);
+    // likewise the effective code is the one supplied on this call or already stored.
+    const effectiveChannel = dto.fulfilmentChannel ?? order.fulfilmentChannel;
+    const effectiveVoucherCode = dto.voucherCode ?? order.voucherCode;
+    if (
+      toStatus === RedemptionStatus.DELIVERED &&
+      effectiveChannel === GiftFulfilmentChannel.DIGITAL_VOUCHER &&
+      !effectiveVoucherCode?.trim()
+    ) {
+      throw new BadRequestException(
+        'A voucher code is required before a digital voucher order can be marked delivered.',
       );
     }
 

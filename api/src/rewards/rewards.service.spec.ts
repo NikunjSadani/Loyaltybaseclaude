@@ -159,6 +159,11 @@ describe('RewardsService', () => {
     mockPrisma.outlet.findMany.mockResolvedValue([]); // default: no extra outlet-keyed assignments
     // Default eligible partner for the in-tx TOCTOU re-check (all modes now gated).
     mockPrisma.channelPartner.findFirst.mockResolvedValue(ELIGIBLE_FRESH_PARTNER);
+    // Default eligible catalog item for the in-tx confirm-time re-check (DEF-3): the
+    // fixed confirmRedeem/confirmRedeemForOutlet re-load the item inside the tx and
+    // abort if it no longer resolves. A deterministic default keeps the legacy confirm
+    // tests green without relying on cross-test mock leakage; per-test overrides win.
+    mockPrisma.rewardCatalog.findFirst.mockResolvedValue({ id: 'r1' });
   });
 
   describe('listCatalog', () => {

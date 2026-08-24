@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsArray,
   IsBoolean,
@@ -233,8 +233,21 @@ export class RedeemDto {
    * shared with the fulfilment vendor. The service BLOCKS a vendor-item redeem
    * without it and stores vendorPiiConsentAt + consentVersion on the order. Ignored
    * for PLATFORM items (no third party → no checkbox).
+   *
+   * C1 (consent fail-open): the global ValidationPipe runs with
+   * `enableImplicitConversion:true`, so class-transformer would coerce ANY
+   * non-empty string (`"false"`/`"0"`/`"no"`) to boolean `true`, defeating the
+   * service's `consent === true` DPDP gate. Strict-parse here so ONLY a genuine
+   * boolean `true` or the exact string `'true'` counts as consent; everything
+   * else resolves to `false` and the service blocks the vendor-item redeem.
+   *
+   * NOTE: read the RAW source value via `obj`, not `value` — under
+   * `enableImplicitConversion:true` the implicit Boolean coercion runs BEFORE
+   * this @Transform, so `value` for `"false"`/`"0"`/`"no"` has already become
+   * boolean `true` (verified at runtime). `obj.consent` is the untouched input.
    */
   @IsOptional()
+  @Transform(({ obj }) => obj?.consent === true || obj?.consent === 'true')
   @IsBoolean()
   consent?: boolean;
 }

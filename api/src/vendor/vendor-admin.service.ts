@@ -8,7 +8,6 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { isGifsyOperator } from '../common/tenant-scope';
 import { isActivePhoneConflict, ACTIVE_PHONE_IN_USE_MSG } from '../common/phone-conflict';
 import {
   CreateVendorDto,
@@ -38,12 +37,6 @@ export class VendorAdminService {
   private readonly logger = new Logger(VendorAdminService.name);
 
   constructor(private readonly prisma: PrismaService) {}
-
-  private assertOperator(user: JwtPayload) {
-    if (!isGifsyOperator(user)) {
-      throw new ForbiddenException('Vendor management is Gifsy-operator only');
-    }
-  }
 
   /**
    * OWNER-ONLY data boundary (Wave-2 audit MED#3). Vendor administration exposes the full
@@ -202,7 +195,7 @@ export class VendorAdminService {
   }
 
   async createVendor(user: JwtPayload, dto: CreateVendorDto) {
-    this.assertOperator(user);
+    this.assertOwner(user);
     const vendor = await this.prisma.vendor.create({
       data: { name: dto.name, createdByUserId: user.sub },
     });
@@ -210,7 +203,7 @@ export class VendorAdminService {
   }
 
   async updateVendor(user: JwtPayload, id: string, dto: UpdateVendorDto) {
-    this.assertOperator(user);
+    this.assertOwner(user);
     const existing = await this.prisma.vendor.findFirst({ where: { id } });
     if (!existing) throw new NotFoundException('Vendor not found');
 
@@ -232,7 +225,7 @@ export class VendorAdminService {
 
   /** Create OR reactivate a vendor↔tenant grant (unique on [vendorId, clientId]). */
   async createGrant(user: JwtPayload, vendorId: string, dto: CreateVendorGrantDto) {
-    this.assertOperator(user);
+    this.assertOwner(user);
     const vendor = await this.prisma.vendor.findFirst({ where: { id: vendorId } });
     if (!vendor) throw new NotFoundException('Vendor not found');
 
@@ -267,7 +260,7 @@ export class VendorAdminService {
     grantId: string,
     dto: UpdateVendorGrantDto,
   ) {
-    this.assertOperator(user);
+    this.assertOwner(user);
     const existing = await this.prisma.vendorTenantGrant.findFirst({
       where: { id: grantId, vendorId },
     });
@@ -298,7 +291,7 @@ export class VendorAdminService {
    * unique index) — only an ACTIVE user reserves a (clientId, phone).
    */
   async createVendorUser(user: JwtPayload, vendorId: string, dto: CreateVendorUserDto) {
-    this.assertOperator(user);
+    this.assertOwner(user);
     const vendor = await this.prisma.vendor.findFirst({ where: { id: vendorId } });
     if (!vendor) throw new NotFoundException('Vendor not found');
     if (vendor.status !== 'ACTIVE') {

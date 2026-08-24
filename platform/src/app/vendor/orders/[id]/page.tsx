@@ -37,8 +37,6 @@ import {
   statusBadgeClass,
   channelLabel,
   GIFT_FULFILMENT_CHANNELS,
-  fmtValuePaise,
-  fmtPoints,
 } from '@/lib/gift-orders';
 import {
   vendorNextStatusOptions,
@@ -160,9 +158,8 @@ export default function VendorOrderDetailPage() {
               <p className="text-xs font-semibold text-gray-700">Order</p>
               <Field icon={<Package className="w-3.5 h-3.5" />} label="Item" value={order.rewardName ?? '—'} />
               <Field label="Channel" value={channelLabel(order.fulfilmentChannel)} />
-              {/* Value + points are READ-ONLY for the vendor. */}
-              <Field label="Value" value={order.valuePaise != null ? fmtValuePaise(order.valuePaise) : '—'} />
-              <Field label="Points" value={fmtPoints(order.totalPointsCost)} />
+              {/* Order value / points cost (the 194R basis) are intentionally NOT shown to the
+                  vendor (design §1.15) — the backend never sends them. */}
             </div>
 
             {/* Delivery PII — the vendor needs name/address/phone to ship (§1.15). Digital

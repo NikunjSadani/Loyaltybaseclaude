@@ -79,6 +79,11 @@ const VENDOR_ORDER_SELECT = {
   },
 } satisfies Prisma.RedemptionOrderSelect;
 
+/** The raw vendor order row shape (VENDOR_ORDER_SELECT projection). */
+type VendorOrderRow = Prisma.RedemptionOrderGetPayload<{ select: typeof VENDOR_ORDER_SELECT }>;
+/** The same row AFTER {@link applyVendorPiiRetention} (adds `piiWithheld`; nulls PII when withheld). */
+type VendorOrderRowRetained = VendorOrderRow & { piiWithheld: boolean };
+
 /**
  * Terminal (closed) order states. A vendor may neither transition NOR patch fulfilment on
  * an order in one of these states (Wave-2 audit MED#4b) — this also keeps `updatedAt` from
@@ -495,6 +500,62 @@ export class VendorPortalService {
   }
 
   // ── Orders ────────────────────────────────────────────────────────────────────
+  /**
+   * Map a RETENTION-APPLIED vendor order row into the DISPLAY shape the vendor FE consumes
+   * (the same `delivery.{name,address,phone}` / `rewardName` contract the Gifsy console
+   * uses — see `getFulfilmentOrder` in rewards.service). The `delivery` block is composed
+   * from the retention-applied fields, so once the retention window has elapsed those
+   * fields are already null and `delivery` comes out null (FE shows the withheld message).
+   *
+   * PRIVACY INVARIANT (decision #15): this DELIBERATELY OMITS the 194R cost basis —
+   * `valuePaise`, `pointsDeducted`, `totalPointsCost`, `sellingValuePaise`, `metadata`,
+   * `sourceType`, `moderationStatus`. The console mapper emits `valuePaise`; the vendor
+   * view must NOT. (VENDOR_ORDER_SELECT already never selects those columns; this mapper
+   * is the second line of defence so no future select-widening leaks them.)
+   */
+  private toVendorOrderView(row: VendorOrderRowRetained) {
+    const address = [
+      row.deliveryAddressLine1,
+      row.deliveryAddressLine2,
+      row.deliveryCity,
+      row.deliveryState,
+      row.deliveryPincode,
+    ]
+      .filter(Boolean)
+      .join(', ');
+    const delivery =
+      row.deliveryName || address || row.deliveryPhone
+        ? {
+            name: row.deliveryName ?? null,
+            address: address || null,
+            phone: row.deliveryPhone ?? null,
+          }
+        : null;
+    return {
+      id: row.id,
+      orderNumber: row.orderNumber,
+      status: row.status,
+      redemptionMode: row.redemptionMode,
+      quantity: row.quantity,
+      rewardName: row.reward?.name ?? null,
+      fulfilmentChannel: row.fulfilmentChannel,
+      logisticsPartner: row.logisticsPartner,
+      supplierOrderRef: row.supplierOrderRef,
+      trackingNumber: row.trackingNumber,
+      trackingUrl: row.trackingUrl,
+      voucherCode: row.voucherCode,
+      voucherProvider: row.voucherProvider,
+      podUrl: row.podUrl,
+      delivery,
+      piiWithheld: row.piiWithheld,
+      dispatchedAt: row.dispatchedAt,
+      deliveredAt: row.deliveredAt,
+      cancelledAt: row.cancelledAt,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
   async listOrders(user: JwtPayload) {
     const scope = await this.resolveScope(user);
     const orders = await this.prisma.redemptionOrder.findMany({
@@ -510,7 +571,9 @@ export class VendorPortalService {
       orderBy: { createdAt: 'desc' },
     });
     const now = new Date();
-    return { items: orders.map((o) => applyVendorPiiRetention(o, now)) };
+    // Retention FIRST (nulls PII past the window), THEN map to the display shape so the
+    // composed `delivery` block reflects the withheld state (decision #15/#16).
+    return { items: orders.map((o) => this.toVendorOrderView(applyVendorPiiRetention(o, now))) };
   }
 
   async getOrder(user: JwtPayload, id: string) {
@@ -526,7 +589,9 @@ export class VendorPortalService {
       select: VENDOR_ORDER_SELECT,
     });
     if (!order) throw new NotFoundException('Order not found');
-    return applyVendorPiiRetention(order, new Date());
+    // Retention FIRST, THEN map to the display shape (delivery.{name,address,phone} +
+    // rewardName), keeping the 194R cost basis out of the vendor payload (decision #15).
+    return this.toVendorOrderView(applyVendorPiiRetention(order, new Date()));
   }
 
   /** PATCH /vendor/orders/:id/fulfilment — vendor-scoped NON-STATUS update. */
@@ -607,6 +672,22 @@ export class VendorPortalService {
     if (!(allowed[fromStatus] ?? []).includes(toStatus)) {
       throw new BadRequestException(
         `Vendors may only move an order PROCESSING → DISPATCHED → DELIVERED. Illegal: ${fromStatus} → ${toStatus}`,
+      );
+    }
+
+    // BUG-1: a DIGITAL_VOUCHER order cannot be marked DELIVERED without a voucher code —
+    // the member would have nothing to redeem. Check the EFFECTIVE channel/code (the value
+    // arriving on this transition dto, else the one already stored). Mirrors the identical
+    // guard in rewards.service transitionOrder.
+    const effectiveChannel = dto.fulfilmentChannel ?? order.fulfilmentChannel;
+    const effectiveVoucherCode = (dto.voucherCode ?? order.voucherCode ?? '').trim();
+    if (
+      toStatus === RedemptionStatus.DELIVERED &&
+      effectiveChannel === 'DIGITAL_VOUCHER' &&
+      !effectiveVoucherCode
+    ) {
+      throw new BadRequestException(
+        'A voucher code is required before a digital voucher order can be marked delivered.',
       );
     }
 

@@ -10,7 +10,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { isGifsyOperator } from '../common/tenant-scope';
+import { isGifsyOperator, tenantScope } from '../common/tenant-scope';
 import {
   CreateGiftCategoryDto,
   CreateGiftMasterDto,
@@ -184,6 +184,14 @@ export class GiftCatalogueService {
     const inUse = await this.prisma.giftMaster.count({ where: { categoryId: id, deletedAt: null } });
     if (inUse > 0) {
       throw new ConflictException('This category is in use by one or more gift masters');
+    }
+    // Vendor items link a category via RewardCatalog.giftCategoryId with NO GiftMaster
+    // (FK is ON DELETE SET NULL, so deleting would silently strip the taxonomy link).
+    const catalogueInUse = await this.prisma.rewardCatalog.count({
+      where: { giftCategoryId: id, deletedAt: null },
+    });
+    if (catalogueInUse > 0) {
+      throw new ConflictException('This category is in use by catalogue items and cannot be deleted.');
     }
     await this.prisma.giftCategory.delete({ where: { id } });
     return { id, deleted: true };
@@ -596,8 +604,11 @@ export class GiftCatalogueService {
    */
   async listModeration(user: JwtPayload) {
     this.assertOperator(user);
+    // Cross-tenant for an un-assumed OWNER (scope undefined); pinned to the assumed
+    // tenant otherwise, so a scoped operator only sees their own tenant's queue.
+    const scope = tenantScope(user);
     const rows = await this.prisma.rewardCatalog.findMany({
-      where: { moderationStatus: 'PENDING', deletedAt: null },
+      where: { moderationStatus: 'PENDING', deletedAt: null, ...(scope ? { clientId: scope } : {}) },
       include: {
         vendor: { select: { name: true } },
         giftCategory: { select: { name: true } },
@@ -633,7 +644,12 @@ export class GiftCatalogueService {
   /** Approve a pending moderation row → APPROVED (redeemable). */
   async approveModeration(user: JwtPayload, id: string) {
     this.assertOperator(user);
-    const row = await this.prisma.rewardCatalog.findFirst({ where: { id, deletedAt: null } });
+    // Scope the lookup so a scoped operator gets a 404 on a foreign tenant's item
+    // instead of successfully moderating it; an un-assumed OWNER (scope undefined) sees all.
+    const scope = tenantScope(user);
+    const row = await this.prisma.rewardCatalog.findFirst({
+      where: { id, deletedAt: null, ...(scope ? { clientId: scope } : {}) },
+    });
     if (!row) throw new NotFoundException('Catalogue item not found');
     const updated = await this.prisma.rewardCatalog.update({
       where: { id },
@@ -654,7 +670,12 @@ export class GiftCatalogueService {
     if (!reason || !reason.trim()) {
       throw new BadRequestException('A rejection reason is required');
     }
-    const row = await this.prisma.rewardCatalog.findFirst({ where: { id, deletedAt: null } });
+    // Scope the lookup so a scoped operator gets a 404 on a foreign tenant's item
+    // instead of successfully moderating it; an un-assumed OWNER (scope undefined) sees all.
+    const scope = tenantScope(user);
+    const row = await this.prisma.rewardCatalog.findFirst({
+      where: { id, deletedAt: null, ...(scope ? { clientId: scope } : {}) },
+    });
     if (!row) throw new NotFoundException('Catalogue item not found');
     const updated = await this.prisma.rewardCatalog.update({
       where: { id },
