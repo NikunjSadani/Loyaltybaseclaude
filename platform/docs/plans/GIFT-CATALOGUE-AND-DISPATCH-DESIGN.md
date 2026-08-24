@@ -111,7 +111,7 @@ Enums: `GiftSourceType`, `VendorStatus`, `VendorGrantStatus`, `GiftApprovalPolic
 - **Member view:** "My rewards" order status + tracking in the partner app. **Dispatch SLA/aging** (reuse business-hours/SLA engine): flag orders undispatched beyond N business hours, per fulfiller; alert Gifsy ops + the vendor.
 
 ## 6. 194R & reporting (no vendor money)
-- **194R stays outlet-based:** a delivered gift's `valuePaise` adds to the receiving outlet/PAN's 194R base — same engine that already cumulates redemption value. Gifts + cash both count.
+- **194R stays outlet-based:** a delivered gift's `valuePaise` adds to the receiving outlet/PAN's 194R base — same engine that already cumulates redemption value. Gifts + cash both count. (Clarification, E2E audit 2026-08-24: a **FREE_AMOUNT / choose-your-value** voucher has a *null fixed-price snapshot* but STILL contributes its REAL redeemed value `= points ÷ rate` to 194R when delivered — only the fixed selling-price *snapshot* is null, never the value. Do not "fix" this to exclude FREE_AMOUNT; that would be the 194R under-reporting bug.)
 - **Gift Disbursal report** (tenant-accessible + Gifsy): by tenant and **by vendor** — counts + ₹ value disbursed + status breakdown + date range, xlsx export. Pure reporting; **no** settlement/commission/vendor payout anywhere.
 
 ## 7. Migration (Deoleo is live)
