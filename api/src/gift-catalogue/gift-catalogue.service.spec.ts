@@ -146,6 +146,30 @@ describe('GiftCatalogueService', () => {
       expect(res.results[0].action).toBe('updated');
     });
 
+    it('re-publish with NO price at all preserves BOTH stored sellingValuePaise and pointsCost (rate drift ignored)', async () => {
+      // C-2: the publication omits BOTH sellingValuePaise and pointsCost. The stored
+      // price falls back (existing.sellingValuePaise) and the stored pointsCost is
+      // PRESERVED verbatim — never re-derived from the current conversion rate. Also
+      // proves an ACTIVE row is not force-reactivated.
+      rate = 5; // large rate drift since first publish — must NOT move pointsCost
+      mockPrisma.giftMaster.findFirst.mockResolvedValue(republishMaster);
+      mockPrisma.rewardCategory.findFirst.mockResolvedValue({ id: 'rc-cat-1' });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        id: 'rcat-1', status: 'ACTIVE', sellingValuePaise: 50000, pointsCost: 500,
+      });
+      mockPrisma.rewardCatalog.update.mockResolvedValue({ id: 'rcat-1', sellingValuePaise: 50000, pointsCost: 500 });
+
+      const res = await service.publish(gifsy, 'm1', {
+        publications: [{ clientId: 'deoleo' }], // no sellingValuePaise, no pointsCost
+      });
+
+      const call = mockPrisma.rewardCatalog.update.mock.calls[0][0];
+      expect(call.data.sellingValuePaise).toBe(50000); // fell back to stored
+      expect(call.data.pointsCost).toBe(500); // PRESERVED — NOT 500 × 5 re-derive
+      expect(call.data.status).toBeUndefined(); // ACTIVE row not force-reactivated
+      expect(res.results[0].action).toBe('updated');
+    });
+
     it('re-publish APPLIES an explicitly-sent pointsCost', async () => {
       rate = 1;
       mockPrisma.giftMaster.findFirst.mockResolvedValue(republishMaster);

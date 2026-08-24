@@ -82,6 +82,10 @@ describe('GifsyService', () => {
     // Default: no custom domains (getClientDetail + non-domain paths never crash).
     mockPrisma.clientDomain.findMany.mockResolvedValue([]);
     mockPrisma.clientDomain.findFirst.mockResolvedValue(null);
+    // Default: no existing tenants → the createClient order-number-code collision
+    // guard finds no clash unless a test supplies one. (listClients/getOverview
+    // override this in-body.)
+    mockPrisma.client.findMany.mockResolvedValue([]);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         GifsyService,
@@ -151,6 +155,43 @@ describe('GifsyService', () => {
       await expect(
         service.createClient(gifsy, { slug: 'API', internalName: 'X' } as never),
       ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('BUG-3: rejects a slug whose order-number code collides with an existing tenant', async () => {
+      // "deo-leo" and the existing "deoleo" both normalise to code DEOLEO → they would
+      // share an order-number prefix AND advisory-lock key. Reject at creation time.
+      mockPrisma.client.findUnique.mockResolvedValue(null); // exact slug is free
+      mockPrisma.client.findMany.mockResolvedValue([{ id: 'deoleo' }]);
+      await expect(
+        service.createClient(gifsy, { slug: 'deo-leo', internalName: 'Rogue' } as never),
+      ).rejects.toBeInstanceOf(ConflictException);
+      // Rejected before any client row is written.
+      expect(mockPrisma.client.create).not.toHaveBeenCalled();
+    });
+
+    it('BUG-3: allows a slug whose order-number code does NOT collide', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue(null);
+      mockPrisma.client.findMany.mockResolvedValue([{ id: 'deoleo' }]); // ACME ≠ DEOLEO
+      mockPrisma.client.create.mockResolvedValue({
+        id: 'acme',
+        internalName: 'Acme',
+        status: 'ONBOARDING',
+        onboardedAt: new Date('2026-07-01'),
+        branding: {},
+        features: {},
+      });
+      mockPrisma.outletType.findMany.mockResolvedValue([]);
+      mockPrisma.clientDomain.findFirst.mockResolvedValue(null);
+      mockPrisma.clientDomain.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          { id: 'c1', clientId: 'acme', domain: 'acme.gifsy.in', isPrimary: false },
+        ]);
+
+      const res = await service.createClient(gifsy, { slug: 'acme', internalName: 'Acme' } as never);
+
+      expect(mockPrisma.client.create).toHaveBeenCalled();
+      expect(res.slug).toBe('acme');
     });
   });
 

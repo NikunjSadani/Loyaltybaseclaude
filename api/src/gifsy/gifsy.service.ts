@@ -15,6 +15,7 @@ import { sniffFileType } from '../common/file-signature';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide, isGifsyOperator } from '../common/tenant-scope';
 import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
+import { deriveTenantCode } from '../rewards/order-number.helper';
 import {
   CreateClientDto,
   UpdateClientDto,
@@ -499,6 +500,23 @@ export class GifsyService {
     const existing = await this.prisma.client.findUnique({ where: { id: dto.slug } });
     if (existing) {
       throw new ConflictException(`Client with slug "${dto.slug}" already exists.`);
+    }
+
+    // Order-number-code collision guard (root-cause fix for the tenant-code clash):
+    // deriveTenantCode strips non-alphanumerics + uppercases the slug to build the
+    // per-tenant order-number PREFIX, which is ALSO the advisory-lock key that serialises
+    // number minting. Two distinct slugs that normalise to the SAME code (e.g. "deo-leo"
+    // and "deoleo" → "DEOLEO") would share a prefix + lock and interleave sequences. The
+    // lock is CORRECT keyed on the (unique) code — keying it on the raw slug would instead
+    // let two same-code tenants mint DUPLICATE numbers. So enforce code uniqueness HERE,
+    // at the one place new slugs are minted, rather than weakening the lock.
+    const newCode = deriveTenantCode(dto.slug);
+    const allClients = await this.prisma.client.findMany({ select: { id: true } });
+    const collision = allClients.find((c) => deriveTenantCode(c.id) === newCode);
+    if (collision) {
+      throw new ConflictException(
+        `This client id conflicts with an existing tenant’s order-number code (${newCode}, already used by "${collision.id}"); choose a different id.`,
+      );
     }
 
     let client;
