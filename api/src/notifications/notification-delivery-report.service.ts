@@ -274,14 +274,26 @@ export class NotificationDeliveryReportService {
     from?: string,
     to?: string,
   ): Prisma.DateTimeFilter | undefined {
+    // A date-only string (the FE's <input type="date">, e.g. "2026-08-25") is interpreted as an IST
+    // calendar day: `from` → start of that IST day; `to` → INCLUSIVE of the whole IST day (via an
+    // exclusive `lt` at the start of the next IST day) so "To = today" doesn't drop all of today's
+    // messages (every receipt has a time > IST-midnight). A full ISO datetime is used as given.
+    const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
     const range: Prisma.DateTimeFilter = {};
     if (from) {
-      const gte = new Date(from);
+      const gte = DATE_ONLY.test(from) ? new Date(`${from}T00:00:00+05:30`) : new Date(from);
       if (!Number.isNaN(gte.getTime())) range.gte = gte;
     }
     if (to) {
-      const lte = new Date(to);
-      if (!Number.isNaN(lte.getTime())) range.lte = lte;
+      if (DATE_ONLY.test(to)) {
+        const startOfIstDay = new Date(`${to}T00:00:00+05:30`);
+        if (!Number.isNaN(startOfIstDay.getTime())) {
+          range.lt = new Date(startOfIstDay.getTime() + 24 * 60 * 60 * 1000); // start of next IST day (exclusive)
+        }
+      } else {
+        const lte = new Date(to);
+        if (!Number.isNaN(lte.getTime())) range.lte = lte;
+      }
     }
     return Object.keys(range).length > 0 ? range : undefined;
   }

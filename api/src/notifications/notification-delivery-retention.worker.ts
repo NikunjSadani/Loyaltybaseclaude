@@ -44,9 +44,13 @@ export class NotificationDeliveryRetentionWorker {
    * future manual trigger). Batches the delete of rows older than the retention window.
    */
   async runPrune(): Promise<{ deleted: number }> {
-    const days =
+    // Guard against a mis-typed non-positive env (e.g. "-5"), which would otherwise put the cutoff in
+    // the FUTURE and prune the ENTIRE table. Floor at 1 day.
+    const days = Math.max(
+      1,
       Number(process.env.NOTIFICATIONS_RETENTION_DAYS ?? '') ||
-      NotificationDeliveryRetentionWorker.RETENTION_DAYS_DEFAULT;
+        NotificationDeliveryRetentionWorker.RETENTION_DAYS_DEFAULT,
+    );
     const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
     let deleted = 0;

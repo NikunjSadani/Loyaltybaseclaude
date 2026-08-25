@@ -199,8 +199,12 @@ describe('NotificationDeliveryReportService', () => {
         to: '2026-02-01',
       });
       const where = mockPrisma.messageDeliveryReceipt.groupBy.mock.calls[0][0].where;
-      expect(where.createdAt.gte).toEqual(new Date('2026-01-01'));
-      expect(where.createdAt.lte).toEqual(new Date('2026-02-01'));
+      // Date-only inputs are IST calendar days: from → start of that IST day; to → INCLUSIVE of the
+      // whole IST day, expressed as an exclusive lt at the start of the NEXT IST day (so "To=today"
+      // captures all of today's messages). No lte.
+      expect(where.createdAt.gte).toEqual(new Date('2026-01-01T00:00:00+05:30'));
+      expect(where.createdAt.lt).toEqual(new Date('2026-02-02T00:00:00+05:30'));
+      expect(where.createdAt.lte).toBeUndefined();
     });
   });
 
