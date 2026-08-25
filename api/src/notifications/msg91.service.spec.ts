@@ -173,11 +173,41 @@ describe('Msg91Service.sendSms (v5 flow)', () => {
     expect(body.recipients).toEqual([{ mobiles: '919000000001', ownerName: 'Asha', points: '120' }]);
   });
 
+  it('passes crqid on the recipient and returns MSG91 request id from the response', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ type: 'success', request_id: 'req-abc-123' }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    const result = await service.sendSms('9000000001', 'dlt-tpl-1', { a: 'b' }, { crqid: 'crq-1' });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.recipients).toEqual([{ mobiles: '919000000001', a: 'b', crqid: 'crq-1' }]);
+    expect(result).toEqual({ requestId: 'req-abc-123' });
+  });
+
+  it('returns { requestId: null } when the response carries no id', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue({ ok: true, status: 200, json: async () => ({ type: 'success' }) });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    await expect(service.sendSms('9000000001', 'dlt-tpl-1', {})).resolves.toEqual({
+      requestId: null,
+    });
+  });
+
   it('dev bypass: no authKey → logs + returns WITHOUT calling fetch', async () => {
     const fetchMock = jest.fn();
     global.fetch = fetchMock as unknown as typeof fetch;
     const service = new Msg91Service(makeConfig({})); // MSG91_AUTH_KEY undefined
-    await expect(service.sendSms('9000000001', 'dlt-tpl-1', { a: 'b' })).resolves.toBeUndefined();
+    await expect(service.sendSms('9000000001', 'dlt-tpl-1', { a: 'b' })).resolves.toEqual({
+      requestId: null,
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -186,7 +216,7 @@ describe('Msg91Service.sendSms (v5 flow)', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
     for (const bad of ['919830011252', '+919830011252', '98300', '98300112ab']) {
-      await expect(service.sendSms(bad, 'dlt-tpl-1', {})).resolves.toBeUndefined();
+      await expect(service.sendSms(bad, 'dlt-tpl-1', {})).resolves.toEqual({ requestId: null });
     }
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -248,6 +278,46 @@ describe('Msg91Service.sendOtp — per-tenant template override', () => {
     expect(body.otp).toBe('123456');
   });
 
+  it('returns MSG91 request id from the OTP response body (best-effort)', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ type: 'success', request_id: 'otp-req-9876543210abcdef' }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    await expect(service.sendOtp('9000000001', '123456', 'SMS')).resolves.toEqual({
+      requestId: 'otp-req-9876543210abcdef',
+    });
+  });
+
+  it('reads a bare ~24-char request id echoed on the OTP success `message` field', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ type: 'success', message: '3a1f9c7e2b6d4058af12cd34' }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    await expect(service.sendOtp('9000000001', '123456', 'SMS')).resolves.toEqual({
+      requestId: '3a1f9c7e2b6d4058af12cd34',
+    });
+  });
+
+  it('returns { requestId: null } when the OTP response carries no id', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue({ ok: true, status: 200, json: async () => ({ type: 'success' }) });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    await expect(service.sendOtp('9000000001', '123456', 'SMS')).resolves.toEqual({
+      requestId: null,
+    });
+  });
+
   it('trims the override templateId before use', async () => {
     const fetchMock = jest
       .fn()
@@ -298,7 +368,9 @@ describe('Msg91Service.sendOtp — per-tenant template override', () => {
     const service = new Msg91Service(
       makeConfig({ MSG91_AUTH_KEY: 'key-123', MSG91_OTP_TEMPLATE_ID: 'env-tpl', FIXED_OTP: '123456' }),
     );
-    await expect(service.sendOtp('9000000001', '123456', 'SMS', 'tenant-tpl')).resolves.toBeUndefined();
+    await expect(service.sendOtp('9000000001', '123456', 'SMS', 'tenant-tpl')).resolves.toEqual({
+      requestId: null,
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -307,7 +379,9 @@ describe('Msg91Service.sendOtp — per-tenant template override', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
 
     const service = new Msg91Service(makeConfig({ MSG91_OTP_TEMPLATE_ID: 'env-tpl' })); // no authKey
-    await expect(service.sendOtp('9000000001', '123456', 'SMS', 'tenant-tpl')).resolves.toBeUndefined();
+    await expect(service.sendOtp('9000000001', '123456', 'SMS', 'tenant-tpl')).resolves.toEqual({
+      requestId: null,
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

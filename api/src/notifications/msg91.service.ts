@@ -15,12 +15,19 @@ export class Msg91Service {
 
   constructor(private readonly config: ConfigService) {}
 
+  /**
+   * @returns `{ requestId }` — MSG91's returned OTP request id (the ~24-char handle used by the
+   *   OTP delivery-status query API / callback). Best-effort: null when the FIXED_OTP or
+   *   missing-authKey DEV bypass fires, or when the response body carries no id. Send behaviour
+   *   is UNCHANGED — existing callers (AuthService, RewardsService) ignore the return value, so
+   *   this is backward-compatible (additive). See DELIVERY-STATUS-REPORTING-SCOPE.md §6 (D1).
+   */
   async sendOtp(
     phone: string,
     otp: string,
     channel: 'SMS' | 'WHATSAPP' = 'SMS',
     templateId?: string,
-  ): Promise<void> {
+  ): Promise<{ requestId: string | null }> {
     // `.trim()` defends against secrets saved with a leading UTF-8 BOM (U+FEFF) or
     // stray whitespace/newline — a BOM on MSG91_AUTH_KEY made `fetch` throw a
     // ByteString error ("character … value 65279") when set as the authkey header.
@@ -38,12 +45,12 @@ export class Msg91Service {
     // FIXED_OTP mode — skip MSG91, log OTP to console (dev/staging only)
     if (fixedOtp) {
       this.logger.warn(`[FIXED_OTP MODE] OTP for ${phone} is always: ${fixedOtp} — MSG91 not called`);
-      return;
+      return { requestId: null };
     }
 
     if (!authKey) {
       this.logger.warn(`[DEV] MSG91 not configured — OTP for ${phone}: ${otp}`);
-      return;
+      return { requestId: null };
     }
 
     // MSG91 OTP API v5 — authkey goes in the header, not the body.
@@ -71,13 +78,36 @@ export class Msg91Service {
       throw new Error(`Failed to send OTP via ${channel}: ${reason}`);
     }
 
-    // MSG91 can return HTTP 200 with {"type":"error"} — check the body too
-    const json = await res.json() as { type?: string; message?: string };
+    // MSG91 can return HTTP 200 with {"type":"error"} — check the body too.
+    // ⚠️ RUNTIME-VERIFY (requestId): the MSG91 v5 OTP API returns a request id in the response
+    // body; the exact field name varies across docs (`request_id` / `requestId`, sometimes the
+    // ~24-char handle is carried in `message` on the success body). We read the common shapes and
+    // store whatever is present. Best-effort correlation aid — null if absent (never affects send).
+    const json = await res.json() as {
+      type?: string;
+      message?: string;
+      request_id?: string;
+      requestId?: string;
+      data?: { request_id?: string; requestId?: string };
+    };
     if (!res.ok || json?.type === 'error') {
       const reason = json?.message ?? `HTTP ${res.status}`;
       this.logger.error(`MSG91 OTP failed for ${phone} (${channel}): ${reason}`);
       throw new Error(`Failed to send OTP via ${channel}: ${reason}`);
     }
+
+    // On the OTP success body MSG91 echoes the request id in `message` (a bare ~24-char handle).
+    // Only treat `message` as an id when it is NOT the human "success" string — hence the
+    // request_id/requestId/data.* fields take precedence, and `message` is the last-resort source.
+    const requestId =
+      json.request_id ??
+      json.requestId ??
+      json.data?.request_id ??
+      json.data?.requestId ??
+      (typeof json.message === 'string' && /^[A-Za-z0-9]{20,}$/.test(json.message.trim())
+        ? json.message.trim()
+        : null);
+    return { requestId };
   }
 
   /**
@@ -294,12 +324,21 @@ export class Msg91Service {
    * @param phone     recipient's bare 10-digit mobile (country code prepended → `91<phone>`)
    * @param templateId the MSG91 flow/DLT template id
    * @param variables the template's named variables → spread into the recipient object
+   * @param opts      optional per-message extras:
+   *   - `crqid`      a client reference id sent on the FLOW recipient and ECHOED back on the SMS
+   *                  DLR webhook → the correlation key the delivery-status ingestion uses to map a
+   *                  DLR callback back to its MessageDeliveryReceipt row. See the ⚠️ RUNTIME-VERIFY
+   *                  note below on the exact field placement + spelling.
+   * @returns `{ requestId }` — MSG91's returned FLOW/bulk request id (best-effort; null when the
+   *   DEV bypass fires, the recipient is skipped, or the response carries no id). Existing callers
+   *   ignore the return value, so this is backward-compatible (additive).
    */
   async sendSms(
     phone: string,
     templateId: string,
     variables: Record<string, string> = {},
-  ): Promise<void> {
+    opts?: { crqid?: string },
+  ): Promise<{ requestId: string | null }> {
     const authKey = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
 
     // DEV bypass — same shape as sendOtp's missing-authKey path: a non-prod env without
@@ -308,7 +347,7 @@ export class Msg91Service {
       this.logger.warn(
         `[DEV] MSG91 not configured — SMS template "${templateId}" for ${phone} not sent (vars: ${JSON.stringify(variables)})`,
       );
-      return;
+      return { requestId: null };
     }
 
     // Recipient sanity guard (mirrors sendWhatsappTemplate): the body prepends `91`, so a
@@ -318,15 +357,24 @@ export class Msg91Service {
       this.logger.warn(
         `SMS template "${templateId}" skipped — recipient is not a bare 10-digit mobile.`,
       );
-      return;
+      return { requestId: null };
     }
 
     // MSG91 v5 flow API — authkey in the header (never the body), template_id + recipients
     // in the body. Each recipient carries `mobiles` plus the template's named variables.
+    //
+    // ⚠️ RUNTIME-VERIFY (crqid): per the MSG91 SMS DLR-webhook docs a custom client-reference id
+    // (CRQID — alphanumeric, no spaces) is carried on the per-recipient object and echoed back on
+    // the DLR callback. The exact key spelling (`crqid`) + placement is per the current MSG91 docs;
+    // confirm against a real send + a real DLR payload on staging. The ingestion falls back to
+    // matching on the returned requestId if the crqid echo differs, so a mismatch degrades gracefully.
+    const recipient: Record<string, string> = { mobiles: `91${phone}`, ...variables };
+    if (opts?.crqid) recipient.crqid = opts.crqid;
+
     const url = 'https://control.msg91.com/api/v5/flow/';
     const body = {
       template_id: templateId,
-      recipients: [{ mobiles: `91${phone}`, ...variables }],
+      recipients: [recipient],
     };
 
     // Never hang the request on an unresponsive MSG91 — 10s timeout, then fail fast.
@@ -348,12 +396,30 @@ export class Msg91Service {
     }
 
     // MSG91 can return HTTP 200 with {"type":"error"} — check the body too.
-    const json = (await res.json()) as { type?: string; message?: string };
+    // ⚠️ RUNTIME-VERIFY (requestId): MSG91 returns the FLOW/bulk request id in the response body;
+    // the exact field name varies across docs (`request_id` / `requestId`, sometimes nested under
+    // `data`). We read the common shapes and store whatever is present — best-effort correlation aid
+    // for the status-by-requestID poll (the primary key is the crqid echoed on the DLR webhook).
+    const json = (await res.json()) as {
+      type?: string;
+      message?: string;
+      request_id?: string;
+      requestId?: string;
+      data?: { request_id?: string; requestId?: string };
+    };
     if (!res.ok || json?.type === 'error') {
       const reason = json?.message ?? `HTTP ${res.status}`;
       this.logger.error(`MSG91 SMS template "${templateId}" failed for ${phone}: ${reason}`);
       throw new Error(`Failed to send SMS template ${templateId}: ${reason}`);
     }
+
+    const requestId =
+      json.request_id ??
+      json.requestId ??
+      json.data?.request_id ??
+      json.data?.requestId ??
+      null;
+    return { requestId };
   }
 
   /**

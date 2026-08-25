@@ -363,6 +363,18 @@ enum NotificationStatus {
   CANCELLED
 }
 
+/// Provider delivery outcome for a single transactional message (SMS / transactional WhatsApp),
+/// tracked per-message on MessageDeliveryReceipt, and (light D1 tracking) on OtpCode. Distinct from
+/// NotificationStatus (our send-attempt lifecycle) — this is MSG91's real per-recipient outcome:
+/// QUEUED → SENT → DELIVERED → READ (WhatsApp only), or FAILED. See DELIVERY-STATUS-REPORTING-SCOPE.md.
+enum MessageDeliveryStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
 enum ReportFormat {
   CSV
   XLSX
@@ -696,6 +708,13 @@ model OtpCode {
   // concurrent PENDING orders across outlets (login picker), so an order-scoped lookup prevents one
   // order's confirm consuming another order's OTP. Nullable: purposes that don't scope leave it null.
   referenceId String?
+  // Light OTP delivery tracking (D1) — additive, nullable, dormant until the send path captures
+  // MSG91's returned request id + a status callback/poll fills these. NOT a full per-OTP receipt
+  // table (that lives on MessageDeliveryReceipt for SMS/WhatsApp); OTP gets an aggregate
+  // delivery-rate view keyed off deliveryStatus. See DELIVERY-STATUS-REPORTING-SCOPE.md §6 (D1).
+  msg91RequestId String?
+  deliveryStatus MessageDeliveryStatus?
+  deliveredAt    DateTime?
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 
@@ -2257,6 +2276,35 @@ model NotificationDeliveryLog {
   @@index([status])
   @@index([createdAt])
   @@map("notification_delivery_log")
+}
+
+/// Per-message delivery receipt for transactional SMS + transactional WhatsApp (NOT OTP — OTP uses
+/// the light fields on OtpCode per D1). Generalizes the proven WhatsappBroadcastRecipient pattern to
+/// trigger-based sends: every billable send writes one row, `crqid` is the client-reference id we send
+/// to MSG91 and it echoes back on the DLR/outbound-report webhook (the correlation key), and
+/// `msg91RequestId` is captured from the send response for the fallback status-by-requestID poll.
+/// Status transitions use the same idempotent guarded-update + counter mechanism as the broadcast module.
+/// Ships dormant (no writer until Wave 1+). See docs/plans/DELIVERY-STATUS-REPORTING-SCOPE.md §5–6.
+model MessageDeliveryReceipt {
+  id              String                @id @default(cuid())
+  clientId        String // tenant scope for the report surface (D4)
+  channel         NotificationChannel // holds SMS or WHATSAPP for transactional sends
+  eventKey        String? // the notification trigger (e.g. ORDER_APPROVED)
+  recipientPhone  String?
+  crqid           String                @unique // client-reference id echoed back by MSG91 — correlation key
+  msg91RequestId  String? // provider's returned bulk/request id — for the fallback status-by-requestID poll
+  status          MessageDeliveryStatus @default(QUEUED)
+  sentAt          DateTime?
+  deliveredAt     DateTime?
+  readAt          DateTime?
+  failureReason   String?
+  providerResponse Json?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  @@index([clientId, channel, createdAt])
+  @@index([msg91RequestId])
+  @@map("message_delivery_receipts")
 }
 
 /// Web Push (PWA) subscription — one row per browser/device endpoint a user has
