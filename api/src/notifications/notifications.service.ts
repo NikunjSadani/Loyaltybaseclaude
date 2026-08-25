@@ -359,6 +359,9 @@ export class NotificationsService implements OnModuleInit {
     eventKey: string,
     recipientPhone: string,
   ): Promise<{ id: string; crqid: string } | null> {
+    // Parity with the SMS leg (push-delivery.worker): never write an unscoped receipt — an empty
+    // clientId would mis-scope the row in the per-tenant (D4) delivery report.
+    if (!clientId?.trim()) return null;
     const crqid = randomBytes(16).toString('hex');
     try {
       return await this.prisma.messageDeliveryReceipt.create({

@@ -116,10 +116,12 @@ export class WhatsappStatusService {
         broadcastId = row.broadcastId;
       }
     }
-    if (!rowId && ev.requestId) {
-      // crqid is the primary key; this is only the fallback. A bulk requestId can in principle
-      // match more than one row — findFirst tolerates that (never throws), and the explicit
-      // orderBy makes the pick deterministic (most-recent send) rather than arbitrary.
+    if (!rowId && !ev.crqid && ev.requestId) {
+      // crqid is the primary key; this is only the fallback, and ONLY when no crqid was given. If a
+      // crqid IS present but matched no broadcast recipient, this is a transactional callback — skip
+      // the broadcast requestId fallback (which could theoretically collide with a broadcast row's
+      // msg91RequestId) and fall straight through to the shared receipt service below.
+      // A bulk requestId can match more than one row — findFirst + orderBy makes the pick deterministic.
       const row = await this.prisma.whatsappBroadcastRecipient.findFirst({
         where: { msg91RequestId: ev.requestId },
         orderBy: { createdAt: 'desc' },
