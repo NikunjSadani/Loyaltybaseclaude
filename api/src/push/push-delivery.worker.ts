@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { Prisma } from '@prisma/client';
-import { createId } from '@paralleldrive/cuid2';
+import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { PushSenderService, PushPayload } from './push-sender.service';
 import { Msg91Service } from '../notifications/msg91.service';
@@ -210,9 +210,10 @@ export class PushDeliveryWorker {
     // clientId is required on the receipt (its tenant scope). Without it we can't write a valid
     // row — skip the receipt rather than fail (delivery tracking degrades for this one message).
     if (!clientId) return null;
-    // The crqid is the correlation key echoed back by MSG91 on the DLR webhook. Generate an
-    // alphanumeric, hyphen-free id (MSG91 CRQID must be alphanumeric, no spaces) — cuid2 fits.
-    const crqid = createId();
+    // The crqid is the correlation key echoed back by MSG91 on the DLR webhook. Must be
+    // alphanumeric + hyphen-free (MSG91 CRQID constraint). 32 hex chars from Node's built-in
+    // crypto — no external dependency (a new npm dep here would pass gates but crash at boot).
+    const crqid = randomBytes(16).toString('hex');
     try {
       return await this.prisma.messageDeliveryReceipt.create({
         data: {

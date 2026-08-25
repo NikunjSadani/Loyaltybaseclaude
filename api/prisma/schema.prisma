@@ -2304,6 +2304,7 @@ model MessageDeliveryReceipt {
 
   @@index([clientId, channel, createdAt])
   @@index([msg91RequestId])
+  @@index([channel, status, sentAt])
   @@map("message_delivery_receipts")
 }
 

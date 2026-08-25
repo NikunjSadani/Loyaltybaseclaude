@@ -146,7 +146,7 @@ describe('PushDeliveryWorker — SMS delivery-receipt lifecycle (Wave 1)', () =>
     });
     const crqid = receipts.createCalls[0].crqid;
     expect(typeof crqid).toBe('string');
-    expect(crqid).toMatch(/^[a-z0-9]+$/); // cuid2: alphanumeric, no spaces/hyphens (MSG91 constraint)
+    expect(crqid).toMatch(/^[a-f0-9]{32}$/); // crypto hex: alphanumeric, no spaces/hyphens (MSG91 CRQID constraint)
     // sendSms carried the crqid we generated for the receipt.
     const receiptId = [...receipts.store.keys()][0];
     expect(send).toHaveBeenCalledWith('9990000001', 'dlt-1', { ownerName: 'Asha' }, { crqid });

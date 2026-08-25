@@ -66,6 +66,63 @@ describe('MessageDeliveryStatusService', () => {
     });
   });
 
+  // Regression for the Wave-1 audit HIGH: MSG91 SMS DLR reports a NUMERIC status code + a `CRQID`
+  // (uppercase) correlation field; the classifiers must map the codes and the parser must read CRQID.
+  describe('MSG91 SMS DLR numeric codes + CRQID (real payload shape)', () => {
+    const dlr = (over: Record<string, unknown> = {}) => ({
+      requestId: 'req-sms-1',
+      telNum: '919876500011',
+      status: '1',
+      deliveryTime: '2026-03-19T16:58:07+05:30',
+      CRQID: 'rcpt-1',
+      eventName: 'delivered',
+      failureReason: '',
+      ...over,
+    });
+
+    it('parses the real SMS DLR payload: numeric status, CRQID (uppercase), requestId, deliveryTime', () => {
+      const [ev] = service.parseEvents(dlr());
+      expect(ev).toMatchObject({ crqid: 'rcpt-1', requestId: 'req-sms-1', status: '1' });
+      expect(typeof ev.at).toBe('number');
+    });
+
+    it('treats CRQID "0" (MSG91 default when none sent) as absent', () => {
+      const [ev] = service.parseEvents(dlr({ CRQID: '0' }));
+      expect(ev.crqid).toBeUndefined();
+    });
+
+    it('code "1" → DELIVERED', async () => {
+      mockPrisma.messageDeliveryReceipt.findUnique
+        .mockResolvedValueOnce({ id: 'rcpt-1' })
+        .mockResolvedValue({ providerResponse: null });
+      mockPrisma.messageDeliveryReceipt.updateMany.mockResolvedValue({ count: 1 });
+      const res = await service.handleWebhook(dlr());
+      expect(res.updated).toBe(1);
+      expect(mockPrisma.messageDeliveryReceipt.updateMany).toHaveBeenCalledWith({
+        where: { id: 'rcpt-1', deliveredAt: null, status: { notIn: ['FAILED', 'READ'] } },
+        data: { status: 'DELIVERED', deliveredAt: expect.any(Date) },
+      });
+    });
+
+    it.each(['2', '9', '16', '17', '20', '25'])('code "%s" → FAILED', async (code) => {
+      mockPrisma.messageDeliveryReceipt.findUnique
+        .mockResolvedValueOnce({ id: 'rcpt-1' })
+        .mockResolvedValue({ providerResponse: null });
+      mockPrisma.messageDeliveryReceipt.updateMany.mockResolvedValue({ count: 1 });
+      const res = await service.handleWebhook(dlr({ status: code, eventName: 'failed', failureReason: 'x' }));
+      expect(res.updated).toBe(1);
+      const call = mockPrisma.messageDeliveryReceipt.updateMany.mock.calls[0][0];
+      expect(call.data.status).toBe('FAILED');
+    });
+
+    it('code "0" (Sent) → no flip', async () => {
+      mockPrisma.messageDeliveryReceipt.findUnique.mockResolvedValueOnce({ id: 'rcpt-1' });
+      const res = await service.handleWebhook(dlr({ status: '0', eventName: 'sent' }));
+      expect(res.updated).toBe(0);
+      expect(mockPrisma.messageDeliveryReceipt.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
   describe('correlation', () => {
     it('resolves by crqid (unique) first', async () => {
       mockPrisma.messageDeliveryReceipt.findUnique.mockResolvedValueOnce({ id: 'r1' });
@@ -115,7 +172,7 @@ describe('MessageDeliveryStatusService', () => {
       const first = await service.handleWebhook([{ crqid: 'r1', status: 'delivered' }]);
       expect(first).toEqual({ processed: 1, updated: 1 });
       expect(mockPrisma.messageDeliveryReceipt.updateMany).toHaveBeenCalledWith({
-        where: { id: 'r1', deliveredAt: null, status: { notIn: ['FAILED'] } },
+        where: { id: 'r1', deliveredAt: null, status: { notIn: ['FAILED', 'READ'] } },
         data: { status: 'DELIVERED', deliveredAt: expect.any(Date) },
       });
 

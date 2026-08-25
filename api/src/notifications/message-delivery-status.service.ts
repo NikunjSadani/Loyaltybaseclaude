@@ -55,13 +55,14 @@ export class MessageDeliveryStatusService {
   /**
    * Parse an MSG91 delivery-report payload into normalised events.
    *
-   * ⚠️ RUNTIME-VERIFY (SMS DLR field spellings): the exact SMS DLR payload shape (top-level array
-   * vs `{ data: [...] }` vs a single object) and the field names MUST be confirmed against a real
-   * MSG91 SMS DLR callback on staging. Per the MSG91 SMS DLR-webhook docs the client reference id
-   * is echoed as `crqid` and MSG91's handle as a request id, with a numeric DLR `status` code +
-   * `description`/`err` reason — but the precise spellings vary across docs/plans, so this parser
-   * reads the common aliases and LOWERCASES the status. An unrecognised event is skipped (never
-   * throws), so a shape mismatch degrades to "no update" rather than a 500.
+   * SMS DLR payload (confirmed vs the MSG91 SMS DLR webhook docs, 2026-08): a per-recipient JSON
+   * object with `requestId`, `telNum`, a NUMERIC `status` code (string, e.g. "1"=delivered / "2"=failed),
+   * `CRQID` (the client-reference id we send — MSG91 defaults it to "0" when none was passed),
+   * `eventName` (text, e.g. "delivered"), `deliveryTime`/`requestedAt`, and `failureReason`. This
+   * parser reads those (plus tolerant aliases for other channels) and the classifiers map both the
+   * numeric SMS codes and the text WhatsApp statuses. An unrecognised event is skipped (never throws),
+   * so a shape mismatch degrades to "no update" rather than a 500. ⚠️ Still confirm the LIVE callback
+   * body once the MSG91 webhook is wired on staging (top-level object vs `{data:[...]}` batching).
    */
   parseEvents(payload: unknown): DeliveryEvent[] {
     const items: unknown[] = Array.isArray(payload)
@@ -75,29 +76,41 @@ export class MessageDeliveryStatusService {
     const events: DeliveryEvent[] = [];
     for (const it of items) {
       if (!this.isRecord(it)) continue;
-      // ⚠️ RUNTIME-VERIFY: SMS DLR may carry the outcome as a text `status`, a nested
-      // `report.status`, an `event`, or a numeric DLR code in `description`/`state`.
+      // MSG91 SMS DLR carries the outcome as a NUMERIC `status` code (string, e.g. "1") PLUS a
+      // text `eventName` ("delivered"); WhatsApp (Wave 2) carries a text status. Read the numeric
+      // `status` first (classifiers map the codes), then the text fallbacks. Confirmed against the
+      // MSG91 SMS DLR webhook docs 2026-08 — see the classifiers for the code map.
       const statusRaw =
         this.str(it.status) ??
         this.str(this.isRecord(it.report) ? it.report.status : undefined) ??
         this.str(it.event) ??
+        this.str(it.eventName) ??
         this.str(it.state);
       if (!statusRaw) continue;
-      // ⚠️ RUNTIME-VERIFY: crqid aliases seen across MSG91 channels — crqid / crqId /
-      // clientRefId / cref.
-      const crqid =
+      // Correlation id we sent. MSG91 SMS DLR echoes it as `CRQID` (uppercase); other channels use
+      // `crqid`/`crqId`/`clientRefId`/`cref`. MSG91 defaults CRQID to "0" when none was sent — treat
+      // that (and empty) as absent so it never spuriously "matches".
+      const crqidRaw =
         this.str(it.crqid) ??
+        this.str(it.CRQID) ??
         this.str(it.crqId) ??
+        this.str(it.CRQId) ??
         this.str(it.clientRefId) ??
         this.str(it.cref);
-      // ⚠️ RUNTIME-VERIFY: requestId aliases — requestId / request_id / requestID / id.
+      const crqid = crqidRaw && crqidRaw !== '0' ? crqidRaw : undefined;
+      // requestId aliases — requestId (MSG91 SMS DLR) / request_id / requestID / id.
       const requestId =
         this.str(it.requestId) ??
         this.str(it.request_id) ??
         this.str(it.requestID) ??
         this.str(it.id);
       const atRaw =
-        this.str(it.timestamp) ?? this.str(it.time) ?? this.str(it.eventTime) ?? this.str(it.date);
+        this.str(it.deliveryTime) ??
+        this.str(it.timestamp) ??
+        this.str(it.time) ??
+        this.str(it.eventTime) ??
+        this.str(it.date) ??
+        this.str(it.requestedAt);
       const at = atRaw ? this.toMillis(atRaw) : undefined;
       // ⚠️ RUNTIME-VERIFY: failure-reason aliases — reason / error / err / description / failureReason.
       const reason =
@@ -164,7 +177,9 @@ export class MessageDeliveryStatusService {
   /** SENT→DELIVERED (guarded on deliveredAt null; never overrides a terminal FAILED). */
   private async markDelivered(receiptId: string, at: Date, raw: unknown): Promise<boolean> {
     const res = await this.prisma.messageDeliveryReceipt.updateMany({
-      where: { id: receiptId, deliveredAt: null, status: { notIn: ['FAILED'] } },
+      // notIn FAILED (never revive) + READ (never downgrade a read row back to delivered — matters
+      // when Wave 2 reuses this for WhatsApp, where READ can arrive before/around DELIVERED).
+      where: { id: receiptId, deliveredAt: null, status: { notIn: ['FAILED', 'READ'] } },
       data: { status: 'DELIVERED', deliveredAt: at },
     });
     if (res.count !== 1) return false;
@@ -292,14 +307,23 @@ export class MessageDeliveryStatusService {
   }
 
   // ── status classifiers (tolerant of MSG91's per-channel status vocabularies) ─────────────
+  // MSG91 SMS DLR reports a NUMERIC status code (confirmed vs the MSG91 SMS DLR webhook docs, 2026-08):
+  //   0 = Sent, 1 = Delivered, 2 = Failed, 9 = NDNC, 16 & 25 = Rejected, 17 = Blocked number,
+  //   20 = Country code blocked. Code "0" (Sent) maps to neither → no flip (stays SENT).
+  // WhatsApp (Wave 2) reports TEXT statuses (sent/delivered/read/failed). Both handled below.
+  private static readonly SMS_CODE_DELIVERED = new Set(['1']);
+  private static readonly SMS_CODE_FAILED = new Set(['2', '9', '16', '17', '20', '25']);
+
   private isRead(s: string): boolean {
-    return s.includes('read');
+    return s.includes('read'); // WhatsApp only; SMS has no read code
   }
   private isDelivered(s: string): boolean {
+    if (MessageDeliveryStatusService.SMS_CODE_DELIVERED.has(s)) return true;
     // 'delivered' / 'deliver' (avoid matching 'undelivered'/'not delivered', which are failures).
     return s.includes('deliver') && !s.includes('undeliver') && !s.includes('not deliver');
   }
   private isFailed(s: string): boolean {
+    if (MessageDeliveryStatusService.SMS_CODE_FAILED.has(s)) return true;
     return (
       s.includes('fail') ||
       s.includes('undeliver') ||
