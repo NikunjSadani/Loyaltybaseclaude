@@ -236,6 +236,60 @@ describe('MessageDeliveryStatusService', () => {
     });
   });
 
+  // Wave 2: a transactional-WhatsApp receipt receives WhatsApp TEXT statuses (delivered then read)
+  // via the shared service (reached from the WhatsApp status webhook on a broadcast miss). This
+  // drives the real guarded transitions over a STATEFUL fake to prove the end-to-end sequence
+  // SENT→DELIVERED→READ on one receipt row.
+  describe('transactional WhatsApp DLR sequence: SENT → DELIVERED → READ (stateful)', () => {
+    it('a delivered then read sequence transitions the same receipt SENT→DELIVERED→READ', async () => {
+      const row: any = {
+        id: 'rcpt-wa-1',
+        crqid: 'crq-wa-1',
+        status: 'SENT',
+        deliveredAt: null,
+        readAt: null,
+        providerResponse: null,
+      };
+      // Stateful fake: findUnique resolves by crqid (correlation) or by id (merge read); updateMany
+      // honours the not-yet-set-timestamp / status guards exactly like Prisma updateMany.
+      mockPrisma.messageDeliveryReceipt.findUnique.mockImplementation(({ where }: any) => {
+        if (where.crqid && where.crqid === row.crqid) return Promise.resolve({ id: row.id });
+        if (where.id && where.id === row.id) return Promise.resolve({ providerResponse: row.providerResponse });
+        return Promise.resolve(null);
+      });
+      mockPrisma.messageDeliveryReceipt.updateMany.mockImplementation(({ where, data }: any) => {
+        if (where.id !== row.id) return Promise.resolve({ count: 0 });
+        if ('deliveredAt' in where && where.deliveredAt === null && row.deliveredAt !== null)
+          return Promise.resolve({ count: 0 });
+        if ('readAt' in where && where.readAt === null && row.readAt !== null)
+          return Promise.resolve({ count: 0 });
+        if (where.status?.notIn && where.status.notIn.includes(row.status))
+          return Promise.resolve({ count: 0 });
+        Object.assign(row, data);
+        return Promise.resolve({ count: 1 });
+      });
+      mockPrisma.messageDeliveryReceipt.update.mockImplementation(({ data }: any) => {
+        Object.assign(row, data);
+        return Promise.resolve(row);
+      });
+
+      const d = await service.handleWebhook([{ crqid: 'crq-wa-1', status: 'delivered' }]);
+      expect(d.updated).toBe(1);
+      expect(row.status).toBe('DELIVERED');
+      expect(row.deliveredAt).toBeInstanceOf(Date);
+
+      const r = await service.handleWebhook([{ crqid: 'crq-wa-1', status: 'read' }]);
+      expect(r.updated).toBe(1);
+      expect(row.status).toBe('READ');
+      expect(row.readAt).toBeInstanceOf(Date);
+
+      // A duplicate READ callback (MSG91 retry) is a no-op — no downgrade, no re-count.
+      const dup = await service.handleWebhook([{ crqid: 'crq-wa-1', status: 'read' }]);
+      expect(dup.updated).toBe(0);
+      expect(row.status).toBe('READ');
+    });
+  });
+
   describe('reconcile (best-effort SMS poll)', () => {
     it('is a no-op when no rows are stuck', async () => {
       mockPrisma.messageDeliveryReceipt.findMany.mockResolvedValueOnce([]);

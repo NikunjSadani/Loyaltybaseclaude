@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
+import { randomBytes } from 'node:crypto';
 import { NotificationChannel, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { Msg91Service } from './msg91.service';
@@ -303,14 +304,119 @@ export class NotificationsService implements OnModuleInit {
       const orderedWhatsapp = (contract?.whatsapp ?? []).map((name) =>
         this.varToString(params.vars?.[name]),
       );
+
+      // ── Additive per-message delivery receipt (Wave 2 — DELIVERY-STATUS-REPORTING-SCOPE.md) ──
+      // Create a MessageDeliveryReceipt QUEUED FIRST with a generated crqid, then pass {crqid} to
+      // sendWhatsappTemplate so MSG91 echoes it back on the outbound-report webhook → the shared
+      // MessageDeliveryStatusService correlates the callback to this receipt. BEST-EFFORT + billing-
+      // safe, mirroring the SMS leg in push-delivery.worker: a receipt-write failure NEVER stops the
+      // send (it still fires unchanged, with no crqid, if the receipt can't be written), and a billed
+      // send is never left FAILED (the receipt is flipped SENT before the catch can run, and the
+      // FAILED flip is guarded on status:'QUEUED'). Runs AFTER the caller's tx commit (unchanged).
+      const receipt = await this.createWhatsappReceipt(
+        params.clientId,
+        params.eventKey,
+        phone,
+      );
       try {
-        await this.msg91.sendWhatsappTemplate(phone, cfg.whatsappTemplate, orderedWhatsapp);
+        // crqid is passed ONLY when a receipt exists — a no-receipt call stays byte-identical to the
+        // prior 3-arg send (so a pre-migration env / a receipt-write failure changes nothing).
+        // Destructure defensively (`?? {}`) so a mock/return with no object never throws.
+        const sendRes = receipt
+          ? await this.msg91.sendWhatsappTemplate(phone, cfg.whatsappTemplate, orderedWhatsapp, {
+              crqid: receipt.crqid,
+            })
+          : await this.msg91.sendWhatsappTemplate(phone, cfg.whatsappTemplate, orderedWhatsapp);
+        const requestId = (sendRes ?? {}).requestId ?? null;
+        // Send SUCCEEDED (billed). Flip QUEUED→SENT (best-effort, guarded, never throws) so a billed
+        // message's receipt can never be downgraded to FAILED by the catch below.
+        await this.markWhatsappReceiptSent(receipt, requestId);
       } catch (e) {
         // Non-critical: a WhatsApp delivery failure must NEVER fail the caller's domain path.
         this.logger.warn(
           `[notifications] WhatsApp send failed for ${params.userId} (${params.eventKey}, template ${cfg.whatsappTemplate}): ${e}`,
         );
+        // Guarded (QUEUED-only): only an UNBILLED send (the send itself threw, receipt still QUEUED)
+        // flips to FAILED. A billed send is already SENT → no-op → never downgraded.
+        await this.markWhatsappReceiptFailed(receipt, String(e));
       }
+    }
+  }
+
+  /**
+   * Create the additive MessageDeliveryReceipt (channel WHATSAPP, status QUEUED) for a to-be-sent
+   * transactional WhatsApp. Returns `{ id, crqid }` or null when a receipt can't be written —
+   * BEST-EFFORT: this must never break the send, so every failure (pre-migration table, transient DB
+   * error) is swallowed with a log and returns null (the send then proceeds without a crqid, and
+   * delivery tracking simply degrades for that one message).
+   *
+   * The crqid is the correlation key echoed back by MSG91 on the outbound-report webhook. It must be
+   * alphanumeric + hyphen-free (MSG91 CRQID constraint): 32 hex chars from Node's built-in `crypto`
+   * — NO external dependency (a new npm dep here would pass gates but crash at container boot).
+   */
+  private async createWhatsappReceipt(
+    clientId: string,
+    eventKey: string,
+    recipientPhone: string,
+  ): Promise<{ id: string; crqid: string } | null> {
+    const crqid = randomBytes(16).toString('hex');
+    try {
+      return await this.prisma.messageDeliveryReceipt.create({
+        data: {
+          clientId,
+          channel: 'WHATSAPP',
+          crqid,
+          eventKey,
+          recipientPhone,
+          status: 'QUEUED',
+        },
+        select: { id: true, crqid: true },
+      });
+    } catch (e) {
+      this.logger.warn(`[notifications] WhatsApp delivery-receipt create skipped: ${e}`);
+      return null;
+    }
+  }
+
+  /**
+   * Flip a receipt QUEUED→SENT (guarded on status:'QUEUED' so it's idempotent and can never be
+   * downgraded from a terminal state later). BEST-EFFORT + billing-safe: a billed send must persist
+   * SENT if at all possible, so we NEVER throw and NEVER write FAILED here — a total failure logs.
+   */
+  private async markWhatsappReceiptSent(
+    receipt: { id: string } | null,
+    requestId: string | null,
+  ): Promise<void> {
+    if (!receipt) return;
+    try {
+      await this.prisma.messageDeliveryReceipt.updateMany({
+        where: { id: receipt.id, status: 'QUEUED' },
+        data: { status: 'SENT', sentAt: new Date(), msg91RequestId: requestId ?? undefined },
+      });
+    } catch (e) {
+      this.logger.warn(
+        `[notifications] WhatsApp receipt ${receipt.id} SENT write failed (left non-FAILED to avoid a false failure on a billed send): ${e}`,
+      );
+    }
+  }
+
+  /**
+   * Flip a receipt QUEUED→FAILED (guarded on status:'QUEUED'). Only ever applies to a receipt that
+   * was never marked SENT — i.e. the send genuinely threw (unbilled). A receipt already SENT (billed
+   * message) does NOT match the guard, so a billed message's receipt is never downgraded to FAILED.
+   */
+  private async markWhatsappReceiptFailed(
+    receipt: { id: string } | null,
+    reason: string,
+  ): Promise<void> {
+    if (!receipt) return;
+    try {
+      await this.prisma.messageDeliveryReceipt.updateMany({
+        where: { id: receipt.id, status: 'QUEUED' },
+        data: { status: 'FAILED', failureReason: reason.slice(0, 500) },
+      });
+    } catch (e) {
+      this.logger.warn(`[notifications] WhatsApp receipt ${receipt.id} FAILED write failed: ${e}`);
     }
   }
 

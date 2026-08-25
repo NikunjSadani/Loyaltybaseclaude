@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { PrismaService } from '../prisma/prisma.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { MessageDeliveryStatusService } from '../notifications/message-delivery-status.service';
 import { WhatsappStatusService } from './whatsapp-status.service';
 
 const mockPrisma = {
@@ -14,6 +15,9 @@ const mockPrisma = {
 };
 
 const mockMsg91 = { getWhatsappStatusByRequestId: jest.fn() };
+// Shared channel-agnostic receipt service (Wave 2 / D3) — the status webhook delegates to it on a
+// broadcast-recipient miss so a transactional MessageDeliveryReceipt is transitioned instead.
+const mockDelivery = { applyEvent: jest.fn() };
 
 describe('WhatsappStatusService', () => {
   let service: WhatsappStatusService;
@@ -25,6 +29,7 @@ describe('WhatsappStatusService', () => {
         WhatsappStatusService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: Msg91Service, useValue: mockMsg91 },
+        { provide: MessageDeliveryStatusService, useValue: mockDelivery },
       ],
     }).compile();
     service = module.get(WhatsappStatusService);
@@ -142,13 +147,50 @@ describe('WhatsappStatusService', () => {
     });
   });
 
-  describe('handleWebhook — unknown correlation is ignored', () => {
-    it('does nothing when neither crqid nor requestId resolves a row', async () => {
+  describe('D3 — delegate to the shared receipt service on a broadcast miss (one webhook, both consumers)', () => {
+    it('delegates a broadcast-miss callback to the shared service (transactional receipt transition)', async () => {
+      // No broadcast recipient matches the crqid/requestId → fall through to the shared service,
+      // whose applyEvent transitions the transactional MessageDeliveryReceipt and returns true.
       mockPrisma.whatsappBroadcastRecipient.findUnique.mockResolvedValue(null);
       mockPrisma.whatsappBroadcastRecipient.findFirst.mockResolvedValue(null);
+      mockDelivery.applyEvent.mockResolvedValueOnce(true);
+
+      const res = await service.handleWebhook([{ crqid: 'txn-rcpt-1', status: 'delivered' }]);
+
+      expect(res).toEqual({ processed: 1, updated: 1 });
+      expect(mockDelivery.applyEvent).toHaveBeenCalledTimes(1);
+      expect(mockDelivery.applyEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ crqid: 'txn-rcpt-1', status: 'delivered' }),
+      );
+      // The broadcast tables are NOT touched for a delegated event.
+      expect(mockPrisma.whatsappBroadcast.update).not.toHaveBeenCalled();
+    });
+
+    it('a broadcast miss that the shared service also cannot correlate counts as no update', async () => {
+      mockPrisma.whatsappBroadcastRecipient.findUnique.mockResolvedValue(null);
+      mockPrisma.whatsappBroadcastRecipient.findFirst.mockResolvedValue(null);
+      mockDelivery.applyEvent.mockResolvedValueOnce(false);
+
       const res = await service.handleWebhook([{ requestId: 'ghost', status: 'delivered' }]);
       expect(res).toEqual({ processed: 1, updated: 0 });
+      expect(mockDelivery.applyEvent).toHaveBeenCalledTimes(1);
       expect(mockPrisma.whatsappBroadcast.update).not.toHaveBeenCalled();
+    });
+
+    it('does NOT delegate on a broadcast HIT (broadcast path unchanged)', async () => {
+      // A crqid that resolves a broadcast recipient → the broadcast path handles it; the shared
+      // service must never be invoked (no double-processing).
+      mockPrisma.whatsappBroadcastRecipient.findUnique.mockResolvedValue({ id: 'r1', broadcastId: 'b1' });
+      mockPrisma.whatsappBroadcastRecipient.updateMany.mockResolvedValue({ count: 1 });
+
+      const res = await service.handleWebhook([{ crqid: 'r1', status: 'delivered' }]);
+
+      expect(res).toEqual({ processed: 1, updated: 1 });
+      expect(mockDelivery.applyEvent).not.toHaveBeenCalled();
+      expect(mockPrisma.whatsappBroadcast.update).toHaveBeenCalledWith({
+        where: { id: 'b1' },
+        data: { deliveredCount: { increment: 1 } },
+      });
     });
   });
 });

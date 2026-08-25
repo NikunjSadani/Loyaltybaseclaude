@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { MessageDeliveryStatusService } from '../notifications/message-delivery-status.service';
 
 /** A normalised delivery event extracted from an MSG91 outbound-report payload. */
 export interface StatusEvent {
@@ -35,6 +36,15 @@ export class WhatsappStatusService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly msg91: Msg91Service,
+    // Shared, channel-agnostic receipt ingestion (D3). Both MSG91 WhatsApp callbacks (broadcast
+    // AND transactional) hit the ONE configured webhook (POST /v1/whatsapp/status) → on a broadcast
+    // miss we delegate here so a transactional MessageDeliveryReceipt is transitioned instead.
+    //
+    // DI: MessageDeliveryStatusService is exported by the @Global() NotificationsModule (its only
+    // deps are the @Global PrismaService + the in-module Msg91Service), so it resolves by normal
+    // constructor injection with NO module-import edge and NO provider cycle — the SAME proven
+    // mechanism by which Msg91Service (above) already reaches this service. No lazy ModuleRef needed.
+    private readonly delivery: MessageDeliveryStatusService,
   ) {}
 
   /**
@@ -120,7 +130,14 @@ export class WhatsappStatusService {
         broadcastId = row.broadcastId;
       }
     }
-    if (!rowId || !broadcastId) return false; // unknown correlation — ignore
+    if (!rowId || !broadcastId) {
+      // Not a broadcast recipient — MSG91 sends BOTH broadcast and transactional WhatsApp reports to
+      // this one webhook (D3). Fall through to the shared receipt service so a transactional
+      // MessageDeliveryReceipt is transitioned instead. Broadcast behaviour above is unchanged; only
+      // a broadcast MISS reaches here. StatusEvent is structurally assignable to DeliveryEvent (the
+      // extra `raw` field is optional → no provider-response merge for a delegated event, fine).
+      return this.delivery.applyEvent(ev);
+    }
 
     if (ev.status === 'delivered') return this.markDelivered(rowId, broadcastId, at);
     if (ev.status === 'read') return this.markRead(rowId, broadcastId, at);
