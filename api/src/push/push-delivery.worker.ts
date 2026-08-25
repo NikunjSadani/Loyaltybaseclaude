@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { Prisma } from '@prisma/client';
+import { createId } from '@paralleldrive/cuid2';
 import { PrismaService } from '../prisma/prisma.service';
 import { PushSenderService, PushPayload } from './push-sender.service';
 import { Msg91Service } from '../notifications/msg91.service';
@@ -130,22 +131,56 @@ export class PushDeliveryWorker {
         },
         orderBy: { createdAt: 'asc' },
         take: BATCH_SIZE,
+        // Derive the receipt's tenant scope (clientId) from the recipient user (Wave 1 delivery
+        // receipts). Additive: an absent user just means no receipt (send still proceeds).
+        include: { user: { select: { clientId: true } } },
       });
 
       for (const row of rows) {
         // Claim before sending so a concurrent drain can't bill the same SMS twice. Loser skips.
         if (!(await this.claimQueuedRow(row.id))) continue;
 
+        // ── Additive per-message delivery receipt (Wave 1 — DELIVERY-STATUS-REPORTING-SCOPE.md) ──
+        // Create the receipt QUEUED FIRST with a generated crqid, echoed back by MSG91 on the SMS
+        // DLR webhook → the status service correlates the callback to this row by crqid. BEST-EFFORT:
+        // a receipt failure (e.g. pre-migration table, missing clientId) must NEVER break the
+        // billable send — createSmsReceipt swallows its own errors and returns null, and the send
+        // proceeds without a crqid (delivery tracking simply degrades for that one message).
+        const receipt = await this.createSmsReceipt(row, row.user?.clientId ?? null);
+
         try {
-          // Non-null by the select filter above; assert for the type checker.
-          await this.msg91.sendSms(row.recipientPhone!, row.templateId!, this.smsVariables(row.variables));
+          // Non-null by the select filter above; assert for the type checker. crqid is passed only
+          // when a receipt exists (keeps the no-receipt call byte-identical to the prior 3-arg send).
+          // Destructure defensively (`?? {}`) so a caller/mock returning no object never throws.
+          const sendRes = receipt
+            ? await this.msg91.sendSms(
+                row.recipientPhone!,
+                row.templateId!,
+                this.smsVariables(row.variables),
+                { crqid: receipt.crqid },
+              )
+            : await this.msg91.sendSms(
+                row.recipientPhone!,
+                row.templateId!,
+                this.smsVariables(row.variables),
+              );
+          const requestId = (sendRes ?? {}).requestId ?? null;
+          // The send SUCCEEDED (billed). Flip the receipt QUEUED→SENT FIRST (best-effort, guarded,
+          // never throws) — done before the queue post-writes so that even if a queue write below
+          // throws into the catch, the receipt is already SENT and its guarded markSmsReceiptFailed
+          // (QUEUED-only) is a no-op → a BILLED message's receipt is NEVER flipped to FAILED.
+          await this.markSmsReceiptSent(receipt, requestId);
           await this.markSent(row.id);
           await this.writeLog(row.id, 'SMS', 'SENT', null, null);
         } catch (e) {
           // A send failure (MSG91 error / timeout) — mark FAILED + bump retry, and keep going so
-          // one bad row never aborts the batch.
+          // one bad row never aborts the batch. NotificationQueue transitions are unchanged.
           await this.markFailed(row.id, row.retryCount, row.maxRetries);
           await this.writeLog(row.id, 'SMS', 'FAILED', String(e), null);
+          // Guarded (QUEUED-only): if the throw was the (unbilled) sendSms, the receipt flips to
+          // FAILED; if a post-write threw after a billed send, the receipt is already SENT so this
+          // is a no-op — a billed message can never end up FAILED.
+          await this.markSmsReceiptFailed(receipt, String(e));
           this.logger.warn(`[push-worker] SMS row ${row.id} failed: ${e}`);
         }
       }
@@ -156,6 +191,85 @@ export class PushDeliveryWorker {
     } catch (e) {
       // Missing table (pre-migration env), transient DB error, etc. — never crash.
       this.logger.warn(`[push-worker] SMS drain skipped: ${e}`);
+    }
+  }
+
+  /**
+   * Create the additive MessageDeliveryReceipt (channel SMS, status QUEUED) for a to-be-sent SMS.
+   * Returns `{ id }` (used as the crqid) or null when a receipt can't be written — BEST-EFFORT:
+   * this must never break the billable send, so every failure (pre-migration table, a recipient
+   * with no derivable clientId, transient DB error) is swallowed with a log and returns null.
+   *
+   * The payout/scheme SMS that currently route through `msg91.sendOtp` (D5) are NOT covered here —
+   * they get their receipt in a later step (they don't flow through this SMS drain leg).
+   */
+  private async createSmsReceipt(
+    row: { templateId: string | null; recipientPhone: string | null },
+    clientId: string | null,
+  ): Promise<{ id: string; crqid: string } | null> {
+    // clientId is required on the receipt (its tenant scope). Without it we can't write a valid
+    // row — skip the receipt rather than fail (delivery tracking degrades for this one message).
+    if (!clientId) return null;
+    // The crqid is the correlation key echoed back by MSG91 on the DLR webhook. Generate an
+    // alphanumeric, hyphen-free id (MSG91 CRQID must be alphanumeric, no spaces) — cuid2 fits.
+    const crqid = createId();
+    try {
+      return await this.prisma.messageDeliveryReceipt.create({
+        data: {
+          clientId,
+          channel: 'SMS',
+          crqid,
+          // eventKey: the queue row carries no trigger key, so the DLT templateId is the best
+          // available handle for grouping in the report (nullable is fine).
+          eventKey: row.templateId ?? undefined,
+          recipientPhone: row.recipientPhone ?? undefined,
+          status: 'QUEUED',
+        },
+        select: { id: true, crqid: true },
+      });
+    } catch (e) {
+      this.logger.warn(`[push-worker] SMS delivery-receipt create skipped: ${e}`);
+      return null;
+    }
+  }
+
+  /**
+   * Flip a receipt QUEUED→SENT (guarded on status:'QUEUED' so it's idempotent and can never be
+   * downgraded from a terminal state later). BEST-EFFORT + billing-safe: a billed send must persist
+   * SENT if at all possible, so we NEVER throw and NEVER write FAILED here — a total failure logs.
+   */
+  private async markSmsReceiptSent(
+    receipt: { id: string } | null,
+    requestId: string | null,
+  ): Promise<void> {
+    if (!receipt) return;
+    try {
+      await this.prisma.messageDeliveryReceipt.updateMany({
+        where: { id: receipt.id, status: 'QUEUED' },
+        data: { status: 'SENT', sentAt: new Date(), msg91RequestId: requestId ?? undefined },
+      });
+    } catch (e) {
+      this.logger.warn(`[push-worker] SMS receipt ${receipt.id} SENT write failed (left non-FAILED to avoid a false failure on a billed send): ${e}`);
+    }
+  }
+
+  /**
+   * Flip a receipt QUEUED→FAILED (guarded on status:'QUEUED'). Only ever applies to a receipt that
+   * was never marked SENT — i.e. the send genuinely threw (unbilled). A receipt already SENT (billed
+   * message) does NOT match the guard, so a billed message's receipt is never downgraded to FAILED.
+   */
+  private async markSmsReceiptFailed(
+    receipt: { id: string } | null,
+    reason: string,
+  ): Promise<void> {
+    if (!receipt) return;
+    try {
+      await this.prisma.messageDeliveryReceipt.updateMany({
+        where: { id: receipt.id, status: 'QUEUED' },
+        data: { status: 'FAILED', failureReason: reason.slice(0, 500) },
+      });
+    } catch (e) {
+      this.logger.warn(`[push-worker] SMS receipt ${receipt.id} FAILED write failed: ${e}`);
     }
   }
 

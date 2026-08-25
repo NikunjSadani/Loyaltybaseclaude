@@ -301,6 +301,58 @@ export class Msg91Service {
   }
 
   /**
+   * Fallback status reconcile for SMS — query the MSG91 "status by requestID" API for a single
+   * FLOW/bulk request id and return a coarse terminal/derived status. Used by the transactional
+   * delivery-status reconcile poll to catch SMS receipts whose DLR webhook was missed. FAIL-SAFE:
+   * never throws — returns `null` on any error / DEV-bypass / an unrecognised body, so a reconcile
+   * pass can never crash the scheduler or produce a false status flip.
+   *
+   * ⚠️ RUNTIME-VERIFY: the MSG91 SMS report/analytics-by-requestID endpoint URL + response shape
+   * are per the current MSG91 v5 docs and MUST be confirmed against a real call on staging. The SMS
+   * report path may differ from the WhatsApp one (a distinct URL and/or a per-recipient array with a
+   * DLR code rather than a single `status`). Implemented to the best-documented shape and fully
+   * env-overridable via MSG91_SMS_REPORT_URL; a wrong/unknown shape → null (no false flips), so this
+   * is safe to ship dormant behind the poll's gate. DO NOT trust the URL below until verified.
+   */
+  async getSmsStatusByRequestId(
+    requestId: string,
+  ): Promise<{ status: string; raw: unknown } | null> {
+    const authKey = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
+    if (!authKey || !requestId) return null;
+
+    // ⚠️ RUNTIME-VERIFY: placeholder URL — confirm the real SMS report-by-requestId endpoint before
+    // relying on the reconcile. Kept env-overridable so it can be corrected without a code change.
+    const base =
+      this.config.get<string>('MSG91_SMS_REPORT_URL')?.trim() ||
+      'https://control.msg91.com/api/v5/report/';
+    const url = `${base}${encodeURIComponent(requestId)}`;
+
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { authkey: authKey, 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) return null;
+      const json = (await res.json()) as {
+        type?: string;
+        status?: string;
+        data?: { status?: string } | Array<{ status?: string }>;
+      };
+      if (json?.type === 'error') return null;
+      // Tolerate a top-level status, a nested data.status, or a first-element array status.
+      const status =
+        json.status ??
+        (Array.isArray(json.data) ? json.data[0]?.status : json.data?.status);
+      if (typeof status !== 'string' || status.trim() === '') return null;
+      return { status, raw: json };
+    } catch (e) {
+      this.logger.warn(`MSG91 SMS status-by-requestId reconcile failed for ${requestId}: ${e}`);
+      return null;
+    }
+  }
+
+  /**
    * Send a transactional SMS via the MSG91 v5 FLOW API (DLT-registered template).
    *
    * Mirrors sendOtp's conventions EXACTLY:
