@@ -16,6 +16,7 @@ import { generateNumericOtp } from '../common/otp';
 import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
 import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
 import { ALL_PERMISSIONS } from '../common/rbac/permissions';
+import { captureOtpDeliveryHandle } from '../notifications/otp-delivery';
 import {
   OTP_EXPIRY_MINUTES,
   OTP_MAX_ATTEMPTS,
@@ -238,7 +239,7 @@ export class AuthService {
       where: { expiresAt: { lt: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
     });
 
-    await this.prisma.otpCode.create({
+    const otpRow = await this.prisma.otpCode.create({
       data: {
         phone:      cleanPhone,
         code:       otp,
@@ -249,7 +250,11 @@ export class AuthService {
     });
 
     // Send via MSG91 — pass the tenant so the per-tenant login template can be resolved.
-    await this.sendViaMSG91(cleanPhone, otp, channel, clientId);
+    const sendRes = await this.sendViaMSG91(cleanPhone, otp, channel, clientId);
+
+    // Light D1 OTP delivery tracking — persist MSG91's request id + mark the row SENT. Best-effort:
+    // captureOtpDeliveryHandle NEVER throws, so this can never affect the OTP send behaviour above.
+    await captureOtpDeliveryHandle(this.prisma, otpRow.id, sendRes);
 
     // Mask the phone in logs (PII) — last 4 digits only. cleanPhone is the 10-digit number.
     this.logger.log(`OTP sent to ****${cleanPhone.slice(-4)} via ${channel}`);
@@ -848,12 +853,13 @@ export class AuthService {
     return generateNumericOtp();
   }
 
-  private async sendViaMSG91(phone: string, otp: string, channel: 'SMS' | 'WHATSAPP', clientId?: string): Promise<void> {
+  private async sendViaMSG91(phone: string, otp: string, channel: 'SMS' | 'WHATSAPP', clientId?: string): Promise<{ requestId: string | null }> {
     // Delegates to the shared Msg91Service — behavior is byte-identical to the
     // former inline implementation (FIXED_OTP/missing-authKey bypasses + the
     // HTTP-200-with-{type:'error'} failure check live there now).
     // Per-tenant login template; undefined (no clientId / no override) → global env template.
+    // Returns MSG91's `{ requestId }` (null under the DEV bypasses) for the light D1 delivery capture.
     const tpl = await this.tenantSettings.getOtpTemplateId(clientId, 'login');
-    await this.msg91.sendOtp(phone, otp, channel, tpl);
+    return this.msg91.sendOtp(phone, otp, channel, tpl);
   }
 }

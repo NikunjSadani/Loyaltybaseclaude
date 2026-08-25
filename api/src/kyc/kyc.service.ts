@@ -16,6 +16,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { captureOtpDeliveryHandle } from '../notifications/otp-delivery';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { EventKey } from '../notification-templates/notification-templates.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
@@ -464,7 +465,7 @@ export class KycService {
     await this.prisma.otpCode.deleteMany({
       where: { phone: mobile, purpose: 'KYC_CONSENT', verifiedAt: null },
     });
-    await this.prisma.otpCode.create({
+    const otpRow = await this.prisma.otpCode.create({
       data: {
         phone: mobile,
         code: otp,
@@ -477,7 +478,9 @@ export class KycService {
     // Real send in prod; a no-op when FIXED_OTP is honored (msg91 service handles it).
     // Per-tenant KYC consent template; undefined → global env template.
     const tpl = await this.tenantSettings.getOtpTemplateId(user.clientId, 'kycConsent');
-    await this.msg91.sendOtp(mobile, otp, 'SMS', tpl);
+    const sendRes = await this.msg91.sendOtp(mobile, otp, 'SMS', tpl);
+    // Light D1 OTP delivery tracking — best-effort (never throws → send behaviour unchanged).
+    await captureOtpDeliveryHandle(this.prisma, otpRow.id, sendRes);
     return { success: true, expiresIn: 600 };
   }
 

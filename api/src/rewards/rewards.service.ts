@@ -17,6 +17,7 @@ import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { captureOtpDeliveryHandle } from '../notifications/otp-delivery';
 import { EventKey } from '../notification-templates/notification-templates.config';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { resolveEffectiveKycStatus, isPartnerPayable } from '../kyc/kyc-eligibility';
@@ -800,6 +801,7 @@ export class RewardsService {
     // Single active OTP per OUTLET: supersede the OUTLET's abandoned PENDING orders
     // (never debited) and clear the OUTLET's unverified REDEMPTION_CONFIRM OTPs so
     // the new OTP can confirm only THIS order. Scope is the OUTLET, not the caller.
+    let otpCodeId: string | undefined; // captured for the light D1 OTP delivery-handle write after send
     const order = await this.prisma.$transaction(async (tx) => {
       await tx.redemptionOrder.updateMany({
         where: { partnerId: partner.id, status: 'PENDING' },
@@ -841,7 +843,7 @@ export class RewardsService {
           ...consentData,
         },
       });
-      await tx.otpCode.create({
+      const otpRow = await tx.otpCode.create({
         data: {
           userId: otpUserId,
           phone: otpPhone,
@@ -854,6 +856,7 @@ export class RewardsService {
           referenceId: created.id,
         },
       });
+      otpCodeId = otpRow.id;
       return created;
     });
 
@@ -881,7 +884,10 @@ export class RewardsService {
     try {
       // Per-tenant SALES-ASSISTED redemption template; undefined → global env template.
       const tpl = await this.tenantSettings.getOtpTemplateId(user.clientId, 'redemptionSales');
-      await this.msg91.sendOtp(otpPhone, otp, 'SMS', tpl);
+      const sendRes = await this.msg91.sendOtp(otpPhone, otp, 'SMS', tpl);
+      // Light D1 OTP delivery tracking — best-effort; NEVER throws, so it cannot trip the
+      // send-failure cleanup/503 path below (the catch is only for a real sendOtp failure).
+      await captureOtpDeliveryHandle(this.prisma, otpCodeId, sendRes);
     } catch (e) {
       this.logger.error(`[redeemForOutlet] OTP send failed for order ${order.id}: ${e}`);
       // No debit happened at redeem (pointsDeducted:0), so just undo the OTP + order so nothing is orphaned.
@@ -1337,6 +1343,7 @@ export class RewardsService {
     // (none were ever debited → pointsDeducted=0, no refund) and their unverified
     // OTPs guarantees the single active REDEMPTION_CONFIRM OTP can confirm only
     // THIS order — closing the cross-order OTP-confusion the audit flagged.
+    let otpCodeId: string | undefined; // captured for the light D1 OTP delivery-handle write after send
     const order = await this.prisma.$transaction(async (tx) => {
       // Supersede the ACTIVE partner's abandoned PENDING orders (never debited). The
       // OTP delete/create stay bound to user.sub — the OTP is LOGIN-level (one active
@@ -1381,7 +1388,7 @@ export class RewardsService {
           ...consentData,
         },
       });
-      await tx.otpCode.create({
+      const otpRow = await tx.otpCode.create({
         data: {
           userId: user.sub,
           phone: user.phone,
@@ -1395,6 +1402,7 @@ export class RewardsService {
           referenceId: created.id,
         },
       });
+      otpCodeId = otpRow.id;
       return created;
     });
 
@@ -1404,7 +1412,10 @@ export class RewardsService {
     try {
       // Per-tenant SELF redemption template; undefined → global env template.
       const tpl = await this.tenantSettings.getOtpTemplateId(user.clientId, 'redemptionSelf');
-      await this.msg91.sendOtp(user.phone, otp, 'SMS', tpl);
+      const sendRes = await this.msg91.sendOtp(user.phone, otp, 'SMS', tpl);
+      // Light D1 OTP delivery tracking — best-effort; NEVER throws, so it cannot trip the
+      // send-failure cleanup/503 path below (the catch is only for a real sendOtp failure).
+      await captureOtpDeliveryHandle(this.prisma, otpCodeId, sendRes);
     } catch (e) {
       this.logger.error(`[redeem] OTP send failed for order ${order.id}: ${e}`);
       // No debit happened at redeem (pointsDeducted:0), so just undo the OTP + order so nothing is orphaned.

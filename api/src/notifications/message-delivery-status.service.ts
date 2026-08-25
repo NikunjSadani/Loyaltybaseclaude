@@ -140,11 +140,20 @@ export class MessageDeliveryStatusService {
     return { processed: events.length, updated };
   }
 
-  /** Resolve the target receipt (by crqid = id, else by msg91RequestId) then transition it. */
+  /**
+   * Resolve the target for an event and transition it. Correlation ORDER (the invariant that keeps
+   * a receipt and an OtpCode from ever both matching one event):
+   *   1. MessageDeliveryReceipt by crqid (SMS / transactional WhatsApp — the unique correlation key), then
+   *   2. MessageDeliveryReceipt by msg91RequestId (fallback), then — ONLY when neither matched —
+   *   3. OtpCode by msg91RequestId (light D1 OTP tracking).
+   * A receipt ALWAYS wins: OTP is tried only after both receipt lookups miss. They cannot collide in
+   * practice — receipts carry a crqid (OTP sends none, so its DLR's CRQID is absent/"0"), and an OTP
+   * requestId comes from the distinct v5/otp API, so it won't be found in the receipt table.
+   */
   async applyEvent(ev: DeliveryEvent): Promise<boolean> {
     const at = ev.at ? new Date(ev.at) : new Date();
 
-    // Resolve the receipt. Primary key: the crqid we sent (unique column). Fallback: msg91RequestId.
+    // ── (1)+(2) Receipt correlation. Primary key: the crqid we sent (unique). Fallback: msg91RequestId.
     let receiptId: string | null = null;
     if (ev.crqid) {
       const row = await this.prisma.messageDeliveryReceipt.findUnique({
@@ -164,14 +173,60 @@ export class MessageDeliveryStatusService {
       });
       if (row) receiptId = row.id;
     }
-    if (!receiptId) return false; // unknown correlation — ignore
+
+    if (receiptId) {
+      const s = ev.status;
+      if (this.isRead(s)) return this.markRead(receiptId, at, ev.raw);
+      if (this.isDelivered(s)) return this.markDelivered(receiptId, at, ev.raw);
+      if (this.isFailed(s)) return this.markFailed(receiptId, ev.reason ?? 'Failed', at, ev.raw);
+      // 'sent'/'submitted' (or anything else) — the worker already set SENT; nothing to flip.
+      return false;
+    }
+
+    // ── (3) OTP fallback (light D1). Reached ONLY when NO receipt matched by crqid AND none by
+    // requestId. OTP carries no crqid, so it is correlated by msg91RequestId alone.
+    if (ev.requestId) return this.applyOtpEvent(ev, at);
+
+    return false; // unknown correlation — ignore
+  }
+
+  /**
+   * Light D1 OTP delivery tracking — correlate an OtpCode by its captured msg91RequestId and apply the
+   * SAME numeric/text classifiers to flip its deliveryStatus/deliveredAt. OTP has NO read state, so only
+   * delivered/failed transition it. Idempotent + no-downgrade, mirroring the receipt transitions.
+   */
+  private async applyOtpEvent(ev: DeliveryEvent, at: Date): Promise<boolean> {
+    // Most-recent send wins if a requestId somehow recurs (it won't in practice — one id per send).
+    const row = await this.prisma.otpCode.findFirst({
+      where: { msg91RequestId: ev.requestId },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    });
+    if (!row) return false; // unknown correlation — ignore
 
     const s = ev.status;
-    if (this.isRead(s)) return this.markRead(receiptId, at, ev.raw);
-    if (this.isDelivered(s)) return this.markDelivered(receiptId, at, ev.raw);
-    if (this.isFailed(s)) return this.markFailed(receiptId, ev.reason ?? 'Failed', at, ev.raw);
-    // 'sent'/'submitted' (or anything else) — the worker already set SENT; nothing to flip.
+    if (this.isDelivered(s)) return this.markOtpDelivered(row.id, at);
+    if (this.isFailed(s)) return this.markOtpFailed(row.id);
+    // 'read' is WhatsApp-only + OTP is SMS; 'sent' already stored by the send path — nothing to flip.
     return false;
+  }
+
+  /** OtpCode SENT→DELIVERED (guarded on deliveredAt null; never overrides a terminal FAILED). */
+  private async markOtpDelivered(otpCodeId: string, at: Date): Promise<boolean> {
+    const res = await this.prisma.otpCode.updateMany({
+      where: { id: otpCodeId, deliveredAt: null, deliveryStatus: { notIn: ['FAILED'] } },
+      data: { deliveryStatus: 'DELIVERED', deliveredAt: at },
+    });
+    return res.count === 1;
+  }
+
+  /** OtpCode →FAILED (guarded so a terminal DELIVERED/FAILED row is never re-counted or downgraded). */
+  private async markOtpFailed(otpCodeId: string): Promise<boolean> {
+    const res = await this.prisma.otpCode.updateMany({
+      where: { id: otpCodeId, deliveryStatus: { notIn: ['DELIVERED', 'FAILED'] } },
+      data: { deliveryStatus: 'FAILED' },
+    });
+    return res.count === 1;
   }
 
   /** SENT→DELIVERED (guarded on deliveredAt null; never overrides a terminal FAILED). */
@@ -304,6 +359,71 @@ export class MessageDeliveryStatusService {
       }
     }
     return { checked: rows.length, updated };
+  }
+
+  /**
+   * Aggregate OTP delivery-rate (light D1) — counts over the CURRENT OtpCode rows, grouped by
+   * deliveryStatus. This feeds Wave 4's report; it does NOT render anything itself.
+   *
+   * WINDOW: OtpCode rows are pruned ~24h after creation (10-min code expiry + the opportunistic
+   * >24h-past-expiry cleanup in auth.service). So this is inherently a ROLLING ~24h delivery-rate —
+   * expected + correct for the light option. Long-term retention (a daily rollup) is deliberately
+   * out of scope.
+   * // FUTURE (b): a daily-rollup table would give long-term OTP delivery history — deferred.
+   *
+   * TENANT SCOPING: OtpCode.userId is null for most sends (login/KYC/scheme OTPs carry no user), so a
+   * per-tenant filter can only see the redemption OTPs that DO set userId — it would undercount. The
+   * `clientId` filter is therefore PARTIAL; platform-level (no clientId) is authoritative for now.
+   * Full per-tenant OTP attribution is deferred to Wave 4.
+   *
+   * @returns counts + a deliveryRate = delivered / (delivered + failed) in [0,1], null when no OTP
+   *   has reached a terminal (delivered/failed) outcome yet.
+   */
+  async getOtpDeliveryStats(opts?: { clientId?: string }): Promise<{
+    total: number;
+    delivered: number;
+    failed: number;
+    sent: number; // dispatched, awaiting a terminal delivery report
+    pending: number; // no delivery handle captured (null) — pre-feature rows / a capture that no-op'd
+    deliveryRate: number | null;
+  }> {
+    // PARTIAL per-tenant filter (see the doc note): only rows WITH a userId under this client.
+    const where = opts?.clientId ? { user: { is: { clientId: opts.clientId } } } : {};
+
+    const groups = await this.prisma.otpCode.groupBy({
+      by: ['deliveryStatus'],
+      where,
+      _count: { _all: true },
+    });
+
+    let total = 0;
+    let delivered = 0;
+    let failed = 0;
+    let sent = 0;
+    let pending = 0;
+    for (const g of groups) {
+      const c = g._count._all;
+      total += c;
+      switch (g.deliveryStatus) {
+        case 'DELIVERED':
+        case 'READ': // OTP never reports read, but fold it into delivered defensively
+          delivered += c;
+          break;
+        case 'FAILED':
+          failed += c;
+          break;
+        case 'SENT':
+        case 'QUEUED':
+          sent += c;
+          break;
+        default: // null — no handle captured yet
+          pending += c;
+          break;
+      }
+    }
+    const terminal = delivered + failed;
+    const deliveryRate = terminal > 0 ? delivered / terminal : null;
+    return { total, delivered, failed, sent, pending, deliveryRate };
   }
 
   // ── status classifiers (tolerant of MSG91's per-channel status vocabularies) ─────────────

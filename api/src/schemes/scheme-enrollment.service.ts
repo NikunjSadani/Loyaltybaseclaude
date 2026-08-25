@@ -11,6 +11,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { captureOtpDeliveryHandle } from '../notifications/otp-delivery';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide, isGifsyOperator } from '../common/tenant-scope';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
@@ -711,7 +712,7 @@ export class SchemeEnrollmentService {
     await this.prisma.otpCode.deleteMany({
       where: { phone, purpose: SCHEME_OTP_PURPOSE, referenceId: row.id, verifiedAt: null },
     });
-    await this.prisma.otpCode.create({
+    const otpRow = await this.prisma.otpCode.create({
       data: {
         phone,
         code: otp,
@@ -722,7 +723,9 @@ export class SchemeEnrollmentService {
       },
     });
     // Real send in prod; no-op under FIXED_OTP (msg91 handles it). Global template (undefined).
-    await this.msg91.sendOtp(phone, otp, 'SMS');
+    const sendRes = await this.msg91.sendOtp(phone, otp, 'SMS');
+    // Light D1 OTP delivery tracking — best-effort (never throws → send behaviour unchanged).
+    await captureOtpDeliveryHandle(this.prisma, otpRow.id, sendRes);
 
     return {
       success: true,

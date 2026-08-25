@@ -18,6 +18,12 @@ const mockPrisma = {
     update: jest.fn(),
     findMany: jest.fn(),
   },
+  // Wave 3 (light D1) — OTP fallback correlation + aggregate.
+  otpCode: {
+    findFirst: jest.fn(),
+    updateMany: jest.fn(),
+    groupBy: jest.fn(),
+  },
 };
 
 const mockMsg91 = { getSmsStatusByRequestId: jest.fn() };
@@ -30,6 +36,8 @@ describe('MessageDeliveryStatusService', () => {
     // Default: providerResponse merge reads find a row with no prior response.
     mockPrisma.messageDeliveryReceipt.findUnique.mockResolvedValue({ providerResponse: null });
     mockPrisma.messageDeliveryReceipt.update.mockResolvedValue({});
+    // Default: no OtpCode matches (the OTP fallback is only exercised in its own tests).
+    mockPrisma.otpCode.findFirst.mockResolvedValue(null);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         MessageDeliveryStatusService,
@@ -322,6 +330,119 @@ describe('MessageDeliveryStatusService', () => {
     it('never throws when the receipt table is missing (pre-migration)', async () => {
       mockPrisma.messageDeliveryReceipt.findMany.mockRejectedValueOnce(new Error('no such table'));
       await expect(service.reconcile()).resolves.toEqual({ checked: 0, updated: 0 });
+    });
+  });
+
+  // ── Wave 3 (light D1): OTP delivery correlation via the OtpCode fallback ─────────────────────
+  describe('OTP fallback correlation (light D1)', () => {
+    it('an OTP DLR (numeric "1") correlated by msg91RequestId flips OtpCode → DELIVERED', async () => {
+      // No receipt matches (crqid absent, requestId misses the receipt table) → fall to OtpCode.
+      mockPrisma.messageDeliveryReceipt.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'otp-1' });
+      mockPrisma.otpCode.updateMany.mockResolvedValueOnce({ count: 1 });
+
+      const res = await service.handleWebhook([{ requestId: 'req-otp-1', status: '1' }]);
+      expect(res).toEqual({ processed: 1, updated: 1 });
+      expect(mockPrisma.otpCode.findFirst).toHaveBeenCalledWith({
+        where: { msg91RequestId: 'req-otp-1' },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true },
+      });
+      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
+        where: { id: 'otp-1', deliveredAt: null, deliveryStatus: { notIn: ['FAILED'] } },
+        data: { deliveryStatus: 'DELIVERED', deliveredAt: expect.any(Date) },
+      });
+    });
+
+    it('is idempotent — a duplicate DELIVERED callback flips nothing (count 0 → not counted)', async () => {
+      mockPrisma.messageDeliveryReceipt.findFirst.mockResolvedValue(null);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'otp-1' });
+      mockPrisma.otpCode.updateMany.mockResolvedValueOnce({ count: 0 }); // already delivered
+
+      const res = await service.handleWebhook([{ requestId: 'req-otp-1', status: 'delivered' }]);
+      expect(res.updated).toBe(0);
+    });
+
+    it('an OTP failure code ("2") flips OtpCode → FAILED, no-downgrade guard', async () => {
+      mockPrisma.messageDeliveryReceipt.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'otp-2' });
+      mockPrisma.otpCode.updateMany.mockResolvedValueOnce({ count: 1 });
+
+      const res = await service.handleWebhook([{ requestId: 'req-otp-2', status: '2' }]);
+      expect(res.updated).toBe(1);
+      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
+        where: { id: 'otp-2', deliveryStatus: { notIn: ['DELIVERED', 'FAILED'] } },
+        data: { deliveryStatus: 'FAILED' },
+      });
+    });
+
+    it('ignores an OTP DLR whose requestId matches no OtpCode', async () => {
+      mockPrisma.messageDeliveryReceipt.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce(null);
+      const res = await service.handleWebhook([{ requestId: 'ghost', status: '1' }]);
+      expect(res).toEqual({ processed: 1, updated: 0 });
+      expect(mockPrisma.otpCode.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  // Ordering invariant: a MessageDeliveryReceipt ALWAYS wins; the OtpCode fallback is reached only
+  // when BOTH receipt lookups (crqid, requestId) miss.
+  describe('ordering: a receipt match wins over OtpCode', () => {
+    it('does NOT touch OtpCode when a receipt matches by crqid', async () => {
+      mockPrisma.messageDeliveryReceipt.findUnique.mockResolvedValueOnce({ id: 'rcpt-1' });
+      mockPrisma.messageDeliveryReceipt.updateMany.mockResolvedValue({ count: 1 });
+      const res = await service.handleWebhook([{ crqid: 'rcpt-1', requestId: 'req-x', status: 'delivered' }]);
+      expect(res.updated).toBe(1);
+      expect(mockPrisma.otpCode.findFirst).not.toHaveBeenCalled();
+      expect(mockPrisma.otpCode.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('does NOT touch OtpCode when a receipt matches by requestId', async () => {
+      mockPrisma.messageDeliveryReceipt.findUnique.mockResolvedValue(null); // no crqid match
+      mockPrisma.messageDeliveryReceipt.findFirst.mockResolvedValueOnce({ id: 'rcpt-2' });
+      mockPrisma.messageDeliveryReceipt.updateMany.mockResolvedValue({ count: 1 });
+      const res = await service.handleWebhook([{ requestId: 'req-shared', status: 'delivered' }]);
+      expect(res.updated).toBe(1);
+      expect(mockPrisma.otpCode.findFirst).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getOtpDeliveryStats (aggregate delivery-rate)', () => {
+    it('reduces groupBy(deliveryStatus) into counts + deliveryRate', async () => {
+      mockPrisma.otpCode.groupBy.mockResolvedValueOnce([
+        { deliveryStatus: 'DELIVERED', _count: { _all: 80 } },
+        { deliveryStatus: 'FAILED', _count: { _all: 20 } },
+        { deliveryStatus: 'SENT', _count: { _all: 15 } },
+        { deliveryStatus: null, _count: { _all: 5 } },
+      ]);
+      const res = await service.getOtpDeliveryStats();
+      expect(res).toEqual({
+        total: 120,
+        delivered: 80,
+        failed: 20,
+        sent: 15,
+        pending: 5,
+        deliveryRate: 0.8, // 80 / (80 + 20)
+      });
+    });
+
+    it('deliveryRate is null when no OTP has a terminal outcome yet', async () => {
+      mockPrisma.otpCode.groupBy.mockResolvedValueOnce([
+        { deliveryStatus: 'SENT', _count: { _all: 10 } },
+        { deliveryStatus: null, _count: { _all: 3 } },
+      ]);
+      const res = await service.getOtpDeliveryStats();
+      expect(res).toMatchObject({ total: 13, delivered: 0, failed: 0, sent: 10, pending: 3, deliveryRate: null });
+    });
+
+    it('applies the (partial) per-tenant filter when clientId is given', async () => {
+      mockPrisma.otpCode.groupBy.mockResolvedValueOnce([]);
+      await service.getOtpDeliveryStats({ clientId: 'deoleo' });
+      expect(mockPrisma.otpCode.groupBy).toHaveBeenCalledWith({
+        by: ['deliveryStatus'],
+        where: { user: { is: { clientId: 'deoleo' } } },
+        _count: { _all: true },
+      });
     });
   });
 });

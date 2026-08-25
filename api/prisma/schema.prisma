@@ -725,6 +725,9 @@ model OtpCode {
   @@index([purpose])
   @@index([expiresAt])
   @@index([referenceId])
+  // Wave 3 (light D1): the OTP delivery-report ingestion correlates an OtpCode by this captured
+  // request id (the fallback after MessageDeliveryReceipt misses). Index it for that lookup.
+  @@index([msg91RequestId])
   @@map("otp_codes")
 }
 
