@@ -1,6 +1,22 @@
 # Delivery-Status Reporting — Build Scope (SMS · OTP · transactional WhatsApp)
 
-**Status:** APPROVED 2026-08-24 — decisions locked (see §6). Building, additive + ships dormant.
+**Status:** ✅ BUILT 2026-08-25 (Waves 0–4, on `develop`, pending cutover #37) — additive + ships DORMANT.
+All 5 waves gated + adversarially audited + runtime-proven on staging. SMS/OTP/transactional-WhatsApp
+delivery tracking + the team+tenant report all working end-to-end on the deployed container. Decisions §6.
+
+**As-built (HEADs verify via `git log`):** W0 `72276ac` (receipt table + OtpCode fields + provider signatures) ·
+W1 `924cabf` (SMS ingestion — shared `MessageDeliveryStatusService` + `/v1/notifications/status` webhook +
+receipt-writing; a boot bug [a stray `@paralleldrive/cuid2` dep] was caught at the staging health-gate and fixed —
+crqid now uses `node:crypto`; the audit HIGH [MSG91 SMS DLR is a NUMERIC code + `CRQID` field] fixed with a verified
+code map) · W2 `cf0381b`/`34af500` (transactional WhatsApp receipts + the ONE MSG91 WhatsApp webhook delegates
+broadcast-miss → shared service; no DI cycle) · W3 `f4dbda8` (OTP light — request-id on `OtpCode` at send [best-effort,
+never throws → login OTP unaffected] + OtpCode correlation fallback + rolling ~24h rate) · W4 `9f851b6` (report
+`/v1/admin/notification-delivery` summary/list/export, CLIENT_ADMIN hard-scoped [isolation runtime-proven 5/5] +
+GIFSY_ADMIN platform/assumed, OTP `indicative` caveat, 90-day retention worker; FE `/admin/notification-delivery`).
+Migrations: 3 additive (receipt table + reconcile index + otp index). **▶ owner-gated to go live:** wire the MSG91
+SMS-DLR + WhatsApp outbound-report + (optional) OTP callback URLs at `/v1/notifications/status` (+ keep the broadcast
+`/v1/whatsapp/status`), set `NOTIFICATIONS_STATUS_SECRET` + `NOTIFICATIONS_RETENTION_ENABLED=true`, and confirm the
+LIVE SMS-DLR payload shape (the one remaining RUNTIME-VERIFY).
 **Author:** this session, 2026-08-24. **Design source of truth once approved:** this file.
 
 ## 1. Goal
