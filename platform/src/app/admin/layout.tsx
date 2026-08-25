@@ -34,6 +34,7 @@ import {
   MessageSquare,
   Truck,
   Store,
+  Send,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useTenantFeatures } from '@/lib/tenant-features';
@@ -180,6 +181,10 @@ const ALL_NAV_ITEMS = [
   // giftDisbursal flag gates the nav to exactly those two roles (hidden from GIFSY_STAFF + MIS_USER),
   // matching the ['GIFSY_ADMIN','CLIENT_ADMIN'] route guard in admin/gift-disbursal/layout.tsx.
   { href: '/admin/gift-disbursal', label: 'Gift Disbursal', icon: FileBarChart2, featureFlag: null, giftDisbursal: true },
+  // Delivery-status report (SMS + transactional WhatsApp + OTP) — GIFSY_ADMIN (all tenants / assumed)
+  // + CLIENT_ADMIN (own tenant). deliveryReport flag gates the nav to exactly those two roles,
+  // matching the ['GIFSY_ADMIN','CLIENT_ADMIN'] route guard in admin/notification-delivery/layout.tsx.
+  { href: '/admin/notification-delivery', label: 'Delivery Status', icon: Send, featureFlag: null, deliveryReport: true },
   { href: '/admin/settings', label: 'Settings',         icon: Settings,      featureFlag: null },
 ];
 
@@ -228,6 +233,10 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         // giftDisbursal items are shown to GIFSY_ADMIN (all tenants) + CLIENT_ADMIN (own tenant)
         // only — hidden from GIFSY_STAFF + MIS_USER — matching the gift-disbursal route guard.
         if ((item as { giftDisbursal?: boolean }).giftDisbursal
+          && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'CLIENT_ADMIN') return false;
+        // deliveryReport items (Delivery Status) — same two roles as giftDisbursal: GIFSY_ADMIN
+        // (all tenants / assumed) + CLIENT_ADMIN (own tenant); hidden from GIFSY_STAFF + MIS_USER.
+        if ((item as { deliveryReport?: boolean }).deliveryReport
           && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'CLIENT_ADMIN') return false;
         // tenantReportOnly items (Scheme Reports) are hidden from GIFSY_ADMIN, who
         // gets the full management + report surface under Scheme Management instead.

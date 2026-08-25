@@ -1,0 +1,369 @@
+import { Injectable, StreamableFile } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { tenantScope } from '../common/tenant-scope';
+import { buildXlsx } from '../common/xlsx';
+import { MessageDeliveryStatusService } from './message-delivery-status.service';
+import {
+  NotificationDeliveryListQueryDto,
+  NotificationDeliverySummaryQueryDto,
+} from './dto/notification-delivery-report.dto';
+
+/** Per-channel status bucket counts (raw, from groupBy). */
+type StatusCounts = {
+  QUEUED: number;
+  SENT: number;
+  DELIVERED: number;
+  READ: number;
+  FAILED: number;
+};
+
+/** SMS funnel (SMS never reports READ). */
+export interface SmsFunnel {
+  sent: number;
+  delivered: number;
+  failed: number;
+  pending: number;
+  deliveryRate: number | null;
+}
+
+/** WhatsApp funnel (adds READ). */
+export interface WhatsappFunnel {
+  sent: number;
+  delivered: number;
+  read: number;
+  failed: number;
+  pending: number;
+  deliveryRate: number | null;
+}
+
+/** OTP tile (aggregate, light D1). `indicative` = tenant-scoped undercount caveat (see below). */
+export interface OtpTile {
+  sent: number;
+  delivered: number;
+  failed: number;
+  deliveryRate: number | null;
+  /** true when the count is tenant-scoped (redemption OTPs only) — the FE renders the caveat. */
+  indicative: boolean;
+}
+
+export interface DeliverySummary {
+  sms: SmsFunnel;
+  whatsapp: WhatsappFunnel;
+  otp: OtpTile;
+}
+
+export interface DeliveryListItem {
+  id: string;
+  channel: string;
+  eventKey: string | null;
+  recipientPhone: string | null;
+  status: string;
+  sentAt: string | null;
+  deliveredAt: string | null;
+  readAt: string | null;
+  failureReason: string | null;
+  createdAt: string | null;
+}
+
+export interface DeliveryListPage {
+  items: DeliveryListItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+/**
+ * Transactional delivery-status REPORTING surface (Wave 4) — reads over the shared
+ * `MessageDeliveryReceipt` table (SMS + transactional WhatsApp) plus the aggregate OTP rate.
+ *
+ * D4 SCOPING (isolation-critical): every read is scoped by `tenantScope(user)`, which is derived
+ * ENTIRELY from the JWT — never from request input:
+ *   - CLIENT_ADMIN → tenantScope returns their own clientId (they are never platform-wide), so the
+ *     WHERE always pins `clientId` to their token's tenant. They can never see another tenant's rows.
+ *   - GIFSY_ADMIN un-assumed → tenantScope returns undefined → no clientId filter → platform-wide.
+ *   - GIFSY_ADMIN assumed into a tenant → tenantScope returns the assumed clientId → pinned.
+ * The DTOs carry NO clientId param (and whitelist:true would strip one), so the tenant filter can
+ * only ever come from the token. THIS is the leak-prevention invariant — a tenant seeing another
+ * tenant's recipient phones/delivery data would be a breach.
+ *
+ * Funnel semantics: counts are CUMULATIVE delivery milestones (Sent ⊇ Delivered ⊇ Read), so the
+ * funnel narrows monotonically — a DELIVERED message is also counted in `sent`. `deliveryRate` is
+ * TERMINAL-based: delivered / (delivered + failed), null until a terminal outcome exists (mirrors
+ * getOtpDeliveryStats), so messages still awaiting a delivery callback don't drag the rate down.
+ */
+@Injectable()
+export class NotificationDeliveryReportService {
+  /** Hard cap so a 90-day export can never build an unbounded workbook in memory. */
+  private static readonly MAX_EXPORT_ROWS = 100_000;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly status: MessageDeliveryStatusService,
+  ) {}
+
+  /** Per-channel funnels + the OTP tile, all scoped + filtered identically. */
+  async summary(
+    user: JwtPayload,
+    q: NotificationDeliverySummaryQueryDto,
+  ): Promise<DeliverySummary> {
+    const scope = tenantScope(user);
+    const base = this.baseWhere(user, q);
+
+    // Respect an optional channel filter by only computing the requested channel (the other stays
+    // zeroed). Channel is added explicitly per-funnel — the base intentionally omits it.
+    const wantSms = !q.channel || q.channel === 'SMS';
+    const wantWa = !q.channel || q.channel === 'WHATSAPP';
+
+    const smsCounts = wantSms
+      ? await this.statusCounts({ ...base, channel: 'SMS' })
+      : this.zeroCounts();
+    const waCounts = wantWa
+      ? await this.statusCounts({ ...base, channel: 'WHATSAPP' })
+      : this.zeroCounts();
+
+    // OTP: platform-authoritative for an un-assumed operator (scope undefined); tenant-scoped OTP is
+    // a documented undercount (login/kyc OTPs carry no userId — only redemption OTPs set one), so it
+    // is flagged `indicative` for the FE to label. See DELIVERY-STATUS-REPORTING-SCOPE.md §6 (D1).
+    const otpRaw = await this.status.getOtpDeliveryStats(
+      scope ? { clientId: scope } : undefined,
+    );
+
+    return {
+      sms: this.smsFunnel(smsCounts),
+      whatsapp: this.whatsappFunnel(waCounts),
+      otp: {
+        sent: otpRaw.sent,
+        delivered: otpRaw.delivered,
+        failed: otpRaw.failed,
+        deliveryRate: otpRaw.deliveryRate,
+        indicative: scope != null,
+      },
+    };
+  }
+
+  /** Paginated per-message receipt list, newest first, scoped + filtered. */
+  async list(
+    user: JwtPayload,
+    q: NotificationDeliveryListQueryDto,
+  ): Promise<DeliveryListPage> {
+    const page = q.page ?? 1;
+    const pageSize = q.pageSize ?? 50;
+    const skip = (page - 1) * pageSize;
+    const where = this.listWhere(user, q);
+
+    const [rows, total] = await Promise.all([
+      this.prisma.messageDeliveryReceipt.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: pageSize,
+        select: this.rowSelect,
+      }),
+      this.prisma.messageDeliveryReceipt.count({ where }),
+    ]);
+
+    return {
+      items: rows.map((r) => this.toItem(r)),
+      total,
+      page,
+      pageSize,
+    };
+  }
+
+  /** Excel export — one row per receipt, scoped + filtered identically to the list. */
+  async export(
+    user: JwtPayload,
+    q: NotificationDeliverySummaryQueryDto,
+  ): Promise<StreamableFile> {
+    const where = this.listWhere(user, q);
+    const rows = await this.prisma.messageDeliveryReceipt.findMany({
+      where,
+      orderBy: { createdAt: 'asc' },
+      take: NotificationDeliveryReportService.MAX_EXPORT_ROWS,
+      select: this.rowSelect,
+    });
+
+    const iso = (d: Date | null) => (d ? d.toISOString() : '');
+    const sheetRows = rows.map((r) => ({
+      Channel: r.channel,
+      Event: r.eventKey ?? '',
+      'Recipient Phone': r.recipientPhone ?? '',
+      Status: r.status,
+      'Sent At': iso(r.sentAt),
+      'Delivered At': iso(r.deliveredAt),
+      'Read At': iso(r.readAt),
+      'Failure Reason': r.failureReason ?? '',
+      'Created At': iso(r.createdAt),
+    }));
+
+    // buildXlsx derives the header from the first row's keys; an empty result still needs a header
+    // row so the sheet isn't blank (mirrors the broadcast report).
+    const finalRows =
+      sheetRows.length > 0
+        ? sheetRows
+        : [
+            {
+              Channel: '',
+              Event: '',
+              'Recipient Phone': '',
+              Status: '',
+              'Sent At': '',
+              'Delivered At': '',
+              'Read At': '',
+              'Failure Reason': '',
+              'Created At': '',
+            },
+          ];
+
+    const buffer = buildXlsx([{ name: 'Delivery', rows: finalRows }]);
+    const filename = `notification-delivery-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="${filename}"`,
+    });
+  }
+
+  // ── scoping + filter builders ───────────────────────────────────────────────
+
+  /** The columns every row-returning read selects (NEVER selects providerResponse / crqid). */
+  private readonly rowSelect = {
+    id: true,
+    channel: true,
+    eventKey: true,
+    recipientPhone: true,
+    status: true,
+    sentAt: true,
+    deliveredAt: true,
+    readAt: true,
+    failureReason: true,
+    createdAt: true,
+  } satisfies Prisma.MessageDeliveryReceiptSelect;
+
+  /**
+   * Base WHERE = tenant scope (from the JWT) + optional event + optional date window. Channel is
+   * NOT included here — the summary adds it per-funnel; the list/export add it via listWhere.
+   */
+  private baseWhere(
+    user: JwtPayload,
+    q: NotificationDeliverySummaryQueryDto,
+  ): Prisma.MessageDeliveryReceiptWhereInput {
+    const scope = tenantScope(user);
+    const where: Prisma.MessageDeliveryReceiptWhereInput = {};
+    // ISOLATION invariant: the clientId filter comes ONLY from the token-derived scope.
+    if (scope) where.clientId = scope;
+    if (q.event) where.eventKey = q.event;
+    const createdAt = this.dateRange(q.from, q.to);
+    if (createdAt) where.createdAt = createdAt;
+    return where;
+  }
+
+  /** List/export WHERE = base + the optional channel filter. */
+  private listWhere(
+    user: JwtPayload,
+    q: NotificationDeliverySummaryQueryDto,
+  ): Prisma.MessageDeliveryReceiptWhereInput {
+    return {
+      ...this.baseWhere(user, q),
+      ...(q.channel ? { channel: q.channel } : {}),
+    };
+  }
+
+  private dateRange(
+    from?: string,
+    to?: string,
+  ): Prisma.DateTimeFilter | undefined {
+    const range: Prisma.DateTimeFilter = {};
+    if (from) {
+      const gte = new Date(from);
+      if (!Number.isNaN(gte.getTime())) range.gte = gte;
+    }
+    if (to) {
+      const lte = new Date(to);
+      if (!Number.isNaN(lte.getTime())) range.lte = lte;
+    }
+    return Object.keys(range).length > 0 ? range : undefined;
+  }
+
+  // ── counting + funnel math ──────────────────────────────────────────────────
+
+  private zeroCounts(): StatusCounts {
+    return { QUEUED: 0, SENT: 0, DELIVERED: 0, READ: 0, FAILED: 0 };
+  }
+
+  private async statusCounts(
+    where: Prisma.MessageDeliveryReceiptWhereInput,
+  ): Promise<StatusCounts> {
+    const groups = await this.prisma.messageDeliveryReceipt.groupBy({
+      by: ['status'],
+      where,
+      _count: { _all: true },
+    });
+    const counts = this.zeroCounts();
+    for (const g of groups) {
+      counts[g.status as keyof StatusCounts] = g._count._all;
+    }
+    return counts;
+  }
+
+  private smsFunnel(c: StatusCounts): SmsFunnel {
+    // READ shouldn't occur for SMS, but fold it into delivered defensively.
+    const delivered = c.DELIVERED + c.READ;
+    const sent = c.SENT + delivered; // cumulative: a delivered message was also sent
+    const failed = c.FAILED;
+    const pending = c.QUEUED;
+    const terminal = delivered + failed;
+    return {
+      sent,
+      delivered,
+      failed,
+      pending,
+      deliveryRate: terminal > 0 ? delivered / terminal : null,
+    };
+  }
+
+  private whatsappFunnel(c: StatusCounts): WhatsappFunnel {
+    const read = c.READ;
+    const delivered = c.DELIVERED + c.READ;
+    const sent = c.SENT + delivered;
+    const failed = c.FAILED;
+    const pending = c.QUEUED;
+    const terminal = delivered + failed;
+    return {
+      sent,
+      delivered,
+      read,
+      failed,
+      pending,
+      deliveryRate: terminal > 0 ? delivered / terminal : null,
+    };
+  }
+
+  private toItem(r: {
+    id: string;
+    channel: string;
+    eventKey: string | null;
+    recipientPhone: string | null;
+    status: string;
+    sentAt: Date | null;
+    deliveredAt: Date | null;
+    readAt: Date | null;
+    failureReason: string | null;
+    createdAt: Date | null;
+  }): DeliveryListItem {
+    const iso = (d: Date | null) => (d ? d.toISOString() : null);
+    return {
+      id: r.id,
+      channel: r.channel,
+      eventKey: r.eventKey,
+      recipientPhone: r.recipientPhone,
+      status: r.status,
+      sentAt: iso(r.sentAt),
+      deliveredAt: iso(r.deliveredAt),
+      readAt: iso(r.readAt),
+      failureReason: r.failureReason,
+      createdAt: iso(r.createdAt),
+    };
+  }
+}
