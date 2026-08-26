@@ -24,8 +24,12 @@ correctness holes): **M1** funnel "Sent" now = dispatched (`sentAt != null`) so 
 ALL receipt production dormant (off = byte-identical pre-feature, no crqid in the MSG91 payload); **M3** export emits a
 truncation-notice row at the 100k cap; **M4** SMS retry no longer leaves a duplicate receipt (QUEUED-guarded delete on
 re-queue, one FAILED only on terminal); plus OTP tile total/pending, an explicit OTP-stats window, transactional-WhatsApp
-reconcile, a fail-closed empty-scope assert, and FE from>to/download hints. **Deferred (flagged):** D3 scheme-SMS-via-OTP-transport
-coverage (owner scope Q); D7 the full MSG91 numeric-code map (the existing live-payload RUNTIME-VERIFY).
+reconcile, a fail-closed empty-scope assert, and FE from>to/download hints. **D3 + D5 now CLOSED (`443cf49`):** every member-facing
+send is delivery-tracked — a consumer trace of all `sendOtp`/`sendWhatsappTemplate` callers confirmed OTP + transactional
+SMS/WhatsApp (W1–W3) + scheme-notify (D3, WhatsApp-by-crqid / SMS-via-sendOtp-by-requestId) + the payout-credit WhatsApp
+notification (D5, post-commit best-effort, money tx untouched), all behind `DELIVERY_RECEIPTS_ENABLED`. **Only remaining
+open item: D7** — confirm MSG91's live SMS-DLR payload/code map against the FIRST real callback (owner-gated: needs the
+MSG91 dashboard wiring; the docs map is applied and the parser is unknown-code-safe until then).
 
 **▶ owner-gated to go live:** wire the MSG91 SMS-DLR + WhatsApp outbound-report + (optional) OTP callback URLs at
 `/v1/notifications/status` (+ keep the broadcast `/v1/whatsapp/status`), then set **`DELIVERY_RECEIPTS_ENABLED=true`**
