@@ -1,4 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { Msg91Service } from '../notifications/msg91.service';
@@ -25,6 +26,13 @@ export {
   ancestorSalesUserIds,
   type SalesReportingEdge,
 } from '../common/audience/audience.helpers';
+
+/**
+ * Stable event tag for the MessageDeliveryReceipt rows written by scheme broadcasts
+ * (D5 — member-facing scheme SMS/WhatsApp delivery tracking). Groups these sends in the
+ * per-tenant/per-event delivery report (D4).
+ */
+const SCHEME_NOTIFY_EVENT_KEY = 'SCHEME_NOTIFY';
 
 /**
  * Scheme notifications (D29) — an ad-hoc broadcast tool inside Scheme Management.
@@ -74,7 +82,7 @@ export class SchemeNotifyService {
     // one bad number can never abort the whole broadcast.
     for (const phone of phones) {
       try {
-        await this.send(dto.channel, phone, dto.templateId, bodyValues);
+        await this.send(clientId, dto.channel, phone, dto.templateId, bodyValues);
         sentCount++;
       } catch (e) {
         failedCount++;
@@ -269,17 +277,150 @@ export class SchemeNotifyService {
    * One recipient send. WHATSAPP → the template API; SMS → the OTP/SMS template
    * API (a single {{var}} = bodyValues[0], the MSG91 SMS/OTP template shape).
    * Both throw on failure — the caller wraps them fire-and-forget.
+   *
+   * ── Additive per-message delivery receipt (D3/D5 — DELIVERY-STATUS-REPORTING-SCOPE.md) ──
+   * Each member-facing send writes a best-effort MessageDeliveryReceipt so it lands in the
+   * delivery report (previously these sends were tracked NOWHERE — neither the receipt table
+   * nor the OTP tile). BEST-EFFORT + billing-safe, mirroring the SMS leg in push-delivery.worker
+   * and the transactional-WhatsApp leg in notifications.service:
+   *   - WHATSAPP → create a QUEUED receipt with a generated crqid, pass {crqid} to
+   *     sendWhatsappTemplate (echoed back on the outbound-report webhook → correlated by crqid),
+   *     then flip QUEUED→SENT with the returned requestId. (The existing /v1/whatsapp/status
+   *     delegation already resolves transactional receipts.)
+   *   - SMS (via sendOtp) → sendOtp has NO crqid param and its DLR echoes only a requestId, so we
+   *     still write a QUEUED receipt with a generated crqid ONLY to satisfy the unique PK column
+   *     (MSG91 never sees it) and store the requestId sendOtp returns — correlation then happens
+   *     via ladder step 2 (receipt-by-msg91RequestId). sendOtp's signature is UNCHANGED (we do NOT
+   *     route through sendSms, which would change the DLT template behaviour).
+   * A receipt-write failure NEVER affects the send (the helpers swallow their own errors and the
+   * send fires unchanged / with no crqid), and a billed send is never left FAILED (SENT is flipped
+   * before the catch, and the FAILED flip is guarded on status:'QUEUED'). The send STILL throws on
+   * failure so the caller's fire-and-forget sentCount/failedCount tally is unchanged.
    */
   private async send(
+    clientId: string,
     channel: BroadcastChannel,
     phone: string,
     templateId: string,
     bodyValues: string[],
   ): Promise<void> {
     if (channel === 'WHATSAPP') {
-      await this.msg91.sendWhatsappTemplate(phone, templateId, bodyValues);
+      const receipt = await this.createReceipt(clientId, 'WHATSAPP', phone);
+      try {
+        // crqid passed ONLY when a receipt exists — a no-receipt call (gate off / write failure)
+        // stays byte-identical to the prior 3-arg send. Destructure defensively (`?? {}`).
+        const sendRes = receipt
+          ? await this.msg91.sendWhatsappTemplate(phone, templateId, bodyValues, {
+              crqid: receipt.crqid,
+            })
+          : await this.msg91.sendWhatsappTemplate(phone, templateId, bodyValues);
+        await this.markReceiptSent(receipt, (sendRes ?? {}).requestId ?? null);
+      } catch (e) {
+        // Guarded (QUEUED-only): only an UNBILLED send (the send threw, receipt still QUEUED) flips
+        // to FAILED; a billed send is already SENT → no-op. Rethrow so the caller counts the failure.
+        await this.markReceiptFailed(receipt, String(e));
+        throw e;
+      }
       return;
     }
-    await this.msg91.sendOtp(phone, bodyValues[0] ?? '', 'SMS', templateId);
+
+    // SMS via sendOtp — receipt gets a generated crqid (for the required-unique PK column only;
+    // MSG91 never receives it because sendOtp takes no crqid), correlation is by the returned
+    // requestId (ladder step 2). sendOtp's signature is unchanged.
+    const receipt = await this.createReceipt(clientId, 'SMS', phone);
+    try {
+      const sendRes = await this.msg91.sendOtp(phone, bodyValues[0] ?? '', 'SMS', templateId);
+      await this.markReceiptSent(receipt, (sendRes ?? {}).requestId ?? null);
+    } catch (e) {
+      await this.markReceiptFailed(receipt, String(e));
+      throw e;
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Delivery receipts (D3/D5) — best-effort, gated, never-throwing. Mirrors the
+  // helpers in push-delivery.worker (SMS) and notifications.service (WhatsApp).
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Create a QUEUED MessageDeliveryReceipt for a to-be-sent scheme notification. Returns
+   * `{ id, crqid }` or null when a receipt can't be written — BEST-EFFORT: this must never break
+   * the send, so every failure (feature off, missing clientId, pre-migration table, transient DB
+   * error) is swallowed with a log and returns null (the send then proceeds without a crqid).
+   *
+   * The crqid is 32 hex chars from Node's built-in `crypto` (alphanumeric, hyphen-free per the
+   * MSG91 CRQID constraint) — NO external dependency (a new npm dep would pass gates but crash at boot).
+   */
+  private async createReceipt(
+    clientId: string,
+    channel: 'SMS' | 'WHATSAPP',
+    recipientPhone: string,
+  ): Promise<{ id: string; crqid: string } | null> {
+    // M2 dormancy gate — the ENTIRE delivery-receipt feature is OFF unless DELIVERY_RECEIPTS_ENABLED
+    // === 'true'. Returning null here makes every scheme send byte-identical to pre-feature behaviour
+    // (no receipt row, WhatsApp fires the 3-arg send with NO crqid).
+    if (process.env.DELIVERY_RECEIPTS_ENABLED !== 'true') return null;
+    // Never write an unscoped receipt — an empty clientId would mis-scope the row in the per-tenant
+    // (D4) delivery report.
+    if (!clientId?.trim()) return null;
+    const crqid = randomBytes(16).toString('hex');
+    try {
+      return await this.prisma.messageDeliveryReceipt.create({
+        data: {
+          clientId,
+          channel,
+          crqid,
+          eventKey: SCHEME_NOTIFY_EVENT_KEY,
+          recipientPhone,
+          status: 'QUEUED',
+        },
+        select: { id: true, crqid: true },
+      });
+    } catch (e) {
+      this.logger.warn(`[scheme-broadcast] delivery-receipt create skipped: ${e}`);
+      return null;
+    }
+  }
+
+  /**
+   * Flip a receipt QUEUED→SENT (guarded on status:'QUEUED' so it's idempotent and can never be
+   * downgraded from a terminal state later). BEST-EFFORT + billing-safe: a billed send must persist
+   * SENT if at all possible, so we NEVER throw and NEVER write FAILED here — a total failure logs.
+   */
+  private async markReceiptSent(
+    receipt: { id: string } | null,
+    requestId: string | null,
+  ): Promise<void> {
+    if (!receipt) return;
+    try {
+      await this.prisma.messageDeliveryReceipt.updateMany({
+        where: { id: receipt.id, status: 'QUEUED' },
+        data: { status: 'SENT', sentAt: new Date(), msg91RequestId: requestId ?? undefined },
+      });
+    } catch (e) {
+      this.logger.warn(
+        `[scheme-broadcast] receipt ${receipt.id} SENT write failed (left non-FAILED to avoid a false failure on a billed send): ${e}`,
+      );
+    }
+  }
+
+  /**
+   * Flip a receipt QUEUED→FAILED (guarded on status:'QUEUED'). Only ever applies to a receipt that
+   * was never marked SENT — i.e. the send genuinely threw (unbilled). A receipt already SENT (billed
+   * message) does NOT match the guard, so a billed message's receipt is never downgraded to FAILED.
+   */
+  private async markReceiptFailed(
+    receipt: { id: string } | null,
+    reason: string,
+  ): Promise<void> {
+    if (!receipt) return;
+    try {
+      await this.prisma.messageDeliveryReceipt.updateMany({
+        where: { id: receipt.id, status: 'QUEUED' },
+        data: { status: 'FAILED', failureReason: reason.slice(0, 500) },
+      });
+    } catch (e) {
+      this.logger.warn(`[scheme-broadcast] receipt ${receipt.id} FAILED write failed: ${e}`);
+    }
   }
 }

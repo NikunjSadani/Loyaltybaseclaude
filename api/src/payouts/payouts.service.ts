@@ -4,6 +4,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { randomBytes } from 'node:crypto';
 import { PayoutStatus, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
@@ -23,6 +24,13 @@ import {
   ReceiveFundDto,
   ReconciliationQueryDto,
 } from './dto/payouts.dto';
+
+/**
+ * Stable event tag for the MessageDeliveryReceipt rows written by the post-commit payout-credit
+ * WhatsApp notification (D5 — completeness: this send was previously tracked NOWHERE). Groups
+ * these sends in the per-tenant/per-event delivery report (D4).
+ */
+const PAYOUT_NOTIFY_EVENT_KEY = 'PAYOUT_NOTIFY';
 
 /**
  * Credits & Payouts — ported from platform/src/app/api/payouts/* onto /v1.
@@ -854,17 +862,37 @@ export class PayoutsService {
             // non-redemption or already-reversed txn that must not get a "0 points" msg.
             if (!phone || points <= 0) continue;
             const ownerName = partnerMap.get(w.partnerId)?.ownerName?.trim() || 'Partner';
+            const bodyValues = [
+              ownerName,
+              String(points),
+              w.utr,
+              paymentDate,
+              paymentMonth,
+            ];
+            // ── Additive per-message delivery receipt (D5 — DELIVERY-STATUS-REPORTING-SCOPE.md) ──
+            // Best-effort + billing-safe, mirroring the transactional-WhatsApp leg in
+            // notifications.service and the scheme-notify D3 fix. The money tx above is ALREADY
+            // committed; this whole post-commit block is fire-and-forget, so the receipt write can
+            // NEVER affect the payout OR the notification. A receipt-write failure (or the gate being
+            // off) leaves the send byte-identical to before (the 3-arg send fires with no crqid), and
+            // a billed send is never left FAILED (SENT is flipped before the catch; FAILED is guarded
+            // on status:'QUEUED').
+            const receipt = await this.createReceipt(user.clientId, phone);
             try {
-              await this.msg91.sendWhatsappTemplate(phone, template, [
-                ownerName,
-                String(points),
-                w.utr,
-                paymentDate,
-                paymentMonth,
-              ]);
+              // crqid passed ONLY when a receipt exists — a no-receipt call (gate off / write failure)
+              // stays byte-identical to the prior 3-arg send. Destructure defensively (`?? {}`).
+              const sendRes = receipt
+                ? await this.msg91.sendWhatsappTemplate(phone, template, bodyValues, {
+                    crqid: receipt.crqid,
+                  })
+                : await this.msg91.sendWhatsappTemplate(phone, template, bodyValues);
+              await this.markReceiptSent(receipt, (sendRes ?? {}).requestId ?? null);
             } catch (e) {
               // Non-critical: a WhatsApp delivery failure must NEVER fail the payout.
               this.logger.warn(`[payout-whatsapp] payout-credit send failed (client ${user.clientId}): ${e}`);
+              // Guarded (QUEUED-only): only an UNBILLED send flips to FAILED; a billed send is already
+              // SENT → no-op. Does NOT rethrow — the payout-notify block stays fire-and-forget.
+              await this.markReceiptFailed(receipt, String(e));
             }
           }
         } catch (e) {
@@ -875,5 +903,94 @@ export class PayoutsService {
     }
 
     return { applied: true, paidCount, failedCount, reversedCount };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Delivery receipts (D5) — best-effort, gated, never-throwing. Mirrors the helpers
+  // in notifications.service (transactional WhatsApp) and scheme-notify (D3). MONEY-
+  // ADJACENT FILE: these helpers exist ONLY to record delivery tracking for the
+  // post-commit payout-credit WhatsApp; they never run inside the payout tx and can
+  // never affect the payout or the notification (all three swallow their own errors).
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Create a QUEUED MessageDeliveryReceipt (channel WHATSAPP) for a to-be-sent payout-credit
+   * notification. Returns `{ id, crqid }` or null when a receipt can't be written — BEST-EFFORT:
+   * every failure (feature off, missing clientId, pre-migration table, transient DB error) is
+   * swallowed with a log and returns null (the send then proceeds without a crqid).
+   *
+   * The crqid is 32 hex chars from Node's built-in `crypto` (alphanumeric, hyphen-free per the
+   * MSG91 CRQID constraint) — NO external dependency (a new npm dep would pass gates but crash at boot).
+   */
+  private async createReceipt(
+    clientId: string,
+    recipientPhone: string,
+  ): Promise<{ id: string; crqid: string } | null> {
+    // M2 dormancy gate — the ENTIRE delivery-receipt feature is OFF unless DELIVERY_RECEIPTS_ENABLED
+    // === 'true'. Returning null here makes the payout notification byte-identical to pre-feature
+    // behaviour (no receipt row, WhatsApp fires the 3-arg send with NO crqid).
+    if (process.env.DELIVERY_RECEIPTS_ENABLED !== 'true') return null;
+    // Never write an unscoped receipt — an empty clientId would mis-scope the row in the per-tenant
+    // (D4) delivery report.
+    if (!clientId?.trim()) return null;
+    const crqid = randomBytes(16).toString('hex');
+    try {
+      return await this.prisma.messageDeliveryReceipt.create({
+        data: {
+          clientId,
+          channel: 'WHATSAPP',
+          crqid,
+          eventKey: PAYOUT_NOTIFY_EVENT_KEY,
+          recipientPhone,
+          status: 'QUEUED',
+        },
+        select: { id: true, crqid: true },
+      });
+    } catch (e) {
+      this.logger.warn(`[payout-whatsapp] delivery-receipt create skipped: ${e}`);
+      return null;
+    }
+  }
+
+  /**
+   * Flip a receipt QUEUED→SENT (guarded on status:'QUEUED' so it's idempotent and can never be
+   * downgraded from a terminal state later). BEST-EFFORT + billing-safe: a billed send must persist
+   * SENT if at all possible, so we NEVER throw and NEVER write FAILED here — a total failure logs.
+   */
+  private async markReceiptSent(
+    receipt: { id: string } | null,
+    requestId: string | null,
+  ): Promise<void> {
+    if (!receipt) return;
+    try {
+      await this.prisma.messageDeliveryReceipt.updateMany({
+        where: { id: receipt.id, status: 'QUEUED' },
+        data: { status: 'SENT', sentAt: new Date(), msg91RequestId: requestId ?? undefined },
+      });
+    } catch (e) {
+      this.logger.warn(
+        `[payout-whatsapp] receipt ${receipt.id} SENT write failed (left non-FAILED to avoid a false failure on a billed send): ${e}`,
+      );
+    }
+  }
+
+  /**
+   * Flip a receipt QUEUED→FAILED (guarded on status:'QUEUED'). Only ever applies to a receipt that
+   * was never marked SENT — i.e. the send genuinely threw (unbilled). A receipt already SENT (billed
+   * message) does NOT match the guard, so a billed message's receipt is never downgraded to FAILED.
+   */
+  private async markReceiptFailed(
+    receipt: { id: string } | null,
+    reason: string,
+  ): Promise<void> {
+    if (!receipt) return;
+    try {
+      await this.prisma.messageDeliveryReceipt.updateMany({
+        where: { id: receipt.id, status: 'QUEUED' },
+        data: { status: 'FAILED', failureReason: reason.slice(0, 500) },
+      });
+    } catch (e) {
+      this.logger.warn(`[payout-whatsapp] receipt ${receipt.id} FAILED write failed: ${e}`);
+    }
   }
 }

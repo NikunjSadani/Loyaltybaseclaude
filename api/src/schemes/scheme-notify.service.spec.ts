@@ -18,6 +18,7 @@ const mockPrisma = {
   salesUser: { findMany: jest.fn() },
   user: { findMany: jest.fn() },
   schemeBroadcast: { create: jest.fn(), findMany: jest.fn() },
+  messageDeliveryReceipt: { create: jest.fn(), updateMany: jest.fn() },
 };
 
 const mockMsg91 = {
@@ -260,5 +261,144 @@ describe('SchemeNotifyService', () => {
     await service.broadcast(asTenant('deoleo'), 's1',wa('OUTLETS'));
     const data = mockPrisma.schemeBroadcast.create.mock.calls[0][0].data;
     expect(data.recipientFilter).toBe(Prisma.JsonNull);
+  });
+
+  // ── Delivery receipts (D3/D5 — DELIVERY-STATUS-REPORTING-SCOPE.md) ──────────────
+  // The scheme-notify send path previously wrote NO MessageDeliveryReceipt (untracked in
+  // both the receipt table and the OTP tile). These sends now write a best-effort receipt,
+  // gated by DELIVERY_RECEIPTS_ENABLED, never affecting the send.
+  describe('delivery receipts (D3/D5)', () => {
+    const OLD_ENV = process.env;
+    // A tiny in-memory receipt store so we can assert the crqid→SENT lifecycle + guards.
+    const wireReceiptStore = () => {
+      const store = new Map<string, any>();
+      let seq = 0;
+      mockPrisma.messageDeliveryReceipt.create.mockImplementation(({ data }: any) => {
+        const id = `rcpt${++seq}`;
+        store.set(id, { id, ...data });
+        return Promise.resolve({ id, crqid: data.crqid });
+      });
+      mockPrisma.messageDeliveryReceipt.updateMany.mockImplementation(({ where, data }: any) => {
+        const row = store.get(where.id);
+        if (!row) return Promise.resolve({ count: 0 });
+        if (where.status !== undefined && row.status !== where.status) {
+          return Promise.resolve({ count: 0 });
+        }
+        Object.assign(row, data);
+        return Promise.resolve({ count: 1 });
+      });
+      return store;
+    };
+
+    beforeEach(() => {
+      process.env = { ...OLD_ENV, DELIVERY_RECEIPTS_ENABLED: 'true' };
+    });
+    afterEach(() => {
+      process.env = OLD_ENV;
+    });
+
+    it('a scheme WhatsApp send writes a WHATSAPP receipt with crqid + requestId (SENT)', async () => {
+      const store = wireReceiptStore();
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
+        { matchedOutletId: 'o1', matchedPartner: { phone: '9990000001' }, matchedOutlet: { phone: null, zone: null, programName: null, programCategory: null, state: null, outletTypeId: null } },
+      ]);
+      mockMsg91.sendWhatsappTemplate.mockResolvedValue({ requestId: 'WA-REQ-1' });
+
+      const res = await service.broadcast(asTenant('deoleo'), 's1', wa('OUTLETS'));
+
+      expect(res.sentCount).toBe(1);
+      const created = mockPrisma.messageDeliveryReceipt.create.mock.calls[0][0].data;
+      expect(created).toMatchObject({
+        clientId: 'deoleo',
+        channel: 'WHATSAPP',
+        eventKey: 'SCHEME_NOTIFY',
+        recipientPhone: '9990000001',
+        status: 'QUEUED',
+      });
+      // crqid = 32 hex chars from node:crypto (alphanumeric, hyphen-free) — no npm dep.
+      expect(created.crqid).toMatch(/^[a-f0-9]{32}$/);
+      // The crqid was passed to sendWhatsappTemplate (correlation key on the outbound-report webhook).
+      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledWith(
+        '9990000001',
+        'scheme_announce',
+        ['Hello'],
+        { crqid: created.crqid },
+      );
+      const rcpt = store.get('rcpt1');
+      expect(rcpt.status).toBe('SENT');
+      expect(rcpt.msg91RequestId).toBe('WA-REQ-1');
+      expect(rcpt.sentAt).toBeInstanceOf(Date);
+    });
+
+    it('a scheme SMS send writes an SMS receipt with msg91RequestId (correlated by requestId, sendOtp signature unchanged)', async () => {
+      const store = wireReceiptStore();
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
+        { matchedOutletId: 'o1', matchedPartner: { phone: '9990000001' }, matchedOutlet: { phone: null, zone: null, programName: null, programCategory: null, state: null, outletTypeId: null } },
+      ]);
+      mockMsg91.sendOtp.mockResolvedValue({ requestId: 'SMS-REQ-9' });
+
+      await service.broadcast(asTenant('deoleo'), 's1', {
+        channel: 'SMS',
+        templateId: 'sms_tpl',
+        recipientScope: 'OUTLETS',
+        bodyValues: ['CODE123'],
+      });
+
+      const created = mockPrisma.messageDeliveryReceipt.create.mock.calls[0][0].data;
+      expect(created).toMatchObject({ channel: 'SMS', eventKey: 'SCHEME_NOTIFY', status: 'QUEUED' });
+      // A crqid is still generated (required-unique PK column) even though MSG91 never sees it.
+      expect(created.crqid).toMatch(/^[a-f0-9]{32}$/);
+      // sendOtp's signature is UNCHANGED — no crqid arg is added (correlation is by requestId).
+      expect(mockMsg91.sendOtp).toHaveBeenCalledWith('9990000001', 'CODE123', 'SMS', 'sms_tpl');
+      const rcpt = store.get('rcpt1');
+      expect(rcpt.status).toBe('SENT');
+      expect(rcpt.msg91RequestId).toBe('SMS-REQ-9');
+    });
+
+    it('with DELIVERY_RECEIPTS_ENABLED off, NO receipt is written and the send fires unchanged', async () => {
+      process.env.DELIVERY_RECEIPTS_ENABLED = 'false';
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
+        { matchedOutletId: 'o1', matchedPartner: { phone: '9990000001' }, matchedOutlet: { phone: null, zone: null, programName: null, programCategory: null, state: null, outletTypeId: null } },
+      ]);
+      mockMsg91.sendWhatsappTemplate.mockResolvedValue(undefined);
+
+      const res = await service.broadcast(asTenant('deoleo'), 's1', wa('OUTLETS'));
+
+      expect(res.sentCount).toBe(1);
+      expect(mockPrisma.messageDeliveryReceipt.create).not.toHaveBeenCalled();
+      // Byte-identical to pre-feature: a 3-arg send, no crqid opts object.
+      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledWith('9990000001', 'scheme_announce', ['Hello']);
+    });
+
+    it('a receipt-create failure NEVER breaks the scheme send (still fires, still counts sent)', async () => {
+      mockPrisma.messageDeliveryReceipt.create.mockRejectedValue(new Error('receipt table missing'));
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
+        { matchedOutletId: 'o1', matchedPartner: { phone: '9990000001' }, matchedOutlet: { phone: null, zone: null, programName: null, programCategory: null, state: null, outletTypeId: null } },
+      ]);
+      mockMsg91.sendWhatsappTemplate.mockResolvedValue({ requestId: 'WA-REQ-2' });
+
+      const res = await service.broadcast(asTenant('deoleo'), 's1', wa('OUTLETS'));
+
+      expect(res.sentCount).toBe(1);
+      expect(res.failedCount).toBe(0);
+      // Receipt-write failure → the send degrades to the 3-arg (no crqid) call, unchanged.
+      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledWith('9990000001', 'scheme_announce', ['Hello']);
+    });
+
+    it('a send that throws marks the receipt FAILED (guarded) and still counts as failed', async () => {
+      const store = wireReceiptStore();
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
+        { matchedOutletId: 'o1', matchedPartner: { phone: '9990000001' }, matchedOutlet: { phone: null, zone: null, programName: null, programCategory: null, state: null, outletTypeId: null } },
+      ]);
+      mockMsg91.sendWhatsappTemplate.mockRejectedValue(new Error('MSG91 down'));
+
+      const res = await service.broadcast(asTenant('deoleo'), 's1', wa('OUTLETS'));
+
+      expect(res.sentCount).toBe(0);
+      expect(res.failedCount).toBe(1);
+      const rcpt = store.get('rcpt1');
+      expect(rcpt.status).toBe('FAILED');
+      expect(rcpt.failureReason).toContain('MSG91 down');
+    });
   });
 });

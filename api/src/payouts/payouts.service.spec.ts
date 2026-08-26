@@ -50,6 +50,8 @@ const mockPrisma = {
   // redemption order (pointsDeducted) POST-COMMIT — not inside the tx.
   channelPartner: { findMany: jest.fn() },
   redemptionOrder: { findMany: jest.fn() },
+  // D5 delivery-receipt table for the post-commit payout WhatsApp (best-effort, gated).
+  messageDeliveryReceipt: { create: jest.fn(), updateMany: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown, _opts?: { timeout?: number; maxWait?: number }) => cb(mockTx)),
 };
 
@@ -911,6 +913,116 @@ describe('PayoutsService', () => {
       );
       // The payout still applied despite the WhatsApp send throwing.
       expect(res).toMatchObject({ applied: true, paidCount: 1 });
+    });
+
+    // ── D5 delivery-receipt for the post-commit payout WhatsApp (best-effort, gated) ──
+    describe('D5 delivery receipt (post-commit payout WhatsApp)', () => {
+      function primePaid() {
+        mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+        mockPrisma.payoutTransaction.findMany
+          .mockResolvedValueOnce([
+            { id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'UPI', partnerId: 'p1', redemptionOrderId: 'o1' },
+          ])
+          .mockResolvedValueOnce([]);
+        mockPrisma.channelPartner.findMany.mockResolvedValue([{ id: 'p1', ownerName: 'Ravi Traders', phone: '9900000041' }]);
+        mockPrisma.redemptionOrder.findMany.mockResolvedValue([{ id: 'o1', pointsDeducted: 500 }]);
+      }
+
+      const ORIGINAL_FLAG = process.env.DELIVERY_RECEIPTS_ENABLED;
+      afterEach(() => {
+        if (ORIGINAL_FLAG === undefined) delete process.env.DELIVERY_RECEIPTS_ENABLED;
+        else process.env.DELIVERY_RECEIPTS_ENABLED = ORIGINAL_FLAG;
+      });
+
+      it('flag ON → writes a WHATSAPP receipt with a crqid, passes it to the send, and flips QUEUED→SENT with the requestId', async () => {
+        process.env.DELIVERY_RECEIPTS_ENABLED = 'true';
+        primePaid();
+        mockPrisma.messageDeliveryReceipt.create.mockResolvedValue({ id: 'r1', crqid: 'abc123crqid' });
+        mockPrisma.messageDeliveryReceipt.updateMany.mockResolvedValue({ count: 1 });
+        mockMsg91.sendWhatsappTemplate.mockResolvedValue({ requestId: 'RQ-1' });
+
+        await service.uploadPayoutUtr(
+          gifsy,
+          'b1',
+          buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]),
+          true,
+        );
+
+        // QUEUED receipt created for the payout's tenant, WHATSAPP, PAYOUT_NOTIFY, recipient phone.
+        expect(mockPrisma.messageDeliveryReceipt.create).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              clientId: 'deoleo',
+              channel: 'WHATSAPP',
+              eventKey: 'PAYOUT_NOTIFY',
+              recipientPhone: '9900000041',
+              status: 'QUEUED',
+              crqid: expect.any(String),
+            }),
+          }),
+        );
+        // The send carried the receipt's crqid as the 4th arg.
+        expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledWith(
+          '9900000041',
+          'deoleo_payout_credit',
+          ['Ravi Traders', '500', 'UTR12345678', expect.any(String), expect.any(String)],
+          { crqid: 'abc123crqid' },
+        );
+        // QUEUED→SENT with the returned requestId, guarded on status:'QUEUED'.
+        expect(mockPrisma.messageDeliveryReceipt.updateMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { id: 'r1', status: 'QUEUED' },
+            data: expect.objectContaining({ status: 'SENT', msg91RequestId: 'RQ-1' }),
+          }),
+        );
+      });
+
+      it('flag OFF → writes NO receipt and the send stays byte-identical (3-arg, no crqid)', async () => {
+        delete process.env.DELIVERY_RECEIPTS_ENABLED;
+        primePaid();
+
+        await service.uploadPayoutUtr(
+          gifsy,
+          'b1',
+          buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]),
+          true,
+        );
+
+        expect(mockPrisma.messageDeliveryReceipt.create).not.toHaveBeenCalled();
+        expect(mockPrisma.messageDeliveryReceipt.updateMany).not.toHaveBeenCalled();
+        // 3-arg send, no opts object.
+        expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledWith(
+          '9900000041',
+          'deoleo_payout_credit',
+          ['Ravi Traders', '500', 'UTR12345678', expect.any(String), expect.any(String)],
+        );
+      });
+
+      it('flag ON + receipt-write failure → payout notification STILL fires and the payout is unaffected', async () => {
+        process.env.DELIVERY_RECEIPTS_ENABLED = 'true';
+        primePaid();
+        // createReceipt's create throws → helper swallows → returns null → send fires the 3-arg form.
+        mockPrisma.messageDeliveryReceipt.create.mockRejectedValue(new Error('DB down'));
+        mockMsg91.sendWhatsappTemplate.mockResolvedValue({ requestId: 'RQ-1' });
+
+        const res = await service.uploadPayoutUtr(
+          gifsy,
+          'b1',
+          buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]),
+          true,
+        );
+
+        // Payout flow unaffected.
+        expect(res).toMatchObject({ applied: true, paidCount: 1, failedCount: 0, reversedCount: 0 });
+        // Notification still fired — as the byte-identical 3-arg send (no receipt → no crqid).
+        expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledWith(
+          '9900000041',
+          'deoleo_payout_credit',
+          ['Ravi Traders', '500', 'UTR12345678', expect.any(String), expect.any(String)],
+        );
+        // No SENT/FAILED flip attempted for a null receipt.
+        expect(mockPrisma.messageDeliveryReceipt.updateMany).not.toHaveBeenCalled();
+      });
     });
 
     it('FAILED → marks payout FAILED, reverses points ONCE (M2 claim) and order FAILED', async () => {
