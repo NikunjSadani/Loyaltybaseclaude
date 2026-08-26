@@ -27,6 +27,12 @@ export interface DeliveryEvent {
 
 const RECONCILE_AGE_MIN_DEFAULT = 30;
 const RECONCILE_BATCH = 200;
+// D4: the OTP delivery-rate tile is an intentionally ROLLING window. Bound it EXPLICITLY (createdAt
+// >= now - N hours) rather than relying on the opportunistic ~24h OtpCode cleanup, which only runs on
+// a login send — a tenant with heavy non-login OTP but little login traffic would otherwise let rows
+// linger and silently widen the window. Default 24h (matches the historical cleanup horizon),
+// overridable via OTP_STATS_WINDOW_HOURS.
+const OTP_STATS_WINDOW_HOURS_DEFAULT = 24;
 
 /**
  * Shared, CHANNEL-AGNOSTIC delivery-status ingestion (D3).
@@ -305,35 +311,42 @@ export class MessageDeliveryStatusService {
   }
 
   /**
-   * Fallback poll (best-effort) — reconcile SMS receipts stuck at SENT (no terminal callback) older
-   * than N minutes, via MSG91's SMS status-by-requestId API. FAIL-SAFE: each row is best-effort; a
-   * null/failed lookup leaves the row untouched. Gated by the caller + by having a stored
-   * msg91RequestId (the report API keys on MSG91's id, not our crqid). Never breaks if MSG91 is
-   * unconfigured (getSmsStatusByRequestId returns null on the DEV bypass).
+   * Fallback poll (best-effort) — reconcile receipts stuck at SENT (no terminal callback) older than
+   * N minutes, via MSG91's status-by-requestId APIs. Covers BOTH channels (D6):
+   *   - SMS   → getSmsStatusByRequestId
+   *   - WHATSAPP (transactional) → getWhatsappStatusByRequestId
+   * The transactional-WhatsApp funnel depends ENTIRELY on the outbound-report webhook, so a missed
+   * webhook would otherwise leave a WhatsApp receipt SENT forever — reconcile is the safety net.
+   * FAIL-SAFE: each row is best-effort; a null/failed lookup leaves the row untouched. Gated by the
+   * caller + by having a stored msg91RequestId (the report APIs key on MSG91's id, not our crqid).
+   * Never breaks if MSG91 is unconfigured (both getters return null on the DEV bypass), so it ships
+   * dormant behind the caller's secret + the age env.
    *
-   * ⚠️ RUNTIME-VERIFY: the SMS report-by-requestId endpoint URL + shape are per msg91.service's
-   * `getSmsStatusByRequestId` (itself RUNTIME-VERIFY) — a wrong/unknown shape returns null (no false
-   * flips), so this is safe to ship dormant behind the caller's secret + the age env.
+   * ⚠️ RUNTIME-VERIFY: the SMS and WhatsApp report-by-requestId endpoint URLs + shapes are per
+   * msg91.service's `getSmsStatusByRequestId` / `getWhatsappStatusByRequestId` (both RUNTIME-VERIFY)
+   * — a wrong/unknown shape returns null (no false flips), so this is safe to ship dormant.
    */
   async reconcile(): Promise<{ checked: number; updated: number }> {
     const ageMin =
       Number(process.env.NOTIFICATIONS_RECONCILE_AGE_MIN ?? '') || RECONCILE_AGE_MIN_DEFAULT;
     const cutoff = new Date(Date.now() - ageMin * 60_000);
 
-    let rows: { id: string; msg91RequestId: string | null }[] = [];
+    let rows: { id: string; channel: string; msg91RequestId: string | null }[] = [];
     try {
       rows = await this.prisma.messageDeliveryReceipt.findMany({
         where: {
-          channel: 'SMS',
+          // D6: reconcile SMS AND transactional WHATSAPP (the WhatsApp funnel has no other fallback
+          // than this poll if the outbound-report webhook is missed).
+          channel: { in: ['SMS', 'WHATSAPP'] },
           status: 'SENT',
           deliveredAt: null,
           sentAt: { lt: cutoff },
-          // The SMS report API keys on MSG91's request id (our crqid = the receipt id is unknown to
-          // it), so only rows that captured a requestId can be reconciled; the rest rely on the
-          // webhook. ⚠️ RUNTIME-VERIFY: confirm the SMS response returns a usable request id.
+          // The report APIs key on MSG91's request id (our crqid = the receipt id is unknown to
+          // them), so only rows that captured a requestId can be reconciled; the rest rely on the
+          // webhook. ⚠️ RUNTIME-VERIFY: confirm each channel's response returns a usable request id.
           msg91RequestId: { not: null },
         },
-        select: { id: true, msg91RequestId: true },
+        select: { id: true, channel: true, msg91RequestId: true },
         take: RECONCILE_BATCH,
       });
     } catch (e) {
@@ -345,12 +358,18 @@ export class MessageDeliveryStatusService {
     let updated = 0;
     for (const row of rows) {
       try {
-        const res = await this.msg91.getSmsStatusByRequestId(row.msg91RequestId!);
+        // Poll the channel-appropriate report API (mirrored idempotent transitions for both).
+        const res =
+          row.channel === 'WHATSAPP'
+            ? await this.msg91.getWhatsappStatusByRequestId(row.msg91RequestId!)
+            : await this.msg91.getSmsStatusByRequestId(row.msg91RequestId!);
         if (!res) continue;
         const status = res.status.toLowerCase();
         const at = new Date();
         let changed = false;
-        if (this.isDelivered(status)) changed = await this.markDelivered(row.id, at, res.raw);
+        // WhatsApp can report 'read' — treat it as delivered-and-read via the same guarded path.
+        if (this.isRead(status)) changed = await this.markRead(row.id, at, res.raw);
+        else if (this.isDelivered(status)) changed = await this.markDelivered(row.id, at, res.raw);
         else if (this.isFailed(status))
           changed = await this.markFailed(row.id, 'Failed (reconcile)', at, res.raw);
         if (changed) updated++;
@@ -365,10 +384,13 @@ export class MessageDeliveryStatusService {
    * Aggregate OTP delivery-rate (light D1) — counts over the CURRENT OtpCode rows, grouped by
    * deliveryStatus. This feeds Wave 4's report; it does NOT render anything itself.
    *
-   * WINDOW: OtpCode rows are pruned ~24h after creation (10-min code expiry + the opportunistic
-   * >24h-past-expiry cleanup in auth.service). So this is inherently a ROLLING ~24h delivery-rate —
-   * expected + correct for the light option. Long-term retention (a daily rollup) is deliberately
-   * out of scope.
+   * WINDOW (D4): the tile is an intentionally ROLLING window, but its bound is now EXPLICIT — the
+   * groupBy is filtered `createdAt >= now - N hours` (default 24h, override OTP_STATS_WINDOW_HOURS)
+   * rather than leaning on the opportunistic >24h-past-expiry OtpCode cleanup in auth.service (which
+   * only runs on a login send — so a tenant with heavy non-login OTP but little login traffic would
+   * otherwise let rows linger and silently widen the "rolling ~24h" tile). The explicit filter makes
+   * the window deterministic regardless of cleanup timing. Long-term retention (a daily rollup) is
+   * deliberately out of scope.
    * // FUTURE (b): a daily-rollup table would give long-term OTP delivery history — deferred.
    *
    * TENANT SCOPING: OtpCode.userId is null for most sends (login/KYC/scheme OTPs carry no user), so a
@@ -387,8 +409,17 @@ export class MessageDeliveryStatusService {
     pending: number; // no delivery handle captured (null) — pre-feature rows / a capture that no-op'd
     deliveryRate: number | null;
   }> {
-    // PARTIAL per-tenant filter (see the doc note): only rows WITH a userId under this client.
-    const where = opts?.clientId ? { user: { is: { clientId: opts.clientId } } } : {};
+    // D4: bound the window explicitly so it does not depend on the opportunistic cleanup running.
+    const windowHours =
+      Number(process.env.OTP_STATS_WINDOW_HOURS ?? '') || OTP_STATS_WINDOW_HOURS_DEFAULT;
+    const since = new Date(Date.now() - windowHours * 3_600_000);
+
+    // Deterministic rolling window (createdAt >= since) AND the PARTIAL per-tenant filter (see the
+    // doc note): only rows WITH a userId under this client.
+    const where: Prisma.OtpCodeWhereInput = {
+      createdAt: { gte: since },
+      ...(opts?.clientId ? { user: { is: { clientId: opts.clientId } } } : {}),
+    };
 
     const groups = await this.prisma.otpCode.groupBy({
       by: ['deliveryStatus'],

@@ -100,6 +100,16 @@ const call = (svc: NotificationsService) =>
   });
 
 describe('NotificationsService — transactional WhatsApp delivery-receipt lifecycle (Wave 2)', () => {
+  const OLD_ENV = process.env;
+  beforeEach(() => {
+    // DELIVERY_RECEIPTS_ENABLED (M2) gates the whole receipt feature; set it on for the lifecycle
+    // assertions. A dedicated OFF test below proves the dormant (no-receipt) path.
+    process.env = { ...OLD_ENV, DELIVERY_RECEIPTS_ENABLED: 'true' };
+  });
+  afterEach(() => {
+    process.env = OLD_ENV;
+  });
+
   it('creates a QUEUED WHATSAPP receipt, sends with {crqid}, and flips it SENT with requestId', async () => {
     const send = jest.fn().mockResolvedValue({ requestId: 'REQ-1' });
     const { svc, receipts } = makeSvc(send);
@@ -169,6 +179,24 @@ describe('NotificationsService — transactional WhatsApp delivery-receipt lifec
     await expect(call(svc)).resolves.toBeUndefined();
     expect(receipts.createCalls).toHaveLength(0);
     // Byte-identical to the prior behaviour: a 3-arg send (no crqid opts object).
+    expect(send).toHaveBeenCalledWith('9990000001', 'deoleo_points_credit', [
+      'Asha',
+      '120',
+      '500',
+      'July 2026',
+      '06 Jul 2026',
+    ]);
+  });
+
+  it('M2 — with DELIVERY_RECEIPTS_ENABLED off, NO receipt is created and WhatsApp still sends (3-arg)', async () => {
+    process.env.DELIVERY_RECEIPTS_ENABLED = 'false';
+    const send = jest.fn().mockResolvedValue({ requestId: 'REQ-OFF' });
+    const { svc, receipts } = makeSvc(send);
+    await expect(call(svc)).resolves.toBeUndefined();
+
+    // Dormant: no receipt row, and the send is byte-identical to pre-feature (3-arg, no crqid).
+    expect(receipts.createCalls).toHaveLength(0);
+    expect(receipts.store.size).toBe(0);
     expect(send).toHaveBeenCalledWith('9990000001', 'deoleo_points_credit', [
       'Asha',
       '120',

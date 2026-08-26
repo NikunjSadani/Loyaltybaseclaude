@@ -26,7 +26,10 @@ const mockPrisma = {
   },
 };
 
-const mockMsg91 = { getSmsStatusByRequestId: jest.fn() };
+const mockMsg91 = {
+  getSmsStatusByRequestId: jest.fn(),
+  getWhatsappStatusByRequestId: jest.fn(),
+};
 
 describe('MessageDeliveryStatusService', () => {
   let service: MessageDeliveryStatusService;
@@ -331,6 +334,57 @@ describe('MessageDeliveryStatusService', () => {
       mockPrisma.messageDeliveryReceipt.findMany.mockRejectedValueOnce(new Error('no such table'));
       await expect(service.reconcile()).resolves.toEqual({ checked: 0, updated: 0 });
     });
+
+    // D6: the transactional-WhatsApp funnel depends entirely on the outbound-report webhook. A stuck
+    // WHATSAPP receipt must ALSO be reconciled — via getWhatsappStatusByRequestId — and its status
+    // mapped by the shared classifier.
+    it('D6: polls a stuck WHATSAPP receipt via getWhatsappStatusByRequestId and reconciles it', async () => {
+      mockPrisma.messageDeliveryReceipt.findMany.mockResolvedValueOnce([
+        { id: 'wa9', channel: 'WHATSAPP', msg91RequestId: 'wreq9' },
+      ]);
+      mockMsg91.getWhatsappStatusByRequestId.mockResolvedValueOnce({ status: 'delivered', raw: {} });
+      mockPrisma.messageDeliveryReceipt.updateMany.mockResolvedValueOnce({ count: 1 });
+      const res = await service.reconcile();
+      expect(res).toEqual({ checked: 1, updated: 1 });
+      // WhatsApp report API used (NOT the SMS one) for a WHATSAPP row.
+      expect(mockMsg91.getWhatsappStatusByRequestId).toHaveBeenCalledWith('wreq9');
+      expect(mockMsg91.getSmsStatusByRequestId).not.toHaveBeenCalled();
+      // Classifier mapped 'delivered' → the SENT→DELIVERED guarded transition.
+      expect(mockPrisma.messageDeliveryReceipt.updateMany).toHaveBeenCalledWith({
+        where: { id: 'wa9', deliveredAt: null, status: { notIn: ['FAILED', 'READ'] } },
+        data: { status: 'DELIVERED', deliveredAt: expect.any(Date) },
+      });
+    });
+
+    it('D6: maps a WhatsApp "read" report to the READ transition (implies delivered)', async () => {
+      mockPrisma.messageDeliveryReceipt.findMany.mockResolvedValueOnce([
+        { id: 'wa10', channel: 'WHATSAPP', msg91RequestId: 'wreq10' },
+      ]);
+      mockMsg91.getWhatsappStatusByRequestId.mockResolvedValueOnce({ status: 'read', raw: {} });
+      mockPrisma.messageDeliveryReceipt.updateMany
+        .mockResolvedValueOnce({ count: 1 }) // READ transition
+        .mockResolvedValueOnce({ count: 1 }); // deliveredAt claim
+      const res = await service.reconcile();
+      expect(res).toEqual({ checked: 1, updated: 1 });
+      expect(mockPrisma.messageDeliveryReceipt.updateMany).toHaveBeenNthCalledWith(1, {
+        where: { id: 'wa10', readAt: null, status: { notIn: ['FAILED'] } },
+        data: { status: 'READ', readAt: expect.any(Date) },
+      });
+    });
+
+    it('D6: a mixed SMS+WHATSAPP batch routes each row to its own report API', async () => {
+      mockPrisma.messageDeliveryReceipt.findMany.mockResolvedValueOnce([
+        { id: 's1', channel: 'SMS', msg91RequestId: 'sreq1' },
+        { id: 'w1', channel: 'WHATSAPP', msg91RequestId: 'wreq1' },
+      ]);
+      mockMsg91.getSmsStatusByRequestId.mockResolvedValueOnce({ status: '1', raw: {} });
+      mockMsg91.getWhatsappStatusByRequestId.mockResolvedValueOnce({ status: 'failed', raw: {} });
+      mockPrisma.messageDeliveryReceipt.updateMany.mockResolvedValue({ count: 1 });
+      const res = await service.reconcile();
+      expect(res).toEqual({ checked: 2, updated: 2 });
+      expect(mockMsg91.getSmsStatusByRequestId).toHaveBeenCalledWith('sreq1');
+      expect(mockMsg91.getWhatsappStatusByRequestId).toHaveBeenCalledWith('wreq1');
+    });
   });
 
   // ── Wave 3 (light D1): OTP delivery correlation via the OtpCode fallback ─────────────────────
@@ -440,9 +494,44 @@ describe('MessageDeliveryStatusService', () => {
       await service.getOtpDeliveryStats({ clientId: 'deoleo' });
       expect(mockPrisma.otpCode.groupBy).toHaveBeenCalledWith({
         by: ['deliveryStatus'],
-        where: { user: { is: { clientId: 'deoleo' } } },
+        where: {
+          createdAt: { gte: expect.any(Date) }, // D4: explicit rolling window always applied
+          user: { is: { clientId: 'deoleo' } },
+        },
         _count: { _all: true },
       });
+    });
+
+    // D4: the "rolling ~24h" tile must be bounded EXPLICITLY (createdAt >= now - N hours), not left
+    // to the opportunistic cleanup — otherwise a tenant with heavy non-login OTP silently widens it.
+    it('D4: always applies an explicit createdAt window (default 24h) even with no clientId', async () => {
+      mockPrisma.otpCode.groupBy.mockResolvedValueOnce([]);
+      const before = Date.now();
+      await service.getOtpDeliveryStats();
+      const call = mockPrisma.otpCode.groupBy.mock.calls[0][0];
+      expect(call.where).toHaveProperty('createdAt');
+      expect(call.where.createdAt.gte).toBeInstanceOf(Date);
+      // Default 24h window: the lower bound sits ~24h before "now" (allow a small execution slack).
+      const gteMs = call.where.createdAt.gte.getTime();
+      const expected = before - 24 * 3_600_000;
+      expect(Math.abs(gteMs - expected)).toBeLessThan(60_000);
+    });
+
+    it('D4: honours OTP_STATS_WINDOW_HOURS override', async () => {
+      const prev = process.env.OTP_STATS_WINDOW_HOURS;
+      process.env.OTP_STATS_WINDOW_HOURS = '6';
+      try {
+        mockPrisma.otpCode.groupBy.mockResolvedValueOnce([]);
+        const before = Date.now();
+        await service.getOtpDeliveryStats();
+        const call = mockPrisma.otpCode.groupBy.mock.calls[0][0];
+        const gteMs = call.where.createdAt.gte.getTime();
+        const expected = before - 6 * 3_600_000;
+        expect(Math.abs(gteMs - expected)).toBeLessThan(60_000);
+      } finally {
+        if (prev === undefined) delete process.env.OTP_STATS_WINDOW_HOURS;
+        else process.env.OTP_STATS_WINDOW_HOURS = prev;
+      }
     });
   });
 });

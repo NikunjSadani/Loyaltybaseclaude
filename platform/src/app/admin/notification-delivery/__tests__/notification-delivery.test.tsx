@@ -138,6 +138,18 @@ describe('NotificationDeliveryPage', () => {
     await waitFor(() => expect(downloadBlob).toHaveBeenCalled());
   });
 
+  it('warns when the applied From date is after the To date (D4)', async () => {
+    mockOk(SUMMARY, { items: [], total: 0, page: 1, pageSize: 25 });
+    render(<NotificationDeliveryPage />);
+    await screen.findByTestId('delivery-empty');
+    // No hint until an inverted range is applied.
+    expect(screen.queryByTestId('from-after-to-hint')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByTestId('filter-from'), { target: { value: '2026-02-10' } });
+    fireEvent.change(screen.getByTestId('filter-to'), { target: { value: '2026-02-01' } });
+    fireEvent.click(screen.getByTestId('apply-filters-btn'));
+    expect(await screen.findByTestId('from-after-to-hint')).toBeInTheDocument();
+  });
+
   it('shows an empty state when there are no receipts', async () => {
     mockOk(SUMMARY, { items: [], total: 0, page: 1, pageSize: 25 });
     render(<NotificationDeliveryPage />);

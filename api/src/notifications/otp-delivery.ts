@@ -29,6 +29,13 @@ export async function captureOtpDeliveryHandle(
   otpCodeId: string | undefined | null,
   sendResult: { requestId: string | null } | undefined,
 ): Promise<void> {
+  // M2 dormancy gate — the ENTIRE delivery-receipt feature (all three producers) is OFF unless
+  // DELIVERY_RECEIPTS_ENABLED === 'true'. A no-op here makes OTP send/verify byte-identical to
+  // pre-feature behaviour: no msg91RequestId/deliveryStatus is captured, so nothing accumulates
+  // to be consumed while the CONSUME side (webhook/reconcile/retention) is still off by default.
+  // Go-live = set DELIVERY_RECEIPTS_ENABLED=true + NOTIFICATIONS_STATUS_SECRET +
+  // NOTIFICATIONS_RETENTION_ENABLED=true, and wire the MSG91 callbacks.
+  if (process.env.DELIVERY_RECEIPTS_ENABLED !== 'true') return;
   if (!otpCodeId) return;
   try {
     await prisma.otpCode.updateMany({

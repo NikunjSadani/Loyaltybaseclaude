@@ -139,7 +139,7 @@ export default function NotificationDeliveryPage() {
         <Button
           variant="outline"
           onClick={handleDownload}
-          disabled={downloading || total === 0}
+          disabled={downloading || listLoading || total === 0}
           data-testid="download-delivery-btn"
         >
           {downloading ? (
@@ -295,6 +295,17 @@ export default function NotificationDeliveryPage() {
           )}
         </div>
       </div>
+
+      {applied.from && applied.to && applied.from > applied.to && (
+        <p
+          className="flex items-start gap-1.5 text-xs text-amber-600"
+          role="alert"
+          data-testid="from-after-to-hint"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          From date is after To date — no results possible.
+        </p>
+      )}
 
       {downloadError && (
         <p className="flex items-start gap-1.5 text-xs text-red-600" role="alert">

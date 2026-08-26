@@ -103,6 +103,13 @@ class FakeReceipts {
     Object.assign(row, data);
     return Promise.resolve({ count: 1 });
   }
+  deleteMany({ where }: { where: { id: string; status?: string } }) {
+    const row = this.store.get(where.id);
+    if (!row) return Promise.resolve({ count: 0 });
+    if (where.status !== undefined && row.status !== where.status) return Promise.resolve({ count: 0 });
+    this.store.delete(where.id);
+    return Promise.resolve({ count: 1 });
+  }
 }
 
 function makeWorker(rows: QRow[], sendSms: jest.Mock, opts?: { failOnSent?: boolean }) {
@@ -123,7 +130,9 @@ function makeWorker(rows: QRow[], sendSms: jest.Mock, opts?: { failOnSent?: bool
 describe('PushDeliveryWorker — SMS delivery-receipt lifecycle (Wave 1)', () => {
   const OLD_ENV = process.env;
   beforeEach(() => {
-    process.env = { ...OLD_ENV, PUSH_WORKER_ENABLED: 'true' };
+    // DELIVERY_RECEIPTS_ENABLED (M2) gates the whole receipt feature; set it on for the lifecycle
+    // assertions. A dedicated OFF test below proves the dormant (no-receipt) path.
+    process.env = { ...OLD_ENV, PUSH_WORKER_ENABLED: 'true', DELIVERY_RECEIPTS_ENABLED: 'true' };
   });
   afterEach(() => {
     process.env = OLD_ENV;
@@ -158,18 +167,60 @@ describe('PushDeliveryWorker — SMS delivery-receipt lifecycle (Wave 1)', () =>
     expect(queue.rows[0].status).toBe('SENT');
   });
 
-  it('a send that throws BEFORE billing flips the receipt to FAILED (and re-queues the SMS)', async () => {
+  it('M4 — a RETRYABLE send failure leaves NO receipt (deleted) and re-queues the SMS', async () => {
+    // retryCount 0 of maxRetries 3 → non-terminal → the row re-queues. Since MSG91 never got this
+    // crqid, the just-created receipt is DELETED so the retry's fresh crqid is the only receipt →
+    // one logical SMS never yields a stale FAILED + a later SENT.
     const send = jest.fn().mockRejectedValue(new Error('MSG91 down'));
-    const { worker, queue, receipts } = makeWorker([makeRow({ maxRetries: 3 })], send);
+    const { worker, queue, receipts } = makeWorker([makeRow({ maxRetries: 3, retryCount: 0 })], send);
     await worker.drain();
 
-    const receiptId = [...receipts.store.keys()][0];
-    const rcpt = receipts.store.get(receiptId)!;
-    expect(rcpt.status).toBe('FAILED');
-    expect(rcpt.failureReason).toContain('MSG91 down');
+    // The receipt was created then deleted → store is empty (exactly zero receipts remain).
+    expect(receipts.createCalls).toHaveLength(1);
+    expect(receipts.store.size).toBe(0);
     // Queue transitions unchanged: a non-exhausted retry re-queues.
     expect(queue.rows[0].status).toBe('QUEUED');
     expect(queue.rows[0].retryCount).toBe(1);
+  });
+
+  it('M4 — a TERMINAL send failure leaves exactly ONE FAILED receipt', async () => {
+    // retryCount 2 of maxRetries 3 → nextRetry 3 >= 3 → terminal → the receipt is KEPT and marked
+    // FAILED (guarded QUEUED-only). Exactly one receipt, status FAILED.
+    const send = jest.fn().mockRejectedValue(new Error('MSG91 down'));
+    const { worker, queue, receipts } = makeWorker([makeRow({ maxRetries: 3, retryCount: 2 })], send);
+    await worker.drain();
+
+    expect(receipts.store.size).toBe(1);
+    const rcpt = [...receipts.store.values()][0];
+    expect(rcpt.status).toBe('FAILED');
+    expect(rcpt.failureReason).toContain('MSG91 down');
+    // Queue: exhausted retries → terminal FAILED.
+    expect(queue.rows[0].status).toBe('FAILED');
+    expect(queue.rows[0].retryCount).toBe(3);
+  });
+
+  it('M4 — a successful send leaves exactly ONE SENT receipt', async () => {
+    const send = jest.fn().mockResolvedValue({ requestId: 'REQ-OK' });
+    const { worker, receipts } = makeWorker([makeRow({})], send);
+    await worker.drain();
+
+    expect(receipts.store.size).toBe(1);
+    const rcpt = [...receipts.store.values()][0];
+    expect(rcpt.status).toBe('SENT');
+    expect(rcpt.msg91RequestId).toBe('REQ-OK');
+  });
+
+  it('M2 — with DELIVERY_RECEIPTS_ENABLED off, NO receipt is created and the SMS still sends (3-arg)', async () => {
+    process.env.DELIVERY_RECEIPTS_ENABLED = 'false';
+    const send = jest.fn().mockResolvedValue({ requestId: 'REQ-OFF' });
+    const { worker, queue, receipts } = makeWorker([makeRow({})], send);
+    await worker.drain();
+
+    // Dormant: no receipt row, and the send is byte-identical to pre-feature (3-arg, no crqid).
+    expect(receipts.createCalls).toHaveLength(0);
+    expect(receipts.store.size).toBe(0);
+    expect(send).toHaveBeenCalledWith('9990000001', 'dlt-1', { ownerName: 'Asha' });
+    expect(queue.rows[0].status).toBe('SENT');
   });
 
   it('a BILLED send whose queue post-write fails does NOT flip the receipt to FAILED', async () => {

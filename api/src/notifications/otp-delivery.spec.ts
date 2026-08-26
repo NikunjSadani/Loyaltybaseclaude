@@ -13,6 +13,16 @@ function makePrisma() {
 }
 
 describe('captureOtpDeliveryHandle', () => {
+  const OLD_ENV = process.env;
+  beforeEach(() => {
+    // DELIVERY_RECEIPTS_ENABLED (M2) gates the whole receipt feature; set it on for the capture
+    // assertions. A dedicated OFF test below proves the dormant (no-op) path.
+    process.env = { ...OLD_ENV, DELIVERY_RECEIPTS_ENABLED: 'true' };
+  });
+  afterEach(() => {
+    process.env = OLD_ENV;
+  });
+
   it('writes msg91RequestId + deliveryStatus SENT, guarded on deliveryStatus null', async () => {
     const prisma = makePrisma();
     await captureOtpDeliveryHandle(prisma, 'otp_1', { requestId: 'req-abc' });
@@ -48,5 +58,12 @@ describe('captureOtpDeliveryHandle', () => {
     const prisma = makePrisma();
     prisma.otpCode.updateMany.mockRejectedValueOnce(new Error('db down'));
     await expect(captureOtpDeliveryHandle(prisma, 'otp_1', { requestId: 'req-abc' })).resolves.toBeUndefined();
+  });
+
+  it('M2 — with DELIVERY_RECEIPTS_ENABLED off, it is a no-op (no capture write)', async () => {
+    process.env.DELIVERY_RECEIPTS_ENABLED = 'false';
+    const prisma = makePrisma();
+    await captureOtpDeliveryHandle(prisma, 'otp_1', { requestId: 'req-abc' });
+    expect(prisma.otpCode.updateMany).not.toHaveBeenCalled();
   });
 });

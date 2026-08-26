@@ -177,10 +177,19 @@ export class PushDeliveryWorker {
           // one bad row never aborts the batch. NotificationQueue transitions are unchanged.
           await this.markFailed(row.id, row.retryCount, row.maxRetries);
           await this.writeLog(row.id, 'SMS', 'FAILED', String(e), null);
-          // Guarded (QUEUED-only): if the throw was the (unbilled) sendSms, the receipt flips to
-          // FAILED; if a post-write threw after a billed send, the receipt is already SENT so this
-          // is a no-op — a billed message can never end up FAILED.
-          await this.markSmsReceiptFailed(receipt, String(e));
+          // M4 — exactly ONE receipt per logical message. A thrown send means MSG91 never received
+          // this crqid (no DLR callback will ever arrive for it). Mirror markFailed's retry-vs-
+          // terminal decision (retryCount+1 >= maxRetries): on a RE-QUEUE (non-terminal) DELETE the
+          // just-created receipt so the next drain's fresh crqid doesn't leave a stale FAILED behind
+          // (one logical SMS that fails once then succeeds would otherwise yield a FAILED + a SENT).
+          // Only on the TERMINAL failure do we KEEP it and mark it FAILED (guarded QUEUED-only, so a
+          // billed send whose post-write threw stays SENT and is never downgraded).
+          const isTerminal = row.retryCount + 1 >= row.maxRetries;
+          if (isTerminal) {
+            await this.markSmsReceiptFailed(receipt, String(e));
+          } else {
+            await this.deleteSmsReceipt(receipt);
+          }
           this.logger.warn(`[push-worker] SMS row ${row.id} failed: ${e}`);
         }
       }
@@ -207,6 +216,14 @@ export class PushDeliveryWorker {
     row: { templateId: string | null; recipientPhone: string | null },
     clientId: string | null,
   ): Promise<{ id: string; crqid: string } | null> {
+    // M2 dormancy gate — the ENTIRE delivery-receipt feature (all three producers) is OFF unless
+    // DELIVERY_RECEIPTS_ENABLED === 'true'. Returning null here makes the SMS leg byte-identical to
+    // pre-feature behaviour: the 3-arg send fires with NO crqid and NO receipt row is written, so on
+    // a tenant with a live channel (Deoleo post-cutover) receipts can't accumulate stuck at SENT
+    // while the CONSUME side (webhook/reconcile/retention) is still off by default.
+    // Go-live = set DELIVERY_RECEIPTS_ENABLED=true + NOTIFICATIONS_STATUS_SECRET +
+    // NOTIFICATIONS_RETENTION_ENABLED=true, and wire the MSG91 DLR callbacks.
+    if (process.env.DELIVERY_RECEIPTS_ENABLED !== 'true') return null;
     // clientId is required on the receipt (its tenant scope). Without it we can't write a valid
     // row — skip the receipt rather than fail (delivery tracking degrades for this one message).
     if (!clientId) return null;
@@ -271,6 +288,24 @@ export class PushDeliveryWorker {
       });
     } catch (e) {
       this.logger.warn(`[push-worker] SMS receipt ${receipt.id} FAILED write failed: ${e}`);
+    }
+  }
+
+  /**
+   * M4 — delete a still-QUEUED receipt when its unbilled send failed AND the queue row is being
+   * RE-QUEUED for another attempt (so the retry's fresh crqid becomes the one and only receipt).
+   * GUARDED on status:'QUEUED' + BEST-EFFORT: a receipt already flipped SENT (a billed send whose
+   * post-write threw) does NOT match and is never deleted → billing-safety preserved; any delete
+   * error is swallowed so the batch never aborts.
+   */
+  private async deleteSmsReceipt(receipt: { id: string } | null): Promise<void> {
+    if (!receipt) return;
+    try {
+      await this.prisma.messageDeliveryReceipt.deleteMany({
+        where: { id: receipt.id, status: 'QUEUED' },
+      });
+    } catch (e) {
+      this.logger.warn(`[push-worker] SMS receipt ${receipt.id} retry-delete failed: ${e}`);
     }
   }
 

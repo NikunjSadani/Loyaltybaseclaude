@@ -359,6 +359,14 @@ export class NotificationsService implements OnModuleInit {
     eventKey: string,
     recipientPhone: string,
   ): Promise<{ id: string; crqid: string } | null> {
+    // M2 dormancy gate — the ENTIRE delivery-receipt feature (all three producers) is OFF unless
+    // DELIVERY_RECEIPTS_ENABLED === 'true'. Returning null here makes the transactional-WhatsApp leg
+    // byte-identical to pre-feature behaviour: the 3-arg send fires with NO crqid and NO receipt row
+    // is written, so on a live-WhatsApp tenant (Deoleo post-cutover) receipts can't accumulate stuck
+    // at SENT while the CONSUME side (webhook/reconcile/retention) is still off by default.
+    // Go-live = set DELIVERY_RECEIPTS_ENABLED=true + NOTIFICATIONS_STATUS_SECRET +
+    // NOTIFICATIONS_RETENTION_ENABLED=true, and wire the MSG91 callbacks.
+    if (process.env.DELIVERY_RECEIPTS_ENABLED !== 'true') return null;
     // Parity with the SMS leg (push-delivery.worker): never write an unscoped receipt — an empty
     // clientId would mis-scope the row in the per-tenant (D4) delivery report.
     if (!clientId?.trim()) return null;

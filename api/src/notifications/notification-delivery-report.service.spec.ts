@@ -6,13 +6,20 @@
 // prune deletes ONLY >90d rows and only when its env flag is on.
 // Run: npx jest src/notifications/notification-delivery-report.service.spec.ts
 
-import { StreamableFile } from '@nestjs/common';
+import { ForbiddenException, StreamableFile } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { PrismaService } from '../prisma/prisma.service';
 import { MessageDeliveryStatusService } from './message-delivery-status.service';
 import { NotificationDeliveryReportService } from './notification-delivery-report.service';
 import { NotificationDeliveryRetentionWorker } from './notification-delivery-retention.worker';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { buildXlsx } from '../common/xlsx';
+
+// M3: mock the workbook builder so export tests can inspect the exact rows handed to it (a real
+// xlsx buffer is opaque). Returns a Buffer so `new StreamableFile(...)` still succeeds.
+jest.mock('../common/xlsx', () => ({
+  buildXlsx: jest.fn(() => Buffer.from('xlsx')),
+}));
 
 const CLIENT_ADMIN: JwtPayload = {
   sub: 'u1',
@@ -72,6 +79,16 @@ describe('NotificationDeliveryReportService', () => {
           ];
         }
         return [];
+      },
+    );
+    // M1: `count` backs the DISPATCHED (sentAt != null) count per channel. Default it to the
+    // dispatched total that matches the status buckets above (SMS SENT2+DELIVERED5=7; WA
+    // SENT1+DELIVERED2+READ4=7), so the funnel's `sent` reflects "was dispatched".
+    mockPrisma.messageDeliveryReceipt.count.mockImplementation(
+      async ({ where }: { where?: { channel?: string } }) => {
+        if (where?.channel === 'SMS') return 7;
+        if (where?.channel === 'WHATSAPP') return 7;
+        return 0;
       },
     );
     mockStatus.getOtpDeliveryStats.mockResolvedValue({
@@ -159,12 +176,49 @@ describe('NotificationDeliveryReportService', () => {
       });
     });
 
-    it('OTP tile: authoritative (not indicative) for the platform operator', async () => {
+    it('M1: Sent = DISPATCHED rows (sentAt != null), so it never understates delivered + delivery-failures', async () => {
+      // 90 DELIVERED + 10 FAILED that were dispatched then failed delivery (they carry sentAt but sit
+      // in the FAILED bucket) → all 100 were dispatched. The OLD `SENT + delivered` would have read
+      // sent=90 (< delivered 90 + failed 10); the fix reads the true dispatched count = 100.
+      mockPrisma.messageDeliveryReceipt.groupBy.mockImplementation(
+        async ({ where }: { where: { channel?: string } }) => {
+          if (where.channel === 'SMS') {
+            return [
+              { status: 'DELIVERED', _count: { _all: 90 } },
+              { status: 'FAILED', _count: { _all: 10 } },
+            ];
+          }
+          return [];
+        },
+      );
+      mockPrisma.messageDeliveryReceipt.count.mockImplementation(
+        async ({ where }: { where?: { channel?: string } }) =>
+          where?.channel === 'SMS' ? 100 : 0,
+      );
+
+      const res = await service.summary(OPERATOR_UNASSUMED, { channel: 'SMS' });
+      expect(res.sms).toEqual({
+        sent: 100,
+        delivered: 90,
+        failed: 10,
+        pending: 0,
+        deliveryRate: 90 / 100,
+      });
+      // The dispatched count is a `sentAt: { not: null }` count query (not a status bucket).
+      const countWhere =
+        mockPrisma.messageDeliveryReceipt.count.mock.calls[0][0].where;
+      expect(countWhere.sentAt).toEqual({ not: null });
+      expect(countWhere.channel).toBe('SMS');
+    });
+
+    it('OTP tile: authoritative (not indicative) for the platform operator, with total + pending surfaced (D2)', async () => {
       const res = await service.summary(OPERATOR_UNASSUMED, {});
       expect(res.otp).toEqual({
+        total: 12,
         sent: 2,
         delivered: 9,
         failed: 1,
+        pending: 0,
         deliveryRate: 0.9,
         indicative: false,
       });
@@ -296,6 +350,74 @@ describe('NotificationDeliveryReportService', () => {
       mockPrisma.messageDeliveryReceipt.findMany.mockResolvedValue([]);
       const res = await service.export(OPERATOR_UNASSUMED, {});
       expect(res).toBeInstanceOf(StreamableFile);
+    });
+
+    it('M3: appends a truncation-notice row when the export hits the row cap', async () => {
+      const cap = (
+        NotificationDeliveryReportService as unknown as { MAX_EXPORT_ROWS: number }
+      ).MAX_EXPORT_ROWS;
+      // findMany returns exactly the cap → the result was (potentially) clipped.
+      mockPrisma.messageDeliveryReceipt.findMany.mockResolvedValue(
+        Array.from({ length: cap }, () => ({})),
+      );
+      await service.export(OPERATOR_UNASSUMED, {});
+
+      const sheets = (buildXlsx as jest.Mock).mock.calls[0][0];
+      const rows = sheets[0].rows as Array<{ Channel: string }>;
+      // cap data rows + 1 notice row.
+      expect(rows).toHaveLength(cap + 1);
+      expect(rows[rows.length - 1].Channel).toContain('truncated');
+    });
+
+    it('M3: no truncation notice when the result is below the cap', async () => {
+      mockPrisma.messageDeliveryReceipt.findMany.mockResolvedValue([
+        {
+          id: 'r1',
+          channel: 'SMS',
+          eventKey: null,
+          recipientPhone: null,
+          status: 'SENT',
+          sentAt: null,
+          deliveredAt: null,
+          readAt: null,
+          failureReason: null,
+          createdAt: null,
+        },
+      ]);
+      await service.export(OPERATOR_UNASSUMED, {});
+
+      const sheets = (buildXlsx as jest.Mock).mock.calls[0][0];
+      const rows = sheets[0].rows as Array<{ Channel: string }>;
+      expect(rows).toHaveLength(1);
+      expect(rows.some((r) => r.Channel.includes('truncated'))).toBe(false);
+    });
+  });
+
+  // ── INFO-2 (isolation defence-in-depth) ────────────────────────────────────
+
+  describe('scope hardening (INFO-2)', () => {
+    const EMPTY_SCOPE_ADMIN: JwtPayload = {
+      sub: 'x',
+      role: 'CLIENT_ADMIN',
+      clientId: '',
+      phone: '',
+      name: '',
+    };
+
+    it('a non-platform-wide caller with a falsy scope is REFUSED (never reads unscoped)', async () => {
+      await expect(service.summary(EMPTY_SCOPE_ADMIN, {})).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      await expect(service.list(EMPTY_SCOPE_ADMIN, {})).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      await expect(service.export(EMPTY_SCOPE_ADMIN, {})).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      // Fail-closed BEFORE any query is issued — no unscoped read ever reaches the DB.
+      expect(mockPrisma.messageDeliveryReceipt.groupBy).not.toHaveBeenCalled();
+      expect(mockPrisma.messageDeliveryReceipt.findMany).not.toHaveBeenCalled();
+      expect(mockStatus.getOtpDeliveryStats).not.toHaveBeenCalled();
     });
   });
 
