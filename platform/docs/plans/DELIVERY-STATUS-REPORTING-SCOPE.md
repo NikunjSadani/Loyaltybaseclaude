@@ -13,10 +13,24 @@ broadcast-miss → shared service; no DI cycle) · W3 `f4dbda8` (OTP light — r
 never throws → login OTP unaffected] + OtpCode correlation fallback + rolling ~24h rate) · W4 `9f851b6` (report
 `/v1/admin/notification-delivery` summary/list/export, CLIENT_ADMIN hard-scoped [isolation runtime-proven 5/5] +
 GIFSY_ADMIN platform/assumed, OTP `indicative` caveat, 90-day retention worker; FE `/admin/notification-delivery`).
-Migrations: 3 additive (receipt table + reconcile index + otp index). **▶ owner-gated to go live:** wire the MSG91
-SMS-DLR + WhatsApp outbound-report + (optional) OTP callback URLs at `/v1/notifications/status` (+ keep the broadcast
-`/v1/whatsapp/status`), set `NOTIFICATIONS_STATUS_SECRET` + `NOTIFICATIONS_RETENTION_ENABLED=true`, and confirm the
-LIVE SMS-DLR payload shape (the one remaining RUNTIME-VERIFY).
+Migrations: 3 additive (receipt table + reconcile index + otp index).
+
+**WHOLE-FEATURE E2E EDGE-CASE AUDIT (across all 5 waves) — DONE `df5cb7b`.** 3 parallel adversarial lanes
+(cross-wave chain+integrity · isolation/PII/auth · edge-cases/concurrency/UI-UX): **isolation/auth/PII CLEAN**
+(tenant isolation runtime-proven 5/5; webhooks fail-closed; no cross-tenant recipient-PII leak on summary/list/export),
+seams sound, concurrency + query-bounding robust, FE↔BE contract matches. Fixes applied (accuracy + true-dormancy, no
+correctness holes): **M1** funnel "Sent" now = dispatched (`sentAt != null`) so a dispatched-then-failed row is counted
+(runtime-proven: 2 SENT+1 DELIVERED+1 FAILED → Sent=4); **M2** one gate `DELIVERY_RECEIPTS_ENABLED` (default OFF) makes
+ALL receipt production dormant (off = byte-identical pre-feature, no crqid in the MSG91 payload); **M3** export emits a
+truncation-notice row at the 100k cap; **M4** SMS retry no longer leaves a duplicate receipt (QUEUED-guarded delete on
+re-queue, one FAILED only on terminal); plus OTP tile total/pending, an explicit OTP-stats window, transactional-WhatsApp
+reconcile, a fail-closed empty-scope assert, and FE from>to/download hints. **Deferred (flagged):** D3 scheme-SMS-via-OTP-transport
+coverage (owner scope Q); D7 the full MSG91 numeric-code map (the existing live-payload RUNTIME-VERIFY).
+
+**▶ owner-gated to go live:** wire the MSG91 SMS-DLR + WhatsApp outbound-report + (optional) OTP callback URLs at
+`/v1/notifications/status` (+ keep the broadcast `/v1/whatsapp/status`), then set **`DELIVERY_RECEIPTS_ENABLED=true`**
+(the production gate — without it nothing is tracked) + `NOTIFICATIONS_STATUS_SECRET` + `NOTIFICATIONS_RETENTION_ENABLED=true`,
+and confirm the LIVE SMS-DLR payload shape (the one remaining RUNTIME-VERIFY).
 **Author:** this session, 2026-08-24. **Design source of truth once approved:** this file.
 
 ## 1. Goal
