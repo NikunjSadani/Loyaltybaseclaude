@@ -27,6 +27,7 @@ import { generateTenantOrderNumber } from './order-number.helper';
 import { computeFrozenValuePaise } from './gift-value.helper';
 import { computeDispatchSla } from '../common/dispatch-sla';
 import { loadHolidaySet } from '../common/holiday-calendar';
+import { istDayRangeFilter } from '../common/ist-date';
 import {
   AdminListCatalogQueryDto,
   CreateRewardCatalogDto,
@@ -2204,11 +2205,11 @@ export class RewardsService {
     if (q.q) where.orderNumber = { contains: q.q, mode: 'insensitive' };
     // WAVE-2 SEAM: a `vendorId` filter (where.fulfilledByVendorId) lands here for the
     // vendor-scoped console once vendor fulfilment ships.
-    if (q.from || q.to) {
-      where.createdAt = {};
-      if (q.from) where.createdAt.gte = new Date(q.from);
-      if (q.to) where.createdAt.lte = new Date(q.to);
-    }
+    // Date-only FE `<input type="date">` bounds are treated as FULL INCLUSIVE IST days
+    // (a raw `new Date("YYYY-MM-DD")` is 05:30 IST → would skew the start and truncate the
+    // last IST day). A full ISO datetime is used as-given.
+    const createdAtRange = istDayRangeFilter(q.from, q.to);
+    if (createdAtRange) where.createdAt = createdAtRange;
 
     const [orders, total, holidays] = await Promise.all([
       this.prisma.redemptionOrder.findMany({

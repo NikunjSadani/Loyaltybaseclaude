@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isGifsyOperator, tenantScope } from '../common/tenant-scope';
+import { istDayRangeFilter } from '../common/ist-date';
 import { GiftDisbursalQueryDto } from './dto/vendor.dto';
 import {
   buildDisbursalReport,
@@ -46,15 +47,14 @@ export class GiftDisbursalService {
     // FY/date-ranged disbursal report ties out to the 194R base for boundary orders
     // (Wave-2 audit MED#5). A non-DELIVERED order has a null `deliveredAt` and so falls
     // outside any date window — correct, since only DELIVERED value is disbursed.
-    const deliveredAt: Prisma.DateTimeNullableFilter = {};
-    if (q.from) deliveredAt.gte = new Date(q.from);
-    if (q.to) {
-      // inclusive upper bound → end of the given day
-      const to = new Date(q.to);
-      to.setHours(23, 59, 59, 999);
-      deliveredAt.lte = to;
-    }
-    if (deliveredAt.gte || deliveredAt.lte) where.deliveredAt = deliveredAt;
+    //
+    // Date-only bounds are the FULL INCLUSIVE IST day. The old code did
+    // `to.setHours(23,59,59,999)` which uses SERVER-LOCAL time (UTC in prod) → the upper
+    // bound became 05:29 IST of the NEXT day, over-including ~5.5h, and `from` = 05:30 IST
+    // skewed the start. istDayRangeFilter gives the exact inclusive IST day(s) so the 194R
+    // reconciliation window is precise.
+    const deliveredAt = istDayRangeFilter(q.from, q.to);
+    if (deliveredAt) where.deliveredAt = deliveredAt;
 
     return where;
   }

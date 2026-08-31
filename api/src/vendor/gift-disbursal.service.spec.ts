@@ -89,6 +89,26 @@ describe('GiftDisbursalService', () => {
     expect(where.createdAt).toBeUndefined();
   });
 
+  it('date-only deliveredAt window uses INCLUSIVE IST day bounds, not raw/UTC setHours (IST boundary fix)', async () => {
+    mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+    await service.report(gifsy, { from: '2025-04-01', to: '2026-03-31' });
+    const where = mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where;
+
+    // from → 00:00:00.000 IST of 2025-04-01 = 2025-03-31T18:30:00.000Z (NOT raw 05:30 IST).
+    expect(where.deliveredAt.gte.toISOString()).toBe('2025-03-31T18:30:00.000Z');
+    // to → 23:59:59.999 IST of 2026-03-31 = 2026-03-31T18:29:59.999Z (NOT the old UTC
+    // setHours 23:59:59.999Z, which over-included ~5.5h into the next IST day).
+    expect(where.deliveredAt.lte.toISOString()).toBe('2026-03-31T18:29:59.999Z');
+
+    // A DELIVERED at 23:00 IST on the to-date (2026-03-31T17:30:00Z) is INSIDE the window.
+    const insideTo = new Date('2026-03-31T17:30:00.000Z');
+    expect(insideTo.getTime()).toBeLessThanOrEqual(where.deliveredAt.lte.getTime());
+    // A DELIVERED at 02:00 IST the NEXT day (2026-03-31T20:30:00Z, = 2026-04-01 IST) is
+    // EXCLUDED — the old UTC setHours(23,59,59,999) wrongly included it in FY2025-26.
+    const nextIstDay = new Date('2026-03-31T20:30:00.000Z');
+    expect(nextIstDay.getTime()).toBeGreaterThan(where.deliveredAt.lte.getTime());
+  });
+
   it('vendorId filter narrows to one fulfiller', async () => {
     mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
     await service.report(gifsy, { vendorId: 'v1' });

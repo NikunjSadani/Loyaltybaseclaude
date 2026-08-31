@@ -2,6 +2,7 @@ import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsDate,
+  IsDateString,
   IsEnum,
   IsInt,
   IsNumber,
@@ -34,13 +35,18 @@ export class ListTransactionsQueryDto {
   @IsBoolean()
   unbatched?: boolean;
 
+  // Date-only (`YYYY-MM-DD`) or full-ISO string bounds. Kept as STRINGS (not
+  // `@Type(() => Date)`) so `istDayRangeFilter` in the service can detect a
+  // date-only value and expand it to a FULL INCLUSIVE IST day (a raw
+  // `new Date("YYYY-MM-DD")` is 05:30 IST → would skew the start + truncate the
+  // last IST day). Mirrors the schemes/gift/reports filter DTOs.
   @IsOptional()
-  @Type(() => Date)
-  dateFrom?: Date;
+  @IsDateString()
+  dateFrom?: string;
 
   @IsOptional()
-  @Type(() => Date)
-  dateTo?: Date;
+  @IsDateString()
+  dateTo?: string;
 
   @IsOptional()
   @Type(() => Number)

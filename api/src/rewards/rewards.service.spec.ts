@@ -2874,6 +2874,33 @@ describe('RewardsService', () => {
       expect(call.where.partner).toEqual({ clientId: 'deoleo' }); // pinned, NOT acme
     });
 
+    it('date-only createdAt filter uses INCLUSIVE IST day bounds, not raw new Date (IST boundary fix)', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(0);
+      await service.listFulfilmentOrders(gifsy, { from: '2026-08-01', to: '2026-08-31' });
+      const call = mockPrisma.redemptionOrder.findMany.mock.calls[0][0];
+
+      // from → 00:00:00.000 IST of 2026-08-01 = 2026-07-31T18:30:00.000Z (NOT raw 05:30 IST).
+      expect(call.where.createdAt.gte.toISOString()).toBe('2026-07-31T18:30:00.000Z');
+      // to → 23:59:59.999 IST of 2026-08-31 = 2026-08-31T18:29:59.999Z (NOT the old raw
+      // new Date('2026-08-31') = 00:00Z = 05:30 IST, which truncated almost the whole day).
+      expect(call.where.createdAt.lte.toISOString()).toBe('2026-08-31T18:29:59.999Z');
+
+      // An order created at 23:00 IST on the to-date (2026-08-31T17:30:00Z) is NOW INCLUDED
+      // (it was dropped by the old raw-new-Date upper bound of 2026-08-31T00:00:00Z).
+      const lateOnToDate = new Date('2026-08-31T17:30:00.000Z');
+      expect(lateOnToDate.getTime()).toBeLessThanOrEqual(call.where.createdAt.lte.getTime());
+      expect(lateOnToDate.getTime()).toBeGreaterThanOrEqual(call.where.createdAt.gte.getTime());
+    });
+
+    it('omits the createdAt filter when neither from nor to is given', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(0);
+      await service.listFulfilmentOrders(gifsy, {});
+      const call = mockPrisma.redemptionOrder.findMany.mock.calls[0][0];
+      expect(call.where.createdAt).toBeUndefined();
+    });
+
     it('annotates each order with a channel-aware SLA + stringifies BigInt valuePaise', async () => {
       mockPrisma.redemptionOrder.findMany.mockResolvedValue([
         {

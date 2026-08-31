@@ -26,6 +26,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { endOfIstDay, startOfIstDay } from '../common/ist-date';
 
 const PAST = new Date('2020-01-01');
 const FUTURE = new Date('2099-12-31');
@@ -684,6 +685,46 @@ describe('SchemeEnrollmentService', () => {
     expect(where).toMatchObject({ schemeId: 's1', clientId: 'deoleo', deletedAt: null });
   });
 
+  // ── IST date-boundary bug: the roster date filter must treat a date-only bound as a
+  //    FULL INCLUSIVE IST day (was: raw `new Date(to)` = 00:00 UTC = 05:30 IST, which
+  //    truncated the last IST day and dropped late-evening-IST enrollments). ──────────
+  it('adminListEnrollments: a date-only `to` filters on the INCLUSIVE end of the IST day (not raw new Date(to))', async () => {
+    mockPrisma.scheme.findFirst.mockResolvedValue(makeScheme());
+    mockPrisma.schemeOutlet.findMany.mockResolvedValue([]);
+    mockPrisma.schemeOutlet.count.mockResolvedValue(0);
+
+    const to = '2026-08-31'; // date-only, as a FE <input type="date"> emits
+    const from = '2026-08-01';
+    await service.adminListEnrollments(adminUser, 's1', { from, to } as any);
+
+    const where = mockPrisma.schemeOutlet.findMany.mock.calls[0][0].where;
+    const enrolledAt = where.enrollment.is.enrolledAt;
+
+    // The `to` bound is the LAST instant of the IST day (23:59:59.999 IST), NOT raw 00:00 UTC.
+    expect(enrolledAt.lte).toEqual(endOfIstDay(new Date(to)));
+    expect(enrolledAt.lte.getTime()).not.toBe(new Date(to).getTime());
+    // The `from` bound is the START of the IST day (00:00 IST), not raw 00:00 UTC.
+    expect(enrolledAt.gte).toEqual(startOfIstDay(new Date(from)));
+
+    // An enrollment at 23:00 IST on `to` (= 17:30 UTC) — previously DROPPED because it fell
+    // after the old 05:30-IST cutoff — is now within [gte, lte].
+    const at2300Ist = new Date('2026-08-31T17:30:00.000Z');
+    expect(at2300Ist.getTime()).toBeLessThanOrEqual(enrolledAt.lte.getTime());
+    expect(at2300Ist.getTime()).toBeGreaterThanOrEqual(enrolledAt.gte.getTime());
+    // Under the OLD (buggy) bound this same enrollment would have been excluded.
+    expect(at2300Ist.getTime()).toBeGreaterThan(new Date(to).getTime());
+  });
+
+  it('adminListEnrollments: no date bounds → no enrolledAt filter is applied', async () => {
+    mockPrisma.scheme.findFirst.mockResolvedValue(makeScheme());
+    mockPrisma.schemeOutlet.findMany.mockResolvedValue([]);
+    mockPrisma.schemeOutlet.count.mockResolvedValue(0);
+    await service.adminListEnrollments(adminUser, 's1', {});
+    const where = mockPrisma.schemeOutlet.findMany.mock.calls[0][0].where;
+    // No status/date filter → no enrollment relation constraint at all.
+    expect(where.enrollment).toBeUndefined();
+  });
+
   // ── D26: tenant CLIENT_ADMIN read-only access is ALLOWED but HARD-SCOPED to own tenant ──
   it('ALLOWS a tenant CLIENT_ADMIN to list — and pins the scheme lookup to their own clientId', async () => {
     mockPrisma.scheme.findFirst.mockResolvedValue(makeScheme());
@@ -740,7 +781,7 @@ describe('SchemeEnrollmentService', () => {
     it('returns active in-window schemes for a rep', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su-caller' }); // requireCallerSalesUser
       mockPrisma.scheme.findMany.mockResolvedValue([
-        { id: 's1', clientId: 'deoleo', status: 'ACTIVE', enrollmentForm: { campaignType: 'MIXED', version: 2 } },
+        { id: 's1', clientId: 'deoleo', status: 'ACTIVE', startDate: PAST, endDate: FUTURE, enrollmentForm: { campaignType: 'MIXED', version: 2 } },
       ]);
 
       const res = await service.getSalesEligibleSchemes(salesUser);
@@ -767,9 +808,9 @@ describe('SchemeEnrollmentService', () => {
         { id: 'su-child', reportingToId: 'su-caller' },
       ]);
       mockPrisma.scheme.findMany.mockResolvedValue([
-        { id: 'sNo', clientId: 'deoleo', status: 'ACTIVE', audienceConfig: null, enrollmentForm: null },
-        { id: 'sHit', clientId: 'deoleo', status: 'ACTIVE', audienceConfig: { mode: 'EXCEL', frozen: true }, enrollmentForm: null },
-        { id: 'sMiss', clientId: 'deoleo', status: 'ACTIVE', audienceConfig: { mode: 'EXCEL', frozen: true }, enrollmentForm: null },
+        { id: 'sNo', clientId: 'deoleo', status: 'ACTIVE', startDate: PAST, endDate: FUTURE, audienceConfig: null, enrollmentForm: null },
+        { id: 'sHit', clientId: 'deoleo', status: 'ACTIVE', startDate: PAST, endDate: FUTURE, audienceConfig: { mode: 'EXCEL', frozen: true }, enrollmentForm: null },
+        { id: 'sMiss', clientId: 'deoleo', status: 'ACTIVE', startDate: PAST, endDate: FUTURE, audienceConfig: { mode: 'EXCEL', frozen: true }, enrollmentForm: null },
       ]);
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outletId: 'o1', partnerId: null }]);
       // Only sHit has a roster row reachable by the rep's downline; sMiss has none.
@@ -789,8 +830,8 @@ describe('SchemeEnrollmentService', () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su-caller' });
       mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'su-caller', reportingToId: null }]);
       mockPrisma.scheme.findMany.mockResolvedValue([
-        { id: 'sNorth', clientId: 'deoleo', status: 'ACTIVE', audienceConfig: { mode: 'FILTER', frozen: false, filter: { zones: ['NORTH'] } }, enrollmentForm: null },
-        { id: 'sSouth', clientId: 'deoleo', status: 'ACTIVE', audienceConfig: { mode: 'FILTER', frozen: false, filter: { zones: ['SOUTH'] } }, enrollmentForm: null },
+        { id: 'sNorth', clientId: 'deoleo', status: 'ACTIVE', startDate: PAST, endDate: FUTURE, audienceConfig: { mode: 'FILTER', frozen: false, filter: { zones: ['NORTH'] } }, enrollmentForm: null },
+        { id: 'sSouth', clientId: 'deoleo', status: 'ACTIVE', startDate: PAST, endDate: FUTURE, audienceConfig: { mode: 'FILTER', frozen: false, filter: { zones: ['SOUTH'] } }, enrollmentForm: null },
       ]);
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outletId: 'o1', partnerId: null }]);
       mockPrisma.schemeOutlet.findMany.mockResolvedValue([]); // no materialized roster rows
@@ -801,6 +842,90 @@ describe('SchemeEnrollmentService', () => {
 
       const res = await service.getSalesEligibleSchemes(salesUser);
       expect(res.schemes.map((s) => s.id)).toEqual(['sNorth']); // sSouth hidden
+    });
+
+    it('open-list returns an end-dated-TODAY scheme late in the IST day (was wrongly closed by the +5:30 skew)', async () => {
+      jest.useFakeTimers();
+      // 23:00 IST on 2026-08-31 (= 17:30Z). endDate is the date-only "today" (00:00Z),
+      // which the old endDate.gte:now prefilter excluded once past 05:30 IST.
+      jest.setSystemTime(new Date('2026-08-31T17:30:00.000Z'));
+      try {
+        mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su-caller' });
+        mockPrisma.scheme.findMany.mockResolvedValue([
+          {
+            id: 'sToday',
+            clientId: 'deoleo',
+            status: 'ACTIVE',
+            startDate: new Date('2026-08-01T00:00:00.000Z'),
+            endDate: new Date('2026-08-31T00:00:00.000Z'), // date-only "today"
+            audienceConfig: null,
+            enrollmentForm: null,
+          },
+        ]);
+        const res = await service.getSalesEligibleSchemes(salesUser);
+        expect(res.schemes.map((s) => s.id)).toEqual(['sToday']);
+        // The Prisma prefilter is LOOSE (±1 day) so it can never exclude a valid row.
+        const where = mockPrisma.scheme.findMany.mock.calls[0][0].where;
+        expect(where.endDate.gte.getTime()).toBeLessThan(new Date('2026-08-31T00:00:00.000Z').getTime());
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+  });
+
+  // ── enrollment window (IST-day inclusive) ──────────────────────────────────
+  describe('enrollment window (assertSchemeOpen / isSchemeOpen)', () => {
+    // Scheme dates come from a date-only <input type="date"> → stored at 00:00 UTC.
+    // The window must be the INCLUSIVE IST calendar-day range [start 00:00 IST, end 23:59:59.999 IST].
+    const START = new Date('2026-08-01T00:00:00.000Z'); // date-only "2026-08-01"
+    const END = new Date('2026-08-31T00:00:00.000Z'); // date-only "2026-08-31"
+    const openScheme = { status: 'ACTIVE', startDate: START, endDate: END };
+    const assertOpen = (now: Date) =>
+      (service as unknown as { isSchemeOpen: (n: Date, s: unknown) => boolean }).isSchemeOpen(now, openScheme);
+
+    it('OPEN at 23:00 IST on the END date (17:30Z) — was wrongly CLOSED (~05:30 IST cutoff)', () => {
+      expect(assertOpen(new Date('2026-08-31T17:30:00.000Z'))).toBe(true);
+    });
+
+    it('OPEN at 23:59 IST on the END date (18:29Z) — inclusive to end of the IST day', () => {
+      expect(assertOpen(new Date('2026-08-31T18:29:00.000Z'))).toBe(true);
+    });
+
+    it('OPEN at 00:30 IST on the START date (2026-07-31T19:00Z) — was wrongly CLOSED pre-05:30', () => {
+      // 00:30 IST on 2026-08-01 = 2026-07-31T19:00:00Z.
+      expect(assertOpen(new Date('2026-07-31T19:00:00.000Z'))).toBe(true);
+    });
+
+    it('CLOSED just before the START IST day (23:59 IST on 2026-07-31 = 18:29Z)', () => {
+      expect(assertOpen(new Date('2026-07-31T18:29:00.000Z'))).toBe(false);
+    });
+
+    it('CLOSED the day AFTER the END date (00:30 IST on 2026-09-01 = 2026-08-31T19:00Z)', () => {
+      expect(assertOpen(new Date('2026-08-31T19:00:00.000Z'))).toBe(false);
+    });
+
+    it('assertSchemeOpen throws outside the window and passes inside it', () => {
+      jest.useFakeTimers();
+      try {
+        const call = () =>
+          (service as unknown as { assertSchemeOpen: (s: unknown) => void }).assertSchemeOpen(openScheme);
+        jest.setSystemTime(new Date('2026-08-31T17:30:00.000Z')); // 23:00 IST end day → open
+        expect(call).not.toThrow();
+        jest.setSystemTime(new Date('2026-08-31T19:00:00.000Z')); // next IST day → closed
+        expect(call).toThrow(BadRequestException);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('assertSchemeOpen still rejects a non-ACTIVE scheme regardless of window', () => {
+      expect(() =>
+        (service as unknown as { assertSchemeOpen: (s: unknown) => void }).assertSchemeOpen({
+          status: 'DRAFT',
+          startDate: START,
+          endDate: END,
+        }),
+      ).toThrow(BadRequestException);
     });
   });
 

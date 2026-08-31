@@ -6,6 +6,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ReportFormat, ReportRangeQueryDto, TdsReportQueryDto } from './dto/reports.dto';
 import { buildXlsx, ReportSheet } from '../common/xlsx';
 import { platformWide } from '../common/tenant-scope';
+import { istDayRangeFilter } from '../common/ist-date';
 
 /**
  * Reporting & Analytics — ported from platform/src/app/api/reports/*.
@@ -48,18 +49,17 @@ export class ReportsService {
     }
   }
 
-  /** Parses an optional ISO date string to a Date, mirroring `new Date(...)`. */
+  /**
+   * Parses an optional ISO date string to a Date, mirroring `new Date(...)`.
+   * ONLY used by schemePerformance to filter the Scheme's own DAY-GRANULAR
+   * startDate/endDate columns (both sides day-granular → no IST-day skew). Every
+   * report that filters an event TIMESTAMP (createdAt) instead uses
+   * `istDayRangeFilter`, which expands a date-only bound to the full inclusive
+   * IST day so a `<input type="date">` value neither skews the start (+5:30h) nor
+   * truncates the last IST day.
+   */
   private parseDate(v?: string): Date | undefined {
     return v ? new Date(v) : undefined;
-  }
-
-  /** Builds a createdAt range filter from optional bounds. */
-  private createdAtRange(from?: Date, to?: Date): Prisma.DateTimeFilter | undefined {
-    if (!from && !to) return undefined;
-    const range: Prisma.DateTimeFilter = {};
-    if (from) range.gte = from;
-    if (to) range.lte = to;
-    return range;
   }
 
   private toJson(data: unknown): ReportResult {
@@ -73,12 +73,10 @@ export class ReportsService {
   // ── Visibility Status ───────────────────────────────────────────────────────
   async visibilityStatus(user: JwtPayload, q: ReportRangeQueryDto): Promise<ReportResult> {
     await this.assertVisibilityEnabled(user);
-    const dateFrom = this.parseDate(q.dateFrom);
-    const dateTo = this.parseDate(q.dateTo);
 
     // Visibility (POSM) captures are keyed by (outlet, window); clientId is a direct column.
     const where: Prisma.VisibilityCaptureWhereInput = { clientId: user.clientId };
-    const createdAt = this.createdAtRange(dateFrom, dateTo);
+    const createdAt = istDayRangeFilter(q.dateFrom, q.dateTo);
     if (createdAt) where.createdAt = createdAt;
 
     const submissions = await this.prisma.visibilityCapture.findMany({
@@ -159,15 +157,13 @@ export class ReportsService {
 
   // ── TDS Report ───────────────────────────────────────────────────────────────
   async tds(user: JwtPayload, q: TdsReportQueryDto): Promise<ReportResult> {
-    const dateFrom = this.parseDate(q.dateFrom);
-    const dateTo = this.parseDate(q.dateTo);
     const financialYear = q.fy ?? undefined;
 
     const where: Prisma.TdsRecordWhereInput = {
       payoutTransaction: { batch: { clientId: user.clientId } },
     };
     if (financialYear) where.assessmentYear = financialYear;
-    const createdAt = this.createdAtRange(dateFrom, dateTo);
+    const createdAt = istDayRangeFilter(q.dateFrom, q.dateTo);
     if (createdAt) where.createdAt = createdAt;
 
     const records = await this.prisma.tdsRecord.findMany({
@@ -217,14 +213,11 @@ export class ReportsService {
 
   // ── Payout Liability ──────────────────────────────────────────────────────────
   async payoutLiability(user: JwtPayload, q: ReportRangeQueryDto): Promise<ReportResult> {
-    const dateFrom = this.parseDate(q.dateFrom);
-    const dateTo = this.parseDate(q.dateTo);
-
     const where: Prisma.PayoutTransactionWhereInput = {
       status: 'PENDING',
       batch: { clientId: user.clientId },
     };
-    const createdAt = this.createdAtRange(dateFrom, dateTo);
+    const createdAt = istDayRangeFilter(q.dateFrom, q.dateTo);
     if (createdAt) where.createdAt = createdAt;
 
     const transactions = await this.prisma.payoutTransaction.findMany({
@@ -377,13 +370,10 @@ export class ReportsService {
 
   // ── KYC Status ────────────────────────────────────────────────────────────────
   async kycStatus(user: JwtPayload, q: ReportRangeQueryDto): Promise<ReportResult> {
-    const dateFrom = this.parseDate(q.dateFrom);
-    const dateTo = this.parseDate(q.dateTo);
-
     const where: Prisma.KycSubmissionWhereInput = {
       user: { clientId: user.clientId },
     };
-    const createdAt = this.createdAtRange(dateFrom, dateTo);
+    const createdAt = istDayRangeFilter(q.dateFrom, q.dateTo);
     if (createdAt) where.createdAt = createdAt;
 
     const submissions = await this.prisma.kycSubmission.findMany({

@@ -13,7 +13,7 @@ import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
 import { rupeesToPaise } from '../common/money';
-import { monthYearIST, formatDateIST } from '../common/ist-date';
+import { monthYearIST, formatDateIST, istDayRangeFilter } from '../common/ist-date';
 import { parsePayoutUtrUpload } from './payout-utr.helpers';
 import { resolveEffectiveKycStatus } from '../kyc/kyc-eligibility';
 import {
@@ -66,11 +66,11 @@ export class PayoutsService {
     if (q.status && !q.unbatched) where.status = q.status;
     if (q.mode) where.payoutMode = q.mode;
     if (q.partnerId) where.partnerId = q.partnerId;
-    if (q.dateFrom || q.dateTo) {
-      where.createdAt = {};
-      if (q.dateFrom) where.createdAt.gte = q.dateFrom;
-      if (q.dateTo) where.createdAt.lte = q.dateTo;
-    }
+    // Date-only FE `<input type="date">` bounds are treated as FULL INCLUSIVE IST days
+    // (a raw `new Date("YYYY-MM-DD")` is 05:30 IST → would skew the start and truncate the
+    // last IST day); a full ISO datetime is used as-given. Mirrors rewards/gift/reports.
+    const createdAtRange = istDayRangeFilter(q.dateFrom, q.dateTo);
+    if (createdAtRange) where.createdAt = createdAtRange;
 
     const [transactions, total] = await Promise.all([
       this.prisma.payoutTransaction.findMany({

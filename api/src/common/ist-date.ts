@@ -52,3 +52,64 @@ export function formatDateIST(d: Date): string {
   const day = String(shifted.getUTCDate()).padStart(2, '0');
   return `${day} ${MONTHS_SHORT[shifted.getUTCMonth()]} ${shifted.getUTCFullYear()}`;
 }
+
+/**
+ * The UTC instant of 00:00:00.000 of the IST calendar day that `d` falls on.
+ *
+ * WHY: a date-only `<input type="date">` value (e.g. "2026-08-31") is stored as
+ * `new Date("2026-08-31")` = 2026-08-31T00:00:00.000Z = 05:30 IST — NOT the start
+ * of the IST day. Comparing `now` against that raw instant skews the window by the
+ * fixed +5:30 offset. To recover the true IST-day start we read the IST wall-clock
+ * Y-M-D (shift then read getUTC*, mirroring formatDateIST) and rebuild that day's
+ * 00:00 IST as a UTC instant. Robust whether the stored value is 00:00 UTC or any
+ * other time on that IST day.
+ */
+export function startOfIstDay(d: Date): Date {
+  const shifted = new Date(d.getTime() + IST_OFFSET_MIN * 60_000);
+  const y = shifted.getUTCFullYear();
+  const m = shifted.getUTCMonth();
+  const day = shifted.getUTCDate();
+  return new Date(Date.UTC(y, m, day, 0, 0, 0, 0) - IST_OFFSET_MIN * 60_000);
+}
+
+/**
+ * The UTC instant of 23:59:59.999 of the IST calendar day that `d` falls on — the
+ * INCLUSIVE end of that IST day (see startOfIstDay for the why).
+ */
+export function endOfIstDay(d: Date): Date {
+  const shifted = new Date(d.getTime() + IST_OFFSET_MIN * 60_000);
+  const y = shifted.getUTCFullYear();
+  const m = shifted.getUTCMonth();
+  const day = shifted.getUTCDate();
+  return new Date(Date.UTC(y, m, day, 23, 59, 59, 999) - IST_OFFSET_MIN * 60_000);
+}
+
+/**
+ * Build a Prisma `{ gte?, lte? }` date-range filter from operator-supplied `from`/`to` bounds,
+ * interpreting a DATE-ONLY value (`YYYY-MM-DD`, from a `<input type="date">`) as a FULL INCLUSIVE
+ * IST day: `from` → 00:00:00.000 IST of that day, `to` → 23:59:59.999 IST of that day.
+ *
+ * WHY: a raw `new Date("2026-08-31")` is 05:30 IST, so a naive `{ gte: from, lte: to }` skips the
+ * first 5.5h of the start day AND truncates almost the whole end day (closes ~05:30 IST). This is
+ * the single fix for every list/report date-range filter (schemes roster, gift orders, gift
+ * disbursal, reports, payouts, …). A FULL ISO datetime (contains a `T`) is used as-given (an
+ * explicit instant the caller already chose), so this is safe to apply uniformly.
+ *
+ * Returns `undefined` when neither bound is a valid date, so callers can `if (range) where.x = range`.
+ */
+export function istDayRangeFilter(
+  from?: string | null,
+  to?: string | null,
+): { gte?: Date; lte?: Date } | undefined {
+  const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+  const range: { gte?: Date; lte?: Date } = {};
+  if (from) {
+    const d = new Date(from);
+    if (!Number.isNaN(d.getTime())) range.gte = DATE_ONLY.test(from) ? startOfIstDay(d) : d;
+  }
+  if (to) {
+    const d = new Date(to);
+    if (!Number.isNaN(d.getTime())) range.lte = DATE_ONLY.test(to) ? endOfIstDay(d) : d;
+  }
+  return range.gte !== undefined || range.lte !== undefined ? range : undefined;
+}

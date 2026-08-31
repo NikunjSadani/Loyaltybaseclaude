@@ -17,7 +17,7 @@ import { TdsStatutoryConfigService } from '../tds/tds-statutory.config.service';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { paiseToRupees, toPaiseBigInt } from '../common/money';
-import { monthYearIST, formatDateIST } from '../common/ist-date';
+import { monthYearIST, formatDateIST, IST_OFFSET_MIN } from '../common/ist-date';
 import {
   resolveEffectiveKycStatus,
   isPartnerPayable,
@@ -735,11 +735,26 @@ export class CreditsService {
   // credits-payouts-parser.ts). They are bypassable via a direct API call, so we
   // now MIRROR them server-side from the per-tenant TenantSettingsService.
 
-  /** Current month as `YYYY-MM` on the server clock — matches the FE's `getPreviousMonth`
-   *  baseline and the existing `targets.helpers.currentMonthKey` (both server-clock, no IST
-   *  conversion; the FE's `isUploadWindowOpen` likewise reads a plain `new Date()`). */
+  /**
+   * The IST wall-clock parts of an instant: `{ monthKey: "YYYY-MM", day }` (day = day-of-month).
+   * Production runs UTC (no TZ in api/Dockerfile), so reading `.getMonth()/.getDate()` off a raw
+   * Date reads SERVER-LOCAL (UTC) time — in the 00:00–05:30 IST window that is the WRONG IST day,
+   * and at a UTC month boundary the WRONG IST month, leaving the cutoff open ~5.5h too long. We
+   * shift by the fixed IST offset then read via getUTC* — the exact pattern in ist-date.ts
+   * (formatDateIST/startOfIstDay) — so the result is the IST wall-clock value regardless of the
+   * server's timezone. The FE's window check runs in the admin's IST browser, so this now truly
+   * mirrors it (the prior "server-clock mirrors the FE" comment was wrong for a UTC server).
+   */
+  private istParts(now: Date = new Date()): { monthKey: string; day: number } {
+    const shifted = new Date(now.getTime() + IST_OFFSET_MIN * 60_000);
+    const monthKey = `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}`;
+    return { monthKey, day: shifted.getUTCDate() };
+  }
+
+  /** Current month as `YYYY-MM` in IST wall-clock (see istParts for the why). Matches the FE's
+   *  `getPreviousMonth` baseline (the FE runs in the admin's IST browser). */
   private currentPeriodKey(now: Date = new Date()): string {
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    return this.istParts(now).monthKey;
   }
 
   /**
@@ -748,16 +763,17 @@ export class CreditsService {
    * before the current month, `YYYY-MM` string compare) may only be created/confirmed
    * while today's day-of-month is on/before `monthCutoffDay`. Current/future-month
    * batches are unaffected (the FE only ever uploads the previous month, so the prior-
-   * month case is the one the window guards).
+   * month case is the one the window guards). Both the current-month key AND the
+   * day-of-month are read in IST wall-clock (see istParts) so a UTC server does not
+   * hold the window open through the 00:00–05:30 IST tail of the cutoff day.
    */
   private assertWithinUploadWindow(period: string, monthCutoffDay: number): void {
-    const now = new Date();
-    const current = this.currentPeriodKey(now);
+    const { monthKey: current, day } = this.istParts();
     // Only PRIOR-month batches are gated. Same string-compare as targets isMonthLocked.
-    if (period < current && now.getDate() > monthCutoffDay) {
+    if (period < current && day > monthCutoffDay) {
       throw new BadRequestException(
         `The upload window for prior-month period ${period} closed on day ${monthCutoffDay} ` +
-          `of the current month (today is day ${now.getDate()}). Batches for past months ` +
+          `of the current month (today is day ${day}). Batches for past months ` +
           `can no longer be created or confirmed.`,
       );
     }

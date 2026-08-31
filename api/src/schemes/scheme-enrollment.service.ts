@@ -17,6 +17,7 @@ import { platformWide, isGifsyOperator } from '../common/tenant-scope';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { descendantSalesUserIds, SalesUserEdge } from '../sales/sales-hierarchy-access.helper';
 import { generateNumericOtp } from '../common/otp';
+import { startOfIstDay, endOfIstDay, istDayRangeFilter } from '../common/ist-date';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { sniffFileType } from '../common/file-signature';
 import {
@@ -168,12 +169,27 @@ export class SchemeEnrollmentService {
     return scheme;
   }
 
+  /**
+   * The enrollment window is the INCLUSIVE IST calendar-day range
+   * [startDate 00:00 IST, endDate 23:59:59.999 IST].
+   *
+   * WHY the IST-day bounds: startDate/endDate come from a date-only `<input type="date">`
+   * and are stored as `new Date("YYYY-MM-DD")` = 00:00 UTC (= 05:30 IST). A raw
+   * `now >= startDate && now <= endDate` compare therefore opens the window at 05:30 IST
+   * on the start day and CLOSES it at ~05:30 IST on the end day (the end day is almost
+   * entirely excluded), skewing both bounds +5:30. Normalising each bound to its IST
+   * calendar day fixes EXISTING stored schemes with no data change. (Same class of bug as
+   * the delivery-status report date fix.)
+   */
+  private isSchemeOpen(now: Date, scheme: { startDate: Date; endDate: Date }): boolean {
+    return now >= startOfIstDay(scheme.startDate) && now <= endOfIstDay(scheme.endDate);
+  }
+
   private assertSchemeOpen(scheme: { status: string; startDate: Date; endDate: Date }): void {
     if (scheme.status !== 'ACTIVE') {
       throw new BadRequestException(`Scheme is not accepting enrollments (status: ${scheme.status}).`);
     }
-    const now = new Date();
-    if (now < scheme.startDate || now > scheme.endDate) {
+    if (!this.isSchemeOpen(new Date(), scheme)) {
       throw new BadRequestException('Scheme is outside its active enrollment period.');
     }
   }
@@ -1438,17 +1454,24 @@ export class SchemeEnrollmentService {
   async getSalesEligibleSchemes(user: JwtPayload) {
     const caller = await this.requireCallerSalesUser(user);
     const now = new Date();
-    const schemes = await this.prisma.scheme.findMany({
-      where: {
-        clientId: user.clientId,
-        status: 'ACTIVE',
-        deletedAt: null,
-        startDate: { lte: now },
-        endDate: { gte: now },
-      },
-      include: { enrollmentForm: { select: { campaignType: true, version: true } } },
-      orderBy: { createdAt: 'desc' },
-    });
+    // LOOSE Prisma prefilter: the stored startDate/endDate are date-only at 00:00 UTC, so the
+    // true IST-day window can extend up to 5.5h beyond the raw bound. A ±1-day slack cannot
+    // exclude any row valid under isSchemeOpen; the exact IST-day-inclusive check is applied
+    // in JS below (same predicate as assertSchemeOpen), so existing schemes are corrected too.
+    const oneDayMs = 24 * 60 * 60 * 1000;
+    const schemes = (
+      await this.prisma.scheme.findMany({
+        where: {
+          clientId: user.clientId,
+          status: 'ACTIVE',
+          deletedAt: null,
+          startDate: { lte: new Date(now.getTime() + oneDayMs) },
+          endDate: { gte: new Date(now.getTime() - oneDayMs) },
+        },
+        include: { enrollmentForm: { select: { campaignType: true, version: true } } },
+        orderBy: { createdAt: 'desc' },
+      })
+    ).filter((s) => this.isSchemeOpen(now, s));
     if (schemes.length === 0) return { schemes };
 
     // Scope the LIST so a rep only sees schemes they actually have outlets to work on —
@@ -1726,12 +1749,11 @@ export class SchemeEnrollmentService {
     // out of the shaped row below so a deleted capture never appears in the admin list.
     const enrollmentWhere: Prisma.SchemeEnrollmentWhereInput = {};
     if (q.status) enrollmentWhere.status = q.status;
-    if (q.from || q.to) {
-      enrollmentWhere.enrolledAt = {
-        ...(q.from ? { gte: new Date(q.from) } : {}),
-        ...(q.to ? { lte: new Date(q.to) } : {}),
-      };
-    }
+    // Date-only bounds (FE <input type="date">) are interpreted as FULL INCLUSIVE IST days
+    // via the shared helper: a raw `new Date(q.to)` = 00:00 UTC = 05:30 IST would truncate the
+    // last IST day (and `from` would skew +5:30h). Only assign when a valid range is produced.
+    const enrolledAtRange = istDayRangeFilter(q.from, q.to);
+    if (enrolledAtRange) enrollmentWhere.enrolledAt = enrolledAtRange;
     if (Object.keys(enrollmentWhere).length > 0) {
       where.enrollment = { is: { ...enrollmentWhere, deletedAt: null } };
     }

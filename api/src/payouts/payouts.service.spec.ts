@@ -111,11 +111,14 @@ describe('PayoutsService', () => {
     it('builds a createdAt range when dates are supplied', async () => {
       mockPrisma.payoutTransaction.findMany.mockResolvedValue([]);
       mockPrisma.payoutTransaction.count.mockResolvedValue(0);
-      const from = new Date('2026-01-01');
-      const to = new Date('2026-02-01');
+      // Bounds are now strings (IsDateString). A FULL-ISO datetime is passed through
+      // as-is; DATE-ONLY values expand to inclusive IST-day bounds — that expansion is
+      // covered in payouts.service.ist-dates.spec.ts.
+      const from = '2026-01-01T00:00:00.000Z';
+      const to = '2026-02-01T00:00:00.000Z';
       await service.listTransactions(gifsy, { dateFrom: from, dateTo: to });
       const where = mockPrisma.payoutTransaction.findMany.mock.calls[0][0].where;
-      expect(where.createdAt).toEqual({ gte: from, lte: to });
+      expect(where.createdAt).toEqual({ gte: new Date(from), lte: new Date(to) });
     });
 
     it('scopes unbatched by partner.clientId (not the null batch relation)', async () => {
