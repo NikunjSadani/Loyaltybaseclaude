@@ -17,9 +17,9 @@ import { ROLE_ROUTES } from '@/proxy';
 
 // Canonical backend roles — mirror api/prisma/schema.prisma `enum UserRole`.
 const USER_ROLE = new Set([
-  'GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER',
+  'GIFSY_ADMIN', 'GIFSY_STAFF', 'CLIENT_ADMIN', 'MIS_USER',
   'SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR',
-  'SSS', 'WHOLESALER', 'SUB_STOCKIST',
+  'SSS', 'WHOLESALER', 'SUB_STOCKIST', 'VENDOR',
 ]);
 
 const SALES_ROLES = ['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'];
@@ -45,7 +45,11 @@ describe('proxy ROLE_ROUTES — canonical role codes only', () => {
   });
 
   it('/admin and /partner lists remain canonical (regression-proof the working portals too)', () => {
-    expect(ROLE_ROUTES['/admin']).toEqual(['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER']);
+    expect(ROLE_ROUTES['/admin']).toEqual(['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER', 'GIFSY_STAFF']);
     expect(ROLE_ROUTES['/partner']).toEqual(['SSS', 'WHOLESALER', 'SUB_STOCKIST']);
+  });
+
+  it('/admin admits GIFSY_STAFF (assumed-staff brand click must not 307-loop to /auth/login)', () => {
+    expect(ROLE_ROUTES['/admin']).toContain('GIFSY_STAFF');
   });
 });

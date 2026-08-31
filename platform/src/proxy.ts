@@ -55,7 +55,13 @@ const PUBLIC_PATHS = [
 
 export const ROLE_ROUTES: Record<string, string[]> = {
   '/admin/gifsy': ['GIFSY_ADMIN'],                                                // Gifsy-internal only — checked before /admin
-  '/admin':   ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER'],
+  // GIFSY_STAFF is admitted to the /admin portal (their home is /gifsy, but an ASSUMED
+  // staff lands on /admin/* for the brand they picked — RBAC Option-X P5). The loop above
+  // still enforces the /admin/gifsy entry independently, so staff remain blocked from the
+  // owner-only /admin/gifsy pages; fine-grained per-page gating is done client-side
+  // (AdminRouteGuard, which admits assumed staff) and per-endpoint in the backend. Omitting
+  // GIFSY_STAFF here 307'd every assumed-staff brand click to /auth/login = infinite loop.
+  '/admin':   ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER', 'GIFSY_STAFF'],
   '/sales':   ['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'], // canonical UserRole enum — must match PORTAL_ROLES.sales (stale legacy codes here 307'd every sales login to /auth/login)
   '/partner': ['SSS', 'WHOLESALER', 'SUB_STOCKIST'],
 }
