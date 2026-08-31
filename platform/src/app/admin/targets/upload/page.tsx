@@ -47,6 +47,8 @@ interface UploadResult {
   totalRows:     number;
   acceptedCount: number;
   rejectedCount: number;
+  /** Ground truth: outlet-month targets actually written to the backend this upload. */
+  savedCount?:   number;
   rows:          UploadRow[];
 }
 
@@ -455,8 +457,34 @@ export default function TargetUploadPage() {
       </div>
 
       {/* ── Section 4: Results ─────────────────────────────────────────────── */}
-      {result && (
+      {result && (() => {
+        // Ground truth of what persisted (backend `savedCount`; falls back to
+        // acceptedCount for older API builds). This drives the explicit "saved to
+        // the backend" confirmation the admin needs.
+        const savedCount   = result.savedCount ?? result.acceptedCount;
+        const savedMonths  = (result.writableMonths && result.writableMonths.length > 0)
+          ? result.writableMonths.length
+          : result.monthsInBatch.length;
+        return (
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm px-6 py-5 space-y-4">
+          {/* Prominent submit confirmation — the admin's proof the upload reached the backend. */}
+          {savedCount > 0 && (
+            <div className="flex items-start gap-3 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3.5">
+              <CheckCircle2 className="w-5 h-5 mt-0.5 shrink-0 text-emerald-600" />
+              <div className="space-y-0.5">
+                <p className="text-sm font-semibold text-emerald-800">
+                  Targets submitted successfully
+                </p>
+                <p className="text-xs text-emerald-700">
+                  {savedCount.toLocaleString()} outlet-month target{savedCount !== 1 ? 's' : ''} saved
+                  to the system{savedMonths > 0 ? ` across ${savedMonths} month${savedMonths !== 1 ? 's' : ''}` : ''}
+                  {result.rejectedCount > 0 ? ` · ${result.rejectedCount} row${result.rejectedCount !== 1 ? 's' : ''} skipped (see below)` : ''}.
+                  You can confirm anytime with <span className="font-semibold">Download Final Targets</span> above.
+                </p>
+              </div>
+            </div>
+          )}
+
           <div className="flex items-center justify-between">
             <p className="text-sm font-semibold text-gray-900">Upload Result</p>
             <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full">
@@ -541,7 +569,8 @@ export default function TargetUploadPage() {
             </div>
           )}
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

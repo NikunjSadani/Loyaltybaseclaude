@@ -521,6 +521,11 @@ export class TargetsService {
       totalRows,
       acceptedCount,
       rejectedCount,
+      // The GROUND TRUTH of what was actually persisted this upload: one OutletTarget
+      // upsert per (outlet, writable-month) with ≥1 non-blank KPI. This is the number
+      // the confirmation message reports — `acceptedCount` can be higher because it
+      // counts parse-valid rows for LOCKED past months too, which are not written.
+      savedCount:    targetOps.length,
       rows:          parseResult.rows,
     };
   }
