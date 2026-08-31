@@ -296,3 +296,174 @@ export function ticketAgingXlsxRows(rows: TicketAgingRow[]): Record<string, unkn
     'Last updated': isoToDate(r.lastUpdatedAt),
   }));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Target vs Sales Performance
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Max inclusive span (in months) for the Target vs Sales report. Kept as a named
+ * constant so the DTO/service message, the FE validation copy, and the tests all
+ * point at one source of truth.
+ */
+export const TARGET_VS_SALES_MAX_MONTHS = 15;
+
+/** A KPI column definition (from the tenant's enabled KpiDef catalogue). */
+export interface TargetVsSalesKpiDef {
+  code: string;
+  label: string;
+  unit?: string | null;
+}
+
+/**
+ * The per-outlet×KPI shape produced by TargetsService.getPace — re-declared here
+ * (structurally identical) so the pure row-builder can be unit-tested without the
+ * targets module. `target`/`achieved`/`pace` are null when the key is ABSENT
+ * (never stored) — a stored value of 0 is a real 0, NOT null.
+ */
+export interface PaceKpi {
+  code: string;
+  target: number | null;
+  achieved: number | null;
+  pace: number | null;
+}
+export interface PaceOutlet {
+  outletCode: string;
+  outletName: string;
+  outletType: string;
+  month: string;
+  kpis: PaceKpi[];
+}
+/** getPace's output for ONE month, tagged with that month. */
+export interface PaceMonthResult {
+  month: string; // YYYY-MM
+  outlets: PaceOutlet[];
+}
+
+/**
+ * Ordered inclusive YYYY-MM list between from/to. Throws RangeError when
+ * from > to or when the span exceeds TARGET_VS_SALES_MAX_MONTHS (15) — the
+ * service turns either into a 400 with the RangeError's message.
+ */
+export function targetVsSalesMonthList(fromYYYYMM: string, toYYYYMM: string): string[] {
+  const [fromYear, fromMonth] = fromYYYYMM.split('-').map(Number);
+  const [toYear, toMonth] = toYYYYMM.split('-').map(Number);
+
+  const fromTotal = fromYear * 12 + (fromMonth - 1);
+  const toTotal = toYear * 12 + (toMonth - 1);
+
+  if (fromTotal > toTotal) {
+    throw new RangeError(`fromMonth (${fromYYYYMM}) must not be after toMonth (${toYYYYMM}).`);
+  }
+
+  const count = toTotal - fromTotal + 1;
+  if (count > TARGET_VS_SALES_MAX_MONTHS) {
+    throw new RangeError(
+      `Period spans ${count} months — maximum allowed is ${TARGET_VS_SALES_MAX_MONTHS} months (inclusive).`,
+    );
+  }
+
+  const out: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const total = fromTotal + i;
+    const year = Math.floor(total / 12);
+    const month = (total % 12) + 1;
+    out.push(`${year}-${String(month).padStart(2, '0')}`);
+  }
+  return out;
+}
+
+/** The three column headers a KPI contributes, in order. */
+export function targetVsSalesKpiHeaders(label: string): [string, string, string] {
+  return [`${label} Target`, `${label} Achieved`, `${label} Pace %`];
+}
+
+/**
+ * The full ordered header-key list for a Target vs Sales sheet: four lead columns
+ * then Target/Achieved/Pace % per KPI (KpiDef order). Used to project every row
+ * (so the xlsx column order is deterministic) and to seed an all-blank row when
+ * there is no data (so the download still carries its headers).
+ */
+export function targetVsSalesHeaderKeys(kpiDefs: TargetVsSalesKpiDef[]): string[] {
+  const keys = ['Outlet Code', 'Outlet Name', 'Outlet Type', 'Month'];
+  for (const k of kpiDefs) keys.push(...targetVsSalesKpiHeaders(k.label));
+  return keys;
+}
+
+/** pace ratio → percentage rounded to 1 decimal (e.g. 0.8753 → 87.5). */
+function paceToPct(pace: number): number {
+  return Math.round(pace * 1000) / 10;
+}
+
+/**
+ * Build the flat (outlet × month) grid for the Target vs Sales report.
+ *
+ * Row set: one row per (qualifying outlet × EVERY month in range), where a
+ * "qualifying" outlet is any outlet that has at least one target OR actual in the
+ * range (i.e. appears in getPace for at least one month). This makes the range a
+ * contiguous timeline — a month/outlet with no upload appears as a row whose KPI
+ * cells are all BLANK (not 0), and a KPI with no target/actual within an
+ * otherwise-present outlet-month is also BLANK. A stored value of 0 is a real 0
+ * and is emitted as 0 (mirrors the upload rule "blank cells are skipped, not
+ * stored as 0"). Pace % is blank whenever pace is null (target absent or 0).
+ *
+ * Rows are ordered by outletCode then month; KPI columns follow KpiDef order.
+ * Every row carries the identical key set (targetVsSalesHeaderKeys), so
+ * json_to_sheet derives a complete, stable header row.
+ */
+export function buildTargetVsSalesRows(
+  months: string[],
+  kpiDefs: TargetVsSalesKpiDef[],
+  paceResults: PaceMonthResult[],
+): { rows: Record<string, unknown>[]; kpis: TargetVsSalesKpiDef[]; headerKeys: string[] } {
+  // Index: `${month}::${outletCode}` → (code → PaceKpi); plus outlet meta and the
+  // set of qualifying outlet codes (any outlet seen in any month).
+  const byMonthOutlet = new Map<string, Map<string, PaceKpi>>();
+  const meta = new Map<string, { name: string; type: string }>();
+  const qualifying = new Set<string>();
+
+  for (const { month, outlets } of paceResults) {
+    for (const o of outlets) {
+      qualifying.add(o.outletCode);
+      const kpiMap = new Map<string, PaceKpi>();
+      for (const k of o.kpis) kpiMap.set(k.code, k);
+      byMonthOutlet.set(`${month}::${o.outletCode}`, kpiMap);
+
+      // Capture the friendliest meta seen (prefer a non-empty name/type).
+      const prev = meta.get(o.outletCode);
+      meta.set(o.outletCode, {
+        name: prev?.name || o.outletName || o.outletCode,
+        type: prev?.type || o.outletType || '',
+      });
+    }
+  }
+
+  const headerKeys = targetVsSalesHeaderKeys(kpiDefs);
+  const sortedOutlets = [...qualifying].sort((a, b) => a.localeCompare(b));
+
+  const rows: Record<string, unknown>[] = [];
+  for (const outletCode of sortedOutlets) {
+    const m = meta.get(outletCode) ?? { name: outletCode, type: '' };
+    for (const month of months) {
+      const kpiMap = byMonthOutlet.get(`${month}::${outletCode}`);
+      const row: Record<string, unknown> = {
+        'Outlet Code': outletCode,
+        'Outlet Name': m.name,
+        'Outlet Type': m.type,
+        Month: month,
+      };
+      for (const def of kpiDefs) {
+        const [tHdr, aHdr, pHdr] = targetVsSalesKpiHeaders(def.label);
+        const k = kpiMap?.get(def.code);
+        // Blank ('') when the KPI key is absent (null) OR the outlet-month has no
+        // data at all; a real 0 stays 0.
+        row[tHdr] = k && k.target !== null ? k.target : '';
+        row[aHdr] = k && k.achieved !== null ? k.achieved : '';
+        row[pHdr] = k && k.pace !== null ? paceToPct(k.pace) : '';
+      }
+      rows.push(row);
+    }
+  }
+
+  return { rows, kpis: kpiDefs, headerKeys };
+}

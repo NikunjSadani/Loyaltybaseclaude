@@ -6,15 +6,20 @@ import { KycService } from '../kyc/kyc.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
 import { isKycInFlight, isReKycPending } from '../common/kyc-rekyc.helper';
-import { PointsLedgerQueryDto, TicketAgingQueryDto } from './dto/reports.dto';
+import { TargetsService } from '../targets/targets.service';
+import { PointsLedgerQueryDto, TargetVsSalesQueryDto, TicketAgingQueryDto, ReportFormat } from './dto/reports.dto';
 import {
   aggregateLedgerToRow,
+  buildTargetVsSalesRows,
   buildTicketAgingRow,
   monthsInRange,
+  PaceMonthResult,
   PointsLedgerReportRow,
   pointsLedgerXlsxRows,
   ReportMonth,
   summarizeAging,
+  targetVsSalesHeaderKeys,
+  targetVsSalesMonthList,
   TicketAgingRow,
   ticketAgingXlsxRows,
 } from './reports/report-helpers';
@@ -148,6 +153,7 @@ export class ReportsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly kyc: KycService,
+    private readonly targets: TargetsService,
   ) {}
 
   private isValidYYYYMM(s: string): boolean {
@@ -688,5 +694,78 @@ export class ReportsService {
 
     const summary = summarizeAging(rows);
     return { rows, summary, asOf: asOf.toISOString() };
+  }
+
+  // ── Target vs Sales Performance ───────────────────────────────────────────────
+  /**
+   * GET /v1/admin/reports/target-vs-sales — json (default, on-screen preview) or
+   * xlsx download. One row per (outlet × month) across an inclusive fromMonth→
+   * toMonth range (max 15 months). For each enabled KpiDef the sheet carries
+   * three columns: Target, Achieved, Pace %.
+   *
+   * The target↔actual join is NOT re-implemented: it delegates to
+   * TargetsService.getPace per month (the exact OutletTarget.targetValues ↔
+   * OutletSalesRecord.kpiValues join on (clientId, outletCode, month) with the
+   * pace = achieved÷target divide-by-zero guard). getPace is tenant-scoped by
+   * `user.clientId` from the JWT — this endpoint takes NO clientId param, so a
+   * caller cannot read another tenant's data (an un-assumed GIFSY_ADMIN sees only
+   * its own — empty — client, an assumed one sees the assumed tenant, exactly like
+   * every sibling report). Batches one getPace (2 queries) per month + one KpiDef
+   * query — never N+1 per outlet.
+   *
+   * Blank-not-zero: getPace returns null for an ABSENT target/actual key; those
+   * become '' (blank) here, while a stored 0 stays 0 — mirroring the upload rule
+   * "blank cells are skipped, not stored as 0". Pace % is blank when pace is null.
+   */
+  async targetVsSales(user: JwtPayload, q: TargetVsSalesQueryDto) {
+    const fromMonth = q.fromMonth ?? '';
+    const toMonth = q.toMonth ?? '';
+    const format = q.format ?? ReportFormat.JSON;
+
+    if (!fromMonth || !toMonth) {
+      throw new BadRequestException('Query params `fromMonth` and `toMonth` (YYYY-MM) are required.');
+    }
+    if (!this.isValidYYYYMM(fromMonth) || !this.isValidYYYYMM(toMonth)) {
+      throw new BadRequestException('`fromMonth` and `toMonth` must be in YYYY-MM format.');
+    }
+
+    let months: string[];
+    try {
+      months = targetVsSalesMonthList(fromMonth, toMonth);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Invalid period range.';
+      throw new BadRequestException(msg);
+    }
+
+    // KPI columns = the tenant's ENABLED KpiDef catalogue, in KpiDef order.
+    const kpiDefs = await this.prisma.kpiDef.findMany({
+      where: { clientId: user.clientId, enabled: true },
+      orderBy: [{ order: 'asc' }, { code: 'asc' }],
+      select: { code: true, label: true, unit: true },
+    });
+
+    // Reuse getPace's join per month (tenant-scoped by user.clientId).
+    const paceResults: PaceMonthResult[] = [];
+    for (const month of months) {
+      const res = await this.targets.getPace(user, { month });
+      paceResults.push({ month, outlets: res.outlets });
+    }
+
+    const { rows, kpis } = buildTargetVsSalesRows(months, kpiDefs, paceResults);
+
+    if (format === ReportFormat.XLSX) {
+      // Seed an all-blank row so an empty result still carries every header column.
+      const headerKeys = targetVsSalesHeaderKeys(kpiDefs);
+      const sheetRows = rows.length
+        ? rows
+        : [Object.fromEntries(headerKeys.map((h) => [h, '']))];
+      const buffer = buildXlsx([{ name: 'Target vs Sales', rows: sheetRows }]);
+      return new StreamableFile(buffer, {
+        type: XLSX_TYPE,
+        disposition: `attachment; filename="target-vs-sales-${fromMonth}-to-${toMonth}.xlsx"`,
+      });
+    }
+
+    return { fromMonth, toMonth, months, kpis, rows };
   }
 }

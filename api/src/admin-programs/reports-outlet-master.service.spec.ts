@@ -12,6 +12,7 @@ import * as XLSX from 'xlsx';
 import { ReportsService } from './reports.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { KycService } from '../kyc/kyc.service';
+import { TargetsService } from '../targets/targets.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const admin: JwtPayload = { sub: 'a1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
@@ -76,6 +77,8 @@ describe('ReportsService.outletMaster (57 columns)', () => {
         ReportsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: KycService, useValue: mockKyc },
+        // outletMaster does not use TargetsService, but ReportsService now depends on it.
+        { provide: TargetsService, useValue: { getPace: jest.fn() } },
       ],
     }).compile();
     service = module.get(ReportsService);

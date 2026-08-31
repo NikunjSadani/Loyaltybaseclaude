@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { KycModule } from '../kyc/kyc.module';
+import { TargetsModule } from '../targets/targets.module';
 
 import { ChannelPartnersController } from './channel-partners.controller';
 import { VisibilityController } from './visibility.controller';
@@ -25,7 +26,7 @@ import { BannerConfigService } from './banner-config.service';
  * SchemeReportController now owns the media-link export.)
  */
 @Module({
-  imports: [PrismaModule, KycModule],
+  imports: [PrismaModule, KycModule, TargetsModule],
   controllers: [
     ChannelPartnersController,
     VisibilityController,

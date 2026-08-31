@@ -1,9 +1,29 @@
-import { IsEnum, IsIn, IsOptional, IsString } from 'class-validator';
+import { IsEnum, IsIn, IsOptional, IsString, Matches } from 'class-validator';
 import { TicketCategory, TicketPriority } from '@prisma/client';
 
 export enum ReportFormat {
   JSON = 'json',
   XLSX = 'xlsx',
+}
+
+/**
+ * Query for GET /v1/admin/reports/target-vs-sales.
+ * `fromMonth`/`toMonth` are YYYY-MM (format enforced here; the inclusive span is
+ * capped at 15 months in the service, mirroring the max-15 rule). Defaults to
+ * JSON (on-screen preview); `format=xlsx` streams the download.
+ */
+export class TargetVsSalesQueryDto {
+  @IsString()
+  @Matches(/^\d{4}-(0[1-9]|1[0-2])$/, { message: 'fromMonth must be in YYYY-MM format' })
+  fromMonth!: string;
+
+  @IsString()
+  @Matches(/^\d{4}-(0[1-9]|1[0-2])$/, { message: 'toMonth must be in YYYY-MM format' })
+  toMonth!: string;
+
+  @IsOptional()
+  @IsEnum(ReportFormat)
+  format?: ReportFormat = ReportFormat.JSON;
 }
 
 /**
