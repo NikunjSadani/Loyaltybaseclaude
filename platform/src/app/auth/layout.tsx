@@ -1,11 +1,21 @@
 import type { Metadata } from 'next';
 import { SiteFooter } from '@/components/layout/site-footer';
+import { getTenantConfig } from '@/lib/platform/server';
 
 export const metadata: Metadata = {
   title: 'Sign In',
 };
 
-export default function AuthLayout({ children }: { children: React.ReactNode }) {
+export default async function AuthLayout({ children }: { children: React.ReactNode }) {
+  // Per-tenant login branding: resolve the tenant from the request host and use its
+  // uploaded white wordmark. Falls back to a hex mark + the tenant display name when no
+  // wordmark is set — mirroring the post-login sidebar (components/layout/sidebar.tsx), so
+  // pre- and post-login branding match. On the default/operator host this resolves to the
+  // same config that was previously hardcoded.
+  const config = await getTenantConfig();
+  const wordmarkWhiteUrl = config.branding.wordmarkWhiteUrl;
+  const brandName = config.branding.displayName || 'LoyaltyBase';
+
   return (
     <div className="min-h-screen flex flex-col lg:flex-row">
       {/* Brand panel – desktop left / mobile top strip */}
@@ -15,10 +25,21 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
         <div className="absolute -bottom-32 -right-16 w-80 h-80 rounded-full bg-[var(--brand-primary)]/5" />
 
         <div className="relative z-10 text-center max-w-sm">
-          {/* Deoleo wordmark — white variant on the dark brand panel */}
+          {/* Per-tenant white wordmark on the dark brand panel; else a hex mark + name. */}
           <div className="flex flex-col items-center gap-2 mb-8">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/brand/deoleo-wordmark-white.png" alt="Deoleo" className="h-10 w-auto" />
+            {wordmarkWhiteUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={wordmarkWhiteUrl} alt={brandName} className="h-10 w-auto" />
+            ) : (
+              <div className="flex items-center gap-2">
+                <div className="w-9 h-9 bg-[var(--brand-primary)] rounded-lg flex items-center justify-center shrink-0">
+                  <svg viewBox="0 0 40 40" className="w-6 h-6 fill-white">
+                    <path d="M20 4L36 12v16L20 36 4 28V12L20 4z" />
+                  </svg>
+                </div>
+                <span className="text-white font-bold text-2xl leading-tight">{brandName}</span>
+              </div>
+            )}
             <p className="text-white/60 text-sm">Trade Loyalty</p>
           </div>
 
@@ -44,10 +65,21 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
         </div>
       </div>
 
-      {/* Mobile top strip — Deoleo wordmark (white on dark) */}
+      {/* Mobile top strip — per-tenant wordmark (white on dark); else hex mark + name */}
       <div className="lg:hidden bg-[#1A1A2E] px-6 pt-10 pb-8 flex items-center gap-3">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src="/brand/deoleo-wordmark-white.png" alt="Deoleo" className="h-7 w-auto" />
+        {wordmarkWhiteUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={wordmarkWhiteUrl} alt={brandName} className="h-7 w-auto" />
+        ) : (
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 bg-[var(--brand-primary)] rounded-lg flex items-center justify-center shrink-0">
+              <svg viewBox="0 0 40 40" className="w-4 h-4 fill-white">
+                <path d="M20 4L36 12v16L20 36 4 28V12L20 4z" />
+              </svg>
+            </div>
+            <span className="text-white font-bold text-lg leading-tight">{brandName}</span>
+          </div>
+        )}
         <div className="border-l border-white/20 pl-3">
           <p className="text-white/70 text-xs font-medium">Trade Loyalty</p>
           <p className="text-white/50 text-xs">Sign in to continue</p>
