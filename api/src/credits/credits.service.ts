@@ -1314,17 +1314,28 @@ export class CreditsService {
   // the SAME value the upload parser resolves against (`outletTypeAwards[outlet.type]`,
   // where outlet.type is the OutletType.code) — so the configured map keys always
   // match the codes stored on outlets. Tenant-scoped; enabled + active only.
+  // Mirrors GifsyService.getOutletTypeConfigs' DEFAULT-ON semantics EXACTLY so the
+  // award editor and the operator console never disagree: start from the ACTIVE
+  // outlet types, left-overlay the client's OutletTypeClientConfig rows, and treat
+  // a type as enabled unless a SAVED row sets isEnabled=false (`config?.isEnabled ?? true`).
+  // Previously this only listed SAVED enabled rows, so a default-on type WITHOUT a row
+  // was dropped from the editor even though the console showed it enabled — the bug this fixes.
   async listOutletTypes(user: JwtPayload): Promise<{ code: string; label: string }[]> {
-    const configs = await this.prisma.outletTypeClientConfig.findMany({
-      where: {
-        clientId: user.clientId,
-        isEnabled: true,
-        outletType: { isActive: true },
-      },
-      include: { outletType: { select: { code: true, name: true } } },
-    });
-    return configs
-      .map((c) => ({ code: c.outletType.code, label: c.displayName ?? c.outletType.name }))
+    const [types, rows] = await Promise.all([
+      this.prisma.outletType.findMany({ where: { isActive: true } }),
+      this.prisma.outletTypeClientConfig.findMany({
+        where: { clientId: user.clientId },
+      }),
+    ]);
+
+    const rowMap = new Map(rows.map((r) => [r.outletTypeId, r]));
+
+    return types
+      .filter((type) => (rowMap.get(type.id)?.isEnabled ?? true))
+      .map((type) => ({
+        code: type.code,
+        label: rowMap.get(type.id)?.displayName ?? type.name,
+      }))
       .sort((a, b) => a.code.localeCompare(b.code));
   }
 

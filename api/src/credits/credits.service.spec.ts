@@ -93,6 +93,7 @@ const mockPrisma = {
   // Post-commit points-credit WhatsApp reads the partner's redeemable balance AFTER the credit.
   wallet: { findFirst: jest.fn() },
   outlet: { findMany: jest.fn() },
+  outletType: { findMany: jest.fn() },
   outletTypeClientConfig: { findMany: jest.fn() },
   // Visibility-payout TDS reads (cross-tenant PAN aggregation + carry-forward + one-per-PAN/FY).
   tdsDeductionEntry: { findMany: jest.fn() },
@@ -283,6 +284,80 @@ describe('CreditsService', () => {
 
       // A valid limit at the cap passes.
       expect(await validate(plainToInstance(ListBatchesQueryDto, { limit: 100 }))).toHaveLength(0);
+    });
+  });
+
+  // The award editor's outlet-type list MUST mirror GifsyService.getOutletTypeConfigs'
+  // DEFAULT-ON semantics: an active outlet type is enabled unless a SAVED client config
+  // row disables it. Regression guard for the "console shows enabled, editor shows none" bug.
+  describe('listOutletTypes', () => {
+    const RETAIL = { id: 'ot-retail', code: 'RETAIL', name: 'Retail', isActive: true };
+    const WHOLESALE = { id: 'ot-wholesale', code: 'WHOLESALE', name: 'Wholesale', isActive: true };
+
+    it('INCLUDES an active outlet type with NO config row (default-on)', async () => {
+      mockPrisma.outletType.findMany.mockResolvedValue([RETAIL]);
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]); // no saved rows
+      const res = await service.listOutletTypes(admin);
+      expect(res).toEqual([{ code: 'RETAIL', label: 'Retail' }]);
+    });
+
+    it('INCLUDES an active type with a saved isEnabled=true row, using displayName when set', async () => {
+      mockPrisma.outletType.findMany.mockResolvedValue([RETAIL]);
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletTypeId: 'ot-retail', isEnabled: true, displayName: 'Retail Stores' },
+      ]);
+      const res = await service.listOutletTypes(admin);
+      expect(res).toEqual([{ code: 'RETAIL', label: 'Retail Stores' }]);
+    });
+
+    it('falls back to the outlet type name when the saved row has a null displayName', async () => {
+      mockPrisma.outletType.findMany.mockResolvedValue([RETAIL]);
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletTypeId: 'ot-retail', isEnabled: true, displayName: null },
+      ]);
+      const res = await service.listOutletTypes(admin);
+      expect(res).toEqual([{ code: 'RETAIL', label: 'Retail' }]);
+    });
+
+    it('EXCLUDES an active type whose saved row sets isEnabled=false', async () => {
+      mockPrisma.outletType.findMany.mockResolvedValue([RETAIL, WHOLESALE]);
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletTypeId: 'ot-wholesale', isEnabled: false, displayName: null },
+      ]);
+      const res = await service.listOutletTypes(admin);
+      // RETAIL default-on (no row) stays; WHOLESALE explicitly disabled drops.
+      expect(res).toEqual([{ code: 'RETAIL', label: 'Retail' }]);
+    });
+
+    it('EXCLUDES an inactive outlet type even when a saved enabled row exists', async () => {
+      // Inactive types are filtered by the outletType.findMany({ isActive: true }) query itself,
+      // so a stale config row for an inactive type can never resurface it.
+      mockPrisma.outletType.findMany.mockResolvedValue([RETAIL]); // WHOLESALE inactive → not returned
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletTypeId: 'ot-wholesale', isEnabled: true, displayName: 'Wholesale' },
+      ]);
+      const res = await service.listOutletTypes(admin);
+      expect(res).toEqual([{ code: 'RETAIL', label: 'Retail' }]);
+      // Assert the isActive filter is what enforces this.
+      expect(mockPrisma.outletType.findMany.mock.calls[0][0]).toEqual({
+        where: { isActive: true },
+      });
+    });
+
+    it('is tenant-scoped: the config lookup is filtered by the caller clientId', async () => {
+      mockPrisma.outletType.findMany.mockResolvedValue([RETAIL]);
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
+      await service.listOutletTypes(admin);
+      expect(mockPrisma.outletTypeClientConfig.findMany.mock.calls[0][0]).toEqual({
+        where: { clientId: 'deoleo' },
+      });
+    });
+
+    it('sorts the returned types by code', async () => {
+      mockPrisma.outletType.findMany.mockResolvedValue([WHOLESALE, RETAIL]); // unsorted input
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
+      const res = await service.listOutletTypes(admin);
+      expect(res.map((r) => r.code)).toEqual(['RETAIL', 'WHOLESALE']);
     });
   });
 
@@ -970,25 +1045,9 @@ describe('CreditsService', () => {
     });
   });
 
-  describe('listOutletTypes', () => {
-    it('returns the tenant ENABLED+active outlet types as {code,label}, sorted, displayName preferred', async () => {
-      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
-        { displayName: null, outletType: { code: 'WHOLESALER', name: 'Wholesaler' } },
-        { displayName: 'Super Stockist', outletType: { code: 'SSS', name: 'SSS' } },
-      ]);
-      const res = await service.listOutletTypes(admin);
-      // sorted by code: SSS before WHOLESALER; displayName preferred when present
-      expect(res).toEqual([
-        { code: 'SSS', label: 'Super Stockist' },
-        { code: 'WHOLESALER', label: 'Wholesaler' },
-      ]);
-      // tenant-scoped + enabled/active filter
-      const where = mockPrisma.outletTypeClientConfig.findMany.mock.calls[0][0].where;
-      expect(where.clientId).toBe(admin.clientId);
-      expect(where.isEnabled).toBe(true);
-      expect(where.outletType).toEqual({ isActive: true });
-    });
-  });
+  // NOTE: listOutletTypes is fully covered by the describe block above (default-on
+  // semantics mirroring GifsyService.getOutletTypeConfigs). The prior test here
+  // asserted the OLD saved-enabled-row-only query and was removed with the fix.
 
   describe('patchField', () => {
     it('maps the deactivate action to isActive=false', async () => {
