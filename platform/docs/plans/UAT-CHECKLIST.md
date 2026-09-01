@@ -30,7 +30,7 @@
 
 | # | Step | Expected | ✅/❌ |
 |---|---|---|---|
-| 0.1 | Confirm the env under test. **UAT runs on STAGING** with **real MSG91 OTP** (no fixed OTP). Subdomains: GIFSY `uat.app.gifsy.in`, Deoleo `uat.deoleoloyalty.gifsy.in`. | Both load the login screen over HTTPS. | |
+| 0.1 | Confirm the env under test. **UAT runs on STAGING** with **real MSG91 OTP** (no fixed OTP). Hosts (single-label `uat-<slug>.gifsy.in` convention, wildcard-cert-covered): GIFSY `uat-app.gifsy.in`, Deoleo `uat-deoleoloyalty.gifsy.in`. *(The old nested `uat.app.gifsy.in` / `uat.deoleoloyalty.gifsy.in` still work during the transition; single-label needs a live `wrangler deploy` of the edge Worker.)* | Both load the login screen over HTTPS. | |
 | 0.2 | Confirm the serving image is the fix-wave build — `gcloud run services describe gifsy-api-staging` / `gifsy-frontend-staging` shows an image tag ending in the latest `develop` short-SHA. | SHA matches the pushed fix-wave commit. | |
 | 0.3 | Confirm the staging DB has been migrated to include `20260621120000` + `20260621130000` (auto-applies on `develop` push). | Migrations show as applied; no pending. | |
 | 0.4 | Have the **test phone numbers** for each role ready. **Staging OTP is `123456` for every number (FIXED_OTP, re-enabled 2026-06-22) — no real SIM/SMS needed.** Confirm the phones against the **current staging seed** (these have drifted — verify, don't assume): GIFSY admin `9830011252`/clientId gifsy, Deoleo CLIENT_ADMIN `6289864191`, partner+outlet `7795096288`, (optional) MIS. | Each number logs in with OTP `123456`. | |
@@ -43,8 +43,8 @@
 
 | # | Role | Steps | Expected | ✅/❌ |
 |---|---|---|---|---|
-| 1.1 | GIFSY admin | Login via `uat.app.gifsy.in` with OTP. | Lands on the GIFSY console; identity shows the real operator, not a demo persona. | |
-| 1.2 | CLIENT_ADMIN (Deoleo) | Login via `uat.deoleoloyalty.gifsy.in`. | Lands on the Deoleo admin dashboard, scoped to Deoleo. | |
+| 1.1 | GIFSY admin | Login via `uat-app.gifsy.in` (or old `uat.app.gifsy.in`) with OTP. | Lands on the GIFSY console; identity shows the real operator, not a demo persona. | |
+| 1.2 | CLIENT_ADMIN (Deoleo) | Login via `uat-deoleoloyalty.gifsy.in` (or old `uat.deoleoloyalty.gifsy.in`). | Lands on the Deoleo admin dashboard, scoped to Deoleo. | |
 | 1.3 | Partner | Login with the partner phone. | Lands on the partner app (wallet/home). | |
 | 1.4 | Sales | Login with the sales phone. | Lands on the sales app (beat/tasks). | |
 | 1.5 | Any | Enter a **wrong OTP**. | Honest error; no login; no session created. | |

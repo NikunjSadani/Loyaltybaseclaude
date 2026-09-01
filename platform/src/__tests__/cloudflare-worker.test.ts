@@ -61,13 +61,34 @@ describe('worker — resolveOrigin routing', () => {
     expect(captured!.url.startsWith(API_STAGING)).toBe(true);
   });
 
-  it('uat.deoleoloyalty.gifsy.in → FRONTEND_STAGING', async () => {
+  it('uat.deoleoloyalty.gifsy.in (OLD nested staging form) → FRONTEND_STAGING', async () => {
     await hit('https://uat.deoleoloyalty.gifsy.in/auth/login');
+    expect(captured!.url.startsWith(FRONTEND_STAGING)).toBe(true);
+  });
+
+  it('uat-deoleoloyalty.gifsy.in (NEW single-label staging form) → FRONTEND_STAGING', async () => {
+    await hit('https://uat-deoleoloyalty.gifsy.in/auth/login');
+    expect(captured!.url.startsWith(FRONTEND_STAGING)).toBe(true);
+  });
+
+  it('uat-clientb.gifsy.in (NEW single-label staging tenant) → FRONTEND_STAGING', async () => {
+    await hit('https://uat-clientb.gifsy.in/');
+    expect(captured!.url.startsWith(FRONTEND_STAGING)).toBe(true);
+  });
+
+  it('uat-app.gifsy.in (NEW single-label staging operator) → FRONTEND_STAGING', async () => {
+    await hit('https://uat-app.gifsy.in/gifsy');
     expect(captured!.url.startsWith(FRONTEND_STAGING)).toBe(true);
   });
 
   it('deoleoloyalty.gifsy.in (tenant frontend) → FRONTEND_PROD', async () => {
     await hit('https://deoleoloyalty.gifsy.in/auth/login');
+    expect(captured!.url.startsWith(FRONTEND_PROD)).toBe(true);
+  });
+
+  it('a prod host with a mid-host `uat-` label (not the first) → FRONTEND_PROD', async () => {
+    // Only the FIRST label starting `uat-` marks staging; a non-leading one must not.
+    await hit('https://clientb.uat-x.gifsy.in/');
     expect(captured!.url.startsWith(FRONTEND_PROD)).toBe(true);
   });
 
@@ -109,6 +130,11 @@ describe('worker — header transforms on the forwarded request', () => {
   it('forwards the REAL host even for a uat.* host (no alias rewrite)', async () => {
     await hit('https://uat.deoleoloyalty.gifsy.in/x');
     expect(captured!.headers.get('x-forwarded-host')).toBe('uat.deoleoloyalty.gifsy.in');
+  });
+
+  it('forwards the REAL host for a NEW uat-<slug> host (no alias rewrite)', async () => {
+    await hit('https://uat-deoleoloyalty.gifsy.in/x');
+    expect(captured!.headers.get('x-forwarded-host')).toBe('uat-deoleoloyalty.gifsy.in');
   });
 
   it('strips cf-connecting-ip / cf-ipcountry / cf-ray / cf-visitor', async () => {

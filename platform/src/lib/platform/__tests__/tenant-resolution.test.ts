@@ -65,6 +65,43 @@ describe('resolveSlugFromHostname', () => {
     expect(resolveSlugFromHostname('UAT.DeoleoLoyalty.Gifsy.In:443')).toBe('deoleo');
   });
 
+  // ── NEW single-label staging convention `uat-<slug>.gifsy.in` (wildcard-cert-covered) ──
+  it('maps the single-label staging branded domain uat-deoleoloyalty.gifsy.in to deoleo', () => {
+    // `uat-` is stripped from the FIRST label → deoleoloyalty.gifsy.in → domain map → deoleo.
+    expect(resolveSlugFromHostname('uat-deoleoloyalty.gifsy.in')).toBe('deoleo');
+  });
+
+  it('maps a single-label staging subdomain tenant uat-clientb.gifsy.in to clientb', () => {
+    // `uat-` stripped → clientb.gifsy.in → subdomain heuristic → clientb.
+    expect(resolveSlugFromHostname('uat-clientb.gifsy.in')).toBe('clientb');
+  });
+
+  it('maps a single-label staging subdomain tenant uat-deoleo.gifsy.in to deoleo', () => {
+    expect(resolveSlugFromHostname('uat-deoleo.gifsy.in')).toBe('deoleo');
+  });
+
+  it('maps the single-label staging operator console uat-app.gifsy.in to the gifsy slug', () => {
+    // Matched by OPERATOR_HOSTS as a full host BEFORE any strip (else `app` → reserved → null).
+    expect(resolveSlugFromHostname('uat-app.gifsy.in')).toBe('gifsy');
+  });
+
+  it('is case/port-insensitive for the single-label staging prefix', () => {
+    expect(resolveSlugFromHostname('UAT-DeoleoLoyalty.Gifsy.In:443')).toBe('deoleo');
+    expect(resolveSlugFromHostname('UAT-App.Gifsy.In')).toBe('gifsy');
+  });
+
+  it('single-label staging domain round-trips to the right config', () => {
+    const slug = resolveSlugFromHostname('uat-deoleoloyalty.gifsy.in');
+    const cfg = resolveClientConfig(slug!);
+    expect(cfg!.slug).toBe('deoleo');
+    expect(cfg!.branding.displayName).toBe('Deoleo India');
+  });
+
+  it('only strips `uat-` from the FIRST label (a mid-host uat- label is untouched)', () => {
+    // Regression guard: the strip must not fire on a non-leading `uat-` label.
+    expect(resolveSlugFromHostname('clientb.uat-x.gifsy.in')).toBe('clientb');
+  });
+
   it('operator-console match is case-insensitive and ignores the port', () => {
     expect(resolveSlugFromHostname('APP.Gifsy.In:443')).toBe('gifsy');
     expect(resolveSlugFromHostname('UAT.App.Gifsy.In')).toBe('gifsy');

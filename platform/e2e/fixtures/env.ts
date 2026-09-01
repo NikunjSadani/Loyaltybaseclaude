@@ -34,7 +34,12 @@ export type TenantStrategy =
   /** Legacy local `next dev`: type the clientId into the dev-only "Organization" override field. Kept for
    *  back-compat, but `next dev` no longer runs the proxy for `/api/*` — prefer `hostHeader` + a prod build. */
   | 'devClientIdField'
-  /** Staging: tenant comes from the real host/subdomain; the override field is NOT rendered (prod build). */
+  /**
+   * Staging: tenant comes from the real host/subdomain (via E2E_BASE_URL); the override field is NOT
+   * rendered (prod build). Staging hosts use the single-label `uat-<slug>.gifsy.in` convention (e.g.
+   * `uat-deoleoloyalty.gifsy.in`, `uat-app.gifsy.in`), covered by the `*.gifsy.in` wildcard cert; the
+   * old nested `uat.<slug>.gifsy.in` form still resolves during the transition. See ENVIRONMENTS.md.
+   */
   | 'subdomain';
 
 /** How the harness obtains the OTP for a given phone. */

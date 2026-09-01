@@ -21,6 +21,13 @@ export interface RoleDef {
    * `x-forwarded-host` so the FE proxy/login-action resolves the tenant from the host, exactly like a
    * real subdomain on staging. `app.gifsy.in` → operator (gifsy); a tenant's branded/subdomain host →
    * its slug (see lib/platform/tenant-resolution.ts OPERATOR_HOSTS + resolveSlugFromDomainMap).
+   *
+   * These are PROD-shaped hosts on purpose: locally we exercise the prod resolution path. On STAGING
+   * the `subdomain` strategy (env.ts) ignores this field and takes the tenant from the REAL host in
+   * E2E_BASE_URL — which now uses the single-label `uat-<slug>.gifsy.in` staging convention (e.g.
+   * `uat-deoleoloyalty.gifsy.in`, `uat-app.gifsy.in`), covered by the `*.gifsy.in` wildcard cert. The
+   * old nested `uat.<slug>.gifsy.in` form still resolves during the transition. Both strip to the same
+   * prod-shaped host in tenant-resolution.ts, so this fixture stays prod-shaped.
    */
   host: string;
   /** dev fixed OTP; staging would inject a real one. */

@@ -17,6 +17,23 @@
 - **Prod is never pushed by us** (`main`, approval-gated). Never point dev at prod; never `prisma migrate dev` (resets `gifsy_dev`).
 - **DB migrations (2026-06-20):** schema applies from one squashed Prisma **baseline** via `prisma migrate deploy` run as an **in-VPC Cloud Run Job** (the shared instance is private-IP). **Staging auto-migrates** on every `develop` push (`gifsy-migrate-staging` in `deploy-staging.yml`, before the new revision serves); **prod is gated** (`gifsy-migrate` job + a one-time P3005 baseline reconcile). `gifsy_dev` is unchanged — db-push / surgical-SQL via the proxy. Full model: [`MIGRATIONS.md`](MIGRATIONS.md).
 
+## Staging host convention (`uat-<slug>.gifsy.in`)
+
+Staging serves every tenant under a **single-label** `uat-<slug>.gifsy.in` host — e.g. `uat-deoleoloyalty.gifsy.in`,
+`uat-clientb.gifsy.in`, and the operator console `uat-app.gifsy.in`. Single-label means it is covered by the existing
+**`*.gifsy.in` wildcard cert + DNS + Worker route** (no per-host cert needed).
+
+- The edge Worker treats a host as **staging** when its first label starts with `uat-` **or** the host starts with `uat.`
+  (`cloudflare-worker/worker.js` → `isStagingHost`) → routes to `FRONTEND_STAGING`.
+- The FE app strips the `uat` marker for tenant resolution (`lib/platform/tenant-resolution.ts`): a leading `uat.` **or**
+  a `uat-` FIRST-label prefix is removed before the domain-map/subdomain lookup (`uat-deoleoloyalty.gifsy.in` → `deoleo`,
+  `uat-app.gifsy.in` → `gifsy` via `OPERATOR_HOSTS`).
+- **Transition-safe:** the OLD nested `uat.<slug>.gifsy.in` form (e.g. `uat.deoleoloyalty.gifsy.in`, `uat.app.gifsy.in`)
+  still resolves, so nothing in flight breaks. It needs a per-host cert; prefer the single-label form going forward.
+- ⚠️ Slugs beginning `uat-` are **reserved by convention** (a `uat-foo.gifsy.in` prod host would be mis-stripped to `foo`).
+- ⚠️ The Worker change only takes effect at the edge after a separate **`wrangler deploy`** (owner-run) from
+  `cloudflare-worker/`. Until then the edge still routes by the old `uat.` rule.
+
 ## What data shows where
 
 **The principle is identical in every environment: the app renders ONLY real data from that environment's database, scoped to the logged-in user's role + tenant. Nothing is hardcoded.** (Fabricated demo numbers — 8,550 pts / 248 partners / persona switchers — are pre-backend leftovers and are bugs; see gap #40. Intended per-page/per-role data: `DATA-VISIBILITY.md`.)

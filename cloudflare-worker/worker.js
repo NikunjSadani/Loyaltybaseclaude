@@ -13,7 +13,14 @@
  *   so onboarding a new tenant frontend host needs NO worker edit — only a
  *   DB/registry domain→slug row (read by Next) and DNS (see wrangler.toml).
  *   Only the API hosts stay explicit (they point at a non-frontend origin).
- *   prod vs staging split is purely the `uat.` prefix.
+ *   prod vs staging split is a `uat` staging marker on the host:
+ *     - NEW single-label form  `uat-<slug>.gifsy.in` (first label starts `uat-`),
+ *       covered by the existing `*.gifsy.in` wildcard cert/DNS (1 label), and
+ *     - OLD nested form         `uat.<slug>.gifsy.in` (host starts `uat.`),
+ *       kept working during the transition (needs a per-host cert).
+ *   Either marker → FRONTEND_STAGING; everything else → FRONTEND_PROD. The FE app
+ *   strips the marker itself for tenant resolution, so the edge forwards the real
+ *   host unchanged in x-forwarded-host (no alias) for BOTH forms.
  *
  * Deployment steps (one-time, done by a human):
  *   1. Add gifsy.in to Cloudflare (change NS at registrar)
@@ -48,8 +55,9 @@ const RESERVED_HOSTS = new Set([
  * Resolve the Cloud Run origin for an incoming public hostname.
  * - Explicit API host        → its API origin.
  * - Reserved host            → null (caller returns 502).
- * - Any other *.gifsy.in host → frontend origin (staging if `uat.` prefixed,
- *   else prod). Tenant slug resolution is Next's job via x-forwarded-host.
+ * - Any other *.gifsy.in host → frontend origin (staging if it carries a `uat`
+ *   staging marker, else prod). Tenant slug resolution is Next's job via
+ *   x-forwarded-host.
  */
 function resolveOrigin(hostname) {
   const apiOrigin = API_ROUTES[hostname]
@@ -57,8 +65,24 @@ function resolveOrigin(hostname) {
 
   if (RESERVED_HOSTS.has(hostname)) return null
 
-  // Coarse frontend rule: uat.* → staging, everything else → prod.
-  return hostname.startsWith('uat.') ? FRONTEND_STAGING : FRONTEND_PROD
+  // Coarse frontend rule: a `uat` staging marker → staging, everything else → prod.
+  return isStagingHost(hostname) ? FRONTEND_STAGING : FRONTEND_PROD
+}
+
+/**
+ * A host is STAGING when it carries either `uat` staging marker:
+ *   - NEW single-label form: the FIRST label starts with `uat-`
+ *     (e.g. `uat-deoleoloyalty.gifsy.in`, `uat-clientb.gifsy.in`, `uat-app.gifsy.in`) —
+ *     one label, so covered by the existing `*.gifsy.in` wildcard cert/DNS.
+ *   - OLD nested form: the host starts with `uat.`
+ *     (e.g. `uat.deoleoloyalty.gifsy.in`, `uat.app.gifsy.in`) — kept for the
+ *     transition; needs a per-host cert.
+ * `uat-app.gifsy.in` is thus the staging OPERATOR host, exactly mirroring the old
+ * `uat.app.gifsy.in`. Both forms → FRONTEND_STAGING.
+ */
+function isStagingHost(hostname) {
+  const firstLabel = hostname.split('.')[0]
+  return firstLabel.startsWith('uat-') || hostname.startsWith('uat.')
 }
 
 export default {
@@ -77,9 +101,10 @@ export default {
     // Forward all original headers.
     // - Host will be set automatically to the backendBase hostname by fetch().
     // - X-Forwarded-Host carries the REAL public hostname so that Next.js
-    //   proxy.ts can resolve the correct tenant slug. Next strips the `uat.`
-    //   prefix and reads the DB/registry domain→slug map itself, so the edge
-    //   forwards the real host with NO alias.
+    //   proxy.ts can resolve the correct tenant slug. Next strips the `uat`
+    //   staging marker itself (a leading `uat.` OR a `uat-` first-label prefix)
+    //   and reads the DB/registry domain→slug map, so the edge forwards the real
+    //   host with NO alias for both the old and new staging host forms.
     const headers = new Headers(request.headers)
     headers.set('x-forwarded-host', hostname)
     headers.set('x-forwarded-proto', url.protocol.replace(':', ''))

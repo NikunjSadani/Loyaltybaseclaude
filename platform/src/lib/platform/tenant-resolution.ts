@@ -45,9 +45,15 @@ const PLATFORM_RESERVED = new Set(['www', 'app', 'api', 'admin', 'status', 'mail
  * full hosts ahead of every other rule. The staging build runs the same code, so
  * the staging host resolves natively (no Worker host-alias needed).
  *   app.gifsy.in      → gifsy   (prod operator console)
- *   uat.app.gifsy.in  → gifsy   (staging operator console)
+ *   uat.app.gifsy.in  → gifsy   (staging operator console — OLD nested form)
+ *   uat-app.gifsy.in  → gifsy   (staging operator console — NEW single-label form)
+ *
+ * NOTE both staging operator hosts are matched as FULL hosts here, BEFORE the `uat`
+ * marker strip below. That is deliberate: stripping `uat-app.gifsy.in` → `app.gifsy.in`
+ * would then hit PLATFORM_RESERVED (`app`) → null, so the full-host match must win first
+ * — exactly as it already does for the old `uat.app.gifsy.in`.
  */
-const OPERATOR_HOSTS = new Set(['app.gifsy.in', 'uat.app.gifsy.in']);
+const OPERATOR_HOSTS = new Set(['app.gifsy.in', 'uat.app.gifsy.in', 'uat-app.gifsy.in']);
 
 /**
  * Registry-derived custom-hostname → slug map, built from each tenant's `domains`
@@ -71,7 +77,7 @@ const REGISTRY_DOMAIN_TO_SLUG: ReadonlyMap<string, string> = new Map(
  * the DB map over the registry map so DB wins). Preserves ALL rules IN ORDER:
  *   1. OPERATOR_HOSTS (full-host)      → 'gifsy'
  *   2. localhost / empty               → DEFAULT_DEV_SLUG
- *   3. strip a leading `uat.` prefix (staging)
+ *   3. strip the `uat` staging marker (leading `uat.` OR `uat-` first-label prefix)
  *   4. domainToSlug lookup (DB-over-registry) → slug
  *   5. bare domain (≤2 labels)         → null
  *   6. PLATFORM_RESERVED first label   → null
@@ -94,13 +100,26 @@ export function resolveSlugFromDomainMap(
     return DEFAULT_DEV_SLUG;
   }
 
-  // Staging serves every TENANT under a `uat.` prefix (uat.deoleoloyalty.gifsy.in,
-  // uat.clientb.app.gifsy.in, …). Strip it so the prod-shaped custom-domain map and the
-  // subdomain heuristic match. Without this, uat.deoleoloyalty.gifsy.in resolves to the
-  // bogus slug `uat` (parts[0]) and EVERY direct tenant login on staging is rejected with
-  // a wrong clientId. The operator host (uat.app.gifsy.in) is matched above before this,
-  // so it is never stripped.
-  const resolveHost = host.startsWith('uat.') ? host.slice(4) : host;
+  // Staging serves every TENANT under a `uat` staging marker on the host. Strip it so the
+  // prod-shaped custom-domain map and the subdomain heuristic match. Two marker forms are
+  // supported during the transition:
+  //   - NEW single-label `uat-<slug>.gifsy.in` (first label starts `uat-`, e.g.
+  //     uat-deoleoloyalty.gifsy.in, uat-clientb.gifsy.in) — one label, so covered by the
+  //     existing `*.gifsy.in` wildcard cert (no per-host cert). Strip `uat-` from the FIRST
+  //     label only → deoleoloyalty.gifsy.in / clientb.gifsy.in.
+  //   - OLD nested `uat.<slug>.gifsy.in` (host starts `uat.`, e.g. uat.deoleoloyalty.gifsy.in)
+  //     — kept working (needs a per-host cert). Strip the leading `uat.` label.
+  // Without this, uat.deoleoloyalty.gifsy.in / uat-deoleoloyalty.gifsy.in resolve to a bogus
+  // slug (`uat` / `uat-deoleoloyalty`) and EVERY direct tenant login on staging is rejected
+  // with a wrong clientId. The operator hosts (uat.app.gifsy.in, uat-app.gifsy.in) are matched
+  // by OPERATOR_HOSTS above before this, so they are never stripped.
+  // TRADEOFF: a real tenant whose slug legitimately begins with `uat-` would be mis-stripped;
+  // slugs starting `uat-` are therefore RESERVED by convention (never onboard one).
+  let resolveHost = host.startsWith('uat.') ? host.slice(4) : host;
+  const [firstLabel, ...restLabels] = resolveHost.split('.');
+  if (firstLabel.startsWith('uat-')) {
+    resolveHost = [firstLabel.slice(4), ...restLabels].join('.');
+  }
 
   // Custom branded domain (full-hostname match) wins over the subdomain heuristic.
   const mapped = domainToSlug.get(resolveHost);

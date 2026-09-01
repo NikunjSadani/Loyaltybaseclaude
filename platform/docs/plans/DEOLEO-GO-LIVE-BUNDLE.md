@@ -131,7 +131,7 @@ the MSG91 template application (a 404 link won't get DLT-approved), the worker n
   than running the scoped wipe — prod was already greenfield/0-users; the wipe runbook stands for the post-UAT clean.)
 - **MSG91 OTP template** ✅ set (`MSG91_OTP_TEMPLATE_ID`=`699d295ba29962881e09d062`; auth-key/sender already present).
   MSG91 confirmed responding; **IP-whitelisting OFF** (not a factor). **B2 worker / B3 templates** = the long pole, cleared.
-- **UAT URL** ✅ `https://uat.deoleoloyalty.gifsy.in` → the staging build (owner UAT / pre-prod view).
+- **UAT URL** ✅ `https://uat-deoleoloyalty.gifsy.in` (single-label `uat-<slug>` convention, wildcard-cert-covered) → the staging build (owner UAT / pre-prod view). *(Old `https://uat.deoleoloyalty.gifsy.in` still works during the transition; the single-label form requires a live `wrangler deploy` of the edge Worker.)*
 - **⚠️ 3 STAGING-INFRA BUGS found+fixed** (all surfaced by the real-OTP test — staging had never been exercised and was
   broken): (1) staging FE missing `JWT_SECRET` → 500; (2) `api.staging.gifsy.in` (FE's baked API host) **unrouted** → the
   login server-action self-proxy hung → routed it + 12s timeout on the login fetches (hardens prod); (3) staging API

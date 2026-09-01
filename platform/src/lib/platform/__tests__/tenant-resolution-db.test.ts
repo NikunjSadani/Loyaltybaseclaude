@@ -46,6 +46,8 @@ describe('resolveSlugFromDomainMap (pure)', () => {
   it('preserves the operator-console rule (app.gifsy.in → gifsy)', () => {
     expect(resolveSlugFromDomainMap('app.gifsy.in', EMPTY)).toBe('gifsy');
     expect(resolveSlugFromDomainMap('uat.app.gifsy.in', EMPTY)).toBe('gifsy');
+    // NEW single-label staging operator host resolves the same way.
+    expect(resolveSlugFromDomainMap('uat-app.gifsy.in', EMPTY)).toBe('gifsy');
   });
 
   it('preserves localhost/empty → dev default', () => {
@@ -56,6 +58,13 @@ describe('resolveSlugFromDomainMap (pure)', () => {
   it('preserves the uat.-prefix strip before the map lookup', () => {
     const map = new Map([['deoleoloyalty.gifsy.in', 'deoleo']]);
     expect(resolveSlugFromDomainMap('uat.deoleoloyalty.gifsy.in', map)).toBe('deoleo');
+  });
+
+  it('strips the NEW `uat-` first-label prefix before the map lookup', () => {
+    const map = new Map([['deoleoloyalty.gifsy.in', 'deoleo']]);
+    expect(resolveSlugFromDomainMap('uat-deoleoloyalty.gifsy.in', map)).toBe('deoleo');
+    // …and falls through to the subdomain heuristic when the (stripped) host isn't mapped.
+    expect(resolveSlugFromDomainMap('uat-clientb.gifsy.in', EMPTY)).toBe('clientb');
   });
 
   it('preserves reserved-label and bare-domain → null', () => {
