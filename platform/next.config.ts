@@ -65,8 +65,10 @@ const nextConfig: NextConfig = {
     serverActions: {
       allowedOrigins: [
         '*.gifsy.in',                 // all single-label tenant subdomains (deoleo, clientb, platform, deoleoloyalty)
+                                      // — ALSO covers the NEW single-label staging hosts uat-<slug>.gifsy.in
+                                      // (e.g. uat-deoleoloyalty, uat-app), so they need no explicit entry.
         'deoleoloyalty.gifsy.in',     // Deoleo prod (explicit for the launch domain; also covered above)
-        'uat.deoleoloyalty.gifsy.in', // Deoleo UAT — 4-part host; `*` does not cross dots
+        'uat.deoleoloyalty.gifsy.in', // Deoleo UAT (OLD nested form) — 4-part host; `*` does not cross dots
         'clientb.app.gifsy.in',       // 4-part prod hostname (tenant-resolution tests) — not covered by `*.gifsy.in`
         // E2E-ONLY (default OFF): the local prod-build harness runs on http://localhost:<port> but
         // injects `x-forwarded-host: <tenant>.gifsy.in` to resolve tenants like staging does. That
