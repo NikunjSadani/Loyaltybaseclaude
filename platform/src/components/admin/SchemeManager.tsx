@@ -202,13 +202,21 @@ function DetailsTab({ scheme, onChanged, hasAudience, hasForm }: {
   };
 
   // Valid, meaningful transitions from the current status.
+  //
+  // Lifecycle simplified to a SINGLE stop action — Pause (owner decision 2026-09-01):
+  // Expire and Cancel were functionally identical to Pause (all three block new
+  // enrollments + preserve data; Pause/Expire both resume via Activate, Cancel only
+  // differed by a reopen-as-draft path). So the normal states offer only Activate
+  // (launch/resume) and Pause (reversible stop). EXPIRED/CANCELLED can no longer be
+  // set from the UI, but any LEGACY scheme already in those states keeps a recovery
+  // transition so it isn't stranded.
   const transitions: SchemeStatus[] = (() => {
     switch (status) {
-      case 'DRAFT': return ['ACTIVE', 'CANCELLED'];
-      case 'ACTIVE': return ['PAUSED', 'EXPIRED', 'CANCELLED'];
-      case 'PAUSED': return ['ACTIVE', 'EXPIRED', 'CANCELLED'];
-      case 'EXPIRED': return ['ACTIVE'];
-      case 'CANCELLED': return ['DRAFT'];
+      case 'DRAFT': return ['ACTIVE'];
+      case 'ACTIVE': return ['PAUSED'];
+      case 'PAUSED': return ['ACTIVE'];
+      case 'EXPIRED': return ['ACTIVE'];      // legacy recovery only (button no longer creates EXPIRED)
+      case 'CANCELLED': return ['DRAFT'];     // legacy recovery only (button no longer creates CANCELLED)
       default: return [];
     }
   })();
