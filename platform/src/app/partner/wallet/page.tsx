@@ -164,8 +164,13 @@ function downloadCombinedStatement(rows: LedgerRow[], period: string) {
   XLSX.writeFile(wb, `wallet-statement-${period}.xlsx`);
 }
 
-const DEFAULT_FROM = '2026-05';
-const DEFAULT_TO   = '2026-05';
+/** Current calendar month as a `YYYY-MM` month-input value, computed from `new Date()`.
+ *  Used as the FIRST-paint default (before live data arrives) and as the empty-history
+ *  fallback — never a hardcoded date, so the wallet opens on "today", not a fixed past month. */
+function currentMonthInput(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
 
 /* ─── Points summary card ─────────────────────────────────────────────────────── */
 
@@ -220,12 +225,21 @@ export default function WalletPage() {
   /* KPI filter */
   const [kpiFilter, setKpiFilter] = useState('');
 
-  /* Date-range state */
-  const [fromMonth,   setFromMonth]   = useState(DEFAULT_FROM);
-  const [toMonth,     setToMonth]     = useState(DEFAULT_TO);
-  const [pendingFrom, setPendingFrom] = useState(DEFAULT_FROM);
-  const [pendingTo,   setPendingTo]   = useState(DEFAULT_TO);
+  /* Date-range state — initialised to the CURRENT month (lazy, from real `new Date()`),
+     so the very first paint (before live data) is today's month, never a hardcoded past
+     month. Once data has loaded the SELECTED period defaults to the partner's activity
+     range (see `activeFrom`/`activeTo` below) so they immediately see their whole history;
+     these `fromMonth`/`toMonth` values only take over once the partner picks a range. */
+  const [fromMonth,   setFromMonth]   = useState<string>(currentMonthInput);
+  const [toMonth,     setToMonth]     = useState<string>(currentMonthInput);
+  const [pendingFrom, setPendingFrom] = useState<string>(currentMonthInput);
+  const [pendingTo,   setPendingTo]   = useState<string>(currentMonthInput);
   const [calOpen,     setCalOpen]     = useState(false);
+
+  /* Flips true the moment the partner Applies a period of their own. Until then the
+     statement snaps to the full activity range; afterwards their pick is honoured and
+     never overridden on re-render. Reset returns to the snapped default (flag → false). */
+  const [userPicked, setUserPicked] = useState(false);
 
   useEffect(() => {
     // Live data only — wallet summary + passbook + payouts from the backend (via the
@@ -295,17 +309,35 @@ export default function WalletPage() {
 
   const allRows = useMemo<LedgerRow[]>(() => [...pointsRows, ...payoutRows], [pointsRows, payoutRows]);
 
-  /* Earliest and latest month across the COMBINED history */
+  /* Earliest and latest month across the COMBINED history (falls back to the current
+     month — never a hardcoded date — when there is no activity at all). */
   const [minMonth, maxMonth] = useMemo(() => {
-    if (!allRows.length) return [DEFAULT_FROM, DEFAULT_TO];
+    if (!allRows.length) { const cm = currentMonthInput(); return [cm, cm]; }
     const keys = allRows.map((r) => toMonthKey(r.date));
     return [monthKeyToInput(Math.min(...keys)), monthKeyToInput(Math.max(...keys))];
   }, [allRows]);
 
+  /* Effective selected period. Until the partner picks a range of their own, snap to the
+     FULL activity range [minMonth..maxMonth] so their whole history is visible on open (a
+     payout in ANY month shows without hunting); with no activity at all this is the
+     current month. Once they pick, honour `fromMonth`/`toMonth` and never override it.
+     Derived at render (not via an effect) so the default is correct on the SAME render
+     the data arrives — no empty-first-frame flash and no snap-timing race. */
+  const activeFrom = userPicked ? fromMonth : minMonth;
+  const activeTo   = userPicked ? toMonth   : maxMonth;
+
+  /* Picker bounds: always allow selecting up to the current month even if the latest
+     activity is older (max = later of maxMonth / current month); and never let the
+     lower bound sit past the current month (min = earlier of minMonth / current month).
+     `YYYY-MM` strings order correctly under lexical comparison. */
+  const currentMonth = currentMonthInput();
+  const pickerMax = maxMonth > currentMonth ? maxMonth : currentMonth;
+  const pickerMin = minMonth < currentMonth ? minMonth : currentMonth;
+
   /* Period- + earn/burn-filtered rows (before the KPI filter) */
   const periodRows = useMemo(() => {
-    const fromKey = monthInputToKey(fromMonth);
-    const toKey   = monthInputToKey(toMonth);
+    const fromKey = monthInputToKey(activeFrom);
+    const toKey   = monthInputToKey(activeTo);
     return allRows
       .filter((r) => { const k = toMonthKey(r.date); return k >= fromKey && k <= toKey; })
       .filter((r) => {
@@ -315,7 +347,7 @@ export default function WalletPage() {
         if (earnBurnFilter === 'earn') return r.tx.type === TransactionType.CREDIT;
         return r.tx.type === TransactionType.DEBIT || r.tx.type === TransactionType.EXPIRE;
       });
-  }, [allRows, fromMonth, toMonth, earnBurnFilter]);
+  }, [allRows, activeFrom, activeTo, earnBurnFilter]);
 
   /* KPI options — derived from the period rows; Visibility only for RETAILER/MT */
   const kpiOptions = useMemo(() => {
@@ -333,7 +365,7 @@ export default function WalletPage() {
     return [...filtered].sort((a, b) => +b.date - +a.date);
   }, [periodRows, kpiFilter]);
 
-  const periodDisp = rangeLabel(fromMonth, toMonth);
+  const periodDisp = rangeLabel(activeFrom, activeTo);
 
   return (
     <div className="space-y-5 fade-in">
@@ -365,7 +397,7 @@ export default function WalletPage() {
                 {/* Excel download — always present; disabled when nothing to export */}
                 <button
                   data-testid="excel-btn"
-                  onClick={() => { if (displayedRows.length > 0) downloadCombinedStatement(displayedRows, `${fromMonth}_${toMonth}`); }}
+                  onClick={() => { if (displayedRows.length > 0) downloadCombinedStatement(displayedRows, `${activeFrom}_${activeTo}`); }}
                   disabled={displayedRows.length === 0}
                   title="Download as Excel"
                   className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border border-gray-200 bg-white text-gray-600 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-gray-200 disabled:hover:text-gray-600"
@@ -377,7 +409,7 @@ export default function WalletPage() {
                 <div className="relative">
                   <button
                     data-testid="period-picker-btn"
-                    onClick={() => { setPendingFrom(fromMonth); setPendingTo(toMonth); setCalOpen(o => !o); }}
+                    onClick={() => { setPendingFrom(activeFrom); setPendingTo(activeTo); setCalOpen(o => !o); }}
                     className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
                       calOpen
                         ? 'bg-[var(--brand-primary)] text-white border-[var(--brand-primary)]'
@@ -401,14 +433,14 @@ export default function WalletPage() {
                         <div className="space-y-3">
                           <div>
                             <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide block mb-1">From</label>
-                            <input type="month" value={pendingFrom} min={minMonth} max={pendingTo}
+                            <input type="month" value={pendingFrom} min={pickerMin} max={pendingTo}
                               onChange={e => setPendingFrom(e.target.value)}
                               className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm text-gray-700 focus:outline-none focus:border-[var(--brand-primary)] focus:ring-1 focus:ring-[var(--brand-primary)]/20"
                             />
                           </div>
                           <div>
                             <label className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide block mb-1">To</label>
-                            <input type="month" value={pendingTo} min={pendingFrom} max={maxMonth}
+                            <input type="month" value={pendingTo} min={pendingFrom} max={pickerMax}
                               onChange={e => setPendingTo(e.target.value)}
                               className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm text-gray-700 focus:outline-none focus:border-[var(--brand-primary)] focus:ring-1 focus:ring-[var(--brand-primary)]/20"
                             />
@@ -416,13 +448,13 @@ export default function WalletPage() {
                         </div>
                         <div className="flex gap-2 mt-4">
                           <button
-                            onClick={() => { setPendingFrom(DEFAULT_FROM); setPendingTo(DEFAULT_TO); setFromMonth(DEFAULT_FROM); setToMonth(DEFAULT_TO); setCalOpen(false); }}
+                            onClick={() => { setUserPicked(false); setPendingFrom(minMonth); setPendingTo(maxMonth); setFromMonth(minMonth); setToMonth(maxMonth); setCalOpen(false); }}
                             className="flex-1 py-2 border border-gray-200 text-gray-500 rounded-xl text-xs font-semibold hover:bg-gray-50 transition-colors"
                           >
                             Reset
                           </button>
                           <button
-                            onClick={() => { setFromMonth(pendingFrom); setToMonth(pendingTo); setCalOpen(false); }}
+                            onClick={() => { setUserPicked(true); setFromMonth(pendingFrom); setToMonth(pendingTo); setCalOpen(false); }}
                             className="flex-1 py-2 bg-[var(--brand-primary)] text-white rounded-xl text-xs font-semibold hover:bg-[var(--brand-primary-dark)] transition-colors"
                           >
                             Apply
