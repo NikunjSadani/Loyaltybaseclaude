@@ -31,8 +31,19 @@ Staging serves every tenant under a **single-label** `uat-<slug>.gifsy.in` host 
 - **Transition-safe:** the OLD nested `uat.<slug>.gifsy.in` form (e.g. `uat.deoleoloyalty.gifsy.in`, `uat.app.gifsy.in`)
   still resolves, so nothing in flight breaks. It needs a per-host cert; prefer the single-label form going forward.
 - ⚠️ Slugs beginning `uat-` are **reserved by convention** (a `uat-foo.gifsy.in` prod host would be mis-stripped to `foo`).
-- ⚠️ The Worker change only takes effect at the edge after a separate **`wrangler deploy`** (owner-run) from
-  `cloudflare-worker/`. Until then the edge still routes by the old `uat.` rule.
+- ✅ **LIVE 2026-09-02** — the Worker is deployed to the shared edge (`gifsy-proxy`, version `60b87984`) and this
+  rule is in force. Verified: `uat-clientb.gifsy.in` serves staging Client B end-to-end (real outlet login → partner
+  dashboard, TLS valid via the wildcard cert); prod (`clientb.gifsy.in`, `deoleoloyalty.gifsy.in`) and the old
+  `uat.` staging hosts are unaffected.
+- ✅ **New tenants are ZERO-TOUCH on both environments** (proven generic — a non-existent `uat-acmetest.gifsy.in`
+  already TLS-resolves and reaches the staging FE; it only 404s because no such tenant exists). After you create a
+  tenant in the Gifsy console, its links work immediately with **no cert, no DNS, no worker deploy**:
+  prod `https://<slug>.gifsy.in`, staging `https://uat-<slug>.gifsy.in`. (A vanity host ≠ slug needs one `domains`
+  entry in the client console; still no infra.)
+- Re-deploying the Worker (only if `worker.js`/`wrangler.toml` change again): from `cloudflare-worker/`,
+  `CLOUDFLARE_API_TOKEN=<Edit-Cloudflare-Workers token> npx wrangler deploy`. The stored OAuth login does NOT work
+  in this split-shell setup (login succeeds but wrangler never persists the token to the config file it reads back —
+  `default.toml` stays stale/expired); use an API-token env var instead.
 
 ## What data shows where
 
