@@ -33,7 +33,10 @@ const mockPrisma = {
   channelPartner: { findFirst: jest.fn() },
   salesUser: { findFirst: jest.fn() },
   salesUserAssignment: { findFirst: jest.fn() },
-  outlet: { findMany: jest.fn() },
+  // outlet.findFirst + outletTypeClientConfig added for the per-outlet-type Loyalty gate
+  // (isLoyaltyEnabledForPartner). Defaulted in beforeEach so existing tests default loyalty ON.
+  outlet: { findMany: jest.fn(), findFirst: jest.fn() },
+  outletTypeClientConfig: { findUnique: jest.fn() },
   auditLog: { create: jest.fn() },
   wallet: { findFirst: jest.fn() },
   otpCode: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), deleteMany: jest.fn() },
@@ -157,6 +160,10 @@ describe('RewardsService', () => {
     mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
     mockPrisma.auditLog.create.mockResolvedValue({ id: 'audit1' });
     mockPrisma.outlet.findMany.mockResolvedValue([]); // default: no extra outlet-keyed assignments
+    // Per-outlet-type Loyalty gate defaults: no primary outlet + no config row →
+    // isLoyaltyEnabledForPartner returns true (schema default). Loyalty-off cases override.
+    mockPrisma.outlet.findFirst.mockResolvedValue(null);
+    mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue(null);
     // Default eligible partner for the in-tx TOCTOU re-check (all modes now gated).
     mockPrisma.channelPartner.findFirst.mockResolvedValue(ELIGIBLE_FRESH_PARTNER);
     // Default eligible catalog item for the in-tx confirm-time re-check (DEF-3): the
@@ -592,6 +599,90 @@ describe('RewardsService', () => {
 
   // ─── P5.4a CORE redemption pipeline ──────────────────────────────────────────
 
+  // ── Per-outlet-type Loyalty gate (OutletTypeClientConfig.loyaltyEnabled) ─────────────────
+  // Server-side enforcement (the FE gate is bypassable via a direct API call). When the active
+  // outlet's type has Loyalty OFF, the catalogue is EMPTY and NEW redemptions are blocked.
+  describe('per-outlet-type Loyalty gate', () => {
+    const loyaltyItem = {
+      id: 'r1', clientId: 'deoleo', status: 'ACTIVE', deletedAt: null,
+      pointsCost: 500, redemptionMode: 'GIFT_CARD',
+      minRedemptionPoints: null, maxRedemptionPoints: null, stockQuantity: null,
+    };
+
+    it('listCatalog returns an EMPTY catalogue (same shape) when the outlet type has Loyalty OFF', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 100 });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletTypeId: 'ot1' });
+      mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue({ loyaltyEnabled: false });
+
+      const res = await service.listCatalog(partner, {});
+
+      expect(res).toEqual({
+        items: [],
+        userBalance: 100,
+        pagination: { page: 1, limit: 20, total: 0, pages: 0 },
+      });
+      // Early return — the catalogue is never queried when Loyalty is off.
+      expect(mockPrisma.rewardCatalog.findMany).not.toHaveBeenCalled();
+    });
+
+    it('listCatalog behaves normally when Loyalty is ON (config loyaltyEnabled: true)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 100 });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletTypeId: 'ot1' });
+      mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue({ loyaltyEnabled: true });
+      mockPrisma.rewardCatalog.findMany.mockResolvedValue([{ id: 'r1', pointsCost: 50 }]);
+      mockPrisma.rewardCatalog.count.mockResolvedValue(1);
+
+      const res = await service.listCatalog(partner, {});
+      expect(mockPrisma.rewardCatalog.findMany).toHaveBeenCalled();
+      expect(res.items).toHaveLength(1);
+      expect(res.userBalance).toBe(100);
+    });
+
+    it('redeem throws Forbidden when the outlet type has Loyalty OFF (before any wallet debit / order)', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(loyaltyItem);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletTypeId: 'ot1' });
+      mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue({ loyaltyEnabled: false });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 5000 });
+
+      await expect(service.redeem(partner, { rewardId: 'r1', quantity: 1 }))
+        .rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+    });
+
+    it('redeem proceeds (no Loyalty block) when config loyaltyEnabled: true — creates the PENDING order', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(loyaltyItem);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletTypeId: 'ot1' });
+      mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue({ loyaltyEnabled: true });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.create.mockResolvedValue({ id: 'o1', orderNumber: 'RDM-x' });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
+
+      const res = await service.redeem(partner, { rewardId: 'r1', quantity: 1 });
+      const created = mockPrisma.redemptionOrder.create.mock.calls?.[0]?.[0];
+      expect(created.data.status).toBe('PENDING');
+      expect(res.orderId).toBe('o1');
+    });
+
+    it('redeem proceeds (default true) when there is NO config row for the outlet type', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(loyaltyItem);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      // Primary outlet resolves to a type, but no config row exists → schema default true.
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletTypeId: 'ot1' });
+      mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue(null);
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.create.mockResolvedValue({ id: 'o1', orderNumber: 'RDM-x' });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
+
+      const res = await service.redeem(partner, { rewardId: 'r1', quantity: 1 });
+      expect(res.orderId).toBe('o1');
+    });
+  });
+
   describe('redeem', () => {
     const fixedItem = {
       id: 'r1', clientId: 'deoleo', status: 'ACTIVE', deletedAt: null,
@@ -773,6 +864,23 @@ describe('RewardsService', () => {
       });
       await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
         .rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('forbids confirm + never debits when the outlet type’s Loyalty was turned OFF between redeem and confirm (TOCTOU)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(pendingOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+        expiresAt: new Date(Date.now() + 60000),
+      });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+      // Loyalty disabled for this outlet's type AFTER the PENDING order was created.
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletTypeId: 'ot1' });
+      mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue({ loyaltyEnabled: false });
+
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .rejects.toBeInstanceOf(ForbiddenException);
+      // The throw is inside the tx, before the debit → points never move (rollback).
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
 

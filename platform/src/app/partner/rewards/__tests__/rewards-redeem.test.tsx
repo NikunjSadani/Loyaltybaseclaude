@@ -25,6 +25,7 @@ vi.mock('next/navigation', () => ({ useRouter: () => ({ push: pushMock }) }));
 let mockIdentity = {
   businessName: 'Kumar Store', ownerName: 'Rajesh', partnerCode: 'P1',
   outletType: 'WHOLESALER', hasPointsActivity: true, hasPayoutActivity: false,
+  loyaltyEnabled: true,
 };
 vi.mock('@/lib/partner-identity', () => ({
   usePartnerIdentity: () => mockIdentity,
@@ -77,10 +78,11 @@ function catalogResponse() {
 beforeEach(() => {
   pushMock.mockClear();
   toastError.mockClear();
-  // Default: a points-active partner reaches the catalogue.
+  // Default: a loyalty-enabled, points-active partner reaches the catalogue.
   mockIdentity = {
     businessName: 'Kumar Store', ownerName: 'Rajesh', partnerCode: 'P1',
     outletType: 'WHOLESALER', hasPointsActivity: true, hasPayoutActivity: false,
+    loyaltyEnabled: true,
   };
 });
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -92,10 +94,11 @@ async function openVoucherSheet(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('RR — Rewards live catalogue + redeem flow', () => {
-  it('RR0: a PAYOUT-only partner (hasPointsActivity=false) sees the gate, not the catalogue', async () => {
+  it('RR0: a loyalty-OFF outlet type (loyaltyEnabled=false) sees the gate, not the catalogue', async () => {
     mockIdentity = {
       businessName: 'Sharma Kirana', ownerName: 'Amit', partnerCode: 'P2',
       outletType: 'SSS', hasPointsActivity: false, hasPayoutActivity: true,
+      loyaltyEnabled: false,
     };
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
       if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogResponse());
@@ -107,6 +110,27 @@ describe('RR — Rewards live catalogue + redeem flow', () => {
     expect(screen.queryByText('Amazon Voucher ₹500')).not.toBeInTheDocument();
     // No Vouchers tab either (the catalogue UI is entirely gated out).
     expect(screen.queryByRole('button', { name: /vouchers/i })).not.toBeInTheDocument();
+  });
+
+  it('RR0b: a loyalty-ON outlet with ZERO points (hasPointsActivity=false) still reaches the catalogue', async () => {
+    // The gate now keys on loyaltyEnabled, NOT hasPointsActivity — a loyalty-enabled
+    // outlet that simply has no points yet must see the catalogue (affordability, not
+    // the gate, handles balance).
+    mockIdentity = {
+      businessName: 'Kumar Store', ownerName: 'Rajesh', partnerCode: 'P1',
+      outletType: 'WHOLESALER', hasPointsActivity: false, hasPayoutActivity: false,
+      loyaltyEnabled: true,
+    };
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogResponse());
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    }));
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    // The gate copy never renders; the catalogue is reachable.
+    expect(screen.queryByText(/rewards not available/i)).not.toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: /vouchers/i }));
+    expect(await screen.findByText('Amazon Voucher ₹500')).toBeInTheDocument();
   });
 
   it('RR1: renders catalogue items from GET /api/rewards/catalog', async () => {

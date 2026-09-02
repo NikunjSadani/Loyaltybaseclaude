@@ -20,6 +20,11 @@ jest.mock('../common/reward-account.helper', () => ({
 const mockPrisma = {
   channelPartner: { findFirst: jest.fn() },
   wallet: { findFirst: jest.fn() },
+  // Per-outlet-type Loyalty gate (isLoyaltyEnabledForPartner): no outlet row → helper
+  // returns its default TRUE (loyalty on), so these vendor-visibility/consent tests
+  // exercise the catalogue/redeem path unchanged.
+  outlet: { findFirst: jest.fn().mockResolvedValue(null) },
+  outletTypeClientConfig: { findUnique: jest.fn().mockResolvedValue(null) },
   rewardCatalog: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn() },
   redemptionOrder: { create: jest.fn(), updateMany: jest.fn() },
   otpCode: { create: jest.fn(), deleteMany: jest.fn() },

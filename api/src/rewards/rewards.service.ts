@@ -22,6 +22,7 @@ import { EventKey } from '../notification-templates/notification-templates.confi
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { resolveEffectiveKycStatus, isPartnerPayable } from '../kyc/kyc-eligibility';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
+import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
 import { isGifsyOperator, tenantScope } from '../common/tenant-scope';
 import { generateTenantOrderNumber } from './order-number.helper';
 import { computeFrozenValuePaise } from './gift-value.helper';
@@ -255,6 +256,20 @@ export class RewardsService {
       : null;
     const userBalance = wallet ? wallet.redeemablePoints : 0;
 
+    // Per-outlet-type Loyalty gate (OutletTypeClientConfig.loyaltyEnabled) — server-enforced
+    // (the FE gate is bypassable via a direct API call). When the active outlet's type has
+    // Loyalty OFF, the catalogue is EMPTY (same response shape). Missing config → default true.
+    if (
+      activePartnerId &&
+      !(await isLoyaltyEnabledForPartner(this.prisma, user.clientId, activePartnerId))
+    ) {
+      return {
+        items: [],
+        userBalance,
+        pagination: { page, limit, total: 0, pages: 0 },
+      };
+    }
+
     const [items, total] = await Promise.all([
       this.prisma.rewardCatalog.findMany({
         where,
@@ -316,7 +331,16 @@ export class RewardsService {
     // regardless of the active outlet. We still re-authorize the selector so a bogus
     // x-active-partner-id is rejected consistently across every rewards endpoint
     // (never silently accepted on one read) — validation only, result unchanged.
-    await this.resolveActive(user, requestedPartnerId);
+    const activePartnerId = await this.resolveActive(user, requestedPartnerId);
+    // Per-outlet-type Loyalty gate — when the active outlet's type has Loyalty OFF, no reward
+    // item is available to it (parity with the not-found message so a deep link can't reveal
+    // that the item exists). Missing config → default true (never hide on missing config).
+    if (
+      activePartnerId &&
+      !(await isLoyaltyEnabledForPartner(this.prisma, user.clientId, activePartnerId))
+    ) {
+      throw new NotFoundException('Reward item not found or not available');
+    }
     // Derive the DPDP consent gate (decision #15) from sourceType, then DROP
     // sourceType so the member never sees the raw source/vendor origin.
     const { sourceType, ...rest } = item;
@@ -780,6 +804,13 @@ export class RewardsService {
       dto.targetPartnerId,
     );
 
+    // Per-outlet-type Loyalty gate — checked on the OUTLET being redeemed FOR (not the sales
+    // operator). Block a NEW sales-assisted redemption when that outlet's type has Loyalty OFF,
+    // BEFORE any wallet debit / order creation. Missing config → default true.
+    if (!(await isLoyaltyEnabledForPartner(this.prisma, user.clientId, partner.id))) {
+      throw new ForbiddenException('Rewards are not enabled for your outlet type.');
+    }
+
     // Affordability checks the OUTLET's wallet (no debit yet).
     const wallet = await this.prisma.wallet.findFirst({ where: { partnerId: partner.id } });
     if (!wallet) throw new NotFoundException('Wallet not found');
@@ -1087,6 +1118,15 @@ export class RewardsService {
         throw new BadRequestException('This gift is no longer available');
       }
 
+      // TOCTOU loyalty re-check: an admin can disable the outlet type's Loyalty flag
+      // between the sales-assisted redeem and this confirm. Points MOVE at the debit
+      // below, so re-assert the per-outlet-type gate INSIDE the tx (parity with the
+      // freshPartner/DEF-3 guards) — a now loyalty-OFF outlet type can never complete
+      // an in-flight redemption. A throw rolls the whole tx back (no debit/claim).
+      if (!(await isLoyaltyEnabledForPartner(tx, user.clientId, order.partnerId))) {
+        throw new ForbiddenException('Rewards are not enabled for your outlet type.');
+      }
+
       // Atomic claim: only the tx that flips PENDING→CONFIRMED proceeds → a single
       // order can never be debited twice (double-submit matches 0 rows, aborts).
       const claim = await tx.redemptionOrder.updateMany({
@@ -1313,6 +1353,13 @@ export class RewardsService {
     // selector throws here before any read; null (no partner) → today's 404.
     const activePartnerId = await this.resolveActive(user, requestedPartnerId);
     if (!activePartnerId) throw new NotFoundException('Partner account not found');
+
+    // Per-outlet-type Loyalty gate — server-enforced (the FE gate is bypassable via a direct
+    // API call). Block a NEW redemption when the active outlet's type has Loyalty OFF. Placed
+    // BEFORE any wallet debit / order creation. Missing config → default true.
+    if (!(await isLoyaltyEnabledForPartner(this.prisma, user.clientId, activePartnerId))) {
+      throw new ForbiddenException('Rewards are not enabled for your outlet type.');
+    }
 
     const wallet = await this.prisma.wallet.findFirst({ where: { partnerId: activePartnerId } });
     if (!wallet) throw new NotFoundException('Wallet not found');
@@ -1628,6 +1675,15 @@ export class RewardsService {
       });
       if (!liveItem) {
         throw new BadRequestException('This gift is no longer available');
+      }
+
+      // TOCTOU loyalty re-check: an admin can disable the outlet type's Loyalty flag
+      // between redeem and this confirm. Points MOVE at the debit below, so re-assert the
+      // per-outlet-type gate INSIDE the tx (parity with the freshPartner/DEF-3 guards) —
+      // a now loyalty-OFF outlet type can never complete an in-flight redemption. A throw
+      // rolls the whole tx back (no debit/claim).
+      if (!(await isLoyaltyEnabledForPartner(tx, user.clientId, order.partnerId))) {
+        throw new ForbiddenException('Rewards are not enabled for your outlet type.');
       }
 
       const claim = await tx.redemptionOrder.updateMany({

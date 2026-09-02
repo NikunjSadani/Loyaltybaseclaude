@@ -1007,19 +1007,18 @@ export default function RewardsPage() {
       // Failure simply leaves beneficiary null → the cash tab shows the KYC empty-state.
   }, []);
 
-  /* ── Gate: partners with no points reality don't get the rewards catalogue.
-     Keyed on the IDENTITY signal (not the catalogue load) so a payout-only partner
-     sees the gate as soon as identity resolves, without waiting on a catalogue they
-     never need. ── */
-  if (!identity.loading && !identity.hasPointsActivity) {
+  /* ── Gate: outlet types with the per-type Loyalty flag OFF don't get the rewards
+     catalogue. Keyed on the IDENTITY signal (loyaltyEnabled) so a loyalty-OFF outlet
+     sees the gate as soon as identity resolves — while a loyalty-ON outlet with zero
+     points still reaches the catalogue (affordability, not the gate, handles balance). ── */
+  if (!identity.loading && !identity.loyaltyEnabled) {
     return (
       <div className="flex flex-col items-center justify-center py-20 gap-4 text-center">
         <Gift className="h-12 w-12 text-gray-300" />
         <div>
           <p className="text-gray-700 font-semibold">Rewards not available</p>
           <p className="text-sm text-gray-500 mt-1">
-            The rewards catalogue is only available for Wholesaler outlets.
-            Your earnings are paid out directly to your bank account.
+            The rewards catalogue isn&apos;t available for your outlet type.
           </p>
         </div>
         <Button variant="primary" onClick={() => router.push('/partner/wallet')}>View My Wallet</Button>

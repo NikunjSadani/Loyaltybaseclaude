@@ -53,6 +53,12 @@ export interface PartnerIdentity {
   hasPointsActivity: boolean;
   hasPayoutActivity: boolean;
   /**
+   * Driven by the per-outlet-type "Loyalty (Earn and redeem points)" flag, delivered on
+   * the /partner/me response. Gates the partner Rewards catalogue/redeem. Default TRUE
+   * unless the API explicitly says false (backward-compatible when the field is absent).
+   */
+  loyaltyEnabled: boolean;
+  /**
    * The caller's tenant feature flags (DB-backed, from the same /partner/me response —
    * §A-DOMAIN "P5"). The partner shell reads its nav gating (walletModule /
    * partnerApp.showLeaderboard) from HERE, not the in-code CLIENT_REGISTRY. Fully
@@ -105,6 +111,14 @@ export function usePartnerIdentity(): PartnerIdentity {
     outletType: null,
     hasPointsActivity: false,
     hasPayoutActivity: false,
+    // Default TRUE — the documented "on unless the API explicitly says false" contract.
+    // Loyalty-ON is the common case, so this shows Rewards immediately (no nav flash-in)
+    // and, critically, is what the .catch below preserves via ...prev: a TRANSIENT
+    // /partner/me failure must not permanently hide Rewards (+ show the wrong "paid to
+    // your bank" wall) for a normal points outlet. A loyalty-OFF outlet briefly shows the
+    // nav then it hides once /me resolves to false; the rewards PAGE wall is guarded by
+    // !identity.loading, so it never flashes.
+    loyaltyEnabled: true,
     features: DEFAULT_FEATURES,
     activePartnerId: null,
     operableOutlets: [],
@@ -144,6 +158,8 @@ export function usePartnerIdentity(): PartnerIdentity {
           outletType: d?.outletType ?? null,
           hasPointsActivity: d?.hasPointsActivity === true,
           hasPayoutActivity: d?.hasPayoutActivity === true,
+          // TRUE unless the API explicitly returns false (backward-compatible if absent).
+          loyaltyEnabled: d?.loyaltyEnabled !== false,
           features: normalizeFeatures(d?.features),
           activePartnerId: d?.activePartnerId ?? null,
           operableOutlets: Array.isArray(d?.operableOutlets) ? (d.operableOutlets as OperableOutlet[]) : [],

@@ -127,7 +127,7 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
 
   /* ── Nav items — gated by feature flags ── */
   const walletOn      = features.walletModule;
-  const rewardsOn     = features.walletModule && identity.hasPointsActivity;
+  const rewardsOn     = features.walletModule && identity.loyaltyEnabled;
   const leaderboardOn = features.partnerApp.showLeaderboard;
   // Wave 3 — the read-only group overview nav entry (page built by FE-2), shown only
   // when this login belongs to an owner group.

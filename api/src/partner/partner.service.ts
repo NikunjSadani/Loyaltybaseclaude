@@ -10,6 +10,7 @@ import {
   resolveActivePartnerId,
   resolveOperableContexts,
 } from '../common/partner-group.helper';
+import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
 
 /**
  * Partner self-service — ported from platform/src/app/api/partner/* onto /v1.
@@ -114,9 +115,9 @@ export class PartnerService {
         })
       : null;
 
-    const { outletType, hasPointsActivity, hasPayoutActivity } = partner
+    const { outletType, hasPointsActivity, hasPayoutActivity, loyaltyEnabled } = partner
       ? await this.resolvePartnerActivity(user.clientId, partner.id)
-      : { outletType: null, hasPointsActivity: false, hasPayoutActivity: false };
+      : { outletType: null, hasPointsActivity: false, hasPayoutActivity: false, loyaltyEnabled: true };
 
     // Per-tenant feature blob (DB-backed via TenantService.resolveClient — D-1). The
     // partner shell reads its runtime feature gating (walletModule / partnerApp.*)
@@ -133,6 +134,10 @@ export class PartnerService {
       outletType,
       hasPointsActivity,
       hasPayoutActivity,
+      // Per-outlet-type Loyalty gate (OutletTypeClientConfig.loyaltyEnabled). Governs the
+      // partner Rewards catalogue/redeem surface. Defaults true when there is no config row
+      // for the primary outlet's type, or the partner has no outlet/type (schema default).
+      loyaltyEnabled,
       features,
       // Login-picker: the operable set + parent-overview availability (Wave 3).
       // `activePartnerId` = the currently-selected outlet (own by default) so the FE switcher can
@@ -163,7 +168,12 @@ export class PartnerService {
   private async resolvePartnerActivity(
     clientId: string,
     partnerId: string,
-  ): Promise<{ outletType: string | null; hasPointsActivity: boolean; hasPayoutActivity: boolean }> {
+  ): Promise<{
+    outletType: string | null;
+    hasPointsActivity: boolean;
+    hasPayoutActivity: boolean;
+    loyaltyEnabled: boolean;
+  }> {
     // Partner's outlets — outletCode (payout-entry scoping) + primary-outlet type in one query.
     // NB: CreditPayoutEntry.outletId stores the outlet CODE (not the Outlet PK) — it is a
     // bare string set from the uploaded "Outlet ID", resolved elsewhere via outletCode
@@ -171,10 +181,15 @@ export class PartnerService {
     const outlets = await this.prisma.outlet.findMany({
       where: { clientId, partnerId, deletedAt: null },
       orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
-      select: { outletCode: true, outletType: { select: { code: true } } },
+      select: { outletCode: true, outletTypeId: true, outletType: { select: { code: true } } },
     });
     const outletType = outlets[0]?.outletType?.code ?? null;
     const outletCodes = outlets.map((o) => o.outletCode);
+
+    // Per-outlet-type Loyalty (Rewards) gate — resolved via the shared helper (single source
+    // of truth, also used by the rewards-service enforcement). Defaults true when there is no
+    // OutletTypeClientConfig row for the primary outlet's type, or no outlet/type at all.
+    const loyaltyEnabled = await isLoyaltyEnabledForPartner(this.prisma, clientId, partnerId);
 
     // Wallet reality — the partner's wallet balances + any ledger row.
     const wallet = await this.prisma.wallet.findFirst({
@@ -216,7 +231,7 @@ export class PartnerService {
     ]);
     const hasPayoutActivity = !!payoutEntry || !!payoutTxn;
 
-    return { outletType, hasPointsActivity, hasPayoutActivity };
+    return { outletType, hasPointsActivity, hasPayoutActivity, loyaltyEnabled };
   }
 
   /**

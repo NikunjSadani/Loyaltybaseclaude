@@ -47,6 +47,7 @@ function makeIdentity(over: Partial<PartnerIdentity>): PartnerIdentity {
     outletType: 'WHOLESALER',
     hasPointsActivity: false,
     hasPayoutActivity: true,
+    loyaltyEnabled: true,
     // features unused by the picker — a loose stub keeps the type happy.
     features: {} as PartnerIdentity['features'],
     activePartnerId: null,

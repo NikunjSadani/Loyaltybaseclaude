@@ -21,7 +21,10 @@ const mockPrisma = {
   creditPayoutEntry: { findFirst: jest.fn(), findMany: jest.fn() },
   wallet:            { findFirst: jest.fn() },
   pointsLedger:      { findFirst: jest.fn() },
-  outlet:            { findMany: jest.fn() },
+  // outlet.findFirst + outletTypeClientConfig added for the per-outlet-type Loyalty gate
+  // (isLoyaltyEnabledForPartner). Defaulted in beforeEach so existing tests default loyalty ON.
+  outlet:            { findMany: jest.fn(), findFirst: jest.fn() },
+  outletTypeClientConfig: { findUnique: jest.fn() },
   outletTarget:      { findFirst: jest.fn(), findMany: jest.fn() },
   outletSalesRecord: { findMany: jest.fn() },
   kpiDef:            { findMany: jest.fn() },
@@ -68,6 +71,10 @@ describe('PartnerService', () => {
     // default to an empty KPI set so existing target tests are unaffected.
     mockPrisma.kpiDef.findMany.mockResolvedValue([]);
     mockTenant.resolveClient.mockResolvedValue({ features: TENANT_FEATURES });
+    // Per-outlet-type Loyalty gate defaults: no primary outlet resolved + no config row →
+    // isLoyaltyEnabledForPartner returns true (schema default). Loyalty-off cases override.
+    mockPrisma.outlet.findFirst.mockResolvedValue(null);
+    mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue(null);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PartnerService,
@@ -94,6 +101,8 @@ describe('PartnerService', () => {
         outletType: null,
         hasPointsActivity: false,
         hasPayoutActivity: false,
+        // New per-outlet-type Loyalty gate: defaults true for a partner-less login (schema default).
+        loyaltyEnabled: true,
         features: TENANT_FEATURES,
         // Wave 3 picker payload: no active partner + empty operable set + no group overview for a partner-less login.
         activePartnerId: null,
@@ -293,6 +302,38 @@ describe('PartnerService', () => {
       expect(mockPrisma.creditPayoutEntry.findFirst).not.toHaveBeenCalled();
       expect(res.outletType).toBeNull();
       expect(res.hasPayoutActivity).toBe(false);
+    });
+
+    // ── Per-outlet-type Loyalty gate (OutletTypeClientConfig.loyaltyEnabled) ──────────────
+    it('loyaltyEnabled defaults to TRUE when there is no OutletTypeClientConfig row (never hide on missing config)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1', outletType: { code: 'WHOLESALER' } }]);
+      // The primary outlet resolves to a type, but there is NO config row for (clientId, type).
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletTypeId: 'ot1' });
+      mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue(null);
+      mockPrisma.wallet.findFirst.mockResolvedValue(null);
+      mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue(null);
+      mockPrisma.payoutTransaction.findFirst.mockResolvedValue(null);
+
+      const res = await service.getMe(partner);
+      expect(mockPrisma.outletTypeClientConfig.findUnique).toHaveBeenCalledWith({
+        where: { clientId_outletTypeId: { clientId: 'deoleo', outletTypeId: 'ot1' } },
+        select: { loyaltyEnabled: true },
+      });
+      expect(res.loyaltyEnabled).toBe(true);
+    });
+
+    it('loyaltyEnabled is FALSE when the primary outlet type config has loyaltyEnabled: false', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1', outletType: { code: 'WHOLESALER' } }]);
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletTypeId: 'ot1' });
+      mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue({ loyaltyEnabled: false });
+      mockPrisma.wallet.findFirst.mockResolvedValue(null);
+      mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue(null);
+      mockPrisma.payoutTransaction.findFirst.mockResolvedValue(null);
+
+      const res = await service.getMe(partner);
+      expect(res.loyaltyEnabled).toBe(false);
     });
   });
 

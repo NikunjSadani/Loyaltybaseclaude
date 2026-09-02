@@ -20,6 +20,7 @@ vi.mock('@/lib/partner-identity', () => ({
   usePartnerIdentity: () => ({
     businessName: 'Kumar Store', ownerName: 'Rajesh', partnerCode: 'P1',
     outletType: 'WHOLESALER', hasPointsActivity: true, hasPayoutActivity: false,
+    loyaltyEnabled: true,
   }),
 }));
 
