@@ -235,6 +235,12 @@ export class VendorPortalService {
         name: true,
         imageUrl: true,
         sortOrder: true,
+        // CONTRACT: the FE GiftCategory type carries `isActive`, and the vendor item
+        // editor's category picker filters on it. This endpoint already returns
+        // active-only rows, so isActive is always true here — but it MUST be present
+        // in the payload, or the FE reads `undefined` (falsy) and filters EVERY
+        // category out, leaving the picker empty despite categories existing.
+        isActive: true,
       },
     });
     return { items };

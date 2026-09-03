@@ -81,6 +81,13 @@ describe('VendorPortalService', () => {
       ]);
       const res = await service.listCategories(vendor);
       expect(mockPrisma.giftCategory.findMany.mock.calls[0][0].where).toEqual({ isActive: true });
+      // CONTRACT GUARD: `isActive` MUST be in the select. The vendor item-editor picker
+      // filters categories on `isActive`; omitting it (the original bug) made the FE read
+      // `undefined` (falsy) and hide EVERY category, leaving the picker empty even though
+      // categories existed and were returned.
+      expect(mockPrisma.giftCategory.findMany.mock.calls[0][0].select).toEqual(
+        expect.objectContaining({ isActive: true }),
+      );
       expect(res).toEqual({
         items: [{ id: 'gc1', parentId: null, code: 'ELEC', name: 'Electronics', imageUrl: null, sortOrder: 0 }],
       });

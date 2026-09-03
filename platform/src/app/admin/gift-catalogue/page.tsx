@@ -479,7 +479,11 @@ export function MasterEditor({
                 >
                   <option value="">Select a category…</option>
                   {categories
-                    .filter((c) => c.isActive || c.id === form.categoryId)
+                    // Hardened to `!== false` (behaviour-identical today — the admin
+                    // gift-categories API returns the full row incl. isActive — but this
+                    // prevents the empty-picker bug if that endpoint is ever narrowed to a
+                    // `select` that omits isActive, the way the vendor endpoint was).
+                    .filter((c) => c.isActive !== false || c.id === form.categoryId)
                     .map((c) => (
                       <option key={c.id} value={c.id}>{c.name}</option>
                     ))}

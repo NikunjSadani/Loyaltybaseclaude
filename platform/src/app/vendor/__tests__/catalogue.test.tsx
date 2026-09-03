@@ -138,6 +138,29 @@ describe('Vendor catalogue', () => {
     });
   });
 
+  it('CL8: renders category options even when the API omits isActive (regression: picker was empty despite categories existing)', async () => {
+    // The real GET /api/vendor/categories returned rows WITHOUT `isActive`; the picker
+    // filtered on `c.isActive` (undefined → falsy) and hid EVERY category, so a vendor
+    // saw "Select a category…" and nothing else even though categories existed. Mimic
+    // that exact payload (no isActive) and assert the option renders and is selectable.
+    get.mockImplementation((url: string) => {
+      if (url === '/api/vendor/catalogue') return Promise.resolve({ success: true, data: { items: [] } });
+      if (url === '/api/vendor/categories')
+        return Promise.resolve({
+          success: true,
+          data: { items: [{ id: 'cat-x', parentId: null, code: 'RGW', name: 'Regression Widgets', imageUrl: null, sortOrder: 0 }] },
+        });
+      return Promise.resolve({ success: false, error: 'unexpected url ' + url });
+    });
+    renderPage();
+    fireEvent.click(await screen.findByTestId('new-item-btn'));
+    await screen.findByTestId('field-name');
+    const select = screen.getByTestId('field-category') as HTMLSelectElement;
+    expect(screen.getByRole('option', { name: 'Regression Widgets' })).toBeInTheDocument();
+    fireEvent.change(select, { target: { value: 'cat-x' } });
+    expect(select.value).toBe('cat-x');
+  });
+
   it('CL5: a material edit of an approved item warns it will re-submit for approval', async () => {
     mockGet();
     renderPage();

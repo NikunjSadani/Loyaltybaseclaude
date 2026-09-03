@@ -475,7 +475,15 @@ export function VendorItemEditor({
               >
                 <option value="">Select a category…</option>
                 {categories
-                  .filter((c) => c.isActive || c.id === form.categoryId)
+                  // Show every category unless it is EXPLICITLY inactive (isActive === false).
+                  // Guarding on `!== false` (NOT a bare truthy check) means a MISSING `isActive`
+                  // never silently hides the whole list — the bug that left this picker empty
+                  // despite categories existing. NB: the vendor categories API is active-only,
+                  // so the `c.id === form.categoryId` clause only rescues a still-active selected
+                  // category; if Gifsy later deactivates a category an item already uses, editing
+                  // that item shows a blank picker (rare — the stored categoryId is preserved on
+                  // save unless the vendor picks a new one).
+                  .filter((c) => c.isActive !== false || c.id === form.categoryId)
                   .map((c) => (
                     <option key={c.id} value={c.id}>{c.name}</option>
                   ))}
