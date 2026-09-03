@@ -22,7 +22,13 @@ vi.mock('next/navigation', () => ({ useRouter: () => ({ push: pushMock }) }));
 // Rewards is gated on the REAL points-presence signal from usePartnerIdentity
 // (replaces the demo REWARD_TRACK). A points-active partner reaches the catalogue.
 // `mockIdentity` is mutable so a test can simulate a payout-only partner (gate shown).
-let mockIdentity = {
+// `loading` is optional so most tests can omit it (undefined ⇒ settled), while the
+// rules-of-hooks regression test (RR0c) can simulate the loading→settled transition.
+let mockIdentity: {
+  businessName: string; ownerName: string; partnerCode: string; outletType: string;
+  hasPointsActivity: boolean; hasPayoutActivity: boolean; loyaltyEnabled: boolean;
+  loading?: boolean;
+} = {
   businessName: 'Kumar Store', ownerName: 'Rajesh', partnerCode: 'P1',
   outletType: 'WHOLESALER', hasPointsActivity: true, hasPayoutActivity: false,
   loyaltyEnabled: true,
@@ -131,6 +137,29 @@ describe('RR — Rewards live catalogue + redeem flow', () => {
     expect(screen.queryByText(/rewards not available/i)).not.toBeInTheDocument();
     await user.click(await screen.findByRole('button', { name: /vouchers/i }));
     expect(await screen.findByText('Amazon Voucher ₹500')).toBeInTheDocument();
+  });
+
+  it('RR0c: settling to loyalty-OFF AFTER a loading render shows the wall, not a rules-of-hooks crash', async () => {
+    // Regression guard: the loyalty gate must live BELOW every hook. Render first with
+    // identity still LOADING (the component runs all its useMemo hooks + shows the
+    // spinner)…
+    mockIdentity = {
+      businessName: 'Whole Co', ownerName: 'W', partnerCode: 'P9',
+      outletType: 'WHOLESALER', hasPointsActivity: false, hasPayoutActivity: false,
+      loyaltyEnabled: true, loading: true,
+    };
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogResponse());
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    }));
+    const { rerender } = render(<RewardsPage />);
+    // …then /partner/me settles to loyalty-OFF. If the gate returned early ABOVE the
+    // useMemo hooks (the pre-fix bug), this rerender would call fewer hooks than the
+    // loading render and React would throw "rendered fewer hooks than expected".
+    mockIdentity = { ...mockIdentity, loyaltyEnabled: false, loading: false };
+    rerender(<RewardsPage />);
+    expect(await screen.findByText(/rewards not available/i)).toBeInTheDocument();
+    expect(screen.queryByText('Amazon Voucher ₹500')).not.toBeInTheDocument();
   });
 
   it('RR1: renders catalogue items from GET /api/rewards/catalog', async () => {

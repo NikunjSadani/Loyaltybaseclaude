@@ -1007,24 +1007,10 @@ export default function RewardsPage() {
       // Failure simply leaves beneficiary null → the cash tab shows the KYC empty-state.
   }, []);
 
-  /* ── Gate: outlet types with the per-type Loyalty flag OFF don't get the rewards
-     catalogue. Keyed on the IDENTITY signal (loyaltyEnabled) so a loyalty-OFF outlet
-     sees the gate as soon as identity resolves — while a loyalty-ON outlet with zero
-     points still reaches the catalogue (affordability, not the gate, handles balance). ── */
-  if (!identity.loading && !identity.loyaltyEnabled) {
-    return (
-      <div className="flex flex-col items-center justify-center py-20 gap-4 text-center">
-        <Gift className="h-12 w-12 text-gray-300" />
-        <div>
-          <p className="text-gray-700 font-semibold">Rewards not available</p>
-          <p className="text-sm text-gray-500 mt-1">
-            The rewards catalogue isn&apos;t available for your outlet type.
-          </p>
-        </div>
-        <Button variant="primary" onClick={() => router.push('/partner/wallet')}>View My Wallet</Button>
-      </div>
-    );
-  }
+  // NOTE: the loyalty-OFF gate (the "Rewards not available" wall) is applied AFTER all
+  // hooks below, next to the loading-spinner return — returning early HERE would skip the
+  // useMemo hooks that follow and trip React's rules-of-hooks (fewer hooks on the gated
+  // render than on the loading render → runtime crash / error boundary).
 
   // Bucket by redemption mode to match the admin's definition (admin/gifts:
   // VOUCHER_LIKE = {'GIFT_CARD'}). The reward's category label ("Gift Vouchers"
@@ -1091,6 +1077,26 @@ export default function RewardsPage() {
   };
 
   if (loading || identity.loading) return <div className="flex items-center justify-center min-h-64"><Spinner size="lg" /></div>;
+
+  /* ── Gate: outlet types with the per-type Loyalty flag OFF don't get the rewards
+     catalogue. Placed AFTER every hook above (identity is settled here, since the
+     spinner already returned while loading) so it can never skip a hook. A loyalty-ON
+     outlet with zero points still reaches the catalogue — affordability, not this gate,
+     handles the balance. ── */
+  if (!identity.loyaltyEnabled) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 gap-4 text-center">
+        <Gift className="h-12 w-12 text-gray-300" />
+        <div>
+          <p className="text-gray-700 font-semibold">Rewards not available</p>
+          <p className="text-sm text-gray-500 mt-1">
+            The rewards catalogue isn&apos;t available for your outlet type.
+          </p>
+        </div>
+        <Button variant="primary" onClick={() => router.push('/partner/wallet')}>View My Wallet</Button>
+      </div>
+    );
+  }
 
   const channels = ch; // already computed above
 
