@@ -1,8 +1,15 @@
 name: Deploy — Production (main)
 
 on:
-  push:
-    branches: [main]
+  # MANUAL-ONLY production deploy (the deploy gate). We intentionally do NOT deploy
+  # on push to main: the GitHub Environment "production" required-reviewers gate is
+  # NOT enforced on a PRIVATE repo on the Free plan (it only enforces on public repos,
+  # or on Pro/Team/Enterprise for private) — so after the repo went private the gate
+  # stopped pausing and a push to main auto-shipped to prod. Making prod deploy
+  # workflow_dispatch-only restores a hard gate on ANY plan: prod ships ONLY when a
+  # human clicks Actions → "Deploy — Production (main)" → Run workflow. The `approve`
+  # job below is kept (harmless no-op when the env gate isn't enforced; re-arms
+  # automatically if the repo returns to public or upgrades to Pro/Team).
   workflow_dispatch:
     inputs:
       skip_tests:
