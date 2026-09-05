@@ -202,11 +202,25 @@ export function buildEnrollmentExportRows(
   fields: FormField[],
   mintLink: (submissionId: string, fieldId: string) => string,
 ): { rows: Record<string, unknown>[]; columns: ExportColumn[] } {
-  // De-collide duplicate field labels so no column silently overwrites another.
+  // The fixed BUILT-IN columns (identity + master + status). Defined here (not lower)
+  // so the field-label de-collision below can see them, and reused by the `reserved`
+  // set (Excel de-collision) further down.
+  const identityCols = ['Outlet Ref', 'Outlet Name', 'Matched', 'Tagged Employee', 'Submitted By (Employee)'];
+  const masterCols = ['Zone', 'Program', 'Program Category', 'Outlet Type'];
+  const statusCols = ['Status', 'Version', 'Enrolled At', 'Submitted By', 'Submitted By Phone', 'Rejection Reason'];
+  const BUILTIN_BASE = new Set<string>([...identityCols, ...masterCols, ...statusCols]);
+
+  // De-collide field labels so no column silently overwrites another — both against other
+  // fields (duplicate labels) AND against the built-in columns above. The row builder
+  // writes form-field cells AFTER the built-in cells under the SAME row object, so a form
+  // field whose label equals a built-in header (e.g. "Outlet Name", "Status", "Zone")
+  // would clobber that built-in column — which blanked the real Outlet Name on un-enrolled
+  // rows (the field's captured value is empty). Such a field exports as "… (Form)" instead.
   const seen = new Map<string, number>();
   const columnFor = new Map<string, string>(); // fieldId → column header
   for (const f of fields) {
-    const base = f.label?.trim() || f.id;
+    let base = f.label?.trim() || f.id;
+    if (BUILTIN_BASE.has(base)) base = `${base} (Form)`;
     const n = (seen.get(base) ?? 0) + 1;
     seen.set(base, n);
     columnFor.set(f.id, n === 1 ? base : `${base} (${n})`);
@@ -228,13 +242,10 @@ export function buildEnrollmentExportRows(
   }
   const geoColFor = (fieldId: string): string => `${columnFor.get(fieldId) as string} (Geo)`;
 
-  // The reserved (non-Excel) headers: base identity, master attrs, status, and
-  // every form-field column. An uploaded Excel header colliding with any of these
-  // is suffixed ` (Excel)` rather than dropped (RESERVED-collision trap) so the
+  // The reserved (non-Excel) headers: base identity, master attrs, status (all defined
+  // above), and every form-field column. An uploaded Excel header colliding with any of
+  // these is suffixed ` (Excel)` rather than dropped (RESERVED-collision trap) so the
   // base column value always wins and the Excel data is still surfaced.
-  const identityCols = ['Outlet Ref', 'Outlet Name', 'Matched', 'Tagged Employee', 'Submitted By (Employee)'];
-  const masterCols = ['Zone', 'Program', 'Program Category', 'Outlet Type'];
-  const statusCols = ['Status', 'Version', 'Enrolled At', 'Submitted By', 'Submitted By Phone', 'Rejection Reason'];
   const reserved = new Set<string>([
     ...identityCols,
     ...masterCols,

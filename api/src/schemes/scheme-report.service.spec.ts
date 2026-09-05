@@ -192,6 +192,27 @@ describe('buildEnrollmentExportRows (pure)', () => {
     expect(rows[0]['Status (Excel)']).toBe('FROM_EXCEL');
   });
 
+  it('de-collides a FORM FIELD label that clashes with a built-in column (does not clobber Outlet Name)', () => {
+    // A form field literally labelled "Outlet Name" must NOT overwrite the built-in
+    // Outlet Name column. The original bug: form-field cells are written AFTER the
+    // built-in cells under the same row object, so an "Outlet Name" field clobbered the
+    // real name with its (empty, on un-enrolled rows) captured value → blank report.
+    const collidingFields: FormField[] = [field({ id: 'f_on', type: 'TEXT', label: 'Outlet Name', order: 1 })];
+    const roster: ExportRosterRow[] = [
+      // Enrolled: the field HAS a captured value → the two columns are distinct.
+      row({ outletRef: 'A', outletName: 'Ambey Stores', enrollment: enrolled({ formValues: { f_on: 'Typed Name' } }) }),
+      // Un-enrolled: the field is EMPTY — this is the row the bug blanked.
+      row({ outletRef: 'B', outletName: 'Baquai' }),
+    ];
+    const { rows } = buildEnrollmentExportRows(roster, collidingFields, link);
+    // Built-in Outlet Name preserved (NOT clobbered) on BOTH rows.
+    expect(rows[0]['Outlet Name']).toBe('Ambey Stores');
+    expect(rows[1]['Outlet Name']).toBe('Baquai');
+    // The form field is still surfaced, under a de-collided "(Form)" header.
+    expect(rows[0]['Outlet Name (Form)']).toBe('Typed Name');
+    expect(rows[1]['Outlet Name (Form)']).toBe('');
+  });
+
   it('falls back Outlet Name to the matched outlet name when the uploaded name is blank', () => {
     const roster: ExportRosterRow[] = [
       row({ outletRef: 'A', outletName: '', matchedOutletName: 'Real Loyalty Outlet', matchedOutletId: 'o1' }),
