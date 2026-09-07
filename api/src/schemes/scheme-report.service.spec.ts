@@ -192,6 +192,37 @@ describe('buildEnrollmentExportRows (pure)', () => {
     expect(rows[0]['Status (Excel)']).toBe('FROM_EXCEL');
   });
 
+  it('de-collides an Excel header that clashes with a built-in column case-INSENSITIVELY', () => {
+    // An uploaded column differing only in case from a built-in ("status" vs "Status")
+    // must be de-collided to "… (Excel)", not appear as a confusing second bare column.
+    const roster: ExportRosterRow[] = [
+      row({ outletRef: 'A', prefillValues: { status: 'FROM_EXCEL' }, enrollment: enrolled({ status: 'REJECTED' }) }),
+    ];
+    const { rows } = buildEnrollmentExportRows(roster, fields, link);
+    expect(rows[0]['Status']).toBe('REJECTED');          // built-in preserved
+    expect(rows[0]['status (Excel)']).toBe('FROM_EXCEL'); // lowercase Excel col de-collided
+    expect(rows[0]['status']).toBeUndefined();            // NOT a bare lowercase duplicate
+  });
+
+  it('de-collides the per-photo geo companion from a form field with the same label', () => {
+    // A media field "Photo" that carries geo produces a "Photo (Geo)" companion column. A
+    // separate text field literally labelled "Photo (Geo)" must NOT clobber it — the field
+    // keeps "Photo (Geo)", the geo companion yields to "Photo (Geo) (2)". Both values kept.
+    const mediaAndClash: FormField[] = [
+      field({ id: 'f_photo', type: 'CAMERA', label: 'Photo', order: 1 }),
+      field({ id: 'f_clash', type: 'TEXT', label: 'Photo (Geo)', order: 2 }),
+    ];
+    const roster: ExportRosterRow[] = [
+      row({ outletRef: 'A', enrollment: enrolled({ formValues: {
+        f_photo: { key: 'gcs/p.jpg', geo: { lat: 12.9, lng: 77.6, accuracy: 8 } },
+        f_clash: 'typed text',
+      } }) }),
+    ];
+    const { rows } = buildEnrollmentExportRows(roster, mediaAndClash, link);
+    expect(rows[0]['Photo (Geo)']).toBe('typed text');       // the text field keeps the name
+    expect(rows[0]['Photo (Geo) (2)']).toBe('12.9, 77.6 (±8m)'); // geo companion de-collided, value kept
+  });
+
   it('de-collides a FORM FIELD label that clashes with a built-in column (does not clobber Outlet Name)', () => {
     // A form field literally labelled "Outlet Name" must NOT overwrite the built-in
     // Outlet Name column. The original bug: form-field cells are written AFTER the
@@ -211,6 +242,19 @@ describe('buildEnrollmentExportRows (pure)', () => {
     // The form field is still surfaced, under a de-collided "(Form)" header.
     expect(rows[0]['Outlet Name (Form)']).toBe('Typed Name');
     expect(rows[1]['Outlet Name (Form)']).toBe('');
+  });
+
+  it('de-collides a form-field label that matches a built-in column case-INSENSITIVELY', () => {
+    // Parity with the Excel side: a field "status" (lowercase) must be de-collided to
+    // "status (Form)", not sit beside the built-in "Status" as a confusing near-duplicate.
+    const f: FormField[] = [field({ id: 'f_s', type: 'TEXT', label: 'status', order: 1 })];
+    const roster: ExportRosterRow[] = [
+      row({ outletRef: 'A', enrollment: enrolled({ status: 'SUBMITTED', formValues: { f_s: 'typed' } }) }),
+    ];
+    const { rows } = buildEnrollmentExportRows(roster, f, link);
+    expect(rows[0]['Status']).toBe('SUBMITTED');    // built-in preserved
+    expect(rows[0]['status (Form)']).toBe('typed'); // field de-collided
+    expect(rows[0]['status']).toBeUndefined();      // no bare lowercase near-duplicate
   });
 
   it('falls back Outlet Name to the matched outlet name when the uploaded name is blank', () => {

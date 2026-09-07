@@ -209,6 +209,10 @@ export function buildEnrollmentExportRows(
   const masterCols = ['Zone', 'Program', 'Program Category', 'Outlet Type'];
   const statusCols = ['Status', 'Version', 'Enrolled At', 'Submitted By', 'Submitted By Phone', 'Rejection Reason'];
   const BUILTIN_BASE = new Set<string>([...identityCols, ...masterCols, ...statusCols]);
+  // Normalized (case/whitespace-insensitive) view — kept in lockstep with the Excel-side
+  // `reservedNorm` below, so a field labelled "status" / "Outlet  Name" is de-collided to
+  // "… (Form)" just like an uploaded Excel column would be (no confusing near-dup header).
+  const BUILTIN_BASE_NORM = new Set<string>([...BUILTIN_BASE].map(normalizeKey));
 
   // De-collide field labels so no column silently overwrites another — both against other
   // fields (duplicate labels) AND against the built-in columns above. The row builder
@@ -220,7 +224,7 @@ export function buildEnrollmentExportRows(
   const columnFor = new Map<string, string>(); // fieldId → column header
   for (const f of fields) {
     let base = f.label?.trim() || f.id;
-    if (BUILTIN_BASE.has(base)) base = `${base} (Form)`;
+    if (BUILTIN_BASE_NORM.has(normalizeKey(base))) base = `${base} (Form)`;
     const n = (seen.get(base) ?? 0) + 1;
     seen.set(base, n);
     columnFor.set(f.id, n === 1 ? base : `${base} (${n})`);
@@ -240,7 +244,23 @@ export function buildEnrollmentExportRows(
       }
     }
   }
-  const geoColFor = (fieldId: string): string => `${columnFor.get(fieldId) as string} (Geo)`;
+  // De-collide the per-photo geo companion header too: a form field labelled exactly like
+  // a media field's "<col> (Geo)" companion (or another field's geo header) would otherwise
+  // clobber it under the same row key. Suffix a colliding geo header instead of losing a
+  // value. Built AFTER columnFor (all field columns known) and iterated over `fields` for a
+  // deterministic order; the field column always wins, the geo companion yields.
+  const geoTaken = new Set<string>([...BUILTIN_BASE, ...columnFor.values()]);
+  const geoNameFor = new Map<string, string>();
+  for (const f of fields) {
+    if (!mediaGeoFields.has(f.id)) continue;
+    const stem = `${columnFor.get(f.id) as string} (Geo)`;
+    let name = stem;
+    let n = 1;
+    while (geoTaken.has(name)) { n += 1; name = `${stem} (${n})`; }
+    geoTaken.add(name);
+    geoNameFor.set(f.id, name);
+  }
+  const geoColFor = (fieldId: string): string => geoNameFor.get(fieldId) as string;
 
   // The reserved (non-Excel) headers: base identity, master attrs, status (all defined
   // above), and every form-field column. An uploaded Excel header colliding with any of
@@ -255,6 +275,10 @@ export function buildEnrollmentExportRows(
     // column sharing a "<col> (Geo)" header is de-collided rather than overwriting it.
     ...[...mediaGeoFields].map(geoColFor),
   ]);
+  // Case-INSENSITIVE view of the reserved headers: an uploaded Excel column that differs
+  // from a reserved header only in letter-case (e.g. "status" vs the built-in "Status")
+  // is still de-collided to "… (Excel)" instead of appearing as a confusing second column.
+  const reservedNorm = new Set<string>([...reserved].map(normalizeKey));
 
   // Bug 1: resolve the Outlet Name per row and remember WHICH prefill header (if any)
   // supplied it, so bug-3 can claim that header (avoid duplicating the name column).
@@ -291,7 +315,7 @@ export function buildEnrollmentExportRows(
       if (excelSeen.has(origKey)) continue;
       excelSeen.add(origKey);
       if (claimedPrefillNorm.has(normalizeKey(origKey))) continue; // merged into a field/identity column
-      excelCols.push({ origKey, header: reserved.has(origKey) ? `${origKey} (Excel)` : origKey });
+      excelCols.push({ origKey, header: reservedNorm.has(normalizeKey(origKey)) ? `${origKey} (Excel)` : origKey });
     }
   }
 
