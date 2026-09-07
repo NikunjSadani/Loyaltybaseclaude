@@ -383,11 +383,22 @@ export class SchemeAdminService {
       await this.prisma.$transaction(ops.slice(i, i + SchemeAdminService.UPLOAD_CHUNK));
     }
 
+    // Rows that will actually show a BLANK outlet name in the report: no parsed name AND
+    // not matched to a loyalty outlet. A MATCHED row is deliberately excluded — it recovers
+    // the registered outlet's name from the master in the export, so warning on it would be
+    // noise (and would fire every upload for teams whose names come from matching, not the
+    // file). Surfaced so the upload UI warns AT UPLOAD TIME — before the operator sees the
+    // blanks in the report — that a name column may be unmapped OR those name cells are empty.
+    const blankNameCount = matched.rows.filter(
+      (r) => (!r.outletName || !r.outletName.trim()) && !r.matchedOutletId,
+    ).length;
+
     return {
       totalRows: rawRows.length,
       upserted: matched.rows.length,
       matchedCount: matched.matchedCount,
       standaloneCount: matched.standaloneCount,
+      blankNameCount,
       duplicateRefs: matched.duplicateRefs,
       unmatchedEmployeeCodes: matched.unmatchedEmployeeCodes,
       // Non-blank rows dropped for a missing outlet id — surfaced so a reconciliation

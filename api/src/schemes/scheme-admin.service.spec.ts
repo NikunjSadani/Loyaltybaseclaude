@@ -336,6 +336,34 @@ describe('SchemeAdminService', () => {
       expect(mockPrisma.schemeOutlet.upsert.mock.calls[0][0].update.deletedAt).toBeNull();
     });
 
+    it('reports blankNameCount = UNMATCHED rows with an empty/whitespace name (matched blanks excluded)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(activeScheme);
+      // OUT003 matches a loyalty outlet → its blank name recovers from the master, so it
+      // must NOT be counted. OUT001/OUT002 are standalone.
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { id: 'o3', outletCode: 'OUT003', partnerId: null },
+      ]);
+      mockPrisma.salesUser.findMany.mockResolvedValue([]);
+      mockPrisma.schemeOutlet.upsert.mockReturnValue(Promise.resolve({}));
+
+      const buf = xlsxBuffer([
+        ['Outlet ID', 'Outlet Name', 'Slab'],
+        ['OUT001', 'Shop One', 'Gold'], // named, unmatched → not counted
+        ['OUT002', '', 'Silver'], // blank, unmatched → COUNTED
+        ['OUT003', '   ', 'Bronze'], // blank BUT matched → NOT counted (recovers from master)
+      ]);
+
+      const res = await service.uploadRoster(
+        user,
+        's1',
+        { buffer: buf } as Express.Multer.File,
+        {},
+      );
+
+      expect(res.totalRows).toBe(3);
+      expect(res.blankNameCount).toBe(1);
+    });
+
     it('rejects a file with no data rows', async () => {
       mockPrisma.scheme.findFirst.mockResolvedValue(activeScheme);
       const buf = xlsxBuffer([['Outlet ID', 'Outlet Name']]);

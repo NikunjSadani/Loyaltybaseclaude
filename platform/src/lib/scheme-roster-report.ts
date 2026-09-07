@@ -44,6 +44,10 @@ export function buildRosterReportWorkbook(
     ...(result.skippedRows !== undefined
       ? [['Rows skipped (blank / missing outlet id)', result.skippedRows]]
       : []),
+    // Only shown when the backend reports it (older backends omit blankNameCount).
+    ...(result.blankNameCount !== undefined
+      ? [['Saved rows with no outlet name (unmatched → blank in report)', result.blankNameCount]]
+      : []),
   ];
   XLSX.utils.book_append_sheet(wb, aoaToSheetSafe(summary), 'Summary');
 

@@ -238,6 +238,8 @@ export interface RosterUploadResult {
   upserted: number;
   matchedCount: number;
   standaloneCount: number;
+  /** Rows saved with a blank outlet name (name column not found/mapped) — drives the upload warning. */
+  blankNameCount?: number;
   duplicateRefs: string[];
   unmatchedEmployeeCodes: string[];
   /** Non-blank rows dropped for a missing outlet id (accounted for in the report). */

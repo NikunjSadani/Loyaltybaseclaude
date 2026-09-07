@@ -910,8 +910,13 @@ function RosterUploadPanel({ schemeId, schemeName, onUploaded }: { schemeId: str
                 {result.unmatchedEmployeeCodes.length} tagged employee code{result.unmatchedEmployeeCodes.length === 1 ? '' : 's'} not found: {result.unmatchedEmployeeCodes.slice(0, 6).join(', ')}{result.unmatchedEmployeeCodes.length > 6 ? ' …' : ''}
               </p>
             )}
-            {result.duplicateRefs.length === 0 && result.unmatchedEmployeeCodes.length === 0 && (
-              <p className="flex items-center gap-1.5 text-green-600"><CheckCircle className="w-3.5 h-3.5" /> No duplicates or unmatched employees.</p>
+            {(result.blankNameCount ?? 0) > 0 && (
+              <p className="flex items-start gap-1.5 text-amber-700" data-testid="blank-name-warning"><AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                {result.blankNameCount} of {result.upserted} saved row{result.blankNameCount === 1 ? '' : 's'} {result.blankNameCount === 1 ? 'has' : 'have'} no outlet name and no matching outlet, so {result.blankNameCount === 1 ? 'it' : 'they'} will show blank in the report. Check your file&rsquo;s name column — empty name cells, or a non-standard header you can map under &ldquo;Column overrides &rarr; Outlet name column&rdquo; above — then re-upload. (Rows matched to a registered outlet keep that outlet&rsquo;s name.)
+              </p>
+            )}
+            {result.duplicateRefs.length === 0 && result.unmatchedEmployeeCodes.length === 0 && (result.blankNameCount ?? 0) === 0 && (
+              <p className="flex items-center gap-1.5 text-green-600"><CheckCircle className="w-3.5 h-3.5" /> No duplicates, unmatched employees, or missing names.</p>
             )}
           </div>
         </div>
