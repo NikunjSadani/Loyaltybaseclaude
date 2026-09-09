@@ -176,6 +176,7 @@ describe('G – getOutletTypeClientConfig', () => {
       loyaltyEnabled: true, schemesEnabled: false,
       visibilityEnabled: true, payoutsEnabled: true,
       leaderboardEnabled: false, targetsEnabled: true, kycRequired: true,
+      salesAssistedRedeemEnabled: false,
     },
   ];
 

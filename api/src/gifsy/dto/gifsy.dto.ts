@@ -281,4 +281,10 @@ export class UpdateOutletTypeConfigDto {
   @IsOptional()
   @IsBoolean()
   kycRequired?: boolean;
+
+  // Per-outlet-type sales-assisted redemption ("Redeem for Outlet") eligibility. Persisted as an
+  // explicit boolean when set; left unset (NULL) → preserve-today default (WHOLESALER only).
+  @IsOptional()
+  @IsBoolean()
+  salesAssistedRedeemEnabled?: boolean;
 }

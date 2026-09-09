@@ -42,6 +42,8 @@ interface KYCDetail {
   outletId?: string;
   outletCode?: string;
   outletType?: 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
+  /** Per-outlet-type "Redeem for Outlet" eligibility (backend-computed; drives the redeem gate). */
+  salesRedeemEnabled?: boolean;
   // The payout method the outlet-master mandates for this outlet — lets the approver
   // verify the rep captured the required type (BANK / UPI / ANY = rep's choice).
   requiredPaymentType?: 'BANK' | 'UPI' | 'ANY';
@@ -869,12 +871,13 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           id:              s.id,
           outletId:        s.partner?.outlets?.[0]?.id ?? '',
           outletCode:      s.partner?.outlets?.[0]?.outletCode ?? '',
-          // outletType.code (SSS/WHOLESALER/SUB_STOCKIST) gates the "Redeem for Outlet"
-          // action when the tenant restricts redemption to wholesalers
-          // (settings.salesApp.redeemGiftWholesalerOnly). Read from the relation the
-          // detail endpoint now selects — without it the gate sees `undefined` and
-          // hides redeem for every outlet, even wholesalers.
+          // outletType.code is DISPLAY-ONLY (reviewer context). The "Redeem for Outlet" gate no
+          // longer keys off it — it reads the backend-computed salesRedeemEnabled below.
           outletType:      s.partner?.outlets?.[0]?.outletType?.code ?? undefined,
+          // Per-outlet-type "Redeem for Outlet" eligibility, computed by the backend
+          // (OutletTypeClientConfig.salesAssistedRedeemEnabled, preserve-today default). Drives the
+          // redeem-button gate — settings-driven per outlet type, NOT hardcoded to a role.
+          salesRedeemEnabled: s.salesRedeemEnabled ?? false,
           // Outlet-master mandated payout method (primary outlet), for reviewer verification.
           requiredPaymentType: s.partner?.outlets?.[0]?.requiredPaymentType ?? undefined,
           partnerName:     s.user?.name                       ?? '',
@@ -1056,15 +1059,12 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
      Redeem is offered ONLY for an APPROVED outlet — a submitted-but-unapproved outlet
      has no access yet (the backend also gates redemption on KYC-APPROVED, so this just
      stops the button looking active before approval / during a pending re-KYC).
-     showRedeem then hides redeem when the tenant restricts it to wholesalers
-     (settings.salesApp.redeemGiftWholesalerOnly === true) AND this outlet is not a
-     wholesaler. A normal redeemable outlet (wholesaler, OR any outlet when the
-     restriction is off) shows the button. outletType now comes from the API (the
-     detail endpoint selects outletType.code) so the gate no longer collapses to
-     "always hidden" from an undefined type. */
-  const showRedeem =
-    isApproved &&
-    !(settings.salesApp?.redeemGiftWholesalerOnly && kyc.outletType !== 'WHOLESALER');
+     showRedeem then honours the PER-OUTLET-TYPE "Sales-Assisted Redemption" setting
+     (OutletTypeClientConfig.salesAssistedRedeemEnabled), computed by the backend and
+     delivered as `kyc.salesRedeemEnabled` — settings-driven per outlet type, NOT hardcoded
+     to a role. The backend redeemForOutlet/confirmRedeemForOutlet enforce the same flag, so
+     this is purely the UX gate. */
+  const showRedeem = isApproved && (kyc.salesRedeemEnabled ?? false);
 
   return (
     <div className="space-y-4 fade-in">

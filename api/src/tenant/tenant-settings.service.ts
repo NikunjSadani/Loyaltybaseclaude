@@ -42,10 +42,11 @@ export interface UniquenessPolicySettings {
 
 export interface SalesAppSettings {
   ledgerLabel:              string;
-  redeemGiftWholesalerOnly: boolean;
   /** When true, the sales KYC form offers UPI as a payout option. Default false = bank-only. */
   upiEnabled:               boolean;
 }
+// NOTE: the former `redeemGiftWholesalerOnly` binary was replaced by the per-outlet-type
+// `OutletTypeClientConfig.salesAssistedRedeemEnabled` flag (see sales-redeem-eligibility.ts).
 
 /**
  * Per-tenant, per-purpose MSG91 OTP template IDs. Each field holds an MSG91-registered
@@ -256,7 +257,7 @@ export class TenantSettingsService {
       // (owner decision 2026-06-25). A tenant must be turned ON in Gifsy Settings.
       visibilityEnabled:      false,
       redemptionChannels:     { physicalGifts: true, vouchers: true, bankTransfer: true },
-      salesApp:               { ledgerLabel: 'Wallet', redeemGiftWholesalerOnly: true, upiEnabled: false },
+      salesApp:               { ledgerLabel: 'Wallet', upiEnabled: false },
       creditsPayouts: {
         monthCutoffDay:  28,
         safetyCapPoints: 50000,
@@ -483,8 +484,6 @@ export class TenantSettingsService {
             out.salesApp = {
               ledgerLabel: typeof v.ledgerLabel === 'string' && v.ledgerLabel.trim()
                 ? v.ledgerLabel : base.salesApp.ledgerLabel,
-              redeemGiftWholesalerOnly:
-                this.bool(v.redeemGiftWholesalerOnly, base.salesApp.redeemGiftWholesalerOnly),
               upiEnabled: this.bool(v.upiEnabled, base.salesApp.upiEnabled),
             };
           }

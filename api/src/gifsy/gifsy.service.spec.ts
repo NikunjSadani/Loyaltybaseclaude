@@ -497,6 +497,7 @@ describe('GifsyService', () => {
           leaderboardEnabled: true,
           targetsEnabled: true,
           kycRequired: true,
+          salesAssistedRedeemEnabled: false, // RETAILER → preserve-today default (wholesalers only)
         },
       ]);
     });
@@ -511,6 +512,26 @@ describe('GifsyService', () => {
       expect(cfg.displayName).toBe('Shops');
       expect(cfg.loyaltyEnabled).toBe(false);
       expect(cfg.schemesEnabled).toBe(true); // not in row → default
+    });
+
+    it('salesAssistedRedeemEnabled: unset → WHOLESALER effective TRUE, others FALSE (preserve-today)', async () => {
+      mockPrisma.outletType.findMany.mockResolvedValue([
+        { id: 'ot1', code: 'WHOLESALER', name: 'Wholesaler' },
+        { id: 'ot2', code: 'SSS', name: 'SSS' },
+      ]);
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
+      const res = await service.getOutletTypeConfigs(gifsy, 'deoleo');
+      expect(res.find((c) => c.outletTypeCode === 'WHOLESALER')!.salesAssistedRedeemEnabled).toBe(true);
+      expect(res.find((c) => c.outletTypeCode === 'SSS')!.salesAssistedRedeemEnabled).toBe(false);
+    });
+
+    it('salesAssistedRedeemEnabled: an explicit stored value wins over the default', async () => {
+      mockPrisma.outletType.findMany.mockResolvedValue([{ id: 'ot1', code: 'SSS', name: 'SSS' }]);
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletTypeId: 'ot1', salesAssistedRedeemEnabled: true },
+      ]);
+      const [cfg] = await service.getOutletTypeConfigs(gifsy, 'deoleo');
+      expect(cfg.salesAssistedRedeemEnabled).toBe(true); // explicit true wins for a non-wholesaler
     });
   });
 
@@ -565,6 +586,19 @@ describe('GifsyService', () => {
       expect(call.where).toEqual({
         clientId_outletTypeId: { clientId: 'deoleo', outletTypeId: 'ot1' },
       });
+    });
+
+    it('persists salesAssistedRedeemEnabled to BOTH the update and create sets when supplied', async () => {
+      mockPrisma.outletType.findFirst.mockResolvedValue({ id: 'ot1', code: 'SSS', name: 'SSS' });
+      mockPrisma.outletTypeClientConfig.upsert.mockResolvedValue({
+        clientId: 'deoleo', outletTypeId: 'ot1', isEnabled: true, displayName: null,
+        loyaltyEnabled: true, schemesEnabled: true, visibilityEnabled: true, payoutsEnabled: true,
+        leaderboardEnabled: true, targetsEnabled: true, kycRequired: true, salesAssistedRedeemEnabled: true,
+      });
+      await service.updateOutletTypeConfig(gifsy, 'deoleo', 'SSS', { salesAssistedRedeemEnabled: true });
+      const call = mockPrisma.outletTypeClientConfig.upsert.mock.calls[0][0];
+      expect(call.update).toEqual({ salesAssistedRedeemEnabled: true });
+      expect(call.create.salesAssistedRedeemEnabled).toBe(true);
     });
   });
 

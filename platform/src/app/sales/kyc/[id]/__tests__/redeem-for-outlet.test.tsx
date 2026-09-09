@@ -6,13 +6,17 @@
  * appears ONLY on the outlet-detail view (this page, reached by tapping an outlet),
  * surfaced PROMINENTLY — not on the outlet list, not as a bottom-nav tab.
  *
- * RFO1: a wholesaler outlet (wholesaler-only restriction ON) shows a prominent
+ * The gate is now the PER-OUTLET-TYPE "Sales-Assisted Redemption" setting
+ * (OutletTypeClientConfig.salesAssistedRedeemEnabled), computed by the backend and delivered
+ * on the KYC detail as `submission.salesRedeemEnabled` — settings-driven per outlet type, NOT
+ * hardcoded to a role. (The backend redeemForOutlet/confirmRedeemForOutlet enforce the same flag.)
+ *
+ * RFO1: an APPROVED outlet whose type has redemption ENABLED shows a prominent
  *       "Redeem for Outlet" button linking to /sales/catalogue?outletId=<id>
- * RFO2: a NON-wholesaler outlet, with the wholesaler-only restriction OFF, still
- *       shows the redeem action (the gate must not hide a normal redeemable outlet)
- * RFO3: a NON-wholesaler outlet, with the wholesaler-only restriction ON, hides it
- * RFO4: the action is rendered once (prominent button) — not duplicated as a
- *       Quick-Action row
+ * RFO2: enablement is independent of the outlet TYPE label (a non-wholesaler with the
+ *       flag on still shows it) — proves nothing is hardcoded to WHOLESALER
+ * RFO3: an outlet whose type has redemption DISABLED hides the action
+ * RFO4: the action is rendered once (prominent button) — not duplicated as a Quick-Action row
  */
 
 import React, { Suspense, act } from 'react';
@@ -35,7 +39,7 @@ vi.mock('next/link', () => ({
 // The page reads the sales role from localStorage via getRole(); pin it to XSR.
 vi.mock('@/lib/sales-role', () => ({ getRole: () => 'XSR' }));
 
-// useGifsySettings is the gate input — drive it per-test.
+// useGifsySettings is still consumed by the page (other cards); pin it to defaults.
 let mockSettings: GifsySettings = DEFAULT_SETTINGS;
 vi.mock('@/lib/gifsy-settings', async (importOriginal) => {
   const actual = await importOriginal() as typeof import('@/lib/gifsy-settings');
@@ -44,13 +48,17 @@ vi.mock('@/lib/gifsy-settings', async (importOriginal) => {
 
 import SalesKYCDetailPage from '../page';
 
-/** A KYC submission whose enrolled outlet has a given outletType.code. */
-function submission(outletTypeCode: string) {
+/**
+ * A KYC submission whose enrolled outlet has a given outletType.code and the backend-computed
+ * `salesRedeemEnabled` flag (the gate input).
+ */
+function submission(outletTypeCode: string, salesRedeemEnabled: boolean) {
   return {
     id: 'KYC42',
     status: 'APPROVED',
     submittedAt: '2026-05-01T00:00:00.000Z',
     rejectionReason: null,
+    salesRedeemEnabled,
     user: { id: 'u1', name: 'Anil XSR', phone: '9900000011', role: 'SALES_XSR' },
     partner: {
       id: 'p1',
@@ -70,10 +78,10 @@ function submission(outletTypeCode: string) {
   };
 }
 
-function stubFetch(outletTypeCode: string) {
+function stubFetch(outletTypeCode: string, salesRedeemEnabled: boolean) {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
     ok: true,
-    json: () => Promise.resolve({ success: true, data: { submission: submission(outletTypeCode) } }),
+    json: () => Promise.resolve({ success: true, data: { submission: submission(outletTypeCode, salesRedeemEnabled) } }),
   }));
 }
 
@@ -98,9 +106,8 @@ beforeEach(() => { mockSettings = DEFAULT_SETTINGS; });
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 describe('RFO — sales outlet-detail Redeem for Outlet', () => {
-  it('RFO1: wholesaler outlet (wholesaler-only ON) shows a prominent redeem button to the catalogue', async () => {
-    mockSettings = { ...DEFAULT_SETTINGS, salesApp: { ...DEFAULT_SETTINGS.salesApp, redeemGiftWholesalerOnly: true } };
-    stubFetch('WHOLESALER');
+  it('RFO1: an outlet whose type has redemption ENABLED shows a prominent redeem button to the catalogue', async () => {
+    stubFetch('WHOLESALER', true);
     await renderPage('KYC42');
 
     const action = await screen.findByTestId('redeem-for-outlet');
@@ -108,18 +115,16 @@ describe('RFO — sales outlet-detail Redeem for Outlet', () => {
     expect(action).toHaveTextContent(/Redeem for Outlet/i);
   });
 
-  it('RFO2: non-wholesaler outlet shows redeem when the wholesaler-only restriction is OFF', async () => {
-    mockSettings = { ...DEFAULT_SETTINGS, salesApp: { ...DEFAULT_SETTINGS.salesApp, redeemGiftWholesalerOnly: false } };
-    stubFetch('SSS');
+  it('RFO2: enablement is per-type, not hardcoded — a NON-wholesaler with the flag ON still shows redeem', async () => {
+    stubFetch('SSS', true);
     await renderPage('KYC42');
 
     const action = await screen.findByTestId('redeem-for-outlet');
     expect(action).toHaveAttribute('href', '/sales/catalogue?outletId=KYC42');
   });
 
-  it('RFO3: non-wholesaler outlet hides redeem when the wholesaler-only restriction is ON', async () => {
-    mockSettings = { ...DEFAULT_SETTINGS, salesApp: { ...DEFAULT_SETTINGS.salesApp, redeemGiftWholesalerOnly: true } };
-    stubFetch('SSS');
+  it('RFO3: an outlet whose type has redemption DISABLED hides the action', async () => {
+    stubFetch('SSS', false);
     await renderPage('KYC42');
 
     // Wait for the page to hydrate (the outlet/firm name renders post-fetch).
@@ -128,8 +133,7 @@ describe('RFO — sales outlet-detail Redeem for Outlet', () => {
   });
 
   it('RFO4: the redeem action renders exactly once (prominent button, not also a Quick-Action row)', async () => {
-    mockSettings = { ...DEFAULT_SETTINGS, salesApp: { ...DEFAULT_SETTINGS.salesApp, redeemGiftWholesalerOnly: true } };
-    stubFetch('WHOLESALER');
+    stubFetch('WHOLESALER', true);
     const { container } = await renderPage('KYC42');
 
     await screen.findByTestId('redeem-for-outlet');

@@ -94,7 +94,7 @@ const LENIENT_SETTINGS = () => ({
   paceAmberThreshold: 10,
   visibilityPhotoEnabled: false,
   redemptionChannels: { physicalGifts: true, vouchers: true, bankTransfer: true },
-  salesApp: { ledgerLabel: 'Wallet', redeemGiftWholesalerOnly: true },
+  salesApp: { ledgerLabel: 'Wallet', upiEnabled: false },
   creditsPayouts: { monthCutoffDay: 28, safetyCapPoints: 50000, safetyCapInr: 100000, fourEyesEnabled: false, notifyEmails: [] },
 });
 let mockSettings = LENIENT_SETTINGS();
@@ -160,9 +160,12 @@ describe('RewardsService', () => {
     mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
     mockPrisma.auditLog.create.mockResolvedValue({ id: 'audit1' });
     mockPrisma.outlet.findMany.mockResolvedValue([]); // default: no extra outlet-keyed assignments
-    // Per-outlet-type Loyalty gate defaults: no primary outlet + no config row →
-    // isLoyaltyEnabledForPartner returns true (schema default). Loyalty-off cases override.
-    mockPrisma.outlet.findFirst.mockResolvedValue(null);
+    // Per-outlet-type gate defaults (Loyalty + Sales-Assisted Redemption): a WHOLESALER primary
+    // outlet + no config row → isLoyaltyEnabledForPartner true (schema default) AND
+    // isSalesRedeemEnabledForPartner true (preserve-today default = wholesalers only). Loyalty-off
+    // and sales-redeem-off cases override these. (Self-path loyalty tests override findFirst with a
+    // code-less outlet — fine, they never call the sales-redeem resolver.)
+    mockPrisma.outlet.findFirst.mockResolvedValue({ outletTypeId: 'ot1', outletType: { code: 'WHOLESALER' } });
     mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue(null);
     // Default eligible partner for the in-tx TOCTOU re-check (all modes now gated).
     mockPrisma.channelPartner.findFirst.mockResolvedValue(ELIGIBLE_FRESH_PARTNER);
@@ -884,6 +887,37 @@ describe('RewardsService', () => {
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
 
+    it('Finding-1: a REP-STAGED order (metadata.salesInitiatedById) is BLOCKED via self-confirm once the type has Sales-Assisted Redemption OFF — no debit', async () => {
+      // The rep staged this order (redeem-for-outlet); OTP went to the outlet's own phone. If the
+      // admin disables the type's sales-assisted redemption, the OWNER must not finish it via self-confirm.
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ ...pendingOrder, metadata: { salesInitiatedById: 'su1' } });
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000),
+      });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+      // Loyalty stays ON (undefined→true); sales-assisted redemption explicitly OFF for this type.
+      mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue({ salesAssistedRedeemEnabled: false });
+
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .rejects.toThrow('Sales-assisted redemption is not enabled for this outlet type.');
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('Finding-1: a genuine SELF order (no salesInitiatedById marker) is UNAFFECTED by the sales-redeem flag being OFF — still debits', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(pendingOrder); // no metadata marker
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000),
+      });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'CONFIRMED' });
+      // Sales-assisted redemption OFF must NOT gate a self-redeem (loyalty stays the governing flag).
+      mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue({ salesAssistedRedeemEnabled: false, loyaltyEnabled: true });
+
+      const res = await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
+      expect(res.status).toBe('CONFIRMED');
+      expect(mockWallet.debitRedeem).toHaveBeenCalled();
+    });
+
     it('happy path: debits via WalletService(tx), sets CONFIRMED, writes history', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(pendingOrder);
       mockPrisma.otpCode.findFirst.mockResolvedValue({
@@ -1552,6 +1586,26 @@ describe('RewardsService', () => {
       mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
     };
 
+    it('BLOCKS with 403 (no order) when the outlet type has Sales-Assisted Redemption explicitly OFF', async () => {
+      wireAssigned();
+      // Explicit per-type disable wins over the wholesaler preserve-today default.
+      mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue({ salesAssistedRedeemEnabled: false });
+      await expect(
+        service.redeemForOutlet(sales, { rewardId: 'r1', quantity: 1, targetPartnerId: 'cp-out' }),
+      ).rejects.toThrow('Sales-assisted redemption is not enabled for this outlet type.');
+      expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+    });
+
+    it('BLOCKS with 403 for a non-wholesaler type when UNSET (preserve-today default OFF)', async () => {
+      wireAssigned();
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletTypeId: 'ot9', outletType: { code: 'SSS' } });
+      mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue(null); // unset → default off for SSS
+      await expect(
+        service.redeemForOutlet(sales, { rewardId: 'r1', quantity: 1, targetPartnerId: 'cp-out' }),
+      ).rejects.toThrow('Sales-assisted redemption is not enabled for this outlet type.');
+      expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+    });
+
     it('creates the order against the TARGET outlet, binds the OTP to the OUTLET, supersedes the OUTLET', async () => {
       wireAssigned();
 
@@ -1693,6 +1747,18 @@ describe('RewardsService', () => {
       mockWallet.debitRedeem.mockResolvedValue({});
       mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
     };
+
+    it('TOCTOU: if Sales-Assisted Redemption is turned OFF mid-flight, confirm is blocked and NO debit happens', async () => {
+      wireConfirm();
+      // Admin disables the outlet type's sales-assisted redemption between redeem and confirm.
+      mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue({ salesAssistedRedeemEnabled: false });
+      await expect(
+        service.confirmRedeemForOutlet(sales, {
+          orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
+        }),
+      ).rejects.toThrow('Sales-assisted redemption is not enabled for this outlet type.');
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
 
     it('re-checks the assignment server-side — Forbidden without it (order alone not trusted)', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });

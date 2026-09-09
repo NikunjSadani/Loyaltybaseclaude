@@ -49,8 +49,11 @@ Current reality of each field (all localStorage today unless noted):
   **`fourEyesEnabled` concept is ENTIRELY ABSENT** (no approval status; batch goes
   PENDING_CONFIRM→CONFIRMED in one action).
 - `paceAmberThreshold` — FE-only; classification in `lib/pace.ts:35`, 6 consumers.
-- `salesApp.ledgerLabel` / `redeemGiftWholesalerOnly` — FE-only UI label + gate
-  (`sales/kyc/[id]/page.tsx:845-846`).
+- `salesApp.ledgerLabel` — FE-only UI label (`sales/kyc/[id]/page.tsx`).
+  (The former `salesApp.redeemGiftWholesalerOnly` binary was REPLACED by the per-outlet-type
+  `OutletTypeClientConfig.salesAssistedRedeemEnabled` flag — backend-enforced in
+  `rewards.redeemForOutlet`/`confirmRedeemForOutlet`, surfaced to the sales redeem gate via the
+  KYC-detail `salesRedeemEnabled`; configured in Outlet Type Configuration → Feature flags.)
 - `visibilityPhotoEnabled` — FE-only, but **overlaps** the already-DB-backed
   `visibilityCaptureMode`. Consolidate, don't duplicate.
 

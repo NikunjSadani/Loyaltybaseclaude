@@ -490,8 +490,8 @@ export interface GifsySettings {
   salesApp?: {
     /** Override label for the "View Points Ledger" quick action. Default: 'View Points Ledger' */
     ledgerLabel?: string;
-    /** When true, "Redeem Gift" quick action is shown only for WHOLESALER outlets. Default: false */
-    redeemGiftWholesalerOnly?: boolean;
+    // NOTE: the former `redeemGiftWholesalerOnly` binary was replaced by the per-outlet-type
+    // "Sales-Assisted Redemption" flag (OutletTypeClientConfig.salesAssistedRedeemEnabled).
     /** When true, the sales KYC form offers UPI as a payout option. Default: false (bank-only). */
     upiEnabled?: boolean;
   };

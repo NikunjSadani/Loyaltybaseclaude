@@ -41,6 +41,7 @@ describe('A – initial render', () => {
       loyaltyEnabled: true, schemesEnabled: true,
       visibilityEnabled: true, payoutsEnabled: true,
       leaderboardEnabled: true, targetsEnabled: true, kycRequired: true,
+      salesAssistedRedeemEnabled: false,
     }];
     render(<OutletTypeConfigSection clientId="deoleo" initialConfigs={configs} />);
     const switches = screen.getAllByRole('switch', { name: /enable for this client/i });
@@ -178,6 +179,7 @@ describe('E – custom display name override', () => {
       loyaltyEnabled: true, schemesEnabled: true,
       visibilityEnabled: true, payoutsEnabled: true,
       leaderboardEnabled: true, targetsEnabled: true, kycRequired: true,
+      salesAssistedRedeemEnabled: false,
     }];
     render(<OutletTypeConfigSection clientId="deoleo" initialConfigs={configs} />);
     expandRetailer();

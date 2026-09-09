@@ -23,6 +23,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { resolveEffectiveKycStatus, isPartnerPayable } from '../kyc/kyc-eligibility';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
+import { isSalesRedeemEnabledForPartner } from '../common/sales-redeem-eligibility';
 import { isGifsyOperator, tenantScope } from '../common/tenant-scope';
 import { generateTenantOrderNumber } from './order-number.helper';
 import { computeFrozenValuePaise } from './gift-value.helper';
@@ -811,6 +812,14 @@ export class RewardsService {
       throw new ForbiddenException('Rewards are not enabled for your outlet type.');
     }
 
+    // Per-outlet-type SALES-ASSISTED REDEMPTION gate — the tenant governs, per outlet type, whether
+    // a rep may redeem on an outlet's behalf (OutletTypeClientConfig.salesAssistedRedeemEnabled).
+    // Server-enforced (the FE "Redeem for Outlet" button is bypassable via a direct API call), BEFORE
+    // any debit/order. Unset → preserve-today default (wholesalers only). See sales-redeem-eligibility.
+    if (!(await isSalesRedeemEnabledForPartner(this.prisma, user.clientId, partner.id))) {
+      throw new ForbiddenException('Sales-assisted redemption is not enabled for this outlet type.');
+    }
+
     // Affordability checks the OUTLET's wallet (no debit yet).
     const wallet = await this.prisma.wallet.findFirst({ where: { partnerId: partner.id } });
     if (!wallet) throw new NotFoundException('Wallet not found');
@@ -822,13 +831,16 @@ export class RewardsService {
 
     const addr = dto.deliveryAddress;
     const otp = this.generateOtpCode();
-    // Gift value snapshot (decision §14): freeze the gift's ₹ selling price onto the
-    // order at redeem so a later price/rate change never re-values it. Null for
-    // non-gift / variable-amount items → confirm falls back to points ÷ rate.
-    const giftMetadata =
-      item.sellingValuePaise != null
-        ? ({ sellingValuePaiseSnapshot: item.sellingValuePaise } as Prisma.InputJsonValue)
-        : undefined;
+    // Order metadata: (a) gift value snapshot (decision §14) — freeze the gift's ₹ selling price
+    // so a later price/rate change never re-values it (null for non-gift/variable → confirm falls
+    // back to points ÷ rate); (b) salesInitiatedById — mark this as a REP-STAGED order so the
+    // self-confirm path (confirmRedeem) can also refuse it once the outlet type's sales-assisted
+    // redemption is disabled (closes the disable-mid-flight residual — the OTP sits on the outlet's
+    // own phone, so without this the owner could complete a rep-staged order via self-confirm).
+    const giftMetadata: Prisma.InputJsonValue = {
+      ...(item.sellingValuePaise != null ? { sellingValuePaiseSnapshot: item.sellingValuePaise } : {}),
+      salesInitiatedById: user.sub,
+    };
 
     // Single active OTP per OUTLET: supersede the OUTLET's abandoned PENDING orders
     // (never debited) and clear the OUTLET's unverified REDEMPTION_CONFIRM OTPs so
@@ -1125,6 +1137,18 @@ export class RewardsService {
       // an in-flight redemption. A throw rolls the whole tx back (no debit/claim).
       if (!(await isLoyaltyEnabledForPartner(tx, user.clientId, order.partnerId))) {
         throw new ForbiddenException('Rewards are not enabled for your outlet type.');
+      }
+
+      // TOCTOU sales-assisted-redemption re-check: an admin can turn the outlet type's
+      // salesAssistedRedeemEnabled flag OFF between the sales-assisted redeem and this confirm.
+      // Re-assert the per-outlet-type gate INSIDE the tx so this (rep-assisted) endpoint can never
+      // complete a rep-assisted redemption after the type is disabled (parity with the loyalty
+      // re-check). Throw → tx rollback. The companion self-confirm path (confirmRedeem) ALSO blocks
+      // a rep-staged order (marked via metadata.salesInitiatedById at redeem) under the same gate,
+      // so the outlet owner cannot finish it with the OTP sent to their phone either — both confirm
+      // paths are closed for a disabled type.
+      if (!(await isSalesRedeemEnabledForPartner(tx, user.clientId, order.partnerId))) {
+        throw new ForbiddenException('Sales-assisted redemption is not enabled for this outlet type.');
       }
 
       // Atomic claim: only the tx that flips PENDING→CONFIRMED proceeds → a single
@@ -1684,6 +1708,17 @@ export class RewardsService {
       // rolls the whole tx back (no debit/claim).
       if (!(await isLoyaltyEnabledForPartner(tx, user.clientId, order.partnerId))) {
         throw new ForbiddenException('Rewards are not enabled for your outlet type.');
+      }
+
+      // Finding-1 close: a REP-STAGED order (created via redeem-for-outlet, marked with
+      // metadata.salesInitiatedById) must NOT complete via THIS self-confirm path either once the
+      // outlet type's sales-assisted redemption is disabled — otherwise the outlet owner could finish
+      // a rep-staged order with the OTP that was sent to their own phone, bypassing the rep-path gate.
+      // Only rep-staged orders are gated here; a genuine self-redeem (no marker) is unaffected.
+      const salesInitiated =
+        (order.metadata as { salesInitiatedById?: unknown } | null)?.salesInitiatedById != null;
+      if (salesInitiated && !(await isSalesRedeemEnabledForPartner(tx, user.clientId, order.partnerId))) {
+        throw new ForbiddenException('Sales-assisted redemption is not enabled for this outlet type.');
       }
 
       const claim = await tx.redemptionOrder.updateMany({

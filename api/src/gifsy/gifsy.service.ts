@@ -56,7 +56,19 @@ const CONFIG_FIELDS = [
   'leaderboardEnabled',
   'targetsEnabled',
   'kycRequired',
+  // Nullable — deliberately NOT in DEFAULT_FLAGS so it stays NULL (unset) on create unless the admin
+  // sets it. The GET/PUT return the EFFECTIVE value (null → preserve-today default = WHOLESALER).
+  'salesAssistedRedeemEnabled',
 ] as const;
+
+/**
+ * Effective per-type sales-assisted redemption flag for the API responses: an explicit stored
+ * boolean wins; NULL (unset) resolves to the preserve-today default (enabled for WHOLESALER only).
+ * Mirrors `isSalesRedeemEnabledForPartner` so the console UI and the enforcement agree.
+ */
+function effectiveSalesRedeem(stored: boolean | null | undefined, code: string): boolean {
+  return stored ?? code === 'WHOLESALER';
+}
 
 /**
  * The module-level feature keys counted as "modules on" in the operator
@@ -1070,6 +1082,7 @@ export class GifsyService {
           row?.leaderboardEnabled ?? DEFAULT_FLAGS.leaderboardEnabled,
         targetsEnabled: row?.targetsEnabled ?? DEFAULT_FLAGS.targetsEnabled,
         kycRequired: row?.kycRequired ?? DEFAULT_FLAGS.kycRequired,
+        salesAssistedRedeemEnabled: effectiveSalesRedeem(row?.salesAssistedRedeemEnabled, type.code),
       };
     });
   }
@@ -1132,6 +1145,7 @@ export class GifsyService {
       leaderboardEnabled: row.leaderboardEnabled,
       targetsEnabled: row.targetsEnabled,
       kycRequired: row.kycRequired,
+      salesAssistedRedeemEnabled: effectiveSalesRedeem(row.salesAssistedRedeemEnabled, outletType.code),
     };
   }
 }

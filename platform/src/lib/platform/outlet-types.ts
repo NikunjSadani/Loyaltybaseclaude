@@ -41,6 +41,7 @@ export interface OutletTypeClientConfig {
   leaderboardEnabled: boolean;  // appears in leaderboard rankings
   targetsEnabled: boolean;      // targets can be assigned
   kycRequired: boolean;         // KYC must be completed before activation
+  salesAssistedRedeemEnabled: boolean; // a sales rep may "Redeem for Outlet" on this type's behalf
 }
 
 export type OutletTypeFeatureFlag = keyof Omit<
@@ -161,6 +162,9 @@ export function defaultOutletTypeClientConfig(
     leaderboardEnabled: true,
     targetsEnabled: true,
     kycRequired: true,
+    // Preserve-today default: sales-assisted redemption is on for WHOLESALER only until a Gifsy
+    // admin sets it per type (matches the backend effectiveSalesRedeem / isSalesRedeemEnabledForPartner).
+    salesAssistedRedeemEnabled: outletTypeCode === 'WHOLESALER',
   };
 }
 

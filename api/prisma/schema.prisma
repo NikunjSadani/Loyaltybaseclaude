@@ -1124,6 +1124,10 @@ model OutletTypeClientConfig {
   leaderboardEnabled Boolean @default(true)
   targetsEnabled     Boolean @default(true)
   kycRequired        Boolean @default(true)
+  // Sales-assisted redemption ("Redeem for Outlet") eligibility, per outlet type. NULLABLE so
+  // "unset" is distinct from "explicitly off": unset resolves to the preserve-today default
+  // (code === 'WHOLESALER') in isSalesRedeemEnabledForPartner; an explicit true/false then wins.
+  salesAssistedRedeemEnabled Boolean?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

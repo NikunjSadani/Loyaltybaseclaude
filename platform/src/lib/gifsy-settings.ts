@@ -34,7 +34,6 @@ export const DEFAULT_SETTINGS: GifsySettings = {
   },
   salesApp: {
     ledgerLabel:              'Wallet',
-    redeemGiftWholesalerOnly: true,
     upiEnabled:               false,
   },
   creditsPayouts: {

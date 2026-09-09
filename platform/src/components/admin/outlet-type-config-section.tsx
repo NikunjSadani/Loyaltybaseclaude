@@ -22,6 +22,7 @@ interface Props {
 
 const FLAG_META: { flag: OutletTypeFeatureFlag; label: string; description: string }[] = [
   { flag: 'loyaltyEnabled',     label: 'Loyalty',              description: 'Earn and redeem points' },
+  { flag: 'salesAssistedRedeemEnabled', label: 'Sales-Assisted Redemption', description: 'Sales reps can redeem on this outlet’s behalf' },
   { flag: 'schemesEnabled',     label: 'Schemes',              description: 'Eligible for scheme enrolment' },
   { flag: 'visibilityEnabled',  label: 'Visibility',           description: 'Submit visibility program photos' },
   { flag: 'payoutsEnabled',     label: 'Payouts',              description: 'Receive UPI / bank payouts' },
@@ -73,6 +74,7 @@ export function OutletTypeConfigSection({ clientId, initialConfigs = [] }: Props
               leaderboardEnabled: item.leaderboardEnabled,
               targetsEnabled:     item.targetsEnabled,
               kycRequired:        item.kycRequired,
+              salesAssistedRedeemEnabled: item.salesAssistedRedeemEnabled,
             })),
           );
         }

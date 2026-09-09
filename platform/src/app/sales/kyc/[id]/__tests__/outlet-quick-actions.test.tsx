@@ -4,9 +4,11 @@
  *
  * AD1: Ledger quick action shows tenant-configured label ("Wallet") instead of default
  * AD2: Ledger quick action shows default "View Points Ledger" when no custom label set
- * AD3: "Redeem Gift for Outlet" is shown for a WHOLESALER outlet when redeemGiftWholesalerOnly=true
- * AD4: "Redeem Gift for Outlet" is hidden for a RETAILER outlet when redeemGiftWholesalerOnly=true
  * AD5: Past Performance section is present and shows monthly bar data for the outlet
+ *
+ * (The former AD3/AD4 — the wholesaler-only "Redeem Gift for Outlet" binary — were removed:
+ *  the gate is now the per-outlet-type salesAssistedRedeemEnabled flag, covered by
+ *  redeem-for-outlet.test.tsx (RFO1–4) against the backend-computed salesRedeemEnabled.)
  */
 
 import React, { Suspense, act } from 'react';
@@ -67,22 +69,6 @@ describe.skip('AD — Outlet quick actions tenant config', () => {
     await renderKyc('k1');
     expect(screen.getByText('View Points Ledger')).toBeInTheDocument();
     expect(screen.queryByText('Wallet')).not.toBeInTheDocument();
-  });
-
-  it('AD3: "Redeem Gift for Outlet" is shown for a WHOLESALER outlet', async () => {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
-      salesApp: { redeemGiftWholesalerOnly: true },
-    }));
-    await renderKyc('k4'); // Singh Supermart = WHOLESALER
-    expect(screen.getByText('Redeem Gift for Outlet')).toBeInTheDocument();
-  });
-
-  it('AD4: "Redeem Gift for Outlet" is hidden for a RETAILER outlet when redeemGiftWholesalerOnly=true', async () => {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
-      salesApp: { redeemGiftWholesalerOnly: true },
-    }));
-    await renderKyc('k1'); // Kumar General Store = RETAILER
-    expect(screen.queryByText('Redeem Gift for Outlet')).not.toBeInTheDocument();
   });
 
   it('AD5: past performance section is shown with month labels and achievement bars', async () => {

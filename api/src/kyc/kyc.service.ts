@@ -25,6 +25,7 @@ import { sniffFileType } from '../common/file-signature';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { isActivePhoneConflict } from '../common/phone-conflict';
 import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
+import { isSalesRedeemEnabledForPartner } from '../common/sales-redeem-eligibility';
 import { businessHoursBetween } from '../common/business-hours';
 import { loadHolidaySet } from '../common/holiday-calendar';
 import {
@@ -2256,10 +2257,9 @@ export class KycService {
           // Address lives on the Outlet (captured at KYC) — surfaced so the reviewer
           // can see the submitted address (ChannelPartner has no address columns).
           addressLine1: true, addressLine2: true, city: true, state: true, pincode: true,
-          // outletType.code (SSS/WHOLESALER/SUB_STOCKIST) drives the sales-app
-          // "Redeem for Outlet" gate (redeemGiftWholesalerOnly). Without it the FE
-          // sees outletType=undefined and the wholesaler-only gate hides redeem for
-          // EVERY outlet — including genuine wholesalers.
+          // outletType.code is DISPLAY context for the reviewer. (It no longer drives the
+          // "Redeem for Outlet" gate — that now reads the per-outlet-type salesRedeemEnabled
+          // computed below via isSalesRedeemEnabledForPartner.)
           outletType: { select: { code: true } },
           // isPrimary picks the primary outlet for the detail-level reKycFlags below.
           isPrimary: true,
@@ -2435,6 +2435,17 @@ export class KycService {
           )
         : false;
 
+    // Per-outlet-type "Redeem for Outlet" eligibility for THIS outlet — drives the sales KYC
+    // detail page's redeem-button gate (settings-driven, per outlet type; NOT hardcoded to a role).
+    // The backend redeemForOutlet/confirmRedeemForOutlet enforce this too, so this is the UX signal.
+    const salesRedeemEnabled = submission.partnerId
+      ? await isSalesRedeemEnabledForPartner(
+          this.prisma,
+          submission.partner?.clientId ?? user.clientId,
+          submission.partnerId,
+        )
+      : false;
+
     return {
       submission: {
         ...submission,
@@ -2444,6 +2455,7 @@ export class KycService {
         reKycFlags,
         parentVerified,
         willLeaveGroup,
+        salesRedeemEnabled,
         // C3: classification (from the partner) + the group lock (null when free to pick).
         entityType: (submission.partner?.entityType as EntityType | null | undefined) ?? null,
         gstRegistrationType:
