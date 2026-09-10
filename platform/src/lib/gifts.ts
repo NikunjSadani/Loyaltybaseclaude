@@ -28,6 +28,12 @@ export interface GiftCatalogueItem {
   voucherType?: VoucherDenominationType;
   /** Face value for FIXED vouchers (in ₹). Ignored for FREE_AMOUNT. */
   fixedAmount?: number;
+  /** Redemption mode from the real catalogue (GIFT_CARD | PHYSICAL_GIFT | BANK_TRANSFER | UPI). */
+  redemptionMode?: string | null;
+  /** FREE_AMOUNT band (in POINTS) from the real catalogue. A free-amount item has points===0
+   *  AND both bounds set — the redeemer supplies the ₹ amount, converted to points server-side. */
+  minRedemptionPoints?: number | null;
+  maxRedemptionPoints?: number | null;
 }
 
 const STORAGE_KEY = 'loyaltybase_gifts_v1';

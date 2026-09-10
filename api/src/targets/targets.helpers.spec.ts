@@ -586,12 +586,13 @@ describe('buildResolvedTargetsBuffer ↔ parseTargetUploadBuffer round-trip', ()
 
     const row1 = aoa[0] as string[];
     const row2 = aoa[1] as string[];
-    // Month-group label sits at the first KPI column (after 3 fixed cols).
-    expect(String(row1[3])).toMatch(/jul.*26.*target/i);
+    // Month-group label sits at the first KPI column (after the 3 fixed cols + Program Name).
+    expect(String(row1[4])).toMatch(/jul.*26.*target/i);
     expect(row2[0]).toBe('Outlet ID');
     expect(row2[1]).toBe('Outlet Name');
     expect(row2[2]).toBe('Outlet Type');
-    expect(row2[3]).toBe('Month Target');
+    expect(row2[3]).toBe('Program Name');
+    expect(row2[4]).toBe('Month Target');
   });
 });
 
@@ -759,10 +760,12 @@ describe('formula-injection sanitisation (AF-5)', () => {
         { outletCode: '@evil', outletName: '+name', outletType: '-type', targetValues: { EVIL: 5 } },
       ]),
     );
-    expect(aoa[1][3]).toBe('\'=HYPERLINK("http://x")'); // KPI label header
+    expect(aoa[1][3]).toBe('Program Name'); // injected identity col (benign, unchanged)
+    expect(aoa[1][4]).toBe('\'=HYPERLINK("http://x")'); // KPI label header (shifted by Program Name)
     expect(aoa[2][0]).toBe('\'@evil'); // Outlet code
     expect(aoa[2][1]).toBe('\'+name'); // Outlet name
     expect(aoa[2][2]).toBe('\'-type'); // Outlet type
-    expect(aoa[2][3]).toBe('5'); // numeric target survives (raw:false → string "5")
+    expect(aoa[2][3]).toBe(''); // Program Name (none on this row)
+    expect(aoa[2][4]).toBe('5'); // numeric target survives (raw:false → string "5"), shifted
   });
 });

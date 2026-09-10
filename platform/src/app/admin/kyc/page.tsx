@@ -35,11 +35,16 @@ interface KYCEntry {
   ownerName: string;
   mobile: string;
   salesUser: string;
+  programName: string;
   status: KYCStatusType;
   submittedDate: string;
   // Stage-aware SLA result — which clock (field/gifsy/none), the business-hours age,
   // the per-stage target, and whether it has breached. Drives the list's SLA badge.
   sla: KycSlaResult;
+  // True only when the submission is at the GIFSY-review stage (raw status PENDING_GIFSY) —
+  // i.e. exactly what the "Gifsy Review Sheet" export (review-dump) includes. Drives whether
+  // that export button is enabled (an empty worksheet is confusing, so we disable + explain).
+  awaitingGifsy: boolean;
 }
 
 /* ─── API mapping ────────────────────────────────────────────────────────────── */
@@ -60,7 +65,7 @@ interface ApiKycSub {
     businessName: string;
     ownerName?: string;
     phone?: string;
-    outlets?: { name: string; outletCode: string; phone?: string }[];
+    outlets?: { name: string; outletCode: string; phone?: string; programName?: string }[];
   } | null;
   documents?: { id: string; documentType: string; status: string }[];
 }
@@ -98,9 +103,11 @@ function mapApiKyc(s: ApiKycSub, targets: KycSlaTargets, holidays: Set<string>):
     ownerName:     s.partner?.ownerName ?? '',
     mobile:        s.partner?.outlets?.[0]?.phone ?? s.partner?.phone ?? '',
     salesUser:     s.user.name,
+    programName:   s.partner?.outlets?.[0]?.programName ?? '',
     status:        DB_STATUS_MAP[s.status] ?? 'PENDING',
     submittedDate: submittedAt.slice(0, 10),
     sla,
+    awaitingGifsy: s.status === 'PENDING_GIFSY',
   };
 }
 
@@ -135,6 +142,7 @@ export default function KYCPage() {
   const [error, setError]       = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<KYCStatusType | 'ALL'>('ALL');
+  const [programFilter, setProgramFilter] = useState('');
   const [exportLoading, setExportLoading] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
 
@@ -171,6 +179,13 @@ export default function KYCPage() {
     rejected: kycList.filter((k) => k.status === 'REJECTED').length,
   }), [kycList]);
 
+  // Distinct program names present in the loaded list — drives the Program filter dropdown
+  // (matches the sales KYC list's approach; only shows programs actually present).
+  const programOptions = useMemo(
+    () => Array.from(new Set(kycList.map((k) => k.programName).filter(Boolean))).sort(),
+    [kycList],
+  );
+
   const filtered = useMemo(() => {
     return kycList.filter((k) => {
       const matchSearch =
@@ -182,9 +197,30 @@ export default function KYCPage() {
       const matchStatus =
         statusFilter === 'ALL' ||
         (statusFilter === 'PENDING' ? isPending(k.status) : k.status === statusFilter);
-      return matchSearch && matchStatus;
+      const matchProgram = !programFilter || k.programName === programFilter;
+      return matchSearch && matchStatus && matchProgram;
     });
-  }, [search, statusFilter, kycList]);
+  }, [search, statusFilter, programFilter, kycList]);
+
+  // Export button state. The button has TWO modes (see handleExport): on the Rejected filter it
+  // downloads the "Rejected outlets" report; otherwise it downloads the GIFSY-stage review worksheet
+  // (only PENDING_GIFSY submissions — NOT the on-screen list). We relabel per mode and disable it
+  // with a clear reason when the target set is empty, so an operator never gets a headers-only file.
+  const rejectedMode = statusFilter === 'REJECTED';
+  const gifsyCount = useMemo(() => kycList.filter((k) => k.awaitingGifsy).length, [kycList]);
+  const exportEmpty = rejectedMode ? stats.rejected === 0 : gifsyCount === 0;
+  const exportDisabled = exportLoading || exportEmpty;
+  const exportLabel = exportLoading
+    ? 'Exporting…'
+    : rejectedMode
+    ? 'Export Rejected Outlets'
+    : 'Export Gifsy Review Sheet';
+  const exportTitle = rejectedMode
+    ? 'Download the Rejected-outlets report — full KYC + which fields were rejected + remarks.'
+    : 'Download the Gifsy-stage review worksheet — submissions awaiting your final Gifsy decision (PENDING_GIFSY), to verify offline and re-upload. It does NOT export the whole on-screen list.';
+  const exportEmptyHint = rejectedMode
+    ? 'No rejected submissions to export'
+    : 'No submissions are awaiting Gifsy review';
 
   const handleExport = async () => {
     setExportLoading(true);
@@ -282,17 +318,34 @@ export default function KYCPage() {
               <option value="REJECTED">Rejected</option>
               <option value="RESUBMISSION_REQUIRED">Re-upload Required</option>
             </select>
+            {programOptions.length > 0 && (
+              <select
+                value={programFilter}
+                onChange={(e) => setProgramFilter(e.target.value)}
+                data-testid="kyc-program-filter"
+                className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
+              >
+                <option value="">All Programs</option>
+                {programOptions.map((p) => (
+                  <option key={p} value={p}>{p}</option>
+                ))}
+              </select>
+            )}
           </div>
           {isGifsyAdmin && (
             <div className="flex flex-col items-end gap-1">
               <button
                 onClick={handleExport}
-                disabled={exportLoading}
-                className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 text-sm rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-60"
+                disabled={exportDisabled}
+                title={exportTitle}
+                className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 text-sm rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 <Download className="w-4 h-4" />
-                {exportLoading ? 'Exporting...' : 'Export Excel'}
+                {exportLabel}
               </button>
+              {!exportLoading && exportEmpty && (
+                <span className="text-xs text-gray-400">{exportEmptyHint}</span>
+              )}
               {exportError && (
                 <span className="flex items-center gap-1 text-xs text-red-600">
                   <AlertTriangle className="w-3 h-3" />{exportError}

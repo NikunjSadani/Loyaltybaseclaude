@@ -282,9 +282,16 @@ export function buildResolvedTargetsBuffer(
     outletName: string | null;
     outletType: string | null;
     targetValues: unknown;
+    programName?: string | null;
   }[],
 ): Buffer {
   const enabled = getEnabledKpis(kpis);
+
+  // Identity columns for THIS export = the shared FIXED_COLS + a read-only "Program Name" column
+  // (for filtering/analysis). Injected locally, NOT into the shared FIXED_COLS constant, so the
+  // blank-template + upload-parser paths are untouched. The upload parser resolves the fixed cols
+  // by header name and KPI cols by label (ignoring unknown columns), so this stays re-uploadable.
+  const identityCols = [...FIXED_COLS, 'Program Name'];
 
   // CRITICAL: emit the SAME two-row month-group layout that
   // generateTargetTemplateBuffer produces, so a downloaded Final-Targets file
@@ -298,17 +305,22 @@ export function buildResolvedTargetsBuffer(
     Number(mm) - 1
   ];
   const monthLabel = `${abbr} '${year.slice(2)} Target`;
-  const row1: (string | number)[] = Array(FIXED_COLS.length).fill('');
+  const row1: (string | number)[] = Array(identityCols.length).fill('');
   row1.push(monthLabel);
   for (let i = 1; i < enabled.length; i++) row1.push('');
 
   // ── Row 2: column headers ───────────────────────────────────────────────────
-  const row2: string[] = [...FIXED_COLS, ...enabled.map((k) => k.label)];
+  const row2: string[] = [...identityCols, ...enabled.map((k) => k.label)];
 
   // ── Data rows (verbatim stored values; blank = KPI not configured) ──────────
   const dataRows = rows.map((r) => {
     const vals = (r.targetValues ?? {}) as Record<string, unknown>;
-    const out: (string | number)[] = [r.outletCode, r.outletName ?? '', r.outletType ?? ''];
+    const out: (string | number)[] = [
+      r.outletCode,
+      r.outletName ?? '',
+      r.outletType ?? '',
+      r.programName ?? '',
+    ];
     for (const k of enabled) {
       const v = vals[k.code];
       out.push(typeof v === 'number' ? v : ''); // blank = not configured
@@ -321,6 +333,7 @@ export function buildResolvedTargetsBuffer(
     { wch: 16 },
     { wch: 24 },
     { wch: 16 },
+    { wch: 20 }, // Program Name
     ...enabled.map(() => ({ wch: 16 })),
   ];
 
@@ -328,8 +341,8 @@ export function buildResolvedTargetsBuffer(
   if (enabled.length > 0) {
     ws['!merges'] = [
       {
-        s: { r: 0, c: FIXED_COLS.length },
-        e: { r: 0, c: FIXED_COLS.length + enabled.length - 1 },
+        s: { r: 0, c: identityCols.length },
+        e: { r: 0, c: identityCols.length + enabled.length - 1 },
       },
     ];
   }

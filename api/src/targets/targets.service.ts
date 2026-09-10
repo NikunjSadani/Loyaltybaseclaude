@@ -346,6 +346,23 @@ export class TargetsService {
       },
     });
 
+    // Program name is NOT denormalized on OutletTarget — join Outlet by (clientId, outletCode)
+    // to source it (matches the outlet-master report). Adds a "Program Name" column for analysis/
+    // filtering; the export stays re-uploadable (the column sits after the identity cols and the
+    // upload parser resolves fixed cols by NAME + KPI cols by label, ignoring unknown columns).
+    const codes = targetRows.map((r) => r.outletCode);
+    const outletsForProgram = codes.length
+      ? await this.prisma.outlet.findMany({
+          where: { clientId: user.clientId, outletCode: { in: codes }, deletedAt: null },
+          select: { outletCode: true, programName: true },
+        })
+      : [];
+    const programByCode = new Map(outletsForProgram.map((o) => [o.outletCode, o.programName ?? '']));
+    const rowsWithProgram = targetRows.map((r) => ({
+      ...r,
+      programName: programByCode.get(r.outletCode) ?? '',
+    }));
+
     const kpis: KpiDefLike[] = kpiRows.map((k) => ({
       code: k.code,
       label: k.label,
@@ -356,7 +373,7 @@ export class TargetsService {
       enabled: k.enabled,
     }));
 
-    return buildResolvedTargetsBuffer(month, kpis, targetRows);
+    return buildResolvedTargetsBuffer(month, kpis, rowsWithProgram);
   }
 
   // ─── Target upload ──────────────────────────────────────────────────────────

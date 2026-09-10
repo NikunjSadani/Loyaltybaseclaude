@@ -722,6 +722,11 @@ describe('TargetsService', () => {
         { outletCode: 'RT-1', outletName: 'Shop One', outletType: 'SSS', targetValues: { MONTH_TGT: 100, FOCUS_PACK_1: 20 } },
         { outletCode: 'RT-2', outletName: 'Shop Two', outletType: 'SSS', targetValues: { MONTH_TGT: 50 } },
       ]);
+      // programName is joined from Outlet by (clientId, outletCode) — mock the lookup.
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'RT-1', programName: 'Trade Loyalty' },
+        { outletCode: 'RT-2', programName: 'Gold Programme' },
+      ]);
 
       const buf = await service.exportTargetsBuffer(admin, '2026-07');
 
@@ -735,12 +740,14 @@ describe('TargetsService', () => {
       // 2-row month-group header (matches generateTargetTemplateBuffer) so the
       // "Download Final Targets" export re-uploads cleanly through parseTargetUploadBuffer.
       // Row 0 = month-group label over the KPI columns; row 1 = column labels.
-      expect(rows[0][3]).toBe("Jul '26 Target");
-      expect(rows[1]).toEqual(['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1']);
-      expect(rows[2]).toEqual(['RT-1', 'Shop One', 'SSS', 100, 20]);
+      // A read-only "Program Name" identity column is injected after Outlet Type (shifts KPI cols +1).
+      expect(rows[0][4]).toBe("Jul '26 Target");
+      expect(rows[1]).toEqual(['Outlet ID', 'Outlet Name', 'Outlet Type', 'Program Name', 'Month Target', 'Focus Pack - 1']);
+      expect(rows[2]).toEqual(['RT-1', 'Shop One', 'SSS', 'Trade Loyalty', 100, 20]);
       // RT-2's omitted FOCUS_PACK_1 cell is blank (empty), not 0.
-      expect(rows[3][3]).toBe(50);
-      expect(rows[3][4]).toBe('');
+      expect(rows[3][3]).toBe('Gold Programme');
+      expect(rows[3][4]).toBe(50);
+      expect(rows[3][5]).toBe('');
     });
   });
 

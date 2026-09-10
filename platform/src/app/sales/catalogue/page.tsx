@@ -38,12 +38,20 @@ interface RedeemState {
   verifying: boolean;
   error: string;
   otpResendCountdown: number;
+  /** ₹ amount for a FREE_AMOUNT (variable) voucher/bank-transfer redemption; '' otherwise. */
+  amount: string;
 }
 
 const INITIAL_REDEEM: RedeemState = {
   outlet: null, orderId: '', otpSending: false, otpSent: false, otp: '',
-  verifying: false, error: '', otpResendCountdown: 0,
+  verifying: false, error: '', otpResendCountdown: 0, amount: '',
 };
+
+/** A FREE_AMOUNT (variable) reward: pointsCost 0 AND both band bounds set — the redeemer supplies
+ *  the ₹ amount (converted to points server-side). Mirrors the backend isFreeAmount predicate. */
+function isFreeAmountGift(g: GiftItem | null): boolean {
+  return !!g && g.points === 0 && g.minRedemptionPoints != null && g.maxRedemptionPoints != null;
+}
 
 /* ─── Gift image display ─────────────────────────────────────────────────────── */
 
@@ -139,6 +147,9 @@ function CatalogueInner() {
       id: string; name: string; pointsCost: number;
       description: string | null; imageUrls: string[] | null;
       status: string; stockQuantity: number | null; redemptionMode?: string;
+      // FREE_AMOUNT band (points) — needed so the sales-assisted redeem can collect a ₹ amount
+      // for variable vouchers/bank transfers (the backend requires `amount` for these).
+      minRedemptionPoints?: number | null; maxRedemptionPoints?: number | null;
     }
     interface ApiCatalogResponse { items: ApiCatalogItem[] }
     api.get<ApiCatalogResponse>('/api/rewards/catalog')
@@ -165,6 +176,9 @@ function CatalogueInner() {
               addedDate:    ref?.addedDate     ?? new Date().toISOString().slice(0, 10),
               voucherType:  ref?.voucherType,
               fixedAmount:  ref?.fixedAmount,
+              redemptionMode:      item.redemptionMode ?? null,
+              minRedemptionPoints: item.minRedemptionPoints ?? null,
+              maxRedemptionPoints: item.maxRedemptionPoints ?? null,
             };
           });
           setGifts(mapped);
@@ -231,10 +245,22 @@ function CatalogueInner() {
       setRedeem((r) => ({ ...r, error: 'Missing outlet or gift. Please reselect.' }));
       return;
     }
+    // FREE_AMOUNT (variable) vouchers / bank transfers require a ₹ amount — without it the backend
+    // rejects redeem-for-outlet with "amount (₹) is required for a variable-amount voucher".
+    const freeAmount = isFreeAmountGift(selectedGift);
+    const amountNum = Number(redeem.amount);
+    if (freeAmount && (!redeem.amount.trim() || !Number.isFinite(amountNum) || amountNum <= 0)) {
+      setRedeem((r) => ({ ...r, error: 'Enter the amount (₹) to redeem for this outlet.' }));
+      return;
+    }
     setRedeem((r) => ({ ...r, otpSending: true, error: '' }));
     const res = await api.post<{ orderId: string; orderNumber: string }>(
       '/api/rewards/redeem-for-outlet',
-      { rewardId: selectedGift.id, targetPartnerId: redeem.outlet.partnerId },
+      {
+        rewardId: selectedGift.id,
+        targetPartnerId: redeem.outlet.partnerId,
+        ...(freeAmount ? { amount: amountNum } : {}),
+      },
     );
     if (res.success && res.data?.orderId) {
       setRedeem((r) => ({ ...r, otpSending: false, otpSent: true, orderId: res.data.orderId, otp: '', otpResendCountdown: 30 }));
@@ -548,19 +574,43 @@ function CatalogueInner() {
                     </div>
                   </div>
 
-                  {/* Points breakdown */}
-                  <div className="bg-gray-50 rounded-xl p-4 space-y-2">
-                    {[
-                      { label: 'Current balance',  value: redeem.outlet.balance.toLocaleString(),                                 color: 'text-gray-800' },
-                      { label: 'Points to deduct', value: `− ${selectedGift.points.toLocaleString()}`,                            color: 'text-red-500'  },
-                      { label: 'Balance after',    value: (redeem.outlet.balance - selectedGift.points).toLocaleString(),          color: 'text-[var(--brand-primary)] font-bold' },
-                    ].map((r) => (
-                      <div key={r.label} className="flex items-center justify-between">
-                        <span className="text-xs text-gray-500">{r.label}</span>
-                        <span className={`text-sm ${r.color}`}>{r.value} pts</span>
+                  {/* FREE_AMOUNT (variable) → collect the ₹ amount; FIXED → show the points breakdown. */}
+                  {isFreeAmountGift(selectedGift) ? (
+                    <div className="bg-gray-50 rounded-xl p-4 space-y-2">
+                      <label className="block text-xs text-gray-500" htmlFor="redeem-amount">Amount to redeem (₹)</label>
+                      <input
+                        id="redeem-amount"
+                        type="number"
+                        inputMode="numeric"
+                        min={1}
+                        value={redeem.amount}
+                        onChange={(e) => setRedeem((r) => ({ ...r, amount: e.target.value, error: '' }))}
+                        placeholder="Enter ₹ amount"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
+                      />
+                      <p className="text-[11px] text-gray-400">
+                        Points are calculated from this amount at the tenant conversion rate on confirmation
+                        (subject to the reward’s min/max limits).
+                      </p>
+                      <div className="flex items-center justify-between pt-1">
+                        <span className="text-xs text-gray-500">Current balance</span>
+                        <span className="text-sm text-gray-800">{redeem.outlet.balance.toLocaleString()} pts</span>
                       </div>
-                    ))}
-                  </div>
+                    </div>
+                  ) : (
+                    <div className="bg-gray-50 rounded-xl p-4 space-y-2">
+                      {[
+                        { label: 'Current balance',  value: redeem.outlet.balance.toLocaleString(),                                 color: 'text-gray-800' },
+                        { label: 'Points to deduct', value: `− ${selectedGift.points.toLocaleString()}`,                            color: 'text-red-500'  },
+                        { label: 'Balance after',    value: (redeem.outlet.balance - selectedGift.points).toLocaleString(),          color: 'text-[var(--brand-primary)] font-bold' },
+                      ].map((r) => (
+                        <div key={r.label} className="flex items-center justify-between">
+                          <span className="text-xs text-gray-500">{r.label}</span>
+                          <span className={`text-sm ${r.color}`}>{r.value} pts</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                   <div className="flex items-start gap-2 p-3 bg-amber-50 rounded-xl border border-amber-100">
                     <Smartphone className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
@@ -569,7 +619,17 @@ function CatalogueInner() {
                     </p>
                   </div>
 
-                  <Button variant="primary" className="w-full" loading={redeem.otpSending} onClick={sendOtp}>
+                  {redeem.error && (
+                    <p className="text-xs text-red-600 text-center">{redeem.error}</p>
+                  )}
+
+                  <Button
+                    variant="primary"
+                    className="w-full"
+                    loading={redeem.otpSending}
+                    disabled={isFreeAmountGift(selectedGift) && !(Number(redeem.amount) > 0)}
+                    onClick={sendOtp}
+                  >
                     Send OTP &amp; Proceed
                   </Button>
 
