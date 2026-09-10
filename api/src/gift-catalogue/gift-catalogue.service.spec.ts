@@ -1,8 +1,9 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { GiftCatalogueService } from './gift-catalogue.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockPrisma = {
@@ -20,6 +21,16 @@ const mockPrisma = {
 let rate = 1;
 const mockTenantSettings = { getConversionRate: jest.fn(async () => rate) };
 
+const mockStorage = {
+  generateKey: jest.fn((folder: string, name: string) => `${folder}/2026-09/uuid-${name}`),
+  uploadFile: jest.fn(async (_buf: Buffer, key: string) => `https://storage.googleapis.com/gifsy-platform-files/${key}`),
+};
+
+/** Minimal valid image bytes (PNG magic) for the sniff-passing upload tests. */
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x00]);
+const makeFile = (buffer: Buffer, size = buffer.length, originalname = 'gift.png'): Express.Multer.File =>
+  ({ buffer, size, originalname } as Express.Multer.File);
+
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '9990001111', name: '' };
 const partner: JwtPayload = { sub: 'u1', role: 'RETAILER', clientId: 'deoleo', phone: '9991112222', name: '' };
 
@@ -34,9 +45,44 @@ describe('GiftCatalogueService', () => {
         GiftCatalogueService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TenantSettingsService, useValue: mockTenantSettings },
+        { provide: StorageService, useValue: mockStorage },
       ],
     }).compile();
     service = mod.get(GiftCatalogueService);
+  });
+
+  describe('uploadGiftImage (public gift image — sniff + 5 MB cap + storage.uploadFile)', () => {
+    it('stores a valid image and returns the PUBLIC storage.googleapis.com URL', async () => {
+      const res = await service.uploadGiftImage(makeFile(PNG_BYTES));
+      expect(mockStorage.generateKey).toHaveBeenCalledWith('gift-catalogue', 'gift.png');
+      expect(mockStorage.uploadFile).toHaveBeenCalledWith(PNG_BYTES, expect.stringContaining('gift-catalogue/'), 'image/png');
+      expect(res.url).toMatch(/^https:\/\/storage\.googleapis\.com\/.+gift-catalogue\//);
+    });
+
+    it('rejects a missing / empty file', async () => {
+      await expect(service.uploadGiftImage(undefined as never)).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.uploadGiftImage(makeFile(Buffer.alloc(0)))).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockStorage.uploadFile).not.toHaveBeenCalled();
+    });
+
+    it('rejects a file over the 5 MB cap', async () => {
+      await expect(
+        service.uploadGiftImage(makeFile(PNG_BYTES, 5 * 1024 * 1024 + 1)),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockStorage.uploadFile).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-image masquerade (PDF magic bytes) — images only', async () => {
+      const pdf = Buffer.from('%PDF-1.7\n', 'latin1');
+      await expect(service.uploadGiftImage(makeFile(pdf))).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockStorage.uploadFile).not.toHaveBeenCalled();
+    });
+
+    it('rejects bytes that sniff to nothing (HTML/script payload)', async () => {
+      const html = Buffer.from('<html><script>alert(1)</script></html>', 'utf8');
+      await expect(service.uploadGiftImage(makeFile(html))).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockStorage.uploadFile).not.toHaveBeenCalled();
+    });
   });
 
   describe('data-boundary guard', () => {

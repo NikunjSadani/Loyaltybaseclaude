@@ -1,4 +1,16 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Post,
+  Put,
+  Query,
+  UploadedFile,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { GiftCatalogueService } from './gift-catalogue.service';
 import { GiftBackfillService } from './gift-backfill.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
@@ -121,6 +133,26 @@ export class GiftCatalogueController {
     @Body() dto: PublishGiftMasterDto,
   ) {
     return this.catalogue.publish(user, id, dto);
+  }
+
+  // ── Gift image upload (multipart) — PUBLIC object, both editors call this ─────
+  // The ONE image-upload endpoint (POST /v1/admin/gift-catalogue/image). Sniffs magic
+  // bytes (images only) + caps at 5 MB, stores on the public uploads bucket, and returns
+  // { url } (the direct storage.googleapis.com URL). The URL is persisted through the
+  // EXISTING gift-master / reward-catalog create-update endpoints (imageUrls already
+  // supported) — this endpoint never touches tenant data.
+  //
+  // Method-level @Roles OVERRIDES the class GIFSY_ADMIN gate (RolesGuard uses
+  // getAllAndOverride) to ADMIT CLIENT_ADMIN too: the per-tenant reward editor
+  // (/admin/gifts) is CLIENT_ADMIN-accessible (its catalog CRUD is
+  // @Roles('GIFSY_ADMIN','CLIENT_ADMIN')), so a GIFSY_ADMIN-only upload would 403 a
+  // tenant admin's image button. Same rewards:manage_inventory write permission.
+  @Post('gift-catalogue/image')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
+  @RequirePermission('rewards:manage_inventory')
+  @UseInterceptors(FileInterceptor('file'))
+  uploadGiftImage(@UploadedFile() file: Express.Multer.File) {
+    return this.catalogue.uploadGiftImage(file);
   }
 
   // ── Moderation — /v1/admin/gift-catalogue/moderation ────────────────────────

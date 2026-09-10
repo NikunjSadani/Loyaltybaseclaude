@@ -28,6 +28,7 @@ import { BadRequestException } from '@nestjs/common';
 import { RewardsService } from './rewards.service';
 import { GiftCatalogueService } from '../gift-catalogue/gift-catalogue.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -281,6 +282,7 @@ describe('GiftCatalogueService.deleteCategory — in-use guard completeness', ()
         GiftCatalogueService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TenantSettingsService, useValue: mockTenantSettings },
+        { provide: StorageService, useValue: {} },
       ],
     }).compile();
     catalogue = mod.get(GiftCatalogueService);

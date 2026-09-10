@@ -64,4 +64,29 @@ describe('MasterEditor (create)', () => {
     });
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
   });
+
+  it('an uploaded image URL flows into the imageUrls textarea and the create payload', async () => {
+    const IMG = 'https://storage.googleapis.com/gifsy-platform-files/gift-catalogue/2026-09/uuid-a.png';
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ success: true, data: { url: IMG } }) });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    render(<MasterEditor masterId={null} categories={CATEGORIES} onClose={() => {}} onSaved={() => {}} />);
+
+    fireEvent.change(screen.getByTestId('field-name'), { target: { value: 'JBL Speaker' } });
+    fireEvent.change(screen.getByTestId('field-code'), { target: { value: 'GM-JBL' } });
+    fireEvent.change(screen.getByTestId('field-category'), { target: { value: 'c1' } });
+    fireEvent.change(screen.getByTestId('field-mrp'), { target: { value: '2499' } });
+
+    // Upload a picture — the returned URL should land in the (synced) URL textarea.
+    fireEvent.change(screen.getByTestId('gift-image-input'), {
+      target: { files: [new File([new Uint8Array([1])], 'a.png', { type: 'image/png' })] },
+    });
+    await waitFor(() => expect((screen.getByTestId('field-images') as HTMLTextAreaElement).value).toContain(IMG));
+
+    fireEvent.click(screen.getByTestId('save-master-btn'));
+
+    await waitFor(() => expect(post).toHaveBeenCalled());
+    const [, body] = post.mock.calls[0];
+    expect(body).toMatchObject({ imageUrls: [IMG] });
+  });
 });

@@ -34,6 +34,7 @@ import {
   Truck, ChevronDown, Layers,
 } from 'lucide-react';
 import { authHeader } from '@/lib/api-client';
+import { GiftImageUpload } from '@/components/GiftImageUpload';
 import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings';
 import { useAdminSession } from '@/lib/admin-session';
 import type { GifsySettings } from '@/types';
@@ -428,6 +429,7 @@ interface ItemFormState {
   code: string;
   name: string;
   description: string;
+  imageUrls: string[];
   redemptionMode: PayoutMode;
   /** Only meaningful when redemptionMode === GIFT_CARD */
   voucherMode: VoucherMode;
@@ -444,7 +446,7 @@ interface ItemFormState {
 function blankItemForm(categoryId: string): ItemFormState {
   return {
     categoryId,
-    code: '', name: '', description: '',
+    code: '', name: '', description: '', imageUrls: [],
     redemptionMode: 'GIFT_CARD', voucherMode: 'FIXED',
     pointsCost: 0, mrpRupees: '',
     minRedemptionPoints: '', maxRedemptionPoints: '',
@@ -476,6 +478,7 @@ function ItemModal({
       code: editing.code,
       name: editing.name,
       description: editing.description ?? '',
+      imageUrls: Array.isArray(editing.imageUrls) ? editing.imageUrls : [],
       redemptionMode: editing.redemptionMode,
       voucherMode: isFree ? 'FREE_AMOUNT' : 'FIXED',
       pointsCost: editing.pointsCost,
@@ -527,6 +530,7 @@ function ItemModal({
       code: form.code.trim(),
       name: form.name.trim(),
       description: form.description.trim() || undefined,
+      imageUrls: form.imageUrls,
       redemptionMode: form.redemptionMode,
       status: form.status,
       stockQuantity: form.stockTracked ? form.stockQuantity : null,
@@ -620,6 +624,16 @@ function ItemModal({
               rows={2}
               className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
             />
+          </div>
+
+          {/* Images — REAL file upload to the shared gift-image endpoint */}
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-gray-700">Images</label>
+            <GiftImageUpload
+              value={form.imageUrls}
+              onChange={(urls) => set('imageUrls', urls)}
+            />
+            <p className="text-[10px] text-gray-400">PNG/JPG/WEBP/GIF, max 5 MB each. Shown to members in the reward catalogue.</p>
           </div>
 
           {/* Redemption mode */}
