@@ -21,6 +21,7 @@ import { RewardsService } from '../rewards/rewards.service';
 import { WalletService } from '../wallet/wallet.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -85,6 +86,7 @@ describe('Gift Catalogue & Dispatch — ISOLATION / RBAC / VENDOR-LIFECYCLE audi
         VendorAdminService,
         GiftCatalogueService,
         RewardsService,
+        { provide: StorageService, useValue: {} },
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TenantSettingsService, useValue: mockTenantSettings },
         { provide: NotificationsService, useValue: mockNotifications },

@@ -192,6 +192,45 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
     });
   });
 
+  it('GIF7: uploading a gift image includes its url in the create payload', async () => {
+    const IMG = 'https://storage.googleapis.com/gifsy-platform-files/gift-catalogue/2026-09/uuid-a.png';
+    const { calls } = installFetch((url, init) => {
+      if (url.startsWith('/api/admin/gift-catalogue/image') && init?.method === 'POST') {
+        return jsonOk({ url: IMG });
+      }
+      return undefined;
+    });
+    render(<AdminGiftsPage />);
+
+    const addButtons = await screen.findAllByRole('button', { name: /add reward/i });
+    await userEvent.click(addButtons[addButtons.length - 1]);
+
+    const dialog = await screen.findByText('Add Reward', { selector: 'h2' });
+    const modal = dialog.closest('div.relative') as HTMLElement;
+    const scope = within(modal);
+
+    await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'IMG-1');
+    await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'With Image');
+    await userEvent.type(scope.getByPlaceholderText('2500'), '750');
+
+    // Upload a picture through the shared control (multipart → returns the stored url).
+    const imageInput = scope.getByTestId('gift-image-input') as HTMLInputElement;
+    await userEvent.upload(imageInput, new File([new Uint8Array([1])], 'a.png', { type: 'image/png' }));
+    // The thumbnail (its remove control) appears once the url is stored.
+    await scope.findByTestId('gift-image-remove');
+
+    await userEvent.click(scope.getByRole('button', { name: /add reward/i }));
+
+    await waitFor(() => {
+      const post = calls.find(
+        (c) => c.url.startsWith('/api/admin/rewards/catalog') && c.init?.method === 'POST',
+      );
+      expect(post).toBeTruthy();
+      const body = JSON.parse(String(post!.init!.body));
+      expect(body.imageUrls).toEqual([IMG]);
+    });
+  });
+
   it('GIF4: fulfilment upload POSTs the file and renders the per-row error list', async () => {
     let uploadBody: unknown;
     const { fn } = installFetch((url, init) => {

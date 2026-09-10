@@ -9,8 +9,10 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isGifsyOperator, tenantScope } from '../common/tenant-scope';
+import { sniffFileType } from '../common/file-signature';
 import {
   CreateGiftCategoryDto,
   CreateGiftMasterDto,
@@ -38,6 +40,7 @@ export class GiftCatalogueService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tenantSettings: TenantSettingsService,
+    private readonly storage: StorageService,
   ) {}
 
   /** Data-boundary guard — Gifsy operator (owner or permission-gated staff) only. */
@@ -45,6 +48,49 @@ export class GiftCatalogueService {
     if (!isGifsyOperator(user)) {
       throw new ForbiddenException('Gift catalogue administration is Gifsy-operator only');
     }
+  }
+
+  /**
+   * Upload a gift image and return its PUBLIC object URL. Mirrors the branding-asset
+   * upload (gifsy.service.uploadBrandingAsset) and the visibility media path (AF-10):
+   * null/empty check, 5 MB cap, magic-byte sniff (IMAGES ONLY — a PDF as well as any
+   * SVG/HTML/script masquerade labelled image/* is rejected), then storage.uploadFile.
+   *
+   * PUBLIC by design (owner-approved): gift images aren't sensitive, so the object is
+   * stored on the same uploads bucket the brand logos/favicons live on and the returned
+   * `storage.googleapis.com` URL renders directly in an <img> (no auth-gated proxy) —
+   * exactly the brand-asset posture, NOT the private KYC/visibility stream posture.
+   *
+   * DELIBERATELY NOT assertOperator: this one endpoint serves BOTH the GIFSY-only
+   * master editor (/admin/gift-catalogue) AND the per-tenant reward editor (/admin/gifts),
+   * whose reward-catalog CRUD admits CLIENT_ADMIN. The controller
+   * @Roles('GIFSY_ADMIN','CLIENT_ADMIN') gate is the boundary; this method only validates
+   * bytes and returns a URL — it reads/writes no tenant data, so admitting a tenant admin
+   * leaks nothing. The URL is persisted via the EXISTING gift-master / reward-catalog
+   * create/update endpoints (imageUrls already supported), not here.
+   */
+  async uploadGiftImage(file: Express.Multer.File): Promise<{ url: string }> {
+    if (!file) throw new BadRequestException('No file uploaded');
+    if (!file.buffer?.length) throw new BadRequestException('Empty file');
+
+    const MAX_BYTES = 5 * 1024 * 1024; // 5 MB — matches branding + visibility uploads
+    if (file.size > MAX_BYTES) throw new BadRequestException('File too large (max 5 MB)');
+
+    // Untrusted client mimetype: derive the REAL type from the bytes and require an
+    // image (rejects PDF, and any SVG/HTML/script payload labelled image/*).
+    const sniffed = sniffFileType(file.buffer);
+    if (!sniffed || !sniffed.mime.startsWith('image/')) {
+      throw new BadRequestException(
+        'Unsupported or corrupt file. Upload a PNG, JPG, WEBP, or GIF image.',
+      );
+    }
+
+    const key = this.storage.generateKey(
+      'gift-catalogue',
+      file.originalname || `gift.${sniffed.ext}`,
+    );
+    const url = await this.storage.uploadFile(file.buffer, key, sniffed.mime);
+    return { url };
   }
 
   // ── Wire mappers (list → { items }; detail → FLAT) ──────────────────────────

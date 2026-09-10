@@ -33,7 +33,9 @@ import {
   validateGiftMasterForm,
   giftMasterFormToPayload,
   giftMasterDetailToForm,
+  parseImageUrls,
 } from '@/lib/gift-catalogue';
+import { GiftImageUpload } from '@/components/GiftImageUpload';
 import { PublishDialog } from './publish-dialog';
 
 const STATUS_BADGE: Record<GiftMasterStatus, string> = {
@@ -557,10 +559,15 @@ export function MasterEditor({
               </div>
 
               <div className="sm:col-span-2">
-                <Field label="Image URLs" hint="One per line (or comma-separated). Must be valid http(s) URLs.">
+                <Field label="Images" hint="Upload a picture (PNG/JPG/WEBP/GIF, max 5 MB). Or paste image URLs below — one per line.">
+                  <GiftImageUpload
+                    value={parseImageUrls(form.imageUrls)}
+                    onChange={(urls) => set('imageUrls', urls.join('\n'))}
+                  />
                   <textarea
                     value={form.imageUrls} data-testid="field-images" rows={2}
-                    onChange={(e) => set('imageUrls', e.target.value)} className={FIELD_CLS}
+                    onChange={(e) => set('imageUrls', e.target.value)}
+                    className={`${FIELD_CLS} mt-2`}
                     placeholder="https://cdn.example.com/gift-1.jpg"
                   />
                 </Field>
