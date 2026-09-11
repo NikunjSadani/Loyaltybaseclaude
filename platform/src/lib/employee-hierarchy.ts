@@ -392,9 +392,18 @@ export function validateEmployeeUpload(
       const existing = existingById.get(employeeId);
       if (existing) {
         const roleChanged    = existing.roleCode.toUpperCase() !== levelConfig.roleCode.toUpperCase();
-        const managerChanged = mgrId !== (existing.reportsToId ?? '');
 
-        if (roleChanged || managerChanged) {
+        // A ROLE/level change for an outlet/sub-report holder is blocked: their
+        // outlets and team subtree don't automatically move with a level change,
+        // so the operator must reassign/replace first.
+        //
+        // A PURE reporting-manager change (same role, only reportsToId differs) is
+        // a legitimate reporting-line reorg and is allowed even for outlet/sub-report
+        // holders: the employee keeps their outlets, their sub-report subtree moves
+        // with them, and reporting cycles are already caught by the wouldCreateCycle
+        // check above. This matches the backend single-employee edit
+        // (admin-core.service.ts updateEmployee), which has no such guard.
+        if (roleChanged) {
           if (existing.hasOutlets) {
             errors.push(
               `"${employeeId}" has outlets assigned. ` +

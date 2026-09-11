@@ -335,8 +335,24 @@ describe('H14–H25 — Row error cases', () => {
 // ─── H26–H28: Business rules ──────────────────────────────────────────────────
 
 describe('H26–H28 — Business rules', () => {
-  it('H26: employee with outlets cannot change reporting manager → error', () => {
-    // ISR-M001 has hasOutlets: true; try to move to a different SO
+  it('H26: employee with outlets cannot change ROLE/level → error', () => {
+    // ISR-M001 has hasOutlets: true; promote XSR → SO (a real role change).
+    // (A pure manager change is allowed — see H26b below.)
+    const row = makeRow({
+      employeeId: 'ISR-M001',
+      hierarchy: 'SO',                       // XSR → SO: role change
+      employeeName: 'Anil Sharma',
+      employeePhone: '9900000041',
+      reportingManagerHierarchy: 'ASM',
+      reportingManagerEmployeeId: 'ASM-MUM', // valid ASM manager for an SO
+    });
+    const result = validateEmployeeUpload([row], BASE_EMPLOYEES, config);
+    expect(result.rows[0].errors.some(e => /has outlets assigned/i.test(e))).toBe(true);
+  });
+
+  it('H26b: employee WITH outlets — pure manager change (same role) → NO error, UPDATE_HIERARCHY', () => {
+    // ISR-M001 (XSR, hasOutlets: true) stays XSR but moves to a different SO.
+    // Outlets stay with the employee; this is a legitimate reporting-line reorg.
     const differentSO: HierarchyEmployee = {
       id: 'SO-MUM3', tenantId: 'deoleo', roleCode: 'SO', roleLabel: 'SO',
       reportsToId: 'ASM-MUM', hierarchyPath: '/NSM-01/ZNM-W1/RSM-MH/ASM-MUM/SO-MUM3/',
@@ -347,27 +363,37 @@ describe('H26–H28 — Business rules', () => {
 
     const row = makeRow({
       employeeId: 'ISR-M001',
-      hierarchy: 'XSR',
+      hierarchy: 'XSR',                      // same role
       employeeName: 'Anil Sharma',
       employeePhone: '9900000041',
       reportingManagerHierarchy: 'SO',
-      reportingManagerEmployeeId: 'SO-MUM3', // changed manager
+      reportingManagerEmployeeId: 'SO-MUM3', // changed manager only
     });
     const result = validateEmployeeUpload([row], employees, config);
-    expect(result.rows[0].errors.some(e => /has outlets assigned/i.test(e))).toBe(true);
+    expect(result.rows[0].errors.some(e => /has outlets assigned/i.test(e))).toBe(false);
+    expect(result.hasErrors).toBe(false);
+    expect(result.rows[0].action).toBe('UPDATE_HIERARCHY');
   });
 
-  it('H27: employee with sub-reports cannot change hierarchy → error (create replacement first)', () => {
-    // SO-MUM1 has hasSubReports: true; try to move to different ASM
+  it('H27: employee with sub-reports cannot change ROLE/level → error (create replacement first)', () => {
+    // SO-MUM1 has hasSubReports: true; promote SO → ASM (a real role change).
+    // (A pure manager change is allowed — see H27b below.)
     const row: EmployeeUploadRow = {
       rowNum: 2,
-      hierarchy: 'SO',
+      hierarchy: 'ASM',                       // SO → ASM: role change
       employeeId: 'SO-MUM1',
       employeeName: 'Rajesh Kumar',
       employeePhone: '9900000028',
-      reportingManagerHierarchy: 'ASM',
-      reportingManagerEmployeeId: 'ASM-PUN', // changed from ASM-MUM
+      reportingManagerHierarchy: 'RSM',
+      reportingManagerEmployeeId: 'RSM-MH',   // valid RSM manager for an ASM
     };
+    const result = validateEmployeeUpload([row], BASE_EMPLOYEES, config);
+    expect(result.rows[0].errors.some(e => /replacement/i.test(e))).toBe(true);
+  });
+
+  it('H27b: employee WITH sub-reports — pure manager change (same role) → NO error, UPDATE_HIERARCHY', () => {
+    // SO-MUM1 (SO, hasSubReports: true) stays SO but moves to a different ASM.
+    // The sub-report subtree moves with them; cycles are caught separately.
     const asmPun: HierarchyEmployee = {
       id: 'ASM-PUN', tenantId: 'deoleo', roleCode: 'ASM', roleLabel: 'ASM',
       reportsToId: 'RSM-MH', hierarchyPath: '/NSM-01/ZNM-W1/RSM-MH/ASM-PUN/',
@@ -375,8 +401,20 @@ describe('H26–H28 — Business rules', () => {
       hasOutlets: false, hasSubReports: true,
     };
     const employees = [...BASE_EMPLOYEES, asmPun];
+
+    const row: EmployeeUploadRow = {
+      rowNum: 2,
+      hierarchy: 'SO',                        // same role
+      employeeId: 'SO-MUM1',
+      employeeName: 'Rajesh Kumar',
+      employeePhone: '9900000028',
+      reportingManagerHierarchy: 'ASM',
+      reportingManagerEmployeeId: 'ASM-PUN',  // changed manager only (was ASM-MUM)
+    };
     const result = validateEmployeeUpload([row], employees, config);
-    expect(result.rows[0].errors.some(e => /replacement/i.test(e))).toBe(true);
+    expect(result.rows[0].errors.some(e => /replacement/i.test(e))).toBe(false);
+    expect(result.hasErrors).toBe(false);
+    expect(result.rows[0].action).toBe('UPDATE_HIERARCHY');
   });
 
   it('H28: name/phone update on employee WITH outlets — hierarchy unchanged → OK', () => {
