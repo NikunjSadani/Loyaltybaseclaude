@@ -20,6 +20,7 @@ import {
   getEnabledKpis,
   generateTargetTemplateBuffer,
   buildResolvedTargetsBuffer,
+  buildSalesDataBuffer,
   parseTargetUploadBuffer,
   KpiDefLike,
   OutletLike,
@@ -593,6 +594,86 @@ describe('buildResolvedTargetsBuffer ↔ parseTargetUploadBuffer round-trip', ()
     expect(row2[2]).toBe('Outlet Type');
     expect(row2[3]).toBe('Program Name');
     expect(row2[4]).toBe('Month Target');
+  });
+});
+
+// ─── buildSalesDataBuffer round-trip (Download Sales Data) ────────────────────
+//
+// The "Download Sales Data" export mirrors the achievement UPLOAD layout (so it
+// re-uploads straight back through parseTargetUploadBuffer / uploadAchievements)
+// but ADDS a "Program Name" column after the identity columns. These tests are the
+// re-upload-safety guarantee: the extra column must be IGNORED by the parser while
+// every identity column resolves by name and every KPI column by label.
+
+describe('buildSalesDataBuffer ↔ parseTargetUploadBuffer round-trip', () => {
+  it('a Sales-Data export re-parses to the same accepted KPI values (Program Name ignored)', () => {
+    const month = '2026-07';
+    const storedRows = [
+      {
+        outletCode: 'O001',
+        outletName: 'Outlet One',
+        outletType: 'RETAIL',
+        programName: 'Deoleo Gold',
+        // MONTH_TGT configured, FOCUS_PACK_1 omitted (not configured → blank cell)
+        kpiValues: { MONTH_TGT: 1234 } as Record<string, unknown>,
+      },
+      {
+        outletCode: 'O002',
+        outletName: 'Outlet Two',
+        outletType: 'HORECA',
+        programName: null, // unset → blank Program Name cell
+        kpiValues: { MONTH_TGT: 500, FOCUS_PACK_1: 78.5 } as Record<string, unknown>,
+      },
+    ];
+
+    const buf = buildSalesDataBuffer(month, ENABLED_KPIS, storedRows);
+    const result = parseTargetUploadBuffer(buf, ENABLED_KPIS, KNOWN_CODES);
+
+    // Both rows accepted — the extra Program Name column does not break the parse,
+    // and the integrity guard (all enabled KPIs matched by label) still passes.
+    expect(result.summary.accepted).toBe(2);
+
+    const o1 = result.acceptedTargets[month]?.['O001'];
+    expect(o1).toBeDefined();
+    expect(o1['MONTH_TGT']).toBe(1234);
+    // blank export cell → key omitted on re-parse (the no-compute contract)
+    expect('FOCUS_PACK_1' in o1).toBe(false);
+    // The Program Name column must NOT round-trip into stored KPI values.
+    expect('Program Name' in o1).toBe(false);
+    expect('__names' in o1).toBe(false);
+
+    const o2 = result.acceptedTargets[month]?.['O002'];
+    expect(o2).toBeDefined();
+    expect(o2['MONTH_TGT']).toBe(500);
+    expect(o2['FOCUS_PACK_1']).toBe(78.5);
+  });
+
+  it('emits Program Name as row-2 header AFTER the identity cols, month label shifted right', () => {
+    const buf = buildSalesDataBuffer('2026-07', ENABLED_KPIS, [
+      {
+        outletCode: 'O001',
+        outletName: 'Outlet One',
+        outletType: 'RETAIL',
+        programName: 'Deoleo Gold',
+        kpiValues: { MONTH_TGT: 10 },
+      },
+    ]);
+    const wb = XLSX.read(buf, { type: 'buffer' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json<(string | number)[]>(ws, { header: 1, defval: '' });
+
+    const row1 = aoa[0] as string[];
+    const row2 = aoa[1] as string[];
+    // Program Name is column index 3 (after the 3 fixed cols); month label anchors
+    // at column index 4 (the first KPI column), one further right than the target export.
+    expect(row2[3]).toBe('Program Name');
+    expect(row2[4]).toBe('Month Target');
+    expect(String(row1[4])).toMatch(/jul.*26.*target/i);
+    // The Program Name column in row 1 (the month-group row) is blank — never a month block.
+    expect(String(row1[3] ?? '')).toBe('');
+    // Data row carries the program name in the same column.
+    const dataRow = aoa[2] as (string | number)[];
+    expect(dataRow[3]).toBe('Deoleo Gold');
   });
 });
 

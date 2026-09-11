@@ -364,6 +364,7 @@ export default function SalesUploadPage() {
   const [historyKey,  setHistoryKey] = useState(0);  // bump to refresh history
   const [showPace,    setShowPace]  = useState(false);
   const [downloadError, setDownloadError] = useState('');
+  const [downloadingSalesData, setDownloadingSalesData] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -421,6 +422,37 @@ export default function SalesUploadPage() {
       downloadBlob(blob, `sales_template_${salesMonth}.xlsx`);
     } catch (err) {
       setDownloadError(err instanceof Error ? err.message : 'Template download failed');
+    }
+  }
+
+  // ── Download stored sales data (with Program Name column) ──────────────
+
+  async function handleDownloadSalesData() {
+    if (!salesMonth) return;
+    setDownloadError('');
+    setDownloadingSalesData(true);
+    try {
+      // Streams the stored OutletSalesRecord values for the selected month, verbatim,
+      // with an added Program Name column. The file re-uploads cleanly through
+      // /api/admin/achievements/upload (Program Name is ignored by the parser).
+      const res = await fetch(
+        `/api/admin/achievements/export?month=${encodeURIComponent(salesMonth)}`,
+      );
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = (await res.json()) as { error?: string; message?: string };
+          msg = j.error ?? j.message ?? msg;
+        } catch { /* body was not JSON */ }
+        setDownloadError(msg);
+        return;
+      }
+      const blob = await res.blob();
+      downloadBlob(blob, `sales_data_${salesMonth}.xlsx`);
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : 'Sales data download failed');
+    } finally {
+      setDownloadingSalesData(false);
     }
   }
 
@@ -553,13 +585,26 @@ export default function SalesUploadPage() {
           </span>
         </div>
 
-        <button
-          onClick={handleDownloadTemplate}
-          className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-semibold rounded-xl hover:opacity-90 transition-opacity"
-        >
-          <Download className="w-4 h-4" />
-          Download Template — {currentMonthLabel}
-        </button>
+        <div className="flex items-center gap-3 flex-wrap">
+          <button
+            onClick={handleDownloadTemplate}
+            className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-semibold rounded-xl hover:opacity-90 transition-opacity"
+          >
+            <Download className="w-4 h-4" />
+            Download Template — {currentMonthLabel}
+          </button>
+
+          {/* Download the STORED sales actuals for the selected month (with a
+              Program Name column). Re-uploadable through the achievements upload. */}
+          <button
+            onClick={handleDownloadSalesData}
+            disabled={!salesMonth || downloadingSalesData}
+            className="flex items-center gap-2 px-4 py-2 border border-gray-200 text-gray-700 text-sm font-semibold rounded-xl hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Download className="w-4 h-4" />
+            {downloadingSalesData ? 'Preparing…' : `Download Sales Data — ${currentMonthLabel}`}
+          </button>
+        </div>
 
         {downloadError && (
           <p className="text-xs text-red-600">{downloadError}</p>

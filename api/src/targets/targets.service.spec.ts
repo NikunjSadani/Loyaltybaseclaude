@@ -751,6 +751,77 @@ describe('TargetsService', () => {
     });
   });
 
+  // ─── exportAchievementsBuffer (Download Sales Data) ─────────────────────────
+
+  describe('exportAchievementsBuffer', () => {
+    const XLSX = require('xlsx');
+
+    it('rejects a non-YYYY-MM month', async () => {
+      await expect(service.exportAchievementsBuffer(admin, 'July')).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('rejects when the tenant has no enabled KPIs', async () => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([]);
+      await expect(service.exportAchievementsBuffer(admin, '2026-07')).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('reads OutletSalesRecord for the month (tenant + month scoped)', async () => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, kpiRow2]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+
+      await service.exportAchievementsBuffer(admin, '2026-07');
+
+      const where = mockPrisma.outletSalesRecord.findMany.mock.calls.at(-1)[0].where;
+      expect(where).toEqual({ clientId: 'deoleo', month: '2026-07' });
+    });
+
+    it('dumps stored kpiValues verbatim + a Program Name column sourced from the Outlet join', async () => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, kpiRow2]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        // RT-1 has both KPIs; RT-2 only the primary (FOCUS_PACK_1 omitted → blank).
+        { outletCode: 'RT-1', outletName: 'Shop One', outletType: 'SSS', kpiValues: { MONTH_TGT: 100, FOCUS_PACK_1: 20 } },
+        { outletCode: 'RT-2', outletName: 'Shop Two', outletType: 'SSS', kpiValues: { MONTH_TGT: 50 } },
+      ]);
+      // programName is NOT on OutletSalesRecord — it comes from the Outlet join.
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'RT-1', programName: 'Deoleo Gold' },
+        { outletCode: 'RT-2', programName: null }, // unset → blank cell
+      ]);
+
+      const buf = await service.exportAchievementsBuffer(admin, '2026-07');
+
+      // Outlet join is tenant-scoped, excludes soft-deleted, and is BOUNDED to only
+      // the outletCodes being exported (mirrors exportTargetsBuffer).
+      const outletWhere = mockPrisma.outlet.findMany.mock.calls.at(-1)[0].where;
+      expect(outletWhere).toEqual({
+        clientId: 'deoleo',
+        outletCode: { in: ['RT-1', 'RT-2'] },
+        deletedAt: null,
+      });
+
+      const wb = XLSX.read(buf, { type: 'buffer' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+
+      // 2-row month-group header, Program Name inserted AFTER the identity cols.
+      expect(rows[0][4]).toBe("Jul '26 Target"); // month label now at col 4 (after Program Name)
+      expect(rows[1]).toEqual([
+        'Outlet ID', 'Outlet Name', 'Outlet Type', 'Program Name', 'Month Target', 'Focus Pack - 1',
+      ]);
+      // RT-1: program name from join + both KPI values verbatim.
+      expect(rows[2]).toEqual(['RT-1', 'Shop One', 'SSS', 'Deoleo Gold', 100, 20]);
+      // RT-2: null programName → blank; omitted FOCUS_PACK_1 → blank (not 0).
+      expect(rows[3][3]).toBe('');   // Program Name blank
+      expect(rows[3][4]).toBe(50);   // MONTH_TGT
+      expect(rows[3][5]).toBe('');   // FOCUS_PACK_1 omitted
+    });
+  });
+
   // ─── uploadAchievements ────────────────────────────────────────────────────
 
   describe('uploadAchievements', () => {

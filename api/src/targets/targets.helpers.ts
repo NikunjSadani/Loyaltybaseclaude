@@ -353,6 +353,114 @@ export function buildResolvedTargetsBuffer(
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 }
 
+// ── buildSalesDataBuffer ──────────────────────────────────────────────────────
+
+/**
+ * Extra identity column that the "Download Sales Data" export adds and the
+ * target/achievement side does NOT emit. Sits AFTER the fixed identity columns
+ * and BEFORE the month block. It is sourced by joining Outlet.programName (which
+ * is NOT denormalized on OutletSalesRecord) — never a KPI code.
+ */
+export const PROGRAM_NAME_COL = 'Program Name' as const;
+
+/**
+ * Build a "sales data" export for ONE month — a verbatim dump of the stored
+ * `OutletSalesRecord.kpiValues` per outlet (NO compute), in the SAME month-group
+ * 2-row layout `generateTargetTemplateBuffer` produces, PLUS a "Program Name"
+ * column. This is the achievement-side twin of `buildResolvedTargetsBuffer`.
+ *
+ * RE-UPLOAD SAFETY (hard requirement): the produced file must ingest cleanly back
+ * through `uploadAchievements` → `parseTargetUploadBuffer`. The parser (a) finds
+ * the fixed columns by NAME (`Outlet ID`/`Outlet Name`/`Outlet Type`), (b) detects
+ * month blocks from row 1 via `parseMonthHeader`, and (c) matches KPI columns by
+ * LABEL within each month block's column range `[block.startCol, nextBlock.startCol)`.
+ * The Program Name column is placed at column index `FIXED_COLS.length` — strictly
+ * BEFORE the single month block's start column — so it is never inside a block's
+ * range, is not a fixed column the parser looks up, and its "Program Name" label
+ * resolves to neither a KPI nor an override → it is silently ignored on re-upload,
+ * while every identity column resolves by name and every KPI column by label. Blank
+ * cell = the KPI was never configured for that outlet-month (key omitted).
+ *
+ * @param month  YYYY-MM being exported.
+ * @param kpis   The tenant's KpiDef rows (only enabled ones become columns).
+ * @param rows   Stored OutletSalesRecord rows for that month, each carrying the
+ *               outlet's Program Name resolved from the Outlet join.
+ */
+export function buildSalesDataBuffer(
+  month: string,
+  kpis: KpiDefLike[],
+  rows: {
+    outletCode: string;
+    outletName: string | null;
+    outletType: string | null;
+    programName: string | null;
+    kpiValues: unknown;
+  }[],
+): Buffer {
+  const enabled = getEnabledKpis(kpis);
+
+  // ── Row 1: month group header ───────────────────────────────────────────────
+  // Anchored at the FIRST KPI column, which now sits one column further right than
+  // the target export because of the inserted Program Name column.
+  const [year, mm] = month.split('-');
+  const abbr = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][
+    Number(mm) - 1
+  ];
+  const monthLabel = `${abbr} '${year.slice(2)} Target`;
+
+  // Identity block = the 3 fixed cols + the Program Name col. The month block
+  // begins immediately after it.
+  const identityColCount = FIXED_COLS.length + 1;
+
+  const row1: (string | number)[] = Array(identityColCount).fill('');
+  row1.push(monthLabel);
+  for (let i = 1; i < enabled.length; i++) row1.push('');
+
+  // ── Row 2: column headers (identity + Program Name + KPI value labels) ───────
+  const row2: string[] = [...FIXED_COLS, PROGRAM_NAME_COL, ...enabled.map((k) => k.label)];
+
+  // ── Data rows (verbatim stored values; blank = KPI not configured) ──────────
+  const dataRows = rows.map((r) => {
+    const vals = (r.kpiValues ?? {}) as Record<string, unknown>;
+    const out: (string | number)[] = [
+      r.outletCode,
+      r.outletName ?? '',
+      r.outletType ?? '',
+      r.programName ?? '', // Program Name from the Outlet join (blank if unset)
+    ];
+    for (const k of enabled) {
+      const v = vals[k.code];
+      out.push(typeof v === 'number' ? v : ''); // blank = not configured
+    }
+    return out;
+  });
+
+  const ws = aoaToSheetSafe([row1, row2, ...dataRows]);
+  ws['!cols'] = [
+    { wch: 16 }, // Outlet ID
+    { wch: 24 }, // Outlet Name
+    { wch: 16 }, // Outlet Type
+    { wch: 22 }, // Program Name
+    ...enabled.map(() => ({ wch: 16 })),
+  ];
+
+  // Merge the month-group header cell across its KPI columns (row 1), starting at
+  // the first KPI column (immediately after the identity block).
+  if (enabled.length > 0) {
+    ws['!merges'] = [
+      {
+        s: { r: 0, c: identityColCount },
+        e: { r: 0, c: identityColCount + enabled.length - 1 },
+      },
+    ];
+  }
+
+  const wb = XLSX.utils.book_new();
+  // Sheet names cap at 31 chars — "Sales Data 2026-07" is well under.
+  XLSX.utils.book_append_sheet(wb, ws, `Sales Data ${month}`);
+  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+}
+
 // ── parseTargetUploadBuffer ───────────────────────────────────────────────────
 
 /**

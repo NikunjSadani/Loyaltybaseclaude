@@ -115,4 +115,20 @@ describe('admin/sales/page.tsx — endpoint wiring', () => {
     // Pace display must handle null gracefully — show "—" when pace is null
     expect(page).toMatch(/null.*'—'|null.*"—"|pctVal.*null.*'—'|'—'/);
   });
+
+  it('PW16: Download Sales Data calls /api/admin/achievements/export and downloads a blob', () => {
+    // The new export button fetches the stored sales actuals (with a Program Name
+    // column) from the achievements export endpoint and streams the blob out.
+    expect(page).toContain('/api/admin/achievements/export?month=');
+    expect(page).toContain('handleDownloadSalesData');
+    expect(page).toMatch(/downloadBlob\(blob,\s*`sales_data_\$\{salesMonth\}\.xlsx`\)/);
+  });
+
+  it('PW17: Download Sales Data button surfaces errors and has an honest disabled state', () => {
+    // Non-OK responses read the JSON message (sibling handler pattern) and the
+    // button is disabled while in-flight / when no month is selected.
+    expect(page).toContain('Download Sales Data');
+    expect(page).toMatch(/disabled=\{!salesMonth\s*\|\|\s*downloadingSalesData\}/);
+    expect(page).toMatch(/j\.error\s*\?\?\s*j\.message/);
+  });
 });

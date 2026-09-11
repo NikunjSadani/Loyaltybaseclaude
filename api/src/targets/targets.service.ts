@@ -36,6 +36,7 @@ import {
 import {
   generateTargetTemplateBuffer,
   buildResolvedTargetsBuffer,
+  buildSalesDataBuffer,
   parseTargetUploadBuffer,
   currentMonthKey,
   isMonthLocked,
@@ -374,6 +375,80 @@ export class TargetsService {
     }));
 
     return buildResolvedTargetsBuffer(month, kpis, rowsWithProgram);
+  }
+
+  /**
+   * GET /v1/admin/achievements/export?month=YYYY-MM — "Download Sales Data".
+   *
+   * The achievement-side twin of exportTargetsBuffer: dumps the stored
+   * OutletSalesRecord.kpiValues per outlet for the month, verbatim (no compute),
+   * in the SAME month-group 2-row layout the achievement UPLOAD parser expects,
+   * PLUS a "Program Name" column. Tenant-scoped. Blank cell = KPI not configured.
+   *
+   * Program Name is NOT denormalized on OutletSalesRecord, so it is sourced by
+   * joining Outlet on (clientId, outletCode, deletedAt:null) — the same roster
+   * query the achievement template/upload use — and looked up by outletCode. The
+   * extra column sits BEFORE the month block, so the produced file re-uploads
+   * cleanly through uploadAchievements (the parser ignores it — see
+   * buildSalesDataBuffer's re-upload-safety note).
+   */
+  async exportAchievementsBuffer(user: JwtPayload, month: string): Promise<Buffer> {
+    // Strict YYYY-MM (01-12) — a loose \d{2} accepts 2026-13 and yields a corrupt
+    // "undefined 'YY Target" header instead of a clean 400.
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      throw new BadRequestException('A valid YYYY-MM "month" query param is required');
+    }
+
+    const kpiRows = await this.prisma.kpiDef.findMany({
+      where: { clientId: user.clientId, enabled: true },
+      orderBy: [{ order: 'asc' }, { code: 'asc' }],
+    });
+    if (kpiRows.length === 0) {
+      throw new BadRequestException('No enabled KPIs found for this tenant.');
+    }
+
+    const salesRows = await this.prisma.outletSalesRecord.findMany({
+      where: { clientId: user.clientId, month },
+      orderBy: { outletCode: 'asc' },
+      select: {
+        outletCode: true,
+        outletName: true,
+        outletType: true,
+        kpiValues: true,
+      },
+    });
+
+    // programName lives on Outlet (NOT on OutletSalesRecord). Build a
+    // code→programName map, bounded to only the outletCodes we're exporting (mirrors
+    // exportTargetsBuffer — no need to pull the whole roster when the month has few rows).
+    const codes = salesRows.map((r) => r.outletCode);
+    const outlets = codes.length
+      ? await this.prisma.outlet.findMany({
+          where: { clientId: user.clientId, outletCode: { in: codes }, deletedAt: null },
+          select: { outletCode: true, programName: true },
+        })
+      : [];
+    const programNameByCode = new Map(outlets.map((o) => [o.outletCode, o.programName]));
+
+    const kpis: KpiDefLike[] = kpiRows.map((k) => ({
+      code: k.code,
+      label: k.label,
+      isPrimary: k.isPrimary,
+      hasNameOverride: k.hasNameOverride,
+      nameOverrideLabel: k.nameOverrideLabel ?? null,
+      order: k.order,
+      enabled: k.enabled,
+    }));
+
+    const rows = salesRows.map((r) => ({
+      outletCode: r.outletCode,
+      outletName: r.outletName,
+      outletType: r.outletType,
+      programName: programNameByCode.get(r.outletCode) ?? null,
+      kpiValues: r.kpiValues,
+    }));
+
+    return buildSalesDataBuffer(month, kpis, rows);
   }
 
   // ─── Target upload ──────────────────────────────────────────────────────────

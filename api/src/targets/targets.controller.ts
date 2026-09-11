@@ -210,6 +210,8 @@ export class TargetsController {
  * OutletSalesRecord / SalesUploadBatch.
  *
  * Routes:
+ *   GET    /v1/admin/achievements/template download .xlsx upload template (query: month=YYYY-MM)
+ *   GET    /v1/admin/achievements/export   download stored sales data .xlsx + Program Name (query: month=YYYY-MM)
  *   POST   /v1/admin/achievements/upload   multipart xlsx → OutletSalesRecord (verbatim)
  *   GET    /v1/admin/achievements/batches  list SalesUploadBatch records
  *   GET    /v1/admin/achievements/pace     pace view: target + achievement + pace per KPI
@@ -237,6 +239,30 @@ export class AchievementsController {
   ): Promise<StreamableFile> {
     const buffer = await this.targets.buildAchievementTemplate(user, q.month);
     const filename = `sales-template-${q.month}.xlsx`;
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="${filename}"`,
+    });
+  }
+
+  /**
+   * GET /v1/admin/achievements/export?month=YYYY-MM  — "Download Sales Data".
+   * Streams the stored OutletSalesRecord values per outlet for the month, verbatim
+   * (no compute), in the SAME month-group layout the upload parser expects, PLUS a
+   * "Program Name" column (joined from Outlet). The file re-uploads cleanly through
+   * POST /upload (the parser ignores the extra column). Blank cell = KPI not
+   * configured. Must come BEFORE the generic @Get() to avoid routing ambiguity.
+   */
+  @Get('export')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('targets:read')
+  async exportAchievements(
+    @CurrentUser() user: JwtPayload,
+    @Query('month') month: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const buffer = await this.targets.exportAchievementsBuffer(user, month);
+    const filename = `sales-data-${month}.xlsx`;
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       disposition: `attachment; filename="${filename}"`,
