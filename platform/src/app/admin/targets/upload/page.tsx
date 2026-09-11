@@ -416,6 +416,18 @@ export default function TargetUploadPage() {
           </div>
         </div>
 
+        {/* Re-upload advisory: an upload REPLACES each outlet-month's stored target values with the
+            columns present, and the template/export carry only currently-enabled KPIs. */}
+        <div className="mb-4 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          <span>
+            Uploading <strong>replaces</strong> each outlet&rsquo;s target values for the month with the
+            columns in this file. The template and the Final Targets export include only
+            <strong> currently-enabled KPIs</strong> — if a KPI was disabled after targets were uploaded,
+            re-uploading removes its stored targets for that month.
+          </span>
+        </div>
+
         {/* Drop zone */}
         <div
           onDrop={handleDrop}
