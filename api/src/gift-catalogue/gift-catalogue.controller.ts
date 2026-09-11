@@ -135,12 +135,13 @@ export class GiftCatalogueController {
     return this.catalogue.publish(user, id, dto);
   }
 
-  // ── Gift image upload (multipart) — PUBLIC object, both editors call this ─────
+  // ── Gift image upload (multipart) — both editors call this ───────────────────
   // The ONE image-upload endpoint (POST /v1/admin/gift-catalogue/image). Sniffs magic
-  // bytes (images only) + caps at 5 MB, stores on the public uploads bucket, and returns
-  // { url } (the direct storage.googleapis.com URL). The URL is persisted through the
-  // EXISTING gift-master / reward-catalog create-update endpoints (imageUrls already
-  // supported) — this endpoint never touches tenant data.
+  // bytes (renderable images only) + caps at 5 MB, stores PRIVATELY (the uploads bucket
+  // also holds KYC/POSM data, so a raw storage.googleapis.com URL 403s in a browser),
+  // and returns { url } = an auth-gated proxy PATH rendered via GET /v1/gift-images (see
+  // GiftImageController). The path is persisted through the EXISTING gift-master /
+  // reward-catalog create-update endpoints (imageUrls already supported).
   //
   // Method-level @Roles OVERRIDES the class GIFSY_ADMIN gate (RolesGuard uses
   // getAllAndOverride) to ADMIT CLIENT_ADMIN too: the per-tenant reward editor
@@ -150,9 +151,12 @@ export class GiftCatalogueController {
   @Post('gift-catalogue/image')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('rewards:manage_inventory')
-  @UseInterceptors(FileInterceptor('file'))
-  uploadGiftImage(@UploadedFile() file: Express.Multer.File) {
-    return this.catalogue.uploadGiftImage(file);
+  // limits.fileSize rejects an oversize upload BEFORE Multer buffers the whole body
+  // into memory (matches the branding uploader). Without it the 5 MB check in the
+  // service runs only after the full file is in RAM — an unauthenticated-size DoS.
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024, files: 1 } }))
+  uploadGiftImage(@CurrentUser() user: JwtPayload, @UploadedFile() file: Express.Multer.File) {
+    return this.catalogue.uploadGiftImage(user, file);
   }
 
   // ── Moderation — /v1/admin/gift-catalogue/moderation ────────────────────────

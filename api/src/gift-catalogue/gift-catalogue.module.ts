@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { GiftCatalogueController } from './gift-catalogue.controller';
+import { GiftImageController } from './gift-image.controller';
 import { DispatchController } from './dispatch.controller';
 import { GiftCatalogueService } from './gift-catalogue.service';
 import { GiftBackfillService } from './gift-backfill.service';
@@ -15,7 +16,7 @@ import { RewardsModule } from '../rewards/rewards.module';
  */
 @Module({
   imports: [PrismaModule, RewardsModule],
-  controllers: [GiftCatalogueController, DispatchController],
+  controllers: [GiftCatalogueController, GiftImageController, DispatchController],
   providers: [GiftCatalogueService, GiftBackfillService],
 })
 export class GiftCatalogueModule {}

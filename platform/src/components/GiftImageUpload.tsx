@@ -26,6 +26,11 @@ import { authHeader } from '@/lib/api-client';
 /** The ONE multipart gift-image endpoint both editors call (see GiftCatalogueController). */
 export const GIFT_IMAGE_UPLOAD_URL = '/api/admin/gift-catalogue/image';
 
+/** Client-side guards — must MIRROR the server (5 MB + image/* only) so the user gets
+ *  instant feedback instead of streaming a bad file and waiting for a 400. */
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+const ACCEPTED_IMAGE_PREFIX = 'image/';
+
 /** POST the picked file and return the stored PUBLIC URL (or an error). */
 export async function uploadGiftImage(
   file: File,
@@ -71,7 +76,9 @@ function Thumb({ url, onRemove }: { url: string; onRemove: () => void }) {
         onClick={onRemove}
         aria-label="Remove image"
         data-testid="gift-image-remove"
-        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/60 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+        // Visible on hover for mouse users, but also on keyboard focus and on
+        // touch/coarse-pointer devices (where hover never fires) so it's reachable.
+        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/60 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity"
       >
         <X className="w-2.5 h-2.5" />
       </button>
@@ -82,32 +89,59 @@ function Thumb({ url, onRemove }: { url: string; onRemove: () => void }) {
 export function GiftImageUpload({
   value,
   onChange,
+  onUploadingChange,
   disabled,
 }: {
   /** Current stored image URLs. */
   value: string[];
   /** Called with the next array after an upload or a removal. */
   onChange: (urls: string[]) => void;
+  /** Fires true while an upload is in flight and false when it settles, so the
+   *  parent can block its own Save (otherwise a Save during an in-flight upload
+   *  drops the image — the onChange lands after the modal unmounts). */
+  onUploadingChange?: (uploading: boolean) => void;
   disabled?: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // The async upload resolves LATER — reading `value` from the closure captured
+  // at upload-start would resurrect an image the user removed mid-upload (and use
+  // a stale de-dupe set). A ref always holds the latest committed value.
+  const valueRef = useRef(value);
+  useEffect(() => { valueRef.current = value; }, [value]);
+
+  const setBusy = (b: boolean) => {
+    setUploading(b);
+    onUploadingChange?.(b);
+  };
+
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = ''; // allow re-selecting the same file after an error
     if (!file) return;
-    setUploading(true);
+    // Client-side guards MIRROR the server (5 MB + image/* only): instant, honest
+    // feedback instead of streaming a bad file and waiting for a 400/413.
+    if (!file.type.startsWith(ACCEPTED_IMAGE_PREFIX)) {
+      setError('Please choose an image file (PNG, JPG, WEBP, or GIF).');
+      return;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setError('Image is too large — the maximum size is 5 MB.');
+      return;
+    }
+    setBusy(true);
     setError(null);
     const res = await uploadGiftImage(file);
-    setUploading(false);
+    setBusy(false);
     if (!res.ok || !res.url) {
       setError(res.error ?? 'Upload failed');
       return;
     }
-    // De-dupe: don't append a URL that's already stored.
-    if (!value.includes(res.url)) onChange([...value, res.url]);
+    // De-dupe + append against the LATEST value (not the stale closure).
+    const current = valueRef.current;
+    if (!current.includes(res.url)) onChange([...current, res.url]);
   };
 
   return (
@@ -132,6 +166,7 @@ export function GiftImageUpload({
         type="button"
         onClick={() => inputRef.current?.click()}
         disabled={uploading || disabled}
+        aria-busy={uploading}
         data-testid="gift-image-upload-btn"
         className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 text-gray-700 text-xs font-medium rounded-lg hover:bg-gray-50 disabled:opacity-50"
       >

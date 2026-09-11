@@ -1,8 +1,9 @@
 /// <reference types="vitest/globals" />
 /**
  * GiftImageUpload — the REAL file → portal upload control shared by both gift editors.
- * A picked file POSTs multipart to the ONE endpoint; the returned PUBLIC url is appended
- * to `value`; an error surfaces; a stored image can be removed.
+ * A picked file POSTs multipart to the ONE endpoint; the returned proxy path is appended
+ * to `value`; client + server errors surface; a stored image can be removed; and an
+ * in-flight upload signals the parent (onUploadingChange) so it can block Save.
  *
  * Run: npx vitest run src/app/admin/gift-catalogue/__tests__/gift-image-upload.test.tsx
  */
@@ -63,17 +64,47 @@ describe('<GiftImageUpload/>', () => {
     await waitFor(() => expect(onChange).toHaveBeenCalledWith(['https://storage.googleapis.com/b/gift-catalogue/new.png']));
   });
 
-  it('shows an inline error and does not call onChange when the upload fails', async () => {
+  it('shows an inline error and does not call onChange when the SERVER upload fails', async () => {
     fetchMock.mockResolvedValueOnce({ ok: false, json: async () => ({ success: false, error: 'Unsupported or corrupt file.' }) } as Response);
     const onChange = vi.fn();
     render(<GiftImageUpload value={[]} onChange={onChange} />);
 
+    // A valid image (passes the client guard) but the server rejects it → the
+    // server's error is surfaced and no url is appended.
     fireEvent.change(screen.getByTestId('gift-image-input'), {
-      target: { files: [new File(['x'], 'bad.txt')] },
+      target: { files: [new File([new Uint8Array([1])], 'x.png', { type: 'image/png' })] },
     });
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/Unsupported or corrupt file/);
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-image CLIENT-SIDE without hitting the server', async () => {
+    const onChange = vi.fn();
+    render(<GiftImageUpload value={[]} onChange={onChange} />);
+
+    fireEvent.change(screen.getByTestId('gift-image-input'), {
+      target: { files: [new File(['x'], 'bad.txt', { type: 'text/plain' })] },
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/choose an image file/i);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('blocks Save via onUploadingChange while an upload is in flight, then clears it', async () => {
+    let resolveFetch: (r: Response) => void = () => {};
+    fetchMock.mockReturnValueOnce(new Promise<Response>((res) => { resolveFetch = res; }));
+    const onUploadingChange = vi.fn();
+    render(<GiftImageUpload value={[]} onChange={vi.fn()} onUploadingChange={onUploadingChange} />);
+
+    fireEvent.change(screen.getByTestId('gift-image-input'), {
+      target: { files: [new File([new Uint8Array([1])], 'a.png', { type: 'image/png' })] },
+    });
+
+    await waitFor(() => expect(onUploadingChange).toHaveBeenCalledWith(true));
+    resolveFetch(okResponse('/api/gift-images?key=gift-catalogue/_platform/2026-09/uuid-a.png'));
+    await waitFor(() => expect(onUploadingChange).toHaveBeenLastCalledWith(false));
   });
 
   it('renders a thumbnail per stored url and removes one via onChange', () => {

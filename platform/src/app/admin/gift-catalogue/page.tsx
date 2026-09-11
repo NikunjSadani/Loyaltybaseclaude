@@ -386,6 +386,9 @@ export function MasterEditor({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
   const [touched, setTouched] = useState(false);
+  // Block Save while a gift image is still uploading (otherwise the in-flight
+  // image is dropped and its onChange lands after the editor unmounts).
+  const [imgUploading, setImgUploading] = useState(false);
   const inFlight = useRef(false);
 
   const loadDetail = useCallback(async () => {
@@ -563,6 +566,7 @@ export function MasterEditor({
                   <GiftImageUpload
                     value={parseImageUrls(form.imageUrls)}
                     onChange={(urls) => set('imageUrls', urls.join('\n'))}
+                    onUploadingChange={setImgUploading}
                   />
                   <textarea
                     value={form.imageUrls} data-testid="field-images" rows={2}
@@ -605,8 +609,8 @@ export function MasterEditor({
               <button onClick={onClose} className="px-4 py-2 text-xs font-semibold text-gray-600 rounded-lg hover:bg-gray-100">
                 Cancel
               </button>
-              <Button variant="primary" onClick={() => { void handleSave(); }} loading={saving} data-testid="save-master-btn">
-                {isEdit ? 'Save changes' : 'Create gift master'}
+              <Button variant="primary" onClick={() => { void handleSave(); }} loading={saving} disabled={imgUploading} title={imgUploading ? 'Wait for the image to finish uploading' : undefined} data-testid="save-master-btn">
+                {imgUploading ? 'Uploading image…' : isEdit ? 'Save changes' : 'Create gift master'}
               </Button>
             </div>
           </>

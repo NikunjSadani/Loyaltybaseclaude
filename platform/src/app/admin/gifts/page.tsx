@@ -492,6 +492,9 @@ function ItemModal({
     };
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
+  // Block Save while a gift image is still uploading — otherwise saving mid-upload
+  // persists without the image and the onChange lands after the modal unmounts.
+  const [imgUploading, setImgUploading] = useState(false);
 
   const set = <K extends keyof ItemFormState>(k: K, v: ItemFormState[K]) =>
     setForm((f) => ({ ...f, [k]: v }));
@@ -632,6 +635,7 @@ function ItemModal({
             <GiftImageUpload
               value={form.imageUrls}
               onChange={(urls) => set('imageUrls', urls)}
+              onUploadingChange={setImgUploading}
             />
             <p className="text-[10px] text-gray-400">PNG/JPG/WEBP/GIF, max 5 MB each. Shown to members in the reward catalogue.</p>
           </div>
@@ -804,10 +808,11 @@ function ItemModal({
           </button>
           <button
             onClick={submit}
-            disabled={saving}
+            disabled={saving || imgUploading}
+            title={imgUploading ? 'Wait for the image to finish uploading' : undefined}
             className="flex-1 py-2.5 bg-[var(--brand-primary)] text-white rounded-xl text-sm font-semibold hover:bg-[var(--brand-primary-dark)] disabled:opacity-50"
           >
-            {saving ? 'Saving…' : editing ? 'Save Changes' : 'Add Reward'}
+            {saving ? 'Saving…' : imgUploading ? 'Uploading image…' : editing ? 'Save Changes' : 'Add Reward'}
           </button>
         </div>
       </div>

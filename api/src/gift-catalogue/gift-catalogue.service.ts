@@ -11,7 +11,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { isGifsyOperator, tenantScope } from '../common/tenant-scope';
+import { isGifsyOperator, platformWide, tenantScope } from '../common/tenant-scope';
 import { sniffFileType } from '../common/file-signature';
 import {
   CreateGiftCategoryDto,
@@ -50,47 +50,113 @@ export class GiftCatalogueService {
     }
   }
 
+  /** The bucket prefix all gift images live under; serveGiftImage refuses any key
+   *  outside it, so this endpoint can never be used to read arbitrary objects. */
+  private static readonly GIFT_IMAGE_PREFIX = 'gift-catalogue/';
+  /** The browser-renderable image types this feature accepts + serves inline. */
+  private static readonly RENDERABLE_MIME = new Set([
+    'image/png',
+    'image/jpeg',
+    'image/webp',
+    'image/gif',
+  ]);
+
   /**
-   * Upload a gift image and return its PUBLIC object URL. Mirrors the branding-asset
-   * upload (gifsy.service.uploadBrandingAsset) and the visibility media path (AF-10):
-   * null/empty check, 5 MB cap, magic-byte sniff (IMAGES ONLY — a PDF as well as any
-   * SVG/HTML/script masquerade labelled image/* is rejected), then storage.uploadFile.
+   * Upload a gift image and return an AUTH-GATED PROXY PATH the browser renders via
+   * serveGiftImage below. The uploads bucket (`gifsy-platform-files`) is PRIVATE
+   * (uniform bucket-level access, no allUsers grant — it also holds KYC docs + POSM
+   * photos), so a raw `storage.googleapis.com` URL 403s in a browser. We therefore
+   * follow the KYC/visibility posture — store privately, stream through the API — NOT
+   * a public URL. (The `publicUrl()` name on StorageService is a misnomer; the object
+   * is private.) No schema change: imageUrls already holds strings; it now holds the
+   * proxy path instead of a bucket URL.
    *
-   * PUBLIC by design (owner-approved): gift images aren't sensitive, so the object is
-   * stored on the same uploads bucket the brand logos/favicons live on and the returned
-   * `storage.googleapis.com` URL renders directly in an <img> (no auth-gated proxy) —
-   * exactly the brand-asset posture, NOT the private KYC/visibility stream posture.
+   * The key is TENANT-FOLDED: un-assumed GIFSY (master catalogue) → `_platform/`
+   * (world-readable within the portal, which master gift content is); every other
+   * caller (a CLIENT_ADMIN, or an assumed operator) → its own `<clientId>/` folder,
+   * so serveGiftImage can enforce tenant from the path.
    *
    * DELIBERATELY NOT assertOperator: this one endpoint serves BOTH the GIFSY-only
    * master editor (/admin/gift-catalogue) AND the per-tenant reward editor (/admin/gifts),
    * whose reward-catalog CRUD admits CLIENT_ADMIN. The controller
-   * @Roles('GIFSY_ADMIN','CLIENT_ADMIN') gate is the boundary; this method only validates
-   * bytes and returns a URL — it reads/writes no tenant data, so admitting a tenant admin
-   * leaks nothing. The URL is persisted via the EXISTING gift-master / reward-catalog
-   * create/update endpoints (imageUrls already supported), not here.
+   * @Roles('GIFSY_ADMIN','CLIENT_ADMIN') gate is the boundary.
    */
-  async uploadGiftImage(file: Express.Multer.File): Promise<{ url: string }> {
+  async uploadGiftImage(user: JwtPayload, file: Express.Multer.File): Promise<{ url: string }> {
     if (!file) throw new BadRequestException('No file uploaded');
     if (!file.buffer?.length) throw new BadRequestException('Empty file');
 
     const MAX_BYTES = 5 * 1024 * 1024; // 5 MB — matches branding + visibility uploads
     if (file.size > MAX_BYTES) throw new BadRequestException('File too large (max 5 MB)');
 
-    // Untrusted client mimetype: derive the REAL type from the bytes and require an
-    // image (rejects PDF, and any SVG/HTML/script payload labelled image/*).
+    // Untrusted client mimetype: derive the REAL type from the bytes and require a
+    // BROWSER-RENDERABLE image. sniffFileType also recognises TIFF/BMP/HEIC (which no
+    // mainstream <img> renders → a stored-but-broken thumbnail), so restrict to the
+    // exact four the FE offers rather than any image/*. Also rejects PDF/SVG/HTML.
     const sniffed = sniffFileType(file.buffer);
-    if (!sniffed || !sniffed.mime.startsWith('image/')) {
+    if (!sniffed || !GiftCatalogueService.RENDERABLE_MIME.has(sniffed.mime)) {
       throw new BadRequestException(
         'Unsupported or corrupt file. Upload a PNG, JPG, WEBP, or GIF image.',
       );
     }
 
+    const scope = platformWide(user) ? '_platform' : user.clientId;
     const key = this.storage.generateKey(
-      'gift-catalogue',
+      `${GiftCatalogueService.GIFT_IMAGE_PREFIX}${scope}`,
       file.originalname || `gift.${sniffed.ext}`,
     );
-    const url = await this.storage.uploadFile(file.buffer, key, sniffed.mime);
-    return { url };
+    await this.storage.uploadFile(file.buffer, key, sniffed.mime);
+    // Same-origin proxy path the /api proxy forwards to GET /v1/gift-images.
+    return { url: `/api/gift-images?key=${encodeURIComponent(key)}` };
+  }
+
+  /**
+   * Stream a private gift image to the browser (the GET /v1/gift-images render path).
+   * Readable by ANY authenticated portal user (members browse the catalogue) — the
+   * route carries no @Roles — but tenant-fenced HERE by the key's folder: `_platform/`
+   * images are portal-wide; a `<clientId>/` image is served only to that tenant (or an
+   * un-assumed GIFSY operator). Refuses any key outside the gift-catalogue prefix, so it
+   * can never be turned into an arbitrary-object reader against the shared private bucket.
+   */
+  async serveGiftImage(
+    user: JwtPayload,
+    key: string,
+  ): Promise<{ bytes: Buffer; contentType: string; cachePublic: boolean }> {
+    const deny = () => new NotFoundException();
+    // Defense-in-depth: the tenant fence below trusts the key's folder segments, so
+    // reject anything that isn't a clean gift-catalogue path BEFORE any storage read —
+    // no traversal (`..`), no backslashes, no absolute/double-slash segments, safe
+    // charset only. (Traversal is already inert because GCS object names are literal,
+    // not a filesystem path — this makes the KYC/POSM-isolation invariant explicit
+    // rather than dependent on that storage internal.)
+    if (
+      !key ||
+      typeof key !== 'string' ||
+      !key.startsWith(GiftCatalogueService.GIFT_IMAGE_PREFIX) ||
+      key.includes('..') ||
+      key.includes('\\') ||
+      key.includes('//') ||
+      !/^[A-Za-z0-9/_.-]+$/.test(key)
+    ) {
+      throw deny();
+    }
+    const segments = key.split('/');
+    const scope = segments[1]; // '_platform' | '<clientId>'
+    if (!scope || segments.length < 4) throw deny();
+    if (scope !== '_platform' && !platformWide(user) && scope !== user.clientId) throw deny();
+
+    // Cap the read at the upload cap (5 MB) rather than downloadBytes' 24 MB default —
+    // this is the member hot path, so never buffer a larger object into API memory.
+    const file = await this.storage.downloadBytes(key, 5 * 1024 * 1024);
+    if (!file) throw deny();
+
+    // Only ever stream a known image type inline (never trust the stored content-type
+    // into an inline response beyond the renderable set).
+    const mime = (file.contentType || '').toLowerCase();
+    if (!GiftCatalogueService.RENDERABLE_MIME.has(mime)) throw deny();
+    // _platform (master) images are portal-wide → safe to cache in the viewer's browser.
+    // A per-tenant `<clientId>/` image must NOT be cached, so a shared browser can't
+    // serve tenant A's cached image to tenant B without the server-side fence re-running.
+    return { bytes: file.bytes, contentType: mime, cachePublic: scope === '_platform' };
   }
 
   // ── Wire mappers (list → { items }; detail → FLAT) ──────────────────────────
