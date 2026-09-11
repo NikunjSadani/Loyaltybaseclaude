@@ -61,6 +61,54 @@ describe('MasterEditor (create)', () => {
     expect(url).toBe('/api/admin/gift-masters');
     expect(body).toMatchObject({
       name: 'JBL Speaker', code: 'GM-JBL', categoryId: 'c1', mrpPaise: 249900,
+      amountType: 'FIXED', minAmountPaise: null, maxAmountPaise: null,
+    });
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  });
+});
+
+describe('MasterEditor — FIXED vs FLEXIBLE (free-amount)', () => {
+  it('hides the amount-type toggle for a physical (FIXED-only) mode; shows it for gift card', () => {
+    render(<MasterEditor masterId={null} categories={CATEGORIES} onClose={() => {}} onSaved={() => {}} />);
+    // Default mode is PHYSICAL_GIFT → no toggle.
+    expect(screen.queryByTestId('amount-type-section')).toBeNull();
+    // Switch to GIFT_CARD → the toggle appears.
+    fireEvent.change(screen.getByTestId('field-redemption-mode'), { target: { value: 'GIFT_CARD' } });
+    expect(screen.getByTestId('amount-type-section')).toBeTruthy();
+  });
+
+  it('blocks save when flexible is chosen but the max ₹ is blank', async () => {
+    render(<MasterEditor masterId={null} categories={CATEGORIES} onClose={() => {}} onSaved={() => {}} />);
+    fireEvent.change(screen.getByTestId('field-name'), { target: { value: 'Amazon' } });
+    fireEvent.change(screen.getByTestId('field-code'), { target: { value: 'GM-AMZ' } });
+    fireEvent.change(screen.getByTestId('field-category'), { target: { value: 'c1' } });
+    fireEvent.change(screen.getByTestId('field-redemption-mode'), { target: { value: 'GIFT_CARD' } });
+    fireEvent.click(screen.getByTestId('amount-type-flex'));
+    fireEvent.change(screen.getByTestId('field-min-amount'), { target: { value: '100' } });
+    // max left blank
+    fireEvent.click(screen.getByTestId('save-master-btn'));
+
+    await screen.findByTestId('master-errors');
+    expect(screen.getByTestId('master-errors').textContent).toMatch(/Maximum amount/);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('POSTs a FREE_AMOUNT master with the ₹ band (rupees→paise)', async () => {
+    const onSaved = vi.fn();
+    render(<MasterEditor masterId={null} categories={CATEGORIES} onClose={() => {}} onSaved={onSaved} />);
+    fireEvent.change(screen.getByTestId('field-name'), { target: { value: 'Amazon' } });
+    fireEvent.change(screen.getByTestId('field-code'), { target: { value: 'GM-AMZ' } });
+    fireEvent.change(screen.getByTestId('field-category'), { target: { value: 'c1' } });
+    fireEvent.change(screen.getByTestId('field-redemption-mode'), { target: { value: 'GIFT_CARD' } });
+    fireEvent.click(screen.getByTestId('amount-type-flex'));
+    fireEvent.change(screen.getByTestId('field-min-amount'), { target: { value: '100' } });
+    fireEvent.change(screen.getByTestId('field-max-amount'), { target: { value: '5000' } });
+    fireEvent.click(screen.getByTestId('save-master-btn'));
+
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
+    const [, body] = post.mock.calls[0];
+    expect(body).toMatchObject({
+      amountType: 'FREE_AMOUNT', minAmountPaise: 10000, maxAmountPaise: 500000,
     });
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
   });

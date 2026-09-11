@@ -367,6 +367,187 @@ describe('GiftCatalogueService', () => {
     });
   });
 
+  describe('amount type — master create/update validation (money path)', () => {
+    const baseDto = {
+      categoryId: 'gc1',
+      code: 'GM-AMZ',
+      name: 'Amazon Voucher',
+      redemptionMode: 'GIFT_CARD',
+    };
+
+    beforeEach(() => {
+      mockPrisma.giftCategory.findFirst.mockResolvedValue({ id: 'gc1' });
+      mockPrisma.giftMaster.findFirst.mockResolvedValue(null); // no code clash
+      mockPrisma.giftMaster.create.mockImplementation(async ({ data }: never) => ({
+        id: 'gm-1',
+        ...(data as object),
+        category: { name: 'Vouchers' },
+      }));
+    });
+
+    it('FREE_AMOUNT (eligible mode + complete band) persists amountType + ₹ band', async () => {
+      await service.createMaster(gifsy, {
+        ...baseDto,
+        amountType: 'FREE_AMOUNT',
+        minAmountPaise: 10000, // ₹100
+        maxAmountPaise: 500000, // ₹5000
+      } as never);
+
+      const data = mockPrisma.giftMaster.create.mock.calls[0][0].data;
+      expect(data).toMatchObject({
+        amountType: 'FREE_AMOUNT',
+        minAmountPaise: 10000,
+        maxAmountPaise: 500000,
+      });
+    });
+
+    it('FREE_AMOUNT rejects a half-configured band (min set, max null)', async () => {
+      await expect(
+        service.createMaster(gifsy, {
+          ...baseDto,
+          amountType: 'FREE_AMOUNT',
+          minAmountPaise: 10000,
+        } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('FREE_AMOUNT rejects an ineligible (physical) mode', async () => {
+      await expect(
+        service.createMaster(gifsy, {
+          ...baseDto,
+          redemptionMode: 'PHYSICAL_GIFT',
+          amountType: 'FREE_AMOUNT',
+          minAmountPaise: 10000,
+          maxAmountPaise: 500000,
+        } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('FREE_AMOUNT rejects min > max', async () => {
+      await expect(
+        service.createMaster(gifsy, {
+          ...baseDto,
+          amountType: 'FREE_AMOUNT',
+          minAmountPaise: 500000,
+          maxAmountPaise: 10000,
+        } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('FIXED (default) clears the band even if amounts were sent', async () => {
+      await service.createMaster(gifsy, {
+        ...baseDto,
+        minAmountPaise: 10000,
+        maxAmountPaise: 500000,
+      } as never);
+
+      const data = mockPrisma.giftMaster.create.mock.calls[0][0].data;
+      expect(data.amountType).toBe('FIXED');
+      expect(data.minAmountPaise).toBeNull();
+      expect(data.maxAmountPaise).toBeNull();
+    });
+
+    it('update to FREE_AMOUNT with only a min (existing max null) is rejected (effective-band guard)', async () => {
+      mockPrisma.giftMaster.findFirst.mockResolvedValue({
+        id: 'gm-1',
+        code: 'GM-AMZ',
+        categoryId: 'gc1',
+        redemptionMode: 'GIFT_CARD',
+        amountType: 'FIXED',
+        minAmountPaise: null,
+        maxAmountPaise: null,
+      });
+      await expect(
+        service.updateMaster(gifsy, 'gm-1', {
+          amountType: 'FREE_AMOUNT',
+          minAmountPaise: 10000, // max still null on the row → incomplete
+        } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('update FREE_AMOUNT → FIXED forces the band null on the master row', async () => {
+      mockPrisma.giftMaster.findFirst.mockResolvedValue({
+        id: 'gm-1',
+        code: 'GM-AMZ',
+        categoryId: 'gc1',
+        redemptionMode: 'GIFT_CARD',
+        amountType: 'FREE_AMOUNT',
+        minAmountPaise: 10000,
+        maxAmountPaise: 500000,
+      });
+      mockPrisma.giftMaster.update.mockResolvedValue({ id: 'gm-1', category: { name: 'Vouchers' } });
+      mockPrisma.rewardCatalog.updateMany.mockResolvedValue({ count: 0 });
+
+      await service.updateMaster(gifsy, 'gm-1', { amountType: 'FIXED' } as never);
+
+      const data = mockPrisma.giftMaster.update.mock.calls[0][0].data;
+      expect(data.amountType).toBe('FIXED');
+      expect(data.minAmountPaise).toBeNull();
+      expect(data.maxAmountPaise).toBeNull();
+    });
+  });
+
+  describe('publish — FREE_AMOUNT master → free-amount tenant row (₹ band × rate)', () => {
+    const freeMaster = {
+      id: 'm1', status: 'ACTIVE', categoryId: 'gc1', code: 'GM-AMZ', name: 'Amazon Voucher',
+      description: 'd', imageUrls: [], mrpPaise: null, redemptionMode: 'GIFT_CARD',
+      amountType: 'FREE_AMOUNT', minAmountPaise: 10000 /* ₹100 */, maxAmountPaise: 500000 /* ₹5000 */,
+      termsAndConditions: 't', stockQuantity: null,
+      category: { code: 'VCH', name: 'Vouchers', imageUrl: null, sortOrder: 0 },
+    };
+
+    it('first publish → pointsCost 0 + points band = round(₹ × rate); sellingValue not required', async () => {
+      rate = 2;
+      mockPrisma.giftMaster.findFirst.mockResolvedValue(freeMaster);
+      mockPrisma.rewardCategory.findFirst.mockResolvedValue({ id: 'rc-cat-1' });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null); // no existing row, no code clash
+      mockPrisma.rewardCatalog.create.mockImplementation(async ({ data }: never) => ({ id: 'rcat-1', ...(data as object) }));
+
+      const res = await service.publish(gifsy, 'm1', {
+        publications: [{ clientId: 'deoleo' }], // no sellingValuePaise → OK for free-amount
+      });
+
+      const data = mockPrisma.rewardCatalog.create.mock.calls[0][0].data;
+      expect(data).toMatchObject({
+        pointsCost: 0,
+        minRedemptionPoints: 200, // ₹100 × 2
+        maxRedemptionPoints: 10000, // ₹5000 × 2
+      });
+      expect(res.published).toBe(1);
+      expect(res.failed).toBe(0);
+    });
+
+    it('re-publish syncs the points band + keeps pointsCost 0', async () => {
+      rate = 3;
+      mockPrisma.giftMaster.findFirst.mockResolvedValue(freeMaster);
+      mockPrisma.rewardCategory.findFirst.mockResolvedValue({ id: 'rc-cat-1' });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({ id: 'rcat-1', status: 'ACTIVE', sellingValuePaise: null, pointsCost: 0 });
+      mockPrisma.rewardCatalog.update.mockResolvedValue({ id: 'rcat-1' });
+
+      await service.publish(gifsy, 'm1', { publications: [{ clientId: 'deoleo' }] });
+
+      const data = mockPrisma.rewardCatalog.update.mock.calls[0][0].data;
+      expect(data).toMatchObject({
+        pointsCost: 0,
+        minRedemptionPoints: 300, // ₹100 × 3
+        maxRedemptionPoints: 15000, // ₹5000 × 3
+      });
+    });
+
+    it('fails cleanly (no broken row) when the tenant rate is 0 (band resolves to 0 points)', async () => {
+      rate = 0;
+      mockPrisma.giftMaster.findFirst.mockResolvedValue(freeMaster);
+      mockPrisma.rewardCategory.findFirst.mockResolvedValue({ id: 'rc-cat-1' });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null);
+
+      const res = await service.publish(gifsy, 'm1', { publications: [{ clientId: 'deoleo' }] });
+
+      expect(res.failed).toBe(1);
+      expect(res.results[0].error).toMatch(/rounds to 0 points|conversion rate/i);
+      expect(mockPrisma.rewardCatalog.create).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getPublishMatrix excludes the Gifsy operator tenant', () => {
     it('never lists clientId "gifsy" as a candidate publish target', async () => {
       mockPrisma.giftMaster.findFirst.mockResolvedValue({ id: 'm1' });

@@ -31,6 +31,17 @@ export type GiftFulfilmentChannel =
 
 export type GiftMasterStatus = 'ACTIVE' | 'ARCHIVED';
 
+/** FIXED (face-value / physical) vs FREE_AMOUNT (variable ₹) — mirrors the per-tenant
+ *  /admin/gifts VoucherMode. FREE_AMOUNT is only offered for free-amount-eligible modes. */
+export type GiftAmountType = 'FIXED' | 'FREE_AMOUNT';
+
+/** Redemption modes that support a FREE_AMOUNT (variable ₹) band. Mirrors the per-tenant
+ *  /admin/gifts `supportsFreeAmount`: gift cards + cash payouts (UPI / BANK_TRANSFER).
+ *  Physical gifts are FIXED-only. Kept in sync with the BE service guard. */
+export function supportsFreeAmount(mode: GiftRedemptionMode): boolean {
+  return mode === 'GIFT_CARD' || mode === 'UPI' || mode === 'BANK_TRANSFER';
+}
+
 /** Moderation state of a per-tenant catalogue row (§3 RewardCatalog extension). */
 export type GiftModerationStatus = 'DRAFT' | 'PENDING' | 'APPROVED' | 'REJECTED';
 
@@ -66,6 +77,11 @@ export interface GiftMasterSummary {
   categoryName?: string | null;
   mrpPaise: number;
   redemptionMode: GiftRedemptionMode;
+  /** FIXED (face-value) vs FREE_AMOUNT (variable ₹ band). Defaults FIXED. */
+  amountType?: GiftAmountType;
+  /** ₹ band in paise; present only for a FREE_AMOUNT master. */
+  minAmountPaise?: number | null;
+  maxAmountPaise?: number | null;
   /** The DEFAULT fulfilment channel (§3 `fulfilmentSource`). */
   fulfilmentChannel: GiftFulfilmentChannel;
   status: GiftMasterStatus;
@@ -92,6 +108,11 @@ export interface GiftMasterFormState {
   /** ₹ rupees as typed (converted to mrpPaise before submit). */
   mrpRupees: string;
   redemptionMode: GiftRedemptionMode;
+  /** FIXED vs FLEXIBLE (free-amount). Only offered for free-amount-eligible modes. */
+  amountType: GiftAmountType;
+  /** ₹ band (rupee strings) — used only when the effective amount type is FREE_AMOUNT. */
+  minAmountRupees: string;
+  maxAmountRupees: string;
   fulfilmentChannel: GiftFulfilmentChannel;
   termsAndConditions: string;
   /** blank = unlimited; a number string otherwise. */
@@ -108,12 +129,22 @@ export const EMPTY_MASTER_FORM: GiftMasterFormState = {
   categoryId: '',
   mrpRupees: '',
   redemptionMode: 'PHYSICAL_GIFT',
+  amountType: 'FIXED',
+  minAmountRupees: '',
+  maxAmountRupees: '',
   fulfilmentChannel: 'GIFSY_WAREHOUSE',
   termsAndConditions: '',
   stockQuantity: '',
   imageUrls: '',
   status: 'ACTIVE',
 };
+
+/** The EFFECTIVE free-amount state: FREE_AMOUNT chosen AND the mode still supports it.
+ *  (If the operator picks FREE_AMOUNT then switches to a physical mode, the master is
+ *  effectively FIXED — the toggle hides and this returns false.) */
+export function isEffectiveFreeAmount(form: GiftMasterFormState): boolean {
+  return form.amountType === 'FREE_AMOUNT' && supportsFreeAmount(form.redemptionMode);
+}
 
 /** GET /api/admin/gift-categories → { items: GiftCategory[] } (flat list; tree built client-side). */
 export interface GiftCategory {
@@ -223,9 +254,24 @@ export function validateGiftMasterForm(form: GiftMasterFormState): string[] {
   if (!form.code.trim()) errors.push('Code is required.');
   if (!form.categoryId.trim()) errors.push('Category is required.');
 
-  const mrp = parseRupeesToPaise(form.mrpRupees);
-  if (mrp == null) errors.push('MRP must be a valid amount in ₹.');
-  else if (mrp <= 0) errors.push('MRP must be greater than ₹0.');
+  const free = isEffectiveFreeAmount(form);
+
+  // MRP is the fixed face value — required for a FIXED gift; not meaningful for a
+  // FREE_AMOUNT one (the member picks the amount within the ₹ band below).
+  if (!free) {
+    const mrp = parseRupeesToPaise(form.mrpRupees);
+    if (mrp == null) errors.push('MRP must be a valid amount in ₹.');
+    else if (mrp <= 0) errors.push('MRP must be greater than ₹0.');
+  }
+
+  // FREE_AMOUNT: BOTH ₹ bounds required, each > 0, min <= max (mirrors the BE guard).
+  if (free) {
+    const min = parseRupeesToPaise(form.minAmountRupees);
+    const max = parseRupeesToPaise(form.maxAmountRupees);
+    if (min == null || min <= 0) errors.push('Minimum amount (₹) is required and must be greater than ₹0.');
+    if (max == null || max <= 0) errors.push('Maximum amount (₹) is required and must be greater than ₹0.');
+    if (min != null && max != null && min > max) errors.push('Minimum amount must be ≤ maximum amount.');
+  }
 
   if (form.stockQuantity.trim() !== '') {
     const q = Number(form.stockQuantity.trim());
@@ -243,6 +289,7 @@ export function validateGiftMasterForm(form: GiftMasterFormState): string[] {
 
 /** Build the JSON body for create/update from the validated form. */
 export function giftMasterFormToPayload(form: GiftMasterFormState): Record<string, unknown> {
+  const free = isEffectiveFreeAmount(form);
   return {
     code: form.code.trim(),
     name: form.name.trim(),
@@ -250,6 +297,11 @@ export function giftMasterFormToPayload(form: GiftMasterFormState): Record<strin
     categoryId: form.categoryId.trim(),
     mrpPaise: parseRupeesToPaise(form.mrpRupees),
     redemptionMode: form.redemptionMode,
+    // Coerce to the EFFECTIVE type so a FREE_AMOUNT choice left over from an eligible
+    // mode can't be sent for a physical (FIXED-only) gift. FIXED clears the band.
+    amountType: free ? 'FREE_AMOUNT' : 'FIXED',
+    minAmountPaise: free ? parseRupeesToPaise(form.minAmountRupees) : null,
+    maxAmountPaise: free ? parseRupeesToPaise(form.maxAmountRupees) : null,
     fulfilmentChannel: form.fulfilmentChannel,
     termsAndConditions: form.termsAndConditions.trim(),
     stockQuantity: form.stockQuantity.trim() === '' ? null : Number(form.stockQuantity.trim()),
@@ -267,6 +319,9 @@ export function giftMasterDetailToForm(d: GiftMasterDetail): GiftMasterFormState
     categoryId: d.categoryId ?? '',
     mrpRupees: d.mrpPaise != null ? String(paiseToRupees(d.mrpPaise)) : '',
     redemptionMode: d.redemptionMode ?? 'PHYSICAL_GIFT',
+    amountType: d.amountType ?? 'FIXED',
+    minAmountRupees: d.minAmountPaise != null ? String(paiseToRupees(d.minAmountPaise)) : '',
+    maxAmountRupees: d.maxAmountPaise != null ? String(paiseToRupees(d.maxAmountPaise)) : '',
     fulfilmentChannel: d.fulfilmentChannel ?? 'GIFSY_WAREHOUSE',
     termsAndConditions: d.termsAndConditions ?? '',
     stockQuantity: d.stockQuantity == null ? '' : String(d.stockQuantity),

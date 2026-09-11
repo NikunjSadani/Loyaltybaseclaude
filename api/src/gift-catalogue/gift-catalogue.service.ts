@@ -6,7 +6,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { GiftAmountType, PayoutMode, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { StorageService } from '../storage/storage.service';
@@ -171,6 +171,9 @@ export class GiftCatalogueService {
     categoryId: string;
     mrpPaise: number | null;
     redemptionMode: unknown;
+    amountType?: unknown;
+    minAmountPaise?: number | null;
+    maxAmountPaise?: number | null;
     defaultFulfilmentChannel: unknown;
     status: unknown;
     stockQuantity: number | null;
@@ -187,6 +190,9 @@ export class GiftCatalogueService {
       categoryName: m.category?.name ?? null,
       mrpPaise: m.mrpPaise,
       redemptionMode: m.redemptionMode,
+      amountType: m.amountType ?? 'FIXED',
+      minAmountPaise: m.minAmountPaise ?? null,
+      maxAmountPaise: m.maxAmountPaise ?? null,
       fulfilmentChannel: m.defaultFulfilmentChannel,
       status: m.status,
       stockQuantity: m.stockQuantity,
@@ -204,6 +210,9 @@ export class GiftCatalogueService {
     categoryId: string;
     mrpPaise: number | null;
     redemptionMode: unknown;
+    amountType?: unknown;
+    minAmountPaise?: number | null;
+    maxAmountPaise?: number | null;
     defaultFulfilmentChannel: unknown;
     status: unknown;
     stockQuantity: number | null;
@@ -321,6 +330,12 @@ export class GiftCatalogueService {
     });
     if (clash) throw new ConflictException('A gift master with this code already exists');
 
+    // Amount-type: default FIXED; FREE_AMOUNT is validated for an eligible mode + a
+    // complete 0 < min <= max ₹ band. FIXED clears the band (null).
+    const amountType = dto.amountType ?? GiftAmountType.FIXED;
+    this.assertAmountBand(amountType, dto.redemptionMode, dto.minAmountPaise, dto.maxAmountPaise);
+    const isFree = amountType === GiftAmountType.FREE_AMOUNT;
+
     const master = await this.prisma.giftMaster.create({
       data: {
         categoryId: dto.categoryId,
@@ -330,6 +345,9 @@ export class GiftCatalogueService {
         imageUrls: (dto.imageUrls ?? undefined) as Prisma.InputJsonValue | undefined,
         mrpPaise: dto.mrpPaise,
         redemptionMode: dto.redemptionMode,
+        amountType,
+        minAmountPaise: isFree ? dto.minAmountPaise : null,
+        maxAmountPaise: isFree ? dto.maxAmountPaise : null,
         defaultFulfilmentChannel: dto.fulfilmentChannel,
         termsAndConditions: dto.termsAndConditions,
         stockQuantity: dto.stockQuantity,
@@ -403,6 +421,15 @@ export class GiftCatalogueService {
       if (clash) throw new ConflictException('A gift master with this code already exists');
     }
 
+    // Validate the EFFECTIVE amount-type/mode/band (undefined in the DTO = keep existing).
+    // A partial PATCH must never leave the master in a half-configured FREE_AMOUNT state.
+    const effAmountType = dto.amountType !== undefined ? dto.amountType : existing.amountType;
+    const effMode = dto.redemptionMode !== undefined ? dto.redemptionMode : existing.redemptionMode;
+    const effMin = dto.minAmountPaise !== undefined ? dto.minAmountPaise : existing.minAmountPaise;
+    const effMax = dto.maxAmountPaise !== undefined ? dto.maxAmountPaise : existing.maxAmountPaise;
+    this.assertAmountBand(effAmountType, effMode, effMin, effMax);
+    const effIsFree = effAmountType === GiftAmountType.FREE_AMOUNT;
+
     const master = await this.prisma.giftMaster.update({
       where: { id },
       data: {
@@ -413,6 +440,12 @@ export class GiftCatalogueService {
         imageUrls: (dto.imageUrls ?? undefined) as Prisma.InputJsonValue | undefined,
         mrpPaise: dto.mrpPaise,
         redemptionMode: dto.redemptionMode,
+        amountType: dto.amountType,
+        // Band is meaningful ONLY for a FREE_AMOUNT master. For a FIXED (or FREE→FIXED)
+        // master force the band null so a direct-API PATCH can't leave a stale [min,max];
+        // for a FREE master, undefined = keep existing (already validated as complete).
+        minAmountPaise: effIsFree ? dto.minAmountPaise : null,
+        maxAmountPaise: effIsFree ? dto.maxAmountPaise : null,
         defaultFulfilmentChannel: dto.fulfilmentChannel,
         termsAndConditions: dto.termsAndConditions,
         stockQuantity: dto.stockQuantity,
@@ -432,6 +465,17 @@ export class GiftCatalogueService {
     if (dto.redemptionMode !== undefined) contentPatch.redemptionMode = dto.redemptionMode;
     if (dto.termsAndConditions !== undefined) {
       contentPatch.termsAndConditions = dto.termsAndConditions;
+    }
+    // If the master is no longer a valid free-amount item (FREE→FIXED, or mode → an
+    // ineligible one), CLEAR the band on published rows in the same content push — otherwise
+    // a content edit could leave a tenant row stuck free-amount (pointsCost 0 + [min,max])
+    // possibly on an ineligible mode, redeemable as a variable-amount voucher without a
+    // re-publish (money audit A2). Price is NOT touched (re-publish is the price editor); such
+    // a row is safely un-redeemable (0-cost) until re-published with a fixed price. Setting
+    // these also makes contentPatch non-empty so an amountType-only edit still reconciles rows.
+    if (!effIsFree || !this.supportsFreeAmount(effMode)) {
+      contentPatch.minRedemptionPoints = null;
+      contentPatch.maxRedemptionPoints = null;
     }
     if (Object.keys(contentPatch).length > 0) {
       await this.prisma.rewardCatalog.updateMany({
@@ -577,14 +621,46 @@ export class GiftCatalogueService {
           where: { clientId: target.clientId, giftMasterId: masterId, deletedAt: null },
         });
 
-        // Resolve the price to apply. On CREATE sellingValuePaise is required; on
-        // re-publish an omitted price keeps the stored one.
+        // Resolve the price to apply. On CREATE sellingValuePaise is required (FIXED only);
+        // on re-publish an omitted price keeps the stored one.
         const rate = await this.tenantSettings.getConversionRate(target.clientId);
+        const isFree = master.amountType === 'FREE_AMOUNT';
         const sellingValuePaise = target.sellingValuePaise ?? existing?.sellingValuePaise ?? null;
-        if (sellingValuePaise == null) {
+        // A FIXED gift needs a ₹ selling value to derive pointsCost; a FREE_AMOUNT gift has
+        // no single ₹ value (the member picks the amount at redeem), so it is not required.
+        if (!isFree && sellingValuePaise == null) {
           throw new BadRequestException(
             'sellingValuePaise is required to publish this gift to a tenant for the first time',
           );
+        }
+        // A FREE_AMOUNT row must NEVER carry a sellingValuePaise: the confirm-time value +
+        // the 194R/disbursal basis fall back to points÷rate (= the amount the member chose).
+        // Forcing null here prevents a FIXED→FREE re-publish from leaving the OLD fixed price
+        // stamped on the row, which would freeze the tax basis at the wrong value (money audit #1).
+        const rowSellingValuePaise = isFree ? null : sellingValuePaise;
+
+        // FREE_AMOUNT: convert the master ₹ band → per-tenant points band using the SAME
+        // conversion rate + rounding as derivePointsCost (points = round(₹ × rate)). Guard
+        // both the master band (must be complete) and the result (never write a free-amount
+        // row with a null/0 max — an un-redeemable voucher).
+        let freeBand: { minRedemptionPoints: number; maxRedemptionPoints: number } | null = null;
+        if (isFree) {
+          // Defense-in-depth: re-assert the master band invariant at publish (eligible mode +
+          // both bounds + 0<min<=max), not just trusting the master write (money audit A3).
+          this.assertAmountBand(
+            master.amountType,
+            master.redemptionMode,
+            master.minAmountPaise ?? null,
+            master.maxAmountPaise ?? null,
+          );
+          const minRedemptionPoints = this.derivePointsCost(master.minAmountPaise as number, rate);
+          const maxRedemptionPoints = this.derivePointsCost(master.maxAmountPaise as number, rate);
+          if (minRedemptionPoints < 1 || maxRedemptionPoints < 1) {
+            throw new BadRequestException(
+              `Cannot publish "${master.code}" to ${target.clientId}: the ₹ band is too small for this tenant's conversion rate (it rounds to 0 points). Widen the band or set the tenant's conversion rate.`,
+            );
+          }
+          freeBand = { minRedemptionPoints, maxRedemptionPoints };
         }
 
         if (existing) {
@@ -595,7 +671,24 @@ export class GiftCatalogueService {
           // silently re-derive from the CURRENT rate, which would shift the member price
           // on any rate drift since first publish. Derivation happens only on first
           // create (below).
-          const pointsCost = target.pointsCost ?? existing.pointsCost;
+          // FREE_AMOUNT rows are pointsCost 0 + a points band (synced from the master ₹
+          // band on every re-publish). FIXED rows preserve the stored pointsCost when
+          // omitted (audit fix #3 — no silent re-price on rate drift).
+          // FIXED re-publish: apply an explicit price, else keep the stored pointsCost —
+          // BUT if the stored one is the poison 0 (the row was previously FREE_AMOUNT),
+          // derive from the selling value so a FREE→FIXED switch can't leave an
+          // un-redeemable 0-cost fixed row (money audit #2).
+          const pointsCost = isFree
+            ? 0
+            : target.pointsCost ??
+              (existing.pointsCost > 0
+                ? existing.pointsCost
+                : this.derivePointsCost(sellingValuePaise as number, rate));
+          if (!isFree && pointsCost < 1) {
+            throw new BadRequestException(
+              `Cannot publish "${master.code}" to ${target.clientId} as a fixed-price gift: its points cost resolves to 0 (set a selling value, or the tenant conversion rate is not configured).`,
+            );
+          }
           // status: do NOT force ACTIVE unconditionally — that would un-hide a deliberately
           // paused / OUT_OF_STOCK row. Re-activate ONLY a previously-unpublished
           // (DISCONTINUED) row, which is exactly the intent of re-publishing an unpublished
@@ -613,8 +706,12 @@ export class GiftCatalogueService {
               mrpPaise: master.mrpPaise,
               redemptionMode: master.redemptionMode,
               termsAndConditions: master.termsAndConditions,
-              sellingValuePaise,
+              sellingValuePaise: rowSellingValuePaise,
               pointsCost,
+              // Sync the free-amount band; force null for FIXED so a FREE→FIXED master
+              // re-publish can't leave a stale [min,max] that keeps the row free-amount.
+              minRedemptionPoints: isFree ? freeBand!.minRedemptionPoints : null,
+              maxRedemptionPoints: isFree ? freeBand!.maxRedemptionPoints : null,
               ...reactivate,
             },
           });
@@ -628,8 +725,16 @@ export class GiftCatalogueService {
           continue;
         }
 
-        // First create → derive pointsCost from the tenant rate when not explicitly supplied.
-        const pointsCost = target.pointsCost ?? this.derivePointsCost(sellingValuePaise, rate);
+        // First create → FREE_AMOUNT rows are pointsCost 0 + a points band; FIXED rows
+        // derive pointsCost from the tenant rate when not explicitly supplied.
+        const pointsCost = isFree
+          ? 0
+          : target.pointsCost ?? this.derivePointsCost(sellingValuePaise as number, rate);
+        if (!isFree && pointsCost < 1) {
+          throw new BadRequestException(
+            `Cannot publish "${master.code}" to ${target.clientId} as a fixed-price gift: its points cost resolves to 0 (set a selling value, or the tenant conversion rate is not configured).`,
+          );
+        }
 
         // Code uniqueness per tenant (non-deleted) — the reused member CRUD enforces
         // this app-side; keep parity so publish can't create a duplicate code.
@@ -655,7 +760,10 @@ export class GiftCatalogueService {
             description: master.description,
             imageUrls: (master.imageUrls ?? undefined) as Prisma.InputJsonValue | undefined,
             pointsCost,
-            sellingValuePaise,
+            sellingValuePaise: rowSellingValuePaise,
+            // FREE_AMOUNT: the points band the member redeems within; null for FIXED.
+            minRedemptionPoints: isFree ? freeBand!.minRedemptionPoints : null,
+            maxRedemptionPoints: isFree ? freeBand!.maxRedemptionPoints : null,
             mrpPaise: master.mrpPaise,
             redemptionMode: master.redemptionMode,
             termsAndConditions: master.termsAndConditions,
@@ -809,6 +917,52 @@ export class GiftCatalogueService {
   derivePointsCost(sellingValuePaise: number, rate: number): number {
     if (!rate || rate <= 0) return 0;
     return Math.round((sellingValuePaise / 100) * rate);
+  }
+
+  /**
+   * Redemption modes that support a FREE_AMOUNT (variable ₹) band. Mirrors the per-tenant
+   * /admin/gifts `supportsFreeAmount`: gift cards + cash payouts (UPI / BANK_TRANSFER).
+   * Physical gifts are FIXED-only.
+   */
+  private static readonly FREE_AMOUNT_MODES: ReadonlySet<PayoutMode> = new Set<PayoutMode>([
+    PayoutMode.GIFT_CARD,
+    PayoutMode.UPI,
+    PayoutMode.BANK_TRANSFER,
+  ]);
+
+  private supportsFreeAmount(mode: PayoutMode): boolean {
+    return GiftCatalogueService.FREE_AMOUNT_MODES.has(mode);
+  }
+
+  /**
+   * Money-path guard for the master ₹ band. FREE_AMOUNT is allowed ONLY for a free-amount
+   * -eligible mode, and it MUST carry a COMPLETE band with 0 < min <= max — this closes the
+   * half-configured bug (a min set but max null) that would publish an un-redeemable row.
+   * For FIXED, the band is ignored (cleared to null by the caller).
+   */
+  private assertAmountBand(
+    amountType: GiftAmountType,
+    redemptionMode: PayoutMode,
+    minAmountPaise: number | null | undefined,
+    maxAmountPaise: number | null | undefined,
+  ) {
+    if (amountType !== GiftAmountType.FREE_AMOUNT) return;
+    if (!this.supportsFreeAmount(redemptionMode)) {
+      throw new BadRequestException(
+        'A flexible (free-amount) gift is only available for Gift Card, UPI, or Bank Transfer redemption modes.',
+      );
+    }
+    if (minAmountPaise == null || maxAmountPaise == null) {
+      throw new BadRequestException(
+        'A flexible (free-amount) gift requires both a minimum and a maximum ₹ amount.',
+      );
+    }
+    if (!(minAmountPaise > 0)) {
+      throw new BadRequestException('The minimum ₹ amount must be greater than 0.');
+    }
+    if (minAmountPaise > maxAmountPaise) {
+      throw new BadRequestException('The minimum ₹ amount must be ≤ the maximum ₹ amount.');
+    }
   }
 
   /**

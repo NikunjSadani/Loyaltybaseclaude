@@ -3339,6 +3339,13 @@ model GiftMaster {
   imageUrls                Json?
   mrpPaise                 Int?
   redemptionMode           PayoutMode
+  // FIXED (face-value / physical) vs FREE_AMOUNT (variable ₹) — tenant-neutral at the
+  // master. On publish, a FREE_AMOUNT master becomes a per-tenant free-amount
+  // RewardCatalog row (pointsCost 0 + min/max points = ₹ band × conversion rate).
+  amountType               GiftAmountType         @default(FIXED)
+  // ₹ band in paise; MEANINGFUL only when amountType = FREE_AMOUNT (null for FIXED).
+  minAmountPaise           Int?
+  maxAmountPaise           Int?
   defaultFulfilmentChannel GiftFulfilmentChannel?
   termsAndConditions       String?
   status                   GiftMasterStatus       @default(ACTIVE)
@@ -3361,4 +3368,9 @@ model GiftMaster {
 enum GiftMasterStatus {
   ACTIVE
   ARCHIVED
+}
+
+enum GiftAmountType {
+  FIXED
+  FREE_AMOUNT
 }

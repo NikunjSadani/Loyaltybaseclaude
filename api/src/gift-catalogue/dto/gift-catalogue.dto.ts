@@ -7,11 +7,12 @@ import {
   IsOptional,
   IsString,
   IsUrl,
+  Max,
   Min,
   MinLength,
   ValidateNested,
 } from 'class-validator';
-import { GiftFulfilmentChannel, GiftMasterStatus, PayoutMode } from '@prisma/client';
+import { GiftAmountType, GiftFulfilmentChannel, GiftMasterStatus, PayoutMode } from '@prisma/client';
 
 /**
  * Gift Catalogue & Dispatch — Wave 1 PLATFORM catalogue DTOs.
@@ -117,6 +118,31 @@ export class CreateGiftMasterDto {
   @IsEnum(PayoutMode)
   redemptionMode!: PayoutMode;
 
+  /**
+   * FIXED (face-value / physical) vs FREE_AMOUNT (variable ₹). Defaults to FIXED in the
+   * service when omitted. FREE_AMOUNT is validated to be a free-amount-eligible mode with
+   * a complete ₹ band (see service `assertAmountBand`).
+   */
+  @IsOptional()
+  @IsEnum(GiftAmountType)
+  amountType?: GiftAmountType;
+
+  /** ₹ band lower bound in paise; REQUIRED (with maxAmountPaise) when amountType=FREE_AMOUNT. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(2_147_483_647)
+  minAmountPaise?: number;
+
+  /** ₹ band upper bound in paise; REQUIRED (with minAmountPaise) when amountType=FREE_AMOUNT. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(2_147_483_647)
+  maxAmountPaise?: number;
+
   /** The DEFAULT fulfilment channel a redemption order inherits (mapped to the
    *  `defaultFulfilmentChannel` column). FE field name = `fulfilmentChannel`. */
   @IsOptional()
@@ -173,6 +199,27 @@ export class UpdateGiftMasterDto {
   @IsOptional()
   @IsEnum(PayoutMode)
   redemptionMode?: PayoutMode;
+
+  /** FIXED vs FREE_AMOUNT. Validated against the EFFECTIVE mode/band in the service. */
+  @IsOptional()
+  @IsEnum(GiftAmountType)
+  amountType?: GiftAmountType;
+
+  /** ₹ band lower bound in paise (FREE_AMOUNT only; cleared to null for FIXED). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(2_147_483_647)
+  minAmountPaise?: number;
+
+  /** ₹ band upper bound in paise (FREE_AMOUNT only; cleared to null for FIXED). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(2_147_483_647)
+  maxAmountPaise?: number;
 
   /** FE field name = `fulfilmentChannel`; maps to the `defaultFulfilmentChannel` column. */
   @IsOptional()

@@ -27,6 +27,7 @@ import {
   type GiftRedemptionMode,
   type GiftFulfilmentChannel,
   type GiftMasterStatus,
+  type GiftAmountType,
   EMPTY_MASTER_FORM,
   REDEMPTION_MODE_OPTIONS,
   FULFILMENT_CHANNEL_OPTIONS,
@@ -34,6 +35,8 @@ import {
   giftMasterFormToPayload,
   giftMasterDetailToForm,
   parseImageUrls,
+  supportsFreeAmount,
+  isEffectiveFreeAmount,
 } from '@/lib/gift-catalogue';
 import { GiftImageUpload } from '@/components/GiftImageUpload';
 import { PublishDialog } from './publish-dialog';
@@ -411,6 +414,12 @@ export function MasterEditor({
   const set = <K extends keyof GiftMasterFormState>(key: K, value: GiftMasterFormState[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
 
+  // Amount type: the FIXED / FLEXIBLE toggle is offered ONLY for free-amount-eligible
+  // modes (gift card / UPI / bank transfer). `effFree` is the effective state used for
+  // MRP-vs-band field gating (matches the payload coercion + BE guard).
+  const canFreeAmount = supportsFreeAmount(form.redemptionMode);
+  const effFree = isEffectiveFreeAmount(form);
+
   // Live-validate once the user has attempted a save (so we don't shout on first open).
   useEffect(() => {
     if (touched) setErrors(validateGiftMasterForm(form));
@@ -500,7 +509,11 @@ export function MasterEditor({
                 )}
               </Field>
 
-              <Field label="MRP (₹)" required>
+              <Field
+                label="MRP (₹)"
+                required={!effFree}
+                hint={effFree ? 'Optional for a flexible gift — the ₹ band below sets the value.' : undefined}
+              >
                 <input
                   type="text" inputMode="decimal" value={form.mrpRupees} data-testid="field-mrp"
                   onChange={(e) => set('mrpRupees', e.target.value)} className={FIELD_CLS}
@@ -519,6 +532,65 @@ export function MasterEditor({
                   ))}
                 </select>
               </Field>
+
+              {/* Amount type — FIXED vs FLEXIBLE (free-amount). Shown ONLY for free-amount
+                  -eligible modes (gift card / UPI / bank transfer); physical gifts are
+                  always FIXED. Mirrors the per-tenant /admin/gifts voucher UX. */}
+              {canFreeAmount && (
+                <div className="sm:col-span-2 rounded-xl border border-amber-100 bg-amber-50 p-4 space-y-3" data-testid="amount-type-section">
+                  <p className="text-xs font-semibold text-amber-900" id="amount-type-label">Amount type</p>
+                  <div className="flex gap-3" role="radiogroup" aria-labelledby="amount-type-label">
+                    {(['FIXED', 'FREE_AMOUNT'] as GiftAmountType[]).map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        role="radio"
+                        aria-checked={form.amountType === t}
+                        data-testid={t === 'FIXED' ? 'amount-type-fixed' : 'amount-type-flex'}
+                        onClick={() => set('amountType', t)}
+                        className={`flex-1 py-2.5 rounded-xl text-sm font-medium border-2 transition-all ${
+                          form.amountType === t
+                            ? 'border-amber-500 bg-amber-500 text-white'
+                            : 'border-gray-200 bg-white text-gray-600 hover:border-amber-300'
+                        }`}
+                      >
+                        {t === 'FIXED' ? '🎯 Fixed amount' : '✏️ Flexible (free amount)'}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-gray-500">
+                    {effFree
+                      ? 'The member redeems any ₹ amount within the band below. On publish, each tenant’s points band = ₹ × that tenant’s conversion rate (pointsCost is 0).'
+                      : 'A single fixed face value, priced per tenant on publish.'}
+                  </p>
+                  {effFree && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                          Minimum amount (₹)<span className="text-[var(--brand-primary)]"> *</span>
+                        </label>
+                        <input
+                          type="text" inputMode="decimal" value={form.minAmountRupees}
+                          data-testid="field-min-amount"
+                          onChange={(e) => set('minAmountRupees', e.target.value)}
+                          className={FIELD_CLS} placeholder="e.g. 100"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                          Maximum amount (₹)<span className="text-[var(--brand-primary)]"> *</span>
+                        </label>
+                        <input
+                          type="text" inputMode="decimal" value={form.maxAmountRupees}
+                          data-testid="field-max-amount"
+                          onChange={(e) => set('maxAmountRupees', e.target.value)}
+                          className={FIELD_CLS} placeholder="e.g. 5000"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               <Field label="Default fulfilment channel" required>
                 <select

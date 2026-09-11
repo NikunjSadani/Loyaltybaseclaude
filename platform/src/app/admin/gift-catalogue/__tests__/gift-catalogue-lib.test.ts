@@ -90,6 +90,44 @@ describe('validateGiftMasterForm', () => {
     expect(bad.some((e) => /Image URL is not valid/.test(e))).toBe(true);
   });
 
+  it('FREE_AMOUNT (gift card): requires both ₹ bounds, min ≤ max, and drops the MRP requirement', () => {
+    const missingMax = validateGiftMasterForm({
+      ...EMPTY_MASTER_FORM,
+      name: 'Amazon', code: 'GM-AMZ', categoryId: 'c1',
+      redemptionMode: 'GIFT_CARD', amountType: 'FREE_AMOUNT',
+      minAmountRupees: '100', maxAmountRupees: '',
+    });
+    expect(missingMax.some((e) => /Maximum amount/.test(e))).toBe(true);
+    expect(missingMax.some((e) => /MRP/.test(e))).toBe(false); // MRP not required for free-amount
+
+    const inverted = validateGiftMasterForm({
+      ...EMPTY_MASTER_FORM,
+      name: 'Amazon', code: 'GM-AMZ', categoryId: 'c1',
+      redemptionMode: 'GIFT_CARD', amountType: 'FREE_AMOUNT',
+      minAmountRupees: '5000', maxAmountRupees: '100',
+    });
+    expect(inverted.some((e) => /Minimum amount must be ≤ maximum/.test(e))).toBe(true);
+
+    const ok = validateGiftMasterForm({
+      ...EMPTY_MASTER_FORM,
+      name: 'Amazon', code: 'GM-AMZ', categoryId: 'c1',
+      redemptionMode: 'GIFT_CARD', amountType: 'FREE_AMOUNT',
+      minAmountRupees: '100', maxAmountRupees: '5000',
+    });
+    expect(ok).toEqual([]);
+  });
+
+  it('FREE_AMOUNT chosen on a physical (ineligible) mode is treated as FIXED (MRP still required)', () => {
+    const payload = giftMasterFormToPayload({
+      ...EMPTY_MASTER_FORM,
+      name: 'TV', code: 'GM-TV', categoryId: 'c1', mrpRupees: '1000',
+      redemptionMode: 'PHYSICAL_GIFT', amountType: 'FREE_AMOUNT',
+      minAmountRupees: '100', maxAmountRupees: '5000',
+    });
+    // Coerced to FIXED because physical gifts don't support free-amount; band cleared.
+    expect(payload).toMatchObject({ amountType: 'FIXED', minAmountPaise: null, maxAmountPaise: null });
+  });
+
   it('serialises to the wire payload (rupees → paise, blank stock → null unlimited)', () => {
     const payload = giftMasterFormToPayload({
       ...EMPTY_MASTER_FORM,
