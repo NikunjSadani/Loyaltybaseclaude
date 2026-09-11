@@ -29,6 +29,18 @@ export class AdminSalesUsersController {
     return this.svc.getEmployeeOptions(user);
   }
 
+  /**
+   * Fetch ONE employee (AdminUser shape) by hierarchy employeeCode — powers the Hierarchy
+   * tab's edit pencil. Same `sales_org:manage_hierarchy` gate as the edit itself, so the
+   * open→edit round-trip needs only that one permission (no separate users:read), and it's
+   * an exact lookup (no search-pagination cap). Static path declared before `:id`.
+   */
+  @Get('by-code/:code')
+  @RequirePermission('sales_org:manage_hierarchy')
+  byCode(@CurrentUser() user: JwtPayload, @Param('code') code: string) {
+    return this.svc.getEmployeeByCode(user, code);
+  }
+
   @Patch(':id')
   @RequirePermission('sales_org:manage_hierarchy')
   update(

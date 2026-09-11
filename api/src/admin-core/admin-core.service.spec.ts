@@ -114,7 +114,36 @@ describe('AdminCoreService', () => {
       expect(where.clientId).toBe('deoleo');
       expect(where.role).toBe('SALES_SO');
       expect(where.status).toBe('ACTIVE');
-      expect(where.OR).toHaveLength(3);
+      // name / phone / email / salesUser.employeeCode
+      expect(where.OR).toHaveLength(4);
+    });
+
+    it('makes employees searchable by their hierarchy employeeCode', async () => {
+      // The Employee Hierarchy tab fetches the full user by employeeCode ("Pune101") to open
+      // the shared edit modal — so the search OR must include a SalesUser.employeeCode branch.
+      const emp = {
+        id: 'u9',
+        phone: '9800000009',
+        name: 'Asha Patel',
+        email: null,
+        role: 'SALES_SO',
+        status: 'ACTIVE',
+        salesUser: { id: 's9', employeeCode: 'Pune101', hierarchyLevelId: 'lvl1', reportingToId: null },
+      };
+      mockPrisma.user.findMany.mockResolvedValue([emp]);
+      mockPrisma.user.count.mockResolvedValue(1);
+
+      const res = await service.listUsers(clientAdmin, { search: 'Pune101' });
+
+      const where = mockPrisma.user.findMany.mock.calls[0][0].where;
+      expect(where.OR).toContainEqual({
+        salesUser: { employeeCode: { contains: 'Pune101', mode: 'insensitive' } },
+      });
+      // The employeeCode is projected so the frontend can match the fetched row exactly.
+      const select = mockPrisma.user.findMany.mock.calls[0][0].select;
+      expect(select.salesUser.select.employeeCode).toBe(true);
+      // And the matching employee is returned to the caller.
+      expect(res.users).toEqual([emp]);
     });
 
     it('P5-F2: a GIFSY_STAFF caller cannot enumerate operator accounts (excludes GIFSY_ADMIN/GIFSY_STAFF)', async () => {
@@ -124,6 +153,65 @@ describe('AdminCoreService', () => {
       const where = mockPrisma.user.findMany.mock.calls[0][0].where;
       expect(where.clientId).toBe('gifsy');
       expect(where.role).toEqual({ notIn: ['GIFSY_ADMIN', 'GIFSY_STAFF'] });
+    });
+  });
+
+  describe('getEmployeeByCode (Hierarchy-tab edit lookup)', () => {
+    it('returns the AdminUser-shaped row for an ACTIVE employee, tenant + status scoped', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 's1', employeeCode: 'Pune101', hierarchyLevelId: 'lvl1', reportingToId: 'r1',
+        user: { id: 'u1', phone: '9800000009', name: 'Asha Patel', email: null, role: 'SALES_SO', status: 'ACTIVE', createdAt: new Date() },
+      });
+      const res = await service.getEmployeeByCode(clientAdmin, 'Pune101');
+      const where = mockPrisma.salesUser.findFirst.mock.calls.at(-1)[0].where;
+      expect(where).toEqual({ clientId: 'deoleo', employeeCode: 'Pune101', deletedAt: null, user: { status: 'ACTIVE' } });
+      // Shaped like a listUsers row: user fields flattened + a salesUser sub-object.
+      expect(res.user.name).toBe('Asha Patel');
+      expect(res.user.salesUser).toEqual({ id: 's1', employeeCode: 'Pune101', hierarchyLevelId: 'lvl1', reportingToId: 'r1' });
+    });
+
+    it('404s when the code matches no ACTIVE employee (e.g. since deactivated)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      await expect(service.getEmployeeByCode(clientAdmin, 'GHOST')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('rejects a blank code', async () => {
+      await expect(service.getEmployeeByCode(clientAdmin, '   ')).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  describe('getHierarchyConfig (live overlay so single-employee edits show)', () => {
+    it('overlays live name/mobile/role/manager onto the snapshot; leaves placeholders as-is', async () => {
+      mockPrisma.programSetting.findFirst.mockResolvedValue({
+        settingValue: [
+          { id: 'Pune101', roleCode: 'XSR', roleLabel: 'XSR', reportsToId: 'Pune001', name: 'OLD Name', mobile: '9000000000', status: 'ACTIVE', hierarchyPath: '/Pune001/Pune101/' },
+          { id: 'Pune102', roleCode: 'XSR', roleLabel: 'XSR', reportsToId: 'Pune001', name: null, mobile: null, status: 'PLACEHOLDER', hierarchyPath: '/Pune001/Pune102/' },
+        ],
+      });
+      // Only Pune101 has a live SalesUser — its fields were edited since the last upload.
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { employeeCode: 'Pune101', user: { name: 'NEW Name', phone: '9811111111' }, hierarchyLevel: { code: 'SO', name: 'Sales Officer' }, reportingTo: { employeeCode: 'Pune900' } },
+      ]);
+
+      const { employees } = await service.getHierarchyConfig(clientAdmin);
+      const p101 = employees.find((e: { id: string }) => e.id === 'Pune101');
+      const p102 = employees.find((e: { id: string }) => e.id === 'Pune102');
+
+      // Live values win; the structural hierarchyPath stays from the snapshot.
+      expect(p101).toMatchObject({
+        name: 'NEW Name', mobile: '9811111111', roleCode: 'SO', roleLabel: 'Sales Officer',
+        reportsToId: 'Pune900', hierarchyPath: '/Pune001/Pune101/',
+      });
+      // Placeholder (no live SalesUser) is untouched.
+      expect(p102).toMatchObject({ id: 'Pune102', name: null, status: 'PLACEHOLDER' });
+    });
+
+    it('returns the empty snapshot without a relational read', async () => {
+      mockPrisma.programSetting.findFirst.mockResolvedValue(null);
+      mockPrisma.salesUser.findMany.mockClear();
+      const { employees } = await service.getHierarchyConfig(clientAdmin);
+      expect(employees).toEqual([]);
+      expect(mockPrisma.salesUser.findMany).not.toHaveBeenCalled();
     });
   });
 

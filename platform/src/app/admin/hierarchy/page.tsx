@@ -4,9 +4,14 @@ import React, { useState, useMemo, useRef, useCallback, useEffect } from 'react'
 import {
   Users, Download, Upload, Search, AlertTriangle, CheckCircle,
   XCircle, FileSpreadsheet, BookOpen, ArrowLeft, Info, ChevronDown,
-  ChevronRight, Shield, UserCheck, UserX,
+  ChevronRight, Shield, UserCheck, UserX, SquarePen, Loader2, X,
 } from 'lucide-react';
 import Link from 'next/link';
+import {
+  EditUserModal,
+  type AdminUser,
+  type EmployeeOptions,
+} from '@/components/admin/EditUserModal';
 import * as XLSX from 'xlsx';
 import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import {
@@ -256,13 +261,69 @@ export default function HierarchyPage() {
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // ── Edit-employee (reuses the shared /admin/users EditUserModal) ─────────────
+  // The Hierarchy row only holds a denormalized snapshot (employee CODE, not the login
+  // CUID), so on edit we fetch the full user by code and open the SAME modal + endpoints
+  // the User Accounts page uses — one editor, one set of session-revocation warnings.
+  const [editUser, setEditUser] = useState<AdminUser | null>(null);
+  // Level/manager dropdown sources for the modal — fetched once and cached (like /admin/users).
+  const [employeeOptions, setEmployeeOptions] = useState<EmployeeOptions | null>(null);
+  // The row whose full record is being fetched (drives the per-row spinner / disabled state).
+  const [loadingEditCode, setLoadingEditCode] = useState<string | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+
   // ── Load from API ──────────────────────────────────────────────────────────
-  useEffect(() => {
+  const loadEmployees = useCallback(() => {
     fetch('/api/admin/hierarchy-config')
       .then((r) => r.json())
       .then((j) => { if (j.success) setEmployees(j.data.employees ?? []); })
       .catch(() => {});
   }, []);
+
+  useEffect(() => { loadEmployees(); }, [loadEmployees]);
+
+  function showEditError(msg: string) {
+    setEditError(msg);
+    setTimeout(() => setEditError(null), 4000);
+  }
+
+  // Fetch the full user record for a hierarchy row, then open the shared edit modal.
+  // Only ACTIVE, named positions have a linked login user — vacant/PLACEHOLDER slots don't.
+  const openEditForEmployee = useCallback(async (emp: HierarchyEmployee) => {
+    if (emp.status !== 'ACTIVE' || emp.name == null) return;
+    setEditError(null);
+    setLoadingEditCode(emp.id);
+    try {
+      // Level/manager dropdown sources — fetch once, then reuse from state.
+      let opts = employeeOptions;
+      if (!opts) {
+        const optRes = await fetch('/api/admin/sales-users/options');
+        if (optRes.ok) {
+          const oj = await optRes.json().catch(() => null);
+          if (oj?.success && oj.data) {
+            opts = oj.data as EmployeeOptions;
+            setEmployeeOptions(opts);
+          }
+        }
+      }
+
+      // Exact lookup by employeeCode via the dedicated endpoint — gated on the SAME
+      // sales_org:manage_hierarchy permission the edit needs (so no separate users:read),
+      // and pagination-free (a `?search=` page could push the exact row off page 1).
+      const res = await fetch(`/api/admin/sales-users/by-code/${encodeURIComponent(emp.id)}`);
+      const j = await res.json().catch(() => null);
+      const match: AdminUser | null = res.ok && j?.success && j.data?.user ? j.data.user : null;
+      if (!match) {
+        showEditError("Couldn't load this employee to edit.");
+        return;
+      }
+      setEditUser(match);
+    } catch {
+      showEditError("Couldn't load this employee to edit.");
+    } finally {
+      setLoadingEditCode(null);
+    }
+  }, [employeeOptions]);
 
   // Persist to the backend and CONFIRM the write succeeded before the caller shows success.
   // Resolves only on a confirmed PUT (HTTP ok AND no { success:false } body). On failure it
@@ -765,6 +826,22 @@ export default function HierarchyPage() {
                       {emp.reportsToId ? `→ ${emp.reportsToId}` : 'Root'}
                     </p>
                   </div>
+                  {/* Edit — only for ACTIVE, filled positions (vacant/PLACEHOLDER slots have no
+                      linked login user to edit). Reuses the shared /admin/users edit modal. */}
+                  {emp.status === 'ACTIVE' && emp.name != null && (
+                    <button
+                      data-testid={`hierarchy-edit-${emp.id}`}
+                      onClick={() => openEditForEmployee(emp)}
+                      disabled={loadingEditCode === emp.id}
+                      aria-label={`Edit ${emp.name}`}
+                      title="Edit employee"
+                      className="flex-shrink-0 self-center p-1.5 rounded-lg text-gray-400 hover:text-[var(--brand-primary)] hover:bg-gray-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {loadingEditCode === emp.id
+                        ? <Loader2 className="h-4 w-4 animate-spin" />
+                        : <SquarePen className="h-4 w-4" />}
+                    </button>
+                  )}
                 </div>
               </div>
             ))}
@@ -811,6 +888,30 @@ export default function HierarchyPage() {
           </table>
         </div>
       </div>
+
+      {/* Edit-employee modal — the shared /admin/users editor, opened with the fetched user.
+          On save: re-fetch the hierarchy snapshot (name / level / reports-to may have changed)
+          and show the page's success banner. */}
+      {editUser && (
+        <EditUserModal
+          user={editUser}
+          roles={[]}
+          employeeOptions={employeeOptions}
+          onClose={() => setEditUser(null)}
+          onSaved={() => { setSuccessMsg('Employee updated.'); loadEmployees(); }}
+        />
+      )}
+
+      {/* Edit-load error toast (no silent failure). */}
+      {editError && (
+        <div className="fixed bottom-6 right-6 z-[70] flex items-center gap-2 bg-red-600 text-white text-sm font-medium px-4 py-2.5 rounded-xl shadow-lg">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+          <span>{editError}</span>
+          <button onClick={() => setEditError(null)} className="ml-1 opacity-80 hover:opacity-100" aria-label="Dismiss">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

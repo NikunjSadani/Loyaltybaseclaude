@@ -68,6 +68,19 @@ import {
   ACCESS_TTL,
 } from '../auth/auth.constants';
 
+/** One denormalized employee row in the stored hierarchy snapshot (ProgramSetting
+ *  `employee_hierarchy`). Only the fields getHierarchyConfig reads/overlays are typed;
+ *  the blob is authored by the FE at upload time (see platform HierarchyEmployee). */
+interface HierarchyEmployeeSnapshot {
+  id: string; // employeeCode
+  roleCode?: string;
+  roleLabel?: string;
+  reportsToId?: string | null;
+  name?: string | null;
+  mobile?: string | null;
+  [k: string]: unknown;
+}
+
 /**
  * AdminCoreService — business logic for the ported admin sub-domains
  * (users, settings, hierarchy-config, force-logout-all, dashboard, task-config,
@@ -261,6 +274,12 @@ export class AdminCoreService {
         { name: { contains: q.search, mode: 'insensitive' } },
         { phone: { contains: q.search } },
         { email: { contains: q.search, mode: 'insensitive' } },
+        // Employees are also searchable by their hierarchy employeeCode (e.g. "Pune101").
+        // A to-one relation filter that never matches non-employee rows (no linked
+        // SalesUser). This DOES widen Users-page search results — a query that matches an
+        // employeeCode now also returns that employee (intended); it never removes matches
+        // and stays tenant-scoped by the outer where.clientId.
+        { salesUser: { employeeCode: { contains: q.search, mode: 'insensitive' } } },
       ];
     }
 
@@ -277,7 +296,9 @@ export class AdminCoreService {
           createdAt: true,
           // salesUser presence marks an employee; the level/reporting ids prefill the
           // employee edit form (Level + Reports-to) without a second fetch per row.
-          salesUser: { select: { id: true, hierarchyLevelId: true, reportingToId: true } },
+          // employeeCode lets the Employee Hierarchy tab match the fetched row to the clicked
+          // row EXACTLY (the search is a `contains`, so an exact-code check disambiguates).
+          salesUser: { select: { id: true, employeeCode: true, hierarchyLevelId: true, reportingToId: true } },
         },
         skip,
         take: limit,
@@ -1372,12 +1393,88 @@ export class AdminCoreService {
   // HIERARCHY-CONFIG — admin/hierarchy-config
   // ════════════════════════════════════════════════════════════════════════
 
-  async getHierarchyConfig(user: JwtPayload) {
+  async getHierarchyConfig(user: JwtPayload): Promise<{ employees: unknown[] }> {
     const setting = await this.prisma.programSetting.findFirst({
       where: { clientId: user.clientId, settingKey: AdminCoreService.HIERARCHY_KEY },
     });
-    const employees = (setting?.settingValue as unknown[]) ?? [];
+    const snapshot = (setting?.settingValue as HierarchyEmployeeSnapshot[]) ?? [];
+    if (snapshot.length === 0) return { employees: snapshot };
+
+    // The snapshot is a denormalized blob rewritten only by the bulk Excel upload. A
+    // single-employee edit (updateEmployee) writes the RELATIONAL tables, not this blob,
+    // so overlay the live mutable fields (name / mobile / role / manager) here — otherwise
+    // an edit made from the Hierarchy tab would appear to do nothing until the next upload.
+    // Read-only overlay (no write-back) → no read-modify-write race on the shared blob when
+    // two admins edit concurrently. Structural fields (hierarchyPath / hasOutlets /
+    // hasSubReports / status) stay from the snapshot — they're FE-computed at upload time and
+    // only drift on a reports-to move, which self-heals on the next roster upload.
+    const salesUsers = await this.prisma.salesUser.findMany({
+      where: { clientId: user.clientId, deletedAt: null },
+      select: {
+        employeeCode: true,
+        user: { select: { name: true, phone: true } },
+        hierarchyLevel: { select: { code: true, name: true } },
+        reportingTo: { select: { employeeCode: true } },
+      },
+    });
+    const liveByCode = new Map(salesUsers.map((s) => [s.employeeCode, s]));
+
+    const employees = snapshot.map((e) => {
+      if (!e || typeof e !== 'object') return e;
+      const live = liveByCode.get(e.id);
+      if (!live) return e; // placeholder / vacant position (no linked SalesUser) → as-is
+      return {
+        ...e,
+        name: live.user?.name ?? e.name,
+        mobile: live.user?.phone ?? e.mobile,
+        roleCode: live.hierarchyLevel?.code ?? e.roleCode,
+        roleLabel: live.hierarchyLevel?.name ?? e.roleLabel,
+        reportsToId: live.reportingTo?.employeeCode ?? null,
+      };
+    });
     return { employees };
+  }
+
+  /**
+   * Fetch ONE employee by their hierarchy employeeCode, shaped like a listUsers row
+   * (AdminUser). Powers the Hierarchy tab's edit pencil: an EXACT, single-permission,
+   * pagination-free lookup — gated on sales_org:manage_hierarchy (the same permission the
+   * edit implies), so a staff member who can edit the hierarchy but lacks users:read can
+   * still open the editor, and a large tenant can't push the row off a search page.
+   * ACTIVE + non-deleted only, so a since-deactivated employee resolves to a clean 404.
+   */
+  async getEmployeeByCode(user: JwtPayload, code: string) {
+    const trimmed = (code ?? '').trim();
+    if (!trimmed) throw new BadRequestException('An employeeCode is required.');
+    const salesUser = await this.prisma.salesUser.findFirst({
+      where: {
+        clientId: user.clientId,
+        employeeCode: trimmed,
+        deletedAt: null,
+        user: { status: 'ACTIVE' },
+      },
+      select: {
+        id: true,
+        employeeCode: true,
+        hierarchyLevelId: true,
+        reportingToId: true,
+        user: {
+          select: { id: true, phone: true, name: true, email: true, role: true, status: true, createdAt: true },
+        },
+      },
+    });
+    if (!salesUser) throw new NotFoundException('Employee not found.');
+    return {
+      user: {
+        ...salesUser.user,
+        salesUser: {
+          id: salesUser.id,
+          employeeCode: salesUser.employeeCode,
+          hierarchyLevelId: salesUser.hierarchyLevelId,
+          reportingToId: salesUser.reportingToId,
+        },
+      },
+    };
   }
 
   async saveHierarchyConfig(user: JwtPayload, dto: HierarchyConfigDto) {
