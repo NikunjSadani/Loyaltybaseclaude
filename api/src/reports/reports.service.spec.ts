@@ -19,6 +19,7 @@ const mockPrisma = {
   user: { count: jest.fn(), findMany: jest.fn() },
   userActivityDay: { findMany: jest.fn() },
   kycSubmission: { findMany: jest.fn() },
+  outlet: { findMany: jest.fn() },
 };
 
 // visibilityStatus is master-gated; default ON so the existing scoping tests run.
@@ -34,6 +35,9 @@ describe('ReportsService', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     mockTenant.resolveVisibilityEnabled.mockResolvedValue(true);
+    // kycStatus always runs a tenant-scoped outlet.findMany for the outlet columns;
+    // default to no outlets so tests that don't care about enrichment still work.
+    mockPrisma.outlet.findMany.mockResolvedValue([]);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ReportsService,
@@ -267,6 +271,142 @@ describe('ReportsService', () => {
       await service.kycStatus(gifsy, {});
       const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
       expect(where).toEqual({ user: { clientId: 'deoleo' } });
+    });
+
+    it('scopes the outlet enrichment query to the caller clientId (non-deleted)', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+      await service.kycStatus(gifsy, {});
+      const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({ clientId: 'deoleo', deletedAt: null });
+    });
+
+    it('enriches a submission with its single outlet Zone/ID/Name/Program', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([
+        {
+          id: 'k1',
+          partnerId: 'p1',
+          status: 'APPROVED',
+          createdAt: new Date('2026-02-01T00:00:00.000Z'),
+          user: { name: 'Owner One', phone: '900' },
+          partner: { businessName: 'Acme', panNumber: 'ABCDE1234F' },
+        },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { partnerId: 'p1', zone: 'West', outletCode: 'OUT-1', name: 'Acme Store', programName: 'Gold' },
+      ]);
+      const res = await service.kycStatus(gifsy, {});
+      if (res.kind === 'json') {
+        const data = res.data as { data: Record<string, unknown>[] };
+        expect(data.data).toHaveLength(1);
+        expect(data.data[0]).toEqual({
+          'S.No': 1,
+          'Submission ID': 'k1',
+          'User Name': 'Owner One',
+          Mobile: '900',
+          'Business Name': 'Acme',
+          Zone: 'West',
+          'Outlet ID': 'OUT-1',
+          'Outlet Name': 'Acme Store',
+          'Program Name': 'Gold',
+          Status: 'APPROVED',
+          'Submitted On': '2026-02-01',
+          PAN: 'ABCDE1234F',
+        });
+      }
+    });
+
+    it('fans a partner owning 2 outlets into 2 rows with sequential S.No', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([
+        {
+          id: 'k1',
+          partnerId: 'p1',
+          status: 'APPROVED',
+          createdAt: new Date('2026-02-01T00:00:00.000Z'),
+          user: { name: 'Owner One', phone: '900' },
+          partner: { businessName: 'Acme', panNumber: 'ABCDE1234F' },
+        },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { partnerId: 'p1', zone: 'West', outletCode: 'OUT-1', name: 'Store 1', programName: 'Gold' },
+        { partnerId: 'p1', zone: 'East', outletCode: 'OUT-2', name: 'Store 2', programName: 'Silver' },
+      ]);
+      const res = await service.kycStatus(gifsy, {});
+      if (res.kind === 'json') {
+        const rows = (res.data as { data: Record<string, unknown>[] }).data;
+        expect(rows).toHaveLength(2);
+        expect(rows.map((r) => r['S.No'])).toEqual([1, 2]);
+        expect(rows.map((r) => r['Outlet ID'])).toEqual(['OUT-1', 'OUT-2']);
+        expect(rows.map((r) => r['Zone'])).toEqual(['West', 'East']);
+        // KYC columns repeat across both outlet rows.
+        expect(rows.every((r) => r['Submission ID'] === 'k1' && r['PAN'] === 'ABCDE1234F')).toBe(true);
+      }
+    });
+
+    it('emits one row with blank outlet columns for a null-partner submission', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([
+        {
+          id: 'k2',
+          partnerId: null,
+          status: 'DRAFT',
+          createdAt: new Date('2026-02-03T00:00:00.000Z'),
+          user: { name: 'Owner Two', phone: '901' },
+          partner: null,
+        },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { partnerId: 'p9', zone: 'North', outletCode: 'OUT-9', name: 'Other', programName: 'Bronze' },
+      ]);
+      const res = await service.kycStatus(gifsy, {});
+      if (res.kind === 'json') {
+        const rows = (res.data as { data: Record<string, unknown>[] }).data;
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          'S.No': 1,
+          'Submission ID': 'k2',
+          Zone: '',
+          'Outlet ID': '',
+          'Outlet Name': '',
+          'Program Name': '',
+        });
+      }
+    });
+
+    it('emits one row with blank outlet columns when the partner owns no outlet', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([
+        {
+          id: 'k3',
+          partnerId: 'p-orphan',
+          status: 'SUBMITTED',
+          createdAt: new Date('2026-02-04T00:00:00.000Z'),
+          user: { name: 'Owner Three', phone: '902' },
+          partner: { businessName: 'NoOutlet', panNumber: '' },
+        },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { partnerId: 'p1', zone: 'West', outletCode: 'OUT-1', name: 'Store 1', programName: 'Gold' },
+      ]);
+      const res = await service.kycStatus(gifsy, {});
+      if (res.kind === 'json') {
+        const rows = (res.data as { data: Record<string, unknown>[] }).data;
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ Zone: '', 'Outlet ID': '', 'Outlet Name': '', 'Program Name': '' });
+      }
+    });
+
+    it('empty range → valid xlsx buffer, no throw', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      const res = await service.kycStatus(gifsy, {
+        dateFrom: '2026-02-01',
+        dateTo: '2026-02-01',
+        format: ReportFormat.XLSX,
+      });
+      expect(res.kind).toBe('xlsx');
+      if (res.kind === 'xlsx') {
+        expect(res.filename).toBe('kyc-status.xlsx');
+        expect(Buffer.isBuffer(res.buffer)).toBe(true);
+        expect(res.buffer.length).toBeGreaterThan(0);
+      }
     });
   });
 });

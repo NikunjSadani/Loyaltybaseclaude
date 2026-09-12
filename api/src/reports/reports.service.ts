@@ -385,19 +385,80 @@ export class ReportsService {
       orderBy: { createdAt: 'desc' },
     });
 
-    const data = submissions.map((s, i) => ({
-      'S.No': i + 1,
-      'Submission ID': s.id,
-      'User Name': s.user?.name ?? '',
-      Mobile: s.user?.phone ?? '',
-      'Business Name': s.partner?.businessName ?? '',
-      Status: s.status,
-      'Submitted On': s.createdAt.toISOString().split('T')[0],
-      PAN: s.partner?.panNumber ?? '',
-    }));
+    // Outlet-level enrichment (Zone / Outlet ID / Outlet Name / Program Name). A
+    // KycSubmission.partnerId → the owning ChannelPartner, which may own MULTIPLE
+    // outlets (Outlet.partnerId, relation "OutletOwner"). One tenant-scoped query
+    // (NOT N+1), mapped partnerId → outlet[], mirrors the outlet-master report join.
+    const outlets = await this.prisma.outlet.findMany({
+      where: { clientId: user.clientId, deletedAt: null },
+      select: { partnerId: true, zone: true, outletCode: true, name: true, programName: true },
+    });
+    const outletsByPartner = new Map<string, typeof outlets>();
+    for (const o of outlets) {
+      if (!o.partnerId) continue;
+      const list = outletsByPartner.get(o.partnerId);
+      if (list) list.push(o);
+      else outletsByPartner.set(o.partnerId, [o]);
+    }
+
+    // One row per submission-outlet pair (a partner with N outlets → N rows so each
+    // outlet shows its own Zone/ID/Name/Program). A null / unmatched partnerId yields
+    // ONE row with blank outlet columns — the submission is never dropped. S.No runs
+    // sequentially across the final (possibly fanned-out) row set.
+    const data: Record<string, unknown>[] = [];
+    for (const s of submissions) {
+      const base = {
+        'Submission ID': s.id,
+        'User Name': s.user?.name ?? '',
+        Mobile: s.user?.phone ?? '',
+        'Business Name': s.partner?.businessName ?? '',
+      };
+      const tail = {
+        Status: s.status,
+        'Submitted On': s.createdAt.toISOString().split('T')[0],
+        PAN: s.partner?.panNumber ?? '',
+      };
+      const partnerOutlets = s.partnerId ? outletsByPartner.get(s.partnerId) : undefined;
+      if (partnerOutlets && partnerOutlets.length > 0) {
+        for (const o of partnerOutlets) {
+          data.push({
+            'S.No': data.length + 1,
+            ...base,
+            Zone: o.zone ?? '',
+            'Outlet ID': o.outletCode ?? '',
+            'Outlet Name': o.name ?? '',
+            'Program Name': o.programName ?? '',
+            ...tail,
+          });
+        }
+      } else {
+        data.push({
+          'S.No': data.length + 1,
+          ...base,
+          Zone: '',
+          'Outlet ID': '',
+          'Outlet Name': '',
+          'Program Name': '',
+          ...tail,
+        });
+      }
+    }
 
     if (q.format === ReportFormat.XLSX) {
-      return this.toXlsx([{ name: 'KYC Status', rows: data }], 'kyc-status.xlsx');
+      // Empty range → seed one all-blank row so the sheet still shows the column headers
+      // (an empty json_to_sheet yields a header-less blank sheet — the "barely any
+      // columns" confusion; mirrors the outlet-master / target-vs-sales reports).
+      const rows =
+        data.length > 0
+          ? data
+          : [
+              {
+                'S.No': '', 'Submission ID': '', 'User Name': '', Mobile: '', 'Business Name': '',
+                Zone: '', 'Outlet ID': '', 'Outlet Name': '', 'Program Name': '',
+                Status: '', 'Submitted On': '', PAN: '',
+              },
+            ];
+      return this.toXlsx([{ name: 'KYC Status', rows }], 'kyc-status.xlsx');
     }
     return this.toJson({ data, recordCount: data.length });
   }

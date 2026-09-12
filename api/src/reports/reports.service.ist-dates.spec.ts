@@ -36,6 +36,8 @@ describe('ReportsService — IST createdAt date bounds', () => {
 
     const prisma = {
       kycSubmission: { findMany: kycFindMany },
+      // kycStatus also runs a tenant-scoped outlet.findMany for the outlet columns.
+      outlet: { findMany: jest.fn().mockResolvedValue([]) },
       visibilityCapture: { findMany: visibilityFindMany },
       tdsRecord: { findMany: tdsFindMany },
       payoutTransaction: { findMany: payoutFindMany },

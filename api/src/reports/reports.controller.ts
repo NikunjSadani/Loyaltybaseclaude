@@ -69,7 +69,7 @@ export class ReportsController {
   }
 
   @Get('kyc-status')
-  @Roles('GIFSY_ADMIN', 'MIS_USER')
+  @Roles('GIFSY_ADMIN', 'MIS_USER', 'CLIENT_ADMIN')
   @RequirePermission('reports:read')
   async kycStatus(@CurrentUser() user: JwtPayload, @Query() query: ReportRangeQueryDto) {
     return this.respond(await this.reports.kycStatus(user, query));
