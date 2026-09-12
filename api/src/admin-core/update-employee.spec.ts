@@ -22,7 +22,8 @@ const mockTx = {
 const mockPrisma = {
   user: { findFirst: jest.fn(), update: jest.fn() },
   userSession: { updateMany: jest.fn() },
-  salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
+  salesUser: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn() },
+  salesUserAssignment: { count: jest.fn() },
   salesHierarchyLevel: { findFirst: jest.fn() },
   auditLog: { create: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
@@ -42,6 +43,10 @@ describe('AdminCoreService.updateEmployee', () => {
     jest.clearAllMocks();
     // Safe defaults so revokeAllSessionsForUser never NPEs on result.count.
     mockPrisma.userSession.updateMany.mockResolvedValue({ count: 0 });
+    // Role-change outlet/team guard (Option A): default to "no outlets, no team" so the
+    // existing level-change tests pass through it; guard-specific tests override these.
+    mockPrisma.salesUserAssignment.count.mockResolvedValue(0);
+    mockPrisma.salesUser.count.mockResolvedValue(0);
     mockPrisma.user.update.mockResolvedValue({});
     mockTx.user.update.mockResolvedValue({});
     mockTx.salesUser.update.mockResolvedValue({});

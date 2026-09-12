@@ -37,7 +37,9 @@ const mockPrisma = {
     updateMany: jest.fn(),
   },
   userSession: { updateMany: jest.fn() },
-  salesUser: { findMany: jest.fn(), findFirst: jest.fn() },
+  salesUser: { findMany: jest.fn(), findFirst: jest.fn(), count: jest.fn() },
+  salesUserAssignment: { count: jest.fn() },
+  salesHierarchyLevel: { findFirst: jest.fn() },
   outlet: { findMany: jest.fn(), count: jest.fn() },
   kycSubmission: { count: jest.fn() },
   kycStatusHistory: { findMany: jest.fn() },
@@ -212,6 +214,45 @@ describe('AdminCoreService', () => {
       const { employees } = await service.getHierarchyConfig(clientAdmin);
       expect(employees).toEqual([]);
       expect(mockPrisma.salesUser.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('updateEmployee — role-change outlet/team guard (Option A: pencil matches bulk)', () => {
+    beforeEach(() => {
+      // Target employee (a field rep) at level lvl1, being changed to lvl2 (a role change).
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 's1', clientId: 'deoleo', hierarchyLevelId: 'lvl1',
+        user: { id: 'u1', clientId: 'deoleo', role: 'SALES_ISR', status: 'ACTIVE', phone: '9900000041', email: null, name: 'Ravi' },
+      });
+      mockPrisma.salesHierarchyLevel.findFirst.mockResolvedValue({ id: 'lvl2', code: 'SO' });
+    });
+
+    it('BLOCKS a level change when the employee has outlets assigned', async () => {
+      mockPrisma.salesUserAssignment.count.mockResolvedValue(3);
+      mockPrisma.salesUser.count.mockResolvedValue(0);
+      await expect(
+        service.updateEmployee(clientAdmin, 's1', { hierarchyLevelId: 'lvl2' } as never),
+      ).rejects.toThrow(/outlets assigned/i);
+    });
+
+    it('BLOCKS a level change when the employee has team members reporting to them', async () => {
+      mockPrisma.salesUserAssignment.count.mockResolvedValue(0);
+      mockPrisma.salesUser.count.mockResolvedValue(2);
+      await expect(
+        service.updateEmployee(clientAdmin, 's1', { hierarchyLevelId: 'lvl2' } as never),
+      ).rejects.toThrow(/team members/i);
+    });
+
+    it('does NOT run the outlet/team guard when the level is unchanged (pure manager change is allowed)', async () => {
+      mockPrisma.salesUserAssignment.count.mockClear();
+      mockPrisma.salesUser.count.mockClear();
+      // No hierarchyLevelId in the dto → levelChanged is false → the guard is never reached.
+      // (The reporting-to path is exercised by other flows; here we only assert the guard is
+      // skipped, so we don't need the full transaction mock — a throw would fail this test.)
+      await service
+        .updateEmployee(clientAdmin, 's1', { reportingToId: null } as never)
+        .catch(() => undefined);
+      expect(mockPrisma.salesUserAssignment.count).not.toHaveBeenCalled();
     });
   });
 

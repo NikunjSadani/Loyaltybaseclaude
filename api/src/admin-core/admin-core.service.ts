@@ -806,6 +806,30 @@ export class AdminCoreService {
       // Defense-in-depth: the derived bucket is always a sales role, but re-assert the caller
       // is permitted to assign it (never lets this path mint a privileged role).
       this.assertRoleAssignable(caller, newUserRole);
+
+      // A ROLE/level change is blocked while the employee still holds outlets or has team
+      // members reporting to them — their outlets/team don't move up a level automatically,
+      // so reassign/replace first. This mirrors the bulk Employee-Hierarchy upload guard so
+      // the pencil edit and the bulk upload behave identically. (A pure reporting-manager
+      // change is NOT gated — that path is always allowed; see the cycle guard below.)
+      const [activeOutletCount, subReportCount] = await Promise.all([
+        this.prisma.salesUserAssignment.count({
+          where: { salesUserId, unassignedAt: null },
+        }),
+        this.prisma.salesUser.count({
+          where: { reportingToId: salesUserId, deletedAt: null, isActive: true },
+        }),
+      ]);
+      if (activeOutletCount > 0) {
+        throw new BadRequestException(
+          'This employee has outlets assigned. Reassign all outlets before changing their role/level.',
+        );
+      }
+      if (subReportCount > 0) {
+        throw new BadRequestException(
+          'This employee has team members reporting to them. Reassign their team before changing their role/level.',
+        );
+      }
     }
 
     // ── Reporting-to cycle guard ──────────────────────────────────────────────
