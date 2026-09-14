@@ -15,7 +15,7 @@
  * GPS captureTrigger). Renders every §13.1 field type.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { Component, useEffect, useMemo, useState } from 'react';
 import {
   Plus, Trash2, ChevronUp, ChevronDown, ChevronRight, Type, Hash, List,
   Calendar, FileText, Camera, MapPin, Smartphone, Info, AlertCircle, QrCode,
@@ -36,6 +36,7 @@ import {
 } from '@/lib/scheme-types';
 import type { CampaignType } from '@/lib/scheme-types';
 import { schemeApi } from '@/lib/schemes';
+import { SchemeFormRenderer } from '@/components/schemes/SchemeFormRenderer';
 
 // ── Field-type metadata ─────────────────────────────────────────────────────
 
@@ -272,6 +273,63 @@ function ConditionEditor({
   );
 }
 
+// ── Live-preview error boundary ───────────────────────────────────────────────
+//
+// The REAL SchemeFormRenderer can throw while a schema is half-built (e.g. a choice
+// field whose options aren't an array yet). Wrapping the live preview keeps a malformed
+// in-progress schema from crashing the whole builder page — the author sees a friendly
+// hint instead. `resetKey` (the live schema object) changes on every edit, so fixing the
+// form automatically clears the error state and re-renders the preview.
+class PreviewErrorBoundary extends Component<
+  { children: React.ReactNode; resetKey: unknown },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidUpdate(prev: { resetKey: unknown }) {
+    if (this.state.hasError && prev.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="border border-dashed border-amber-300 bg-amber-50 rounded-xl p-4 text-center">
+          <AlertCircle className="w-5 h-5 text-amber-400 mx-auto mb-1.5" />
+          <p className="text-[11px] text-amber-700">Finish the fields to preview the live form.</p>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// ── Live preview (the REAL renderer in dry-run mode) ──────────────────────────
+//
+// Feeds the current in-editor schema (unsaved edits included) to the shared
+// SchemeFormRenderer with `previewMode` on — so it renders + behaves exactly like the
+// end-user form (conditional logic, validation, the live UPI scanner, capture UI) while
+// NEVER writing data (no enroll, no media upload, OTP auto-passed). A placeholder
+// schemeId is fine because previewMode makes no API calls. SALES mode (rep-facing) is
+// used — the widest surface; outletApproved:false keeps the PHONE_OTP field editable.
+function LiveFormPreview({ value }: { value: EnrollmentFormSchema }) {
+  return (
+    <PreviewErrorBoundary resetKey={value}>
+      <SchemeFormRenderer
+        schema={value}
+        context={{ schemeId: 'preview', mode: 'SALES', outletApproved: false }}
+        previewMode
+        onSubmitted={() => { /* no-op — previewMode never enrolls */ }}
+      />
+    </PreviewErrorBoundary>
+  );
+}
+
 // ── Mobile preview cell ───────────────────────────────────────────────────────
 
 function PreviewField({ field }: { field: FormField }) {
@@ -372,6 +430,9 @@ export function SchemeFormBuilder({
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [showPicker, setShowPicker] = useState(false);
   const [showPreview, setShowPreview] = useState(true);
+  // Preview mode: static mock (default, robust against a half-built schema) ⇄ live (the REAL
+  // renderer fed the current in-editor schema, dry-run — nothing is saved).
+  const [liveMode, setLiveMode] = useState(false);
   const [prefillSources, setPrefillSources] = useState<PrefillSourcesState>({ excelColumns: [], outletFields: [] });
 
   // H1: load this scheme's prefill sources (roster Excel columns + curated outlet fields)
@@ -846,17 +907,42 @@ export function SchemeFormBuilder({
       </div>
 
       {/* Mobile preview */}
-      <div className="hidden lg:block w-56 flex-shrink-0">
+      <div className={`hidden lg:block flex-shrink-0 transition-all ${liveMode ? 'w-80' : 'w-56'}`}>
         <div className="sticky top-4">
           <div className="flex items-center justify-between mb-2">
             <p className="text-[11px] font-semibold text-gray-500 flex items-center gap-1"><Smartphone className="w-3.5 h-3.5" /> Preview</p>
-            <button type="button" onClick={() => setShowPreview((p) => !p)} className="text-[10px] text-gray-400 hover:text-gray-600">{showPreview ? 'Hide' : 'Show'}</button>
+            <div className="flex items-center gap-2">
+              {/* Mock ⇄ Live toggle — Live swaps the static mock for the REAL renderer (dry-run). */}
+              <div className="inline-flex rounded-full border border-gray-200 overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setLiveMode(false)}
+                  aria-pressed={!liveMode}
+                  className={`text-[10px] px-2 py-0.5 ${!liveMode ? 'bg-[var(--brand-primary)] text-white' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                  Mock
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLiveMode(true)}
+                  aria-pressed={liveMode}
+                  className={`text-[10px] px-2 py-0.5 ${liveMode ? 'bg-[var(--brand-primary)] text-white' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                  Test form (live)
+                </button>
+              </div>
+              <button type="button" onClick={() => setShowPreview((p) => !p)} className="text-[10px] text-gray-400 hover:text-gray-600">{showPreview ? 'Hide' : 'Show'}</button>
+            </div>
           </div>
           {showPreview && (
             <div className="border-2 border-gray-300 rounded-2xl p-3 bg-white shadow-sm relative" style={{ minHeight: 300 }}>
               <div className="w-12 h-1.5 bg-gray-200 rounded-full mx-auto mb-3" />
               {fields.length === 0 ? (
                 <div className="text-center py-8"><p className="text-[10px] text-gray-300">Fields appear here</p></div>
+              ) : liveMode ? (
+                <div className="max-h-[32rem] overflow-y-auto pr-1">
+                  <LiveFormPreview value={value} />
+                </div>
               ) : (
                 <div className="max-h-[28rem] overflow-y-auto pr-1">
                   {fields.map((f) => <PreviewField key={f.id} field={f} />)}
@@ -864,6 +950,9 @@ export function SchemeFormBuilder({
                 </div>
               )}
             </div>
+          )}
+          {showPreview && liveMode && (
+            <p className="text-[10px] text-gray-400 mt-1.5 text-center">Preview — nothing is saved.</p>
           )}
         </div>
       </div>

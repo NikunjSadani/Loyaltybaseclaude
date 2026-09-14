@@ -78,6 +78,21 @@ export interface SchemeFormRendererProps {
   context: SchemeFormContext;
   onSubmitted: (result: EnrollResult) => void;
   onError?: (msg: string) => void;
+  /**
+   * Preview / dry-run mode (default false). When true the form renders and behaves EXACTLY
+   * as the real thing — field rendering, conditional visible/required logic, validation, the
+   * live UPI scanner + camera/photo/signature/GPS capture UI — but EVERY side-effecting
+   * backend call is gated: no enroll POST, no media upload (a synthetic `preview://…` key is
+   * used instead), and the PHONE_OTP step is auto-satisfied. Existing sales/partner callers
+   * omit it, so their behaviour is byte-identical.
+   */
+  previewMode?: boolean;
+  /**
+   * Optional — called with the collected would-submit `formValues` when a PREVIEW submit
+   * passes validation (in place of the enroll POST). The builder may ignore it; the inline
+   * preview-result panel is shown regardless.
+   */
+  onPreviewSubmit?: (formValues: Record<string, unknown>) => void;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -132,6 +147,8 @@ export function SchemeFormRenderer({
   context,
   onSubmitted,
   onError,
+  previewMode = false,
+  onPreviewSubmit,
 }: SchemeFormRendererProps) {
   const { schemeId, mode, outletApproved, ownerPhoneMasked } = context;
 
@@ -151,6 +168,9 @@ export function SchemeFormRenderer({
   // and can retry that field's upload.
   const [uploadErrors, setUploadErrors] = useState<Record<string, string>>({});
   const [otpVerified, setOtpVerified] = useState(false);
+  // Preview/dry-run: the collected formValues a PREVIEW submit WOULD have POSTed. Non-null
+  // only in previewMode after a passing submit — drives the inline "would submit" panel.
+  const [previewResult, setPreviewResult] = useState<Record<string, unknown> | null>(null);
   // SIG-2: signature fields that have strokes but whose PNG hasn't been saved/uploaded
   // yet. Tracked so Submit can block (with a clear message) instead of silently dropping
   // a signature the rep drew but never tapped "Save signature" for.
@@ -198,6 +218,14 @@ export function SchemeFormRenderer({
         return next;
       });
       try {
+        // Preview/dry-run: NEVER touch the bucket. Resolve to a synthetic key so the field
+        // shows its "Captured"/confirmed state and the flow stays testable end-to-end.
+        if (previewMode) {
+          const name = filename ?? (file instanceof File ? file.name : 'capture');
+          const key = `preview://${name}`;
+          if (opts?.store !== false) setValue(fieldId, key);
+          return key;
+        }
         const res = await schemeApi.uploadMedia(schemeId, file, filename);
         if (res.success) {
           if (opts?.store !== false) setValue(fieldId, res.data.key);
@@ -213,7 +241,7 @@ export function SchemeFormRenderer({
         setUploading((u) => ({ ...u, [fieldId]: false }));
       }
     },
-    [schemeId, setValue, reportError],
+    [schemeId, setValue, reportError, previewMode],
   );
 
   // ── PHONE-OTP consent sub-flow (D16) ────────────────────────────────────────
@@ -261,6 +289,7 @@ export function SchemeFormRenderer({
     setSubmitError(null);
     setFieldErrors([]);
     setErrorFieldIds(new Set());
+    setPreviewResult(null);
 
     // ENR-M1: never submit while a media/camera/signature upload is still in flight — the
     // file could be dropped or a just-captured field wrongly read as empty. The button is
@@ -307,7 +336,9 @@ export function SchemeFormRenderer({
 
     // 2) client-side validation (mirrors backend)
     const errs = validateSchemeValues(schema, working);
-    if (otpRequired && !otpVerified) {
+    // Preview/dry-run auto-satisfies the OTP step (no real send/verify) so it never blocks
+    // a preview; the real flow still enforces it.
+    if (otpRequired && !otpVerified && !previewMode) {
       errs.push('Verify the phone OTP before submitting.');
     }
     if (errs.length > 0) {
@@ -324,12 +355,12 @@ export function SchemeFormRenderer({
       }
       // ENR-M3: the OTP "not verified" message carries no quoted label, so it resolves to no
       // field above. Fall back to the PHONE_OTP field so that error also highlights.
-      if (otpRequired && !otpVerified && phoneOtpField) invalidIds.add(phoneOtpField.id);
+      if (otpRequired && !otpVerified && !previewMode && phoneOtpField) invalidIds.add(phoneOtpField.id);
       setErrorFieldIds(invalidIds);
       // Scroll to the FIRST invalid field (from the first error message).
       const m = /"([^"]+)"/.exec(errs[0]);
       const firstField = m ? fields.find((f) => f.label === m[1]) : undefined;
-      const targetId = firstField?.id ?? (otpRequired && !otpVerified ? phoneOtpField?.id ?? null : null);
+      const targetId = firstField?.id ?? (otpRequired && !otpVerified && !previewMode ? phoneOtpField?.id ?? null : null);
       if (targetId && typeof document !== 'undefined') {
         requestAnimationFrame(() =>
           document
@@ -350,6 +381,14 @@ export function SchemeFormRenderer({
       if (!isFieldVisible(f, working)) continue;
       const v = working[f.id];
       if (v !== undefined) formValues[f.id] = v;
+    }
+
+    // Preview/dry-run: validation passed — surface the would-submit values and STOP. No
+    // enroll POST is ever made in previewMode.
+    if (previewMode) {
+      setPreviewResult(formValues);
+      onPreviewSubmit?.(formValues);
+      return;
     }
 
     const payload: EnrollInput = {
@@ -378,7 +417,7 @@ export function SchemeFormRenderer({
   }, [
     values, fields, schema, otpRequired, otpVerified, mode, context, phoneOtpField,
     outletApproved, schemeId, captureGps, onSubmitted, onError, reportError,
-    uploading, unsavedSignatures,
+    uploading, unsavedSignatures, previewMode, onPreviewSubmit,
   ]);
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -404,6 +443,7 @@ export function SchemeFormRenderer({
             setSignatureUnsaved={setSignatureUnsaved}
             ownerPhoneMasked={ownerPhoneMasked}
             errorFieldIds={errorFieldIds}
+            previewMode={previewMode}
           />
         );
       })}
@@ -425,6 +465,8 @@ export function SchemeFormRenderer({
           <>
             <Loader2 className="h-4 w-4 animate-spin" /> Waiting for upload to finish…
           </>
+        ) : previewMode ? (
+          'Test submit'
         ) : (
           'Submit'
         )}
@@ -445,6 +487,40 @@ export function SchemeFormRenderer({
         <div role="alert" className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5">
           <AlertCircle className="h-3.5 w-3.5 text-red-500 shrink-0 mt-0.5" />
           <p className="text-xs text-red-700">{submitError}</p>
+        </div>
+      )}
+
+      {/* Preview/dry-run: the values a real submit WOULD have sent — nothing was saved. */}
+      {previewMode && previewResult && (
+        <div
+          data-testid="preview-submit-result"
+          className="bg-green-50 border border-green-200 rounded-xl px-3 py-2.5 space-y-2"
+        >
+          <p className="text-xs font-bold text-green-800 flex items-center gap-1.5">
+            <CheckCircle className="h-3.5 w-3.5 text-green-500 shrink-0" />
+            Preview — would submit (nothing saved)
+          </p>
+          {Object.keys(previewResult).length === 0 ? (
+            <p className="text-[11px] text-green-700">No values collected.</p>
+          ) : (
+            <dl className="space-y-1">
+              {Object.entries(previewResult).map(([fid, v]) => {
+                const label = fields.find((f) => f.id === fid)?.label || fid;
+                const shown =
+                  v === null || v === undefined || v === ''
+                    ? '—'
+                    : typeof v === 'object'
+                      ? JSON.stringify(v)
+                      : String(v);
+                return (
+                  <div key={fid} className="flex items-start justify-between gap-2 text-[11px]">
+                    <dt className="text-green-700 font-medium shrink-0">{label}</dt>
+                    <dd className="text-green-900 font-mono text-right break-all">{shown}</dd>
+                  </div>
+                );
+              })}
+            </dl>
+          )}
         </div>
       )}
     </div>
@@ -480,6 +556,8 @@ interface FieldRendererProps {
   /** ENR-L2: ids of ALL fields the last failed submit flagged — each gets an attention ring
    * (the view scrolls to the first). */
   errorFieldIds?: Set<string>;
+  /** Preview/dry-run — gates side-effecting calls (currently only PHONE_OTP auto-passes). */
+  previewMode?: boolean;
 }
 
 /**
@@ -1536,7 +1614,7 @@ const OTP_RESEND_COOLDOWN_S = 30;
 const OTP_TTL_S = 300;
 
 function PhoneOtpField({
-  field, values, setValue, context, subject, otpVerified, setOtpVerified, ownerPhoneMasked, req, prefill, errorFieldIds,
+  field, values, setValue, context, subject, otpVerified, setOtpVerified, ownerPhoneMasked, req, prefill, errorFieldIds, previewMode,
 }: FieldRendererProps & { req: boolean }) {
   const { schemeId, outletApproved } = context;
   const highlight = Boolean(errorFieldIds?.has(field.id));
@@ -1684,7 +1762,15 @@ function PhoneOtpField({
         />
       )}
 
-      {otpVerified ? (
+      {previewMode ? (
+        // Preview/dry-run: no real OTP endpoints — the step is auto-satisfied so it doesn't
+        // block the preview. The number stays editable so a required 10-digit value still
+        // validates like the real form.
+        <div className="flex items-center gap-1.5 mt-2 text-xs text-green-700 font-medium">
+          <ShieldCheck className="h-3.5 w-3.5 text-green-500" /> Verified{' '}
+          <span className="text-gray-400 font-normal">(preview — OTP auto-passed)</span>
+        </div>
+      ) : otpVerified ? (
         <div className="flex items-center gap-1.5 mt-2 text-xs text-green-700 font-medium">
           <ShieldCheck className="h-3.5 w-3.5 text-green-500" /> Verified
         </div>

@@ -233,3 +233,115 @@ describe('media field → stored key', () => {
     expect(payload.formValues.shot).toBe('scheme-media/c/photo.jpg');
   });
 });
+
+describe('previewMode (dry-run — no side effects)', () => {
+  it('(a) a passing submit does NOT call enroll and surfaces the would-submit values', async () => {
+    const onPreviewSubmit = vi.fn();
+    render(
+      <SchemeFormRenderer
+        schema={schema([field({ id: 'shopName', type: 'TEXT', label: 'Shop name', required: true })])}
+        context={baseCtx}
+        previewMode
+        onSubmitted={vi.fn()}
+        onPreviewSubmit={onPreviewSubmit}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText(/Shop name/i), { target: { value: 'Acme Store' } });
+    fireEvent.click(screen.getByRole('button', { name: /submit/i }));
+
+    const panel = await screen.findByTestId('preview-submit-result');
+    expect(enroll).not.toHaveBeenCalled();
+    expect(panel).toHaveTextContent('Acme Store');
+    expect(panel).toHaveTextContent('Shop name');
+    expect(onPreviewSubmit).toHaveBeenCalledWith({ shopName: 'Acme Store' });
+  });
+
+  it('(b) a failing (required-empty) submit still shows the validation errors and does not enroll', async () => {
+    render(
+      <SchemeFormRenderer
+        schema={schema([field({ id: 'shopName', type: 'TEXT', label: 'Shop name', required: true })])}
+        context={baseCtx}
+        previewMode
+        onSubmitted={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /submit/i }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.getByRole('alert')).toHaveTextContent(/is required/i);
+    expect(enroll).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('preview-submit-result')).not.toBeInTheDocument();
+  });
+
+  it('(c) a media upload does NOT call uploadMedia yet shows the captured state', async () => {
+    render(
+      <SchemeFormRenderer
+        schema={schema([field({ id: 'shot', type: 'IMAGE', label: 'Shopfront', required: true })])}
+        context={baseCtx}
+        previewMode
+        onSubmitted={vi.fn()}
+      />,
+    );
+
+    const input = screen.getByLabelText('Shopfront') as HTMLInputElement;
+    const file = new File([new Uint8Array([1, 2, 3])], 'shop.jpg', { type: 'image/jpeg' });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => expect(screen.getByText(/Captured/i)).toBeInTheDocument());
+    expect(uploadMedia).not.toHaveBeenCalled();
+
+    // The synthetic preview key is what a real submit would carry — proven via the panel.
+    fireEvent.click(screen.getByRole('button', { name: /submit/i }));
+    const panel = await screen.findByTestId('preview-submit-result');
+    expect(enroll).not.toHaveBeenCalled();
+    expect(panel).toHaveTextContent('preview://shop.jpg');
+  });
+
+  it('(d) conditional-required is still evaluated in preview', async () => {
+    render(
+      <SchemeFormRenderer
+        schema={schema([
+          field({ id: 'kind', type: 'DROPDOWN', options: ['A', 'OTHER'] }),
+          field({ id: 'other', type: 'TEXT', requiredWhen: { fieldId: 'kind', op: 'eq', value: 'OTHER' } }),
+        ])}
+        context={baseCtx}
+        previewMode
+        onSubmitted={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText(/Field kind/i), { target: { value: 'OTHER' } });
+    fireEvent.click(screen.getByRole('button', { name: /submit/i }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(enroll).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('preview-submit-result')).not.toBeInTheDocument();
+  });
+
+  it('(e) an OTP-required form auto-passes OTP without calling the real endpoints', async () => {
+    render(
+      <SchemeFormRenderer
+        schema={{
+          captureGpsOnSubmit: false,
+          requireOtp: true,
+          fields: [field({ id: 'ph', type: 'PHONE_OTP', label: 'Owner Mobile', otpRequired: true })],
+        }}
+        context={baseCtx}
+        previewMode
+        onSubmitted={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/preview — OTP auto-passed/i)).toBeInTheDocument();
+    // The number stays editable so a required value still validates like the real form.
+    fireEvent.change(screen.getByLabelText('Owner Mobile'), { target: { value: '9830011252' } });
+    fireEvent.click(screen.getByRole('button', { name: /submit/i }));
+
+    await screen.findByTestId('preview-submit-result');
+    expect(sendOtp).not.toHaveBeenCalled();
+    expect(verifyOtp).not.toHaveBeenCalled();
+    expect(enroll).not.toHaveBeenCalled();
+  });
+});
