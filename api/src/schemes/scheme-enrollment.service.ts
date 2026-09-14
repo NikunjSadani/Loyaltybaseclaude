@@ -1956,11 +1956,15 @@ export class SchemeEnrollmentService {
   }
 }
 
-/** Media-typed field set — a module-local copy of the helper's set (avoids a cyclic import surprise). */
+/**
+ * Media-typed field set — a module-local copy of the helper's set (avoids a cyclic import
+ * surprise). UPI_QR_SCAN is intentionally NOT here: its value is a live-scanned UPI VPA
+ * string (a value field), so extractMedia skips it and the VPA surfaces as a normal
+ * captured formValue (no image proxy / view path).
+ */
 const MEDIA_FIELD_SET: ReadonlySet<string> = new Set([
   'DOCUMENT',
   'IMAGE',
   'CAMERA',
-  'UPI_QR_SCAN',
   'SIGNATURE',
 ]);

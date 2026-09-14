@@ -159,7 +159,11 @@ function EnrollerEditForm({
   const isOn = (v: unknown) => v === true || v === 'true' || v === 'yes' || v === '1';
 
   const readOnly = (f: FormField) =>
-    MEDIA_FIELD_TYPES.has(f.type) || f.type === 'GPS_POINT' || f.type === 'CALCULATED' || f.type === 'LOOKUP' || f.type === 'PHONE_OTP';
+    MEDIA_FIELD_TYPES.has(f.type) || f.type === 'GPS_POINT' || f.type === 'CALCULATED' || f.type === 'LOOKUP' || f.type === 'PHONE_OTP' ||
+    // UPI_QR_SCAN is a live-scanned VPA value (no longer media). This lightweight self-edit
+    // form has no scanner and manual typing is not permitted for this field, so show the
+    // scanned VPA read-only ("<vpa>", unchanged) — it is preserved on the new version.
+    f.type === 'UPI_QR_SCAN';
 
   const save = async () => {
     setSaving(true);

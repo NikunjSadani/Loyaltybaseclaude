@@ -75,6 +75,12 @@ describe('renderExportValue (pure)', () => {
     expect(MEDIA_FIELD_TYPES.has('SIGNATURE')).toBe(true);
   });
 
+  it('does NOT treat UPI_QR_SCAN as media — it exports as the plain VPA text (not a hyperlink)', () => {
+    expect(MEDIA_FIELD_TYPES.has('UPI_QR_SCAN')).toBe(false);
+    const cell = renderExportValue(field({ id: 'u', type: 'UPI_QR_SCAN' }), '9876543210@paytm', link);
+    expect(cell).toBe('9876543210@paytm');
+  });
+
   it('renders a GPS_POINT as "lat, lng (±acc)"', () => {
     expect(
       renderExportValue(field({ id: 'g', type: 'GPS_POINT' }), { lat: 12.9, lng: 77.5, accuracy: 8 }, link),

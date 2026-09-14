@@ -369,9 +369,10 @@ export default function SchemeEnrollmentsView({
 const editInputCls = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]';
 
 // Field types the admin cannot edit inline — their captured value (media object key,
-// GPS fix, computed/display) is preserved untouched on the new version.
+// GPS fix, computed/display) is preserved untouched on the new version. UPI_QR_SCAN is a
+// plain VPA string (no longer media), so the admin correction tool CAN edit it as text.
 const UNEDITABLE_FIELD_TYPES = new Set<string>([
-  'DOCUMENT', 'IMAGE', 'CAMERA', 'UPI_QR_SCAN', 'SIGNATURE', 'GPS_POINT',
+  'DOCUMENT', 'IMAGE', 'CAMERA', 'SIGNATURE', 'GPS_POINT',
   'CALCULATED', 'LOOKUP', 'SECTION', 'DATA_DISPLAY',
   // PHONE_OTP is the consented number — server-pinned / carried-forward on edit, never editable here.
   'PHONE_OTP',
@@ -547,7 +548,7 @@ function EnrollmentDrawer({
                 <div className="grid grid-cols-2 gap-2">
                   {detail.media.map((m) => {
                     const href = rewriteMediaViewPath(m.viewPath);
-                    const isImage = /IMAGE|CAMERA|SIGNATURE|UPI/i.test(m.type);
+                    const isImage = /IMAGE|CAMERA|SIGNATURE/i.test(m.type);
                     return (
                       <a key={m.fieldId + m.key} href={href} target="_blank" rel="noopener noreferrer"
                         className="border border-gray-200 rounded-lg overflow-hidden hover:border-[var(--brand-primary)] transition-colors group">

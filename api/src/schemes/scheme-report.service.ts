@@ -41,13 +41,14 @@ const NAME_ALIAS_SET: ReadonlySet<string> = new Set(
  * Field types whose captured value is a stored GCS object key (media). In the
  * export these render as an AUTH-GATED view link (D30), NOT the raw key. Kept
  * local so it stays correct even as enrollment-form.helper's FORM_FIELD_TYPES is
- * extended by the sibling stream (adds SIGNATURE etc.).
+ * extended by the sibling stream (adds SIGNATURE etc.). UPI_QR_SCAN is NOT here:
+ * its captured value is a live-scanned UPI VPA string, exported as a plain text
+ * column (not a view link).
  */
 export const MEDIA_FIELD_TYPES = new Set<string>([
   'DOCUMENT',
   'IMAGE',
   'CAMERA',
-  'UPI_QR_SCAN',
   'SIGNATURE',
 ]);
 

@@ -154,6 +154,34 @@ describe('validateSchemeValues', () => {
     expect(validateSchemeValues(s, { m: ['A', 'Z'] }).length).toBe(1);
     expect(validateSchemeValues(s, { m: ['A', 'B'] })).toEqual([]);
   });
+  it('UPI_QR_SCAN is a VALUE (VPA string) field — required+empty fails, valid VPA passes, non-VPA fails format', () => {
+    const req = schema([f({ id: 'u', type: 'UPI_QR_SCAN', required: true })]);
+    // required + empty → required error
+    expect(validateSchemeValues(req, {}).length).toBe(1);
+    expect(validateSchemeValues(req, { u: '' }).length).toBe(1);
+    // a valid VPA string passes
+    expect(validateSchemeValues(req, { u: '9876543210@paytm' })).toEqual([]);
+    // a non-VPA string fails the lenient format check
+    const errs = validateSchemeValues(req, { u: 'not-a-upi' });
+    expect(errs.length).toBe(1);
+    expect(errs[0]).toMatch(/valid UPI ID/i);
+    // optional + present-but-invalid still fails format
+    const opt = schema([f({ id: 'u', type: 'UPI_QR_SCAN' })]);
+    expect(validateSchemeValues(opt, { u: 'garbage' }).length).toBe(1);
+    // optional + empty is fine
+    expect(validateSchemeValues(opt, {})).toEqual([]);
+  });
+  it('UPI_QR_SCAN grandfathers a legacy media OBJECT KEY (contains "/"), still rejects a bad non-key', () => {
+    const req = schema([f({ id: 'u', type: 'UPI_QR_SCAN', required: true })]);
+    // pre-conversion enrollment holding a legacy storage key → NOT a format error
+    expect(validateSchemeValues(req, { u: 'schemes/t1/abc.jpg' })).toEqual([]);
+    // a valid VPA still passes
+    expect(validateSchemeValues(req, { u: 'merchant@okhdfc' })).toEqual([]);
+    // a genuinely bad new value (no "@", no "/") still fails the format check
+    const errs = validateSchemeValues(req, { u: 'notaupi' });
+    expect(errs.length).toBe(1);
+    expect(errs[0]).toMatch(/valid UPI ID/i);
+  });
   it('errors when captureGpsOnSubmit is on but the form has no GPS_POINT field', () => {
     const s: EnrollmentFormSchema = {
       captureGpsOnSubmit: true, requireOtp: false, fields: [f({ id: 't', type: 'TEXT' })],

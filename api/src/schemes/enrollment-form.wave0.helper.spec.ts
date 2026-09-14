@@ -244,6 +244,30 @@ describe('validateSubmittedValues — Wave-0 coercion + resolution', () => {
     expect(validateSubmittedValues(s, { p: '12345' }).errors.length).toBe(1);
   });
 
+  it('UPI_QR_SCAN is a value (VPA string) — required+empty fails, valid VPA passes, non-VPA fails format', () => {
+    const s = schema([field({ id: 'u', type: 'UPI_QR_SCAN', required: true })]);
+    // required + empty → required error (not a "media reference" error)
+    expect(validateSubmittedValues(s, {}).errors.length).toBe(1);
+    // a valid VPA string passes
+    expect(validateSubmittedValues(s, { u: '9876543210@paytm' }).errors).toEqual([]);
+    // a non-VPA string fails the lenient format check
+    const { errors } = validateSubmittedValues(s, { u: 'not-a-upi' });
+    expect(errors.length).toBe(1);
+    expect(errors[0]).toMatch(/valid UPI ID/i);
+  });
+
+  it('UPI_QR_SCAN grandfathers a legacy media OBJECT KEY (contains "/"), still rejects a bad non-key', () => {
+    const s = schema([field({ id: 'u', type: 'UPI_QR_SCAN', required: true })]);
+    // pre-conversion enrollment holding a legacy storage key → NOT a format error
+    expect(validateSubmittedValues(s, { u: 'schemes/t1/abc.jpg' }).errors).toEqual([]);
+    // a valid VPA still passes
+    expect(validateSubmittedValues(s, { u: 'merchant@okhdfc' }).errors).toEqual([]);
+    // a genuinely bad new value (no "@", no "/") still fails the format check
+    const { errors } = validateSubmittedValues(s, { u: 'notaupi' });
+    expect(errors.length).toBe(1);
+    expect(errors[0]).toMatch(/valid UPI ID/i);
+  });
+
   it('requiredWhen makes a field conditionally required', () => {
     const s = schema([
       field({ id: 'active', type: 'TOGGLE' }),

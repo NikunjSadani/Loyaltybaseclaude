@@ -133,13 +133,17 @@ describe('validateFieldValues', () => {
     expect(result.valid).toBe(true);
   });
 
-  it('validates UPI_QR_SCAN field — required and empty fails', () => {
+  // UPI_QR_SCAN is a VALUE field: its stored value is the live-scanned UPI VPA STRING (not
+  // a media object key). This legacy campaign.ts validator only does presence checks; the
+  // lenient VPA *format* check lives in the real validators (scheme-types.validateSchemeValues
+  // + backend enrollment-form.helper.validateSubmittedValues) and is covered by their specs.
+  it('validates UPI_QR_SCAN field (value/VPA string) — required and empty fails', () => {
     const result = validateFieldValues([reqUpi], { r3: '' });
     expect(result.valid).toBe(false);
     expect(result.missingFieldIds).toContain('r3');
   });
 
-  it('validates UPI_QR_SCAN field — required and filled passes', () => {
+  it('validates UPI_QR_SCAN field (value/VPA string) — required and filled with a VPA passes', () => {
     const result = validateFieldValues([reqUpi], { r3: '9876543210@paytm' });
     expect(result.valid).toBe(true);
   });

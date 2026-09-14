@@ -32,9 +32,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle, Calculator, Camera, CheckCircle, Eye, FileText, Lock, MapPin,
-  Loader2, ShieldCheck, Upload, X,
+  Loader2, QrCode, ShieldCheck, Upload, X,
 } from 'lucide-react';
 import { schemeApi, type EnrollInput, type EnrollResult } from '@/lib/schemes';
+import { parseUpiFromQr } from '@/lib/upi-utils';
 import {
   DISPLAY_ONLY_FIELD_TYPES,
   PREFILLABLE_VALUE_FIELD_TYPES,
@@ -176,7 +177,7 @@ export function SchemeFormRenderer({
     [onError],
   );
 
-  // ── Media upload (CAMERA / DOCUMENT / IMAGE / UPI_QR_SCAN / SIGNATURE) ───────
+  // ── Media upload (CAMERA / DOCUMENT / IMAGE / SIGNATURE) ────────────────────
   // Returns the uploaded object key (null on failure) so a geotag caller can attach a
   // per-photo GPS fix and store `{ key, geo }` itself. By default it also stores the bare
   // key string into the field value (unchanged behaviour for every non-geotag caller);
@@ -684,14 +685,15 @@ function FieldRenderer(props: FieldRendererProps) {
 
     // ── Media ────────────────────────────────────────────────────────────────
     // CAMERA is a TRUE in-app live capture (webcam / rear camera) — NO gallery or
-    // file-picker fallback. DOCUMENT / IMAGE / UPI_QR_SCAN legitimately allow files
-    // and stay on the MediaField (file-input) path.
+    // file-picker fallback. DOCUMENT / IMAGE legitimately allow files and stay on the
+    // MediaField (file-input) path. UPI_QR_SCAN is a live QR decode → stored VPA STRING
+    // (a value field, NOT media) — its own scanner component, never a file picker.
     case 'CAMERA':
       return <CameraField {...props} req={req} />;
     case 'IMAGE':
       return <MediaField {...props} req={req} accept="image/*" icon="camera" />;
     case 'UPI_QR_SCAN':
-      return <MediaField {...props} req={req} accept="image/*" icon="camera" />;
+      return <UpiQrScanField {...props} req={req} />;
     case 'DOCUMENT':
       return <MediaField {...props} req={req} accept="image/*,application/pdf" icon="doc" />;
     case 'SIGNATURE':
@@ -762,7 +764,7 @@ function Labeled({
   );
 }
 
-// ── Media field (CAMERA / IMAGE / DOCUMENT / UPI_QR_SCAN) ──────────────────────
+// ── Media field (IMAGE / DOCUMENT) ────────────────────────────────────────────
 
 function MediaField({
   field, values, uploading, uploadError, uploadFile, req, accept, capture, icon, errorFieldIds,
@@ -1137,6 +1139,208 @@ function CameraField({
         </button>
       )}
       {/* Off-screen canvas — the capture target; never shown to the user. */}
+      <canvas ref={canvasRef} className="hidden" />
+    </Labeled>
+  );
+}
+
+// ── UPI QR scan field (UPI_QR_SCAN — TRUE live QR decode → stored VPA string) ──
+//
+// A live rear-camera QR scanner. Opens getUserMedia({video:{facingMode:'environment'}}),
+// polls frames every ~300ms, decodes with jsqr (dynamic import → kept out of the SSR
+// bundle), extracts the UPI VPA via parseUpiFromQr, and stores the VPA STRING into
+// values[field.id] — NOT an image / object key (never calls uploadFile). There is
+// deliberately NO gallery / file-picker and NO manual typing: a scanned VPA must come from
+// a live QR. Mirrors CameraField's lifecycle (re-entrancy guard, stop-all-tracks on
+// unmount / cancel / success) and error handling (camera denied/unavailable → inline error
+// + Retry). getUserMedia needs a SECURE CONTEXT (HTTPS or localhost) — satisfied on
+// staging/prod (HTTPS) and local dev (localhost).
+function UpiQrScanField({
+  field, values, setValue, req, errorFieldIds,
+}: FieldRendererProps & { req: boolean }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  // Re-entrancy guard (mirrors CameraField): a synchronous second tap before React
+  // re-renders must not start a second getUserMedia over the first.
+  const openingRef = useRef(false);
+
+  const [live, setLive] = useState(false);
+  const [opening, setOpening] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // The stored value is the extracted VPA string (never an object key).
+  const vpa = typeof values[field.id] === 'string' ? (values[field.id] as string) : '';
+  const highlight = Boolean(errorFieldIds?.has(field.id));
+
+  const stopStream = useCallback(() => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  }, []);
+
+  // Always release the camera on unmount — never leave the light on.
+  useEffect(() => () => stopStream(), [stopStream]);
+
+  // Attach the live stream once the <video> is actually mounted (renders only while `live`).
+  useEffect(() => {
+    if (live && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+    }
+  }, [live]);
+
+  const cancel = useCallback(() => {
+    stopStream();
+    setLive(false);
+  }, [stopStream]);
+
+  const openCamera = useCallback(async () => {
+    if (openingRef.current || live) return;
+    setError(null);
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      setError('Camera access is required to scan the QR — allow the camera and try again.');
+      return;
+    }
+    openingRef.current = true;
+    setOpening(true);
+    stopStream();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      setLive(true);
+    } catch (e) {
+      const name = (e as DOMException)?.name;
+      if (name === 'NotFoundError' || name === 'DevicesNotFoundError' || name === 'OverconstrainedError') {
+        setError('No camera found.');
+      } else {
+        setError('Camera access is required to scan the QR — allow the camera and try again.');
+      }
+    } finally {
+      openingRef.current = false;
+      setOpening(false);
+    }
+  }, [live, stopStream]);
+
+  // Poll frames while live: draw video → canvas → jsqr decode → parseUpiFromQr. On a valid
+  // VPA, store the STRING and stop the camera. An invalid / non-UPI QR is ignored (keep
+  // scanning). jsqr is dynamically imported so it never enters the SSR bundle.
+  useEffect(() => {
+    if (!live) return;
+    let cancelled = false;
+    const intervalId = setInterval(() => {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      canvas.width = video.videoWidth || 320;
+      canvas.height = video.videoHeight || 240;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      void import('jsqr').then(({ default: jsqr }) => {
+        if (cancelled) return;
+        const result = jsqr(imageData.data, imageData.width, imageData.height);
+        if (!result) return;
+        const parsed = parseUpiFromQr(result.data);
+        if (parsed) {
+          setValue(field.id, parsed);
+          stopStream();
+          setLive(false);
+        }
+      });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [live, field.id, setValue, stopStream]);
+
+  return (
+    <Labeled field={field} req={req} highlight={highlight}>
+      {/* `live` is checked BEFORE `vpa` so Rescan (which keeps the old VPA until a new
+          decode succeeds) actually shows the camera; a cancelled rescan falls back to the
+          previously-scanned VPA. */}
+      {live ? (
+        <div className="space-y-2">
+          <div
+            data-testid="upi-qr-camera-view"
+            className="relative rounded-xl overflow-hidden border border-gray-200 bg-black aspect-square"
+          >
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+              <div className="w-48 h-48 border-2 border-white/70 rounded-2xl" />
+            </div>
+            <p className="absolute bottom-3 left-0 right-0 text-center text-xs text-white/80 z-10">
+              Point camera at the UPI QR code
+            </p>
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              aria-label={field.label}
+              className="w-full h-full object-cover"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={cancel}
+            className="px-4 py-2 rounded-xl text-sm bg-gray-100 text-gray-600 flex items-center gap-1.5"
+          >
+            <X className="h-3.5 w-3.5" /> Cancel
+          </button>
+        </div>
+      ) : error ? (
+        <div className="space-y-2">
+          <p className="text-xs text-red-600 flex items-start gap-1.5 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5">
+            <AlertCircle className="h-3.5 w-3.5 text-red-500 shrink-0 mt-0.5" />
+            {error}
+          </p>
+          <button
+            type="button"
+            onClick={openCamera}
+            className="w-full flex items-center justify-center gap-2 py-2.5 border-2 border-dashed border-gray-200 rounded-xl text-sm text-gray-500 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] transition-colors"
+          >
+            <QrCode className="h-4 w-4" /> Retry
+          </button>
+        </div>
+      ) : vpa ? (
+        // Confirmed — the extracted VPA shown read-only; Rescan re-opens the camera and
+        // keeps this value until a NEW decode succeeds (or is cleared on a fresh scan).
+        <div
+          id={field.id}
+          data-testid={`upi-scanned-${field.id}`}
+          className="flex items-center gap-2 px-3 py-2.5 bg-green-50 border border-green-200 rounded-xl"
+        >
+          <CheckCircle className="h-3.5 w-3.5 text-green-500 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="text-[10px] font-semibold text-green-700">UPI ID scanned</p>
+            <p className="text-xs font-mono text-green-800 truncate">{vpa}</p>
+          </div>
+          <button
+            type="button"
+            onClick={openCamera}
+            className="ml-auto text-xs text-green-600 underline px-2 py-1 -my-1 shrink-0"
+          >
+            Rescan
+          </button>
+        </div>
+      ) : (
+        // NOTE: no id={field.id} on this button — a <label htmlFor> would otherwise
+        // override its accessible name (mirrors CameraField). The error ring still lands
+        // via errorFieldIds; the confirmed row above carries id={field.id} as the anchor.
+        <button
+          type="button"
+          onClick={openCamera}
+          disabled={opening}
+          className="w-full flex items-center justify-center gap-2 py-2.5 border-2 border-dashed border-gray-200 rounded-xl text-sm text-gray-500 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:opacity-50 transition-colors"
+        >
+          {opening ? <Loader2 className="h-4 w-4 animate-spin" /> : <QrCode className="h-4 w-4" />}
+          {opening ? 'Opening camera…' : 'Scan UPI QR'}
+        </button>
+      )}
+      {/* Off-screen canvas — the decode target; never shown to the user. */}
       <canvas ref={canvasRef} className="hidden" />
     </Labeled>
   );

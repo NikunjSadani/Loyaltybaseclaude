@@ -44,12 +44,15 @@ export const FORM_FIELD_TYPES = [
 ] as const;
 export type FormFieldType = (typeof FORM_FIELD_TYPES)[number];
 
-/** Field types whose captured value is a stored GCS object key (media). */
+/**
+ * Field types whose captured value is a stored GCS object key (media). UPI_QR_SCAN is
+ * NOT here: it is a live-camera QR scan whose stored value is the extracted UPI VPA
+ * STRING (a value field), so it renders/validates/exports as plain text, not a media key.
+ */
 export const MEDIA_FIELD_TYPES: ReadonlySet<FormFieldType> = new Set<FormFieldType>([
   'DOCUMENT',
   'IMAGE',
   'CAMERA',
-  'UPI_QR_SCAN',
   'SIGNATURE',
 ]);
 
@@ -61,11 +64,11 @@ export const DISPLAY_ONLY_FIELD_TYPES: ReadonlySet<FormFieldType> = new Set<Form
 
 /**
  * Value field types that may be prefilled from a roster/Excel column (D13 / Mode B).
- * Media (DOCUMENT/IMAGE/CAMERA/UPI_QR_SCAN/SIGNATURE), GPS_POINT, CALCULATED, LOOKUP,
- * SECTION and DATA_DISPLAY are EXCLUDED — a stored object key / GPS fix / computed /
- * structural value can never come from an Excel cell, and injecting a prefill string
- * into a media field id would corrupt it. Mirrors the backend + the admin builder's
- * prefillable-type gate.
+ * Media (DOCUMENT/IMAGE/CAMERA/SIGNATURE), UPI_QR_SCAN (scanned live, never prefilled),
+ * GPS_POINT, CALCULATED, LOOKUP, SECTION and DATA_DISPLAY are EXCLUDED — a stored object
+ * key / scanned VPA / GPS fix / computed / structural value can never come from an Excel
+ * cell, and injecting a prefill string into such a field id would corrupt it. Mirrors the
+ * backend + the admin builder's prefillable-type gate.
  */
 export const PREFILLABLE_VALUE_FIELD_TYPES: ReadonlySet<FormFieldType> = new Set<FormFieldType>([
   'TEXT',
@@ -516,6 +519,12 @@ export function resolveLookup(field: FormField, values: Record<string, unknown>)
 const TRUE_TOKENS = new Set(['true', '1', 'yes', 'on']);
 const FALSE_TOKENS = new Set(['false', '0', 'no', 'off']);
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/**
+ * Lenient UPI VPA (`handle@psp`, no whitespace either side of `@`) for a UPI_QR_SCAN value.
+ * Deliberately loose — the value is produced by a live QR decode (parseUpiFromQr), so this
+ * only guards against an obviously-malformed string; mirrors the backend UPI_VPA_RE.
+ */
+const UPI_VPA_RE = /^\S+@\S+$/;
 
 function isBlank(v: unknown): boolean {
   return (
@@ -578,6 +587,18 @@ export function validateSchemeValues(
       case 'PHONE_OTP': {
         const digits = String(raw).replace(/\D/g, '').slice(-10);
         if (digits.length !== 10) errors.push(`"${field.label}" must be a valid 10-digit mobile number.`);
+        break;
+      }
+      case 'UPI_QR_SCAN': {
+        // A live-scanned UPI VPA string (no longer a media object key). Required+empty is
+        // handled generically above; here we only lenient-format-check a present value.
+        // Back-compat GRANDFATHER: a pre-conversion enrollment may hold a legacy media
+        // OBJECT KEY here (e.g. "schemes/t1/abc.jpg"). A real scanned VPA NEVER contains
+        // "/", a storage key always does — so skip the format check for any value containing
+        // "/" (valid legacy value), keeping an unrelated edit on such a record from being
+        // rejected. A genuinely bad new value ("notaupi") still fails.
+        const upiVal = String(raw).trim();
+        if (!upiVal.includes('/') && !UPI_VPA_RE.test(upiVal)) errors.push(`"${field.label}" must be a valid UPI ID.`);
         break;
       }
       case 'TOGGLE': {

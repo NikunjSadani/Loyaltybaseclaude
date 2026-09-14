@@ -322,7 +322,12 @@ function PreviewField({ field }: { field: FormField }) {
       {(field.type === 'IMAGE' || field.type === 'CAMERA') && (
         <div className="border-2 border-dashed border-pink-200 rounded-lg p-2 text-center bg-pink-50/40"><Camera className="w-4 h-4 text-pink-300 mx-auto" /><p className="text-[9px] text-pink-400">Capture photo</p></div>
       )}
-      {field.type === 'UPI_QR_SCAN' && box('scan / type UPI id')}
+      {field.type === 'UPI_QR_SCAN' && (
+        <div className="border-2 border-dashed border-pink-200 rounded-lg p-2 text-center bg-pink-50/40">
+          <QrCode className="w-4 h-4 text-pink-300 mx-auto" />
+          <p className="text-[9px] text-pink-400">Scan QR (camera)</p>
+        </div>
+      )}
       {field.type === 'SIGNATURE' && (
         <div className="border border-gray-200 rounded-lg h-10 bg-white flex items-center justify-center"><PenLine className="w-4 h-4 text-gray-300" /></div>
       )}

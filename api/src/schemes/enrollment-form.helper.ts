@@ -52,12 +52,15 @@ export type GpsCaptureTrigger = (typeof GPS_CAPTURE_TRIGGERS)[number];
  */
 const DISPLAY_ONLY_TYPES: ReadonlySet<string> = new Set(['DATA_DISPLAY', 'SECTION']);
 
-/** Field types whose value is a stored GCS object key (media). */
+/**
+ * Field types whose value is a stored GCS object key (media). UPI_QR_SCAN is NOT
+ * here: it is a live-camera QR scan whose stored value is the extracted UPI VPA
+ * STRING (a value field), not an object key — validated/exported as a plain string.
+ */
 export const MEDIA_FIELD_TYPES: ReadonlySet<string> = new Set([
   'DOCUMENT',
   'IMAGE',
   'CAMERA',
-  'UPI_QR_SCAN',
   'SIGNATURE',
 ]);
 
@@ -206,8 +209,8 @@ function normalizeGeo(g: unknown): GpsCapture | undefined {
 
 /**
  * Value-type fields that a Mode-B Excel variable can prefill AND lock. Media
- * (DOCUMENT/IMAGE/CAMERA/UPI_QR_SCAN/SIGNATURE), GPS_POINT, and structural/display
- * types (SECTION/DATA_DISPLAY) cannot be Excel-prefilled. CALCULATED/LOOKUP are
+ * (DOCUMENT/IMAGE/CAMERA/SIGNATURE), UPI_QR_SCAN (live-scanned VPA), GPS_POINT, and
+ * structural/display types (SECTION/DATA_DISPLAY) cannot be Excel-prefilled. CALCULATED/LOOKUP are
  * server-derived (their own overwrite wins), and PHONE_OTP owns its own pin (the
  * consent-OTP path) — so all three are excluded here too.
  */
@@ -928,6 +931,14 @@ export interface SubmissionValidationResult {
 /** RFC-5322-lite email check — good enough to reject obvious garbage without false-rejecting real addresses. */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/**
+ * Lenient UPI VPA (Virtual Payment Address) shape for a UPI_QR_SCAN value — `handle@psp`,
+ * no whitespace either side of the `@`. Deliberately loose (mirrors the FE upi-utils lenient
+ * check): the value is produced by a live QR decode → parseUpiFromQr, so this only guards
+ * against an obviously-malformed string, never re-derives the strict client rule.
+ */
+const UPI_VPA_RE = /^\S+@\S+$/;
+
 /** Truthy/falsy tokens accepted for a TOGGLE (yes/no) field. */
 const TRUE_TOKENS = new Set(['true', '1', 'yes', 'on']);
 const FALSE_TOKENS = new Set(['false', '0', 'no', 'off']);
@@ -1024,7 +1035,7 @@ export function validateSubmittedValues(
     // Type validation — only when a value is present.
     if (empty) continue;
 
-    // Media fields (DOCUMENT/IMAGE/CAMERA/UPI_QR_SCAN/SIGNATURE): the value is a bare
+    // Media fields (DOCUMENT/IMAGE/CAMERA/SIGNATURE): the value is a bare
     // object-key string OR a `{ key, geo? }` object carrying that photo's shutter-time
     // GPS fix (per-photo geotag). Both shapes are accepted; a bare string stays valid
     // (full back-compat). When a geo IS embedded, validate its shape/Earth-range and the
@@ -1096,6 +1107,21 @@ export function validateSubmittedValues(
         }
         break;
       }
+      case 'UPI_QR_SCAN': {
+        // A live-scanned UPI VPA string (no longer a media object key). The required +
+        // empty case is handled above; here we only lenient-format-check a present value.
+        const upiVal = String(rawValue).trim();
+        // Back-compat GRANDFATHER: a pre-conversion enrollment may hold a legacy media
+        // OBJECT KEY here (old MediaField behaviour), e.g. "schemes/t1/abc.jpg". A real
+        // scanned VPA NEVER contains "/", a storage key always does — so skip the format
+        // check for any value containing "/" (treat it as a valid legacy value). This keeps
+        // an unrelated edit on such a record from being rejected on the shared enroll/edit
+        // path. A genuinely bad new value ("notaupi": no "@", no "/") still fails.
+        if (!upiVal.includes('/') && !UPI_VPA_RE.test(upiVal)) {
+          errors.push(`Field "${field.label}" (${field.id}) must be a valid UPI ID.`);
+        }
+        break;
+      }
       case 'TOGGLE': {
         const ok =
           typeof rawValue === 'boolean' ||
@@ -1146,9 +1172,10 @@ export function validateSubmittedValues(
         break;
       }
       // TEXT (and any other non-cased value type): any non-empty value accepted.
-      // Media types (IMAGE/CAMERA/DOCUMENT/UPI_QR_SCAN/SIGNATURE) never reach here — they are
+      // Media types (IMAGE/CAMERA/DOCUMENT/SIGNATURE) never reach here — they are
       // validated + `continue`d by the MEDIA_FIELD_TYPES block above (which accepts a bare key
-      // string OR a `{ key, geo }` object and rejects a keyless value).
+      // string OR a `{ key, geo }` object and rejects a keyless value). UPI_QR_SCAN is a value
+      // field (VPA string) and IS handled by its own case above.
       default:
         break;
     }
