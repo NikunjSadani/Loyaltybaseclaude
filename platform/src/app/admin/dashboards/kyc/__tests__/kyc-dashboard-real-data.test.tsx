@@ -13,12 +13,16 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import KycDashboardPage from '../page';
 
 const PAYLOAD = {
   scope: { tenant: 'Deoleo', generatedAt: '2026-06-27T08:30:00.000Z' },
+  // Program list comes from the ENDPOINT (real distinct outlet.programName values). These are
+  // deliberately NOT the old static Gifsy-settings defaults ('Trade Loyalty'/'Gold Programme') so a
+  // passing test proves the options are sourced from the response, not a hardcoded allow-list.
+  availablePrograms: ['Deoleo Trade Loyalty', 'Silver Scheme'],
   universe: { addressableOutlets: 1000, notInterested: 60, inactive: 40 },
   headline: {
     coveragePct: 73.4,
@@ -135,5 +139,51 @@ describe('Admin KYC Dashboard — real data', () => {
     expect(screen.queryByText('73.4%')).not.toBeInTheDocument();
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+  });
+
+  it('RD6: Program filter defaults to All programs, first-loads with NO param, options come from the response', async () => {
+    const fetchMock = mockFetchOk();
+    render(<KycDashboardPage />);
+    // Wait for the loaded dashboard so we query the CONTENT-branch select (the loading-branch
+    // header renders one too, then detaches on load).
+    await screen.findByTestId('kyc-dashboard');
+    const select = screen.getByTestId('kyc-program-filter') as HTMLSelectElement;
+    expect(select).toBeInTheDocument();
+    expect(select.value).toBe(''); // '' sentinel = All programs = no filter
+    // Options are sourced from the endpoint's availablePrograms (NOT a static allow-list): a
+    // program name that only exists in the response must render as an option.
+    expect(screen.getByRole('option', { name: 'Deoleo Trade Loyalty' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Silver Scheme' })).toBeInTheDocument();
+    // The default (All programs) load hits the endpoint WITHOUT a programName query param.
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some((c) => String(c[0]) === '/api/admin/dashboard/kyc'),
+      ).toBe(true),
+    );
+    // No call carried a programName param on the default view.
+    expect(
+      fetchMock.mock.calls.some((c) => String(c[0]).includes('programName=')),
+    ).toBe(false);
+  });
+
+  it('RD7: changing the Program filter refetches the dashboard scoped to that program', async () => {
+    const fetchMock = mockFetchOk();
+    render(<KycDashboardPage />);
+    // Query the CONTENT-branch select (stable) after the first load resolves.
+    await screen.findByTestId('kyc-dashboard');
+    const select = screen.getByTestId('kyc-program-filter') as HTMLSelectElement;
+    // Options come from the response — pick one that is NOT an old static default.
+    fireEvent.change(select, { target: { value: 'Deoleo Trade Loyalty' } });
+    expect(select.value).toBe('Deoleo Trade Loyalty');
+    // A scoped refetch is issued with the encoded programName param.
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some((c) =>
+          String(c[0]).includes('/api/admin/dashboard/kyc?programName=Deoleo%20Trade%20Loyalty'),
+        ),
+      ).toBe(true),
+    );
+    // The dashboard stays rendered across the scoped refetch (no full-page spinner blank).
+    expect(await screen.findByTestId('kyc-dashboard')).toBeInTheDocument();
   });
 });

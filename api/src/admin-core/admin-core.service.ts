@@ -1731,9 +1731,25 @@ export class AdminCoreService {
    * behave exactly like the rest of the admin dashboard. Every query below is
    * tenant-filtered (no cross-tenant leak — fixes slaMetrics() bug (b)).
    */
-  async kycDashboard(user: JwtPayload) {
+  async kycDashboard(user: JwtPayload, programName?: string) {
     const clientId = user.clientId;
     const now = Date.now();
+    // Optional program scope. Only empty / whitespace / undefined → no filter (default dashboard,
+    // unchanged); every other value (incl. a program literally named "ALL") is a real filter that
+    // must match an actual outlet.programName. The FE sources the dropdown from availablePrograms
+    // (real distinct values) below, so the value always matches real data.
+    const programFilter =
+      programName && programName.trim().length > 0 ? programName.trim() : null;
+    // Ties a KycSubmission to the selected program via its owning partner's outlets: a submission
+    // carries no programName; its owner ChannelPartner reaches outlets through the OutletOwner
+    // relation (Outlet.programName). GRAIN NOTE: quality/rejection are owner(submission)-grain, so
+    // `some` ("owns ≥1 outlet in this program") means a multi-program owner contributes to EACH of
+    // its programs — per-program tallies therefore do NOT sum to the unfiltered total. Submissions
+    // whose partner is null are excluded from a program-scoped view (no program to attribute to).
+    // When unfiltered this contributes nothing.
+    const submissionProgramScope = programFilter
+      ? { partner: { outlets: { some: { programName: programFilter } } } }
+      : {};
     // KYC SLA ages count BUSINESS hours only (Mon–Fri, minus the national holiday
     // calendar) — the stage targets are business hours, not calendar. The two targets are
     // per-tenant configurable (field 24h / gifsy 96h defaults), resolved once here.
@@ -1742,7 +1758,15 @@ export class AdminCoreService {
 
     // ── Addressable universe + the canonical per-outlet status derivation ──────
     // ONE findMany with latest-submission include (mirrors buildOutlets): no N+1.
-    const [addressableOutlets, notInterested, inactive, reUploadCount, totalSubmissions, rejectionHistory] =
+    const [
+      addressableOutlets,
+      notInterested,
+      inactive,
+      reUploadCount,
+      totalSubmissions,
+      rejectionHistory,
+      programRows,
+    ] =
       await Promise.all([
         this.prisma.outlet.findMany({
           // Addressable = every live outlet we are trying to onboard. New outlets are
@@ -1755,6 +1779,9 @@ export class AdminCoreService {
             clientId,
             deletedAt: null,
             deactivatedAt: null,
+            // Program scope (no-op when unfiltered) — this is what makes every outlet-derived
+            // metric (headline, funnel, buckets, SLA, coverageBy) fold to the selected program.
+            ...(programFilter ? { programName: programFilter } : {}),
             // Prisma's `{ notIn }` EXCLUDES NULL rows. Almost every outlet has
             // kycIntent=NULL (only sales-marked ones are NOT_INTERESTED, admin-parked ones
             // PARKED), so an explicit OR is required to keep them — otherwise addressable → 0.
@@ -1787,9 +1814,15 @@ export class AdminCoreService {
           },
         }),
 
-        // Informational counts — NOT part of the coverage denominator.
+        // Informational counts — NOT part of the coverage denominator. Program-scoped too so
+        // the "Not Interested / inactive in universe" tile matches the filtered universe.
         this.prisma.outlet.count({
-          where: { clientId, deletedAt: null, kycIntent: 'NOT_INTERESTED' },
+          where: {
+            clientId,
+            deletedAt: null,
+            kycIntent: 'NOT_INTERESTED',
+            ...(programFilter ? { programName: programFilter } : {}),
+          },
         }),
         this.prisma.outlet.count({
           // Genuinely DEACTIVATED (not merely KYC-pending) — deactivatedAt is set.
@@ -1798,25 +1831,49 @@ export class AdminCoreService {
             clientId,
             deletedAt: null,
             deactivatedAt: { not: null },
+            ...(programFilter ? { programName: programFilter } : {}),
             OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
           },
         }),
 
-        // Quality — re-upload rate over ALL submissions in scope (tenant-filtered).
+        // Quality — re-upload rate over ALL submissions in scope (tenant-filtered + program-scoped
+        // via the owner partner's outlets so the rate matches the filtered headline).
         this.prisma.kycSubmission.count({
-          where: { user: { clientId }, status: 'RE_UPLOAD_REQUIRED' },
+          where: { user: { clientId }, status: 'RE_UPLOAD_REQUIRED', ...submissionProgramScope },
         }),
         this.prisma.kycSubmission.count({
-          where: { user: { clientId } },
+          where: { user: { clientId }, ...submissionProgramScope },
         }),
 
         // Rejection-reason tally — TENANT-FILTERED via kycSubmission → user.clientId
-        // (slaMetrics() bug (b) was the missing tenant filter here).
+        // (slaMetrics() bug (b) was the missing tenant filter here) + program-scoped via the
+        // owner partner's outlets so rejection reasons match the filtered headline.
         this.prisma.kycStatusHistory.findMany({
-          where: { toStatus: 'REJECTED', kycSubmission: { user: { clientId } } },
+          where: {
+            toStatus: 'REJECTED',
+            kycSubmission: { user: { clientId }, ...submissionProgramScope },
+          },
           select: { notes: true },
         }),
+
+        // Dropdown source — the FULL set of real distinct programName values for this tenant,
+        // IGNORING the program filter (so the option list never collapses to the current
+        // selection). Sourced from the outlets themselves, so every option matches an actual
+        // outlet.programName value the filter can hit (unlike the settings allow-list, which is
+        // free-text-independent). Null programNames are excluded (there's no program to select).
+        this.prisma.outlet.findMany({
+          where: { clientId, deletedAt: null, programName: { not: null } },
+          select: { programName: true },
+          distinct: ['programName'],
+          orderBy: { programName: 'asc' },
+        }),
       ]);
+
+    // Flatten + defensively drop any blank/whitespace program names (the query already excludes
+    // NULL and sorts ascending, so this stays alphabetical).
+    const availablePrograms = programRows
+      .map((r) => r.programName)
+      .filter((p): p is string => !!p && p.trim().length > 0);
 
     const addressableCount = addressableOutlets.length;
 
@@ -2015,6 +2072,9 @@ export class AdminCoreService {
 
     return {
       scope: { tenant: tenantSlug, generatedAt: new Date().toISOString() },
+      // Full tenant program list (real distinct outlet.programName values) for the FE dropdown —
+      // ALWAYS the complete list, never narrowed by the active filter.
+      availablePrograms,
       universe: {
         addressableOutlets: addressableCount,
         notInterested,

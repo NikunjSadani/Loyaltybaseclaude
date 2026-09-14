@@ -17,6 +17,12 @@ import {
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { authHeader } from '@/lib/api-client';
 
+// "All programs" sentinel = empty string (no filter). Real programNames are never blank, so '' is a
+// safe sentinel — a program literally named "ALL" now filters correctly. The option list comes from
+// the endpoint's `availablePrograms` (real distinct outlet.programName values), so every option
+// matches data the filter can actually hit.
+const ALL_PROGRAMS = '';
+
 const DARK_NAVY = '#1A1A2E';
 
 /* ─── API response model (precise to the endpoint contract) ─────────────────── */
@@ -37,6 +43,7 @@ interface SlaBucket {
 
 interface KycDashboardData {
   scope: { tenant: string; generatedAt: string };
+  availablePrograms: string[];
   universe: { addressableOutlets: number; notInterested: number; inactive: number };
   headline: {
     coveragePct: number;
@@ -205,11 +212,20 @@ export default function AdminKycDashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<keyof KycDashboardData['coverageBy']>('state');
 
+  // Program filter (default = all programs). Options come from the endpoint's availablePrograms
+  // (real distinct outlet.programName values), so every option matches data the filter can hit.
+  const [programName, setProgramName] = useState<string>(ALL_PROGRAMS);
+  const programOptions = data?.availablePrograms ?? [];
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetch('/api/admin/dashboard/kyc', { headers: { ...authHeader() } })
+    // Only append the param for a real selection ('' = All programs = no filter).
+    const url = programName
+      ? `/api/admin/dashboard/kyc?programName=${encodeURIComponent(programName)}`
+      : '/api/admin/dashboard/kyc';
+    fetch(url, { headers: { ...authHeader() } })
       .then(async (r) => {
         if (!r.ok) throw new Error(`Request failed (${r.status})`);
         const json: unknown = await r.json();
@@ -227,7 +243,7 @@ export default function AdminKycDashboardPage() {
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, []);
+  }, [programName]);
 
   const funnelMax = useMemo(
     () => (data && data.funnel.length ? Math.max(...data.funnel.map((s) => s.count), 1) : 1),
@@ -236,12 +252,54 @@ export default function AdminKycDashboardPage() {
 
   const coverageRows = data ? data.coverageBy[activeTab] : [];
 
-  /* ── Loading state ── */
-  if (loading) {
+  // A refetch is in flight while the dashboard is already showing (program switch) → keep the
+  // dashboard rendered and show a small inline indicator, instead of blanking to a full-page spinner.
+  const refetching = loading && !!data;
+
+  /* ── Program filter — shared across loading / error / content so it stays usable
+        (the selected program scopes the ENTIRE dashboard; default = All programs). ── */
+  const programFilter = (
+    <div className="flex items-center gap-2">
+      {refetching && (
+        <span className="flex items-center gap-1 text-[11px] text-gray-400" data-testid="kyc-dashboard-refetching">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          Updating…
+        </span>
+      )}
+      <label htmlFor="kyc-program-filter" className="text-xs font-medium text-gray-500">
+        Program
+      </label>
+      <select
+        id="kyc-program-filter"
+        data-testid="kyc-program-filter"
+        aria-label="Program"
+        value={programName}
+        onChange={(e) => setProgramName(e.target.value)}
+        className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm text-gray-800 bg-white focus:outline-none focus:border-[var(--brand-primary)]"
+      >
+        <option value={ALL_PROGRAMS}>All programs</option>
+        {programOptions.map((p) => (
+          <option key={p} value={p}>{p}</option>
+        ))}
+      </select>
+    </div>
+  );
+
+  /* ── Initial loading state (full-page spinner ONLY before the first payload). A refetch on a
+        program switch keeps the current dashboard visible with the inline "Updating…" indicator. ── */
+  if (loading && !data) {
     return (
-      <div className="flex flex-col items-center justify-center py-32 text-gray-400" data-testid="kyc-dashboard-loading">
-        <Loader2 className="w-8 h-8 animate-spin mb-3" />
-        <p className="text-sm">Loading KYC dashboard…</p>
+      <div className="space-y-6">
+        <div className="flex flex-wrap items-end justify-between gap-2">
+          <h1 className="text-2xl font-bold tracking-tight" style={{ color: DARK_NAVY }}>
+            KYC Dashboard
+          </h1>
+          {programFilter}
+        </div>
+        <div className="flex flex-col items-center justify-center py-32 text-gray-400" data-testid="kyc-dashboard-loading">
+          <Loader2 className="w-8 h-8 animate-spin mb-3" />
+          <p className="text-sm">Loading KYC dashboard…</p>
+        </div>
       </div>
     );
   }
@@ -250,10 +308,11 @@ export default function AdminKycDashboardPage() {
   if (error || !data) {
     return (
       <div className="space-y-6">
-        <div>
+        <div className="flex flex-wrap items-end justify-between gap-2">
           <h1 className="text-2xl font-bold tracking-tight" style={{ color: DARK_NAVY }}>
             KYC Dashboard
           </h1>
+          {programFilter}
         </div>
         <Card className="border border-red-100 shadow-sm rounded-2xl" data-testid="kyc-dashboard-error">
           <CardContent className="py-12 flex flex-col items-center text-center gap-2">
@@ -273,6 +332,39 @@ export default function AdminKycDashboardPage() {
     ? Math.max(...quality.topRejectionReasons.map((r) => r.count), 1)
     : 1;
 
+  /* ── Empty state: a specific program is selected but it has no addressable outlets. Show a light
+        note (header + Program filter stay visible so the user can switch back) rather than a whole
+        dashboard of zeros. Not shown for "All programs" (a genuinely empty tenant renders normally). ── */
+  if (programName && universe.addressableOutlets === 0) {
+    return (
+      <div className="space-y-6" data-testid="kyc-dashboard">
+        <div className="flex flex-wrap items-end justify-between gap-2">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight" style={{ color: DARK_NAVY }}>
+              KYC Dashboard
+            </h1>
+            <p className="text-sm text-gray-500 mt-1">
+              {scope.tenant} · Outlet onboarding &amp; verification coverage
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-2">
+            {programFilter}
+            <p className="text-xs text-gray-400">as of {fmtTimestamp(scope.generatedAt)}</p>
+          </div>
+        </div>
+        <Card className="border border-gray-100 shadow-sm rounded-2xl" data-testid="kyc-dashboard-empty">
+          <CardContent className="py-12 flex flex-col items-center text-center gap-2">
+            <Store className="w-8 h-8 text-gray-300" />
+            <p className="text-sm font-semibold text-gray-600">No outlets found for this program.</p>
+            <p className="text-xs text-gray-400 max-w-md">
+              No addressable outlets are tagged to “{programName}”. Pick another program or switch back to All programs.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6" data-testid="kyc-dashboard">
 
@@ -286,7 +378,10 @@ export default function AdminKycDashboardPage() {
             {scope.tenant} · Outlet onboarding &amp; verification coverage
           </p>
         </div>
-        <p className="text-xs text-gray-400">as of {fmtTimestamp(scope.generatedAt)}</p>
+        <div className="flex flex-col items-end gap-2">
+          {programFilter}
+          <p className="text-xs text-gray-400">as of {fmtTimestamp(scope.generatedAt)}</p>
+        </div>
       </div>
 
       {/* ── Headline stat cards ── */}

@@ -33,11 +33,15 @@ export class AdminDashboardController {
    * KYC program-health aggregation — replaces a fabricated FE dashboard with real,
    * tenant-scoped data. Same guards/scope as /kpis (GIFSY_ADMIN, CLIENT_ADMIN,
    * MIS_USER; scoped by user.clientId). See AdminCoreService.kycDashboard.
+   *
+   * Optional `programName` scopes the ENTIRE dashboard (headline, funnel, SLA,
+   * buckets, quality/rejection AND coverageBy) to one program. Empty / 'ALL' /
+   * omitted = no filter (unchanged behaviour).
    */
   @Get('kyc')
   @RequirePermission('reports:read')
-  kyc(@CurrentUser() user: JwtPayload) {
-    return this.svc.kycDashboard(user);
+  kyc(@CurrentUser() user: JwtPayload, @Query('programName') programName?: string) {
+    return this.svc.kycDashboard(user, programName);
   }
 
   /** Program Health — brand-admin view (activation, participation, points economy,
