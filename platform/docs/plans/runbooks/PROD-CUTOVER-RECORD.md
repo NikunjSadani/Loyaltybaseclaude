@@ -1,8 +1,8 @@
 # Production Cutover — Record (A-9)
 
-> ⚠️ **STALE — as-run entries below STOP at cutover #6 (`c36f6c8`, 2026-07-06).** Cutovers **#7–#46** were not
+> ⚠️ **STALE — as-run entries below STOP at cutover #6 (`c36f6c8`, 2026-07-06).** Cutovers **#7–#47** were not
 > logged here. The **canonical cutover record** (SHAs · payloads · migrations · verification) is now memory
-> **`[[deoleo-go-live-bundle]]`** + the **CUTOVER LEDGER table in `RESUME.md`**. Current prod = **`9f4f385`** (cutover #46, 2026-09-14 — KYC whole-dashboard program-name filter + UPI_QR_SCAN true live-camera scanner; #45=`399cfa7` the 9-change batch). 🟡 develop = `5ad9acc` ahead by the scheme-builder Live Preview (staging only). ⚠️ **DEPLOY IS NOW MANUAL** — `deploy.yml` is `workflow_dispatch`-only; a FF `develop→main` NO LONGER deploys; prod ships ONLY via GitHub Actions → "Deploy — Production (main)" → Run workflow.
+> **`[[deoleo-go-live-bundle]]`** + the **CUTOVER LEDGER table in `RESUME.md`**. Current prod = **`83c4af4`** (cutover #47, 2026-09-15 — scheme-builder Live Preview + imageUrls validation fix + sales-enroll pagination fix; #46=`9f4f385`, #45=`399cfa7`). (develop carries only a docs update on top of prod.) ⚠️ **DEPLOY IS NOW MANUAL** — `deploy.yml` is `workflow_dispatch`-only; a FF `develop→main` NO LONGER deploys; prod ships ONLY via GitHub Actions → "Deploy — Production (main)" → Run workflow.
 >
 > Executed 2026-06-20. This is the **as-run record** of the Deoleo production cutover. The cutover was
 > performed directly (each step gated by an independent adversarial audit) rather than handed off as a
