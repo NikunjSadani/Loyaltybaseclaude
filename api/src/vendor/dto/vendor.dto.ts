@@ -18,6 +18,7 @@ import {
   VendorGrantStatus,
   VendorStatus,
 } from '@prisma/client';
+import { IsImageRef } from '../../common/validators/is-image-ref.validator';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Gifsy vendor management — /v1/admin/vendors  (@Roles GIFSY_ADMIN)
@@ -106,7 +107,7 @@ export class VendorCreateCatalogueDto {
 
   @IsOptional()
   @IsArray()
-  @IsUrl({}, { each: true })
+  @IsImageRef({ each: true })
   imageUrls?: string[];
 
   @IsEnum(PayoutMode)
@@ -152,7 +153,7 @@ export class VendorUpdateCatalogueDto {
 
   @IsOptional()
   @IsArray()
-  @IsUrl({}, { each: true })
+  @IsImageRef({ each: true })
   imageUrls?: string[];
 
   @IsOptional()

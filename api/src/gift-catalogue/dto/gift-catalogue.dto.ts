@@ -6,13 +6,13 @@ import {
   IsInt,
   IsOptional,
   IsString,
-  IsUrl,
   Max,
   Min,
   MinLength,
   ValidateNested,
 } from 'class-validator';
 import { GiftAmountType, GiftFulfilmentChannel, GiftMasterStatus, PayoutMode } from '@prisma/client';
+import { IsImageRef } from '../../common/validators/is-image-ref.validator';
 
 /**
  * Gift Catalogue & Dispatch — Wave 1 PLATFORM catalogue DTOs.
@@ -39,7 +39,7 @@ export class CreateGiftCategoryDto {
   parentId?: string;
 
   @IsOptional()
-  @IsUrl()
+  @IsImageRef()
   imageUrl?: string;
 
   @IsOptional()
@@ -69,7 +69,7 @@ export class UpdateGiftCategoryDto {
   parentId?: string;
 
   @IsOptional()
-  @IsUrl()
+  @IsImageRef()
   imageUrl?: string;
 
   @IsOptional()
@@ -106,7 +106,7 @@ export class CreateGiftMasterDto {
 
   @IsOptional()
   @IsArray()
-  @IsUrl({}, { each: true })
+  @IsImageRef({ each: true })
   imageUrls?: string[];
 
   @IsOptional()
@@ -187,7 +187,7 @@ export class UpdateGiftMasterDto {
 
   @IsOptional()
   @IsArray()
-  @IsUrl({}, { each: true })
+  @IsImageRef({ each: true })
   imageUrls?: string[];
 
   @IsOptional()

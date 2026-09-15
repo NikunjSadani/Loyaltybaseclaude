@@ -23,6 +23,7 @@ import {
   RedemptionStatus,
   RewardCatalogStatus,
 } from '@prisma/client';
+import { IsImageRef } from '../../common/validators/is-image-ref.validator';
 
 /**
  * Catalog listing filters — mirror the source query params on
@@ -427,7 +428,7 @@ export class CreateRewardCategoryDto {
   parentId?: string;
 
   @IsOptional()
-  @IsUrl()
+  @IsImageRef()
   imageUrl?: string;
 
   @IsOptional()
@@ -462,7 +463,7 @@ export class UpdateRewardCategoryDto {
   parentId?: string;
 
   @IsOptional()
-  @IsUrl()
+  @IsImageRef()
   imageUrl?: string;
 
   @IsOptional()
@@ -507,7 +508,7 @@ export class CreateRewardCatalogDto {
   /** Array of image URLs; stored as the `imageUrls` Json column. */
   @IsOptional()
   @IsArray()
-  @IsUrl({}, { each: true })
+  @IsImageRef({ each: true })
   imageUrls?: string[];
 
   @Type(() => Number)
@@ -581,7 +582,7 @@ export class UpdateRewardCatalogDto {
 
   @IsOptional()
   @IsArray()
-  @IsUrl({}, { each: true })
+  @IsImageRef({ each: true })
   imageUrls?: string[];
 
   @IsOptional()
