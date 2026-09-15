@@ -118,26 +118,62 @@ export function SchemeEnrollSheet({
   // source — deferred. See owner note.
   const allowEnrollerEdit = false;
 
+  // BUG-FIX (only-first-50-outlets): the backend `GET .../sales-targets` paginates at
+  // 50/page by default (`@Max(200)`), returning `{ targets, pagination: { pages, … } }`.
+  // The old loader fetched page 1 only, so a scheme reaching >50 outlets showed just 50 and
+  // the client-side search couldn't find the rest. We now load ALL pages: page 1 at limit 200
+  // (the DTO max) to learn `pagination.pages`, then pages 2..N in PARALLEL (Promise.all — the
+  // total is known after page 1, order is preserved by the array), concatenating every page's
+  // `targets` in order. If ANY page errors we surface the load error and show nothing partial
+  // (a half list would silently hide reachable outlets — worse than an explicit failure).
+  // `pages` is hard-capped at MAX_PAGES so a pathological server value can't loop unbounded.
   useEffect(() => {
     let cancelled = false;
     setTargets(null);
     setLoadError(null);
-    schemeApi
-      .getSalesTargets(scheme.id)
-      .then((r) => {
+
+    const PAGE_LIMIT = 200; // backend DTO @Max(200)
+    const MAX_PAGES = 100; // hard cap (≤ 20k targets) — guards against a bad server `pages`
+
+    (async () => {
+      try {
+        const first = await schemeApi.getSalesTargets(scheme.id, { page: 1, limit: PAGE_LIMIT });
         if (cancelled) return;
-        if (r.success) setTargets(r.data.targets);
-        else {
+        if (!first.success) {
           setTargets([]);
-          setLoadError(r.error);
+          setLoadError(first.error);
+          return;
         }
-      })
-      .catch(() => {
+        const all: SalesTarget[] = [...first.data.targets];
+        const totalPages = Math.min(first.data.pagination?.pages ?? 1, MAX_PAGES);
+        if (totalPages > 1) {
+          const rest = await Promise.all(
+            Array.from({ length: totalPages - 1 }, (_, i) =>
+              schemeApi.getSalesTargets(scheme.id, { page: i + 2, limit: PAGE_LIMIT }),
+            ),
+          );
+          if (cancelled) return;
+          for (const r of rest) {
+            if (!r.success) {
+              // A single failed page means we can't guarantee a complete list — fail loudly
+              // rather than render a partial one that hides reachable outlets.
+              setTargets([]);
+              setLoadError(r.error);
+              return;
+            }
+            all.push(...r.data.targets);
+          }
+        }
+        if (cancelled) return;
+        setTargets(all);
+      } catch {
         if (!cancelled) {
           setTargets([]);
           setLoadError('Failed to load outlets for this scheme.');
         }
-      });
+      }
+    })();
+
     return () => {
       cancelled = true;
     };

@@ -117,7 +117,9 @@ describe('Sales Tasks — real sales-assisted scheme enrollment', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Select' }));
     // The target picker (getSalesTargets) opens.
     expect(await screen.findByText(/Pick the outlet/i)).toBeInTheDocument();
-    expect(getSalesTargets).toHaveBeenCalledWith('s1');
+    // The loader always requests page 1 at the DTO-max limit (single-page scheme → no page 2).
+    expect(getSalesTargets).toHaveBeenCalledWith('s1', { page: 1, limit: 200 });
+    expect(getSalesTargets).not.toHaveBeenCalledWith('s1', { page: 2, limit: 200 });
     expect(screen.getByText('Sharma Traders')).toBeInTheDocument();
 
     // Choose the target → formless confirm → enroll (the row button "Select" picks the outlet).
@@ -136,6 +138,44 @@ describe('Sales Tasks — real sales-assisted scheme enrollment', () => {
 
     // Success state reflects the real backend enrollment.
     expect(await screen.findByText('Enrolled')).toBeInTheDocument();
+  });
+
+  it('loads ALL pages of reachable targets (260 across 2 pages), not just the first page', async () => {
+    // Regression for the only-first-50-outlets bug: the sheet must page through every
+    // sales-target page (page 1 → learn `pages` → fetch 2..N) and show all of them.
+    const mk = (n: number) => ({
+      schemeOutletId: null, targetOutletRef: `o${n}`, outletRef: `o${n}`, outletName: `Outlet ${n}`,
+      matched: true, standalone: false, status: 'NOT_ENROLLED',
+      rejectionReason: null, enrollmentId: null, currentVersion: null,
+    });
+    const page1 = Array.from({ length: 200 }, (_, i) => mk(i + 1));
+    const page2 = Array.from({ length: 60 }, (_, i) => mk(201 + i));
+    getSalesTargets.mockImplementation((_id: string, q: { page?: number } = {}) =>
+      Promise.resolve(
+        (q?.page ?? 1) === 1
+          ? { success: true, data: { targets: page1, pagination: { page: 1, limit: 200, total: 260, pages: 2 } } }
+          : { success: true, data: { targets: page2, pagination: { page: 2, limit: 200, total: 260, pages: 2 } } },
+      ),
+    );
+
+    render(<TasksPage />);
+    fireEvent.click(await screen.findByText('Activations / Tasks'));
+    expect(await screen.findByText('Summer Activation')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }));
+    expect(await screen.findByText(/Pick the outlet/i)).toBeInTheDocument();
+
+    // Both pages were requested with the page/limit params.
+    await waitFor(() => expect(getSalesTargets).toHaveBeenCalledWith('s1', { page: 1, limit: 200 }));
+    expect(getSalesTargets).toHaveBeenCalledWith('s1', { page: 2, limit: 200 });
+
+    // Targets from page 1, the page boundary, AND the very last page-2 row are all rendered.
+    expect(await screen.findByText('Outlet 1')).toBeInTheDocument();
+    expect(screen.getByText('Outlet 201')).toBeInTheDocument();
+    expect(screen.getByText('Outlet 260')).toBeInTheDocument();
+
+    // All 260 target rows are selectable (plus the scheme card's own Select button).
+    const selects = screen.getAllByRole('button', { name: 'Select' });
+    expect(selects.length).toBeGreaterThanOrEqual(260);
   });
 
   it('renders the scheme group for a manager (RSM) — the backend scopes targets to their downline', async () => {
