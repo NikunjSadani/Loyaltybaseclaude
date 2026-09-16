@@ -103,6 +103,23 @@ describe('AKR — admin KYC detail decision wiring', () => {
     });
   });
 
+  it('AKR4: Reject supports MULTIPLE reasons — both are joined into the reason payload', async () => {
+    const calls = installFetch();
+    await renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /reject kyc/i }));
+    // tick TWO presets (the whole point of this change — was a single radio before)
+    fireEvent.click(await screen.findByLabelText('Document is expired'));
+    fireEvent.click(await screen.findByLabelText('Name mismatch between documents'));
+    fireEvent.click(screen.getByRole('button', { name: /confirm reject/i }));
+
+    await waitFor(() => {
+      const post = calls.find((c) => c.method === 'POST' && c.url.includes(`/api/kyc/${TEST_UUID}/reject`));
+      expect(post).toBeTruthy();
+      expect(post!.body).toContain('Document is expired');
+      expect(post!.body).toContain('Name mismatch between documents');
+    });
+  });
+
   it('AKR3: Approve posts to /api/kyc/:id/approve', async () => {
     const calls = installFetch();
     await renderPage();

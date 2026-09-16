@@ -12,7 +12,7 @@ import {
   CheckSquare,
   AlertTriangle,
 } from 'lucide-react';
-import { KYC_REJECTION_REASONS, KYC_REJECTION_OTHER_OPTION } from '@/lib/kyc-rejection-reasons';
+import { KYC_REJECTION_REASONS, KYC_REJECTION_OTHER_OPTION, buildRejectionReason } from '@/lib/kyc-rejection-reasons';
 
 interface KYCDocument {
   id: string;
@@ -44,10 +44,6 @@ interface KYCReviewerProps {
   /** Helper text shown beneath the disabled Approve button explaining why. Optional. */
   approveDisabledReason?: string;
 }
-
-// Single source of truth shared with the sales senior-reject modal (the admin keeps
-// its single-select behaviour; the same option set is preserved verbatim).
-const REJECTION_REASONS = [...KYC_REJECTION_REASONS, KYC_REJECTION_OTHER_OPTION];
 
 /** A document is a PDF (GST cert, shop-establishment, cancelled cheque, …) when its
  *  inlined data URL is application/pdf. PDFs cannot render in an <img> — they need an
@@ -100,7 +96,10 @@ export function KYCReviewer({
   const [selectedDoc, setSelectedDoc] = useState<KYCDocument | null>(documents[0] ?? null);
   const [zoomedDoc, setZoomedDoc] = useState<KYCDocument | null>(null);
   const [actionModal, setActionModal] = useState<'reject' | 'reupload' | null>(null);
-  const [selectedReason, setSelectedReason] = useState('');
+  // Multi-select rejection reasons (was a single radio): the reviewer may tick MORE THAN ONE
+  // preset, plus an optional "Others" free-text — mirroring the sales senior-reject modal.
+  const [selectedReasons, setSelectedReasons] = useState<string[]>([]);
+  const [othersChecked, setOthersChecked] = useState(false);
   const [customReason, setCustomReason] = useState('');
   const [approveConfirm, setApproveConfirm] = useState(false);
 
@@ -111,7 +110,22 @@ export function KYCReviewer({
   const selectedIsPdf = !!selectedDoc && isPdfUrl(selectedDoc.url);
   const zoomedIsPdf = !!zoomedDoc && isPdfUrl(zoomedDoc.url);
 
-  const finalReason = selectedReason === 'Other (specify below)' ? customReason : selectedReason;
+  // Join the ticked presets + optional Others note into ONE string for the existing
+  // `{ reason }` reject/re-upload payload (reuses the shared builder → the sales & admin
+  // reason strings never drift). onReject/onRequestReupload still receive a single string.
+  const finalReason = buildRejectionReason(selectedReasons, othersChecked ? customReason : '');
+  const canSubmitReason =
+    (selectedReasons.length > 0 || othersChecked) &&
+    (!othersChecked || customReason.trim().length > 0);
+  const toggleReason = (reason: string) =>
+    setSelectedReasons((prev) =>
+      prev.includes(reason) ? prev.filter((r) => r !== reason) : [...prev, reason],
+    );
+  const resetReasonState = () => {
+    setSelectedReasons([]);
+    setOthersChecked(false);
+    setCustomReason('');
+  };
 
   const handleApprove = () => {
     if (approveDisabled) return;
@@ -124,19 +138,17 @@ export function KYCReviewer({
   };
 
   const handleReject = () => {
-    if (!finalReason) return;
+    if (!canSubmitReason) return;
     onReject(partnerId, finalReason);
     setActionModal(null);
-    setSelectedReason('');
-    setCustomReason('');
+    resetReasonState();
   };
 
   const handleReupload = () => {
-    if (!finalReason) return;
+    if (!canSubmitReason) return;
     onRequestReupload(partnerId, finalReason);
     setActionModal(null);
-    setSelectedReason('');
-    setCustomReason('');
+    resetReasonState();
   };
 
   const docStatusIcon = (status: KYCDocument['status']) => {
@@ -389,7 +401,7 @@ export function KYCReviewer({
                 {actionModal === 'reject' ? 'Reject KYC' : 'Request Re-upload'}
               </h2>
               <button
-                onClick={() => { setActionModal(null); setSelectedReason(''); setCustomReason(''); }}
+                onClick={() => { setActionModal(null); resetReasonState(); }}
                 className="text-gray-400 hover:text-gray-600"
               >
                 <X className="w-5 h-5" />
@@ -402,26 +414,35 @@ export function KYCReviewer({
 
             <div className="mb-4">
               <label className="block text-xs font-medium text-gray-700 mb-2">
-                Select Reason <span className="text-red-500">*</span>
+                Select Reason(s) <span className="text-red-500">*</span>
               </label>
               <div className="space-y-2 max-h-48 overflow-y-auto">
-                {REJECTION_REASONS.map((reason) => (
+                {KYC_REJECTION_REASONS.map((reason) => (
                   <label key={reason} className="flex items-center gap-2 cursor-pointer">
                     <input
-                      type="radio"
-                      name="reason"
+                      type="checkbox"
                       value={reason}
-                      checked={selectedReason === reason}
-                      onChange={() => setSelectedReason(reason)}
+                      checked={selectedReasons.includes(reason)}
+                      onChange={() => toggleReason(reason)}
                       className="accent-[var(--brand-primary)]"
                     />
                     <span className="text-xs text-gray-700">{reason}</span>
                   </label>
                 ))}
+                {/* "Others" toggles a free-text box for any reason not in the presets. */}
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={othersChecked}
+                    onChange={() => setOthersChecked((v) => !v)}
+                    className="accent-[var(--brand-primary)]"
+                  />
+                  <span className="text-xs text-gray-700">{KYC_REJECTION_OTHER_OPTION}</span>
+                </label>
               </div>
             </div>
 
-            {selectedReason === 'Other (specify below)' && (
+            {othersChecked && (
               <div className="mb-4">
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   Custom Reason <span className="text-red-500">*</span>
@@ -438,14 +459,14 @@ export function KYCReviewer({
 
             <div className="flex gap-3">
               <button
-                onClick={() => { setActionModal(null); setSelectedReason(''); setCustomReason(''); }}
+                onClick={() => { setActionModal(null); resetReasonState(); }}
                 className="flex-1 py-2.5 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={actionModal === 'reject' ? handleReject : handleReupload}
-                disabled={!finalReason}
+                disabled={!canSubmitReason}
                 className={`flex-1 py-2.5 rounded-lg text-sm font-medium text-white transition-colors ${
                   actionModal === 'reject'
                     ? 'bg-red-600 hover:bg-red-700 disabled:bg-red-300'
