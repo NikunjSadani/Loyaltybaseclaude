@@ -14,6 +14,11 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { businessHoursBetween, isValidIsoDate } from '../common/business-hours';
 import { isActivePhoneConflict, ACTIVE_PHONE_IN_USE_MSG } from '../common/phone-conflict';
 import {
+  KYC_PENDING_FIELD_STATUSES,
+  KYC_REJECT_REUPLOAD_STATUSES,
+  deriveKycStage,
+} from '../common/kyc-rekyc.helper';
+import {
   HOLIDAY_CLIENT_ID,
   Holiday,
   NATIONAL_HOLIDAYS_KEY,
@@ -1658,25 +1663,17 @@ export class AdminCoreService {
    * Field-approval pending bucket: an addressable outlet whose latest submission
    * sits in any of the pre-Gifsy review states (covers the full SO/ASM/RSM chain
    * that slaMetrics() bug (a) misses).
+   *
+   * The two status sets and the per-outlet stage grouping now live in the shared
+   * kyc-rekyc.helper (deriveKycStage) so the KYC Status report reuses the exact same
+   * derivation. These aliases keep the existing SLA-detail references unchanged.
    */
-  private static readonly KYC_PENDING_FIELD_STATUSES: ReadonlySet<KycStatus> = new Set<KycStatus>([
-    'SUBMITTED',
-    'UNDER_REVIEW',
-    'PENDING_PENNY_DROP',
-    'PENDING_AGREEMENT',
-    'PENDING_SO_APPROVAL',
-    'PENDING_ASM_APPROVAL',
-    'PENDING_RSM_APPROVAL',
-  ]);
+  private static readonly KYC_PENDING_FIELD_STATUSES: ReadonlySet<KycStatus> =
+    KYC_PENDING_FIELD_STATUSES;
 
   /** Rejected / re-upload / re-KYC / suspended → "not approved, needs action". */
-  private static readonly KYC_REJECT_REUPLOAD_STATUSES: ReadonlySet<KycStatus> = new Set<KycStatus>([
-    'REJECTED',
-    'RE_UPLOAD_REQUIRED',
-    'RESUBMISSION_REQUIRED',
-    'RE_KYC_REQUIRED',
-    'SUSPENDED',
-  ]);
+  private static readonly KYC_REJECT_REUPLOAD_STATUSES: ReadonlySet<KycStatus> =
+    KYC_REJECT_REUPLOAD_STATUSES;
 
   private static readonly KYC_HOUR_MS = 1000 * 60 * 60;
 
@@ -1951,25 +1948,33 @@ export class AdminCoreService {
       const status: KycStatus | 'NOT_STARTED' = sub ? sub.status : 'NOT_STARTED';
       const isApproved = status === 'APPROVED';
 
-      if (isApproved) {
-        approved += 1;
-      } else if (status === 'PENDING_GIFSY') {
-        awaitingGifsy += 1;
-      } else if (
-        status !== 'NOT_STARTED' &&
-        AdminCoreService.KYC_PENDING_FIELD_STATUSES.has(status)
-      ) {
-        pendingField += 1;
-      } else if (
-        status !== 'NOT_STARTED' &&
-        AdminCoreService.KYC_REJECT_REUPLOAD_STATUSES.has(status)
-      ) {
-        rejectedOrReupload += 1;
-        if (status === 'REJECTED') rejectedCount += 1;
-      } else if (status === 'DRAFT') {
-        inProgress += 1;
-      } else {
-        notStarted += 1; // NOT_STARTED (no submission)
+      // Canonical per-outlet stage (shared with the KYC Status report). The switch
+      // below reproduces the previous if/else buckets exactly — 'Rejected' is the
+      // REJECTED-only case that also bumps rejectedCount; 'Re-upload' covers the rest
+      // of the reject/re-upload/re-KYC/suspended set.
+      switch (deriveKycStage(sub?.status ?? null)) {
+        case 'Approved':
+          approved += 1;
+          break;
+        case 'Pending Gifsy':
+          awaitingGifsy += 1;
+          break;
+        case 'Submitted (field approval)':
+          pendingField += 1;
+          break;
+        case 'Rejected':
+          rejectedOrReupload += 1;
+          rejectedCount += 1;
+          break;
+        case 'Re-upload':
+          rejectedOrReupload += 1;
+          break;
+        case 'In Progress':
+          inProgress += 1;
+          break;
+        case 'Not Started':
+          notStarted += 1; // NOT_STARTED (no submission) or an out-of-set status
+          break;
       }
 
       bump(byState, o.state, isApproved);

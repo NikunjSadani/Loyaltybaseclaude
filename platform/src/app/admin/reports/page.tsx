@@ -22,7 +22,7 @@ interface ReportConfig {
 const reports: ReportConfig[] = [
   // Operational
   { id: 'outlet-master', name: 'Outlet Master', description: 'Complete outlet dump with KYC status, banking details, account holder name, signature, sales hierarchy, and lifecycle timestamps', category: 'operational', endpoint: '/api/admin/reports/outlet-master', filters: [] },
-  { id: 'kyc-status', name: 'KYC Status Report', description: 'All KYC submissions with current status, age, and assigned sales user', category: 'operational', endpoint: '/api/reports/kyc-status', filters: ['dateFrom', 'dateTo', 'status', 'state'] },
+  { id: 'kyc-status', name: 'KYC Status Report', description: 'Full snapshot of every outlet and its current KYC status (including outlets that never started KYC) — one row per outlet', category: 'operational', endpoint: '/api/reports/kyc-status', filters: [] },
   { id: 'visibility-status', name: 'Visibility Status Report', description: 'Visibility submissions with approval status, outlet, and payout eligibility', category: 'operational', endpoint: '/api/reports/visibility-status', filters: ['dateFrom', 'dateTo', 'status', 'programId'] },
   { id: 'ticket-aging', name: 'Ticket Aging Report', description: 'Open tickets aged by priority bucket with SLA breach flags', category: 'operational', endpoint: '/api/admin/reports/ticket-aging', href: '/admin/reports/ticket-aging', filters: [] },
   { id: 'approval-pendency', name: 'Approval Pendency Report', description: 'Pending approvals across KYC and visibility with age in hours', category: 'operational', endpoint: '/api/reports/approval-pendency', filters: ['type', 'state'] },

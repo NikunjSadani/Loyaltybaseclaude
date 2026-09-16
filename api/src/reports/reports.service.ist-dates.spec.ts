@@ -54,34 +54,17 @@ describe('ReportsService — IST createdAt date bounds', () => {
   const q = (over: Partial<ReportRangeQueryDto>): ReportRangeQueryDto =>
     ({ ...over } as ReportRangeQueryDto);
 
-  it('kycStatus: date-only bounds become full inclusive IST-day bounds (not raw new Date)', async () => {
+  it('kycStatus: no longer a date-windowed report — it never queries KycSubmission or date-filters', async () => {
+    // The KYC Status report is now a FULL outlet snapshot (one row per outlet, incl.
+    // never-started ones), so it drives off outlet.findMany with NO createdAt bound and
+    // never touches KycSubmission — passing a date range must not add any filter.
     await service.kycStatus(user, q({ dateFrom: '2026-08-01', dateTo: '2026-08-31' }));
-
-    const where = kycFindMany.mock.calls[0][0].where;
-    expect(where.createdAt.gte.toISOString()).toBe('2026-07-31T18:30:00.000Z');
-    expect(where.createdAt.lte.toISOString()).toBe('2026-08-31T18:29:59.999Z');
-
-    // The pre-fix (buggy) behaviour would have produced the raw midnight-UTC instants.
-    expect(where.createdAt.gte.toISOString()).not.toBe(new Date('2026-08-01').toISOString());
-    expect(where.createdAt.lte.toISOString()).not.toBe(new Date('2026-08-31').toISOString());
-  });
-
-  it('kycStatus: `to = today` no longer truncates — lte extends past raw midnight-UTC', async () => {
-    // Compute "today" in IST relative to now (never hardcode a fixed date).
-    const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000;
-    const nowIst = new Date(Date.now() + IST_OFFSET_MS);
-    const todayStr = `${nowIst.getUTCFullYear()}-${String(nowIst.getUTCMonth() + 1).padStart(2, '0')}-${String(
-      nowIst.getUTCDate(),
-    ).padStart(2, '0')}`;
-
-    await service.kycStatus(user, q({ dateTo: todayStr }));
-
-    const where = kycFindMany.mock.calls[0][0].where;
-    const rawTruncated = new Date(todayStr); // the buggy bound: today 00:00 UTC = 05:30 IST
-    // Fixed bound must reach the END of the IST day, strictly later than the raw instant,
-    // so records created after 05:30 IST today are no longer dropped.
-    expect(where.createdAt.lte.getTime()).toBeGreaterThan(rawTruncated.getTime());
-    expect(where.createdAt.lte.toISOString()).toBe(endOfIstDay(new Date(todayStr)).toISOString());
+    expect(kycFindMany).not.toHaveBeenCalled();
+    const outletFindMany = (service as unknown as { prisma: { outlet: { findMany: jest.Mock } } })
+      .prisma.outlet.findMany;
+    const where = outletFindMany.mock.calls[0][0].where;
+    expect(where).toEqual({ clientId: 'client-1', deletedAt: null });
+    expect(where.createdAt).toBeUndefined();
   });
 
   it('visibilityStatus / tds / payoutLiability also get IST-day createdAt bounds', async () => {
@@ -100,9 +83,9 @@ describe('ReportsService — IST createdAt date bounds', () => {
     }
   });
 
-  it('omits the createdAt filter entirely when no date bounds are supplied', async () => {
-    await service.kycStatus(user, q({}));
-    const where = kycFindMany.mock.calls[0][0].where;
+  it('omits the createdAt filter entirely when no date bounds are supplied (payoutLiability)', async () => {
+    await service.payoutLiability(user, q({}));
+    const where = payoutFindMany.mock.calls[0][0].where;
     expect(where.createdAt).toBeUndefined();
   });
 });

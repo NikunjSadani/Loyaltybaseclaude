@@ -1,4 +1,10 @@
-import { isReKycPending, isKycInFlight, isReKycActionable } from './kyc-rekyc.helper';
+import {
+  isReKycPending,
+  isKycInFlight,
+  isReKycActionable,
+  deriveKycStage,
+} from './kyc-rekyc.helper';
+import type { KycStatus } from '@prisma/client';
 
 describe('isReKycPending', () => {
   it('a non-empty reKycFlags object (a field to re-capture) → true', () => {
@@ -45,5 +51,51 @@ describe('isReKycActionable', () => {
   it('no flags → never actionable regardless of status', () => {
     expect(isReKycActionable(null, 'APPROVED')).toBe(false);
     expect(isReKycActionable({}, 'REJECTED')).toBe(false);
+  });
+});
+
+describe('deriveKycStage', () => {
+  it('null / undefined (no submission) → Not Started', () => {
+    expect(deriveKycStage(null)).toBe('Not Started');
+    expect(deriveKycStage(undefined)).toBe('Not Started');
+  });
+
+  it('DRAFT → In Progress', () => {
+    expect(deriveKycStage('DRAFT')).toBe('In Progress');
+  });
+
+  it.each<KycStatus>([
+    'SUBMITTED',
+    'UNDER_REVIEW',
+    'PENDING_PENNY_DROP',
+    'PENDING_AGREEMENT',
+    'PENDING_SO_APPROVAL',
+    'PENDING_ASM_APPROVAL',
+    'PENDING_RSM_APPROVAL',
+  ])('%s → Submitted (field approval)', (s) => {
+    expect(deriveKycStage(s)).toBe('Submitted (field approval)');
+  });
+
+  it('PENDING_GIFSY → Pending Gifsy', () => {
+    expect(deriveKycStage('PENDING_GIFSY')).toBe('Pending Gifsy');
+  });
+
+  it('APPROVED → Approved', () => {
+    expect(deriveKycStage('APPROVED')).toBe('Approved');
+  });
+
+  it('REJECTED → Rejected (its own label, distinct from re-upload)', () => {
+    expect(deriveKycStage('REJECTED')).toBe('Rejected');
+  });
+
+  it.each<KycStatus>(['RE_UPLOAD_REQUIRED', 'RESUBMISSION_REQUIRED', 'RE_KYC_REQUIRED', 'SUSPENDED'])(
+    '%s → Re-upload',
+    (s) => {
+      expect(deriveKycStage(s)).toBe('Re-upload');
+    },
+  );
+
+  it('a bare NOT_INTERESTED submission status (outside every set) → Not Started (matches the dashboard grouping)', () => {
+    expect(deriveKycStage('NOT_INTERESTED')).toBe('Not Started');
   });
 });

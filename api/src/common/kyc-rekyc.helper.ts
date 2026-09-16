@@ -1,3 +1,5 @@
+import type { KycStatus } from '@prisma/client';
+
 /**
  * True when an outlet's `reKycFlags` marks a re-KYC as pending.
  *
@@ -55,4 +57,69 @@ export function isKycInFlight(status: unknown): boolean {
  */
 export function isReKycActionable(reKycFlags: unknown, latestStatus: unknown): boolean {
   return isReKycPending(reKycFlags) && !isKycInFlight(latestStatus);
+}
+
+// ── Canonical KYC-stage derivation (the KYC dashboard's per-outlet grouping) ──────────
+//
+// SINGLE source of truth for mapping an outlet's LATEST submission status to a
+// dashboard-style KYC stage. Extracted from AdminCoreService.kycDashboard's inline
+// grouping loop so the dashboard AND the KYC Status report can never diverge.
+
+/**
+ * Field-approval pending bucket: an addressable outlet whose latest submission sits in any
+ * of the pre-Gifsy review states (the full SO/ASM/RSM chain + initial-review states).
+ */
+export const KYC_PENDING_FIELD_STATUSES: ReadonlySet<KycStatus> = new Set<KycStatus>([
+  'SUBMITTED',
+  'UNDER_REVIEW',
+  'PENDING_PENNY_DROP',
+  'PENDING_AGREEMENT',
+  'PENDING_SO_APPROVAL',
+  'PENDING_ASM_APPROVAL',
+  'PENDING_RSM_APPROVAL',
+]);
+
+/** Rejected / re-upload / re-KYC / suspended → "not approved, needs action". */
+export const KYC_REJECT_REUPLOAD_STATUSES: ReadonlySet<KycStatus> = new Set<KycStatus>([
+  'REJECTED',
+  'RE_UPLOAD_REQUIRED',
+  'RESUBMISSION_REQUIRED',
+  'RE_KYC_REQUIRED',
+  'SUSPENDED',
+]);
+
+/** The dashboard-style per-outlet KYC stage labels. */
+export type KycStageLabel =
+  | 'Not Started'
+  | 'In Progress'
+  | 'Submitted (field approval)'
+  | 'Pending Gifsy'
+  | 'Approved'
+  | 'Rejected'
+  | 'Re-upload';
+
+/**
+ * Derive an outlet's dashboard-style KYC stage from its LATEST submission status
+ * (null / undefined = the owner partner has no submission → "Not Started").
+ *
+ * This is a faithful 1:1 extraction of the kycDashboard grouping chain (same branch
+ * order, same status sets) so the dashboard's bucket counts are unchanged when it calls
+ * this. The report splits the dashboard's merged rejected/re-upload bucket into the two
+ * distinct labels the status column shows: REJECTED → "Rejected", every other
+ * reject/re-upload/re-KYC/suspended state → "Re-upload". A DRAFT (started, not yet
+ * submitted) → "In Progress"; any status outside every set (e.g. NOT_INTERESTED as a
+ * bare submission status) → "Not Started", exactly as the dashboard groups it.
+ */
+export function deriveKycStage(latestStatus: KycStatus | null | undefined): KycStageLabel {
+  const status: KycStatus | 'NOT_STARTED' = latestStatus ?? 'NOT_STARTED';
+  if (status === 'APPROVED') return 'Approved';
+  if (status === 'PENDING_GIFSY') return 'Pending Gifsy';
+  if (status !== 'NOT_STARTED' && KYC_PENDING_FIELD_STATUSES.has(status)) {
+    return 'Submitted (field approval)';
+  }
+  if (status !== 'NOT_STARTED' && KYC_REJECT_REUPLOAD_STATUSES.has(status)) {
+    return status === 'REJECTED' ? 'Rejected' : 'Re-upload';
+  }
+  if (status === 'DRAFT') return 'In Progress';
+  return 'Not Started';
 }

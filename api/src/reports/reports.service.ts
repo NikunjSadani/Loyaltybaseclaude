@@ -1,5 +1,5 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { OutletKycIntent, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -7,6 +7,7 @@ import { ReportFormat, ReportRangeQueryDto, TdsReportQueryDto } from './dto/repo
 import { buildXlsx, ReportSheet } from '../common/xlsx';
 import { platformWide } from '../common/tenant-scope';
 import { istDayRangeFilter } from '../common/ist-date';
+import { deriveKycStage } from '../common/kyc-rekyc.helper';
 
 /**
  * Reporting & Analytics — ported from platform/src/app/api/reports/*.
@@ -369,83 +370,86 @@ export class ReportsService {
   }
 
   // ── KYC Status ────────────────────────────────────────────────────────────────
+  /**
+   * A FULL SNAPSHOT of every non-deleted tenant outlet and its current KYC status —
+   * ONE row per outlet, including outlets that have NEVER started KYC (they show
+   * "Not Started"). This is deliberately NOT a date-windowed activity export: there is
+   * no date filter, so `dateFrom` / `dateTo` are ignored here (the shared DTO keeps them
+   * for the other, activity-style reports).
+   *
+   * Status is the canonical dashboard-style KYC stage (deriveKycStage, shared with the
+   * KYC dashboard) derived from the owner partner's LATEST submission, overlaid with the
+   * outlet-level lifecycle states that sit OUTSIDE the KYC pipeline — Deactivated
+   * (deactivatedAt set), Parked / Not Interested (kycIntent) — so every outlet's real
+   * state is reflected and none is silently dropped.
+   *
+   * ONE tenant-scoped `outlet.findMany` with the owner partner's latest submission
+   * included (mirrors the dashboard's `kycSubmissions orderBy createdAt desc take 1`) —
+   * NO N+1, one query for the whole tenant (~2,989 outlets for Deoleo, like outletMaster).
+   */
   async kycStatus(user: JwtPayload, q: ReportRangeQueryDto): Promise<ReportResult> {
-    const where: Prisma.KycSubmissionWhereInput = {
-      user: { clientId: user.clientId },
-    };
-    const createdAt = istDayRangeFilter(q.dateFrom, q.dateTo);
-    if (createdAt) where.createdAt = createdAt;
-
-    const submissions = await this.prisma.kycSubmission.findMany({
-      where,
-      include: {
-        user: { select: { name: true, phone: true } },
-        partner: { select: { businessName: true, panNumber: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    // Outlet-level enrichment (Zone / Outlet ID / Outlet Name / Program Name). A
-    // KycSubmission.partnerId → the owning ChannelPartner, which may own MULTIPLE
-    // outlets (Outlet.partnerId, relation "OutletOwner"). One tenant-scoped query
-    // (NOT N+1), mapped partnerId → outlet[], mirrors the outlet-master report join.
+    // NOTE: no date filter — this is a full outlet snapshot. `q.dateFrom/dateTo` are ignored
+    // (only `q.format` is read, below), so passing a date range does not change the row set.
     const outlets = await this.prisma.outlet.findMany({
       where: { clientId: user.clientId, deletedAt: null },
-      select: { partnerId: true, zone: true, outletCode: true, name: true, programName: true },
+      select: {
+        zone: true,
+        outletCode: true,
+        name: true,
+        programName: true,
+        deactivatedAt: true,
+        kycIntent: true,
+        partner: {
+          select: {
+            ownerName: true,
+            phone: true,
+            businessName: true,
+            panNumber: true,
+            // Latest submission for the owner partner (mirrors the KYC dashboard include).
+            kycSubmissions: {
+              orderBy: { createdAt: 'desc' },
+              take: 1,
+              select: { status: true, submittedAt: true, createdAt: true },
+            },
+          },
+        },
+      },
+      orderBy: { outletCode: 'asc' },
     });
-    const outletsByPartner = new Map<string, typeof outlets>();
-    for (const o of outlets) {
-      if (!o.partnerId) continue;
-      const list = outletsByPartner.get(o.partnerId);
-      if (list) list.push(o);
-      else outletsByPartner.set(o.partnerId, [o]);
-    }
 
-    // One row per submission-outlet pair (a partner with N outlets → N rows so each
-    // outlet shows its own Zone/ID/Name/Program). A null / unmatched partnerId yields
-    // ONE row with blank outlet columns — the submission is never dropped. S.No runs
-    // sequentially across the final (possibly fanned-out) row set.
-    const data: Record<string, unknown>[] = [];
-    for (const s of submissions) {
-      const base = {
-        'Submission ID': s.id,
-        'User Name': s.user?.name ?? '',
-        Mobile: s.user?.phone ?? '',
-        'Business Name': s.partner?.businessName ?? '',
+    // Per-outlet status: outlet-level lifecycle overlay first (states outside the KYC
+    // pipeline), then the canonical dashboard KYC stage from the latest submission.
+    const statusFor = (o: (typeof outlets)[number]): string => {
+      if (o.deactivatedAt) return 'Deactivated';
+      if (o.kycIntent === OutletKycIntent.PARKED) return 'Parked';
+      if (o.kycIntent === OutletKycIntent.NOT_INTERESTED) return 'Not Interested';
+      return deriveKycStage(o.partner?.kycSubmissions[0]?.status ?? null);
+    };
+
+    const data = outlets.map((o, i) => {
+      const sub = o.partner?.kycSubmissions[0];
+      // Latest submission date; blank when the outlet has never started KYC. submittedAt
+      // is the real submit instant, falling back to the row's createdAt for a DRAFT.
+      const lastSubmittedOn = sub
+        ? (sub.submittedAt ?? sub.createdAt).toISOString().split('T')[0]
+        : '';
+      return {
+        'S.No': i + 1,
+        'Outlet ID': o.outletCode ?? '',
+        'Outlet Name': o.name ?? '',
+        Zone: o.zone ?? '',
+        'Program Name': o.programName ?? '',
+        'Business Name': o.partner?.businessName ?? '',
+        'Owner/User Name': o.partner?.ownerName ?? '',
+        Mobile: o.partner?.phone ?? '',
+        PAN: o.partner?.panNumber ?? '',
+        Status: statusFor(o),
+        'Last Submitted On': lastSubmittedOn,
       };
-      const tail = {
-        Status: s.status,
-        'Submitted On': s.createdAt.toISOString().split('T')[0],
-        PAN: s.partner?.panNumber ?? '',
-      };
-      const partnerOutlets = s.partnerId ? outletsByPartner.get(s.partnerId) : undefined;
-      if (partnerOutlets && partnerOutlets.length > 0) {
-        for (const o of partnerOutlets) {
-          data.push({
-            'S.No': data.length + 1,
-            ...base,
-            Zone: o.zone ?? '',
-            'Outlet ID': o.outletCode ?? '',
-            'Outlet Name': o.name ?? '',
-            'Program Name': o.programName ?? '',
-            ...tail,
-          });
-        }
-      } else {
-        data.push({
-          'S.No': data.length + 1,
-          ...base,
-          Zone: '',
-          'Outlet ID': '',
-          'Outlet Name': '',
-          'Program Name': '',
-          ...tail,
-        });
-      }
-    }
+    });
 
     if (q.format === ReportFormat.XLSX) {
-      // Empty range → seed one all-blank row so the sheet still shows the column headers
+      // Zero outlets → seed one all-blank row so the sheet still shows the column headers
       // (an empty json_to_sheet yields a header-less blank sheet — the "barely any
       // columns" confusion; mirrors the outlet-master / target-vs-sales reports).
       const rows =
@@ -453,9 +457,9 @@ export class ReportsService {
           ? data
           : [
               {
-                'S.No': '', 'Submission ID': '', 'User Name': '', Mobile: '', 'Business Name': '',
-                Zone: '', 'Outlet ID': '', 'Outlet Name': '', 'Program Name': '',
-                Status: '', 'Submitted On': '', PAN: '',
+                'S.No': '', 'Outlet ID': '', 'Outlet Name': '', Zone: '', 'Program Name': '',
+                'Business Name': '', 'Owner/User Name': '', Mobile: '', PAN: '',
+                Status: '', 'Last Submitted On': '',
               },
             ];
       return this.toXlsx([{ name: 'KYC Status', rows }], 'kyc-status.xlsx');
