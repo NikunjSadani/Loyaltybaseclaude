@@ -3,7 +3,7 @@
 // Run: npx jest src/auth/auth.service.spec.ts
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { ForbiddenException, NotFoundException, BadRequestException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException, BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
@@ -576,6 +576,80 @@ describe('AuthService', () => {
       expect(audit.action).toBe('LOGOUT');
       expect(audit.actorId).toBe('me1');
       expect(audit.metadata).toMatchObject({ event: 'logout_all_sessions', revoked: 1 });
+    });
+  });
+
+  // ── exitTenant — authoritative, stash-independent exit (#51 strand fix) ──────
+  describe('exitTenant', () => {
+    // The caller's token here is the ASSUMED token: role stays GIFSY_ADMIN, clientId is the tenant,
+    // assumed:true, and `sid` is the assumed session's id (revoked on exit).
+    const assumedOp = { sub: 'op1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '98', name: 'Op', assumed: true, sid: 'sid_A' } as any;
+
+    beforeEach(() => {
+      mockPrisma.userSession.create.mockResolvedValue({ id: 'home_sess' });
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.auditLog.create.mockResolvedValue({ id: 'al_exit' });
+    });
+
+    it('mints an UN-ASSUMED session for the operator’s OWN home clientId (no assumed flag)', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' } as any);
+
+      const res = await service.exitTenant(assumedOp);
+
+      // token minted for the HOME clientId, and the payload carries NO `assumed` flag
+      const signPayload = (mockJwt.sign as jest.Mock).mock.calls.at(-1)![0];
+      expect(signPayload).toEqual(expect.objectContaining({ sub: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy' }));
+      expect(signPayload.assumed).toBeUndefined();
+      // the SESSION ROW is created against the HOME clientId too (not the tenant) — a regression that
+      // minted the row against the assumed tenant while signing home would otherwise slip through.
+      const sessionData = (mockPrisma.userSession.create as jest.Mock).mock.calls.at(-1)![0].data;
+      expect(sessionData.clientId).toBe('gifsy');
+      expect(res.clientId).toBe('gifsy');
+      expect(res.accessToken).toBeTruthy();
+      expect(res.refreshToken).toBeTruthy();
+    });
+
+    it('REVOKES the assumed session (and its rotated successors) so the assumed refresh cannot self-renew', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' } as any);
+
+      await service.exitTenant(assumedOp);
+
+      const call = (mockPrisma.userSession.updateMany as jest.Mock).mock.calls.at(-1)![0];
+      expect(call.where).toMatchObject({ userId: 'op1', revokedAt: null });
+      expect(call.where.OR).toEqual(
+        expect.arrayContaining([{ id: 'sid_A' }, { rotatedFromId: 'sid_A' }]),
+      );
+      expect(call.data).toEqual({ revokedAt: expect.any(Date) });
+    });
+
+    it('writes an EXIT_TENANT audit log attributed to the real operator', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' } as any);
+
+      await service.exitTenant(assumedOp);
+
+      const audit = mockPrisma.auditLog.create.mock.calls.at(-1)![0].data;
+      expect(audit.action).toBe('LOGOUT');
+      expect(audit.actorId).toBe('op1');
+      expect(audit.metadata).toMatchObject({ event: 'EXIT_TENANT', fromClientId: 'deoleo', toClientId: 'gifsy' });
+    });
+
+    it('rejects an UN-ASSUMED caller (no spurious home session / from==to audit row)', async () => {
+      await expect(
+        service.exitTenant({ sub: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', assumed: false, sid: 's' } as any),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
+      expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('forbids a non-operator caller', async () => {
+      await expect(
+        service.exitTenant({ sub: 'u1', role: 'CLIENT_ADMIN', clientId: 'deoleo', assumed: true } as any),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('rejects when the operator account no longer exists', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue(null as any);
+      await expect(service.exitTenant(assumedOp)).rejects.toThrow(UnauthorizedException);
     });
   });
 

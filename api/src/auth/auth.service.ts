@@ -536,6 +536,84 @@ export class AuthService {
     return { ...tokens, clientId: targetClientId, brandName: target.internalName };
   }
 
+  /**
+   * POST /v1/auth/exit-tenant — the AUTHORITATIVE inverse of assume-tenant (#51 fix).
+   *
+   * Re-mints a fresh UN-ASSUMED session for the operator's REAL home identity, derived from
+   * the (assumed) token's `sub` — so it does NOT depend on the client-side `home_token`
+   * cookie stash. That stash is only a fast-path optimisation; when it is missing or expired
+   * (>7d of assumed work, a multi-tab drop, or a pre-stash assume) the FE's cookie-swap Exit
+   * silently no-ops and STRANDS the operator on the assumed token under platform chrome
+   * (the reported bug). This endpoint is the stash-independent fallback the FE calls in that
+   * case, guaranteeing Exit always lands the operator back in their home (un-assumed) context.
+   *
+   *   - GIFSY_ADMIN / GIFSY_STAFF only (defense-in-depth beyond the controller @Roles);
+   *   - identity is fixed to the caller's real `sub` → no escalation: the minted token carries
+   *     the operator's OWN home clientId + role (an un-assumed staff token is still NOT
+   *     platform-wide, per tenant-scope.ts) — exactly what a fresh login would grant;
+   *   - `assumed` is omitted → a clean platform token (clears the FE banner);
+   *   - audit-logged (action LOGOUT + metadata.event=EXIT_TENANT) on the same trail as assume.
+   */
+  async exitTenant(
+    operator: JwtPayload,
+  ): Promise<{ accessToken: string; refreshToken: string; clientId: string }> {
+    if (operator.role !== 'GIFSY_ADMIN' && operator.role !== 'GIFSY_STAFF') {
+      throw new ForbiddenException('Only Gifsy operators may exit a brand context');
+    }
+    // Exit is only meaningful FROM an assumed session — refuse an un-assumed caller so this never
+    // mints a spurious home session or writes a from==to EXIT_TENANT audit row (audit F4).
+    if (operator.assumed !== true) {
+      throw new BadRequestException('Not in an assumed tenant context');
+    }
+
+    // The real operator user — their home clientId + role define the un-assumed session.
+    const opUser = await this.prisma.user.findFirst({
+      where: { id: operator.sub, deletedAt: null },
+    });
+    if (!opUser) throw new UnauthorizedException('Operator account not found');
+
+    // Mint a fresh session for the operator's OWN home clientId with NO assumed flag: no
+    // clientIdOverride (→ opUser.clientId) and no `assumed` → an un-assumed platform token.
+    // Minted FIRST, so a failure in the revoke below can never leave the operator session-less.
+    const tokens = await this.generateTokens(opUser, { expiresIn: ACCESS_TTL });
+
+    // AUTHORITATIVE termination (audit F1): revoke the assumed session being exited AND any live
+    // successor it rotated into, so the assumed refresh-token lineage can no longer self-renew for
+    // the 7-day session window after Exit — a second device / prior tab still holding the assumed
+    // refresh token is cut off (its next refresh hits a revoked row → 401). Scoped to the caller's
+    // own userId (defense-in-depth). Skipped only for legacy tokens with no `sid`.
+    if (operator.sid) {
+      await this.prisma.userSession.updateMany({
+        where: {
+          userId: operator.sub,
+          revokedAt: null,
+          OR: [{ id: operator.sid }, { rotatedFromId: operator.sid }],
+        },
+        data: { revokedAt: new Date() },
+      });
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'LOGOUT',
+        entityType: 'CLIENT',
+        entityId: operator.clientId,
+        actorId: operator.sub,
+        metadata: {
+          event: 'EXIT_TENANT',
+          fromClientId: operator.clientId,
+          toClientId: opUser.clientId,
+        },
+      },
+    });
+
+    this.logger.log(
+      `GIFSY operator ${operator.sub} exited tenant ${operator.clientId} → home ${opUser.clientId}`,
+    );
+
+    return { ...tokens, clientId: opUser.clientId };
+  }
+
   // ── Refresh token ────────────────────────────────────────────────────────────
 
   async refreshToken(refreshToken: string): Promise<{ accessToken: string; refreshToken: string }> {

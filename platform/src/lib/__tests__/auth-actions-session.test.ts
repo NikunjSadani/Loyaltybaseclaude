@@ -120,6 +120,20 @@ describe('assume / exit — refresh-cookie writes use 7d, not 30d', () => {
     expect(setOf('refresh_token')?.opts.maxAge).toBe(SEVEN_DAYS);
   });
 
+  it('exitTenantAction — fast path with NO home_refresh stashed drops the assumed refresh (prevents silent re-assume)', async () => {
+    store.set('home_token', jwtWithExp(nowSecs() + ONE_HOUR));
+    // no home_refresh_token stashed; the live refresh_token is still the ASSUMED tenant's
+    store.set('refresh_token', 'assumed-refresh');
+
+    const res = await exitTenantAction();
+
+    expect(res).toEqual({ success: true });
+    // leaving the assumed refresh would let the proxy silent-refresh roll the tenant scope forward
+    // and re-drop the operator into the tenant — it must be deleted.
+    expect(deleted).toContain('refresh_token');
+    expect(deleted).toContain('home_token');
+  });
+
   it('exitTenantAction restores home context even when the home ACCESS token has EXPIRED (the ship-blocker regression)', async () => {
     // Simulates >60m of assumed work: the home ACCESS token value is expired, but the home_token
     // COOKIE is still present (it is now stashed at 7d maxAge, so the browser still holds it).
@@ -142,5 +156,85 @@ describe('assume / exit — refresh-cookie writes use 7d, not 30d', () => {
     // The stash is consumed, not orphaned: BOTH home_token and home_refresh_token are deleted.
     expect(deleted).toContain('home_token');
     expect(deleted).toContain('home_refresh_token');
+  });
+
+  it('exitTenantAction — NO stash → authoritative backend exit sets fresh un-assumed cookies (#51 strand fix)', async () => {
+    // The strand: no home_token stash at all (so the fast path is skipped) — old code no-opped and
+    // left the assumed token in place. The fallback must exit authoritatively via the backend.
+    store.set('token', 'assumed-token');
+    store.set('refresh_token', 'assumed-refresh');
+    const homeExp = nowSecs() + SEVEN_DAYS;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      // full interceptor envelope, so the test pins the real {success,data} contract.
+      json: () => Promise.resolve({ success: true, data: { accessToken: jwtWithExp(homeExp), refreshToken: 'home-new', clientId: 'gifsy' } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = await exitTenantAction();
+
+    expect(res).toEqual({ success: true });
+    // hit the authoritative backend endpoint with the (assumed) bearer token
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/v1/auth/exit-tenant'),
+      expect.objectContaining({ method: 'POST', headers: expect.objectContaining({ Authorization: 'Bearer assumed-token' }) }),
+    );
+    // fresh un-assumed home session written
+    expect(setOf('token')?.value).toBe(jwtWithExp(homeExp));
+    expect(setOf('refresh_token')?.value).toBe('home-new');
+    expect(setOf('refresh_token')?.opts.maxAge).toBe(SEVEN_DAYS);
+  });
+
+  it('exitTenantAction — fallback success with NO refresh in the response drops the stale assumed refresh (no re-assume)', async () => {
+    store.set('token', 'assumed-token');
+    store.set('refresh_token', 'assumed-refresh'); // the ASSUMED refresh — must NOT survive exit
+    const homeExp = nowSecs() + SEVEN_DAYS;
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: { accessToken: jwtWithExp(homeExp), clientId: 'gifsy' } }), // no refreshToken
+    }));
+
+    const res = await exitTenantAction();
+
+    expect(res).toEqual({ success: true });
+    expect(setOf('token')?.value).toBe(jwtWithExp(homeExp));
+    // the leftover assumed refresh cookie is dropped rather than left to roll the tenant scope forward
+    expect(deleted).toContain('refresh_token');
+  });
+
+  it('exitTenantAction — NO stash, backend 401 (assumed token dead) → CLEARS the session (clean re-login)', async () => {
+    store.set('token', 'assumed-token');
+    store.set('refresh_token', 'assumed-refresh');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401, json: () => Promise.resolve({ error: 'unauthorized' }) }));
+
+    const res = await exitTenantAction();
+
+    expect(res).toEqual({ success: false });
+    // definitively-invalid token → cleared so the next navigation bounces to a clean login
+    expect(deleted).toContain('token');
+    expect(deleted).toContain('refresh_token');
+  });
+
+  it('exitTenantAction — NO stash, TRANSIENT failure (network/5xx) → KEEPS cookies (retryable, not a forced logout)', async () => {
+    store.set('token', 'assumed-token');
+    store.set('refresh_token', 'assumed-refresh');
+    // a network throw is the transient case
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
+
+    const res = await exitTenantAction();
+
+    expect(res).toEqual({ success: false });
+    // a healthy session must NOT be evicted by a blip — cookies intact so Exit is retryable
+    expect(deleted).not.toContain('token');
+    expect(deleted).not.toContain('refresh_token');
+    expect(store.get('token')).toBe('assumed-token');
+  });
+
+  it('exitTenantAction — NO stash + NO token at all → clears any residual stash', async () => {
+    // nothing to preserve
+    vi.stubGlobal('fetch', vi.fn());
+    const res = await exitTenantAction();
+    expect(res).toEqual({ success: false });
+    expect(deleted).toContain('token');
   });
 });

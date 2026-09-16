@@ -75,4 +75,18 @@ export class AuthController {
   assumeTenant(@CurrentUser() user: JwtPayload, @Body() dto: AssumeTenantDto) {
     return this.authService.assumeTenant(user, dto.clientId);
   }
+
+  /**
+   * POST /v1/auth/exit-tenant — authoritative inverse of assume-tenant (#51 strand fix).
+   * Re-mints a fresh UN-ASSUMED home session for the operator (from the assumed token's real
+   * `sub`), so the FE can always exit even when the client-side home_token stash is gone.
+   * The caller's current token here is the ASSUMED token (role GIFSY_ADMIN/STAFF passes @Roles);
+   * identity is fixed to their own `sub`, so there is no cross-tenant/escalation surface.
+   */
+  @Roles('GIFSY_ADMIN', 'GIFSY_STAFF')
+  @Post('exit-tenant')
+  @HttpCode(HttpStatus.OK)
+  exitTenant(@CurrentUser() user: JwtPayload) {
+    return this.authService.exitTenant(user);
+  }
 }

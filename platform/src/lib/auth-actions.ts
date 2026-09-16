@@ -77,18 +77,90 @@ export async function assumeTenantAction(
   }
 }
 
-/** Exit the assumed-tenant context: restore the stashed home session, drop the stash. */
+/**
+ * Exit the assumed-tenant context and land back in the home (platform) session.
+ *
+ * FAST PATH (unchanged): restore the stashed home session if the `home_token` cookie is
+ * present — no backend round-trip, preserves the original home session's continuity.
+ *
+ * ROBUST FALLBACK (the #51 strand fix): if the stash is GONE (>7d of assumed work, a
+ * multi-tab drop, a pre-stash assume), the old cookie-swap silently no-opped and left the
+ * operator stranded on the assumed token under platform chrome. Instead, ask the backend to
+ * mint a fresh UN-ASSUMED home session from the operator's real identity — independent of any
+ * cookie stash. LAST RESORT: if even that fails, CLEAR the session so the next navigation
+ * bounces to a clean (un-assumed) login — never leave the operator stranded on the assumed token.
+ */
 export async function exitTenantAction(): Promise<{ success: boolean }> {
   const cookieStore = await cookies();
+
+  // ── FAST PATH: stash present → restore it (pre-existing behavior). ──
   const home = cookieStore.get('home_token')?.value;
   if (home) {
     cookieStore.set('token', home, cookieOptions(accessCookieMaxAge(home)));
     const homeRefresh = cookieStore.get('home_refresh_token')?.value;
-    if (homeRefresh) cookieStore.set('refresh_token', homeRefresh, cookieOptions(REFRESH_MAX_AGE));
+    if (homeRefresh) {
+      cookieStore.set('refresh_token', homeRefresh, cookieOptions(REFRESH_MAX_AGE));
+    } else {
+      // No home refresh stashed → the live `refresh_token` is still the ASSUMED tenant's. Leaving
+      // it lets the proxy's silent-refresh roll the assumed scope forward and re-drop the operator
+      // into the tenant (banner returns). Drop it so the restored home access token stands alone.
+      cookieStore.delete('refresh_token');
+    }
     cookieStore.delete('home_token');
     cookieStore.delete('home_refresh_token');
+    return { success: true };
   }
-  return { success: true };
+
+  // ── ROBUST FALLBACK: no stash → authoritative backend exit (stash-independent). ──
+  const token = cookieStore.get('token')?.value;
+  if (token) {
+    try {
+      const res = await fetch(`${API_URL}/v1/auth/exit-tenant`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(12_000),
+      });
+      if (res.ok) {
+        const body = await res.json().catch(() => null);
+        const newToken: string | undefined = body?.data?.accessToken;
+        const newRefresh: string | undefined = body?.data?.refreshToken;
+        if (newToken) {
+          cookieStore.set('token', newToken, cookieOptions(accessCookieMaxAge(newToken)));
+          if (newRefresh) {
+            cookieStore.set('refresh_token', newRefresh, cookieOptions(REFRESH_MAX_AGE));
+          } else {
+            cookieStore.delete('refresh_token'); // never leave the assumed refresh behind
+          }
+          cookieStore.delete('home_token');
+          cookieStore.delete('home_refresh_token');
+          return { success: true };
+        }
+        // 200 but no token — unexpected; fall through to the transient path (keep cookies, retryable).
+      } else if (res.status === 401 || res.status === 403) {
+        // The assumed token is DEFINITIVELY invalid (expired/revoked) → clear so the next nav lands
+        // on a clean un-assumed login. Not stranded: the assumed session is already dead.
+        cookieStore.delete('token');
+        cookieStore.delete('refresh_token');
+        cookieStore.delete('home_token');
+        cookieStore.delete('home_refresh_token');
+        return { success: false };
+      }
+      // else 5xx / other status → transient; fall through (keep cookies, retryable).
+    } catch {
+      // network error / timeout → transient; fall through (keep cookies, retryable).
+    }
+
+    // ── TRANSIENT failure: leave the session INTACT so a blip doesn't evict a healthy session. The
+    // operator stays (still assumed) and can retry Exit, rather than being force-logged-out. ──
+    return { success: false };
+  }
+
+  // ── No token at all → nothing to preserve; clear any residual stash. ──
+  cookieStore.delete('token');
+  cookieStore.delete('refresh_token');
+  cookieStore.delete('home_token');
+  cookieStore.delete('home_refresh_token');
+  return { success: false };
 }
 
 /**
