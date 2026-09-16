@@ -21,6 +21,7 @@ vi.mock('@/lib/auth-client', () => ({
 }));
 
 import { BrandSwitcher } from '../brand-switcher';
+import { assumeTenant } from '@/lib/auth-client';
 
 const CLIENTS = [
   { slug: 'live-co',    internalName: 'Live Co',       status: 'ACTIVE' },
@@ -62,5 +63,48 @@ describe('BrandSwitcher tenant filtering', () => {
     });
     // The muted status chip is only rendered for ONBOARDING rows.
     expect(screen.getByText('Onboarding')).toBeInTheDocument();
+  });
+});
+
+describe('BrandSwitcher — stale-deployment self-heal on assume', () => {
+  const reload = vi.fn();
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      json: async () => ({ success: true, data: { clients: CLIENTS } }),
+    }));
+    reload.mockClear();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { href: 'http://localhost/', pathname: '/', origin: 'http://localhost', reload, assign: vi.fn() },
+    });
+    try { window.sessionStorage.clear(); } catch { /* ignore */ }
+    (assumeTenant as unknown as ReturnType<typeof vi.fn>).mockReset();
+  });
+
+  it('a STALE server-action rejection triggers a one-shot reload, NOT an inline error', async () => {
+    (assumeTenant as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('Failed to find Server Action "40277a0e". This request might be from an older or newer deployment.'),
+    );
+    render(<BrandSwitcher />);
+    fireEvent.click(screen.getByRole('button', { name: /work in brand/i }));
+    await waitFor(() => expect(screen.getByText('Live Co')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Live Co'));
+
+    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+    // the raw deploy-skew message is NOT surfaced to the operator
+    expect(screen.queryByText(/failed to find server action/i)).not.toBeInTheDocument();
+  });
+
+  it('a NON-stale rejection still shows the inline error and does NOT reload', async () => {
+    (assumeTenant as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('You do not have access to this brand'),
+    );
+    render(<BrandSwitcher />);
+    fireEvent.click(screen.getByRole('button', { name: /work in brand/i }));
+    await waitFor(() => expect(screen.getByText('Live Co')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Live Co'));
+
+    await waitFor(() => expect(screen.getByText('You do not have access to this brand')).toBeInTheDocument());
+    expect(reload).not.toHaveBeenCalled();
   });
 });

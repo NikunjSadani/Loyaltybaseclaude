@@ -8,6 +8,7 @@ import { useToast } from '@/components/ui/toast';
 import { sendOTP, verifyOTP } from './actions';
 import { cn } from '@/lib/utils';
 import { clearAssumedContext } from '@/lib/auth-client';
+import { isStaleDeploymentError, recoverFromStaleDeployment } from '@/lib/stale-deploy';
 
 type Step = 'mobile' | 'otp';
 
@@ -94,7 +95,11 @@ export default function LoginPage() {
       setStep('otp');
       setCountdown(RESEND_COUNTDOWN);
       setTimeout(() => otpRefs.current[0]?.focus(), 100);
-    } catch {
+    } catch (e) {
+      // A tab left open across a deploy → a stale server-action id; self-heal with a one-shot
+      // reload instead of a misleading "connection" error (audit F1: login is the most common
+      // stale-tab entry point).
+      if (isStaleDeploymentError(e) && recoverFromStaleDeployment()) return;
       toast.error('Could not send the OTP. Please check your connection and try again.');
     } finally {
       setSending(false);
@@ -161,7 +166,9 @@ export default function LoginPage() {
 
       toast.success('Logged in successfully!');
       window.location.href = getRoleDashboard(result.role);
-    } catch {
+    } catch (e) {
+      // Deploy-skew stale action id → self-heal with a one-shot reload (audit F1).
+      if (isStaleDeploymentError(e) && recoverFromStaleDeployment()) return;
       const msg = 'Could not verify the OTP. Please check your connection and try again.';
       toast.error(msg);
       setOtpError(msg);

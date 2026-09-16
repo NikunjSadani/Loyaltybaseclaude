@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Building2, ChevronDown, Loader2, ArrowRight } from 'lucide-react';
 import { assumeTenant } from '@/lib/auth-client';
+import { isStaleDeploymentError, recoverFromStaleDeployment } from '@/lib/stale-deploy';
 
 interface Brand {
   id?: string;
@@ -93,6 +94,10 @@ export function BrandSwitcher({ variant = 'menu' }: { variant?: Variant } = {}) 
       // we navigate away on success.)
       window.location.href = '/admin/dashboard';
     } catch (e) {
+      // This tab may have been open across a deploy → a stale server-action id ("Failed to find
+      // Server Action"). Self-heal with a one-shot reload to the new bundle instead of showing the
+      // raw error; if recovery declines (just reloaded / storage blocked), fall through and show it.
+      if (isStaleDeploymentError(e) && recoverFromStaleDeployment()) return;
       // Show the switch failure INLINE (keep the brand list visible) rather than replacing the
       // whole picker with a Retry that re-fetches the list — a failed ASSUME, not a failed load (L4).
       setSwitchError(e instanceof Error ? e.message : 'Switch failed');
