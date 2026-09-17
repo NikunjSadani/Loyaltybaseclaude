@@ -33,6 +33,21 @@ describe('TenantSettingsService', () => {
     expect(s.creditsPayouts.notifyEmails).toEqual([]);
     // Master visibility switch defaults OFF (opt-in per tenant).
     expect(s.visibilityEnabled).toBe(false);
+    // GSTIN-compulsory defaults ON (opt-out per tenant) — the inverse of visibility.
+    expect(s.kycGstinRequired).toBe(true);
+  });
+
+  it('overlays kycGstinRequired=false; ignores a non-boolean value (default TRUE kept)', async () => {
+    const off = await new TenantSettingsService(
+      makePrisma([{ settingKey: 'kycGstinRequired', settingValue: false }]),
+    ).getEffectiveSettings('deoleo');
+    expect(off.kycGstinRequired).toBe(false);
+
+    // A malformed (non-boolean) row is rejected → the compulsory default (TRUE) is kept.
+    const bad = await new TenantSettingsService(
+      makePrisma([{ settingKey: 'kycGstinRequired', settingValue: 'no' }]),
+    ).getEffectiveSettings('deoleo');
+    expect(bad.kycGstinRequired).toBe(true);
   });
 
   describe('getVisibilityEnabledUncached', () => {
@@ -52,6 +67,29 @@ describe('TenantSettingsService', () => {
     it('fails CLOSED (false) when the read throws', async () => {
       const prisma = { programSetting: { findUnique: jest.fn().mockRejectedValue(new Error('db down')) } } as any;
       expect(await new TenantSettingsService(prisma).getVisibilityEnabledUncached('deoleo')).toBe(false);
+    });
+  });
+
+  describe('getKycGstinRequiredUncached (fail-SAFE = compulsory)', () => {
+    it('returns TRUE when there is no row (default ON / opt-out)', async () => {
+      expect(await new TenantSettingsService(makePrisma([])).getKycGstinRequiredUncached('deoleo')).toBe(true);
+    });
+
+    it('returns false ONLY for a strict boolean false row', async () => {
+      const off = makePrisma([{ settingKey: 'kycGstinRequired', settingValue: false }]);
+      expect(await new TenantSettingsService(off).getKycGstinRequiredUncached('deoleo')).toBe(false);
+
+      const on = makePrisma([{ settingKey: 'kycGstinRequired', settingValue: true }]);
+      expect(await new TenantSettingsService(on).getKycGstinRequiredUncached('deoleo')).toBe(true);
+
+      // A non-boolean value does NOT disable — fail toward compulsory.
+      const strung = makePrisma([{ settingKey: 'kycGstinRequired', settingValue: 'false' }]);
+      expect(await new TenantSettingsService(strung).getKycGstinRequiredUncached('deoleo')).toBe(true);
+    });
+
+    it('fails SAFE (true) when the read throws', async () => {
+      const prisma = { programSetting: { findUnique: jest.fn().mockRejectedValue(new Error('db down')) } } as any;
+      expect(await new TenantSettingsService(prisma).getKycGstinRequiredUncached('deoleo')).toBe(true);
     });
   });
 

@@ -1310,6 +1310,23 @@ export class KycService {
       throw new BadRequestException('UPI payout requires a upiId.');
     }
 
+    // ── GSTIN COMPULSORY (per-tenant Gifsy-toggle, default ON) ─────────────────
+    // Reject a blank GSTIN up-front (before any write) when the tenant requires one — but ONLY
+    // when GST is actually editable THIS submission (canProvide): first submit, or a re-KYC where
+    // gstNumber is flagged. A re-KYC of some OTHER field on a legacy no-GST outlet leaves
+    // gstNumber LOCKED to its stored (blank) value; demanding it there would DEADLOCK a
+    // resubmission the rep cannot fix (identical to the payout-field reasoning above). Read
+    // UNCACHED so an OFF→ON tightening takes effect immediately across the fleet (no stale-cache
+    // fail-open window). A group-child submits the group's own GSTIN, so this never blocks an
+    // inherited child. Uncached DB read is last so it only runs when the cheap checks don't clear it.
+    if (
+      canProvide('gstNumber') &&
+      !normalizeIdentityValue('gst', text.gstNumber as string | null | undefined) &&
+      (await this.tenantSettings.getKycGstinRequiredUncached(user.clientId))
+    ) {
+      throw new BadRequestException('A GSTIN is required to submit KYC for this outlet.');
+    }
+
     // WRITE-SIDE NORMALIZATION (F5). The uniqueness fields (gst/pan/bank/upi) are persisted
     // through the SAME `normalizeIdentityValue` the helper uses to compare/lock — PAN & GST
     // upper-cased+trimmed, bank/UPI trimmed. This guarantees the stored value equals its

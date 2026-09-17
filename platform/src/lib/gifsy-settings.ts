@@ -27,6 +27,7 @@ export const DEFAULT_SETTINGS: GifsySettings = {
   visibilityEnabled:       false,
   visibilityPhotoEnabled:  false,
   visibilityCaptureMode:   'PHOTO_APPROVAL',
+  kycGstinRequired:        true,
   redemptionChannels: {
     physicalGifts: true,
     vouchers:      true,
@@ -66,6 +67,7 @@ interface ServerSettings {
   visibilityPhotoEnabled: boolean;
   /** Present on the /me settings block only (authoritative ClientConfig flag). */
   visibilityCaptureMode?: 'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD';
+  kycGstinRequired:       boolean;
   redemptionChannels:     GifsySettings['redemptionChannels'];
   salesApp:               GifsySettings['salesApp'];
   creditsPayouts?:        GifsySettings['creditsPayouts'];
@@ -112,6 +114,8 @@ function fromServer(srv: ServerSettings, prev: GifsySettings): GifsySettings {
     visibilityEnabled:      srv.visibilityEnabled      ?? prev.visibilityEnabled,
     visibilityPhotoEnabled: srv.visibilityPhotoEnabled ?? prev.visibilityPhotoEnabled,
     visibilityCaptureMode:  srv.visibilityCaptureMode  ?? prev.visibilityCaptureMode ?? 'PHOTO_APPROVAL',
+    // Default TRUE when absent (GSTIN compulsory; opt-out) — prev is seeded from DEFAULT_SETTINGS (true).
+    kycGstinRequired:       srv.kycGstinRequired       ?? prev.kycGstinRequired,
     redemptionChannels:     srv.redemptionChannels     ?? prev.redemptionChannels,
     salesApp:               srv.salesApp               ?? prev.salesApp,
     // /me omits creditsPayouts (operator-only) — keep the previous/cached value then.
@@ -167,6 +171,7 @@ const SAVE_KEY_MAP: Partial<Record<keyof GifsySettings, string>> = {
   paceAmberThreshold:     'paceAmberThreshold',
   visibilityEnabled:      'visibilityEnabled',
   visibilityPhotoEnabled: 'visibilityPhotoEnabled',
+  kycGstinRequired:       'kycGstinRequired',
   redemptionChannels:     'redemptionChannels',
   salesApp:               'salesApp',
   creditsPayouts:         'creditsPayouts',

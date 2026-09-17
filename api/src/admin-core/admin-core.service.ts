@@ -1194,6 +1194,17 @@ export class AdminCoreService {
       dto.value = n;
     }
 
+    // Key-specific guard: kycGstinRequired is a strict boolean toggle (Gifsy-only) whose SAFE
+    // default is TRUE (compulsory). Coerce to a real boolean, but FAIL TOWARD THE SAFE STATE:
+    // only an EXPLICIT false (`false`/'false'/0/'0') turns the requirement OFF; anything else —
+    // 'true', an unexpected 'TRUE'/'yes'/2/'', null — resolves to TRUE (compulsory). Coercing an
+    // ambiguous value to `false` would silently DISABLE a compliance control (audit F3).
+    if (dto.key === 'kycGstinRequired') {
+      const explicitlyOff =
+        dto.value === false || dto.value === 'false' || dto.value === 0 || dto.value === '0';
+      dto.value = !explicitlyOff;
+    }
+
     // For the TDS policy (a money-path config), capture the PRIOR value BEFORE the write so
     // the dedicated audit row below records the exact old→new transition (W0-C).
     const isTdsPolicyWrite =

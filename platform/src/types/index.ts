@@ -478,6 +478,12 @@ export interface GifsySettings {
    */
   visibilityCaptureMode?: 'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD';
   /**
+   * Per-tenant switch: whether a GSTIN is compulsory to submit KYC. Default: true
+   * (GSTIN required; opt-out). Turn off only for a tenant that has genuinely
+   * unregistered (no-GST) outlets. Backend-enforced; the value here drives UX only.
+   */
+  kycGstinRequired?:       boolean;
+  /**
    * Controls which redemption channels are visible in the partner rewards catalogue.
    * All three default to true. Disable any to hide that tab entirely for the tenant.
    */

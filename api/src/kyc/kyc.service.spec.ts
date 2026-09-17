@@ -117,12 +117,16 @@ let mockUpiEnabled = false;
 // and checkGroupUniqueness (gst/bank/upi flags). Default mirrors the EffectiveSettings default
 // (gst+phone enforced; bank/upi off). Group tests flip fields per case.
 let mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+let mockKycGstinRequired = false; // default OFF here so the pre-existing blank-GST create tests hold
 const mockTenantSettings = {
   getOtpTemplateId: jest.fn(async () => mockKycOtpTemplateId),
   getEffectiveSettings: jest.fn(async () => ({
     salesApp: { upiEnabled: mockUpiEnabled },
     uniquenessPolicy: mockUniquenessPolicy,
+    kycGstinRequired: mockKycGstinRequired,
   })),
+  // create() reads the GSTIN-compulsory switch UNCACHED (fail-closed) — mirror the flag.
+  getKycGstinRequiredUncached: jest.fn(async () => mockKycGstinRequired),
 };
 
 const mockStorage = {
@@ -185,6 +189,7 @@ describe('KycService', () => {
     jest.clearAllMocks();
     mockKycOtpTemplateId = undefined; // default: no per-tenant override (global env template)
     mockUpiEnabled = false; // default: tenant UPI gate OFF (payout-mandate guard)
+    mockKycGstinRequired = false; // default: GSTIN not compulsory in these tests unless a test opts in
     mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false }; // default policy
     // clearAllMocks does not drain mockResolvedValueOnce queues nor clear a
     // mockResolvedValue impl; reset the mocks that create() now also touches so
@@ -384,6 +389,43 @@ describe('KycService', () => {
       // partnerDetails.gstNumber must be undefined (→ stored NULL), never '' (which
       // would make a SECOND no-GST outlet collide on the unique index → P2002).
       expect(mockTx.channelPartner.create.mock.calls[0][0].data.gstNumber).toBeUndefined();
+    });
+
+    it('GSTIN-COMPULSORY (kycGstinRequired): rejects a blank GSTIN with a clean 400 before any write', async () => {
+      mockKycGstinRequired = true;
+      primeCreateMocks();
+      await expect(
+        service.create(so, {
+          ...baseDto,
+          gstNumber: '   ', // blank → must be rejected when the tenant requires a GSTIN
+          documents: [{ type: 'GST_CERTIFICATE', fileKey: 'kyc/deoleo/2026-06/uuid.pdf' }],
+        } as never),
+      ).rejects.toThrow(/GSTIN is required/i);
+      // rejected up-front → no partner/submission write attempted
+      expect(mockTx.channelPartner.create).not.toHaveBeenCalled();
+      expect(mockTx.kycSubmission.create).not.toHaveBeenCalled();
+    });
+
+    it('GSTIN-COMPULSORY: a valid GSTIN passes the requirement', async () => {
+      mockKycGstinRequired = true;
+      primeCreateMocks();
+      const res = await service.create(so, {
+        ...baseDto,
+        gstNumber: '29ABCDE1234F1Z5',
+        documents: [{ type: 'GST_CERTIFICATE', fileKey: 'kyc/deoleo/2026-06/uuid.pdf' }],
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-1' });
+    });
+
+    it('GSTIN-OPTIONAL (kycGstinRequired=false): a blank GSTIN is still allowed', async () => {
+      mockKycGstinRequired = false;
+      primeCreateMocks();
+      const res = await service.create(so, {
+        ...baseDto,
+        gstNumber: '',
+        documents: [{ type: 'GST_CERTIFICATE', fileKey: 'kyc/deoleo/2026-06/uuid.pdf' }],
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-1' });
     });
 
     it('rejects a duplicate GST with a clean 400 (not a tx-aborting 500) on the create path', async () => {
@@ -1070,6 +1112,34 @@ describe('KycService', () => {
       mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
       // paymentMode='bank', no bank fields sent — they're locked+empty. Must NOT throw.
       const res = await service.create(so, { ...dtoBase, paymentMode: 'bank' } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-1' });
+    });
+
+    it('re-KYC resubmit: GSTIN LOCKED (not flagged) + stored blank does NOT 400 even when kycGstinRequired (audit HIGH — no deadlock)', async () => {
+      // A legacy no-GST outlet flagged for re-KYC on a NON-GST field: gstNumber is LOCKED to its
+      // stored (blank) value and the rep cannot fill it. The compulsory-GSTIN guard must NOT
+      // demand it here (canProvide('gstNumber') === false), or the resubmission deadlocks forever.
+      mockKycGstinRequired = true; // tenant requires GSTIN
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-1', clientId: 'deoleo', partnerId: 'cp-existing',
+        outletCode: 'OUT-1', outletType: { code: 'SSS' },
+        requiredPaymentType: 'BANK',
+        reKycFlags: { mobileNumber: true }, // NON-GST flag → gstNumber locked to stored (blank)
+        addressLine1: 'addr1', city: 'X', state: 'Y', pincode: '110011',
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.channelPartner.findUnique.mockResolvedValueOnce({ // stored: blank GST, filled bank
+        ownerName: 'Acme', phone: '9000000000', gstNumber: null, panNumber: null,
+        bankName: 'B', bankAccountHolder: 'H', bankAccountNumber: '123', ifscCode: 'IFSC0001', upiId: '',
+      });
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'cp-existing' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-1' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+      const res = await service.create(so, { ...dtoBase, gstNumber: '', paymentMode: 'bank' } as never);
       expect(res).toMatchObject({ submissionId: 'sub-1' });
     });
   });

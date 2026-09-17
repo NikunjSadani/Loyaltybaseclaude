@@ -27,7 +27,9 @@ import NewKYCPage from '../page';
 
 const EXISTING_KYC = {
   partnerName: 'Verma Traders', mobile: '7766554433',
-  gstNumber: '', panNumber: '',
+  // A GST-registered outlet (GSTIN compulsory by default) — the re-entry prefill carries it so
+  // the Basic-step GST gate is satisfied; PAN auto-derives from the GSTIN in the form.
+  gstNumber: '27AAPFU0939F1Z5', panNumber: '',
   address: '12 MG Road', city: 'Pune', state: 'Maharashtra', pincode: '411001',
   bankName: 'HDFC Bank', accountHolderName: 'Suresh Verma',
   accountNumber: '123456789012', ifscCode: 'HDFC0001234', upiId: '',

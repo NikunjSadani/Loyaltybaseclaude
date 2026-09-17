@@ -141,6 +141,13 @@ export interface EffectiveSettings {
    * and from the per-outlet-type `OutletTypeClientConfig.visibilityEnabled` column.
    */
   visibilityEnabled:      boolean;
+  /**
+   * Per-tenant switch: when true (DEFAULT), a GSTIN is COMPULSORY to submit KYC — the KYC
+   * create/submit path rejects a blank GSTIN. Gifsy-only editable (a tenant with genuinely
+   * unregistered outlets is turned OFF in the Gifsy Settings panel). Default TRUE (opt-out),
+   * the inverse of `visibilityEnabled`'s opt-in default.
+   */
+  kycGstinRequired:       boolean;
   redemptionChannels:     RedemptionChannels;
   salesApp:               SalesAppSettings;
   creditsPayouts:         CreditsPayoutsSettings;
@@ -198,6 +205,7 @@ type SettingKey =
   | 'paceAmberThreshold'
   | 'visibilityPhotoEnabled'
   | 'visibilityEnabled'
+  | 'kycGstinRequired'
   | 'redemptionChannels'
   | 'salesApp'
   | 'creditsPayouts'
@@ -256,6 +264,8 @@ export class TenantSettingsService {
       // Master Visibility switch defaults OFF — visibility is opt-in per tenant
       // (owner decision 2026-06-25). A tenant must be turned ON in Gifsy Settings.
       visibilityEnabled:      false,
+      // GSTIN compulsory by default (opt-out); a tenant with unregistered outlets is turned OFF.
+      kycGstinRequired:       true,
       redemptionChannels:     { physicalGifts: true, vouchers: true, bankTransfer: true },
       salesApp:               { ledgerLabel: 'Wallet', upiEnabled: false },
       creditsPayouts: {
@@ -395,6 +405,29 @@ export class TenantSettingsService {
     }
   }
 
+  /**
+   * UNCACHED read of the GSTIN-compulsory switch — used by the KYC create/submit guard.
+   *
+   * Same rationale as getVisibilityEnabledUncached: the 5-min per-instance cache would leave an
+   * OFF→ON tightening eventually-consistent across the fleet (a blank-GST submission could slip
+   * through on a stale instance for up to CACHE_TTL_MS right after the compliance control is
+   * turned on). KYC submits are low-traffic, so read the single row directly. Fails toward the
+   * SAFE state (compulsory = true): an absent row, a read error, or anything but a strict
+   * boolean `false` → true. Only an explicit boolean `false` turns the requirement OFF.
+   */
+  async getKycGstinRequiredUncached(clientId: string): Promise<boolean> {
+    try {
+      const row = await this.prisma.programSetting.findUnique({
+        where: { clientId_settingKey: { clientId, settingKey: 'kycGstinRequired' } },
+        select: { settingValue: true },
+      });
+      return row?.settingValue === false ? false : true;
+    } catch (e) {
+      this.logger.warn(`kycGstinRequired read failed for ${clientId}; treating as REQUIRED: ${e}`);
+      return true;
+    }
+  }
+
   /** Bust the cache for a tenant — called by AdminCoreService.upsertSetting after a write. */
   invalidate(clientId: string): void {
     this.cache.delete(clientId);
@@ -456,6 +489,10 @@ export class TenantSettingsService {
         }
         case 'visibilityEnabled': {
           if (typeof v === 'boolean') out.visibilityEnabled = v;
+          break;
+        }
+        case 'kycGstinRequired': {
+          if (typeof v === 'boolean') out.kycGstinRequired = v;
           break;
         }
         case 'redemptionChannels': {

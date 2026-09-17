@@ -1,7 +1,7 @@
 ﻿'use client'
 
 import { useState, useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone, Clock, Coins, Lock, Fingerprint, CalendarDays, Globe } from 'lucide-react'
+import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone, Clock, Coins, Lock, Fingerprint, CalendarDays, Globe, FileText } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { fetchTaskConfig, updateTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig, type CustomTaskItem } from '@/lib/task-config'
@@ -656,6 +656,33 @@ export default function SettingsPage() {
     }
     setVisibilityEnabledSaved(true)
     setTimeout(() => setVisibilityEnabledSaved(false), 3000)
+  }
+
+  // ── KYC GSTIN requirement toggle (per-tenant; saved via GifsySettings) ──
+  // Like the visibility switch, saveGifsySettings PUTs to /v1/admin/settings (GIFSY_ADMIN-only),
+  // so the control is editable only for GIFSY_ADMIN. Default ON (GSTIN compulsory) — treat
+  // missing as ON (gate with `!== false`, never `=== true`).
+  const [kycGstinRequired,      setKycGstinRequired]      = useState<boolean>(() => getGifsySettings().kycGstinRequired !== false)
+  const [kycGstinRequiredSaved, setKycGstinRequiredSaved] = useState(false)
+  const [kycGstinRequiredError, setKycGstinRequiredError] = useState<string | null>(null)
+
+  // Keep the displayed value in sync once server settings hydrate (/me → cache).
+  useEffect(() => {
+    setKycGstinRequired(getGifsySettings().kycGstinRequired !== false)
+  }, [])
+
+  async function handleKycGstinRequiredChange(next: boolean) {
+    setKycGstinRequiredError(null)
+    const previous = kycGstinRequired
+    setKycGstinRequired(next) // optimistic
+    const ok = await saveGifsySettings({ kycGstinRequired: next })
+    if (!ok) {
+      setKycGstinRequired(previous) // revert
+      setKycGstinRequiredError('Could not save — the GSTIN requirement can only be changed by a Gifsy Admin.')
+      return
+    }
+    setKycGstinRequiredSaved(true)
+    setTimeout(() => setKycGstinRequiredSaved(false), 3000)
   }
 
   // ── UPI collection toggle (per-tenant; saved via GifsySettings) ──
@@ -1329,6 +1356,50 @@ export default function SettingsPage() {
           )}
           {visibilityEnabledError && (
             <p className="text-xs text-red-600 mt-2">{visibilityEnabledError}</p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ── Require GSTIN for KYC (per-tenant) ── */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2">
+                <FileText className="h-4 w-4 text-[var(--brand-primary)]" /> Require GSTIN for KYC
+              </CardTitle>
+              <CardDescription className="mt-1">
+                When ON, a GSTIN is compulsory to submit KYC. Turn OFF only for a tenant that has
+                genuinely unregistered (no-GST) outlets. This is a Gifsy-operated setting — only a
+                Gifsy Admin can change it.
+              </CardDescription>
+            </div>
+            {kycGstinRequiredSaved && (
+              <span className="text-xs font-semibold text-emerald-600 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg shrink-0">
+                ✓ Saved
+              </span>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center gap-3">
+            {/* Segmented ON/OFF control */}
+            <SegmentedControl
+              options={[['OFF', false], ['ON', true]] as const}
+              value={kycGstinRequired}
+              onChange={handleKycGstinRequiredChange}
+              disabled={!isGifsyAdmin}
+              ariaLabel="Require GSTIN for KYC"
+              testIdFor={(lbl) => `kyc-gstin-required-${lbl.toLowerCase()}`}
+            />
+          </div>
+          {!isGifsyAdmin && (
+            <p className="text-xs text-gray-400 mt-2">
+              The GSTIN requirement is a Gifsy-operated setting — only a Gifsy Admin can change it.
+            </p>
+          )}
+          {kycGstinRequiredError && (
+            <p className="text-xs text-red-600 mt-2">{kycGstinRequiredError}</p>
           )}
         </CardContent>
       </Card>

@@ -522,6 +522,9 @@ export default function NewKYCPage() {
    *   The tenant gate wins inside the helper (a UPI outlet on upiEnabled=false → 'bank').
    *   `pinnedMode` also feeds <BankOrUpiSection lockedMode> below to lock/hide the toggle. */
   const upiEnabled = getGifsySettings().salesApp?.upiEnabled === true;
+  // Per-tenant GSTIN-compulsory switch (default ON). Drives the entry-form required marker +
+  // a pre-submit guard; the BACKEND (kyc.service create) is the authoritative enforcer.
+  const gstinRequired = getGifsySettings().kycGstinRequired !== false;
   const pinnedMode: PaymentMode | null = selectedOutlet
     ? pinnedPaymentMode(selectedOutlet.requiredPaymentType ?? 'ANY', upiEnabled)
     : null;
@@ -1260,6 +1263,13 @@ export default function NewKYCPage() {
     // submit again must NOT create a second submission — just return to the OTP step (which
     // has its own Resend). Guards the duplicate-submit path.
     if (submissionId) { setStep('otp'); return; }
+    // GSTIN-compulsory (per-tenant): catch a blank GSTIN before the network round-trip so the rep
+    // gets instant feedback (the backend enforces this authoritatively too). Message stays on the
+    // current step; the required asterisk on the Basic-details GST field cues where to fix it.
+    if (gstinRequired && !isFieldLocked('gstNumber') && form.gstNumber.trim() === '') {
+      setSubmitError('A GSTIN is required for this outlet — add it in the Basic details step before submitting.');
+      return;
+    }
     setSubmitting(true);
     setSubmitError('');
     try {
@@ -1832,6 +1842,14 @@ export default function NewKYCPage() {
   else if (mobileCheck === 'outlet_conflict' || mobileCheck === 'employee_conflict')
     basicMissing.push('A different, available mobile number');
   if (!docs.businessDoc && !gstCertInherited) basicMissing.push('GST Certificate');
+  // GSTIN compulsory (per-tenant, default ON) — gate it at the Basic step (checklist↔gate parity)
+  // so a blank/invalid GSTIN blocks here, not only at final submit. Only when the field is
+  // EDITABLE this submission (a re-KYC that locks gstNumber must not demand it — see the backend
+  // canProvide guard); the backend enforces authoritatively regardless.
+  if (gstinRequired && !isFieldLocked('gstNumber')) {
+    if (form.gstNumber.trim() === '') basicMissing.push('GST Number');
+    else if (!isValidGstin(form.gstNumber)) basicMissing.push('A valid 15-character GSTIN');
+  }
   if (!docs.ownerPhoto) basicMissing.push('Owner photo');
   const basicBlocked = basicMissing.length > 0 || basicBusy !== null;
 
@@ -2225,9 +2243,10 @@ export default function NewKYCPage() {
               )}
             </div>
 
-            {/* GST (optional — blank never errors; a non-empty value is validated against the 15-char GSTIN format) */}
+            {/* GST — required when the tenant's kycGstinRequired is ON (default); otherwise optional.
+                A non-empty value is always validated against the 15-char GSTIN format. */}
             <div>
-              <label className={labelCls}>GST Number<FlagBadge field="gstNumber" /></label>
+              <label className={labelCls}>GST Number{gstinRequired && !isFieldLocked('gstNumber') && <span className="text-red-500"> *</span>}<FlagBadge field="gstNumber" /></label>
               <input
                 className={`${inputCls} ${flagCls('gstNumber')} ${
                   form.gstNumber.length === 0
