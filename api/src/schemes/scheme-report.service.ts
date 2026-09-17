@@ -281,6 +281,21 @@ export function buildEnrollmentExportRows(
   // is still de-collided to "… (Excel)" instead of appearing as a confusing second column.
   const reservedNorm = new Set<string>([...reserved].map(normalizeKey));
 
+  // SEMANTIC de-collide (client complaint 2026-09-17): a roster upload often carries its
+  // OWN status-like column (e.g. "Enrollment Status") that is a FROZEN snapshot from the
+  // sheet and contradicts the live built-in "Status" column. Its header does not match any
+  // reserved header by text, so it slipped through as a confusing second status column
+  // (e.g. Status=SUBMITTED but Enrollment Status=NOT_ENROLLED). Treat these known synonyms
+  // of the live "Status" as colliding → suffix " (Excel)" so the client reads "Enrollment
+  // Status (Excel)" (their upload) beside the live "Status". Non-destructive: the column and
+  // its data are preserved, only the header is clarified. Extend the set if new synonyms
+  // surface. NOTE: an uploaded column CLAIMED by a form field's prefillKey is merged into
+  // that field's column earlier (never reaches here), so this only clarifies genuinely
+  // standalone status-synonym uploads.
+  const STATUS_SYNONYM_NORM = new Set<string>(
+    ['Enrollment Status', 'Enrolment Status'].map(normalizeKey),
+  );
+
   // Bug 1: resolve the Outlet Name per row and remember WHICH prefill header (if any)
   // supplied it, so bug-3 can claim that header (avoid duplicating the name column).
   const nameFor = new Map<ExportRosterRow, string>();
@@ -309,6 +324,14 @@ export function buildEnrollmentExportRows(
   // unrelated clash with a reserved header. `origKey` reads the value, `header` names it.
   const excelCols: { origKey: string; header: string }[] = [];
   const excelSeen = new Set<string>();
+  // Every emitted Excel header must be UNIQUE: two uploaded columns whose de-collided
+  // headers would coincide (e.g. a sheet carrying BOTH "Enrollment Status" and a literal
+  // "Enrollment Status (Excel)", or both "Status" and "Status (Excel)") would otherwise
+  // silently overwrite each other in the row object AND produce duplicate legend rows,
+  // dropping the first column's data. Suffix a running counter instead so both columns +
+  // their data survive (audit 2026-09-17 LOW hardening — closes the pre-existing collision
+  // class the synonym de-collide widened).
+  const excelHeaderTaken = new Set<string>();
   for (const r of roster) {
     const pv = r.prefillValues;
     if (!pv || typeof pv !== 'object' || Array.isArray(pv)) continue;
@@ -316,7 +339,16 @@ export function buildEnrollmentExportRows(
       if (excelSeen.has(origKey)) continue;
       excelSeen.add(origKey);
       if (claimedPrefillNorm.has(normalizeKey(origKey))) continue; // merged into a field/identity column
-      excelCols.push({ origKey, header: reservedNorm.has(normalizeKey(origKey)) ? `${origKey} (Excel)` : origKey });
+      const collides =
+        reservedNorm.has(normalizeKey(origKey)) || STATUS_SYNONYM_NORM.has(normalizeKey(origKey));
+      let header = collides ? `${origKey} (Excel)` : origKey;
+      if (excelHeaderTaken.has(header)) {
+        const stem = header;
+        let n = 1;
+        while (excelHeaderTaken.has(header)) { n += 1; header = `${stem} (${n})`; }
+      }
+      excelHeaderTaken.add(header);
+      excelCols.push({ origKey, header });
     }
   }
 

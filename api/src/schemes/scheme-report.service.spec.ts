@@ -210,6 +210,43 @@ describe('buildEnrollmentExportRows (pure)', () => {
     expect(rows[0]['status']).toBeUndefined();            // NOT a bare lowercase duplicate
   });
 
+  it('de-collides an uploaded "Enrollment Status" (semantic synonym of the live Status) → "(Excel)"', () => {
+    // Client complaint 2026-09-17: a roster upload carried its OWN frozen "Enrollment Status"
+    // column that contradicts the live built-in "Status" (e.g. Status=SUBMITTED but the sheet
+    // said NOT_ENROLLED). It matches no reserved header by text, so it used to surface as a
+    // confusing second bare column. It must now be de-collided to "Enrollment Status (Excel)".
+    const roster: ExportRosterRow[] = [
+      row({
+        outletRef: 'A',
+        prefillValues: { 'Enrollment Status': 'NOT_ENROLLED' },
+        enrollment: enrolled({ status: 'SUBMITTED' }),
+      }),
+    ];
+    const { rows, columns } = buildEnrollmentExportRows(roster, fields, link);
+    expect(rows[0]['Status']).toBe('SUBMITTED');                       // live built-in preserved
+    expect(rows[0]['Enrollment Status (Excel)']).toBe('NOT_ENROLLED'); // upload de-collided, data kept
+    expect(rows[0]['Enrollment Status']).toBeUndefined();             // NO confusing bare duplicate
+    expect(columns).toEqual(
+      expect.arrayContaining([{ name: 'Enrollment Status (Excel)', source: 'Audience Excel upload' }]),
+    );
+  });
+
+  it('keeps BOTH columns when an upload has "Enrollment Status" AND a literal "Enrollment Status (Excel)"', () => {
+    // Hardening (audit 2026-09-17): the synonym de-collide turns "Enrollment Status" into
+    // "Enrollment Status (Excel)"; if the sheet ALSO literally has that header, the two must
+    // NOT collapse onto one row key (silent data loss). The second is suffixed with a counter.
+    const roster: ExportRosterRow[] = [
+      row({
+        outletRef: 'A',
+        prefillValues: { 'Enrollment Status': 'SYNONYM_VAL', 'Enrollment Status (Excel)': 'LITERAL_VAL' },
+      }),
+    ];
+    const { rows } = buildEnrollmentExportRows(roster, fields, link);
+    expect(rows[0]['Enrollment Status (Excel)']).toBe('SYNONYM_VAL');     // synonym-suffixed, first
+    expect(rows[0]['Enrollment Status (Excel) (2)']).toBe('LITERAL_VAL'); // literal, counter-suffixed
+    expect(rows[0]['Enrollment Status']).toBeUndefined();                 // no confusing bare status
+  });
+
   it('de-collides the per-photo geo companion from a form field with the same label', () => {
     // A media field "Photo" that carries geo produces a "Photo (Geo)" companion column. A
     // separate text field literally labelled "Photo (Geo)" must NOT clobber it — the field
