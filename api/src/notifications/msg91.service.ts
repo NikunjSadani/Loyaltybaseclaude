@@ -252,6 +252,15 @@ export class Msg91Service {
       json.data?.request_id ??
       json.data?.requestId ??
       null;
+    // Positive audit trail for a successful send — the success path was previously SILENT,
+    // so a fired scheme confirmation (or any WhatsApp template) left NO log at all. Mirrors
+    // the SMTP-success LOG line and is symmetric with the error/DEV-bypass/guard paths above,
+    // so every WhatsApp send now leaves exactly one line. PII-safe: masked recipient + the
+    // variable COUNT only (never the body values — they carry owner name / outlet / form-field
+    // data) + the MSG91 request id for webhook correlation.
+    this.logger.log(
+      `MSG91 WhatsApp template "${templateName}" sent to ••••${phone.slice(-4)} (${bodyValues.length} vars${requestId ? `, req ${requestId}` : ''})`,
+    );
     return { requestId };
   }
 
