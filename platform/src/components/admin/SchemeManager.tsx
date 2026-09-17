@@ -12,10 +12,10 @@
  * saves are in-place and status transitions use valid SchemeStatus values only.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Save, AlertCircle, CheckCircle, Loader2, Play, Pause, XCircle, Settings2,
-  Users, ClipboardList,
+  Users, ClipboardList, MessageCircle,
 } from 'lucide-react';
 import { api } from '@/lib/api-client';
 import {
@@ -26,15 +26,18 @@ import type {
   AudienceConfig,
   CampaignType,
   EnrollmentFormSchema,
+  FormField,
   SchemeRecord,
   SchemeStatus,
+  WhatsappConfirmConfig,
 } from '@/lib/scheme-types';
 import { SchemeAudienceEditor } from './SchemeAudienceEditor';
 import { SchemeFormBuilder, validateSchemeFormSchema, normalizeSchemeFormSchema } from './SchemeFormBuilder';
+import { WhatsappConfirmCard, validateWhatsappConfirm, normalizeWhatsappConfirm } from './WhatsappConfirmCard';
 
 const EMPTY_FORM: EnrollmentFormSchema = { captureGpsOnSubmit: false, requireOtp: false, fields: [] };
 
-type Tab = 'details' | 'audience' | 'form';
+type Tab = 'details' | 'audience' | 'form' | 'whatsapp';
 
 interface EnrollmentFormResponse {
   enrollmentForm: {
@@ -49,10 +52,20 @@ export function SchemeManager({ schemeId }: { schemeId: string }) {
   const [audience, setAudience] = useState<AudienceConfig | null>(null);
   const [campaignType, setCampaignType] = useState<CampaignType>('OPEN_CAMPAIGN');
   const [formSchema, setFormSchema] = useState<EnrollmentFormSchema>(EMPTY_FORM);
-  // The PERSISTED form's field count (from the last hydrate/save) — drives the badges +
-  // activation gate. Kept separate from `formSchema`, which the builder mutates LIVE as
-  // the admin types (before Save); the gate must reflect what is stored, not the draft.
-  const [savedFormFieldCount, setSavedFormFieldCount] = useState(0);
+  // The PERSISTED form's fields (from the last hydrate/save) — kept separate from
+  // `formSchema`, which the builder mutates LIVE as the admin types (before Save). The
+  // badges + activation gate reflect what is STORED, not the draft; the WhatsApp tab's
+  // field dropdowns + validation also bind to these SAVED fields so a mapping can only
+  // reference a field that actually exists server-side.
+  const [savedFormFields, setSavedFormFields] = useState<FormField[]>([]);
+  const savedFormFieldCount = savedFormFields.length;
+  // WhatsApp-on-submit draft — LIFTED to the parent (like `formSchema`) so it survives
+  // tab switches. Seeded once from the loaded scheme's metadata (a form/audience re-hydrate
+  // must not clobber unsaved WhatsApp edits), then owned here and saved by the WhatsApp tab.
+  const [whatsappConfirm, setWhatsappConfirm] = useState<WhatsappConfirmConfig>(
+    () => normalizeWhatsappConfirm(undefined),
+  );
+  const whatsappInitedRef = useRef(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('details');
@@ -65,6 +78,12 @@ export function SchemeManager({ schemeId }: { schemeId: string }) {
     if (!schemeRes.success) { setLoadError(schemeRes.error); setLoading(false); return; }
     setScheme(schemeRes.data.scheme);
     setAudience(schemeRes.data.scheme.audienceConfig ?? null);
+    // Seed the LIFTED WhatsApp draft ONCE from the loaded scheme — a later form/audience
+    // re-hydrate must not overwrite unsaved WhatsApp edits.
+    if (!whatsappInitedRef.current) {
+      setWhatsappConfirm(normalizeWhatsappConfirm(schemeRes.data.scheme.metadata?.whatsappConfirm));
+      whatsappInitedRef.current = true;
+    }
 
     const formRes = await api.get<EnrollmentFormResponse>(`/api/schemes/${schemeId}/enrollment-form`);
     if (formRes.success && formRes.data.enrollmentForm) {
@@ -72,15 +91,16 @@ export function SchemeManager({ schemeId }: { schemeId: string }) {
       const fs = formRes.data.enrollmentForm.formSchema;
       const fields = Array.isArray(fs?.fields) ? fs.fields : [];
       // Coerce any persisted dead `ON_PHOTO` GPS trigger → `MANUAL` on load (per-photo geotag replaces it).
-      setFormSchema(normalizeSchemeFormSchema({
+      const normalized = normalizeSchemeFormSchema({
         captureGpsOnSubmit: !!fs?.captureGpsOnSubmit,
         requireOtp: !!fs?.requireOtp,
         fields,
-      }));
-      setSavedFormFieldCount(fields.length);
+      });
+      setFormSchema(normalized);
+      setSavedFormFields(normalized.fields);
     } else {
       setFormSchema(EMPTY_FORM);
-      setSavedFormFieldCount(0);
+      setSavedFormFields([]);
     }
     setLoading(false);
   }, [schemeId]);
@@ -110,6 +130,8 @@ export function SchemeManager({ schemeId }: { schemeId: string }) {
   // Persisted (saved) form, NOT the live builder draft — so the badge/gate reflect what
   // is stored. `onSaved={hydrate}` refreshes this after every form save.
   const hasForm = savedFormFieldCount > 0;
+  // WhatsApp-on-submit is "configured" once enabled in the persisted scheme metadata.
+  const hasWhatsapp = normalizeWhatsappConfirm(scheme.metadata?.whatsappConfirm).enabled;
 
   return (
     <div className="space-y-4">
@@ -119,6 +141,7 @@ export function SchemeManager({ schemeId }: { schemeId: string }) {
           { key: 'details' as Tab, label: 'Details', Icon: Settings2, done: false },
           { key: 'audience' as Tab, label: 'Audience', Icon: Users, done: hasAudience },
           { key: 'form' as Tab, label: 'Enrollment form', Icon: ClipboardList, done: hasForm },
+          { key: 'whatsapp' as Tab, label: 'WhatsApp', Icon: MessageCircle, done: hasWhatsapp },
         ]).map(({ key, label, Icon, done }) => (
           <button key={key} onClick={() => setTab(key)}
             className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${tab === key ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
@@ -144,6 +167,15 @@ export function SchemeManager({ schemeId }: { schemeId: string }) {
           onCampaignTypeChange={setCampaignType}
           onSchemaChange={setFormSchema}
           onSaved={hydrate}
+        />
+      )}
+      {tab === 'whatsapp' && (
+        <WhatsappTab
+          scheme={scheme}
+          formFields={savedFormFields}
+          config={whatsappConfirm}
+          onConfigChange={setWhatsappConfirm}
+          onChanged={setScheme}
         />
       )}
     </div>
@@ -378,6 +410,59 @@ function FormTab({
           className="flex items-center gap-2 px-5 py-2.5 text-sm font-medium bg-[var(--brand-primary)] text-white rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
           {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
           {saving ? 'Saving…' : 'Save form'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── WhatsApp tab (per-scheme WhatsApp-on-submit config → scheme.metadata) ────────
+//
+// Reads/writes `scheme.metadata.whatsappConfirm` and persists it through the SAME
+// scheme-update payload the Details tab uses (`schemeApi.update`), sending a top-level
+// `whatsappConfirm` the backend folds into metadata. The config draft is LIFTED to the
+// SchemeManager parent (like `formSchema`) so it survives tab switches; the field
+// dropdowns + validation bind to the SAVED form fields (`savedFormFields`), never the
+// unsaved builder draft. Own Save + validation gate, mirroring the Form tab.
+
+function WhatsappTab({
+  scheme, formFields, config, onConfigChange, onChanged,
+}: {
+  scheme: SchemeRecord;
+  formFields: FormField[];
+  config: WhatsappConfirmConfig;
+  onConfigChange: (c: WhatsappConfirmConfig) => void;
+  onChanged: (s: SchemeRecord) => void;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  const errors = useMemo(() => validateWhatsappConfirm(config, formFields), [config, formFields]);
+
+  const save = async () => {
+    setMsg(null);
+    if (errors.length > 0) return;
+    setSaving(true);
+    const res = await schemeApi.update(scheme.id, { whatsappConfirm: config });
+    setSaving(false);
+    if (res.success) { onChanged(res.data.scheme); setMsg({ kind: 'ok', text: 'WhatsApp confirmation saved.' }); }
+    else setMsg({ kind: 'err', text: res.error });
+  };
+
+  return (
+    <div className="space-y-4">
+      <WhatsappConfirmCard value={config} formFields={formFields} onChange={onConfigChange} />
+      {msg && (
+        <p className={`text-xs flex items-center gap-1.5 ${msg.kind === 'ok' ? 'text-green-600' : 'text-red-500'}`}>
+          {msg.kind === 'ok' ? <CheckCircle className="w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}{msg.text}
+        </p>
+      )}
+      <div className="flex justify-end">
+        <button onClick={save} disabled={saving || errors.length > 0}
+          title={errors.length > 0 ? 'Resolve the errors above to save.' : undefined}
+          className="flex items-center gap-2 px-5 py-2.5 text-sm font-medium bg-[var(--brand-primary)] text-white rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
+          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+          {saving ? 'Saving…' : 'Save WhatsApp settings'}
         </button>
       </div>
     </div>

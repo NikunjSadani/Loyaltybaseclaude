@@ -69,7 +69,10 @@ const mockPrisma = {
 };
 
 const mockStorage = { generateKey: jest.fn(), uploadFile: jest.fn(), downloadBytes: jest.fn() };
-const mockMsg91 = { sendOtp: jest.fn() };
+const mockMsg91 = { sendOtp: jest.fn(), sendWhatsappTemplate: jest.fn() };
+
+/** Flush the fire-and-forget WhatsApp-confirm IIFE (a short chain of resolved promises). */
+const flushMicrotasks = () => new Promise((r) => setTimeout(r, 0));
 
 const partnerUser: JwtPayload = { sub: 'u-partner', role: 'SSS', clientId: 'deoleo', phone: '9990001111', name: '' };
 const salesUser: JwtPayload = { sub: 'u-sales', role: 'SALES_SO', clientId: 'deoleo', phone: '', name: '' };
@@ -162,6 +165,73 @@ describe('SchemeEnrollmentService', () => {
       mockPrisma.schemeEnrollment.findUnique.mockResolvedValue({ id: 'enr1', status: 'SUBMITTED' });
 
       await expect(service.enroll(partnerUser, 's1', { enrollmentMode: 'SELF', formValues: { f1: 'x' } })).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  // ── WhatsApp confirmation on submit (fire-and-forget) ──────────────────────
+  describe('WhatsApp confirmation on submit', () => {
+    const primeSelfEnroll = (schemeOver: Record<string, unknown> = {}) => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(makeScheme(schemeOver));
+      // resolveActivePartnerId → own partner (consumed first).
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce({ id: 'cp1', groupId: null });
+      // The fire-and-forget path re-reads the matched partner for owner name/phone.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ ownerName: 'Ravi Kumar', phone: '+91 98300 11252' });
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { id: 'o1', name: 'Shop', partnerId: 'cp1', outletTypeId: 't', programName: null, programCategory: null, zone: null, state: null },
+      ]);
+      // The fire path re-reads the matched outlet for name/code.
+      mockPrisma.outlet.findFirst.mockResolvedValue({ id: 'o1', name: 'Ravi Stores', outletCode: 'OUT001', ownerName: null, phone: null });
+      mockPrisma.schemeOutlet.upsert.mockResolvedValue({ id: 'ro1', schemeId: 's1', clientId: 'deoleo', matchedPartnerId: 'cp1', matchedOutletId: 'o1', outletRef: 'o1', outletName: 'Shop', taggedSalesUserId: null });
+      mockPrisma.schemeEnrollment.findUnique.mockResolvedValue(null);
+      mockPrisma.schemeEnrollment.create.mockResolvedValue({ id: 'enr1', schemeId: 's1', schemeOutletId: 'ro1', currentVersion: 1 });
+      mockPrisma.schemeSubmission.create.mockResolvedValue({ id: 'sub1', version: 1 });
+    };
+
+    it('sends the confirmation with the resolved recipient + body when enabled', async () => {
+      primeSelfEnroll({
+        name: 'Diwali Dhamaka',
+        metadata: {
+          whatsappConfirm: {
+            enabled: true,
+            templateName: 'scheme_confirm',
+            recipient: { source: 'PARTNER_PHONE' },
+            variables: [{ token: 'OWNER_NAME' }, { token: 'OUTLET_NAME' }, { token: 'SCHEME_NAME' }, { token: 'FORM_FIELD', formFieldId: 'f1' }],
+          },
+        },
+      });
+
+      const res = await service.enroll(partnerUser, 's1', { enrollmentMode: 'SELF', formValues: { f1: 'My Shop' } });
+      expect(res.enrollment.id).toBe('enr1'); // submit returned successfully first
+      await flushMicrotasks();
+
+      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledTimes(1);
+      const [phone, templateName, bodyValues] = mockMsg91.sendWhatsappTemplate.mock.calls[0];
+      expect(phone).toBe('9830011252'); // normalized owner phone
+      expect(templateName).toBe('scheme_confirm');
+      expect(bodyValues).toEqual(['Ravi Kumar', 'Ravi Stores', 'Diwali Dhamaka', 'My Shop']);
+    });
+
+    it('does NOT send when whatsappConfirm is absent', async () => {
+      primeSelfEnroll(); // default scheme has no metadata.whatsappConfirm
+      await service.enroll(partnerUser, 's1', { enrollmentMode: 'SELF', formValues: { f1: 'My Shop' } });
+      await flushMicrotasks();
+      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
+    });
+
+    it('does NOT send when whatsappConfirm is disabled', async () => {
+      primeSelfEnroll({ metadata: { whatsappConfirm: { enabled: false, templateName: 't', recipient: { source: 'PARTNER_PHONE' }, variables: [] } } });
+      await service.enroll(partnerUser, 's1', { enrollmentMode: 'SELF', formValues: { f1: 'My Shop' } });
+      await flushMicrotasks();
+      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
+    });
+
+    it('never fails the submission when the WhatsApp send throws', async () => {
+      primeSelfEnroll({ metadata: { whatsappConfirm: { enabled: true, templateName: 't', recipient: { source: 'PARTNER_PHONE' }, variables: [] } } });
+      mockMsg91.sendWhatsappTemplate.mockRejectedValue(new Error('MSG91 down'));
+      const res = await service.enroll(partnerUser, 's1', { enrollmentMode: 'SELF', formValues: { f1: 'My Shop' } });
+      expect(res.enrollment.id).toBe('enr1'); // submit still succeeded
+      await flushMicrotasks(); // the rejected send is swallowed (no unhandled rejection)
+      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledTimes(1);
     });
   });
 

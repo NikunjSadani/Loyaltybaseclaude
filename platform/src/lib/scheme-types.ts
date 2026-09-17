@@ -216,6 +216,65 @@ function normalizeGeo(g: unknown): GpsCapture | undefined {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// WhatsApp confirmation on enrollment submit
+//
+// Per-scheme config sending an MSG91 WhatsApp template message the moment a filler
+// submits the enrollment form. Stored at `scheme.metadata.whatsappConfirm` and wired
+// through the scheme create/update payload (the backend accepts a top-level
+// `whatsappConfirm` and persists it into metadata). WhatsApp only actually fires once
+// the tenant's WhatsApp channel is configured — dormant otherwise.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The template variable tokens the config can map each WhatsApp body slot to. Ordered
+ * as the config's `variables` array is → the ordinal position IS the template slot
+ * ({{1}}, {{2}}, …). FORM_FIELD additionally carries a `formFieldId`.
+ */
+export const WHATSAPP_CONFIRM_TOKENS = [
+  'OWNER_NAME',
+  'OWNER_PHONE',
+  'OUTLET_NAME',
+  'OUTLET_CODE',
+  'SCHEME_NAME',
+  'SUBMISSION_DATE',
+  'FORM_FIELD',
+] as const;
+export type WhatsappConfirmToken = (typeof WHATSAPP_CONFIRM_TOKENS)[number];
+
+/** Where the confirmation message is sent. */
+export type WhatsappRecipientSource = 'PARTNER_PHONE' | 'FORM_FIELD';
+
+export interface WhatsappConfirmRecipient {
+  source: WhatsappRecipientSource;
+  /** Required when source === 'FORM_FIELD': the form field holding the phone number. */
+  formFieldId?: string;
+}
+
+export interface WhatsappConfirmVariable {
+  token: WhatsappConfirmToken;
+  /** Required when token === 'FORM_FIELD': the form field whose value fills the slot. */
+  formFieldId?: string;
+}
+
+/** The per-scheme WhatsApp-on-submit config (scheme.metadata.whatsappConfirm). */
+export interface WhatsappConfirmConfig {
+  enabled: boolean;
+  /** The MSG91-registered WhatsApp template name. */
+  templateName: string;
+  recipient: WhatsappConfirmRecipient;
+  /** ORDERED — index i fills template slot {{i+1}} (body_1, body_2, …). */
+  variables: WhatsappConfirmVariable[];
+}
+
+/** The all-off default a scheme starts from (and the safe fallback for absent metadata). */
+export const DEFAULT_WHATSAPP_CONFIRM: WhatsappConfirmConfig = {
+  enabled: false,
+  templateName: '',
+  recipient: { source: 'PARTNER_PHONE' },
+  variables: [],
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // audienceConfig (§13.2)
 // ─────────────────────────────────────────────────────────────────────────────
 

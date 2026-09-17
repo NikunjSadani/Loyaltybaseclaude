@@ -39,6 +39,7 @@ import type {
   SchemeRecord,
   SchemeStatus,
   SchemeSubmission,
+  WhatsappConfirmConfig,
 } from '@/lib/scheme-types';
 
 const BASE = '/api/schemes';
@@ -72,6 +73,11 @@ export interface CreateSchemeInput {
   endDate: string; // ISO
   imageUrl?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Per-scheme WhatsApp-on-submit config. Sent as a top-level field; the backend
+   * persists it into `scheme.metadata.whatsappConfirm`.
+   */
+  whatsappConfirm?: WhatsappConfirmConfig;
   /** DRAFT (default) or ACTIVE (D6). */
   status?: 'DRAFT' | 'ACTIVE';
 }
@@ -83,6 +89,11 @@ export interface UpdateSchemeInput {
   endDate?: string;
   imageUrl?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Per-scheme WhatsApp-on-submit config. Sent as a top-level field; the backend
+   * persists it into `scheme.metadata.whatsappConfirm`.
+   */
+  whatsappConfirm?: WhatsappConfirmConfig;
 }
 
 export interface UpsertEnrollmentFormInput {

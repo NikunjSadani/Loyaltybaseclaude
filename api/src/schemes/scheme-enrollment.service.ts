@@ -5,6 +5,7 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -43,6 +44,7 @@ import {
   SendEnrollOtpDto,
   VerifyEnrollOtpDto,
 } from './dto/scheme-enrollment.dto';
+import { resolveSchemeWhatsappConfirm } from './scheme-whatsapp-confirm.helper';
 
 /** OtpPurpose value added in this wave (schema.prisma edit — orchestrator regenerates). */
 const SCHEME_OTP_PURPOSE = 'SCHEME_ENROLL_CONSENT' as const;
@@ -117,6 +119,11 @@ export interface SalesTargetRow {
  */
 @Injectable()
 export class SchemeEnrollmentService {
+  private readonly logger = new Logger(SchemeEnrollmentService.name);
+
+  /** Stable event tag for the WhatsApp confirmation send (fire-and-forget on submit). */
+  private static readonly WHATSAPP_CONFIRM_EVENT_KEY = 'SCHEME_ENROLLMENT_SUBMITTED';
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
@@ -884,7 +891,16 @@ export class SchemeEnrollmentService {
    */
   private async submit(
     user: JwtPayload,
-    scheme: { id: string; clientId: string; enrollmentForm?: { formSchema: Prisma.JsonValue; version: number } | null },
+    scheme: {
+      id: string;
+      clientId: string;
+      // name + metadata power the fire-and-forget WhatsApp confirmation (metadata.whatsappConfirm).
+      // loadSchemeWithForm / loadScheme return the full Scheme record, so both are present at
+      // runtime for every caller (enroll / resubmit / adminEdit).
+      name?: string | null;
+      metadata?: Prisma.JsonValue | null;
+      enrollmentForm?: { formSchema: Prisma.JsonValue; version: number } | null;
+    },
     row: RosterRow,
     mode: EnrollmentMode,
     submittedRaw: Record<string, unknown> | undefined,
@@ -987,8 +1003,9 @@ export class SchemeEnrollmentService {
     const now = new Date();
     const jsonValues = (finalFormValues ?? Prisma.JsonNull) as Prisma.InputJsonValue;
 
+    let result: { enrollment: Prisma.SchemeEnrollmentGetPayload<Record<string, never>>; submission: Prisma.SchemeSubmissionGetPayload<Record<string, never>> };
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      result = await this.prisma.$transaction(async (tx) => {
         let enrollment;
         let version: number;
 
@@ -1057,6 +1074,97 @@ export class SchemeEnrollmentService {
       }
       throw e;
     }
+
+    // ── WhatsApp confirmation (fire-and-forget) ────────────────────────────────
+    // ONLY after the transaction has committed: send a per-scheme confirmation WhatsApp
+    // template if the scheme has metadata.whatsappConfirm.enabled. This is deliberately NOT
+    // awaited and can NEVER throw into the submit path or delay the return — a confirmation
+    // failure must never fail (or slow) a successful enrollment (mirrors the KYC / scheme
+    // broadcast fire-and-forget discipline).
+    this.fireWhatsappConfirm(scheme, row, finalFormValues, now);
+
+    return result;
+  }
+
+  /**
+   * Fire-and-forget the per-scheme WhatsApp confirmation for a just-committed submit.
+   *
+   * Synchronous, non-throwing entry point: it does a cheap `enabled` gate, then kicks off an
+   * async IIFE that loads the owner/outlet context, resolves the send via the pure
+   * `resolveSchemeWhatsappConfirm`, and calls MSG91 — all wrapped so nothing ever throws back
+   * into (or after) the caller and the caller's `return` is never blocked. The recipient phone
+   * is NEVER logged (only masked last-4 elsewhere / never here), and MSG91's own guard drops a
+   * non-10-digit number, so a mis-resolved recipient is a no-op.
+   */
+  private fireWhatsappConfirm(
+    scheme: { id: string; clientId: string; name?: string | null; metadata?: Prisma.JsonValue | null },
+    row: RosterRow,
+    finalFormValues: Record<string, unknown> | null,
+    submittedAt: Date,
+  ): void {
+    // Cheap gate — only proceed when the feature is explicitly enabled on this scheme.
+    const meta = scheme.metadata;
+    const rawConfig =
+      meta && typeof meta === 'object' && !Array.isArray(meta)
+        ? (meta as Record<string, unknown>).whatsappConfirm
+        : undefined;
+    const enabled =
+      rawConfig && typeof rawConfig === 'object' && !Array.isArray(rawConfig)
+        ? (rawConfig as Record<string, unknown>).enabled === true
+        : false;
+    if (!enabled) return;
+
+    void (async () => {
+      try {
+        // Owner (partner) + outlet context for the matched roster row. A standalone row
+        // (no matched partner/outlet) simply resolves to null ownerPhone → the resolver
+        // returns null for a PARTNER_PHONE recipient (skip), which is correct.
+        let ownerName: string | null = null;
+        let ownerPhone: string | null = null;
+        let outletName: string | null = row.outletName ?? null;
+        let outletCode: string | null = null;
+
+        if (row.matchedPartnerId) {
+          const partner = await this.prisma.channelPartner.findFirst({
+            where: { id: row.matchedPartnerId, clientId: scheme.clientId },
+            select: { ownerName: true, phone: true },
+          });
+          ownerName = partner?.ownerName ?? null;
+          ownerPhone = partner?.phone ?? null;
+        }
+        if (row.matchedOutletId) {
+          const outlet = await this.prisma.outlet.findFirst({
+            where: { id: row.matchedOutletId, clientId: scheme.clientId },
+            select: { name: true, outletCode: true, ownerName: true, phone: true },
+          });
+          if (outlet) {
+            outletName = outlet.name ?? outletName;
+            outletCode = outlet.outletCode ?? null;
+            // Fall back to the outlet's own owner/phone when the partner had none.
+            ownerName = ownerName ?? outlet.ownerName ?? null;
+            ownerPhone = ownerPhone ?? outlet.phone ?? null;
+          }
+        }
+
+        const resolved = resolveSchemeWhatsappConfirm(rawConfig, {
+          ownerName,
+          ownerPhone,
+          outletName,
+          outletCode,
+          schemeName: scheme.name ?? null,
+          submittedAt,
+          formValues: finalFormValues ?? {},
+        });
+        if (!resolved) return;
+
+        await this.msg91.sendWhatsappTemplate(resolved.phone, resolved.templateName, resolved.bodyValues);
+      } catch (e) {
+        // Never surface a confirmation failure — log without the phone (event-tagged).
+        this.logger.warn(
+          `[${SchemeEnrollmentService.WHATSAPP_CONFIRM_EVENT_KEY}] confirmation send skipped for scheme ${scheme.id}: ${e}`,
+        );
+      }
+    })();
   }
 
   /** Audit-only submitter (nullable for a login-less sibling / standalone rep target). */

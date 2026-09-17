@@ -26,6 +26,7 @@ import {
   OutletMatch,
 } from './scheme-roster.helper';
 import { OUTLET_FIELD_CATALOG, ROSTER_IDENTITY_COLUMNS } from './enrollment-form.helper';
+import { normalizeWhatsappConfirmForStore, parseWhatsappConfirmConfig } from './scheme-whatsapp-confirm.helper';
 
 /**
  * SchemeAdminService — Wave-0 scheme data-collection ADMIN authoring (GIFSY only).
@@ -44,6 +45,42 @@ export class SchemeAdminService {
   private static readonly UPLOAD_CHUNK = 100;
 
   constructor(private readonly prisma: PrismaService) {}
+
+  /** Read a stored metadata JSON value into a plain object (null/array/scalar → {}). */
+  private readMetadataObject(raw: unknown): Record<string, unknown> {
+    return raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? { ...(raw as Record<string, unknown>) }
+      : {};
+  }
+
+  /**
+   * Merge the create/update metadata inputs into the value to persist.
+   *   - `base` — the metadata to start from (existing scheme metadata on update, else {}).
+   *   - `dtoMetadata` — a caller-supplied metadata bag; its keys are merged over `base`.
+   *   - `whatsappConfirm` — when provided, normalized into `metadata.whatsappConfirm`,
+   *     preserving every OTHER metadata key (so the WhatsApp-confirm editor and the main
+   *     scheme editor never clobber each other's metadata).
+   * Returns `undefined` when the result is empty (nothing to write on create).
+   */
+  private mergeMetadata(
+    base: Record<string, unknown>,
+    dtoMetadata: Record<string, unknown> | undefined,
+    whatsappConfirm: Record<string, unknown> | undefined,
+  ): Record<string, unknown> | undefined {
+    const merged: Record<string, unknown> = { ...base, ...(dtoMetadata ?? {}) };
+    // SECURITY: `whatsappConfirm` may ONLY be written through the dedicated, @IsValidWhatsappConfirm-
+    // validated DTO field — never smuggled raw through the free-form `metadata` bag (which would skip
+    // validation). Strip any bag-supplied key first; if the caller sent the real (validated) field,
+    // it is normalized in below. If they didn't, the STORED whatsappConfirm (from `base`) is preserved.
+    if ('whatsappConfirm' in merged && whatsappConfirm === undefined) {
+      merged.whatsappConfirm = this.readMetadataObject(base).whatsappConfirm;
+      if (merged.whatsappConfirm === undefined) delete merged.whatsappConfirm;
+    }
+    if (whatsappConfirm !== undefined) {
+      merged.whatsappConfirm = normalizeWhatsappConfirmForStore(whatsappConfirm);
+    }
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
 
   // ── Ownership / tenant guard ───────────────────────────────────────────────
 
@@ -88,9 +125,43 @@ export class SchemeAdminService {
     }
   }
 
+  /**
+   * Authoritative guard (audit FE-F1): when whatsappConfirm is ENABLED and references FORM_FIELD
+   * ids (recipient and/or variables), every referenced id MUST exist in the scheme's SAVED
+   * enrollment form — not merely in the builder's unsaved draft. A stale/never-saved field id
+   * would otherwise resolve to a blank body variable or an unresolvable recipient at send time.
+   * `schemeId === null` (create) → no form yet → any FORM_FIELD ref is rejected (save the form first).
+   */
+  private async assertWhatsappConfirmFieldsExist(
+    schemeId: string | null,
+    whatsappConfirm: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    if (whatsappConfirm === undefined) return;
+    const cfg = parseWhatsappConfirmConfig(whatsappConfirm);
+    if (!cfg || !cfg.enabled) return;
+    const refs = new Set<string>();
+    if (cfg.recipient?.source === 'FORM_FIELD' && cfg.recipient.formFieldId) refs.add(cfg.recipient.formFieldId);
+    for (const v of cfg.variables ?? []) {
+      if (v.token === 'FORM_FIELD' && v.formFieldId) refs.add(v.formFieldId);
+    }
+    if (refs.size === 0) return;
+    const form = schemeId
+      ? await this.prisma.schemeEnrollmentForm.findUnique({ where: { schemeId }, select: { formSchema: true } })
+      : null;
+    const fields = ((form?.formSchema as { fields?: Array<{ id?: unknown }> } | null)?.fields) ?? [];
+    const known = new Set(fields.map((f) => (typeof f.id === 'string' ? f.id : '')).filter(Boolean));
+    const missing = [...refs].filter((id) => !known.has(id));
+    if (missing.length > 0) {
+      throw new BadRequestException(
+        `WhatsApp confirmation references enrollment-form field(s) not in this scheme's saved form: ${missing.join(', ')}. Save the enrollment form (with those fields) first.`,
+      );
+    }
+  }
+
   // ── Create (DRAFT or ACTIVE — D6) ──────────────────────────────────────────
 
   async create(user: JwtPayload, dto: CreateSchemeAdminDto) {
+    await this.assertWhatsappConfirmFieldsExist(null, dto.whatsappConfirm);
     const startDate = new Date(dto.startDate);
     const endDate = new Date(dto.endDate);
     this.assertDateOrder(startDate, endDate);
@@ -112,7 +183,11 @@ export class SchemeAdminService {
         startDate,
         endDate,
         imageUrl: dto.imageUrl,
-        metadata: dto.metadata as Prisma.InputJsonValue | undefined,
+        // A new scheme has no existing metadata → base is {}; whatsappConfirm (when sent)
+        // is normalized into metadata.whatsappConfirm alongside any other metadata keys.
+        metadata: this.mergeMetadata({}, dto.metadata, dto.whatsappConfirm) as
+          | Prisma.InputJsonValue
+          | undefined,
         // Status is DRAFT unless the admin explicitly launches ACTIVE.
         status: dto.status ?? 'DRAFT',
         // INERT non-null columns (D5) — a data-collection scheme has no reward/compute;
@@ -130,6 +205,7 @@ export class SchemeAdminService {
 
   async update(user: JwtPayload, schemeId: string, dto: UpdateSchemeAdminDto) {
     const existing = await this.assertSchemeOwnership(user, schemeId);
+    await this.assertWhatsappConfirmFieldsExist(schemeId, dto.whatsappConfirm);
 
     const startDate = dto.startDate !== undefined ? new Date(dto.startDate) : existing.startDate;
     const endDate = dto.endDate !== undefined ? new Date(dto.endDate) : existing.endDate;
@@ -143,7 +219,17 @@ export class SchemeAdminService {
     if (dto.startDate !== undefined) data.startDate = startDate;
     if (dto.endDate !== undefined) data.endDate = endDate;
     if (dto.imageUrl !== undefined) data.imageUrl = dto.imageUrl;
-    if (dto.metadata !== undefined) data.metadata = dto.metadata as Prisma.InputJsonValue;
+    // Metadata: only touched when the caller sends a metadata bag and/or whatsappConfirm.
+    // Both are merged over the scheme's EXISTING metadata so neither clobbers keys it did
+    // not send (in particular, editing whatsappConfirm preserves the rest of the bag, and
+    // editing other metadata preserves an already-stored whatsappConfirm).
+    if (dto.metadata !== undefined || dto.whatsappConfirm !== undefined) {
+      data.metadata = this.mergeMetadata(
+        this.readMetadataObject(existing.metadata),
+        dto.metadata,
+        dto.whatsappConfirm,
+      ) as Prisma.InputJsonValue;
+    }
 
     const scheme = await this.prisma.scheme.update({ where: { id: schemeId }, data });
     return { scheme };

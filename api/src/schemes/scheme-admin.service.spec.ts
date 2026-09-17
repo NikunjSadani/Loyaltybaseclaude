@@ -145,6 +145,107 @@ describe('SchemeAdminService', () => {
     });
   });
 
+  // ── whatsappConfirm persistence (metadata.whatsappConfirm) ───────────────────
+  describe('whatsappConfirm persistence', () => {
+    it('create: normalizes whatsappConfirm into metadata.whatsappConfirm alongside other metadata keys', async () => {
+      mockPrisma.scheme.create.mockResolvedValue({ id: 's1' });
+      await service.create(user, {
+        code: 'SCH1',
+        name: 'Scheme One',
+        startDate: '2026-08-01',
+        endDate: '2026-08-31',
+        metadata: { foo: 'bar' },
+        // enabled:false here — this test asserts NORMALIZATION (trim + drop/keep formFieldId),
+        // which runs regardless of enabled. An ENABLED config referencing a FORM_FIELD is
+        // (correctly) rejected on create because no enrollment form exists yet — covered by the
+        // dedicated cross-check test below.
+        whatsappConfirm: {
+          enabled: false,
+          templateName: '  scheme_confirm  ',
+          recipient: { source: 'PARTNER_PHONE', formFieldId: 'ignored' },
+          variables: [{ token: 'OWNER_NAME' }, { token: 'FORM_FIELD', formFieldId: 'f1' }],
+        } as Record<string, unknown>,
+      });
+      const data = mockPrisma.scheme.create.mock.calls[0][0].data;
+      expect(data.metadata).toEqual({
+        foo: 'bar',
+        whatsappConfirm: {
+          enabled: false,
+          templateName: 'scheme_confirm', // trimmed
+          recipient: { source: 'PARTNER_PHONE' }, // FORM_FIELD id dropped for PARTNER_PHONE
+          variables: [{ token: 'OWNER_NAME' }, { token: 'FORM_FIELD', formFieldId: 'f1' }],
+        },
+      });
+    });
+
+    it('update: merges whatsappConfirm over existing metadata, preserving other keys', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue({
+        ...activeScheme,
+        metadata: { keepMe: 1, whatsappConfirm: { enabled: false } },
+      });
+      mockPrisma.scheme.update.mockResolvedValue({ id: 's1' });
+      // The enabled config references form field 'fPhone' → the cross-check loads the saved form,
+      // which must contain it.
+      mockPrisma.schemeEnrollmentForm.findUnique.mockResolvedValue({ formSchema: { fields: [{ id: 'fPhone' }] } });
+      await service.update(user, 's1', {
+        whatsappConfirm: {
+          enabled: true,
+          templateName: 't',
+          recipient: { source: 'FORM_FIELD', formFieldId: 'fPhone' },
+          variables: [],
+        } as Record<string, unknown>,
+      });
+      const data = mockPrisma.scheme.update.mock.calls[0][0].data;
+      expect(data.metadata).toEqual({
+        keepMe: 1, // preserved
+        whatsappConfirm: {
+          enabled: true,
+          templateName: 't',
+          recipient: { source: 'FORM_FIELD', formFieldId: 'fPhone' },
+          variables: [],
+        },
+      });
+    });
+
+    it('update: rejects an ENABLED config referencing a form field NOT in the saved form (audit FE-F1)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue({ ...activeScheme, metadata: {} });
+      mockPrisma.schemeEnrollmentForm.findUnique.mockResolvedValue({ formSchema: { fields: [{ id: 'fOther' }] } });
+      await expect(
+        service.update(user, 's1', {
+          whatsappConfirm: {
+            enabled: true,
+            templateName: 't',
+            recipient: { source: 'FORM_FIELD', formFieldId: 'fGhost' },
+            variables: [],
+          } as Record<string, unknown>,
+        }),
+      ).rejects.toThrow(/not in this scheme's saved form/i);
+      expect(mockPrisma.scheme.update).not.toHaveBeenCalled();
+    });
+
+    it('update: editing other metadata preserves an already-stored whatsappConfirm', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue({
+        ...activeScheme,
+        metadata: { whatsappConfirm: { enabled: true, templateName: 't', recipient: { source: 'PARTNER_PHONE' }, variables: [] } },
+      });
+      mockPrisma.scheme.update.mockResolvedValue({ id: 's1' });
+      await service.update(user, 's1', { metadata: { theme: 'dark' } });
+      const data = mockPrisma.scheme.update.mock.calls[0][0].data;
+      expect(data.metadata).toMatchObject({
+        theme: 'dark',
+        whatsappConfirm: { enabled: true, templateName: 't' },
+      });
+    });
+
+    it('update: leaves metadata untouched when neither metadata nor whatsappConfirm is sent', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue({ ...activeScheme, metadata: { x: 1 } });
+      mockPrisma.scheme.update.mockResolvedValue({ id: 's1' });
+      await service.update(user, 's1', { name: 'Renamed' });
+      const data = mockPrisma.scheme.update.mock.calls[0][0].data;
+      expect(data.metadata).toBeUndefined();
+    });
+  });
+
   // ── upsertEnrollmentForm (D11 versioning) ────────────────────────────────────
   describe('upsertEnrollmentForm', () => {
     const dto = { campaignType: 'MIXED' as const, formSchema: { fields: [] } };

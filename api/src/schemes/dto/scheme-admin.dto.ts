@@ -20,6 +20,32 @@ import {
 } from 'class-validator';
 import { SchemeStatus } from '@prisma/client';
 import { CAMPAIGN_TYPES, CampaignType, validateFormSchema } from '../enrollment-form.helper';
+import { validateWhatsappConfirmConfig } from '../scheme-whatsapp-confirm.helper';
+
+/**
+ * Custom class-validator decorator: validates the per-scheme WhatsApp-confirmation config
+ * (metadata.whatsappConfirm) using the pure `validateWhatsappConfirmConfig` helper. Mirrors
+ * IsValidFormSchema — each structural error is concatenated into one validation message.
+ */
+function IsValidWhatsappConfirm(validationOptions?: ValidationOptions) {
+  // eslint-disable-next-line @typescript-eslint/ban-types
+  return function (object: Object, propertyName: string) {
+    registerDecorator({
+      name: 'isValidWhatsappConfirm',
+      target: object.constructor,
+      propertyName,
+      options: validationOptions,
+      validator: {
+        validate(value: unknown): boolean {
+          return validateWhatsappConfirmConfig(value).length === 0;
+        },
+        defaultMessage(args: ValidationArguments): string {
+          return validateWhatsappConfirmConfig(args.value).join(' | ');
+        },
+      },
+    });
+  };
+}
 
 /**
  * scheme-admin.dto.ts — Wave-0 scheme DATA-COLLECTION admin-authoring DTOs.
@@ -72,6 +98,17 @@ export class CreateSchemeAdminDto {
   metadata?: Record<string, unknown>;
 
   /**
+   * Per-scheme WhatsApp-confirmation config (persisted into metadata.whatsappConfirm).
+   * When `enabled`, each successful enrollment submit fires a WhatsApp template message.
+   * Validated by the pure helper; when NOT enabled it may be stored/cleared without a
+   * template. See scheme-whatsapp-confirm.helper for the shape.
+   */
+  @IsOptional()
+  @IsObject()
+  @IsValidWhatsappConfirm()
+  whatsappConfirm?: Record<string, unknown>;
+
+  /**
    * Initial lifecycle state (D6). DRAFT by default so a half-configured scheme is
    * never visible to the field force; the admin flips it ACTIVE (here or via the
    * status endpoint) when the form + audience are ready.
@@ -112,6 +149,16 @@ export class UpdateSchemeAdminDto {
   @IsOptional()
   @IsObject()
   metadata?: Record<string, unknown>;
+
+  /**
+   * Per-scheme WhatsApp-confirmation config (persisted into metadata.whatsappConfirm),
+   * merged over the scheme's existing metadata so it can be edited independently of the
+   * rest of the metadata bag. See scheme-whatsapp-confirm.helper for the shape.
+   */
+  @IsOptional()
+  @IsObject()
+  @IsValidWhatsappConfirm()
+  whatsappConfirm?: Record<string, unknown>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

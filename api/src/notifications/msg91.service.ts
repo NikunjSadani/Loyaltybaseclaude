@@ -153,8 +153,10 @@ export class Msg91Service {
     // DEV bypass — same shape as sendOtp's missing-authKey path: a non-prod env
     // without MSG91 configured logs and returns instead of throwing.
     if (!authKey) {
+      // PII: never log the full recipient or the body values (owner name / outlet / form-field
+      // values ride in bodyValues). Mask to the last 4 and record only the variable COUNT.
       this.logger.warn(
-        `[DEV] MSG91 not configured — WhatsApp template "${templateName}" for ${phone} not sent (values: ${JSON.stringify(bodyValues)})`,
+        `[DEV] MSG91 not configured — WhatsApp template "${templateName}" for ••••${phone.slice(-4)} not sent (${bodyValues.length} vars)`,
       );
       return { requestId: null };
     }
@@ -219,7 +221,7 @@ export class Msg91Service {
           ? 'MSG91 did not respond within 10s (timeout — check MSG91 IP whitelisting / egress)'
           : String(e);
       this.logger.error(
-        `MSG91 WhatsApp template "${templateName}" request failed for ${phone}: ${reason}`,
+        `MSG91 WhatsApp template "${templateName}" request failed for ••••${phone.slice(-4)}: ${reason}`,
       );
       throw new Error(`Failed to send WhatsApp template ${templateName}: ${reason}`);
     }
@@ -239,7 +241,7 @@ export class Msg91Service {
     if (!res.ok || json?.type === 'error') {
       const reason = json?.message ?? `HTTP ${res.status}`;
       this.logger.error(
-        `MSG91 WhatsApp template "${templateName}" failed for ${phone}: ${reason}`,
+        `MSG91 WhatsApp template "${templateName}" failed for ••••${phone.slice(-4)}: ${reason}`,
       );
       throw new Error(`Failed to send WhatsApp template ${templateName}: ${reason}`);
     }
