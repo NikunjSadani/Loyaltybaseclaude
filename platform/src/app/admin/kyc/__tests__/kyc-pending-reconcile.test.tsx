@@ -116,3 +116,37 @@ describe('KYC — Pending card ⟷ filter reconciliation', () => {
     expect(screen.queryByText(/SLA Breached/i)).not.toBeInTheDocument();
   });
 });
+
+describe('KYC — "Pending — Gifsy" filter (awaiting Gifsy review)', () => {
+  // One row at the GIFSY stage (raw PENDING_GIFSY → awaitingGifsy) + one FIELD-stage
+  // pending + one approved. The Gifsy filter must show ONLY the PENDING_GIFSY row.
+  const MIXED = [
+    { id: 'G1', status: 'PENDING_GIFSY', submittedAt: '2026-05-01T00:00:00.000Z',
+      user: { id: 'u1', name: 'A', phone: '9820184321' }, partner: { id: 'p1', businessName: 'Gifsy Stage Store' }, documents: [] },
+    { id: 'F1', status: 'PENDING_SO_APPROVAL', submittedAt: '2026-05-02T00:00:00.000Z',
+      user: { id: 'u2', name: 'B', phone: '9811034021' }, partner: { id: 'p2', businessName: 'Field Stage Store' }, documents: [] },
+    { id: 'A1', status: 'APPROVED', submittedAt: '2026-04-28T00:00:00.000Z',
+      user: { id: 'u3', name: 'C', phone: '9800000000' }, partner: { id: 'p3', businessName: 'Approved Store' }, documents: [] },
+  ];
+  function mockMixed() {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: { submissions: MIXED, pagination: { page: 1, limit: 500, total: 3, pages: 1 }, statusCounts: {} } }),
+    }));
+  }
+
+  it('shows the Gifsy-pending option with the live count and filters to only PENDING_GIFSY rows', async () => {
+    mockMixed();
+    render(<KYCPage />);
+    await screen.findByText('Gifsy Stage Store');
+    const statusSelect = screen.getByDisplayValue('All Statuses') as HTMLSelectElement;
+    // The option is labelled with the live awaiting-Gifsy count (1).
+    expect(within(statusSelect).getByText(/Pending — Gifsy \(1\)/)).toBeInTheDocument();
+    fireEvent.change(statusSelect, { target: { value: 'AWAITING_GIFSY' } });
+    // Only the Gifsy-stage row remains; field-pending + approved are hidden.
+    expect(screen.getByText('Gifsy Stage Store')).toBeInTheDocument();
+    expect(screen.queryByText('Field Stage Store')).not.toBeInTheDocument();
+    expect(screen.queryByText('Approved Store')).not.toBeInTheDocument();
+    expect(screen.getByText(/showing 1 of 3/i)).toBeInTheDocument();
+  });
+});

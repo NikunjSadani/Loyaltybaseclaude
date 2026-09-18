@@ -141,7 +141,10 @@ export default function KYCPage() {
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState<string | null>(null);
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<KYCStatusType | 'ALL'>('ALL');
+  // 'AWAITING_GIFSY' is a SYNTHETIC filter (not a real KYC status): rows at the Gifsy-review
+  // stage (awaitingGifsy === raw status PENDING_GIFSY). Lets an operator jump straight to the
+  // submissions in Gifsy's court — the same set the "Gifsy Review Sheet" export covers.
+  const [statusFilter, setStatusFilter] = useState<KYCStatusType | 'ALL' | 'AWAITING_GIFSY'>('ALL');
   const [programFilter, setProgramFilter] = useState('');
   const [exportLoading, setExportLoading] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -195,8 +198,13 @@ export default function KYCPage() {
         k.mobile.includes(search) ||
         k.salesUser.toLowerCase().includes(search.toLowerCase());
       const matchStatus =
-        statusFilter === 'ALL' ||
-        (statusFilter === 'PENDING' ? isPending(k.status) : k.status === statusFilter);
+        statusFilter === 'ALL'
+          ? true
+          : statusFilter === 'AWAITING_GIFSY'
+          ? k.awaitingGifsy
+          : statusFilter === 'PENDING'
+          ? isPending(k.status)
+          : k.status === statusFilter;
       const matchProgram = !programFilter || k.programName === programFilter;
       return matchSearch && matchStatus && matchProgram;
     });
@@ -275,7 +283,7 @@ export default function KYCPage() {
           return (
             <button
               key={s.label}
-              onClick={() => setStatusFilter(s.filter as KYCStatusType | 'ALL')}
+              onClick={() => setStatusFilter(s.filter as KYCStatusType | 'ALL' | 'AWAITING_GIFSY')}
               className={`bg-white border border-gray-200 rounded-xl p-4 flex items-center gap-3 hover:shadow-md transition-all text-left ${
                 statusFilter === s.filter ? 'border-[var(--brand-primary)] ring-1 ring-[var(--brand-primary)]/20' : ''
               }`}
@@ -308,11 +316,12 @@ export default function KYCPage() {
             </div>
             <select
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as KYCStatusType | 'ALL')}
+              onChange={(e) => setStatusFilter(e.target.value as KYCStatusType | 'ALL' | 'AWAITING_GIFSY')}
               className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
             >
               <option value="ALL">All Statuses</option>
               <option value="PENDING">Pending</option>
+              <option value="AWAITING_GIFSY">Pending — Gifsy{gifsyCount ? ` (${gifsyCount})` : ''}</option>
               <option value="UNDER_REVIEW">Under Review</option>
               <option value="APPROVED">Approved</option>
               <option value="REJECTED">Rejected</option>
