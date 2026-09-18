@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   StreamableFile,
 } from '@nestjs/common';
@@ -16,6 +17,7 @@ import {
   RosterUploadDto,
   SetAudienceDto,
   SetSchemeStatusDto,
+  TestWhatsappConfirmDto,
   UpdateSchemeAdminDto,
   UpsertEnrollmentFormAdminDto,
 } from './dto/scheme-admin.dto';
@@ -26,7 +28,14 @@ import {
   OutletMatch,
 } from './scheme-roster.helper';
 import { OUTLET_FIELD_CATALOG, ROSTER_IDENTITY_COLUMNS } from './enrollment-form.helper';
-import { normalizeWhatsappConfirmForStore, parseWhatsappConfirmConfig } from './scheme-whatsapp-confirm.helper';
+import {
+  normalizeWhatsappConfirmForStore,
+  parseWhatsappConfirmConfig,
+  WhatsappConfirmVariable,
+} from './scheme-whatsapp-confirm.helper';
+import { Msg91Service } from '../notifications/msg91.service';
+import { formatDateIST } from '../common/ist-date';
+import { phoneLast10, isValidPhone } from '../common/audience/audience.helpers';
 
 /**
  * SchemeAdminService — Wave-0 scheme data-collection ADMIN authoring (GIFSY only).
@@ -41,10 +50,16 @@ import { normalizeWhatsappConfirmForStore, parseWhatsappConfirmConfig } from './
  */
 @Injectable()
 export class SchemeAdminService {
+  private readonly logger = new Logger(SchemeAdminService.name);
   /** Chunk size for batched $transaction persistence (trap #8 — mirrors TargetsService). */
   private static readonly UPLOAD_CHUNK = 100;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    // Msg91Service is @Global() (NotificationsModule) + already injected by
+    // SchemeEnrollmentService the same way — no schemes.module import change needed.
+    private readonly msg91: Msg91Service,
+  ) {}
 
   /** Read a stored metadata JSON value into a plain object (null/array/scalar → {}). */
   private readMetadataObject(raw: unknown): Record<string, unknown> {
@@ -248,6 +263,105 @@ export class SchemeAdminService {
       data: { status: dto.status },
     });
     return { scheme };
+  }
+
+  // ── Test-send the WhatsApp confirmation (validate a SAVED config live) ──────
+
+  /** Sample values for a body variable when the admin supplies none (per token). */
+  private sampleForVariable(v: WhatsappConfirmVariable, schemeName: string | null): string {
+    switch (v.token) {
+      case 'OWNER_NAME':
+        return 'Ramesh Kumar';
+      case 'OWNER_PHONE':
+        return '9876543210';
+      case 'OUTLET_NAME':
+        return 'Ramesh Traders';
+      case 'OUTLET_CODE':
+        return 'OUT12345';
+      case 'SCHEME_NAME':
+        return schemeName || 'Sample Scheme';
+      case 'SUBMISSION_DATE':
+        // Match resolveSchemeWhatsappConfirm's SUBMISSION_DATE: IST wall-clock "DD Mon YYYY".
+        return formatDateIST(new Date());
+      case 'FORM_FIELD':
+        return 'Sample value';
+      default:
+        return 'Sample value';
+    }
+  }
+
+  /**
+   * Fire a TEST WhatsApp for a scheme's SAVED metadata.whatsappConfirm config, to a number
+   * the admin types, with sample (or admin-provided) variable values — WITHOUT creating an
+   * enrollment or touching partner data. Validates the MSG91 template name + variable mapping
+   * on a live scheme.
+   *
+   * VALIDATION problems (config not enabled / blank template / bad phone / value-count
+   * mismatch) throw 4xx. The SEND outcome (dormant / sent / MSG91 error) is the POINT of the
+   * test, so it is returned as a 200 RESULT — never thrown.
+   *
+   * PII: the full phone + body values are NEVER logged or returned — only `sentToMasked`
+   * (••••<last4>).
+   */
+  async testWhatsappConfirm(user: JwtPayload, schemeId: string, dto: TestWhatsappConfirmDto) {
+    // 1) Tenant scope (also loads the scheme — metadata + name — for the config + samples).
+    const scheme = await this.assertSchemeOwnership(user, schemeId);
+
+    // 2) Load + validate the SAVED config (lives at metadata.whatsappConfirm; same extraction
+    //    as fireWhatsappConfirm in scheme-enrollment.service).
+    const rawConfig = this.readMetadataObject(scheme.metadata).whatsappConfirm;
+    const config = parseWhatsappConfirmConfig(rawConfig);
+    if (!config || !config.enabled || config.templateName.trim() === '') {
+      throw new BadRequestException(
+        'Enable the WhatsApp confirmation and set a template name before sending a test.',
+      );
+    }
+    const templateName = config.templateName.trim();
+
+    // 3) Normalize the recipient: strip non-digits, take the LAST 10; must be exactly 10.
+    const phone = phoneLast10(dto.phone);
+    if (!isValidPhone(phone)) {
+      throw new BadRequestException('Enter a valid 10-digit mobile number.');
+    }
+
+    // 4) Resolve the ordered body values.
+    let bodyValues: string[];
+    if (dto.bodyValues !== undefined) {
+      if (dto.bodyValues.length !== config.variables.length) {
+        throw new BadRequestException('Test values count must match the configured variables.');
+      }
+      // Coerce → String, trim, cap each at 300 chars (defensive — the DTO already @IsString's them).
+      bodyValues = dto.bodyValues.map((v) => String(v ?? '').trim().slice(0, 300));
+      // A blank/whitespace-only positional value is rejected by WhatsApp — surface it as a
+      // clear 400 rather than letting it fail opaquely at MSG91.
+      if (bodyValues.some((v) => v === '')) {
+        throw new BadRequestException('Test values cannot be blank — fill every sample value.');
+      }
+    } else {
+      bodyValues = config.variables.map((v) => this.sampleForVariable(v, scheme.name ?? null));
+    }
+
+    // 5) Dormancy: report (don't silently no-op) when MSG91 is not wired in this environment.
+    if (!this.msg91.isWhatsappConfigured()) {
+      return {
+        ok: false,
+        dormant: true,
+        message: 'WhatsApp channel is not configured in this environment — nothing was sent.',
+      };
+    }
+
+    // 6) Send. The send OUTCOME is the point of the test → returned as a 200 result, never thrown.
+    // Audit line (initiator + scheme + masked recipient only — never the full phone or the
+    // body values) so a real, billable test send is traceable to the admin who fired it.
+    this.logger.log(
+      `WhatsApp test-send: admin=${user.sub} scheme=${schemeId} template="${templateName}" → ••••${phone.slice(-4)}`,
+    );
+    try {
+      const { requestId } = await this.msg91.sendWhatsappTemplate(phone, templateName, bodyValues);
+      return { ok: true, requestId: requestId ?? null, sentToMasked: '••••' + phone.slice(-4) };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
   }
 
   // ── Enrollment form (versioned — D11) ──────────────────────────────────────

@@ -422,6 +422,27 @@ export interface BroadcastResult {
   failedCount: number;
 }
 
+/**
+ * POST :id/whatsapp-confirm/test — result of firing the scheme's SAVED WhatsApp-confirm
+ * template to a typed number with sample body values, to validate the template + variable
+ * mapping WITHOUT creating an enrollment. On success the envelope's `data` is one of:
+ *   - `{ ok: true, … }`             → MSG91 accepted the send (masked recipient + req id).
+ *   - `{ ok: false, dormant: true }`→ the tenant's WhatsApp channel isn't configured (no-op).
+ *   - `{ ok: false }`               → MSG91 rejected it; `message` is the rejection reason.
+ * A 4xx surfaces through api-client as `{ success:false, error }`.
+ */
+export type WhatsappTestResult =
+  | { ok: true; requestId: string | null; sentToMasked: string }
+  | { ok: false; dormant: true; message: string }
+  | { ok: false; dormant?: false; message: string };
+
+/** Request body for the WhatsApp-confirm test send (positional body_1..N). */
+export interface WhatsappTestInput {
+  phone: string;
+  /** ONE value per configured variable, SAME ORDER as the config's `variables`. */
+  bodyValues: string[];
+}
+
 /* ─── Media view-path helpers (D30 — auth-gated app route, NOT a signed URL) ─── */
 
 /** Build the browser-facing auth-gated media view URL for a stored object key. */
@@ -449,6 +470,14 @@ export const schemeApi = {
   },
   setStatus(schemeId: string, status: SchemeStatus) {
     return api.patch<{ scheme: SchemeRecord }>(`${BASE}/${schemeId}/status`, { status });
+  },
+  /**
+   * Fire the scheme's SAVED WhatsApp-confirm template to a typed number with editable
+   * sample body values (positional body_1..N, SAME ORDER as the config's `variables`) —
+   * validates the template + variable mapping on a live scheme WITHOUT enrolling.
+   */
+  sendWhatsappTest(schemeId: string, input: WhatsappTestInput) {
+    return api.post<WhatsappTestResult>(`${BASE}/${schemeId}/whatsapp-confirm/test`, input);
   },
   upsertEnrollmentForm(schemeId: string, input: UpsertEnrollmentFormInput) {
     return api.put<{ enrollmentForm: unknown; formVersion: unknown }>(

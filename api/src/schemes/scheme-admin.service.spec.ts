@@ -13,6 +13,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { SchemeAdminService } from './scheme-admin.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { Msg91Service } from '../notifications/msg91.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockPrisma = {
@@ -37,6 +38,14 @@ const mockPrisma = {
   ),
 };
 
+// Msg91Service is injected by SchemeAdminService (testWhatsappConfirm). Mock the two
+// methods the service touches; isWhatsappConfigured defaults to true (configured) and
+// is overridden per-test to exercise the dormant path.
+const mockMsg91 = {
+  isWhatsappConfigured: jest.fn(() => true),
+  sendWhatsappTemplate: jest.fn(),
+};
+
 const user: JwtPayload = {
   sub: 'u1',
   role: 'GIFSY_ADMIN',
@@ -58,8 +67,13 @@ describe('SchemeAdminService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    mockMsg91.isWhatsappConfigured.mockReturnValue(true);
     const module: TestingModule = await Test.createTestingModule({
-      providers: [SchemeAdminService, { provide: PrismaService, useValue: mockPrisma }],
+      providers: [
+        SchemeAdminService,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: Msg91Service, useValue: mockMsg91 },
+      ],
     }).compile();
     service = module.get(SchemeAdminService);
   });
@@ -142,6 +156,114 @@ describe('SchemeAdminService', () => {
       mockPrisma.scheme.update.mockResolvedValue({ id: 's1', status: 'PAUSED' });
       await service.setStatus(user, 's1', { status: 'PAUSED' as never });
       expect(mockPrisma.scheme.update.mock.calls[0][0].data).toEqual({ status: 'PAUSED' });
+    });
+  });
+
+  // ── testWhatsappConfirm (fire a test for the SAVED config) ───────────────────
+  describe('testWhatsappConfirm', () => {
+    const enabledScheme = {
+      ...activeScheme,
+      name: 'Scheme One',
+      metadata: {
+        whatsappConfirm: {
+          enabled: true,
+          templateName: 'scheme_confirm',
+          recipient: { source: 'PARTNER_PHONE' },
+          variables: [{ token: 'OWNER_NAME' }, { token: 'FORM_FIELD', formFieldId: 'f1' }],
+        },
+      },
+    };
+
+    it('enabled config + provided bodyValues → sends and returns ok/requestId/masked', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(enabledScheme);
+      mockMsg91.sendWhatsappTemplate.mockResolvedValue({ requestId: 'req_123' });
+
+      const res = await service.testWhatsappConfirm(user, 's1', {
+        phone: '+91 98765-43210', // → last 10 = 9876543210
+        bodyValues: ['Owner', 'FieldVal'],
+      });
+
+      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledWith(
+        '9876543210',
+        'scheme_confirm',
+        ['Owner', 'FieldVal'],
+      );
+      expect(res).toEqual({ ok: true, requestId: 'req_123', sentToMasked: '••••3210' });
+    });
+
+    it('generates per-token samples when bodyValues omitted', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(enabledScheme);
+      mockMsg91.sendWhatsappTemplate.mockResolvedValue({ requestId: null });
+
+      await service.testWhatsappConfirm(user, 's1', { phone: '9876543210' });
+
+      const [, tmpl, values] = mockMsg91.sendWhatsappTemplate.mock.calls[0];
+      expect(tmpl).toBe('scheme_confirm');
+      // OWNER_NAME sample + FORM_FIELD sample, in config order.
+      expect(values).toEqual(['Ramesh Kumar', 'Sample value']);
+    });
+
+    it('not-enabled config → BadRequestException, no send', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue({
+        ...activeScheme,
+        name: 'S',
+        metadata: { whatsappConfirm: { enabled: false, templateName: 't', recipient: { source: 'PARTNER_PHONE' }, variables: [] } },
+      });
+      await expect(
+        service.testWhatsappConfirm(user, 's1', { phone: '9876543210' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
+    });
+
+    it('bodyValues length mismatch → BadRequestException, no send', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(enabledScheme); // 2 configured variables
+      await expect(
+        service.testWhatsappConfirm(user, 's1', { phone: '9876543210', bodyValues: ['only-one'] }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
+    });
+
+    it('blank/whitespace-only provided value → BadRequestException, no send', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(enabledScheme); // 2 configured variables
+      await expect(
+        service.testWhatsappConfirm(user, 's1', { phone: '9876543210', bodyValues: ['ok', '   '] }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
+    });
+
+    it('bad phone (fewer than 10 digits) → BadRequestException, no send', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(enabledScheme);
+      await expect(
+        service.testWhatsappConfirm(user, 's1', { phone: '12345', bodyValues: ['a', 'b'] }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
+    });
+
+    it('channel not configured → { ok:false, dormant:true } and NO send', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(enabledScheme);
+      mockMsg91.isWhatsappConfigured.mockReturnValue(false);
+
+      const res = await service.testWhatsappConfirm(user, 's1', { phone: '9876543210', bodyValues: ['a', 'b'] });
+
+      expect(res).toMatchObject({ ok: false, dormant: true });
+      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
+    });
+
+    it('msg91 throws → { ok:false, message } (send outcome is a 200 result, not a throw)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(enabledScheme);
+      mockMsg91.sendWhatsappTemplate.mockRejectedValue(new Error('MSG91 down'));
+
+      const res = await service.testWhatsappConfirm(user, 's1', { phone: '9876543210', bodyValues: ['a', 'b'] });
+
+      expect(res).toEqual({ ok: false, message: 'MSG91 down' });
+    });
+
+    it('404s a cross-tenant / deleted scheme (no send)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(null);
+      await expect(
+        service.testWhatsappConfirm(user, 'sX', { phone: '9876543210' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
     });
   });
 

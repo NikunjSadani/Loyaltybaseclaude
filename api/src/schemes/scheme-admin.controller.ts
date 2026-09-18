@@ -11,6 +11,7 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { Throttle } from '@nestjs/throttler';
 import { SchemeAdminService } from './scheme-admin.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -22,6 +23,7 @@ import {
   RosterUploadDto,
   SetAudienceDto,
   SetSchemeStatusDto,
+  TestWhatsappConfirmDto,
   UpdateSchemeAdminDto,
   UpsertEnrollmentFormAdminDto,
 } from './dto/scheme-admin.dto';
@@ -61,6 +63,27 @@ export class SchemeAdminController {
     @Body() dto: UpdateSchemeAdminDto,
   ) {
     return this.admin.update(user, id, dto);
+  }
+
+  /**
+   * POST /v1/schemes/:id/whatsapp-confirm/test — fire a TEST WhatsApp for the scheme's
+   * SAVED metadata.whatsappConfirm config, to a typed number, with sample/provided variable
+   * values. No enrollment is created and no partner data is touched. Validation problems
+   * (config not enabled / blank template / bad phone / value-count mismatch) 400; the send
+   * outcome (dormant / sent / MSG91 error) is returned as a 200 result.
+   */
+  @Post(':id/whatsapp-confirm/test')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('schemes:write')
+  // Real, billable WhatsApp send → tighten beyond the global 60/min (mirrors the auth
+  // OTP endpoints), so an admin token can't be driven to burn MSG91 credits at scale.
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  testWhatsappConfirm(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: TestWhatsappConfirmDto,
+  ) {
+    return this.admin.testWhatsappConfirm(user, id, dto);
   }
 
   /** PATCH /v1/schemes/:id/status — activate / pause (valid SchemeStatus only). */

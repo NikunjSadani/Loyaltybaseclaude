@@ -16,6 +16,17 @@ export class Msg91Service {
   constructor(private readonly config: ConfigService) {}
 
   /**
+   * True iff MSG91 is wired in this environment (MSG91_AUTH_KEY set). Every send path
+   * above treats a missing auth key as the DEV bypass (log + no-op), so a caller that
+   * wants to REPORT dormancy rather than silently no-op (e.g. the scheme "send a test
+   * WhatsApp" admin flow) can gate on this first. `.trim()` mirrors the auth-key reads
+   * above (a BOM/whitespace-only value is treated as unconfigured).
+   */
+  isWhatsappConfigured(): boolean {
+    return !!this.config.get<string>('MSG91_AUTH_KEY')?.trim();
+  }
+
+  /**
    * @returns `{ requestId }` — MSG91's returned OTP request id (the ~24-char handle used by the
    *   OTP delivery-status query API / callback). Best-effort: null when the FIXED_OTP or
    *   missing-authKey DEV bypass fires, or when the response body carries no id. Send behaviour

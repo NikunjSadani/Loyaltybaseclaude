@@ -17,9 +17,10 @@
  * `normalizeWhatsappConfirm` to hydrate raw metadata).
  */
 
-import { useId, useMemo } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import {
   MessageCircle, Plus, Trash2, ChevronUp, ChevronDown, AlertCircle, Info, Phone,
+  Send, Loader2, CheckCircle,
 } from 'lucide-react';
 import {
   DEFAULT_WHATSAPP_CONFIRM,
@@ -30,6 +31,7 @@ import {
   type WhatsappConfirmVariable,
   type WhatsappRecipientSource,
 } from '@/lib/scheme-types';
+import { schemeApi } from '@/lib/schemes';
 
 // ── Token catalog (label + what it resolves to — drives the dropdowns + the legend) ──
 
@@ -61,6 +63,32 @@ const fieldLabel = (f: FormField) => f.label?.trim() || '(Untitled field)';
 
 /** Backend caps a WhatsApp template at 20 body variables ({{1}}…{{20}}) → mirror it here. */
 export const MAX_WHATSAPP_VARIABLES = 20;
+
+// ── "Send a test" sample values ─────────────────────────────────────────────────
+// Pre-fill the per-variable test inputs so a GIFSY admin can fire the template with
+// realistic values in one click (all editable). One sample per token.
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** Today as "DD Mon YYYY" (the SUBMISSION_DATE sample). */
+function sampleToday(): string {
+  const d = new Date();
+  return `${String(d.getDate()).padStart(2, '0')} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+}
+
+/** A realistic sample value for a token's test input (pre-fill; editable). */
+function sampleForToken(token: WhatsappConfirmToken): string {
+  switch (token) {
+    case 'OWNER_NAME': return 'Ramesh Kumar';
+    case 'OWNER_PHONE': return '9876543210';
+    case 'OUTLET_NAME': return 'Ramesh Traders';
+    case 'OUTLET_CODE': return 'OUT12345';
+    case 'SCHEME_NAME': return 'Sample Scheme';
+    case 'SUBMISSION_DATE': return sampleToday();
+    case 'FORM_FIELD': return 'Sample value';
+    default: return 'Sample value';
+  }
+}
 
 // ── Pure hydrate + validate (mirrors normalize/validate in SchemeFormBuilder) ─────
 
@@ -158,6 +186,15 @@ interface Props {
    * builder draft, so a mapping can only reference a field the backend also knows.
    */
   formFields: FormField[];
+  /**
+   * The SAVED scheme's id — enables the "Send a test" panel (a test fires the scheme's
+   * persisted config, so it only works once saved). Absent for an unsaved/new scheme →
+   * the panel renders disabled with a "save first" note.
+   */
+  schemeId?: string;
+  /** True when the draft config differs from the SAVED one — the test panel fires the SAVED
+   *  config, so with unsaved edits it disables the test and asks the admin to save first. */
+  unsavedChanges?: boolean;
   onChange: (next: WhatsappConfirmConfig) => void;
 }
 
@@ -209,7 +246,184 @@ function FieldSelect({
   );
 }
 
-export function WhatsappConfirmCard({ value, formFields, onChange }: Props) {
+/**
+ * "Send a test" panel — fires the scheme's SAVED WhatsApp-confirm template to a number
+ * the admin types, with an editable sample value per configured variable (positional
+ * body_1..N, SAME ORDER as `value.variables`). Validates the template + variable mapping
+ * on a LIVE scheme WITHOUT creating an enrollment. Only meaningful once the scheme is
+ * SAVED (needs a `schemeId`) — rendered disabled with a "save first" note otherwise.
+ * Module-level (like FieldSelect) so it isn't re-created on every card render.
+ */
+function WhatsappTestPanel({
+  schemeId, value, formFields, unsavedChanges,
+}: {
+  schemeId?: string;
+  value: WhatsappConfirmConfig;
+  formFields: FormField[];
+  unsavedChanges?: boolean;
+}) {
+  const uid = useId();
+  const [phone, setPhone] = useState('');
+  const [testValues, setTestValues] = useState<string[]>(() => value.variables.map((v) => sampleForToken(v.token)));
+  const [sending, setSending] = useState(false);
+  const [result, setResult] = useState<{ kind: 'success' | 'dormant' | 'error'; text: string } | null>(null);
+
+  // Re-seed the sample values whenever the configured variables change (count or token
+  // order) — a builder edit to the mapping resets the samples to match the new tokens.
+  const varSignature = value.variables.map((v) => v.token).join('|');
+  useEffect(() => {
+    setTestValues(value.variables.map((v) => sampleForToken(v.token)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [varSignature]);
+
+  const digits = phone.replace(/\D/g, '');
+  const phoneValid = digits.length === 10;
+  const saved = !!schemeId;
+  // The test fires the SAVED config, so it's only meaningful when the scheme is saved AND the
+  // draft has no unsaved WhatsApp edits (else we'd test the OLD saved config, not what's shown).
+  const testable = saved && !unsavedChanges;
+  const canSend = testable && phoneValid && !sending;
+
+  // Any edit invalidates a prior result banner (it referred to the previous send).
+  const setValueAt = (idx: number, next: string) => {
+    setResult(null);
+    setTestValues((prev) => prev.map((v, i) => (i === idx ? next : v)));
+  };
+  const onPhoneChange = (next: string) => { setResult(null); setPhone(next); };
+
+  const varLabel = (v: WhatsappConfirmVariable, i: number): string => {
+    let label = `body_${i + 1} · ${v.token}`;
+    if (v.token === 'FORM_FIELD' && v.formFieldId) {
+      const f = formFields.find((ff) => ff.id === v.formFieldId);
+      if (f) label += ` (${fieldLabel(f)})`;
+    }
+    return label;
+  };
+
+  const send = async () => {
+    if (!schemeId) return;
+    setResult(null);
+    setSending(true);
+    const res = await schemeApi.sendWhatsappTest(schemeId, { phone: digits, bodyValues: testValues });
+    setSending(false);
+    if (!res.success) { setResult({ kind: 'error', text: res.error }); return; }
+    const data = res.data;
+    if (data.ok) {
+      setResult({
+        kind: 'success',
+        text: `Test sent to ${data.sentToMasked} — MSG91 accepted it (req ${data.requestId ?? '—'}). If it doesn't arrive, the template isn't approved yet in MSG91.`,
+      });
+    } else if (data.dormant) {
+      setResult({ kind: 'dormant', text: data.message });
+    } else {
+      setResult({ kind: 'error', text: data.message });
+    }
+  };
+
+  const resultCls =
+    result?.kind === 'success' ? 'bg-green-50 border-green-200 text-green-700'
+    : result?.kind === 'dormant' ? 'bg-blue-50 border-blue-200 text-blue-700'
+    : 'bg-red-50 border-red-200 text-red-600';
+
+  return (
+    <div className="border border-gray-200 rounded-lg bg-white p-3 space-y-3">
+      <div className="flex items-start gap-2">
+        <Send className="w-3.5 h-3.5 text-[var(--brand-primary)] flex-shrink-0 mt-0.5" />
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold text-gray-700">Send a test</p>
+          <p className="text-[11px] text-gray-500 mt-0.5">
+            This sends a <strong>real</strong> WhatsApp to the number you type (use your own), using the scheme&apos;s
+            SAVED config — save the scheme first.
+          </p>
+        </div>
+      </div>
+
+      {!testable && (
+        <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          <AlertCircle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
+          <p className="text-[11px] text-amber-700">
+            {!saved
+              ? 'Save the scheme first to send a test.'
+              : 'Save your WhatsApp changes first, then send a test — the test uses the saved config.'}
+          </p>
+        </div>
+      )}
+
+      {/* Test number */}
+      <div>
+        <label htmlFor={`${uid}-phone`} className="block text-[11px] font-medium text-gray-700 mb-1">
+          Test number
+        </label>
+        <input
+          id={`${uid}-phone`}
+          type="tel"
+          inputMode="numeric"
+          value={phone}
+          onChange={(e) => onPhoneChange(e.target.value)}
+          disabled={!testable || sending}
+          placeholder="10-digit mobile"
+          aria-describedby={phone.length > 0 && !phoneValid ? `${uid}-phone-hint` : undefined}
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)] disabled:bg-gray-50 disabled:text-gray-400"
+        />
+        {phone.length > 0 && !phoneValid && (
+          <p id={`${uid}-phone-hint`} className="text-[10px] text-amber-500 mt-1">Enter a 10-digit mobile number.</p>
+        )}
+      </div>
+
+      {/* One editable sample per configured variable, in order */}
+      {value.variables.length > 0 ? (
+        <div className="space-y-2">
+          <p className="text-[11px] font-medium text-gray-700">Sample values (editable)</p>
+          {value.variables.map((v, i) => {
+            const id = `${uid}-var-${i}`;
+            return (
+              <div key={i}>
+                <label htmlFor={id} className="block text-[10px] font-mono text-gray-500 mb-0.5">
+                  {varLabel(v, i)}
+                </label>
+                <input
+                  id={id}
+                  type="text"
+                  value={testValues[i] ?? ''}
+                  onChange={(e) => setValueAt(i, e.target.value)}
+                  disabled={!testable || sending}
+                  className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)] disabled:bg-gray-50 disabled:text-gray-400"
+                />
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="text-[11px] text-gray-400">This template has no variables — the test sends the template body as-is.</p>
+      )}
+
+      <button
+        type="button"
+        onClick={send}
+        disabled={!canSend}
+        title={!saved ? 'Save the scheme first to send a test.' : unsavedChanges ? 'Save your WhatsApp changes first.' : !phoneValid ? 'Enter a 10-digit mobile number.' : undefined}
+        className="flex items-center gap-2 px-4 py-2 text-xs font-medium bg-[var(--brand-primary)] text-white rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {sending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+        {sending ? 'Sending…' : 'Send test message'}
+      </button>
+
+      {/* Result (accessible live region) */}
+      <div aria-live="polite" role="status">
+        {result && (
+          <div className={`flex items-start gap-2 border rounded-lg px-3 py-2 ${resultCls}`}>
+            {result.kind === 'success' ? <CheckCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+              : result.kind === 'dormant' ? <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+              : <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />}
+            <p className="text-[11px]">{result.text}</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function WhatsappConfirmCard({ value, formFields, schemeId, unsavedChanges, onChange }: Props) {
   // Unique per card instance so multiple radio groups on a page never collide.
   const uid = useId();
   const recipientLabelId = `${uid}-recipient-label`;
@@ -428,6 +642,12 @@ export function WhatsappConfirmCard({ value, formFields, onChange }: Props) {
                 </p>
               ))}
             </div>
+          )}
+
+          {/* Send a test — validate the SAVED template + mapping against a real number,
+              without creating an enrollment. Only once a template name is set. */}
+          {value.templateName.trim() !== '' && (
+            <WhatsappTestPanel schemeId={schemeId} value={value} formFields={formFields} unsavedChanges={unsavedChanges} />
           )}
         </div>
       )}

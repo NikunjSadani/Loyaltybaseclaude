@@ -439,6 +439,16 @@ function WhatsappTab({
 
   const errors = useMemo(() => validateWhatsappConfirm(config, formFields), [config, formFields]);
 
+  // The test panel fires the SAVED config; if the draft has unsaved edits, testing would
+  // silently exercise the OLD saved template/variables (and could report a false success).
+  // Compute a dirty flag so the panel can disable the test + tell the admin to save first.
+  const unsavedChanges = useMemo(
+    () =>
+      JSON.stringify(normalizeWhatsappConfirm(config)) !==
+      JSON.stringify(normalizeWhatsappConfirm(scheme.metadata?.whatsappConfirm)),
+    [config, scheme.metadata],
+  );
+
   const save = async () => {
     setMsg(null);
     if (errors.length > 0) return;
@@ -451,7 +461,7 @@ function WhatsappTab({
 
   return (
     <div className="space-y-4">
-      <WhatsappConfirmCard value={config} formFields={formFields} onChange={onConfigChange} />
+      <WhatsappConfirmCard value={config} formFields={formFields} schemeId={scheme.id} unsavedChanges={unsavedChanges} onChange={onConfigChange} />
       {msg && (
         <p className={`text-xs flex items-center gap-1.5 ${msg.kind === 'ok' ? 'text-green-600' : 'text-red-500'}`}>
           {msg.kind === 'ok' ? <CheckCircle className="w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}{msg.text}

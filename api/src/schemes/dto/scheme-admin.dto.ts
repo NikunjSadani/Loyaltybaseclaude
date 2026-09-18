@@ -11,6 +11,7 @@ import {
   IsOptional,
   IsString,
   Max,
+  MaxLength,
   Min,
   MinLength,
   ValidateNested,
@@ -159,6 +160,32 @@ export class UpdateSchemeAdminDto {
   @IsObject()
   @IsValidWhatsappConfirm()
   whatsappConfirm?: Record<string, unknown>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test-send the WhatsApp confirmation (validate a SAVED config on a live scheme)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Fire a TEST WhatsApp for a scheme's SAVED metadata.whatsappConfirm config, to a number
+ * the admin types, with sample (or provided) variable values — WITHOUT creating an
+ * enrollment or touching partner data. Validates the MSG91 template name + variable
+ * mapping on a live scheme.
+ *   - `phone` — the recipient the admin types (normalized to the last 10 digits server-side).
+ *   - `bodyValues` — optional explicit body values; when provided the count MUST match the
+ *     configured variable count. When omitted the service generates per-token samples.
+ */
+export class TestWhatsappConfirmDto {
+  @IsString()
+  @MinLength(1)
+  phone!: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(300, { each: true })
+  @ArrayMaxSize(20)
+  bodyValues?: string[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
