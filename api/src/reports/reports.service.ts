@@ -1,5 +1,5 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
-import { OutletKycIntent, Prisma } from '@prisma/client';
+import { KycStatus, OutletKycIntent, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -406,16 +406,52 @@ export class ReportsService {
             businessName: true,
             panNumber: true,
             // Latest submission for the owner partner (mirrors the KYC dashboard include).
+            // Rejection detail (id/reason/notes/reviewedAt + the transition INTO REJECTED)
+            // is only USED for rows whose current status is "Rejected" (see below), but is
+            // always selected so the row map can read it without a second query.
             kycSubmissions: {
               orderBy: { createdAt: 'desc' },
               take: 1,
-              select: { status: true, submittedAt: true, createdAt: true },
+              select: {
+                status: true,
+                submittedAt: true,
+                createdAt: true,
+                id: true,
+                rejectionReason: true,
+                reviewerNotes: true,
+                reviewedAt: true,
+                // Rejected-date + actor + pre-rejection stage: the (latest) transition into
+                // REJECTED. Mirrors kyc.service.rejectedExport's statusHistory include.
+                statusHistory: {
+                  where: { toStatus: 'REJECTED' },
+                  orderBy: { createdAt: 'desc' },
+                  take: 1,
+                  select: { createdAt: true, changedByUserId: true, fromStatus: true },
+                },
+              },
             },
           },
         },
       },
       orderBy: { outletCode: 'asc' },
     });
+
+    // Batch-resolve the rejecters' name + role in ONE round-trip (no N+1), mirroring
+    // rejectedExport's actor lookup and extending it with `role` for the friendly label.
+    const actorIds = Array.from(
+      new Set(
+        outlets
+          .map((o) => o.partner?.kycSubmissions[0]?.statusHistory?.[0]?.changedByUserId)
+          .filter((v): v is string => !!v),
+      ),
+    );
+    const actors = actorIds.length
+      ? await this.prisma.user.findMany({
+          where: { id: { in: actorIds } },
+          select: { id: true, name: true, role: true },
+        })
+      : [];
+    const actorById = new Map(actors.map((a) => [a.id, a]));
 
     // Per-outlet status: outlet-level lifecycle overlay first (states outside the KYC
     // pipeline), then the canonical dashboard KYC stage from the latest submission.
@@ -426,6 +462,41 @@ export class ReportsService {
       return deriveKycStage(o.partner?.kycSubmissions[0]?.status ?? null);
     };
 
+    // Friendly label for a User.role (reviewer). Sales roles collapse to the hierarchy
+    // codes the field uses (SALES_STATE_HEAD → RSM, SALES_HO → NSM); the raw role is the
+    // fallback for anything unmapped.
+    const roleLabel = (role: string | null | undefined): string => {
+      if (!role) return '';
+      const map: Record<string, string> = {
+        GIFSY_ADMIN: 'Gifsy Admin',
+        GIFSY_STAFF: 'Gifsy Staff',
+        CLIENT_ADMIN: 'Client Admin',
+        MIS_USER: 'MIS User',
+        SALES_HO: 'NSM',
+        SALES_STATE_HEAD: 'RSM',
+        SALES_ASM: 'ASM',
+        SALES_SO: 'SO',
+        SALES_ISR: 'ISR',
+      };
+      return map[role] ?? role;
+    };
+
+    // Classify a rejection as Field vs Gifsy. Prefer the shared canonical stage derivation
+    // on the pre-rejection status (fromStatus): "Pending Gifsy" → Gifsy, "Submitted (field
+    // approval)" → Field. If fromStatus is null/unmapped, fall back to the rejecter's role
+    // (GIFSY_* → Gifsy, SALES_* → Field); otherwise blank.
+    const classifyRejectStage = (
+      fromStatus: KycStatus | null | undefined,
+      actorRole: string | null | undefined,
+    ): string => {
+      const stage = deriveKycStage(fromStatus ?? null);
+      if (stage === 'Pending Gifsy') return 'Gifsy';
+      if (stage === 'Submitted (field approval)') return 'Field';
+      if (actorRole?.startsWith('GIFSY_')) return 'Gifsy';
+      if (actorRole?.startsWith('SALES_')) return 'Field';
+      return '';
+    };
+
     const data = outlets.map((o, i) => {
       const sub = o.partner?.kycSubmissions[0];
       // Latest submission date; blank when the outlet has never started KYC. submittedAt
@@ -433,6 +504,26 @@ export class ReportsService {
       const lastSubmittedOn = sub
         ? (sub.submittedAt ?? sub.createdAt).toISOString().split('T')[0]
         : '';
+
+      // The 5 rejection-detail columns are populated ONLY when the outlet's CURRENT status
+      // is "Rejected" (statusFor === deriveKycStage's 'Rejected'); blank for every other row.
+      const isRejected = statusFor(o) === 'Rejected';
+      const hist = sub?.statusHistory?.[0];
+      const actor = hist?.changedByUserId ? actorById.get(hist.changedByUserId) : undefined;
+      const rejectedStage = isRejected ? classifyRejectStage(hist?.fromStatus, actor?.role) : '';
+      const rejectedBy = isRejected
+        ? actor?.name
+          ? actor.role
+            ? `${actor.name} (${roleLabel(actor.role)})`
+            : actor.name
+          : ''
+        : '';
+      const rejectionReason = isRejected ? (sub?.rejectionReason ?? '') : '';
+      const reviewerNotes = isRejected ? (sub?.reviewerNotes ?? '') : '';
+      const rejectedOn = isRejected
+        ? ((hist?.createdAt ?? sub?.reviewedAt)?.toISOString().split('T')[0] ?? '')
+        : '';
+
       return {
         'S.No': i + 1,
         'Outlet ID': o.outletCode ?? '',
@@ -445,6 +536,11 @@ export class ReportsService {
         PAN: o.partner?.panNumber ?? '',
         Status: statusFor(o),
         'Last Submitted On': lastSubmittedOn,
+        'Rejected Stage': rejectedStage,
+        'Rejected By': rejectedBy,
+        'Rejection Reason': rejectionReason,
+        'Reviewer Notes': reviewerNotes,
+        'Rejected On': rejectedOn,
       };
     });
 
@@ -459,7 +555,8 @@ export class ReportsService {
               {
                 'S.No': '', 'Outlet ID': '', 'Outlet Name': '', Zone: '', 'Program Name': '',
                 'Business Name': '', 'Owner/User Name': '', Mobile: '', PAN: '',
-                Status: '', 'Last Submitted On': '',
+                Status: '', 'Last Submitted On': '', 'Rejected Stage': '', 'Rejected By': '',
+                'Rejection Reason': '', 'Reviewer Notes': '', 'Rejected On': '',
               },
             ];
       return this.toXlsx([{ name: 'KYC Status', rows }], 'kyc-status.xlsx');

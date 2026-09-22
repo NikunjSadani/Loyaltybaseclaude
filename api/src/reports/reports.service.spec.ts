@@ -279,7 +279,20 @@ describe('ReportsService', () => {
         kycIntent: string | null;
         partner: unknown;
       }> = {},
-      sub?: { status: string; submittedAt: Date | null; createdAt: Date },
+      sub?: {
+        status: string;
+        submittedAt: Date | null;
+        createdAt: Date;
+        id?: string;
+        rejectionReason?: string | null;
+        reviewerNotes?: string | null;
+        reviewedAt?: Date | null;
+        statusHistory?: {
+          createdAt: Date;
+          changedByUserId: string | null;
+          fromStatus: string | null;
+        }[];
+      },
     ) => ({
       zone: 'West',
       outletCode: 'OUT-1',
@@ -327,6 +340,12 @@ describe('ReportsService', () => {
         PAN: 'ABCDE1234F',
         Status: 'Not Started',
         'Last Submitted On': '',
+        // The 5 rejection-detail columns are blank for any non-rejected row.
+        'Rejected Stage': '',
+        'Rejected By': '',
+        'Rejection Reason': '',
+        'Reviewer Notes': '',
+        'Rejected On': '',
       });
     });
 
@@ -446,6 +465,175 @@ describe('ReportsService', () => {
       const rows = rowsOf(await service.kycStatus(gifsy, {}));
       expect(rows[0].Status).toBe(expected);
       expect(rows[0].Status).toBe(deriveKycStage(status as never));
+    });
+
+    describe('rejection-detail columns (populated only for currently-Rejected rows)', () => {
+      it('a Gifsy-stage rejection fills all 5 columns (stage=Gifsy, By=name + Gifsy Admin)', async () => {
+        mockPrisma.outlet.findMany.mockResolvedValue([
+          outletRow({}, {
+            status: 'REJECTED',
+            submittedAt: new Date('2026-02-01T00:00:00.000Z'),
+            createdAt: new Date('2026-02-01T00:00:00.000Z'),
+            id: 'sub-1',
+            rejectionReason: 'PAN mismatch; Bank proof unclear',
+            reviewerNotes: 'Ask partner to re-upload PAN card',
+            reviewedAt: new Date('2026-02-05T09:00:00.000Z'),
+            statusHistory: [
+              {
+                createdAt: new Date('2026-02-05T09:00:00.000Z'),
+                changedByUserId: 'U-gifsy',
+                fromStatus: 'PENDING_GIFSY',
+              },
+            ],
+          }),
+        ]);
+        mockPrisma.user.findMany.mockResolvedValue([
+          { id: 'U-gifsy', name: 'Gifsy Admin', role: 'GIFSY_ADMIN' },
+        ]);
+
+        const rows = rowsOf(await service.kycStatus(gifsy, {}));
+        expect(rows[0].Status).toBe('Rejected');
+        expect(rows[0]['Rejected Stage']).toBe('Gifsy');
+        expect(rows[0]['Rejected By']).toBe('Gifsy Admin (Gifsy Admin)');
+        expect(rows[0]['Rejection Reason']).toBe('PAN mismatch; Bank proof unclear');
+        expect(rows[0]['Reviewer Notes']).toBe('Ask partner to re-upload PAN card');
+        expect(rows[0]['Rejected On']).toBe('2026-02-05');
+      });
+
+      it('a Field-stage rejection classifies as Field and labels the sales role (ASM)', async () => {
+        mockPrisma.outlet.findMany.mockResolvedValue([
+          outletRow({}, {
+            status: 'REJECTED',
+            submittedAt: new Date('2026-03-01T00:00:00.000Z'),
+            createdAt: new Date('2026-03-01T00:00:00.000Z'),
+            id: 'sub-2',
+            rejectionReason: 'Address proof missing',
+            reviewerNotes: null,
+            reviewedAt: new Date('2026-03-03T00:00:00.000Z'),
+            statusHistory: [
+              {
+                createdAt: new Date('2026-03-03T11:30:00.000Z'),
+                changedByUserId: 'U-asm',
+                fromStatus: 'PENDING_ASM_APPROVAL',
+              },
+            ],
+          }),
+        ]);
+        mockPrisma.user.findMany.mockResolvedValue([
+          { id: 'U-asm', name: 'Ramesh Kumar', role: 'SALES_ASM' },
+        ]);
+
+        const rows = rowsOf(await service.kycStatus(gifsy, {}));
+        expect(rows[0]['Rejected Stage']).toBe('Field');
+        expect(rows[0]['Rejected By']).toBe('Ramesh Kumar (ASM)');
+        expect(rows[0]['Rejection Reason']).toBe('Address proof missing');
+        expect(rows[0]['Reviewer Notes']).toBe('');
+        expect(rows[0]['Rejected On']).toBe('2026-03-03');
+      });
+
+      it('a non-rejected (Approved) outlet leaves all 5 rejection columns blank', async () => {
+        mockPrisma.outlet.findMany.mockResolvedValue([
+          outletRow({}, {
+            status: 'APPROVED',
+            submittedAt: new Date('2026-02-01T00:00:00.000Z'),
+            createdAt: new Date('2026-02-01T00:00:00.000Z'),
+            id: 'sub-3',
+            // Even if stray rejection fields/history exist, a non-Rejected status blanks them.
+            rejectionReason: 'should not surface',
+            reviewerNotes: 'should not surface',
+            reviewedAt: new Date('2026-02-05T00:00:00.000Z'),
+            statusHistory: [
+              { createdAt: new Date('2026-02-05T00:00:00.000Z'), changedByUserId: 'U-x', fromStatus: 'PENDING_GIFSY' },
+            ],
+          }),
+        ]);
+        mockPrisma.user.findMany.mockResolvedValue([{ id: 'U-x', name: 'X', role: 'GIFSY_ADMIN' }]);
+
+        const rows = rowsOf(await service.kycStatus(gifsy, {}));
+        expect(rows[0].Status).toBe('Approved');
+        expect(rows[0]['Rejected Stage']).toBe('');
+        expect(rows[0]['Rejected By']).toBe('');
+        expect(rows[0]['Rejection Reason']).toBe('');
+        expect(rows[0]['Reviewer Notes']).toBe('');
+        expect(rows[0]['Rejected On']).toBe('');
+      });
+
+      it('resolves all rejecters in a SINGLE user.findMany (no N+1) across many rejected rows', async () => {
+        mockPrisma.outlet.findMany.mockResolvedValue([
+          outletRow({ outletCode: 'OUT-1' }, {
+            status: 'REJECTED', submittedAt: new Date('2026-02-01T00:00:00.000Z'), createdAt: new Date('2026-02-01T00:00:00.000Z'),
+            id: 's1', rejectionReason: 'r1', reviewerNotes: null, reviewedAt: new Date('2026-02-02T00:00:00.000Z'),
+            statusHistory: [{ createdAt: new Date('2026-02-02T00:00:00.000Z'), changedByUserId: 'U-a', fromStatus: 'PENDING_GIFSY' }],
+          }),
+          outletRow({ outletCode: 'OUT-2' }, {
+            status: 'REJECTED', submittedAt: new Date('2026-02-01T00:00:00.000Z'), createdAt: new Date('2026-02-01T00:00:00.000Z'),
+            id: 's2', rejectionReason: 'r2', reviewerNotes: null, reviewedAt: new Date('2026-02-02T00:00:00.000Z'),
+            statusHistory: [{ createdAt: new Date('2026-02-02T00:00:00.000Z'), changedByUserId: 'U-b', fromStatus: 'PENDING_ASM_APPROVAL' }],
+          }),
+        ]);
+        mockPrisma.user.findMany.mockResolvedValue([
+          { id: 'U-a', name: 'Alice', role: 'GIFSY_ADMIN' },
+          { id: 'U-b', name: 'Bob', role: 'SALES_ASM' },
+        ]);
+
+        const rows = rowsOf(await service.kycStatus(gifsy, {}));
+        expect(mockPrisma.user.findMany).toHaveBeenCalledTimes(1);
+        // The one lookup is scoped to exactly the distinct actor ids.
+        const where = mockPrisma.user.findMany.mock.calls[0][0].where;
+        expect(where.id.in.sort()).toEqual(['U-a', 'U-b']);
+        expect(rows[0]['Rejected By']).toBe('Alice (Gifsy Admin)');
+        expect(rows[1]['Rejected By']).toBe('Bob (ASM)');
+      });
+
+      it('a Deactivated outlet whose latest submission is REJECTED shows Deactivated with all 5 rejection columns blank (lifecycle overlay wins → no rejection-detail leak)', async () => {
+        mockPrisma.outlet.findMany.mockResolvedValue([
+          outletRow({ deactivatedAt: new Date('2026-02-10T00:00:00.000Z') }, {
+            status: 'REJECTED',
+            submittedAt: new Date('2026-02-01T00:00:00.000Z'),
+            createdAt: new Date('2026-02-01T00:00:00.000Z'),
+            id: 'sub-deact',
+            rejectionReason: 'must not surface on a deactivated row',
+            reviewerNotes: 'must not surface',
+            reviewedAt: new Date('2026-02-05T00:00:00.000Z'),
+            statusHistory: [
+              { createdAt: new Date('2026-02-05T00:00:00.000Z'), changedByUserId: 'U-g', fromStatus: 'PENDING_GIFSY' },
+            ],
+          }),
+        ]);
+        mockPrisma.user.findMany.mockResolvedValue([{ id: 'U-g', name: 'G', role: 'GIFSY_ADMIN' }]);
+
+        const rows = rowsOf(await service.kycStatus(gifsy, {}));
+        expect(rows[0].Status).toBe('Deactivated');
+        expect(rows[0]['Rejected Stage']).toBe('');
+        expect(rows[0]['Rejected By']).toBe('');
+        expect(rows[0]['Rejection Reason']).toBe('');
+        expect(rows[0]['Reviewer Notes']).toBe('');
+        expect(rows[0]['Rejected On']).toBe('');
+      });
+
+      it('a Rejected row with no rejection history / unresolved actor degrades cleanly (By + Stage blank, Reason/Notes/Date still from the submission)', async () => {
+        mockPrisma.outlet.findMany.mockResolvedValue([
+          outletRow({}, {
+            status: 'REJECTED',
+            submittedAt: new Date('2026-04-01T00:00:00.000Z'),
+            createdAt: new Date('2026-04-01T00:00:00.000Z'),
+            id: 'sub-old',
+            rejectionReason: 'Legacy rejection (pre-history)',
+            reviewerNotes: 'Fix and resubmit',
+            reviewedAt: new Date('2026-04-03T00:00:00.000Z'),
+            statusHistory: [], // older data: no recorded REJECTED transition
+          }),
+        ]);
+        mockPrisma.user.findMany.mockResolvedValue([]);
+
+        const rows = rowsOf(await service.kycStatus(gifsy, {}));
+        expect(rows[0].Status).toBe('Rejected');
+        expect(rows[0]['Rejected By']).toBe('');
+        expect(rows[0]['Rejected Stage']).toBe('');
+        expect(rows[0]['Rejection Reason']).toBe('Legacy rejection (pre-history)');
+        expect(rows[0]['Reviewer Notes']).toBe('Fix and resubmit');
+        expect(rows[0]['Rejected On']).toBe('2026-04-03'); // falls back to reviewedAt when no history row
+      });
     });
   });
 });
