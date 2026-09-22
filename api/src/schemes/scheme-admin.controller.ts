@@ -20,6 +20,7 @@ import {
   CreateSchemeAdminDto,
   RosterQueryDto,
   RosterRemoveDto,
+  RosterRemoveUploadDto,
   RosterUploadDto,
   SetAudienceDto,
   SetSchemeStatusDto,
@@ -199,6 +200,33 @@ export class SchemeAdminController {
     @Body() dto: RosterRemoveDto,
   ) {
     return this.admin.removeRoster(user, id, dto);
+  }
+
+  /**
+   * POST /v1/schemes/:id/roster/remove-upload — bulk-remove roster rows by uploading an
+   * Excel of Outlet IDs (same sheet format as upload; only the id column is read). Body
+   * `dryRun=true` returns a resolve-only preview (no writes); `dryRun=false` performs the
+   * soft-delete. Recoverable via /roster/restore. GIFSY-only, own-scheme scoped.
+   */
+  @Post(':id/roster/remove-upload')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('schemes:write')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB ceiling — bound parse memory
+      fileFilter: (_req, file, cb) =>
+        /\.(xlsx|xls)$/i.test(file.originalname)
+          ? cb(null, true)
+          : cb(new Error('Only .xlsx / .xls files are accepted'), false),
+    }),
+  )
+  removeRosterByUpload(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @UploadedFile() file: Express.Multer.File,
+    @Body() dto: RosterRemoveUploadDto,
+  ) {
+    return this.admin.removeRosterByUpload(user, id, file, dto);
   }
 
   /**

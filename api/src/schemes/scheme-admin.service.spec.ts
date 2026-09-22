@@ -694,4 +694,135 @@ describe('SchemeAdminService', () => {
       expect(res.pagination).toEqual({ page: 1, limit: 50, total: 1, pages: 1 });
     });
   });
+
+  // ── removeRosterByUpload (bulk remove by Excel of Outlet IDs) ─────────────────
+  describe('removeRosterByUpload', () => {
+    const xlsxBuffer = (aoa: (string | number | null)[][]): Buffer => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const XLSX = require('xlsx');
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Remove');
+      return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    };
+    const buf = () =>
+      xlsxBuffer([
+        ['Outlet ID', 'Note'],
+        ['OUT1', 'x'],
+        ['OUT2', 'y'],
+        ['OUT3', 'gone'], // no live roster row → not found
+        ['OUT1', 'dup'], // duplicate ref → de-duped, counted once
+      ]);
+
+    it('dryRun preview resolves refs → live rows, counts hidden enrollments, and NEVER writes', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(activeScheme);
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
+        { id: 'ro1', outletRef: 'OUT1' },
+        { id: 'ro2', outletRef: 'OUT2' },
+      ]);
+      mockPrisma.schemeEnrollment.count.mockResolvedValue(1); // one of the two has a live enrollment
+
+      const res = await service.removeRosterByUpload(
+        user, 's1', { buffer: buf() } as Express.Multer.File, { dryRun: 'true' },
+      );
+
+      // resolve scoped to own scheme/client + LIVE rows only, on the DISTINCT refs
+      expect(mockPrisma.schemeOutlet.findMany.mock.calls[0][0].where).toEqual({
+        schemeId: 's1',
+        clientId: 't1',
+        deletedAt: null,
+        outletRef: { in: ['OUT1', 'OUT2', 'OUT3'] },
+      });
+      expect(res).toEqual({
+        dryRun: true,
+        totalRefs: 3, // OUT1 de-duped
+        willRemove: 2,
+        withEnrollmentCount: 1,
+        notFoundCount: 1,
+        notFoundRefs: ['OUT3'],
+      });
+      // A preview must not touch the roster.
+      expect(mockPrisma.schemeOutlet.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('performs the soft-delete (dryRun:false), scoped + chunk-safe, and reports not-found refs', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(activeScheme);
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
+        { id: 'ro1', outletRef: 'OUT1' },
+        { id: 'ro2', outletRef: 'OUT2' },
+      ]);
+      mockPrisma.schemeEnrollment.count.mockResolvedValue(1);
+      mockPrisma.schemeOutlet.updateMany.mockResolvedValue({ count: 2 });
+
+      const res = await service.removeRosterByUpload(
+        user, 's1', { buffer: buf() } as Express.Multer.File, { dryRun: 'false' },
+      );
+
+      expect(mockPrisma.schemeOutlet.updateMany.mock.calls[0][0].where).toEqual({
+        schemeId: 's1',
+        clientId: 't1',
+        id: { in: ['ro1', 'ro2'] },
+        deletedAt: null,
+      });
+      expect(mockPrisma.schemeOutlet.updateMany.mock.calls[0][0].data.deletedAt).toBeInstanceOf(Date);
+      expect(res).toEqual({
+        dryRun: false,
+        totalRefs: 3,
+        removed: 2,
+        removedWithEnrollment: 1,
+        notFoundCount: 1,
+        notFoundRefs: ['OUT3'],
+      });
+    });
+
+    it('SAFE DEFAULT — an omitted dryRun previews, it never performs an unconfirmed removal', async () => {
+      // Guards the "boolean DTO + enableImplicitConversion = fail-open" trap: only an explicit
+      // 'false'/'0' may write; anything else (incl. absent) must stay a no-write preview.
+      mockPrisma.scheme.findFirst.mockResolvedValue(activeScheme);
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([{ id: 'ro1', outletRef: 'OUT1' }]);
+      mockPrisma.schemeEnrollment.count.mockResolvedValue(0);
+
+      const res = await service.removeRosterByUpload(
+        user, 's1', { buffer: buf() } as Express.Multer.File, {}, // dryRun omitted
+      );
+
+      expect(res).toMatchObject({ dryRun: true });
+      expect(mockPrisma.schemeOutlet.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('when NO ref matches a live row: willRemove 0, no enrollment count, no write', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(activeScheme);
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([]); // nothing live
+      const res = await service.removeRosterByUpload(
+        user, 's1', { buffer: buf() } as Express.Multer.File, { dryRun: 'true' },
+      );
+      expect(res).toMatchObject({ dryRun: true, willRemove: 0, withEnrollmentCount: 0, notFoundCount: 3 });
+      expect(mockPrisma.schemeEnrollment.count).not.toHaveBeenCalled();
+      expect(mockPrisma.schemeOutlet.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('rejects a file with no Outlet IDs (header only)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(activeScheme);
+      await expect(
+        service.removeRosterByUpload(user, 's1', { buffer: xlsxBuffer([['Outlet ID']]) } as Express.Multer.File, {}),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.schemeOutlet.findMany).not.toHaveBeenCalled();
+    });
+
+    it('rejects when no file buffer is supplied', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(activeScheme);
+      await expect(
+        service.removeRosterByUpload(user, 's1', undefined as unknown as Express.Multer.File, {}),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('404s a cross-tenant / deleted scheme before any parse or write', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(null);
+      await expect(
+        service.removeRosterByUpload(user, 'sX', { buffer: buf() } as Express.Multer.File, { dryRun: 'true' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockPrisma.schemeOutlet.findMany).not.toHaveBeenCalled();
+      expect(mockPrisma.schemeOutlet.updateMany).not.toHaveBeenCalled();
+    });
+  });
 });

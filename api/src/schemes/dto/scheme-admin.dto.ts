@@ -372,3 +372,26 @@ export class RosterRemoveDto {
   @IsString({ each: true })
   schemeOutletIds!: string[];
 }
+
+/**
+ * Body for POST :id/roster/remove-upload — bulk-remove roster rows by uploading an Excel
+ * of Outlet IDs (the SAME sheet format as the roster upload; only the id column is read).
+ * `dryRun` drives the preview: 'true'/'1' = resolve + report only (no writes); 'false'/'0' =
+ * perform the soft-delete.
+ *
+ * NOTE — `dryRun` is a STRING, deliberately, and MUST NOT be typed `boolean`. The global pipe
+ * runs with `enableImplicitConversion: true`, which coerces a `boolean`-typed field from the
+ * multipart string by truthiness ('false' → true), silently defeating any @Transform — the
+ * documented "boolean DTO + implicit conversion = fail-open" trap. A string design-type is a
+ * no-op under implicit conversion, so the value reaches the service verbatim, where it is
+ * interpreted with a SAFE (preview) default (anything but an explicit 'false'/'0' → dry run).
+ */
+export class RosterRemoveUploadDto {
+  @IsOptional()
+  @IsString()
+  idColumn?: string;
+
+  @IsOptional()
+  @IsIn(['true', 'false', '1', '0'])
+  dryRun?: string;
+}

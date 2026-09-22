@@ -233,6 +233,28 @@ export interface RosterRestoreResult {
   notFound: number;
 }
 
+/**
+ * POST :id/roster/remove-upload — bulk remove by Excel of Outlet IDs.
+ * `dryRun:true` = preview (no writes); `dryRun:false` = the performed removal.
+ * `notFoundRefs` is a bounded sample (≤500); `notFoundCount` is always exact.
+ */
+export interface RosterRemoveUploadPreview {
+  dryRun: true;
+  totalRefs: number;
+  willRemove: number;
+  withEnrollmentCount: number;
+  notFoundCount: number;
+  notFoundRefs: string[];
+}
+export interface RosterRemoveUploadResult {
+  dryRun: false;
+  totalRefs: number;
+  removed: number;
+  removedWithEnrollment: number;
+  notFoundCount: number;
+  notFoundRefs: string[];
+}
+
 /** Per-input-row disposition for the downloadable upload report (Phase 2). */
 export interface RosterRowReport {
   rowIndex: number;
@@ -542,6 +564,25 @@ export const schemeApi = {
   /** GIFSY admin soft-deletes roster rows (recoverable). Removing a row with a filled enrollment hides it too. */
   removeRosterRows(schemeId: string, schemeOutletIds: string[]) {
     return api.post<RosterRemoveResult>(`${BASE}/${schemeId}/roster/remove`, { schemeOutletIds });
+  },
+  /**
+   * GIFSY admin bulk-removes roster rows by uploading an Excel of Outlet IDs (same sheet
+   * format as upload; only the id column is read). Pass `dryRun:true` for a no-write preview,
+   * then `dryRun:false` to perform the (recoverable) soft-delete.
+   */
+  removeRosterByUpload(
+    schemeId: string,
+    file: File,
+    opts: { idColumn?: string; dryRun?: boolean } = {},
+  ) {
+    const form = new FormData();
+    form.append('file', file);
+    if (opts.idColumn) form.append('idColumn', opts.idColumn);
+    form.append('dryRun', opts.dryRun ? 'true' : 'false');
+    return postMultipart<RosterRemoveUploadPreview | RosterRemoveUploadResult>(
+      `${BASE}/${schemeId}/roster/remove-upload`,
+      form,
+    );
   },
   /** GIFSY admin restores soft-deleted roster rows (and any enrollment reached through them). */
   restoreRosterRows(schemeId: string, schemeOutletIds: string[]) {

@@ -27,6 +27,7 @@ import {
   type AudienceResult,
   type FacetValues,
   type RosterRow,
+  type RosterRemoveUploadPreview,
 } from '@/lib/schemes';
 import { downloadRosterReport } from '@/lib/scheme-roster-report';
 import { aoaToSheetSafe } from '@/lib/xlsx-safe';
@@ -346,6 +347,10 @@ export function SchemeAudienceEditor({ schemeId, schemeName, audienceConfig, onS
             onUploaded={() => { setRosterUploaded(true); setRosterRefreshKey((k) => k + 1); }}
           />
           <CurrentRosterPanel schemeId={schemeId} refreshKey={rosterRefreshKey} />
+          <RosterRemoveByExcelPanel
+            schemeId={schemeId}
+            onRemoved={() => setRosterRefreshKey((k) => k + 1)}
+          />
         </>
       )}
     </div>
@@ -918,6 +923,172 @@ function RosterUploadPanel({ schemeId, schemeName, onUploaded }: { schemeId: str
             {result.duplicateRefs.length === 0 && result.unmatchedEmployeeCodes.length === 0 && (result.blankNameCount ?? 0) === 0 && (
               <p className="flex items-center gap-1.5 text-green-600"><CheckCircle className="w-3.5 h-3.5" /> No duplicates, unmatched employees, or missing names.</p>
             )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Bulk remove by Excel (upload a sheet of Outlet IDs to soft-remove) ────────
+//
+// A destructive counterpart to the roster upload: drop a .xlsx of Outlet IDs, get a
+// no-write PREVIEW (how many will be removed / not found / carry a filled enrollment),
+// then Confirm to perform the soft-delete. Recoverable via "Show removed → Restore" in the
+// Current-roster panel above. Only the Outlet ID column is read; every other column is ignored.
+export function RosterRemoveByExcelPanel({ schemeId, onRemoved }: { schemeId: string; onRemoved: () => void }) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const [idColumn, setIdColumn] = useState('');
+  const [showCol, setShowCol] = useState(false);
+
+  // The chosen file is held across preview→confirm (the confirm re-sends the SAME file;
+  // the backend re-resolves at delete time, so it stays authoritative even if the roster changed).
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState<false | 'preview' | 'remove'>(false);
+  const [preview, setPreview] = useState<RosterRemoveUploadPreview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const reset = () => {
+    setFile(null);
+    setPreview(null);
+    setError(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const runPreview = async (f: File) => {
+    if (busy) return; // re-entrancy guard
+    setError(null);
+    setNotice(null);
+    setPreview(null);
+    setFile(f);
+    setBusy('preview');
+    const res = await schemeApi.removeRosterByUpload(schemeId, f, {
+      idColumn: idColumn.trim() || undefined,
+      dryRun: true,
+    });
+    setBusy(false);
+    if (res.success && res.data.dryRun) setPreview(res.data);
+    else setError(res.success ? 'Unexpected response.' : res.error);
+  };
+
+  const confirmRemove = async () => {
+    if (!file || busy) return;
+    setError(null);
+    setBusy('remove');
+    const res = await schemeApi.removeRosterByUpload(schemeId, file, {
+      idColumn: idColumn.trim() || undefined,
+      dryRun: false,
+    });
+    setBusy(false);
+    if (res.success && !res.data.dryRun) {
+      const { removed, removedWithEnrollment, notFoundCount } = res.data;
+      setNotice(
+        `Removed ${removed} outlet${removed === 1 ? '' : 's'}` +
+          (removedWithEnrollment > 0
+            ? ` (${removedWithEnrollment} had a filled enrollment — now hidden; restore to recover)`
+            : '') +
+          (notFoundCount > 0 ? ` · ${notFoundCount} Outlet ID${notFoundCount === 1 ? '' : 's'} not found` : '') +
+          '.',
+      );
+      reset();
+      onRemoved();
+    } else {
+      setError(res.success ? 'Unexpected response.' : res.error);
+    }
+  };
+
+  const previewing = busy === 'preview';
+  const removing = busy === 'remove';
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <p className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+          <Trash2 className="w-4 h-4 text-gray-500" /> Remove outlets by Excel
+        </p>
+        <button type="button" onClick={() => setShowCol((s) => !s)} className="text-xs text-[var(--brand-primary)] hover:underline">
+          {showCol ? 'Hide column override' : 'Column override'}
+        </button>
+      </div>
+      <p className="text-xs text-gray-500 flex items-start gap-1.5">
+        <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-gray-400" />
+        Upload a sheet whose <strong className="font-medium">Outlet ID</strong> column lists the outlets to remove (other columns are ignored). You&rsquo;ll see a preview before anything is removed. Removal is recoverable via &ldquo;Show removed&rdquo; above.
+      </p>
+
+      {showCol && (
+        <div className="max-w-xs">
+          <label className="block text-[10px] text-gray-500 mb-1">Outlet id column (if your header isn&rsquo;t &ldquo;Outlet ID&rdquo;)</label>
+          <input type="text" value={idColumn} onChange={(e) => { setIdColumn(e.target.value); setPreview(null); }}
+            placeholder="outlet_id" className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5" />
+        </div>
+      )}
+
+      {notice && (
+        <p className="text-xs text-gray-600 flex items-start gap-1.5 bg-gray-50 border border-gray-100 rounded-lg px-3 py-2">
+          <CheckCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-green-500" />
+          <span className="flex-1">{notice}</span>
+          <button type="button" onClick={() => setNotice(null)} className="text-gray-400 hover:text-gray-600"><X className="w-3.5 h-3.5" /></button>
+        </p>
+      )}
+
+      {/* Dropzone — hidden once a preview is showing (the confirm step takes over) */}
+      {!preview && (
+        <div
+          onDragOver={(e) => { e.preventDefault(); if (!busy) setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={(e) => { e.preventDefault(); setDragOver(false); if (busy) return; const f = e.dataTransfer.files[0]; if (f) void runPreview(f); }}
+          onClick={() => { if (busy) return; fileInputRef.current?.click(); }}
+          aria-disabled={!!busy}
+          className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors ${busy ? 'pointer-events-none opacity-60 cursor-default border-gray-300 bg-gray-50' : dragOver ? 'border-red-400 bg-red-50 cursor-pointer' : 'border-gray-300 hover:border-gray-400 bg-gray-50 cursor-pointer'}`}
+        >
+          {previewing ? <Loader2 className="w-6 h-6 text-red-400 mx-auto mb-2 animate-spin" /> : <Upload className="w-6 h-6 text-gray-400 mx-auto mb-2" />}
+          <p className="text-sm font-medium text-gray-700">{previewing ? 'Checking the file…' : 'Drop the Excel of Outlet IDs to remove'}</p>
+          <p className="text-xs text-gray-400 mt-0.5">or click to browse · .xlsx / .xls</p>
+          <input ref={fileInputRef} type="file" accept=".xlsx,.xls" className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) void runPreview(f); }} />
+        </div>
+      )}
+
+      {error && <p className="text-xs text-red-500 flex items-start gap-1.5"><AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />{error}</p>}
+
+      {/* Preview + confirm */}
+      {preview && (
+        <div className="border border-amber-200 rounded-xl overflow-hidden">
+          <div className="px-3 py-2.5 bg-amber-50 border-b border-amber-200 flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+            <div className="text-xs text-amber-800">
+              <p className="font-semibold">
+                {preview.willRemove} of {preview.totalRefs} Outlet ID{preview.totalRefs === 1 ? '' : 's'} will be removed from the roster.
+              </p>
+              {preview.withEnrollmentCount > 0 && (
+                <p className="mt-0.5 font-semibold text-red-600 flex items-start gap-1">
+                  <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                  {preview.withEnrollmentCount} of them {preview.withEnrollmentCount === 1 ? 'has' : 'have'} a filled enrollment — it will be hidden too (recoverable via Restore).
+                </p>
+              )}
+              {preview.notFoundCount > 0 && (
+                <p className="mt-0.5 text-amber-700">
+                  {preview.notFoundCount} Outlet ID{preview.notFoundCount === 1 ? '' : 's'} not in the current roster (skipped): {preview.notFoundRefs.slice(0, 8).join(', ')}{preview.notFoundCount > preview.notFoundRefs.slice(0, 8).length ? ' …' : ''}
+                </p>
+              )}
+            </div>
+          </div>
+          <div className="px-3 py-2.5 flex items-center gap-2 flex-wrap">
+            {preview.willRemove > 0 ? (
+              <button type="button" onClick={() => void confirmRemove()} disabled={removing}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-red-500 text-white hover:bg-red-600 disabled:opacity-60">
+                {removing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                Remove {preview.willRemove} outlet{preview.willRemove === 1 ? '' : 's'}
+              </button>
+            ) : (
+              <span className="text-xs text-gray-500">Nothing to remove — none of these Outlet IDs are in the current roster.</span>
+            )}
+            <button type="button" onClick={reset} disabled={removing}
+              className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-60">
+              {preview.willRemove > 0 ? 'Cancel' : 'Choose another file'}
+            </button>
           </div>
         </div>
       )}

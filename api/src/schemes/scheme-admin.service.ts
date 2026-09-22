@@ -14,6 +14,7 @@ import {
   CreateSchemeAdminDto,
   RosterQueryDto,
   RosterRemoveDto,
+  RosterRemoveUploadDto,
   RosterUploadDto,
   SetAudienceDto,
   SetSchemeStatusDto,
@@ -825,25 +826,154 @@ export class SchemeAdminService {
     // Dedup so a repeated id can't inflate `notFound` (updateMany counts each row once).
     const ids = [...new Set(dto.schemeOutletIds)];
 
-    // Count how many of the rows we are ABOUT to remove carry a live (non-deleted)
-    // enrollment — surfaced so the admin can be warned that captured data is being hidden.
-    // Scoped to the rows this call will actually remove (own scheme/client + not-yet-removed).
+    const { removed, removedWithEnrollment } = await this.softRemoveRosterByIds(
+      user.clientId,
+      schemeId,
+      ids,
+    );
+
+    return {
+      removed,
+      removedWithEnrollment,
+      notFound: ids.length - removed,
+    };
+  }
+
+  /**
+   * Shared soft-delete of roster rows by internal schemeOutlet id (the single source of
+   * truth behind both `removeRoster` [ids] and `removeRosterByUpload` [Excel of refs]).
+   *
+   * Counts the live enrollments hidden by this removal FIRST (so the admin can be warned),
+   * then stamps `deletedAt` on the not-yet-removed rows, chunked to stay well under any
+   * statement/parameter limit at tenant scale. Every write is scoped to the caller's own
+   * scheme/client + `deletedAt: null`, so it is idempotent and cannot touch another tenant.
+   * `ids` MUST already be de-duplicated by the caller (the `removed` count is authoritative).
+   */
+  private async softRemoveRosterByIds(clientId: string, schemeId: string, ids: string[]) {
+    if (ids.length === 0) return { removed: 0, removedWithEnrollment: 0 };
+
+    // How many of the rows we are ABOUT to remove carry a live (non-deleted) enrollment —
+    // scoped to the rows this call will actually remove (own scheme/client + not-yet-removed).
     const removedWithEnrollment = await this.prisma.schemeEnrollment.count({
       where: {
         deletedAt: null,
-        schemeOutlet: { id: { in: ids }, schemeId, clientId: user.clientId, deletedAt: null },
+        schemeOutlet: { id: { in: ids }, schemeId, clientId, deletedAt: null },
       },
     });
 
-    const res = await this.prisma.schemeOutlet.updateMany({
-      where: { schemeId, clientId: user.clientId, id: { in: ids }, deletedAt: null },
-      data: { deletedAt: new Date() },
-    });
+    let removed = 0;
+    const now = new Date();
+    for (let i = 0; i < ids.length; i += SchemeAdminService.UPLOAD_CHUNK) {
+      const res = await this.prisma.schemeOutlet.updateMany({
+        where: {
+          schemeId,
+          clientId,
+          id: { in: ids.slice(i, i + SchemeAdminService.UPLOAD_CHUNK) },
+          deletedAt: null,
+        },
+        data: { deletedAt: now },
+      });
+      removed += res.count;
+    }
+
+    return { removed, removedWithEnrollment };
+  }
+
+  // ── Bulk remove by Excel (upload a sheet of Outlet IDs to soft-remove) ──────
+  //
+  // Reuses the roster-upload parser (only the Outlet ID column is read; name / tagged /
+  // prefill columns are ignored) and the shared soft-delete above. A `dryRun` returns a
+  // resolve-only PREVIEW (no writes) so the admin can confirm the exact effect first.
+  // Removal is recoverable via the existing "Show removed → Restore".
+  //
+  // Identity: match on `outletRef` (the same "Outlet ID" that built the roster, unique per
+  // scheme). A ref with no LIVE roster row (never present, already removed, or another
+  // scheme's) is reported as not-found — never a silent miss, never a cross-scheme reach.
+  async removeRosterByUpload(
+    user: JwtPayload,
+    schemeId: string,
+    file: Express.Multer.File,
+    dto: RosterRemoveUploadDto,
+  ) {
+    await this.assertSchemeOwnership(user, schemeId);
+    if (!file?.buffer) throw new BadRequestException('A .xlsx file of Outlet IDs is required.');
+
+    // Distinct, order-preserving Outlet IDs from the sheet. Only the id column matters for
+    // removal; the parser still needs a recognizable id header (else it throws → 400).
+    let refs: string[];
+    try {
+      const rows = parseRosterUploadBuffer(file.buffer, { idColumn: dto.idColumn }).rows;
+      refs = [...new Set(rows.map((r) => r.outletRef).filter((r): r is string => !!r))];
+    } catch {
+      throw new BadRequestException(
+        'Invalid or corrupted xlsx file, or no recognizable Outlet ID column was found.',
+      );
+    }
+
+    if (refs.length === 0) {
+      throw new BadRequestException('The file contained no Outlet IDs to remove.');
+    }
+
+    // Resolve refs → LIVE roster rows for THIS scheme (deletedAt: null). Anything not here is
+    // reported as not-found. Chunked to bound the IN() size at scale.
+    const liveRows: { id: string; outletRef: string }[] = [];
+    for (let i = 0; i < refs.length; i += SchemeAdminService.UPLOAD_CHUNK) {
+      const chunk = await this.prisma.schemeOutlet.findMany({
+        where: {
+          schemeId,
+          clientId: user.clientId,
+          deletedAt: null,
+          outletRef: { in: refs.slice(i, i + SchemeAdminService.UPLOAD_CHUNK) },
+        },
+        select: { id: true, outletRef: true },
+      });
+      liveRows.push(...chunk);
+    }
+
+    const foundRefs = new Set(liveRows.map((r) => r.outletRef));
+    const notFoundRefs = refs.filter((r) => !foundRefs.has(r));
+    const ids = liveRows.map((r) => r.id);
+
+    // Safe default: preview UNLESS the caller explicitly asked to perform the removal
+    // ('false'/'0'). An omitted/ambiguous value never triggers an unconfirmed destructive
+    // write. (dryRun is a string by design — see RosterRemoveUploadDto.)
+    const isDryRun = dto.dryRun !== 'false' && dto.dryRun !== '0';
+
+    if (isDryRun) {
+      // Preview only — no writes. Count live enrollments that WOULD be hidden.
+      const withEnrollmentCount =
+        ids.length === 0
+          ? 0
+          : await this.prisma.schemeEnrollment.count({
+              where: {
+                deletedAt: null,
+                schemeOutlet: { id: { in: ids }, schemeId, clientId: user.clientId, deletedAt: null },
+              },
+            });
+      return {
+        dryRun: true as const,
+        totalRefs: refs.length,
+        willRemove: ids.length,
+        withEnrollmentCount,
+        notFoundCount: notFoundRefs.length,
+        // Bound the payload — the exact count is always precise; the list is a sample for the UI.
+        notFoundRefs: notFoundRefs.slice(0, 500),
+      };
+    }
+
+    const { removed, removedWithEnrollment } = await this.softRemoveRosterByIds(
+      user.clientId,
+      schemeId,
+      ids,
+    );
 
     return {
-      removed: res.count,
+      dryRun: false as const,
+      totalRefs: refs.length,
+      removed,
       removedWithEnrollment,
-      notFound: ids.length - res.count,
+      notFoundCount: notFoundRefs.length,
+      notFoundRefs: notFoundRefs.slice(0, 500),
     };
   }
 
