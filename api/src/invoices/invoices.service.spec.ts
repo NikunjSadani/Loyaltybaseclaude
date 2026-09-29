@@ -311,6 +311,8 @@ const mockPrisma = {
     create: jest.fn(),
     updateMany: jest.fn(),
   },
+  // generateForPeriod ensures a HELD reimbursement (create + refresh self-heal); default: none exists.
+  gstReimbursement: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
@@ -576,6 +578,41 @@ describe('InvoicesService', () => {
       const where = mockPrisma.autoInvoice.updateMany.mock.calls[0][0].where;
       expect(where.status).toBe('GENERATED');
       expect(where.outletCode).toBe('O1');
+    });
+
+    it('SELF-HEAL: a refresh that (re)gains GST creates the missing HELD reimbursement', async () => {
+      mockPrisma.autoInvoice.count.mockResolvedValue(1);
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f1' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([{ outletId: 'O1', amountPaise: 500000n }]);
+      mockPrisma.outlet.findMany.mockResolvedValue([kycApprovedWBOutlet]); // REGULAR → GST applies
+      const p2002 = new Prisma.PrismaClientKnownRequestError('x', { code: 'P2002', clientVersion: '5.0.0' });
+      mockPrisma.autoInvoice.create.mockRejectedValue(p2002);
+      mockPrisma.autoInvoice.findFirst.mockResolvedValue({ id: 'inv1' }); // tuple exists + self-heal id read
+      mockPrisma.autoInvoice.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.gstReimbursement.findUnique.mockResolvedValue(null); // no reimbursement yet
+
+      await service.generateForPeriod(admin, { period: '2025-01' });
+
+      expect(mockPrisma.gstReimbursement.create).toHaveBeenCalledTimes(1);
+      const data = mockPrisma.gstReimbursement.create.mock.calls[0][0].data;
+      expect(data).toMatchObject({ clientId: 'deoleo', autoInvoiceId: 'inv1', outletCode: 'O1', status: 'HELD' });
+      expect(Number(data.gstPaise)).toBeGreaterThan(0);
+    });
+
+    it('SELF-HEAL is idempotent: an existing reimbursement is NOT duplicated on refresh', async () => {
+      mockPrisma.autoInvoice.count.mockResolvedValue(1);
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f1' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([{ outletId: 'O1', amountPaise: 500000n }]);
+      mockPrisma.outlet.findMany.mockResolvedValue([kycApprovedWBOutlet]);
+      const p2002 = new Prisma.PrismaClientKnownRequestError('x', { code: 'P2002', clientVersion: '5.0.0' });
+      mockPrisma.autoInvoice.create.mockRejectedValue(p2002);
+      mockPrisma.autoInvoice.findFirst.mockResolvedValue({ id: 'inv1' });
+      mockPrisma.autoInvoice.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.gstReimbursement.findUnique.mockResolvedValue({ id: 'gr1' }); // already exists
+
+      await service.generateForPeriod(admin, { period: '2025-01' });
+
+      expect(mockPrisma.gstReimbursement.create).not.toHaveBeenCalled();
     });
 
     it('does NOT mutate a PAID (finalized) invoice on re-run — guarded updateMany skips it', async () => {

@@ -196,6 +196,9 @@ describe('CreditsService', () => {
     mockTx.autoInvoice.findMany.mockResolvedValue([]);
     mockTx.$executeRaw.mockResolvedValue(0);
 
+    // Default: outlet lookups (uploadUtr resolves per-outlet bank accounts for the same-account
+    // shared-UTR rule before the tx; createPayoutDownload/uploadUtr tests override per case).
+    mockPrisma.outlet.findMany.mockResolvedValue([]);
     // Default: partner resolves for the post-commit PUSH + WhatsApp; wallet balance read.
     mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'partnerUser1', ownerName: 'Ravi Traders', phone: '9900000041' });
     mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 500 });

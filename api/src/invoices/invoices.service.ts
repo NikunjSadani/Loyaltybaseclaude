@@ -270,7 +270,7 @@ export class InvoicesService {
         existingCount += 1;
         const invoiceNumber = generateInvoiceNumber(outletCode, period, existingCount);
         try {
-          await this.prisma.autoInvoice.create({
+          const created = await this.prisma.autoInvoice.create({
             data: {
               clientId,
               invoiceNumber,
@@ -287,7 +287,12 @@ export class InvoicesService {
               totalPaise: gst.totalPaise,
               snapshot: snapshot as unknown as Prisma.InputJsonValue,
             },
+            select: { id: true },
           });
+          // GST holdback (D5): a freshly-generated GST invoice needs its HELD reimbursement row.
+          if (gst.gstApplicable) {
+            await this.ensureHeldReimbursement(clientId, created.id, partner.id, outletCode, gst.gstPaise);
+          }
           generated += 1;
           persisted = true;
         } catch (err: unknown) {
@@ -321,6 +326,19 @@ export class InvoicesService {
             data: refreshData,
           });
           if (refreshed.count > 0) {
+            // SELF-HEAL (D5): a regenerate that brings an invoice from ₹0 → GST (e.g. a retailer
+            // reclassified to REGULAR after the first generation) never created its HELD
+            // reimbursement row — so it was missing from the release queue. Create it now if the
+            // refreshed invoice has GST and has no reimbursement yet (idempotent).
+            if (gst.gstApplicable) {
+              const inv = await this.prisma.autoInvoice.findFirst({
+                where: { clientId, outletCode, period, invoiceKind: 'SERVICE' },
+                select: { id: true },
+              });
+              if (inv) {
+                await this.ensureHeldReimbursement(clientId, inv.id, partner.id, outletCode, gst.gstPaise);
+              }
+            }
             generated += 1;
           } else {
             skipped.push({
@@ -334,6 +352,34 @@ export class InvoicesService {
     }
 
     return { generated, skipped };
+  }
+
+  /**
+   * Idempotently ensure a HELD GstReimbursement exists for a GST invoice (D5 holdback). No-op if
+   * one already exists (the autoInvoiceId unique makes this safe under a concurrent race — a P2002
+   * on create is swallowed). Used by generateForPeriod's create + refresh paths so a GST invoice
+   * always has its held-GST row, and a regenerate that adds GST self-heals the missing row.
+   */
+  private async ensureHeldReimbursement(
+    clientId: string,
+    autoInvoiceId: string,
+    partnerId: string,
+    outletCode: string,
+    gstPaise: bigint,
+  ): Promise<void> {
+    const existing = await this.prisma.gstReimbursement.findUnique({
+      where: { autoInvoiceId },
+      select: { id: true },
+    });
+    if (existing) return;
+    try {
+      await this.prisma.gstReimbursement.create({
+        data: { clientId, autoInvoiceId, partnerId, outletCode, gstPaise, status: 'HELD' },
+      });
+    } catch (err) {
+      // Concurrent create raced us — the unique on autoInvoiceId already holds the row. Ignore.
+      if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
+    }
   }
 
   // ── generateForBatch (visibility-payout: invoice-at-CONFIRM) ────────────────

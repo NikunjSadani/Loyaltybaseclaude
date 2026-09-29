@@ -9,7 +9,14 @@
  */
 
 import * as XLSX from 'xlsx';
-import { generatePayoutFileBuffer, PayoutBatch, PayoutBatchRow } from './credits.helpers';
+import {
+  generatePayoutFileBuffer,
+  parseUtrUpload,
+  PAYOUT_FILE_HEADERS,
+  PayoutBatch,
+  PayoutBatchRow,
+  UtrBatchRow,
+} from './credits.helpers';
 
 const row = (over: Partial<PayoutBatchRow> = {}): PayoutBatchRow => ({
   outletId: 'OUT-1',

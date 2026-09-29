@@ -1096,6 +1096,8 @@ export interface UtrUploadRow {
   remarks:    string;
   status:     'OK' | 'ERROR' | 'SKIP';
   errors:     string[];
+  /** Operator-supplied payment date (ISO), parsed from the "Payment Date" column; drives paidAt. */
+  paymentDate?: string | null;
 }
 
 export interface UtrParseResult {

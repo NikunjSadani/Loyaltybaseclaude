@@ -1889,7 +1889,9 @@ export class CreditsService {
       return {
         outletId: code,
         outletName: info.outletName,
-        phone: o?.phone ?? '',
+        // Prefer the KYC partner phone (the number that actually receives the payout WhatsApp);
+        // the master-file Outlet.phone is usually null. Mirrors the payout-WhatsApp recipient pick.
+        phone: o?.partner?.phone ?? o?.phone ?? '',
         bankName: snapshot.bankName,
         accountNumber: snapshot.accountNumber,
         ifscCode: snapshot.ifscCode,
@@ -1956,7 +1958,37 @@ export class CreditsService {
       file.buffer.byteOffset + file.buffer.byteLength,
     );
 
-    // Injectable batch rows from DB.
+    // Known UTRs across all downloads for this client (dup detection). We also need
+    // each prior use's bank account so the same-account shared-UTR rule can allow a
+    // legitimate combined transfer while still rejecting a cross-account copy-paste.
+    const usedUtrs = await this.prisma.creditPayoutEntry.findMany({
+      where: { clientId: user.clientId, utr: { not: null } },
+      select: { utr: true, outletId: true },
+    });
+
+    // Resolve the KYC-partner bank account per outlet, for BOTH this download's entries
+    // (so batchRows carry accountNumber) and the prior-UTR entries (so knownUtrs carry
+    // the account they were paid from). outletId on an entry is the outlet's outletCode.
+    const outletCodesForAccounts = [
+      ...new Set<string>([
+        ...download.entries.map((e) => e.outletId),
+        ...usedUtrs.map((u) => u.outletId),
+      ]),
+    ];
+    const acctOutlets = outletCodesForAccounts.length
+      ? await this.prisma.outlet.findMany({
+          where: { clientId: user.clientId, outletCode: { in: outletCodesForAccounts } },
+          select: { outletCode: true, partner: { select: { bankAccountNumber: true } } },
+        })
+      : [];
+    const acctByOutlet = new Map<string, string>(
+      (acctOutlets ?? []).map((o) => [
+        o.outletCode,
+        (o.partner?.bankAccountNumber ?? '').trim(),
+      ]),
+    );
+
+    // Injectable batch rows from DB (accountNumber drives the same-account shared-UTR rule).
     const batchRows = download.entries.map((e) => ({
       outletId: e.outletId,
       utrStatus: (e.status === 'PAID'
@@ -1965,16 +1997,22 @@ export class CreditsService {
           ? 'FAILED'
           : 'PENDING') as 'PENDING' | 'PAID' | 'FAILED',
       utr: e.utr ?? undefined,
+      accountNumber: acctByOutlet.get(e.outletId) ?? '',
     }));
 
-    // Known UTRs across all downloads for this client (dup detection).
-    const usedUtrs = await this.prisma.creditPayoutEntry.findMany({
-      where: { clientId: user.clientId, utr: { not: null } },
-      select: { utr: true },
-    });
-    const knownUtrs = new Set<string>(
-      usedUtrs.filter((e) => e.utr != null).map((e) => e.utr!.toUpperCase()),
-    );
+    // UTR → set of distinct non-empty bank accounts prior entries used with it.
+    const knownUtrs = new Map<string, Set<string>>();
+    for (const u of usedUtrs) {
+      if (!u.utr) continue;
+      const key = u.utr.toUpperCase();
+      let set = knownUtrs.get(key);
+      if (!set) {
+        set = new Set<string>();
+        knownUtrs.set(key, set);
+      }
+      const acct = acctByOutlet.get(u.outletId) ?? '';
+      if (acct) set.add(acct);
+    }
 
     const parseResult = parseUtrUpload(ab, {
       downloadCode: download.downloadCode,
@@ -2043,7 +2081,8 @@ export class CreditsService {
           data: {
             status: row.success ? 'PAID' : 'FAILED',
             utr: row.success ? row.utr || null : null,
-            paidAt: row.success ? now : null,
+            // Use the operator-supplied Payment Date when present, else the apply time.
+            paidAt: row.success ? (row.paymentDate ?? now) : null,
             // FIX-3: a FAILED payout withheld nothing → clear the stamped deduction.
             ...(row.success ? {} : { tdsDeductedPaise: 0n }),
           },
@@ -2189,7 +2228,8 @@ export class CreditsService {
                 ownerName,
                 points: pointsPaid,
                 utr: row.utr ?? '',
-                paymentDate: formatDateIST(new Date()),
+                // Reflect the actual payment date recorded on the entry (operator date or apply time).
+                paymentDate: formatDateIST(row.paymentDate ?? now),
                 month: monthYearIST(download.period),
               },
               body: `Your payout of ${pointsPaid} points has been credited.`,
