@@ -138,10 +138,13 @@ const ALL_NAV_ITEMS = [
     icon: Coins,
     featureFlag: null,
     children: [
-      { href: '/admin/credits-payouts/upload',  label: 'Upload Credits'    },
-      { href: '/admin/credits-payouts/status',  label: 'Payout Status'     },
-      { href: '/admin/credits-payouts/payout',  label: 'Payout Download', gifsyOnly: true },
-      { href: '/admin/credits-payouts/fields',  label: 'Field Configuration' },
+      { href: '/admin/credits-payouts/upload',   label: 'Upload Credits'    },
+      { href: '/admin/credits-payouts/status',   label: 'Payout Status'     },
+      // Payments Report — date-ranged payout payments across all streams. Visible to
+      // CLIENT_ADMIN too (own tenant; backend pins scope), so NOT gifsyOnly.
+      { href: '/admin/credits-payouts/payments', label: 'Payments Report'   },
+      { href: '/admin/credits-payouts/payout',   label: 'Payout Download', gifsyOnly: true },
+      { href: '/admin/credits-payouts/fields',   label: 'Field Configuration' },
     ],
   },
   {

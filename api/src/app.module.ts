@@ -34,6 +34,7 @@ import { KycModule }      from './kyc/kyc.module';
 import { SalesModule }    from './sales/sales.module';
 import { PayoutsModule }  from './payouts/payouts.module';
 import { ReportsModule }  from './reports/reports.module';
+import { PaymentsReportModule } from './payments-report/payments-report.module';
 import { SchemesModule }  from './schemes/schemes.module';
 import { LeaderboardModule } from './leaderboard/leaderboard.module';
 import { CreditsModule }  from './credits/credits.module';
@@ -95,6 +96,7 @@ import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
     SalesModule,
     PayoutsModule,
     ReportsModule,
+    PaymentsReportModule,
     SchemesModule,
     LeaderboardModule,
     CreditsModule,
