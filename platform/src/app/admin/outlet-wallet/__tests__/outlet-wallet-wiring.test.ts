@@ -5,7 +5,7 @@
  * Mirrors the source-assertion style of admin/__tests__/admin-pages-wiring.test.ts:
  * cheap, render-free guards that the GIFSY-only points-wallet page stays wired to the
  * three frozen endpoints, encodes the outletCode in the path, reuses the partner
- * presentational components, and stays guarded to GIFSY_ADMIN.
+ * presentational components, and stays guarded to GIFSY_ADMIN + GIFSY_STAFF (assumed staff).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -93,9 +93,12 @@ describe('Outlet Wallet — page wiring', () => {
 });
 
 describe('Outlet Wallet — route guard', () => {
-  it('guards the page to GIFSY_ADMIN via RequireAuth', () => {
+  it('guards the page to GIFSY_ADMIN + GIFSY_STAFF via RequireAuth', () => {
+    // RBAC Option-X: an assumed GIFSY_STAFF (with wallet permissions) must be admitted, or the
+    // gifsyOnly nav link loops (rejected → getRoleHome → /gifsy → back into /admin). The backend
+    // still enforces wallet:read / wallet:adjust per endpoint.
     const code = src(LAYOUT);
     expect(code).toMatch(/RequireAuth/);
-    expect(code).toMatch(/allowedRoles=\{\['GIFSY_ADMIN'\]\}/);
+    expect(code).toMatch(/allowedRoles=\{\['GIFSY_ADMIN', 'GIFSY_STAFF'\]\}/);
   });
 });
