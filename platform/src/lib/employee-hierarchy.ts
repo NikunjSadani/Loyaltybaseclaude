@@ -905,7 +905,7 @@ ${config.filter(l => !l.isLeaf && !l.isRoot)
 </table>
 
 <p style="margin-top:48px;color:#999;font-size:12px;border-top:1px solid #eee;padding-top:16px">
-  Gifsy Platform · Employee Hierarchy Management Guide · Generated ${new Date().toLocaleDateString('en-IN')}
+  Gifsy Platform · Employee Hierarchy Management Guide · Generated ${new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}
 </p>
 </body>
 </html>`;

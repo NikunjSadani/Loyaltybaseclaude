@@ -14,6 +14,7 @@ import { KYCStatus } from '@/types';
 import { getRole, type SalesRole } from '@/lib/sales-role';
 import { classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
+import { istDateKey } from '@/lib/ist-date';
 import {
   fetchOutletVisibilityStatuses,
   VISIBILITY_ELIGIBLE_OUTLET_TYPES,
@@ -72,11 +73,12 @@ const kycBadge: Record<KYCStatus, { variant: 'success' | 'warning' | 'danger' | 
 /** Compare % of month elapsed vs % of target achieved → CSS bg class for the card strip. */
 function paceStrip(achievePct: number, period: string): string {
   const [year, month] = period.split('-').map(Number);
-  const today    = new Date();
+  // "Today" resolved in IST (prod/SSR runs UTC; an off-IST clock skews pacing by a day at boundaries).
+  const key      = istDateKey(new Date()); // "YYYY-MM-DD" in Asia/Kolkata
   const daysInMonth  = new Date(year, month, 0).getDate();
   const isCurrentMonth =
-    today.getFullYear() === year && today.getMonth() + 1 === month;
-  const elapsed  = isCurrentMonth ? today.getDate() : daysInMonth;
+    Number(key.slice(0, 4)) === year && Number(key.slice(5, 7)) === month;
+  const elapsed  = isCurrentMonth ? Number(key.slice(8, 10)) : daysInMonth;
   const timePct  = Math.round((elapsed / daysInMonth) * 100);
   const gap      = timePct - achievePct;          // positive = behind pace
   const status   = classifyPaceGap(gap, timePct, getGifsySettings().paceAmberThreshold ?? 10);

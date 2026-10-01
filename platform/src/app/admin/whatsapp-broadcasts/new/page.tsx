@@ -373,7 +373,7 @@ function ConfirmSendModal({
           {scheduledAt && (
             <p className="text-xs text-amber-700 mt-1 flex items-center gap-1.5">
               <Clock className="w-3.5 h-3.5" />
-              Scheduled for {new Date(scheduledAt).toLocaleString('en-IN')}
+              Scheduled for {new Date(scheduledAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
             </p>
           )}
           <p className={`text-xs mt-2 ${paid ? 'text-amber-700' : 'text-gray-500'}`}>

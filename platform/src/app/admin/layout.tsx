@@ -434,6 +434,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
             </h1>
             <p className="text-xs text-gray-500">
               {new Date().toLocaleDateString('en-IN', {
+                timeZone: 'Asia/Kolkata',
                 weekday: 'long',
                 year: 'numeric',
                 month: 'long',

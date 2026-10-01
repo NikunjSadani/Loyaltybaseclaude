@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useMemo, use } from 'react';
 import Link from 'next/link';
 import { ArrowLeft, AlertTriangle, Calendar, X, Download, Coins } from 'lucide-react';
+import { istDateKey } from '@/lib/ist-date';
 import * as XLSX from 'xlsx';
 import { jsonToSheetSafe } from '@/lib/xlsx-safe';
 import { Spinner } from '@/components/ui/spinner';
@@ -115,9 +116,10 @@ function periodLabel(period: string): string {
   const [yr, mo] = period.split('-');
   return new Date(+yr, +mo - 1, 1).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
 }
-/** A JS Date → the YYYY-MM-DD the points rows carry, for the Excel Date column. */
+/** A JS Date → the IST YYYY-MM-DD the points rows carry, for the Excel Date column.
+ *  IST-pinned (prod/SSR runs UTC) so this sales-ledger export matches the partner-wallet export. */
 function dateToYmd(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return istDateKey(d);
 }
 
 /* ─── Excel download — unified points + payout statement ──────────────────────── */

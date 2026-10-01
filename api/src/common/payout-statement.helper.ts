@@ -14,6 +14,8 @@
 // and caps at 100.
 
 /** One payout row as surfaced to the wallet / ledger (INR, integer paise). */
+import { istMonthKey } from './ist-date';
+
 export interface PayoutRow {
   id: string;
   period: string; // 'YYYY-MM'
@@ -85,10 +87,12 @@ export function mapCreditEntryStatus(s: string): PayoutRow['status'] {
   return 'PENDING';
 }
 
+// The IST calendar month (YYYY-MM) of a payout instant. Reading getFullYear()/getMonth() off the
+// raw Date is server-local (UTC in prod) → a payout completed 00:00–05:30 IST on the 1st was
+// labelled the PREVIOUS month, disagreeing by a month with the credit rows (which use the stored
+// IST credit `period`) in the same partner statement. istMonthKey resolves the true IST month.
 function toPeriod(d: Date): string {
-  const yr = d.getFullYear();
-  const mo = String(d.getMonth() + 1).padStart(2, '0');
-  return `${yr}-${mo}`;
+  return istMonthKey(d);
 }
 
 /**

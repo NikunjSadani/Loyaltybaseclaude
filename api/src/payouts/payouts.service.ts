@@ -13,7 +13,7 @@ import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
 import { rupeesToPaise } from '../common/money';
-import { monthYearIST, formatDateIST, istDayRangeFilter } from '../common/ist-date';
+import { monthYearIST, formatDateIST, istDayRangeFilter, istDateKey } from '../common/ist-date';
 import { parsePayoutUtrUpload } from './payout-utr.helpers';
 import { resolveEffectiveKycStatus } from '../kyc/kyc-eligibility';
 import {
@@ -554,7 +554,7 @@ export class PayoutsService {
       'Net Amount (₹)': (Number(t.netAmountPaise) / 100).toFixed(2),
       Mode: t.payoutMode,
       Status: t.status,
-      Date: t.createdAt.toISOString().split('T')[0],
+      Date: istDateKey(t.createdAt),
     }));
 
     return {

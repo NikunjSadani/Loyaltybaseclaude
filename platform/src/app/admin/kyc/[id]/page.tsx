@@ -404,7 +404,7 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     agreementDate:    '',
     statusHistory:    (s.statusHistory ?? []).map(h => ({
       status:    h.toStatus,
-      timestamp: new Date(h.createdAt).toLocaleString('en-IN'),
+      timestamp: new Date(h.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
       user:      'System',
       remark:    h.notes ?? undefined,
     })),

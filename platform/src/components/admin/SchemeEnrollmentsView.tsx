@@ -232,7 +232,7 @@ export default function SchemeEnrollmentsView({
                     <td className="px-4 py-2.5">
                       <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[d.status] ?? 'bg-gray-100 text-gray-600'}`}>{d.status}{d.currentVersion > 1 ? ` · v${d.currentVersion}` : ''}</span>
                     </td>
-                    <td className="px-4 py-2.5 text-xs text-gray-500">{d.deletedAt ? new Date(d.deletedAt).toLocaleString('en-IN') : '—'}</td>
+                    <td className="px-4 py-2.5 text-xs text-gray-500">{d.deletedAt ? new Date(d.deletedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '—'}</td>
                     <td className="px-4 py-2.5 text-right">
                       <button onClick={() => handleRestoreRow(d.id)} disabled={restoringId === d.id}
                         className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--brand-primary)] hover:underline disabled:opacity-60">
@@ -478,7 +478,7 @@ function EnrollmentDrawer({
               </div>
               <p className="text-xs text-gray-400 font-mono">{outlet?.matchedOutlet?.outletCode ?? ''}</p>
               <p className="text-xs text-gray-500 mt-1">
-                Mode {detail.enrollmentMode} · v{detail.currentVersion} · {new Date(detail.enrolledAt).toLocaleString('en-IN')}
+                Mode {detail.enrollmentMode} · v{detail.currentVersion} · {new Date(detail.enrolledAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
               </p>
               {detail.status === 'REJECTED' && detail.rejectionReason && (
                 <div className="mt-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-600">
@@ -590,7 +590,7 @@ function EnrollmentDrawer({
                       <div>
                         <span className="font-medium text-gray-700">v{s.version}</span>
                         <span className={`ml-2 px-1.5 py-0.5 rounded-full ${STATUS_STYLES[s.status] ?? 'bg-gray-100 text-gray-600'}`}>{s.status}</span>
-                        <span className="ml-2 text-gray-400">{new Date(s.createdAt).toLocaleString('en-IN')}</span>
+                        <span className="ml-2 text-gray-400">{new Date(s.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</span>
                         {s.status === 'REJECTED' && s.rejectionReason && (
                           <p className="text-red-500 mt-0.5"><span className="font-medium">Reason:</span> {s.rejectionReason}</p>
                         )}

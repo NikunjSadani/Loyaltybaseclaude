@@ -367,9 +367,9 @@ export default function PayoutStatusPage() {
                   <div className="border-t border-gray-100">
                     <div className="px-5 py-3 bg-gray-50 flex flex-wrap gap-6 text-xs text-gray-500">
                       <span>Uploaded by: <strong className="text-gray-700">{batch.uploadedBy}</strong></span>
-                      <span>At: <strong className="text-gray-700">{new Date(batch.uploadedAt).toLocaleString('en-IN')}</strong></span>
+                      <span>At: <strong className="text-gray-700">{new Date(batch.uploadedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</strong></span>
                       {batch.confirmedAt && (
-                        <span>Confirmed: <strong className="text-gray-700">{new Date(batch.confirmedAt).toLocaleString('en-IN')}</strong></span>
+                        <span>Confirmed: <strong className="text-gray-700">{new Date(batch.confirmedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</strong></span>
                       )}
                     </div>
 

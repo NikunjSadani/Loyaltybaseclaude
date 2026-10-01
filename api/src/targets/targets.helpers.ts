@@ -28,6 +28,7 @@
 
 import * as XLSX from 'xlsx';
 import { aoaToSheetSafe } from '../common/xlsx';
+import { istMonthKey } from '../common/ist-date';
 
 // ── Shared types ──────────────────────────────────────────────────────────────
 
@@ -130,9 +131,9 @@ export function getEnabledKpis(kpis: KpiDefLike[]): KpiDefLike[] {
 
 // ── Month-lock helpers ────────────────────────────────────────────────────────
 
-/** Current month as `YYYY-MM` (server clock). */
+/** Current month as `YYYY-MM` (IST wall-clock; prod runs UTC). */
 export function currentMonthKey(now: Date = new Date()): string {
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  return istMonthKey(now);
 }
 
 /**
@@ -141,10 +142,13 @@ export function currentMonthKey(now: Date = new Date()): string {
  * Used by the partner dashboard trend chart.
  */
 export function lastNMonths(n: number, now: Date = new Date()): string[] {
+  // Anchor on the current IST month (prod runs UTC), then step back i months on a
+  // UTC anchor so month/year arithmetic is timezone-independent.
+  const [cy, cm] = istMonthKey(now).split('-').map(Number); // cm is 1-based
   const out: string[] = [];
   for (let i = n - 1; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+    const d = new Date(Date.UTC(cy, cm - 1 - i, 1));
+    out.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
   }
   return out;
 }

@@ -97,7 +97,7 @@ const CATEGORIES: { value: TicketCategory; label: string; emoji: string }[] = [
 
 function formatTime(iso: string) {
   const d = new Date(iso);
-  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' });
+  return d.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: '2-digit' });
 }
 
 /* ─── New ticket form ────────────────────────────────────────────────────────── */

@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { CreditEntryStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { buildXlsx } from '../common/xlsx';
-import { istDayRangeFilter } from '../common/ist-date';
+import { istDayRangeFilter, istDateKey } from '../common/ist-date';
 
 /**
  * Payments Report service — a READ-ONLY report of all payout PAYMENTS in a date range, across
@@ -260,7 +260,9 @@ export class PaymentsReportService {
     const sheetRows = report.rows.map((r, i) => ({
       'S.No': i + 1,
       'Client': r.clientId,
-      'Payment Date': r.paymentDate ?? '',
+      // Format the stored UTC instant as the IST calendar day (raw ISO would print UTC — off-by-one
+      // in the 00:00–05:30 IST window). The JSON envelope keeps raw ISO for the FE to format.
+      'Payment Date': r.paymentDate ? istDateKey(new Date(r.paymentDate)) : '',
       'Outlet Code': r.outletCode ?? '',
       'Outlet Name': r.outletName,
       'Business Name': r.businessName ?? '',

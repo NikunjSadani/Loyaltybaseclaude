@@ -85,6 +85,7 @@ function fmtTimestamp(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
     day: '2-digit', month: 'short', year: 'numeric',
     hour: '2-digit', minute: '2-digit',
   });

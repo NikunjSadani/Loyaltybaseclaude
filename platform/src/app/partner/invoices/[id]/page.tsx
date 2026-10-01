@@ -374,7 +374,7 @@ export default function PartnerInvoiceDetailPage({
           <p className="text-xs text-gray-500">Invoice Date</p>
           <p className="text-xs font-medium text-gray-800 mt-0.5">
             {new Date(inv.invoiceDate).toLocaleDateString('en-IN', {
-              day: 'numeric', month: 'short', year: 'numeric',
+              timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric',
             })}
           </p>
         </div>

@@ -95,6 +95,7 @@ function getSalesMonthOptions(): Array<{ value: string; label: string }> {
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString('en-IN', {
+    timeZone: 'Asia/Kolkata',
     day: '2-digit', month: 'short', year: 'numeric',
     hour: '2-digit', minute: '2-digit',
   });

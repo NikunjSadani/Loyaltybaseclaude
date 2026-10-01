@@ -112,8 +112,8 @@ describe('FinanceDashboardService', () => {
     expect(out.breakage.breakagePct).toBe(5);
     // expired ₹ = 2,000 ÷ 10 = ₹200
     expect(out.breakage.expiredRupees).toBe(200);
-    // period label is the current calendar month YYYY-MM
-    expect(out.breakage.period).toMatch(/^\d{4}-\d{2}$/);
+    // period label is the current IST calendar month as "Month YYYY" (monthYearIST)
+    expect(out.breakage.period).toMatch(/^[A-Z][a-z]+ \d{4}$/);
   });
 
   it('guards divide-by-zero breakage when nothing was issued in the period', async () => {

@@ -2,6 +2,7 @@ import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/commo
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isReKycActionable } from '../common/kyc-rekyc.helper';
+import { istDateKey } from '../common/ist-date';
 import {
   resolveGroupPan,
   resolveGroupIdentity,
@@ -1255,7 +1256,7 @@ export class SalesService {
               : outlet.kycIntent === 'NOT_INTERESTED'
                 ? 'NOT_INTERESTED'
                 : (latestKyc?.status ?? 'NOT_STARTED'),
-            kycSubmittedAt: latestKyc?.createdAt?.toISOString().split('T')[0],
+            kycSubmittedAt: latestKyc?.createdAt ? istDateKey(latestKyc.createdAt) : undefined,
             kycRejectionReason: latestKyc?.rejectionReason ?? null,
             reKycFlags: outlet.reKycFlags ?? null,
             // Per-outlet payout MANDATE (BANK|UPI|ANY) — the KYC wizard reads this to pin/lock

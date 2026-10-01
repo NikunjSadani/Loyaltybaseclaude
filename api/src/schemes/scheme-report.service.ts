@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { buildXlsx, HyperlinkCell } from '../common/xlsx';
+import { istDateTimeCell } from '../common/ist-date';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide } from '../common/tenant-scope';
 import { EnrollmentFormSchema, FormField, readMediaValue } from './enrollment-form.helper';
@@ -378,7 +379,7 @@ export function buildEnrollmentExportRows(
     // Status
     row['Status'] = r.enrollment?.status ?? 'NOT_ENROLLED';
     row['Version'] = r.enrollment?.currentVersion ?? '';
-    row['Enrolled At'] = r.enrollment ? r.enrollment.enrolledAt.toISOString() : '';
+    row['Enrolled At'] = r.enrollment ? istDateTimeCell(r.enrollment.enrolledAt) : '';
     row['Submitted By'] = r.enrollment?.submittedByName ?? '';
     row['Submitted By Phone'] = r.enrollment?.submittedByPhone ?? '';
     row['Rejection Reason'] = r.enrollment?.rejectionReason ?? '';

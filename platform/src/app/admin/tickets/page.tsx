@@ -77,11 +77,11 @@ const PRIORITY_STYLE: Record<TicketPriority, string> = {
 };
 
 function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' });
+  return new Date(iso).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: '2-digit' });
 }
 function formatDateTime(iso: string) {
   const d = new Date(iso);
-  return `${d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} ${d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`;
+  return `${d.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short' })} ${d.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}`;
 }
 
 /* ─── Ticket row ─────────────────────────────────────────────────────────────── */

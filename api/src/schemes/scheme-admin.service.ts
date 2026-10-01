@@ -35,7 +35,7 @@ import {
   WhatsappConfirmVariable,
 } from './scheme-whatsapp-confirm.helper';
 import { Msg91Service } from '../notifications/msg91.service';
-import { formatDateIST } from '../common/ist-date';
+import { formatDateIST, istDateKey } from '../common/ist-date';
 import { phoneLast10, isValidPhone } from '../common/audience/audience.helpers';
 
 /**
@@ -718,7 +718,7 @@ export class SchemeAdminService {
       row['Enrollment Status'] = enr?.status ?? 'NOT_ENROLLED';
       row['Version'] = enr?.currentVersion ?? '';
       row['Enrolled At'] = enr?.enrolledAt
-        ? enr.enrolledAt.toISOString().split('T')[0]
+        ? istDateKey(enr.enrolledAt)
         : '';
       for (const k of prefillCols) {
         const v = pv[k];

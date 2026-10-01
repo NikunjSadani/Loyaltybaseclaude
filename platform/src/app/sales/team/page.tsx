@@ -12,6 +12,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { type SalesRole, ROLE_LABELS, getRole, hasTeamView } from '@/lib/sales-role';
 import { classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
+import { istDateKey } from '@/lib/ist-date';
 
 /* ─── Types ────────────────────────────────────────────────────────────────── */
 
@@ -56,9 +57,10 @@ function mapApiMember(m: any): MemberStats {
 /* ─── Helpers ───────────────────────────────────────────────────────────────── */
 
 function paceBorderClass(targetPct: number): string {
-  const today       = new Date();
-  const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
-  const timePct     = Math.round((today.getDate() / daysInMonth) * 100);
+  // IST calendar day-of-month (prod/SSR runs UTC; an off-IST clock skews the pacing %).
+  const key         = istDateKey(new Date()); // "YYYY-MM-DD" in Asia/Kolkata
+  const daysInMonth = new Date(Number(key.slice(0, 4)), Number(key.slice(5, 7)), 0).getDate();
+  const timePct     = Math.round((Number(key.slice(8, 10)) / daysInMonth) * 100);
   const gap    = timePct - targetPct;
   const status = classifyPaceGap(gap, timePct, getGifsySettings().paceAmberThreshold ?? 10);
   if (status === 'green') return 'border-l-emerald-400';

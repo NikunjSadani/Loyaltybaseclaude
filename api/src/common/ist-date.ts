@@ -113,3 +113,58 @@ export function istDayRangeFilter(
   }
   return range.gte !== undefined || range.lte !== undefined ? range : undefined;
 }
+
+/**
+ * The IST calendar month of an instant, as a `YYYY-MM` key. Shift-then-read-UTC, so an instant
+ * in the 00:00–05:30 IST window of the 1st resolves to the correct IST month (not the UTC month,
+ * which would be the previous one). Use everywhere a month bucket/key/lock is derived from a Date
+ * — replaces the `new Date(y, m, 1)` / `getFullYear()/getMonth()` idiom that reads UTC in prod.
+ */
+export function istMonthKey(d: Date): string {
+  const shifted = new Date(d.getTime() + IST_OFFSET_MIN * 60_000);
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+/**
+ * The IST calendar day of an instant, as a `YYYY-MM-DD` key (sortable). Shift-then-read-UTC so it
+ * is the IST wall-clock day (correct in the 00:00–05:30 IST window). This is the IST-correct
+ * replacement for `d.toISOString().slice(0,10)` / `.split('T')[0]` in export/report DATE cells.
+ * (The ad-hoc `istDateKey` copies in activity-tracking / business-hours are equivalent and could
+ * later be consolidated onto this one — left in place for now to keep this change scoped.)
+ */
+export function istDateKey(d: Date): string {
+  const shifted = new Date(d.getTime() + IST_OFFSET_MIN * 60_000);
+  const m = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(shifted.getUTCDate()).padStart(2, '0');
+  return `${shifted.getUTCFullYear()}-${m}-${day}`;
+}
+
+/**
+ * An instant as an IST `YYYY-MM-DD HH:mm` string (24h, sortable). The IST-correct replacement for a
+ * bare `d.toISOString()` in export/report DATETIME cells (which prints UTC with a `Z`, 5.5h off).
+ */
+export function istDateTimeCell(d: Date): string {
+  const shifted = new Date(d.getTime() + IST_OFFSET_MIN * 60_000);
+  const m = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(shifted.getUTCDate()).padStart(2, '0');
+  const hh = String(shifted.getUTCHours()).padStart(2, '0');
+  const mm = String(shifted.getUTCMinutes()).padStart(2, '0');
+  return `${shifted.getUTCFullYear()}-${m}-${day} ${hh}:${mm}`;
+}
+
+/**
+ * The UTC instants bounding an IST calendar month, from a `YYYY-MM` key: `start` = 00:00 IST of the
+ * 1st, `endExclusive` = 00:00 IST of the 1st of the NEXT month. Use for monthly aggregation windows
+ * (`{ gte: start, lt: endExclusive }`) instead of the local-time `new Date(y, m, 1)` constructor,
+ * which yields UTC month boundaries (05:30 IST) on a UTC server. Throws on a malformed key.
+ */
+export function istMonthBounds(monthKey: string): { start: Date; endExclusive: Date } {
+  const m = /^(\d{4})-(\d{2})$/.exec(monthKey);
+  if (!m) throw new Error(`istMonthBounds: invalid monthKey "${monthKey}"`);
+  const y = Number(m[1]);
+  const moIdx = Number(m[2]) - 1; // 0-based month
+  if (moIdx < 0 || moIdx > 11) throw new Error(`istMonthBounds: invalid month in "${monthKey}"`);
+  const start = new Date(Date.UTC(y, moIdx, 1, 0, 0, 0, 0) - IST_OFFSET_MIN * 60_000);
+  const endExclusive = new Date(Date.UTC(y, moIdx + 1, 1, 0, 0, 0, 0) - IST_OFFSET_MIN * 60_000);
+  return { start, endExclusive };
+}

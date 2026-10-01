@@ -6,7 +6,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ReportFormat, ReportRangeQueryDto, TdsReportQueryDto } from './dto/reports.dto';
 import { buildXlsx, ReportSheet } from '../common/xlsx';
 import { platformWide } from '../common/tenant-scope';
-import { istDayRangeFilter } from '../common/ist-date';
+import { istDayRangeFilter, istDateKey } from '../common/ist-date';
 import { deriveKycStage } from '../common/kyc-rekyc.helper';
 
 /**
@@ -101,7 +101,7 @@ export class ReportsService {
       Latitude: s.captureLat?.toString() ?? '',
       Longitude: s.captureLng?.toString() ?? '',
       'Geo-fence': s.geoFenceOk === null ? 'unverifiable' : s.geoFenceOk ? 'ok' : 'outside',
-      'Submitted On': s.createdAt.toISOString().split('T')[0],
+      'Submitted On': istDateKey(s.createdAt),
     }));
 
     if (q.format === ReportFormat.XLSX) {
@@ -191,7 +191,7 @@ export class ReportsService {
       'Quarter Period': r.quarterPeriod ?? '',
       'TDS Rate %': (Number(r.tdsRate) * 100).toFixed(1),
       'TDS Amount (₹)': (Number(r.tdsPaise) / 100).toFixed(2),
-      Date: r.createdAt.toISOString().split('T')[0],
+      Date: istDateKey(r.createdAt),
     }));
 
     const panData = Object.values(panSummary).map((p) => ({
@@ -239,7 +239,7 @@ export class ReportsService {
       'Amount (₹)': (Number(t.amountPaise) / 100).toFixed(2),
       Mode: t.payoutMode,
       Status: t.status,
-      'Created On': t.createdAt.toISOString().split('T')[0],
+      'Created On': istDateKey(t.createdAt),
     }));
 
     if (q.format === ReportFormat.XLSX) {
@@ -502,7 +502,7 @@ export class ReportsService {
       // Latest submission date; blank when the outlet has never started KYC. submittedAt
       // is the real submit instant, falling back to the row's createdAt for a DRAFT.
       const lastSubmittedOn = sub
-        ? (sub.submittedAt ?? sub.createdAt).toISOString().split('T')[0]
+        ? istDateKey(sub.submittedAt ?? sub.createdAt)
         : '';
 
       // The 5 rejection-detail columns are populated ONLY when the outlet's CURRENT status
@@ -520,8 +520,9 @@ export class ReportsService {
         : '';
       const rejectionReason = isRejected ? (sub?.rejectionReason ?? '') : '';
       const reviewerNotes = isRejected ? (sub?.reviewerNotes ?? '') : '';
+      const rejectedAtInstant = hist?.createdAt ?? sub?.reviewedAt;
       const rejectedOn = isRejected
-        ? ((hist?.createdAt ?? sub?.reviewedAt)?.toISOString().split('T')[0] ?? '')
+        ? (rejectedAtInstant ? istDateKey(rejectedAtInstant) : '')
         : '';
 
       return {

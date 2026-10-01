@@ -12,6 +12,7 @@ import { TransactionType, WalletBucket, type WalletBalance, type WalletTransacti
 import type { PayoutLedgerEntry } from '@/types';
 import { usePartnerIdentity } from '@/lib/partner-identity';
 import { authHeader } from '@/lib/api-client';
+import { formatISTDate } from '@/lib/ist-date';
 
 
 /* ─── API types & mappers (wallet wiring) ────────────────────────────────────── */
@@ -138,7 +139,7 @@ function downloadCombinedStatement(rows: LedgerRow[], period: string) {
     if (r.kind === 'points') {
       const tx = r.tx;
       return {
-        Date: r.date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
+        Date: formatISTDate(r.date),
         Description: tx.description,
         Type: TYPE_LABEL[tx.type] ?? tx.type,
         Points: tx.type === TransactionType.CREDIT ? `+${tx.amount}` : `-${tx.amount}`,
@@ -148,7 +149,7 @@ function downloadCombinedStatement(rows: LedgerRow[], period: string) {
     }
     const p = r.entry;
     return {
-      Date: r.date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
+      Date: formatISTDate(r.date),
       Description: `${p.kpiLabel} · ${monthLabel(p.period)}`,
       Type: p.status === 'PAID' ? 'Payout' : 'Payout (Pending)',
       Points: '',

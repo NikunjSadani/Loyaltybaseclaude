@@ -272,7 +272,7 @@ function CaptureDrawer({
               <p className="text-xs text-gray-400 font-mono">{detail.outletCode}</p>
               <p className="text-xs text-gray-500 mt-1">
                 Window <span className="font-mono">{detail.windowKey}</span> · v{detail.currentVersion}
-                {detail.receivedAt ? ` · ${new Date(detail.receivedAt).toLocaleString('en-IN')}` : ''}
+                {detail.receivedAt ? ` · ${new Date(detail.receivedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}` : ''}
               </p>
               {detail.status === 'REJECTED' && (detail.rejectionReason || detail.rejectionReasonCode) && (
                 <div className="mt-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-600">
@@ -404,7 +404,7 @@ function CaptureDrawer({
                       <div>
                         <span className="font-medium text-gray-700">v{s.version}</span>
                         <span className={`ml-2 px-1.5 py-0.5 rounded-full ${STATUS_STYLES[s.status] ?? 'bg-gray-100 text-gray-600'}`}>{s.status}</span>
-                        <span className="ml-2 text-gray-400">{new Date(s.createdAt).toLocaleString('en-IN')}</span>
+                        <span className="ml-2 text-gray-400">{new Date(s.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</span>
                       </div>
                     </li>
                   ))}

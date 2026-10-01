@@ -640,7 +640,7 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
                       <tr key={r.id} className="text-gray-700">
                         <td className="px-3 py-2 font-mono text-[11px]">{r.outletRef}</td>
                         <td className="px-3 py-2">{r.outletName}</td>
-                        <td className="px-3 py-2 text-gray-500">{r.deletedAt ? new Date(r.deletedAt).toLocaleString('en-IN') : '—'}</td>
+                        <td className="px-3 py-2 text-gray-500">{r.deletedAt ? new Date(r.deletedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '—'}</td>
                         <td className="px-3 py-2 text-right">
                           <button type="button" onClick={() => void doRestore(r.id)} disabled={restoringId != null}
                             className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--brand-primary)] hover:underline disabled:opacity-60">

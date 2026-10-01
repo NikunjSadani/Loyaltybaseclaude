@@ -1,4 +1,5 @@
 import React from 'react';
+import { istDateKey } from '@/lib/ist-date';
 import type { PayoutLedgerEntry } from '@/types';
 
 /* ─── Payout statement row (INR entry inside a combined statement) ──────────────
@@ -23,9 +24,10 @@ export function PayoutStatementRow({ entry: p }: { entry: PayoutLedgerEntry }) {
   // Date the chip by when money hit (paidAt); before payment, by when the payout was
   // added (uploadedAt) so a pending row isn't a blank "—".
   const dateSrc = p.paidAt ?? p.uploadedAt;
-  const d = dateSrc ? new Date(dateSrc) : null;
-  const day = d ? String(d.getDate()).padStart(2, '0') : '—';
-  const mon = d ? MONTH_SHORT[d.getMonth() + 1] : '';
+  // IST calendar day/month (istDateKey → "YYYY-MM-DD" in Asia/Kolkata).
+  const key = dateSrc ? istDateKey(dateSrc) : '';
+  const day = key ? key.slice(8, 10) : '—';
+  const mon = key ? MONTH_SHORT[Number(key.slice(5, 7))] : '';
 
   return (
     <div className="flex items-center gap-3 py-3.5">

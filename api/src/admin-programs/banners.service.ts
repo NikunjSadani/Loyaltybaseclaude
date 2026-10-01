@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { CreateBannerDto } from './dto/banners.dto';
 import { isGifsyOperator } from '../common/tenant-scope';
+import { startOfIstDay } from '../common/ist-date';
 
 /**
  * Banners admin — ported from platform/src/app/api/admin/banners/route.ts.
@@ -26,7 +27,10 @@ export class BannersService {
     // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
     if (!isGifsyOperator(user)) {
       where.status = 'ACTIVE';
-      where.OR = [{ endDate: null }, { endDate: { gte: new Date() } }];
+      // A date-only endDate is stored as 00:00 UTC (= 05:30 IST), so a bare `gte: new Date()`
+      // drops the banner ~18h early on its last IST day. Compare against 00:00 IST of today so
+      // the banner stays active through the end of its endDate's IST day.
+      where.OR = [{ endDate: null }, { endDate: { gte: startOfIstDay(new Date()) } }];
     }
 
     const banners = await this.prisma.bannerManagement.findMany({

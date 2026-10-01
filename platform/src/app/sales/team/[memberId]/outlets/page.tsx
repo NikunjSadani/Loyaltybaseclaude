@@ -14,6 +14,7 @@ import {
   getPrimaryParam,
 } from '@/lib/targets';
 import { kycOrderRank } from '@/lib/kyc-order';
+import { istDateKey } from '@/lib/ist-date';
 
 /* ─── Outlet metadata ───────────────────────────────────────────────────────── */
 
@@ -76,11 +77,12 @@ const kycBadge: Record<KYCStatus, { variant: 'success' | 'warning' | 'danger' | 
 
 function paceStrip(achievePct: number, period: string): string {
   const [year, month] = period.split('-').map(Number);
-  const today       = new Date();
+  // "Today" resolved in IST (prod/SSR runs UTC; an off-IST clock skews pacing by a day at boundaries).
+  const key         = istDateKey(new Date()); // "YYYY-MM-DD" in Asia/Kolkata
   const daysInMonth = new Date(year, month, 0).getDate();
   const isCurrentMonth =
-    today.getFullYear() === year && today.getMonth() + 1 === month;
-  const elapsed = isCurrentMonth ? today.getDate() : daysInMonth;
+    Number(key.slice(0, 4)) === year && Number(key.slice(5, 7)) === month;
+  const elapsed = isCurrentMonth ? Number(key.slice(8, 10)) : daysInMonth;
   const timePct = Math.round((elapsed / daysInMonth) * 100);
   const gap     = timePct - achievePct;
   if (gap <= 0)  return 'bg-emerald-400';

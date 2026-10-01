@@ -6,6 +6,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
 import { parseOutletPaymentType } from '../common/payment-type.helper';
+import { istDateKey } from '../common/ist-date';
 import {
   acquireIdentityLocks,
   checkGroupUniqueness,
@@ -382,7 +383,7 @@ function mapOutletListRow(o: OutletListRow, latestStatusByPartnerId: Map<string,
     xsrName: xsr?.user?.name ?? '',
     kycStatus: deriveKycStatus(o.reKycFlags, o.kycIntent, o.partnerId, latestStatusByPartnerId),
     isActive: o.isActive,
-    addedDate: o.createdAt.toISOString().slice(0, 10),
+    addedDate: istDateKey(o.createdAt),
     // Owner-group grouping fields (null when the outlet is ungrouped).
     parentId: o.parentId ?? null,
     parentCode: o.parent?.partnerCode ?? null,

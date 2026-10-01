@@ -8,6 +8,7 @@ import { JwtPayload } from '../../common/decorators/current-user.decorator';
 import { platformWide } from '../../common/tenant-scope';
 import { fyOfToday } from '../../tds/tds.helpers';
 import { paiseToRupees } from '../../common/money';
+import { istMonthKey, istMonthBounds, monthYearIST } from '../../common/ist-date';
 
 /**
  * FinanceDashboardService — GET /v1/admin/dashboard/finance.
@@ -91,12 +92,13 @@ export class FinanceDashboardService {
     // ── Breakage: PERIOD-ONLY (current calendar month) ──────────────────────────
     // expiredPoints = Σ PointsLedger.points (transactionType=EXPIRE) in the period;
     // issuedPoints = Σ EARN in the period. Tenant-scoped via wallet.partner.clientId.
-    // Local-time month boundaries to match the Program Health dashboard (and the
-    // app-wide monthRange convention) so the two breakage cards use an identical period.
+    // IST month boundaries to match the Program Health dashboard (and the app-wide
+    // monthRange convention) so the two breakage cards use an identical period. Prod
+    // runs UTC, so local-time boundaries would land on the wrong IST month at a boundary.
     const now = new Date();
-    const periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const periodEndExclusive = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-    const periodLabel = `${periodStart.getFullYear()}-${String(periodStart.getMonth() + 1).padStart(2, '0')}`;
+    const monthKey = istMonthKey(now);
+    const { start: periodStart, endExclusive: periodEndExclusive } = istMonthBounds(monthKey);
+    const periodLabel = monthYearIST(now);
 
     const [expiredAgg, issuedAgg] = await Promise.all([
       this.prisma.pointsLedger.aggregate({

@@ -105,7 +105,7 @@ export function VisibilityAmountUploadPanel() {
           r.dateOfCapture ?? '',
           r.approvedBy ?? '',
           r.uploadBatch?.fileName ?? '',
-          r.uploadBatch?.createdAt ? new Date(r.uploadBatch.createdAt).toLocaleString() : '',
+          r.uploadBatch?.createdAt ? new Date(r.uploadBatch.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '',
         ]),
       ];
       const ws = aoaToSheetSafe(sheetData);

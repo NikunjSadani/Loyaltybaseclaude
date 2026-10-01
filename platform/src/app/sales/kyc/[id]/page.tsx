@@ -601,7 +601,7 @@ function buildTimeline(kyc: KYCDetail): TimelineStep[] {
 
   const step1: TimelineStep = {
     label: 'Submitted',
-    sublabel: `${kyc.submittedByName} · ${new Date(kyc.submittedAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`,
+    sublabel: `${kyc.submittedByName} · ${new Date(kyc.submittedAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short' })}`,
     state: 'complete',
     testid: 'timeline-step-submitted',
   };

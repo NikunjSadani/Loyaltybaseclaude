@@ -12,7 +12,7 @@ import { ScheduledReportsService } from './scheduled-reports.service';
  * Constant-time compare so the secret can't be probed by timing.
  *
  * Provisioning (go-live, imperative — NOT terraform, like push-drain):
- *   gcloud scheduler jobs create http reports-run-prod --schedule="30 3 * * 1-6" \
+ *   gcloud scheduler jobs create http reports-run-prod --schedule="30 9 * * 1-6" \
  *     --uri="$API/v1/reports/run" --http-method=POST --time-zone="Asia/Kolkata" \
  *     --headers="x-reports-run-secret=$REPORTS_RUN_SECRET" --message-body=" "
  */

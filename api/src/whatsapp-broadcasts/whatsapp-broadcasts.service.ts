@@ -13,6 +13,7 @@ import { Msg91Service } from '../notifications/msg91.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isValidPhone } from '../common/audience/audience.helpers';
 import { buildXlsx } from '../common/xlsx';
+import { istDateTimeCell } from '../common/ist-date';
 import { WhatsappTemplatesService } from './whatsapp-templates.service';
 import {
   AudienceResolution,
@@ -493,7 +494,7 @@ export class WhatsappBroadcastsService {
     for (const c of contract) labelForIndex.set(c.index, c.label);
     const varHeader = (i: number) => labelForIndex.get(i) ?? `Variable ${i}`;
 
-    const iso = (d: Date | null) => (d ? d.toISOString() : '');
+    const iso = (d: Date | null) => (d ? istDateTimeCell(d) : '');
     const rows = recipients.map((r) => {
       const vars = Array.isArray(r.variables) ? (r.variables as unknown[]) : [];
       const row: Record<string, unknown> = { Phone: r.phone };

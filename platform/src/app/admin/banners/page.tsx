@@ -370,19 +370,19 @@ function ItemRow<T extends { id: string; active: boolean; type: string; title: s
               <span className="text-gray-300">·</span>
               <span className="text-xs text-gray-400">
                 {item.startDate
-                  ? new Date(item.startDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+                  ? new Date(item.startDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short' })
                   : '∞'
                 }
                 {' → '}
                 {item.endDate
-                  ? new Date(item.endDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+                  ? new Date(item.endDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short' })
                   : '∞'
                 }
               </span>
             </>
           )}
           <span className="text-gray-300">·</span>
-          <span className="text-xs text-gray-400">Updated {new Date(item.updatedAt).toLocaleDateString('en-IN')}</span>
+          <span className="text-xs text-gray-400">Updated {new Date(item.updatedAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}</span>
         </div>
       </div>
       <Badge variant={item.active ? 'success' : 'default'}>{item.active ? 'Active' : 'Inactive'}</Badge>

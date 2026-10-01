@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide, tenantScope } from '../common/tenant-scope';
 import { buildXlsx } from '../common/xlsx';
+import { istDateTimeCell } from '../common/ist-date';
 import { MessageDeliveryStatusService } from './message-delivery-status.service';
 import {
   NotificationDeliveryListQueryDto,
@@ -197,7 +198,7 @@ export class NotificationDeliveryReportService {
       select: this.rowSelect,
     });
 
-    const iso = (d: Date | null) => (d ? d.toISOString() : '');
+    const iso = (d: Date | null) => (d ? istDateTimeCell(d) : '');
     const sheetRows: Record<string, string>[] = rows.map((r) => ({
       Channel: r.channel,
       Event: r.eventKey ?? '',

@@ -25,6 +25,7 @@ import {
   buildMonthRange, formatMonth,
 } from '@/lib/targets';
 import { getGifsySettings } from '@/lib/gifsy-settings';
+import { istDateKey } from '@/lib/ist-date';
 
 /* ─── Backend response types ─────────────────────────────────────────────────── */
 
@@ -72,11 +73,15 @@ function computePace(period: string): { timePct: number; daysLeft: number; elaps
   const year  = parseInt(parts[0], 10);
   const month = parseInt(parts[1], 10);
   if (isNaN(year) || isNaN(month)) return null;
-  const today       = new Date();
+  // Compare "today" in IST (prod/SSR runs UTC; an off-IST clock skews pacing by a day at boundaries).
+  const key         = istDateKey(new Date()); // "YYYY-MM-DD" in Asia/Kolkata
+  const istYear     = Number(key.slice(0, 4));
+  const istMonth    = Number(key.slice(5, 7)); // 1-based
+  const istDay      = Number(key.slice(8, 10));
   const daysInMonth = new Date(year, month, 0).getDate();
-  const isCurrent   = today.getFullYear() === year && today.getMonth() + 1 === month;
-  const elapsed     = isCurrent ? today.getDate() : daysInMonth;
-  const daysLeft    = isCurrent ? daysInMonth - today.getDate() : 0;
+  const isCurrent   = istYear === year && istMonth === month;
+  const elapsed     = isCurrent ? istDay : daysInMonth;
+  const daysLeft    = isCurrent ? daysInMonth - istDay : 0;
   const timePct     = Math.round((elapsed / daysInMonth) * 100);
   return { timePct, daysLeft, elapsed, daysInMonth };
 }

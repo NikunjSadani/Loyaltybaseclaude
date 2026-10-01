@@ -25,6 +25,7 @@ import { pct, currentPeriod } from '@/lib/targets';
 import { loadPortalSchemes, statusOf } from '@/app/partner/schemes/portal-api';
 import { formatLastUpdated, getLastSalesUploadDate } from '@/lib/sales-upload-utils';
 import { authHeader } from '@/lib/api-client';
+import { istDateKey } from '@/lib/ist-date';
 
 /* ─── Real-data model ────────────────────────────────────────────────────────
    The dashboard hero consumes the SAME endpoints as the Targets page
@@ -67,9 +68,12 @@ interface AggKpi {
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
 
 function computePace() {
-  const today      = new Date();
-  const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
-  const elapsed    = today.getDate();
+  // IST calendar day-of-month (prod/SSR runs UTC; an off-IST clock skews the pacing % by a day).
+  const key         = istDateKey(new Date()); // "YYYY-MM-DD" in Asia/Kolkata
+  const istYear     = Number(key.slice(0, 4));
+  const istMonth    = Number(key.slice(5, 7)); // 1-based
+  const elapsed     = Number(key.slice(8, 10));
+  const daysInMonth = new Date(istYear, istMonth, 0).getDate();
   return { timePct: Math.round((elapsed / daysInMonth) * 100), daysLeft: daysInMonth - elapsed };
 }
 

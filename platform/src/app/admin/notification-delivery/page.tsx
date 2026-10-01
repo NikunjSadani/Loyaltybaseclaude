@@ -480,6 +480,7 @@ function fmtTs(iso: string | null): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '—';
   return d.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
     day: '2-digit',
     month: 'short',
     hour: '2-digit',

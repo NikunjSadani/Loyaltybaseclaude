@@ -4,7 +4,8 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { TenantService } from '../../tenant/tenant.service';
 import { TenantSettingsService } from '../../tenant/tenant-settings.service';
 import { JwtPayload } from '../../common/decorators/current-user.decorator';
-import { kpiCodeKeys, lastNMonths, currentMonthKey } from '../../targets/targets.helpers';
+import { kpiCodeKeys, lastNMonths } from '../../targets/targets.helpers';
+import { istMonthBounds, istMonthKey } from '../../common/ist-date';
 
 /**
  * ProgramHealthDashboardService — REAL, tenant-scoped "program health" aggregation
@@ -54,11 +55,10 @@ export class ProgramHealthDashboardService {
 
   /** Month boundaries [start, nextMonthStart) for a YYYY-MM key. */
   private static monthRange(month: string): { start: Date; end: Date } {
-    const [y, m] = month.split('-').map((x) => parseInt(x, 10));
-    // Local-time month boundaries (matches the server clock used everywhere else).
-    const start = new Date(y, m - 1, 1);
-    const end = new Date(y, m, 1);
-    return { start, end };
+    // IST month boundaries (prod runs UTC, so local-time boundaries would land on the
+    // wrong IST month at a boundary). `end` is the exclusive start of the next IST month.
+    const { start, endExclusive } = istMonthBounds(month);
+    return { start, end: endExclusive };
   }
 
   /**
@@ -88,7 +88,7 @@ export class ProgramHealthDashboardService {
     const clientId = user.clientId;
     const now = new Date();
     const periodKey =
-      period && /^\d{4}-\d{2}$/.test(period) ? period : currentMonthKey(now);
+      period && /^\d{4}-\d{2}$/.test(period) ? period : istMonthKey(now);
     const { start: periodStart, end: periodEnd } = ProgramHealthDashboardService.monthRange(periodKey);
 
     // PointsLedger has no clientId column; it joins to the tenant via

@@ -144,7 +144,7 @@ function mapBackend(b: BackendInvoice): InvoiceDisplay {
 }
 
 const fmtDate = (iso: string) =>
-  new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  new Date(iso).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric' });
 
 // ── Page ────────────────────────────────────────────────────────────────────────
 export default function AdminInvoiceDetailPage({

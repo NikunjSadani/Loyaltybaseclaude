@@ -9,6 +9,8 @@
  * `buildXlsx` helper in common/xlsx.ts.
  */
 
+import { istDateKey, istMonthKey } from '../../common/ist-date';
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Points Ledger (R1)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -103,7 +105,7 @@ export function aggregateLedgerToRow(
 
   for (const entry of entries) {
     const d = entry.createdAt instanceof Date ? entry.createdAt : new Date(entry.createdAt);
-    const monthKey = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    const monthKey = istMonthKey(d);
     const cell = cellByKey.get(monthKey);
 
     if (entry.type === 'EARN') {
@@ -276,7 +278,7 @@ export function summarizeAging(rows: TicketAgingRow[]): TicketAgingSummary {
   return { total: rows.length, slaBreached: slaBreachedCount, byBucket };
 }
 
-const isoToDate = (iso: string): string => iso.slice(0, 10);
+const isoToDate = (iso: string): string => istDateKey(new Date(iso));
 
 /** Flatten ticket-aging rows to xlsx row objects (13 columns, source order). */
 export function ticketAgingXlsxRows(rows: TicketAgingRow[]): Record<string, unknown>[] {

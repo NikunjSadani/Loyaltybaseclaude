@@ -141,11 +141,11 @@ function KYCApprovalCard({
         <div className="bg-gray-50 rounded-xl p-3 space-y-1.5 text-xs">
           <div className="flex items-center gap-2 text-gray-600">
             <FileCheck className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
-            <span>Submitted by <strong>{entry.submittedByName}</strong> ({entry.submittedByRole}) on {new Date(entry.submittedAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</span>
+            <span>Submitted by <strong>{entry.submittedByName}</strong> ({entry.submittedByRole}) on {new Date(entry.submittedAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short' })}</span>
           </div>
           <div className="flex items-center gap-2 text-gray-600">
             <CheckCircle className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
-            <span>Approved by <strong>{entry.firstApprovedBy}</strong> on {new Date(entry.firstApprovedAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</span>
+            <span>Approved by <strong>{entry.firstApprovedBy}</strong> on {new Date(entry.firstApprovedAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short' })}</span>
           </div>
         </div>
 

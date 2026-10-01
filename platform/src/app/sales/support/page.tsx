@@ -101,7 +101,7 @@ const PRIORITIES: { value: TicketPriority; label: string; color: string }[] = [
 ];
 
 function formatTime(iso: string) {
-  return new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' });
+  return new Date(iso).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: '2-digit' });
 }
 
 /* ─── Ticket detail ──────────────────────────────────────────────────────────── */

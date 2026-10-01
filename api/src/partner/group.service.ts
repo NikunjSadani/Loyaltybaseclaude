@@ -7,6 +7,7 @@ import { resolveGroupParentByPhone } from '../common/partner-group.helper';
 import { kpiCodeKeys, NAMES_KEY } from '../targets/targets.helpers';
 import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
 import { GroupVisibilityQueryDto } from './dto/group.dto';
+import { istMonthKey, istDateKey } from '../common/ist-date';
 
 /**
  * GroupService — Wave 3 read-only PARENT GROUP OVERVIEW (a consolidated wallet
@@ -395,7 +396,7 @@ export class GroupService {
       return { available: true as const, visibilityEnabled: false as const, parent: parentInfo };
     }
 
-    const month = q?.month ?? new Date().toISOString().slice(0, 7);
+    const month = q?.month ?? istMonthKey(new Date());
     const outletCodes = outlets.map((o) => o.outletCode);
     const nameByCode = new Map(outlets.map((o) => [o.outletCode, o.name]));
 
@@ -416,7 +417,7 @@ export class GroupService {
         outletCode: code,
         outletName: nameByCode.get(code) ?? code,
         status: rec?.status ?? null,
-        dateOfCapture: rec?.dateOfCapture ? rec.dateOfCapture.toISOString().slice(0, 10) : null,
+        dateOfCapture: rec?.dateOfCapture ? istDateKey(rec.dateOfCapture) : null,
         approvedBy: rec?.approvedBy ?? null,
       };
     });

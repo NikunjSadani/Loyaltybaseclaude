@@ -1,5 +1,6 @@
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { formatISTDateNumeric, formatISTDateTime } from './ist-date';
 
 // ─── Tailwind class merger ────────────────────────────────────────────────────
 
@@ -32,27 +33,20 @@ export function formatPoints(points: number): string {
 // ─── Date formatters ─────────────────────────────────────────────────────────
 
 /**
- * Format a date as DD-MM-YYYY (e.g. 16-05-2026).
+ * Format a date as DD-MM-YYYY (e.g. 16-05-2026), in IST.
+ * Delegates to the shared IST formatter — reading .getDate()/.getMonth() off the raw Date rendered
+ * the viewer's browser (or SSR/UTC) day, off-by-one in the 00:00–05:30 IST window. Output unchanged.
  */
 export function formatDate(date: string | Date): string {
-  const d = new Date(date);
-  const day = String(d.getDate()).padStart(2, '0');
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const year = d.getFullYear();
-  return `${day}-${month}-${year}`;
+  return formatISTDateNumeric(date);
 }
 
 /**
- * Format a date with time for display.
+ * Format a date with time for display, in IST.
+ * Delegates to the shared IST formatter (pins Asia/Kolkata). Output format unchanged.
  */
 export function formatDateTime(date: string | Date): string {
-  return new Intl.DateTimeFormat('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(date));
+  return formatISTDateTime(date);
 }
 
 /**

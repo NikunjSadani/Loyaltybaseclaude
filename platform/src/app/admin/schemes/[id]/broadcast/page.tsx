@@ -265,7 +265,7 @@ export default function BroadcastPage({ params }: { params: Promise<{ id: string
               <tbody className="divide-y divide-gray-100">
                 {history.map((b) => (
                   <tr key={b.id}>
-                    <td className="px-4 py-2 text-xs text-gray-600">{new Date(b.createdAt).toLocaleString('en-IN')}</td>
+                    <td className="px-4 py-2 text-xs text-gray-600">{new Date(b.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</td>
                     <td className="px-4 py-2 text-xs text-gray-700">{b.channel}</td>
                     <td className="px-4 py-2 text-xs text-gray-700">{b.recipientScope}</td>
                     <td className="px-4 py-2 text-xs text-gray-500 font-mono truncate max-w-[10rem]">{b.templateId}</td>

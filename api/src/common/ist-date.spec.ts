@@ -4,7 +4,17 @@
 // month boundary) still produces the correct IST day/month.
 // Run: npx jest src/common/ist-date.spec.ts
 
-import { monthYearIST, formatDateIST, startOfIstDay, endOfIstDay, istDayRangeFilter } from './ist-date';
+import {
+  monthYearIST,
+  formatDateIST,
+  startOfIstDay,
+  endOfIstDay,
+  istDayRangeFilter,
+  istMonthKey,
+  istDateKey,
+  istDateTimeCell,
+  istMonthBounds,
+} from './ist-date';
 
 describe('ist-date', () => {
   describe('monthYearIST', () => {
@@ -105,6 +115,62 @@ describe('ist-date', () => {
 
     it('ignores an invalid bound (returns undefined when nothing parses)', () => {
       expect(istDayRangeFilter('not-a-date', undefined)).toBeUndefined();
+    });
+  });
+
+  describe('istMonthKey', () => {
+    it('returns the IST month, not the UTC month, in the early-IST window of the 1st', () => {
+      // 2026-08-01T02:00:00Z = 2026-08-01 07:30 IST → August (UTC also August here).
+      expect(istMonthKey(new Date('2026-08-01T02:00:00Z'))).toBe('2026-08');
+    });
+    it('rolls to the next IST month for a late-UTC instant that is already next-day IST', () => {
+      // 2026-07-31T20:00:00Z = 2026-08-01 01:30 IST → August (UTC would say July).
+      expect(istMonthKey(new Date('2026-07-31T20:00:00Z'))).toBe('2026-08');
+    });
+    it('stays in the prior IST month for an instant still on the last IST day', () => {
+      // 2026-07-31T17:00:00Z = 2026-07-31 22:30 IST → July.
+      expect(istMonthKey(new Date('2026-07-31T17:00:00Z'))).toBe('2026-07');
+    });
+  });
+
+  describe('istDateKey', () => {
+    it('returns the IST calendar day (YYYY-MM-DD), correct in the 00:00–05:30 IST window', () => {
+      // 2026-06-30T20:00:00Z = 2026-07-01 01:30 IST → 2026-07-01 (toISOString would say 2026-06-30).
+      expect(istDateKey(new Date('2026-06-30T20:00:00Z'))).toBe('2026-07-01');
+    });
+    it('agrees with UTC when the instant is mid-IST-day', () => {
+      expect(istDateKey(new Date('2026-07-15T06:00:00Z'))).toBe('2026-07-15');
+    });
+  });
+
+  describe('istDateTimeCell', () => {
+    it('renders IST wall-clock YYYY-MM-DD HH:mm (24h)', () => {
+      // 2026-07-15T06:00:00Z = 2026-07-15 11:30 IST.
+      expect(istDateTimeCell(new Date('2026-07-15T06:00:00Z'))).toBe('2026-07-15 11:30');
+    });
+    it('crosses the IST day boundary correctly', () => {
+      // 2026-06-30T20:15:00Z = 2026-07-01 01:45 IST.
+      expect(istDateTimeCell(new Date('2026-06-30T20:15:00Z'))).toBe('2026-07-01 01:45');
+    });
+  });
+
+  describe('istMonthBounds', () => {
+    it('bounds the IST month as [00:00 IST of the 1st, 00:00 IST of next 1st)', () => {
+      const { start, endExclusive } = istMonthBounds('2026-08');
+      // 00:00 IST = 18:30 UTC the previous day.
+      expect(start.toISOString()).toBe('2026-07-31T18:30:00.000Z');
+      expect(endExclusive.toISOString()).toBe('2026-08-31T18:30:00.000Z');
+    });
+    it('round-trips: an instant just inside the IST month is >= start and < endExclusive', () => {
+      const { start, endExclusive } = istMonthBounds('2026-08');
+      const firstMomentIst = new Date('2026-07-31T18:30:00.000Z'); // 2026-08-01 00:00 IST
+      const lastMomentIst = new Date('2026-08-31T18:29:59.999Z'); // 2026-08-31 23:59:59.999 IST
+      expect(firstMomentIst.getTime()).toBeGreaterThanOrEqual(start.getTime());
+      expect(lastMomentIst.getTime()).toBeLessThan(endExclusive.getTime());
+    });
+    it('throws on a malformed month key', () => {
+      expect(() => istMonthBounds('2026-13')).toThrow();
+      expect(() => istMonthBounds('nope')).toThrow();
     });
   });
 });

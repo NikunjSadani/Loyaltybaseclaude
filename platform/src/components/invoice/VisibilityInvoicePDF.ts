@@ -92,6 +92,7 @@ export async function generateVisibilityInvoicePDF(inv: VisibilityInvoice): Prom
 
   // Date (right)
   const genDate = new Date(inv.generatedAt).toLocaleDateString('en-IN', {
+    timeZone: 'Asia/Kolkata',
     day: 'numeric', month: 'long', year: 'numeric',
   });
   doc.setFont('helvetica', 'bold');

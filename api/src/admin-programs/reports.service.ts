@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { KycService } from '../kyc/kyc.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
+import { istDateKey, istMonthBounds } from '../common/ist-date';
 import { isKycInFlight, isReKycPending } from '../common/kyc-rekyc.helper';
 import { TargetsService } from '../targets/targets.service';
 import { PointsLedgerQueryDto, TargetVsSalesQueryDto, TicketAgingQueryDto, ReportFormat } from './dto/reports.dto';
@@ -50,7 +51,7 @@ function decToStr(d: Prisma.Decimal | null | undefined): string {
 
 /** Date | null → YYYY-MM-DD ('' when null). */
 function dateOnly(d: Date | null | undefined): string {
-  return d ? new Date(d).toISOString().split('T')[0] : '';
+  return d ? istDateKey(new Date(d)) : '';
 }
 
 /**
@@ -538,14 +539,9 @@ export class ReportsService {
       throw new BadRequestException(msg);
     }
 
-    // Period window as UTC Date boundaries.
-    const [fromYear, fromMonthNum] = from.split('-').map(Number);
-    const [toYear, toMonthNum] = to.split('-').map(Number);
-    const periodStart = new Date(Date.UTC(fromYear, fromMonthNum - 1, 1));
-    const periodEnd =
-      toMonthNum === 12
-        ? new Date(Date.UTC(toYear + 1, 0, 1))
-        : new Date(Date.UTC(toYear, toMonthNum, 1));
+    // Period window as IST month boundaries (UTC instants bounding the IST months).
+    const periodStart = istMonthBounds(from).start;
+    const periodEnd = istMonthBounds(to).endExclusive;
 
     // Outlet → partner (1:1) → wallets[0] → pointsLedger up to periodEnd.
     const outlets = await this.prisma.outlet.findMany({

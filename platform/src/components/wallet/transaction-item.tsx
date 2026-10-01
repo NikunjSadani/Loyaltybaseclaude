@@ -1,5 +1,6 @@
 import React from 'react';
 import { formatPoints } from '@/lib/utils';
+import { istDateKey } from '@/lib/ist-date';
 import { TransactionType, type WalletTransaction } from '@/types';
 
 interface TransactionItemProps {
@@ -10,17 +11,11 @@ interface TransactionItemProps {
 
 const MONTH_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-function fmtDay(d: Date) {
-  return String(d.getDate()).padStart(2, '0');
-}
-function fmtMon(d: Date) {
-  return MONTH_SHORT[d.getMonth()];
-}
-
 export function TransactionItem({ transaction: tx, isLockedEntry = false }: TransactionItemProps) {
-  const date = new Date(tx.createdAt);
-  const day   = fmtDay(date);
-  const mon   = fmtMon(date);
+  // IST calendar day/month (istDateKey → "YYYY-MM-DD" in Asia/Kolkata).
+  const key   = istDateKey(tx.createdAt);
+  const day   = key ? key.slice(8, 10) : '';
+  const mon   = key ? MONTH_SHORT[Number(key.slice(5, 7)) - 1] : '';
 
   /* ── Amount colour & sign ── */
   const isCredit  = tx.type === TransactionType.CREDIT;

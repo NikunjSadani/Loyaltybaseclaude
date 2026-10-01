@@ -52,7 +52,7 @@ function formatInr(m: Money): string {
 function formatDate(iso: string | null): string {
   if (!iso) return '—';
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('en-IN');
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 }
 
 /** Status badge styling. */

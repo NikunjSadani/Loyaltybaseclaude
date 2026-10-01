@@ -14,6 +14,7 @@ import { KYCStatus } from '@/types';
 import { pct, pctBarColor } from '@/lib/targets';
 import { type SalesRole, getRole, canEnroll } from '@/lib/sales-role';
 import { classifyPaceGap, buildCasesToGoMsg } from '@/lib/pace';
+import { istDateKey, istMonthKey } from '@/lib/ist-date';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { fetchTaskConfig, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
 import { fetchBanners, getActiveSalesBanners, getBgStyle, type Banner } from '@/lib/banner';
@@ -81,11 +82,18 @@ function TargetSummaryCard({ targets }: { targets: SalesTargets }) {
   const withTarget = kpis.filter((k) => k.target > 0);
 
   const now          = new Date();
-  const periodLabel  = (targets.period ? new Date(`${targets.period}-01T00:00:00`) : now)
+  // Month label + pacing math resolve against the IST calendar (not the viewer's zone / SSR UTC).
+  const periodKey    = targets.period ?? istMonthKey(now);          // "YYYY-MM"
+  const [pYear, pMonth] = periodKey.split('-').map(Number);
+  const periodLabel  = new Date(pYear, pMonth - 1, 1)
     .toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
-  const daysInMonth  = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const daysLeft     = daysInMonth - now.getDate();
-  const timePct      = Math.round((now.getDate() / daysInMonth) * 100);
+  const istToday     = istDateKey(now);                             // "YYYY-MM-DD"
+  const istYear      = Number(istToday.slice(0, 4));
+  const istMonth     = Number(istToday.slice(5, 7));                // 1-indexed
+  const istDayOfMonth = Number(istToday.slice(8, 10));
+  const daysInMonth  = new Date(istYear, istMonth, 0).getDate();
+  const daysLeft     = daysInMonth - istDayOfMonth;
+  const timePct      = Math.round((istDayOfMonth / daysInMonth) * 100);
 
   // Pace badge is driven by the PRIMARY metric (owner): a plain "{remaining} {unit}
   // to go" the rep can act on, coloured by how the PRIMARY KPI is pacing — NOT the

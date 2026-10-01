@@ -556,7 +556,7 @@ function PayoutPageInner() {
                           <span className="font-mono text-gray-700">{r.outletId}</span>
                           {r.utr && <span className="ml-2 text-gray-500">UTR: {r.utr}</span>}
                           {r.paymentDate && (
-                            <span className="ml-2 text-gray-400">Paid: {new Date(r.paymentDate).toLocaleDateString('en-IN')}</span>
+                            <span className="ml-2 text-gray-400">Paid: {new Date(r.paymentDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}</span>
                           )}
                           {r.errors.length > 0 && (
                             <p className="text-red-600 mt-0.5">{r.errors.join(' · ')}</p>
@@ -675,7 +675,7 @@ function PayoutPageInner() {
                   </div>
                   <div>
                     <p className="text-gray-500">Requested At</p>
-                    <p className="font-medium text-gray-800">{new Date(rev.requestedAt).toLocaleDateString('en-IN')}</p>
+                    <p className="font-medium text-gray-800">{new Date(rev.requestedAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}</p>
                   </div>
                 </div>
 
@@ -840,7 +840,7 @@ function PayoutPageInner() {
                         )}
                       </td>
                       <td className="py-2 text-gray-500">
-                        {rev.approvedAt ? new Date(rev.approvedAt).toLocaleDateString('en-IN') : '—'}
+                        {rev.approvedAt ? new Date(rev.approvedAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' }) : '—'}
                       </td>
                     </tr>
                   );

@@ -21,6 +21,7 @@
 import * as XLSX from 'xlsx';
 import { paiseToRupees } from '../common/money';
 import { buildXlsx } from '../common/xlsx';
+import { istDateKey } from '../common/ist-date';
 
 // ── Recipient constant (the self-bill buyer) ────────────────────────────────
 
@@ -226,9 +227,12 @@ export function buildInvoiceExportXlsx(
       : { cgst: 0n, sgst: 0n };
     const igst = r.gstType === 'IGST' ? gstPaise : 0n;
 
+    // GST self-bill invoice is a legal doc — the "Invoice Date" must be the IST calendar day.
+    // invoiceDate is a real timestamp (new Date() at generation), so toISOString() would print the
+    // UTC day → the previous calendar day for any invoice generated 00:00–05:30 IST.
     const invoiceDate =
       r.invoiceDate instanceof Date
-        ? r.invoiceDate.toISOString().slice(0, 10)
+        ? istDateKey(r.invoiceDate)
         : String(r.invoiceDate ?? '').slice(0, 10);
 
     return {

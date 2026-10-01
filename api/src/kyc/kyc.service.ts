@@ -13,6 +13,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as XLSX from 'xlsx';
 import { PrismaService } from '../prisma/prisma.service';
+import { formatDateIST, istDateKey } from '../common/ist-date';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
@@ -968,11 +969,14 @@ export class KycService {
     };
   }
 
-  /** Format a date as a readable "DD MMM YYYY" (e.g. "30 Jun 2026") for WhatsApp bodies. */
+  /**
+   * Format a date as a readable "DD MMM YYYY" (e.g. "30 Jun 2026") for WhatsApp bodies.
+   * Uses the canonical IST formatter — prod runs UTC, so reading .getDate()/.getMonth() off the raw
+   * Date rendered the UTC wall-clock day (off-by-one in the 00:00–05:30 IST window) in the partner's
+   * KYC-submitted WhatsApp message. formatDateIST gives the identical format, IST-correct.
+   */
   private formatKycDate(d: Date): string {
-    const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${day} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+    return formatDateIST(d);
   }
 
   /**
@@ -3236,7 +3240,7 @@ export class KycService {
       },
       transactions: transactions.map((tx) => ({
         id: tx.id,
-        date: tx.createdAt.toISOString().split('T')[0],
+        date: istDateKey(tx.createdAt),
         description: tx.description ?? '',
         type: mapTxType(tx.transactionType),
         points: tx.points,
@@ -4986,8 +4990,8 @@ export class KycService {
         ownerName: p?.ownerName ?? '',
         mobile: p?.phone ?? s.user.phone ?? '',
         salesRep: s.user.name ?? '',
-        submittedDate: submittedAt ? submittedAt.toISOString().slice(0, 10) : '',
-        rejectedDate: rejectedAt ? rejectedAt.toISOString().slice(0, 10) : '',
+        submittedDate: submittedAt ? istDateKey(submittedAt) : '',
+        rejectedDate: rejectedAt ? istDateKey(rejectedAt) : '',
         rejectedBy: (hist?.changedByUserId && actorName.get(hist.changedByUserId)) || '',
         rejectionReason: s.rejectionReason ?? '',
         slaAgeHrs,

@@ -186,7 +186,7 @@ export default function MemberDetailPage() {
                             {o.lastVisit && (
                               <span className="flex items-center gap-1 text-xs text-gray-400 shrink-0">
                                 <Clock className="h-3 w-3" />
-                                {new Date(o.lastVisit).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+                                {new Date(o.lastVisit).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short' })}
                               </span>
                             )}
                           </div>

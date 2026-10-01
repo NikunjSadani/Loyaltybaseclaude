@@ -8,6 +8,7 @@ import {
 } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
+import { istDateTimeCell } from '../common/ist-date';
 import { currentWindowKey, isWindowClosed } from './visibility-window.helper';
 import { readMediaValue } from './visibility-form.helper';
 import { evaluatePhotoFence, haversineMeters } from './geo-fence.helper';
@@ -212,8 +213,8 @@ export class VisibilityReportService {
         Rep: c.submittedBy?.employeeCode ?? '',
         'Geo-fence OK': c.geoFenceOk === null ? 'UNVERIFIABLE' : c.geoFenceOk ? 'YES' : 'NO',
         'Distance (m)': c.distanceMeters != null ? String(c.distanceMeters) : '',
-        'Captured At': c.capturedAt ? c.capturedAt.toISOString() : '',
-        'Received At': c.receivedAt.toISOString(),
+        'Captured At': c.capturedAt ? istDateTimeCell(c.capturedAt) : '',
+        'Received At': istDateTimeCell(c.receivedAt),
         'Accuracy (m)': c.captureAccuracy != null ? String(c.captureAccuracy) : '',
         'Duplicate Photo': dupCaptureIds.has(c.id) ? 'YES' : '',
         'Reject Reason': c.rejectionReasonCode ?? '',

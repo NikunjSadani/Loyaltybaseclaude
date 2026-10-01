@@ -72,6 +72,7 @@ function formatDate(iso?: string | null): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '—';
   return d.toLocaleDateString('en-IN', {
+    timeZone: 'Asia/Kolkata',
     day: '2-digit',
     month: 'short',
     year: 'numeric',
