@@ -35,6 +35,7 @@ import {
   Truck,
   Store,
   Send,
+  Calculator,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useTenantFeatures } from '@/lib/tenant-features';
@@ -145,6 +146,22 @@ const ALL_NAV_ITEMS = [
       { href: '/admin/credits-payouts/payments', label: 'Payments Report'   },
       { href: '/admin/credits-payouts/payout',   label: 'Payout Download', gifsyOnly: true },
       { href: '/admin/credits-payouts/fields',   label: 'Field Configuration' },
+    ],
+  },
+  {
+    // Points Compute Engine (configurable points calculation → preview/export or in-portal direct credit).
+    // gifsyAdminOnly for now — Gifsy drives the rollout + enables it per tenant; surfacing the nav to a
+    // CLIENT_ADMIN once their tenant's pointsEngine.enabled is on is the tracked follow-up (that flag lives
+    // in program_settings, not the clients.features blob the nav's featureFlag reads).
+    href: '/admin/points-engine/rules',
+    label: 'Points Engine',
+    icon: Calculator,
+    featureFlag: null,
+    gifsyAdminOnly: true,
+    children: [
+      { href: '/admin/points-engine/rules',    label: 'Rules'    },
+      { href: '/admin/points-engine/compute',  label: 'Compute'  },
+      { href: '/admin/points-engine/settings', label: 'Settings' },
     ],
   },
   {
