@@ -320,3 +320,82 @@ billing block bites (re-public decision), the Wave 5 UAT, the prod cutover appro
 power-user panel); a LIVE simulator (type inputs → see points + band breakdown, marginal vs whole side-by-side);
 every state (loading/empty/error/async-race) + inline validation; light+dark parity, responsive, a11y; a
 dedicated UI/UX audit lane + runtime screenshot review + iterate before it reaches the owner.
+
+---
+
+## 14. Wave 3 — UI/UX design (the masterpiece) — authored 2026-10-02
+
+Grounded in the real FE architecture (thin Next 16, `'use client'`, `api` client + `ApiResponse` envelope,
+`var(--brand-primary)`, light-mode cards `bg-white rounded-xl border-gray-200`, lucide, hand-rolled tables
+like targets/schemes, native `confirm()` for destructive actions). NO new libs (no react-hook-form/zod/SWR).
+Primary analog for the compute flow = `admin/credits-payouts/upload/page.tsx` (stepper + OK/SKIP/ERROR
+summary cards + two-call confirm + done card). Backend is COMPLETE (Waves 0–2); the UI only calls:
+`/api/admin/points-rules*` (CRUD/publish/archive), `/api/admin/points-compute/{preview,export,preview-report,commit}`,
+`/api/admin/points-engine/settings` (GET/PUT, GIFSY-only PUT).
+
+### 14.1 Routes (under `platform/src/app/admin/points-engine/`)
+- `layout.tsx` — `RequireAuth allowedRoles={['GIFSY_ADMIN','CLIENT_ADMIN']}` (authoring is self-serve per §12 #5).
+- `rules/page.tsx` — rule LIST (status/program/kpi filters; New Rule; row → builder).
+- `rules/[id]/page.tsx` — the RULE BUILDER (progressive disclosure) + the embedded LIVE SIMULATOR.
+- `rules/new/page.tsx` — builder in create mode (or reuse `[id]` with id='new').
+- `compute/page.tsx` — the COMPUTE → PREVIEW → EXPORT / COMMIT screen (the credits-upload analog).
+- `settings/page.tsx` — the per-tenant flags; the on/off toggles are GIFSY-only (CLIENT_ADMIN sees read-only).
+- Nav: add a "Points Engine" group to `ALL_NAV_ITEMS` in `admin/layout.tsx`, gated so the whole group is
+  hidden unless the tenant's `pointsEngine.enabled` feature flag is on (via `useTenantFeatures`), matching how
+  other dormant features hide. Direct-credit affordances additionally gated on `directCreditEnabled`.
+
+### 14.2 Rule builder — progressive disclosure (the core of the masterpiece)
+A rule = Attachment + Inputs + an ordered Pipeline + Output + Rounding + Effective window. The builder never
+shows raw JSON; it renders typed cards. Disclosure levels (match the node the author adds):
+- **Attachment card:** program (select, "any" allowed) × programCategory (optional) × KPI (select from the
+  tenant's `KpiDef` list — NEVER free text, so the publish-time KPI reconciliation can't trip). Effective from/to.
+- **Inputs card:** auto-seeds a `value` input bound to the attachment KPI; author adds more inputs (achievement
+  `kpiCode`, `target:<kpi>`, `pct:<kpi>`, or a `segment:<field>` enum) with a per-input null policy
+  (reject/zero/skipRule) shown as plain-English radios ("missing → skip row / treat as 0 / this rule pays 0").
+- **Pipeline builder:** an ordered, reorderable list of node cards; "Add step" menu groups them by level:
+  - L1 **Rate** — 2 fields: measure (input picker) × rate. (The simple 90% case = just this.)
+  - L2 **Slab** — a BAND GRID (from / to / rate / flat rows; last to=∞), basis = absolute | % of target,
+    apply = marginal (tax-bracket) | whole (cliff). Inline gap/overlap validation. A mini marginal-vs-whole
+    hint per band.
+  - L3 **Gate / Segment filter / Milestone / Floor / Cap** — predicate builder (field op value, with all/any/not
+    groups) for gate+milestone; allow-list for segment; min/max for floor/cap; onFail as plain-English.
+  - L4 **Formula** — a power-user panel: an `expr` textarea over the bound input vars + output (add/multiply/set),
+    with a live "valid / error" indicator (calls the same validator shape; never `eval`) and a var reference chip row.
+  - Output card: the credit-field bucket (select from `/api/admin/credits/fields?active=true`; show its
+    POINTS/PAYOUT classification — warn if PAYOUT, since Wave-1 demotes those) + rounding (POINTS forces scale 0).
+- **Lifecycle:** Draft → Save (PATCH) → Publish (POST /publish; shows the supersede/overlap conflict inline) →
+  a published rule is read-only with "Edit = new version". Archive with confirm. Version history list.
+
+### 14.3 Live simulator (embedded in the builder)
+A side panel: the author types achievement / target / segment values → we POST nothing; instead we reuse the
+PURE evaluator client-side is NOT available (it's backend). Options: (a) a lightweight `/preview`-style
+"simulate one row" — add `POST /api/admin/points-compute/simulate` (pure, no DB: body = the draft rule config +
+a sample context → EvalOutcome with the full trace) so the simulator shows points + each node's delta +
+marginal-vs-whole band breakdown live. **Decision: add a `simulate` route** (pure `evaluateRule` over the
+posted draft; no persistence) — it keeps the evaluator the single source of truth and avoids shipping a second
+JS evaluator to the browser. Simulator shows: final points (big), the TraceStep ladder (node → detail → delta →
+running total), and for a slab, a marginal-vs-whole side-by-side.
+
+### 14.4 Compute → preview → export / commit (credits-upload analog)
+Stepper: **Select** (period month-picker + optional program/KPI) → **Preview** (`POST /preview`) → **Act**.
+- Preview shows 4 summary cards (OK / Skip / Error / No-rule) + total points + `engineDisabled` banner + rule
+  versions used, then OK/ERROR/SKIP/NO_RULE row lists (outlet, KPI, achievement/target, points, explanation).
+- Act (operator chooses — §12 #6, show BOTH): **Export** (`GET /export` → xlsx via `downloadBlob`) + **Download
+  review report** (`GET /preview-report`), and — only when `directCreditEnabled` — **Credit in portal**
+  (`POST /commit` with the preview's `sourceKey` as `expectedKey`) → shows the created PENDING batch + a
+  "Review & confirm in Credits & Payouts" link (confirm stays in the existing credits screen = the money gate).
+  Surface `priorPointsEngineBatchesThisPeriod` as an amber "already an engine batch for this period" warning.
+
+### 14.5 Settings screen
+Shows `enabled` + `directCreditEnabled`. GIFSY_ADMIN: two toggles (PUT /settings). CLIENT_ADMIN: read-only with
+"managed by Gifsy" note. Explain each flag in one line.
+
+### 14.6 Build decomposition (3b) + states
+- I scaffold: FE types (`platform/src/lib/points-engine/types.ts`, mirroring the backend contract), the api
+  wiring, the route group + layout guard + nav entry, and the SETTINGS page (smallest, establishes patterns).
+- Then orchestrate (parallel, against the scaffold + this design): (A) rules list + builder + node cards, (B) the
+  simulator + the `simulate` backend route, (C) the compute/preview/commit screen.
+- Every page: loading (Spinner), empty (EmptyState), error (red banner + retry), async-race guards, inline
+  validation, `var(--brand-primary)` accents, a `__tests__/*.test.tsx` (vitest). Then a dedicated UI/UX audit +
+  runtime screenshot review (preview_start) before it reaches the owner.
+- Open micro-decision resolved: use HAND-ROLLED tables/cards (match targets/schemes, the adjacent features).
