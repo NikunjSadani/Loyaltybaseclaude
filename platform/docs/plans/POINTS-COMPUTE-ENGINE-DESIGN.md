@@ -196,11 +196,12 @@ guard (`updateMany WHERE status='PENDING_CONFIRM'`, atomic 180s tx, deliberately
 `PointsLedger` lot per credit; server-side safety caps + IST upload window on **both** create and confirm;
 skip-with-reason (never silent drop); whole-points invariant (no ×100); fire-and-forget notifications.
 
-**⚠️ NEW requirement (owner decision needed):** the rail dedupes *double-confirm of one batch*, but nothing
-stops **two compute runs for the same `(clientId, period, ruleset)`** from each producing a batch that both get
-confirmed → **double credit**. The engine MUST add a **compute-run idempotency key** (e.g. unique on
-`clientId + period + fieldId + ruleVersion`, or refuse a second compute batch for a period already credited).
-Do not ship without deciding this.
+**⚠️ NEW requirement — RESOLVED (§12 #4):** the rail dedupes *double-confirm of one batch*, but nothing stops
+**two compute runs for the same `(clientId, period, ruleset)`** from both crediting → **double credit**. This
+only applies to the **direct-credit route (GIFSY-toggled)**; the export route is read-only (crediting is the
+existing, already-guarded manual upload). The direct-credit route MUST carry a **compute-run idempotency key**
+(unique on `clientId + period + fieldId + ruleVersion`). Also, per §12 #8, when the engine is ON for a tenant,
+a manual points upload to an engine-managed period is warned/guarded to prevent double-sourcing.
 
 **Versioning / snapshot / explainability (the money-trust core):** a published rule version is append-only;
 "editing" makes `version+1` with a new `effectiveFrom`. On commit, **freeze into every result row**: the
@@ -236,29 +237,54 @@ no `lib/incentive` / `schemes/calculate` / tier / partner-class files exist; eve
 
 ---
 
-## 11. Delivery plan & scope
+## 11. Delivery plan & scope — DECISIONS LOCKED (2026-10-02)
 
-**Two waves** (ship value early, de-risk the costly L4 formula layer until a real scheme validates the DSL):
+**Single build, full L1–L4** (owner chose the complete engine over a phased L1–L3-first split). Internally
+phased, delivered in ~1–2 owner-gated cutovers.
 
-- **Wave A — L1–L3 engine (the 80%).** `PointsRule` store + CRUD + the pure evaluator (`rate`/`slab`/`gate`/
-  `segmentFilter`/`milestone`/`floor`/`cap`) + preview (`createBatch`) + commit (`confirmBatch`) + the
-  compute-run idempotency guard + rule-version snapshot/trace + authoring UI + fixtures A–C. **~5–7 build
-  sessions, ~1.5–2.5 weeks elapsed** (incl. your UAT + a cutover). Architected so L4 is just one more node.
-- **Wave B — L4 formula node.** The whitelisted-AST evaluator + formula authoring UI + fixture D, added once
-  ≥1 real cross-KPI scheme exists to validate the expression model. **+~4–6 sessions.**
+Scope locked:
+- **Full L1–L4** engine: `rate`/`slab`/`gate`/`segmentFilter`/`milestone`/`floor`/`cap` **+ the `formula`
+  node** (whitelisted-AST evaluator, no `eval`) **and its formula authoring UI**, from the start.
+- **Two output routes:** (a) **compute → preview → EXPORT** (read-only; in the existing credits-upload file
+  format) for the offline client-approval flow → re-uploaded via the existing credits rail; **(b) optional
+  in-portal "compute → preview → confirm → credit" shortcut**, whose availability is a **GIFSY-admin toggle**
+  per tenant. Route (b) is a real money path → gets the **compute-run idempotency guard** (unique on
+  clientId+period+fieldId+ruleVersion) + the **dual money+identity audit**.
+- **Authoring = GIFSY_ADMIN + CLIENT_ADMIN self-serve.** Because clients author money logic, ship **strong
+  structural validation** (slab gap/overlap, boundary inclusivity, explicit per-input null policy, formula
+  ref-validation at save) + a **mandatory preview** before a rule is usable. The **direct-credit route stays
+  GIFSY-gated** — clients may author + compute + export, but direct wallet crediting only if Gifsy enabled it.
+- **Slabs:** no default — the author must pick **marginal vs whole-amount**, with a side-by-side worked total
+  shown on sample numbers before save.
+- **Clawback:** **reuse the EXISTING credits maker-checker reversal** (`credits.service.ts:1208–1282`,
+  REVERSED status, bank-file exclusion) + wallet `REVERSE`/`DEBIT_ADJUSTMENT` ledger — do NOT build a new
+  path. A recompute that lowers a period's total surfaces the delta and routes it through that existing
+  reversal. (Per-invoice returns need a transaction store we don't have → deferred with per-transaction mode.)
+- **Opt-in = per tenant (whole client on/off)** via a `pointsEngineEnabled` flag in `program_settings`. When
+  ON for a tenant, manual points uploads for engine-managed periods are warned/guarded to prevent
+  double-sourcing.
 
-Each wave: orchestrated build → full gates → **dual adversarial audit (money + identity)** → runtime verify →
+**Estimate:** ~**10–14 focused build sessions, ~3–5 weeks elapsed** (incl. your UAT + cutovers) — dominated by
+the L4 formula engine + its authoring UI, the client-self-serve validation/preview guardrails, and the
+direct-credit money path (idempotency + dual audit). Internal phase order: (1) rule model + pure evaluator
+(incl. formula) + fixtures A–D; (2) compute + preview + EXPORT (read-only route); (3) direct-credit route
+(GIFSY-toggled) + idempotency + reversal wiring + dual audit; (4) authoring UI (both roles) + validation;
+(5) runtime + staging e2e + cutover(s).
+
+Each phase: orchestrated build → full gates → **dual adversarial audit (money + identity)** → runtime verify →
 staging e2e → owner-gated cutover.
 
 ---
 
-## 12. Open decisions for the owner (Phase 0 sign-off)
+## 12. Decisions — LOCKED (owner sign-off 2026-10-02)
 
-1. **Wave A scope** — confirm L1–L3 first, L4 (Wave B) deferred until a concrete scheme? *(recommended)*
-2. **Attachment** — per `(program × KPI)` tenant-wide, per `Scheme`, or both?
-3. **`evaluationBasis`** — PERIOD_AGGREGATE (monthly, matches today's data) for now; PER_TRANSACTION deferred? *(recommended)*
-4. **Compute-run idempotency policy** — refuse a 2nd compute for a credited period, or unique-key + upsert? (§8 — must decide)
-5. **Authoring** — GIFSY_ADMIN-operator-authored only, or CLIENT_ADMIN self-serve too?
-6. **Marginal vs whole-amount default** in the UI (recommend: no default — force the choice + show both).
-7. **Clawback** (returns/cancellations reversing accrued points) — schema hook now, behavior later?
-8. **Opt-in granularity** — per tenant, per CreditField, or per scheme (engine-computed vs verbatim-upload)?
+| # | Decision | Chosen |
+|---|---|---|
+| 1 | Scope / sequencing | **Full L1–L4 in one build** (not phased) |
+| 2 | Attachment | **Per (program × input-KPI), tenant-wide**; output lands in a credit-field (L4 rules read several input KPIs, still write one bucket) |
+| 3 | Evaluation basis | **PERIOD_AGGREGATE (monthly)**; per-transaction deferred |
+| 4 | Engine boundary | **Compute + export ALWAYS**, PLUS optional **in-portal direct credit, GIFSY-admin-toggle-gated** (direct path ⇒ idempotency guard + dual audit) |
+| 5 | Authoring | **GIFSY_ADMIN + CLIENT_ADMIN self-serve** (strong validation + mandatory preview; direct-credit stays GIFSY-gated) |
+| 6 | Slab marginal/whole | **No default — force the choice + show both totals** |
+| 7 | Clawback | **Reuse the existing credits maker-checker reversal** (not a new path); recompute-delta → existing reversal |
+| 8 | Opt-in granularity | **Per tenant (whole client on/off)**; block manual double-sourcing when engine-on |
