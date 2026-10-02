@@ -1,18 +1,25 @@
 import { Module } from '@nestjs/common';
 import { PointsEngineController } from './points-engine.controller';
 import { PointsEngineService } from './points-engine.service';
+import { PointsComputeController } from './points-compute.controller';
+import { PointsComputeService } from './points-compute.service';
 import { PrismaModule } from '../prisma/prisma.module';
 
 /**
- * Points Compute Engine (Wave 0) — the versioned PointsRule config store.
- * Exports PointsEngineService so later-wave modules (compute/preview/credit) can
- * resolve the effective rule for an attachment. TenantSettingsService is @Global
- * (TenantModule) so no re-import is needed to read the pointsEngine flag.
+ * Points Compute Engine.
+ *   - Wave 0: the versioned PointsRule config store (PointsEngineService + CRUD controller).
+ *   - Wave 1: the read-only compute/preview service (PointsComputeService + controller) — joins
+ *     achievements/targets/segment, resolves the effective rule via PointsEngineService, runs the
+ *     pure evaluator, and returns a ComputePreview. NO wallet write / NO CreditBatch in Wave 1.
+ *
+ * PrismaModule gives the repositories; TenantSettingsService is @Global (TenantModule) so the
+ * pointsEngine.enabled flag reads without a re-import. PointsEngineService stays exported so
+ * later-wave modules can resolve the effective rule for an attachment.
  */
 @Module({
   imports: [PrismaModule],
-  controllers: [PointsEngineController],
-  providers: [PointsEngineService],
-  exports: [PointsEngineService],
+  controllers: [PointsEngineController, PointsComputeController],
+  providers: [PointsEngineService, PointsComputeService],
+  exports: [PointsEngineService, PointsComputeService],
 })
 export class PointsEngineModule {}
