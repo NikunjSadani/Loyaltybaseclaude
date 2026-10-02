@@ -19,7 +19,7 @@ import { PointsComputeService } from './points-compute.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { CommitComputeDto, PreviewComputeDto } from './dto/points-compute.dto';
+import { CommitComputeDto, PreviewComputeDto, SimulateComputeDto } from './dto/points-compute.dto';
 import { buildCreditUploadXlsx, buildPreviewReportXlsx } from './points-compute-export.helper';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -56,6 +56,18 @@ export class PointsComputeController {
       kpiCode: dto.kpiCode ?? null,
       expectedKey: dto.expectedKey ?? null,
     });
+  }
+
+  /**
+   * POST /v1/admin/points-compute/simulate — PURE live simulation for the rule builder: validate a draft
+   * config + evaluate it against one sample context → { valid, errors, outcome(trace) }. No DB/persistence/
+   * money; available during authoring regardless of the engine flag. Authoring entitlement (points_rules:read).
+   */
+  @Post('simulate')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
+  @RequirePermission('points_rules:read')
+  simulate(@CurrentUser() user: JwtPayload, @Body() dto: SimulateComputeDto) {
+    return this.compute.simulate(user, dto);
   }
 
   /** GET /v1/admin/points-compute/export — OK rows as a credits-upload-format xlsx (→ offline approval → existing upload). */

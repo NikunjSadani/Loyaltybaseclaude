@@ -7,7 +7,14 @@
  * only — the rules themselves are deep-validated by validateRule() on load (see the service).
  */
 
-import { IsOptional, IsString, Matches } from 'class-validator';
+import { IsArray, IsIn, IsObject, IsOptional, IsString, Matches } from 'class-validator';
+import type {
+  AwardType,
+  PipelineNode,
+  RoundingSpec,
+  RuleAttachment,
+  RuleInput,
+} from '../points-engine.types';
 
 /** Strict YYYY-MM (01-12) — rejects 2026-13 etc. (mirrors achievements export). */
 const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -37,4 +44,46 @@ export class CommitComputeDto extends PreviewComputeDto {
   @IsOptional()
   @IsString()
   expectedKey?: string;
+}
+
+/**
+ * Simulate body — a DRAFT rule's authoring fields + ONE sample context, for the builder's live simulator.
+ * Shape-level only (presence/primitive); the node grammar is deep-validated by validateRule() in the service
+ * (the single source of truth — the CRUD DTOs deliberately don't re-encode it either). No persistence.
+ */
+export class SimulateComputeDto {
+  @IsObject()
+  attachsTo!: RuleAttachment;
+
+  @IsObject()
+  output!: { awardType: AwardType; fieldId: string };
+
+  @IsObject()
+  rounding!: RoundingSpec;
+
+  @IsArray()
+  inputs!: RuleInput[];
+
+  @IsArray()
+  pipeline!: PipelineNode[];
+
+  @IsOptional()
+  @IsString()
+  effectiveFrom?: string;
+
+  @IsOptional()
+  @IsString()
+  effectiveTo?: string | null;
+
+  @IsOptional()
+  @IsIn(['PERIOD_AGGREGATE'])
+  evaluationBasis?: 'PERIOD_AGGREGATE';
+
+  /** One sample evaluation context: achievements/targets by kpiCode + the outlet's segment facet. */
+  @IsObject()
+  context!: {
+    achievements?: Record<string, number | null>;
+    targets?: Record<string, number | null>;
+    segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null };
+  };
 }

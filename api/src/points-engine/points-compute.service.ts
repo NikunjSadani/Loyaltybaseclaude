@@ -485,6 +485,57 @@ export class PointsComputeService {
   }
 
   /**
+   * PURE rule simulation for the authoring UI's live simulator (Wave 3). Validates a DRAFT rule config
+   * (possibly unsaved) and, if valid, evaluates it against one sample context — returning the full trace
+   * so the builder can show points + each node's delta + marginal-vs-whole band breakdown live. No DB, no
+   * persistence, no money; the engine flag is NOT required (authors build rules while the engine is dormant).
+   * Reuses the SINGLE evaluator/validator so the simulator can never diverge from real compute.
+   */
+  simulate(
+    user: JwtPayload,
+    dto: {
+      attachsTo: RuleAttachment;
+      output: { awardType: AwardType; fieldId: string };
+      rounding: RoundingSpec;
+      inputs: RuleInput[];
+      pipeline: PipelineNode[];
+      effectiveFrom?: string;
+      effectiveTo?: string | null;
+      evaluationBasis?: 'PERIOD_AGGREGATE';
+      context: {
+        achievements?: Record<string, number | null>;
+        targets?: Record<string, number | null>;
+        segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null };
+      };
+    },
+  ): { valid: boolean; errors: string[]; outcome?: ReturnType<typeof evaluateRule> } {
+    const config: PointsRuleConfig = {
+      ruleId: 'simulation',
+      tenantId: user.clientId,
+      version: 0,
+      status: 'draft',
+      effectiveFrom: dto.effectiveFrom || '2000-01-01',
+      effectiveTo: dto.effectiveTo ?? null,
+      attachsTo: dto.attachsTo,
+      evaluationBasis: dto.evaluationBasis ?? 'PERIOD_AGGREGATE',
+      output: dto.output,
+      rounding: dto.rounding,
+      inputs: dto.inputs,
+      pipeline: dto.pipeline,
+    };
+    const errors = validateRule(config);
+    if (errors.length > 0) return { valid: false, errors };
+
+    const ctx: EvalContext = {
+      achievements: dto.context?.achievements ?? {},
+      targets: dto.context?.targets ?? {},
+      segment: dto.context?.segment ?? {},
+      meta: {},
+    };
+    return { valid: true, errors: [], outcome: evaluateRule(config, ctx) };
+  }
+
+  /**
    * Pure mapping of a preview's OK rows → the existing credits `UploadRowDto[]`, for the
    * export/Wave-2 re-upload path. POINTS amounts are WHOLE (a count, never ×100). fieldName carries
    * the resolved CreditField.name (previewCompute populates it) so the row round-trips through the

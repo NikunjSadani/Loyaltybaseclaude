@@ -342,4 +342,36 @@ describe('PointsComputeService (Wave 1 — read-only preview)', () => {
       expect(mockCredits.createBatch).not.toHaveBeenCalled();
     });
   });
+
+  // ── Wave 3: pure rule simulation (authoring aid) ─────────────────────────────────────────────
+  describe('simulate (authoring)', () => {
+    const validDraft = {
+      attachsTo: { scope: 'program_kpi', program: 'GOLD', programCategory: null, kpiCode: 'CASES_SOLD' } as never,
+      output: { awardType: 'POINTS' as const, fieldId: 'cf1' },
+      rounding: { mode: 'half_up' as const, scale: 0 },
+      inputs: [{ ref: 'value', kpiCode: 'CASES_SOLD', type: 'number' as const, nullAs: 'reject' as const }],
+      pipeline: [{ type: 'rate', id: 'n1', measure: { var: 'value' }, rate: 2 }] as never,
+    };
+
+    it('evaluates a valid draft against a sample context and returns the trace (no DB)', () => {
+      const res = service.simulate(clientAdmin, { ...validDraft, context: { achievements: { CASES_SOLD: 50 } } });
+      expect(res.valid).toBe(true);
+      expect(res.outcome?.status).toBe('OK');
+      expect(res.outcome && 'points' in res.outcome ? res.outcome.points : null).toBe(100); // 50 × 2
+      expect(res.outcome?.trace.length).toBeGreaterThan(0);
+      expectNoWrite();
+    });
+
+    it('returns valid:false + errors for a malformed draft (POINTS award with fractional rounding)', () => {
+      const res = service.simulate(clientAdmin, {
+        ...validDraft,
+        rounding: { mode: 'half_up', scale: 2 }, // POINTS must be scale 0 → invalid
+        context: { achievements: { CASES_SOLD: 50 } },
+      });
+      expect(res.valid).toBe(false);
+      expect(res.errors.length).toBeGreaterThan(0);
+      expect(res.outcome).toBeUndefined();
+      expectNoWrite();
+    });
+  });
 });
