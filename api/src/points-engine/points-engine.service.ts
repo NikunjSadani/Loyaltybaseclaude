@@ -111,9 +111,19 @@ export class PointsEngineService {
     const config = this.buildConfig({ clientId, ruleId, version, status: 'draft' }, dto);
     this.assertValid(config);
 
-    return this.prisma.pointsRule.create({
-      data: this.toCreateData(clientId, ruleId, version, 'draft', dto, user.sub),
-    });
+    try {
+      return await this.prisma.pointsRule.create({
+        data: this.toCreateData(clientId, ruleId, version, 'draft', dto, user.sub),
+      });
+    } catch (e) {
+      // Two concurrent createDraft on the same ruleId can both pass the version/open-draft check above
+      // (check-then-act race); the (clientId,ruleId,version) unique turns the loser into a clean 409
+      // instead of a raw 500.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new ConflictException('A concurrent draft was just created for this rule — reload and retry.');
+      }
+      throw e;
+    }
   }
 
   /**
@@ -180,6 +190,33 @@ export class PointsEngineService {
     const supersedeBoundary = dayBeforeUtc(newFrom);
 
     return this.prisma.$transaction(async (tx) => {
+      // Block a DIFFERENT logical rule already governing the SAME attachment (program × kpi) over an
+      // overlapping window — two distinct ruleIds owning one attachment makes "which rule pays" ambiguous
+      // (a null program/category is a wildcard, so it clashes with any specific one). Must archive first.
+      const others = await tx.pointsRule.findMany({
+        where: {
+          clientId: row.clientId,
+          status:   'published',
+          kpiCode:  row.kpiCode,
+          ruleId:   { not: row.ruleId },
+          id:       { not: row.id },
+        },
+      });
+      for (const other of others) {
+        const progClash =
+          other.program === row.program || other.program === null || row.program === null;
+        const catClash =
+          other.programCategory === row.programCategory ||
+          other.programCategory === null ||
+          row.programCategory === null;
+        if (progClash && catClash && windowsOverlap(other.effectiveFrom, other.effectiveTo, newFrom, newTo)) {
+          throw new ConflictException(
+            `Another rule (${other.ruleId}) already governs ${row.program ?? 'all programs'} × ${row.kpiCode} ` +
+              `for an overlapping period — archive it before publishing this one.`,
+          );
+        }
+      }
+
       // Prior published versions of the SAME logical rule in the SAME tenant.
       const priors = await tx.pointsRule.findMany({
         where: {
@@ -266,6 +303,8 @@ export class PointsEngineService {
           { OR: [{ programCategory: programCategory ?? null }, { programCategory: null }] },
         ],
       },
+      // Deterministic pre-sort (the JS rank below is authoritative, but this makes the input order stable).
+      orderBy: [{ effectiveFrom: 'desc' }, { version: 'desc' }, { ruleId: 'asc' }],
     });
     if (candidates.length === 0) return null;
     if (candidates.length === 1) return candidates[0];
@@ -279,7 +318,12 @@ export class PointsEngineService {
         if (spec !== 0) return spec;
         const from = b.effectiveFrom.getTime() - a.effectiveFrom.getTime();
         if (from !== 0) return from;
-        return b.version - a.version;
+        const ver = b.version - a.version;
+        if (ver !== 0) return ver;
+        // Deterministic final tiebreak so two same-specificity/date/version rules never resolve by DB
+        // row order (would make "which rule pays" nondeterministic). publish() already blocks this clash,
+        // but defense-in-depth keeps resolution total-ordered.
+        return a.ruleId < b.ruleId ? -1 : a.ruleId > b.ruleId ? 1 : 0;
       })[0];
   }
 

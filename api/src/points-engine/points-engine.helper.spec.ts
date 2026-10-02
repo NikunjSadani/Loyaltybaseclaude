@@ -751,3 +751,53 @@ describe('Derived pct:<kpi> input (relative target-gate)', () => {
     expect(o.status).toBe('SKIP');
   });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// Audit fixes — HIGH-1 (finiteness/overflow), MED-3 (enum-as-measure), MED-4 (attachsTo/output)
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('Audit fixes', () => {
+  it('HIGH-1: arithmetic overflow (huge rate, no cap) → ERROR, never an OK Infinity', () => {
+    const r = rule({
+      inputs: [{ ref: 'cases', kpiCode: 'CASES_SOLD', type: 'number', nullAs: 'reject' }],
+      pipeline: [{ type: 'rate', id: 'r1', measure: { var: 'cases' }, rate: 1e308 }],
+    });
+    const o = evaluateRule(r, ctx({ achievements: { CASES_SOLD: 1000 } }));
+    expect(o.status).toBe('ERROR');
+  });
+
+  it('HIGH-1: rounding.scale > 6 is rejected at validate (prevents 10^scale → Infinity → NaN)', () => {
+    const r = rule({
+      inputs: [{ ref: 'c', kpiCode: 'C', type: 'number', nullAs: 'reject' }],
+      pipeline: [{ type: 'rate', id: 'r1', measure: { var: 'c' }, rate: 1 }],
+      rounding: { mode: 'half_up', scale: 309 },
+    });
+    expect(validateRule(r).length).toBeGreaterThan(0);
+  });
+
+  it('MED-3: an enum input used as a numeric measure is rejected at validate', () => {
+    const r = rule({
+      inputs: [{ ref: 'seg', source: 'segment:program', type: 'enum', values: ['GOLD'], nullAs: 'reject' }],
+      pipeline: [{ type: 'rate', id: 'r1', measure: { var: 'seg' }, rate: 2 }],
+    });
+    expect(validateRule(r).some((e) => /number-typed/.test(e))).toBe(true);
+  });
+
+  it('MED-4: attachsTo missing kpiCode is rejected at validate', () => {
+    const base = rule({
+      inputs: [{ ref: 'c', kpiCode: 'C', type: 'number', nullAs: 'reject' }],
+      pipeline: [{ type: 'rate', id: 'r1', measure: { var: 'c' }, rate: 1 }],
+    });
+    const bad = { ...base, attachsTo: { scope: 'program_kpi' } as unknown as typeof base.attachsTo };
+    expect(validateRule(bad).some((e) => /kpiCode/.test(e))).toBe(true);
+  });
+
+  it('MED-4: bad output.awardType is rejected at validate', () => {
+    const base = rule({
+      inputs: [{ ref: 'c', kpiCode: 'C', type: 'number', nullAs: 'reject' }],
+      pipeline: [{ type: 'rate', id: 'r1', measure: { var: 'c' }, rate: 1 }],
+    });
+    const bad = { ...base, output: { awardType: 'GARBAGE', fieldId: '' } as unknown as typeof base.output };
+    expect(validateRule(bad).some((e) => /awardType/.test(e))).toBe(true);
+  });
+});

@@ -947,6 +947,18 @@ export function evaluateRule(rule: PointsRuleConfig, ctx: EvalContext): EvalOutc
 
     // ── 5. Single final rounding + non-negative clamp ───────────────────────────
     const finalPoints = roundNonNeg(points, rule.rounding);
+    // MONEY-SAFETY INVARIANT: the credit rail must NEVER receive NaN / Infinity / an overflowed value.
+    // A config that overflows (e.g. a huge rate×measure with no cap) or otherwise produces a non-finite
+    // number fails CLOSED as an ERROR (surfaced for review) rather than silently crediting garbage points.
+    if (!Number.isFinite(finalPoints) || Math.abs(finalPoints) > Number.MAX_SAFE_INTEGER) {
+      return {
+        status: 'ERROR',
+        errors: [
+          `computed points is not a finite, safe value (${finalPoints}) — check rates/flats/caps and rounding.scale`,
+        ],
+        trace,
+      };
+    }
     return { status: 'OK', points: finalPoints, trace };
   } catch (e) {
     if (e instanceof RuleSkip) return { status: 'SKIP', reason: e.message, trace };
@@ -972,7 +984,13 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
 
-function validateOperand(op: unknown, declared: ReadonlySet<string>, where: string, errs: string[]): void {
+function validateOperand(
+  op: unknown,
+  declared: ReadonlySet<string>,
+  where: string,
+  errs: string[],
+  numericVars?: ReadonlySet<string>, // when provided, a var operand here MUST be a number-typed input
+): void {
   if (!isObj(op)) {
     errs.push(`${where}: operand must be an object {var} or {lit}.`);
     return;
@@ -986,6 +1004,9 @@ function validateOperand(op: unknown, declared: ReadonlySet<string>, where: stri
   if (hasVar) {
     if (typeof op.var !== 'string' || op.var === '') errs.push(`${where}: operand var must be a non-empty string.`);
     else if (!declared.has(op.var)) errs.push(`${where}: operand references undeclared input "${op.var}".`);
+    else if (numericVars && !numericVars.has(op.var)) {
+      errs.push(`${where}: operand "${op.var}" must be a number-typed input (an enum input can't be a numeric measure/target).`);
+    }
   } else {
     if (typeof op.lit !== 'number' && typeof op.lit !== 'string') {
       errs.push(`${where}: operand lit must be a number or string.`);
@@ -1074,6 +1095,7 @@ export function validateRule(rule: PointsRuleConfig): string[] {
 
   // ── inputs ──────────────────────────────────────────────────────────────────
   const declared = new Set<string>();
+  const declaredNumber = new Set<string>(); // refs with type 'number' — valid as a numeric measure/target
   if (!Array.isArray(rule.inputs)) {
     errs.push('inputs must be an array.');
   } else {
@@ -1085,7 +1107,10 @@ export function validateRule(rule: PointsRuleConfig): string[] {
       }
       if (typeof inp.ref !== 'string' || inp.ref === '') errs.push(`${w}: ref must be a non-empty string.`);
       else if (declared.has(inp.ref)) errs.push(`${w}: duplicate input ref "${inp.ref}".`);
-      else declared.add(inp.ref);
+      else {
+        declared.add(inp.ref);
+        if (inp.type === 'number') declaredNumber.add(inp.ref);
+      }
 
       if (inp.type !== 'number' && inp.type !== 'enum') errs.push(`${w}: type must be 'number' or 'enum'.`);
       if (typeof inp.nullAs !== 'string' || !NULL_POLICIES.has(inp.nullAs)) {
@@ -1100,6 +1125,34 @@ export function validateRule(rule: PointsRuleConfig): string[] {
     });
   }
 
+  // ── attachsTo (denormalized into indexed, non-null columns → must be well-formed) ──
+  if (!isObj(rule.attachsTo)) {
+    errs.push('attachsTo must be an object.');
+  } else {
+    if (rule.attachsTo.scope !== 'program_kpi') errs.push("attachsTo.scope must be 'program_kpi'.");
+    if (typeof rule.attachsTo.kpiCode !== 'string' || rule.attachsTo.kpiCode === '') {
+      errs.push('attachsTo.kpiCode must be a non-empty string.');
+    }
+    if (rule.attachsTo.program != null && typeof rule.attachsTo.program !== 'string') {
+      errs.push('attachsTo.program must be a string or null.');
+    }
+    if (rule.attachsTo.programCategory != null && typeof rule.attachsTo.programCategory !== 'string') {
+      errs.push('attachsTo.programCategory must be a string or null.');
+    }
+  }
+
+  // ── output (the credit bucket + award type the computed points feed in Wave 2) ──
+  if (!isObj(rule.output)) {
+    errs.push('output must be an object.');
+  } else {
+    if (rule.output.awardType !== 'POINTS' && rule.output.awardType !== 'PAYOUT') {
+      errs.push("output.awardType must be 'POINTS' or 'PAYOUT'.");
+    }
+    if (typeof rule.output.fieldId !== 'string' || rule.output.fieldId === '') {
+      errs.push('output.fieldId must be a non-empty credit-field id.');
+    }
+  }
+
   // ── rounding ──────────────────────────────────────────────────────────────────
   if (rule.rounding !== undefined) {
     if (!isObj(rule.rounding)) {
@@ -1108,8 +1161,14 @@ export function validateRule(rule: PointsRuleConfig): string[] {
       if (typeof rule.rounding.mode !== 'string' || !ROUNDING_MODES.has(rule.rounding.mode)) {
         errs.push(`rounding.mode must be one of ${[...ROUNDING_MODES].join(', ')}.`);
       }
-      if (!Number.isInteger(rule.rounding.scale) || (rule.rounding.scale as number) < 0) {
-        errs.push('rounding.scale must be a non-negative integer.');
+      if (
+        !Number.isInteger(rule.rounding.scale) ||
+        (rule.rounding.scale as number) < 0 ||
+        (rule.rounding.scale as number) > 6
+      ) {
+        // Upper bound guards against Math.pow(10, scale) overflowing to Infinity (→ NaN points).
+        // Points/paise are whole, so scale 0 is normal; >6 is never meaningful for a money output.
+        errs.push('rounding.scale must be an integer between 0 and 6.');
       }
     }
   }
@@ -1133,16 +1192,16 @@ export function validateRule(rule: PointsRuleConfig): string[] {
     const n = node as PipelineNode;
     switch (n.type) {
       case 'rate':
-        validateOperand(n.measure, declared, `${w}.measure`, errs);
+        validateOperand(n.measure, declared, `${w}.measure`, errs, declaredNumber);
         if (!isFiniteNum(n.rate)) errs.push(`${w}: rate must be a finite number.`);
         break;
       case 'slab':
         if (!SLAB_BASES.has(n.basis)) errs.push(`${w}: basis must be 'absolute' or 'pct_of_target'.`);
         if (!SLAB_APPLY.has(n.apply)) errs.push(`${w}: apply must be 'marginal' or 'whole'.`);
-        validateOperand(n.measure, declared, `${w}.measure`, errs);
+        validateOperand(n.measure, declared, `${w}.measure`, errs, declaredNumber);
         if (n.basis === 'pct_of_target') {
           if (n.target === undefined) errs.push(`${w}: basis 'pct_of_target' requires a target operand.`);
-          else validateOperand(n.target, declared, `${w}.target`, errs);
+          else validateOperand(n.target, declared, `${w}.target`, errs, declaredNumber);
         }
         validateSlabBands(n, w, errs);
         break;

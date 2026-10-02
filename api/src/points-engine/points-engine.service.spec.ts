@@ -170,7 +170,8 @@ describe('PointsEngineService', () => {
       const draftV2 = row({ id: 'row_v2', version: 2, status: 'draft', effectiveFrom: new Date('2026-03-01T00:00:00.000Z') });
       const priorV1 = row({ id: 'row_v1', version: 1, status: 'published', effectiveFrom: new Date('2026-01-01T00:00:00.000Z'), effectiveTo: null });
       mockPrisma.pointsRule.findFirst.mockResolvedValue(draftV2);
-      mockPrisma.pointsRule.findMany.mockResolvedValue([priorV1]);
+      // publish() queries findMany twice: 1st = other-ruleId clashes (none here), 2nd = same-ruleId priors.
+      mockPrisma.pointsRule.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([priorV1]);
       mockPrisma.pointsRule.update.mockResolvedValue(row({ id: 'row_v2', version: 2, status: 'published' }));
 
       await service.publish(clientAdmin, 'row_v2');
@@ -186,12 +187,22 @@ describe('PointsEngineService', () => {
       // v1 ends BEFORE v2 begins → no overlap.
       const priorV1 = row({ id: 'row_v1', version: 1, status: 'published', effectiveFrom: new Date('2026-01-01T00:00:00.000Z'), effectiveTo: new Date('2026-02-01T00:00:00.000Z') });
       mockPrisma.pointsRule.findFirst.mockResolvedValue(draftV2);
-      mockPrisma.pointsRule.findMany.mockResolvedValue([priorV1]);
+      // publish() queries findMany twice: 1st = other-ruleId clashes (none here), 2nd = same-ruleId priors.
+      mockPrisma.pointsRule.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([priorV1]);
       mockPrisma.pointsRule.update.mockResolvedValue(row({ id: 'row_v2', status: 'published' }));
 
       await service.publish(clientAdmin, 'row_v2');
       const priorUpdate = mockPrisma.pointsRule.update.mock.calls.find((c) => c[0].where.id === 'row_v1');
       expect(priorUpdate).toBeUndefined(); // v1 is immutable + untouched
+    });
+
+    it('HIGH-2: refuses to publish when a DIFFERENT ruleId already governs the same attachment+window', async () => {
+      const draftB = row({ id: 'row_b', ruleId: 'rule_2', version: 1, status: 'draft', effectiveFrom: new Date('2026-02-01T00:00:00.000Z') });
+      const otherA = row({ id: 'row_a', ruleId: 'rule_1', version: 1, status: 'published', effectiveFrom: new Date('2026-01-01T00:00:00.000Z'), effectiveTo: null });
+      mockPrisma.pointsRule.findFirst.mockResolvedValue(draftB);
+      // 1st findMany = the other-ruleId clash query → returns the conflicting published rule.
+      mockPrisma.pointsRule.findMany.mockResolvedValueOnce([otherA]);
+      await expect(service.publish(clientAdmin, 'row_b')).rejects.toBeInstanceOf(ConflictException);
     });
 
     it('refuses to publish an already-published rule', async () => {
