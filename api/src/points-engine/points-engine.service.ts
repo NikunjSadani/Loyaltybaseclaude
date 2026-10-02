@@ -183,7 +183,11 @@ export class PointsEngineService {
 
     // Re-validate the stored config at the publish boundary (belt-and-braces: the draft could
     // have been written before a validator tightening).
-    this.assertValid(this.rowToConfig(row));
+    const config = this.rowToConfig(row);
+    this.assertValid(config);
+    // Reconcile referenced KPI codes against the live KpiDef master so a typo can't ship a rule that
+    // silently credits 0 / skips every outlet (a draft is allowed to reference a not-yet-created KPI).
+    await this.assertKpiCodesExist(row.clientId, config);
 
     const newFrom = row.effectiveFrom;
     const newTo = row.effectiveTo; // null = open-ended
@@ -358,6 +362,31 @@ export class PointsEngineService {
     }
   }
 
+  /**
+   * Reconcile every KPI code a rule references against the tenant's KpiDef master. A rule's attachment
+   * KPI and its achievement/target/pct input sources must be REAL, enabled KpiDef codes: a typo (wrong
+   * case, stray char) otherwise resolves to an ABSENT value at compute time and — depending on the
+   * input's nullAs — silently credits 0 or SKIPs every outlet, with no error surfaced. We enforce this
+   * at the PUBLISH boundary (a draft may legitimately be mid-construction, referencing a KPI not yet
+   * created). `segment:` sources are outlet attributes, not KPIs, so they are excluded.
+   */
+  private async assertKpiCodesExist(clientId: string, config: PointsRuleConfig): Promise<void> {
+    const refs = collectKpiRefs(config);
+    if (refs.length === 0) return;
+    const defs = await this.prisma.kpiDef.findMany({
+      where: { clientId, enabled: true, code: { in: refs } },
+      select: { code: true },
+    });
+    const known = new Set(defs.map((d) => d.code));
+    const missing = refs.filter((c) => !known.has(c));
+    if (missing.length > 0) {
+      throw new BadRequestException(
+        `These KPI codes are not enabled KPIs for this tenant: ${missing.join(', ')}. ` +
+          'Use existing KPI codes from the Target Field Configuration — a typo would silently credit 0.',
+      );
+    }
+  }
+
   /** Build a PointsRuleConfig from server-owned identity + a create/update DTO. */
   private buildConfig(
     identity: { clientId: string; ruleId: string; version: number; status: RuleStatus },
@@ -443,6 +472,29 @@ function toDate(ymd: string): Date {
 /** Format a stored @db.Date back to YYYY-MM-DD. */
 function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Every KPI code a rule references: its attachment KPI plus each input's achievement source (`kpiCode`
+ * or `achievement:CODE`), `target:CODE`, and `pct:CODE`. Mirrors the evaluator's source parsing
+ * (points-engine.helper resolveRaw). `segment:*` is an outlet attribute, not a KPI, so it is excluded.
+ */
+function collectKpiRefs(config: PointsRuleConfig): string[] {
+  const out = new Set<string>();
+  if (config.attachsTo?.kpiCode) out.add(config.attachsTo.kpiCode);
+  for (const inp of config.inputs ?? []) {
+    if (inp.kpiCode) {
+      out.add(inp.kpiCode);
+      continue;
+    }
+    if (inp.source) {
+      const idx = inp.source.indexOf(':');
+      const kind = idx >= 0 ? inp.source.slice(0, idx) : inp.source;
+      const key = idx >= 0 ? inp.source.slice(idx + 1) : '';
+      if (key && (kind === 'achievement' || kind === 'target' || kind === 'pct')) out.add(key);
+    }
+  }
+  return [...out];
 }
 
 /** The calendar day before `d` (UTC), used to close a superseded rule's window. */

@@ -146,6 +146,10 @@ export class PointsComputeService {
     const targetsByCode = new Map(
       targetRows.map((r) => [r.outletCode, normalizeValues(r.targetValues)]),
     );
+    // Outlet type per code — needed to resolve the LIVE CreditField classification per outlet (below).
+    const outletTypeByCode = new Map(
+      outlets.map((o) => [o.outletCode, o.outletType?.code ?? null]),
+    );
 
     // ── 3. Resolve + evaluate per (outlet × active KPI) ─────────────────────────────────────
     // Memoize rule resolution by (program × programCategory × kpiCode): distinct segment combos,
@@ -271,17 +275,63 @@ export class PointsComputeService {
       }
     }
 
-    // Resolve CreditField display NAMES for the output buckets. REQUIRED for the credits-upload export
-    // to round-trip: the existing credits parser matches value columns by CreditField.name, not id
-    // (points-compute-export.helper). One batched query (no N+1).
+    // ── 3b. Reconcile every OK row against the LIVE output CreditField config ───────────────────
+    // The credits-upload file the operator re-uploads does NOT state an award type — the existing
+    // parser RE-DERIVES POINTS-vs-PAYOUT (and skips) from the live `CreditField.outletTypeAwards`
+    // keyed by each outlet's TYPE, at upload time (credits-payouts-parser.ts). So an OK points row
+    // is only safe to export if its output field is, right now, an ACTIVE field classified POINTS for
+    // THAT outlet's type. Otherwise, on re-upload, the row would be either:
+    //   • silently dropped  — field inactive/unknown (parser matches active fields by NAME), or NA
+    //     for the outlet type (parser SKIPs) → points vanish with no error; or
+    //   • ×100'd into rupees — field PAYOUT for the outlet type (parser does rupeesToPaise) → a
+    //     500-point award becomes a ₹500 payout.
+    // We demote any such OK row to ERROR here so (a) the preview is HONEST and (b) the export can only
+    // ever contain correctly-classified whole-points cells. We also reject non-POINTS rule outputs:
+    // PAYOUT-award rules need the paise-correct credit path that lands in Wave 2.
+    // fieldName (the parser matches value columns by CreditField.name, not id) is resolved in the same
+    // batched query (no N+1).
     const fieldIds = [...new Set(rows.map((r) => r.fieldId).filter((x): x is string => !!x))];
     if (fieldIds.length > 0) {
       const fields = await this.prisma.creditField.findMany({
         where: { clientId, id: { in: fieldIds } },
-        select: { id: true, name: true },
+        select: { id: true, name: true, isActive: true, outletTypeAwards: true },
       });
-      const nameById = new Map(fields.map((f) => [f.id, f.name]));
-      for (const r of rows) if (r.fieldId) r.fieldName = nameById.get(r.fieldId) ?? undefined;
+      const fieldById = new Map(fields.map((f) => [f.id, f]));
+      for (const r of rows) {
+        if (!r.fieldId) continue;
+        const field = fieldById.get(r.fieldId);
+        r.fieldName = field?.name ?? undefined;
+        if (r.status !== 'OK') continue;
+        if (r.awardType !== 'POINTS') {
+          demoteToError(
+            r,
+            `This rule credits a ${r.awardType ?? 'non-POINTS'} bucket; the compute preview supports whole POINTS only (PAYOUT crediting lands in Wave 2).`,
+          );
+        } else if (!field) {
+          demoteToError(r, 'Output credit field no longer exists in this tenant — cannot credit.');
+        } else if (!field.isActive) {
+          demoteToError(
+            r,
+            `Output credit field "${field.name}" is inactive — it would be ignored on upload. Re-activate it or point the rule at an active field.`,
+          );
+        } else {
+          const type = outletTypeByCode.get(r.outletCode) ?? null;
+          const cls = classForType(field.outletTypeAwards, type);
+          if (cls !== 'POINTS') {
+            demoteToError(
+              r,
+              `Credit field "${field.name}" is ${cls} for outlet type "${type ?? '—'}", not POINTS — on upload it would ${
+                cls === 'PAYOUT' ? 'be credited as a ₹ payout (×100), not points' : 'be skipped'
+              }. Reclassify the field for this outlet type or point the rule at a POINTS field.`,
+            );
+          }
+        }
+      }
+    } else {
+      // No output fieldIds at all → any OK row is mis-configured (no bucket to credit into).
+      for (const r of rows) {
+        if (r.status === 'OK') demoteToError(r, 'Rule has no output credit field — cannot credit.');
+      }
     }
 
     // ── 4. Aggregate ────────────────────────────────────────────────────────────────────────
@@ -387,6 +437,29 @@ function normalizeValues(v: unknown): Record<string, number | null> {
     out[k] = toNumOrNull(val);
   }
   return out;
+}
+
+/**
+ * In-place demotion of an OK row to ERROR (the output field can't safely take whole points). Clears
+ * points + explanation so it is never summed, exported, or shown as a credit. Mirrors the parser's
+ * effective outcome (dropped / mis-credited) as an explicit, honest ERROR in the preview.
+ */
+function demoteToError(r: ComputePreviewRow, reason: string): void {
+  r.status = 'ERROR';
+  r.reason = reason;
+  r.points = undefined;
+  r.explanation = undefined;
+}
+
+/**
+ * Resolve a CreditField's award class for an outlet type EXACTLY as the credits parser does:
+ * `outletTypeAwards[type] ?? 'NA'` (credits-payouts-parser.ts). A null/unknown type, or a malformed
+ * map, collapses to NA (which the parser SKIPs) — never silently POINTS.
+ */
+function classForType(awards: unknown, type: string | null): 'POINTS' | 'PAYOUT' | 'NA' {
+  if (!type || awards === null || typeof awards !== 'object' || Array.isArray(awards)) return 'NA';
+  const v = (awards as Record<string, unknown>)[type];
+  return v === 'POINTS' || v === 'PAYOUT' ? v : 'NA';
 }
 
 /** A finite number, else null (the evaluator's "absent" that triggers each input's nullAs). */

@@ -90,7 +90,11 @@ describe('PointsComputeService (Wave 1 — read-only preview)', () => {
     mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
     mockPrisma.outletTarget.findMany.mockResolvedValue([]);
     mockPrisma.outlet.findMany.mockResolvedValue([]);
-    mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'cf1', name: 'Q1 Reward' }]);
+    // Default output field: active, POINTS-classified for outlet type SSS (the fixture's type) → OK rows
+    // survive the live-classification reconciliation. Individual tests override to prove demotion.
+    mockPrisma.creditField.findMany.mockResolvedValue([
+      { id: 'cf1', name: 'Q1 Reward', isActive: true, outletTypeAwards: { SSS: 'POINTS' } },
+    ]);
     mockEngine.getActiveForAttachment.mockResolvedValue(null);
     service = new PointsComputeService(
       mockPrisma as unknown as PrismaService,
@@ -128,6 +132,57 @@ describe('PointsComputeService (Wave 1 — read-only preview)', () => {
     expect(uploadRows[0]).toMatchObject({
       rowNum: 1, outletId: 'O1', fieldId: 'cf1', amount: 200, awardType: 'POINTS', status: 'OK',
     });
+  });
+
+  it('DEMOTE→ERROR: output field is PAYOUT-classified for the outlet type (would be ×100 on upload)', async () => {
+    mockPrisma.outlet.findMany.mockResolvedValue([outletRow('O1')]);
+    mockPrisma.outletSalesRecord.findMany.mockResolvedValue([{ outletCode: 'O1', kpiValues: { CASES_SOLD: 100 } }]);
+    mockEngine.getActiveForAttachment.mockResolvedValue(ruleRow());
+    // The live field classifies SSS as PAYOUT → a whole-points award would be re-derived as a ₹ payout.
+    mockPrisma.creditField.findMany.mockResolvedValue([
+      { id: 'cf1', name: 'Q1 Reward', isActive: true, outletTypeAwards: { SSS: 'PAYOUT' } },
+    ]);
+
+    const preview = await service.previewCompute(clientAdmin, { period: '2026-02' });
+
+    expect(preview.rows[0].status).toBe('ERROR');
+    expect(preview.rows[0].reason).toMatch(/PAYOUT|payout|×100/);
+    expect(preview.rows[0].points).toBeUndefined(); // cleared — never summed or exported
+    expect(preview.counts).toMatchObject({ total: 1, ok: 0, error: 1 });
+    expect(preview.totalPoints).toBe(0);
+    expectNoWrite();
+  });
+
+  it('DEMOTE→ERROR: output field is inactive (would be silently dropped on upload)', async () => {
+    mockPrisma.outlet.findMany.mockResolvedValue([outletRow('O1')]);
+    mockPrisma.outletSalesRecord.findMany.mockResolvedValue([{ outletCode: 'O1', kpiValues: { CASES_SOLD: 100 } }]);
+    mockEngine.getActiveForAttachment.mockResolvedValue(ruleRow());
+    mockPrisma.creditField.findMany.mockResolvedValue([
+      { id: 'cf1', name: 'Q1 Reward', isActive: false, outletTypeAwards: { SSS: 'POINTS' } },
+    ]);
+
+    const preview = await service.previewCompute(clientAdmin, { period: '2026-02' });
+
+    expect(preview.rows[0].status).toBe('ERROR');
+    expect(preview.rows[0].reason).toMatch(/inactive/i);
+    expect(preview.counts).toMatchObject({ total: 1, ok: 0, error: 1 });
+    expectNoWrite();
+  });
+
+  it('DEMOTE→ERROR: a PAYOUT-award rule is not creditable by the Wave-1 points preview', async () => {
+    mockPrisma.outlet.findMany.mockResolvedValue([outletRow('O1')]);
+    mockPrisma.outletSalesRecord.findMany.mockResolvedValue([{ outletCode: 'O1', kpiValues: { CASES_SOLD: 100 } }]);
+    // Rule outputs to a PAYOUT bucket — paise crediting is Wave 2; the points preview must refuse it.
+    mockEngine.getActiveForAttachment.mockResolvedValue(
+      ruleRow({ output: { awardType: 'PAYOUT', fieldId: 'cf1' } as never }),
+    );
+
+    const preview = await service.previewCompute(clientAdmin, { period: '2026-02' });
+
+    expect(preview.rows[0].status).toBe('ERROR');
+    expect(preview.rows[0].reason).toMatch(/PAYOUT|Wave 2/i);
+    expect(preview.counts).toMatchObject({ total: 1, ok: 0, error: 1 });
+    expectNoWrite();
   });
 
   it('SKIP: a reject-input rule skips when its target is missing', async () => {

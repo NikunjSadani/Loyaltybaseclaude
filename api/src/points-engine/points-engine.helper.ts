@@ -1173,6 +1173,20 @@ export function validateRule(rule: PointsRuleConfig): string[] {
     }
   }
 
+  // A POINTS award is a WHOLE count — it must not round to a fraction. The credits upload the engine
+  // exports into rejects any value with >1 decimal place, and a fractional "point" is not creditable,
+  // so a POINTS rule may only use rounding.scale 0. (PAYOUT, a future Wave-2 path, may use decimals
+  // for rupees; that is bounded separately above.) rounding omitted ⇒ scale 0 ⇒ fine.
+  if (
+    isObj(rule.output) &&
+    rule.output.awardType === 'POINTS' &&
+    isObj(rule.rounding) &&
+    Number.isInteger(rule.rounding.scale) &&
+    (rule.rounding.scale as number) !== 0
+  ) {
+    errs.push('A POINTS-award rule must use rounding.scale 0 — points are a whole count.');
+  }
+
   // ── pipeline ──────────────────────────────────────────────────────────────────
   if (!Array.isArray(rule.pipeline)) {
     errs.push('pipeline must be an array.');

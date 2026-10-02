@@ -67,7 +67,7 @@ export function buildCreditUploadXlsx(preview: ComputePreview): Buffer {
     (r) =>
       r.status === 'OK' &&
       typeof r.points === 'number' &&
-      Number.isFinite(r.points) &&
+      Number.isInteger(r.points) && // POINTS are a whole count; the parser rejects >1-decimal values
       fieldHeader(r) !== '',
   );
 

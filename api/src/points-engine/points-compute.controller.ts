@@ -14,7 +14,7 @@
  * fine gate @RequirePermission('points_rules:read'). Tenant scope comes from @CurrentUser().clientId.
  */
 
-import { Body, Controller, Get, Post, Query, StreamableFile } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Post, Query, StreamableFile } from '@nestjs/common';
 import { PointsComputeService } from './points-compute.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -50,6 +50,15 @@ export class PointsComputeController {
       program: q.program ?? null,
       kpiCode: q.kpiCode ?? null,
     });
+    // The credit-upload file IS the creditable artifact. When the engine is disabled for this tenant it
+    // must not be produced — otherwise the "disabled" flag gives false assurance (the file would upload
+    // through the ordinary credits flow, which knows nothing of the points-engine toggle). The read-only
+    // preview + human report stay available (flagged); only the machine-reuploadable file is withheld.
+    if (preview.engineDisabled) {
+      throw new ForbiddenException(
+        'The points engine is disabled for this tenant — enable it in settings before exporting a credit-upload file.',
+      );
+    }
     return new StreamableFile(buildCreditUploadXlsx(preview), {
       type: XLSX_MIME,
       disposition: `attachment; filename="points-credit-upload-${preview.period}.xlsx"`,

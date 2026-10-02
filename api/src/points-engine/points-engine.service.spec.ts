@@ -24,6 +24,7 @@ const mockPrisma = {
     create: jest.fn(),
     update: jest.fn(),
   },
+  kpiDef: { findMany: jest.fn() },
   // $transaction(cb) runs the callback with a tx that reuses the same mocks.
   $transaction: jest.fn(),
 };
@@ -81,6 +82,9 @@ describe('PointsEngineService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockValidate.mockReturnValue([]);
+    // By default the referenced KPI (CASES_SOLD, from the fixtures) IS an enabled KpiDef, so publish's
+    // KPI reconciliation passes. A dedicated test overrides this to assert a typo is rejected.
+    mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'CASES_SOLD' }]);
     mockPrisma.$transaction.mockImplementation(async (cb: (tx: typeof mockPrisma) => unknown) => cb(mockPrisma));
     service = new PointsEngineService(mockPrisma as unknown as PrismaService);
   });
@@ -208,6 +212,25 @@ describe('PointsEngineService', () => {
     it('refuses to publish an already-published rule', async () => {
       mockPrisma.pointsRule.findFirst.mockResolvedValue(row({ status: 'published' }));
       await expect(service.publish(clientAdmin, 'row_1')).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('refuses to publish when a referenced KPI code is not an enabled KpiDef (typo guard)', async () => {
+      // Rule references CASES_SOLD (attachment) + a target:LITRES input; the tenant has only CASES_SOLD
+      // enabled → LITRES is a typo/stale ref that would silently credit 0 at compute time → reject.
+      const draft = row({
+        id: 'row_v2',
+        version: 2,
+        status: 'draft',
+        inputs: [
+          { ref: 'value', kpiCode: 'CASES_SOLD', type: 'number', nullAs: 'reject' },
+          { ref: 'tgt', source: 'target:LITRES', type: 'number', nullAs: 'reject' },
+        ] as never,
+      });
+      mockPrisma.pointsRule.findFirst.mockResolvedValue(draft);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'CASES_SOLD' }]); // LITRES absent
+      await expect(service.publish(clientAdmin, 'row_v2')).rejects.toBeInstanceOf(BadRequestException);
+      // Never reached the supersede transaction / status flip.
+      expect(mockPrisma.pointsRule.update).not.toHaveBeenCalled();
     });
   });
 
