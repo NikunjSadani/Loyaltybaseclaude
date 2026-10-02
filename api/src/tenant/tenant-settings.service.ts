@@ -68,6 +68,22 @@ export interface OtpTemplatesSettings {
 /** The distinguishable OTP purposes, keyed to OtpTemplatesSettings. */
 export type OtpTemplatePurpose = 'login' | 'redemptionSelf' | 'kycConsent' | 'redemptionSales';
 
+/**
+ * Points Compute Engine per-tenant switches (POINTS-COMPUTE-ENGINE-DESIGN.md §7, §12 #4/#8).
+ * Reader + default ONLY at Wave 0 — NO enforcement is wired yet (that is Wave 2). Both
+ * default FALSE so the engine ships DORMANT: a tenant must be explicitly turned on.
+ *   - enabled             — master switch for the whole engine for this tenant (authoring +
+ *                           compute + export). When OFF the engine is invisible/no-op.
+ *   - directCreditEnabled — the GIFSY-admin-gated in-portal "compute → confirm → credit"
+ *                           money shortcut (§12 #4). Even when the engine is enabled, direct
+ *                           wallet crediting stays OFF until Gifsy turns this on; clients may
+ *                           still author + compute + export without it.
+ */
+export interface PointsEngineSettings {
+  enabled:             boolean;
+  directCreditEnabled: boolean;
+}
+
 export interface CreditsPayoutsSettings {
   monthCutoffDay:  number;
   safetyCapPoints: number;
@@ -184,6 +200,11 @@ export interface EffectiveSettings {
    * silently coercing — money-path hardening (W0-A). Resolved via resolveTdsPolicy().
    */
   tdsPolicy:              TdsPolicySettings;
+  /**
+   * Points Compute Engine per-tenant switches. Both default FALSE (engine ships dormant).
+   * Reader + default only at Wave 0 — enforcement is NOT wired yet.
+   */
+  pointsEngine:           PointsEngineSettings;
 }
 
 /**
@@ -214,7 +235,8 @@ type SettingKey =
   | 'outletCategories'
   | 'uniquenessPolicy'
   | 'visibilityConfig'
-  | 'tdsPolicy';
+  | 'tdsPolicy'
+  | 'pointsEngine';
 
 const NESTED_KEYS: ReadonlySet<SettingKey> = new Set([
   'redemptionChannels',
@@ -223,6 +245,7 @@ const NESTED_KEYS: ReadonlySet<SettingKey> = new Set([
   'otpTemplates',
   'uniquenessPolicy',
   'visibilityConfig',
+  'pointsEngine',
 ]);
 
 @Injectable()
@@ -305,6 +328,12 @@ export class TenantSettingsService {
       tdsPolicy: {
         section:     TdsSection.SEC_194C,
         methodology: TdsMethodology.GROSS_UP,
+      },
+      // Points Compute Engine — DORMANT by default (owner decision §12 #4/#8). Both OFF: a
+      // tenant must be explicitly enabled; direct wallet crediting stays GIFSY-gated on top.
+      pointsEngine: {
+        enabled:             false,
+        directCreditEnabled: false,
       },
     };
   }
@@ -447,6 +476,7 @@ export class TenantSettingsService {
       creditsPayouts:     { ...base.creditsPayouts },
       otpTemplates:       { ...base.otpTemplates },
       uniquenessPolicy:   { ...base.uniquenessPolicy },
+      pointsEngine:       { ...base.pointsEngine },
       visibilityConfig: {
         ...base.visibilityConfig,
         // Copy the arrays + nested geoFence — never share the reference held by the cached default.
@@ -588,6 +618,18 @@ export class TenantSettingsService {
                 // Radius = positive integer 1..5000 else default (50).
                 radiusMeters: this.intInRange(geo.radiusMeters, 1, 5000, d.geoFence.radiusMeters),
               },
+            };
+          }
+          break;
+        }
+        case 'pointsEngine': {
+          // REPLACE-WHOLE nested key: rebuild the complete block from defaults so a
+          // partial/malformed PUT still yields a valid, complete config. Both switches
+          // default FALSE. No enforcement here — this is the reader/default only (Wave 0).
+          if (this.isObj(v)) {
+            out.pointsEngine = {
+              enabled:             this.bool(v.enabled,             base.pointsEngine.enabled),
+              directCreditEnabled: this.bool(v.directCreditEnabled, base.pointsEngine.directCreditEnabled),
             };
           }
           break;

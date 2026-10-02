@@ -2894,6 +2894,46 @@ model OutletTarget {
   @@map("outlet_targets")
 }
 
+// ─── MODULE: POINTS COMPUTE ENGINE (Wave 0) — versioned rule store ────────────
+// A PointsRule is a versioned, immutable config row that mirrors the shared
+// PointsRuleConfig contract (api/src/points-engine/points-engine.types.ts). A
+// logical rule is identified by `ruleId`; each (clientId, ruleId, version) is one
+// row. A PUBLISHED version is NEVER mutated — "editing" creates a new draft
+// version that supersedes the prior published one on publish. attachsTo/output/
+// rounding/inputs/pipeline hold the typed JSON of the contract verbatim; kpiCode/
+// program/programCategory are DENORMALIZED copies of attachsTo (set at write-time)
+// so the hot-path attachment lookup can be a single indexed query. Additive +
+// dormant (behind the per-tenant pointsEngine settings flag). No compute here.
+
+model PointsRule {
+  id              String    @id @default(cuid())
+  ruleId          String // stable logical identity across versions
+  clientId        String
+  version         Int // monotonic per (clientId, ruleId)
+  status          String    @default("draft") // draft | published | archived
+  effectiveFrom   DateTime  @db.Date // business-time validity (calendar day, no time)
+  effectiveTo     DateTime? @db.Date // null = open-ended
+  evaluationBasis String    @default("PERIOD_AGGREGATE")
+  attachsTo       Json // RuleAttachment { scope, program?, programCategory?, kpiCode }
+  output          Json // { awardType, fieldId }
+  rounding        Json // RoundingSpec { mode, scale }
+  inputs          Json // RuleInput[]
+  pipeline        Json // PipelineNode[]
+  // Denormalized from attachsTo at write-time for indexed attachment lookup.
+  kpiCode         String
+  program         String?
+  programCategory String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  createdBy       String? // JwtPayload.sub of the author (audit attribution)
+
+  @@unique([clientId, ruleId, version])
+  @@index([clientId])
+  @@index([clientId, status])
+  @@index([clientId, program, kpiCode, status])
+  @@map("points_rules")
+}
+
 // ============================================================
 // MODULE: CREDITS & PAYOUTS (DB-backed)
 // ============================================================

@@ -177,10 +177,12 @@ write, TDS freeze, invoice-at-confirm, notifications); the `getPace` input join;
 
 ## 7. Attachment, tenancy, RBAC
 
-- **Attachment:** per-tenant rules live in **`program_settings` via `TenantSettingsService`** (same typed,
-  cache-busted home as conversion-rate / credit-caps / TDS) as a new `pointsEngine` sub-config. Natural key
-  **`(program × KpiCode)`** (resolve each outlet's `programName`/`programCategory` from `Outlet`, select the
-  matching rule), with an optional **per-`Scheme`** rule set when rules vary by scheme rather than tenant-wide.
+- **Attachment:** rules live in a **dedicated `PointsRule` table** (Wave 0 — chosen over a `program_settings`
+  JSON blob because rules are immutable-versioned + queried by attachment; the earlier `program_settings` idea
+  is superseded). `program_settings.pointsEngine` now holds ONLY the two feature flags (`enabled`,
+  `directCreditEnabled`). Natural key **`(program × input-KpiCode)`**, denormalized onto the row for indexed
+  lookup (resolve each outlet's `programName`/`programCategory` from `Outlet`, select the effective published
+  rule via `getActiveForAttachment`).
 - **Tenancy:** all reads/writes `clientId`-scoped via `platformWide()`/`tenantScope()`; un-assumed GIFSY_ADMIN
   platform-wide, everyone else (incl. assumed staff) pinned to their tenant.
 - **RBAC:** author rules = **GIFSY_ADMIN** + a finance-reserved permission (follow `tenancy:write_finance`);
@@ -225,9 +227,10 @@ no `lib/incentive` / `schemes/calculate` / tier / partner-class files exist; eve
 ## 10. Worked archetypes (regression fixtures — stress-test the schema across L1–L4)
 
 - **A — Flat per-case (L1):** 2 pts/case, no target. 137 cases → **274 pts**. (trivial linear path)
-- **B — %-of-target slab, marginal (L2):** target 500; `<80% →0, 80–100% →2, >100% →3` pts/case, marginal.
-  600 cases (120%) → `400×2 + 100×3 + 100×... ` → **1,500 pts**. *Cliff (whole) mode → 2,400* — the 900-pt
-  swing is the single best test of the `apply` flag.
+- **B — %-of-target slab, marginal (L2):** target 500; `<80% →2, 80–100% →3, >100% →4` pts/case, marginal
+  (rates chosen so the worked total is self-consistent). 600 cases (120%) → band edges in cases 0–400 / 400–500 /
+  500–600 → `400×2 + 100×3 + 100×4 = 1,500 pts`. *Cliff (whole) mode → 600×4 = 2,400* — the 900-pt swing is the
+  single best test of the `apply` flag. (Implemented + asserted in `points-engine.helper.spec.ts`.)
 - **C — Gated milestone + cap (L3):** litres target 4,000; gate 80%; 1 pt/L once gated; +1,000 at ≥100%; cap
   5,000; floor 500. 3,000 L (75%) → **0**; 3,400 L (85%) → **3,400**; 4,800 L (120%) → `4,800+1,000=5,800`
   → **capped 5,000**. (tests order gate→compute→milestone→floor→cap)

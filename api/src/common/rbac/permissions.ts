@@ -143,6 +143,19 @@ const TARGETS = {
 } as const;
 
 /**
+ * @capabilityContext §08b · Points Compute Engine (rule authoring)
+ * Controls who can read and author (create/update/publish/archive) PointsRule
+ * configs — the versioned rules that compute wallet points from raw achievement +
+ * target values (POINTS-COMPUTE-ENGINE-DESIGN.md §7). Authoring money-logic, so
+ * write is bound to GIFSY_ADMIN + CLIENT_ADMIN in the role map; the direct-credit
+ * MONEY path is separately gated by the credits:* keys + a GIFSY per-tenant toggle.
+ */
+const POINTS_RULES = {
+  READ:             'points_rules:read',
+  WRITE:            'points_rules:write',
+} as const;
+
+/**
  * @capabilityContext §09 · Wallet & Points
  * Controls who can view partner wallets and perform admin adjustments.
  * Expiry config management is a separate key for fine-grained control.
@@ -276,6 +289,7 @@ export const PERMISSIONS = {
   CATALOG,
   SCHEMES,
   TARGETS,
+  POINTS_RULES,
   WALLET,
   REWARDS,
   VISIBILITY,
@@ -366,6 +380,11 @@ export const PERMISSION_GROUPS: PermissionGroupMeta[] = [
     key: 'TARGETS',
     label: 'Targets & Achievements',
     capabilityContext: '§08 · Targets & Achievements',
+  },
+  {
+    key: 'POINTS_RULES',
+    label: 'Points Compute Engine',
+    capabilityContext: '§08b · Points Compute Engine (rule authoring)',
   },
   {
     key: 'WALLET',

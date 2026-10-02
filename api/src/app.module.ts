@@ -42,6 +42,7 @@ import { AdminOutletsModule } from './admin-outlets/admin-outlets.module';
 import { AdminCoreModule } from './admin-core/admin-core.module';
 import { AdminProgramsModule } from './admin-programs/admin-programs.module';
 import { TargetsModule }      from './targets/targets.module';
+import { PointsEngineModule } from './points-engine/points-engine.module';
 import { InvoicesModule }     from './invoices/invoices.module';
 import { TdsModule }          from './tds/tds.module';
 import { TdsInvoicingModule } from './tds-invoicing/tds-invoicing.module';
@@ -104,6 +105,7 @@ import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
     AdminCoreModule,
     AdminProgramsModule,
     TargetsModule,
+    PointsEngineModule,
     InvoicesModule,
     TdsModule,
     TdsInvoicingModule,
