@@ -26,3 +26,15 @@ export class PreviewComputeDto {
   @IsString()
   kpiCode?: string;
 }
+
+/**
+ * Commit (direct-credit) body — the preview filters plus an optional `expectedKey`: the sourceKey the
+ * operator saw when they previewed. If supplied and the fresh compute's key differs (achievements/targets
+ * edited or a rule republished since review), the commit is REJECTED so we never credit a run that no
+ * longer matches what was reviewed/approved (TOCTOU guard). Omitted → direct API use, no staleness check.
+ */
+export class CommitComputeDto extends PreviewComputeDto {
+  @IsOptional()
+  @IsString()
+  expectedKey?: string;
+}

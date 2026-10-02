@@ -10,5 +10,8 @@ import { TdsModule } from '../tds/tds.module';
   imports: [PrismaModule, WalletModule, InvoicesModule, TdsModule],
   controllers: [CreditsController],
   providers: [CreditsService],
+  // Exported so the Points Compute Engine (Wave 2 direct-credit path) can create + credit a
+  // CreditBatch through the SAME rail as a manual upload (safety caps, confirm, reversal all reused).
+  exports: [CreditsService],
 })
 export class CreditsModule {}

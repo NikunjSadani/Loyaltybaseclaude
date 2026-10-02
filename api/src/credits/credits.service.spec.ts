@@ -56,6 +56,9 @@ const mockTx = {
     update: jest.fn(),
     updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     findFirst: jest.fn(),
+    // Wave 2: the sourced (direct-credit) create path reads findMany + supersedes via deleteMany in-tx.
+    findMany: jest.fn().mockResolvedValue([]),
+    deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
     // createBatch now generates the code + creates UNDER a per-(clientId, period) advisory lock in a tx.
     count: jest.fn().mockResolvedValue(0),
     create: jest.fn(),
@@ -384,6 +387,41 @@ describe('CreditsService', () => {
       expect(data.uploadedBy).toBe('admin1');
       // totalPayoutPaise stored as BigInt
       expect(data.totalPayoutPaise).toBe(BigInt(10000));
+    });
+
+    // ── Wave 2: programmatic (direct-credit) source path — idempotency + one-active-per-period ──
+    const srcDto: CreateBatchDto = {
+      period: '2026-05', totalOutlets: 1, totalPoints: 200, totalPayoutPaise: 0, rows: [],
+    };
+
+    it('source: returns the existing batch unchanged when the identical run already has one (idempotent)', async () => {
+      mockTx.creditBatch.findFirst.mockResolvedValueOnce({ id: 'existing', batchCode: 'CB-2026-05-001', status: 'PENDING_CONFIRM', sourceKey: 'pe_k1' });
+      const res = await service.createBatch(admin, srcDto, { kind: 'POINTS_ENGINE', key: 'pe_k1' });
+      expect(res.id).toBe('existing');
+      expect(mockTx.creditBatch.create).not.toHaveBeenCalled();   // no second batch → no double-credit
+      expect(mockTx.creditBatch.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('source: refuses a new run when a CONFIRMED engine batch already credited the period (double-credit guard)', async () => {
+      mockTx.creditBatch.findFirst
+        .mockResolvedValueOnce(null)                                        // sameRun: none
+        .mockResolvedValueOnce({ batchCode: 'CB-2026-05-001', status: 'CONFIRMED' }); // active confirmed
+      await expect(service.createBatch(admin, srcDto, { kind: 'POINTS_ENGINE', key: 'pe_k2' }))
+        .rejects.toBeInstanceOf(ConflictException);
+      expect(mockTx.creditBatch.create).not.toHaveBeenCalled();
+    });
+
+    it('source: supersedes an un-confirmed engine draft for the period, then creates the new batch', async () => {
+      mockTx.creditBatch.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(null); // no sameRun, no active confirmed
+      mockTx.creditBatch.create.mockResolvedValue({ id: 'new1', sourceKey: 'pe_k3' });
+      const res = await service.createBatch(admin, srcDto, { kind: 'POINTS_ENGINE', key: 'pe_k3' });
+      expect(mockTx.creditBatch.deleteMany).toHaveBeenCalledWith({
+        where: { clientId: 'deoleo', period: '2026-05', sourceKind: 'POINTS_ENGINE', status: 'PENDING_CONFIRM' },
+      });
+      const data = mockTx.creditBatch.create.mock.calls[0][0].data;
+      expect(data.sourceKind).toBe('POINTS_ENGINE');
+      expect(data.sourceKey).toBe('pe_k3');
+      expect(res.id).toBe('new1');
     });
   });
 

@@ -435,6 +435,35 @@ export class TenantSettingsService {
   }
 
   /**
+   * UNCACHED read of the Points Engine flags — used by the direct-credit MONEY gate (commitCompute).
+   *
+   * Same rationale as getVisibilityEnabledUncached: directCreditEnabled turns a wallet-crediting path
+   * on/off, so a Gifsy "turn it off" must take effect immediately fleet-wide; the 5-min per-instance
+   * cache would leave the capability live on stale instances for up to CACHE_TTL_MS. Reads the single
+   * `pointsEngine` row directly. Fails CLOSED (both false) on an absent row, a read error, or a
+   * non-object value; each flag is true ONLY on a strict boolean `true`.
+   */
+  async getPointsEngineFlagsUncached(
+    clientId: string,
+  ): Promise<{ enabled: boolean; directCreditEnabled: boolean }> {
+    try {
+      const row = await this.prisma.programSetting.findUnique({
+        where: { clientId_settingKey: { clientId, settingKey: 'pointsEngine' } },
+        select: { settingValue: true },
+      });
+      const v = row?.settingValue;
+      if (!v || typeof v !== 'object' || Array.isArray(v)) {
+        return { enabled: false, directCreditEnabled: false };
+      }
+      const rec = v as Record<string, unknown>;
+      return { enabled: rec.enabled === true, directCreditEnabled: rec.directCreditEnabled === true };
+    } catch (e) {
+      this.logger.warn(`pointsEngine flags read failed for ${clientId}; treating as OFF: ${e}`);
+      return { enabled: false, directCreditEnabled: false };
+    }
+  }
+
+  /**
    * UNCACHED read of the GSTIN-compulsory switch — used by the KYC create/submit guard.
    *
    * Same rationale as getVisibilityEnabledUncached: the 5-min per-instance cache would leave an

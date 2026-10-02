@@ -3009,6 +3009,12 @@ model CreditBatch {
   totalPoints      Int               @default(0)
   totalPayoutPaise BigInt            @default(0)
   rows             Json              @default("[]")
+  // Provenance for programmatically-created batches (Points Compute Engine direct-credit, Wave 2).
+  // sourceKind is null for ordinary operator uploads; sourceKey is a deterministic idempotency key for
+  // a compute run so re-committing the SAME run returns the existing batch instead of double-crediting.
+  // (clientId, sourceKey) is unique; Postgres treats NULLs as distinct, so upload batches are unaffected.
+  sourceKind       String?
+  sourceKey        String?
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
 
@@ -3017,6 +3023,7 @@ model CreditBatch {
 
   @@index([clientId])
   @@unique([clientId, batchCode], name: "clientId_batchCode")
+  @@unique([clientId, sourceKey], name: "clientId_sourceKey")
   @@index([period])
   @@index([status])
   @@map("credit_batches")

@@ -1179,6 +1179,17 @@ export class AdminCoreService {
       );
     }
 
+    // OWNER-ONLY money control at the DATA boundary: pointsEngine (esp. directCreditEnabled) ENABLES an
+    // in-portal compute→confirm→wallet-credit shortcut. It must ONLY be written through the dedicated,
+    // GIFSY_ADMIN-only Points Engine endpoint (which passes allowPlatformOnlyKey). Blocking it here stops
+    // the generic PUT /v1/admin/settings — reachable by a GIFSY_STAFF holding tenancy:write_finance — from
+    // turning the money shortcut ON for a tenant, bypassing the owner-only guarantee. Mirrors tdsStatutory.
+    if (dto.key === 'pointsEngine' && !opts?.allowPlatformOnlyKey) {
+      throw new ForbiddenException(
+        'The points engine settings can only be changed via the dedicated owner-only Points Engine screen.',
+      );
+    }
+
     // Key-specific guard: the two KYC review-SLA targets drive the breach buckets on the
     // KYC dashboard (kycDashboard()). A non-integer / out-of-range value would poison those
     // metrics, so reject anything outside KYC_SLA_MIN_HOURS–KYC_SLA_MAX_HOURS business hours

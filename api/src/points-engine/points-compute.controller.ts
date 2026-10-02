@@ -19,7 +19,7 @@ import { PointsComputeService } from './points-compute.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { PreviewComputeDto } from './dto/points-compute.dto';
+import { CommitComputeDto, PreviewComputeDto } from './dto/points-compute.dto';
 import { buildCreditUploadXlsx, buildPreviewReportXlsx } from './points-compute-export.helper';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -37,6 +37,24 @@ export class PointsComputeController {
       period: dto.period,
       program: dto.program ?? null,
       kpiCode: dto.kpiCode ?? null,
+    });
+  }
+
+  /**
+   * POST /v1/admin/points-compute/commit — Wave 2 DIRECT-CREDIT: compute the run and create a
+   * PENDING_CONFIRM CreditBatch from its OK rows (the operator then confirms it to move money, through
+   * the existing credits flow). Double-gated in the service (engine enabled + Gifsy-set directCredit);
+   * requires the SAME `credits:upload` entitlement as a manual batch upload. Idempotent per run.
+   */
+  @Post('commit')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
+  @RequirePermission('credits:upload')
+  commit(@CurrentUser() user: JwtPayload, @Body() dto: CommitComputeDto) {
+    return this.compute.commitCompute(user, {
+      period: dto.period,
+      program: dto.program ?? null,
+      kpiCode: dto.kpiCode ?? null,
+      expectedKey: dto.expectedKey ?? null,
     });
   }
 

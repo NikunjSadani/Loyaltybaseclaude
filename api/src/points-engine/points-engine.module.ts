@@ -3,7 +3,10 @@ import { PointsEngineController } from './points-engine.controller';
 import { PointsEngineService } from './points-engine.service';
 import { PointsComputeController } from './points-compute.controller';
 import { PointsComputeService } from './points-compute.service';
+import { PointsEngineSettingsController } from './points-engine-settings.controller';
 import { PrismaModule } from '../prisma/prisma.module';
+import { CreditsModule } from '../credits/credits.module';
+import { AdminCoreModule } from '../admin-core/admin-core.module';
 
 /**
  * Points Compute Engine.
@@ -17,8 +20,8 @@ import { PrismaModule } from '../prisma/prisma.module';
  * later-wave modules can resolve the effective rule for an attachment.
  */
 @Module({
-  imports: [PrismaModule],
-  controllers: [PointsEngineController, PointsComputeController],
+  imports: [PrismaModule, CreditsModule, AdminCoreModule],
+  controllers: [PointsEngineController, PointsComputeController, PointsEngineSettingsController],
   providers: [PointsEngineService, PointsComputeService],
   exports: [PointsEngineService, PointsComputeService],
 })

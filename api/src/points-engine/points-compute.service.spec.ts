@@ -6,10 +6,12 @@
 // service performs NO write (it is read-only; no CreditBatch create / update / $transaction).
 // Run: npx jest --no-coverage src/points-engine/points-compute.service.spec.ts
 
+import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { PointsComputeService } from './points-compute.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsEngineService } from './points-engine.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { CreditsService } from '../credits/credits.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import type { PointsRule } from '@prisma/client';
 
@@ -19,14 +21,16 @@ const mockPrisma = {
   outlet: { findMany: jest.fn() },
   outletSalesRecord: { findMany: jest.fn() },
   outletTarget: { findMany: jest.fn() },
-  creditBatch: { create: jest.fn(), update: jest.fn() },
+  creditBatch: { create: jest.fn(), update: jest.fn(), findFirst: jest.fn(), count: jest.fn() },
   wallet: { update: jest.fn() },
   creditField: { findMany: jest.fn() },
   $transaction: jest.fn(),
 };
 
 const mockEngine = { getActiveForAttachment: jest.fn() };
-const mockSettings = { getEffectiveSettings: jest.fn() };
+const mockSettings = { getEffectiveSettings: jest.fn(), getPointsEngineFlagsUncached: jest.fn() };
+// CreditsService.createBatch is the existing credits rail the commit path reuses (NOT re-implemented).
+const mockCredits = { createBatch: jest.fn() };
 
 const clientAdmin: JwtPayload = {
   sub: 'u_client', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '1', name: 'CA',
@@ -85,6 +89,8 @@ describe('PointsComputeService (Wave 1 — read-only preview)', () => {
     mockSettings.getEffectiveSettings.mockResolvedValue({
       pointsEngine: { enabled: true, directCreditEnabled: false },
     });
+    // Direct-credit money gate reads the UNCACHED flags; default = engine on, direct-credit OFF.
+    mockSettings.getPointsEngineFlagsUncached.mockResolvedValue({ enabled: true, directCreditEnabled: false });
     // default inputs
     mockPrisma.pointsRule.findMany.mockResolvedValue([{ kpiCode: 'CASES_SOLD' }]);
     mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
@@ -96,10 +102,13 @@ describe('PointsComputeService (Wave 1 — read-only preview)', () => {
       { id: 'cf1', name: 'Q1 Reward', isActive: true, outletTypeAwards: { SSS: 'POINTS' } },
     ]);
     mockEngine.getActiveForAttachment.mockResolvedValue(null);
+    mockPrisma.creditBatch.findFirst.mockResolvedValue(null);
+    mockPrisma.creditBatch.count.mockResolvedValue(0);
     service = new PointsComputeService(
       mockPrisma as unknown as PrismaService,
       mockEngine as unknown as PointsEngineService,
       mockSettings as unknown as TenantSettingsService,
+      mockCredits as unknown as CreditsService,
     );
   });
 
@@ -258,5 +267,79 @@ describe('PointsComputeService (Wave 1 — read-only preview)', () => {
     // kpiCode filter short-circuits the discovery findMany on pointsRule.
     expect(mockPrisma.pointsRule.findMany).not.toHaveBeenCalled();
     expect(mockEngine.getActiveForAttachment.mock.calls[0][3]).toBe('LITRES'); // kpiCode arg
+  });
+
+  // ── Wave 2: direct-credit commit ──────────────────────────────────────────────────────────
+  describe('commitCompute (direct-credit)', () => {
+    /** Wire a single-OK-row run (O1 × CASES_SOLD × rate 2 × 100 = 200 pts). */
+    function wireOkRun() {
+      mockPrisma.outlet.findMany.mockResolvedValue([outletRow('O1')]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([{ outletCode: 'O1', kpiValues: { CASES_SOLD: 100 } }]);
+      mockEngine.getActiveForAttachment.mockResolvedValue(ruleRow());
+    }
+
+    it('refuses when the per-tenant engine is disabled (uncached gate)', async () => {
+      mockSettings.getPointsEngineFlagsUncached.mockResolvedValue({ enabled: false, directCreditEnabled: true });
+      await expect(service.commitCompute(clientAdmin, { period: '2026-02' })).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockCredits.createBatch).not.toHaveBeenCalled();
+    });
+
+    it('refuses when Gifsy has NOT enabled direct crediting (default) — a tenant admin cannot self-enable', async () => {
+      // beforeEach default: enabled:true, directCreditEnabled:false.
+      wireOkRun();
+      await expect(service.commitCompute(clientAdmin, { period: '2026-02' })).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockCredits.createBatch).not.toHaveBeenCalled();
+    });
+
+    it('creates a PENDING points-only batch from OK rows through the existing credits rail (no direct wallet write)', async () => {
+      mockSettings.getPointsEngineFlagsUncached.mockResolvedValue({ enabled: true, directCreditEnabled: true });
+      wireOkRun();
+      mockCredits.createBatch.mockResolvedValue({
+        id: 'cb1', batchCode: 'CB-2026-02-001', status: 'PENDING_CONFIRM', period: '2026-02', totalPoints: 200, totalOutlets: 1,
+      });
+
+      const res = await service.commitCompute(clientAdmin, { period: '2026-02' });
+
+      // Routed through CreditsService.createBatch with a POINTS_ENGINE source + idempotency key; pure points.
+      expect(mockCredits.createBatch).toHaveBeenCalledTimes(1);
+      const [, dto, source] = mockCredits.createBatch.mock.calls[0];
+      expect(dto).toMatchObject({ period: '2026-02', totalOutlets: 1, totalPoints: 200, totalPayoutPaise: 0 });
+      expect(dto.rows).toHaveLength(1);
+      expect(dto.rows[0]).toMatchObject({ outletId: 'O1', amount: 200, awardType: 'POINTS' });
+      expect(source.kind).toBe('POINTS_ENGINE');
+      expect(source.key).toMatch(/^pe_[0-9a-f]{64}$/);
+      expect(res).toMatchObject({ batchId: 'cb1', status: 'PENDING_CONFIRM', totalPoints: 200, idempotentHit: false });
+      // The service itself NEVER moves money (money moves only on the operator's confirmBatch).
+      expectNoWrite();
+    });
+
+    it('is idempotent: a run whose batch already exists reports idempotentHit (no double-credit)', async () => {
+      mockSettings.getPointsEngineFlagsUncached.mockResolvedValue({ enabled: true, directCreditEnabled: true });
+      wireOkRun();
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'cb1' }); // same sourceKey already has a batch
+      mockCredits.createBatch.mockResolvedValue({
+        id: 'cb1', batchCode: 'CB-2026-02-001', status: 'PENDING_CONFIRM', period: '2026-02', totalPoints: 200, totalOutlets: 1,
+      });
+
+      const res = await service.commitCompute(clientAdmin, { period: '2026-02' });
+      expect(res.idempotentHit).toBe(true);
+    });
+
+    it('refuses a run with no creditable (OK) rows', async () => {
+      mockSettings.getPointsEngineFlagsUncached.mockResolvedValue({ enabled: true, directCreditEnabled: true });
+      mockPrisma.outlet.findMany.mockResolvedValue([outletRow('O1', 'SILVER')]); // no rule → NO_RULE, 0 OK rows
+      mockEngine.getActiveForAttachment.mockResolvedValue(null);
+      await expect(service.commitCompute(clientAdmin, { period: '2026-02' })).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockCredits.createBatch).not.toHaveBeenCalled();
+    });
+
+    it('TOCTOU: refuses to commit when the fresh run no longer matches the reviewed key', async () => {
+      mockSettings.getPointsEngineFlagsUncached.mockResolvedValue({ enabled: true, directCreditEnabled: true });
+      wireOkRun();
+      await expect(
+        service.commitCompute(clientAdmin, { period: '2026-02', expectedKey: 'pe_staleKeyThatWontMatch' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(mockCredits.createBatch).not.toHaveBeenCalled();
+    });
   });
 });

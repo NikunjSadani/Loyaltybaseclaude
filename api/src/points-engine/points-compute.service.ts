@@ -22,11 +22,13 @@
  * query count.
  */
 
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { CreditAwardType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { CreditsService } from '../credits/credits.service';
 import { PointsEngineService } from './points-engine.service';
 import { evaluateRule, validateRule } from './points-engine.helper';
 import type {
@@ -39,12 +41,15 @@ import type {
   RuleInput,
   RuleStatus,
 } from './points-engine.types';
-import type { ComputePreview, ComputePreviewRow } from './points-compute.types';
+import type { ComputeCommitResult, ComputePreview, ComputePreviewRow } from './points-compute.types';
 import type { PointsRule } from '@prisma/client';
 import { UploadRowDto, UploadRowStatus } from '../credits/dto/credits.dto';
 
 /** The reserved non-KPI key inside a targetValues/kpiValues JSON (custom display names). */
 const NAMES_KEY = '__names';
+
+/** CreditBatch.sourceKind tag for batches created by the direct-credit path (idempotency + provenance). */
+const POINTS_ENGINE_SOURCE = 'POINTS_ENGINE';
 
 @Injectable()
 export class PointsComputeService {
@@ -52,6 +57,7 @@ export class PointsComputeService {
     private readonly prisma: PrismaService,
     private readonly pointsEngine: PointsEngineService,
     private readonly tenantSettings: TenantSettingsService,
+    private readonly credits: CreditsService,
   ) {}
 
   /**
@@ -368,6 +374,117 @@ export class PointsComputeService {
   }
 
   /**
+   * Wave 2 DIRECT-CREDIT commit: compute a run and create a PENDING_CONFIRM CreditBatch from its OK
+   * rows through the EXISTING credits rail (so safety caps, confirm-to-credit, and maker-checker
+   * reversal/clawback are all reused unchanged — this method performs NO wallet write itself; money
+   * moves only when the operator confirms the batch via the existing confirmBatch flow).
+   *
+   * Double-gated: the per-tenant engine must be ENABLED and GIFSY must have turned ON directCreditEnabled
+   * (a tenant admin cannot self-enable the in-portal credit path — §12 #4-revised/#8). The commit route
+   * additionally requires the same `credits:upload` entitlement as a manual batch upload (controller).
+   *
+   * Idempotent: a deterministic sourceKey over the committable content means a re-submit of the identical
+   * run returns the existing batch instead of creating a second one (no double-credit). A genuinely
+   * different result (corrected data) yields a new key → a new batch; other engine batches for the same
+   * period are surfaced (non-blocking) so the UI can warn about double-sourcing.
+   */
+  async commitCompute(
+    user: JwtPayload,
+    opts: { period: string; program?: string | null; kpiCode?: string | null; expectedKey?: string | null },
+  ): Promise<ComputeCommitResult> {
+    // MONEY GATE read UNCACHED + fail-closed: a Gifsy "turn it off" must take effect immediately across
+    // the fleet (the 5-min per-instance settings cache would leave a revoked capability live on stale
+    // instances — the same hazard the project reads visibility/kycGstin uncached for).
+    const flags = await this.tenantSettings.getPointsEngineFlagsUncached(user.clientId);
+    if (!flags.enabled) {
+      throw new ForbiddenException('The points engine is disabled for this tenant.');
+    }
+    if (!flags.directCreditEnabled) {
+      throw new ForbiddenException(
+        'In-portal direct crediting is not enabled for this tenant — Gifsy must turn it on, or use Export for offline upload.',
+      );
+    }
+
+    const preview = await this.previewCompute(user, opts);
+    const uploadRows = PointsComputeService.mapPreviewToUploadRows(preview); // OK rows only, whole points
+    if (uploadRows.length === 0) {
+      throw new BadRequestException(
+        'This run has no creditable rows (all outlets were skipped, errored, or had no rule).',
+      );
+    }
+
+    // Every committable row is POINTS (Wave 1 demotes any PAYOUT-award / mis-classified row to ERROR, so
+    // it never reaches here) → the batch is pure points; no payout paise. Keep ONLY rows that will actually
+    // credit (amount > 0 — confirmBatch skips 0-point rows), so the batch + header match what is credited.
+    const creditableRows = uploadRows.filter((r) => r.amount > 0);
+    if (creditableRows.length === 0) {
+      throw new BadRequestException('This run computed 0 points for every outlet — nothing to credit.');
+    }
+
+    // Idempotency key over the actual committed content (clientId + period + filter + rule versions + the
+    // creditable rows). previewCompute is read-only, so recomputing for the key is cheap + deterministic.
+    const sourceKey = computeSourceKey(user.clientId, preview, creditableRows);
+
+    // TOCTOU guard: if the caller passed the key they reviewed and the fresh compute no longer matches
+    // (achievements/targets edited or a rule republished since review), refuse — never credit a run that
+    // diverged from what was approved. The operator re-previews to see + approve the new result.
+    if (opts.expectedKey && opts.expectedKey !== sourceKey) {
+      throw new ConflictException(
+        'The computation changed since you last previewed it (achievements, targets, or a rule were updated). Re-preview and review the new result before crediting.',
+      );
+    }
+
+    const totalPoints = creditableRows.reduce((sum, r) => sum + r.amount, 0);
+    const totalOutlets = new Set(creditableRows.map((r) => r.outletId)).size;
+    // CreditBatch.totalPoints is a 32-bit Int; fail CLOSED with a clear error rather than let the DB abort
+    // the whole commit on overflow for an (implausibly) huge run.
+    if (totalPoints > 2_147_483_647) {
+      throw new BadRequestException(
+        'This run totals more points than a single batch can hold — narrow it by program or KPI and credit in parts.',
+      );
+    }
+
+    const existingBefore = await this.prisma.creditBatch.findFirst({
+      where: { clientId: user.clientId, sourceKey },
+      select: { id: true },
+    });
+
+    const batch = await this.credits.createBatch(
+      user,
+      {
+        period: preview.period,
+        totalOutlets,
+        totalPoints,
+        totalPayoutPaise: 0,
+        rows: creditableRows,
+      } as never,
+      { kind: POINTS_ENGINE_SOURCE, key: sourceKey },
+    );
+
+    const priorPointsEngineBatchesThisPeriod = await this.prisma.creditBatch.count({
+      where: {
+        clientId: user.clientId,
+        period: preview.period,
+        sourceKind: POINTS_ENGINE_SOURCE,
+        id: { not: batch.id },
+      },
+    });
+
+    return {
+      batchId: batch.id,
+      batchCode: batch.batchCode,
+      status: batch.status,
+      period: batch.period,
+      totalPoints: batch.totalPoints,
+      totalOutlets: batch.totalOutlets,
+      counts: preview.counts,
+      sourceKey,
+      idempotentHit: !!existingBefore,
+      priorPointsEngineBatchesThisPeriod,
+    };
+  }
+
+  /**
    * Pure mapping of a preview's OK rows → the existing credits `UploadRowDto[]`, for the
    * export/Wave-2 re-upload path. POINTS amounts are WHOLE (a count, never ×100). fieldName carries
    * the resolved CreditField.name (previewCompute populates it) so the row round-trips through the
@@ -460,6 +577,35 @@ function classForType(awards: unknown, type: string | null): 'POINTS' | 'PAYOUT'
   if (!type || awards === null || typeof awards !== 'object' || Array.isArray(awards)) return 'NA';
   const v = (awards as Record<string, unknown>)[type];
   return v === 'POINTS' || v === 'PAYOUT' ? v : 'NA';
+}
+
+/**
+ * Deterministic idempotency key for a direct-credit commit: a sha256 over the tenant, period, filter,
+ * the rule versions used, AND the committable rows (outlet × field × whole points, sorted). Two commits
+ * of the SAME result collide (→ the first batch is returned, no double-credit); a genuinely different
+ * result (corrected achievements, a republished rule version, a changed filter) yields a new key → a new,
+ * intentional batch. The row set is folded in so re-running after a data correction is NOT silently
+ * deduped against the stale batch. Scoped to the clientId so keys can never collide across tenants.
+ */
+function computeSourceKey(
+  clientId: string,
+  preview: ComputePreview,
+  uploadRows: UploadRowDto[],
+): string {
+  const rows = uploadRows
+    .map((r) => `${r.outletId}|${r.fieldId}|${r.amount}`)
+    .sort();
+  const versions = preview.ruleVersionsUsed
+    .map((v) => `${v.ruleId}@${v.version}`)
+    .sort();
+  const payload = JSON.stringify({
+    clientId,
+    period: preview.period,
+    filter: { program: preview.filter?.program ?? null, kpiCode: preview.filter?.kpiCode ?? null },
+    versions,
+    rows,
+  });
+  return `pe_${createHash('sha256').update(payload).digest('hex')}`;
 }
 
 /** A finite number, else null (the evaluator's "absent" that triggers each input's nullAs). */

@@ -46,6 +46,28 @@ export interface ComputePreviewRow {
   explanation?: string;
 }
 
+/**
+ * The result of a Wave 2 direct-credit COMMIT: the PENDING_CONFIRM CreditBatch created from the run's
+ * OK rows (through the existing credits rail — the operator still confirms it to move money), plus the
+ * run's counts for the UI. `idempotentHit` is true when the identical run already had a batch (the
+ * existing one is returned, nothing re-created). `priorPointsEngineBatchesThisPeriod` surfaces other
+ * engine batches for the same period so the UI can warn about double-sourcing (non-blocking — a
+ * correction run is legitimate, mirroring how manual uploads allow multiple batches per period).
+ */
+export interface ComputeCommitResult {
+  batchId: string;
+  batchCode: string;
+  status: string;
+  period: string;
+  totalPoints: number;
+  totalOutlets: number;
+  counts: { total: number; ok: number; skip: number; error: number; noRule: number };
+  /** The run's content hash — the UI stores it and passes it back as `expectedKey` on confirm/re-commit. */
+  sourceKey: string;
+  idempotentHit: boolean;
+  priorPointsEngineBatchesThisPeriod: number;
+}
+
 /** A full compute run's preview for one (clientId × period), before any crediting. */
 export interface ComputePreview {
   clientId: string;

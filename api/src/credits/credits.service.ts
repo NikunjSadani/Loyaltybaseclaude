@@ -881,7 +881,21 @@ export class CreditsService {
   }
 
   // ─── POST /v1/admin/credits/batches ────────────────────────────────────────
-  async createBatch(user: JwtPayload, dto: CreateBatchDto) {
+  /**
+   * Create a PENDING_CONFIRM credit batch from parsed rows.
+   *
+   * `source` (optional) tags a programmatically-created batch (the Points Compute Engine direct-credit
+   * path, Wave 2) with a provenance kind + a deterministic idempotency key. When a key is given, a batch
+   * already carrying that (clientId, sourceKey) is returned UNCHANGED instead of a second batch being
+   * created — so re-submitting the identical compute run (double-click, retry) cannot double-credit.
+   * Ordinary operator uploads pass no source (both columns stay null; multiple uploads per period are
+   * unaffected — NULL sourceKeys are distinct). Caps + the upload window are enforced for BOTH paths.
+   */
+  async createBatch(
+    user: JwtPayload,
+    dto: CreateBatchDto,
+    source?: { kind: string; key: string },
+  ) {
     // Load per-tenant settings and ENFORCE the safety caps + month-cutoff window
     // server-side (these were FE-only and bypassable via direct API).
     const { creditsPayouts } = await this.tenantSettings.getEffectiveSettings(user.clientId);
@@ -897,8 +911,50 @@ export class CreditsService {
     // Generate the code + create UNDER a per-(clientId, period) advisory lock so concurrent
     // createBatch calls for the same tenant/period serialize into sequential codes (batchCode is
     // now unique per tenant, not globally — a different tenant reusing CB-<period>-001 is fine).
+    // The SAME lock serializes idempotency: two concurrent commits of one run can't both pass the
+    // sourceKey check-then-create (the second waits, then finds the first's batch and returns it).
     const batch = await this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`CBATCH|${user.clientId}|${dto.period}`}, 0))`;
+      if (source?.key) {
+        // Idempotent: the identical run already has a batch → return it unchanged (no double-credit).
+        const sameRun = await tx.creditBatch.findFirst({
+          where: { clientId: user.clientId, sourceKey: source.key },
+        });
+        if (sameRun) return sameRun;
+
+        // ONE active programmatic batch per (clientId, period, sourceKind). An already-CONFIRMED (or
+        // PARTIALLY_REVERSED) batch for this period has credited/partly-credited wallets — creating a
+        // second one that overlaps the same outlets would DOUBLE-credit on confirm. Refuse; the operator
+        // must reverse the existing credit before computing a fresh run for the period. (A manual upload
+        // passes no source and is unaffected — multiple manual batches per period remain allowed.)
+        const activeConfirmed = await tx.creditBatch.findFirst({
+          where: {
+            clientId: user.clientId,
+            period: dto.period,
+            sourceKind: source.kind,
+            status: { in: ['CONFIRMED', 'PARTIALLY_REVERSED'] },
+          },
+          select: { batchCode: true, status: true },
+        });
+        if (activeConfirmed) {
+          throw new ConflictException(
+            `A ${activeConfirmed.status} ${source.kind} batch (${activeConfirmed.batchCode}) already credited ${dto.period}. ` +
+              'Reverse it before computing and crediting a new run for this period.',
+          );
+        }
+
+        // A still-UNCONFIRMED programmatic batch for this period has credited NOTHING yet, so a recompute
+        // supersedes it (delete the stale draft) rather than stacking a second pending batch the operator
+        // could accidentally also confirm. Safe: a PENDING_CONFIRM batch has no payout entries/reversals.
+        await tx.creditBatch.deleteMany({
+          where: {
+            clientId: user.clientId,
+            period: dto.period,
+            sourceKind: source.kind,
+            status: 'PENDING_CONFIRM',
+          },
+        });
+      }
       const batchCode = await this.generateBatchCode(tx, user.clientId, dto.period);
       return tx.creditBatch.create({
         data: {
@@ -913,6 +969,8 @@ export class CreditsService {
           totalPayoutPaise: toPaiseBigInt(dto.totalPayoutPaise),
           // rows JSON stores per-row `amount` in paise (PAYOUT) or whole points (POINTS).
           rows: dto.rows as unknown as Prisma.InputJsonValue,
+          sourceKind: source?.kind ?? null,
+          sourceKey: source?.key ?? null,
         },
       });
     });
