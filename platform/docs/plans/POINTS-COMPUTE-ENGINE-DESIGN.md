@@ -288,3 +288,32 @@ staging e2e → owner-gated cutover.
 | 6 | Slab marginal/whole | **No default — force the choice + show both totals** |
 | 7 | Clawback | **Reuse the existing credits maker-checker reversal** (not a new path); recompute-delta → existing reversal |
 | 8 | Opt-in granularity | **Per tenant (whole client on/off)**; block manual double-sourcing when engine-on |
+
+---
+
+## 13. Execution plan & orchestration (approved 2026-10-02; Wave 0 STARTED)
+
+**Model:** I orchestrate; agents write code; I integrate + run full gates + run independent adversarial
+audits + own the result. Peak ~3–4 concurrent agents; each wave modest. Money path = dual (money+identity)
+audit. UI/UX gets a design-first lane + a dedicated UI/UX audit. **Owner comes in ONCE — Wave 5 UAT — after my
+full end-to-end audit + runtime verification + staging e2e (it reaches the owner bug-free, as a confirmation).**
+
+| Wave | Activity | Agents | Duration | Depends | Owner? |
+|---|---|---|---|---|---|
+| **0 Core** | `PointsRule` schema+migration+CRUD; pure evaluator (node pipeline + whitelisted-AST formula, no `eval`) + fixtures A–D | 2 build + 1 correctness audit | ~1.5–2 sessions | — | no |
+| **1 Compute+export** | compute service (join inputs like `getPace` → evaluator → `UploadRowDto[]` + skip-reason); preview report + export in credits-upload format (read-only route) | 2 build + 1 audit | ~1.5 sessions | W0 | no |
+| **2 Direct-credit money path** | GIFSY-toggled compute→preview→confirm→credit; compute-run idempotency key; clawback via existing maker-checker reversal; per-tenant opt-in + double-sourcing guard | 2 build + 2 audit (dual) | ~2 sessions | W1 | no |
+| **3 UI/UX (masterpiece)** | 3a design (rule builder, slab grid w/ live marginal-vs-whole, rule simulator, compute/preview/export screens, GIFSY toggle, validation) → 3b build | 1 design + 2–3 FE build + 1 UI/UX audit | ~3–4 sessions | W1–W2 | no |
+| **4 Verify & harden** | Playwright points-engine specs (authoring both roles, compute, preview, direct-credit, clawback); full runtime verification | 3 audit | ~1.5–2 sessions | W3 | no |
+| **5 Final audit + UAT + cutover** | my final end-to-end adversarial+runtime audit → owner UAT on staging → prod cutover | fresh e2e audit + me | my audit ~1 session + owner UAT + cutover | W4 | **✅ UAT + cutover go** |
+
+**Agents total:** ~18–22 deployments across the project (sequential/reused), peak ~3–4 concurrent.
+**Time:** ~10–14 build sessions; ~3–5 weeks elapsed (incl. owner UAT + cutover). Likely 1–2 cutovers (W0–W2
+may ship dormant/off behind the per-tenant flag, then the UI).
+**Owner dependencies:** mid-build ~none (I resolve intermediate forks with documented recommendations, interrupt
+only for a genuine product-judgment fork). Unavoidable owner-gated points: staging deploy if the Actions
+billing block bites (re-public decision), the Wave 5 UAT, the prod cutover approval.
+**UI/UX bar:** design-first; progressive disclosure (simple rate = 2 fields, slabs = a grid, formula = a
+power-user panel); a LIVE simulator (type inputs → see points + band breakdown, marginal vs whole side-by-side);
+every state (loading/empty/error/async-race) + inline validation; light+dark parity, responsive, a11y; a
+dedicated UI/UX audit lane + runtime screenshot review + iterate before it reaches the owner.
