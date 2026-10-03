@@ -89,14 +89,25 @@ export function NumberField({
   disabled?: boolean;
   min?: number;
 }) {
+  // Local text so the field can be momentarily blank / mid-edit without snapping to 0. We commit a number
+  // on every keystroke (a blank commits 0 so the config stays valid) but DON'T reset the text while the
+  // user is clearing it; we re-sync only when the external value changes to something the text isn't.
+  const [text, setText] = React.useState<string>(Number.isFinite(value) ? String(value) : '');
+  React.useEffect(() => {
+    const parsed = text === '' ? NaN : Number(text);
+    if (text !== '' && parsed !== value && Number.isFinite(value)) setText(String(value));
+  }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <input
       type="number"
-      value={Number.isFinite(value) ? value : ''}
+      value={text}
       disabled={disabled}
       placeholder={placeholder}
       min={min}
-      onChange={(e) => onChange(e.target.value === '' ? 0 : Number(e.target.value))}
+      onChange={(e) => {
+        setText(e.target.value);
+        onChange(e.target.value === '' ? 0 : Number(e.target.value));
+      }}
       className={`${inputCls} disabled:bg-gray-100 disabled:text-gray-400`}
     />
   );

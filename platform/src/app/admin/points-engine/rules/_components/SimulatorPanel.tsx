@@ -143,8 +143,9 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
             <div className="grid grid-cols-1 gap-2">
               {achKpis.map((k) => (
                 <div key={`a-${k}`}>
-                  <label className={labelCls}>Achievement · {k}</label>
+                  <label htmlFor={`sim-ach-${k}`} className={labelCls}>Achievement · {k}</label>
                   <input
+                    id={`sim-ach-${k}`}
                     type="number"
                     value={ctx.achievements[k] ?? ''}
                     placeholder="blank = missing"
@@ -160,8 +161,9 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
             <div className="grid grid-cols-1 gap-2">
               {tgtKpis.map((k) => (
                 <div key={`t-${k}`}>
-                  <label className={labelCls}>Target · {k}</label>
+                  <label htmlFor={`sim-tgt-${k}`} className={labelCls}>Target · {k}</label>
                   <input
+                    id={`sim-tgt-${k}`}
                     type="number"
                     value={ctx.targets[k] ?? ''}
                     placeholder="blank = missing"
@@ -176,8 +178,9 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
           <div className="grid grid-cols-1 gap-2">
             {(['program', 'programCategory', 'outletType'] as const).map((f) => (
               <div key={f}>
-                <label className={labelCls}>Segment · {f}</label>
+                <label htmlFor={`sim-seg-${f}`} className={labelCls}>Segment · {f}</label>
                 <input
+                  id={`sim-seg-${f}`}
                   value={ctx.segment[f]}
                   placeholder="(blank)"
                   onChange={(e) => setSeg(f, e.target.value)}
