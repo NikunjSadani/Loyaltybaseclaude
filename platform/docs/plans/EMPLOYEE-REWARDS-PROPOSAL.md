@@ -1,5 +1,13 @@
 # Employee Rewards Portal — Product Proposal
 
+> **⚠️ SUPERSEDED IN PART by [EMPLOYEE-REWARDS-DESIGN.md](./EMPLOYEE-REWARDS-DESIGN.md) (2026-08).**
+> That doc is now authoritative. Key reversals from this proposal: **same DB, not a separate DB**;
+> spine is **`Client.loyaltyType`** resolving a capability set; earner is a **unified `RewardAccount`**
+> (OUTLET | EMPLOYEE peers), not an employee-only "member"; and — because Deoleo's prod wallet is
+> empty — **converge Deoleo onto the one model now (no strangler / no future migration)**. Britannia
+> is the anchor use case. The reuse map, phases, and effort logic below still hold; read DESIGN.md
+> for the current decisions.
+>
 > **Status: INITIAL PROPOSAL — not started. No code written.**
 > Created 2026-07-18. This is a *separate product line* from the trade-loyalty platform
 > (operator Gifsy; live client Deoleo). Kept as its own document deliberately — it shares the
