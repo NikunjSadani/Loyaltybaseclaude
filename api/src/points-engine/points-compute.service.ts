@@ -86,6 +86,7 @@ export class PointsComputeService {
 
     const settings = await this.tenantSettings.getEffectiveSettings(clientId);
     const engineDisabled = !settings.pointsEngine.enabled;
+    const directCreditEnabled = settings.pointsEngine.directCreditEnabled;
 
     // ── 1. Determine the active input-KPI attachments to compute ────────────────────────────
     // An explicit kpiCode filter pins the run to exactly that KPI (so outlets with no rule for it
@@ -115,6 +116,7 @@ export class PointsComputeService {
       totalPoints: 0,
       rows: [],
       engineDisabled,
+      directCreditEnabled,
       ruleVersionsUsed: [],
     };
     if (activeKpiCodes.length === 0) return emptyPreview;
@@ -369,6 +371,7 @@ export class PointsComputeService {
       totalPoints,
       rows,
       engineDisabled,
+      directCreditEnabled,
       ruleVersionsUsed: [...ruleVersions.values()],
     };
   }

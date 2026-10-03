@@ -156,6 +156,8 @@ export interface ComputePreview {
   totalPoints: number;
   rows: ComputePreviewRow[];
   engineDisabled: boolean;
+  /** Gifsy-enabled in-portal direct crediting — lets the UI offer/hide "Credit in portal" pre-click. */
+  directCreditEnabled: boolean;
   ruleVersionsUsed: Array<{ ruleId: string; version: number }>;
 }
 export interface ComputeCommitResult {

@@ -32,7 +32,13 @@ export function listRules(q?: { status?: string; program?: string; kpiCode?: str
 }
 export const getRule = (id: string) => api.get<PointsRuleRow>(`${RULES}/${id}`);
 export const createRule = (draft: RuleConfigDraft) => api.post<PointsRuleRow>(RULES, draft);
-export const updateRule = (id: string, draft: Omit<RuleConfigDraft, 'ruleId'>) => api.patch<PointsRuleRow>(`${RULES}/${id}`, draft);
+export function updateRule(id: string, draft: RuleConfigDraft): Promise<ApiResponse<PointsRuleRow>> {
+  // STRIP ruleId: the PATCH (updateDraft) DTO has no ruleId and the backend pipe is forbidNonWhitelisted,
+  // so sending it 400s. A loaded draft carries ruleId (identity), so remove it from the update body.
+  const { ruleId: _omit, ...body } = draft;
+  void _omit;
+  return api.patch<PointsRuleRow>(`${RULES}/${id}`, body);
+}
 export const publishRule = (id: string) => api.post<PointsRuleRow>(`${RULES}/${id}/publish`, {});
 export const archiveRule = (id: string) => api.post<PointsRuleRow>(`${RULES}/${id}/archive`, {});
 

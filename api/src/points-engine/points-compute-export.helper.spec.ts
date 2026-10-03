@@ -39,6 +39,7 @@ function samplePreview(overrides: Partial<ComputePreview> = {}): ComputePreview 
     counts: { total: 7, ok: 4, skip: 1, error: 1, noRule: 1 },
     totalPoints: 1850,
     engineDisabled: false,
+    directCreditEnabled: false,
     ruleVersionsUsed: [
       { ruleId: 'rule_cases_q3', version: 7 },
       { ruleId: 'rule_vis', version: 2 },

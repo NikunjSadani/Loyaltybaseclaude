@@ -81,6 +81,9 @@ export interface ComputePreview {
   rows: ComputePreviewRow[];
   /** True if the per-tenant engine flag is OFF (preview still allowed, but flagged — can't be credited). */
   engineDisabled: boolean;
+  /** True when Gifsy has enabled in-portal direct crediting for this tenant — lets the UI offer/hide
+   *  the "Credit in portal" action BEFORE a click (the commit route still enforces it server-side). */
+  directCreditEnabled: boolean;
   /** Rule-version content-hash set used — frozen into a batch later (Wave 2). */
   ruleVersionsUsed: Array<{ ruleId: string; version: number }>;
 }
