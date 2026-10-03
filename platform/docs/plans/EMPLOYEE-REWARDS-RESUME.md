@@ -5,10 +5,17 @@
 > This is **state**; the authoritative *how/what* live in the doc set below.
 
 ## Current state (2026-10-03)
-- **PHASE 0 UNDERWAY** on the isolated worktree `../Loyaltybaseclaude-er` (branch `er/phase0-shell`, off
-  `develop`). The **capability-gated admin shell is scaffolded + FULL-GATE GREEN** (committed locally, NOT
-  pushed). ▶ Remaining Phase-0 exit steps are **owner-gated**: push `er/phase0-shell`→`develop` (staging
-  deploy + Actions-billing check) and create the staging `uat-britannia` tenant (staging DB op).
+- **PHASE 0 CODE DONE — STAGING DEPLOY HELD BY OWNER.** The capability-gated admin shell is scaffolded,
+  **FULL-GATE GREEN**, and **independently audited (PASS-WITH-NOTES)** on the isolated worktree
+  `../Loyaltybaseclaude-er` (branch `er/phase0-shell`, HEAD `5edc57a`) — committed **local only, NOT pushed**,
+  isolated from the trade work.
+- ⏸️ **Owner HELD the staging deploy (2026-10-03).** Do **NOT** push `er/phase0-shell`→`develop` — `develop`
+  carries ~20 unpushed commits including the **held trade Points Compute Engine Waves 1–3**, so a push would
+  deploy those too. No `uat-britannia` tenant / staging runtime-verify until the owner re-opens the staging
+  cadence.
+- ▶ **To resume:** owner GO on staging → push + staging `uat-britannia` tenant → runtime-verify (Deoleo nav
+  unchanged + Britannia employee cockpit) → then **Phase A** (BUILD-PLAN §5). The worktree + lane branch
+  persist; nothing is lost.
 - **Foundation is LIVE in prod** (cutover #35, dormant): `Client.loyaltyType` + unified `RewardAccount`
   (OUTLET|EMPLOYEE) + dual-write + back-fill. Deoleo byte-identical. See [[employee-rewards-product]].
 - **This is a SECOND product on the same platform/repo** — inherits Loyaltybase's engineering process
