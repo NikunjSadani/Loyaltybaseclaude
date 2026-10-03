@@ -35,6 +35,64 @@ function bool(v: unknown, fallback: boolean): boolean {
   return typeof v === 'boolean' ? v : fallback;
 }
 
+/* ─── Capabilities (Employee Rewards) ─────────────────────────────────────────
+   The backend resolves a per-tenant CapabilitySet from `loyaltyType` (+ per-client
+   overrides) — see api/src/common/loyalty-capabilities.helper.ts — and now returns it
+   on /admin/settings/config under `data.capabilities`. The FE reads it (it does NOT
+   re-derive it) to gate the admin shell by capability. Fail-safe: anything
+   missing/malformed resolves to the TRADE defaults (the live product), so an absent
+   value can never flip a tenant into the compliance-off employee posture. ───────── */
+
+export type EarnerModel = 'OUTLET' | 'EMPLOYEE';
+
+export interface Capabilities {
+  /** Derived from loyaltyType by the backend; NOT overridable. */
+  earnerModel: EarnerModel;
+  kyc: boolean;
+  gst: boolean;
+  tds: boolean;
+  payouts: boolean;
+  invoicing: boolean;
+  vendorMarketplace: boolean;
+  celebratoryUx: boolean;
+}
+
+/** The boolean capability keys (everything except the derived earnerModel). */
+export type CapabilityKey = Exclude<keyof Capabilities, 'earnerModel'>;
+
+/** TRADE defaults — the live product, and the fail-safe target. */
+export const TRADE_CAPABILITIES: Capabilities = {
+  earnerModel: 'OUTLET',
+  kyc: true,
+  gst: true,
+  tds: true,
+  payouts: true,
+  invoicing: true,
+  vendorMarketplace: false,
+  celebratoryUx: false,
+};
+
+const CAP_KEYS: readonly CapabilityKey[] = [
+  'kyc', 'gst', 'tds', 'payouts', 'invoicing', 'vendorMarketplace', 'celebratoryUx',
+];
+
+/**
+ * Shape the raw `data.capabilities` blob into a fully-populated Capabilities.
+ * Fail-safe: a missing/invalid blob returns TRADE defaults; earnerModel is only
+ * 'EMPLOYEE' when explicitly present, otherwise 'OUTLET' (never guessed into the
+ * compliance-off posture). Each boolean falls back to its TRADE default when absent.
+ */
+export function normalizeCapabilities(raw: unknown): Capabilities {
+  const c = (raw ?? null) as Record<string, unknown> | null;
+  if (!c || typeof c !== 'object') return { ...TRADE_CAPABILITIES };
+  const out: Capabilities = { ...TRADE_CAPABILITIES };
+  out.earnerModel = c.earnerModel === 'EMPLOYEE' ? 'EMPLOYEE' : 'OUTLET';
+  for (const k of CAP_KEYS) {
+    if (typeof c[k] === 'boolean') out[k] = c[k] as boolean;
+  }
+  return out;
+}
+
 /**
  * Normalize a raw `clients.features` blob into a fully-shaped FeatureFlags. Every
  * key falls back to the DEFAULT_FEATURES value when missing/non-boolean, and the
@@ -70,6 +128,10 @@ export function normalizeFeatures(raw: unknown): FeatureFlags {
 export interface TenantFeaturesState {
   /** Fully-shaped features. DEFAULT_FEATURES until the endpoint settles. */
   features: FeatureFlags;
+  /** The tenant's resolved capability set (Employee Rewards). TRADE defaults until
+      the endpoint settles / for endpoints that don't return it (additive — existing
+      consumers that only read `features` are unaffected). */
+  capabilities: Capabilities;
   /** True until the endpoint resolves OR errors — gate feature-off UI on this. */
   loading: boolean;
 }
@@ -83,6 +145,7 @@ export interface TenantFeaturesState {
 export function useTenantFeatures(endpoint: string): TenantFeaturesState {
   const [state, setState] = useState<TenantFeaturesState>({
     features: DEFAULT_FEATURES,
+    capabilities: TRADE_CAPABILITIES,
     loading: true,
   });
 
@@ -92,7 +155,11 @@ export function useTenantFeatures(endpoint: string): TenantFeaturesState {
       .then((r) => (r.ok ? r.json() : null))
       .then((res) => {
         if (cancelled) return;
-        setState({ features: normalizeFeatures(res?.data?.features), loading: false });
+        setState({
+          features: normalizeFeatures(res?.data?.features),
+          capabilities: normalizeCapabilities(res?.data?.capabilities),
+          loading: false,
+        });
       })
       .catch(() => {
         if (!cancelled) setState((prev) => ({ ...prev, loading: false }));

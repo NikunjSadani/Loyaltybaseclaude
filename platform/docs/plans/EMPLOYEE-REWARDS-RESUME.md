@@ -5,7 +5,10 @@
 > This is **state**; the authoritative *how/what* live in the doc set below.
 
 ## Current state (2026-10-03)
-- **BUILD NOT STARTED.** Planning + documentation complete; all decisions locked; awaiting the owner's GO.
+- **PHASE 0 UNDERWAY** on the isolated worktree `../Loyaltybaseclaude-er` (branch `er/phase0-shell`, off
+  `develop`). The **capability-gated admin shell is scaffolded + FULL-GATE GREEN** (committed locally, NOT
+  pushed). ▶ Remaining Phase-0 exit steps are **owner-gated**: push `er/phase0-shell`→`develop` (staging
+  deploy + Actions-billing check) and create the staging `uat-britannia` tenant (staging DB op).
 - **Foundation is LIVE in prod** (cutover #35, dormant): `Client.loyaltyType` + unified `RewardAccount`
   (OUTLET|EMPLOYEE) + dual-write + back-fill. Deoleo byte-identical. See [[employee-rewards-product]].
 - **This is a SECOND product on the same platform/repo** — inherits Loyaltybase's engineering process
@@ -60,4 +63,12 @@ nav unchanged). In parallel, the owner pre-stages external deps (DLT templates, 
 credits + catalogue, pilot vendors).
 
 ## Wave log (append as the build progresses)
-- *(none yet — build not started)*
+- **Phase 0 — capability-gated admin shell** (2026-10-03, `er/phase0-shell`, FULL-GATE GREEN):
+  - BE: `getTenantConfig` (admin-core) now returns the resolved `capabilities` (reuses `resolveCapabilities`,
+    additive + fail-safe to TRADE). `api jest` 3456 ✓, `nest build` ✓.
+  - FE: `lib/tenant-features.ts` surfaces `capabilities`; **new `lib/admin-nav.ts`** = the trade nav (moved
+    verbatim) + the employee cockpit skeleton + a pure, unit-tested `selectAdminNav` (picks the world by
+    `earnerModel`); `app/admin/layout.tsx` wired to it; 8 employee stub pages. `platform tsc` ✓, `vitest`
+    2595 ✓ (incl. `admin-nav.test.ts` 5 ✓; fixed 2 source-read tests that moved with the nav).
+  - TRADE output is byte-identical (same tree, same gates); EMPLOYEE flips to the cockpit. ⏳ Independent
+    audit + the owner-gated push/staging-tenant + staging runtime-verify (Deoleo unchanged + Britannia nav).

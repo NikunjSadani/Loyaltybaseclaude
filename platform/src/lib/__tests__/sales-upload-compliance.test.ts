@@ -12,7 +12,7 @@
  *  4. app/api/admin/sales/bulk-upload/route.ts  — POST handler
  *  5. app/api/admin/sales/records/route.ts      — GET handler
  *  6. app/admin/sales/page.tsx           — admin sales upload page
- *  7. app/admin/layout.tsx               — "Sales Data" nav entry
+ *  7. lib/admin-nav.ts                   — "Sales Data" nav entry (moved from layout.tsx)
  */
 
 import { readFileSync } from 'fs';
@@ -500,18 +500,21 @@ describe('G — app/admin/sales/page.tsx: UI shape', () => {
 // H: Admin layout — Sales Data nav entry
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('H — app/admin/layout.tsx: nav entry', () => {
-  const layout = src('app/admin/layout.tsx');
+// The admin nav model moved from app/admin/layout.tsx into lib/admin-nav.ts
+// (Employee Rewards Phase 0 — the capability-gated shell). The Sales Data entry
+// now lives in TRADE_NAV_ITEMS there; assert against that file.
+describe('H — lib/admin-nav.ts: nav entry', () => {
+  const nav = src('lib/admin-nav.ts');
 
   it('H1: nav includes /admin/sales path', () => {
-    expect(layout).toMatch(/\/admin\/sales/);
+    expect(nav).toMatch(/\/admin\/sales/);
   });
 
   it('H2: nav entry has a "Sales Data" or "Sales" label', () => {
     const hasSalesLabel =
-      layout.includes('Sales Data') ||
-      layout.includes("'Sales'") ||
-      layout.includes('"Sales"');
+      nav.includes('Sales Data') ||
+      nav.includes("'Sales'") ||
+      nav.includes('"Sales"');
     expect(hasSalesLabel).toBe(true);
   });
 });

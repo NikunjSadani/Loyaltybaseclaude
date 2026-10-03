@@ -913,7 +913,7 @@ describe('AdminCoreService', () => {
   });
 
   describe('getTenantConfig', () => {
-    it('returns only non-secret branding + features for the caller tenant', async () => {
+    it('returns non-secret branding + features + resolved TRADE capabilities for an OUTLET tenant', async () => {
       mockTenant.resolveClient.mockResolvedValue({
         slug: 'deoleo',
         name: 'Deoleo',
@@ -921,6 +921,7 @@ describe('AdminCoreService', () => {
         branding: { primaryColor: '#000', displayName: 'Deoleo' },
         features: { loyalty: true },
       });
+      mockPrisma.client.findUnique.mockResolvedValue({ loyaltyType: 'TRADE_LOYALTY', features: {} });
       const res = await service.getTenantConfig(clientAdmin);
       expect(mockTenant.resolveClient).toHaveBeenCalledWith('deoleo');
       expect(res).toEqual({
@@ -929,6 +930,28 @@ describe('AdminCoreService', () => {
         status: 'ACTIVE',
         branding: { primaryColor: '#000', displayName: 'Deoleo' },
         features: { loyalty: true },
+        capabilities: {
+          earnerModel: 'OUTLET',
+          kyc: true, gst: true, tds: true, payouts: true, invoicing: true,
+          vendorMarketplace: false, celebratoryUx: false,
+        },
+      });
+    });
+
+    it('resolves EMPLOYEE capabilities (compliance off) for an EMPLOYEE_REWARDS tenant', async () => {
+      mockTenant.resolveClient.mockResolvedValue({
+        slug: 'britannia',
+        name: 'Britannia',
+        isActive: true,
+        branding: { primaryColor: '#eb1923', displayName: 'Britannia' },
+        features: {},
+      });
+      mockPrisma.client.findUnique.mockResolvedValue({ loyaltyType: 'EMPLOYEE_REWARDS', features: {} });
+      const res = await service.getTenantConfig(clientAdmin);
+      expect(res.capabilities).toEqual({
+        earnerModel: 'EMPLOYEE',
+        kyc: false, gst: false, tds: false, payouts: false, invoicing: false,
+        vendorMarketplace: true, celebratoryUx: true,
       });
     });
   });

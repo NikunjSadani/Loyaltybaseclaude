@@ -13,6 +13,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { businessHoursBetween, isValidIsoDate } from '../common/business-hours';
 import { isActivePhoneConflict, ACTIVE_PHONE_IN_USE_MSG } from '../common/phone-conflict';
+import { resolveCapabilities } from '../common/loyalty-capabilities.helper';
 import {
   KYC_PENDING_FIELD_STATUSES,
   KYC_REJECT_REUPLOAD_STATUSES,
@@ -1283,12 +1284,25 @@ export class AdminCoreService {
    */
   async getTenantConfig(user: JwtPayload) {
     const config = await this.tenant.resolveClient(user.clientId);
+    // Employee Rewards: surface the resolved capability set so the FE can gate the admin
+    // shell by capability (the trade vs employee nav world). Additive + fail-safe —
+    // resolveCapabilities() returns the TRADE defaults for an unknown/absent loyaltyType,
+    // so a bad/empty value can never flip a tenant into the compliance-off posture.
+    const row = await this.prisma.client.findUnique({
+      where: { id: user.clientId },
+      select: { loyaltyType: true, features: true },
+    });
+    const capabilities = resolveCapabilities(
+      row?.loyaltyType as string | null | undefined,
+      (row?.features ?? null) as Record<string, unknown> | null,
+    );
     return {
       slug: config.slug,
       internalName: config.name,
       status: config.isActive ? 'ACTIVE' : 'INACTIVE',
       branding: config.branding,
       features: config.features,
+      capabilities,
     };
   }
 

@@ -4,41 +4,11 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useState, useMemo, useEffect } from 'react';
 import {
-  LayoutDashboard,
-  FileCheck,
-  Users,
-  Tag,
-  Eye,
-  CreditCard,
-  BarChart2,
-  FileBarChart2,
-  Settings,
-  ChevronLeft,
-  ChevronRight,
-  LogOut,
-  ChevronDown,
-  Wallet,
-  Building2,
-  Megaphone,
-  TicketCheck,
-  Target,
-  Gift,
-  BadgeCheck,
-  Banknote,
-  ShoppingBag,
-  TrendingUp,
-  Coins,
-  Landmark,
-  Smartphone,
-  BookOpen,
-  MessageSquare,
-  Truck,
-  Store,
-  Send,
-  Calculator,
+  ChevronLeft, ChevronRight, LogOut, ChevronDown, Wallet, Building2,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useTenantFeatures } from '@/lib/tenant-features';
+import { selectAdminNav } from '@/lib/admin-nav';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import { useAdminSession, adminRoleLabel } from '@/lib/admin-session';
 import { RequireAuth } from '@/components/auth/require-auth';
@@ -48,165 +18,6 @@ import { OperatorBanner } from '@/components/operator/operator-banner';
 import { SiteFooter } from '@/components/layout/site-footer';
 import { AdminRouteGuard } from '@/components/rbac/admin-route-guard';
 
-// All possible nav items — feature flags control which are visible
-const ALL_NAV_ITEMS = [
-  { href: '/admin/dashboard', label: 'Overview', icon: LayoutDashboard, featureFlag: null },
-  {
-    href: '/admin/dashboards',
-    label: 'Dashboards',
-    icon: BarChart2,
-    featureFlag: null,
-    children: [
-      { href: '/admin/dashboards/kyc',            label: 'KYC Dashboard'       },
-      { href: '/admin/dashboards/program-health', label: 'Program Health'      },
-      { href: '/admin/dashboards/operations',     label: 'Operations'          },
-      { href: '/admin/dashboards/finance',        label: 'Finance & Liability' },
-    ],
-  },
-  {
-    href: '/admin/kyc',
-    label: 'KYC Management',
-    icon: FileCheck,
-    featureFlag: 'kycApprovalFlow' as const,
-    children: [
-      { href: '/admin/kyc',            label: 'KYC Submissions'  },
-      // NOTE(P3): mark gifsyOnly:true once real roles are wired — KYC approval is Gifsy-operated.
-      // Left visible for now so the DEMO surfaces it (gifsyOnly links are hidden in demo mode).
-      { href: '/admin/kyc/approvals',  label: 'KYC Approvals' },
-    ],
-  },
-  {
-    href: '/admin/users',
-    label: 'User Management',
-    icon: Users,
-    featureFlag: null,
-    children: [
-      // NOTE: list the more-specific child paths FIRST. The header-title resolver below
-      // matches a child via `startsWith(child.href + '/')`, and '/admin/users' is a prefix
-      // of '/admin/users/outlets' — putting User Accounts last keeps the outlets page's
-      // title correct while still exact-matching '/admin/users' for itself.
-      { href: '/admin/users/outlets', label: 'Outlet Management'   },
-      // Owner Groups (parent multi-outlet management) — usable by GIFSY_ADMIN AND
-      // CLIENT_ADMIN (create/list/ungroup are partners:manage_outlets), so NOT gifsyOnly.
-      // Listed before the bare '/admin/users' so the header-title resolver's
-      // startsWith(child.href + '/') match stays correct.
-      { href: '/admin/users/parents', label: 'Owner Groups'        },
-      { href: '/admin/hierarchy',     label: 'Employee Hierarchy'  },
-      { href: '/admin/users',         label: 'User Accounts'       },
-    ],
-  },
-  { href: '/admin/schemes',  label: 'Scheme Management',icon: Tag,          featureFlag: null, gifsyOnly: true  },
-  // Outlet Wallet — GIFSY-only points wallet viewer + manual credit/debit adjust (money-adjacent).
-  // Page guarded to GIFSY_ADMIN via admin/outlet-wallet/layout.tsx; nav hidden for CLIENT_ADMIN.
-  { href: '/admin/outlet-wallet', label: 'Outlet Wallet', icon: Wallet, featureFlag: null, gifsyOnly: true },
-  // Tenant read-only scheme coverage reports (D2/D26). Shown to tenant admins
-  // (CLIENT_ADMIN / MIS_USER) only — GIFSY manages + reports from /admin/schemes.
-  { href: '/admin/scheme-reports', label: 'Scheme Reports', icon: FileBarChart2, featureFlag: null, tenantReportOnly: true },
-  // Visibility (POSM) capture management is GIFSY-only (config / form / approve-reject queue).
-  { href: '/admin/visibility', label: 'Visibility (POSM)', icon: Eye, featureFlag: null, gifsyOnly: true },
-  // Tenant read-only POSM coverage reports — shown to tenant admins (CLIENT_ADMIN / MIS_USER) only.
-  { href: '/admin/visibility-reports', label: 'Visibility Reports', icon: FileBarChart2, featureFlag: null, tenantReportOnly: true },
-  {
-    href: '/admin/invoices',
-    label: 'Visibility Invoices',
-    icon: FileCheck,
-    featureFlag: 'visibilityInvoiceModule' as const,
-    children: [
-      { href: '/admin/invoices',        label: 'Invoice List'    },
-      { href: '/admin/invoices/upload', label: 'Upload Payouts'  },
-    ],
-  },
-  {
-    // Q1: payout management is GIFSY-only — hidden from CLIENT_ADMIN nav (and the pages are
-    // guarded to GIFSY_ADMIN via admin/payouts/layout.tsx). MIS dropped from the backend too.
-    href: '/admin/payouts',
-    label: 'Payout Management',
-    icon: CreditCard,
-    featureFlag: 'walletModule' as const,
-    gifsyOnly: true,
-    children: [
-      { href: '/admin/payouts',      label: 'Payout Batches'  },
-      { href: '/admin/payouts/fund', label: 'Fund Management' },
-    ],
-  },
-  { href: '/admin/gifts',    label: 'Gift Catalogue',  icon: Gift,          featureFlag: 'walletModule' as const },
-  { href: '/admin/gift-catalogue', label: 'Gift Master Catalogue', icon: ShoppingBag, featureFlag: null, gifsyAdminOnly: true },
-  { href: process.env.NEXT_PUBLIC_EXCEL_TARGETS_ONLY === 'true' ? '/admin/targets/upload' : '/admin/targets', label: 'Targets', icon: Target, featureFlag: null },
-  { href: '/admin/sales',    label: 'Sales Data',       icon: TrendingUp,    featureFlag: null },
-  {
-    href: '/admin/credits-payouts',
-    label: 'Credits & Payouts',
-    icon: Coins,
-    featureFlag: null,
-    children: [
-      { href: '/admin/credits-payouts/upload',   label: 'Upload Credits'    },
-      { href: '/admin/credits-payouts/status',   label: 'Payout Status'     },
-      // Payments Report — date-ranged payout payments across all streams. Visible to
-      // CLIENT_ADMIN too (own tenant; backend pins scope), so NOT gifsyOnly.
-      { href: '/admin/credits-payouts/payments', label: 'Payments Report'   },
-      { href: '/admin/credits-payouts/payout',   label: 'Payout Download', gifsyOnly: true },
-      { href: '/admin/credits-payouts/fields',   label: 'Field Configuration' },
-    ],
-  },
-  {
-    // Points Compute Engine (configurable points calculation → preview/export or in-portal direct credit).
-    // gifsyAdminOnly for now — Gifsy drives the rollout + enables it per tenant; surfacing the nav to a
-    // CLIENT_ADMIN once their tenant's pointsEngine.enabled is on is the tracked follow-up (that flag lives
-    // in program_settings, not the clients.features blob the nav's featureFlag reads).
-    href: '/admin/points-engine/rules',
-    label: 'Points Engine',
-    icon: Calculator,
-    featureFlag: null,
-    gifsyAdminOnly: true,
-    children: [
-      { href: '/admin/points-engine/rules',    label: 'Rules'    },
-      { href: '/admin/points-engine/compute',  label: 'Compute'  },
-      { href: '/admin/points-engine/settings', label: 'Settings' },
-    ],
-  },
-  {
-    href: '/admin/tds',
-    label: 'TDS & Invoicing',
-    icon: Landmark,
-    featureFlag: null,
-    children: [
-      // List more-specific paths before '/admin/tds' so the header-title resolver
-      // (startsWith(child.href + '/')) resolves each page correctly.
-      { href: '/admin/tds-config',         label: 'TDS Treatment'       }, // section+methodology; tenant read-only
-      { href: '/admin/tds-payouts',        label: 'Payout Report'       }, // role-scoped (own tenant for CLIENT_ADMIN)
-      { href: '/admin/tds-recovery',       label: 'Recovery / Attribution' }, // role-scoped (own recovery liability)
-      { href: '/admin/tds-rcm',            label: 'RCM (Unregistered)', gifsyOnly: true },
-      { href: '/admin/gst-reimbursements', label: 'GST Reimbursements', gifsyOnly: true },
-      { href: '/admin/tds',                label: 'TDS Ledger (194R/194C)' }, // existing 194R/194C compute+export
-    ],
-  },
-  { href: '/admin/tickets',  label: 'Tickets',          icon: TicketCheck,   featureFlag: null },
-  { href: '/admin/banners',  label: 'Banners',          icon: Megaphone,     featureFlag: null },
-  { href: '/admin/reports',  label: 'Reports',          icon: FileBarChart2, featureFlag: null },
-  { href: '/admin/app-adoption', label: 'App Adoption', icon: Smartphone,    featureFlag: null },
-  // Help & Guides — internal operating guides for the Gifsy ops team. gifsyOnly: shown to
-  // GIFSY_ADMIN + GIFSY_STAFF (canManageSchemes), hidden from CLIENT_ADMIN / MIS_USER; the
-  // pages are also role-guarded via admin/guides/layout.tsx.
-  { href: '/admin/guides', label: 'Help & Guides', icon: BookOpen, featureFlag: null, gifsyOnly: true },
-  // WhatsApp Broadcasts — Gifsy-OWNER console (bulk WhatsApp campaigns for the assumed
-  // tenant). gifsyAdminOnly: shown to GIFSY_ADMIN only (hidden from CLIENT_ADMIN / MIS_USER
-  // AND GIFSY_STAFF); the pages are role-guarded to ['GIFSY_ADMIN'] via
-  // admin/whatsapp-broadcasts/layout.tsx, so nav visibility and the route guard agree.
-  { href: '/admin/whatsapp-broadcasts', label: 'WhatsApp Broadcasts', icon: MessageSquare, featureFlag: null, gifsyAdminOnly: true },
-  { href: '/admin/gift-orders', label: 'Gift Dispatch', icon: Truck, featureFlag: null, gifsyAdminOnly: true },
-  // Wave-2 vendor management — GIFSY_ADMIN only (grants, policies, logins, suspend/reactivate).
-  // gifsyAdminOnly matches the ['GIFSY_ADMIN'] route guard in admin/vendors/layout.tsx.
-  { href: '/admin/vendors', label: 'Vendors', icon: Store, featureFlag: null, gifsyAdminOnly: true },
-  // Wave-2 Gift Disbursal report — GIFSY_ADMIN (all tenants/vendors) + CLIENT_ADMIN (own tenant).
-  // giftDisbursal flag gates the nav to exactly those two roles (hidden from GIFSY_STAFF + MIS_USER),
-  // matching the ['GIFSY_ADMIN','CLIENT_ADMIN'] route guard in admin/gift-disbursal/layout.tsx.
-  { href: '/admin/gift-disbursal', label: 'Gift Disbursal', icon: FileBarChart2, featureFlag: null, giftDisbursal: true },
-  // Delivery-status report (SMS + transactional WhatsApp + OTP) — GIFSY_ADMIN (all tenants / assumed)
-  // + CLIENT_ADMIN (own tenant). deliveryReport flag gates the nav to exactly those two roles,
-  // matching the ['GIFSY_ADMIN','CLIENT_ADMIN'] route guard in admin/notification-delivery/layout.tsx.
-  { href: '/admin/notification-delivery', label: 'Delivery Status', icon: Send, featureFlag: null, deliveryReport: true },
-  { href: '/admin/settings', label: 'Settings',         icon: Settings,      featureFlag: null },
-];
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const pathname     = usePathname();
@@ -214,7 +25,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const clientConfig = useClientConfig();
   // Feature gating is DB-sourced via the authenticated tenant-config endpoint
   // (§A-DOMAIN "P5"), NOT the in-code registry. Branding still comes from clientConfig.
-  const { features } = useTenantFeatures('/api/admin/settings/config');
+  const { features, capabilities } = useTenantFeatures('/api/admin/settings/config');
   const adminSession = useAdminSession();
   // Master Visibility switch (per-tenant, default OFF). Lives in GifsySettings, NOT ClientConfig
   // features — so it is gated here directly rather than via the featureFlag map below.
@@ -242,34 +53,20 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const [userMenuOpen, setUserMenuOpen] = useState(false);
 
   // Filter nav items by feature flags AND role
+  // Employee Rewards: the admin shell is now capability-gated. `selectAdminNav` picks the
+  // world's nav tree by the tenant's resolved earnerModel (OUTLET → the trade tree, byte-
+  // identical to before; EMPLOYEE → the employee cockpit), then applies the same role/feature/
+  // visibility gates. Pure + unit-tested in lib/__tests__/admin-nav.test.ts.
   const navItems = useMemo(
     () =>
-      ALL_NAV_ITEMS.filter((item) => {
-        // gifsyOnly items (e.g. Scheme Management) are hidden from CLIENT_ADMIN
-        if ((item as { gifsyOnly?: boolean }).gifsyOnly && !adminSession.canManageSchemes) return false;
-        // gifsyAdminOnly items (WhatsApp Broadcasts) are owner-only — hidden from GIFSY_STAFF
-        // too, so nav visibility matches the GIFSY_ADMIN-only route guard (no shown-but-blocked gap).
-        if ((item as { gifsyAdminOnly?: boolean }).gifsyAdminOnly && adminSession.role !== 'GIFSY_ADMIN') return false;
-        // giftDisbursal items are shown to GIFSY_ADMIN (all tenants) + CLIENT_ADMIN (own tenant)
-        // only — hidden from GIFSY_STAFF + MIS_USER — matching the gift-disbursal route guard.
-        if ((item as { giftDisbursal?: boolean }).giftDisbursal
-          && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'CLIENT_ADMIN') return false;
-        // deliveryReport items (Delivery Status) — same two roles as giftDisbursal: GIFSY_ADMIN
-        // (all tenants / assumed) + CLIENT_ADMIN (own tenant); hidden from GIFSY_STAFF + MIS_USER.
-        if ((item as { deliveryReport?: boolean }).deliveryReport
-          && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'CLIENT_ADMIN') return false;
-        // tenantReportOnly items (Scheme Reports) are hidden from GIFSY_ADMIN, who
-        // gets the full management + report surface under Scheme Management instead.
-        if ((item as { tenantReportOnly?: boolean }).tenantReportOnly && adminSession.canManageSchemes) return false;
-        // Master Visibility switch gates the Visibility Approval page AND (ANDed with its own
-        // featureFlag) the Visibility Invoices group — both hidden when Visibility is OFF.
-        if (item.href === '/admin/visibility') return visibilityEnabled;
-        if (item.href === '/admin/visibility-reports') return visibilityEnabled;
-        if (item.href === '/admin/invoices' && !visibilityEnabled) return false;
-        if (!item.featureFlag) return true;
-        return !!(features as unknown as Record<string, boolean>)[item.featureFlag];
+      selectAdminNav({
+        capabilities,
+        role: adminSession.role,
+        canManageSchemes: adminSession.canManageSchemes,
+        visibilityEnabled,
+        features: features as unknown as Record<string, boolean>,
       }),
-    [features, adminSession.canManageSchemes, adminSession.role, visibilityEnabled],
+    [capabilities, features, adminSession.canManageSchemes, adminSession.role, visibilityEnabled],
   );
 
   // Auto-expand the parent whose child matches the current path
