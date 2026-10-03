@@ -399,3 +399,44 @@ Shows `enabled` + `directCreditEnabled`. GIFSY_ADMIN: two toggles (PUT /settings
   validation, `var(--brand-primary)` accents, a `__tests__/*.test.tsx` (vitest). Then a dedicated UI/UX audit +
   runtime screenshot review (preview_start) before it reaches the owner.
 - Open micro-decision resolved: use HAND-ROLLED tables/cards (match targets/schemes, the adjacent features).
+
+---
+
+## 15. Final end-to-end audit — 2026-10-03 (before owner UAT)
+
+4 independent adversarial lanes over the WHOLE feature (money·identity·correctness·UI/UX). **Core re-verified
+sound**: NaN/∞/overflow fail-closed, formula AST safety, POINTS⇒scale-0, slab math, NO cross-tenant hole, NO
+self-enable path, money gate uncached/fail-closed, tenant-scoped idempotency key, direct-path classification
+(no ×100), FE↔BE contract (the Wave-4 DTO fix holds), simulator race handling, versioning/read-only lockdown.
+
+**Money decision (owner, Option A — platform-consistent + warn):** the engine can credit a period two ways
+(export→manual-upload or in-portal direct-commit) and the credits rail has never cross-deduped batches, so
+the same run could be credited via both; separately my Wave-2 "one engine batch per period" guard over-blocked
+legit corrections / a 2nd program / reverse-then-recredit (a reversal never flips `CreditBatch.status`). Chosen:
+keep the per-run sourceKey idempotency (no accidental same-run double-submit); DROP the coarse period guard;
+WARN when a period already has any credit batch (`priorBatchesThisPeriod`); the maker-checker confirm is the
+money gate — exactly how manual uploads already behave. (Commit `47e90fc`.)
+
+**Fixed (backend `47e90fc` + FE `2e3da3c`):** Option-A guard relaxation + broadened warning; settings PUT
+rejects an ASSUMED session (TDS-parity); export engine-disabled gate reads UNCACHED; preview returns
+`sourceKey` → commit `expectedKey` TOCTOU guard. UI: Publish blocked while dirty + refresh-after; Inputs
+validated pre-submit (segment-input bug, duplicate ref, enum-needs-values, formula undeclared var); gate/
+segmentFilter onFail restricted to the withhold option (over-credit footgun) + "checked first"/"applied at
+end" ordering labels; edit-as-new-version date default; effectiveTo≥from; Field a11y; archive copy/banner;
+tab counts; settings toggles-during-save; rate-0 warning. Gate: backend jest 216 · build 0 · platform tsc 0 ·
+vitest 2606 (points-engine 30).
+
+**Residual NOTES (no code change — inherent/low, documented for UAT):** export-file re-upload re-derives award
+type from the LIVE CreditField at upload (inherent to the manual rail — a field reclassified in the offline
+window could mis-credit; direct path is immune); un-assumed owner has platform-wide rule-WRITE reach
+(consistent with `platformWide()`); maker-checker needs RBAC enforced (same as the existing credits rail; prod
+deoleo has it on); compute's outlet universe is the Outlet table vs `getPace`'s sales/target union (benign);
+gate/segmentFilter position + `onFail` soft modes are inert by design (position-aware gating = future
+enhancement); wildcard tenant-default + per-program override is blocked at publish (product gap — decide if
+wanted); mid-month `effectiveFrom` doesn't apply that month.
+
+**Runtime verification:** the Wave-4 e2e (5/5) already exercised publish→preview→commit→idempotent against the
+real stack; the Option-A + preview-sourceKey changes keep that path's behavior identical and are covered by the
+216 backend + 2606 FE unit tests, so the authoritative final e2e re-run is the **owner's Wave-5 staging UAT**
+(avoids a 2nd cloud-dev reset). ▶ Wave 5: push `develop`→staging (owner; Actions-billing/privacy trap) → owner
+UAT → prod cutover (additive migrations, dormant until per-tenant flags on).
