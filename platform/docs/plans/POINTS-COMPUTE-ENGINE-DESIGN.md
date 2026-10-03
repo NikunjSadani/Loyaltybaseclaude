@@ -340,7 +340,7 @@ summary cards + two-call confirm + done card). Backend is COMPLETE (Waves 0–2)
 - `rules/new/page.tsx` — builder in create mode (or reuse `[id]` with id='new').
 - `compute/page.tsx` — the COMPUTE → PREVIEW → EXPORT / COMMIT screen (the credits-upload analog).
 - `settings/page.tsx` — the per-tenant flags; the on/off toggles are GIFSY-only (CLIENT_ADMIN sees read-only).
-- Nav: add a "Points Engine" group to `ALL_NAV_ITEMS` in `admin/layout.tsx`, gated so the whole group is
+- Nav: add a "Points Engine" group to `TRADE_NAV_ITEMS` in `lib/admin-nav.ts` (moved from admin/layout.tsx 2026-10), gated so the whole group is
   hidden unless the tenant's `pointsEngine.enabled` feature flag is on (via `useTenantFeatures`), matching how
   other dormant features hide. Direct-credit affordances additionally gated on `directCreditEnabled`.
 

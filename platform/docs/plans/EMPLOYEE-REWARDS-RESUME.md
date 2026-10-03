@@ -70,5 +70,15 @@ credits + catalogue, pilot vendors).
     verbatim) + the employee cockpit skeleton + a pure, unit-tested `selectAdminNav` (picks the world by
     `earnerModel`); `app/admin/layout.tsx` wired to it; 8 employee stub pages. `platform tsc` ✓, `vitest`
     2595 ✓ (incl. `admin-nav.test.ts` 5 ✓; fixed 2 source-read tests that moved with the nav).
-  - TRADE output is byte-identical (same tree, same gates); EMPLOYEE flips to the cockpit. ⏳ Independent
-    audit + the owner-gated push/staging-tenant + staging runtime-verify (Deoleo unchanged + Britannia nav).
+  - TRADE output is byte-identical (same tree, same gates); EMPLOYEE flips to the cockpit.
+  - **Independent audit (opus) = PASS-WITH-NOTES** — nav move verified faithful item-by-item (all 29 items +
+    flags + children), fail-safe confirmed BE+FE, BE query tenant-scoped (`Client.id == slug`). FIXED: 2
+    stale nav refs (`route-permissions.ts` comment + POINTS doc). **Accepted minors (tracked, not blocking):**
+    (a) EMPLOYEE admins briefly flash the TRADE nav before the config endpoint resolves — cosmetic, safe
+    direction (toward MORE compliance; reverse impossible), inherent to the client-side config model, mirrors
+    the existing features-default; (b) `getTenantConfig` does one extra uncached `client.findUnique` for
+    `loyaltyType` (micro-perf; cleaner once `loyaltyType` is exposed on the cached ClientConfig); (c) employee
+    stub routes are capability-ungated (direct-URL reachable; harmless stubs — real route guards land with the
+    real pages in Phase A+). Residual: a `gen_doc.js` help string (trade tooling) still says `ALL_NAV_ITEMS`.
+    Sibling shells (partner/sales/vendor) not yet capability-gated — consistent with Phase 0 scope, tracked.
+  - ⏳ Owner-gated: push `er/phase0-shell`→`develop` + staging `uat-britannia` tenant + staging runtime-verify.

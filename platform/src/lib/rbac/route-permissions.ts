@@ -1,5 +1,5 @@
 /* ─── RBAC Option-X P6 — admin route → required-permission map ─────────────────
-   Mirrors the NAV config in src/app/admin/layout.tsx: each admin route (and the
+   Mirrors the NAV config in src/lib/admin-nav.ts: each admin route (and the
    child paths under it) maps to the natural permission key from the backend
    catalog (api/src/common/rbac/permissions.ts). A GIFSY_STAFF operator who lacks
    the mapped permission for the route they land on is shown <AccessDenied/> by
