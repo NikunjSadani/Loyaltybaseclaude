@@ -40,13 +40,27 @@ export function Field({
   children: React.ReactNode;
   className?: string;
 }) {
+  // Associate the label with its control: generate an id, point htmlFor at it, and inject it onto the
+  // single child (TextField/NumberField/SelectField forward `id`; raw <input>/<textarea>/<select> take it
+  // directly; composite controls that ignore it degrade gracefully). Using htmlFor (not wrapping) avoids
+  // nested <label>s where a Field holds a control that renders its own labels (e.g. the predicate builder).
+  const autoId = React.useId();
+  let control = children;
+  let forId = autoId;
+  if (React.isValidElement(children)) {
+    const childId = (children.props as { id?: string }).id;
+    forId = childId ?? autoId;
+    if (!childId) {
+      control = React.cloneElement(children as React.ReactElement<{ id?: string }>, { id: autoId });
+    }
+  }
   return (
     <div className={className}>
-      <label className={labelCls}>
+      <label className={labelCls} htmlFor={forId}>
         {label}
         {required && <span className="text-[var(--brand-primary)]"> *</span>}
       </label>
-      {children}
+      {control}
       {hint && <p className="mt-0.5 text-[10px] text-gray-400">{hint}</p>}
     </div>
   );
@@ -58,15 +72,18 @@ export function TextField({
   placeholder,
   disabled,
   upper,
+  id,
 }: {
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   disabled?: boolean;
   upper?: boolean;
+  id?: string;
 }) {
   return (
     <input
+      id={id}
       value={value}
       disabled={disabled}
       placeholder={placeholder}
@@ -82,12 +99,14 @@ export function NumberField({
   placeholder,
   disabled,
   min,
+  id,
 }: {
   value: number;
   onChange: (v: number) => void;
   placeholder?: string;
   disabled?: boolean;
   min?: number;
+  id?: string;
 }) {
   // Local text so the field can be momentarily blank / mid-edit without snapping to 0. We commit a number
   // on every keystroke (a blank commits 0 so the config stays valid) but DON'T reset the text while the
@@ -99,6 +118,7 @@ export function NumberField({
   }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <input
+      id={id}
       type="number"
       value={text}
       disabled={disabled}
@@ -118,14 +138,17 @@ export function SelectField<T extends string>({
   onChange,
   options,
   disabled,
+  id,
 }: {
   value: T;
   onChange: (v: T) => void;
   options: ReadonlyArray<{ value: T; label: string }>;
   disabled?: boolean;
+  id?: string;
 }) {
   return (
     <select
+      id={id}
       value={value}
       disabled={disabled}
       onChange={(e) => onChange(e.target.value as T)}
@@ -329,12 +352,34 @@ export function predicateOperands(p: Predicate): Operand[] {
 }
 
 /**
+ * Extract the variable references used in a formula expression, mirroring the backend lexer/parser:
+ * an identifier NOT immediately followed by `(` is a variable (one followed by `(` is a function call).
+ * String literals are stripped first so quoted text is never mistaken for a variable. Used only to steer
+ * the author — the backend's parseFormula remains the authority. (Deliberately not stricter: it flags an
+ * identifier only when the backend's walkAst would emit the same "undeclared input" error.)
+ */
+export function formulaVarRefs(expr: string): string[] {
+  const noStrings = expr.replace(/'[^']*'|"[^"]*"/g, ' ');
+  const refs: string[] = [];
+  const re = /[A-Za-z_][A-Za-z0-9_]*/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(noStrings)) !== null) {
+    const after = noStrings.slice(m.index + m[0].length);
+    if (/^\s*\(/.test(after)) continue; // a function call, not a variable reference
+    refs.push(m[0]);
+  }
+  return refs;
+}
+
+/**
  * Pre-submit draft validation that mirrors the backend validateRule for the cases a builder can hit, so
  * the author is steered to a valid rule instead of a raw 400. BLOCKING issues are ones validateRule
- * definitely rejects (empty/unknown operand var, an enum used as a numeric measure, a non-contiguous or
- * wrongly open slab band, an empty formula). WARNINGS are valid-but-footgun configs (no pipeline, a cap
- * that zeroes everything, an empty segment allow-list) — surfaced, not blocked, so we never prevent a
- * config the backend would accept.
+ * definitely rejects (a duplicate/absent/double-sourced input, an enum input with no values, an
+ * empty/unknown operand var, an enum used as a numeric measure, a non-contiguous or wrongly open slab
+ * band, an empty formula or one referencing an undeclared input, an inverted effective window). WARNINGS
+ * are valid-but-footgun configs (no pipeline, a zero rate, a cap that zeroes everything, an empty segment
+ * allow-list, a gate whose failure won't withhold) — surfaced, not blocked, so we never prevent a config
+ * the backend would accept. Deliberately never STRICTER than validateRule.
  */
 export function draftIssues(draft: RuleConfigDraft): { blocking: string[]; warnings: string[] } {
   const blocking: string[] = [];
@@ -351,6 +396,27 @@ export function draftIssues(draft: RuleConfigDraft): { blocking: string[]; warni
     else if (numeric && !numRefs.has(v)) blocking.push(`${where}: "${v}" is not a number input.`);
   };
 
+  // ── inputs (mirror validateRule's inputs block exactly) ────────────────────────
+  const declared = new Set<string>();
+  draft.inputs.forEach((inp, i) => {
+    const w = `Input ${i + 1}`;
+    if (inp.ref === '') blocking.push(`${w}: give the input a reference name.`);
+    else if (declared.has(inp.ref)) blocking.push(`${w}: duplicate reference name "${inp.ref}".`);
+    else declared.add(inp.ref);
+
+    const hasKpi = typeof inp.kpiCode === 'string' && inp.kpiCode !== '';
+    const hasSrc = typeof inp.source === 'string' && inp.source !== '';
+    if (hasKpi === hasSrc)
+      blocking.push(`${w}: set exactly one source — a KPI code, or a target / % / segment field.`);
+
+    if (inp.type === 'enum' && (!Array.isArray(inp.values) || inp.values.length === 0))
+      blocking.push(`${w}: an enum / segment input must list at least one allowed value.`);
+  });
+
+  // ── effective window ───────────────────────────────────────────────────────────
+  if (draft.effectiveTo && draft.effectiveFrom && draft.effectiveTo < draft.effectiveFrom)
+    blocking.push('Effective-to must be on or after effective-from.');
+
   if (draft.pipeline.length === 0) {
     warnings.push('No steps yet — every outlet would compute 0 points.');
   }
@@ -360,6 +426,7 @@ export function draftIssues(draft: RuleConfigDraft): { blocking: string[]; warni
     switch (n.type) {
       case 'rate':
         checkOperand(n.measure, where, true);
+        if (n.rate === 0) warnings.push(`${where}: a rate of 0 pays no points.`);
         break;
       case 'slab': {
         checkOperand(n.measure, where, true);
@@ -379,18 +446,30 @@ export function draftIssues(draft: RuleConfigDraft): { blocking: string[]; warni
         break;
       }
       case 'gate':
+        predicateOperands(n.when).forEach((op) => checkOperand(op, where, false));
+        if (n.onFail !== 'zero')
+          warnings.push(`${where}: this gate won't withhold points on failure — only "Pay 0" withholds.`);
+        break;
       case 'milestone':
         predicateOperands(n.when).forEach((op) => checkOperand(op, where, false));
         break;
       case 'segmentFilter':
         if (n.allow.length === 0)
           warnings.push(`${where}: no values allowed — every outlet is filtered out (0 points).`);
+        if (n.onFail !== 'zero')
+          warnings.push(`${where}: this filter won't withhold points on failure — only "Pay 0" withholds.`);
         break;
       case 'cap':
         if (n.max <= 0) warnings.push(`${where}: a cap of ${n.max} clamps every total to ${n.max}.`);
         break;
       case 'formula':
-        if (!n.expr.trim()) blocking.push(`${where}: enter a formula expression.`);
+        if (!n.expr.trim()) {
+          blocking.push(`${where}: enter a formula expression.`);
+        } else {
+          [...new Set(formulaVarRefs(n.expr))].forEach((v) => {
+            if (!allRefs.has(v)) blocking.push(`${where}: formula references an unknown input "${v}".`);
+          });
+        }
         break;
     }
   });

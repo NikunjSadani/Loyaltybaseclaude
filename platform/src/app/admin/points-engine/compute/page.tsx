@@ -150,7 +150,7 @@ function NonOkGroup({ status, rows }: { status: Exclude<PreviewRowStatus, 'OK'>;
 }
 
 /** OK rows rendered as a normal table. */
-function OkGroup({ rows }: { rows: ComputePreviewRow[] }) {
+function OkGroup({ rows, engineDisabled }: { rows: ComputePreviewRow[]; engineDisabled: boolean }) {
   if (rows.length === 0) return null;
   const shown = rows.slice(0, ROWS_PER_GROUP);
   return (
@@ -193,7 +193,7 @@ function OkGroup({ rows }: { rows: ComputePreviewRow[] }) {
       {rows.length > shown.length && (
         <p className="border-t border-gray-100 px-4 py-2 text-xs text-gray-400">
           Showing the first {shown.length.toLocaleString('en-IN')} of {rows.length.toLocaleString('en-IN')} —
-          download the credit-upload file or review report for all rows.
+          download the {engineDisabled ? 'review report' : 'credit-upload file or review report'} for all rows.
         </p>
       )}
     </div>
@@ -215,6 +215,9 @@ export default function PointsComputePage() {
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [preview, setPreview] = useState<ComputePreview | null>(null);
   const [applied, setApplied] = useState<AppliedFilter | null>(null);
+  // The previewed run's content hash — passed back as `expectedKey` on commit so a run that changed since
+  // the preview (achievements/targets/rules edited) is rejected with a 409 instead of crediting stale data.
+  const [appliedSourceKey, setAppliedSourceKey] = useState<string | null>(null);
 
   // EXPORT
   const [exportingFile, setExportingFile] = useState(false);
@@ -246,6 +249,7 @@ export default function PointsComputePage() {
     if (res.success) {
       setPreview(res.data);
       setApplied(filter);
+      setAppliedSourceKey(res.data.sourceKey);
       setStep('preview');
     } else {
       setPreviewError(res.error ?? 'Failed to run the preview');
@@ -279,12 +283,13 @@ export default function PointsComputePage() {
     if (!applied || committing) return;
     setCommitting(true);
     setCommitError(null);
-    // v1: omit expectedKey (the preview response carries no sourceKey; the backend
-    // computes its own and its TOCTOU guard is optional — design §14.4).
+    // Pass the previewed run's sourceKey as expectedKey — the backend rejects the commit with a 409 if the
+    // computation changed since this preview, and that message surfaces in the commit-error banner below.
     const res = await commitCompute({
       period: applied.period,
       program: applied.program,
       kpiCode: applied.kpiCode,
+      expectedKey: appliedSourceKey,
     });
     if (res.success) {
       setCommitResult(res.data);
@@ -299,6 +304,7 @@ export default function PointsComputePage() {
     setStep('select');
     setPreview(null);
     setApplied(null);
+    setAppliedSourceKey(null);
     setPreviewError(null);
     setExportMsg(null);
     setExportError(null);
@@ -513,7 +519,7 @@ export default function PointsComputePage() {
               <NonOkGroup status="ERROR" rows={errorRows} />
               <NonOkGroup status="SKIP" rows={skipRows} />
               <NonOkGroup status="NO_RULE" rows={noRuleRows} />
-              <OkGroup rows={okRows} />
+              <OkGroup rows={okRows} engineDisabled={preview.engineDisabled} />
             </div>
           )}
 
@@ -630,14 +636,14 @@ export default function PointsComputePage() {
                   </div>
                 </div>
 
-                {commitResult.priorPointsEngineBatchesThisPeriod > 0 && (
+                {commitResult.priorBatchesThisPeriod > 0 && (
                   <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                     <span>
-                      There {commitResult.priorPointsEngineBatchesThisPeriod === 1 ? 'is' : 'are'} already{' '}
-                      {commitResult.priorPointsEngineBatchesThisPeriod} engine batch
-                      {commitResult.priorPointsEngineBatchesThisPeriod !== 1 ? 'es' : ''} for this period — review
-                      carefully before confirming to avoid double-crediting.
+                      There {commitResult.priorBatchesThisPeriod === 1 ? 'is' : 'are'} already{' '}
+                      {commitResult.priorBatchesThisPeriod} credit batch
+                      {commitResult.priorBatchesThisPeriod !== 1 ? 'es' : ''} for this period (review before
+                      confirming to avoid double-crediting).
                     </span>
                   </div>
                 )}

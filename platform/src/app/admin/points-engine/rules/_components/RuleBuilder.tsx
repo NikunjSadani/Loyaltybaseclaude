@@ -129,8 +129,15 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  // Unsaved-edits flag, distinct from `saved` (which is false on a fresh load too): true only after the
+  // author mutates the draft, cleared on load / save / publish. Publish acts on the STORED row, so it is
+  // blocked while there are unsaved edits.
+  const [dirty, setDirty] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
+  const [archiving, setArchiving] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [archiveMsg, setArchiveMsg] = useState<string | null>(null);
 
   const readOnly = status !== null && status !== 'draft';
 
@@ -144,6 +151,7 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
       setStatus(res.data.status);
       setVersion(res.data.version);
       setStoredRuleId(res.data.ruleId);
+      setDirty(false);
     } else {
       setLoadError(res.error ?? 'Failed to load rule');
     }
@@ -158,6 +166,7 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
   const patch = (p: Partial<RuleConfigDraft>) => {
     setDraft((d) => ({ ...d, ...p }));
     setSaved(false);
+    setDirty(true);
   };
 
   const setAttach = (p: Partial<RuleConfigDraft['attachsTo']>) => {
@@ -174,6 +183,7 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
       return { ...d, attachsTo: nextAttach, inputs };
     });
     setSaved(false);
+    setDirty(true);
   };
 
   const setOutput = (p: Partial<RuleConfigDraft['output']>) => {
@@ -184,6 +194,7 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
       return { ...d, output, rounding };
     });
     setSaved(false);
+    setDirty(true);
   };
 
   const setInputs = (inputs: RuleInput[]) => patch({ inputs });
@@ -226,6 +237,7 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
       setStatus(res.data.status);
       setVersion(res.data.version);
       setSaved(true);
+      setDirty(false);
     } else {
       setSaveError(res.error ?? 'Save failed');
     }
@@ -238,8 +250,12 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
     setPublishError(null);
     const res = await publishRule(ruleId);
     if (res.success) {
+      // Refresh the editor from the publish response so the on-screen config matches what is now live.
+      setDraft(rowToDraft(res.data));
       setStatus(res.data.status);
       setVersion(res.data.version);
+      setSaved(false);
+      setDirty(false);
     } else {
       setPublishError(
         res.status === 409
@@ -252,20 +268,33 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
 
   const handleArchive = async () => {
     if (isNew) return;
-    if (!confirm('Archive this rule? It will stop applying to new compute runs.')) return;
+    // A draft never resolves in a compute run, so the "stop applying to new runs" copy is wrong for it.
+    const confirmMsg =
+      status === 'draft'
+        ? 'Archive this draft? It will be removed from the active list and can no longer be published.'
+        : 'Archive this rule? It will stop applying to new compute runs.';
+    if (!confirm(confirmMsg)) return;
+    setArchiving(true);
+    setArchiveError(null);
+    setArchiveMsg(null);
     const res = await archiveRule(ruleId);
     if (res.success) {
       setStatus(res.data.status);
+      setArchiveMsg('Rule archived.');
     } else {
-      alert(res.error ?? 'Archive failed');
+      setArchiveError(res.error ?? 'Archive failed');
     }
+    setArchiving(false);
   };
 
   const handleEditAsNewVersion = async () => {
     setSaving(true);
     setSaveError(null);
-    // Carry the same ruleId → the backend mints version+1 as a fresh draft.
-    const res = await createRule({ ...draft, ruleId: storedRuleId ?? draft.ruleId });
+    // Carry the same ruleId → the backend mints version+1 as a fresh draft. Default the new version's
+    // effective-from to TODAY (the author can change it) so publishing it doesn't collapse the prior
+    // published version to a 1-day window by reusing its effectiveFrom.
+    const today = new Date().toISOString().slice(0, 10);
+    const res = await createRule({ ...draft, ruleId: storedRuleId ?? draft.ruleId, effectiveFrom: today });
     if (res.success) {
       router.push(`/admin/points-engine/rules/${res.data.id}`);
       return;
@@ -345,7 +374,8 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                 <button
                   type="button"
                   onClick={() => void handleArchive()}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-600 transition hover:bg-gray-50"
+                  disabled={archiving}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-600 transition hover:bg-gray-50 disabled:opacity-60"
                 >
                   <Archive className="h-4 w-4" /> Archive
                 </button>
@@ -367,7 +397,8 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                   <button
                     type="button"
                     onClick={() => void handlePublish()}
-                    disabled={publishing}
+                    disabled={publishing || dirty}
+                    title={dirty ? 'Save your changes before publishing.' : undefined}
                     className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--brand-primary)] px-3 py-2 text-sm font-semibold text-[var(--brand-primary)] transition hover:bg-[var(--brand-primary)]/5 disabled:opacity-60"
                   >
                     {publishing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Rocket className="h-4 w-4" />}
@@ -376,7 +407,8 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                   <button
                     type="button"
                     onClick={() => void handleArchive()}
-                    className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-600 transition hover:bg-gray-50"
+                    disabled={archiving}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-600 transition hover:bg-gray-50 disabled:opacity-60"
                   >
                     <Archive className="h-4 w-4" /> Archive
                   </button>
@@ -422,9 +454,24 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
           </ul>
         </div>
       )}
+      {!readOnly && !isNew && dirty && (
+        <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
+          <AlertCircle className="h-4 w-4 shrink-0" /> Save your changes before publishing.
+        </div>
+      )}
       {publishError && (
         <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
           <AlertCircle className="h-4 w-4 shrink-0" /> {publishError}
+        </div>
+      )}
+      {archiveError && (
+        <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
+          <AlertCircle className="h-4 w-4 shrink-0" /> {archiveError}
+        </div>
+      )}
+      {archiveMsg && (
+        <div className="flex items-center gap-2 rounded-xl border border-green-200 bg-green-50 px-4 py-2.5 text-sm text-green-700">
+          <CheckCircle2 className="h-4 w-4 shrink-0" /> {archiveMsg}
         </div>
       )}
       {readOnly && (
@@ -487,6 +534,7 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                     type="date"
                     value={draft.effectiveTo ?? ''}
                     disabled={readOnly}
+                    min={draft.effectiveFrom || undefined}
                     onChange={(e) => patch({ effectiveTo: e.target.value || null })}
                     className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-[var(--brand-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 disabled:bg-gray-100 disabled:text-gray-400"
                   />

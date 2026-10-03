@@ -155,7 +155,7 @@ export default function PointsEngineSettingsPage() {
           </div>
           <Toggle
             checked={settings.enabled}
-            disabled={!canEdit}
+            disabled={!canEdit || saving}
             label="Enable the Points Engine"
             onChange={(v) => patch({ enabled: v, directCreditEnabled: v ? settings.directCreditEnabled : false })}
           />
@@ -175,7 +175,7 @@ export default function PointsEngineSettingsPage() {
           </div>
           <Toggle
             checked={settings.directCreditEnabled}
-            disabled={!canEdit || !settings.enabled}
+            disabled={!canEdit || !settings.enabled || saving}
             label="Allow in-portal direct crediting"
             onChange={(v) => patch({ directCreditEnabled: v })}
           />

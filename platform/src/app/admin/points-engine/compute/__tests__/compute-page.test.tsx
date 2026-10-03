@@ -47,6 +47,7 @@ function makePreview(over: Partial<ComputePreview> = {}): ComputePreview {
     totalPoints: 1300,
     engineDisabled: false,
     directCreditEnabled: true,
+    sourceKey: 'deoleo|2026-09|cf_x|v7',
     ruleVersionsUsed: [{ ruleId: 'rule_cases_q3', version: 7 }],
     rows: [
       {
@@ -81,7 +82,7 @@ const COMMIT_RESULT: ComputeCommitResult = {
   counts: { total: 2, ok: 1, skip: 0, error: 1, noRule: 0 },
   sourceKey: 'deoleo|2026-09|cf_x|v7',
   idempotentHit: false,
-  priorPointsEngineBatchesThisPeriod: 0,
+  priorBatchesThisPeriod: 0,
 };
 
 beforeEach(() => {
@@ -164,8 +165,9 @@ describe('Points Engine compute page', () => {
     fireEvent.click(creditBtn);
 
     await waitFor(() => expect(commitMock).toHaveBeenCalledTimes(1));
+    // TOCTOU: the previewed run's sourceKey is passed back as expectedKey so a stale run 409s.
     expect(commitMock).toHaveBeenCalledWith(
-      expect.objectContaining({ period: expect.any(String) }),
+      expect.objectContaining({ period: expect.any(String), expectedKey: 'deoleo|2026-09|cf_x|v7' }),
     );
 
     await waitFor(() => expect(screen.getByTestId('commit-result')).toBeInTheDocument());
@@ -173,5 +175,64 @@ describe('Points Engine compute page', () => {
 
     const link = screen.getByRole('link', { name: /review .* confirm this batch in credits/i });
     expect(link).toHaveAttribute('href', '/admin/credits-payouts/status');
+  });
+
+  it('PE-C5: a commit returning a 409 surfaces the "computation changed" message', async () => {
+    commitMock.mockResolvedValue({
+      success: false,
+      status: 409,
+      error: 'The computation changed since you last previewed it. Re-preview and review the new result.',
+    });
+    render(<ComputePage />);
+    await runPreview();
+
+    const creditBtn = await screen.findByRole('button', { name: /credit in portal/i });
+    fireEvent.click(creditBtn);
+
+    await waitFor(() => expect(commitMock).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/computation changed since you last previewed/i)).toBeInTheDocument();
+    // No success batch panel on a rejected commit.
+    expect(screen.queryByTestId('commit-result')).not.toBeInTheDocument();
+  });
+
+  it('PE-C6: the prior-batches warning counts ANY credit batch for the period', async () => {
+    commitMock.mockResolvedValue({
+      success: true,
+      data: { ...COMMIT_RESULT, priorBatchesThisPeriod: 2 },
+    });
+    render(<ComputePage />);
+    await runPreview();
+
+    fireEvent.click(await screen.findByRole('button', { name: /credit in portal/i }));
+    await waitFor(() => expect(screen.getByTestId('commit-result')).toBeInTheDocument());
+    expect(screen.getByText(/already 2 credit batches for this period/i)).toBeInTheDocument();
+  });
+
+  it('PE-C7: engineDisabled OK-group footer omits the credit-upload file reference', async () => {
+    // >25 OK rows so the "showing the first N" footer renders, with the engine disabled.
+    const okRows = Array.from({ length: 30 }, (_, i) => ({
+      outletCode: `OUT-${i}`,
+      kpiCode: 'CASES_SOLD',
+      status: 'OK' as const,
+      points: 100,
+      achievement: 10,
+      target: 10,
+      explanation: 'ok',
+    }));
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        engineDisabled: true,
+        counts: { total: 30, ok: 30, skip: 0, error: 0, noRule: 0 },
+        rows: okRows,
+      }),
+    });
+    render(<ComputePage />);
+    await runPreview();
+
+    await waitFor(() => expect(screen.getByTestId('group-OK')).toBeInTheDocument());
+    const footer = screen.getByText(/showing the first/i);
+    expect(footer.textContent).toMatch(/review report/i);
+    expect(footer.textContent).not.toMatch(/credit-upload file/i);
   });
 });

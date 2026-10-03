@@ -33,11 +33,24 @@ const NODE_ICON: Record<NodeType, React.ReactNode> = {
   formula: <FunctionSquare className="h-4 w-4" />,
 };
 
-const ON_FAIL_OPTIONS: ReadonlyArray<{ value: OnFail; label: string }> = [
-  { value: 'zero', label: 'Pay nothing — the whole rule → 0' },
-  { value: 'skipNode', label: 'Skip this step, keep going' },
-  { value: 'passthrough', label: 'Ignore the check, keep going' },
-];
+// Only 'zero' actually withholds points; 'skipNode'/'passthrough' are inert for a gate and invite silent
+// over-credit, so the builder no longer offers them. A rule loaded from the API that already carries a
+// legacy value keeps it visible (and selectable, so it isn't silently rewritten) — draftIssues warns about
+// it (see kit.draftIssues) — but a fresh gate can only be 'zero'.
+function onFailOptions(current: OnFail): ReadonlyArray<{ value: OnFail; label: string }> {
+  const zero = { value: 'zero' as OnFail, label: 'Pay 0 points if this fails (withhold)' };
+  if (current === 'zero') return [zero];
+  return [zero, { value: current, label: `${current} (legacy — won’t withhold; switch to Pay 0)` }];
+}
+
+// Pipeline order is fixed in the evaluator regardless of card position: gates/filters run FIRST, floor/cap
+// LAST. A small badge keeps the visible (reorderable) order from misleading the author.
+const ORDER_NOTE: Partial<Record<NodeType, string>> = {
+  gate: 'checked first',
+  segmentFilter: 'checked first',
+  floor: 'applied at the end',
+  cap: 'applied at the end',
+};
 
 export function NodeCard({
   node,
@@ -68,8 +81,16 @@ export function NodeCard({
             {NODE_ICON[node.type]}
           </span>
           <div>
-            <p className="text-sm font-bold text-gray-900">
+            <p className="flex items-center gap-1.5 text-sm font-bold text-gray-900">
               {index + 1}. {meta.label}
+              {ORDER_NOTE[node.type] && (
+                <span
+                  className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-gray-500"
+                  title="This step runs in a fixed position regardless of its order in the list."
+                >
+                  {ORDER_NOTE[node.type]}
+                </span>
+              )}
             </p>
             <p className="text-[10px] text-gray-400">{meta.blurb}</p>
           </div>
@@ -217,7 +238,7 @@ function NodeEditor({
             <PredicateBuilder value={node.when} vars={vars} disabled={disabled} onChange={(when) => onChange({ ...node, when })} />
           </Field>
           <Field label="If the check fails">
-            <SelectField value={node.onFail} disabled={disabled} onChange={(onFail) => onChange({ ...node, onFail })} options={ON_FAIL_OPTIONS} />
+            <SelectField value={node.onFail} disabled={disabled} onChange={(onFail) => onChange({ ...node, onFail })} options={onFailOptions(node.onFail)} />
           </Field>
         </div>
       );
@@ -262,7 +283,7 @@ function NodeEditor({
             </div>
           )}
           <Field label="If no value matches">
-            <SelectField value={node.onFail} disabled={disabled} onChange={(onFail) => onChange({ ...node, onFail })} options={ON_FAIL_OPTIONS} />
+            <SelectField value={node.onFail} disabled={disabled} onChange={(onFail) => onChange({ ...node, onFail })} options={onFailOptions(node.onFail)} />
           </Field>
         </div>
       );

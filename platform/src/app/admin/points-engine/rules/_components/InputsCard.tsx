@@ -94,9 +94,14 @@ export function InputsCard({
                 <SelectField<SourceKind>
                   value={kind}
                   disabled={disabled}
-                  onChange={(k) =>
-                    replaceInput(i, applyKind({ ...inp, type: k === 'segment' ? 'enum' : inp.type }, k, value))
-                  }
+                  onChange={(k) => {
+                    // Segment ⇒ enum input (seed a concrete field so the source isn't an empty "segment:");
+                    // leaving segment for a numeric source ⇒ drop the forced enum so the input is valid again
+                    // (an enum input needs `values`, which a KPI/target source doesn't collect).
+                    const nextType = k === 'segment' ? 'enum' : kind === 'segment' ? 'number' : inp.type;
+                    const nextValue = k === 'segment' ? value || 'program' : value;
+                    replaceInput(i, applyKind({ ...inp, type: nextType }, k, nextValue));
+                  }}
                   options={[
                     { value: 'achievement', label: 'Achievement (KPI code)' },
                     { value: 'target', label: 'Target of a KPI' },

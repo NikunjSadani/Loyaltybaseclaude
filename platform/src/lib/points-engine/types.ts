@@ -159,6 +159,8 @@ export interface ComputePreview {
   /** Gifsy-enabled in-portal direct crediting — lets the UI offer/hide "Credit in portal" pre-click. */
   directCreditEnabled: boolean;
   ruleVersionsUsed: Array<{ ruleId: string; version: number }>;
+  /** Content hash of this run — pass back as `expectedKey` on commit to guard the review→commit TOCTOU. */
+  sourceKey: string;
 }
 export interface ComputeCommitResult {
   batchId: string;
@@ -170,7 +172,8 @@ export interface ComputeCommitResult {
   counts: { total: number; ok: number; skip: number; error: number; noRule: number };
   sourceKey: string;
   idempotentHit: boolean;
-  priorPointsEngineBatchesThisPeriod: number;
+  /** Count of OTHER credit batches (engine OR manual) already in this period — the UI warns (Option A). */
+  priorBatchesThisPeriod: number;
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────────

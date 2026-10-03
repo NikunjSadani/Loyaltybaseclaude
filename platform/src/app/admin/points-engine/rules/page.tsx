@@ -88,7 +88,12 @@ export default function PointsRulesPage() {
               }`}
             >
               {s}
-              {s !== 'all' && rules.length > 0 ? ` (${counts[s]})` : ''}
+              {/* Counts are derived from the server-FILTERED rows, so they're only meaningful for a status
+                 when that status is the one loaded (or when "all" is active). Showing them on inactive tabs
+                 would misleadingly read "(0)". */}
+              {s !== 'all' && (statusFilter === 'all' || statusFilter === s) && rules.length > 0
+                ? ` (${counts[s]})`
+                : ''}
             </button>
           ))}
         </div>

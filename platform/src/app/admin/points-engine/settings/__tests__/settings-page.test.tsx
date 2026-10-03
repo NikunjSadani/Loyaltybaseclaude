@@ -70,4 +70,26 @@ describe('Points Engine settings page', () => {
     await waitFor(() => expect(setSettings).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByText(/^saved$/i)).toBeInTheDocument());
   });
+
+  it('PE-S5: both toggles are disabled while a save is in flight', async () => {
+    asGifsy();
+    let resolveSave!: (v: unknown) => void;
+    (setSettings as unknown as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Promise((res) => {
+        resolveSave = res;
+      }),
+    );
+    render(<SettingsPage />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /save changes/i })).toBeInTheDocument());
+    // Engine is on in the loaded data, so before saving both switches are enabled.
+    expect(screen.getAllByRole('switch').every((s) => !s.hasAttribute('disabled'))).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() =>
+      expect(screen.getAllByRole('switch').every((s) => s.hasAttribute('disabled'))).toBe(true),
+    );
+
+    resolveSave({ success: true, data: { clientId: 'deoleo', enabled: true, directCreditEnabled: true } });
+    await waitFor(() => expect(screen.getByText(/^saved$/i)).toBeInTheDocument());
+  });
 });
