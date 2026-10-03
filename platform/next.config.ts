@@ -19,6 +19,10 @@ const BACKEND_API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:400
 const nextConfig: NextConfig = {
   // Required for Docker standalone build (Cloud Run)
   output: 'standalone',
+  // DEV-ONLY (local multi-tenant testing): allow cross-origin dev requests from the
+  // `<slug>.app.localhost` tenant subdomains so Turbopack HMR + hydration work when
+  // exercising per-tenant hosts locally. Ignored in production builds.
+  allowedDevOrigins: ['*.localhost', '*.app.localhost'],
   async rewrites() {
     return {
       beforeFiles: [
