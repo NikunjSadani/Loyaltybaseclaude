@@ -5,10 +5,16 @@
 > This is **state**; the authoritative *how/what* live in the doc set below.
 
 ## Current state (2026-10-03)
-- **PHASE 0 CODE DONE — STAGING DEPLOY HELD BY OWNER.** The capability-gated admin shell is scaffolded,
-  **FULL-GATE GREEN**, and **independently audited (PASS-WITH-NOTES)** on the isolated worktree
-  `../Loyaltybaseclaude-er` (branch `er/phase0-shell`, HEAD `5edc57a`) — committed **local only, NOT pushed**,
-  isolated from the trade work.
+- **PHASE 0 CODE DONE + LOCAL RUNTIME-VERIFIED (harness-limited) — STAGING DEPLOY HELD BY OWNER.** The
+  capability-gated admin shell is scaffolded, **FULL-GATE GREEN**, **independently audited (PASS-WITH-NOTES)**, and
+  **local runtime-verified** on the isolated worktree `../Loyaltybaseclaude-er` (branch `er/phase0-shell`,
+  HEAD `1c0139b`) — committed **local only, NOT pushed**, isolated from the trade work.
+- **Local verify result (see Wave log for detail):** the enabler really writes `loyaltyType=EMPLOYEE_REWARDS`
+  (DB-confirmed), and real OTP-login-per-role returns the correct per-tenant `capabilities` from the live config
+  endpoint (Deoleo=OUTLET/trade, Britannia=EMPLOYEE/cockpit) — the exact `selectAdminNav` input. Deoleo's trade shell
+  renders in the browser; the Britannia **cockpit screenshot is the one thing the local browser pane can't show**
+  (it blocks cookies for `*.localhost`, so the FE's client-side config XHR 401s → TRADE fallback). Not a product
+  defect (proven server-side + unit tests); it's naturally captured on the planned **staging** verify.
 - ⏸️ **Owner HELD the staging deploy (2026-10-03).** Do **NOT** push `er/phase0-shell`→`develop` — `develop`
   carries ~20 unpushed commits including the **held trade Points Compute Engine Waves 1–3**, so a push would
   deploy those too. No `uat-britannia` tenant / staging runtime-verify until the owner re-opens the staging
@@ -93,5 +99,31 @@ credits + catalogue, pilot vendors).
     only when `EMPLOYEE_REWARDS`; TDD both cases). So `uat-britannia` can be onboarded as an EMPLOYEE tenant
     via a **clean authenticated API call — no raw DB write ever**, once staging un-holds. `nest build` ✓,
     `api jest` 3458 ✓ (BE-only; FE unaffected).
-  - ⏳ Owner-gated: push `er/phase0-shell`→`develop` + create `uat-britannia` via `POST /v1/gifsy/clients`
-    (`loyaltyType: EMPLOYEE_REWARDS`) + staging runtime-verify (Deoleo unchanged + Britannia cockpit).
+  - **LOCAL RUNTIME-VERIFY** (2026-10-03, dev DB `gifsy_dev` via Cloud SQL Auth Proxy; api :4001 + platform :3001,
+    isolated from the primary trade stack on :4000/:3000). Dev commit `1c0139b` adds a DEV-ONLY
+    `allowedDevOrigins` (`*.localhost`/`*.app.localhost`) so local per-tenant subdomains hydrate (ignored in prod).
+    **PROVEN end-to-end against the real running server + real DB:**
+    - **Enabler works for real:** `POST /v1/gifsy/clients {loyaltyType:'EMPLOYEE_REWARDS'}` (GIFSY_ADMIN OTP login)
+      → HTTP 201, and the **DB row `britannia.loyaltyType == EMPLOYEE_REWARDS`** (verified directly). A clean
+      authenticated API call — no raw DB write. (Britannia tenant + a `CLIENT_ADMIN` test user `9000000030` now
+      seeded in `gifsy_dev` — additive dev data, reusable for future local verifies.)
+    - **Capability resolution per role (real OTP login each):** `GET /v1/admin/settings/config` returns —
+      Deoleo (TRADE) → `earnerModel:OUTLET, kyc/gst/tds/payouts/invoicing:true, celebratoryUx:false`;
+      Britannia (EMPLOYEE) → `earnerModel:EMPLOYEE, compliance all false, vendorMarketplace+celebratoryUx:true`.
+      This is the **exact input `selectAdminNav` consumes** → trade world vs employee cockpit. Also confirmed via a
+      backend log line (`statusCode:200, tenantId:britannia, role:CLIENT_ADMIN`) — the proxy+auth+capabilities path
+      works end-to-end server-side.
+    - **Deoleo admin real browser login → `/admin/dashboard` renders the trade shell/nav** (screenshot), unchanged.
+    - **Britannia admin real browser login SUCCEEDS** ("logged in — client: britannia", redirect to `/admin`).
+    - ⚠️ **One gap — the live Britannia COCKPIT screenshot was NOT captured locally.** Root cause (fully diagnosed):
+      the **built-in browser pane blocks cookies for the local `*.localhost` origin** (`document.cookie` is empty +
+      unwritable), so the httpOnly session cookie is never sent on the FE's client-side `/api` XHR → the config
+      fetch 401s client-side → `useTenantFeatures` falls back to the TRADE default → the cockpit nav never swaps in
+      the pane (Deoleo looks right only because TRADE *is* the fallback). This is a **harness limitation, not a
+      product defect** — it 401s identically for the trade tenant (code I didn't touch), and the same endpoint
+      returns the correct EMPLOYEE capabilities when called with a valid Bearer (server-side 200, and `selectAdminNav`
+      unit tests prove the cockpit selection). The cockpit visual is naturally captured on **staging** (real https
+      origin + real cookies), which is already the planned staging-verify step.
+  - ⏳ Owner-gated (unchanged): push `er/phase0-shell`→`develop` + create `uat-britannia` via `POST /v1/gifsy/clients`
+    (`loyaltyType: EMPLOYEE_REWARDS`) + staging runtime-verify (Deoleo unchanged + **Britannia cockpit screenshot** —
+    the one thing the local browser pane couldn't show). ▶ Then **Phase A** (People roster, BUILD-PLAN §5).
