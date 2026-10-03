@@ -389,7 +389,9 @@ describe('CreditsService', () => {
       expect(data.totalPayoutPaise).toBe(BigInt(10000));
     });
 
-    // ── Wave 2: programmatic (direct-credit) source path — idempotency + one-active-per-period ──
+    // ── Wave 2 (Option A, 2026-10-03): programmatic (direct-credit) source path — idempotency only ──
+    // Cross-batch/cross-path overlap is NOT blocked here (platform-consistent: multiple batches per period
+    // are allowed, as for manual uploads; overlap is warned by commitCompute + gated by the confirm step).
     const srcDto: CreateBatchDto = {
       period: '2026-05', totalOutlets: 1, totalPoints: 200, totalPayoutPaise: 0, rows: [],
     };
@@ -398,30 +400,20 @@ describe('CreditsService', () => {
       mockTx.creditBatch.findFirst.mockResolvedValueOnce({ id: 'existing', batchCode: 'CB-2026-05-001', status: 'PENDING_CONFIRM', sourceKey: 'pe_k1' });
       const res = await service.createBatch(admin, srcDto, { kind: 'POINTS_ENGINE', key: 'pe_k1' });
       expect(res.id).toBe('existing');
-      expect(mockTx.creditBatch.create).not.toHaveBeenCalled();   // no second batch → no double-credit
-      expect(mockTx.creditBatch.deleteMany).not.toHaveBeenCalled();
+      expect(mockTx.creditBatch.create).not.toHaveBeenCalled();   // no second batch for the SAME run → no double-credit
     });
 
-    it('source: refuses a new run when a CONFIRMED engine batch already credited the period (double-credit guard)', async () => {
-      mockTx.creditBatch.findFirst
-        .mockResolvedValueOnce(null)                                        // sameRun: none
-        .mockResolvedValueOnce({ batchCode: 'CB-2026-05-001', status: 'CONFIRMED' }); // active confirmed
-      await expect(service.createBatch(admin, srcDto, { kind: 'POINTS_ENGINE', key: 'pe_k2' }))
-        .rejects.toBeInstanceOf(ConflictException);
-      expect(mockTx.creditBatch.create).not.toHaveBeenCalled();
-    });
-
-    it('source: supersedes an un-confirmed engine draft for the period, then creates the new batch', async () => {
-      mockTx.creditBatch.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(null); // no sameRun, no active confirmed
-      mockTx.creditBatch.create.mockResolvedValue({ id: 'new1', sourceKey: 'pe_k3' });
-      const res = await service.createBatch(admin, srcDto, { kind: 'POINTS_ENGINE', key: 'pe_k3' });
-      expect(mockTx.creditBatch.deleteMany).toHaveBeenCalledWith({
-        where: { clientId: 'deoleo', period: '2026-05', sourceKind: 'POINTS_ENGINE', status: 'PENDING_CONFIRM' },
-      });
+    it('source: a DIFFERENT run creates a new batch even when a CONFIRMED engine batch already exists for the period (Option A — not blocked)', async () => {
+      // Only the sameRun (sourceKey) lookup runs now; a non-matching key → create. (A confirmed prior batch
+      // for the period is NOT queried/blocked; overlap is operator-governed + warned, like manual uploads.)
+      mockTx.creditBatch.findFirst.mockResolvedValueOnce(null); // no same-key batch
+      mockTx.creditBatch.create.mockResolvedValue({ id: 'new2', sourceKey: 'pe_k2' });
+      const res = await service.createBatch(admin, srcDto, { kind: 'POINTS_ENGINE', key: 'pe_k2' });
       const data = mockTx.creditBatch.create.mock.calls[0][0].data;
       expect(data.sourceKind).toBe('POINTS_ENGINE');
-      expect(data.sourceKey).toBe('pe_k3');
-      expect(res.id).toBe('new1');
+      expect(data.sourceKey).toBe('pe_k2');
+      expect(res.id).toBe('new2');
+      expect(mockTx.creditBatch.deleteMany).not.toHaveBeenCalled(); // no supersede-delete anymore
     });
   });
 

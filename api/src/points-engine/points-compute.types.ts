@@ -65,7 +65,9 @@ export interface ComputeCommitResult {
   /** The run's content hash — the UI stores it and passes it back as `expectedKey` on confirm/re-commit. */
   sourceKey: string;
   idempotentHit: boolean;
-  priorPointsEngineBatchesThisPeriod: number;
+  /** Count of OTHER credit batches (ANY source — engine or manual upload) already existing for this
+   *  (clientId, period). Surfaced so the UI warns about possible double-crediting (Option A). Non-blocking. */
+  priorBatchesThisPeriod: number;
 }
 
 /** A full compute run's preview for one (clientId × period), before any crediting. */
@@ -86,4 +88,7 @@ export interface ComputePreview {
   directCreditEnabled: boolean;
   /** Rule-version content-hash set used — frozen into a batch later (Wave 2). */
   ruleVersionsUsed: Array<{ ruleId: string; version: number }>;
+  /** Deterministic content hash of this run's creditable rows — the UI passes it back as `expectedKey`
+   *  on commit so a run that changed since it was previewed is rejected (review→commit TOCTOU guard). */
+  sourceKey: string;
 }

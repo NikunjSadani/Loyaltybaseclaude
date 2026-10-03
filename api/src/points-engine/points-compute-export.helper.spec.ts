@@ -40,6 +40,7 @@ function samplePreview(overrides: Partial<ComputePreview> = {}): ComputePreview 
     totalPoints: 1850,
     engineDisabled: false,
     directCreditEnabled: false,
+    sourceKey: 'pe_test',
     ruleVersionsUsed: [
       { ruleId: 'rule_cases_q3', version: 7 },
       { ruleId: 'rule_vis', version: 2 },

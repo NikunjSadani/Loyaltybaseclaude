@@ -11,7 +11,7 @@
  *   GET /v1/admin/points-engine/settings?clientId=                                     (GIFSY any / tenant own)
  */
 
-import { Body, Controller, Get, Put, Query } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Put, Query } from '@nestjs/common';
 import { AdminCoreService } from '../admin-core/admin-core.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { UpsertSettingDto } from '../admin-core/dto/settings.dto';
@@ -53,6 +53,15 @@ export class PointsEngineSettingsController {
   @Put()
   @Roles('GIFSY_ADMIN')
   async set(@CurrentUser() user: JwtPayload, @Body() dto: SetPointsEngineSettingsDto) {
+    // This is a platform-level money control (directCreditEnabled turns on in-portal wallet crediting), so
+    // — exactly like the TDS statutory setter — it may only be written from an UN-ASSUMED GIFSY session;
+    // an owner working inside an assumed brand must exit first. Prevents editing one tenant's money flag
+    // from inside another tenant's context.
+    if (!platformWide(user)) {
+      throw new ForbiddenException(
+        'Points Engine settings can only be changed from an un-assumed Gifsy session — exit the brand first.',
+      );
+    }
     const settingDto: UpsertSettingDto = {
       key: 'pointsEngine',
       value: { enabled: dto.enabled, directCreditEnabled: dto.directCreditEnabled },

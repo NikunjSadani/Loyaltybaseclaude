@@ -118,6 +118,7 @@ export class PointsComputeService {
       engineDisabled,
       directCreditEnabled,
       ruleVersionsUsed: [],
+      sourceKey: computeSourceKey(clientId, period, { program: programFilter, kpiCode: kpiFilter }, [], []),
     };
     if (activeKpiCodes.length === 0) return emptyPreview;
 
@@ -363,7 +364,8 @@ export class PointsComputeService {
       }
     }
 
-    return {
+    const ruleVersionsUsed = [...ruleVersions.values()];
+    const preview: ComputePreview = {
       clientId,
       period,
       filter: { program: programFilter, kpiCode: kpiFilter },
@@ -372,8 +374,15 @@ export class PointsComputeService {
       rows,
       engineDisabled,
       directCreditEnabled,
-      ruleVersionsUsed: [...ruleVersions.values()],
+      ruleVersionsUsed,
+      sourceKey: '', // set below
     };
+    // Deterministic key over the creditable (OK, amount>0) rows — the UI stores it and passes it back as
+    // `expectedKey` on commit; commitCompute reuses this exact value so a run that changed since preview is
+    // rejected. Computed from the same creditable rows commit will use (mapPreviewToUploadRows → amount>0).
+    const creditable = PointsComputeService.mapPreviewToUploadRows(preview).filter((r) => r.amount > 0);
+    preview.sourceKey = computeSourceKey(clientId, period, preview.filter, ruleVersionsUsed, creditable);
+    return preview;
   }
 
   /**
@@ -424,9 +433,9 @@ export class PointsComputeService {
       throw new BadRequestException('This run computed 0 points for every outlet — nothing to credit.');
     }
 
-    // Idempotency key over the actual committed content (clientId + period + filter + rule versions + the
-    // creditable rows). previewCompute is read-only, so recomputing for the key is cheap + deterministic.
-    const sourceKey = computeSourceKey(user.clientId, preview, creditableRows);
+    // Idempotency key = the one previewCompute already computed over these same creditable rows (clientId +
+    // period + filter + rule versions + rows) — deterministic, so reusing it keeps preview + commit identical.
+    const sourceKey = preview.sourceKey;
 
     // TOCTOU guard: if the caller passed the key they reviewed and the fresh compute no longer matches
     // (achievements/targets edited or a rule republished since review), refuse — never credit a run that
@@ -464,11 +473,12 @@ export class PointsComputeService {
       { kind: POINTS_ENGINE_SOURCE, key: sourceKey },
     );
 
-    const priorPointsEngineBatchesThisPeriod = await this.prisma.creditBatch.count({
+    // Count OTHER credit batches for this period — ANY source (engine OR manual upload) — so the UI can
+    // warn about possible double-crediting (Option A: cross-batch overlap is warned, not blocked).
+    const priorBatchesThisPeriod = await this.prisma.creditBatch.count({
       where: {
         clientId: user.clientId,
         period: preview.period,
-        sourceKind: POINTS_ENGINE_SOURCE,
         id: { not: batch.id },
       },
     });
@@ -483,7 +493,7 @@ export class PointsComputeService {
       counts: preview.counts,
       sourceKey,
       idempotentHit: !!existingBefore,
-      priorPointsEngineBatchesThisPeriod,
+      priorBatchesThisPeriod,
     };
   }
 
@@ -644,19 +654,21 @@ function classForType(awards: unknown, type: string | null): 'POINTS' | 'PAYOUT'
  */
 function computeSourceKey(
   clientId: string,
-  preview: ComputePreview,
+  period: string,
+  filter: { program?: string | null; kpiCode?: string | null } | undefined,
+  ruleVersionsUsed: Array<{ ruleId: string; version: number }>,
   uploadRows: UploadRowDto[],
 ): string {
   const rows = uploadRows
     .map((r) => `${r.outletId}|${r.fieldId}|${r.amount}`)
     .sort();
-  const versions = preview.ruleVersionsUsed
+  const versions = ruleVersionsUsed
     .map((v) => `${v.ruleId}@${v.version}`)
     .sort();
   const payload = JSON.stringify({
     clientId,
-    period: preview.period,
-    filter: { program: preview.filter?.program ?? null, kpiCode: preview.filter?.kpiCode ?? null },
+    period,
+    filter: { program: filter?.program ?? null, kpiCode: filter?.kpiCode ?? null },
     versions,
     rows,
   });

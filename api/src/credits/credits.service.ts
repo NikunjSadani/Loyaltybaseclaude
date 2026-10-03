@@ -916,44 +916,20 @@ export class CreditsService {
     const batch = await this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`CBATCH|${user.clientId}|${dto.period}`}, 0))`;
       if (source?.key) {
-        // Idempotent: the identical run already has a batch → return it unchanged (no double-credit).
+        // Idempotent: the IDENTICAL run already has a batch → return it unchanged, so an accidental
+        // re-submit of the same run (double-click / retry) never creates a second batch.
+        //
+        // Cross-batch / cross-path overlap is deliberately NOT blocked here (Option A — platform-consistent,
+        // owner decision 2026-10-03). The credits rail has always allowed multiple batches per period
+        // (corrections, a 2nd program/filter, top-ups) and relies on the maker-checker CONFIRM step +
+        // operator judgement; a hard per-period block over-blocked all of those (and, since a reversal
+        // never flips CreditBatch.status, permanently blocked reverse-then-recredit). Instead, the engine
+        // surfaces a WARNING when the period already has credit batches (commitCompute →
+        // priorBatchesThisPeriod) and confirm remains the money gate — matching how manual uploads behave.
         const sameRun = await tx.creditBatch.findFirst({
           where: { clientId: user.clientId, sourceKey: source.key },
         });
         if (sameRun) return sameRun;
-
-        // ONE active programmatic batch per (clientId, period, sourceKind). An already-CONFIRMED (or
-        // PARTIALLY_REVERSED) batch for this period has credited/partly-credited wallets — creating a
-        // second one that overlaps the same outlets would DOUBLE-credit on confirm. Refuse; the operator
-        // must reverse the existing credit before computing a fresh run for the period. (A manual upload
-        // passes no source and is unaffected — multiple manual batches per period remain allowed.)
-        const activeConfirmed = await tx.creditBatch.findFirst({
-          where: {
-            clientId: user.clientId,
-            period: dto.period,
-            sourceKind: source.kind,
-            status: { in: ['CONFIRMED', 'PARTIALLY_REVERSED'] },
-          },
-          select: { batchCode: true, status: true },
-        });
-        if (activeConfirmed) {
-          throw new ConflictException(
-            `A ${activeConfirmed.status} ${source.kind} batch (${activeConfirmed.batchCode}) already credited ${dto.period}. ` +
-              'Reverse it before computing and crediting a new run for this period.',
-          );
-        }
-
-        // A still-UNCONFIRMED programmatic batch for this period has credited NOTHING yet, so a recompute
-        // supersedes it (delete the stale draft) rather than stacking a second pending batch the operator
-        // could accidentally also confirm. Safe: a PENDING_CONFIRM batch has no payout entries/reversals.
-        await tx.creditBatch.deleteMany({
-          where: {
-            clientId: user.clientId,
-            period: dto.period,
-            sourceKind: source.kind,
-            status: 'PENDING_CONFIRM',
-          },
-        });
       }
       const batchCode = await this.generateBatchCode(tx, user.clientId, dto.period);
       return tx.creditBatch.create({
