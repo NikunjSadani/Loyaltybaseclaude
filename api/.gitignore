@@ -3,6 +3,7 @@ node_modules/
 
 # Build
 dist/
+dist-seed/
 
 # Environment files — never commit secrets
 .env
