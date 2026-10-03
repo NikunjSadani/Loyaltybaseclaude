@@ -60,8 +60,10 @@ interface RuleConfigInput {
   attachsTo: RuleAttachment;
   output: { awardType: AwardType; fieldId: string };
   rounding: RoundingSpec;
-  inputs: RuleInput[];
-  pipeline: PipelineNode[];
+  // `unknown` (not RuleInput[]/PipelineNode[]) — the DTOs type these free-form to survive the global
+  // pipe's enableImplicitConversion (see dto/points-rule.dto.ts); validateRule enforces the real shape.
+  inputs: unknown;
+  pipeline: unknown;
 }
 
 @Injectable()
@@ -403,8 +405,9 @@ export class PointsEngineService {
       evaluationBasis: dto.evaluationBasis ?? 'PERIOD_AGGREGATE',
       output:          dto.output,
       rounding:        dto.rounding,
-      inputs:          dto.inputs,
-      pipeline:        dto.pipeline,
+      // Cast the free-form (`unknown`) config into the typed shape — validateRule then enforces it.
+      inputs:          dto.inputs as RuleInput[],
+      pipeline:        dto.pipeline as PipelineNode[],
     };
   }
 

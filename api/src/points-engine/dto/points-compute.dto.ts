@@ -7,14 +7,8 @@
  * only — the rules themselves are deep-validated by validateRule() on load (see the service).
  */
 
-import { IsArray, IsIn, IsObject, IsOptional, IsString, Matches } from 'class-validator';
-import type {
-  AwardType,
-  PipelineNode,
-  RoundingSpec,
-  RuleAttachment,
-  RuleInput,
-} from '../points-engine.types';
+import { Allow, IsIn, IsOptional, IsString, Matches } from 'class-validator';
+import type { AwardType, RoundingSpec, RuleAttachment } from '../points-engine.types';
 
 /** Strict YYYY-MM (01-12) — rejects 2026-13 etc. (mirrors achievements export). */
 const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -52,20 +46,23 @@ export class CommitComputeDto extends PreviewComputeDto {
  * (the single source of truth — the CRUD DTOs deliberately don't re-encode it either). No persistence.
  */
 export class SimulateComputeDto {
-  @IsObject()
+  // @Allow() (not @IsObject/@IsArray) — the nested config passes through untouched for validateRule; the
+  // global pipe (whitelist + transform + enableImplicitConversion) mangles @IsArray-typed nested objects
+  // (strips each element to a non-object). Same reason the CRUD DTOs + UpsertSettingDto use @Allow().
+  @Allow()
   attachsTo!: RuleAttachment;
 
-  @IsObject()
+  @Allow()
   output!: { awardType: AwardType; fieldId: string };
 
-  @IsObject()
+  @Allow()
   rounding!: RoundingSpec;
 
-  @IsArray()
-  inputs!: RuleInput[];
+  @Allow()
+  inputs!: unknown;
 
-  @IsArray()
-  pipeline!: PipelineNode[];
+  @Allow()
+  pipeline!: unknown;
 
   @IsOptional()
   @IsString()
@@ -80,7 +77,7 @@ export class SimulateComputeDto {
   evaluationBasis?: 'PERIOD_AGGREGATE';
 
   /** One sample evaluation context: achievements/targets by kpiCode + the outlet's segment facet. */
-  @IsObject()
+  @Allow()
   context!: {
     achievements?: Record<string, number | null>;
     targets?: Record<string, number | null>;

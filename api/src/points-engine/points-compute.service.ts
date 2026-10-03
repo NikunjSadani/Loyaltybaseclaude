@@ -500,8 +500,9 @@ export class PointsComputeService {
       attachsTo: RuleAttachment;
       output: { awardType: AwardType; fieldId: string };
       rounding: RoundingSpec;
-      inputs: RuleInput[];
-      pipeline: PipelineNode[];
+      // free-form (the DTO types these `unknown` to survive the global pipe); validateRule enforces shape.
+      inputs: unknown;
+      pipeline: unknown;
       effectiveFrom?: string;
       effectiveTo?: string | null;
       evaluationBasis?: 'PERIOD_AGGREGATE';
@@ -523,8 +524,8 @@ export class PointsComputeService {
       evaluationBasis: dto.evaluationBasis ?? 'PERIOD_AGGREGATE',
       output: dto.output,
       rounding: dto.rounding,
-      inputs: dto.inputs,
-      pipeline: dto.pipeline,
+      inputs: dto.inputs as RuleInput[],
+      pipeline: dto.pipeline as PipelineNode[],
     };
     const errors = validateRule(config);
     if (errors.length > 0) return { valid: false, errors };

@@ -9,15 +9,17 @@
  * node grammar as nested class-validator classes here (it would fork the contract).
  */
 
-import { IsArray, IsIn, IsObject, IsOptional, IsString, Matches } from 'class-validator';
-import type {
-  AwardType,
-  PipelineNode,
-  RoundingSpec,
-  RuleAttachment,
-  RuleInput,
-  RuleStatus,
-} from '../points-engine.types';
+import { Allow, IsIn, IsOptional, IsString, Matches } from 'class-validator';
+import type { AwardType, RoundingSpec, RuleAttachment, RuleStatus } from '../points-engine.types';
+
+/**
+ * ⚠️ The nested config props are typed `unknown` + `@Allow()` ON PURPOSE. The global ValidationPipe runs
+ * `transform + enableImplicitConversion`; a prop whose reflected design-type is an ARRAY (e.g.
+ * `inputs: RuleInput[]`) gets each element COERCED to `[]`, so validateRule then rejects
+ * "inputs[0]: must be an object". Reflected-type `Object` (a plain object, or `unknown`) is left
+ * untouched — so we type the free-form config as `unknown` and let validateRule (the single authority)
+ * validate the real shape. @Allow() keeps the prop past the whitelist. Do NOT re-type these as arrays.
+ */
 
 /** Calendar day, no time component — matches the @db.Date columns. */
 const DATE_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
@@ -47,25 +49,30 @@ export class CreatePointsRuleDto {
   @IsIn(['PERIOD_AGGREGATE'], { message: 'evaluationBasis must be PERIOD_AGGREGATE' })
   evaluationBasis?: 'PERIOD_AGGREGATE';
 
+  // The nested config objects/arrays are passed THROUGH untouched (validateRule is the authority) —
+  // @Allow() whitelists them without constraints. @IsObject()/@IsArray() here is unsafe: the global pipe
+  // (whitelist + transform + enableImplicitConversion) MANGLES @IsArray-typed nested objects (strips each
+  // element to a non-object), so validateRule would reject "inputs[0]: must be an object". (Same reason
+  // UpsertSettingDto uses @Allow() for its free-form value.)
   /** RuleAttachment { scope, program?, programCategory?, kpiCode } — deep-validated by validateRule. */
-  @IsObject()
+  @Allow()
   attachsTo!: RuleAttachment;
 
   /** { awardType, fieldId } — the credit-field bucket + award type. */
-  @IsObject()
+  @Allow()
   output!: { awardType: AwardType; fieldId: string };
 
   /** RoundingSpec { mode, scale } — single, final rounding. */
-  @IsObject()
+  @Allow()
   rounding!: RoundingSpec;
 
-  /** The ONLY variables the pipeline may read. */
-  @IsArray()
-  inputs!: RuleInput[];
+  /** RuleInput[] — typed `unknown` (see header); validateRule enforces the real shape. */
+  @Allow()
+  inputs!: unknown;
 
-  /** The ordered pipeline of typed nodes. */
-  @IsArray()
-  pipeline!: PipelineNode[];
+  /** PipelineNode[] — typed `unknown` (see header); validateRule enforces the real shape. */
+  @Allow()
+  pipeline!: unknown;
 }
 
 /**
@@ -87,20 +94,21 @@ export class UpdatePointsRuleDto {
   @IsIn(['PERIOD_AGGREGATE'], { message: 'evaluationBasis must be PERIOD_AGGREGATE' })
   evaluationBasis?: 'PERIOD_AGGREGATE';
 
-  @IsObject()
+  // Free-form config: @Allow() + `unknown` (see header) — validateRule is the authority.
+  @Allow()
   attachsTo!: RuleAttachment;
 
-  @IsObject()
+  @Allow()
   output!: { awardType: AwardType; fieldId: string };
 
-  @IsObject()
+  @Allow()
   rounding!: RoundingSpec;
 
-  @IsArray()
-  inputs!: RuleInput[];
+  @Allow()
+  inputs!: unknown;
 
-  @IsArray()
-  pipeline!: PipelineNode[];
+  @Allow()
+  pipeline!: unknown;
 }
 
 /** List filter — all optional, tenant scope is applied server-side from the JWT. */

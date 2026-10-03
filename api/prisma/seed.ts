@@ -1161,6 +1161,147 @@ async function seedDeoleoDemo() {
   });
   console.log('   ✓ Payout pipeline: FundLedger + DRAFT PayoutBatch PB-2026-05 (1 PENDING txn) + COMPLETED PB-2026-04');
 
+  // ── Points Compute Engine e2e fixtures (DEOLEO) ───────────────────────────────────
+  // Additive + idempotent inputs the Points Engine specs compute against:
+  //   platform/e2e/clientAdmin/points-engine-compute.e2e.ts
+  //   platform/e2e/clientAdmin/points-engine-simulate.e2e.ts
+  //   platform/e2e/gifsy/points-engine-settings.e2e.ts
+  // Period is '2026-05' (POINTS_ENGINE_PERIOD) — the specs hardcode the same literal with a comment.
+  // Chain the specs exercise: pointsEngine ON + a CASES_SOLD KpiDef + a POINTS-classified CreditField
+  // + per-outlet CASES_SOLD achievements/targets for 2026-05, so a published rate rule yields OK
+  // compute rows. Re-seed-safe: every write is an upsert keyed on a fixed id or a compound unique.
+  const POINTS_ENGINE_PERIOD = '2026-05';
+
+  // 1. Enable the engine + Gifsy direct-credit for deoleo (so preview/commit are not flagged off).
+  //    Default (tenant-settings.service) is both OFF; this row overrides them for deoleo.
+  await prisma.programSetting.upsert({
+    where: { clientId_settingKey: { clientId: DEOLEO_CLIENT_ID, settingKey: 'pointsEngine' } },
+    update: { settingValue: { enabled: true, directCreditEnabled: true } },
+    create: {
+      clientId: DEOLEO_CLIENT_ID,
+      settingKey: 'pointsEngine',
+      settingValue: { enabled: true, directCreditEnabled: true },
+      category: 'pointsEngine',
+      description: 'Points Compute Engine per-tenant flags (e2e fixture): preview enabled + direct-credit on.',
+    },
+  });
+
+  // 2. KpiDef CASES_SOLD — publish() reconciles every rule-referenced KPI against the ENABLED KpiDef
+  //    master, so the attachment/input KPI must exist as an enabled KpiDef or publish 400s.
+  await prisma.kpiDef.upsert({
+    where: { clientId_code: { clientId: DEOLEO_CLIENT_ID, code: 'CASES_SOLD' } },
+    update: { label: 'Cases Sold', enabled: true },
+    create: {
+      clientId: DEOLEO_CLIENT_ID,
+      code: 'CASES_SOLD',
+      label: 'Cases Sold',
+      unit: 'cases',
+      enabled: true,
+      order: 10,
+    },
+  });
+
+  // 3. The CreditField the rule credits into — isActive + POINTS-classified for the WHOLESALER/SSS
+  //    outlet types. previewCompute DEMOTES an OK row to ERROR unless its output field is, right now,
+  //    ACTIVE and POINTS for THAT outlet's type, so WHOLESALER (O001/O004's type) must be POINTS.
+  //    Name is distinctive and NOT in platform/e2e/fixtures/fabricated.ts.
+  await prisma.creditField.upsert({
+    where: { id: 'seed-cf-pe' },
+    update: {
+      name: 'Scheme Points Q2',
+      isActive: true,
+      outletTypeAwards: { WHOLESALER: 'POINTS', SSS: 'POINTS' },
+    },
+    create: {
+      id: 'seed-cf-pe',
+      clientId: DEOLEO_CLIENT_ID,
+      name: 'Scheme Points Q2',
+      isActive: true,
+      outletTypeAwards: { WHOLESALER: 'POINTS', SSS: 'POINTS' },
+      order: 50,
+    },
+  });
+
+  // 4. CASES_SOLD achievements (OutletSalesRecord) for 2026-05 on two WHOLESALER outlets (O001, O004).
+  //    Distinctive case counts (NOT in the fabricated list). A rate-2 rule → points = cases × 2
+  //    (O001: 137 → 274, O004: 212 → 424). Outlets with no CASES_SOLD cell SKIP (input nullAs:'reject').
+  const peSalesBatch = await prisma.salesUploadBatch.upsert({
+    where: { id: 'seed-pe-sales-batch' },
+    update: { month: POINTS_ENGINE_PERIOD, totalRows: 2, acceptedCount: 2 },
+    create: {
+      id: 'seed-pe-sales-batch',
+      clientId: DEOLEO_CLIENT_ID,
+      uploadedById: clientAdmin.id,
+      month: POINTS_ENGINE_PERIOD,
+      totalRows: 2,
+      acceptedCount: 2,
+    },
+  });
+  const peRows = [
+    { outletCode: 'O001', outletName: 'Deoleo Demo Wholesale Mart', cases: 137, target: 100 },
+    { outletCode: 'O004', outletName: 'Deoleo Demo Approved Wholesale', cases: 212, target: 150 },
+  ];
+  for (const r of peRows) {
+    await prisma.outletSalesRecord.upsert({
+      where: {
+        clientId_outletCode_month: {
+          clientId: DEOLEO_CLIENT_ID,
+          outletCode: r.outletCode,
+          month: POINTS_ENGINE_PERIOD,
+        },
+      },
+      update: { kpiValues: { CASES_SOLD: r.cases }, batchId: peSalesBatch.id, outletType: 'WHOLESALER' },
+      create: {
+        clientId: DEOLEO_CLIENT_ID,
+        outletCode: r.outletCode,
+        outletName: r.outletName,
+        outletType: 'WHOLESALER',
+        month: POINTS_ENGINE_PERIOD,
+        kpiValues: { CASES_SOLD: r.cases },
+        batchId: peSalesBatch.id,
+      },
+    });
+  }
+
+  // 5. CASES_SOLD targets (OutletTarget) for the same outlets/month. The rate rule above doesn't read
+  //    target, but these let a pct/gate rule be authored against the same fixtures later.
+  const peTargetBatch = await prisma.targetUploadBatch.upsert({
+    where: { id: 'seed-pe-target-batch' },
+    update: { month: POINTS_ENGINE_PERIOD, totalRows: 2, acceptedCount: 2 },
+    create: {
+      id: 'seed-pe-target-batch',
+      clientId: DEOLEO_CLIENT_ID,
+      uploadedById: clientAdmin.id,
+      month: POINTS_ENGINE_PERIOD,
+      totalRows: 2,
+      acceptedCount: 2,
+    },
+  });
+  for (const r of peRows) {
+    await prisma.outletTarget.upsert({
+      where: {
+        clientId_outletCode_month: {
+          clientId: DEOLEO_CLIENT_ID,
+          outletCode: r.outletCode,
+          month: POINTS_ENGINE_PERIOD,
+        },
+      },
+      update: { targetValues: { CASES_SOLD: r.target }, batchId: peTargetBatch.id, outletType: 'WHOLESALER' },
+      create: {
+        clientId: DEOLEO_CLIENT_ID,
+        outletCode: r.outletCode,
+        outletName: r.outletName,
+        outletType: 'WHOLESALER',
+        month: POINTS_ENGINE_PERIOD,
+        targetValues: { CASES_SOLD: r.target },
+        batchId: peTargetBatch.id,
+      },
+    });
+  }
+  console.log(
+    `   ✓ Points Engine fixtures: pointsEngine ON + CASES_SOLD KpiDef + "Scheme Points Q2" field + O001/O004 achievements+targets (${POINTS_ENGINE_PERIOD})`,
+  );
+
   console.log('   ✅ deoleo demo dataset ready.');
 }
 
