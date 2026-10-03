@@ -193,6 +193,47 @@ describe('GifsyService', () => {
       expect(mockPrisma.client.create).toHaveBeenCalled();
       expect(res.slug).toBe('acme');
     });
+
+    it('Phase 0: passes loyaltyType=EMPLOYEE_REWARDS through to client.create when provided', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue(null);
+      mockPrisma.client.findMany.mockResolvedValue([]);
+      mockPrisma.client.create.mockResolvedValue({
+        id: 'britannia', internalName: 'Britannia', status: 'ONBOARDING',
+        onboardedAt: new Date('2026-10-03'), branding: {}, features: {},
+      });
+      mockPrisma.outletType.findMany.mockResolvedValue([]);
+      mockPrisma.clientDomain.findFirst.mockResolvedValue(null);
+      mockPrisma.clientDomain.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ id: 'c1', clientId: 'britannia', domain: 'britannia.gifsy.in', isPrimary: false }]);
+
+      await service.createClient(gifsy, {
+        slug: 'britannia', internalName: 'Britannia', loyaltyType: 'EMPLOYEE_REWARDS',
+      } as never);
+
+      expect(mockPrisma.client.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ loyaltyType: 'EMPLOYEE_REWARDS' }) }),
+      );
+    });
+
+    it('Phase 0: omits loyaltyType when not provided (schema default TRADE applies — Deoleo-safe)', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue(null);
+      mockPrisma.client.findMany.mockResolvedValue([]);
+      mockPrisma.client.create.mockResolvedValue({
+        id: 'acme2', internalName: 'Acme2', status: 'ONBOARDING',
+        onboardedAt: new Date('2026-10-03'), branding: {}, features: {},
+      });
+      mockPrisma.outletType.findMany.mockResolvedValue([]);
+      mockPrisma.clientDomain.findFirst.mockResolvedValue(null);
+      mockPrisma.clientDomain.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ id: 'c1', clientId: 'acme2', domain: 'acme2.gifsy.in', isPrimary: false }]);
+
+      await service.createClient(gifsy, { slug: 'acme2', internalName: 'Acme2' } as never);
+
+      const arg = mockPrisma.client.create.mock.calls[0][0];
+      expect(arg.data.loyaltyType).toBeUndefined();
+    });
   });
 
   describe('updateClient', () => {

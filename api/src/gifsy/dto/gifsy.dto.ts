@@ -66,6 +66,16 @@ export class CreateClientDto {
   @IsObject()
   features?: Record<string, boolean>;
 
+  /**
+   * Employee Rewards — the tenant's loyalty product line. Optional; when absent the
+   * schema default `TRADE_LOYALTY` applies, so existing onboarding is byte-identical.
+   * Set to `EMPLOYEE_REWARDS` to onboard an employee-rewards tenant (e.g. Britannia) —
+   * it selects the EMPLOYEE earner model + the compliance-off capability set.
+   */
+  @IsOptional()
+  @IsIn(['TRADE_LOYALTY', 'EMPLOYEE_REWARDS'])
+  loyaltyType?: 'TRADE_LOYALTY' | 'EMPLOYEE_REWARDS';
+
   // ── Tenant domains (§A-DOMAIN) ────────────────────────────────────────────
 
   /**

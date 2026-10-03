@@ -88,4 +88,10 @@ credits + catalogue, pilot vendors).
     stub routes are capability-ungated (direct-URL reachable; harmless stubs — real route guards land with the
     real pages in Phase A+). Residual: a `gen_doc.js` help string (trade tooling) still says `ALL_NAV_ITEMS`.
     Sibling shells (partner/sales/vendor) not yet capability-gated — consistent with Phase 0 scope, tracked.
-  - ⏳ Owner-gated: push `er/phase0-shell`→`develop` + staging `uat-britannia` tenant + staging runtime-verify.
+  - **Tenant-create enabler** (2026-10-03, `er/phase0-shell`): wired `loyaltyType` into
+    `POST /v1/gifsy/clients` (`CreateClientDto` + `gifsy.createClient`, additive — default stays TRADE, set
+    only when `EMPLOYEE_REWARDS`; TDD both cases). So `uat-britannia` can be onboarded as an EMPLOYEE tenant
+    via a **clean authenticated API call — no raw DB write ever**, once staging un-holds. `nest build` ✓,
+    `api jest` 3458 ✓ (BE-only; FE unaffected).
+  - ⏳ Owner-gated: push `er/phase0-shell`→`develop` + create `uat-britannia` via `POST /v1/gifsy/clients`
+    (`loyaltyType: EMPLOYEE_REWARDS`) + staging runtime-verify (Deoleo unchanged + Britannia cockpit).

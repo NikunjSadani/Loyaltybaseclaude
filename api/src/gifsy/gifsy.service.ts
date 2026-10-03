@@ -548,6 +548,9 @@ export class GifsyService {
               invoicePrefix: dto.invoicePrefix ?? '',
             } as Prisma.InputJsonValue,
             features: (dto.features ?? {}) as Prisma.InputJsonValue,
+            // Employee Rewards: set only when explicitly provided; otherwise the schema
+            // default (TRADE_LOYALTY) applies, so existing tenant onboarding is unchanged.
+            ...(dto.loyaltyType ? { loyaltyType: dto.loyaltyType } : {}),
             approvalHierarchy: {} as Prisma.InputJsonValue,
             notifications: {} as Prisma.InputJsonValue,
             invoicing: {
