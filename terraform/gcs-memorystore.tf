@@ -64,6 +64,30 @@ resource "google_storage_bucket" "uploads" {
     }
   }
 
+  # Credit/payout audit-evidence retention (B1, 2026-10-04): credit-evidence/ prefix ONLY.
+  # Mirrors the visibility-media/ schedule EXACTLY — Standard→ARCHIVE@120d (the whole-bucket
+  # NEARLINE@90d rule above also applies first) then deleted at 7y (2555d > ARCHIVE's 365d min).
+  # Also sweeps any object orphaned if a batch is ever hard-deleted (DB cascade drops the row but
+  # not the GCS object). See CREDIT-BATCH-EVIDENCE-B1.md.
+  lifecycle_rule {
+    action {
+      type          = "SetStorageClass"
+      storage_class = "ARCHIVE"
+    }
+    condition {
+      age            = 120
+      matches_prefix = ["credit-evidence/"]
+    }
+  }
+
+  lifecycle_rule {
+    action { type = "Delete" }
+    condition {
+      age            = 2555
+      matches_prefix = ["credit-evidence/"]
+    }
+  }
+
   depends_on = [google_project_service.apis]
 }
 
