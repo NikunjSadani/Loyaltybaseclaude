@@ -144,6 +144,7 @@ export const TRADE_NAV_ITEMS: AdminNavItem[] = [
    stub routes; Rewards reuses the gift catalogue, Vendors + Settings reuse existing routes.
    No KYC/TDS/payouts/GST/invoicing/outlets — those don't exist in this world. ─────────── */
 export const EMPLOYEE_NAV_ITEMS: AdminNavItem[] = [
+  { href: '/admin/overview',   label: 'Overview',        icon: LayoutDashboard, featureFlag: null },
   { href: '/admin/people',     label: 'People',          icon: Users,         featureFlag: null },
   { href: '/admin/points',     label: 'Points',          icon: Coins,         featureFlag: null },
   { href: '/admin/contests',   label: 'Contests',        icon: Trophy,        featureFlag: null },

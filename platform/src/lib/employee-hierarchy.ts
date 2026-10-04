@@ -49,12 +49,12 @@ export const REQUIRED_HEADERS = [
 // XSR < SO < ASM < RSM < ZNM < NSM
 
 export const DEOLEO_HIERARCHY: TenantHierarchyLevel[] = [
-  { tenantId: 'deoleo', level: 1, roleCode: 'XSR', roleLabel: 'XSR', isLeaf: true,  isRoot: false },
-  { tenantId: 'deoleo', level: 2, roleCode: 'SO',  roleLabel: 'SO',  isLeaf: false, isRoot: false },
-  { tenantId: 'deoleo', level: 3, roleCode: 'ASM', roleLabel: 'ASM', isLeaf: false, isRoot: false },
-  { tenantId: 'deoleo', level: 4, roleCode: 'RSM', roleLabel: 'RSM', isLeaf: false, isRoot: false },
-  { tenantId: 'deoleo', level: 5, roleCode: 'ZNM', roleLabel: 'ZNM', isLeaf: false, isRoot: false },
-  { tenantId: 'deoleo', level: 6, roleCode: 'NSM', roleLabel: 'NSM', isLeaf: false, isRoot: true  },
+  { tenantId: 'deoleo', level: 1, roleCode: 'XSR', roleLabel: 'XSR', isLeaf: true,  isRoot: false, userRole: 'SALES_ISR'        },
+  { tenantId: 'deoleo', level: 2, roleCode: 'SO',  roleLabel: 'SO',  isLeaf: false, isRoot: false, userRole: 'SALES_SO'         },
+  { tenantId: 'deoleo', level: 3, roleCode: 'ASM', roleLabel: 'ASM', isLeaf: false, isRoot: false, userRole: 'SALES_ASM'        },
+  { tenantId: 'deoleo', level: 4, roleCode: 'RSM', roleLabel: 'RSM', isLeaf: false, isRoot: false, userRole: 'SALES_STATE_HEAD' },
+  { tenantId: 'deoleo', level: 5, roleCode: 'ZNM', roleLabel: 'ZNM', isLeaf: false, isRoot: false, userRole: 'SALES_STATE_HEAD' },
+  { tenantId: 'deoleo', level: 6, roleCode: 'NSM', roleLabel: 'NSM', isLeaf: false, isRoot: true,  userRole: 'SALES_HO'         },
 ];
 
 // ─── Mock employee store (localStorage-backed for demo) ───────────────────────

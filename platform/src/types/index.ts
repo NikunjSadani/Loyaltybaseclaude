@@ -627,6 +627,16 @@ export interface ExifValidationResult {
 
 // ─── Employee Hierarchy ───────────────────────────────────────────────────────
 
+/** The SalesUser role a hierarchy level maps to (backend `userRole` on
+ *  TenantHierarchyLevel). NOTE: this is the SalesUser-role enum, distinct from the
+ *  FE `UserRole` enum above whose sales codes are XSR…NSM. */
+export type HierarchyUserRole =
+  | 'SALES_HO'
+  | 'SALES_STATE_HEAD'
+  | 'SALES_ASM'
+  | 'SALES_SO'
+  | 'SALES_ISR';
+
 /** One level in a tenant's sales hierarchy configuration */
 export interface TenantHierarchyLevel {
   tenantId: string;
@@ -635,6 +645,9 @@ export interface TenantHierarchyLevel {
   roleLabel: string;  // display name
   isLeaf: boolean;    // can own outlets directly
   isRoot: boolean;    // no reporting manager required
+  /** The SalesUser role this level maps to (optional for back-compat with
+   *  configs saved before this field existed). */
+  userRole?: HierarchyUserRole;
 }
 
 /** An employee in the hierarchy — position-based, not person-based */

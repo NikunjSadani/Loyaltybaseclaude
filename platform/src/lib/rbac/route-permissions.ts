@@ -41,11 +41,15 @@ export const ROUTE_PERMISSIONS: Record<string, string> = {
   '/admin/users/outlets':            'partners:read',
   '/admin/users/parents':            'partners:read',
   '/admin/hierarchy':                'sales_org:read',
+  // Hierarchy-levels editor (employee cockpit) — managing the tenant's level config.
+  '/admin/hierarchy-levels':         'sales_org:manage_hierarchy',
   // Employee Rewards cockpit — People surfaces the roster (the hierarchy/sales-org upload + edit),
   // so it carries the SAME permission as /admin/hierarchy. Without this entry the per-page guard
   // fails open for a permissioned GIFSY_STAFF (the composed pages' backend endpoints still 403, but
   // the page should gate too).
   '/admin/people':                   'sales_org:read',
+  // Employee cockpit landing — surfaces the people/hierarchy overview (same read scope).
+  '/admin/overview':                 'sales_org:read',
 
   // Schemes (GIFSY-operated) + tenant read-only scheme reports
   '/admin/schemes':                  'schemes:read',

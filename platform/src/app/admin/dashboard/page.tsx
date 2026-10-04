@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useMemo, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   Users,
   Clock,
@@ -9,8 +10,10 @@ import {
   CheckCircle2,
   AlertCircle,
   Banknote,
+  Loader2,
 } from 'lucide-react';
 import { authHeader } from '@/lib/api-client';
+import { useTenantFeatures } from '@/lib/tenant-features';
 
 /* ─── KPI card data ──────────────────────────────────────────────────────────── */
 
@@ -57,6 +60,18 @@ export default function DashboardPage() {
   // Live KPIs from the API — the only source for the cards. No mock fallback (was 4821/214/…).
   const [liveKpis, setLiveKpis] = useState<ApiKpiData | null>(null);
 
+  // Employee Rewards: this trade dashboard is the shared post-login landing. An EMPLOYEE
+  // tenant has its own cockpit (/admin/overview), so bounce there via a capability-gated
+  // early return — WITHOUT touching the shared redirect helpers. For OUTLET/trade the
+  // hook resolves to the OUTLET default and NO redirect fires, so behavior is unchanged.
+  const router = useRouter();
+  const { capabilities } = useTenantFeatures('/api/admin/settings/config');
+  const isEmployeeCockpit = capabilities.earnerModel === 'EMPLOYEE';
+
+  useEffect(() => {
+    if (isEmployeeCockpit) router.replace('/admin/overview');
+  }, [isEmployeeCockpit, router]);
+
   useEffect(() => {
     fetch('/api/admin/dashboard/kpis', { headers: { ...authHeader() } })
       .then(r => r.json())
@@ -92,6 +107,16 @@ export default function DashboardPage() {
       { ...payoutSummary[2], count: sum(['FAILED', 'REVERSED'], 'count'),                        amount: fmtL(sum(['FAILED', 'REVERSED'], 'amountPaise'))                        },
     ];
   }, [liveKpis]);
+
+  // Employee cockpit redirect in flight — render a minimal spinner so an employee admin
+  // never sees the trade KPIs. OUTLET/trade never reaches this branch (byte-identical).
+  if (isEmployeeCockpit) {
+    return (
+      <div className="flex items-center justify-center py-24" data-testid="employee-cockpit-redirect">
+        <Loader2 className="w-6 h-6 text-gray-400 animate-spin" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5 fade-in">
