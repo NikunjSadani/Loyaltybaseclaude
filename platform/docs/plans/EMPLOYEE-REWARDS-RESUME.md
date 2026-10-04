@@ -95,15 +95,22 @@
 - **Staging/prod migration note (audit M5).** `20261003120000` builds a **non-concurrent** unique index on
   `sales_users` → brief write-lock during the migration window (fast here; the column is all-NULL). `ON
   DELETE SET NULL` means deleting a RewardAccount unlinks (and would strand a future wallet) — Phase 2 note.
-- **OPERATIONAL RULE (Phase A limitation — audit F2/F4): re-upload the roster after editing level CODES.**
-  The levels editor writes the `hierarchy_levels` config; the relational `SalesHierarchyLevel` rows and each
-  employee's coarse `User.role` are only rebuilt on a **roster re-upload**. So after changing a level's *code*,
-  a single-employee pencil-edit maps the old relational code via the new config → miss → `SALES_ISR`, and the
-  Overview's level list/counts lag the editor until a re-upload. Document for operators: **"after changing
-  level codes in the editor, re-upload the roster."** (Renaming only a level's display *name* or `userRole`
-  without changing the code is safe. The proper structural fix — reconcile relational levels/roles on config
-  save — is deferred.) Audit F5 (an employee admin briefly sees the trade dashboard + one trade-KPI fetch
-  during the redirect) is an accepted cosmetic minor, same class as the Phase-0 pre-config-load flash.
+- **✅ CLOSED (2026-10-04, HEAD `fc2749a`) — editing level codes no longer needs a roster re-upload.**
+  `setHierarchyLevels` now runs `reconcileLevelsToConfig` in the same tx: matches by LEVEL NUMBER, updates
+  the relational `SalesHierarchyLevel` row at each level IN PLACE (same id → employees stay linked) and
+  remaps existing employees' `User.role` to the new per-level `userRole`; a removal of a populated level is
+  rejected (400, no orphaning). Independent audit (auth/destructive-adjacent) fixes applied: **F3** —
+  `setHierarchyLevels` is now **EMPLOYEE-tenants-only** (a Deoleo CLIENT_ADMIN could otherwise have run the
+  reconcile on the live trade roster; GET stays open for the shared roster page); **F1/F2** — unique
+  monotonically-negative parking + orphan cleanup (no `(clientId,level)`/`(clientId,code)` self-collision,
+  no `__tmp__` accumulation); **F6** — `__tmp__` codes never surface in the UI. Runtime-verified: rename
+  MGR→MANAGER + role change auto-propagates with no re-upload; populated-level removal → 400; Deoleo PUT → 400.
+  **Residuals (tracked, Phase-A-acceptable):** F4 — a role change via the editor does NOT revoke the
+  affected users' sessions (a demoted manager keeps the old role claim until token refresh, ~rolling-session
+  window; **consistent with the bulk-upload path**; revoke before a staff-enabled live tenant). F5 — the
+  editor matches by position, so REORDERING rows re-roles employees by position (rename-in-place is the
+  intended use). Audit F5-prev (employee admin briefly sees the trade dashboard + one trade-KPI fetch during
+  the redirect) is an accepted cosmetic minor, same class as the Phase-0 pre-config-load flash.
 - **UI/UX fork — People roster reskin vs reuse-as-is (owner decision).** Phase A reuses the trade hierarchy
   page verbatim (design §5.1 "reuse as-is"). The UI/UX audit flags trade-era chrome bleeding into the
   employee cockpit: a "← back to /admin/dashboard" link (orphan — the employee nav has no dashboard) and
