@@ -33,7 +33,7 @@ This is deliberately **not** the POSM visibility photo module — that is in-app
 - **Deferred to staging UAT:** the full data-path e2e (real upload→GCS→DB→stream + cross-tenant negative), to avoid mutating the active shared dev DB.
 
 ## Open / follow-ups (not blockers)
-- **GCS lifecycle:** add a lifecycle rule for the `credit-evidence/` prefix at cutover (mirror `visibility-media/`: Standard → Archive → delete) so orphaned/aged objects are reaped. Infra (terraform), owner-gated.
+- **GCS lifecycle:** ✅ WRITTEN in `terraform/gcs-memorystore.tf` (commit `8e65026`) — `credit-evidence/` prefix gets ARCHIVE@120d + Delete@2555d (7y), mirroring `visibility-media/` exactly; `terraform fmt`/`validate` clean. **Not applied** (touches the shared prod bucket) — `terraform apply` it at the B1 cutover with owner go.
 - **TOCTOU soft cap:** the per-batch 100-file cap is a soft resource limit (count-then-insert, not locked) — concurrent uploads could slightly exceed it. Accepted; not a security boundary.
 - **Perm coupling:** upload and delete both use `credits:upload` (no separate `credits:delete`), consistent with the module. Owner sign-off noted.
 - **Deploy:** additive + dormant-safe; ships with the next staging deploy (the migration runs via `gifsy-migrate-staging`). Batch with the seed-packaging fix to keep deploy cutovers few.
