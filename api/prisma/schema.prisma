@@ -3020,6 +3020,7 @@ model CreditBatch {
 
   payoutEntries CreditPayoutEntry[]
   reversals     CreditReversal[]
+  attachments   CreditBatchAttachment[]
 
   @@index([clientId])
   @@unique([clientId, batchCode], name: "clientId_batchCode")
@@ -3027,6 +3028,30 @@ model CreditBatch {
   @@index([period])
   @@index([status])
   @@map("credit_batches")
+}
+
+/// Audit-evidence files attached to a credit/payout batch — the client's offline
+/// visibility-audit photos/PDFs kept in-portal as the record behind a 194C visibility
+/// payout. Bulk-uploaded against the BATCH (no per-file tagging); `outletCode` is a
+/// reserved, currently-unused tag left nullable so a future "evidence per outlet"
+/// surfacing needs no migration. Files live in GCS under
+/// `credit-evidence/<clientId>/<batchId>/…`; a row carries only metadata and never
+/// touches a money row. Additive + decoupled from the payout/invoice state machine.
+model CreditBatchAttachment {
+  id           String      @id @default(cuid())
+  clientId     String
+  batchId      String
+  batch        CreditBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  outletCode   String?
+  fileKey      String // GCS object key (tenant-foldered; tenant enforced from the path on view)
+  fileName     String // original client filename, display-only (never used to build the key)
+  contentType  String // mime sniffed from the bytes at upload (trusted thereafter)
+  sizeBytes    Int
+  uploadedById String
+  createdAt    DateTime    @default(now())
+
+  @@index([clientId, batchId])
+  @@map("credit_batch_attachments")
 }
 
 model CreditPayoutEntry {

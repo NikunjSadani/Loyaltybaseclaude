@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -9,11 +10,13 @@ import {
   Res,
   StreamableFile,
   UploadedFile,
+  UploadedFiles,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import { CreditsService } from './credits.service';
+import { CreditEvidenceService } from './credit-evidence.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
@@ -45,7 +48,10 @@ import {
  */
 @Controller('admin/credits')
 export class CreditsController {
-  constructor(private readonly credits: CreditsService) {}
+  constructor(
+    private readonly credits: CreditsService,
+    private readonly evidence: CreditEvidenceService,
+  ) {}
 
   // ─── Batches ───────────────────────────────────────────────────────────────
 
@@ -93,6 +99,68 @@ export class CreditsController {
     @Body() dto: CreateReversalDto,
   ) {
     return this.credits.createReversal(user, id, dto);
+  }
+
+  // ─── Batch audit-evidence attachments (B1) ─────────────────────────────────
+  // Bulk-upload the client's offline visibility-audit photos/PDFs against a batch, so the
+  // evidence behind a 194C visibility payout lives in-portal. CLIENT_ADMIN + GIFSY_ADMIN
+  // (GIFSY works a tenant by assuming it). View streams auth-gated + inline-safe; delete is
+  // blocked once the batch is confirmed (add-only audit trail).
+
+  @Post('batches/:id/attachments')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:upload')
+  @UseInterceptors(
+    // Bulk path: cap files/request low so multer's in-RAM buffering is bounded (5 × 10 MB).
+    // The FE uploads in matching chunks of 5; the service re-checks size + sniffs each file.
+    FilesInterceptor('files', 5, {
+      limits: { fileSize: 10 * 1024 * 1024, files: 5 },
+    }),
+  )
+  uploadBatchAttachments(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @UploadedFiles() files: Express.Multer.File[],
+  ) {
+    return this.evidence.uploadEvidence(user, id, files);
+  }
+
+  @Get('batches/:id/attachments')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:read')
+  listBatchAttachments(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.evidence.listEvidence(user, id);
+  }
+
+  @Get('attachments/:id/media')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:read')
+  async viewAttachment(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { bytes, contentType, fileName, inline } = await this.evidence.viewEvidence(user, id);
+    // Private audit-proof media (may contain PII) — never cache in the browser or a shared proxy.
+    // Mirrors the sibling KYC / scheme / visibility doc-view endpoints.
+    res.setHeader('Cache-Control', 'no-store');
+    // Sanitise the filename for the header (strip anything that could break/inject it).
+    const safeName = (fileName || 'evidence').replace(/[^\w.\- ]+/g, '_').slice(0, 120);
+    return new StreamableFile(bytes, {
+      type: contentType,
+      disposition: `${inline ? 'inline' : 'attachment'}; filename="${safeName}"`,
+    });
+  }
+
+  @Delete('batches/:id/attachments/:attId')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:upload')
+  deleteBatchAttachment(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Param('attId') attId: string,
+  ) {
+    return this.evidence.deleteEvidence(user, id, attId);
   }
 
   // ─── Eligible outlets ──────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ import {
 import { useAdminSession } from '@/lib/admin-session';
 import { jsonToSheetSafe } from '@/lib/xlsx-safe';
 import { downloadBlob } from '@/lib/download';
+import BatchEvidencePanel from './_components/BatchEvidencePanel';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -429,6 +430,8 @@ export default function PayoutStatusPage() {
                         )}
                       </div>
                     )}
+
+                    <BatchEvidencePanel batchId={batch.id} canDelete={!isConfirmed} />
                   </div>
                 )}
               </div>
