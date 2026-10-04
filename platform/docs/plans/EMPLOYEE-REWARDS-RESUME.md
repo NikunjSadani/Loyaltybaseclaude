@@ -4,11 +4,16 @@
 > [`RESUME.md`](./RESUME.md), which is the *trade* restart brief). Keep it current every wave.
 > This is **state**; the authoritative *how/what* live in the doc set below.
 
-## Current state (2026-10-03)
-- **PHASE 0 CODE DONE + LOCAL RUNTIME-VERIFIED (harness-limited) — STAGING DEPLOY HELD BY OWNER.** The
-  capability-gated admin shell is scaffolded, **FULL-GATE GREEN**, **independently audited (PASS-WITH-NOTES)**, and
-  **local runtime-verified** on the isolated worktree `../Loyaltybaseclaude-er` (branch `er/phase0-shell`,
-  HEAD `1c0139b`) — committed **local only, NOT pushed**, isolated from the trade work.
+## Current state (2026-10-04)
+- **PHASE 0 + PHASE A DONE, FULL-GATE GREEN, AUDITED (dual money + UI/UX) + LOCAL RUNTIME-VERIFIED — STAGING
+  DEPLOY HELD BY OWNER.** Worktree `../Loyaltybaseclaude-er` (branch `er/phase0-shell`) — committed **local
+  only, NOT pushed**, isolated from the trade work.
+- **Phase A (Shell + People roster) just landed (2026-10-04):** the one net-new piece — the EMPLOYEE
+  `RewardAccount` ↔ `SalesUser` linkage (migration `20261003120000` + `ensureEmployeeAccount`/bulk helper,
+  gated by `earnerModel`) — plus `/admin/people` surfacing the reused roster. Two money-audit defects (lock
+  namespace, per-row link scale) FIXED. Runtime-verified on real `gifsy_dev`: EMPLOYEE roster → accounts
+  linked (4/4), idempotent, **Deoleo untouched (0)**. See the Wave log for full detail + the Open spec items
+  for the deferred owner decisions (UI/UX reskin fork, `employeeCode`-reuse policy, onboarding assumption).
 - **Local verify result (see Wave log for detail):** the enabler really writes `loyaltyType=EMPLOYEE_REWARDS`
   (DB-confirmed), and real OTP-login-per-role returns the correct per-tenant `capabilities` from the live config
   endpoint (Deoleo=OUTLET/trade, Britannia=EMPLOYEE/cockpit) — the exact `selectAdminNav` input. Deoleo's trade shell
@@ -56,12 +61,34 @@
   `cd platform && npx vitest run` · `cd platform && npx tsc --noEmit`.
 
 ## Open spec items (surfaced by the 2026-10-03 doc audit — specify before the named phase)
-- **Phase 2 — EMPLOYEE owner-generalisation (NET-NEW, not reuse):** the `RewardAccount → SalesUser` profile
-  relation does **not** exist in schema yet (`RewardAccount` has only `outletProfile ChannelPartner?`), and
-  `ensureOutletAccount` is **OUTLET-only** today. Build the EMPLOYEE account keying + profile link + the
-  "exactly one profile per `accountType`" DB constraint (the DESIGN §5.2 invariant is unenforceable until
-  then). Grep **all ~7 `resolveActivePartnerId` consumers** (wallet, rewards, partner, schemes,
-  scheme-enrollment, invoices, leaderboard) before landing.
+- **Phase 2 — EMPLOYEE owner-generalisation (PARTLY DONE in Phase A).** The `RewardAccount ↔ SalesUser`
+  profile link now EXISTS (`SalesUser.accountId` + `RewardAccount.employeeProfile`, migration
+  `20261003120000`), and `ensureEmployeeAccount` / `ensureEmployeeAccountsForSalesUsers` CREATE+link the
+  account on the roster path (Phase A). **Still Phase 2 (the READ/earn side):** branch **all ~7
+  `resolveActivePartnerId` consumers** (wallet `:294/:415`, rewards `:638`, schemes `:80`,
+  scheme-enrollment `:483/:539/:1378/:1487`, partner `:51/:92`, leaderboard `:26`, invoices `:955`) so the
+  rep app resolves the logged-in user → their `SalesUser` → `EMPLOYEE RewardAccount`; wire wallet creation
+  **account-first** (→ decide `Wallet.partnerId` nullability then — NOT needed in Phase A); and consider a
+  DB constraint enforcing profile↔accountType pairing (today only code enforces it).
+- **DECISION NEEDED before Phase 2 — `employeeCode` reuse re-inherits an account (audit Finding-2).** The
+  roster never clears `SalesUser.accountId` on deactivation, and `ensureEmployee…` only fills a NULL. If a
+  resigned person's `employeeCode` is later refilled by a DIFFERENT human, they inherit the prior account —
+  harmless now (no wallet), but a silent balance transfer once Phase 2 wallets land. Owner to decide the
+  policy (clear accountId on deactivate? key accounts to a person, not a code?).
+- **CONFIRM before staging cutover — onboarding assumption (audit M3).** Accounts are ensured only on a
+  roster upload / single-edit (migration is "no backfill"). An EMPLOYEE tenant switched from TRADE *after*
+  its roster was loaded would have account-less active employees until the next upload. Fine **iff** EMPLOYEE
+  tenants are always onboarded as `EMPLOYEE_REWARDS` from the first roster (the enabler sets `loyaltyType` at
+  create, so this holds for the normal path) — else add a one-shot backfill.
+- **Staging/prod migration note (audit M5).** `20261003120000` builds a **non-concurrent** unique index on
+  `sales_users` → brief write-lock during the migration window (fast here; the column is all-NULL). `ON
+  DELETE SET NULL` means deleting a RewardAccount unlinks (and would strand a future wallet) — Phase 2 note.
+- **UI/UX fork — People roster reskin vs reuse-as-is (owner decision).** Phase A reuses the trade hierarchy
+  page verbatim (design §5.1 "reuse as-is"). The UI/UX audit flags trade-era chrome bleeding into the
+  employee cockpit: a "← back to /admin/dashboard" link (orphan — the employee nav has no dashboard) and
+  trade sales-role labels (XSR…NSM, "Manage sales team structure", "has outlets"). Fixing these means
+  editing the shared trade page or building an employee-flavoured roster view (new scope). **Owner: reskin
+  for the pilot, or accept trade chrome for now?**
 - **Phase 2 — employee login identity:** `employeeCode` is the identity key, but how a roster employee
   acquires a **phone** for the (reused) phone-OTP login, and how `employeeCode ↔ phone` map, is not yet
   specified. One explicit line of design needed before Phase 2.
@@ -126,4 +153,37 @@ credits + catalogue, pilot vendors).
       origin + real cookies), which is already the planned staging-verify step.
   - ⏳ Owner-gated (unchanged): push `er/phase0-shell`→`develop` + create `uat-britannia` via `POST /v1/gifsy/clients`
     (`loyaltyType: EMPLOYEE_REWARDS`) + staging runtime-verify (Deoleo unchanged + **Britannia cockpit screenshot** —
-    the one thing the local browser pane couldn't show). ▶ Then **Phase A** (People roster, BUILD-PLAN §5).
+    the one thing the local browser pane couldn't show).
+
+- **Phase A — Shell + People roster** (2026-10-04, `er/phase0-shell`, FULL-GATE GREEN, orchestrated 2 build
+  agents + a 3-lane independent audit [dual money + UI/UX]). ADDITIVE + gated; Deoleo/OUTLET write-identical.
+  - **BE — EMPLOYEE RewardAccount linkage (the one net-new piece):** migration `20261003120000` adds
+    `SalesUser.accountId @unique` ↔ `RewardAccount.employeeProfile` (mirrors `ChannelPartner.accountId`,
+    `ON DELETE SET NULL`). New `ensureEmployeeAccount` (single) + `ensureEmployeeAccountsForSalesUsers`
+    (set-based bulk) in `reward-account.helper.ts`. Wired into `persistHierarchy` (bulk) + `updateEmployee`
+    (single), **gated by `resolveCapabilities().earnerModel === 'EMPLOYEE'`** (fail-safe → TRADE skips). The
+    roster CRUD itself is REUSED unchanged (it already writes `SalesUser`/`User`/`SalesHierarchyLevel` keyed
+    by `employeeCode`).
+  - **FE — People:** `/admin/people` now renders the existing employee-hierarchy page (roster upload +
+    per-employee edit) reused as-is; added `/admin/people → sales_org:read` to `ROUTE_PERMISSIONS`. (Dropped
+    an over-added, mislabeled "admin accounts" tab — not the design's roster.)
+  - **Independent DUAL money audit — BOTH lanes CONFIRMED the same top defect; FIXED:**
+    - **M1 (HIGH, fixed):** single-edit & bulk used DIFFERENT advisory-lock namespaces → a concurrent
+      upload + single-edit of the same employee could mint a duplicate/orphan account. Fix: both paths now
+      lock on the SAME tenant key `reward_account:employee:client:<clientId>` + single re-checks after the
+      lock. Regression-guard tests assert the lock KEY (closes the "$executeRaw mocked no-op" test gap).
+    - **M2 (MEDIUM, fixed):** per-row link loop inside the 20s tx (2,261-row timeout risk) → replaced with
+      ONE set-based `UPDATE … FROM (VALUES …)` + `accountId IS NULL` guard.
+    - Deferred (see Open spec items): Finding-2 (code-reuse re-inherits account → Phase 2 decision), M3
+      (onboarding assumption → confirm), M5 (migration notes), UI/UX reskin fork.
+  - **FULL GATE GREEN (run personally):** `api nest build` ✓ · `api jest` **3473** ✓ (+2 M1 guards) ·
+    `platform tsc` ✓ · `platform vitest` **2595** ✓.
+  - **RUNTIME-VERIFIED end-to-end against real `gifsy_dev`** (migration applied via `prisma db execute`;
+    api on :4001 → own proxy on **:5434**, since the primary trade stack holds :5433): real Britannia
+    (EMPLOYEE) roster upload → accounts created+linked (**4/4** employees, DB-confirmed); re-upload /
+    mixed existing+new → `employeeAccountsEnsured` counts only the NEW (idempotent, set-based link works on
+    real Postgres); **Deoleo (TRADE) re-save → 0 accounts, 0 SalesUser.accountId (Deoleo-safety, DB-confirmed)**;
+    exactly 4 EMPLOYEE accounts, all britannia (no orphans/duplicates/leakage). This path is API-level, so it is
+    NOT blocked by the browser-pane cookie limit.
+  - ▶ **NEXT:** owner call on the UI/UX reskin fork (Open spec items), then **Phase B** (Rewards + Fulfilment
+    + Vendors) / **Phase C** (points-upload + contests) per BUILD-PLAN §5 — still on the held branch.
