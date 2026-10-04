@@ -30,6 +30,9 @@ const mockPrisma = {
   salesUser: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn() },
   salesUserAssignment: { count: jest.fn() },
   salesHierarchyLevel: { findFirst: jest.fn() },
+  // Employee Rewards Phase A: a level change resolves the per-tenant ladder via getLevelsConfig,
+  // which reads this row. null → fall back to DEOLEO_HIERARCHY (Deoleo mapping unchanged).
+  programSetting: { findFirst: jest.fn().mockResolvedValue(null) },
   auditLog: { create: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };

@@ -8,12 +8,64 @@
  * blank-phone resolution (blank ≠ a shared empty-string user).
  */
 import { BadRequestException } from '@nestjs/common';
+import type { UserRole } from '@prisma/client';
 import {
   persistHierarchy,
+  mapRoleCodeToUserRole,
   DEOLEO_HIERARCHY,
   syntheticPlaceholderPhone,
   type HierarchyEmployee,
+  type TenantHierarchyLevel,
 } from './hierarchy-persistence';
+
+describe('mapRoleCodeToUserRole — Deoleo byte-identical + custom-config resolution', () => {
+  // The exact mapping the LEGACY hardcoded switch produced. Deoleo must resolve IDENTICALLY
+  // whether it reads DEOLEO_HIERARCHY[].userRole or falls through to the switch.
+  const DEOLEO_EXPECTED: Record<string, UserRole> = {
+    NSM: 'SALES_HO',
+    ZNM: 'SALES_STATE_HEAD',
+    RSM: 'SALES_STATE_HEAD',
+    ASM: 'SALES_ASM',
+    SO: 'SALES_SO',
+    XSR: 'SALES_ISR',
+  };
+
+  it('resolves every Deoleo code to the SAME UserRole as the old switch (via DEOLEO_HIERARCHY)', () => {
+    for (const [code, expected] of Object.entries(DEOLEO_EXPECTED)) {
+      expect(mapRoleCodeToUserRole(code, DEOLEO_HIERARCHY)).toBe(expected);
+    }
+  });
+
+  it('resolves identically with the default arg (no config passed) — legacy single-arg callers', () => {
+    for (const [code, expected] of Object.entries(DEOLEO_EXPECTED)) {
+      expect(mapRoleCodeToUserRole(code)).toBe(expected);
+    }
+  });
+
+  it('is case-insensitive and trims (matches the switch) and defaults unknown → SALES_ISR', () => {
+    expect(mapRoleCodeToUserRole('  nsm  ', DEOLEO_HIERARCHY)).toBe('SALES_HO');
+    expect(mapRoleCodeToUserRole('WHO_KNOWS', DEOLEO_HIERARCHY)).toBe('SALES_ISR');
+  });
+
+  it('resolves a CUSTOM config via its per-level userRole mapping', () => {
+    const custom: TenantHierarchyLevel[] = [
+      { tenantId: 't', level: 1, roleCode: 'REP', roleLabel: 'Rep', isLeaf: true, isRoot: false, userRole: 'SALES_ISR' },
+      { tenantId: 't', level: 2, roleCode: 'MGR', roleLabel: 'Manager', isLeaf: false, isRoot: false, userRole: 'SALES_ASM' },
+      { tenantId: 't', level: 3, roleCode: 'HEAD', roleLabel: 'Head', isLeaf: false, isRoot: true, userRole: 'SALES_HO' },
+    ];
+    expect(mapRoleCodeToUserRole('REP', custom)).toBe('SALES_ISR');
+    expect(mapRoleCodeToUserRole('mgr', custom)).toBe('SALES_ASM');
+    expect(mapRoleCodeToUserRole('HEAD', custom)).toBe('SALES_HO');
+  });
+
+  it('falls through to the switch when a matching level lacks an explicit userRole', () => {
+    // A Deoleo-code level WITHOUT userRole → the switch still covers it (NSM→SALES_HO).
+    const noUserRole: TenantHierarchyLevel[] = [
+      { tenantId: 't', level: 1, roleCode: 'NSM', roleLabel: 'NSM', isLeaf: false, isRoot: true },
+    ];
+    expect(mapRoleCodeToUserRole('NSM', noUserRole)).toBe('SALES_HO');
+  });
+});
 
 type ExistingUser = { phone: string; salesUser: { employeeCode: string } | null };
 

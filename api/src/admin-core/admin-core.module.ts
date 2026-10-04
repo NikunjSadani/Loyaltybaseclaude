@@ -5,6 +5,8 @@ import { AdminUsersController } from './users.controller';
 import { AdminSalesUsersController } from './sales-users.controller';
 import { AdminSettingsController } from './settings.controller';
 import { AdminHierarchyConfigController } from './hierarchy-config.controller';
+import { AdminHierarchyLevelsController } from './hierarchy-levels.controller';
+import { AdminPeopleController } from './people.controller';
 import { AdminForceLogoutAllController } from './force-logout-all.controller';
 import { AdminDashboardController } from './dashboard.controller';
 import { AdminTaskConfigController } from './task-config.controller';
@@ -30,6 +32,8 @@ import { TdsModule } from '../tds/tds.module';
     AdminSalesUsersController,
     AdminSettingsController,
     AdminHierarchyConfigController,
+    AdminHierarchyLevelsController,
+    AdminPeopleController,
     AdminForceLogoutAllController,
     AdminDashboardController,
     AdminTaskConfigController,

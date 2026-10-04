@@ -60,6 +60,7 @@ import { HierarchyConfigDto, TaskConfigDto } from './dto/config.dto';
 import {
   DEOLEO_HIERARCHY,
   HierarchyEmployee,
+  TenantHierarchyLevel,
   mapRoleCodeToUserRole,
   persistHierarchy,
 } from './hierarchy-persistence';
@@ -172,8 +173,22 @@ export class AdminCoreService {
 
   // ─── ProgramSetting setting keys (mirror the Next routes) ───────────────────
   private static readonly HIERARCHY_KEY = 'employee_hierarchy';
+  // Employee Rewards Phase A — per-tenant hierarchy LEVELS config (ladder + custom names +
+  // per-level coarse-role mapping). Absent → the resolved config falls back to DEOLEO_HIERARCHY.
+  private static readonly HIERARCHY_LEVELS_KEY = 'hierarchy_levels';
   private static readonly TASK_CONFIG_KEY = 'task_config';
   private static readonly GIFT_CATALOGUE_KEY = 'gift_catalogue';
+
+  // The coarse sales UserRole buckets a per-level `userRole` mapping may target (validation set
+  // for setHierarchyLevels). A subset of TENANT_ASSIGNABLE_ROLES — the hierarchy ladder is a
+  // sales reporting tree, so only sales roles are valid level buckets.
+  private static readonly SALES_USER_ROLES: ReadonlySet<UserRole> = new Set<UserRole>([
+    'SALES_HO',
+    'SALES_STATE_HEAD',
+    'SALES_ASM',
+    'SALES_SO',
+    'SALES_ISR',
+  ]);
 
   // ════════════════════════════════════════════════════════════════════════
   // Session helpers — ported from platform/src/lib/session.ts
@@ -808,8 +823,11 @@ export class AdminCoreService {
       });
       if (!level) throw new BadRequestException('Hierarchy level not found in this tenant');
       // Role is stored in TWO places — keep the coarse User.role bucket in lock-step with the
-      // fine SalesUser level, exactly as the bulk upload does (persistHierarchy).
-      newUserRole = mapRoleCodeToUserRole(level.code);
+      // fine SalesUser level, exactly as the bulk upload does (persistHierarchy). Resolve via the
+      // per-tenant ladder (stored-or-Deoleo) so a custom config's userRole mapping is honoured;
+      // a tenant with no config resolves to DEOLEO_HIERARCHY → identical to the legacy switch.
+      const levelsConfig = await this.getLevelsConfig(clientId);
+      newUserRole = mapRoleCodeToUserRole(level.code, levelsConfig);
       // Defense-in-depth: the derived bucket is always a sales role, but re-assert the caller
       // is permitted to assign it (never lets this path mint a privileged role).
       this.assertRoleAssignable(caller, newUserRole);
@@ -1484,12 +1502,211 @@ export class AdminCoreService {
   // HIERARCHY-CONFIG — admin/hierarchy-config
   // ════════════════════════════════════════════════════════════════════════
 
-  async getHierarchyConfig(user: JwtPayload): Promise<{ employees: unknown[] }> {
+  /**
+   * Normalize a raw stored `hierarchy_levels` blob into TenantHierarchyLevel[], or return null if
+   * it is absent/empty/malformed (→ the caller falls back to DEOLEO_HIERARCHY). Fail-SAFE: any
+   * shape surprise yields null rather than a half-built ladder, mirroring resolveCapabilities'
+   * unknown→default posture, so the live TRADE roster path can never be corrupted by a bad row.
+   */
+  private static normalizeLevelsBlob(
+    clientId: string,
+    raw: unknown,
+  ): TenantHierarchyLevel[] | null {
+    if (!Array.isArray(raw) || raw.length === 0) return null;
+    const out: TenantHierarchyLevel[] = [];
+    // Reject duplicate levels/codes on the READ path too (audit F6): a blob written out-of-band
+    // (bypassing setHierarchyLevels' validation) with a dup would survive to buildLevelRows and then
+    // hit the `(clientId, level)` / `(clientId, code)` unique at upsert — a P2002 that rolls back the
+    // whole roster upload. Fail-safe to null → caller substitutes DEOLEO_HIERARCHY.
+    const seenLevels = new Set<number>();
+    const seenCodes = new Set<string>();
+    for (const r of raw) {
+      if (r == null || typeof r !== 'object' || Array.isArray(r)) return null;
+      const row = r as Record<string, unknown>;
+      const level = Number(row.level);
+      const roleCode = typeof row.roleCode === 'string' ? row.roleCode.trim() : '';
+      const roleLabel = typeof row.roleLabel === 'string' ? row.roleLabel.trim() : '';
+      if (!Number.isInteger(level) || level <= 0 || !roleCode || !roleLabel) return null;
+      if (seenLevels.has(level) || seenCodes.has(roleCode.toUpperCase())) return null;
+      seenLevels.add(level);
+      seenCodes.add(roleCode.toUpperCase());
+      const userRole =
+        typeof row.userRole === 'string' &&
+        AdminCoreService.SALES_USER_ROLES.has(row.userRole as UserRole)
+          ? (row.userRole as UserRole)
+          : undefined;
+      out.push({
+        tenantId: typeof row.tenantId === 'string' && row.tenantId ? row.tenantId : clientId,
+        level,
+        roleCode,
+        roleLabel,
+        isLeaf: row.isLeaf === true,
+        isRoot: row.isRoot === true,
+        ...(userRole ? { userRole } : {}),
+      });
+    }
+    return out.sort((a, b) => a.level - b.level);
+  }
+
+  /**
+   * The RESOLVED per-tenant hierarchy ladder: the stored `hierarchy_levels` config when present +
+   * well-formed, else DEOLEO_HIERARCHY. This is the single read used by both the bulk upload
+   * (saveHierarchyConfig → persistHierarchy) and the single-employee edit (updateEmployee) to map
+   * role codes to coarse UserRole buckets, so a tenant with no config is byte-identical to before
+   * this feature (Deoleo default = the safety).
+   */
+  async getLevelsConfig(clientId: string): Promise<TenantHierarchyLevel[]> {
+    const row = await this.prisma.programSetting.findFirst({
+      where: { clientId, settingKey: AdminCoreService.HIERARCHY_LEVELS_KEY },
+      select: { settingValue: true },
+    });
+    return AdminCoreService.normalizeLevelsBlob(clientId, row?.settingValue) ?? DEOLEO_HIERARCHY;
+  }
+
+  /**
+   * Read the resolved hierarchy levels (stored-or-Deoleo) for the caller's tenant — for the
+   * config UI. GET /v1/admin/hierarchy-levels.
+   */
+  async getHierarchyLevels(user: JwtPayload): Promise<{ levels: TenantHierarchyLevel[] }> {
+    return { levels: await this.getLevelsConfig(user.clientId) };
+  }
+
+  /**
+   * Replace the caller tenant's hierarchy levels config. Validates (BadRequestException):
+   *   - non-empty;
+   *   - `level` values form a contiguous 1..N set;
+   *   - exactly ONE isLeaf:true AND exactly ONE isRoot:true;
+   *   - roleCodes unique (case-insensitive);
+   *   - each `userRole` (when given) ∈ the sales UserRole set.
+   * Upserts the single per-tenant ProgramSetting row (category 'hierarchy'), mirroring the
+   * holidays / report-recipients upsert shape. Returns the resolved (normalized) config.
+   */
+  async setHierarchyLevels(
+    user: JwtPayload,
+    levels: unknown,
+  ): Promise<{ levels: TenantHierarchyLevel[] }> {
+    const clientId = user.clientId;
+    if (!Array.isArray(levels) || levels.length === 0) {
+      throw new BadRequestException('At least one hierarchy level is required.');
+    }
+
+    const normalized: TenantHierarchyLevel[] = [];
+    const seenCodes = new Set<string>();
+    const seenLevels = new Set<number>();
+    let leafCount = 0;
+    let rootCount = 0;
+
+    for (const raw of levels) {
+      if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new BadRequestException('Each hierarchy level must be a JSON object.');
+      }
+      const row = raw as Record<string, unknown>;
+      const level = Number(row.level);
+      if (!Number.isInteger(level) || level <= 0) {
+        throw new BadRequestException(`Level "${String(row.level)}" must be a positive integer.`);
+      }
+      if (seenLevels.has(level)) {
+        throw new BadRequestException(`Level ${level} appears more than once.`);
+      }
+      seenLevels.add(level);
+
+      const roleCode = typeof row.roleCode === 'string' ? row.roleCode.trim() : '';
+      if (!roleCode) throw new BadRequestException('Every level needs a non-blank roleCode.');
+      // Restrict the code charset (audit F7): roleCode is now admin-editable and is interpolated into
+      // the generated hierarchy guide/template, so keep it to plain identifier characters to foreclose
+      // any HTML/script injection via a crafted code.
+      if (!/^[A-Za-z0-9 ._-]+$/.test(roleCode)) {
+        throw new BadRequestException(
+          `Role code "${roleCode}" may only contain letters, numbers, spaces, dot, underscore and hyphen.`,
+        );
+      }
+      const codeKey = roleCode.toUpperCase();
+      if (seenCodes.has(codeKey)) {
+        throw new BadRequestException(`Role code "${roleCode}" is used more than once.`);
+      }
+      seenCodes.add(codeKey);
+
+      const roleLabel =
+        typeof row.roleLabel === 'string' && row.roleLabel.trim() ? row.roleLabel.trim() : roleCode;
+
+      const isLeaf = row.isLeaf === true;
+      const isRoot = row.isRoot === true;
+      if (isLeaf) leafCount++;
+      if (isRoot) rootCount++;
+
+      // userRole is REQUIRED (audit F1): without it, a custom (non-Deoleo) code falls through
+      // mapRoleCodeToUserRole's legacy switch to the SALES_ISR default, silently collapsing every
+      // employee — managers included — to the field-rep role. Force each level to declare its coarse
+      // bucket explicitly. (Deoleo's default ladder always carries userRole, so this never affects it.)
+      if (
+        typeof row.userRole !== 'string' ||
+        !AdminCoreService.SALES_USER_ROLES.has(row.userRole as UserRole)
+      ) {
+        throw new BadRequestException(
+          `Level ${level} ("${roleCode}") needs a valid mapped role — one of ${[
+            ...AdminCoreService.SALES_USER_ROLES,
+          ].join(', ')}.`,
+        );
+      }
+      const userRole = row.userRole as UserRole;
+
+      normalized.push({
+        tenantId: clientId,
+        level,
+        roleCode,
+        roleLabel,
+        isLeaf,
+        isRoot,
+        userRole,
+      });
+    }
+
+    // Contiguous 1..N levels (no gap, no duplicate — duplicates already rejected above).
+    normalized.sort((a, b) => a.level - b.level);
+    for (let i = 0; i < normalized.length; i++) {
+      if (normalized[i].level !== i + 1) {
+        throw new BadRequestException(
+          `Levels must be contiguous starting at 1 (got ${normalized
+            .map((l) => l.level)
+            .join(', ')}).`,
+        );
+      }
+    }
+    if (leafCount !== 1) {
+      throw new BadRequestException(`Exactly one level must be the leaf (got ${leafCount}).`);
+    }
+    if (rootCount !== 1) {
+      throw new BadRequestException(`Exactly one level must be the root (got ${rootCount}).`);
+    }
+
+    const settingValue = normalized as unknown as Prisma.InputJsonValue;
+    await this.prisma.programSetting.upsert({
+      where: {
+        clientId_settingKey: { clientId, settingKey: AdminCoreService.HIERARCHY_LEVELS_KEY },
+      },
+      create: {
+        clientId,
+        settingKey: AdminCoreService.HIERARCHY_LEVELS_KEY,
+        settingValue,
+        category: 'hierarchy',
+        updatedById: user.sub,
+      },
+      update: { settingValue, updatedById: user.sub },
+    });
+    return { levels: normalized };
+  }
+
+  async getHierarchyConfig(
+    user: JwtPayload,
+  ): Promise<{ employees: unknown[]; levels: TenantHierarchyLevel[] }> {
+    // The resolved ladder (stored-or-Deoleo) is returned alongside the roster so the FE can label
+    // levels and drive the level picker without a second round-trip.
+    const levels = await this.getLevelsConfig(user.clientId);
     const setting = await this.prisma.programSetting.findFirst({
       where: { clientId: user.clientId, settingKey: AdminCoreService.HIERARCHY_KEY },
     });
     const snapshot = (setting?.settingValue as HierarchyEmployeeSnapshot[]) ?? [];
-    if (snapshot.length === 0) return { employees: snapshot };
+    if (snapshot.length === 0) return { employees: snapshot, levels };
 
     // The snapshot is a denormalized blob rewritten only by the bulk Excel upload. A
     // single-employee edit (updateEmployee) writes the RELATIONAL tables, not this blob,
@@ -1523,7 +1740,7 @@ export class AdminCoreService {
         reportsToId: live.reportingTo?.employeeCode ?? null,
       };
     });
-    return { employees };
+    return { employees, levels };
   }
 
   /**
@@ -1581,6 +1798,11 @@ export class AdminCoreService {
       throw new BadRequestException('Each employee must be a JSON object');
     }
 
+    // Resolve the per-tenant ladder ONCE, before the transaction (a plain read). Absent/malformed
+    // → DEOLEO_HIERARCHY (getLevelsConfig fail-safe), so a tenant with no config persists exactly
+    // as before this feature — the live TRADE roster path is byte-identical.
+    const levelsConfig = await this.getLevelsConfig(clientId);
+
     // 1. Keep the denormalized JSON snapshot for the admin UI (GET) AND
     // 2. Persist the authoritative relational tree — both in one transaction.
     const result = await this.prisma.$transaction(async (tx) => {
@@ -1598,12 +1820,79 @@ export class AdminCoreService {
       return persistHierarchy(
         clientId,
         employees as HierarchyEmployee[],
-        DEOLEO_HIERARCHY,
+        levelsConfig,
         tx,
       );
     }, { timeout: 20_000, maxWait: 10_000 });
 
     return { message: 'Employee hierarchy saved', persisted: result };
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PEOPLE OVERVIEW — admin/people/overview (Employee cockpit)
+  // ════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Tenant-scoped roster metrics for the Employee cockpit Overview. Reads ONLY data that exists
+   * today in the relational roster tables (NOT dashboardKpis, which counts channelPartner / KYC /
+   * payout — all trade-only). Everything is scoped by `user.clientId`.
+   *
+   * - totalEmployees   — all non-deleted SalesUsers.
+   * - activeEmployees  — isActive:true (a real person occupies the node).
+   * - placeholders     — isActive:false (a vacant/placeholder node; persistHierarchy stores a
+   *                      PLACEHOLDER employee as isActive:false with a synthetic __vacant__ phone),
+   *                      mirroring the FE's status==='PLACEHOLDER' count.
+   * - levelCount       — SalesHierarchyLevel rows for the tenant.
+   * - rewardAccounts   — SalesUsers linked to an EMPLOYEE RewardAccount (accountId not null).
+   * - perLevel         — per SalesHierarchyLevel {levelId, code, name, level, employeeCount}, the
+   *                      count of non-deleted SalesUsers at that level, ordered by level.
+   */
+  async peopleOverview(user: JwtPayload) {
+    const clientId = user.clientId;
+
+    const [totalEmployees, activeEmployees, placeholders, levelCount, rewardAccounts, levels, grouped] =
+      await Promise.all([
+        this.prisma.salesUser.count({ where: { clientId, deletedAt: null } }),
+        this.prisma.salesUser.count({ where: { clientId, deletedAt: null, isActive: true } }),
+        this.prisma.salesUser.count({ where: { clientId, deletedAt: null, isActive: false } }),
+        // `level: { gt: 0 }` excludes superseded/parked levels (audit F3): persistHierarchy parks
+        // levels replaced by a re-config at level ≈ −1,000,000 (UPDATE-only, never deleted), so an
+        // unfiltered count/list would inflate the KPI and render junk "L-999994" rows.
+        this.prisma.salesHierarchyLevel.count({ where: { clientId, level: { gt: 0 } } }),
+        this.prisma.salesUser.count({
+          where: { clientId, deletedAt: null, accountId: { not: null } },
+        }),
+        this.prisma.salesHierarchyLevel.findMany({
+          where: { clientId, level: { gt: 0 } },
+          select: { id: true, code: true, name: true, level: true },
+          orderBy: { level: 'asc' },
+        }),
+        this.prisma.salesUser.groupBy({
+          by: ['hierarchyLevelId'],
+          where: { clientId, deletedAt: null },
+          _count: { _all: true },
+        }),
+      ]);
+
+    const countByLevelId = new Map(
+      grouped.map((g) => [g.hierarchyLevelId, g._count._all]),
+    );
+    const perLevel = levels.map((l) => ({
+      levelId: l.id,
+      code: l.code,
+      name: l.name,
+      level: l.level,
+      employeeCount: countByLevelId.get(l.id) ?? 0,
+    }));
+
+    return {
+      totalEmployees,
+      activeEmployees,
+      placeholders,
+      levelCount,
+      rewardAccounts,
+      perLevel,
+    };
   }
 
   // ════════════════════════════════════════════════════════════════════════

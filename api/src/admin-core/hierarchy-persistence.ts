@@ -26,6 +26,13 @@ export interface TenantHierarchyLevel {
   roleLabel: string;
   isLeaf: boolean;
   isRoot: boolean;
+  /**
+   * Employee Rewards Phase A — OPTIONAL per-level mapping to the coarse `UserRole` bucket.
+   * When present, mapRoleCodeToUserRole uses it directly; when absent, the mapping falls back to
+   * the legacy hardcoded switch (which covers Deoleo verbatim and defaults unknown codes to
+   * SALES_ISR). Additive: a stored config without userRole behaves exactly as before.
+   */
+  userRole?: UserRole;
 }
 
 export interface HierarchyEmployee {
@@ -44,13 +51,17 @@ export interface HierarchyEmployee {
 
 // ─── Deoleo hierarchy config (tenant default) ─────────────────────────────────
 // XSR < SO < ASM < RSM < ZNM < NSM
+// `userRole` is stated explicitly on every entry and matches the legacy mapRoleCodeToUserRole
+// switch EXACTLY (NSM→SALES_HO, ZNM/RSM→SALES_STATE_HEAD, ASM→SALES_ASM, SO→SALES_SO,
+// XSR→SALES_ISR) so the resolved Deoleo mapping is byte-identical whether it reads userRole or
+// falls through to the switch.
 export const DEOLEO_HIERARCHY: TenantHierarchyLevel[] = [
-  { tenantId: 'deoleo', level: 1, roleCode: 'XSR', roleLabel: 'XSR', isLeaf: true, isRoot: false },
-  { tenantId: 'deoleo', level: 2, roleCode: 'SO', roleLabel: 'SO', isLeaf: false, isRoot: false },
-  { tenantId: 'deoleo', level: 3, roleCode: 'ASM', roleLabel: 'ASM', isLeaf: false, isRoot: false },
-  { tenantId: 'deoleo', level: 4, roleCode: 'RSM', roleLabel: 'RSM', isLeaf: false, isRoot: false },
-  { tenantId: 'deoleo', level: 5, roleCode: 'ZNM', roleLabel: 'ZNM', isLeaf: false, isRoot: false },
-  { tenantId: 'deoleo', level: 6, roleCode: 'NSM', roleLabel: 'NSM', isLeaf: false, isRoot: true },
+  { tenantId: 'deoleo', level: 1, roleCode: 'XSR', roleLabel: 'XSR', isLeaf: true, isRoot: false, userRole: 'SALES_ISR' },
+  { tenantId: 'deoleo', level: 2, roleCode: 'SO', roleLabel: 'SO', isLeaf: false, isRoot: false, userRole: 'SALES_SO' },
+  { tenantId: 'deoleo', level: 3, roleCode: 'ASM', roleLabel: 'ASM', isLeaf: false, isRoot: false, userRole: 'SALES_ASM' },
+  { tenantId: 'deoleo', level: 4, roleCode: 'RSM', roleLabel: 'RSM', isLeaf: false, isRoot: false, userRole: 'SALES_STATE_HEAD' },
+  { tenantId: 'deoleo', level: 5, roleCode: 'ZNM', roleLabel: 'ZNM', isLeaf: false, isRoot: false, userRole: 'SALES_STATE_HEAD' },
+  { tenantId: 'deoleo', level: 6, roleCode: 'NSM', roleLabel: 'NSM', isLeaf: false, isRoot: true, userRole: 'SALES_HO' },
 ];
 
 // ─── Pure: level rows ─────────────────────────────────────────────────────────
@@ -70,8 +81,28 @@ export function buildLevelRows(config: TenantHierarchyLevel[]): LevelRow[] {
 
 // ─── Pure: fine role code → coarse UserRole bucket ────────────────────────────
 
-export function mapRoleCodeToUserRole(roleCode: string): UserRole {
-  switch (roleCode.trim().toUpperCase()) {
+/**
+ * Resolve a fine role code to its coarse `UserRole` bucket for a tenant.
+ *
+ * Resolution order (Employee Rewards Phase A):
+ *   1. If the resolved `config` has a level whose roleCode matches (case-insensitively) AND that
+ *      level carries an explicit `userRole`, use it — this is how a CUSTOM tenant config maps its
+ *      own codes to coarse buckets.
+ *   2. Otherwise fall through to the legacy hardcoded switch below, kept VERBATIM. It covers
+ *      Deoleo even with no userRole set and provides the unknown→SALES_ISR default.
+ *
+ * `config` is optional so any residual single-arg caller still compiles and behaves exactly as the
+ * old switch; the resolved DEOLEO_HIERARCHY is the fail-safe default supplied by callers.
+ */
+export function mapRoleCodeToUserRole(
+  roleCode: string,
+  config: TenantHierarchyLevel[] = DEOLEO_HIERARCHY,
+): UserRole {
+  const normalized = String(roleCode ?? '').trim().toUpperCase();
+  const match = config.find((l) => l.roleCode.trim().toUpperCase() === normalized);
+  if (match?.userRole) return match.userRole;
+
+  switch (normalized) {
     case 'NSM':
       return 'SALES_HO';
     case 'ZNM':
@@ -281,7 +312,7 @@ export async function persistHierarchy(
 
     const phone = realMobile !== '' ? realMobile : syntheticPlaceholderPhone(emp.id);
     const name = emp.name ?? `(vacant) ${emp.id}`;
-    const userRole = mapRoleCodeToUserRole(emp.roleCode);
+    const userRole = mapRoleCodeToUserRole(emp.roleCode, config);
     const userStatus = isPlaceholder ? 'INACTIVE' : 'ACTIVE';
 
     // Resolve the employee's EXISTING canonical User by the stable business key
