@@ -105,11 +105,15 @@
   monotonically-negative parking + orphan cleanup (no `(clientId,level)`/`(clientId,code)` self-collision,
   no `__tmp__` accumulation); **F6** — `__tmp__` codes never surface in the UI. Runtime-verified: rename
   MGR→MANAGER + role change auto-propagates with no re-upload; populated-level removal → 400; Deoleo PUT → 400.
-  **Residuals (tracked, Phase-A-acceptable):** F4 — a role change via the editor does NOT revoke the
-  affected users' sessions (a demoted manager keeps the old role claim until token refresh, ~rolling-session
-  window; **consistent with the bulk-upload path**; revoke before a staff-enabled live tenant). F5 — the
-  editor matches by position, so REORDERING rows re-roles employees by position (rename-in-place is the
-  intended use). Audit F5-prev (employee admin briefly sees the trade dashboard + one trade-KPI fetch during
+  **F4 CLOSED for the editor (HEAD `b8ac14a`):** a role change via the levels editor now stamps
+  `sessionsInvalidBefore` + revokes the affected users' live sessions in-tx (stamp-before-revoke, mirroring
+  `updateEmployee`), so the new role is enforced on the user's NEXT request (the per-request `JwtStrategy`
+  rejects a revoked session). Verified facts: refresh RE-READS the role from the DB (`generateTokens(session.user)`)
+  and `ACCESS_TTL=60m`, so the pre-fix exposure was **≤60m (bounded, not infinite)**; the fix makes it immediate.
+  ⚠️ **Still tracked:** the **bulk roster upload** (`persistHierarchy`) has the same ≤60m property on a
+  re-upload that changes roles and does NOT yet revoke-on-change — close it the same way before a staff-enabled
+  live tenant (it's a larger change to the Deoleo-shared upload path). F5 — the editor matches by position, so
+  REORDERING rows re-roles employees by position (rename-in-place is the intended use). Audit F5-prev (employee admin briefly sees the trade dashboard + one trade-KPI fetch during
   the redirect) is an accepted cosmetic minor, same class as the Phase-0 pre-config-load flash.
 - **UI/UX fork — People roster reskin vs reuse-as-is (owner decision).** Phase A reuses the trade hierarchy
   page verbatim (design §5.1 "reuse as-is"). The UI/UX audit flags trade-era chrome bleeding into the
