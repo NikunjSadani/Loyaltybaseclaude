@@ -110,10 +110,13 @@
   `updateEmployee`), so the new role is enforced on the user's NEXT request (the per-request `JwtStrategy`
   rejects a revoked session). Verified facts: refresh RE-READS the role from the DB (`generateTokens(session.user)`)
   and `ACCESS_TTL=60m`, so the pre-fix exposure was **≤60m (bounded, not infinite)**; the fix makes it immediate.
-  ⚠️ **Still tracked:** the **bulk roster upload** (`persistHierarchy`) has the same ≤60m property on a
-  re-upload that changes roles and does NOT yet revoke-on-change — close it the same way before a staff-enabled
-  live tenant (it's a larger change to the Deoleo-shared upload path). F5 — the editor matches by position, so
-  REORDERING rows re-roles employees by position (rename-in-place is the intended use). Audit F5-prev (employee admin briefly sees the trade dashboard + one trade-KPI fetch during
+  **Bulk roster upload ALSO CLOSED (HEAD `42a8c73`):** `persistHierarchy` now revokes the sessions of any
+  employee whose coarse role changes on a re-upload (stamp-before-revoke, in-tx; returns `rolesRevoked`).
+  **Applies to EVERY tenant incl. Deoleo** (consistent with the ungated single-edit revoke) — ⚠️ **behavior
+  change for Deoleo:** a live sales-hierarchy re-upload that changes someone's role now logs that user out
+  (re-auth with the new role); a re-upload that changes no roles is byte-identical. So revoke-on-role-change
+  is now uniform across all three write paths (single-edit, levels editor, bulk upload). F5 — the editor
+  matches by position, so REORDERING rows re-roles employees by position (rename-in-place is the intended use). Audit F5-prev (employee admin briefly sees the trade dashboard + one trade-KPI fetch during
   the redirect) is an accepted cosmetic minor, same class as the Phase-0 pre-config-load flash.
 - **UI/UX fork — People roster reskin vs reuse-as-is (owner decision).** Phase A reuses the trade hierarchy
   page verbatim (design §5.1 "reuse as-is"). The UI/UX audit flags trade-era chrome bleeding into the
