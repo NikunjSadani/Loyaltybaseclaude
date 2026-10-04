@@ -25,16 +25,16 @@ import Link from 'next/link';
 import { authHeader } from '@/lib/api-client';
 import { DEOLEO_HIERARCHY } from '@/lib/employee-hierarchy';
 import type { TenantHierarchyLevel, HierarchyUserRole } from '@/types';
+import {
+  detectReorderMoves,
+  affectedEmployeeCount,
+  type LevelDraft as ReorderLevelDraft,
+} from '@/lib/hierarchy-levels-reorder';
 
 /* ─── Editable row model (level is derived from position) ──────────────────────── */
 
-interface LevelDraft {
-  roleCode: string;
-  roleLabel: string;
-  isLeaf: boolean;
-  isRoot: boolean;
-  userRole: HierarchyUserRole | '';
-}
+// LevelDraft + the reorder-guardrail helpers live in a pure lib so they can be unit-tested.
+type LevelDraft = ReorderLevelDraft;
 
 const USER_ROLE_OPTIONS: HierarchyUserRole[] = [
   'SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR',
@@ -89,22 +89,42 @@ function validate(rows: LevelDraft[]): string[] {
 
 export default function HierarchyLevelsPage() {
   const [rows, setRows] = useState<LevelDraft[]>(toDraft(DEOLEO_HIERARCHY));
+  // The config as last loaded/saved — the baseline we diff against to detect a REORDER on save.
+  const [baseline, setBaseline] = useState<LevelDraft[]>(toDraft(DEOLEO_HIERARCHY));
+  // Per-level employee headcount (level number → count), from the Overview — powers the impact line.
+  const [countByLevel, setCountByLevel] = useState<Record<number, number>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Reorder confirmation modal (F5 guardrail).
+  const [confirm, setConfirm] = useState<{ moves: string[]; affected: number } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/admin/hierarchy-levels', { headers: { ...authHeader() } })
-      .then((r) => r.json())
-      .then((j) => {
+    Promise.all([
+      fetch('/api/admin/hierarchy-levels', { headers: { ...authHeader() } })
+        .then((r) => r.json())
+        .catch(() => null),
+      // Best-effort: per-level headcounts to quantify a reorder's impact. Failure → impact shown as "—".
+      fetch('/api/admin/people/overview', { headers: { ...authHeader() } })
+        .then((r) => r.json())
+        .catch(() => null),
+    ])
+      .then(([levelsRes, overviewRes]) => {
         if (cancelled) return;
-        if (j.success && Array.isArray(j.data?.levels) && j.data.levels.length > 0) {
-          setRows(toDraft(j.data.levels));
+        if (levelsRes?.success && Array.isArray(levelsRes.data?.levels) && levelsRes.data.levels.length > 0) {
+          const drafts = toDraft(levelsRes.data.levels);
+          setRows(drafts);
+          setBaseline(drafts);
+        }
+        const perLevel = overviewRes?.data?.perLevel;
+        if (Array.isArray(perLevel)) {
+          const map: Record<number, number> = {};
+          for (const p of perLevel) if (typeof p?.level === 'number') map[p.level] = p.employeeCount ?? 0;
+          setCountByLevel(map);
         }
       })
-      .catch(() => {})
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, []);
@@ -138,12 +158,25 @@ export default function HierarchyLevelsPage() {
       return next;
     });
 
-  /* ── Save ──────────────────────────────────────────────────────────────────── */
+  /* ── Save (with the F5 reorder guardrail) ──────────────────────────────────── */
 
-  const save = async () => {
+  const save = () => {
     setError(null);
     setSuccess(null);
     if (errors.length > 0) { setError(errors[0]); return; }
+    // Because the reconcile matches employees to levels by POSITION, reordering silently re-roles
+    // everyone at a moved position — so confirm first. Rename / add / remove / in-place role change
+    // are deliberate and do not trip this.
+    const moves = detectReorderMoves(baseline, rows);
+    if (moves.length > 0) {
+      setConfirm({ moves, affected: affectedEmployeeCount(baseline, rows, countByLevel) });
+      return;
+    }
+    void doSave();
+  };
+
+  const doSave = async () => {
+    setConfirm(null);
     setSaving(true);
 
     // Level = position (1..N) → contiguous by construction. roleLabel defaults to roleCode
@@ -175,9 +208,13 @@ export default function HierarchyLevelsPage() {
       if (!res.ok || json.success === false) {
         throw new Error(json.error || json.message || `Save failed (HTTP ${res.status}).`);
       }
-      // Re-seed from the server's canonical response when present.
+      // Re-seed from the server's canonical response when present — and reset the reorder baseline.
       if (Array.isArray(json.data?.levels) && json.data.levels.length > 0) {
-        setRows(toDraft(json.data.levels));
+        const drafts = toDraft(json.data.levels);
+        setRows(drafts);
+        setBaseline(drafts);
+      } else {
+        setBaseline(rows);
       }
       setSuccess('Hierarchy levels saved.');
     } catch (err) {
@@ -377,6 +414,69 @@ export default function HierarchyLevelsPage() {
         Level 1 is the leaf (owns outlets); the highest level is the root (no reporting manager).
         Use the arrows to reorder — levels renumber automatically.
       </p>
+
+      {/* Reorder confirmation (F5 guardrail) */}
+      {confirm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Confirm hierarchy reorder"
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 px-4"
+          onClick={() => setConfirm(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-xl max-w-md w-full p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="p-2 rounded-lg bg-amber-100 flex-shrink-0">
+                <AlertTriangle className="h-5 w-5 text-amber-600" />
+              </div>
+              <div>
+                <h2 className="text-base font-bold text-gray-900">You&rsquo;re reordering the hierarchy</h2>
+                <p className="mt-1 text-sm text-gray-600">
+                  Employees are matched to levels by <strong>position</strong>. Reordering reassigns everyone
+                  at a moved level to whatever role now sits there — and signs the affected employees out so
+                  the new role applies immediately.
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 space-y-1">
+              <p className="text-xs font-semibold text-gray-500">Levels moved</p>
+              {confirm.moves.map((m, i) => (
+                <p key={i} className="text-sm font-mono text-gray-800">{m}</p>
+              ))}
+            </div>
+
+            <p className="text-sm text-gray-700">
+              <strong className="text-amber-700">
+                {confirm.affected} employee{confirm.affected === 1 ? '' : 's'}
+              </strong>{' '}
+              will have their role reassigned and be signed out.
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                data-testid="reorder-cancel"
+                onClick={() => setConfirm(null)}
+                className="px-4 py-2 rounded-lg border border-gray-200 text-gray-700 text-xs font-semibold hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                data-testid="reorder-confirm"
+                onClick={() => void doSave()}
+                className="px-4 py-2 rounded-lg bg-amber-600 text-white text-xs font-semibold hover:bg-amber-700"
+              >
+                Reorder &amp; save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
