@@ -14,6 +14,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { businessHoursBetween, isValidIsoDate } from '../common/business-hours';
 import { isActivePhoneConflict, ACTIVE_PHONE_IN_USE_MSG } from '../common/phone-conflict';
 import { resolveCapabilities } from '../common/loyalty-capabilities.helper';
+import { ensureEmployeeAccount } from '../common/reward-account.helper';
 import {
   KYC_PENDING_FIELD_STATUSES,
   KYC_REJECT_REUPLOAD_STATUSES,
@@ -881,6 +882,25 @@ export class AdminCoreService {
 
     const roleChanged = levelChanged && newUserRole !== undefined && newUserRole !== target.role;
 
+    // ── Employee Rewards Phase A (GATED) — resolve the tenant earner model ────
+    // An EMPLOYEE-earner tenant links a RewardAccount to each active employee. Resolved from
+    // loyaltyType (fail-safe → TRADE/OUTLET for unknown/absent), so a TRADE tenant writes nothing
+    // new here (byte-identical). ensureEmployeeAccount is idempotent, so running it on a plain edit
+    // of an already-linked employee is a no-op. Skip synthetic vacant nodes (inactive placeholders)
+    // — a vacant node is not an earner; it gets its account when filled via the bulk roster.
+    const clientRow = await this.prisma.client.findUnique({
+      where: { id: clientId },
+      select: { loyaltyType: true, features: true },
+    });
+    const capabilities = resolveCapabilities(
+      clientRow?.loyaltyType as string | null | undefined,
+      (clientRow?.features ?? null) as Record<string, unknown> | null,
+    );
+    const isVacantPlaceholder =
+      !salesUser.isActive || (target.phone ?? '').startsWith('__vacant__:');
+    const ensureEmployeeRewardAccount =
+      capabilities.earnerModel === 'EMPLOYEE' && !isVacantPlaceholder;
+
     // ── ONE transaction: User + SalesUser updated together (can't drift) + audit ──
     try {
       await this.prisma.$transaction(async (tx) => {
@@ -889,6 +909,12 @@ export class AdminCoreService {
         // its reserved phone). §phone guard above already cleared any ACTIVE clash.
         await tx.user.update({ where: { id: target.id }, data: userData });
         await tx.salesUser.update({ where: { id: salesUserId }, data: salesData });
+
+        // Employee Rewards Phase A: find-or-create this employee's EMPLOYEE RewardAccount in the
+        // same tx (gated + idempotent). No-op for a TRADE tenant or an already-linked employee.
+        if (ensureEmployeeRewardAccount) {
+          await ensureEmployeeAccount(tx, salesUserId);
+        }
 
         await tx.auditLog.create({
           data: {

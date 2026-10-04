@@ -14,12 +14,17 @@ import { SalesNotificationsService } from '../notifications/sales-notifications.
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockTx = {
+  $executeRaw: jest.fn(), // Employee Rewards Phase A — ensureEmployeeAccount advisory lock
   user: { update: jest.fn() },
-  salesUser: { update: jest.fn() },
+  salesUser: { update: jest.fn(), findUnique: jest.fn() },
+  rewardAccount: { create: jest.fn() },
   auditLog: { create: jest.fn() },
 };
 
 const mockPrisma = {
+  // Employee Rewards Phase A: updateEmployee reads the tenant earner model (gate). Default TRADE
+  // → earnerModel OUTLET → the EMPLOYEE account path is skipped, so these edit tests are unchanged.
+  client: { findUnique: jest.fn().mockResolvedValue({ loyaltyType: 'TRADE_LOYALTY', features: null }) },
   user: { findFirst: jest.fn(), update: jest.fn() },
   userSession: { updateMany: jest.fn() },
   salesUser: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn() },
@@ -51,6 +56,9 @@ describe('AdminCoreService.updateEmployee', () => {
     mockTx.user.update.mockResolvedValue({});
     mockTx.salesUser.update.mockResolvedValue({});
     mockTx.auditLog.create.mockResolvedValue({});
+    mockTx.$executeRaw.mockResolvedValue(0);
+    mockTx.salesUser.findUnique.mockResolvedValue({ accountId: null, clientId: 'deoleo' });
+    mockTx.rewardAccount.create.mockResolvedValue({ id: 'acc-emp-new' });
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AdminCoreService,
@@ -261,6 +269,45 @@ describe('AdminCoreService.updateEmployee', () => {
     expect(mockTx.salesUser.update).toHaveBeenCalledWith({
       where: { id: 'su1' }, data: { reportingToId: 'boss' },
     });
+  });
+
+  // ── Employee Rewards Phase A: gated EMPLOYEE RewardAccount link ───────────────
+  it('EMPLOYEE tenant: editing an active employee find-or-creates + links their RewardAccount (in-tx)', async () => {
+    mockPrisma.client.findUnique.mockResolvedValueOnce({
+      loyaltyType: 'EMPLOYEE_REWARDS',
+      features: null,
+    });
+    mockPrisma.salesUser.findFirst
+      .mockResolvedValueOnce({
+        id: 'su1', clientId: 'deoleo', hierarchyLevelId: 'lvl-so', employeeCode: 'E1', isActive: true,
+        user: { id: 'u1', role: 'SALES_SO', phone: '1111111111', email: null, status: 'ACTIVE' },
+      }) // load
+      .mockResolvedValueOnce({ id: 'su1', user: { id: 'u1' } }); // re-fetch
+
+    await service.updateEmployee(clientAdmin, 'su1', { name: 'New Name' });
+
+    // The gated helper ran inside the tx: created an EMPLOYEE account and linked it on the SalesUser.
+    expect(mockTx.rewardAccount.create).toHaveBeenCalledWith({
+      data: { clientId: 'deoleo', accountType: 'EMPLOYEE' },
+    });
+    expect(mockTx.salesUser.update).toHaveBeenCalledWith({
+      where: { id: 'su1' }, data: { accountId: 'acc-emp-new' },
+    });
+  });
+
+  it('TRADE tenant: editing an employee creates NO RewardAccount (byte-identical)', async () => {
+    // Default client.findUnique → TRADE. Load an ACTIVE employee; the account path must stay off.
+    mockPrisma.salesUser.findFirst
+      .mockResolvedValueOnce({
+        id: 'su1', clientId: 'deoleo', hierarchyLevelId: 'lvl-so', employeeCode: 'E1', isActive: true,
+        user: { id: 'u1', role: 'SALES_SO', phone: '1111111111', email: null, status: 'ACTIVE' },
+      })
+      .mockResolvedValueOnce({ id: 'su1', user: { id: 'u1' } });
+
+    await service.updateEmployee(clientAdmin, 'su1', { name: 'New Name' });
+
+    expect(mockTx.rewardAccount.create).not.toHaveBeenCalled();
+    expect(mockTx.salesUser.update).toHaveBeenCalledWith({ where: { id: 'su1' }, data: {} });
   });
 
   // ── Operator-row guard (assertCanManageTarget) ────────────────────────────────

@@ -24,14 +24,48 @@ type ExistingUser = { phone: string; salesUser: { employeeCode: string } | null 
  * persist loop resolves via salesUser.findUnique). Codes absent from the map are treated as
  * brand-new employees (findUnique → null → resolve-ACTIVE-holder (none) → user.create runs).
  */
+/**
+ * Employee Rewards Phase A options:
+ *  - loyaltyType: the tenant's loyaltyType the in-tx client.findUnique returns (default TRADE,
+ *    so every pre-existing test keeps exercising the trade path unchanged).
+ *  - alreadyLinked: when true, the set-based account scan (salesUser.findMany for rows LACKING an
+ *    accountId) returns [] — simulating an idempotent re-upload where every employee already has
+ *    an account, so no new RewardAccount is created.
+ */
+interface TxOpts {
+  loyaltyType?: string;
+  alreadyLinked?: boolean;
+}
+
 function makeTx(
   existingUsers: ExistingUser[] = [],
   existingSalesUsersByCode: Record<string, { userId: string }> = {},
+  opts: TxOpts = {},
 ) {
   const upsertedUserPhones: string[] = [];
+  // Employee Rewards Phase A trackers.
+  const createdRewardAccounts: any[] = []; // every row passed to rewardAccount.createMany
+  const linkedAccountSalesUserIds: string[] = []; // salesUser.update calls that set an accountId
   let userSeq = 0;
   let salesSeq = 0;
   const tx = {
+    // $executeRaw serves TWO calls in the EMPLOYEE path: the tenant-level advisory lock (tagged
+    // template → first arg is a TemplateStringsArray) and the set-based link UPDATE (function form
+    // → first arg is a Prisma.Sql with .sql/.values). Capture the linked sales-user ids from the
+    // link statement's values ([su, acc, su, acc, ...] → even indices are sales-user ids).
+    $executeRaw: jest.fn().mockImplementation((arg: any) => {
+      if (arg && typeof arg === 'object' && typeof arg.sql === 'string' && /UPDATE "sales_users"/.test(arg.sql)) {
+        const vals: unknown[] = arg.values ?? [];
+        for (let i = 0; i < vals.length; i += 2) linkedAccountSalesUserIds.push(vals[i] as string);
+      }
+      return Promise.resolve(0);
+    }),
+    client: {
+      // In-tx earner-model read (gate). Default TRADE → OUTLET → account step is skipped.
+      findUnique: jest
+        .fn()
+        .mockResolvedValue({ loyaltyType: opts.loyaltyType ?? 'TRADE_LOYALTY', features: null }),
+    },
     user: {
       findMany: jest.fn().mockResolvedValue(existingUsers),
       findUnique: jest.fn().mockResolvedValue(null),
@@ -59,10 +93,28 @@ function makeTx(
         return Promise.resolve(existingSalesUsersByCode[code] ?? null);
       }),
       upsert: jest.fn().mockImplementation(() => Promise.resolve({ id: `su-${salesSeq++}` })),
-      update: jest.fn().mockResolvedValue({}),
+      // Set-based account scan: the supplied ids, minus any already linked (alreadyLinked → none).
+      findMany: jest.fn().mockImplementation((args: any) => {
+        if (opts.alreadyLinked) return Promise.resolve([]);
+        const ids: string[] = args?.where?.id?.in ?? [];
+        return Promise.resolve(ids.map((id) => ({ id })));
+      }),
+      update: jest.fn().mockImplementation((args: any) => {
+        if (args?.data && Object.prototype.hasOwnProperty.call(args.data, 'accountId')) {
+          linkedAccountSalesUserIds.push(args.where.id);
+        }
+        return Promise.resolve({});
+      }),
+    },
+    rewardAccount: {
+      createMany: jest.fn().mockImplementation((args: any) => {
+        createdRewardAccounts.push(...args.data);
+        return Promise.resolve({ count: args.data.length });
+      }),
+      create: jest.fn().mockResolvedValue({ id: 'acc-single' }),
     },
   };
-  return { tx: tx as any, upsertedUserPhones };
+  return { tx: tx as any, upsertedUserPhones, createdRewardAccounts, linkedAccountSalesUserIds };
 }
 
 const CLIENT = 'deoleo';
@@ -202,5 +254,83 @@ describe('persistHierarchy — phone ↔ employeeCode guard', () => {
     ]);
     // distinct → no two users collapse onto one (clientId, '') row
     expect(new Set(upsertedUserPhones).size).toBe(2);
+  });
+});
+
+describe('persistHierarchy — Employee Rewards Phase A (gated EMPLOYEE RewardAccount)', () => {
+  it('EMPLOYEE tenant: each ACTIVE employee gets exactly ONE RewardAccount + a linked accountId', async () => {
+    const employees = [
+      emp({ id: 'XSR-1', name: 'A', mobile: '9900000001' }),
+      emp({ id: 'XSR-2', name: 'B', mobile: '9900000002' }),
+    ];
+    const { tx, createdRewardAccounts, linkedAccountSalesUserIds } = makeTx([], {}, {
+      loyaltyType: 'EMPLOYEE_REWARDS',
+    });
+
+    const result = await persistHierarchy(CLIENT, employees, DEOLEO_HIERARCHY, tx);
+
+    // one EMPLOYEE account per active employee…
+    expect(tx.rewardAccount.createMany).toHaveBeenCalledTimes(1);
+    expect(createdRewardAccounts).toHaveLength(2);
+    for (const acc of createdRewardAccounts) {
+      expect(acc.accountType).toBe('EMPLOYEE');
+      expect(acc.clientId).toBe(CLIENT);
+      expect(typeof acc.id).toBe('string'); // app-generated id, paired to a sales user
+    }
+    // …and each active SalesUser had its accountId linked.
+    expect(linkedAccountSalesUserIds).toHaveLength(2);
+    expect(result.employeeAccountsEnsured).toBe(2);
+    // OUTLET helper must never run on this path.
+    expect(tx.channelPartner).toBeUndefined();
+  });
+
+  it('EMPLOYEE tenant idempotent re-upload: NO duplicate accounts created', async () => {
+    const employees = [emp({ id: 'XSR-1', name: 'A', mobile: '9900000001' })];
+    // alreadyLinked → the lacking-account scan returns [] (all employees already have accounts).
+    const { tx, createdRewardAccounts, linkedAccountSalesUserIds } = makeTx([], {}, {
+      loyaltyType: 'EMPLOYEE_REWARDS',
+      alreadyLinked: true,
+    });
+
+    const result = await persistHierarchy(CLIENT, employees, DEOLEO_HIERARCHY, tx);
+
+    expect(tx.rewardAccount.createMany).not.toHaveBeenCalled();
+    expect(createdRewardAccounts).toHaveLength(0);
+    expect(linkedAccountSalesUserIds).toHaveLength(0);
+    expect(result.employeeAccountsEnsured).toBe(0);
+  });
+
+  it('TRADE tenant: NO RewardAccount created and NO accountId written (Deoleo byte-identical)', async () => {
+    const employees = [
+      emp({ id: 'XSR-1', name: 'A', mobile: '9900000001' }),
+      emp({ id: 'XSR-2', name: 'B', mobile: '9900000002' }),
+    ];
+    // Default loyaltyType is TRADE_LOYALTY → earnerModel OUTLET → the whole account step is skipped.
+    const { tx, createdRewardAccounts, linkedAccountSalesUserIds } = makeTx([], {});
+
+    const result = await persistHierarchy(CLIENT, employees, DEOLEO_HIERARCHY, tx);
+
+    expect(tx.rewardAccount.createMany).not.toHaveBeenCalled();
+    expect(tx.rewardAccount.create).not.toHaveBeenCalled();
+    expect(tx.salesUser.findMany).not.toHaveBeenCalled(); // account scan never happens
+    expect(createdRewardAccounts).toHaveLength(0);
+    expect(linkedAccountSalesUserIds).toHaveLength(0); // no SalesUser.accountId ever written
+    expect(result.employeeAccountsEnsured).toBe(0);
+  });
+
+  it('EMPLOYEE tenant: a synthetic VACANT node is NOT given an account (only active earners)', async () => {
+    const employees = [
+      emp({ id: 'XSR-1', name: 'A', mobile: '9900000001' }), // active earner
+      emp({ id: 'XSR-2', name: null, mobile: '', status: 'PLACEHOLDER' }), // vacant placeholder
+    ];
+    const { tx, createdRewardAccounts } = makeTx([], {}, { loyaltyType: 'EMPLOYEE_REWARDS' });
+
+    const result = await persistHierarchy(CLIENT, employees, DEOLEO_HIERARCHY, tx);
+
+    // Only the ONE active employee is handed to the account scan + createMany.
+    const scanArgs = (tx.salesUser.findMany as jest.Mock).mock.calls[0][0];
+    expect(scanArgs.where.id.in).toHaveLength(1);
+    expect(createdRewardAccounts).toHaveLength(1);
+    expect(result.employeeAccountsEnsured).toBe(1);
   });
 });

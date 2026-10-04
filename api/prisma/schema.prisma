@@ -793,8 +793,10 @@ model SalesUser {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
   deletedAt        DateTime?
+  accountId        String?   @unique // Employee Rewards Phase A — this employee's EMPLOYEE RewardAccount (additive)
 
   user             User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account          RewardAccount?        @relation("EmployeeAccount", fields: [accountId], references: [id], onDelete: SetNull)
   hierarchyLevel   SalesHierarchyLevel   @relation(fields: [hierarchyLevelId], references: [id])
   reportingTo      SalesUser?            @relation("SalesUserReporting", fields: [reportingToId], references: [id])
   subordinates     SalesUser[]           @relation("SalesUserReporting")
@@ -1325,9 +1327,12 @@ model RewardAccount {
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
-  wallet        Wallet?
-  orders        RedemptionOrder[]
-  outletProfile ChannelPartner?
+  wallet          Wallet?
+  orders          RedemptionOrder[]
+  outletProfile   ChannelPartner?
+  // Employee Rewards Phase A — the EMPLOYEE earner's profile (accountType EMPLOYEE). Virtual
+  // back-relation (no column); the link lives on SalesUser.accountId, mirroring outletProfile.
+  employeeProfile SalesUser?        @relation("EmployeeAccount")
 
   @@index([clientId])
   @@map("reward_accounts")

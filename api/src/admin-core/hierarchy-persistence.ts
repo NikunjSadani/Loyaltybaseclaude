@@ -14,6 +14,8 @@
 
 import { BadRequestException } from '@nestjs/common';
 import type { Prisma, UserRole } from '@prisma/client';
+import { resolveCapabilities } from '../common/loyalty-capabilities.helper';
+import { ensureEmployeeAccountsForSalesUsers } from '../common/reward-account.helper';
 
 // ─── Ported types (from platform/src/types) ───────────────────────────────────
 
@@ -117,6 +119,12 @@ export interface PersistHierarchyResult {
   salesUsersUpserted: number;
   reportingLinksSet: number;
   placeholders: number;
+  /**
+   * Employee Rewards Phase A — count of EMPLOYEE RewardAccounts created this run (0 for a TRADE
+   * tenant, which skips the whole account step; 0 on an idempotent re-upload where every active
+   * employee is already linked).
+   */
+  employeeAccountsEnsured: number;
 }
 
 /**
@@ -248,6 +256,9 @@ export async function persistHierarchy(
   let salesUsersUpserted = 0;
   let placeholders = 0;
   const salesUserIdByCode = new Map<string, string>();
+  // Employee Rewards Phase A — SalesUser ids of ACTIVE (non-vacant) earners in this upload.
+  // A synthetic vacant node (isPlaceholder) is NOT an earner — it gets its account when filled.
+  const activeSalesUserIds: string[] = [];
 
   for (const emp of employees) {
     // Defensive: the PUT route accepts the raw request body (no DTO transform), so coerce the role
@@ -334,6 +345,7 @@ export async function persistHierarchy(
     });
     salesUsersUpserted++;
     salesUserIdByCode.set(emp.id, salesUser.id);
+    if (!isPlaceholder) activeSalesUserIds.push(salesUser.id);
   }
 
   // ── 3. Second pass: reporting links ──────────────────────────────────────
@@ -354,11 +366,35 @@ export async function persistHierarchy(
     if (managerId) reportingLinksSet++;
   }
 
+  // ── 4. Employee Rewards (GATED by earnerModel === 'EMPLOYEE') ─────────────
+  // Only an EMPLOYEE-earner tenant gets a RewardAccount per ACTIVE roster employee. The tenant's
+  // loyaltyType is read in-tx and resolved via resolveCapabilities (fail-safe: an unknown/absent
+  // loyaltyType → TRADE defaults → earnerModel 'OUTLET', so this whole step is skipped). For a
+  // TRADE tenant NOTHING below runs — no RewardAccount is created, no SalesUser.accountId is
+  // written — so the live trade path is byte-identical to before this feature. Same transaction.
+  let employeeAccountsEnsured = 0;
+  const clientRow = await tx.client.findUnique({
+    where: { id: clientId },
+    select: { loyaltyType: true, features: true },
+  });
+  const capabilities = resolveCapabilities(
+    clientRow?.loyaltyType as string | null | undefined,
+    (clientRow?.features ?? null) as Record<string, unknown> | null,
+  );
+  if (capabilities.earnerModel === 'EMPLOYEE' && activeSalesUserIds.length > 0) {
+    employeeAccountsEnsured = await ensureEmployeeAccountsForSalesUsers(
+      tx,
+      clientId,
+      activeSalesUserIds,
+    );
+  }
+
   return {
     levelsUpserted: levelRows.length,
     usersUpserted,
     salesUsersUpserted,
     reportingLinksSet,
     placeholders,
+    employeeAccountsEnsured,
   };
 }
