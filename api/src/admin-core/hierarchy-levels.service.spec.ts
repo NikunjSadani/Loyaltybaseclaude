@@ -18,7 +18,12 @@ const clientAdmin: JwtPayload = {
 };
 
 function makeService() {
-  const prisma = {
+  const prisma: any = {
+    // F3 guard: setHierarchyLevels is EMPLOYEE-tenants-only. Default to an employee tenant so the
+    // validation/reconcile tests reach their target; a dedicated test overrides this to TRADE.
+    client: {
+      findUnique: jest.fn().mockResolvedValue({ loyaltyType: 'EMPLOYEE_REWARDS', features: null }),
+    },
     programSetting: {
       findFirst: jest.fn().mockResolvedValue(null),
       upsert: jest.fn().mockResolvedValue({}),
@@ -26,11 +31,20 @@ function makeService() {
     salesUser: {
       count: jest.fn().mockResolvedValue(0),
       groupBy: jest.fn().mockResolvedValue([]),
+      findMany: jest.fn().mockResolvedValue([]), // reconcile: active employees to remap / referenced parked
     },
     salesHierarchyLevel: {
       count: jest.fn().mockResolvedValue(0),
-      findMany: jest.fn().mockResolvedValue([]),
+      findMany: jest.fn().mockResolvedValue([]), // reconcile: existing / all / still-parked level rows
+      update: jest.fn().mockResolvedValue({}),
+      create: jest.fn().mockResolvedValue({}),
+      deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
+    user: {
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }), // reconcile: role remap
+    },
+    // setHierarchyLevels wraps the upsert + reconcile in a tx; run the callback with prisma as tx.
+    $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => fn(prisma)),
   };
   const svc = new AdminCoreService(
     prisma as never,
@@ -109,6 +123,15 @@ describe('setHierarchyLevels — validation', () => {
   it('rejects an empty config', async () => {
     const { svc } = makeService();
     await expect(svc.setHierarchyLevels(clientAdmin, [])).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects a TRADE tenant entirely (audit F3 — reconcile must never touch a live trade roster)', async () => {
+    const { svc, prisma } = makeService();
+    prisma.client.findUnique.mockResolvedValue({ loyaltyType: 'TRADE_LOYALTY', features: null });
+    await expect(svc.setHierarchyLevels(clientAdmin, CUSTOM)).rejects.toThrow(/employee-rewards tenants only/i);
+    // Nothing is written — the guard is the first thing checked.
+    expect(prisma.programSetting.upsert).not.toHaveBeenCalled();
+    expect(prisma.salesHierarchyLevel.update).not.toHaveBeenCalled();
   });
 
   // Structural-rule tests carry a valid userRole on every level (now REQUIRED, audit F1) so they
@@ -194,6 +217,91 @@ describe('setHierarchyLevels — validation', () => {
       { level: 1, roleCode: '<img src=x>', isLeaf: true, isRoot: true, userRole: 'SALES_ISR' },
     ];
     await expect(svc.setHierarchyLevels(clientAdmin, bad)).rejects.toThrow(/letters, numbers/i);
+  });
+});
+
+describe('setHierarchyLevels — reconcile (audit F2/F4: no manual re-upload after editing levels)', () => {
+  it('renames a level code IN PLACE (reuses the row at that level) + remaps roles by level number', async () => {
+    const { svc, prisma } = makeService();
+    // Existing relational rows: level 1 (id L1, was REP) and level 2 (id L2, was MGR).
+    // findMany serves step 1 (level≥0) + step 3 (all rows) with the existing rows, and the step-4b
+    // still-parked query (level<0) with none (both rows were reused back to positive).
+    prisma.salesHierarchyLevel.findMany.mockImplementation((args: any) => {
+      const lvl = args?.where?.level;
+      if (lvl && typeof lvl === 'object' && 'lt' in lvl) return Promise.resolve([]);
+      return Promise.resolve([
+        { id: 'L1', level: 1 },
+        { id: 'L2', level: 2 },
+      ]);
+    });
+    // Two active employees, one at each level, to remap.
+    prisma.salesUser.findMany.mockResolvedValue([
+      { userId: 'u1', hierarchyLevel: { level: 1 } },
+      { userId: 'u2', hierarchyLevel: { level: 2 } },
+    ]);
+    // Rename level-1 code REP→FIELD (userRole same) and level-2 MGR→MANAGER with a DIFFERENT userRole.
+    const renamed: TenantHierarchyLevel[] = [
+      { tenantId: 'acme', level: 1, roleCode: 'FIELD', roleLabel: 'Field', isLeaf: true, isRoot: false, userRole: 'SALES_ISR' },
+      { tenantId: 'acme', level: 2, roleCode: 'MANAGER', roleLabel: 'Manager', isLeaf: false, isRoot: true, userRole: 'SALES_STATE_HEAD' },
+    ];
+    await svc.setHierarchyLevels(clientAdmin, renamed);
+
+    // The level-1 row (L1) is updated IN PLACE to the new code (not a new row) → employees stay linked.
+    expect(prisma.salesHierarchyLevel.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'L1' }, data: expect.objectContaining({ level: 1, code: 'FIELD' }) }),
+    );
+    expect(prisma.salesHierarchyLevel.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'L2' }, data: expect.objectContaining({ level: 2, code: 'MANAGER' }) }),
+    );
+    expect(prisma.salesHierarchyLevel.create).not.toHaveBeenCalled(); // same level count → no new rows
+    // Roles remapped set-based, per level, filtered to those that actually change.
+    expect(prisma.user.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: { in: ['u2'] }, role: { not: 'SALES_STATE_HEAD' } }, data: { role: 'SALES_STATE_HEAD' } }),
+    );
+  });
+
+  it('cleans up UNREFERENCED parked level rows (audit F1 — no __tmp__ orphan accumulation)', async () => {
+    const { svc, prisma } = makeService();
+    // step 1 (level≥0) + step 3 (all) → one active level; step 4b (level<0) → two leftover parked
+    // rows P8, P9.
+    prisma.salesHierarchyLevel.findMany.mockImplementation((args: any) => {
+      const lvl = args?.where?.level;
+      if (lvl && typeof lvl === 'object' && 'lt' in lvl) {
+        return Promise.resolve([{ id: 'P8' }, { id: 'P9' }]);
+      }
+      return Promise.resolve([{ id: 'L1', level: 1 }]);
+    });
+    // P8 is still referenced by a (deactivated) employee; P9 is not.
+    prisma.salesUser.findMany.mockImplementation((args: any) => {
+      if (args?.distinct) return Promise.resolve([{ hierarchyLevelId: 'P8' }]);
+      return Promise.resolve([]); // remap: no active employees
+    });
+    const cfg: TenantHierarchyLevel[] = [
+      { tenantId: 'acme', level: 1, roleCode: 'ONLY', roleLabel: 'Only', isLeaf: true, isRoot: true, userRole: 'SALES_ISR' },
+    ];
+    await svc.setHierarchyLevels(clientAdmin, cfg);
+    // Only the UNREFERENCED parked row (P9) is deleted; P8 (referenced) is kept.
+    expect(prisma.salesHierarchyLevel.deleteMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: { in: ['P9'] } } }),
+    );
+  });
+
+  it('rejects reducing levels when an active employee sits at a removed level (no silent orphaning)', async () => {
+    const { svc, prisma } = makeService();
+    // Existing has 3 levels; the new config has 2 → level 3 is removed.
+    prisma.salesHierarchyLevel.findMany.mockResolvedValue([
+      { id: 'L1', level: 1 },
+      { id: 'L2', level: 2 },
+      { id: 'L3', level: 3 },
+    ]);
+    prisma.salesUser.count.mockResolvedValue(4); // 4 active employees still at the removed level
+    const shorter: TenantHierarchyLevel[] = [
+      { tenantId: 'acme', level: 1, roleCode: 'REP', roleLabel: 'Rep', isLeaf: true, isRoot: false, userRole: 'SALES_ISR' },
+      { tenantId: 'acme', level: 2, roleCode: 'HEAD', roleLabel: 'Head', isLeaf: false, isRoot: true, userRole: 'SALES_HO' },
+    ];
+    await expect(svc.setHierarchyLevels(clientAdmin, shorter)).rejects.toThrow(/removed|reassign/i);
+    // Nothing committed (the whole tx would roll back).
+    expect(prisma.salesHierarchyLevel.create).not.toHaveBeenCalled();
   });
 });
 

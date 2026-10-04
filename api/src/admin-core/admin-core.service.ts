@@ -1586,6 +1586,27 @@ export class AdminCoreService {
     levels: unknown,
   ): Promise<{ levels: TenantHierarchyLevel[] }> {
     const clientId = user.clientId;
+
+    // EMPLOYEE-tenants ONLY (audit F3). Per-tenant custom levels + the relational reconcile are an
+    // employee-rewards feature; a TRADE tenant uses the fixed Deoleo ladder. Without this guard a
+    // Deoleo CLIENT_ADMIN who saved the levels editor would run reconcileLevelsToConfig against the
+    // LIVE trade roster — reparking every level row + re-roling every employee by position. GET
+    // stays open (it returns the Deoleo fallback, which the shared roster page reads); only this
+    // mutation is gated. Fail-safe: unknown/absent loyaltyType → TRADE → rejected.
+    const client = await this.prisma.client.findUnique({
+      where: { id: clientId },
+      select: { loyaltyType: true, features: true },
+    });
+    const capabilities = resolveCapabilities(
+      client?.loyaltyType as string | null | undefined,
+      (client?.features ?? null) as Record<string, unknown> | null,
+    );
+    if (capabilities.earnerModel !== 'EMPLOYEE') {
+      throw new BadRequestException(
+        'Custom hierarchy levels apply to employee-rewards tenants only.',
+      );
+    }
+
     if (!Array.isArray(levels) || levels.length === 0) {
       throw new BadRequestException('At least one hierarchy level is required.');
     }
@@ -1680,20 +1701,160 @@ export class AdminCoreService {
     }
 
     const settingValue = normalized as unknown as Prisma.InputJsonValue;
-    await this.prisma.programSetting.upsert({
-      where: {
-        clientId_settingKey: { clientId, settingKey: AdminCoreService.HIERARCHY_LEVELS_KEY },
+    // Save the config AND reconcile the relational hierarchy in ONE transaction so editing levels
+    // no longer needs a manual roster re-upload (closes audit F2/F4). reconcileLevelsToConfig may
+    // reject (BadRequestException) if the change would strand active employees at a removed level —
+    // the whole save then rolls back.
+    await this.prisma.$transaction(
+      async (tx) => {
+        await tx.programSetting.upsert({
+          where: {
+            clientId_settingKey: { clientId, settingKey: AdminCoreService.HIERARCHY_LEVELS_KEY },
+          },
+          create: {
+            clientId,
+            settingKey: AdminCoreService.HIERARCHY_LEVELS_KEY,
+            settingValue,
+            category: 'hierarchy',
+            updatedById: user.sub,
+          },
+          update: { settingValue, updatedById: user.sub },
+        });
+        await this.reconcileLevelsToConfig(tx, clientId, normalized);
       },
-      create: {
-        clientId,
-        settingKey: AdminCoreService.HIERARCHY_LEVELS_KEY,
-        settingValue,
-        category: 'hierarchy',
-        updatedById: user.sub,
-      },
-      update: { settingValue, updatedById: user.sub },
-    });
+      // The reconcile touches the level rows + remaps employee roles; give it the same budget as the
+      // roster upload (saveHierarchyConfig) so the default 5s interactive-tx timeout can't abort it.
+      { timeout: 20_000, maxWait: 10_000 },
+    );
     return { levels: normalized };
+  }
+
+  /**
+   * Reconcile the RELATIONAL hierarchy (SalesHierarchyLevel rows) + existing employees' coarse
+   * `User.role` to a newly-saved levels config, so editing levels in the editor no longer needs a
+   * roster re-upload (closes audit F2/F4 — the config/relational decoupling).
+   *
+   * Matched by LEVEL NUMBER (position = stable identity, the way the editor derives levels from row
+   * order) — NOT by code. The row that was at level N is updated IN PLACE (same id), so employees
+   * stay linked via `hierarchyLevelId` and a code rename flows straight through to: the single-edit
+   * role mapping (maps the now-renamed relational code via the config), the roster display
+   * (getHierarchyConfig overlays the relational code/name), and the Overview. Keying by code instead
+   * would orphan a renamed level (its old code drops out of the config → parked, employees stranded).
+   *
+   * Runs ONLY inside setHierarchyLevels' tx, i.e. only for a tenant that explicitly stores a config.
+   * A Deoleo/trade tenant never calls this (it resolves the fallback), so the live trade path is
+   * untouched.
+   */
+  private async reconcileLevelsToConfig(
+    tx: Prisma.TransactionClient,
+    clientId: string,
+    config: TenantHierarchyLevel[], // validated + sorted 1..N
+  ): Promise<void> {
+    // 1. Existing ACTIVE (level ≥ 0) level rows, by their current level number.
+    const existing = await tx.salesHierarchyLevel.findMany({
+      where: { clientId, level: { gte: 0 } },
+      select: { id: true, level: true },
+    });
+    const existingIdByLevel = new Map(existing.map((e) => [e.level, e.id]));
+
+    // 2. Guard removal: a level whose number exceeds the new length is being dropped. Refuse to
+    //    strand active employees sitting at it — the admin must reassign them (or re-upload) first.
+    const removedIds = existing.filter((e) => e.level > config.length).map((e) => e.id);
+    if (removedIds.length > 0) {
+      const stranded = await tx.salesUser.count({
+        where: { clientId, deletedAt: null, isActive: true, hierarchyLevelId: { in: removedIds } },
+      });
+      if (stranded > 0) {
+        throw new BadRequestException(
+          `Cannot reduce to ${config.length} level(s) — ${stranded} active employee(s) are at a level you removed. ` +
+            `Reassign them (or re-upload the roster) before removing that level.`,
+        );
+      }
+    }
+
+    // 3. Free the (clientId, level) AND (clientId, code) unique space before writing the new config.
+    //    Park EVERY level row for the tenant — the active reuse candidates AND any pre-existing
+    //    negative orphans (from earlier reconciles or bulk-upload drops, which keep their real code)
+    //    — to a UNIQUE, monotonically-decreasing negative level + a temp code. Parking strictly
+    //    below the current floor guarantees no (clientId, level) self-collision across repeated edits
+    //    (audit F1), and the temp codes free every code slot so re-adding any previously-used code
+    //    can't hit (clientId, code) (audit F2). UPDATE-only → row ids + hierarchyLevelId FKs survive.
+    const allRows = await tx.salesHierarchyLevel.findMany({
+      where: { clientId },
+      select: { id: true, level: true },
+    });
+    let parkCursor = Math.min(0, ...allRows.map((r) => r.level)) - 1;
+    for (const r of allRows) {
+      await tx.salesHierarchyLevel.update({
+        where: { id: r.id },
+        data: { level: parkCursor, code: `__tmp__:${r.id}` },
+      });
+      parkCursor -= 1;
+    }
+
+    // 4. Write the new config BY LEVEL NUMBER: reuse the row that was at that level (update it back
+    //    to a positive level + the new code, IN PLACE so its employees stay linked) or create one
+    //    for a newly-added level.
+    for (const lvl of config) {
+      const reuseId = existingIdByLevel.get(lvl.level);
+      if (reuseId) {
+        await tx.salesHierarchyLevel.update({
+          where: { id: reuseId },
+          data: { level: lvl.level, code: lvl.roleCode, name: lvl.roleLabel },
+        });
+      } else {
+        await tx.salesHierarchyLevel.create({
+          data: { clientId, code: lvl.roleCode, name: lvl.roleLabel, level: lvl.level },
+        });
+      }
+    }
+
+    // 4b. Clean up parked rows that NOTHING references, so orphaned `__tmp__` rows don't accumulate
+    //     forever (audit F1) and the internal temp code can't leak (audit F6) for empty levels. Rows
+    //     still referenced by a (deactivated) employee are kept — they self-heal on the next upload.
+    const stillParked = await tx.salesHierarchyLevel.findMany({
+      where: { clientId, level: { lt: 0 } },
+      select: { id: true },
+    });
+    if (stillParked.length > 0) {
+      const parkedIds = stillParked.map((r) => r.id);
+      const referenced = await tx.salesUser.findMany({
+        where: { clientId, hierarchyLevelId: { in: parkedIds } },
+        select: { hierarchyLevelId: true },
+        distinct: ['hierarchyLevelId'],
+      });
+      const refSet = new Set(referenced.map((r) => r.hierarchyLevelId));
+      const deletable = parkedIds.filter((id) => !refSet.has(id));
+      if (deletable.length > 0) {
+        await tx.salesHierarchyLevel.deleteMany({ where: { id: { in: deletable } } });
+      }
+    }
+
+    // 5. Remap existing active employees' coarse User.role to the new per-level userRole — set-based
+    //    (one updateMany per level, filtered to those whose role actually changed), so a large roster
+    //    doesn't fan out to N individual writes.
+    const sus = await tx.salesUser.findMany({
+      where: { clientId, deletedAt: null },
+      select: { userId: true, hierarchyLevel: { select: { level: true } } },
+    });
+    const userIdsByLevel = new Map<number, string[]>();
+    for (const su of sus) {
+      const lvl = su.hierarchyLevel?.level;
+      if (lvl != null && lvl > 0) {
+        const bucket = userIdsByLevel.get(lvl);
+        if (bucket) bucket.push(su.userId);
+        else userIdsByLevel.set(lvl, [su.userId]);
+      }
+    }
+    for (const lvl of config) {
+      const ids = userIdsByLevel.get(lvl.level);
+      if (ids && ids.length > 0) {
+        await tx.user.updateMany({
+          where: { id: { in: ids }, role: { not: lvl.userRole as UserRole } },
+          data: { role: lvl.userRole as UserRole },
+        });
+      }
+    }
   }
 
   async getHierarchyConfig(
@@ -1735,7 +1896,13 @@ export class AdminCoreService {
         ...e,
         name: live.user?.name ?? e.name,
         mobile: live.user?.phone ?? e.mobile,
-        roleCode: live.hierarchyLevel?.code ?? e.roleCode,
+        // Never surface an internal parked `__tmp__:<id>` code (audit F6) — a since-deactivated
+        // employee may still point at a parked level after a levels reconcile; fall back to the
+        // snapshot's code for display.
+        roleCode:
+          live.hierarchyLevel?.code && !live.hierarchyLevel.code.startsWith('__tmp__')
+            ? live.hierarchyLevel.code
+            : e.roleCode,
         roleLabel: live.hierarchyLevel?.name ?? e.roleLabel,
         reportsToId: live.reportingTo?.employeeCode ?? null,
       };
