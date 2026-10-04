@@ -1830,30 +1830,50 @@ export class AdminCoreService {
       }
     }
 
-    // 5. Remap existing active employees' coarse User.role to the new per-level userRole — set-based
-    //    (one updateMany per level, filtered to those whose role actually changed), so a large roster
-    //    doesn't fan out to N individual writes.
+    // 5. Remap existing active employees' coarse User.role to the new per-level userRole, AND revoke
+    //    the sessions of anyone whose role actually CHANGES — so a demotion/promotion takes effect on
+    //    the user's next request (the per-request JwtStrategy rejects a revoked session) rather than
+    //    only after their ~60m access token expires and silently refreshes. Mirrors updateEmployee's
+    //    stamp-before-revoke on a role change (the reconcile is a demotion surface too). Set-based
+    //    throughout (grouped writes), so a large roster doesn't fan out to per-user writes.
     const sus = await tx.salesUser.findMany({
       where: { clientId, deletedAt: null },
-      select: { userId: true, hierarchyLevel: { select: { level: true } } },
+      select: {
+        userId: true,
+        hierarchyLevel: { select: { level: true } },
+        user: { select: { role: true } },
+      },
     });
-    const userIdsByLevel = new Map<number, string[]>();
+    const roleByLevel = new Map(config.map((c) => [c.level, c.userRole as UserRole]));
+    // Users whose coarse role changes, grouped by their new role (for set-based role writes).
+    const changedIdsByRole = new Map<UserRole, string[]>();
+    const changedUserIds: string[] = [];
     for (const su of sus) {
       const lvl = su.hierarchyLevel?.level;
-      if (lvl != null && lvl > 0) {
-        const bucket = userIdsByLevel.get(lvl);
-        if (bucket) bucket.push(su.userId);
-        else userIdsByLevel.set(lvl, [su.userId]);
-      }
+      if (lvl == null || lvl <= 0) continue;
+      const newRole = roleByLevel.get(lvl);
+      if (!newRole || !su.user || su.user.role === newRole) continue;
+      changedUserIds.push(su.userId);
+      const bucket = changedIdsByRole.get(newRole);
+      if (bucket) bucket.push(su.userId);
+      else changedIdsByRole.set(newRole, [su.userId]);
     }
-    for (const lvl of config) {
-      const ids = userIdsByLevel.get(lvl.level);
-      if (ids && ids.length > 0) {
-        await tx.user.updateMany({
-          where: { id: { in: ids }, role: { not: lvl.userRole as UserRole } },
-          data: { role: lvl.userRole as UserRole },
-        });
+
+    if (changedUserIds.length > 0) {
+      const now = new Date();
+      // STAMP sessionsInvalidBefore BEFORE revoking (authoritative ordering — same as
+      // revokeAllSessionsForUser) so an in-flight refresh can't roll a stale-role session forward.
+      await tx.user.updateMany({
+        where: { id: { in: changedUserIds } },
+        data: { sessionsInvalidBefore: now },
+      });
+      for (const [role, ids] of changedIdsByRole) {
+        await tx.user.updateMany({ where: { id: { in: ids } }, data: { role } });
       }
+      await tx.userSession.updateMany({
+        where: { userId: { in: changedUserIds }, revokedAt: null },
+        data: { revokedAt: now },
+      });
     }
   }
 

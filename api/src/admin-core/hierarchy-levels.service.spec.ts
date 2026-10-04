@@ -41,7 +41,10 @@ function makeService() {
       deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
     user: {
-      updateMany: jest.fn().mockResolvedValue({ count: 0 }), // reconcile: role remap
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }), // reconcile: sessionsInvalidBefore stamp + role remap
+    },
+    userSession: {
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }), // reconcile: revoke sessions of role-changed users
     },
     // setHierarchyLevels wraps the upsert + reconcile in a tx; run the callback with prisma as tx.
     $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => fn(prisma)),
@@ -234,10 +237,11 @@ describe('setHierarchyLevels — reconcile (audit F2/F4: no manual re-upload aft
         { id: 'L2', level: 2 },
       ]);
     });
-    // Two active employees, one at each level, to remap.
+    // Two active employees: u1 at level 1 (already SALES_ISR → no change), u2 at level 2 (SALES_SO
+    // today → will change to the level-2 role).
     prisma.salesUser.findMany.mockResolvedValue([
-      { userId: 'u1', hierarchyLevel: { level: 1 } },
-      { userId: 'u2', hierarchyLevel: { level: 2 } },
+      { userId: 'u1', hierarchyLevel: { level: 1 }, user: { role: 'SALES_ISR' } },
+      { userId: 'u2', hierarchyLevel: { level: 2 }, user: { role: 'SALES_SO' } },
     ]);
     // Rename level-1 code REP→FIELD (userRole same) and level-2 MGR→MANAGER with a DIFFERENT userRole.
     const renamed: TenantHierarchyLevel[] = [
@@ -254,9 +258,17 @@ describe('setHierarchyLevels — reconcile (audit F2/F4: no manual re-upload aft
       expect.objectContaining({ where: { id: 'L2' }, data: expect.objectContaining({ level: 2, code: 'MANAGER' }) }),
     );
     expect(prisma.salesHierarchyLevel.create).not.toHaveBeenCalled(); // same level count → no new rows
-    // Roles remapped set-based, per level, filtered to those that actually change.
+    // Only u2's role changed → it gets re-roled...
     expect(prisma.user.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: { in: ['u2'] }, role: { not: 'SALES_STATE_HEAD' } }, data: { role: 'SALES_STATE_HEAD' } }),
+      expect.objectContaining({ where: { id: { in: ['u2'] } }, data: { role: 'SALES_STATE_HEAD' } }),
+    );
+    // ...its sessionsInvalidBefore is stamped...
+    expect(prisma.user.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: { in: ['u2'] } }, data: expect.objectContaining({ sessionsInvalidBefore: expect.any(Date) }) }),
+    );
+    // ...and its live sessions are revoked (immediate role enforcement, not a ~60m wait).
+    expect(prisma.userSession.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: { in: ['u2'] }, revokedAt: null }, data: expect.objectContaining({ revokedAt: expect.any(Date) }) }),
     );
   });
 
