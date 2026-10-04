@@ -91,13 +91,15 @@ interface TxOpts {
 
 function makeTx(
   existingUsers: ExistingUser[] = [],
-  existingSalesUsersByCode: Record<string, { userId: string }> = {},
+  existingSalesUsersByCode: Record<string, { userId: string; user?: { role: string } }> = {},
   opts: TxOpts = {},
 ) {
   const upsertedUserPhones: string[] = [];
   // Employee Rewards Phase A trackers.
   const createdRewardAccounts: any[] = []; // every row passed to rewardAccount.createMany
   const linkedAccountSalesUserIds: string[] = []; // salesUser.update calls that set an accountId
+  const stampedUserIds: string[] = []; // user.updateMany({sessionsInvalidBefore}) — role-change revoke
+  const revokedSessionUserIds: string[] = []; // userSession.updateMany revoke targets
   let userSeq = 0;
   let salesSeq = 0;
   const tx = {
@@ -130,6 +132,19 @@ function makeTx(
       update: jest
         .fn()
         .mockImplementation((args: any) => Promise.resolve({ id: args.where.id })),
+      // Role-change revoke: the stamp of sessionsInvalidBefore on the changed users.
+      updateMany: jest.fn().mockImplementation((args: any) => {
+        const ids: string[] = args?.where?.id?.in ?? [];
+        if (args?.data && 'sessionsInvalidBefore' in args.data) stampedUserIds.push(...ids);
+        return Promise.resolve({ count: ids.length });
+      }),
+    },
+    userSession: {
+      updateMany: jest.fn().mockImplementation((args: any) => {
+        const ids: string[] = args?.where?.userId?.in ?? [];
+        revokedSessionUserIds.push(...ids);
+        return Promise.resolve({ count: ids.length });
+      }),
     },
     salesHierarchyLevel: {
       updateMany: jest.fn().mockResolvedValue({ count: 0 }),
@@ -166,7 +181,7 @@ function makeTx(
       create: jest.fn().mockResolvedValue({ id: 'acc-single' }),
     },
   };
-  return { tx: tx as any, upsertedUserPhones, createdRewardAccounts, linkedAccountSalesUserIds };
+  return { tx: tx as any, upsertedUserPhones, createdRewardAccounts, linkedAccountSalesUserIds, stampedUserIds, revokedSessionUserIds };
 }
 
 const CLIENT = 'deoleo';
@@ -384,5 +399,30 @@ describe('persistHierarchy — Employee Rewards Phase A (gated EMPLOYEE RewardAc
     expect(scanArgs.where.id.in).toHaveLength(1);
     expect(createdRewardAccounts).toHaveLength(1);
     expect(result.employeeAccountsEnsured).toBe(1);
+  });
+});
+
+describe('persistHierarchy — role-change session revoke (immediate enforcement, all tenants)', () => {
+  it('revokes sessions of a user whose coarse role CHANGES on a re-upload', async () => {
+    const employees = [emp({ id: 'XSR-1', roleCode: 'XSR', mobile: '9900000001' })]; // XSR → SALES_ISR
+    const { tx, stampedUserIds, revokedSessionUserIds } = makeTx(
+      [],
+      { 'XSR-1': { userId: 'u-1', user: { role: 'SALES_SO' } } }, // was SALES_SO → now SALES_ISR (changes)
+    );
+    const res = await persistHierarchy(CLIENT, employees, DEOLEO_HIERARCHY, tx);
+    expect(res.rolesRevoked).toBe(1);
+    expect(stampedUserIds).toEqual(['u-1']); // sessionsInvalidBefore stamped first
+    expect(revokedSessionUserIds).toEqual(['u-1']); // then live sessions revoked
+  });
+
+  it('does NOT revoke when the role is unchanged (idempotent re-upload)', async () => {
+    const employees = [emp({ id: 'XSR-1', roleCode: 'XSR', mobile: '9900000001' })]; // XSR → SALES_ISR
+    const { tx, revokedSessionUserIds } = makeTx(
+      [],
+      { 'XSR-1': { userId: 'u-1', user: { role: 'SALES_ISR' } } }, // already SALES_ISR → no change
+    );
+    const res = await persistHierarchy(CLIENT, employees, DEOLEO_HIERARCHY, tx);
+    expect(res.rolesRevoked).toBe(0);
+    expect(revokedSessionUserIds).toEqual([]);
   });
 });

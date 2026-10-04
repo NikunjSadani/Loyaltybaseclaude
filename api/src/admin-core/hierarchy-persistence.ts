@@ -156,6 +156,8 @@ export interface PersistHierarchyResult {
    * employee is already linked).
    */
   employeeAccountsEnsured: number;
+  /** Count of users whose coarse role changed this run → their live sessions were revoked. */
+  rolesRevoked: number;
 }
 
 /**
@@ -290,6 +292,9 @@ export async function persistHierarchy(
   // Employee Rewards Phase A — SalesUser ids of ACTIVE (non-vacant) earners in this upload.
   // A synthetic vacant node (isPlaceholder) is NOT an earner — it gets its account when filled.
   const activeSalesUserIds: string[] = [];
+  // Users whose COARSE role changes on this upload → their live sessions are revoked at the end of
+  // the tx so the new role is enforced on their next request (not after a ~60m access-token TTL).
+  const roleChangedUserIds = new Set<string>();
 
   for (const emp of employees) {
     // Defensive: the PUT route accepts the raw request body (no DTO transform), so coerce the role
@@ -326,7 +331,7 @@ export async function persistHierarchy(
     // correctly reclaims a pre-existing user that happens to already hold that phone.
     const existingSU = await tx.salesUser.findUnique({
       where: { clientId_employeeCode: { clientId, employeeCode: emp.id } },
-      select: { userId: true },
+      select: { userId: true, user: { select: { role: true } } },
     });
     // Brand-new employee (no SalesUser yet): resolve the ACTIVE holder of this phone, if any,
     // and reclaim it in place; otherwise create a fresh User. Phone uniqueness is now the PARTIAL
@@ -338,6 +343,11 @@ export async function persistHierarchy(
     // number simply creates a fresh row (the stale INACTIVE row no longer reserves the phone).
     let user: { id: string };
     if (existingSU) {
+      // Immediate-enforcement: if this employee's COARSE role is changing, mark them so their live
+      // sessions are revoked at the end of the tx (a stale-role access token would otherwise keep
+      // the old role for up to one ~60m access-token TTL). Mirrors updateEmployee's revoke-on-role-
+      // change — applies to EVERY tenant (same as the single-edit path), trade and employee alike.
+      if (existingSU.user && existingSU.user.role !== userRole) roleChangedUserIds.add(existingSU.userId);
       user = await tx.user.update({
         where: { id: existingSU.userId },
         data: { phone, name, role: userRole, status: userStatus },
@@ -345,8 +355,9 @@ export async function persistHierarchy(
     } else {
       const activeHolder = await tx.user.findFirst({
         where: { clientId, phone, status: 'ACTIVE' },
-        select: { id: true },
+        select: { id: true, role: true },
       });
+      if (activeHolder && activeHolder.role !== userRole) roleChangedUserIds.add(activeHolder.id);
       user = activeHolder
         ? await tx.user.update({
             where: { id: activeHolder.id },
@@ -420,6 +431,25 @@ export async function persistHierarchy(
     );
   }
 
+  // ── 5. Revoke sessions for anyone whose COARSE role changed (immediate enforcement) ───────────
+  // A promotion/demotion on a roster RE-upload would otherwise leave the old role claim live for up
+  // to one ~60m access-token TTL. Stamp sessionsInvalidBefore BEFORE revoking (authoritative
+  // ordering — same as revokeAllSessionsForUser), both in THIS transaction. No-op on the FIRST load
+  // of a tenant (no existing roles → no changes) and on any re-upload that doesn't change roles.
+  // Applies to every tenant (trade + employee), matching the ungated single-edit revoke.
+  const revokedRoleUserIds = [...roleChangedUserIds];
+  if (revokedRoleUserIds.length > 0) {
+    const now = new Date();
+    await tx.user.updateMany({
+      where: { id: { in: revokedRoleUserIds } },
+      data: { sessionsInvalidBefore: now },
+    });
+    await tx.userSession.updateMany({
+      where: { userId: { in: revokedRoleUserIds }, revokedAt: null },
+      data: { revokedAt: now },
+    });
+  }
+
   return {
     levelsUpserted: levelRows.length,
     usersUpserted,
@@ -427,5 +457,6 @@ export async function persistHierarchy(
     reportingLinksSet,
     placeholders,
     employeeAccountsEnsured,
+    rolesRevoked: revokedRoleUserIds.length,
   };
 }
