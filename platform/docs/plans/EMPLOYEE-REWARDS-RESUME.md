@@ -115,8 +115,11 @@
   **Applies to EVERY tenant incl. Deoleo** (consistent with the ungated single-edit revoke) — ⚠️ **behavior
   change for Deoleo:** a live sales-hierarchy re-upload that changes someone's role now logs that user out
   (re-auth with the new role); a re-upload that changes no roles is byte-identical. So revoke-on-role-change
-  is now uniform across all three write paths (single-edit, levels editor, bulk upload). F5 — the editor
-  matches by position, so REORDERING rows re-roles employees by position (rename-in-place is the intended use). Audit F5-prev (employee admin briefly sees the trade dashboard + one trade-KPI fetch during
+  is now uniform across all three write paths (single-edit, levels editor, bulk upload). **F5 CLOSED (HEAD
+  `4c936f3`):** the levels editor now shows a **reorder confirmation** on save — detecting when an existing
+  level moved position (rename/add/remove/in-place role change don't trip it) and warning, with the specific
+  moves + how many employees will be re-roled & signed out (from the Overview headcounts), before applying.
+  Pure helpers unit-tested (`lib/hierarchy-levels-reorder.ts`). **No role-change residuals remain.** Audit F5-prev (employee admin briefly sees the trade dashboard + one trade-KPI fetch during
   the redirect) is an accepted cosmetic minor, same class as the Phase-0 pre-config-load flash.
 - **UI/UX fork — People roster reskin vs reuse-as-is (owner decision).** Phase A reuses the trade hierarchy
   page verbatim (design §5.1 "reuse as-is"). The UI/UX audit flags trade-era chrome bleeding into the
