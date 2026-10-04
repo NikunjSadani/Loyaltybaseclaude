@@ -8,12 +8,24 @@
 - **PHASE 0 + PHASE A DONE, FULL-GATE GREEN, AUDITED (dual money + UI/UX) + LOCAL RUNTIME-VERIFIED — STAGING
   DEPLOY HELD BY OWNER.** Worktree `../Loyaltybaseclaude-er` (branch `er/phase0-shell`) — committed **local
   only, NOT pushed**, isolated from the trade work.
-- **Phase A (Shell + People roster) just landed (2026-10-04):** the one net-new piece — the EMPLOYEE
+- **Phase A (Shell + People roster) landed (2026-10-04):** the one net-new piece — the EMPLOYEE
   `RewardAccount` ↔ `SalesUser` linkage (migration `20261003120000` + `ensureEmployeeAccount`/bulk helper,
   gated by `earnerModel`) — plus `/admin/people` surfacing the reused roster. Two money-audit defects (lock
   namespace, per-row link scale) FIXED. Runtime-verified on real `gifsy_dev`: EMPLOYEE roster → accounts
-  linked (4/4), idempotent, **Deoleo untouched (0)**. See the Wave log for full detail + the Open spec items
-  for the deferred owner decisions (UI/UX reskin fork, `employeeCode`-reuse policy, onboarding assumption).
+  linked (4/4), idempotent, **Deoleo untouched (0)**.
+- **Phase A polish landed (2026-10-04, HEAD `e382e3f`):** (1) **per-tenant hierarchy levels** — custom codes,
+  **custom level names**, and a per-level `userRole`→coarse-role mapping, stored as a `hierarchy_levels`
+  ProgramSetting, **defaulting to Deoleo when unset** (trade byte-identical); validated `GET/PUT
+  /v1/admin/hierarchy-levels` + a FE levels editor; (2) **employee cockpit Overview** (`/admin/overview`, first
+  nav item + the cockpit landing via a capability-gated dashboard redirect) with roster KPIs + per-level
+  breakdown. Independent audit (1 lane) = **Deoleo byte-identical CONFIRMED**; 4 findings FIXED (F1 require
+  `userRole`, F3 overview excludes parked levels, F6 normalize rejects dup blobs, F7 roleCode charset).
+  Full gate green (api **3495** · platform tsc · vitest **2595**); runtime-verified on `gifsy_dev`: a custom
+  3-level Britannia config drives the coarse role (MGR→SALES_STATE_HEAD, which the legacy switch would never
+  produce), Deoleo roles unchanged (ASM→SALES_ASM), overview `levelCount` excludes parked levels (3 not 9),
+  F1/F7 reject with 400.
+- See the Wave log for full detail + Open spec items for deferred owner decisions (UI/UX reskin fork,
+  `employeeCode`-reuse policy, onboarding assumption, **+ the level-code-rename operational rule**).
 - **Local verify result (see Wave log for detail):** the enabler really writes `loyaltyType=EMPLOYEE_REWARDS`
   (DB-confirmed), and real OTP-login-per-role returns the correct per-tenant `capabilities` from the live config
   endpoint (Deoleo=OUTLET/trade, Britannia=EMPLOYEE/cockpit) — the exact `selectAdminNav` input. Deoleo's trade shell
@@ -83,6 +95,15 @@
 - **Staging/prod migration note (audit M5).** `20261003120000` builds a **non-concurrent** unique index on
   `sales_users` → brief write-lock during the migration window (fast here; the column is all-NULL). `ON
   DELETE SET NULL` means deleting a RewardAccount unlinks (and would strand a future wallet) — Phase 2 note.
+- **OPERATIONAL RULE (Phase A limitation — audit F2/F4): re-upload the roster after editing level CODES.**
+  The levels editor writes the `hierarchy_levels` config; the relational `SalesHierarchyLevel` rows and each
+  employee's coarse `User.role` are only rebuilt on a **roster re-upload**. So after changing a level's *code*,
+  a single-employee pencil-edit maps the old relational code via the new config → miss → `SALES_ISR`, and the
+  Overview's level list/counts lag the editor until a re-upload. Document for operators: **"after changing
+  level codes in the editor, re-upload the roster."** (Renaming only a level's display *name* or `userRole`
+  without changing the code is safe. The proper structural fix — reconcile relational levels/roles on config
+  save — is deferred.) Audit F5 (an employee admin briefly sees the trade dashboard + one trade-KPI fetch
+  during the redirect) is an accepted cosmetic minor, same class as the Phase-0 pre-config-load flash.
 - **UI/UX fork — People roster reskin vs reuse-as-is (owner decision).** Phase A reuses the trade hierarchy
   page verbatim (design §5.1 "reuse as-is"). The UI/UX audit flags trade-era chrome bleeding into the
   employee cockpit: a "← back to /admin/dashboard" link (orphan — the employee nav has no dashboard) and
