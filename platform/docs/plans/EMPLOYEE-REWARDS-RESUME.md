@@ -4,10 +4,26 @@
 > [`RESUME.md`](./RESUME.md), which is the *trade* restart brief). Keep it current every wave.
 > This is **state**; the authoritative *how/what* live in the doc set below.
 
-## Current state (2026-10-04)
-- **PHASE 0 + PHASE A DONE, FULL-GATE GREEN, AUDITED (dual money + UI/UX) + LOCAL RUNTIME-VERIFIED — STAGING
-  DEPLOY HELD BY OWNER.** Worktree `../Loyaltybaseclaude-er` (branch `er/phase0-shell`) — committed **local
-  only, NOT pushed**, isolated from the trade work.
+## Current state (2026-10-05)
+- **PHASE 0 + PHASE A + PHASE C (bulk points crediting, BE) DONE, FULL-GATE GREEN, AUDITED (dual money) +
+  REAL-DB RUNTIME-VERIFIED — STAGING DEPLOY HELD BY OWNER.** Worktree `../Loyaltybaseclaude-er` (branch
+  `er/phase0-shell`) — committed **local only, NOT pushed**, isolated from the trade work.
+- **Phase C BE (bulk employee points crediting) landed (2026-10-05, HEAD `4259185`):** a SEPARATE employee
+  credit rail reusing the ledger/batch primitives — trade `createBatch`/`confirmBatch`/`creditEarn`/
+  `applyMovement` byte-unchanged. `Wallet.partnerId` made nullable (account-first employee wallet, migration
+  `20261004120000`); `ensureEmployeeWallet` + `creditEarnForAccount` (mirror of `creditEarn` via the SAME
+  `applyMovement`); `createEmployeeBatch`/`confirmEmployeeBatch` (EMPLOYEE-gated, `sourceKind=EMPLOYEE_UPLOAD`,
+  employeeCode→account→wallet→credit, single atomic tx, guarded claim, skip-with-reason) on gated routes
+  `POST /v1/admin/credits/employee-batches[/:id/confirm]`. **DUAL money audit → 4 CONFIRMED findings FIXED:**
+  **F1** trade `confirmBatch` now rejects an EMPLOYEE_UPLOAD batch (symmetric guard); **F2** always-on
+  advisory-locked period-uniqueness at employee confirm (a manual no-sourceKey 2nd batch can't double-credit —
+  employee credits are account-owned + currently irreversible); **F3** employee-batch reversal refused outright
+  (not a silent zero-clawback — `patchReversal` is partnerId-keyed); **F5** non-POINTS row surfaced as skipped
+  `UNSUPPORTED_AWARD_TYPE`. Audit B confirmed nullable-`partnerId` is **SAFE for the live Deoleo/trade path**.
+  Gate: **api jest 3522 + build clean**. **Real-DB runtime verify (throwaway Postgres :5434, full migrate
+  deploy + create→confirm→credit):** double-entry ledger, `partnerId`-NULL wallet, idempotent re-confirm,
+  F1/F2/F3/F5 + Deoleo-safety — **all green**. ▶ **NEXT: Phase C FE** (Points nav bulk upload → dry-run diff →
+  confirm UI).
 - **Phase A (Shell + People roster) landed (2026-10-04):** the one net-new piece — the EMPLOYEE
   `RewardAccount` ↔ `SalesUser` linkage (migration `20261003120000` + `ensureEmployeeAccount`/bulk helper,
   gated by `earnerModel`) — plus `/admin/people` surfacing the reused roster. Two money-audit defects (lock
@@ -133,6 +149,21 @@
 - **Phase C — contest bonus auto-credit:** the "validation rule → credits bonus" path is the vaguest
   money-adjacent spec (only "reframes scheme/campaign"). Give it a concrete data-model + validation spec
   before building (already flagged DUAL-audit).
+- **DECISION (Phase C BE audit F3) — account-aware clawback for the employee rail.** Employee credits are
+  account-owned (`Wallet.partnerId` NULL) and the existing `patchReversal` clawback is partnerId-keyed, so an
+  employee reversal would silently claw back ZERO. Phase C BE **refuses** employee-batch reversal outright
+  (honest + complete, not a silent no-op) — but there is no way to undo a wrong employee credit in-product.
+  **Owner: build an account-aware clawback now, or defer until employee reversal is actually needed?** (The
+  pilot may not need reversal; F2's period-uniqueness already prevents the common double-credit.)
+- **TRACKED (Phase C BE audit Gap A) — employee-liability dashboard.** Every wallet aggregate
+  (finance/program-health/admin-core dashboards) is partner-scoped, so account-only employee wallets report as
+  **0** liability/issued/breakage. Good for trade isolation (Deoleo numbers can't be polluted), but the employee
+  product needs its own liability view before it ships — a **Phase D (Insights + Liability)** lane per
+  BUILD-PLAN, not a defect in Phase C.
+- **DECISION (Phase C BE audit F4) — credit inactive-but-not-deleted employees?** `confirmEmployeeBatch`
+  resolves `{employeeCode, deletedAt:null}` with **no `isActive` filter**, so a suspended/inactive (not
+  soft-deleted) employee is still credited. Mirrors the trade path (no outlet `isActive` check). Owner: for the
+  employee pilot, skip inactive employees with a reason, or keep crediting (points wait in their account)?
 
 ## Next action (on owner GO)
 Phase 0 (BUILD-PLAN §5): create the worktree + first `er/*` lane branch → scaffold the capability-gated
@@ -225,3 +256,45 @@ credits + catalogue, pilot vendors).
     NOT blocked by the browser-pane cookie limit.
   - ▶ **NEXT:** owner call on the UI/UX reskin fork (Open spec items), then **Phase B** (Rewards + Fulfilment
     + Vendors) / **Phase C** (points-upload + contests) per BUILD-PLAN §5 — still on the held branch.
+
+- **Phase C BE — bulk employee points crediting** (2026-10-05, `er/phase0-shell` HEAD `4259185`, FULL-GATE
+  GREEN, DUAL money audit, REAL-DB runtime-verified). A SEPARATE employee credit rail reusing the ledger/batch
+  primitives; **trade `createBatch`/`confirmBatch`/`creditEarn`/`applyMovement` byte-unchanged**.
+  - **Schema:** `Wallet.partnerId` → nullable (account-first employee wallet); migration `20261004120000`
+    (`ALTER COLUMN DROP NOT NULL` — catalog-only, non-blocking; `@unique` valid, NULLs distinct); `partner`
+    relation optional.
+  - **BE:** `ensureEmployeeWallet(tx, accountId)` (account-first upsert); `requireWalletByAccount` +
+    `creditEarnForAccount` (mirror of `creditEarn` via the SAME `applyMovement`, whole-Int EARN);
+    `createEmployeeBatch` + `confirmEmployeeBatch` (EMPLOYEE-gate, `sourceKind=EMPLOYEE_UPLOAD`,
+    employeeCode→SalesUser→account→wallet→credit, single atomic tx, guarded status claim, skip-with-reason).
+    Routes `POST /v1/admin/credits/employee-batches[/:id/confirm]` gated like trade.
+  - **Independent DUAL money audit (2 lanes) — 4 CONFIRMED findings FIXED (all runtime-verified + unit tests):**
+    - **F1 (HIGH):** trade `confirmBatch` had no `sourceKind` guard → an EMPLOYEE_UPLOAD batch confirmed via
+      the trade endpoint would strand (every row `OUTLET_NOT_FOUND`) yet flip CONFIRMED, blocking the correct
+      re-run. Fix: symmetric `sourceKind==='EMPLOYEE_UPLOAD'` rejection (twin of the employee path's guard).
+    - **F2 (HIGH):** the create-time period-refusal was `if (dto.sourceKey)`-gated → two MANUAL batches could
+      both confirm & double-credit; and employee credits are account-owned + irreversible (F3), so stacking is
+      not clawback-recoverable. Fix: **always-on, advisory-locked period-uniqueness at confirm** (`CBATCH|
+      client|period`) refusing a second confirmed EMPLOYEE_UPLOAD batch for the period; the throw rolls back
+      the status claim (batch stays PENDING, never stranded).
+    - **F3 (MED):** `patchReversal`'s POINTS clawback is partnerId-keyed → an employee reversal would flip
+      APPROVED while clawing back ZERO (silent no-op). Fix: `createReversal` refuses an EMPLOYEE_UPLOAD batch
+      outright (→ Open spec items: build account-aware clawback, or defer).
+    - **F5 (LOW):** a non-POINTS row in an employee batch vanished. Fix: surfaced as skipped
+      `UNSUPPORTED_AWARD_TYPE` (never silent).
+    - **Audit B verdict:** nullable-`partnerId` is **SAFE for the live Deoleo/trade path** — no trade wallet
+      read/write dereferences `partnerId`; auth login + all dashboards handle the NULL (and employee wallets
+      are universally excluded from trade aggregates → can't pollute Deoleo numbers; the flip side = Gap A,
+      the employee-liability dashboard, tracked for Phase D).
+  - **FULL GATE GREEN:** `api nest build` ✓ · `api jest` **3522** ✓ (+4 audit-fix regression tests). (No
+    platform changes this increment — platform gates unaffected.)
+  - **REAL-DB RUNTIME-VERIFIED** (throwaway Postgres on **:5434** via the bundled PG binary — `gifsy_dev` isn't
+    running locally & the Cloud SQL `gifsy-db` instance only hosts staging/prod, so a fresh isolated cluster;
+    `prisma migrate deploy` applied the FULL chain incl. both ER migrations cleanly): a Nest TestingModule with
+    the **real** CreditsService + WalletService + TenantSettings + Prisma drove create→confirm→credit —
+    double-entry (1 PointsLedger EARN + 1 WalletTransaction), `partnerId`-NULL account-first wallet, balance
+    100/100, idempotent re-confirm blocked, **F2** 2nd-manual-batch blocked (balance stayed 100), **F5** PAYOUT
+    surfaced skipped, **F1** trade-confirm refused, **F3** reversal refused, **Deoleo-safety** TRADE tenant
+    rejected — **all green**.
+  - ▶ **NEXT:** **Phase C FE** (Points nav → bulk points upload → dry-run diff → confirm UI). Open owner
+    decisions logged (account-aware clawback F3, employee-liability dashboard Gap A, credit-inactive F4).
