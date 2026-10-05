@@ -22,8 +22,20 @@
   `UNSUPPORTED_AWARD_TYPE`. Audit B confirmed nullable-`partnerId` is **SAFE for the live Deoleo/trade path**.
   Gate: **api jest 3522 + build clean**. **Real-DB runtime verify (throwaway Postgres :5434, full migrate
   deploy + create→confirm→credit):** double-entry ledger, `partnerId`-NULL wallet, idempotent re-confirm,
-  F1/F2/F3/F5 + Deoleo-safety — **all green**. ▶ **NEXT: Phase C FE** (Points nav bulk upload → dry-run diff →
-  confirm UI).
+  F1/F2/F3/F5 + Deoleo-safety — **all green**.
+- **Phase C FE (bulk employee points upload) landed (2026-10-05, HEAD `7b6326e`):** `/admin/points` is now the
+  upload UI — 4-step flow (template → upload → dry-run preview → confirm/credit) mirroring the trade
+  credits-upload page but POINTS-ONLY, one row per employee (Employee Code), calling the Phase C BE rail. New
+  `employee-points-template.ts` (roster pre-fill) + `employee-points-parser.ts` (+16 unit tests) +
+  `/admin/points` route-permission. **Independent FE audit (correctness + UI/UX) → payload whitelist-clean;
+  5 fixes:** **#1 (MED→BE)** `confirmEmployeeBatch` now skips an INACTIVE employee (`EMPLOYEE_INACTIVE`),
+  deterministically (never credited whether or not the roster pre-flight loaded — resolves the old F4 decision);
+  **#2/#3** FE sends a per-parse `sourceKey` (no orphan drafts on retry) + a `useRef` double-click guard;
+  **#4** parser skips any parsed-zero (`"0.0"`), no silent OK-0; **#5** done screen never shows green when 0
+  credited; **#7** case-sensitive dedup (matches the resolver). Gate: **api jest 3523 · build clean · platform
+  tsc clean · vitest 2619**. Real-DB runtime verify re-run incl. inactive-skip + sourceKey idempotency — all green.
+  ▶ **NEXT: Phase C — the optional target column** (owner-locked INCLUDE; needs a BE target store, NOT in the
+  committed BE) + **Contests** (needs a concrete spec), then Phase B/D/E per BUILD-PLAN.
 - **Phase A (Shell + People roster) landed (2026-10-04):** the one net-new piece — the EMPLOYEE
   `RewardAccount` ↔ `SalesUser` linkage (migration `20261003120000` + `ensureEmployeeAccount`/bulk helper,
   gated by `earnerModel`) — plus `/admin/people` surfacing the reused roster. Two money-audit defects (lock
@@ -160,10 +172,12 @@
   **0** liability/issued/breakage. Good for trade isolation (Deoleo numbers can't be polluted), but the employee
   product needs its own liability view before it ships — a **Phase D (Insights + Liability)** lane per
   BUILD-PLAN, not a defect in Phase C.
-- **DECISION (Phase C BE audit F4) — credit inactive-but-not-deleted employees?** `confirmEmployeeBatch`
-  resolves `{employeeCode, deletedAt:null}` with **no `isActive` filter**, so a suspended/inactive (not
-  soft-deleted) employee is still credited. Mirrors the trade path (no outlet `isActive` check). Owner: for the
-  employee pilot, skip inactive employees with a reason, or keep crediting (points wait in their account)?
+- **✅ RESOLVED (Phase C FE audit #1, HEAD `7b6326e`) — inactive employees are SKIPPED, deterministically.**
+  The FE audit showed the old behaviour was non-deterministic (a deactivated code was blocked when the roster
+  pre-flight loaded, but CREDITED when the roster fetch 403'd). `confirmEmployeeBatch` now reads `isActive` and
+  skips an inactive (deactivated, not deleted) employee with reason `EMPLOYEE_INACTIVE` — an inactive employee
+  is NEVER credited regardless of the roster, aligning with the roster (which filters `isActive`). Safe default
+  for the pilot; owner can later opt to credit inactive employees if ever wanted (would reverse this skip).
 
 ## Next action (on owner GO)
 Phase 0 (BUILD-PLAN §5): create the worktree + first `er/*` lane branch → scaffold the capability-gated
@@ -298,3 +312,26 @@ credits + catalogue, pilot vendors).
     rejected — **all green**.
   - ▶ **NEXT:** **Phase C FE** (Points nav → bulk points upload → dry-run diff → confirm UI). Open owner
     decisions logged (account-aware clawback F3, employee-liability dashboard Gap A, credit-inactive F4).
+
+- **Phase C FE — bulk employee points upload** (2026-10-05, `er/phase0-shell` HEAD `7b6326e`, FULL-GATE GREEN,
+  independent FE audit, real-DB runtime-verified). `/admin/points` is now the upload UI (replaced the stub).
+  - **FE:** `admin/points/page.tsx` — a 4-step flow (template → upload → dry-run preview → confirm/credit)
+    mirroring the trade `credits-payouts/upload` page but POINTS-ONLY, ONE ROW PER EMPLOYEE (keyed by Employee
+    Code, ADMIN-DESIGN §5.2); period picker; roster-aware pre-flight (best-effort `GET /sales-users/options`;
+    `knownCodes=null` when unavailable → defer unknown-code validation to the server); reads the CONFIRM
+    response as source-of-truth for what was actually credited; honest skip surfacing. New
+    `lib/employee-points-template.ts` (roster-prefilled xlsx) + `lib/employee-points-parser.ts` (+
+    `toEmployeeUploadRows` → the UploadRowDto shape); `/admin/points → credits:read` in ROUTE_PERMISSIONS
+    (the upload/confirm ACTIONS are gated at the endpoint with credits:upload/confirm_payout).
+  - **Independent FE audit (correctness + UI/UX) — payload verified whitelist-clean; 5 fixes:** **#1 (MED, BE
+    fix)** inactive-employee determinism → `confirmEmployeeBatch` skips `EMPLOYEE_INACTIVE` (see Open spec items,
+    resolves old F4); **#2/#3** per-parse `sourceKey` + `useRef` in-flight guard (no orphan drafts / no
+    double-submit); **#4** parser skips any parsed-zero (no silent OK-0); **#5** done screen honest when 0
+    credited; **#7** case-sensitive dedup. #6 (FE window gate uses browser-local time vs the backend's IST) left
+    as inherited-from-trade (logic identical; India operators; rare boundary only).
+  - **FULL GATE GREEN:** api jest **3523** (+EMPLOYEE_INACTIVE test) · nest build ✓ · platform tsc ✓ · vitest
+    **2619** (+16 parser tests). **Real-DB runtime verify re-run** (throwaway Postgres): create→confirm→credit,
+    idempotent re-confirm, F1/F2/F3/F5, **inactive-skip (EMPLOYEE_INACTIVE)**, **sourceKey idempotency**,
+    Deoleo-safety — all green. (FE browser visual deferred to staging — the pane blocks `*.localhost` cookies.)
+  - ▶ **NEXT:** the optional **target column** (owner-locked INCLUDE — needs a BE target store, NOT in the
+    committed BE) + **Contests** (needs a concrete spec) per BUILD-PLAN §C; then Phase B/D/E.
