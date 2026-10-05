@@ -34,8 +34,23 @@
   **#4** parser skips any parsed-zero (`"0.0"`), no silent OK-0; **#5** done screen never shows green when 0
   credited; **#7** case-sensitive dedup (matches the resolver). Gate: **api jest 3523 · build clean · platform
   tsc clean · vitest 2619**. Real-DB runtime verify re-run incl. inactive-skip + sourceKey idempotency — all green.
-  ▶ **NEXT: Phase C — the optional target column** (owner-locked INCLUDE; needs a BE target store, NOT in the
-  committed BE) + **Contests** (needs a concrete spec), then Phase B/D/E per BUILD-PLAN.
+  (Phase C follow-ons still open: the optional **target column** — owner-locked INCLUDE, needs a BE target
+  store — and **Contests**, needs a spec.)
+- **Phase B Wave B1 (account-first self-service redeem rail, BE) landed (2026-10-05, HEAD `87ddd34`):** the
+  redeem mirror of Phase C's credit rail — a logged-in EMPLOYEE redeems a gift FOR THEMSELVES against their
+  account-owned wallet (single-step, **NO OTP** per owner). `RedemptionOrder.partnerId`→nullable (migration
+  `20261005120000`); `debitRedeemForAccount`+`reverseForAccount` (account-first mirrors via the same
+  `applyMovement`); `redeemForEmployee` (own-SalesUser resolve, cash modes rejected → no PayoutTransaction/
+  TDS/KYC/outlet gates, create-order-CONFIRMED + debit in one tx) + a guarded `transitionOrder` refund branch;
+  route `POST /v1/rewards/employee/redeem`. **DUAL money audit:** Lane A FIXED Finding 1 (double-submit
+  double-debit → `sourceKey` now REQUIRED + always-on dedup) + Finding 2 (key reuse for a different reward now
+  FAILS LOUD); Lane B VERDICT **SAFE for Deoleo** (no null-partner order in a trade tenant; every trade query
+  tenant-scoped or non-null; every `!` site provably unreachable; migration catalog-only; trade byte-identical).
+  Gate: **api jest 3543 · build clean**. Real-DB runtime verify: redeem→debit, idempotent re-submit, key-reuse
+  fail-loud, cash reject, inactive/non-employee reject, refund restores — all green.
+  ▶ **NEXT: Phase B Wave B2** (close EMP-GAP-1 — account-first fulfilment console + employee order read; the
+  catalogue CRUD + vendor portal are already reused as-is) + the catalogue curation flags / employee
+  shipping-address sourcing.
 - **Phase A (Shell + People roster) landed (2026-10-04):** the one net-new piece — the EMPLOYEE
   `RewardAccount` ↔ `SalesUser` linkage (migration `20261003120000` + `ensureEmployeeAccount`/bulk helper,
   gated by `earnerModel`) — plus `/admin/people` surfacing the reused roster. Two money-audit defects (lock
@@ -167,6 +182,18 @@
   (honest + complete, not a silent no-op) — but there is no way to undo a wrong employee credit in-product.
   **Owner: build an account-aware clawback now, or defer until employee reversal is actually needed?** (The
   pilot may not need reversal; F2's period-uniqueness already prevents the common double-credit.)
+- **GO-LIVE BLOCKER (Phase B audit EMP-GAP-1) — employee orders are invisible to tenant-scoped views.** An
+  employee redeem creates a CONFIRMED order with `partnerId: null`, but the member order history
+  (`listOrders`/`getOrder`), the dispatch console (`listFulfilmentOrders`/`getFulfilmentOrder`/`transitionOrder`),
+  gift-disbursal and the fulfilment export ALL scope by `partner: { clientId }` → they exclude null-partner rows,
+  and there is NO accountId-scoped GET. So today only an un-assumed platform-wide GIFSY OWNER can see/progress an
+  employee order — the employee can't see their own, and the tenant CLIENT_ADMIN can't fulfil it. **Wave B2** must
+  add account-first scoping (an `account.clientId` branch) to those reads/console + an employee order-list
+  endpoint before employee go-live. (NOT a trade risk — trade orders always have a partner.)
+- **TRACKED (Phase B audit EMP-REC-1, low) — mixed-tenant disbursal↔194R reconciliation.** A platform-wide
+  gift-disbursal report (OWNER, no clientId) would include employee DELIVERED `valuePaise` while 194R Source-2
+  (partner-scoped) excludes it, breaking the "disbursal ties to the 194R base" note. Dormant until employee
+  orders exist; revisit when the employee-liability/finance view is built.
 - **TRACKED (Phase C BE audit Gap A) — employee-liability dashboard.** Every wallet aggregate
   (finance/program-health/admin-core dashboards) is partner-scoped, so account-only employee wallets report as
   **0** liability/issued/breakage. Good for trade isolation (Deoleo numbers can't be polluted), but the employee
@@ -335,3 +362,27 @@ credits + catalogue, pilot vendors).
     Deoleo-safety — all green. (FE browser visual deferred to staging — the pane blocks `*.localhost` cookies.)
   - ▶ **NEXT:** the optional **target column** (owner-locked INCLUDE — needs a BE target store, NOT in the
     committed BE) + **Contests** (needs a concrete spec) per BUILD-PLAN §C; then Phase B/D/E.
+
+- **Phase B Wave B1 — account-first self-service redeem rail (BE)** (2026-10-05, `er/phase0-shell` HEAD
+  `87ddd34`, FULL-GATE GREEN, DUAL money audit, real-DB runtime-verified). Owner chose Phase B next; owner
+  clarified employee redeem = self-service from the catalogue, **NO OTP**. Built as SEPARATE employee methods
+  (Phase C precedent); the live trade redeem/confirm/payout path is runtime byte-identical.
+  - **Reused as-is (mapped, no change):** the catalogue (`GiftCategory`/`RewardCategory`/`GiftMaster`/
+    `RewardCatalog` + `/admin/rewards` CRUD) and the whole 3P vendor portal (vendor+tenant+order-scoped).
+  - **Net-new (BE):** `RedemptionOrder.partnerId`→nullable (migration `20261005120000`); `WalletService`
+    `debitRedeemForAccount`+`reverseForAccount` (+ account-first spec, 4 tests); `redeemForEmployee` (single-step,
+    no-OTP, own-SalesUser resolve, cash rejected, atomic order+debit, idempotent on a REQUIRED sourceKey) +
+    `assertEmployeeEarner`; the one guarded `transitionOrder` refund branch; route `POST /v1/rewards/employee/redeem`;
+    spec `rewards.employee-redeem.spec.ts` (15 tests).
+  - **DUAL money audit → Lane A fixes:** Finding 1 (double-submit double-debit) → `sourceKey` REQUIRED + always-on
+    advisory-locked dedup; Finding 2 (key reused for a different reward) → FAILS LOUD (no silent wrong-order return).
+    **Lane B VERDICT: SAFE for Deoleo** — no null-partner order can exist in a trade tenant (fail-closed
+    `assertEmployeeEarner`), every trade query tenant-scoped or non-null, every `order.partnerId!` provably
+    unreachable, migration catalog-only. Confirmed employee-side gaps are B2/tracked (EMP-GAP-1, EMP-REC-1).
+  - **FULL GATE GREEN:** api jest **3543** · nest build ✓. **Real-DB runtime verify** (throwaway Postgres):
+    redeem→debit (200→150, order account-first CONFIRMED, 1 REDEEM ledger + 1 history), idempotent re-submit (no
+    2nd debit), key-reuse fail-loud, distinct redeem (fresh key), cash reject, inactive + non-employee reject,
+    refund (RETURNED → reverseForAccount restores, pointsDeducted zeroed) — all green.
+  - ▶ **NEXT:** **Wave B2** — close EMP-GAP-1 (account-first fulfilment console scoping + employee order read;
+    wire the `/admin/fulfilment` stub) + catalogue curation flags (Dream-eligible/featured, role/region visibility)
+    + employee shipping-address sourcing.
