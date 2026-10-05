@@ -205,6 +205,35 @@ export class RewardsService {
     }
   }
 
+  /**
+   * Employee Rewards Phase B W2 (EMP-GAP-1) — the tenant-scope `where` fragment for the OPERATOR
+   * fulfilment/dispatch console reads, which must span BOTH owner shapes of a RedemptionOrder: a
+   * TRADE order (partner set, scope via `partner.clientId`) AND an ACCOUNT-FIRST employee order
+   * (partnerId null, scope via `account.clientId → RewardAccount.clientId`). The old
+   * `...(scope ? { partner: { clientId: scope } } : {})` spread dropped every null-partner employee
+   * order, making them invisible/un-fulfillable to a tenant-scoped operator.
+   *
+   *   scope undefined (platform-wide, un-assumed OWNER) → {}  (all tenants — UNCHANGED).
+   *   scope set (assumed operator, or an OWNER narrowing to one clientId) → match EITHER arm:
+   *     { OR: [ { partner: { clientId: scope } }, { account: { clientId: scope } } ] }
+   *
+   * TRADE-SAFETY: a trade order's `account.clientId` EQUALS its `partner.clientId` (dual-write via
+   * ensureOutletAccount), so the account arm is a SAME-TENANT superset — it NEVER widens
+   * cross-tenant; it only ADDS null-partner employee orders of the SAME tenant. An OLD trade order
+   * with `accountId: null` is unaffected: it still matches through the `partner` arm, never dropped.
+   *
+   * COMPOSITION: this returns a top-level `OR`, so a caller whose `where` already carries its own
+   * top-level `OR` MUST compose this under `AND` instead of spreading it (it would otherwise clobber
+   * the other `OR`). None of the 5 console sites do today — each previously spread a single
+   * `partner` filter alongside scalar equality filters (id / orderNumber / status / channel /
+   * createdAt), which remain intact when this fragment is spread.
+   */
+  private orderTenantScope(scope: string | undefined): Prisma.RedemptionOrderWhereInput {
+    return scope
+      ? { OR: [{ partner: { clientId: scope } }, { account: { clientId: scope } }] }
+      : {};
+  }
+
   /** Map a redemption mode to the tenant channel toggle that governs it. */
   private channelKey(mode: PayoutMode): 'physicalGifts' | 'vouchers' | 'bankTransfer' {
     if (mode === 'PHYSICAL_GIFT') return 'physicalGifts';
@@ -517,10 +546,15 @@ export class RewardsService {
    */
   async updateOrder(user: JwtPayload, id: string, dto: UpdateOrderDto) {
     // GIFSY-only is enforced by @Roles on the controller; tenant scope re-checked
-    // here by partner.clientId (§12). platformWide OWNER → cross-tenant console.
+    // here (§12). platformWide OWNER → cross-tenant console.
+    // EMP-GAP-1 — this non-status write is reached by the dispatch console's single-order
+    // voucher/tracking edit AND by uploadFulfilment's blank-status branch; both must be able to
+    // stamp an ACCOUNT-FIRST employee order (partner null), so span partner OR account like the
+    // other console sites. OR-superset is same-tenant (account.clientId == partner.clientId for a
+    // trade order), so no cross-tenant widening.
     const scope = tenantScope(user);
     const existingOrder = await this.prisma.redemptionOrder.findFirst({
-      where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
+      where: { id, ...this.orderTenantScope(scope) },
     });
     if (!existingOrder) throw new NotFoundException('Order not found');
 
@@ -2216,7 +2250,8 @@ export class RewardsService {
     // the Gifsy fulfilment console; an assumed operator is pinned to that tenant.
     const scope = tenantScope(user);
     const order = await this.prisma.redemptionOrder.findFirst({
-      where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
+      // EMP-GAP-1 — span trade (partner) AND account-first employee (null-partner) orders.
+      where: { id, ...this.orderTenantScope(scope) },
     });
     if (!order) throw new NotFoundException('Order not found');
 
@@ -2447,10 +2482,11 @@ export class RewardsService {
    * actionable set, narrowable by `?status=` and `?mode=`.
    */
   async getFulfilmentTemplate(user: JwtPayload, q: FulfilmentTemplateQueryDto): Promise<Buffer> {
-    // Tenant scope by partner.clientId (§12); platformWide OWNER → all tenants.
+    // Tenant scope spanning trade (partner) + account-first employee orders (§12, EMP-GAP-1);
+    // platformWide OWNER → all tenants.
     const scope = tenantScope(user);
     const where: Prisma.RedemptionOrderWhereInput = {
-      ...(scope ? { partner: { clientId: scope } } : {}),
+      ...this.orderTenantScope(scope),
     };
     if (q.mode) where.redemptionMode = q.mode;
 
@@ -2524,7 +2560,8 @@ export class RewardsService {
       try {
         // Resolve the order in-scope; collect (don't throw) on a miss/cross-tenant.
         const order = await this.prisma.redemptionOrder.findFirst({
-          where: { orderNumber: r.orderNumber, ...(scope ? { partner: { clientId: scope } } : {}) },
+          // EMP-GAP-1 — resolve trade (partner) AND account-first employee (null-partner) orders.
+          where: { orderNumber: r.orderNumber, ...this.orderTenantScope(scope) },
           select: { id: true },
         });
         if (!order) {
@@ -2613,8 +2650,9 @@ export class RewardsService {
     // An ASSUMED operator is HARD-pinned to `scope` — q.clientId must NOT override it
     // (that would be a cross-tenant leak), so it is ignored for a scoped caller.
     const effectiveClientId = scope ?? q.clientId;
+    // EMP-GAP-1 — scope over trade (partner) AND account-first employee orders of the tenant.
     const where: Prisma.RedemptionOrderWhereInput = {
-      ...(effectiveClientId ? { partner: { clientId: effectiveClientId } } : {}),
+      ...this.orderTenantScope(effectiveClientId),
     };
     if (q.status) where.status = q.status;
     if (q.channel) where.fulfilmentChannel = q.channel;
@@ -2633,6 +2671,14 @@ export class RewardsService {
         include: {
           reward: { select: { id: true, name: true, sourceType: true } },
           partner: { select: { id: true, businessName: true, clientId: true } },
+          // EMP-GAP-1 — account-first employee orders have no partner; carry the account's tenant +
+          // employee identity so the row can show a tenant name and a sensible recipient.
+          account: {
+            select: {
+              clientId: true,
+              employeeProfile: { select: { employeeCode: true, user: { select: { name: true } } } },
+            },
+          },
           statusHistory: {
             where: { toStatus: 'CONFIRMED' },
             orderBy: { createdAt: 'asc' },
@@ -2648,8 +2694,11 @@ export class RewardsService {
       loadHolidaySet(this.prisma),
     ]);
 
-    // Tenant display names for the cross-tenant console (clientId → Client.internalName).
-    const clientIds = [...new Set(orders.map((o) => o.partner?.clientId).filter(Boolean))] as string[];
+    // Tenant display names for the cross-tenant console (clientId → Client.internalName). Include
+    // the account's clientId too (EMP-GAP-1) so employee-order tenant names resolve, not just trade.
+    const clientIds = [
+      ...new Set(orders.flatMap((o) => [o.partner?.clientId, o.account?.clientId]).filter(Boolean)),
+    ] as string[];
     const clients = clientIds.length
       ? await this.prisma.client.findMany({
           where: { id: { in: clientIds } },
@@ -2670,7 +2719,10 @@ export class RewardsService {
         slaBusinessHours: DISPATCH_SLA_BUSINESS_HOURS,
         holidays,
       });
-      const clientId = o.partner?.clientId ?? null;
+      // EMP-GAP-1 — a trade order resolves via partner (byte-identical); a null-partner employee
+      // order falls back to the account's tenant for clientId and to the employee's name/code for
+      // the recipient label. `??` short-circuits on a present partner, so trade rows are unchanged.
+      const clientId = o.partner?.clientId ?? o.account?.clientId ?? null;
       // GiftOrderSummary — flat wire shape the FE console reads (renamed/derived fields).
       // valuePaise is BigInt → serialise to string for the JSON envelope.
       return {
@@ -2682,7 +2734,11 @@ export class RewardsService {
         redemptionMode: o.redemptionMode,
         fulfilmentChannel: o.fulfilmentChannel,
         rewardName: o.reward?.name ?? null,
-        partnerName: o.partner?.businessName ?? null,
+        partnerName:
+          o.partner?.businessName ??
+          o.account?.employeeProfile?.user?.name ??
+          o.account?.employeeProfile?.employeeCode ??
+          null,
         totalPointsCost: o.totalPointsCost,
         valuePaise: o.valuePaise != null ? o.valuePaise.toString() : null,
         trackingNumber: o.trackingNumber,
@@ -2707,10 +2763,18 @@ export class RewardsService {
     this.assertOperator(user);
     const scope = tenantScope(user);
     const order = await this.prisma.redemptionOrder.findFirst({
-      where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
+      // EMP-GAP-1 — span trade (partner) AND account-first employee (null-partner) orders.
+      where: { id, ...this.orderTenantScope(scope) },
       include: {
         reward: { select: { id: true, name: true, sourceType: true, giftMasterId: true, vendorId: true } },
         partner: { select: { id: true, businessName: true, clientId: true } },
+        // EMP-GAP-1 — account-first employee orders carry tenant + recipient via the account.
+        account: {
+          select: {
+            clientId: true,
+            employeeProfile: { select: { employeeCode: true, user: { select: { name: true } } } },
+          },
+        },
         fulfilledByVendor: { select: { id: true, name: true, status: true } },
         statusHistory: {
           orderBy: { createdAt: 'asc' },
@@ -2727,8 +2791,9 @@ export class RewardsService {
       : [];
     const actorName = new Map(actors.map((a) => [a.id, a.name]));
 
-    // Tenant display name (clientId → Client.internalName).
-    const clientId = order.partner?.clientId ?? null;
+    // Tenant display name (clientId → Client.internalName). EMP-GAP-1 — trade via partner
+    // (byte-identical), employee (null-partner) falls back to the account's tenant.
+    const clientId = order.partner?.clientId ?? order.account?.clientId ?? null;
     const client = clientId
       ? await this.prisma.client.findUnique({ where: { id: clientId }, select: { internalName: true } })
       : null;
@@ -2772,7 +2837,13 @@ export class RewardsService {
       status: order.status,
       redemptionMode: order.redemptionMode,
       rewardName: order.reward?.name ?? null,
-      partnerName: order.partner?.businessName ?? null,
+      // EMP-GAP-1 — `??` short-circuits on a present partner (trade rows byte-identical); a
+      // null-partner employee order falls back to the employee's name, then employeeCode.
+      partnerName:
+        order.partner?.businessName ??
+        order.account?.employeeProfile?.user?.name ??
+        order.account?.employeeProfile?.employeeCode ??
+        null,
       totalPointsCost: order.totalPointsCost,
       quantity: order.quantity,
       valuePaise: order.valuePaise != null ? order.valuePaise.toString() : null,

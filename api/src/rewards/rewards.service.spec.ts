@@ -570,12 +570,15 @@ describe('RewardsService', () => {
   describe('updateOrder', () => {
     it('throws NotFound when the order is outside the tenant', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(null);
-      // An ASSUMED operator scopes by partner.clientId (§12).
+      // An ASSUMED operator scopes by partner OR account clientId (§12 / EMP-GAP-1).
       await expect(
         service.updateOrder(assumedGifsy, 'o9', { trackingNumber: 'TN1' }),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith({
-        where: { id: 'o9', partner: { clientId: 'deoleo' } },
+        where: {
+          id: 'o9',
+          OR: [{ partner: { clientId: 'deoleo' } }, { account: { clientId: 'deoleo' } }],
+        },
       });
     });
 
@@ -2185,13 +2188,17 @@ describe('RewardsService', () => {
       expect(hist.data).toMatchObject({ orderId: 'o1', fromStatus: 'PROCESSING', toStatus: 'DISPATCHED' });
     });
 
-    it('scopes the order load by partner.clientId for an ASSUMED operator (tenant)', async () => {
+    it('scopes the order load by tenant (partner OR account) for an ASSUMED operator (EMP-GAP-1)', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(null);
       await expect(
         service.transitionOrder(assumedGifsy, 'o9', { toStatus: UpdatableOrderStatus.PROCESSING }),
       ).rejects.toBeInstanceOf(NotFoundException);
+      // Spans trade (partner) + account-first employee (null-partner) orders of the same tenant.
       expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith({
-        where: { id: 'o9', partner: { clientId: 'deoleo' } },
+        where: {
+          id: 'o9',
+          OR: [{ partner: { clientId: 'deoleo' } }, { account: { clientId: 'deoleo' } }],
+        },
       });
     });
 
@@ -2447,9 +2454,12 @@ describe('RewardsService', () => {
 
       const buf = await service.getFulfilmentTemplate(assumedGifsy, {});
 
-      // Tenant scope (assumed operator → partner.clientId, §12) + default actionable set.
+      // Tenant scope (assumed operator → partner OR account clientId, §12 / EMP-GAP-1) + default set.
       const call = mockPrisma.redemptionOrder.findMany.mock.calls?.[0]?.[0];
-      expect(call.where.partner).toEqual({ clientId: 'deoleo' });
+      expect(call.where.OR).toEqual([
+        { partner: { clientId: 'deoleo' } },
+        { account: { clientId: 'deoleo' } },
+      ]);
       expect(call.where.status).toEqual({
         in: expect.arrayContaining(['CONFIRMED', 'PROCESSING', 'DISPATCHED']),
       });
@@ -2521,10 +2531,13 @@ describe('RewardsService', () => {
       );
       const res = await service.uploadFulfilment(assumedGifsy, file);
 
-      // Resolved the order in-tenant by orderNumber (assumed operator → partner.clientId).
+      // Resolved the order in-tenant by orderNumber (partner OR account clientId, EMP-GAP-1).
       expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { orderNumber: 'RDM-1', partner: { clientId: 'deoleo' } },
+          where: {
+            orderNumber: 'RDM-1',
+            OR: [{ partner: { clientId: 'deoleo' } }, { account: { clientId: 'deoleo' } }],
+          },
         }),
       );
       // Applied via the guarded transition with the row's voucher + target status.
@@ -2551,7 +2564,10 @@ describe('RewardsService', () => {
 
       expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { orderNumber: 'RDM-OTHER-TENANT', partner: { clientId: 'deoleo' } },
+          where: {
+            orderNumber: 'RDM-OTHER-TENANT',
+            OR: [{ partner: { clientId: 'deoleo' } }, { account: { clientId: 'deoleo' } }],
+          },
         }),
       );
       expect(tSpy).not.toHaveBeenCalled();
@@ -3037,7 +3053,11 @@ describe('RewardsService', () => {
       mockPrisma.redemptionOrder.count.mockResolvedValue(0);
       await service.listFulfilmentOrders(gifsy, { clientId: 'acme' });
       const call = mockPrisma.redemptionOrder.findMany.mock.calls[0][0];
-      expect(call.where.partner).toEqual({ clientId: 'acme' });
+      // Narrowed to the one tenant, spanning trade (partner) + employee (account) orders (EMP-GAP-1).
+      expect(call.where.OR).toEqual([
+        { partner: { clientId: 'acme' } },
+        { account: { clientId: 'acme' } },
+      ]);
     });
 
     it('ASSUMED operator is HARD-pinned — q.clientId cannot override the tenant (no leak)', async () => {
@@ -3045,7 +3065,10 @@ describe('RewardsService', () => {
       mockPrisma.redemptionOrder.count.mockResolvedValue(0);
       await service.listFulfilmentOrders(assumedGifsy, { clientId: 'acme' });
       const call = mockPrisma.redemptionOrder.findMany.mock.calls[0][0];
-      expect(call.where.partner).toEqual({ clientId: 'deoleo' }); // pinned, NOT acme
+      expect(call.where.OR).toEqual([
+        { partner: { clientId: 'deoleo' } }, // pinned, NOT acme
+        { account: { clientId: 'deoleo' } },
+      ]);
     });
 
     it('date-only createdAt filter uses INCLUSIVE IST day bounds, not raw new Date (IST boundary fix)', async () => {
