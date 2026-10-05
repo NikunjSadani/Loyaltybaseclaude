@@ -48,9 +48,18 @@
   tenant-scoped or non-null; every `!` site provably unreachable; migration catalog-only; trade byte-identical).
   Gate: **api jest 3543 · build clean**. Real-DB runtime verify: redeem→debit, idempotent re-submit, key-reuse
   fail-loud, cash reject, inactive/non-employee reject, refund restores — all green.
-  ▶ **NEXT: Phase B Wave B2** (close EMP-GAP-1 — account-first fulfilment console + employee order read; the
-  catalogue CRUD + vendor portal are already reused as-is) + the catalogue curation flags / employee
-  shipping-address sourcing.
+- **Phase B Wave B2 part 1 (fulfilment console account-scoping) landed (2026-10-05, HEAD `53c1d14`):** the
+  OPERATOR side of EMP-GAP-1 — account-first employee orders are now visible + fulfillable in the GIFSY dispatch
+  console (new `orderTenantScope` helper → `OR[partner.clientId, account.clientId]` at 6 operator sites: list,
+  detail, template, upload, transitionOrder fetch, updateOrder; list/detail show the employee name). Query-only,
+  no schema change. Audit VERDICT **SAFE for Deoleo** (OR account arm is a provably same-tenant superset; trade
+  rows byte-identical — OUTLET accounts have no `employeeProfile`). Gate api jest **3549**; runtime-verified
+  (scoped operator sees the employee order, cross-tenant isolated). Member-facing order view NOT touched (WS2).
+  ▶ **NEXT (remaining B2 / go-live):** (a) **vendor-portal queue** + scoped **gift-disbursal** still
+  partner-scoped (audit Finding 6) — a VENDOR-sourced employee gift is stuck on the vendor rail; close OR explicitly
+  defer per the pilot-scope question "do employee rewards use vendor-sourced gifts?"; (b) catalogue curation flags
+  (Dream-eligible/featured, role/region visibility); (c) employee shipping-address sourcing; (d) the employee's OWN
+  order view (WS2).
 - **Phase A (Shell + People roster) landed (2026-10-04):** the one net-new piece — the EMPLOYEE
   `RewardAccount` ↔ `SalesUser` linkage (migration `20261003120000` + `ensureEmployeeAccount`/bulk helper,
   gated by `earnerModel`) — plus `/admin/people` surfacing the reused roster. Two money-audit defects (lock
@@ -182,14 +191,15 @@
   (honest + complete, not a silent no-op) — but there is no way to undo a wrong employee credit in-product.
   **Owner: build an account-aware clawback now, or defer until employee reversal is actually needed?** (The
   pilot may not need reversal; F2's period-uniqueness already prevents the common double-credit.)
-- **GO-LIVE BLOCKER (Phase B audit EMP-GAP-1) — employee orders are invisible to tenant-scoped views.** An
-  employee redeem creates a CONFIRMED order with `partnerId: null`, but the member order history
-  (`listOrders`/`getOrder`), the dispatch console (`listFulfilmentOrders`/`getFulfilmentOrder`/`transitionOrder`),
-  gift-disbursal and the fulfilment export ALL scope by `partner: { clientId }` → they exclude null-partner rows,
-  and there is NO accountId-scoped GET. So today only an un-assumed platform-wide GIFSY OWNER can see/progress an
-  employee order — the employee can't see their own, and the tenant CLIENT_ADMIN can't fulfil it. **Wave B2** must
-  add account-first scoping (an `account.clientId` branch) to those reads/console + an employee order-list
-  endpoint before employee go-live. (NOT a trade risk — trade orders always have a partner.)
+- **EMP-GAP-1 (employee orders invisible to tenant-scoped views) — operator console DONE (`53c1d14`); residual gates remain.**
+  ✅ The GIFSY fulfilment/dispatch console (list/detail/template/upload/transition/updateOrder) now spans
+  `OR[partner.clientId, account.clientId]` via `orderTenantScope`, so an operator sees + fulfils employee orders
+  (audit SAFE for Deoleo; runtime-verified). **Still open before employee go-live:** (a) **3P vendor portal** queue
+  (`vendor-portal.service.ts`) + scoped **gift-disbursal** (`gift-disbursal.service.ts:43`) still partner-scoped
+  → a VENDOR-sourced employee gift is un-fulfillable on the vendor rail, and a scoped disbursal total excludes
+  employee DELIVERED value (audit Finding 6; dormant, NOT a trade risk). Depends on the pilot-scope question "do
+  employee rewards use vendor-sourced gifts?" — close OR explicitly defer. (b) the employee's OWN order view
+  (`listOrders`/`getOrder`/`track`) = **Workstream 2** (rep app); fails closed today (no cross-tenant/trade risk).
 - **TRACKED (Phase B audit EMP-REC-1, low) — mixed-tenant disbursal↔194R reconciliation.** A platform-wide
   gift-disbursal report (OWNER, no clientId) would include employee DELIVERED `valuePaise` while 194R Source-2
   (partner-scoped) excludes it, breaking the "disbursal ties to the 194R base" note. Dormant until employee
@@ -386,3 +396,24 @@ credits + catalogue, pilot vendors).
   - ▶ **NEXT:** **Wave B2** — close EMP-GAP-1 (account-first fulfilment console scoping + employee order read;
     wire the `/admin/fulfilment` stub) + catalogue curation flags (Dream-eligible/featured, role/region visibility)
     + employee shipping-address sourcing.
+
+- **Phase B Wave B2 part 1 — fulfilment console account-scoping (EMP-GAP-1, operator side)** (2026-10-05,
+  `er/phase0-shell` HEAD `53c1d14`, FULL-GATE GREEN, independent trade-safety audit, real-DB runtime-verified).
+  Query-only (no schema change). The GIFSY dispatch console now sees + fulfils account-first employee orders.
+  - **New:** `orderTenantScope(scope)` helper → `{}` (platform-wide) or `OR[{partner:{clientId}},{account:{clientId}}]`;
+    applied at **6** operator sites (listFulfilmentOrders, getFulfilmentOrder, getFulfilmentTemplate,
+    uploadFulfilment, transitionOrder fetch, **updateOrder** — the 6th found by consumer-tracing the PATCH + the
+    upload blank-status branch, per agreement #2). List/detail include the account (+ employeeProfile.user.name);
+    row maps fall back `clientId = partner?.clientId ?? account?.clientId`, `partnerName = partner?.businessName ??
+    employee name ?? employeeCode`; the tenantName map spans account clientIds.
+  - **Independent trade-safety + cross-tenant audit → VERDICT SAFE for Deoleo:** the OR account arm is a provably
+    SAME-TENANT superset (`ensureOutletAccount` sets `account.clientId == partner.clientId` for every trade order;
+    legacy accountId-null orders still match via the partner arm), trade rows byte-identical (OUTLET accounts have
+    no `employeeProfile` → every `??` collapses to the prior value), no OR-collision, all 6 sites role-gated.
+    Finding 6 (pre-existing, dormant, NOT trade risk): the 3P vendor-portal queue + scoped gift-disbursal are still
+    partner-scoped → tracked as go-live gates (see Open spec items).
+  - **FULL GATE GREEN:** api jest **3549** (+ `rewards-fulfilment-scope.spec.ts`, 7 tests) · nest build ✓.
+    **Real-DB runtime verify:** a scoped operator LISTS + FETCHES the employee order (labelled with the employee
+    name), a cross-tenant operator is isolated (NotFound, 0 items) — all green.
+  - ▶ **NEXT:** vendor-portal/disbursal account-spanning (Finding 6, pilot-scope gated) + catalogue curation flags
+    + employee shipping-address + the `/admin/fulfilment` FE page + the employee's own order view (WS2).
