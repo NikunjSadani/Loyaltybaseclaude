@@ -19,6 +19,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import {
   CreateBatchDto,
+  CreateEmployeeBatchDto,
   CreateFieldDto,
   CreatePayoutDownloadDto,
   CreateReversalDto,
@@ -75,6 +76,25 @@ export class CreditsController {
   @RequirePermission('credits:confirm_payout')
   confirmBatch(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.credits.confirmBatch(user, id);
+  }
+
+  // ─── Employee Rewards Phase C — EMPLOYEE points batches (ADDITIVE; points-only) ─────
+  // Same role + permission gates as the trade batch routes: CLIENT_ADMIN + GIFSY_ADMIN,
+  // credits:upload to create, credits:confirm_payout to confirm. The service enforces the
+  // EMPLOYEE-earner tenant gate (a trade tenant is rejected).
+
+  @Post('employee-batches')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:upload')
+  createEmployeeBatch(@CurrentUser() user: JwtPayload, @Body() dto: CreateEmployeeBatchDto) {
+    return this.credits.createEmployeeBatch(user, dto);
+  }
+
+  @Post('employee-batches/:id/confirm')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:confirm_payout')
+  confirmEmployeeBatch(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.credits.confirmEmployeeBatch(user, id);
   }
 
   @Get('batches/:id/reversals')

@@ -1345,7 +1345,11 @@ enum AccountType {
 
 model Wallet {
   id                String    @id @default(cuid())
-  partnerId         String    @unique
+  // Employee Rewards Phase C — nullable so an EMPLOYEE wallet can be minted ACCOUNT-FIRST (no
+  // ChannelPartner). OUTLET wallets still carry it (unique; NULLs are distinct in Postgres so many
+  // account-only employee wallets coexist). The partner relation is optional to match. ADDITIVE —
+  // every existing OUTLET wallet keeps its partnerId and the live trade path is byte-unchanged.
+  partnerId         String?   @unique
   accountId         String?   @unique // Employee Rewards Phase 1 — unified owner (additive; partnerId kept as the outlet profile)
   earnedPoints      Int       @default(0)
   lockedPoints      Int       @default(0)
@@ -1359,7 +1363,9 @@ model Wallet {
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
-  partner      ChannelPartner      @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  // Optional: an account-first EMPLOYEE wallet has no ChannelPartner (partnerId null). OUTLET
+  // wallets still link their partner; onDelete behaviour for a linked partner is unchanged.
+  partner      ChannelPartner?     @relation(fields: [partnerId], references: [id], onDelete: Cascade)
   // Restrict (not SetNull): a funded wallet's account must never be deletable out from under
   // it (Phase-2 employee wallets are account-only-owned → SetNull would strand money).
   account      RewardAccount?      @relation(fields: [accountId], references: [id], onDelete: Restrict)

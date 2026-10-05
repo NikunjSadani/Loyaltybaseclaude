@@ -169,6 +169,62 @@ describe('WalletService', () => {
     });
   });
 
+  // Employee Rewards Phase C — the account-keyed mirror of creditEarn.
+  describe('creditEarnForAccount', () => {
+    it('resolves the wallet BY ACCOUNT and credits through the SAME applyMovement primitive', async () => {
+      mockTx.wallet.findFirst.mockResolvedValue({ id: 'wE', redeemablePoints: 0 });
+      mockTx.pointExpiryConfig.findFirst.mockResolvedValue({ expiryDays: 90 });
+      mockTx.wallet.update.mockResolvedValue({ id: 'wE', redeemablePoints: 40 });
+      mockTx.walletTransaction.create.mockResolvedValue({ id: 'txE' });
+      mockTx.pointsLedger.create.mockResolvedValue({ id: 'plE' });
+
+      const res = await service.creditEarnForAccount('acc-1', 'acme', 40, {
+        referenceType: 'CREDIT_BATCH',
+        referenceId: 'b1',
+        sourceType: 'EMPLOYEE_UPLOAD',
+        sourceId: 'EMP001',
+      });
+
+      expect(res).toEqual({ transactionId: 'txE', newRedeemable: 40, ledgerId: 'plE' });
+      // Wallet resolved by accountId (NOT partnerId).
+      expect(mockTx.wallet.findFirst).toHaveBeenCalledWith({ where: { accountId: 'acc-1' } });
+      // Identical credit aggregate bumps as the trade path (redeemable + earned + lifetimeEarned).
+      expect(mockTx.wallet.update).toHaveBeenCalledWith({
+        where: { id: 'wE' },
+        data: {
+          lastTransactionAt: expect.any(Date),
+          redeemablePoints: { increment: 40 },
+          earnedPoints: { increment: 40 },
+          lifetimeEarned: { increment: 40 },
+        },
+      });
+      // Both the passbook + ledger rows are written (invariant preserved).
+      expect(mockTx.walletTransaction.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ transactionType: 'CREDIT_POINTS_EARNED', points: 40 }),
+        }),
+      );
+      const ledgerArg = mockTx.pointsLedger.create.mock.calls[0][0].data;
+      expect(ledgerArg.transactionType).toBe('EARN');
+      expect(ledgerArg.sourceType).toBe('EMPLOYEE_UPLOAD');
+      expect(ledgerArg.sourceId).toBe('EMP001');
+    });
+
+    it('rejects a non-positive amount (writes nothing)', async () => {
+      await expect(service.creditEarnForAccount('acc-1', 'acme', 0, {})).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(mockTx.wallet.update).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFound when the account has no wallet', async () => {
+      mockTx.wallet.findFirst.mockResolvedValue(null);
+      await expect(service.creditEarnForAccount('accX', 'acme', 10, {})).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+  });
+
   describe('debitRedeem', () => {
     it('throws BadRequest when redeemable is insufficient and writes nothing', async () => {
       mockTx.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5 });

@@ -98,6 +98,30 @@ export async function ensureEmployeeAccount(
 }
 
 /**
+ * Employee Rewards Phase C — find-or-create the EMPLOYEE Wallet for an already-linked EMPLOYEE
+ * RewardAccount, ACCOUNT-FIRST (no ChannelPartner). The employee mirror of the OUTLET
+ * `wallet.upsert({ where: { partnerId } })` in the trade confirm path, but keyed on `accountId`
+ * (which is @unique) so it is race-safe + idempotent: one wallet per account, a second call is a
+ * no-op that returns the same wallet. `partnerId` is left NULL (the wallet is owned purely by the
+ * account). Must run inside the caller's transaction so the wallet create composes atomically with
+ * the account link + the credit movement. Returns the wallet id.
+ *
+ * Callers MUST pass an accountId already linked to the employee (via `ensureEmployeeAccount`); this
+ * helper does not touch SalesUser/RewardAccount, only the Wallet row.
+ */
+export async function ensureEmployeeWallet(
+  tx: Prisma.TransactionClient,
+  accountId: string,
+): Promise<string> {
+  const wallet = await tx.wallet.upsert({
+    where: { accountId },
+    create: { accountId },
+    update: {},
+  });
+  return wallet.id;
+}
+
+/**
  * Employee Rewards Phase A — SET-BASED bulk variant of `ensureEmployeeAccount` for the roster
  * upload path (`persistHierarchy`), which can carry thousands of rows. Rather than a per-row
  * advisory lock + create, it:

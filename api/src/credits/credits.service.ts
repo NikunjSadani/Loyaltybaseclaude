@@ -14,7 +14,8 @@ import {
 } from '../tds/tds-methodology.helper';
 import { grossUpTdsPaise, rate194CFrom, rate194RFrom, TdsRate, type ResolvedTdsStatutory } from '../tds/tds.helpers';
 import { TdsStatutoryConfigService } from '../tds/tds-statutory.config.service';
-import { ensureOutletAccount } from '../common/reward-account.helper';
+import { ensureOutletAccount, ensureEmployeeAccount, ensureEmployeeWallet } from '../common/reward-account.helper';
+import { resolveCapabilities } from '../common/loyalty-capabilities.helper';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { paiseToRupees, toPaiseBigInt } from '../common/money';
 import { monthYearIST, formatDateIST, IST_OFFSET_MIN } from '../common/ist-date';
@@ -24,6 +25,7 @@ import {
 } from '../kyc/kyc-eligibility';
 import {
   CreateBatchDto,
+  CreateEmployeeBatchDto,
   CreateFieldDto,
   CreatePayoutDownloadDto,
   CreateReversalDto,
@@ -996,6 +998,15 @@ export class CreditsService {
       where: { id, clientId: user.clientId },
     });
     if (!batch) throw new NotFoundException('Batch not found');
+    // Hard guard (money audit F1): the trade confirm path resolves rows by outletCode→partner and
+    // fires payout/TDS/invoice side-effects — it must NEVER process an EMPLOYEE_UPLOAD batch (whose
+    // rows key on employeeCode and whose wallet is account-owned). Confirming an employee batch here
+    // would strand the credit (every row skips OUTLET_NOT_FOUND) yet flip it CONFIRMED, blocking the
+    // correct employee re-run. Employee batches are confirmed ONLY through confirmEmployeeBatch; this
+    // is the symmetric twin of that path's `sourceKind !== 'EMPLOYEE_UPLOAD'` guard.
+    if (batch.sourceKind === 'EMPLOYEE_UPLOAD') {
+      throw new BadRequestException('Employee credit batches must be confirmed via the employee endpoint');
+    }
     if (batch.status !== 'PENDING_CONFIRM') {
       throw new BadRequestException(`Batch is already ${batch.status}`);
     }
@@ -1263,6 +1274,287 @@ export class CreditsService {
     };
   }
 
+  // ═══ Employee Rewards Phase C — EMPLOYEE points credit (ADDITIVE; separate from the trade path) ═══
+  //
+  // A bulk POINTS upload that credits each employee's EMPLOYEE RewardAccount wallet, reusing the
+  // SAME ledger + batch primitives as the trade path WITHOUT touching it. The trade
+  // createBatch/confirmBatch/creditEarn/requireWallet are left byte-identical; this is a parallel
+  // rail keyed on employeeCode → SalesUser → RewardAccount → account-owned Wallet. Points-only:
+  // NO payout entries, NO TDS, NO invoicing, NO partner-notification fan-out.
+
+  /**
+   * Fail-safe EMPLOYEE-earner gate. Resolves the tenant's capability set from loyaltyType +
+   * features (unknown/absent → TRADE/OUTLET, so a bad/empty value can NEVER let a trade tenant
+   * reach the compliance-off employee credit path). Mirrors the guard on admin-core.setHierarchyLevels.
+   */
+  private async assertEmployeeEarner(clientId: string): Promise<void> {
+    const client = await this.prisma.client.findUnique({
+      where: { id: clientId },
+      select: { loyaltyType: true, features: true },
+    });
+    const capabilities = resolveCapabilities(
+      client?.loyaltyType as string | null | undefined,
+      (client?.features ?? null) as Record<string, unknown> | null,
+    );
+    if (capabilities.earnerModel !== 'EMPLOYEE') {
+      throw new BadRequestException(
+        'Employee point credits apply to employee-rewards tenants only.',
+      );
+    }
+  }
+
+  // ─── POST /v1/admin/credits/employee-batches ───────────────────────────────
+  /**
+   * Create a PENDING_CONFIRM POINTS-ONLY employee credit batch. Mirrors createBatch's
+   * idempotency + per-(clientId, period) advisory lock + sequential code generation, but:
+   *  - EMPLOYEE-earner tenants only (fail-safe gate);
+   *  - tagged sourceKind=EMPLOYEE_UPLOAD; totalPayoutPaise is always 0 (points-only);
+   *  - an optional sourceKey makes a re-submitted identical run return the existing batch
+   *    (no double-credit) via the SAME (clientId, sourceKey) uniqueness + guarded check-then-create.
+   * The month-cutoff window + points safety cap are enforced server-side (as for the trade path).
+   */
+  async createEmployeeBatch(user: JwtPayload, dto: CreateEmployeeBatchDto) {
+    await this.assertEmployeeEarner(user.clientId);
+
+    // Reuse the SAME server-side enforcement as the trade upload (bypassable FE-only otherwise).
+    const { creditsPayouts } = await this.tenantSettings.getEffectiveSettings(user.clientId);
+    this.assertWithinUploadWindow(dto.period, creditsPayouts.monthCutoffDay);
+    // Only POINTS rows carry a live award here; the cap helper checks POINTS against safetyCapPoints.
+    this.assertWithinSafetyCaps(dto.rows, creditsPayouts.safetyCapPoints, creditsPayouts.safetyCapInr);
+
+    const sourceKind = 'EMPLOYEE_UPLOAD';
+
+    // Code gen + create UNDER a per-(clientId, period) advisory lock — identical serialization to
+    // createBatch: concurrent creates get sequential codes, and the SAME lock serializes the
+    // sourceKey idempotency check-then-create so two commits of one run can't both create a batch.
+    const batch = await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`CBATCH|${user.clientId}|${dto.period}`}, 0))`;
+      if (dto.sourceKey) {
+        // Idempotent: the identical run already has a batch → return it unchanged (no double-credit).
+        const sameRun = await tx.creditBatch.findFirst({
+          where: { clientId: user.clientId, sourceKey: dto.sourceKey },
+        });
+        if (sameRun) return sameRun;
+
+        // One active programmatic batch per (clientId, period, sourceKind). An already-CONFIRMED (or
+        // PARTIALLY_REVERSED) employee batch for this period has credited wallets — a second
+        // overlapping run would DOUBLE-credit on confirm. Refuse; reverse the existing credit first.
+        const activeConfirmed = await tx.creditBatch.findFirst({
+          where: {
+            clientId: user.clientId,
+            period: dto.period,
+            sourceKind,
+            status: { in: ['CONFIRMED', 'PARTIALLY_REVERSED'] },
+          },
+          select: { batchCode: true, status: true },
+        });
+        if (activeConfirmed) {
+          throw new ConflictException(
+            `A ${activeConfirmed.status} ${sourceKind} batch (${activeConfirmed.batchCode}) already credited ${dto.period}. ` +
+              'Reverse it before crediting a new run for this period.',
+          );
+        }
+
+        // A still-UNCONFIRMED employee draft for this period has credited nothing yet → a recompute
+        // supersedes it (delete the stale draft) rather than stacking a second pending batch.
+        await tx.creditBatch.deleteMany({
+          where: {
+            clientId: user.clientId,
+            period: dto.period,
+            sourceKind,
+            status: 'PENDING_CONFIRM',
+          },
+        });
+      }
+      const batchCode = await this.generateBatchCode(tx, user.clientId, dto.period);
+      return tx.creditBatch.create({
+        data: {
+          clientId: user.clientId,
+          batchCode,
+          period: dto.period,
+          uploadedBy: user.sub ?? '',
+          // totalOutlets is the generic per-batch entity counter — here it holds the employee count.
+          totalOutlets: dto.totalEmployees,
+          totalPoints: dto.totalPoints,
+          // Points-only — never a payout.
+          totalPayoutPaise: 0n,
+          rows: dto.rows as unknown as Prisma.InputJsonValue,
+          sourceKind,
+          sourceKey: dto.sourceKey ?? null,
+        },
+      });
+    });
+
+    return batch;
+  }
+
+  // ─── POST /v1/admin/credits/employee-batches/:id/confirm ───────────────────
+  /**
+   * Confirm an employee points batch: credit each resolved employee's account-owned wallet in ONE
+   * all-or-nothing $transaction. Mirrors confirmBatch's guarded PENDING_CONFIRM→CONFIRMED claim
+   * (only count===1 proceeds — a concurrent double-confirm can't double-credit) and the single bulk
+   * transaction, but resolves employeeCode → SalesUser → ensureEmployeeAccount → ensureEmployeeWallet
+   * → creditEarnForAccount. An unresolvable employeeCode is SKIPPED with a reason (never dropped).
+   */
+  async confirmEmployeeBatch(user: JwtPayload, id: string) {
+    await this.assertEmployeeEarner(user.clientId);
+
+    const batch = await this.prisma.creditBatch.findFirst({
+      where: { id, clientId: user.clientId },
+    });
+    if (!batch) throw new NotFoundException('Batch not found');
+    // Hard guard: this path confirms EMPLOYEE_UPLOAD batches ONLY — never a trade batch (which must
+    // go through the untouched confirmBatch so its payout/TDS/invoice side-effects fire).
+    if (batch.sourceKind !== 'EMPLOYEE_UPLOAD') {
+      throw new BadRequestException('Not an employee credit batch');
+    }
+    if (batch.status !== 'PENDING_CONFIRM') {
+      throw new BadRequestException(`Batch is already ${batch.status}`);
+    }
+
+    const { creditsPayouts } = await this.tenantSettings.getEffectiveSettings(user.clientId);
+    this.assertWithinUploadWindow(batch.period, creditsPayouts.monthCutoffDay);
+
+    const rows = batch.rows as unknown as {
+      outletId: string;
+      outletName: string;
+      employeeCode?: string;
+      fieldId: string;
+      fieldName: string;
+      amount: number;
+      narration: string;
+      awardType: string;
+      status: string;
+    }[];
+
+    // Points-only path: credit POINTS+OK rows with a positive amount (creditEarnForAccount rejects
+    // non-positive amounts — a 0/negative row would throw inside the tx and roll back the whole confirm).
+    const pointsRows = rows.filter(
+      (r) => r.awardType === 'POINTS' && r.status === 'OK' && r.amount > 0,
+    );
+
+    // Rows that cannot be credited, WITH a reason surfaced to the admin (never dropped silently).
+    const skipped: {
+      employeeCode: string;
+      fieldName: string;
+      points: number;
+      reason: 'EMPLOYEE_NOT_FOUND' | 'UNSUPPORTED_AWARD_TYPE';
+    }[] = [];
+
+    // Money audit F5/Gap C: the employee rail is points-only. A non-POINTS (e.g. PAYOUT) OK row would
+    // otherwise be filtered out of pointsRows and vanish WITHOUT a signal — surface it as skipped so
+    // the operator sees it was not credited (never a silent drop), mirroring the EMPLOYEE_NOT_FOUND
+    // discipline. These rows carry no money on this rail (no payout entry is created here).
+    for (const r of rows.filter((r) => r.status === 'OK' && r.awardType !== 'POINTS')) {
+      skipped.push({
+        employeeCode: (r.employeeCode ?? r.outletId)?.trim() ?? '',
+        fieldName: r.fieldName,
+        points: r.amount,
+        reason: 'UNSUPPORTED_AWARD_TYPE',
+      });
+    }
+
+    let pointsCredited = 0; // count of credited rows
+    let pointsCreditedTotal = 0; // sum of credited points
+
+    // ONE atomic bulk tx (raised timeout for a full-tenant batch; all-or-nothing — do NOT chunk).
+    const updated = await this.prisma.$transaction(async (tx) => {
+      // ── Always-on period-uniqueness (money audit F2) ───────────────────────
+      // Employee credits are account-owned and currently IRREVERSIBLE (see createReversal's
+      // EMPLOYEE_UPLOAD guard) — there is no clawback that can touch an account-only wallet. So,
+      // unlike the trade rail (which tolerates manual re-uploads because reversal exists), the
+      // employee rail must allow at most ONE confirmed batch per period, regardless of whether a
+      // sourceKey was supplied. createEmployeeBatch's refusal is only sourceKey-gated, so a MANUAL
+      // (no-sourceKey) second draft could otherwise be confirmed and double-credit. Serialize on
+      // (clientId, period) — the SAME advisory key createEmployeeBatch uses — so a concurrent
+      // confirm of a sibling draft can't race past this check; then refuse if any OTHER
+      // EMPLOYEE_UPLOAD batch already credited this period. Throwing rolls back the status claim
+      // below, so this batch stays PENDING_CONFIRM (never stranded CONFIRMED-but-uncredited).
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`CBATCH|${user.clientId}|${batch.period}`}, 0))`;
+      const otherConfirmed = await tx.creditBatch.findFirst({
+        where: {
+          clientId: user.clientId,
+          period: batch.period,
+          sourceKind: 'EMPLOYEE_UPLOAD',
+          status: { in: ['CONFIRMED', 'PARTIALLY_REVERSED'] },
+          id: { not: id },
+        },
+        select: { batchCode: true, status: true },
+      });
+      if (otherConfirmed) {
+        throw new ConflictException(
+          `A ${otherConfirmed.status} employee batch (${otherConfirmed.batchCode}) already credited ${batch.period}. ` +
+            'Only one confirmed employee batch per period is allowed.',
+        );
+      }
+
+      // Guarded status claim — only the first caller flips PENDING_CONFIRM→CONFIRMED (count===1);
+      // a racing double-confirm sees count===0 and throws, preventing double-crediting.
+      const claimed = await tx.creditBatch.updateMany({
+        where: { id, status: 'PENDING_CONFIRM' },
+        data: {
+          status: 'CONFIRMED',
+          confirmedBy: user.sub,
+          confirmedAt: new Date(),
+        },
+      });
+      if (claimed.count === 0) {
+        throw new BadRequestException('Batch already confirmed');
+      }
+
+      const confirmed = await tx.creditBatch.findFirst({ where: { id } });
+
+      for (const r of pointsRows) {
+        // Fall back to outletId when a row carries no explicit employeeCode (shared row shape).
+        const employeeCode = (r.employeeCode ?? r.outletId)?.trim();
+        const salesUser = employeeCode
+          ? await tx.salesUser.findFirst({
+              where: { clientId: user.clientId, employeeCode, deletedAt: null },
+              select: { id: true },
+            })
+          : null;
+        if (!salesUser) {
+          skipped.push({
+            employeeCode: employeeCode ?? '',
+            fieldName: r.fieldName,
+            points: r.amount,
+            reason: 'EMPLOYEE_NOT_FOUND',
+          });
+          continue;
+        }
+
+        // Account-first: link (idempotent) the EMPLOYEE RewardAccount, mint (idempotent) its wallet,
+        // then credit through the SAME applyMovement primitive the trade path uses (via the account).
+        const accountId = await ensureEmployeeAccount(tx, salesUser.id);
+        await ensureEmployeeWallet(tx, accountId);
+        await this.walletService.creditEarnForAccount(
+          accountId,
+          user.clientId,
+          r.amount,
+          {
+            referenceType: 'CREDIT_BATCH',
+            referenceId: id,
+            sourceType: 'EMPLOYEE_UPLOAD',
+            sourceId: employeeCode,
+            description: r.narration ?? null,
+          },
+          tx,
+        );
+        pointsCredited += 1;
+        pointsCreditedTotal += r.amount;
+      }
+
+      return confirmed;
+    }, { timeout: 180_000, maxWait: 20_000 });
+
+    return {
+      batch: updated,
+      pointsCredited,
+      pointsCreditedTotal,
+      skipped,
+    };
+  }
+
   // ─── GET /v1/admin/credits/batches/:id/reversals ───────────────────────────
   async listBatchReversals(user: JwtPayload, id: string) {
     const batch = await this.prisma.creditBatch.findFirst({
@@ -1283,6 +1575,15 @@ export class CreditsService {
       where: { id, clientId: user.clientId },
     });
     if (!batch) throw new NotFoundException('Batch not found');
+    // Money audit F3: patchReversal's POINTS clawback resolves outletCode→partner→wallet-by-partnerId,
+    // but an EMPLOYEE_UPLOAD credit lands in an account-owned wallet (partnerId null). An employee
+    // reversal would therefore flip to APPROVED while clawing back ZERO — a SILENT no-op that misleads
+    // the operator into thinking the points were pulled back. Until an account-aware clawback exists,
+    // refuse employee-batch reversal outright rather than pretend it worked. (Tracked: build an
+    // account-aware clawback for the employee rail — EMPLOYEE-REWARDS-RESUME decision list.)
+    if (batch.sourceKind === 'EMPLOYEE_UPLOAD') {
+      throw new BadRequestException('Reversal is not yet supported for employee credit batches');
+    }
     if (batch.status === 'PENDING_CONFIRM') {
       throw new BadRequestException('Cannot reverse a batch that has not been confirmed');
     }

@@ -215,6 +215,18 @@ export class WalletService {
   }
 
   /**
+   * Employee Rewards Phase C — load an ACCOUNT-OWNED wallet inside a tx; throws NotFound if absent.
+   * The account mirror of `requireWallet` (keyed on the @unique accountId instead of partnerId), for
+   * the EMPLOYEE earner whose wallet is minted account-first (no ChannelPartner). Separate method so
+   * the live OUTLET path (`requireWallet`) is untouched.
+   */
+  private async requireWalletByAccount(tx: Prisma.TransactionClient, accountId: string) {
+    const wallet = await tx.wallet.findFirst({ where: { accountId } });
+    if (!wallet) throw new NotFoundException('Wallet not found for this account');
+    return wallet;
+  }
+
+  /**
    * Resolve the active expiry config for a credit and compute its expiresAt.
    * Rule: prefer the scheme-specific active config when a schemeId is supplied and
    * a matching `{ schemeId, isActive: true }` row exists; otherwise fall back to the
@@ -518,6 +530,54 @@ export class WalletService {
 
     return this.withTx(tx, async (t) => {
       const wallet = await this.requireWallet(t, partnerId);
+      const expiresAt = await this.resolveExpiresAt(t, clientId, opts.schemeId ?? null);
+      return this.applyMovement(t, {
+        wallet,
+        walletTxType: 'CREDIT_POINTS_EARNED',
+        ledgerType: PointsLedgerType.EARN,
+        points: amount,
+        schemeId: opts.schemeId ?? null,
+        expiresAt,
+        referenceType: opts.referenceType ?? null,
+        referenceId: opts.referenceId ?? null,
+        sourceType: opts.sourceType ?? null,
+        sourceId: opts.sourceId ?? null,
+        description: opts.description ?? null,
+      });
+    });
+  }
+
+  /**
+   * Employee Rewards Phase C — credit earned points to an ACCOUNT-OWNED wallet (the EMPLOYEE earner).
+   * The exact mirror of `creditEarn`, but the wallet is resolved by `accountId` (via
+   * requireWalletByAccount) instead of `partnerId`, then routed through the SAME `applyMovement`
+   * primitive so the passbook + ledger invariant is identical to the trade path. Stamps expiresAt
+   * from the tenant's active PointExpiryConfig exactly as creditEarn does.
+   *
+   * `creditEarn`/`requireWallet`/`applyMovement` are deliberately NOT changed — this is a separate,
+   * additive entry point so the live OUTLET credit path stays byte-identical.
+   *
+   * NOTE: tenant scope on `accountId` is the CALLER's responsibility (internal primitive). The
+   * employee credit-batch confirm resolves employeeCode → SalesUser (tenant-scoped) → accountId first.
+   */
+  async creditEarnForAccount(
+    accountId: string,
+    clientId: string,
+    amount: number,
+    opts: {
+      schemeId?: string | null;
+      referenceType?: string | null;
+      referenceId?: string | null;
+      sourceType?: string | null;
+      sourceId?: string | null;
+      description?: string | null;
+    } = {},
+    tx?: Prisma.TransactionClient,
+  ) {
+    if (amount <= 0) throw new BadRequestException('Credit amount must be positive');
+
+    return this.withTx(tx, async (t) => {
+      const wallet = await this.requireWalletByAccount(t, accountId);
       const expiresAt = await this.resolveExpiresAt(t, clientId, opts.schemeId ?? null);
       return this.applyMovement(t, {
         wallet,

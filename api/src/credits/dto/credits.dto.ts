@@ -44,6 +44,15 @@ export class UploadRowDto {
   @IsString()
   outletName!: string;
 
+  /**
+   * Employee Rewards Phase C — OPTIONAL employee code for the EMPLOYEE credit path (additive). The
+   * employee batch confirm resolves this to a SalesUser (tenant-scoped); when absent it falls back
+   * to `outletId` so the same row shape serves both. Unused by the OUTLET/trade path.
+   */
+  @IsOptional()
+  @IsString()
+  employeeCode?: string;
+
   @IsString()
   fieldId!: string;
 
@@ -106,6 +115,39 @@ export class CreateBatchDto {
   @ValidateNested({ each: true })
   @Type(() => UploadRowDto)
   rows!: UploadRowDto[];
+}
+
+/**
+ * POST /admin/credits/employee-batches — Employee Rewards Phase C. Create a PENDING_CONFIRM
+ * POINTS-ONLY credit batch for an EMPLOYEE-earner tenant (NO payout/TDS/invoicing). Reuses the
+ * CreditBatch rail (tagged sourceKind=EMPLOYEE_UPLOAD at the service). Rows carry `employeeCode`
+ * (resolved to a SalesUser at confirm) and `amount` as whole points. `sourceKey` is an OPTIONAL
+ * deterministic idempotency key — re-submitting the identical run returns the existing batch
+ * instead of double-crediting (same guard as the trade compute-engine source path).
+ */
+export class CreateEmployeeBatchDto {
+  @Matches(PERIOD_RE, { message: 'Period must be YYYY-MM' })
+  period!: string;
+
+  /** Number of employees in the batch (stored on CreditBatch.totalOutlets — the generic counter). */
+  @IsInt()
+  @Min(0)
+  totalEmployees!: number;
+
+  /** Whole points (a count, NOT money — no ×100 conversion). */
+  @IsInt()
+  @Min(0)
+  totalPoints!: number;
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => UploadRowDto)
+  rows!: UploadRowDto[];
+
+  /** Optional deterministic idempotency key for a programmatic run (double-submit guard). */
+  @IsOptional()
+  @IsString()
+  sourceKey?: string;
 }
 
 /**

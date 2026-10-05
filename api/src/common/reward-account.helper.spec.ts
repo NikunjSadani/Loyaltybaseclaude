@@ -2,6 +2,7 @@ import {
   ensureOutletAccount,
   ensureEmployeeAccount,
   ensureEmployeeAccountsForSalesUsers,
+  ensureEmployeeWallet,
 } from './reward-account.helper';
 
 describe('ensureOutletAccount (Employee Rewards Phase 1)', () => {
@@ -204,5 +205,45 @@ describe('ensureEmployeeAccountsForSalesUsers (Employee Rewards Phase A — bulk
     expect((tx as never as { rewardAccount: { createMany: jest.Mock } }).rewardAccount.createMany).not.toHaveBeenCalled();
     expect(createdRewardAccounts).toHaveLength(0);
     expect(linkedSalesUserIds).toHaveLength(0);
+  });
+});
+
+describe('ensureEmployeeWallet (Employee Rewards Phase C — account-first wallet)', () => {
+  const makeTx = (upsertResult: { id: string }) => {
+    const tx = {
+      wallet: {
+        upsert: jest.fn().mockResolvedValue(upsertResult),
+      },
+    };
+    return tx as never;
+  };
+
+  it('upserts the wallet ACCOUNT-FIRST (keyed on accountId, no partnerId) and returns its id', async () => {
+    const tx = makeTx({ id: 'w-new' });
+    const id = await ensureEmployeeWallet(tx, 'acc-1');
+    expect(id).toBe('w-new');
+    const t = tx as never as { wallet: { upsert: jest.Mock } };
+    expect(t.wallet.upsert).toHaveBeenCalledWith({
+      where: { accountId: 'acc-1' },
+      create: { accountId: 'acc-1' },
+      update: {},
+    });
+    // create carries NO partnerId — the employee wallet is owned purely by the account.
+    expect(t.wallet.upsert.mock.calls[0][0].create).not.toHaveProperty('partnerId');
+  });
+
+  it('is idempotent: a second call returns the SAME wallet via the accountId upsert (no dup)', async () => {
+    // Model the already-created state: the upsert matches the existing row and returns the same id.
+    const tx = makeTx({ id: 'w-existing' });
+    const first = await ensureEmployeeWallet(tx, 'acc-1');
+    const second = await ensureEmployeeWallet(tx, 'acc-1');
+    expect(first).toBe('w-existing');
+    expect(second).toBe('w-existing');
+    // Both calls are the same race-safe upsert (update:{} = no-op when the row exists).
+    const t = tx as never as { wallet: { upsert: jest.Mock } };
+    expect(t.wallet.upsert).toHaveBeenCalledTimes(2);
+    for (const call of t.wallet.upsert.mock.calls) {
+      expect(call[0].update).toEqual({});
+    }
   });
 });
