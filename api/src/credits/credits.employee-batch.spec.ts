@@ -232,7 +232,7 @@ describe('CreditsService — Employee Rewards Phase C (employee points credit)',
       mockPrisma.creditBatch.findFirst.mockResolvedValue(batchWith([
         { outletId: 'EMP001', outletName: 'A', employeeCode: 'EMP001', fieldId: 'f1', fieldName: 'Q2', amount: 50, narration: 'bonus', awardType: 'POINTS', status: 'OK' },
       ]));
-      mockTx.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockTx.salesUser.findFirst.mockResolvedValue({ id: 'su1', isActive: true });
 
       const res = await service.confirmEmployeeBatch(admin, 'b1');
 
@@ -242,7 +242,7 @@ describe('CreditsService — Employee Rewards Phase C (employee points credit)',
       // Resolved tenant-scoped + non-deleted.
       expect(mockTx.salesUser.findFirst).toHaveBeenCalledWith({
         where: { clientId: 'acme', employeeCode: 'EMP001', deletedAt: null },
-        select: { id: true },
+        select: { id: true, isActive: true },
       });
       expect(ensureEmployeeAccount).toHaveBeenCalledWith(mockTx, 'su1');
       expect(ensureEmployeeWallet).toHaveBeenCalledWith(mockTx, 'acc-emp');
@@ -267,11 +267,11 @@ describe('CreditsService — Employee Rewards Phase C (employee points credit)',
       mockPrisma.creditBatch.findFirst.mockResolvedValue(batchWith([
         { outletId: 'EMP999', outletName: 'A', fieldId: 'f1', fieldName: 'Q2', amount: 20, narration: '', awardType: 'POINTS', status: 'OK' },
       ]));
-      mockTx.salesUser.findFirst.mockResolvedValue({ id: 'su9' });
+      mockTx.salesUser.findFirst.mockResolvedValue({ id: 'su9', isActive: true });
       await service.confirmEmployeeBatch(admin, 'b1');
       expect(mockTx.salesUser.findFirst).toHaveBeenCalledWith({
         where: { clientId: 'acme', employeeCode: 'EMP999', deletedAt: null },
-        select: { id: true },
+        select: { id: true, isActive: true },
       });
     });
 
@@ -291,11 +291,28 @@ describe('CreditsService — Employee Rewards Phase C (employee points credit)',
       expect(mockWalletService.creditEarnForAccount).not.toHaveBeenCalled();
     });
 
+    it('💰 FE audit #1: SKIPS an INACTIVE (deactivated, not deleted) employee with EMPLOYEE_INACTIVE — never credits', async () => {
+      // Determinism: an inactive employee must never be credited regardless of the FE roster pre-flight.
+      mockPrisma.creditBatch.findFirst.mockResolvedValue(batchWith([
+        { outletId: 'EMP001', outletName: 'A', employeeCode: 'EMP001', fieldId: 'f1', fieldName: 'Q2', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
+      ]));
+      mockTx.salesUser.findFirst.mockResolvedValue({ id: 'su1', isActive: false }); // exists but deactivated
+
+      const res = await service.confirmEmployeeBatch(admin, 'b1');
+
+      expect(res.pointsCredited).toBe(0);
+      expect(res.skipped).toEqual([
+        { employeeCode: 'EMP001', fieldName: 'Q2', points: 50, reason: 'EMPLOYEE_INACTIVE' },
+      ]);
+      expect(ensureEmployeeAccount).not.toHaveBeenCalled();
+      expect(mockWalletService.creditEarnForAccount).not.toHaveBeenCalled();
+    });
+
     it('throws on a double-confirm (guarded claim count===0) and credits nothing', async () => {
       mockPrisma.creditBatch.findFirst.mockResolvedValue(batchWith([
         { outletId: 'EMP001', outletName: 'A', employeeCode: 'EMP001', fieldId: 'f1', fieldName: 'Q2', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
       ]));
-      mockTx.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockTx.salesUser.findFirst.mockResolvedValue({ id: 'su1', isActive: true });
       mockTx.creditBatch.updateMany.mockResolvedValue({ count: 0 }); // already flipped by a racer
 
       await expect(service.confirmEmployeeBatch(admin, 'b1')).rejects.toBeInstanceOf(BadRequestException);
@@ -322,7 +339,7 @@ describe('CreditsService — Employee Rewards Phase C (employee points credit)',
       mockPrisma.creditBatch.findFirst.mockResolvedValue(batchWith([
         { outletId: 'EMP001', outletName: 'A', employeeCode: 'EMP001', fieldId: 'f1', fieldName: 'Q2', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
       ]));
-      mockTx.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockTx.salesUser.findFirst.mockResolvedValue({ id: 'su1', isActive: true });
       // The period-uniqueness probe (`where.id.not`) finds ANOTHER confirmed EMPLOYEE_UPLOAD batch.
       mockTx.creditBatch.findFirst.mockImplementation((args: { where?: { id?: { not?: unknown } | unknown } }) => {
         const idClause = args?.where?.id as { not?: unknown } | string | undefined;
@@ -342,7 +359,7 @@ describe('CreditsService — Employee Rewards Phase C (employee points credit)',
         { outletId: 'EMP001', outletName: 'A', employeeCode: 'EMP001', fieldId: 'f1', fieldName: 'Q2', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
         { outletId: 'EMP002', outletName: 'B', employeeCode: 'EMP002', fieldId: 'f2', fieldName: 'Cash', amount: 999, narration: '', awardType: 'PAYOUT', status: 'OK' },
       ]));
-      mockTx.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockTx.salesUser.findFirst.mockResolvedValue({ id: 'su1', isActive: true });
 
       const res = await service.confirmEmployeeBatch(admin, 'b1');
 

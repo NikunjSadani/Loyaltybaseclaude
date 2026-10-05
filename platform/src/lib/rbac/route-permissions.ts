@@ -77,6 +77,10 @@ export const ROUTE_PERMISSIONS: Record<string, string> = {
   // Awards & credits → payouts (upload / status / payout / fields)
   '/admin/credits-payouts':          'credits:read',
 
+  // Employee Rewards cockpit — bulk employee points upload (reuses the credit-batch rail;
+  // the upload/confirm ACTIONS are gated at the endpoint with credits:upload/confirm_payout).
+  '/admin/points':                   'credits:read',
+
   // TDS & invoicing section — each maps to the TDS-view permission.
   // Listed explicitly because these are SIBLING paths (/admin/tds-config, not
   // /admin/tds/config) so the '/'-boundary prefix match won't fold them together.

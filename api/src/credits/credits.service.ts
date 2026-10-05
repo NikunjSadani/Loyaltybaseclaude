@@ -1438,7 +1438,7 @@ export class CreditsService {
       employeeCode: string;
       fieldName: string;
       points: number;
-      reason: 'EMPLOYEE_NOT_FOUND' | 'UNSUPPORTED_AWARD_TYPE';
+      reason: 'EMPLOYEE_NOT_FOUND' | 'EMPLOYEE_INACTIVE' | 'UNSUPPORTED_AWARD_TYPE';
     }[] = [];
 
     // Money audit F5/Gap C: the employee rail is points-only. A non-POINTS (e.g. PAYOUT) OK row would
@@ -1510,7 +1510,7 @@ export class CreditsService {
         const salesUser = employeeCode
           ? await tx.salesUser.findFirst({
               where: { clientId: user.clientId, employeeCode, deletedAt: null },
-              select: { id: true },
+              select: { id: true, isActive: true },
             })
           : null;
         if (!salesUser) {
@@ -1519,6 +1519,21 @@ export class CreditsService {
             fieldName: r.fieldName,
             points: r.amount,
             reason: 'EMPLOYEE_NOT_FOUND',
+          });
+          continue;
+        }
+        // DETERMINISM (FE audit #1): an inactive (deactivated-but-not-deleted) employee must NEVER be
+        // credited, regardless of whether the FE's roster pre-flight (which filters isActive) was
+        // available. Without this, a deactivated code was blocked when the roster loaded but CREDITED
+        // when the roster fetch 403'd — the same input, opposite money outcome. Skip-with-reason keeps
+        // the outcome deterministic AND honest (the employee exists, but is inactive). The roster
+        // (getEmployeeOptions) already filters isActive, so this aligns the two paths.
+        if (!salesUser.isActive) {
+          skipped.push({
+            employeeCode: employeeCode ?? '',
+            fieldName: r.fieldName,
+            points: r.amount,
+            reason: 'EMPLOYEE_INACTIVE',
           });
           continue;
         }
