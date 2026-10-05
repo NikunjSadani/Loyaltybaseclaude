@@ -660,6 +660,67 @@ export class WalletService {
     });
   }
 
+  /**
+   * Employee Rewards Phase B — ACCOUNT-FIRST redemption debit. The employee mirror of `debitRedeem`
+   * (keyed on the @unique accountId instead of partnerId), for the EMPLOYEE earner whose wallet is
+   * account-owned (no ChannelPartner). Byte-for-byte identical to `debitRedeem` except the wallet is
+   * resolved via `requireWalletByAccount`; routes through the SAME `applyMovement` with the SAME
+   * atomic `requireSufficientRedeemable` TOCTOU guard. The live OUTLET path (`debitRedeem`) is untouched.
+   */
+  async debitRedeemForAccount(
+    accountId: string,
+    amount: number,
+    opts: { referenceId?: string | null; description?: string | null } = {},
+    tx?: Prisma.TransactionClient,
+  ) {
+    if (amount <= 0) throw new BadRequestException('Redeem amount must be positive');
+
+    return this.withTx(tx, async (t) => {
+      const wallet = await this.requireWalletByAccount(t, accountId);
+      if (wallet.redeemablePoints < amount) {
+        throw new BadRequestException('Insufficient wallet balance for redemption');
+      }
+      return this.applyMovement(t, {
+        wallet,
+        walletTxType: 'DEBIT_REDEMPTION',
+        ledgerType: PointsLedgerType.REDEEM,
+        points: -amount,
+        referenceType: 'REDEMPTION_ORDER',
+        referenceId: opts.referenceId ?? null,
+        description: opts.description ?? null,
+        requireSufficientRedeemable: true,
+        insufficientMessage: 'Insufficient wallet balance for redemption',
+      });
+    });
+  }
+
+  /**
+   * Employee Rewards Phase B — ACCOUNT-FIRST reversal (refund on cancel/return). The employee mirror
+   * of `reverse` keyed on accountId; restores redeemablePoints without bumping earned/lifetimeEarned
+   * (a reversal is not new earning). Same `applyMovement` write-path; the OUTLET `reverse` is untouched.
+   */
+  async reverseForAccount(
+    accountId: string,
+    amount: number,
+    opts: { referenceId?: string | null; description?: string | null } = {},
+    tx?: Prisma.TransactionClient,
+  ) {
+    if (amount <= 0) throw new BadRequestException('Reversal amount must be positive');
+
+    return this.withTx(tx, async (t) => {
+      const wallet = await this.requireWalletByAccount(t, accountId);
+      return this.applyMovement(t, {
+        wallet,
+        walletTxType: 'CREDIT_REVERSAL',
+        ledgerType: PointsLedgerType.REVERSE,
+        points: amount,
+        referenceType: 'REDEMPTION_ORDER',
+        referenceId: opts.referenceId ?? null,
+        description: opts.description ?? null,
+      });
+    });
+  }
+
   /** POST /v1/wallet/adjust — GIFSY-only manual credit/debit on a partner wallet. */
   async adjust(user: JwtPayload, dto: AdjustWalletDto) {
     // GIFSY-only is enforced by @Roles on the controller; tenant scope checked here.

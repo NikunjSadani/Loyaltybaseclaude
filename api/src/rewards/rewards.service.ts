@@ -12,7 +12,12 @@ import { GiftFulfilmentChannel, PayoutMode, Prisma, RedemptionStatus } from '@pr
 import { PrismaService } from '../prisma/prisma.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
-import { ensureOutletAccount } from '../common/reward-account.helper';
+import {
+  ensureOutletAccount,
+  ensureEmployeeAccount,
+  ensureEmployeeWallet,
+} from '../common/reward-account.helper';
+import { resolveCapabilities } from '../common/loyalty-capabilities.helper';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -34,6 +39,7 @@ import {
   AdminListCatalogQueryDto,
   CreateRewardCatalogDto,
   CreateRewardCategoryDto,
+  EmployeeRedeemDto,
   FulfilmentOrdersQueryDto,
   FulfilmentTemplateQueryDto,
   ListCatalogQueryDto,
@@ -1093,7 +1099,7 @@ export class RewardsService {
       // = active + not-deleted + KYC-APPROVED, which is exactly the all-mode gate.
       {
         const freshPartner = await tx.channelPartner.findFirst({
-          where: { id: order.partnerId },
+          where: { id: order.partnerId! }, // non-null: OUTLET order (type-only assertion, JS identical)
           select: {
             isActive: true,
             deletedAt: true,
@@ -1135,7 +1141,7 @@ export class RewardsService {
       // below, so re-assert the per-outlet-type gate INSIDE the tx (parity with the
       // freshPartner/DEF-3 guards) — a now loyalty-OFF outlet type can never complete
       // an in-flight redemption. A throw rolls the whole tx back (no debit/claim).
-      if (!(await isLoyaltyEnabledForPartner(tx, user.clientId, order.partnerId))) {
+      if (!(await isLoyaltyEnabledForPartner(tx, user.clientId, order.partnerId!))) {
         throw new ForbiddenException('Rewards are not enabled for your outlet type.');
       }
 
@@ -1147,7 +1153,7 @@ export class RewardsService {
       // a rep-staged order (marked via metadata.salesInitiatedById at redeem) under the same gate,
       // so the outlet owner cannot finish it with the OTP sent to their phone either — both confirm
       // paths are closed for a disabled type.
-      if (!(await isSalesRedeemEnabledForPartner(tx, user.clientId, order.partnerId))) {
+      if (!(await isSalesRedeemEnabledForPartner(tx, user.clientId, order.partnerId!))) {
         throw new ForbiddenException('Sales-assisted redemption is not enabled for this outlet type.');
       }
 
@@ -1166,7 +1172,7 @@ export class RewardsService {
 
       // Debit the OUTLET's wallet via the canonical write-path (passbook + ledger).
       await this.wallet.debitRedeem(
-        order.partnerId,
+        order.partnerId!, // non-null: OUTLET order (type-only assertion, JS identical)
         requiredPoints,
         { referenceId: order.id, description: `Redemption ${order.orderNumber}` },
         tx,
@@ -1211,7 +1217,7 @@ export class RewardsService {
         order.redemptionMode === 'BANK_TRANSFER'
       ) {
         const partnerSnap = await tx.channelPartner.findFirst({
-          where: { id: order.partnerId },
+          where: { id: order.partnerId! }, // non-null: OUTLET order (type-only assertion, JS identical)
           select: {
             bankAccountHolder: true,
             ownerName: true,
@@ -1235,7 +1241,7 @@ export class RewardsService {
 
         await tx.payoutTransaction.create({
           data: {
-            partnerId: order.partnerId,
+            partnerId: order.partnerId!, // non-null: OUTLET order (type-only assertion, JS identical)
             redemptionOrderId: order.id,
             payoutMode: order.redemptionMode,
             status: 'PENDING',
@@ -1283,6 +1289,307 @@ export class RewardsService {
 
     return {
       orderId: order.id,
+      status: 'CONFIRMED',
+      message: 'Redemption confirmed. Your order is being processed.',
+    };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Employee Rewards Phase B — ACCOUNT-FIRST self-service redeem rail.
+  //
+  // A logged-in EMPLOYEE redeems a gift FOR THEMSELVES. Unlike the trade partner
+  // flow (redeem -> OTP-confirm -> debit), there is NO OTP: this is a SINGLE-STEP
+  // operation — validate the item -> resolve the caller's OWN employee account+wallet
+  // -> debit -> create the order already PAST the debit (CONFIRMED) -> it flows into
+  // the existing fulfilment lifecycle. A SEPARATE method (Phase C precedent): the live
+  // trade redeem/confirmRedeem/redeemForOutlet/confirmRedeemForOutlet are untouched.
+  //
+  // Employees have NO cash modes (UPI/BANK_TRANSFER rejected), so NO PayoutTransaction
+  // bridge, NO TDS/valuePaise-for-cash, NO KYC-APPROVED gate, NO outlet-type loyalty
+  // gate, NO partner/sales-assisted resolution.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Fail-safe EMPLOYEE-earner gate (mirrors CreditsService.assertEmployeeEarner). Resolves the
+   * tenant's capability set from loyaltyType + features; an unknown/absent loyaltyType resolves to
+   * the TRADE/OUTLET defaults, so a bad/empty value can NEVER let a trade tenant reach the employee
+   * self-redeem path. Rejects a non-EMPLOYEE tenant with a clean 400.
+   */
+  private async assertEmployeeEarner(clientId: string): Promise<void> {
+    const client = await this.prisma.client.findUnique({
+      where: { id: clientId },
+      select: { loyaltyType: true, features: true },
+    });
+    const capabilities = resolveCapabilities(
+      client?.loyaltyType as string | null | undefined,
+      (client?.features ?? null) as Record<string, unknown> | null,
+    );
+    if (capabilities.earnerModel !== 'EMPLOYEE') {
+      throw new BadRequestException(
+        'Employee self-service redemption applies to employee-rewards tenants only.',
+      );
+    }
+  }
+
+  /**
+   * POST /v1/rewards/employee/redeem — Employee Rewards Phase B SINGLE-STEP self-service redeem.
+   *
+   * Validates the catalogue item (same guards as `redeem`), resolves the LOGGED-IN employee's OWN
+   * SalesUser -> EMPLOYEE RewardAccount + account-owned Wallet, and in ONE all-or-nothing $transaction
+   * debits the wallet and creates the order already CONFIRMED (past the debit). No OTP, no PENDING
+   * limbo. An optional `sourceKey` makes a double-submit idempotent (returns the existing order).
+   */
+  async redeemForEmployee(user: JwtPayload, dto: EmployeeRedeemDto) {
+    // 1. EMPLOYEE-earner tenant gate (fail-safe; a trade tenant is rejected here).
+    await this.assertEmployeeEarner(user.clientId);
+
+    const quantity = dto.quantity ?? 1;
+
+    // 2. Resolve the caller's OWN SalesUser (the employee). This IS the identity authorization:
+    //    a non-sales user (e.g. a CLIENT_ADMIN) has no SalesUser row -> rejected. An inactive
+    //    employee cannot redeem (parity with the Phase C credit path's inactive-skip).
+    const salesUser = await this.prisma.salesUser.findFirst({
+      where: { userId: user.sub, clientId: user.clientId, deletedAt: null },
+      select: { id: true, isActive: true },
+    });
+    if (!salesUser) {
+      throw new ForbiddenException('Only employees may redeem for themselves.');
+    }
+    if (salesUser.isActive === false) {
+      throw new ForbiddenException('Your account is inactive; redemption is not available.');
+    }
+
+    // 3. ACTIVE non-deleted, APPROVED, in-tenant catalogue item (+ vendor-visibility cascade) — the
+    //    SAME guard the trade redeem uses so a stale cart / deep link can't reach a hidden item.
+    const item = await this.prisma.rewardCatalog.findFirst({
+      where: {
+        id: dto.rewardId,
+        status: 'ACTIVE',
+        deletedAt: null,
+        clientId: user.clientId,
+        moderationStatus: 'APPROVED',
+        ...vendorVisibilityFilter(user.clientId),
+      },
+    });
+    if (!item) throw new NotFoundException('Reward item not found or not available');
+
+    // 4. Employees have NO cash rail. Reject UPI/BANK_TRANSFER as an unavailable channel BEFORE any
+    //    other work (so there is never a PayoutTransaction / TDS / cash-value path for an employee).
+    if (item.redemptionMode === 'UPI' || item.redemptionMode === 'BANK_TRANSFER') {
+      throw new BadRequestException('This redemption channel is not available.');
+    }
+
+    // 5. DPDP consent for a VENDOR-sourced item (identical to the trade path); {} for PLATFORM items.
+    const consentData = this.resolveVendorConsent(item, dto.consent);
+
+    // 6. PHYSICAL_GIFT requires a full, pincode-valid delivery address.
+    if (item.redemptionMode === 'PHYSICAL_GIFT') {
+      if (!dto.deliveryAddress) {
+        throw new BadRequestException('Delivery address is required for physical gifts');
+      }
+      this.assertValidPincode(dto.deliveryAddress.pincode);
+    }
+
+    // 7. Per-tenant settings: points<->₹ rate + channel availability (server-enforced). The cash
+    //    branch is unreachable for employees (rejected above) but the channel gate still applies to
+    //    the voucher/physical-gift channels.
+    const settings = await this.tenantSettings.getEffectiveSettings(user.clientId);
+    const rate = settings.conversionRate;
+    if (!settings.redemptionChannels[this.channelKey(item.redemptionMode)]) {
+      throw new BadRequestException('This redemption channel is currently unavailable.');
+    }
+
+    // 8. Points cost: FREE_AMOUNT = round(amount × rate) bounded by min/max + the global voucher
+    //    floor; else pointsCost × qty. Identical to the trade redeem (minus the cash floor branch,
+    //    which is unreachable here).
+    let requiredPoints: number;
+    if (this.isFreeAmount(item)) {
+      if (dto.amount == null) {
+        throw new BadRequestException('amount (₹) is required for a variable-amount voucher');
+      }
+      requiredPoints = Math.round(dto.amount * rate);
+      const min = item.minRedemptionPoints as number;
+      const max = item.maxRedemptionPoints as number;
+      if (requiredPoints < min || requiredPoints > max) {
+        throw new BadRequestException(
+          `Amount out of range. Allowed: ${min}–${max} points, requested: ${requiredPoints}`,
+        );
+      }
+      // Global voucher floor (employees have no cash rail → always the voucher floor).
+      const floorInr = settings.minVoucherFreeAmount;
+      const floorPoints = Math.round(floorInr * rate);
+      if (requiredPoints < floorPoints) {
+        throw new BadRequestException(
+          `Minimum voucher amount is ₹${floorInr} (${floorPoints} points).`,
+        );
+      }
+    } else {
+      requiredPoints = item.pointsCost * quantity;
+    }
+    if (requiredPoints <= 0) {
+      throw new BadRequestException('Redemption must cost a positive number of points');
+    }
+
+    // 9. Gift value snapshot (decision §14): freeze the gift's ₹ selling price onto the order so a
+    //    later price/rate change never re-values it. Null for non-gift / variable-amount items.
+    const sellingSnap = item.sellingValuePaise;
+    const addr = dto.deliveryAddress;
+    // Ship-to name fallback (audit HIGH#2 parity): never let a gift brand/product be the recipient —
+    // fall back to the employee's own name (from the session) when the sent name is blank/the gift.
+    const deliveryName = this.resolveDeliveryName(addr?.name, user.name, item.name);
+    const rateCenti = Math.round(rate * 100);
+
+    // 10. SINGLE-STEP, all-or-nothing: ensure the employee's account + account-owned wallet, create
+    //     the order already CONFIRMED (past the debit), debit the account wallet, and write the
+    //     creation status-history row. Idempotent on `sourceKey` under a per-(account,key) advisory
+    //     lock so a double-submit returns the existing order instead of debiting twice.
+    const order = await this.prisma.$transaction(async (tx) => {
+      const accountId = await ensureEmployeeAccount(tx, salesUser.id);
+      await ensureEmployeeWallet(tx, accountId);
+
+      // ALWAYS-ON idempotency (money audit A, Finding 1): sourceKey is REQUIRED, so this dedup runs on
+      // every call. Serialize on (account,key) via an advisory xact lock, then return the
+      // already-created order for an identical re-submit (no second debit) — the single-step redeem
+      // mints a fresh order per call, so without this a double-click would create two orders + two
+      // debits (requireSufficientRedeemable only blocks a NEGATIVE balance, not a within-balance
+      // double-charge). The lock is taken BEFORE the find+create so concurrent identical submits
+      // serialize and the loser sees the committed order.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`employee_redeem:${accountId}:${dto.sourceKey}`}, 0))`;
+      const existing = await tx.redemptionOrder.findFirst({
+        where: {
+          accountId,
+          metadata: { path: ['employeeRedeemKey'], equals: dto.sourceKey },
+        },
+      });
+      if (existing) {
+        // Fail loud on key REUSE for a different reward (money audit A, Finding 2): returning the
+        // prior (unrelated) order would silently swallow a genuine new redeem. The caller must mint a
+        // fresh key per intent. An identical retry (same reward) returns the existing order unchanged.
+        if (existing.rewardId !== item.id) {
+          throw new BadRequestException(
+            'This idempotency key was already used for a different redemption. Use a fresh key per redeem.',
+          );
+        }
+        return existing;
+      }
+
+      // valuePaise freeze (gift value; rate-immune). Employees are never cash mode, so isCashMode is
+      // always false → a gift freezes sellingValuePaise×qty, a non-gift falls back to points ÷ rate.
+      // This keeps the fulfilment/gift-disbursal reporting lifecycle consistent with the trade path.
+      const valuePaise = computeFrozenValuePaise({
+        isCashMode: false,
+        sellingValuePaiseSnapshot: sellingSnap ?? null,
+        quantity,
+        points: requiredPoints,
+        rateCenti,
+      });
+
+      const metadata: Prisma.InputJsonValue = {
+        ...(sellingSnap != null ? { sellingValuePaiseSnapshot: sellingSnap } : {}),
+        // Always stamped (sourceKey is required) — the idempotency lookup above keys on it.
+        employeeRedeemKey: dto.sourceKey,
+        employeeRedeem: true,
+      };
+
+      // Tenant-stamped order number via the SAME concurrency-safe per-(tenant,year) sequence.
+      const orderNumber = await generateTenantOrderNumber(tx, user.clientId);
+      const created = await tx.redemptionOrder.create({
+        data: {
+          // ACCOUNT-FIRST: no ChannelPartner. Tenant ownership flows through accountId -> clientId.
+          partnerId: null,
+          accountId,
+          rewardId: item.id,
+          orderNumber,
+          metadata,
+          quantity,
+          // Past the debit already — the debit happens in this same tx below.
+          pointsDeducted: requiredPoints,
+          totalPointsCost: requiredPoints,
+          valuePaise,
+          conversionRateCenti: rateCenti,
+          redemptionMode: item.redemptionMode,
+          // CONFIRMED = the first fulfilment state the dispatch console expects (same as the trade
+          // confirm). No PENDING-OTP limbo.
+          status: 'CONFIRMED',
+          deliveryName,
+          deliveryPhone: addr?.mobile,
+          deliveryAddressLine1: addr?.address,
+          deliveryCity: addr?.city,
+          deliveryState: addr?.state,
+          deliveryPincode: addr?.pincode,
+          ...consentData,
+        },
+      });
+
+      // Debit the EMPLOYEE's account-owned wallet via the account-first canonical write-path (passbook
+      // + ledger + the SAME atomic requireSufficientRedeemable TOCTOU guard as the trade debitRedeem).
+      // Throws 400 on insufficient balance → the whole tx (incl. the order create) rolls back.
+      await this.wallet.debitRedeemForAccount(
+        accountId,
+        requiredPoints,
+        { referenceId: created.id, description: `Redemption ${created.orderNumber}` },
+        tx,
+      );
+
+      // Guarded stock claim — concurrent redeems of the last unit can't oversell (parity with confirm).
+      if (item.stockQuantity != null) {
+        const stockClaim = await tx.rewardCatalog.updateMany({
+          where: { id: item.id, stockQuantity: { gte: quantity } },
+          data: { stockQuantity: { decrement: quantity } },
+        });
+        if (stockClaim.count === 0) {
+          throw new BadRequestException('Reward is out of stock');
+        }
+        const fresh = await tx.rewardCatalog.findFirst({
+          where: { id: item.id },
+          select: { stockQuantity: true },
+        });
+        if (fresh?.stockQuantity != null && fresh.stockQuantity <= 0) {
+          await tx.rewardCatalog.update({
+            where: { id: item.id },
+            data: { status: 'OUT_OF_STOCK' },
+          });
+        }
+      }
+
+      // Creation history: fromStatus null (there was never a PENDING state) -> CONFIRMED.
+      await tx.redemptionStatusHistory.create({
+        data: {
+          orderId: created.id,
+          fromStatus: null,
+          toStatus: RedemptionStatus.CONFIRMED,
+          changedById: user.sub,
+        },
+      });
+
+      return created;
+    });
+
+    // Best-effort confirmation notification to the employee (free channels: bell + push). No paid
+    // channel / owner fan-out (employees have no ChannelPartner owner). Fire-and-forget; never throws
+    // into the money path (the debit already committed above).
+    await this.notifications
+      .notifyUserWithChannels({
+        clientId: user.clientId,
+        userId: user.sub,
+        eventKey: 'REDEMPTION_CONFIRMED',
+        recipientPhone: null,
+        vars: {
+          ownerName: user.name ?? 'Employee',
+          rewardName: item.name,
+          points: requiredPoints,
+        },
+        subject: 'Redemption confirmed',
+        body: 'Your redemption is confirmed.',
+        url: '/rewards',
+        event: 'REDEMPTION_CONFIRMED',
+      })
+      .catch((e) => this.logger.error(`[redeemForEmployee] notify failed for order ${order.id}: ${e}`));
+
+    return {
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      requiredPoints,
       status: 'CONFIRMED',
       message: 'Redemption confirmed. Your order is being processed.',
     };
@@ -1662,7 +1969,7 @@ export class RewardsService {
         // partner) + clientId — NEVER re-resolve from user.sub here, which would
         // silently switch a switched-outlet confirm back to the login's own partner.
         const freshPartner = await tx.channelPartner.findFirst({
-          where: { id: order.partnerId, clientId: user.clientId },
+          where: { id: order.partnerId!, clientId: user.clientId }, // non-null: OUTLET order (type-only)
           select: {
             isActive: true,
             deletedAt: true,
@@ -1706,7 +2013,7 @@ export class RewardsService {
       // per-outlet-type gate INSIDE the tx (parity with the freshPartner/DEF-3 guards) —
       // a now loyalty-OFF outlet type can never complete an in-flight redemption. A throw
       // rolls the whole tx back (no debit/claim).
-      if (!(await isLoyaltyEnabledForPartner(tx, user.clientId, order.partnerId))) {
+      if (!(await isLoyaltyEnabledForPartner(tx, user.clientId, order.partnerId!))) {
         throw new ForbiddenException('Rewards are not enabled for your outlet type.');
       }
 
@@ -1717,7 +2024,7 @@ export class RewardsService {
       // Only rep-staged orders are gated here; a genuine self-redeem (no marker) is unaffected.
       const salesInitiated =
         (order.metadata as { salesInitiatedById?: unknown } | null)?.salesInitiatedById != null;
-      if (salesInitiated && !(await isSalesRedeemEnabledForPartner(tx, user.clientId, order.partnerId))) {
+      if (salesInitiated && !(await isSalesRedeemEnabledForPartner(tx, user.clientId, order.partnerId!))) {
         throw new ForbiddenException('Sales-assisted redemption is not enabled for this outlet type.');
       }
 
@@ -1736,7 +2043,7 @@ export class RewardsService {
       // Debit via the canonical wallet write-path (passbook + ledger). Throws 400
       // on insufficient balance → whole tx (incl. the claim) rolls back.
       await this.wallet.debitRedeem(
-        order.partnerId,
+        order.partnerId!, // non-null: OUTLET order (type-only assertion, JS identical)
         requiredPoints,
         { referenceId: order.id, description: `Redemption ${order.orderNumber}` },
         tx,
@@ -1805,7 +2112,7 @@ export class RewardsService {
         // keyed by order.partnerId (== the resolved active partner) + clientId — the
         // payout beneficiary is the switched outlet, never re-resolved from user.sub.
         const partnerSnap = await tx.channelPartner.findFirst({
-          where: { id: order.partnerId, clientId: user.clientId },
+          where: { id: order.partnerId!, clientId: user.clientId }, // non-null: OUTLET order (type-only)
           select: {
             bankAccountHolder: true,
             ownerName: true,
@@ -1832,7 +2139,7 @@ export class RewardsService {
 
         await tx.payoutTransaction.create({
           data: {
-            partnerId: order.partnerId,
+            partnerId: order.partnerId!, // non-null: OUTLET order (type-only assertion, JS identical)
             redemptionOrderId: order.id,
             payoutMode: order.redemptionMode,
             status: 'PENDING',
@@ -2028,12 +2335,26 @@ export class RewardsService {
           data: { pointsDeducted: 0 },
         });
         if (refundClaim.count > 0) {
-          await this.wallet.reverse(
-            order.partnerId,
-            order.pointsDeducted,
-            { referenceId: id, description: `Refund ${order.orderNumber}` },
-            tx,
-          );
+          // Employee Rewards Phase B — the ONE justified in-method branch (shared fulfilment
+          // lifecycle): an ACCOUNT-FIRST employee order has partnerId null, so the trade
+          // wallet.reverse(partnerId) would throw. Refund the account-owned wallet instead. The
+          // trade (partnerId) path is byte-identical — order.partnerId! erases at compile (an
+          // OUTLET order here always has a non-null partnerId).
+          if (order.partnerId == null && order.accountId != null) {
+            await this.wallet.reverseForAccount(
+              order.accountId,
+              order.pointsDeducted,
+              { referenceId: id, description: `Refund ${order.orderNumber}` },
+              tx,
+            );
+          } else {
+            await this.wallet.reverse(
+              order.partnerId!,
+              order.pointsDeducted,
+              { referenceId: id, description: `Refund ${order.orderNumber}` },
+              tx,
+            );
+          }
         }
       }
 
@@ -2052,11 +2373,15 @@ export class RewardsService {
       return o;
     });
 
-    // Notify the partner on the customer-visible milestones.
+    // Notify the partner on the customer-visible milestones. Guarded on a non-null partnerId:
+    // an ACCOUNT-FIRST employee order (partnerId null) has no ChannelPartner owner to fan out to
+    // here — this is forced by the nullable column and is runtime-identical for every trade order
+    // (which always has a non-null partnerId). The employee gets their own confirmation on redeem.
     if (
-      toStatus === RedemptionStatus.DISPATCHED ||
-      toStatus === RedemptionStatus.DELIVERED ||
-      toStatus === RedemptionStatus.CANCELLED
+      order.partnerId != null &&
+      (toStatus === RedemptionStatus.DISPATCHED ||
+        toStatus === RedemptionStatus.DELIVERED ||
+        toStatus === RedemptionStatus.CANCELLED)
     ) {
       const partner = await this.prisma.channelPartner.findFirst({
         where: { id: order.partnerId },

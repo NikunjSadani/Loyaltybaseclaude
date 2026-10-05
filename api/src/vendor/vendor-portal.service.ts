@@ -722,9 +722,12 @@ export class VendorPortalService {
     });
 
     // Member notification on the customer-visible milestones (same path as Gifsy).
+    // Employee Rewards Phase B — order.partnerId! is a type-only assertion (JS identical): this
+    // transition is reached only via the vendor portal, which scopes by `partner: { clientId }`
+    // (see the findFirst above), so an ACCOUNT-FIRST employee order (partner null) can never reach here.
     if (toStatus === RedemptionStatus.DISPATCHED || toStatus === RedemptionStatus.DELIVERED) {
       const partner = await this.prisma.channelPartner.findFirst({
-        where: { id: order.partnerId },
+        where: { id: order.partnerId! },
         select: { userId: true, phone: true, ownerName: true },
       });
       if (partner?.userId) {

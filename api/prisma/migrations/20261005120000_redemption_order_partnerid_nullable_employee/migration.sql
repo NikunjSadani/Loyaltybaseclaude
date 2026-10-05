@@ -1,0 +1,11 @@
+-- Employee Rewards Phase B — allow an ACCOUNT-FIRST employee redemption order (STRICTLY ADDITIVE).
+-- Drop the NOT NULL on redemption_orders.partnerId so an EMPLOYEE order can be created with only an
+-- accountId (no ChannelPartner), mirroring the Phase C wallets.partnerId change. Tenant ownership of
+-- an employee order is carried by the accountId -> reward_accounts.clientId relation (there is no
+-- clientId column on this table), exactly as the account itself is minted with the employee's clientId.
+--
+-- The existing FK (partnerId -> channel_partners.id, onDelete Restrict) and every index stay valid with
+-- NULLs: an employee order simply has partnerId NULL. Every existing OUTLET order keeps its partnerId and
+-- the live TRADE redeem/confirm path (redeem -> confirmRedeem -> wallet.debitRedeem(order.partnerId)) is
+-- unchanged. No backfill, no drops of the index/constraint.
+ALTER TABLE "redemption_orders" ALTER COLUMN "partnerId" DROP NOT NULL;

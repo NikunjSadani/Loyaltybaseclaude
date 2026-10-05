@@ -296,6 +296,79 @@ describe('WalletService', () => {
     });
   });
 
+  // ─── Employee Rewards Phase B — account-first redeem/refund primitives ──────────
+  describe('debitRedeemForAccount (Phase B)', () => {
+    it('resolves the wallet BY ACCOUNT and debits via the SAME atomic guarded update as debitRedeem', async () => {
+      mockTx.wallet.findFirst.mockResolvedValue({ id: 'wE', redeemablePoints: 50 });
+      mockTx.wallet.updateMany.mockResolvedValue({ count: 1 });
+      mockTx.wallet.findUniqueOrThrow.mockResolvedValue({ id: 'wE', redeemablePoints: 40 });
+      mockTx.walletTransaction.create.mockResolvedValue({ id: 'txE' });
+      mockTx.pointsLedger.create.mockResolvedValue({ id: 'plE' });
+
+      const res = await service.debitRedeemForAccount('acc-1', 10, { referenceId: 'order-E' });
+
+      expect(res.newRedeemable).toBe(40);
+      // Wallet resolved by accountId (NOT partnerId).
+      expect(mockTx.wallet.findFirst).toHaveBeenCalledWith({ where: { accountId: 'acc-1' } });
+      // Identical guarded conditional decrement + redeemed counters; NEVER earned.
+      const call = mockTx.wallet.updateMany.mock.calls[0][0];
+      expect(call.where).toEqual({ id: 'wE', redeemablePoints: { gte: 10 } });
+      expect(call.data).toEqual({
+        lastTransactionAt: expect.any(Date),
+        redeemablePoints: { decrement: 10 },
+        redeemedPoints: { increment: 10 },
+        lifetimeRedeemed: { increment: 10 },
+      });
+      expect(mockTx.pointsLedger.create.mock.calls[0][0].data).toEqual(
+        expect.objectContaining({ transactionType: 'REDEEM', points: -10 }),
+      );
+    });
+
+    it('throws BadRequest when redeemable is insufficient and writes nothing', async () => {
+      mockTx.wallet.findFirst.mockResolvedValue({ id: 'wE', redeemablePoints: 5 });
+      await expect(
+        service.debitRedeemForAccount('acc-1', 10, { referenceId: 'order-E' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockTx.wallet.update).not.toHaveBeenCalled();
+      expect(mockTx.pointsLedger.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects a concurrent redemption when the guarded update matches no row (TOCTOU, no negative balance)', async () => {
+      mockTx.wallet.findFirst.mockResolvedValue({ id: 'wE', redeemablePoints: 50 });
+      mockTx.wallet.updateMany.mockResolvedValue({ count: 0 });
+      await expect(
+        service.debitRedeemForAccount('acc-1', 40, { referenceId: 'order-E2' }),
+      ).rejects.toThrow('Insufficient wallet balance for redemption');
+      expect(mockTx.pointsLedger.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-positive amount and throws NotFound when the account has no wallet', async () => {
+      await expect(service.debitRedeemForAccount('acc-1', 0, {})).rejects.toBeInstanceOf(BadRequestException);
+      mockTx.wallet.findFirst.mockResolvedValue(null);
+      await expect(service.debitRedeemForAccount('accX', 10, {})).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('reverseForAccount (Phase B)', () => {
+    it('re-credits redeemable BY ACCOUNT without bumping earned/lifetimeEarned', async () => {
+      mockTx.wallet.findFirst.mockResolvedValue({ id: 'wE', redeemablePoints: 20 });
+      mockTx.wallet.update.mockResolvedValue({ id: 'wE', redeemablePoints: 30 });
+      mockTx.walletTransaction.create.mockResolvedValue({ id: 'txE' });
+      mockTx.pointsLedger.create.mockResolvedValue({ id: 'plE' });
+
+      await service.reverseForAccount('acc-1', 10, { referenceId: 'order-E' });
+
+      expect(mockTx.wallet.findFirst).toHaveBeenCalledWith({ where: { accountId: 'acc-1' } });
+      const data = mockTx.wallet.update.mock.calls[0][0].data;
+      expect(data.redeemablePoints).toEqual({ increment: 10 });
+      expect(data.earnedPoints).toBeUndefined();
+      expect(data.lifetimeEarned).toBeUndefined();
+      expect(mockTx.pointsLedger.create.mock.calls[0][0].data).toEqual(
+        expect.objectContaining({ transactionType: 'REVERSE', points: 10 }),
+      );
+    });
+  });
+
   describe('adjust', () => {
     it('throws NotFound when the partner wallet is outside the tenant', async () => {
       mockPrisma.wallet.findFirst.mockResolvedValue(null);

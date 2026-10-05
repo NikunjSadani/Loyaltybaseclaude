@@ -4,6 +4,7 @@ import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decor
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import {
+  EmployeeRedeemDto,
   ListCatalogQueryDto,
   ListOrdersQueryDto,
   RedeemConfirmDto,
@@ -67,6 +68,19 @@ export class RewardsController {
     @Headers('x-active-partner-id') activePartnerId?: string,
   ) {
     return this.rewards.confirmRedeem(user, dto, activePartnerId);
+  }
+
+  /**
+   * Employee Rewards Phase B — SINGLE-STEP self-service redeem (no OTP). The logged-in EMPLOYEE
+   * redeems a gift for themselves. Intentionally NOT @Roles-gated: an employee's role is their
+   * tenant-defined hierarchy-level code (dynamic, not a fixed allow-list), so authorization is the
+   * SERVICE-layer gates — the EMPLOYEE-earner tenant check + resolving the caller's OWN SalesUser.
+   * This mirrors the GET orders routes, which also rely on service-layer scoping rather than @Roles.
+   */
+  @Post('employee/redeem')
+  @RequirePermission('rewards:read')
+  redeemForEmployee(@CurrentUser() user: JwtPayload, @Body() dto: EmployeeRedeemDto) {
+    return this.rewards.redeemForEmployee(user, dto);
   }
 
   /** SALES-ASSISTED redeem (B1, #50-E) — a sales user redeems for an assigned outlet. */

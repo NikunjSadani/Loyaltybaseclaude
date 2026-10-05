@@ -74,11 +74,15 @@ export class GiftDisbursalService {
         valuePaise: true,
         fulfilledByVendorId: true,
         partner: { select: { clientId: true } },
+        // Employee Rewards Phase B — an ACCOUNT-FIRST employee order has no partner; its tenant is
+        // carried by the account. Selected as the clientId fallback so a platform-wide view (no
+        // partner filter) never dereferences a null partner.
+        account: { select: { clientId: true } },
       },
     });
 
     const rows: DisbursalOrderRow[] = orders.map((o) => ({
-      clientId: o.partner.clientId,
+      clientId: o.partner?.clientId ?? o.account?.clientId ?? '',
       vendorId: o.fulfilledByVendorId,
       status: o.status,
       valuePaise: o.valuePaise,

@@ -253,6 +253,28 @@ export class RedeemDto {
   consent?: boolean;
 }
 
+/**
+ * POST /v1/rewards/employee/redeem — Employee Rewards Phase B SINGLE-STEP self-service redeem.
+ * The logged-in EMPLOYEE redeems a gift FOR THEMSELVES (resolved from their own SalesUser). There is
+ * NO OTP (unlike the trade partner flow): validate -> debit -> create a post-debit order in one step.
+ * Reuses RedeemDto (rewardId / quantity / amount / deliveryAddress / consent) and adds an OPTIONAL
+ * idempotency key so a double-submit returns the existing order instead of debiting twice.
+ */
+export class EmployeeRedeemDto extends RedeemDto {
+  /**
+   * REQUIRED idempotency key (money audit A, Finding 1). Unlike the trade redeem (two-step: the
+   * order's PENDING→CONFIRMED claim is its own dedup token), the employee redeem is SINGLE-STEP and
+   * mints a fresh order per call, so it has NO natural idempotency — without a key a double-submit
+   * (double-click / client retry) would create two orders and debit the wallet TWICE. So the key is
+   * mandatory: the caller mints a fresh value per redeem intent (a UUID held in FE state, reused on
+   * retry). Resolved under a per-(account,key) advisory lock + stored on the order metadata
+   * (`employeeRedeemKey`) so an identical re-submit returns the existing order instead of debiting again.
+   */
+  @IsString()
+  @MinLength(1)
+  sourceKey!: string;
+}
+
 /** POST /v1/rewards/redeem/confirm — confirm a PENDING order with the OTP. */
 export class RedeemConfirmDto {
   @IsString()

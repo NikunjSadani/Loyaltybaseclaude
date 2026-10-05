@@ -1536,7 +1536,12 @@ model RewardCatalog {
 
 model RedemptionOrder {
   id                   String           @id @default(cuid())
-  partnerId            String
+  // Employee Rewards Phase B — nullable so an EMPLOYEE order can be created ACCOUNT-FIRST (no
+  // ChannelPartner), mirroring the Phase C Wallet.partnerId change. Tenant ownership of an employee
+  // order flows through accountId -> RewardAccount.clientId (there is no clientId column here). The
+  // partner relation is optional to match. ADDITIVE — every existing OUTLET order keeps its partnerId
+  // and the live TRADE redeem/confirm path is byte-unchanged (partnerId is non-null for those rows).
+  partnerId            String?
   accountId            String?          // Employee Rewards Phase 1 — unified owner (additive; partnerId kept)
   rewardId             String
   orderNumber          String           @unique
@@ -1586,7 +1591,9 @@ model RedemptionOrder {
   createdAt            DateTime         @default(now())
   updatedAt            DateTime         @updatedAt
 
-  partner          ChannelPartner            @relation(fields: [partnerId], references: [id], onDelete: Restrict)
+  // Optional: an account-first EMPLOYEE order has no ChannelPartner (partnerId null). OUTLET orders
+  // still link their partner; onDelete Restrict for a linked partner is unchanged.
+  partner          ChannelPartner?           @relation(fields: [partnerId], references: [id], onDelete: Restrict)
   account          RewardAccount?            @relation(fields: [accountId], references: [id], onDelete: Restrict)
   reward           RewardCatalog             @relation(fields: [rewardId], references: [id])
   fulfilledByVendor Vendor?                  @relation(fields: [fulfilledByVendorId], references: [id], onDelete: Restrict)

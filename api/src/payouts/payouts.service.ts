@@ -791,7 +791,10 @@ export class PayoutsService {
               });
               if (refundClaim.count > 0) {
                 await this.wallet.reverse(
-                  order.partnerId,
+                  // Employee Rewards Phase B — type-only assertion (JS identical): a PayoutTransaction
+                  // exists only for CASH redemptions, which employees cannot make (the employee redeem
+                  // rail rejects UPI/BANK_TRANSFER), so this order always has a non-null OUTLET partnerId.
+                  order.partnerId!,
                   order.pointsDeducted,
                   {
                     referenceId: orderId,
