@@ -55,11 +55,15 @@
   no schema change. Audit VERDICT **SAFE for Deoleo** (OR account arm is a provably same-tenant superset; trade
   rows byte-identical — OUTLET accounts have no `employeeProfile`). Gate api jest **3549**; runtime-verified
   (scoped operator sees the employee order, cross-tenant isolated). Member-facing order view NOT touched (WS2).
-  ▶ **NEXT (remaining B2 / go-live):** (a) **vendor-portal queue** + scoped **gift-disbursal** still
-  partner-scoped (audit Finding 6) — a VENDOR-sourced employee gift is stuck on the vendor rail; close OR explicitly
-  defer per the pilot-scope question "do employee rewards use vendor-sourced gifts?"; (b) catalogue curation flags
-  (Dream-eligible/featured, role/region visibility); (c) employee shipping-address sourcing; (d) the employee's OWN
-  order view (WS2).
+- **Phase B Wave B2 part 2 (vendor rail + disbursal account-scoping, Finding 6) landed (2026-10-09, HEAD `6992686`):**
+  the 3P vendor portal (4 queue sites) + scoped gift-disbursal now span `OR[partner,account]` via the shared
+  `orderTenantScopeWhere`, so a vendor-sourced employee gift surfaces to its vendor + into a scoped disbursal total.
+  Audit caught + FIXED a real HIGH (vendor `transition()` 500 on a null-partner order — Prisma 7 throws on `id:null`;
+  now branches notify by owner + notifies the employee via account→user) with a null-partner regression test.
+  Audit SAFE for Deoleo. Gate api jest **3553**; disbursal runtime-verified on real data.
+  ▶ **NEXT (remaining B2 / go-live):** (a) catalogue curation flags (Dream-eligible/featured, role/region
+  visibility); (b) employee shipping-address sourcing; (c) `/admin/fulfilment` FE page; (d) the employee's OWN
+  order view (WS2 / rep app). Also open from earlier: Phase C target column + Contests.
 - **Phase A (Shell + People roster) landed (2026-10-04):** the one net-new piece — the EMPLOYEE
   `RewardAccount` ↔ `SalesUser` linkage (migration `20261003120000` + `ensureEmployeeAccount`/bulk helper,
   gated by `earnerModel`) — plus `/admin/people` surfacing the reused roster. Two money-audit defects (lock
@@ -194,12 +198,14 @@
 - **EMP-GAP-1 (employee orders invisible to tenant-scoped views) — operator console DONE (`53c1d14`); residual gates remain.**
   ✅ The GIFSY fulfilment/dispatch console (list/detail/template/upload/transition/updateOrder) now spans
   `OR[partner.clientId, account.clientId]` via `orderTenantScope`, so an operator sees + fulfils employee orders
-  (audit SAFE for Deoleo; runtime-verified). **Still open before employee go-live:** (a) **3P vendor portal** queue
-  (`vendor-portal.service.ts`) + scoped **gift-disbursal** (`gift-disbursal.service.ts:43`) still partner-scoped
-  → a VENDOR-sourced employee gift is un-fulfillable on the vendor rail, and a scoped disbursal total excludes
-  employee DELIVERED value (audit Finding 6; dormant, NOT a trade risk). Depends on the pilot-scope question "do
-  employee rewards use vendor-sourced gifts?" — close OR explicitly defer. (b) the employee's OWN order view
-  (`listOrders`/`getOrder`/`track`) = **Workstream 2** (rep app); fails closed today (no cross-tenant/trade risk).
+  (audit SAFE for Deoleo; runtime-verified). ✅ **Finding 6 CLOSED (`6992686`):** the 3P **vendor portal** queue
+  (4 sites) + scoped **gift-disbursal** now use the shared `orderTenantScopeWhere`, so a vendor-sourced employee
+  gift surfaces to its vendor and into a scoped disbursal total (`redeemForEmployee` stamps `fulfilledByVendorId`).
+  The audit caught a real HIGH in the same pass — the vendor `transition()` notify did `channelPartner.findFirst({
+  id: order.partnerId! })`, and Prisma 7 THROWS on `id: null` → a vendor dispatching an employee gift would 500;
+  FIXED (branch notify on `partnerId != null`; employee notified via account→SalesUser→user) + null-partner
+  regression test. **Still open before go-live:** the employee's OWN order view (`listOrders`/`getOrder`/`track`)
+  = **Workstream 2** (rep app); fails closed today (no cross-tenant/trade risk).
 - **TRACKED (Phase B audit EMP-REC-1, low) — mixed-tenant disbursal↔194R reconciliation.** A platform-wide
   gift-disbursal report (OWNER, no clientId) would include employee DELIVERED `valuePaise` while 194R Source-2
   (partner-scoped) excludes it, breaking the "disbursal ties to the 194R base" note. Dormant until employee
@@ -417,3 +423,25 @@ credits + catalogue, pilot vendors).
     name), a cross-tenant operator is isolated (NotFound, 0 items) — all green.
   - ▶ **NEXT:** vendor-portal/disbursal account-spanning (Finding 6, pilot-scope gated) + catalogue curation flags
     + employee shipping-address + the `/admin/fulfilment` FE page + the employee's own order view (WS2).
+
+- **Phase B Wave B2 part 2 — vendor rail + disbursal account-scoping (Finding 6)** (2026-10-09, `er/phase0-shell`
+  HEAD `6992686`, FULL-GATE GREEN, independent trade-safety audit, real-DB runtime-verified). Query-only.
+  - **Net:** extracted a shared `common/order-tenant-scope.ts` → `orderTenantScopeWhere(scope)` (single source of the
+    trade-safety reasoning); applied at the 3P vendor-portal's 4 order-queue sites + gift-disbursal `buildWhere`;
+    `rewards.service`'s private `orderTenantScope` now DELEGATES to it (6 console sites unchanged). So a vendor-sourced
+    employee gift (`redeemForEmployee` stamps `fulfilledByVendorId` + consent) surfaces to its vendor and into a
+    scoped disbursal total. The vendor VIEW is partner-agnostic (delivery from the order's own fields) → no display change.
+  - **Independent audit caught a real HIGH (Finding 1), FIXED:** spanning employee orders made the vendor
+    `transition()` reachable with a null partnerId, but its notify did `channelPartner.findFirst({ id: order.partnerId! })`
+    — **Prisma 7 THROWS on `id: null`** (not silent) → a vendor dispatching/delivering an employee gift would 500.
+    Fix: branch the notify on `partnerId != null`; a null-partner employee order notifies the employee via
+    account→SalesUser→user (mirrors the account-aware refund branch). Added a **null-partner transition regression
+    test** (the exact gap that let it pass green). Audit VERDICT otherwise SAFE for Deoleo (no cross-tenant leak —
+    account arm is a proven same-tenant superset; no OR-collision; PENDING/PII intact; trade rows byte-identical).
+  - **FULL GATE GREEN:** api jest **3553** (+ `order-tenant-scope.spec.ts`, the null-partner transition test; the
+    vendor/disbursal/isolation specs updated to the OR shape) · nest build ✓. **Real-DB runtime verify:** a scoped
+    CLIENT_ADMIN's gift-disbursal total INCLUDES the employee DELIVERED value (2000 paise) and EXCLUDES another
+    tenant's — the OR scoping proven on real data through a second consumer. (Vendor `transition()` fix covered by
+    the unit regression test; a full vendor-queue DB seed is disproportionate for a dormant surface whose query
+    pattern is already DB-proven.)
+  - ▶ **NEXT:** catalogue curation flags + employee shipping-address + `/admin/fulfilment` FE + employee order view (WS2).
