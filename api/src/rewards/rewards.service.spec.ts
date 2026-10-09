@@ -2341,6 +2341,24 @@ describe('RewardsService', () => {
       expect(call.data.status).toBe('ACTIVE');
       expect(res).toEqual({ item: { id: 'r1' } });
     });
+
+    it('persists the Phase B curation flags (featured/dreamEligible/visibleRoleCodes/visibleRegions)', async () => {
+      mockPrisma.rewardCategory.findFirst.mockResolvedValue({ id: 'c1' });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null);
+      mockPrisma.rewardCatalog.create.mockResolvedValue({ id: 'r1' });
+      await service.createCatalogItem(gifsy, {
+        ...base,
+        featured: true,
+        dreamEligible: true,
+        visibleRoleCodes: ['ASM', 'RSM'],
+        visibleRegions: ['WEST'],
+      } as never);
+      const call = mockPrisma.rewardCatalog.create.mock.calls?.[0]?.[0];
+      expect(call.data.featured).toBe(true);
+      expect(call.data.dreamEligible).toBe(true);
+      expect(call.data.visibleRoleCodes).toEqual(['ASM', 'RSM']);
+      expect(call.data.visibleRegions).toEqual(['WEST']);
+    });
   });
 
   describe('updateCatalogItem', () => {
@@ -2376,6 +2394,25 @@ describe('RewardsService', () => {
       await service.updateCatalogItem(gifsy, 'r1', { status: 'ACTIVE' });
       const call = mockPrisma.rewardCatalog.update.mock.calls?.[0]?.[0];
       expect(call.data.status).toBe('ACTIVE');
+    });
+
+    it('persists the Phase B curation flags on update', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        id: 'r1', code: 'AMZ500', stockQuantity: 5,
+        minRedemptionPoints: null, maxRedemptionPoints: null,
+      });
+      mockPrisma.rewardCatalog.update.mockResolvedValue({ id: 'r1' });
+      await service.updateCatalogItem(gifsy, 'r1', {
+        featured: true,
+        dreamEligible: false,
+        visibleRoleCodes: ['ASM'],
+        visibleRegions: [],
+      } as never);
+      const call = mockPrisma.rewardCatalog.update.mock.calls?.[0]?.[0];
+      expect(call.data.featured).toBe(true);
+      expect(call.data.dreamEligible).toBe(false);
+      expect(call.data.visibleRoleCodes).toEqual(['ASM']);
+      expect(call.data.visibleRegions).toEqual([]);
     });
   });
 

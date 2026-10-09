@@ -148,7 +148,7 @@ describe('RewardsService — Employee Rewards Phase B (self-service redeem)', ()
     await service.redeemForEmployee(employee, dto());
     expect(mockPrisma.salesUser.findFirst).toHaveBeenCalledWith({
       where: { userId: 'u-emp', clientId: 'acme', deletedAt: null },
-      select: { id: true, isActive: true },
+      select: { id: true, isActive: true, region: true, hierarchyLevel: { select: { code: true } } },
     });
     expect(ensureEmployeeAccount).toHaveBeenCalledWith(mockPrisma, 'su-emp');
     expect(ensureEmployeeWallet).toHaveBeenCalledWith(mockPrisma, 'acc-emp');
@@ -178,6 +178,63 @@ describe('RewardsService — Employee Rewards Phase B (self-service redeem)', ()
       BadRequestException,
     );
     expect(mockWallet.debitRedeemForAccount).not.toHaveBeenCalled();
+  });
+
+  // ─── Catalogue VISIBILITY gate (Phase B §5.4 — role/region, employee path only) ─
+  // The employee's role-code = salesUser.hierarchyLevel.code; region = salesUser.region.
+  const empWith = (over: { code?: string | null; region?: string | null }) => ({
+    id: 'su-emp',
+    isActive: true,
+    region: over.region ?? null,
+    hierarchyLevel: over.code === null ? null : { code: over.code ?? 'FIELD_EXEC' },
+  });
+
+  it('REJECTS when visibleRoleCodes is set and the employee role is NOT in it — no debit', async () => {
+    mockPrisma.salesUser.findFirst.mockResolvedValue(empWith({ code: 'FIELD_EXEC', region: 'WEST' }));
+    mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+      ...PLATFORM_GIFT,
+      visibleRoleCodes: ['ASM', 'RSM'],
+      visibleRegions: [],
+    });
+    await expect(service.redeemForEmployee(employee, dto())).rejects.toBeInstanceOf(ForbiddenException);
+    expect(mockWallet.debitRedeemForAccount).not.toHaveBeenCalled();
+    expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+  });
+
+  it('PROCEEDS when the employee role IS in visibleRoleCodes', async () => {
+    mockPrisma.salesUser.findFirst.mockResolvedValue(empWith({ code: 'ASM', region: 'WEST' }));
+    mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+      ...PLATFORM_GIFT,
+      visibleRoleCodes: ['ASM', 'RSM'],
+      visibleRegions: [],
+    });
+    const res = await service.redeemForEmployee(employee, dto());
+    expect(res.status).toBe('CONFIRMED');
+    expect(mockWallet.debitRedeemForAccount).toHaveBeenCalledTimes(1);
+  });
+
+  it('REJECTS when visibleRegions is set and the employee region does NOT match — no debit', async () => {
+    mockPrisma.salesUser.findFirst.mockResolvedValue(empWith({ code: 'ASM', region: 'EAST' }));
+    mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+      ...PLATFORM_GIFT,
+      visibleRoleCodes: [],
+      visibleRegions: ['WEST', 'NORTH'],
+    });
+    await expect(service.redeemForEmployee(employee, dto())).rejects.toBeInstanceOf(ForbiddenException);
+    expect(mockWallet.debitRedeemForAccount).not.toHaveBeenCalled();
+    expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+  });
+
+  it('PROCEEDS when BOTH visibility lists are empty (no restriction = visible to all)', async () => {
+    mockPrisma.salesUser.findFirst.mockResolvedValue(empWith({ code: 'FIELD_EXEC', region: 'EAST' }));
+    mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+      ...PLATFORM_GIFT,
+      visibleRoleCodes: [],
+      visibleRegions: [],
+    });
+    const res = await service.redeemForEmployee(employee, dto());
+    expect(res.status).toBe('CONFIRMED');
+    expect(mockWallet.debitRedeemForAccount).toHaveBeenCalledTimes(1);
   });
 
   // ─── The money path ──────────────────────────────────────────────────────────

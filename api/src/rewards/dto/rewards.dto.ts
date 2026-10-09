@@ -579,6 +579,28 @@ export class CreateRewardCatalogDto {
   @IsInt()
   @Min(0)
   sortOrder?: number;
+
+  // ── Employee Rewards Phase B (§5.4) — catalogue CURATION flags. All OPTIONAL + additive; a trade
+  // caller that omits them keeps the schema defaults (featured/dreamEligible false, empty visibility
+  // lists = visible to all) so the trade catalogue behaviour is unchanged. visibleRoleCodes/Regions
+  // empty = NO restriction; a non-empty list drives the employee redeem visibility gate.
+  @IsOptional()
+  @IsBoolean()
+  featured?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  dreamEligible?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  visibleRoleCodes?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  visibleRegions?: string[];
 }
 
 /** PATCH /v1/admin/rewards/catalog/:id — all fields optional. */
@@ -654,4 +676,24 @@ export class UpdateRewardCatalogDto {
   @IsInt()
   @Min(0)
   sortOrder?: number;
+
+  // ── Employee Rewards Phase B (§5.4) — catalogue CURATION flags (same additive/optional contract as
+  // CreateRewardCatalogDto). Omitting a field leaves the stored value unchanged (Prisma skips undefined).
+  @IsOptional()
+  @IsBoolean()
+  featured?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  dreamEligible?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  visibleRoleCodes?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  visibleRegions?: string[];
 }

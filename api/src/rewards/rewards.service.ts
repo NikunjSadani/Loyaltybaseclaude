@@ -1366,7 +1366,9 @@ export class RewardsService {
     //    employee cannot redeem (parity with the Phase C credit path's inactive-skip).
     const salesUser = await this.prisma.salesUser.findFirst({
       where: { userId: user.sub, clientId: user.clientId, deletedAt: null },
-      select: { id: true, isActive: true },
+      // Phase B §5.4 — also resolve the employee's role-code (hierarchyLevel.code) + region so the
+      // catalogue VISIBILITY gate below can defensively reject a role/region-restricted item.
+      select: { id: true, isActive: true, region: true, hierarchyLevel: { select: { code: true } } },
     });
     if (!salesUser) {
       throw new ForbiddenException('Only employees may redeem for themselves.');
@@ -1393,6 +1395,30 @@ export class RewardsService {
     //    other work (so there is never a PayoutTransaction / TDS / cash-value path for an employee).
     if (item.redemptionMode === 'UPI' || item.redemptionMode === 'BANK_TRANSFER') {
       throw new BadRequestException('This redemption channel is not available.');
+    }
+
+    // 4b. Catalogue VISIBILITY gate (Phase B §5.4) — DEFENSIVE redeem gate for a role/region-curated
+    //     item. EMPLOYEE PATH ONLY (the trade redeem/confirm/redeemForOutlet never apply this; the
+    //     columns default empty so trade stays byte-identical). An EMPTY list = visible to ALL → no
+    //     restriction. A NON-EMPTY visibleRoleCodes requires the employee's role-code
+    //     (salesUser.hierarchyLevel.code) to be in it; a non-empty visibleRegions requires
+    //     salesUser.region to be in it. `item` is the full RewardCatalog row (findFirst, no select), so
+    //     the two arrays are present. Placed with the ACTIVE/APPROVED/moderation guards — all pre-debit.
+    const roleCode = salesUser.hierarchyLevel?.code ?? null;
+    const region = salesUser.region ?? null;
+    if (
+      Array.isArray(item.visibleRoleCodes) &&
+      item.visibleRoleCodes.length > 0 &&
+      (roleCode == null || !item.visibleRoleCodes.includes(roleCode))
+    ) {
+      throw new ForbiddenException('This reward is not available for your role.');
+    }
+    if (
+      Array.isArray(item.visibleRegions) &&
+      item.visibleRegions.length > 0 &&
+      (region == null || !item.visibleRegions.includes(region))
+    ) {
+      throw new ForbiddenException('This reward is not available in your region.');
     }
 
     // 5. DPDP consent for a VENDOR-sourced item (identical to the trade path); {} for PLATFORM items.
@@ -3117,6 +3143,13 @@ export class RewardsService {
         stockQuantity: dto.stockQuantity,
         termsAndConditions: dto.termsAndConditions,
         sortOrder: dto.sortOrder ?? 0,
+        // Employee Rewards Phase B (§5.4) — curation flags. Additive + optional; omitted fields fall to
+        // the schema defaults (featured/dreamEligible false, empty visibility lists = visible to all), so
+        // a trade caller that sends none creates a byte-identical row.
+        featured: dto.featured,
+        dreamEligible: dto.dreamEligible,
+        visibleRoleCodes: dto.visibleRoleCodes,
+        visibleRegions: dto.visibleRegions,
       },
     });
     return { item };
@@ -3188,6 +3221,12 @@ export class RewardsService {
         stockQuantity: dto.stockQuantity,
         termsAndConditions: dto.termsAndConditions,
         sortOrder: dto.sortOrder,
+        // Employee Rewards Phase B (§5.4) — curation flags. undefined = leave the stored value unchanged
+        // (Prisma skips undefined), so a trade PATCH that omits them never touches an existing row's flags.
+        featured: dto.featured,
+        dreamEligible: dto.dreamEligible,
+        visibleRoleCodes: dto.visibleRoleCodes,
+        visibleRegions: dto.visibleRegions,
       },
     });
     return { item };

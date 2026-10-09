@@ -1511,6 +1511,15 @@ model RewardCatalog {
   moderationByUserId  String?
   moderatedAt         DateTime?
   moderationReason    String?
+  // ── Employee Rewards Phase B (§5.4) — catalogue CURATION flags. All additive with safe defaults so
+  // every existing row stays valid and the TRADE catalogue/redeem path is byte-unchanged (defaults make
+  // trade callers that omit them behave exactly as before). `featured`/`dreamEligible` are curation
+  // badges; `visibleRoleCodes`/`visibleRegions` drive the EMPLOYEE redeem visibility gate — an EMPTY
+  // array means "visible to ALL" (no restriction). See rewards.service.redeemForEmployee.
+  featured            Boolean             @default(false)
+  dreamEligible       Boolean             @default(false)
+  visibleRoleCodes    String[]            @default([])
+  visibleRegions      String[]            @default([])
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
   deletedAt           DateTime?
