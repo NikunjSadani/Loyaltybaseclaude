@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isGifsyOperator, tenantScope } from '../common/tenant-scope';
+import { orderTenantScopeWhere } from '../common/order-tenant-scope';
 import { istDayRangeFilter } from '../common/ist-date';
 import { GiftDisbursalQueryDto } from './dto/vendor.dto';
 import {
@@ -40,7 +41,10 @@ export class GiftDisbursalService {
     const effectiveClientId = scope ?? (q.clientId || undefined);
 
     const where: Prisma.RedemptionOrderWhereInput = {};
-    if (effectiveClientId) where.partner = { clientId: effectiveClientId };
+    // EMP-GAP-1 (Finding 6): span trade (partner) + account-first employee (null-partner) orders so a
+    // scoped disbursal total includes employee DELIVERED value. Helper returns {} for a platform-wide
+    // OWNER (all tenants, unchanged). The row-map already falls back to account.clientId.
+    Object.assign(where, orderTenantScopeWhere(effectiveClientId));
     if (q.vendorId) where.fulfilledByVendorId = q.vendorId;
 
     // Window on `deliveredAt` — the SAME basis 194R Source-2 uses (tds.service) — so an

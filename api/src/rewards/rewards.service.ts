@@ -18,6 +18,7 @@ import {
   ensureEmployeeWallet,
 } from '../common/reward-account.helper';
 import { resolveCapabilities } from '../common/loyalty-capabilities.helper';
+import { orderTenantScopeWhere } from '../common/order-tenant-scope';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -206,32 +207,13 @@ export class RewardsService {
   }
 
   /**
-   * Employee Rewards Phase B W2 (EMP-GAP-1) — the tenant-scope `where` fragment for the OPERATOR
-   * fulfilment/dispatch console reads, which must span BOTH owner shapes of a RedemptionOrder: a
-   * TRADE order (partner set, scope via `partner.clientId`) AND an ACCOUNT-FIRST employee order
-   * (partnerId null, scope via `account.clientId → RewardAccount.clientId`). The old
-   * `...(scope ? { partner: { clientId: scope } } : {})` spread dropped every null-partner employee
-   * order, making them invisible/un-fulfillable to a tenant-scoped operator.
-   *
-   *   scope undefined (platform-wide, un-assumed OWNER) → {}  (all tenants — UNCHANGED).
-   *   scope set (assumed operator, or an OWNER narrowing to one clientId) → match EITHER arm:
-   *     { OR: [ { partner: { clientId: scope } }, { account: { clientId: scope } } ] }
-   *
-   * TRADE-SAFETY: a trade order's `account.clientId` EQUALS its `partner.clientId` (dual-write via
-   * ensureOutletAccount), so the account arm is a SAME-TENANT superset — it NEVER widens
-   * cross-tenant; it only ADDS null-partner employee orders of the SAME tenant. An OLD trade order
-   * with `accountId: null` is unaffected: it still matches through the `partner` arm, never dropped.
-   *
-   * COMPOSITION: this returns a top-level `OR`, so a caller whose `where` already carries its own
-   * top-level `OR` MUST compose this under `AND` instead of spreading it (it would otherwise clobber
-   * the other `OR`). None of the 5 console sites do today — each previously spread a single
-   * `partner` filter alongside scalar equality filters (id / orderNumber / status / channel /
-   * createdAt), which remain intact when this fragment is spread.
+   * Employee Rewards Phase B (EMP-GAP-1) — tenant-scope the OPERATOR fulfilment/dispatch console
+   * reads so they span BOTH a TRADE order (partner-keyed) and an ACCOUNT-FIRST employee order
+   * (partner null, account-keyed). Delegates to the shared `orderTenantScopeWhere` (single source of
+   * the trade-safety reasoning — also used by the 3P vendor portal + gift-disbursal).
    */
   private orderTenantScope(scope: string | undefined): Prisma.RedemptionOrderWhereInput {
-    return scope
-      ? { OR: [{ partner: { clientId: scope } }, { account: { clientId: scope } }] }
-      : {};
+    return orderTenantScopeWhere(scope);
   }
 
   /** Map a redemption mode to the tenant channel toggle that governs it. */

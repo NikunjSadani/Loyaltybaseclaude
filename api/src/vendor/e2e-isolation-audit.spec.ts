@@ -109,7 +109,10 @@ describe('Gift Catalogue & Dispatch — ISOLATION / RBAC / VENDOR-LIFECYCLE audi
       await expect(portal.getOrder(vendorA, 'foreign-order')).rejects.toBeInstanceOf(NotFoundException);
       const where = mockPrisma.redemptionOrder.findFirst.mock.calls[0][0].where;
       expect(where.fulfilledByVendorId).toBe('vA');
-      expect(where.partner).toEqual({ clientId: 'deoleo' });
+      // EMP-GAP-1: tenant pinned via OR(partner, account) — BOTH arms the caller's tenant (no leak);
+      // adds account-first employee orders of the SAME tenant. No top-level partner key any more.
+      expect(where.partner).toBeUndefined();
+      expect(where.OR).toEqual([{ partner: { clientId: 'deoleo' } }, { account: { clientId: 'deoleo' } }]);
       // PENDING (pre-payment) orders are hidden from the vendor.
       expect(where.status).toEqual({ not: RedemptionStatus.PENDING });
     });
@@ -132,7 +135,8 @@ describe('Gift Catalogue & Dispatch — ISOLATION / RBAC / VENDOR-LIFECYCLE audi
       ).rejects.toBeInstanceOf(NotFoundException);
       const where = mockPrisma.redemptionOrder.findFirst.mock.calls[0][0].where;
       expect(where.fulfilledByVendorId).toBe('vA');
-      expect(where.partner).toEqual({ clientId: 'deoleo' });
+      expect(where.partner).toBeUndefined();
+      expect(where.OR).toEqual([{ partner: { clientId: 'deoleo' } }, { account: { clientId: 'deoleo' } }]);
     });
 
     it('ISO-4 listOrders/listCatalogue: queries always pin vendorId + clientId', async () => {
@@ -143,7 +147,8 @@ describe('Gift Catalogue & Dispatch — ISOLATION / RBAC / VENDOR-LIFECYCLE audi
       await portal.listCatalogue(vendorA);
       const ordWhere = mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where;
       expect(ordWhere.fulfilledByVendorId).toBe('vA');
-      expect(ordWhere.partner).toEqual({ clientId: 'deoleo' });
+      expect(ordWhere.partner).toBeUndefined();
+      expect(ordWhere.OR).toEqual([{ partner: { clientId: 'deoleo' } }, { account: { clientId: 'deoleo' } }]);
       const catWhere = mockPrisma.rewardCatalog.findMany.mock.calls[0][0].where;
       expect(catWhere).toMatchObject({ sourceType: 'VENDOR', vendorId: 'vA', clientId: 'deoleo', deletedAt: null });
     });
@@ -263,7 +268,9 @@ describe('Gift Catalogue & Dispatch — ISOLATION / RBAC / VENDOR-LIFECYCLE audi
     it('RPT-1 a foreign ?clientId is IGNORED — the query pins the caller tenant', async () => {
       await disbursal.report(clientAdminX, { clientId: 'tenantY' } as never);
       const where = mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where;
-      expect(where.partner).toEqual({ clientId: 'tenantX' }); // NOT tenantY
+      // EMP-GAP-1: pinned via OR(partner, account), BOTH arms the CALLER's tenant (tenantX), NOT tenantY.
+      expect(where.partner).toBeUndefined();
+      expect(where.OR).toEqual([{ partner: { clientId: 'tenantX' } }, { account: { clientId: 'tenantX' } }]);
     });
 
     it('RPT-2 a non-operator, non-CLIENT_ADMIN role is Forbidden', async () => {

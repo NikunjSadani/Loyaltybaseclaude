@@ -16,6 +16,7 @@ const mockPrisma = {
   redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn() },
   redemptionStatusHistory: { create: jest.fn() },
   channelPartner: { findFirst: jest.fn() },
+  rewardAccount: { findFirst: jest.fn() },
   auditLog: { create: jest.fn().mockResolvedValue({}) },
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   $transaction: jest.fn((fn: (tx: any) => unknown) => fn(mockPrisma)),
@@ -192,14 +193,19 @@ describe('VendorPortalService', () => {
   });
 
   describe('orders — hard scope + restricted transition', () => {
-    it('listOrders filters fulfilledByVendorId + partner.clientId', async () => {
+    it('listOrders filters fulfilledByVendorId + tenant (spans trade partner AND employee account — EMP-GAP-1)', async () => {
       grantScope();
       mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
       await service.listOrders(vendor);
-      expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where).toMatchObject({
+      const where = mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where;
+      expect(where).toMatchObject({
         fulfilledByVendorId: 'v1',
-        partner: { clientId: 'deoleo' },
+        // EMP-GAP-1: tenant scope now spans a trade order (partner) AND an account-first employee
+        // order (null partner) — so a vendor-sourced EMPLOYEE gift surfaces to its vendor.
+        OR: [{ partner: { clientId: 'deoleo' } }, { account: { clientId: 'deoleo' } }],
       });
+      expect(where.partner).toBeUndefined(); // no longer a top-level partner filter
+      expect(where.status).toEqual({ not: 'PENDING' }); // other filters intact
     });
 
     it('getOrder 404 for a foreign order', async () => {
@@ -237,6 +243,30 @@ describe('VendorPortalService', () => {
       await service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never, trackingNumber: 'TRK1' });
       expect(mockPrisma.redemptionOrder.update.mock.calls[0][0].data.dispatchedAt).toBeInstanceOf(Date);
       expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalled();
+    });
+
+    it('Finding-6: DISPATCHES an ACCOUNT-FIRST employee order (partner null) WITHOUT a null-partner crash; notifies via the account', async () => {
+      // Regression lock: before the fix, the notify block did channelPartner.findFirst({ id: order.partnerId! })
+      // — Prisma 7 THROWS on id:null → 500 on the vendor's dispatch of a vendor-sourced employee gift.
+      grantScope();
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'oE', status: 'PROCESSING', partnerId: null, accountId: 'acc-emp', orderNumber: 'B-26-1' });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'oE', status: 'DISPATCHED' });
+      mockPrisma.rewardAccount.findFirst.mockResolvedValue({ employeeProfile: { userId: 'u-emp', user: { name: 'Asha', phone: '9830000000' } } });
+
+      await expect(
+        service.transition(vendor, 'oE', { toStatus: 'DISPATCHED' as never, trackingNumber: 'TRK-E' }),
+      ).resolves.toBeDefined();
+
+      // The partner path is SKIPPED — never dereference a null partnerId.
+      expect(mockPrisma.channelPartner.findFirst).not.toHaveBeenCalled();
+      // The employee is notified via their SalesUser login user (account-aware branch).
+      expect(mockPrisma.rewardAccount.findFirst).toHaveBeenCalledWith({
+        where: { id: 'acc-emp' },
+        select: { employeeProfile: { select: { userId: true, user: { select: { name: true, phone: true } } } } },
+      });
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'u-emp', event: 'REDEMPTION_DISPATCHED' }),
+      );
     });
 
     it('transition is idempotent (same status → skip)', async () => {
@@ -295,7 +325,7 @@ describe('VendorPortalService', () => {
       await service.listOrders(vendor);
       expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where).toMatchObject({
         fulfilledByVendorId: 'v1',
-        partner: { clientId: 'deoleo' },
+        OR: [{ partner: { clientId: 'deoleo' } }, { account: { clientId: 'deoleo' } }],
         status: { not: RedemptionStatus.PENDING },
       });
 

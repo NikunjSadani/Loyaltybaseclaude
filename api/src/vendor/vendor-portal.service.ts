@@ -12,6 +12,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { EventKey } from '../notification-templates/notification-templates.config';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { orderTenantScopeWhere } from '../common/order-tenant-scope';
 import { assertVendorPriceBounds, VendorPriceError } from './vendor-pricing.helper';
 import { applyVendorPiiRetention } from './vendor-pii.helper';
 import {
@@ -570,7 +571,7 @@ export class VendorPortalService {
       // (Wave-2 audit LOW#6).
       where: {
         fulfilledByVendorId: scope.vendorId,
-        partner: { clientId: scope.clientId },
+        ...orderTenantScopeWhere(scope.clientId), // EMP-GAP-1: span trade (partner) + employee (account) orders of this tenant
         status: { not: RedemptionStatus.PENDING },
       },
       select: VENDOR_ORDER_SELECT,
@@ -589,7 +590,7 @@ export class VendorPortalService {
       where: {
         id,
         fulfilledByVendorId: scope.vendorId,
-        partner: { clientId: scope.clientId },
+        ...orderTenantScopeWhere(scope.clientId), // EMP-GAP-1: span trade (partner) + employee (account) orders of this tenant
         status: { not: RedemptionStatus.PENDING },
       },
       select: VENDOR_ORDER_SELECT,
@@ -608,7 +609,7 @@ export class VendorPortalService {
       where: {
         id,
         fulfilledByVendorId: scope.vendorId,
-        partner: { clientId: scope.clientId },
+        ...orderTenantScopeWhere(scope.clientId), // EMP-GAP-1: span trade (partner) + employee (account) orders of this tenant
         status: { not: RedemptionStatus.PENDING },
       },
       select: { id: true, status: true },
@@ -650,7 +651,7 @@ export class VendorPortalService {
       where: {
         id,
         fulfilledByVendorId: scope.vendorId,
-        partner: { clientId: scope.clientId },
+        ...orderTenantScopeWhere(scope.clientId), // EMP-GAP-1: span trade (partner) + employee (account) orders of this tenant
         status: { not: RedemptionStatus.PENDING },
       },
     });
@@ -721,32 +722,61 @@ export class VendorPortalService {
       return o;
     });
 
-    // Member notification on the customer-visible milestones (same path as Gifsy).
-    // Employee Rewards Phase B — order.partnerId! is a type-only assertion (JS identical): this
-    // transition is reached only via the vendor portal, which scopes by `partner: { clientId }`
-    // (see the findFirst above), so an ACCOUNT-FIRST employee order (partner null) can never reach here.
+    // Member notification on the customer-visible milestones (same path as Gifsy). EMP-GAP-1 /
+    // Finding-6 fix: the vendor queue now spans ACCOUNT-FIRST employee orders (partnerId null), so
+    // this block IS reachable with a null partnerId — NEVER dereference `order.partnerId` unguarded
+    // (Prisma 7 THROWS on `id: null`, which would 500 the vendor on DISPATCH/DELIVER). Branch by owner:
+    // a trade order notifies its ChannelPartner owner; an employee order notifies the employee via
+    // their SalesUser login user (mirrors the account-aware refund branch in rewards.transitionOrder).
     if (toStatus === RedemptionStatus.DISPATCHED || toStatus === RedemptionStatus.DELIVERED) {
-      const partner = await this.prisma.channelPartner.findFirst({
-        where: { id: order.partnerId! },
-        select: { userId: true, phone: true, ownerName: true },
-      });
-      if (partner?.userId) {
-        await this.notifications.notifyUserWithChannels({
-          clientId: scope.clientId,
-          userId: partner.userId,
-          eventKey: `ORDER_${toStatus}` as EventKey,
-          recipientPhone: partner.phone ?? null,
-          vars: {
-            ownerName: partner.ownerName ?? 'Partner',
-            orderId: order.orderNumber,
-            trackingId: dto.trackingNumber ?? '',
-            reason: '',
-          },
-          subject: 'Redemption update',
-          body: `Your redemption ${order.orderNumber} is now ${toStatus}.`,
-          url: '/partner/rewards',
-          event: `REDEMPTION_${toStatus}`,
+      if (order.partnerId != null) {
+        const partner = await this.prisma.channelPartner.findFirst({
+          where: { id: order.partnerId },
+          select: { userId: true, phone: true, ownerName: true },
         });
+        if (partner?.userId) {
+          await this.notifications.notifyUserWithChannels({
+            clientId: scope.clientId,
+            userId: partner.userId,
+            eventKey: `ORDER_${toStatus}` as EventKey,
+            recipientPhone: partner.phone ?? null,
+            vars: {
+              ownerName: partner.ownerName ?? 'Partner',
+              orderId: order.orderNumber,
+              trackingId: dto.trackingNumber ?? '',
+              reason: '',
+            },
+            subject: 'Redemption update',
+            body: `Your redemption ${order.orderNumber} is now ${toStatus}.`,
+            url: '/partner/rewards',
+            event: `REDEMPTION_${toStatus}`,
+          });
+        }
+      } else if (order.accountId != null) {
+        // Account-first EMPLOYEE order: notify the employee via their SalesUser's login user.
+        const acct = await this.prisma.rewardAccount.findFirst({
+          where: { id: order.accountId },
+          select: { employeeProfile: { select: { userId: true, user: { select: { name: true, phone: true } } } } },
+        });
+        const emp = acct?.employeeProfile;
+        if (emp?.userId) {
+          await this.notifications.notifyUserWithChannels({
+            clientId: scope.clientId,
+            userId: emp.userId,
+            eventKey: `ORDER_${toStatus}` as EventKey,
+            recipientPhone: emp.user?.phone ?? null,
+            vars: {
+              ownerName: emp.user?.name ?? 'Employee',
+              orderId: order.orderNumber,
+              trackingId: dto.trackingNumber ?? '',
+              reason: '',
+            },
+            subject: 'Redemption update',
+            body: `Your redemption ${order.orderNumber} is now ${toStatus}.`,
+            url: '/rewards',
+            event: `REDEMPTION_${toStatus}`,
+          });
+        }
       }
     }
 

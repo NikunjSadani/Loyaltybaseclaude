@@ -34,21 +34,24 @@ describe('GiftDisbursalService', () => {
   it('FORCE-scopes a CLIENT_ADMIN to their own tenant (ignores a foreign clientId param)', async () => {
     mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
     await service.report(clientAdmin, { clientId: 'someone-else' });
+    // EMP-GAP-1 — scope spans trade (partner) + employee (account) orders of the tenant.
     expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where).toMatchObject({
-      partner: { clientId: 'deoleo' },
+      OR: [{ partner: { clientId: 'deoleo' } }, { account: { clientId: 'deoleo' } }],
     });
   });
 
   it('a platform-wide Gifsy operator reads ALL tenants (no clientId scope) unless narrowed', async () => {
     mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
     await service.report(gifsy, {});
-    expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where.partner).toBeUndefined();
+    const unscoped = mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where;
+    expect(unscoped.partner).toBeUndefined();
+    expect(unscoped.OR).toBeUndefined(); // platform-wide = no tenant filter at all
 
     jest.clearAllMocks();
     mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
     await service.report(gifsy, { clientId: 'deoleo' });
     expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where).toMatchObject({
-      partner: { clientId: 'deoleo' },
+      OR: [{ partner: { clientId: 'deoleo' } }, { account: { clientId: 'deoleo' } }],
     });
   });
 
