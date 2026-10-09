@@ -13,6 +13,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
+import { resolveCapabilities } from '../common/loyalty-capabilities.helper';
 import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
 import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
 import { ALL_PERMISSIONS } from '../common/rbac/permissions';
@@ -267,7 +268,7 @@ export class AuthService {
     phone: string,
     otp: string,
     clientId: string,
-  ): Promise<{ accessToken: string; refreshToken: string; user: Partial<User> }> {
+  ): Promise<{ accessToken: string; refreshToken: string; earnerModel: string; user: Partial<User> }> {
     const cleanPhone = phone.replace(/\D/g, '');
 
     const record = await this.prisma.otpCode.findFirst({
@@ -366,8 +367,22 @@ export class AuthService {
     const tokens = await this.generateTokens(user);
     this.logger.log(`User ${user.id} (${user.role}) logged in — client: ${clientId}`);
 
+    // Employee Rewards WS2 — surface the tenant's earner model on login so the FE can route a
+    // SALES_* user of an EMPLOYEE_REWARDS tenant to the rep app (vs the trade /sales tool). Additive +
+    // fail-safe: `resolveCapabilities` returns OUTLET for any trade/unknown/missing loyaltyType, so a
+    // trade login's earnerModel is 'OUTLET' and its routing is unchanged.
+    const client = await this.prisma.client.findUnique({
+      where: { id: clientId },
+      select: { loyaltyType: true, features: true },
+    });
+    const earnerModel = resolveCapabilities(
+      client?.loyaltyType as string | null | undefined,
+      (client?.features ?? null) as Record<string, unknown> | null,
+    ).earnerModel;
+
     return {
       ...tokens,
+      earnerModel,
       user: {
         id:    user.id,
         name:  user.name,

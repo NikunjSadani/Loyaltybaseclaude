@@ -14,7 +14,7 @@ type Step = 'mobile' | 'otp';
 
 const RESEND_COUNTDOWN = 60;
 
-function getRoleDashboard(role?: string): string {
+function getRoleDashboard(role?: string, earnerModel?: string): string {
   const r = role ?? '';
   // Role values match the backend UserRole enum.
   if (r === 'GIFSY_ADMIN') return '/gifsy';
@@ -28,7 +28,12 @@ function getRoleDashboard(role?: string): string {
   // auto-forwards single-outlet logins straight to /partner/dashboard (today's behaviour),
   // and shows a picker only when the login operates multiple outlets or has a group overview.
   if (['SSS', 'WHOLESALER', 'SUB_STOCKIST'].includes(r)) return '/partner/select';
-  if (['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'].includes(r)) return '/sales/dashboard';
+  if (['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'].includes(r)) {
+    // Employee Rewards WS2 — a SALES_* user of an EMPLOYEE_REWARDS tenant is an employee EARNER:
+    // land them in the rep app. A TRADE tenant's SALES_* user keeps the internal /sales tool
+    // (earnerModel is 'OUTLET' for trade/unknown — fail-safe, so trade routing is unchanged).
+    return earnerModel === 'EMPLOYEE' ? '/rep' : '/sales/dashboard';
+  }
   return '/admin/dashboard'; // CLIENT_ADMIN, MIS_USER
 }
 
@@ -165,7 +170,7 @@ export default function LoginPage() {
       if (result.user) localStorage.setItem('user', JSON.stringify(result.user));
 
       toast.success('Logged in successfully!');
-      window.location.href = getRoleDashboard(result.role);
+      window.location.href = getRoleDashboard(result.role, result.earnerModel);
     } catch (e) {
       // Deploy-skew stale action id → self-heal with a one-shot reload (audit F1).
       if (isStaleDeploymentError(e) && recoverFromStaleDeployment()) return;

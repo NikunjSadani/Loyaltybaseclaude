@@ -15,6 +15,9 @@ interface SendOTPResult {
 interface VerifyOTPResult {
   success: boolean;
   role?: string;
+  /** Employee Rewards WS2 — the tenant's earner model ('EMPLOYEE' | 'OUTLET'), used to route a
+   *  SALES_* login of an EMPLOYEE_REWARDS tenant to the rep app instead of the trade /sales tool. */
+  earnerModel?: string;
   /** JWT access token — the client stores this in localStorage (api-client reads it for Bearer auth). */
   token?: string;
   user?: { id: string; name: string; role: string; phone: string };
@@ -129,6 +132,7 @@ export async function verifyOTP(
     const token: string = data.data?.accessToken ?? '';
     const refreshToken: string = data.data?.refreshToken ?? '';
     const user = data.data?.user;
+    const earnerModel: string | undefined = data.data?.earnerModel;
 
     // AF-6: the access token lives ONLY in this httpOnly cookie — it is NOT readable
     // by JS and is NOT mirrored to localStorage. The edge proxy reads this cookie and
@@ -152,7 +156,7 @@ export async function verifyOTP(
       cookieStore.set('refresh_token', refreshToken, { ...cookieBase, maxAge: REFRESH_MAX_AGE });
     }
 
-    return { success: true, role: user?.role, token, user };
+    return { success: true, role: user?.role, earnerModel, token, user };
   } catch {
     return { success: false, error: 'Network error. Please check your connection.' };
   }

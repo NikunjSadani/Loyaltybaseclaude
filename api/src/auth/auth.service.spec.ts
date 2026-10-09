@@ -25,7 +25,7 @@ const mockPrisma = {
   user:    { findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), findUnique: jest.fn() },
   otpCode: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), deleteMany: jest.fn(), count: jest.fn() },
   userSession: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
-  client:  { findFirst: jest.fn() },
+  client:  { findFirst: jest.fn(), findUnique: jest.fn().mockResolvedValue({ loyaltyType: 'TRADE_LOYALTY', features: null }) },
   auditLog: { create: jest.fn() },
   // Deactivated-outlet login gate: default to "no partner" so non-partner logins
   // skip the gate; the partner-login tests below override these.
@@ -355,6 +355,24 @@ describe('AuthService', () => {
 
       expect(result.accessToken).toBe('mock.jwt.token');
       expect(result.refreshToken).toBeTruthy();
+    });
+
+    // Employee Rewards WS2 — login surfaces the tenant earner model so the FE can route a SALES_*
+    // employee of an EMPLOYEE_REWARDS tenant to the rep app (vs the trade /sales tool).
+    it('returns earnerModel EMPLOYEE for an EMPLOYEE_REWARDS tenant, OUTLET otherwise (fail-safe)', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'u1', role: 'SALES_ISR', clientId, status: 'ACTIVE' });
+      mockPrisma.userSession.create.mockResolvedValue({ id: 'sess_1' });
+
+      mockPrisma.client.findUnique.mockResolvedValueOnce({ loyaltyType: 'EMPLOYEE_REWARDS', features: null });
+      expect((await service.verifyOtp(phone, '1234', clientId)).earnerModel).toBe('EMPLOYEE');
+
+      mockPrisma.client.findUnique.mockResolvedValueOnce({ loyaltyType: 'TRADE_LOYALTY', features: null });
+      expect((await service.verifyOtp(phone, '1234', clientId)).earnerModel).toBe('OUTLET');
+
+      mockPrisma.client.findUnique.mockResolvedValueOnce(null); // unknown tenant → fail-safe OUTLET
+      expect((await service.verifyOtp(phone, '1234', clientId)).earnerModel).toBe('OUTLET');
     });
 
     // ── ACTIVE-only phone reservation: DETERMINISTIC login resolution ──────────
