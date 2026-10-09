@@ -61,9 +61,18 @@
   Audit caught + FIXED a real HIGH (vendor `transition()` 500 on a null-partner order — Prisma 7 throws on `id:null`;
   now branches notify by owner + notifies the employee via account→user) with a null-partner regression test.
   Audit SAFE for Deoleo. Gate api jest **3553**; disbursal runtime-verified on real data.
-  ▶ **NEXT (remaining B2 / go-live):** (a) catalogue curation flags (Dream-eligible/featured, role/region
-  visibility); (b) employee shipping-address sourcing; (c) `/admin/fulfilment` FE page; (d) the employee's OWN
-  order view (WS2 / rep app). Also open from earlier: Phase C target column + Contests.
+- **✅ PHASE B COMPLETE (2026-10-09):** the last pieces landed — **catalogue curation flags + employee
+  visibility gate (BE `f709ba3`)**: `RewardCatalog.featured/dreamEligible/visibleRoleCodes/visibleRegions`
+  (migration `20261009120000`), admin-rewards CRUD accepts them, and `redeemForEmployee` enforces a defensive
+  role/region visibility gate (employee-path-only, pre-debit, fails closed; trade byte-identical). **FE
+  `a4ad714`**: the `/admin/gifts` curation controls + the `/admin/fulfilment` console (reuses the dispatch
+  console via default-identical props). Gate api jest **3559** · platform vitest **2623**; visibility gate
+  runtime-verified both directions (role/region-restricted → rejected, visible → redeemed). Item 2 (employee
+  shipping-address) was already satisfied by B1 (ships to the employee's own address, never an outlet).
+  ▶ **NEXT: WORKSTREAM 2 — the employee REP APP** (owner GO'd 2026-10-09). Wave 0 = the login-identity decision
+  (see Open spec items); the account-first READ rails (wallet/passbook/orders/catalogue — closes the last
+  EMP-GAP-1 member residual) are login-independent and built first. Still open from earlier: Phase C target
+  column + Contests (Contests also feeds WS2 campaign screens).
 - **Phase A (Shell + People roster) landed (2026-10-04):** the one net-new piece — the EMPLOYEE
   `RewardAccount` ↔ `SalesUser` linkage (migration `20261003120000` + `ensureEmployeeAccount`/bulk helper,
   gated by `earnerModel`) — plus `/admin/people` surfacing the reused roster. Two money-audit defects (lock
