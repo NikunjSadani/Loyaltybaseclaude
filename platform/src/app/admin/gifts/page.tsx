@@ -72,6 +72,11 @@ interface CatalogItem {
   stockQuantity?: number | null;
   termsAndConditions?: string | null;
   sortOrder?: number | null;
+  /* ─ Employee-rewards curation flags (optional, additive). Empty array = visible to all. ─ */
+  featured?: boolean | null;
+  dreamEligible?: boolean | null;
+  visibleRoleCodes?: string[] | null;
+  visibleRegions?: string[] | null;
 }
 
 interface Pagination { page: number; limit: number; total: number; pages: number }
@@ -152,6 +157,19 @@ function fmtPts(n: number) { return n.toLocaleString('en-IN'); }
 function fmtPaise(p?: number | null) {
   if (p == null) return '—';
   return `₹${(p / 100).toLocaleString('en-IN')}`;
+}
+
+/** Comma/newline-separated text → deduped, trimmed string[] (empty tokens dropped). */
+export function parseCsvList(raw: string): string[] {
+  return Array.from(
+    new Set(
+      raw.split(/[\n,]/).map((s) => s.trim()).filter((s) => s.length > 0),
+    ),
+  );
+}
+/** string[] → comma-joined text for a text input. */
+export function joinCsvList(list?: string[] | null): string {
+  return Array.isArray(list) ? list.join(', ') : '';
 }
 
 /* ─── Generic fetch helper (unwraps {success,data}) ──────────────────────────── */
@@ -441,6 +459,11 @@ interface ItemFormState {
   stockQuantity: number;
   termsAndConditions: string;
   status: CatalogStatus;
+  /* ─ Employee-rewards curation flags (additive). Roles/regions are comma-separated text. ─ */
+  featured: boolean;
+  dreamEligible: boolean;
+  visibleRoleCodes: string;
+  visibleRegions: string;
 }
 
 function blankItemForm(categoryId: string): ItemFormState {
@@ -452,6 +475,8 @@ function blankItemForm(categoryId: string): ItemFormState {
     minRedemptionPoints: '', maxRedemptionPoints: '',
     stockTracked: false, stockQuantity: 0,
     termsAndConditions: '', status: 'ACTIVE',
+    featured: false, dreamEligible: false,
+    visibleRoleCodes: '', visibleRegions: '',
   };
 }
 
@@ -489,6 +514,10 @@ function ItemModal({
       stockQuantity: editing.stockQuantity ?? 0,
       termsAndConditions: editing.termsAndConditions ?? '',
       status: editing.status,
+      featured: editing.featured ?? false,
+      dreamEligible: editing.dreamEligible ?? false,
+      visibleRoleCodes: joinCsvList(editing.visibleRoleCodes),
+      visibleRegions: joinCsvList(editing.visibleRegions),
     };
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -538,6 +567,11 @@ function ItemModal({
       status: form.status,
       stockQuantity: form.stockTracked ? form.stockQuantity : null,
       termsAndConditions: form.termsAndConditions.trim() || undefined,
+      // Employee-rewards curation flags (additive). Empty lists → [] = visible to all.
+      featured: form.featured,
+      dreamEligible: form.dreamEligible,
+      visibleRoleCodes: parseCsvList(form.visibleRoleCodes),
+      visibleRegions: parseCsvList(form.visibleRegions),
     };
     if (form.mrpRupees.trim()) {
       payload.mrpPaise = Math.round(parseFloat(form.mrpRupees) * 100);
@@ -798,6 +832,66 @@ function ItemModal({
                 <option value="INACTIVE">Inactive</option>
               </select>
               <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+            </div>
+          </div>
+
+          {/* ─ Catalogue curation (employee-rewards). Additive; blank role/region lists = All. ─ */}
+          <div className="rounded-xl border border-gray-100 p-4 space-y-4">
+            <div className="flex items-center gap-2">
+              <Settings2 className="h-4 w-4 text-[var(--brand-primary)] shrink-0" />
+              <p className="text-sm font-semibold text-gray-900">Catalogue curation</p>
+            </div>
+
+            <div className="flex flex-wrap gap-6">
+              <button
+                type="button"
+                onClick={() => set('featured', !form.featured)}
+                className="flex items-center gap-2 text-sm font-medium text-gray-700"
+                aria-pressed={form.featured}
+              >
+                <span className={`w-9 h-5 rounded-full relative transition-colors ${form.featured ? 'bg-[var(--brand-primary)]' : 'bg-gray-200'}`}>
+                  <span className={`absolute top-0.5 h-4 w-4 bg-white rounded-full transition-all ${form.featured ? 'left-4' : 'left-0.5'}`} />
+                </span>
+                Featured
+              </button>
+              <button
+                type="button"
+                onClick={() => set('dreamEligible', !form.dreamEligible)}
+                className="flex items-center gap-2 text-sm font-medium text-gray-700"
+                aria-pressed={form.dreamEligible}
+              >
+                <span className={`w-9 h-5 rounded-full relative transition-colors ${form.dreamEligible ? 'bg-[var(--brand-primary)]' : 'bg-gray-200'}`}>
+                  <span className={`absolute top-0.5 h-4 w-4 bg-white rounded-full transition-all ${form.dreamEligible ? 'left-4' : 'left-0.5'}`} />
+                </span>
+                Dream-eligible
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-gray-700">Visible to roles</label>
+                <input
+                  value={form.visibleRoleCodes}
+                  onChange={(e) => set('visibleRoleCodes', e.target.value)}
+                  placeholder="Leave blank for All"
+                  className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+                />
+                <p className="text-[10px] text-gray-400">
+                  Comma-separated role codes. {form.visibleRoleCodes.trim() ? '' : 'Empty = visible to All.'}
+                </p>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-gray-700">Visible to regions</label>
+                <input
+                  value={form.visibleRegions}
+                  onChange={(e) => set('visibleRegions', e.target.value)}
+                  placeholder="Leave blank for All"
+                  className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+                />
+                <p className="text-[10px] text-gray-400">
+                  Comma-separated regions. {form.visibleRegions.trim() ? '' : 'Empty = visible to All.'}
+                </p>
+              </div>
             </div>
           </div>
         </div>

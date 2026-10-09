@@ -67,6 +67,19 @@ interface PaginationMeta {
 
 const STATUS_FILTER_VALUES = ['all', ...Object.keys(GIFT_ORDER_STATUS_LABEL)];
 
+/**
+ * Optional presentation overrides. Defaults reproduce the trade "Gift Dispatch" console
+ * exactly, so the Next.js page render (which passes only router props this component
+ * ignores) is unchanged. The Employee-Rewards `/admin/fulfilment` page reuses this same
+ * component with a neutral recipient column label (the backend is account-scoped, so the
+ * list already returns employee orders and `partnerName` carries the employee's name).
+ */
+export interface GiftOrdersConsoleProps {
+  recipientColumnLabel?: string;
+  title?: string;
+  subtitle?: string;
+}
+
 function formatDate(iso?: string | null): string {
   if (!iso) return '—';
   const d = new Date(iso);
@@ -81,7 +94,11 @@ function formatDate(iso?: string | null): string {
   });
 }
 
-export default function GiftOrdersConsolePage() {
+export default function GiftOrdersConsolePage({
+  recipientColumnLabel = 'Partner',
+  title = 'Gift Dispatch',
+  subtitle = 'Track and fulfil gift redemption orders across all tenants — set the channel, logistics partner and tracking, and advance each order’s status.',
+}: GiftOrdersConsoleProps = {}) {
   const [filters, setFilters] = useState<GiftOrderFilters>(emptyGiftOrderFilters());
   const [items, setItems] = useState<GiftOrderSummary[]>([]);
   const [pagination, setPagination] = useState<PaginationMeta | null>(null);
@@ -168,11 +185,10 @@ export default function GiftOrdersConsolePage() {
         <div>
           <h1 className="text-lg font-bold text-gray-900 flex items-center gap-2">
             <Truck className="w-5 h-5 text-[var(--brand-primary)]" />
-            Gift Dispatch
+            {title}
           </h1>
           <p className="text-xs text-gray-500 mt-0.5">
-            Track and fulfil gift redemption orders across all tenants — set the channel,
-            logistics partner and tracking, and advance each order&rsquo;s status.
+            {subtitle}
           </p>
         </div>
         <button
@@ -337,7 +353,7 @@ export default function GiftOrdersConsolePage() {
                   <th className="px-4 py-3 font-semibold text-gray-600 text-xs">Order</th>
                   <th className="px-4 py-3 font-semibold text-gray-600 text-xs">Tenant</th>
                   <th className="px-4 py-3 font-semibold text-gray-600 text-xs">Reward</th>
-                  <th className="px-4 py-3 font-semibold text-gray-600 text-xs">Partner</th>
+                  <th className="px-4 py-3 font-semibold text-gray-600 text-xs">{recipientColumnLabel}</th>
                   <th className="px-4 py-3 font-semibold text-gray-600 text-xs">Channel</th>
                   <th className="px-4 py-3 font-semibold text-gray-600 text-xs text-right">Value</th>
                   <th className="px-4 py-3 font-semibold text-gray-600 text-xs">Status</th>

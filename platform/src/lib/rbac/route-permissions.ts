@@ -71,6 +71,11 @@ export const ROUTE_PERMISSIONS: Record<string, string> = {
   // Gift catalogue
   '/admin/gifts':                    'rewards:read',
 
+  // Employee-Rewards fulfilment console (reuses the gift-dispatch console; gift
+  // redemption orders are a rewards-module read). Mirrors the dispatch console's
+  // rewards permission. The transition/upload ACTIONS stay gated at the endpoint.
+  '/admin/fulfilment':               'rewards:read',
+
   // Targets & achievements
   '/admin/targets':                  'targets:read',
 
