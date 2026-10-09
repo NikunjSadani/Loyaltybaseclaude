@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Gift, Wallet, Package, ArrowRight, ChevronRight, Sparkles } from 'lucide-react';
+import { Gift, Wallet, Package, ArrowRight, ChevronRight, Sparkles, Target } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Spinner } from '@/components/ui/spinner';
 import { formatPoints } from '@/lib/utils';
@@ -27,6 +27,7 @@ export default function RepHome() {
   const [loading, setLoading] = useState(true);
   const [redeemable, setRedeemable] = useState<number | null>(null);
   const [earned, setEarned] = useState<number | null>(null);
+  const [targetPoints, setTargetPoints] = useState<number | null>(null);
   const [featured, setFeatured] = useState<CatalogItem[]>([]);
 
   useEffect(() => {
@@ -41,6 +42,15 @@ export default function RepHome() {
       })
       .catch(() => {});
 
+    // Current-period target (default period on the server). Display-only; null/0 → no target element.
+    const targetP = fetch('/api/rewards/employee/target', { headers: { ...authHeader() } })
+      .then((r) => r.json())
+      .then((json: { success?: boolean; data?: { period: string; targetPoints: number | null } }) => {
+        if (cancelled || !json.success || !json.data) return;
+        setTargetPoints(json.data.targetPoints);
+      })
+      .catch(() => {});
+
     const catalogP = fetch('/api/rewards/employee/catalog?limit=50', { headers: { ...authHeader() } })
       .then((r) => r.json())
       .then((json: { success?: boolean; data?: EmployeeCatalogResponse }) => {
@@ -49,7 +59,7 @@ export default function RepHome() {
       })
       .catch(() => {});
 
-    Promise.allSettled([walletP, catalogP]).then(() => {
+    Promise.allSettled([walletP, targetP, catalogP]).then(() => {
       if (!cancelled) setLoading(false);
     });
     return () => {
@@ -109,6 +119,35 @@ export default function RepHome() {
           </Link>
         </div>
       </div>
+
+      {/* ── Target / achievement ── (display-only; shown only when a positive target exists) */}
+      {typeof targetPoints === 'number' && targetPoints > 0 && (() => {
+        const earnedBasis = earned ?? 0; // lifetime-earned is the earned basis
+        const pct = Math.max(0, Math.min(100, Math.round((earnedBasis / targetPoints) * 100)));
+        return (
+          <Card>
+            <CardContent className="px-4 py-4">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-1.5">
+                  <Target className="h-4 w-4 text-[var(--brand-primary)]" />
+                  <p className="text-sm font-bold text-gray-900">Your target</p>
+                </div>
+                <p className="text-sm font-extrabold text-[var(--brand-primary)]">{pct}%</p>
+              </div>
+              <p className="text-xs text-gray-600">
+                Earned <span className="font-semibold text-gray-900">{formatPoints(earnedBasis)}</span> of{' '}
+                <span className="font-semibold text-gray-900">{formatPoints(targetPoints)}</span> target
+              </p>
+              <div className="mt-2 h-2 w-full rounded-full bg-gray-100 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-[var(--brand-primary)] transition-all"
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+            </CardContent>
+          </Card>
+        );
+      })()}
 
       {/* ── Featured / within-reach strip ── */}
       {featured.length > 0 && (

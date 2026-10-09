@@ -129,6 +129,73 @@ describe('parseEmployeePointsUpload — row validation', () => {
   });
 });
 
+describe('parseEmployeePointsUpload — optional Target Points column', () => {
+  it('carries a valid target on a points+target row (status OK)', () => {
+    const buf = sheetBuf([['EMP001', 'Alice', 100, 'Q4', 500]]);
+    const r = parseEmployeePointsUpload(buf, { knownCodes: roster('EMP001'), safetyCapPoints: CAP });
+    expect(r.rows[0].status).toBe('OK');
+    expect(r.rows[0].points).toBe(100);
+    expect(r.rows[0].targetPoints).toBe(500);
+    expect(r.summary.totalPoints).toBe(100);
+    expect(r.summary.targetsSet).toBe(1);
+    expect(r.canProceed).toBe(true);
+  });
+
+  it('treats a TARGET-ONLY row (points blank, target set) as VALID/OK — not skipped, not dropped', () => {
+    const buf = sheetBuf([['EMP001', 'Alice', '', '', 750]]);
+    const r = parseEmployeePointsUpload(buf, { knownCodes: roster('EMP001'), safetyCapPoints: CAP });
+    expect(r.rows).toHaveLength(1);
+    expect(r.rows[0].status).toBe('OK');
+    expect(r.rows[0].points).toBe(0);
+    expect(r.rows[0].targetPoints).toBe(750);
+    expect(r.summary.ok).toBe(1);
+    expect(r.summary.skipped).toBe(0);
+    expect(r.summary.totalPoints).toBe(0);
+    expect(r.summary.targetsSet).toBe(1);
+    expect(r.canProceed).toBe(true); // a target-only sheet can be confirmed
+  });
+
+  it('still SKIPs a row with blank points AND no target (unchanged behaviour)', () => {
+    const buf = sheetBuf([['EMP001', 'Alice', '', '', '']]);
+    const r = parseEmployeePointsUpload(buf, { knownCodes: roster('EMP001'), safetyCapPoints: CAP });
+    expect(r.rows[0].status).toBe('SKIP');
+    expect(r.rows[0].targetPoints).toBeUndefined();
+    expect(r.summary.targetsSet).toBe(0);
+  });
+
+  it('ERRORs a negative or decimal target', () => {
+    const buf = sheetBuf([
+      ['EMP001', 'A', 100, '', -5],
+      ['EMP002', 'B', 100, '', 10.5],
+    ]);
+    const r = parseEmployeePointsUpload(buf, { knownCodes: roster('EMP001', 'EMP002'), safetyCapPoints: CAP });
+    expect(r.summary.errors).toBe(2);
+    expect(r.rows[0].errors.join()).toMatch(/Target Points cannot be negative/);
+    expect(r.rows[1].errors.join()).toMatch(/Target Points must be a whole number/);
+    expect(r.rows[0].targetPoints).toBeUndefined();
+    expect(r.canProceed).toBe(false);
+  });
+
+  it('ERRORs a non-numeric target', () => {
+    const buf = sheetBuf([['EMP001', 'A', 100, '', 'soon']]);
+    const r = parseEmployeePointsUpload(buf, { knownCodes: roster('EMP001'), safetyCapPoints: CAP });
+    expect(r.rows[0].status).toBe('ERROR');
+    expect(r.rows[0].errors.join()).toMatch(/Target Points .* not a valid number/);
+  });
+
+  it('points-only upload with NO Target Points column behaves exactly as before', () => {
+    const buf = sheetBuf(
+      [['EMP001', 'Alice', 100, 'Q4'], ['EMP002', 'Bob', 50, '']],
+      ['Employee Code', 'Employee Name', 'Points', 'Narration'],
+    );
+    const r = parseEmployeePointsUpload(buf, { knownCodes: roster('EMP001', 'EMP002'), safetyCapPoints: CAP });
+    expect(r.summary.ok).toBe(2);
+    expect(r.summary.totalPoints).toBe(150);
+    expect(r.summary.targetsSet).toBe(0);
+    expect(r.rows.every((x) => x.targetPoints === undefined)).toBe(true);
+  });
+});
+
 describe('toEmployeeUploadRows', () => {
   const base: EmployeePointsRow = {
     rowNum: 3, employeeCode: 'EMP001', employeeName: 'Alice', points: 100, narration: 'x', status: 'OK', errors: [],
@@ -160,5 +227,15 @@ describe('toEmployeeUploadRows', () => {
   it('falls back outletName to the code when the name is blank', () => {
     const [row] = toEmployeeUploadRows([{ ...base, employeeName: '' }]);
     expect(row.outletName).toBe('EMP001');
+  });
+
+  it('carries targetPoints onto the emitted row when present', () => {
+    const [row] = toEmployeeUploadRows([{ ...base, targetPoints: 500 }]);
+    expect((row as { targetPoints?: number }).targetPoints).toBe(500);
+  });
+
+  it('omits targetPoints when absent (points-only row)', () => {
+    const [row] = toEmployeeUploadRows([base]);
+    expect('targetPoints' in row).toBe(false);
   });
 });

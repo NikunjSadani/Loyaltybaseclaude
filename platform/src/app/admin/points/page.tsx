@@ -246,6 +246,7 @@ export default function EmployeePointsUploadPage() {
         'Employee Code': r.employeeCode,
         'Employee Name': r.employeeName,
         'Points': r.points || '',
+        'Target Points': r.targetPoints ?? '',
         'Status': r.status,
         'Narration': r.narration,
         'Errors': r.errors.length > 0 ? r.errors.join('; ') : (r.skipReason ?? ''),
@@ -423,6 +424,10 @@ export default function EmployeePointsUploadPage() {
               { label: 'Skipped', value: parseResult.summary.skipped, color: 'text-gray-500' },
               { label: 'Errors', value: parseResult.summary.errors, color: 'text-red-600' },
               { label: 'Total Pts', value: parseResult.summary.totalPoints.toLocaleString('en-IN'), color: 'text-blue-600' },
+              // Only shown when at least one row carries a target (keeps the points-only upload unchanged).
+              ...(parseResult.summary.targetsSet > 0
+                ? [{ label: 'Targets Set', value: parseResult.summary.targetsSet, color: 'text-indigo-600' }]
+                : []),
             ].map((c) => (
               <div key={c.label} className="bg-white rounded-xl border border-gray-200 p-3 text-center">
                 <p className={`text-xl font-bold ${c.color}`}>{c.value}</p>

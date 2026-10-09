@@ -7,10 +7,11 @@
  * no outlet-type award logic — the employee earn side is a flat points credit.
  *
  * Column layout:
- *   Employee Code | Employee Name | Points | Narration
+ *   Employee Code | Employee Name | Points | Narration | Target Points
  *
  * - Employee Code + Name are pre-filled from the active roster (caller passes them from
- *   /api/admin/sales-users/options). Points + Narration are left blank for the admin to fill.
+ *   /api/admin/sales-users/options). Points + Narration + Target Points are left blank for the
+ *   admin to fill. Target Points is OPTIONAL (a trailing column) — blank/absent means no target.
  * - If the roster is unavailable, a header-only template is produced (the admin fills codes).
  *
  * Sheet name: "Employee Points". Title row: "Employee Points — {Month Label}".
@@ -29,7 +30,7 @@ function monthLabel(yyyyMm: string): string {
   return new Date(y, m - 1, 1).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
 }
 
-export const EMPLOYEE_POINTS_HEADERS = ['Employee Code', 'Employee Name', 'Points', 'Narration'] as const;
+export const EMPLOYEE_POINTS_HEADERS = ['Employee Code', 'Employee Name', 'Points', 'Narration', 'Target Points'] as const;
 
 /**
  * Generates the employee points upload template buffer.
@@ -43,8 +44,8 @@ export function generateEmployeePointsTemplate(
 ): ArrayBuffer {
   const headers = [...EMPLOYEE_POINTS_HEADERS];
 
-  // One row per employee, Points + Narration blank (ready for the admin to fill).
-  const dataRows = employees.map((e) => [e.employeeCode, e.name, '', '']);
+  // One row per employee, Points + Narration + Target Points blank (ready for the admin to fill).
+  const dataRows = employees.map((e) => [e.employeeCode, e.name, '', '', '']);
 
   const wsData: (string | number)[][] = [
     [`Employee Points — ${monthLabel(month)}`],
@@ -54,7 +55,7 @@ export function generateEmployeePointsTemplate(
 
   const ws = aoaToSheetSafe(wsData);
   ws['!freeze'] = { xSplit: 0, ySplit: 2 };
-  ws['!cols'] = [{ wch: 16 }, { wch: 28 }, { wch: 12 }, { wch: 30 }];
+  ws['!cols'] = [{ wch: 16 }, { wch: 28 }, { wch: 12 }, { wch: 30 }, { wch: 14 }];
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Employee Points');
