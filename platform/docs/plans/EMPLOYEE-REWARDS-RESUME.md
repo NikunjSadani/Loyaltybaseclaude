@@ -69,10 +69,21 @@
   console via default-identical props). Gate api jest **3559** · platform vitest **2623**; visibility gate
   runtime-verified both directions (role/region-restricted → rejected, visible → redeemed). Item 2 (employee
   shipping-address) was already satisfied by B1 (ships to the employee's own address, never an outlet).
-  ▶ **NEXT: WORKSTREAM 2 — the employee REP APP** (owner GO'd 2026-10-09). Wave 0 = the login-identity decision
-  (see Open spec items); the account-first READ rails (wallet/passbook/orders/catalogue — closes the last
-  EMP-GAP-1 member residual) are login-independent and built first. Still open from earlier: Phase C target
-  column + Contests (Contests also feeds WS2 campaign screens).
+  ▶ **WORKSTREAM 2 — the employee REP APP** (owner GO'd 2026-10-09). **Wave 0 DECIDED:** login = phone-OTP via
+  the roster mobile (owner chose it) — reuse `send-otp`/`verify-otp` as-is; `persistHierarchy` already maps roster
+  `mobile`→`User.phone`. No new auth. (Residual, NOT silently fixed: the employeeCode-reuse→account-inherit
+  hazard stays a flagged owner decision — "clear accountId on deactivate" would wrongly orphan a temporarily-
+  deactivated person's points.) **✅ Wave 2 BE LANDED (2026-10-09, HEAD `f3e5f96`):** account-first employee
+  READ rails — `GET /v1/rewards/employee/{wallet,wallet/transactions,orders,orders/:id,orders/:id/track,catalog}`
+  via `resolveEmployeeReadContext` (own-SalesUser→accountId; reads never provision); closes the last EMP-GAP-1
+  member residual. Reviewed (cross-account isolation: accountId-pinned, foreign id 404s; trade byte-identical).
+  Gate api jest **3578**; real-DB runtime-verified (wallet/passbook/own-orders/cross-account-404/catalogue
+  visibility+affordability). Follow-up noted: employee catalogue browse still lists cash-mode items the redeem
+  rejects (filter non-redeemable channels from the browse).
+  ▶ **NEXT: rep-app FE** — Wave 1 (new `rep/` route segment mirroring `partner/*` + OTP login + Britannia-demo
+  theming) + Wave 2 FE (wallet/passbook/orders/catalogue screens wired to the new endpoints); then W3 redeem,
+  W4 home, W5 team, W6 contests (needs spec), W7 profile+inbox. FE is staging-verified (browser-pane blocks
+  `*.localhost` cookies). Still open: Phase C target column + Contests (feeds W6).
 - **Phase A (Shell + People roster) landed (2026-10-04):** the one net-new piece — the EMPLOYEE
   `RewardAccount` ↔ `SalesUser` linkage (migration `20261003120000` + `ensureEmployeeAccount`/bulk helper,
   gated by `earnerModel`) — plus `/admin/people` surfacing the reused roster. Two money-audit defects (lock
