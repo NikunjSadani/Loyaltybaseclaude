@@ -80,10 +80,20 @@
   Gate api jest **3578**; real-DB runtime-verified (wallet/passbook/own-orders/cross-account-404/catalogue
   visibility+affordability). Follow-up noted: employee catalogue browse still lists cash-mode items the redeem
   rejects (filter non-redeemable channels from the browse).
-  ▶ **NEXT: rep-app FE** — Wave 1 (new `rep/` route segment mirroring `partner/*` + OTP login + Britannia-demo
-  theming) + Wave 2 FE (wallet/passbook/orders/catalogue screens wired to the new endpoints); then W3 redeem,
-  W4 home, W5 team, W6 contests (needs spec), W7 profile+inbox. FE is staging-verified (browser-pane blocks
-  `*.localhost` cookies). Still open: Phase C target column + Contests (feeds W6).
+  ✅ **WS2 Wave 1 + the rep-app CORE LANDED (2026-10-09, HEAD `3a35484`):** the employee REP APP at
+  `platform/src/app/rep/*` (mobile shell + Home/Wallet/Rewards/Redeem/Orders+track/Profile) wired to the Wave-2
+  read rails + the redeem rail, PLUS the login routing (BE `verifyOtp` returns `earnerModel`; FE
+  `getRoleDashboard(role, earnerModel)` lands a SALES_* employee of an EMPLOYEE_REWARDS tenant on `/rep`, trade
+  SALES_* still on `/sales`). Single-step redeem (fresh-UUID sourceKey), no cash rail, `RequireAuth` sales roles.
+  Gate: api jest **3579** · platform tsc clean · vitest **2630** (+7 rep helpers). This is the WS2 exit path —
+  **a rep can log in and complete earn→see→redeem→track.** FE flows verify on STAGING (pane blocks
+  `*.localhost` cookies).
+  ▶ **NEXT — the richer WS2 waves (each needs a spec/BE first; genuine forks for the owner):** W4 Home richness
+  (targets + live campaigns + **Dream Reward** — needs the employee target store [Phase C "target column", no BE
+  yet] + Dream-Reward persistence/forecast); W5 Team manager rollup (per-rep points rollup is net-new); W6
+  Contests (needs the Contest data-model + bonus-engine spec — also Phase C); W7 Profile enrich + Notifications
+  in-app inbox (new BE endpoint). Smaller follow-ups: expose `featured`/`dreamEligible` in the employee catalogue
+  select (for W4 Dream Reward); filter cash-mode items from the employee catalogue browse.
 - **Phase A (Shell + People roster) landed (2026-10-04):** the one net-new piece — the EMPLOYEE
   `RewardAccount` ↔ `SalesUser` linkage (migration `20261003120000` + `ensureEmployeeAccount`/bulk helper,
   gated by `earnerModel`) — plus `/admin/people` surfacing the reused roster. Two money-audit defects (lock
