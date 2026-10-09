@@ -18,6 +18,7 @@ import {
   ensureEmployeeWallet,
 } from '../common/reward-account.helper';
 import { resolveCapabilities } from '../common/loyalty-capabilities.helper';
+import { resolveEmployeeReadContext } from '../common/employee-context.helper';
 import { orderTenantScopeWhere } from '../common/order-tenant-scope';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -59,6 +60,7 @@ import {
   buildFulfilmentTemplateBuffer,
   parseFulfilmentUploadBuffer,
 } from './rewards-fulfilment.helpers';
+import { ListTransactionsQueryDto } from '../wallet/dto/wallet.dto';
 
 /**
  * Rewards & Redemption — ported from platform/src/app/api/rewards/* onto /v1.
@@ -518,6 +520,219 @@ export class RewardsService {
         timeline: order.statusHistory,
       },
     };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Employee Rewards WS2 (Wave 2) — ACCOUNT-FIRST employee READ rails.
+  //
+  // SEPARATE employee methods (never a branch inside the trade listOrders/getOrder/trackOrder/
+  // listCatalog). Each resolves the caller's OWN SalesUser → its EMPLOYEE RewardAccount accountId
+  // (via resolveEmployeeReadContext) and scopes by `accountId = <the employee's own account>` — NOT
+  // partner. That account pin IS the cross-account isolation: an employee can only ever read their
+  // own wallet/orders/catalogue affordability. An employee with no account yet → empty reads (never
+  // crash). Response shapes are byte-identical to the trade/member reads they mirror.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** GET /v1/rewards/employee/orders — the employee's OWN account orders (member-safe shape). */
+  async employeeListOrders(user: JwtPayload, q: ListOrdersQueryDto) {
+    const page = q.page ?? 1;
+    const limit = q.limit ?? 20;
+    const skip = (page - 1) * limit;
+
+    const ctx = await resolveEmployeeReadContext(this.prisma, user);
+    if (!ctx.accountId) {
+      // Not yet provisioned → no orders (same empty shape as a zero-result trade list).
+      return { orders: [], pagination: { page, limit, total: 0, pages: 0 } };
+    }
+
+    // Scope to the employee's OWN account (cross-account isolation). Same member-safe projection +
+    // `returnedAt` mapping + pagination as the trade listOrders member path.
+    const where: Prisma.RedemptionOrderWhereInput = { accountId: ctx.accountId };
+    if (q.status) where.status = q.status;
+
+    const [orders, total] = await Promise.all([
+      this.prisma.redemptionOrder.findMany({
+        where,
+        select: {
+          id: true,
+          orderNumber: true,
+          status: true,
+          redemptionMode: true,
+          totalPointsCost: true,
+          quantity: true,
+          voucherCode: true,
+          voucherProvider: true,
+          trackingNumber: true,
+          trackingUrl: true,
+          logisticsPartner: true,
+          dispatchedAt: true,
+          deliveredAt: true,
+          cancelledAt: true,
+          createdAt: true,
+          updatedAt: true,
+          reward: { select: { id: true, name: true, imageUrls: true, redemptionMode: true } },
+          partner: { select: { id: true, businessName: true } },
+        },
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.redemptionOrder.count({ where }),
+    ]);
+
+    const mapped = orders.map((o) => ({
+      ...o,
+      returnedAt: o.status === 'RETURNED' ? o.updatedAt : null,
+    }));
+
+    return {
+      orders: mapped,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    };
+  }
+
+  /** GET /v1/rewards/employee/orders/:id — one of the employee's OWN orders (member-safe). */
+  async employeeGetOrder(user: JwtPayload, id: string) {
+    const ctx = await resolveEmployeeReadContext(this.prisma, user);
+    // No account yet → the order cannot be the employee's → 404 (parity with a not-owned order).
+    if (!ctx.accountId) throw new NotFoundException('Order not found');
+
+    // The accountId pin is the authorization: an order of ANOTHER account simply does not match, so
+    // a cross-account id 404s rather than leaking existence. Member-safe projection (same as getOrder).
+    const order = await this.prisma.redemptionOrder.findFirst({
+      where: { id, accountId: ctx.accountId },
+      select: MEMBER_ORDER_SELECT,
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    return { order };
+  }
+
+  /**
+   * GET /v1/rewards/employee/orders/:id/track — the employee's OWN order tracking view.
+   * Mirror of `trackOrder` scoped by accountId. Same member-safe tracking payload (status +
+   * tracking + the dispatch timeline; internal notes never leak).
+   */
+  async employeeTrackOrder(user: JwtPayload, id: string) {
+    const ctx = await resolveEmployeeReadContext(this.prisma, user);
+    if (!ctx.accountId) throw new NotFoundException('Order not found');
+
+    const order = await this.prisma.redemptionOrder.findFirst({
+      where: { id, accountId: ctx.accountId },
+      include: {
+        reward: { select: { id: true, name: true, imageUrls: true } },
+        statusHistory: {
+          orderBy: { createdAt: 'asc' },
+          select: { fromStatus: true, toStatus: true, createdAt: true },
+        },
+      },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+
+    return {
+      tracking: {
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        status: order.status,
+        reward: order.reward,
+        quantity: order.quantity,
+        logisticsPartner: order.logisticsPartner,
+        trackingNumber: order.trackingNumber,
+        trackingUrl: order.trackingUrl,
+        dispatchedAt: order.dispatchedAt,
+        deliveredAt: order.deliveredAt,
+        cancelledAt: order.cancelledAt,
+        timeline: order.statusHistory,
+      },
+    };
+  }
+
+  /**
+   * GET /v1/rewards/employee/catalog — the employee's affordability-aware, visibility-filtered
+   * catalogue. Mirror of `listCatalog` but: (a) affordability (`userBalance` / `isAffordable`) is
+   * computed from the employee's ACCOUNT wallet (not a partner wallet), and (b) the role/region
+   * VISIBILITY filter is applied in the WHERE so the browse list matches what the employee redeem
+   * will allow (the redeem enforces the same gate defensively). No outlet-type Loyalty gate
+   * (employees have no outlet). Same member-safe projection + response shape as listCatalog.
+   */
+  async employeeListCatalog(user: JwtPayload, q: ListCatalogQueryDto) {
+    const page = q.page ?? 1;
+    const limit = q.limit ?? 20;
+    const skip = (page - 1) * limit;
+
+    const ctx = await resolveEmployeeReadContext(this.prisma, user);
+
+    // Affordability from the employee's ACCOUNT wallet (zero when no account/wallet yet).
+    const wallet = ctx.accountId
+      ? await this.prisma.wallet.findFirst({ where: { accountId: ctx.accountId } })
+      : null;
+    const userBalance = wallet ? wallet.redeemablePoints : 0;
+
+    const where: Prisma.RewardCatalogWhereInput = {
+      status: 'ACTIVE',
+      deletedAt: null,
+      clientId: user.clientId,
+      moderationStatus: 'APPROVED',
+      ...vendorVisibilityFilter(user.clientId),
+      // Role/region VISIBILITY gate — same rule the employee redeem enforces: an EMPTY list = visible
+      // to ALL; a NON-EMPTY list must include the employee's roleCode / region. A null roleCode/region
+      // therefore only ever sees empty-list (unrestricted) items — identical to the redeem gate.
+      AND: [
+        {
+          OR: [
+            { visibleRoleCodes: { isEmpty: true } },
+            ...(ctx.roleCode ? [{ visibleRoleCodes: { has: ctx.roleCode } }] : []),
+          ],
+        },
+        {
+          OR: [
+            { visibleRegions: { isEmpty: true } },
+            ...(ctx.region ? [{ visibleRegions: { has: ctx.region } }] : []),
+          ],
+        },
+      ],
+    };
+    if (q.minPoints !== undefined || q.maxPoints !== undefined) {
+      where.pointsCost = {};
+      if (q.minPoints !== undefined) where.pointsCost.gte = q.minPoints;
+      if (q.maxPoints !== undefined) where.pointsCost.lte = q.maxPoints;
+    }
+
+    const [items, total] = await Promise.all([
+      this.prisma.rewardCatalog.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { pointsCost: 'asc' },
+        select: { ...MEMBER_CATALOG_SELECT, sourceType: true },
+      }),
+      this.prisma.rewardCatalog.count({ where }),
+    ]);
+
+    const enriched = items.map((item) => {
+      const { category, sourceType, ...rest } = item;
+      return {
+        ...rest,
+        category: category?.name,
+        requiresConsent: sourceType === 'VENDOR',
+        isAffordable: userBalance >= item.pointsCost,
+      };
+    });
+
+    return {
+      items: enriched,
+      userBalance,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    };
+  }
+
+  /** GET /v1/rewards/employee/wallet — thin delegate to WalletService (which owns the wallet). */
+  employeeWallet(user: JwtPayload) {
+    return this.wallet.employeeWalletSummary(user);
+  }
+
+  /** GET /v1/rewards/employee/wallet/transactions — thin delegate to WalletService. */
+  employeeWalletTransactions(user: JwtPayload, q: ListTransactionsQueryDto) {
+    return this.wallet.employeeTransactions(user, q);
   }
 
   /**

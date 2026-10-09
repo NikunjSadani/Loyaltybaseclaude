@@ -3,8 +3,9 @@ import { Prisma, PointsLedgerType, WalletTransactionType } from '@prisma/client'
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { resolveCreditFieldNames } from '../common/credit-field-name.helper';
+import { resolveCreditFieldNames, resolveEmployeeCreditFieldNames } from '../common/credit-field-name.helper';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
+import { resolveEmployeeReadContext } from '../common/employee-context.helper';
 import { AdjustType, AdjustWalletDto, ListTransactionsQueryDto } from './dto/wallet.dto';
 
 /**
@@ -438,6 +439,137 @@ export class WalletService {
     }
 
     return this.loadPassbook(active.partnerId, user.clientId, q);
+  }
+
+  // ─── Employee Rewards WS2 (Wave 2): ACCOUNT-FIRST employee read rails ────────
+  //
+  // SEPARATE employee methods (never a branch inside the trade getWallet/listTransactions). The
+  // trade reads resolve a ChannelPartner via resolveActivePartnerId (null for an employee); these
+  // resolve the caller's OWN SalesUser → its linked EMPLOYEE RewardAccount, then read the
+  // ACCOUNT-KEYED wallet (wallet.findFirst({ accountId })). An employee with no account yet →
+  // zeroed summary / empty page (never crash). The live getWallet/loadWalletSummary/listTransactions/
+  // loadPassbook are untouched.
+
+  /**
+   * Account mirror of `loadWalletSummary` — same summary shape (so the employee FE is a drop-in),
+   * keyed on the employee's `accountId`. Zeroed (but still rate-carrying) when no wallet exists yet.
+   * Tenant authorization is the CALLER's responsibility (resolved from their own SalesUser).
+   */
+  private async loadWalletSummaryByAccount(accountId: string, clientId: string) {
+    const conversionRate = await this.tenantSettings.getConversionRate(clientId);
+    const wallet = await this.prisma.wallet.findFirst({ where: { accountId } });
+    if (!wallet) return this.zeroedSummary(conversionRate);
+
+    return {
+      earnedPoints: wallet.earnedPoints,
+      lockedPoints: wallet.lockedPoints,
+      redeemablePoints: wallet.redeemablePoints,
+      redeemedPoints: wallet.redeemedPoints,
+      expiredPoints: wallet.expiredPoints,
+      lifetimeEarned: wallet.lifetimeEarned,
+      lifetimeRedeemed: wallet.lifetimeRedeemed,
+      lifetimeExpired: wallet.lifetimeExpired,
+      currency: 'POINTS',
+      conversionRate,
+    };
+  }
+
+  /**
+   * Account mirror of `loadPassbook` — same transaction DTO shape + pagination, keyed on the
+   * employee's account wallet id. CREDIT_BATCH field names are replayed via the EMPLOYEE resolver
+   * (matched by employeeCode) rather than the outlet resolver. Empty page when no wallet exists yet.
+   */
+  private async loadPassbookByAccount(
+    accountId: string,
+    clientId: string,
+    employeeCode: string,
+    q: { page?: number; limit?: number; type?: WalletTransactionType },
+  ) {
+    const page = q.page ?? 1;
+    const limit = q.limit ?? 20;
+    const skip = (page - 1) * limit;
+
+    const emptyResult = {
+      transactions: [],
+      pagination: { page, limit, total: 0, pages: 0 },
+    };
+
+    const wallet = await this.prisma.wallet.findFirst({ where: { accountId } });
+    if (!wallet) return emptyResult;
+
+    const where: Prisma.WalletTransactionWhereInput = { walletId: wallet.id };
+    if (q.type) where.transactionType = q.type;
+
+    const [transactions, total] = await Promise.all([
+      this.prisma.walletTransaction.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.walletTransaction.count({ where }),
+    ]);
+
+    // Field-name resolution is pagination-robust (resolve over ALL this wallet's CREDIT_BATCH txns,
+    // then apply the Map to the page) — exactly like loadPassbook, but matched by employeeCode.
+    const allCreditTxns = await this.prisma.walletTransaction.findMany({
+      where: { walletId: wallet.id, referenceType: 'CREDIT_BATCH' },
+      select: {
+        id: true,
+        referenceType: true,
+        referenceId: true,
+        description: true,
+        points: true,
+        createdAt: true,
+      },
+    });
+    const fieldNameByTxId = await resolveEmployeeCreditFieldNames(
+      this.prisma,
+      clientId,
+      employeeCode,
+      allCreditTxns,
+    );
+
+    const passbook = transactions.map((t) => ({
+      id: t.id,
+      transactionType: t.transactionType,
+      description: t.description ?? this.getDefaultDescription(t.transactionType),
+      points: t.points,
+      date: t.createdAt,
+      balanceType: t.balanceType,
+      balanceAfter: t.balanceAfter,
+      referenceType: t.referenceType,
+      referenceId: t.referenceId,
+      fieldName: fieldNameByTxId.get(t.id) ?? null,
+      narration: t.description,
+    }));
+
+    return {
+      transactions: passbook,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    };
+  }
+
+  /** GET /v1/rewards/employee/wallet — the logged-in employee's OWN account wallet summary. */
+  async employeeWalletSummary(user: JwtPayload) {
+    const ctx = await resolveEmployeeReadContext(this.prisma, user);
+    if (!ctx.accountId) {
+      // Roster employee not yet provisioned an account → zeroed summary (still carries the rate).
+      const conversionRate = await this.tenantSettings.getConversionRate(user.clientId);
+      return this.zeroedSummary(conversionRate);
+    }
+    return this.loadWalletSummaryByAccount(ctx.accountId, user.clientId);
+  }
+
+  /** GET /v1/rewards/employee/wallet/transactions — the employee's OWN account passbook (paginated). */
+  async employeeTransactions(user: JwtPayload, q: ListTransactionsQueryDto) {
+    const ctx = await resolveEmployeeReadContext(this.prisma, user);
+    if (!ctx.accountId) {
+      const page = q.page ?? 1;
+      const limit = q.limit ?? 20;
+      return { transactions: [], pagination: { page, limit, total: 0, pages: 0 } };
+    }
+    return this.loadPassbookByAccount(ctx.accountId, user.clientId, ctx.employeeCode, q);
   }
 
   // ─── GIFSY-only admin: wallet BY OUTLET ─────────────────────────────────────

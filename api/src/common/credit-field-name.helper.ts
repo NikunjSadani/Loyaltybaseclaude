@@ -42,6 +42,60 @@ export async function resolveCreditFieldNames(
   outletCode: string,
   txns: CreditTxn[],
 ): Promise<Map<string, string | null>> {
+  // The TRADE passbook matches batch rows by OUTLET code (`row.outletId`). Byte-identical to the
+  // original behaviour — the match predicate is the only thing factored out so the EMPLOYEE variant
+  // below can reuse the exact same consumption algorithm.
+  return resolveCreditFieldNamesBy(
+    prisma,
+    clientId,
+    txns,
+    (r) => r.outletId === outletCode,
+  );
+}
+
+/**
+ * Employee Rewards Workstream 2 — the EMPLOYEE passbook variant of `resolveCreditFieldNames`.
+ * Identical consumption algorithm, but matches batch rows by EMPLOYEE code: the employee credit
+ * batch (CreditsService.confirmEmployeeBatch) resolves an employeeCode via `row.employeeCode ??
+ * row.outletId` (the shared bulk row shape), so this mirrors that fallback. The TRADE resolver above
+ * is untouched (it keys on `row.outletId`).
+ */
+export async function resolveEmployeeCreditFieldNames(
+  prisma: CreditBatchReader,
+  clientId: string,
+  employeeCode: string,
+  txns: CreditTxn[],
+): Promise<Map<string, string | null>> {
+  return resolveCreditFieldNamesBy(
+    prisma,
+    clientId,
+    txns,
+    (r) => (r.employeeCode ?? r.outletId) === employeeCode,
+  );
+}
+
+/** Row fields the match predicate may read (plus the consumption fields below). */
+type MatchableBatchRow = {
+  fieldName?: string;
+  amount?: number;
+  narration?: string;
+  outletId?: string;
+  employeeCode?: string;
+  awardType?: string;
+};
+
+/**
+ * Shared core for both the TRADE (`resolveCreditFieldNames`) and EMPLOYEE
+ * (`resolveEmployeeCreditFieldNames`) resolvers. The ONLY thing that varies is how a batch row is
+ * matched to the ledger owner (`rowMatches`) — everything else (POINTS-only filter, oldest→newest
+ * consumption, amount+narration tiebreak) is identical, so both passbooks can never drift.
+ */
+async function resolveCreditFieldNamesBy(
+  prisma: CreditBatchReader,
+  clientId: string,
+  txns: CreditTxn[],
+  rowMatches: (row: MatchableBatchRow) => boolean,
+): Promise<Map<string, string | null>> {
   const fieldNameByTxId = new Map<string, string | null>();
 
   const creditTxns = txns.filter(
@@ -58,7 +112,7 @@ export async function resolveCreditFieldNames(
     select: { id: true, rows: true },
   });
 
-  // Per batch, the not-yet-consumed rows for THIS outlet (by outlet CODE).
+  // Per batch, the not-yet-consumed rows for THIS owner (matched by the caller's predicate).
   type BatchRow = { fieldName?: string; amount?: number; narration?: string };
   const rowsByBatch = new Map<string, BatchRow[]>();
   for (const batch of batches) {
@@ -70,8 +124,8 @@ export async function resolveCreditFieldNames(
         // POINTS rows only — a PAYOUT row (amount in paise) never credits the
         // wallet, so excluding it avoids a numeric amount collision consuming
         // the wrong row.
-        parsed = (raw as (BatchRow & { outletId?: string; awardType?: string })[]).filter(
-          (r) => r && r.outletId === outletCode && r.awardType === 'POINTS',
+        parsed = (raw as MatchableBatchRow[]).filter(
+          (r) => r && rowMatches(r) && r.awardType === 'POINTS',
         );
       }
     } catch {

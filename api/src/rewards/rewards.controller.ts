@@ -14,6 +14,7 @@ import {
   TransitionOrderDto,
   UpdateOrderDto,
 } from './dto/rewards.dto';
+import { ListTransactionsQueryDto } from '../wallet/dto/wallet.dto';
 
 /** Sales hierarchy roles that may redeem on behalf of an assigned outlet. */
 const SALES_ROLES = [
@@ -81,6 +82,57 @@ export class RewardsController {
   @RequirePermission('rewards:read')
   redeemForEmployee(@CurrentUser() user: JwtPayload, @Body() dto: EmployeeRedeemDto) {
     return this.rewards.redeemForEmployee(user, dto);
+  }
+
+  // ── Employee Rewards WS2 (Wave 2) — ACCOUNT-FIRST employee READ rails. ─────────────────
+  // Same guard as employee/redeem: NOT @Roles-gated (an employee's role is a dynamic tenant
+  // hierarchy code, not a fixed allow-list), so authorization is the SERVICE-layer own-SalesUser
+  // resolution (an employee only ever sees THEIR OWN account). @RequirePermission('rewards:read')
+  // mirrors the member reads. No x-active-partner-id (account-first — there is no partner switch).
+
+  /** The logged-in employee's OWN account wallet summary (drop-in for the partner wallet shape). */
+  @Get('employee/wallet')
+  @RequirePermission('rewards:read')
+  employeeWallet(@CurrentUser() user: JwtPayload) {
+    return this.rewards.employeeWallet(user);
+  }
+
+  /** The employee's OWN account passbook (paginated). */
+  @Get('employee/wallet/transactions')
+  @RequirePermission('rewards:read')
+  employeeWalletTransactions(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: ListTransactionsQueryDto,
+  ) {
+    return this.rewards.employeeWalletTransactions(user, query);
+  }
+
+  /** The employee's OWN account orders (member-safe shape). Closes the EMP-GAP-1 member residual. */
+  @Get('employee/orders')
+  @RequirePermission('rewards:read')
+  employeeListOrders(@CurrentUser() user: JwtPayload, @Query() query: ListOrdersQueryDto) {
+    return this.rewards.employeeListOrders(user, query);
+  }
+
+  /** One of the employee's OWN orders (404 for a cross-account id). */
+  @Get('employee/orders/:id')
+  @RequirePermission('rewards:read')
+  employeeGetOrder(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.rewards.employeeGetOrder(user, id);
+  }
+
+  /** The employee's OWN order tracking view. */
+  @Get('employee/orders/:id/track')
+  @RequirePermission('rewards:read')
+  employeeTrackOrder(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.rewards.employeeTrackOrder(user, id);
+  }
+
+  /** The employee's affordability-aware, role/region-visibility-filtered catalogue. */
+  @Get('employee/catalog')
+  @RequirePermission('rewards:read')
+  employeeListCatalog(@CurrentUser() user: JwtPayload, @Query() query: ListCatalogQueryDto) {
+    return this.rewards.employeeListCatalog(user, query);
   }
 
   /** SALES-ASSISTED redeem (B1, #50-E) — a sales user redeems for an assigned outlet. */
