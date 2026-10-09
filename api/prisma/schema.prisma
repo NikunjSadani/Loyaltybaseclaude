@@ -2921,6 +2921,29 @@ model OutletTarget {
   @@map("outlet_targets")
 }
 
+// ─── Employee Rewards Phase C (ADMIN-DESIGN §5.2) — per-employee DISPLAY target ───
+// An OPTIONAL per-employee/period target-points value, UPLOADED via the SAME employee
+// points upload (one row per employee) and stored as DATA — NOT computed. It drives the
+// rep app's display-only "Potential / achievement" view (achievement = earned ÷ target,
+// computed FE-side over this + the wallet summary). It NEVER touches the wallet/ledger/
+// credit math — additive, display-only. OutletTarget above is outlet/KPI-shaped (keyed on
+// outletCode with a KPI targetValues JSON + a required batchId), awkward for a single
+// scalar employee target; this is the minimal employee-shaped twin.
+model EmployeeTarget {
+  id           String @id @default(cuid())
+  clientId     String
+  employeeCode String
+  period       String // 'YYYY-MM'
+  targetPoints Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([clientId, employeeCode, period]) // one target per employee per period
+  @@index([clientId, period])
+  @@map("employee_targets")
+}
+
 // ─── MODULE: POINTS COMPUTE ENGINE (Wave 0) — versioned rule store ────────────
 // A PointsRule is a versioned, immutable config row that mirrors the shared
 // PointsRuleConfig contract (api/src/points-engine/points-engine.types.ts). A

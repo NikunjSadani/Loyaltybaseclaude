@@ -36,12 +36,13 @@ import { generateTenantOrderNumber } from './order-number.helper';
 import { computeFrozenValuePaise } from './gift-value.helper';
 import { computeDispatchSla } from '../common/dispatch-sla';
 import { loadHolidaySet } from '../common/holiday-calendar';
-import { istDayRangeFilter } from '../common/ist-date';
+import { istDayRangeFilter, istMonthKey } from '../common/ist-date';
 import {
   AdminListCatalogQueryDto,
   CreateRewardCatalogDto,
   CreateRewardCategoryDto,
   EmployeeRedeemDto,
+  EmployeeTargetQueryDto,
   FulfilmentOrdersQueryDto,
   FulfilmentTemplateQueryDto,
   ListCatalogQueryDto,
@@ -733,6 +734,34 @@ export class RewardsService {
   /** GET /v1/rewards/employee/wallet/transactions — thin delegate to WalletService. */
   employeeWalletTransactions(user: JwtPayload, q: ListTransactionsQueryDto) {
     return this.wallet.employeeTransactions(user, q);
+  }
+
+  /**
+   * GET /v1/rewards/employee/target — the logged-in employee's OWN uploaded DISPLAY target for a
+   * period (default = current IST month). Employee Rewards Phase C (ADMIN-DESIGN §5.2): returns the
+   * uploaded `targetPoints` (or null when none), for the rep app's display-only "Potential /
+   * achievement" view. Achievement = earned ÷ target is computed FE-SIDE over this + the wallet
+   * summary — NO compute, NO money here. Resolved via the SAME resolveEmployeeReadContext the other
+   * employee reads use, so an employee only ever sees their OWN target (own-identity authorization).
+   */
+  async employeeTarget(
+    user: JwtPayload,
+    q: EmployeeTargetQueryDto,
+  ): Promise<{ period: string; targetPoints: number | null }> {
+    const period = q.period ?? istMonthKey(new Date());
+    // Identity/own-account authorization + EMPLOYEE-earner tenant gate (throws 400/403 otherwise).
+    const ctx = await resolveEmployeeReadContext(this.prisma, user);
+    const row = await this.prisma.employeeTarget.findUnique({
+      where: {
+        clientId_employeeCode_period: {
+          clientId: user.clientId,
+          employeeCode: ctx.employeeCode,
+          period,
+        },
+      },
+      select: { targetPoints: true },
+    });
+    return { period, targetPoints: row?.targetPoints ?? null };
   }
 
   /**

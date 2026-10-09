@@ -1425,6 +1425,10 @@ export class CreditsService {
       narration: string;
       awardType: string;
       status: string;
+      // Employee Rewards Phase C — OPTIONAL per-employee/period DISPLAY target (whole points).
+      // Carried on the SAME upload row; stored as data (NOT credited). May be present on a
+      // points row OR a target-only (0/blank-points) row.
+      targetPoints?: number;
     }[];
 
     // Points-only path: credit POINTS+OK rows with a positive amount (creditEarnForAccount rejects
@@ -1557,6 +1561,46 @@ export class CreditsService {
         );
         pointsCredited += 1;
         pointsCreditedTotal += r.amount;
+      }
+
+      // ── Employee Rewards Phase C — DISPLAY-ONLY target upsert (ADDITIVE; NO money) ──────────
+      // SEPARATE from the points-credit loop above and NON-INTERFERING with it: for EVERY OK row
+      // that carries a numeric targetPoints (>= 0) — INCLUDING a target-only row with 0/blank
+      // points (which pointsRows skipped, so the credit loop never saw it) — store the uploaded
+      // per-employee/period target on EmployeeTarget. This touches NO wallet/ledger/credit
+      // primitive (points stay credited exactly as above; a target-only row credits nothing).
+      // The employeeCode resolves the SAME way the credit loop does (row.employeeCode ?? outletId);
+      // a row whose employee does NOT resolve is skipped (like the credit path) — no target is
+      // written for a ghost code. Idempotent upsert on the (clientId, employeeCode, period) key so
+      // a re-confirm/re-upload of the period refreshes the target rather than duplicating it.
+      for (const r of rows) {
+        if (r.status !== 'OK') continue;
+        const tp = r.targetPoints;
+        // Only a genuine non-negative integer target is stored; absent/blank/garbage → no target.
+        if (typeof tp !== 'number' || !Number.isInteger(tp) || tp < 0) continue;
+        const employeeCode = (r.employeeCode ?? r.outletId)?.trim();
+        if (!employeeCode) continue;
+        const targetUser = await tx.salesUser.findFirst({
+          where: { clientId: user.clientId, employeeCode, deletedAt: null },
+          select: { id: true },
+        });
+        if (!targetUser) continue; // employee does not resolve → no target (parity with credit skip)
+        await tx.employeeTarget.upsert({
+          where: {
+            clientId_employeeCode_period: {
+              clientId: user.clientId,
+              employeeCode,
+              period: batch.period,
+            },
+          },
+          create: {
+            clientId: user.clientId,
+            employeeCode,
+            period: batch.period,
+            targetPoints: tp,
+          },
+          update: { targetPoints: tp },
+        });
       }
 
       return confirmed;

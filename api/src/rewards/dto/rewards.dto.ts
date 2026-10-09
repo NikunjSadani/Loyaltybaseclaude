@@ -105,6 +105,17 @@ export class ListOrdersQueryDto {
 }
 
 /**
+ * Employee Rewards Phase C — GET /v1/rewards/employee/target query. OPTIONAL `period` (YYYY-MM);
+ * when absent the service defaults to the current IST month. Display-only read of the uploaded
+ * per-employee target (no money, no compute).
+ */
+export class EmployeeTargetQueryDto {
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}$/, { message: 'Period must be YYYY-MM' })
+  period?: string;
+}
+
+/**
  * Settable order statuses for the admin transition — mirrors the source zod enum
  * (PENDING is intentionally excluded: admins move orders forward only).
  * Kept as its own enum because the canonical RedemptionStatus also has PENDING.

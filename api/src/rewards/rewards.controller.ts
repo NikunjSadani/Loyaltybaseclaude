@@ -5,6 +5,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import {
   EmployeeRedeemDto,
+  EmployeeTargetQueryDto,
   ListCatalogQueryDto,
   ListOrdersQueryDto,
   RedeemConfirmDto,
@@ -133,6 +134,17 @@ export class RewardsController {
   @RequirePermission('rewards:read')
   employeeListCatalog(@CurrentUser() user: JwtPayload, @Query() query: ListCatalogQueryDto) {
     return this.rewards.employeeListCatalog(user, query);
+  }
+
+  /**
+   * Employee Rewards Phase C — the employee's OWN uploaded DISPLAY target for a period (default =
+   * current IST month). `{ period, targetPoints: number | null }`. Display-only (NO money, NO
+   * compute); achievement = earned ÷ target is derived FE-side over this + the wallet summary.
+   */
+  @Get('employee/target')
+  @RequirePermission('rewards:read')
+  employeeTarget(@CurrentUser() user: JwtPayload, @Query() query: EmployeeTargetQueryDto) {
+    return this.rewards.employeeTarget(user, query);
   }
 
   /** SALES-ASSISTED redeem (B1, #50-E) — a sales user redeems for an assigned outlet. */

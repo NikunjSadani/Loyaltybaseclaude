@@ -77,6 +77,18 @@ export class UploadRowDto {
   @IsEnum(UploadRowStatus)
   status!: UploadRowStatus;
 
+  /**
+   * Employee Rewards Phase C (ADMIN-DESIGN §5.2) — OPTIONAL per-employee/period DISPLAY target
+   * (whole points). Uploaded via the SAME employee points sheet (a "Target Points" column the FE
+   * adds later); stored as DATA on EmployeeTarget at confirm, NOT computed and NEVER credited. A
+   * row may carry a target WITHOUT points (target-only) or alongside points. Unused by the
+   * OUTLET/trade path (its upload never sends it).
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  targetPoints?: number;
+
   @IsOptional()
   @IsArray()
   @IsString({ each: true })

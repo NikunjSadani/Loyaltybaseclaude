@@ -147,6 +147,7 @@ describe('RewardsService — Employee Rewards WS2 (account-first order + catalog
     wallet: { findFirst: jest.fn() },
     redemptionOrder: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn() },
     rewardCatalog: { findMany: jest.fn(), count: jest.fn() },
+    employeeTarget: { findUnique: jest.fn() },
   };
   const mockWallet = {
     getWallet: jest.fn(),
@@ -171,6 +172,7 @@ describe('RewardsService — Employee Rewards WS2 (account-first order + catalog
     mockPrisma.redemptionOrder.findFirst.mockResolvedValue(null);
     mockPrisma.rewardCatalog.findMany.mockResolvedValue([]);
     mockPrisma.rewardCatalog.count.mockResolvedValue(0);
+    mockPrisma.employeeTarget.findUnique.mockResolvedValue(null);
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -311,5 +313,47 @@ describe('RewardsService — Employee Rewards WS2 (account-first order + catalog
   it('REJECTS a non-employee caller (no SalesUser) on the catalogue read', async () => {
     mockPrisma.salesUser.findFirst.mockResolvedValue(null);
     await expect(service.employeeListCatalog(employee, {} as never)).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  // ─── Phase C: employee DISPLAY target read ──────────────────────────────────────
+  it('employeeTarget resolves the OWN employee and returns the period target', async () => {
+    mockPrisma.employeeTarget.findUnique.mockResolvedValue({ targetPoints: 500 });
+    const res = await service.employeeTarget(employee, { period: '2026-05' });
+    expect(res).toEqual({ period: '2026-05', targetPoints: 500 });
+    // Looked up on the OWN resolved employeeCode (SU() → 'EMP001') + the requested period.
+    expect(mockPrisma.employeeTarget.findUnique).toHaveBeenCalledWith({
+      where: { clientId_employeeCode_period: { clientId: 'acme', employeeCode: 'EMP001', period: '2026-05' } },
+      select: { targetPoints: true },
+    });
+  });
+
+  it('employeeTarget returns null when the employee has no target for the period', async () => {
+    mockPrisma.employeeTarget.findUnique.mockResolvedValue(null);
+    const res = await service.employeeTarget(employee, { period: '2026-05' });
+    expect(res).toEqual({ period: '2026-05', targetPoints: null });
+  });
+
+  it('employeeTarget defaults to the current IST month when no period is given', async () => {
+    mockPrisma.employeeTarget.findUnique.mockResolvedValue(null);
+    const res = await service.employeeTarget(employee, {});
+    // Current IST month key, computed the same way the service does (shift-then-read-UTC).
+    const shifted = new Date(Date.now() + (5 * 60 + 30) * 60_000);
+    const expected = `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}`;
+    expect(res.period).toBe(expected);
+    expect(res.targetPoints).toBeNull();
+    const call = mockPrisma.employeeTarget.findUnique.mock.calls[0][0] as { where: { clientId_employeeCode_period: { period: string } } };
+    expect(call.where.clientId_employeeCode_period.period).toBe(expected);
+  });
+
+  it('employeeTarget REJECTS a TRADE tenant (fail-safe earner gate) — no target read', async () => {
+    mockPrisma.client.findUnique.mockResolvedValue(TRADE_CLIENT);
+    await expect(service.employeeTarget(employee, { period: '2026-05' })).rejects.toBeInstanceOf(BadRequestException);
+    expect(mockPrisma.employeeTarget.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('employeeTarget REJECTS a non-employee caller (no SalesUser)', async () => {
+    mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+    await expect(service.employeeTarget(employee, { period: '2026-05' })).rejects.toBeInstanceOf(ForbiddenException);
+    expect(mockPrisma.employeeTarget.findUnique).not.toHaveBeenCalled();
   });
 });

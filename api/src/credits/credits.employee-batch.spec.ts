@@ -53,6 +53,8 @@ const mockTx = {
   salesUser: { findFirst: jest.fn() },
   outlet: { findFirst: jest.fn() },
   wallet: { upsert: jest.fn().mockResolvedValue({ id: 'w1' }), findFirst: jest.fn() },
+  // Employee Rewards Phase C — the DISPLAY-only target upsert (no money).
+  employeeTarget: { upsert: jest.fn().mockResolvedValue({ id: 'et1' }) },
   $executeRaw: jest.fn().mockResolvedValue(0),
 };
 
@@ -119,6 +121,7 @@ describe('CreditsService — Employee Rewards Phase C (employee points credit)',
     mockTx.creditBatch.count.mockResolvedValue(0);
     mockTx.$executeRaw.mockResolvedValue(0);
     mockTx.salesUser.findFirst.mockResolvedValue(null);
+    mockTx.employeeTarget.upsert.mockResolvedValue({ id: 'et1' });
     (ensureEmployeeAccount as jest.Mock).mockResolvedValue('acc-emp');
     (ensureEmployeeWallet as jest.Mock).mockResolvedValue('w-emp');
 
@@ -367,6 +370,87 @@ describe('CreditsService — Employee Rewards Phase C (employee points credit)',
       expect(res.skipped).toContainEqual({ employeeCode: 'EMP002', fieldName: 'Cash', points: 999, reason: 'UNSUPPORTED_AWARD_TYPE' });
       // The PAYOUT row never reaches the credit primitive.
       expect(mockWalletService.creditEarnForAccount).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ─── Phase C: DISPLAY-only EmployeeTarget upsert (ADDITIVE; NO money) ─────────
+  describe('🎯 Phase C — EmployeeTarget upsert (display-only; never touches the credit math)', () => {
+    beforeEach(() => mockPrisma.client.findUnique.mockResolvedValue(EMPLOYEE_CLIENT));
+
+    const batchWith = (rows: unknown[]) => ({
+      id: 'b1', clientId: 'acme', status: 'PENDING_CONFIRM', sourceKind: 'EMPLOYEE_UPLOAD',
+      period: '2026-05', uploadedBy: 'admin1', totalOutlets: 1, totalPoints: 100, totalPayoutPaise: 0n, rows,
+    });
+
+    it('a points+target row CREDITS the points AND upserts the target (credit unchanged)', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue(batchWith([
+        { outletId: 'EMP001', outletName: 'A', employeeCode: 'EMP001', fieldId: 'f1', fieldName: 'Q2', amount: 50, narration: 'bonus', awardType: 'POINTS', status: 'OK', targetPoints: 400 },
+      ]));
+      mockTx.salesUser.findFirst.mockResolvedValue({ id: 'su1', isActive: true });
+
+      const res = await service.confirmEmployeeBatch(admin, 'b1');
+
+      // Credit behavior is byte-identical to the no-target case: still exactly one credit of 50.
+      expect(res.pointsCredited).toBe(1);
+      expect(res.pointsCreditedTotal).toBe(50);
+      expect(mockWalletService.creditEarnForAccount).toHaveBeenCalledTimes(1);
+      expect(mockWalletService.creditEarnForAccount).toHaveBeenCalledWith(
+        'acc-emp', 'acme', 50,
+        { referenceType: 'CREDIT_BATCH', referenceId: 'b1', sourceType: 'EMPLOYEE_UPLOAD', sourceId: 'EMP001', description: 'bonus' },
+        mockTx,
+      );
+      // AND the target is upserted on the (clientId, employeeCode, period) key.
+      expect(mockTx.employeeTarget.upsert).toHaveBeenCalledTimes(1);
+      expect(mockTx.employeeTarget.upsert).toHaveBeenCalledWith({
+        where: { clientId_employeeCode_period: { clientId: 'acme', employeeCode: 'EMP001', period: '2026-05' } },
+        create: { clientId: 'acme', employeeCode: 'EMP001', period: '2026-05', targetPoints: 400 },
+        update: { targetPoints: 400 },
+      });
+    });
+
+    it('a TARGET-ONLY row (0/blank points) upserts the target and CREDITS NOTHING', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue(batchWith([
+        { outletId: 'EMP002', outletName: 'B', employeeCode: 'EMP002', fieldId: 'f1', fieldName: 'Q2', amount: 0, narration: '', awardType: 'POINTS', status: 'OK', targetPoints: 250 },
+      ]));
+      mockTx.salesUser.findFirst.mockResolvedValue({ id: 'su2', isActive: true });
+
+      const res = await service.confirmEmployeeBatch(admin, 'b1');
+
+      // Zero-amount row is skipped by the credit loop (amount > 0 filter) → nothing credited.
+      expect(res.pointsCredited).toBe(0);
+      expect(res.pointsCreditedTotal).toBe(0);
+      expect(mockWalletService.creditEarnForAccount).not.toHaveBeenCalled();
+      // But the target IS stored.
+      expect(mockTx.employeeTarget.upsert).toHaveBeenCalledTimes(1);
+      expect(mockTx.employeeTarget.upsert).toHaveBeenCalledWith({
+        where: { clientId_employeeCode_period: { clientId: 'acme', employeeCode: 'EMP002', period: '2026-05' } },
+        create: { clientId: 'acme', employeeCode: 'EMP002', period: '2026-05', targetPoints: 250 },
+        update: { targetPoints: 250 },
+      });
+    });
+
+    it('a row WITHOUT targetPoints upserts NO target (credit path untouched)', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue(batchWith([
+        { outletId: 'EMP003', outletName: 'C', employeeCode: 'EMP003', fieldId: 'f1', fieldName: 'Q2', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
+      ]));
+      mockTx.salesUser.findFirst.mockResolvedValue({ id: 'su3', isActive: true });
+
+      const res = await service.confirmEmployeeBatch(admin, 'b1');
+
+      expect(res.pointsCredited).toBe(1);
+      expect(res.pointsCreditedTotal).toBe(50);
+      expect(mockTx.employeeTarget.upsert).not.toHaveBeenCalled();
+    });
+
+    it('does NOT upsert a target for a row whose employee does not resolve (ghost code)', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue(batchWith([
+        { outletId: 'GHOST', outletName: 'X', employeeCode: 'GHOST', fieldId: 'f1', fieldName: 'Q2', amount: 0, narration: '', awardType: 'POINTS', status: 'OK', targetPoints: 300 },
+      ]));
+      mockTx.salesUser.findFirst.mockResolvedValue(null); // does not resolve
+
+      await service.confirmEmployeeBatch(admin, 'b1');
+
+      expect(mockTx.employeeTarget.upsert).not.toHaveBeenCalled();
     });
   });
 
