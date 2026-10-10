@@ -353,7 +353,7 @@ function PayoutPageInner() {
       <div className="flex items-center gap-3">
         <Coins className="w-5 h-5 text-[var(--brand-primary)]" />
         <div>
-          <h2 className="text-lg font-bold text-gray-900">Payout Management</h2>
+          <h2 className="text-lg font-bold text-gray-900">Payout Download</h2>
           <p className="text-xs text-gray-500">Generate payout files, upload UTR results, approve reversals.</p>
         </div>
       </div>

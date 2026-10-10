@@ -94,9 +94,9 @@ You can watch each batch's state on **Payout Status** (Confirmed = credited/paid
 
 > **Status words for this flow:** **Pending → Initiated → Success.** (Or **Failed** / **Reversed**.)
 >
-> **Menu:** in the brand's admin menu, open **Payout Management**.
+> **Menu:** in the brand's admin menu, open **Redemption Payouts**.
 
-![Redemption Payout Management screen](/guides/payouts/redemption-payouts.png)
+![Redemption Payouts screen](/guides/payouts/redemption-payouts.png)
 
 ### The steps
 
