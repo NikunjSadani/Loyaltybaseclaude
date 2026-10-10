@@ -236,6 +236,51 @@ export interface EmployeeRedeemResult {
   message: string;
 }
 
+/* ─── Contests (GET /api/rewards/employee/contests) ─────────────────────────────
+   The backend ALREADY filters to only the ACTIVE/SCHEDULED contests this employee is
+   eligible for (by role/region) — the FE does NOT filter further, it just displays
+   what comes back. eligibleRoleCodes/eligibleRegions ride along for completeness but
+   are not surfaced (the filter is server-side). ───────────────────────────────── */
+
+export interface ApiEmployeeContest {
+  id: string;
+  name: string;
+  bannerUrl: string | null;
+  description: string | null;
+  startDate: string; // ISO
+  endDate: string; // ISO
+  bonusPoints: number;
+  status: 'ACTIVE' | 'SCHEDULED';
+  eligibleRoleCodes: string[];
+  eligibleRegions: string[];
+}
+
+export interface Contest {
+  id: string;
+  name: string;
+  bannerUrl: string | null;
+  description: string;
+  startDate: string;
+  endDate: string;
+  bonusPoints: number;
+  status: 'ACTIVE' | 'SCHEDULED';
+}
+
+export function mapContest(api: ApiEmployeeContest): Contest {
+  return {
+    id: api.id,
+    name: api.name,
+    bannerUrl: api.bannerUrl ?? null,
+    description: api.description ?? '',
+    startDate: api.startDate,
+    endDate: api.endDate,
+    // Defensive clamp — points are display copy ("Win N pts"); never show a negative/NaN.
+    bonusPoints: Number.isFinite(api.bonusPoints) ? Math.max(0, api.bonusPoints) : 0,
+    // Anything the backend doesn't label SCHEDULED is treated as live/ACTIVE.
+    status: api.status === 'SCHEDULED' ? 'SCHEDULED' : 'ACTIVE',
+  };
+}
+
 /* ─── Profile (GET /api/auth/me → user + salesUser) ─────────────────────────── */
 
 export interface EmployeeMe {
@@ -289,4 +334,57 @@ export function pickFeatured(items: CatalogItem[], limit = 6): CatalogItem[] {
     .filter((i) => !i.isAffordable)
     .sort((a, b) => a.pointsCost - b.pointsCost); // nearest-reach next
   return [...affordable, ...aspirational].slice(0, limit);
+}
+
+/** The IST calendar day / short-month / year of an instant, as display primitives. */
+function istDateParts(
+  date: string | Date,
+): { day: number; month: string; year: string } | null {
+  const d = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(d.getTime())) return null;
+  // en-GB + Asia/Kolkata: day with NO leading zero ("1"), month short ("Nov"), 4-digit year.
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  }).formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+  return { day: Number(get('day')), month: get('month'), year: get('year') };
+}
+
+/**
+ * Human date range for a contest, pinned to IST, collapsing the shared month/year:
+ *   same month + year → "1 – 30 Nov 2026"
+ *   same year         → "1 Nov – 5 Dec 2026"
+ *   spanning years    → "1 Nov 2026 – 5 Jan 2027"
+ * Returns '' when BOTH ends are missing/invalid; if only one is valid, that single
+ * date is shown — so a contest line never renders "Invalid Date".
+ */
+export function formatContestDateRange(start: string | Date, end: string | Date): string {
+  const s = istDateParts(start);
+  const e = istDateParts(end);
+  if (!s && !e) return '';
+  if (!s) return `${e!.day} ${e!.month} ${e!.year}`;
+  if (!e) return `${s.day} ${s.month} ${s.year}`;
+  if (s.year !== e.year) {
+    return `${s.day} ${s.month} ${s.year} – ${e.day} ${e.month} ${e.year}`;
+  }
+  if (s.month !== e.month) {
+    return `${s.day} ${s.month} – ${e.day} ${e.month} ${e.year}`;
+  }
+  return `${s.day} – ${e.day} ${e.month} ${e.year}`;
+}
+
+/**
+ * Badge copy + variant for a contest status. ACTIVE reads as a live contest, SCHEDULED
+ * as an upcoming one; the variant strings are valid `BadgeVariant` members so the page
+ * can hand them straight to <Badge>. Any unrecognised status falls back to live.
+ */
+export function contestStatusBadge(
+  status: string,
+): { label: string; variant: 'success' | 'info' } {
+  return status === 'SCHEDULED'
+    ? { label: 'Upcoming', variant: 'info' }
+    : { label: 'Live', variant: 'success' };
 }

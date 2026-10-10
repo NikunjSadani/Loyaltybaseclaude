@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { Home, Wallet, Gift, Package, User } from 'lucide-react';
+import { Home, Wallet, Gift, Package, User, Trophy } from 'lucide-react';
 import { NavBottom, type NavItem } from '@/components/layout/nav-bottom';
 import { Sidebar, type SidebarSection } from '@/components/layout/sidebar';
 import { SiteFooter } from '@/components/layout/site-footer';
@@ -25,6 +25,7 @@ import type { EmployeeMe } from './_lib/employee';
 const NAV_TABS: NavItem[] = [
   { href: '/rep', label: 'Home', icon: Home },
   { href: '/rep/rewards', label: 'Rewards', icon: Gift },
+  { href: '/rep/contests', label: 'Contests', icon: Trophy },
   { href: '/rep/orders', label: 'Orders', icon: Package },
   { href: '/rep/wallet', label: 'Wallet', icon: Wallet },
   { href: '/rep/profile', label: 'Profile', icon: User },
@@ -36,6 +37,7 @@ const SIDEBAR_SECTIONS: SidebarSection[] = [
       { href: '/rep', label: 'Home', icon: Home },
       { href: '/rep/wallet', label: 'My Wallet', icon: Wallet },
       { href: '/rep/rewards', label: 'Rewards', icon: Gift },
+      { href: '/rep/contests', label: 'Contests', icon: Trophy },
       { href: '/rep/orders', label: 'My Orders', icon: Package },
       { href: '/rep/profile', label: 'Profile', icon: User },
     ],

@@ -34,8 +34,30 @@
   **#4** parser skips any parsed-zero (`"0.0"`), no silent OK-0; **#5** done screen never shows green when 0
   credited; **#7** case-sensitive dedup (matches the resolver). Gate: **api jest 3523 · build clean · platform
   tsc clean · vitest 2619**. Real-DB runtime verify re-run incl. inactive-skip + sourceKey idempotency — all green.
-  (Phase C follow-ons still open: the optional **target column** — owner-locked INCLUDE, needs a BE target
-  store — and **Contests**, needs a spec.)
+  (Phase C follow-ons: **target column** ✅ landed; **Contests** ✅ BE landed — see next bullet.)
+- **Phase C target column landed (2026-10-10):** `confirmEmployeeBatch` upserts `EmployeeTarget`
+  (`@@unique[clientId,employeeCode,period]`, migration `20261010120000`) in a SEPARATE loop AFTER the credit
+  loop (same tx; credit loop byte-unchanged) — a target-only row (amount 0) sets a display target while
+  crediting nothing. FE `/admin/points` template/parser gained an optional `targetPoints` column; rep read
+  `GET /v1/rewards/employee/target`. Display-only — NEVER touches the money path.
+- **Phase C Contests BE landed (2026-10-10, HEAD `dea72e7`):** additive `ContestsModule` (earner-gated — rejects
+  non-EMPLOYEE tenants, so Deoleo/trade untouched). Admin CRUD `POST/GET/PATCH /v1/admin/contests` + manual bonus
+  credit `POST /v1/admin/contests/:id/credit-bonus`; rep read `GET /v1/rewards/employee/contests`. `Contest` +
+  `ContestBonusCredit` models (`@@unique[contestId,employeeCode]`, migration `20261010130000`). **Manual bonus
+  credit only** (owner decision — no auto-validation engine). Credit reuses the AUDITED `creditEarnForAccount`
+  with `referenceType:CONTEST`/`sourceType:CONTEST_BONUS` and **NO CreditBatch**, so a contest credit is
+  structurally invisible to the F2 period-uniqueness guard and COEXISTS with the monthly upload rail. Money
+  safety: once-only guarded claim (`updateMany` count===1 flip to CREDITED + stamp `bonusCreditedAt` BEFORE any
+  wallet write → a racing 2nd credit throws, no double-credit); zero-creditable-winner run does NOT burn the
+  contest (stays ACTIVE, re-runnable); inactive/soft-deleted never credited; explicit non-eligible winners
+  surfaced skipped. **DUAL money audit → Audit A Finding 1 FIXED** (bonusPoints > tenant `safetyCapPoints`
+  refused at credit time, mirrors the upload cap, authoritative against the live setting); Audit B clean.
+  Gate: **api jest 3607 + build clean**. **Real-DB runtime verify (:5434):** create→ACTIVE→credit = +25 to the
+  active ISR / inactive skipped / audit row written / NO EMPLOYEE_UPLOAD batch (F2 coexistence) / once-only
+  re-credit refused balance-unchanged / cap-60000>50000 refused moving no points & NOT burning the contest /
+  monthly batch still confirms alongside — **all green**. ▶ **NEXT: Contests FE** (admin builder at
+  `/admin/contests` + rep contest display at `/rep`). Residuals (non-blocking): whole-roster-in-one-tx scale at
+  Britannia volume (R1); no hard-delete (R2); list/get not earner-gated (R3, cosmetic).
 - **Phase B Wave B1 (account-first self-service redeem rail, BE) landed (2026-10-05, HEAD `87ddd34`):** the
   redeem mirror of Phase C's credit rail — a logged-in EMPLOYEE redeems a gift FOR THEMSELVES against their
   account-owned wallet (single-step, **NO OTP** per owner). `RedemptionOrder.partnerId`→nullable (migration

@@ -13,6 +13,7 @@ describe('requiredPermissionForPath()', () => {
     expect(requiredPermissionForPath('/admin/payouts')).toBe('payouts:read');
     expect(requiredPermissionForPath('/admin/tickets')).toBe('support:read');
     expect(requiredPermissionForPath('/admin/gifts')).toBe('rewards:read');
+    expect(requiredPermissionForPath('/admin/contests')).toBe('rewards:read');
     expect(requiredPermissionForPath('/admin/visibility')).toBe('visibility:read');
     expect(requiredPermissionForPath('/admin/credits-payouts')).toBe('credits:read');
   });
