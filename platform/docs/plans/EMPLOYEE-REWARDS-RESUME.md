@@ -55,9 +55,20 @@
   Gate: **api jest 3607 + build clean**. **Real-DB runtime verify (:5434):** create→ACTIVE→credit = +25 to the
   active ISR / inactive skipped / audit row written / NO EMPLOYEE_UPLOAD batch (F2 coexistence) / once-only
   re-credit refused balance-unchanged / cap-60000>50000 refused moving no points & NOT burning the contest /
-  monthly batch still confirms alongside — **all green**. ▶ **NEXT: Contests FE** (admin builder at
-  `/admin/contests` + rep contest display at `/rep`). Residuals (non-blocking): whole-roster-in-one-tx scale at
+  monthly batch still confirms alongside — **all green**. Residuals (non-blocking): whole-roster-in-one-tx scale at
   Britannia volume (R1); no hard-delete (R2); list/get not earner-gated (R3, cosmetic).
+- **Phase C Contests FE landed (2026-10-10, HEAD `dc1efd6`) → PHASE C COMPLETE (BE + FE):** admin builder
+  `/admin/contests` (list+filter+pagination, create/edit [edit only DRAFT/SCHEDULED], status-advance buttons
+  mirroring the BE transition map, cancel, and the money-adjacent credit-bonus confirm modal — two-step,
+  in-flight double-click guard, optional explicit-winner textarea, result panel creditedCount/pointsCreditedTotal/
+  skipped) + route-perm `/admin/contests→rewards:read`; rep display `/rep/contests` (eligible ACTIVE/SCHEDULED
+  contests as cards off the backend-scoped read rail, nav tab, IST date-range/badge pure helpers unit-tested).
+  **Independent FE/UX audit → 1 copy-honesty defect FIXED:** the credit-bonus success panel showed a green
+  "Bonus credited." even when the BE returned `credited:false`/`creditedCount:0` (the zero-eligible-winner case
+  that leaves the contest ACTIVE + re-runnable) → now an honest amber "Nothing was credited … still active, can
+  be run again". Gate: platform **tsc clean · vitest 2644**; api unchanged (jest 3607). FE runtime-verify
+  deferred to staging (pane blocks `*.localhost` cookies); the BE credit path incl. the zero-winner
+  `credited:false` case is already real-DB runtime-verified.
 - **Phase B Wave B1 (account-first self-service redeem rail, BE) landed (2026-10-05, HEAD `87ddd34`):** the
   redeem mirror of Phase C's credit rail — a logged-in EMPLOYEE redeems a gift FOR THEMSELVES against their
   account-owned wallet (single-step, **NO OTP** per owner). `RedemptionOrder.partnerId`→nullable (migration
