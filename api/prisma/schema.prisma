@@ -2944,6 +2944,76 @@ model EmployeeTarget {
   @@map("employee_targets")
 }
 
+// ─── MODULE: EMPLOYEE REWARDS — CONTESTS (Phase C, ADMIN-DESIGN §5.3) ──────────
+// A first-class per-tenant Contest (banner/name/duration/eligibility/optional bonus).
+// MANUAL only — NO auto-validation from performance data (deferred). An admin creates
+// + schedules a contest, then MANUALLY credits the bonus to the winners (or the whole
+// eligible set). The bonus lands on employee wallets through the AUDITED account-first
+// credit primitive (WalletService.creditEarnForAccount, referenceType CONTEST), which
+// is INDEPENDENT of the EMPLOYEE_UPLOAD credit-batch rail — a contest bonus is NOT a
+// CreditBatch, so the monthly-points F2 one-confirmed-batch-per-period guard never
+// applies and a contest bonus COEXISTS cleanly with the month's points upload. Additive
+// + dormant; employee-earner tenants only (a trade tenant is rejected at the service).
+
+enum ContestStatus {
+  DRAFT
+  SCHEDULED
+  ACTIVE
+  ENDED
+  CREDITED
+  CANCELLED
+}
+
+model Contest {
+  id                String        @id @default(cuid())
+  clientId          String
+  name              String
+  bannerUrl         String?
+  description       String?
+  startDate         DateTime
+  endDate           DateTime
+  // Eligible hierarchy-level CODES + regions. EMPTY list = NO restriction (visible/eligible
+  // to ALL) — the SAME semantics the employee catalogue visibility gate uses.
+  eligibleRoleCodes String[]      @default([])
+  eligibleRegions   String[]      @default([])
+  bonusPoints       Int           @default(0)
+  status            ContestStatus @default(DRAFT)
+  // Stamped ONCE, atomically, when the bonus is manually credited: the idempotency guard
+  // flips status→CREDITED + sets bonusCreditedAt/By in ONE conditional updateMany, so a
+  // racing/second credit sees a non-creditable status (or non-null bonusCreditedAt) and is
+  // rejected (count 0) BEFORE any wallet write — no winner can be double-credited.
+  bonusCreditedAt   DateTime?
+  bonusCreditedBy   String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  bonusCredits ContestBonusCredit[]
+
+  @@index([clientId, status])
+  @@map("contests")
+}
+
+/// One row per winner actually credited a contest bonus — the audit trail for the manual
+/// credit AND a robust idempotency backstop (@@unique([contestId, employeeCode]) so one
+/// winner can never be credited twice for the same contest, even if an explicit winner
+/// list repeats a code). `points` is whole-Int EARN (mirrors the employee points rail).
+model ContestBonusCredit {
+  id           String   @id @default(cuid())
+  contestId    String
+  clientId     String
+  employeeCode String
+  accountId    String
+  points       Int
+  creditedAt   DateTime @default(now())
+
+  contest Contest @relation(fields: [contestId], references: [id], onDelete: Cascade)
+
+  @@unique([contestId, employeeCode])
+  @@index([contestId])
+  @@index([clientId])
+  @@map("contest_bonus_credits")
+}
+
 // ─── MODULE: POINTS COMPUTE ENGINE (Wave 0) — versioned rule store ────────────
 // A PointsRule is a versioned, immutable config row that mirrors the shared
 // PointsRuleConfig contract (api/src/points-engine/points-engine.types.ts). A

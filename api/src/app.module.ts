@@ -38,6 +38,7 @@ import { PaymentsReportModule } from './payments-report/payments-report.module';
 import { SchemesModule }  from './schemes/schemes.module';
 import { LeaderboardModule } from './leaderboard/leaderboard.module';
 import { CreditsModule }  from './credits/credits.module';
+import { ContestsModule } from './contests/contests.module';
 import { AdminOutletsModule } from './admin-outlets/admin-outlets.module';
 import { AdminCoreModule } from './admin-core/admin-core.module';
 import { AdminProgramsModule } from './admin-programs/admin-programs.module';
@@ -101,6 +102,7 @@ import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
     SchemesModule,
     LeaderboardModule,
     CreditsModule,
+    ContestsModule,
     AdminOutletsModule,
     AdminCoreModule,
     AdminProgramsModule,
