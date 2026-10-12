@@ -121,12 +121,32 @@
   Gate: api jest **3579** · platform tsc clean · vitest **2630** (+7 rep helpers). This is the WS2 exit path —
   **a rep can log in and complete earn→see→redeem→track.** FE flows verify on STAGING (pane blocks
   `*.localhost` cookies).
-  ▶ **NEXT — the richer WS2 waves (each needs a spec/BE first; genuine forks for the owner):** W4 Home richness
-  (targets + live campaigns + **Dream Reward** — needs the employee target store [Phase C "target column", no BE
-  yet] + Dream-Reward persistence/forecast); W5 Team manager rollup (per-rep points rollup is net-new); W6
-  Contests (needs the Contest data-model + bonus-engine spec — also Phase C); W7 Profile enrich + Notifications
-  in-app inbox (new BE endpoint). Smaller follow-ups: expose `featured`/`dreamEligible` in the employee catalogue
-  select (for W4 Dream Reward); filter cash-mode items from the employee catalogue browse.
+- **WS2 Wave 4 — Dream Reward + live-contests Home landed (2026-10-12, HEAD `4626b70`):** the signature pitch
+  feature, themed to the Britannia demo. BE (additive, EMPLOYEE-gated, Deoleo byte-identical — trade-safety
+  audit CLEAN): `RewardAccount.dreamRewardId String?` (migration `20261010140000`, no FK → validate-on-write,
+  self-heal-on-read); `GET`/`PUT /v1/rewards/employee/dream` (resolve dream + progress + a DERIVED
+  `monthlyEarnRate` [avg EARN over trailing complete months, divisor = real months since first earn, clamped
+  [1,3]] + `forecastDate`); `employeeListCatalog` now also returns `featured`/`dreamEligible` (added LOCALLY —
+  the shared `MEMBER_CATALOG_SELECT` is untouched). Dream gate = tenant + ACTIVE + APPROVED + visible (role/
+  region) + `dreamEligible:true` + **`pointsCost>0`** (audit L2-1). FE: Dream hero on Home + `/rep/dream`
+  (progress ring, "to be earned", server ETA hidden when null, a CLIENT-ONLY "Plan your finish" what-if slider +
+  target-date on-time/late badge — never writes), "Set as Dream Reward" + "Dream" badge in the catalogue, and a
+  live-contests carousel on Home. **Independent audit → trade-safety CLEAN; L2-1 (zero-cost dream) FIXED;
+  L3-2/3/4 (copy honesty "Est."/day-count/discoverability-on-fetch-fail) FIXED.** Gate: api jest **3622** + build
+  · platform tsc + vitest **2662**. REAL-DB runtime-verified (:5434): set/validation(×4 incl. zero-cost)/self-heal/
+  reached/clear/zero-history-no-ETA/earn-rate=3000 — all green.
+  ⚠️ **W4 residuals (owner's call, NOT fixed):** **L3-1** the rep rewards GRID + detail resolve from ONE capped
+  catalogue page (grid `limit=100`, detail `limit=200`+find; no per-item employee GET, no grid pagination) — a
+  tenant with >100 catalogue items can't browse/set items past the cap. PRE-EXISTING + rep-app-wide (not W4), the
+  dream controls/badge inherit it. Honest fix = a small dedicated follow-up (load-all-pages grid + single-item
+  employee catalog GET); pilot catalogue likely < cap. **L3-5** the what-if slider clamps the seeded rate to its
+  visual range (authoritative `forecastDate` unaffected) — accepted. Smaller follow-up still open: filter
+  cash-mode items from the employee catalogue browse.
+  ▶ **NEXT — WS2 waves (each needs a spec/BE first; genuine forks for the owner):** W5 Team manager rollup
+  (reuse the sales-hierarchy `descendantSalesUserIds`; points-based, NO "cases" — that's trade); W6 Contests
+  detail (stays THIN — our contests are MANUAL with no progress metric, so a leaderboard would be fiction);
+  W7 Profile enrich + Notifications in-app inbox (wire the rep app to the EXISTING bell feed — `notifications`
+  module, partner+sales; the one real fork there = where a "Contact support" query goes).
 - **Phase A (Shell + People roster) landed (2026-10-04):** the one net-new piece — the EMPLOYEE
   `RewardAccount` ↔ `SalesUser` linkage (migration `20261003120000` + `ensureEmployeeAccount`/bulk helper,
   gated by `earnerModel`) — plus `/admin/people` surfacing the reused roster. Two money-audit defects (lock
