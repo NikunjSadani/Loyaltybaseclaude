@@ -538,3 +538,200 @@ export function formatMonthYear(date: string | Date | null | undefined): string 
     year: 'numeric',
   }).format(d);
 }
+
+/* ─── Team manager-rollup (GET /api/rewards/employee/team[?managerId=]) ──────────
+   A manager employee's downline, served by the account-first team endpoint. Passing
+   no managerId returns the CALLER's own direct team; passing a manager's salesUserId
+   (a row with isManager:true) drills into that sub-team — the backend enforces that
+   the target is inside the caller's subtree (a cross-subtree id is a 403/400, handled
+   gracefully at the call site). A caller with no team comes back as
+   { isManager:false, members:[] } → the FE shows a friendly "no team yet" state.
+
+   The FE does NOT recompute rollup/achievement — those are server-authoritative. The
+   mappers here only DEFENSIVELY clamp display numbers (never show a negative/NaN) and
+   SORT the leaderboard (achievement desc, nulls last) so the view is deterministic. ─ */
+
+export interface ApiTeamRoot {
+  salesUserId: string;
+  name: string;
+  employeeCode: string;
+  roleName: string;
+}
+
+export interface ApiTeamRollup {
+  memberCount: number;
+  earnedThisMonth: number;
+  redeemedThisMonth: number;
+  avgAchievementPct: number;
+  onTrackCount: number;
+}
+
+export type TeamTrend = 'up' | 'down' | 'flat';
+
+export interface ApiTeamMember {
+  salesUserId: string;
+  name: string;
+  employeeCode: string;
+  roleName: string;
+  region: string;
+  isManager: boolean;
+  directReportCount: number;
+  teamSize: number;
+  pointsBalance: number;
+  earnedThisMonth: number;
+  redeemedThisMonth: number;
+  targetPoints: number | null;
+  achievedPct: number | null;
+  trend: TeamTrend;
+}
+
+export interface ApiTeamMonth {
+  monthKey: string;
+  label: string;
+  earned: number;
+  redeemed: number;
+}
+
+export interface ApiTeamResponse {
+  root: ApiTeamRoot | null;
+  isManager: boolean;
+  rollup: ApiTeamRollup;
+  members: ApiTeamMember[];
+  monthly: ApiTeamMonth[];
+}
+
+/** The mapped, sorted, display-safe team the TeamView renders. Same shape as the API
+ *  response, but with clamped numbers, a sorted leaderboard, and non-null collections. */
+export interface Team {
+  root: ApiTeamRoot | null;
+  isManager: boolean;
+  rollup: ApiTeamRollup;
+  members: ApiTeamMember[];
+  monthly: ApiTeamMonth[];
+}
+
+/**
+ * Clamp a percent to an integer 0–100 — for the progress-bar FILL WIDTH ONLY (a bar can't
+ * exceed 100% wide). It must NOT be used for the displayed number, the headline avg, or the
+ * sort key: achievement is intentionally UNCAPPED (a 250% over-achiever must read "250%", rank
+ * above a 100% peer, and lift the team average). null / non-finite → 0; negatives floor to 0.
+ */
+export function clampPercent(n: number | null | undefined): number {
+  if (n == null || !Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+/** A percent as a DISPLAY/sort value: non-negative integer, UNCAPPED (null preserved). */
+export function displayPercent(n: number | null | undefined): number | null {
+  if (n == null) return null;
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.round(n));
+}
+
+/**
+ * Icon direction + copy + tone for a member's month-over-month trend. `direction`
+ * selects the arrow (the page maps it to a lucide icon), `tone` selects the colour.
+ * Anything unrecognised reads as a flat/steady trend.
+ */
+export function trendMeta(
+  trend: string | null | undefined,
+): { direction: TeamTrend; label: string; tone: TeamTrend } {
+  if (trend === 'up') return { direction: 'up', label: 'Trending up', tone: 'up' };
+  if (trend === 'down') return { direction: 'down', label: 'Trending down', tone: 'down' };
+  return { direction: 'flat', label: 'Steady', tone: 'flat' };
+}
+
+/**
+ * Sort a member list for the leaderboard: highest achievement first, NULLS LAST (an
+ * un-targeted member sinks below everyone with a measured achievement). Ties break by
+ * earned-this-month (desc) then name (asc) so the order is stable and deterministic.
+ * Pure: returns a new array, does not mutate the input.
+ */
+export function sortByAchievement<
+  T extends { achievedPct: number | null; earnedThisMonth?: number; name?: string },
+>(members: T[]): T[] {
+  return [...members].sort((a, b) => {
+    const ap = a.achievedPct;
+    const bp = b.achievedPct;
+    if (ap == null && bp == null) {
+      // both un-targeted → fall straight to the tiebreak
+    } else if (ap == null) {
+      return 1; // a sinks
+    } else if (bp == null) {
+      return -1; // b sinks
+    } else if (bp !== ap) {
+      return bp - ap; // higher achievement first
+    }
+    const ae = a.earnedThisMonth ?? 0;
+    const be = b.earnedThisMonth ?? 0;
+    if (be !== ae) return be - ae;
+    return (a.name ?? '').localeCompare(b.name ?? '');
+  });
+}
+
+/**
+ * The y-axis maximum for the earned-vs-redeemed chart: the largest single bar value
+ * across all months (earned OR redeemed), with a floor of 1 so an all-zero team still
+ * yields a valid (flat) chart rather than a divide-by-zero. Non-finite values ignored.
+ */
+export function teamChartMax(monthly: ApiTeamMonth[]): number {
+  let max = 0;
+  for (const m of monthly ?? []) {
+    if (Number.isFinite(m.earned)) max = Math.max(max, m.earned);
+    if (Number.isFinite(m.redeemed)) max = Math.max(max, m.redeemed);
+  }
+  return Math.max(1, max);
+}
+
+/**
+ * Map + harden the raw team payload for the view. Clamps every display number to a
+ * safe non-negative (percent fields to 0–100), preserves the null semantics of
+ * targetPoints/achievedPct (null = no target, rendered as "No target"), sorts the
+ * leaderboard, and guarantees non-null collections. Pure.
+ */
+export function mapTeam(api: ApiTeamResponse): Team {
+  const clampNum = (n: number | null | undefined): number =>
+    n != null && Number.isFinite(n) ? Math.max(0, n) : 0;
+
+  const r = api.rollup ?? ({} as ApiTeamRollup);
+
+  const members = (api.members ?? []).map(
+    (m): ApiTeamMember => ({
+      salesUserId: m.salesUserId,
+      name: m.name,
+      employeeCode: m.employeeCode,
+      roleName: m.roleName,
+      region: m.region,
+      isManager: m.isManager === true,
+      directReportCount: clampNum(m.directReportCount),
+      teamSize: clampNum(m.teamSize),
+      pointsBalance: clampNum(m.pointsBalance),
+      earnedThisMonth: clampNum(m.earnedThisMonth),
+      redeemedThisMonth: clampNum(m.redeemedThisMonth),
+      // Preserve null (no target) — only clamp a real number.
+      targetPoints: m.targetPoints == null ? null : clampNum(m.targetPoints),
+      // UNCAPPED display value (over-achievement must survive for the number + the sort).
+      achievedPct: displayPercent(m.achievedPct),
+      trend: trendMeta(m.trend).direction,
+    }),
+  );
+
+  return {
+    root: api.root ?? null,
+    isManager: api.isManager === true,
+    rollup: {
+      memberCount: clampNum(r.memberCount),
+      earnedThisMonth: clampNum(r.earnedThisMonth),
+      redeemedThisMonth: clampNum(r.redeemedThisMonth),
+      avgAchievementPct: displayPercent(r.avgAchievementPct) ?? 0,
+      onTrackCount: clampNum(r.onTrackCount),
+    },
+    members: sortByAchievement(members),
+    monthly: (api.monthly ?? []).map((m) => ({
+      monthKey: m.monthKey,
+      label: m.label,
+      earned: clampNum(m.earned),
+      redeemed: clampNum(m.redeemed),
+    })),
+  };
+}

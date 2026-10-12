@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { Home, Wallet, Gift, Package, User, Trophy } from 'lucide-react';
+import { Home, Wallet, Gift, Package, User, Trophy, Users } from 'lucide-react';
 import { NavBottom, type NavItem } from '@/components/layout/nav-bottom';
 import { Sidebar, type SidebarSection } from '@/components/layout/sidebar';
 import { SiteFooter } from '@/components/layout/site-footer';
@@ -22,13 +22,16 @@ import type { EmployeeMe } from './_lib/employee';
    GET /api/auth/me → user.salesUser — no partner-identity hook (that calls
    /partner/me, which an employee has no record on). ─────────────────────────── */
 
+// Mobile bottom nav = the demo's proven 5-tab set (Home · Team · Rewards · Wallet · Contests).
+// Profile lives in the top-bar "My Account" avatar (below) — a 6th bottom tab would be redundant;
+// Orders stays reachable from the Home quick-links and the desktop sidebar. 7 tabs overflowed the
+// mobile bar, so we don't duplicate the header affordances here.
 const NAV_TABS: NavItem[] = [
   { href: '/rep', label: 'Home', icon: Home },
+  { href: '/rep/team', label: 'Team', icon: Users },
   { href: '/rep/rewards', label: 'Rewards', icon: Gift },
-  { href: '/rep/contests', label: 'Contests', icon: Trophy },
-  { href: '/rep/orders', label: 'Orders', icon: Package },
   { href: '/rep/wallet', label: 'Wallet', icon: Wallet },
-  { href: '/rep/profile', label: 'Profile', icon: User },
+  { href: '/rep/contests', label: 'Contests', icon: Trophy },
 ];
 
 const SIDEBAR_SECTIONS: SidebarSection[] = [
@@ -38,6 +41,7 @@ const SIDEBAR_SECTIONS: SidebarSection[] = [
       { href: '/rep/wallet', label: 'My Wallet', icon: Wallet },
       { href: '/rep/rewards', label: 'Rewards', icon: Gift },
       { href: '/rep/contests', label: 'Contests', icon: Trophy },
+      { href: '/rep/team', label: 'My Team', icon: Users },
       { href: '/rep/orders', label: 'My Orders', icon: Package },
       { href: '/rep/profile', label: 'Profile', icon: User },
     ],

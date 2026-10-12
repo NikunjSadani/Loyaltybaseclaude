@@ -117,6 +117,19 @@ export class EmployeeTargetQueryDto {
 }
 
 /**
+ * Employee Rewards Wave 5 — GET /v1/rewards/employee/team query. OPTIONAL `managerId` (a SalesUser id)
+ * drills the rollup into a SUB-MANAGER's team; it MUST be within the caller's own reporting subtree
+ * (the service rejects anything else — a manager can only drill into their own downline). Absent =
+ * the caller's own team. READ-ONLY (no points move).
+ */
+export class EmployeeTeamQueryDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  managerId?: string;
+}
+
+/**
  * PUT /v1/rewards/employee/dream — set or CLEAR the employee's Dream Reward.
  * `rewardId: null` (or absent) clears the dream; a non-null id is validated server-side (exists in
  * THIS tenant's catalogue, ACTIVE/not-deleted/APPROVED, dreamEligible, AND visible to this employee)

@@ -45,7 +45,8 @@ import { generateTenantOrderNumber } from './order-number.helper';
 import { computeFrozenValuePaise } from './gift-value.helper';
 import { computeDispatchSla } from '../common/dispatch-sla';
 import { loadHolidaySet } from '../common/holiday-calendar';
-import { istDayRangeFilter, istMonthKey } from '../common/ist-date';
+import { istDayRangeFilter, istMonthKey, istMonthBounds } from '../common/ist-date';
+import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
 import {
   AdminListCatalogQueryDto,
   CreateRewardCatalogDto,
@@ -995,6 +996,284 @@ export class RewardsService {
     });
 
     return this.resolveDreamFor(user, ctx);
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Employee Rewards Wave 5 — TEAM MANAGER ROLLUP (READ-ONLY; NO points move).
+  //
+  // A manager employee sees a rollup of their downline: team totals + a per-member leaderboard +
+  // a 6-month earned/redeemed series, with drill-down into a sub-manager's team. EMPLOYEE-tenant
+  // only + own-identity authorized via resolveEmployeeReadContext (a trade/non-employee tenant is
+  // rejected 400/403 and never reaches a team). ADDITIVE: no trade sales-hierarchy read, no shared
+  // helper and no schema is touched — this is a NEW read method reusing the PURE descendantSalesUserIds
+  // subtree helper (same helper the trade sales-org reads use, but called read-only here).
+  //
+  // Employee rewards is POINTS-based — there is NO "cases" metric (that is trade): points
+  // earned/redeemed/balance + EmployeeTarget achievement. Performance: NO N+1 — the tenant
+  // edge+profile list, the subtree wallets, the 6-month PointsLedger rows and the current-period
+  // EmployeeTargets are each loaded ONCE, then aggregated in memory by month and by member-subtree.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  async employeeTeamRollup(user: JwtPayload, managerId?: string) {
+    // Own-identity + EMPLOYEE-earner tenant gate (throws 400 for a trade tenant, 403 for a
+    // non-employee caller). An employee only ever resolves to THEIR OWN SalesUser id.
+    const ctx = await resolveEmployeeReadContext(this.prisma, user);
+    const callerSalesUserId = ctx.salesUserId;
+
+    // ── 1. The tenant SalesUser edge + profile list, ONCE. Scoped by SalesUser.clientId DIRECTLY
+    // (not the `user` relation) so a roster member is in the tree regardless of login state.
+    // deletedAt:null keeps BOTH active and inactive rows — an inactive mid-tree manager must not
+    // sever the subtree below it; DIRECT members are filtered to active where it matters below.
+    const rows = await this.prisma.salesUser.findMany({
+      where: { clientId: user.clientId, deletedAt: null },
+      select: {
+        id: true,
+        reportingToId: true,
+        isActive: true,
+        region: true,
+        employeeCode: true,
+        accountId: true,
+        hierarchyLevel: { select: { name: true } },
+        user: { select: { name: true } },
+      },
+    });
+    const edges = rows.map((r) => ({ id: r.id, reportingToId: r.reportingToId }));
+    const byId = new Map(rows.map((r) => [r.id, r]));
+
+    // ── 2. Resolve the ROOT (the caller, or a drilled sub-manager VALIDATED into the caller's
+    // own subtree — a manager may only ever drill into their OWN downline). ──
+    const callerSubtree = descendantSalesUserIds(callerSalesUserId, edges);
+    let rootId = callerSalesUserId;
+    if (managerId && managerId !== callerSalesUserId) {
+      if (!callerSubtree.has(managerId)) {
+        throw new ForbiddenException('You can only view a team within your own downline.');
+      }
+      rootId = managerId;
+    }
+    const rootRow = byId.get(rootId) ?? null;
+    const root = rootRow
+      ? {
+          salesUserId: rootRow.id,
+          name: rootRow.user?.name ?? null,
+          employeeCode: rootRow.employeeCode,
+          roleName: rootRow.hierarchyLevel?.name ?? null,
+        }
+      : null;
+
+    // ── 3. The root's whole subtree + the DIRECT members (ACTIVE, non-deleted, reporting to root). ──
+    const rootSubtree = descendantSalesUserIds(rootId, edges);
+    const directMembers = rows.filter((r) => r.reportingToId === rootId && r.isActive);
+    const isManager = directMembers.length > 0;
+
+    // Active direct-report count per sales user (drives each member's directReportCount + isManager).
+    const activeDirectCount = new Map<string, number>();
+    for (const r of rows) {
+      if (r.isActive && r.reportingToId) {
+        activeDirectCount.set(r.reportingToId, (activeDirectCount.get(r.reportingToId) ?? 0) + 1);
+      }
+    }
+
+    // ── 4. Month windows — ALL IST calendar months, so every number on this screen (the monthly
+    // series, this/prev-month stats, AND the achievedPct period) describes the SAME IST month as the
+    // Home target bar + Phase C employeeTarget. (Bucketing by UTC month while the achievement period
+    // was IST made the two disagree for the first 5.5h of each IST month — audit Lane 2.) ──
+    const now = new Date();
+    const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    // Last 6 IST months, oldest→newest. Step back by landing 1ms before each month's IST start.
+    const monthDefs: { monthKey: string; label: string }[] = [];
+    let cursorKey = istMonthKey(now);
+    for (let i = 0; i < 6; i++) {
+      const monthIdx = parseInt(cursorKey.slice(5, 7), 10) - 1;
+      monthDefs.unshift({ monthKey: cursorKey, label: MONTHS_SHORT[monthIdx] });
+      cursorKey = istMonthKey(new Date(istMonthBounds(cursorKey).start.getTime() - 1));
+    }
+    const currentMonthKey = monthDefs[5].monthKey;
+    const prevMonthKey = monthDefs[4].monthKey;
+    const sixMonthStart = istMonthBounds(monthDefs[0].monthKey).start;
+    const period = currentMonthKey; // the current IST month — same as istMonthKey(now)
+
+    // ── 5. Subtree wallets, ONCE (by accountId-in-subtree → the account pin IS the tenant/account
+    // isolation; a member with no provisioned account simply has no wallet → zeros). ──
+    const accountIdBySalesUser = new Map<string, string | null>();
+    const subtreeAccountIds: string[] = [];
+    for (const sid of rootSubtree) {
+      const accId = byId.get(sid)?.accountId ?? null;
+      accountIdBySalesUser.set(sid, accId);
+      if (accId) subtreeAccountIds.push(accId);
+    }
+    const wallets = subtreeAccountIds.length
+      ? await this.prisma.wallet.findMany({
+          // accountId already pins to this tenant's SalesUser rows; the explicit account.clientId
+          // re-filter is belt-and-suspenders tenant isolation (audit Lane 1 defense-in-depth).
+          where: { accountId: { in: subtreeAccountIds }, account: { clientId: user.clientId } },
+          select: { id: true, accountId: true, redeemablePoints: true },
+        })
+      : [];
+    const walletByAccountId = new Map(wallets.map((w) => [w.accountId as string, w]));
+    const walletBySalesUser = new Map<string, { id: string; redeemablePoints: number }>();
+    for (const [sid, accId] of accountIdBySalesUser) {
+      const w = accId ? walletByAccountId.get(accId) : undefined;
+      if (w) walletBySalesUser.set(sid, { id: w.id, redeemablePoints: w.redeemablePoints });
+    }
+
+    // ── 6. PointsLedger EARN/REDEEM rows for those wallets within the window, ONCE; aggregate in
+    // memory into per-wallet month buckets + a per-wallet current-period EARN total. ──
+    const walletIds = wallets.map((w) => w.id);
+    const ledgerRows = walletIds.length
+      ? await this.prisma.pointsLedger.findMany({
+          where: {
+            walletId: { in: walletIds },
+            transactionType: { in: [PointsLedgerType.EARN, PointsLedgerType.REDEEM] },
+            createdAt: { gte: sixMonthStart },
+          },
+          select: { walletId: true, transactionType: true, points: true, createdAt: true },
+        })
+      : [];
+    const earnByWalletMonth = new Map<string, Map<string, number>>();
+    const redeemByWalletMonth = new Map<string, Map<string, number>>();
+    const periodEarnByWallet = new Map<string, number>();
+    const bump = (map: Map<string, Map<string, number>>, wid: string, key: string, pts: number) => {
+      let inner = map.get(wid);
+      if (!inner) {
+        inner = new Map();
+        map.set(wid, inner);
+      }
+      inner.set(key, (inner.get(key) ?? 0) + pts);
+    };
+    for (const r of ledgerRows) {
+      const key = istMonthKey(r.createdAt); // IST month bucket — consistent with period + the series
+      if (r.transactionType === PointsLedgerType.EARN) {
+        bump(earnByWalletMonth, r.walletId, key, r.points);
+        if (key === period) {
+          periodEarnByWallet.set(r.walletId, (periodEarnByWallet.get(r.walletId) ?? 0) + r.points);
+        }
+      } else {
+        bump(redeemByWalletMonth, r.walletId, key, r.points);
+      }
+    }
+
+    // ── 7. Current-period EmployeeTargets for the WHOLE subtree, ONCE (keyed by employeeCode). A
+    // member row's target is the SUM over that member's OWN subtree (the TEAM target), so
+    // achievedPct = team-earn ÷ team-target is internally consistent with the other subtree-summed
+    // stats (pointsBalance/earnedThisMonth). A leaf reduces to own-earn ÷ own-target — lining up
+    // with the Home target bar. (Using the manager's PERSONAL target against subtree earn would
+    // badly over-report: a big team's earn over one person's small target.)
+    const subtreeCodes = [...rootSubtree]
+      .map((sid) => byId.get(sid)?.employeeCode)
+      .filter((c): c is string => !!c);
+    const targetRows = subtreeCodes.length
+      ? await this.prisma.employeeTarget.findMany({
+          where: { clientId: user.clientId, period, employeeCode: { in: subtreeCodes } },
+          select: { employeeCode: true, targetPoints: true },
+        })
+      : [];
+    const targetByCode = new Map(targetRows.map((t) => [t.employeeCode, t.targetPoints]));
+
+    // Aggregate the points stats (+ the team target sum) over a set of salesUserIds (a subtree
+    // slice), all in memory. `hasTarget` distinguishes "no target set anywhere in the subtree"
+    // (→ null achievedPct) from a genuine zero.
+    const aggregate = (salesUserIds: Iterable<string>) => {
+      let balance = 0,
+        earnThis = 0,
+        redeemThis = 0,
+        earnPrev = 0,
+        periodEarn = 0,
+        targetSum = 0,
+        hasTarget = false;
+      // Dedupe wallet contributions by walletId: should two SalesUser rows in the subtree ever share
+      // one RewardAccount (the open employeeCode-reuse→account-inherit hazard), the wallet's points
+      // must still be counted ONCE, not per sid (audit Lane 2). Targets key by employeeCode (unique
+      // per tenant), so they never collide and need no dedupe.
+      const seenWallets = new Set<string>();
+      for (const sid of salesUserIds) {
+        const code = byId.get(sid)?.employeeCode;
+        if (code != null) {
+          const t = targetByCode.get(code);
+          if (t != null && t > 0) {
+            targetSum += t;
+            hasTarget = true;
+          }
+        }
+        const w = walletBySalesUser.get(sid);
+        if (!w || seenWallets.has(w.id)) continue;
+        seenWallets.add(w.id);
+        balance += w.redeemablePoints;
+        earnThis += earnByWalletMonth.get(w.id)?.get(currentMonthKey) ?? 0;
+        redeemThis += redeemByWalletMonth.get(w.id)?.get(currentMonthKey) ?? 0;
+        earnPrev += earnByWalletMonth.get(w.id)?.get(prevMonthKey) ?? 0;
+        periodEarn += periodEarnByWallet.get(w.id) ?? 0;
+      }
+      return { balance, earnThis, redeemThis, earnPrev, periodEarn, targetSum, hasTarget };
+    };
+
+    // ── 8. Per-member leaderboard rows — each aggregates that member's OWN subtree (incl. self):
+    // a manager member's points are the sum over their subtree, a leaf's are just themselves. ──
+    const members = directMembers.map((mem) => {
+      const subtree = descendantSalesUserIds(mem.id, edges);
+      const agg = aggregate(subtree);
+      // TEAM target = the sum of EmployeeTargets across this member's subtree (null when none set).
+      // achievedPct = round(subtree periodEarn / team target * 100) — team-earn over team-target.
+      const targetPoints = agg.hasTarget ? agg.targetSum : null;
+      const achievedPct =
+        targetPoints != null && targetPoints > 0
+          ? Math.round((agg.periodEarn / targetPoints) * 100)
+          : null;
+      const trend: 'up' | 'down' | 'flat' =
+        agg.earnThis > agg.earnPrev ? 'up' : agg.earnThis < agg.earnPrev ? 'down' : 'flat';
+      return {
+        salesUserId: mem.id,
+        name: mem.user?.name ?? null,
+        employeeCode: mem.employeeCode,
+        roleName: mem.hierarchyLevel?.name ?? null,
+        region: mem.region ?? null,
+        isManager: (activeDirectCount.get(mem.id) ?? 0) > 0,
+        directReportCount: activeDirectCount.get(mem.id) ?? 0,
+        teamSize: subtree.size,
+        pointsBalance: agg.balance,
+        earnedThisMonth: agg.earnThis,
+        redeemedThisMonth: agg.redeemThis,
+        targetPoints,
+        achievedPct,
+        trend,
+      };
+    });
+
+    // ── 9. Rollup over the DIRECT members (each already subtree-aggregated; sibling subtrees are
+    // disjoint in a tree, so summing is correct). ──
+    const withPct = members.filter((x) => x.achievedPct !== null);
+    const rollup = {
+      memberCount: members.length,
+      earnedThisMonth: members.reduce((s, x) => s + x.earnedThisMonth, 0),
+      redeemedThisMonth: members.reduce((s, x) => s + x.redeemedThisMonth, 0),
+      avgAchievementPct: withPct.length
+        ? Math.round(withPct.reduce((s, x) => s + (x.achievedPct as number), 0) / withPct.length)
+        : 0,
+      onTrackCount: members.filter((x) => x.achievedPct !== null && (x.achievedPct as number) >= 100)
+        .length,
+    };
+
+    // ── 10. 6-month earned/redeemed series over the SAME population the rollup/leaderboard cover —
+    // the union of the ACTIVE direct members' subtrees (NOT the raw rootSubtree, which also contains
+    // an inactive direct report's descendants that the rollup excludes → the chart and the tiles
+    // would otherwise disagree, audit Lane 2). The union excludes the root (root is in no direct
+    // member's subtree). For a LEAF caller with no team, the series is the caller's OWN wallet. ──
+    const monthlyScope = isManager
+      ? [...new Set(directMembers.flatMap((mem) => [...descendantSalesUserIds(mem.id, edges)]))]
+      : [rootId];
+    const monthlyWalletIds = monthlyScope
+      .map((sid) => walletBySalesUser.get(sid)?.id)
+      .filter((wid): wid is string => !!wid);
+    const monthly = monthDefs.map((md) => {
+      let earned = 0,
+        redeemed = 0;
+      for (const wid of monthlyWalletIds) {
+        earned += earnByWalletMonth.get(wid)?.get(md.monthKey) ?? 0;
+        redeemed += redeemByWalletMonth.get(wid)?.get(md.monthKey) ?? 0;
+      }
+      return { monthKey: md.monthKey, label: md.label, earned, redeemed };
+    });
+
+    return { root, isManager, rollup, members, monthly };
   }
 
   /**

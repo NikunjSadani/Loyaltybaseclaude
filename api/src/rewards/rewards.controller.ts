@@ -6,6 +6,7 @@ import { RequirePermission } from '../common/decorators/require-permission.decor
 import {
   EmployeeRedeemDto,
   EmployeeTargetQueryDto,
+  EmployeeTeamQueryDto,
   ListCatalogQueryDto,
   ListOrdersQueryDto,
   RedeemConfirmDto,
@@ -165,6 +166,20 @@ export class RewardsController {
   @RequirePermission('rewards:read')
   setEmployeeDreamReward(@CurrentUser() user: JwtPayload, @Body() dto: SetDreamRewardDto) {
     return this.rewards.setEmployeeDreamReward(user, dto);
+  }
+
+  /**
+   * Employee Rewards Wave 5 — the manager's TEAM ROLLUP (team totals + per-member leaderboard +
+   * a 6-month earned/redeemed series). READ-ONLY, no points move. Optional `managerId` drills into a
+   * SUB-manager's team and MUST be within the caller's own downline (the service rejects anything
+   * else). Same guard as the other employee rails: NOT @Roles-gated — authorization is the
+   * service-layer own-identity resolve + the EMPLOYEE-earner tenant gate; @RequirePermission('rewards:read')
+   * mirrors the member reads.
+   */
+  @Get('employee/team')
+  @RequirePermission('rewards:read')
+  employeeTeamRollup(@CurrentUser() user: JwtPayload, @Query() query: EmployeeTeamQueryDto) {
+    return this.rewards.employeeTeamRollup(user, query.managerId);
   }
 
   /** SALES-ASSISTED redeem (B1, #50-E) — a sales user redeems for an assigned outlet. */

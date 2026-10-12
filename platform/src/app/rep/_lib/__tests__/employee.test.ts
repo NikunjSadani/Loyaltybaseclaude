@@ -13,8 +13,15 @@ import {
   formatMonthYear,
   mapCatalogItem,
   mapDream,
+  clampPercent,
+  trendMeta,
+  sortByAchievement,
+  teamChartMax,
+  mapTeam,
   type CatalogItem,
   type ApiEmployeeDream,
+  type ApiTeamMember,
+  type ApiTeamResponse,
 } from '../employee';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -271,5 +278,164 @@ describe('mapDream', () => {
     const d = mapDream({ ...apiBase, pointsRemaining: -10, monthlyEarnRate: Number.NaN });
     expect(d.pointsRemaining).toBe(0);
     expect(d.monthlyEarnRate).toBe(0);
+  });
+});
+
+/* ─── Team manager-rollup helpers ───────────────────────────────────────────── */
+
+function member(over: Partial<ApiTeamMember>): ApiTeamMember {
+  return {
+    salesUserId: over.salesUserId ?? 'm',
+    name: over.name ?? 'Member',
+    employeeCode: over.employeeCode ?? 'E1',
+    roleName: over.roleName ?? 'SALES_OFFICER',
+    region: over.region ?? 'West',
+    isManager: over.isManager ?? false,
+    directReportCount: over.directReportCount ?? 0,
+    teamSize: over.teamSize ?? 0,
+    pointsBalance: over.pointsBalance ?? 0,
+    earnedThisMonth: over.earnedThisMonth ?? 0,
+    redeemedThisMonth: over.redeemedThisMonth ?? 0,
+    targetPoints: over.targetPoints ?? null,
+    achievedPct: over.achievedPct ?? null,
+    trend: over.trend ?? 'flat',
+    ...over,
+  };
+}
+
+describe('clampPercent', () => {
+  it('rounds and clamps a percent to an integer 0–100', () => {
+    expect(clampPercent(42.6)).toBe(43);
+    expect(clampPercent(0)).toBe(0);
+    expect(clampPercent(100)).toBe(100);
+  });
+
+  it('floors negatives at 0 and saturates above 100', () => {
+    expect(clampPercent(-5)).toBe(0);
+    expect(clampPercent(140)).toBe(100);
+  });
+
+  it('treats null / undefined / NaN as 0', () => {
+    expect(clampPercent(null)).toBe(0);
+    expect(clampPercent(undefined)).toBe(0);
+    expect(clampPercent(Number.NaN)).toBe(0);
+  });
+});
+
+describe('trendMeta', () => {
+  it('maps up / down to the matching direction + tone', () => {
+    expect(trendMeta('up')).toEqual({ direction: 'up', label: 'Trending up', tone: 'up' });
+    expect(trendMeta('down')).toEqual({ direction: 'down', label: 'Trending down', tone: 'down' });
+  });
+
+  it('maps flat and anything unrecognised to a steady/flat trend', () => {
+    expect(trendMeta('flat')).toEqual({ direction: 'flat', label: 'Steady', tone: 'flat' });
+    expect(trendMeta('garbage')).toEqual({ direction: 'flat', label: 'Steady', tone: 'flat' });
+    expect(trendMeta(null)).toEqual({ direction: 'flat', label: 'Steady', tone: 'flat' });
+  });
+});
+
+describe('sortByAchievement', () => {
+  it('sorts by achievement desc with nulls last', () => {
+    const rows = [
+      member({ salesUserId: 'none', achievedPct: null }),
+      member({ salesUserId: 'low', achievedPct: 30 }),
+      member({ salesUserId: 'high', achievedPct: 95 }),
+    ];
+    expect(sortByAchievement(rows).map((m) => m.salesUserId)).toEqual(['high', 'low', 'none']);
+  });
+
+  it('breaks ties by earned-this-month desc, then name asc', () => {
+    const rows = [
+      member({ salesUserId: 'b', name: 'Bob', achievedPct: 50, earnedThisMonth: 100 }),
+      member({ salesUserId: 'a', name: 'Ann', achievedPct: 50, earnedThisMonth: 100 }),
+      member({ salesUserId: 'c', name: 'Cal', achievedPct: 50, earnedThisMonth: 500 }),
+    ];
+    // Cal (higher earned) first; Ann before Bob on the name tiebreak.
+    expect(sortByAchievement(rows).map((m) => m.salesUserId)).toEqual(['c', 'a', 'b']);
+  });
+
+  it('ranks an over-achiever (>100%) above a sub-100% peer even with lower earnings', () => {
+    // Audit regression: if achievement were clamped to 100 before sorting, the two would tie and
+    // fall to the earned-this-month tiebreak, wrongly ranking the lower over-achiever first.
+    const rows = [
+      member({ salesUserId: 'steady', achievedPct: 105, earnedThisMonth: 9000 }),
+      member({ salesUserId: 'star', achievedPct: 300, earnedThisMonth: 1000 }),
+    ];
+    expect(sortByAchievement(rows).map((m) => m.salesUserId)).toEqual(['star', 'steady']);
+  });
+
+  it('does not mutate the input array', () => {
+    const rows = [member({ salesUserId: 'x', achievedPct: 10 }), member({ salesUserId: 'y', achievedPct: 90 })];
+    const snapshot = rows.map((m) => m.salesUserId);
+    sortByAchievement(rows);
+    expect(rows.map((m) => m.salesUserId)).toEqual(snapshot);
+  });
+});
+
+describe('teamChartMax', () => {
+  it('returns the largest single earned/redeemed value', () => {
+    expect(
+      teamChartMax([
+        { monthKey: '2026-05', label: 'May', earned: 300, redeemed: 120 },
+        { monthKey: '2026-06', label: 'Jun', earned: 150, redeemed: 420 },
+      ]),
+    ).toBe(420);
+  });
+
+  it('floors at 1 for an empty or all-zero series (no divide-by-zero)', () => {
+    expect(teamChartMax([])).toBe(1);
+    expect(teamChartMax([{ monthKey: '2026-05', label: 'May', earned: 0, redeemed: 0 }])).toBe(1);
+  });
+});
+
+describe('mapTeam', () => {
+  const base: ApiTeamResponse = {
+    root: { salesUserId: 'r', name: 'Root RM', employeeCode: 'RM1', roleName: 'SALES_RM' },
+    isManager: true,
+    rollup: {
+      memberCount: 3,
+      earnedThisMonth: 1200,
+      redeemedThisMonth: 400,
+      avgAchievementPct: 150.4, // a team averaging OVER 100% — must NOT be capped
+      onTrackCount: 2,
+    },
+    members: [
+      member({ salesUserId: 'none', achievedPct: null, earnedThisMonth: 10 }),
+      member({ salesUserId: 'top', achievedPct: 250, earnedThisMonth: 50 }),
+      member({ salesUserId: 'mid', achievedPct: 40, earnedThisMonth: 20 }),
+    ],
+    monthly: [{ monthKey: '2026-05', label: 'May', earned: 300, redeemed: 120 }],
+  };
+
+  it('sorts members by achievement (nulls last) and keeps over-achievement UNCAPPED', () => {
+    const t = mapTeam(base);
+    expect(t.members.map((m) => m.salesUserId)).toEqual(['top', 'mid', 'none']);
+    expect(t.rollup.avgAchievementPct).toBe(150); // rounded, NOT clamped to 100
+    // achievedPct is the uncapped DISPLAY value (over-achievement survives); null stays null.
+    expect(t.members.find((m) => m.salesUserId === 'top')!.achievedPct).toBe(250);
+    expect(t.members.find((m) => m.salesUserId === 'none')!.achievedPct).toBeNull();
+  });
+
+  it('clamps negative / NaN numbers and preserves a null targetPoints', () => {
+    const t = mapTeam({
+      ...base,
+      rollup: { ...base.rollup, earnedThisMonth: -5, onTrackCount: Number.NaN },
+      members: [member({ salesUserId: 'm', pointsBalance: -100, targetPoints: null })],
+      monthly: [{ monthKey: '2026-05', label: 'May', earned: -10, redeemed: Number.NaN }],
+    });
+    expect(t.rollup.earnedThisMonth).toBe(0);
+    expect(t.rollup.onTrackCount).toBe(0);
+    expect(t.members[0].pointsBalance).toBe(0);
+    expect(t.members[0].targetPoints).toBeNull();
+    expect(t.monthly[0].earned).toBe(0);
+    expect(t.monthly[0].redeemed).toBe(0);
+  });
+
+  it('tolerates a no-team payload (non-manager, empty collections)', () => {
+    const t = mapTeam({ root: null, isManager: false, rollup: base.rollup, members: [], monthly: [] });
+    expect(t.isManager).toBe(false);
+    expect(t.members).toEqual([]);
+    expect(t.monthly).toEqual([]);
   });
 });
