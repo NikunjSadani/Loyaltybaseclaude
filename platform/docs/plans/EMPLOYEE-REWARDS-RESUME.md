@@ -142,8 +142,32 @@
   employee catalog GET); pilot catalogue likely < cap. **L3-5** the what-if slider clamps the seeded rate to its
   visual range (authoritative `forecastDate` unaffected) — accepted. Smaller follow-up still open: filter
   cash-mode items from the employee catalogue browse.
-  ▶ **NEXT — WS2 waves (each needs a spec/BE first; genuine forks for the owner):** W5 Team manager rollup
-  (reuse the sales-hierarchy `descendantSalesUserIds`; points-based, NO "cases" — that's trade); W6 Contests
+- **WS2 Wave 5 — Team manager rollup landed (2026-10-13, HEAD `cfc6b31`):** a manager employee sees their
+  downline. BE `employeeTeamRollup(user, managerId?)` (`GET /v1/rewards/employee/team`) reuses the tenant
+  hierarchy `descendantSalesUserIds`; per-direct-member stats aggregate that member's OWN subtree; a 6-month
+  earned/redeemed series; **points-based, NO "cases"** (that's trade). FE: `/rep/team` + `/rep/team/[memberId]`
+  drill-down sharing `TeamView` (4-stat rollup, inline-SVG earned/redeemed chart, leaderboard sorted by
+  achievement, leaf detail sheet) + nav rationalized to the demo's **5-tab** bottom bar (Home·Team·Rewards·
+  Wallet·Contests; Profile→top-bar avatar, Orders→Home-quick-link/sidebar — 7 tabs overflowed). **Independent
+  audit → Lane 1 auth/trade-safety CLEAN, Lane 3 scale/N+1 CLEAN (bounded 4-query aggregate).** Fixes applied:
+  (a) **team-target semantics** — a member's `achievedPct` = subtree earn ÷ SUM of the subtree's targets (team
+  target), not the manager's personal target (a big team ÷ a small personal target would over-report); (b) the
+  **inactive-direct-report consistency** bug — the 6-month chart now covers the SAME population (union of ACTIVE
+  direct members' subtrees) as the rollup/leaderboard, so an inactive report's branch no longer leaks into the
+  chart but not the tiles; (c) **FE over-achievement** — `achievedPct`/avg are UNCAPPED for the number + the
+  sort key (clamp only the bar fill width), so a 250%-achiever reads 250% and outranks a 100% peer; (d) IST
+  month bucketing throughout (aligns `earnedThisMonth` with the IST achievement period + Home bar); (e) `Team of
+  N` excludes self; (f) wallet-query `clientId` re-filter (defense-in-depth) + wallet dedupe in aggregate.
+  Gate: api jest **3629** + build · platform tsc + vitest **2676**. REAL-DB runtime-verified (fresh :5434 cluster
+  — see ⚠️ below): subtree aggregation / team-target 1500→33% / uncapped 200% / the #2 chart-vs-tile agreement /
+  drill / sibling+ancestor drill → Forbidden / leaf caller / trade rejection — all green.
+  ⚠️ **W5 residuals (LOW, not fixed):** drill-down back-link always returns to the top team (shallow pilot trees;
+  acceptable); a named drill page can show "no team yet" if a manager's reports all go inactive between loads.
+  ⚠️ **throwaway runtime-verify DB was recreated** — the old `:5434` cluster (`pgdata-er`) corrupted a relation
+  mid-session (every write 58P01); recreated fresh at **`pgdata-er2`** via `initdb -U gifsy_user -A trust` +
+  `createdb gifsy_dev` + `prisma migrate deploy` (the full chain now applies CLEAN — the old drift that wedged
+  `migrate deploy` is gone). Runtime-verify scripts live in `scratchpad/er-*-verify.js`.
+  ▶ **NEXT — WS2 waves (each needs a spec/BE first; genuine forks for the owner):** W6 Contests
   detail (stays THIN — our contests are MANUAL with no progress metric, so a leaderboard would be fiction);
   W7 Profile enrich + Notifications in-app inbox (wire the rep app to the EXISTING bell feed — `notifications`
   module, partner+sales; the one real fork there = where a "Contact support" query goes).
