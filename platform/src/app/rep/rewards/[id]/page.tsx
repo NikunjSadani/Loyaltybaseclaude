@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { ArrowLeft, Gift, CheckCircle, Truck, Phone, Shield, Package } from 'lucide-react';
+import { ArrowLeft, Gift, CheckCircle, Truck, Phone, Shield, Package, Sparkles, Star } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { useToast } from '@/components/ui/toast';
@@ -10,12 +10,14 @@ import { formatPoints } from '@/lib/utils';
 import { api, authHeader } from '@/lib/api-client';
 import {
   mapCatalogItem,
+  mapDream,
   affordability,
   type EmployeeCatalogResponse,
   type EmployeeMe,
   type CatalogItem,
   type EmployeeRedeemPayload,
   type EmployeeRedeemResult,
+  type ApiEmployeeDream,
 } from '../../_lib/employee';
 
 /* ─── REP reward detail + redeem ──────────────────────────────────────────────
@@ -43,6 +45,11 @@ export default function RepRewardDetailPage() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
 
+  // Dream Reward: the current dream's id (null = none) + an in-flight flag for the
+  // "Set as Dream Reward" write. `isDream` reflects whether THIS item is the dream.
+  const [dreamRewardId, setDreamRewardId] = useState<string | null>(null);
+  const [settingDream, setSettingDream] = useState(false);
+
   // Member identity (seeds the delivery recipient + mobile) — from /api/auth/me.
   const [memberName, setMemberName] = useState('');
   const [mobile, setMobile] = useState('');
@@ -69,8 +76,14 @@ export default function RepRewardDetailPage() {
       fetch('/api/auth/me', { headers: { ...authHeader() } })
         .then((r) => r.json())
         .catch(() => null),
-    ]).then(([catJson, meJson]) => {
+      fetch('/api/rewards/employee/dream', { headers: { ...authHeader() } })
+        .then((r) => r.json())
+        .catch(() => null),
+    ]).then(([catJson, meJson, dreamJson]) => {
       if (cancelled) return;
+      if (dreamJson?.success && dreamJson.data) {
+        setDreamRewardId(mapDream(dreamJson.data as ApiEmployeeDream).reward?.id ?? null);
+      }
       if (catJson?.success && catJson.data) {
         const data = catJson.data as EmployeeCatalogResponse;
         const found = (data.items ?? []).map(mapCatalogItem).find((i) => i.id === id) ?? null;
@@ -106,6 +119,24 @@ export default function RepRewardDetailPage() {
     () => affordability(balance, item?.pointsCost ?? 0),
     [balance, item?.pointsCost],
   );
+
+  // This item is the current Dream Reward? Only dream-eligible items may be set.
+  const isDream = dreamRewardId != null && item != null && dreamRewardId === item.id;
+  const canSetDream = item?.dreamEligible === true && !isDream;
+
+  const setAsDream = async () => {
+    if (!item) return;
+    setSettingDream(true);
+    const result = await api.put<ApiEmployeeDream>('/api/rewards/employee/dream', { rewardId: item.id });
+    setSettingDream(false);
+    if (!result.success) {
+      // A 400 here means the server found the item not dream-eligible/visible — surface it.
+      toast.error(result.error || 'This reward can’t be set as your Dream Reward');
+      return;
+    }
+    setDreamRewardId(mapDream(result.data).reward?.id ?? item.id);
+    toast.success('Set as your Dream Reward ⭐');
+  };
 
   const doRedeem = async () => {
     if (!item) return;
@@ -286,6 +317,20 @@ export default function RepRewardDetailPage() {
             </div>
           )}
         </>
+      )}
+
+      {/* Dream Reward control (detail step only) */}
+      {step === 'detail' && (isDream || canSetDream) && (
+        isDream ? (
+          <div className="flex items-center gap-2 p-3 rounded-xl border border-amber-200 bg-amber-50">
+            <Star className="h-4 w-4 text-amber-500 fill-amber-400 shrink-0" />
+            <span className="text-sm font-semibold text-amber-900">This is your Dream Reward</span>
+          </div>
+        ) : (
+          <Button variant="outline" className="w-full" loading={settingDream} onClick={setAsDream}>
+            <Sparkles className="h-4 w-4" /> Set as Dream Reward
+          </Button>
+        )
       )}
 
       {/* Delivery form (PHYSICAL_GIFT) */}

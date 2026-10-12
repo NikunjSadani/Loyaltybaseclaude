@@ -15,6 +15,7 @@ import {
   Max,
   Min,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import {
@@ -113,6 +114,22 @@ export class EmployeeTargetQueryDto {
   @IsOptional()
   @Matches(/^\d{4}-\d{2}$/, { message: 'Period must be YYYY-MM' })
   period?: string;
+}
+
+/**
+ * PUT /v1/rewards/employee/dream — set or CLEAR the employee's Dream Reward.
+ * `rewardId: null` (or absent) clears the dream; a non-null id is validated server-side (exists in
+ * THIS tenant's catalogue, ACTIVE/not-deleted/APPROVED, dreamEligible, AND visible to this employee)
+ * before it is persisted. The id is a soft reference — no DB FK — so a stale id simply fails the
+ * write-time validation (and self-heals on read).
+ */
+export class SetDreamRewardDto {
+  // Explicit null is a valid value (clears the dream); only validate as a string when a non-null
+  // value is supplied, so `{ rewardId: null }` and `{}` both pass and mean "clear".
+  @ValidateIf((o) => o.rewardId !== null && o.rewardId !== undefined)
+  @IsString()
+  @MinLength(1)
+  rewardId?: string | null;
 }
 
 /**

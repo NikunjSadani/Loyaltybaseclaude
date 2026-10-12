@@ -1327,6 +1327,12 @@ model RewardAccount {
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
+  // Employee Rewards Wave 4 (Dream Reward) — the employee's ONE chosen aspirational catalogue
+  // reward. Nullable, DEFERRED/soft reference (NO hard FK): validated on write, SELF-HEALED on read
+  // (a dream that no longer qualifies reads as cleared, never errors). ADDITIVE + EMPLOYEE-only —
+  // OUTLET accounts never set it and no trade read touches it, so the live trade path is unchanged.
+  dreamRewardId String?
+
   wallet          Wallet?
   orders          RedemptionOrder[]
   outletProfile   ChannelPartner?

@@ -9,12 +9,13 @@
    the employee is account-first (one account, no outlet switch).
 
    SHAPES ADAPTED FROM THE PINNED CONTRACT (verified against the real backend):
-     • catalog item has NO `featured` / `dreamEligible` fields — the real member-safe
-       select is { id, code, name, description, imageUrls[], pointsCost, redemptionMode,
-       minRedemptionPoints, maxRedemptionPoints, stockQuantity, category, ... } enriched
-       with `isAffordable` + `requiresConsent`; the response wraps `userBalance` and
-       `pagination` (total lives under pagination, not top-level). The Home "featured"
-       strip is therefore DERIVED (affordable / lowest-cost first) — see pickFeatured.
+     • catalog item carries { id, code, name, description, imageUrls[], pointsCost,
+       redemptionMode, minRedemptionPoints, maxRedemptionPoints, stockQuantity, category,
+       ... } enriched with `isAffordable` + `requiresConsent`, and (Wave 4) `featured` +
+       `dreamEligible` flags; the response wraps `userBalance` and `pagination` (total
+       lives under pagination, not top-level). `dreamEligible` gates the "Set as Dream
+       Reward" control; the Home "Rewards for you" strip stays DERIVED (affordable /
+       lowest-cost first) via pickFeatured — `featured` is surfaced but not the sole sort.
      • catalog image is `imageUrls: string[]`, not a single `imageUrl`.
      • redeem is SINGLE-STEP (no OTP confirm): one POST → { orderId, orderNumber,
        requiredPoints, status, message }. `sourceKey` (a fresh UUID per redeem intent,
@@ -131,6 +132,8 @@ export interface ApiEmployeeCatalogItem {
   category?: string | null;
   isAffordable?: boolean;
   requiresConsent?: boolean;
+  featured?: boolean; // Wave 4: operator-curated "featured" flag.
+  dreamEligible?: boolean; // Wave 4: may this item be chosen as a Dream Reward?
 }
 
 export interface EmployeeCatalogResponse {
@@ -151,6 +154,8 @@ export interface CatalogItem {
   isAffordable: boolean;
   requiresConsent: boolean;
   inStock: boolean;
+  featured: boolean;
+  dreamEligible: boolean;
 }
 
 export function mapCatalogItem(item: ApiEmployeeCatalogItem): CatalogItem {
@@ -167,6 +172,8 @@ export function mapCatalogItem(item: ApiEmployeeCatalogItem): CatalogItem {
     requiresConsent: item.requiresConsent === true,
     // Null stock = unlimited; 0 = out of stock.
     inStock: item.stockQuantity == null || item.stockQuantity > 0,
+    featured: item.featured === true,
+    dreamEligible: item.dreamEligible === true,
   };
 }
 
@@ -281,6 +288,65 @@ export function mapContest(api: ApiEmployeeContest): Contest {
   };
 }
 
+/* ─── Dream Reward (GET/PUT /api/rewards/employee/dream) ────────────────────────
+   The employee picks ONE aspirational reward; the backend returns the resolved dream
+   plus progress + a forecast ETA computed from the employee's real earn history.
+     • `dreamReward` is null when none is chosen yet.
+     • `forecastDate` is null when the backend cannot forecast (e.g. too little earn
+       history / a zero earn rate) — the FE HIDES the ETA line rather than faking one.
+     • `reached` is true once the redeemable balance covers the dream's cost.
+   PUT body { rewardId: string | null } sets (or clears) the dream and returns the SAME
+   resolved shape (so the caller can reflect progress immediately); a non-eligible /
+   non-visible rewardId is a 400, surfaced gracefully at the call site. ──────────── */
+
+export interface ApiEmployeeDreamReward {
+  id: string;
+  name: string;
+  imageUrl: string | null;
+  pointsCost: number;
+}
+
+export interface ApiEmployeeDream {
+  dreamReward: ApiEmployeeDreamReward | null;
+  pointsRequired: number;
+  pointsRemaining: number;
+  redeemablePoints: number;
+  monthlyEarnRate: number;
+  forecastDate: string | null; // ISO, or null when not forecastable.
+  reached: boolean;
+}
+
+export interface Dream {
+  reward: ApiEmployeeDreamReward | null;
+  pointsRequired: number;
+  pointsRemaining: number;
+  redeemablePoints: number;
+  monthlyEarnRate: number;
+  forecastDate: string | null;
+  reached: boolean;
+}
+
+export function mapDream(api: ApiEmployeeDream): Dream {
+  // Points are display + progress-ring inputs — never let a negative/NaN through.
+  const clamp = (n: number) => (Number.isFinite(n) ? Math.max(0, n) : 0);
+  return {
+    reward: api.dreamReward
+      ? {
+          id: api.dreamReward.id,
+          name: api.dreamReward.name,
+          imageUrl: api.dreamReward.imageUrl ?? null,
+          pointsCost: clamp(api.dreamReward.pointsCost),
+        }
+      : null,
+    pointsRequired: clamp(api.pointsRequired),
+    pointsRemaining: clamp(api.pointsRemaining),
+    redeemablePoints: clamp(api.redeemablePoints),
+    monthlyEarnRate: clamp(api.monthlyEarnRate),
+    forecastDate: api.forecastDate ?? null,
+    reached: api.reached === true,
+  };
+}
+
 /* ─── Profile (GET /api/auth/me → user + salesUser) ─────────────────────────── */
 
 export interface EmployeeMe {
@@ -387,4 +453,88 @@ export function contestStatusBadge(
   return status === 'SCHEDULED'
     ? { label: 'Upcoming', variant: 'info' }
     : { label: 'Live', variant: 'success' };
+}
+
+/* ─── Dream Reward progress + forecast helpers (unit-tested) ─────────────────── */
+
+/**
+ * Clamp the ratio a/b to an integer 0–100 percent (progress-ring / bar fill). A
+ * non-positive or non-finite denominator → 0 (nothing to be "percent of"); an `a`
+ * at or above `b` saturates at 100 (never over-fills the ring).
+ */
+export function pct(a: number, b: number): number {
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round((a / b) * 100)));
+}
+
+/**
+ * Project a completion date from a remaining-points balance and an assumed monthly
+ * earn rate: `from + ceil(remaining / ratePerMonth × 30)` days.
+ *   • remaining ≤ 0 → already reached: returns a copy of `from` (today).
+ *   • ratePerMonth ≤ 0 / non-finite → cannot forecast: returns null (the UI then hides
+ *     the ETA rather than faking one).
+ * `from` is injectable so callers/tests stay deterministic (never hardcode a clock —
+ * pass the reference instant in). Pure: does not mutate `from`.
+ */
+export function forecastFromRate(
+  remaining: number,
+  ratePerMonth: number,
+  from: Date = new Date(),
+): Date | null {
+  const rem = Number.isFinite(remaining) ? remaining : 0;
+  if (rem <= 0) return new Date(from.getTime());
+  if (!Number.isFinite(ratePerMonth) || ratePerMonth <= 0) return null;
+  const days = Math.ceil((rem / ratePerMonth) * 30);
+  return new Date(from.getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+/**
+ * Whole days a projected completion lands AFTER a target date (0 when on time or
+ * early). Either side null/invalid → 0 (cannot judge lateness → treat as on time).
+ */
+export function daysLate(projected: Date | null, target: Date | null): number {
+  if (!projected || !target) return 0;
+  const p = projected.getTime();
+  const t = target.getTime();
+  if (Number.isNaN(p) || Number.isNaN(t)) return 0;
+  const diffMs = p - t;
+  if (diffMs <= 0) return 0;
+  return Math.ceil(diffMs / (24 * 60 * 60 * 1000));
+}
+
+/**
+ * On-time status for the "Plan your finish" panel: compares a projected completion to
+ * a chosen target date. `onTime` when the projection is on or before the target, else
+ * the whole-day overshoot. A null projection (unforecastable) or null target reads as
+ * on time (nothing to be late against). The page maps this to a green / red badge.
+ */
+export function onTimeBadge(
+  projected: Date | null,
+  target: Date | null,
+): { onTime: boolean; daysLate: number } {
+  const late = daysLate(projected, target);
+  return { onTime: late === 0, daysLate: late };
+}
+
+/**
+ * Add whole calendar months to a date (for the "1 / 2 / 3 months" target presets).
+ * Uses setMonth so month-length overflow is handled by the platform (e.g. 31 Jan +1
+ * month → early Mar). Pure: returns a new Date, does not mutate `from`.
+ */
+export function addMonths(from: Date, months: number): Date {
+  const d = new Date(from.getTime());
+  d.setMonth(d.getMonth() + months);
+  return d;
+}
+
+/** "Mon YYYY" (e.g. "Nov 2026") in IST — the compact ETA label on the Home hero. */
+export function formatMonthYear(date: string | Date | null | undefined): string {
+  if (date == null) return '';
+  const d = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(d.getTime())) return '';
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    month: 'short',
+    year: 'numeric',
+  }).format(d);
 }

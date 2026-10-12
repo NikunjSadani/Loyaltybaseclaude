@@ -2,16 +2,18 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Gift, Search, CheckCircle } from 'lucide-react';
+import { Gift, Search, CheckCircle, Sparkles } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { EmptyState } from '@/components/ui/empty-state';
 import { cn, formatPoints } from '@/lib/utils';
 import { authHeader } from '@/lib/api-client';
 import {
   mapCatalogItem,
+  mapDream,
   affordability,
   type EmployeeCatalogResponse,
   type CatalogItem,
+  type ApiEmployeeDream,
 } from '../_lib/employee';
 
 /* ─── REP Rewards catalogue ───────────────────────────────────────────────────
@@ -27,20 +29,32 @@ export default function RepRewardsPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('All');
+  // Current Dream Reward id → a "Dream" badge on its grid card (null = none set).
+  const [dreamRewardId, setDreamRewardId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/rewards/employee/catalog?limit=100', { headers: { ...authHeader() } })
+    const catalogP = fetch('/api/rewards/employee/catalog?limit=100', { headers: { ...authHeader() } })
       .then((r) => r.json())
       .then((json: { success?: boolean; data?: EmployeeCatalogResponse }) => {
         if (cancelled || !json.success || !json.data) return;
         setItems((json.data.items ?? []).map(mapCatalogItem));
         setBalance(json.data.userBalance ?? 0);
       })
-      .catch(() => {})
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+      .catch(() => {});
+
+    // Cheap one-shot fetch just to know which card to badge as the Dream Reward.
+    const dreamP = fetch('/api/rewards/employee/dream', { headers: { ...authHeader() } })
+      .then((r) => r.json())
+      .then((json: { success?: boolean; data?: ApiEmployeeDream }) => {
+        if (cancelled || !json.success || !json.data) return;
+        setDreamRewardId(mapDream(json.data).reward?.id ?? null);
+      })
+      .catch(() => {});
+
+    Promise.allSettled([catalogP, dreamP]).then(() => {
+      if (!cancelled) setLoading(false);
+    });
     return () => {
       cancelled = true;
     };
@@ -152,6 +166,13 @@ export default function RepRewardsPage() {
                     <img src={item.imageUrl} alt="" className="max-h-full max-w-full object-contain p-3" />
                   ) : (
                     <Gift className="h-10 w-10 text-gray-300" />
+                  )}
+                  {dreamRewardId === item.id && (
+                    <div className="absolute top-2 left-2">
+                      <span className="inline-flex items-center gap-1 bg-[var(--brand-primary)] text-white text-[9px] font-bold px-2 py-0.5 rounded-full shadow-sm">
+                        <Sparkles className="h-2.5 w-2.5" /> Dream
+                      </span>
+                    </div>
                   )}
                   {!affordable && (
                     <div className="absolute inset-0 flex items-end justify-center pb-2">

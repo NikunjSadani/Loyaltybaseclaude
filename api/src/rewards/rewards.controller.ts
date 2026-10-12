@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Patch, Post, Put, Query } from '@nestjs/common';
 import { RewardsService } from './rewards.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -12,6 +12,7 @@ import {
   RedeemDto,
   SalesRedeemConfirmDto,
   SalesRedeemDto,
+  SetDreamRewardDto,
   TransitionOrderDto,
   UpdateOrderDto,
 } from './dto/rewards.dto';
@@ -145,6 +146,25 @@ export class RewardsController {
   @RequirePermission('rewards:read')
   employeeTarget(@CurrentUser() user: JwtPayload, @Query() query: EmployeeTargetQueryDto) {
     return this.rewards.employeeTarget(user, query);
+  }
+
+  /**
+   * Employee Rewards Wave 4 — the employee's OWN Dream Reward (resolved selection + progress +
+   * forecast ETA). DISPLAY + a preference write; NO points move here. Same guard as the other
+   * employee rails: NOT @Roles-gated (authorization is the service-layer own-identity resolve +
+   * the EMPLOYEE-earner tenant gate); @RequirePermission('rewards:read') mirrors the member reads.
+   */
+  @Get('employee/dream')
+  @RequirePermission('rewards:read')
+  employeeDreamReward(@CurrentUser() user: JwtPayload) {
+    return this.rewards.employeeDreamReward(user);
+  }
+
+  /** Set or clear the employee's OWN Dream Reward; returns the SAME resolved shape as GET. */
+  @Put('employee/dream')
+  @RequirePermission('rewards:read')
+  setEmployeeDreamReward(@CurrentUser() user: JwtPayload, @Body() dto: SetDreamRewardDto) {
+    return this.rewards.setEmployeeDreamReward(user, dto);
   }
 
   /** SALES-ASSISTED redeem (B1, #50-E) — a sales user redeems for an assigned outlet. */

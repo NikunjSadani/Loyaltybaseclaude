@@ -8,7 +8,13 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { GiftFulfilmentChannel, PayoutMode, Prisma, RedemptionStatus } from '@prisma/client';
+import {
+  GiftFulfilmentChannel,
+  PayoutMode,
+  PointsLedgerType,
+  Prisma,
+  RedemptionStatus,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
@@ -18,7 +24,10 @@ import {
   ensureEmployeeWallet,
 } from '../common/reward-account.helper';
 import { resolveCapabilities } from '../common/loyalty-capabilities.helper';
-import { resolveEmployeeReadContext } from '../common/employee-context.helper';
+import {
+  resolveEmployeeReadContext,
+  type EmployeeReadContext,
+} from '../common/employee-context.helper';
 import { orderTenantScopeWhere } from '../common/order-tenant-scope';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -51,6 +60,7 @@ import {
   RedeemDto,
   SalesRedeemConfirmDto,
   SalesRedeemDto,
+  SetDreamRewardDto,
   TransitionOrderDto,
   UpdatableOrderStatus,
   UpdateOrderDto,
@@ -704,18 +714,23 @@ export class RewardsService {
         skip,
         take: limit,
         orderBy: { pointsCost: 'asc' },
-        select: { ...MEMBER_CATALOG_SELECT, sourceType: true },
+        // featured/dreamEligible are added LOCALLY here (not to the shared MEMBER_CATALOG_SELECT,
+        // which also backs the trade/partner catalogue reads) so the rep app can render the Dream
+        // picker + the featured/dream badges. EMPLOYEE-only read — the trade projection is unchanged.
+        select: { ...MEMBER_CATALOG_SELECT, sourceType: true, featured: true, dreamEligible: true },
       }),
       this.prisma.rewardCatalog.count({ where }),
     ]);
 
     const enriched = items.map((item) => {
-      const { category, sourceType, ...rest } = item;
+      const { category, sourceType, featured, dreamEligible, ...rest } = item;
       return {
         ...rest,
         category: category?.name,
         requiresConsent: sourceType === 'VENDOR',
         isAffordable: userBalance >= item.pointsCost,
+        featured,
+        dreamEligible,
       };
     });
 
@@ -762,6 +777,224 @@ export class RewardsService {
       select: { targetPoints: true },
     });
     return { period, targetPoints: row?.targetPoints ?? null };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Employee Rewards Wave 4 — DREAM REWARD (DISPLAY + a preference write; NO points move here,
+  // not money-adjacent). An employee picks ONE aspirational catalogue reward as their "dream"; the
+  // app shows progress toward affording it + a forecast ETA. Authorization is the SERVICE-layer
+  // own-identity resolve (resolveEmployeeReadContext) + the EMPLOYEE-earner tenant gate — a trade
+  // tenant / non-employee caller is rejected (400/403) and never reaches a dream. ADDITIVE +
+  // EMPLOYEE-only: OUTLET accounts never set dreamRewardId and no trade read touches it.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * The selectable-dream WHERE for a catalogue item, scoped to THIS employee. Mirrors
+   * `employeeListCatalog`'s gate EXACTLY — tenant + ACTIVE + not-deleted + APPROVED +
+   * vendor-visibility + the role/region visibility gate (empty list ⇒ visible to all) — PLUS
+   * `dreamEligible: true`. Used by BOTH set (write validation) and get (read self-heal), so a dream
+   * is set/kept iff it is still selectable under identical rules.
+   */
+  private dreamEligibleWhere(
+    user: JwtPayload,
+    ctx: EmployeeReadContext,
+  ): Prisma.RewardCatalogWhereInput {
+    return {
+      status: 'ACTIVE',
+      deletedAt: null,
+      clientId: user.clientId,
+      moderationStatus: 'APPROVED',
+      dreamEligible: true,
+      // A dream must have a positive points goal — a pointsCost:0 item (e.g. a FREE_AMOUNT voucher)
+      // would make pointsRequired 0 → pointsRemaining 0 → "reached" always true, a meaningless 0%
+      // ring + contradictory "reached" badge. Exclude it from selectable dreams (and self-heal away
+      // if an existing dream's cost is later set to 0).
+      pointsCost: { gt: 0 },
+      ...vendorVisibilityFilter(user.clientId),
+      AND: [
+        {
+          OR: [
+            { visibleRoleCodes: { isEmpty: true } },
+            ...(ctx.roleCode ? [{ visibleRoleCodes: { has: ctx.roleCode } }] : []),
+          ],
+        },
+        {
+          OR: [
+            { visibleRegions: { isEmpty: true } },
+            ...(ctx.region ? [{ visibleRegions: { has: ctx.region } }] : []),
+          ],
+        },
+      ],
+    };
+  }
+
+  /**
+   * monthlyEarnRate — the caller account's average monthly EARN over trailing COMPLETE calendar
+   * months (the current partial month is EXCLUDED), up to the last 3 complete months.
+   *   - Sum EARN-type points-ledger for this wallet within those complete months.
+   *   - Divisor = how many of those complete months fall on/after the account's first-ever EARN
+   *     (so a 1-month-old employee divides by 1, not 3), clamped to [1, 3].
+   *   - rate = round(sumEarn / divisor); NO complete-month EARN history at all ⇒ 0.
+   * Month boundaries are computed in UTC for determinism. READ-ONLY (never writes the ledger).
+   */
+  private async computeMonthlyEarnRate(walletId: string): Promise<number> {
+    const now = new Date();
+    const y = now.getUTCFullYear();
+    const m = now.getUTCMonth(); // 0-based month of the CURRENT (partial) month
+    // Window = the 3 complete calendar months before the current one: [firstDay(m-3), firstDay(m)).
+    const windowStart = new Date(Date.UTC(y, m - 3, 1));
+    const windowEnd = new Date(Date.UTC(y, m, 1)); // exclusive — excludes the current partial month
+
+    const earnRows = await this.prisma.pointsLedger.findMany({
+      where: {
+        walletId,
+        transactionType: PointsLedgerType.EARN,
+        createdAt: { gte: windowStart, lt: windowEnd },
+      },
+      select: { points: true },
+    });
+    if (earnRows.length === 0) return 0; // no complete-month EARN history at all
+
+    const sumEarn = earnRows.reduce((acc, r) => acc + r.points, 0);
+
+    // The account's first-ever EARN decides how many complete months are "real" for this employee.
+    const firstEarn = await this.prisma.pointsLedger.findFirst({
+      where: { walletId, transactionType: PointsLedgerType.EARN },
+      orderBy: { createdAt: 'asc' },
+      select: { createdAt: true },
+    });
+    const fe = firstEarn?.createdAt ?? windowStart;
+    const feMonthStart = new Date(Date.UTC(fe.getUTCFullYear(), fe.getUTCMonth(), 1));
+
+    let completeMonths = 0;
+    for (let i = 0; i < 3; i++) {
+      const monthStart = new Date(Date.UTC(y, m - 3 + i, 1));
+      if (monthStart >= feMonthStart) completeMonths += 1;
+    }
+    const divisor = Math.min(3, Math.max(1, completeMonths));
+
+    return Math.round(sumEarn / divisor);
+  }
+
+  /**
+   * Resolve the dream + progress + forecast for an already-resolved employee context. Shared by the
+   * GET and PUT handlers so both return the IDENTICAL shape. Self-heals a stale dream (a stored id
+   * that no longer qualifies reads as cleared — no error, no mutation).
+   */
+  private async resolveDreamFor(user: JwtPayload, ctx: EmployeeReadContext) {
+    // redeemablePoints from the employee's ACCOUNT wallet (zero when no account/wallet yet).
+    const wallet = ctx.accountId
+      ? await this.prisma.wallet.findFirst({
+          where: { accountId: ctx.accountId },
+          select: { id: true, redeemablePoints: true },
+        })
+      : null;
+    const redeemablePoints = wallet ? wallet.redeemablePoints : 0;
+
+    // The stored dream id (no account ⇒ none).
+    const account = ctx.accountId
+      ? await this.prisma.rewardAccount.findUnique({
+          where: { id: ctx.accountId },
+          select: { dreamRewardId: true },
+        })
+      : null;
+    const storedId = account?.dreamRewardId ?? null;
+
+    let dreamReward: {
+      id: string;
+      name: string;
+      imageUrl: string | null;
+      pointsCost: number;
+    } | null = null;
+
+    if (storedId) {
+      // Re-validate under the SAME selectable gate as set — self-heal: a no-longer-eligible dream is
+      // treated as cleared (do NOT error, do NOT mutate the stored id).
+      const item = await this.prisma.rewardCatalog.findFirst({
+        where: { id: storedId, ...this.dreamEligibleWhere(user, ctx) },
+        select: { id: true, name: true, imageUrls: true, pointsCost: true },
+      });
+      if (item) {
+        dreamReward = {
+          id: item.id,
+          name: item.name,
+          // Mirror how the catalogue reads expose the first image of the Json array.
+          imageUrl:
+            Array.isArray(item.imageUrls) && item.imageUrls.length > 0
+              ? String(item.imageUrls[0])
+              : null,
+          pointsCost: item.pointsCost,
+        };
+      }
+    }
+
+    const pointsRequired = dreamReward ? dreamReward.pointsCost : 0;
+    const pointsRemaining = dreamReward ? Math.max(0, pointsRequired - redeemablePoints) : 0;
+    const reached = dreamReward !== null && pointsRemaining <= 0;
+
+    // Earn-rate only matters when a wallet exists; no wallet ⇒ no history ⇒ 0.
+    const monthlyEarnRate = wallet ? await this.computeMonthlyEarnRate(wallet.id) : 0;
+
+    let forecastDate: string | null = null;
+    if (monthlyEarnRate > 0 && pointsRemaining > 0) {
+      const days = Math.ceil((pointsRemaining / monthlyEarnRate) * 30);
+      const d = new Date();
+      d.setDate(d.getDate() + days);
+      forecastDate = d.toISOString();
+    }
+
+    return {
+      dreamReward,
+      pointsRequired,
+      pointsRemaining,
+      redeemablePoints,
+      monthlyEarnRate,
+      forecastDate,
+      reached,
+    };
+  }
+
+  /**
+   * GET /v1/rewards/employee/dream — resolve the caller's dream + progress + forecast.
+   * Own-identity authorization + EMPLOYEE-earner tenant gate via resolveEmployeeReadContext.
+   */
+  async employeeDreamReward(user: JwtPayload) {
+    const ctx = await resolveEmployeeReadContext(this.prisma, user);
+    return this.resolveDreamFor(user, ctx);
+  }
+
+  /**
+   * PUT /v1/rewards/employee/dream — set or CLEAR the caller's dream; returns the SAME resolved
+   * shape as GET. `rewardId: null`/absent clears. A non-null id MUST pass the selectable-dream gate
+   * (this tenant, ACTIVE/not-deleted/APPROVED, dreamEligible, AND visible to this employee) before
+   * it is persisted; otherwise 400. Requires the employee to have a provisioned account.
+   */
+  async setEmployeeDreamReward(user: JwtPayload, dto: SetDreamRewardDto) {
+    const ctx = await resolveEmployeeReadContext(this.prisma, user);
+    if (!ctx.accountId) {
+      throw new BadRequestException(
+        'Your rewards account is not set up yet, so a Dream Reward cannot be saved.',
+      );
+    }
+
+    const rewardId = dto.rewardId ?? null;
+    if (rewardId) {
+      // Validate BEFORE persisting — only a currently-selectable dream for THIS employee is allowed.
+      const item = await this.prisma.rewardCatalog.findFirst({
+        where: { id: rewardId, ...this.dreamEligibleWhere(user, ctx) },
+        select: { id: true },
+      });
+      if (!item) {
+        throw new BadRequestException("That reward can't be set as your Dream Reward.");
+      }
+    }
+
+    await this.prisma.rewardAccount.update({
+      where: { id: ctx.accountId },
+      data: { dreamRewardId: rewardId },
+    });
+
+    return this.resolveDreamFor(user, ctx);
   }
 
   /**
