@@ -67,6 +67,39 @@ export function validateNewClientSlug(
 export const TENANT_DOMAIN_SUFFIX = '.gifsy.in';
 
 /**
+ * True when the operator console is itself running on a STAGING host. Staging is marked on
+ * the host by a `uat-` first-label prefix (NEW single-label form, e.g. `uat-app.gifsy.in`)
+ * or a leading `uat.` (OLD nested form). Mirrors the gifsy-proxy worker + tenant-resolution.
+ */
+export function isStagingConsoleHost(host: string | null | undefined): boolean {
+  if (!host) return false;
+  const h = host.toLowerCase().split(':')[0]; // drop any :port
+  return h.startsWith('uat.') || h.split('.')[0].startsWith('uat-');
+}
+
+/**
+ * Build the URL to OPEN a tenant's site from the environment the console is CURRENTLY in.
+ *
+ * On a staging console, a `*.gifsy.in` tenant domain is served under the `uat-` first-label
+ * staging marker (`bajaj.gifsy.in` → `uat-bajaj.gifsy.in`) — the edge worker routes that to
+ * the staging frontend and the resolver strips the marker back to the real slug. On prod, the
+ * domain is used as-is. A non-`.gifsy.in` custom domain can't be stagingised, so it's returned
+ * unchanged. Without this, the console (on staging) would link to the PROD host — which 404s
+ * for a staging-only tenant and silently opens prod for one that exists in both.
+ */
+export function tenantSiteUrl(domain: string, consoleHost: string | null | undefined): string {
+  const d = (domain || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  if (!d) return '';
+  const isGifsySubdomain = d.endsWith(TENANT_DOMAIN_SUFFIX);
+  if (isStagingConsoleHost(consoleHost) && isGifsySubdomain) {
+    const [first, ...rest] = d.split('.');
+    const firstOut = first.startsWith('uat-') ? first : `uat-${first}`; // never double-prefix
+    return `https://${[firstOut, ...rest].join('.')}`;
+  }
+  return `https://${d}`;
+}
+
+/**
  * First-label subdomains a tenant may NOT claim — platform-infrastructure hosts.
  * Mirrors the backend `RESERVED_DOMAIN_LABELS`; kept in sync so the console blocks
  * a clash BEFORE the round-trip (the backend remains the authoritative guard).

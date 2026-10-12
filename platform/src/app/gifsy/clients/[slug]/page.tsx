@@ -6,9 +6,9 @@ import {
   ArrowLeft, CheckCircle, Clock, AlertCircle,
   Pencil, Save, X, ChevronDown, ChevronUp,
   Palette, Shield, Users, Bell, FileText, Wallet, Building2, ShoppingBag, Loader2,
-  Settings, Power, Globe, Plus, Trash2, Star, Image as ImageIcon, Upload,
+  Settings, Power, Globe, Plus, Trash2, Star, Image as ImageIcon, Upload, ExternalLink,
 } from 'lucide-react';
-import { validateTenantDomain, normalizeTenantDomain, TENANT_DOMAIN_SUFFIX } from '@/lib/platform/platform-admin';
+import { validateTenantDomain, normalizeTenantDomain, TENANT_DOMAIN_SUFFIX, tenantSiteUrl } from '@/lib/platform/platform-admin';
 import type { ClientConfig, FeatureKey } from '@/lib/platform/client-config';
 import { OutletTypeConfigSection } from '@/components/admin/outlet-type-config-section';
 import { getToken } from '@/lib/auth-client';
@@ -178,6 +178,13 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
   const [saved, setSaved]   = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // The console's OWN host decides whether a tenant link needs the `uat-` staging marker, so a
+  // staging console links to the staging site (not prod, which 404s for a staging-only tenant).
+  // Set after mount: SSR + first client render use '' (prod form, identical → no hydration
+  // mismatch), then the effect fills in the real host and the link re-renders env-correct.
+  const [consoleHost, setConsoleHost] = useState('');
+  useEffect(() => { setConsoleHost(window.location.host); }, []);
 
   /** Flash a "Saved" indicator briefly (used by the in-memory-only sections) */
   const flashSaved = useCallback(() => {
@@ -381,7 +388,24 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
             </div>
             <div>
               <h1 className="text-xl font-bold text-white">{config.branding.displayName}</h1>
-              <p className="text-sm text-white/40">{config.internalName} · <code className="font-mono text-xs">{config.slug}.gifsy.in</code></p>
+              <p className="text-sm text-white/40 flex items-center gap-1.5 flex-wrap">
+                <span>{config.internalName} ·</span>
+                {(() => {
+                  const url = tenantSiteUrl(`${config.slug}${TENANT_DOMAIN_SUFFIX}`, consoleHost);
+                  return (
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="Open the tenant site (uses this console's environment)"
+                      className="inline-flex items-center gap-1 font-mono text-xs text-sky-400 hover:text-sky-300 hover:underline"
+                    >
+                      {url.replace(/^https:\/\//, '')}
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  );
+                })()}
+              </p>
             </div>
           </div>
         </div>
@@ -746,6 +770,10 @@ function DomainsSection({
   // Re-sync when the authoritative (primary-first) set arrives after a save.
   useEffect(() => { setList(config.domains ?? []); }, [config.domains]);
 
+  // Console host → env-correct "open" link (adds the `uat-` staging marker on a staging console).
+  const [consoleHost, setConsoleHost] = useState('');
+  useEffect(() => { setConsoleHost(window.location.host); }, []);
+
   // The saved primary is the first entry of the primary-first ordering.
   const primary = saved[0];
 
@@ -792,7 +820,16 @@ function DomainsSection({
           return (
             <div key={d} className="flex items-center gap-3 px-4 py-2.5 rounded-xl bg-white/5 border border-white/5">
               <Globe className="w-4 h-4 text-white/40 shrink-0" />
-              <span className="text-sm font-mono text-white/80 flex-1 min-w-0 truncate">{d}</span>
+              <a
+                href={tenantSiteUrl(d, consoleHost)}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={`Open ${tenantSiteUrl(d, consoleHost).replace(/^https:\/\//, '')} (this console's environment)`}
+                className="text-sm font-mono text-white/80 hover:text-sky-300 hover:underline flex-1 min-w-0 truncate inline-flex items-center gap-1"
+              >
+                {d}
+                <ExternalLink className="w-3 h-3 shrink-0 text-white/40" />
+              </a>
               {isPrimary && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-green-500/15 border border-green-500/30 text-green-400">
                   <Star className="w-3 h-3" />Primary

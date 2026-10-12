@@ -13,6 +13,8 @@ import {
   applyFeatureFlagUpdate,
   canClientAdminModify,
   buildClientSummary,
+  isStagingConsoleHost,
+  tenantSiteUrl,
   type ClientSummary,
 } from '../platform-admin';
 import { DEOLEO_CONFIG, CLIENT_B_CONFIG, CLIENT_REGISTRY } from '../client-registry';
@@ -224,5 +226,44 @@ describe('buildClientSummary', () => {
   it('reflects the status from ClientConfig', () => {
     const summary = buildClientSummary(CLIENT_B_CONFIG);
     expect(summary.status).toBe('ONBOARDING');
+  });
+});
+
+describe('isStagingConsoleHost', () => {
+  it('detects the uat- single-label marker', () => {
+    expect(isStagingConsoleHost('uat-app.gifsy.in')).toBe(true);
+    expect(isStagingConsoleHost('uat-bajaj.gifsy.in')).toBe(true);
+  });
+  it('detects the old nested uat. marker', () => {
+    expect(isStagingConsoleHost('uat.app.gifsy.in')).toBe(true);
+  });
+  it('is false for prod and for a bare "uat" without the hyphen/dot', () => {
+    expect(isStagingConsoleHost('app.gifsy.in')).toBe(false);
+    expect(isStagingConsoleHost('uatbajaj.gifsy.in')).toBe(false); // no hyphen → NOT a staging marker
+    expect(isStagingConsoleHost('')).toBe(false);
+    expect(isStagingConsoleHost(null)).toBe(false);
+  });
+  it('ignores a port suffix', () => {
+    expect(isStagingConsoleHost('uat-app.gifsy.in:443')).toBe(true);
+    expect(isStagingConsoleHost('localhost:3000')).toBe(false);
+  });
+});
+
+describe('tenantSiteUrl', () => {
+  it('on a prod console returns the domain as-is', () => {
+    expect(tenantSiteUrl('bajaj.gifsy.in', 'app.gifsy.in')).toBe('https://bajaj.gifsy.in');
+  });
+  it('on a staging console prepends the uat- marker to a *.gifsy.in domain', () => {
+    expect(tenantSiteUrl('bajaj.gifsy.in', 'uat-app.gifsy.in')).toBe('https://uat-bajaj.gifsy.in');
+    expect(tenantSiteUrl('deoleoloyalty.gifsy.in', 'uat.app.gifsy.in')).toBe('https://uat-deoleoloyalty.gifsy.in');
+  });
+  it('never double-prefixes a domain that already carries the marker', () => {
+    expect(tenantSiteUrl('uat-bajaj.gifsy.in', 'uat-app.gifsy.in')).toBe('https://uat-bajaj.gifsy.in');
+  });
+  it('leaves a non-gifsy.in custom domain unchanged even on staging (cannot be stagingised)', () => {
+    expect(tenantSiteUrl('rewards.bajaj.com', 'uat-app.gifsy.in')).toBe('https://rewards.bajaj.com');
+  });
+  it('tolerates an input that already has a scheme / trailing slash', () => {
+    expect(tenantSiteUrl('https://bajaj.gifsy.in/', 'uat-app.gifsy.in')).toBe('https://uat-bajaj.gifsy.in');
   });
 });
