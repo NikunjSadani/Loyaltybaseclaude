@@ -167,10 +167,23 @@
   mid-session (every write 58P01); recreated fresh at **`pgdata-er2`** via `initdb -U gifsy_user -A trust` +
   `createdb gifsy_dev` + `prisma migrate deploy` (the full chain now applies CLEAN — the old drift that wedged
   `migrate deploy` is gone). Runtime-verify scripts live in `scratchpad/er-*-verify.js`.
-  ▶ **NEXT — WS2 waves (each needs a spec/BE first; genuine forks for the owner):** W6 Contests
-  detail (stays THIN — our contests are MANUAL with no progress metric, so a leaderboard would be fiction);
-  W7 Profile enrich + Notifications in-app inbox (wire the rep app to the EXISTING bell feed — `notifications`
-  module, partner+sales; the one real fork there = where a "Contact support" query goes).
+- **WS2 Wave 6 — Contest detail landed (2026-10-13, HEAD `07eba1e`):** thin, FE-only. `/rep/contests/[id]`
+  resolves the contest from the (unpaginated, already role/region-scoped) employee contests list — NO new BE,
+  no pagination-cap fragility — and shows banner/status/duration/bonus/description + eligibility (informational)
+  + a "winners are credited by your admin after the contest ends" note. Both the `/rep/contests` list cards and
+  the Home live-contests carousel now tap through to it; honest loading/not-found/error states. `Contest` type +
+  `mapContest` gained `eligibleRoleCodes`/`eligibleRegions` (additive). Gate: platform tsc + vitest **2676**; api
+  unchanged. (Deliberately no progress bar/leaderboard — our contests are MANUAL with no progress metric, so that
+  would be fiction.) FE runtime-verify deferred to staging.
+  ▶ **RECONCILED — the rep app is functionally PILOT-COMPLETE.** W7's notification inbox is ALREADY done: the
+  shared `NotificationBell` (unread badge + feed panel + mark-read + load-more) is mounted in the rep layout and
+  the `GET /v1/notifications` feed is `user.sub`-scoped with NO @Roles gate, so a SALES_* employee gets their own
+  feed. W7 "profile enrich" has no honest net-new work for the pilot: a performance pulse duplicates Home; the
+  notification-preference toggles + contact-support form need net-new backends (per-type prefs; a support
+  destination) — owner-gated, not built (building them as non-functional UI would be dishonest).
+  ▶ **NEXT (owner's call):** the big gated milestone — push `er/phase0-shell` to staging + stand up a
+  `uat-britannia` tenant + real-login UAT. OR W7 profile backends if the owner wants them (needs the support
+  destination + a prefs-worth-it decision). The W4 residual (rep-catalogue pagination cap) is also still open.
 - **Phase A (Shell + People roster) landed (2026-10-04):** the one net-new piece — the EMPLOYEE
   `RewardAccount` ↔ `SalesUser` linkage (migration `20261003120000` + `ensureEmployeeAccount`/bulk helper,
   gated by `earnerModel`) — plus `/admin/people` surfacing the reused roster. Two money-audit defects (lock
