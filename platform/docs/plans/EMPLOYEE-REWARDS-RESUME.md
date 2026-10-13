@@ -175,15 +175,32 @@
   `mapContest` gained `eligibleRoleCodes`/`eligibleRegions` (additive). Gate: platform tsc + vitest **2676**; api
   unchanged. (Deliberately no progress bar/leaderboard — our contests are MANUAL with no progress metric, so that
   would be fiction.) FE runtime-verify deferred to staging.
-  ▶ **RECONCILED — the rep app is functionally PILOT-COMPLETE.** W7's notification inbox is ALREADY done: the
-  shared `NotificationBell` (unread badge + feed panel + mark-read + load-more) is mounted in the rep layout and
-  the `GET /v1/notifications` feed is `user.sub`-scoped with NO @Roles gate, so a SALES_* employee gets their own
-  feed. W7 "profile enrich" has no honest net-new work for the pilot: a performance pulse duplicates Home; the
-  notification-preference toggles + contact-support form need net-new backends (per-type prefs; a support
-  destination) — owner-gated, not built (building them as non-functional UI would be dishonest).
-  ▶ **NEXT (owner's call):** the big gated milestone — push `er/phase0-shell` to staging + stand up a
-  `uat-britannia` tenant + real-login UAT. OR W7 profile backends if the owner wants them (needs the support
-  destination + a prefs-worth-it decision). The W4 residual (rep-catalogue pagination cap) is also still open.
+- **WS2 Wave 7 — Contact support landed (2026-10-14, HEAD `b4fb2d8`); notification prefs SKIPPED (owner).**
+  Owner chose: support → a real TICKET; per-type notification prefs → skip for pilot. BE (tickets module,
+  additive, EMPLOYEE-gated): `TicketsService.createEmployeeSupport`/`listEmployeeSupport` + `EmployeeSupport
+  Controller` (`POST`/`GET /v1/rewards/employee/support`, `@RequirePermission('rewards:read')`, NOT @Roles —
+  authz = `resolveEmployeeReadContext` earner+own-identity gate). An employee raises a ticket FOR THEMSELVES into
+  the SAME ticketing system the operator console + ops-dashboard SLA track (reuses `TicketsService.create` →
+  ticketNumber + initial message + OPEN/MEDIUM); category allow-list = POINTS/REDEMPTION/TECHNICAL/ACCOUNT/OTHER
+  (operator-only KYC/PAYOUT/SCHEME rejected); list is own-scoped (`createdById=user.sub`). FE: `/rep/profile`
+  Contact Support section (topic select + subject + message + double-submit guard → shows the ticket ref) + a
+  "Your recent requests" list with status badges. **Independent audit → Lane 1 (authz/isolation/trade-safety)
+  CLEAN, Lane 3 (FE) CLEAN.** Lane-2 fixes applied: hardened `ticketNumber` (added a 4-char random suffix —
+  the col isn't `@unique` + ms-granular gen risked silent duplicate refs at field-rep concurrency); BE now
+  trims+rejects an all-whitespace subject/message; `listEmployeeSupport` bounded to `take:50`. Gate: api jest
+  **3636** + build · platform tsc + vitest **2685**. REAL-DB runtime-verified (fresh :5434): create/persist-as-
+  caller/lean-response/hardened-ref/category-allow-list/whitespace-reject/earner+own-identity gates/own-scoped
+  list + cross-employee isolation. ⚠️ residual (by-design, pre-existing): authz leans entirely on the service
+  gate (RBAC decorators dormant — consistent with all employee rails); the operator `POST /v1/tickets` has no
+  category allow-list (a sales caller could miscategorise there while RBAC is dormant — cosmetic, own+tenant-
+  scoped, not W7's rail). FE runtime-verify deferred to staging.
+  ▶ **RECONCILED EARLIER — W7 notification inbox was ALREADY done:** the shared `NotificationBell` (unread badge +
+  feed + mark-read + load-more) is mounted in the rep layout and `GET /v1/notifications` is `user.sub`-scoped with
+  NO @Roles gate, so a SALES_* employee gets their own feed. Per-type prefs skipped (owner) — low pilot value +
+  needs a net-new prefs backend.
+  ▶ **THE REP APP IS PILOT-COMPLETE (W4–W7 done).** ▶ **NEXT (owner's call):** the big gated milestone — push
+  `er/phase0-shell` to staging + stand up a `uat-britannia` tenant + real-login UAT. The W4 residual (rep-catalogue
+  pagination cap) is still open as an optional polish.
 - **Phase A (Shell + People roster) landed (2026-10-04):** the one net-new piece — the EMPLOYEE
   `RewardAccount` ↔ `SalesUser` linkage (migration `20261003120000` + `ensureEmployeeAccount`/bulk helper,
   gated by `earnerModel`) — plus `/admin/people` surfacing the reused roster. Two money-audit defects (lock
