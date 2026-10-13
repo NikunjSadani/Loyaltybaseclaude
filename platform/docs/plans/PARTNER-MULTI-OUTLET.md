@@ -493,3 +493,40 @@ policy to a UI.
   write; a dup-sweep first found 2 test-data duplicate bank pairs, 0 UPI). **PROD deoleo policy is UNCHANGED — bank/UPI
   still OFF.** The OWNER will flip prod ON via the new toggle (or ask) — this is an OPEN owner action, NOT done. Always
   sweep dup bank/UPI before flipping a tenant's `uniquenessPolicy.bank`/`upi` to true (no DB index reveals them).
+
+---
+
+## 12. Operational: KYC "PAN belongs to an outlet outside this group" conflicts
+
+A recurring field-support case. When a rep KYCs a **grouped** outlet (its `Outlet.parentId` is set) and the PAN they
+enter is already stored on a **ChannelPartner whose outlet is outside that group** (a standalone/ungrouped outlet, or a
+different group), the submit is blocked at `api/src/common/partner-group.helper.ts` (`checkGroupUniqueness`) with:
+
+> **"This PAN belongs to an outlet outside this group. A group shares exactly one PAN."**
+
+Key facts for triage:
+- The check runs against **every stored partner PAN in the tenant**, not just APPROVED ones — a PAN registered by an
+  **approved OR rejected** prior KYC on another outlet still "holds" it (a rejected KYC leaves the PAN on its partner row).
+- A **brand-new-outlet** KYC submit is a single atomic transaction (uniqueness check → then partner/draft create); a
+  blocked submit **rolls back**, so the PAN the rep typed is **not** persisted anywhere — you must get it from the rep.
+- The canonical `<slug>.gifsy.in` host and the group identity (`parentId` shared by a group's outlets) are unrelated to
+  this — it's purely: *does this PAN already live on an outlet that is NOT in this outlet's group?*
+
+### How to find where a PAN is used (guarded prod read)
+Run a READ-ONLY, `gifsy_prod`-guarded query (mechanism: the `gifsy-oneoff-prodcheck` Cloud Run job, api image, prod
+`DATABASE_URL` secret, in-VPC; override the command per-exec with a base64'd `node`+`pg` script; always assert
+`current_database()='gifsy_prod'`). Look up every `channel_partners` row (incl. deleted) with `upper("panNumber")=upper($PAN)`
+for the tenant, plus each holder's outlets (`outletCode`, `parentId`, `isActive`) and latest `kyc_submissions` status;
+and the target outlet's `parentId` + parent name.
+
+### Resolution (a business/data decision — confirm the real owner with the field team)
+- **Same owner** (the PAN's existing outlet and the outlet being KYC'd are the same legal entity): they must sit in **one
+  group**. Either bring the existing (often standalone, already-approved) outlet into the target's group, or KYC the new
+  outlet so the PAN lives with its real owner group. A group shares exactly one PAN by design.
+- **Different owner / mis-keyed PAN**: the entered PAN isn't this outlet's — enter the correct one. (Name similarity is
+  NOT proof — e.g. several distinct "Srinivas" outlets each have their own PAN.)
+
+**Worked example (2026-10-13, deoleo prod):** rep KYCing `FO_DEOL_35175012` (in group **"Srinivas Kirana Store"**) with
+PAN `ABKCS2620J` was blocked. Lookup: `ABKCS2620J` is held by **`FO_DEOL_27478449`** — a **standalone (ungrouped),
+active, APPROVED** outlet (business "Srinivas", phone 8179808334). Same-PAN-split-across-grouping → resolve per the
+"same owner vs different owner" fork above.
