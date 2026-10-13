@@ -271,6 +271,8 @@ export interface Contest {
   endDate: string;
   bonusPoints: number;
   status: 'ACTIVE' | 'SCHEDULED';
+  eligibleRoleCodes: string[];
+  eligibleRegions: string[];
 }
 
 export function mapContest(api: ApiEmployeeContest): Contest {
@@ -285,6 +287,9 @@ export function mapContest(api: ApiEmployeeContest): Contest {
     bonusPoints: Number.isFinite(api.bonusPoints) ? Math.max(0, api.bonusPoints) : 0,
     // Anything the backend doesn't label SCHEDULED is treated as live/ACTIVE.
     status: api.status === 'SCHEDULED' ? 'SCHEDULED' : 'ACTIVE',
+    // Eligibility — informational on the detail view (empty list = open to all).
+    eligibleRoleCodes: Array.isArray(api.eligibleRoleCodes) ? api.eligibleRoleCodes : [],
+    eligibleRegions: Array.isArray(api.eligibleRegions) ? api.eligibleRegions : [],
   };
 }
 

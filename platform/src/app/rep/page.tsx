@@ -357,7 +357,7 @@ export default function RepHome() {
                   <button
                     key={contest.id}
                     type="button"
-                    onClick={() => router.push('/rep/contests')}
+                    onClick={() => router.push(`/rep/contests/${contest.id}`)}
                     className="snap-start shrink-0 w-56 text-left rounded-xl border border-gray-200 bg-white overflow-hidden hover:shadow-md transition-all active:scale-[0.98]"
                   >
                     <div className="relative h-24 flex items-center justify-center">

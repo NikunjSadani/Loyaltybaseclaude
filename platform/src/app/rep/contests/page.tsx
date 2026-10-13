@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { Trophy, Sparkles, CalendarDays } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Spinner } from '@/components/ui/spinner';
@@ -23,6 +24,7 @@ import {
    contest description. Read-only (no join/opt-in rail in the pinned contract). ──── */
 
 export default function RepContestsPage() {
+  const router = useRouter();
   const [contests, setContests] = useState<Contest[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -86,9 +88,11 @@ export default function RepContestsPage() {
             const badge = contestStatusBadge(contest.status);
             const dateRange = formatContestDateRange(contest.startDate, contest.endDate);
             return (
-              <div
+              <button
                 key={contest.id}
-                className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-sm"
+                type="button"
+                onClick={() => router.push(`/rep/contests/${contest.id}`)}
+                className="w-full text-left bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-sm hover:shadow-md transition-all active:scale-[0.99]"
               >
                 {/* Banner — image if provided, else a brand-tinted gradient with a trophy. */}
                 <div className="relative h-32 flex items-center justify-center bg-gray-50">
@@ -140,7 +144,7 @@ export default function RepContestsPage() {
                     </p>
                   )}
                 </div>
-              </div>
+              </button>
             );
           })}
         </div>
