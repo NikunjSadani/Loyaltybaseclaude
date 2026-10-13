@@ -4,9 +4,10 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, TicketPriority } from '@prisma/client';
+import { Prisma, TicketCategory, TicketPriority } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { resolveEmployeeReadContext } from '../common/employee-context.helper';
 import {
   AddMessageDto,
   CreateTicketDto,
@@ -83,7 +84,14 @@ export class TicketsService {
   }
 
   async create(user: JwtPayload, dto: CreateTicketDto) {
-    const ticketNumber = `TKT-${Date.now().toString(36).toUpperCase()}`;
+    // Human ref: timestamp + 4 random base36 chars. `ticketNumber` is not DB-unique and the
+    // employee rail makes concurrent (same-millisecond) creation far more likely at field-rep scale,
+    // so the random suffix makes a duplicate ref astronomically unlikely (the row's cuid `id` is the
+    // real key). (audit Lane 2 — silent duplicate refs under concurrency.)
+    const ticketNumber = `TKT-${Date.now().toString(36).toUpperCase()}-${Math.random()
+      .toString(36)
+      .slice(2, 6)
+      .toUpperCase()}`;
     const ticket = await this.prisma.ticket.create({
       data: {
         ticketNumber,
@@ -101,6 +109,68 @@ export class TicketsService {
       include: { messages: true },
     });
     return { ticket };
+  }
+
+  // ─── Employee Rewards WS2 Wave 7 — rep-facing "Contact support" ──────────────────────────────
+  // The categories an EMPLOYEE may raise (the operator-only KYC / PAYOUT / SCHEME categories are not
+  // employee-relevant and are rejected defensively — the rep form only offers this subset).
+  private static readonly EMPLOYEE_SUPPORT_CATEGORIES: ReadonlySet<TicketCategory> = new Set<TicketCategory>([
+    TicketCategory.POINTS,
+    TicketCategory.REDEMPTION,
+    TicketCategory.TECHNICAL,
+    TicketCategory.ACCOUNT,
+    TicketCategory.OTHER,
+  ]);
+
+  /**
+   * POST /v1/rewards/employee/support — a roster employee raises a support ticket FOR THEMSELVES.
+   * The EMPLOYEE-earner + own-identity gate (resolveEmployeeReadContext) is the authorization (a
+   * trade tenant → 400, a non-roster caller → 403). Reuses `create` so the ticket enters the SAME
+   * system (ticketNumber, initial message, OPEN/MEDIUM) the operator console + SLA already track.
+   */
+  async createEmployeeSupport(user: JwtPayload, dto: CreateTicketDto) {
+    await resolveEmployeeReadContext(this.prisma, user);
+    if (!TicketsService.EMPLOYEE_SUPPORT_CATEGORIES.has(dto.category)) {
+      throw new BadRequestException('That support category is not available.');
+    }
+    // @MinLength(1) alone admits an all-whitespace subject/message (" ".length === 1) on a direct
+    // POST; trim and reject a blank so no empty-subject ticket is filed (audit Lane 2).
+    const subject = dto.subject?.trim() ?? '';
+    const description = dto.description?.trim() ?? '';
+    if (!subject || !description) {
+      throw new BadRequestException('Please add a subject and a message.');
+    }
+    const { ticket } = await this.create(user, { ...dto, subject, description });
+    // Lean, own-data response (mirrors listEmployeeSupport); the full thread lives in the console.
+    return {
+      ticket: {
+        id: ticket.id,
+        ticketNumber: ticket.ticketNumber,
+        category: ticket.category,
+        subject: ticket.subject,
+        status: ticket.status,
+        createdAt: ticket.createdAt,
+      },
+    };
+  }
+
+  /** GET /v1/rewards/employee/support — the caller's OWN support tickets, newest first. */
+  async listEmployeeSupport(user: JwtPayload) {
+    await resolveEmployeeReadContext(this.prisma, user);
+    const tickets = await this.prisma.ticket.findMany({
+      where: { clientId: user.clientId, createdById: user.sub, deletedAt: null },
+      orderBy: { createdAt: 'desc' },
+      take: 50, // "recent requests" — bounded (newest 50); unbounded growth otherwise (audit Lane 2)
+      select: {
+        id: true,
+        ticketNumber: true,
+        category: true,
+        subject: true,
+        status: true,
+        createdAt: true,
+      },
+    });
+    return { tickets };
   }
 
   /** Loads a ticket within the caller's tenant + access scope, or throws. */

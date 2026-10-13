@@ -18,10 +18,15 @@ import {
   sortByAchievement,
   teamChartMax,
   mapTeam,
+  supportTopics,
+  supportCategoryLabel,
+  ticketStatusMeta,
+  mapTicket,
   type CatalogItem,
   type ApiEmployeeDream,
   type ApiTeamMember,
   type ApiTeamResponse,
+  type SupportCategory,
 } from '../employee';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -437,5 +442,83 @@ describe('mapTeam', () => {
     expect(t.isManager).toBe(false);
     expect(t.members).toEqual([]);
     expect(t.monthly).toEqual([]);
+  });
+});
+
+/* ─── Contact Support helpers ────────────────────────────────────────────────── */
+
+describe('supportTopics (allow-list integrity)', () => {
+  it('offers EXACTLY the five backend-allowed categories', () => {
+    const allowed: SupportCategory[] = ['POINTS', 'REDEMPTION', 'TECHNICAL', 'ACCOUNT', 'OTHER'];
+    expect(supportTopics.map((t) => t.value).sort()).toEqual([...allowed].sort());
+    expect(supportTopics).toHaveLength(allowed.length);
+  });
+
+  it('carries the pinned friendly labels, each non-empty', () => {
+    const byValue = Object.fromEntries(supportTopics.map((t) => [t.value, t.label]));
+    expect(byValue.POINTS).toBe('Points not received / wrong balance');
+    expect(byValue.REDEMPTION).toBe('Reward / redemption issue');
+    expect(byValue.TECHNICAL).toBe('App / technical problem');
+    expect(byValue.ACCOUNT).toBe('My account / profile');
+    expect(byValue.OTHER).toBe('Something else');
+    for (const t of supportTopics) expect(t.label.trim().length).toBeGreaterThan(0);
+  });
+
+  it('has unique values and unique labels (no dupes in the dropdown)', () => {
+    expect(new Set(supportTopics.map((t) => t.value)).size).toBe(supportTopics.length);
+    expect(new Set(supportTopics.map((t) => t.label)).size).toBe(supportTopics.length);
+  });
+});
+
+describe('supportCategoryLabel', () => {
+  it('returns the friendly label for a known category', () => {
+    expect(supportCategoryLabel('POINTS')).toBe('Points not received / wrong balance');
+    expect(supportCategoryLabel('OTHER')).toBe('Something else');
+  });
+
+  it('humanises an unknown category rather than showing a raw ENUM', () => {
+    expect(supportCategoryLabel('ON_HOLD')).toBe('On Hold');
+    expect(supportCategoryLabel('')).toBe('Support');
+  });
+});
+
+describe('ticketStatusMeta', () => {
+  it('maps each known status to its label + badge tone', () => {
+    expect(ticketStatusMeta('OPEN')).toEqual({ label: 'Open', variant: 'warning' });
+    expect(ticketStatusMeta('IN_PROGRESS')).toEqual({ label: 'In progress', variant: 'info' });
+    expect(ticketStatusMeta('RESOLVED')).toEqual({ label: 'Resolved', variant: 'success' });
+    expect(ticketStatusMeta('CLOSED')).toEqual({ label: 'Closed', variant: 'default' });
+  });
+
+  it('matches status case-insensitively', () => {
+    expect(ticketStatusMeta('open')).toEqual({ label: 'Open', variant: 'warning' });
+    expect(ticketStatusMeta('in_progress')).toEqual({ label: 'In progress', variant: 'info' });
+  });
+
+  it('falls back to a muted humanised label for an unrecognised status', () => {
+    expect(ticketStatusMeta('ON_HOLD')).toEqual({ label: 'On Hold', variant: 'default' });
+    expect(ticketStatusMeta('')).toEqual({ label: 'Unknown', variant: 'default' });
+  });
+});
+
+describe('mapTicket', () => {
+  it('adds the friendly category label and preserves the raw fields', () => {
+    const t = mapTicket({
+      id: 't1',
+      ticketNumber: 'SUP-1001',
+      category: 'REDEMPTION',
+      subject: 'Voucher not delivered',
+      status: 'IN_PROGRESS',
+      createdAt: '2026-10-13T06:00:00Z',
+    });
+    expect(t).toEqual({
+      id: 't1',
+      ticketNumber: 'SUP-1001',
+      category: 'REDEMPTION',
+      categoryLabel: 'Reward / redemption issue',
+      subject: 'Voucher not delivered',
+      status: 'IN_PROGRESS',
+      createdAt: '2026-10-13T06:00:00Z',
+    });
   });
 });

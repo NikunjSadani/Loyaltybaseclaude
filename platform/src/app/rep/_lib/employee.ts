@@ -29,6 +29,7 @@ import {
   type WalletBalance,
   type WalletTransaction,
 } from '@/types';
+import type { BadgeVariant } from '@/components/ui/badge';
 
 /* ─── Wallet summary (GET /api/rewards/employee/wallet) ─────────────────────── */
 
@@ -365,6 +366,111 @@ export interface EmployeeMe {
       zone?: string | null;
       reportingTo?: { name?: string | null; designation?: string | null; phone?: string | null } | null;
     } | null;
+  };
+}
+
+/* ─── Contact Support (POST/GET /api/rewards/employee/support) ──────────────────
+   Contact Support on the rep Profile (WS2 Wave 7): an employee raises a query, which
+   opens a REAL support ticket, and can see their own recent requests + status.
+     • POST body { category, subject, description } → { ticket: { id, ticketNumber,
+       category, subject, status, createdAt } }. 400 for a disallowed category /
+       non-employee tenant, 403 for a non-roster caller — surfaced inline at the call site.
+     • GET → { tickets: [...] } — the caller's OWN tickets, newest first.
+   The form may ONLY offer the five allowed categories in `supportTopics` (must match the
+   backend allow-list exactly). `ticketStatusMeta` (status → label + badge tone) and the
+   raw→display mappers are pure and unit-tested. ─────────────────────────────────── */
+
+/** The categories the backend allows — the form's <select> may offer ONLY these. */
+export type SupportCategory = 'POINTS' | 'REDEMPTION' | 'TECHNICAL' | 'ACCOUNT' | 'OTHER';
+
+export interface SupportTopic {
+  value: SupportCategory;
+  label: string;
+}
+
+/**
+ * The ONLY topics the Contact Support form may offer. Each `value` is a backend-allowed
+ * category enum; the `label` is the friendly copy shown to the employee. Kept in sync with
+ * the pinned backend allow-list — a disallowed category is a 400 server-side, so the UI
+ * never offers one. (Integrity is asserted in the unit tests.)
+ */
+export const supportTopics: readonly SupportTopic[] = [
+  { value: 'POINTS', label: 'Points not received / wrong balance' },
+  { value: 'REDEMPTION', label: 'Reward / redemption issue' },
+  { value: 'TECHNICAL', label: 'App / technical problem' },
+  { value: 'ACCOUNT', label: 'My account / profile' },
+  { value: 'OTHER', label: 'Something else' },
+];
+
+export interface ApiSupportTicket {
+  id: string;
+  ticketNumber: string;
+  category: string;
+  subject: string;
+  status: string; // 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' | 'CLOSED' (be tolerant of others)
+  createdAt: string; // ISO
+}
+
+export interface SupportTicket {
+  id: string;
+  ticketNumber: string;
+  category: string;
+  categoryLabel: string;
+  subject: string;
+  status: string;
+  createdAt: string;
+}
+
+/** "ON_HOLD" → "On hold": title-case an ENUM-ish token for a graceful fallback label. */
+function humaniseToken(raw: string): string {
+  return (raw ?? '')
+    .toLowerCase()
+    .split('_')
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(' ');
+}
+
+/**
+ * Friendly label for a ticket category. A known category uses its `supportTopics` copy; an
+ * unrecognised one (should not happen — the backend allow-list matches the form) falls back
+ * to a humanised token so a row never renders a raw ENUM.
+ */
+export function supportCategoryLabel(category: string): string {
+  const match = supportTopics.find((t) => t.value === category);
+  return match ? match.label : humaniseToken(category) || 'Support';
+}
+
+/**
+ * Badge copy + tone for a ticket status. OPEN reads as awaiting (amber/warning), IN_PROGRESS
+ * as being worked (info), RESOLVED as done (success), CLOSED as finished/muted (default). The
+ * `variant` is a valid BadgeVariant so the page hands it straight to <Badge>. Status is
+ * matched case-insensitively; anything unrecognised falls back to a muted humanised label.
+ */
+export function ticketStatusMeta(status: string): { label: string; variant: BadgeVariant } {
+  switch ((status ?? '').toUpperCase()) {
+    case 'OPEN':
+      return { label: 'Open', variant: 'warning' };
+    case 'IN_PROGRESS':
+      return { label: 'In progress', variant: 'info' };
+    case 'RESOLVED':
+      return { label: 'Resolved', variant: 'success' };
+    case 'CLOSED':
+      return { label: 'Closed', variant: 'default' };
+    default:
+      return { label: humaniseToken(status) || 'Unknown', variant: 'default' };
+  }
+}
+
+/** Map a raw support ticket to the display shape (adds the friendly category label). */
+export function mapTicket(t: ApiSupportTicket): SupportTicket {
+  return {
+    id: t.id,
+    ticketNumber: t.ticketNumber,
+    category: t.category,
+    categoryLabel: supportCategoryLabel(t.category),
+    subject: t.subject,
+    status: t.status,
+    createdAt: t.createdAt,
   };
 }
 
