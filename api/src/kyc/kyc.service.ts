@@ -110,6 +110,7 @@ import {
 import {
   descendantSalesUserIds,
   firstActiveApproverId,
+  isSelfOrDescendant,
 } from '../sales/sales-hierarchy-access.helper';
 
 // ─── KycFieldKey → ReKYCFlags map (reconcile §6 SHOULD-FIX #3) ──────────────
@@ -757,6 +758,52 @@ export class KycService {
   }
 
   /**
+   * Multi-stage approval climb. From the APPROVER (a sales manager who just approved), walk the
+   * reporting chain upward and return the FIRST ACTIVE manager's hierarchy level code — i.e. the
+   * NEXT required sales approver. Skips inactive / soft-deleted managers (same escalation as
+   * resolveInitialRouting). Returns null when no active manager remains above the approver.
+   *
+   * Used ONLY when the tenant's `multiLevelApproval` flag is ON (Bajaj). A PENDING_SO_APPROVAL
+   * status exists only for an ISR submission; after the SO approves, this yields the ASM (or RSM
+   * if the ASM is vacant) that the submission must climb to before Gifsy. For every other tenant
+   * (flag off) the caller skips this and the flow stays single-stage (byte-identical for Deoleo).
+   */
+  private async resolveNextActiveManagerLevel(
+    approverUserId: string,
+    clientId: string,
+  ): Promise<string | null> {
+    const MAX_HOPS = 10;
+    const approver = await this.prisma.salesUser.findFirst({
+      where: { userId: approverUserId, clientId, deletedAt: null },
+      select: { reportingToId: true },
+    });
+    let currentId: string | null = approver?.reportingToId ?? null;
+    let hops = 0;
+    const visited = new Set<string>();
+    while (currentId && hops < MAX_HOPS) {
+      if (visited.has(currentId)) break; // cycle guard
+      visited.add(currentId);
+      hops++;
+      const manager = await this.prisma.salesUser.findFirst({
+        where: { id: currentId, clientId },
+        select: {
+          isActive: true,
+          deletedAt: true,
+          reportingToId: true,
+          hierarchyLevel: { select: { code: true } },
+        },
+      });
+      if (!manager) break; // dangling reference
+      if (!manager.isActive || manager.deletedAt != null) {
+        currentId = manager.reportingToId; // skip vacant level
+        continue;
+      }
+      return manager.hierarchyLevel.code; // next active manager (the ASM ceiling, or RSM if ASM vacant)
+    }
+    return null;
+  }
+
+  /**
    * Resolve the calling sales user's reporting subtree (Q4 — a manager sees the
    * WHOLE downline's KYC). Returns the caller's SalesUser.id plus the User.ids of
    * every sales user in their subtree (self + all descendants), so list/view can
@@ -858,6 +905,22 @@ export class KycService {
       where: { user: { clientId: user.clientId }, deletedAt: null },
       select: { id: true, reportingToId: true, isActive: true },
     });
+
+    // Multi-stage sales approval (Bajaj, via multiLevelApproval): the routed approver ADVANCES as the
+    // submission climbs SO→ASM, so a single "first active approver" check would reject the ASM at the
+    // second stage and strand the KYC. Instead authorize ANY ACTIVE manager in the submitter's upward
+    // chain (same branch); the caller already passed canFirstApprove, which ties the acting ROLE to the
+    // current PENDING_* status, so only the correct level can act at each stage. Single-stage tenants
+    // (Deoleo) keep the strict first-active-approver check below — byte-identical.
+    const features = await resolveTenantFeatures(this.tenant, user.clientId);
+    if (features.multiLevelApproval === true) {
+      const callerActive = nodes.find((n) => n.id === caller.id)?.isActive === true;
+      if (callerActive && caller.id !== submitter.id && isSelfOrDescendant(submitter.id, caller.id, nodes)) {
+        return;
+      }
+      throw new ForbiddenException('Only the submitting rep’s reporting manager can approve this KYC.');
+    }
+
     if (firstActiveApproverId(submitter.id, nodes) !== caller.id) {
       throw new ForbiddenException('Only the submitting rep’s reporting manager can approve this KYC.');
     }
@@ -1181,6 +1244,11 @@ export class KycService {
       const features = await resolveTenantFeatures(this.tenant, user.clientId);
       if (features.soDeclarationKyc !== true) {
         throw new ForbiddenException('The SO Declaration KYC flow is not enabled for this tenant.');
+      }
+      // ONLY a Sales Officer may file an SO Declaration (owner rule 2026-10-15). An ISR always uses
+      // the normal document-submission flow. Enforced server-side so a crafted request can't bypass it.
+      if (user.role !== 'SALES_SO') {
+        throw new ForbiddenException('Only a Sales Officer can file an SO Declaration.');
       }
       const d = dto.declaration;
       const filled = (v: unknown): v is string => typeof v === 'string' && v.trim() !== '';
@@ -2837,7 +2905,20 @@ export class KycService {
       }
     }
 
-    const nextStatus = nextStatusAfterFirstApprove(submission.status);
+    // Multi-stage sales approval (gated on the tenant's `multiLevelApproval` flag — Bajaj ON; every
+    // other tenant OFF, so STANDARD/Deoleo stays byte-identical single-stage). A PENDING_SO_APPROVAL
+    // status exists ONLY for an ISR submission; when the SO approves under multiLevel, the submission
+    // must CLIMB to the next active manager (the ASM, or RSM if the ASM is vacant) before Gifsy,
+    // instead of collapsing straight to PENDING_GIFSY. Every other approval (an SO-submitter's ASM, an
+    // ASM-or-above approval, or any non-multiLevel tenant) goes straight to Gifsy as before.
+    let nextStatus = nextStatusAfterFirstApprove(submission.status);
+    if (submission.status === 'PENDING_SO_APPROVAL') {
+      const features = await resolveTenantFeatures(this.tenant, user.clientId);
+      if (features.multiLevelApproval === true) {
+        const nextLevel = await this.resolveNextActiveManagerLevel(user.sub, user.clientId);
+        if (nextLevel) nextStatus = statusForApproverCode(nextLevel);
+      }
+    }
 
     // SO Declaration: capture the approver's ACTUAL designation (sales hierarchy level name) so the
     // declaration prints the real title — e.g. when the ASM is vacant and an RSM approves, the deed

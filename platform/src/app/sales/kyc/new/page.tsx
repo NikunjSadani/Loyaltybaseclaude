@@ -397,7 +397,9 @@ export default function NewKYCPage() {
    * STANDARD flow, unchanged; SO Declaration = the variant). The variant keeps EVERY enrollment
    * step and signature, but makes PAN/GST/GST-cert/address-proof optional and adds a Declaration
    * step (SO signs). STANDARD + every flag-off tenant never see any of this. */
-  const soFlag = features.soDeclarationKyc;
+  // Only a Sales Officer may file an SO Declaration (owner rule 2026-10-15); an ISR always uses the
+  // normal document flow and never sees the chooser. Mirrors the server-side gate in KycService.create.
+  const soFlag = features.soDeclarationKyc && getStoredUser()?.role === 'SALES_SO';
   const [flowVariant, setFlowVariant] = useState<FlowVariant | null>(null);
   const isSoVariant = soFlag && flowVariant === 'SO_DECLARATION';
 
