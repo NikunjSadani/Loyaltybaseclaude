@@ -665,10 +665,21 @@ function buildTimeline(kyc: KYCDetail): TimelineStep[] {
       : 'Approved';
   } else if (
     kyc.status === KYCStatus.PENDING_SO_APPROVAL ||
-    kyc.status === KYCStatus.PENDING_ASM_APPROVAL
+    kyc.status === KYCStatus.PENDING_ASM_APPROVAL ||
+    kyc.status === KYCStatus.PENDING_RSM_APPROVAL
   ) {
     step2State = 'active';
-    step2Sub   = 'Awaiting review';
+    // Multi-stage (Bajaj ISR→SO→ASM): when an earlier sales level already approved and the
+    // submission has CLIMBED to the next level, show both stages — "SO approved — awaiting ASM" —
+    // rather than a bare "Awaiting review". Single-stage flows (and the first sales stage) have no
+    // prior approval here, so they read "Awaiting review" unchanged (Deoleo byte-identical).
+    const climbed =
+      (kyc.status === KYCStatus.PENDING_ASM_APPROVAL || kyc.status === KYCStatus.PENDING_RSM_APPROVAL) &&
+      firstApproverEvent?.action === 'APPROVED' &&
+      !!firstApproverEvent.by;
+    step2Sub = climbed
+      ? `${APPROVER_ROLE_LABEL[firstApproverEvent.role ?? ''] ?? 'SO'} approved — awaiting ${PENDING_STATUS_LABEL[kyc.status] ?? 'ASM'}`
+      : 'Awaiting review';
   } else if (firstApproverEvent?.action === 'APPROVED') {
     // Defensive: an approved first-approver event with a non-standard status.
     step2State = 'complete';

@@ -768,6 +768,27 @@ export class KycService {
    * if the ASM is vacant) that the submission must climb to before Gifsy. For every other tenant
    * (flag off) the caller skips this and the flow stays single-stage (byte-identical for Deoleo).
    */
+  /**
+   * Whether the tenant uses multi-stage sales approval (Bajaj, via the `multiLevelApproval` feature).
+   * Reads the cached tenant config. On a resolve ERROR it LOGS and falls back to single-stage (false)
+   * rather than silently swallowing — so a transient failure (a) is traceable and (b) degrades
+   * CONSISTENTLY: both the first-approve climb and the routed-approver check call this one helper, so
+   * they never disagree (which could otherwise strand a submission). Single source of truth for the gate.
+   */
+  private async isMultiLevelApproval(clientId: string): Promise<boolean> {
+    try {
+      const cfg = await this.tenant.resolveClient(clientId);
+      const features = (cfg.features ?? {}) as unknown as Record<string, unknown>;
+      return features.multiLevelApproval === true;
+    } catch (e) {
+      this.logger.error(
+        `multiLevelApproval resolve failed for tenant ${clientId}; falling back to single-stage approval. ` +
+          (e instanceof Error ? e.message : String(e)),
+      );
+      return false;
+    }
+  }
+
   private async resolveNextActiveManagerLevel(
     approverUserId: string,
     clientId: string,
@@ -911,9 +932,9 @@ export class KycService {
     // second stage and strand the KYC. Instead authorize ANY ACTIVE manager in the submitter's upward
     // chain (same branch); the caller already passed canFirstApprove, which ties the acting ROLE to the
     // current PENDING_* status, so only the correct level can act at each stage. Single-stage tenants
-    // (Deoleo) keep the strict first-active-approver check below — byte-identical.
-    const features = await resolveTenantFeatures(this.tenant, user.clientId);
-    if (features.multiLevelApproval === true) {
+    // (Deoleo) keep the strict first-active-approver check below — byte-identical. Same helper as the
+    // first-approve climb, so the two can never disagree (even on a transient feature-resolve error).
+    if (await this.isMultiLevelApproval(user.clientId)) {
       const callerActive = nodes.find((n) => n.id === caller.id)?.isActive === true;
       if (callerActive && caller.id !== submitter.id && isSelfOrDescendant(submitter.id, caller.id, nodes)) {
         return;
@@ -2912,12 +2933,9 @@ export class KycService {
     // instead of collapsing straight to PENDING_GIFSY. Every other approval (an SO-submitter's ASM, an
     // ASM-or-above approval, or any non-multiLevel tenant) goes straight to Gifsy as before.
     let nextStatus = nextStatusAfterFirstApprove(submission.status);
-    if (submission.status === 'PENDING_SO_APPROVAL') {
-      const features = await resolveTenantFeatures(this.tenant, user.clientId);
-      if (features.multiLevelApproval === true) {
-        const nextLevel = await this.resolveNextActiveManagerLevel(user.sub, user.clientId);
-        if (nextLevel) nextStatus = statusForApproverCode(nextLevel);
-      }
+    if (submission.status === 'PENDING_SO_APPROVAL' && (await this.isMultiLevelApproval(user.clientId))) {
+      const nextLevel = await this.resolveNextActiveManagerLevel(user.sub, user.clientId);
+      if (nextLevel) nextStatus = statusForApproverCode(nextLevel);
     }
 
     // SO Declaration: capture the approver's ACTUAL designation (sales hierarchy level name) so the
