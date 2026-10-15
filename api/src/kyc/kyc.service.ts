@@ -19,6 +19,8 @@ import { SalesNotificationsService } from '../notifications/sales-notifications.
 import { Msg91Service } from '../notifications/msg91.service';
 import { captureOtpDeliveryHandle } from '../notifications/otp-delivery';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { TenantService } from '../tenant/tenant.service';
+import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import { EventKey } from '../notification-templates/notification-templates.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
@@ -73,7 +75,7 @@ import {
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide, isGifsyOperator } from '../common/tenant-scope';
-import { KYC_FIELD_KEYS, BridgeResult } from './kyc-verification.helper';
+import { KYC_FIELD_KEYS, BridgeResult, requiredFieldKeys } from './kyc-verification.helper';
 import { evaluateSubmission } from './kyc-verification.helper';
 import {
   generateKycReviewDumpExcel,
@@ -208,6 +210,7 @@ export class KycService {
     private readonly salesNotifications: SalesNotificationsService,
     private readonly msg91: Msg91Service,
     private readonly tenantSettings: TenantSettingsService,
+    private readonly tenant: TenantService,
     private readonly storage: StorageService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
@@ -1096,9 +1099,13 @@ export class KycService {
       // Under the stage-at-approval model these are staged here and NOT written to the live
       // ChannelPartner/Outlet until Gifsy approval (applyBridgeOutcome).
       proposedPartner?: Prisma.InputJsonValue;
+      // SO Declaration variant (Bajaj). Both undefined for STANDARD so the columns keep their
+      // defaults (kycVariant → STANDARD via the DB default; declarationData/soSignatureKey → NULL).
+      declarationData?: Prisma.InputJsonValue;
+      soSignatureKey?: string;
     },
   ) {
-    const { user, dto, status, escalatedFrom, partnerId, inFlightStatuses, proposedPartner } = args;
+    const { user, dto, status, escalatedFrom, partnerId, inFlightStatuses, proposedPartner, declarationData, soSignatureKey } = args;
 
     const existing = await tx.kycSubmission.findFirst({
       where: {
@@ -1121,6 +1128,11 @@ export class KycService {
         addressNameMismatch: dto.addressNameMismatch ?? false,
         // undefined → Prisma omits the column → stays NULL (brand-new-outlet draft).
         proposedPartner: proposedPartner,
+        // SO Declaration variant — all undefined for STANDARD → Prisma omits them → the DB defaults
+        // apply (kycVariant STANDARD; declarationData/soSignatureKey NULL), keeping STANDARD identical.
+        kycVariant: dto.kycVariant ?? undefined,
+        declarationData: declarationData,
+        soSignatureKey: soSignatureKey,
         submittedAt: new Date(),
 
         boardPhotoLat: dto.boardPhotoGeo?.lat ?? null,
@@ -1154,6 +1166,36 @@ export class KycService {
       include: { outletType: { select: { code: true } } },
     });
     if (!outlet) throw new NotFoundException('Outlet not found');
+
+    // ── SO Declaration variant (Bajaj) — see platform/docs/plans/SO-DECLARATION-KYC.md ──
+    // Gated ENTIRELY on this flag so the STANDARD path stays byte-identical for every other
+    // tenant (Deoleo). When set, the SO fills + signs a declaration in place of the optional
+    // PAN/GST/address documents. Validate the declaration payload up-front (fail fast).
+    const isSoDeclaration = dto.kycVariant === 'SO_DECLARATION';
+    if (isSoDeclaration) {
+      // DEOLEO-SAFETY SERVER GATE: the SO Declaration flow is accepted ONLY for a tenant whose
+      // `clients.features.soDeclarationKyc` is ON. The FE already only offers it to Bajaj, but the
+      // DTO alone can't stop a hand-crafted request from another tenant skipping the GSTIN gate —
+      // so we enforce the feature server-side here. resolveTenantFeatures fails SOFT ({}), which is
+      // fail-CLOSED for a gate (a DB blip → feature absent → variant refused, never silently opened).
+      const features = await resolveTenantFeatures(this.tenant, user.clientId);
+      if (features.soDeclarationKyc !== true) {
+        throw new ForbiddenException('The SO Declaration KYC flow is not enabled for this tenant.');
+      }
+      const d = dto.declaration;
+      const filled = (v: unknown): v is string => typeof v === 'string' && v.trim() !== '';
+      if (!d || !filled(d.ownerFatherName) || !filled(d.ownerResidence) || !filled(d.soSignatureFileKey)) {
+        throw new BadRequestException(
+          "SO Declaration requires the owner's father/husband name, residence, and the SO signature.",
+        );
+      }
+      // The SO signature is a GCS object uploaded via POST /v1/kyc/documents, which always
+      // tenant-folders as kyc/<clientId>/… — reject a key outside this tenant's namespace
+      // (same guard the document-attach path applies at ~L1885; blocks a crafted foreign key).
+      if (!d.soSignatureFileKey.startsWith(`kyc/${user.clientId}/`)) {
+        throw new BadRequestException('Invalid SO signature reference');
+      }
+    }
 
     // Tenant uniqueness policy + this outlet's GROUP (parentId) drive the identity/phone
     // uniqueness gates below (partner-child owner groups — PARTNER-MULTI-OUTLET.md).
@@ -1323,7 +1365,11 @@ export class KycService {
     // UNCACHED so an OFF→ON tightening takes effect immediately across the fleet (no stale-cache
     // fail-open window). A group-child submits the group's own GSTIN, so this never blocks an
     // inherited child. Uncached DB read is last so it only runs when the cheap checks don't clear it.
+    // SO Declaration (Bajaj) makes GST optional by design — skip the compulsory-GSTIN throw for
+    // this variant ONLY (the `!isSoDeclaration` short-circuit also avoids the uncached DB read).
+    // STANDARD enforcement is unchanged for every tenant.
     if (
+      !isSoDeclaration &&
       canProvide('gstNumber') &&
       !normalizeIdentityValue('gst', text.gstNumber as string | null | undefined) &&
       (await this.tenantSettings.getKycGstinRequiredUncached(user.clientId))
@@ -1368,6 +1414,41 @@ export class KycService {
       bankAccountNumber: partnerDetails.bankAccountNumber ?? null,
       upiId: partnerDetails.upiId ?? null,
     };
+
+    // ── SO Declaration — default classification + persisted declaration payload ──
+    // Default an SO-Declaration owner with NEITHER PAN NOR GST to an UNREGISTERED INDIVIDUAL.
+    // This is ONLY a default (null for STANDARD, and never applied when the owner provided a
+    // PAN/GST, nor when the owner group supplies a classification to inherit — group wins below).
+    // Gifsy can still overwrite it later via `gstDetails`.
+    const soDefaultEntityType: EntityType | null =
+      isSoDeclaration && !partnerDetails.panNumber && !partnerDetails.gstNumber ? 'INDIVIDUAL' : null;
+    const soDefaultGstRegType: GstRegistrationType | null =
+      isSoDeclaration && !partnerDetails.panNumber && !partnerDetails.gstNumber ? 'UNREGISTERED' : null;
+
+    // The declaration snapshot persisted on the submission (SO_DECLARATION only). Auto fields:
+    // verificationDate = now (physical-verification = submission date), soName = the submitting rep.
+    // Reference fields come from the outlet master; the address snapshot is the submitted (re-KYC-
+    // locked `text`) address. Undefined for STANDARD → the column stays NULL (byte-identical).
+    let declarationData: Prisma.InputJsonValue | undefined;
+    let soSignatureKey: string | undefined;
+    if (isSoDeclaration && dto.declaration) {
+      soSignatureKey = dto.declaration.soSignatureFileKey;
+      declarationData = {
+        ownerFatherName: dto.declaration.ownerFatherName,
+        ownerResidence: dto.declaration.ownerResidence,
+        verificationDate: new Date().toISOString(),
+        soName: user.name,
+        programName: outlet.programName ?? null,
+        distributorName: outlet.distributorName ?? null,
+        distributorCode: outlet.distributorCode ?? null,
+        outletAddressSnapshot: {
+          address: (text.address as string | undefined) ?? null,
+          city: (text.city as string | undefined) ?? null,
+          state: (text.state as string | undefined) ?? null,
+          pincode: (text.pincode as string | undefined) ?? null,
+        },
+      } as Prisma.InputJsonValue;
+    }
 
     // 2a. GROUP DOCUMENT CARRY-FORWARD — decided BEFORE the submission is created. The KycDocument
     //     rows are written AFTER the tx commits, so we resolve + VALIDATE here (a post-tx throw would
@@ -1730,8 +1811,10 @@ export class KycService {
           outletCode: outlet.outletCode,
           details: partnerDetails,
           // Inherit the owner group's APPROVED classification at create (null for ungrouped/first member).
-          entityType: groupClassification?.entityType ?? null,
-          gstRegistrationType: groupClassification?.gstRegistrationType ?? null,
+          // SO Declaration no-PAN/no-GST owners default to INDIVIDUAL/UNREGISTERED — the group lock
+          // still takes precedence when one exists; both default to null for STANDARD (unchanged).
+          entityType: groupClassification?.entityType ?? soDefaultEntityType,
+          gstRegistrationType: groupClassification?.gstRegistrationType ?? soDefaultGstRegType,
           // Set the DERIVED group key inline at CREATE so a grouped-before-KYC sibling enters
           // already-grouped — excluded from the (clientId,gst/pan) partial-unique index
           // (WHERE groupId IS NULL) with NO NULL window (the outlets trigger would otherwise
@@ -1773,6 +1856,9 @@ export class KycService {
         partnerId,
         inFlightStatuses: [...IN_FLIGHT_STATUSES],
         proposedPartner: proposedSnapshot,
+        // SO Declaration variant (undefined for STANDARD → DB default STANDARD, NULL JSON/key).
+        declarationData,
+        soSignatureKey,
       });
 
       // 3d. C6 — pre-seed APPROVED GROUP_INHERITED verification items for the group-shareable fields
@@ -2467,6 +2553,23 @@ export class KycService {
         )
       : false;
 
+    // ── SO Declaration: resolve the SO's stored declaration signature to a viewable data URL ──
+    // So the ASM client can embed the ACTUAL SO ink into the final dual-signed declaration PDF
+    // (both signatures as real images, not a typed name). Resolved directly from soSignatureKey,
+    // independent of the KycDocument list (which can carry two SIGNATURE rows — the outlet owner's
+    // enrollment signature AND the SO's declaration signature). Null for STANDARD/when absent.
+    const soSignatureViewUrl =
+      submission.kycVariant === 'SO_DECLARATION' && submission.soSignatureKey
+        ? await this.resolveDocumentViewUrl(
+            {
+              fileKey: submission.soSignatureKey,
+              fileUrl: this.storage.publicUrl(submission.soSignatureKey),
+              mimeType: 'image/png',
+            },
+            2 * 1024 * 1024,
+          )
+        : null;
+
     return {
       submission: {
         ...submission,
@@ -2477,6 +2580,7 @@ export class KycService {
         parentVerified,
         willLeaveGroup,
         salesRedeemEnabled,
+        soSignatureViewUrl,
         // C3: classification (from the partner) + the group lock (null when free to pick).
         entityType: (submission.partner?.entityType as EntityType | null | undefined) ?? null,
         gstRegistrationType:
@@ -2712,13 +2816,82 @@ export class KycService {
     // the chain) may act — a same-level manager in a different branch is rejected.
     await this.assertRoutedApprover(user, submission.userId);
 
+    // ── SO Declaration variant (Bajaj) — the ASM signs the declaration at first-approve ──
+    // Gated on the submission's variant so STANDARD first-approve is byte-identical. Require
+    // both the ASM signature and the final dual-signed PDF; persist them + attach the PDF as a
+    // KycDocument(SO_DECLARATION) linked to the submission before the normal → PENDING_GIFSY.
+    const isSoDeclaration = submission.kycVariant === 'SO_DECLARATION';
+    if (isSoDeclaration) {
+      const asmKey = dto.asmSignatureFileKey?.trim();
+      const pdfKey = dto.declarationPdfFileKey?.trim();
+      if (!asmKey || !pdfKey) {
+        throw new BadRequestException(
+          'This SO Declaration requires the ASM signature and the signed declaration PDF to approve.',
+        );
+      }
+      // Both are GCS objects uploaded via POST /v1/kyc/documents (tenant-foldered kyc/<clientId>/…);
+      // reject a key outside this tenant's namespace (blocks a crafted foreign key — same guard the
+      // create() document-attach path applies).
+      if (!asmKey.startsWith(`kyc/${user.clientId}/`) || !pdfKey.startsWith(`kyc/${user.clientId}/`)) {
+        throw new BadRequestException('Invalid declaration document reference');
+      }
+    }
+
     const nextStatus = nextStatusAfterFirstApprove(submission.status);
+
+    // SO Declaration: capture the approver's ACTUAL designation (sales hierarchy level name) so the
+    // declaration prints the real title — e.g. when the ASM is vacant and an RSM approves, the deed
+    // reads "Regional Sales Manager", not a hard-coded "Area Sales Manager". Falls back to null →
+    // the FE then uses its default "Area Sales Manager" label.
+    let asmDesignation: string | null = null;
+    if (isSoDeclaration) {
+      const approver = await this.prisma.salesUser.findFirst({
+        where: { userId: user.sub, clientId: user.clientId, deletedAt: null },
+        select: { hierarchyLevel: { select: { name: true } } },
+      });
+      asmDesignation = approver?.hierarchyLevel?.name ?? null;
+    }
 
     await this.prisma.$transaction(async (tx) => {
       await tx.kycSubmission.update({
         where: { id },
-        data: { status: nextStatus as never, reviewedAt: new Date() },
+        data: {
+          status: nextStatus as never,
+          reviewedAt: new Date(),
+          // SO Declaration: persist the ASM signature + final PDF (omitted for STANDARD → unchanged).
+          // Also stamp the REAL approving ASM's name + designation into declarationData so the on-screen
+          // declaration (sales detail + Gifsy review) shows the actual approver, not whoever is viewing.
+          ...(isSoDeclaration
+            ? {
+                asmSignatureKey: dto.asmSignatureFileKey!.trim(),
+                declarationPdfKey: dto.declarationPdfFileKey!.trim(),
+                declarationData: {
+                  ...((submission.declarationData as Record<string, unknown> | null) ?? {}),
+                  asmName: user.name ?? null,
+                  asmDesignation,
+                  asmApprovedAt: new Date().toISOString(),
+                } as Prisma.InputJsonValue,
+              }
+            : {}),
+        },
       });
+
+      // SO Declaration: attach the final dual-signed PDF as a reviewable KycDocument so Gifsy
+      // sees it via the existing getOne() viewUrl (type SO_DECLARATION, linked to this submission).
+      if (isSoDeclaration) {
+        const pdfKey = dto.declarationPdfFileKey!.trim();
+        await tx.kycDocument.create({
+          data: {
+            kycSubmissionId: id,
+            documentType: 'SO_DECLARATION',
+            fileKey: pdfKey,
+            fileUrl: this.storage.publicUrl(pdfKey),
+            fileName: 'so-declaration.pdf',
+            mimeType: 'application/pdf',
+            status: 'PENDING',
+          },
+        });
+      }
 
       await tx.kycStatusHistory.create({
         data: {
@@ -2865,8 +3038,10 @@ export class KycService {
         },
       });
 
-      // Step 2: create rows for any of the 7 fields that have no row yet.
-      const missingKeys = KYC_FIELD_KEYS.filter((k) => !existingByKey.has(k));
+      // Step 2: create rows for any REQUIRED field that has no row yet. For STANDARD this is the
+      // 7 canonical keys (unchanged); for an SO Declaration it is only the 4 blocking keys, so a
+      // blanket-approve never fabricates APPROVED rows for the optional GST/address-doc fields.
+      const missingKeys = requiredFieldKeys(sub).filter((k) => !existingByKey.has(k));
       if (missingKeys.length > 0) {
         await tx.kycVerificationItem.createMany({
           data: missingKeys.map((fieldKey) => ({
@@ -2886,7 +3061,7 @@ export class KycService {
         where: { kycSubmissionId: id },
         select: { fieldKey: true, decision: true },
       });
-      const bridgeResult = evaluateSubmission(allItems);
+      const bridgeResult = evaluateSubmission(allItems, sub);
 
       // ── (d) Conflict check: any already-REJECTED field blocks a blanket approve ─
       if (bridgeResult.next === 'RE_UPLOAD_REQUIRED') {
@@ -2997,7 +3172,7 @@ export class KycService {
         where: { kycSubmissionId: id },
         select: { fieldKey: true, decision: true },
       });
-      const bridgeResult = evaluateSubmission(allItems);
+      const bridgeResult = evaluateSubmission(allItems, submission);
 
       // ── (d) Apply bridge outcome (only fires if all 7 are terminal) ───────
       let applied: { outcome: 'approved' | 'reupload' | 'recorded' | 'skipped'; notification?: CommitNotifyIntent } = { outcome: 'recorded' };
@@ -4690,7 +4865,7 @@ export class KycService {
         select: { fieldKey: true, decision: true },
       });
 
-      const bridgeResult = evaluateSubmission(allItems);
+      const bridgeResult = evaluateSubmission(allItems, submission);
 
       // ── (d) Branch on bridge outcome via shared applyBridgeOutcome ────────
       const applied = await this.applyBridgeOutcome(tx, submission, bridgeResult, 'EXCEL', user.sub, now);

@@ -25,11 +25,19 @@ import {
 } from '@/lib/rekyc-fields';
 import { useTenantFeatures } from '@/lib/tenant-features';
 import { isAddressProofRequired, isSelfDeclarationRequired } from '@/lib/kyc-document-gating';
+import { SignaturePad, SignatureClearButton, type SignaturePadHandle } from '@/components/signature-pad';
+import { SoDeclarationView } from '@/components/so-declaration-view';
+import { getStoredUser } from '@/lib/auth-client';
 import type { GeoCapture } from '@/types';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
-type Step = 'outlet' | 'basic' | 'address' | 'bank' | 'otp' | 'done';
+/* 'choose' (flow-select) + 'declare' (SO declaration) are SO-Declaration-variant-only
+ * steps (Bajaj, feature-gated). STANDARD KYC never renders them, keeping it byte-identical. */
+type Step = 'choose' | 'outlet' | 'basic' | 'address' | 'bank' | 'declare' | 'otp' | 'done';
+
+/** The KYC flow the rep picked on the chooser (SO-Declaration variant only). */
+type FlowVariant = 'STANDARD' | 'SO_DECLARATION';
 
 interface AssignedOutlet {
   /** Internal identity (Prisma CUID) — used as the select key + the Not-Interested POST id. NOT shown to users. */
@@ -45,6 +53,10 @@ interface AssignedOutlet {
   type: 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
   programName?: string;
   programCategory?: string;
+  /** Distributor (from the outlet master) — surfaced so the SO-Declaration on-screen
+   *  declaration preview matches the saved PDF (both fill distributor from the master). */
+  distributorName?: string;
+  distributorCode?: string;
   /** Per-outlet payout MANDATE — pins the KYC paymentMode (see pinnedPaymentMode).
    *  Absent (legacy data) → treated as 'ANY' (rep chooses). */
   requiredPaymentType?: OutletPaymentType;
@@ -129,8 +141,11 @@ const TYPE_LABEL: Record<AssignedOutlet['type'], string> = {
 const PINCODE_REGEX = /^\d{6}$/;
 /** IFSC — 4 bank letters, a fixed 0, then 6 alphanumerics (e.g. HDFC0001234). */
 const IFSC_REGEX = /^[A-Z]{4}0[A-Z0-9]{6}$/;
+/** PAN — 5 letters, 4 digits, 1 letter (e.g. ABCDE1234F). */
+const PAN_REGEX = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
 const isValidPincode = (s: string | null | undefined) => !!s && PINCODE_REGEX.test(s.trim());
 const isValidIfsc = (s: string | null | undefined) => !!s && IFSC_REGEX.test(s.trim().toUpperCase());
+const isValidPan = (s: string | null | undefined) => !!s && PAN_REGEX.test(s.trim().toUpperCase());
 
 
 type MobileCheckState = 'idle' | 'checking' | 'ok' | 'outlet_conflict' | 'employee_conflict';
@@ -139,8 +154,11 @@ type MobileCheckState = 'idle' | 'checking' | 'ok' | 'outlet_conflict' | 'employ
 
 /** Steps shown in the step bar — otp and done are post-submission */
 const STEPS: Step[] = ['outlet', 'basic', 'address', 'bank'];
+/** SO-Declaration variant adds a Declaration step before OTP (Bajaj only). */
+const SO_STEPS: Step[] = ['outlet', 'basic', 'address', 'bank', 'declare'];
 const STEP_LABELS: Record<Step, string> = {
-  outlet: 'Outlet', basic: 'Details', address: 'Address', bank: 'Bank', otp: 'OTP', done: 'Done',
+  choose: 'Flow', outlet: 'Outlet', basic: 'Details', address: 'Address', bank: 'Bank',
+  declare: 'Declaration', otp: 'OTP', done: 'Done',
 };
 
 /* ─── Image compression ──────────────────────────────────────────────────────── */
@@ -374,6 +392,40 @@ export default function NewKYCPage() {
   const addressProofRequired = isAddressProofRequired();
   const selfDeclarationRequired = isSelfDeclarationRequired(waiverEnabled, nameMismatch);
 
+  /* ── SO Declaration variant (Bajaj, feature-gated) ──
+   * When `soDeclarationKyc` is on, the rep first picks a flow (document submission = today's
+   * STANDARD flow, unchanged; SO Declaration = the variant). The variant keeps EVERY enrollment
+   * step and signature, but makes PAN/GST/GST-cert/address-proof optional and adds a Declaration
+   * step (SO signs). STANDARD + every flag-off tenant never see any of this. */
+  const soFlag = features.soDeclarationKyc;
+  const [flowVariant, setFlowVariant] = useState<FlowVariant | null>(null);
+  const isSoVariant = soFlag && flowVariant === 'SO_DECLARATION';
+
+  /* New SO-declaration fields */
+  const [soFatherName, setSoFatherName]   = useState('');
+  const [ownerResidence, setOwnerResidence] = useState('');
+  const [residenceSameAsOutlet, setResidenceSameAsOutlet] = useState(false);
+
+  /* Declaration step: SO signature + confirmation */
+  const soSigRef = useRef<SignaturePadHandle>(null);
+  const [soHasSigned, setSoHasSigned] = useState(false);
+  const [soConfirmed, setSoConfirmed] = useState(false);
+
+  /* Composed outlet address (used for the "same as outlet" residence toggle + the declaration). */
+  const composedOutletAddress = [form.address, form.city, form.state, form.pincode]
+    .map((s) => s.trim()).filter(Boolean).join(', ');
+
+  /* When "same as outlet" is ticked, keep the residence synced to the outlet address. */
+  useEffect(() => {
+    if (residenceSameAsOutlet) setOwnerResidence(composedOutletAddress);
+  }, [residenceSameAsOutlet, composedOutletAddress]);
+
+  /* SO-variant relaxations: PAN/GST number, GST certificate + address proof become OPTIONAL
+   * (no asterisk, no blocking gate). Everything else (bank, photos, owner signature, OTP,
+   * consent) stays required. STANDARD keeps its existing gating untouched. */
+  const addressProofRequiredEff     = addressProofRequired && !isSoVariant;
+  const selfDeclarationRequiredEff  = selfDeclarationRequired && !isSoVariant;
+
   /* B — Consent checkboxes */
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [agreedToComms, setAgreedToComms] = useState(false);
@@ -429,6 +481,9 @@ export default function NewKYCPage() {
             reKycRemarks: o.kycRejectionReason ?? o.reKycFlags?.remarks ?? undefined,
             programName:     o.programName ?? '',
             programCategory: o.programCategory ?? '',
+            // Distributor from the outlet master (now in the payload) — feeds the SO-declaration preview.
+            distributorName: o.distributorName || undefined,
+            distributorCode: o.distributorCode || undefined,
             requiredPaymentType: o.requiredPaymentType ?? undefined,
             // Approved-parent pre-fill (grouped-before-KYC child) — present only when set.
             parentPrefill:   o.parentPrefill ?? undefined,
@@ -524,7 +579,8 @@ export default function NewKYCPage() {
   const upiEnabled = getGifsySettings().salesApp?.upiEnabled === true;
   // Per-tenant GSTIN-compulsory switch (default ON). Drives the entry-form required marker +
   // a pre-submit guard; the BACKEND (kyc.service create) is the authoritative enforcer.
-  const gstinRequired = getGifsySettings().kycGstinRequired !== false;
+  // SO-variant makes GSTIN optional (plain field on the Declaration step); STANDARD unchanged.
+  const gstinRequired = getGifsySettings().kycGstinRequired !== false && !isSoVariant;
   const pinnedMode: PaymentMode | null = selectedOutlet
     ? pinnedPaymentMode(selectedOutlet.requiredPaymentType ?? 'ANY', upiEnabled)
     : null;
@@ -672,6 +728,10 @@ export default function NewKYCPage() {
     setPendingSignature(null); setSignatureCarriedOver(false); setHasSigned(false);
     const canvas = signatureCanvasRef.current;
     canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
+    // SO-declaration fields/signature never bleed across outlets either (flowVariant is a
+    // per-session choice and is intentionally preserved).
+    setSoFatherName(''); setOwnerResidence(''); setResidenceSameAsOutlet(false);
+    setSoConfirmed(false); setSoHasSigned(false); soSigRef.current?.clear();
     prefilledKycRef.current = null; // re-arm the prefill for the new outlet
   }, [selectedOutlet?.outletId]);
 
@@ -1332,6 +1392,57 @@ export default function NewKYCPage() {
         }
       }
 
+      // ── SO Declaration variant: upload the SO signature + build the declaration payload ──
+      // (Everything else in the enrollment is identical; only these extra fields travel.)
+      let soDeclarationPayload:
+        | { kycVariant: 'SO_DECLARATION'; declaration: { ownerFatherName: string; ownerResidence: string; soSignatureFileKey: string } }
+        | undefined;
+      if (isSoVariant) {
+        // Optional PAN/GSTIN must be well-formed when present (empty is allowed). Belt-and-braces
+        // with the Declaration step's disabled gate — never let a malformed optional id through.
+        if (form.panNumber.trim() !== '' && !isValidPan(form.panNumber)) {
+          setSubmitting(false);
+          setSubmitError('The PAN entered is not a valid format. Clear it or enter a valid PAN (e.g. ABCDE1234F).');
+          return;
+        }
+        if (form.gstNumber.trim() !== '' && !isValidGstin(form.gstNumber)) {
+          setSubmitting(false);
+          setSubmitError('The GSTIN entered is not a valid format. Clear it or enter a valid 15-character GSTIN.');
+          return;
+        }
+        const soSigData = soSigRef.current?.getDataUrl();
+        if (!soSigData) {
+          setSubmitting(false);
+          setSubmitError('The Sales Officer signature is required on the declaration before submitting.');
+          return;
+        }
+        let soSignatureFileKey: string;
+        try {
+          const blob = await fetch(soSigData).then((r) => r.blob());
+          const fd = new FormData();
+          fd.append('file', blob, 'so-signature.png');
+          fd.append('documentType', 'SIGNATURE');
+          const sigRes = await fetch('/api/kyc/documents', { method: 'POST', body: fd });
+          const sigBody = await sigRes.json().catch(() => ({}));
+          if (!sigRes.ok || !sigBody.success || !sigBody.data?.fileKey) {
+            throw new Error(sigBody.message ?? sigBody.error ?? 'Could not upload the declaration signature.');
+          }
+          soSignatureFileKey = sigBody.data.fileKey as string;
+        } catch (err) {
+          setSubmitting(false);
+          setSubmitError(err instanceof Error ? err.message : 'Could not upload the declaration signature.');
+          return;
+        }
+        soDeclarationPayload = {
+          kycVariant: 'SO_DECLARATION',
+          declaration: {
+            ownerFatherName: soFatherName.trim(),
+            ownerResidence: ownerResidence.trim(),
+            soSignatureFileKey,
+          },
+        };
+      }
+
       const res = await fetch('/api/kyc', {
         method:  'POST',
         headers: {
@@ -1361,6 +1472,7 @@ export default function NewKYCPage() {
           signatureDataUrl,
           agreedToTerms,
           agreedToComms,
+          ...(soDeclarationPayload ?? {}),
         }),
       });
 
@@ -1676,10 +1788,12 @@ export default function NewKYCPage() {
   );
 
   /* ── Step indicator ── */
+  // SO-Declaration variant shows the extra Declaration step; STANDARD bar is unchanged.
+  const stepBarSteps = isSoVariant ? SO_STEPS : STEPS;
   const StepBar = () => (
     <div className="flex items-center gap-1">
-      {STEPS.map((s, i) => {
-        const currentIdx = STEPS.indexOf(step);
+      {stepBarSteps.map((s, i) => {
+        const currentIdx = stepBarSteps.indexOf(step);
         const isDone = currentIdx > i, isActive = step === s;
         return (
           <React.Fragment key={s}>
@@ -1691,7 +1805,7 @@ export default function NewKYCPage() {
                   so at least the ACTIVE step's name is shown so the rep knows where they are. */}
               <span className={isActive ? 'inline' : 'hidden sm:inline'}>{STEP_LABELS[s]}</span>
             </div>
-            {i < STEPS.length - 1 && <div className="flex-1 h-px bg-gray-200" />}
+            {i < stepBarSteps.length - 1 && <div className="flex-1 h-px bg-gray-200" />}
           </React.Fragment>
         );
       })}
@@ -1841,7 +1955,11 @@ export default function NewKYCPage() {
   if (form.mobile.length !== 10) basicMissing.push('10-digit mobile number');
   else if (mobileCheck === 'outlet_conflict' || mobileCheck === 'employee_conflict')
     basicMissing.push('A different, available mobile number');
-  if (!docs.businessDoc && !gstCertInherited) basicMissing.push('GST Certificate');
+  // GST Certificate is OPTIONAL in the SO-Declaration variant (owner won't share documents).
+  if (!docs.businessDoc && !gstCertInherited && !isSoVariant) basicMissing.push('GST Certificate');
+  // SO-Declaration variant: the S/o (father's name) field is collected on this step. The owner's
+  // residence moved to the Address step (gated there) so the "same as outlet" toggle has a value.
+  if (isSoVariant && !soFatherName.trim()) basicMissing.push("Owner's father's name");
   // GSTIN compulsory (per-tenant, default ON) — gate it at the Basic step (checklist↔gate parity)
   // so a blank/invalid GSTIN blocks here, not only at final submit. Only when the field is
   // EDITABLE this submission (a re-KYC that locks gstNumber must not demand it — see the backend
@@ -1869,9 +1987,11 @@ export default function NewKYCPage() {
   else if (!isValidPincode(form.pincode)) addressMissing.push('A valid 6-digit pincode');
   // KYC-M1: State is a required `*` field but was never in the gate.
   if (!form.state) addressMissing.push('State');
-  if (addressProofRequired && !docs.shopAddressDoc) addressMissing.push('Address proof');
+  // SO-Declaration variant: owner's residence (moved here from Details, below the outlet address).
+  if (isSoVariant && !ownerResidence.trim()) addressMissing.push("Owner's residence address");
+  if (addressProofRequiredEff && !docs.shopAddressDoc) addressMissing.push('Address proof');
   if (!docs.storeBoardPhoto) addressMissing.push('Store board photo');
-  if (selfDeclarationRequired && !docs.selfDeclaration) addressMissing.push('Signed self-declaration');
+  if (selfDeclarationRequiredEff && !docs.selfDeclaration) addressMissing.push('Signed self-declaration');
   // Board location: only actionable once a photo exists (no photo → already blocked above).
   if (docs.storeBoardPhoto && !boardPhotoGeo && !boardPhotoGeoLoading)
     addressMissing.push('Store board location (retake photo or tap Retry location)');
@@ -1908,6 +2028,65 @@ export default function NewKYCPage() {
   if ((docs.cheque || form.upiId || chequeInherited) && !paymentGeo && !paymentGeoLoading)
     bankMissing.push('Payment location (upload cheque / scan UPI, then tap Retry location if needed)');
   const bankBlocked = bankMissing.length > 0 || bankBusy !== null;
+
+  // Step 5 (SO-Declaration variant) — PAN/GSTIN are OPTIONAL, but a non-empty value must be
+  // well-formed (reuse isValidGstin; PAN via isValidPan). Empty = allowed. These block the
+  // Declaration step's submit so a malformed optional id can't reach the backend.
+  const declPanInvalid = isSoVariant && form.panNumber.trim() !== '' && !isValidPan(form.panNumber);
+  const declGstInvalid = isSoVariant && form.gstNumber.trim() !== '' && !isValidGstin(form.gstNumber);
+
+  /* ── SO Declaration flow-select (Bajaj, feature-gated) ──
+   * Shown FIRST when the tenant has soDeclarationKyc on and the rep hasn't picked a flow yet.
+   * Owner requirement: re-KYC MUST also support the SO Declaration flow, so the chooser is shown
+   * on re-entry too (the prior variant isn't in the assigned-outlets payload, so the rep picks —
+   * STANDARD keeps today's document flow, SO Declaration runs the variant). Hidden once submitted. */
+  const showChooser = soFlag && flowVariant === null && !isSubmitted;
+  if (showChooser) {
+    return (
+      <div className="space-y-5 fade-in">
+        <div className="flex items-center gap-3">
+          <Link href="/sales/kyc" className="p-2 rounded-lg hover:bg-gray-100 transition-colors">
+            <ArrowLeft className="h-4 w-4 text-gray-600" />
+          </Link>
+          <div className="flex-1 min-w-0">
+            <h1 className="text-lg font-bold text-gray-900">{isReKYC ? 'Re-KYC' : 'New KYC'}</h1>
+            <p className="text-xs text-gray-500">Choose how you&apos;ll complete this enrollment</p>
+          </div>
+        </div>
+
+        <Card>
+          <CardContent className="pt-5 space-y-3">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--brand-primary)]">Choose flow</p>
+            <h2 className="text-base font-semibold text-gray-900">How will you complete KYC?</h2>
+            <p className="text-xs text-gray-500 -mt-1">Both options are available for this outlet.</p>
+
+            <button
+              type="button"
+              data-testid="flow-choice-standard"
+              onClick={() => setFlowVariant('STANDARD')}
+              className="w-full text-left border-2 border-gray-200 rounded-xl p-4 hover:bg-green-50/30 transition-colors active:scale-[0.99]"
+            >
+              <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center mb-2.5"><FileText className="h-5 w-5 text-gray-500" /></div>
+              <h3 className="text-sm font-semibold text-gray-900">Via Document submission</h3>
+              <p className="text-xs text-gray-500 mt-0.5">Owner shares PAN, GST &amp; address proof. The standard full KYC.</p>
+            </button>
+
+            <button
+              type="button"
+              data-testid="flow-choice-so-declaration"
+              onClick={() => setFlowVariant('SO_DECLARATION')}
+              className="w-full text-left border-2 border-[var(--brand-primary)]/40 bg-green-50/20 rounded-xl p-4 hover:bg-green-50/50 transition-colors active:scale-[0.99]"
+            >
+              <div className="w-10 h-10 rounded-full bg-[var(--brand-primary)]/10 flex items-center justify-center mb-2.5"><PenLine className="h-5 w-5 text-[var(--brand-primary)]" /></div>
+              <h3 className="text-sm font-semibold text-gray-900">Via SO Declaration</h3>
+              <p className="text-xs text-gray-500 mt-0.5">Owner won&apos;t share documents. Full enrollment still done; you certify &amp; sign. PAN/GST optional.</p>
+              <span className="inline-block mt-2.5 text-[11px] font-semibold px-2 py-0.5 rounded-full bg-[var(--brand-primary)]/10 text-[var(--brand-primary)]">Owner + SO + ASM sign</span>
+            </button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   /* ── Page shell ── */
   return (
@@ -2243,8 +2422,21 @@ export default function NewKYCPage() {
               )}
             </div>
 
+            {/* ── SO Declaration variant: the S/o (father's name) field. The owner's residence +
+                   "Same as outlet address" toggle live on the ADDRESS step, AFTER the outlet
+                   address is captured, so the toggle has a value to copy from. ── */}
+            {isSoVariant && (
+              <div>
+                <label className={labelCls}>S/o (Father&apos;s Name) *</label>
+                <input data-testid="so-father-name" className={inputCls} placeholder="Father's full name"
+                  value={soFatherName} onChange={(e) => setSoFatherName(e.target.value)} />
+              </div>
+            )}
+
             {/* GST — required when the tenant's kycGstinRequired is ON (default); otherwise optional.
-                A non-empty value is always validated against the 15-char GSTIN format. */}
+                A non-empty value is always validated against the 15-char GSTIN format.
+                SO-Declaration variant: PAN/GST move to the Declaration step → hidden here. */}
+            {!isSoVariant && (<>
             <div>
               <label className={labelCls}>GST Number{gstinRequired && !isFieldLocked('gstNumber') && <span className="text-red-500"> *</span>}<FlagBadge field="gstNumber" /></label>
               <input
@@ -2307,6 +2499,7 @@ export default function NewKYCPage() {
                 disabled={isFieldLocked('panNumber') || groupPanLocked}
                 readOnly={isFieldLocked('panNumber') || form.gstNumber.length >= 12 || groupPanLocked} />
             </div>
+            </>)}
 
             {/* KYC Documents */}
             <div className="pt-1 space-y-4">
@@ -2320,9 +2513,9 @@ export default function NewKYCPage() {
                     <RefreshCw className="h-2.5 w-2.5" /> Re-upload required
                   </p>
                 )}
-                <FileUploadCard docKey="businessDoc" label="GST Certificate" required inherited={gstCertInherited}
+                <FileUploadCard docKey="businessDoc" label="GST Certificate" required={!isSoVariant} inherited={gstCertInherited}
                   inheritedTestId="gst-cert-inherited-note"
-                  hint="PDF or image · Max 5 MB · Auto-compressed" inputRef={businessDocRef} />
+                  hint={isSoVariant ? 'Optional · PDF or image · Max 5 MB' : 'PDF or image · Max 5 MB · Auto-compressed'} inputRef={businessDocRef} />
                 {/* KYC-M2: the standalone "Inherited from group" note was removed — the
                     inherited state is now shown ONCE, on the FileUploadCard panel. */}
               </div>
@@ -2395,13 +2588,32 @@ export default function NewKYCPage() {
               />
             </div>
 
+            {/* ── SO Declaration variant: owner's residence + "Same as outlet address" toggle.
+                   Placed AFTER the outlet address above so the toggle copies a populated value
+                   (it used to sit on the Details step, before the address existed → it emptied
+                   + locked the field and blocked the step). ── */}
+            {isSoVariant && (
+              <div>
+                <label className={labelCls}>Owner&apos;s Residence Address *</label>
+                <input data-testid="owner-residence" className={`${inputCls} ${residenceSameAsOutlet ? 'bg-gray-50 text-gray-500' : ''}`}
+                  placeholder="House no., street, city, state"
+                  value={ownerResidence} onChange={(e) => setOwnerResidence(e.target.value)}
+                  disabled={residenceSameAsOutlet} readOnly={residenceSameAsOutlet} />
+                <label className="flex items-center gap-2 mt-2 text-xs text-gray-600 cursor-pointer">
+                  <input type="checkbox" data-testid="residence-same-as-outlet" className="w-4 h-4 accent-[var(--brand-primary)]"
+                    checked={residenceSameAsOutlet} onChange={(e) => setResidenceSameAsOutlet(e.target.checked)} />
+                  Same as outlet address
+                </label>
+              </div>
+            )}
+
             <div className="pt-1 space-y-4">
               <p className="text-xs font-semibold text-gray-700 flex items-center gap-1.5">
                 <FileText className="h-3.5 w-3.5 text-[var(--brand-primary)]" /> Store Address &amp; Store Documents
               </p>
 
-              {/* Address Proof upload */}
-              <FileUploadCard docKey="shopAddressDoc" label="Address Proof" required={addressProofRequired}
+              {/* Address Proof upload — OPTIONAL in the SO-Declaration variant. */}
+              <FileUploadCard docKey="shopAddressDoc" label="Address Proof" required={addressProofRequiredEff}
                 hint="Accepted: GST certificate, trade license, food license, drug license, GST purchase bill, electricity bill, telephone bill, rent agreement, Aadhaar card (if sole proprietor) · PDF or image · Max 5 MB"
                 inputRef={shopAddressDocRef} />
 
@@ -2429,7 +2641,7 @@ export default function NewKYCPage() {
               {/* ── Self Declaration — shown only when mismatch is flagged AND the
                      waiver is OFF for this tenant (the Address Proof above stays
                      required regardless) ── */}
-              {selfDeclarationRequired && (
+              {selfDeclarationRequiredEff && (
                 <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 space-y-3">
                   {/* Info banner */}
                   <div className="flex items-start gap-2">
@@ -2835,11 +3047,122 @@ export default function NewKYCPage() {
             <StepGate missing={bankMissing} busy={bankBusy} />
             <div className="flex gap-3 pt-1">
               <Button variant="outline" className="flex-1" onClick={() => setStep('address')}>← Back</Button>
+              {isSoVariant ? (
+                /* SO-Declaration variant: Bank → Declaration step (SO signs there, then OTP). */
+                <Button variant="primary" className="flex-1" onClick={() => setStep(isSubmitted ? 'otp' : 'declare')}
+                  disabled={!isSubmitted && bankBlocked}>
+                  {isSubmitted ? 'Continue to verification →' : 'Continue →'}
+                </Button>
+              ) : (
+                <Button variant="primary" className="flex-1" loading={submitting} onClick={handleSubmit}
+                  disabled={!isSubmitted && bankBlocked}>
+                  {/* KYC-M5: once submitted the handler only navigates to the OTP step (it never
+                      re-POSTs), so the label reads as navigation, not a re-submit. */}
+                  {isSubmitted ? 'Continue to verification →' : 'Send OTP to Outlet Owner'}
+                </Button>
+              )}
+            </div>
+            <p className="text-[11px] text-gray-400 text-center pt-1">
+              {isSoVariant
+                ? 'Next, review & sign the SO declaration, then the outlet owner verifies the OTP.'
+                : 'The KYC is submitted for review only after the outlet owner verifies the OTP.'}
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ══ Step 5 (SO-Declaration variant only) — Declaration + SO signature ══════ */}
+      {step === 'declare' && isSoVariant && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-sm"><PenLine className="h-4 w-4" /> SO Declaration &amp; Signature</CardTitle>
+            <p className="text-xs text-gray-400 mt-1">
+              PAN &amp; GSTIN are optional. Review the declaration — it&apos;s exactly what gets saved as the PDF — then sign.
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Optional PAN + GSTIN (plain fields; bound to the submission) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className={labelCls}>PAN <span className="text-[10px] text-gray-400 font-normal">(optional)</span></label>
+                <input data-testid="decl-pan" className={`${inputCls} ${declPanInvalid ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-200/40' : ''}`} placeholder="ABCDE1234F"
+                  value={form.panNumber}
+                  onChange={(e) => setForm((f) => ({ ...f, panNumber: e.target.value.toUpperCase() }))} />
+                {declPanInvalid && (
+                  <p className="text-[11px] text-red-600 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Invalid PAN format (e.g. ABCDE1234F)</p>
+                )}
+              </div>
+              <div>
+                <label className={labelCls}>GSTIN <span className="text-[10px] text-gray-400 font-normal">(optional)</span></label>
+                <input data-testid="decl-gstin" className={`${inputCls} ${declGstInvalid ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-200/40' : ''}`} placeholder="24ABCDE1234F1Z5"
+                  maxLength={GSTIN_LENGTH} value={form.gstNumber} onChange={handleGSTChange} />
+                {declGstInvalid && (
+                  <p className="text-[11px] text-red-600 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Invalid GST number format</p>
+                )}
+              </div>
+            </div>
+
+            {/* Declaration WYSIWYG — the saved artifact */}
+            <SoDeclarationView
+              data={{
+                soName:          getStoredUser()?.name ?? '',
+                ownerName:       form.partnerName,
+                ownerFatherName: soFatherName,
+                ownerResidence:  ownerResidence,
+                outletName:      selectedOutlet?.name ?? '',
+                outletCode:      selectedOutlet?.outletCode ?? '',
+                outletAddress:   composedOutletAddress,
+                distributorName: selectedOutlet?.distributorName ?? null,
+                distributorCode: selectedOutlet?.distributorCode ?? null,
+                verificationDate: new Date().toISOString(),
+                programName:     selectedOutlet?.programName ?? null,
+                asmName:         null,
+              }}
+              signed={{ so: false, asm: false }}
+            />
+
+            {/* Confirmation */}
+            <label className="flex items-start gap-3 cursor-pointer">
+              <input type="checkbox" data-testid="so-decl-confirm" className="mt-0.5 w-5 h-5 accent-[var(--brand-primary)] shrink-0"
+                checked={soConfirmed} onChange={(e) => setSoConfirmed(e.target.checked)} />
+              <span className="text-sm text-gray-700 leading-snug">
+                I confirm I have personally verified this outlet and the above details are true and correct.
+              </span>
+            </label>
+
+            {/* SO signature pad */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-semibold text-gray-700 flex items-center gap-1.5">
+                  <PenLine className="h-3.5 w-3.5 text-[var(--brand-primary)]" /> Sales Officer signature
+                </p>
+                {soHasSigned && <SignatureClearButton onClear={() => soSigRef.current?.clear()} />}
+              </div>
+              <SignaturePad ref={soSigRef} onInkedChange={setSoHasSigned} ariaLabel="Sales Officer signature pad" placeholder="SO signs here" />
+              {!soHasSigned && (
+                <p className="text-[11px] text-amber-600 flex items-center gap-1">
+                  <AlertCircle className="h-3 w-3 shrink-0" /> Signature required to proceed.
+                </p>
+              )}
+            </div>
+
+            {/* Submit error */}
+            {submitError && (
+              <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5">
+                <AlertCircle className="h-4 w-4 text-red-500 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold text-red-700">Could not submit</p>
+                  <p className="text-xs text-red-600 mt-0.5">{submitError}</p>
+                </div>
+                <button onClick={() => setSubmitError('')} className="shrink-0 text-red-400 hover:text-red-600"><X className="h-3.5 w-3.5" /></button>
+              </div>
+            )}
+
+            <div className="flex gap-3 pt-1">
+              <Button variant="outline" className="flex-1" onClick={() => setStep('bank')}>← Back</Button>
               <Button variant="primary" className="flex-1" loading={submitting} onClick={handleSubmit}
-                disabled={!isSubmitted && bankBlocked}>
-                {/* KYC-M5: once submitted the handler only navigates to the OTP step (it never
-                    re-POSTs), so the label reads as navigation, not a re-submit. */}
-                {isSubmitted ? 'Continue to verification →' : 'Send OTP to Outlet Owner'}
+                disabled={!soConfirmed || !soHasSigned || declPanInvalid || declGstInvalid}>
+                Continue to verification →
               </Button>
             </div>
             <p className="text-[11px] text-gray-400 text-center pt-1">

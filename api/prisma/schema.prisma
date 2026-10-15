@@ -118,6 +118,8 @@ enum KycDocumentType {
   SIGNATURE
   STORE_BOARD_PHOTO
   SELF_DECLARATION
+  // The dual-signed SO Declaration PDF (SO Declaration KYC variant). See SO-DECLARATION-KYC.md.
+  SO_DECLARATION
   OTHER
 }
 
@@ -125,6 +127,15 @@ enum KycDocumentStatus {
   PENDING
   VERIFIED
   REJECTED
+}
+
+// KYC enrollment variant. STANDARD = the document-submission flow (every tenant today, unchanged).
+// SO_DECLARATION = the Bajaj "owner won't share documents" flow: full enrollment still captured
+// (bank, photos, owner signature, OTP) but PAN/GST/GST-certificate/address-proof are optional and
+// the SO + ASM sign a declaration. Gated to Bajaj via the `soDeclarationKyc` feature flag.
+enum KycVariant {
+  STANDARD
+  SO_DECLARATION
 }
 
 // ── Field-level KYC verification (P3.4a — the 7-field Gifsy grid, Option A) ──────
@@ -935,6 +946,20 @@ model KycSubmission {
   agreementSignedAt   DateTime?
   escalatedFrom       String? // SalesRole that was skipped due to resignation (e.g. 'SO')
   version             Int       @default(1)
+
+  // ── SO Declaration KYC variant (additive; STANDARD keeps every tenant byte-identical) ──
+  // See platform/docs/plans/SO-DECLARATION-KYC.md. STANDARD = document-submission flow.
+  kycVariant        KycVariant @default(STANDARD)
+  // Declaration-only captured data: { ownerFatherName, ownerResidence, verificationDate,
+  // soName, programName, distributorName, distributorCode, outletAddressSnapshot }.
+  declarationData   Json?
+  // SO declaration signature (GCS key), captured at submission. The OUTLET OWNER's own
+  // enrollment signature stays in KycDocument(SIGNATURE) exactly as for STANDARD.
+  soSignatureKey    String?
+  // ASM declaration signature (GCS key), captured at firstApprove.
+  asmSignatureKey   String?
+  // The final dual-signed declaration PDF (GCS key); also attached as KycDocument(SO_DECLARATION).
+  declarationPdfKey String?
 
   // Shop-board name vs address-proof name mismatch, declared by the submitting rep.
   // When true, the tenant's `kycAddressProofWaiver` feature waives the Address Proof

@@ -19,6 +19,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { TenantService } from '../tenant/tenant.service';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { KYC_FIELD_KEYS } from './kyc-verification.helper';
@@ -251,6 +252,9 @@ describe('KycService', () => {
         },
         { provide: Msg91Service, useValue: mockMsg91 },
         { provide: TenantSettingsService, useValue: mockTenantSettings },
+        // TenantService — used by the SO-Declaration server-side feature gate (resolveTenantFeatures).
+        // Default: SO Declaration ENABLED, so a STANDARD test is unaffected and an SO test can run.
+        { provide: TenantService, useValue: { resolveClient: jest.fn().mockResolvedValue({ features: { soDeclarationKyc: true } }) } },
         { provide: StorageService, useValue: mockStorage },
         { provide: JwtService, useValue: mockJwt },
         { provide: ConfigService, useValue: mockConfig },

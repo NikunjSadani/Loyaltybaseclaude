@@ -4,6 +4,8 @@
 import { KycFieldDecision, KycFieldKey } from '@prisma/client';
 import {
   evaluateSubmission,
+  requiredFieldKeys,
+  SO_DECLARATION_FIELD_KEYS,
   KYC_FIELD_KEYS,
   KYC_FIELD_COUNT,
   VerificationDecisionLike,
@@ -134,5 +136,76 @@ describe('evaluateSubmission (Stage-2 bridge)', () => {
     ]);
     expect(forward.rejectedFields).toEqual(['PAYMENT', 'ADDRESS']);
     expect(reversed.rejectedFields).toEqual(['PAYMENT', 'ADDRESS']);
+  });
+});
+
+describe('requiredFieldKeys (SO Declaration variant)', () => {
+  it('STANDARD (and omitted/null) → all 7 canonical keys, unchanged', () => {
+    expect(requiredFieldKeys({ kycVariant: 'STANDARD' })).toEqual(KYC_FIELD_KEYS);
+    expect(requiredFieldKeys(null)).toEqual(KYC_FIELD_KEYS);
+    expect(requiredFieldKeys(undefined)).toEqual(KYC_FIELD_KEYS);
+    expect(requiredFieldKeys({})).toEqual(KYC_FIELD_KEYS);
+  });
+
+  it('SO_DECLARATION → only the 4 blocking keys (GST/doc keys non-blocking)', () => {
+    expect(requiredFieldKeys({ kycVariant: 'SO_DECLARATION' })).toEqual([
+      'PAYMENT',
+      'ADDRESS',
+      'BOARD_PHOTO',
+      'OWNER_PHOTO',
+    ]);
+    expect(SO_DECLARATION_FIELD_KEYS).not.toContain('GST_VALIDATION');
+    expect(SO_DECLARATION_FIELD_KEYS).not.toContain('GST_DOCUMENT');
+    expect(SO_DECLARATION_FIELD_KEYS).not.toContain('ADDRESS_DOCUMENT');
+  });
+});
+
+describe('evaluateSubmission — SO Declaration variant', () => {
+  const soDecl = { kycVariant: 'SO_DECLARATION' as const };
+
+  it('APPROVES when the 4 required keys are APPROVED even if the GST/address-doc keys are ABSENT', () => {
+    const items = SO_DECLARATION_FIELD_KEYS.map((k) => item(k, 'APPROVED'));
+    const r = evaluateSubmission(items, soDecl);
+    expect(r.next).toBe('APPROVED');
+    expect(r.approvedCount).toBe(4);
+  });
+
+  it('a REJECTED optional GST doc is NON-BLOCKING (still approves on the 4 required)', () => {
+    const items = [
+      ...SO_DECLARATION_FIELD_KEYS.map((k) => item(k, 'APPROVED')),
+      item('GST_DOCUMENT', 'REJECTED'),
+      item('ADDRESS_DOCUMENT', 'REJECTED'),
+    ];
+    expect(evaluateSubmission(items, soDecl).next).toBe('APPROVED');
+  });
+
+  it('a PENDING REQUIRED key still holds at PENDING_GIFSY', () => {
+    const items = [
+      item('PAYMENT', 'APPROVED'),
+      item('ADDRESS', 'APPROVED'),
+      item('BOARD_PHOTO', 'APPROVED'),
+      item('OWNER_PHOTO', 'PENDING'),
+    ];
+    expect(evaluateSubmission(items, soDecl).next).toBe('PENDING_GIFSY');
+  });
+
+  it('a REJECTED required key → RE_UPLOAD_REQUIRED (only the required one surfaces)', () => {
+    const items = [
+      item('PAYMENT', 'REJECTED'),
+      item('ADDRESS', 'APPROVED'),
+      item('BOARD_PHOTO', 'APPROVED'),
+      item('OWNER_PHOTO', 'APPROVED'),
+      item('GST_DOCUMENT', 'REJECTED'),
+    ];
+    const r = evaluateSubmission(items, soDecl);
+    expect(r.next).toBe('RE_UPLOAD_REQUIRED');
+    expect(r.rejectedFields).toEqual(['PAYMENT']);
+  });
+
+  it('REGRESSION: STANDARD still blocks on a missing GST key (byte-identical)', () => {
+    const items = KYC_FIELD_KEYS.filter((k) => k !== 'GST_DOCUMENT').map((k) => item(k, 'APPROVED'));
+    expect(evaluateSubmission(items, { kycVariant: 'STANDARD' }).next).toBe('PENDING_GIFSY');
+    // and with no submission arg at all (legacy callers) it must also stay STANDARD
+    expect(evaluateSubmission(items).next).toBe('PENDING_GIFSY');
   });
 });

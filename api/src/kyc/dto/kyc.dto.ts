@@ -74,6 +74,23 @@ export class UploadKycDocumentDto {
 }
 
 // ─── Full KYC submission schema ───────────────────────────────────────────────
+// Declaration-only fields for the SO Declaration KYC variant (Bajaj). Required (non-empty)
+// only when kycVariant === 'SO_DECLARATION'; enforced in KycService.create. See SO-DECLARATION-KYC.md.
+export class SoDeclarationDto {
+  @IsString()
+  @MinLength(2)
+  ownerFatherName!: string;
+
+  @IsString()
+  @MinLength(5)
+  ownerResidence!: string;
+
+  // GCS fileKey of the SO's declaration signature (uploaded via POST /v1/kyc/documents).
+  @IsString()
+  @MinLength(1)
+  soSignatureFileKey!: string;
+}
+
 export class CreateKycDto {
   // Target outlet (Prisma CUID — the outlet `id`, NOT the human outletCode). The
   // submission is FILED BY the rep but is ABOUT this outlet/owner. Required so a
@@ -197,6 +214,18 @@ export class CreateKycDto {
   @IsOptional()
   @IsString()
   reviewerNotes?: string;
+
+  // ── SO Declaration variant (Bajaj) ── see platform/docs/plans/SO-DECLARATION-KYC.md.
+  // Defaults to STANDARD when omitted so every existing caller is unaffected.
+  @IsOptional()
+  @IsEnum(['STANDARD', 'SO_DECLARATION'])
+  kycVariant?: 'STANDARD' | 'SO_DECLARATION';
+
+  // Required (service-enforced) only when kycVariant === 'SO_DECLARATION'.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SoDeclarationDto)
+  declaration?: SoDeclarationDto;
 }
 
 // PATCH /v1/kyc/:id — admin (GIFSY) status/notes update
@@ -231,6 +260,18 @@ export class FirstApproveKycDto {
   @IsOptional()
   @IsString()
   remarks?: string;
+
+  // ── SO Declaration variant ── the ASM signs the declaration at first-approve.
+  // Required (service-enforced) when the submission is kycVariant SO_DECLARATION.
+  // GCS fileKey of the ASM signature (uploaded via POST /v1/kyc/documents).
+  @IsOptional()
+  @IsString()
+  asmSignatureFileKey?: string;
+
+  // GCS fileKey of the final dual-signed declaration PDF (rendered on the FE with jsPDF).
+  @IsOptional()
+  @IsString()
+  declarationPdfFileKey?: string;
 }
 
 // POST /v1/kyc/:id/reject

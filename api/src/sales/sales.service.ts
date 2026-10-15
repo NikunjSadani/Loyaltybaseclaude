@@ -1247,6 +1247,10 @@ export class SalesService {
             type: outlet.outletType.code,
             programName: outlet.programName ?? '',
             programCategory: outlet.programCategory ?? '',
+            // Distributor (from the outlet master) — surfaced so the SO Declaration wizard's
+            // on-screen declaration preview matches the saved PDF (both fill distributor from master).
+            distributorName: outlet.distributorName ?? '',
+            distributorCode: outlet.distributorCode ?? '',
             // Re-KYC (admin-flagged fields to re-capture) takes priority — mirror the
             // admin deriveKycStatus so a re-KYC'd outlet reads RE_KYC_REQUIRED (under the
             // rep's Re-KYC filter/tasks), not Approved — UNLESS a fresh resubmission is now

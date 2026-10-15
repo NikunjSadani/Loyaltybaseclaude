@@ -22,6 +22,8 @@ import {
   hasReKycFlags, reKycRemarks, flaggedLabels, flaggedDocTypes, type ReKycFlags,
 } from '@/lib/rekyc-fields';
 import type { EntityType, GSTRegistrationType } from '@/lib/invoice';
+import { SoDeclarationView } from '@/components/so-declaration-view';
+import type { SoDeclarationData } from '@/lib/so-declaration';
 
 // ─── 7-field verification types (shared with approvals page) ─────────────────
 
@@ -147,6 +149,25 @@ interface ApiKycDetail {
   documents?: { id: string; documentType: string; fileUrl?: string; viewUrl?: string | null; status: string }[];
   verificationItems?: { fieldKey: string; decision: string; remark?: string | null; source?: string | null }[];
   statusHistory?: { id: string; toStatus: string; createdAt: string; notes?: string | null }[];
+  // SO Declaration variant (Bajaj). Absent/STANDARD for every other submission.
+  kycVariant?: 'STANDARD' | 'SO_DECLARATION';
+  declarationData?: SoDeclarationDataSnapshot | null;
+}
+
+/** The declaration snapshot persisted at submission (SO_DECLARATION only). */
+interface SoDeclarationDataSnapshot {
+  soName?: string;
+  ownerFatherName?: string;
+  ownerResidence?: string;
+  verificationDate?: string;
+  programName?: string | null;
+  distributorName?: string | null;
+  distributorCode?: string | null;
+  outletAddressSnapshot?: { address?: string | null; city?: string | null; state?: string | null; pincode?: string | null } | null;
+  // The REAL approving ASM's name + timestamp, stamped by the backend at first-approve.
+  asmName?: string | null;
+  asmDesignation?: string | null;
+  asmApprovedAt?: string | null;
 }
 
 type KycDetailShape = {
@@ -180,6 +201,9 @@ type KycDetailShape = {
   gstRegistrationType: GSTRegistrationType | null;
   // Non-null when the owner-group already has an APPROVED classification → selects locked.
   classificationLock: { entityType: EntityType; gstRegistrationType: GSTRegistrationType; sourcePartnerId: string } | null;
+  // SO Declaration variant.
+  kycVariant: 'STANDARD' | 'SO_DECLARATION';
+  declarationData: SoDeclarationDataSnapshot | null;
 };
 
 /* ─── Re-KYC proposed-change diff (stage-at-approval) ─────────────────────────── */
@@ -368,6 +392,8 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     entityType:       s.entityType ?? null,
     gstRegistrationType: s.gstRegistrationType ?? null,
     classificationLock: s.classificationLock ?? null,
+    kycVariant:       s.kycVariant ?? 'STANDARD',
+    declarationData:  s.declarationData ?? null,
     verificationItems: s.verificationItems ?? [],
     // Human outlet ID for the header (KYC is partner-keyed → the enrolled outlet's code).
     // Prefer the real Outlet code; fall back to the partner code if no outlet is linked yet.
@@ -445,13 +471,25 @@ const PENNY_ICONS = {
 
 // ─── Per-field verification panel (wired to POST /api/kyc/:id/verify) ─────────
 
+/** SO-Declaration variant: these grid keys are NON-BLOCKING — the owner won't share
+ *  GST / address documents, so they are shown muted ("Not required — SO Declaration")
+ *  instead of as missing/failed. STANDARD keeps all 7 required (byte-identical). */
+const SO_DECLARATION_NONREQUIRED = new Set<KycFieldKey>(['GST_VALIDATION', 'GST_DOCUMENT', 'ADDRESS_DOCUMENT']);
+
 function KycFieldVerificationPanel({
   submissionId,
   initialItems,
+  kycVariant = 'STANDARD',
 }: {
   submissionId: string;
   initialItems?: { fieldKey: string; decision: string; remark?: string | null; source?: string | null }[];
+  kycVariant?: 'STANDARD' | 'SO_DECLARATION';
 }) {
+  const isSoDecl = kycVariant === 'SO_DECLARATION';
+  // The keys that actually gate approval for this variant (SO Declaration = 4; STANDARD = 7).
+  const requiredKeys = isSoDecl
+    ? KYC_FIELD_ORDER.filter((k) => !SO_DECLARATION_NONREQUIRED.has(k))
+    : KYC_FIELD_ORDER;
   const [fields, setFields] = useState<Record<KycFieldKey, KycFieldState>>(() => {
     const out = {} as Record<KycFieldKey, KycFieldState>;
     for (const k of KYC_FIELD_ORDER) out[k] = { decision: 'PENDING' };
@@ -525,7 +563,8 @@ function KycFieldVerificationPanel({
     [submissionId]
   );
 
-  const terminalCount = KYC_FIELD_ORDER.filter(k => fields[k].decision !== 'PENDING').length;
+  // Progress counts only the REQUIRED keys (4 for SO Declaration, 7 for STANDARD).
+  const terminalCount = requiredKeys.filter(k => fields[k].decision !== 'PENDING').length;
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-4">
@@ -534,9 +573,9 @@ function KycFieldVerificationPanel({
           Field Verification (Gifsy Admin)
         </h2>
         <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-          terminalCount === 7 ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'
+          terminalCount === requiredKeys.length ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'
         }`}>
-          {terminalCount}/7 done
+          {terminalCount}/{requiredKeys.length} done
         </span>
       </div>
 
@@ -576,6 +615,20 @@ function KycFieldVerificationPanel({
           const canReject = remark.trim().length > 0;
           const isLoading = fieldLoading[key];
           const err = fieldError[key];
+
+          // SO-Declaration variant: GST / address-document keys are non-blocking — render
+          // them muted ("Not required — SO Declaration") rather than as missing/failed.
+          // (Still shown as APPROVED if evidence was actually attached + verified.)
+          if (isSoDecl && SO_DECLARATION_NONREQUIRED.has(key) && state.decision !== 'APPROVED') {
+            return (
+              <div key={key} data-testid={`so-decl-nonrequired-${key}`} className="py-3 flex items-center justify-between gap-3 opacity-70">
+                <p className="text-xs font-medium text-gray-500">{KYC_FIELD_LABELS[key]}</p>
+                <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 whitespace-nowrap">
+                  Not required — SO Declaration
+                </span>
+              </div>
+            );
+          }
 
           return (
             <div key={key} className="py-3 flex flex-col gap-1.5 sm:flex-row sm:items-start sm:gap-4">
@@ -792,6 +845,31 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
   // The Save button's ✓-saved label is DERIVED (current selection === persisted), so reverting
   // a dirty edit back to the stored value clears "Saved" in lock-step with Approve re-enabling.
   const classificationSaved = classificationComplete && classificationPersisted;
+
+  // ── SO Declaration variant (Bajaj): build the declaration view data from the snapshot. ──
+  const isSoDecl = kyc.kycVariant === 'SO_DECLARATION';
+  const dd = kyc.declarationData;
+  const soDeclSnapshotAddress = dd?.outletAddressSnapshot
+    ? [dd.outletAddressSnapshot.address, dd.outletAddressSnapshot.city, dd.outletAddressSnapshot.state, dd.outletAddressSnapshot.pincode]
+        .filter(Boolean).join(', ')
+    : '';
+  const soDeclData: SoDeclarationData = {
+    soName:          dd?.soName ?? '',
+    ownerName:       kyc.ownerName,
+    ownerFatherName: dd?.ownerFatherName ?? '',
+    ownerResidence:  dd?.ownerResidence ?? '',
+    outletName:      kyc.outletName,
+    outletCode:      kyc.outletCode ?? '',
+    outletAddress:   soDeclSnapshotAddress || [kyc.address, kyc.city, kyc.state, kyc.pincode].filter(Boolean).join(', '),
+    distributorName: dd?.distributorName ?? null,
+    distributorCode: dd?.distributorCode ?? null,
+    verificationDate: dd?.verificationDate ?? kyc.submittedDate,
+    programName:     dd?.programName ?? null,
+    // The REAL approving ASM's name + designation, stamped by the backend at first-approve (getOne
+    // returns them on declarationData). The Gifsy view is always read-only, so never the current viewer.
+    asmName:         dd?.asmName ?? null,
+    asmDesignation:  dd?.asmDesignation ?? null,
+  };
 
   return (
     <div className="space-y-5 fade-in">
@@ -1181,6 +1259,25 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
 
         {/* Middle & Right: Document Viewer + Actions */}
         <div className="lg:col-span-2 space-y-4">
+          {/* ── SO Declaration variant: the dual-signed declaration + a reviewer note ── */}
+          {isSoDecl && (
+            <div data-testid="so-declaration-card" className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <h2 className="text-sm font-semibold text-gray-800">SO Declaration (dual-signed)</h2>
+                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">GST / docs optional</span>
+              </div>
+              <SoDeclarationView data={soDeclData} signed={{ so: true, asm: true }} />
+              <div className="flex gap-2.5 items-start bg-amber-50 border border-amber-200 rounded-xl p-3 text-[12.5px] text-gray-700">
+                <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                <span>
+                  <span className="font-semibold">SO Declaration</span> — the owner declined to share KYC documents. The full
+                  enrollment (bank, photos, owner signature, OTP) was completed; existence is certified by the SO + ASM.
+                  The signed PDF below is the audit evidence; GST / address-document checks are not required for this flow.
+                </span>
+              </div>
+            </div>
+          )}
+
           <div className="bg-white rounded-xl border border-gray-200 p-4">
             <h2 className="text-sm font-semibold text-gray-800 mb-4">Document Review</h2>
             <KYCReviewer
@@ -1199,7 +1296,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
           </div>
 
           {/* Per-field KYC verification — wired to POST /api/kyc/:id/verify */}
-          <KycFieldVerificationPanel submissionId={kyc.id} initialItems={kyc.verificationItems} />
+          <KycFieldVerificationPanel submissionId={kyc.id} initialItems={kyc.verificationItems} kycVariant={kyc.kycVariant} />
 
           {/* Status History Timeline */}
           <div className="bg-white rounded-xl border border-gray-200 p-4">

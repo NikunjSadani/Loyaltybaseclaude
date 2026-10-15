@@ -15,7 +15,7 @@
  *   - all 7 terminal, all APPROVED → APPROVED (→ activate user + wallet + notify)
  */
 
-import { KycFieldKey, KycFieldDecision, KycStatus } from '@prisma/client';
+import { KycFieldKey, KycFieldDecision, KycStatus, KycVariant } from '@prisma/client';
 
 /** The 7 verification fields, in canonical order. */
 export const KYC_FIELD_KEYS: KycFieldKey[] = [
@@ -29,6 +29,38 @@ export const KYC_FIELD_KEYS: KycFieldKey[] = [
 ];
 
 export const KYC_FIELD_COUNT = KYC_FIELD_KEYS.length; // 7
+
+/**
+ * SO Declaration variant (Bajaj) — the fields that still GATE approval. The three
+ * document/GST-centric keys (GST_VALIDATION, GST_DOCUMENT, ADDRESS_DOCUMENT) are
+ * NON-BLOCKING for this variant: a missing one must never hold the submission at
+ * PENDING_GIFSY. See platform/docs/plans/SO-DECLARATION-KYC.md §5.2.
+ */
+export const SO_DECLARATION_FIELD_KEYS: KycFieldKey[] = [
+  'PAYMENT',
+  'ADDRESS',
+  'BOARD_PHOTO',
+  'OWNER_PHOTO',
+];
+
+/** Minimal shape needed to decide a submission's required (blocking) field set. */
+export interface RequiredFieldsLike {
+  kycVariant?: KycVariant | null;
+}
+
+/**
+ * The REQUIRED (blocking) verification field keys for a submission, by variant.
+ *   - STANDARD (or omitted) → all 7 keys, UNCHANGED (Deoleo-safe).
+ *   - SO_DECLARATION        → the 4 keys that still gate approval; the GST/doc keys
+ *     are non-blocking (reviewable/approvable if evidence exists, but never block).
+ * Centralizing this keeps the bridge (`evaluateSubmission`) and the approve()
+ * fill-missing loop from ever diverging on which fields a variant requires.
+ */
+export function requiredFieldKeys(submission?: RequiredFieldsLike | null): KycFieldKey[] {
+  return submission?.kycVariant === 'SO_DECLARATION'
+    ? SO_DECLARATION_FIELD_KEYS
+    : KYC_FIELD_KEYS;
+}
 
 /** Minimal shape the bridge needs from a KycVerificationItem (keeps it testable). */
 export interface VerificationDecisionLike {
@@ -52,11 +84,19 @@ export interface BridgeResult {
  * @@unique([kycSubmissionId, fieldKey]) guarantees at most one row per field;
  * if duplicates were ever passed, the last one wins.
  */
-export function evaluateSubmission(items: VerificationDecisionLike[]): BridgeResult {
+export function evaluateSubmission(
+  items: VerificationDecisionLike[],
+  submission?: RequiredFieldsLike | null,
+): BridgeResult {
+  // Which keys GATE this submission. STANDARD (or omitted) → the 7 canonical keys,
+  // so the Deoleo path is byte-identical. SO_DECLARATION → only the 4 required keys;
+  // the non-required keys are ignored by the bridge entirely (never force PENDING, a
+  // missing/rejected optional doc can neither block nor re-open the submission).
+  const required = requiredFieldKeys(submission);
   const byKey = new Map<KycFieldKey, KycFieldDecision>();
   for (const it of items) byKey.set(it.fieldKey, it.decision);
 
-  const decisions = KYC_FIELD_KEYS.map((k) => byKey.get(k) ?? 'PENDING');
+  const decisions = required.map((k) => byKey.get(k) ?? 'PENDING');
   const approvedCount = decisions.filter((d) => d === 'APPROVED').length;
   const anyPending = decisions.some((d) => d === 'PENDING');
 
@@ -70,7 +110,7 @@ export function evaluateSubmission(items: VerificationDecisionLike[]): BridgeRes
     return { next: 'PENDING_GIFSY', rejectedFields: [], approvedCount };
   }
 
-  const rejectedFields = KYC_FIELD_KEYS.filter((k) => byKey.get(k) === 'REJECTED');
+  const rejectedFields = required.filter((k) => byKey.get(k) === 'REJECTED');
   if (rejectedFields.length > 0) {
     return { next: 'RE_UPLOAD_REQUIRED', rejectedFields, approvedCount };
   }

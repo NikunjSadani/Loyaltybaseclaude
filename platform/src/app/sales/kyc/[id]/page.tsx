@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useState, useEffect, useCallback, type ReactNode } from 'react';
+import { use, useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 import Link from 'next/link';
 import {
   ArrowLeft, Building2, Phone, MapPin, User,
@@ -18,6 +18,10 @@ import { useGifsySettings } from '@/lib/gifsy-settings';
 import { visibilityApi } from '@/lib/visibility';
 import type { CaptureUiState, OutletStatusWindow } from '@/lib/visibility-types';
 import { hasReKycFlags, isReKycActionable, reKycRemarks, flaggedLabels, flaggedDocTypes, type ReKycFlags } from '@/lib/rekyc-fields';
+import { SignaturePad, SignatureClearButton, type SignaturePadHandle } from '@/components/signature-pad';
+import { SoDeclarationView } from '@/components/so-declaration-view';
+import { renderSoDeclarationPdf, type SoDeclarationData } from '@/lib/so-declaration';
+import { getStoredUser } from '@/lib/auth-client';
 import { RejectionModal } from './RejectionModal';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -78,6 +82,29 @@ interface KYCDetail {
   documents: KYCDoc[];
   photos: { label: string; url: string; documentType: string }[];
   approvalHistory: ApprovalEvent[];
+  // SO Declaration variant (Bajaj). STANDARD submissions leave these absent/default.
+  kycVariant?: 'STANDARD' | 'SO_DECLARATION';
+  declarationData?: SoDeclarationDataSnapshot | null;
+  // The SO's declaration signature, resolved to a viewable data URL by getOne, so the ASM
+  // client can embed the ACTUAL SO ink into the final dual-signed PDF. Null for STANDARD.
+  soSignatureViewUrl?: string | null;
+}
+
+/** The declaration snapshot persisted at submission (SO_DECLARATION only). */
+interface SoDeclarationDataSnapshot {
+  soName?: string;
+  ownerFatherName?: string;
+  ownerResidence?: string;
+  verificationDate?: string;
+  programName?: string | null;
+  distributorName?: string | null;
+  distributorCode?: string | null;
+  outletAddressSnapshot?: { address?: string | null; city?: string | null; state?: string | null; pincode?: string | null } | null;
+  // The REAL approving ASM's name + timestamp, stamped by the backend at first-approve. Used to
+  // render the already-approved declaration with the actual approver (NOT the current viewer).
+  asmName?: string | null;
+  asmDesignation?: string | null;
+  asmApprovedAt?: string | null;
 }
 
 /** A single uploaded KYC document, with a short-lived signed URL to open it. */
@@ -527,6 +554,17 @@ const APPROVER_ROLE_LABEL: Record<string, string> = {
   SALES_HO: 'HO', HO: 'HO',
 };
 
+/** The SO-declaration approver designation printed on the PDF the ACTIVE approver generates, keyed by
+ *  the FE role label. The authoritative designation on the stored record is the sales hierarchy level
+ *  NAME (stamped by the backend into declarationData.asmDesignation and used by the read-only views);
+ *  this map keeps the at-approval PDF accurate for an escalated approver without an extra fetch. */
+const ASM_DESIGNATION_BY_ROLE: Record<string, string> = {
+  SO:  'Sales Officer',
+  ASM: 'Area Sales Manager',
+  RSM: 'Regional Sales Manager',
+  HO:  'Head Office',
+};
+
 /** Map a `PENDING_*_APPROVAL` first-approver status to the short reviewer label. */
 const PENDING_STATUS_LABEL: Partial<Record<KYCStatus, string>> = {
   [KYCStatus.PENDING_SO_APPROVAL]:  'SO',
@@ -829,6 +867,10 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
   const [approving,         setApproving]         = useState(false);
   const [showRejectModal,   setShowRejectModal]   = useState(false);
   const [actionError,       setActionError]       = useState<string | null>(null);
+  // SO Declaration variant — the ASM signs the declaration at first-approve.
+  const asmSigRef = useRef<SignaturePadHandle>(null);
+  const [asmHasSigned, setAsmHasSigned] = useState(false);
+  const [asmConfirmed, setAsmConfirmed] = useState(false);
   const [role,              setRoleState]         = useState<string>('SO');
   const [detailsOpen,       setDetailsOpen]       = useState(false);
   const [photoLightboxIndex, setPhotoLightboxIndex] = useState<number | null>(null);
@@ -932,6 +974,10 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
               documentType: d.documentType,
             })),
           approvalHistory: mapStatusHistory(s.statusHistory ?? []),
+          // SO Declaration variant — surfaced straight from the submission columns.
+          kycVariant:      (s.kycVariant as 'STANDARD' | 'SO_DECLARATION' | undefined) ?? 'STANDARD',
+          declarationData: (s.declarationData as SoDeclarationDataSnapshot | null) ?? null,
+          soSignatureViewUrl: (s.soSignatureViewUrl as string | null | undefined) ?? null,
         });
       }
     } catch {
@@ -978,9 +1024,14 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
   const isApproved = kyc.status === KYCStatus.APPROVED;
 
   /* ── Who can act on this entry? ── */
+  // The routed first-approver can act at ANY level the reporting chain escalated to (skip-vacant):
+  // SO → ASM → RSM/State-Head. Mirrors the backend `canFirstApprove` (SALES_STATE_HEAD ↔
+  // PENDING_RSM_APPROVAL) so an escalated approver (e.g. ASM vacant → RSM) can actually sign off,
+  // not just see the queue. Applies to STANDARD and SO Declaration alike.
   const canApprove =
     (role === 'SO'  && kyc.status === KYCStatus.PENDING_SO_APPROVAL) ||
-    (role === 'ASM' && kyc.status === KYCStatus.PENDING_ASM_APPROVAL);
+    (role === 'ASM' && kyc.status === KYCStatus.PENDING_ASM_APPROVAL) ||
+    (role === 'RSM' && kyc.status === KYCStatus.PENDING_RSM_APPROVAL);
 
   const handleApprove = async () => {
     setApproving(true);
@@ -999,6 +1050,63 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
       await loadKyc(); // authoritative persisted status + history
     } catch {
       setActionError('Approval failed. Please check your connection and try again.');
+    } finally {
+      setApproving(false);
+    }
+  };
+
+  /* SO Declaration variant: the ASM signs the declaration, the FE renders the FINAL
+     dual-signed PDF (jsPDF), uploads the ASM signature + the PDF to GCS, then calls
+     first-approve with both fileKeys. */
+  const handleApproveSign = async (declData: SoDeclarationData) => {
+    const asmSig = asmSigRef.current?.getDataUrl();
+    if (!asmSig) { setActionError('Please sign the declaration before approving.'); return; }
+    // The final PDF MUST carry BOTH inks. If getOne couldn't resolve the SO's signature, do NOT
+    // proceed — a single-ink PDF would silently drop the SO signature from the audit evidence.
+    if (!kyc?.soSignatureViewUrl) {
+      setActionError("Couldn't load the SO's signature; please retry.");
+      return;
+    }
+    setApproving(true);
+    setActionError(null);
+    try {
+      // 1. Render the final dual-signed PDF — BOTH inks embedded (SO signature resolved by
+      //    getOne as soSignatureViewUrl; ASM ink from the pad just signed) + both names + dates.
+      const pdfBlob = await renderSoDeclarationPdf(
+        { ...declData, asmName: getStoredUser()?.name ?? declData.asmName ?? '' },
+        { asmSignatureDataUrl: asmSig, soSignatureDataUrl: kyc?.soSignatureViewUrl ?? undefined },
+      );
+
+      // 2. Upload the ASM signature + the PDF via POST /api/kyc/documents (GCS fileKeys).
+      const uploadDoc = async (blob: Blob, name: string, documentType: string): Promise<string> => {
+        const fd = new FormData();
+        fd.append('file', blob, name);
+        fd.append('documentType', documentType);
+        const r = await fetch('/api/kyc/documents', { method: 'POST', body: fd });
+        const b = await r.json().catch(() => ({}));
+        if (!r.ok || !b.success || !b.data?.fileKey) {
+          throw new Error(b.message ?? b.error ?? 'Upload failed');
+        }
+        return b.data.fileKey as string;
+      };
+      const asmBlob = await (await fetch(asmSig)).blob();
+      const asmSignatureFileKey = await uploadDoc(asmBlob, 'asm-signature.png', 'SIGNATURE');
+      const declarationPdfFileKey = await uploadDoc(pdfBlob, 'so-declaration.pdf', 'SO_DECLARATION');
+
+      // 3. First-approve with the signature + PDF fileKeys.
+      const res = await fetch(`/api/kyc/${id}/first-approve`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ asmSignatureFileKey, declarationPdfFileKey }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json?.success === false) {
+        setActionError(json?.error ?? 'Approval failed. Please try again.');
+        return;
+      }
+      await loadKyc();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Approval failed. Please try again.');
     } finally {
       setApproving(false);
     }
@@ -1065,6 +1173,42 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
      to a role. The backend redeemForOutlet/confirmRedeemForOutlet enforce the same flag, so
      this is purely the UX gate. */
   const showRedeem = isApproved && (kyc.salesRedeemEnabled ?? false);
+
+  /* ── SO Declaration variant (Bajaj) ── */
+  const isSoDecl = kyc.kycVariant === 'SO_DECLARATION';
+  const dd = kyc.declarationData;
+  const soDeclSnapshotAddress = dd?.outletAddressSnapshot
+    ? [dd.outletAddressSnapshot.address, dd.outletAddressSnapshot.city, dd.outletAddressSnapshot.state, dd.outletAddressSnapshot.pincode]
+        .filter(Boolean).join(', ')
+    : '';
+  const declData: SoDeclarationData = {
+    soName:          dd?.soName ?? kyc.submittedByName ?? '',
+    ownerName:       kyc.ownerName,
+    ownerFatherName: dd?.ownerFatherName ?? '',
+    ownerResidence:  dd?.ownerResidence ?? '',
+    outletName:      kyc.outletName,
+    outletCode:      kyc.outletCode ?? '',
+    outletAddress:   soDeclSnapshotAddress || [kyc.address, kyc.city, kyc.state, kyc.pincode].filter(Boolean).join(', '),
+    distributorName: dd?.distributorName ?? null,
+    distributorCode: dd?.distributorCode ?? null,
+    verificationDate: dd?.verificationDate ?? kyc.submittedAt,
+    programName:     dd?.programName ?? null,
+    // asmName source: only the ASM ACTIVELY signing (pre-approval, canApprove) is the current
+    // viewer, so use getStoredUser() then. For an already-approved / read-only declaration, use
+    // the REAL approving ASM stamped in declarationData — never the current viewer's name.
+    asmName:         canApprove && isSoDecl
+      ? (getStoredUser()?.name ?? dd?.asmName ?? null)
+      : (dd?.asmName ?? null),
+    // Designation mirrors asmName: the ACTIVE approver signs with their own designation (role-mapped,
+    // so an escalated RSM reads "Regional Sales Manager" on the PDF they generate); a read-only view
+    // uses the REAL designation the backend stamped (sales hierarchy level name). Falls back to the
+    // component default ("Area Sales Manager") when neither is available.
+    asmDesignation:  canApprove && isSoDecl
+      ? (ASM_DESIGNATION_BY_ROLE[role] ?? dd?.asmDesignation ?? null)
+      : (dd?.asmDesignation ?? null),
+  };
+  // The declaration is dual-signed once it clears the first approver (→ PENDING_GIFSY / APPROVED).
+  const asmSigned = isSoDecl && (kyc.status === KYCStatus.PENDING_GIFSY || kyc.status === KYCStatus.APPROVED);
 
   return (
     <div className="space-y-4 fade-in">
@@ -1180,8 +1324,23 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
       {/* Approval Timeline — hidden for approved outlets (no longer actionable) */}
       {!isApproved && <ApprovalTimeline kyc={kyc} />}
 
+      {/* ── SO Declaration variant: show the SO-signed declaration at every stage ── */}
+      {isSoDecl && !canApprove && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <CheckCircle className="h-4 w-4 text-[var(--brand-primary)]" />
+              SO Declaration {asmSigned ? '(dual-signed)' : '(SO-signed)'}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <SoDeclarationView data={declData} signed={{ so: true, asm: asmSigned }} />
+          </CardContent>
+        </Card>
+      )}
+
       {/* Approve / Reject actions for SO and ASM */}
-      {canApprove && (
+      {canApprove && !isSoDecl && (
         <Card className="border-amber-200 bg-amber-50">
           <CardContent className="pt-4 pb-4">
             <p className="text-xs text-amber-700 font-medium mb-3">
@@ -1208,6 +1367,66 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                 loading={approving}
               >
                 <CheckCircle className="h-4 w-4" /> Approve
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── SO Declaration variant: "Approve & Sign" — ASM reviews the SO-signed
+             declaration, then signs to approve (finalises the dual-signed PDF). ── */}
+      {canApprove && isSoDecl && (
+        <Card className="border-amber-200 bg-amber-50">
+          <CardContent className="pt-4 pb-4 space-y-3">
+            <p className="text-xs text-amber-700 font-medium">
+              Review the SO-signed declaration, then sign to approve. Approving finalises the dual-signed PDF.
+            </p>
+
+            <div className="rounded-xl bg-white p-1">
+              <SoDeclarationView data={declData} signed={{ so: true, asm: false }} />
+            </div>
+
+            {/* ASM signature pad */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-semibold text-gray-700">Sign here (Area Sales Manager)</p>
+                {asmHasSigned && <SignatureClearButton onClear={() => asmSigRef.current?.clear()} />}
+              </div>
+              <SignaturePad ref={asmSigRef} onInkedChange={setAsmHasSigned} ariaLabel="ASM signature pad" placeholder="ASM signs here" />
+            </div>
+
+            <label className="flex items-start gap-3 cursor-pointer">
+              <input type="checkbox" data-testid="asm-decl-confirm" className="mt-0.5 w-5 h-5 accent-[var(--brand-primary)] shrink-0"
+                checked={asmConfirmed} onChange={(e) => setAsmConfirmed(e.target.checked)} />
+              <span className="text-sm text-gray-700 leading-snug">
+                I approve this enrollment and certify the declaration above.
+              </span>
+            </label>
+
+            {actionError && (
+              <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                {actionError}
+              </p>
+            )}
+
+            <div className="flex gap-3">
+              <Button
+                variant="outline"
+                className="flex-1 border-red-300 text-red-600 hover:bg-red-50"
+                onClick={() => setShowRejectModal(true)}
+                loading={approving}
+              >
+                <XCircle className="h-4 w-4" /> Reject
+              </Button>
+              <Button
+                variant="primary"
+                className="flex-1"
+                data-testid="asm-approve-sign"
+                onClick={() => handleApproveSign(declData)}
+                loading={approving}
+                disabled={!asmConfirmed || !asmHasSigned}
+              >
+                <CheckCircle className="h-4 w-4" /> Approve &amp; Sign
               </Button>
             </div>
           </CardContent>
