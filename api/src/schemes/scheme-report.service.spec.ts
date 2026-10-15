@@ -366,7 +366,7 @@ describe('buildEnrollmentExportRows (pure)', () => {
     expect(names).toEqual([
       'Outlet Ref', 'Outlet Name', 'Matched', 'Tagged Employee', 'Submitted By (Employee)',
       'Slab',
-      'Zone', 'Program', 'Program Category', 'Outlet Type',
+      'Zone', 'Program', 'Sub-Program', 'Outlet Type',
       'Status', 'Version', 'Enrolled At', 'Submitted By', 'Submitted By Phone', 'Rejection Reason',
       'Owner', 'Photo',
     ]);

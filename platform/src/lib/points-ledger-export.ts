@@ -171,7 +171,7 @@ const FIXED_LEADING_LABELS = [
   'Distributor code',
   'Distributor Name',
   'Program name',
-  'Program category',
+  'Sub-Program',
   'Outlet type',
   'Opening balance',
 ];
@@ -189,7 +189,7 @@ const FIXED_TRAILING_LABELS = [
  *
  * Column order (per spec):
  *   Outlet ID · Outlet Name · Zone · ZNM id · RSM id · ASM id · SO id · XSR id ·
- *   Distributor code · Distributor Name · Program name · Program category · Outlet type ·
+ *   Distributor code · Distributor Name · Program name · Sub-Program · Outlet type ·
  *   Opening balance · [<Mon YYYY> Earn · <Mon YYYY> Burn] × N ·
  *   Total earn · Total burn · Total expired · Closing balance
  *

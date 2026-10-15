@@ -43,6 +43,8 @@ const mockPrisma = {
   kycSubmission: { findMany: jest.fn() },
   // Owner-group (Parent ID) paths read parents + run the uniqueness helper against this model.
   channelPartner: { findMany: jest.fn(), findUnique: jest.fn() },
+  // upsert reads the tenant's clients.features (outletMasterGeo gate) once per batch.
+  client: { findUnique: jest.fn() },
   auditLog: { create: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
@@ -93,6 +95,9 @@ describe('AdminOutletsService', () => {
     // never send a Parent ID) never touch these.
     mockPrisma.channelPartner.findMany.mockResolvedValue([]);
     mockPrisma.channelPartner.findUnique.mockResolvedValue(null);
+    // Default: tenant NOT geo-enabled (no outletMasterGeo flag) → mapRowToOutletData omits
+    // latitude/longitude, so pre-existing upsert tests behave exactly as before. Geo tests override.
+    mockPrisma.client.findUnique.mockResolvedValue({ features: {} });
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AdminOutletsService,
@@ -551,6 +556,73 @@ describe('AdminOutletsService', () => {
       expect(mockTx.salesUserAssignment.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ salesUserId: 'su1', outletId: 'o1' }) }),
       );
+    });
+
+    // ─── Outlet-master geo (Bajaj-only, gated on clients.features.outletMasterGeo) ───
+    describe('outlet-master geo columns (outletMasterGeo gate)', () => {
+      const geoRow = (over: Record<string, unknown> = {}) => ({
+        rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', outletName: 'Verma',
+        city: 'Mumbai', state: 'MH', xsrId: 'ISR-1', ...over,
+      });
+      const primeCreate = () => {
+        mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+          { outletType: { id: 'type1', code: 'SSS', isActive: true } },
+        ]);
+        mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
+        mockTx.outlet.findUnique.mockResolvedValue(null); // CREATE
+        mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+      };
+
+      it('geo ON: a valid lat/long is written into the create payload', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+        primeCreate();
+        const res = await service.upsert(admin, { rows: [geoRow({ latitude: '19.0760', longitude: '72.8777' })] });
+        expect(res.rows[0].status).toBe('OK');
+        const args = mockTx.outlet.upsert.mock.calls[0][0];
+        expect(args.create).toMatchObject({ latitude: 19.0760, longitude: 72.8777 });
+      });
+
+      it('geo ON: a blank lat/long is a no-op — the payload omits both keys (never wipes existing coords)', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+        primeCreate();
+        const res = await service.upsert(admin, { rows: [geoRow({ latitude: '', longitude: '' })] });
+        expect(res.rows[0].status).toBe('OK');
+        const args = mockTx.outlet.upsert.mock.calls[0][0];
+        // Key may be present but the VALUE is undefined — Prisma omits undefined at query time,
+        // so an existing coordinate is never overwritten (and never set to null).
+        expect(args.create.latitude).toBeUndefined();
+        expect(args.create.longitude).toBeUndefined();
+        expect(args.update.latitude).toBeUndefined();
+        expect(args.update.longitude).toBeUndefined();
+      });
+
+      it('geo ON: an out-of-range latitude is a per-row ERROR and nothing is written', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+        primeCreate();
+        const res = await service.upsert(admin, { rows: [geoRow({ latitude: '91', longitude: '72.8777' })] });
+        expect(res.rows[0].status).toBe('ERROR');
+        expect(res.rows[0].errors.some((e: string) => /latitude/i.test(e))).toBe(true);
+        expect(mockTx.outlet.upsert).not.toHaveBeenCalled();
+      });
+
+      it('geo ON: a lone coordinate (lat without long) is a per-row ERROR (both-or-neither)', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+        primeCreate();
+        const res = await service.upsert(admin, { rows: [geoRow({ latitude: '19.0760', longitude: '' })] });
+        expect(res.rows[0].status).toBe('ERROR');
+        expect(res.rows[0].errors.some((e: string) => /together/i.test(e))).toBe(true);
+        expect(mockTx.outlet.upsert).not.toHaveBeenCalled();
+      });
+
+      it('geo OFF (default): lat/long cells are ignored — no error, no geo keys written', async () => {
+        // mockPrisma.client.findUnique defaults to { features: {} } in beforeEach → geoEnabled false
+        primeCreate();
+        const res = await service.upsert(admin, { rows: [geoRow({ latitude: '999', longitude: 'nope' })] });
+        expect(res.rows[0].status).toBe('OK');
+        const args = mockTx.outlet.upsert.mock.calls[0][0];
+        expect('latitude' in args.create).toBe(false);
+        expect('longitude' in args.create).toBe(false);
+      });
     });
 
     it('reports UPDATE for an already-existing outlet', async () => {

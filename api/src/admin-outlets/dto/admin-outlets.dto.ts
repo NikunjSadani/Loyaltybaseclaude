@@ -103,6 +103,18 @@ export class OutletUploadRowDto {
   @IsString()
   payoutMethod?: string = '';
 
+  // Outlet-master geo (Bajaj-only, gated by clients.features.outletMasterGeo). Raw lat/long cells,
+  // carried straight through like the other string columns; the service range-validates them (only
+  // when the tenant is geo-enabled AND the cell is non-blank) and parses them to numbers. A blank
+  // cell is a no-op (never wipes existing coords); a non-geo tenant ignores them entirely.
+  @IsOptional()
+  @IsString()
+  latitude?: string = '';
+
+  @IsOptional()
+  @IsString()
+  longitude?: string = '';
+
   // Parent-child owner group link (docs/plans/PARTNER-MULTI-OUTLET.md §4.4). The admin-facing
   // PARENT identifier = the parent ChannelPartner's partnerCode (e.g. "CPP01"), resolved to the
   // parent's id and written to Outlet.parentId. Deliberately has NO `= ''` default so the three

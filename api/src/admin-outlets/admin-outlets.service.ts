@@ -147,6 +147,10 @@ interface OutletWriteData {
   zone: string | null;
   programName: string | null;
   programCategory: string | null;
+  // Outlet master geo (Bajaj-only via outletMasterGeo). `undefined` = cell blank/absent OR tenant not
+  // geo-enabled → Prisma omits the field → never overwrites existing coords. A number = set/overwrite.
+  latitude?: number;
+  longitude?: number;
 }
 
 /** "" → null so blank cells don't overwrite with empty strings. */
@@ -155,14 +159,30 @@ function nullIfBlank(v: string | undefined): string | null {
   return t === '' ? null : t;
 }
 
+/** Parse an optional lat/long cell → number (set) or undefined (blank → no-op). Assumes the caller
+ *  already range-validated a non-blank value, so a stray non-finite value falls back to undefined. */
+function parseGeoCell(v: string | undefined): number | undefined {
+  const t = (v ?? '').trim();
+  if (t === '') return undefined;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 /**
  * The tenant-uniqueness policy applied when the tenant settings blob carries none — today's
  * behaviour (GST + phone enforced; PAN is always on inside the helper; bank/UPI off). Shared by
  * the upload's add-to-parent check and the dedicated un-group action so the two never diverge.
  */
 
-/** Map a validated upload row + resolved OutletType id to the Outlet column data. */
-function mapRowToOutletData(row: OutletUploadRowDto, outletTypeId: string): OutletWriteData {
+/** Map a validated upload row + resolved OutletType id to the Outlet column data.
+ *  `geoEnabled` gates the Bajaj-only lat/long columns (clients.features.outletMasterGeo): when true a
+ *  non-blank cell sets the coord and a blank cell → undefined → Prisma omits it (never wipes); when
+ *  false the geo fields are OMITTED entirely, so non-geo tenants (Deoleo et al.) are byte-identical. */
+function mapRowToOutletData(
+  row: OutletUploadRowDto,
+  outletTypeId: string,
+  geoEnabled: boolean,
+): OutletWriteData {
   return {
     outletTypeId,
     name: (row.outletName ?? '').trim(),
@@ -175,6 +195,9 @@ function mapRowToOutletData(row: OutletUploadRowDto, outletTypeId: string): Outl
     zone: nullIfBlank(row.zone),
     programName: nullIfBlank(row.programName),
     programCategory: nullIfBlank(row.programCategory),
+    ...(geoEnabled
+      ? { latitude: parseGeoCell(row.latitude), longitude: parseGeoCell(row.longitude) }
+      : {}),
   };
 }
 
@@ -805,6 +828,17 @@ export class AdminOutletsService {
     // Fall back to today's-behaviour default if a partial settings object is returned.
     const policy: UniquenessPolicy = resolveUniquenessPolicy(settings);
 
+    // Outlet-master geo gate (Bajaj-only: clients.features.outletMasterGeo). Read once for the whole
+    // batch directly off the Client row (self-contained; no constructor dependency). When false, the
+    // row mapping omits latitude/longitude entirely and the per-row geo validation is skipped, so
+    // every non-geo tenant (incl. live Deoleo) is byte-identical to before.
+    const c = await this.prisma.client.findUnique({
+      where: { id: clientId },
+      select: { features: true },
+    });
+    const geoEnabled =
+      (c?.features as Record<string, unknown> | null)?.outletMasterGeo === true;
+
     // ── Owner-group PRELOADS (batched over the LINK rows only) ────────────────────
     // A Parent ID cell only ever does work when it carries a partnerCode (LINK / add-to-parent).
     // A blank cell is a NO-OP (un-grouping is a separate explicit action — ungroupOutlet — so a
@@ -947,12 +981,36 @@ export class AdminOutletsService {
         // blank cell → no-op (never un-groups).
       }
 
+      // 2d. Outlet-master geo (Bajaj-only). Validate ONLY when the tenant is geo-enabled AND the cell
+      //     is non-blank — a blank cell is a no-op (mapRowToOutletData → undefined → never wipes). An
+      //     out-of-range value is a per-row ERROR (mirrors the other errors.push(...) above).
+      if (geoEnabled) {
+        const rawLat = (row.latitude ?? '').trim();
+        if (rawLat) {
+          const lat = Number(rawLat);
+          if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+            errors.push(`Latitude "${row.latitude}" must be a number between -90 and 90`);
+          }
+        }
+        const rawLng = (row.longitude ?? '').trim();
+        if (rawLng) {
+          const lng = Number(rawLng);
+          if (!Number.isFinite(lng) || lng < -180 || lng > 180) {
+            errors.push(`Longitude "${row.longitude}" must be a number between -180 and 180`);
+          }
+        }
+        // Both-or-neither: a lone coordinate is a meaningless point. Require the pair together.
+        if (!!rawLat !== !!rawLng) {
+          errors.push('Latitude and Longitude must be provided together — fill both or leave both blank');
+        }
+      }
+
       if (errors.length > 0 || !outletTypeId) {
         rowResults.push({ rowNum: row.rowNum, outletId: outletCode, status: 'ERROR', action: 'CREATE', errors });
         continue;
       }
 
-      const data = mapRowToOutletData(row, outletTypeId);
+      const data = mapRowToOutletData(row, outletTypeId, geoEnabled);
 
       // 3. Upsert the outlet + (re)tag to the XSR in one transaction. When the row LINKS to a
       //    parent, the add-to-parent uniqueness check runs HERE — inside the same tx, AFTER

@@ -109,7 +109,7 @@ export const OUTLET_FIELD_CATALOG = [
   { key: 'pincode', label: 'Pincode' },
   { key: 'zone', label: 'Zone' },
   { key: 'programName', label: 'Program' },
-  { key: 'programCategory', label: 'Program category' },
+  { key: 'programCategory', label: 'Sub-Program' },
   { key: 'panNumber', label: 'PAN' },
   { key: 'gstNumber', label: 'GST' },
 ] as const;

@@ -20,7 +20,7 @@ const admin: JwtPayload = { sub: 'a1', role: 'CLIENT_ADMIN', clientId: 'deoleo',
 // Leading columns mirror the outlet upload template's order (OUTLET_UPLOAD_HEADERS);
 // the hierarchy block + master-only columns follow.
 const EXPECTED_HEADERS = [
-  'Outlet Code', 'Outlet Name', 'Program Name', 'Program Category', 'Outlet Type',
+  'Outlet Code', 'Outlet Name', 'Program Name', 'Sub-Program', 'Outlet Type',
   'Beat', 'Distributor Code', 'Distributor Name', 'Metro', 'City', 'State', 'Zone',
   'XSR ID', 'XSR Name', 'XSR Phone Number',
   'SO ID', 'SO Name', 'SO Phone Number',
@@ -47,6 +47,8 @@ const mockPrisma = {
   salesUserAssignment: { findMany: jest.fn() },
   kycSubmission: { findMany: jest.fn() },
   salesUser: { findMany: jest.fn() },
+  // outletMaster reads clients.features for the outletMasterGeo gate.
+  client: { findUnique: jest.fn() },
 };
 
 const mockKyc = {
@@ -293,5 +295,48 @@ describe('ReportsService.outletMaster (57 columns)', () => {
     for (const c of cases) {
       expect(`${c.code}=${byCode.get(c.code)}`).toBe(`${c.code}=${c.expected}`);
     }
+  });
+
+  it('geo ON (outletMasterGeo): inserts Latitude/Longitude after Metro and emits outlet coords; blank when null', async () => {
+    mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+    mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+    mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+    mockPrisma.salesUser.findMany.mockResolvedValue([]);
+    mockPrisma.outlet.findMany.mockResolvedValue([
+      {
+        id: 'o1', partnerId: null, zone: 'Z', outletCode: 'OUT001', name: 'Shop One',
+        outletType: null, programName: null, programCategory: null,
+        distributorCode: null, distributorName: null, metro: 'Metro', beat: null,
+        addressLine1: null, addressLine2: null, city: 'Pune', state: 'MH', pincode: null,
+        phone: null, latitude: dec('19.07600000'), longitude: dec('72.87770000'),
+        isActive: true, deactivatedAt: null, kycIntent: null, reKycFlags: null,
+        partner: null, parent: null,
+      },
+      {
+        id: 'o2', partnerId: null, zone: null, outletCode: 'OUT002', name: 'Shop Two',
+        outletType: null, programName: null, programCategory: null,
+        distributorCode: null, distributorName: null, metro: null, beat: null,
+        addressLine1: null, addressLine2: null, city: null, state: null, pincode: null,
+        phone: null, latitude: null, longitude: null,
+        isActive: true, deactivatedAt: null, kycIntent: null, reKycFlags: null,
+        partner: null, parent: null,
+      },
+    ]);
+
+    const file = await service.outletMaster(admin);
+    const aoa = await readSheet(file);
+    const headers = aoa[0] as string[];
+    // Two new columns, placed right after Metro.
+    expect(headers).toHaveLength(EXPECTED_HEADERS.length + 2);
+    expect(headers.indexOf('Latitude')).toBe(headers.indexOf('Metro') + 1);
+    expect(headers.indexOf('Longitude')).toBe(headers.indexOf('Metro') + 2);
+    // These are the OUTLET coordinate columns, distinct from the KYC board/bank geo columns.
+    expect(headers).toContain('Latitude of Outlet Board');
+
+    const idx = (h: string) => headers.indexOf(h);
+    expect((aoa[1] as unknown[])[idx('Latitude')]).toBe('19.07600000');
+    expect((aoa[1] as unknown[])[idx('Longitude')]).toBe('72.87770000');
+    expect((aoa[2] as unknown[])[idx('Latitude')]).toBe('');  // null coords → blank
+    expect((aoa[2] as unknown[])[idx('Longitude')]).toBe('');
   });
 });

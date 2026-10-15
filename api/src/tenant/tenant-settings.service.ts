@@ -179,7 +179,7 @@ export interface EffectiveSettings {
    */
   outletPrograms:         string[];
   /**
-   * Allowed "Program Category" values for the Outlet Master upload (per-tenant). Same model
+   * Allowed "Sub-Program" values for the Outlet Master upload (per-tenant). Same model
    * as outletPrograms. Never empty (default-guarded).
    */
   outletCategories:       string[];

@@ -38,6 +38,7 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     kycApprovalFlow: true,
     kycAddressProofWaiver: false,
     soDeclarationKyc: false,
+    outletMasterGeo: false,
     campaignEnrollmentForm: true,
     salesTeamApp: true,
     walletModule: true,

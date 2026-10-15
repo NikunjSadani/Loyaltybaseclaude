@@ -522,7 +522,7 @@ export interface GifsySettings {
    */
   outletPrograms?:   string[];
   /**
-   * Allowed "Program Category" values for the Outlet Master upload (per-tenant).
+   * Allowed "Sub-Program" values for the Outlet Master upload (per-tenant).
    * Default: ['Premium', 'Standard', 'Economy'].
    */
   outletCategories?: string[];
@@ -802,6 +802,8 @@ export interface OutletUploadRow {
   xsrId:            string;
   payoutMethod:     string;   // per-outlet payout MANDATE — "BANK"/"UPI"/"ANY" (case-insensitive); blank → BANK
   parentId:         string;   // parent's partnerCode (e.g. "CPP01") linking this outlet to an owner group; blank → grouping unchanged (backend no-op)
+  latitude?:        string;   // optional outlet GPS latitude (decimal degrees) — only surfaced/validated when the tenant's outletMasterGeo feature is on; blank → backend leaves existing coord untouched
+  longitude?:       string;   // optional outlet GPS longitude (decimal degrees) — see latitude
 }
 
 /** Validation result for one row in the outlet addition upload */
@@ -1135,6 +1137,8 @@ export interface OutletMasterRow {
   programCategory: string;
   beat:            string;
   isMetro:         boolean;
+  latitude?:       string;   // optional outlet GPS latitude (decimal degrees) — exported only when the tenant's outletMasterGeo feature is on
+  longitude?:      string;   // optional outlet GPS longitude (decimal degrees) — see latitude
 
   // ── B: Contact / Address ─────────────────────────────────────────────────────
   ownerName?:      string;

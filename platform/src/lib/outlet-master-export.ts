@@ -13,10 +13,15 @@ import * as XLSX from 'xlsx';
 import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import type { OutletMasterRow } from '@/types';
 
+// Optional, tenant-gated (features.outletMasterGeo) geo fields live on OutletMasterRow in @/types;
+// the geo columns below are emitted only when generateOutletMasterExcel is called with geoEnabled.
+
 // ─── Column headers (in display order) ───────────────────────────────────────
 
+type OutletMasterColumn = { key: keyof OutletMasterRow; label: string; section: string };
+
 /** Column header label for each key of OutletMasterRow, in file order. */
-const COLUMNS: { key: keyof OutletMasterRow; label: string; section: string }[] = [
+const COLUMNS: OutletMasterColumn[] = [
   // A: Identity
   { key: 'outletId',        label: 'Outlet ID',          section: 'A: Identity' },
   { key: 'outletCode',      label: 'Outlet Code',        section: 'A: Identity' },
@@ -24,7 +29,7 @@ const COLUMNS: { key: keyof OutletMasterRow; label: string; section: string }[] 
   { key: 'outletType',      label: 'Outlet Type',        section: 'A: Identity' },
   { key: 'partnerClass',    label: 'Partner Class',      section: 'A: Identity' },
   { key: 'programName',     label: 'Program Name',       section: 'A: Identity' },
-  { key: 'programCategory', label: 'Program Category',   section: 'A: Identity' },
+  { key: 'programCategory', label: 'Sub-Program',        section: 'A: Identity' },
   { key: 'beat',            label: 'Beat',               section: 'A: Identity' },
   { key: 'isMetro',         label: 'Metro',              section: 'A: Identity' },
 
@@ -95,6 +100,21 @@ const COLUMNS: { key: keyof OutletMasterRow; label: string; section: string }[] 
   { key: 'deactivatedAt',label: 'Deactivated At',section: 'I: Lifecycle' },
   { key: 'reactivatedAt',label: 'Reactivated At',section: 'I: Lifecycle' },
 ];
+
+/** Optional geo columns, appended only when the tenant's `outletMasterGeo` flag is on. */
+const GEO_COLUMNS: OutletMasterColumn[] = [
+  { key: 'latitude',  label: 'Latitude',  section: 'A: Identity' },
+  { key: 'longitude', label: 'Longitude', section: 'A: Identity' },
+];
+
+/** The effective column set for an export. Geo columns are inserted right after 'Metro' (the end
+ *  of section A) when geoEnabled; when off, the column set is byte-for-byte the base COLUMNS, so
+ *  other tenants' export/template is unchanged. */
+function columnsFor(geoEnabled: boolean): OutletMasterColumn[] {
+  if (!geoEnabled) return COLUMNS;
+  const idx = COLUMNS.findIndex(c => c.key === 'isMetro');
+  return [...COLUMNS.slice(0, idx + 1), ...GEO_COLUMNS, ...COLUMNS.slice(idx + 1)];
+}
 
 // ─── Demo data (10 rows) ─────────────────────────────────────────────────────
 
@@ -278,18 +298,22 @@ export const DEMO_OUTLET_MASTER_ROWS: OutletMasterRow[] = [
  */
 export function generateOutletMasterExcel(
   rows: OutletMasterRow[] = DEMO_OUTLET_MASTER_ROWS,
+  /** When true (tenant feature `outletMasterGeo` on), Latitude/Longitude columns are included.
+   *  Defaults to false, so every existing caller produces the same file as before. */
+  geoEnabled: boolean = false,
 ): Uint8Array {
   const wb = XLSX.utils.book_new();
+  const columns = columnsFor(geoEnabled);
 
   // ── Section grouping row (row 1) ──
-  const sectionRow: string[] = COLUMNS.map(c => c.section);
+  const sectionRow: string[] = columns.map(c => c.section);
 
   // ── Header row (row 2) ──
-  const headerRow: string[] = COLUMNS.map(c => c.label);
+  const headerRow: string[] = columns.map(c => c.label);
 
   // ── Data rows ──
   const dataRows: (string | number | boolean | undefined)[][] = rows.map(row =>
-    COLUMNS.map(({ key }) => {
+    columns.map(({ key }) => {
       const val = row[key];
       if (val === undefined || val === null) return '';
       if (typeof val === 'boolean') return val ? 'Yes' : 'No';
@@ -301,7 +325,7 @@ export function generateOutletMasterExcel(
   const ws = aoaToSheetSafe(wsData);
 
   // ── Column widths ──
-  ws['!cols'] = COLUMNS.map(({ label }) => ({
+  ws['!cols'] = columns.map(({ label }) => ({
     wch: Math.max(label.length + 2, 18),
   }));
 

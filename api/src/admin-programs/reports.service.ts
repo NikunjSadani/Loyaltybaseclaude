@@ -71,7 +71,7 @@ function dateOnly(d: Date | null | undefined): string {
  */
 const OUTLET_MASTER_HEADERS: string[] = [
   // ── mirror the upload template's order ──
-  'Outlet Code', 'Outlet Name', 'Program Name', 'Program Category', 'Outlet Type',
+  'Outlet Code', 'Outlet Name', 'Program Name', 'Sub-Program', 'Outlet Type',
   'Beat', 'Distributor Code', 'Distributor Name', 'Metro', 'City', 'State', 'Zone',
   ...RUNGS.flatMap((r) => [`${r} ID`, `${r} Name`, `${r} Phone Number`]),
   'Parent ID',
@@ -85,6 +85,22 @@ const OUTLET_MASTER_HEADERS: string[] = [
   'Latitude of Bank Details Collection', 'Longitude of Bank Details Collection',
   'Remarks', 'GST', 'PAN', 'GST Certificate', 'Address Proof', 'Self-Declaration', 'Deactivated At',
 ];
+
+/**
+ * The outlet-master headers for a given tenant. Base = OUTLET_MASTER_HEADERS (every non-geo tenant,
+ * incl. Deoleo, is byte-identical). When the tenant's `outletMasterGeo` feature is on (Bajaj), the
+ * two outlet-coordinate columns 'Latitude'/'Longitude' are inserted right after 'Metro' — matching
+ * the upload template's header names so a downloaded master round-trips back through the upload.
+ * (Distinct from the KYC-sourced 'Latitude of Outlet Board' / '… Bank Details Collection' columns.)
+ */
+function outletMasterHeaders(geoEnabled: boolean): string[] {
+  if (!geoEnabled) return OUTLET_MASTER_HEADERS;
+  const h = [...OUTLET_MASTER_HEADERS];
+  const at = h.indexOf('Metro');
+  const insertAt = at >= 0 ? at + 1 : h.length;
+  h.splice(insertAt, 0, 'Latitude', 'Longitude');
+  return h;
+}
 
 /**
  * Derive the outlet's real "Profile Status" for the master export.
@@ -133,9 +149,9 @@ function profileStatus(
   }
 }
 
-/** A single all-empty row carrying every header key, so an empty export still has the 57 columns. */
-function emptyOutletMasterRow(): Record<string, unknown> {
-  return Object.fromEntries(OUTLET_MASTER_HEADERS.map((h) => [h, ''] as const));
+/** A single all-empty row carrying every header key, so an empty export still has every column. */
+function emptyOutletMasterRow(headers: string[]): Record<string, unknown> {
+  return Object.fromEntries(headers.map((h) => [h, ''] as const));
 }
 
 /**
@@ -179,6 +195,12 @@ export class ReportsService {
     const clientId = user.clientId;
     const base = this.externalBase(req);
 
+    // Bajaj-only: outlet-coordinate columns in the master export. Gated on clients.features so every
+    // other tenant (incl. Deoleo) gets the byte-identical base column set.
+    const client = await this.prisma.client.findUnique({ where: { id: clientId }, select: { features: true } });
+    const geoEnabled = ((client?.features ?? {}) as Record<string, unknown>).outletMasterGeo === true;
+    const headers = outletMasterHeaders(geoEnabled);
+
     // 1) Outlets + partner (1 query). Tenant-scoped.
     const outlets = await this.prisma.outlet.findMany({
       where: { clientId, deletedAt: null },
@@ -201,6 +223,8 @@ export class ReportsService {
         state: true,
         pincode: true,
         phone: true,
+        latitude: true,
+        longitude: true,
         isActive: true,
         deactivatedAt: true,
         kycIntent: true,
@@ -322,13 +346,19 @@ export class ReportsService {
       row['Outlet Name'] = o.name ?? '';
       row['Outlet Type'] = o.outletType?.name ?? '';
       row['Program Name'] = o.programName ?? '';
-      row['Program Category'] = o.programCategory ?? '';
+      row['Sub-Program'] = o.programCategory ?? '';
       row['Distributor Code'] = o.distributorCode ?? '';
       row['Distributor Name'] = o.distributorName ?? '';
       row['Metro'] = o.metro ?? '';
       row['Beat'] = o.beat ?? '';
       // Owner-group parent code (round-trips through the outlet-master upload's "Parent ID").
       row['Parent ID'] = o.parent?.partnerCode ?? '';
+
+      // Outlet coordinates (Bajaj-only, gated). Round-trips through the upload's Latitude/Longitude.
+      if (geoEnabled) {
+        row['Latitude'] = decToStr(o.latitude);
+        row['Longitude'] = decToStr(o.longitude);
+      }
 
       // sales-hierarchy rungs, mapped by hierarchyLevel.code.
       const byRung = this.resolveRungs(assignmentByOutlet.get(o.id));
@@ -407,8 +437,8 @@ export class ReportsService {
     // that list regardless of the assignment order above (json_to_sheet derives the header row
     // from the first object's key order). Also guarantees the 57 columns when outlets is empty.
     const orderRow = (r: Record<string, unknown>): Record<string, unknown> =>
-      Object.fromEntries(OUTLET_MASTER_HEADERS.map((h) => [h, r[h] ?? '']));
-    const sheetRows = (rows.length ? rows : [emptyOutletMasterRow()]).map(orderRow);
+      Object.fromEntries(headers.map((h) => [h, r[h] ?? '']));
+    const sheetRows = (rows.length ? rows : [emptyOutletMasterRow(headers)]).map(orderRow);
 
     const buffer = buildXlsx([{ name: 'Outlet Master', rows: sheetRows }]);
     const today = new Date().toISOString().split('T')[0];

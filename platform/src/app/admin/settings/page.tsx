@@ -1474,7 +1474,7 @@ export default function SettingsPage() {
                 <Tags className="h-4 w-4 text-[var(--brand-primary)]" /> Outlet Programs &amp; Categories
               </CardTitle>
               <CardDescription className="mt-1">
-                These lists control the allowed Program Name / Program Category values in the
+                These lists control the allowed Program Name / Sub-Program values in the
                 Outlet Master upload for this tenant. This is a Gifsy-operated setting — only a
                 Gifsy Admin can change it.
               </CardDescription>

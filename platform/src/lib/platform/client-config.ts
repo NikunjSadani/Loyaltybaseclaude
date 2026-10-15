@@ -31,6 +31,10 @@ export interface FeatureFlags {
   // the SO + ASM sign a declaration). Bajaj-only; runtime behaviour flag, NOT a console module
   // toggle (excluded from FeatureKey below). See platform/docs/plans/SO-DECLARATION-KYC.md.
   soDeclarationKyc: boolean;
+  // Outlet master: offer optional Latitude/Longitude columns in the outlet-master upload +
+  // download template (written to the existing Outlet.latitude/longitude). Bajaj-only; runtime
+  // behaviour flag, NOT a console module toggle (excluded from FeatureKey below).
+  outletMasterGeo: boolean;
   selfEnrollmentAllowed: boolean;   // Partners can self-accept schemes
   nonKycOutletCampaigns: boolean;   // Campaigns can target non-KYC outlets
   multiLevelApproval: boolean;      // ≥2 approval levels in hierarchy
@@ -51,7 +55,7 @@ export interface FeatureFlags {
 // The gifsy-console module toggles. Excludes `partnerApp` (nested) and
 // `kycAddressProofWaiver` (a runtime KYC behaviour flag set via clients.features, not a
 // console module) so the console's exhaustive feature Records stay to the module set.
-export type FeatureKey = keyof Omit<FeatureFlags, 'partnerApp' | 'kycAddressProofWaiver' | 'soDeclarationKyc'>;
+export type FeatureKey = keyof Omit<FeatureFlags, 'partnerApp' | 'kycAddressProofWaiver' | 'soDeclarationKyc' | 'outletMasterGeo'>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Branding

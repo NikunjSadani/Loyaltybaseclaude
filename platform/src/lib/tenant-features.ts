@@ -50,6 +50,7 @@ export function normalizeFeatures(raw: unknown): FeatureFlags {
     kycApprovalFlow:         bool(f.kycApprovalFlow,         d.kycApprovalFlow),
     kycAddressProofWaiver:   bool(f.kycAddressProofWaiver,   d.kycAddressProofWaiver),
     soDeclarationKyc:        bool(f.soDeclarationKyc,        d.soDeclarationKyc),
+    outletMasterGeo:         bool(f.outletMasterGeo,         d.outletMasterGeo),
     campaignEnrollmentForm:  bool(f.campaignEnrollmentForm,  d.campaignEnrollmentForm),
     salesTeamApp:            bool(f.salesTeamApp,            d.salesTeamApp),
     walletModule:            bool(f.walletModule,            d.walletModule),

@@ -208,7 +208,7 @@ export function buildEnrollmentExportRows(
   // so the field-label de-collision below can see them, and reused by the `reserved`
   // set (Excel de-collision) further down.
   const identityCols = ['Outlet Ref', 'Outlet Name', 'Matched', 'Tagged Employee', 'Submitted By (Employee)'];
-  const masterCols = ['Zone', 'Program', 'Program Category', 'Outlet Type'];
+  const masterCols = ['Zone', 'Program', 'Sub-Program', 'Outlet Type'];
   const statusCols = ['Status', 'Version', 'Enrolled At', 'Submitted By', 'Submitted By Phone', 'Rejection Reason'];
   const BUILTIN_BASE = new Set<string>([...identityCols, ...masterCols, ...statusCols]);
   // Normalized (case/whitespace-insensitive) view — kept in lockstep with the Excel-side
@@ -374,7 +374,7 @@ export function buildEnrollmentExportRows(
     // Master attrs (matched loyalty outlet)
     row['Zone'] = r.zone ?? '';
     row['Program'] = r.programName ?? '';
-    row['Program Category'] = r.programCategory ?? '';
+    row['Sub-Program'] = r.programCategory ?? '';
     row['Outlet Type'] = r.outletType ?? '';
     // Status
     row['Status'] = r.enrollment?.status ?? 'NOT_ENROLLED';
@@ -418,7 +418,7 @@ export function buildEnrollmentExportRows(
     ...excelCols.map((c) => ({ name: c.header, source: 'Audience Excel upload' })),
     { name: 'Zone', source: 'Matched loyalty outlet master' },
     { name: 'Program', source: 'Matched loyalty outlet master' },
-    { name: 'Program Category', source: 'Matched loyalty outlet master' },
+    { name: 'Sub-Program', source: 'Matched loyalty outlet master' },
     { name: 'Outlet Type', source: 'Matched loyalty outlet master' },
     { name: 'Status', source: 'Enrollment record' },
     { name: 'Version', source: 'Enrollment record' },

@@ -29,13 +29,22 @@ import { KYCStatus } from '@/types';
 import { parseOutletPaymentType } from '@/lib/payment-type';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 
+// Latitude/Longitude are OPTIONAL, tenant-gated (features.outletMasterGeo) geo columns on the
+// outlet-master upload (the fields live on OutletUploadRow in @/types). parseOutletUploadRows
+// always emits them (blank when the columns are absent); the backend applies + validates them only
+// when the tenant flag is on, and validateOutletUpload only range-checks them when geoEnabled is true.
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
+// 'Sub-Program' was formerly labelled 'Program Category' (owner rename). The underlying field
+// is still `programCategory`; only the user-facing column label changed. Uploads carrying the
+// OLD 'Program Category' header are still accepted (see parseOutletUploadRows + the header
+// validator's backward-compat branch).
 export const OUTLET_UPLOAD_HEADERS = [
   'Outlet ID',
   'Outlet Name',
   'Program Name',
-  'Program Category',
+  'Sub-Program',
   'Outlet Type',
   'Beat',
   'Distributor ID',
@@ -136,12 +145,19 @@ function isBlankOutletRow(row: OutletUploadRow): boolean {
  *  CAN fill them, but not compulsory). Owner 2026-06-25: Beat + Metro are optional.
  *  Payout Method is optional too — a blank cell defaults the outlet mandate to BANK.
  *  Parent ID is optional — grouping is opt-in, so a blank cell must never be a "required" error. */
-export const OPTIONAL_OUTLET_HEADERS = ['Beat', 'Metro', 'Payout Method', 'Parent ID'] as const;
+// Latitude/Longitude are OPTIONAL for every tenant — they only carry data when the geo feature is
+// on, and even then a blank cell is a no-op. They are listed here so the header validator never
+// treats them as required.
+export const OPTIONAL_OUTLET_HEADERS = ['Beat', 'Metro', 'Payout Method', 'Parent ID', 'Latitude', 'Longitude'] as const;
 
 export function validateOutletUploadHeaders(headers: readonly string[]): string | null {
   const optional = new Set<string>(OPTIONAL_OUTLET_HEADERS);
   const missing = (OUTLET_UPLOAD_HEADERS as readonly string[])
-    .filter(h => !optional.has(h) && !headers.includes(h));
+    .filter(h => !optional.has(h) && !headers.includes(h))
+    // Backward-compat: the 'Sub-Program' column (renamed from 'Program Category') is still
+    // satisfied by a file that carries the OLD 'Program Category' header, so existing upload
+    // files keep working after the rename.
+    .filter(h => !(h === 'Sub-Program' && headers.includes('Program Category')));
   if (missing.length === 0) return null;
   return `Missing required column${missing.length > 1 ? 's' : ''}: ${missing.join(', ')}`;
 }
@@ -169,7 +185,9 @@ export function parseOutletUploadRows(rawRows: Record<string, unknown>[]): Outle
     outletId:        cell(raw['Outlet ID']),
     outletName:      cell(raw['Outlet Name']),
     programName:     cell(raw['Program Name']),
-    programCategory: cell(raw['Program Category']),
+    // Read the current 'Sub-Program' header first, falling back to the legacy 'Program Category'
+    // header so files created before the rename still parse. Field name is unchanged.
+    programCategory: cell(raw['Sub-Program'] ?? raw['Program Category']),
     outletType:      cell(raw['Outlet Type']),
     beat:            cell(raw['Beat']),
     distributorId:   cell(raw['Distributor ID']),
@@ -184,6 +202,11 @@ export function parseOutletUploadRows(rawRows: Record<string, unknown>[]): Outle
     // A blank cell yields '' — the backend treats '' as a no-op (grouping unchanged), so a
     // routine re-upload that leaves the column blank never un-groups. Always emit the key.
     parentId:        cell(raw['Parent ID']),
+    // Optional geo columns (tenant-gated). Always emitted (blank when the columns are absent) so
+    // they flow through to the backend upsert unchanged; the backend applies them only when the
+    // tenant's geo flag is on.
+    latitude:        cell(raw['Latitude']),
+    longitude:       cell(raw['Longitude']),
   }));
 }
 
@@ -217,7 +240,7 @@ export function parseReKYCFlagRows(rawRows: Record<string, unknown>[]): ReKYCFla
 
 /**
  * Case-INSENSITIVE lookup that returns the CONFIGURED (canonical) spelling, or undefined
- * if there's no match. Program Name / Program Category are matched this way so an upload of
+ * if there's no match. Program Name / Sub-Program are matched this way so an upload of
  * "trade loyalty" resolves to the configured "Trade Loyalty" — and the caller rewrites the
  * cell to the canonical value so what's stored (and later filtered on) has consistent casing.
  * (Outlet Type is already case-insensitive via its own uppercased set.)
@@ -248,6 +271,10 @@ export function validateOutletUpload(
    *  warning, not an error): the upsert applies field changes but the outlet stays hidden until
    *  un-parked. Lets the master upload surface it instead of a silent "OK". */
   parkedOutletIds?:  Set<string>,
+  /** When true (tenant feature `outletMasterGeo` on), a non-blank Latitude/Longitude cell is
+   *  range-validated (finite number within WGS84 bounds). Blank cells are always allowed, and
+   *  when false the columns are ignored entirely — so other tenants' uploads are unaffected. */
+  geoEnabled: boolean = false,
 ): OutletUploadValidationResult {
   const existingMap  = new Map(existingOutlets.map(o => [o.outletId, o]));
   const seenInUpload = new Map<string, number>(); // outletId → first rowNum
@@ -319,12 +346,12 @@ export function validateOutletUpload(
         }
       }
 
-      // 6. Program Category is OPTIONAL (owner 2026-07-03); if provided it must be a configured value
+      // 6. Sub-Program is OPTIONAL (owner 2026-07-03); if provided it must be a configured value
       //    (case-insensitive; canonicalised).
       if (row.programCategory) {
         const canon = canonicalValue(row.programCategory, validCategories);
         if (!canon) {
-          errors.push(`Program Category "${row.programCategory}" is not in the configured list. Valid values: ${validCategories.join(', ')}`);
+          errors.push(`Sub-Program "${row.programCategory}" is not in the configured list. Valid values: ${validCategories.join(', ')}`);
         } else {
           row.programCategory = canon;
         }
@@ -397,7 +424,7 @@ export function validateOutletUpload(
       if (row.programCategory) {
         const canon = canonicalValue(row.programCategory, validCategories);
         if (!canon) {
-          errors.push(`Program Category "${row.programCategory}" is not in the configured list. Valid values: ${validCategories.join(', ')}`);
+          errors.push(`Sub-Program "${row.programCategory}" is not in the configured list. Valid values: ${validCategories.join(', ')}`);
         } else {
           row.programCategory = canon;
         }
@@ -441,6 +468,30 @@ export function validateOutletUpload(
     // after Confirm. Skipped when the list didn't load (undefined); enforced even for an empty set.
     if (row.parentId && validParentCodes && !validParentCodes.has(row.parentId)) {
       errors.push(`Parent ID "${row.parentId}" is not an existing owner group. Create it under Owner Groups first, or leave the Parent ID column blank.`);
+    }
+
+    // Latitude / Longitude — only range-checked when the tenant's geo feature is on AND the cell is
+    // non-blank. A blank cell is always a no-op (the columns are optional for every tenant), and
+    // when geoEnabled is false the values are not validated at all. Mirrors the backend guard.
+    if (geoEnabled) {
+      if (row.latitude && row.latitude.trim()) {
+        const lat = Number(row.latitude);
+        if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+          errors.push(`Latitude "${row.latitude}" is invalid — must be a number between -90 and 90`);
+        }
+      }
+      if (row.longitude && row.longitude.trim()) {
+        const lng = Number(row.longitude);
+        if (!Number.isFinite(lng) || lng < -180 || lng > 180) {
+          errors.push(`Longitude "${row.longitude}" is invalid — must be a number between -180 and 180`);
+        }
+      }
+      // Both-or-neither: a lone coordinate is a meaningless point. Require the pair together.
+      const hasLat = !!(row.latitude && row.latitude.trim());
+      const hasLng = !!(row.longitude && row.longitude.trim());
+      if (hasLat !== hasLng) {
+        errors.push('Latitude and Longitude must be provided together — fill both or leave both blank');
+      }
     }
 
     // Parked target — a WARNING, not an error: the upsert still applies field changes, but the
@@ -595,8 +646,11 @@ export function getOutletAdditionTemplateData(
   validCategories:  string[],
   validOutletTypes: string[],
   leafRoleCode:     string,
+  /** When true (tenant feature `outletMasterGeo` on), the template gains optional Latitude/Longitude
+   *  columns + guidance. When false the template is unchanged, so other tenants never see them. */
+  geoEnabled: boolean = false,
 ): OutletTemplateData {
-  const headers = [...OUTLET_UPLOAD_HEADERS];
+  const headers = [...OUTLET_UPLOAD_HEADERS, ...(geoEnabled ? ['Latitude', 'Longitude'] : [])];
 
   // Outlet types are tenant-specific (the enabled OutletTypeClientConfig codes). The
   // template MUST use the same source as validateOutletUpload, or it would instruct users
@@ -609,8 +663,8 @@ export function getOutletAdditionTemplateData(
     : 'No outlet types are enabled for this tenant yet — ask Gifsy to enable outlet types before adding outlets';
 
   const exampleRows: string[][] = [
-    ['OUT-2026-001', 'Verma Traders', validPrograms[0] ?? 'Trade Loyalty', validCategories[0] ?? 'Standard', exType1, 'Andheri Beat',  'DIST-01', 'ABC Distributors', 'Yes', 'Mumbai', 'Maharashtra', 'West Zone',   `${leafRoleCode}-M001`, 'BANK', 'CPP01'],
-    ['OUT-2026-002', 'Patel Kirana',  validPrograms[0] ?? 'Trade Loyalty', validCategories[1] ?? 'Premium',  exType2, 'Borivali Beat', 'DIST-02', 'XYZ Distributors', 'No',  'Pune',   'Maharashtra', '',            `${leafRoleCode}-P001`, 'ANY',  ''],
+    ['OUT-2026-001', 'Verma Traders', validPrograms[0] ?? 'Trade Loyalty', validCategories[0] ?? 'Standard', exType1, 'Andheri Beat',  'DIST-01', 'ABC Distributors', 'Yes', 'Mumbai', 'Maharashtra', 'West Zone',   `${leafRoleCode}-M001`, 'BANK', 'CPP01', ...(geoEnabled ? ['19.0760', '72.8777'] : [])],
+    ['OUT-2026-002', 'Patel Kirana',  validPrograms[0] ?? 'Trade Loyalty', validCategories[1] ?? 'Premium',  exType2, 'Borivali Beat', 'DIST-02', 'XYZ Distributors', 'No',  'Pune',   'Maharashtra', '',            `${leafRoleCode}-P001`, 'ANY',  '',      ...(geoEnabled ? ['18.5204', '73.8567'] : [])],
   ];
 
   const dosAndDonts: string[][] = [
@@ -620,7 +674,7 @@ export function getOutletAdditionTemplateData(
     ['Outlet ID',         'Unique outlet code you assign — e.g. OUT-2026-001. Any characters are accepted (letters, numbers, spaces, /, ., &, etc.). Once created, this ID cannot be changed via upload.'],
     ['Outlet Name',       'Shop/store name as it appears on the board'],
     ['Program Name',      `Must be one of: ${validPrograms.join(', ')}`],
-    ['Program Category',  `Must be one of: ${validCategories.join(', ')}`],
+    ['Sub-Program',       `Must be one of: ${validCategories.join(', ')}`],
     ['Outlet Type',       outletTypeRef],
     ['Beat',              'Optional — beat/area name this outlet belongs to, or leave blank'],
     ['Distributor ID',    'Reference only — enter distributor code if known, or leave blank'],
@@ -632,25 +686,29 @@ export function getOutletAdditionTemplateData(
     ['XSR ID',            `Employee ID of the ${leafRoleCode} (field sales rep) this outlet is assigned to. Must exist in the Employee Hierarchy.`],
     ['Payout Method',     'Optional — BANK, UPI, or ANY (case-insensitive). Blank defaults to BANK. UPI only if UPI payouts are enabled for your tenant, else the row is rejected.'],
     ['Parent ID',         'Optional — the Owner Group / Parent ID (parent code) to link this outlet to an owner group. Leave blank if the outlet is standalone.'],
+    ...(geoEnabled ? [
+      ['Latitude',  'Optional — outlet location latitude in decimal degrees between -90 and 90 (e.g. 19.0760). Leave blank if unknown.'],
+      ['Longitude', 'Optional — outlet location longitude in decimal degrees between -180 and 180 (e.g. 72.8777). Leave blank if unknown.'],
+    ] : []),
     ['', ''],
     ['✓ DOs', ''],
     ['DO',  'Use whatever Outlet ID coding scheme you like — any characters are accepted, just keep each ID unique'],
     ['DO',  'Ensure the XSR ID exists in the Employee Hierarchy before uploading'],
     ['DO',  'If you fill the Metro column, enter exactly "Yes" or "No" (without quotes)'],
-    ['DO',  'Use the exact Program Name and Program Category values from the configured list'],
+    ['DO',  'Use the exact Program Name and Sub-Program values from the configured list'],
     ['DO',  'Keep Outlet IDs unique — this system does not allow editing via this upload'],
     ['', ''],
     ['✗ DON\'Ts', ''],
     ['DON\'T', 'Re-upload an existing Outlet ID — it will be rejected. This upload is for new outlets only.'],
     ['DON\'T', 'Enter an XSR ID that belongs to a non-field role (SO, ASM, RSM, ZNM, NSM) — only ISR-level IDs are accepted'],
-    ['DON\'T', 'Leave Outlet ID, Outlet Name, Program Name, Program Category, Outlet Type, City, State, or XSR ID blank (Beat, Metro, Payout Method and Parent ID may be left blank)'],
+    ['DON\'T', 'Leave Outlet ID, Outlet Name, Program Name, Sub-Program, Outlet Type, City, State, or XSR ID blank (Beat, Metro, Payout Method and Parent ID may be left blank)'],
     ['DON\'T', 'Enter UPI in Payout Method when UPI payouts are not enabled for your tenant — the row will be rejected'],
     ['', ''],
     ['COMMON MISTAKES', ''],
     ['MISTAKE', 'Using a SO/ASM ID in the XSR ID column — only leaf-level (ISR) IDs are accepted'],
     ['MISTAKE', 'Entering "Yes " (with trailing space) in Metro — trim all spaces'],
     ['MISTAKE', 'Uploading the same Outlet ID twice in one file — both rows will be marked as errors'],
-    ['MISTAKE', 'Program Name or Category that doesn\'t exactly match the configured list (case-sensitive)'],
+    ['MISTAKE', 'Program Name or Sub-Program that doesn\'t exactly match the configured list (case-sensitive)'],
   ];
 
   // Sanitise every cell — the tenant-configured program/category values are
@@ -1097,7 +1155,7 @@ export function generateOutletGuideHtml(validOutletTypes: string[] = []): string
   <tr><td><code>Outlet ID</code></td><td><span class="badge badge-red">Required</span></td><td>Any characters accepted (letters, numbers, spaces, /, ., &, etc.). Must be unique — upload rejected if ID already exists.</td></tr>
   <tr><td><code>Outlet Name</code></td><td><span class="badge badge-red">Required</span></td><td>Shop name as it appears</td></tr>
   <tr><td><code>Program Name</code></td><td><span class="badge badge-red">Required</span></td><td>Must match a value from Settings → Programs</td></tr>
-  <tr><td><code>Program Category</code></td><td><span class="badge badge-red">Required</span></td><td>Must match a value from Settings → Program Categories</td></tr>
+  <tr><td><code>Sub-Program</code></td><td><span class="badge badge-red">Required</span></td><td>Must match a value from Settings → Program Categories</td></tr>
   <tr><td><code>Outlet Type</code></td><td><span class="badge badge-red">Required</span></td><td>${outletTypeCell}</td></tr>
   <tr><td><code>Beat</code></td><td><span class="badge badge-green">Optional</span></td><td>Beat name for this outlet, or leave blank</td></tr>
   <tr><td><code>Distributor ID</code></td><td><span class="badge badge-green">Optional</span></td><td>Reference only — stored as-is, not validated</td></tr>
@@ -1259,7 +1317,8 @@ export function buildOutletUploadErrorReport(
       'Outlet ID':        p?.outletId ?? r.outletId,
       'Outlet Name':      p?.outletName ?? '',
       'Program Name':     p?.programName ?? '',
-      'Program Category': p?.programCategory ?? '',
+      // Key must match the renamed 'Sub-Program' column header (the report maps columns → row keys).
+      'Sub-Program':      p?.programCategory ?? '',
       'Outlet Type':      p?.outletType ?? '',
       'Beat':             p?.beat ?? '',
       'Distributor ID':   p?.distributorId ?? '',

@@ -28,6 +28,7 @@ vi.mock('@/lib/gifsy-settings', () => ({
 
 import {
   OUTLET_UPLOAD_HEADERS,
+  OPTIONAL_OUTLET_HEADERS,
   REKYC_FLAG_HEADERS,
   REKYC_FIELD_KEYS,
   DEACTIVATE_HEADERS,
@@ -362,16 +363,16 @@ describe('outlet master row validation — errors (CREATE)', () => {
     expect(result.rows[0].errors.some(e => /program name/i.test(e))).toBe(true);
   });
 
-  it('O22 — program category not in configured list is an error', () => {
+  it('O22 — sub-program not in configured list is an error', () => {
     const result = validateOutletUpload([makeRow({ programCategory: 'Unknown Cat' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('ERROR');
-    expect(result.rows[0].errors.some(e => /program category/i.test(e))).toBe(true);
+    expect(result.rows[0].errors.some(e => /sub-program/i.test(e))).toBe(true);
   });
 
-  it('O22b — blank program category is VALID (Program Category is OPTIONAL, owner 2026-07-03)', () => {
+  it('O22b — blank sub-program is VALID (Sub-Program is OPTIONAL, owner 2026-07-03)', () => {
     const result = validateOutletUpload([makeRow({ programCategory: '' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('OK');
-    expect(result.rows[0].errors.some(e => /program category/i.test(e))).toBe(false);
+    expect(result.rows[0].errors.some(e => /sub-program/i.test(e))).toBe(false);
   });
 
   it('O23 — metro value not Yes/No is an error', () => {
@@ -1098,5 +1099,179 @@ describe('O90–O97 — Parent ID column in outlet addition', () => {
       [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     expect(result.rows[0].status).toBe('OK');
+  });
+});
+
+// ─── O100–O106: "Program Category" → "Sub-Program" rename (label + backward-compat) ──
+// Only the user-facing column label changed; the field is still `programCategory`, and files
+// carrying the OLD 'Program Category' header must keep working.
+
+describe('O100–O106 — Program Category → Sub-Program rename', () => {
+  it('O100 — OUTLET_UPLOAD_HEADERS uses "Sub-Program", not "Program Category"', () => {
+    expect(OUTLET_UPLOAD_HEADERS).toContain('Sub-Program');
+    expect(OUTLET_UPLOAD_HEADERS).not.toContain('Program Category');
+  });
+
+  it('O101 — parseOutletUploadRows reads the new "Sub-Program" header into programCategory', () => {
+    const raw = [{
+      'Outlet ID': 'OUT-001', 'Outlet Name': 'Test Shop', 'Program Name': 'Trade Loyalty',
+      'Sub-Program': 'Standard', 'Outlet Type': 'SSS', 'City': 'Mumbai',
+      'State': 'Maharashtra', 'XSR ID': 'ISR-M001',
+    }];
+    expect(parseOutletUploadRows(raw)[0].programCategory).toBe('Standard');
+  });
+
+  it('O102 — parseOutletUploadRows still reads the LEGACY "Program Category" header (alias)', () => {
+    const raw = [{
+      'Outlet ID': 'OUT-001', 'Outlet Name': 'Test Shop', 'Program Name': 'Trade Loyalty',
+      'Program Category': 'Premium', 'Outlet Type': 'SSS', 'City': 'Mumbai',
+      'State': 'Maharashtra', 'XSR ID': 'ISR-M001',
+    }];
+    expect(parseOutletUploadRows(raw)[0].programCategory).toBe('Premium');
+  });
+
+  it('O103 — the new "Sub-Program" header prevails when BOTH headers are present', () => {
+    const raw = [{
+      'Outlet ID': 'OUT-001', 'Sub-Program': 'Standard', 'Program Category': 'Premium',
+    }];
+    expect(parseOutletUploadRows(raw)[0].programCategory).toBe('Standard');
+  });
+
+  it('O104 — header validation accepts a file carrying the LEGACY "Program Category" header', () => {
+    const legacy = OUTLET_UPLOAD_HEADERS.map(h => (h === 'Sub-Program' ? 'Program Category' : h));
+    expect(validateOutletUploadHeaders(legacy)).toBeNull();
+  });
+
+  it('O105 — header validation accepts the new "Sub-Program" header', () => {
+    expect(validateOutletUploadHeaders(OUTLET_UPLOAD_HEADERS)).toBeNull();
+  });
+
+  it('O106 — header validation reports "Sub-Program" missing when NEITHER header is present', () => {
+    const without = OUTLET_UPLOAD_HEADERS.filter(h => h !== 'Sub-Program');
+    expect(validateOutletUploadHeaders(without)).toMatch(/Sub-Program/);
+  });
+});
+
+// ─── O110–O119: Latitude/Longitude geo columns (tenant-gated via geoEnabled) ──────────
+
+describe('O110–O119 — Latitude/Longitude geo columns', () => {
+  it('O110 — Latitude & Longitude are in OPTIONAL_OUTLET_HEADERS (never required)', () => {
+    expect(OPTIONAL_OUTLET_HEADERS).toContain('Latitude');
+    expect(OPTIONAL_OUTLET_HEADERS).toContain('Longitude');
+  });
+
+  it('O111 — header validation passes whether or not Latitude/Longitude are present', () => {
+    expect(validateOutletUploadHeaders([...OUTLET_UPLOAD_HEADERS])).toBeNull();
+    expect(validateOutletUploadHeaders([...OUTLET_UPLOAD_HEADERS, 'Latitude', 'Longitude'])).toBeNull();
+  });
+
+  it('O112 — parseOutletUploadRows reads Latitude/Longitude cells', () => {
+    const raw = [{
+      'Outlet ID': 'OUT-001', 'Outlet Name': 'Test Shop', 'Program Name': 'Trade Loyalty',
+      'Sub-Program': 'Standard', 'Outlet Type': 'SSS', 'City': 'Mumbai', 'State': 'Maharashtra',
+      'XSR ID': 'ISR-M001', 'Latitude': '19.0760', 'Longitude': '72.8777',
+    }];
+    const row = parseOutletUploadRows(raw)[0];
+    expect(row.latitude).toBe('19.0760');
+    expect(row.longitude).toBe('72.8777');
+  });
+
+  it('O113 — parseOutletUploadRows emits "" for absent Latitude/Longitude columns', () => {
+    const raw = [{
+      'Outlet ID': 'OUT-001', 'Outlet Name': 'Test Shop', 'Program Name': 'Trade Loyalty',
+      'Sub-Program': 'Standard', 'Outlet Type': 'SSS', 'City': 'Mumbai', 'State': 'Maharashtra',
+      'XSR ID': 'ISR-M001',
+    }];
+    const row = parseOutletUploadRows(raw)[0];
+    expect(row.latitude).toBe('');
+    expect(row.longitude).toBe('');
+  });
+
+  it('O114 — geoEnabled: a valid lat/long passes', () => {
+    const result = validateOutletUpload(
+      [makeRow({ latitude: '19.0760', longitude: '72.8777' })],
+      [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      undefined, undefined, true,
+    );
+    expect(result.rows[0].status).toBe('OK');
+  });
+
+  it('O115 — geoEnabled: blank lat/long is allowed (no-op)', () => {
+    const result = validateOutletUpload(
+      [makeRow({ latitude: '', longitude: '' })],
+      [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      undefined, undefined, true,
+    );
+    expect(result.rows[0].status).toBe('OK');
+  });
+
+  it('O116 — geoEnabled: an out-of-range latitude is an error', () => {
+    const result = validateOutletUpload(
+      [makeRow({ latitude: '91', longitude: '72.8777' })],
+      [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      undefined, undefined, true,
+    );
+    expect(result.rows[0].status).toBe('ERROR');
+    expect(result.rows[0].errors.some(e => /latitude/i.test(e))).toBe(true);
+  });
+
+  it('O117 — geoEnabled: an out-of-range / non-numeric longitude is an error', () => {
+    const bad = validateOutletUpload(
+      [makeRow({ latitude: '19.07', longitude: '200' })],
+      [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      undefined, undefined, true,
+    );
+    expect(bad.rows[0].status).toBe('ERROR');
+    expect(bad.rows[0].errors.some(e => /longitude/i.test(e))).toBe(true);
+
+    const nan = validateOutletUpload(
+      [makeRow({ latitude: '19.07', longitude: 'abc' })],
+      [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      undefined, undefined, true,
+    );
+    expect(nan.rows[0].status).toBe('ERROR');
+    expect(nan.rows[0].errors.some(e => /longitude/i.test(e))).toBe(true);
+  });
+
+  it('O118 — geoEnabled OFF (default): garbage lat/long is NOT validated (other tenants unaffected)', () => {
+    const result = validateOutletUpload(
+      [makeRow({ latitude: '999', longitude: 'nope' })],
+      [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+    );
+    expect(result.rows[0].status).toBe('OK');
+    expect(result.rows[0].errors.some(e => /latitude|longitude/i.test(e))).toBe(false);
+  });
+
+  it('O120 — geoEnabled: a lone coordinate (lat without long, or long without lat) is an error', () => {
+    const latOnly = validateOutletUpload(
+      [makeRow({ latitude: '19.0760', longitude: '' })],
+      [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      undefined, undefined, true,
+    );
+    expect(latOnly.rows[0].status).toBe('ERROR');
+    expect(latOnly.rows[0].errors.some(e => /together/i.test(e))).toBe(true);
+
+    const lngOnly = validateOutletUpload(
+      [makeRow({ latitude: '', longitude: '72.8777' })],
+      [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      undefined, undefined, true,
+    );
+    expect(lngOnly.rows[0].status).toBe('ERROR');
+    expect(lngOnly.rows[0].errors.some(e => /together/i.test(e))).toBe(true);
+  });
+
+  it('O119 — template: geoEnabled adds Latitude/Longitude columns; default omits them', () => {
+    const base = getOutletAdditionTemplateData(['Trade Loyalty'], ['Standard'], ['RETAILER'], 'XSR');
+    expect(base.headers).not.toContain('Latitude');
+    expect(base.headers).not.toContain('Longitude');
+
+    const geo = getOutletAdditionTemplateData(['Trade Loyalty'], ['Standard'], ['RETAILER'], 'XSR', true);
+    expect(geo.headers).toContain('Latitude');
+    expect(geo.headers).toContain('Longitude');
+    // Base (non-geo) columns keep their positions — geo columns are appended at the end.
+    expect(geo.headers.slice(0, base.headers.length)).toEqual(base.headers);
+    // A column-reference line for each geo column is present in the Dos & Don'ts sheet.
+    expect(geo.dosAndDonts.some(r => r[0] === 'Latitude')).toBe(true);
+    expect(geo.dosAndDonts.some(r => r[0] === 'Longitude')).toBe(true);
   });
 });

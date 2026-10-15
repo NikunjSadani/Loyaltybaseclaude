@@ -13,6 +13,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync } from 'fs';
 import { resolve }                  from 'path';
+import * as XLSX                    from 'xlsx';
 
 const src = (rel: string) =>
   readFileSync(resolve(__dirname, '../../..', rel), 'utf-8');
@@ -155,6 +156,65 @@ describe('D — Column structure', () => {
   it('D3: source references Account Holder Name column', () => {
     const code = src('src/lib/outlet-master-export.ts');
     expect(code).toMatch(/Account Holder Name/);
+  });
+
+  it('D4: the Program Category column label is renamed to "Sub-Program"', () => {
+    const code = src('src/lib/outlet-master-export.ts');
+    expect(code).toContain("label: 'Sub-Program'");
+    // The old label is gone (the `programCategory` FIELD/key is intentionally unchanged).
+    expect(code).not.toContain("'Program Category'");
+  });
+});
+
+// ─── F: Geo columns (tenant-gated via geoEnabled) ────────────────────────────
+
+describe('F — Latitude/Longitude geo columns', () => {
+  let generateFn: typeof import('../outlet-master-export').generateOutletMasterExcel;
+  let demoRows:   typeof import('../outlet-master-export').DEMO_OUTLET_MASTER_ROWS;
+
+  beforeAll(async () => {
+    const mod = await import('../outlet-master-export');
+    generateFn = mod.generateOutletMasterExcel;
+    demoRows   = mod.DEMO_OUTLET_MASTER_ROWS;
+  });
+
+  /** Read back the header (label) row — wsData is [sectionRow, headerRow, ...dataRows]. */
+  const labelRow = (bytes: Uint8Array): string[] => {
+    const wb  = XLSX.read(bytes, { type: 'array' });
+    const ws  = wb.Sheets[wb.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '' });
+    return (aoa[1] as string[]) ?? [];
+  };
+
+  it('F1: default export (geoEnabled off) omits Latitude/Longitude', () => {
+    const labels = labelRow(generateFn(demoRows));
+    expect(labels).not.toContain('Latitude');
+    expect(labels).not.toContain('Longitude');
+  });
+
+  it('F2: geoEnabled export includes Latitude/Longitude columns', () => {
+    const labels = labelRow(generateFn(demoRows, true));
+    expect(labels).toContain('Latitude');
+    expect(labels).toContain('Longitude');
+  });
+
+  it('F3: OUTLET_MASTER_COLUMN_COUNT (base) is unchanged by the geo feature', async () => {
+    const { OUTLET_MASTER_COLUMN_COUNT } = await import('../outlet-master-export');
+    const baseLen = labelRow(generateFn(demoRows)).length;
+    expect(baseLen).toBe(OUTLET_MASTER_COLUMN_COUNT);
+    // Geo export is exactly two columns wider.
+    expect(labelRow(generateFn(demoRows, true)).length).toBe(baseLen + 2);
+  });
+
+  it('F4: geo export maps OutletMasterRow.latitude/longitude into the cells', () => {
+    const row = { ...demoRows[0], latitude: '19.0760', longitude: '72.8777' };
+    const wb  = XLSX.read(generateFn([row], true), { type: 'array' });
+    const ws  = wb.Sheets[wb.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '' });
+    const labels = aoa[1] as string[];
+    const data   = aoa[2] as string[];
+    expect(data[labels.indexOf('Latitude')]).toBe('19.0760');
+    expect(data[labels.indexOf('Longitude')]).toBe('72.8777');
   });
 });
 

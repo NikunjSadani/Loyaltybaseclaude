@@ -33,6 +33,7 @@ import {
 } from '@/lib/outlet-upload';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import { useGifsySettings } from '@/lib/gifsy-settings';
+import { useTenantFeatures } from '@/lib/tenant-features';
 import { downloadBlob } from '@/lib/download';
 import { chunkArray } from '@/lib/chunk';
 import type { HierarchyEmployee } from '@/types';
@@ -592,7 +593,7 @@ function OutletEditModal({
 
           <div className="grid grid-cols-2 gap-3">
             {field('Program name', programName, setProgramName)}
-            {field('Program category', programCategory, setProgramCategory)}
+            {field('Sub-Program', programCategory, setProgramCategory)}
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -643,11 +644,16 @@ function OutletEditModal({
 export default function OutletsPage() {
   const [activeTab, setActiveTab] = useState<TabId>('master');
 
-  // Per-tenant allowed Program Name / Program Category lists (owner-editable in Gifsy Settings).
+  // Per-tenant allowed Program Name / Sub-Program lists (owner-editable in Gifsy Settings).
   // Falls back to the module defaults until settings hydrate, and if a list is absent/empty.
   const settings = useGifsySettings();
   const validPrograms   = settings.outletPrograms?.length   ? settings.outletPrograms   : DEFAULT_PROGRAMS;
   const validCategories = settings.outletCategories?.length ? settings.outletCategories : DEFAULT_CATEGORIES;
+
+  // Per-tenant geo feature — gates the optional Latitude/Longitude columns in the outlet-master
+  // upload template + validation (Bajaj-only; OFF for Deoleo and every other tenant by default).
+  const { features } = useTenantFeatures('/api/admin/settings/config');
+  const geoEnabled = features.outletMasterGeo;
 
   // ── Outlet list state ──
   // `outlets` = the CURRENT server page (drives the table). Server-paginated +
@@ -918,7 +924,7 @@ export default function OutletsPage() {
       // PARKED outlet IDs (from the full tenant list) — a row targeting one is flagged so the
       // upload never silently "succeeds" on a hidden outlet. Parent codes validate the Parent ID.
       const parkedIds = new Set(allOutlets.filter(o => o.kycStatus === 'PARKED').map(o => o.outletId));
-      const result   = validateOutletUpload(parsed, existing, validPrograms, validCategories, outletTypes, employees, LEAF_ROLE_CODE, parentCodes ?? undefined, parkedIds);
+      const result   = validateOutletUpload(parsed, existing, validPrograms, validCategories, outletTypes, employees, LEAF_ROLE_CODE, parentCodes ?? undefined, parkedIds, geoEnabled);
       setOutletParsedRows(parsed);
       setOutletValidation(result);
       setOutletUploadState('parsed');
@@ -926,7 +932,7 @@ export default function OutletsPage() {
       setOutletValidation({ headerError: 'Failed to read file — please ensure it is a valid XLSX file', rows: [], hasErrors: true, canProceed: false, summary: { total: 0, creates: 0, updates: 0, reactivates: 0, errors: 0 } });
       setOutletUploadState('parsed');
     }
-  }, [allOutlets, outletTypes, employees, parseXlsx, validPrograms, validCategories, outletUploadDisabledReason, parentCodes]);
+  }, [allOutlets, outletTypes, employees, parseXlsx, validPrograms, validCategories, outletUploadDisabledReason, parentCodes, geoEnabled]);
 
   // ── Handle re-KYC upload ──
   const handleReKYCFile = useCallback(async (file: File) => {
@@ -1025,7 +1031,7 @@ export default function OutletsPage() {
   }
 
   function downloadOutletTemplate() {
-    const { headers, exampleRows, dosAndDonts } = getOutletAdditionTemplateData(validPrograms, validCategories, outletTypes, LEAF_ROLE_CODE);
+    const { headers, exampleRows, dosAndDonts } = getOutletAdditionTemplateData(validPrograms, validCategories, outletTypes, LEAF_ROLE_CODE, geoEnabled);
     const wb = XLSX.utils.book_new();
     // Sheet 1: Dos & Don'ts (opens first)
     const ddSheet = aoaToSheetSafe(dosAndDonts);

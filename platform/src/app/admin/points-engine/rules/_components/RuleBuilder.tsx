@@ -502,7 +502,7 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                   onChange={(v) => setAttach({ program: v || null })}
                 />
               </Field>
-              <Field label="Program category" hint="Optional sub-segment.">
+              <Field label="Sub-Program" hint="Optional sub-segment.">
                 <TextField
                   value={draft.attachsTo.programCategory ?? ''}
                   disabled={readOnly}
