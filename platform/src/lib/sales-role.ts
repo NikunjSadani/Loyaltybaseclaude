@@ -87,3 +87,48 @@ const CHILD_ROLE: Record<SalesRole, SalesRole | null> = {
 export function childRole(role: SalesRole): SalesRole | null {
   return CHILD_ROLE[role];
 }
+
+// ─── Bajaj nomenclature rename (display-only; internal codes UNCHANGED) ─────────
+// Bajaj shows SHORT display labels instead of the long Deoleo ROLE_LABELS. The internal
+// role CODES (XSR/SO/ASM/RSM/ZNM/NSM) are the machine identifiers and never change — only
+// the SHOWN label differs. This local map mirrors employee-hierarchy's
+// displayLabelForTenant('bajaj', …) EXACTLY, kept local to avoid pulling the xlsx-heavy
+// employee-hierarchy module into the widely-imported /sales bundle.
+// See docs/plans/BAJAJ-HIERARCHY-RENAME.md. XSR→ISR, SO→SO, ASM→ASM, RSM→SM, ZNM→ZH, NSM→NSM.
+const BAJAJ_ROLE_LABELS: Record<SalesRole, string> = {
+  XSR: 'ISR',
+  SO:  'SO',
+  ASM: 'ASM',
+  RSM: 'SM',
+  ZNM: 'ZH',
+  NSM: 'NSM',
+};
+
+/** True for the Bajaj tenant slug (case/space-insensitive). */
+function isBajajSlug(slug: string | null | undefined): boolean {
+  return (slug ?? '').trim().toLowerCase() === 'bajaj';
+}
+
+/**
+ * Tenant-aware role label for the /sales UI.
+ *  • Bajaj  → the SHORT Bajaj display label (ISR/SO/ASM/SM/ZH/NSM).
+ *  • Deoleo / every other tenant → the EXISTING long ROLE_LABELS value, UNCHANGED
+ *    (byte-identical — `roleLabelFor('deoleo', code) === ROLE_LABELS[code]` for every code).
+ * Falls back to the raw code for an unrecognised code under either tenant.
+ */
+export function roleLabelFor(slug: string, code: string): string {
+  const c = code as SalesRole;
+  if (isBajajSlug(slug)) return BAJAJ_ROLE_LABELS[c] ?? code;
+  return ROLE_LABELS[c] ?? code;
+}
+
+/**
+ * Tenant-aware label for the immediate subordinate role (drives the KYC-list member filter
+ * "All XSR" / "All ISR"). Deoleo returns the raw child CODE (byte-identical to `childRole`);
+ * Bajaj returns the child's SHORT Bajaj label. Null for a leaf role (XSR).
+ */
+export function childRoleLabelFor(slug: string, role: SalesRole): string | null {
+  const child = childRole(role);
+  if (!child) return null;
+  return isBajajSlug(slug) ? (BAJAJ_ROLE_LABELS[child] ?? child) : child;
+}

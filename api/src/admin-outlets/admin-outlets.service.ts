@@ -7,6 +7,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
 import { parseOutletPaymentType } from '../common/payment-type.helper';
 import { istDateKey } from '../common/ist-date';
+import { rungDisplayLabel } from '../common/hierarchy-labels';
 import {
   acquireIdentityLocks,
   checkGroupUniqueness,
@@ -839,6 +840,11 @@ export class AdminOutletsService {
     const geoEnabled =
       (c?.features as Record<string, unknown> | null)?.outletMasterGeo === true;
 
+    // Leaf-rung DISPLAY label for user-facing messages (Bajaj: "ISR"; every other tenant incl.
+    // Deoleo: "XSR"). The INTERNAL leaf code stays 'XSR' everywhere — only the message vocabulary
+    // changes. Client.id IS the tenant slug, so `clientId` is the slug the label resolver keys on.
+    const leafLabel = rungDisplayLabel(clientId, 'XSR');
+
     // ── Owner-group PRELOADS (batched over the LINK rows only) ────────────────────
     // A Parent ID cell only ever does work when it carries a partnerCode (LINK / add-to-parent).
     // A blank cell is a NO-OP (un-grouping is a separate explicit action — ungroupOutlet — so a
@@ -936,7 +942,7 @@ export class AdminOutletsService {
           select: { id: true },
         });
         if (!su) {
-          errors.push(`XSR ${xsrId} not found — upload the sales hierarchy first`);
+          errors.push(`${leafLabel} ${xsrId} not found — upload the sales hierarchy first`);
         } else {
           salesUserId = su.id;
         }

@@ -7,6 +7,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
 import { istDateKey, istMonthBounds } from '../common/ist-date';
 import { isKycInFlight, isReKycPending } from '../common/kyc-rekyc.helper';
+import { rungIdHeader, rungNameHeader, rungPhoneHeader } from '../common/hierarchy-labels';
 import { TargetsService } from '../targets/targets.service';
 import { PointsLedgerQueryDto, TargetVsSalesQueryDto, TicketAgingQueryDto, ReportFormat } from './dto/reports.dto';
 import {
@@ -68,34 +69,47 @@ function dateOnly(d: Date | null | undefined): string {
  * churn the report contract for no gain. The template's single "XSR ID" expands here to the
  * full XSR→NSM hierarchy block; the template's write-only "Payout Method" has no master
  * counterpart. Master-only columns (hierarchy names/phones, owner, KYC, geo, docs) follow.
+ *
+ * The hierarchy-block headers (XSR→NSM × ID/Name/Phone) are tenant-aware: Bajaj emits its own
+ * display headers (ISR Code/SO HQ/…; ISR Name/…; ISR Phone Number/…) while the internal codes
+ * stay XSR…NSM. Every non-bajaj tenant (incl. Deoleo) resolves to the identical `${code} ID` /
+ * `${code} Name` / `${code} Phone Number` strings — byte-identical.
  */
-const OUTLET_MASTER_HEADERS: string[] = [
-  // ── mirror the upload template's order ──
-  'Outlet Code', 'Outlet Name', 'Program Name', 'Sub-Program', 'Outlet Type',
-  'Beat', 'Distributor Code', 'Distributor Name', 'Metro', 'City', 'State', 'Zone',
-  ...RUNGS.flatMap((r) => [`${r} ID`, `${r} Name`, `${r} Phone Number`]),
-  'Parent ID',
-  // ── master-only columns ──
-  'Owner Name', 'Phone Number', 'Address', 'Pincode',
-  'Latitude of Outlet Board', 'Longitude of Outlet Board',
-  'Enrollment by Employee ID', 'Enrollment by Employee Name', 'Enrollment by Employee Phone Number',
-  'Enrollment Date', 'Enrollment Status', 'Profile Status',
-  'Approval by Employee ID', 'Approval by Employee Name', 'Approval by Employee Phone Number',
-  'Approval by Gifsy', 'Approval Date of Gifsy',
-  'Latitude of Bank Details Collection', 'Longitude of Bank Details Collection',
-  'Remarks', 'GST', 'PAN', 'GST Certificate', 'Address Proof', 'Self-Declaration', 'Deactivated At',
-];
+function baseOutletMasterHeaders(clientId: string): string[] {
+  return [
+    // ── mirror the upload template's order ──
+    'Outlet Code', 'Outlet Name', 'Program Name', 'Sub-Program', 'Outlet Type',
+    'Beat', 'Distributor Code', 'Distributor Name', 'Metro', 'City', 'State', 'Zone',
+    ...RUNGS.flatMap((r) => [
+      rungIdHeader(clientId, r),
+      rungNameHeader(clientId, r),
+      rungPhoneHeader(clientId, r),
+    ]),
+    'Parent ID',
+    // ── master-only columns ──
+    'Owner Name', 'Phone Number', 'Address', 'Pincode',
+    'Latitude of Outlet Board', 'Longitude of Outlet Board',
+    'Enrollment by Employee ID', 'Enrollment by Employee Name', 'Enrollment by Employee Phone Number',
+    'Enrollment Date', 'Enrollment Status', 'Profile Status',
+    'Approval by Employee ID', 'Approval by Employee Name', 'Approval by Employee Phone Number',
+    'Approval by Gifsy', 'Approval Date of Gifsy',
+    'Latitude of Bank Details Collection', 'Longitude of Bank Details Collection',
+    'Remarks', 'GST', 'PAN', 'GST Certificate', 'Address Proof', 'Self-Declaration', 'Deactivated At',
+  ];
+}
 
 /**
- * The outlet-master headers for a given tenant. Base = OUTLET_MASTER_HEADERS (every non-geo tenant,
- * incl. Deoleo, is byte-identical). When the tenant's `outletMasterGeo` feature is on (Bajaj), the
- * two outlet-coordinate columns 'Latitude'/'Longitude' are inserted right after 'Metro' — matching
- * the upload template's header names so a downloaded master round-trips back through the upload.
- * (Distinct from the KYC-sourced 'Latitude of Outlet Board' / '… Bank Details Collection' columns.)
+ * The outlet-master headers for a given tenant. Base = baseOutletMasterHeaders (every non-geo
+ * tenant, incl. Deoleo, is byte-identical). When the tenant's `outletMasterGeo` feature is on
+ * (Bajaj), the two outlet-coordinate columns 'Latitude'/'Longitude' are inserted right after
+ * 'Metro' — matching the upload template's header names so a downloaded master round-trips back
+ * through the upload. (Distinct from the KYC-sourced 'Latitude of Outlet Board' / '… Bank Details
+ * Collection' columns.) `clientId` selects the tenant-aware hierarchy-block headers.
  */
-function outletMasterHeaders(geoEnabled: boolean): string[] {
-  if (!geoEnabled) return OUTLET_MASTER_HEADERS;
-  const h = [...OUTLET_MASTER_HEADERS];
+function outletMasterHeaders(geoEnabled: boolean, clientId: string): string[] {
+  const base = baseOutletMasterHeaders(clientId);
+  if (!geoEnabled) return base;
+  const h = [...base];
   const at = h.indexOf('Metro');
   const insertAt = at >= 0 ? at + 1 : h.length;
   h.splice(insertAt, 0, 'Latitude', 'Longitude');
@@ -199,7 +213,9 @@ export class ReportsService {
     // other tenant (incl. Deoleo) gets the byte-identical base column set.
     const client = await this.prisma.client.findUnique({ where: { id: clientId }, select: { features: true } });
     const geoEnabled = ((client?.features ?? {}) as Record<string, unknown>).outletMasterGeo === true;
-    const headers = outletMasterHeaders(geoEnabled);
+    // Tenant-aware hierarchy headers (Bajaj display labels; Deoleo byte-identical). Client.id IS
+    // the tenant slug, so `clientId` is the slug the label resolver keys on (no extra read).
+    const headers = outletMasterHeaders(geoEnabled, clientId);
 
     // 1) Outlets + partner (1 query). Tenant-scoped.
     const outlets = await this.prisma.outlet.findMany({
@@ -360,13 +376,15 @@ export class ReportsService {
         row['Longitude'] = decToStr(o.longitude);
       }
 
-      // sales-hierarchy rungs, mapped by hierarchyLevel.code.
+      // sales-hierarchy rungs, mapped by the UNCHANGED internal hierarchyLevel.code; the column
+      // KEYS use the tenant-aware headers so they match the header row (Bajaj display headers;
+      // Deoleo byte-identical). resolveRungs still buckets by code — only the labels differ.
       const byRung = this.resolveRungs(assignmentByOutlet.get(o.id));
       for (const rung of RUNGS) {
         const su = byRung[rung];
-        row[`${rung} ID`] = su?.employeeCode ?? '';
-        row[`${rung} Name`] = su?.user?.name ?? '';
-        row[`${rung} Phone Number`] = su?.user?.phone ?? '';
+        row[rungIdHeader(clientId, rung)] = su?.employeeCode ?? '';
+        row[rungNameHeader(clientId, rung)] = su?.user?.name ?? '';
+        row[rungPhoneHeader(clientId, rung)] = su?.user?.phone ?? '';
       }
 
       // 29-34 owner / contact / address.
@@ -433,9 +451,11 @@ export class ReportsService {
       return row;
     });
 
-    // Project every row through OUTLET_MASTER_HEADERS so the sheet's COLUMN ORDER is exactly
+    // Project every row through the resolved `headers` so the sheet's COLUMN ORDER is exactly
     // that list regardless of the assignment order above (json_to_sheet derives the header row
-    // from the first object's key order). Also guarantees the 57 columns when outlets is empty.
+    // from the first object's key order). Also guarantees the full column set when outlets is empty.
+    // Row keys are built with the SAME tenant-aware header helpers, so they match `headers` exactly
+    // (a Bajaj row's leaf cell lands under "ISR Code", a Deoleo row's under "XSR ID").
     const orderRow = (r: Record<string, unknown>): Record<string, unknown> =>
       Object.fromEntries(headers.map((h) => [h, r[h] ?? '']));
     const sheetRows = (rows.length ? rows : [emptyOutletMasterRow(headers)]).map(orderRow);

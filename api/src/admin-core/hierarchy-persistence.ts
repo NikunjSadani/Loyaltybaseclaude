@@ -14,6 +14,7 @@
 
 import { BadRequestException } from '@nestjs/common';
 import type { Prisma, UserRole } from '@prisma/client';
+import { isBajajTenant, rungDisplayLabel } from '../common/hierarchy-labels';
 
 // ─── Ported types (from platform/src/types) ───────────────────────────────────
 
@@ -51,6 +52,28 @@ export const DEOLEO_HIERARCHY: TenantHierarchyLevel[] = [
   { tenantId: 'deoleo', level: 6, roleCode: 'NSM', roleLabel: 'NSM', isLeaf: false, isRoot: true },
 ];
 
+// ─── Bajaj hierarchy config ───────────────────────────────────────────────────
+// Same internal role CODES as Deoleo (XSR < SO < ASM < RSM < ZNM < NSM) — only the DISPLAY
+// labels differ (ISR/SO/ASM/SM/ZH/NSM), per platform/docs/plans/BAJAJ-HIERARCHY-RENAME.md.
+// The code→UserRole mapping (mapRoleCodeToUserRole) is keyed on the unchanged codes, so no
+// change is needed there.
+export const BAJAJ_HIERARCHY: TenantHierarchyLevel[] = [
+  { tenantId: 'bajaj', level: 1, roleCode: 'XSR', roleLabel: 'ISR', isLeaf: true, isRoot: false },
+  { tenantId: 'bajaj', level: 2, roleCode: 'SO', roleLabel: 'SO', isLeaf: false, isRoot: false },
+  { tenantId: 'bajaj', level: 3, roleCode: 'ASM', roleLabel: 'ASM', isLeaf: false, isRoot: false },
+  { tenantId: 'bajaj', level: 4, roleCode: 'RSM', roleLabel: 'SM', isLeaf: false, isRoot: false },
+  { tenantId: 'bajaj', level: 5, roleCode: 'ZNM', roleLabel: 'ZH', isLeaf: false, isRoot: false },
+  { tenantId: 'bajaj', level: 6, roleCode: 'NSM', roleLabel: 'NSM', isLeaf: false, isRoot: true },
+];
+
+/**
+ * The hierarchy config for a tenant. Bajaj → BAJAJ_HIERARCHY (bajaj display labels); every other
+ * tenant (incl. Deoleo) → DEOLEO_HIERARCHY. `clientId` IS the tenant slug (Client.id == slug).
+ */
+export function hierarchyConfigForTenant(clientId: string | null | undefined): TenantHierarchyLevel[] {
+  return isBajajTenant(clientId) ? BAJAJ_HIERARCHY : DEOLEO_HIERARCHY;
+}
+
 // ─── Pure: level rows ─────────────────────────────────────────────────────────
 
 export interface LevelRow {
@@ -59,11 +82,27 @@ export interface LevelRow {
   level: number;
 }
 
-/** Tenant hierarchy config → the SalesHierarchyLevel rows to upsert (sorted by level). */
-export function buildLevelRows(config: TenantHierarchyLevel[]): LevelRow[] {
+/**
+ * Tenant hierarchy config → the SalesHierarchyLevel rows to upsert (sorted by level).
+ *
+ * `code` is always the unchanged internal role code. `name` is the DISPLAY label: for a bajaj
+ * tenant it is resolved from the shared label map (ISR/SO/ASM/SM/ZH/NSM) keyed on the code, so
+ * a bajaj snapshot persists bajaj labels even when the caller passes DEOLEO_HIERARCHY. For every
+ * other tenant (incl. Deoleo, and when `clientId` is omitted) it stays the config's own roleLabel
+ * — byte-identical to before.
+ */
+export function buildLevelRows(
+  config: TenantHierarchyLevel[],
+  clientId?: string | null,
+): LevelRow[] {
+  const bajaj = isBajajTenant(clientId);
   return [...config]
     .sort((a, b) => a.level - b.level)
-    .map((l) => ({ code: l.roleCode, name: l.roleLabel, level: l.level }));
+    .map((l) => ({
+      code: l.roleCode,
+      name: bajaj ? rungDisplayLabel(clientId, l.roleCode) : l.roleLabel,
+      level: l.level,
+    }));
 }
 
 // ─── Pure: fine role code → coarse UserRole bucket ────────────────────────────
@@ -131,7 +170,7 @@ export async function persistHierarchy(
   config: TenantHierarchyLevel[],
   tx: Prisma.TransactionClient,
 ): Promise<PersistHierarchyResult> {
-  const levelRows = buildLevelRows(config);
+  const levelRows = buildLevelRows(config, clientId);
 
   // ── 0. Validate phone ↔ employeeCode uniqueness BEFORE any write ──────────
   // A phone number is a person's login, so it must map to exactly ONE employee per

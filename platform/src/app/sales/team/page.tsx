@@ -9,7 +9,8 @@ import {
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Spinner } from '@/components/ui/spinner';
 import { EmptyState } from '@/components/ui/empty-state';
-import { type SalesRole, ROLE_LABELS, getRole, hasTeamView } from '@/lib/sales-role';
+import { type SalesRole, roleLabelFor, getRole, hasTeamView } from '@/lib/sales-role';
+import { useClientConfig } from '@/lib/platform/client-config-context';
 import { classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { istDateKey } from '@/lib/ist-date';
@@ -179,6 +180,7 @@ function SummaryStrip({ members }: { members: MemberStats[] }) {
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function SalesTeamPage() {
+  const slug = useClientConfig().slug;
   const [role,          setRoleState]    = useState<SalesRole>('SO');
   const [loading,       setLoading]      = useState(true);
   const [apiMembers,    setApiMembers]   = useState<MemberStats[]>([]);
@@ -212,13 +214,13 @@ export default function SalesTeamPage() {
     const memberRoleCode = (apiMembers[0]?.role ?? 'XSR') as SalesRole;
     const territory      = salesUserData?.region ?? salesUserData?.zone ?? '';
     const isNSM          = role === 'NSM';
-    const roleLabel      = ROLE_LABELS[memberRoleCode] ?? String(memberRoleCode);
+    const roleLabel      = roleLabelFor(slug, memberRoleCode);
     return {
       heading:    isNSM ? 'National Team' : 'My Team',
       subheading: apiMembers.length > 0 ? `${roleLabel}s · ${territory}` : '',
       memberRole: memberRoleCode,
     };
-  }, [salesUserData, apiMembers, role]);
+  }, [salesUserData, apiMembers, role, slug]);
 
   const sortedMembers = useMemo(
     () => [...apiMembers].sort((a, b) => a.targetPct - b.targetPct),
@@ -257,7 +259,7 @@ export default function SalesTeamPage() {
               <div className="flex items-center justify-between">
                 <CardTitle className="flex items-center gap-2">
                   <Users className="h-4 w-4 text-[var(--brand-primary)]" />
-                  {ROLE_LABELS[memberRole]}s
+                  {roleLabelFor(slug, memberRole)}s
                 </CardTitle>
                 <span className="text-xs text-gray-400">
                   {sortedMembers.length} member{sortedMembers.length !== 1 ? 's' : ''}

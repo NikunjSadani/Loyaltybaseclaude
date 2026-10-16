@@ -46,6 +46,7 @@ import {
   getOutletAdditionTemplateData,
   getParkTemplateData,
   getUnparkTemplateData,
+  buildOutletUploadErrorReport,
   isYes,
 } from '../outlet-upload';
 import type {
@@ -1273,5 +1274,73 @@ describe('O110–O119 — Latitude/Longitude geo columns', () => {
     // A column-reference line for each geo column is present in the Dos & Don'ts sheet.
     expect(geo.dosAndDonts.some(r => r[0] === 'Latitude')).toBe(true);
     expect(geo.dosAndDonts.some(r => r[0] === 'Longitude')).toBe(true);
+  });
+});
+
+// ─── O130–O136: Bajaj leaf-hierarchy column rename ("XSR ID" → "ISR Code"), slug-gated ──────
+// Internal field (xsrId) + role code (XSR) unchanged; only the COLUMN HEADER differs for Bajaj,
+// with a backward-compat parse/validate alias so legacy "XSR ID" files keep working.
+describe('O130–O136 — Bajaj "XSR ID" → "ISR Code" leaf column', () => {
+  it('O130 — Bajaj template uses "ISR Code" (not "XSR ID"); Deoleo keeps "XSR ID"', () => {
+    const bajaj = getOutletAdditionTemplateData(VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, LEAF_ROLE_CODE, false, 'bajaj');
+    expect(bajaj.headers).toContain('ISR Code');
+    expect(bajaj.headers).not.toContain('XSR ID');
+
+    const deoleo = getOutletAdditionTemplateData(VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, LEAF_ROLE_CODE, false, 'deoleo');
+    expect(deoleo.headers).toContain('XSR ID');
+    expect(deoleo.headers).not.toContain('ISR Code');
+  });
+
+  it('O131 — default (no slug) template is byte-identical to Deoleo (keeps "XSR ID")', () => {
+    const def = getOutletAdditionTemplateData(VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, LEAF_ROLE_CODE);
+    expect(def.headers).toContain('XSR ID');
+    expect(def.headers).not.toContain('ISR Code');
+  });
+
+  it('O132 — parseOutletUploadRows reads the Bajaj "ISR Code" header into xsrId', () => {
+    const [row] = parseOutletUploadRows([{
+      'Outlet ID': 'OUT-001', 'Sub-Program': 'Standard', 'Outlet Type': 'SSS', 'City': 'Mumbai',
+      'State': 'MH', 'ISR Code': 'ISR-1',
+    }]);
+    expect(row.xsrId).toBe('ISR-1');
+  });
+
+  it('O133 — parseOutletUploadRows still reads the LEGACY "XSR ID" header (backward-compat)', () => {
+    const [row] = parseOutletUploadRows([{
+      'Outlet ID': 'OUT-001', 'Sub-Program': 'Standard', 'Outlet Type': 'SSS', 'City': 'Mumbai',
+      'State': 'MH', 'XSR ID': 'XSR-9',
+    }]);
+    expect(row.xsrId).toBe('XSR-9');
+  });
+
+  it('O134 — header validation accepts a file carrying "ISR Code" instead of "XSR ID"', () => {
+    const bajajHeaders = OUTLET_UPLOAD_HEADERS.map(h => (h === 'XSR ID' ? 'ISR Code' : h));
+    expect(validateOutletUploadHeaders(bajajHeaders)).toBeNull();
+    // ...and still accepts the legacy header set.
+    expect(validateOutletUploadHeaders([...OUTLET_UPLOAD_HEADERS])).toBeNull();
+  });
+
+  it('O135 — validation error message uses the Bajaj leaf header when slug is bajaj', () => {
+    const res = validateOutletUpload(
+      [makeRow({ xsrId: '' })],
+      [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      undefined, undefined, false, 'bajaj',
+    );
+    expect(res.rows[0].errors.some(e => e.includes('ISR Code'))).toBe(true);
+    expect(res.rows[0].errors.some(e => e.includes('XSR ID'))).toBe(false);
+  });
+
+  it('O136 — error report columns echo the Bajaj leaf header for a bajaj upload', () => {
+    const res = validateOutletUpload(
+      [makeRow({ xsrId: '' })],
+      [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      undefined, undefined, false, 'bajaj',
+    );
+    const report = buildOutletUploadErrorReport(res, [makeRow({ xsrId: '' })], 'bajaj');
+    expect(report.columns).toContain('ISR Code');
+    expect(report.columns).not.toContain('XSR ID');
+    // Deoleo report keeps "XSR ID".
+    const deoleoReport = buildOutletUploadErrorReport(res, [makeRow({ xsrId: '' })], 'deoleo');
+    expect(deoleoReport.columns).toContain('XSR ID');
   });
 });

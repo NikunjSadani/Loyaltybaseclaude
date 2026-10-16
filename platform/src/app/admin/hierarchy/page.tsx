@@ -16,7 +16,8 @@ import * as XLSX from 'xlsx';
 import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import {
   validateEmployeeUpload,
-  DEOLEO_HIERARCHY,
+  hierarchyConfigForTenant,
+  displayLabelForTenant,
   generateGuideHtml,
   validateHierarchyChainHeaders,
   parseHierarchyChainRows,
@@ -26,16 +27,14 @@ import {
   getHierarchyChainHeaders,
   buildHierarchyChainExportRows,
 } from '@/lib/employee-hierarchy';
+import { useClientConfig } from '@/lib/platform/client-config-context';
 import type {
+  TenantHierarchyLevel,
   HierarchyEmployee,
   EmployeeUploadValidationResult,
   EmployeeRowValidationResult,
   HierarchyChainParseResult,
 } from '@/types';
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const CONFIG = DEOLEO_HIERARCHY;
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
@@ -141,8 +140,8 @@ function ValidationRowItem({ row }: { row: EmployeeRowValidationResult }) {
 
 // ─── Downloads ────────────────────────────────────────────────────────────────
 
-function downloadTemplate() {
-  const { headers, exampleRows, dosAndDontsRows } = getHierarchyChainTemplateData(CONFIG);
+function downloadTemplate(config: TenantHierarchyLevel[]) {
+  const { headers, exampleRows, dosAndDontsRows } = getHierarchyChainTemplateData(config);
 
   const wb = XLSX.utils.book_new();
 
@@ -179,9 +178,9 @@ function downloadTemplate() {
 
 /** Export the CURRENTLY stored hierarchy as the same 18-column chain workbook the upload
  *  accepts — so the admin can view what's saved and download → edit → re-upload. */
-function downloadCurrentHierarchy(employees: HierarchyEmployee[]) {
-  const headers  = getHierarchyChainHeaders(CONFIG);
-  const dataRows = buildHierarchyChainExportRows(employees, CONFIG);
+function downloadCurrentHierarchy(employees: HierarchyEmployee[], config: TenantHierarchyLevel[]) {
+  const headers  = getHierarchyChainHeaders(config);
+  const dataRows = buildHierarchyChainExportRows(employees, config);
 
   const wb    = XLSX.utils.book_new();
   const sheet = aoaToSheetSafe([headers, ...dataRows]);
@@ -220,19 +219,21 @@ function triggerXlsxDownload(bytes: Uint8Array, filename: string) {
 function downloadErrorReport(
   rawRows: Record<string, string>[],
   parseResult: HierarchyChainParseResult,
+  config: TenantHierarchyLevel[],
 ) {
-  triggerXlsxDownload(generateHierarchyChainErrorReport(rawRows, parseResult, CONFIG), 'Hierarchy_Error_Report.xlsx');
+  triggerXlsxDownload(generateHierarchyChainErrorReport(rawRows, parseResult, config), 'Hierarchy_Error_Report.xlsx');
 }
 
 function downloadRowErrorReport(
   rawRows: Record<string, string>[],
   validation: EmployeeUploadValidationResult,
+  config: TenantHierarchyLevel[],
 ) {
-  triggerXlsxDownload(generateHierarchyRowErrorReport(rawRows, validation, CONFIG), 'Hierarchy_Error_Report.xlsx');
+  triggerXlsxDownload(generateHierarchyRowErrorReport(rawRows, validation, config), 'Hierarchy_Error_Report.xlsx');
 }
 
-function downloadGuide() {
-  const html  = generateGuideHtml(CONFIG);
+function downloadGuide(config: TenantHierarchyLevel[]) {
+  const html  = generateGuideHtml(config);
   const blob  = new Blob([html], { type: 'text/html;charset=utf-8' });
   const url   = URL.createObjectURL(blob);
   const link  = document.createElement('a');
@@ -247,6 +248,13 @@ function downloadGuide() {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function HierarchyPage() {
+  // Per-tenant hierarchy config (Bajaj renames the display labels + column headers; every
+  // other tenant — Deoleo included — is byte-identical). The slug comes from the tenant
+  // context resolved server-side from the request host (e.g. bajaj.gifsy.in → 'bajaj').
+  const clientConfig = useClientConfig();
+  const slug = clientConfig.slug;
+  const config = useMemo(() => hierarchyConfigForTenant(slug), [slug]);
+
   const [employees, setEmployees] = useState<HierarchyEmployee[]>([]);
   const [search, setSearch] = useState('');
   // Phase 1: chain parse result (cross-row conflicts, missing IDs, etc.)
@@ -408,7 +416,7 @@ export default function HierarchyPage() {
 
         // Pass 1: validate the 18-column chain headers
         const headers   = Object.keys(rows[0]);
-        const headerErr = validateHierarchyChainHeaders(headers, CONFIG);
+        const headerErr = validateHierarchyChainHeaders(headers, config);
         if (headerErr) {
           setChainResult({
             headerError: headerErr,
@@ -420,14 +428,14 @@ export default function HierarchyPage() {
         }
 
         // Pass 2: parse + cross-row conflict detection
-        const cr = parseHierarchyChainRows(rows, CONFIG);
+        const cr = parseHierarchyChainRows(rows, config);
         setChainResult(cr);
         setRawRows(rows);
 
         if (cr.hasErrors) return; // show chain errors + download button; stop here
 
         // Pass 3: employee-level validation (outlet guards, circular deps, etc.)
-        const empResult = validateEmployeeUpload(cr.employeeRows, employees, CONFIG);
+        const empResult = validateEmployeeUpload(cr.employeeRows, employees, config);
         setValidation(empResult);
       } catch (err) {
         // Surface the real cause instead of a blanket "not a valid file" — the catch wraps the
@@ -439,7 +447,7 @@ export default function HierarchyPage() {
       }
     };
     reader.readAsArrayBuffer(file);
-  }, [employees]);
+  }, [employees, config]);
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -469,7 +477,7 @@ export default function HierarchyPage() {
 
     for (const row of uploadRows) {
       const id      = row.employeeId.trim();
-      const roleL   = CONFIG.find(l => l.roleCode.toUpperCase() === row.hierarchy.toUpperCase());
+      const roleL   = config.find(l => l.roleCode.toUpperCase() === row.hierarchy.toUpperCase());
       const isLeaf  = roleL?.isLeaf ?? false;
       const isRoot  = roleL?.isRoot ?? false;
       const status: HierarchyEmployee['status'] =
@@ -537,7 +545,7 @@ export default function HierarchyPage() {
         <div className="flex gap-2">
           <button
             data-testid="download-guide"
-            onClick={downloadGuide}
+            onClick={() => downloadGuide(config)}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-700 text-xs font-semibold hover:bg-gray-50 transition-colors"
           >
             <BookOpen className="h-3.5 w-3.5" />
@@ -545,7 +553,7 @@ export default function HierarchyPage() {
           </button>
           <button
             data-testid="download-current"
-            onClick={() => downloadCurrentHierarchy(employees)}
+            onClick={() => downloadCurrentHierarchy(employees, config)}
             disabled={employees.length === 0}
             title={employees.length === 0 ? 'No hierarchy saved yet' : 'Download the currently saved hierarchy as Excel'}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-700 text-xs font-semibold hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
@@ -555,7 +563,7 @@ export default function HierarchyPage() {
           </button>
           <button
             data-testid="download-template"
-            onClick={downloadTemplate}
+            onClick={() => downloadTemplate(config)}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--brand-primary)] bg-[var(--brand-primary)] text-white text-xs font-semibold hover:opacity-90 transition-opacity"
           >
             <FileSpreadsheet className="h-3.5 w-3.5" />
@@ -657,7 +665,7 @@ export default function HierarchyPage() {
                   </div>
                   <button
                     type="button"
-                    onClick={() => downloadErrorReport(rawRows, chainResult)}
+                    onClick={() => downloadErrorReport(rawRows, chainResult, config)}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-300 bg-white text-red-700 text-xs font-semibold hover:bg-red-50 transition-colors flex-shrink-0"
                   >
                     <Download className="h-3.5 w-3.5" />
@@ -716,7 +724,7 @@ export default function HierarchyPage() {
                       {validation.hasErrors && rawRows.length > 0 && (
                         <button
                           type="button"
-                          onClick={() => downloadRowErrorReport(rawRows, validation)}
+                          onClick={() => downloadRowErrorReport(rawRows, validation, config)}
                           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-300 bg-white text-red-700 text-xs font-semibold hover:bg-red-50 transition-colors flex-shrink-0"
                         >
                           <Download className="h-3.5 w-3.5" />
@@ -798,7 +806,7 @@ export default function HierarchyPage() {
                 <div className="flex items-start gap-3">
                   {/* Role badge + ID */}
                   <div className="flex-shrink-0 w-16">
-                    <RoleBadge role={emp.roleCode} />
+                    <RoleBadge role={displayLabelForTenant(slug, emp.roleCode)} />
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
@@ -876,10 +884,10 @@ export default function HierarchyPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
-              {[...CONFIG].reverse().map(l => (
+              {[...config].reverse().map(l => (
                 <tr key={l.level} className="hover:bg-gray-50">
                   <td className="px-4 py-2 text-gray-500 text-xs">{l.level}</td>
-                  <td className="px-4 py-2 font-mono font-bold text-gray-900">{l.roleCode}</td>
+                  <td className="px-4 py-2 font-mono font-bold text-gray-900">{l.displayLabel ?? l.roleCode}</td>
                   <td className="px-4 py-2 text-xs">{l.isLeaf ? '✓ Yes' : '—'}</td>
                   <td className="px-4 py-2 text-xs">{l.isRoot ? '✓ Yes' : '—'}</td>
                 </tr>

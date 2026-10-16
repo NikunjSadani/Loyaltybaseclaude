@@ -8,7 +8,8 @@ import {
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Spinner } from '@/components/ui/spinner';
-import { ROLE_LABELS, type SalesRole } from '@/lib/sales-role';
+import { roleLabelFor } from '@/lib/sales-role';
+import { useClientConfig } from '@/lib/platform/client-config-context';
 import { api, authHeader } from '@/lib/api-client';
 import { logoutAction } from '@/lib/auth-actions';
 import PwaAppSettings from '@/components/pwa/PwaAppSettings';
@@ -69,7 +70,7 @@ function mapUserToProfile(user: {
     joinedAt?: string;
     reportingTo?: { user?: { name?: string; phone?: string }; hierarchyLevel?: { name?: string } } | null;
   } | null;
-}): SalesProfile {
+}, slug: string): SalesProfile {
   const su = user.salesUser;
   const territory = su?.region ?? su?.zone ?? '';
   const joinedDate = su?.joinedAt ? su.joinedAt.slice(0, 10) : '';
@@ -78,7 +79,7 @@ function mapUserToProfile(user: {
   const reportingManager = reportingName
     ? reportingLevel ? `${reportingName} (${reportingLevel})` : reportingName
     : '';
-  const role = ROLE_LABELS[user.role as SalesRole] ?? user.role ?? '';
+  const role = user.role ? roleLabelFor(slug, user.role) : (user.role ?? '');
 
   return {
     name:            user.name,
@@ -97,6 +98,7 @@ function mapUserToProfile(user: {
 }
 
 export default function SalesProfilePage() {
+  const slug = useClientConfig().slug;
   const router = useRouter();
   const [profile, setProfile] = useState<SalesProfile | null>(null);
   const [loading, setLoading] = useState(true);
@@ -117,7 +119,7 @@ export default function SalesProfilePage() {
         { success: boolean; data?: { outlets: { kycStatus?: string }[] } } | null,
       ]) => {
         if (meJson.success && meJson.data) {
-          const p = mapUserToProfile(meJson.data.user);
+          const p = mapUserToProfile(meJson.data.user, slug);
           const outlets = outletJson?.success ? (outletJson.data?.outlets ?? []) : [];
           p.totalOutlets = outlets.length;
           p.kycCompleted = outlets.filter((o) => o.kycStatus === 'APPROVED').length;
@@ -128,7 +130,7 @@ export default function SalesProfilePage() {
       })
       .catch(() => setError('Failed to load profile'))
       .finally(() => setLoading(false));
-  }, []);
+  }, [slug]);
 
   const handleLogout = () => {
     document.cookie = 'token=; Max-Age=0; path=/';

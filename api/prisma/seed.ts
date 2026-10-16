@@ -95,6 +95,10 @@ const DEOLEO_CLIENT_ID = 'deoleo';
 // A SECOND tenant, so the E2E harness can prove tenant isolation: deoleo users must NEVER see any of
 // clientb's data (distinctive names below are the leak markers). See platform/e2e cross-tenant specs.
 const CLIENTB_CLIENT_ID = 'clientb';
+// Bajaj tenant — same sales-hierarchy CODES as Deoleo but bajaj DISPLAY labels on the levels
+// (ISR/SO/ASM/SM/ZH/NSM). Lets local dev exercise the Bajaj nomenclature rename. Client.id IS the
+// tenant slug, so this slug is what the bajaj label resolver keys on (isBajajTenant).
+const BAJAJ_CLIENT_ID = 'bajaj';
 
 // OutletType master list. code is the stable key — name is the display label
 // and can be changed at any time without touching code or migrations.
@@ -656,6 +660,62 @@ async function seedDeoleoDemo() {
     },
   });
   console.log(`   ✓ ProgramSetting [employee_hierarchy] — ${hierarchySnapshot.length} employees (EMPASM1, EMP001)`);
+
+  // ── Bajaj tenant — hierarchy-nomenclature rename (code unchanged; bajaj display labels) ──────
+  // A minimal real tenant so local dev can exercise the Bajaj rename end-to-end. The six
+  // SalesHierarchyLevel rows keep the INTERNAL codes (XSR/SO/ASM/RSM/ZNM/NSM) and carry the bajaj
+  // DISPLAY labels in `name` (ISR/SO/ASM/SM/ZH/NSM) — matching BAJAJ_HIERARCHY in
+  // api/src/admin-core/hierarchy-persistence.ts and platform/docs/plans/BAJAJ-HIERARCHY-RENAME.md.
+  // Deoleo's own rows above are UNTOUCHED. gifsy_dev TEST DATA only (the seed never runs on
+  // staging/prod — the live bajaj tenant's level names are an owner-gated DB op, not this seed).
+  const bajajBranding = {
+    displayName: 'Bajaj Consumer Care',
+    primaryColor: '#0b5d3b',
+    supportEmail: 'support@bajaj.gifsy.in',
+    productBrands: ['Bajaj Almond Drops'],
+  } as const;
+  // outletMasterGeo ON — bajaj is the geo-enabled tenant (outlet-master lat/long columns).
+  const bajajFeatures = {
+    kycApprovalFlow: true,
+    walletModule: true,
+    salesTeamApp: true,
+    outletMasterGeo: true,
+  } as const;
+  await prisma.client.upsert({
+    where: { id: BAJAJ_CLIENT_ID },
+    update: { internalName: 'Bajaj Consumer Care Ltd.', branding: bajajBranding, features: bajajFeatures },
+    create: {
+      id: BAJAJ_CLIENT_ID,
+      internalName: 'Bajaj Consumer Care Ltd.',
+      status: 'ACTIVE',
+      onboardedAt: new Date(),
+      branding: bajajBranding,
+      features: bajajFeatures,
+      approvalHierarchy: emptyJson,
+      notifications: emptyJson,
+      invoicing: emptyJson,
+      wallet: emptyJson,
+    },
+  });
+  console.log(`   ✓ Client [${BAJAJ_CLIENT_ID}] — Bajaj nomenclature tenant`);
+
+  // code = the UNCHANGED internal role code; name = the bajaj display label.
+  const bajajLevels = [
+    { code: 'XSR', name: 'ISR', level: 1 },
+    { code: 'SO', name: 'SO', level: 2 },
+    { code: 'ASM', name: 'ASM', level: 3 },
+    { code: 'RSM', name: 'SM', level: 4 },
+    { code: 'ZNM', name: 'ZH', level: 5 },
+    { code: 'NSM', name: 'NSM', level: 6 },
+  ];
+  for (const lv of bajajLevels) {
+    await prisma.salesHierarchyLevel.upsert({
+      where: { clientId_code: { clientId: BAJAJ_CLIENT_ID, code: lv.code } },
+      update: { name: lv.name, level: lv.level },
+      create: { clientId: BAJAJ_CLIENT_ID, code: lv.code, name: lv.name, level: lv.level },
+    });
+  }
+  console.log(`   ✓ SalesHierarchyLevel (bajaj) — ${bajajLevels.length} levels (XSR→NSM as ISR/SO/ASM/SM/ZH/NSM)`);
 
   // Enable the Visibility module for BOTH test tenants so the E2E harness can exercise the visibility
   // flows (admin bulk-upload, partner photo submit, cross-tenant isolation). The gate is

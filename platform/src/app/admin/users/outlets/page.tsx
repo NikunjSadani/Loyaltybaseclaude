@@ -34,6 +34,8 @@ import {
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import { useTenantFeatures } from '@/lib/tenant-features';
+import { useClientConfig } from '@/lib/platform/client-config-context';
+import { leafIdHeaderForTenant } from '@/lib/employee-hierarchy';
 import { downloadBlob } from '@/lib/download';
 import { chunkArray } from '@/lib/chunk';
 import type { HierarchyEmployee } from '@/types';
@@ -654,6 +656,10 @@ export default function OutletsPage() {
   // upload template + validation (Bajaj-only; OFF for Deoleo and every other tenant by default).
   const { features } = useTenantFeatures('/api/admin/settings/config');
   const geoEnabled = features.outletMasterGeo;
+  // Tenant slug — drives the leaf hierarchy column header ("ISR Code" for Bajaj, "XSR ID" otherwise)
+  // in the upload template, validation, guide, and error report.
+  const { slug } = useClientConfig();
+  const leafHeader = leafIdHeaderForTenant(slug);
 
   // ── Outlet list state ──
   // `outlets` = the CURRENT server page (drives the table). Server-paginated +
@@ -924,7 +930,7 @@ export default function OutletsPage() {
       // PARKED outlet IDs (from the full tenant list) — a row targeting one is flagged so the
       // upload never silently "succeeds" on a hidden outlet. Parent codes validate the Parent ID.
       const parkedIds = new Set(allOutlets.filter(o => o.kycStatus === 'PARKED').map(o => o.outletId));
-      const result   = validateOutletUpload(parsed, existing, validPrograms, validCategories, outletTypes, employees, LEAF_ROLE_CODE, parentCodes ?? undefined, parkedIds, geoEnabled);
+      const result   = validateOutletUpload(parsed, existing, validPrograms, validCategories, outletTypes, employees, LEAF_ROLE_CODE, parentCodes ?? undefined, parkedIds, geoEnabled, slug);
       setOutletParsedRows(parsed);
       setOutletValidation(result);
       setOutletUploadState('parsed');
@@ -1031,7 +1037,7 @@ export default function OutletsPage() {
   }
 
   function downloadOutletTemplate() {
-    const { headers, exampleRows, dosAndDonts } = getOutletAdditionTemplateData(validPrograms, validCategories, outletTypes, LEAF_ROLE_CODE, geoEnabled);
+    const { headers, exampleRows, dosAndDonts } = getOutletAdditionTemplateData(validPrograms, validCategories, outletTypes, LEAF_ROLE_CODE, geoEnabled, slug);
     const wb = XLSX.utils.book_new();
     // Sheet 1: Dos & Don'ts (opens first)
     const ddSheet = aoaToSheetSafe(dosAndDonts);
@@ -1117,7 +1123,7 @@ export default function OutletsPage() {
   }
 
   function downloadGuide() {
-    const html = generateOutletGuideHtml(outletTypes);
+    const html = generateOutletGuideHtml(outletTypes, slug);
     const blob = new Blob([html], { type: 'text/html' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
@@ -1272,7 +1278,7 @@ export default function OutletsPage() {
                 <li><strong>Existing active Outlet ID</strong> → only the fields you fill are updated; blank = keep existing</li>
                 <li><strong>Existing inactive Outlet ID</strong> → outlet is reactivated; any filled fields are also updated</li>
                 <li><strong>Outlet Name cannot be changed here</strong> — use Re-KYC Flagging to request a name correction</li>
-                <li><strong>XSR ID</strong> must be an ISR-level employee if provided</li>
+                <li><strong>{leafHeader}</strong> must be an ISR-level employee if provided</li>
                 <li><strong>Parent ID</strong> links an outlet to an owner group — blank = standalone; a parent code (e.g. CPP01) = link to that group</li>
               </ul>
             </div>
@@ -1309,7 +1315,7 @@ export default function OutletsPage() {
               errorReportFilename="outlet-upload-errors.xlsx"
               parentIdByRow={Object.fromEntries(outletParsedRows.map(r => [r.rowNum, r.parentId]))}
               uploadDisabledReason={outletUploadDisabledReason}
-              errorReport={outletValidation ? buildOutletUploadErrorReport(outletValidation, outletParsedRows) : undefined}
+              errorReport={outletValidation ? buildOutletUploadErrorReport(outletValidation, outletParsedRows, slug) : undefined}
               onFileChange={handleOutletFile}
               validationResult={outletValidation}
               uploadState={outletUploadState}

@@ -16,6 +16,10 @@ import { TargetsService } from '../targets/targets.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const admin: JwtPayload = { sub: 'a1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
+// Bajaj caller — same internal rung CODES, but the hierarchy-block HEADERS carry the bajaj
+// display nomenclature (ISR Code/SO HQ/…; ISR/SM/ZH names; … Phone Number). Client.id IS the
+// tenant slug, so clientId='bajaj' is what the label resolver keys on.
+const bajajAdmin: JwtPayload = { sub: 'b1', role: 'CLIENT_ADMIN', clientId: 'bajaj', phone: '', name: '' };
 
 // Leading columns mirror the outlet upload template's order (OUTLET_UPLOAD_HEADERS);
 // the hierarchy block + master-only columns follow.
@@ -28,6 +32,28 @@ const EXPECTED_HEADERS = [
   'RSM ID', 'RSM Name', 'RSM Phone Number',
   'ZNM ID', 'ZNM Name', 'ZNM Phone Number',
   'NSM ID', 'NSM Name', 'NSM Phone Number',
+  'Parent ID',
+  'Owner Name', 'Phone Number', 'Address', 'Pincode',
+  'Latitude of Outlet Board', 'Longitude of Outlet Board',
+  'Enrollment by Employee ID', 'Enrollment by Employee Name', 'Enrollment by Employee Phone Number',
+  'Enrollment Date', 'Enrollment Status', 'Profile Status',
+  'Approval by Employee ID', 'Approval by Employee Name', 'Approval by Employee Phone Number',
+  'Approval by Gifsy', 'Approval Date of Gifsy',
+  'Latitude of Bank Details Collection', 'Longitude of Bank Details Collection',
+  'Remarks', 'GST', 'PAN', 'GST Certificate', 'Address Proof', 'Self-Declaration', 'Deactivated At',
+];
+
+// Bajaj headers: identical to EXPECTED_HEADERS except the hierarchy block carries the bajaj
+// display nomenclature. Codes stay XSR→NSM internally; only these column headers change.
+const BAJAJ_EXPECTED_HEADERS = [
+  'Outlet Code', 'Outlet Name', 'Program Name', 'Sub-Program', 'Outlet Type',
+  'Beat', 'Distributor Code', 'Distributor Name', 'Metro', 'City', 'State', 'Zone',
+  'ISR Code', 'ISR Name', 'ISR Phone Number',
+  'SO HQ', 'SO Name', 'SO Phone Number',
+  'ASM HQ', 'ASM Name', 'ASM Phone Number',
+  'SM HQ', 'SM Name', 'SM Phone Number',
+  'ZH HQ', 'ZH Name', 'ZH Phone Number',
+  'NSM HQ', 'NSM Name', 'NSM Phone Number',
   'Parent ID',
   'Owner Name', 'Phone Number', 'Address', 'Pincode',
   'Latitude of Outlet Board', 'Longitude of Outlet Board',
@@ -338,5 +364,60 @@ describe('ReportsService.outletMaster (57 columns)', () => {
     expect((aoa[1] as unknown[])[idx('Longitude')]).toBe('72.87770000');
     expect((aoa[2] as unknown[])[idx('Latitude')]).toBe('');  // null coords → blank
     expect((aoa[2] as unknown[])[idx('Longitude')]).toBe('');
+  });
+
+  it('BAJAJ: emits the bajaj hierarchy headers (ISR Code/SO HQ/…; ISR/SM/ZH labels) with codes unchanged, and buckets rows by code', async () => {
+    // A chain XSR → RSM → ZNM (SO/ASM skipped) to prove the rows still bucket by the UNCHANGED
+    // internal code even though the headers are renamed. RSM→"SM HQ", ZNM→"ZH HQ", XSR→"ISR Code".
+    const znm = {
+      employeeCode: 'E-ZNM', hierarchyLevel: { code: 'ZNM' },
+      user: { name: 'Znm Name', phone: '9000000005' }, reportingTo: null,
+    };
+    const rsm = {
+      employeeCode: 'E-RSM', hierarchyLevel: { code: 'RSM' },
+      user: { name: 'Rsm Name', phone: '9000000004' }, reportingTo: znm,
+    };
+    const xsr = {
+      employeeCode: 'E-XSR', hierarchyLevel: { code: 'XSR' },
+      user: { name: 'Xsr Name', phone: '9000000001' }, reportingTo: rsm,
+    };
+
+    // geo OFF so the hierarchy headers are asserted in isolation. (clearAllMocks resets calls but
+    // NOT implementations, so explicitly override any geo-ON mockResolvedValue from a prior test.)
+    mockPrisma.client.findUnique.mockResolvedValue({ features: {} });
+    mockPrisma.outlet.findMany.mockResolvedValue([
+      {
+        id: 'o1', partnerId: null, zone: 'Z', outletCode: 'OUT001', name: 'Shop One',
+        outletType: null, programName: null, programCategory: null,
+        distributorCode: null, distributorName: null, metro: null, beat: null,
+        addressLine1: null, addressLine2: null, city: 'Pune', state: 'MH', pincode: null,
+        phone: null, isActive: true, deactivatedAt: null, kycIntent: null, reKycFlags: null,
+        partner: null, parent: null,
+      },
+    ]);
+    mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+      { outletId: 'o1', assignedAt: new Date(), salesUser: xsr },
+    ]);
+    mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+    mockPrisma.salesUser.findMany.mockResolvedValue([]);
+
+    const file = await service.outletMaster(bajajAdmin);
+    const aoa = await readSheet(file);
+    const headers = aoa[0] as string[];
+    expect(headers).toEqual(BAJAJ_EXPECTED_HEADERS);
+
+    const idx = (h: string) => headers.indexOf(h);
+    const r1 = aoa[1] as unknown[];
+    // Rows still bucket by the UNCHANGED internal code, written under the bajaj headers.
+    expect(r1[idx('ISR Code')]).toBe('E-XSR');
+    expect(r1[idx('ISR Name')]).toBe('Xsr Name');
+    expect(r1[idx('ISR Phone Number')]).toBe('9000000001');
+    expect(r1[idx('SM HQ')]).toBe('E-RSM');   // RSM bucket → "SM" bajaj label
+    expect(r1[idx('SM Name')]).toBe('Rsm Name');
+    expect(r1[idx('ZH HQ')]).toBe('E-ZNM');   // ZNM bucket → "ZH" bajaj label
+    expect(r1[idx('ZH Name')]).toBe('Znm Name');
+    expect(r1[idx('SO HQ')]).toBe('');        // skipped level → blank
+    expect(r1[idx('ASM HQ')]).toBe('');
+    expect(r1[idx('NSM HQ')]).toBe('');
   });
 });

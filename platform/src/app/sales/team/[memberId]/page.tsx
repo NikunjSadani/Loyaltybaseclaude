@@ -10,7 +10,8 @@ import {
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Spinner } from '@/components/ui/spinner';
-import { type SalesRole, ROLE_LABELS } from '@/lib/sales-role';
+import { type SalesRole, roleLabelFor } from '@/lib/sales-role';
+import { useClientConfig } from '@/lib/platform/client-config-context';
 import { KYCStatus } from '@/types';
 
 /* ─── Mock detail data keyed by memberId ──────────────────────────────────── */
@@ -72,6 +73,7 @@ const kycBadge: Record<KYCStatus, { variant: 'success' | 'warning' | 'danger' | 
 /* ─── Page ─────────────────────────────────────────────────────────────────── */
 
 export default function MemberDetailPage() {
+  const slug = useClientConfig().slug;
   const { memberId } = useParams<{ memberId: string }>();
   const router = useRouter();
   const [loading,     setLoading]  = useState(true);
@@ -126,7 +128,7 @@ export default function MemberDetailPage() {
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-base font-bold text-gray-900">{m.name}</p>
-              <p className="text-sm text-gray-500">{ROLE_LABELS[m.role]}</p>
+              <p className="text-sm text-gray-500">{roleLabelFor(slug, m.role)}</p>
               {m.employeeId && (
                 <p className="text-xs text-gray-400 mt-0.5 font-mono">{m.employeeId}</p>
               )}

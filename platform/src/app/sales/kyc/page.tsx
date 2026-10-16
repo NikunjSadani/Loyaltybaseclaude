@@ -11,7 +11,8 @@ import { Spinner } from '@/components/ui/spinner';
 import { EmptyState } from '@/components/ui/empty-state';
 import { KYCStatus } from '@/types';
 import { cn } from '@/lib/utils';
-import { type SalesRole, getRole, hasTeamView, canEnroll, childRole } from '@/lib/sales-role';
+import { type SalesRole, getRole, hasTeamView, canEnroll, childRoleLabelFor } from '@/lib/sales-role';
+import { useClientConfig } from '@/lib/platform/client-config-context';
 import { kycSubmissionOrderRank } from '@/lib/kyc-order';
 import { api } from '@/lib/api-client';
 
@@ -158,6 +159,7 @@ function rowBorder(status: KYCStatus, approvalStatus: KYCStatus | null): string 
 }
 
 function KYCListContent() {
+  const slug = useClientConfig().slug;
   const searchParams = useSearchParams();
   const rawStatus = searchParams.get('status');
   const approvalStatus = getApprovalStatus();
@@ -410,7 +412,7 @@ function KYCListContent() {
               memberFilter ? 'border-[var(--brand-primary)] text-[var(--brand-primary)] font-semibold' : '',
             )}
           >
-            <option value="">{`All ${childRole(role) ?? 'Members'}`}</option>
+            <option value="">{`All ${childRoleLabelFor(slug, role) ?? 'Members'}`}</option>
             {teamMembers.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.employeeCode ? `${m.employeeCode} · ${m.name}` : m.name}

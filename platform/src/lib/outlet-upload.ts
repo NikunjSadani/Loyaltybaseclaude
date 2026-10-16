@@ -28,6 +28,7 @@ import type { HierarchyEmployee, TenantHierarchyLevel } from '@/types';
 import { KYCStatus } from '@/types';
 import { parseOutletPaymentType } from '@/lib/payment-type';
 import { getGifsySettings } from '@/lib/gifsy-settings';
+import { leafIdHeaderForTenant, displayLabelForTenant } from '@/lib/employee-hierarchy';
 
 // Latitude/Longitude are OPTIONAL, tenant-gated (features.outletMasterGeo) geo columns on the
 // outlet-master upload (the fields live on OutletUploadRow in @/types). parseOutletUploadRows
@@ -157,7 +158,9 @@ export function validateOutletUploadHeaders(headers: readonly string[]): string 
     // Backward-compat: the 'Sub-Program' column (renamed from 'Program Category') is still
     // satisfied by a file that carries the OLD 'Program Category' header, so existing upload
     // files keep working after the rename.
-    .filter(h => !(h === 'Sub-Program' && headers.includes('Program Category')));
+    .filter(h => !(h === 'Sub-Program' && headers.includes('Program Category')))
+    // Backward-compat: the leaf-id column 'XSR ID' is satisfied by the Bajaj header 'ISR Code'.
+    .filter(h => !(h === 'XSR ID' && headers.includes('ISR Code')));
   if (missing.length === 0) return null;
   return `Missing required column${missing.length > 1 ? 's' : ''}: ${missing.join(', ')}`;
 }
@@ -196,7 +199,9 @@ export function parseOutletUploadRows(rawRows: Record<string, unknown>[]): Outle
     city:            cell(raw['City']),
     state:           cell(raw['State']),
     zone:            cell(raw['Zone']),
-    xsrId:           cell(raw['XSR ID']),
+    // Read the current leaf-id header first, falling back to the legacy 'XSR ID' so files created
+    // before the Bajaj rename ("ISR Code") still parse. Field name (xsrId) is unchanged.
+    xsrId:           cell(raw['ISR Code'] ?? raw['XSR ID']),
     payoutMethod:    cell(raw['Payout Method']),
     // Parent ID = the parent's partnerCode (e.g. CPP01) linking this outlet to an owner group.
     // A blank cell yields '' — the backend treats '' as a no-op (grouping unchanged), so a
@@ -275,7 +280,12 @@ export function validateOutletUpload(
    *  range-validated (finite number within WGS84 bounds). Blank cells are always allowed, and
    *  when false the columns are ignored entirely — so other tenants' uploads are unaffected. */
   geoEnabled: boolean = false,
+  /** Tenant slug — drives the leaf hierarchy column header/label in error messages ("ISR Code"/"ISR"
+   *  for Bajaj). Default '' keeps "XSR ID"/"XSR", so other tenants' messages are byte-identical. */
+  slug: string = '',
 ): OutletUploadValidationResult {
+  const leafHeader   = leafIdHeaderForTenant(slug);
+  const leafLabel    = displayLabelForTenant(slug, leafRoleCode);
   const existingMap  = new Map(existingOutlets.map(o => [o.outletId, o]));
   const seenInUpload = new Map<string, number>(); // outletId → first rowNum
   const empById      = new Map(employees.map(e => [e.id, e]));
@@ -381,15 +391,15 @@ export function validateOutletUpload(
         errors.push('State is required');
       }
 
-      // 12. XSR ID required for new outlets
+      // 12. Leaf-rep ID required for new outlets
       if (!row.xsrId) {
-        errors.push('XSR ID is required');
+        errors.push(`${leafHeader} is required`);
       } else {
         const emp = empById.get(row.xsrId);
         if (!emp) {
-          errors.push(`XSR ID "${row.xsrId}" not found in the employee hierarchy. Add the employee via Employee Hierarchy upload first.`);
+          errors.push(`${leafHeader} "${row.xsrId}" not found in the employee hierarchy. Add the employee via Employee Hierarchy upload first.`);
         } else if (emp.roleCode !== leafRoleCode) {
-          errors.push(`XSR ID "${row.xsrId}" has role "${emp.roleCode}" — only ${leafRoleCode} (field-level) employees can be assigned outlets`);
+          errors.push(`${leafHeader} "${row.xsrId}" has role "${emp.roleCode}" — only ${leafLabel} (field-level) employees can be assigned outlets`);
         }
       }
 
@@ -438,13 +448,13 @@ export function validateOutletUpload(
         errors.push(`Metro "${row.metro}" is invalid — must be "Yes" or "No"`);
       }
 
-      // XSR ID optional for updates/reactivations; if provided must be valid + leaf
+      // Leaf-rep ID optional for updates/reactivations; if provided must be valid + leaf
       if (row.xsrId) {
         const emp = empById.get(row.xsrId);
         if (!emp) {
-          errors.push(`XSR ID "${row.xsrId}" not found in the employee hierarchy. Add the employee via Employee Hierarchy upload first.`);
+          errors.push(`${leafHeader} "${row.xsrId}" not found in the employee hierarchy. Add the employee via Employee Hierarchy upload first.`);
         } else if (emp.roleCode !== leafRoleCode) {
-          errors.push(`XSR ID "${row.xsrId}" has role "${emp.roleCode}" — only ${leafRoleCode} (field-level) employees can be assigned outlets`);
+          errors.push(`${leafHeader} "${row.xsrId}" has role "${emp.roleCode}" — only ${leafLabel} (field-level) employees can be assigned outlets`);
         }
       }
     }
@@ -649,8 +659,17 @@ export function getOutletAdditionTemplateData(
   /** When true (tenant feature `outletMasterGeo` on), the template gains optional Latitude/Longitude
    *  columns + guidance. When false the template is unchanged, so other tenants never see them. */
   geoEnabled: boolean = false,
+  /** Tenant slug — drives the leaf hierarchy column header/label (Bajaj: "ISR Code"/"ISR"). Deoleo
+   *  (and default '') keep "XSR ID"/"XSR", so the template is byte-identical for other tenants. */
+  slug: string = '',
 ): OutletTemplateData {
-  const headers = [...OUTLET_UPLOAD_HEADERS, ...(geoEnabled ? ['Latitude', 'Longitude'] : [])];
+  // Leaf hierarchy column is tenant-aware: "ISR Code"/"ISR" for Bajaj, "XSR ID"/"XSR" otherwise.
+  const leafHeader = leafIdHeaderForTenant(slug);
+  const leafLabel = displayLabelForTenant(slug, leafRoleCode);
+  const headers = [
+    ...OUTLET_UPLOAD_HEADERS.map(h => (h === 'XSR ID' ? leafHeader : h)),
+    ...(geoEnabled ? ['Latitude', 'Longitude'] : []),
+  ];
 
   // Outlet types are tenant-specific (the enabled OutletTypeClientConfig codes). The
   // template MUST use the same source as validateOutletUpload, or it would instruct users
@@ -663,8 +682,8 @@ export function getOutletAdditionTemplateData(
     : 'No outlet types are enabled for this tenant yet — ask Gifsy to enable outlet types before adding outlets';
 
   const exampleRows: string[][] = [
-    ['OUT-2026-001', 'Verma Traders', validPrograms[0] ?? 'Trade Loyalty', validCategories[0] ?? 'Standard', exType1, 'Andheri Beat',  'DIST-01', 'ABC Distributors', 'Yes', 'Mumbai', 'Maharashtra', 'West Zone',   `${leafRoleCode}-M001`, 'BANK', 'CPP01', ...(geoEnabled ? ['19.0760', '72.8777'] : [])],
-    ['OUT-2026-002', 'Patel Kirana',  validPrograms[0] ?? 'Trade Loyalty', validCategories[1] ?? 'Premium',  exType2, 'Borivali Beat', 'DIST-02', 'XYZ Distributors', 'No',  'Pune',   'Maharashtra', '',            `${leafRoleCode}-P001`, 'ANY',  '',      ...(geoEnabled ? ['18.5204', '73.8567'] : [])],
+    ['OUT-2026-001', 'Verma Traders', validPrograms[0] ?? 'Trade Loyalty', validCategories[0] ?? 'Standard', exType1, 'Andheri Beat',  'DIST-01', 'ABC Distributors', 'Yes', 'Mumbai', 'Maharashtra', 'West Zone',   `${leafLabel}-M001`, 'BANK', 'CPP01', ...(geoEnabled ? ['19.0760', '72.8777'] : [])],
+    ['OUT-2026-002', 'Patel Kirana',  validPrograms[0] ?? 'Trade Loyalty', validCategories[1] ?? 'Premium',  exType2, 'Borivali Beat', 'DIST-02', 'XYZ Distributors', 'No',  'Pune',   'Maharashtra', '',            `${leafLabel}-P001`, 'ANY',  '',      ...(geoEnabled ? ['18.5204', '73.8567'] : [])],
   ];
 
   const dosAndDonts: string[][] = [
@@ -683,7 +702,7 @@ export function getOutletAdditionTemplateData(
     ['City',              'City where the outlet is located'],
     ['State',             'State where the outlet is located'],
     ['Zone',              'Geographic sales zone this outlet belongs to (e.g. "West Zone", "North Zone"). Leave blank if not applicable.'],
-    ['XSR ID',            `Employee ID of the ${leafRoleCode} (field sales rep) this outlet is assigned to. Must exist in the Employee Hierarchy.`],
+    [leafHeader,          `Employee ID of the ${leafLabel} (field sales rep) this outlet is assigned to. Must exist in the Employee Hierarchy.`],
     ['Payout Method',     'Optional — BANK, UPI, or ANY (case-insensitive). Blank defaults to BANK. UPI only if UPI payouts are enabled for your tenant, else the row is rejected.'],
     ['Parent ID',         'Optional — the Owner Group / Parent ID (parent code) to link this outlet to an owner group. Leave blank if the outlet is standalone.'],
     ...(geoEnabled ? [
@@ -693,19 +712,19 @@ export function getOutletAdditionTemplateData(
     ['', ''],
     ['✓ DOs', ''],
     ['DO',  'Use whatever Outlet ID coding scheme you like — any characters are accepted, just keep each ID unique'],
-    ['DO',  'Ensure the XSR ID exists in the Employee Hierarchy before uploading'],
+    ['DO',  `Ensure the ${leafHeader} exists in the Employee Hierarchy before uploading`],
     ['DO',  'If you fill the Metro column, enter exactly "Yes" or "No" (without quotes)'],
     ['DO',  'Use the exact Program Name and Sub-Program values from the configured list'],
     ['DO',  'Keep Outlet IDs unique — this system does not allow editing via this upload'],
     ['', ''],
     ['✗ DON\'Ts', ''],
     ['DON\'T', 'Re-upload an existing Outlet ID — it will be rejected. This upload is for new outlets only.'],
-    ['DON\'T', 'Enter an XSR ID that belongs to a non-field role (SO, ASM, RSM, ZNM, NSM) — only ISR-level IDs are accepted'],
-    ['DON\'T', 'Leave Outlet ID, Outlet Name, Program Name, Sub-Program, Outlet Type, City, State, or XSR ID blank (Beat, Metro, Payout Method and Parent ID may be left blank)'],
+    ['DON\'T', `Enter an ${leafHeader} that belongs to a non-field role (SO, ASM, RSM, ZNM, NSM) — only ISR-level IDs are accepted`],
+    ['DON\'T', `Leave Outlet ID, Outlet Name, Program Name, Sub-Program, Outlet Type, City, State, or ${leafHeader} blank (Beat, Metro, Payout Method and Parent ID may be left blank)`],
     ['DON\'T', 'Enter UPI in Payout Method when UPI payouts are not enabled for your tenant — the row will be rejected'],
     ['', ''],
     ['COMMON MISTAKES', ''],
-    ['MISTAKE', 'Using a SO/ASM ID in the XSR ID column — only leaf-level (ISR) IDs are accepted'],
+    ['MISTAKE', `Using a SO/ASM ID in the ${leafHeader} column — only leaf-level (ISR) IDs are accepted`],
     ['MISTAKE', 'Entering "Yes " (with trailing space) in Metro — trim all spaces'],
     ['MISTAKE', 'Uploading the same Outlet ID twice in one file — both rows will be marked as errors'],
     ['MISTAKE', 'Program Name or Sub-Program that doesn\'t exactly match the configured list (case-sensitive)'],
@@ -1072,7 +1091,8 @@ export function getUnparkTemplateData(): OutletTemplateData {
 
 // ─── HTML Operations Guide ────────────────────────────────────────────────────
 
-export function generateOutletGuideHtml(validOutletTypes: string[] = []): string {
+export function generateOutletGuideHtml(validOutletTypes: string[] = [], slug: string = ''): string {
+  const leafHeader = leafIdHeaderForTenant(slug);
   // Same tenant source as the template/validator so the guide can't contradict them.
   const outletTypeCell = validOutletTypes.length
     ? 'Exactly one of: ' + validOutletTypes.map(t => `<code>${t}</code>`).join(', ')
@@ -1163,7 +1183,7 @@ export function generateOutletGuideHtml(validOutletTypes: string[] = []): string
   <tr><td><code>Metro</code></td><td><span class="badge badge-green">Optional</span></td><td>If filled, enter exactly <code>Yes</code> or <code>No</code></td></tr>
   <tr><td><code>City</code></td><td><span class="badge badge-red">Required</span></td><td></td></tr>
   <tr><td><code>State</code></td><td><span class="badge badge-red">Required</span></td><td></td></tr>
-  <tr><td><code>XSR ID</code></td><td><span class="badge badge-red">Required</span></td><td>Must be a valid ISR-level employee ID in the Employee Hierarchy</td></tr>
+  <tr><td><code>${leafHeader}</code></td><td><span class="badge badge-red">Required</span></td><td>Must be a valid ISR-level employee ID in the Employee Hierarchy</td></tr>
   <tr><td><code>Payout Method</code></td><td><span class="badge badge-green">Optional</span></td><td>Per-outlet payout mandate — <code>BANK</code>, <code>UPI</code>, or <code>ANY</code> (case-insensitive). Blank defaults to <code>BANK</code>. <code>UPI</code> is only accepted when UPI payouts are enabled for your tenant, otherwise the row is rejected.</td></tr>
   <tr><td><code>Parent ID</code></td><td><span class="badge badge-green">Optional</span></td><td>The Owner Group / Parent ID (parent code) to link this outlet to an owner group. Leave blank if the outlet is standalone.</td></tr>
 </table>
@@ -1173,8 +1193,8 @@ export function generateOutletGuideHtml(validOutletTypes: string[] = []): string
 <h3>Common error scenarios</h3>
 <ul>
   <li><strong>Row rejected: "already exists"</strong> — The Outlet ID was previously uploaded. Remove that row.</li>
-  <li><strong>Row rejected: "not found in employee hierarchy"</strong> — The XSR ID in the last column doesn't exist. Upload the employee first via Employee Hierarchy upload.</li>
-  <li><strong>Row rejected: "only ISR-level employees"</strong> — You entered an SO or ASM ID in the XSR ID column. Only ISR (field-rep level) IDs are accepted.</li>
+  <li><strong>Row rejected: "not found in employee hierarchy"</strong> — The ${leafHeader} in the last column doesn't exist. Upload the employee first via Employee Hierarchy upload.</li>
+  <li><strong>Row rejected: "only ISR-level employees"</strong> — You entered an SO or ASM ID in the ${leafHeader} column. Only ISR (field-rep level) IDs are accepted.</li>
   <li><strong>Row rejected: "program name not in configured list"</strong> — Go to Settings and check the exact program name configured.</li>
 </ul>
 
@@ -1278,7 +1298,7 @@ export function generateOutletGuideHtml(validOutletTypes: string[] = []): string
 <h3>New outlet not appearing in ISR's KYC dropdown</h3>
 <ul>
   <li>Confirm the upload validation passed with no errors</li>
-  <li>Check that the XSR ID in the upload matches the ISR who is logged in</li>
+  <li>Check that the ${leafHeader} in the upload matches the ISR who is logged in</li>
   <li>Verify the outlet's kycStatus is <code>PENDING</code> (not already started)</li>
 </ul>
 
@@ -1308,7 +1328,11 @@ export interface UploadErrorReport {
 export function buildOutletUploadErrorReport(
   result: OutletUploadValidationResult,
   parsed: OutletUploadRow[],
+  /** Tenant slug — the leaf hierarchy column echoes the tenant's header ("ISR Code"/"XSR ID") so the
+   *  re-uploadable error report matches the template the admin downloaded. Default '' keeps "XSR ID". */
+  slug: string = '',
 ): UploadErrorReport {
+  const leafHeader = leafIdHeaderForTenant(slug);
   const byRow = new Map(parsed.map(p => [p.rowNum, p]));
   const rows = result.rows.map(r => {
     const p = byRow.get(r.rowNum);
@@ -1327,13 +1351,14 @@ export function buildOutletUploadErrorReport(
       'City':             p?.city ?? '',
       'State':            p?.state ?? '',
       'Zone':             p?.zone ?? '',
-      'XSR ID':           p?.xsrId ?? '',
+      [leafHeader]:       p?.xsrId ?? '',
       'Payout Method':    p?.payoutMethod ?? '',
       'Parent ID':        p?.parentId ?? '',
       __errors:           r.errors,
     } as Record<string, unknown>;
   });
-  return { columns: ['Row', ...OUTLET_UPLOAD_HEADERS], rows, errorHeader: 'Remarks' };
+  const columns = ['Row', ...OUTLET_UPLOAD_HEADERS.map(h => (h === 'XSR ID' ? leafHeader : h))];
+  return { columns, rows, errorHeader: 'Remarks' };
 }
 
 /** Re-KYC flag error report — full 22-column file + a distinct 'Validation Errors'

@@ -12,6 +12,7 @@
 import * as XLSX from 'xlsx';
 import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import type { OutletMasterRow } from '@/types';
+import { hierarchyConfigForTenant } from '@/lib/employee-hierarchy';
 
 // Optional, tenant-gated (features.outletMasterGeo) geo fields live on OutletMasterRow in @/types;
 // the geo columns below are emitted only when generateOutletMasterExcel is called with geoEnabled.
@@ -107,13 +108,34 @@ const GEO_COLUMNS: OutletMasterColumn[] = [
   { key: 'longitude', label: 'Longitude', section: 'A: Identity' },
 ];
 
+/** Relabel the D-section (sales hierarchy) columns to a tenant's nomenclature. For Bajaj the
+ *  hierarchyL1..L6 Id/Name labels become the tenant headers (ISR Code/SO HQ/…/NSM HQ + ISR/SM/ZH
+ *  Name). For every other tenant the base COLUMNS labels are returned untouched (byte-identical). */
+function tenantColumns(slug: string): OutletMasterColumn[] {
+  if ((slug ?? '').trim().toLowerCase() !== 'bajaj') return COLUMNS;
+  const levels = [...hierarchyConfigForTenant('bajaj')].sort((a, b) => a.level - b.level);
+  const idLabel = new Map<string, string>();
+  const nameLabel = new Map<string, string>();
+  levels.forEach((lvl, i) => {
+    const n = i + 1;
+    idLabel.set(`hierarchyL${n}Id`, lvl.idHeader ?? `${lvl.roleCode} ID`);
+    nameLabel.set(`hierarchyL${n}Name`, `${lvl.displayLabel ?? lvl.roleCode} Name`);
+  });
+  return COLUMNS.map(c =>
+    idLabel.has(c.key as string)   ? { ...c, label: idLabel.get(c.key as string)! }   :
+    nameLabel.has(c.key as string) ? { ...c, label: nameLabel.get(c.key as string)! } :
+    c,
+  );
+}
+
 /** The effective column set for an export. Geo columns are inserted right after 'Metro' (the end
- *  of section A) when geoEnabled; when off, the column set is byte-for-byte the base COLUMNS, so
- *  other tenants' export/template is unchanged. */
-function columnsFor(geoEnabled: boolean): OutletMasterColumn[] {
-  if (!geoEnabled) return COLUMNS;
-  const idx = COLUMNS.findIndex(c => c.key === 'isMetro');
-  return [...COLUMNS.slice(0, idx + 1), ...GEO_COLUMNS, ...COLUMNS.slice(idx + 1)];
+ *  of section A) when geoEnabled; when off, the column set is byte-for-byte the base COLUMNS (for
+ *  non-bajaj), so other tenants' export/template is unchanged. */
+function columnsFor(geoEnabled: boolean, slug: string = ''): OutletMasterColumn[] {
+  const base = tenantColumns(slug);
+  if (!geoEnabled) return base;
+  const idx = base.findIndex(c => c.key === 'isMetro');
+  return [...base.slice(0, idx + 1), ...GEO_COLUMNS, ...base.slice(idx + 1)];
 }
 
 // ─── Demo data (10 rows) ─────────────────────────────────────────────────────
@@ -301,9 +323,12 @@ export function generateOutletMasterExcel(
   /** When true (tenant feature `outletMasterGeo` on), Latitude/Longitude columns are included.
    *  Defaults to false, so every existing caller produces the same file as before. */
   geoEnabled: boolean = false,
+  /** Tenant slug — relabels the D-section hierarchy columns (Bajaj: ISR Code/SO HQ/…). Default ''
+   *  keeps the base labels, so other tenants' export is byte-identical. */
+  slug: string = '',
 ): Uint8Array {
   const wb = XLSX.utils.book_new();
-  const columns = columnsFor(geoEnabled);
+  const columns = columnsFor(geoEnabled, slug);
 
   // ── Section grouping row (row 1) ──
   const sectionRow: string[] = columns.map(c => c.section);

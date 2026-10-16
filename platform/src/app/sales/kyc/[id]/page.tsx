@@ -14,6 +14,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { KYCStatus, type ApprovalEvent, type KYCSubmitterRole } from '@/types';
 import { getRole } from '@/lib/sales-role';
+import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import { visibilityApi } from '@/lib/visibility';
 import type { CaptureUiState, OutletStatusWindow } from '@/lib/visibility-types';
@@ -544,6 +545,10 @@ function latestForStage(kyc: KYCDetail, stage: ApprovalEvent['stage']): Approval
   return kyc.approvalHistory.findLast((e) => e.stage === stage);
 }
 
+/** True for the Bajaj tenant slug (case/space-insensitive). */
+const isBajajSlug = (slug: string | null | undefined): boolean =>
+  (slug ?? '').trim().toLowerCase() === 'bajaj';
+
 /** Map a backend UserRole string (or an already-short label) to the short reviewer
  *  label shown in the stepper. SALES_ISR (XSR) never approves, so it is not a first
  *  approver — the map covers the roles that CAN be the first approver. */
@@ -553,6 +558,19 @@ const APPROVER_ROLE_LABEL: Record<string, string> = {
   SALES_STATE_HEAD: 'RSM', RSM: 'RSM',
   SALES_HO: 'HO', HO: 'HO',
 };
+/** Bajaj nomenclature (docs/plans/BAJAJ-HIERARCHY-RENAME.md): the only first-approver level
+ *  whose Bajaj display label differs is RSM → SM (ZNM collapses to SALES_STATE_HEAD→RSM; XSR
+ *  never approves). SO/ASM/HO are identical to Deoleo. Internal codes unchanged. */
+const APPROVER_ROLE_LABEL_BAJAJ: Record<string, string> = {
+  SALES_SO: 'SO', SO: 'SO',
+  SALES_ASM: 'ASM', ASM: 'ASM',
+  SALES_STATE_HEAD: 'SM', RSM: 'SM',
+  SALES_HO: 'HO', HO: 'HO',
+};
+/** Tenant-aware short reviewer label for a backend role / short code (Bajaj: RSM→SM). */
+function approverRoleLabel(slug: string, key: string | null | undefined): string | undefined {
+  return (isBajajSlug(slug) ? APPROVER_ROLE_LABEL_BAJAJ : APPROVER_ROLE_LABEL)[key ?? ''];
+}
 
 /** The SO-declaration approver designation printed on the PDF the ACTIVE approver generates, keyed by
  *  the FE role label. The authoritative designation on the stored record is the sales hierarchy level
@@ -564,6 +582,19 @@ const ASM_DESIGNATION_BY_ROLE: Record<string, string> = {
   RSM: 'Regional Sales Manager',
   HO:  'Head Office',
 };
+/** Bajaj designations = the Bajaj hierarchy level NAMES the backend stamps for a bajaj tenant
+ *  (ISR/SO/ASM/SM/ZH/NSM), so the at-approval PDF matches the authoritative DB value:
+ *  SO→SO, ASM→ASM, RSM→SM, HO→NSM. Keep Deoleo's long designations unchanged. */
+const ASM_DESIGNATION_BY_ROLE_BAJAJ: Record<string, string> = {
+  SO:  'SO',
+  ASM: 'ASM',
+  RSM: 'SM',
+  HO:  'NSM',
+};
+/** Tenant-aware at-approval approver designation for the FE short role (Bajaj: level names). */
+function asmDesignationByRole(slug: string, role: string): string | undefined {
+  return (isBajajSlug(slug) ? ASM_DESIGNATION_BY_ROLE_BAJAJ : ASM_DESIGNATION_BY_ROLE)[role];
+}
 
 /** Map a `PENDING_*_APPROVAL` first-approver status to the short reviewer label. */
 const PENDING_STATUS_LABEL: Partial<Record<KYCStatus, string>> = {
@@ -571,6 +602,16 @@ const PENDING_STATUS_LABEL: Partial<Record<KYCStatus, string>> = {
   [KYCStatus.PENDING_ASM_APPROVAL]: 'ASM',
   [KYCStatus.PENDING_RSM_APPROVAL]: 'RSM',
 };
+/** Bajaj: PENDING_RSM surfaces as "SM" (RSM→SM); SO/ASM unchanged. */
+const PENDING_STATUS_LABEL_BAJAJ: Partial<Record<KYCStatus, string>> = {
+  [KYCStatus.PENDING_SO_APPROVAL]:  'SO',
+  [KYCStatus.PENDING_ASM_APPROVAL]: 'ASM',
+  [KYCStatus.PENDING_RSM_APPROVAL]: 'SM',
+};
+/** Tenant-aware short reviewer label for a pending-approval status (Bajaj: RSM→SM). */
+function pendingStatusLabel(slug: string, status: KYCStatus): string | undefined {
+  return (isBajajSlug(slug) ? PENDING_STATUS_LABEL_BAJAJ : PENDING_STATUS_LABEL)[status];
+}
 
 /**
  * Resolve the first-approver step label from the ACTUAL reviewer level, not the
@@ -585,10 +626,10 @@ const PENDING_STATUS_LABEL: Partial<Record<KYCStatus, string>> = {
  *      the acted FIRST_APPROVER event's persisted approverRole.
  *   3. Fallback → "SO Review" (never renders a blank label).
  */
-function firstApproverLabel(kyc: KYCDetail): string {
+function firstApproverLabel(kyc: KYCDetail, slug: string): string {
   const short =
-    PENDING_STATUS_LABEL[kyc.status] ??
-    APPROVER_ROLE_LABEL[latestForStage(kyc, 'FIRST_APPROVER')?.role ?? ''] ??
+    pendingStatusLabel(slug, kyc.status) ??
+    approverRoleLabel(slug, latestForStage(kyc, 'FIRST_APPROVER')?.role) ??
     'SO';
   return `${short} Review`;
 }
@@ -615,8 +656,8 @@ function firstApproverLabel(kyc: KYCDetail): string {
  *      approval yet on the current cycle)
  *   Gifsy rejection          → step2 complete,  step3 rejected
  */
-function buildTimeline(kyc: KYCDetail): TimelineStep[] {
-  const stepFirstLabel     = firstApproverLabel(kyc);
+function buildTimeline(kyc: KYCDetail, slug: string): TimelineStep[] {
+  const stepFirstLabel     = firstApproverLabel(kyc, slug);
   const firstApproverEvent = latestForStage(kyc, 'FIRST_APPROVER');
   const gifsyEvent         = latestForStage(kyc, 'GIFSY');
 
@@ -678,7 +719,7 @@ function buildTimeline(kyc: KYCDetail): TimelineStep[] {
       firstApproverEvent?.action === 'APPROVED' &&
       !!firstApproverEvent.by;
     step2Sub = climbed
-      ? `${APPROVER_ROLE_LABEL[firstApproverEvent.role ?? ''] ?? 'SO'} approved — awaiting ${PENDING_STATUS_LABEL[kyc.status] ?? 'ASM'}`
+      ? `${approverRoleLabel(slug, firstApproverEvent.role) ?? 'SO'} approved — awaiting ${pendingStatusLabel(slug, kyc.status) ?? 'ASM'}`
       : 'Awaiting review';
   } else if (firstApproverEvent?.action === 'APPROVED') {
     // Defensive: an approved first-approver event with a non-standard status.
@@ -740,8 +781,8 @@ function StepDot({ state }: { state: StepState }) {
   );
 }
 
-function ApprovalTimeline({ kyc }: { kyc: KYCDetail }) {
-  const steps = buildTimeline(kyc);
+function ApprovalTimeline({ kyc, slug }: { kyc: KYCDetail; slug: string }) {
+  const steps = buildTimeline(kyc, slug);
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -872,6 +913,7 @@ function VisibilityPeriodCard({ outletId, enabled }: { outletId: string; enabled
 
 export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id }        = use(params);
+  const slug          = useClientConfig().slug;
   const [kyc,     setKyc]     = useState<KYCDetail | null>(null);
   const [loadingKyc, setLoadingKyc] = useState(true);
 
@@ -1215,7 +1257,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
     // uses the REAL designation the backend stamped (sales hierarchy level name). Falls back to the
     // component default ("Area Sales Manager") when neither is available.
     asmDesignation:  canApprove && isSoDecl
-      ? (ASM_DESIGNATION_BY_ROLE[role] ?? dd?.asmDesignation ?? null)
+      ? (asmDesignationByRole(slug, role) ?? dd?.asmDesignation ?? null)
       : (dd?.asmDesignation ?? null),
   };
   // The declaration is dual-signed once it clears the first approver (→ PENDING_GIFSY / APPROVED).
@@ -1333,7 +1375,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
       )}
 
       {/* Approval Timeline — hidden for approved outlets (no longer actionable) */}
-      {!isApproved && <ApprovalTimeline kyc={kyc} />}
+      {!isApproved && <ApprovalTimeline kyc={kyc} slug={slug} />}
 
       {/* ── SO Declaration variant: show the SO-signed declaration at every stage ── */}
       {isSoDecl && !canApprove && (

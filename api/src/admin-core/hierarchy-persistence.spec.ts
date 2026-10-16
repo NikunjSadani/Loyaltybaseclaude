@@ -11,6 +11,9 @@ import { BadRequestException } from '@nestjs/common';
 import {
   persistHierarchy,
   DEOLEO_HIERARCHY,
+  BAJAJ_HIERARCHY,
+  buildLevelRows,
+  hierarchyConfigForTenant,
   syntheticPlaceholderPhone,
   type HierarchyEmployee,
 } from './hierarchy-persistence';
@@ -202,5 +205,43 @@ describe('persistHierarchy — phone ↔ employeeCode guard', () => {
     ]);
     // distinct → no two users collapse onto one (clientId, '') row
     expect(new Set(upsertedUserPhones).size).toBe(2);
+  });
+});
+
+describe('buildLevelRows — tenant-aware level names (Bajaj rename)', () => {
+  it('Deoleo (and no-clientId): name = the config roleLabel, codes unchanged — byte-identical', () => {
+    const rows = buildLevelRows(DEOLEO_HIERARCHY, 'deoleo');
+    expect(rows).toEqual([
+      { code: 'XSR', name: 'XSR', level: 1 },
+      { code: 'SO', name: 'SO', level: 2 },
+      { code: 'ASM', name: 'ASM', level: 3 },
+      { code: 'RSM', name: 'RSM', level: 4 },
+      { code: 'ZNM', name: 'ZNM', level: 5 },
+      { code: 'NSM', name: 'NSM', level: 6 },
+    ]);
+    // Omitting clientId is identical to the pre-rename behaviour.
+    expect(buildLevelRows(DEOLEO_HIERARCHY)).toEqual(rows);
+  });
+
+  it('Bajaj: persists the bajaj DISPLAY label as name, codes unchanged — even if the caller passes DEOLEO_HIERARCHY', () => {
+    const expected = [
+      { code: 'XSR', name: 'ISR', level: 1 },
+      { code: 'SO', name: 'SO', level: 2 },
+      { code: 'ASM', name: 'ASM', level: 3 },
+      { code: 'RSM', name: 'SM', level: 4 },
+      { code: 'ZNM', name: 'ZH', level: 5 },
+      { code: 'NSM', name: 'NSM', level: 6 },
+    ];
+    // The bajaj config already carries bajaj labels…
+    expect(buildLevelRows(BAJAJ_HIERARCHY, 'bajaj')).toEqual(expected);
+    // …and a bajaj clientId forces bajaj labels even when the caller hands DEOLEO_HIERARCHY
+    // (the real caller hardcodes DEOLEO_HIERARCHY; the bajaj remap keys on the unchanged code).
+    expect(buildLevelRows(DEOLEO_HIERARCHY, 'bajaj')).toEqual(expected);
+  });
+
+  it('hierarchyConfigForTenant resolves bajaj → BAJAJ_HIERARCHY, else DEOLEO_HIERARCHY', () => {
+    expect(hierarchyConfigForTenant('bajaj')).toBe(BAJAJ_HIERARCHY);
+    expect(hierarchyConfigForTenant('deoleo')).toBe(DEOLEO_HIERARCHY);
+    expect(hierarchyConfigForTenant(null)).toBe(DEOLEO_HIERARCHY);
   });
 });

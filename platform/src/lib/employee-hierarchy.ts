@@ -57,6 +57,94 @@ export const DEOLEO_HIERARCHY: TenantHierarchyLevel[] = [
   { tenantId: 'deoleo', level: 6, roleCode: 'NSM', roleLabel: 'NSM', isLeaf: false, isRoot: true  },
 ];
 
+// ─── Bajaj hierarchy config (nomenclature rename — codes UNCHANGED) ────────────
+// Internal role codes stay XSR/SO/ASM/RSM/ZNM/NSM (the machine identifiers); only the
+// display labels + column headers are Bajaj-specific. See docs/plans/BAJAJ-HIERARCHY-RENAME.md.
+//   code  display  idHeader
+//   XSR → ISR      ISR Code
+//   SO  → SO       SO HQ
+//   ASM → ASM      ASM HQ
+//   RSM → SM       SM HQ
+//   ZNM → ZH       ZH HQ
+//   NSM → NSM      NSM HQ
+
+export const BAJAJ_HIERARCHY: TenantHierarchyLevel[] = [
+  { tenantId: 'bajaj', level: 1, roleCode: 'XSR', roleLabel: 'XSR', isLeaf: true,  isRoot: false, displayLabel: 'ISR', idHeader: 'ISR Code' },
+  { tenantId: 'bajaj', level: 2, roleCode: 'SO',  roleLabel: 'SO',  isLeaf: false, isRoot: false, displayLabel: 'SO',  idHeader: 'SO HQ'    },
+  { tenantId: 'bajaj', level: 3, roleCode: 'ASM', roleLabel: 'ASM', isLeaf: false, isRoot: false, displayLabel: 'ASM', idHeader: 'ASM HQ'   },
+  { tenantId: 'bajaj', level: 4, roleCode: 'RSM', roleLabel: 'RSM', isLeaf: false, isRoot: false, displayLabel: 'SM',  idHeader: 'SM HQ'    },
+  { tenantId: 'bajaj', level: 5, roleCode: 'ZNM', roleLabel: 'ZNM', isLeaf: false, isRoot: false, displayLabel: 'ZH',  idHeader: 'ZH HQ'    },
+  { tenantId: 'bajaj', level: 6, roleCode: 'NSM', roleLabel: 'NSM', isLeaf: false, isRoot: true,  displayLabel: 'NSM', idHeader: 'NSM HQ'   },
+];
+
+/**
+ * Resolve the hierarchy config for a tenant slug. Bajaj gets the renamed-label config;
+ * every other tenant (Deoleo included) gets DEOLEO_HIERARCHY — byte-identical behavior.
+ */
+export function hierarchyConfigForTenant(slug: string): TenantHierarchyLevel[] {
+  return (slug ?? '').trim().toLowerCase() === 'bajaj' ? BAJAJ_HIERARCHY : DEOLEO_HIERARCHY;
+}
+
+// ─── Per-level header / label helpers ─────────────────────────────────────────
+// A level's columns derive from these so Deoleo (no displayLabel/idHeader) stays
+// byte-identical while Bajaj renders its renamed headers.
+
+/** ID-column header: `level.idHeader ?? `${roleCode} ID``. */
+function levelIdHeader(l: TenantHierarchyLevel): string {
+  return l.idHeader ?? `${l.roleCode} ID`;
+}
+/** Name-column header: `${displayLabel ?? roleCode} Name`. */
+function levelNameHeader(l: TenantHierarchyLevel): string {
+  return `${l.displayLabel ?? l.roleCode} Name`;
+}
+/** Phone-column header (FE uses "Phone", not "Phone Number"): `${displayLabel ?? roleCode} Phone`. */
+function levelPhoneHeader(l: TenantHierarchyLevel): string {
+  return `${l.displayLabel ?? l.roleCode} Phone`;
+}
+/** Display label used in guidance text / badges: `displayLabel ?? roleCode`. */
+function levelLabel(l: TenantHierarchyLevel): string {
+  return l.displayLabel ?? l.roleCode;
+}
+/** Legacy (code-based) headers — accepted on READ for backward-compat with existing uploads. */
+function legacyIdHeader(l: TenantHierarchyLevel): string    { return `${l.roleCode} ID`; }
+function legacyNameHeader(l: TenantHierarchyLevel): string  { return `${l.roleCode} Name`; }
+function legacyPhoneHeader(l: TenantHierarchyLevel): string { return `${l.roleCode} Phone`; }
+
+/**
+ * Per-level column readers (leaf→root). Each entry carries the CANONICAL output header
+ * for the level's ID/Name/Phone plus a reader that accepts the new header OR the legacy
+ * `${roleCode} …` header (backward-compat). Shared by header generation, parsing and the
+ * error-report sheet so all three agree on the column set. Deoleo: new === legacy ⇒
+ * byte-identical.
+ */
+function chainColumnReaders(
+  config: TenantHierarchyLevel[],
+): { header: string; read: (raw: Record<string, unknown>) => string }[] {
+  const sorted = [...config].sort((a, b) => a.level - b.level);
+  return sorted.flatMap(l => [
+    { header: levelIdHeader(l),    read: (raw: Record<string, unknown>) => String(raw[levelIdHeader(l)]    ?? raw[legacyIdHeader(l)]    ?? '') },
+    { header: levelNameHeader(l),  read: (raw: Record<string, unknown>) => String(raw[levelNameHeader(l)]  ?? raw[legacyNameHeader(l)]  ?? '') },
+    { header: levelPhoneHeader(l), read: (raw: Record<string, unknown>) => String(raw[levelPhoneHeader(l)] ?? raw[legacyPhoneHeader(l)] ?? '') },
+  ]);
+}
+
+// ─── Exported helpers for sibling FE streams (outlet / sales) ──────────────────
+
+/** The leaf level's ID-column header for a tenant ("ISR Code" bajaj / "XSR ID" deoleo). */
+export function leafIdHeaderForTenant(slug: string): string {
+  const config = hierarchyConfigForTenant(slug);
+  const leaf = config.find(l => l.isLeaf) ?? config[0];
+  return levelIdHeader(leaf);
+}
+
+/** The display label for an internal role code under a tenant (falls back to the code). */
+export function displayLabelForTenant(slug: string, code: string): string {
+  const config = hierarchyConfigForTenant(slug);
+  const n = (code ?? '').trim().toUpperCase();
+  const level = config.find(l => l.roleCode.toUpperCase() === n);
+  return level ? levelLabel(level) : code;
+}
+
 // ─── Mock employee store (localStorage-backed for demo) ───────────────────────
 
 const STORE_KEY = 'hierarchy_employees_v1';
@@ -159,13 +247,21 @@ export function normalisePhone(phone: string): string {
   return phone.trim().replace(/\D/g, '');
 }
 
-/** Case-insensitive role lookup in tenant config */
+/**
+ * Case-insensitive role lookup in tenant config. Matches the internal role CODE and,
+ * when a tenant defines one, its display LABEL alias (e.g. Bajaj ISR→XSR, SM→RSM, ZH→ZNM)
+ * so an uploaded "Hierarchy" value using the renamed label still resolves. Deoleo has no
+ * displayLabel, so only the code matches — byte-identical.
+ */
 export function resolveRole(
   roleInput: string,
   config: TenantHierarchyLevel[],
 ): TenantHierarchyLevel | null {
   const n = roleInput.trim().toUpperCase();
-  return config.find(l => l.roleCode.toUpperCase() === n) ?? null;
+  if (!n) return null;
+  return config.find(
+    l => l.roleCode.toUpperCase() === n || (l.displayLabel ?? '').toUpperCase() === n,
+  ) ?? null;
 }
 
 // ─── Pass 1: header validation ────────────────────────────────────────────────
@@ -545,11 +641,16 @@ export interface TemplateData {
  *   Sheet 2 — "Employee Upload" ← the data entry sheet
  */
 export function getTemplateData(config: TenantHierarchyLevel[]): TemplateData {
-  const roles        = config.map(l => l.roleCode);
+  // Display labels (Deoleo: label === code ⇒ byte-identical; Bajaj: ISR/SM/ZH…). resolveRole
+  // accepts the label as a Hierarchy-column value, so the example rows below use labels too.
+  const roles        = config.map(l => levelLabel(l));
   const rolesStr     = roles.join(' / ');
   const leafConfig   = config.find(l => l.isLeaf)  ?? config[0];
   const rootConfig   = config.find(l => l.isRoot)  ?? config[config.length - 1];
   const parentOfLeaf = config.find(l => l.level === leafConfig.level + 1);
+  const leafCode     = levelLabel(leafConfig);
+  const rootCode     = levelLabel(rootConfig);
+  const parentCode   = parentOfLeaf ? levelLabel(parentOfLeaf) : '';
 
   // ── Build Dos & Don'ts sheet rows ─────────────────────────────────────────
   // Each row: [col-A content, col-B content]
@@ -586,14 +687,14 @@ export function getTemplateData(config: TenantHierarchyLevel[]): TemplateData {
     ],
     [
       'Reporting Manager Hierarchy',
-      `REQUIRED for all levels except ${rootConfig.roleCode}. ` +
-      `Must be the role code exactly one level above (e.g. an ${leafConfig.roleCode} must report to ${parentOfLeaf?.roleCode ?? 'the next level'}). ` +
+      `REQUIRED for all levels except ${rootCode}. ` +
+      `Must be the role code exactly one level above (e.g. an ${leafCode} must report to ${parentCode || 'the next level'}). ` +
       'This is cross-checked against the manager\'s actual role in the system.',
     ],
     [
       'Reporting Manager Employee ID',
-      `REQUIRED for all levels except ${rootConfig.roleCode}. ` +
-      `${rootConfig.roleCode} must leave BOTH manager columns completely blank. ` +
+      `REQUIRED for all levels except ${rootCode}. ` +
+      `${rootCode} must leave BOTH manager columns completely blank. ` +
       'The manager must exist in the system or appear anywhere in this upload file.',
     ],
     ['', ''],
@@ -615,7 +716,7 @@ export function getTemplateData(config: TenantHierarchyLevel[]): TemplateData {
     ],
     [
       '✓ DO',
-      `Leave BOTH Reporting Manager columns blank for ${rootConfig.roleCode} rows only.`,
+      `Leave BOTH Reporting Manager columns blank for ${rootCode} rows only.`,
     ],
     [
       '✓ DO',
@@ -659,16 +760,16 @@ export function getTemplateData(config: TenantHierarchyLevel[]): TemplateData {
     ],
     [
       '✗ DON\'T',
-      `Fill the Reporting Manager columns for ${rootConfig.roleCode}. Leave them blank.`,
+      `Fill the Reporting Manager columns for ${rootCode}. Leave them blank.`,
     ],
     [
       '✗ DON\'T',
-      `Skip the Reporting Manager columns for any level other than ${rootConfig.roleCode}. Both are required.`,
+      `Skip the Reporting Manager columns for any level other than ${rootCode}. Both are required.`,
     ],
     [
       '✗ DON\'T',
       'Enter a manager whose Hierarchy is not exactly one level above. ' +
-      `Example: ${leafConfig.roleCode} MUST report to ${parentOfLeaf?.roleCode ?? 'the next level up'}, not skip a level.`,
+      `Example: ${leafCode} MUST report to ${parentCode || 'the next level up'}, not skip a level.`,
     ],
     [
       '✗ DON\'T',
@@ -719,28 +820,28 @@ export function getTemplateData(config: TenantHierarchyLevel[]): TemplateData {
     headers: REQUIRED_HEADERS,
     exampleRows: [
       // NSM row — no manager
-      [rootConfig.roleCode, `${rootConfig.roleCode}-001`, 'Anand Rao', '9900000001', '', ''],
+      [rootCode, `${rootCode}-001`, 'Anand Rao', '9900000001', '', ''],
       // Middle level — parent of leaf
       [
-        parentOfLeaf?.roleCode ?? '',
-        `${parentOfLeaf?.roleCode ?? 'SO'}-MUM1`,
+        parentCode,
+        `${parentCode || 'SO'}-MUM1`,
         'Rajesh Kumar', '9900000028',
-        rootConfig.roleCode,
-        `${rootConfig.roleCode}-001`,
+        rootCode,
+        `${rootCode}-001`,
       ],
       // Leaf with full details
       [
-        leafConfig.roleCode, `${leafConfig.roleCode}-P001`,
+        leafCode, `${leafCode}-P001`,
         'Anil Sharma', '9900000041',
-        parentOfLeaf?.roleCode ?? '',
-        `${parentOfLeaf?.roleCode ?? 'SO'}-MUM1`,
+        parentCode,
+        `${parentCode || 'SO'}-MUM1`,
       ],
       // Placeholder — blank name and phone
       [
-        leafConfig.roleCode, `${leafConfig.roleCode}-P002`,
+        leafCode, `${leafCode}-P002`,
         '', '',
-        parentOfLeaf?.roleCode ?? '',
-        `${parentOfLeaf?.roleCode ?? 'SO'}-MUM1`,
+        parentCode,
+        `${parentCode || 'SO'}-MUM1`,
       ],
     ],
     dosAndDontsRows,
@@ -750,11 +851,15 @@ export function getTemplateData(config: TenantHierarchyLevel[]): TemplateData {
 // ─── HTML guide document ──────────────────────────────────────────────────────
 
 export function generateGuideHtml(config: TenantHierarchyLevel[]): string {
-  const roles      = config.map(l => l.roleCode);
-  const leafCode   = config.find(l => l.isLeaf)?.roleCode  ?? roles[0];
-  const rootCode   = config.find(l => l.isRoot)?.roleCode  ?? roles[roles.length - 1];
+  // Use display labels throughout (Deoleo: label === code ⇒ byte-identical; Bajaj: ISR/SM/ZH…).
+  const roles      = config.map(l => levelLabel(l));
+  const leafL      = config.find(l => l.isLeaf);
+  const rootL      = config.find(l => l.isRoot);
+  const parentL    = config.find(l => l.level === 2);
+  const leafCode   = leafL ? levelLabel(leafL) : roles[0];
+  const rootCode   = rootL ? levelLabel(rootL) : roles[roles.length - 1];
   const levelStr   = roles.join(' < ');
-  const parentCode = config.find(l => l.level === 2)?.roleCode ?? '';
+  const parentCode = parentL ? levelLabel(parentL) : '';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -788,7 +893,7 @@ export function generateGuideHtml(config: TenantHierarchyLevel[]): string {
 <ul>
   <li><strong>${leafCode}</strong> — Field level. Directly tagged to outlets.</li>
 ${config.filter(l => !l.isLeaf && !l.isRoot)
-        .map(l => `  <li><strong>${l.roleCode}</strong> — Manages the team below them.</li>`)
+        .map(l => `  <li><strong>${levelLabel(l)}</strong> — Manages the team below them.</li>`)
         .join('\n')}
   <li><strong>${rootCode}</strong> — Top of the hierarchy. No reporting manager.</li>
 </ul>
@@ -932,9 +1037,9 @@ ${config.filter(l => !l.isLeaf && !l.isRoot)
  * ordered leaf-first: "{ROLE} ID", "{ROLE} Name", "{ROLE} Phone" × 6 levels.
  */
 export function getHierarchyChainHeaders(config: TenantHierarchyLevel[]): string[] {
-  return [...config]
-    .sort((a, b) => a.level - b.level)
-    .flatMap(l => [`${l.roleCode} ID`, `${l.roleCode} Name`, `${l.roleCode} Phone`]);
+  // Canonical per-level headers (ID/Name/Phone × levels, leaf-first). Deoleo: `${code} ID/Name/Phone`;
+  // Bajaj: the renamed headers (ISR Code / SO HQ / … and ISR Name / SM Phone / …).
+  return chainColumnReaders(config).map(c => c.header);
 }
 
 /**
@@ -1019,14 +1124,28 @@ export function buildHierarchyChainExportRows(
  * Pass 1 header validation for the chain format.
  * Returns null if all expected columns are present; otherwise an error string
  * that names every missing column.
+ *
+ * Backward-compat: a column is satisfied by EITHER its canonical per-level header
+ * (new) OR the legacy `${roleCode} …` header, so an existing (pre-rename) upload keeps
+ * validating under a renamed (Bajaj) config. Deoleo: new === legacy ⇒ byte-identical.
+ * The error message always names the CANONICAL header for any missing column.
  */
 export function validateHierarchyChainHeaders(
   headers: string[],
   config: TenantHierarchyLevel[],
 ): string | null {
+  const sorted = [...config].sort((a, b) => a.level - b.level);
   const expected = getHierarchyChainHeaders(config);
   const normalised = headers.map(h => h.trim());
-  const missing = expected.filter(h => !normalised.includes(h));
+  const present = (neu: string, legacy: string) =>
+    normalised.includes(neu) || normalised.includes(legacy);
+
+  const missing: string[] = [];
+  for (const l of sorted) {
+    if (!present(levelIdHeader(l),    legacyIdHeader(l)))    missing.push(levelIdHeader(l));
+    if (!present(levelNameHeader(l),  legacyNameHeader(l)))  missing.push(levelNameHeader(l));
+    if (!present(levelPhoneHeader(l), legacyPhoneHeader(l))) missing.push(levelPhoneHeader(l));
+  }
   if (missing.length === 0) return null;
   return (
     `Missing required column(s): ${missing.join(', ')}. ` +
@@ -1056,7 +1175,8 @@ export function parseHierarchyChainRows(
 ): HierarchyChainParseResult {
   const sorted = [...config].sort((a, b) => a.level - b.level); // leaf→root
   const leafLevel = sorted.find(l => l.isLeaf) ?? sorted[0];
-  const levelCodes = sorted.map(l => l.roleCode);
+  // Display labels for user-facing messages (Deoleo: label === code ⇒ byte-identical).
+  const levelLabels = sorted.map(l => levelLabel(l));
 
   const chainErrors: HierarchyChainRowError[] = [];
 
@@ -1076,16 +1196,17 @@ export function parseHierarchyChainRows(
   // ── Phase 1: row-by-row scan ───────────────────────────────────────────────
   let rowNum = 2; // row 1 = header
   for (const raw of rawRows) {
-    // Extract per-level data
+    // Extract per-level data. Headers are read via the per-level NEW header with a LEGACY
+    // `${roleCode} …` fallback so existing (pre-rename) uploads keep parsing under a renamed
+    // (Bajaj) config. String() coerces numeric cells (SheetJS returns numbers for numeric
+    // IDs/phones) — a bare `(v ?? '').trim()` throws "trim is not a function" on those.
     const levels = sorted.map((l, i) => ({
       cfg:       l,
-      // String() coerces numeric cells (SheetJS returns numbers for numeric IDs/phones) — a bare
-      // `(v ?? '').trim()` throws "trim is not a function" on those. (#hierarchy-upload real-data)
-      id:        String(raw[`${l.roleCode} ID`]    ?? '').trim(),
-      name:      String(raw[`${l.roleCode} Name`]  ?? '').trim(),
-      phone:     String(raw[`${l.roleCode} Phone`] ?? '').trim(),
+      id:        String(raw[levelIdHeader(l)]    ?? raw[legacyIdHeader(l)]    ?? '').trim(),
+      name:      String(raw[levelNameHeader(l)]  ?? raw[legacyNameHeader(l)]  ?? '').trim(),
+      phone:     String(raw[levelPhoneHeader(l)] ?? raw[legacyPhoneHeader(l)] ?? '').trim(),
       parentId:  i + 1 < sorted.length
-        ? String(raw[`${sorted[i + 1].roleCode} ID`] ?? '').trim()
+        ? String(raw[levelIdHeader(sorted[i + 1])] ?? raw[legacyIdHeader(sorted[i + 1])] ?? '').trim()
         : null, // root has no parent
     }));
 
@@ -1101,8 +1222,8 @@ export function parseHierarchyChainRows(
           rowNums:    [rowNum],
           employeeId: '',
           message:
-            `Row ${rowNum}: ${cfg.roleCode} ID is missing. ` +
-            `All levels (${levelCodes.join(' → ')}) must have an ID — ` +
+            `Row ${rowNum}: ${levelIdHeader(cfg)} is missing. ` +
+            `All levels (${levelLabels.join(' → ')}) must have an ID — ` +
             `the full chain is required for the KYC flow to work.`,
         });
       }
@@ -1144,7 +1265,7 @@ export function parseHierarchyChainRows(
           rowNums:    [rowNum],
           employeeId: id,
           message:
-            `Row ${rowNum}: ${cfg.roleCode} phone "${phone}" for ID "${id}" is invalid. ` +
+            `Row ${rowNum}: ${levelLabel(cfg)} phone "${phone}" for ID "${id}" is invalid. ` +
             `Phone must be exactly 10 digits with no spaces or +91 prefix. ` +
             `Leave blank if the number is not available.`,
         });
@@ -1183,8 +1304,8 @@ export function parseHierarchyChainRows(
         rowNums:    rows,
         employeeId: id,
         message:
-          `${leafLevel.roleCode} ID "${id}" appears in more than one row ` +
-          `(rows ${rows.join(', ')}). Each ${leafLevel.roleCode} can only appear once per upload.`,
+          `${levelIdHeader(leafLevel)} "${id}" appears in more than one row ` +
+          `(rows ${rows.join(', ')}). Each ${levelLabel(leafLevel)} can only appear once per upload.`,
       });
     }
   }
@@ -1333,12 +1454,16 @@ function buildHierarchyErrorSheet(
   errorsByRow: Map<number, string[]>,
   config: TenantHierarchyLevel[],
 ): Uint8Array {
-  const chainHeaders = getHierarchyChainHeaders(config);
+  const readers      = chainColumnReaders(config);
+  const chainHeaders = readers.map(c => c.header);
   const allHeaders   = [...chainHeaders, 'Remarks'];
 
   const dataRows = rawRows.map((raw, idx) => {
     const rn      = idx + 2; // idx 0 → rowNum 2 (row 1 = header)
-    const values  = chainHeaders.map(h => (raw[h] ?? '').toString());
+    // Read with the new-or-legacy fallback so an error report for a LEGACY (`${code} …`) upload
+    // under a renamed (Bajaj) config still carries the original cell values into the re-uploadable
+    // sheet (emitted under the canonical headers). Deoleo: new === legacy ⇒ identical.
+    const values  = readers.map(c => c.read(raw));
     const remarks = (errorsByRow.get(rn) ?? []).join(' | ');
     return [...values, remarks];
   });
@@ -1404,7 +1529,14 @@ export function getHierarchyChainTemplateData(config: TenantHierarchyLevel[]): {
   const headers  = getHierarchyChainHeaders(config);
   const leaf     = sorted.find(l => l.isLeaf)  ?? sorted[0];
   const root     = sorted.find(l => l.isRoot)  ?? sorted[sorted.length - 1];
-  const levelStr = sorted.map(l => l.roleCode).join(' → ');
+  const parent   = sorted.find(l => l.level === leaf.level + 1);
+  // Display labels (Deoleo: label === code ⇒ byte-identical; Bajaj: ISR/SM/ZH…).
+  const leafLbl    = levelLabel(leaf);
+  const rootLbl    = levelLabel(root);
+  const parentLbl  = parent ? levelLabel(parent) : '';
+  const levelStr   = sorted.map(l => levelLabel(l)).join(' → ');
+  const nonLeafStr = sorted.filter(l => !l.isLeaf).map(l => levelLabel(l)).join('/');
+  const count      = sorted.length;
 
   // ── Example rows ──────────────────────────────────────────────────────────
   // All non-leaf levels use generic, config-derived values so the template
@@ -1418,16 +1550,16 @@ export function getHierarchyChainTemplateData(config: TenantHierarchyLevel[]): {
         row.push(leafId, leafName, leafPhone);
       } else {
         const phone = `990000${String(i + 1).padStart(4, '0')}`;
-        row.push(`${l.roleCode}-EX${i + 1}`, `${l.roleCode} Example`, phone);
+        row.push(`${levelLabel(l)}-EX${i + 1}`, `${levelLabel(l)} Example`, phone);
       }
     });
     return row;
   };
 
   const exampleRows: string[][] = [
-    makeExampleRow('XSR-M001', 'Anil Sharma',   '9900000041'),
-    makeExampleRow('XSR-M002', '',               ''),           // PLACEHOLDER
-    makeExampleRow('XSR-P001', 'Deepa Nair',    '9900000042'),
+    makeExampleRow(`${leafLbl}-M001`, 'Anil Sharma',   '9900000041'),
+    makeExampleRow(`${leafLbl}-M002`, '',               ''),           // PLACEHOLDER
+    makeExampleRow(`${leafLbl}-P001`, 'Deepa Nair',    '9900000042'),
   ];
 
   // ── Dos & Don'ts sheet ────────────────────────────────────────────────────
@@ -1439,7 +1571,7 @@ export function getHierarchyChainTemplateData(config: TenantHierarchyLevel[]): {
     ['━━━  FORMAT OVERVIEW  ━━━', ''],
     ['Each row = one field-level employee + their full reporting chain.', ''],
     [`Column order: ${levelStr} — three columns per level (ID, Name, Phone).`, ''],
-    ['The same SO/ASM/RSM/ZNM/NSM will appear in multiple rows (once per XSR under them).', ''],
+    [`The same ${nonLeafStr} will appear in multiple rows (once per ${leafLbl} under them).`, ''],
     ['That is expected and correct — the system deduplicates automatically.', ''],
     ['', ''],
 
@@ -1452,39 +1584,39 @@ export function getHierarchyChainTemplateData(config: TenantHierarchyLevel[]): {
 
     ['━━━  CRITICAL RULES  ━━━', ''],
     ['Rule', 'Why it matters'],
-    ['All 6 ID columns must be filled in every row.',
-     'The KYC flow requires the complete chain from XSR all the way to NSM.'],
+    [`All ${count} ID columns must be filled in every row.`,
+     `The KYC flow requires the complete chain from ${leafLbl} all the way to ${rootLbl}.`],
     ['The same manager ID must have the same name/phone in every row it appears.',
      'Any mismatch is a hard error — the system cannot guess which version is correct.'],
     ['The same manager ID must report to the same parent in every row.',
      'Conflicting chains are rejected — the system cannot resolve them automatically.'],
-    ['Each XSR ID must appear in exactly one row.',
-     'Duplicate XSR rows are rejected — two chains for the same XSR is ambiguous.'],
+    [`Each ${levelIdHeader(leaf)} must appear in exactly one row.`,
+     `Duplicate ${leafLbl} rows are rejected — two chains for the same ${leafLbl} is ambiguous.`],
     ['IDs must be unique across all level columns in the same row.',
-     'An XSR and their SO cannot share the same ID code.'],
+     `An ${leafLbl} and their ${parentLbl || 'manager'} cannot share the same ID code.`],
     ['', ''],
 
     ['━━━  ✓ DOs  ━━━', ''],
     ['✓ DO', 'Export this file directly from your HR system if it supports this format.'],
     ['✓ DO', 'Leave Name and Phone blank for positions that are currently vacant.'],
-    ['✓ DO', 'Include the NSM row even if the NSM manages everyone in the file.'],
-    ['✓ DO', `Use consistent IDs — the same person must always use the same ${root.roleCode} ID.`],
+    ['✓ DO', `Include the ${rootLbl} row even if the ${rootLbl} manages everyone in the file.`],
+    ['✓ DO', `Use consistent IDs — the same person must always use the same ${levelIdHeader(root)}.`],
     ['', ''],
 
     ['━━━  ✗ DON\'TS  ━━━', ''],
     ['✗ DON\'T', 'Leave any ID column blank in a non-blank row.'],
     ['✗ DON\'T', 'Use the same ID for two different people or two different levels.'],
     ['✗ DON\'T', 'Enter inconsistent manager data across rows (e.g. SO-001 under ASM-001 in row 2, but ASM-002 in row 5).'],
-    ['✗ DON\'T', `List the same ${leaf.roleCode} in more than one row.`],
+    ['✗ DON\'T', `List the same ${leafLbl} in more than one row.`],
     ['✗ DON\'T', 'Mix +91 prefix into phone numbers — use 10 digits only.'],
     ['', ''],
 
     ['━━━  COMMON MISTAKES  ━━━', ''],
     ['Mistake', 'Fix'],
-    ['NSM row is blank in some rows', 'Every row must have the full chain including NSM ID.'],
-    ['Same NSM ID has different names in different rows', 'Use the exact same spelling in all rows.'],
-    ['Same SO ID has two different ASMs across rows', 'An SO can only report to one ASM — fix the chain.'],
-    ['XSR appears twice with different managers', 'Remove the duplicate row or fix the manager.'],
+    [`${rootLbl} row is blank in some rows`, `Every row must have the full chain including ${levelIdHeader(root)}.`],
+    [`Same ${rootLbl} ID has different names in different rows`, 'Use the exact same spelling in all rows.'],
+    [`Same ${parentLbl || 'manager'} ID has two different ${levelLabel(sorted[2] ?? root)}s across rows`, `An ${parentLbl || 'manager'} can only report to one ${levelLabel(sorted[2] ?? root)} — fix the chain.`],
+    [`${leafLbl} appears twice with different managers`, 'Remove the duplicate row or fix the manager.'],
   ];
 
   return { headers, exampleRows, dosAndDontsRows };

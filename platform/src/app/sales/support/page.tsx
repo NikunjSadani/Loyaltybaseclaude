@@ -13,7 +13,8 @@ import {
   type Ticket, type TicketCategory, type TicketPriority, type TicketStatus,
   CATEGORY_LABELS, STATUS_LABELS, PRIORITY_LABELS,
 } from '@/lib/tickets';
-import { ROLE_LABELS, getRole, type SalesRole } from '@/lib/sales-role';
+import { roleLabelFor, getRole, type SalesRole } from '@/lib/sales-role';
+import { useClientConfig } from '@/lib/platform/client-config-context';
 import { getStoredUser } from '@/lib/auth-client';
 
 /* ─── Outlets (from /api/sales/outlets) ─────────────────────────────────────── */
@@ -209,6 +210,7 @@ interface NewForm {
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function SalesSupportPage() {
+  const slug = useClientConfig().slug;
   const [role,       setRoleState] = useState<SalesRole>('SO');
   const [tickets,    setTickets]   = useState<Ticket[]>([]);
   const [outlets,    setOutlets]   = useState<Outlet[]>([]);
@@ -237,7 +239,7 @@ export default function SalesSupportPage() {
     return () => window.removeEventListener('storage', onStorage);
   }, []);
 
-  const myName   = `${getStoredUser()?.name ?? ''} (${ROLE_LABELS[role]})`;
+  const myName   = `${getStoredUser()?.name ?? ''} (${roleLabelFor(slug, role)})`;
   const filtered = outlets.filter((o) => o.name.toLowerCase().includes(form.outletSearch.toLowerCase()));
 
   const isSelf    = form.ticketFor === 'self';

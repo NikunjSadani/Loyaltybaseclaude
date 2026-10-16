@@ -8,6 +8,7 @@ import { buildXlsx, ReportSheet } from '../common/xlsx';
 import { platformWide } from '../common/tenant-scope';
 import { istDayRangeFilter, istDateKey } from '../common/ist-date';
 import { deriveKycStage } from '../common/kyc-rekyc.helper';
+import { salesUserRoleLabel } from '../common/hierarchy-labels';
 
 /**
  * Reporting & Analytics — ported from platform/src/app/api/reports/*.
@@ -465,20 +466,19 @@ export class ReportsService {
     // Friendly label for a User.role (reviewer). Sales roles collapse to the hierarchy
     // codes the field uses (SALES_STATE_HEAD → RSM, SALES_HO → NSM); the raw role is the
     // fallback for anything unmapped.
+    // Non-sales roles are tenant-independent; the sales roles resolve through the shared
+    // tenant-aware label helper (Bajaj swaps the SALES_STATE_HEAD bucket RSM→SM; every other
+    // tenant, incl. Deoleo, is byte-identical). The coarse enum is lossy — SALES_STATE_HEAD
+    // covers both RSM and ZNM — so it mirrors the pre-existing single-label collapse.
     const roleLabel = (role: string | null | undefined): string => {
       if (!role) return '';
-      const map: Record<string, string> = {
+      const nonSales: Record<string, string> = {
         GIFSY_ADMIN: 'Gifsy Admin',
         GIFSY_STAFF: 'Gifsy Staff',
         CLIENT_ADMIN: 'Client Admin',
         MIS_USER: 'MIS User',
-        SALES_HO: 'NSM',
-        SALES_STATE_HEAD: 'RSM',
-        SALES_ASM: 'ASM',
-        SALES_SO: 'SO',
-        SALES_ISR: 'ISR',
       };
-      return map[role] ?? role;
+      return nonSales[role] ?? salesUserRoleLabel(user.clientId, role) ?? role;
     };
 
     // Classify a rejection as Field vs Gifsy. Prefer the shared canonical stage derivation

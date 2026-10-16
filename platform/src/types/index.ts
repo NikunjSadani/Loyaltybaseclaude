@@ -631,10 +631,21 @@ export interface ExifValidationResult {
 export interface TenantHierarchyLevel {
   tenantId: string;
   level: number;      // 1 = leaf (owns outlets), highest = root (no manager)
-  roleCode: string;   // e.g. 'XSR', 'SO', 'NSM'
+  roleCode: string;   // e.g. 'XSR', 'SO', 'NSM' — INTERNAL machine code (never renamed)
   roleLabel: string;  // display name
   isLeaf: boolean;    // can own outlets directly
   isRoot: boolean;    // no reporting manager required
+  /**
+   * Optional per-tenant display label shown in the UI and used as the Name/Phone
+   * column-header prefix (e.g. Bajaj renames RSM→'SM', ZNM→'ZH'). Absent ⇒ roleCode
+   * (Deoleo and every other tenant stay byte-identical).
+   */
+  displayLabel?: string;
+  /**
+   * Optional per-tenant ID-column header (e.g. Bajaj uses 'ISR Code', 'SO HQ').
+   * Absent ⇒ `${roleCode} ID` (Deoleo and every other tenant stay byte-identical).
+   */
+  idHeader?: string;
 }
 
 /** An employee in the hierarchy — position-based, not person-based */
