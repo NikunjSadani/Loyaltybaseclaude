@@ -89,6 +89,9 @@ interface KYCDetail {
   // The SO's declaration signature, resolved to a viewable data URL by getOne, so the ASM
   // client can embed the ACTUAL SO ink into the final dual-signed PDF. Null for STANDARD.
   soSignatureViewUrl?: string | null;
+  // The ASM's approval signature (resolved by getOne once signed) so the dual-signed declaration
+  // shows BOTH actual inks on screen. Null for STANDARD / before the ASM signs.
+  asmSignatureViewUrl?: string | null;
 }
 
 /** The declaration snapshot persisted at submission (SO_DECLARATION only). */
@@ -1031,6 +1034,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           kycVariant:      (s.kycVariant as 'STANDARD' | 'SO_DECLARATION' | undefined) ?? 'STANDARD',
           declarationData: (s.declarationData as SoDeclarationDataSnapshot | null) ?? null,
           soSignatureViewUrl: (s.soSignatureViewUrl as string | null | undefined) ?? null,
+          asmSignatureViewUrl: (s.asmSignatureViewUrl as string | null | undefined) ?? null,
         });
       }
     } catch {
@@ -1387,7 +1391,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
             </CardTitle>
           </CardHeader>
           <CardContent className="pt-0">
-            <SoDeclarationView data={declData} signed={{ so: true, asm: asmSigned }} />
+            <SoDeclarationView data={declData} signed={{ so: true, asm: asmSigned }} soSignatureUrl={kyc.soSignatureViewUrl} asmSignatureUrl={kyc.asmSignatureViewUrl} />
           </CardContent>
         </Card>
       )}
@@ -1436,7 +1440,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
             </p>
 
             <div className="rounded-xl bg-white p-1">
-              <SoDeclarationView data={declData} signed={{ so: true, asm: false }} />
+              <SoDeclarationView data={declData} signed={{ so: true, asm: false }} soSignatureUrl={kyc.soSignatureViewUrl} />
             </div>
 
             {/* ASM signature pad */}

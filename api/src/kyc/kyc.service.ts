@@ -2659,6 +2659,21 @@ export class KycService {
           )
         : null;
 
+    // ── SO Declaration: the ASM's stored approval signature (mirrors soSignatureViewUrl) so the
+    // dual-signed declaration shows BOTH actual inks ON SCREEN (ASM review + Gifsy final), not just
+    // typed names. Populated once the ASM has approved+signed. Null for STANDARD/when absent. ──
+    const asmSignatureViewUrl =
+      submission.kycVariant === 'SO_DECLARATION' && submission.asmSignatureKey
+        ? await this.resolveDocumentViewUrl(
+            {
+              fileKey: submission.asmSignatureKey,
+              fileUrl: this.storage.publicUrl(submission.asmSignatureKey),
+              mimeType: 'image/png',
+            },
+            2 * 1024 * 1024,
+          )
+        : null;
+
     return {
       submission: {
         ...submission,
@@ -2670,6 +2685,7 @@ export class KycService {
         willLeaveGroup,
         salesRedeemEnabled,
         soSignatureViewUrl,
+        asmSignatureViewUrl,
         // C3: classification (from the partner) + the group lock (null when free to pick).
         entityType: (submission.partner?.entityType as EntityType | null | undefined) ?? null,
         gstRegistrationType:

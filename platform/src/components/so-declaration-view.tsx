@@ -14,11 +14,17 @@ import {
 export function SoDeclarationView({
   data,
   signed = {},
+  soSignatureUrl = null,
+  asmSignatureUrl = null,
   className = '',
 }: {
   data: SoDeclarationData;
   /** Which signature lines are filled in. */
   signed?: { so?: boolean; asm?: boolean };
+  /** The SO's / ASM's actual drawn signature image (data/URL). When present it is rendered as the
+   *  real ink above the typed name, so a reviewer sees the signature — not just the name. */
+  soSignatureUrl?: string | null;
+  asmSignatureUrl?: string | null;
   className?: string;
 }) {
   const paras = declarationSegments(data);
@@ -56,20 +62,24 @@ export function SoDeclarationView({
 
       <div className="flex gap-4 flex-wrap mt-4">
         <div className="flex-1 min-w-[140px] border-t border-gray-400 pt-1.5" style={{ fontFamily: 'ui-sans-serif, system-ui, sans-serif' }}>
-          <div className="h-6 flex items-end mb-0.5 text-[15px] italic" style={{ fontFamily: 'Georgia, serif' }}>
+          <div className="h-10 flex items-end mb-0.5" style={{ fontFamily: 'Georgia, serif' }}>
             {signed.so
-              ? <span className="text-gray-900">{data.soName || '—'}</span>
-              : <span className="text-amber-600 text-[11px] not-italic">awaiting signature</span>}
+              ? (soSignatureUrl
+                  ? <img src={soSignatureUrl} alt={`${data.soName || 'Sales Officer'} signature`} className="max-h-10 object-contain" />
+                  : <span className="text-[15px] italic text-gray-900">{data.soName || '—'}</span>)
+              : <span className="text-amber-600 text-[11px]">awaiting signature</span>}
           </div>
-          <span className="text-[11px] text-gray-500">Initiated by (Sales Officer) · {signed.so ? date : '—'}</span>
+          <span className="text-[11px] text-gray-500">Initiated by (Sales Officer){signed.so && soSignatureUrl ? ` · ${data.soName}` : ''} · {signed.so ? date : '—'}</span>
         </div>
         <div className="flex-1 min-w-[140px] border-t border-gray-400 pt-1.5" style={{ fontFamily: 'ui-sans-serif, system-ui, sans-serif' }}>
-          <div className="h-6 flex items-end mb-0.5 text-[15px] italic" style={{ fontFamily: 'Georgia, serif' }}>
+          <div className="h-10 flex items-end mb-0.5" style={{ fontFamily: 'Georgia, serif' }}>
             {signed.asm
-              ? <span className="text-gray-900">{data.asmName || '—'}</span>
-              : <span className="text-amber-600 text-[11px] not-italic">awaiting ASM signature</span>}
+              ? (asmSignatureUrl
+                  ? <img src={asmSignatureUrl} alt={`${data.asmName || 'ASM'} signature`} className="max-h-10 object-contain" />
+                  : <span className="text-[15px] italic text-gray-900">{data.asmName || '—'}</span>)
+              : <span className="text-amber-600 text-[11px]">awaiting ASM signature</span>}
           </div>
-          <span className="text-[11px] text-gray-500">Approved by ({asmDesignationOf(data)}) · {signed.asm ? date : '—'}</span>
+          <span className="text-[11px] text-gray-500">Approved by ({asmDesignationOf(data)}){signed.asm && asmSignatureUrl ? ` · ${data.asmName}` : ''} · {signed.asm ? date : '—'}</span>
         </div>
       </div>
     </div>

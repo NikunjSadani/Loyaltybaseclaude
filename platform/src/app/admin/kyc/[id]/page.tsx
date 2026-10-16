@@ -152,6 +152,10 @@ interface ApiKycDetail {
   // SO Declaration variant (Bajaj). Absent/STANDARD for every other submission.
   kycVariant?: 'STANDARD' | 'SO_DECLARATION';
   declarationData?: SoDeclarationDataSnapshot | null;
+  // Actual drawn signature inks (resolved by getOne) so the dual-signed declaration shows the real
+  // signatures on screen, not just typed names. Null for STANDARD / before signing.
+  soSignatureViewUrl?: string | null;
+  asmSignatureViewUrl?: string | null;
 }
 
 /** The declaration snapshot persisted at submission (SO_DECLARATION only). */
@@ -204,6 +208,8 @@ type KycDetailShape = {
   // SO Declaration variant.
   kycVariant: 'STANDARD' | 'SO_DECLARATION';
   declarationData: SoDeclarationDataSnapshot | null;
+  soSignatureViewUrl: string | null;
+  asmSignatureViewUrl: string | null;
 };
 
 /* ─── Re-KYC proposed-change diff (stage-at-approval) ─────────────────────────── */
@@ -394,6 +400,8 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     classificationLock: s.classificationLock ?? null,
     kycVariant:       s.kycVariant ?? 'STANDARD',
     declarationData:  s.declarationData ?? null,
+    soSignatureViewUrl:  s.soSignatureViewUrl ?? null,
+    asmSignatureViewUrl: s.asmSignatureViewUrl ?? null,
     verificationItems: s.verificationItems ?? [],
     // Human outlet ID for the header (KYC is partner-keyed → the enrolled outlet's code).
     // Prefer the real Outlet code; fall back to the partner code if no outlet is linked yet.
@@ -1266,7 +1274,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
                 <h2 className="text-sm font-semibold text-gray-800">SO Declaration (dual-signed)</h2>
                 <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">GST / docs optional</span>
               </div>
-              <SoDeclarationView data={soDeclData} signed={{ so: true, asm: true }} />
+              <SoDeclarationView data={soDeclData} signed={{ so: true, asm: true }} soSignatureUrl={kyc.soSignatureViewUrl} asmSignatureUrl={kyc.asmSignatureViewUrl} />
               <div className="flex gap-2.5 items-start bg-amber-50 border border-amber-200 rounded-xl p-3 text-[12.5px] text-gray-700">
                 <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
                 <span>

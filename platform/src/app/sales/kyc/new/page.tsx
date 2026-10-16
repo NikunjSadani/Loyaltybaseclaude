@@ -387,7 +387,7 @@ export default function NewKYCPage() {
    * self-declaration document — the Address Proof upload itself stays REQUIRED either
    * way. While features load, DEFAULT_FEATURES has the flag OFF → the SAFE default of
    * requiring the self-declaration on a declared mismatch. */
-  const { features } = useTenantFeatures('/api/sales/me');
+  const { features, loading: featuresLoading } = useTenantFeatures('/api/sales/me');
   const waiverEnabled = features.kycAddressProofWaiver;
   const addressProofRequired = isAddressProofRequired();
   const selfDeclarationRequired = isSelfDeclarationRequired(waiverEnabled, nameMismatch);
@@ -516,15 +516,24 @@ export default function NewKYCPage() {
     const match = assignedOutlets.find((o) => o.outletId === outletId);
     if (!match) return;
     setSelectedOutlet(match);
-    // Re-KYC deep-link: the outlet is already chosen AND 'Not Interested' is hidden
-    // for a RE_KYC_REQUIRED outlet (see the outlet step), so Step 1 (Select Outlet)
-    // has no decision left to make — skip straight to Details and mark outlet-select
-    // done. Rejected / resubmission deep-links KEEP Step 1 because the rep can still
-    // mark those Not Interested there.
-    // Bajaj SO: still offer the flow chooser on a re-KYC deep-link (outlet already chosen →
-    // go to 'choose'); everyone else skips straight to Details as before.
-    if (match.kycStatus === 'RE_KYC_REQUIRED') setStep(soFlag && flowVariant === null ? 'choose' : 'basic');
   }, [assignedOutlets, selectedOutlet]);
+
+  /* Re-KYC deep-link step jump — done in a SEPARATE effect gated on featuresLoading so soFlag is
+   * reliable. A RE_KYC_REQUIRED outlet has no Step-1 decision left ('Not Interested' is hidden),
+   * so skip Step 1 → the flow chooser for a Bajaj SO, else straight to Details. Gating on
+   * !featuresLoading closes the race where jumping before features load would force STANDARD
+   * (soFlag false) and never offer the SO Declaration on re-KYC. Runs once (ref-guarded).
+   * Rejected / resubmission deep-links KEEP Step 1 (the rep can still mark them Not Interested). */
+  const reKycDeepLinkJumped = useRef(false);
+  useEffect(() => {
+    if (reKycDeepLinkJumped.current || featuresLoading || !selectedOutlet || step !== 'outlet') return;
+    if (typeof window === 'undefined') return;
+    const deepLinked = new URLSearchParams(window.location.search).get('outletId') === selectedOutlet.outletId;
+    if (deepLinked && selectedOutlet.kycStatus === 'RE_KYC_REQUIRED') {
+      reKycDeepLinkJumped.current = true;
+      setStep(soFlag && flowVariant === null ? 'choose' : 'basic');
+    }
+  }, [selectedOutlet, featuresLoading, step, soFlag, flowVariant]);
 
   /* ── Outside-click: outlet dropdown ── */
   useEffect(() => {
@@ -732,8 +741,11 @@ export default function NewKYCPage() {
     setPendingSignature(null); setSignatureCarriedOver(false); setHasSigned(false);
     const canvas = signatureCanvasRef.current;
     canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
-    // SO-declaration fields/signature never bleed across outlets either (flowVariant is a
-    // per-session choice and is intentionally preserved).
+    // SO-declaration fields/signature never bleed across outlets either. The flow CHOICE also
+    // resets on every outlet switch (owner, 2026-10-16) → the rep re-picks Document vs SO
+    // Declaration for the new outlet (guarded by lastOutletIdRef, so re-selecting the SAME
+    // outlet keeps the choice).
+    setFlowVariant(null);
     setSoFatherName(''); setOwnerResidence(''); setResidenceSameAsOutlet(false);
     setSoConfirmed(false); setSoHasSigned(false); soSigRef.current?.clear();
     prefilledKycRef.current = null; // re-arm the prefill for the new outlet
