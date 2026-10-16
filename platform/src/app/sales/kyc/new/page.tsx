@@ -521,7 +521,9 @@ export default function NewKYCPage() {
     // has no decision left to make — skip straight to Details and mark outlet-select
     // done. Rejected / resubmission deep-links KEEP Step 1 because the rep can still
     // mark those Not Interested there.
-    if (match.kycStatus === 'RE_KYC_REQUIRED') setStep('basic');
+    // Bajaj SO: still offer the flow chooser on a re-KYC deep-link (outlet already chosen →
+    // go to 'choose'); everyone else skips straight to Details as before.
+    if (match.kycStatus === 'RE_KYC_REQUIRED') setStep(soFlag && flowVariant === null ? 'choose' : 'basic');
   }, [assignedOutlets, selectedOutlet]);
 
   /* ── Outside-click: outlet dropdown ── */
@@ -2038,21 +2040,25 @@ export default function NewKYCPage() {
   const declGstInvalid = isSoVariant && form.gstNumber.trim() !== '' && !isValidGstin(form.gstNumber);
 
   /* ── SO Declaration flow-select (Bajaj, feature-gated) ──
-   * Shown FIRST when the tenant has soDeclarationKyc on and the rep hasn't picked a flow yet.
-   * Owner requirement: re-KYC MUST also support the SO Declaration flow, so the chooser is shown
-   * on re-entry too (the prior variant isn't in the assigned-outlets payload, so the rep picks —
-   * STANDARD keeps today's document flow, SO Declaration runs the variant). Hidden once submitted. */
-  const showChooser = soFlag && flowVariant === null && !isSubmitted;
-  if (showChooser) {
+   * Shown AFTER outlet selection (owner UX, 2026-10-16): the rep picks the outlet first, then
+   * chooses how to complete ITS KYC. Reached from the outlet step's Continue (and the re-KYC
+   * deep-link) only when soFlag && no flow picked yet; STANDARD = today's document flow, SO
+   * Declaration = the variant. ISR / non-bajaj never route here (Deoleo unaffected). */
+  if (step === 'choose') {
     return (
       <div className="space-y-5 fade-in">
         <div className="flex items-center gap-3">
-          <Link href="/sales/kyc" className="p-2 rounded-lg hover:bg-gray-100 transition-colors">
+          <button
+            type="button"
+            onClick={() => setStep('outlet')}
+            aria-label="Back to outlet selection"
+            className="p-2 rounded-lg hover:bg-gray-100 transition-colors"
+          >
             <ArrowLeft className="h-4 w-4 text-gray-600" />
-          </Link>
+          </button>
           <div className="flex-1 min-w-0">
             <h1 className="text-lg font-bold text-gray-900">{isReKYC ? 'Re-KYC' : 'New KYC'}</h1>
-            <p className="text-xs text-gray-500">Choose how you&apos;ll complete this enrollment</p>
+            <p className="text-xs text-gray-500 truncate">{selectedOutlet ? `${selectedOutlet.name} · ${selectedOutlet.outletCode}` : 'Choose how you’ll complete this enrollment'}</p>
           </div>
         </div>
 
@@ -2065,7 +2071,7 @@ export default function NewKYCPage() {
             <button
               type="button"
               data-testid="flow-choice-standard"
-              onClick={() => setFlowVariant('STANDARD')}
+              onClick={() => { setFlowVariant('STANDARD'); setStep('basic'); }}
               className="w-full text-left border-2 border-gray-200 rounded-xl p-4 hover:bg-green-50/30 transition-colors active:scale-[0.99]"
             >
               <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center mb-2.5"><FileText className="h-5 w-5 text-gray-500" /></div>
@@ -2076,7 +2082,7 @@ export default function NewKYCPage() {
             <button
               type="button"
               data-testid="flow-choice-so-declaration"
-              onClick={() => setFlowVariant('SO_DECLARATION')}
+              onClick={() => { setFlowVariant('SO_DECLARATION'); setStep('basic'); }}
               className="w-full text-left border-2 border-[var(--brand-primary)]/40 bg-green-50/20 rounded-xl p-4 hover:bg-green-50/50 transition-colors active:scale-[0.99]"
             >
               <div className="w-10 h-10 rounded-full bg-[var(--brand-primary)]/10 flex items-center justify-center mb-2.5"><PenLine className="h-5 w-5 text-[var(--brand-primary)]" /></div>
@@ -2263,7 +2269,7 @@ export default function NewKYCPage() {
               variant="primary"
               className="w-full font-bold"
               disabled={!selectedOutlet}
-              onClick={() => setStep('basic')}
+              onClick={() => setStep(soFlag && flowVariant === null ? 'choose' : 'basic')}
             >
               {selectedOutlet?.kycStatus === 'RE_KYC_REQUIRED' ? 'Begin Re-KYC →' : 'Continue →'}
             </Button>
@@ -2534,7 +2540,7 @@ export default function NewKYCPage() {
 
             <StepGate missing={basicMissing} busy={basicBusy} />
             <div className="flex gap-3">
-              <Button variant="outline" className="flex-1" onClick={() => setStep('outlet')}>← Back</Button>
+              <Button variant="outline" className="flex-1" onClick={() => setStep(soFlag ? 'choose' : 'outlet')}>← Back</Button>
               <Button variant="primary" className="flex-1" onClick={() => setStep('address')}
                 disabled={basicBlocked}>
                 Continue →
