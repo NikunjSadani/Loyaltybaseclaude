@@ -1976,6 +1976,10 @@ export default function NewKYCPage() {
   // SO-Declaration variant: the S/o (father's name) field is collected on this step. The owner's
   // residence moved to the Address step (gated there) so the "same as outlet" toggle has a value.
   if (isSoVariant && !soFatherName.trim()) basicMissing.push("Owner's father's name");
+  // SO-Declaration: PAN/GSTIN are OPTIONAL and now live on this (Details) step — but if the rep
+  // types one, it must be valid before Continue (so the error is caught here, not late at signing).
+  if (isSoVariant && form.panNumber.trim() !== '' && !isValidPan(form.panNumber)) basicMissing.push('A valid PAN (or leave it blank)');
+  if (isSoVariant && form.gstNumber.trim() !== '' && !isValidGstin(form.gstNumber)) basicMissing.push('A valid GSTIN (or leave it blank)');
   // GSTIN compulsory (per-tenant, default ON) — gate it at the Basic step (checklist↔gate parity)
   // so a blank/invalid GSTIN blocks here, not only at final submit. Only when the field is
   // EDITABLE this submission (a re-KYC that locks gstNumber must not demand it — see the backend
@@ -2520,6 +2524,30 @@ export default function NewKYCPage() {
                 readOnly={isFieldLocked('panNumber') || form.gstNumber.length >= 12 || groupPanLocked} />
             </div>
             </>)}
+
+            {/* SO-Declaration variant: PAN + GSTIN as PLAIN OPTIONAL fields, on the first (Details)
+                page like the standard flow (owner, 2026-10-16). Validated only when non-empty. */}
+            {isSoVariant && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>PAN <span className="text-[10px] text-gray-400 font-normal">(optional)</span></label>
+                  <input data-testid="decl-pan" className={`${inputCls} ${declPanInvalid ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-200/40' : ''}`} placeholder="ABCDE1234F"
+                    value={form.panNumber}
+                    onChange={(e) => setForm((f) => ({ ...f, panNumber: e.target.value.toUpperCase() }))} />
+                  {declPanInvalid && (
+                    <p className="text-[11px] text-red-600 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Invalid PAN format (e.g. ABCDE1234F)</p>
+                  )}
+                </div>
+                <div>
+                  <label className={labelCls}>GSTIN <span className="text-[10px] text-gray-400 font-normal">(optional)</span></label>
+                  <input data-testid="decl-gstin" className={`${inputCls} ${declGstInvalid ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-200/40' : ''}`} placeholder="24ABCDE1234F1Z5"
+                    maxLength={GSTIN_LENGTH} value={form.gstNumber} onChange={handleGSTChange} />
+                  {declGstInvalid && (
+                    <p className="text-[11px] text-red-600 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Invalid GST number format</p>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* KYC Documents */}
             <div className="pt-1 space-y-4">
@@ -3097,31 +3125,10 @@ export default function NewKYCPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-sm"><PenLine className="h-4 w-4" /> SO Declaration &amp; Signature</CardTitle>
             <p className="text-xs text-gray-400 mt-1">
-              PAN &amp; GSTIN are optional. Review the declaration — it&apos;s exactly what gets saved as the PDF — then sign.
+              Review the declaration — it&apos;s exactly what gets saved as the PDF — then sign. (PAN &amp; GSTIN, if available, were entered on the Details step.)
             </p>
           </CardHeader>
           <CardContent className="space-y-4">
-            {/* Optional PAN + GSTIN (plain fields; bound to the submission) */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className={labelCls}>PAN <span className="text-[10px] text-gray-400 font-normal">(optional)</span></label>
-                <input data-testid="decl-pan" className={`${inputCls} ${declPanInvalid ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-200/40' : ''}`} placeholder="ABCDE1234F"
-                  value={form.panNumber}
-                  onChange={(e) => setForm((f) => ({ ...f, panNumber: e.target.value.toUpperCase() }))} />
-                {declPanInvalid && (
-                  <p className="text-[11px] text-red-600 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Invalid PAN format (e.g. ABCDE1234F)</p>
-                )}
-              </div>
-              <div>
-                <label className={labelCls}>GSTIN <span className="text-[10px] text-gray-400 font-normal">(optional)</span></label>
-                <input data-testid="decl-gstin" className={`${inputCls} ${declGstInvalid ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-200/40' : ''}`} placeholder="24ABCDE1234F1Z5"
-                  maxLength={GSTIN_LENGTH} value={form.gstNumber} onChange={handleGSTChange} />
-                {declGstInvalid && (
-                  <p className="text-[11px] text-red-600 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Invalid GST number format</p>
-                )}
-              </div>
-            </div>
-
             {/* Declaration WYSIWYG — the saved artifact */}
             <SoDeclarationView
               data={{
