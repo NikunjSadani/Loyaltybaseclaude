@@ -30,6 +30,7 @@ import {
   buildReKYCErrorReport,
   buildDeactivateErrorReport,
   type UploadErrorReport,
+  type OutletTypeOption,
 } from '@/lib/outlet-upload';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import { useGifsySettings } from '@/lib/gifsy-settings';
@@ -488,11 +489,20 @@ function OutletEditModal({
   onSaved,
 }: {
   outlet:      MockOutlet;
-  outletTypes: string[];
+  outletTypes: OutletTypeOption[];
   onClose:     () => void;
   onSaved:     (msg: string) => void;
 }) {
-  const [outletType, setOutletType]           = useState(outlet.outletType);
+  // The list now shows the type LABEL (displayName ?? code). Resolve it back to the stored CODE so
+  // the dropdown pre-selects the right option and the PATCH sends the code — the identifier the
+  // backend resolves. Falls back to the raw value when the current type isn't in the enabled list.
+  const initialTypeCode = useMemo(
+    () =>
+      outletTypes.find((t) => t.label === outlet.outletType || t.code === outlet.outletType)?.code ??
+      outlet.outletType,
+    [outletTypes, outlet.outletType],
+  );
+  const [outletType, setOutletType]           = useState(initialTypeCode);
   const [name, setName]                        = useState(outlet.outletName);
   const [programName, setProgramName]          = useState(outlet.programName);
   const [programCategory, setProgramCategory]  = useState(outlet.programCategory);
@@ -506,10 +516,14 @@ function OutletEditModal({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Keep the current type selectable even if it's not in the enabled-types list.
-  const typeOptions = useMemo(
-    () => (outletTypes.includes(outletType) ? outletTypes : [outletType, ...outletTypes].filter(Boolean)),
-    [outletTypes, outletType],
+  // Keep the current type selectable even if it's not in the enabled-types list. Option values are
+  // CODES (what the PATCH sends); the visible text is the LABEL (displayName ?? code).
+  const typeOptions = useMemo<OutletTypeOption[]>(
+    () =>
+      outletTypes.some((t) => t.code === outletType)
+        ? outletTypes
+        : [{ code: outletType, label: outlet.outletType || outletType }, ...outletTypes].filter((t) => t.code),
+    [outletTypes, outletType, outlet.outletType],
   );
 
   const canSubmit = name.trim().length > 0 && !submitting;
@@ -522,7 +536,7 @@ function OutletEditModal({
     // Send ONLY changed fields (a PATCH; unsent fields are left untouched by the backend).
     const body: Record<string, string> = {};
     if (name.trim() !== outlet.outletName) body.name = name.trim();
-    if (outletType !== outlet.outletType) body.outletTypeId = outletType;
+    if (outletType !== initialTypeCode) body.outletTypeId = outletType;
     if (programName !== outlet.programName) body.programName = programName;
     if (programCategory !== outlet.programCategory) body.programCategory = programCategory;
     if (city !== outlet.city) body.city = city;
@@ -589,7 +603,7 @@ function OutletEditModal({
               aria-label="Outlet type"
               className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white focus:outline-none focus:border-[var(--brand-primary)]"
             >
-              {typeOptions.map((t) => <option key={t} value={t}>{t}</option>)}
+              {typeOptions.map((t) => <option key={t.code} value={t.code}>{t.label}</option>)}
             </select>
           </div>
 
@@ -669,7 +683,10 @@ export default function OutletsPage() {
   const [editToast, setEditToast]     = useState<string | null>(null);
   const [pagination, setPagination]   = useState<Pagination | null>(null);
   const [page,          setPage]      = useState(1);
-  const [outletTypes, setOutletTypes] = useState<string[]>([]);
+  // Each enabled outlet type as { code, label }: `label` (= displayName ?? code) is shown in the
+  // template/guide/list + accepted as an upload alias; `code` is the stored identifier. A tenant
+  // with no displayName (e.g. Deoleo) has label === code, so every surface is byte-identical.
+  const [outletTypes, setOutletTypes] = useState<OutletTypeOption[]>([]);
   const [employees, setEmployees]     = useState<HierarchyEmployee[]>([]);
   const [search,        setSearch]    = useState('');
   const [kycFilter,     setKycFilter] = useState<KYCStatusLocal | 'ALL'>('ALL');
@@ -757,8 +774,16 @@ export default function OutletsPage() {
       if (j.success) {
         if (Array.isArray(j.data.outlets)) setOutlets(j.data.outlets);
         if (j.data.pagination) setPagination(j.data.pagination as Pagination);
-        // Enabled outlet types come from the backend (tenant's OutletTypeClientConfig).
-        if (Array.isArray(j.data.outletTypes)) setOutletTypes(j.data.outletTypes);
+        // Enabled outlet types come from the backend (tenant's OutletTypeClientConfig) as
+        // { code, label } objects (label = displayName ?? code). Normalize defensively so a
+        // legacy string[] payload still works (string ⇒ label === code).
+        if (Array.isArray(j.data.outletTypes)) {
+          setOutletTypes(
+            (j.data.outletTypes as (string | OutletTypeOption)[]).map((t) =>
+              typeof t === 'string' ? { code: t, label: t } : { code: t.code, label: t.label || t.code },
+            ),
+          );
+        }
         setOutletsLoadStatus('ready');
       } else {
         // Keep a prior good load; otherwise surface the failure so the upload warns.

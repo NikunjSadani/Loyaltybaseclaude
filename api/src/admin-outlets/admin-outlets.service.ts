@@ -388,12 +388,24 @@ type OutletListRow = Prisma.OutletGetPayload<{ select: typeof OUTLET_LIST_SELECT
  * agree. `latestStatusByPartnerId` carries the batched latest-submission lookup used by
  * deriveKycStatus.
  */
-function mapOutletListRow(o: OutletListRow, latestStatusByPartnerId: Map<string, KycStatus>) {
+function mapOutletListRow(
+  o: OutletListRow,
+  latestStatusByPartnerId: Map<string, KycStatus>,
+  /**
+   * Per-tenant outlet-type DISPLAY labels, keyed by OutletType id. Carries ONLY the types the
+   * tenant gave a non-blank `OutletTypeClientConfig.displayName`. The displayed type label is
+   * `displayName ?? code` — so a tenant without a displayName (e.g. Deoleo) falls back to the
+   * CODE and is byte-identical to before. Defaults to an empty map so any caller that omits it
+   * keeps the pre-feature code-only behaviour.
+   */
+  typeLabelById: Map<string, string> = new Map(),
+) {
   const xsr = o.salesAssignments[0]?.salesUser;
+  const typeLabel = (o.outletTypeId ? typeLabelById.get(o.outletTypeId) : undefined) ?? o.outletType?.code ?? '';
   return {
     outletId: o.outletCode,
     outletName: o.name,
-    outletType: o.outletType?.code ?? '',
+    outletType: typeLabel,
     programName: o.programName ?? '',
     programCategory: o.programCategory ?? '',
     beat: o.beat ?? '',
@@ -707,17 +719,23 @@ export class AdminOutletsService {
       }
     }
 
-    const mapped = outlets.map((o) => mapOutletListRow(o, latestStatusByPartnerId));
+    // Per-tenant type DISPLAY labels (displayName ?? code) for the list projection.
+    const typeLabelById = await this.loadOutletTypeLabels(user.clientId);
+    const mapped = outlets.map((o) => mapOutletListRow(o, latestStatusByPartnerId, typeLabelById));
 
-    // The tenant's enabled outlet-type codes — the FE validates uploads against THESE
-    // (not a hardcoded list) so it never green-lights a type the upsert will reject as
-    // "Unknown outlet type". Empty ⇒ no types enabled for this tenant: outlets cannot be
-    // added until an operator enables outlet types (the false-success this used to hide).
+    // The tenant's enabled outlet types — the FE validates uploads against THESE (not a hardcoded
+    // list) so it never green-lights a type the upsert will reject as "Unknown outlet type". Each
+    // entry carries the stored `code` (the identifier) AND the `label` (displayName ?? code) shown
+    // in the template + list UI and accepted as an upload alias. Empty ⇒ no types enabled for this
+    // tenant: outlets cannot be added until an operator enables outlet types (the false-success
+    // this used to hide). A tenant with no displayName (e.g. Deoleo) ⇒ label === code everywhere.
     const typeConfigs = await this.prisma.outletTypeClientConfig.findMany({
       where: { clientId: user.clientId, isEnabled: true, outletType: { isActive: true } },
-      select: { outletType: { select: { code: true } } },
+      select: { displayName: true, outletType: { select: { code: true } } },
     });
-    const outletTypes = typeConfigs.map((c) => c.outletType.code).sort();
+    const outletTypes = typeConfigs
+      .map((c) => ({ code: c.outletType.code, label: c.displayName?.trim() || c.outletType.code }))
+      .sort((a, b) => a.label.localeCompare(b.label));
 
     return {
       outlets: mapped,
@@ -813,11 +831,22 @@ export class AdminOutletsService {
     // global catalog; per-tenant enablement lives on OutletTypeClientConfig.
     const typeConfigs = await this.prisma.outletTypeClientConfig.findMany({
       where: { clientId, isEnabled: true },
-      select: { outletType: { select: { id: true, code: true, isActive: true } } },
+      select: { displayName: true, outletType: { select: { id: true, code: true, isActive: true } } },
     });
+    // Resolve an upload row's "Outlet Type" value by EITHER the stored code OR the per-tenant
+    // displayName alias (both case-insensitive, trimmed). Index codes FIRST so an exact code match
+    // always wins on collision (a displayName that equals another type's code never overrides it);
+    // the displayName pass then only fills aliases that don't already clash with a code. The stored
+    // identifier remains the OutletType id (resolved below), exactly as before. A tenant with no
+    // displayName (e.g. Deoleo) adds no aliases ⇒ byte-identical to the old code-only map.
     const typeIdByCode = new Map<string, string>();
     for (const c of typeConfigs) {
       if (c.outletType.isActive) typeIdByCode.set(c.outletType.code.toUpperCase(), c.outletType.id);
+    }
+    for (const c of typeConfigs) {
+      if (!c.outletType.isActive) continue;
+      const alias = c.displayName?.trim().toUpperCase();
+      if (alias && !typeIdByCode.has(alias)) typeIdByCode.set(alias, c.outletType.id);
     }
 
     // The tenant's UPI gate + owner-group uniqueness policy — read once for the whole batch.
@@ -1271,6 +1300,25 @@ export class AdminOutletsService {
   }
 
   /**
+   * Load the tenant's per-outlet-type DISPLAY labels, keyed by OutletType id. Returns ONLY the
+   * enabled types that carry a non-blank `OutletTypeClientConfig.displayName`; the list/detail
+   * projection then renders `displayName ?? code`. A tenant with no displayName (e.g. Deoleo)
+   * yields an EMPTY map ⇒ the projection falls back to the code ⇒ byte-identical to before.
+   */
+  private async loadOutletTypeLabels(clientId: string): Promise<Map<string, string>> {
+    const configs = await this.prisma.outletTypeClientConfig.findMany({
+      where: { clientId, isEnabled: true },
+      select: { outletTypeId: true, displayName: true },
+    });
+    const map = new Map<string, string>();
+    for (const c of configs) {
+      const dn = c.displayName?.trim();
+      if (dn) map.set(c.outletTypeId, dn);
+    }
+    return map;
+  }
+
+  /**
    * Fetch ONE outlet (tenant-scoped, non-deleted) and map it to the SAME shape list() returns
    * (via the shared OUTLET_LIST_SELECT + mapOutletListRow). Used as the response of updateOne so
    * the single-edit and the list can never render a different outlet shape. 404 if not found.
@@ -1296,7 +1344,8 @@ export class AdminOutletsService {
         }
       }
     }
-    return mapOutletListRow(o, latestStatusByPartnerId);
+    const typeLabelById = await this.loadOutletTypeLabels(clientId);
+    return mapOutletListRow(o, latestStatusByPartnerId, typeLabelById);
   }
 
   /**

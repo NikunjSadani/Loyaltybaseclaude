@@ -75,6 +75,8 @@ const mockPrisma = {
   salesUser: { findMany: jest.fn() },
   // outletMaster reads clients.features for the outletMasterGeo gate.
   client: { findUnique: jest.fn() },
+  // outletMaster loads per-tenant outlet-type display names (displayName ?? name in the export).
+  outletTypeClientConfig: { findMany: jest.fn() },
 };
 
 const mockKyc = {
@@ -100,6 +102,8 @@ describe('ReportsService.outletMaster (57 columns)', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    // Default: no per-tenant outlet-type display names → export uses the global `name` (Deoleo-identical).
+    mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ReportsService,
@@ -419,5 +423,35 @@ describe('ReportsService.outletMaster (57 columns)', () => {
     expect(r1[idx('SO HQ')]).toBe('');        // skipped level → blank
     expect(r1[idx('ASM HQ')]).toBe('');
     expect(r1[idx('NSM HQ')]).toBe('');
+  });
+
+  it('Outlet Type column shows the per-tenant displayName (displayName ?? name)', async () => {
+    mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+    mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+    mockPrisma.salesUser.findMany.mockResolvedValue([]);
+    // Tenant renamed SSS → "Retailer"; WHOLESALER has no displayName → falls back to the global name.
+    mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+      { displayName: 'Retailer', outletType: { code: 'SSS' } },
+    ]);
+    mockPrisma.outlet.findMany.mockResolvedValue([
+      { id: 'o1', partnerId: null, zone: 'Z', outletCode: 'OUT001', name: 'Shop One',
+        outletType: { name: 'SSS', code: 'SSS' }, programName: null, programCategory: null,
+        distributorCode: null, distributorName: null, metro: null, beat: null,
+        addressLine1: null, addressLine2: null, city: null, state: null, pincode: null,
+        phone: null, latitude: null, longitude: null, isActive: true, deactivatedAt: null,
+        kycIntent: null, reKycFlags: null, partner: null, parent: null },
+      { id: 'o2', partnerId: null, zone: 'Z', outletCode: 'OUT002', name: 'Shop Two',
+        outletType: { name: 'Wholesaler', code: 'WHOLESALER' }, programName: null, programCategory: null,
+        distributorCode: null, distributorName: null, metro: null, beat: null,
+        addressLine1: null, addressLine2: null, city: null, state: null, pincode: null,
+        phone: null, latitude: null, longitude: null, isActive: true, deactivatedAt: null,
+        kycIntent: null, reKycFlags: null, partner: null, parent: null },
+    ]);
+
+    const aoa = await readSheet(await service.outletMaster(admin));
+    const headers = aoa[0] as string[];
+    const idx = (h: string) => headers.indexOf(h);
+    expect((aoa[1] as unknown[])[idx('Outlet Type')]).toBe('Retailer');   // renamed
+    expect((aoa[2] as unknown[])[idx('Outlet Type')]).toBe('Wholesaler'); // unrenamed → global name
   });
 });

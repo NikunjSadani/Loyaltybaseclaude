@@ -255,6 +255,27 @@ function canonicalValue(value: string, list: string[]): string | undefined {
   return list.find((v) => v.trim().toLowerCase() === needle);
 }
 
+// ─── Outlet-type options (per-tenant display label) ─────────────────────────────
+
+/**
+ * One enabled outlet type for the tenant: the stored `code` (the identifier persisted on the
+ * outlet and resolved server-side) and the `label` to DISPLAY in the template/guide/list and to
+ * ACCEPT as an upload alias. `label` = `OutletTypeClientConfig.displayName ?? code`, so a tenant
+ * WITHOUT a displayName (e.g. Deoleo) has `label === code` and every surface is byte-identical to
+ * before. The template + validator take `(string | OutletTypeOption)[]`: a bare string is treated
+ * as `{ code: s, label: s }` (label === code), so legacy callers that pass plain codes are a strict
+ * no-op — they keep displaying and accepting exactly the code, as today.
+ */
+export interface OutletTypeOption {
+  code:  string;
+  label: string;
+}
+
+/** Normalize a code string OR a {code,label} option to a {code,label} pair (string ⇒ label===code). */
+function normOutletType(t: string | OutletTypeOption): OutletTypeOption {
+  return typeof t === 'string' ? { code: t, label: t } : { code: t.code, label: t.label || t.code };
+}
+
 // ─── Outlet Addition Validation ───────────────────────────────────────────────
 
 export function validateOutletUpload(
@@ -262,7 +283,10 @@ export function validateOutletUpload(
   existingOutlets:   Pick<OutletRecord, 'outletId' | 'isActive'>[],
   validPrograms:     string[],
   validCategories:   string[],
-  validOutletTypes:  string[],
+  /** Enabled outlet types: either plain codes (string) or {code,label} options. The row's "Outlet
+   *  Type" cell is accepted when it matches EITHER the code or the label (case-insensitive). A bare
+   *  string ⇒ label===code, so code-only callers are unchanged. See OutletTypeOption. */
+  validOutletTypes:  (string | OutletTypeOption)[],
   employees:         HierarchyEmployee[],
   leafRoleCode:      string,
   /** The tenant's existing owner-group parent codes (partnerCode). When provided, a non-blank
@@ -292,9 +316,18 @@ export function validateOutletUpload(
   // Outlet types come from the tenant's enabled OutletTypeClientConfig (passed in by the
   // page from GET /admin/outlets) — NOT a hardcoded list — so FE validation matches what
   // the backend upsert will actually accept. Empty ⇒ none enabled for this tenant.
-  const validTypeSet = new Set(validOutletTypes.map(t => t.toUpperCase()));
-  const typeHint = validOutletTypes.length
-    ? `must be one of: ${validOutletTypes.join(', ')}`
+  // A row's "Outlet Type" cell is accepted when it matches EITHER the stored code OR the
+  // per-tenant display label (case-insensitive) — so Bajaj's "SSS" accepts both "SSS" and
+  // "Retailer"; Deoleo (label===code) accepts exactly the code, as today. The hint + rejection
+  // message list the LABELS (what the template instructs users to type).
+  const typeOpts = validOutletTypes.map(normOutletType);
+  const validTypeSet = new Set<string>();
+  for (const t of typeOpts) {
+    validTypeSet.add(t.code.trim().toUpperCase());
+    if (t.label) validTypeSet.add(t.label.trim().toUpperCase());
+  }
+  const typeHint = typeOpts.length
+    ? `must be one of: ${typeOpts.map(t => t.label).join(', ')}`
     : 'no outlet types are enabled for this tenant — ask Gifsy to enable outlet types before adding outlets';
 
   // Per-tenant UPI gate (default OFF). A "UPI" payout cell is rejected — not silently
@@ -367,10 +400,10 @@ export function validateOutletUpload(
         }
       }
 
-      // 7. Outlet Type must be valid enum
+      // 7. Outlet Type must be valid enum (accepts the code OR the per-tenant display label)
       if (!row.outletType) {
         errors.push('Outlet Type is required');
-      } else if (!validTypeSet.has(row.outletType.toUpperCase())) {
+      } else if (!validTypeSet.has(row.outletType.trim().toUpperCase())) {
         errors.push(`Outlet Type "${row.outletType}" is invalid — ${typeHint}`);
       }
 
@@ -440,7 +473,7 @@ export function validateOutletUpload(
         }
       }
 
-      if (row.outletType && !validTypeSet.has(row.outletType.toUpperCase())) {
+      if (row.outletType && !validTypeSet.has(row.outletType.trim().toUpperCase())) {
         errors.push(`Outlet Type "${row.outletType}" is invalid — ${typeHint}`);
       }
 
@@ -654,7 +687,10 @@ function safeMatrix(rows: string[][]): string[][] {
 export function getOutletAdditionTemplateData(
   validPrograms:    string[],
   validCategories:  string[],
-  validOutletTypes: string[],
+  /** Enabled outlet types: plain codes (string) or {code,label} options. The template's "Outlet
+   *  Type" column reference + examples show the LABEL (displayName ?? code). A bare string ⇒
+   *  label===code, so code-only callers get the exact pre-feature template. See OutletTypeOption. */
+  validOutletTypes: (string | OutletTypeOption)[],
   leafRoleCode:     string,
   /** When true (tenant feature `outletMasterGeo` on), the template gains optional Latitude/Longitude
    *  columns + guidance. When false the template is unchanged, so other tenants never see them. */
@@ -671,14 +707,16 @@ export function getOutletAdditionTemplateData(
     ...(geoEnabled ? ['Latitude', 'Longitude'] : []),
   ];
 
-  // Outlet types are tenant-specific (the enabled OutletTypeClientConfig codes). The
-  // template MUST use the same source as validateOutletUpload, or it would instruct users
-  // to type a value the validator/backend then reject. Examples fall back only if the
-  // tenant has no enabled types (in which case the column reference says so explicitly).
-  const exType1 = validOutletTypes[0] ?? 'RETAILER';
-  const exType2 = validOutletTypes[1] ?? exType1;
-  const outletTypeRef = validOutletTypes.length
-    ? `Must be exactly one of: ${validOutletTypes.join(', ')}`
+  // Outlet types are tenant-specific (the enabled OutletTypeClientConfig). The template MUST use
+  // the same source as validateOutletUpload, or it would instruct users to type a value the
+  // validator/backend then reject. The column reference + examples show the LABEL (displayName ??
+  // code) — so Bajaj's template instructs "Retailer"; Deoleo (label===code) shows exactly the code.
+  // Examples fall back only if the tenant has no enabled types (column reference then says so).
+  const typeOpts = validOutletTypes.map(normOutletType);
+  const exType1 = typeOpts[0]?.label ?? 'RETAILER';
+  const exType2 = typeOpts[1]?.label ?? exType1;
+  const outletTypeRef = typeOpts.length
+    ? `Must be exactly one of: ${typeOpts.map(t => t.label).join(', ')}`
     : 'No outlet types are enabled for this tenant yet — ask Gifsy to enable outlet types before adding outlets';
 
   const exampleRows: string[][] = [
@@ -1091,11 +1129,13 @@ export function getUnparkTemplateData(): OutletTemplateData {
 
 // ─── HTML Operations Guide ────────────────────────────────────────────────────
 
-export function generateOutletGuideHtml(validOutletTypes: string[] = [], slug: string = ''): string {
+export function generateOutletGuideHtml(validOutletTypes: (string | OutletTypeOption)[] = [], slug: string = ''): string {
   const leafHeader = leafIdHeaderForTenant(slug);
-  // Same tenant source as the template/validator so the guide can't contradict them.
-  const outletTypeCell = validOutletTypes.length
-    ? 'Exactly one of: ' + validOutletTypes.map(t => `<code>${t}</code>`).join(', ')
+  // Same tenant source as the template/validator so the guide can't contradict them. Shows the
+  // LABEL (displayName ?? code); Deoleo (label===code) renders exactly the code, as before.
+  const typeOpts = validOutletTypes.map(normOutletType);
+  const outletTypeCell = typeOpts.length
+    ? 'Exactly one of: ' + typeOpts.map(t => `<code>${t.label}</code>`).join(', ')
     : 'No outlet types are enabled for this tenant yet — ask Gifsy to enable outlet types first';
   return `<!DOCTYPE html>
 <html lang="en">

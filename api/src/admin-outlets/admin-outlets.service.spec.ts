@@ -158,17 +158,97 @@ describe('AdminOutletsService', () => {
       });
     });
 
-    it('returns the tenant enabled outlet-type codes (sorted) for FE validation', async () => {
+    it('returns the tenant enabled outlet types as { code, label } (sorted by label) for FE validation', async () => {
       mockPrisma.outlet.findMany.mockResolvedValue([]);
+      // No displayName configured ⇒ label === code (the Deoleo / backward-compat case).
       mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
-        { outletType: { code: 'WHOLESALER' } },
-        { outletType: { code: 'RETAILER' } },
+        { displayName: null, outletType: { code: 'WHOLESALER' } },
+        { displayName: null, outletType: { code: 'RETAILER' } },
       ]);
       const res = await service.list(admin);
-      expect(res.outletTypes).toEqual(['RETAILER', 'WHOLESALER']);
+      expect(res.outletTypes).toEqual([
+        { code: 'RETAILER', label: 'RETAILER' },
+        { code: 'WHOLESALER', label: 'WHOLESALER' },
+      ]);
       // tenant-scoped + only enabled + only active types
       const where = mockPrisma.outletTypeClientConfig.findMany.mock.calls[0][0].where;
       expect(where).toMatchObject({ clientId: TENANT_A, isEnabled: true });
+    });
+
+    it('uses the per-tenant displayName as the type label (falls back to the code when unset)', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      // Bajaj: SSS has a displayName "Retailer"; WHOLESALER has none ⇒ label === code.
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { displayName: 'Retailer', outletType: { code: 'SSS' } },
+        { displayName: '  ', outletType: { code: 'WHOLESALER' } },
+      ]);
+      const res = await service.list(admin);
+      // Sorted by label: "Retailer" (SSS) before "WHOLESALER".
+      expect(res.outletTypes).toEqual([
+        { code: 'SSS', label: 'Retailer' },
+        { code: 'WHOLESALER', label: 'WHOLESALER' },
+      ]);
+    });
+
+    it('list display shows the type LABEL (displayName ?? code) for the enrolled outlet type', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        {
+          outletCode: 'OUT-1',
+          name: 'Verma Traders',
+          outletTypeId: 'type1',
+          outletType: { code: 'SSS' },
+          city: 'Mumbai',
+          state: 'MH',
+          isActive: true,
+          createdAt: new Date('2026-05-01T09:00:00Z'),
+          distributorCode: 'DIST-01',
+          beat: 'Andheri',
+          metro: 'Yes',
+          programName: 'Trade Loyalty',
+          programCategory: 'Standard',
+          partnerId: null,
+          reKycFlags: null,
+          kycIntent: null,
+          salesAssignments: [],
+        },
+      ]);
+      // loadOutletTypeLabels + the outletTypes query share this mock. The displayName row maps
+      // type1 → "Retailer"; the list projection renders that label instead of the "SSS" code.
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletTypeId: 'type1', displayName: 'Retailer', outletType: { code: 'SSS' } },
+      ]);
+      const res = await service.list(admin);
+      expect(res.outlets[0].outletType).toBe('Retailer');
+    });
+
+    it('list display falls back to the CODE when the type has no displayName (Deoleo path unchanged)', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        {
+          outletCode: 'OUT-1',
+          name: 'Verma Traders',
+          outletTypeId: 'type1',
+          outletType: { code: 'SSS' },
+          city: 'Mumbai',
+          state: 'MH',
+          isActive: true,
+          createdAt: new Date('2026-05-01T09:00:00Z'),
+          distributorCode: 'DIST-01',
+          beat: 'Andheri',
+          metro: 'Yes',
+          programName: 'Trade Loyalty',
+          programCategory: 'Standard',
+          partnerId: null,
+          reKycFlags: null,
+          kycIntent: null,
+          salesAssignments: [],
+        },
+      ]);
+      // No displayName ⇒ loadOutletTypeLabels yields an empty map ⇒ projection uses the code.
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletTypeId: 'type1', displayName: null, outletType: { code: 'SSS' } },
+      ]);
+      const res = await service.list(admin);
+      expect(res.outlets[0].outletType).toBe('SSS');
     });
   });
 
@@ -556,6 +636,59 @@ describe('AdminOutletsService', () => {
       expect(mockTx.salesUserAssignment.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ salesUserId: 'su1', outletId: 'o1' }) }),
       );
+    });
+
+    it('resolves an upload row by the per-tenant displayName ALIAS (label → OutletType id)', async () => {
+      // Bajaj: SSS has displayName "Retailer". A row typing "Retailer" must resolve to SSS's id.
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { displayName: 'Retailer', outletType: { id: 'type1', code: 'SSS', isActive: true } },
+      ]);
+      mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
+      mockTx.outlet.findUnique.mockResolvedValue(null);
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'retailer', outletName: 'Verma', city: 'Mumbai', state: 'MH', xsrId: 'ISR-1' }],
+      });
+
+      expect(res.created).toBe(1);
+      expect(res.rows[0].status).toBe('OK');
+      expect(mockTx.outlet.upsert.mock.calls[0][0].create).toMatchObject({ outletTypeId: 'type1' });
+    });
+
+    it('still resolves an upload row by the stored CODE even when a displayName alias exists', async () => {
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { displayName: 'Retailer', outletType: { id: 'type1', code: 'SSS', isActive: true } },
+      ]);
+      mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
+      mockTx.outlet.findUnique.mockResolvedValue(null);
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', outletName: 'Verma', city: 'Mumbai', state: 'MH', xsrId: 'ISR-1' }],
+      });
+
+      expect(res.created).toBe(1);
+      expect(mockTx.outlet.upsert.mock.calls[0][0].create).toMatchObject({ outletTypeId: 'type1' });
+    });
+
+    it('prefers an EXACT code match over a colliding displayName alias', async () => {
+      // type A's code is "SSS"; type B's displayName is also "SSS". A row typing "SSS" must resolve
+      // to type A (the code owner), never type B's alias.
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { displayName: null,  outletType: { id: 'typeA', code: 'SSS', isActive: true } },
+        { displayName: 'SSS', outletType: { id: 'typeB', code: 'RETAILER', isActive: true } },
+      ]);
+      mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
+      mockTx.outlet.findUnique.mockResolvedValue(null);
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', outletName: 'Verma', city: 'Mumbai', state: 'MH', xsrId: 'ISR-1' }],
+      });
+
+      expect(res.created).toBe(1);
+      expect(mockTx.outlet.upsert.mock.calls[0][0].create).toMatchObject({ outletTypeId: 'typeA' });
     });
 
     // ─── Outlet-master geo (Bajaj-only, gated on clients.features.outletMasterGeo) ───

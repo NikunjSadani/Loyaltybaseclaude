@@ -217,6 +217,20 @@ export class ReportsService {
     // the tenant slug, so `clientId` is the slug the label resolver keys on (no extra read).
     const headers = outletMasterHeaders(geoEnabled, clientId);
 
+    // Per-tenant outlet-type display labels: the "Outlet Type" column shows `displayName ?? name`,
+    // so a tenant that renamed a type (e.g. Bajaj SSS → "Retailer") exports the renamed label and it
+    // round-trips through the upload (which accepts the displayName). No displayName → the global
+    // `name`, byte-identical to before for Deoleo and every un-renamed type.
+    const typeConfigs = await this.prisma.outletTypeClientConfig.findMany({
+      where: { clientId, displayName: { not: null } },
+      select: { displayName: true, outletType: { select: { code: true } } },
+    });
+    const typeDisplayByCode = new Map<string, string>();
+    for (const tc of typeConfigs) {
+      const dn = (tc.displayName ?? '').trim();
+      if (dn) typeDisplayByCode.set(tc.outletType.code, dn);
+    }
+
     // 1) Outlets + partner (1 query). Tenant-scoped.
     const outlets = await this.prisma.outlet.findMany({
       where: { clientId, deletedAt: null },
@@ -226,7 +240,7 @@ export class ReportsService {
         zone: true,
         outletCode: true,
         name: true,
-        outletType: { select: { name: true } },
+        outletType: { select: { name: true, code: true } },
         programName: true,
         programCategory: true,
         distributorCode: true,
@@ -360,7 +374,7 @@ export class ReportsService {
       row['Zone'] = o.zone ?? '';
       row['Outlet Code'] = o.outletCode ?? '';
       row['Outlet Name'] = o.name ?? '';
-      row['Outlet Type'] = o.outletType?.name ?? '';
+      row['Outlet Type'] = (o.outletType?.code && typeDisplayByCode.get(o.outletType.code)) || o.outletType?.name || '';
       row['Program Name'] = o.programName ?? '';
       row['Sub-Program'] = o.programCategory ?? '';
       row['Distributor Code'] = o.distributorCode ?? '';

@@ -358,6 +358,54 @@ describe('outlet master row validation — errors (CREATE)', () => {
     expect(result.rows[0].errors.some(e => /no outlet types are enabled/i.test(e))).toBe(true);
   });
 
+  // ─── Per-tenant outlet-type DISPLAY label (displayName ?? code) ───────────────
+  // Bajaj's SSS type carries displayName "Retailer": the template instructs "Retailer" and the
+  // upload accepts "Retailer" OR "SSS". A tenant with no displayName (label === code, the Deoleo
+  // case, exercised by every other test here via the string[] form) is byte-identical to before.
+  describe('O20d — outlet-type display label (code OR label accepted)', () => {
+    const BAJAJ_TYPES = [
+      { code: 'SSS',        label: 'Retailer' },
+      { code: 'WHOLESALER', label: 'WHOLESALER' }, // no displayName ⇒ label === code
+    ];
+
+    it('accepts the display LABEL ("Retailer") as the Outlet Type', () => {
+      const result = validateOutletUpload([makeRow({ outletType: 'Retailer' })], [], VALID_PROGRAMS, VALID_CATEGORIES, BAJAJ_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      expect(result.rows[0].status).toBe('OK');
+    });
+
+    it('accepts the display label case-insensitively ("retailer")', () => {
+      const result = validateOutletUpload([makeRow({ outletType: 'retailer' })], [], VALID_PROGRAMS, VALID_CATEGORIES, BAJAJ_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      expect(result.rows[0].status).toBe('OK');
+    });
+
+    it('STILL accepts the stored CODE ("SSS") alongside the label', () => {
+      const result = validateOutletUpload([makeRow({ outletType: 'SSS' })], [], VALID_PROGRAMS, VALID_CATEGORIES, BAJAJ_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      expect(result.rows[0].status).toBe('OK');
+    });
+
+    it('rejects a value that is neither a code nor a label, listing the LABELS in the hint', () => {
+      const result = validateOutletUpload([makeRow({ outletType: 'KIRANA' })], [], VALID_PROGRAMS, VALID_CATEGORIES, BAJAJ_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      expect(result.rows[0].status).toBe('ERROR');
+      expect(result.rows[0].errors.some(e => /must be one of: Retailer, WHOLESALER/.test(e))).toBe(true);
+    });
+
+    it('the template Outlet Type column reference + examples show the LABEL', () => {
+      const { exampleRows, dosAndDonts } = getOutletAdditionTemplateData(VALID_PROGRAMS, VALID_CATEGORIES, BAJAJ_TYPES, LEAF_ROLE_CODE);
+      const ref = dosAndDonts.find(r => r[0] === 'Outlet Type')?.[1] ?? '';
+      expect(ref).toContain('Retailer');
+      expect(ref).not.toMatch(/\bSSS\b/); // the code is not shown when a label exists
+      // First example row's Outlet Type cell (index 4) uses the label.
+      expect(exampleRows[0][4]).toBe('Retailer');
+    });
+
+    it('with no displayName (string[] form) the label === code — byte-identical to before', () => {
+      const viaStrings = validateOutletUpload([makeRow({ outletType: 'SSS' })], [], VALID_PROGRAMS, VALID_CATEGORIES, ['SSS', 'WHOLESALER'], MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      const viaObjects = validateOutletUpload([makeRow({ outletType: 'SSS' })], [], VALID_PROGRAMS, VALID_CATEGORIES, [{ code: 'SSS', label: 'SSS' }, { code: 'WHOLESALER', label: 'WHOLESALER' }], MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      expect(viaStrings.rows[0].status).toBe('OK');
+      expect(viaObjects.rows[0].status).toBe('OK');
+    });
+  });
+
   it('O21 — program name not in configured list is an error', () => {
     const result = validateOutletUpload([makeRow({ programName: 'Unknown Programme' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('ERROR');
