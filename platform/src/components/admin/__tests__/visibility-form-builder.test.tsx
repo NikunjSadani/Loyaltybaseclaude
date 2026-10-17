@@ -28,6 +28,12 @@ vi.mock('@/lib/visibility', () => ({
   rewriteMediaViewPath: (p: string) => p.replace(/^\/v1\//, '/api/'),
 }));
 
+// The builder reads tenant Sub-Program values (outletCategories) from settings for the
+// Outlet Sub-Program condition source — stub it deterministically (no network on mount).
+vi.mock('@/lib/gifsy-settings', () => ({
+  useGifsySettings: () => ({ outletCategories: ['Premium', 'Standard'] }),
+}));
+
 import { VisibilityFormBuilder, validateVisibilityFormSchema } from '../VisibilityFormBuilder';
 import type { VisibilityFormSchema } from '@/lib/visibility-types';
 
@@ -70,6 +76,54 @@ describe('VISFORM — VisibilityFormBuilder', () => {
     // The new CAMERA field auto-expands: instruction input + sample uploader visible.
     expect(await screen.findByLabelText('Camera instruction')).toBeInTheDocument();
     expect(screen.getByLabelText('Upload sample image')).toBeInTheDocument();
+  });
+
+  it('VISFORM5: the local validator accepts a clause keyed on the reserved Outlet Sub-Program source', () => {
+    const schema: VisibilityFormSchema = {
+      captureGpsOnSubmit: false,
+      fields: [
+        { id: 'p1', type: 'CAMERA', label: 'Photo 1', required: true, order: 0 },
+        {
+          id: 'p2', type: 'CAMERA', label: 'Photo 2', required: false, order: 1,
+          requiredWhen: { fieldId: '__subProgram__', op: 'eq', value: 'Premium' },
+          visibleWhen: { fieldId: '__subProgram__', op: 'eq', value: 'Premium' },
+        },
+      ],
+    };
+    const errs = validateVisibilityFormSchema(schema);
+    // The reserved source is whitelisted → no "unknown field" error.
+    expect(errs.some((e) => /references an unknown field/i.test(e))).toBe(false);
+  });
+
+  it('VISFORM6: Outlet Sub-Program is a selectable condition source that round-trips into the schema', async () => {
+    upsertForm.mockResolvedValue({ success: true, data: { version: 2 } });
+    render(<VisibilityFormBuilder />);
+
+    // Add a Camera field (auto-expands; optional by default → "Required only when…" shows).
+    fireEvent.click(await screen.findByRole('button', { name: /add field/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Camera Rear-camera capture/i }));
+
+    // Give it a label so the form is valid to save.
+    fireEvent.change(await screen.findByPlaceholderText(/Camera label/i), { target: { value: 'POSM photo' } });
+
+    // Enable "Required only when…" — with no other form field, it defaults to the
+    // Outlet Sub-Program source.
+    fireEvent.click(screen.getByText('Required only when…'));
+
+    // The source dropdown offers "Outlet Sub-Program"; the value dropdown offers the
+    // tenant's configured Sub-Program values (from settings.outletCategories).
+    expect(screen.getByRole('option', { name: 'Outlet Sub-Program' })).toBeInTheDocument();
+    const premium = screen.getByRole('option', { name: 'Premium' }) as HTMLOptionElement;
+    expect(premium).toBeInTheDocument();
+
+    // Pick the value "Premium".
+    fireEvent.change(premium.closest('select') as HTMLSelectElement, { target: { value: 'Premium' } });
+
+    // Save → the reserved clause round-trips into the saved schema and the validator accepts it.
+    fireEvent.click(screen.getByRole('button', { name: /save form/i }));
+    await waitFor(() => expect(upsertForm).toHaveBeenCalledTimes(1));
+    const saved = upsertForm.mock.calls[0][0].formSchema as VisibilityFormSchema;
+    expect(saved.fields[0].requiredWhen).toEqual({ fieldId: '__subProgram__', op: 'eq', value: 'Premium' });
   });
 
   it('VISFORM4: geo-fence on + a location-less form → warning + save blocked (M4)', async () => {

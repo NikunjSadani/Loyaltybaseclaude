@@ -24,8 +24,10 @@ import {
   Smartphone, AlignLeft, CheckCircle, Loader2, Save, ImagePlus, X,
 } from 'lucide-react';
 import { visibilityApi, mediaViewUrl } from '@/lib/visibility';
+import { useGifsySettings } from '@/lib/gifsy-settings';
 import {
   GPS_CAPTURE_TRIGGERS,
+  OUTLET_CONTEXT_FIELD_IDS,
   formCapturesLocation,
   type VisibilityFormFieldType,
   type VisibilityFormField,
@@ -34,6 +36,18 @@ import {
   type VisibleWhen,
   type VisibleWhenOp,
 } from '@/lib/visibility-types';
+
+/**
+ * Outlet-attribute condition sources (resolve from the OUTLET master, not a form field) —
+ * a `visibleWhen` / `requiredWhen` clause may key on one of these to drive, e.g., a 2nd
+ * required photo for a given Sub-Program. Prepended to the ConditionEditor source dropdown.
+ */
+const OUTLET_CONTEXT_SOURCES: { fieldId: string; label: string }[] = [
+  { fieldId: '__subProgram__', label: 'Outlet Sub-Program' },
+];
+
+/** A reserved outlet-context id is a valid clause source (whitelisted by validation). */
+const RESERVED_SOURCE_IDS: ReadonlySet<string> = new Set<string>(OUTLET_CONTEXT_FIELD_IDS);
 
 const EMPTY_FORM: VisibilityFormSchema = { captureGpsOnSubmit: false, fields: [] };
 
@@ -108,7 +122,10 @@ export function validateVisibilityFormSchema(schema: VisibilityFormSchema): stri
     for (const [key, clause] of [['visibleWhen', f.visibleWhen], ['requiredWhen', f.requiredWhen]] as const) {
       if (!clause) continue;
       if (clause.fieldId === f.id) errors.push(`${pos} ("${name}"): ${key} cannot depend on itself.`);
-      else if (!ids.has(clause.fieldId)) errors.push(`${pos} ("${name}"): ${key} references an unknown field.`);
+      // A clause source is valid if it's another form field OR a reserved outlet-attribute
+      // source (`__subProgram__` etc. — mirrors the backend validateFormSchema whitelist).
+      else if (!ids.has(clause.fieldId) && !RESERVED_SOURCE_IDS.has(clause.fieldId))
+        errors.push(`${pos} ("${name}"): ${key} references an unknown field.`);
     }
   });
 
@@ -132,23 +149,32 @@ const OP_LABELS: { value: VisibleWhenOp; label: string }[] = [
 ];
 
 function ConditionEditor({
-  title, clause, otherFields, allFields, onChange,
+  title, clause, otherFields, allFields, subProgramValues, onChange,
 }: {
   title: string;
   clause: VisibleWhen | undefined;
   otherFields: VisibilityFormField[];
   allFields: VisibilityFormField[];
+  /** Tenant-configured Sub-Program values (outletCategories) offered when the source is `__subProgram__`. */
+  subProgramValues: string[];
   onChange: (c: VisibleWhen | undefined) => void;
 }) {
   const enabled = !!clause;
   const dep = clause ? allFields.find((f) => f.id === clause.fieldId) : undefined;
+  // Whether the selected source is a reserved outlet-attribute (resolved from the outlet,
+  // not a form field). There's always at least one such source, so a condition can be built
+  // even before any other field exists.
+  const isCtxSource = clause ? RESERVED_SOURCE_IDS.has(clause.fieldId) : false;
+  // The default source when enabling: the first form field if any, else the first
+  // outlet-attribute source (which always exists).
+  const defaultSourceId = otherFields.length > 0 ? otherFields[0].id : OUTLET_CONTEXT_SOURCES[0].fieldId;
   return (
     <div className="pt-1 border-t border-gray-100 space-y-2">
       <label className="flex items-center gap-2 cursor-pointer">
         <input type="checkbox" checked={enabled}
           onChange={(e) => {
             if (!e.target.checked) onChange(undefined);
-            else if (otherFields.length > 0) onChange({ fieldId: otherFields[0].id, op: 'eq', value: '' });
+            else onChange({ fieldId: defaultSourceId, op: 'eq', value: '' });
           }}
           className="w-3.5 h-3.5 accent-[var(--brand-primary)]" />
         <span className="text-[11px] text-gray-600 font-medium">{title}</span>
@@ -157,26 +183,39 @@ function ConditionEditor({
         <div className="flex flex-wrap items-center gap-2 pl-5">
           <select value={clause.fieldId} onChange={(e) => onChange({ ...clause, fieldId: e.target.value })}
             className="text-[10px] border border-gray-200 rounded-lg px-2 py-1.5 bg-white text-gray-700">
-            {otherFields.map((f) => <option key={f.id} value={f.id}>{f.label || '(Untitled)'}</option>)}
+            <optgroup label="Outlet">
+              {OUTLET_CONTEXT_SOURCES.map((s) => <option key={s.fieldId} value={s.fieldId}>{s.label}</option>)}
+            </optgroup>
+            {otherFields.length > 0 && (
+              <optgroup label="Form fields">
+                {otherFields.map((f) => <option key={f.id} value={f.id}>{f.label || '(Untitled)'}</option>)}
+              </optgroup>
+            )}
           </select>
           <select value={clause.op} onChange={(e) => onChange({ ...clause, op: e.target.value as VisibleWhenOp })}
             className="text-[10px] border border-gray-200 rounded-lg px-2 py-1.5 bg-white text-gray-700">
             {OP_LABELS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
           </select>
-          {CHOICE_TYPES.has(dep?.type ?? 'TEXT') ? (
+          {isCtxSource && subProgramValues.length > 0 ? (
+            // Outlet Sub-Program source → offer the tenant's configured Sub-Program values.
+            <select value={clause.value} onChange={(e) => onChange({ ...clause, value: e.target.value })}
+              className="text-[10px] border border-gray-200 rounded-lg px-2 py-1.5 bg-white text-gray-700">
+              <option value="">Select…</option>
+              {subProgramValues.map((o) => <option key={o} value={o}>{o}</option>)}
+            </select>
+          ) : !isCtxSource && CHOICE_TYPES.has(dep?.type ?? 'TEXT') ? (
             <select value={clause.value} onChange={(e) => onChange({ ...clause, value: e.target.value })}
               className="text-[10px] border border-gray-200 rounded-lg px-2 py-1.5 bg-white text-gray-700">
               <option value="">Select…</option>
               {(dep?.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
             </select>
           ) : (
+            // Free-text fallback (a non-choice form field, or a Sub-Program with no
+            // configured values yet).
             <input type="text" value={clause.value} onChange={(e) => onChange({ ...clause, value: e.target.value })}
               placeholder="value" className="text-[10px] border border-gray-200 rounded-lg px-2 py-1.5 w-24" />
           )}
         </div>
-      )}
-      {enabled && otherFields.length === 0 && (
-        <p className="text-[10px] text-gray-400 pl-5">Add more fields to build a condition.</p>
       )}
     </div>
   );
@@ -275,6 +314,10 @@ function PreviewField({ field }: { field: VisibilityFormField }) {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function VisibilityFormBuilder() {
+  // Tenant-configured Sub-Program values (outletCategories) — offered as the value options
+  // when a condition keys on the Outlet Sub-Program source.
+  const settings = useGifsySettings();
+  const subProgramValues = useMemo(() => settings.outletCategories ?? [], [settings.outletCategories]);
   const [value, setValue] = useState<VisibilityFormSchema>(EMPTY_FORM);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [showPicker, setShowPicker] = useState(false);
@@ -560,9 +603,11 @@ export function VisibilityFormBuilder() {
 
                     {/* Conditional visibility + required */}
                     <ConditionEditor title="Show only when…" clause={field.visibleWhen} otherFields={otherFields} allFields={fields}
+                      subProgramValues={subProgramValues}
                       onChange={(c) => patch(field.id, { visibleWhen: c })} />
                     {!field.required && (
                       <ConditionEditor title="Required only when…" clause={field.requiredWhen} otherFields={otherFields} allFields={fields}
+                        subProgramValues={subProgramValues}
                         onChange={(c) => patch(field.id, { requiredWhen: c })} />
                     )}
                   </div>

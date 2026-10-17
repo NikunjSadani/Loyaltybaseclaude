@@ -13,8 +13,11 @@ import {
   validateFormSchema,
   validateSubmittedValues,
   evaluateVisibleWhen,
+  evaluateClause,
   isFieldRequired,
+  outletContextValues,
   MEDIA_FIELD_TYPES,
+  OUTLET_CONTEXT_FIELD_IDS,
   VisibilityFormSchema,
   FormField,
 } from './visibility-form.helper';
@@ -137,6 +140,101 @@ describe('validateFormSchema', () => {
   it('exposes CAMERA in MEDIA_FIELD_TYPES', () => {
     expect(MEDIA_FIELD_TYPES.has('CAMERA')).toBe(true);
     expect(MEDIA_FIELD_TYPES.has('GPS_POINT')).toBe(false);
+  });
+
+  // ── Design B: outlet-attribute condition sources (`__subProgram__`) ──────────
+  it('ACCEPTS a requiredWhen clause whose fieldId is the reserved __subProgram__', () => {
+    const schema = {
+      captureGpsOnSubmit: false,
+      fields: [
+        cameraField({ id: 'photo1' }),
+        cameraField({
+          id: 'photo2',
+          order: 2,
+          required: false,
+          requiredWhen: { fieldId: '__subProgram__', op: 'eq', value: 'GOLD' },
+          visibleWhen: { fieldId: '__subProgram__', op: 'eq', value: 'GOLD' },
+        }),
+      ],
+    };
+    expect(validateFormSchema(schema)).toEqual([]);
+  });
+
+  it('still REJECTS an unknown NON-reserved clause fieldId', () => {
+    const schema = {
+      captureGpsOnSubmit: false,
+      fields: [
+        cameraField(),
+        cameraField({
+          id: 'photo2',
+          order: 2,
+          requiredWhen: { fieldId: '__notReserved__', op: 'eq', value: 'x' },
+        }),
+      ],
+    };
+    expect(validateFormSchema(schema).some((e) => e.includes('unknown field id'))).toBe(true);
+  });
+
+  it('REJECTS a real field that declares a reserved outlet-attribute id', () => {
+    const schema = {
+      captureGpsOnSubmit: false,
+      fields: [cameraField(), cameraField({ id: '__subProgram__', order: 2 })],
+    };
+    expect(validateFormSchema(schema).some((e) => e.includes('reserved'))).toBe(true);
+  });
+
+  it('REJECTS any double-underscore-wrapped field id (reserved namespace), not just the known set', () => {
+    const schema = {
+      captureGpsOnSubmit: false,
+      fields: [cameraField(), cameraField({ id: '__foo__', order: 2 })],
+    };
+    expect(validateFormSchema(schema).some((e) => e.includes('reserved'))).toBe(true);
+  });
+
+  it('exposes __subProgram__ as a reserved outlet-context id', () => {
+    expect((OUTLET_CONTEXT_FIELD_IDS as readonly string[]).includes('__subProgram__')).toBe(true);
+  });
+});
+
+describe('outletContextValues + injected clause evaluation (Design B)', () => {
+  it('outletContextValues trims programCategory into __subProgram__ (blank when null)', () => {
+    expect(outletContextValues({ programCategory: '  GOLD  ' })).toEqual({ __subProgram__: 'GOLD' });
+    expect(outletContextValues({ programCategory: null })).toEqual({ __subProgram__: '' });
+    expect(outletContextValues({})).toEqual({ __subProgram__: '' });
+  });
+
+  it('evaluateClause toggles on an injected __subProgram__ value', () => {
+    const clause = { fieldId: '__subProgram__', op: 'eq', value: 'GOLD' } as const;
+    expect(evaluateClause(clause, { __subProgram__: 'GOLD' })).toBe(true);
+    expect(evaluateClause(clause, { __subProgram__: 'SILVER' })).toBe(false);
+    expect(evaluateClause(clause, {})).toBe(false); // blank/missing → false
+  });
+
+  it('isFieldRequired honours a requiredWhen keyed on the injected __subProgram__', () => {
+    const photo2: FormField = {
+      id: 'photo2',
+      type: 'CAMERA',
+      label: '2nd photo',
+      required: false,
+      order: 2,
+      requiredWhen: { fieldId: '__subProgram__', op: 'eq', value: 'GOLD' },
+    };
+    expect(isFieldRequired(photo2, { __subProgram__: 'GOLD' })).toBe(true);
+    expect(isFieldRequired(photo2, { __subProgram__: 'SILVER' })).toBe(false);
+    expect(isFieldRequired(photo2, {})).toBe(false);
+  });
+
+  it('evaluateVisibleWhen hides a visibleWhen-__subProgram__ field for a non-matching outlet', () => {
+    const photo2: FormField = {
+      id: 'photo2',
+      type: 'CAMERA',
+      label: '2nd photo',
+      required: false,
+      order: 2,
+      visibleWhen: { fieldId: '__subProgram__', op: 'eq', value: 'GOLD' },
+    };
+    expect(evaluateVisibleWhen(photo2, { __subProgram__: 'GOLD' })).toBe(true);
+    expect(evaluateVisibleWhen(photo2, { __subProgram__: 'SILVER' })).toBe(false);
   });
 });
 

@@ -114,6 +114,103 @@ describe('VisibilityCaptureForm — submit while uploading (L2)', () => {
   });
 });
 
+describe('VisibilityCaptureForm — outlet-context conditional (sub-program)', () => {
+  // A 2nd CAMERA that only shows + is required for sub-program 'X', driven by the OUTLET's
+  // sub-program (reserved `__subProgram__` source), NOT a rep-entered value.
+  const TWO_PHOTO_SCHEMA: VisibilityFormSchema = {
+    captureGpsOnSubmit: false,
+    fields: [
+      { id: 'photo1', type: 'CAMERA', label: 'Photo 1', required: true, order: 0 },
+      {
+        id: 'photo2',
+        type: 'CAMERA',
+        label: 'Photo 2',
+        required: false,
+        order: 1,
+        visibleWhen: { fieldId: '__subProgram__', op: 'eq', value: 'X' },
+        requiredWhen: { fieldId: '__subProgram__', op: 'eq', value: 'X' },
+      },
+    ],
+  };
+
+  it('shows + requires the 2nd CAMERA when the outlet sub-program matches (X)', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <VisibilityCaptureForm
+        schema={TWO_PHOTO_SCHEMA}
+        initialValues={{ photo1: 'visibility-media/c1/p1.jpg' }}
+        outletContext={{ subProgram: 'X' }}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    // Photo 2 is visible (its visibleWhen clause is true for sub-program X).
+    expect(screen.getByText('Photo 2')).toBeInTheDocument();
+
+    // Submitting without Photo 2 is blocked — it is required for sub-program X.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /submit capture/i }));
+    });
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('"Photo 2" is required.'));
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('hides + does not require the 2nd CAMERA for a different sub-program (Y); no reserved key in payload', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <VisibilityCaptureForm
+        schema={TWO_PHOTO_SCHEMA}
+        initialValues={{ photo1: 'visibility-media/c1/p1.jpg' }}
+        outletContext={{ subProgram: 'Y' }}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    // Photo 2 is hidden (its visibleWhen clause is false for sub-program Y).
+    expect(screen.queryByText('Photo 2')).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /submit capture/i }));
+    });
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload).toEqual({ photo1: 'visibility-media/c1/p1.jpg' });
+    expect(payload).not.toHaveProperty('photo2');
+    // The reserved outlet-context key must NEVER be submitted.
+    expect(payload).not.toHaveProperty('__subProgram__');
+  });
+
+  it('never submits the reserved key even when the 2nd photo is captured (X)', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <VisibilityCaptureForm
+        schema={TWO_PHOTO_SCHEMA}
+        initialValues={{
+          photo1: 'visibility-media/c1/p1.jpg',
+          photo2: 'visibility-media/c1/p2.jpg',
+          // A crafted/stale reserved key in the initial values must be stripped.
+          __subProgram__: 'spoofed',
+        }}
+        outletContext={{ subProgram: 'X' }}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /submit capture/i }));
+    });
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload).toEqual({
+      photo1: 'visibility-media/c1/p1.jpg',
+      photo2: 'visibility-media/c1/p2.jpg',
+    });
+    expect(payload).not.toHaveProperty('__subProgram__');
+  });
+});
+
 describe('VisibilityCaptureForm — submit payload', () => {
   it('strips a visibleWhen-hidden field from the submitted formValues', async () => {
     const schema: VisibilityFormSchema = {

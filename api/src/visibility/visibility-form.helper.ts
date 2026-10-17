@@ -28,6 +28,7 @@ import {
   VisibilityFormSchema,
   MEDIA_FIELD_TYPES,
   readMediaValue,
+  OUTLET_CONTEXT_FIELD_IDS,
 } from './visibility-types';
 
 // Re-export the shared types + constants so consumers can import everything the
@@ -38,9 +39,11 @@ export {
   VISIBLE_WHEN_OPS,
   MEDIA_FIELD_TYPES,
   readMediaValue,
+  OUTLET_CONTEXT_FIELD_IDS,
 };
 export type { FormFieldType, VisibleWhen, FormField, VisibilityFormSchema };
-export type { MediaValue, GpsCapture } from './visibility-types';
+export type { MediaValue, GpsCapture, OutletContextFieldId } from './visibility-types';
+export { outletContextValues } from './visibility-types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Structural type guards
@@ -122,6 +125,13 @@ export function validateFormSchema(rawSchema: unknown): string[] {
 
     if (!isString(f.id) || f.id.trim() === '') {
       errors.push(`${pos}: id must be a non-empty string.`);
+    } else if (/^__.*__$/.test(f.id)) {
+      // A real field may NOT use a `__…__` id. These are reserved for server-injected
+      // outlet-context values (e.g. `__subProgram__`) and are stripped from client payloads,
+      // so a `__…__` form field would be silently dropped / shadow the authoritative value.
+      // Forbidding the whole pattern (not just the current reserved set) keeps the payload
+      // strip provably safe for any future context id.
+      errors.push(`${pos}: id "${f.id}" is reserved (ids wrapped in double underscores cannot be a form field id).`);
     } else if (fieldIds.has(f.id)) {
       errors.push(`${pos}: duplicate field id "${f.id}".`);
     } else {
@@ -213,7 +223,12 @@ export function validateFormSchema(rawSchema: unknown): string[] {
         errors.push(`${pos}: ${clauseKey}.fieldId must be a non-empty string.`);
       } else if (isString(f.id) && clause.fieldId === f.id) {
         errors.push(`${pos} ("${label}"): ${clauseKey} cannot depend on itself.`);
-      } else if (!fieldIds.has(clause.fieldId as string)) {
+      } else if (
+        !fieldIds.has(clause.fieldId as string) &&
+        !(OUTLET_CONTEXT_FIELD_IDS as readonly string[]).includes(clause.fieldId as string)
+      ) {
+        // A clause may key on another FORM field OR a reserved outlet-attribute id
+        // (e.g. `__subProgram__`) that the capture service injects server-side.
         errors.push(
           `${pos} ("${label}"): ${clauseKey} references unknown field id "${clause.fieldId}".`,
         );

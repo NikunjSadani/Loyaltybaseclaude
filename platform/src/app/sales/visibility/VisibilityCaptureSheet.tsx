@@ -211,6 +211,9 @@ export function VisibilityCaptureSheet({
                 mode="SALES"
                 submitting={submitting}
                 onSubmit={handleSubmit}
+                // Outlet attributes (from the outlet master) that drive outlet-context
+                // conditional fields (e.g. a 2nd photo required for a given sub-program).
+                outletContext={{ subProgram: outlet.programCategory }}
               />
             )}
           </div>

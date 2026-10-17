@@ -33,6 +33,7 @@ import {
   isFieldRequired,
   isFieldVisible,
   orderedFields,
+  outletContextValues,
   readMediaValue,
   validateVisibilityValues,
   type GpsCapture,
@@ -58,6 +59,14 @@ export interface VisibilityCaptureFormProps {
   submitting?: boolean;
   /** Visibility is sales-captured only; kept explicit + extensible. */
   mode?: 'SALES';
+  /**
+   * Outlet attributes (from the outlet master, NOT rep-entered) exposed to conditional
+   * `visibleWhen` / `requiredWhen` clauses via reserved ids (e.g. `__subProgram__`). These
+   * drive live show/hide + the required marker only — they are NEVER submitted (reserved
+   * keys are stripped from the payload). The backend re-derives the authoritative value on
+   * submit, so a conditional photo requirement cannot be spoofed away by the client.
+   */
+  outletContext?: { subProgram?: string | null };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -161,6 +170,7 @@ export function VisibilityCaptureForm({
   initialValues,
   onSubmit,
   submitting = false,
+  outletContext,
 }: VisibilityCaptureFormProps) {
   const [values, setValues] = useState<Record<string, unknown>>(() => ({ ...(initialValues ?? {}) }));
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -169,6 +179,17 @@ export function VisibilityCaptureForm({
   const [busy, setBusy] = useState(false);
 
   const fields = useMemo(() => orderedFields(schema), [schema]);
+
+  // Reserved outlet-context values (keyed by `__…__` id) resolved from the outlet master.
+  // These are merged into the values map ONLY for clause evaluation (live show/hide +
+  // required marker); they never live in `values`, so they are never submitted.
+  const reservedValues = useMemo(
+    () => outletContextValues({ programCategory: outletContext?.subProgram ?? null }),
+    [outletContext?.subProgram],
+  );
+  // The map every conditional clause (visibleWhen / requiredWhen) is evaluated against:
+  // the rep-entered values plus the reserved outlet-context values.
+  const evalValues = useMemo(() => ({ ...values, ...reservedValues }), [values, reservedValues]);
 
   const setValue = useCallback((id: string, value: unknown) => {
     setValues((prev) => ({ ...prev, [id]: value }));
@@ -240,20 +261,29 @@ export function VisibilityCaptureForm({
       }
     }
 
-    // 2) client-side validation (mirrors the backend).
-    const { errors } = validateVisibilityValues(schema, working);
+    // 2) client-side validation (mirrors the backend) — evaluated against the merged map
+    //    so a conditional field keyed on an outlet attribute (e.g. a 2nd photo required
+    //    for a given sub-program) is enforced live.
+    const workingEval = { ...working, ...reservedValues };
+    const { errors } = validateVisibilityValues(schema, workingEval);
     if (errors.length > 0) {
       setFieldErrors(errors);
       return;
     }
 
     // 3) build the payload — drop fields hidden by a `visibleWhen` clause so a stale
-    //    value from a now-hidden field is never submitted (mirrors the validator).
+    //    value from a now-hidden field is never submitted (mirrors the validator), using
+    //    the merged map for the same reason as above.
     const formValues: Record<string, unknown> = {};
     for (const f of fields) {
-      if (!isFieldVisible(f, working)) continue;
+      if (!isFieldVisible(f, workingEval)) continue;
       const v = working[f.id];
       if (v !== undefined) formValues[f.id] = v;
+    }
+    // Defensive: never submit a reserved outlet-context key (`__…__`) — they are
+    // evaluation-only and the backend re-derives them authoritatively.
+    for (const k of Object.keys(formValues)) {
+      if (/^__.*__$/.test(k)) delete formValues[k];
     }
 
     setBusy(true);
@@ -264,7 +294,7 @@ export function VisibilityCaptureForm({
     } finally {
       setBusy(false);
     }
-  }, [values, fields, schema, captureGps, onSubmit]);
+  }, [values, fields, schema, captureGps, onSubmit, reservedValues]);
 
   // Block submit while ANY field is still uploading (L2): an optional CAMERA photo mid-
   // upload would otherwise be silently omitted from formValues by a submit that races it.
@@ -275,12 +305,12 @@ export function VisibilityCaptureForm({
   return (
     <div className="space-y-4">
       {fields.map((field) => {
-        if (!isFieldVisible(field, values)) return null;
+        if (!isFieldVisible(field, evalValues)) return null;
         return (
           <FieldRenderer
             key={field.id}
             field={field}
-            values={values}
+            values={evalValues}
             setValue={setValue}
             uploading={Boolean(uploading[field.id])}
             uploadFile={uploadFile}

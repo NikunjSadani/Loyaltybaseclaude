@@ -292,6 +292,17 @@ describe('VisibilityCaptureService', () => {
     expect(res.outlets[0].windowState).toBe('awaiting');
   });
 
+  it('getSalesEligible returns programCategory so the capture form can evaluate the __subProgram__ clause', async () => {
+    // Regression: without this, the FE sees a blank sub-program, HIDES a required 2nd photo, and the
+    // BE (which re-derives the real sub-program) then rejects the submit → the rep is hard-blocked.
+    mockPrisma.outlet.findMany.mockResolvedValue([
+      { id: 'o1', outletCode: 'OC1', name: 'Shop 1', zone: null, state: null, programCategory: 'Premium', outletType: { code: 'SSS' } },
+    ]);
+    mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
+    const res = await service.getSalesEligible(user);
+    expect(res.outlets[0]).toHaveProperty('programCategory', 'Premium');
+  });
+
   // ── H1: geo-fence fail-CLOSED on garbage/missing capture geo ─────────────────
   it('H1: BLOCKS a garbage present GPS value at validation (400) — cannot slip through as empty geo', async () => {
     mockPrisma.channelPartner.findFirst.mockResolvedValue(refKyc(12.9, 77.5)); // reference present
@@ -372,6 +383,118 @@ describe('VisibilityCaptureService', () => {
     await expect(
       service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues }),
     ).rejects.toThrow(NotFoundException);
+  });
+
+  // ── Design B: sub-program-driven conditional 2nd photo ───────────────────────
+  // A form whose 2nd CAMERA is required (+visible) only when the OUTLET's sub-program
+  // (programCategory) == 'X'. The context is server-authoritative and never persisted.
+  const subProgramForm = {
+    clientId: 't1',
+    version: 5,
+    formSchema: {
+      captureGpsOnSubmit: true,
+      fields: [
+        { id: 'photo1', type: 'CAMERA', label: 'Photo 1', required: true, order: 1 },
+        {
+          id: 'photo2',
+          type: 'CAMERA',
+          label: 'Photo 2',
+          required: false,
+          order: 2,
+          requiredWhen: { fieldId: '__subProgram__', op: 'eq', value: 'X' },
+          visibleWhen: { fieldId: '__subProgram__', op: 'eq', value: 'X' },
+        },
+        { id: 'geo', type: 'GPS_POINT', label: 'Location', required: false, order: 3 },
+      ],
+    },
+  };
+  const geoNear = { lat: 12.9001, lng: 77.5001, accuracy: 10 };
+
+  it("REJECTS a submit missing the 2nd photo for an outlet whose sub-program == 'X'", async () => {
+    mockPrisma.visibilityForm.findUnique.mockResolvedValue(subProgramForm);
+    mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, programCategory: 'X' });
+    await expect(
+      service.submitCapture(user, {
+        outletId: 'o1',
+        formValues: { photo1: 'visibility-media/t1/a.jpg', geo: geoNear },
+      }),
+    ).rejects.toThrow(BadRequestException);
+    expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+  });
+
+  it("ACCEPTS the same single-photo submit for an outlet whose sub-program == 'Y'", async () => {
+    mockPrisma.visibilityForm.findUnique.mockResolvedValue(subProgramForm);
+    mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, programCategory: 'Y' });
+    const res = await service.submitCapture(user, {
+      outletId: 'o1',
+      formValues: { photo1: 'visibility-media/t1/a.jpg', geo: geoNear },
+    });
+    expect(res.version).toBe(1);
+    expect(mockPrisma.visibilityCapture.create).toHaveBeenCalled();
+    // photo2 is hidden for 'Y' → never persisted.
+    const createArg = mockPrisma.visibilityCapture.create.mock.calls[0][0].data;
+    expect('photo2' in createArg.formValues).toBe(false);
+  });
+
+  it('IGNORES a client-sent __subProgram__ (server uses the outlet value → still requires the 2nd photo)', async () => {
+    mockPrisma.visibilityForm.findUnique.mockResolvedValue(subProgramForm);
+    // Outlet really is 'X' (needs 2 photos); client spoofs 'Y' to try to drop the 2nd.
+    mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, programCategory: 'X' });
+    await expect(
+      service.submitCapture(user, {
+        outletId: 'o1',
+        formValues: { photo1: 'visibility-media/t1/a.jpg', geo: geoNear, __subProgram__: 'Y' },
+      }),
+    ).rejects.toThrow(BadRequestException);
+    expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+  });
+
+  it('never persists a reserved __subProgram__ key in the stored formValues', async () => {
+    mockPrisma.visibilityForm.findUnique.mockResolvedValue(subProgramForm);
+    mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, programCategory: 'X' });
+    const res = await service.submitCapture(user, {
+      outletId: 'o1',
+      formValues: {
+        photo1: 'visibility-media/t1/a.jpg',
+        photo2: 'visibility-media/t1/b.jpg',
+        geo: geoNear,
+        __subProgram__: 'spoof', // client-injected reserved key
+      },
+    });
+    expect(res.version).toBe(1);
+    const createArg = mockPrisma.visibilityCapture.create.mock.calls[0][0].data;
+    expect('__subProgram__' in createArg.formValues).toBe(false);
+    expect(createArg.formValues.photo1).toBe('visibility-media/t1/a.jpg');
+    expect(createArg.formValues.photo2).toBe('visibility-media/t1/b.jpg');
+  });
+
+  it('re-derives sub-program context from the outlet on RESUBMIT too', async () => {
+    mockPrisma.visibilityForm.findUnique.mockResolvedValue(subProgramForm);
+    mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, programCategory: 'X' });
+    // A REJECTED capture in the current window to resubmit over.
+    mockPrisma.visibilityCapture.findFirst.mockImplementation((args: { where?: { status?: string } }) => {
+      if (args?.where?.status === 'APPROVED') return Promise.resolve(null);
+      return Promise.resolve({
+        id: 'cap1',
+        status: 'REJECTED',
+        outletId: 'o1',
+        currentVersion: 1,
+        windowKey: CUR_WINDOW,
+      });
+    });
+    mockPrisma.visibilityCapture.findUnique.mockResolvedValue({
+      id: 'cap1',
+      status: 'REJECTED',
+      currentVersion: 1,
+      windowKey: CUR_WINDOW,
+    });
+    // Outlet is 'X' → the 2nd photo is still required on resubmit; omitting it is rejected.
+    await expect(
+      service.resubmitCapture(user, 'cap1', {
+        formValues: { photo1: 'visibility-media/t1/a.jpg', geo: geoNear },
+      }),
+    ).rejects.toThrow(BadRequestException);
+    expect(mockPrisma.visibilityCapture.update).not.toHaveBeenCalled();
   });
 
   // ── haversine sanity ─────────────────────────────────────────────────────────

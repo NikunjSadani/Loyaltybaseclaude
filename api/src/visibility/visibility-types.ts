@@ -52,6 +52,34 @@ export const MEDIA_FIELD_TYPES: ReadonlySet<string> = new Set(['CAMERA']);
 export const VISIBLE_WHEN_OPS = ['eq', 'neq', 'gt', 'lt', 'contains'] as const;
 export type VisibleWhenOp = (typeof VISIBLE_WHEN_OPS)[number];
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Outlet-attribute condition sources (Design B — sub-program-driven photos)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Reserved synthetic condition fieldIds that resolve from the OUTLET (not the form)
+ * — so a `visibleWhen` / `requiredWhen` clause can key on an outlet attribute such as
+ * its Sub-Program. These are merged into the values map before clause evaluation and
+ * whitelisted by `validateFormSchema` (a real field may NOT declare one of these ids).
+ *
+ * Extensible at ~zero cost: `__program__`, `__outletType__` follow the same mechanism.
+ * Currently exposed: `__subProgram__` (← `Outlet.programCategory`).
+ *
+ * SECURITY: these are server-authoritative. The capture service strips any `__…__`
+ * key a client sent out of the stored formValues and re-injects the SERVER-derived
+ * value for evaluation only — the enforced photo requirement cannot be spoofed by a
+ * crafted payload.
+ */
+export const OUTLET_CONTEXT_FIELD_IDS = ['__subProgram__'] as const;
+export type OutletContextFieldId = (typeof OUTLET_CONTEXT_FIELD_IDS)[number];
+
+/** The outlet attributes exposed to conditional clauses, keyed by reserved id. */
+export function outletContextValues(o: {
+  programCategory?: string | null;
+}): Record<string, string> {
+  return { __subProgram__: (o.programCategory ?? '').trim() };
+}
+
 /** A single conditional clause: `submittedValues[fieldId] <op> value`. */
 export interface VisibleWhen {
   fieldId: string;

@@ -32,7 +32,11 @@ import {
   MEDIA_FIELD_TYPES,
   readMediaValue,
 } from './visibility-form.helper';
-import { VisibilityFormSchema, GpsCapture } from './visibility-types';
+import {
+  VisibilityFormSchema,
+  GpsCapture,
+  outletContextValues,
+} from './visibility-types';
 import { evaluatePhotoFence, isValidGeo } from './geo-fence.helper';
 import { SubmitCaptureDto, ResubmitCaptureDto } from './dto/visibility-capture.dto';
 
@@ -232,6 +236,8 @@ export class VisibilityCaptureService {
         name: true,
         zone: true,
         state: true,
+        // Drives the Sub-Program conditional-photo clause on the capture form (__subProgram__).
+        programCategory: true,
         outletType: { select: { code: true, name: true } },
       },
       orderBy: { name: 'asc' },
@@ -255,6 +261,7 @@ export class VisibilityCaptureService {
           outletName: o.name,
           zone: o.zone,
           state: o.state,
+          programCategory: o.programCategory ?? null,
           outletType: o.outletType,
           captureId: cap?.id ?? null,
           status: cap?.status ?? null,
@@ -429,6 +436,9 @@ export class VisibilityCaptureService {
         outletCode: true,
         name: true,
         partnerId: true,
+        // Sub-program (Design B) — the authoritative outlet attribute that drives
+        // conditional capture fields (e.g. a `requiredWhen __subProgram__ == X` 2nd photo).
+        programCategory: true,
         outletType: { select: { code: true } },
       },
     });
@@ -448,7 +458,13 @@ export class VisibilityCaptureService {
     user: JwtPayload,
     config: VisibilityConfigSettings,
     caller: CallerSalesUser,
-    outlet: { id: string; outletCode: string; name: string; partnerId: string | null },
+    outlet: {
+      id: string;
+      outletCode: string;
+      name: string;
+      partnerId: string | null;
+      programCategory?: string | null;
+    },
     submittedRaw: Record<string, unknown> | undefined,
     existing: { id: string; status: string; currentVersion: number } | null,
   ) {
@@ -461,7 +477,15 @@ export class VisibilityCaptureService {
     const schema = form.formSchema as unknown as VisibilityFormSchema;
     const formVersion = form.version;
 
-    const { errors, values } = validateSubmittedValues(schema, submittedRaw ?? {});
+    // Design B (sub-program-driven conditional photos): merge the SERVER-AUTHORITATIVE
+    // outlet context into the values map used to evaluate visibleWhen / requiredWhen, so a
+    // clause can key on the outlet's Sub-Program. ANTI-SPOOF: strip any reserved `__…__`
+    // keys the client sent (a crafted payload must not be able to drop a required photo)
+    // and inject the server-derived ctx LAST. The ctx keys are NOT form fields, so
+    // validateSubmittedValues projects them out — they are never persisted in formValues.
+    const ctx = outletContextValues(outlet);
+    const cleaned = stripReservedKeys(submittedRaw ?? {});
+    const { errors, values } = validateSubmittedValues(schema, { ...cleaned, ...ctx });
     if (errors.length > 0) {
       throw new BadRequestException(`Form validation failed: ${errors.join(' | ')}`);
     }
@@ -909,6 +933,23 @@ export class VisibilityCaptureService {
     }
     return hashes;
   }
+}
+
+/**
+ * Strip reserved outlet-context keys (`__…__`) from a client-submitted values map
+ * (Design B). The capture service re-injects the SERVER-derived context for clause
+ * evaluation only — a client must never be able to supply (and thus spoof) one of these
+ * values, e.g. to suppress a `requiredWhen __subProgram__ == X` photo. Pure + module-local.
+ */
+function stripReservedKeys(
+  v: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, val] of Object.entries(v ?? {})) {
+    if (/^__.*__$/.test(k)) continue;
+    out[k] = val;
+  }
+  return out;
 }
 
 /**

@@ -45,6 +45,29 @@ export type GpsCaptureTrigger = (typeof GPS_CAPTURE_TRIGGERS)[number];
 export const VISIBLE_WHEN_OPS = ['eq', 'neq', 'gt', 'lt', 'contains'] as const;
 export type VisibleWhenOp = (typeof VISIBLE_WHEN_OPS)[number];
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Outlet-attribute condition sources (mirror of api/.../visibility-types.ts)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Reserved synthetic condition fieldIds that resolve from the OUTLET (not the form) —
+ * so a `visibleWhen` / `requiredWhen` clause can key on an outlet attribute such as its
+ * Sub-Program. The capture renderer merges these into the values map before clause
+ * evaluation (live show/hide + required-marker); the builder whitelists them as valid
+ * clause sources. MUST stay in sync with the api copy
+ * (`api/src/visibility/visibility-types.ts`) — the SAME ids.
+ *
+ * Extensible at ~zero cost: `__program__`, `__outletType__` follow the same mechanism.
+ * Currently exposed: `__subProgram__` (← `Outlet.programCategory`).
+ */
+export const OUTLET_CONTEXT_FIELD_IDS = ['__subProgram__'] as const;
+export type OutletContextFieldId = (typeof OUTLET_CONTEXT_FIELD_IDS)[number];
+
+/** The outlet attributes exposed to conditional clauses, keyed by reserved id. */
+export function outletContextValues(o: { programCategory?: string | null }): Record<string, string> {
+  return { __subProgram__: (o.programCategory ?? '').trim() };
+}
+
 /** A single conditional clause: `values[fieldId] <op> value`. */
 export interface VisibleWhen {
   fieldId: string;
@@ -214,6 +237,13 @@ export interface SalesEligibleOutlet {
   zone: string | null;
   state: string | null;
   outletType: { code: string; name: string } | null;
+  /**
+   * The outlet's Sub-Program (`Outlet.programCategory`) — drives outlet-context
+   * conditional fields in the capture form (e.g. a 2nd photo required only for a given
+   * sub-program). Supplied by the backend on the eligible payload; absent/blank = no
+   * outlet-context condition fires.
+   */
+  programCategory?: string | null;
   /** The current capture row for this (outlet, window), when one exists. */
   captureId: string | null;
   status: VisibilityCaptureStatus | null;
