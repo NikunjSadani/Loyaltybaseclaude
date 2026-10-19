@@ -190,6 +190,21 @@ describe('AdminOutletsService', () => {
       ]);
     });
 
+    it('outletTypes payload carries the global `name` (upload alias — export→re-upload round-trip)', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      // SUB_STOCKIST: name ≠ code, no displayName ⇒ label === code; the export emits the global name.
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { displayName: 'Retailer', outletType: { code: 'SSS', name: 'Super Stockist' } },
+        { displayName: null,       outletType: { code: 'SUB_STOCKIST', name: 'Sub-Stockist' } },
+      ]);
+      const res = await service.list(admin);
+      // Sorted by label: "Retailer" (SSS) before "SUB_STOCKIST".
+      expect(res.outletTypes).toEqual([
+        { code: 'SSS', label: 'Retailer', name: 'Super Stockist' },
+        { code: 'SUB_STOCKIST', label: 'SUB_STOCKIST', name: 'Sub-Stockist' },
+      ]);
+    });
+
     it('list display shows the type LABEL (displayName ?? code) for the enrolled outlet type', async () => {
       mockPrisma.outlet.findMany.mockResolvedValue([
         {
@@ -678,6 +693,61 @@ describe('AdminOutletsService', () => {
       mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
         { displayName: null,  outletType: { id: 'typeA', code: 'SSS', isActive: true } },
         { displayName: 'SSS', outletType: { id: 'typeB', code: 'RETAILER', isActive: true } },
+      ]);
+      mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
+      mockTx.outlet.findUnique.mockResolvedValue(null);
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', outletName: 'Verma', city: 'Mumbai', state: 'MH', xsrId: 'ISR-1' }],
+      });
+
+      expect(res.created).toBe(1);
+      expect(mockTx.outlet.upsert.mock.calls[0][0].create).toMatchObject({ outletTypeId: 'typeA' });
+    });
+
+    it('resolves an upload row by the global NAME (export→re-upload round-trip)', async () => {
+      // SUB_STOCKIST: name "Sub-Stockist" ≠ code, no displayName. The "Download Outlet Master" export
+      // emits `displayName ?? name` = "Sub-Stockist", which the upload must now accept back.
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { displayName: null, outletType: { id: 'type1', code: 'SUB_STOCKIST', name: 'Sub-Stockist', isActive: true } },
+      ]);
+      mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
+      mockTx.outlet.findUnique.mockResolvedValue(null);
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'sub-stockist', outletName: 'Verma', city: 'Mumbai', state: 'MH', xsrId: 'ISR-1' }],
+      });
+
+      expect(res.created).toBe(1);
+      expect(res.rows[0].status).toBe('OK');
+      expect(mockTx.outlet.upsert.mock.calls[0][0].create).toMatchObject({ outletTypeId: 'type1' });
+    });
+
+    it('still resolves by CODE and by displayName when a global name alias also exists', async () => {
+      // SSS has displayName "Retailer" AND global name "Super Stockist". All three must resolve to type1.
+      const types = [{ displayName: 'Retailer', outletType: { id: 'type1', code: 'SSS', name: 'Super Stockist', isActive: true } }];
+      mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
+      mockTx.outlet.findUnique.mockResolvedValue(null);
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      for (const val of ['SSS', 'Retailer', 'Super Stockist']) {
+        mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue(types);
+        const res = await service.upsert(admin, {
+          rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: val, outletName: 'Verma', city: 'Mumbai', state: 'MH', xsrId: 'ISR-1' }],
+        });
+        expect(res.created).toBe(1);
+        expect(mockTx.outlet.upsert.mock.calls.at(-1)![0].create).toMatchObject({ outletTypeId: 'type1' });
+      }
+    });
+
+    it('prefers an EXACT code match over a colliding global NAME alias', async () => {
+      // type A's code is "SSS"; type B's global name is also "Sss". A row typing "SSS" must resolve
+      // to type A (the code owner), never type B's name alias.
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { displayName: null, outletType: { id: 'typeA', code: 'SSS', name: 'Super Stockist', isActive: true } },
+        { displayName: null, outletType: { id: 'typeB', code: 'RETAILER', name: 'Sss', isActive: true } },
       ]);
       mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
       mockTx.outlet.findUnique.mockResolvedValue(null);

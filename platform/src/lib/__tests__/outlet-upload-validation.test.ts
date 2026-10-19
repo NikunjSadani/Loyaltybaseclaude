@@ -49,6 +49,7 @@ import {
   buildOutletUploadErrorReport,
   isYes,
 } from '../outlet-upload';
+import type { OutletTypeOption } from '../outlet-upload';
 import type {
   OutletUploadRow,
   ReKYCFlagRow,
@@ -403,6 +404,59 @@ describe('outlet master row validation — errors (CREATE)', () => {
       const viaObjects = validateOutletUpload([makeRow({ outletType: 'SSS' })], [], VALID_PROGRAMS, VALID_CATEGORIES, [{ code: 'SSS', label: 'SSS' }, { code: 'WHOLESALER', label: 'WHOLESALER' }], MOCK_EMPLOYEES, LEAF_ROLE_CODE);
       expect(viaStrings.rows[0].status).toBe('OK');
       expect(viaObjects.rows[0].status).toBe('OK');
+    });
+  });
+
+  // ─── Global `name` accepted as an upload alias (export→re-upload round-trip) ───
+  // The "Download Outlet Master" export emits `displayName ?? name`. For a type where name ≠ code
+  // and no displayName is set (e.g. SUB_STOCKIST / "Sub-Stockist"), the exported value is the
+  // global `name` — which the upload must accept back so the round-trip closes. Accepted set is now
+  // { code, name, displayName }; display is unchanged (still label = displayName ?? code).
+  describe('O20e — outlet-type global name accepted as an upload alias', () => {
+    // SUB_STOCKIST: name ≠ code, NO displayName ⇒ label === code ("SUB_STOCKIST"); export emits "Sub-Stockist".
+    // SSS:          name ≠ code, displayName "Retailer" ⇒ export emits "Retailer".
+    const TYPES: OutletTypeOption[] = [
+      { code: 'SUB_STOCKIST', label: 'SUB_STOCKIST', name: 'Sub-Stockist' },
+      { code: 'SSS',          label: 'Retailer',     name: 'Super Stockist' },
+    ];
+
+    it('accepts the global NAME ("Sub-Stockist") for a non-renamed type (label === code)', () => {
+      const result = validateOutletUpload([makeRow({ outletType: 'Sub-Stockist' })], [], VALID_PROGRAMS, VALID_CATEGORIES, TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      expect(result.rows[0].status).toBe('OK');
+    });
+
+    it('accepts the global name case-insensitively / trimmed ("  sub-stockist  ")', () => {
+      const result = validateOutletUpload([makeRow({ outletType: '  sub-stockist  ' })], [], VALID_PROGRAMS, VALID_CATEGORIES, TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      expect(result.rows[0].status).toBe('OK');
+    });
+
+    it('STILL accepts the code ("SUB_STOCKIST") and the displayName ("Retailer")', () => {
+      const byCode  = validateOutletUpload([makeRow({ outletType: 'SUB_STOCKIST' })], [], VALID_PROGRAMS, VALID_CATEGORIES, TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      const byLabel = validateOutletUpload([makeRow({ outletType: 'Retailer' })],      [], VALID_PROGRAMS, VALID_CATEGORIES, TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      expect(byCode.rows[0].status).toBe('OK');
+      expect(byLabel.rows[0].status).toBe('OK');
+    });
+
+    it('for a RENAMED type the export value (displayName "Retailer") and the global name both pass', () => {
+      const byExport = validateOutletUpload([makeRow({ outletType: 'Retailer' })],       [], VALID_PROGRAMS, VALID_CATEGORIES, TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      const byName   = validateOutletUpload([makeRow({ outletType: 'Super Stockist' })], [], VALID_PROGRAMS, VALID_CATEGORIES, TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      expect(byExport.rows[0].status).toBe('OK');
+      expect(byName.rows[0].status).toBe('OK');
+    });
+
+    it('still REJECTS a truly unknown value (not code, name, or displayName)', () => {
+      const result = validateOutletUpload([makeRow({ outletType: 'KIRANA' })], [], VALID_PROGRAMS, VALID_CATEGORIES, TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      expect(result.rows[0].status).toBe('ERROR');
+      // Hint still lists only the LABELS — name is accepted but not advertised.
+      expect(result.rows[0].errors.some(e => /must be one of: SUB_STOCKIST, Retailer/.test(e))).toBe(true);
+    });
+
+    it('a bare-string option carries no name — strict superset, legacy callers unchanged', () => {
+      // No `name` present ⇒ the only accepted values are the code (=== label). "Sub-Stockist" is NOT accepted.
+      const ok  = validateOutletUpload([makeRow({ outletType: 'SUB_STOCKIST' })], [], VALID_PROGRAMS, VALID_CATEGORIES, ['SUB_STOCKIST'], MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      const bad = validateOutletUpload([makeRow({ outletType: 'Sub-Stockist' })], [], VALID_PROGRAMS, VALID_CATEGORIES, ['SUB_STOCKIST'], MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      expect(ok.rows[0].status).toBe('OK');
+      expect(bad.rows[0].status).toBe('ERROR');
     });
   });
 

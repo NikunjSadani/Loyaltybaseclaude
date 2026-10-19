@@ -454,4 +454,30 @@ describe('ReportsService.outletMaster (57 columns)', () => {
     expect((aoa[1] as unknown[])[idx('Outlet Type')]).toBe('Retailer');   // renamed
     expect((aoa[2] as unknown[])[idx('Outlet Type')]).toBe('Wholesaler'); // unrenamed → global name
   });
+
+  // ── pointsLedger: the per-tenant outlet-type display name in the statement rows ──
+  describe('pointsLedger (Outlet Type = displayName ?? name)', () => {
+    const outletWithLedger = (over: Record<string, unknown> = {}) => ({
+      id: 'o1', name: 'Shop One',
+      outletType: { id: 'ot_sss', name: 'SSS' },
+      partner: { wallets: [{ pointsLedger: [{ transactionType: 'EARN', points: 100, createdAt: new Date('2026-06-10T00:00:00Z') }] }] },
+      ...over,
+    });
+
+    it('renders the renamed outlet type (scoped to the caller tenant)', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([outletWithLedger()]);
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([{ outletTypeId: 'ot_sss', displayName: 'Retailer' }]);
+
+      const res = (await service.pointsLedger(admin, { from: '2026-06', to: '2026-06' } as never)) as { rows: { outletType?: string }[] };
+      expect(res.rows[0].outletType).toBe('Retailer');
+      expect(mockPrisma.outletTypeClientConfig.findMany.mock.calls[0][0].where).toMatchObject({ clientId: 'deoleo' });
+    });
+
+    it('falls back to outletType.name when the tenant set no displayName (Deoleo parity)', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([outletWithLedger()]);
+      // Default [] config (beforeEach) → empty map → original name.
+      const res = (await service.pointsLedger(admin, { from: '2026-06', to: '2026-06' } as never)) as { rows: { outletType?: string }[] };
+      expect(res.rows[0].outletType).toBe('SSS');
+    });
+  });
 });

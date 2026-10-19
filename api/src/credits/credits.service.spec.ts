@@ -202,6 +202,9 @@ describe('CreditsService', () => {
     // Default: outlet lookups (uploadUtr resolves per-outlet bank accounts for the same-account
     // shared-UTR rule before the tx; createPayoutDownload/uploadUtr tests override per case).
     mockPrisma.outlet.findMany.mockResolvedValue([]);
+    // Default: no per-tenant outlet-type displayName (eligibleOutlets loads this) → empty map →
+    // eligibleOutlets `type` falls back to outletType.code (Deoleo parity). Overridden per case.
+    mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
     // Default: partner resolves for the post-commit PUSH + WhatsApp; wallet balance read.
     mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'partnerUser1', ownerName: 'Ravi Traders', phone: '9900000041' });
     mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 500 });
@@ -1049,14 +1052,28 @@ describe('CreditsService', () => {
   });
 
   describe('eligibleOutlets', () => {
-    it('filters to active outlets of active partners in the tenant', async () => {
+    it('filters to active outlets of active partners in the tenant (no displayName → code)', async () => {
       mockPrisma.outlet.findMany.mockResolvedValue([
-        { outletCode: 'O1', name: 'A', phone: '900', outletType: { code: 'GT' } },
+        { outletCode: 'O1', name: 'A', phone: '900', outletType: { id: 'ot_gt', code: 'GT' } },
       ]);
       const res = await service.eligibleOutlets(admin);
       const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
       expect(where.partner).toEqual({ clientId: 'deoleo', isActive: true });
+      // No per-tenant displayName (default []) → `type` stays the outletType.code (Deoleo parity).
       expect(res[0]).toEqual({ id: 'O1', name: 'A', type: 'GT', phone: '900' });
+    });
+
+    it('renders the tenant displayName for a renamed outlet type (displayName ?? code)', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'O1', name: 'A', phone: '900', outletType: { id: 'ot_gt', code: 'GT' } },
+      ]);
+      // Tenant renamed OutletType ot_gt → "General Trade".
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletTypeId: 'ot_gt', displayName: 'General Trade' },
+      ]);
+      const res = await service.eligibleOutlets(admin);
+      expect(res[0].type).toBe('General Trade');
+      expect(mockPrisma.outletTypeClientConfig.findMany.mock.calls[0][0].where).toMatchObject({ clientId: 'deoleo' });
     });
   });
 

@@ -18,6 +18,7 @@ import { ensureOutletAccount } from '../common/reward-account.helper';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { paiseToRupees, toPaiseBigInt } from '../common/money';
 import { monthYearIST, formatDateIST, IST_OFFSET_MIN } from '../common/ist-date';
+import { loadOutletTypeDisplayNames, labelFor } from '../common/outlet-type-display';
 import {
   resolveEffectiveKycStatus,
   isPartnerPayable,
@@ -1329,15 +1330,18 @@ export class CreditsService {
         partner: { clientId: user.clientId, isActive: true },
       },
       include: {
-        outletType: { select: { code: true } },
+        outletType: { select: { id: true, code: true } },
       },
       orderBy: { outletCode: 'asc' },
     });
 
+    // Per-tenant outlet-type display labels (displayName ?? code), scoped to this tenant.
+    const typeDisplayById = await loadOutletTypeDisplayNames(this.prisma, user.clientId);
+
     return outlets.map((o) => ({
       id: o.outletCode,
       name: o.name,
-      type: o.outletType.code,
+      type: labelFor(typeDisplayById, o.outletType.id, o.outletType.code),
       phone: o.phone ?? undefined,
     }));
   }

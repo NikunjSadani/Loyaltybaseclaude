@@ -7,6 +7,7 @@ import { buildXlsx, HyperlinkCell } from '../common/xlsx';
 import { istDateTimeCell } from '../common/ist-date';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide } from '../common/tenant-scope';
+import { loadOutletTypeDisplayNames, labelFor } from '../common/outlet-type-display';
 import { EnrollmentFormSchema, FormField, readMediaValue } from './enrollment-form.helper';
 import {
   AudienceFilter,
@@ -630,11 +631,14 @@ export class SchemeReportService {
           select: {
             zone: true,
             programName: true,
-            outletType: { select: { name: true } },
+            outletType: { select: { id: true, name: true } },
           },
         },
       },
     });
+
+    // Per-tenant outlet-type display labels (displayName ?? name), scoped to the scheme's tenant.
+    const typeDisplayById = await loadOutletTypeDisplayNames(this.prisma, clientId);
 
     const enrollments = await this.prisma.schemeEnrollment.findMany({
       // Soft-deleted enrollments are excluded from coverage/counts (they read as NOT_ENROLLED).
@@ -677,7 +681,12 @@ export class SchemeReportService {
       enrolledIds,
     );
     const byOutletType = tally(
-      roster.map((r) => ({ id: r.id, key: r.matchedOutlet?.outletType?.name ?? null })),
+      roster.map((r) => ({
+        id: r.id,
+        key: r.matchedOutlet?.outletType
+          ? labelFor(typeDisplayById, r.matchedOutlet.outletType.id, r.matchedOutlet.outletType.name)
+          : null,
+      })),
       enrolledIds,
     );
 
@@ -706,6 +715,7 @@ export class SchemeReportService {
       byZone,
       byProgram,
       byOutletType,
+      typeDisplayById,
     };
   }
 
@@ -738,7 +748,9 @@ export class SchemeReportService {
       matched: !!r.matchedOutletId,
       zone: r.matchedOutlet?.zone ?? null,
       program: r.matchedOutlet?.programName ?? null,
-      outletType: r.matchedOutlet?.outletType?.name ?? null,
+      outletType: r.matchedOutlet?.outletType
+        ? labelFor(a.typeDisplayById, r.matchedOutlet.outletType.id, r.matchedOutlet.outletType.name)
+        : null,
       status: a.statusByOutlet.get(r.id) ?? 'NOT_ENROLLED',
     }));
 
@@ -788,7 +800,7 @@ export class SchemeReportService {
             zone: true,
             programName: true,
             programCategory: true,
-            outletType: { select: { name: true } },
+            outletType: { select: { id: true, name: true } },
           },
         },
         enrollment: {
@@ -819,6 +831,9 @@ export class SchemeReportService {
     });
     const fields = this.fieldsFromSchema(form?.formSchema);
 
+    // Per-tenant outlet-type display labels (displayName ?? name), scoped to the scheme's tenant.
+    const typeDisplayById = await loadOutletTypeDisplayNames(this.prisma, clientId);
+
     const mapped: ExportRosterRow[] = roster.map((r) => ({
       outletRef: r.outletRef,
       outletName: r.outletName,
@@ -827,7 +842,9 @@ export class SchemeReportService {
       zone: r.matchedOutlet?.zone ?? null,
       programName: r.matchedOutlet?.programName ?? null,
       programCategory: r.matchedOutlet?.programCategory ?? null,
-      outletType: r.matchedOutlet?.outletType?.name ?? null,
+      outletType: r.matchedOutlet?.outletType
+        ? labelFor(typeDisplayById, r.matchedOutlet.outletType.id, r.matchedOutlet.outletType.name)
+        : null,
       taggedEmployeeCode: r.taggedSalesUser?.employeeCode ?? null,
       prefillValues: (r.prefillValues as Record<string, unknown> | null) ?? null,
       // The live enrollment id — threaded into the media view-token (null when the row

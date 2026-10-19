@@ -395,6 +395,9 @@ const mockPrisma = {
   schemeEnrollment: { findMany: jest.fn(), findUnique: jest.fn() },
   schemeEnrollmentForm: { findUnique: jest.fn() },
   outlet: { count: jest.fn() },
+  // Per-tenant outlet-type display names (loadOutletTypeDisplayNames). Defaults to [] in
+  // beforeEach ⇒ empty display map ⇒ reports fall back to outletType.name (Deoleo parity).
+  outletTypeClientConfig: { findMany: jest.fn() },
 };
 const mockJwt = { sign: jest.fn(() => 'TESTTOKEN'), verify: jest.fn() };
 const mockConfig = { get: jest.fn(() => 'test-secret') };
@@ -410,6 +413,8 @@ describe('SchemeReportService', () => {
     jest.clearAllMocks();
     mockJwt.sign.mockReturnValue('TESTTOKEN');
     mockConfig.get.mockReturnValue('test-secret');
+    // Default: tenant has NO per-type displayName → empty map → outletType.name passes through.
+    mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SchemeReportService,
@@ -467,6 +472,39 @@ describe('SchemeReportService', () => {
     it('throws NotFound for a cross-tenant scheme', async () => {
       mockPrisma.scheme.findFirst.mockResolvedValue(null);
       await expect(service.gifsyReport(asTenant('other', 'x'), 's1')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // ── Per-tenant outlet-type display name (displayName ?? name) ──────────────
+    it('renders the tenant displayName for a renamed outlet type (row + byOutletType breakdown)', async () => {
+      // The scheme belongs to tenant "bajaj" — display names are scoped to the SCHEME's tenant.
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', code: 'SC1', name: 'Scheme 1', status: 'ACTIVE', clientId: 'bajaj' });
+      // Roster carries outletType.id so the per-tenant config can key onto it.
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
+        { id: 'r1', outletRef: 'A1', outletName: 'A1', matchedOutletId: 'o1', matchedOutlet: { zone: 'W', programName: 'P', outletType: { id: 'ot_sss', name: 'SSS' } } },
+        { id: 'r2', outletRef: 'A2', outletName: 'A2', matchedOutletId: 'o2', matchedOutlet: { zone: 'W', programName: 'P', outletType: { id: 'ot_sss', name: 'SSS' } } },
+      ]);
+      mockPrisma.schemeEnrollment.findMany.mockResolvedValue([{ schemeOutletId: 'r1', status: 'SUBMITTED' }]);
+      // Tenant renamed OutletType ot_sss → "Retailer".
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletTypeId: 'ot_sss', displayName: 'Retailer' },
+      ]);
+
+      const rep = await service.tenantReport(asTenant('bajaj'), 's1');
+      expect(rep.rows.every((r) => r.outletType === 'Retailer')).toBe(true);
+      expect(rep.byOutletType).toEqual([{ key: 'Retailer', rosterCount: 2, enrolledCount: 1 }]);
+      // The config lookup is scoped to the scheme's tenant.
+      expect(mockPrisma.outletTypeClientConfig.findMany.mock.calls[0][0].where).toMatchObject({ clientId: 'bajaj' });
+    });
+
+    it('falls back to outletType.name when the tenant set no displayName (Deoleo parity)', async () => {
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
+        { id: 'r1', outletRef: 'A1', outletName: 'A1', matchedOutletId: 'o1', matchedOutlet: { zone: 'W', programName: 'P', outletType: { id: 'ot_sss', name: 'SSS' } } },
+      ]);
+      mockPrisma.schemeEnrollment.findMany.mockResolvedValue([]);
+      // Default empty config (beforeEach) ⇒ empty map ⇒ original name.
+      const rep = await service.tenantReport(asTenant('deoleo'), 's1');
+      expect(rep.rows[0].outletType).toBe('SSS');
+      expect(rep.byOutletType).toEqual([{ key: 'SSS', rosterCount: 1, enrolledCount: 0 }]);
     });
   });
 

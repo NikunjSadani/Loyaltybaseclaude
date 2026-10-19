@@ -780,7 +780,10 @@ export default function OutletsPage() {
         if (Array.isArray(j.data.outletTypes)) {
           setOutletTypes(
             (j.data.outletTypes as (string | OutletTypeOption)[]).map((t) =>
-              typeof t === 'string' ? { code: t, label: t } : { code: t.code, label: t.label || t.code },
+              // `name` (the global OutletType.name) is threaded through when present so the upload
+              // validator can accept it as an alias (export→re-upload round-trip). Missing name is
+              // fine (defensive) — it just adds no extra accepted alias.
+              typeof t === 'string' ? { code: t, label: t } : { code: t.code, label: t.label || t.code, name: t.name },
             ),
           );
         }

@@ -31,6 +31,7 @@ import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
 import { isSalesRedeemEnabledForPartner } from '../common/sales-redeem-eligibility';
 import { businessHoursBetween } from '../common/business-hours';
 import { loadHolidaySet } from '../common/holiday-calendar';
+import { loadOutletTypeDisplayNames, labelFor } from '../common/outlet-type-display';
 import {
   kycStageOf,
   latestGifsyEntryMs,
@@ -201,6 +202,9 @@ type CommitOutcome = BulkVerifySubmissionResult & { notification?: CommitNotifyI
  * KycDocument.fileUrl (no multipart upload happens on this path — the form posts
  * JSON with base64/url document references), so no StorageService upload is used.
  */
+/** Shared empty display-name map (per-tenant fallback) so `labelFor` always receives a Map. */
+const EMPTY_TYPE_DISPLAY: ReadonlyMap<string, string> = new Map<string, string>();
+
 @Injectable()
 export class KycService {
   private readonly logger = new Logger(KycService.name);
@@ -5034,7 +5038,7 @@ export class KycService {
                 state: true,
                 pincode: true,
                 programName: true,
-                outletType: { select: { name: true } },
+                outletType: { select: { id: true, name: true } },
               },
             },
           },
@@ -5046,11 +5050,15 @@ export class KycService {
       orderBy: { createdAt: 'asc' },
     });
 
+    // Per-tenant outlet-type display labels, scoped to each row's own tenant (Gifsy = cross-tenant).
+    const typeDisplayByClient = await this.loadTypeDisplayByClient(submissions.map((s) => s.user.clientId));
+
     const entries = submissions.map((s) => {
       // Overlay the re-KYC PROPOSED values (stage-at-approval) so the queue shows what's UNDER
       // REVIEW, not the stale live-partner values (which a re-KYC only overwrites at approval).
       const p = this.overlayProposedIdentity(s.partner, s.proposedPartner);
       const o = p?.outlets[0];
+      const typeDisplay = typeDisplayByClient.get(s.user.clientId) ?? EMPTY_TYPE_DISPLAY;
       const holder = p?.bankAccountHolder?.trim().toLowerCase();
       const owner = p?.ownerName?.trim().toLowerCase();
 
@@ -5061,7 +5069,10 @@ export class KycService {
         outletName: o?.name ?? p?.businessName ?? '',
         ownerName: p?.ownerName ?? '',
         mobile: p?.phone ?? s.user.phone ?? '',
-        partnerClass: o?.outletType?.name ?? o?.programName ?? '',
+        partnerClass:
+          (o?.outletType ? labelFor(typeDisplay, o.outletType.id, o.outletType.name) : undefined) ??
+          o?.programName ??
+          '',
         gstNumber: p?.gstNumber ?? '',
         panNumber: p?.panNumber ?? '',
         address: [o?.addressLine1, o?.addressLine2].filter(Boolean).join(', '),
@@ -5099,7 +5110,7 @@ export class KycService {
     const submissions = await this.prisma.kycSubmission.findMany({
       where: { status: 'PENDING_GIFSY', ...this.kycTenantFilter(user) },
       include: {
-        user: { select: { name: true, phone: true } },
+        user: { select: { name: true, phone: true, clientId: true } },
         partner: {
           select: {
             businessName: true,
@@ -5127,7 +5138,7 @@ export class KycService {
                 state: true,
                 pincode: true,
                 programName: true,
-                outletType: { select: { name: true } },
+                outletType: { select: { id: true, name: true } },
               },
             },
           },
@@ -5138,12 +5149,16 @@ export class KycService {
       orderBy: { createdAt: 'asc' },
     });
 
+    // Per-tenant outlet-type display labels, scoped to each row's own tenant (Gifsy = cross-tenant).
+    const typeDisplayByClient = await this.loadTypeDisplayByClient(submissions.map((s) => s.user.clientId));
+
     const entries: KycReviewDumpEntry[] = [];
     for (const s of submissions) {
       // Overlay the re-KYC PROPOSED values (stage-at-approval) so the export reflects what's UNDER
       // REVIEW, not the stale live-partner values (a re-KYC only overwrites the partner at approval).
       const p = this.overlayProposedIdentity(s.partner, s.proposedPartner);
       const o = p?.outlets[0];
+      const typeDisplay = typeDisplayByClient.get(s.user.clientId) ?? EMPTY_TYPE_DISPLAY;
       const holder = p?.bankAccountHolder?.trim().toLowerCase();
       const owner = p?.ownerName?.trim().toLowerCase();
       entries.push({
@@ -5152,7 +5167,10 @@ export class KycService {
         outletName: o?.name ?? p?.businessName ?? '',
         ownerName: p?.ownerName ?? '',
         mobile: p?.phone ?? s.user.phone ?? '',
-        outletType: o?.outletType?.name ?? o?.programName ?? '',
+        outletType:
+          (o?.outletType ? labelFor(typeDisplay, o.outletType.id, o.outletType.name) : undefined) ??
+          o?.programName ??
+          '',
         gstNumber: p?.gstNumber ?? '',
         panNumber: p?.panNumber ?? '',
         address: [o?.addressLine1, o?.addressLine2].filter(Boolean).join(', '),
@@ -5301,6 +5319,21 @@ export class KycService {
     });
 
     return generateRejectedKycExcel(rows);
+  }
+
+  /**
+   * Per-tenant outlet-type display maps for a set of (possibly cross-tenant, Gifsy) submissions,
+   * keyed clientId → (outletType.id → displayName). The Gifsy KYC queues span tenants, so each
+   * row must resolve its label against ITS OWN tenant's config. Tenants with no displayName
+   * contribute an empty inner map ⇒ `labelFor` falls back to the original name ⇒ byte-identical.
+   */
+  private async loadTypeDisplayByClient(clientIds: (string | null | undefined)[]): Promise<Map<string, Map<string, string>>> {
+    const distinct = Array.from(new Set(clientIds.filter((c): c is string => !!c)));
+    const byClient = new Map<string, Map<string, string>>();
+    for (const cid of distinct) {
+      byClient.set(cid, await loadOutletTypeDisplayNames(this.prisma, cid));
+    }
+    return byClient;
   }
 
   /** Build the 7-field state map, defaulting any field with no item to PENDING. */

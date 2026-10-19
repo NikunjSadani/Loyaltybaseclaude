@@ -8,6 +8,7 @@ import { buildXlsx } from '../common/xlsx';
 import { istDateKey, istMonthBounds } from '../common/ist-date';
 import { isKycInFlight, isReKycPending } from '../common/kyc-rekyc.helper';
 import { rungIdHeader, rungNameHeader, rungPhoneHeader } from '../common/hierarchy-labels';
+import { loadOutletTypeDisplayNames, labelFor } from '../common/outlet-type-display';
 import { TargetsService } from '../targets/targets.service';
 import { PointsLedgerQueryDto, TargetVsSalesQueryDto, TicketAgingQueryDto, ReportFormat } from './dto/reports.dto';
 import {
@@ -218,9 +219,11 @@ export class ReportsService {
     const headers = outletMasterHeaders(geoEnabled, clientId);
 
     // Per-tenant outlet-type display labels: the "Outlet Type" column shows `displayName ?? name`,
-    // so a tenant that renamed a type (e.g. Bajaj SSS → "Retailer") exports the renamed label and it
-    // round-trips through the upload (which accepts the displayName). No displayName → the global
-    // `name`, byte-identical to before for Deoleo and every un-renamed type.
+    // so a tenant that renamed a type (e.g. Bajaj SSS → "Retailer") exports the renamed label. The
+    // exported value round-trips through the upload, which accepts the code, the global `name`, AND
+    // the displayName: for a renamed type the upload accepts the displayName; for a type with no
+    // displayName but name ≠ code (e.g. SUB_STOCKIST / "Sub-Stockist") the exported `name` is now
+    // accepted too. Deoleo / un-renamed types are byte-identical to before.
     const typeConfigs = await this.prisma.outletTypeClientConfig.findMany({
       where: { clientId, displayName: { not: null } },
       select: { displayName: true, outletType: { select: { code: true } } },
@@ -613,7 +616,7 @@ export class ReportsService {
       select: {
         id: true,
         name: true,
-        outletType: { select: { name: true } },
+        outletType: { select: { id: true, name: true } },
         partner: {
           select: {
             wallets: {
@@ -629,6 +632,9 @@ export class ReportsService {
         },
       },
     });
+
+    // Per-tenant outlet-type display labels (displayName ?? name). Empty for Deoleo ⇒ byte-identical.
+    const typeDisplayById = await loadOutletTypeDisplayNames(this.prisma, user.clientId);
 
     const rows: PointsLedgerReportRow[] = outlets
       .filter((o) => (o.partner?.wallets?.length ?? 0) > 0)
@@ -648,7 +654,11 @@ export class ReportsService {
         }, 0);
 
         return aggregateLedgerToRow(
-          { outletId: o.id, outletName: o.name, outletType: o.outletType?.name },
+          {
+            outletId: o.id,
+            outletName: o.name,
+            outletType: o.outletType ? labelFor(typeDisplayById, o.outletType.id, o.outletType.name) : undefined,
+          },
           openingBalance,
           inPeriod.map((e) => ({
             type: e.transactionType,

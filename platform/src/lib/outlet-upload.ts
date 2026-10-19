@@ -269,11 +269,19 @@ function canonicalValue(value: string, list: string[]): string | undefined {
 export interface OutletTypeOption {
   code:  string;
   label: string;
+  /** The outlet type's GLOBAL `name` (OutletType.name). Optional — a bare-string option has none.
+   *  It is NOT displayed anywhere (display stays `label` = `displayName ?? code`); it is only an
+   *  additional ACCEPTED alias on upload, so the value the "Download Outlet Master" export emits
+   *  (`displayName ?? name`) round-trips back in for a type where name ≠ code and no displayName. */
+  name?: string;
 }
 
-/** Normalize a code string OR a {code,label} option to a {code,label} pair (string ⇒ label===code). */
+/** Normalize a code string OR a {code,label,name?} option to the full shape (string ⇒ label===code,
+ *  no name). `name` is carried through when present so it can be accepted as an upload alias. */
 function normOutletType(t: string | OutletTypeOption): OutletTypeOption {
-  return typeof t === 'string' ? { code: t, label: t } : { code: t.code, label: t.label || t.code };
+  return typeof t === 'string'
+    ? { code: t, label: t }
+    : { code: t.code, label: t.label || t.code, name: t.name };
 }
 
 // ─── Outlet Addition Validation ───────────────────────────────────────────────
@@ -316,15 +324,21 @@ export function validateOutletUpload(
   // Outlet types come from the tenant's enabled OutletTypeClientConfig (passed in by the
   // page from GET /admin/outlets) — NOT a hardcoded list — so FE validation matches what
   // the backend upsert will actually accept. Empty ⇒ none enabled for this tenant.
-  // A row's "Outlet Type" cell is accepted when it matches EITHER the stored code OR the
-  // per-tenant display label (case-insensitive) — so Bajaj's "SSS" accepts both "SSS" and
-  // "Retailer"; Deoleo (label===code) accepts exactly the code, as today. The hint + rejection
-  // message list the LABELS (what the template instructs users to type).
+  // A row's "Outlet Type" cell is accepted when it matches the stored code, the per-tenant display
+  // label, OR the global `name` (all case-insensitive) — so Bajaj's "SSS" accepts "SSS", "Retailer",
+  // and the global name; Deoleo (label===code) accepts the code and (for a type where name ≠ code)
+  // the name too. The global-name alias closes the export→re-upload round-trip (the "Download Outlet
+  // Master" export emits `displayName ?? name`). The hint + rejection message still list only the
+  // LABELS (what the template instructs users to type).
   const typeOpts = validOutletTypes.map(normOutletType);
   const validTypeSet = new Set<string>();
   for (const t of typeOpts) {
     validTypeSet.add(t.code.trim().toUpperCase());
     if (t.label) validTypeSet.add(t.label.trim().toUpperCase());
+    // Also accept the global `name` (when present) — mirrors the backend upsert's typeIdByCode map
+    // and closes the export→re-upload round-trip (the export emits `displayName ?? name`). Not
+    // displayed anywhere; the hint/rejection message still lists only the LABELS.
+    if (t.name) validTypeSet.add(t.name.trim().toUpperCase());
   }
   const typeHint = typeOpts.length
     ? `must be one of: ${typeOpts.map(t => t.label).join(', ')}`

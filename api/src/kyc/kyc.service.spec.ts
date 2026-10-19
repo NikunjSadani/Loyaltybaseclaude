@@ -78,6 +78,10 @@ const mockPrisma = {
   kycDocument: { create: jest.fn(), findUnique: jest.fn() },
   otpCode: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn(), deleteMany: jest.fn() },
   outlet: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+  // reviewQueue/reviewDump resolve each row's per-tenant outlet-type displayName (scoped to the
+  // submission's own tenant). Default [] (set in beforeEach after the reset loop) → empty map →
+  // the original outletType.name passes through (Deoleo parity).
+  outletTypeClientConfig: { findMany: jest.fn().mockResolvedValue([]) },
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   // assertCanViewSubmission's reassignment-aware allow-path looks up the outlet's
   // CURRENT active assignment (unassignedAt null) to a salesUser in the caller's subtree.
@@ -236,6 +240,9 @@ describe('KycService', () => {
     mockPrisma.outlet.findMany.mockResolvedValue([]);
     mockPrisma.payoutTransaction.findMany.mockResolvedValue([]);
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+    // Default: no per-tenant outlet-type displayName (reviewQueue/reviewDump) → empty map →
+    // outletType.name passes through. Rename tests override per case.
+    mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         KycService,
@@ -5042,6 +5049,60 @@ describe('KycService', () => {
       // PAYMENT is APPROVED (from verificationItems)
       expect(entry.fields['PAYMENT'].decision).toBe('APPROVED');
       expect(entry.fields['PAYMENT'].source).toBe('PORTAL');
+    });
+
+    it('partnerClass shows the tenant displayName for a renamed outlet type (scoped to the row tenant)', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
+        {
+          id: 'SUB-Q-RN',
+          boardPhotoLat: null,
+          boardPhotoLng: null,
+          user: { name: 'Owner A', phone: '9820100001', clientId: 'bajaj' },
+          partner: {
+            businessName: 'Kumar Store', ownerName: 'Kumar', phone: '9820100001',
+            gstNumber: '', panNumber: '', bankName: null, bankAccountNumber: null,
+            bankAccountHolder: null, ifscCode: null, upiId: null, paymentMode: 'bank',
+            outlets: [
+              { outletCode: 'OUT-Q-RN', name: 'Kumar Store', addressLine1: 'x', addressLine2: null,
+                city: 'M', state: 'MH', pincode: '400058', programName: 'Gold',
+                outletType: { id: 'ot_sss', name: 'SSS' } },
+            ],
+          },
+          verificationItems: [],
+        },
+      ]);
+      // Bajaj renamed OutletType ot_sss → "Retailer".
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletTypeId: 'ot_sss', displayName: 'Retailer' },
+      ]);
+
+      const result = await service.reviewQueue(gifsy);
+      expect(result.entries[0].partnerClass).toBe('Retailer');
+      // The per-tenant config is looked up for the SUBMISSION's own tenant (not the GIFSY caller).
+      expect(mockPrisma.outletTypeClientConfig.findMany.mock.calls[0][0].where).toMatchObject({ clientId: 'bajaj' });
+    });
+
+    it('partnerClass falls back to outletType.name when the tenant set no displayName (Deoleo parity)', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
+        {
+          id: 'SUB-Q-FB', boardPhotoLat: null, boardPhotoLng: null,
+          user: { name: 'Owner A', phone: '9820100001', clientId: 'deoleo' },
+          partner: {
+            businessName: 'S', ownerName: 'S', phone: '9820100001',
+            gstNumber: '', panNumber: '', bankName: null, bankAccountNumber: null,
+            bankAccountHolder: null, ifscCode: null, upiId: null, paymentMode: 'bank',
+            outlets: [
+              { outletCode: 'OUT-Q-FB', name: 'S', addressLine1: 'x', addressLine2: null,
+                city: 'M', state: 'MH', pincode: '400058', programName: 'Gold',
+                outletType: { id: 'ot_sss', name: 'SSS' } },
+            ],
+          },
+          verificationItems: [],
+        },
+      ]);
+      // Default empty config (beforeEach) ⇒ original name.
+      const result = await service.reviewQueue(gifsy);
+      expect(result.entries[0].partnerClass).toBe('SSS');
     });
 
     it('re-KYC: OVERLAYS the staged proposedPartner values over the stale live partner', async () => {

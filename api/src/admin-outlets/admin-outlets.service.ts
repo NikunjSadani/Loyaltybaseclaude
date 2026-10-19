@@ -725,16 +725,20 @@ export class AdminOutletsService {
 
     // The tenant's enabled outlet types — the FE validates uploads against THESE (not a hardcoded
     // list) so it never green-lights a type the upsert will reject as "Unknown outlet type". Each
-    // entry carries the stored `code` (the identifier) AND the `label` (displayName ?? code) shown
-    // in the template + list UI and accepted as an upload alias. Empty ⇒ no types enabled for this
-    // tenant: outlets cannot be added until an operator enables outlet types (the false-success
-    // this used to hide). A tenant with no displayName (e.g. Deoleo) ⇒ label === code everywhere.
+    // entry carries the stored `code` (the identifier), the `label` (displayName ?? code) shown
+    // in the template + list UI, AND the global `name` — the upload accepts ANY of {code, name,
+    // label} as an alias (case-insensitive), which closes the export→re-upload round-trip: the
+    // "Download Outlet Master" export emits `displayName ?? name`, so for a type where name ≠ code
+    // and no displayName is set, the exported value is the global `name` and must be accepted back.
+    // Empty ⇒ no types enabled for this tenant: outlets cannot be added until an operator enables
+    // outlet types (the false-success this used to hide). A tenant with no displayName (e.g. Deoleo)
+    // ⇒ label === code; `name` is still carried so a renamed global type round-trips.
     const typeConfigs = await this.prisma.outletTypeClientConfig.findMany({
       where: { clientId: user.clientId, isEnabled: true, outletType: { isActive: true } },
-      select: { displayName: true, outletType: { select: { code: true } } },
+      select: { displayName: true, outletType: { select: { code: true, name: true } } },
     });
     const outletTypes = typeConfigs
-      .map((c) => ({ code: c.outletType.code, label: c.displayName?.trim() || c.outletType.code }))
+      .map((c) => ({ code: c.outletType.code, label: c.displayName?.trim() || c.outletType.code, name: c.outletType.name }))
       .sort((a, b) => a.label.localeCompare(b.label));
 
     return {
@@ -831,17 +835,25 @@ export class AdminOutletsService {
     // global catalog; per-tenant enablement lives on OutletTypeClientConfig.
     const typeConfigs = await this.prisma.outletTypeClientConfig.findMany({
       where: { clientId, isEnabled: true },
-      select: { displayName: true, outletType: { select: { id: true, code: true, isActive: true } } },
+      select: { displayName: true, outletType: { select: { id: true, code: true, name: true, isActive: true } } },
     });
-    // Resolve an upload row's "Outlet Type" value by EITHER the stored code OR the per-tenant
-    // displayName alias (both case-insensitive, trimmed). Index codes FIRST so an exact code match
-    // always wins on collision (a displayName that equals another type's code never overrides it);
-    // the displayName pass then only fills aliases that don't already clash with a code. The stored
-    // identifier remains the OutletType id (resolved below), exactly as before. A tenant with no
-    // displayName (e.g. Deoleo) adds no aliases ⇒ byte-identical to the old code-only map.
+    // Resolve an upload row's "Outlet Type" value by the stored code, the global `name`, OR the
+    // per-tenant displayName alias (all case-insensitive, trimmed). Index codes FIRST so an exact
+    // code match always wins on collision (a name/displayName that equals another type's code never
+    // overrides it); the `name` pass then fills aliases that don't clash with a code, and the
+    // displayName pass fills whatever remains. The global `name` alias closes the export→re-upload
+    // round-trip: "Download Outlet Master" emits `displayName ?? name`, so a type with name ≠ code
+    // and no displayName exports its `name`, which the upload previously rejected. The stored
+    // identifier remains the OutletType id. A tenant with no displayName and name === code adds no
+    // extra aliases ⇒ byte-identical to the old code-only map.
     const typeIdByCode = new Map<string, string>();
     for (const c of typeConfigs) {
       if (c.outletType.isActive) typeIdByCode.set(c.outletType.code.toUpperCase(), c.outletType.id);
+    }
+    for (const c of typeConfigs) {
+      if (!c.outletType.isActive) continue;
+      const nameAlias = c.outletType.name?.trim().toUpperCase();
+      if (nameAlias && !typeIdByCode.has(nameAlias)) typeIdByCode.set(nameAlias, c.outletType.id);
     }
     for (const c of typeConfigs) {
       if (!c.outletType.isActive) continue;

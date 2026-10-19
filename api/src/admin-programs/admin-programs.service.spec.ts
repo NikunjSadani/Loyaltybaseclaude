@@ -31,6 +31,9 @@ const mockPrisma = {
   ticket: { findMany: jest.fn() },
   kpiDef: { findMany: jest.fn() },
   auditLog: { create: jest.fn() },
+  // pointsLedger loads the tenant's per-outlet-type displayName (displayName ?? name).
+  // Default [] (re-applied in beforeEach) → empty map → outletType.name passes through.
+  outletTypeClientConfig: { findMany: jest.fn() },
 };
 
 // TargetsService mock — ReportsService.targetVsSales delegates the target↔actual
@@ -70,6 +73,7 @@ beforeEach(() => {
   mockTenant.resolveVisibilityCaptureMode.mockResolvedValue('AMOUNT_UPLOAD');
   mockTenant.resolveVisibilityEnabled.mockResolvedValue(true);
   mockTargets.getPace.mockResolvedValue({ month: '', outlets: [] });
+  mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
 });
 
 describe('ChannelPartnersService', () => {
