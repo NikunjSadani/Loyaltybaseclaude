@@ -30,6 +30,7 @@ import type {
   VisibilityCaptureStatus,
   VisibilityConfig,
   VisibilityFormSchema,
+  VisibilityPhotoDecision,
   VisibilityRejectReasonCode,
   VisibilityReport,
 } from '@/lib/visibility-types';
@@ -100,6 +101,18 @@ export interface AdminListCapturesQuery {
 /** POST /captures/:id/reject — controlled reason code + optional detail. */
 export interface RejectCaptureInput {
   reasonCode: VisibilityRejectReasonCode;
+  reason?: string;
+}
+
+/**
+ * POST /captures/:id/photo-review — a per-photo (per CAMERA field) review decision.
+ * A REJECTED decision carries a controlled reason code + optional detail; the backend
+ * recomputes the derived capture status after each decision.
+ */
+export interface PhotoReviewInput {
+  fieldId: string;
+  decision: VisibilityPhotoDecision;
+  reasonCode?: VisibilityRejectReasonCode;
   reason?: string;
 }
 
@@ -232,6 +245,17 @@ export const visibilityApi = {
   rejectCapture(captureId: string, input: RejectCaptureInput) {
     return api.post<{ capture: VisibilityCapture }>(
       `${BASE}/captures/${captureId}/reject`,
+      input,
+    );
+  },
+  /**
+   * Per-photo (per CAMERA field) review decision — approve/reject ONE photo. The backend
+   * sets `photoReviews[fieldId]`, recomputes the derived capture status (any required photo
+   * REJECTED → CHANGES_REQUESTED; all required APPROVED → APPROVED), and returns the row.
+   */
+  reviewPhoto(captureId: string, input: PhotoReviewInput) {
+    return api.post<{ capture: VisibilityCapture }>(
+      `${BASE}/captures/${captureId}/photo-review`,
       input,
     );
   },

@@ -190,19 +190,40 @@ export interface VisibilityConfig {
 // Capture record + status + window-derived UI state
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** VisibilityCapture status enum (mirrors the Prisma enum). */
-export const VISIBILITY_CAPTURE_STATUSES = ['SUBMITTED', 'APPROVED', 'REJECTED'] as const;
+/**
+ * VisibilityCapture status enum (mirrors the Prisma enum).
+ * `CHANGES_REQUESTED` (additive, per-photo-approval build) — some photos were REJECTED in
+ * review, the window is NOT satisfied, and the rep must re-capture ONLY the flagged photos
+ * (approved photos carry forward). `REJECTED` remains the whole-capture reject (re-shoot
+ * everything) for back-compat.
+ */
+export const VISIBILITY_CAPTURE_STATUSES = [
+  'SUBMITTED',
+  'APPROVED',
+  'REJECTED',
+  'CHANGES_REQUESTED',
+] as const;
 export type VisibilityCaptureStatus = (typeof VISIBILITY_CAPTURE_STATUSES)[number];
 
 /**
  * The per-outlet/per-window UI state derived by the backend (D7):
- *   due       — no capture yet, window open
- *   awaiting  — SUBMITTED, awaiting review
- *   approved  — APPROVED (window satisfied)
- *   rejected  — REJECTED, re-opens the window
- *   late      — window closed with no approval (missed / late)
+ *   due               — no capture yet, window open
+ *   awaiting          — SUBMITTED, awaiting review
+ *   approved          — APPROVED (window satisfied)
+ *   rejected          — REJECTED (whole capture), re-opens the window (re-shoot all)
+ *   changes_requested — CHANGES_REQUESTED (per-photo), re-opens the window (re-shoot the
+ *                       flagged photos only). The backend may instead reuse `rejected`
+ *                       here while setting the capture `status` to CHANGES_REQUESTED — the
+ *                       FE derives the distinct label from either (see `isChangesRequested`).
+ *   late              — window closed with no approval (missed / late)
  */
-export type CaptureUiState = 'due' | 'awaiting' | 'approved' | 'rejected' | 'late';
+export type CaptureUiState =
+  | 'due'
+  | 'awaiting'
+  | 'approved'
+  | 'rejected'
+  | 'changes_requested'
+  | 'late';
 
 /** Controlled reject-reason codes (D12) — mirrors VISIBILITY_REJECT_REASON_CODES. */
 export const VISIBILITY_REJECT_REASON_CODES = [
@@ -224,6 +245,64 @@ export const VISIBILITY_REJECT_REASON_LABELS: Record<VisibilityRejectReasonCode,
   DUPLICATE_PHOTO: 'Duplicate photo',
   OTHER: 'Other',
 };
+
+/** Short human label for a capture status (sales + admin surfaces). */
+export const VISIBILITY_CAPTURE_STATUS_LABELS: Record<VisibilityCaptureStatus, string> = {
+  SUBMITTED: 'Submitted',
+  APPROVED: 'Approved',
+  REJECTED: 'Rejected',
+  CHANGES_REQUESTED: 'Changes requested',
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-photo review (per CAMERA field) — the per-photo-approval build
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A single photo (CAMERA field) review decision, as stored in
+ * `VisibilityCapture.photoReviews[fieldId]` (keyed by CAMERA field id). A field ABSENT
+ * from the map = not yet reviewed (pending). Mirrors the backend review shape.
+ */
+export interface VisibilityPhotoReview {
+  status: 'APPROVED' | 'REJECTED';
+  reasonCode?: VisibilityRejectReasonCode | string;
+  reason?: string;
+  reviewedAt: string;
+  reviewedByUserId: string;
+}
+
+/** Per-CAMERA-field review state, keyed by field id. */
+export type VisibilityPhotoReviews = Record<string, VisibilityPhotoReview>;
+
+/** The per-photo review decision for the per-photo endpoint. */
+export type VisibilityPhotoDecision = 'APPROVED' | 'REJECTED';
+
+/** True when any photo in the review map is REJECTED (→ whole-capture approve blocked). */
+export function hasRejectedPhoto(reviews?: VisibilityPhotoReviews | null): boolean {
+  if (!reviews) return false;
+  return Object.values(reviews).some((r) => r?.status === 'REJECTED');
+}
+
+/** The CAMERA field ids the reviewer REJECTED (the rep re-captures only these). */
+export function rejectedPhotoFieldIds(reviews?: VisibilityPhotoReviews | null): string[] {
+  if (!reviews) return [];
+  return Object.entries(reviews)
+    .filter(([, r]) => r?.status === 'REJECTED')
+    .map(([id]) => id);
+}
+
+/**
+ * Whether a capture row is in the per-photo "changes requested" state (some photos
+ * flagged for re-capture). Robust to EITHER backend mapping: the authoritative signal is
+ * the capture `status === 'CHANGES_REQUESTED'`; we also honour a `windowState`/`state` of
+ * `'changes_requested'` if the backend surfaces it that way.
+ */
+export function isChangesRequested(o: {
+  status?: VisibilityCaptureStatus | null;
+  windowState?: CaptureUiState | null;
+}): boolean {
+  return o.status === 'CHANGES_REQUESTED' || o.windowState === 'changes_requested';
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sales discovery — GET /sales/eligible
@@ -249,6 +328,12 @@ export interface SalesEligibleOutlet {
   status: VisibilityCaptureStatus | null;
   currentVersion: number | null;
   rejectionReason: string | null;
+  /**
+   * Per-CAMERA-field review state of the current capture — present (from the backend) for a
+   * CHANGES_REQUESTED row so the rep can see which photos were flagged (REJECTED, with
+   * reasons) vs carried forward (APPROVED). Absent for a fresh / whole-capture-rejected row.
+   */
+  photoReviews?: VisibilityPhotoReviews | null;
   /** Window-derived UI state (D7). */
   windowState: CaptureUiState;
   /** Whether THIS rep may capture (allowed level AND in-subtree). */
@@ -270,8 +355,15 @@ export function isResubmitCapture(
   outlet: Pick<SalesEligibleOutlet, 'status' | 'captureId' | 'windowState'>,
 ): boolean {
   if (!outlet.captureId) return false;
-  if (outlet.status != null) return outlet.status === 'REJECTED';
-  return outlet.windowState === 'rejected' || outlet.windowState === 'late';
+  // CHANGES_REQUESTED (per-photo re-capture) routes through resubmit exactly like REJECTED.
+  if (outlet.status != null) {
+    return outlet.status === 'REJECTED' || outlet.status === 'CHANGES_REQUESTED';
+  }
+  return (
+    outlet.windowState === 'rejected' ||
+    outlet.windowState === 'changes_requested' ||
+    outlet.windowState === 'late'
+  );
 }
 
 /** GET /sales/eligible response — the current window + its in-scope outlets. */
@@ -293,6 +385,8 @@ export interface OutletStatusWindow {
   status: VisibilityCaptureStatus | null;
   currentVersion: number | null;
   rejectionReason: string | null;
+  /** Per-CAMERA-field review state of this window's capture (present for CHANGES_REQUESTED). */
+  photoReviews?: VisibilityPhotoReviews | null;
   state: CaptureUiState;
 }
 
@@ -334,6 +428,8 @@ export interface VisibilityCapture {
   approvedByUserId?: string | null;
   rejectionReasonCode?: VisibilityRejectReasonCode | string | null;
   rejectionReason?: string | null;
+  /** Per-CAMERA-field review state (per-photo approval). Absent on legacy rows (= all pending). */
+  photoReviews?: VisibilityPhotoReviews | null;
   capturedAt?: string | null;
   receivedAt?: string | null;
   createdAt?: string;
@@ -405,6 +501,8 @@ export interface VisibilityMediaRef {
   geo?: GpsCapture;
   /** Per-photo fence status vs the outlet reference geo — set only for fence-required photos. */
   fenceStatus?: PhotoFenceStatus;
+  /** This photo's review decision (per-photo approval); absent = not yet reviewed (pending). */
+  review?: VisibilityPhotoReview | null;
 }
 
 /** A geo ref (a GPS_POINT field's captured value) in a capture detail. */
@@ -431,6 +529,8 @@ export interface VisibilityCaptureSubmission {
   distanceMeters: number | null;
   geoFenceOk: boolean | null;
   submittedBySalesUserId?: string | null;
+  /** Snapshot of the per-CAMERA-field review state at this version (history/trace). */
+  photoReviews?: VisibilityPhotoReviews | null;
   createdAt: string;
 }
 

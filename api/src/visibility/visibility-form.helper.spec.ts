@@ -20,6 +20,11 @@ import {
   OUTLET_CONTEXT_FIELD_IDS,
   VisibilityFormSchema,
   FormField,
+  requiredCameraFieldIds,
+  presentCameraFieldIds,
+  gatingCameraFieldIds,
+  deriveCaptureStatus,
+  PhotoReviews,
 } from './visibility-form.helper';
 
 const cameraField = (over: Partial<FormField> = {}): FormField => ({
@@ -353,5 +358,96 @@ describe('validateSubmittedValues', () => {
     expect(evaluateVisibleWhen(reason, { cond: 'Good' })).toBe(false);
     expect(evaluateVisibleWhen(reason, { cond: 'Damaged' })).toBe(true);
     expect(isFieldRequired(reason, { cond: 'Damaged' })).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-photo review — CAMERA sets + derived status (VISIBILITY-PER-PHOTO-APPROVAL)
+// ─────────────────────────────────────────────────────────────────────────────
+describe('per-photo review helpers', () => {
+  const twoRequired: VisibilityFormSchema = {
+    captureGpsOnSubmit: false,
+    fields: [
+      { id: 'front', type: 'CAMERA', label: 'Front', required: true, order: 1 },
+      { id: 'shelf', type: 'CAMERA', label: 'Shelf', required: true, order: 2 },
+      { id: 'note', type: 'TEXT', label: 'Note', required: false, order: 3 },
+    ],
+  };
+
+  const vals = { front: 'visibility-media/t1/a.jpg', shelf: 'visibility-media/t1/b.jpg' };
+
+  it('requiredCameraFieldIds returns the required, visible CAMERA fields only', () => {
+    expect(requiredCameraFieldIds(twoRequired, vals).sort()).toEqual(['front', 'shelf']);
+  });
+
+  it('presentCameraFieldIds returns CAMERA fields that hold a submitted photo', () => {
+    expect(presentCameraFieldIds(twoRequired, { front: 'visibility-media/t1/a.jpg' })).toEqual(['front']);
+  });
+
+  it('a conditionally-required CAMERA field only gates when its clause is active (outlet context)', () => {
+    const condForm: VisibilityFormSchema = {
+      captureGpsOnSubmit: false,
+      fields: [
+        { id: 'p1', type: 'CAMERA', label: 'P1', required: true, order: 1 },
+        {
+          id: 'p2',
+          type: 'CAMERA',
+          label: 'P2',
+          required: false,
+          order: 2,
+          requiredWhen: { fieldId: '__subProgram__', op: 'eq', value: 'X' },
+          visibleWhen: { fieldId: '__subProgram__', op: 'eq', value: 'X' },
+        },
+      ],
+    };
+    // Outlet not in sub-program X → only p1 gates.
+    expect(requiredCameraFieldIds(condForm, { p1: 'k', __subProgram__: 'Y' })).toEqual(['p1']);
+    // Outlet in sub-program X → both gate.
+    expect(requiredCameraFieldIds(condForm, { p1: 'k', p2: 'k', __subProgram__: 'X' }).sort()).toEqual(['p1', 'p2']);
+  });
+
+  it('deriveCaptureStatus: all approved → APPROVED', () => {
+    const reviews: PhotoReviews = {
+      front: { status: 'APPROVED', reviewedAt: 'x', reviewedByUserId: 'a' },
+      shelf: { status: 'APPROVED', reviewedAt: 'x', reviewedByUserId: 'a' },
+    };
+    expect(deriveCaptureStatus(['front', 'shelf'], reviews)).toBe('APPROVED');
+  });
+
+  it('deriveCaptureStatus: any rejected → CHANGES_REQUESTED', () => {
+    const reviews: PhotoReviews = {
+      front: { status: 'APPROVED', reviewedAt: 'x', reviewedByUserId: 'a' },
+      shelf: { status: 'REJECTED', reasonCode: 'BLURRY', reviewedAt: 'x', reviewedByUserId: 'a' },
+    };
+    expect(deriveCaptureStatus(['front', 'shelf'], reviews)).toBe('CHANGES_REQUESTED');
+  });
+
+  it('deriveCaptureStatus: some pending, none rejected → SUBMITTED (window not satisfied)', () => {
+    const reviews: PhotoReviews = {
+      front: { status: 'APPROVED', reviewedAt: 'x', reviewedByUserId: 'a' },
+    };
+    expect(deriveCaptureStatus(['front', 'shelf'], reviews)).toBe('SUBMITTED');
+  });
+
+  it('deriveCaptureStatus: an empty gating set never derives APPROVED', () => {
+    expect(deriveCaptureStatus([], {})).toBe('SUBMITTED');
+  });
+
+  it('deriveCaptureStatus: a REJECTED OPTIONAL (non-gating) photo still forces CHANGES_REQUESTED (M1)', () => {
+    // "front" is the only required (gating) field and is approved; "extra" is an optional photo the
+    // reviewer rejected — it is NOT in the gating set but must still block APPROVED.
+    const reviews: PhotoReviews = {
+      front: { status: 'APPROVED', reviewedAt: 'x', reviewedByUserId: 'a' },
+      extra: { status: 'REJECTED', reasonCode: 'BLURRY', reviewedAt: 'x', reviewedByUserId: 'a' },
+    };
+    expect(deriveCaptureStatus(['front'], reviews)).toBe('CHANGES_REQUESTED');
+  });
+
+  it('gatingCameraFieldIds falls back to present photos when no CAMERA field is required', () => {
+    const allOptional: VisibilityFormSchema = {
+      captureGpsOnSubmit: false,
+      fields: [{ id: 'opt', type: 'CAMERA', label: 'Opt', required: false, order: 1 }],
+    };
+    expect(gatingCameraFieldIds(allOptional, { opt: 'visibility-media/t1/o.jpg' })).toEqual(['opt']);
   });
 });

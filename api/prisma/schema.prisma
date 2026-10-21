@@ -328,6 +328,11 @@ enum VisibilityCaptureStatus {
   SUBMITTED
   APPROVED
   REJECTED
+  // Per-photo review (VISIBILITY-PER-PHOTO-APPROVAL): some required photo(s) rejected, the
+  // window is NOT satisfied, the rep must re-capture only the rejected photo(s). Treated
+  // everywhere the old whole-capture REJECTED "re-open" was honored (eligibility/notify/
+  // report/window). REJECTED stays the explicit whole-capture reject for back-compat.
+  CHANGES_REQUESTED
 }
 
 enum TicketStatus {
@@ -1677,6 +1682,10 @@ model VisibilityCapture {
   status                 VisibilityCaptureStatus @default(SUBMITTED)
   // Current submission snapshot (photo keys + geo + fields live inside per field).
   formValues             Json?
+  // Per-CAMERA-field review state (VISIBILITY-PER-PHOTO-APPROVAL), keyed by form field id:
+  // { "<fieldId>": { status: 'APPROVED'|'REJECTED', reasonCode?, reason?, reviewedAt, reviewedByUserId } }.
+  // A field absent from the map = not yet reviewed (pending). Null for legacy / single-unit flows.
+  photoReviews           Json?
   currentVersion         Int                     @default(1)
   // The VisibilityForm version this capture was taken against (D11).
   formVersion            Int
@@ -1727,6 +1736,8 @@ model VisibilityCaptureSubmission {
   version                Int
   status                 VisibilityCaptureStatus
   formValues             Json
+  // Per-version snapshot of the capture's photoReviews (history/trace); null for legacy rows.
+  photoReviews           Json?
   formVersion            Int
   captureLat             Decimal?                @db.Decimal(10, 8)
   captureLng             Decimal?                @db.Decimal(11, 8)

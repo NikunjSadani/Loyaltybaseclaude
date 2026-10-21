@@ -66,10 +66,10 @@ export class AdminListCapturesQueryDto {
   @IsString()
   windowKey?: string;
 
-  /** SUBMITTED | APPROVED | REJECTED. */
+  /** SUBMITTED | APPROVED | REJECTED | CHANGES_REQUESTED. */
   @IsOptional()
-  @IsIn(['SUBMITTED', 'APPROVED', 'REJECTED'])
-  status?: 'SUBMITTED' | 'APPROVED' | 'REJECTED';
+  @IsIn(['SUBMITTED', 'APPROVED', 'REJECTED', 'CHANGES_REQUESTED'])
+  status?: 'SUBMITTED' | 'APPROVED' | 'REJECTED' | 'CHANGES_REQUESTED';
 
   /** Filter by outlet code (exact). */
   @IsOptional()
@@ -88,6 +88,34 @@ export class AdminListCapturesQueryDto {
   @Min(1)
   @Max(200)
   limit?: number = 50;
+}
+
+/**
+ * POST /v1/visibility/captures/:id/photo-review (GIFSY_ADMIN) — approve/reject ONE CAMERA
+ * field. A REJECTED decision requires a controlled reasonCode (same vocabulary as reject-ALL).
+ */
+export class PhotoReviewDto {
+  /** The CAMERA form-field id being reviewed. */
+  @IsString()
+  @MinLength(1)
+  fieldId!: string;
+
+  /** APPROVED or REJECTED for this one photo. */
+  @IsIn(['APPROVED', 'REJECTED'])
+  decision!: 'APPROVED' | 'REJECTED';
+
+  /** Required when decision=REJECTED; must be one of VISIBILITY_REJECT_REASON_CODES. */
+  @IsOptional()
+  @IsString()
+  @IsIn(VISIBILITY_REJECT_REASON_CODES as unknown as string[], {
+    message: `reasonCode must be one of: ${VISIBILITY_REJECT_REASON_CODES.join(', ')}`,
+  })
+  reasonCode?: VisibilityRejectReasonCode;
+
+  /** Optional free-text detail stored alongside the code. */
+  @IsOptional()
+  @IsString()
+  reason?: string;
 }
 
 /** POST /v1/visibility/captures/:id/reject (GIFSY_ADMIN). */

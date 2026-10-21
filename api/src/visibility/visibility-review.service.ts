@@ -10,7 +10,18 @@ import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { VisibilityFormSchema } from './visibility-types';
-import { MEDIA_FIELD_TYPES, readMediaValue, GpsCapture } from './visibility-form.helper';
+import {
+  MEDIA_FIELD_TYPES,
+  readMediaValue,
+  GpsCapture,
+  outletContextValues,
+  readPhotoReviews,
+  gatingCameraFieldIds,
+  presentCameraFieldIds,
+  deriveCaptureStatus,
+  PhotoReview,
+  PhotoReviews,
+} from './visibility-form.helper';
 import { evaluatePhotoFence, PhotoFenceStatus } from './geo-fence.helper';
 import {
   AdminListCapturesQueryDto,
@@ -65,9 +76,129 @@ export class VisibilityReviewService {
     return capture;
   }
 
-  // ── Approve / reject (D12) ────────────────────────────────────────────────────
+  // ── Per-photo + whole-capture review (D12 + VISIBILITY-PER-PHOTO-APPROVAL) ──────
 
-  /** Approve a SUBMITTED/REJECTED capture → APPROVED (satisfies the window, D7). */
+  /**
+   * The capture's form-version schema + the merged values (stored formValues + the
+   * SERVER outlet context used for `requiredWhen`) + the raw formValues. The outlet context
+   * is server-authoritative (never from the client), so the required-photo gating cannot be
+   * spoofed. Both schema/outlet are null-safe.
+   */
+  private async resolveReviewContext(capture: {
+    clientId: string;
+    outletId: string;
+    formVersion: number;
+    formValues: Prisma.JsonValue | null;
+  }): Promise<{
+    schema: VisibilityFormSchema | null;
+    merged: Record<string, unknown>;
+    formValues: Record<string, unknown>;
+  }> {
+    const schema = await this.resolveFormSnapshot(capture.clientId, capture.formVersion);
+    const outlet = await this.prisma.outlet.findFirst({
+      where: { id: capture.outletId, clientId: capture.clientId },
+      select: { programCategory: true },
+    });
+    const formValues =
+      capture.formValues && typeof capture.formValues === 'object' && !Array.isArray(capture.formValues)
+        ? (capture.formValues as Record<string, unknown>)
+        : {};
+    const merged = { ...formValues, ...outletContextValues(outlet ?? {}) };
+    return { schema, merged, formValues };
+  }
+
+  /**
+   * Persist a review decision: update the live capture row AND mirror the review map onto
+   * the CURRENT version's immutable submission snapshot (an additive annotation — the
+   * evidence `formValues`/media keys are never touched), so each version retains its review
+   * trace. One transaction.
+   */
+  private async persistReview(
+    capture: { id: string; currentVersion: number },
+    data: Prisma.VisibilityCaptureUncheckedUpdateInput,
+  ) {
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.visibilityCapture.update({ where: { id: capture.id }, data });
+      await tx.visibilityCaptureSubmission.updateMany({
+        where: { captureId: capture.id, version: capture.currentVersion },
+        data: { photoReviews: data.photoReviews ?? Prisma.JsonNull },
+      });
+      return updated;
+    });
+  }
+
+  /**
+   * Review ONE photo (CAMERA field) individually: set its review and recompute + persist the
+   * server-authoritative DERIVED capture status (all required photos APPROVED → APPROVED;
+   * any REJECTED → CHANGES_REQUESTED; else SUBMITTED). GIFSY-gated. `fieldId` must be a
+   * CAMERA field of the capture's form version that currently holds a submitted photo; a
+   * REJECTED decision needs a controlled reasonCode.
+   */
+  async reviewPhoto(
+    user: JwtPayload,
+    captureId: string,
+    fieldId: string,
+    decision: PhotoReview['status'],
+    reasonCode?: string,
+    reason?: string,
+  ) {
+    this.assertGifsy(user);
+    if (decision !== 'APPROVED' && decision !== 'REJECTED') {
+      throw new BadRequestException('decision must be APPROVED or REJECTED.');
+    }
+    const capture = await this.loadCapture(user, captureId);
+    await this.assertEnabled(capture.clientId);
+    if (capture.status === 'APPROVED') {
+      throw new BadRequestException('This capture is already approved.');
+    }
+    if (decision === 'REJECTED' && !(VISIBILITY_REJECT_REASONS as readonly string[]).includes(reasonCode ?? '')) {
+      throw new BadRequestException(
+        `reasonCode must be one of: ${VISIBILITY_REJECT_REASONS.join(', ')}`,
+      );
+    }
+
+    const { schema, merged, formValues } = await this.resolveReviewContext(capture);
+    const field = (schema?.fields ?? []).find((f) => f.id === fieldId && f.type === 'CAMERA');
+    if (!field) {
+      throw new BadRequestException(`"${fieldId}" is not a CAMERA field of this capture's form.`);
+    }
+    if (!readMediaValue(formValues[fieldId]).key) {
+      throw new BadRequestException(`Field "${field.label}" has no submitted photo to review.`);
+    }
+
+    const now = new Date();
+    const review: PhotoReview =
+      decision === 'APPROVED'
+        ? { status: 'APPROVED', reviewedAt: now.toISOString(), reviewedByUserId: user.sub }
+        : {
+            status: 'REJECTED',
+            reasonCode: reasonCode,
+            ...(reason ? { reason } : {}),
+            reviewedAt: now.toISOString(),
+            reviewedByUserId: user.sub,
+          };
+    const next: PhotoReviews = { ...readPhotoReviews(capture.photoReviews), [fieldId]: review };
+    const derived = deriveCaptureStatus(gatingCameraFieldIds(schema, merged), next);
+
+    const data: Prisma.VisibilityCaptureUncheckedUpdateInput = {
+      status: derived,
+      photoReviews: next as unknown as Prisma.InputJsonValue,
+      reviewedAt: now,
+      // Whole-capture rejection columns are reserved for reject-ALL; per-photo reasons live
+      // inside photoReviews. Only stamp the final approver when the capture is fully APPROVED.
+      rejectionReason: null,
+      rejectionReasonCode: null,
+      ...(derived === 'APPROVED' ? { approvedByUserId: user.sub } : {}),
+    };
+    const updated = await this.persistReview(capture, data);
+    return { capture: updated };
+  }
+
+  /**
+   * Approve-ALL (D12): approve every submitted photo and set the capture APPROVED (satisfies
+   * the window, D7). REFUSED while any present photo is REJECTED (it must be re-captured
+   * first). For a single-photo capture this is byte-identical to the pre-per-photo approve.
+   */
   async approve(user: JwtPayload, captureId: string) {
     this.assertGifsy(user);
     const capture = await this.loadCapture(user, captureId);
@@ -76,22 +207,45 @@ export class VisibilityReviewService {
       throw new BadRequestException('This capture is already approved.');
     }
 
-    const updated = await this.prisma.visibilityCapture.update({
-      where: { id: capture.id },
-      data: {
-        status: 'APPROVED',
-        approvedByUserId: user.sub,
-        reviewedAt: new Date(),
-        rejectionReason: null,
-        rejectionReasonCode: null,
-      },
+    const { schema, merged } = await this.resolveReviewContext(capture);
+    const present = presentCameraFieldIds(schema, merged);
+    const reviews = readPhotoReviews(capture.photoReviews);
+    if (present.some((id) => reviews[id]?.status === 'REJECTED')) {
+      throw new BadRequestException(
+        'A photo is rejected and must be re-captured before the capture can be approved.',
+      );
+    }
+
+    const now = new Date();
+    const next: PhotoReviews = { ...reviews };
+    for (const id of present) {
+      next[id] = { status: 'APPROVED', reviewedAt: now.toISOString(), reviewedByUserId: user.sub };
+    }
+
+    // Derive the final status (don't force APPROVED): if a photo that is REQUIRED for this outlet
+    // now (e.g. a `requiredWhen __subProgram__` photo made required by a post-submit sub-program
+    // change) was never captured, it isn't in `present` → not approved → the capture stays SUBMITTED
+    // instead of satisfying the window without it. For a complete capture this derives APPROVED, so
+    // a single-photo / fully-present capture behaves exactly as the old approve-ALL.
+    const derived = deriveCaptureStatus(gatingCameraFieldIds(schema, merged), next);
+    const updated = await this.persistReview(capture, {
+      status: derived,
+      reviewedAt: now,
+      rejectionReason: null,
+      rejectionReasonCode: null,
+      ...(derived === 'APPROVED' ? { approvedByUserId: user.sub } : {}),
+      photoReviews: Object.keys(next).length
+        ? (next as unknown as Prisma.InputJsonValue)
+        : Prisma.JsonNull,
     });
     return { capture: updated };
   }
 
   /**
-   * Reject a capture with a controlled reason code (+ optional free text). Re-opens the
-   * window (REJECTED) so the rep resubmits a new version (D11).
+   * Reject-ALL (D12): reject every submitted photo with a controlled reason code (+ optional
+   * free text) and set the capture REJECTED — the explicit whole-capture reject that re-opens
+   * the window so the rep resubmits a new version (D11). For a single-photo capture this is
+   * byte-identical to the pre-per-photo reject.
    */
   async reject(user: JwtPayload, captureId: string, reasonCode: string, reason?: string) {
     this.assertGifsy(user);
@@ -106,15 +260,29 @@ export class VisibilityReviewService {
       throw new BadRequestException('An approved capture cannot be rejected.');
     }
 
-    const updated = await this.prisma.visibilityCapture.update({
-      where: { id: capture.id },
-      data: {
+    const { schema, merged } = await this.resolveReviewContext(capture);
+    const present = presentCameraFieldIds(schema, merged);
+    const now = new Date();
+    const next: PhotoReviews = { ...readPhotoReviews(capture.photoReviews) };
+    for (const id of present) {
+      next[id] = {
         status: 'REJECTED',
-        rejectionReasonCode: reasonCode,
-        rejectionReason: reason ?? null,
-        approvedByUserId: user.sub,
-        reviewedAt: new Date(),
-      },
+        reasonCode,
+        ...(reason ? { reason } : {}),
+        reviewedAt: now.toISOString(),
+        reviewedByUserId: user.sub,
+      };
+    }
+
+    const updated = await this.persistReview(capture, {
+      status: 'REJECTED',
+      rejectionReasonCode: reasonCode,
+      rejectionReason: reason ?? null,
+      approvedByUserId: user.sub,
+      reviewedAt: now,
+      photoReviews: Object.keys(next).length
+        ? (next as unknown as Prisma.InputJsonValue)
+        : Prisma.JsonNull,
     });
     return { capture: updated };
   }
@@ -150,6 +318,8 @@ export class VisibilityReviewService {
           capturedAt: true,
           receivedAt: true,
           rejectionReasonCode: true,
+          // Per-photo review map so the queue can badge partial/changes-requested captures.
+          photoReviews: true,
           submittedBy: { select: { id: true, employeeCode: true } },
         },
         orderBy: { receivedAt: 'desc' },
@@ -191,7 +361,15 @@ export class VisibilityReviewService {
     // unverifiable status vs that reference. Both are null/default-safe.
     const config = (await this.tenantSettings.getEffectiveSettings(capture.clientId)).visibilityConfig;
     const referenceGeo = await this.outletReferenceGeo(capture.clientId, capture.outletId);
-    const media = this.extractMedia(capture.formValues, schema, referenceGeo, config.geoFence.radiusMeters);
+    // Per-photo review state (VISIBILITY-PER-PHOTO-APPROVAL) — attach each CAMERA field's
+    // review (APPROVED/REJECTED/null=pending) so the FE can render per-photo controls.
+    const reviews = readPhotoReviews(capture.photoReviews);
+    const media = this.extractMedia(
+      capture.formValues,
+      schema,
+      referenceGeo,
+      config.geoFence.radiusMeters,
+    ).map((m) => ({ ...m, review: reviews[m.fieldId] ?? null }));
     const geo = this.extractGeo(capture.formValues, schema);
 
     const dupMatches = await this.findDuplicateMatches(
@@ -203,6 +381,7 @@ export class VisibilityReviewService {
     return {
       capture: {
         ...capture,
+        photoReviews: reviews,
         media,
         geo,
         geoFence: {

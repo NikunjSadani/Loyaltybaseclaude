@@ -367,9 +367,13 @@ export class OperationsDashboardService {
 
     // "submitted" = total captures in any state (the funnel entry point).
     const submitted =
-      statusCount('SUBMITTED') + statusCount('APPROVED') + statusCount('REJECTED');
+      statusCount('SUBMITTED') +
+      statusCount('APPROVED') +
+      statusCount('REJECTED') +
+      statusCount('CHANGES_REQUESTED');
     const approved = statusCount('APPROVED');
-    const rejected = statusCount('REJECTED');
+    // CHANGES_REQUESTED (per-photo re-open) rolls up with REJECTED on this funnel.
+    const rejected = statusCount('REJECTED') + statusCount('CHANGES_REQUESTED');
     const flagged = 0; // no separate FLAGGED capture state; dup/geo flags live per-capture.
 
     const total = byStatus.reduce((sum, r) => sum + r._count._all, 0);

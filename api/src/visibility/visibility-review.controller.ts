@@ -3,7 +3,11 @@ import { VisibilityReviewService } from './visibility-review.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { AdminListCapturesQueryDto, RejectCaptureDto } from './dto/visibility-capture.dto';
+import {
+  AdminListCapturesQueryDto,
+  PhotoReviewDto,
+  RejectCaptureDto,
+} from './dto/visibility-capture.dto';
 
 /**
  * Visibility (POSM) REVIEW API — GIFSY_ADMIN only (D12). Base path `/v1/visibility`.
@@ -51,5 +55,16 @@ export class VisibilityReviewController {
     @Body() dto: RejectCaptureDto,
   ) {
     return this.review.reject(user, id, dto.reasonCode, dto.reason);
+  }
+
+  // ── Per-photo review (approve/reject ONE CAMERA field; derives capture status) ──
+  @Post('captures/:id/photo-review')
+  @RequirePermission('visibility:write')
+  reviewPhoto(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: PhotoReviewDto,
+  ) {
+    return this.review.reviewPhoto(user, id, dto.fieldId, dto.decision, dto.reasonCode, dto.reason);
   }
 }

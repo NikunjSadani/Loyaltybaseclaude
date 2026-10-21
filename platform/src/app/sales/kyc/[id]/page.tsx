@@ -17,6 +17,7 @@ import { getRole } from '@/lib/sales-role';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import { visibilityApi } from '@/lib/visibility';
+import { isChangesRequested } from '@/lib/visibility-types';
 import type { CaptureUiState, OutletStatusWindow } from '@/lib/visibility-types';
 import { hasReKycFlags, isReKycActionable, reKycRemarks, flaggedLabels, flaggedDocTypes, type ReKycFlags } from '@/lib/rekyc-fields';
 import { SignaturePad, SignatureClearButton, type SignaturePadHandle } from '@/components/signature-pad';
@@ -829,6 +830,7 @@ const VIS_STATE_LABEL: Record<CaptureUiState, { label: string; cls: string }> = 
   awaiting: { label: 'In review', cls: 'bg-blue-50 text-blue-700 border-blue-200' },
   approved: { label: 'Approved',  cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
   rejected: { label: 'Rejected',  cls: 'bg-red-50 text-red-700 border-red-200' },
+  changes_requested: { label: 'Changes requested', cls: 'bg-orange-50 text-orange-700 border-orange-200' },
   late:     { label: 'Overdue',   cls: 'bg-orange-50 text-orange-700 border-orange-200' },
 };
 
@@ -839,9 +841,9 @@ function visWindowLabel(w: OutletStatusWindow): string {
   return `${w.startDay}–${w.endDay}${abbr ? ` ${abbr}` : ''}`;
 }
 
-/** A window still needs a capture when it is due / rejected / late (D7). */
+/** A window still needs a capture when it is due / rejected / changes-requested / late (D7). */
 function visNeedsCapture(state: CaptureUiState): boolean {
-  return state === 'due' || state === 'rejected' || state === 'late';
+  return state === 'due' || state === 'rejected' || state === 'changes_requested' || state === 'late';
 }
 
 /**
@@ -876,7 +878,11 @@ function VisibilityPeriodCard({ outletId, enabled }: { outletId: string; enabled
   // Hide until we have a positive in-scope answer with windows.
   if (!enabled || !inScope || !windows || windows.length === 0) return null;
 
-  const needsCapture = canCapture && windows.some((w) => !w.closed && visNeedsCapture(w.state));
+  // Effective display state: a per-photo CHANGES_REQUESTED capture maps to 'changes_requested'
+  // (robust to either backend windowState mapping, via the capture status).
+  const effState = (w: OutletStatusWindow): CaptureUiState =>
+    isChangesRequested({ status: w.status, windowState: w.state }) ? 'changes_requested' : w.state;
+  const needsCapture = canCapture && windows.some((w) => !w.closed && visNeedsCapture(effState(w)));
 
   return (
     <Card data-testid="visibility-period-card">
@@ -887,7 +893,7 @@ function VisibilityPeriodCard({ outletId, enabled }: { outletId: string; enabled
       </CardHeader>
       <CardContent className="pt-0 pb-3 space-y-2">
         {windows.map((w) => {
-          const cfg = VIS_STATE_LABEL[w.state];
+          const cfg = VIS_STATE_LABEL[effState(w)];
           return (
             <div key={w.windowKey} className="flex items-center gap-2">
               <span className="text-xs text-gray-600 flex-1">{visWindowLabel(w)}</span>

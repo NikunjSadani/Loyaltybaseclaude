@@ -27,6 +27,7 @@ import {
 import { visibilityApi } from '@/lib/visibility';
 import {
   isResubmitCapture,
+  isChangesRequested,
   type CaptureUiState, type SalesEligibleOutlet, type SalesEligibleResponse,
 } from '@/lib/visibility-types';
 import { useGifsySettings } from '@/lib/gifsy-settings';
@@ -46,13 +47,15 @@ const STATE_CONFIG: Record<
              icon: <CheckCircle className="h-3.5 w-3.5 text-emerald-500" /> },
   rejected: { label: 'Rejected',  badge: 'bg-red-50 text-red-700 border-red-200',
              icon: <XCircle className="h-3.5 w-3.5 text-red-500" /> },
+  changes_requested: { label: 'Changes requested', badge: 'bg-orange-50 text-orange-700 border-orange-200',
+             icon: <AlertTriangle className="h-3.5 w-3.5 text-orange-500" /> },
   late:     { label: 'Overdue',   badge: 'bg-orange-50 text-orange-700 border-orange-200',
              icon: <AlertTriangle className="h-3.5 w-3.5 text-orange-500" /> },
 };
 
 /** An outlet is capturable now when the rep may capture (D8) and the window is unsatisfied. */
 function isActionable(state: CaptureUiState, canCapture: boolean): boolean {
-  return canCapture && (state === 'due' || state === 'rejected' || state === 'late');
+  return canCapture && (state === 'due' || state === 'rejected' || state === 'changes_requested' || state === 'late');
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -101,8 +104,11 @@ function SalesVisibilityContent() {
     return () => { cancelled = true; };
   }, [isPhotoMode]);
 
-  // Effective state — a fresh session capture overrides the server row.
-  const stateOf = (o: SalesEligibleOutlet): CaptureUiState => captured[o.outletId] ?? o.windowState;
+  // Effective state — a fresh session capture overrides the server row; otherwise a
+  // per-photo CHANGES_REQUESTED capture maps to the 'changes_requested' label (robust to
+  // either backend windowState mapping, via the capture status).
+  const stateOf = (o: SalesEligibleOutlet): CaptureUiState =>
+    captured[o.outletId] ?? (isChangesRequested(o) ? 'changes_requested' : o.windowState);
 
   const outlets = useMemo(() => {
     const list = eligible?.outlets ?? [];
@@ -267,6 +273,11 @@ function SalesVisibilityContent() {
                   </p>
                   {state === 'rejected' && o.rejectionReason && (
                     <p className="text-[11px] text-red-500 mt-0.5 truncate">{o.rejectionReason}</p>
+                  )}
+                  {state === 'changes_requested' && (
+                    <p className="text-[11px] text-orange-600 mt-0.5 truncate">
+                      Some photos flagged — re-capture required{o.rejectionReason ? `: ${o.rejectionReason}` : ''}
+                    </p>
                   )}
                 </div>
                 {actionable ? (

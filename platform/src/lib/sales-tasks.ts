@@ -1,5 +1,5 @@
 import { KYCStatus } from '@/types';
-import type { SalesEligibleResponse } from '@/lib/visibility-types';
+import { isChangesRequested, type SalesEligibleResponse } from '@/lib/visibility-types';
 
 /**
  * Shared sales-task derivation — consumed by BOTH the sales dashboard
@@ -116,12 +116,13 @@ export function buildPhotoCaptureTaskItems(
   eligible: SalesEligibleResponse | null | undefined,
 ): VisibilityTaskItem[] {
   if (!eligible || !Array.isArray(eligible.outlets)) return [];
-  const ACTIONABLE = new Set(['due', 'rejected', 'late']);
+  const ACTIONABLE = new Set(['due', 'rejected', 'changes_requested', 'late']);
   return eligible.outlets
-    .filter((o) => o.canCapture && ACTIONABLE.has(o.windowState))
+    .filter((o) => o.canCapture && (ACTIONABLE.has(o.windowState) || isChangesRequested(o)))
     .map((o) => {
-      const subtitle =
-        o.windowState === 'rejected'
+      const subtitle = isChangesRequested(o)
+        ? `Some photos flagged — recapture required${o.rejectionReason ? `: ${o.rejectionReason}` : ''}`
+        : o.windowState === 'rejected'
           ? `Capture rejected — recapture required${o.rejectionReason ? `: ${o.rejectionReason}` : ''}`
           : o.windowState === 'late'
             ? 'Visibility capture overdue for this window'

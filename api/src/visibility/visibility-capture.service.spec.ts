@@ -497,6 +497,76 @@ describe('VisibilityCaptureService', () => {
     expect(mockPrisma.visibilityCapture.update).not.toHaveBeenCalled();
   });
 
+  // ── Partial re-capture merge (VISIBILITY-PER-PHOTO-APPROVAL) ─────────────────
+  describe('partial re-capture merge over a CHANGES_REQUESTED capture', () => {
+    const twoCamForm = {
+      clientId: 't1',
+      version: 3,
+      formSchema: {
+        captureGpsOnSubmit: false,
+        fields: [
+          { id: 'front', type: 'CAMERA', label: 'Front', required: true, order: 1 },
+          { id: 'shelf', type: 'CAMERA', label: 'Shelf', required: true, order: 2 },
+        ],
+      },
+    };
+    // front APPROVED (carry-forward), shelf rejected (must be re-captured).
+    const priorCapture = {
+      id: 'cap1',
+      status: 'CHANGES_REQUESTED',
+      outletId: 'o1',
+      currentVersion: 1,
+      windowKey: CUR_WINDOW,
+      formValues: {
+        front: 'visibility-media/t1/front-APPROVED.jpg',
+        shelf: 'visibility-media/t1/shelf-OLD.jpg',
+      },
+      photoReviews: { front: { status: 'APPROVED', reviewedAt: 'x', reviewedByUserId: 'admin1' } },
+    };
+
+    beforeEach(() => {
+      mockPrisma.visibilityForm.findUnique.mockResolvedValue(twoCamForm);
+      // No reference geo → the legacy fence allows+flags (keeps this test focused on the merge).
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ kycSubmissions: [] });
+      mockPrisma.visibilityCapture.findFirst.mockImplementation((args: { where?: { status?: string } }) => {
+        if (args?.where?.status === 'APPROVED') return Promise.resolve(null);
+        return Promise.resolve(priorCapture);
+      });
+      mockPrisma.visibilityCapture.findUnique.mockResolvedValue(priorCapture);
+    });
+
+    it('carries the APPROVED photo forward, replaces only the rejected one, and ignores a payload that tries to replace the approved photo (anti-tamper)', async () => {
+      const res = await service.resubmitCapture(user, 'cap1', {
+        formValues: {
+          front: 'visibility-media/t1/front-HACKED.jpg', // tamper attempt on the approved photo
+          shelf: 'visibility-media/t1/shelf-NEW.jpg', // the legit re-capture
+        },
+      });
+      expect(res.version).toBe(2);
+      const updateArg = mockPrisma.visibilityCapture.update.mock.calls[0][0].data;
+      expect(updateArg.status).toBe('SUBMITTED');
+      // ANTI-TAMPER: the approved photo stays the STORED value, never the payload's.
+      expect(updateArg.formValues.front).toBe('visibility-media/t1/front-APPROVED.jpg');
+      // The rejected photo is replaced by the rep's new media.
+      expect(updateArg.formValues.shelf).toBe('visibility-media/t1/shelf-NEW.jpg');
+      // The approved review is carried; the rejected field's review is cleared (pending).
+      expect(updateArg.photoReviews.front.status).toBe('APPROVED');
+      expect(updateArg.photoReviews.shelf).toBeUndefined();
+      // The version snapshot records the carried reviews too.
+      const subArg = mockPrisma.visibilityCaptureSubmission.create.mock.calls[0][0].data;
+      expect(subArg.photoReviews.front.status).toBe('APPROVED');
+    });
+
+    it('accepts a resubmit over a CHANGES_REQUESTED capture (re-open status honored)', async () => {
+      const res = await service.resubmitCapture(user, 'cap1', {
+        formValues: { shelf: 'visibility-media/t1/shelf-NEW.jpg' },
+      });
+      // front carried from the prior snapshot → both required photos present → passes validation.
+      expect(res.version).toBe(2);
+      expect(mockPrisma.visibilityCapture.update).toHaveBeenCalled();
+    });
+  });
+
   // ── haversine sanity ─────────────────────────────────────────────────────────
   it('haversineMeters ~0 for identical points and grows with separation', () => {
     expect(haversineMeters(12.9, 77.5, 12.9, 77.5)).toBeCloseTo(0, 5);

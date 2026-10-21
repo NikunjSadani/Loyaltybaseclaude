@@ -33,6 +33,8 @@ import {
 import { visibilityApi } from '@/lib/visibility';
 import {
   isResubmitCapture,
+  isChangesRequested,
+  rejectedPhotoFieldIds,
   type CaptureUiState,
   type SalesEligibleOutlet,
   type VisibilityFormSchema,
@@ -71,10 +73,17 @@ export function VisibilityCaptureSheet({
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<SubmitCaptureResult | null>(null);
 
-  // A REJECTED capture is re-captured through the resubmit endpoint (D11); anything else
-  // is a fresh submit. Keyed on STATUS (not windowState) so a rejected-then-late capture
-  // still resubmits instead of colliding on the window-unique row (M3).
+  // A REJECTED / CHANGES_REQUESTED capture is re-captured through the resubmit endpoint
+  // (D11); anything else is a fresh submit. Keyed on STATUS (not windowState) so a
+  // rejected-then-late capture still resubmits instead of colliding on the window-unique
+  // row (M3).
   const isResubmit = isResubmitCapture(outlet);
+
+  // PARTIAL re-capture: a CHANGES_REQUESTED capture with per-photo review detail — the rep
+  // re-shoots only the flagged photos. Needs the backend to surface `photoReviews` with ≥1
+  // REJECTED photo on the outlet row; without it we fall back to a full re-capture.
+  const changesRequested = isChangesRequested(outlet);
+  const isPartial = changesRequested && rejectedPhotoFieldIds(outlet.photoReviews).length > 0;
 
   // Load the active capture form; re-invocable so the error state can offer a Retry.
   const reqIdRef = useRef(0);
@@ -148,7 +157,7 @@ export function VisibilityCaptureSheet({
               </h2>
               <p className="text-[12px] text-gray-400 mt-0.5 truncate">
                 {outlet.outletCode}
-                {isResubmit ? ' · Re-capture after rejection' : ''}
+                {changesRequested ? ' · Re-capture flagged photos' : isResubmit ? ' · Re-capture after rejection' : ''}
               </p>
             </div>
             <button
@@ -164,7 +173,19 @@ export function VisibilityCaptureSheet({
         {/* ── VIEW: capture form ─────────────────────────────────────────────── */}
         {view === 'form' && (
           <div className="overflow-y-auto flex-1 px-5 pt-4 pb-8">
-            {isResubmit && outlet.rejectionReason && (
+            {/* CHANGES_REQUESTED banner: the per-photo partial form renders its own
+                "re-capture only the marked photos" note, so here we only show a generic
+                banner when we have no per-photo detail to drive the partial form. */}
+            {changesRequested && !isPartial && (
+              <div className="mb-4 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5">
+                <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0 mt-0.5" />
+                <p className="text-xs text-amber-700">
+                  Some photos were flagged in review — please re-capture for this window.
+                  {outlet.rejectionReason ? ` ${outlet.rejectionReason}` : ''}
+                </p>
+              </div>
+            )}
+            {!changesRequested && isResubmit && outlet.rejectionReason && (
               <div className="mb-4 flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5">
                 <AlertTriangle className="h-3.5 w-3.5 text-red-500 shrink-0 mt-0.5" />
                 <p className="text-xs text-red-700">
@@ -214,6 +235,10 @@ export function VisibilityCaptureSheet({
                 // Outlet attributes (from the outlet master) that drive outlet-context
                 // conditional fields (e.g. a 2nd photo required for a given sub-program).
                 outletContext={{ subProgram: outlet.programCategory }}
+                // CHANGES_REQUESTED partial re-capture: re-shoot only the flagged photos,
+                // carrying forward the approved ones (server-authoritative).
+                photoReviews={outlet.photoReviews ?? undefined}
+                partialRecapture={isPartial}
               />
             )}
           </div>

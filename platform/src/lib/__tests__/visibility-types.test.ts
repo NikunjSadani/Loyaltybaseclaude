@@ -12,6 +12,9 @@ import {
   validateVisibilityValues,
   formCapturesLocation,
   isResubmitCapture,
+  isChangesRequested,
+  hasRejectedPhoto,
+  rejectedPhotoFieldIds,
   type SalesEligibleOutlet,
   type VisibilityFormField,
   type VisibilityFormSchema,
@@ -80,6 +83,36 @@ describe('isResubmitCapture (M3 rejected-then-late routing)', () => {
     expect(isResubmitCapture({ ...base, status: null, captureId: 'c1', windowState: 'rejected' })).toBe(true);
     expect(isResubmitCapture({ ...base, status: null, captureId: 'c1', windowState: 'late' })).toBe(true);
     expect(isResubmitCapture({ ...base, status: null, captureId: 'c1', windowState: 'due' })).toBe(false);
+  });
+
+  it('true for a CHANGES_REQUESTED status with a captureId (per-photo re-capture)', () => {
+    expect(isResubmitCapture({ ...base, status: 'CHANGES_REQUESTED', captureId: 'c1', windowState: 'changes_requested' })).toBe(true);
+    // robust even if the backend reuses windowState 'rejected' for a CHANGES_REQUESTED row
+    expect(isResubmitCapture({ ...base, status: 'CHANGES_REQUESTED', captureId: 'c1', windowState: 'rejected' })).toBe(true);
+  });
+  it('falls back to windowState changes_requested + captureId when status is absent', () => {
+    expect(isResubmitCapture({ ...base, status: null, captureId: 'c1', windowState: 'changes_requested' })).toBe(true);
+  });
+});
+
+describe('isChangesRequested / per-photo review helpers', () => {
+  it('detects CHANGES_REQUESTED via status OR windowState', () => {
+    expect(isChangesRequested({ status: 'CHANGES_REQUESTED' })).toBe(true);
+    expect(isChangesRequested({ windowState: 'changes_requested' })).toBe(true);
+    expect(isChangesRequested({ status: 'REJECTED', windowState: 'rejected' })).toBe(false);
+    expect(isChangesRequested({})).toBe(false);
+  });
+
+  it('hasRejectedPhoto / rejectedPhotoFieldIds read the review map', () => {
+    const reviews = {
+      a: { status: 'APPROVED' as const, reviewedAt: 'x', reviewedByUserId: 'g' },
+      b: { status: 'REJECTED' as const, reasonCode: 'BLURRY' as const, reviewedAt: 'x', reviewedByUserId: 'g' },
+    };
+    expect(hasRejectedPhoto(reviews)).toBe(true);
+    expect(rejectedPhotoFieldIds(reviews)).toEqual(['b']);
+    expect(hasRejectedPhoto(null)).toBe(false);
+    expect(hasRejectedPhoto(undefined)).toBe(false);
+    expect(rejectedPhotoFieldIds({ a: { status: 'APPROVED', reviewedAt: 'x', reviewedByUserId: 'g' } })).toEqual([]);
   });
 });
 

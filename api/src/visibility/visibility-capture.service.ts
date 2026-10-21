@@ -31,6 +31,8 @@ import {
   parseGpsPoint,
   MEDIA_FIELD_TYPES,
   readMediaValue,
+  readPhotoReviews,
+  PhotoReviews,
 } from './visibility-form.helper';
 import {
   VisibilityFormSchema,
@@ -245,7 +247,16 @@ export class VisibilityCaptureService {
 
     const captures = await this.prisma.visibilityCapture.findMany({
       where: { clientId: user.clientId, windowKey, outletId: { in: outlets.map((o) => o.id) } },
-      select: { outletId: true, id: true, status: true, currentVersion: true, rejectionReason: true },
+      select: {
+        outletId: true,
+        id: true,
+        status: true,
+        currentVersion: true,
+        rejectionReason: true,
+        // Per-photo review map — on a CHANGES_REQUESTED capture the rep needs to know WHICH
+        // photos to re-shoot (and why); the whole-capture rejectionReason is null for per-photo.
+        photoReviews: true,
+      },
     });
     const byOutlet = new Map(captures.map((c) => [c.outletId, c]));
 
@@ -267,6 +278,7 @@ export class VisibilityCaptureService {
           status: cap?.status ?? null,
           currentVersion: cap?.currentVersion ?? null,
           rejectionReason: cap?.rejectionReason ?? null,
+          photoReviews: cap?.photoReviews ?? null,
           windowState: this.deriveState(cap?.status ?? null, windowClosed),
           // canCapture (D8): allowed level AND in the caller's subtree (every listed
           // outlet is in-subtree, so this reduces to the level check).
@@ -311,7 +323,14 @@ export class VisibilityCaptureService {
 
     const captures = await this.prisma.visibilityCapture.findMany({
       where: { clientId: user.clientId, outletId, windowKey: { in: windowKeys } },
-      select: { id: true, windowKey: true, status: true, currentVersion: true, rejectionReason: true },
+      select: {
+        id: true,
+        windowKey: true,
+        status: true,
+        currentVersion: true,
+        rejectionReason: true,
+        photoReviews: true,
+      },
     });
     const byWindow = new Map(captures.map((c) => [c.windowKey, c]));
 
@@ -337,6 +356,7 @@ export class VisibilityCaptureService {
           status: cap?.status ?? null,
           currentVersion: cap?.currentVersion ?? null,
           rejectionReason: cap?.rejectionReason ?? null,
+          photoReviews: cap?.photoReviews ?? null,
           state: this.deriveState(cap?.status ?? null, closed),
         };
       }),
@@ -348,7 +368,9 @@ export class VisibilityCaptureService {
     if (status === 'APPROVED') return 'approved';
     if (windowClosed) return 'late'; // closed with no approval → missed/late
     if (status === 'SUBMITTED') return 'awaiting';
-    if (status === 'REJECTED') return 'rejected';
+    // CHANGES_REQUESTED is treated exactly like the old whole-capture REJECTED "re-open":
+    // the rep must re-capture the rejected photo(s); the window is NOT satisfied.
+    if (status === 'REJECTED' || status === 'CHANGES_REQUESTED') return 'rejected';
     return 'due';
   }
 
@@ -390,8 +412,12 @@ export class VisibilityCaptureService {
       where: { id: captureId, clientId: user.clientId },
     });
     if (!capture) throw new NotFoundException('Capture not found.');
-    if (capture.status !== 'REJECTED') {
-      throw new BadRequestException('Only a rejected capture can be resubmitted.');
+    // Re-open statuses: the explicit whole-capture REJECTED, OR the per-photo
+    // CHANGES_REQUESTED (some photos rejected → re-capture only those, merge the rest).
+    if (capture.status !== 'REJECTED' && capture.status !== 'CHANGES_REQUESTED') {
+      throw new BadRequestException(
+        'Only a rejected or changes-requested capture can be resubmitted.',
+      );
     }
 
     // M1 — a resubmit is valid ONLY within the SAME window the rejected capture belongs to.
@@ -466,7 +492,13 @@ export class VisibilityCaptureService {
       programCategory?: string | null;
     },
     submittedRaw: Record<string, unknown> | undefined,
-    existing: { id: string; status: string; currentVersion: number } | null,
+    existing: {
+      id: string;
+      status: string;
+      currentVersion: number;
+      formValues?: Prisma.JsonValue | null;
+      photoReviews?: Prisma.JsonValue | null;
+    } | null,
   ) {
     const form = await this.prisma.visibilityForm.findUnique({
       where: { clientId: user.clientId },
@@ -485,18 +517,83 @@ export class VisibilityCaptureService {
     // validateSubmittedValues projects them out — they are never persisted in formValues.
     const ctx = outletContextValues(outlet);
     const cleaned = stripReservedKeys(submittedRaw ?? {});
-    const { errors, values } = validateSubmittedValues(schema, { ...cleaned, ...ctx });
+
+    const now = new Date();
+    const freq = this.freqOf(config);
+    const windowKey = windowKeyForDate(now, freq);
+
+    // ── PARTIAL RE-CAPTURE MERGE (VISIBILITY-PER-PHOTO-APPROVAL) ─────────────────────
+    // When the prior (outlet, window) capture is CHANGES_REQUESTED, carry the APPROVED
+    // photos forward UNTOUCHED and accept new media ONLY for the non-approved CAMERA fields.
+    // The prior row is the passed resubmit row, else the existing row for this window (so a
+    // rep cannot bypass the merge by calling plain submit instead of resubmit).
+    const priorRow =
+      existing ??
+      (await this.prisma.visibilityCapture.findUnique({
+        where: {
+          clientId_outletId_windowKey: {
+            clientId: user.clientId,
+            outletId: outlet.id,
+            windowKey,
+          },
+        },
+        select: { id: true, status: true, formValues: true, photoReviews: true, currentVersion: true },
+      }));
+
+    const isMerge = !!priorRow && priorRow.status === 'CHANGES_REQUESTED';
+    const priorValues: Record<string, unknown> =
+      isMerge && priorRow!.formValues && typeof priorRow!.formValues === 'object' && !Array.isArray(priorRow!.formValues)
+        ? (priorRow!.formValues as Record<string, unknown>)
+        : {};
+    const carriedReviews: PhotoReviews = {};
+    let effectiveRaw: Record<string, unknown> = cleaned;
+
+    if (isMerge) {
+      const priorReviews = readPhotoReviews(priorRow!.photoReviews);
+      // Start from the full prior snapshot (keeps non-photo answers stable) and overlay only
+      // the rep's new media for the non-approved photos.
+      const merged: Record<string, unknown> = { ...priorValues };
+      for (const f of schema.fields ?? []) {
+        if (f.type !== 'CAMERA') continue;
+        const pr = priorReviews[f.id];
+        if (pr && pr.status === 'APPROVED') {
+          // ANTI-TAMPER: the STORED approved photo is authoritative — a resubmit payload can
+          // never replace it. Keep the stored media value + carry its APPROVED review untouched.
+          merged[f.id] = priorValues[f.id];
+          carriedReviews[f.id] = pr;
+        } else if (Object.prototype.hasOwnProperty.call(cleaned, f.id)) {
+          // Rejected/pending photo → accept the rep's new media; its review is cleared (pending).
+          merged[f.id] = cleaned[f.id];
+        }
+      }
+      effectiveRaw = merged;
+    }
+
+    const { errors, values } = validateSubmittedValues(schema, { ...effectiveRaw, ...ctx });
     if (errors.length > 0) {
       throw new BadRequestException(`Form validation failed: ${errors.join(' | ')}`);
+    }
+
+    // Defensive anti-tamper re-assert: an APPROVED photo always resolves to the STORED value,
+    // regardless of what the resubmit payload contained (the merge already forced this).
+    if (isMerge) {
+      for (const fieldId of Object.keys(carriedReviews)) {
+        if (Object.prototype.hasOwnProperty.call(priorValues, fieldId)) {
+          values[fieldId] = priorValues[fieldId];
+        }
+      }
     }
 
     // L1 — every submitted CAMERA key must live under THIS caller's tenant media folder;
     // a rep cannot point a capture at an arbitrary/cross-tenant object.
     this.assertMediaKeysOwned(user.clientId, schema, values);
 
-    const now = new Date();
-    const freq = this.freqOf(config);
-    const windowKey = windowKeyForDate(now, freq);
+    // The photoReviews to persist on the re-opened capture: carried-forward APPROVED photos
+    // on a partial re-capture; nothing (null) on a fresh submit / whole-capture re-capture.
+    const resubmitReviews: Prisma.InputJsonValue | typeof Prisma.JsonNull =
+      Object.keys(carriedReviews).length > 0
+        ? (carriedReviews as unknown as Prisma.InputJsonValue)
+        : Prisma.JsonNull;
 
     // Geo-fence — TWO paths, chosen by the form schema. A form with ≥1 CAMERA field
     // flagged `geoFenceRequired` uses the NEW per-photo path (each such photo's embedded
@@ -668,6 +765,8 @@ export class VisibilityCaptureService {
               windowKey,
               status: 'SUBMITTED',
               formValues: jsonValues,
+              // Fresh v1 — no reviews yet.
+              photoReviews: Prisma.JsonNull,
               currentVersion: 1,
               formVersion,
               captureLat: repGeo.lat,
@@ -680,13 +779,18 @@ export class VisibilityCaptureService {
               submittedBySalesUserId: caller.id,
             },
           });
-        } else if (current.status === 'REJECTED') {
+        } else if (current.status === 'REJECTED' || current.status === 'CHANGES_REQUESTED') {
           version = current.currentVersion + 1;
           capture = await tx.visibilityCapture.update({
             where: { id: current.id },
             data: {
+              // Re-opened for re-review (always SUBMITTED): the rejected photo(s) are now
+              // pending again; a whole-capture REJECTED re-capture carries no reviews.
               status: 'SUBMITTED',
               formValues: jsonValues,
+              // Partial re-capture carries the APPROVED photos' reviews forward; a whole-capture
+              // re-capture clears them (null).
+              photoReviews: resubmitReviews,
               currentVersion: version,
               formVersion,
               captureLat: repGeo.lat,
@@ -697,7 +801,7 @@ export class VisibilityCaptureService {
               capturedAt: repGeo.capturedAt,
               receivedAt: now,
               submittedBySalesUserId: caller.id,
-              // Re-open cleanly: clear the prior rejection + review attribution.
+              // Re-open cleanly: clear the prior whole-capture rejection + review attribution.
               rejectionReason: null,
               rejectionReasonCode: null,
               approvedByUserId: null,
@@ -721,6 +825,9 @@ export class VisibilityCaptureService {
             version,
             status: 'SUBMITTED',
             formValues: jsonValues,
+            // Per-version snapshot of the reviews carried into this version (null for v1 /
+            // whole-capture re-capture; carried APPROVED reviews on a partial re-capture).
+            photoReviews: resubmitReviews,
             formVersion,
             captureLat: repGeo.lat,
             captureLng: repGeo.lng,

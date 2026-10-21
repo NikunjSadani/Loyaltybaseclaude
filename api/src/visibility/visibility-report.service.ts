@@ -90,7 +90,10 @@ export class VisibilityReportService {
     const countOf = (s: string) => grouped.find((g) => g.status === s)?._count._all ?? 0;
     const approved = countOf('APPROVED');
     const pending = countOf('SUBMITTED');
-    const rejected = countOf('REJECTED');
+    // CHANGES_REQUESTED (per-photo re-open) is treated like the old whole-capture REJECTED for
+    // coverage: not satisfied, rep must act. Folded into the rejected bucket so it is neither
+    // counted as satisfied nor double-counted as "missed".
+    const rejected = countOf('REJECTED') + countOf('CHANGES_REQUESTED');
     // No capture at all = denominator minus every outlet that has any capture row this window
     // (one row per outlet/window by the unique). "missed" once the window has closed.
     const withCapture = approved + pending + rejected;

@@ -6,16 +6,20 @@
  * VISQ2: opening a capture shows duplicate-photo matches + the media grid.
  * VISQ3: Approve calls visibilityApi.approveCapture.
  * VISQ4: Reject-with-reason calls rejectCapture with the controlled reason code.
+ * VISQ5: a CHANGES_REQUESTED row renders the "Changes requested" label.
+ * VISQ6: a multi-photo capture renders per-photo Approve/Reject → calls reviewPhoto.
+ * VISQ7: the whole-capture Approve is disabled while any photo is rejected.
  */
 
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 const listCaptures = vi.fn();
 const getCapture = vi.fn();
 const approveCapture = vi.fn();
 const rejectCapture = vi.fn();
+const reviewPhoto = vi.fn();
 
 vi.mock('@/lib/visibility', () => ({
   visibilityApi: {
@@ -23,6 +27,7 @@ vi.mock('@/lib/visibility', () => ({
     getCapture: (...a: unknown[]) => getCapture(...a),
     approveCapture: (...a: unknown[]) => approveCapture(...a),
     rejectCapture: (...a: unknown[]) => rejectCapture(...a),
+    reviewPhoto: (...a: unknown[]) => reviewPhoto(...a),
   },
   mediaViewUrl: (k: string) => `/api/visibility/captures/media?key=${k}`,
   rewriteMediaViewPath: (p: string) => p.replace(/^\/v1\//, '/api/'),
@@ -62,15 +67,31 @@ const DETAIL = {
   approvedBy: null,
 };
 
+// A multi-photo capture in CHANGES_REQUESTED: one photo approved, one rejected.
+const MULTI_DETAIL = {
+  ...DETAIL,
+  status: 'CHANGES_REQUESTED' as const,
+  photoReviews: {
+    ph1: { status: 'APPROVED', reviewedAt: '2026-07-20T09:00:00.000Z', reviewedByUserId: 'g1' },
+    ph2: { status: 'REJECTED', reasonCode: 'BLURRY', reviewedAt: '2026-07-20T09:00:00.000Z', reviewedByUserId: 'g1' },
+  },
+  media: [
+    { fieldId: 'ph1', label: 'Front photo', type: 'CAMERA', key: 'visibility-media/c1/a.jpg', viewPath: '/v1/visibility/captures/media?key=a', review: { status: 'APPROVED', reviewedAt: 'x', reviewedByUserId: 'g1' } },
+    { fieldId: 'ph2', label: 'Shelf photo', type: 'CAMERA', key: 'visibility-media/c1/b.jpg', viewPath: '/v1/visibility/captures/media?key=b', review: { status: 'REJECTED', reasonCode: 'BLURRY', reviewedAt: 'x', reviewedByUserId: 'g1' } },
+  ],
+};
+
 beforeEach(() => {
   listCaptures.mockReset();
   getCapture.mockReset();
   approveCapture.mockReset();
   rejectCapture.mockReset();
+  reviewPhoto.mockReset();
   listCaptures.mockResolvedValue({ success: true, data: { captures: [ROW], pagination: { page: 1, limit: 25, total: 1, pages: 1 } } });
   getCapture.mockResolvedValue({ success: true, data: { capture: DETAIL } });
   approveCapture.mockResolvedValue({ success: true, data: { capture: { ...ROW, status: 'APPROVED' } } });
   rejectCapture.mockResolvedValue({ success: true, data: { capture: { ...ROW, status: 'REJECTED' } } });
+  reviewPhoto.mockResolvedValue({ success: true, data: { capture: { ...ROW, status: 'CHANGES_REQUESTED' } } });
 });
 
 describe('VISQ — VisibilityCaptureQueue', () => {
@@ -103,5 +124,48 @@ describe('VISQ — VisibilityCaptureQueue', () => {
     fireEvent.change(screen.getByLabelText('Rejection reason code'), { target: { value: 'GEO_MISMATCH' } });
     fireEvent.click(screen.getByRole('button', { name: /Reject capture/i }));
     await waitFor(() => expect(rejectCapture).toHaveBeenCalledWith('cap-1', expect.objectContaining({ reasonCode: 'GEO_MISMATCH' })));
+  });
+
+  it('VISQ5: a CHANGES_REQUESTED row renders the "Changes requested" label', async () => {
+    listCaptures.mockResolvedValue({
+      success: true,
+      data: {
+        captures: [{ ...ROW, status: 'CHANGES_REQUESTED' }],
+        pagination: { page: 1, limit: 25, total: 1, pages: 1 },
+      },
+    });
+    render(<VisibilityCaptureQueue />);
+    expect(await screen.findByText('Changes requested')).toBeInTheDocument();
+  });
+
+  it('VISQ6: per-photo Approve/Reject calls reviewPhoto with the field id + decision', async () => {
+    getCapture.mockResolvedValue({ success: true, data: { capture: MULTI_DETAIL } });
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+
+    // The rejected photo card (ph2) exposes an "Approve" control (to flip its decision).
+    const rejectedCard = await screen.findByTestId('photo-card-ph2');
+    fireEvent.click(within(rejectedCard).getByRole('button', { name: /^Approve$/i }));
+    await waitFor(() =>
+      expect(reviewPhoto).toHaveBeenCalledWith('cap-1', expect.objectContaining({ fieldId: 'ph2', decision: 'APPROVED' })),
+    );
+
+    // The approved photo card (ph1) exposes a Reject control → reason picker → confirm.
+    const approvedCard = await screen.findByTestId('photo-card-ph1');
+    fireEvent.click(within(approvedCard).getByRole('button', { name: /^Reject$/i }));
+    fireEvent.change(within(approvedCard).getByLabelText(/Reject reason for ph1/i), { target: { value: 'POSM_NOT_VISIBLE' } });
+    fireEvent.click(within(approvedCard).getByRole('button', { name: /Reject photo/i }));
+    await waitFor(() =>
+      expect(reviewPhoto).toHaveBeenCalledWith('cap-1', expect.objectContaining({ fieldId: 'ph1', decision: 'REJECTED', reasonCode: 'POSM_NOT_VISIBLE' })),
+    );
+  });
+
+  it('VISQ7: whole-capture Approve is disabled while any photo is rejected', async () => {
+    getCapture.mockResolvedValue({ success: true, data: { capture: MULTI_DETAIL } });
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    // Multi-photo → the whole-capture button is labelled "Approve all" and is disabled.
+    const approveAll = await screen.findByRole('button', { name: /Approve all/i });
+    expect(approveAll).toBeDisabled();
   });
 });

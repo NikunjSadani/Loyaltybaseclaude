@@ -35,10 +35,15 @@ import {
   orderedFields,
   outletContextValues,
   readMediaValue,
+  rejectedPhotoFieldIds,
   validateVisibilityValues,
+  VISIBILITY_REJECT_REASON_LABELS,
   type GpsCapture,
   type VisibilityFormField,
   type VisibilityFormSchema,
+  type VisibilityPhotoReview,
+  type VisibilityPhotoReviews,
+  type VisibilityRejectReasonCode,
 } from '@/lib/visibility-types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -67,6 +72,21 @@ export interface VisibilityCaptureFormProps {
    * submit, so a conditional photo requirement cannot be spoofed away by the client.
    */
   outletContext?: { subProgram?: string | null };
+  /**
+   * Per-CAMERA-field review state of the prior capture (from the backend), keyed by field
+   * id. Supplied for a CHANGES_REQUESTED re-entry so the form can show which photos were
+   * REJECTED (with reasons) and which were APPROVED (carried forward). See `partialRecapture`.
+   */
+  photoReviews?: VisibilityPhotoReviews;
+  /**
+   * PARTIAL re-capture mode (a CHANGES_REQUESTED re-entry). When true (and `photoReviews`
+   * has ≥1 REJECTED photo) the form shows ONLY the rejected CAMERA fields as editable +
+   * required; APPROVED/pending photos render read-only (carried forward by the server) and
+   * all non-camera fields are hidden. The submit payload contains ONLY the re-captured
+   * (rejected) fields — the server merges them onto the carried-forward approved photos.
+   * A fresh capture (or a whole-capture REJECTED re-shoot) leaves this false → unchanged.
+   */
+  partialRecapture?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -171,6 +191,8 @@ export function VisibilityCaptureForm({
   onSubmit,
   submitting = false,
   outletContext,
+  photoReviews,
+  partialRecapture = false,
 }: VisibilityCaptureFormProps) {
   const [values, setValues] = useState<Record<string, unknown>>(() => ({ ...(initialValues ?? {}) }));
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -179,6 +201,16 @@ export function VisibilityCaptureForm({
   const [busy, setBusy] = useState(false);
 
   const fields = useMemo(() => orderedFields(schema), [schema]);
+
+  // PARTIAL re-capture: the set of CAMERA field ids the reviewer REJECTED — the ONLY fields
+  // the rep re-captures. Active only when partial mode is on AND at least one photo is
+  // rejected (otherwise fall through to the normal full form, so nothing breaks if the
+  // review map is missing).
+  const rejectedIds = useMemo(
+    () => new Set(partialRecapture ? rejectedPhotoFieldIds(photoReviews) : []),
+    [partialRecapture, photoReviews],
+  );
+  const partial = partialRecapture && rejectedIds.size > 0;
 
   // Reserved outlet-context values (keyed by `__…__` id) resolved from the outlet master.
   // These are merged into the values map ONLY for clause evaluation (live show/hide +
@@ -246,6 +278,38 @@ export function VisibilityCaptureForm({
     setSubmitError(null);
     setFieldErrors([]);
 
+    // 0) PARTIAL re-capture (CHANGES_REQUESTED): only the REJECTED CAMERA fields are
+    //    re-captured + validated + submitted. Each rejected photo must carry a fresh media
+    //    key; the per-photo geotag (captured at shutter time) provides its location, so the
+    //    schema-level GPS-on-submit fill is skipped here. Everything else (approved photos,
+    //    non-camera fields) is carried forward by the server and NOT in the payload.
+    if (partial) {
+      const errors: string[] = [];
+      const formValues: Record<string, unknown> = {};
+      for (const f of fields) {
+        if (f.type !== 'CAMERA' || !rejectedIds.has(f.id)) continue;
+        const media = readMediaValue(values[f.id]);
+        if (!media.key) {
+          errors.push(`"${f.label}" must be re-captured.`);
+          continue;
+        }
+        formValues[f.id] = values[f.id];
+      }
+      if (errors.length > 0) {
+        setFieldErrors(errors);
+        return;
+      }
+      setBusy(true);
+      try {
+        await onSubmit(formValues);
+      } catch (err) {
+        setSubmitError(err instanceof Error ? err.message : 'Submit failed');
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
     // 1) capture GPS at submit into every empty GPS field. Two triggers fill a single
     //    fix: a field whose own captureTrigger === 'ON_SUBMIT', and the top-level
     //    schema.captureGpsOnSubmit flag (which fills EVERY empty GPS_POINT field).
@@ -294,7 +358,7 @@ export function VisibilityCaptureForm({
     } finally {
       setBusy(false);
     }
-  }, [values, fields, schema, captureGps, onSubmit, reservedValues]);
+  }, [values, fields, schema, captureGps, onSubmit, reservedValues, partial, rejectedIds]);
 
   // Block submit while ANY field is still uploading (L2): an optional CAMERA photo mid-
   // upload would otherwise be silently omitted from formValues by a submit that races it.
@@ -304,8 +368,51 @@ export function VisibilityCaptureForm({
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-4">
+      {partial && (
+        <div data-testid="partial-recapture-note" className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5">
+          <AlertCircle className="h-3.5 w-3.5 text-amber-500 shrink-0 mt-0.5" />
+          <p className="text-xs text-amber-700">
+            Some photos were flagged — re-capture only the photos marked below. Your approved
+            photos are kept and don&apos;t need re-shooting.
+          </p>
+        </div>
+      )}
+
       {fields.map((field) => {
         if (!isFieldVisible(field, evalValues)) return null;
+
+        // PARTIAL mode: show ONLY CAMERA fields. Rejected ones are editable (re-capture);
+        // approved/pending ones render read-only as "carried forward"; non-camera fields hide.
+        if (partial) {
+          if (field.type !== 'CAMERA') return null;
+          if (rejectedIds.has(field.id)) {
+            const rev = photoReviews?.[field.id];
+            return (
+              <div key={field.id} className="space-y-1.5">
+                <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+                  <AlertCircle className="h-3.5 w-3.5 text-red-500 shrink-0 mt-0.5" />
+                  <p className="text-[11px] text-red-700">
+                    <span className="font-semibold">Flagged for re-capture</span>
+                    {rev?.reasonCode
+                      ? ` · ${VISIBILITY_REJECT_REASON_LABELS[rev.reasonCode as VisibilityRejectReasonCode] ?? rev.reasonCode}`
+                      : ''}
+                    {rev?.reason ? ` — ${rev.reason}` : ''}
+                  </p>
+                </div>
+                <FieldRenderer
+                  field={field}
+                  values={evalValues}
+                  setValue={setValue}
+                  uploading={Boolean(uploading[field.id])}
+                  uploadFile={uploadFile}
+                  captureGps={captureGps}
+                />
+              </div>
+            );
+          }
+          return <CarriedForwardPhoto key={field.id} field={field} review={photoReviews?.[field.id]} />;
+        }
+
         return (
           <FieldRenderer
             key={field.id}
@@ -336,6 +443,8 @@ export function VisibilityCaptureForm({
           <>
             <Loader2 className="h-4 w-4 animate-spin" /> Uploading photo…
           </>
+        ) : partial ? (
+          'Submit re-capture'
         ) : (
           'Submit capture'
         )}
@@ -660,6 +769,34 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
         onChange={onFile}
       />
     </Labeled>
+  );
+}
+
+// ── Carried-forward photo (partial re-capture, read-only) ──────────────────────
+
+/**
+ * A CAMERA field that was APPROVED (or left pending) in the prior review and is carried
+ * forward by the server on a partial re-capture — shown read-only so the rep sees it is
+ * kept and must NOT re-shoot it. We render a status chip rather than the stored image,
+ * because sales-side read-back of another capture's media is not guaranteed.
+ */
+function CarriedForwardPhoto({
+  field, review,
+}: {
+  field: VisibilityFormField;
+  review?: VisibilityPhotoReview;
+}) {
+  const approved = review?.status === 'APPROVED';
+  return (
+    <div data-testid={`carried-forward-${field.id}`}>
+      <label className={labelCls}>{field.label}</label>
+      <div className="flex items-center gap-2 px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl">
+        <CheckCircle className={`h-3.5 w-3.5 shrink-0 ${approved ? 'text-green-500' : 'text-gray-400'}`} />
+        <span className="text-xs text-gray-600 font-medium">
+          {approved ? 'Approved — kept from your last submission' : 'Kept from your last submission'}
+        </span>
+      </div>
+    </div>
   );
 }
 

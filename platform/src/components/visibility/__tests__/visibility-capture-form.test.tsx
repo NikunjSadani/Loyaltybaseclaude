@@ -211,6 +211,81 @@ describe('VisibilityCaptureForm — outlet-context conditional (sub-program)', (
   });
 });
 
+describe('VisibilityCaptureForm — partial re-capture (CHANGES_REQUESTED)', () => {
+  const TWO_PHOTO: VisibilityFormSchema = {
+    captureGpsOnSubmit: false,
+    fields: [
+      { id: 'photo1', type: 'CAMERA', label: 'Front photo', required: true, order: 0 },
+      { id: 'photo2', type: 'CAMERA', label: 'Shelf photo', required: true, order: 1 },
+      { id: 'note', type: 'TEXT', label: 'Note', required: false, order: 2 },
+    ],
+  };
+  const REVIEWS = {
+    photo1: { status: 'APPROVED' as const, reviewedAt: 'x', reviewedByUserId: 'g1' },
+    photo2: { status: 'REJECTED' as const, reasonCode: 'BLURRY' as const, reason: 'too dark', reviewedAt: 'x', reviewedByUserId: 'g1' },
+  };
+
+  it('shows ONLY the rejected photo as editable; approved photo carried forward; non-camera hidden', () => {
+    render(
+      <VisibilityCaptureForm schema={TWO_PHOTO} photoReviews={REVIEWS} partialRecapture onSubmit={vi.fn()} />,
+    );
+    // The rejected photo (photo2) is editable with its reason shown.
+    expect(screen.getByText('Shelf photo')).toBeInTheDocument();
+    expect(screen.getByText(/Flagged for re-capture/i)).toBeInTheDocument();
+    expect(screen.getByText(/too dark/)).toBeInTheDocument();
+    // The approved photo (photo1) is carried forward read-only (no file input for it).
+    expect(screen.getByTestId('carried-forward-photo1')).toBeInTheDocument();
+    // A non-camera field is hidden entirely in partial mode.
+    expect(screen.queryByText('Note')).not.toBeInTheDocument();
+  });
+
+  it('blocks submit until the rejected photo is re-captured, then sends only that field', async () => {
+    const compressed = new Blob([new Uint8Array([9, 9])], { type: 'image/jpeg' });
+    vi.spyOn(imageCompression, 'compress').mockResolvedValue(compressed);
+    uploadSalesMedia.mockResolvedValue({ success: true, data: { key: 'visibility-media/c1/reshot.jpg' } });
+
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { container } = render(
+      <VisibilityCaptureForm schema={TWO_PHOTO} photoReviews={REVIEWS} partialRecapture onSubmit={onSubmit} />,
+    );
+
+    // Submit with nothing re-captured → blocked.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /submit re-capture/i }));
+    });
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/Shelf photo.*re-captured/i));
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    // Re-capture the only editable photo (photo2).
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File([new Uint8Array([1, 2, 3])], 'raw.jpg', { type: 'image/jpeg' });
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } });
+    });
+    await waitFor(() => expect(uploadSalesMedia).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /submit re-capture/i }));
+    });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    // Payload contains ONLY the re-captured (rejected) field.
+    expect(onSubmit.mock.calls[0][0]).toEqual({ photo2: 'visibility-media/c1/reshot.jpg' });
+  });
+
+  it('falls back to the full form when partialRecapture is set but no photo is rejected', () => {
+    const allApproved = {
+      photo1: { status: 'APPROVED' as const, reviewedAt: 'x', reviewedByUserId: 'g1' },
+      photo2: { status: 'APPROVED' as const, reviewedAt: 'x', reviewedByUserId: 'g1' },
+    };
+    render(
+      <VisibilityCaptureForm schema={TWO_PHOTO} photoReviews={allApproved} partialRecapture onSubmit={vi.fn()} />,
+    );
+    // Normal full form → the non-camera field is visible and the button is "Submit capture".
+    expect(screen.getByText('Note')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /submit capture/i })).toBeInTheDocument();
+  });
+});
+
 describe('VisibilityCaptureForm — submit payload', () => {
   it('strips a visibleWhen-hidden field from the submitted formValues', async () => {
     const schema: VisibilityFormSchema = {

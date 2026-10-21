@@ -29,6 +29,8 @@ import {
   MEDIA_FIELD_TYPES,
   readMediaValue,
   OUTLET_CONTEXT_FIELD_IDS,
+  PhotoReviews,
+  DerivedCaptureStatus,
 } from './visibility-types';
 
 // Re-export the shared types + constants so consumers can import everything the
@@ -42,8 +44,16 @@ export {
   OUTLET_CONTEXT_FIELD_IDS,
 };
 export type { FormFieldType, VisibleWhen, FormField, VisibilityFormSchema };
-export type { MediaValue, GpsCapture, OutletContextFieldId } from './visibility-types';
-export { outletContextValues } from './visibility-types';
+export type {
+  MediaValue,
+  GpsCapture,
+  OutletContextFieldId,
+  PhotoReview,
+  PhotoReviewStatus,
+  PhotoReviews,
+  DerivedCaptureStatus,
+} from './visibility-types';
+export { outletContextValues, readPhotoReviews } from './visibility-types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Structural type guards
@@ -510,4 +520,94 @@ export function validateSubmittedValues(
   }
 
   return { errors, values: projected };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-photo review — CAMERA-field sets + server-authoritative derived status
+// (VISIBILITY-PER-PHOTO-APPROVAL)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** True when a stored media value carries a non-empty object key (a photo is present). */
+function hasPhoto(v: unknown): boolean {
+  return readMediaValue(v).key.length > 0;
+}
+
+/**
+ * The CAMERA fields of the form that currently hold a submitted photo, visible under the
+ * given (merged) values. Used by the whole-capture approve-ALL / reject-ALL: every photo
+ * actually present gets a review written, so "approve/reject everything" is literal.
+ */
+export function presentCameraFieldIds(
+  schema: VisibilityFormSchema | null | undefined,
+  mergedValues: Record<string, unknown>,
+): string[] {
+  if (!schema) return [];
+  return (schema.fields ?? [])
+    .filter((f) => f.type === 'CAMERA')
+    .filter((f) => evaluateVisibleWhen(f, mergedValues))
+    .filter((f) => hasPhoto(mergedValues[f.id]))
+    .map((f) => f.id);
+}
+
+/**
+ * The REQUIRED, visible CAMERA fields for this capture — the photos that MUST be present
+ * (mirrors submit-time `isFieldRequired`, including a `requiredWhen` that keys on an outlet
+ * attribute, so `mergedValues` must already carry the server outlet context). This is the
+ * gating set: the window is satisfied only when every one of these is APPROVED.
+ */
+export function requiredCameraFieldIds(
+  schema: VisibilityFormSchema | null | undefined,
+  mergedValues: Record<string, unknown>,
+): string[] {
+  if (!schema) return [];
+  return (schema.fields ?? [])
+    .filter((f) => f.type === 'CAMERA')
+    .filter((f) => evaluateVisibleWhen(f, mergedValues))
+    .filter((f) => isFieldRequired(f, mergedValues))
+    .map((f) => f.id);
+}
+
+/**
+ * The gating CAMERA field set used to DERIVE the whole-capture status: the required,
+ * visible photos. When a form declares no required CAMERA field (all-optional — rare),
+ * fall back to the present photos so per-photo review still functions and a capture can
+ * still reach APPROVED. `mergedValues` must carry the server outlet context (for
+ * `requiredWhen`). Pure.
+ */
+export function gatingCameraFieldIds(
+  schema: VisibilityFormSchema | null | undefined,
+  mergedValues: Record<string, unknown>,
+): string[] {
+  const required = requiredCameraFieldIds(schema, mergedValues);
+  if (required.length > 0) return required;
+  return presentCameraFieldIds(schema, mergedValues);
+}
+
+/**
+ * The SINGLE server-authoritative rule for the derived whole-capture status, over the
+ * gating CAMERA fields:
+ *   - any gating photo REJECTED            → CHANGES_REQUESTED (window NOT satisfied)
+ *   - gating non-empty AND all APPROVED    → APPROVED (satisfies the window, D7)
+ *   - else (some pending, none rejected)   → SUBMITTED
+ * An empty gating set can never derive APPROVED (a capture with nothing to prove stays
+ * SUBMITTED until an explicit approve-ALL).
+ */
+export function deriveCaptureStatus(
+  gatingFieldIds: string[],
+  reviews: PhotoReviews,
+): DerivedCaptureStatus {
+  // ANY explicitly REJECTED photo — required OR optional — forces CHANGES_REQUESTED. A reviewer's
+  // rejection must never be silently retained inside a window-satisfying (APPROVED) capture, so the
+  // rejection check scans ALL reviews, not just the gating set (otherwise a rejected OPTIONAL photo
+  // would be ignored and the capture could finalise APPROVED with it still rejected).
+  for (const r of Object.values(reviews)) {
+    if (r?.status === 'REJECTED') return 'CHANGES_REQUESTED';
+  }
+  // APPROVED only when every gating (required + visible) photo is APPROVED.
+  let allApproved = gatingFieldIds.length > 0;
+  for (const id of gatingFieldIds) {
+    const r = reviews[id];
+    if (!r || r.status !== 'APPROVED') allApproved = false;
+  }
+  return allApproved ? 'APPROVED' : 'SUBMITTED';
 }

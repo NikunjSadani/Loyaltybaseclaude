@@ -175,6 +175,54 @@ function normalizeGeo(g: unknown): GpsCapture | undefined {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Per-photo review state (VISIBILITY-PER-PHOTO-APPROVAL — shared contract)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A single photo's review outcome. APPROVED/REJECTED; absence from the map = pending. */
+export type PhotoReviewStatus = 'APPROVED' | 'REJECTED';
+
+/**
+ * One CAMERA field's review decision. `reasonCode`/`reason` are set on a REJECTED photo
+ * (reasonCode from VISIBILITY_REJECT_REASONS); an APPROVED photo carries neither.
+ */
+export interface PhotoReview {
+  status: PhotoReviewStatus;
+  reasonCode?: string;
+  reason?: string;
+  reviewedAt: string; // ISO
+  reviewedByUserId: string;
+}
+
+/** The capture's per-CAMERA-field review map, keyed by form field id. */
+export type PhotoReviews = Record<string, PhotoReview>;
+
+/** The server-authoritative DERIVED whole-capture status over the required photos' reviews. */
+export type DerivedCaptureStatus = 'SUBMITTED' | 'APPROVED' | 'CHANGES_REQUESTED';
+
+/**
+ * Normalize an untrusted stored value (Prisma JsonValue) to a PhotoReviews map. Any entry
+ * without a valid `status` is dropped; never throws. A null/garbage input yields `{}`.
+ */
+export function readPhotoReviews(v: unknown): PhotoReviews {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+  const out: PhotoReviews = {};
+  for (const [fieldId, raw] of Object.entries(v as Record<string, unknown>)) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const o = raw as Record<string, unknown>;
+    if (o.status !== 'APPROVED' && o.status !== 'REJECTED') continue;
+    const review: PhotoReview = {
+      status: o.status,
+      reviewedAt: typeof o.reviewedAt === 'string' ? o.reviewedAt : '',
+      reviewedByUserId: typeof o.reviewedByUserId === 'string' ? o.reviewedByUserId : '',
+    };
+    if (typeof o.reasonCode === 'string') review.reasonCode = o.reasonCode;
+    if (typeof o.reason === 'string') review.reason = o.reason;
+    out[fieldId] = review;
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Per-tenant Visibility configuration (settings-backed; mirrors
 // TenantSettingsService.VisibilityConfigSettings so Stream B has a local type)
 // ─────────────────────────────────────────────────────────────────────────────

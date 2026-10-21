@@ -19,7 +19,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ClipboardList, AlertCircle, X, Loader2, MapPin, ExternalLink, History,
-  Image as ImageIcon, XCircle, CheckCircle2, Filter, Copy,
+  Image as ImageIcon, XCircle, CheckCircle2, Filter, Copy, Check,
 } from 'lucide-react';
 import {
   visibilityApi, rewriteMediaViewPath,
@@ -30,12 +30,16 @@ import type {
 import {
   VISIBILITY_REJECT_REASON_CODES,
   VISIBILITY_REJECT_REASON_LABELS,
+  VISIBILITY_CAPTURE_STATUS_LABELS,
+  hasRejectedPhoto,
   type Pagination,
   type PhotoFenceStatus,
   type VisibilityCaptureDetail,
   type VisibilityCaptureRow,
   type VisibilityCaptureStatus,
   type VisibilityGeoRef,
+  type VisibilityMediaRef,
+  type VisibilityPhotoDecision,
   type VisibilityRejectReasonCode,
 } from '@/lib/visibility-types';
 
@@ -43,7 +47,13 @@ const STATUS_STYLES: Record<string, string> = {
   SUBMITTED: 'bg-amber-100 text-amber-700',
   APPROVED:  'bg-green-100 text-green-700',
   REJECTED:  'bg-red-100 text-red-600',
+  CHANGES_REQUESTED: 'bg-orange-100 text-orange-700',
 };
+
+/** Badge label for a capture status (falls back to the raw code for an unknown value). */
+function statusLabel(status: string): string {
+  return VISIBILITY_CAPTURE_STATUS_LABELS[status as VisibilityCaptureStatus] ?? status;
+}
 
 export function VisibilityCaptureQueue() {
   const [rows, setRows] = useState<VisibilityCaptureRow[]>([]);
@@ -91,6 +101,7 @@ export function VisibilityCaptureQueue() {
           <select value={status} onChange={(e) => setStatus(e.target.value as VisibilityCaptureStatus | '')} className={selCls}>
             <option value="">All</option>
             <option value="SUBMITTED">Submitted</option>
+            <option value="CHANGES_REQUESTED">Changes requested</option>
             <option value="APPROVED">Approved</option>
             <option value="REJECTED">Rejected</option>
           </select>
@@ -136,7 +147,7 @@ export function VisibilityCaptureQueue() {
                     <td className="px-4 py-2.5"><GeoBadge geoFenceOk={r.geoFenceOk} distanceMeters={r.distanceMeters} /></td>
                     <td className="px-4 py-2.5 text-xs text-gray-600 font-mono">{r.submittedBy?.employeeCode ?? '—'}</td>
                     <td className="px-4 py-2.5">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[r.status] ?? 'bg-gray-100 text-gray-600'}`}>{r.status}{r.currentVersion > 1 ? ` · v${r.currentVersion}` : ''}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[r.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(r.status)}{r.currentVersion > 1 ? ` · v${r.currentVersion}` : ''}</span>
                     </td>
                     <td className="px-4 py-2.5 text-right">
                       <button onClick={() => setOpenId(r.id)} className="text-xs text-[var(--brand-primary)] font-medium hover:underline">Review</button>
@@ -201,6 +212,197 @@ function PhotoFenceBadge({ status }: { status: PhotoFenceStatus }) {
   return <span className="px-1.5 py-0.5 rounded-full font-medium bg-amber-50 text-amber-700 border border-amber-200">Unverifiable</span>;
 }
 
+// ── Per-photo card (image + geotag + per-photo review controls) ────────────────
+
+/**
+ * One photo in the capture-review drawer: the image (opens full-size), its per-photo
+ * geotag/fence badge, and — for a MULTI-photo capture — its own review state + Approve/
+ * Reject controls. For a single-photo capture `showReview` is false and the decision lives
+ * on the whole-capture Approve/Reject at the bottom (identical to today).
+ */
+function PhotoCard({
+  media: m, showReview, reviewable, busy, disabled, onReview,
+}: {
+  media: VisibilityMediaRef;
+  showReview: boolean;
+  reviewable: boolean;
+  busy: boolean;
+  disabled: boolean;
+  onReview: (
+    fieldId: string,
+    decision: VisibilityPhotoDecision,
+    reasonCode?: VisibilityRejectReasonCode,
+    reason?: string,
+  ) => void;
+}) {
+  const href = rewriteMediaViewPath(m.viewPath);
+  const geo = m.geo;
+  return (
+    <div className="border border-gray-200 rounded-lg overflow-hidden" data-testid={`photo-card-${m.fieldId}`}>
+      <a href={href} target="_blank" rel="noopener noreferrer"
+        className="block hover:border-[var(--brand-primary)] transition-colors group">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={href} alt={m.label} className="w-full h-24 object-cover bg-gray-50" />
+        <div className="px-2 py-1.5 flex items-center gap-1 text-[10px] text-gray-600">
+          <ImageIcon className="w-3 h-3" />
+          <span className="truncate flex-1">{m.label}</span>
+          <ExternalLink className="w-3 h-3 text-gray-300 group-hover:text-[var(--brand-primary)]" />
+        </div>
+        {/* Per-photo geotag: this photo's own GPS + its fence status. Absent for a legacy
+            bare-string photo (no geo, no per-photo status). */}
+        {(m.geo || m.fenceStatus) && (
+          <div className="px-2 pb-1.5 flex items-center justify-between gap-1 text-[10px]">
+            {geo ? (
+              <span
+                role="link"
+                tabIndex={0}
+                title="Open in Google Maps"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  window.open(`https://www.google.com/maps?q=${geo.lat},${geo.lng}`, '_blank', 'noopener,noreferrer');
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    window.open(`https://www.google.com/maps?q=${geo.lat},${geo.lng}`, '_blank', 'noopener,noreferrer');
+                  }
+                }}
+                className="inline-flex items-center gap-0.5 text-[var(--brand-primary)] hover:underline cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] focus-visible:ring-offset-1"
+              >
+                <MapPin className="w-2.5 h-2.5" />
+                {geo.lat.toFixed(5)}, {geo.lng.toFixed(5)}
+              </span>
+            ) : (
+              <span />
+            )}
+            {m.fenceStatus && (
+              <span className="inline-flex items-center gap-1">
+                <span className="text-gray-400">this photo</span>
+                <PhotoFenceBadge status={m.fenceStatus} />
+              </span>
+            )}
+          </div>
+        )}
+      </a>
+      {showReview && (
+        <PhotoReviewControls
+          fieldId={m.fieldId}
+          review={m.review ?? null}
+          reviewable={reviewable}
+          busy={busy}
+          disabled={disabled}
+          onReview={onReview}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The per-photo review row: shows the current decision (approved ✓ / rejected + reason /
+ * pending) and, while the capture is still reviewable, the Approve / Reject (with reason)
+ * controls — each calling the per-photo endpoint.
+ */
+function PhotoReviewControls({
+  fieldId, review, reviewable, busy, disabled, onReview,
+}: {
+  fieldId: string;
+  review: VisibilityMediaRef['review'];
+  reviewable: boolean;
+  busy: boolean;
+  disabled: boolean;
+  onReview: (
+    fieldId: string,
+    decision: VisibilityPhotoDecision,
+    reasonCode?: VisibilityRejectReasonCode,
+    reason?: string,
+  ) => void;
+}) {
+  const [rejectOpen, setRejectOpen] = useState(false);
+  const [reasonCode, setReasonCode] = useState<VisibilityRejectReasonCode>('BLURRY');
+  const [reason, setReason] = useState('');
+
+  const status = review?.status ?? null;
+  const spin = busy;
+
+  // Current-decision badge (always shown).
+  const badge =
+    status === 'APPROVED' ? (
+      <span data-testid={`photo-review-${fieldId}`} className="inline-flex items-center gap-1 text-[11px] font-medium text-green-700">
+        <Check className="w-3 h-3" /> Approved
+      </span>
+    ) : status === 'REJECTED' ? (
+      <span data-testid={`photo-review-${fieldId}`} className="inline-flex items-center gap-1 text-[11px] font-medium text-red-600">
+        <XCircle className="w-3 h-3" /> Rejected
+        {review?.reasonCode
+          ? ` · ${VISIBILITY_REJECT_REASON_LABELS[review.reasonCode as VisibilityRejectReasonCode] ?? review.reasonCode}`
+          : ''}
+      </span>
+    ) : (
+      <span data-testid={`photo-review-${fieldId}`} className="text-[11px] font-medium text-gray-400">Pending</span>
+    );
+
+  if (!reviewable) {
+    return <div className="px-2 py-2 border-t border-gray-100 bg-gray-50">{badge}</div>;
+  }
+
+  return (
+    <div className="px-2 py-2 border-t border-gray-100 bg-gray-50 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        {badge}
+        {review?.reason && (
+          <span className="text-[10px] text-gray-500 truncate max-w-[55%]" title={review.reason}>{review.reason}</span>
+        )}
+      </div>
+
+      {rejectOpen ? (
+        <div className="space-y-1.5">
+          <select value={reasonCode} onChange={(e) => setReasonCode(e.target.value as VisibilityRejectReasonCode)}
+            aria-label={`Reject reason for ${fieldId}`}
+            className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-red-400">
+            {VISIBILITY_REJECT_REASON_CODES.map((c) => (
+              <option key={c} value={c}>{VISIBILITY_REJECT_REASON_LABELS[c]}</option>
+            ))}
+          </select>
+          <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2}
+            placeholder="Optional detail — the rep re-captures only this photo."
+            className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-red-400 resize-none" />
+          <div className="flex gap-2 justify-end">
+            <button onClick={() => { setRejectOpen(false); }} className="px-2 py-1 text-[11px] border border-gray-200 rounded-lg text-gray-600 hover:bg-white">Cancel</button>
+            <button
+              onClick={() => { onReview(fieldId, 'REJECTED', reasonCode, reason.trim() || undefined); setRejectOpen(false); setReason(''); }}
+              disabled={spin}
+              className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-60">
+              {spin ? <Loader2 className="w-3 h-3 animate-spin" /> : <XCircle className="w-3 h-3" />} Reject photo
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex gap-2">
+          {status !== 'APPROVED' && (
+            <button
+              onClick={() => onReview(fieldId, 'APPROVED')}
+              disabled={spin || disabled}
+              className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-60">
+              {spin ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />} Approve
+            </button>
+          )}
+          {status !== 'REJECTED' && (
+            <button
+              onClick={() => setRejectOpen(true)}
+              disabled={spin || disabled}
+              className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium border border-red-200 text-red-600 rounded-lg hover:bg-red-50 disabled:opacity-60">
+              <XCircle className="w-3 h-3" /> Reject
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Detail drawer ─────────────────────────────────────────────────────────────
 
 function CaptureDrawer({
@@ -227,6 +429,25 @@ function CaptureDrawer({
 
   useEffect(() => { void load(); }, [load]);
 
+  // Per-photo review (per CAMERA field). Tracks which field is mid-call so only that
+  // card's controls disable. After each decision we reload the detail (the backend
+  // recomputes the derived capture status) and refresh the list.
+  const [photoBusy, setPhotoBusy] = useState<string | null>(null);
+
+  const reviewPhoto = async (
+    fieldId: string,
+    decision: VisibilityPhotoDecision,
+    reasonCode?: VisibilityRejectReasonCode,
+    reason?: string,
+  ) => {
+    setPhotoBusy(fieldId);
+    setActionError(null);
+    const res = await visibilityApi.reviewPhoto(captureId, { fieldId, decision, reasonCode, reason });
+    setPhotoBusy(null);
+    if (res.success) { await load(); onChanged(); }
+    else setActionError(res.error);
+  };
+
   const approve = async () => {
     setBusy(true);
     setActionError(null);
@@ -248,6 +469,16 @@ function CaptureDrawer({
   const captured = (detail?.formValues ?? {}) as Record<string, unknown>;
   const specialIds = new Set<string>([...(detail?.media ?? []).map((m) => m.fieldId), ...(detail?.geo ?? []).map((g) => g.fieldId)]);
 
+  // Per-photo review surface. `anyRejected` blocks the whole-capture Approve (a rejected
+  // photo must be re-captured first). `multiPhoto` decides whether per-photo controls show:
+  // a single-photo capture collapses to the whole-capture decision (identical to today).
+  // `reviewable` = the capture is still open for review (not fully APPROVED).
+  const anyRejected =
+    hasRejectedPhoto(detail?.photoReviews) ||
+    (detail?.media ?? []).some((m) => m.review?.status === 'REJECTED');
+  const multiPhoto = (detail?.media?.length ?? 0) > 1;
+  const reviewable = detail != null && detail.status !== 'APPROVED';
+
   return (
     <div className="fixed inset-0 z-50 flex">
       <div className="flex-1 bg-black/30" onClick={onClose} aria-hidden />
@@ -267,7 +498,7 @@ function CaptureDrawer({
             <div>
               <div className="flex items-center justify-between">
                 <p className="text-base font-bold text-gray-900">{detail.outletName || 'Outlet'}</p>
-                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[detail.status] ?? 'bg-gray-100 text-gray-600'}`}>{detail.status}</span>
+                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[detail.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(detail.status)}</span>
               </div>
               <p className="text-xs text-gray-400 font-mono">{detail.outletCode}</p>
               <p className="text-xs text-gray-500 mt-1">
@@ -299,67 +530,23 @@ function CaptureDrawer({
               )}
             </Section>
 
-            {/* Media */}
+            {/* Media + per-photo review. A multi-photo capture gets per-photo Approve/Reject
+                controls (keyed by CAMERA field id); a single-photo capture collapses to the
+                whole-capture decision at the bottom (identical to today). */}
             {detail.media.length > 0 && (
               <Section title={`Photos (${detail.media.length})`}>
-                <div className="grid grid-cols-2 gap-2">
-                  {detail.media.map((m) => {
-                    const href = rewriteMediaViewPath(m.viewPath);
-                    const geo = m.geo;
-                    return (
-                      <a key={m.fieldId + m.key} href={href} target="_blank" rel="noopener noreferrer"
-                        className="border border-gray-200 rounded-lg overflow-hidden hover:border-[var(--brand-primary)] transition-colors group">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={href} alt={m.label} className="w-full h-24 object-cover bg-gray-50" />
-                        <div className="px-2 py-1.5 flex items-center gap-1 text-[10px] text-gray-600">
-                          <ImageIcon className="w-3 h-3" />
-                          <span className="truncate flex-1">{m.label}</span>
-                          <ExternalLink className="w-3 h-3 text-gray-300 group-hover:text-[var(--brand-primary)]" />
-                        </div>
-                        {/* Per-photo geotag: this photo's own GPS + its fence status (in
-                            addition to the aggregate geo-fence badge above). Absent for a
-                            legacy bare-string photo (no geo, no per-photo status). */}
-                        {(m.geo || m.fenceStatus) && (
-                          <div className="px-2 pb-1.5 flex items-center justify-between gap-1 text-[10px]">
-                            {geo ? (
-                              // Coords open Google Maps in a new tab. This sits inside the
-                              // photo-card <a>, so we can't nest another <a>; open via
-                              // window.open (noopener) and stop the click bubbling to the card.
-                              <span
-                                role="link"
-                                tabIndex={0}
-                                title="Open in Google Maps"
-                                onClick={(e) => {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  window.open(`https://www.google.com/maps?q=${geo.lat},${geo.lng}`, '_blank', 'noopener,noreferrer');
-                                }}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter' || e.key === ' ') {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    window.open(`https://www.google.com/maps?q=${geo.lat},${geo.lng}`, '_blank', 'noopener,noreferrer');
-                                  }
-                                }}
-                                className="inline-flex items-center gap-0.5 text-[var(--brand-primary)] hover:underline cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] focus-visible:ring-offset-1"
-                              >
-                                <MapPin className="w-2.5 h-2.5" />
-                                {geo.lat.toFixed(5)}, {geo.lng.toFixed(5)}
-                              </span>
-                            ) : (
-                              <span />
-                            )}
-                            {m.fenceStatus && (
-                              <span className="inline-flex items-center gap-1">
-                                <span className="text-gray-400">this photo</span>
-                                <PhotoFenceBadge status={m.fenceStatus} />
-                              </span>
-                            )}
-                          </div>
-                        )}
-                      </a>
-                    );
-                  })}
+                <div className={multiPhoto ? 'space-y-3' : 'grid grid-cols-2 gap-2'}>
+                  {detail.media.map((m) => (
+                    <PhotoCard
+                      key={m.fieldId + m.key}
+                      media={m}
+                      showReview={multiPhoto}
+                      reviewable={reviewable}
+                      busy={photoBusy === m.fieldId}
+                      disabled={photoBusy != null && photoBusy !== m.fieldId}
+                      onReview={reviewPhoto}
+                    />
+                  ))}
                 </div>
               </Section>
             )}
@@ -403,7 +590,7 @@ function CaptureDrawer({
                       <History className="w-3.5 h-3.5 text-gray-300 mt-0.5 shrink-0" />
                       <div>
                         <span className="font-medium text-gray-700">v{s.version}</span>
-                        <span className={`ml-2 px-1.5 py-0.5 rounded-full ${STATUS_STYLES[s.status] ?? 'bg-gray-100 text-gray-600'}`}>{s.status}</span>
+                        <span className={`ml-2 px-1.5 py-0.5 rounded-full ${STATUS_STYLES[s.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(s.status)}</span>
                         <span className="ml-2 text-gray-400">{new Date(s.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</span>
                       </div>
                     </li>
@@ -439,15 +626,24 @@ function CaptureDrawer({
                     </div>
                   </div>
                 ) : (
-                  <div className="flex gap-2">
-                    <button onClick={approve} disabled={busy}
-                      className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-600 text-white rounded-lg text-sm font-semibold hover:bg-green-700 transition-colors disabled:opacity-60">
-                      {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />} Approve
-                    </button>
-                    <button onClick={() => setRejectOpen(true)} disabled={busy}
-                      className="flex-1 flex items-center justify-center gap-2 py-2.5 border border-red-200 text-red-600 rounded-lg text-sm font-semibold hover:bg-red-50 transition-colors disabled:opacity-60">
-                      <XCircle className="w-4 h-4" /> Reject
-                    </button>
+                  <div className="space-y-2">
+                    <div className="flex gap-2">
+                      <button onClick={approve} disabled={busy || anyRejected}
+                        title={anyRejected ? 'Re-capture the flagged photos before approving the whole capture.' : undefined}
+                        className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-green-600 text-white rounded-lg text-sm font-semibold hover:bg-green-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
+                        {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />} {multiPhoto ? 'Approve all' : 'Approve'}
+                      </button>
+                      <button onClick={() => setRejectOpen(true)} disabled={busy}
+                        className="flex-1 flex items-center justify-center gap-2 py-2.5 border border-red-200 text-red-600 rounded-lg text-sm font-semibold hover:bg-red-50 transition-colors disabled:opacity-60">
+                        <XCircle className="w-4 h-4" /> {multiPhoto ? 'Reject all' : 'Reject'}
+                      </button>
+                    </div>
+                    {anyRejected && (
+                      <p className="text-[11px] text-orange-600 flex items-center gap-1">
+                        <AlertCircle className="w-3 h-3 shrink-0" />
+                        Some photos are rejected — the rep must re-capture them before the capture can be approved.
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
