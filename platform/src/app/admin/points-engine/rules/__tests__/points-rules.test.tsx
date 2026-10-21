@@ -178,8 +178,9 @@ describe('Publish lifecycle', () => {
     expect(publishBtn).not.toBeDisabled();
     expect(screen.queryByText(/save your changes before publishing/i)).not.toBeInTheDocument();
 
-    // Edit a field → dirty → Publish disabled + hint.
-    fireEvent.change(screen.getByDisplayValue('cf_q3'), { target: { value: 'cf_q4' } });
+    // Edit a field → dirty → Publish disabled + hint. (Credit field is now a dropdown; the Program
+    // text field is a stable, unique editable field for this check.)
+    fireEvent.change(screen.getByDisplayValue('GOLD'), { target: { value: 'SILVER' } });
     expect(await screen.findByText(/save your changes before publishing/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /publish/i })).toBeDisabled();
   });

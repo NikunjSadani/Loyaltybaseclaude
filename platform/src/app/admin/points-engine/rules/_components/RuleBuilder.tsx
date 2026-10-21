@@ -162,6 +162,30 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
     void load();
   }, [load]);
 
+  // ── Credit-field options for the Output dropdown (resolves the opaque field id → its name, so an
+  //    author never has to discover/paste a cuid). Active fields only; a stored-but-now-inactive
+  //    field on an existing rule is still shown so it isn't silently lost. ──
+  const [creditFields, setCreditFields] = useState<{ id: string; name: string; isActive: boolean }[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch('/api/admin/credits/fields');
+        const json = await res.json();
+        if (!cancelled && json?.success && Array.isArray(json.data)) {
+          setCreditFields(
+            (json.data as Array<{ id: string; name: string; isActive: boolean }>).map((f) => ({
+              id: f.id, name: f.name, isActive: f.isActive,
+            })),
+          );
+        }
+      } catch {
+        /* leave empty — the Output field falls back to a "create a field first" prompt */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   // ── draft mutators ────────────────────────────────────────────────────────────
   const patch = (p: Partial<RuleConfigDraft>) => {
     setDraft((d) => ({ ...d, ...p }));
@@ -593,13 +617,43 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                   ]}
                 />
               </Field>
-              <Field label="Credit field id" required hint="The credit bucket the points feed.">
-                <TextField
-                  value={draft.output.fieldId}
-                  disabled={readOnly}
-                  placeholder="cf_scheme_q3"
-                  onChange={(fieldId) => setOutput({ fieldId })}
-                />
+              <Field label="Credit field" required hint="The credit bucket the points feed.">
+                {(() => {
+                  const active = creditFields.filter((f) => f.isActive);
+                  const selected = creditFields.find((f) => f.id === draft.output.fieldId);
+                  const selectedMissing = draft.output.fieldId !== '' && !active.some((f) => f.id === draft.output.fieldId);
+                  if (readOnly) {
+                    return (
+                      <div className="w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">
+                        {selected?.name ?? (draft.output.fieldId || '—')}
+                      </div>
+                    );
+                  }
+                  if (active.length === 0 && !selectedMissing) {
+                    return (
+                      <p className="text-xs text-gray-500">
+                        No credit fields yet —{' '}
+                        <Link href="/admin/credits-payouts/fields" className="font-medium text-[var(--brand-primary)] underline">
+                          create one in Credits &amp; Payouts → Fields
+                        </Link>{' '}first.
+                      </p>
+                    );
+                  }
+                  return (
+                    <SelectField<string>
+                      value={draft.output.fieldId}
+                      disabled={readOnly}
+                      onChange={(fieldId) => setOutput({ fieldId })}
+                      options={[
+                        { value: '', label: 'Select a credit field…' },
+                        ...active.map((f) => ({ value: f.id, label: f.name })),
+                        ...(selectedMissing
+                          ? [{ value: draft.output.fieldId, label: `${selected?.name ?? draft.output.fieldId} (inactive)` }]
+                          : []),
+                      ]}
+                    />
+                  );
+                })()}
               </Field>
 
               {draft.output.awardType === 'PAYOUT' && (
