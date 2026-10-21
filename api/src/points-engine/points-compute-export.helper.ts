@@ -21,11 +21,16 @@
  *     engine computes WHOLE POINTS (no ×100) — so every value cell is a whole points count and the
  *     target CreditField must be POINTS-classified for the outlet types involved.
  *
- *  2. buildPreviewReportXlsx — the full human review report the operator shares with the client
+ *  2. buildPreviewReportXlsx — the full human review report (POINTS) the operator shares with the client
  *     offline: one row per preview row (every status, with the math explanation) + a summary.
  *
- * Both return a Buffer for a Nest StreamableFile (the controller — wired by the orchestrator — streams
- * it). Sanitisation (cellSafe) is inherited from the shared xlsx helpers.
+ *  3. buildPayoutReportXlsx — the PAYOUT report (report-only; the engine never credits/pays a payout —
+ *     owner directive 2026-10-21, PAYOUT-COMPUTE-REPORT.md): one row per PAYOUT row with the amount in
+ *     WHOLE INR on OK rows + a payout summary. Shared with the client for offline approval; the final
+ *     payment status is then uploaded through the existing payout flow, not through the engine.
+ *
+ * All return a Buffer for a Nest StreamableFile (the controller streams it). Sanitisation (cellSafe) is
+ * inherited from the shared xlsx helpers.
  */
 
 import * as XLSX from 'xlsx';
@@ -181,7 +186,13 @@ function num(v: number | null | undefined): number | string {
  * re-uploading the credit-upload file.
  */
 export function buildPreviewReportXlsx(preview: ComputePreview): Buffer {
-  const rows: Record<string, unknown>[] = preview.rows.map((r) => ({
+  // POINTS report: exclude PAYOUT rows (they live in the payout report). NO_RULE rows carry no award type
+  // and belong here (the primary view). Keeping this symmetric with buildPayoutReportXlsx means the counts
+  // reconcile — a mixed run no longer shows PAYOUT outlets as OK/blank-points with a summary that counts
+  // them in OK but not in Total Points.
+  const pointsRows = preview.rows.filter((r) => r.awardType !== 'PAYOUT');
+
+  const rows: Record<string, unknown>[] = pointsRows.map((r) => ({
     'Outlet Code': r.outletCode,
     'Outlet Name': (r.outletName && r.outletName.trim()) || '',
     Program: (r.program && r.program.trim()) || '',
@@ -197,15 +208,24 @@ export function buildPreviewReportXlsx(preview: ComputePreview): Buffer {
     'Rule Version': typeof r.ruleVersion === 'number' ? r.ruleVersion : '',
   }));
 
+  // Points-only counts (the preview counts cover ALL rows, points + payout).
+  const counts = { ok: 0, skip: 0, error: 0, noRule: 0 };
+  for (const r of pointsRows) {
+    if (r.status === 'OK') counts.ok++;
+    else if (r.status === 'SKIP') counts.skip++;
+    else if (r.status === 'ERROR') counts.error++;
+    else counts.noRule++;
+  }
+
   const summary: Record<string, unknown>[] = [
     {
       Client: preview.clientId,
       Period: preview.period,
-      Total: preview.counts.total,
-      OK: preview.counts.ok,
-      Skip: preview.counts.skip,
-      Error: preview.counts.error,
-      'No Rule': preview.counts.noRule,
+      Total: pointsRows.length,
+      OK: counts.ok,
+      Skip: counts.skip,
+      Error: counts.error,
+      'No Rule': counts.noRule,
       'Total Points': preview.totalPoints,
       'Engine Disabled': preview.engineDisabled,
     },
@@ -213,6 +233,93 @@ export function buildPreviewReportXlsx(preview: ComputePreview): Buffer {
 
   return buildXlsx([
     { name: 'Preview Rows', rows },
+    { name: 'Summary', rows: summary },
+  ]);
+}
+
+// ─── Payout report (report-only; NEVER credited) ─────────────────────────────────
+
+/** Column headers of the "Payout Rows" sheet. */
+export const PAYOUT_REPORT_COLUMNS = [
+  'Outlet Code',
+  'Outlet Name',
+  'Program',
+  'KPI Code',
+  'Achievement',
+  'Target',
+  'Status',
+  'Payout (INR)',
+  'Reason / Explanation',
+  'Rule ID',
+  'Rule Version',
+] as const;
+
+/** Column headers of the payout "Summary" sheet. */
+export const PAYOUT_SUMMARY_COLUMNS = [
+  'Client',
+  'Period',
+  'Payout Rows',
+  'OK',
+  'Skip',
+  'Error',
+  'No Rule',
+  'Total Payout (INR)',
+] as const;
+
+/**
+ * Build the PAYOUT report the operator shares with the client offline.
+ *
+ * PAYOUT is COMPUTE-TO-REPORT only (owner directive 2026-10-21 — PAYOUT-COMPUTE-REPORT.md): the engine
+ * never credits or pays it. This report lists every PAYOUT row (one per outlet × PAYOUT rule, every
+ * status) with the computed amount in WHOLE INR on OK rows, plus a summary. After the client approves it
+ * offline, the final payment status is uploaded through the existing payout flow — not here.
+ *
+ * Only rows whose resolved rule output is a PAYOUT award are included (the engine sets `payoutRupees` and
+ * clears `points` for those). POINTS rows live in the credit-upload file + preview report, not here.
+ */
+export function buildPayoutReportXlsx(preview: ComputePreview): Buffer {
+  const payoutRows = preview.rows.filter((r) => r.awardType === 'PAYOUT');
+
+  const rows: Record<string, unknown>[] = payoutRows.map((r) => ({
+    'Outlet Code': r.outletCode,
+    'Outlet Name': (r.outletName && r.outletName.trim()) || '',
+    Program: (r.program && r.program.trim()) || '',
+    'KPI Code': r.kpiCode,
+    Achievement: num(r.achievement),
+    Target: num(r.target),
+    Status: r.status,
+    // Whole INR only on OK rows; blank otherwise (no amount to pay).
+    'Payout (INR)': r.status === 'OK' ? num(r.payoutRupees) : '',
+    // SKIP/ERROR/NO_RULE carry a `reason`; OK rows carry the trace `explanation`.
+    'Reason / Explanation': r.reason ?? r.explanation ?? '',
+    'Rule ID': r.ruleId ?? '',
+    'Rule Version': typeof r.ruleVersion === 'number' ? r.ruleVersion : '',
+  }));
+
+  // Payout-specific counts (the preview counts cover ALL rows, points + payout).
+  const counts = { ok: 0, skip: 0, error: 0, noRule: 0 };
+  for (const r of payoutRows) {
+    if (r.status === 'OK') counts.ok++;
+    else if (r.status === 'SKIP') counts.skip++;
+    else if (r.status === 'ERROR') counts.error++;
+    else counts.noRule++;
+  }
+
+  const summary: Record<string, unknown>[] = [
+    {
+      Client: preview.clientId,
+      Period: preview.period,
+      'Payout Rows': payoutRows.length,
+      OK: counts.ok,
+      Skip: counts.skip,
+      Error: counts.error,
+      'No Rule': counts.noRule,
+      'Total Payout (INR)': preview.totalPayoutRupees,
+    },
+  ];
+
+  return buildXlsx([
+    { name: 'Payout Rows', rows },
     { name: 'Summary', rows: summary },
   ]);
 }

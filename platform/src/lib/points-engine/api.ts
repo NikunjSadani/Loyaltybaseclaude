@@ -90,6 +90,8 @@ export const downloadExport = (q: { period: string; program?: string | null; kpi
   download(`${COMPUTE}/export?${computeQs(q)}`, `points-credit-upload-${q.period}.xlsx`);
 export const downloadPreviewReport = (q: { period: string; program?: string | null; kpiCode?: string | null }) =>
   download(`${COMPUTE}/preview-report?${computeQs(q)}`, `points-preview-${q.period}.xlsx`);
+export const downloadPayoutReport = (q: { period: string; program?: string | null; kpiCode?: string | null }) =>
+  download(`${COMPUTE}/payout-report?${computeQs(q)}`, `points-payout-report-${q.period}.xlsx`);
 
 // ── Settings ────────────────────────────────────────────────────────────────────────
 export function getSettings(clientId?: string): Promise<ApiResponse<PointsEngineSettings>> {

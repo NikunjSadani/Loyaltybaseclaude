@@ -3,7 +3,8 @@
  *
  *   POST /v1/admin/points-compute/preview          body  { period, program?, kpiCode? }  → ComputePreview JSON
  *   GET  /v1/admin/points-compute/export           query { period, program?, kpiCode? }  → credits-upload xlsx
- *   GET  /v1/admin/points-compute/preview-report   query { period, program?, kpiCode? }  → full review xlsx
+ *   GET  /v1/admin/points-compute/preview-report   query { period, program?, kpiCode? }  → full review xlsx (POINTS)
+ *   GET  /v1/admin/points-compute/payout-report    query { period, program?, kpiCode? }  → payout report xlsx (report-only)
  *
  * READ-ONLY — computes + previews/exports; NO wallet write, NO CreditBatch create (that is Wave 2). The
  * `export` xlsx is in the EXACT format the existing credits upload accepts, so after offline client
@@ -21,7 +22,7 @@ import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decor
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import { CommitComputeDto, PreviewComputeDto, SimulateComputeDto } from './dto/points-compute.dto';
-import { buildCreditUploadXlsx, buildPreviewReportXlsx } from './points-compute-export.helper';
+import { buildCreditUploadXlsx, buildPayoutReportXlsx, buildPreviewReportXlsx } from './points-compute-export.helper';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -113,6 +114,28 @@ export class PointsComputeController {
     return new StreamableFile(buildPreviewReportXlsx(preview), {
       type: XLSX_MIME,
       disposition: `attachment; filename="points-preview-${preview.period}.xlsx"`,
+    });
+  }
+
+  /**
+   * GET /v1/admin/points-compute/payout-report — the PAYOUT report xlsx (share with the client offline).
+   *
+   * PAYOUT is COMPUTE-TO-REPORT only (owner directive 2026-10-21): the engine never credits or pays it,
+   * so this route — like preview-report — produces a READ-ONLY report and carries NO engine fail-closed
+   * gate (it mints no creditable artifact; the preview itself is allowed even when the engine is off).
+   */
+  @Get('payout-report')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
+  @RequirePermission('points_rules:read')
+  async payoutReport(@CurrentUser() user: JwtPayload, @Query() q: PreviewComputeDto): Promise<StreamableFile> {
+    const preview = await this.compute.previewCompute(user, {
+      period: q.period,
+      program: q.program ?? null,
+      kpiCode: q.kpiCode ?? null,
+    });
+    return new StreamableFile(buildPayoutReportXlsx(preview), {
+      type: XLSX_MIME,
+      disposition: `attachment; filename="points-payout-report-${preview.period}.xlsx"`,
     });
   }
 }

@@ -35,8 +35,16 @@ export interface ComputePreviewRow {
    */
   fieldName?: string;
   status: PreviewRowStatus;
-  /** Present only when status === 'OK' — whole, non-negative, safe integer. */
+  /** Present only when status === 'OK' AND awardType === 'POINTS' — whole, non-negative, safe integer. */
   points?: number;
+  /**
+   * Present only when status === 'OK' AND awardType === 'PAYOUT' — the computed payout in WHOLE INR
+   * (rupees, rounded off; never paise). PAYOUT is COMPUTE-TO-REPORT only: the engine never credits or
+   * pays it (owner directive 2026-10-21 — see PAYOUT-COMPUTE-REPORT.md). It is kept OUT of `points`,
+   * `totalPoints`, the credit-upload export, and the direct-credit path, so a payout amount can never
+   * leak into crediting or a wallet. It flows only into the downloadable payout report.
+   */
+  payoutRupees?: number;
   /** Raw inputs echoed for the preview report (achievement + target for the primary KPI). */
   achievement?: number | null;
   target?: number | null;
@@ -78,8 +86,10 @@ export interface ComputePreview {
   /** Optional filters the run was scoped to. */
   filter?: { program?: string | null; kpiCode?: string | null };
   counts: { total: number; ok: number; skip: number; error: number; noRule: number };
-  /** Σ points over OK rows (whole). */
+  /** Σ points over OK POINTS rows (whole). */
   totalPoints: number;
+  /** Σ payoutRupees over OK PAYOUT rows (whole INR). Report-only — never credited (see payoutRupees). */
+  totalPayoutRupees: number;
   rows: ComputePreviewRow[];
   /** True if the per-tenant engine flag is OFF (preview still allowed, but flagged — can't be credited). */
   engineDisabled: boolean;

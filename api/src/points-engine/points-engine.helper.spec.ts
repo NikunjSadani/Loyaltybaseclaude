@@ -800,4 +800,21 @@ describe('Audit fixes', () => {
     const bad = { ...base, output: { awardType: 'GARBAGE', fieldId: '' } as unknown as typeof base.output };
     expect(validateRule(bad).some((e) => /awardType/.test(e))).toBe(true);
   });
+
+  it('a PAYOUT-award rule must use rounding.scale 0 (whole INR) — fractional rupees are rejected', () => {
+    const base = rule({
+      inputs: [{ ref: 'c', kpiCode: 'C', type: 'number', nullAs: 'reject' }],
+      pipeline: [{ type: 'rate', id: 'r1', measure: { var: 'c' }, rate: 1 }],
+      rounding: { mode: 'half_up', scale: 2 },
+    });
+    const payout = { ...base, output: { awardType: 'PAYOUT' as const, fieldId: 'cf_p' } };
+    expect(validateRule(payout).some((e) => /PAYOUT.*scale 0|whole rupees|INR/.test(e))).toBe(true);
+    // scale 0 is accepted for PAYOUT.
+    const ok = {
+      ...base,
+      output: { awardType: 'PAYOUT' as const, fieldId: 'cf_p' },
+      rounding: { mode: 'half_up' as const, scale: 0 },
+    };
+    expect(validateRule(ok).some((e) => /PAYOUT.*scale 0|whole rupees|INR/.test(e))).toBe(false);
+  });
 });

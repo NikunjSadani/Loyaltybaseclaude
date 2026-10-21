@@ -143,6 +143,8 @@ export interface ComputePreviewRow {
   fieldName?: string;
   status: PreviewRowStatus;
   points?: number;
+  /** Whole INR — present ONLY on OK PAYOUT rows (awardType === 'PAYOUT'); `points` is undefined on these. */
+  payoutRupees?: number;
   achievement?: number | null;
   target?: number | null;
   reason?: string;
@@ -154,6 +156,8 @@ export interface ComputePreview {
   filter?: { program?: string | null; kpiCode?: string | null };
   counts: { total: number; ok: number; skip: number; error: number; noRule: number };
   totalPoints: number;
+  /** Σ whole-INR over OK PAYOUT rows. */
+  totalPayoutRupees: number;
   rows: ComputePreviewRow[];
   engineDisabled: boolean;
   /** Gifsy-enabled in-portal direct crediting — lets the UI offer/hide "Credit in portal" pre-click. */

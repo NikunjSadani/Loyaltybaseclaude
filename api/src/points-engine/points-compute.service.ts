@@ -114,6 +114,7 @@ export class PointsComputeService {
       filter: { program: programFilter, kpiCode: kpiFilter },
       counts: { total: 0, ok: 0, skip: 0, error: 0, noRule: 0 },
       totalPoints: 0,
+      totalPayoutRupees: 0,
       rows: [],
       engineDisabled,
       directCreditEnabled,
@@ -285,18 +286,25 @@ export class PointsComputeService {
     }
 
     // ── 3b. Reconcile every OK row against the LIVE output CreditField config ───────────────────
-    // The credits-upload file the operator re-uploads does NOT state an award type — the existing
-    // parser RE-DERIVES POINTS-vs-PAYOUT (and skips) from the live `CreditField.outletTypeAwards`
-    // keyed by each outlet's TYPE, at upload time (credits-payouts-parser.ts). So an OK points row
-    // is only safe to export if its output field is, right now, an ACTIVE field classified POINTS for
-    // THAT outlet's type. Otherwise, on re-upload, the row would be either:
-    //   • silently dropped  — field inactive/unknown (parser matches active fields by NAME), or NA
-    //     for the outlet type (parser SKIPs) → points vanish with no error; or
-    //   • ×100'd into rupees — field PAYOUT for the outlet type (parser does rupeesToPaise) → a
-    //     500-point award becomes a ₹500 payout.
-    // We demote any such OK row to ERROR here so (a) the preview is HONEST and (b) the export can only
-    // ever contain correctly-classified whole-points cells. We also reject non-POINTS rule outputs:
-    // PAYOUT-award rules need the paise-correct credit path that lands in Wave 2.
+    // POINTS rows: the credits-upload file the operator re-uploads does NOT state an award type — the
+    // existing parser RE-DERIVES POINTS-vs-PAYOUT (and skips) from the live `CreditField.outletTypeAwards`
+    // keyed by each outlet's TYPE, at upload time (credits-payouts-parser.ts). So an OK points row is only
+    // safe to export if its output field is, right now, an ACTIVE field classified POINTS for THAT outlet's
+    // type. Otherwise, on re-upload, the row would be either:
+    //   • silently dropped  — field inactive/unknown (parser matches active fields by NAME), or NA for the
+    //     outlet type (parser SKIPs) → points vanish with no error; or
+    //   • ×100'd into rupees — field PAYOUT for the outlet type (parser does rupeesToPaise) → a 500-point
+    //     award becomes a ₹500 payout.
+    // We demote any such OK row to ERROR so (a) the preview is HONEST and (b) the export can only ever
+    // contain correctly-classified whole-points cells.
+    //
+    // PAYOUT rows: COMPUTE-TO-REPORT only (owner directive 2026-10-21 — PAYOUT-COMPUTE-REPORT.md). The
+    // engine NEVER credits or pays a payout; it computes the amount and emits it into the downloadable
+    // payout report, where the client approves offline and the final payment status is uploaded through
+    // the existing payout flow. So we DO NOT demote a PAYOUT rule (we did before, when payout crediting was
+    // deferred); instead we validate the field is a usable PAYOUT bucket (honest config) and move the
+    // computed amount from `points` into `payoutRupees` as WHOLE INR — keeping it entirely OUT of the
+    // points total, the credit-upload export, the direct-credit path, and any wallet.
     // fieldName (the parser matches value columns by CreditField.name, not id) is resolved in the same
     // batched query (no N+1).
     const fieldIds = [...new Set(rows.map((r) => r.fieldId).filter((x): x is string => !!x))];
@@ -311,11 +319,37 @@ export class PointsComputeService {
         const field = fieldById.get(r.fieldId);
         r.fieldName = field?.name ?? undefined;
         if (r.status !== 'OK') continue;
+
+        const type = outletTypeByCode.get(r.outletCode) ?? null;
+
+        if (r.awardType === 'PAYOUT') {
+          // Report-only payout: validate the field is an active PAYOUT bucket for this outlet type, then
+          // stash the WHOLE-INR amount in payoutRupees and clear points (never summed/exported/credited).
+          if (!field) {
+            demoteToError(r, 'Output credit field no longer exists in this tenant.');
+          } else if (!field.isActive) {
+            demoteToError(
+              r,
+              `Output credit field "${field.name}" is inactive — re-activate it or point the rule at an active field.`,
+            );
+          } else {
+            const cls = classForType(field.outletTypeAwards, type);
+            if (cls !== 'PAYOUT') {
+              demoteToError(
+                r,
+                `Credit field "${field.name}" is ${cls} for outlet type "${type ?? '—'}", not PAYOUT — reclassify it for this outlet type or point the payout rule at a PAYOUT field.`,
+              );
+            } else {
+              r.payoutRupees = Math.round(r.points ?? 0); // whole INR (rounded off, never paise)
+              r.points = undefined; // keep payout entirely out of the points/credit path
+            }
+          }
+          continue;
+        }
+
+        // POINTS (default) — unchanged safety: must be an active POINTS field for this outlet type.
         if (r.awardType !== 'POINTS') {
-          demoteToError(
-            r,
-            `This rule credits a ${r.awardType ?? 'non-POINTS'} bucket; the compute preview supports whole POINTS only (PAYOUT crediting lands in Wave 2).`,
-          );
+          demoteToError(r, `Unknown award type "${r.awardType}" — the rule output is mis-configured.`);
         } else if (!field) {
           demoteToError(r, 'Output credit field no longer exists in this tenant — cannot credit.');
         } else if (!field.isActive) {
@@ -324,7 +358,6 @@ export class PointsComputeService {
             `Output credit field "${field.name}" is inactive — it would be ignored on upload. Re-activate it or point the rule at an active field.`,
           );
         } else {
-          const type = outletTypeByCode.get(r.outletCode) ?? null;
           const cls = classForType(field.outletTypeAwards, type);
           if (cls !== 'POINTS') {
             demoteToError(
@@ -337,7 +370,7 @@ export class PointsComputeService {
         }
       }
     } else {
-      // No output fieldIds at all → any OK row is mis-configured (no bucket to credit into).
+      // No output fieldIds at all → any OK row is mis-configured (no bucket to credit/report into).
       for (const r of rows) {
         if (r.status === 'OK') demoteToError(r, 'Rule has no output credit field — cannot credit.');
       }
@@ -346,11 +379,14 @@ export class PointsComputeService {
     // ── 4. Aggregate ────────────────────────────────────────────────────────────────────────
     const counts = { total: rows.length, ok: 0, skip: 0, error: 0, noRule: 0 };
     let totalPoints = 0;
+    let totalPayoutRupees = 0;
     for (const r of rows) {
       switch (r.status) {
         case 'OK':
           counts.ok++;
-          totalPoints += r.points ?? 0;
+          // POINTS rows carry `points`; PAYOUT rows carry `payoutRupees` (report-only, never credited).
+          if (r.awardType === 'PAYOUT') totalPayoutRupees += r.payoutRupees ?? 0;
+          else totalPoints += r.points ?? 0;
           break;
         case 'SKIP':
           counts.skip++;
@@ -371,6 +407,7 @@ export class PointsComputeService {
       filter: { program: programFilter, kpiCode: kpiFilter },
       counts,
       totalPoints,
+      totalPayoutRupees,
       rows,
       engineDisabled,
       directCreditEnabled,
@@ -381,7 +418,31 @@ export class PointsComputeService {
     // `expectedKey` on commit; commitCompute reuses this exact value so a run that changed since preview is
     // rejected. Computed from the same creditable rows commit will use (mapPreviewToUploadRows → amount>0).
     const creditable = PointsComputeService.mapPreviewToUploadRows(preview).filter((r) => r.amount > 0);
-    preview.sourceKey = computeSourceKey(clientId, period, preview.filter, ruleVersionsUsed, creditable);
+    // Fold in ONLY the rule versions of the CREDITABLE rows — not every resolved version (ruleVersionsUsed
+    // also lists PAYOUT rules and SKIP/ERROR-only rules, which credit nothing). Keying off all of them would
+    // let an unrelated republish (e.g. iterating a payout rule between preview and commit) change a POINTS
+    // batch's idempotency key and defeat the dedup → a second identical PENDING batch. The creditable set is
+    // exactly what the batch contains, so it is the correct idempotency basis. ruleVersionsUsed stays as the
+    // informational "versions used" list on the preview.
+    const creditableVersions = new Map<string, { ruleId: string; version: number }>();
+    for (const r of rows) {
+      if (
+        r.status === 'OK' &&
+        r.awardType === 'POINTS' &&
+        (r.points ?? 0) > 0 &&
+        r.ruleId &&
+        typeof r.ruleVersion === 'number'
+      ) {
+        creditableVersions.set(`${r.ruleId}@${r.ruleVersion}`, { ruleId: r.ruleId, version: r.ruleVersion });
+      }
+    }
+    preview.sourceKey = computeSourceKey(
+      clientId,
+      period,
+      preview.filter,
+      [...creditableVersions.values()],
+      creditable,
+    );
     return preview;
   }
 
@@ -550,16 +611,23 @@ export class PointsComputeService {
   }
 
   /**
-   * Pure mapping of a preview's OK rows → the existing credits `UploadRowDto[]`, for the
-   * export/Wave-2 re-upload path. POINTS amounts are WHOLE (a count, never ×100). fieldName carries
-   * the resolved CreditField.name (previewCompute populates it) so the row round-trips through the
-   * existing credits upload, which keys value columns by field name. Only OK rows carry points.
+   * Pure mapping of a preview's OK POINTS rows → the existing credits `UploadRowDto[]`, for the export +
+   * direct-credit path. POINTS amounts are WHOLE (a count, never ×100). fieldName carries the resolved
+   * CreditField.name (previewCompute populates it) so the row round-trips through the existing credits
+   * upload, which keys value columns by field name.
+   *
+   * POINTS ONLY — a PAYOUT row is report-only (owner directive 2026-10-21): it carries its amount in
+   * `payoutRupees`, not `points`, and is excluded here so a payout can never enter crediting or a wallet.
    */
   static mapPreviewToUploadRows(preview: ComputePreview): UploadRowDto[] {
     const out: UploadRowDto[] = [];
     let rowNum = 1;
     for (const row of preview.rows) {
       if (row.status !== 'OK') continue;
+      // SAFETY INVARIANT: the credit path (credit-upload export + direct-credit commit) is POINTS ONLY.
+      // A PAYOUT row is report-only (its amount lives in payoutRupees, not points) and must NEVER enter
+      // crediting — so exclude it explicitly here, not just via the (now undefined) points value.
+      if (row.awardType === 'PAYOUT') continue;
       const dto = new UploadRowDto();
       dto.rowNum = rowNum++;
       dto.outletId = row.outletCode;
@@ -630,6 +698,7 @@ function demoteToError(r: ComputePreviewRow, reason: string): void {
   r.status = 'ERROR';
   r.reason = reason;
   r.points = undefined;
+  r.payoutRupees = undefined;
   r.explanation = undefined;
 }
 

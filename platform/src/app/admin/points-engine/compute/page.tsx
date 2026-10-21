@@ -35,6 +35,7 @@ import {
 import {
   commitCompute,
   downloadExport,
+  downloadPayoutReport,
   downloadPreviewReport,
   previewCompute,
 } from '@/lib/points-engine/api';
@@ -200,6 +201,57 @@ function OkGroup({ rows, engineDisabled }: { rows: ComputePreviewRow[]; engineDi
   );
 }
 
+/** OK PAYOUT rows rendered as a normal table — the "rows to pay out" report (indigo to parallel the emerald Ok group). */
+function PayoutOkGroup({ rows }: { rows: ComputePreviewRow[] }) {
+  if (rows.length === 0) return null;
+  const shown = rows.slice(0, ROWS_PER_GROUP);
+  return (
+    <div className="overflow-hidden rounded-xl border border-gray-200 bg-white" data-testid="group-PAYOUT">
+      <div className="flex items-center gap-2 border-b border-indigo-100 bg-indigo-50 px-4 py-3 text-indigo-800">
+        <Wallet className="h-3.5 w-3.5 shrink-0" />
+        <p className="text-xs font-semibold">
+          {rows.length.toLocaleString('en-IN')} row{rows.length !== 1 ? 's' : ''} to pay out
+        </p>
+      </div>
+      <div className="max-h-96 overflow-auto">
+        <table className="w-full text-left">
+          <thead>
+            <tr className="sticky top-0 bg-gray-50 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+              <th className="px-4 py-2.5">Outlet</th>
+              <th className="px-2 py-2.5">KPI</th>
+              <th className="px-2 py-2.5 text-right">Achievement</th>
+              <th className="px-2 py-2.5 text-right">Target</th>
+              <th className="px-2 py-2.5 text-right">Payout (₹)</th>
+              <th className="px-4 py-2.5">Explanation</th>
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((r, i) => (
+              <tr key={`${r.outletCode}-${r.kpiCode}-${i}`} className="border-b border-gray-50 text-sm">
+                <td className="px-4 py-2.5">
+                  <span className="font-medium text-gray-900">{r.outletCode}</span>
+                  {r.outletName && <span className="block text-xs text-gray-400">{r.outletName}</span>}
+                </td>
+                <td className="px-2 py-2.5 font-mono text-xs text-gray-500">{r.kpiCode}</td>
+                <td className="px-2 py-2.5 text-right text-gray-700">{num(r.achievement)}</td>
+                <td className="px-2 py-2.5 text-right text-gray-700">{num(r.target)}</td>
+                <td className="px-2 py-2.5 text-right font-semibold text-indigo-700">₹{num(r.payoutRupees)}</td>
+                <td className="px-4 py-2.5 text-xs text-gray-500">{r.explanation ?? '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {rows.length > shown.length && (
+        <p className="border-t border-gray-100 px-4 py-2 text-xs text-gray-400">
+          Showing the first {shown.length.toLocaleString('en-IN')} of {rows.length.toLocaleString('en-IN')} —
+          download the payout report for all rows.
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ─── Page ───────────────────────────────────────────────────────────────────────
 
 export default function PointsComputePage() {
@@ -222,6 +274,7 @@ export default function PointsComputePage() {
   // EXPORT
   const [exportingFile, setExportingFile] = useState(false);
   const [exportingReport, setExportingReport] = useState(false);
+  const [exportingPayout, setExportingPayout] = useState(false);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
 
@@ -279,6 +332,17 @@ export default function PointsComputePage() {
     setExportingReport(false);
   };
 
+  const handlePayoutReport = async () => {
+    if (!applied || exportingPayout) return;
+    setExportingPayout(true);
+    setExportMsg(null);
+    setExportError(null);
+    const err = await downloadPayoutReport(applied);
+    if (err) setExportError(err);
+    else setExportMsg('Payout report downloaded.');
+    setExportingPayout(false);
+  };
+
   const handleCommit = async () => {
     if (!applied || committing) return;
     setCommitting(true);
@@ -317,12 +381,16 @@ export default function PointsComputePage() {
   const skipRows = preview?.rows.filter((r) => r.status === 'SKIP') ?? [];
   const noRuleRows = preview?.rows.filter((r) => r.status === 'NO_RULE') ?? [];
   const okRows = preview?.rows.filter((r) => r.status === 'OK') ?? [];
-  const hasOkRows = (preview?.counts.ok ?? 0) > 0;
+  // OK rows split by award type: POINTS rows credit/export; PAYOUT rows are reporting-only (whole-INR).
+  const pointsOkRows = okRows.filter((r) => r.awardType !== 'PAYOUT');
+  const payoutOkRows = okRows.filter((r) => r.awardType === 'PAYOUT');
+  const hasPointsOkRows = pointsOkRows.length > 0;
+  const hasPayoutRows = payoutOkRows.length > 0;
   // Direct credit is offered only when the engine is on AND Gifsy has enabled in-portal crediting AND
-  // there is something to credit — known from the preview BEFORE the click (the backend still enforces it).
-  const canDirectCredit = !!preview && !preview.engineDisabled && preview.directCreditEnabled && hasOkRows;
-  // Engine on + OK rows but Gifsy hasn't turned on in-portal crediting → explain, point to Export.
-  const directCreditOffByGifsy = !!preview && !preview.engineDisabled && !preview.directCreditEnabled && hasOkRows;
+  // there are POINTS rows to credit — known from the preview BEFORE the click (the backend still enforces it).
+  const canDirectCredit = !!preview && !preview.engineDisabled && preview.directCreditEnabled && hasPointsOkRows;
+  // Engine on + POINTS OK rows but Gifsy hasn't turned on in-portal crediting → explain, point to Export.
+  const directCreditOffByGifsy = !!preview && !preview.engineDisabled && !preview.directCreditEnabled && hasPointsOkRows;
   // The SELECT inputs stay editable; if they drift from the previewed snapshot, block Export/Credit (which
   // act on `applied`) so a visible selection can never contradict what gets exported/credited (money safety).
   const filtersChanged =
@@ -473,20 +541,33 @@ export default function PointsComputePage() {
           )}
 
           {/* Summary cards */}
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-            {[
-              { label: 'OK', value: preview.counts.ok, color: 'text-emerald-600' },
-              { label: 'Skipped', value: preview.counts.skip, color: 'text-amber-600' },
-              { label: 'Errors', value: preview.counts.error, color: 'text-red-600' },
-              { label: 'No rule', value: preview.counts.noRule, color: 'text-gray-500' },
-              { label: 'Total points', value: preview.totalPoints, color: 'text-[var(--brand-primary)]' },
-            ].map((c) => (
-              <div key={c.label} className="rounded-xl border border-gray-200 bg-white p-3 text-center">
-                <p className={`text-xl font-bold ${c.color}`}>{c.value.toLocaleString('en-IN')}</p>
-                <p className="mt-0.5 text-xs text-gray-500">{c.label}</p>
+          {(() => {
+            const showPayoutCard = hasPayoutRows || preview.totalPayoutRupees > 0;
+            const cards: { label: string; value: string; color: string }[] = [
+              { label: 'OK', value: preview.counts.ok.toLocaleString('en-IN'), color: 'text-emerald-600' },
+              { label: 'Skipped', value: preview.counts.skip.toLocaleString('en-IN'), color: 'text-amber-600' },
+              { label: 'Errors', value: preview.counts.error.toLocaleString('en-IN'), color: 'text-red-600' },
+              { label: 'No rule', value: preview.counts.noRule.toLocaleString('en-IN'), color: 'text-gray-500' },
+              { label: 'Total points', value: preview.totalPoints.toLocaleString('en-IN'), color: 'text-[var(--brand-primary)]' },
+            ];
+            if (showPayoutCard) {
+              cards.push({
+                label: 'Total payout',
+                value: `₹${preview.totalPayoutRupees.toLocaleString('en-IN')}`,
+                color: 'text-indigo-600',
+              });
+            }
+            return (
+              <div className={`grid grid-cols-2 gap-3 ${showPayoutCard ? 'sm:grid-cols-6' : 'sm:grid-cols-5'}`}>
+                {cards.map((c) => (
+                  <div key={c.label} className="rounded-xl border border-gray-200 bg-white p-3 text-center">
+                    <p className={`text-xl font-bold ${c.color}`}>{c.value}</p>
+                    <p className="mt-0.5 text-xs text-gray-500">{c.label}</p>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            );
+          })()}
 
           {/* Rule versions used */}
           {preview.ruleVersionsUsed.length > 0 && (
@@ -519,7 +600,8 @@ export default function PointsComputePage() {
               <NonOkGroup status="ERROR" rows={errorRows} />
               <NonOkGroup status="SKIP" rows={skipRows} />
               <NonOkGroup status="NO_RULE" rows={noRuleRows} />
-              <OkGroup rows={okRows} engineDisabled={preview.engineDisabled} />
+              <OkGroup rows={pointsOkRows} engineDisabled={preview.engineDisabled} />
+              {hasPayoutRows && <PayoutOkGroup rows={payoutOkRows} />}
             </div>
           )}
 
@@ -546,8 +628,14 @@ export default function PointsComputePage() {
               <div className="flex flex-wrap gap-3">
                 <button
                   onClick={() => void handleExport()}
-                  disabled={exportingFile || preview.engineDisabled || filtersChanged}
-                  title={preview.engineDisabled ? 'Unavailable while the engine is disabled' : undefined}
+                  disabled={exportingFile || preview.engineDisabled || !hasPointsOkRows || filtersChanged}
+                  title={
+                    preview.engineDisabled
+                      ? 'Unavailable while the engine is disabled'
+                      : !hasPointsOkRows
+                        ? 'No points rows to credit in this preview'
+                        : undefined
+                  }
                   className="inline-flex items-center gap-2 rounded-xl bg-[var(--brand-primary)] px-4 py-2.5 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {exportingFile ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
@@ -561,7 +649,23 @@ export default function PointsComputePage() {
                   {exportingReport ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
                   Download review report
                 </button>
+                {hasPayoutRows && (
+                  <button
+                    onClick={() => void handlePayoutReport()}
+                    disabled={exportingPayout || filtersChanged}
+                    className="inline-flex items-center gap-2 rounded-xl border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-40"
+                  >
+                    {exportingPayout ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet className="h-4 w-4" />}
+                    Download payout report
+                  </button>
+                )}
               </div>
+              {hasPayoutRows && (
+                <p className="text-xs text-gray-500">
+                  Payout is computed for reporting only — share it with the client for approval, then upload the
+                  final payment status through your existing payout flow. The engine never pays out.
+                </p>
+              )}
               {exportMsg && (
                 <p className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700">
                   <CheckCircle2 className="h-3.5 w-3.5" /> {exportMsg}
@@ -580,8 +684,8 @@ export default function PointsComputePage() {
                 <div className="flex items-start gap-2">
                   <Wallet className="mt-0.5 h-4 w-4 shrink-0 text-[var(--brand-primary)]" />
                   <p className="text-xs text-gray-500">
-                    Or credit the {preview.counts.ok.toLocaleString('en-IN')} OK row
-                    {preview.counts.ok !== 1 ? 's' : ''} directly. This creates a <strong>pending</strong> batch
+                    Or credit the {pointsOkRows.length.toLocaleString('en-IN')} OK points row
+                    {pointsOkRows.length !== 1 ? 's' : ''} directly. This creates a <strong>pending</strong> batch
                     you then review &amp; confirm in Credits &amp; Payouts — wallets are only credited there.
                   </p>
                 </div>

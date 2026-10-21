@@ -211,7 +211,7 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
               </ul>
             </div>
           ) : (
-            <OutcomeView result={result} />
+            <OutcomeView result={result} awardType={draft.output.awardType} />
           )}
         </div>
       </div>
@@ -219,16 +219,23 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
   );
 }
 
-function OutcomeView({ result }: { result: SimulateResult }) {
+function OutcomeView({ result, awardType }: { result: SimulateResult; awardType?: 'POINTS' | 'PAYOUT' }) {
   const outcome = result.outcome;
   if (!outcome) return null;
+
+  // A PAYOUT rule computes money in whole rupees (report-only), not points — label it honestly.
+  const isPayout = awardType === 'PAYOUT';
 
   return (
     <div className="space-y-3">
       {outcome.status === 'OK' && (
         <div className="rounded-xl border border-green-200 bg-green-50 p-3 text-center">
-          <p className="text-[10px] font-semibold uppercase tracking-wide text-green-600">Points awarded</p>
-          <p className="text-3xl font-extrabold text-green-700">{outcome.points.toLocaleString()}</p>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-green-600">
+            {isPayout ? 'Payout (₹)' : 'Points awarded'}
+          </p>
+          <p className="text-3xl font-extrabold text-green-700">
+            {isPayout ? `₹${Math.round(outcome.points).toLocaleString('en-IN')}` : outcome.points.toLocaleString()}
+          </p>
         </div>
       )}
       {outcome.status === 'SKIP' && (

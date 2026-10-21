@@ -178,20 +178,94 @@ describe('PointsComputeService (Wave 1 — read-only preview)', () => {
     expectNoWrite();
   });
 
-  it('DEMOTE→ERROR: a PAYOUT-award rule is not creditable by the Wave-1 points preview', async () => {
+  it('PAYOUT: a PAYOUT-award rule computes to a REPORT amount (whole INR) and NEVER enters the credit path', async () => {
     mockPrisma.outlet.findMany.mockResolvedValue([outletRow('O1')]);
     mockPrisma.outletSalesRecord.findMany.mockResolvedValue([{ outletCode: 'O1', kpiValues: { CASES_SOLD: 100 } }]);
-    // Rule outputs to a PAYOUT bucket — paise crediting is Wave 2; the points preview must refuse it.
+    // Rule outputs to a PAYOUT bucket; the field is an ACTIVE PAYOUT field for the outlet type (SSS).
     mockEngine.getActiveForAttachment.mockResolvedValue(
       ruleRow({ output: { awardType: 'PAYOUT', fieldId: 'cf1' } as never }),
     );
+    mockPrisma.creditField.findMany.mockResolvedValue([
+      { id: 'cf1', name: 'Visibility Payout', isActive: true, outletTypeAwards: { SSS: 'PAYOUT' } },
+    ]);
+
+    const preview = await service.previewCompute(clientAdmin, { period: '2026-02' });
+
+    const r = preview.rows[0];
+    expect(r.status).toBe('OK'); // computes — no longer demoted
+    expect(r.awardType).toBe('PAYOUT');
+    expect(r.payoutRupees).toBe(200); // 100 × 2, whole INR (report-only)
+    expect(r.points).toBeUndefined(); // kept entirely out of the points/credit path
+    expect(preview.counts).toMatchObject({ total: 1, ok: 1, error: 0 });
+    expect(preview.totalPoints).toBe(0);
+    expect(preview.totalPayoutRupees).toBe(200);
+    // SAFETY: a PAYOUT row must NOT map into the credit-upload / direct-credit rows.
+    expect(PointsComputeService.mapPreviewToUploadRows(preview)).toHaveLength(0);
+    expectNoWrite();
+  });
+
+  it('DEMOTE→ERROR: a PAYOUT rule whose field is POINTS-classified for the outlet type is an honest config error', async () => {
+    mockPrisma.outlet.findMany.mockResolvedValue([outletRow('O1')]);
+    mockPrisma.outletSalesRecord.findMany.mockResolvedValue([{ outletCode: 'O1', kpiValues: { CASES_SOLD: 100 } }]);
+    mockEngine.getActiveForAttachment.mockResolvedValue(
+      ruleRow({ output: { awardType: 'PAYOUT', fieldId: 'cf1' } as never }),
+    );
+    // Field is POINTS for SSS, but the rule says PAYOUT → mismatch → ERROR (not a silent payout).
+    mockPrisma.creditField.findMany.mockResolvedValue([
+      { id: 'cf1', name: 'Q1 Reward', isActive: true, outletTypeAwards: { SSS: 'POINTS' } },
+    ]);
 
     const preview = await service.previewCompute(clientAdmin, { period: '2026-02' });
 
     expect(preview.rows[0].status).toBe('ERROR');
-    expect(preview.rows[0].reason).toMatch(/PAYOUT|Wave 2/i);
+    expect(preview.rows[0].reason).toMatch(/not PAYOUT|POINTS/i);
+    expect(preview.rows[0].payoutRupees).toBeUndefined();
     expect(preview.counts).toMatchObject({ total: 1, ok: 0, error: 1 });
+    expect(preview.totalPayoutRupees).toBe(0);
     expectNoWrite();
+  });
+
+  it('idempotency key ignores non-creditable (PAYOUT) rule versions — republishing a payout rule does NOT change a POINTS run key', async () => {
+    // One outlet, two KPIs: CASES_SOLD → a POINTS rule (creditable), VISIBILITY → a PAYOUT rule (report-only).
+    mockPrisma.pointsRule.findMany.mockResolvedValue([{ kpiCode: 'CASES_SOLD' }, { kpiCode: 'VISIBILITY' }]);
+    mockPrisma.outlet.findMany.mockResolvedValue([outletRow('O1')]);
+    mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+      { outletCode: 'O1', kpiValues: { CASES_SOLD: 100, VISIBILITY: 50 } },
+    ]);
+    mockPrisma.creditField.findMany.mockResolvedValue([
+      { id: 'cf1', name: 'Points', isActive: true, outletTypeAwards: { SSS: 'POINTS' } },
+      { id: 'cf_p', name: 'Payout', isActive: true, outletTypeAwards: { SSS: 'PAYOUT' } },
+    ]);
+    const pointsRule = ruleRow({ ruleId: 'rule_cases', version: 3 }); // POINTS cf1, rate 2, CASES_SOLD
+    const makePayout = (v: number) =>
+      ruleRow({
+        ruleId: 'rule_pay',
+        version: v,
+        kpiCode: 'VISIBILITY',
+        attachsTo: { scope: 'program_kpi', program: 'GOLD', programCategory: null, kpiCode: 'VISIBILITY' } as never,
+        output: { awardType: 'PAYOUT', fieldId: 'cf_p' } as never,
+        inputs: [{ ref: 'value', kpiCode: 'VISIBILITY', type: 'number', nullAs: 'reject' }] as never,
+        pipeline: [{ type: 'rate', id: 'n1', measure: { var: 'value' }, rate: 10 }] as never,
+      });
+    const wire = (payoutV: number) =>
+      mockEngine.getActiveForAttachment.mockImplementation((_c, _p, _pc, kpi) =>
+        Promise.resolve(kpi === 'VISIBILITY' ? makePayout(payoutV) : pointsRule),
+      );
+
+    wire(1);
+    const p1 = await service.previewCompute(clientAdmin, { period: '2026-02' });
+    wire(2); // payout rule republished to v2 — nothing about the creditable POINTS row changed
+    const p2 = await service.previewCompute(clientAdmin, { period: '2026-02' });
+
+    // Same creditable content → SAME idempotency key (the fix): a payout-rule republish can't spawn a 2nd batch.
+    expect(p1.sourceKey).toBe(p2.sourceKey);
+    // Sanity: the run really did contain BOTH a creditable points row and a report-only payout row…
+    const pts = p1.rows.find((r) => r.kpiCode === 'CASES_SOLD');
+    const pay = p1.rows.find((r) => r.kpiCode === 'VISIBILITY');
+    expect(pts).toMatchObject({ status: 'OK', awardType: 'POINTS', points: 200 });
+    expect(pay).toMatchObject({ status: 'OK', awardType: 'PAYOUT', payoutRupees: 500 });
+    // …and the informational ruleVersionsUsed DID change, proving the key's independence is deliberate.
+    expect(p1.ruleVersionsUsed).not.toEqual(p2.ruleVersionsUsed);
   });
 
   it('SKIP: a reject-input rule skips when its target is missing', async () => {

@@ -17,14 +17,16 @@ import {
   commitCompute,
   downloadExport,
   downloadPreviewReport,
+  downloadPayoutReport,
 } from '@/lib/points-engine/api';
-import type { ComputePreview, ComputeCommitResult } from '@/lib/points-engine/types';
+import type { ComputePreview, ComputeCommitResult, ComputePreviewRow } from '@/lib/points-engine/types';
 
 vi.mock('@/lib/points-engine/api', () => ({
   previewCompute: vi.fn(),
   commitCompute: vi.fn(),
   downloadExport: vi.fn(),
   downloadPreviewReport: vi.fn(),
+  downloadPayoutReport: vi.fn(),
 }));
 
 // next/link → a plain anchor so href is assertable.
@@ -38,6 +40,7 @@ const previewMock = previewCompute as unknown as ReturnType<typeof vi.fn>;
 const commitMock = commitCompute as unknown as ReturnType<typeof vi.fn>;
 const exportMock = downloadExport as unknown as ReturnType<typeof vi.fn>;
 const reportMock = downloadPreviewReport as unknown as ReturnType<typeof vi.fn>;
+const payoutReportMock = downloadPayoutReport as unknown as ReturnType<typeof vi.fn>;
 
 function makePreview(over: Partial<ComputePreview> = {}): ComputePreview {
   return {
@@ -45,6 +48,7 @@ function makePreview(over: Partial<ComputePreview> = {}): ComputePreview {
     period: '2026-09',
     counts: { total: 2, ok: 1, skip: 0, error: 1, noRule: 0 },
     totalPoints: 1300,
+    totalPayoutRupees: 0,
     engineDisabled: false,
     directCreditEnabled: true,
     sourceKey: 'deoleo|2026-09|cf_x|v7',
@@ -91,7 +95,32 @@ beforeEach(() => {
   commitMock.mockResolvedValue({ success: true, data: COMMIT_RESULT });
   exportMock.mockResolvedValue(null);
   reportMock.mockResolvedValue(null);
+  payoutReportMock.mockResolvedValue(null);
 });
+
+// A preview that mixes a POINTS OK row, a PAYOUT OK row, and (optionally) nothing else.
+const PAYOUT_ROW: ComputePreviewRow = {
+  outletCode: 'OUT-003',
+  outletName: 'Gamma Store',
+  kpiCode: 'CASES_SOLD',
+  status: 'OK',
+  awardType: 'PAYOUT',
+  payoutRupees: 2500,
+  achievement: 150,
+  target: 100,
+  explanation: 'Gate passed → slab 100%+ → ₹2,500',
+};
+const POINTS_ROW: ComputePreviewRow = {
+  outletCode: 'OUT-001',
+  outletName: 'Alpha Store',
+  kpiCode: 'CASES_SOLD',
+  status: 'OK',
+  awardType: 'POINTS',
+  points: 1300,
+  achievement: 120,
+  target: 100,
+  explanation: 'Gate passed → slab 100%+ → milestone +1000',
+};
 
 async function runPreview() {
   fireEvent.click(screen.getByRole('button', { name: /run preview/i }));
@@ -234,5 +263,74 @@ describe('Points Engine compute page', () => {
     const footer = screen.getByText(/showing the first/i);
     expect(footer.textContent).toMatch(/review report/i);
     expect(footer.textContent).not.toMatch(/credit-upload file/i);
+  });
+
+  it('PE-C8: a payout preview renders the "Total payout" card + the payout group with ₹ amounts', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        counts: { total: 2, ok: 2, skip: 0, error: 0, noRule: 0 },
+        totalPoints: 1300,
+        totalPayoutRupees: 2500,
+        rows: [POINTS_ROW, PAYOUT_ROW],
+      }),
+    });
+    render(<ComputePage />);
+    await runPreview();
+
+    // Total payout card. ₹2,500 shows in both the card and the payout row — assert presence, not uniqueness.
+    await waitFor(() => expect(screen.getByText('Total payout')).toBeInTheDocument());
+    expect(screen.getAllByText('₹2,500').length).toBeGreaterThan(0);
+
+    // The payout group renders its rows with ₹ amounts.
+    const payoutGroup = screen.getByTestId('group-PAYOUT');
+    expect(payoutGroup).toBeInTheDocument();
+    expect(screen.getByText('OUT-003')).toBeInTheDocument();
+    expect(payoutGroup.textContent).toMatch(/to pay out/i);
+  });
+
+  it('PE-C9: Download payout report calls downloadPayoutReport with the applied filter', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        filter: { program: 'TRADE', kpiCode: 'CASES_SOLD' },
+        counts: { total: 1, ok: 1, skip: 0, error: 0, noRule: 0 },
+        totalPoints: 0,
+        totalPayoutRupees: 2500,
+        rows: [PAYOUT_ROW],
+      }),
+    });
+    render(<ComputePage />);
+    await runPreview();
+
+    const payoutBtn = await screen.findByRole('button', { name: /download payout report/i });
+    fireEvent.click(payoutBtn);
+
+    await waitFor(() => expect(payoutReportMock).toHaveBeenCalledTimes(1));
+    expect(payoutReportMock).toHaveBeenCalledWith(
+      expect.objectContaining({ period: '2026-09' }),
+    );
+    expect(await screen.findByText(/payout report downloaded/i)).toBeInTheDocument();
+  });
+
+  it('PE-C10: a PAYOUT-only preview disables the credit-upload file + offers no in-portal credit', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        counts: { total: 1, ok: 1, skip: 0, error: 0, noRule: 0 },
+        totalPoints: 0,
+        totalPayoutRupees: 2500,
+        rows: [PAYOUT_ROW],
+      }),
+    });
+    render(<ComputePage />);
+    await runPreview();
+
+    await waitFor(() => expect(screen.getByTestId('group-PAYOUT')).toBeInTheDocument());
+    // No points rows → the credit-upload file is disabled and in-portal crediting is not offered.
+    expect(screen.getByRole('button', { name: /download credit-upload file/i })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /credit in portal/i })).not.toBeInTheDocument();
+    // The payout report is still available.
+    expect(screen.getByRole('button', { name: /download payout report/i })).toBeInTheDocument();
   });
 });
