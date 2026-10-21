@@ -9,6 +9,7 @@ import { sendOTP, verifyOTP } from './actions';
 import { cn } from '@/lib/utils';
 import { clearAssumedContext } from '@/lib/auth-client';
 import { isStaleDeploymentError, recoverFromStaleDeployment } from '@/lib/stale-deploy';
+import { api } from '@/lib/api-client';
 
 type Step = 'mobile' | 'otp';
 
@@ -50,6 +51,46 @@ export default function LoginPage() {
   const [countdown, setCountdown] = useState(0);
 
   const otpRefs = useRef<Array<HTMLInputElement | null>>([]);
+
+  // Already-signed-in bounce: the root `/` (and any shared SFA link to the bare origin) routes
+  // through here, so an authenticated visitor would otherwise see the login form despite a valid
+  // session. Check the httpOnly session via /auth/me (same-origin cookie; the proxy silently
+  // refreshes an expired access token from the 7-day refresh cookie) and, if valid, go straight to
+  // the role dashboard — no re-login. Skipped when we were bounced here by an expiry (?expired=1),
+  // so that notice shows instead of a redirect tussle.
+  const [checkingSession, setCheckingSession] = useState(true);
+  useEffect(() => {
+    const expired =
+      typeof window !== 'undefined' &&
+      new URLSearchParams(window.location.search).get('expired') === '1';
+    if (expired) { setCheckingSession(false); return; }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await api.get<{
+          role?: string;
+          user?: { id?: string; name?: string; phone?: string };
+        }>('/api/auth/me');
+        if (!cancelled && res.success && res.data?.role) {
+          // Hydrate the NON-sensitive stored `user` (the destination portal's RequireAuth reads it,
+          // NOT the httpOnly cookie) so the dashboard doesn't bounce straight back to login — a loop
+          // that would otherwise hit a browser with a live cookie but no stored user. Mirrors exactly
+          // what the post-OTP path persists (id/name/role/phone only; never the token — AF-6).
+          const u = res.data.user ?? {};
+          localStorage.setItem(
+            'user',
+            JSON.stringify({ id: u.id ?? '', name: u.name ?? '', role: res.data.role, phone: u.phone ?? '' }),
+          );
+          window.location.href = getRoleDashboard(res.data.role);
+          return; // keep the loader up while the browser navigates away
+        }
+      } catch {
+        /* no/!valid session → fall through to the sign-in form */
+      }
+      if (!cancelled) setCheckingSession(false);
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // Countdown timer
   useEffect(() => {
@@ -201,6 +242,16 @@ export default function LoginPage() {
       toast.error(result.error ?? 'Failed to resend');
     }
   };
+
+  // While the session check is in flight, show a minimal loader instead of flashing the sign-in
+  // form to a user who is about to be bounced to their dashboard.
+  if (checkingSession) {
+    return (
+      <div className="flex items-center justify-center py-16 text-sm text-gray-400" aria-live="polite">
+        Loading…
+      </div>
+    );
+  }
 
   return (
     <div>

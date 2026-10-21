@@ -40,7 +40,7 @@ export function buildManifest(
   const base = `/${scope}`;
   const name = pwaAppName(config, scope);
 
-  return {
+  const manifest = {
     id: base,
     name,
     short_name: name,
@@ -51,6 +51,14 @@ export function buildManifest(
     start_url: `${base}/dashboard`,
     scope: base,
     display: 'standalone',
+    // Link capturing: when the app is INSTALLED, prefer opening an in-scope https link
+    // (e.g. a link shared into a client's SFA) in the installed PWA rather than a browser
+    // tab, and FOCUS an already-open window instead of spawning a duplicate. Supported on
+    // Chromium (Android/desktop); other browsers ignore these and open the link normally,
+    // so it is a safe progressive enhancement. `handle_links`/`launch_handler` are newer
+    // manifest members not in Next's MetadataRoute.Manifest type yet → cast on return.
+    handle_links: 'preferred',
+    launch_handler: { client_mode: ['focus-existing', 'auto'] },
     theme_color: color,
     background_color: color,
     icons: [
@@ -74,4 +82,5 @@ export function buildManifest(
       },
     ],
   };
+  return manifest as MetadataRoute.Manifest;
 }
