@@ -22,12 +22,14 @@ import type {
 } from '@/lib/points-engine/types';
 import { NODE_META } from '@/lib/points-engine/types';
 import {
-  Field, TextField, NumberField, SelectField, StatusBadge, cardCls,
-  blankDraft, rowToDraft, defaultNode, firstNumericVar, draftIssues,
+  Field, NumberField, SelectField, StatusBadge, cardCls,
+  blankDraft, rowToDraft, defaultNode, firstNumericVar, draftIssues, inputCls,
 } from './kit';
 import { InputsCard } from './InputsCard';
 import { NodeCard } from './NodeCard';
 import { SimulatorPanel } from './SimulatorPanel';
+import { SearchableSelect } from '@/components/ui/searchable-select';
+import { useGifsySettings } from '@/lib/gifsy-settings';
 
 // Node types grouped by disclosure level for the "Add step" menu.
 const LEVEL_ORDER = ['Basic', 'Tiered', 'Conditional', 'Clamp', 'Advanced'] as const;
@@ -185,6 +187,38 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
     })();
     return () => { cancelled = true; };
   }, []);
+
+  // ── Attachment dropdown options (searchable) ──
+  // Program + Sub-Program come from the tenant's configured lists (the same source as the outlet master
+  // upload); KPI codes from the KPI catalogue. Each list also includes the draft's CURRENT value, so
+  // editing an existing rule whose stored value is no longer in the list still shows + keeps it.
+  const settings = useGifsySettings();
+  const [kpiCodes, setKpiCodes] = useState<string[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch('/api/admin/kpis');
+        const json = await res.json();
+        if (!cancelled && json?.success && Array.isArray(json.data)) {
+          setKpiCodes(
+            (json.data as Array<{ code: string; enabled?: boolean }>)
+              .filter((k) => k.enabled !== false)
+              .map((k) => k.code),
+          );
+        }
+      } catch {
+        /* leave empty — KPI falls back to the draft's current value only */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const uniqOpts = (arr: (string | null | undefined)[]): string[] =>
+    [...new Set(arr.filter((x): x is string => !!x && x.trim() !== ''))];
+  const programOptions = uniqOpts([...(settings.outletPrograms ?? []), draft.attachsTo.program]);
+  const categoryOptions = uniqOpts([...(settings.outletCategories ?? []), draft.attachsTo.programCategory]);
+  const kpiOptions = uniqOpts([...kpiCodes, draft.attachsTo.kpiCode]);
 
   // ── draft mutators ────────────────────────────────────────────────────────────
   const patch = (p: Partial<RuleConfigDraft>) => {
@@ -518,28 +552,39 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
             right={<Link2 className="h-4 w-4 text-gray-300" />}
           >
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Field label="Program" hint="Leave blank to match any program.">
-                <TextField
+              <Field label="Program" hint="Pick a configured program, or leave blank to match any.">
+                <SearchableSelect
                   value={draft.attachsTo.program ?? ''}
+                  options={programOptions}
                   disabled={readOnly}
                   placeholder="(any)"
+                  aria-label="Program"
+                  testIdPrefix="rule-program"
+                  className={`${inputCls} disabled:bg-gray-100 disabled:text-gray-400`}
                   onChange={(v) => setAttach({ program: v || null })}
                 />
               </Field>
-              <Field label="Sub-Program" hint="Optional sub-segment.">
-                <TextField
+              <Field label="Sub-Program" hint="Pick a configured sub-program, or leave blank.">
+                <SearchableSelect
                   value={draft.attachsTo.programCategory ?? ''}
+                  options={categoryOptions}
                   disabled={readOnly}
                   placeholder="(any)"
+                  aria-label="Sub-Program"
+                  testIdPrefix="rule-subprogram"
+                  className={`${inputCls} disabled:bg-gray-100 disabled:text-gray-400`}
                   onChange={(v) => setAttach({ programCategory: v || null })}
                 />
               </Field>
-              <Field label="KPI code" required hint="Reconciled against the KPI catalogue at publish.">
-                <TextField
+              <Field label="KPI code" required hint="Pick from the KPI catalogue (reconciled at publish).">
+                <SearchableSelect
                   value={draft.attachsTo.kpiCode}
+                  options={kpiOptions}
                   disabled={readOnly}
-                  upper
-                  placeholder="CASES_SOLD"
+                  placeholder="Select a KPI"
+                  aria-label="KPI code"
+                  testIdPrefix="rule-kpi"
+                  className={`${inputCls} disabled:bg-gray-100 disabled:text-gray-400`}
                   onChange={(v) => setAttach({ kpiCode: v })}
                 />
               </Field>

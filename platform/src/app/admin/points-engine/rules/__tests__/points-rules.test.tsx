@@ -178,9 +178,10 @@ describe('Publish lifecycle', () => {
     expect(publishBtn).not.toBeDisabled();
     expect(screen.queryByText(/save your changes before publishing/i)).not.toBeInTheDocument();
 
-    // Edit a field → dirty → Publish disabled + hint. (Credit field is now a dropdown; the Program
-    // text field is a stable, unique editable field for this check.)
-    fireEvent.change(screen.getByDisplayValue('GOLD'), { target: { value: 'SILVER' } });
+    // Edit a field → dirty → Publish disabled + hint. (Program/Sub-Program/KPI are now searchable
+    // dropdowns and the credit field is a dropdown; the "Effective from" date is the stable, unique
+    // plain input for this dirty-state check.)
+    fireEvent.change(screen.getByDisplayValue('2026-07-01'), { target: { value: '2026-08-01' } });
     expect(await screen.findByText(/save your changes before publishing/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /publish/i })).toBeDisabled();
   });
