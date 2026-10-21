@@ -53,13 +53,18 @@ export class PointsEngineSettingsController {
   @Put()
   @Roles('GIFSY_ADMIN')
   async set(@CurrentUser() user: JwtPayload, @Body() dto: SetPointsEngineSettingsDto) {
-    // This is a platform-level money control (directCreditEnabled turns on in-portal wallet crediting), so
-    // — exactly like the TDS statutory setter — it may only be written from an UN-ASSUMED GIFSY session;
-    // an owner working inside an assumed brand must exit first. Prevents editing one tenant's money flag
-    // from inside another tenant's context.
-    if (!platformWide(user)) {
+    // This is a PER-TENANT money control (directCreditEnabled turns on in-portal wallet crediting). The flag
+    // is written for the TARGET tenant (dto.clientId), so an operator may set it in one of two ways:
+    //   • from an UN-ASSUMED Gifsy session (platform-wide) — may target ANY tenant via dto.clientId; or
+    //   • while ASSUMED INTO the target tenant itself (dto.clientId === the assumed tenant) — the natural
+    //     "work in the brand, then enable it" flow.
+    // What stays forbidden is editing ONE tenant's money flag from INSIDE a DIFFERENT tenant's context: an
+    // assumed operator can only touch the brand they are working in (they cannot pass another tenant's id).
+    // This keeps the cross-tenant safety the old un-assumed-only rule aimed at, without the dead-end where a
+    // per-tenant flag could not be reached from the only place a tenant is selected (the assumed brand).
+    if (!platformWide(user) && dto.clientId !== user.clientId) {
       throw new ForbiddenException(
-        'Points Engine settings can only be changed from an un-assumed Gifsy session — exit the brand first.',
+        'You can only change Points Engine settings for the brand you are currently working in. Switch into that brand, or exit to an un-assumed Gifsy session.',
       );
     }
     const settingDto: UpsertSettingDto = {
