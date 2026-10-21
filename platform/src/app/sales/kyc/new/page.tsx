@@ -2528,7 +2528,17 @@ export default function NewKYCPage() {
             {/* SO-Declaration variant: PAN + GSTIN as PLAIN OPTIONAL fields, on the first (Details)
                 page like the standard flow (owner, 2026-10-16). Validated only when non-empty. */}
             {isSoVariant && (
+              /* Same field ORDER as the standard flow: GST first, then PAN (so typing GST
+                 auto-fills PAN below it, not above). Both plain-optional, validated when non-empty. */
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>GSTIN <span className="text-[10px] text-gray-400 font-normal">(optional)</span></label>
+                  <input data-testid="decl-gstin" className={`${inputCls} ${declGstInvalid ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-200/40' : ''}`} placeholder="24ABCDE1234F1Z5"
+                    maxLength={GSTIN_LENGTH} value={form.gstNumber} onChange={handleGSTChange} />
+                  {declGstInvalid && (
+                    <p className="text-[11px] text-red-600 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Invalid GST number format</p>
+                  )}
+                </div>
                 <div>
                   <label className={labelCls}>PAN <span className="text-[10px] text-gray-400 font-normal">(optional)</span></label>
                   <input data-testid="decl-pan" className={`${inputCls} ${declPanInvalid ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-200/40' : ''}`} placeholder="ABCDE1234F"
@@ -2536,14 +2546,6 @@ export default function NewKYCPage() {
                     onChange={(e) => setForm((f) => ({ ...f, panNumber: e.target.value.toUpperCase() }))} />
                   {declPanInvalid && (
                     <p className="text-[11px] text-red-600 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Invalid PAN format (e.g. ABCDE1234F)</p>
-                  )}
-                </div>
-                <div>
-                  <label className={labelCls}>GSTIN <span className="text-[10px] text-gray-400 font-normal">(optional)</span></label>
-                  <input data-testid="decl-gstin" className={`${inputCls} ${declGstInvalid ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-200/40' : ''}`} placeholder="24ABCDE1234F1Z5"
-                    maxLength={GSTIN_LENGTH} value={form.gstNumber} onChange={handleGSTChange} />
-                  {declGstInvalid && (
-                    <p className="text-[11px] text-red-600 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Invalid GST number format</p>
                   )}
                 </div>
               </div>

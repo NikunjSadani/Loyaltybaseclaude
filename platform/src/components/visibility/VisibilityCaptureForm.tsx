@@ -17,9 +17,12 @@
  * Renders every §5/§6 field type:
  *   TEXT · TEXTAREA · NUMBER · DATE · DROPDOWN · MULTI_SELECT · TOGGLE · CAMERA · GPS_POINT
  *
- * CAMERA fields (D9/D16): native rear-camera capture (`capture="environment"`), the
- * per-field `instruction` text, and a `sampleImageKey` reference thumbnail (via the
- * auth-gated media view URL) when present. Photos are downscaled + re-encoded client-side
+ * CAMERA fields (D9/D16): a TRUE in-app live camera (getUserMedia, via the shared
+ * `CameraCapture` component) so the device GALLERY can NEVER open — camera-only is the
+ * default (`noGallery !== false`); only an author-opted `noGallery === false` field keeps
+ * the `<input type="file">` gallery fallback. Plus the per-field `instruction` text and a
+ * `sampleImageKey` reference thumbnail (via the auth-gated media view URL) when present.
+ * Photos are downscaled + re-encoded client-side
  * before upload to save the rep's mobile data + storage (best-practice #4), with a
  * graceful fallback to the original bytes if compression fails.
  */
@@ -29,6 +32,7 @@ import {
   AlertCircle, Camera, CheckCircle, Loader2, MapPin,
 } from 'lucide-react';
 import { mediaViewUrl, visibilityApi } from '@/lib/visibility';
+import { CameraCapture } from '@/components/ui/camera-capture';
 import {
   isFieldRequired,
   isFieldVisible,
@@ -658,10 +662,11 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
   // this the button re-enables mid-fix (double-capture race) with no "getting location" feedback.
   const [busy, setBusy] = useState(false);
 
-  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (inputRef.current) inputRef.current.value = '';
-    if (!file) return;
+  // Shared capture handler — fed IDENTICALLY by the live camera's `onCapture(file)`
+  // (camera-only fields) and the gallery `<input onChange>` (noGallery === false). So the
+  // preview thumbnail, per-photo geotag GPS, required validation, partial-recapture and the
+  // submit payload all keep working regardless of how the File was obtained.
+  const handleFile = async (file: File) => {
     setCapError('');
     if (field.geotag) {
       // Per-photo geotag: fetch a GPS fix AT SHUTTER TIME (the moment the photo is taken),
@@ -697,6 +702,21 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
     }
   };
 
+  // Gallery path wrapper (noGallery === false): read the chosen File + reset the input
+  // (so re-picking the SAME file fires onChange again) then run the shared handler.
+  const onFileInput = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (inputRef.current) inputRef.current.value = '';
+    if (!file) return;
+    await handleFile(file);
+  };
+
+  // Clears a captured photo so the live camera (camera-only) re-mounts for a re-shoot.
+  const clearCapture = () => {
+    setCapError('');
+    setValue(field.id, undefined);
+  };
+
   return (
     <Labeled field={field} req={req}>
       {field.instruction && (
@@ -719,7 +739,7 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
             <span className="text-xs text-green-700 font-medium truncate">Photo captured</span>
             <button
               type="button"
-              onClick={() => inputRef.current?.click()}
+              onClick={cameraOnly ? clearCapture : () => inputRef.current?.click()}
               className="ml-auto text-[10px] text-green-600 underline"
             >
               Retake
@@ -741,6 +761,24 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
             </p>
           ) : null}
         </div>
+      ) : cameraOnly ? (
+        // TRUE in-app live camera (getUserMedia) — the device gallery can NEVER open.
+        // The captured File feeds the EXACT same handler the gallery input used.
+        <div className="space-y-1">
+          <CameraCapture
+            onCapture={handleFile}
+            disabled={uploading || busy}
+            facingMode="environment"
+            testIdPrefix={`camera-${field.id}`}
+            aria-label={field.label}
+          />
+          {(uploading || busy) && (
+            <p className="flex items-center gap-1.5 text-xs text-gray-500">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              {busy ? 'Getting location…' : 'Uploading…'}
+            </p>
+          )}
+        </div>
       ) : (
         <button
           type="button"
@@ -758,16 +796,18 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
           {capError}
         </p>
       )}
-      <input
-        ref={inputRef}
-        type="file"
-        accept="image/*"
-        // `capture` on a file input opens the rear camera directly on field phones (D14).
-        {...(cameraOnly ? { capture: 'environment' as const } : {})}
-        className="hidden"
-        aria-label={field.label}
-        onChange={onFile}
-      />
+      {/* Gallery fallback input — ONLY for an author-opted gallery field (noGallery === false).
+          A camera-only field never renders this (no gallery can open); it uses CameraCapture. */}
+      {!cameraOnly && (
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          aria-label={field.label}
+          onChange={onFileInput}
+        />
+      )}
     </Labeled>
   );
 }

@@ -1,9 +1,15 @@
 /**
  * visibility-capture-form.test.tsx — the shared VisibilityCaptureForm renderer:
- *   1. renders a CAMERA field with its per-field instruction + sample thumbnail;
- *   2. selecting a photo runs the client-side compression path then uploads the
+ *   1. a camera-only CAMERA field renders the TRUE in-app live camera (getUserMedia)
+ *      and NO `<input type="file">` (the device gallery can never open);
+ *   2. an author-opted gallery field (`noGallery: false`) still renders the file input;
+ *   3. capturing a photo runs the client-side compression path then uploads the
  *      compressed blob via visibilityApi.uploadSalesMedia;
- *   3. a field hidden by a visibleWhen clause is stripped from the submit payload.
+ *   4. a field hidden by a visibleWhen clause is stripped from the submit payload;
+ *   5. the partial re-capture (CHANGES_REQUESTED) flow.
+ *
+ * jsdom has no camera: getUserMedia / canvas.toBlob / HTMLMediaElement.play are mocked
+ * below so the live-capture path runs headlessly.
  */
 
 import React from 'react';
@@ -25,13 +31,62 @@ import {
 } from '@/components/visibility/VisibilityCaptureForm';
 import type { VisibilityFormSchema } from '@/lib/visibility-types';
 
+// Track the live stream's stop() so cleanup can be asserted.
+let trackStop: ReturnType<typeof vi.fn>;
+
 beforeEach(() => {
   uploadSalesMedia.mockResolvedValue({ success: true, data: { key: 'visibility-media/c1/new.jpg' } });
+
+  // getUserMedia → a fake stream whose single track records stop() calls.
+  trackStop = vi.fn();
+  Object.defineProperty(globalThis.navigator, 'mediaDevices', {
+    value: { getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [{ stop: trackStop }] }) },
+    configurable: true,
+  });
+
+  // canvas.toBlob → invoke the callback with a tiny JPEG blob (jsdom has no encoder).
+  Object.defineProperty(globalThis.HTMLCanvasElement.prototype, 'toBlob', {
+    value(cb: (b: Blob) => void) {
+      cb(new Blob([new Uint8Array([1, 2, 3])], { type: 'image/jpeg' }));
+    },
+    configurable: true,
+    writable: true,
+  });
+
+  // HTMLMediaElement.play → resolved promise (jsdom does not implement it meaningfully).
+  Object.defineProperty(globalThis.HTMLMediaElement.prototype, 'play', {
+    value: vi.fn().mockResolvedValue(undefined),
+    configurable: true,
+    writable: true,
+  });
+
+  // URL.createObjectURL / revokeObjectURL — used for the captured still preview.
+  if (!('createObjectURL' in URL)) {
+    Object.defineProperty(URL, 'createObjectURL', { value: () => 'blob:stub', configurable: true, writable: true });
+  }
+  if (!('revokeObjectURL' in URL)) {
+    Object.defineProperty(URL, 'revokeObjectURL', { value: () => {}, configurable: true, writable: true });
+  }
 });
+
 afterEach(() => {
   vi.clearAllMocks();
   vi.restoreAllMocks();
 });
+
+/** Tap-to-open the camera, then click the shutter once the stream is ready. */
+async function shoot(fieldId: string) {
+  // The camera no longer auto-opens (single-active-stream anti-contention) — open it first.
+  const openBtn = await screen.findByTestId(`camera-${fieldId}-open`);
+  await act(async () => {
+    fireEvent.click(openBtn);
+  });
+  const btn = await screen.findByTestId(`camera-${fieldId}-capture`);
+  await waitFor(() => expect(btn).not.toBeDisabled());
+  await act(async () => {
+    fireEvent.click(btn);
+  });
+}
 
 const CAMERA_SCHEMA: VisibilityFormSchema = {
   captureGpsOnSubmit: false,
@@ -48,7 +103,19 @@ const CAMERA_SCHEMA: VisibilityFormSchema = {
   ],
 };
 
-describe('VisibilityCaptureForm — camera field', () => {
+describe('VisibilityCaptureForm — camera field (live, camera-only)', () => {
+  it('renders the live camera UI and NO file input (gallery can never open)', async () => {
+    const { container } = render(<VisibilityCaptureForm schema={CAMERA_SCHEMA} onSubmit={vi.fn()} />);
+    // Camera-only field shows a tap-to-open button (stream NOT auto-opened), and NO file input.
+    expect(await screen.findByTestId('camera-photo-open')).toBeInTheDocument();
+    expect(container.querySelector('input[type="file"]')).toBeNull();
+    // Tapping Open reveals the live preview + shutter — still no file input, ever.
+    await act(async () => { fireEvent.click(screen.getByTestId('camera-photo-open')); });
+    expect(await screen.findByTestId('camera-photo-video')).toBeInTheDocument();
+    expect(screen.getByTestId('camera-photo-capture')).toBeInTheDocument();
+    expect(container.querySelector('input[type="file"]')).toBeNull();
+  });
+
   it('renders the instruction text and the sample-image thumbnail', () => {
     render(<VisibilityCaptureForm schema={CAMERA_SCHEMA} onSubmit={vi.fn()} />);
     expect(screen.getByTestId('camera-instruction-photo')).toHaveTextContent(
@@ -60,11 +127,63 @@ describe('VisibilityCaptureForm — camera field', () => {
     );
   });
 
-  it('compresses then uploads the compressed blob on photo selection', async () => {
+  it('compresses then uploads the compressed blob when a photo is captured', async () => {
     const compressed = new Blob([new Uint8Array([9, 9])], { type: 'image/jpeg' });
     const compressSpy = vi.spyOn(imageCompression, 'compress').mockResolvedValue(compressed);
 
-    const { container } = render(<VisibilityCaptureForm schema={CAMERA_SCHEMA} onSubmit={vi.fn()} />);
+    render(<VisibilityCaptureForm schema={CAMERA_SCHEMA} onSubmit={vi.fn()} />);
+    await shoot('photo');
+
+    await waitFor(() => {
+      expect(compressSpy).toHaveBeenCalledTimes(1);
+      expect(uploadSalesMedia).toHaveBeenCalledTimes(1);
+    });
+    // The File handed to compress is the live-captured JPEG, and the UPLOADED blob is the
+    // compressed output (not the raw frame).
+    const passed = compressSpy.mock.calls[0][0] as File;
+    expect(passed).toBeInstanceOf(File);
+    expect(passed.type).toBe('image/jpeg');
+    expect(uploadSalesMedia).toHaveBeenCalledWith(compressed, 'photo.jpg');
+  });
+
+  it('stops every camera track after the shot (no lingering stream)', async () => {
+    vi.spyOn(imageCompression, 'compress').mockResolvedValue(
+      new Blob([new Uint8Array([9])], { type: 'image/jpeg' }),
+    );
+    render(<VisibilityCaptureForm schema={CAMERA_SCHEMA} onSubmit={vi.fn()} />);
+    await shoot('photo');
+    // Freezing to the still tears the stream down.
+    await waitFor(() => expect(trackStop).toHaveBeenCalled());
+  });
+});
+
+describe('VisibilityCaptureForm — gallery-allowed field (noGallery: false)', () => {
+  const GALLERY_SCHEMA: VisibilityFormSchema = {
+    captureGpsOnSubmit: false,
+    fields: [
+      {
+        id: 'photo',
+        type: 'CAMERA',
+        label: 'Store photo',
+        required: true,
+        order: 0,
+        noGallery: false,
+      },
+    ],
+  };
+
+  it('keeps the <input type="file"> (gallery allowed by the author) and no live camera', () => {
+    const { container } = render(<VisibilityCaptureForm schema={GALLERY_SCHEMA} onSubmit={vi.fn()} />);
+    expect(container.querySelector('input[type="file"]')).not.toBeNull();
+    // No live camera is mounted for a gallery-allowed field.
+    expect(screen.queryByTestId('camera-photo-video')).not.toBeInTheDocument();
+  });
+
+  it('compresses then uploads on file selection via the gallery input', async () => {
+    const compressed = new Blob([new Uint8Array([9, 9])], { type: 'image/jpeg' });
+    const compressSpy = vi.spyOn(imageCompression, 'compress').mockResolvedValue(compressed);
+
+    const { container } = render(<VisibilityCaptureForm schema={GALLERY_SCHEMA} onSubmit={vi.fn()} />);
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
     const file = new File([new Uint8Array([1, 2, 3, 4])], 'raw.jpg', { type: 'image/jpeg' });
 
@@ -74,10 +193,8 @@ describe('VisibilityCaptureForm — camera field', () => {
 
     await waitFor(() => {
       expect(compressSpy).toHaveBeenCalledWith(file);
-      expect(uploadSalesMedia).toHaveBeenCalledTimes(1);
+      expect(uploadSalesMedia).toHaveBeenCalledWith(compressed, 'photo.jpg');
     });
-    // uploaded blob is the COMPRESSED output, not the raw file
-    expect(uploadSalesMedia).toHaveBeenCalledWith(compressed, 'photo.jpg');
   });
 });
 
@@ -90,13 +207,8 @@ describe('VisibilityCaptureForm — submit while uploading (L2)', () => {
     uploadSalesMedia.mockReturnValue(new Promise((res) => { resolveUpload = res; }));
 
     const onSubmit = vi.fn().mockResolvedValue(undefined);
-    const { container } = render(<VisibilityCaptureForm schema={CAMERA_SCHEMA} onSubmit={onSubmit} />);
-    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
-    const file = new File([new Uint8Array([1, 2, 3, 4])], 'raw.jpg', { type: 'image/jpeg' });
-
-    await act(async () => {
-      fireEvent.change(input, { target: { files: [file] } });
-    });
+    render(<VisibilityCaptureForm schema={CAMERA_SCHEMA} onSubmit={onSubmit} />);
+    await shoot('photo');
 
     // Upload is in flight → submit is disabled + labelled "Uploading photo…" and a click no-ops.
     const uploadingBtn = await screen.findByRole('button', { name: /uploading photo/i });
@@ -233,8 +345,11 @@ describe('VisibilityCaptureForm — partial re-capture (CHANGES_REQUESTED)', () 
     expect(screen.getByText('Shelf photo')).toBeInTheDocument();
     expect(screen.getByText(/Flagged for re-capture/i)).toBeInTheDocument();
     expect(screen.getByText(/too dark/)).toBeInTheDocument();
-    // The approved photo (photo1) is carried forward read-only (no file input for it).
+    // The rejected photo renders the live camera (camera-only) — its tap-to-open control.
+    expect(screen.getByTestId('camera-photo2-open')).toBeInTheDocument();
+    // The approved photo (photo1) is carried forward read-only (no live camera for it).
     expect(screen.getByTestId('carried-forward-photo1')).toBeInTheDocument();
+    expect(screen.queryByTestId('camera-photo1-capture')).not.toBeInTheDocument();
     // A non-camera field is hidden entirely in partial mode.
     expect(screen.queryByText('Note')).not.toBeInTheDocument();
   });
@@ -245,7 +360,7 @@ describe('VisibilityCaptureForm — partial re-capture (CHANGES_REQUESTED)', () 
     uploadSalesMedia.mockResolvedValue({ success: true, data: { key: 'visibility-media/c1/reshot.jpg' } });
 
     const onSubmit = vi.fn().mockResolvedValue(undefined);
-    const { container } = render(
+    render(
       <VisibilityCaptureForm schema={TWO_PHOTO} photoReviews={REVIEWS} partialRecapture onSubmit={onSubmit} />,
     );
 
@@ -256,12 +371,8 @@ describe('VisibilityCaptureForm — partial re-capture (CHANGES_REQUESTED)', () 
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/Shelf photo.*re-captured/i));
     expect(onSubmit).not.toHaveBeenCalled();
 
-    // Re-capture the only editable photo (photo2).
-    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
-    const file = new File([new Uint8Array([1, 2, 3])], 'raw.jpg', { type: 'image/jpeg' });
-    await act(async () => {
-      fireEvent.change(input, { target: { files: [file] } });
-    });
+    // Re-capture the only editable photo (photo2) via the live camera.
+    await shoot('photo2');
     await waitFor(() => expect(uploadSalesMedia).toHaveBeenCalledTimes(1));
 
     await act(async () => {
