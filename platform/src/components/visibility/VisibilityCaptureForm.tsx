@@ -27,7 +27,7 @@
  * graceful fallback to the original bytes if compression fails.
  */
 
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle, Camera, CheckCircle, Loader2, MapPin,
 } from 'lucide-react';
@@ -657,6 +657,22 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
   const cameraOnly = field.noGallery !== false;
   // Cap-violation message (D2) — a present-but-too-imprecise shutter fix rejects the shot.
   const [capError, setCapError] = useState('');
+  // Local object-URL preview of the JUST-captured photo so the rep SEES what they shot (KYC-enrollment
+  // parity). We show this local blob rather than the uploaded key — sales-side server read-back of the
+  // media isn't guaranteed, so the local preview is the reliable source for "this is what you captured".
+  const [localPreview, setLocalPreview] = useState('');
+  const localPreviewRef = useRef('');
+  const setPreviewFromFile = (file: File) => {
+    if (localPreviewRef.current) { try { URL.revokeObjectURL(localPreviewRef.current); } catch { /* ignore */ } }
+    let url = '';
+    try { url = URL.createObjectURL(file); } catch { url = ''; }
+    localPreviewRef.current = url;
+    setLocalPreview(url);
+  };
+  // Revoke the object URL on unmount (no leak).
+  useEffect(() => () => {
+    if (localPreviewRef.current) { try { URL.revokeObjectURL(localPreviewRef.current); } catch { /* ignore */ } }
+  }, []);
   // Busy across the WHOLE geotag capture (upload + GPS fix). `uploading` alone flips false the
   // instant the upload finishes, while `captureGps()` can still be pending up to 10s — without
   // this the button re-enables mid-fix (double-capture race) with no "getting location" feedback.
@@ -693,12 +709,14 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
           return; // photo NOT stored → field stays uncaptured, the rep can re-capture
         }
         setValue(field.id, fix ? { key: uploadedKey, geo: fix } : { key: uploadedKey });
+        setPreviewFromFile(file); // show the shot back to the rep
       } finally {
         setBusy(false);
       }
     } else {
-      // Non-geotag CAMERA: unchanged — uploadFile stores the bare key string.
-      await uploadFile(field.id, file);
+      // Non-geotag CAMERA: uploadFile stores the bare key string.
+      const uploadedKey = await uploadFile(field.id, file);
+      if (uploadedKey) setPreviewFromFile(file); // show the shot back to the rep
     }
   };
 
@@ -714,6 +732,8 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
   // Clears a captured photo so the live camera (camera-only) re-mounts for a re-shoot.
   const clearCapture = () => {
     setCapError('');
+    if (localPreviewRef.current) { try { URL.revokeObjectURL(localPreviewRef.current); } catch { /* ignore */ } localPreviewRef.current = ''; }
+    setLocalPreview('');
     setValue(field.id, undefined);
   };
 
@@ -733,7 +753,19 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
         />
       )}
       {key ? (
-        <div className="space-y-1">
+        <div className="space-y-1.5">
+          {/* Show the captured photo back to the rep (KYC-enrollment parity). Prefer the local blob
+              (reliable); fall back to the uploaded media URL, hidden on a read-back error. */}
+          {(localPreview || mediaViewUrl(key)) && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={localPreview || mediaViewUrl(key)}
+              alt={`${field.label} — captured`}
+              data-testid={`camera-${field.id}-captured-img`}
+              className="w-full max-h-56 rounded-xl border border-gray-200 object-cover"
+              onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+            />
+          )}
           <div className="flex items-center gap-2 px-3 py-2.5 bg-green-50 border border-green-200 rounded-xl">
             <CheckCircle className="h-3.5 w-3.5 text-green-500 shrink-0" />
             <span className="text-xs text-green-700 font-medium truncate">Photo captured</span>

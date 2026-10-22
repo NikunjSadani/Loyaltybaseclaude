@@ -144,6 +144,10 @@ describe('VisibilityCaptureForm — camera field (live, camera-only)', () => {
     expect(passed).toBeInstanceOf(File);
     expect(passed.type).toBe('image/jpeg');
     expect(uploadSalesMedia).toHaveBeenCalledWith(compressed, 'photo.jpg');
+
+    // The captured photo is shown back to the rep (KYC-enrollment parity) — not just a text chip.
+    expect(await screen.findByTestId('camera-photo-captured-img')).toBeInTheDocument();
+    expect(screen.getByText('Photo captured')).toBeInTheDocument();
   });
 
   it('stops every camera track after the shot (no lingering stream)', async () => {
