@@ -935,6 +935,9 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
   const [asmConfirmed, setAsmConfirmed] = useState(false);
   const [role,              setRoleState]         = useState<string>('SO');
   const [detailsOpen,       setDetailsOpen]       = useState(false);
+  // SO Declaration collapse (approved outlets only — it becomes reference material, tucked
+  // away as a collapsed last card; default closed).
+  const [declOpen,          setDeclOpen]          = useState(false);
   const [photoLightboxIndex, setPhotoLightboxIndex] = useState<number | null>(null);
   // Inline document preview (PDF → iframe, image → img) via a blob URL — mirrors the
   // Gifsy reviewer so a rep can preview any doc in-page, not only in a new tab.
@@ -1387,8 +1390,10 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
       {/* Approval Timeline — hidden for approved outlets (no longer actionable) */}
       {!isApproved && <ApprovalTimeline kyc={kyc} slug={slug} />}
 
-      {/* ── SO Declaration variant: show the SO-signed declaration at every stage ── */}
-      {isSoDecl && !canApprove && (
+      {/* ── SO Declaration — shown EXPANDED during review (pending stages). Once the outlet is
+             APPROVED the deed is reference material, so it is rendered COLLAPSED as the LAST card
+             (below Quick Actions) instead of here. ── */}
+      {isSoDecl && !canApprove && !isApproved && (
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm flex items-center gap-2">
@@ -1832,6 +1837,31 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           ));
         })()}
       </div>
+
+      {/* ── SO Declaration (APPROVED outlet) — reference material, tucked away as a collapsed
+             LAST card (mirrors the Store Information collapsible). Default closed. ── */}
+      {isSoDecl && !canApprove && isApproved && (
+        <div className="rounded-xl border border-gray-200 overflow-hidden" data-testid="so-declaration-collapsed">
+          <button
+            type="button"
+            onClick={() => setDeclOpen(!declOpen)}
+            className="w-full flex items-center justify-between px-4 py-3.5 bg-gray-50 hover:bg-gray-100 transition-colors"
+          >
+            <div className="flex items-center gap-2">
+              <CheckCircle className="h-4 w-4 text-gray-400" />
+              <span className="text-sm font-semibold text-gray-600">
+                SO Declaration {asmSigned ? '(dual-signed)' : '(SO-signed)'}
+              </span>
+            </div>
+            <ChevronDown className={`h-4 w-4 text-gray-400 transition-transform duration-200 ${declOpen ? 'rotate-180' : ''}`} />
+          </button>
+          {declOpen && (
+            <div className="p-4 bg-white">
+              <SoDeclarationView data={declData} signed={{ so: true, asm: asmSigned }} soSignatureUrl={kyc.soSignatureViewUrl} asmSignatureUrl={kyc.asmSignatureViewUrl} />
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Rejection modal */}
       {showRejectModal && (
