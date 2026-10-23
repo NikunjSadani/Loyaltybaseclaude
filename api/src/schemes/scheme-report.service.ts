@@ -454,6 +454,32 @@ function tally(
   return [...m.values()].sort((a, b) => b.rosterCount - a.rosterCount);
 }
 
+/** Normalize a roster column header for alias matching (lowercase, strip non-alphanumerics). */
+function normKey(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+// Canonical aliases for the breakdown-fallback columns (matched case/space/punctuation-insensitively
+// against the roster's own uploaded column headers). e.g. "Program Name" → "programname".
+const ZONE_ALIASES: ReadonlySet<string> = new Set(['zone']);
+const PROGRAM_ALIASES: ReadonlySet<string> = new Set(['program', 'programname']);
+const TYPE_ALIASES: ReadonlySet<string> = new Set(['outlettype', 'type']);
+
+/**
+ * Resolve a breakdown attribute (zone / program / outlet type) for a STANDALONE roster row (one
+ * with no matched loyalty outlet) from the row's OWN uploaded roster columns (`prefillValues`),
+ * matching the column header against a canonical alias set. Returns the trimmed value, or null when
+ * the row carries no such column — so the breakdown reflects the roster's real Zone/Program/Type
+ * instead of bucketing every unmatched row into "Unspecified". Matched rows never reach this (the
+ * matched outlet's value wins), so matched/loyalty reporting is byte-identical.
+ */
+function rosterAttr(prefillValues: unknown, aliases: ReadonlySet<string>): string | null {
+  if (!prefillValues || typeof prefillValues !== 'object' || Array.isArray(prefillValues)) return null;
+  for (const [k, v] of Object.entries(prefillValues as Record<string, unknown>)) {
+    if (aliases.has(normKey(k)) && v != null && String(v).trim() !== '') return String(v).trim();
+  }
+  return null;
+}
+
 /**
  * Scheme reports (D26/D30).
  *   - gifsyReport   — full aggregates for the Gifsy admin (roster/enrolled counts,
@@ -627,6 +653,10 @@ export class SchemeReportService {
         outletRef: true,
         outletName: true,
         matchedOutletId: true,
+        // The roster's OWN uploaded columns — the breakdown falls back to these (zone/program/type)
+        // for a STANDALONE row with no matched loyalty outlet, so they are attributed to their real
+        // Zone/Program/Type instead of all bucketing into "Unspecified".
+        prefillValues: true,
         matchedOutlet: {
           select: {
             zone: true,
@@ -672,12 +702,16 @@ export class SchemeReportService {
     const coveragePct = denominator > 0 ? Math.round((enrolledCount / denominator) * 1000) / 10 : 0;
     const notEnrolledCount = Math.max(denominator - enrolledCount, 0);
 
+    // Breakdown key per roster row: the matched loyalty outlet's value WINS; a standalone row
+    // (no matched outlet — e.g. a WS/Sub-D outlet not in the loyalty master) falls back to its
+    // OWN uploaded roster column (prefillValues), matched by canonical alias. Keeps matched rows
+    // byte-identical and turns the previously-"Unspecified" standalone rows into real buckets.
     const byZone = tally(
-      roster.map((r) => ({ id: r.id, key: r.matchedOutlet?.zone ?? null })),
+      roster.map((r) => ({ id: r.id, key: r.matchedOutlet?.zone ?? rosterAttr(r.prefillValues, ZONE_ALIASES) })),
       enrolledIds,
     );
     const byProgram = tally(
-      roster.map((r) => ({ id: r.id, key: r.matchedOutlet?.programName ?? null })),
+      roster.map((r) => ({ id: r.id, key: r.matchedOutlet?.programName ?? rosterAttr(r.prefillValues, PROGRAM_ALIASES) })),
       enrolledIds,
     );
     const byOutletType = tally(
@@ -685,7 +719,7 @@ export class SchemeReportService {
         id: r.id,
         key: r.matchedOutlet?.outletType
           ? labelFor(typeDisplayById, r.matchedOutlet.outletType.id, r.matchedOutlet.outletType.name)
-          : null,
+          : rosterAttr(r.prefillValues, TYPE_ALIASES),
       })),
       enrolledIds,
     );
@@ -746,11 +780,12 @@ export class SchemeReportService {
       outletRef: r.outletRef,
       outletName: r.outletName,
       matched: !!r.matchedOutletId,
-      zone: r.matchedOutlet?.zone ?? null,
-      program: r.matchedOutlet?.programName ?? null,
+      // Matched loyalty outlet wins; a standalone row falls back to its own roster column.
+      zone: r.matchedOutlet?.zone ?? rosterAttr(r.prefillValues, ZONE_ALIASES),
+      program: r.matchedOutlet?.programName ?? rosterAttr(r.prefillValues, PROGRAM_ALIASES),
       outletType: r.matchedOutlet?.outletType
         ? labelFor(a.typeDisplayById, r.matchedOutlet.outletType.id, r.matchedOutlet.outletType.name)
-        : null,
+        : rosterAttr(r.prefillValues, TYPE_ALIASES),
       status: a.statusByOutlet.get(r.id) ?? 'NOT_ENROLLED',
     }));
 

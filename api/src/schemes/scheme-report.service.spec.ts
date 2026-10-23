@@ -458,6 +458,29 @@ describe('SchemeReportService', () => {
       expect(rep.byZone.find((b) => b.key === 'Unspecified')).toEqual({ key: 'Unspecified', rosterCount: 1, enrolledCount: 0 });
     });
 
+    it('breakdown + rows fall back to the roster’s OWN columns for a standalone (unmatched) row', async () => {
+      // A matched row (uses the loyalty outlet) + a standalone row whose roster carries Zone /
+      // Program Name / Outlet Type columns (as in the real SOND 26 "WS & Sub DB" scheme).
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
+        { id: 'r1', outletRef: 'A1', outletName: 'A1', matchedOutletId: 'o1', prefillValues: null, matchedOutlet: { zone: 'W', programName: 'P', outletType: { id: 't', name: 'Retail' } } },
+        { id: 'r2', outletRef: 'A2', outletName: 'A2', matchedOutletId: null, prefillValues: { City: 'Katihar', Zone: 'East', 'Program Name': 'SOND 26 WS and SubD', 'Outlet Type': 'SubD' }, matchedOutlet: null },
+      ]);
+      mockPrisma.schemeEnrollment.findMany.mockResolvedValue([{ schemeOutletId: 'r2', status: 'SUBMITTED' }]);
+
+      const rep = await service.gifsyReport(asTenant('deoleo'), 's1');
+      // The standalone row is attributed to its OWN roster columns, NOT "Unspecified".
+      expect(rep.byZone.find((b) => b.key === 'East')).toEqual({ key: 'East', rosterCount: 1, enrolledCount: 1 });
+      expect(rep.byZone.find((b) => b.key === 'Unspecified')).toBeUndefined();
+      expect(rep.byProgram.find((b) => b.key === 'SOND 26 WS and SubD')).toMatchObject({ rosterCount: 1 });
+      expect(rep.byOutletType.find((b) => b.key === 'SubD')).toMatchObject({ rosterCount: 1 });
+      // The matched row is unchanged (its loyalty-outlet value wins).
+      expect(rep.byZone.find((b) => b.key === 'W')).toMatchObject({ rosterCount: 1 });
+
+      // The on-screen tenant row list reflects the same fallback.
+      const trep = await service.tenantReport(asTenant('deoleo'), 's1');
+      expect(trep.rows.find((r) => r.outletRef === 'A2')).toMatchObject({ matched: false, zone: 'East', program: 'SOND 26 WS and SubD', outletType: 'SubD' });
+    });
+
     it('tenantReport returns aggregates + a row list with NO raw media/formValues', async () => {
       const rep = await service.tenantReport(asTenant('deoleo'), 's1');
       expect(rep.summary.rosterCount).toBe(4);
