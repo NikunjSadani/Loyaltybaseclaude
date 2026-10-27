@@ -1100,6 +1100,112 @@ describe('SalesService', () => {
     });
   });
 
+  describe('getTeamView', () => {
+    const edges = [
+      { id: 'root', reportingToId: null },
+      { id: 'so1', reportingToId: 'root' },
+      { id: 'so2', reportingToId: 'root' },
+      { id: 'isr1', reportingToId: 'so1' },
+      { id: 'isr2', reportingToId: 'so2' },
+    ];
+    const sub = (id: string, name: string, code: string) => ({
+      id, employeeCode: code, region: null, zone: null,
+      user: { name, phone: '' }, hierarchyLevel: { code: 'SO', name: 'SO' },
+      _count: { subordinates: 1 },
+    });
+    const approved = { partner: { kycSubmissions: [{ status: 'APPROVED' }] } };
+
+    function primeHappy() {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'root', user: { name: 'Root', phone: '' },
+        hierarchyLevel: { code: 'ASM', name: 'ASM', level: 3 },
+        subordinates: [sub('so1', 'SO One', 'SO1'), sub('so2', 'SO Two', 'SO2')],
+      });
+      mockPrisma.salesUser.findMany.mockResolvedValue(edges);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'K', label: 'KPI K', isPrimary: true, order: 1 }]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { salesUserId: 'isr1', outlet: { id: 'o1', outletCode: 'O1', programName: 'Unnati', outletType: { code: 'SSS', name: 'Retailer' }, ...approved } },
+        { salesUserId: 'isr1', outlet: { id: 'o2', outletCode: 'O2', programName: 'Unnati', outletType: { code: 'SSS', name: 'Retailer' }, ...approved } },
+        { salesUserId: 'isr2', outlet: { id: 'o3', outletCode: 'O3', programName: 'BSC', outletType: { code: 'WHOLESALER', name: 'Wholesaler' }, ...approved } },
+      ]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', targetValues: { K: 10 } },
+        { outletCode: 'O2', targetValues: { K: 10 } },
+        { outletCode: 'O3', targetValues: { K: 10 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', kpiValues: { K: 12 } }, // hit
+        { outletCode: 'O2', kpiValues: { K: 5 } },  // miss
+        { outletCode: 'O3', kpiValues: { K: 20 } }, // hit
+      ]);
+    }
+
+    it('scores each direct report by outlets-hit-target ÷ outlets-with-target, ascending (worst first)', async () => {
+      primeHappy();
+      const res = await service.getTeamView(caller, {});
+      expect(res.members.map((m: { id: string }) => m.id)).toEqual(['so1', 'so2']); // 50% before 100%
+      expect(res.members[0]).toMatchObject({ id: 'so1', outletsWithTarget: 2, outletsAchieved: 1, achievedPct: 50 });
+      expect(res.members[1]).toMatchObject({ id: 'so2', outletsWithTarget: 1, outletsAchieved: 1, achievedPct: 100 });
+      expect(res.summary).toMatchObject({ outlets: 3, kycDone: 3, avgTargetPct: 67 }); // 2 of 3 across the team
+      expect(res.filterOptions.programs).toEqual(['BSC', 'Unnati']);
+    });
+
+    it('the outletType filter narrows the outlet population (and empties non-matching members)', async () => {
+      primeHappy();
+      const res = await service.getTeamView(caller, { outletType: 'WHOLESALER' });
+      expect(res.members.find((m: { id: string }) => m.id === 'so1')).toMatchObject({ outletsWithTarget: 0, achievedPct: null });
+      expect(res.members.find((m: { id: string }) => m.id === 'so2')).toMatchObject({ outletsWithTarget: 1, achievedPct: 100 });
+      expect(res.summary.outlets).toBe(1);
+    });
+
+    it('sorts a null-% member (no targeted outlets) BELOW a 0% member', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'root', user: { name: 'Root', phone: '' },
+        hierarchyLevel: { code: 'ASM', name: 'ASM', level: 3 },
+        subordinates: [sub('so1', 'SO One', 'SO1'), sub('so2', 'SO Two', 'SO2')],
+      });
+      mockPrisma.salesUser.findMany.mockResolvedValue(edges);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'K', label: 'KPI K', isPrimary: true, order: 1 }]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { salesUserId: 'isr1', outlet: { id: 'o1', outletCode: 'O1', programName: 'Unnati', outletType: { code: 'SSS', name: 'Retailer' }, ...approved } },
+        { salesUserId: 'isr2', outlet: { id: 'o3', outletCode: 'O3', programName: 'BSC', outletType: { code: 'WHOLESALER', name: 'Wholesaler' }, ...approved } },
+      ]);
+      // O1 HAS a target (so1 → 0% after a miss); O3 has NO target for K (so2 → null, no targeted outlets).
+      mockPrisma.outletTarget.findMany.mockResolvedValue([{ outletCode: 'O1', targetValues: { K: 10 } }]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([{ outletCode: 'O1', kpiValues: { K: 0 } }]);
+      const res = await service.getTeamView(caller, {});
+      expect(res.members.map((m: { id: string }) => m.id)).toEqual(['so1', 'so2']); // 0% above null
+      expect(res.members[0]).toMatchObject({ id: 'so1', achievedPct: 0 });
+      expect(res.members[1]).toMatchObject({ id: 'so2', achievedPct: null });
+    });
+
+    it('no enabled KPIs → kpiCode null, empty KPI options, null %s, no throw (empty-tenant path)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'root', user: { name: 'Root', phone: '' },
+        hierarchyLevel: { code: 'ASM', name: 'ASM', level: 3 },
+        subordinates: [sub('so1', 'SO One', 'SO1')],
+      });
+      mockPrisma.salesUser.findMany.mockResolvedValue(edges);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { salesUserId: 'isr1', outlet: { id: 'o1', outletCode: 'O1', programName: 'Unnati', outletType: { code: 'SSS', name: 'Retailer' }, ...approved } },
+      ]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+      const res = await service.getTeamView(caller, {});
+      expect(res.kpiCode).toBeNull();
+      expect(res.filterOptions.kpis).toEqual([]);
+      expect(res.summary.avgTargetPct).toBeNull();
+      expect(res.members[0]).toMatchObject({ id: 'so1', achievedPct: null });
+    });
+
+    it('a drill-down memberId outside the caller subtree is Forbidden', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'root' });
+      mockPrisma.salesUser.findMany.mockResolvedValue(edges); // 'x' is not in the tenant edges
+      await expect(service.getTeamView(caller, { memberId: 'x' })).rejects.toThrow('Forbidden');
+    });
+  });
+
   describe('getOutletTargets', () => {
     it('returns empty when not a sales user', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue(null);

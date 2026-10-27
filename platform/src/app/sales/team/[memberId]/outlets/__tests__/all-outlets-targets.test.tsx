@@ -11,7 +11,10 @@ import React from 'react';
 import { render, screen, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
-vi.mock('next/navigation', () => ({ useParams: () => ({ memberId: 'm-1' }) }));
+vi.mock('next/navigation', () => ({
+  useParams: () => ({ memberId: 'm-1' }),
+  useRouter: () => ({ back: vi.fn(), push: vi.fn(), replace: vi.fn() }),
+}));
 vi.mock('next/link', () => ({
   default: ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) =>
     <a href={href} {...props}>{children}</a>,

@@ -314,6 +314,209 @@ export class SalesService {
   }
 
   /**
+   * GET /v1/sales/team-view — the redesigned Team screen (filters + KPI league table).
+   *
+   * Root = the caller, or `memberId` (auth-scoped to the caller's subtree via assertCanViewMember)
+   * for recursive drill-down. Filters: `outletType` + `program` narrow the outlet population;
+   * `kpi` (default = primary) selects the achievement metric.
+   *
+   * Returns the team SUMMARY (filtered, over the root's whole subtree) + each DIRECT report scored
+   * by `outletsAchieved / outletsWithTarget` — KYC-approved outlets in that report's WHOLE downline
+   * (type/program-filtered) that have a target for the KPI and hit it ÷ those that have a target
+   * (an outlet with NO target for the KPI is excluded from BOTH). Members sorted ASCENDING by that
+   * % (worst first); members with no targeted outlets (null %) sort last. Plus the filter options.
+   *
+   * One assignment batch over the root subtree + one target/achievement map pair; everything else
+   * rolls up in memory (no per-member query, mirrors buildTeamRollups).
+   */
+  async getTeamView(
+    user: JwtPayload,
+    opts: { memberId?: string; outletType?: string; program?: string; kpi?: string } = {},
+  ) {
+    if (opts.memberId) await this.assertCanViewMember(user, opts.memberId);
+
+    const root = await this.prisma.salesUser.findFirst({
+      where: opts.memberId
+        ? { id: opts.memberId, deletedAt: null, user: { clientId: user.clientId } }
+        : { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
+      include: {
+        user: { select: { name: true, phone: true } },
+        hierarchyLevel: { select: { code: true, name: true, level: true } },
+        subordinates: {
+          where: { isActive: true, deletedAt: null },
+          include: {
+            user: { select: { name: true, phone: true } },
+            hierarchyLevel: { select: { code: true, name: true } },
+            // ACTIVE direct-report count only — this drives the FE drill-down route
+            // (teamSize>0 → team view, else → outlets). An unfiltered count would still
+            // show teamSize=1 for a manager whose only subordinate is soft-deleted and
+            // route to an empty team view instead of their outlets.
+            _count: { select: { subordinates: { where: { isActive: true, deletedAt: null } } } },
+          },
+        },
+      },
+    });
+
+    // KPI catalogue → the KPI filter options + the metric. Enabled only, configured order.
+    const kpiDefs = await this.prisma.kpiDef.findMany({
+      where: { clientId: user.clientId, enabled: true },
+      select: { code: true, label: true, isPrimary: true, order: true },
+      orderBy: [{ order: 'asc' }, { code: 'asc' }],
+    });
+    const primaryCode = (kpiDefs.find((k) => k.isPrimary) ?? kpiDefs[0])?.code ?? null;
+    const kpiCode = opts.kpi && kpiDefs.some((k) => k.code === opts.kpi) ? opts.kpi : primaryCode;
+
+    const filterOptions = {
+      outletTypes: [] as { code: string; name: string }[],
+      programs: [] as string[],
+      kpis: kpiDefs.map((k) => ({ code: k.code, label: k.label })),
+    };
+    const emptySummary = { outlets: 0, kycDone: 0, kycPending: 0, avgTargetPct: null as number | null };
+    if (!root) {
+      return { member: null, summary: emptySummary, members: [], filterOptions, kpiCode };
+    }
+
+    const month = this.reportMonth();
+    const [targetMap, achMap] = await this.primaryMapsForMonth(user.clientId, month, kpiCode);
+
+    const edges = await this.prisma.salesUser.findMany({
+      where: { user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true, reportingToId: true },
+    });
+    const rootSubtree = descendantSalesUserIds(root.id, edges);
+    const directReports = root.subordinates;
+    const memberSubtrees = new Map<string, Set<string>>(
+      directReports.map((m) => [m.id, descendantSalesUserIds(m.id, edges)]),
+    );
+
+    // One assignment batch over the root subtree, with each outlet's type + program + latest KYC.
+    const assignments = await this.prisma.salesUserAssignment.findMany({
+      where: {
+        salesUserId: { in: [...rootSubtree] },
+        unassignedAt: null,
+        outletId: { not: null },
+        outlet: NOT_PARKED_OUTLET,
+      },
+      select: {
+        salesUserId: true,
+        outlet: {
+          select: {
+            id: true,
+            outletCode: true,
+            programName: true,
+            outletType: { select: { code: true, name: true } },
+            partner: {
+              select: { kycSubmissions: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true } } },
+            },
+          },
+        },
+      },
+    });
+
+    type OInfo = { id: string; code: string | null; typeCode: string; typeName: string; program: string; status: string };
+    const outletsByUser = new Map<string, OInfo[]>();
+    const typeSet = new Map<string, string>();
+    const programSet = new Set<string>();
+    for (const a of assignments) {
+      const o = a.outlet;
+      if (!o) continue;
+      const info: OInfo = {
+        id: o.id,
+        code: o.outletCode,
+        typeCode: o.outletType?.code ?? '',
+        typeName: o.outletType?.name ?? o.outletType?.code ?? '',
+        program: o.programName ?? '',
+        status: o.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED',
+      };
+      if (info.typeCode) typeSet.set(info.typeCode, info.typeName);
+      if (info.program) programSet.add(info.program);
+      const arr = outletsByUser.get(a.salesUserId) ?? [];
+      arr.push(info);
+      outletsByUser.set(a.salesUserId, arr);
+    }
+    filterOptions.outletTypes = [...typeSet.entries()]
+      .map(([code, name]) => ({ code, name }))
+      .sort((x, y) => x.name.localeCompare(y.name));
+    filterOptions.programs = [...programSet].sort();
+
+    const typeF = opts.outletType && opts.outletType !== 'ALL' ? opts.outletType : null;
+    const progF = opts.program && opts.program !== 'ALL' ? opts.program : null;
+    const passes = (o: OInfo) => (!typeF || o.typeCode === typeF) && (!progF || o.program === progF);
+    const TERMINAL = ['APPROVED', 'REJECTED', 'NOT_INTERESTED'];
+
+    // Roll up one subtree's (deduped, filtered) outlets into counts + the KPI metric.
+    const aggregate = (subtree: Set<string>) => {
+      const seen = new Set<string>();
+      let outlets = 0, kycDone = 0, kycPending = 0, withTarget = 0, achieved = 0;
+      for (const sid of subtree) {
+        for (const o of outletsByUser.get(sid) ?? []) {
+          if (seen.has(o.id)) continue;
+          seen.add(o.id);
+          if (!passes(o)) continue;
+          outlets++;
+          const approved = o.status === 'APPROVED';
+          if (approved) kycDone++;
+          if (!TERMINAL.includes(o.status)) kycPending++;
+          if (approved && o.code) {
+            const t = targetMap.get(o.code) ?? 0;
+            if (t > 0) {
+              withTarget++;
+              if ((achMap.get(o.code) ?? 0) >= t) achieved++;
+            }
+          }
+        }
+      }
+      const pct = withTarget > 0 ? Math.round((100 * achieved) / withTarget) : null;
+      return { outlets, kycDone, kycPending, withTarget, achieved, pct };
+    };
+
+    const sum = aggregate(rootSubtree);
+    const summary = { outlets: sum.outlets, kycDone: sum.kycDone, kycPending: sum.kycPending, avgTargetPct: sum.pct };
+
+    const members = directReports.map((m) => {
+      const agg = aggregate(memberSubtrees.get(m.id) ?? new Set<string>());
+      return {
+        id: m.id,
+        name: m.user.name,
+        employeeCode: m.employeeCode,
+        mobile: m.user.phone ?? '',
+        role: m.hierarchyLevel.code,
+        roleLabel: m.hierarchyLevel.name,
+        teamSize: m._count.subordinates,
+        outlets: agg.outlets,
+        kycDone: agg.kycDone,
+        kycPending: agg.kycPending,
+        outletsAchieved: agg.achieved,
+        outletsWithTarget: agg.withTarget,
+        achievedPct: agg.pct,
+      };
+    });
+
+    // Ascending by the KPI-achievement % (worst first); no-targeted-outlets (null) sorts last.
+    members.sort((a, b) => {
+      if (a.achievedPct === null && b.achievedPct === null) return a.name.localeCompare(b.name);
+      if (a.achievedPct === null) return 1;
+      if (b.achievedPct === null) return -1;
+      if (a.achievedPct !== b.achievedPct) return a.achievedPct - b.achievedPct;
+      return a.name.localeCompare(b.name);
+    });
+
+    return {
+      member: {
+        id: root.id,
+        name: root.user.name,
+        roleLabel: root.hierarchyLevel.name,
+        role: root.hierarchyLevel.code,
+        level: root.hierarchyLevel.level,
+      },
+      summary,
+      members,
+      filterOptions,
+      kpiCode,
+    };
+  }
+
+  /**
    * Resolves the caller's own SalesUser within the tenant, loads the tenant's
    * reporting edges, and verifies the target member is the caller or a descendant
    * of the caller in their reporting subtree. Throws Forbidden otherwise.

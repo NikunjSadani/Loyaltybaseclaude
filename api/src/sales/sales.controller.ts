@@ -25,6 +25,20 @@ export class SalesController {
     return this.sales.getTeam(user);
   }
 
+  // Redesigned Team screen: filters (outletType/program/kpi) + per-direct-report KPI-achievement
+  // league table. Optional memberId drills into that member's team (auth-scoped to the caller).
+  @Get('team-view')
+  @RequirePermission('sales_org:read')
+  getTeamView(
+    @CurrentUser() user: JwtPayload,
+    @Query('memberId') memberId?: string,
+    @Query('outletType') outletType?: string,
+    @Query('program') program?: string,
+    @Query('kpi') kpi?: string,
+  ) {
+    return this.sales.getTeamView(user, { memberId, outletType, program, kpi });
+  }
+
   @Get('outlets')
   @RequirePermission('sales_org:read')
   getMyOutlets(@CurrentUser() user: JwtPayload) {

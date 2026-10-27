@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import {
   ArrowLeft, AlertTriangle, LayoutGrid, LayoutList, ChevronRight,
 } from 'lucide-react';
@@ -31,12 +31,21 @@ interface OutletMeta {
   beat: string;
   district?: string;
   state?: string;
+  programName?: string;
 }
 
 /* ─── Real per-outlet target data (GET /api/sales/team/[memberId]/outlet-targets) ─ */
 
 interface KpiCol { code: string; name: string; unit: string; isPrimary: boolean; }
 type OutletKpis = Record<string, { target: number | null; achieved: number | null; pace: number | null }>;
+
+/** A single KPI's achievement % for an outlet, or null when it has no target for that KPI. */
+function kpiPct(kpis: OutletKpis, code: string | null): number | null {
+  if (!code) return null;
+  const k = kpis[code];
+  if (k && k.target && k.target > 0) return pct(k.achieved ?? 0, k.target);
+  return null;
+}
 
 /** Overall achievement % for an outlet = its primary KPI's pct, else the avg of KPIs with a target. */
 function outletOverallPct(kpis: OutletKpis, primaryCode: string | null): number {
@@ -102,6 +111,7 @@ const TYPE_FILTERS: { value: OutletType | 'ALL'; label: string }[] = [
 /* ─── Page ──────────────────────────────────────────────────────────────────── */
 
 export default function MemberOutletsPage() {
+  const router   = useRouter();
   const params   = useParams();
   const memberId = Array.isArray(params.memberId) ? params.memberId[0] : (params.memberId ?? '');
 
@@ -114,6 +124,9 @@ export default function MemberOutletsPage() {
   const [view,       setView]       = useState<'table' | 'cards'>('cards');
   const [typeFilter, setTypeFilter] = useState<OutletType | 'ALL'>('ALL');
   const [beatFilter, setBeatFilter] = useState<string>('ALL');
+  const [programFilter, setProgramFilter] = useState<string>('ALL');
+  // KPI chosen in the Team view → sort outlets ascending by that KPI (lowest first); '' = default.
+  const [kpiSort, setKpiSort] = useState<string>('');
 
   // Cards on mobile, table on desktop
   useEffect(() => {
@@ -121,6 +134,14 @@ export default function MemberOutletsPage() {
     update();
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
+  }, []);
+
+  // Carry the Team-view filters (outletType / program / kpi) passed in the URL query.
+  useEffect(() => {
+    const sp = new URLSearchParams(window.location.search);
+    const t = sp.get('outletType'); if (t) setTypeFilter(t as OutletType | 'ALL');
+    const p = sp.get('program'); if (p) setProgramFilter(p);
+    const k = sp.get('kpi'); if (k) setKpiSort(k);
   }, []);
 
   // Fetch member info + outlets from API
@@ -172,12 +193,18 @@ export default function MemberOutletsPage() {
     return ['ALL', ...Array.from(beats).sort()];
   }, [allOutlets]);
 
+  const allPrograms = useMemo(() => {
+    const progs = new Set(allOutlets.map((o) => o.programName).filter((v): v is string => !!v));
+    return ['ALL', ...Array.from(progs).sort()];
+  }, [allOutlets]);
+
   // Apply filters
   const visibleOutlets = useMemo(() => allOutlets.filter((o) => {
     const matchesType = typeFilter === 'ALL' || o.type === typeFilter;
     const matchesBeat = beatFilter === 'ALL' || o.beat === beatFilter;
-    return matchesType && matchesBeat;
-  }), [allOutlets, typeFilter, beatFilter]);
+    const matchesProgram = programFilter === 'ALL' || o.programName === programFilter;
+    return matchesType && matchesBeat && matchesProgram;
+  }), [allOutlets, typeFilter, beatFilter, programFilter]);
 
   // Owner-specified outlet order (2026-07-03): Approved → Re-KYC → Rejected →
   // Pending → Not Interested (see kycOrderRank). Within Approved, worst performer
@@ -187,11 +214,24 @@ export default function MemberOutletsPage() {
       const ra = kycOrderRank(a.kycStatus);
       const rb = kycOrderRank(b.kycStatus);
       if (ra !== rb) return ra - rb;
-      if (ra === 0) return outletOverallPct(kpisFor(a), primaryCode) - outletOverallPct(kpisFor(b), primaryCode);
+      if (ra === 0) {
+        // A KPI chosen in the Team view sorts ascending by THAT KPI (no-target outlets last);
+        // otherwise the existing overall-% worst-first order.
+        if (kpiSort) {
+          const pa = kpiPct(kpisFor(a), kpiSort);
+          const pb = kpiPct(kpisFor(b), kpiSort);
+          if (pa === null && pb === null) return a.name.localeCompare(b.name);
+          if (pa === null) return 1;
+          if (pb === null) return -1;
+          if (pa !== pb) return pa - pb;
+          return a.name.localeCompare(b.name);
+        }
+        return outletOverallPct(kpisFor(a), primaryCode) - outletOverallPct(kpisFor(b), primaryCode);
+      }
       return a.name.localeCompare(b.name);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleOutlets, targetsByOutlet, primaryCode]);
+  }, [visibleOutlets, targetsByOutlet, primaryCode, kpiSort]);
 
   const approvedCount = visibleOutlets.filter((o) => o.kycStatus === KYCStatus.APPROVED).length;
   const filteredCount = allOutlets.length - visibleOutlets.length;
@@ -218,13 +258,16 @@ export default function MemberOutletsPage() {
 
       {/* Back nav + title */}
       <div className="flex items-center gap-2">
-        <Link
-          href={`/sales/team/${memberId}`}
+        {/* Return to wherever the user came from (the parent team list). Using the raw
+            /sales/team/{memberId} route would land on this leaf's own (empty) team view. */}
+        <button
+          type="button"
+          onClick={() => router.back()}
           className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors text-gray-500 shrink-0"
           aria-label="Back"
         >
           <ArrowLeft className="h-4 w-4" />
-        </Link>
+        </button>
         <div className="min-w-0">
           <h1 className="text-lg font-bold text-gray-900 leading-tight truncate">
             {member?.name ?? '…'}&apos;s Outlets
@@ -310,6 +353,47 @@ export default function MemberOutletsPage() {
             <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
         </div>
+
+        {/* Program (carried from the Team view; shown when this member spans >1 program) */}
+        {allPrograms.length > 2 && (
+          <div className="relative shrink-0">
+            <select
+              value={programFilter}
+              onChange={(e) => setProgramFilter(e.target.value)}
+              className={`appearance-none text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1 bg-white focus:outline-none transition-colors cursor-pointer ${
+                programFilter !== 'ALL' ? 'border-[#16a34a] text-[#16a34a]' : 'border-gray-200 text-gray-600 focus:border-[#16a34a]'
+              }`}
+            >
+              {allPrograms.map((p) => (
+                <option key={p} value={p}>{p === 'ALL' ? 'All Programs' : p}</option>
+              ))}
+            </select>
+            <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${programFilter !== 'ALL' ? 'text-[#16a34a]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none">
+              <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </div>
+        )}
+
+        {/* KPI sort (carried from the Team view; sorts outlets ascending by that KPI) */}
+        {kpiColumns.length > 0 && (
+          <div className="relative shrink-0">
+            <select
+              value={kpiSort}
+              onChange={(e) => setKpiSort(e.target.value)}
+              className={`appearance-none text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1 bg-white focus:outline-none transition-colors cursor-pointer ${
+                kpiSort !== '' ? 'border-[#16a34a] text-[#16a34a]' : 'border-gray-200 text-gray-600 focus:border-[#16a34a]'
+              }`}
+            >
+              <option value="">Sort: Default</option>
+              {kpiColumns.map((k) => (
+                <option key={k.code} value={k.code}>Sort: {k.name}</option>
+              ))}
+            </select>
+            <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${kpiSort !== '' ? 'text-[#16a34a]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none">
+              <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </div>
+        )}
       </div>
 
       {/* No outlets in tree */}
@@ -434,7 +518,7 @@ export default function MemberOutletsPage() {
               <AlertTriangle className="h-7 w-7 text-gray-300" />
               <p className="text-sm text-gray-400">No outlets match the selected filters</p>
               <button
-                onClick={() => { setTypeFilter('ALL'); setBeatFilter('ALL'); }}
+                onClick={() => { setTypeFilter('ALL'); setBeatFilter('ALL'); setProgramFilter('ALL'); }}
                 className="text-xs text-[#16a34a] font-semibold hover:underline mt-1"
               >
                 Clear all filters

@@ -10,7 +10,9 @@ import { render, screen, waitFor, act } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
+  usePathname: () => '/sales/team',
+  useSearchParams: () => new URLSearchParams(''),
 }));
 vi.mock('next/link', () => ({
   default: ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) =>
@@ -69,10 +71,12 @@ describe.skip('AB — MemberCard sub-line shows employee ID', () => {
 describe('TM — team member sub-line shows employee ID + phone (real /api/sales/team)', () => {
   afterEach(() => { vi.unstubAllGlobals(); });
 
+  // The redesigned Team view (GET /api/sales/team-view) envelope.
   const TEAM_PAYLOAD = {
     success: true,
     data: {
-      salesUser: { role: 'SO', region: 'NCR', zone: null },
+      member: null,
+      summary: { outlets: 10, kycDone: 7, kycPending: 3, avgTargetPct: 65 },
       members: [
         {
           id: 'cmqp6qtu3007x01s6dbz4aisb', // internal CUID — must NOT be displayed
@@ -81,15 +85,17 @@ describe('TM — team member sub-line shows employee ID + phone (real /api/sales
           mobile: '9900000011',
           role: 'ISR',
           roleLabel: 'Executive Sales Representative',
-          territory: '',
           teamSize: 0,
-          joinedAt: '2026-01-01T00:00:00.000Z',
+          outlets: 10, kycDone: 7, kycPending: 3,
+          outletsAchieved: 2, outletsWithTarget: 3, achievedPct: 67,
         },
       ],
+      filterOptions: { outletTypes: [], programs: [], kpis: [] },
+      kpiCode: null,
     },
   };
 
-  it('TM1: renders "ISR-M0100 · 9900000011" under the name, not the CUID', async () => {
+  it('TM1: member sub-line shows employeeCode + phone, not the CUID', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve(TEAM_PAYLOAD),
@@ -97,7 +103,8 @@ describe('TM — team member sub-line shows employee ID + phone (real /api/sales
     render(<TeamPage />);
 
     expect(await screen.findByText('Anil Sharma')).toBeInTheDocument();
-    expect(screen.getByText('ISR-M0100 · 9900000011')).toBeInTheDocument();
+    // Sub-line = roleLabel · employeeCode · mobile (the redesigned member row).
+    expect(screen.getByText('Executive Sales Representative · ISR-M0100 · 9900000011')).toBeInTheDocument();
     expect(screen.queryByText('cmqp6qtu3007x01s6dbz4aisb')).not.toBeInTheDocument();
   });
 });
