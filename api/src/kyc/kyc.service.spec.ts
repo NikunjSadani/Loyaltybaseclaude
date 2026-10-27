@@ -321,6 +321,38 @@ describe('KycService', () => {
     });
   });
 
+  describe('create() — Bajaj enroll gate (ISR/SO only; owner 2026-10-27)', () => {
+    const dto = { outletId: 'outlet-1' } as unknown as Parameters<typeof service.create>[1];
+    const bajaj = (role: string): JwtPayload =>
+      ({ sub: 'u', role: role as JwtPayload['role'], clientId: 'bajaj', phone: '', name: '' });
+
+    it('blocks a Bajaj sales MANAGER (ASM / RSM·ZNM / NSM) from enrolling', async () => {
+      for (const role of ['SALES_ASM', 'SALES_STATE_HEAD', 'SALES_HO']) {
+        await expect(service.create(bajaj(role), dto)).rejects.toThrow('Only an ISR or SO can enroll');
+      }
+    });
+
+    it('lets a Bajaj ISR or SO past the gate (then only the unrelated outlet lookup fails)', async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValue(null);
+      for (const role of ['SALES_ISR', 'SALES_SO']) {
+        await expect(service.create(bajaj(role), dto)).rejects.toThrow('Outlet not found');
+      }
+    });
+
+    it('does NOT block a non-Bajaj (Deoleo) ASM — byte-identical', async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValue(null);
+      const deoleoAsm: JwtPayload = { sub: 'a', role: 'SALES_ASM', clientId: 'deoleo', phone: '', name: '' };
+      await expect(service.create(deoleoAsm, dto)).rejects.toThrow('Outlet not found');
+    });
+
+    it('does NOT block non-sales Bajaj initiators (admin / partner self-enroll)', async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValue(null);
+      for (const role of ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'RETAILER']) {
+        await expect(service.create(bajaj(role), dto)).rejects.toThrow('Outlet not found');
+      }
+    });
+  });
+
   describe('create() document references (tenant safety)', () => {
     const baseDto = {
       outletId: 'outlet-1',

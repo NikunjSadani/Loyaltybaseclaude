@@ -1238,6 +1238,20 @@ export class KycService {
 
   // ─── POST /v1/kyc ────────────────────────────────────────────────────────────
   async create(user: JwtPayload, dto: CreateKycDto) {
+    // ── BAJAJ ENROLL GATE (owner 2026-10-27): only an ISR or SO may enroll a new outlet ──
+    // For the Bajaj tenant a sales MANAGER (ASM and above) is an APPROVER only, never an
+    // enroller — enforced server-side so a crafted request can't bypass the hidden FE button
+    // (standard AND SO-Declaration flows). The denylist is the three manager sales roles; every
+    // non-manager caller passes: SALES_ISR / SALES_SO (the two allowed enrollers), and non-sales
+    // initiators — GIFSY_ADMIN / CLIENT_ADMIN and partner SELF-enrollment (whose role is not a
+    // SALES_* code). Scoped to clientId 'bajaj', so Deoleo / every other tenant is byte-identical.
+    if (
+      user.clientId === 'bajaj' &&
+      ['SALES_ASM', 'SALES_STATE_HEAD', 'SALES_HO'].includes(user.role)
+    ) {
+      throw new ForbiddenException('Only an ISR or SO can enroll a new outlet for this tenant.');
+    }
+
     // ── OUTLET-DRIVEN KYC ─────────────────────────────────────────────────────
     // The submission is FILED BY the rep (user.sub) but is ABOUT dto.outletId's
     // outlet/owner. We (a) resolve the target outlet, (b) resolve-or-create the

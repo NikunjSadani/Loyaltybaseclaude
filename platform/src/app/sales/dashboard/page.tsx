@@ -338,7 +338,7 @@ export default function SalesDashboard() {
   /* ── Visibility tasks — same source + shape as the Tasks page (buildVisibilityTaskItems)
        so the dashboard's "Visibility" count matches /sales/tasks. Enroll roles only. ── */
   useEffect(() => {
-    const isFieldRole = canEnroll(role);
+    const isFieldRole = canEnroll(role, slug);
     const gs = getGifsySettings();
     const visibilityEnabled = gs.visibilityEnabled === true;
     const captureMode = gs.visibilityCaptureMode ?? 'PHOTO_APPROVAL';
@@ -412,7 +412,7 @@ export default function SalesDashboard() {
     const groups: TaskGroup[] = [];
 
     // Role gates
-    const isFieldRole = canEnroll(role);
+    const isFieldRole = canEnroll(role, slug);
     const approvalStatus =
       role === 'SO'  ? KYCStatus.PENDING_SO_APPROVAL  :
       role === 'ASM' ? KYCStatus.PENDING_ASM_APPROVAL :
@@ -558,7 +558,7 @@ export default function SalesDashboard() {
     // with the Tasks page). Mode-aware (D8/D14): PHOTO_APPROVAL surfaces to ANY capturer
     // (incl. managers, driven by canCapture) — NOT gated on isFieldRole; AMOUNT_UPLOAD
     // stays field-role only. visibilityItems is empty for a non-capturer either way.
-    const showVisibilityGroup = visibilityMode === 'PHOTO_APPROVAL' || canEnroll(role);
+    const showVisibilityGroup = visibilityMode === 'PHOTO_APPROVAL' || canEnroll(role, slug);
     if (showVisibilityGroup && visibilityItems.length > 0) {
       groups.push({
         id: 'visibility', label: 'Visibility',
@@ -614,7 +614,7 @@ export default function SalesDashboard() {
           <h1 className="text-xl font-bold text-gray-900">Dashboard</h1>
           <p className="text-sm text-gray-500">Your daily task overview</p>
         </div>
-        {canEnroll(role) && (
+        {canEnroll(role, slug) && (
           <Link href="/sales/kyc/new">
             <Button variant="primary" size="sm">
               <Plus className="h-4 w-4" /> New Enrollment

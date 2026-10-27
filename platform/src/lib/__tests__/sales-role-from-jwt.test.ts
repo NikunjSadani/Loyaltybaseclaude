@@ -64,24 +64,30 @@ describe('getRole — derives from the JWT user when no demo override', () => {
 });
 
 describe('canEnroll — roles that can INITIATE a KYC enrollment', () => {
-  it('the two field reps can enroll', () => {
+  it('the two field reps can enroll (any tenant)', () => {
     expect(canEnroll('XSR')).toBe(true);
     expect(canEnroll('SO')).toBe(true);
+    expect(canEnroll('XSR', 'bajaj')).toBe(true);
+    expect(canEnroll('SO', 'bajaj')).toBe(true);
   });
 
-  it('ASM can now enroll (Deoleo, 2026-07-01)', () => {
-    expect(canEnroll('ASM')).toBe(true);
+  it('ASM can enroll by default (Deoleo, 2026-07-01) but NOT for Bajaj', () => {
+    expect(canEnroll('ASM')).toBe(true);           // platform default (no slug)
+    expect(canEnroll('ASM', 'deoleo')).toBe(true); // other tenant unchanged
+    expect(canEnroll('ASM', 'bajaj')).toBe(false); // Bajaj: ASM is approver-only (2026-10-27)
   });
 
-  it('managers above ASM cannot enroll', () => {
-    expect(canEnroll('RSM')).toBe(false);
-    expect(canEnroll('ZNM')).toBe(false);
-    expect(canEnroll('NSM')).toBe(false);
+  it('managers above ASM cannot enroll (any tenant)', () => {
+    for (const r of ['RSM', 'ZNM', 'NSM'] as SalesRole[]) {
+      expect(canEnroll(r)).toBe(false);
+      expect(canEnroll(r, 'bajaj')).toBe(false);
+    }
   });
 
-  it('ENROLL_ROLES is exactly XSR, SO, ASM — the gate is not open to all roles', () => {
+  it('platform default (no slug) = XSR/SO/ASM; Bajaj = XSR/SO only', () => {
     const roles: SalesRole[] = ['XSR', 'SO', 'ASM', 'RSM', 'ZNM', 'NSM'];
-    expect(roles.filter(canEnroll)).toEqual(['XSR', 'SO', 'ASM']);
+    expect(roles.filter((r) => canEnroll(r))).toEqual(['XSR', 'SO', 'ASM']);
+    expect(roles.filter((r) => canEnroll(r, 'bajaj'))).toEqual(['XSR', 'SO']);
     expect(ENROLL_ROLES).toEqual(['XSR', 'SO', 'ASM']);
   });
 });

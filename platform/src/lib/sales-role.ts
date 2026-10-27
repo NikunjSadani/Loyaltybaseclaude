@@ -17,6 +17,9 @@ export const HAS_TEAM: SalesRole[] = ['SO', 'ASM', 'RSM', 'ZNM', 'NSM'];
 
 // Roles that can INITIATE a new KYC enrollment (field reps + ASM per Deoleo, 2026-07-01).
 export const ENROLL_ROLES: SalesRole[] = ['XSR', 'SO', 'ASM'];
+// Bajaj restricts enrollment to the two field reps — ASM (and above) are APPROVERS only
+// (owner rule 2026-10-27). Every other tenant keeps ENROLL_ROLES (ASM can still enroll).
+export const BAJAJ_ENROLL_ROLES: SalesRole[] = ['XSR', 'SO'];
 
 const STORAGE_KEY = 'loyaltybase_sales_role';
 
@@ -67,8 +70,13 @@ export function hasTeamView(role: SalesRole): boolean {
   return HAS_TEAM.includes(role);
 }
 
-export function canEnroll(role: SalesRole): boolean {
-  return ENROLL_ROLES.includes(role);
+/**
+ * Whether `role` may INITIATE a new KYC enrollment. Tenant-aware: Bajaj excludes ASM (and
+ * above) — only ISR/SO enroll, ASM is an approver only. Omitting `slug` (or any non-Bajaj
+ * tenant) keeps the platform default (XSR/SO/ASM), so Deoleo is byte-identical.
+ */
+export function canEnroll(role: SalesRole, slug?: string | null): boolean {
+  return (isBajajSlug(slug) ? BAJAJ_ENROLL_ROLES : ENROLL_ROLES).includes(role);
 }
 
 // Immediate child level one step down the hierarchy (XSR → SO → ASM → RSM → ZNM → NSM).

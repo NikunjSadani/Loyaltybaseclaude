@@ -164,7 +164,7 @@ function KYCListContent() {
   const rawStatus = searchParams.get('status');
   const approvalStatus = getApprovalStatus();
   const role = getRole();
-  const canEnrollRole = canEnroll(role);
+  const canEnrollRole = canEnroll(role, slug);
 
   const statusParam: FilterKey | null = rawStatus
     ? rawStatus === APPROVAL_REQUIRED_KEY
@@ -246,7 +246,7 @@ function KYCListContent() {
     //    ONLY for the roles who enroll (canEnroll — XSR / SO / ASM);
     //  - NOT_INTERESTED → shown DISTINCTLY and NON-actionable for ALL roles (only an
     //    admin can re-open such an outlet for enrollment).
-    const canEnrollNow = canEnroll(role);
+    const canEnrollNow = canEnroll(role, slug);
     const outletsFetch: Promise<KYCEntry[]> = fetch('/api/sales/outlets')
       .then((r) => r.json())
       .then((body): KYCEntry[] => {

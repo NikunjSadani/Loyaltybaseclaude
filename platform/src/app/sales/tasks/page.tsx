@@ -16,6 +16,7 @@ import {
   type VisibilityStatusMap,
 } from '@/lib/visibility-upload';
 import { getRole, canEnroll, type SalesRole } from '@/lib/sales-role';
+import { useClientConfig } from '@/lib/platform/client-config-context';
 import { schemeApi } from '@/lib/schemes';
 import type { EligibleScheme } from '@/lib/scheme-types';
 import {
@@ -277,6 +278,7 @@ export default function TasksPage() {
   const [visibilityItems, setVisibilityItems]  = useState<TaskItem[]>([]);
   const [visibilityMode,  setVisibilityMode]   = useState<'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD'>('PHOTO_APPROVAL');
   const [loading,         setLoading]          = useState(true);
+  const slug = useClientConfig().slug;
 
   /* Record a real backend enrollment so the badge count updates without a reload. */
   const handleSchemeEnrolled = (schemeId: string, targetKey: string, status: SchemeEnrolledStatus) => {
@@ -349,7 +351,7 @@ export default function TasksPage() {
   const taskGroups: TaskGroup[] = useMemo(() => {
     if (!taskConfig) return [];
 
-    const isFieldRole  = canEnroll(role);
+    const isFieldRole  = canEnroll(role, slug);
     const approvalStatus =
       role === 'SO'  ? KYCStatus.PENDING_SO_APPROVAL  :
       role === 'ASM' ? KYCStatus.PENDING_ASM_APPROVAL :
