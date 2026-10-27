@@ -15,6 +15,8 @@ import {
   isChangesRequested,
   hasRejectedPhoto,
   rejectedPhotoFieldIds,
+  classifyVisibilityCapture,
+  summarizeVisibilityCaptures,
   type SalesEligibleOutlet,
   type VisibilityFormField,
   type VisibilityFormSchema,
@@ -220,5 +222,69 @@ describe('validateVisibilityValues', () => {
     expect(validateVisibilityValues(schema, { n: 'abc', d: 'GOOD' }).errors.some((e) => /Count.*number/i.test(e))).toBe(true);
     expect(validateVisibilityValues(schema, { n: '5', d: 'NOPE' }).errors.some((e) => /Grade.*invalid/i.test(e))).toBe(true);
     expect(validateVisibilityValues(schema, { n: '5', d: 'GOOD' }).errors).toEqual([]);
+  });
+});
+
+describe('classifyVisibilityCapture (dashboard 5-status summary)', () => {
+  const approved = { status: 'APPROVED' as const, reviewedAt: 't', reviewedByUserId: 'u' };
+  const rejected = { status: 'REJECTED' as const, reviewedAt: 't', reviewedByUserId: 'u' };
+
+  it('no capture → pending', () => {
+    expect(classifyVisibilityCapture({ status: null })).toBe('pending');
+    expect(classifyVisibilityCapture({})).toBe('pending');
+  });
+
+  it('APPROVED → approved', () => {
+    expect(classifyVisibilityCapture({ status: 'APPROVED' })).toBe('approved');
+  });
+
+  it('SUBMITTED → in_review (even with a photo already approved, nothing rejected)', () => {
+    expect(classifyVisibilityCapture({ status: 'SUBMITTED' })).toBe('in_review');
+    expect(classifyVisibilityCapture({ status: 'SUBMITTED', photoReviews: { a: approved } })).toBe('in_review');
+  });
+
+  it('whole-capture REJECTED → rejected', () => {
+    expect(classifyVisibilityCapture({ status: 'REJECTED', photoReviews: { a: rejected } })).toBe('rejected');
+  });
+
+  it('CHANGES_REQUESTED with one approved + one rejected → partial (the owner scenario)', () => {
+    expect(
+      classifyVisibilityCapture({ status: 'CHANGES_REQUESTED', photoReviews: { a: approved, b: rejected } }),
+    ).toBe('partial');
+  });
+
+  it('CHANGES_REQUESTED with no photo approved → rejected (not partial)', () => {
+    expect(
+      classifyVisibilityCapture({ status: 'CHANGES_REQUESTED', photoReviews: { a: rejected } }),
+    ).toBe('rejected');
+    // rejected + still-pending photo (no approval yet) is also a plain rejection.
+    expect(
+      classifyVisibilityCapture({ status: 'CHANGES_REQUESTED', photoReviews: { b: rejected } }),
+    ).toBe('rejected');
+  });
+});
+
+describe('summarizeVisibilityCaptures', () => {
+  const o = (status: SalesEligibleOutlet['status'], photoReviews?: SalesEligibleOutlet['photoReviews']) =>
+    ({ status, photoReviews } as Pick<SalesEligibleOutlet, 'status' | 'photoReviews'>);
+  const approved = { status: 'APPROVED' as const, reviewedAt: 't', reviewedByUserId: 'u' };
+  const rejected = { status: 'REJECTED' as const, reviewedAt: 't', reviewedByUserId: 'u' };
+
+  it('counts each bucket and totals them', () => {
+    const counts = summarizeVisibilityCaptures([
+      o('APPROVED'),
+      o('APPROVED'),
+      o('SUBMITTED'),
+      o(null),
+      o('REJECTED', { a: rejected }),
+      o('CHANGES_REQUESTED', { a: approved, b: rejected }),
+    ]);
+    expect(counts).toEqual({ total: 6, approved: 2, partial: 1, in_review: 1, pending: 1, rejected: 1 });
+  });
+
+  it('empty list → all zero', () => {
+    expect(summarizeVisibilityCaptures([])).toEqual({
+      total: 0, approved: 0, partial: 0, in_review: 0, pending: 0, rejected: 0,
+    });
   });
 });

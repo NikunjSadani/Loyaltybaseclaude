@@ -40,6 +40,9 @@ export interface KpiDef {
   hasNameOverride:   boolean;
   nameOverrideLabel: string | null;
   order:             number;
+  /** Aggregation roll-up on the dashboard/team totals: cumulative sum, or count of outlets
+   *  that met their own target. Absent on older payloads → treated as 'SUM'. */
+  rollup?:           'SUM' | 'OUTLET_COUNT';
   enabled:           boolean;
 }
 
@@ -56,6 +59,7 @@ function blankForm(order: number): UpsertPayload {
     hasNameOverride:   false,
     nameOverrideLabel: null,
     order,
+    rollup:            'SUM',
     enabled:           true,
   };
 }
@@ -209,6 +213,24 @@ function KpiForm({
             className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
           />
         </div>
+      </div>
+
+      {/* Roll-up mode — how this KPI aggregates on the dashboard + team totals. */}
+      <div>
+        <label className="block text-xs font-semibold text-gray-500 mb-1">Roll-up (dashboard &amp; team totals)</label>
+        <select
+          value={form.rollup ?? 'SUM'}
+          onChange={e => set('rollup', e.target.value as 'SUM' | 'OUTLET_COUNT')}
+          className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+        >
+          <option value="SUM">Cumulative sum (total across outlets)</option>
+          <option value="OUTLET_COUNT">Outlets achieved (count of outlets that met target)</option>
+        </select>
+        <p className="text-[11px] text-gray-400 mt-1">
+          {form.rollup === 'OUTLET_COUNT'
+            ? 'Dashboard shows how many outlets met their own target (e.g. 12 / 40 outlets). Per-outlet values are unchanged.'
+            : 'Dashboard sums this KPI across all outlets.'}
+        </p>
       </div>
 
       {/* Checkboxes — Primary is NOT set here; it is a single-select chosen via

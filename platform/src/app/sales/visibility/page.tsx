@@ -69,6 +69,34 @@ function windowLabel(windowKey: string, window: { startDay: number; endDay: numb
   return `${window.startDay}–${window.endDay} ${abbr} '${year}`;
 }
 
+/* ─── Filter pill (shared select styling, matches the Outlets filter strip) ────── */
+
+function FilterPill({
+  value, onChange, active, children,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  active: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="relative shrink-0">
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={`appearance-none text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1.5 bg-white focus:outline-none transition-colors cursor-pointer ${
+          active ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-gray-200 text-gray-600 focus:border-[var(--brand-primary)]'
+        }`}
+      >
+        {children}
+      </select>
+      <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${active ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+      </svg>
+    </div>
+  );
+}
+
 /* ─── Content ────────────────────────────────────────────────────────────────── */
 
 function SalesVisibilityContent() {
@@ -81,6 +109,11 @@ function SalesVisibilityContent() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  // Filters (mirroring the KYC-submissions list): status · outlet type · program · sort.
+  const [statusFilter, setStatusFilter] = useState<CaptureUiState | 'ALL'>('ALL');
+  const [typeFilter, setTypeFilter] = useState<string>('ALL');
+  const [programFilter, setProgramFilter] = useState<string>('ALL');
+  const [sortBy, setSortBy] = useState<'action' | 'name'>('action');
   // Session read-back of a fresh capture — outletId → its new window state.
   const [captured, setCaptured] = useState<Record<string, CaptureUiState>>({});
   const [activeOutletId, setActiveOutletId] = useState<string | null>(null);
@@ -110,22 +143,53 @@ function SalesVisibilityContent() {
   const stateOf = (o: SalesEligibleOutlet): CaptureUiState =>
     captured[o.outletId] ?? (isChangesRequested(o) ? 'changes_requested' : o.windowState);
 
+  // Filter option lists, derived from the loaded outlets.
+  const typeOptions = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const o of eligible?.outlets ?? []) if (o.outletType?.code) m.set(o.outletType.code, o.outletType.name);
+    return [...m.entries()].sort((a, b) => a[1].localeCompare(b[1])); // [code, name]
+  }, [eligible]);
+  const programOptions = useMemo(
+    () => Array.from(new Set((eligible?.outlets ?? []).map((o) => o.programName).filter((p): p is string => !!p))).sort(),
+    [eligible],
+  );
+  const statusOptions = useMemo(() => {
+    const present = new Set<CaptureUiState>();
+    for (const o of eligible?.outlets ?? []) present.add(stateOf(o));
+    // Fixed display order (action-needed states first).
+    return (['due', 'changes_requested', 'rejected', 'late', 'awaiting', 'approved'] as CaptureUiState[])
+      .filter((s) => present.has(s));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eligible, captured]);
+
+  const anyFilter = search.trim() !== '' || statusFilter !== 'ALL' || typeFilter !== 'ALL' || programFilter !== 'ALL';
+
+  // If the selected status leaves the option set (e.g. the last outlet of that status was just
+  // captured), fall back to "All" so the list doesn't get stuck on an empty, blank-select state.
+  useEffect(() => {
+    if (statusFilter !== 'ALL' && !statusOptions.includes(statusFilter)) setStatusFilter('ALL');
+  }, [statusOptions, statusFilter]);
+
   const outlets = useMemo(() => {
     const list = eligible?.outlets ?? [];
     const q = search.trim().toLowerCase();
-    const rows = q
-      ? list.filter(
-          (o) => o.outletName.toLowerCase().includes(q) || o.outletCode.toLowerCase().includes(q),
-        )
-      : list;
-    // Actionable (due/rejected/late & canCapture) first, then the rest.
-    return [...rows].sort(
-      (a, b) =>
-        Number(isActionable(captured[b.outletId] ?? b.windowState, b.canCapture)) -
-        Number(isActionable(captured[a.outletId] ?? a.windowState, a.canCapture)),
-    );
+    const rows = list.filter((o) => {
+      if (q && !(o.outletName.toLowerCase().includes(q) || o.outletCode.toLowerCase().includes(q))) return false;
+      if (statusFilter !== 'ALL' && stateOf(o) !== statusFilter) return false;
+      if (typeFilter !== 'ALL' && o.outletType?.code !== typeFilter) return false;
+      if (programFilter !== 'ALL' && o.programName !== programFilter) return false;
+      return true;
+    });
+    const actionRank = (o: SalesEligibleOutlet) =>
+      Number(isActionable(captured[o.outletId] ?? o.windowState, o.canCapture));
+    return [...rows].sort((a, b) => {
+      if (sortBy === 'name') return a.outletName.localeCompare(b.outletName);
+      // Default: actionable (due/rejected/late & canCapture) first, then by name.
+      const d = actionRank(b) - actionRank(a);
+      return d !== 0 ? d : a.outletName.localeCompare(b.outletName);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eligible, search, captured]);
+  }, [eligible, search, captured, statusFilter, typeFilter, programFilter, sortBy]);
 
   const dueCount = useMemo(
     () =>
@@ -236,6 +300,32 @@ function SalesVisibilityContent() {
         </div>
       )}
 
+      {/* Filter strip — status · outlet type · program · sort (mirrors the KYC list). */}
+      {(eligible?.outlets.length ?? 0) > 0 && (
+        <div className="flex items-center gap-1.5 overflow-x-auto mb-4" style={{ scrollbarWidth: 'none' }}>
+          <FilterPill value={statusFilter} onChange={(v) => setStatusFilter(v as CaptureUiState | 'ALL')} active={statusFilter !== 'ALL'}>
+            <option value="ALL">All statuses</option>
+            {statusOptions.map((s) => <option key={s} value={s}>{STATE_CONFIG[s].label}</option>)}
+          </FilterPill>
+          {typeOptions.length > 1 && (
+            <FilterPill value={typeFilter} onChange={setTypeFilter} active={typeFilter !== 'ALL'}>
+              <option value="ALL">All types</option>
+              {typeOptions.map(([code, name]) => <option key={code} value={code}>{name}</option>)}
+            </FilterPill>
+          )}
+          {programOptions.length > 1 && (
+            <FilterPill value={programFilter} onChange={setProgramFilter} active={programFilter !== 'ALL'}>
+              <option value="ALL">All programs</option>
+              {programOptions.map((p) => <option key={p} value={p}>{p}</option>)}
+            </FilterPill>
+          )}
+          <FilterPill value={sortBy} onChange={(v) => setSortBy(v as 'action' | 'name')} active={sortBy !== 'action'}>
+            <option value="action">Action needed</option>
+            <option value="name">Name A–Z</option>
+          </FilterPill>
+        </div>
+      )}
+
       {loading ? (
         <div className="flex items-center justify-center py-20">
           <Loader2 className="h-6 w-6 animate-spin text-[var(--brand-primary)]" />
@@ -249,8 +339,16 @@ function SalesVisibilityContent() {
         <div className="flex flex-col items-center gap-2 py-12 text-center text-gray-400 bg-white rounded-2xl border border-gray-100">
           <Eye className="h-8 w-8" />
           <p className="text-sm">
-            {search ? 'No outlets match that search' : 'No visibility outlets in your scope for this window'}
+            {anyFilter ? 'No outlets match the selected filters' : 'No visibility outlets in your scope for this window'}
           </p>
+          {anyFilter && (
+            <button
+              onClick={() => { setSearch(''); setStatusFilter('ALL'); setTypeFilter('ALL'); setProgramFilter('ALL'); }}
+              className="text-xs text-[var(--brand-primary)] font-semibold hover:underline mt-1"
+            >
+              Clear all filters
+            </button>
+          )}
         </div>
       ) : (
         <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden shadow-sm divide-y divide-gray-50">

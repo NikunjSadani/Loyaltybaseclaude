@@ -20,6 +20,9 @@ import {
   VISIBILITY_ELIGIBLE_OUTLET_TYPES,
   type VisibilityStatusMap,
 } from '@/lib/visibility-upload';
+import { visibilityApi } from '@/lib/visibility';
+import { classifyVisibilityCapture, type VisibilitySummaryBucket } from '@/lib/visibility-types';
+import { useClientConfig } from '@/lib/platform/client-config-context';
 
 /* ─── Outlet roster ─────────────────────────────────────────────────────────── */
 
@@ -36,11 +39,12 @@ interface Outlet {
   state:      string;
   type:       OutletType;
   kycStatus:  KYCStatus;
+  programName?: string;  // from the outlet master (sales roster payload) — drives the Program filter
 }
 
 /* ─── Real per-outlet target data (GET /api/sales/outlet-targets) ─────────────── */
 
-interface KpiCol { code: string; name: string; unit: string; isPrimary: boolean; }
+interface KpiCol { code: string; name: string; unit: string; isPrimary: boolean; rollup?: 'SUM' | 'OUTLET_COUNT'; }
 type OutletKpis = Record<string, { target: number | null; achieved: number | null; pace: number | null }>;
 
 const TYPE_FILTERS: { value: OutletType | 'ALL'; label: string }[] = [
@@ -85,6 +89,15 @@ function paceStrip(achievePct: number, period: string): string {
   if (status === 'green') return 'bg-emerald-400';
   if (status === 'amber') return 'bg-amber-400';
   return 'bg-red-400';
+}
+
+/** PRIMARY-KPI achievement % for an outlet, or null when it has no primary target set (so
+ *  callers can sort no-target outlets last rather than treating them as a 0% performer). */
+function outletPrimaryPct(kpis: OutletKpis, primaryCode: string | null): number | null {
+  if (!primaryCode) return null;
+  const k = kpis[primaryCode];
+  if (k && k.target && k.target > 0) return pct(k.achieved ?? 0, k.target);
+  return null;
 }
 
 /** Overall achievement % for an outlet = its primary KPI's pace, else the avg of KPIs with a target. */
@@ -134,6 +147,16 @@ const VIS_LABEL: Record<string, string> = {
   PENDING: 'Pending', UNDER_REVIEW: 'Under Review', APPROVED: 'Approved',
 };
 
+/** Photo-approval (PHOTO_APPROVAL mode) visibility badge — the 5-status model shared with the
+ *  sales dashboard summary card (classifyVisibilityCapture). Bajaj-scoped. */
+const VIS_BUCKET_BADGE: Record<VisibilitySummaryBucket, { label: string; cls: string }> = {
+  approved:  { label: 'Approved',  cls: 'bg-emerald-50 text-emerald-700' },
+  partial:   { label: 'Partial',   cls: 'bg-amber-50 text-amber-700' },
+  in_review: { label: 'In review', cls: 'bg-blue-50 text-blue-700' },
+  pending:   { label: 'Pending',   cls: 'bg-gray-100 text-gray-600' },
+  rejected:  { label: 'Rejected',  cls: 'bg-red-50 text-red-700' },
+};
+
 /* ─── Page ──────────────────────────────────────────────────────────────────── */
 
 export default function SalesOutletsPage() {
@@ -146,9 +169,17 @@ export default function SalesOutletsPage() {
   const [view,       setView]       = useState<'table' | 'cards'>('table');
   const [typeFilter, setTypeFilter] = useState<OutletType | 'ALL'>('ALL');
   const [beatFilter, setBeatFilter] = useState<string>('ALL');
+  const [programFilter, setProgramFilter] = useState<string>('ALL');
   const [role,       setRoleState]  = useState<SalesRole>('SO');
 
+  // Bajaj-scoped outlets-page additions (program filter, photo-visibility badge, primary sort)
+  // — keeps every other tenant's outlets page byte-identical.
+  const isBajaj = (useClientConfig().slug ?? '').trim().toLowerCase() === 'bajaj';
+
   const [visibilityMap, setVisibilityMap] = useState<VisibilityStatusMap>({});
+  // Photo-approval (PHOTO_APPROVAL) per-outlet 5-status, keyed by outletCode (Bajaj). Only
+  // in-scope outlets appear here → "visibility applicable" is implicit in map membership.
+  const [visPhotoByCode, setVisPhotoByCode] = useState<Record<string, VisibilitySummaryBucket>>({});
 
   // Cards on portrait mobile, table on landscape / desktop
   useEffect(() => {
@@ -201,43 +232,98 @@ export default function SalesOutletsPage() {
     [outlets],
   );
 
+  // Distinct programs across the roster (Bajaj Program filter). 'ALL' + sorted names.
+  const allPrograms = useMemo(
+    () => ['ALL', ...Array.from(new Set(outlets.map((o) => o.programName).filter((p): p is string => !!p))).sort()],
+    [outlets],
+  );
+
   const monthlyPeriods = useMemo(() => PERIODS.filter((p) => !p.value.includes('Q')), []);
 
   // Fetch visibility statuses for the selected month (RETAILER + MT outlets only)
   useEffect(() => {
+    // Bajaj uses the PHOTO_APPROVAL badge below (visPhotoByCode); skip the amount-upload
+    // path entirely so the two never render a double "Visibility:" pill on one outlet.
+    if (isBajaj) return;
     const eligibleCodes = outlets
       .filter((o) => VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(o.type))
       .map((o) => o.outletCode);
     if (eligibleCodes.length === 0) return;
     fetchOutletVisibilityStatuses(eligibleCodes, period)
       .then((map) => { if (Object.keys(map).length > 0) setVisibilityMap(map); });
-  }, [period, outlets]);
+  }, [period, outlets, isBajaj]);
+
+  // Photo-approval visibility status per outlet (Bajaj) — the CURRENT window's 5-status from
+  // the same getSalesEligible call the dashboard uses. getSalesEligible is current-window only,
+  // so this badge reflects the current month regardless of the period selector (visibility is a
+  // this-period concept; no per-past-window sales read exists).
+  useEffect(() => {
+    if (!isBajaj) { setVisPhotoByCode({}); return; }
+    const gs = getGifsySettings();
+    if (gs.visibilityEnabled !== true || (gs.visibilityCaptureMode ?? 'PHOTO_APPROVAL') !== 'PHOTO_APPROVAL') {
+      setVisPhotoByCode({});
+      return;
+    }
+    let cancelled = false;
+    visibilityApi.getSalesEligible()
+      .then((r) => {
+        if (cancelled) return;
+        if (!r.success) { setVisPhotoByCode({}); return; }
+        const map: Record<string, VisibilitySummaryBucket> = {};
+        for (const o of r.data.outlets ?? []) {
+          if (o.outletCode) map[o.outletCode] = classifyVisibilityCapture(o);
+        }
+        setVisPhotoByCode(map);
+      })
+      .catch(() => { if (!cancelled) setVisPhotoByCode({}); });
+    return () => { cancelled = true; };
+  }, [isBajaj, outlets]);
 
   const params      = kpiColumns;
   const primaryCode = getPrimaryParam(kpiColumns)?.code ?? null;
   const periodLabel = PERIODS.find((p) => p.value === period)?.label ?? period;
+  // The photo-visibility badge is CURRENT-window only (getSalesEligible has no past-window
+  // read), so only show it when the current month is selected — never stale on a past period.
+  const isCurrentPeriod = period === CURRENT_MONTH;
 
   const kpisFor = (o: Outlet): OutletKpis => targetsByOutlet[o.outletCode] ?? {};
 
   const visibleOutlets = useMemo(() => outlets.filter((o) => {
     const matchesType = typeFilter === 'ALL' || o.type === typeFilter;
     const matchesBeat = beatFilter === 'ALL' || o.beat === beatFilter;
-    return matchesType && matchesBeat;
-  }), [outlets, typeFilter, beatFilter]);
+    const matchesProgram = programFilter === 'ALL' || o.programName === programFilter;
+    return matchesType && matchesBeat && matchesProgram;
+  }), [outlets, typeFilter, beatFilter, programFilter]);
 
   // Owner-specified outlet order (2026-07-03): Approved → Re-KYC → Rejected →
   // Pending → Not Interested (see kycOrderRank). Within Approved, worst performer
   // first (actionable); within every other bucket, alphabetical by name.
+  //
+  // Bajaj (owner 2026-10-27): within Approved, sort strictly by PRIMARY-KPI achievement
+  // ascending (lowest first) and push outlets with no primary target to the bottom — so the
+  // actionable low performers surface on top, not the no-target outlets. Other tenants keep
+  // the original overall-% order (byte-identical). The KYC-status grouping is preserved.
   const sortedVisibleOutlets = useMemo(() => {
     return [...visibleOutlets].sort((a, b) => {
       const ra = kycOrderRank(a.kycStatus);
       const rb = kycOrderRank(b.kycStatus);
       if (ra !== rb) return ra - rb;
-      if (ra === 0) return outletOverallPct(kpisFor(a), primaryCode) - outletOverallPct(kpisFor(b), primaryCode);
+      if (ra === 0) {
+        if (isBajaj) {
+          const pa = outletPrimaryPct(kpisFor(a), primaryCode);
+          const pb = outletPrimaryPct(kpisFor(b), primaryCode);
+          if (pa === null && pb === null) return a.name.localeCompare(b.name);
+          if (pa === null) return 1;   // no primary target → after those that have one
+          if (pb === null) return -1;
+          if (pa !== pb) return pa - pb; // lowest primary achievement first
+          return a.name.localeCompare(b.name);
+        }
+        return outletOverallPct(kpisFor(a), primaryCode) - outletOverallPct(kpisFor(b), primaryCode);
+      }
       return a.name.localeCompare(b.name);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleOutlets, targetsByOutlet, primaryCode]);
+  }, [visibleOutlets, targetsByOutlet, primaryCode, isBajaj]);
 
   const tableGeoLabel = beatFilter !== 'ALL' ? beatFilter : 'My Outlets';
 
@@ -253,8 +339,17 @@ export default function SalesOutletsPage() {
         params.forEach((p) => {
           const k = kpis[p.code];
           if (!k) return;
-          totals[p.code].achieved += k.achieved ?? 0;
-          totals[p.code].target   += k.target ?? 0;
+          if (p.rollup === 'OUTLET_COUNT') {
+            // Count outlets that met their own target (denominator = outlets with a target).
+            const t = k.target ?? 0;
+            if (t > 0) {
+              totals[p.code].target += 1;
+              if ((k.achieved ?? 0) >= t) totals[p.code].achieved += 1;
+            }
+          } else {
+            totals[p.code].achieved += k.achieved ?? 0;
+            totals[p.code].target   += k.target ?? 0;
+          }
         });
       });
     return totals;
@@ -346,6 +441,26 @@ export default function SalesOutletsPage() {
             <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
         </div>
+
+        {/* Program filter (Bajaj) — only when the roster has more than one program. */}
+        {isBajaj && allPrograms.length > 2 && (
+          <div className="relative shrink-0">
+            <select
+              value={programFilter}
+              onChange={(e) => setProgramFilter(e.target.value)}
+              className={`appearance-none text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1 bg-white focus:outline-none transition-colors cursor-pointer ${
+                programFilter !== 'ALL' ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-gray-200 text-gray-600 focus:border-[var(--brand-primary)]'
+              }`}
+            >
+              {allPrograms.map((p) => (
+                <option key={p} value={p}>{p === 'ALL' ? 'All Programs' : p}</option>
+              ))}
+            </select>
+            <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${programFilter !== 'ALL' ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </div>
+        )}
       </div>
 
       {loading ? (
@@ -422,9 +537,14 @@ export default function SalesOutletsPage() {
                                       {avgPct}%
                                     </span>
                                   )}
-                                  {VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(outlet.type) && visibilityMap[outlet.outletCode] && (
+                                  {!isBajaj && VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(outlet.type) && visibilityMap[outlet.outletCode] && (
                                     <span className={`text-[8px] font-semibold px-1 py-0 rounded-full leading-tight ${VIS_CHIP_CLASS[visibilityMap[outlet.outletCode].status] ?? ''}`}>
                                       Visibility: {VIS_LABEL[visibilityMap[outlet.outletCode].status] ?? visibilityMap[outlet.outletCode].status}
+                                    </span>
+                                  )}
+                                  {isBajaj && isCurrentPeriod && visPhotoByCode[outlet.outletCode] && (
+                                    <span className={`text-[8px] font-semibold px-1 py-0 rounded-full leading-tight ${VIS_BUCKET_BADGE[visPhotoByCode[outlet.outletCode]].cls}`}>
+                                      Visibility: {VIS_BUCKET_BADGE[visPhotoByCode[outlet.outletCode]].label}
                                     </span>
                                   )}
                                 </div>
@@ -465,7 +585,7 @@ export default function SalesOutletsPage() {
                           return (
                             <td key={p.code} className="px-3 py-2.5">
                               <p className="text-[10px] font-bold text-gray-700">
-                                {fmtNum(achieved)}<span className="text-gray-400 font-normal">/{fmtNum(target)}</span>
+                                {fmtNum(achieved)}<span className="text-gray-400 font-normal">/{fmtNum(target)}{p.rollup === 'OUTLET_COUNT' ? ' outlets' : ''}</span>
                               </p>
                               <span className={`text-[9px] font-bold px-1 py-0.5 rounded-full ${pctBg(pp)}`}>{pp}%</span>
                             </td>
@@ -492,7 +612,7 @@ export default function SalesOutletsPage() {
               <AlertTriangle className="h-7 w-7 text-gray-300" />
               <p className="text-sm text-gray-400">No outlets match the selected filters</p>
               <button
-                onClick={() => { setTypeFilter('ALL'); setBeatFilter('ALL'); }}
+                onClick={() => { setTypeFilter('ALL'); setBeatFilter('ALL'); setProgramFilter('ALL'); }}
                 className="text-xs text-[var(--brand-primary)] font-semibold hover:underline mt-1"
               >
                 Clear all filters
@@ -506,7 +626,9 @@ export default function SalesOutletsPage() {
               {sortedVisibleOutlets.map((outlet) => {
                 const kpis      = kpisFor(outlet);
                 const svParam   = getPrimaryParam(params);
-                const kpiParams = params.filter((p) => !p.isPrimary);
+                // Exclude the actual headline KPI by code — getPrimaryParam falls back to params[0]
+                // when none is flagged primary, so !isPrimary would duplicate params[0] in the grid.
+                const kpiParams = params.filter((p) => p.code !== svParam?.code);
 
                 const svK    = svParam ? kpis[svParam.code] : undefined;
                 const svPct  = svParam && svK?.target ? pct(svK.achieved ?? 0, svK.target) : 0;
@@ -591,12 +713,21 @@ export default function SalesOutletsPage() {
                       </>
                     )}
 
-                    {VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(outlet.type) && visibilityMap[outlet.outletCode] && (
+                    {!isBajaj && VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(outlet.type) && visibilityMap[outlet.outletCode] && (
                       <div className="border-t border-gray-100 px-4 py-2 flex items-center gap-1.5">
                         <Eye className="h-3 w-3 text-gray-400 shrink-0" />
                         <span className="text-[11px] text-gray-500 font-medium">Visibility:</span>
                         <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${VIS_CHIP_CLASS[visibilityMap[outlet.outletCode].status] ?? ''}`}>
                           {VIS_LABEL[visibilityMap[outlet.outletCode].status] ?? visibilityMap[outlet.outletCode].status}
+                        </span>
+                      </div>
+                    )}
+                    {isBajaj && isCurrentPeriod && visPhotoByCode[outlet.outletCode] && (
+                      <div className="border-t border-gray-100 px-4 py-2 flex items-center gap-1.5">
+                        <Eye className="h-3 w-3 text-gray-400 shrink-0" />
+                        <span className="text-[11px] text-gray-500 font-medium">Visibility:</span>
+                        <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${VIS_BUCKET_BADGE[visPhotoByCode[outlet.outletCode]].cls}`}>
+                          {VIS_BUCKET_BADGE[visPhotoByCode[outlet.outletCode]].label}
                         </span>
                       </div>
                     )}

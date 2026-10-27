@@ -119,7 +119,7 @@ export class TargetsService {
    * Creates if it does not exist; updates only the supplied fields otherwise.
    */
   async upsertKpi(user: JwtPayload, dto: UpsertKpiDefDto) {
-    const { code, label, unit, isPrimary, hasNameOverride, nameOverrideLabel, order, enabled } =
+    const { code, label, unit, isPrimary, hasNameOverride, nameOverrideLabel, order, rollup, enabled } =
       dto;
 
     // Invariant: at most ONE primary KpiDef per tenant. The upsert is keyed by
@@ -150,6 +150,7 @@ export class TargetsService {
             hasNameOverride: hasNameOverride ?? false,
             nameOverrideLabel: nameOverrideLabel ?? null,
             order: order ?? 0,
+            rollup: rollup ?? 'SUM',
             enabled: enabled ?? true,
           },
           update: {
@@ -159,6 +160,7 @@ export class TargetsService {
             ...(hasNameOverride !== undefined ? { hasNameOverride } : {}),
             ...(nameOverrideLabel !== undefined ? { nameOverrideLabel } : {}),
             ...(order !== undefined ? { order } : {}),
+            ...(rollup !== undefined ? { rollup } : {}),
             ...(enabled !== undefined ? { enabled } : {}),
           },
         });

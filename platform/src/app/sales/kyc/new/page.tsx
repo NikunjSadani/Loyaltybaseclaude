@@ -2088,9 +2088,9 @@ export default function NewKYCPage() {
               type="button"
               data-testid="flow-choice-standard"
               onClick={() => { setFlowVariant('STANDARD'); setStep('basic'); }}
-              className="w-full text-left border-2 border-gray-200 rounded-xl p-4 hover:bg-green-50/30 transition-colors active:scale-[0.99]"
+              className="w-full text-left border-2 border-[var(--brand-primary)]/40 bg-green-50/20 rounded-xl p-4 hover:bg-green-50/50 transition-colors active:scale-[0.99]"
             >
-              <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center mb-2.5"><FileText className="h-5 w-5 text-gray-500" /></div>
+              <div className="w-10 h-10 rounded-full bg-[var(--brand-primary)]/10 flex items-center justify-center mb-2.5"><FileText className="h-5 w-5 text-[var(--brand-primary)]" /></div>
               <h3 className="text-sm font-semibold text-gray-900">Via Document submission</h3>
               <p className="text-xs text-gray-500 mt-0.5">Owner shares PAN, GST &amp; address proof. The standard full KYC.</p>
             </button>
@@ -2099,12 +2099,12 @@ export default function NewKYCPage() {
               type="button"
               data-testid="flow-choice-so-declaration"
               onClick={() => { setFlowVariant('SO_DECLARATION'); setStep('basic'); }}
-              className="w-full text-left border-2 border-[var(--brand-primary)]/40 bg-green-50/20 rounded-xl p-4 hover:bg-green-50/50 transition-colors active:scale-[0.99]"
+              className="w-full text-left border-2 border-gray-200 rounded-xl p-4 hover:bg-green-50/30 transition-colors active:scale-[0.99]"
             >
-              <div className="w-10 h-10 rounded-full bg-[var(--brand-primary)]/10 flex items-center justify-center mb-2.5"><PenLine className="h-5 w-5 text-[var(--brand-primary)]" /></div>
+              <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center mb-2.5"><PenLine className="h-5 w-5 text-gray-500" /></div>
               <h3 className="text-sm font-semibold text-gray-900">Via SO Declaration</h3>
               <p className="text-xs text-gray-500 mt-0.5">Owner won&apos;t share documents. Full enrollment still done; you certify &amp; sign. PAN/GST optional.</p>
-              <span className="inline-block mt-2.5 text-[11px] font-semibold px-2 py-0.5 rounded-full bg-[var(--brand-primary)]/10 text-[var(--brand-primary)]">Owner + SO + ASM sign</span>
+              <span className="inline-block mt-2.5 text-[11px] font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">Owner + SO + ASM sign</span>
             </button>
           </CardContent>
         </Card>

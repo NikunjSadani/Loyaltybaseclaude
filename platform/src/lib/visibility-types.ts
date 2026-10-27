@@ -316,6 +316,9 @@ export interface SalesEligibleOutlet {
   zone: string | null;
   state: string | null;
   outletType: { code: string; name: string } | null;
+  /** The outlet's Program (`Outlet.programName`, e.g. Unnati/SAMT/BSC) — drives the sales
+   *  Visibility list's Program filter. Supplied by the backend; absent/blank = unset. */
+  programName?: string | null;
   /**
    * The outlet's Sub-Program (`Outlet.programCategory`) — drives outlet-context
    * conditional fields in the capture form (e.g. a 2nd photo required only for a given
@@ -364,6 +367,75 @@ export function isResubmitCapture(
     outlet.windowState === 'changes_requested' ||
     outlet.windowState === 'late'
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sales dashboard — per-rep visibility summary of the CURRENT window (Bajaj card)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The five dashboard-summary buckets an in-scope outlet's current-window capture falls
+ * into, derived from the capture `status` + per-photo `photoReviews`:
+ *   approved  — capture fully APPROVED (window satisfied)
+ *   partial   — a multi-photo capture with ≥1 photo APPROVED and ≥1 REJECTED (status
+ *               CHANGES_REQUESTED with a MIXED review): some photos cleared, the rep must
+ *               re-capture only the flagged one(s)
+ *   in_review — SUBMITTED, awaiting review (nothing rejected yet; a photo may be approved
+ *               with others still pending)
+ *   pending   — no capture submitted yet for the window
+ *   rejected  — the whole capture REJECTED, or CHANGES_REQUESTED with NO photo approved
+ *
+ * NOTE (deliberate): this keys off review STATUS only, not the window-closed "late" state —
+ * a missed/late outlet with no capture still reads as `pending` (there is no "overdue"
+ * bucket on this card by design).
+ */
+export type VisibilitySummaryBucket =
+  | 'approved'
+  | 'partial'
+  | 'in_review'
+  | 'pending'
+  | 'rejected';
+
+/** Classify one in-scope outlet's current-window capture into a summary bucket. */
+export function classifyVisibilityCapture(o: {
+  status?: VisibilityCaptureStatus | null;
+  photoReviews?: VisibilityPhotoReviews | null;
+}): VisibilitySummaryBucket {
+  const status = o.status ?? null;
+  if (status === null) return 'pending';
+  if (status === 'APPROVED') return 'approved';
+  if (status === 'SUBMITTED') return 'in_review';
+  if (status === 'REJECTED') return 'rejected';
+  // CHANGES_REQUESTED: at least one required photo was rejected. It is "partially approved"
+  // only when another photo was actually APPROVED; otherwise it reads as a plain rejection.
+  const anyApproved = Object.values(o.photoReviews ?? {}).some((r) => r?.status === 'APPROVED');
+  return anyApproved ? 'partial' : 'rejected';
+}
+
+/** Per-bucket counts (+ total) for the dashboard visibility summary card. */
+export interface VisibilitySummaryCounts {
+  total: number;
+  approved: number;
+  partial: number;
+  in_review: number;
+  pending: number;
+  rejected: number;
+}
+
+/** Aggregate the sales-eligible outlets of the CURRENT window into summary-bucket counts. */
+export function summarizeVisibilityCaptures(
+  outlets: ReadonlyArray<Pick<SalesEligibleOutlet, 'status' | 'photoReviews'>>,
+): VisibilitySummaryCounts {
+  const counts: VisibilitySummaryCounts = {
+    total: outlets.length,
+    approved: 0,
+    partial: 0,
+    in_review: 0,
+    pending: 0,
+    rejected: 0,
+  };
+  for (const o of outlets) counts[classifyVisibilityCapture(o)]++;
+  return counts;
 }
 
 /** GET /sales/eligible response — the current window + its in-scope outlets. */

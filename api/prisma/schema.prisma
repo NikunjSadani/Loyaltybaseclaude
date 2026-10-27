@@ -2878,6 +2878,12 @@ model KpiDef {
   hasNameOverride   Boolean  @default(false)
   nameOverrideLabel String?
   order             Int      @default(0)
+  // Aggregation roll-up for the dashboard/team totals:
+  //   SUM           — cumulative sum of the KPI across outlets (default; existing behavior)
+  //   OUTLET_COUNT  — count of outlets that MET their own target (achieved >= target)
+  // Stored as a string (not a Prisma enum) so the column is a plain additive, defaulted
+  // migration — every existing row backfills to 'SUM', so existing tenants are unchanged.
+  rollup            String   @default("SUM")
   enabled           Boolean  @default(true)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt

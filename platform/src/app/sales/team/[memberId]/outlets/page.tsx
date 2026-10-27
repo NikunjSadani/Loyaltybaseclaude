@@ -448,7 +448,9 @@ export default function MemberOutletsPage() {
               {sortedOutlets.map((outlet) => {
                 const kpis       = kpisFor(outlet);
                 const svParam    = getPrimaryParam(params2);
-                const kpiParams  = params2.filter((p) => !p.isPrimary);
+                // Exclude the actual headline KPI by code — getPrimaryParam falls back to params2[0]
+                // when none is flagged primary, so !isPrimary would duplicate params2[0] in the grid.
+                const kpiParams  = params2.filter((p) => p.code !== svParam?.code);
 
                 const svK        = svParam ? kpis[svParam.code] : undefined;
                 const svPct      = svParam && svK?.target ? pct(svK.achieved ?? 0, svK.target) : 0;

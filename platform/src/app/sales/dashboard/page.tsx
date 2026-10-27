@@ -5,7 +5,7 @@ import Link from 'next/link';
 import {
   FileCheck, XCircle, Plus, Search,
   ChevronRight, Clock, MapPin, TrendingUp, Target,
-  CheckCircle2, Bell, ListTodo, RefreshCw, Layers, Tag,
+  CheckCircle2, Bell, ListTodo, RefreshCw, Layers, Tag, Camera,
 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -25,6 +25,8 @@ import {
   buildKycSubRows, buildVisibilityTaskItems, buildPhotoCaptureTaskItems, type KycSubRow,
 } from '@/lib/sales-tasks';
 import { visibilityApi } from '@/lib/visibility';
+import { summarizeVisibilityCaptures, type VisibilitySummaryCounts } from '@/lib/visibility-types';
+import { useClientConfig } from '@/lib/platform/client-config-context';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -69,7 +71,11 @@ function ageInDays(dateStr?: string): number {
 interface SalesKpi {
   code: string; name: string; unit: string; isPrimary: boolean;
   target: number; achieved: number; pace: number | null;
+  // Aggregation roll-up (backend): 'OUTLET_COUNT' → target/achieved are OUTLET counts, not sums.
+  rollup?: 'SUM' | 'OUTLET_COUNT';
 }
+/** Display unit for a KPI line — an OUTLET_COUNT KPI counts outlets, not its own unit. */
+const kpiUnitLabel = (k: SalesKpi): string => (k.rollup === 'OUTLET_COUNT' ? 'outlets' : k.unit);
 interface SalesTargets {
   period: string | null; outletCount: number;
   kpis: SalesKpi[];
@@ -108,7 +114,7 @@ function TargetSummaryCard({ targets }: { targets: SalesTargets }) {
   const paceTextColor = paceStatus === 'green' ? 'text-emerald-700' : paceStatus === 'amber' ? 'text-amber-700' : 'text-red-600';
   const paceText      = primaryLeft === 0
     ? `${primaryKpi?.name ?? 'Primary'} target met 🎉`
-    : buildCasesToGoMsg(primaryLeft, primaryKpi?.unit ?? '', daysLeft);
+    : buildCasesToGoMsg(primaryLeft, primaryKpi ? kpiUnitLabel(primaryKpi) : '', daysLeft);
 
   return (
     <Link href="/sales/outlets" className="block">
@@ -146,7 +152,7 @@ function TargetSummaryCard({ targets }: { targets: SalesTargets }) {
                         {k.name}{k.isPrimary && <span className="ml-1 text-[9px] font-bold text-[var(--brand-primary)] align-middle">PRIMARY</span>}
                       </p>
                       <span className={`text-[11px] font-bold shrink-0 ${p >= 100 ? 'text-emerald-600' : p >= 80 ? 'text-amber-600' : p >= 60 ? 'text-orange-500' : 'text-red-500'}`}>
-                        {k.achieved.toLocaleString('en-IN')}/{k.target.toLocaleString('en-IN')}{k.unit ? ` ${k.unit}` : ''} · {p}%
+                        {k.achieved.toLocaleString('en-IN')}/{k.target.toLocaleString('en-IN')}{kpiUnitLabel(k) ? ` ${kpiUnitLabel(k)}` : ''} · {p}%
                       </span>
                     </div>
                     <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
@@ -200,6 +206,80 @@ function TargetTrendChart({ trend, unit }: { trend: SalesTargets['trend']; unit:
 }
 
 
+/* ─── Visibility summary card (Bajaj) ─────────────────────────────────────────── */
+
+/** The 5 concise status tiles — keys match VisibilitySummaryCounts (excl. total). The
+ *  colours separate the win (green), the in-between (amber = partial), the queue (blue =
+ *  in review), the not-started (gray = pending) and the failure (red = rejected). */
+const VIS_SUMMARY_TILES: {
+  key: keyof Omit<VisibilitySummaryCounts, 'total'>;
+  label: string;
+  title: string;
+  valueCls: string;
+  bg: string;
+}[] = [
+  { key: 'approved',  label: 'Approved',  title: 'Approved',                      valueCls: 'text-emerald-600', bg: 'bg-emerald-50' },
+  { key: 'partial',   label: 'Partial',   title: 'Partially approved',            valueCls: 'text-amber-600',   bg: 'bg-amber-50'   },
+  { key: 'in_review', label: 'In review', title: 'Submitted — awaiting review',   valueCls: 'text-blue-600',    bg: 'bg-blue-50'    },
+  { key: 'pending',   label: 'Pending',   title: 'Not captured yet',             valueCls: 'text-gray-500',    bg: 'bg-gray-50'    },
+  { key: 'rejected',  label: 'Rejected',  title: 'Rejected — re-capture needed',  valueCls: 'text-red-600',     bg: 'bg-red-50'     },
+];
+
+/**
+ * Concise per-rep Visibility summary for the current month (Bajaj dashboard). Aggregates
+ * the rep's in-scope outlets (their downline's, for a manager) into the 5 capture statuses,
+ * with an approved-coverage headline. Tapping opens the visibility list. The caller gates on
+ * tenant + a positive total, so this always has outlets to show.
+ */
+function VisibilitySummaryCard({ counts }: { counts: VisibilitySummaryCounts }) {
+  const coverPct = counts.total > 0 ? Math.round((counts.approved / counts.total) * 100) : 0;
+  // Month label resolves against the IST calendar (not the viewer's zone / SSR UTC).
+  const periodLabel = new Date().toLocaleDateString('en-IN', {
+    month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata',
+  });
+  return (
+    <Link href="/sales/visibility" className="block" data-testid="visibility-summary-card">
+      <Card className="cursor-pointer hover:border-[var(--brand-primary)]/40 transition-colors">
+        <CardHeader className="pb-2">
+          <div className="flex items-center justify-between gap-2">
+            <CardTitle className="flex items-center gap-2">
+              <Camera className="h-4 w-4 text-[var(--brand-primary)]" /> Visibility — this period
+            </CardTitle>
+            <span className="text-[11px] text-gray-400 font-medium">{periodLabel}</span>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-2.5">
+          {/* Approved-coverage headline + bar (approved ÷ total in-scope) */}
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-xs text-gray-500">Covered</span>
+            <span className="text-xs font-semibold text-gray-700">
+              {counts.approved.toLocaleString('en-IN')} of {counts.total.toLocaleString('en-IN')}
+            </span>
+            <span className="text-[11px] text-gray-400">· {coverPct}%</span>
+          </div>
+          <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+            <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${coverPct}%` }} />
+          </div>
+
+          {/* 5-status tiles */}
+          <div className="grid grid-cols-5 gap-1.5 pt-0.5">
+            {VIS_SUMMARY_TILES.map((t) => (
+              <div key={t.key} title={t.title} className={`rounded-lg py-1.5 text-center ${t.bg}`}>
+                <div className={`text-base font-bold leading-none ${t.valueCls}`}>{counts[t.key]}</div>
+                <div className="text-[9px] font-medium text-gray-500 mt-1 leading-tight">{t.label}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex items-center justify-center gap-1 text-xs font-semibold text-[var(--brand-primary)] pt-0.5">
+            View visibility <ChevronRight className="h-3.5 w-3.5" />
+          </div>
+        </CardContent>
+      </Card>
+    </Link>
+  );
+}
+
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function SalesDashboard() {
@@ -216,6 +296,12 @@ export default function SalesDashboard() {
   const [taskConfig,    setTaskConfig]    = useState<TaskConfig | null>(null);
   const [salesBanners,  setSalesBanners]  = useState<Banner[]>([]);
   const [schemes, setSchemes] = useState<EligibleScheme[]>([]);
+  // Per-rep Visibility summary (current window), computed from the same getSalesEligible
+  // call that feeds the Tasks "Visibility" count — rendered (Bajaj only) as its own card.
+  const [visibilitySummary, setVisibilitySummary] = useState<VisibilitySummaryCounts | null>(null);
+  // Tenant slug — the visibility summary card is Bajaj-scoped (tenant-only change).
+  const slug = useClientConfig().slug;
+  const isBajaj = (slug ?? '').trim().toLowerCase() === 'bajaj';
 
   useEffect(() => {
     setRoleState(getRole());
@@ -274,8 +360,8 @@ export default function SalesDashboard() {
     const visibilityEnabled = gs.visibilityEnabled === true;
     const captureMode = gs.visibilityCaptureMode ?? 'PHOTO_APPROVAL';
     setVisibilityMode(captureMode);
-    // Master Visibility switch OFF → no visibility task group.
-    if (!visibilityEnabled) { setVisibilityItems([]); return; }
+    // Master Visibility switch OFF → no visibility task group / summary.
+    if (!visibilityEnabled) { setVisibilityItems([]); setVisibilitySummary(null); return; }
     let cancelled = false;
     // Mode-aware (D3/D14): PHOTO_APPROVAL sources pending captures from the sales-eligible
     // window, driven by the backend's `canCapture` — so ANY capturer (incl. RSM/ZNM/NSM
@@ -284,10 +370,17 @@ export default function SalesDashboard() {
     // Shared builders keep this count identical to the Tasks page.
     if (captureMode === 'PHOTO_APPROVAL') {
       visibilityApi.getSalesEligible()
-        .then((r) => { if (!cancelled) setVisibilityItems(buildPhotoCaptureTaskItems(r.success ? r.data : null)); })
-        .catch(() => { if (!cancelled) setVisibilityItems([]); });
+        .then((r) => {
+          if (cancelled) return;
+          setVisibilityItems(buildPhotoCaptureTaskItems(r.success ? r.data : null));
+          // Aggregate the same eligible outlets into the 5-status summary (Bajaj card).
+          setVisibilitySummary(r.success ? summarizeVisibilityCaptures(r.data.outlets ?? []) : null);
+        })
+        .catch(() => { if (!cancelled) { setVisibilityItems([]); setVisibilitySummary(null); } });
       return () => { cancelled = true; };
     }
+    // AMOUNT_UPLOAD has no per-photo status model → no 5-status summary.
+    setVisibilitySummary(null);
     if (!isFieldRole) { setVisibilityItems([]); return; }
     const eligible = outlets.filter((o) => VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(o.type));
     const codes = eligible.map((o) => o.outletCode).filter(Boolean);
@@ -633,6 +726,11 @@ export default function SalesDashboard() {
           {/* ── Target Achievement (real /api/sales/targets) ── */}
           {salesTargets && (
             <TargetSummaryCard targets={salesTargets} />
+          )}
+
+          {/* ── Visibility summary — 5-status, current month (Bajaj only) ── */}
+          {isBajaj && visibilitySummary && visibilitySummary.total > 0 && (
+            <VisibilitySummaryCard counts={visibilitySummary} />
           )}
 
           {/* ── My Outlets ── */}

@@ -7,7 +7,7 @@ import {
   CheckCircle, XCircle, Clock, AlertTriangle,
   Camera, ChevronRight, ChevronDown,
   BookOpen, Gift, HeadphonesIcon, ThumbsUp,
-  ShoppingCart,
+  ShoppingCart, Target,
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -24,6 +24,8 @@ import { SignaturePad, SignatureClearButton, type SignaturePadHandle } from '@/c
 import { SoDeclarationView } from '@/components/so-declaration-view';
 import { renderSoDeclarationPdf, type SoDeclarationData } from '@/lib/so-declaration';
 import { getStoredUser } from '@/lib/auth-client';
+import { pct, pctBg, pctBarColor, getPrimaryParam } from '@/lib/targets';
+import { istMonthKey } from '@/lib/ist-date';
 import { RejectionModal } from './RejectionModal';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -916,6 +918,110 @@ function VisibilityPeriodCard({ outletId, enabled }: { outletId: string; enabled
   );
 }
 
+/* ─── Target vs Achievement (per-outlet) card ─────────────────────────────────── */
+
+interface OutletKpiCol { code: string; name: string; unit: string; isPrimary: boolean; order?: number; rollup?: 'SUM' | 'OUTLET_COUNT'; }
+interface OutletKpiVal { target: number | null; achieved: number | null; pace: number | null }
+interface OutletTargetsResponse {
+  kpiColumns: OutletKpiCol[];
+  rows: { outletCode: string; kpis: Record<string, OutletKpiVal> }[];
+}
+
+const fmtTgtNum = (n: number | null | undefined) => (n === null || n === undefined ? '–' : n.toLocaleString('en-IN'));
+
+/**
+ * Per-outlet Target vs Achievement — the same primary-bar + KPI-grid the Outlets cards view
+ * shows, scoped to THIS outlet (fetched from /api/sales/outlet-targets for the current IST
+ * month, row picked by outletCode). Self-hides when the outlet has no code, the fetch fails,
+ * or no KPI has a target/achieved this month. This is a per-OUTLET view, so an OUTLET_COUNT
+ * roll-up KPI still shows the outlet's own raw achieved/target (the roll-up only changes the
+ * team/dashboard aggregates, never a single outlet's value).
+ */
+function TargetAchievementCard({ outletCode }: { outletCode: string }) {
+  const [cols, setCols] = useState<OutletKpiCol[] | null>(null);
+  const [kpis, setKpis] = useState<Record<string, OutletKpiVal>>({});
+
+  useEffect(() => {
+    if (!outletCode) { setCols(null); return; }
+    let cancelled = false;
+    fetch(`/api/sales/outlet-targets?period=${encodeURIComponent(istMonthKey(new Date()))}`)
+      .then((r) => r.json())
+      .then((body) => {
+        if (cancelled) return;
+        if (!body?.success) { setCols(null); return; }
+        const data = body.data as OutletTargetsResponse;
+        const row = (data.rows ?? []).find((x) => x.outletCode === outletCode);
+        setCols(data.kpiColumns ?? []);
+        setKpis(row?.kpis ?? {});
+      })
+      .catch(() => { if (!cancelled) setCols(null); });
+    return () => { cancelled = true; };
+  }, [outletCode]);
+
+  if (!cols) return null;
+  // Hide entirely when this outlet has no target/achieved for any KPI this month.
+  const hasAny = cols.some((c) => {
+    const k = kpis[c.code];
+    return k && (k.target != null || k.achieved != null);
+  });
+  if (!hasAny) return null;
+
+  const primary = getPrimaryParam(cols);
+  // Exclude the ACTUAL headline KPI by code (not by isPrimary): getPrimaryParam falls back to
+  // cols[0] when no KPI is flagged primary, so filtering on !isPrimary would render cols[0] twice.
+  const others  = cols.filter((c) => c.code !== primary?.code);
+  const pk      = primary ? kpis[primary.code] : undefined;
+  const pPct    = primary && pk?.target ? pct(pk.achieved ?? 0, pk.target) : 0;
+
+  return (
+    <Card data-testid="target-achievement-card">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Target className="h-4 w-4 text-[var(--brand-primary)]" /> Target Achievement
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="pt-0 pb-3">
+        {primary && pk && (
+          <div className="pb-2.5">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[11px] font-semibold text-gray-600">{primary.name}</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[14px] font-bold text-gray-800">
+                  {fmtTgtNum(pk.achieved)}<span className="text-[12px] text-gray-400 font-normal"> /{fmtTgtNum(pk.target)}{primary.unit ? ` ${primary.unit}` : ''}</span>
+                </span>
+                <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-full ${pctBg(pPct)}`}>{pPct}%</span>
+              </div>
+            </div>
+            <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+              <div className={`h-full rounded-full ${pctBarColor(pPct)}`} style={{ width: `${Math.min(pPct, 100)}%` }} />
+            </div>
+          </div>
+        )}
+        {others.length > 0 && (
+          <div className={`grid grid-cols-2 gap-x-3 gap-y-3 ${primary && pk ? 'border-t border-gray-100 pt-2.5' : ''}`}>
+            {others.map((c) => {
+              const k  = kpis[c.code];
+              const pp = k?.target ? pct(k.achieved ?? 0, k.target) : 0;
+              return (
+                <div key={c.code} className="border-l-[3px] border-gray-200 pl-2">
+                  <p className="text-[11px] font-semibold text-gray-600 truncate leading-tight">{c.name}</p>
+                  <div className="flex items-center justify-between mt-0.5">
+                    <p className="text-[15px] font-bold text-gray-900 leading-tight">
+                      {fmtTgtNum(k?.achieved ?? null)}
+                      <span className="text-[12px] font-semibold text-gray-500"> /{fmtTgtNum(k?.target ?? null)}</span>
+                    </p>
+                    <span className={`text-[12px] font-bold px-1.5 py-0.5 rounded-full ${pctBg(pp)}`}>{pp}%</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 /* ─── Rejection modal ────────────────────────────────────────────────────────── */
 
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
@@ -1531,6 +1637,10 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           enabled={settings.visibilityEnabled === true && captureMode === 'PHOTO_APPROVAL'}
         />
       )}
+
+      {/* Per-outlet Target vs Achievement — same primary-bar + KPI-grid as the Outlets cards
+          view, for this outlet + current month. Self-hides when there are no targets. */}
+      {kyc.outletCode && <TargetAchievementCard outletCode={kyc.outletCode} />}
 
       {/* ─── Partner + Document + Bank details (collapsible for all, default closed) ── */}
       <div className="rounded-xl border border-gray-200 overflow-hidden">

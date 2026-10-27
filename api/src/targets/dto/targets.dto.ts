@@ -30,6 +30,11 @@ export class UpsertKpiDefDto {
   @IsOptional()
   order?: number;
 
+  /** Aggregation roll-up: 'SUM' (cumulative, default) or 'OUTLET_COUNT' (# outlets that met target). */
+  @IsIn(['SUM', 'OUTLET_COUNT'])
+  @IsOptional()
+  rollup?: 'SUM' | 'OUTLET_COUNT';
+
   @IsBoolean()
   @IsOptional()
   enabled?: boolean;

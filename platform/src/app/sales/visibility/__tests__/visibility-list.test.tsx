@@ -9,7 +9,7 @@
  */
 
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import type { SalesEligibleResponse } from '@/lib/visibility-types';
 
@@ -74,8 +74,19 @@ describe('VIS — Sales Visibility list', () => {
     expect(await screen.findByText('Due Store')).toBeInTheDocument();
     expect(screen.getByText('Approved Store')).toBeInTheDocument();
     // Two outlets sit in the 'due' window state (o-due + the view-only o-view).
-    expect(screen.getAllByText('Due')).toHaveLength(2);
-    expect(screen.getByText('Approved')).toBeInTheDocument();
+    // Scope to the badge <span>s so the status-filter <option>s of the same text don't count.
+    expect(screen.getAllByText('Due', { selector: 'span' })).toHaveLength(2);
+    expect(screen.getByText('Approved', { selector: 'span' })).toBeInTheDocument();
+  });
+
+  it('VIS5: status filter narrows the list', async () => {
+    getSalesEligible.mockResolvedValue({ success: true, data: RESP });
+    render(<SalesVisibilityPage />);
+    await screen.findByText('Due Store');
+    // Select the "Approved" status in the (first) status filter pill.
+    fireEvent.change(screen.getByDisplayValue('All statuses'), { target: { value: 'approved' } });
+    expect(screen.queryByText('Due Store')).not.toBeInTheDocument();
+    expect(screen.getByText('Approved Store')).toBeInTheDocument();
   });
 
   it('VIS2: Capture button only for canCapture + unsatisfied window (D8)', async () => {

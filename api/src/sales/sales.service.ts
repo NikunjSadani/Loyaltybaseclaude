@@ -587,42 +587,60 @@ export class SalesService {
 
     const whereBase = { clientId: user.clientId, outletCode: { in: outletCodes } };
     const [targetRows, achRows, kpiRows] = await Promise.all([
-      this.prisma.outletTarget.findMany({ where: { ...whereBase, month }, select: { targetValues: true } }),
-      this.prisma.outletSalesRecord.findMany({ where: { ...whereBase, month }, select: { kpiValues: true } }),
+      this.prisma.outletTarget.findMany({ where: { ...whereBase, month }, select: { outletCode: true, targetValues: true } }),
+      this.prisma.outletSalesRecord.findMany({ where: { ...whereBase, month }, select: { outletCode: true, kpiValues: true } }),
       this.prisma.kpiDef.findMany({
         where: { clientId: user.clientId },
-        select: { code: true, label: true, unit: true, isPrimary: true },
+        select: { code: true, label: true, unit: true, isPrimary: true, order: true, rollup: true },
       }),
     ]);
 
-    // Sum each KPI's target + achieved across all the rep's outlets for the month.
-    const sumByCode = (rows: { v: unknown }[]) => {
-      const acc: Record<string, number> = {};
-      for (const { v } of rows) {
-        const obj = (v ?? {}) as Record<string, number>;
-        for (const code of kpiCodeKeys(obj)) acc[code] = (acc[code] ?? 0) + (Number(obj[code]) || 0);
-      }
-      return acc;
-    };
-    const targetSum = sumByCode(targetRows.map((r) => ({ v: r.targetValues })));
-    const achSum    = sumByCode(achRows.map((r) => ({ v: r.kpiValues })));
+    // Per-outlet target/achieved maps — needed because the OUTLET_COUNT roll-up compares each
+    // outlet's own target vs achieved, not just the tenant-wide sum.
+    const targetByOutlet = new Map(targetRows.map((r) => [r.outletCode, (r.targetValues ?? {}) as Record<string, number>]));
+    const achByOutlet    = new Map(achRows.map((r) => [r.outletCode, (r.kpiValues ?? {}) as Record<string, number>]));
+    const allOutletCodes = new Set([...targetByOutlet.keys(), ...achByOutlet.keys()]);
 
     const kpiMeta = new Map(kpiRows.map((k) => [k.code, k]));
-    const codes = [...new Set([...Object.keys(targetSum), ...Object.keys(achSum)])];
-    const kpis = codes.map((code) => {
-      const target = targetSum[code] ?? 0;
-      const achieved = achSum[code] ?? 0;
+    const codes = new Set<string>();
+    for (const tv of targetByOutlet.values()) for (const c of kpiCodeKeys(tv)) codes.add(c);
+    for (const kv of achByOutlet.values()) for (const c of kpiCodeKeys(kv)) codes.add(c);
+
+    const kpis = [...codes].map((code) => {
       const meta = kpiMeta.get(code);
+      const rollup = meta?.rollup === 'OUTLET_COUNT' ? 'OUTLET_COUNT' : 'SUM';
+      let target = 0;
+      let achieved = 0;
+      if (rollup === 'OUTLET_COUNT') {
+        // Denominator = outlets that have a target for this KPI; numerator = those whose
+        // achieved met/exceeded it. (The card then reads "X / Y outlets · Z%".)
+        for (const oc of allOutletCodes) {
+          const t = Number(targetByOutlet.get(oc)?.[code]) || 0;
+          if (t <= 0) continue;
+          target += 1;
+          if ((Number(achByOutlet.get(oc)?.[code]) || 0) >= t) achieved += 1;
+        }
+      } else {
+        // SUM — numerically identical to the prior sum-across-outlets behavior.
+        for (const oc of allOutletCodes) {
+          target += Number(targetByOutlet.get(oc)?.[code]) || 0;
+          achieved += Number(achByOutlet.get(oc)?.[code]) || 0;
+        }
+      }
       return {
         code,
         name: meta?.label ?? code,
         unit: meta?.unit ?? '',
         isPrimary: meta?.isPrimary ?? false,
+        order: meta?.order ?? 0,
+        rollup,
         target,
         achieved,
         pace: target > 0 ? achieved / target : null,
       };
-    }).sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || a.name.localeCompare(b.name));
+      // Configured KpiDef.order first; isPrimary + name as tiebreakers so tenants that never
+      // set an order (all 0 — e.g. Deoleo) keep the prior primary-then-name order byte-identical.
+    }).sort((a, b) => a.order - b.order || Number(b.isPrimary) - Number(a.isPrimary) || a.name.localeCompare(b.name));
 
     // 6-month trend on the primary KPI (else the first KPI) for the chart.
     const primaryCode = kpis.find((k) => k.isPrimary)?.code ?? kpis[0]?.code ?? null;
@@ -710,7 +728,7 @@ export class SalesService {
       this.prisma.outletSalesRecord.findMany({ where: whereBase, select: { outletCode: true, kpiValues: true } }),
       this.prisma.kpiDef.findMany({
         where: { clientId },
-        select: { code: true, label: true, unit: true, isPrimary: true },
+        select: { code: true, label: true, unit: true, isPrimary: true, order: true, rollup: true },
       }),
     ]);
 
@@ -718,8 +736,9 @@ export class SalesService {
     const aIdx = new Map(achRows.map((r) => [r.outletCode, (r.kpiValues ?? {}) as Record<string, number>]));
 
     const kpiColumns = kpiRows
-      .map((k) => ({ code: k.code, name: k.label, unit: k.unit, isPrimary: k.isPrimary }))
-      .sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || a.name.localeCompare(b.name));
+      .map((k) => ({ code: k.code, name: k.label, unit: k.unit, isPrimary: k.isPrimary, order: k.order, rollup: k.rollup }))
+      // Configured order first; isPrimary + name as tiebreakers (unset order 0 → prior behavior).
+      .sort((a, b) => a.order - b.order || Number(b.isPrimary) - Number(a.isPrimary) || a.name.localeCompare(b.name));
 
     const rows = outletCodes.map((code) => {
       const tv = tIdx.get(code) ?? {};

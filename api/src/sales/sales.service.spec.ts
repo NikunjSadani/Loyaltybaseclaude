@@ -885,15 +885,16 @@ describe('SalesService', () => {
       // current-month targets: two outlets
       mockPrisma.outletTarget.findMany
         .mockResolvedValueOnce([
-          { targetValues: { CONSISTENCY: 500, FOCUS: 100 } },
-          { targetValues: { CONSISTENCY: 400 } },
+          // Real rows always carry outletCode (the OUTLET_COUNT roll-up keys aggregation by it).
+          { outletCode: 'O1', targetValues: { CONSISTENCY: 500, FOCUS: 100 } },
+          { outletCode: 'O2', targetValues: { CONSISTENCY: 400 } },
         ])
         // trend query (6 months) — return nothing extra
         .mockResolvedValueOnce([]);
       mockPrisma.outletSalesRecord.findMany
         .mockResolvedValueOnce([
-          { kpiValues: { CONSISTENCY: 450, FOCUS: 0 } },
-          { kpiValues: { CONSISTENCY: 200 } },
+          { outletCode: 'O1', kpiValues: { CONSISTENCY: 450, FOCUS: 0 } },
+          { outletCode: 'O2', kpiValues: { CONSISTENCY: 200 } },
         ])
         .mockResolvedValueOnce([]);
       mockPrisma.kpiDef.findMany.mockResolvedValue([
@@ -915,6 +916,37 @@ describe('SalesService', () => {
       // trend has 6 month buckets on the primary KPI
       expect(res.trend).toHaveLength(6);
       expect(res.trend[5].month).toBe('2026-05');
+    });
+
+    it('OUTLET_COUNT roll-up counts outlets that met their own target (not a sum)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { outlet: { outletCode: 'O1', isActive: true } },
+        { outlet: { outletCode: 'O2', isActive: true } },
+        { outlet: { outletCode: 'O3', isActive: true } },
+      ]);
+      mockPrisma.outletTarget.findMany
+        .mockResolvedValueOnce([
+          { outletCode: 'O1', targetValues: { LINES: 10 } },
+          { outletCode: 'O2', targetValues: { LINES: 8 } },
+          { outletCode: 'O3', targetValues: { LINES: 0 } }, // no target → excluded from denominator
+        ])
+        .mockResolvedValueOnce([]); // trend
+      mockPrisma.outletSalesRecord.findMany
+        .mockResolvedValueOnce([
+          { outletCode: 'O1', kpiValues: { LINES: 12 } }, // met (12 >= 10)
+          { outletCode: 'O2', kpiValues: { LINES: 5 } },  // missed (5 < 8)
+        ])
+        .mockResolvedValueOnce([]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'LINES', label: 'Lines', unit: 'Unit', isPrimary: true, order: 1, rollup: 'OUTLET_COUNT' },
+      ]);
+
+      const res = await service.getTargets(caller, '2026-05');
+      const lines = res.kpis.find((k: { code: string }) => k.code === 'LINES')!;
+      // 2 outlets have a LINES target (O1, O2); exactly 1 met it (O1) → 1 / 2 outlets.
+      expect(lines).toMatchObject({ rollup: 'OUTLET_COUNT', target: 2, achieved: 1 });
+      expect(lines.pace).toBeCloseTo(0.5);
     });
 
     it('with NO period, defaults to the CURRENT calendar month — not a future target month', async () => {

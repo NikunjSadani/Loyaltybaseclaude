@@ -238,6 +238,8 @@ export class VisibilityCaptureService {
         name: true,
         zone: true,
         state: true,
+        // Program (e.g. Unnati/SAMT/BSC) — drives the sales Visibility list's Program filter.
+        programName: true,
         // Drives the Sub-Program conditional-photo clause on the capture form (__subProgram__).
         programCategory: true,
         outletType: { select: { code: true, name: true } },
@@ -272,6 +274,7 @@ export class VisibilityCaptureService {
           outletName: o.name,
           zone: o.zone,
           state: o.state,
+          programName: o.programName ?? null,
           programCategory: o.programCategory ?? null,
           outletType: o.outletType,
           captureId: cap?.id ?? null,
