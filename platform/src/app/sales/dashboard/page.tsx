@@ -28,6 +28,7 @@ import { visibilityApi } from '@/lib/visibility';
 import { summarizeVisibilityCaptures, type VisibilitySummaryCounts } from '@/lib/visibility-types';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { fetchTargetTrend, type TargetTrendResult } from '@/lib/sales-trend';
+import { TargetTrendChart } from '@/components/target-trend-chart';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -181,30 +182,6 @@ function TargetSummaryCard({ targets }: { targets: SalesTargets }) {
   );
 }
 
-/** Real 6-month target-vs-achieved bar chart on the primary KPI (GET /api/sales/targets → trend). */
-function TargetTrendChart({ trend, unit }: { trend: SalesTargets['trend']; unit: string }) {
-  const hasData = trend.some((t) => t.target > 0 || t.achieved > 0);
-  if (!hasData) {
-    return <p className="text-xs text-gray-400 text-center py-6">No target history yet for your outlets.</p>;
-  }
-  const max = Math.max(1, ...trend.map((t) => Math.max(t.target, t.achieved)));
-  return (
-    <div className="flex items-end justify-between gap-2 h-40 px-1 pt-2">
-      {trend.map((t) => {
-        const label = new Date(`${t.month}-01T00:00:00`).toLocaleDateString('en-IN', { month: 'short' });
-        return (
-          <div key={t.month} className="flex-1 flex flex-col items-center gap-1 min-w-0">
-            <div className="flex items-end gap-0.5 h-32 w-full justify-center">
-              <div className="w-2.5 bg-gray-200 rounded-t" style={{ height: `${(t.target / max) * 100}%` }} title={`Target ${t.target.toLocaleString('en-IN')} ${unit}`} />
-              <div className="w-2.5 bg-[var(--brand-primary)] rounded-t" style={{ height: `${(t.achieved / max) * 100}%` }} title={`Achieved ${t.achieved.toLocaleString('en-IN')} ${unit}`} />
-            </div>
-            <span className="text-[9px] text-gray-400">{label}</span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
 
 
 /* ─── Visibility summary card (Bajaj) ─────────────────────────────────────────── */

@@ -823,11 +823,16 @@ export class SalesService {
   }
 
   /**
-   * GET /v1/sales/target-trend?kpi=&program= — the dashboard "Target vs. Achievement" chart
-   * series for a chosen KPI (default = primary) restricted to a chosen program (default = all
-   * of the caller's ACTIVE subtree outlets). Roll-up aware. Tenant-scoped.
+   * GET /v1/sales/target-trend?kpi=&program=&outlet= — the "Target vs. Achievement" chart
+   * series for a chosen KPI (default = primary).
+   *   • No `outlet`  → dashboard view: the caller's ACTIVE subtree outlets, optionally restricted
+   *     to a `program`, ROLL-UP aware (OUTLET_COUNT → # outlets that met target per month).
+   *   • With `outlet` → outlet-detail view: a SINGLE outlet's RAW monthly target vs achieved
+   *     (always SUM — a one-outlet "0/1" count is meaningless and must match the detail card's
+   *     raw cells); `program` is ignored, and the outlet must be within the caller's reach.
+   * Tenant-scoped.
    */
-  async getTargetTrend(user: JwtPayload, kpi?: string, program?: string) {
+  async getTargetTrend(user: JwtPayload, kpi?: string, program?: string, outlet?: string) {
     const month = this.reportMonth();
     const kpiRows = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId },
@@ -839,21 +844,36 @@ export class SalesService {
       (a, b) => a.order - b.order || Number(b.isPrimary) - Number(a.isPrimary) || a.label.localeCompare(b.label),
     );
     const meta = (kpi && byCode.get(kpi)) || ordered.find((k) => k.isPrimary) || ordered[0] || null;
-    const rollup: 'SUM' | 'OUTLET_COUNT' = meta?.rollup === 'OUTLET_COUNT' ? 'OUTLET_COUNT' : 'SUM';
+    // A single-outlet view is a RAW per-outlet series → force SUM (and ignore program).
+    const singleOutlet = !!outlet;
+    const rollup: 'SUM' | 'OUTLET_COUNT' =
+      singleOutlet ? 'SUM' : meta?.rollup === 'OUTLET_COUNT' ? 'OUTLET_COUNT' : 'SUM';
     const base = { kpiCode: meta?.code ?? null, kpiName: meta?.label ?? null, unit: meta?.unit ?? '', rollup };
 
-    const { active } = await this.subtreeOutletCodes(user);
-    if (!meta || active.length === 0) return { ...base, trend: this.emptyTrend(month) };
+    if (!meta) return { ...base, trend: this.emptyTrend(month) };
+    const { all, active } = await this.subtreeOutletCodes(user);
 
-    // Restrict to a program when one is named (empty match → all-zero trend).
-    let outletCodes = active;
-    if (program) {
-      const outlets = await this.prisma.outlet.findMany({
-        where: { clientId: user.clientId, outletCode: { in: active }, programName: program, deletedAt: null },
-        select: { outletCode: true },
-      });
-      outletCodes = outlets.map((o) => o.outletCode);
-      if (outletCodes.length === 0) return { ...base, trend: this.emptyTrend(month) };
+    let outletCodes: string[];
+    if (singleOutlet) {
+      // Authorize a single outlet against the caller's FULL assigned subtree (incl. pending /
+      // non-approved outlets). The detail-page Target Achievement card shows targets for those
+      // outlets too (it reads the all-scope outlet-targets), so the trend beneath it must use the
+      // SAME scope — else an under-review outlet shows an empty trend under a card of real numbers.
+      if (!all.includes(outlet!)) return { ...base, trend: this.emptyTrend(month) };
+      outletCodes = [outlet!];
+    } else {
+      // Aggregate (dashboard): approved + active outlets only — matches the hero card.
+      if (active.length === 0) return { ...base, trend: this.emptyTrend(month) };
+      outletCodes = active;
+      if (program) {
+        // Restrict to a program when one is named (empty match → all-zero trend).
+        const outlets = await this.prisma.outlet.findMany({
+          where: { clientId: user.clientId, outletCode: { in: active }, programName: program, deletedAt: null },
+          select: { outletCode: true },
+        });
+        outletCodes = outlets.map((o) => o.outletCode);
+        if (outletCodes.length === 0) return { ...base, trend: this.emptyTrend(month) };
+      }
     }
 
     const trend = await this.buildKpiTrend(user.clientId, outletCodes, month, meta.code, rollup);

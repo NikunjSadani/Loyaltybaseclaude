@@ -19,17 +19,20 @@ export interface TargetTrendResult {
 }
 
 /**
- * Fetch the 6-month trend for a KPI (omit → primary) restricted to a program (omit → all
- * of the caller's active outlets). Returns null on any failure so the caller can fall back
- * to the primary/all trend already in the dashboard payload.
+ * Fetch the 6-month trend for a KPI (omit → primary). Dashboard view: restrict to a program
+ * (omit → all of the caller's active outlets), roll-up aware. Outlet-detail view: pass `outlet`
+ * (an outletCode) for that single outlet's raw monthly series (program ignored, always SUM).
+ * Returns null on any failure so the caller can fall back.
  */
 export async function fetchTargetTrend(
   kpi?: string,
   program?: string,
+  outlet?: string,
 ): Promise<TargetTrendResult | null> {
   const qs = new URLSearchParams();
   if (kpi) qs.set('kpi', kpi);
   if (program) qs.set('program', program);
+  if (outlet) qs.set('outlet', outlet);
   const url = `/api/sales/target-trend${qs.toString() ? `?${qs.toString()}` : ''}`;
   try {
     const res = await fetch(url);

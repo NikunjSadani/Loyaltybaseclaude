@@ -1047,6 +1047,57 @@ describe('SalesService', () => {
       });
       expect(res.trend[5]).toMatchObject({ month: cur, target: 100, achieved: 90 });
     });
+
+    it('single outlet → raw SUM series for that outlet even when the KPI is OUTLET_COUNT', async () => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'LINES', label: 'Lines', unit: 'Unit', isPrimary: true, order: 1, rollup: 'OUTLET_COUNT' },
+      ]);
+      const cur = currentMonthKey();
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', month: cur, targetValues: { LINES: 10 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', month: cur, kpiValues: { LINES: 12 } },
+      ]);
+      const res = await service.getTargetTrend(caller, 'LINES', undefined, 'O1');
+      // A single outlet is forced to SUM → raw values (10/12), NOT a 0/1 "met target" count;
+      // and the program path is never taken.
+      expect(res.rollup).toBe('SUM');
+      expect(mockPrisma.outlet.findMany).not.toHaveBeenCalled();
+      expect(res.trend[5]).toMatchObject({ month: cur, target: 10, achieved: 12 });
+    });
+
+    it('single outlet authorizes via the FULL subtree — incl. a pending/non-active outlet', async () => {
+      // A pending (isActive:false) outlet is in `all` but NOT `active`; the single-outlet trend
+      // must still show its data so it matches the detail-page card's scope (not an empty chart).
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { outlet: { outletCode: 'O1', isActive: true } },
+        { outlet: { outletCode: 'O4', isActive: false } },
+      ]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'MONTH_TGT', label: 'Month Target', unit: 'cases', isPrimary: true, order: 1, rollup: 'SUM' },
+      ]);
+      const cur = currentMonthKey();
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O4', month: cur, targetValues: { MONTH_TGT: 100 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O4', month: cur, kpiValues: { MONTH_TGT: 80 } },
+      ]);
+      const res = await service.getTargetTrend(caller, 'MONTH_TGT', undefined, 'O4');
+      expect(res.trend[5]).toMatchObject({ month: cur, target: 100, achieved: 80 });
+    });
+
+    it("single outlet outside the caller's reach → empty (all-zero) trend", async () => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'MONTH_TGT', label: 'Month Target', unit: 'cases', isPrimary: true, order: 1, rollup: 'SUM' },
+      ]);
+      const res = await service.getTargetTrend(caller, undefined, undefined, 'O9');
+      expect(res.trend).toHaveLength(6);
+      expect(
+        res.trend.every((p: { target: number; achieved: number }) => p.target === 0 && p.achieved === 0),
+      ).toBe(true);
+    });
   });
 
   describe('getOutletTargets', () => {

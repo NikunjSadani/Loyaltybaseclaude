@@ -51,15 +51,18 @@ export class SalesController {
     return this.sales.getOutletTargets(user, period);
   }
 
-  // Target-vs-achievement 6-month trend for a chosen KPI (default primary) + program (default all).
+  // Target-vs-achievement 6-month trend for a chosen KPI (default primary). Dashboard view:
+  // optional program (default all), roll-up aware. Outlet-detail view: pass `outlet` for a single
+  // outlet's raw monthly series (program ignored, always SUM).
   @Get('target-trend')
   @RequirePermission('targets:read')
   getTargetTrend(
     @CurrentUser() user: JwtPayload,
     @Query('kpi') kpi?: string,
     @Query('program') program?: string,
+    @Query('outlet') outlet?: string,
   ) {
-    return this.sales.getTargetTrend(user, kpi, program);
+    return this.sales.getTargetTrend(user, kpi, program, outlet);
   }
 
   // Sales team leaderboard — ranks the caller against same-level peers (scope

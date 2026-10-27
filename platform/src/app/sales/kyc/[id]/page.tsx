@@ -7,7 +7,7 @@ import {
   CheckCircle, XCircle, Clock, AlertTriangle,
   Camera, ChevronRight, ChevronDown,
   BookOpen, Gift, HeadphonesIcon, ThumbsUp,
-  ShoppingCart, Target,
+  ShoppingCart, Target, TrendingUp,
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -26,6 +26,8 @@ import { renderSoDeclarationPdf, type SoDeclarationData } from '@/lib/so-declara
 import { getStoredUser } from '@/lib/auth-client';
 import { pct, pctBg, pctBarColor, getPrimaryParam } from '@/lib/targets';
 import { istMonthKey } from '@/lib/ist-date';
+import { fetchTargetTrend, type TargetTrendResult } from '@/lib/sales-trend';
+import { TargetTrendChart } from '@/components/target-trend-chart';
 import { RejectionModal } from './RejectionModal';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -1022,6 +1024,80 @@ function TargetAchievementCard({ outletCode }: { outletCode: string }) {
   );
 }
 
+/* ─── Target vs. Achievement trend (per-outlet, historical) ───────────────────── */
+
+/**
+ * 6-month Target-vs-Achievement trend for THIS outlet (raw SUM series) with a KPI filter —
+ * the same chart the dashboard shows, scoped to one outlet via GET /sales/target-trend?outlet=.
+ * The caller gates on outletCode; self-hides when the outlet has no targets this month.
+ */
+function OutletTrendCard({ outletCode }: { outletCode: string }) {
+  const [kpiCols, setKpiCols] = useState<OutletKpiCol[] | null>(null);
+  const [hasAny, setHasAny] = useState(false);
+  const [kpi, setKpi] = useState('');
+  const [trend, setTrend] = useState<TargetTrendResult | null>(null);
+
+  // KPI list (dropdown) + whether this outlet has any target this month (drives the self-hide,
+  // so this card appears/disappears together with the per-month Target Achievement card).
+  useEffect(() => {
+    if (!outletCode) { setKpiCols(null); return; }
+    let cancelled = false;
+    fetch(`/api/sales/outlet-targets?period=${encodeURIComponent(istMonthKey(new Date()))}`)
+      .then((r) => r.json())
+      .then((body) => {
+        if (cancelled) return;
+        if (!body?.success) { setKpiCols(null); return; }
+        const data = body.data as OutletTargetsResponse;
+        const row = (data.rows ?? []).find((x) => x.outletCode === outletCode);
+        setKpiCols(data.kpiColumns ?? []);
+        setHasAny(!!row && Object.values(row.kpis ?? {}).some((k) => k.target != null || k.achieved != null));
+      })
+      .catch(() => { if (!cancelled) setKpiCols(null); });
+    return () => { cancelled = true; };
+  }, [outletCode]);
+
+  // The selected KPI's 6-month series for THIS outlet (backend forces SUM for a single outlet).
+  useEffect(() => {
+    if (!outletCode) { setTrend(null); return; }
+    let cancelled = false;
+    fetchTargetTrend(kpi || undefined, undefined, outletCode)
+      .then((r) => { if (!cancelled) setTrend(r); })
+      .catch(() => { if (!cancelled) setTrend(null); });
+    return () => { cancelled = true; };
+  }, [outletCode, kpi]);
+
+  if (!kpiCols || !hasAny) return null;
+
+  return (
+    <Card data-testid="outlet-trend-card">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <TrendingUp className="h-4 w-4 text-[var(--brand-primary)]" /> Target vs. Achievement
+        </CardTitle>
+        <div className="flex items-center gap-1.5 mt-2 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
+          <div className="relative shrink-0">
+            <select
+              value={kpi}
+              onChange={(e) => setKpi(e.target.value)}
+              className={`appearance-none text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1 bg-white focus:outline-none transition-colors cursor-pointer ${kpi !== '' ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-gray-200 text-gray-600 focus:border-[var(--brand-primary)]'}`}
+            >
+              <option value="">Primary KPI</option>
+              {kpiCols.map((c) => <option key={c.code} value={c.code}>{c.name}</option>)}
+            </select>
+            <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${kpi !== '' ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          </div>
+        </div>
+        <p className="text-xs text-gray-400 mt-1">
+          Last 6 months · {trend?.kpiName ?? 'Primary KPI'}
+        </p>
+      </CardHeader>
+      <CardContent className="px-2 pb-3">
+        <TargetTrendChart trend={trend?.trend ?? []} unit={trend?.unit ?? ''} emptyText="No target history yet for this outlet." />
+      </CardContent>
+    </Card>
+  );
+}
+
 /* ─── Rejection modal ────────────────────────────────────────────────────────── */
 
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
@@ -1641,6 +1717,9 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
       {/* Per-outlet Target vs Achievement — same primary-bar + KPI-grid as the Outlets cards
           view, for this outlet + current month. Self-hides when there are no targets. */}
       {kyc.outletCode && <TargetAchievementCard outletCode={kyc.outletCode} />}
+
+      {/* Historical 6-month Target-vs-Achievement trend for this outlet (platform-wide; KPI filter). */}
+      {kyc.outletCode && <OutletTrendCard outletCode={kyc.outletCode} />}
 
       {/* ─── Partner + Document + Bank details (collapsible for all, default closed) ── */}
       <div className="rounded-xl border border-gray-200 overflow-hidden">
