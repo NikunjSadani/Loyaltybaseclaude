@@ -56,13 +56,15 @@ function pushSupported(): boolean {
   );
 }
 
-export default function PushSubscriptionManager() {
+export default function PushSubscriptionManager({ tenantSlug }: { tenantSlug?: string }) {
   const [showPrompt, setShowPrompt] = useState(false);
 
   useEffect(() => {
-    // Gate 1: flag must be explicitly 'true'. Unset => fully inert. Read here (not
-    // at module load) so Next inlines it the same way while staying test-stubbable.
-    if (process.env.NEXT_PUBLIC_PWA_PUSH_ENABLED !== 'true') return;
+    // Gate 1: the global flag OR the tenant being Bajaj. Flag read here (not at module
+    // load) so Next inlines it the same way while staying test-stubbable. Other tenants
+    // stay flag-only (default OFF) → byte-identical.
+    const bajaj = (tenantSlug ?? '').trim().toLowerCase() === 'bajaj';
+    if (!(process.env.NEXT_PUBLIC_PWA_PUSH_ENABLED === 'true' || bajaj)) return;
     if (typeof window === 'undefined') return;
     // Gate 2: only inside the /sales + /partner shells.
     if (!inScope(window.location.pathname)) return;
@@ -82,10 +84,42 @@ export default function PushSubscriptionManager() {
       return;
     }
 
-    // permission === 'default': offer the opt-in unless recently snoozed.
+    // permission === 'default':
     if (isSnoozed()) return;
+
+    if (bajaj) {
+      // Bajaj: ask AUTOMATICALLY at login (no in-app banner first). Chromium/Android
+      // shows the browser prompt without a gesture; browsers that REQUIRE a user gesture
+      // (Safari/Firefox) resolve 'default' or throw → fall back to the in-app "Enable"
+      // banner so the user can still trigger it with a tap.
+      let cancelled = false;
+      void (async () => {
+        let result: NotificationPermission | undefined;
+        try {
+          result = await Notification.requestPermission();
+        } catch {
+          result = 'default'; // gesture-required browser → treat as unanswered
+        }
+        if (cancelled) return;
+        if (result === 'granted') {
+          // subscribe failure must NOT surface the "Enable" banner (permission is already
+          // granted) — PwaAppSettings offers a manual retry if the sync didn't land.
+          try { await subscribeToPush(); } catch { /* idempotent; retried elsewhere */ }
+          return;
+        }
+        if (result === 'denied') return;
+        // 'default'/undefined: dismissed or gesture-required. Snooze so we don't re-prompt
+        // on every reload (Chromium auto-blocks repeated dismissals), and offer the
+        // tap-to-enable banner for this session.
+        persistSnooze();
+        setShowPrompt(true);
+      })();
+      return () => { cancelled = true; };
+    }
+
+    // Non-Bajaj (flag on): offer the in-app opt-in banner (unchanged behaviour).
     setShowPrompt(true);
-  }, []);
+  }, [tenantSlug]);
 
   const persistSnooze = () => {
     try {

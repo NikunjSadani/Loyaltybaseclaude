@@ -47,11 +47,13 @@ function isStandalone(): boolean {
   return (navigator as unknown as { standalone?: boolean }).standalone === true;
 }
 
-export default function InstallBeacon() {
+export default function InstallBeacon({ tenantSlug }: { tenantSlug?: string }) {
   useEffect(() => {
-    // Gate: flag must be explicitly 'true'. Unset => fully inert. Read here (not at
-    // module load) so Next inlines it the same way while staying test-stubbable.
-    if (process.env.NEXT_PUBLIC_PWA_INSTALL_ENABLED !== 'true') return;
+    // Gate: the global flag OR the tenant being Bajaj. Flag read here (not at module
+    // load) so Next inlines it the same way while staying test-stubbable. Other
+    // tenants stay flag-only (OFF) → byte-identical.
+    const bajaj = (tenantSlug ?? '').trim().toLowerCase() === 'bajaj';
+    if (!(process.env.NEXT_PUBLIC_PWA_INSTALL_ENABLED === 'true' || bajaj)) return;
     if (typeof window === 'undefined') return;
 
     // Fire the beacon at most once per browser session.
@@ -87,7 +89,7 @@ export default function InstallBeacon() {
     const onInstalled = () => send();
     window.addEventListener('appinstalled', onInstalled);
     return () => window.removeEventListener('appinstalled', onInstalled);
-  }, []);
+  }, [tenantSlug]);
 
   // Side-effect only.
   return null;

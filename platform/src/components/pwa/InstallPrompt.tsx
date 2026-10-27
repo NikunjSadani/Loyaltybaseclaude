@@ -47,15 +47,17 @@ function isSnoozed(): boolean {
   }
 }
 
-export default function InstallPrompt() {
+export default function InstallPrompt({ tenantSlug }: { tenantSlug?: string }) {
   const { canInstall, installed, promptInstall } = useInstallPrompt();
   // 'mode' is set once the mount-time gates pass; it also picks the banner copy
   // (android = custom install button, ios = manual Share instructions).
   const [mode, setMode] = useState<'android' | 'ios' | null>(null);
 
   useEffect(() => {
-    // Gate 1: flag must be explicitly 'true'. Unset => fully inert.
-    if (process.env.NEXT_PUBLIC_PWA_INSTALL_ENABLED !== 'true') return;
+    // Gate 1: the global flag OR the tenant being Bajaj. Other tenants stay flag-only
+    // (default OFF) → byte-identical.
+    const bajaj = (tenantSlug ?? '').trim().toLowerCase() === 'bajaj';
+    if (!(process.env.NEXT_PUBLIC_PWA_INSTALL_ENABLED === 'true' || bajaj)) return;
     if (typeof window === 'undefined') return;
     // Gate 2: only inside the /sales + /partner shells.
     if (!inScope(window.location.pathname)) return;
@@ -66,7 +68,7 @@ export default function InstallPrompt() {
 
     // iOS Safari never fires beforeinstallprompt — offer the manual instruction.
     setMode(isIosSafari() ? 'ios' : 'android');
-  }, [installed]);
+  }, [installed, tenantSlug]);
 
   const snooze = () => {
     try {
@@ -91,76 +93,83 @@ export default function InstallPrompt() {
   if (mode === 'android' && !canInstall) return null;
 
   return (
+    // Full-screen dimmed backdrop; tapping it = dismiss (snooze). The card is centered.
     <div
       role="dialog"
+      aria-modal="true"
       aria-label="Install app"
+      onClick={dismiss}
       style={{
         position: 'fixed',
-        left: '50%',
-        bottom: '1rem',
-        transform: 'translateX(-50%)',
+        inset: 0,
         zIndex: 2147483646,
-        maxWidth: 'min(94vw, 30rem)',
-        width: 'calc(100% - 2rem)',
+        background: 'rgba(17,24,39,0.55)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '1rem',
       }}
     >
       <div
+        onClick={(e) => e.stopPropagation()}
         style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.75rem',
-          padding: '0.75rem 0.875rem',
-          borderRadius: '0.875rem',
-          border: '1px solid rgba(0,0,0,0.08)',
+          position: 'relative',
+          width: 'min(92vw, 22rem)',
           background: '#ffffff',
           color: '#111827',
-          boxShadow: '0 10px 30px rgba(0,0,0,0.18)',
-          fontSize: '0.875rem',
-          lineHeight: 1.35,
+          borderRadius: '1rem',
+          boxShadow: '0 20px 50px rgba(0,0,0,0.30)',
+          padding: '1.5rem 1.25rem 1.25rem',
+          textAlign: 'center',
         }}
       >
-        <span style={{ flex: 1 }}>
-          {mode === 'android'
-            ? 'Install this app for a faster, full-screen experience.'
-            : 'Install this app: tap the Share button, then “Add to Home Screen”.'}
-        </span>
-        {mode === 'android' && (
-          <button
-            type="button"
-            onClick={install}
-            style={{
-              flexShrink: 0,
-              padding: '0.4rem 0.85rem',
-              borderRadius: '0.6rem',
-              border: 'none',
-              background: 'var(--brand-primary, #111827)',
-              color: '#fff',
-              fontWeight: 600,
-              fontSize: '0.8125rem',
-              cursor: 'pointer',
-            }}
-          >
-            Install
-          </button>
-        )}
         <button
           type="button"
           onClick={dismiss}
           aria-label="Dismiss"
           style={{
-            flexShrink: 0,
+            position: 'absolute',
+            top: '0.5rem',
+            right: '0.5rem',
             padding: '0.25rem 0.5rem',
             borderRadius: '0.5rem',
             border: 'none',
             background: 'transparent',
             color: '#6b7280',
-            fontSize: '1.1rem',
+            fontSize: '1.25rem',
             lineHeight: 1,
             cursor: 'pointer',
           }}
         >
           ×
         </button>
+        <p style={{ fontSize: '1rem', fontWeight: 600, margin: '0 0 0.5rem' }}>
+          Install the app
+        </p>
+        <p style={{ fontSize: '0.875rem', lineHeight: 1.45, color: '#374151', margin: '0 0 1.25rem' }}>
+          {mode === 'android'
+            ? 'Add it to your home screen for a faster, full-screen experience.'
+            : 'To install: tap the Share button, then “Add to Home Screen”.'}
+        </p>
+        {mode === 'android' && (
+          <button
+            type="button"
+            onClick={install}
+            style={{
+              width: '100%',
+              padding: '0.6rem 1rem',
+              borderRadius: '0.6rem',
+              border: 'none',
+              background: 'var(--brand-primary, #111827)',
+              color: '#fff',
+              fontWeight: 600,
+              fontSize: '0.9rem',
+              cursor: 'pointer',
+            }}
+          >
+            Install
+          </button>
+        )}
       </div>
     </div>
   );

@@ -96,4 +96,18 @@ describe('InstallPrompt', () => {
     expect(Date.now() - stored).toBeLessThan(5000);
     expect(screen.queryByRole('dialog')).toBeNull();
   });
+
+  it('renders the install modal for the Bajaj tenant even with the flag OFF', () => {
+    // No NEXT_PUBLIC_PWA_INSTALL_ENABLED stub — the tenant slug alone enables it.
+    mockState = { canInstall: true, installed: false };
+    render(<InstallPrompt tenantSlug="bajaj" />);
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Install' })).toBeTruthy();
+  });
+
+  it('renders nothing for a non-Bajaj tenant with the flag OFF (byte-identical)', () => {
+    mockState = { canInstall: true, installed: false };
+    const { container } = render(<InstallPrompt tenantSlug="deoleo" />);
+    expect(container.firstChild).toBeNull();
+  });
 });

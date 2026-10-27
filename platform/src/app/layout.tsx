@@ -101,18 +101,17 @@ export default async function RootLayout({
         {/* Self-heal the Next "Failed to find Server Action" deploy-skew error (a tab open
             across a deploy) with a guarded one-shot reload; app-wide, catches uncaught cases. */}
         <StaleDeploymentGuard />
-        {/* PWA service-worker registrar — self-gates on NEXT_PUBLIC_PWA_SW_ENABLED
-            (default OFF) + /sales|/partner path; renders null otherwise. */}
-        <ServiceWorkerRegister />
-        {/* PWA install prompt — self-gates on NEXT_PUBLIC_PWA_INSTALL_ENABLED
-            (default OFF) + /sales|/partner + not-already-installed; null otherwise. */}
-        <InstallPrompt />
-        {/* PWA push opt-in — self-gates on NEXT_PUBLIC_PWA_PUSH_ENABLED (default OFF)
-            + /sales|/partner + push support; only requests permission on a user gesture. */}
-        <PushSubscriptionManager />
-        {/* PWA install telemetry — self-gates on NEXT_PUBLIC_PWA_INSTALL_ENABLED
-            (default OFF); reports a home-screen install once per session, no UI. */}
-        <InstallBeacon />
+        {/* PWA components self-gate on their NEXT_PUBLIC_* flag (default OFF) OR the
+            tenant being Bajaj (tenantSlug) — so Bajaj gets the installed-app + push UX
+            on, every other tenant stays exactly as before. Plus /sales|/partner scope. */}
+        <ServiceWorkerRegister tenantSlug={config.slug} />
+        {/* PWA install prompt — centered modal; Bajaj or NEXT_PUBLIC_PWA_INSTALL_ENABLED. */}
+        <InstallPrompt tenantSlug={config.slug} />
+        {/* PWA push opt-in — Bajaj auto-asks at login (gesture-required browsers fall back
+            to the in-app Enable prompt); other tenants gate on NEXT_PUBLIC_PWA_PUSH_ENABLED. */}
+        <PushSubscriptionManager tenantSlug={config.slug} />
+        {/* PWA install telemetry — Bajaj or NEXT_PUBLIC_PWA_INSTALL_ENABLED; no UI. */}
+        <InstallBeacon tenantSlug={config.slug} />
       </body>
     </html>
   );

@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock the pure helpers so we can assert the component drives them correctly.
@@ -142,6 +142,31 @@ describe('PushSubscriptionManager', () => {
     stubNotification('denied');
     const { container } = render(<PushSubscriptionManager />);
     expect(container.firstChild).toBeNull();
+    expect(subscribeToPush).not.toHaveBeenCalled();
+  });
+
+  it('Bajaj tenant auto-asks on mount (no banner) and subscribes when granted — flag OFF', async () => {
+    const requestPermission = stubNotification('default', 'granted');
+    render(<PushSubscriptionManager tenantSlug="bajaj" />);
+    await waitFor(() => expect(subscribeToPush).toHaveBeenCalledTimes(1));
+    expect(requestPermission).toHaveBeenCalledTimes(1);
+    // Browser granted automatically → no in-app banner.
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('Bajaj auto-ask falls back to the in-app banner when the browser needs a gesture (default)', async () => {
+    const requestPermission = stubNotification('default', 'default');
+    render(<PushSubscriptionManager tenantSlug="bajaj" />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Enable' })).toBeTruthy());
+    expect(requestPermission).toHaveBeenCalledTimes(1);
+    expect(subscribeToPush).not.toHaveBeenCalled();
+  });
+
+  it('renders nothing for a non-Bajaj tenant with the flag OFF (byte-identical)', () => {
+    const requestPermission = stubNotification('default');
+    const { container } = render(<PushSubscriptionManager tenantSlug="deoleo" />);
+    expect(container.firstChild).toBeNull();
+    expect(requestPermission).not.toHaveBeenCalled();
     expect(subscribeToPush).not.toHaveBeenCalled();
   });
 });

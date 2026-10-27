@@ -26,12 +26,14 @@ function inScope(pathname: string): boolean {
   );
 }
 
-export default function ServiceWorkerRegister() {
+export default function ServiceWorkerRegister({ tenantSlug }: { tenantSlug?: string }) {
   const [waitingWorker, setWaitingWorker] = useState<ServiceWorker | null>(null);
 
   useEffect(() => {
-    // Gate 1: flag must be explicitly 'true'. Unset => fully inert.
-    if (!SW_ENABLED) return;
+    // Gate 1: the SW runs when the global flag is on OR the tenant is Bajaj. Every
+    // other tenant stays on the flag-only default (OFF) → byte-identical.
+    const bajaj = (tenantSlug ?? '').trim().toLowerCase() === 'bajaj';
+    if (!(SW_ENABLED || bajaj)) return;
     // Gate 2: only inside the /sales + /partner shells.
     if (typeof window === 'undefined' || !inScope(window.location.pathname)) return;
     // Gate 3: unsupported browser => no-op silently.
@@ -88,7 +90,7 @@ export default function ServiceWorkerRegister() {
         onControllerChange,
       );
     };
-  }, []);
+  }, [tenantSlug]);
 
   const applyUpdate = () => {
     // Tell the waiting SW to activate; controllerchange (above) then reloads.
