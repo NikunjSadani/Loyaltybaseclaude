@@ -642,10 +642,13 @@ export class SalesService {
       // set an order (all 0 — e.g. Deoleo) keep the prior primary-then-name order byte-identical.
     }).sort((a, b) => a.order - b.order || Number(b.isPrimary) - Number(a.isPrimary) || a.name.localeCompare(b.name));
 
-    // 6-month trend on the primary KPI (else the first KPI) for the chart.
-    const primaryCode = kpis.find((k) => k.isPrimary)?.code ?? kpis[0]?.code ?? null;
-    const trend = primaryCode
-      ? await this.buildTargetTrend(user.clientId, outletCodes, month, primaryCode)
+    // 6-month trend on the primary KPI (else the first KPI) for the chart — roll-up-aware so an
+    // OUTLET_COUNT primary KPI trends as "outlets achieved" (consistent with the hero card and the
+    // KPI/Program trend filter), not a mislabeled cumulative sum. SUM primaries are byte-identical.
+    const primaryKpi = kpis.find((k) => k.isPrimary) ?? kpis[0] ?? null;
+    const trend = primaryKpi
+      ? await this.buildKpiTrend(user.clientId, outletCodes, month, primaryKpi.code,
+          primaryKpi.rollup === 'OUTLET_COUNT' ? 'OUTLET_COUNT' : 'SUM')
       : [];
 
     return { period: month, outletCount: outletCodes.length, kpis, trend };
@@ -756,30 +759,105 @@ export class SalesService {
     return { period: month, kpiColumns, rows };
   }
 
-  /** Last-6-months target vs achieved totals for one KPI code (chart series). */
-  private async buildTargetTrend(
-    clientId: string, outletCodes: string[], latestMonth: string, kpiCode: string,
-  ) {
-    // Build the 6 month keys ending at latestMonth (YYYY-MM), oldest first.
+  /** The 6 month keys ending at `latestMonth` (YYYY-MM), oldest first. */
+  private monthsEndingAt(latestMonth: string): string[] {
     const [y, m] = latestMonth.split('-').map(Number);
     const months: string[] = [];
     for (let i = 5; i >= 0; i--) {
       const d = new Date(Date.UTC(y, (m - 1) - i, 1));
       months.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
     }
+    return months;
+  }
+
+  /** An all-zero 6-month trend (no outlets in scope / no program match). */
+  private emptyTrend(latestMonth: string) {
+    return this.monthsEndingAt(latestMonth).map((month) => ({ month, target: 0, achieved: 0 }));
+  }
+
+  /**
+   * Roll-up-aware 6-month trend for ONE KPI over a fixed outlet set:
+   *   SUM          → sum of target/achieved across the outlets per month.
+   *   OUTLET_COUNT → per month, target = # outlets with a target>0 for the KPI, achieved = # of
+   *                  those whose achieved met/exceeded it ("outlets achieved" series).
+   * getTargets' primary-KPI trend routes through this too; the SUM path is numerically identical
+   * to the previous sum-only helper, so SUM-primary tenants are byte-identical.
+   */
+  private async buildKpiTrend(
+    clientId: string, outletCodes: string[], latestMonth: string,
+    kpiCode: string, rollup: 'SUM' | 'OUTLET_COUNT',
+  ) {
+    const months = this.monthsEndingAt(latestMonth);
     const where = { clientId, outletCode: { in: outletCodes }, month: { in: months } };
     const [tRows, aRows] = await Promise.all([
-      this.prisma.outletTarget.findMany({ where, select: { month: true, targetValues: true } }),
-      this.prisma.outletSalesRecord.findMany({ where, select: { month: true, kpiValues: true } }),
+      this.prisma.outletTarget.findMany({ where, select: { outletCode: true, month: true, targetValues: true } }),
+      this.prisma.outletSalesRecord.findMany({ where, select: { outletCode: true, month: true, kpiValues: true } }),
     ]);
-    const sumFor = (rows: { month: string; v: unknown }[], mo: string) =>
-      rows.filter((r) => r.month === mo)
-        .reduce((s, r) => s + (Number(((r.v ?? {}) as Record<string, number>)[kpiCode]) || 0), 0);
+    const valOf = (obj: unknown, code: string) => Number(((obj ?? {}) as Record<string, number>)[code]) || 0;
+
+    if (rollup === 'OUTLET_COUNT') {
+      return months.map((mo) => {
+        const tByOutlet = new Map<string, number>();
+        for (const r of tRows) {
+          if (r.month !== mo) continue;
+          const t = valOf(r.targetValues, kpiCode);
+          if (t > 0) tByOutlet.set(r.outletCode, t);
+        }
+        const aByOutlet = new Map<string, number>();
+        for (const r of aRows) if (r.month === mo) aByOutlet.set(r.outletCode, valOf(r.kpiValues, kpiCode));
+        let target = 0;
+        let achieved = 0;
+        for (const [oc, t] of tByOutlet) {
+          target += 1;
+          if ((aByOutlet.get(oc) ?? 0) >= t) achieved += 1;
+        }
+        return { month: mo, target, achieved };
+      });
+    }
+
     return months.map((mo) => ({
       month: mo,
-      target:   sumFor(tRows.map((r) => ({ month: r.month, v: r.targetValues })), mo),
-      achieved: sumFor(aRows.map((r) => ({ month: r.month, v: r.kpiValues })), mo),
+      target:   tRows.filter((r) => r.month === mo).reduce((s, r) => s + valOf(r.targetValues, kpiCode), 0),
+      achieved: aRows.filter((r) => r.month === mo).reduce((s, r) => s + valOf(r.kpiValues, kpiCode), 0),
     }));
+  }
+
+  /**
+   * GET /v1/sales/target-trend?kpi=&program= — the dashboard "Target vs. Achievement" chart
+   * series for a chosen KPI (default = primary) restricted to a chosen program (default = all
+   * of the caller's ACTIVE subtree outlets). Roll-up aware. Tenant-scoped.
+   */
+  async getTargetTrend(user: JwtPayload, kpi?: string, program?: string) {
+    const month = this.reportMonth();
+    const kpiRows = await this.prisma.kpiDef.findMany({
+      where: { clientId: user.clientId },
+      select: { code: true, label: true, unit: true, isPrimary: true, order: true, rollup: true },
+    });
+    const byCode = new Map(kpiRows.map((k) => [k.code, k]));
+    // Default KPI = primary, else the first by configured order — same basis as getTargets.
+    const ordered = [...kpiRows].sort(
+      (a, b) => a.order - b.order || Number(b.isPrimary) - Number(a.isPrimary) || a.label.localeCompare(b.label),
+    );
+    const meta = (kpi && byCode.get(kpi)) || ordered.find((k) => k.isPrimary) || ordered[0] || null;
+    const rollup: 'SUM' | 'OUTLET_COUNT' = meta?.rollup === 'OUTLET_COUNT' ? 'OUTLET_COUNT' : 'SUM';
+    const base = { kpiCode: meta?.code ?? null, kpiName: meta?.label ?? null, unit: meta?.unit ?? '', rollup };
+
+    const { active } = await this.subtreeOutletCodes(user);
+    if (!meta || active.length === 0) return { ...base, trend: this.emptyTrend(month) };
+
+    // Restrict to a program when one is named (empty match → all-zero trend).
+    let outletCodes = active;
+    if (program) {
+      const outlets = await this.prisma.outlet.findMany({
+        where: { clientId: user.clientId, outletCode: { in: active }, programName: program, deletedAt: null },
+        select: { outletCode: true },
+      });
+      outletCodes = outlets.map((o) => o.outletCode);
+      if (outletCodes.length === 0) return { ...base, trend: this.emptyTrend(month) };
+    }
+
+    const trend = await this.buildKpiTrend(user.clientId, outletCodes, month, meta.code, rollup);
+    return { ...base, trend };
   }
 
   /**

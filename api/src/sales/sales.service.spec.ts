@@ -21,7 +21,7 @@ const mockPrisma = {
   salesHierarchyLevel: { findFirst: jest.fn() },
   // Used by resolveGroupPan (owner-group PAN resolution) for the KYC pre-fill in buildOutlets.
   channelPartner: { findUnique: jest.fn(), findFirst: jest.fn() },
-  outlet: { findFirst: jest.fn() },
+  outlet: { findFirst: jest.fn(), findMany: jest.fn() },
   // Used by resolveGroupCarryForwardDocs (group GST-cert/cheque inheritability booleans).
   kycSubmission: { findFirst: jest.fn() },
 };
@@ -979,6 +979,76 @@ describe('SalesService', () => {
   });
 
   // ─── getOutletTargets (real PER-OUTLET KPIs for the Outlets list page) ─────────
+  describe('getTargetTrend', () => {
+    beforeEach(() => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'su1', reportingToId: null }]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { outlet: { outletCode: 'O1', isActive: true } },
+        { outlet: { outletCode: 'O2', isActive: true } },
+        { outlet: { outletCode: 'O3', isActive: true } },
+      ]);
+    });
+
+    it('SUM KPI → sums target/achieved per month across the active outlets', async () => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'MONTH_TGT', label: 'Month Target', unit: 'cases', isPrimary: true, order: 1, rollup: 'SUM' },
+      ]);
+      const cur = currentMonthKey();
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', month: cur, targetValues: { MONTH_TGT: 100 } },
+        { outletCode: 'O2', month: cur, targetValues: { MONTH_TGT: 50 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', month: cur, kpiValues: { MONTH_TGT: 40 } },
+        { outletCode: 'O2', month: cur, kpiValues: { MONTH_TGT: 10 } },
+      ]);
+      const res = await service.getTargetTrend(caller);
+      expect(res).toMatchObject({ kpiCode: 'MONTH_TGT', rollup: 'SUM' });
+      expect(res.trend).toHaveLength(6);
+      expect(res.trend[5]).toMatchObject({ month: cur, target: 150, achieved: 50 });
+    });
+
+    it('OUTLET_COUNT KPI → counts outlets that met their own target per month', async () => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'LINES', label: 'Lines', unit: 'Unit', isPrimary: true, order: 1, rollup: 'OUTLET_COUNT' },
+      ]);
+      const cur = currentMonthKey();
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', month: cur, targetValues: { LINES: 10 } },
+        { outletCode: 'O2', month: cur, targetValues: { LINES: 8 } },
+        { outletCode: 'O3', month: cur, targetValues: { LINES: 0 } }, // no target → excluded
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', month: cur, kpiValues: { LINES: 12 } }, // met
+        { outletCode: 'O2', month: cur, kpiValues: { LINES: 5 } },  // missed
+      ]);
+      const res = await service.getTargetTrend(caller, 'LINES');
+      expect(res.rollup).toBe('OUTLET_COUNT');
+      expect(res.trend[5]).toMatchObject({ month: cur, target: 2, achieved: 1 });
+    });
+
+    it('program filter restricts the trend to outlets in that program', async () => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'MONTH_TGT', label: 'Month Target', unit: 'cases', isPrimary: true, order: 1, rollup: 'SUM' },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'O1' }]); // only O1 in "Unnati"
+      const cur = currentMonthKey();
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', month: cur, targetValues: { MONTH_TGT: 100 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', month: cur, kpiValues: { MONTH_TGT: 90 } },
+      ]);
+      const res = await service.getTargetTrend(caller, undefined, 'Unnati');
+      expect(mockPrisma.outlet.findMany).toHaveBeenCalled();
+      expect(mockPrisma.outlet.findMany.mock.calls[0][0].where).toMatchObject({
+        clientId: 'deoleo', programName: 'Unnati', deletedAt: null,
+      });
+      expect(res.trend[5]).toMatchObject({ month: cur, target: 100, achieved: 90 });
+    });
+  });
+
   describe('getOutletTargets', () => {
     it('returns empty when not a sales user', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue(null);

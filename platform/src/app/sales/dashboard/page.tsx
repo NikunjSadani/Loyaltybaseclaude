@@ -27,6 +27,7 @@ import {
 import { visibilityApi } from '@/lib/visibility';
 import { summarizeVisibilityCaptures, type VisibilitySummaryCounts } from '@/lib/visibility-types';
 import { useClientConfig } from '@/lib/platform/client-config-context';
+import { fetchTargetTrend, type TargetTrendResult } from '@/lib/sales-trend';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -243,7 +244,7 @@ function VisibilitySummaryCard({ counts }: { counts: VisibilitySummaryCounts }) 
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between gap-2">
             <CardTitle className="flex items-center gap-2">
-              <Camera className="h-4 w-4 text-[var(--brand-primary)]" /> Visibility — this period
+              <Camera className="h-4 w-4 text-[var(--brand-primary)]" /> Visibility
             </CardTitle>
             <span className="text-[11px] text-gray-400 font-medium">{periodLabel}</span>
           </div>
@@ -302,6 +303,11 @@ export default function SalesDashboard() {
   // Tenant slug — the visibility summary card is Bajaj-scoped (tenant-only change).
   const slug = useClientConfig().slug;
   const isBajaj = (slug ?? '').trim().toLowerCase() === 'bajaj';
+  // Trend-chart filters (Bajaj): KPI ('' = primary default) + Program ('' = all). When either is
+  // set, we fetch a filtered trend; both empty → use the primary/all trend already in salesTargets.
+  const [trendKpi, setTrendKpi] = useState('');
+  const [trendProgram, setTrendProgram] = useState('');
+  const [trendData, setTrendData] = useState<TargetTrendResult | null>(null);
 
   useEffect(() => {
     setRoleState(getRole());
@@ -391,6 +397,16 @@ export default function SalesDashboard() {
       .catch(() => { if (!cancelled) setVisibilityItems([]); });
     return () => { cancelled = true; };
   }, [outlets, role]);
+
+  /* ── Trend chart (Bajaj): fetch a filtered series when a KPI/Program is chosen ── */
+  useEffect(() => {
+    if (!isBajaj || (trendKpi === '' && trendProgram === '')) { setTrendData(null); return; }
+    let cancelled = false;
+    fetchTargetTrend(trendKpi || undefined, trendProgram || undefined)
+      .then((r) => { if (!cancelled) setTrendData(r); })
+      .catch(() => { if (!cancelled) setTrendData(null); });
+    return () => { cancelled = true; };
+  }, [isBajaj, trendKpi, trendProgram]);
 
   /* ── Close search dropdown on outside click ── */
   useEffect(() => {
@@ -604,6 +620,15 @@ export default function SalesDashboard() {
   // sees them too. (The "New Enrollment" KYC button below stays field-only via canEnroll.)
   const schemeCount = schemes.length;
   const totalTasks  = taskGroups.reduce((s, g) => s + g.items.length, 0) + schemeCount;
+
+  // Trend chart series/labels — a Bajaj-filtered trend (trendData) when a KPI/Program is chosen,
+  // else the primary/all trend already in salesTargets (non-Bajaj always uses this → unchanged).
+  const trendPrimaryKpi = salesTargets?.kpis.find((k) => k.isPrimary) ?? salesTargets?.kpis[0] ?? null;
+  const chartTrend = trendData?.trend ?? salesTargets?.trend ?? [];
+  const chartName  = trendData?.kpiName ?? trendPrimaryKpi?.name ?? 'Primary KPI';
+  const chartUnit  = trendData
+    ? (trendData.rollup === 'OUTLET_COUNT' ? 'outlets' : trendData.unit)
+    : (trendPrimaryKpi ? kpiUnitLabel(trendPrimaryKpi) : '');
 
   return (
     <div className="space-y-5 fade-in">
@@ -830,7 +855,7 @@ export default function SalesDashboard() {
             </CardHeader>
           </Card>
 
-          {/* ── Target vs Achievement — real 6-month trend on the primary KPI ── */}
+          {/* ── Target vs Achievement — 6-month trend (KPI + Program filterable for Bajaj) ── */}
           {salesTargets && (
             <Card>
               <CardHeader>
@@ -843,15 +868,43 @@ export default function SalesDashboard() {
                     <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-[var(--brand-primary)]" /> Achieved</span>
                   </div>
                 </div>
-                <p className="text-xs text-gray-400 mt-0.5">
-                  Last 6 months · {salesTargets.kpis.find((k) => k.isPrimary)?.name ?? salesTargets.kpis[0]?.name ?? 'Primary KPI'}
+
+                {/* KPI + Program filters — Bajaj only (other tenants keep the primary/all trend). */}
+                {isBajaj && (
+                  <div className="flex items-center gap-1.5 mt-2 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
+                    <div className="relative shrink-0">
+                      <select
+                        value={trendKpi}
+                        onChange={(e) => setTrendKpi(e.target.value)}
+                        className={`appearance-none text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1 bg-white focus:outline-none transition-colors cursor-pointer ${trendKpi !== '' ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-gray-200 text-gray-600 focus:border-[var(--brand-primary)]'}`}
+                      >
+                        <option value="">Primary KPI</option>
+                        {salesTargets.kpis.map((k) => <option key={k.code} value={k.code}>{k.name}</option>)}
+                      </select>
+                      <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${trendKpi !== '' ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                    </div>
+                    {(getGifsySettings().outletPrograms ?? []).length > 0 && (
+                      <div className="relative shrink-0">
+                        <select
+                          value={trendProgram}
+                          onChange={(e) => setTrendProgram(e.target.value)}
+                          className={`appearance-none text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1 bg-white focus:outline-none transition-colors cursor-pointer ${trendProgram !== '' ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-gray-200 text-gray-600 focus:border-[var(--brand-primary)]'}`}
+                        >
+                          <option value="">All programs</option>
+                          {(getGifsySettings().outletPrograms ?? []).map((p) => <option key={p} value={p}>{p}</option>)}
+                        </select>
+                        <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${trendProgram !== '' ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <p className="text-xs text-gray-400 mt-1">
+                  Last 6 months · {chartName}
                 </p>
               </CardHeader>
               <CardContent className="px-2 pb-3">
-                <TargetTrendChart
-                  trend={salesTargets.trend}
-                  unit={salesTargets.kpis.find((k) => k.isPrimary)?.unit ?? salesTargets.kpis[0]?.unit ?? ''}
-                />
+                <TargetTrendChart trend={chartTrend} unit={chartUnit} />
               </CardContent>
             </Card>
           )}

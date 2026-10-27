@@ -51,6 +51,17 @@ export class SalesController {
     return this.sales.getOutletTargets(user, period);
   }
 
+  // Target-vs-achievement 6-month trend for a chosen KPI (default primary) + program (default all).
+  @Get('target-trend')
+  @RequirePermission('targets:read')
+  getTargetTrend(
+    @CurrentUser() user: JwtPayload,
+    @Query('kpi') kpi?: string,
+    @Query('program') program?: string,
+  ) {
+    return this.sales.getTargetTrend(user, kpi, program);
+  }
+
   // Sales team leaderboard — ranks the caller against same-level peers (scope
   // widens the net: rm | state | national), each scored by their own team's
   // primary-KPI achievement. Entries come back sorted best-first.
