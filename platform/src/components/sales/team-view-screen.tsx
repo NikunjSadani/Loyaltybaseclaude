@@ -64,7 +64,7 @@ function MemberRow({ m, href }: { m: TeamViewMember; href: string }) {
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <p className="text-sm font-semibold text-gray-900 truncate">{m.name}</p>
-          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold ${m.achievedPct === null ? 'text-gray-400 bg-gray-100' : pctClasses(m.achievedPct)}`}>
+          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-sm font-bold ${m.achievedPct === null ? 'text-gray-400 bg-gray-100' : pctClasses(m.achievedPct)}`}>
             {m.achievedPct === null ? '—' : `${m.achievedPct}%`}
           </span>
         </div>

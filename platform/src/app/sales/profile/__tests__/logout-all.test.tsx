@@ -3,8 +3,10 @@
  * SLA — Sales Profile "Log out from all devices" (#101 / Feature 10-i)
  *
  * SLA1: the menu item opens a confirm modal
- * SLA2: confirming POSTs /api/auth/logout-all, then clears cookies (logoutAction),
- *       then routes to /auth/login — in that order.
+ * SLA2: confirming POSTs /api/auth/logout-all, then clears THIS device via the shared
+ *       logout() (which clears the httpOnly cookies through logoutAction) — in that order.
+ *       logout() also drops localStorage + push and hard-navigates, so "all devices" cleans
+ *       this device exactly as thoroughly as plain logout.
  */
 
 import React from 'react';
@@ -53,7 +55,7 @@ describe('SLA — Sales Profile log out from all devices', () => {
     expect(screen.getByText(/signs you out on all your devices/i)).toBeInTheDocument();
   });
 
-  it('SLA2: confirming POSTs /api/auth/logout-all, then clears cookies, then routes to login', async () => {
+  it('SLA2: confirming POSTs /api/auth/logout-all, then clears this device via logout()', async () => {
     installFetch();
     render(<SalesProfilePage />);
     await screen.findByText('Rajesh Kumar');
@@ -64,9 +66,8 @@ describe('SLA — Sales Profile log out from all devices', () => {
 
     await waitFor(() => {
       expect(logoutAction).toHaveBeenCalled();
-      expect(push).toHaveBeenCalledWith('/auth/login');
     });
-    // Endpoint hit BEFORE the cookie-clearing logout action.
+    // Server-side revoke (logout-all) happens BEFORE this device's cookie-clearing logout().
     expect(order).toEqual(['logout-all', 'logout']);
   });
 });

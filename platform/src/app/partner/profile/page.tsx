@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
 import {
   User, CreditCard, Shield, Coins,
   LogOut, ChevronRight, CheckCircle, Clock, AlertTriangle, RefreshCw,
@@ -15,7 +14,7 @@ import { formatPoints, maskAccountNumber } from '@/lib/utils';
 import { KYCStatus } from '@/types';
 import { usePartnerIdentity } from '@/lib/partner-identity';
 import { api } from '@/lib/api-client';
-import { logoutAction } from '@/lib/auth-actions';
+import { logout } from '@/lib/auth-client';
 import PwaAppSettings from '@/components/pwa/PwaAppSettings';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -68,7 +67,6 @@ const orDash = (v?: string | null): string => (v && v.trim() ? v : '—');
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function ProfilePage() {
-  const router   = useRouter();
   const identity = usePartnerIdentity(); // REAL outlet type + points-presence signal (replaces demo session)
 
   const [profile,     setProfile]     = useState<ProfileData | null>(null);
@@ -142,8 +140,12 @@ export default function ProfilePage() {
   useEffect(() => { load(); }, [load]);
 
   const handleLogout = () => {
-    document.cookie = 'token=; Max-Age=0; path=/';
-    router.push('/auth/login');
+    // The `token`/`refresh_token` cookies are httpOnly (AF-6) — `document.cookie` CANNOT
+    // clear them, so the old inline clear left the session fully alive and the login page's
+    // auto-forward bounced straight back to the dashboard. The shared logout() clears the
+    // httpOnly cookies server-side (via logoutAction), drops local display state + the push
+    // subscription, and hard-navigates to /auth/login.
+    void logout();
   };
 
   // Revoke every session server-side (all devices), then clear THIS device's cookies
@@ -154,8 +156,10 @@ export default function ProfilePage() {
     try {
       await api.post('/api/auth/logout-all', {});
     } finally {
-      await logoutAction();
-      router.push('/auth/login');
+      // Route through the shared logout() so "all devices" cleans THIS device exactly as
+      // thoroughly as plain logout: clears the httpOnly cookies + localStorage identity +
+      // this browser's push subscription, then hard-navigates (no stale authed-UI flash).
+      await logout();
     }
   };
 

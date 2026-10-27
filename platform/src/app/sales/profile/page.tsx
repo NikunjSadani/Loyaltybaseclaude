@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
 import {
   User, Phone, Mail, Award, LogOut,
   ChevronRight, Shield, Bell, X,
@@ -11,7 +10,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { roleLabelFor } from '@/lib/sales-role';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { api, authHeader } from '@/lib/api-client';
-import { logoutAction } from '@/lib/auth-actions';
+import { logout } from '@/lib/auth-client';
 import PwaAppSettings from '@/components/pwa/PwaAppSettings';
 
 interface SalesProfile {
@@ -99,7 +98,6 @@ function mapUserToProfile(user: {
 
 export default function SalesProfilePage() {
   const slug = useClientConfig().slug;
-  const router = useRouter();
   const [profile, setProfile] = useState<SalesProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -133,8 +131,12 @@ export default function SalesProfilePage() {
   }, [slug]);
 
   const handleLogout = () => {
-    document.cookie = 'token=; Max-Age=0; path=/';
-    router.push('/auth/login');
+    // The `token`/`refresh_token` cookies are httpOnly (AF-6) — `document.cookie` CANNOT
+    // clear them, so the old inline clear left the session fully alive and the login page's
+    // auto-forward bounced straight back to the dashboard. The shared logout() clears the
+    // httpOnly cookies server-side (via logoutAction), drops local display state + the push
+    // subscription, and hard-navigates to /auth/login.
+    void logout();
   };
 
   // Revoke every session server-side (all devices), then clear THIS device's cookies
@@ -145,8 +147,10 @@ export default function SalesProfilePage() {
     try {
       await api.post('/api/auth/logout-all', {});
     } finally {
-      await logoutAction();
-      router.push('/auth/login');
+      // Route through the shared logout() so "all devices" cleans THIS device exactly as
+      // thoroughly as plain logout: clears the httpOnly cookies + localStorage identity +
+      // this browser's push subscription, then hard-navigates (no stale authed-UI flash).
+      await logout();
     }
   };
 
