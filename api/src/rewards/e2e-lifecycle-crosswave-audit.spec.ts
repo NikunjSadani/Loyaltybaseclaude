@@ -33,6 +33,7 @@ import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { HubbleService } from '../hubble/hubble.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   deriveTenantCode,
@@ -198,6 +199,9 @@ describe('transition state-machine + channel-required-fields (service level)', (
         { provide: TenantSettingsService, useValue: mockTenantSettings },
         { provide: NotificationsService, useValue: mockNotifications },
         { provide: Msg91Service, useValue: mockMsg91 },
+        // Hubble client stub — these transition/update tests don't touch the confirm
+        // Hubble path; a not-configured stub keeps RewardsService instantiable.
+        { provide: HubbleService, useValue: { isConfigured: () => false, placeOrder: jest.fn(), getOrderByReference: jest.fn() } },
       ],
     }).compile();
     rewards = mod.get(RewardsService);

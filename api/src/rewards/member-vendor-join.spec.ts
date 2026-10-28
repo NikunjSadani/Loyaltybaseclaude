@@ -11,6 +11,7 @@ import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { HubbleService } from '../hubble/hubble.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 jest.mock('../common/reward-account.helper', () => ({
@@ -62,6 +63,7 @@ describe('RewardsService — vendor visibility + consent (Wave 2)', () => {
         { provide: TenantSettingsService, useValue: mockTenantSettings },
         { provide: NotificationsService, useValue: mockNotifications },
         { provide: Msg91Service, useValue: mockMsg91 },
+        { provide: HubbleService, useValue: { isConfigured: () => false, placeOrder: jest.fn(), getOrderByReference: jest.fn() } },
       ],
     }).compile();
     service = mod.get(RewardsService);

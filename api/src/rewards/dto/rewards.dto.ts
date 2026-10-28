@@ -557,6 +557,15 @@ export class CreateRewardCatalogDto {
   @IsInt()
   @Min(0)
   sortOrder?: number;
+
+  /**
+   * Hubble Money productId for AUTO-ISSUANCE of a GIFT_CARD voucher (Bajaj-only,
+   * flag-gated). Persisted to RewardCatalog.metadata.hubbleProductId; auto-issuance
+   * fires only when the tenant flag is ON AND this is set on a GIFT_CARD item.
+   */
+  @IsOptional()
+  @IsString()
+  hubbleProductId?: string;
 }
 
 /** PATCH /v1/admin/rewards/catalog/:id — all fields optional. */
@@ -632,4 +641,13 @@ export class UpdateRewardCatalogDto {
   @IsInt()
   @Min(0)
   sortOrder?: number;
+
+  /**
+   * Hubble Money productId (GIFT_CARD auto-issuance). Persisted to
+   * metadata.hubbleProductId; an empty string CLEARS it (disables auto-issuance for
+   * this item). `undefined` leaves the stored value unchanged.
+   */
+  @IsOptional()
+  @IsString()
+  hubbleProductId?: string;
 }

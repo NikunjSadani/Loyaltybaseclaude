@@ -52,6 +52,7 @@ import {
   buildFulfilmentTemplateBuffer,
   parseFulfilmentUploadBuffer,
 } from './rewards-fulfilment.helpers';
+import { HubbleService, HubbleOrderResult, HubbleVoucher } from '../hubble/hubble.service';
 
 /**
  * Rewards & Redemption — ported from platform/src/app/api/rewards/* onto /v1.
@@ -167,6 +168,24 @@ const MEMBER_ORDER_SELECT = {
   partner: { select: { id: true, businessName: true } },
 } satisfies Prisma.RedemptionOrderSelect;
 
+/**
+ * The RedemptionOrder shape the Hubble auto-issuance helpers operate on (a structural
+ * subset of the full row loaded by RewardsService.loadHubbleOrder — extra columns are
+ * fine). Keeps the money-path helpers strongly typed without threading Prisma generics.
+ */
+interface HubbleLoadedOrder {
+  id: string;
+  orderNumber: string;
+  partnerId: string;
+  status: RedemptionStatus;
+  voucherCode: string | null;
+  pointsDeducted: number;
+  valuePaise: bigint | null;
+  redemptionMode: PayoutMode;
+  metadata: Prisma.JsonValue;
+  reward: { metadata: Prisma.JsonValue } | null;
+}
+
 @Injectable()
 export class RewardsService {
   private readonly logger = new Logger(RewardsService.name);
@@ -177,6 +196,7 @@ export class RewardsService {
     private readonly tenantSettings: TenantSettingsService,
     private readonly notifications: NotificationsService,
     private readonly msg91: Msg91Service,
+    private readonly hubble: HubbleService,
   ) {}
 
   private isGifsy(user: JwtPayload): boolean {
@@ -1274,6 +1294,23 @@ export class RewardsService {
       }
     });
 
+    // ── Hubble auto-issuance (Bajaj-only, feature-flagged; default OFF) ───────────
+    // Alternate entry path (sales-assisted): same GIFT_CARD confirm, so it must auto-issue
+    // identically. Points were already debited inside the committed tx above. Non-Hubble /
+    // flag-off → the existing manual path below, byte-identical. The OTP recipient / owner
+    // is the OUTLET (not the acting rep), so the notification addresses the outlet owner.
+    if (await this.isHubbleEligible(order, user.clientId)) {
+      return await this.finishHubbleConfirm(order, {
+        clientId: user.clientId,
+        actorId: user.sub,
+        notifyUserId: partner.userId,
+        recipientPhone: partner.phone ?? null,
+        ownerName: partner.ownerName ?? 'Partner',
+        rewardName: order.reward?.name ?? '',
+        points: requiredPoints,
+      });
+    }
+
     // Redemption-confirmed notification on commit: bell feed (IN_APP) + PUSH to the outlet's
     // partner user, PLUS the config-driven SMS/WhatsApp to the OUTLET OWNER — via the single
     // canonical notifyUserWithChannels path. The dead direct SMS enqueue is removed; SMS now flows
@@ -1887,6 +1924,25 @@ export class RewardsService {
       }
     });
 
+    // ── Hubble auto-issuance (Bajaj-only, feature-flagged; default OFF) ───────────
+    // When the confirmed item is a GIFT_CARD carrying a Hubble productId AND the tenant
+    // has features.hubbleVoucherEnabled, issue the Amazon Pay voucher automatically now
+    // (points were already debited inside the committed tx above — never issue without a
+    // successful debit). Deoleo / flag-off / non-Hubble items short-circuit to the EXACT
+    // existing manual-fulfilment path below — BYTE-IDENTICAL (isHubbleEligible checks the
+    // productId with NO DB read first, so a non-Hubble GIFT_CARD never even reads the flag).
+    if (await this.isHubbleEligible(order, user.clientId)) {
+      return await this.finishHubbleConfirm(order, {
+        clientId: user.clientId,
+        actorId: user.sub,
+        notifyUserId: user.sub,
+        recipientPhone: order.partner?.phone ?? user.phone ?? null,
+        ownerName: order.partner?.ownerName ?? user.name ?? 'Partner',
+        rewardName: order.reward?.name ?? '',
+        points: requiredPoints,
+      });
+    }
+
     // Redemption-confirmed notification on commit: bell feed (IN_APP) + PUSH to the redeeming
     // partner user, PLUS the config-driven SMS/WhatsApp to the OWNER — via the single canonical
     // notifyUserWithChannels path. The dead direct SMS enqueue is removed; SMS now flows through
@@ -2005,6 +2061,20 @@ export class RewardsService {
     if (isCashMode && isForwardDispatchTarget) {
       throw new BadRequestException(
         'Cash redemptions are settled via payout, not the dispatch workflow.',
+      );
+    }
+
+    // AUDIT-FIX (money / double-benefit): a Hubble-issued digital voucher is irreversible —
+    // Hubble has no cancel/clawback, so once issued the member holds a live Amazon Pay
+    // voucher, exactly like a completed cash payout. A manual refund-target transition
+    // (CANCELLED / RETURNED / FAILED) would re-credit the points while the voucher stays
+    // live → double benefit; it would also clobber a DELIVERED order under a confirm↔webhook
+    // race. Block it: Hubble failures auto-refund via the issuance path, never here.
+    // (Deoleo / non-Hubble orders have no voucherProvider='Hubble' → unaffected.)
+    if (order.voucherProvider === 'Hubble' && isRefundTarget) {
+      throw new BadRequestException(
+        'A Hubble-issued voucher cannot be cancelled, returned or failed manually; ' +
+          'it is non-reversible once issued.',
       );
     }
 
@@ -2555,6 +2625,606 @@ export class RewardsService {
   }
 
   // ───────────────────────────────────────────────────────────────────────────
+  // HUBBLE MONEY — auto-issuance of the Amazon Pay voucher for a GIFT_CARD
+  // redemption. Bajaj-only, behind features.hubbleVoucherEnabled (default OFF);
+  // fires ONLY after a successful points debit at confirm.
+  //
+  // MONEY-SAFETY INVARIANTS (owner-set):
+  //   • never issue without a committed points debit  → issuance runs only AFTER the
+  //     confirm tx commits (status CONFIRMED, pointsDeducted set).
+  //   • never leave points debited without a voucher OR a refund → every order ends
+  //     DELIVERED (voucher stored), FAILED (points refunded), or PROCESSING /
+  //     pending-reconcile (webhook / get-by-reference completes it).
+  //   • idempotent on referenceId (= the RedemptionOrder id): a retry recovers the
+  //     existing Hubble order via get-by-reference; voucher-store + refund both use
+  //     atomic status/pointsDeducted claims so neither can double-apply.
+  //
+  // CONSERVATIVE DEVIATION (flagged for owner): on an INDETERMINATE outcome (the
+  // place-order call throws AND get-by-reference also throws — we cannot tell whether
+  // a voucher was issued) we do NOT auto-refund. Refunding then could double-pay a
+  // voucher that was actually issued (Hubble has no cancel). We leave the order
+  // PROCESSING + flagged for reconcile; the webhook or an ops reconcile resolves it.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** Pull a non-empty Hubble productId out of a RewardCatalog.metadata blob. */
+  private extractHubbleProductId(metadata: unknown): string | null {
+    if (!metadata || typeof metadata !== 'object') return null;
+    const v = (metadata as Record<string, unknown>).hubbleProductId;
+    return typeof v === 'string' && v.trim() ? v.trim() : null;
+  }
+
+  /** Read the per-tenant Hubble feature flag (clients.features.hubbleVoucherEnabled). */
+  private async isHubbleEnabledForTenant(clientId: string): Promise<boolean> {
+    const client = await this.prisma.client.findFirst({
+      where: { id: clientId },
+      select: { features: true },
+    });
+    return (client?.features as Record<string, unknown> | null)?.hubbleVoucherEnabled === true;
+  }
+
+  /**
+   * Eligibility for auto-issuance. ORDER MATTERS for byte-identical behaviour: the
+   * cheap, DB-free checks (GIFT_CARD + a productId on the item) run FIRST, so a
+   * Deoleo / non-Hubble item never even reads the tenant flag. Only a GIFT_CARD that
+   * actually carries a Hubble productId pays for the one flag lookup.
+   */
+  private async isHubbleEligible(
+    order: { redemptionMode: PayoutMode; reward?: { metadata?: unknown } | null },
+    clientId: string,
+  ): Promise<boolean> {
+    if (order.redemptionMode !== PayoutMode.GIFT_CARD) return false;
+    if (!this.extractHubbleProductId(order.reward?.metadata)) return false;
+    return this.isHubbleEnabledForTenant(clientId);
+  }
+
+  /**
+   * Finish a Hubble-eligible GIFT_CARD confirm: run the auto-issuance, send the
+   * outcome-appropriate notification, and return the confirm response. Shared by both
+   * confirm entry points (self-redeem + sales-assisted). NEVER throws — a thrown
+   * issuance is swallowed to pending-reconcile (points are already safely debited).
+   */
+  private async finishHubbleConfirm(
+    order: { id: string; orderNumber: string },
+    ctx: {
+      clientId: string;
+      actorId: string;
+      notifyUserId: string | null;
+      recipientPhone: string | null;
+      ownerName: string;
+      rewardName: string;
+      points: number;
+    },
+  ): Promise<{ orderId: string; status: string; message: string }> {
+    const outcome = await this.issueHubbleVoucherForOrder(order.id, ctx.clientId, ctx.actorId);
+
+    // Map the outcome to a member-facing status + message + notification event.
+    const isDelivered = outcome === 'DELIVERED';
+    const isFailed = outcome === 'FAILED_REFUNDED';
+    const status = isDelivered ? 'DELIVERED' : isFailed ? 'FAILED' : 'CONFIRMED';
+    const message = isDelivered
+      ? 'Redemption confirmed. Your voucher has been issued — view it in your orders.'
+      : isFailed
+        ? 'We could not issue your voucher, so your points have been refunded. Please try again.'
+        : 'Redemption confirmed. Your voucher is being issued and will appear shortly.';
+
+    if (ctx.notifyUserId) {
+      // AUDIT-FIX: best-effort. A notification failure must NEVER throw out of a confirm
+      // whose points are already debited (and whose voucher may already be DELIVERED) —
+      // that would 500 a redemption that actually succeeded and block retry. Log + swallow.
+      try {
+        await this.notifications.notifyUserWithChannels({
+          clientId: ctx.clientId,
+          userId: ctx.notifyUserId,
+          eventKey: isFailed ? ('REDEMPTION_FAILED' as EventKey) : 'REDEMPTION_CONFIRMED',
+          recipientPhone: ctx.recipientPhone,
+          vars: {
+            ownerName: ctx.ownerName,
+            rewardName: ctx.rewardName,
+            points: ctx.points,
+          },
+          subject: isFailed ? 'Redemption refunded' : 'Redemption confirmed',
+          body: message,
+          url: '/partner/rewards',
+          event: isFailed ? 'REDEMPTION_FAILED' : 'REDEMPTION_CONFIRMED',
+        });
+      } catch (notifyErr) {
+        this.logger.error(
+          `[hubble] confirm notification failed for order ${order.id} (non-fatal): ${notifyErr}`,
+        );
+      }
+    }
+
+    return { orderId: order.id, status, message };
+  }
+
+  /** The outcome of an auto-issuance attempt. */
+  private readonly HUBBLE_OUTCOME = {
+    DELIVERED: 'DELIVERED',
+    PROCESSING: 'PROCESSING',
+    FAILED_REFUNDED: 'FAILED_REFUNDED',
+    PENDING_RECONCILE: 'PENDING_RECONCILE',
+    SKIPPED: 'SKIPPED',
+  } as const;
+
+  /**
+   * Place the Hubble order for a confirmed GIFT_CARD redemption and apply the result
+   * idempotently. Entry point from the confirm path. NEVER throws (catches everything
+   * → PENDING_RECONCILE) so a confirm can never 500 after the debit has committed.
+   *
+   * @returns one of HUBBLE_OUTCOME.
+   */
+  async issueHubbleVoucherForOrder(
+    orderId: string,
+    clientId: string,
+    actorId?: string,
+  ): Promise<string> {
+    try {
+      const order = await this.loadHubbleOrder(orderId, clientId);
+      if (!order) return this.HUBBLE_OUTCOME.SKIPPED;
+
+      // Idempotency: an order already resolved (delivered with a voucher, or
+      // refunded/failed/cancelled) needs no issuance.
+      if (this.isHubbleOrderResolved(order)) return this.HUBBLE_OUTCOME.SKIPPED;
+
+      const productId = this.extractHubbleProductId(order.reward?.metadata);
+      if (order.redemptionMode !== PayoutMode.GIFT_CARD || !productId) {
+        return this.HUBBLE_OUTCOME.SKIPPED;
+      }
+
+      if (!this.hubble.isConfigured()) {
+        // Flag ON but environment un-provisioned: do NOT refund (nothing was placed and
+        // ops may still fulfil manually) — leave CONFIRMED + flag for reconcile. Loud log.
+        this.logger.error(
+          `[hubble] order ${order.orderNumber} eligible but Hubble is not configured — left for manual/ops fulfilment`,
+        );
+        await this.markHubblePendingReconcile(order.id, 'HUBBLE_NOT_CONFIGURED');
+        return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+      }
+
+      const amount = this.hubbleAmountRupees(order);
+      if (amount == null || amount <= 0) {
+        this.logger.error(
+          `[hubble] order ${order.orderNumber} has no issuable whole-rupee value (valuePaise=${order.valuePaise}) — cannot issue; left for ops`,
+        );
+        await this.markHubblePendingReconcile(order.id, 'HUBBLE_INVALID_AMOUNT');
+        return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+      }
+
+      // AUDIT-FIX (double-issue, future-proofing): if this order is already PROCESSING we
+      // have ALREADY sent Hubble a placeOrder for this referenceId. Never place again (a
+      // 2nd call with the same referenceId risks a 2nd Amazon voucher — our only guard
+      // would be Hubble's own idempotency, which we don't verify). Recover by reference
+      // only, exactly like the webhook reconcile. Protects any future caller (ops "retry
+      // issuance", a reconcile sweep) that points at a PROCESSING order.
+      if (order.status === RedemptionStatus.PROCESSING) {
+        let recovered: HubbleOrderResult | null;
+        try {
+          recovered = await this.hubble.getOrderByReference(order.id);
+        } catch (recoverErr) {
+          this.logger.error(
+            `[hubble] recover (already PROCESSING) failed for order ${order.orderNumber}: ${recoverErr}`,
+          );
+          await this.markHubblePendingReconcile(order.id, 'HUBBLE_INDETERMINATE');
+          return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+        }
+        if (recovered === null) {
+          // PROCESSING locally but Hubble has no record — anomalous; do NOT refund off a
+          // single miss (could double with a later success). Leave for reconcile.
+          await this.markHubblePendingReconcile(order.id, 'HUBBLE_PROCESSING_NOT_FOUND');
+          return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+        }
+        return await this.applyHubbleBody(order, recovered, actorId);
+      }
+
+      // Place the order (referenceId = our order id = the idempotency key). On ANY
+      // thrown error, recover authoritative state by referenceId before deciding.
+      let body: HubbleOrderResult | null;
+      try {
+        body = await this.hubble.placeOrder({
+          productId,
+          referenceId: order.id,
+          amount,
+          denominationDetails: [{ denomination: amount, quantity: 1 }],
+          customerDetails: null, // B2B
+        });
+      } catch (placeErr) {
+        this.logger.warn(
+          `[hubble] placeOrder threw for order ${order.orderNumber}; recovering by reference: ${placeErr}`,
+        );
+        try {
+          body = await this.hubble.getOrderByReference(order.id);
+        } catch (recoverErr) {
+          // INDETERMINATE — may or may not have been placed. Do NOT refund (double-pay
+          // risk). Leave pending; the webhook / ops reconcile resolves it.
+          this.logger.error(
+            `[hubble] indeterminate state for order ${order.orderNumber} (place + recover both failed): ${recoverErr}`,
+          );
+          await this.markHubblePendingReconcile(order.id, 'HUBBLE_INDETERMINATE');
+          return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+        }
+        if (body === null) {
+          // Definitively never placed (404 on recovery) → safe to refund.
+          await this.refundAndFailHubble(
+            order,
+            'Hubble order was not placed (not found on recovery)',
+            actorId,
+          );
+          return this.HUBBLE_OUTCOME.FAILED_REFUNDED;
+        }
+      }
+
+      return await this.applyHubbleBody(order, body, actorId);
+    } catch (e) {
+      // Unexpected error anywhere above (e.g. a DB blip while storing a voucher AFTER a
+      // successful placement): do NOT refund — we cannot be sure a voucher wasn't issued.
+      // Leave pending; the webhook / ops reconcile (get-by-reference) re-applies idempotently.
+      this.logger.error(`[hubble] issueHubbleVoucherForOrder(${orderId}) unexpected error: ${e}`);
+      await this.markHubblePendingReconcile(orderId, 'HUBBLE_UNEXPECTED').catch(() => undefined);
+      return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+    }
+  }
+
+  /**
+   * Webhook / ops reconcile: given OUR referenceId (= order id), fetch the
+   * authoritative Hubble state by reference and apply the terminal transition
+   * idempotently. Does NOT place a new order. NEVER throws (returns an outcome string).
+   */
+  async reconcileHubbleOrder(referenceId: string): Promise<string> {
+    try {
+      // Resolve the tenant from the order itself (the webhook carries no clientId).
+      const owner = await this.prisma.redemptionOrder.findFirst({
+        where: { id: referenceId },
+        select: { partner: { select: { clientId: true } } },
+      });
+      const clientId = owner?.partner?.clientId;
+      if (!clientId) return this.HUBBLE_OUTCOME.SKIPPED;
+
+      const order = await this.loadHubbleOrder(referenceId, clientId);
+      if (!order) return this.HUBBLE_OUTCOME.SKIPPED;
+      if (this.isHubbleOrderResolved(order)) return this.HUBBLE_OUTCOME.SKIPPED;
+
+      // AUDIT-FIX (gating asymmetry): re-assert the SAME eligibility the issue path uses
+      // (GIFT_CARD + a Hubble productId on the item + tenant flag ON) before applying any
+      // Hubble body. Without this, a webhook/ops reconcile for a non-GIFT_CARD / flag-off /
+      // Deoleo order id that Hubble happens to hold a record for could stamp it DELIVERED
+      // (voucher) or refund+zero it — corrupting a cash/physical order.
+      if (!(await this.isHubbleEligible(order, clientId))) return this.HUBBLE_OUTCOME.SKIPPED;
+
+      if (!this.hubble.isConfigured()) {
+        this.logger.error('[hubble] reconcile called but Hubble is not configured');
+        return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+      }
+
+      let body: HubbleOrderResult | null;
+      try {
+        body = await this.hubble.getOrderByReference(referenceId);
+      } catch (e) {
+        this.logger.error(`[hubble] reconcile get-by-reference failed for ${referenceId}: ${e}`);
+        return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+      }
+      if (body === null) {
+        // A webhook/reconcile for an order Hubble has no record of is anomalous — do NOT
+        // refund off a reconcile miss (a transient 404 could double with a later success).
+        this.logger.warn(`[hubble] reconcile: no Hubble order for reference ${referenceId}`);
+        return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+      }
+      return await this.applyHubbleBody(order, body);
+    } catch (e) {
+      this.logger.error(`[hubble] reconcileHubbleOrder(${referenceId}) unexpected error: ${e}`);
+      return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+    }
+  }
+
+  /** The RedemptionOrder shape the Hubble helpers operate on. */
+  private async loadHubbleOrder(orderId: string, clientId: string) {
+    return this.prisma.redemptionOrder.findFirst({
+      where: { id: orderId, partner: { clientId } },
+      include: { reward: { select: { metadata: true } } },
+    });
+  }
+
+  /** An order that already reached a Hubble terminal/resolved state needs no (re)issue. */
+  private isHubbleOrderResolved(order: {
+    status: RedemptionStatus;
+    voucherCode: string | null;
+    pointsDeducted: number;
+  }): boolean {
+    if (order.status === RedemptionStatus.DELIVERED && !!order.voucherCode) return true;
+    // A refunded/cancelled/failed order (points already returned) must not be re-issued.
+    if (
+      (order.status === RedemptionStatus.FAILED ||
+        order.status === RedemptionStatus.CANCELLED ||
+        order.status === RedemptionStatus.RETURNED) &&
+      order.pointsDeducted === 0
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  /** valuePaise → whole rupees for the Hubble order amount (Amazon free-denomination). */
+  private hubbleAmountRupees(order: { valuePaise: bigint | null }): number | null {
+    if (order.valuePaise == null) return null;
+    const paise = Number(order.valuePaise);
+    if (!Number.isFinite(paise) || paise <= 0) return null;
+    // AUDIT-FIX (money leak): issue the EXACT face value only. A fractional rupee (paise
+    // not a multiple of 100) must NOT be silently rounded — rounding would issue a voucher
+    // that diverges from both the points debited and the 194R / gift-disbursal base stored
+    // on the order. Return null so the caller leaves it for ops rather than shorting /
+    // over-issuing. (For Bajaj, conversionRate=1 → valuePaise is always whole-rupee.)
+    // ⚠️ OWNER-VERIFY the Hubble `amount`/`denomination` unit (rupees assumed, per the
+    // contract examples).
+    if (paise % 100 !== 0) return null;
+    return paise / 100;
+  }
+
+  /** Branch on the Hubble body status and apply the matching idempotent transition. */
+  private async applyHubbleBody(
+    order: HubbleLoadedOrder,
+    body: HubbleOrderResult,
+    actorId?: string,
+  ): Promise<string> {
+    const status = (body.status ?? '').toUpperCase();
+    if (status === 'SUCCESS') {
+      await this.storeHubbleSuccess(order, body, actorId);
+      return this.HUBBLE_OUTCOME.DELIVERED;
+    }
+    if (status === 'PROCESSING') {
+      await this.markHubbleProcessing(order, body, actorId);
+      return this.HUBBLE_OUTCOME.PROCESSING;
+    }
+    if (status === 'FAILED') {
+      await this.refundAndFailHubble(
+        order,
+        body.failureReason ?? 'Hubble reported FAILED',
+        actorId,
+      );
+      return this.HUBBLE_OUTCOME.FAILED_REFUNDED;
+    }
+    // Unknown status → treat as still-pending (safer than refunding).
+    this.logger.warn(
+      `[hubble] order ${order.orderNumber} unknown Hubble status "${body.status}" — left pending`,
+    );
+    await this.markHubblePendingReconcile(order.id, `HUBBLE_UNKNOWN_STATUS:${body.status}`);
+    return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+  }
+
+  /**
+   * SUCCESS — store the voucher(s) and mark the order DELIVERED. Idempotent via an
+   * atomic status claim (CONFIRMED/PROCESSING → DELIVERED): a webhook racing the
+   * confirm issuance can only win once. Card data is stored on the order
+   * (voucherCode) + metadata; the response contract is unchanged (the partner/rep UI
+   * already renders voucherCode for GIFT_CARD fulfilment).
+   */
+  private async storeHubbleSuccess(
+    order: HubbleLoadedOrder,
+    body: HubbleOrderResult,
+    actorId?: string,
+  ): Promise<void> {
+    const voucher = (body.vouchers ?? [])[0];
+    const voucherCode = this.primaryVoucherCode(voucher);
+    if (!voucherCode) {
+      // SUCCESS with no usable code is anomalous — do NOT flip to DELIVERED without a
+      // code (would break the DIGITAL_VOUCHER delivered invariant). Leave pending.
+      this.logger.error(
+        `[hubble] order ${order.orderNumber} SUCCESS but no voucher code in payload — left pending`,
+      );
+      await this.markHubblePendingReconcile(order.id, 'HUBBLE_SUCCESS_NO_CODE');
+      return;
+    }
+
+    const now = new Date();
+    await this.prisma.$transaction(async (tx) => {
+      const claim = await tx.redemptionOrder.updateMany({
+        where: {
+          id: order.id,
+          status: { in: [RedemptionStatus.CONFIRMED, RedemptionStatus.PROCESSING] },
+        },
+        data: {
+          status: RedemptionStatus.DELIVERED,
+          fulfilmentChannel: GiftFulfilmentChannel.DIGITAL_VOUCHER,
+          voucherCode,
+          voucherProvider: 'Hubble',
+          supplierOrderRef: body.id ?? body.orderId ?? null,
+          deliveredAt: now,
+          // MERGE onto existing metadata so the redeem-time snapshot (sellingValuePaise,
+          // salesInitiatedById) is preserved alongside the Hubble voucher detail.
+          metadata: this.mergeOrderMetadata(
+            order.metadata,
+            this.buildHubbleVoucherMetadata(voucher, body),
+          ),
+        },
+      });
+      if (claim.count === 0) return; // already resolved by a concurrent apply — no-op
+      await tx.redemptionStatusHistory.create({
+        data: {
+          orderId: order.id,
+          fromStatus: null,
+          toStatus: RedemptionStatus.DELIVERED,
+          changedById: actorId ?? null,
+          notes: 'Hubble voucher issued',
+        },
+      });
+    });
+    this.logger.log(`[hubble] order ${order.orderNumber} voucher issued + marked DELIVERED`);
+  }
+
+  /** PROCESSING — mark the order PROCESSING (pending external); the webhook completes it. */
+  private async markHubbleProcessing(
+    order: HubbleLoadedOrder,
+    body: HubbleOrderResult,
+    actorId?: string,
+  ): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      const claim = await tx.redemptionOrder.updateMany({
+        where: { id: order.id, status: RedemptionStatus.CONFIRMED },
+        data: {
+          status: RedemptionStatus.PROCESSING,
+          fulfilmentChannel: GiftFulfilmentChannel.DIGITAL_VOUCHER,
+          supplierOrderRef: body.id ?? body.orderId ?? null,
+          voucherProvider: 'Hubble',
+          metadata: this.mergeOrderMetadata(order.metadata, {
+            hubbleStatus: 'PROCESSING',
+            hubbleOrderId: body.id ?? body.orderId ?? null,
+          }),
+        },
+      });
+      if (claim.count === 0) return;
+      await tx.redemptionStatusHistory.create({
+        data: {
+          orderId: order.id,
+          fromStatus: RedemptionStatus.CONFIRMED,
+          toStatus: RedemptionStatus.PROCESSING,
+          changedById: actorId ?? null,
+          notes: 'Hubble voucher processing',
+        },
+      });
+    });
+    this.logger.log(`[hubble] order ${order.orderNumber} marked PROCESSING (awaiting Hubble)`);
+  }
+
+  /**
+   * FAILED — refund the points (reusing the canonical reversal path) and mark the
+   * order FAILED. Idempotent: the atomic pointsDeducted (>0 → 0) claim guarantees the
+   * reversal fires AT MOST ONCE even under a confirm/webhook race or a double webhook.
+   * valuePaise is zeroed so the 194R / gift-disbursal reports never count a failed order.
+   */
+  private async refundAndFailHubble(
+    order: HubbleLoadedOrder,
+    reason: string,
+    actorId?: string,
+  ): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      // AUDIT-FIX (money): refund ONLY while the order is still non-terminal. Folding the
+      // status predicate into the SAME atomic claim as the pointsDeducted zeroing means a
+      // voucher already DELIVERED (points legitimately spent) can never also be refunded —
+      // closing the "delivered voucher + points refunded" double-benefit window.
+      const refundClaim = await tx.redemptionOrder.updateMany({
+        where: {
+          id: order.id,
+          pointsDeducted: { gt: 0 },
+          status: {
+            in: [
+              RedemptionStatus.CONFIRMED,
+              RedemptionStatus.PROCESSING,
+              RedemptionStatus.PENDING,
+            ],
+          },
+        },
+        data: { pointsDeducted: 0 },
+      });
+      if (refundClaim.count > 0) {
+        await this.wallet.reverse(
+          order.partnerId,
+          order.pointsDeducted,
+          { referenceId: order.id, description: `Refund ${order.orderNumber} (Hubble failed)` },
+          tx,
+        );
+      }
+      // Flip to FAILED (from any non-terminal state) + zero the value + record the reason.
+      await tx.redemptionOrder.updateMany({
+        where: {
+          id: order.id,
+          status: {
+            in: [
+              RedemptionStatus.CONFIRMED,
+              RedemptionStatus.PROCESSING,
+              RedemptionStatus.PENDING,
+            ],
+          },
+        },
+        data: {
+          status: RedemptionStatus.FAILED,
+          valuePaise: 0n,
+          voucherProvider: 'Hubble',
+          cancelReason: reason.slice(0, 500),
+          notes: `Hubble issuance failed: ${reason}`.slice(0, 500),
+        },
+      });
+      await tx.redemptionStatusHistory.create({
+        data: {
+          orderId: order.id,
+          fromStatus: null,
+          toStatus: RedemptionStatus.FAILED,
+          changedById: actorId ?? null,
+          notes: `Hubble failed — points refunded: ${reason}`.slice(0, 500),
+        },
+      });
+    });
+    this.logger.warn(`[hubble] order ${order.orderNumber} FAILED + points refunded: ${reason}`);
+  }
+
+  /** Flag an order as needing reconcile (money held pending webhook / ops), no status flip. */
+  private async markHubblePendingReconcile(orderId: string, reason: string): Promise<void> {
+    try {
+      const existing = await this.prisma.redemptionOrder.findFirst({
+        where: { id: orderId },
+        select: { metadata: true },
+      });
+      const prevMeta =
+        existing?.metadata && typeof existing.metadata === 'object'
+          ? (existing.metadata as Record<string, unknown>)
+          : {};
+      await this.prisma.redemptionOrder.update({
+        where: { id: orderId },
+        data: {
+          metadata: {
+            ...prevMeta,
+            hubbleNeedsReconcile: true,
+            hubbleReconcileReason: reason,
+            hubbleReconcileAt: new Date().toISOString(),
+          },
+        },
+      });
+    } catch (e) {
+      this.logger.error(`[hubble] failed to flag order ${orderId} for reconcile: ${e}`);
+    }
+  }
+
+  /** Merge a patch onto an order's existing JSON metadata (preserving prior keys). */
+  private mergeOrderMetadata(
+    existing: Prisma.JsonValue,
+    patch: Record<string, unknown>,
+  ): Prisma.InputJsonValue {
+    const base =
+      existing && typeof existing === 'object' && !Array.isArray(existing)
+        ? (existing as Record<string, unknown>)
+        : {};
+    return { ...base, ...patch } as Prisma.InputJsonValue;
+  }
+
+  /** The primary member-facing code: card number, else PIN. */
+  private primaryVoucherCode(voucher: HubbleVoucher | undefined): string | null {
+    if (!voucher) return null;
+    const num = (voucher.cardNumber ?? '').toString().trim();
+    const pin = (voucher.cardPin ?? '').toString().trim();
+    return num || pin || null;
+  }
+
+  /** Build the metadata blob persisted on a delivered Hubble order (full card detail). */
+  private buildHubbleVoucherMetadata(
+    voucher: HubbleVoucher | undefined,
+    body: HubbleOrderResult,
+  ): Record<string, unknown> {
+    return {
+      hubbleStatus: 'SUCCESS',
+      hubbleOrderId: body.id ?? body.orderId ?? null,
+      hubbleVoucher: {
+        id: voucher?.id ?? null,
+        cardType: voucher?.cardType ?? null,
+        // AUDIT-FIX (PII): the card number / PIN are the SPENDABLE secret. The member
+        // receives them via the order's voucherCode (member-scoped select); we deliberately
+        // do NOT duplicate them into metadata, which operator order-reads return in full.
+        // Non-sensitive fields only here. ⚠️ OWNER-VERIFY: Amazon Pay free-denomination is
+        // assumed to be a single claim code (no separate PIN). If a product ever returns a
+        // distinct PIN the member needs, add a member-facing field for it.
+        validTill: voucher?.validTill ?? null,
+        amount: voucher?.amount ?? null,
+      },
+    };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
   // P5.3 — Admin Reward Catalog CRUD (real RewardCategory / RewardCatalog).
   // Supersedes the World-B `admin/gift-config` JSON blob (retired with the FE in
   // 5.5). Every query is tenant-scoped by clientId from the JWT.
@@ -2754,6 +3424,15 @@ export class RewardsService {
     // confirmRedeemForOutlet): guarded atomic decrement + OUT_OF_STOCK flip at 0.
     // This CRUD path only sets the initial value. By design, stock is NOT restored
     // on cancel/return/failed (owner 2026-08-19) — see the STOCK RULE note above.
+    // AUDIT-FIX (byte-identical / defense-in-depth): persist a Hubble productId ONLY for a
+    // tenant with the Hubble flag ON (Bajaj). A non-Hubble tenant (Deoleo) can therefore
+    // never carry a hubbleProductId, so isHubbleEligible short-circuits for its items with
+    // NO tenant-flag DB read — keeping the query profile identical, not just the behaviour.
+    const hubbleMetadata =
+      dto.hubbleProductId?.trim() && (await this.isHubbleEnabledForTenant(user.clientId))
+        ? ({ hubbleProductId: dto.hubbleProductId.trim() } as Prisma.InputJsonValue)
+        : undefined;
+
     const item = await this.prisma.rewardCatalog.create({
       data: {
         clientId: user.clientId,
@@ -2771,6 +3450,8 @@ export class RewardsService {
         stockQuantity: dto.stockQuantity,
         termsAndConditions: dto.termsAndConditions,
         sortOrder: dto.sortOrder ?? 0,
+        // Hubble auto-issuance config (GIFT_CARD only, Bajaj-only — see hubbleMetadata above).
+        metadata: hubbleMetadata,
       },
     });
     return { item };
@@ -2821,9 +3502,28 @@ export class RewardsService {
       status = 'OUT_OF_STOCK';
     }
 
+    // Hubble auto-issuance config patch (GIFT_CARD only). `undefined` = leave metadata
+    // unchanged; a non-empty value sets metadata.hubbleProductId; an empty string
+    // removes it (merge-preserving any other metadata keys). No schema change.
+    let metadataUpdate: Prisma.InputJsonValue | undefined;
+    if (dto.hubbleProductId !== undefined) {
+      const base =
+        existing.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)
+          ? { ...(existing.metadata as Record<string, unknown>) }
+          : {};
+      const v = dto.hubbleProductId.trim();
+      // AUDIT-FIX (byte-identical): SET a productId only for a Hubble-enabled tenant (Bajaj);
+      // for any other tenant, or an empty value, CLEAR it. Clearing is always allowed, so a
+      // non-Hubble tenant can never end up with a hubbleProductId on an item.
+      if (v && (await this.isHubbleEnabledForTenant(user.clientId))) base.hubbleProductId = v;
+      else delete base.hubbleProductId;
+      metadataUpdate = base as Prisma.InputJsonValue;
+    }
+
     const item = await this.prisma.rewardCatalog.update({
       where: { id },
       data: {
+        metadata: metadataUpdate,
         categoryId: dto.categoryId,
         code: dto.code,
         name: dto.name,

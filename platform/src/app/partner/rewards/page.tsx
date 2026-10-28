@@ -386,6 +386,14 @@ function GiftDetailSheet({
       // 401 bad/expired OTP, 400 not-confirmable, etc.
       toast.error(result.error || 'Could not confirm redemption'); return;
     }
+    // Hubble auto-issuance (Bajaj GIFT_CARD) can resolve synchronously to FAILED — the
+    // server has ALREADY refunded the points. Never show the success screen or decrement
+    // the balance in that case. (Non-Hubble confirms return 'CONFIRMED' → unchanged.)
+    if (result.data?.status === 'FAILED') {
+      toast.error(result.data.message || 'We could not issue your voucher; your points have been refunded.');
+      onClose();
+      return;
+    }
     onRedeemed(gift.points);
     setStep('success');
   };
@@ -635,6 +643,14 @@ function VoucherRedeemSheet({
     setSubmitting(false);
     if (!result.success) {
       toast.error(result.error || 'Could not confirm redemption'); return;
+    }
+    // Hubble auto-issuance (Bajaj GIFT_CARD) can resolve synchronously to FAILED — the
+    // server has ALREADY refunded the points. Never show the success screen or decrement
+    // the balance in that case. (Non-Hubble confirms return 'CONFIRMED' → unchanged.)
+    if (result.data?.status === 'FAILED') {
+      toast.error(result.data.message || 'We could not issue your voucher; your points have been refunded.');
+      onClose();
+      return;
     }
     onRedeemed(ptsNeeded);
     setSuccess(true);

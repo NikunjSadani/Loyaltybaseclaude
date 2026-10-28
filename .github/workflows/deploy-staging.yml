@@ -108,6 +108,14 @@ jobs:
             --service-account=gifsy-api-sa@gifsy-platform.iam.gserviceaccount.com \
             --execute-now --wait
 
+      # HUBBLE MONEY (Bajaj-only GIFT_CARD auto-issuance):
+      #   • HUBBLE_BASE_URL + HUBBLE_CLIENT_ID_STAGING / HUBBLE_CLIENT_SECRET_STAGING are wired below.
+      #     Create those two Secret Manager secrets before the next deploy or gcloud will error.
+      #   • HUBBLE_WEBHOOK_SECRET is OPTIONAL on staging (the webhook dev-bypasses when unset, since
+      #     ALLOW_FIXED_OTP=true here) — add it only if you want to exercise the signed path on staging.
+      #   • TODO(prod): add HUBBLE_BASE_URL=https://api.myhubble.money + prod HUBBLE_CLIENT_ID/SECRET
+      #     and a REQUIRED HUBBLE_WEBHOOK_SECRET (fail-closed on prod) to deploy.yml. Do NOT add prod
+      #     secrets here.
       - name: Deploy API to Cloud Run staging
         run: |
           gcloud run deploy gifsy-api-staging \
@@ -128,11 +136,13 @@ jobs:
             --subnet=gifsy-subnet-asia-south1 \
             --vpc-egress=private-ranges-only \
             --startup-probe=httpGet.path=/health/ready,httpGet.port=4000,initialDelaySeconds=0,periodSeconds=5,timeoutSeconds=3,failureThreshold=30 \
-            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=60m,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,FIXED_OTP=123456,ALLOW_FIXED_OTP=true,PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in,REPORTS_FROM_EMAIL=reports@notify.gifsy.in" \
+            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=60m,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,FIXED_OTP=123456,ALLOW_FIXED_OTP=true,PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in,REPORTS_FROM_EMAIL=reports@notify.gifsy.in,HUBBLE_BASE_URL=https://api.dev.myhubble.money" \
             --set-secrets="\
               DATABASE_URL=DATABASE_URL_STAGING:latest,\
               JWT_SECRET=JWT_SECRET_STAGING:latest,\
               MSG91_AUTH_KEY=MSG91_AUTH_KEY:latest,\
+              HUBBLE_CLIENT_ID_STAGING=HUBBLE_CLIENT_ID_STAGING:latest,\
+              HUBBLE_CLIENT_SECRET_STAGING=HUBBLE_CLIENT_SECRET_STAGING:latest,\
               MSG91_SENDER_ID=MSG91_SENDER_ID:latest,\
               MSG91_OTP_TEMPLATE_ID=MSG91_OTP_TEMPLATE_ID:latest,\
               MSG91_SMS_TEMPLATE_ID=MSG91_SMS_TEMPLATE_ID:latest,\

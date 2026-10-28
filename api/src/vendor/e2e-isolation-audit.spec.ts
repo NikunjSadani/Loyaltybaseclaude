@@ -20,6 +20,7 @@ import { GiftCatalogueService } from '../gift-catalogue/gift-catalogue.service';
 import { RewardsService } from '../rewards/rewards.service';
 import { WalletService } from '../wallet/wallet.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { HubbleService } from '../hubble/hubble.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -92,6 +93,9 @@ describe('Gift Catalogue & Dispatch — ISOLATION / RBAC / VENDOR-LIFECYCLE audi
         { provide: NotificationsService, useValue: mockNotifications },
         { provide: WalletService, useValue: mockWallet },
         { provide: Msg91Service, useValue: mockMsg91 },
+        // Hubble client stub (RewardsService dependency). These vendor-isolation tests
+        // don't exercise the Hubble confirm path; not-configured keeps it inert.
+        { provide: HubbleService, useValue: { isConfigured: () => false, placeOrder: jest.fn(), getOrderByReference: jest.fn() } },
       ],
     }).compile();
     portal = mod.get(VendorPortalService);

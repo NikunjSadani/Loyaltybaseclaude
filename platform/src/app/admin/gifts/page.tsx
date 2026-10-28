@@ -73,6 +73,8 @@ interface CatalogItem {
   stockQuantity?: number | null;
   termsAndConditions?: string | null;
   sortOrder?: number | null;
+  // Item config blob. Carries the Hubble auto-issuance productId (GIFT_CARD only).
+  metadata?: { hubbleProductId?: string | null } | null;
 }
 
 interface Pagination { page: number; limit: number; total: number; pages: number }
@@ -470,6 +472,8 @@ interface ItemFormState {
   stockQuantity: number;
   termsAndConditions: string;
   status: CatalogStatus;
+  /** Hubble Money productId — enables auto-issuance for a GIFT_CARD item (optional). */
+  hubbleProductId: string;
 }
 
 function blankItemForm(categoryId: string): ItemFormState {
@@ -481,6 +485,7 @@ function blankItemForm(categoryId: string): ItemFormState {
     minRedemptionPoints: '', maxRedemptionPoints: '',
     stockTracked: false, stockQuantity: 0,
     termsAndConditions: '', status: 'ACTIVE',
+    hubbleProductId: '',
   };
 }
 
@@ -521,6 +526,7 @@ function ItemModal({
       stockQuantity: editing.stockQuantity ?? 0,
       termsAndConditions: editing.termsAndConditions ?? '',
       status: editing.status,
+      hubbleProductId: editing.metadata?.hubbleProductId ?? '',
     };
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -571,6 +577,11 @@ function ItemModal({
       stockQuantity: form.stockTracked ? form.stockQuantity : null,
       termsAndConditions: form.termsAndConditions.trim() || undefined,
     };
+    // Hubble auto-issuance productId — only meaningful for a GIFT_CARD voucher. Send it
+    // (even empty, to CLEAR) whenever editing a gift card; a blank disables auto-issuance.
+    if (form.redemptionMode === 'GIFT_CARD') {
+      payload.hubbleProductId = form.hubbleProductId.trim();
+    }
     if (form.mrpRupees.trim()) {
       payload.mrpPaise = Math.round(parseFloat(form.mrpRupees) * 100);
     }
@@ -748,6 +759,26 @@ function ItemModal({
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Hubble auto-issuance (GIFT_CARD only). When set + the tenant flag is on
+              (Bajaj), a confirmed redemption auto-issues the Amazon Pay voucher. */}
+          {form.redemptionMode === 'GIFT_CARD' && (
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-gray-700">
+                Hubble product ID <span className="text-gray-400 font-normal">(auto-issue voucher)</span>
+              </label>
+              <input
+                value={form.hubbleProductId}
+                onChange={(e) => set('hubbleProductId', e.target.value)}
+                placeholder="e.g. amazon-pay-product-id (leave blank for manual fulfilment)"
+                className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+              />
+              <p className="text-[10px] text-gray-400">
+                Set the Hubble Money productId to auto-issue this voucher on redemption
+                (enabled only for tenants with the Hubble feature on). Blank = manual fulfilment.
+              </p>
             </div>
           )}
 

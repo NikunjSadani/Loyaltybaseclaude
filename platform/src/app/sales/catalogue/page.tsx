@@ -280,11 +280,22 @@ function CatalogueInner() {
       return;
     }
     setRedeem((r) => ({ ...r, verifying: true, error: '' }));
-    const res = await api.post(
+    const res = await api.post<{ orderId: string; status: string; message: string }>(
       '/api/rewards/redeem-for-outlet/confirm',
       { orderId: redeem.orderId, otp: redeem.otp, targetPartnerId: redeem.outlet.partnerId },
     );
     if (res.success) {
+      // Hubble auto-issuance (Bajaj GIFT_CARD) can resolve synchronously to FAILED — the
+      // server has ALREADY refunded the points. Surface the failure, not a success screen.
+      // (Non-Hubble confirms return 'CONFIRMED' → unchanged.)
+      if (res.data?.status === 'FAILED') {
+        setRedeem((r) => ({
+          ...r,
+          verifying: false,
+          error: res.data.message || 'Could not issue the voucher; the points have been refunded.',
+        }));
+        return;
+      }
       setRedeem((r) => ({ ...r, verifying: false }));
       setSheetStep('success');
     } else {

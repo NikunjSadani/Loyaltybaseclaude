@@ -30,7 +30,21 @@ async function bootstrap() {
   app.useLogger(app.get(PinoLogger));
   app.flushLogs();
 
-  app.use(json({ limit: '25mb' }));
+  // Capture the raw request bytes ONLY for the Hubble webhook, so its handler can
+  // verify Hubble's `X-Verify` = Base64(HMAC-SHA256(rawBody, secret)) over the EXACT
+  // bytes received (re-serialising the parsed JSON would change the bytes → signature
+  // mismatch). Scoped by URL so no other route retains a buffer; parsing is unchanged.
+  app.use(
+    json({
+      limit: '25mb',
+      verify: (req, _res, buf) => {
+        const url = (req as { url?: string }).url ?? '';
+        if (url.startsWith('/v1/hubble/webhook')) {
+          (req as { rawBody?: Buffer }).rawBody = Buffer.from(buf);
+        }
+      },
+    }),
+  );
   app.use(urlencoded({ extended: true, limit: '25mb' }));
 
   // URI versioning — all feature controllers serve under /v1 (default version).

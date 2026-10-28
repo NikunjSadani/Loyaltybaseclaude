@@ -19,6 +19,7 @@ import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { HubbleService } from '../hubble/hubble.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { AdminListCatalogQueryDto, UpdatableOrderStatus } from './dto/rewards.dto';
 import { parseFulfilmentUploadBuffer } from './rewards-fulfilment.helpers';
@@ -57,6 +58,8 @@ const mockPrisma = {
   redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
   redemptionStatusHistory: { create: jest.fn() },
   payoutTransaction: { create: jest.fn() },
+  // clients.features read for the Hubble feature flag (default OFF via beforeEach).
+  client: { findFirst: jest.fn() },
   // Tenant order-number generation (order-number.helper) runs raw SQL inside the
   // redeem tx: an advisory xact lock + a max-suffix scan. Default: lock ok, no prior
   // rows → sequence starts at 1.
@@ -82,6 +85,15 @@ const mockNotifications = {
 // OTP is now sent synchronously via Msg91Service (A-2a) — default: succeeds.
 const mockMsg91 = {
   sendOtp: jest.fn().mockResolvedValue(undefined),
+};
+
+// Hubble API client — default CONFIGURED; place/get are set per-test. The flag is OFF
+// by default (mockPrisma.client.findFirst → features {}), so these are never hit by the
+// legacy confirm tests (isHubbleEligible short-circuits on a missing productId).
+const mockHubble = {
+  isConfigured: jest.fn().mockReturnValue(true),
+  placeOrder: jest.fn(),
+  getOrderByReference: jest.fn(),
 };
 
 // Per-tenant settings. Defaults are LENIENT (rate 1, no min-floor, all channels on) so the
@@ -148,10 +160,15 @@ describe('RewardsService', () => {
         { provide: TenantSettingsService, useValue: mockTenantSettings },
         { provide: NotificationsService, useValue: mockNotifications },
         { provide: Msg91Service, useValue: mockMsg91 },
+        { provide: HubbleService, useValue: mockHubble },
       ],
     }).compile();
     service = module.get(RewardsService);
     mockSettings = LENIENT_SETTINGS();
+    // Hubble feature flag OFF by default → the legacy confirm tests are byte-identical
+    // (no Hubble call). The dedicated Hubble block flips this on per-case.
+    mockPrisma.client.findFirst.mockResolvedValue({ features: {} });
+    mockHubble.isConfigured.mockReturnValue(true);
     mockOtpTemplateId = undefined; // default: no per-tenant override (global env template)
     // Default: atomic claims (PENDING→CONFIRMED, refund pointsDeducted>0→0, stock
     // decrement) win. Individual tests override to simulate a lost race.
@@ -3147,6 +3164,289 @@ describe('RewardsService', () => {
     it('rejects a non-operator at the data boundary (audit #6)', async () => {
       await expect(service.getFulfilmentOrder(partner, 'o1')).rejects.toBeInstanceOf(ForbiddenException);
       expect(mockPrisma.redemptionOrder.findFirst).not.toHaveBeenCalled();
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // HUBBLE MONEY — GIFT_CARD auto-issuance (Bajaj-only, flag-gated). Covers the
+  // money-safety matrix: SUCCESS→voucher+DELIVERED, PROCESSING→pending, FAILED→refund,
+  // idempotent-recovery, indeterminate→no-refund, flag/eligibility gating, webhook reconcile.
+  // ───────────────────────────────────────────────────────────────────────────
+  describe('Hubble auto-issuance', () => {
+    const loadedOrder = (over: Record<string, unknown> = {}) => ({
+      id: 'o1',
+      orderNumber: 'RDM-x',
+      partnerId: 'cp1',
+      status: 'CONFIRMED',
+      voucherCode: null,
+      pointsDeducted: 1000,
+      valuePaise: 50000n, // ₹500
+      redemptionMode: 'GIFT_CARD',
+      metadata: {},
+      // owner lookup (reconcile) selects partner.clientId; harmless extra field for issue path.
+      partner: { clientId: 'deoleo' },
+      reward: { metadata: { hubbleProductId: 'amz-1' } },
+      ...over,
+    });
+
+    describe('issueHubbleVoucherForOrder', () => {
+      it('SUCCESS → stores the voucher + marks DELIVERED, no refund', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(loadedOrder());
+        mockHubble.placeOrder.mockResolvedValue({
+          status: 'SUCCESS',
+          id: 'hub-1',
+          vouchers: [{ id: 'v1', cardType: 'CARD_NUMBER_SECURED', cardNumber: 'CARD-123', cardPin: null, validTill: '2027-01-01', amount: 500 }],
+        });
+
+        const out = await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
+
+        expect(out).toBe('DELIVERED');
+        // referenceId = our order id; amount = valuePaise/100 (rupees); free-denomination.
+        expect(mockHubble.placeOrder).toHaveBeenCalledWith(
+          expect.objectContaining({
+            productId: 'amz-1',
+            referenceId: 'o1',
+            amount: 500,
+            denominationDetails: [{ denomination: 500, quantity: 1 }],
+            customerDetails: null,
+          }),
+        );
+        // DELIVERED + voucher persisted via the atomic status claim.
+        const deliverCall = mockPrisma.redemptionOrder.updateMany.mock.calls.find(
+          ([arg]) => (arg as { data?: { status?: string } })?.data?.status === 'DELIVERED',
+        );
+        expect(deliverCall).toBeDefined();
+        expect((deliverCall![0] as { data: Record<string, unknown> }).data).toEqual(
+          expect.objectContaining({
+            status: 'DELIVERED',
+            voucherCode: 'CARD-123',
+            voucherProvider: 'Hubble',
+            fulfilmentChannel: 'DIGITAL_VOUCHER',
+          }),
+        );
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+      });
+
+      it('PROCESSING → marks PROCESSING (pending external), no refund', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(loadedOrder());
+        mockHubble.placeOrder.mockResolvedValue({ status: 'PROCESSING', id: 'hub-1', vouchers: [] });
+
+        const out = await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
+
+        expect(out).toBe('PROCESSING');
+        const procCall = mockPrisma.redemptionOrder.updateMany.mock.calls.find(
+          ([arg]) => (arg as { data?: { status?: string } })?.data?.status === 'PROCESSING',
+        );
+        expect(procCall).toBeDefined();
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+      });
+
+      it('FAILED → refunds the points (atomic claim) + marks FAILED', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(loadedOrder());
+        mockHubble.placeOrder.mockResolvedValue({ status: 'FAILED', failureReason: 'wallet empty' });
+
+        const out = await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
+
+        expect(out).toBe('FAILED_REFUNDED');
+        // Reuses the canonical reversal path with the order's debited points.
+        expect(mockWallet.reverse).toHaveBeenCalledWith(
+          'cp1',
+          1000,
+          expect.objectContaining({ referenceId: 'o1' }),
+          expect.anything(),
+        );
+        const failCall = mockPrisma.redemptionOrder.updateMany.mock.calls.find(
+          ([arg]) => (arg as { data?: { status?: string } })?.data?.status === 'FAILED',
+        );
+        expect(failCall).toBeDefined();
+      });
+
+      it('idempotent recovery: a placeOrder throw recovers SUCCESS via get-by-reference, no double-issue/refund', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(loadedOrder());
+        mockHubble.placeOrder.mockRejectedValue(new Error('timeout'));
+        mockHubble.getOrderByReference.mockResolvedValue({
+          status: 'SUCCESS',
+          id: 'hub-1',
+          vouchers: [{ cardNumber: 'CARD-9', cardType: 'CARD_NUMBER_SECURED' }],
+        });
+
+        const out = await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
+
+        expect(out).toBe('DELIVERED');
+        expect(mockHubble.getOrderByReference).toHaveBeenCalledWith('o1');
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+      });
+
+      it('definitively-not-placed (recovery 404 → null) → refund', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(loadedOrder());
+        mockHubble.placeOrder.mockRejectedValue(new Error('timeout'));
+        mockHubble.getOrderByReference.mockResolvedValue(null);
+
+        const out = await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
+
+        expect(out).toBe('FAILED_REFUNDED');
+        expect(mockWallet.reverse).toHaveBeenCalled();
+      });
+
+      it('INDETERMINATE (place + recover both throw) → pending reconcile, NEVER refunds (no double-pay risk)', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(loadedOrder());
+        mockHubble.placeOrder.mockRejectedValue(new Error('timeout'));
+        mockHubble.getOrderByReference.mockRejectedValue(new Error('still down'));
+
+        const out = await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
+
+        expect(out).toBe('PENDING_RECONCILE');
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+        // flagged for reconcile (metadata patch), not a status flip.
+        expect(mockPrisma.redemptionOrder.update).toHaveBeenCalled();
+      });
+
+      it('idempotent: an already-DELIVERED order with a voucher is a SKIPPED no-op (no placeOrder)', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(
+          loadedOrder({ status: 'DELIVERED', voucherCode: 'CARD-OLD' }),
+        );
+        const out = await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
+        expect(out).toBe('SKIPPED');
+        expect(mockHubble.placeOrder).not.toHaveBeenCalled();
+      });
+
+      it('not configured → leaves the order for ops (pending), never refunds', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(loadedOrder());
+        mockHubble.isConfigured.mockReturnValue(false);
+        const out = await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
+        expect(out).toBe('PENDING_RECONCILE');
+        expect(mockHubble.placeOrder).not.toHaveBeenCalled();
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('reconcileHubbleOrder (webhook)', () => {
+      it('fetches authoritative state by reference and completes a PROCESSING order to DELIVERED', async () => {
+        mockPrisma.client.findFirst.mockResolvedValue({ features: { hubbleVoucherEnabled: true } });
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(loadedOrder({ status: 'PROCESSING' }));
+        mockHubble.getOrderByReference.mockResolvedValue({
+          status: 'SUCCESS',
+          id: 'hub-1',
+          vouchers: [{ cardNumber: 'CARD-7', cardType: 'CARD_NUMBER_SECURED' }],
+        });
+
+        const out = await service.reconcileHubbleOrder('o1');
+
+        expect(out).toBe('DELIVERED');
+        // Webhook NEVER places a new order — it only reconciles.
+        expect(mockHubble.placeOrder).not.toHaveBeenCalled();
+        expect(mockHubble.getOrderByReference).toHaveBeenCalledWith('o1');
+      });
+
+      it('reconcile FAILED → refunds the points idempotently', async () => {
+        mockPrisma.client.findFirst.mockResolvedValue({ features: { hubbleVoucherEnabled: true } });
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(loadedOrder({ status: 'PROCESSING' }));
+        mockHubble.getOrderByReference.mockResolvedValue({ status: 'FAILED', failureReason: 'expired' });
+
+        const out = await service.reconcileHubbleOrder('o1');
+
+        expect(out).toBe('FAILED_REFUNDED');
+        expect(mockWallet.reverse).toHaveBeenCalled();
+      });
+
+      // AUDIT-FIX (Lane B #2): reconcile re-asserts eligibility, so it must NOT touch a
+      // flag-off / non-GIFT_CARD order even if Hubble holds a record for that reference.
+      it('SKIPS a flag-OFF tenant order (no apply, no refund) even if Hubble returns SUCCESS', async () => {
+        mockPrisma.client.findFirst.mockResolvedValue({ features: {} }); // flag OFF
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(loadedOrder({ status: 'PROCESSING' }));
+        mockHubble.getOrderByReference.mockResolvedValue({
+          status: 'SUCCESS',
+          vouchers: [{ cardNumber: 'CARD-X', cardType: 'CARD_NUMBER_SECURED' }],
+        });
+
+        const out = await service.reconcileHubbleOrder('o1');
+
+        expect(out).toBe('SKIPPED');
+        expect(mockHubble.getOrderByReference).not.toHaveBeenCalled();
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+      });
+
+      it('SKIPS a non-GIFT_CARD order (cash) without reading Hubble', async () => {
+        mockPrisma.client.findFirst.mockResolvedValue({ features: { hubbleVoucherEnabled: true } });
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(
+          loadedOrder({ status: 'PROCESSING', redemptionMode: 'BANK_TRANSFER' }),
+        );
+
+        const out = await service.reconcileHubbleOrder('o1');
+
+        expect(out).toBe('SKIPPED');
+        expect(mockHubble.getOrderByReference).not.toHaveBeenCalled();
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+      });
+
+      it('unknown referenceId → SKIPPED (no throw)', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(null);
+        const out = await service.reconcileHubbleOrder('nope');
+        expect(out).toBe('SKIPPED');
+      });
+    });
+
+    describe('confirm wiring + flag/eligibility gating', () => {
+      const giftCardPending = {
+        id: 'o1', status: 'PENDING', partnerId: 'cp1', orderNumber: 'RDM-x',
+        totalPointsCost: 1000, quantity: 1, redemptionMode: 'GIFT_CARD',
+        partner: { id: 'cp1', userId: 'user1', isActive: true, deletedAt: null, phone: '9', ownerName: 'O', kycSubmissions: [{ status: 'APPROVED' }] },
+        reward: { name: 'Amazon ₹500', stockQuantity: null, metadata: { hubbleProductId: 'amz-1' } },
+      };
+      // Factory (NOT a shared const): compute expiresAt at TEST-RUN time, not when Jest
+      // builds the describe tree. A describe-scope `new Date(Date.now()+60000)` is fixed at
+      // build time and lapses if the full suite takes >60s to reach these tests (flake).
+      const validOtp = () => ({ id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 3_600_000) });
+
+      it('flag ON + GIFT_CARD with productId → issues the voucher (placeOrder called, status DELIVERED)', async () => {
+        // 1st findFirst = confirm load (PENDING); 2nd = loadHubbleOrder (CONFIRMED + value).
+        mockPrisma.redemptionOrder.findFirst
+          .mockResolvedValueOnce(giftCardPending)
+          .mockResolvedValue(loadedOrder());
+        mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp());
+        mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+        mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'CONFIRMED' });
+        mockPrisma.client.findFirst.mockResolvedValue({ features: { hubbleVoucherEnabled: true } });
+        mockHubble.placeOrder.mockResolvedValue({
+          status: 'SUCCESS', id: 'hub-1',
+          vouchers: [{ cardNumber: 'CARD-123', cardType: 'CARD_NUMBER_SECURED' }],
+        });
+
+        const res = await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
+
+        expect(mockWallet.debitRedeem).toHaveBeenCalled(); // debit still happens first
+        expect(mockHubble.placeOrder).toHaveBeenCalledWith(expect.objectContaining({ referenceId: 'o1', productId: 'amz-1' }));
+        expect(res.status).toBe('DELIVERED');
+      });
+
+      it('flag OFF → byte-identical manual path (NO placeOrder, status CONFIRMED)', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(giftCardPending);
+        mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp());
+        mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+        mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'CONFIRMED' });
+        mockPrisma.client.findFirst.mockResolvedValue({ features: {} }); // flag OFF
+
+        const res = await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
+
+        expect(mockHubble.placeOrder).not.toHaveBeenCalled();
+        expect(res.status).toBe('CONFIRMED');
+      });
+
+      it('non-Hubble GIFT_CARD (no productId) → short-circuits BEFORE the flag read (byte-identical)', async () => {
+        const noProductId = { ...giftCardPending, reward: { name: 'Amazon ₹500', stockQuantity: null, metadata: {} } };
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(noProductId);
+        mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp());
+        mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+        mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'CONFIRMED' });
+        mockPrisma.client.findFirst.mockResolvedValue({ features: { hubbleVoucherEnabled: true } });
+
+        const res = await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
+
+        expect(mockHubble.placeOrder).not.toHaveBeenCalled();
+        // Eligibility short-circuits on the missing productId → the tenant flag is never read.
+        expect(mockPrisma.client.findFirst).not.toHaveBeenCalled();
+        expect(res.status).toBe('CONFIRMED');
+      });
     });
   });
 });
