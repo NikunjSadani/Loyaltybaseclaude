@@ -368,7 +368,11 @@ function CatalogueInner() {
                     <p className="text-xs font-semibold text-gray-900 leading-snug line-clamp-2 flex-1">{gift.name}</p>
                     <p className="text-[10px] text-gray-400 line-clamp-1">{gift.description}</p>
                     <div className="mt-2 pt-2 border-t border-gray-50 flex items-center justify-between">
-                      <span className="text-sm font-bold text-[var(--brand-primary)]">{gift.points.toLocaleString()} pts</span>
+                      {isFreeAmountGift(gift) ? (
+                        <span className="text-sm font-bold text-[var(--brand-primary)]">You set the amount</span>
+                      ) : (
+                        <span className="text-sm font-bold text-[var(--brand-primary)]">{gift.points.toLocaleString()} pts</span>
+                      )}
                       <span className="text-[10px] text-[var(--brand-primary)] font-medium">View details →</span>
                     </div>
                   </div>
@@ -457,8 +461,17 @@ function CatalogueInner() {
                       {/* Points + delivery */}
                       <div className="flex items-center gap-3 p-3.5 bg-gray-50 rounded-2xl mt-3">
                         <div className="flex-1">
-                          <p className="text-2xl font-bold text-[var(--brand-primary)]">{selectedGift.points.toLocaleString()} pts</p>
-                          <p className="text-xs text-gray-400 mt-0.5">Required to redeem</p>
+                          {isFreeAmountGift(selectedGift) ? (
+                            <>
+                              <p className="text-2xl font-bold text-[var(--brand-primary)]">You choose the amount</p>
+                              <p className="text-xs text-gray-400 mt-0.5">Redeemed as a ₹ amount</p>
+                            </>
+                          ) : (
+                            <>
+                              <p className="text-2xl font-bold text-[var(--brand-primary)]">{selectedGift.points.toLocaleString()} pts</p>
+                              <p className="text-xs text-gray-400 mt-0.5">Required to redeem</p>
+                            </>
+                          )}
                         </div>
                         <div className="text-right">
                           <div className="flex items-center gap-1 justify-end text-xs text-gray-500">
@@ -515,7 +528,11 @@ function CatalogueInner() {
                     <GiftImage gift={selectedGift} size="thumb" />
                     <div className="flex-1 min-w-0">
                       <p className="text-xs font-semibold text-gray-900 truncate">{selectedGift.name}</p>
-                      <p className="text-xs text-[var(--brand-primary)] font-bold">{selectedGift.points.toLocaleString()} pts</p>
+                      {isFreeAmountGift(selectedGift) ? (
+                        <p className="text-xs text-gray-400 font-medium">Amount you enter</p>
+                      ) : (
+                        <p className="text-xs text-[var(--brand-primary)] font-bold">{selectedGift.points.toLocaleString()} pts</p>
+                      )}
                     </div>
                   </div>
                   <p className="text-sm text-gray-500">Which outlet is redeeming?</p>
@@ -557,7 +574,11 @@ function CatalogueInner() {
                     <GiftImage gift={selectedGift} size="thumb" />
                     <div className="flex-1 min-w-0">
                       <p className="text-xs font-semibold text-gray-900 truncate">{selectedGift.name}</p>
-                      <p className="text-xs text-[var(--brand-primary)] font-bold">{selectedGift.points.toLocaleString()} pts</p>
+                      {isFreeAmountGift(selectedGift) ? (
+                        <p className="text-xs text-gray-400 font-medium">Amount you enter</p>
+                      ) : (
+                        <p className="text-xs text-[var(--brand-primary)] font-bold">{selectedGift.points.toLocaleString()} pts</p>
+                      )}
                     </div>
                   </div>
 
@@ -720,18 +741,34 @@ function CatalogueInner() {
 
                   <div className="text-5xl">{selectedGift.emoji}</div>
 
-                  <div className="w-full bg-gray-50 rounded-xl p-4 text-left space-y-2">
-                    {[
-                      { label: 'Item',            value: selectedGift.name },
-                      { label: 'Points deducted', value: `−${selectedGift.points.toLocaleString()}`, cls: 'text-red-500 font-bold' },
-                      { label: 'New balance',     value: `${(redeem.outlet.balance - selectedGift.points).toLocaleString()} pts`, cls: 'text-[var(--brand-primary)] font-bold' },
-                    ].map((r) => (
-                      <div key={r.label} className="flex justify-between text-sm">
-                        <span className="text-gray-500">{r.label}</span>
-                        <span className={`font-medium text-gray-900 ${r.cls ?? ''}`}>{r.value}</span>
-                      </div>
-                    ))}
-                  </div>
+                  {isFreeAmountGift(selectedGift) ? (
+                    <div className="w-full bg-gray-50 rounded-xl p-4 text-left space-y-2">
+                      {[
+                        { label: 'Item',            value: selectedGift.name },
+                        { label: 'Amount',          value: redeem.amount.trim() ? `₹${redeem.amount}` : '—' },
+                        { label: 'Current balance', value: `${redeem.outlet.balance.toLocaleString()} pts` },
+                      ].map((r) => (
+                        <div key={r.label} className="flex justify-between text-sm">
+                          <span className="text-gray-500">{r.label}</span>
+                          <span className="font-medium text-gray-900">{r.value}</span>
+                        </div>
+                      ))}
+                      <p className="text-[11px] text-gray-400">Points deducted at the conversion rate on confirmation</p>
+                    </div>
+                  ) : (
+                    <div className="w-full bg-gray-50 rounded-xl p-4 text-left space-y-2">
+                      {[
+                        { label: 'Item',            value: selectedGift.name },
+                        { label: 'Points deducted', value: `−${selectedGift.points.toLocaleString()}`, cls: 'text-red-500 font-bold' },
+                        { label: 'New balance',     value: `${(redeem.outlet.balance - selectedGift.points).toLocaleString()} pts`, cls: 'text-[var(--brand-primary)] font-bold' },
+                      ].map((r) => (
+                        <div key={r.label} className="flex justify-between text-sm">
+                          <span className="text-gray-500">{r.label}</span>
+                          <span className={`font-medium text-gray-900 ${r.cls ?? ''}`}>{r.value}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                   <p className="text-xs text-gray-400">Confirmation SMS sent to outlet&apos;s registered number.</p>
 
@@ -761,7 +798,9 @@ function CatalogueInner() {
                     className="w-full text-base py-3"
                     onClick={() => setSheetStep(preOutlet ? 'confirm' : 'select_outlet')}
                   >
-                    Redeem for {selectedGift.points.toLocaleString()} pts
+                    {isFreeAmountGift(selectedGift)
+                      ? 'Redeem'
+                      : `Redeem for ${selectedGift.points.toLocaleString()} pts`}
                   </Button>
                 ) : (
                   <Button variant="outline" className="w-full" disabled>Out of Stock</Button>
