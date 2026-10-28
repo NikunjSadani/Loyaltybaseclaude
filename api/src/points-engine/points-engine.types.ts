@@ -97,11 +97,11 @@ export interface GateNode {
   onFail: OnFail;
 }
 
-/** L3 — restrict to a segment (program/category/outletType) value set. */
+/** L3 — restrict to a segment (program/category/outletType/metro) value set. */
 export interface SegmentFilterNode {
   type: 'segmentFilter';
   id: string;
-  /** Which context segment field to test (e.g. "program", "programCategory", "outletType"). */
+  /** Which context segment field to test (e.g. "program", "programCategory", "outletType", "metro"). */
   field: string;
   allow: string[];
   onFail: OnFail;
@@ -203,6 +203,8 @@ export interface EvalContext {
     program?: string | null;
     programCategory?: string | null;
     outletType?: string | null;
+    /** Free-text metro classification from the outlet master (e.g. "Metro"/"Non-Metro"); null when unset. */
+    metro?: string | null;
   };
   /** Optional identifiers for trace/debug (NOT read by rule logic). */
   meta?: { outletCode?: string; period?: string };

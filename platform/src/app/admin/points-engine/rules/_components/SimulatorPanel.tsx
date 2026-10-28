@@ -19,7 +19,7 @@ import { labelCls } from './kit';
 interface SampleContext {
   achievements: Record<string, string>;
   targets: Record<string, string>;
-  segment: { program: string; programCategory: string; outletType: string };
+  segment: { program: string; programCategory: string; outletType: string; metro: string };
 }
 
 /** Which achievement / target KPIs the draft references, so the simulator asks for exactly those. */
@@ -56,7 +56,7 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
   const [ctx, setCtx] = useState<SampleContext>({
     achievements: {},
     targets: {},
-    segment: { program: '', programCategory: '', outletType: '' },
+    segment: { program: '', programCategory: '', outletType: '', metro: '' },
   });
   const [result, setResult] = useState<SimulateResult | null>(null);
   const [running, setRunning] = useState(false);
@@ -87,6 +87,7 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
           program: ctx.segment.program || null,
           programCategory: ctx.segment.programCategory || null,
           outletType: ctx.segment.outletType || null,
+          metro: ctx.segment.metro || null,
         },
       },
     });
@@ -176,7 +177,7 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
           )}
 
           <div className="grid grid-cols-1 gap-2">
-            {(['program', 'programCategory', 'outletType'] as const).map((f) => (
+            {(['program', 'programCategory', 'outletType', 'metro'] as const).map((f) => (
               <div key={f}>
                 <label htmlFor={`sim-seg-${f}`} className={labelCls}>Segment · {f}</label>
                 <input

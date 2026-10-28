@@ -256,6 +256,7 @@ function NodeEditor({
                   { value: 'program', label: 'program' },
                   { value: 'programCategory', label: 'programCategory' },
                   { value: 'outletType', label: 'outletType' },
+                  { value: 'metro', label: 'metro' },
                 ]}
               />
             </Field>

@@ -107,7 +107,7 @@ export interface PointsRuleRow {
 export interface EvalContext {
   achievements: Record<string, number | null>;
   targets: Record<string, number | null>;
-  segment: { program?: string | null; programCategory?: string | null; outletType?: string | null };
+  segment: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
 }
 export interface TraceStep {
   nodeId: string;

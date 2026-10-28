@@ -54,7 +54,7 @@ export function simulate(body: {
   context: {
     achievements?: Record<string, number | null>;
     targets?: Record<string, number | null>;
-    segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null };
+    segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
   };
 }): Promise<ApiResponse<SimulateResult>> {
   return api.post<SimulateResult>(`${COMPUTE}/simulate`, body);

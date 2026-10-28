@@ -434,6 +434,58 @@ describe('Gate / segmentFilter onFail', () => {
     expect(expectOk(evaluateRule(r, ctx({ achievements: { V: 100 }, segment: { program: 'SILVER' } }))).points).toBe(0);
   });
 
+  it('segmentFilter on metro restricts to the listed metro values (null metro → excluded, like outletType null)', () => {
+    const r = rule({
+      inputs,
+      pipeline: [
+        { type: 'segmentFilter', id: 'sf_metro', field: 'metro', allow: ['Metro'], onFail: 'zero' },
+        { type: 'rate', id: 'r1', measure: { var: 'v' }, rate: 1 },
+      ],
+    });
+    // Matching metro value → accrues.
+    expect(expectOk(evaluateRule(r, ctx({ achievements: { V: 100 }, segment: { metro: 'Metro' } }))).points).toBe(100);
+    // Non-matching metro value → withheld (onFail zero).
+    expect(expectOk(evaluateRule(r, ctx({ achievements: { V: 100 }, segment: { metro: 'Non-Metro' } }))).points).toBe(0);
+    // metro null (outlet master didn't set it) → excluded, SAME semantics as a null outletType.
+    expect(expectOk(evaluateRule(r, ctx({ achievements: { V: 100 }, segment: { metro: null } }))).points).toBe(0);
+    // metro key absent entirely → also excluded (segVal collapses to null).
+    expect(expectOk(evaluateRule(r, ctx({ achievements: { V: 100 }, segment: {} }))).points).toBe(0);
+  });
+
+  it('gate referencing a metro Segment-field input fires / withholds correctly', () => {
+    const r = rule({
+      inputs: [
+        { ref: 'v', kpiCode: 'V', type: 'number', nullAs: 'reject' },
+        { ref: 'seg', source: 'segment:metro', type: 'enum', values: ['Metro', 'Non-Metro'], nullAs: 'reject' },
+      ],
+      pipeline: [
+        { type: 'gate', id: 'g_metro', when: { op: 'eq', left: { var: 'seg' }, right: { lit: 'Metro' } }, onFail: 'zero' },
+        { type: 'rate', id: 'r1', measure: { var: 'v' }, rate: 1 },
+      ],
+    });
+    // metro = "Metro" → gate passes → full accrual.
+    expect(expectOk(evaluateRule(r, ctx({ achievements: { V: 100 }, segment: { metro: 'Metro' } }))).points).toBe(100);
+    // metro = "Non-Metro" → gate fails → 0 (hard gate).
+    expect(expectOk(evaluateRule(r, ctx({ achievements: { V: 100 }, segment: { metro: 'Non-Metro' } }))).points).toBe(0);
+    // metro absent → the reject-input surfaces the row for review (SKIP), not silently zeroed.
+    expectSkip(evaluateRule(r, ctx({ achievements: { V: 100 }, segment: {} })));
+  });
+
+  it('ADDITIVE/Deoleo-safe: a rule that does not reference metro computes IDENTICALLY whether or not the segment carries a metro value', () => {
+    const r = rule({
+      inputs,
+      pipeline: [
+        { type: 'segmentFilter', id: 'sf1', field: 'program', allow: ['GOLD'], onFail: 'zero' },
+        { type: 'rate', id: 'r1', measure: { var: 'v' }, rate: 2 },
+      ],
+    });
+    const withoutMetro = evaluateRule(r, ctx({ achievements: { V: 137 }, segment: { program: 'GOLD' } }));
+    const withMetro = evaluateRule(r, ctx({ achievements: { V: 137 }, segment: { program: 'GOLD', metro: 'Metro' } }));
+    // The new segment key is ignored by a rule that doesn't use it → byte-identical outcome.
+    expect(withMetro).toEqual(withoutMetro);
+    expect(expectOk(withMetro).points).toBe(274);
+  });
+
   it('nested predicate (all/any/not) evaluates correctly in a gate', () => {
     const r = rule({
       inputs: [

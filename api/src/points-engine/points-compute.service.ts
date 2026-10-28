@@ -136,6 +136,7 @@ export class PointsComputeService {
           name: true,
           programName: true,
           programCategory: true,
+          metro: true,
           outletType: { select: { code: true } },
         },
         orderBy: { outletCode: 'asc' },
@@ -195,6 +196,7 @@ export class PointsComputeService {
         program,
         programCategory,
         outletType: outlet.outletType?.code ?? null,
+        metro: outlet.metro ?? null,
       };
 
       for (const kpiCode of activeKpiCodes) {
@@ -580,7 +582,7 @@ export class PointsComputeService {
       context: {
         achievements?: Record<string, number | null>;
         targets?: Record<string, number | null>;
-        segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null };
+        segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
       };
     },
   ): { valid: boolean; errors: string[]; outcome?: ReturnType<typeof evaluateRule> } {

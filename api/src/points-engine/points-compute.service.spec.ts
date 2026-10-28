@@ -62,12 +62,13 @@ function ruleRow(partial: Partial<PointsRule> = {}): PointsRule {
   } as PointsRule;
 }
 
-function outletRow(code: string, program: string | null = 'GOLD') {
+function outletRow(code: string, program: string | null = 'GOLD', metro: string | null = null) {
   return {
     outletCode: code,
     name: `Outlet ${code}`,
     programName: program,
     programCategory: null,
+    metro,
     outletType: { code: 'SSS' },
   };
 }
@@ -341,6 +342,68 @@ describe('PointsComputeService (Wave 1 — read-only preview)', () => {
     // kpiCode filter short-circuits the discovery findMany on pointsRule.
     expect(mockPrisma.pointsRule.findMany).not.toHaveBeenCalled();
     expect(mockEngine.getActiveForAttachment.mock.calls[0][3]).toBe('LITRES'); // kpiCode arg
+  });
+
+  // ── metro segment field (additive 4th segment facet) ─────────────────────────────────────
+  it('loads Outlet.metro in the outlet select', async () => {
+    mockPrisma.outlet.findMany.mockResolvedValue([outletRow('O1')]);
+    await service.previewCompute(clientAdmin, { period: '2026-02' });
+    expect(mockPrisma.outlet.findMany.mock.calls[0][0].select.metro).toBe(true);
+  });
+
+  it('the per-outlet segment carries metro, and a metro segmentFilter restricts (null metro → withheld, like outletType null)', async () => {
+    // A rule that only accrues for metro = "Metro" outlets.
+    const metroRule = ruleRow({
+      pipeline: [
+        { type: 'segmentFilter', id: 'sf_metro', field: 'metro', allow: ['Metro'], onFail: 'zero' },
+        { type: 'rate', id: 'n1', measure: { var: 'value' }, rate: 2 },
+      ] as never,
+    });
+    mockPrisma.outlet.findMany.mockResolvedValue([
+      outletRow('O_METRO', 'GOLD', 'Metro'),
+      outletRow('O_NON', 'GOLD', 'Non-Metro'),
+      outletRow('O_NULL', 'GOLD', null), // outlet master didn't set metro
+    ]);
+    mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+      { outletCode: 'O_METRO', kpiValues: { CASES_SOLD: 100 } },
+      { outletCode: 'O_NON', kpiValues: { CASES_SOLD: 100 } },
+      { outletCode: 'O_NULL', kpiValues: { CASES_SOLD: 100 } },
+    ]);
+    mockEngine.getActiveForAttachment.mockResolvedValue(metroRule);
+
+    const preview = await service.previewCompute(clientAdmin, { period: '2026-02' });
+    const byCode = Object.fromEntries(preview.rows.map((r) => [r.outletCode, r]));
+
+    // Metro outlet → the filter passes → full accrual.
+    expect(byCode['O_METRO'].status).toBe('OK');
+    expect(byCode['O_METRO'].points).toBe(200);
+    // Non-Metro + null-metro outlets → segmentFilter withholds (onFail 'zero') → OK row paying 0,
+    // the SAME mechanism/semantics as a non-matching or null outletType.
+    expect(byCode['O_NON'].status).toBe('OK');
+    expect(byCode['O_NON'].points).toBe(0);
+    expect(byCode['O_NULL'].status).toBe('OK');
+    expect(byCode['O_NULL'].points).toBe(0);
+    // Only the Metro outlet contributed points.
+    expect(preview.totalPoints).toBe(200);
+    expectNoWrite();
+  });
+
+  it('ADDITIVE/Deoleo-safe: a rule that does not reference metro computes identically regardless of the outlet metro value', async () => {
+    // Same plain rate rule; two outlets differing ONLY in metro → identical points.
+    mockPrisma.outlet.findMany.mockResolvedValue([
+      outletRow('O_A', 'GOLD', 'Metro'),
+      outletRow('O_B', 'GOLD', null),
+    ]);
+    mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+      { outletCode: 'O_A', kpiValues: { CASES_SOLD: 100 } },
+      { outletCode: 'O_B', kpiValues: { CASES_SOLD: 100 } },
+    ]);
+    mockEngine.getActiveForAttachment.mockResolvedValue(ruleRow()); // plain rate, no metro usage
+
+    const preview = await service.previewCompute(clientAdmin, { period: '2026-02' });
+    const byCode = Object.fromEntries(preview.rows.map((r) => [r.outletCode, r]));
+    expect(byCode['O_A'].points).toBe(200);
+    expect(byCode['O_B'].points).toBe(200); // metro is ignored by a rule that doesn't use it
   });
 
   // ── Wave 2: direct-credit commit ──────────────────────────────────────────────────────────
