@@ -12,6 +12,10 @@ import {
 import { isSelfOrDescendant, descendantSalesUserIds } from './sales-hierarchy-access.helper';
 import { kpiCodeKeys, currentMonthKey } from '../targets/targets.helpers';
 import { TenantService } from '../tenant/tenant.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+// READ-ONLY reuse of the visibility window-key math (pure helper, no DI) — the VISIBILITY
+// pseudo-KPI's "current window" MUST use the same formula the capture/notify services use.
+import { currentWindowKey } from '../visibility/visibility-window.helper';
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
 
 /**
@@ -65,6 +69,7 @@ export class SalesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tenant: TenantService,
+    private readonly tenantSettings: TenantSettingsService,
   ) {}
 
   /**
@@ -366,18 +371,57 @@ export class SalesService {
     const primaryCode = (kpiDefs.find((k) => k.isPrimary) ?? kpiDefs[0])?.code ?? null;
     const kpiCode = opts.kpi && kpiDefs.some((k) => k.code === opts.kpi) ? opts.kpi : primaryCode;
 
+    // VISIBILITY pseudo-KPI gate — resolved ONCE, up front. When the tenant has visibility OFF,
+    // NOTHING below adds a VISIBILITY code/label/column/score anywhere, so a visibility-disabled
+    // tenant (e.g. Deoleo) is byte-identical to the pre-visibility behaviour. Uncached (kill-switch).
+    const visibilityEnabled = await this.tenant.resolveVisibilityEnabled(user.clientId);
+
+    // OVERVIEW is the new DEFAULT: single-KPI mode runs ONLY when the caller passes a real,
+    // enabled KPI code — OR the VISIBILITY pseudo-KPI on a visibility-enabled tenant. Anything
+    // else — empty, absent, 'OVERVIEW', an unknown code, or 'VISIBILITY' on a disabled tenant —
+    // is overview. This keeps a real-kpi-code request byte-identical to the pre-overview behaviour
+    // and makes `kpi=VISIBILITY` on a disabled tenant fall through to OVERVIEW (safe default).
+    const requestedVisibilitySingle = opts.kpi === 'VISIBILITY' && visibilityEnabled;
+    const requestedSingle =
+      requestedVisibilitySingle ||
+      (!!opts.kpi && opts.kpi !== 'OVERVIEW' && kpiDefs.some((k) => k.code === opts.kpi));
+    const overview = !requestedSingle;
+    const codes = kpiDefs.map((k) => k.code); // all enabled real KPI codes, in KpiDef.order
+    const kpiList = kpiDefs.map((k) => ({ code: k.code, label: k.label }));
+
     const filterOptions = {
       outletTypes: [] as { code: string; name: string }[],
       programs: [] as string[],
       kpis: kpiDefs.map((k) => ({ code: k.code, label: k.label })),
     };
+
+    // Visibility is a pseudo-KPI appended AFTER the real KpiDefs in both the KPI list and the
+    // filter options (enabled tenants only). The OVERVIEW `score` then averages it in naturally.
+    if (visibilityEnabled) {
+      kpiList.push({ code: 'VISIBILITY', label: 'Visibility' });
+      filterOptions.kpis.push({ code: 'VISIBILITY', label: 'Visibility' });
+    }
     const emptySummary = { outlets: 0, kycDone: 0, kycPending: 0, avgTargetPct: null as number | null };
     if (!root) {
-      return { member: null, summary: emptySummary, members: [], filterOptions, kpiCode };
+      if (overview) {
+        return {
+          mode: 'OVERVIEW',
+          kpis: kpiList,
+          summary: { outlets: 0, kycDone: 0, kycPending: 0, avgScore: null as number | null },
+          members: [],
+          filterOptions,
+        };
+      }
+      return { mode: 'SINGLE', member: null, summary: emptySummary, members: [], filterOptions, kpiCode };
     }
 
     const month = this.reportMonth();
-    const [targetMap, achMap] = await this.primaryMapsForMonth(user.clientId, month, kpiCode);
+    // Single mode: the selected/primary-KPI maps (byte-identical). Overview: per-KPI maps for
+    // every enabled code, each scored with the SAME outlets-achieved formula as single mode.
+    const [targetMap, achMap] = overview || requestedVisibilitySingle
+      ? [new Map<string, number>(), new Map<string, number>()]
+      : await this.primaryMapsForMonth(user.clientId, month, kpiCode);
+    const kpiMaps = overview ? await this.allKpiMapsForMonth(user.clientId, month, codes) : null;
 
     const edges = await this.prisma.salesUser.findMany({
       where: { user: { clientId: user.clientId }, deletedAt: null },
@@ -403,6 +447,10 @@ export class SalesService {
           select: {
             id: true,
             outletCode: true,
+            // isActive drives ONLY the VISIBILITY pseudo-KPI denominator (approved+active+in-scope).
+            // It is read unconditionally but used only when visibility is enabled — the other KPI
+            // counts/metrics never read it, so a visibility-disabled tenant stays byte-identical.
+            isActive: true,
             programName: true,
             outletType: { select: { code: true, name: true } },
             partner: {
@@ -413,7 +461,7 @@ export class SalesService {
       },
     });
 
-    type OInfo = { id: string; code: string | null; typeCode: string; typeName: string; program: string; status: string };
+    type OInfo = { id: string; code: string | null; typeCode: string; typeName: string; program: string; status: string; isActive: boolean };
     const outletsByUser = new Map<string, OInfo[]>();
     const typeSet = new Map<string, string>();
     const programSet = new Set<string>();
@@ -427,6 +475,7 @@ export class SalesService {
         typeName: o.outletType?.name ?? o.outletType?.code ?? '',
         program: o.programName ?? '',
         status: o.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED',
+        isActive: !!o.isActive,
       };
       if (info.typeCode) typeSet.set(info.typeCode, info.typeName);
       if (info.program) programSet.add(info.program);
@@ -444,8 +493,13 @@ export class SalesService {
     const passes = (o: OInfo) => (!typeF || o.typeCode === typeF) && (!progF || o.program === progF);
     const TERMINAL = ['APPROVED', 'REJECTED', 'NOT_INTERESTED'];
 
-    // Roll up one subtree's (deduped, filtered) outlets into counts + the KPI metric.
-    const aggregate = (subtree: Set<string>) => {
+    // Roll up one subtree's (deduped, filtered) outlets into counts + the outlets-achieved metric,
+    // scored against the supplied target/achievement maps (the single KPI, or one KPI in overview).
+    const aggregate = (
+      subtree: Set<string>,
+      tMap: Map<string, number>,
+      aMap: Map<string, number>,
+    ) => {
       const seen = new Set<string>();
       let outlets = 0, kycDone = 0, kycPending = 0, withTarget = 0, achieved = 0;
       for (const sid of subtree) {
@@ -458,10 +512,10 @@ export class SalesService {
           if (approved) kycDone++;
           if (!TERMINAL.includes(o.status)) kycPending++;
           if (approved && o.code) {
-            const t = targetMap.get(o.code) ?? 0;
+            const t = tMap.get(o.code) ?? 0;
             if (t > 0) {
               withTarget++;
-              if ((achMap.get(o.code) ?? 0) >= t) achieved++;
+              if ((aMap.get(o.code) ?? 0) >= t) achieved++;
             }
           }
         }
@@ -470,11 +524,199 @@ export class SalesService {
       return { outlets, kycDone, kycPending, withTarget, achieved, pct };
     };
 
-    const sum = aggregate(rootSubtree);
+    // ── VISIBILITY pseudo-KPI data (enabled tenants only; READ-ONLY from visibility) ──────────
+    // Denominator (per subtree): in-scope (outletType ∈ visibilityConfig.outletScope), KYC-APPROVED
+    // and active outlets — AFTER the same type/program filters the other KPIs apply (`passes`).
+    // Numerator: of those, outlets with an APPROVED VisibilityCapture in the CURRENT window.
+    // One findMany over the root subtree's outlet ids (windowKey + status filtered) — no N+1.
+    let visScope: string[] = [];
+    const approvedVisOutletIds = new Set<string>();
+    if (visibilityEnabled) {
+      const cfg = (await this.tenantSettings.getEffectiveSettings(user.clientId)).visibilityConfig;
+      visScope = cfg.outletScope ?? [];
+      // REUSE the capture/notify services' exact window-key math (frequency-driven IST windows).
+      const windowKey = currentWindowKey(new Date(), cfg.frequencyPerMonth);
+      const allOutletIds = new Set<string>();
+      for (const arr of outletsByUser.values()) for (const o of arr) allOutletIds.add(o.id);
+      if (visScope.length > 0 && allOutletIds.size > 0) {
+        const caps = await this.prisma.visibilityCapture.findMany({
+          where: {
+            clientId: user.clientId,
+            windowKey,
+            status: 'APPROVED',
+            outletId: { in: [...allOutletIds] },
+          },
+          select: { outletId: true },
+        });
+        for (const c of caps) approvedVisOutletIds.add(c.outletId);
+      }
+    }
+
+    // Roll one subtree's (deduped, type/program-filtered) outlets into the VISIBILITY num/den/pct.
+    const visAggregate = (subtree: Set<string>) => {
+      const seen = new Set<string>();
+      let den = 0;
+      let num = 0;
+      for (const sid of subtree) {
+        for (const o of outletsByUser.get(sid) ?? []) {
+          if (seen.has(o.id)) continue;
+          seen.add(o.id);
+          if (!passes(o)) continue; // same outletType/program filter as the other KPIs
+          if (o.status !== 'APPROVED') continue; // KYC-approved
+          if (!o.isActive) continue; // active
+          if (!visScope.includes(o.typeCode)) continue; // in visibility scope
+          den++;
+          if (approvedVisOutletIds.has(o.id)) num++; // current-window APPROVED capture
+        }
+      }
+      const pct = den > 0 ? Math.round((100 * num) / den) : null;
+      return { num, den, pct };
+    };
+
+    // ── OVERVIEW mode ────────────────────────────────────────────────────────────────────
+    // Every enabled KPI is scored as outlets-achieved % (its configured rollup is IGNORED here);
+    // a member's `score` is the simple unweighted average of that member's NON-NULL KPI percents.
+    if (overview) {
+      const EMPTY = new Map<string, number>(); // counts are KPI-independent; aggregate only reads maps
+      const rootAgg = aggregate(rootSubtree, EMPTY, EMPTY);
+
+      const ovMembers = directReports.map((m) => {
+        const subtree = memberSubtrees.get(m.id) ?? new Set<string>();
+        const kpiPercents: Record<string, number | null> = {};
+        let counts: ReturnType<typeof aggregate> | null = null;
+        for (const code of codes) {
+          const [tMap, aMap] = kpiMaps!.get(code) ?? [EMPTY, EMPTY];
+          const agg = aggregate(subtree, tMap, aMap);
+          kpiPercents[code] = agg.pct;
+          if (!counts) counts = agg; // outlets/kyc counts are identical across KPIs
+        }
+        if (!counts) counts = aggregate(subtree, EMPTY, EMPTY); // zero-KPI tenant
+        // VISIBILITY pseudo-KPI column (enabled tenants only) — appended AFTER the real KPIs so it
+        // folds into the simple-average score below like any other non-null percent.
+        if (visibilityEnabled) kpiPercents['VISIBILITY'] = visAggregate(subtree).pct;
+        const scoreCodes = visibilityEnabled ? [...codes, 'VISIBILITY'] : codes;
+        const nonNull = scoreCodes
+          .map((c) => kpiPercents[c])
+          .filter((v): v is number => v !== null);
+        const score = nonNull.length
+          ? Math.round(nonNull.reduce((a, b) => a + b, 0) / nonNull.length)
+          : null;
+        return {
+          id: m.id,
+          name: m.user.name,
+          roleLabel: m.hierarchyLevel.name,
+          employeeCode: m.employeeCode,
+          mobile: m.user.phone ?? '',
+          outlets: counts.outlets,
+          teamSize: m._count.subordinates,
+          kycPending: counts.kycPending,
+          kycDone: counts.kycDone,
+          kpiPercents,
+          score,
+        };
+      });
+
+      // Ascending by score (worst first); no-targeted-outlet-for-any-KPI (null) sorts last; tie-break name.
+      ovMembers.sort((a, b) => {
+        if (a.score === null && b.score === null) return a.name.localeCompare(b.name);
+        if (a.score === null) return 1;
+        if (b.score === null) return -1;
+        if (a.score !== b.score) return a.score - b.score;
+        return a.name.localeCompare(b.name);
+      });
+
+      const memberScores = ovMembers
+        .map((m) => m.score)
+        .filter((v): v is number => v !== null);
+      const avgScore = memberScores.length
+        ? Math.round(memberScores.reduce((a, b) => a + b, 0) / memberScores.length)
+        : null;
+
+      return {
+        mode: 'OVERVIEW',
+        // `member` is present only on the drill-down (memberId) call, per the FE contract.
+        ...(opts.memberId
+          ? { member: { id: root.id, name: root.user.name, roleLabel: root.hierarchyLevel.name } }
+          : {}),
+        kpis: kpiList,
+        summary: {
+          outlets: rootAgg.outlets,
+          kycDone: rootAgg.kycDone,
+          kycPending: rootAgg.kycPending,
+          avgScore,
+        },
+        members: ovMembers,
+        filterOptions,
+      };
+    }
+
+    // ── SINGLE VISIBILITY pseudo-KPI mode (enabled tenants only) ─────────────────────────────
+    // Same SINGLE shape, but scored by the visibility pct: achievedPct = pct, outletsAchieved =
+    // num (current-window approved), outletsWithTarget = den (in-scope approved+active). Counts
+    // (outlets/kyc) are KPI-independent (empty maps). Members sorted ascending, null last.
+    if (requestedVisibilitySingle) {
+      const EMPTY = new Map<string, number>();
+      const rootCounts = aggregate(rootSubtree, EMPTY, EMPTY);
+      const rootVis = visAggregate(rootSubtree);
+      const visSummary = {
+        outlets: rootCounts.outlets,
+        kycDone: rootCounts.kycDone,
+        kycPending: rootCounts.kycPending,
+        avgTargetPct: rootVis.pct,
+      };
+
+      const visMembers = directReports.map((m) => {
+        const subtree = memberSubtrees.get(m.id) ?? new Set<string>();
+        const counts = aggregate(subtree, EMPTY, EMPTY);
+        const vis = visAggregate(subtree);
+        return {
+          id: m.id,
+          name: m.user.name,
+          employeeCode: m.employeeCode,
+          mobile: m.user.phone ?? '',
+          role: m.hierarchyLevel.code,
+          roleLabel: m.hierarchyLevel.name,
+          teamSize: m._count.subordinates,
+          outlets: counts.outlets,
+          kycDone: counts.kycDone,
+          kycPending: counts.kycPending,
+          outletsAchieved: vis.num,
+          outletsWithTarget: vis.den,
+          achievedPct: vis.pct,
+        };
+      });
+
+      // Ascending by visibility % (worst first); no-in-scope-outlets (null) sorts last.
+      visMembers.sort((a, b) => {
+        if (a.achievedPct === null && b.achievedPct === null) return a.name.localeCompare(b.name);
+        if (a.achievedPct === null) return 1;
+        if (b.achievedPct === null) return -1;
+        if (a.achievedPct !== b.achievedPct) return a.achievedPct - b.achievedPct;
+        return a.name.localeCompare(b.name);
+      });
+
+      return {
+        mode: 'SINGLE',
+        member: {
+          id: root.id,
+          name: root.user.name,
+          roleLabel: root.hierarchyLevel.name,
+          role: root.hierarchyLevel.code,
+          level: root.hierarchyLevel.level,
+        },
+        summary: visSummary,
+        members: visMembers,
+        filterOptions,
+        kpiCode: 'VISIBILITY',
+      };
+    }
+
+    // ── SINGLE-KPI mode (shape unchanged; only `mode` is added for clean FE branching). ──────
+    const sum = aggregate(rootSubtree, targetMap, achMap);
     const summary = { outlets: sum.outlets, kycDone: sum.kycDone, kycPending: sum.kycPending, avgTargetPct: sum.pct };
 
     const members = directReports.map((m) => {
-      const agg = aggregate(memberSubtrees.get(m.id) ?? new Set<string>());
+      const agg = aggregate(memberSubtrees.get(m.id) ?? new Set<string>(), targetMap, achMap);
       return {
         id: m.id,
         name: m.user.name,
@@ -502,6 +744,7 @@ export class SalesService {
     });
 
     return {
+      mode: 'SINGLE',
       member: {
         id: root.id,
         name: root.user.name,
@@ -1357,6 +1600,50 @@ export class SalesService {
       accumulate(targetRows.map((r) => ({ outletCode: r.outletCode, v: r.targetValues }))),
       accumulate(achRows.map((r) => ({ outletCode: r.outletCode, v: r.kpiValues }))),
     ];
+  }
+
+  /**
+   * Overview counterpart of primaryMapsForMonth: for one month, returns a
+   * code → [targetByOutletCode, achievedByOutletCode] map for EVERY requested KPI
+   * code, tenant-scoped, in a single target/achievement query pair. Same per-code
+   * accumulation semantics as primaryMapsForMonth (kpiCodeKeys filters the reserved
+   * __names key; sum each code per outletCode). Returns a map with an empty pair for
+   * each code (and skips the query entirely) when no codes are requested.
+   */
+  private async allKpiMapsForMonth(
+    clientId: string,
+    month: string,
+    codes: string[],
+  ): Promise<Map<string, [Map<string, number>, Map<string, number>]>> {
+    const result = new Map<string, [Map<string, number>, Map<string, number>]>();
+    for (const c of codes) result.set(c, [new Map(), new Map()]);
+    if (codes.length === 0) return result;
+
+    const [targetRows, achRows] = await Promise.all([
+      this.prisma.outletTarget.findMany({
+        where: { clientId, month },
+        select: { outletCode: true, targetValues: true },
+      }),
+      this.prisma.outletSalesRecord.findMany({
+        where: { clientId, month },
+        select: { outletCode: true, kpiValues: true },
+      }),
+    ]);
+
+    const codeSet = new Set(codes);
+    const accumulateInto = (rows: { outletCode: string; v: unknown }[], slot: 0 | 1) => {
+      for (const r of rows) {
+        const obj = (r.v ?? {}) as Record<string, number>;
+        for (const key of kpiCodeKeys(obj)) {
+          if (!codeSet.has(key)) continue;
+          const m = result.get(key)![slot];
+          m.set(r.outletCode, (m.get(r.outletCode) ?? 0) + (Number(obj[key]) || 0));
+        }
+      }
+    };
+    accumulateInto(targetRows.map((r) => ({ outletCode: r.outletCode, v: r.targetValues })), 0);
+    accumulateInto(achRows.map((r) => ({ outletCode: r.outletCode, v: r.kpiValues })), 1);
+    return result;
   }
 
   /**

@@ -71,27 +71,28 @@ describe.skip('AB — MemberCard sub-line shows employee ID', () => {
 describe('TM — team member sub-line shows employee ID + phone (real /api/sales/team)', () => {
   afterEach(() => { vi.unstubAllGlobals(); });
 
-  // The redesigned Team view (GET /api/sales/team-view) envelope.
+  // The redesigned Team view (GET /api/sales/team-view) envelope — OVERVIEW is the DEFAULT mode.
   const TEAM_PAYLOAD = {
     success: true,
     data: {
+      mode: 'OVERVIEW',
       member: null,
-      summary: { outlets: 10, kycDone: 7, kycPending: 3, avgTargetPct: 65 },
+      kpis: [{ code: 'PRIMARY_SALES', label: 'Primary Sales' }],
+      summary: { outlets: 10, kycDone: 7, kycPending: 3, avgScore: 65 },
       members: [
         {
           id: 'cmqp6qtu3007x01s6dbz4aisb', // internal CUID — must NOT be displayed
           employeeCode: 'ISR-M0100',
           name: 'Anil Sharma',
           mobile: '9900000011',
-          role: 'ISR',
           roleLabel: 'Executive Sales Representative',
           teamSize: 0,
           outlets: 10, kycDone: 7, kycPending: 3,
-          outletsAchieved: 2, outletsWithTarget: 3, achievedPct: 67,
+          kpiPercents: { PRIMARY_SALES: 67 },
+          score: 67,
         },
       ],
-      filterOptions: { outletTypes: [], programs: [], kpis: [] },
-      kpiCode: null,
+      filterOptions: { outletTypes: [], programs: [], kpis: [{ code: 'PRIMARY_SALES', label: 'Primary Sales' }] },
     },
   };
 

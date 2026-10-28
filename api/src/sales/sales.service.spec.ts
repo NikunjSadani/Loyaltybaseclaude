@@ -8,9 +8,11 @@ import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { SalesService } from './sales.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isSelfOrDescendant } from './sales-hierarchy-access.helper';
 import { currentMonthKey } from '../targets/targets.helpers';
+import { currentWindowKey } from '../visibility/visibility-window.helper';
 
 const mockPrisma = {
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
@@ -24,12 +26,25 @@ const mockPrisma = {
   outlet: { findFirst: jest.fn(), findMany: jest.fn() },
   // Used by resolveGroupCarryForwardDocs (group GST-cert/cheque inheritability booleans).
   kycSubmission: { findFirst: jest.fn() },
+  // Current-window APPROVED captures for the VISIBILITY pseudo-KPI (team-view).
+  visibilityCapture: { findMany: jest.fn() },
 };
 
 // TenantService.resolveClient feeds the DB-backed feature blob into /sales/me
-// (§A-DOMAIN "P5").
+// (§A-DOMAIN "P5"). resolveVisibilityEnabled gates the VISIBILITY pseudo-KPI (default OFF so
+// the pre-visibility team-view tests stay byte-identical).
 const TENANT_FEATURES = { salesTeamApp: true, walletModule: true };
-const mockTenant = { resolveClient: jest.fn() };
+const mockTenant = { resolveClient: jest.fn(), resolveVisibilityEnabled: jest.fn() };
+
+// TenantSettingsService.getEffectiveSettings supplies the visibilityConfig (outletScope +
+// frequencyPerMonth) the team-view reads when visibility is enabled.
+const mockTenantSettings = { getEffectiveSettings: jest.fn() };
+const VIS_CONFIG = {
+  outletScope: ['SSS'],
+  frequencyPerMonth: 1,
+  allowedSalesLevels: ['ISR'],
+  geoFence: { enabled: false, radiusMeters: 50 },
+};
 
 const caller: JwtPayload = { sub: 'user-mgr', role: 'SALES', clientId: 'deoleo', phone: '', name: '' };
 
@@ -39,11 +54,16 @@ describe('SalesService', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     mockTenant.resolveClient.mockResolvedValue({ features: TENANT_FEATURES });
+    // Default: visibility OFF → the VISIBILITY pseudo-KPI is absent everywhere (byte-identical).
+    mockTenant.resolveVisibilityEnabled.mockResolvedValue(false);
+    mockTenantSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: VIS_CONFIG });
+    mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SalesService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TenantService, useValue: mockTenant },
+        { provide: TenantSettingsService, useValue: mockTenantSettings },
       ],
     }).compile();
     service = module.get(SalesService);
@@ -1142,7 +1162,8 @@ describe('SalesService', () => {
 
     it('scores each direct report by outlets-hit-target ÷ outlets-with-target, ascending (worst first)', async () => {
       primeHappy();
-      const res = await service.getTeamView(caller, {});
+      const res = await service.getTeamView(caller, { kpi: 'K' });
+      expect(res.mode).toBe('SINGLE');
       expect(res.members.map((m: { id: string }) => m.id)).toEqual(['so1', 'so2']); // 50% before 100%
       expect(res.members[0]).toMatchObject({ id: 'so1', outletsWithTarget: 2, outletsAchieved: 1, achievedPct: 50 });
       expect(res.members[1]).toMatchObject({ id: 'so2', outletsWithTarget: 1, outletsAchieved: 1, achievedPct: 100 });
@@ -1152,7 +1173,7 @@ describe('SalesService', () => {
 
     it('the outletType filter narrows the outlet population (and empties non-matching members)', async () => {
       primeHappy();
-      const res = await service.getTeamView(caller, { outletType: 'WHOLESALER' });
+      const res = await service.getTeamView(caller, { outletType: 'WHOLESALER', kpi: 'K' });
       expect(res.members.find((m: { id: string }) => m.id === 'so1')).toMatchObject({ outletsWithTarget: 0, achievedPct: null });
       expect(res.members.find((m: { id: string }) => m.id === 'so2')).toMatchObject({ outletsWithTarget: 1, achievedPct: 100 });
       expect(res.summary.outlets).toBe(1);
@@ -1173,13 +1194,13 @@ describe('SalesService', () => {
       // O1 HAS a target (so1 → 0% after a miss); O3 has NO target for K (so2 → null, no targeted outlets).
       mockPrisma.outletTarget.findMany.mockResolvedValue([{ outletCode: 'O1', targetValues: { K: 10 } }]);
       mockPrisma.outletSalesRecord.findMany.mockResolvedValue([{ outletCode: 'O1', kpiValues: { K: 0 } }]);
-      const res = await service.getTeamView(caller, {});
+      const res = await service.getTeamView(caller, { kpi: 'K' });
       expect(res.members.map((m: { id: string }) => m.id)).toEqual(['so1', 'so2']); // 0% above null
       expect(res.members[0]).toMatchObject({ id: 'so1', achievedPct: 0 });
       expect(res.members[1]).toMatchObject({ id: 'so2', achievedPct: null });
     });
 
-    it('no enabled KPIs → kpiCode null, empty KPI options, null %s, no throw (empty-tenant path)', async () => {
+    it('no enabled KPIs (empty tenant) → OVERVIEW with empty kpis, null avgScore, null member scores', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue({
         id: 'root', user: { name: 'Root', phone: '' },
         hierarchyLevel: { code: 'ASM', name: 'ASM', level: 3 },
@@ -1192,17 +1213,277 @@ describe('SalesService', () => {
       ]);
       mockPrisma.outletTarget.findMany.mockResolvedValue([]);
       mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
-      const res = await service.getTeamView(caller, {});
-      expect(res.kpiCode).toBeNull();
+      const res: any = await service.getTeamView(caller, {}); // empty kpi → OVERVIEW (new default)
+      expect(res.mode).toBe('OVERVIEW');
+      expect(res.kpis).toEqual([]);
       expect(res.filterOptions.kpis).toEqual([]);
-      expect(res.summary.avgTargetPct).toBeNull();
-      expect(res.members[0]).toMatchObject({ id: 'so1', achievedPct: null });
+      expect(res.summary.avgScore).toBeNull();
+      expect(res.members[0]).toMatchObject({ id: 'so1', score: null, kpiPercents: {} });
+    });
+
+    // ── OVERVIEW mode (the new default) ─────────────────────────────────────────────────
+    function primeOverview() {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'root', user: { name: 'Root', phone: '' },
+        hierarchyLevel: { code: 'ASM', name: 'ASM', level: 3 },
+        subordinates: [sub('so1', 'SO One', 'SO1'), sub('so2', 'SO Two', 'SO2')],
+      });
+      mockPrisma.salesUser.findMany.mockResolvedValue(edges);
+      // Two KPIs, out of KpiDef.order so we can assert ordering is honoured (A before B).
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'A', label: 'KPI A', isPrimary: true, order: 1 },
+        { code: 'B', label: 'KPI B', isPrimary: false, order: 2 },
+      ]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { salesUserId: 'isr1', outlet: { id: 'o1', outletCode: 'O1', programName: 'Unnati', outletType: { code: 'SSS', name: 'Retailer' }, ...approved } },
+        { salesUserId: 'isr1', outlet: { id: 'o2', outletCode: 'O2', programName: 'Unnati', outletType: { code: 'SSS', name: 'Retailer' }, ...approved } },
+        { salesUserId: 'isr2', outlet: { id: 'o3', outletCode: 'O3', programName: 'BSC', outletType: { code: 'WHOLESALER', name: 'Wholesaler' }, ...approved } },
+      ]);
+      // so1 (O1,O2): A → O1 hit, O2 miss (50%); B → only O1 targeted & hit (100%) → score 75.
+      // so2 (O3): A → hit (100%); B → no target (null) → score 100.
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', targetValues: { A: 10, B: 10 } },
+        { outletCode: 'O2', targetValues: { A: 10 } },
+        { outletCode: 'O3', targetValues: { A: 10 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', kpiValues: { A: 12, B: 12 } },
+        { outletCode: 'O2', kpiValues: { A: 5 } },
+        { outletCode: 'O3', kpiValues: { A: 20 } },
+      ]);
+    }
+
+    it('OVERVIEW payload shape + per-KPI % + simple-average score + ascending sort', async () => {
+      primeOverview();
+      const res: any = await service.getTeamView(caller, { kpi: 'OVERVIEW' });
+      expect(res.mode).toBe('OVERVIEW');
+      // kpis = ALL tenant KpiDefs, ordered by KpiDef.order.
+      expect(res.kpis).toEqual([{ code: 'A', label: 'KPI A' }, { code: 'B', label: 'KPI B' }]);
+      // No memberId → no `member` on the root call.
+      expect(res).not.toHaveProperty('member');
+      expect(res.filterOptions.kpis).toEqual([{ code: 'A', label: 'KPI A' }, { code: 'B', label: 'KPI B' }]);
+      // Ascending by score (worst first): so1 (75) before so2 (100).
+      expect(res.members.map((m: { id: string }) => m.id)).toEqual(['so1', 'so2']);
+      expect(res.members[0]).toMatchObject({
+        id: 'so1', outlets: 2, teamSize: 1, kycDone: 2,
+        kpiPercents: { A: 50, B: 100 }, score: 75,
+      });
+      expect(res.members[1]).toMatchObject({
+        id: 'so2', outlets: 1, kpiPercents: { A: 100, B: null }, score: 100,
+      });
+      // summary: team-wide counts + avg of the members' non-null scores ((75+100)/2 → 88).
+      expect(res.summary).toMatchObject({ outlets: 3, kycDone: 3, kycPending: 0, avgScore: 88 });
+    });
+
+    it('OVERVIEW: each per-KPI % equals the single-KPI % for the same KPI (A)', async () => {
+      primeOverview();
+      const ov: any = await service.getTeamView(caller, { kpi: 'OVERVIEW' });
+      primeOverview();
+      const single: any = await service.getTeamView(caller, { kpi: 'A' });
+      expect(single.mode).toBe('SINGLE');
+      const ovSo1 = ov.members.find((m: { id: string }) => m.id === 'so1')!;
+      const singleSo1 = single.members.find((m: { id: string }) => m.id === 'so1')!;
+      expect(ovSo1.kpiPercents.A).toBe(singleSo1.achievedPct); // both 50
+      const ovSo2 = ov.members.find((m: { id: string }) => m.id === 'so2')!;
+      const singleSo2 = single.members.find((m: { id: string }) => m.id === 'so2')!;
+      expect(ovSo2.kpiPercents.A).toBe(singleSo2.achievedPct); // both 100
+    });
+
+    it('OVERVIEW: a member with no targeted outlet for ANY KPI → score null, sorts LAST', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'root', user: { name: 'Root', phone: '' },
+        hierarchyLevel: { code: 'ASM', name: 'ASM', level: 3 },
+        subordinates: [sub('so1', 'SO One', 'SO1'), sub('so2', 'SO Two', 'SO2')],
+      });
+      mockPrisma.salesUser.findMany.mockResolvedValue(edges);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'A', label: 'KPI A', isPrimary: true, order: 1 },
+        { code: 'B', label: 'KPI B', isPrimary: false, order: 2 },
+      ]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { salesUserId: 'isr1', outlet: { id: 'o1', outletCode: 'O1', programName: 'Unnati', outletType: { code: 'SSS', name: 'Retailer' }, ...approved } },
+        { salesUserId: 'isr2', outlet: { id: 'o3', outletCode: 'O3', programName: 'BSC', outletType: { code: 'WHOLESALER', name: 'Wholesaler' }, ...approved } },
+      ]);
+      // O1 has a target for A (so1 → 0% after a miss). O3 has NO target for A or B (so2 → null).
+      mockPrisma.outletTarget.findMany.mockResolvedValue([{ outletCode: 'O1', targetValues: { A: 10 } }]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([{ outletCode: 'O1', kpiValues: { A: 0 } }]);
+      const res: any = await service.getTeamView(caller, { kpi: 'OVERVIEW' });
+      expect(res.members.map((m: { id: string }) => m.id)).toEqual(['so1', 'so2']); // 0 above null
+      expect(res.members[0]).toMatchObject({ id: 'so1', kpiPercents: { A: 0, B: null }, score: 0 });
+      expect(res.members[1]).toMatchObject({ id: 'so2', kpiPercents: { A: null, B: null }, score: null });
+    });
+
+    it('OVERVIEW drill-down (memberId) includes the member {id,name,roleLabel}', async () => {
+      primeOverview();
+      const res: any = await service.getTeamView(caller, { memberId: 'root', kpi: 'OVERVIEW' });
+      expect(res.mode).toBe('OVERVIEW');
+      expect(res.member).toEqual({ id: 'root', name: 'Root', roleLabel: 'ASM' });
+    });
+
+    it('OVERVIEW: empty tenant (no root sales user) → empty members, null avgScore', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'A', label: 'KPI A', isPrimary: true, order: 1 }]);
+      const res: any = await service.getTeamView(caller, {}); // default → OVERVIEW
+      expect(res.mode).toBe('OVERVIEW');
+      expect(res.members).toEqual([]);
+      expect(res.summary).toEqual({ outlets: 0, kycDone: 0, kycPending: 0, avgScore: null });
+      expect(res.kpis).toEqual([{ code: 'A', label: 'KPI A' }]);
+    });
+
+    it('SINGLE mode (explicit real kpi) still returns the old shape + a mode:SINGLE flag', async () => {
+      primeHappy();
+      const res: any = await service.getTeamView(caller, { kpi: 'K' });
+      expect(res.mode).toBe('SINGLE');
+      // Old single-KPI shape intact: member{...role,level}, kpiCode, achievedPct/outletsWithTarget etc.
+      expect(res.kpiCode).toBe('K');
+      expect(res.member).toMatchObject({ id: 'root', roleLabel: 'ASM', role: 'ASM', level: 3 });
+      expect(res.summary).toMatchObject({ avgTargetPct: 67 });
+      expect(res.members[0]).toMatchObject({ id: 'so1', outletsWithTarget: 2, outletsAchieved: 1, achievedPct: 50 });
+      expect(res.members[0]).not.toHaveProperty('kpiPercents');
+      expect(res.members[0]).not.toHaveProperty('score');
     });
 
     it('a drill-down memberId outside the caller subtree is Forbidden', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'root' });
       mockPrisma.salesUser.findMany.mockResolvedValue(edges); // 'x' is not in the tenant edges
       await expect(service.getTeamView(caller, { memberId: 'x' })).rejects.toThrow('Forbidden');
+    });
+
+    // ── VISIBILITY pseudo-KPI (visibility-ENABLED tenants only) ──────────────────────────────
+    describe('VISIBILITY pseudo-KPI', () => {
+      // Root → so1 (isr1), so2 (isr2). All outlets are SSS (∈ outletScope ['SSS']), APPROVED + active.
+      //   so1 subtree {so1,isr1}: O1,O2 in scope → den 2; APPROVED current-window capture on O1 → num 1 → 50%.
+      //   so2 subtree {so2,isr2}: O3 in scope → den 1; no approved capture → num 0 → 0%.
+      // One real KPI 'K' too, so the OVERVIEW score averages K% with VISIBILITY%.
+      function primeVisibility() {
+        mockTenant.resolveVisibilityEnabled.mockResolvedValue(true);
+        mockTenantSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: VIS_CONFIG });
+        mockPrisma.salesUser.findFirst.mockResolvedValue({
+          id: 'root', user: { name: 'Root', phone: '' },
+          hierarchyLevel: { code: 'ASM', name: 'ASM', level: 3 },
+          subordinates: [sub('so1', 'SO One', 'SO1'), sub('so2', 'SO Two', 'SO2')],
+        });
+        mockPrisma.salesUser.findMany.mockResolvedValue(edges);
+        mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'K', label: 'KPI K', isPrimary: true, order: 1 }]);
+        const sss = (id: string, code: string) => ({
+          id, outletCode: code, isActive: true, programName: 'Unnati',
+          outletType: { code: 'SSS', name: 'Retailer' }, ...approved,
+        });
+        mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+          { salesUserId: 'isr1', outlet: sss('o1', 'O1') },
+          { salesUserId: 'isr1', outlet: sss('o2', 'O2') },
+          { salesUserId: 'isr2', outlet: sss('o3', 'O3') },
+        ]);
+        // K: O1 hit, O2 miss (so1 → 50%); O3 hit (so2 → 100%).
+        mockPrisma.outletTarget.findMany.mockResolvedValue([
+          { outletCode: 'O1', targetValues: { K: 10 } },
+          { outletCode: 'O2', targetValues: { K: 10 } },
+          { outletCode: 'O3', targetValues: { K: 10 } },
+        ]);
+        mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+          { outletCode: 'O1', kpiValues: { K: 12 } },
+          { outletCode: 'O2', kpiValues: { K: 5 } },
+          { outletCode: 'O3', kpiValues: { K: 20 } },
+        ]);
+        // Current-window APPROVED capture on O1 only.
+        mockPrisma.visibilityCapture.findMany.mockResolvedValue([{ outletId: 'o1' }]);
+      }
+
+      it('OVERVIEW: appends a VISIBILITY column (approved ÷ in-scope-approved-active) that folds into the score', async () => {
+        primeVisibility();
+        const res: any = await service.getTeamView(caller, { kpi: 'OVERVIEW' });
+        expect(res.mode).toBe('OVERVIEW');
+        // VISIBILITY appended AFTER the real KpiDefs, in both kpis[] and the filter options.
+        expect(res.kpis).toEqual([{ code: 'K', label: 'KPI K' }, { code: 'VISIBILITY', label: 'Visibility' }]);
+        expect(res.filterOptions.kpis).toEqual([
+          { code: 'K', label: 'KPI K' }, { code: 'VISIBILITY', label: 'Visibility' },
+        ]);
+        const so1 = res.members.find((m: { id: string }) => m.id === 'so1')!;
+        const so2 = res.members.find((m: { id: string }) => m.id === 'so2')!;
+        // so1: K 50% + VISIBILITY 50% (O1 of {O1,O2}) → score 50.
+        expect(so1.kpiPercents).toEqual({ K: 50, VISIBILITY: 50 });
+        expect(so1.score).toBe(50);
+        // so2: K 100% + VISIBILITY 0% (none of {O3}) → score 50.
+        expect(so2.kpiPercents).toEqual({ K: 100, VISIBILITY: 0 });
+        expect(so2.score).toBe(50);
+
+        // Single efficient capture query: current window + APPROVED + scoped to the subtree outlets.
+        const capWhere = mockPrisma.visibilityCapture.findMany.mock.calls[0][0].where;
+        expect(capWhere.clientId).toBe('deoleo');
+        expect(capWhere.status).toBe('APPROVED');
+        expect(capWhere.windowKey).toBe(currentWindowKey(new Date(), 1));
+        expect([...capWhere.outletId.in].sort()).toEqual(['o1', 'o2', 'o3']);
+        expect(mockPrisma.visibilityCapture.findMany).toHaveBeenCalledTimes(1);
+      });
+
+      it('SINGLE kpi=VISIBILITY returns the single shape scored by visibility %', async () => {
+        primeVisibility();
+        const res: any = await service.getTeamView(caller, { kpi: 'VISIBILITY' });
+        expect(res.mode).toBe('SINGLE');
+        expect(res.kpiCode).toBe('VISIBILITY');
+        expect(res.member).toMatchObject({ id: 'root', roleLabel: 'ASM', role: 'ASM', level: 3 });
+        // Ascending by vis% (worst first): so2 (0%) before so1 (50%).
+        expect(res.members.map((m: { id: string }) => m.id)).toEqual(['so2', 'so1']);
+        expect(res.members[0]).toMatchObject({ id: 'so2', outletsWithTarget: 1, outletsAchieved: 0, achievedPct: 0 });
+        expect(res.members[1]).toMatchObject({ id: 'so1', outletsWithTarget: 2, outletsAchieved: 1, achievedPct: 50 });
+        // Counts are KPI-independent; summary carries the root-level vis % as avgTargetPct.
+        // Root den = {O1,O2,O3} = 3, num = {O1} = 1 → round(100/3) = 33.
+        expect(res.summary).toMatchObject({ outlets: 3, kycDone: 3, avgTargetPct: 33 });
+        // The single-KPI target/achievement maps are NOT loaded for the visibility pseudo-KPI.
+        expect(mockPrisma.outletTarget.findMany).not.toHaveBeenCalled();
+        expect(mockPrisma.outletSalesRecord.findMany).not.toHaveBeenCalled();
+      });
+
+      it('den = 0 (no in-scope approved+active outlets in the subtree) → pct null', async () => {
+        primeVisibility();
+        // Flip every outlet out of scope (WHOLESALER ∉ ['SSS']) → den 0 everywhere → null.
+        mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+          { salesUserId: 'isr1', outlet: { id: 'o1', outletCode: 'O1', isActive: true, programName: 'Unnati', outletType: { code: 'WHOLESALER', name: 'Wholesaler' }, ...approved } },
+          { salesUserId: 'isr2', outlet: { id: 'o3', outletCode: 'O3', isActive: true, programName: 'BSC', outletType: { code: 'WHOLESALER', name: 'Wholesaler' }, ...approved } },
+        ]);
+        const res: any = await service.getTeamView(caller, { kpi: 'OVERVIEW' });
+        const so1 = res.members.find((m: { id: string }) => m.id === 'so1')!;
+        const so2 = res.members.find((m: { id: string }) => m.id === 'so2')!;
+        expect(so1.kpiPercents.VISIBILITY).toBeNull();
+        expect(so2.kpiPercents.VISIBILITY).toBeNull();
+        // SINGLE visibility mode: null den → achievedPct null.
+        primeVisibility();
+        mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+          { salesUserId: 'isr1', outlet: { id: 'o1', outletCode: 'O1', isActive: true, programName: 'Unnati', outletType: { code: 'WHOLESALER', name: 'Wholesaler' }, ...approved } },
+        ]);
+        const single: any = await service.getTeamView(caller, { kpi: 'VISIBILITY' });
+        expect(single.members[0]).toMatchObject({ id: 'so1', outletsWithTarget: 0, achievedPct: null });
+      });
+
+      it('an inactive OR non-APPROVED in-scope outlet is excluded from the denominator', async () => {
+        primeVisibility();
+        mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+          // in-scope + APPROVED + active → counts (den), with an approved capture → num.
+          { salesUserId: 'isr1', outlet: { id: 'o1', outletCode: 'O1', isActive: true, programName: 'Unnati', outletType: { code: 'SSS', name: 'Retailer' }, ...approved } },
+          // in-scope + APPROVED but INACTIVE → excluded.
+          { salesUserId: 'isr1', outlet: { id: 'o2', outletCode: 'O2', isActive: false, programName: 'Unnati', outletType: { code: 'SSS', name: 'Retailer' }, ...approved } },
+          // in-scope + active but NOT_STARTED (partner-less) → excluded.
+          { salesUserId: 'isr1', outlet: { id: 'o4', outletCode: 'O4', isActive: true, programName: 'Unnati', outletType: { code: 'SSS', name: 'Retailer' }, partner: null } },
+        ]);
+        const res: any = await service.getTeamView(caller, { kpi: 'VISIBILITY' });
+        const so1 = res.members.find((m: { id: string }) => m.id === 'so1')!;
+        // Only O1 qualifies → den 1, num 1 → 100%.
+        expect(so1).toMatchObject({ outletsWithTarget: 1, outletsAchieved: 1, achievedPct: 100 });
+      });
+
+      it('visibility DISABLED tenant: NO VISIBILITY anywhere and kpi=VISIBILITY falls through to OVERVIEW (byte-identical)', async () => {
+        // Default mock = resolveVisibilityEnabled false.
+        primeOverview();
+        const res: any = await service.getTeamView(caller, { kpi: 'VISIBILITY' });
+        // kpi=VISIBILITY on a disabled tenant → OVERVIEW (safe default), no VISIBILITY column.
+        expect(res.mode).toBe('OVERVIEW');
+        expect(res.kpis).toEqual([{ code: 'A', label: 'KPI A' }, { code: 'B', label: 'KPI B' }]);
+        expect(res.filterOptions.kpis).toEqual([{ code: 'A', label: 'KPI A' }, { code: 'B', label: 'KPI B' }]);
+        for (const m of res.members) expect(m.kpiPercents).not.toHaveProperty('VISIBILITY');
+        // No visibility reads happen at all when the tenant is OFF.
+        expect(mockPrisma.visibilityCapture.findMany).not.toHaveBeenCalled();
+        expect(mockTenantSettings.getEffectiveSettings).not.toHaveBeenCalled();
+      });
     });
   });
 
