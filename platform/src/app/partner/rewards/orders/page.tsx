@@ -118,9 +118,18 @@ function mapApiOrder(o: ApiOrder): Order {
 
 const VOUCHER_MODES = new Set(['GIFT_CARD', 'VOUCHER']);
 
+/** Partner-facing brand label for a voucher — the reward's brand, never the back-end
+ *  aggregator (e.g. Hubble). Strips a trailing generic "voucher"/"gift card"/"card" so
+ *  "Amazon Voucher" reads as "Amazon"; falls back to the full reward name. */
+function brandLabel(rewardName: string): string {
+  const s = (rewardName || '').trim();
+  const stripped = s.replace(/\s*(e-?)?(gift\s*)?(voucher|card)s?$/i, '').trim();
+  return stripped || s;
+}
+
 /* ─── Voucher code block with copy-to-clipboard ───────────────────────────── */
 
-function VoucherCodeBlock({ code, provider }: { code: string; provider?: string | null }) {
+function VoucherCodeBlock({ code, brand }: { code: string; brand?: string | null }) {
   const [copied, setCopied] = useState(false);
 
   const copy = async () => {
@@ -138,7 +147,7 @@ function VoucherCodeBlock({ code, provider }: { code: string; provider?: string 
       <div className="flex items-center gap-1.5 mb-1.5">
         <Ticket className="h-3.5 w-3.5 text-emerald-700" />
         <p className="text-[10px] font-semibold text-emerald-700 uppercase tracking-wide">
-          Voucher Code{provider ? ` · ${provider}` : ''}
+          Voucher Code{brand ? ` · ${brand}` : ''}
         </p>
       </div>
       <div className="flex items-center gap-2">
@@ -260,7 +269,7 @@ export default function OrdersPage() {
 
                   {/* Voucher code (GIFT_CARD / VOUCHER, once confirmed) */}
                   {showVoucher && order.voucherCode && (
-                    <VoucherCodeBlock code={order.voucherCode} provider={order.voucherProvider} />
+                    <VoucherCodeBlock code={order.voucherCode} brand={brandLabel(order.rewardName)} />
                   )}
 
                   {/* Physical-gift tracking (member-safe: courier name + tracking only) */}

@@ -121,6 +121,14 @@ describe('OR — Orders API wiring (live data)', () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('AMZ-GIFT-7788-CODE'));
   });
 
+  it('OR6b: voucher line shows the reward BRAND, never the back-end aggregator (e.g. Hubble)', async () => {
+    stubOrders([{ ...VOUCHER_ORDER, reward: { id: 'r1', name: 'Amazon Voucher', imageUrls: [] }, voucherProvider: 'Hubble' }]);
+    render(<OrdersPage />);
+    // "Amazon Voucher" → brand "Amazon"; the aggregator name must not leak to the partner.
+    expect(await screen.findByText(/Voucher Code\s*·\s*Amazon/)).toBeInTheDocument();
+    expect(screen.queryByText(/Hubble/i)).toBeNull();
+  });
+
   it('OR7: PHYSICAL_GIFT order renders a tracking link to the tracking URL', async () => {
     stubOrders([PHYSICAL_ORDER]);
     render(<OrdersPage />);
