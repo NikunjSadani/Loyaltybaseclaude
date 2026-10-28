@@ -111,8 +111,9 @@ jobs:
       # HUBBLE MONEY (Bajaj-only GIFT_CARD auto-issuance):
       #   • HUBBLE_BASE_URL + HUBBLE_CLIENT_ID_STAGING / HUBBLE_CLIENT_SECRET_STAGING are wired below.
       #     Create those two Secret Manager secrets before the next deploy or gcloud will error.
-      #   • HUBBLE_WEBHOOK_SECRET is OPTIONAL on staging (the webhook dev-bypasses when unset, since
-      #     ALLOW_FIXED_OTP=true here) — add it only if you want to exercise the signed path on staging.
+      #   • HUBBLE_WEBHOOK_SECRET is wired below from the WebhookHubbleStaging secret, so the webhook
+      #     ENFORCES Hubble's X-Verify HMAC on staging too (its value must equal the portal's Webhook
+      #     Signature). Remove this mapping to fall back to dev-bypass (ALLOW_FIXED_OTP=true here).
       #   • TODO(prod): add HUBBLE_BASE_URL=https://api.myhubble.money + prod HUBBLE_CLIENT_ID/SECRET
       #     and a REQUIRED HUBBLE_WEBHOOK_SECRET (fail-closed on prod) to deploy.yml. Do NOT add prod
       #     secrets here.
@@ -143,6 +144,7 @@ jobs:
               MSG91_AUTH_KEY=MSG91_AUTH_KEY:latest,\
               HUBBLE_CLIENT_ID_STAGING=HUBBLE_CLIENT_ID_STAGING:latest,\
               HUBBLE_CLIENT_SECRET_STAGING=HUBBLE_CLIENT_SECRET_STAGING:latest,\
+              HUBBLE_WEBHOOK_SECRET=WebhookHubbleStaging:latest,\
               MSG91_SENDER_ID=MSG91_SENDER_ID:latest,\
               MSG91_OTP_TEMPLATE_ID=MSG91_OTP_TEMPLATE_ID:latest,\
               MSG91_SMS_TEMPLATE_ID=MSG91_SMS_TEMPLATE_ID:latest,\
