@@ -16,6 +16,28 @@
 
 import type { GpsCapture } from './visibility-types';
 
+/**
+ * Outlet-master geo-fence radius, in metres. Shared by BOTH gated flows (KYC enrollment +
+ * visibility capture) so the "within the outlet" rule is defined exactly once. Currently a
+ * platform-wide constant; it can be promoted to per-tenant config later (e.g. read off
+ * `clients.features`/`visibilityConfig`) without touching the call sites that reuse it.
+ */
+export const OUTLET_MASTER_GEOFENCE_RADIUS_M = 200;
+
+/**
+ * Timed high-accuracy field-acquisition knobs (BOTH tunable). The capture FEs, on a
+ * geo-fence tenant, run a timed `watchPosition` and keep the best (lowest-accuracy) fix:
+ *   • GEO_ACQUIRE_MAX_MS              — hard CAP on how long to wait for a fix before
+ *     resolving with the best seen (or null if none).
+ *   • GEO_ACQUIRE_TARGET_ACCURACY_M  — EARLY-ACCEPT threshold: the moment a fix at or under
+ *     this accuracy (metres) arrives, stop waiting and use it.
+ * Exported here (the single source of truth alongside the fence radius) so the values are
+ * documented in one place; the FE mirrors them in `platform/src/lib/geo-acquire.ts` (the FE
+ * cannot import from the api package). Deoleo / non-gated tenants never run the timed path.
+ */
+export const GEO_ACQUIRE_MAX_MS = 5000;
+export const GEO_ACQUIRE_TARGET_ACCURACY_M = 50;
+
 /** Outcome of a single fence-required photo's location check. */
 export type PhotoFenceStatus = 'inside' | 'outside' | 'unverifiable';
 
@@ -55,6 +77,20 @@ export function isValidGeo(g: GpsCapture | null | undefined): g is GpsCapture {
     lng >= -180 &&
     lng <= 180
   );
+}
+
+/**
+ * A USABLE outlet-master reference point: present, in valid Earth ranges, and not the
+ * null-island sentinel (0,0) — the common bulk-upload default for "coords missing". An
+ * unusable reference must fall to 'unverifiable' (allow + flag), NEVER a spurious hard-block:
+ * a 0/0 or out-of-range master coord would otherwise compute a huge distance and wrongly
+ * block a rep standing at the real outlet. Used only on the gated outlet-master fence path,
+ * so non-gated tenants (Deoleo) are unaffected.
+ */
+export function isUsableReference(
+  ref: { lat: number; lng: number } | null | undefined,
+): ref is { lat: number; lng: number } {
+  return !!ref && isValidGeo(ref) && !(ref.lat === 0 && ref.lng === 0);
 }
 
 /**

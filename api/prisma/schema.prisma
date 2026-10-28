@@ -992,6 +992,21 @@ model KycSubmission {
   paymentGeoAccuracy Decimal?  @db.Decimal(8, 2)
   paymentGeoAt       DateTime?
 
+  // ── Outlet-master geo-fence (Bajaj-only via clients.features.outletMasterGeo) ──────────
+  // Set at enrollment ONLY when the tenant's outletMasterGeo feature is on: the board-photo GPS
+  // fix is fenced against the OUTLET-MASTER lat/long (OUTLET_MASTER_GEOFENCE_RADIUS_M). Values:
+  //   'OK'            → subject within the radius of the outlet master (distance in geoFenceDistanceM);
+  //   'UNVERIFIABLE'  → outlet has no master coords OR the submission carried no valid GPS fix (allowed, flagged).
+  // A capture OUTSIDE the radius is rejected (never persisted). NULL for every non-gated tenant
+  // (incl. live Deoleo) → byte-identical. `geoFenceDistanceM` is the rounded metres-from-outlet.
+  geoFenceStatus    String?
+  geoFenceDistanceM Int?
+  // Instrumentation for UAT benchmarking of the timed high-accuracy acquire (geo-fence tenants
+  // only). `geoFenceAccuracyM` = the board-photo fix's reported accuracy (rounded metres);
+  // `geoLockMs` = ms the FE spent acquiring the fix. Both NULL for every non-gated tenant.
+  geoFenceAccuracyM Int?
+  geoLockMs         Int?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

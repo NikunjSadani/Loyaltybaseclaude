@@ -48,6 +48,9 @@ interface KYCDetail {
   // outlet's physical location); paymentGeo when the cheque/UPI is captured.
   boardGeo?: { lat: number; lng: number } | null;
   paymentGeo?: { lat: number; lng: number } | null;
+  // Outlet-master geo-fence outcome (Bajaj-only; absent/null for every non-gated tenant → nothing rendered).
+  geoFenceStatus?: 'OK' | 'UNVERIFIABLE' | null;
+  geoFenceDistanceM?: number | null;
   partnerClass: string;
   outletId?: string;
   outletCode?: string;
@@ -1187,6 +1190,9 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           // Geo captured during KYC (lives on the submission, not the outlet).
           boardGeo:        parseGeo(s.boardPhotoLat, s.boardPhotoLng),
           paymentGeo:      parseGeo(s.paymentLat, s.paymentLng),
+          // Outlet-master geo-fence flag (Bajaj-only; null for non-gated tenants → not rendered).
+          geoFenceStatus:  (s.geoFenceStatus as 'OK' | 'UNVERIFIABLE' | null | undefined) ?? null,
+          geoFenceDistanceM: (s.geoFenceDistanceM as number | null | undefined) ?? null,
           partnerClass:    '',
           status:          (s.status as KYCStatus)            ?? KYCStatus.SUBMITTED,
           submittedAt:     s.submittedAt                      ?? new Date().toISOString(),
@@ -1777,6 +1783,22 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                     </div>
                   ) : null;
                 })()}
+                {/* Outlet-master geo-fence (Bajaj-only). Renders ONLY when the backend set a
+                    status — null for every non-gated tenant (Deoleo), so nothing shows there. */}
+                {kyc.geoFenceStatus === 'OK' && (
+                  <div className="flex items-start gap-2" data-testid="kyc-geofence-status">
+                    <span className="text-emerald-500 mt-0.5 shrink-0"><MapPin className="h-3.5 w-3.5" /></span>
+                    <p className="text-sm text-emerald-700">
+                      📍 Location verified{kyc.geoFenceDistanceM != null ? ` (${kyc.geoFenceDistanceM} m from outlet)` : ''}
+                    </p>
+                  </div>
+                )}
+                {kyc.geoFenceStatus === 'UNVERIFIABLE' && (
+                  <div className="flex items-start gap-2" data-testid="kyc-geofence-status">
+                    <span className="text-amber-500 mt-0.5 shrink-0"><MapPin className="h-3.5 w-3.5" /></span>
+                    <p className="text-sm text-amber-700">⚠ Location unverifiable</p>
+                  </div>
+                )}
                 {kyc.outletCode && (
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-gray-400">Outlet Code</span>

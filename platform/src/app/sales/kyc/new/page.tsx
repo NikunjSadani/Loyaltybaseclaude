@@ -28,6 +28,8 @@ import { isAddressProofRequired, isSelfDeclarationRequired } from '@/lib/kyc-doc
 import { SignaturePad, SignatureClearButton, type SignaturePadHandle } from '@/components/signature-pad';
 import { SoDeclarationView } from '@/components/so-declaration-view';
 import { getStoredUser } from '@/lib/auth-client';
+import { acquirePreciseFix } from '@/lib/geo-acquire';
+import { usePreciseGpsPreWarm } from '@/lib/use-precise-gps';
 import type { GeoCapture } from '@/types';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -336,6 +338,11 @@ export default function NewKYCPage() {
   const [boardPhotoGeo,        setBoardPhotoGeo]        = useState<GeoCapture | null>(null);
   const [boardPhotoGeoLoading, setBoardPhotoGeoLoading] = useState(false);
   const [boardPhotoGeoError,   setBoardPhotoGeoError]   = useState('');
+  /* Geo-fence tenants (Bajaj) only: ms the timed high-accuracy acquire spent, sent for UAT
+   * benchmarking; and a flag to show a "precise location" state while acquiring. Never set on
+   * the non-gated path → Deoleo / everyone else is byte-identical. */
+  const [boardPhotoLockMs,     setBoardPhotoLockMs]     = useState<number | null>(null);
+  const [boardPhotoGeoPrecise, setBoardPhotoGeoPrecise] = useState(false);
 
   /* Geo capture #2 — payment (taken when cheque uploaded or QR scanned) */
   const [paymentGeo,        setPaymentGeo]        = useState<GeoCapture | null>(null);
@@ -736,7 +743,7 @@ export default function NewKYCPage() {
     if (lastOutletIdRef.current === oid) return; // same outlet → keep the rep's edits
     lastOutletIdRef.current = oid;
     setDocs({ businessDoc: null, ownerPhoto: null, shopAddressDoc: null, storeBoardPhoto: null, cheque: null, selfDeclaration: null });
-    setBoardPhotoGeo(null); setBoardPhotoGeoError(''); setBoardPhotoGeoLoading(false); boardPhotoGeoLoadingRef.current = false;
+    setBoardPhotoGeo(null); setBoardPhotoGeoError(''); setBoardPhotoGeoLoading(false); boardPhotoGeoLoadingRef.current = false; setBoardPhotoLockMs(null); setBoardPhotoGeoPrecise(false);
     setPaymentGeo(null); setPaymentGeoError(''); setPaymentGeoLoading(false); paymentGeoLoadingRef.current = false;
     setPendingSignature(null); setSignatureCarriedOver(false); setHasSigned(false);
     const canvas = signatureCanvasRef.current;
@@ -867,11 +874,42 @@ export default function NewKYCPage() {
    *  also guard here so an in-flight request can't be double-fired. On failure we set a
    *  cause-specific, recovery-oriented message and clear the busy flag on BOTH paths. */
   const boardPhotoGeoLoadingRef = useRef(false);
+  // Geo-fence tenants (Bajaj) run a timed high-accuracy acquire for the board photo; every
+  // other tenant (Deoleo) keeps the EXACT single getCurrentPosition call below (byte-identical).
+  const geoFenceTenant = features.outletMasterGeo;
+  // PRE-WARM: on a geo-fence tenant, start the high-accuracy GPS watch as soon as the rep
+  // reaches the ADDRESS step (where the board photo is captured) so a precise fix is usually
+  // already in hand at capture. Non-gated tenants never start a watch (enabled=false).
+  const boardPhotoWatch = usePreciseGpsPreWarm(geoFenceTenant && step === 'address');
   const captureBoardPhotoGeo = useCallback(() => {
     if (boardPhotoGeoLoadingRef.current) return; // already getting a fix — don't double-fire
     if (!navigator.geolocation) { setBoardPhotoGeoError('Location isn’t supported on this device.'); return; }
     boardPhotoGeoLoadingRef.current = true;
     setBoardPhotoGeoLoading(true); setBoardPhotoGeoError('');
+
+    // ── GEO-FENCE TENANTS (Bajaj) — timed high-accuracy acquire ──────────────────────────
+    // watchPosition, keep the best fix, early-accept a good one, cap at GEO_ACQUIRE_MAX_MS.
+    // Send the fix WITH its accuracy + lock time (boardPhotoLockMs) to the backend.
+    if (geoFenceTenant) {
+      setBoardPhotoGeoPrecise(true);
+      // Consume the pre-warmed watch if present (instant when a good fix is already in hand);
+      // otherwise fall back to a fresh one-shot acquire. lockMs reflects time since watch start.
+      const fixPromise = boardPhotoWatch ? boardPhotoWatch.acquire() : acquirePreciseFix();
+      fixPromise.then((fix) => {
+        boardPhotoGeoLoadingRef.current = false;
+        setBoardPhotoGeoLoading(false);
+        setBoardPhotoGeoPrecise(false);
+        if (fix) {
+          setBoardPhotoGeo({ lat: fix.lat, lng: fix.lng, accuracy: fix.accuracy, ts: new Date().toISOString() });
+          setBoardPhotoLockMs(fix.lockMs);
+        } else {
+          setBoardPhotoGeoError('Couldn’t get a location fix. Move to open sky and tap Retry.');
+        }
+      });
+      return;
+    }
+
+    // ── NON-GATED TENANTS (Deoleo / every other tenant) — unchanged single-shot call ─────
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         setBoardPhotoGeo({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: Math.round(pos.coords.accuracy), ts: new Date().toISOString() });
@@ -885,7 +923,7 @@ export default function NewKYCPage() {
       },
       { timeout: 12000, maximumAge: 0 },
     );
-  }, []);
+  }, [geoFenceTenant, boardPhotoWatch]);
 
   const paymentGeoLoadingRef = useRef(false);
   const capturePaymentGeo = useCallback(() => {
@@ -1127,7 +1165,7 @@ export default function NewKYCPage() {
     setFileError('');
     // Reset the associated geo capture when the triggering document is removed
     if (docKey === 'storeBoardPhoto') {
-      setBoardPhotoGeo(null); setBoardPhotoGeoLoading(false); setBoardPhotoGeoError(''); boardPhotoGeoLoadingRef.current = false;
+      setBoardPhotoGeo(null); setBoardPhotoGeoLoading(false); setBoardPhotoGeoError(''); boardPhotoGeoLoadingRef.current = false; setBoardPhotoLockMs(null); setBoardPhotoGeoPrecise(false);
     }
     if (docKey === 'cheque') {
       setPaymentGeo(null); setPaymentGeoLoading(false); setPaymentGeoError(''); paymentGeoLoadingRef.current = false;
@@ -1482,6 +1520,8 @@ export default function NewKYCPage() {
           ifscCode:         form.ifscCode,
           upiId:            form.upiId,
           boardPhotoGeo:    boardPhotoGeo ?? undefined,
+          // Instrumentation (geo-fence tenants only; undefined otherwise → Deoleo byte-identical).
+          boardPhotoLockMs: boardPhotoLockMs ?? undefined,
           paymentGeo:       paymentGeo   ?? undefined,
           addressNameMismatch: nameMismatch,
           documents,
@@ -2752,7 +2792,7 @@ export default function NewKYCPage() {
                     {boardPhotoGeoError   && <AlertCircle data-testid="board-photo-geo-error" className="h-4 w-4 text-red-500 shrink-0" />}
                     {!boardPhotoGeoLoading && !boardPhotoGeo && !boardPhotoGeoError && <Navigation className="h-4 w-4 text-blue-500 shrink-0" />}
                     <div className="flex-1 min-w-0">
-                      {boardPhotoGeoLoading && <p className="text-blue-700 font-medium">Getting location…</p>}
+                      {boardPhotoGeoLoading && <p className="text-blue-700 font-medium">{boardPhotoGeoPrecise ? 'Getting a precise location…' : 'Getting location…'}</p>}
                       {boardPhotoGeo        && <p className="text-emerald-700 font-medium">Location captured · {boardPhotoGeo.lat.toFixed(5)}, {boardPhotoGeo.lng.toFixed(5)} <span className="font-normal text-emerald-500">(±{boardPhotoGeo.accuracy}m)</span></p>}
                       {boardPhotoGeoError   && (
                         <div>
@@ -2776,7 +2816,7 @@ export default function NewKYCPage() {
                       className="w-full flex items-center justify-center gap-1.5 rounded-xl border border-[var(--brand-primary)]/40 bg-white px-3 py-2 text-xs font-semibold text-[var(--brand-primary)] hover:bg-green-50/40 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
                       {boardPhotoGeoLoading
-                        ? (<><Loader2 className="h-3.5 w-3.5 animate-spin" /> Getting location…</>)
+                        ? (<><Loader2 className="h-3.5 w-3.5 animate-spin" /> {boardPhotoGeoPrecise ? 'Getting a precise location…' : 'Getting location…'}</>)
                         : (<><Navigation className="h-3.5 w-3.5" /> Retry location</>)}
                     </button>
                   )}

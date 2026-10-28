@@ -26,6 +26,8 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { windowKeyForDate } from './visibility-window.helper';
 
 const mockPrisma = {
+  // persistCapture reads clients.features for the outlet-master geo-fence gate (outletMasterGeo).
+  client: { findUnique: jest.fn() },
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   salesUserAssignment: { findMany: jest.fn() },
   outlet: { findFirst: jest.fn(), findMany: jest.fn() },
@@ -108,6 +110,9 @@ describe('VisibilityCaptureService', () => {
     mockTenant.resolveVisibilityEnabled.mockResolvedValue(true);
     mockTenant.resolveVisibilityCaptureMode.mockResolvedValue('PHOTO_APPROVAL');
     mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: config });
+    // Default: tenant NOT geo-enabled (no outletMasterGeo flag) → legacy KYC-board-ref fence
+    // (byte-identical to before). The outletMasterGeo tests override this per case.
+    mockPrisma.client.findUnique.mockResolvedValue(null);
 
     // Caller = SO (allowed), with an active assignment to o1 (in-subtree).
     mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1', hierarchyLevel: { code: 'SO' } });
@@ -182,6 +187,108 @@ describe('VisibilityCaptureService', () => {
     expect(res.geoFenceOk).toBeNull();
     expect(res.flags).toContain('GEO_UNVERIFIABLE');
     expect(mockPrisma.visibilityCapture.create).toHaveBeenCalled();
+  });
+
+  // ── Outlet-master geo-fence (Bajaj-only via clients.features.outletMasterGeo) ─────────────
+  // When ON, the reference becomes the OUTLET-MASTER lat/long, the fence is forced on at 200 m
+  // (ignoring config.geoFence 50 m/enabled), outside → block with the owner message, and missing
+  // master coords / no fix → unverifiable (allow + flag). Deoleo / non-gated stays byte-identical.
+  describe('outlet-master geo-fence (outletMasterGeo gate)', () => {
+    const BLOCK_MSG = 'You are far from the outlet. Please go to the outlet and try again.';
+    const gatedOn = () =>
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+    /** outletRow + outlet-master coords (loadInScopeOutlet now selects latitude/longitude). */
+    const outletWithMaster = (lat: number | null, lng: number | null) => ({
+      ...outletRow,
+      latitude: lat,
+      longitude: lng,
+    });
+    // Form values whose GPS is ~14 m from (12.9, 77.5).
+    const nearMaster = { photo: 'visibility-media/t1/x.jpg', geo: { lat: 12.9001, lng: 77.5001, accuracy: 10 } };
+    const noGeo = { photo: 'visibility-media/t1/x.jpg' };
+
+    it('uses the OUTLET-MASTER reference (not the KYC board) and ALLOWS within 200 m', async () => {
+      gatedOn();
+      mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5)); // master near subject
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(refKyc(13.5, 78.5));     // KYC board FAR
+      const res = await service.submitCapture(user, { outletId: 'o1', formValues: nearMaster });
+      // Proof the master ref (near) won over the KYC board (far): fence passes.
+      expect(res.geoFenceOk).toBe(true);
+      expect(mockPrisma.visibilityCapture.create).toHaveBeenCalled();
+    });
+
+    it('BLOCKS outside 200 m of the OUTLET-MASTER with the exact owner message', async () => {
+      gatedOn();
+      mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(13.5, 78.5)); // master FAR from subject
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(refKyc(12.9, 77.5));     // KYC board near (would pass legacy)
+      await expect(
+        service.submitCapture(user, { outletId: 'o1', formValues: nearMaster }),
+      ).rejects.toThrow(BLOCK_MSG);
+      expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+    });
+
+    it('UNVERIFIABLE + allowed when the outlet has NO master coords (never blocks)', async () => {
+      gatedOn();
+      mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(null, null));
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(refKyc(12.9, 77.5)); // KYC board ignored under gate
+      const res = await service.submitCapture(user, { outletId: 'o1', formValues: nearMaster });
+      expect(res.geoFenceOk).toBeNull();
+      expect(res.flags).toContain('GEO_UNVERIFIABLE');
+      expect(mockPrisma.visibilityCapture.create).toHaveBeenCalled();
+    });
+
+    it('UNVERIFIABLE + allowed when there is no photo GPS fix (no H1 hard-block under the gate)', async () => {
+      gatedOn();
+      mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+      const res = await service.submitCapture(user, { outletId: 'o1', formValues: noGeo });
+      expect(res.geoFenceOk).toBeNull();
+      expect(res.flags).toContain('GEO_UNVERIFIABLE');
+      expect(mockPrisma.visibilityCapture.create).toHaveBeenCalled();
+    });
+
+    it('REGRESSION: with the gate OFF, outlet-master coords are IGNORED (uses the KYC board ref)', async () => {
+      // Gate off (default). Master coords far, KYC board near → legacy fence uses the board → passes.
+      mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(13.5, 78.5));
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(refKyc(12.9, 77.5));
+      const res = await service.submitCapture(user, { outletId: 'o1', formValues: nearMaster });
+      expect(res.geoFenceOk).toBe(true);
+      expect(mockPrisma.visibilityCapture.create).toHaveBeenCalled();
+    });
+
+    // ── ACCURACY BUFFER (gated path) ──────────────────────────────────────────────────
+    // A fix whose OWN reported accuracy is worse than the (forced 200 m) fence radius cannot be
+    // trusted to place the capture in/out → UNVERIFIABLE (allow + flag), never 'outside'.
+    it('ACCURACY BUFFER: fix accuracy > 200 m (near master) → UNVERIFIABLE + allowed, never blocked', async () => {
+      gatedOn();
+      mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5)); // master near subject
+      const imprecise = { photo: 'visibility-media/t1/x.jpg', geo: { lat: 12.9001, lng: 77.5001, accuracy: 250 } };
+      const res = await service.submitCapture(user, { outletId: 'o1', formValues: imprecise });
+      expect(res.geoFenceOk).toBeNull();
+      expect(res.flags).toContain('GEO_UNVERIFIABLE');
+      expect(res.distanceMeters).toBeNull();
+      expect(mockPrisma.visibilityCapture.create).toHaveBeenCalled();
+    });
+
+    it('ACCURACY BUFFER: a precise (≤200 m) fix that is FAR still BLOCKS (buffer does not weaken a real outside)', async () => {
+      gatedOn();
+      mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(13.5, 78.5)); // master FAR from subject
+      const preciseFar = { photo: 'visibility-media/t1/x.jpg', geo: { lat: 12.9001, lng: 77.5001, accuracy: 20 } };
+      await expect(
+        service.submitCapture(user, { outletId: 'o1', formValues: preciseFar }),
+      ).rejects.toThrow(BLOCK_MSG);
+      expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+    });
+
+    it('ACCURACY BUFFER is NOT applied with the gate OFF (a high-accuracy near fix still passes the legacy fence)', async () => {
+      // Gate off (default). Imprecise (250 m) but geometrically near the KYC board (14 m < 50 m)
+      // → legacy fence passes; the accuracy buffer is gated-only so it never fires here.
+      mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(13.5, 78.5));
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(refKyc(12.9, 77.5));
+      const imprecise = { photo: 'visibility-media/t1/x.jpg', geo: { lat: 12.9001, lng: 77.5001, accuracy: 250 } };
+      const res = await service.submitCapture(user, { outletId: 'o1', formValues: imprecise });
+      expect(res.geoFenceOk).toBe(true);
+      expect(mockPrisma.visibilityCapture.create).toHaveBeenCalled();
+    });
   });
 
   // ── First-approved-wins ──────────────────────────────────────────────────────

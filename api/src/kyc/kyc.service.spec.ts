@@ -63,6 +63,8 @@ const mockTx = {
 };
 
 const mockPrisma = {
+  // create() reads clients.features for the outlet-master geo-fence gate (outletMasterGeo).
+  client: { findUnique: jest.fn() },
   channelPartner: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
   // rejectedExport resolves the rejecter's display name in one round-trip.
   user: { findMany: jest.fn() },
@@ -243,6 +245,9 @@ describe('KycService', () => {
     // Default: no per-tenant outlet-type displayName (reviewQueue/reviewDump) → empty map →
     // outletType.name passes through. Rename tests override per case.
     mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
+    // Default: tenant NOT geo-enabled (no outletMasterGeo flag) → create() skips all geo-fence
+    // logic (geoFenceStatus/geoFenceDistanceM stay null). Geo tests override per case.
+    mockPrisma.client.findUnique.mockResolvedValue(null);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         KycService,
@@ -1013,6 +1018,183 @@ describe('KycService', () => {
         addressNameMismatch: true,
       } as never);
       expect(mockTx.kycSubmission.create.mock.calls[0][0].data.addressNameMismatch).toBe(true);
+    });
+  });
+
+  // ─── create() OUTLET-MASTER GEO-FENCE (Bajaj-only via clients.features.outletMasterGeo) ─
+  // Fences the submitted board-photo GPS against the OUTLET-MASTER lat/long at 200 m. OFF for
+  // every non-gated tenant (incl. Deoleo) → geoFenceStatus/geoFenceDistanceM stay null (byte-
+  // identical). ON: within → OK + distance; outside → BadRequest (exact owner message); missing
+  // reference OR subject → UNVERIFIABLE (allow, never block).
+  describe('create() outlet-master geo-fence', () => {
+    const BLOCK_MSG = 'You are far from the outlet. Please go to the outlet and try again.';
+    // Board-photo geo ~15 m from an outlet master at (12.9, 77.5) — well inside 200 m.
+    const nearGeo = { lat: 12.9001, lng: 77.5001, accuracy: 10, ts: '2026-10-28T00:00:00.000Z' };
+    // ~6.5 km away — well outside 200 m.
+    const farGeo = { lat: 12.95, lng: 77.55, accuracy: 10, ts: '2026-10-28T00:00:00.000Z' };
+
+    const baseDto = {
+      outletId: 'outlet-1',
+      partnerName: 'Acme',
+      mobile: '9000000000',
+      address: 'addr1',
+      city: 'X',
+      state: 'Y',
+      pincode: '110011',
+      bankName: 'HDFC',
+      accountNumber: '50100',
+      ifscCode: 'HDFC0001',
+    };
+
+    /** Prime the FULL happy-path writes for a partner-less outlet create (reaches kycSubmission.create). */
+    function primeHappyCreate(outletOverrides: Record<string, unknown>) {
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-1',
+        clientId: 'bajaj',
+        partnerId: null,
+        outletCode: 'OUT-1',
+        outletType: { code: 'WHOLESALER' },
+        requiredPaymentType: 'BANK',
+        ...outletOverrides,
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null); // phone available
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null); // employee-clash null
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'so-su', reportingToId: 'asm-su' }) // submitter
+        .mockResolvedValueOnce({
+          id: 'asm-su', isActive: true, deletedAt: null, reportingToId: null,
+          hierarchyLevel: { code: 'ASM' },
+        });
+      mockTx.user.findFirst.mockResolvedValueOnce(null);
+      mockTx.user.create.mockResolvedValueOnce({ id: 'owner-1' });
+      mockTx.channelPartner.create.mockResolvedValueOnce({ id: 'cp-new' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub1' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+    }
+
+    it('GATED within 200 m → records OK + the rounded distance', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
+      await service.create(so, { ...baseDto, boardPhotoGeo: nearGeo } as never);
+      const data = mockTx.kycSubmission.create.mock.calls[0][0].data;
+      expect(data.geoFenceStatus).toBe('OK');
+      expect(typeof data.geoFenceDistanceM).toBe('number');
+      expect(data.geoFenceDistanceM).toBeLessThanOrEqual(200);
+      expect(data.geoFenceDistanceM).toBeGreaterThan(0);
+    });
+
+    it('GATED beyond 200 m → BadRequest with the exact owner message (no write)', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      // Only the outlet read is needed — the throw happens before any write.
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
+        outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK',
+        latitude: 12.9, longitude: 77.5,
+      });
+      await expect(
+        service.create(so, { ...baseDto, boardPhotoGeo: farGeo } as never),
+      ).rejects.toThrow(BLOCK_MSG);
+      expect(mockTx.kycSubmission.create).not.toHaveBeenCalled();
+    });
+
+    it('GATED but outlet has NO master coords → UNVERIFIABLE + allowed', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      primeHappyCreate({ latitude: null, longitude: null });
+      // Even a far subject is allowed when there is no reference to fence against.
+      const res = await service.create(so, { ...baseDto, boardPhotoGeo: farGeo } as never);
+      expect(res).toMatchObject({ submissionId: 'sub1' });
+      const data = mockTx.kycSubmission.create.mock.calls[0][0].data;
+      expect(data.geoFenceStatus).toBe('UNVERIFIABLE');
+      expect(data.geoFenceDistanceM).toBeNull();
+    });
+
+    it('GATED but NO subject GPS fix → UNVERIFIABLE + allowed (never blocks)', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
+      const res = await service.create(so, { ...baseDto } as never); // no boardPhotoGeo
+      expect(res).toMatchObject({ submissionId: 'sub1' });
+      const data = mockTx.kycSubmission.create.mock.calls[0][0].data;
+      expect(data.geoFenceStatus).toBe('UNVERIFIABLE');
+      expect(data.geoFenceDistanceM).toBeNull();
+    });
+
+    it('NON-GATED tenant → no geo logic even for a far subject; both fields null (Deoleo parity)', async () => {
+      // Default mock: client.findUnique → null → outletMasterGeo off.
+      primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
+      const res = await service.create(so, { ...baseDto, boardPhotoGeo: farGeo } as never);
+      expect(res).toMatchObject({ submissionId: 'sub1' });
+      const data = mockTx.kycSubmission.create.mock.calls[0][0].data;
+      expect(data.geoFenceStatus).toBeNull();
+      expect(data.geoFenceDistanceM).toBeNull();
+    });
+
+    // ── ACCURACY BUFFER + instrumentation (gated path only) ─────────────────────────────
+    // An imprecise fix (accuracy > 200 m) cannot be trusted to place the rep in/out → treat as
+    // UNVERIFIABLE (allow + flag), never block. A precise fix is fenced as before. Both the fix
+    // accuracy (rounded) and the FE lock time are persisted for UAT benchmarking.
+    it('ACCURACY BUFFER: a FAR subject with accuracy > 200 m → UNVERIFIABLE + allowed (not blocked, not OK)', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
+      const imprecise = { ...farGeo, accuracy: 250 };
+      const res = await service.create(so, { ...baseDto, boardPhotoGeo: imprecise } as never);
+      expect(res).toMatchObject({ submissionId: 'sub1' });
+      const data = mockTx.kycSubmission.create.mock.calls[0][0].data;
+      expect(data.geoFenceStatus).toBe('UNVERIFIABLE');
+      expect(data.geoFenceDistanceM).toBeNull();
+      expect(data.geoFenceAccuracyM).toBe(250);
+    });
+
+    it('ACCURACY BUFFER: a precise (≤200 m) FAR subject STILL BLOCKS (buffer does not weaken a real outside)', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
+        outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK',
+        latitude: 12.9, longitude: 77.5,
+      });
+      await expect(
+        service.create(so, { ...baseDto, boardPhotoGeo: { ...farGeo, accuracy: 20 } } as never),
+      ).rejects.toThrow(BLOCK_MSG);
+      expect(mockTx.kycSubmission.create).not.toHaveBeenCalled();
+    });
+
+    it('ACCURACY BUFFER: accuracy null/absent → unchanged (computes + records OK near the outlet)', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
+      // Near fix with NO accuracy on the subject → behaves as today (compute + OK).
+      const noAccuracy = { lat: 12.9001, lng: 77.5001, ts: '2026-10-28T00:00:00.000Z' };
+      await service.create(so, { ...baseDto, boardPhotoGeo: noAccuracy } as never);
+      const data = mockTx.kycSubmission.create.mock.calls[0][0].data;
+      expect(data.geoFenceStatus).toBe('OK');
+      expect(data.geoFenceAccuracyM).toBeNull();
+    });
+
+    it('INSTRUMENTATION: persists rounded accuracy + boardPhotoLockMs on the gated path', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
+      await service.create(so, {
+        ...baseDto,
+        boardPhotoGeo: { ...nearGeo, accuracy: 12.6 },
+        boardPhotoLockMs: 1834,
+      } as never);
+      const data = mockTx.kycSubmission.create.mock.calls[0][0].data;
+      expect(data.geoFenceStatus).toBe('OK');
+      expect(data.geoFenceAccuracyM).toBe(13); // rounded
+      expect(data.geoLockMs).toBe(1834);
+    });
+
+    it('INSTRUMENTATION: NON-GATED tenant never records accuracy / lockMs (Deoleo parity)', async () => {
+      // Default mock: client.findUnique → null → gate off.
+      primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
+      await service.create(so, {
+        ...baseDto,
+        boardPhotoGeo: { ...nearGeo, accuracy: 12 },
+        boardPhotoLockMs: 1834,
+      } as never);
+      const data = mockTx.kycSubmission.create.mock.calls[0][0].data;
+      expect(data.geoFenceAccuracyM).toBeNull();
+      expect(data.geoLockMs).toBeNull();
     });
   });
 

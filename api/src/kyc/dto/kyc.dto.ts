@@ -181,6 +181,15 @@ export class CreateKycDto {
   @Type(() => GeoDto)
   paymentGeo?: GeoDto;
 
+  // Instrumentation (geo-fence tenants only — Bajaj): milliseconds the capture FE spent
+  // acquiring the board-photo GPS fix via the timed high-accuracy acquire (lock time). Sent
+  // ONLY by a geo-fence tenant's capture FE; persisted for UAT benchmarking. Ignored (left
+  // null) on the non-gated path, so Deoleo / every other tenant is byte-identical.
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  boardPhotoLockMs?: number;
+
   // Documents (including signature)
   @IsOptional()
   @IsArray()

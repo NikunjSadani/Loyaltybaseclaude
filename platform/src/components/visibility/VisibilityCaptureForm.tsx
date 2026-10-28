@@ -49,6 +49,7 @@ import {
   type VisibilityPhotoReviews,
   type VisibilityRejectReasonCode,
 } from '@/lib/visibility-types';
+import { acquirePreciseFix, type PreciseWatchHandle } from '@/lib/geo-acquire';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Props contract (implemented EXACTLY so the sales stream can code against it)
@@ -91,6 +92,20 @@ export interface VisibilityCaptureFormProps {
    * A fresh capture (or a whole-capture REJECTED re-shoot) leaves this false → unchanged.
    */
   partialRecapture?: boolean;
+  /**
+   * GEO-FENCE TENANTS (Bajaj, `features.outletMasterGeo`) only: when true, each photo's
+   * shutter-time GPS fix is taken via the TIMED HIGH-ACCURACY acquire (watchPosition — keep
+   * the best fix, early-accept a good one, cap at GEO_ACQUIRE_MAX_MS) and the fix carries its
+   * `lockMs`. When false/undefined (every non-gated tenant, incl. Deoleo) the component keeps
+   * its exact single `getCurrentPosition` call → byte-identical capture behaviour.
+   */
+  preciseGps?: boolean;
+  /**
+   * A PRE-WARMED GPS watch (started when the capture sheet opened) whose best fix is consumed
+   * at capture time — so a precise fix is usually already in hand. Only meaningful with
+   * `preciseGps`; when absent the component does a fresh one-shot acquire instead.
+   */
+  gpsWatch?: PreciseWatchHandle | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -197,6 +212,8 @@ export function VisibilityCaptureForm({
   outletContext,
   photoReviews,
   partialRecapture = false,
+  preciseGps = false,
+  gpsWatch = null,
 }: VisibilityCaptureFormProps) {
   const [values, setValues] = useState<Record<string, unknown>>(() => ({ ...(initialValues ?? {}) }));
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -258,6 +275,25 @@ export function VisibilityCaptureForm({
 
   // ── GPS capture ───────────────────────────────────────────────────────────
   const captureGps = useCallback((): Promise<GpsCapture | null> => {
+    // GEO-FENCE TENANTS (Bajaj): timed high-accuracy acquire — keep the best fix, early-accept
+    // a good one, cap at GEO_ACQUIRE_MAX_MS — and carry its accuracy + lock time.
+    if (preciseGps) {
+      // Consume the pre-warmed watch if present (instant when a good fix is already in hand);
+      // else a fresh one-shot acquire. lockMs reflects time since the watch started.
+      const fixPromise = gpsWatch ? gpsWatch.acquire() : acquirePreciseFix();
+      return fixPromise.then((fix) =>
+        fix
+          ? {
+              lat: fix.lat,
+              lng: fix.lng,
+              accuracy: fix.accuracy,
+              capturedAt: new Date().toISOString(),
+              lockMs: fix.lockMs,
+            }
+          : null,
+      );
+    }
+    // NON-GATED TENANTS (Deoleo / every other tenant): EXACT existing single-shot call.
     return new Promise((resolve) => {
       if (typeof navigator === 'undefined' || !navigator.geolocation) {
         resolve(null);
@@ -275,7 +311,7 @@ export function VisibilityCaptureForm({
         { enableHighAccuracy: true, timeout: 10_000 },
       );
     });
-  }, []);
+  }, [preciseGps, gpsWatch]);
 
   // ── Submit ──────────────────────────────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
@@ -410,6 +446,7 @@ export function VisibilityCaptureForm({
                   uploading={Boolean(uploading[field.id])}
                   uploadFile={uploadFile}
                   captureGps={captureGps}
+                  preciseGps={preciseGps}
                 />
               </div>
             );
@@ -426,6 +463,7 @@ export function VisibilityCaptureForm({
             uploading={Boolean(uploading[field.id])}
             uploadFile={uploadFile}
             captureGps={captureGps}
+            preciseGps={preciseGps}
           />
         );
       })}
@@ -486,6 +524,8 @@ interface FieldRendererProps {
   uploading: boolean;
   uploadFile: (fieldId: string, file: File, opts?: { store?: boolean }) => Promise<string | null>;
   captureGps: () => Promise<GpsCapture | null>;
+  /** Geo-fence tenants (Bajaj): drives the "Getting a precise location…" capture label. */
+  preciseGps: boolean;
 }
 
 function FieldRenderer(props: FieldRendererProps) {
@@ -645,7 +685,7 @@ function Labeled({
 
 // ── Camera field (native rear-camera, instruction + sample thumbnail, D9/D16) ──
 
-function CameraField({ field, values, setValue, uploading, uploadFile, captureGps, req }: FieldRendererProps & { req: boolean }) {
+function CameraField({ field, values, setValue, uploading, uploadFile, captureGps, preciseGps, req }: FieldRendererProps & { req: boolean }) {
   const inputRef = useRef<HTMLInputElement>(null);
   // Read back through readMediaValue so BOTH a legacy bare-key string and a per-photo
   // `{ key, geo }` value resolve to the same shape (full backward-compat).
@@ -807,7 +847,7 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
           {(uploading || busy) && (
             <p className="flex items-center gap-1.5 text-xs text-gray-500">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              {busy ? 'Getting location…' : 'Uploading…'}
+              {busy ? (preciseGps ? 'Getting a precise location…' : 'Getting location…') : 'Uploading…'}
             </p>
           )}
         </div>
@@ -819,7 +859,7 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
           className="w-full flex items-center justify-center gap-2 py-2.5 border-2 border-dashed border-gray-200 rounded-xl text-sm text-gray-500 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:opacity-50 transition-colors"
         >
           {uploading || busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
-          {busy ? 'Getting location…' : uploading ? 'Uploading…' : 'Capture photo'}
+          {busy ? (preciseGps ? 'Getting a precise location…' : 'Getting location…') : uploading ? 'Uploading…' : 'Capture photo'}
         </button>
       )}
       {capError && (

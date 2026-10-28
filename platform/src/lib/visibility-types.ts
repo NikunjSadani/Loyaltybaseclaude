@@ -133,6 +133,12 @@ export interface GpsCapture {
   lng: number;
   accuracy?: number;
   capturedAt?: string;
+  /**
+   * Milliseconds the FE spent acquiring this fix via the timed high-accuracy acquire
+   * (geo-fence tenants only). Rides inside the stored media `geo` blob (persisted in
+   * formValues JSON — no schema change). Absent on non-gated tenants' captures.
+   */
+  lockMs?: number;
 }
 
 /**

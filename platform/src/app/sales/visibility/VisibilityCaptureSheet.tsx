@@ -41,6 +41,8 @@ import {
   type SubmitCaptureResult,
 } from '@/lib/visibility-types';
 import { VisibilityCaptureForm } from '@/components/visibility/VisibilityCaptureForm';
+import { useTenantFeatures } from '@/lib/tenant-features';
+import { usePreciseGpsPreWarm } from '@/lib/use-precise-gps';
 
 /** Human labels for the non-blocking server flags surfaced on a successful capture. */
 const FLAG_LABELS: Record<string, string> = {
@@ -66,6 +68,13 @@ export function VisibilityCaptureSheet({
   onClose: () => void;
 }) {
   const [view, setView] = useState<View>('form');
+  // Geo-fence tenants (Bajaj, features.outletMasterGeo) use the timed high-accuracy acquire for
+  // each photo's GPS fix; every other tenant (Deoleo) keeps the single getCurrentPosition call.
+  const { features } = useTenantFeatures('/api/sales/me');
+  const preciseGps = features.outletMasterGeo;
+  // PRE-WARM: start the high-accuracy GPS watch as soon as the sheet opens (geo-fence tenants
+  // only) so a precise fix is usually already in hand when the rep captures a photo.
+  const gpsWatch = usePreciseGpsPreWarm(preciseGps);
   // undefined = loading; null = no form configured; schema = loaded. A load ERROR is
   // tracked SEPARATELY (`loadError`) so an outage is never shown as "nothing configured".
   const [schema, setSchema] = useState<VisibilityFormSchema | null | undefined>(undefined);
@@ -239,6 +248,10 @@ export function VisibilityCaptureSheet({
                 // carrying forward the approved ones (server-authoritative).
                 photoReviews={outlet.photoReviews ?? undefined}
                 partialRecapture={isPartial}
+                // Geo-fence tenants: timed high-accuracy per-photo GPS acquire (Bajaj only),
+                // consuming the pre-warmed watch started when the sheet opened.
+                preciseGps={preciseGps}
+                gpsWatch={gpsWatch}
               />
             )}
           </div>

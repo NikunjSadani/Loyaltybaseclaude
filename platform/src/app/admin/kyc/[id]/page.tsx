@@ -121,6 +121,9 @@ interface ApiKycDetail {
   // KYC-captured geo (Prisma Decimal → JSON string on the wire).
   boardPhotoLat?: string | number | null; boardPhotoLng?: string | number | null;
   paymentLat?: string | number | null; paymentLng?: string | number | null;
+  // Outlet-master geo-fence outcome (Bajaj-only; absent/null for every non-gated tenant).
+  geoFenceStatus?: 'OK' | 'UNVERIFIABLE' | null;
+  geoFenceDistanceM?: number | null;
   user: { id: string; name: string; phone: string; role?: string };
   partner?: {
     id: string; businessName: string; ownerName?: string | null; partnerCode?: string | null;
@@ -180,6 +183,9 @@ type KycDetailShape = {
   address: string; city: string; state: string; pincode: string;
   boardGeo: { lat: number; lng: number } | null;
   paymentGeo: { lat: number; lng: number } | null;
+  // Outlet-master geo-fence outcome (Bajaj-only; null for non-gated tenants → not rendered).
+  geoFenceStatus: 'OK' | 'UNVERIFIABLE' | null;
+  geoFenceDistanceM: number | null;
   salesUser: string; territory: string; region: string;
   submittedDate: string; status: string;
   bankName: string; accountNumber: string; ifscCode: string; upiId: string;
@@ -423,6 +429,9 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     // Geo captured during KYC (on the submission, not the outlet).
     boardGeo:         parseGeo(s.boardPhotoLat, s.boardPhotoLng),
     paymentGeo:       parseGeo(s.paymentLat, s.paymentLng),
+    // Outlet-master geo-fence flag (Bajaj-only; null for non-gated tenants → not rendered).
+    geoFenceStatus:   (s.geoFenceStatus as 'OK' | 'UNVERIFIABLE' | null | undefined) ?? null,
+    geoFenceDistanceM: (s.geoFenceDistanceM as number | null | undefined) ?? null,
     salesUser:        '',
     territory:        '',
     region:           '',
@@ -1032,6 +1041,22 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
                   </div>
                 ) : null;
               })()}
+              {/* Outlet-master geo-fence (Bajaj-only). Renders ONLY when the backend set a status;
+                  null for every non-gated tenant (Deoleo) → nothing shows. */}
+              {kyc.geoFenceStatus === 'OK' && (
+                <div className="flex gap-2 items-start" data-testid="kyc-geofence-status">
+                  <span className="text-gray-500 w-24 flex-shrink-0">Geo-fence</span>
+                  <span className="text-emerald-700">
+                    📍 Location verified{kyc.geoFenceDistanceM != null ? ` (${kyc.geoFenceDistanceM} m from outlet)` : ''}
+                  </span>
+                </div>
+              )}
+              {kyc.geoFenceStatus === 'UNVERIFIABLE' && (
+                <div className="flex gap-2 items-start" data-testid="kyc-geofence-status">
+                  <span className="text-gray-500 w-24 flex-shrink-0">Geo-fence</span>
+                  <span className="text-amber-700">⚠ Location unverifiable</span>
+                </div>
+              )}
             </div>
           </div>
 

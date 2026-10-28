@@ -39,7 +39,12 @@ import {
   GpsCapture,
   outletContextValues,
 } from './visibility-types';
-import { evaluatePhotoFence, isValidGeo } from './geo-fence.helper';
+import {
+  evaluatePhotoFence,
+  isValidGeo,
+  isUsableReference,
+  OUTLET_MASTER_GEOFENCE_RADIUS_M,
+} from './geo-fence.helper';
 import { SubmitCaptureDto, ResubmitCaptureDto } from './dto/visibility-capture.dto';
 
 /** Object-key tenant folder for all visibility media (mirrors VisibilityMediaService). */
@@ -465,6 +470,10 @@ export class VisibilityCaptureService {
         outletCode: true,
         name: true,
         partnerId: true,
+        // Outlet-master coords — the geo-fence REFERENCE when the tenant's outletMasterGeo
+        // feature is on (Bajaj). Nullable; a null → 'unverifiable' (allow, never block).
+        latitude: true,
+        longitude: true,
         // Sub-program (Design B) — the authoritative outlet attribute that drives
         // conditional capture fields (e.g. a `requiredWhen __subProgram__ == X` 2nd photo).
         programCategory: true,
@@ -492,6 +501,9 @@ export class VisibilityCaptureService {
       outletCode: string;
       name: string;
       partnerId: string | null;
+      // Outlet-master coords (Prisma Decimal | null) — the geo-fence reference under outletMasterGeo.
+      latitude?: Prisma.Decimal | null;
+      longitude?: Prisma.Decimal | null;
       programCategory?: string | null;
     },
     submittedRaw: Record<string, unknown> | undefined,
@@ -598,6 +610,30 @@ export class VisibilityCaptureService {
         ? (carriedReviews as unknown as Prisma.InputJsonValue)
         : Prisma.JsonNull;
 
+    // ── OUTLET-MASTER GEO-FENCE GATE (Bajaj-only via clients.features.outletMasterGeo) ──────
+    // When ON: the fence REFERENCE becomes the OUTLET-MASTER lat/long (not the KYC board photo),
+    // the fence is FORCE-ENABLED at OUTLET_MASTER_GEOFENCE_RADIUS_M (ignoring visibilityConfig.
+    // geoFence.enabled/radiusMeters), and an OUTSIDE capture is blocked with the owner's exact
+    // message. Missing outlet-master coords OR no photo GPS fix → 'unverifiable' (allow + flag),
+    // never a hard-block. When OFF → EXACTLY today's behavior (KYC board-photo ref + the tenant's
+    // visibilityConfig.geoFence), byte-identical for Deoleo / every non-gated tenant.
+    const outletMasterGeoEnabled = await this.resolveOutletMasterGeo(user.clientId);
+    // isUsableReference (not just a null-check) guards the OUTLET-MASTER coords: a 0/0 sentinel
+    // or out-of-range master value → treated as NO reference → 'unverifiable' (allow+flag) in
+    // both fence paths below, never a spurious block of a rep at the real outlet.
+    const outletMasterRefRaw =
+      outletMasterGeoEnabled && outlet.latitude != null && outlet.longitude != null
+        ? { lat: Number(outlet.latitude), lng: Number(outlet.longitude) }
+        : null;
+    const outletMasterRef = isUsableReference(outletMasterRefRaw) ? outletMasterRefRaw : null;
+    // Effective fence params: forced on at the shared 200 m under the gate; the tenant's config otherwise.
+    const fenceEnabled = outletMasterGeoEnabled ? true : config.geoFence.enabled;
+    const fenceRadius = outletMasterGeoEnabled
+      ? OUTLET_MASTER_GEOFENCE_RADIUS_M
+      : config.geoFence.radiusMeters;
+    const OUTSIDE_FENCE_MESSAGE =
+      'You are far from the outlet. Please go to the outlet and try again.';
+
     // Geo-fence — TWO paths, chosen by the form schema. A form with ≥1 CAMERA field
     // flagged `geoFenceRequired` uses the NEW per-photo path (each such photo's embedded
     // shutter-time geo is fenced); otherwise fall through to the LEGACY single-GPS_POINT
@@ -616,9 +652,13 @@ export class VisibilityCaptureService {
 
     if (fenceFields.length > 0) {
       // ── NEW PER-PHOTO PATH ──────────────────────────────────────────────────────
-      // Resolve the outlet reference geo ONCE (latest APPROVED KYC board-photo geo).
-      const reference = await this.outletReferenceGeo(user.clientId, outlet.partnerId);
-      const radius = config.geoFence.radiusMeters;
+      // Reference geo, resolved ONCE: the OUTLET-MASTER lat/long under the outletMasterGeo gate,
+      // else the legacy latest-APPROVED KYC board-photo geo. Radius likewise is the forced 200 m
+      // under the gate, else the tenant's configured radius.
+      const reference = outletMasterGeoEnabled
+        ? outletMasterRef
+        : await this.outletReferenceGeo(user.clientId, outlet.partnerId);
+      const radius = fenceRadius;
 
       let anyInside = false;
       let anyOutside = false;
@@ -629,8 +669,22 @@ export class VisibilityCaptureService {
 
       for (const f of fenceFields) {
         const g = readMediaValue(values[f.id]).geo ?? null;
-        const status = evaluatePhotoFence(g, reference, radius);
-        if (reference && isValidGeo(g)) {
+        let status = evaluatePhotoFence(g, reference, radius);
+        // ACCURACY BUFFER (gated path only): a fix whose OWN reported accuracy is worse than
+        // the fence radius cannot be trusted to place the photo in/out — a genuinely-at-the-
+        // outlet rep could read as 'outside' purely from GPS error. Downgrade such a verdict to
+        // 'unverifiable' (allow + flag), never block. A good-accuracy / absent-accuracy fix is
+        // unchanged. Non-gated tenants never take this branch (byte-identical).
+        const accuracyTooLow =
+          outletMasterGeoEnabled &&
+          status !== 'unverifiable' &&
+          isValidGeo(g) &&
+          typeof g.accuracy === 'number' &&
+          Number.isFinite(g.accuracy) &&
+          g.accuracy > radius;
+        if (accuracyTooLow) {
+          status = 'unverifiable';
+        } else if (reference && isValidGeo(g)) {
           const d = haversineMeters(g.lat, g.lng, reference.lat, reference.lng);
           const rounded = Math.round(d * 100) / 100;
           // Track the worst (farthest) fixed photo so the map pin (repGeo) and distanceMeters
@@ -656,7 +710,7 @@ export class VisibilityCaptureService {
       //   • EVERY fence photo inside  → true  (a real pass — no unverifiable, no outside)
       //   • else (≥1 unverifiable, none outside) → null (surfaces UNVERIFIABLE to the approver;
       //     an absent fix per owner D1 flags-but-doesn't-block, but must NOT read as a clean pass).
-      if (!config.geoFence.enabled) {
+      if (!fenceEnabled) {
         geoFenceOk = null;
       } else if (anyOutside) {
         geoFenceOk = false;
@@ -668,11 +722,13 @@ export class VisibilityCaptureService {
       distanceMeters = worstDistance;
       repGeo = this.photoToCaptureGeo(worstGeo);
 
-      if (config.geoFence.enabled) {
+      if (fenceEnabled) {
         if (anyOutside) {
           throw new ForbiddenException(
-            `Capture is outside the allowed ${radius}m radius of the outlet` +
-              (outsideLabel ? ` — photo "${outsideLabel}" is out of range.` : '.'),
+            outletMasterGeoEnabled
+              ? OUTSIDE_FENCE_MESSAGE
+              : `Capture is outside the allowed ${radius}m radius of the outlet` +
+                  (outsideLabel ? ` — photo "${outsideLabel}" is out of range.` : '.'),
           );
         }
         if (anyUnverifiable) flags.push('GEO_UNVERIFIABLE');
@@ -687,26 +743,50 @@ export class VisibilityCaptureService {
         flags.push('LOW_ACCURACY');
       }
     } else {
-      // ── LEGACY SINGLE-GPS_POINT PATH (unchanged) ────────────────────────────────
+      // ── LEGACY SINGLE-GPS_POINT PATH ────────────────────────────────────────────
+      // Byte-identical to before when outletMasterGeo is OFF. Under the gate, the reference +
+      // enabled + radius are OVERRIDDEN to the outlet-master coords / forced 200 m (the override
+      // is undefined otherwise, so evaluateGeoFence runs its original config-driven logic).
       const geo = this.extractCaptureGeo(schema, values);
-      const res = await this.evaluateGeoFence(user.clientId, outlet.partnerId, config, geo);
-      distanceMeters = res.distanceMeters;
-      geoFenceOk = res.geoFenceOk;
+      const res = await this.evaluateGeoFence(
+        user.clientId,
+        outlet.partnerId,
+        config,
+        geo,
+        outletMasterGeoEnabled
+          ? { reference: outletMasterRef, enabled: fenceEnabled, radiusMeters: fenceRadius }
+          : undefined,
+      );
+      // ACCURACY BUFFER (gated path only): a fix whose OWN reported accuracy is worse than the
+      // fence radius cannot be trusted to place the capture in/out — treat as 'unverifiable'
+      // (allow + flag via the geoFenceOk===null branch below), never a distance-based block.
+      // Non-gated tenants never take this branch (byte-identical).
+      const accuracyTooLow =
+        outletMasterGeoEnabled &&
+        geo.accuracy != null &&
+        Number.isFinite(geo.accuracy) &&
+        geo.accuracy > fenceRadius;
+      distanceMeters = accuracyTooLow ? null : res.distanceMeters;
+      geoFenceOk = accuracyTooLow ? null : res.geoFenceOk;
       repGeo = geo;
 
       const captureGeoPresent = geo.lat != null && geo.lng != null;
-      if (config.geoFence.enabled) {
+      if (fenceEnabled) {
         // H1 — FAIL-CLOSED when a reference geo EXISTS but the capture geo is
         // missing/unparseable/out-of-range: a rep must not be able to defeat the fence by
         // sending no/garbage GPS. (No reference geo → allow-but-flag GEO_UNVERIFIABLE below.)
-        if (res.referencePresent && !captureGeoPresent) {
+        // SKIPPED under the outletMasterGeo gate — the owner's rule there is "no photo GPS →
+        // UNVERIFIABLE (allow + flag), never block"; only an OUTSIDE fix is blocked.
+        if (!outletMasterGeoEnabled && res.referencePresent && !captureGeoPresent) {
           throw new ForbiddenException(
             'A valid GPS location is required to capture at this outlet (geo-fence is enabled).',
           );
         }
         if (geoFenceOk === false) {
           throw new ForbiddenException(
-            `Capture is outside the allowed ${config.geoFence.radiusMeters}m radius of the outlet.`,
+            outletMasterGeoEnabled
+              ? OUTSIDE_FENCE_MESSAGE
+              : `Capture is outside the allowed ${config.geoFence.radiusMeters}m radius of the outlet.`,
           );
         }
       }
@@ -717,7 +797,7 @@ export class VisibilityCaptureService {
         if (skew > CLOCK_SKEW_FLAG_MS) flags.push('CLOCK_SKEW');
       }
       if (geo.accuracy != null && geo.accuracy > LOW_ACCURACY_FLAG_M) flags.push('LOW_ACCURACY');
-      if (geoFenceOk === null && config.geoFence.enabled) flags.push('GEO_UNVERIFIABLE');
+      if (geoFenceOk === null && fenceEnabled) flags.push('GEO_UNVERIFIABLE');
     }
 
     // Hash the capture photos BEFORE the transaction (network I/O outside the tx).
@@ -939,11 +1019,15 @@ export class VisibilityCaptureService {
     partnerId: string | null,
     config: VisibilityConfigSettings,
     geo: CaptureGeo,
+    // Outlet-master geo-fence OVERRIDE (Bajaj-only). When present it supplies the reference geo +
+    // forced enabled/radius, replacing the KYC-board reference and config.geoFence. Undefined →
+    // the original config-driven logic (byte-identical for every non-gated tenant).
+    override?: { reference: { lat: number; lng: number } | null; enabled: boolean; radiusMeters: number },
   ): Promise<{ distanceMeters: number | null; geoFenceOk: boolean | null; referencePresent: boolean }> {
     // referencePresent distinguishes the two null cases for the caller (H1):
-    //   ref exists + no capture geo  → caller HARD-BLOCKS;
+    //   ref exists + no capture geo  → caller HARD-BLOCKS (non-gated path only);
     //   no ref                       → allow-but-flag GEO_UNVERIFIABLE.
-    const ref = await this.outletReferenceGeo(clientId, partnerId);
+    const ref = override ? override.reference : await this.outletReferenceGeo(clientId, partnerId);
     const referencePresent = !!ref;
     if (geo.lat == null || geo.lng == null || !ref) {
       return { distanceMeters: null, geoFenceOk: null, referencePresent };
@@ -952,8 +1036,23 @@ export class VisibilityCaptureService {
     const rounded = Math.round(distance * 100) / 100;
     // geoFenceOk is only meaningful when the fence is enabled; when off we still record
     // the informational distance but leave the pass/fail null (no enforcement).
-    const geoFenceOk = config.geoFence.enabled ? distance <= config.geoFence.radiusMeters : null;
+    const fenceEnabled = override ? override.enabled : config.geoFence.enabled;
+    const fenceRadius = override ? override.radiusMeters : config.geoFence.radiusMeters;
+    const geoFenceOk = fenceEnabled ? distance <= fenceRadius : null;
     return { distanceMeters: rounded, geoFenceOk, referencePresent };
+  }
+
+  /**
+   * Outlet-master geo-fence gate (Bajaj-only). Reuses the SAME feature resolution
+   * admin-outlets.service.ts uses — a direct Client.features read. OFF for every other tenant
+   * (incl. live Deoleo), so the gated behavior never touches them.
+   */
+  private async resolveOutletMasterGeo(clientId: string): Promise<boolean> {
+    const c = await this.prisma.client.findUnique({
+      where: { id: clientId },
+      select: { features: true },
+    });
+    return (c?.features as Record<string, unknown> | null)?.outletMasterGeo === true;
   }
 
   /**

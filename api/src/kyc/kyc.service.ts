@@ -28,6 +28,14 @@ import { sniffFileType } from '../common/file-signature';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { isActivePhoneConflict } from '../common/phone-conflict';
 import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
+// Outlet-master geo-fence (Bajaj-only). REUSE the pure visibility haversine + validity helpers
+// and the shared radius constant — never re-implement the distance math (per the design).
+import {
+  haversineMeters,
+  isValidGeo,
+  isUsableReference,
+  OUTLET_MASTER_GEOFENCE_RADIUS_M,
+} from '../visibility/geo-fence.helper';
 import { isSalesRedeemEnabledForPartner } from '../common/sales-redeem-eligibility';
 import { businessHoursBetween } from '../common/business-hours';
 import { loadHolidaySet } from '../common/holiday-calendar';
@@ -1191,9 +1199,14 @@ export class KycService {
       // defaults (kycVariant → STANDARD via the DB default; declarationData/soSignatureKey → NULL).
       declarationData?: Prisma.InputJsonValue;
       soSignatureKey?: string;
+      // Outlet-master geo-fence outcome (Bajaj-only). All null for every non-gated tenant.
+      geoFenceStatus?: 'OK' | 'UNVERIFIABLE' | null;
+      geoFenceDistanceM?: number | null;
+      geoFenceAccuracyM?: number | null;
+      geoLockMs?: number | null;
     },
   ) {
-    const { user, dto, status, escalatedFrom, partnerId, inFlightStatuses, proposedPartner, declarationData, soSignatureKey } = args;
+    const { user, dto, status, escalatedFrom, partnerId, inFlightStatuses, proposedPartner, declarationData, soSignatureKey, geoFenceStatus, geoFenceDistanceM, geoFenceAccuracyM, geoLockMs } = args;
 
     const existing = await tx.kycSubmission.findFirst({
       where: {
@@ -1232,6 +1245,13 @@ export class KycService {
         paymentLng: dto.paymentGeo?.lng ?? null,
         paymentGeoAccuracy: dto.paymentGeo?.accuracy ?? null,
         paymentGeoAt: dto.paymentGeo?.ts ? new Date(dto.paymentGeo.ts) : null,
+
+        // Outlet-master geo-fence outcome + instrumentation (Bajaj-only; all null for every
+        // non-gated tenant → byte-identical).
+        geoFenceStatus: geoFenceStatus ?? null,
+        geoFenceDistanceM: geoFenceDistanceM ?? null,
+        geoFenceAccuracyM: geoFenceAccuracyM ?? null,
+        geoLockMs: geoLockMs ?? null,
       },
     });
   }
@@ -1268,6 +1288,77 @@ export class KycService {
       include: { outletType: { select: { code: true } } },
     });
     if (!outlet) throw new NotFoundException('Outlet not found');
+
+    // ── OUTLET-MASTER GEO-FENCE (Bajaj-only via clients.features.outletMasterGeo) ──────────
+    // REUSES the SAME feature resolution admin-outlets.service.ts uses (a direct Client.features
+    // read). When the flag is OFF — every tenant incl. live Deoleo — geoFenceStatus/geoFenceDistanceM
+    // stay NULL and NOTHING about this flow changes (byte-identical).
+    //
+    // When ON: fence the submitted BOARD-PHOTO GPS fix (dto.boardPhotoGeo — owner-confirmed subject)
+    // against the OUTLET-MASTER lat/long at OUTLET_MASTER_GEOFENCE_RADIUS_M, using the pure visibility
+    // haversine (no re-implementation):
+    //   • reference + subject both present & valid, distance > radius → BLOCK (BadRequest, the owner's
+    //     exact message) — nothing is written;
+    //   • both present & valid, within radius                        → record 'OK' + rounded distance;
+    //   • outlet has no master coords, OR no/invalid subject fix     → ALLOW + record 'UNVERIFIABLE'
+    //     (conservative: compliance-adjacent, never a wrong hard-block).
+    // Computed BEFORE any write so a far-away capture fails fast (before the create transaction).
+    let geoFenceStatus: 'OK' | 'UNVERIFIABLE' | null = null;
+    let geoFenceDistanceM: number | null = null;
+    // Instrumentation (gated path only; null for every non-gated tenant → byte-identical).
+    let geoFenceAccuracyM: number | null = null;
+    let geoLockMs: number | null = null;
+    const geoClient = await this.prisma.client.findUnique({
+      where: { id: user.clientId },
+      select: { features: true },
+    });
+    const outletMasterGeoEnabled =
+      (geoClient?.features as Record<string, unknown> | null)?.outletMasterGeo === true;
+    if (outletMasterGeoEnabled) {
+      const reference =
+        outlet.latitude != null && outlet.longitude != null
+          ? { lat: Number(outlet.latitude), lng: Number(outlet.longitude) }
+          : null;
+      const subject = dto.boardPhotoGeo ?? null;
+      // Instrumentation: record the fix accuracy + lock time whenever present (regardless of
+      // the fence outcome) so UAT can benchmark the timed acquire.
+      const subjectAccuracy =
+        subject && typeof subject.accuracy === 'number' && Number.isFinite(subject.accuracy)
+          ? subject.accuracy
+          : null;
+      geoFenceAccuracyM = subjectAccuracy != null ? Math.round(subjectAccuracy) : null;
+      geoLockMs =
+        typeof dto.boardPhotoLockMs === 'number' && Number.isFinite(dto.boardPhotoLockMs)
+          ? Math.round(dto.boardPhotoLockMs)
+          : null;
+      // isUsableReference (not just a null-check) guards the OUTLET-MASTER coords: a 0/0
+      // sentinel or out-of-range master value → UNVERIFIABLE (allow+flag), never a spurious
+      // block of a rep standing at the real outlet.
+      if (isUsableReference(reference) && isValidGeo(subject)) {
+        // ACCURACY BUFFER (conservative, compliance-adjacent): if the fix's own reported
+        // accuracy is WORSE than the fence radius, the distance comparison is meaningless —
+        // a genuinely-at-the-outlet rep could read as "outside" purely from GPS error. So an
+        // accuracy > radius → UNVERIFIABLE (allow + flag), never compute/block. A present
+        // accuracy ≤ radius → fence as before; a null/absent accuracy → unchanged behaviour.
+        if (subjectAccuracy != null && subjectAccuracy > OUTLET_MASTER_GEOFENCE_RADIUS_M) {
+          geoFenceStatus = 'UNVERIFIABLE';
+          geoFenceDistanceM = null;
+        } else {
+          const distance = haversineMeters({ lat: subject.lat, lng: subject.lng }, reference);
+          if (distance > OUTLET_MASTER_GEOFENCE_RADIUS_M) {
+            throw new BadRequestException(
+              'You are far from the outlet. Please go to the outlet and try again.',
+            );
+          }
+          geoFenceStatus = 'OK';
+          geoFenceDistanceM = Math.round(distance);
+        }
+      } else {
+        // Missing/invalid reference coords OR a missing/invalid subject fix → allow + flag (never block).
+        geoFenceStatus = 'UNVERIFIABLE';
+        geoFenceDistanceM = null;
+      }
+    }
 
     // ── SO Declaration variant (Bajaj) — see platform/docs/plans/SO-DECLARATION-KYC.md ──
     // Gated ENTIRELY on this flag so the STANDARD path stays byte-identical for every other
@@ -1966,6 +2057,11 @@ export class KycService {
         // SO Declaration variant (undefined for STANDARD → DB default STANDARD, NULL JSON/key).
         declarationData,
         soSignatureKey,
+        // Outlet-master geo-fence outcome + instrumentation (all null for every non-gated tenant → byte-identical).
+        geoFenceStatus,
+        geoFenceDistanceM,
+        geoFenceAccuracyM,
+        geoLockMs,
       });
 
       // 3d. C6 — pre-seed APPROVED GROUP_INHERITED verification items for the group-shareable fields

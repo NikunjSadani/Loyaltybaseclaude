@@ -40,7 +40,7 @@ Object.defineProperty(globalThis.HTMLVideoElement.prototype, 'pause', {
 Element.prototype.scrollIntoView = vi.fn();
 
 Object.defineProperty(globalThis.navigator, 'geolocation', {
-  value: { getCurrentPosition: vi.fn() },
+  value: { getCurrentPosition: vi.fn(), watchPosition: vi.fn(), clearWatch: vi.fn() },
   configurable: true,
 });
 
