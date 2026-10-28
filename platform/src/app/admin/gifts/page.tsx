@@ -339,6 +339,22 @@ function CategorySection({
     }
   };
 
+  // Reactivate an inactive category. The backend deactivate is a reversible isActive=false
+  // toggle (RewardCategory has no soft-delete), so PATCH { isActive: true } turns it back on.
+  // Without this, an inactive category had no way back (the edit modal has no active control).
+  const activate = async (cat: RewardCategory) => {
+    setErr('');
+    try {
+      await apiJson(`/api/admin/rewards/categories/${cat.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ isActive: true }),
+      });
+      onReload();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not activate the category');
+    }
+  };
+
   return (
     <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
       <button
@@ -392,13 +408,21 @@ function CategorySection({
                   >
                     <Edit2 className="h-3.5 w-3.5" />
                   </button>
-                  {c.isActive && (
+                  {c.isActive ? (
                     <button
                       onClick={() => deactivate(c)}
                       className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50"
                       aria-label="Deactivate category"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => activate(c)}
+                      className="px-2 py-1 rounded-lg text-[11px] font-semibold text-emerald-600 hover:bg-emerald-50"
+                      aria-label="Activate category"
+                    >
+                      Activate
                     </button>
                   )}
                 </div>
