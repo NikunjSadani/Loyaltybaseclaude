@@ -19,6 +19,7 @@ import {
 } from 'recharts';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { authHeader } from '@/lib/api-client';
+import { redemptionModeLabel, canonicalRedemptionMode } from '@/lib/redemption-mode';
 
 const DARK_NAVY = '#1A1A2E';
 
@@ -105,13 +106,6 @@ function pctColor(pct: number): string {
   if (pct >= 60) return '#f59e0b';
   return '#ef4444';
 }
-
-const MODE_LABEL: Record<string, string> = {
-  GIFT_CARD: 'Gift Card',
-  UPI: 'UPI',
-  BANK_TRANSFER: 'Bank Transfer',
-  PHYSICAL_GIFT: 'Physical Gift',
-};
 
 const STATUS_LABEL: Record<string, string> = {
   PENDING: 'Pending',
@@ -260,7 +254,21 @@ export default function AdminProgramHealthDashboardPage() {
     { stage: 'First Redeem', count: activation.firstRedeem },
   ];
   const trendData = participation.trend.map((t) => ({ ...t, label: monthLabel(t.month) }));
-  const redemptionModeMax = Math.max(1, ...redemptions.byMode.map((m) => m.count));
+  // Collapse the two cash modes (UPI + BANK_TRANSFER) into one "Cash Payout" bar so this chart
+  // matches the unified catalogue label — both are the same product concept.
+  const byModeMerged = Object.values(
+    redemptions.byMode.reduce<Record<string, ByModeRow>>((acc, m) => {
+      const key = canonicalRedemptionMode(m.mode);
+      const ex = acc[key];
+      if (ex) {
+        ex.count += m.count; ex.points += m.points; ex.valueRupees += m.valueRupees;
+      } else {
+        acc[key] = { ...m, mode: key };
+      }
+      return acc;
+    }, {}),
+  );
+  const redemptionModeMax = Math.max(1, ...byModeMerged.map((m) => m.count));
   const fulfilmentTotal = redemptions.fulfilment.reduce((s, f) => s + f.count, 0);
 
   return (
@@ -514,15 +522,15 @@ export default function AdminProgramHealthDashboardPage() {
             <p className="text-xs text-gray-400 mt-0.5">Completed redemptions for {monthLabel(redemptions.period)} (excludes pending/failed/cancelled/returned)</p>
           </CardHeader>
           <CardContent className="pb-5 space-y-4">
-            {redemptions.byMode.length === 0 && (
+            {byModeMerged.length === 0 && (
               <p className="text-xs text-gray-400">No completed redemptions this period.</p>
             )}
-            {redemptions.byMode.map((m) => {
+            {byModeMerged.map((m) => {
               const barW = (m.count / redemptionModeMax) * 100;
               return (
                 <div key={m.mode}>
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs font-medium text-gray-700">{MODE_LABEL[m.mode] ?? m.mode}</span>
+                    <span className="text-xs font-medium text-gray-700">{redemptionModeLabel(m.mode)}</span>
                     <span className="text-xs text-gray-500 ml-3 shrink-0">
                       <span className="font-bold text-gray-700">{fmtInt(m.count)}</span> orders ·{' '}
                       {fmtInt(m.points)} pts · {fmtRupees(m.valueRupees)}

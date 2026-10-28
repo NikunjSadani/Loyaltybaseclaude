@@ -55,6 +55,7 @@ import {
   fmtValuePaise,
   fmtPoints,
 } from '@/lib/gift-orders';
+import { redemptionModeLabel } from '@/lib/redemption-mode';
 
 function formatDate(iso?: string | null): string {
   if (!iso) return '—';
@@ -165,7 +166,7 @@ export default function GiftOrderDetailPage() {
                 value={order.valuePaise != null ? fmtValuePaise(order.valuePaise) : '—'}
               />
               <Field label="Points spent" value={fmtPoints(order.totalPointsCost)} />
-              <Field label="Mode" value={order.redemptionMode ?? '—'} />
+              <Field label="Mode" value={redemptionModeLabel(order.redemptionMode)} />
             </div>
 
             {/* Internal "fulfilled by" + delivery PII — ops/tenant only (never on the

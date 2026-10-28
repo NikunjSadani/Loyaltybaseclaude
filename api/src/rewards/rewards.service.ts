@@ -1233,11 +1233,27 @@ export class RewardsService {
             return 0n;
           })();
 
+        // MONEY-PATH: the actual payout RAIL follows the partner's ON-FILE
+        // beneficiary, NOT the catalogue item's redemptionMode. UPI is preferred
+        // when present (mirrors the partner-facing payout target + the credit rail),
+        // else the bank rail. This decouples the (now unified "Cash Payout")
+        // catalogue mode from the real disbursement channel, so a cash item can
+        // never misroute a UPI-only partner onto the bank rail (or vice-versa).
+        //
+        // CONVENTION (finance / reconciliation): order.redemptionMode (the reward TYPE —
+        // "Cash Payout" is stored as BANK_TRANSFER) may now legitimately DIFFER from this
+        // payoutMode (the disbursement RAIL). Rail / bank-file questions → read
+        // payoutTransaction.payoutMode; reward-type questions → order.redemptionMode.
+        // NEVER assume the two are equal.
+        const payoutMode: 'UPI' | 'BANK_TRANSFER' = partnerSnap?.upiId
+          ? 'UPI'
+          : 'BANK_TRANSFER';
+
         await tx.payoutTransaction.create({
           data: {
             partnerId: order.partnerId,
             redemptionOrderId: order.id,
-            payoutMode: order.redemptionMode,
+            payoutMode,
             status: 'PENDING',
             batchId: null,
             amountPaise,
@@ -1253,7 +1269,7 @@ export class RewardsService {
         });
 
         this.logger.log(
-          `[confirmRedeemForOutlet] PayoutTransaction created for order ${order.id} (${order.redemptionMode}, ${amountPaise} paise)`,
+          `[confirmRedeemForOutlet] PayoutTransaction created for order ${order.id} (rail=${payoutMode}, ${amountPaise} paise)`,
         );
       }
     });
@@ -1830,11 +1846,27 @@ export class RewardsService {
             return 0n;
           })();
 
+        // MONEY-PATH: the actual payout RAIL follows the partner's ON-FILE
+        // beneficiary, NOT the catalogue item's redemptionMode. UPI is preferred
+        // when present (mirrors the partner-facing payout target + the credit rail),
+        // else the bank rail. This decouples the (now unified "Cash Payout")
+        // catalogue mode from the real disbursement channel, so a cash item can
+        // never misroute a UPI-only partner onto the bank rail (or vice-versa).
+        //
+        // CONVENTION (finance / reconciliation): order.redemptionMode (the reward TYPE —
+        // "Cash Payout" is stored as BANK_TRANSFER) may now legitimately DIFFER from this
+        // payoutMode (the disbursement RAIL). Rail / bank-file questions → read
+        // payoutTransaction.payoutMode; reward-type questions → order.redemptionMode.
+        // NEVER assume the two are equal.
+        const payoutMode: 'UPI' | 'BANK_TRANSFER' = partnerSnap?.upiId
+          ? 'UPI'
+          : 'BANK_TRANSFER';
+
         await tx.payoutTransaction.create({
           data: {
             partnerId: order.partnerId,
             redemptionOrderId: order.id,
-            payoutMode: order.redemptionMode,
+            payoutMode,
             status: 'PENDING',
             batchId: null,           // unbatched — GIFSY admin assigns to a batch later
             amountPaise,
@@ -1850,7 +1882,7 @@ export class RewardsService {
         });
 
         this.logger.log(
-          `[confirmRedeem] PayoutTransaction created for order ${order.id} (${order.redemptionMode}, ${amountPaise} paise)`,
+          `[confirmRedeem] PayoutTransaction created for order ${order.id} (rail=${payoutMode}, ${amountPaise} paise)`,
         );
       }
     });

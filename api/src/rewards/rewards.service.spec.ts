@@ -2861,6 +2861,13 @@ describe('RewardsService', () => {
 
     it('BANK_TRANSFER confirm: creates a PayoutTransaction linked to the order', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(bankOrder);
+      // Partner has a BANK-ONLY beneficiary → the rail is BANK_TRANSFER.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({
+        ...partnerSnap,
+        upiId: null,
+        bankAccountNumber: '0011223344',
+        ifscCode: 'HDFC0001234',
+      });
 
       await service.confirmRedeem(partner, { orderId: 'o-bank', otp: '123456' });
 
@@ -2870,6 +2877,51 @@ describe('RewardsService', () => {
       expect(call.data.redemptionOrderId).toBe('o-bank');
       expect(call.data.amountPaise).toBe(100000n);
       expect(call.data.status).toBe('PENDING');
+    });
+
+    // ── MONEY-PATH: the payout RAIL follows the PARTNER's on-file beneficiary,
+    //    NOT the catalogue item's stored redemptionMode (the unified "Cash Payout"
+    //    item always stores BANK_TRANSFER, but a UPI-only partner must still be
+    //    paid via UPI, and a bank-only partner via BANK_TRANSFER). ──────────────
+
+    it('rail follows the beneficiary: a BANK_TRANSFER-mode item with a UPI-ONLY partner pays out via UPI', async () => {
+      // Catalogue item mode = BANK_TRANSFER (the canonical "Cash Payout" stored value)…
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(bankOrder);
+      // …but the partner's on-file beneficiary is UPI-only.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({
+        ...partnerSnap,
+        upiId: 'upionly@upi',
+        bankAccountNumber: null,
+        ifscCode: null,
+        bankName: null,
+      });
+
+      await service.confirmRedeem(partner, { orderId: 'o-bank', otp: '123456' });
+
+      const call = mockPrisma.payoutTransaction.create.mock.calls[0][0];
+      expect(call.data.payoutMode).toBe('UPI');
+      expect(call.data.upiId).toBe('upionly@upi');
+      expect(call.data.bankAccountNumber).toBeNull();
+    });
+
+    it('rail follows the beneficiary: a UPI-mode item with a BANK-ONLY partner pays out via BANK_TRANSFER', async () => {
+      // Legacy catalogue item mode = UPI…
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(upiOrder);
+      // …but the partner's on-file beneficiary is bank-only.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({
+        ...partnerSnap,
+        upiId: null,
+        bankAccountNumber: '5566778899',
+        ifscCode: 'ICIC0005678',
+        bankName: 'ICICI Bank',
+      });
+
+      await service.confirmRedeem(partner, { orderId: 'o-upi', otp: '123456' });
+
+      const call = mockPrisma.payoutTransaction.create.mock.calls[0][0];
+      expect(call.data.payoutMode).toBe('BANK_TRANSFER');
+      expect(call.data.bankAccountNumber).toBe('5566778899');
+      expect(call.data.upiId).toBeNull();
     });
 
     it('GIFT_CARD confirm: does NOT create a PayoutTransaction', async () => {

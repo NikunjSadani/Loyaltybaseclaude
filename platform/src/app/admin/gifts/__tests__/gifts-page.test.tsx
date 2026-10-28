@@ -275,4 +275,83 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
       ([u, i]) => u.startsWith('/api/admin/rewards/fulfilment/upload') && i?.method === 'POST',
     )).toBe(true);
   });
+
+  // ── Cash Payout simplification (UPI + BANK_TRANSFER → one "Cash Payout") ──────
+
+  /** A legacy catalogue item whose stored mode is UPI (FIXED cash). */
+  const UPI_ITEM = {
+    id: 'rc-upi',
+    categoryId: 'cat1',
+    category: { id: 'cat1', name: 'Vouchers', code: 'VOUCHERS' },
+    code: 'CASH-UPI',
+    name: 'Instant Cash 1000',
+    description: '',
+    pointsCost: 500,
+    mrpPaise: null,
+    redemptionMode: 'UPI',
+    status: 'ACTIVE',
+    minRedemptionPoints: null,
+    maxRedemptionPoints: null,
+    stockQuantity: null,
+  };
+
+  const serveUpiItem = (url: string, init?: RequestInit) =>
+    url.startsWith('/api/admin/rewards/catalog') && (!init?.method || init.method === 'GET')
+      ? jsonOk({ items: [UPI_ITEM], pagination: { page: 1, limit: 200, total: 1, pages: 1 } })
+      : undefined;
+
+  it('GIF8: the item editor offers a SINGLE "Cash Payout" option (no separate UPI / Bank Transfer)', async () => {
+    installFetch();
+    render(<AdminGiftsPage />);
+    const addButtons = await screen.findAllByRole('button', { name: /add reward/i });
+    await userEvent.click(addButtons[addButtons.length - 1]);
+
+    const dialog = await screen.findByText('Add Reward', { selector: 'h2' });
+    const modal = dialog.closest('div.relative') as HTMLElement;
+    const scope = within(modal);
+
+    // Exactly one cash option, labelled "Cash Payout", whose stored value is BANK_TRANSFER.
+    const cash = scope.getByRole('option', { name: 'Cash Payout' }) as HTMLOptionElement;
+    expect(cash.value).toBe('BANK_TRANSFER');
+    // The two old split options are gone.
+    expect(scope.queryByRole('option', { name: /UPI/i })).toBeNull();
+    expect(scope.queryByRole('option', { name: /^Bank Transfer$/i })).toBeNull();
+  });
+
+  it('GIF9: editing a stored-UPI item shows "Cash Payout" selected and PATCHes BANK_TRANSFER', async () => {
+    const { calls } = installFetch(serveUpiItem);
+    render(<AdminGiftsPage />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /edit reward/i }));
+
+    const dialog = await screen.findByText('Edit Reward', { selector: 'h2' });
+    const modal = dialog.closest('div.relative') as HTMLElement;
+    const scope = within(modal);
+
+    // The dropdown shows the single "Cash Payout" option selected (UPI mapped to it).
+    const cashOption = scope.getByRole('option', { name: 'Cash Payout' }) as HTMLOptionElement;
+    const select = cashOption.closest('select') as HTMLSelectElement;
+    expect(select.value).toBe('BANK_TRANSFER');
+
+    // Re-saving persists the canonical BANK_TRANSFER, never the legacy UPI.
+    await userEvent.click(scope.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => {
+      const patch = calls.find(
+        (c) => c.url === '/api/admin/rewards/catalog/rc-upi' && c.init?.method === 'PATCH',
+      );
+      expect(patch).toBeTruthy();
+      expect(JSON.parse(String(patch!.init!.body)).redemptionMode).toBe('BANK_TRANSFER');
+    });
+  });
+
+  it('GIF10: the catalogue table renders "Cash Payout" for a stored-UPI item (not the raw enum)', async () => {
+    installFetch(serveUpiItem);
+    render(<AdminGiftsPage />);
+
+    expect(await screen.findByText('Instant Cash 1000')).toBeInTheDocument();
+    // Mode column shows the friendly label; the raw enum values never surface.
+    expect(await screen.findByText('Cash Payout')).toBeInTheDocument();
+    expect(screen.queryByText('UPI')).toBeNull();
+    expect(screen.queryByText('BANK_TRANSFER')).toBeNull();
+  });
 });

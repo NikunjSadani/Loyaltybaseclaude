@@ -454,7 +454,7 @@ describe('CASH — Cash Payout tab (real beneficiary, free-amount)', () => {
     render(<RewardsPage />);
     const user = userEvent.setup();
 
-    await user.click(await screen.findByRole('button', { name: /bank transfer/i }));
+    await user.click(await screen.findByRole('button', { name: /cash payout/i }));
 
     // Real beneficiary rendered, masked account — no fabricated literals anywhere.
     expect(await screen.findByText(/axis bank/i)).toBeInTheDocument();
@@ -472,7 +472,7 @@ describe('CASH — Cash Payout tab (real beneficiary, free-amount)', () => {
     render(<RewardsPage />);
     const user = userEvent.setup();
 
-    await user.click(await screen.findByRole('button', { name: /bank transfer/i }));
+    await user.click(await screen.findByRole('button', { name: /cash payout/i }));
     await user.click(await screen.findByRole('button', { name: /redeem for cash/i }));
 
     // The free-amount ₹ input is present, and the ₹-min (500 pts ÷ rate 1 = ₹500) is shown.
@@ -499,7 +499,7 @@ describe('CASH — Cash Payout tab (real beneficiary, free-amount)', () => {
 
     render(<RewardsPage />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: /bank transfer/i }));
+    await user.click(await screen.findByRole('button', { name: /cash payout/i }));
     await user.click(await screen.findByRole('button', { name: /redeem for cash/i }));
 
     await user.type(await screen.findByLabelText(/payout amount/i), '600');
@@ -522,7 +522,7 @@ describe('CASH — Cash Payout tab (real beneficiary, free-amount)', () => {
     render(<RewardsPage />);
     const user = userEvent.setup();
 
-    await user.click(await screen.findByRole('button', { name: /bank transfer/i }));
+    await user.click(await screen.findByRole('button', { name: /cash payout/i }));
 
     expect(await screen.findByText(/complete your bank\/upi details in kyc/i)).toBeInTheDocument();
     // No redeem CTA when there's no beneficiary.

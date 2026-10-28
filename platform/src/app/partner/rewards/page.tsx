@@ -1104,7 +1104,7 @@ export default function RewardsPage() {
     [
       { key: 'catalogue' as MainTab, label: 'Physical',      icon: Gift,     enabled: channels.physicalGifts },
       { key: 'vouchers'  as MainTab, label: 'Vouchers',      icon: Tag,      enabled: channels.vouchers      },
-      { key: 'bank'      as MainTab, label: 'Bank Transfer', icon: Banknote, enabled: channels.bankTransfer  },
+      { key: 'bank'      as MainTab, label: 'Cash Payout',   icon: Banknote, enabled: channels.bankTransfer  },
     ] as const
   ).filter(t => t.enabled);
 

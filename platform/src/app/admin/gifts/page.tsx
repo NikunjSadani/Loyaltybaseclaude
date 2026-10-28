@@ -37,6 +37,7 @@ import { authHeader } from '@/lib/api-client';
 import { GiftImageUpload } from '@/components/GiftImageUpload';
 import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings';
 import { useAdminSession } from '@/lib/admin-session';
+import { redemptionModeLabel, canonicalRedemptionMode } from '@/lib/redemption-mode';
 import type { GifsySettings } from '@/types';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
@@ -102,11 +103,15 @@ interface FulfilmentUploadResult {
 
 /* ─── Constants ──────────────────────────────────────────────────────────────── */
 
+// The two cash modes (UPI / BANK_TRANSFER) are unified into a single "Cash Payout"
+// option. The canonical STORED value is BANK_TRANSFER; existing stored-UPI items are
+// normalised to this option when editing (see ItemModal) and still behave as cash
+// (CASH_MODES / supportsFreeAmount recognise BOTH values). No enum/data migration —
+// the real payout rail follows the partner's on-file beneficiary (backend).
 const REDEMPTION_MODES: { value: PayoutMode; label: string }[] = [
   { value: 'GIFT_CARD',      label: 'Gift Card / Voucher' },
   { value: 'PHYSICAL_GIFT',  label: 'Physical Gift'       },
-  { value: 'UPI',            label: 'UPI (points → INR)'  },
-  { value: 'BANK_TRANSFER',  label: 'Bank Transfer'       },
+  { value: 'BANK_TRANSFER',  label: 'Cash Payout'         },
 ];
 
 /** Voucher denomination — derived from the FIXED vs FREE_AMOUNT convention. */
@@ -503,7 +508,10 @@ function ItemModal({
       name: editing.name,
       description: editing.description ?? '',
       imageUrls: Array.isArray(editing.imageUrls) ? editing.imageUrls : [],
-      redemptionMode: editing.redemptionMode,
+      // Collapse a stored-UPI cash item onto the canonical "Cash Payout" (BANK_TRANSFER)
+      // option so the single dropdown entry shows selected and a re-save persists
+      // BANK_TRANSFER. Still a cash mode → supportsFreeAmount / free-amount config intact.
+      redemptionMode: canonicalRedemptionMode(editing.redemptionMode) as PayoutMode,
       voucherMode: isFree ? 'FREE_AMOUNT' : 'FIXED',
       pointsCost: editing.pointsCost,
       mrpRupees: editing.mrpPaise != null ? String(editing.mrpPaise / 100) : '',
@@ -1077,7 +1085,7 @@ function CatalogueTab() {
                           {it.category?.name ?? '—'}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-xs text-gray-600">{it.redemptionMode}</td>
+                      <td className="px-4 py-3 text-xs text-gray-600">{redemptionModeLabel(it.redemptionMode)}</td>
                       <td className="px-4 py-3">
                         {isFree ? (
                           <span className="text-xs text-purple-600 font-semibold">
@@ -1199,7 +1207,7 @@ function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned:
         </td>
         <td className="px-4 py-3 text-gray-900">{order.reward?.name ?? '—'}</td>
         <td className="px-4 py-3 text-xs text-gray-600">{order.partner?.businessName ?? '—'}</td>
-        <td className="px-4 py-3 text-xs text-gray-600">{order.redemptionMode ?? '—'}</td>
+        <td className="px-4 py-3 text-xs text-gray-600">{redemptionModeLabel(order.redemptionMode)}</td>
         <td className="px-4 py-3 font-semibold text-gray-900">{fmtPts(order.totalPointsCost)}</td>
         <td className="px-4 py-3">
           <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full border ${ORDER_STATUS_BADGE[order.status] ?? ORDER_STATUS_BADGE.REVERSED}`}>
