@@ -9,7 +9,7 @@ import {
   Settings, Power, Globe, Plus, Trash2, Star, Image as ImageIcon, Upload, ExternalLink,
 } from 'lucide-react';
 import { validateTenantDomain, normalizeTenantDomain, TENANT_DOMAIN_SUFFIX, tenantSiteUrl } from '@/lib/platform/platform-admin';
-import type { ClientConfig, FeatureKey } from '@/lib/platform/client-config';
+import type { ClientConfig, FeatureKey, FeatureFlags } from '@/lib/platform/client-config';
 import { OutletTypeConfigSection } from '@/components/admin/outlet-type-config-section';
 import { getToken } from '@/lib/auth-client';
 
@@ -28,6 +28,7 @@ const FEATURE_META: Record<FeatureKey, { label: string; description: string }> =
   nonKycOutletCampaigns:    { label: 'Non-KYC Campaigns',   description: 'Campaigns can target outlets that have not completed KYC' },
   multiLevelApproval:       { label: 'Multi-Level Approval', description: 'Require two or more approval levels in hierarchy' },
   rbacEnforcement:          { label: 'RBAC Enforcement',     description: 'Enforce permission checks on admin routes for this tenant (requires RBAC_ENFORCEMENT env=true)' },
+  hubbleVoucherEnabled:     { label: 'Hubble Voucher Auto-Issue', description: 'Auto-issue the Amazon Pay voucher on a GIFT_CARD redemption (needs a Hubble productId on the item + Hubble credentials). Money path — leave OFF unless integrated.' },
 };
 
 const FEATURE_KEYS = Object.keys(FEATURE_META) as FeatureKey[];
@@ -157,6 +158,8 @@ interface ClientPatchBody {
   primaryColor?: string;
   supportEmail?: string;
   supportPhone?: string;
+  /** Feature-flag toggles — merged key-by-key into the tenant's features blob by the backend. */
+  features?: Partial<Record<FeatureKey, boolean>>;
 }
 
 /** Shape returned by the PATCH endpoint (subset we merge back into local config).
@@ -229,6 +232,14 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
           primaryColor: updated.primaryColor ?? patch.primaryColor ?? prev.branding.primaryColor,
           supportEmail: updated.supportEmail ?? patch.supportEmail ?? prev.branding.supportEmail,
           supportPhone: updated.supportPhone ?? patch.supportPhone ?? prev.branding.supportPhone,
+        },
+        // Feature toggles: start from prev, fold in the server's returned blob, then let the
+        // SUBMITTED patch win last — we know exactly which keys we just changed, so a partial
+        // server projection can never silently revert a toggle (undefined patch.features → no-op).
+        features: {
+          ...prev.features,
+          ...((updated.features ?? {}) as Partial<FeatureFlags>),
+          ...((patch.features ?? {}) as Partial<FeatureFlags>),
         },
       }));
       flashSaved();
@@ -448,7 +459,7 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
       </Section>
 
       <Section icon={Shield} title="Feature Flags" defaultOpen>
-        <FeatureFlagsSection config={config} />
+        <FeatureFlagsSection config={config} onSave={saveClient} saving={saving} />
       </Section>
 
       <Section icon={Users} title="Partner Classes">
@@ -554,7 +565,7 @@ function ClientSettingsSection({
   error: string | null;
   onSave: (patch: ClientPatchBody) => Promise<boolean>;
 }) {
-  const [draft, setDraft] = useState<Required<ClientPatchBody>>({
+  const [draft, setDraft] = useState<Required<Omit<ClientPatchBody, 'features'>>>({
     status:        config.status,
     internalName:  config.internalName,
     displayName:   config.branding.displayName,
@@ -988,41 +999,78 @@ function AssetSlot({
 // Feature flags section
 // ─────────────────────────────────────────────────────────────────────────────
 
-// READ-ONLY (informational). Real feature-flag wiring is a separate task (D-1 #159);
-// this card shows the current flags without a persist path so it can't flash a fake
-// "Saved" over a write the runtime never reads.
+// EDITABLE (D-1 #159). Each flag is a live toggle persisted via PATCH /api/gifsy/clients/:slug
+// (GIFSY_ADMIN + tenancy:write). The backend MERGES one key at a time (never drops the others),
+// and the parent folds the server's authoritative features blob back into local state — so the
+// switch reflects only a write the runtime actually reads. A failed save leaves the switch as-is
+// (parent state unchanged) and surfaces via the page-level error banner.
 function FeatureFlagsSection({
   config,
+  onSave,
+  saving,
 }: {
   config: ClientConfig;
+  onSave: (patch: ClientPatchBody) => Promise<boolean>;
+  saving: boolean;
 }) {
+  const [pendingKey, setPendingKey] = useState<FeatureKey | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const toggle = async (key: FeatureKey, next: boolean) => {
+    if (saving) return;
+    setPendingKey(key);
+    setError(null);
+    try {
+      const ok = await onSave({ features: { [key]: next } });
+      if (!ok) setError(`Couldn't update "${FEATURE_META[key].label}". Nothing was changed — please try again.`);
+    } finally {
+      setPendingKey(null);
+    }
+  };
+
   return (
     <div className="pt-2 space-y-2">
       {FEATURE_KEYS.map((key) => {
-        const enabled = !!(config.features as unknown as Record<string, boolean>)[key];
-        const meta    = FEATURE_META[key];
+        const enabled   = !!(config.features as unknown as Record<string, boolean>)[key];
+        const meta      = FEATURE_META[key];
+        const isPending = pendingKey === key;
         return (
           <div key={key} className="flex items-center gap-4 px-4 py-3 rounded-xl bg-white/5 border border-white/5">
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-white">{meta.label}</p>
               <p className="text-xs text-white/40 mt-0.5">{meta.description}</p>
             </div>
-            <span
-              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border shrink-0 ${
-                enabled
-                  ? 'bg-green-500/15 border-green-500/30 text-green-400'
-                  : 'bg-white/5 border-white/10 text-white/40'
+            {isPending && <span className="text-xs text-white/40 shrink-0">Saving…</span>}
+            <button
+              type="button"
+              role="switch"
+              aria-checked={enabled}
+              aria-label={`${enabled ? 'Disable' : 'Enable'} ${meta.label}`}
+              aria-busy={isPending}
+              disabled={saving}
+              onClick={() => toggle(key, !enabled)}
+              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                enabled ? 'bg-green-500/80' : 'bg-white/15'
               }`}
             >
-              {enabled ? <CheckCircle className="w-3 h-3" /> : <X className="w-3 h-3" />}
-              {enabled ? 'On' : 'Off'}
-            </span>
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  enabled ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
           </div>
         );
       })}
 
+      {error && (
+        <p data-testid="feature-flags-error" role="alert" className="text-xs text-red-400 pt-1 px-1">
+          {error}
+        </p>
+      )}
+
       <p className="text-xs text-white/30 pt-1 px-1">
-        Feature changes are applied via runtime tenant config (coming soon).
+        Changes save immediately and apply to this tenant only. Other tenants are unaffected.
       </p>
     </div>
   );

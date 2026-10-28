@@ -41,6 +41,10 @@ export interface FeatureFlags {
   // Gate for RBAC route enforcement — see lib/rbac/require-permission.ts;
   // only active when env RBAC_ENFORCEMENT=true (the global master switch).
   rbacEnforcement: boolean;
+  // Hubble Money auto-issuance: when ON, a confirmed GIFT_CARD redemption whose catalogue
+  // item carries a Hubble productId auto-issues the Amazon Pay voucher (Bajaj-only). This IS
+  // a gifsy-console toggle (included in FeatureKey). Default OFF; Deoleo stays OFF.
+  hubbleVoucherEnabled: boolean;
 
   // Partner app tab visibility (CLIENT_ADMIN cannot change these)
   partnerApp: {

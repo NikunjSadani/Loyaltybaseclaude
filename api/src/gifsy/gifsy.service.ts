@@ -597,12 +597,21 @@ export class GifsyService {
       supportPhone: branding.supportPhone,
       invoicePrefix: branding.invoicePrefix,
       productBrands: branding.productBrands,
+      // Full, coerced console feature set — mirrors getClientDetail so the operator
+      // console shows the same flags a reload would. A partial projection silently
+      // reverts the un-echoed switches (incl. the Hubble money-path flag) until reload.
       features: {
-        visibilityInvoiceModule: features.visibilityInvoiceModule,
-        kycApprovalFlow: features.kycApprovalFlow,
-        walletModule: features.walletModule,
-        salesTeamApp: features.salesTeamApp,
-        referralModule: features.referralModule,
+        visibilityInvoiceModule: !!features.visibilityInvoiceModule,
+        kycApprovalFlow: !!features.kycApprovalFlow,
+        campaignEnrollmentForm: !!features.campaignEnrollmentForm,
+        salesTeamApp: !!features.salesTeamApp,
+        walletModule: !!features.walletModule,
+        referralModule: !!features.referralModule,
+        selfEnrollmentAllowed: !!features.selfEnrollmentAllowed,
+        nonKycOutletCampaigns: !!features.nonKycOutletCampaigns,
+        multiLevelApproval: !!features.multiLevelApproval,
+        rbacEnforcement: !!features.rbacEnforcement,
+        hubbleVoucherEnabled: !!features.hubbleVoucherEnabled,
       },
     };
   }
@@ -729,12 +738,21 @@ export class GifsyService {
       supportPhone: branding.supportPhone,
       invoicePrefix: branding.invoicePrefix,
       productBrands: branding.productBrands,
+      // Full, coerced console feature set — mirrors getClientDetail so the operator
+      // console shows the same flags a reload would. A partial projection silently
+      // reverts the un-echoed switches (incl. the Hubble money-path flag) until reload.
       features: {
-        visibilityInvoiceModule: features.visibilityInvoiceModule,
-        kycApprovalFlow: features.kycApprovalFlow,
-        walletModule: features.walletModule,
-        salesTeamApp: features.salesTeamApp,
-        referralModule: features.referralModule,
+        visibilityInvoiceModule: !!features.visibilityInvoiceModule,
+        kycApprovalFlow: !!features.kycApprovalFlow,
+        campaignEnrollmentForm: !!features.campaignEnrollmentForm,
+        salesTeamApp: !!features.salesTeamApp,
+        walletModule: !!features.walletModule,
+        referralModule: !!features.referralModule,
+        selfEnrollmentAllowed: !!features.selfEnrollmentAllowed,
+        nonKycOutletCampaigns: !!features.nonKycOutletCampaigns,
+        multiLevelApproval: !!features.multiLevelApproval,
+        rbacEnforcement: !!features.rbacEnforcement,
+        hubbleVoucherEnabled: !!features.hubbleVoucherEnabled,
       },
     };
   }
@@ -982,6 +1000,7 @@ export class GifsyService {
         nonKycOutletCampaigns: !!features.nonKycOutletCampaigns,
         multiLevelApproval: !!features.multiLevelApproval,
         rbacEnforcement: !!features.rbacEnforcement,
+        hubbleVoucherEnabled: !!features.hubbleVoucherEnabled,
         partnerApp: {
           showSchemes: partnerApp.showSchemes !== false,
           showInvoices: !!partnerApp.showInvoices,

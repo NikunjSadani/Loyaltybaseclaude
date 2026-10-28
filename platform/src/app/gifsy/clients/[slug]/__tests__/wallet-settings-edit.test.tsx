@@ -35,7 +35,7 @@ const CONFIG = {
     visibilityInvoiceModule: false, kycApprovalFlow: true, campaignEnrollmentForm: false,
     salesTeamApp: false, walletModule: false, referralModule: false,
     selfEnrollmentAllowed: false, nonKycOutletCampaigns: false, multiLevelApproval: false,
-    rbacEnforcement: false,
+    rbacEnforcement: false, hubbleVoucherEnabled: false,
     partnerApp: { showSchemes: true, showInvoices: false, showWallet: false, showTeam: false, showLeaderboard: false },
   },
   partnerClasses: [],

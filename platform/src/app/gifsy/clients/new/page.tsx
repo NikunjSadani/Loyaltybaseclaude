@@ -44,6 +44,7 @@ const DEFAULT_FEATURES: Record<FeatureKey, boolean> = {
   nonKycOutletCampaigns:   false,
   multiLevelApproval:      true,
   rbacEnforcement:         false,
+  hubbleVoucherEnabled:    false,
 };
 
 const FEATURE_META: Record<FeatureKey, { label: string; description: string }> = {
@@ -57,6 +58,7 @@ const FEATURE_META: Record<FeatureKey, { label: string; description: string }> =
   nonKycOutletCampaigns:    { label: 'Non-KYC Campaigns',   description: 'Campaigns can target non-KYC outlets' },
   multiLevelApproval:       { label: 'Multi-Level Approval', description: 'Require two or more approval levels' },
   rbacEnforcement:          { label: 'RBAC Enforcement',     description: 'Enforce permission checks on admin routes (requires RBAC_ENFORCEMENT env=true)' },
+  hubbleVoucherEnabled:     { label: 'Hubble Voucher Auto-Issue', description: 'Auto-issue Amazon Pay vouchers on GIFT_CARD redemptions (needs Hubble setup). Leave OFF unless integrated.' },
 };
 
 const STEPS: { key: Step; label: string }[] = [

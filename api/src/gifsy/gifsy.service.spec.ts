@@ -322,6 +322,26 @@ describe('GifsyService', () => {
       expect(written).toEqual({ walletModule: true, kycApprovalFlow: true, salesTeamApp: true });
     });
 
+    it('RETURN projection echoes the toggled console flag incl. the Hubble money-path key', async () => {
+      // Regression: the PATCH return previously projected only 5 feature keys, so the operator
+      // console silently reverted the un-echoed switches (incl. hubbleVoucherEnabled) in-session.
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: {},
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: data.features,
+      }));
+
+      const res = await service.updateClient(gifsy, 'bajaj', { features: { hubbleVoucherEnabled: true } });
+      const feats = res.features as Record<string, boolean>;
+      expect(feats.hubbleVoucherEnabled).toBe(true);
+      // Full console set is present (coerced), not a partial projection.
+      expect(feats.rbacEnforcement).toBe(false);
+      expect(feats.campaignEnrollmentForm).toBe(false);
+    });
+
     it('F1: deep-merges the nested features.partnerApp so a partial PATCH keeps sibling flags', async () => {
       mockPrisma.client.findFirst.mockResolvedValue({
         id: 'deoleo',

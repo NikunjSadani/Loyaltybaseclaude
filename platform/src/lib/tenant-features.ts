@@ -59,6 +59,7 @@ export function normalizeFeatures(raw: unknown): FeatureFlags {
     nonKycOutletCampaigns:   bool(f.nonKycOutletCampaigns,   d.nonKycOutletCampaigns),
     multiLevelApproval:      bool(f.multiLevelApproval,      d.multiLevelApproval),
     rbacEnforcement:         bool(f.rbacEnforcement,         d.rbacEnforcement),
+    hubbleVoucherEnabled:    bool(f.hubbleVoucherEnabled,    d.hubbleVoucherEnabled),
     partnerApp: {
       showSchemes:     bool(pa.showSchemes,     d.partnerApp.showSchemes),
       showInvoices:    bool(pa.showInvoices,    d.partnerApp.showInvoices),

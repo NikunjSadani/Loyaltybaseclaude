@@ -47,6 +47,7 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     nonKycOutletCampaigns: false,
     multiLevelApproval: false,
     rbacEnforcement: false,
+    hubbleVoucherEnabled: false,
     partnerApp: {
       showSchemes: true,
       showInvoices: false,
