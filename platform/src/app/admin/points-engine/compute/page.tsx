@@ -15,7 +15,7 @@
  * Reads only the scaffolded api module; ApiResponse unwrapped on every call. No new deps.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import {
   AlertTriangle,
@@ -45,6 +45,8 @@ import type {
   ComputePreviewRow,
   PreviewRowStatus,
 } from '@/lib/points-engine/types';
+import { SearchableSelect } from '@/components/ui/searchable-select';
+import { useGifsySettings } from '@/lib/gifsy-settings';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -262,6 +264,32 @@ export default function PointsComputePage() {
   const [program, setProgram] = useState('');
   const [kpiCode, setKpiCode] = useState('');
 
+  // ── Filter dropdown options (searchable) — same sources the rule builder's Attachment uses, so the
+  //    operator picks from the tenant's real configured programs / KPI catalogue instead of free-typing
+  //    (a typo like `unnati` ≠ `Unnati` silently matched nothing before). Blank = no filter (unchanged). ──
+  const settings = useGifsySettings();
+  const programOptions = settings.outletPrograms ?? [];
+  const [kpiCodes, setKpiCodes] = useState<string[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch('/api/admin/kpis');
+        const json = await res.json();
+        if (!cancelled && json?.success && Array.isArray(json.data)) {
+          setKpiCodes(
+            (json.data as Array<{ code: string; enabled?: boolean }>)
+              .filter((k) => k.enabled !== false)
+              .map((k) => k.code),
+          );
+        }
+      } catch {
+        /* leave empty — the KPI filter falls back to "no options" (operator can clear to run all) */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   // PREVIEW
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -465,29 +493,31 @@ export default function PointsComputePage() {
             />
           </div>
           <div>
-            <label htmlFor="pe-program" className="mb-1 block text-xs font-semibold text-gray-500">
+            <label className="mb-1 block text-xs font-semibold text-gray-500">
               Program <span className="font-normal text-gray-400">(optional)</span>
             </label>
-            <input
-              id="pe-program"
-              type="text"
+            <SearchableSelect
               value={program}
-              onChange={(e) => setProgram(e.target.value)}
-              placeholder="All programs"
+              options={programOptions}
+              placeholder="(any)"
+              aria-label="Program"
+              testIdPrefix="pe-program"
               className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-[var(--brand-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20"
+              onChange={setProgram}
             />
           </div>
           <div>
-            <label htmlFor="pe-kpi" className="mb-1 block text-xs font-semibold text-gray-500">
+            <label className="mb-1 block text-xs font-semibold text-gray-500">
               KPI code <span className="font-normal text-gray-400">(optional)</span>
             </label>
-            <input
-              id="pe-kpi"
-              type="text"
+            <SearchableSelect
               value={kpiCode}
-              onChange={(e) => setKpiCode(e.target.value.toUpperCase())}
-              placeholder="All KPIs"
+              options={kpiCodes}
+              placeholder="(any)"
+              aria-label="KPI code"
+              testIdPrefix="pe-kpi"
               className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-[var(--brand-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20"
+              onChange={setKpiCode}
             />
           </div>
         </div>

@@ -6,11 +6,13 @@
  *  - PE-C3: the direct-credit block is hidden when the preview has no OK rows.
  *  - PE-C4: clicking "Credit in portal" calls commitCompute and renders the returned
  *           batchCode + the "review & confirm in Credits & Payouts" link.
+ *  - PE-C11..C13: the Program + KPI filters are searchable dropdowns (options from
+ *           outletPrograms + /api/admin/kpis); a selection drives the preview param; empty = no filter.
  */
 
 import React from 'react';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import ComputePage from '../page';
 import {
   previewCompute,
@@ -34,6 +36,11 @@ vi.mock('next/link', () => ({
   default: ({ href, children }: { href: string; children: React.ReactNode }) => (
     <a href={typeof href === 'string' ? href : '#'}>{children}</a>
   ),
+}));
+
+// Program options come from the tenant's configured programs (same source as the rule builder).
+vi.mock('@/lib/gifsy-settings', () => ({
+  useGifsySettings: () => ({ outletPrograms: ['BSC', 'Unnati', 'SAMT'] }),
 }));
 
 const previewMock = previewCompute as unknown as ReturnType<typeof vi.fn>;
@@ -89,6 +96,17 @@ const COMMIT_RESULT: ComputeCommitResult = {
   priorBatchesThisPeriod: 0,
 };
 
+// KPI options are fetched from GET /api/admin/kpis (same source as the rule builder); one disabled KPI
+// is included to prove `enabled === false` codes are filtered out.
+const KPI_RESPONSE = {
+  success: true,
+  data: [
+    { code: 'CASES_SOLD', enabled: true },
+    { code: 'LITRES_SOLD', enabled: true },
+    { code: 'DISABLED_KPI', enabled: false },
+  ],
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   previewMock.mockResolvedValue({ success: true, data: makePreview() });
@@ -96,6 +114,20 @@ beforeEach(() => {
   exportMock.mockResolvedValue(null);
   reportMock.mockResolvedValue(null);
   payoutReportMock.mockResolvedValue(null);
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) => ({
+      ok: true,
+      json: async () =>
+        typeof url === 'string' && url.includes('/api/admin/kpis')
+          ? KPI_RESPONSE
+          : { success: true, data: [] },
+    })) as unknown as typeof fetch,
+  );
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 // A preview that mixes a POINTS OK row, a PAYOUT OK row, and (optionally) nothing else.
@@ -332,5 +364,56 @@ describe('Points Engine compute page', () => {
     expect(screen.queryByRole('button', { name: /credit in portal/i })).not.toBeInTheDocument();
     // The payout report is still available.
     expect(screen.getByRole('button', { name: /download payout report/i })).toBeInTheDocument();
+  });
+
+  it('PE-C11: the Program filter is a searchable dropdown listing the tenant\'s configured programs', async () => {
+    render(<ComputePage />);
+    // The free-text input is gone; the searchable combobox input is present.
+    const programInput = screen.getByTestId('pe-program-input');
+    expect(programInput).toHaveAttribute('role', 'combobox');
+
+    // Open the list → the configured programs (from outletPrograms) are the options.
+    fireEvent.click(programInput);
+    expect(await screen.findByTestId('pe-program-option-Unnati')).toBeInTheDocument();
+    expect(screen.getByTestId('pe-program-option-BSC')).toBeInTheDocument();
+    expect(screen.getByTestId('pe-program-option-SAMT')).toBeInTheDocument();
+  });
+
+  it('PE-C12: the KPI filter dropdown lists the enabled codes from /api/admin/kpis and omits disabled ones', async () => {
+    render(<ComputePage />);
+    // Wait for the KPI fetch to populate options.
+    const kpiInput = screen.getByTestId('pe-kpi-input');
+    expect(kpiInput).toHaveAttribute('role', 'combobox');
+    fireEvent.click(kpiInput);
+
+    expect(await screen.findByTestId('pe-kpi-option-CASES_SOLD')).toBeInTheDocument();
+    expect(screen.getByTestId('pe-kpi-option-LITRES_SOLD')).toBeInTheDocument();
+    // enabled:false is filtered out (parity with the rule builder).
+    expect(screen.queryByTestId('pe-kpi-option-DISABLED_KPI')).not.toBeInTheDocument();
+  });
+
+  it('PE-C13: selecting a Program + KPI drives the preview request params', async () => {
+    render(<ComputePage />);
+
+    // Pick a program from the dropdown.
+    fireEvent.click(screen.getByTestId('pe-program-input'));
+    fireEvent.mouseDown(await screen.findByTestId('pe-program-option-Unnati'));
+
+    // Pick a KPI from the dropdown.
+    fireEvent.click(screen.getByTestId('pe-kpi-input'));
+    fireEvent.mouseDown(await screen.findByTestId('pe-kpi-option-LITRES_SOLD'));
+
+    await runPreview();
+    expect(previewMock).toHaveBeenCalledWith(
+      expect.objectContaining({ program: 'Unnati', kpiCode: 'LITRES_SOLD' }),
+    );
+  });
+
+  it('PE-C14: leaving both filters empty previews with no program/KPI filter (null)', async () => {
+    render(<ComputePage />);
+    await runPreview();
+    expect(previewMock).toHaveBeenCalledWith(
+      expect.objectContaining({ program: null, kpiCode: null }),
+    );
   });
 });
