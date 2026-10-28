@@ -529,3 +529,66 @@ describe('CASH — Cash Payout tab (real beneficiary, free-amount)', () => {
     expect(screen.queryByRole('button', { name: /redeem for cash/i })).not.toBeInTheDocument();
   });
 });
+
+/* ════════════════════════════════════════════════════════════════════════════
+   FA — FREE_AMOUNT catalogue cards never print the misleading raw "0 pts"
+   ════════════════════════════════════════════════════════════════════════════
+
+   FREE_AMOUNT vouchers store pointsCost 0 by design (the redeemer enters a ₹
+   amount, points are computed at the conversion rate). The grid card must show
+   "You set the amount" for these — never "0 pts" (nor the old "Custom"). FIXED
+   vouchers keep showing "{points} pts" pixel-identically.                        */
+
+// A FREE_AMOUNT voucher: pointsCost 0 + a redemption band → inferVoucherType → FREE_AMOUNT,
+// lands in the Vouchers tab (GIFT_CARD mode).
+const FREE_AMOUNT_VOUCHER = {
+  id: 'fa1',
+  name: 'Flexi Voucher',
+  brand: 'Flipkart',
+  category: 'Vouchers',
+  pointsCost: 0,
+  description: 'Choose your own value',
+  redemptionMode: 'GIFT_CARD',
+  voucherType: 'FREE_AMOUNT',
+  minRedemptionPoints: 250,
+  maxRedemptionPoints: 10_000,
+  available: true,
+  isAffordable: true,
+};
+
+describe('FA — FREE_AMOUNT cards show "You set the amount", FIXED show "{points} pts"', () => {
+  it('FA1: a FREE_AMOUNT voucher card shows "You set the amount" and never "0 pts"/"Custom"', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWith([FREE_AMOUNT_VOUCHER]));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    }));
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: /vouchers/i }));
+
+    // Scope the assertions to this item's card so an unrelated "… pts" (e.g. the
+    // balance pill) can never satisfy them.
+    const card = (await screen.findByText('Flexi Voucher')).closest('[role="button"]');
+    expect(card).not.toBeNull();
+    expect(card).toHaveTextContent('You set the amount');
+    expect(card).not.toHaveTextContent(/0 pts/);      // the misleading raw-zero display
+    expect(card).not.toHaveTextContent('Custom');     // the superseded label
+  });
+
+  it('FA2: a FIXED voucher card still shows "{points} pts" (unchanged)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWith([FIXED_VOUCHER]));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    }));
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: /vouchers/i }));
+
+    const card = (await screen.findByText('Amazon Voucher ₹500')).closest('[role="button"]');
+    expect(card).not.toBeNull();
+    expect(card).toHaveTextContent('500 pts');
+    expect(card).not.toHaveTextContent('You set the amount');
+  });
+});

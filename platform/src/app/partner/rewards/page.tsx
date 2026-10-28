@@ -184,6 +184,19 @@ function deliveryLabel(category: string): string {
 
 function fmtInr(n: number) { return `₹${n.toLocaleString('en-IN')}`; }
 
+/**
+ * A FREE_AMOUNT (variable) item: pointsCost 0 with a redemption band (min and/or max set) —
+ * the redeemer supplies a ₹ amount and points are computed at the tenant conversion rate.
+ * Mirrors `inferVoucherType` (line ~134) and the backend predicate. Used purely to avoid
+ * printing the raw `0` as "0 pts" (misleading for free-amount vouchers / cash). FIXED items
+ * (pointsCost > 0) are never free-amount, so their display is untouched.
+ */
+function isFreeAmount(
+  item: Pick<CatalogueItem, 'points' | 'minRedemptionPoints' | 'maxRedemptionPoints'>,
+): boolean {
+  return item.points === 0 && (item.minRedemptionPoints != null || item.maxRedemptionPoints != null);
+}
+
 /* ─── Real redeem flow (POST /api/rewards/redeem → OTP → confirm) ──────────────
    Shared by the gift + voucher sheets. Returns the message to surface, or null
    on success. The {success,data}/{success,error} envelope is unwrapped by the
@@ -1320,8 +1333,8 @@ export default function RewardsPage() {
                       <p className="text-xs text-gray-400 mb-0.5">{gift.brand}</p>
                       <p className="text-xs font-semibold text-gray-900 leading-snug line-clamp-2 flex-1">{gift.name}</p>
                       <div className="mt-2 pt-2 border-t border-gray-50 flex items-center justify-between">
-                        {gift.voucherType === 'FREE_AMOUNT' ? (
-                          <span className="text-sm font-bold text-blue-600">Custom</span>
+                        {isFreeAmount(gift) ? (
+                          <span className="text-sm font-bold text-[var(--brand-primary)]">You set the amount</span>
                         ) : (
                           <span className={`text-sm font-bold ${canAfford ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`}>
                             {formatPoints(gift.points)} pts
