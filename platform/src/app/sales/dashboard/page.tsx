@@ -89,7 +89,7 @@ interface SalesTargets {
 }
 
 /** Real target vs achievement, summed across the rep's outlets (GET /api/sales/targets). */
-function TargetSummaryCard({ targets }: { targets: SalesTargets }) {
+function TargetSummaryCard({ targets, role }: { targets: SalesTargets; role: SalesRole }) {
   const kpis = targets.kpis;
   const withTarget = kpis.filter((k) => k.target > 0);
 
@@ -123,7 +123,7 @@ function TargetSummaryCard({ targets }: { targets: SalesTargets }) {
     : buildCasesToGoMsg(primaryLeft, primaryKpi ? kpiUnitLabel(primaryKpi) : '', daysLeft);
 
   return (
-    <Link href="/sales/outlets" className="block">
+    <Link href={hasTeamView(role) ? '/sales/team' : '/sales/outlets'} className="block">
       <Card className="border-[var(--brand-primary)]/20 cursor-pointer hover:border-[var(--brand-primary)]/40 transition-colors">
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between gap-2">
@@ -183,7 +183,7 @@ function TargetSummaryCard({ targets }: { targets: SalesTargets }) {
               )}
 
               <div className="flex items-center justify-center gap-1 text-xs font-semibold text-[var(--brand-primary)] pt-1">
-                View full outlet KPIs <ChevronRight className="h-3.5 w-3.5" />
+                {hasTeamView(role) ? 'View team' : 'View full outlet KPIs'} <ChevronRight className="h-3.5 w-3.5" />
               </div>
             </>
           )}
@@ -972,7 +972,7 @@ export default function SalesDashboard() {
                 })}
               </div>
 
-              {salesTargets && <TargetSummaryCard targets={salesTargets} />}
+              {salesTargets && <TargetSummaryCard targets={salesTargets} role={role} />}
 
               {/* Trade comparison — SO-and-above only (hasTeamView); directly below Target Achievement. */}
               {hasTeamView(role) && <TradeComparisonCard outletType={outletType} />}
@@ -987,7 +987,7 @@ export default function SalesDashboard() {
             <>
               {/* ── Target Achievement (real /api/sales/targets) ── */}
               {salesTargets && (
-                <TargetSummaryCard targets={salesTargets} />
+                <TargetSummaryCard targets={salesTargets} role={role} />
               )}
 
               {/* ── Visibility summary — 5-status, current month (Bajaj only) ── */}
