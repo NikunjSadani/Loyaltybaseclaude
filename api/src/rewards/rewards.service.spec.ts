@@ -475,11 +475,13 @@ describe('RewardsService', () => {
       expect(mockPrisma.rewardCatalog.create).toHaveBeenCalled();
     });
 
-    it('accepts a FIXED (pointsCost > 0) item with no bounds', async () => {
+    it('accepts a FIXED item (selling value, no bounds) — pointsCost is DERIVED', async () => {
+      // Pure derive: no manual pointsCost; a selling value is the price driver (rate 1 → 500 pts).
       await expect(
-        service.createCatalogItem(gifsy, { ...baseDto, pointsCost: 500 } as never),
+        service.createCatalogItem(gifsy, { ...baseDto, sellingValuePaise: 50000 } as never),
       ).resolves.toEqual({ item: { id: 'r-new' } });
-      expect(mockPrisma.rewardCatalog.create).toHaveBeenCalled();
+      const call = mockPrisma.rewardCatalog.create.mock.calls?.[0]?.[0];
+      expect(call.data.pointsCost).toBe(500);
     });
   });
 
@@ -508,12 +510,18 @@ describe('RewardsService', () => {
     });
 
     it('clears stale min/max when converting a free-amount voucher to FIXED', async () => {
+      // Pure derive: convert FREE→FIXED by clearing the band AND setting a selling value;
+      // pointsCost is DERIVED from it (rate 1 → ₹500 → 500 pts), not sent manually.
       mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
         id: 'r1', clientId: 'deoleo', deletedAt: null,
         pointsCost: 0, minRedemptionPoints: 250, maxRedemptionPoints: 5000, stockQuantity: null,
       });
       mockPrisma.rewardCatalog.update.mockResolvedValue({ id: 'r1' });
-      await service.updateCatalogItem(gifsy, 'r1', { pointsCost: 500 } as never);
+      await service.updateCatalogItem(gifsy, 'r1', {
+        minRedemptionPoints: null,
+        maxRedemptionPoints: null,
+        sellingValuePaise: 50000,
+      } as never);
       expect(mockPrisma.rewardCatalog.update).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
@@ -2401,11 +2409,13 @@ describe('RewardsService', () => {
   });
 
   describe('createCatalogItem', () => {
+    // Pure derive: a FIXED item carries a ₹ selling value (the price driver); pointsCost is
+    // DERIVED server-side (rate 1 default → 50000 paise = ₹500 → 500 pts). No manual pointsCost.
     const base = {
       categoryId: 'c1',
       code: 'AMZ500',
       name: 'Amazon ₹500',
-      pointsCost: 500,
+      sellingValuePaise: 50000,
       redemptionMode: 'GIFT_CARD' as const,
     };
 
@@ -2422,7 +2432,6 @@ describe('RewardsService', () => {
       await expect(
         service.createCatalogItem(gifsy, {
           ...base,
-          pointsCost: 0,
           minRedemptionPoints: 1000,
           maxRedemptionPoints: 500,
         }),
@@ -2468,6 +2477,123 @@ describe('RewardsService', () => {
     });
   });
 
+  describe('catalog pointsCost — PURE DERIVE (selling value × conversion rate)', () => {
+    const fixedBase = {
+      categoryId: 'c1',
+      code: 'FX-1',
+      name: 'Fixed reward',
+      redemptionMode: 'GIFT_CARD' as const,
+    };
+
+    beforeEach(() => {
+      mockPrisma.rewardCategory.findFirst.mockResolvedValue({ id: 'c1' });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null); // no code clash
+      mockPrisma.rewardCatalog.create.mockResolvedValue({ id: 'r-new' });
+      mockPrisma.rewardCatalog.update.mockResolvedValue({ id: 'r1' });
+    });
+
+    it('CREATE FIXED: derives pointsCost = round(sellingValue/100 × rate)', async () => {
+      mockSettings.conversionRate = 2; // 2 points per ₹
+      await service.createCatalogItem(gifsy, { ...fixedBase, sellingValuePaise: 50000 } as never);
+      const call = mockPrisma.rewardCatalog.create.mock.calls?.[0]?.[0];
+      expect(call.data.pointsCost).toBe(1000); // ₹500 × 2
+      expect(call.data.sellingValuePaise).toBe(50000);
+    });
+
+    it('CREATE FIXED: rounds to the nearest point', async () => {
+      mockSettings.conversionRate = 1.5;
+      await service.createCatalogItem(gifsy, { ...fixedBase, sellingValuePaise: 33300 } as never);
+      const call = mockPrisma.rewardCatalog.create.mock.calls?.[0]?.[0];
+      expect(call.data.pointsCost).toBe(500); // round(333 × 1.5 = 499.5) = 500
+    });
+
+    it('CREATE FIXED: a missing selling value is rejected (400 — selling value is the price driver)', async () => {
+      await expect(
+        service.createCatalogItem(gifsy, { ...fixedBase } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.rewardCatalog.create).not.toHaveBeenCalled();
+    });
+
+    it('CREATE FIXED: a derived-0 pointsCost (rate unset/0) is rejected', async () => {
+      mockSettings.conversionRate = 0; // rate not configured
+      await expect(
+        service.createCatalogItem(gifsy, { ...fixedBase, sellingValuePaise: 50000 } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.rewardCatalog.create).not.toHaveBeenCalled();
+    });
+
+    it('CREATE FREE_AMOUNT: pointsCost stays 0 + band; no selling value required; derive does NOT apply', async () => {
+      mockSettings.conversionRate = 2;
+      await service.createCatalogItem(gifsy, {
+        ...fixedBase,
+        minRedemptionPoints: 100,
+        maxRedemptionPoints: 5000,
+      } as never);
+      const call = mockPrisma.rewardCatalog.create.mock.calls?.[0]?.[0];
+      expect(call.data.pointsCost).toBe(0);
+      expect(call.data.minRedemptionPoints).toBe(100);
+      expect(call.data.maxRedemptionPoints).toBe(5000);
+    });
+
+    it('UPDATE FIXED: keeps the stored pointsCost when no selling value is present (transition safety)', async () => {
+      mockSettings.conversionRate = 2; // would derive differently IF a selling value existed
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        id: 'r1', code: 'FX-1', stockQuantity: null, pointsCost: 777, sellingValuePaise: null,
+        minRedemptionPoints: null, maxRedemptionPoints: null,
+      });
+      await service.updateCatalogItem(gifsy, 'r1', { name: 'Renamed' } as never);
+      const call = mockPrisma.rewardCatalog.update.mock.calls?.[0]?.[0];
+      expect(call.data.pointsCost).toBe(777); // kept, NOT re-derived (no selling value to price from)
+    });
+
+    it('UPDATE FIXED: re-derives when a selling value is provided', async () => {
+      mockSettings.conversionRate = 2;
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        id: 'r1', code: 'FX-1', stockQuantity: null, pointsCost: 777, sellingValuePaise: null,
+        minRedemptionPoints: null, maxRedemptionPoints: null,
+      });
+      await service.updateCatalogItem(gifsy, 'r1', { sellingValuePaise: 60000 } as never);
+      const call = mockPrisma.rewardCatalog.update.mock.calls?.[0]?.[0];
+      expect(call.data.pointsCost).toBe(1200); // ₹600 × 2
+      expect(call.data.sellingValuePaise).toBe(60000);
+    });
+
+    it('FINDING 1: a benign edit does NOT re-price a FIXED item even with a STORED selling value', async () => {
+      // Money audit: an unrelated edit must never silently re-derive from the stored selling
+      // value at the current rate. Stored pointsCost must survive a name-only PATCH unchanged.
+      mockSettings.conversionRate = 3; // would derive 600 from the stored ₹200 IF it re-priced
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        id: 'r1', code: 'FX-1', stockQuantity: null, pointsCost: 100, sellingValuePaise: 20000,
+        minRedemptionPoints: null, maxRedemptionPoints: null,
+      });
+      await service.updateCatalogItem(gifsy, 'r1', { name: 'Renamed' } as never);
+      const call = mockPrisma.rewardCatalog.update.mock.calls?.[0]?.[0];
+      expect(call.data.pointsCost).toBe(100); // UNCHANGED — no silent re-price
+      // The rate is not even read for an edit that doesn't change the selling value.
+      expect(mockTenantSettings.getConversionRate).not.toHaveBeenCalled();
+    });
+
+    it('FINDING 2: a benign edit is NOT locked out by a 0/unset rate when a selling value is stored', async () => {
+      // Money audit (worse): once a FIXED item has a stored selling value, every PATCH used to
+      // re-derive → derived < 1 at rate 0 → 400, making the item un-editable (can't deactivate).
+      // Now a PATCH without a new selling value keeps the stored pointsCost and never reads the rate.
+      mockSettings.conversionRate = 0; // rate not configured
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        id: 'r1', code: 'FX-1', stockQuantity: 5, pointsCost: 500, sellingValuePaise: 50000,
+        minRedemptionPoints: null, maxRedemptionPoints: null,
+      });
+      mockPrisma.rewardCatalog.update.mockResolvedValue({ id: 'r1' });
+      // Deactivating must succeed (no 400) and keep the stored price.
+      await expect(
+        service.updateCatalogItem(gifsy, 'r1', { status: 'INACTIVE' } as never),
+      ).resolves.toEqual({ item: { id: 'r1' } });
+      const call = mockPrisma.rewardCatalog.update.mock.calls?.[0]?.[0];
+      expect(call.data.pointsCost).toBe(500); // kept
+      expect(call.data.status).toBe('INACTIVE');
+      expect(mockTenantSettings.getConversionRate).not.toHaveBeenCalled();
+    });
+  });
+
   describe('updateCatalogItem', () => {
     it('scopes the guard read by clientId + deletedAt (tenant + soft-delete)', async () => {
       mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null);
@@ -2482,8 +2608,9 @@ describe('RewardsService', () => {
 
     it('cannot re-list a 0-stock item via a bare { status: ACTIVE } PATCH', async () => {
       // Stored item is out of stock; payload tries to re-activate without resending stock.
+      // Pure derive: a FIXED item with no selling value keeps its stored pointsCost on UPDATE.
       mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
-        id: 'r1', code: 'AMZ500', stockQuantity: 0,
+        id: 'r1', code: 'AMZ500', stockQuantity: 0, pointsCost: 500, sellingValuePaise: null,
         minRedemptionPoints: null, maxRedemptionPoints: null,
       });
       mockPrisma.rewardCatalog.update.mockResolvedValue({ id: 'r1' });
@@ -2494,7 +2621,7 @@ describe('RewardsService', () => {
 
     it('allows ACTIVE when effective stock is positive', async () => {
       mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
-        id: 'r1', code: 'AMZ500', stockQuantity: 5,
+        id: 'r1', code: 'AMZ500', stockQuantity: 5, pointsCost: 500, sellingValuePaise: null,
         minRedemptionPoints: null, maxRedemptionPoints: null,
       });
       mockPrisma.rewardCatalog.update.mockResolvedValue({ id: 'r1' });

@@ -11,6 +11,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { derivePointsCost as derivePointsCostHelper } from '../rewards/derive-points-cost.helper';
 import { isGifsyOperator, platformWide, tenantScope } from '../common/tenant-scope';
 import { sniffFileType } from '../common/file-signature';
 import {
@@ -915,8 +916,9 @@ export class GiftCatalogueService {
    * so points = ₹ × rate. sellingValuePaise/100 = ₹. rate 0/misconfig → 0.
    */
   derivePointsCost(sellingValuePaise: number, rate: number): number {
-    if (!rate || rate <= 0) return 0;
-    return Math.round((sellingValuePaise / 100) * rate);
+    // DRY: delegate to the shared helper (api/src/rewards/derive-points-cost.helper.ts),
+    // the single source of truth also used by the admin /admin/gifts create/update path.
+    return derivePointsCostHelper(sellingValuePaise, rate);
   }
 
   /**

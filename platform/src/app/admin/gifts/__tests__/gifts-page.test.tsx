@@ -120,8 +120,9 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
 
     await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'NEW-1');
     await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'New Reward');
-    // GIFT_CARD + FIXED is the default → fill points cost
-    await userEvent.type(scope.getByPlaceholderText('2500'), '750');
+    // GIFT_CARD + FIXED is the default → PURE DERIVE: enter the ₹ selling value (price
+    // driver); the backend derives pointsCost. No manual points input exists.
+    await userEvent.type(scope.getByPlaceholderText('500'), '750');
 
     await userEvent.click(scope.getByRole('button', { name: /add reward/i }));
 
@@ -133,8 +134,66 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
       const body = JSON.parse(String(post!.init!.body));
       expect(body.code).toBe('NEW-1');
       expect(body.redemptionMode).toBe('GIFT_CARD');
-      expect(body.pointsCost).toBe(750);
+      // Pure derive: the FE sends the selling value, NEVER a manual pointsCost.
+      expect(body.sellingValuePaise).toBe(75000); // ₹750 → paise
+      expect(body.pointsCost).toBeUndefined();
     });
+  });
+
+  it('GIF3b: a fixed item with NO selling value is blocked (no POST — selling value is required)', async () => {
+    const { calls } = installFetch();
+    render(<AdminGiftsPage />);
+    const addButtons = await screen.findAllByRole('button', { name: /add reward/i });
+    await userEvent.click(addButtons[addButtons.length - 1]);
+
+    const dialog = await screen.findByText('Add Reward', { selector: 'h2' });
+    const modal = dialog.closest('div.relative') as HTMLElement;
+    const scope = within(modal);
+
+    await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'NOSV-1');
+    await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'No Selling Value');
+    // Leave the selling value blank → validation must block the save.
+    await userEvent.click(scope.getByRole('button', { name: /add reward/i }));
+
+    expect(await scope.findByText(/Selling value .* is required/i)).toBeInTheDocument();
+    expect(
+      calls.find((c) => c.url.startsWith('/api/admin/rewards/catalog') && c.init?.method === 'POST'),
+    ).toBeFalsy();
+  });
+
+  it('GIF3c: there is NO manual points-cost input for a fixed item', async () => {
+    installFetch();
+    render(<AdminGiftsPage />);
+    const addButtons = await screen.findAllByRole('button', { name: /add reward/i });
+    await userEvent.click(addButtons[addButtons.length - 1]);
+
+    const dialog = await screen.findByText('Add Reward', { selector: 'h2' });
+    const modal = dialog.closest('div.relative') as HTMLElement;
+    const scope = within(modal);
+
+    // The old manual "Points cost *" field (placeholder 2500) is gone — pure derive.
+    expect(scope.queryByText('Points cost *')).toBeNull();
+    expect(scope.queryByPlaceholderText('2500')).toBeNull();
+  });
+
+  it('GIF3d: a derived-points preview shows when the tenant conversion rate is available', async () => {
+    // /api/settings returns the live per-tenant rate (2 pts/₹ here) for the preview.
+    const { calls } = installFetch((url) =>
+      url.startsWith('/api/settings') ? jsonOk({ conversionRate: 2 }) : undefined,
+    );
+    render(<AdminGiftsPage />);
+    // The page fetches the rate on mount.
+    await waitFor(() => expect(calls.some((c) => c.url.startsWith('/api/settings'))).toBe(true));
+
+    const addButtons = await screen.findAllByRole('button', { name: /add reward/i });
+    await userEvent.click(addButtons[addButtons.length - 1]);
+    const dialog = await screen.findByText('Add Reward', { selector: 'h2' });
+    const modal = dialog.closest('div.relative') as HTMLElement;
+    const scope = within(modal);
+
+    await userEvent.type(scope.getByPlaceholderText('500'), '500'); // ₹500 × 2 = 1,000 pts
+    expect(await scope.findByText(/1,000 pts/)).toBeInTheDocument();
+    expect(scope.getByText(/at this tenant's conversion rate/i)).toBeInTheDocument();
   });
 
   it('GIF5: a free-amount voucher with a blank Max is blocked (no POST)', async () => {
@@ -162,7 +221,7 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
     ).toBeFalsy();
   });
 
-  it('GIF6: a free-amount voucher WITH a Max POSTs pointsCost 0 + both bounds', async () => {
+  it('GIF6: a free-amount voucher WITH a Max POSTs both bounds (no manual pointsCost)', async () => {
     const { calls } = installFetch();
     render(<AdminGiftsPage />);
     const addButtons = await screen.findAllByRole('button', { name: /add reward/i });
@@ -186,7 +245,8 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
       );
       expect(post).toBeTruthy();
       const body = JSON.parse(String(post!.init!.body));
-      expect(body.pointsCost).toBe(0);
+      // Pure derive: the FE no longer sends pointsCost (the backend keeps it 0 for a banded item).
+      expect(body.pointsCost).toBeUndefined();
       expect(body.minRedemptionPoints).toBe(250);
       expect(body.maxRedemptionPoints).toBe(5000);
     });
@@ -211,7 +271,7 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
 
     await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'IMG-1');
     await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'With Image');
-    await userEvent.type(scope.getByPlaceholderText('2500'), '750');
+    await userEvent.type(scope.getByPlaceholderText('500'), '750'); // ₹ selling value (price driver)
 
     // Upload a picture through the shared control (multipart → returns the stored url).
     const imageInput = scope.getByTestId('gift-image-input') as HTMLInputElement;
@@ -243,7 +303,7 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
 
     await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'HUB-1');
     await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'Hubble Voucher');
-    await userEvent.type(scope.getByPlaceholderText('2500'), '750');
+    await userEvent.type(scope.getByPlaceholderText('500'), '750'); // ₹ selling value (price driver)
     // The Hubble product-id field is shown for GIFT_CARD (the default mode).
     await userEvent.type(scope.getByPlaceholderText(/amazon-pay-product-id/i), 'amz-prod-9');
 
@@ -294,10 +354,8 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
 
     await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'SV-1');
     await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'Selling Value Reward');
-    await userEvent.type(scope.getByPlaceholderText('2500'), '500');
-    // MRP and Selling value share the "(optional)" placeholder — target selling value by its label.
-    const svInput = scope.getByText('Selling value (₹)').closest('div')!.querySelector('input')!;
-    await userEvent.type(svInput, '400');
+    // Selling value is the FIXED price driver (placeholder "500"); MRP keeps "(optional)".
+    await userEvent.type(scope.getByPlaceholderText('500'), '400');
 
     await userEvent.click(scope.getByRole('button', { name: /add reward/i }));
 
@@ -325,7 +383,7 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
     const modal = dialog.closest('div.relative') as HTMLElement;
     const scope = within(modal);
 
-    const svInput = scope.getByText('Selling value (₹)').closest('div')!.querySelector('input') as HTMLInputElement;
+    const svInput = scope.getByPlaceholderText('500') as HTMLInputElement;
     expect(svInput.value).toBe('400');
   });
 
@@ -430,6 +488,10 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
     const cashOption = scope.getByRole('option', { name: 'Cash Payout' }) as HTMLOptionElement;
     const select = cashOption.closest('select') as HTMLSelectElement;
     expect(select.value).toBe('BANK_TRANSFER');
+
+    // Pure derive: a FIXED item now requires a ₹ selling value before it can be saved
+    // (the legacy UPI item has none stored) — enter one, then save.
+    await userEvent.type(scope.getByPlaceholderText('500'), '1000');
 
     // Re-saving persists the canonical BANK_TRANSFER, never the legacy UPI.
     await userEvent.click(scope.getByRole('button', { name: /save changes/i }));

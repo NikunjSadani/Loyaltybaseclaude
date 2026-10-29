@@ -492,12 +492,16 @@ export class UpdateRewardCategoryDto {
  * POST /v1/admin/rewards/catalog
  *
  * VOUCHER CONVENTION (no `voucherType` column exists — see reconcile §3):
- *   - FIXED voucher       → `pointsCost` > 0, `redemptionMode = GIFT_CARD`.
- *   - FREE_AMOUNT voucher → `pointsCost = 0` + `minRedemptionPoints`/
- *                           `maxRedemptionPoints` bound the redeem-time range,
- *                           `redemptionMode = GIFT_CARD`. (The variable amount
- *                           itself is taken & validated at redeem time in 5.4 —
- *                           CRUD only STORES the range.)
+ *   - FIXED item          → NO band; `pointsCost` is DERIVED server-side from
+ *                           `sellingValuePaise` × the tenant conversion rate (PURE
+ *                           DERIVE — `pointsCost` is NOT a client input).
+ *   - FREE_AMOUNT voucher → `minRedemptionPoints`/`maxRedemptionPoints` bound the
+ *                           redeem-time range; `pointsCost` stays 0. (The variable
+ *                           amount itself is taken & validated at redeem time in 5.4 —
+ *                           CRUD only STORES the range.) Derivation does NOT apply.
+ *
+ * The service detects FREE_AMOUNT by the presence of a min/max band; everything else is
+ * FIXED and requires `sellingValuePaise` (the price driver).
  */
 export class CreateRewardCatalogDto {
   @IsString()
@@ -522,11 +526,6 @@ export class CreateRewardCatalogDto {
   @IsImageRef({ each: true })
   imageUrls?: string[];
 
-  @Type(() => Number)
-  @IsInt()
-  @Min(0)
-  pointsCost!: number;
-
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -534,7 +533,7 @@ export class CreateRewardCatalogDto {
   mrpPaise?: number;
 
   /**
-   * OPTIONAL per-item ₹ SELLING VALUE in paise (the real cost basis Gifsy pays for the
+   * ₹ SELLING VALUE in paise (the real cost basis Gifsy pays for the
    * item). Drives (a) the rate-INDEPENDENT catalogue MRP-slash the member sees (computed
    * server-side as pointsCost × mrpPaise ÷ sellingValuePaise) and (b) the rate-immune
    * 194R/valuation freeze (sellingValuePaise × qty). COST BASIS — never projected to a
@@ -623,18 +622,14 @@ export class UpdateRewardCatalogDto {
   @Type(() => Number)
   @IsInt()
   @Min(0)
-  pointsCost?: number;
-
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(0)
   mrpPaise?: number;
 
   /**
-   * OPTIONAL ₹ selling value in paise (see CreateRewardCatalogDto.sellingValuePaise).
-   * `undefined` leaves the stored value unchanged. Bound (on the effective values):
-   * when both selling value and MRP are set, sellingValuePaise <= mrpPaise.
+   * ₹ selling value in paise (see CreateRewardCatalogDto.sellingValuePaise). `undefined`
+   * leaves the stored value unchanged. For a FIXED item this is the price driver:
+   * `pointsCost` is RE-DERIVED from the effective selling value × the tenant conversion
+   * rate (PURE DERIVE — `pointsCost` is NOT a client input). Bound (on the effective
+   * values): when both selling value and MRP are set, sellingValuePaise <= mrpPaise.
    */
   @IsOptional()
   @Type(() => Number)

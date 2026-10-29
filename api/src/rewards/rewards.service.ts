@@ -26,6 +26,7 @@ import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
 import { isSalesRedeemEnabledForPartner } from '../common/sales-redeem-eligibility';
 import { isGifsyOperator, tenantScope } from '../common/tenant-scope';
 import { generateTenantOrderNumber } from './order-number.helper';
+import { derivePointsCost } from './derive-points-cost.helper';
 import { computeFrozenValuePaise } from './gift-value.helper';
 import { computeDispatchSla } from '../common/dispatch-sla';
 import { loadHolidaySet } from '../common/holiday-calendar';
@@ -3705,10 +3706,22 @@ export class RewardsService {
     // slash: slashPoints only shows when mrp > selling, so an inverted pair is a config error).
     this.assertSellingValueBounds(dto.sellingValuePaise, dto.mrpPaise);
 
+    // PURE DERIVE: pointsCost is no longer a client input. A FREE_AMOUNT (variable-amount)
+    // item carries a min/max band and keeps pointsCost 0; everything else is FIXED and its
+    // pointsCost is DERIVED from the ₹ selling value × the tenant conversion rate.
+    const pointsCost = await this.resolveAdminPointsCost(user.clientId, {
+      minRedemptionPoints: dto.minRedemptionPoints,
+      maxRedemptionPoints: dto.maxRedemptionPoints,
+      deriveFromSellingValuePaise: dto.sellingValuePaise ?? null,
+      // No stored fallback on CREATE: a FIXED item MUST supply a selling value.
+      keepPointsCost: null,
+      requireSellingValueWhenFixed: true,
+    });
+
     // A pointsCost-0 item is only ever a FREE_AMOUNT voucher, and it MUST carry a
     // complete [min, max] range — reject a half-configured one (see the helper).
     this.assertFreeAmountComplete(
-      dto.pointsCost,
+      pointsCost,
       dto.minRedemptionPoints,
       dto.maxRedemptionPoints,
     );
@@ -3744,9 +3757,11 @@ export class RewardsService {
         name: dto.name,
         description: dto.description,
         imageUrls: (dto.imageUrls ?? undefined) as Prisma.InputJsonValue | undefined,
-        pointsCost: dto.pointsCost,
+        // DERIVED (pure derive) — FIXED: round(sellingValue/100 × rate); FREE_AMOUNT: 0.
+        pointsCost,
         mrpPaise: dto.mrpPaise,
-        // Cost basis for the rate-independent slash + rate-immune 194R freeze (optional).
+        // Cost basis for the rate-independent slash + rate-immune 194R freeze (+ the FIXED
+        // price driver the pointsCost above is derived from).
         sellingValuePaise: dto.sellingValuePaise,
         redemptionMode: dto.redemptionMode,
         status,
@@ -3780,13 +3795,11 @@ export class RewardsService {
     // DTO means "leave unchanged" (Prisma skips it); an explicit null/value is written —
     // so mirror that here (a bare `??` would collapse an explicit null into the stored
     // value and let a max-clearing PATCH slip a free-amount voucher into a broken state).
-    const effPoints = dto.pointsCost !== undefined ? dto.pointsCost : existing.pointsCost;
     const effMin =
       dto.minRedemptionPoints !== undefined ? dto.minRedemptionPoints : existing.minRedemptionPoints;
     const effMax =
       dto.maxRedemptionPoints !== undefined ? dto.maxRedemptionPoints : existing.maxRedemptionPoints;
     this.assertRedemptionRange(effMin, effMax);
-    this.assertFreeAmountComplete(effPoints, effMin, effMax);
 
     // Validate the EFFECTIVE selling value vs MRP (payload value if present, else stored),
     // so a PATCH that raises selling value above MRP — or lowers MRP below it — is rejected.
@@ -3794,6 +3807,22 @@ export class RewardsService {
       dto.sellingValuePaise !== undefined ? dto.sellingValuePaise : existing.sellingValuePaise;
     const effMrp = dto.mrpPaise !== undefined ? dto.mrpPaise : existing.mrpPaise;
     this.assertSellingValueBounds(effSellingValue, effMrp);
+
+    // PURE DERIVE (non-breaking transition). FREE_AMOUNT (a min/max band) keeps pointsCost 0.
+    // A FIXED item re-derives pointsCost ONLY when the admin EXPLICITLY sets/changes the
+    // selling value in THIS update (dto.sellingValuePaise present + non-null); an unrelated
+    // edit (name/status/stock/T&C) leaves the stored pointsCost untouched and never reads the
+    // rate — so there is no silent re-price on drift and no 0/unset-rate edit lockout.
+    const sellingValueProvided =
+      dto.sellingValuePaise !== undefined && dto.sellingValuePaise !== null;
+    const pointsCost = await this.resolveAdminPointsCost(user.clientId, {
+      minRedemptionPoints: effMin,
+      maxRedemptionPoints: effMax,
+      deriveFromSellingValuePaise: sellingValueProvided ? dto.sellingValuePaise! : null,
+      keepPointsCost: existing.pointsCost ?? null,
+      requireSellingValueWhenFixed: false,
+    });
+    this.assertFreeAmountComplete(pointsCost, effMin, effMax);
 
     if (dto.code !== undefined && dto.code !== existing.code) {
       const clash = await this.prisma.rewardCatalog.findFirst({
@@ -3841,18 +3870,20 @@ export class RewardsService {
         name: dto.name,
         description: dto.description,
         imageUrls: (dto.imageUrls ?? undefined) as Prisma.InputJsonValue | undefined,
-        pointsCost: dto.pointsCost,
+        // DERIVED (pure derive). FIXED: round(effective sellingValue/100 × rate), or the
+        // kept stored value when no selling value is available; FREE_AMOUNT: 0.
+        pointsCost,
         mrpPaise: dto.mrpPaise,
-        // Cost basis (optional). undefined = leave unchanged (Prisma skips it).
+        // Cost basis + FIXED price driver (optional). undefined = leave unchanged (Prisma skips it).
         sellingValuePaise: dto.sellingValuePaise,
         redemptionMode: dto.redemptionMode,
         status,
-        // Bounds are meaningful ONLY for a FREE_AMOUNT item (effPoints === 0). On a
+        // Bounds are meaningful ONLY for a FREE_AMOUNT item (pointsCost === 0). On a
         // FIXED item (or a FREE→FIXED transition) force them null so a direct-API PATCH
         // can't leave stale [min,max] on the row; for a FREE item write the DTO value
         // (undefined = keep existing, which the guard has already validated as complete).
-        minRedemptionPoints: effPoints === 0 ? dto.minRedemptionPoints : null,
-        maxRedemptionPoints: effPoints === 0 ? dto.maxRedemptionPoints : null,
+        minRedemptionPoints: pointsCost === 0 ? dto.minRedemptionPoints : null,
+        maxRedemptionPoints: pointsCost === 0 ? dto.maxRedemptionPoints : null,
         stockQuantity: dto.stockQuantity,
         termsAndConditions: dto.termsAndConditions,
         sortOrder: dto.sortOrder,
@@ -3969,5 +4000,71 @@ export class RewardsService {
         'A variable-amount (FREE_AMOUNT) voucher must have minRedemptionPoints >= 1',
       );
     }
+  }
+
+  /**
+   * PURE DERIVE resolver for the admin catalogue (/admin/gifts) create/update paths.
+   * `pointsCost` is NO LONGER a client input — the service sets it:
+   *   - FREE_AMOUNT (a min/max band is present) → 0. The admin still enters the points
+   *     band; the redeem-time ₹ amount drives the actual spend. Derivation does NOT apply.
+   *     A partial band (only min, or only max) is still routed here as free-amount so the
+   *     caller's assertFreeAmountComplete rejects it with the precise "requires both" message.
+   *   - FIXED with a selling value available (sent, or — on UPDATE — already stored) →
+   *     round(sellingValue/100 × tenant conversion rate). A result that rounds to 0 (rate
+   *     unset/0, or the value too small) is REJECTED (mirrors gift-catalogue publish).
+   *   - FIXED with NO selling value available:
+   *       · CREATE (no stored fallback) → 400: a selling value is REQUIRED (the price driver).
+   *       · UPDATE (a positive stored pointsCost) → KEEP it (non-breaking transition: a legacy
+   *         item priced before pure-derive stays redeemable until a selling value is set).
+   */
+  private async resolveAdminPointsCost(
+    clientId: string,
+    input: {
+      minRedemptionPoints?: number | null;
+      maxRedemptionPoints?: number | null;
+      /**
+       * The ₹ selling value to DERIVE from, or null to NOT derive. On CREATE this is the
+       * supplied value; on UPDATE it is non-null ONLY when the admin is explicitly
+       * setting/changing the selling value (dto.sellingValuePaise present + non-null) — a
+       * benign edit passes null so pointsCost is NEVER silently re-priced (and the rate is
+       * never even read, so a 0/unset rate can't lock an item out of editing).
+       */
+      deriveFromSellingValuePaise: number | null;
+      /** UPDATE only: the stored pointsCost to PRESERVE when not deriving. null on CREATE. */
+      keepPointsCost: number | null;
+      /** CREATE only: a FIXED item with no selling value is rejected (the price driver). */
+      requireSellingValueWhenFixed: boolean;
+    },
+  ): Promise<number> {
+    const isFreeAmount =
+      input.minRedemptionPoints != null || input.maxRedemptionPoints != null;
+    if (isFreeAmount) return 0;
+
+    // Derive ONLY when a selling value is actually being set/changed.
+    if (input.deriveFromSellingValuePaise != null) {
+      const rate = await this.tenantSettings.getConversionRate(clientId);
+      const pointsCost = derivePointsCost(input.deriveFromSellingValuePaise, rate);
+      if (pointsCost < 1) {
+        throw new BadRequestException(
+          "This reward's points cost resolves to 0 — set a higher selling value, or the tenant conversion rate is not configured.",
+        );
+      }
+      return pointsCost;
+    }
+
+    // Not deriving: UPDATE preserves the stored price verbatim — no rate read, no re-price,
+    // no derived-<1 error — so an unrelated edit never re-prices and a 0/unset rate never
+    // 400s (matches gift-catalogue's preserve-on-rate-drift).
+    if (input.keepPointsCost != null) return input.keepPointsCost;
+
+    // CREATE FIXED with no selling value → the price driver is required.
+    if (input.requireSellingValueWhenFixed) {
+      throw new BadRequestException(
+        'A selling value (₹) is required for a fixed-price reward.',
+      );
+    }
+    // No stored price and no new selling value (not expected for a real row): leave 0 —
+    // assertFreeAmountComplete then rejects a 0-cost item that carries no band.
+    return 0;
   }
 }

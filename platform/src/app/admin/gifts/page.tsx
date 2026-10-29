@@ -38,6 +38,7 @@ import { GiftImageUpload } from '@/components/GiftImageUpload';
 import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings';
 import { useAdminSession } from '@/lib/admin-session';
 import { redemptionModeLabel, canonicalRedemptionMode } from '@/lib/redemption-mode';
+import { derivePointsCost, parseRupeesToPaise } from '@/lib/gift-catalogue';
 import type { GifsySettings } from '@/types';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
@@ -466,9 +467,8 @@ interface ItemFormState {
   redemptionMode: PayoutMode;
   /** Only meaningful when redemptionMode === GIFT_CARD */
   voucherMode: VoucherMode;
-  pointsCost: number;
   mrpRupees: string;            // optional ₹ input → mrpPaise
-  sellingValueRupees: string;   // optional ₹ input → sellingValuePaise (cost basis)
+  sellingValueRupees: string;   // ₹ input → sellingValuePaise (cost basis + FIXED price driver)
   minRedemptionPoints: string;
   maxRedemptionPoints: string;
   stockTracked: boolean;
@@ -484,7 +484,7 @@ function blankItemForm(categoryId: string): ItemFormState {
     categoryId,
     code: '', name: '', description: '', imageUrls: [],
     redemptionMode: 'GIFT_CARD', voucherMode: 'FIXED',
-    pointsCost: 0, mrpRupees: '', sellingValueRupees: '',
+    mrpRupees: '', sellingValueRupees: '',
     minRedemptionPoints: '', maxRedemptionPoints: '',
     stockTracked: false, stockQuantity: 0,
     termsAndConditions: '', status: 'ACTIVE',
@@ -493,10 +493,12 @@ function blankItemForm(categoryId: string): ItemFormState {
 }
 
 function ItemModal({
-  editing, categories, onSave, onClose, saving,
+  editing, categories, conversionRate, onSave, onClose, saving,
 }: {
   editing: CatalogItem | null;
   categories: RewardCategory[];
+  /** Live tenant conversion rate (points-per-₹) for the derived-points preview; null when not loaded. */
+  conversionRate: number | null;
   onSave: (payload: Record<string, unknown>) => void;
   onClose: () => void;
   saving: boolean;
@@ -521,7 +523,6 @@ function ItemModal({
       // BANK_TRANSFER. Still a cash mode → supportsFreeAmount / free-amount config intact.
       redemptionMode: canonicalRedemptionMode(editing.redemptionMode) as PayoutMode,
       voucherMode: isFree ? 'FREE_AMOUNT' : 'FIXED',
-      pointsCost: editing.pointsCost,
       mrpRupees: editing.mrpPaise != null ? String(editing.mrpPaise / 100) : '',
       sellingValueRupees: editing.sellingValuePaise != null ? String(editing.sellingValuePaise / 100) : '',
       minRedemptionPoints: editing.minRedemptionPoints != null ? String(editing.minRedemptionPoints) : '',
@@ -546,6 +547,16 @@ function ItemModal({
   const canFreeAmount = supportsFreeAmount(form.redemptionMode);
   const isFreeAmount = canFreeAmount && form.voucherMode === 'FREE_AMOUNT';
 
+  // PURE DERIVE: for a FIXED item the points cost is DERIVED server-side from the ₹ selling
+  // value × the tenant conversion rate. Show a read-only preview of that derivation when the
+  // rate is available client-side (fetched from /api/settings); otherwise skip the preview —
+  // the saved item's points show in the list. Never hardcode a rate.
+  const sellingPaise = parseRupeesToPaise(form.sellingValueRupees);
+  const derivedPoints =
+    !isFreeAmount && conversionRate != null
+      ? derivePointsCost(sellingPaise, conversionRate)
+      : null;
+
   const validate = (): boolean => {
     const e: Record<string, string> = {};
     if (!form.categoryId) e.categoryId = 'Pick a category';
@@ -561,7 +572,12 @@ function ItemModal({
       if (!max || max < 1) e.maxRedemptionPoints = 'Max is required (≥ 1) for a free-amount item';
       else if (min && max < min) e.maxRedemptionPoints = 'Max must be ≥ min';
     } else {
-      if (form.pointsCost <= 0) e.pointsCost = 'Points cost must be > 0';
+      // Pure derive: selling value is now the REQUIRED price driver for a fixed item
+      // (the backend derives pointsCost from it); there is no manual points input.
+      const sv = parseFloat(form.sellingValueRupees);
+      if (!form.sellingValueRupees.trim() || !Number.isFinite(sv) || sv <= 0) {
+        e.sellingValueRupees = 'Selling value (₹) is required for a fixed-price reward';
+      }
     }
     // Selling value (optional) can't exceed MRP when both are entered (mirrors the backend bound).
     if (form.sellingValueRupees.trim() && form.mrpRupees.trim()) {
@@ -603,14 +619,15 @@ function ItemModal({
       payload.sellingValuePaise = Math.round(parseFloat(form.sellingValueRupees) * 100);
     }
     if (isFreeAmount) {
-      payload.pointsCost = 0;
+      // Pure derive: pointsCost is NOT sent (the backend keeps it 0 for a banded item);
+      // the admin sets the points band. forbidNonWhitelisted would 400 a stray pointsCost.
       payload.minRedemptionPoints = parseInt(form.minRedemptionPoints);
       payload.maxRedemptionPoints = form.maxRedemptionPoints.trim()
         ? parseInt(form.maxRedemptionPoints)
         : null;
     } else {
-      payload.pointsCost = form.pointsCost;
-      // Clear any stale free-amount bounds when not a free-amount voucher.
+      // Pure derive: no pointsCost sent — the backend derives it from sellingValuePaise ×
+      // the tenant conversion rate. Clear any stale free-amount bounds.
       payload.minRedemptionPoints = null;
       payload.maxRedemptionPoints = null;
     }
@@ -799,43 +816,45 @@ function ItemModal({
             </div>
           )}
 
-          {/* Points cost (not shown for free-amount vouchers — forced to 0) */}
+          {/* Pricing (not shown for free-amount vouchers). Pure derive: the member's points
+              cost is DERIVED from the ₹ selling value × the tenant conversion rate — there is
+              no manual points input. Selling value is the required price driver. */}
           {!isFreeAmount && (
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-gray-700">Points cost *</label>
-                <input
-                  type="number"
-                  value={form.pointsCost || ''}
-                  onChange={(e) => set('pointsCost', parseInt(e.target.value) || 0)}
-                  placeholder="2500"
-                  className={inputCls('pointsCost')}
-                />
-                {errors.pointsCost && <p className="text-xs text-red-500">{errors.pointsCost}</p>}
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-700">Selling value (₹) *</label>
+                  <input
+                    type="number"
+                    value={form.sellingValueRupees}
+                    onChange={(e) => set('sellingValueRupees', e.target.value)}
+                    placeholder="500"
+                    className={inputCls('sellingValueRupees')}
+                  />
+                  {errors.sellingValueRupees
+                    ? <p className="text-xs text-red-500">{errors.sellingValueRupees}</p>
+                    : <p className="text-[10px] text-gray-400">Price driver — the member&apos;s points cost is derived from this. Must be ≤ MRP.</p>}
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-700">MRP (₹)</label>
+                  <input
+                    type="number"
+                    value={form.mrpRupees}
+                    onChange={(e) => set('mrpRupees', e.target.value)}
+                    placeholder="(optional)"
+                    className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+                  />
+                </div>
               </div>
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-gray-700">MRP (₹)</label>
-                <input
-                  type="number"
-                  value={form.mrpRupees}
-                  onChange={(e) => set('mrpRupees', e.target.value)}
-                  placeholder="(optional)"
-                  className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-gray-700">Selling value (₹)</label>
-                <input
-                  type="number"
-                  value={form.sellingValueRupees}
-                  onChange={(e) => set('sellingValueRupees', e.target.value)}
-                  placeholder="(optional)"
-                  className={inputCls('sellingValueRupees')}
-                />
-                {errors.sellingValueRupees
-                  ? <p className="text-xs text-red-500">{errors.sellingValueRupees}</p>
-                  : <p className="text-[10px] text-gray-400">Cost basis — drives the member MRP-slash &amp; tax value. Must be ≤ MRP.</p>}
-              </div>
+              {/* Read-only derived-points preview (only when the tenant rate is available). */}
+              {derivedPoints != null && derivedPoints > 0 && (
+                <div className="flex items-center gap-2 rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-800" aria-live="polite">
+                  <Info className="h-3.5 w-3.5 shrink-0" />
+                  <span>
+                    ≈ <strong>{fmtPts(derivedPoints)} pts</strong> (at this tenant&apos;s conversion rate)
+                  </span>
+                </div>
+              )}
             </div>
           )}
 
@@ -962,6 +981,10 @@ function CatalogueTab() {
   const [editing, setEditing] = useState<CatalogItem | null>(null);
   const [deleting, setDeleting] = useState<CatalogItem | null>(null);
   const [saving, setSaving] = useState(false);
+  // Live tenant conversion rate (points-per-₹) for the derived-points preview in ItemModal.
+  // Fetched from the REAL per-tenant settings (/api/settings → effective settings); null until
+  // loaded or if unavailable (preview is then simply skipped — never hardcode a rate).
+  const [conversionRate, setConversionRate] = useState<number | null>(null);
 
   const loadCategories = useCallback(async () => {
     try {
@@ -969,6 +992,17 @@ function CatalogueTab() {
       setCategories(data.categories ?? []);
     } catch {
       /* surfaced via catalog error if both fail */
+    }
+  }, []);
+
+  const loadConversionRate = useCallback(async () => {
+    try {
+      const data = await apiJson<{ conversionRate?: number }>('/api/settings');
+      if (typeof data.conversionRate === 'number' && data.conversionRate > 0) {
+        setConversionRate(data.conversionRate);
+      }
+    } catch {
+      /* preview is optional — skip it when the rate can't be read */
     }
   }, []);
 
@@ -986,7 +1020,7 @@ function CatalogueTab() {
     }
   }, []);
 
-  useEffect(() => { loadCategories(); loadCatalog(); }, [loadCategories, loadCatalog]);
+  useEffect(() => { loadCategories(); loadCatalog(); loadConversionRate(); }, [loadCategories, loadCatalog, loadConversionRate]);
 
   const saveItem = async (payload: Record<string, unknown>) => {
     setSaving(true); setError('');
@@ -1198,6 +1232,7 @@ function CatalogueTab() {
         <ItemModal
           editing={editing}
           categories={categories}
+          conversionRate={conversionRate}
           saving={saving}
           onSave={saveItem}
           onClose={() => { setModal(false); setEditing(null); }}

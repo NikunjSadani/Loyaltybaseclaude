@@ -48,7 +48,10 @@ test.describe('@clientAdmin reward catalog CRUD write-persistence (W10)', () => 
             categoryId,
             code,
             name,
-            pointsCost: 250,
+            // Pure derive: FIXED items supply a ₹ selling value (the price driver); the
+            // backend DERIVES pointsCost (deoleo rate = 1 → ₹250 → 250 pts). pointsCost is
+            // no longer an accepted input (forbidNonWhitelisted would 400 it).
+            sellingValuePaise: 25000,
             redemptionMode: 'GIFT_CARD',
             description: 'E2E test gift item — create step',
           }),
