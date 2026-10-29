@@ -88,7 +88,7 @@ beforeEach(() => {
 describe('TradeComparisonCard', () => {
   it('TC1: renders the KPI name, ₹ monthly sales, and target-met pct', async () => {
     render(<TradeComparisonCard outletType="SSS" />);
-    await waitFor(() => expect(screen.getByText('Primary Sales')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('Primary Sales').length).toBeGreaterThan(0));
     expect(screen.getByText('₹1.2L')).toBeInTheDocument();  // current (1,20,000 → compact lakhs)
     expect(screen.getByText('₹90K')).toBeInTheDocument();   // last month (90,000 → compact thousands)
     expect(screen.getByText('₹1L')).toBeInTheDocument();    // last 3 months avg (1,00,000 → compact lakhs)
@@ -99,7 +99,7 @@ describe('TradeComparisonCard', () => {
 
   it('TC2: shows achieved/withTarget for current & last month, pct-only for last 3 months', async () => {
     render(<TradeComparisonCard outletType="SSS" />);
-    await waitFor(() => expect(screen.getByText('Primary Sales')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('Primary Sales').length).toBeGreaterThan(0));
     expect(screen.getByText('8/10')).toBeInTheDocument();  // current ratio
     expect(screen.getByText('6/10')).toBeInTheDocument();  // last-month ratio
     // last3Months carries null achieved/withTarget → no ratio rendered, only the 70% pct.
@@ -111,8 +111,10 @@ describe('TradeComparisonCard', () => {
     await waitFor(() => expect(screen.getByText('Current')).toBeInTheDocument());
     expect(screen.getByText('Last month')).toBeInTheDocument();
     expect(screen.getByText('Last 3 months')).toBeInTheDocument();
-    expect(screen.getByText('Monthly sale')).toBeInTheDocument();
-    expect(screen.getByText('Target met')).toBeInTheDocument();
+    // Row label is now the selected KPI's name (default = primary). It may also appear as a
+    // dropdown option, so allow multiple matches.
+    expect(screen.getAllByText('Primary Sales').length).toBeGreaterThan(0);
+    expect(screen.getByText('Width of achievement')).toBeInTheDocument();
   });
 
   it('TC4: program + member filter options come from team-view', async () => {

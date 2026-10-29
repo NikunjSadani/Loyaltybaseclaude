@@ -192,9 +192,10 @@ export function TradeComparisonCard({ outletType }: { outletType: string }) {
               ))}
             </div>
 
-            {/* Row: Monthly sale (₹) */}
+            {/* Row: the selected KPI's value (labelled with the KPI name, so it isn't stuck on
+                "Monthly sale" when another KPI is picked) */}
             <div className="grid grid-cols-4 gap-1 items-center py-1.5 border-t border-gray-50">
-              <div className="text-[11px] font-medium text-gray-600">Monthly sale</div>
+              <div className="text-[11px] font-medium text-gray-600">{data.kpiName}</div>
               {columns.map((c) => (
                 <div key={c.key} className="text-sm font-bold text-gray-800 text-center">
                   {/* Formatted by the selected KPI's unit — INR → compact ₹ (K/L/Cr) so lakhs/crores
@@ -204,9 +205,10 @@ export function TradeComparisonCard({ outletType }: { outletType: string }) {
               ))}
             </div>
 
-            {/* Row: Target met */}
+            {/* Row: Width of achievement — same ratio as the old "Target met" (outlets meeting
+                target ÷ outlets with a target), nomenclature change only. */}
             <div className="grid grid-cols-4 gap-1 items-center py-1.5 border-t border-gray-50">
-              <div className="text-[11px] font-medium text-gray-600">Target met</div>
+              <div className="text-[11px] font-medium text-gray-600">Width of achievement</div>
               {columns.map((c) => (
                 <div key={c.key} className="text-center">
                   <TargetMetCell bucket={data.buckets[c.key]} pctOnly={c.pctOnly} />
