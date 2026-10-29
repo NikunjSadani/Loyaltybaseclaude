@@ -109,11 +109,9 @@ function SalesVisibilityContent() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
-  // Filters (mirroring the KYC-submissions list): status · outlet type · program · sort.
+  // Filters (mirroring the KYC-submissions list): status · program.
   const [statusFilter, setStatusFilter] = useState<CaptureUiState | 'ALL'>('ALL');
-  const [typeFilter, setTypeFilter] = useState<string>('ALL');
   const [programFilter, setProgramFilter] = useState<string>('ALL');
-  const [sortBy, setSortBy] = useState<'action' | 'name'>('action');
   // Session read-back of a fresh capture — outletId → its new window state.
   const [captured, setCaptured] = useState<Record<string, CaptureUiState>>({});
   const [activeOutletId, setActiveOutletId] = useState<string | null>(null);
@@ -144,11 +142,6 @@ function SalesVisibilityContent() {
     captured[o.outletId] ?? (isChangesRequested(o) ? 'changes_requested' : o.windowState);
 
   // Filter option lists, derived from the loaded outlets.
-  const typeOptions = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const o of eligible?.outlets ?? []) if (o.outletType?.code) m.set(o.outletType.code, o.outletType.name);
-    return [...m.entries()].sort((a, b) => a[1].localeCompare(b[1])); // [code, name]
-  }, [eligible]);
   const programOptions = useMemo(
     () => Array.from(new Set((eligible?.outlets ?? []).map((o) => o.programName).filter((p): p is string => !!p))).sort(),
     [eligible],
@@ -162,7 +155,7 @@ function SalesVisibilityContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eligible, captured]);
 
-  const anyFilter = search.trim() !== '' || statusFilter !== 'ALL' || typeFilter !== 'ALL' || programFilter !== 'ALL';
+  const anyFilter = search.trim() !== '' || statusFilter !== 'ALL' || programFilter !== 'ALL';
 
   // If the selected status leaves the option set (e.g. the last outlet of that status was just
   // captured), fall back to "All" so the list doesn't get stuck on an empty, blank-select state.
@@ -176,20 +169,18 @@ function SalesVisibilityContent() {
     const rows = list.filter((o) => {
       if (q && !(o.outletName.toLowerCase().includes(q) || o.outletCode.toLowerCase().includes(q))) return false;
       if (statusFilter !== 'ALL' && stateOf(o) !== statusFilter) return false;
-      if (typeFilter !== 'ALL' && o.outletType?.code !== typeFilter) return false;
       if (programFilter !== 'ALL' && o.programName !== programFilter) return false;
       return true;
     });
     const actionRank = (o: SalesEligibleOutlet) =>
       Number(isActionable(captured[o.outletId] ?? o.windowState, o.canCapture));
     return [...rows].sort((a, b) => {
-      if (sortBy === 'name') return a.outletName.localeCompare(b.outletName);
-      // Default: actionable (due/rejected/late & canCapture) first, then by name.
+      // Actionable (due/rejected/late & canCapture) first, then by name.
       const d = actionRank(b) - actionRank(a);
       return d !== 0 ? d : a.outletName.localeCompare(b.outletName);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eligible, search, captured, statusFilter, typeFilter, programFilter, sortBy]);
+  }, [eligible, search, captured, statusFilter, programFilter]);
 
   const dueCount = useMemo(
     () =>
@@ -300,29 +291,19 @@ function SalesVisibilityContent() {
         </div>
       )}
 
-      {/* Filter strip — status · outlet type · program · sort (mirrors the KYC list). */}
+      {/* Filter strip — status · program (mirrors the KYC list). */}
       {(eligible?.outlets.length ?? 0) > 0 && (
         <div className="flex items-center gap-1.5 overflow-x-auto mb-4" style={{ scrollbarWidth: 'none' }}>
           <FilterPill value={statusFilter} onChange={(v) => setStatusFilter(v as CaptureUiState | 'ALL')} active={statusFilter !== 'ALL'}>
             <option value="ALL">All statuses</option>
             {statusOptions.map((s) => <option key={s} value={s}>{STATE_CONFIG[s].label}</option>)}
           </FilterPill>
-          {typeOptions.length > 1 && (
-            <FilterPill value={typeFilter} onChange={setTypeFilter} active={typeFilter !== 'ALL'}>
-              <option value="ALL">All types</option>
-              {typeOptions.map(([code, name]) => <option key={code} value={code}>{name}</option>)}
-            </FilterPill>
-          )}
           {programOptions.length > 1 && (
             <FilterPill value={programFilter} onChange={setProgramFilter} active={programFilter !== 'ALL'}>
               <option value="ALL">All programs</option>
               {programOptions.map((p) => <option key={p} value={p}>{p}</option>)}
             </FilterPill>
           )}
-          <FilterPill value={sortBy} onChange={(v) => setSortBy(v as 'action' | 'name')} active={sortBy !== 'action'}>
-            <option value="action">Action needed</option>
-            <option value="name">Name A–Z</option>
-          </FilterPill>
         </div>
       )}
 
@@ -343,7 +324,7 @@ function SalesVisibilityContent() {
           </p>
           {anyFilter && (
             <button
-              onClick={() => { setSearch(''); setStatusFilter('ALL'); setTypeFilter('ALL'); setProgramFilter('ALL'); }}
+              onClick={() => { setSearch(''); setStatusFilter('ALL'); setProgramFilter('ALL'); }}
               className="text-xs text-[var(--brand-primary)] font-semibold hover:underline mt-1"
             >
               Clear all filters

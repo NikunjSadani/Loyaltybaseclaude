@@ -89,6 +89,18 @@ describe('VIS — Sales Visibility list', () => {
     expect(screen.getByText('Approved Store')).toBeInTheDocument();
   });
 
+  it('VIS6: the outlet-type and action-needed/sort filters are no longer rendered', async () => {
+    getSalesEligible.mockResolvedValue({ success: true, data: RESP });
+    render(<SalesVisibilityPage />);
+    await screen.findByText('Due Store');
+    // "All types" (outlet-type) and the "Action needed"/"Name A–Z" sort select are removed.
+    expect(screen.queryByText('All types')).not.toBeInTheDocument();
+    expect(screen.queryByText('Action needed')).not.toBeInTheDocument();
+    expect(screen.queryByText('Name A–Z')).not.toBeInTheDocument();
+    // The kept status filter still renders.
+    expect(screen.getByDisplayValue('All statuses')).toBeInTheDocument();
+  });
+
   it('VIS2: Capture button only for canCapture + unsatisfied window (D8)', async () => {
     getSalesEligible.mockResolvedValue({ success: true, data: RESP });
     render(<SalesVisibilityPage />);
