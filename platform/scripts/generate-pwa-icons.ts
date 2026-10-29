@@ -45,12 +45,17 @@ interface IconTenant {
   displayName: string;
   primaryColor: string;       // 6-digit hex, e.g. "#16a34a"
   logoUrl?: string;           // optional local /public path to real art
+  monogram?: boolean;         // force the monogram placeholder even if a logo file exists
+                              // (e.g. the only art is a wide wordmark, which makes a poor square icon)
 }
 
 const TENANTS: IconTenant[] = [
   // ── Registered tenants (mirror CLIENT_REGISTRY) ──
   { slug: 'deoleo',  displayName: 'Deoleo India',   primaryColor: '#16a34a', logoUrl: '/logos/deoleo.svg' },
   { slug: 'clientb', displayName: 'Client B Loyalty', primaryColor: '#2563eb', logoUrl: '/logos/clientb.svg' },
+  // Bajaj Consumer Care — only a wide wordmark exists (public/Logos/bajaj.png), so force the
+  // monogram ("BC" on the brand purple) for a clean square/maskable icon. Drop in square art later.
+  { slug: 'bajaj',   displayName: 'Bajaj Consumer Care Ltd', primaryColor: '#430441', monogram: true },
   // ── GIFSY platform-operator console (NOT in CLIENT_REGISTRY; no branding config) ──
   { slug: 'gifsy',   displayName: 'Gifsy',          primaryColor: '#111827' },
 ];
@@ -296,7 +301,7 @@ async function generateForTenant(t: IconTenant): Promise<void> {
   const outDir = join(ICONS_ROOT, t.slug);
   mkdirSync(outDir, { recursive: true });
 
-  const source = findSourceLogo(t);
+  const source = t.monogram ? null : findSourceLogo(t);
   const text = initials(t.displayName);
   const glyph = contrastColor(t.primaryColor);
   const mode = source ? `logo (${source})` : `monogram "${text}"`;
