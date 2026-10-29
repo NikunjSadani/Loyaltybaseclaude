@@ -6,11 +6,14 @@
  * TC3: the three column headers render (Current / Last month / Last 3 months).
  * TC4: program + team-member options come from the reused team-view filterOptions/members.
  * TC5: a failed refetch after a type change clears stale data + shows the error (no wrong bucket).
+ * TC6: the KPI dropdown lists the response's KPIs and defaults to the primary ('' value).
+ * TC7: changing the KPI refetches with ?kpi= and reformats the values by that KPI's unit.
+ * TC8: the card header reads "Trend Comparison".
  *
  * Run: npx vitest run src/components/sales/__tests__/trade-comparison-card.test.tsx
  */
 import React from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 vi.mock('next/link', () => ({
@@ -37,14 +40,34 @@ const TEAM_VIEW = {
   },
 };
 
+const KPI_LIST = [
+  { code: 'PRIMARY', label: 'Primary Sales', unit: 'INR' },
+  { code: 'VOL', label: 'Volume', unit: 'Litre' },
+];
+
 const COMPARISON = {
   success: true,
   data: {
-    outletType: 'SSS', program: null, kpiCode: 'PRIMARY', kpiName: 'Primary Sales',
+    outletType: 'SSS', program: null, kpiCode: 'PRIMARY', kpiName: 'Primary Sales', kpiUnit: 'INR',
+    kpis: KPI_LIST,
     buckets: {
       current:     { monthlySale: 120000, targetMet: { achieved: 8, withTarget: 10, pct: 80 } },
       lastMonth:   { monthlySale: 90000,  targetMet: { achieved: 6, withTarget: 10, pct: 60 } },
       last3Months: { monthlySale: 100000, targetMet: { achieved: null, withTarget: null, pct: 70 } },
+    },
+  },
+};
+
+// A second response for the non-INR (Litre) KPI — the backend echoes kpiUnit so the FE formats by it.
+const COMPARISON_VOL = {
+  success: true,
+  data: {
+    outletType: 'SSS', program: null, kpiCode: 'VOL', kpiName: 'Volume', kpiUnit: 'Litre',
+    kpis: KPI_LIST,
+    buckets: {
+      current:     { monthlySale: 500, targetMet: { achieved: 2, withTarget: 4, pct: 50 } },
+      lastMonth:   { monthlySale: 400, targetMet: { achieved: 1, withTarget: 4, pct: 25 } },
+      last3Months: { monthlySale: 450, targetMet: { achieved: null, withTarget: null, pct: 40 } },
     },
   },
 };
@@ -122,5 +145,46 @@ describe('TradeComparisonCard', () => {
     await waitFor(() => expect(screen.getByText(/Couldn.t load the comparison/i)).toBeInTheDocument());
     expect(screen.queryByText('₹1.2L')).not.toBeInTheDocument();
     expect(screen.queryByText('₹90K')).not.toBeInTheDocument();
+  });
+
+  it('TC6: the KPI dropdown lists the response KPIs and defaults to the primary', async () => {
+    render(<TradeComparisonCard outletType="SSS" />);
+    const kpiSelect = (await screen.findByLabelText('KPI')) as HTMLSelectElement;
+    await waitFor(() => expect(within(kpiSelect).getByRole('option', { name: 'Volume' })).toBeInTheDocument());
+    expect(within(kpiSelect).getByRole('option', { name: 'Primary KPI' })).toBeInTheDocument();
+    expect(within(kpiSelect).getByRole('option', { name: 'Primary Sales' })).toBeInTheDocument();
+    // Default selection is the primary (the '' value → the backend's primary default).
+    expect(kpiSelect.value).toBe('');
+  });
+
+  it('TC7: changing the KPI refetches with ?kpi= and reformats by that KPI unit', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (typeof url === 'string' && url.includes('/api/sales/team-view')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(TEAM_VIEW) });
+      }
+      if (typeof url === 'string' && url.includes('/api/sales/trade-comparison')) {
+        const body = url.includes('kpi=VOL') ? COMPARISON_VOL : COMPARISON;
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    });
+
+    render(<TradeComparisonCard outletType="SSS" />);
+    await waitFor(() => expect(screen.getByText('₹1.2L')).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText('KPI'), { target: { value: 'VOL' } });
+
+    // Refetch for VOL: values reformatted with the Litre unit suffix (no ₹).
+    await waitFor(() => expect(screen.getByText('500 Litre')).toBeInTheDocument());
+    expect(screen.getByText('400 Litre')).toBeInTheDocument();
+    expect(screen.getByText('450 Litre')).toBeInTheDocument();
+    // The request carried ?kpi=VOL, and the old ₹ figure is gone.
+    expect(fetchMock.mock.calls.some(([u]) => typeof u === 'string' && u.includes('kpi=VOL'))).toBe(true);
+    expect(screen.queryByText('₹1.2L')).not.toBeInTheDocument();
+  });
+
+  it('TC8: the card header reads "Trend Comparison"', async () => {
+    render(<TradeComparisonCard outletType="SSS" />);
+    expect(await screen.findByText('Trend Comparison')).toBeInTheDocument();
   });
 });

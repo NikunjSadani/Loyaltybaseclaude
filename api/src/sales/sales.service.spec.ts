@@ -2326,6 +2326,46 @@ describe('SalesService', () => {
       expect(res.buckets.current.targetMet).toEqual({ achieved: 1, withTarget: 1, pct: 100 });
     });
 
+    it('scores an explicit `kpi` (not the primary), defaults to primary when omitted/invalid, and returns the kpis list', async () => {
+      primeScope([
+        { salesUserId: 'isr1', outlet: { id: 'o1', outletCode: 'O1', programName: 'RLP', outletType: { code: 'SSS', name: 'Retailer' }, isActive: true, ...approved } },
+      ]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'PRI', label: 'Primary', unit: 'INR', isPrimary: true, order: 1, outletType: null },
+        { code: 'VOL', label: 'Volume', unit: 'Litre', isPrimary: false, order: 2, outletType: null },
+      ]);
+      // Same data every month (persistent mock) → the 3-month averages equal the single month.
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', targetValues: { PRI: 100, VOL: 50 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', kpiValues: { PRI: 120, VOL: 40 } },
+      ]);
+
+      // Default (no kpi) → PRIMARY (PRI): sale 120, 1/1 met. Plus the selectable KPI list (code+label+unit).
+      const def: any = await service.getTradeComparison(caller, {});
+      expect(def.kpiCode).toBe('PRI');
+      expect(def.kpiUnit).toBe('INR');
+      expect(def.buckets.current.monthlySale).toBe(120);
+      expect(def.buckets.current.targetMet).toEqual({ achieved: 1, withTarget: 1, pct: 100 });
+      expect(def.kpis).toEqual([
+        { code: 'PRI', label: 'Primary', unit: 'INR' },
+        { code: 'VOL', label: 'Volume', unit: 'Litre' },
+      ]);
+
+      // Explicit kpi=VOL → scored on VOL: sale 40, 0/1 met (40 < 50).
+      const vol: any = await service.getTradeComparison(caller, { kpi: 'VOL' });
+      expect(vol.kpiCode).toBe('VOL');
+      expect(vol.kpiUnit).toBe('Litre');
+      expect(vol.buckets.current.monthlySale).toBe(40);
+      expect(vol.buckets.current.targetMet).toEqual({ achieved: 0, withTarget: 1, pct: 0 });
+
+      // An unknown kpi code falls back to the primary (unchanged default).
+      const bad: any = await service.getTradeComparison(caller, { kpi: 'NOPE' });
+      expect(bad.kpiCode).toBe('PRI');
+      expect(bad.buckets.current.monthlySale).toBe(120);
+    });
+
     it('enforces the memberId IDOR guard (drill into a non-descendant → Forbidden)', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
       mockPrisma.salesUser.findMany.mockResolvedValue(edges); // 'x' not in the caller's subtree

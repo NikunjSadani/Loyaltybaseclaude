@@ -65,8 +65,10 @@ export class SalesController {
   }
 
   // Trade-comparison card: current / last-month / last-3-month-average monthly-sale + target-met for
-  // the caller's subtree, scoped by outletType/program, optional memberId drill. SO-and-above only —
-  // the method-level @Roles DROPS SALES_ISR (the leaf XSR), overriding the controller floor.
+  // the caller's subtree, scoped by outletType/program, optional memberId drill. Optional `kpi`
+  // (a KpiDef code) selects which KPI the comparison is computed for — omitted → the primary default
+  // (unchanged). SO-and-above only — the method-level @Roles DROPS SALES_ISR (the leaf XSR),
+  // overriding the controller floor.
   @Get('trade-comparison')
   @Roles('SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO')
   @RequirePermission('targets:read')
@@ -75,8 +77,9 @@ export class SalesController {
     @Query('outletType') outletType?: string,
     @Query('program') program?: string,
     @Query('memberId') memberId?: string,
+    @Query('kpi') kpi?: string,
   ) {
-    return this.sales.getTradeComparison(user, { outletType, program, memberId });
+    return this.sales.getTradeComparison(user, { outletType, program, memberId, kpi });
   }
 
   // Real per-outlet × per-KPI target vs achievement (the Outlets list page).

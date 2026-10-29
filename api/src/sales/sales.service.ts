@@ -830,27 +830,31 @@ export class SalesService {
   }
 
   /**
-   * GET /v1/sales/trade-comparison?outletType=&program=&memberId= — the sales "Trade Comparison"
+   * GET /v1/sales/trade-comparison?outletType=&program=&memberId=&kpi= — the sales "Trend Comparison"
    * card (RLP vs BSC at the UI; Bajaj-only there, but this backend is tenant-neutral + additive).
    *
    * For the caller's subtree (optionally drilled to `memberId`), narrowed by `outletType`/`program`,
    * returns three month buckets — `current`, `lastMonth`, and `last3Months` — each carrying:
-   *   • monthlySale: the PRIMARY KPI's achievement (₹) SUMMED over the in-scope outlets. The
+   *   • monthlySale: the SELECTED KPI's achievement SUMMED over the in-scope outlets. The
    *     last3Months value is the AVERAGE of the three individual months' sums.
    *   • targetMet { achieved, withTarget, pct }: computed with the SAME aggregateTargetMet ratio the
    *     team-view league table uses (KYC-approved outlets with a target>0 that hit it ÷ those with a
    *     target). last3Months.pct is the AVERAGE of the three months' pcts (null months skipped, null
    *     when all three are null); achieved/withTarget are the three-month averages (rounded detail).
    *
-   * The PRIMARY KPI is resolved PER outlet type (shared KPIs + that type's KPIs). With no outletType
-   * it falls back to the tenant primary, so a tenant with only shared (null-outletType) KPIs — e.g.
-   * live Deoleo — resolves exactly the primary it does today.
+   * The scored KPI is `kpi` when it is a valid code in the outlet-type's applicable set (shared KPIs
+   * + that type's KPIs, resolved via kpisForOutletType — the same source the dashboard uses); when
+   * `kpi` is omitted/invalid it falls back to the PRIMARY for that type. With no outletType it uses
+   * the tenant-wide set, so a tenant with only shared (null-outletType) KPIs — e.g. live Deoleo —
+   * with no `kpi` resolves exactly the primary it does today (byte-identical). The response also
+   * returns `kpis` (code + label + unit) — the selectable list the FE dropdown renders — plus the
+   * selected KPI's `kpiUnit`.
    *
    * Gated SO-and-above (the controller's @Roles drops SALES_ISR). Tenant- + subtree-scoped.
    */
   async getTradeComparison(
     user: JwtPayload,
-    opts: { memberId?: string; outletType?: string; program?: string } = {},
+    opts: { memberId?: string; outletType?: string; program?: string; kpi?: string } = {},
   ) {
     if (opts.memberId) await this.assertCanViewMember(user, opts.memberId);
 
@@ -865,15 +869,26 @@ export class SalesService {
       },
     });
 
-    // Primary KPI for the requested outlet type (shared + type-specific); null type → tenant primary.
+    // KPI catalogue for the requested outlet type. `unit` is carried so the FE dropdown can format
+    // each KPI's values (INR → compact ₹, else the unit suffix).
     const kpiDefs = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId, enabled: true },
-      select: { code: true, label: true, isPrimary: true, order: true, outletType: true },
+      select: { code: true, label: true, unit: true, isPrimary: true, order: true, outletType: true },
       orderBy: [{ order: 'asc' }, { code: 'asc' }],
     });
     const typeF = opts.outletType && opts.outletType !== 'ALL' ? opts.outletType : null;
     const progF = opts.program && opts.program !== 'ALL' ? opts.program : null;
-    const primary = primaryKpiForOutletType(kpiDefs, typeF);
+    // The KPI set applicable to this outlet type (shared + type-specific), resolved the SAME way the
+    // rest of the sales dashboard does (kpisForOutletType) — do NOT invent a second source. This is
+    // the selectable list the FE's KPI dropdown renders.
+    const applicableKpis = kpisForOutletType(kpiDefs, typeF);
+    const kpiList = applicableKpis.map((k) => ({ code: k.code, label: k.label, unit: k.unit ?? '' }));
+    // Scored KPI: the caller's `kpi` when it's a valid code in the applicable set; else the primary
+    // default (so an omitted `kpi` keeps today's exact behaviour / the unchanged initial view).
+    // primaryKpiForOutletType resolves the primary within the SAME filtered set.
+    const selected =
+      (opts.kpi ? applicableKpis.find((k) => k.code === opts.kpi) : undefined) ??
+      primaryKpiForOutletType(kpiDefs, typeF);
 
     const emptyBucket = () => ({
       monthlySale: 0,
@@ -887,15 +902,19 @@ export class SalesService {
     const base = {
       outletType: typeF,
       program: progF,
-      kpiCode: primary?.code ?? null,
-      kpiName: primary?.label ?? null,
+      kpiCode: selected?.code ?? null,
+      kpiName: selected?.label ?? null,
+      kpiUnit: selected?.unit ?? null,
+      // The full selectable KPI list (code + label + unit) so the dropdown can render without a
+      // second round-trip — present even on the empty-bucket path below.
+      kpis: kpiList,
       ...(opts.memberId && root
         ? { member: { id: root.id, name: root.user.name, roleLabel: root.hierarchyLevel.name } }
         : {}),
     };
 
     // Not a sales user, or no KPI applies to this type → stable all-zero buckets.
-    if (!root || !primary) {
+    if (!root || !selected) {
       return {
         ...base,
         buckets: { current: emptyBucket(), lastMonth: emptyBucket(), last3Months: emptyLast3() },
@@ -916,7 +935,7 @@ export class SalesService {
     // SHARED aggregate (so the ratio is identical to team-view).
     const perMonth = await Promise.all(
       months.map(async (m) => {
-        const [tMap, aMap] = await this.primaryMapsForMonth(user.clientId, m, primary.code);
+        const [tMap, aMap] = await this.primaryMapsForMonth(user.clientId, m, selected.code);
         const agg = aggregateTargetMet(rootSubtree, tMap, aMap, outletsByUser, passes);
         return {
           month: m,

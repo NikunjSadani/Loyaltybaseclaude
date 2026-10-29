@@ -19,9 +19,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { BarChart3 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Spinner } from '@/components/ui/spinner';
-import { fetchTradeComparison, type TradeComparisonResult, type TradeComparisonBucket } from '@/lib/sales-trade-comparison';
+import { fetchTradeComparison, type TradeComparisonResult, type TradeComparisonBucket, type TradeComparisonKpi } from '@/lib/sales-trade-comparison';
 import { fetchTeamView } from '@/lib/sales-team';
-import { formatInrCompact } from '@/lib/format-inr';
+import { formatInrCompact, formatCompact, isInrUnit } from '@/lib/format-inr';
 
 interface MemberOption { id: string; name: string; roleLabel: string }
 
@@ -31,6 +31,16 @@ function pctColor(pct: number | null): string {
   if (pct >= 80) return 'text-amber-600';
   if (pct >= 60) return 'text-orange-500';
   return 'text-red-500';
+}
+
+/**
+ * Format a monthly-sale value by the SELECTED KPI's unit (reusing the shared formatters): an INR
+ * unit → compact ₹ (K/L/Cr); any other unit → the compact magnitude with the unit suffix; no unit →
+ * the compact magnitude alone.
+ */
+function formatByUnit(value: number, unit?: string | null): string {
+  if (isInrUnit(unit)) return formatInrCompact(value);
+  return `${formatCompact(value)}${unit ? ` ${unit}` : ''}`;
 }
 
 /** Shared select styling (mirrors the dashboard trend-filter pills). */
@@ -80,6 +90,12 @@ export function TradeComparisonCard({ outletType }: { outletType: string }) {
   const [programOptions, setProgramOptions] = useState<string[]>([]);
   const [memberOptions, setMemberOptions] = useState<MemberOption[]>([]);
 
+  // KPI selection ('' = the primary default → unchanged initial view). The selectable KPI list comes
+  // from the comparison response's `kpis`; we keep it in its own state so it STAYS rendered while a
+  // refetch clears `data`, and so it re-populates for the outlet type's applicable set on a toggle.
+  const [kpi, setKpi] = useState('');
+  const [kpiOptions, setKpiOptions] = useState<TradeComparisonKpi[]>([]);
+
   // Filter options — one team-view call, auth-scoped to the caller's subtree.
   useEffect(() => {
     let cancelled = false;
@@ -102,15 +118,15 @@ export function TradeComparisonCard({ outletType }: { outletType: string }) {
     setLoading(true);
     setError(false);
     setData(null);
-    fetchTradeComparison(outletType, program || undefined, memberId || undefined)
+    fetchTradeComparison(outletType, program || undefined, memberId || undefined, kpi || undefined)
       .then((r) => {
         if (cancelled) return;
-        if (r) setData(r); else setError(true);
+        if (r) { setData(r); setKpiOptions(r.kpis ?? []); } else setError(true);
       })
       .catch(() => { if (!cancelled) setError(true); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [outletType, program, memberId]);
+  }, [outletType, program, memberId, kpi]);
 
   const columns = useMemo(
     () => [
@@ -134,11 +150,14 @@ export function TradeComparisonCard({ outletType }: { outletType: string }) {
       <CardHeader className="pb-2">
         <div className="flex items-center justify-between gap-2">
           <CardTitle className="flex items-center gap-2 text-sm">
-            <BarChart3 className="h-4 w-4 text-[var(--brand-primary)]" /> Trade comparison
+            <BarChart3 className="h-4 w-4 text-[var(--brand-primary)]" /> Trend Comparison
           </CardTitle>
-          {data?.kpiName && (
-            <span className="text-[11px] text-gray-400 font-medium truncate">{data.kpiName}</span>
-          )}
+          {/* KPI selector — replaces the old static KPI label. '' = the primary default (unchanged
+              initial view); the options are the outlet type's applicable KPIs from the response. */}
+          <FilterSelect label="KPI" value={kpi} onChange={setKpi} active={kpi !== ''}>
+            <option value="">Primary KPI</option>
+            {kpiOptions.map((k) => <option key={k.code} value={k.code}>{k.label}</option>)}
+          </FilterSelect>
         </div>
 
         {/* Program + team-member filters */}
@@ -178,8 +197,9 @@ export function TradeComparisonCard({ outletType }: { outletType: string }) {
               <div className="text-[11px] font-medium text-gray-600">Monthly sale</div>
               {columns.map((c) => (
                 <div key={c.key} className="text-sm font-bold text-gray-800 text-center">
-                  {/* Compact Indian ₹ (K/L/Cr) so lakhs/crores don't overflow the card. */}
-                  {formatInrCompact(data.buckets[c.key].monthlySale)}
+                  {/* Formatted by the selected KPI's unit — INR → compact ₹ (K/L/Cr) so lakhs/crores
+                      don't overflow the card; any other unit → compact value + unit suffix. */}
+                  {formatByUnit(data.buckets[c.key].monthlySale, data.kpiUnit)}
                 </div>
               ))}
             </div>
