@@ -45,6 +45,7 @@ const DEFAULT_FEATURES: Record<FeatureKey, boolean> = {
   multiLevelApproval:      true,
   rbacEnforcement:         false,
   hubbleVoucherEnabled:    false,
+  rlpBscView:              false,
 };
 
 const FEATURE_META: Record<FeatureKey, { label: string; description: string }> = {
@@ -59,6 +60,7 @@ const FEATURE_META: Record<FeatureKey, { label: string; description: string }> =
   multiLevelApproval:       { label: 'Multi-Level Approval', description: 'Require two or more approval levels' },
   rbacEnforcement:          { label: 'RBAC Enforcement',     description: 'Enforce permission checks on admin routes (requires RBAC_ENFORCEMENT env=true)' },
   hubbleVoucherEnabled:     { label: 'Hubble Voucher Auto-Issue', description: 'Auto-issue Amazon Pay vouchers on GIFT_CARD redemptions (needs Hubble setup). Leave OFF unless integrated.' },
+  rlpBscView:               { label: 'RLP/BSC Sales Toggle', description: 'Show the RLP/BSC outlet-type toggle on the sales-team dashboard. Button labels come from the outlet-type display names.' },
 };
 
 const STEPS: { key: Step; label: string }[] = [

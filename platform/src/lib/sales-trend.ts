@@ -28,11 +28,13 @@ export async function fetchTargetTrend(
   kpi?: string,
   program?: string,
   outlet?: string,
+  outletType?: string,
 ): Promise<TargetTrendResult | null> {
   const qs = new URLSearchParams();
   if (kpi) qs.set('kpi', kpi);
   if (program) qs.set('program', program);
   if (outlet) qs.set('outlet', outlet);
+  if (outletType) qs.set('outletType', outletType);
   const url = `/api/sales/target-trend${qs.toString() ? `?${qs.toString()}` : ''}`;
   try {
     const res = await fetch(url);

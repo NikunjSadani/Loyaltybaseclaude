@@ -68,7 +68,7 @@ Bajaj change. Last updated: 2026-10-29.
   lockstep, tenant-scoped. **Status:** ⏳ awaiting go.
 - Note: a **program** literally named "BSC" already exists (separate field from the type label).
 
-## 6. RLP/BSC toggle dashboard — SALES TEAM app (Bajaj-only, SO+) — SPEC'D, not built
+## 6. RLP/BSC toggle dashboard — SALES TEAM app (Bajaj-only, SO+) — BUILT + AUDITED
 - **Layout:** Tasks → My Outlets (moved up, shows ALL outlets) → **[RLP | BSC] toggle** →
   Target Achievement → **〈new comparison card〉** → Target-vs-Achievement trend → Visibility.
 - **Toggle drives:** Target Achievement, the new card, the trend chart. **Visibility hidden for BSC**
@@ -84,7 +84,17 @@ Bajaj change. Last updated: 2026-10-29.
 - **Net-new backend:** thread `outletType` through `getTargets`/`getTargetTrend`/`subtreeOutletCodes`
   (today only team-view is type-aware); per-type KpiDef dimension; new comparison endpoint;
   SO-and-above gate (compose `hasTeamView(role)` + tightened `@Roles`/level).
-- **Status:** ⏳ spec complete; build queued behind #1/#2/#5.
+- **Gate:** explicit per-tenant feature flag **`rlpBscView`** (default OFF; added to the console
+  toggles like `hubbleVoucherEnabled`), read via `useTenantFeatures('/api/sales/me')` (reliable
+  authed source, NOT the SSR `useClientConfig`). Decoupled from relabeling. **To enable for Bajaj:
+  flip `rlpBscView` ON in the GIFSY console** (labels already set via Phase A).
+- **Backend:** additive `KpiDef.outletType` + `/v1/sales/trade-comparison` (reuses team-view ratio)
+  + per-type KPI-set filtering in `getTargets`/`getTargetTrend`. **FE:** My-Outlets reorder (Bajaj-only),
+  toggle, comparison card (SO+, program+member filters, 3-period, last-3-mo averaged), Visibility hidden on BSC.
+- **Status:** ✅ **BUILT + audited + gates green (jest 3663, vitest 2788, build, tsc).** Independent
+  audits: backend byte-identical confirmed (getTeamView refactor verbatim), FE Deoleo byte-identical
+  confirmed; fixed a Bajaj targets-race + stale-data nit + switched gate to the explicit flag.
+  Deploying to staging as its own push (incl. the additive migration).
 
 ## 7. Sales-hierarchy nomenclature — ISR/SM/ZH (Bajaj) — ALREADY IN CODE, staging anomaly
 - `BAJAJ_HIERARCHY` (`employee-hierarchy.ts:72-77`): leaf **ISR** (`ISR Code`), **SO HQ, ASM HQ,
@@ -107,5 +117,19 @@ Bajaj change. Last updated: 2026-10-29.
 ---
 
 ## Deploy snapshot (staging `develop`)
-`43c7b87` serving. Pushes **PAUSED** during owner UAT (each redeploy briefly drops silent
-token-refresh on `min-instances=0` staging → intermittent logouts; prod is `min-instances=1`).
+**`ed16d51` serving** (api + frontend) — batch = VOUCHER_ISSUED + RLP/BSC Phase B + ISR fix.
+Dashboard backend (schema + migration + sales.service) remains **uncommitted/held** for its own
+push after the FE. Prod untouched; the voucher Deoleo-prod nod is still pending prod cutover.
+
+## E2E results (staging `ed16d51`, 2026-10-29) — automated, no manual UAT
+- **Phase B labels ✅** — `GET /api/settings/outlet-types` as **Bajaj → SSS="RLP", WHOLESALER="BSC"**
+  (SSS_TOT/SUB_STOCKIST unchanged); as **Deoleo → all displayName:null → "SSS"/"Wholesaler"
+  (byte-identical)**.
+- **ISR fix ✅ (data source)** — `GET /api/auth/me` as Bajaj → `clientId: bajaj` (the value
+  `useAuthClientId()` now feeds the hierarchy/outlet-master pages → ISR/SM/ZH via
+  hierarchyConfigForTenant). Rendered-header screenshot needs a Bajaj-admin login (not in hand).
+- **Voucher ✅** — live ₹500 Amazon redemption `BAJAJ-26-000005` → `DELIVERED`,
+  `voucherCode=9000000066652873` (provider Hubble). Owner's in-app bell shows **"Your Amazon
+  Voucher code: 9000000066652873"** (owner-only feed). WhatsApp `voucher_code` leg executed with
+  no "[DEV] not configured"/no send failure in logs (MSG91 configured); actual handset delivery
+  depends on the template being approved for the recipient's WhatsApp number.

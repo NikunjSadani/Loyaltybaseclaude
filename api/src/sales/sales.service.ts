@@ -10,6 +10,7 @@ import {
   type GroupIdentity,
 } from '../common/partner-group.helper';
 import { isSelfOrDescendant, descendantSalesUserIds } from './sales-hierarchy-access.helper';
+import { kpisForOutletType, primaryKpiForOutletType } from './sales-kpi-type.helper';
 import { kpiCodeKeys, currentMonthKey } from '../targets/targets.helpers';
 import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -48,6 +49,74 @@ export interface SalesEntry {
 
 /** Scopes that widen the same-level peer net for the leaderboard. */
 type LeaderboardScope = 'rm' | 'state' | 'national';
+
+/**
+ * One in-scope outlet, as rolled up from a sales user's assignments for the team-view /
+ * trade-comparison aggregates. Lifted to module scope so the shared aggregate below and the
+ * service's two consumers (getTeamView, getTradeComparison) share ONE shape.
+ */
+export type OutletScopeInfo = {
+  id: string;
+  code: string | null;
+  typeCode: string;
+  typeName: string;
+  program: string;
+  status: string;
+  isActive: boolean;
+};
+
+/** KYC states that are terminal (no further rep action) — drives the kycPending count. */
+const TERMINAL_KYC = ['APPROVED', 'REJECTED', 'NOT_INTERESTED'];
+
+/**
+ * THE shared "target-met" roll-up for a subtree of sales users — the SINGLE source of truth for
+ * the team-view league table AND the trade-comparison card (a divergent second implementation is
+ * a bug). Walks the subtree's DEDUPED, filtered (`passes`) outlets and returns:
+ *   • outlets / kycDone / kycPending — KPI-independent population counts.
+ *   • withTarget / achieved / pct    — among KYC-APPROVED outlets that carry a target>0 for the
+ *                                      scored KPI: how many hit it ÷ how many have one (pct null
+ *                                      when none have a target). This is the exact team-view ratio.
+ *   • achievedSum                    — straight sum of the KPI's achievement over ALL passing
+ *                                      deduped outlets (the trade-comparison "monthly sale"); the
+ *                                      team-view ignores it, so its output is unchanged.
+ */
+export function aggregateTargetMet(
+  subtree: Set<string>,
+  tMap: Map<string, number>,
+  aMap: Map<string, number>,
+  outletsByUser: Map<string, OutletScopeInfo[]>,
+  passes: (o: OutletScopeInfo) => boolean,
+) {
+  const seen = new Set<string>();
+  let outlets = 0,
+    kycDone = 0,
+    kycPending = 0,
+    withTarget = 0,
+    achieved = 0,
+    achievedSum = 0;
+  for (const sid of subtree) {
+    for (const o of outletsByUser.get(sid) ?? []) {
+      if (seen.has(o.id)) continue;
+      seen.add(o.id);
+      if (!passes(o)) continue;
+      outlets++;
+      const approved = o.status === 'APPROVED';
+      if (approved) kycDone++;
+      if (!TERMINAL_KYC.includes(o.status)) kycPending++;
+      // monthly-sale sum: the KPI's achievement over every passing outlet (trade-comparison only).
+      if (o.code) achievedSum += aMap.get(o.code) ?? 0;
+      if (approved && o.code) {
+        const t = tMap.get(o.code) ?? 0;
+        if (t > 0) {
+          withTarget++;
+          if ((aMap.get(o.code) ?? 0) >= t) achieved++;
+        }
+      }
+    }
+  }
+  const pct = withTarget > 0 ? Math.round((100 * achieved) / withTarget) : null;
+  return { outlets, kycDone, kycPending, withTarget, achieved, pct, achievedSum };
+}
 
 /**
  * Sales Organization — ported from platform/src/app/api/sales/* onto /v1.
@@ -423,66 +492,14 @@ export class SalesService {
       : await this.primaryMapsForMonth(user.clientId, month, kpiCode);
     const kpiMaps = overview ? await this.allKpiMapsForMonth(user.clientId, month, codes) : null;
 
-    const edges = await this.prisma.salesUser.findMany({
-      where: { user: { clientId: user.clientId }, deletedAt: null },
-      select: { id: true, reportingToId: true },
-    });
-    const rootSubtree = descendantSalesUserIds(root.id, edges);
+    // Shared scope: tenant edges + the root's subtree outlets (deduped, typed, KYC-tagged).
+    // The SAME builder feeds getTradeComparison, so the two screens never drift on scoping.
+    const { edges, rootSubtree, outletsByUser, typeSet, programSet } =
+      await this.buildOutletScope(user.clientId, root.id);
     const directReports = root.subordinates;
     const memberSubtrees = new Map<string, Set<string>>(
       directReports.map((m) => [m.id, descendantSalesUserIds(m.id, edges)]),
     );
-
-    // One assignment batch over the root subtree, with each outlet's type + program + latest KYC.
-    const assignments = await this.prisma.salesUserAssignment.findMany({
-      where: {
-        salesUserId: { in: [...rootSubtree] },
-        unassignedAt: null,
-        outletId: { not: null },
-        outlet: NOT_PARKED_OUTLET,
-      },
-      select: {
-        salesUserId: true,
-        outlet: {
-          select: {
-            id: true,
-            outletCode: true,
-            // isActive drives ONLY the VISIBILITY pseudo-KPI denominator (approved+active+in-scope).
-            // It is read unconditionally but used only when visibility is enabled — the other KPI
-            // counts/metrics never read it, so a visibility-disabled tenant stays byte-identical.
-            isActive: true,
-            programName: true,
-            outletType: { select: { code: true, name: true } },
-            partner: {
-              select: { kycSubmissions: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true } } },
-            },
-          },
-        },
-      },
-    });
-
-    type OInfo = { id: string; code: string | null; typeCode: string; typeName: string; program: string; status: string; isActive: boolean };
-    const outletsByUser = new Map<string, OInfo[]>();
-    const typeSet = new Map<string, string>();
-    const programSet = new Set<string>();
-    for (const a of assignments) {
-      const o = a.outlet;
-      if (!o) continue;
-      const info: OInfo = {
-        id: o.id,
-        code: o.outletCode,
-        typeCode: o.outletType?.code ?? '',
-        typeName: o.outletType?.name ?? o.outletType?.code ?? '',
-        program: o.programName ?? '',
-        status: o.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED',
-        isActive: !!o.isActive,
-      };
-      if (info.typeCode) typeSet.set(info.typeCode, info.typeName);
-      if (info.program) programSet.add(info.program);
-      const arr = outletsByUser.get(a.salesUserId) ?? [];
-      arr.push(info);
-      outletsByUser.set(a.salesUserId, arr);
-    }
     filterOptions.outletTypes = [...typeSet.entries()]
       .map(([code, name]) => ({ code, name }))
       .sort((x, y) => x.name.localeCompare(y.name));
@@ -490,39 +507,17 @@ export class SalesService {
 
     const typeF = opts.outletType && opts.outletType !== 'ALL' ? opts.outletType : null;
     const progF = opts.program && opts.program !== 'ALL' ? opts.program : null;
-    const passes = (o: OInfo) => (!typeF || o.typeCode === typeF) && (!progF || o.program === progF);
-    const TERMINAL = ['APPROVED', 'REJECTED', 'NOT_INTERESTED'];
+    const passes = (o: OutletScopeInfo) =>
+      (!typeF || o.typeCode === typeF) && (!progF || o.program === progF);
 
     // Roll up one subtree's (deduped, filtered) outlets into counts + the outlets-achieved metric,
     // scored against the supplied target/achievement maps (the single KPI, or one KPI in overview).
+    // Thin wrapper over the module-level aggregate so the ratio can NEVER diverge from trade-comparison.
     const aggregate = (
       subtree: Set<string>,
       tMap: Map<string, number>,
       aMap: Map<string, number>,
-    ) => {
-      const seen = new Set<string>();
-      let outlets = 0, kycDone = 0, kycPending = 0, withTarget = 0, achieved = 0;
-      for (const sid of subtree) {
-        for (const o of outletsByUser.get(sid) ?? []) {
-          if (seen.has(o.id)) continue;
-          seen.add(o.id);
-          if (!passes(o)) continue;
-          outlets++;
-          const approved = o.status === 'APPROVED';
-          if (approved) kycDone++;
-          if (!TERMINAL.includes(o.status)) kycPending++;
-          if (approved && o.code) {
-            const t = tMap.get(o.code) ?? 0;
-            if (t > 0) {
-              withTarget++;
-              if ((aMap.get(o.code) ?? 0) >= t) achieved++;
-            }
-          }
-        }
-      }
-      const pct = withTarget > 0 ? Math.round((100 * achieved) / withTarget) : null;
-      return { outlets, kycDone, kycPending, withTarget, achieved, pct };
-    };
+    ) => aggregateTargetMet(subtree, tMap, aMap, outletsByUser, passes);
 
     // ── VISIBILITY pseudo-KPI data (enabled tenants only; READ-ONLY from visibility) ──────────
     // Denominator (per subtree): in-scope (outletType ∈ visibilityConfig.outletScope), KYC-APPROVED
@@ -760,6 +755,206 @@ export class SalesService {
   }
 
   /**
+   * Shared subtree-scope builder for the team-view + trade-comparison screens: loads the tenant's
+   * reporting edges, the root's whole subtree (descendantSalesUserIds) and ONE assignment batch over
+   * that subtree, projected to OutletScopeInfo (id/code/type/program/latest-KYC/isActive) and grouped
+   * per sales user. Also returns the distinct outlet-type + program sets for the filter dropdowns.
+   * Extracted VERBATIM from getTeamView so both consumers scope identically (no divergence).
+   */
+  private async buildOutletScope(
+    clientId: string,
+    rootId: string,
+  ): Promise<{
+    edges: { id: string; reportingToId: string | null }[];
+    rootSubtree: Set<string>;
+    outletsByUser: Map<string, OutletScopeInfo[]>;
+    typeSet: Map<string, string>;
+    programSet: Set<string>;
+  }> {
+    const edges = await this.prisma.salesUser.findMany({
+      where: { user: { clientId }, deletedAt: null },
+      select: { id: true, reportingToId: true },
+    });
+    const rootSubtree = descendantSalesUserIds(rootId, edges);
+
+    // One assignment batch over the root subtree, with each outlet's type + program + latest KYC.
+    const assignments = await this.prisma.salesUserAssignment.findMany({
+      where: {
+        salesUserId: { in: [...rootSubtree] },
+        unassignedAt: null,
+        outletId: { not: null },
+        outlet: NOT_PARKED_OUTLET,
+      },
+      select: {
+        salesUserId: true,
+        outlet: {
+          select: {
+            id: true,
+            outletCode: true,
+            // isActive drives ONLY the VISIBILITY pseudo-KPI denominator (approved+active+in-scope).
+            // It is read unconditionally but used only when visibility is enabled — the other KPI
+            // counts/metrics never read it, so a visibility-disabled tenant stays byte-identical.
+            isActive: true,
+            programName: true,
+            outletType: { select: { code: true, name: true } },
+            partner: {
+              select: { kycSubmissions: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true } } },
+            },
+          },
+        },
+      },
+    });
+
+    const outletsByUser = new Map<string, OutletScopeInfo[]>();
+    const typeSet = new Map<string, string>();
+    const programSet = new Set<string>();
+    for (const a of assignments) {
+      const o = a.outlet;
+      if (!o) continue;
+      const info: OutletScopeInfo = {
+        id: o.id,
+        code: o.outletCode,
+        typeCode: o.outletType?.code ?? '',
+        typeName: o.outletType?.name ?? o.outletType?.code ?? '',
+        program: o.programName ?? '',
+        status: o.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED',
+        isActive: !!o.isActive,
+      };
+      if (info.typeCode) typeSet.set(info.typeCode, info.typeName);
+      if (info.program) programSet.add(info.program);
+      const arr = outletsByUser.get(a.salesUserId) ?? [];
+      arr.push(info);
+      outletsByUser.set(a.salesUserId, arr);
+    }
+    return { edges, rootSubtree, outletsByUser, typeSet, programSet };
+  }
+
+  /**
+   * GET /v1/sales/trade-comparison?outletType=&program=&memberId= — the sales "Trade Comparison"
+   * card (RLP vs BSC at the UI; Bajaj-only there, but this backend is tenant-neutral + additive).
+   *
+   * For the caller's subtree (optionally drilled to `memberId`), narrowed by `outletType`/`program`,
+   * returns three month buckets — `current`, `lastMonth`, and `last3Months` — each carrying:
+   *   • monthlySale: the PRIMARY KPI's achievement (₹) SUMMED over the in-scope outlets. The
+   *     last3Months value is the AVERAGE of the three individual months' sums.
+   *   • targetMet { achieved, withTarget, pct }: computed with the SAME aggregateTargetMet ratio the
+   *     team-view league table uses (KYC-approved outlets with a target>0 that hit it ÷ those with a
+   *     target). last3Months.pct is the AVERAGE of the three months' pcts (null months skipped, null
+   *     when all three are null); achieved/withTarget are the three-month averages (rounded detail).
+   *
+   * The PRIMARY KPI is resolved PER outlet type (shared KPIs + that type's KPIs). With no outletType
+   * it falls back to the tenant primary, so a tenant with only shared (null-outletType) KPIs — e.g.
+   * live Deoleo — resolves exactly the primary it does today.
+   *
+   * Gated SO-and-above (the controller's @Roles drops SALES_ISR). Tenant- + subtree-scoped.
+   */
+  async getTradeComparison(
+    user: JwtPayload,
+    opts: { memberId?: string; outletType?: string; program?: string } = {},
+  ) {
+    if (opts.memberId) await this.assertCanViewMember(user, opts.memberId);
+
+    const root = await this.prisma.salesUser.findFirst({
+      where: opts.memberId
+        ? { id: opts.memberId, deletedAt: null, user: { clientId: user.clientId } }
+        : { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
+      select: {
+        id: true,
+        user: { select: { name: true } },
+        hierarchyLevel: { select: { code: true, name: true, level: true } },
+      },
+    });
+
+    // Primary KPI for the requested outlet type (shared + type-specific); null type → tenant primary.
+    const kpiDefs = await this.prisma.kpiDef.findMany({
+      where: { clientId: user.clientId, enabled: true },
+      select: { code: true, label: true, isPrimary: true, order: true, outletType: true },
+      orderBy: [{ order: 'asc' }, { code: 'asc' }],
+    });
+    const typeF = opts.outletType && opts.outletType !== 'ALL' ? opts.outletType : null;
+    const progF = opts.program && opts.program !== 'ALL' ? opts.program : null;
+    const primary = primaryKpiForOutletType(kpiDefs, typeF);
+
+    const emptyBucket = () => ({
+      monthlySale: 0,
+      targetMet: { achieved: 0 as number | null, withTarget: 0 as number | null, pct: null as number | null },
+    });
+    // last3Months mirrors the populated path: only the averaged ratio, so achieved/withTarget = null.
+    const emptyLast3 = () => ({
+      monthlySale: 0,
+      targetMet: { achieved: null as number | null, withTarget: null as number | null, pct: null as number | null },
+    });
+    const base = {
+      outletType: typeF,
+      program: progF,
+      kpiCode: primary?.code ?? null,
+      kpiName: primary?.label ?? null,
+      ...(opts.memberId && root
+        ? { member: { id: root.id, name: root.user.name, roleLabel: root.hierarchyLevel.name } }
+        : {}),
+    };
+
+    // Not a sales user, or no KPI applies to this type → stable all-zero buckets.
+    if (!root || !primary) {
+      return {
+        ...base,
+        buckets: { current: emptyBucket(), lastMonth: emptyBucket(), last3Months: emptyLast3() },
+      };
+    }
+
+    const { rootSubtree, outletsByUser } = await this.buildOutletScope(user.clientId, root.id);
+    const passes = (o: OutletScopeInfo) =>
+      (!typeF || o.typeCode === typeF) && (!progF || o.program === progF);
+
+    // Three consecutive months ending at the current reporting month: [m-2, m-1, m].
+    const current = this.reportMonth();
+    const prev1 = this.previousMonthKey(current);
+    const prev2 = this.previousMonthKey(prev1);
+    const months = [prev2, prev1, current];
+
+    // One primary-KPI target/achievement map pair per month, rolled up over the subtree with the
+    // SHARED aggregate (so the ratio is identical to team-view).
+    const perMonth = await Promise.all(
+      months.map(async (m) => {
+        const [tMap, aMap] = await this.primaryMapsForMonth(user.clientId, m, primary.code);
+        const agg = aggregateTargetMet(rootSubtree, tMap, aMap, outletsByUser, passes);
+        return {
+          month: m,
+          monthlySale: agg.achievedSum,
+          targetMet: { achieved: agg.achieved, withTarget: agg.withTarget, pct: agg.pct },
+        };
+      }),
+    );
+    const byMonth = new Map(perMonth.map((p) => [p.month, p]));
+    const bucketOf = (m: string) => {
+      const p = byMonth.get(m)!;
+      return { monthlySale: p.monthlySale, targetMet: p.targetMet };
+    };
+
+    // last3Months: monthlySale = mean of the 3 monthly sums; targetMet.pct = mean of the NON-NULL
+    // monthly pcts (null when all three are null). achieved/withTarget are DELIBERATELY null here —
+    // the 3-month bucket exposes ONLY the averaged ratio (per spec); a mean of counts would not
+    // reconcile with the averaged pct, so there is no honest single count to show for the window.
+    const avg = (ns: number[]) => (ns.length ? ns.reduce((a, b) => a + b, 0) / ns.length : 0);
+    const nonNullPcts = perMonth
+      .map((p) => p.targetMet.pct)
+      .filter((v): v is number => v !== null);
+    const last3Months = {
+      monthlySale: Math.round(avg(perMonth.map((p) => p.monthlySale))),
+      targetMet: {
+        achieved: null as number | null,
+        withTarget: null as number | null,
+        pct: nonNullPcts.length ? Math.round(avg(nonNullPcts)) : null,
+      },
+    };
+
+    return {
+      ...base,
+      buckets: { current: bucketOf(current), lastMonth: bucketOf(prev1), last3Months },
+    };
+  }
+
+  /**
    * Resolves the caller's own SalesUser within the tenant, loads the tenant's
    * reporting edges, and verifies the target member is the caller or a descendant
    * of the caller in their reporting subtree. Throws Forbidden otherwise.
@@ -983,8 +1178,17 @@ export class SalesService {
    *             (getTargets hero card + trend) so the headline % excludes non-approved
    *             outlets, which now carry target/achievement rows after the sibling
    *             upload-relaxation change.
+   *
+   * `outletType` (optional) scopes BOTH sets to outlets of that `Outlet.outletType.code` — the
+   * hook for the RLP/BSC toggle on the Target Achievement card + trend. When OMITTED (the default)
+   * NO type filter is applied and the result is byte-identical to the pre-toggle behaviour, so
+   * tenants that never pass a type (e.g. live Deoleo) are unchanged. The extra `outletType` select
+   * is inert when no type is requested.
    */
-  private async subtreeOutletCodes(user: JwtPayload): Promise<{ all: string[]; active: string[] }> {
+  private async subtreeOutletCodes(
+    user: JwtPayload,
+    outletType?: string,
+  ): Promise<{ all: string[]; active: string[] }> {
     const su = await this.prisma.salesUser.findFirst({
       where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
       select: { id: true },
@@ -997,13 +1201,16 @@ export class SalesService {
     const subtreeIds = [...descendantSalesUserIds(su.id, edges)];
     const assignments = await this.prisma.salesUserAssignment.findMany({
       where: { salesUserId: { in: subtreeIds }, unassignedAt: null, outletId: { not: null } },
-      select: { outlet: { select: { outletCode: true, isActive: true } } },
+      select: { outlet: { select: { outletCode: true, isActive: true, outletType: { select: { code: true } } } } },
     });
+    // Only filter when a concrete type is requested; absent / 'ALL' → no filter (byte-identical).
+    const typeF = outletType && outletType !== 'ALL' ? outletType : null;
     const all = new Set<string>();
     const active = new Set<string>();
     for (const a of assignments) {
       const code = a.outlet?.outletCode;
       if (!code) continue;
+      if (typeF && a.outlet?.outletType?.code !== typeF) continue;
       all.add(code);
       if (a.outlet?.isActive) active.add(code);
     }
@@ -1018,12 +1225,14 @@ export class SalesService {
    * but scopes by the rep's + downline's active outlet assignments instead of partner
    * ownership. Also returns a 6-month trend on the PRIMARY KPI for the dashboard chart.
    */
-  async getTargets(user: JwtPayload, period?: string) {
+  async getTargets(user: JwtPayload, period?: string, outletType?: string) {
     // Hero-card KPI = APPROVED + ACTIVE outlets only (isActive:true). Non-approved
     // outlets now carry target/achievement rows (sibling upload-relaxation), but the
     // headline achievement % must reflect only the outlets that have actually come
     // live — so aggregate + count over the ACTIVE set, not every assigned outlet.
-    const { active: outletCodes } = await this.subtreeOutletCodes(user);
+    // `outletType` (optional) scopes the subtree to one Outlet.outletType.code for the RLP/BSC
+    // toggle; omitted → no type filter → byte-identical to today (Deoleo unchanged).
+    const { active: outletCodes } = await this.subtreeOutletCodes(user, outletType);
     if (outletCodes.length === 0) return { period: null, outletCount: 0, kpis: [], trend: [] };
 
     // Month to report: the caller's period, else the CURRENT calendar month (owner
@@ -1037,7 +1246,7 @@ export class SalesService {
       this.prisma.outletSalesRecord.findMany({ where: { ...whereBase, month }, select: { outletCode: true, kpiValues: true } }),
       this.prisma.kpiDef.findMany({
         where: { clientId: user.clientId },
-        select: { code: true, label: true, unit: true, isPrimary: true, order: true, rollup: true },
+        select: { code: true, label: true, unit: true, isPrimary: true, order: true, rollup: true, outletType: true },
       }),
     ]);
 
@@ -1047,10 +1256,18 @@ export class SalesService {
     const achByOutlet    = new Map(achRows.map((r) => [r.outletCode, (r.kpiValues ?? {}) as Record<string, number>]));
     const allOutletCodes = new Set([...targetByOutlet.keys(), ...achByOutlet.keys()]);
 
-    const kpiMeta = new Map(kpiRows.map((k) => [k.code, k]));
+    // Per-type KPI SET: when a concrete outletType is requested, the card shows only that type's KPI
+    // set (shared/null KPIs + that-type KPIs) — else RLP's KPIs would render over BSC outlets. When
+    // omitted / 'ALL', `kpisForOutletType` is a no-op (all KpiDefs) → Deoleo byte-identical.
+    const typeF = outletType && outletType !== 'ALL' ? outletType : null;
+    const scopedKpis = kpisForOutletType(kpiRows, typeF);
+    const kpiMeta = new Map(scopedKpis.map((k) => [k.code, k]));
+    const allowedCodes = new Set(scopedKpis.map((k) => k.code));
     const codes = new Set<string>();
-    for (const tv of targetByOutlet.values()) for (const c of kpiCodeKeys(tv)) codes.add(c);
-    for (const kv of achByOutlet.values()) for (const c of kpiCodeKeys(kv)) codes.add(c);
+    // Restrict the KPI columns to the type's set ONLY when a type filter is active; with no filter,
+    // keep the prior behaviour (any code present in the data surfaces, even one with no KpiDef).
+    for (const tv of targetByOutlet.values()) for (const c of kpiCodeKeys(tv)) if (!typeF || allowedCodes.has(c)) codes.add(c);
+    for (const kv of achByOutlet.values()) for (const c of kpiCodeKeys(kv)) if (!typeF || allowedCodes.has(c)) codes.add(c);
 
     const kpis = [...codes].map((code) => {
       const meta = kpiMeta.get(code);
@@ -1276,28 +1493,42 @@ export class SalesService {
    *   • With `outlet` → outlet-detail view: a SINGLE outlet's RAW monthly target vs achieved
    *     (always SUM — a one-outlet "0/1" count is meaningless and must match the detail card's
    *     raw cells); `program` is ignored, and the outlet must be within the caller's reach.
-   * Tenant-scoped.
+   * `outletType` (optional) scopes the DASHBOARD (aggregate) view to one Outlet.outletType.code for
+   * the RLP/BSC toggle; it is IGNORED in the single-outlet view (like `program`). Omitted → no type
+   * filter → byte-identical to today (Deoleo unchanged). Tenant-scoped.
    */
-  async getTargetTrend(user: JwtPayload, kpi?: string, program?: string, outlet?: string) {
+  async getTargetTrend(
+    user: JwtPayload,
+    kpi?: string,
+    program?: string,
+    outlet?: string,
+    outletType?: string,
+  ) {
     const month = this.reportMonth();
     const kpiRows = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId },
-      select: { code: true, label: true, unit: true, isPrimary: true, order: true, rollup: true },
+      select: { code: true, label: true, unit: true, isPrimary: true, order: true, rollup: true, outletType: true },
     });
-    const byCode = new Map(kpiRows.map((k) => [k.code, k]));
+    // A single-outlet view is a RAW per-outlet series → force SUM (and ignore program + outletType).
+    const singleOutlet = !!outlet;
+    // Per-type KPI SET for the DASHBOARD view: trend only a KPI from the requested type's set (shared
+    // + that-type KPIs). Single-outlet ignores the toggle; omitted/'ALL' → all KpiDefs (byte-identical).
+    const typeF = !singleOutlet && outletType && outletType !== 'ALL' ? outletType : null;
+    const scopedKpis = kpisForOutletType(kpiRows, typeF);
+    const byCode = new Map(scopedKpis.map((k) => [k.code, k]));
     // Default KPI = primary, else the first by configured order — same basis as getTargets.
-    const ordered = [...kpiRows].sort(
+    const ordered = [...scopedKpis].sort(
       (a, b) => a.order - b.order || Number(b.isPrimary) - Number(a.isPrimary) || a.label.localeCompare(b.label),
     );
     const meta = (kpi && byCode.get(kpi)) || ordered.find((k) => k.isPrimary) || ordered[0] || null;
-    // A single-outlet view is a RAW per-outlet series → force SUM (and ignore program).
-    const singleOutlet = !!outlet;
     const rollup: 'SUM' | 'OUTLET_COUNT' =
       singleOutlet ? 'SUM' : meta?.rollup === 'OUTLET_COUNT' ? 'OUTLET_COUNT' : 'SUM';
     const base = { kpiCode: meta?.code ?? null, kpiName: meta?.label ?? null, unit: meta?.unit ?? '', rollup };
 
     if (!meta) return { ...base, trend: this.emptyTrend(month) };
-    const { all, active } = await this.subtreeOutletCodes(user);
+    // Apply the outletType filter to the aggregate (dashboard) scope only; a single-outlet view
+    // authorizes against the FULL subtree, so leave it unfiltered there (byte-identical to today).
+    const { all, active } = await this.subtreeOutletCodes(user, singleOutlet ? undefined : outletType);
 
     let outletCodes: string[];
     if (singleOutlet) {

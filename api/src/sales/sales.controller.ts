@@ -52,10 +52,31 @@ export class SalesController {
   }
 
   // Real target vs achievement for the caller's assigned outlets (dashboard card + chart).
+  // Optional outletType scopes the card to one Outlet.outletType.code (RLP/BSC toggle); omitted →
+  // unchanged (Deoleo byte-identical).
   @Get('targets')
   @RequirePermission('targets:read')
-  getTargets(@CurrentUser() user: JwtPayload, @Query('period') period?: string) {
-    return this.sales.getTargets(user, period);
+  getTargets(
+    @CurrentUser() user: JwtPayload,
+    @Query('period') period?: string,
+    @Query('outletType') outletType?: string,
+  ) {
+    return this.sales.getTargets(user, period, outletType);
+  }
+
+  // Trade-comparison card: current / last-month / last-3-month-average monthly-sale + target-met for
+  // the caller's subtree, scoped by outletType/program, optional memberId drill. SO-and-above only —
+  // the method-level @Roles DROPS SALES_ISR (the leaf XSR), overriding the controller floor.
+  @Get('trade-comparison')
+  @Roles('SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO')
+  @RequirePermission('targets:read')
+  getTradeComparison(
+    @CurrentUser() user: JwtPayload,
+    @Query('outletType') outletType?: string,
+    @Query('program') program?: string,
+    @Query('memberId') memberId?: string,
+  ) {
+    return this.sales.getTradeComparison(user, { outletType, program, memberId });
   }
 
   // Real per-outlet × per-KPI target vs achievement (the Outlets list page).
@@ -75,8 +96,9 @@ export class SalesController {
     @Query('kpi') kpi?: string,
     @Query('program') program?: string,
     @Query('outlet') outlet?: string,
+    @Query('outletType') outletType?: string,
   ) {
-    return this.sales.getTargetTrend(user, kpi, program, outlet);
+    return this.sales.getTargetTrend(user, kpi, program, outlet, outletType);
   }
 
   // Sales team leaderboard — ranks the caller against same-level peers (scope

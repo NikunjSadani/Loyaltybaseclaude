@@ -48,6 +48,7 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     multiLevelApproval: false,
     rbacEnforcement: false,
     hubbleVoucherEnabled: false,
+    rlpBscView: false,
     partnerApp: {
       showSchemes: true,
       showInvoices: false,

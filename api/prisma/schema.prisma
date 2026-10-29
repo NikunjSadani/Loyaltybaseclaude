@@ -2899,6 +2899,15 @@ model KpiDef {
   // Stored as a string (not a Prisma enum) so the column is a plain additive, defaulted
   // migration — every existing row backfills to 'SUM', so existing tenants are unchanged.
   rollup            String   @default("SUM")
+  // Per-outlet-TYPE tag (additive, 2026-10 sales trade-comparison):
+  //   null          — SHARED KPI: applies to EVERY outlet type (the pre-existing behaviour;
+  //                   all existing rows are null, so every current tenant incl. Deoleo is
+  //                   byte-identical — nothing reads this column unless a type is requested).
+  //   'SSS' / 'WHOLESALER' / … — a type-SPECIFIC KPI (Outlet.outletType.code) surfaced only
+  //                   when that outlet type is in scope.
+  // Deliberately NOT part of @@unique([clientId, code]) and NOT backfilled: a plain nullable,
+  // defaultless additive column.
+  outletType        String?
   enabled           Boolean  @default(true)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt

@@ -60,6 +60,7 @@ export function normalizeFeatures(raw: unknown): FeatureFlags {
     multiLevelApproval:      bool(f.multiLevelApproval,      d.multiLevelApproval),
     rbacEnforcement:         bool(f.rbacEnforcement,         d.rbacEnforcement),
     hubbleVoucherEnabled:    bool(f.hubbleVoucherEnabled,    d.hubbleVoucherEnabled),
+    rlpBscView:              bool(f.rlpBscView,              d.rlpBscView),
     partnerApp: {
       showSchemes:     bool(pa.showSchemes,     d.partnerApp.showSchemes),
       showInvoices:    bool(pa.showInvoices,    d.partnerApp.showInvoices),

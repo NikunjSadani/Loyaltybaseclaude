@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { KYCStatus } from '@/types';
 import { pct, pctBarColor } from '@/lib/targets';
-import { type SalesRole, getRole, canEnroll } from '@/lib/sales-role';
+import { type SalesRole, getRole, canEnroll, hasTeamView } from '@/lib/sales-role';
 import { classifyPaceGap, buildCasesToGoMsg } from '@/lib/pace';
 import { istDateKey, istMonthKey } from '@/lib/ist-date';
 import { getGifsySettings } from '@/lib/gifsy-settings';
@@ -29,6 +29,9 @@ import { summarizeVisibilityCaptures, type VisibilitySummaryCounts } from '@/lib
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { fetchTargetTrend, type TargetTrendResult } from '@/lib/sales-trend';
 import { TargetTrendChart } from '@/components/target-trend-chart';
+import { useOutletTypeLabels } from '@/lib/platform/use-outlet-type-labels';
+import { useTenantFeatures } from '@/lib/tenant-features';
+import { TradeComparisonCard } from '@/components/sales/trade-comparison-card';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -286,6 +289,21 @@ export default function SalesDashboard() {
   const [trendProgram, setTrendProgram] = useState('');
   const [trendData, setTrendData] = useState<TargetTrendResult | null>(null);
 
+  // ── RLP/BSC outlet-type toggle ──────────────────────────────────────────────────────
+  // Gate = the EXPLICIT per-tenant feature flag `rlpBscView` (NO slug branch), read from the
+  // AUTHENTICATED, DB-backed /api/sales/me (useClientConfig's SSR value degrades to DEFAULT for
+  // DB tenants, so it is NOT reliable here). While it loads, DEFAULT_FEATURES → false → no toggle
+  // flash; Deoleo / every other tenant defaults false → the feature is inert and the dashboard
+  // renders byte-identically (no outletType is ever sent). Relabeling outlet types and enabling
+  // this toggle are INDEPENDENT decisions — the flag turns the feature on, the outlet-type display
+  // names (below) only supply the RLP/BSC button TEXT.
+  const { features: tenantFeatures, loading: featuresLoading } = useTenantFeatures('/api/sales/me');
+  const showToggle = tenantFeatures.rlpBscView;
+  // Per-tenant outlet-type display names → the toggle's button labels (RLP = SSS, BSC = WHOLESALER).
+  const outletTypeLabels = useOutletTypeLabels();
+  // Selected outlet type: 'SSS' (RLP, default) | 'WHOLESALER' (BSC). Only meaningful when shown.
+  const [outletType, setOutletType] = useState<'SSS' | 'WHOLESALER'>('SSS');
+
   useEffect(() => {
     setRoleState(getRole());
 
@@ -294,16 +312,18 @@ export default function SalesDashboard() {
       .then((r) => setSchemes(r.success ? (r.data.schemes ?? []) : []))
       .catch(() => setSchemes([]));
 
+    // NOTE: /api/sales/targets is intentionally NOT fetched here. It has a SINGLE owner — the
+    // effect below, keyed on [outletTypeLabels.loading, showToggle, outletType] — so the toggle's
+    // outlet-type scope can never be clobbered by a late-resolving unscoped mount request (audit
+    // Finding 1). Deoleo/non-toggle tenants still issue exactly ONE no-param request there.
     Promise.all([
       fetchTaskConfig(),
       fetchBanners(),
       fetch('/api/sales/outlets').then((r) => r.json()),
-      fetch('/api/sales/targets').then((r) => r.json()).catch(() => null),
       fetch('/api/kyc').then((r) => r.json()).catch(() => null),
-    ]).then(([config, { banners }, outletResult, targetResult, kycResult]) => {
+    ]).then(([config, { banners }, outletResult, kycResult]) => {
       setTaskConfig(config);
       setSalesBanners(getActiveSalesBanners(banners));
-      if (targetResult?.success) setSalesTargets(targetResult.data as SalesTargets);
       if (outletResult.success) {
         setOutlets((outletResult.data.outlets ?? []).map((o: any) => ({
           id:             o.id,
@@ -375,15 +395,40 @@ export default function SalesDashboard() {
     return () => { cancelled = true; };
   }, [outlets, role]);
 
-  /* ── Trend chart (Bajaj): fetch a filtered series when a KPI/Program is chosen ── */
+  /* ── Target Achievement — THE single owner of the /api/sales/targets fetch (audit Finding 1+2).
+       We wait until the tenant features have resolved (featuresLoading=false, which the hook always
+       settles) so we KNOW whether this tenant shows the toggle before issuing exactly ONE request:
+         • non-toggle tenant (Deoleo/others) → a single NO-PARAM request → byte-identical result.
+         • toggle tenant → a single `?outletType=<selected>` request → the default RLP (SSS) view is
+           SSS-scoped from the first paint, never the combined all-types totals.
+       A per-run `cancelled` guard means a slow earlier response can never clobber the latest
+       selection. The scoped result's `trend` also feeds the chart's default series. ── */
   useEffect(() => {
-    if (!isBajaj || (trendKpi === '' && trendProgram === '')) { setTrendData(null); return; }
+    if (featuresLoading) return;
     let cancelled = false;
-    fetchTargetTrend(trendKpi || undefined, trendProgram || undefined)
+    const url = showToggle
+      ? `/api/sales/targets?outletType=${encodeURIComponent(outletType)}`
+      : '/api/sales/targets';
+    fetch(url)
+      .then((r) => r.json())
+      .catch(() => null)
+      .then((res) => { if (!cancelled && res?.success) setSalesTargets(res.data as SalesTargets); });
+    return () => { cancelled = true; };
+  }, [featuresLoading, showToggle, outletType]);
+
+  /* ── Trend chart: fetch a filtered series when a KPI/Program is chosen (Bajaj), OR when a
+       RLP/BSC outlet type is active (toggle). When neither applies, fall back to salesTargets.trend
+       (non-toggle tenants always take this path → unchanged). ── */
+  useEffect(() => {
+    const ot = showToggle ? outletType : undefined;
+    if (!isBajaj && !ot) { setTrendData(null); return; }
+    if (trendKpi === '' && trendProgram === '' && !ot) { setTrendData(null); return; }
+    let cancelled = false;
+    fetchTargetTrend(trendKpi || undefined, trendProgram || undefined, undefined, ot)
       .then((r) => { if (!cancelled) setTrendData(r); })
       .catch(() => { if (!cancelled) setTrendData(null); });
     return () => { cancelled = true; };
-  }, [isBajaj, trendKpi, trendProgram]);
+  }, [isBajaj, showToggle, outletType, trendKpi, trendProgram]);
 
   /* ── Close search dropdown on outside click ── */
   useEffect(() => {
@@ -607,6 +652,167 @@ export default function SalesDashboard() {
     ? (trendData.rollup === 'OUTLET_COUNT' ? 'outlets' : trendData.unit)
     : (trendPrimaryKpi ? kpiUnitLabel(trendPrimaryKpi) : '');
 
+  /* ── Card fragments (extracted so the toggle can reorder them without duplicating JSX) ──
+     NON-toggle tenants render them in today's exact order (Target → Visibility → My Outlets →
+     Trend) so the layout stays byte-identical; the toggle branch moves My Outlets above the
+     toggle and inserts the comparison card. ── */
+
+  // Visibility summary stays Bajaj-scoped (isBajaj, unchanged). With the toggle shown it is RLP-only
+  // (N/A for BSC); without the toggle the `!showToggle` short-circuit keeps today's exact condition.
+  const showVisibility =
+    isBajaj && !!visibilitySummary && visibilitySummary.total > 0 && (!showToggle || outletType === 'SSS');
+
+  const myOutletsCard = (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="flex items-center gap-2">
+            <MapPin className="h-4 w-4 text-[var(--brand-primary)]" /> My Outlets
+          </CardTitle>
+          <Link href="/sales/outlets" className="text-xs font-semibold text-[var(--brand-primary)] hover:underline flex items-center gap-0.5">
+            {outlets.length} outlets <ChevronRight className="h-3.5 w-3.5" />
+          </Link>
+        </div>
+
+        {/* Search with live dropdown */}
+        <div ref={searchRef} className="relative mt-2">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setSearchOpen(true); }}
+            onFocus={() => { if (search.trim()) setSearchOpen(true); }}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') { setSearchOpen(false); setSearch(''); }
+              if (e.key === 'Enter' && search.trim()) {
+                setSearchOpen(false);
+                if (searchResults.length === 1) {
+                  const only = searchResults[0];
+                  // No submission yet → start wizard (else the empty kycId yields a
+                  // dead /sales/kyc/ → "KYC not found").
+                  window.location.href = only.kycId
+                    ? `/sales/kyc/${only.kycId}`
+                    : `/sales/kyc/new?outletId=${only.id}`;
+                } else {
+                  window.location.href = `/sales/outlets?q=${encodeURIComponent(search.trim())}`;
+                }
+              }
+            }}
+            placeholder="Search outlets by name or mobile…"
+            className="w-full pl-9 pr-3 py-2 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)] bg-white"
+            autoComplete="off"
+          />
+
+          {/* Dropdown */}
+          {searchOpen && searchResults.length > 0 && (
+            <div className="absolute left-0 right-0 top-full mt-1 bg-white rounded-xl border border-gray-200 shadow-lg z-50 overflow-hidden">
+              {searchResults.map((o) => (
+                <button
+                  key={o.id}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    setSearchOpen(false);
+                    setSearch('');
+                    // No submission yet → start wizard (else empty kycId → dead route).
+                    window.location.href = o.kycId
+                      ? `/sales/kyc/${o.kycId}`
+                      : `/sales/kyc/new?outletId=${o.id}`;
+                  }}
+                  className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-gray-50 text-left transition-colors border-b border-gray-50 last:border-0"
+                >
+                  <div className="w-8 h-8 rounded-full bg-[var(--brand-primary)]/10 flex items-center justify-center shrink-0">
+                    <span className="text-[11px] font-bold text-[var(--brand-primary)]">
+                      {o.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}
+                    </span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-gray-900 truncate">{o.name}</p>
+                    <p className="text-[11px] text-gray-400 truncate">{o.location} · {o.mobile}</p>
+                  </div>
+                  <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 bg-gray-100 text-gray-500">
+                    {o.type === 'SUB_STOCKIST' ? 'SS' : o.type === 'WHOLESALER' ? 'WS' : 'RT'}
+                  </span>
+                </button>
+              ))}
+              {/* View all results link */}
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  setSearchOpen(false);
+                  window.location.href = `/sales/outlets?q=${encodeURIComponent(search.trim())}`;
+                }}
+                className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-[var(--brand-primary)] hover:bg-[var(--brand-primary)]/5 transition-colors border-t border-gray-100"
+              >
+                <span>See all results for "{search}"</span>
+                <ChevronRight className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+
+          {/* No results */}
+          {searchOpen && search.trim() && searchResults.length === 0 && (
+            <div className="absolute left-0 right-0 top-full mt-1 bg-white rounded-xl border border-gray-200 shadow-lg z-50 px-4 py-3 text-sm text-gray-400 text-center">
+              No outlets found for "{search}"
+            </div>
+          )}
+        </div>
+      </CardHeader>
+    </Card>
+  );
+
+  const trendCard = salesTargets && (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <TrendingUp className="h-4 w-4 text-[var(--brand-primary)]" /> Target vs. Achievement
+          </CardTitle>
+          <div className="flex items-center gap-2 text-[10px] text-gray-400">
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-gray-200" /> Target</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-[var(--brand-primary)]" /> Achieved</span>
+          </div>
+        </div>
+
+        {/* KPI + Program filters — Bajaj only (other tenants keep the primary/all trend). */}
+        {isBajaj && (
+          <div className="flex items-center gap-1.5 mt-2 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
+            <div className="relative shrink-0">
+              <select
+                value={trendKpi}
+                onChange={(e) => setTrendKpi(e.target.value)}
+                className={`appearance-none text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1 bg-white focus:outline-none transition-colors cursor-pointer ${trendKpi !== '' ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-gray-200 text-gray-600 focus:border-[var(--brand-primary)]'}`}
+              >
+                <option value="">Primary KPI</option>
+                {salesTargets.kpis.map((k) => <option key={k.code} value={k.code}>{k.name}</option>)}
+              </select>
+              <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${trendKpi !== '' ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            </div>
+            {(getGifsySettings().outletPrograms ?? []).length > 0 && (
+              <div className="relative shrink-0">
+                <select
+                  value={trendProgram}
+                  onChange={(e) => setTrendProgram(e.target.value)}
+                  className={`appearance-none text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1 bg-white focus:outline-none transition-colors cursor-pointer ${trendProgram !== '' ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-gray-200 text-gray-600 focus:border-[var(--brand-primary)]'}`}
+                >
+                  <option value="">All programs</option>
+                  {(getGifsySettings().outletPrograms ?? []).map((p) => <option key={p} value={p}>{p}</option>)}
+                </select>
+                <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${trendProgram !== '' ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+              </div>
+            )}
+          </div>
+        )}
+
+        <p className="text-xs text-gray-400 mt-1">
+          Last 6 months · {chartName}
+        </p>
+      </CardHeader>
+      <CardContent className="px-2 pb-3">
+        <TargetTrendChart trend={chartTrend} unit={chartUnit} />
+      </CardContent>
+    </Card>
+  );
+
   return (
     <div className="space-y-5 fade-in">
       <div className="flex items-center justify-between">
@@ -725,165 +931,68 @@ export default function SalesDashboard() {
             </CardContent>
           </Card>
 
-          {/* ── Target Achievement (real /api/sales/targets) ── */}
-          {salesTargets && (
-            <TargetSummaryCard targets={salesTargets} />
-          )}
+          {showToggle ? (
+            /* ── Bajaj (RLP/BSC toggle shown) — My Outlets moves above the toggle, then the
+                 toggle-driven Target Achievement + comparison + (RLP-only) Visibility + trend. ── */
+            <>
+              {myOutletsCard}
 
-          {/* ── Visibility summary — 5-status, current month (Bajaj only) ── */}
-          {isBajaj && visibilitySummary && visibilitySummary.total > 0 && (
-            <VisibilitySummaryCard counts={visibilitySummary} />
-          )}
-
-          {/* ── My Outlets ── */}
-          <Card>
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <CardTitle className="flex items-center gap-2">
-                  <MapPin className="h-4 w-4 text-[var(--brand-primary)]" /> My Outlets
-                </CardTitle>
-                <Link href="/sales/outlets" className="text-xs font-semibold text-[var(--brand-primary)] hover:underline flex items-center gap-0.5">
-                  {outlets.length} outlets <ChevronRight className="h-3.5 w-3.5" />
-                </Link>
-              </div>
-
-              {/* Search with live dropdown */}
-              <div ref={searchRef} className="relative mt-2">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(e) => { setSearch(e.target.value); setSearchOpen(true); }}
-                  onFocus={() => { if (search.trim()) setSearchOpen(true); }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Escape') { setSearchOpen(false); setSearch(''); }
-                    if (e.key === 'Enter' && search.trim()) {
-                      setSearchOpen(false);
-                      if (searchResults.length === 1) {
-                        const only = searchResults[0];
-                        // No submission yet → start wizard (else the empty kycId yields a
-                        // dead /sales/kyc/ → "KYC not found").
-                        window.location.href = only.kycId
-                          ? `/sales/kyc/${only.kycId}`
-                          : `/sales/kyc/new?outletId=${only.id}`;
-                      } else {
-                        window.location.href = `/sales/outlets?q=${encodeURIComponent(search.trim())}`;
-                      }
-                    }
-                  }}
-                  placeholder="Search outlets by name or mobile…"
-                  className="w-full pl-9 pr-3 py-2 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)] bg-white"
-                  autoComplete="off"
-                />
-
-                {/* Dropdown */}
-                {searchOpen && searchResults.length > 0 && (
-                  <div className="absolute left-0 right-0 top-full mt-1 bg-white rounded-xl border border-gray-200 shadow-lg z-50 overflow-hidden">
-                    {searchResults.map((o) => (
-                      <button
-                        key={o.id}
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => {
-                          setSearchOpen(false);
-                          setSearch('');
-                          // No submission yet → start wizard (else empty kycId → dead route).
-                          window.location.href = o.kycId
-                            ? `/sales/kyc/${o.kycId}`
-                            : `/sales/kyc/new?outletId=${o.id}`;
-                        }}
-                        className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-gray-50 text-left transition-colors border-b border-gray-50 last:border-0"
-                      >
-                        <div className="w-8 h-8 rounded-full bg-[var(--brand-primary)]/10 flex items-center justify-center shrink-0">
-                          <span className="text-[11px] font-bold text-[var(--brand-primary)]">
-                            {o.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}
-                          </span>
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-semibold text-gray-900 truncate">{o.name}</p>
-                          <p className="text-[11px] text-gray-400 truncate">{o.location} · {o.mobile}</p>
-                        </div>
-                        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 bg-gray-100 text-gray-500">
-                          {o.type === 'SUB_STOCKIST' ? 'SS' : o.type === 'WHOLESALER' ? 'WS' : 'RT'}
-                        </span>
-                      </button>
-                    ))}
-                    {/* View all results link */}
+              {/* RLP / BSC segmented control — labels come from the outlet-type overrides. */}
+              <div
+                className="flex items-center gap-1 p-1 bg-gray-100 rounded-xl"
+                role="tablist"
+                aria-label="Outlet type"
+                data-testid="rlp-bsc-toggle"
+              >
+                {([
+                  { code: 'SSS' as const, fallback: 'RLP' },
+                  { code: 'WHOLESALER' as const, fallback: 'BSC' },
+                ]).map(({ code, fallback }) => {
+                  const active = outletType === code;
+                  return (
                     <button
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => {
-                        setSearchOpen(false);
-                        window.location.href = `/sales/outlets?q=${encodeURIComponent(search.trim())}`;
-                      }}
-                      className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-[var(--brand-primary)] hover:bg-[var(--brand-primary)]/5 transition-colors border-t border-gray-100"
+                      key={code}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      onClick={() => setOutletType(code)}
+                      className={`flex-1 text-xs font-semibold py-2 rounded-lg transition-colors ${active ? 'bg-white text-[var(--brand-primary)] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
                     >
-                      <span>See all results for "{search}"</span>
-                      <ChevronRight className="h-3.5 w-3.5" />
+                      {outletTypeLabels.label(code, fallback)}
                     </button>
-                  </div>
-                )}
-
-                {/* No results */}
-                {searchOpen && search.trim() && searchResults.length === 0 && (
-                  <div className="absolute left-0 right-0 top-full mt-1 bg-white rounded-xl border border-gray-200 shadow-lg z-50 px-4 py-3 text-sm text-gray-400 text-center">
-                    No outlets found for "{search}"
-                  </div>
-                )}
+                  );
+                })}
               </div>
-            </CardHeader>
-          </Card>
 
-          {/* ── Target vs Achievement — 6-month trend (KPI + Program filterable for Bajaj) ── */}
-          {salesTargets && (
-            <Card>
-              <CardHeader>
-                <div className="flex items-center justify-between gap-2">
-                  <CardTitle className="flex items-center gap-2 text-sm">
-                    <TrendingUp className="h-4 w-4 text-[var(--brand-primary)]" /> Target vs. Achievement
-                  </CardTitle>
-                  <div className="flex items-center gap-2 text-[10px] text-gray-400">
-                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-gray-200" /> Target</span>
-                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-[var(--brand-primary)]" /> Achieved</span>
-                  </div>
-                </div>
+              {salesTargets && <TargetSummaryCard targets={salesTargets} />}
 
-                {/* KPI + Program filters — Bajaj only (other tenants keep the primary/all trend). */}
-                {isBajaj && (
-                  <div className="flex items-center gap-1.5 mt-2 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
-                    <div className="relative shrink-0">
-                      <select
-                        value={trendKpi}
-                        onChange={(e) => setTrendKpi(e.target.value)}
-                        className={`appearance-none text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1 bg-white focus:outline-none transition-colors cursor-pointer ${trendKpi !== '' ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-gray-200 text-gray-600 focus:border-[var(--brand-primary)]'}`}
-                      >
-                        <option value="">Primary KPI</option>
-                        {salesTargets.kpis.map((k) => <option key={k.code} value={k.code}>{k.name}</option>)}
-                      </select>
-                      <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${trendKpi !== '' ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                    </div>
-                    {(getGifsySettings().outletPrograms ?? []).length > 0 && (
-                      <div className="relative shrink-0">
-                        <select
-                          value={trendProgram}
-                          onChange={(e) => setTrendProgram(e.target.value)}
-                          className={`appearance-none text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1 bg-white focus:outline-none transition-colors cursor-pointer ${trendProgram !== '' ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-gray-200 text-gray-600 focus:border-[var(--brand-primary)]'}`}
-                        >
-                          <option value="">All programs</option>
-                          {(getGifsySettings().outletPrograms ?? []).map((p) => <option key={p} value={p}>{p}</option>)}
-                        </select>
-                        <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${trendProgram !== '' ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                      </div>
-                    )}
-                  </div>
-                )}
+              {/* Trade comparison — SO-and-above only (hasTeamView); directly below Target Achievement. */}
+              {hasTeamView(role) && <TradeComparisonCard outletType={outletType} />}
 
-                <p className="text-xs text-gray-400 mt-1">
-                  Last 6 months · {chartName}
-                </p>
-              </CardHeader>
-              <CardContent className="px-2 pb-3">
-                <TargetTrendChart trend={chartTrend} unit={chartUnit} />
-              </CardContent>
-            </Card>
+              {/* Visibility — RLP only (N/A for BSC). */}
+              {showVisibility && visibilitySummary && <VisibilitySummaryCard counts={visibilitySummary} />}
+
+              {trendCard}
+            </>
+          ) : (
+            /* ── Deoleo / every other tenant — today's exact order, byte-identical. ── */
+            <>
+              {/* ── Target Achievement (real /api/sales/targets) ── */}
+              {salesTargets && (
+                <TargetSummaryCard targets={salesTargets} />
+              )}
+
+              {/* ── Visibility summary — 5-status, current month (Bajaj only) ── */}
+              {showVisibility && visibilitySummary && (
+                <VisibilitySummaryCard counts={visibilitySummary} />
+              )}
+
+              {/* ── My Outlets ── */}
+              {myOutletsCard}
+
+              {/* ── Target vs Achievement — 6-month trend (KPI + Program filterable for Bajaj) ── */}
+              {trendCard}
+            </>
           )}
         </>
       )}

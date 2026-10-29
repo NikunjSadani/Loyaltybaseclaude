@@ -3,9 +3,15 @@
 // and tenant scoping (clientId from the JWT) on the ported real routes.
 // Run: npx jest src/sales/sales.service.spec.ts
 
+import 'reflect-metadata'; // polyfill Reflect.getMetadata for the @Roles SO-gate assertion
 import { Test, TestingModule } from '@nestjs/testing';
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import type { ExecutionContext } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import { SalesService } from './sales.service';
+import { SalesController } from './sales.controller';
+import { RolesGuard } from '../common/guards/roles.guard';
+import { ROLES_KEY } from '../common/decorators/roles.decorator';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -2034,6 +2040,326 @@ describe('SalesService', () => {
       const res = await service.getLeaderboard(caller, 'bogus' as string, '2026-06');
       // rm behaviour: only same-reportingTo peers
       expect(res.entries.map((e) => e.name)).toEqual(['Me']);
+    });
+  });
+
+  // ─── outletType threading into getTargets (RLP/BSC toggle; omitted → byte-identical) ──────────
+  describe('getTargets — outletType scoping', () => {
+    it('OMITTED outletType → no type filter applied (Deoleo byte-identical)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { outlet: { outletCode: 'O1', isActive: true, outletType: { code: 'SSS' } } },
+        { outlet: { outletCode: 'O2', isActive: true, outletType: { code: 'WHOLESALER' } } },
+      ]);
+      mockPrisma.outletTarget.findMany
+        .mockResolvedValueOnce([
+          { outletCode: 'O1', targetValues: { K: 100 } },
+          { outletCode: 'O2', targetValues: { K: 100 } },
+        ])
+        .mockResolvedValueOnce([]); // trend
+      mockPrisma.outletSalesRecord.findMany
+        .mockResolvedValueOnce([
+          { outletCode: 'O1', kpiValues: { K: 40 } },
+          { outletCode: 'O2', kpiValues: { K: 60 } },
+        ])
+        .mockResolvedValueOnce([]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'K', label: 'K', unit: '', isPrimary: true }]);
+
+      const res = await service.getTargets(caller, '2026-05'); // no outletType
+      // BOTH outlets counted; the assignment query carries NO outletType where-filter.
+      expect(res.outletCount).toBe(2);
+      expect(res.kpis[0]).toMatchObject({ code: 'K', target: 200, achieved: 100 });
+      const where = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
+      expect(where).not.toHaveProperty('outlet.outletType');
+    });
+
+    it('PRESENT outletType → filters the subtree outlets to that type (scoped query + count)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { outlet: { outletCode: 'O1', isActive: true, outletType: { code: 'SSS' } } },
+        { outlet: { outletCode: 'O2', isActive: true, outletType: { code: 'WHOLESALER' } } },
+      ]);
+      // The real DB filters by outletCode IN (scoped) — mirror that: only O1 (SSS) comes back.
+      mockPrisma.outletTarget.findMany
+        .mockResolvedValueOnce([{ outletCode: 'O1', targetValues: { K: 100 } }])
+        .mockResolvedValueOnce([]);
+      mockPrisma.outletSalesRecord.findMany
+        .mockResolvedValueOnce([{ outletCode: 'O1', kpiValues: { K: 40 } }])
+        .mockResolvedValueOnce([]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'K', label: 'K', unit: '', isPrimary: true }]);
+
+      const res = await service.getTargets(caller, '2026-05', 'SSS');
+      // Only the SSS outlet (O1) is in scope → outletCount 1.
+      expect(res.outletCount).toBe(1);
+      // The target/achievement queries are scoped to the SSS code set {O1}.
+      expect(mockPrisma.outletTarget.findMany.mock.calls[0][0].where).toMatchObject({
+        clientId: 'deoleo',
+        outletCode: { in: ['O1'] },
+        month: '2026-05',
+      });
+      expect(res.kpis[0]).toMatchObject({ code: 'K', target: 100, achieved: 40 });
+    });
+
+    // The owner chose DIFFERENT KPI SETS per outlet type — not just a different outlet population.
+    const typeSetKpiDefs = [
+      { code: 'SHARED', label: 'Shared', unit: '', isPrimary: true, order: 1, rollup: 'SUM', outletType: null },
+      { code: 'RLP', label: 'RLP', unit: '', isPrimary: false, order: 2, rollup: 'SUM', outletType: 'SSS' },
+      { code: 'BSC', label: 'BSC', unit: '', isPrimary: false, order: 3, rollup: 'SUM', outletType: 'WHOLESALER' },
+    ];
+    function primeTypeSet() {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { outlet: { outletCode: 'O1', isActive: true, outletType: { code: 'SSS' } } },
+      ]);
+      // O1 carries data for ALL THREE KPI codes — proving the column is filtered by KPI SET, not by
+      // which codes happen to appear in the data.
+      mockPrisma.outletTarget.findMany
+        .mockResolvedValueOnce([{ outletCode: 'O1', targetValues: { SHARED: 100, RLP: 100, BSC: 100 } }])
+        .mockResolvedValueOnce([]); // trend
+      mockPrisma.outletSalesRecord.findMany
+        .mockResolvedValueOnce([{ outletCode: 'O1', kpiValues: { SHARED: 40, RLP: 50, BSC: 60 } }])
+        .mockResolvedValueOnce([]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue(typeSetKpiDefs);
+    }
+
+    it('PER-TYPE KPI SET: a type-tagged KpiDef shows only for its type; shared (null) shows always', async () => {
+      primeTypeSet();
+      const res = await service.getTargets(caller, '2026-05', 'SSS');
+      // SSS set = shared SHARED + type-specific RLP; the WHOLESALER-tagged BSC is excluded.
+      expect(res.kpis.map((k: { code: string }) => k.code).sort()).toEqual(['RLP', 'SHARED']);
+      expect(res.kpis.find((k: { code: string }) => k.code === 'BSC')).toBeUndefined();
+      // Primary resolves WITHIN the filtered set (SHARED is primary and in-set).
+      expect(res.kpis.find((k: { isPrimary: boolean; code: string }) => k.isPrimary)?.code).toBe('SHARED');
+    });
+
+    it('PER-TYPE KPI SET: omitted outletType → ALL tenant KpiDefs shown (Deoleo byte-identical)', async () => {
+      primeTypeSet();
+      const res = await service.getTargets(caller, '2026-05'); // no type
+      expect(res.kpis.map((k: { code: string }) => k.code).sort()).toEqual(['BSC', 'RLP', 'SHARED']);
+    });
+  });
+
+  // ─── outletType threading into getTargetTrend (dashboard view only) ───────────────────────────
+  describe('getTargetTrend — outletType scoping', () => {
+    beforeEach(() => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'su1', reportingToId: null }]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { outlet: { outletCode: 'O1', isActive: true, outletType: { code: 'SSS' } } },
+        { outlet: { outletCode: 'O2', isActive: true, outletType: { code: 'WHOLESALER' } } },
+      ]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'MONTH_TGT', label: 'Month Target', unit: 'cases', isPrimary: true, order: 1, rollup: 'SUM' },
+      ]);
+    });
+
+    it('PRESENT outletType → aggregate trend only sums the matching-type outlets', async () => {
+      const cur = currentMonthKey();
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', month: cur, targetValues: { MONTH_TGT: 100 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', month: cur, kpiValues: { MONTH_TGT: 40 } },
+      ]);
+      const res = await service.getTargetTrend(caller, 'MONTH_TGT', undefined, undefined, 'SSS');
+      // buildKpiTrend was called with ONLY the SSS outlet code (O1) → O2 (WHOLESALER) excluded.
+      expect(res.trend[5]).toMatchObject({ month: cur, target: 100, achieved: 40 });
+    });
+
+    it('single-outlet view IGNORES outletType (authorizes against the full subtree)', async () => {
+      const cur = currentMonthKey();
+      // O2 is WHOLESALER; requesting outletType=SSS must NOT filter it out of the single-outlet auth.
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O2', month: cur, targetValues: { MONTH_TGT: 70 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O2', month: cur, kpiValues: { MONTH_TGT: 55 } },
+      ]);
+      const res = await service.getTargetTrend(caller, 'MONTH_TGT', undefined, 'O2', 'SSS');
+      expect(res.trend[5]).toMatchObject({ month: cur, target: 70, achieved: 55 });
+    });
+
+    it('PER-TYPE KPI SET: a WHOLESALER-tagged KPI is excluded for an SSS trend (falls back to SSS primary)', async () => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'SHARED', label: 'Shared', unit: '', isPrimary: true, order: 1, rollup: 'SUM', outletType: null },
+        { code: 'BSC', label: 'BSC', unit: '', isPrimary: false, order: 2, rollup: 'SUM', outletType: 'WHOLESALER' },
+      ]);
+      const cur = currentMonthKey();
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', month: cur, targetValues: { SHARED: 100 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', month: cur, kpiValues: { SHARED: 40 } },
+      ]);
+      // Ask for the WHOLESALER KPI while scoped to SSS → not in the SSS set → default to SHARED.
+      const res = await service.getTargetTrend(caller, 'BSC', undefined, undefined, 'SSS');
+      expect(res.kpiCode).toBe('SHARED');
+      expect(res.trend[5]).toMatchObject({ month: cur, target: 100, achieved: 40 });
+    });
+  });
+
+  // ─── getTradeComparison (3-bucket monthly-sale + target-met; per-type; averaging) ─────────────
+  describe('getTradeComparison', () => {
+    const edges = [
+      { id: 'root', reportingToId: null },
+      { id: 'so1', reportingToId: 'root' },
+      { id: 'isr1', reportingToId: 'so1' },
+    ];
+    const approved = { partner: { kycSubmissions: [{ status: 'APPROVED' }] } };
+
+    function primeScope(assignments: unknown[]) {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'root',
+        user: { name: 'Root' },
+        hierarchyLevel: { code: 'ASM', name: 'ASM', level: 3 },
+      });
+      mockPrisma.salesUser.findMany.mockResolvedValue(edges);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue(assignments);
+    }
+
+    it('returns all-zero buckets when no KPI applies to the requested type', async () => {
+      primeScope([]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'BSC', label: 'BSC', isPrimary: true, order: 1, outletType: 'WHOLESALER' },
+      ]);
+      // Requesting SSS: the only KPI is WHOLESALER-specific → no primary → zero buckets.
+      const res: any = await service.getTradeComparison(caller, { outletType: 'SSS' });
+      expect(res.kpiCode).toBeNull();
+      expect(res.buckets.current).toEqual({
+        monthlySale: 0,
+        targetMet: { achieved: 0, withTarget: 0, pct: null },
+      });
+      expect(res.buckets.last3Months.targetMet.pct).toBeNull();
+    });
+
+    it('resolves the PRIMARY per outlet type and scopes outlets to that type', async () => {
+      primeScope([
+        { salesUserId: 'isr1', outlet: { id: 'o1', outletCode: 'O1', programName: 'RLP', outletType: { code: 'SSS', name: 'Retailer' }, isActive: true, ...approved } },
+        { salesUserId: 'isr1', outlet: { id: 'o2', outletCode: 'O2', programName: 'BSC', outletType: { code: 'WHOLESALER', name: 'Wholesaler' }, isActive: true, ...approved } },
+      ]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'SHARED', label: 'Shared', isPrimary: false, order: 1, outletType: null },
+        { code: 'RLP', label: 'RLP KPI', isPrimary: true, order: 2, outletType: 'SSS' },
+      ]);
+      // Same data returned for all 3 months (persistent mock) → averages equal the single value.
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', targetValues: { RLP: 100 } },
+        { outletCode: 'O2', targetValues: { RLP: 100 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', kpiValues: { RLP: 120 } }, // hit
+        { outletCode: 'O2', kpiValues: { RLP: 999 } }, // WHOLESALER → filtered out of SSS scope
+      ]);
+      const res: any = await service.getTradeComparison(caller, { outletType: 'SSS' });
+      expect(res.kpiCode).toBe('RLP'); // the SSS primary
+      // Only O1 (SSS) is in scope → monthlySale = 120, targetMet 1/1 = 100%.
+      expect(res.buckets.current).toEqual({
+        monthlySale: 120,
+        targetMet: { achieved: 1, withTarget: 1, pct: 100 },
+      });
+      // All 3 months identical → sale average matches; last3 exposes ONLY the averaged pct
+      // (achieved/withTarget are null — a mean of counts would not reconcile with the averaged ratio).
+      expect(res.buckets.last3Months).toEqual({
+        monthlySale: 120,
+        targetMet: { achieved: null, withTarget: null, pct: 100 },
+      });
+    });
+
+    it('AVERAGES the 3 months for the last3Months bucket (distinct per-month data)', async () => {
+      primeScope([
+        { salesUserId: 'isr1', outlet: { id: 'o1', outletCode: 'O1', programName: 'RLP', outletType: { code: 'SSS', name: 'Retailer' }, isActive: true, ...approved } },
+      ]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'K', label: 'K', isPrimary: true, order: 1, outletType: null },
+      ]);
+      const cur = currentMonthKey();
+      const [cy, cm] = cur.split('-').map(Number);
+      const prev1 = `${cm === 1 ? cy - 1 : cy}-${String(cm === 1 ? 12 : cm - 1).padStart(2, '0')}`;
+      const pm = cm <= 2 ? cm + 10 : cm - 2;
+      const py = cm <= 2 ? cy - 1 : cy;
+      const prev2 = `${py}-${String(pm).padStart(2, '0')}`;
+      // Target = 100 every month (so withTarget=1 each). Achievement differs: hit, hit, miss.
+      const tByMonth: Record<string, unknown[]> = {
+        [cur]: [{ outletCode: 'O1', targetValues: { K: 100 } }],
+        [prev1]: [{ outletCode: 'O1', targetValues: { K: 100 } }],
+        [prev2]: [{ outletCode: 'O1', targetValues: { K: 100 } }],
+      };
+      const aByMonth: Record<string, unknown[]> = {
+        [cur]: [{ outletCode: 'O1', kpiValues: { K: 120 } }], // hit → pct 100, sale 120
+        [prev1]: [{ outletCode: 'O1', kpiValues: { K: 90 } }], // miss → pct 0, sale 90
+        [prev2]: [{ outletCode: 'O1', kpiValues: { K: 60 } }], // miss → pct 0, sale 60
+      };
+      mockPrisma.outletTarget.findMany.mockImplementation(({ where }: any) => Promise.resolve(tByMonth[where.month] ?? []));
+      mockPrisma.outletSalesRecord.findMany.mockImplementation(({ where }: any) => Promise.resolve(aByMonth[where.month] ?? []));
+
+      const res: any = await service.getTradeComparison(caller, {});
+      expect(res.buckets.current.monthlySale).toBe(120);
+      expect(res.buckets.current.targetMet.pct).toBe(100);
+      expect(res.buckets.lastMonth.monthlySale).toBe(90);
+      expect(res.buckets.lastMonth.targetMet.pct).toBe(0);
+      // last3Months sale = mean(120,90,60) = 90; pct = mean(100,0,0) = 33 (rounded);
+      // achieved/withTarget are null (only the averaged ratio is exposed for the window).
+      expect(res.buckets.last3Months.monthlySale).toBe(90);
+      expect(res.buckets.last3Months.targetMet).toEqual({ achieved: null, withTarget: null, pct: 33 });
+    });
+
+    it('reuses the team-view ratio (KYC-approved + target>0 only) for targetMet', async () => {
+      // A NON-approved outlet with a target must be EXCLUDED from withTarget (same as team-view).
+      primeScope([
+        { salesUserId: 'isr1', outlet: { id: 'o1', outletCode: 'O1', programName: 'RLP', outletType: { code: 'SSS', name: 'Retailer' }, isActive: true, ...approved } },
+        { salesUserId: 'isr1', outlet: { id: 'o2', outletCode: 'O2', programName: 'RLP', outletType: { code: 'SSS', name: 'Retailer' }, isActive: false, partner: { kycSubmissions: [{ status: 'PENDING' }] } } },
+      ]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'K', label: 'K', isPrimary: true, order: 1, outletType: null },
+      ]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', targetValues: { K: 100 } },
+        { outletCode: 'O2', targetValues: { K: 100 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', kpiValues: { K: 120 } },
+        { outletCode: 'O2', kpiValues: { K: 500 } }, // pending outlet: counts toward sale, NOT target-met
+      ]);
+      const res: any = await service.getTradeComparison(caller, {});
+      // monthlySale sums BOTH outlets (120+500=620); target-met only the approved O1 → 1/1.
+      expect(res.buckets.current.monthlySale).toBe(620);
+      expect(res.buckets.current.targetMet).toEqual({ achieved: 1, withTarget: 1, pct: 100 });
+    });
+
+    it('enforces the memberId IDOR guard (drill into a non-descendant → Forbidden)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
+      mockPrisma.salesUser.findMany.mockResolvedValue(edges); // 'x' not in the caller's subtree
+      await expect(service.getTradeComparison(caller, { memberId: 'x' })).rejects.toThrow('Forbidden');
+    });
+  });
+
+  // ─── SO-and-above gate on the trade-comparison route (XSR/SALES_ISR excluded) ─────────────────
+  describe('trade-comparison SO-gate', () => {
+    // The gate is the method-level @Roles on the controller route (overrides the class floor).
+    it('@Roles drops SALES_ISR and keeps SO-and-above', () => {
+      const roles: string[] = Reflect.getMetadata(
+        ROLES_KEY,
+        SalesController.prototype.getTradeComparison,
+      );
+      expect(roles).toEqual(['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO']);
+      expect(roles).not.toContain('SALES_ISR');
+    });
+
+    it('RolesGuard with those roles BLOCKS SALES_ISR and ALLOWS SALES_SO', () => {
+      const roles: string[] = Reflect.getMetadata(
+        ROLES_KEY,
+        SalesController.prototype.getTradeComparison,
+      );
+      const reflector = { getAllAndOverride: jest.fn().mockReturnValue(roles) } as unknown as Reflector;
+      const guard = new RolesGuard(reflector);
+      const ctx = (role: string) =>
+        ({
+          switchToHttp: () => ({ getRequest: () => ({ user: { role } }) }),
+          getHandler: () => SalesController.prototype.getTradeComparison,
+          getClass: () => SalesController,
+        }) as unknown as ExecutionContext;
+      expect(guard.canActivate(ctx('SALES_SO'))).toBe(true);
+      expect(() => guard.canActivate(ctx('SALES_ISR'))).toThrow(ForbiddenException);
     });
   });
 });

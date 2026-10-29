@@ -45,6 +45,12 @@ export interface FeatureFlags {
   // item carries a Hubble productId auto-issues the Amazon Pay voucher (Bajaj-only). This IS
   // a gifsy-console toggle (included in FeatureKey). Default OFF; Deoleo stays OFF.
   hubbleVoucherEnabled: boolean;
+  // RLP/BSC sales-dashboard outlet-type toggle: when ON, the sales-team dashboard shows the
+  // RLP (SSS) / BSC (WHOLESALER) segmented control that scopes Target Achievement, the trade
+  // comparison and the trend chart, and gates Visibility to RLP. Independent of outlet-type
+  // RELABELING (the button text still comes from the per-tenant outlet-type displayNames). This
+  // IS a gifsy-console toggle (included in FeatureKey). Default OFF; Deoleo stays OFF.
+  rlpBscView: boolean;
 
   // Partner app tab visibility (CLIENT_ADMIN cannot change these)
   partnerApp: {

@@ -29,6 +29,7 @@ const FEATURE_META: Record<FeatureKey, { label: string; description: string }> =
   multiLevelApproval:       { label: 'Multi-Level Approval', description: 'Require two or more approval levels in hierarchy' },
   rbacEnforcement:          { label: 'RBAC Enforcement',     description: 'Enforce permission checks on admin routes for this tenant (requires RBAC_ENFORCEMENT env=true)' },
   hubbleVoucherEnabled:     { label: 'Hubble Voucher Auto-Issue', description: 'Auto-issue the Amazon Pay voucher on a GIFT_CARD redemption (needs a Hubble productId on the item + Hubble credentials). Money path — leave OFF unless integrated.' },
+  rlpBscView:               { label: 'RLP/BSC Sales Toggle', description: 'Show the RLP/BSC outlet-type toggle on the sales-team dashboard (scopes targets, comparison, trend; gates Visibility to RLP). Button labels come from the outlet-type display names.' },
 };
 
 const FEATURE_KEYS = Object.keys(FEATURE_META) as FeatureKey[];
