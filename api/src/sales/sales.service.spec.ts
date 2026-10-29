@@ -2402,6 +2402,91 @@ describe('SalesService', () => {
       expect(() => guard.canActivate(ctx('SALES_ISR'))).toThrow(ForbiddenException);
     });
   });
+
+  describe('getOutletReportee', () => {
+    // Tree: asm ─ so ─ xsr ; asm ─ so2 ─ xsr3 (so2 is a SIBLING branch under the same ASM).
+    const REPORTEE_EDGES = [
+      { id: 'asm', reportingToId: null },
+      { id: 'so', reportingToId: 'asm' },
+      { id: 'so2', reportingToId: 'asm' },
+      { id: 'xsr', reportingToId: 'so' },
+      { id: 'xsr3', reportingToId: 'so2' },
+    ];
+
+    it('returns null without hitting the DB when no outletId is given', async () => {
+      const res = await service.getOutletReportee(caller, undefined);
+      expect(res).toEqual({ immediateReportee: null });
+      expect(mockPrisma.salesUser.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('a manager two levels up gets the DIRECT report (SO), not the leaf rep (XSR)', async () => {
+      // Viewer = ASM; outlet assigned to the leaf XSR (ASM → so → xsr). Must resolve to SO.
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'asm' }) // viewer
+        .mockResolvedValueOnce({ user: { name: 'SO One', phone: '9900000001' } }); // reportee
+      mockPrisma.salesUser.findMany.mockResolvedValue(REPORTEE_EDGES);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ salesUserId: 'xsr' }]);
+
+      const res = await service.getOutletReportee(caller, 'outlet-1');
+      expect(res).toEqual({ immediateReportee: { name: 'SO One', phone: '9900000001' } });
+      // The reportee lookup targeted the DIRECT report 'so' (not the leaf 'xsr'), tenant-scoped.
+      expect(mockPrisma.salesUser.findFirst).toHaveBeenLastCalledWith({
+        where: { id: 'so', deletedAt: null, user: { clientId: 'deoleo' } },
+        select: { user: { select: { name: true, phone: true } } },
+      });
+    });
+
+    it('resolves to the correct branch when the manager has sibling reports', async () => {
+      // Viewer = ASM; outlet under so2's branch (xsr3) → the DIRECT report is so2, not so.
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'asm' })
+        .mockResolvedValueOnce({ user: { name: 'SO Two', phone: '9900000002' } });
+      mockPrisma.salesUser.findMany.mockResolvedValue(REPORTEE_EDGES);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ salesUserId: 'xsr3' }]);
+
+      const res = await service.getOutletReportee(caller, 'outlet-2');
+      expect(res).toEqual({ immediateReportee: { name: 'SO Two', phone: '9900000002' } });
+      expect(mockPrisma.salesUser.findFirst).toHaveBeenLastCalledWith({
+        where: { id: 'so2', deletedAt: null, user: { clientId: 'deoleo' } },
+        select: { user: { select: { name: true, phone: true } } },
+      });
+    });
+
+    it('an ISR/leaf viewer gets null (no direct report to call)', async () => {
+      // Viewer = the leaf XSR; outlet assigned to that XSR → no reportee.
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce({ id: 'xsr' });
+      mockPrisma.salesUser.findMany.mockResolvedValue(REPORTEE_EDGES);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ salesUserId: 'xsr' }]);
+
+      const res = await service.getOutletReportee(caller, 'outlet-3');
+      expect(res).toEqual({ immediateReportee: null });
+      // Resolved to null → no second (reportee) lookup.
+      expect(mockPrisma.salesUser.findFirst).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns null for an outlet OUTSIDE the viewer subtree (scoping — no leak)', async () => {
+      // Viewer = so2 (subtree {so2, xsr3}); outlet assigned to xsr (so's branch) is out of reach.
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce({ id: 'so2' });
+      mockPrisma.salesUser.findMany.mockResolvedValue(REPORTEE_EDGES);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ salesUserId: 'xsr' }]);
+
+      const res = await service.getOutletReportee(caller, 'foreign-outlet');
+      expect(res).toEqual({ immediateReportee: null });
+      // The assignment query is tenant-scoped via the outlet relation (cross-tenant guard).
+      expect(mockPrisma.salesUserAssignment.findMany).toHaveBeenCalledWith({
+        where: { outletId: 'foreign-outlet', unassignedAt: null, outlet: { clientId: 'deoleo' } },
+        select: { salesUserId: true },
+      });
+      // Out of reach → no reportee lookup.
+      expect(mockPrisma.salesUser.findFirst).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns null when the caller is not a sales user', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
+      const res = await service.getOutletReportee(caller, 'outlet-4');
+      expect(res).toEqual({ immediateReportee: null });
+    });
+  });
 });
 
 // Direct coverage of the ported pure access helper (cross-tenant IDOR fix).

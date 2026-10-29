@@ -92,6 +92,57 @@ export function descendantSalesUserIds(
   return subtree;
 }
 
+/**
+ * Resolve the viewer's IMMEDIATE REPORTEE for an outlet — the viewer's DIRECT report
+ * through whom the chain of command reaches the outlet's assigned rep, so a reviewer
+ * knows whom to call to action the outlet.
+ *
+ * Returns the id of the viewer's direct report `m` such that an assigned rep is `m`
+ * itself OR a descendant of `m` (`m` ∈ the chain from the assigned rep up to the
+ * viewer). Returns null when:
+ *   • the viewer has no direct report in the chain (an ISR/leaf viewer, or the outlet is
+ *     assigned directly to the viewer with no intervening reportee), or
+ *   • none of the assigned reps sits under the viewer at all.
+ *
+ * Walks each assigned rep UP the `reportingToId` chain; the first node whose parent is
+ * the viewer is a direct report of the viewer — that is the immediate reportee. Only
+ * reps that exist in the tenant-scoped edge list are considered (the caller has already
+ * access-scoped the outlet to the viewer's subtree, so `assignedSalesUserIds` should be
+ * the reps that fall within it). Bounded + cycle-safe — no DB access, so it is unit-
+ * testable with plain arrays.
+ *
+ * @param viewerSalesUserId    the viewing manager's own SalesUser.id
+ * @param assignedSalesUserIds the outlet's active-assigned SalesUser ids
+ * @param edges                tenant-scoped {id, reportingToId} edge list
+ */
+export function immediateReporteeForOutlet(
+  viewerSalesUserId: string,
+  assignedSalesUserIds: string[],
+  edges: SalesUserEdge[],
+): string | null {
+  if (!viewerSalesUserId || assignedSalesUserIds.length === 0) return null;
+
+  const parentOf = new Map<string, string | null>();
+  for (const e of edges) parentOf.set(e.id, e.reportingToId);
+
+  for (const repId of assignedSalesUserIds) {
+    // The rep must exist in the tenant's edge list to be walkable at all.
+    if (!repId || !parentOf.has(repId)) continue;
+    const seen = new Set<string>();
+    let current: string | null = repId;
+    while (current) {
+      if (seen.has(current)) break; // cycle guard
+      seen.add(current);
+      const parent = parentOf.get(current) ?? null;
+      // `current`'s parent is the viewer → `current` is a direct report of the viewer,
+      // and it is the (inclusive) ancestor of the assigned rep = the immediate reportee.
+      if (parent === viewerSalesUserId) return current;
+      current = parent;
+    }
+  }
+  return null;
+}
+
 export interface SalesApproverNode {
   id: string;
   reportingToId: string | null;

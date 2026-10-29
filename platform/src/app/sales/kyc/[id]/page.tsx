@@ -2,8 +2,9 @@
 
 import { use, useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
-  ArrowLeft, Building2, Phone, MapPin, User,
+  ArrowLeft, Building2, Phone, MapPin, User, Users,
   CheckCircle, XCircle, Clock, AlertTriangle,
   Camera, ChevronRight, ChevronDown,
   BookOpen, Gift, HeadphonesIcon, ThumbsUp,
@@ -13,7 +14,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { KYCStatus, type ApprovalEvent, type KYCSubmitterRole } from '@/types';
-import { getRole } from '@/lib/sales-role';
+import { getRole, hasTeamView, type SalesRole } from '@/lib/sales-role';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import { visibilityApi } from '@/lib/visibility';
@@ -1101,6 +1102,60 @@ function OutletTrendCard({ outletCode }: { outletCode: string }) {
   );
 }
 
+/* ─── Immediate reportee (manager-only "whom to call") row ─────────────────────── */
+
+/**
+ * Manager-only contact line on the outlet-detail view: the viewer's IMMEDIATE REPORTEE for this
+ * outlet — the direct report through whom the chain of command reaches the outlet's assigned rep —
+ * so a reviewer knows whom to call to action it. Fetches GET /api/sales/outlet-reportee?outletId=
+ * and renders a compact "Contact: {name}" row with a tap-to-call link when a phone is present.
+ *
+ * Renders NOTHING when the backend resolves no reportee (null) — a leaf/ISR view, an outlet
+ * outside the viewer's chain, a missing phone-free name, or a failed fetch — so an ISR/leaf view
+ * and every out-of-chain outlet stay byte-identical. The caller additionally gates on
+ * hasTeamView(role) so a leaf role never even fetches; the backend is the authoritative guard.
+ */
+function ImmediateReporteeRow({ outletId }: { outletId: string }) {
+  const [reportee, setReportee] = useState<{ name: string; phone: string } | null>(null);
+
+  useEffect(() => {
+    if (!outletId) { setReportee(null); return; }
+    let cancelled = false;
+    fetch(`/api/sales/outlet-reportee?outletId=${encodeURIComponent(outletId)}`)
+      .then((r) => r.json())
+      .then((body) => {
+        if (cancelled) return;
+        setReportee(body?.success ? (body.data?.immediateReportee ?? null) : null);
+      })
+      .catch(() => { if (!cancelled) setReportee(null); });
+    return () => { cancelled = true; };
+  }, [outletId]);
+
+  // Null reportee (or a nameless one) → render nothing: no empty row.
+  if (!reportee || !reportee.name) return null;
+
+  return (
+    <div
+      data-testid="immediate-reportee-row"
+      className="flex items-center gap-2 text-xs text-gray-600 pl-11 -mt-1"
+    >
+      <Users className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+      <span className="text-gray-500">Contact:</span>
+      <span className="font-semibold text-gray-700 truncate">{reportee.name}</span>
+      {reportee.phone && (
+        <a
+          href={`tel:${reportee.phone}`}
+          data-testid="immediate-reportee-call"
+          className="flex items-center gap-1 text-[var(--brand-primary)] font-semibold shrink-0"
+        >
+          <Phone className="h-3 w-3" />
+          {reportee.phone}
+        </a>
+      )}
+    </div>
+  );
+}
+
 /* ─── Rejection modal ────────────────────────────────────────────────────────── */
 
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
@@ -1108,6 +1163,7 @@ function OutletTrendCard({ outletCode }: { outletCode: string }) {
 export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id }        = use(params);
   const slug          = useClientConfig().slug;
+  const router        = useRouter();
   const [kyc,     setKyc]     = useState<KYCDetail | null>(null);
   const [loadingKyc, setLoadingKyc] = useState(true);
 
@@ -1468,9 +1524,24 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
     <div className="space-y-4 fade-in">
       {/* Back + header */}
       <div className="flex items-center gap-3">
-        <Link href="/sales/kyc" className="p-2 rounded-lg hover:bg-gray-100 transition-colors">
+        {/* Context back: return to wherever the user came from (KYC list OR the team
+            drill-down → the member's outlets). Falls back to the KYC list on a deep link
+            with no in-app history (preserves today's default). */}
+        <button
+          type="button"
+          data-testid="outlet-detail-back"
+          onClick={() => {
+            if (typeof window !== 'undefined' && window.history.length <= 1) {
+              router.push('/sales/kyc');
+            } else {
+              router.back();
+            }
+          }}
+          className="p-2 rounded-lg hover:bg-gray-100 transition-colors"
+          aria-label="Back"
+        >
           <ArrowLeft className="h-4 w-4 text-gray-600" />
-        </Link>
+        </button>
         <div className="flex-1 min-w-0">
           <h1 className="text-base font-bold text-gray-900 truncate">{kyc.outletName || kyc.firmName}</h1>
           <div className="flex items-center gap-2 flex-wrap mt-0.5">
@@ -1501,6 +1572,12 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
         </div>
         {statusCfg && <Badge variant={statusCfg.variant} className="shrink-0">{statusCfg.label}</Badge>}
       </div>
+
+      {/* Immediate reportee — manager-only "whom to call to action this outlet". Self-hides for a
+          leaf/ISR viewer, an outlet outside the viewer's chain, or no reportee (byte-identical). */}
+      {hasTeamView(role as SalesRole) && kyc.outletId && (
+        <ImmediateReporteeRow outletId={kyc.outletId} />
+      )}
 
       {/* Rejection banner */}
       {kyc.rejectionReason && (

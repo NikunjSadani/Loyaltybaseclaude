@@ -9,7 +9,11 @@ import {
   resolveGroupCarryForwardDocs,
   type GroupIdentity,
 } from '../common/partner-group.helper';
-import { isSelfOrDescendant, descendantSalesUserIds } from './sales-hierarchy-access.helper';
+import {
+  isSelfOrDescendant,
+  descendantSalesUserIds,
+  immediateReporteeForOutlet,
+} from './sales-hierarchy-access.helper';
 import { kpisForOutletType, primaryKpiForOutletType } from './sales-kpi-type.helper';
 import { kpiCodeKeys, currentMonthKey } from '../targets/targets.helpers';
 import { TenantService } from '../tenant/tenant.service';
@@ -997,6 +1001,75 @@ export class SalesService {
     if (!isSelfOrDescendant(memberId, callerSalesUser.id, edges)) {
       throw new ForbiddenException('Forbidden');
     }
+  }
+
+  /**
+   * GET /v1/sales/outlet-reportee?outletId= — the viewing manager's IMMEDIATE REPORTEE for a
+   * single outlet (the outlet-detail view's "whom to call to action this outlet" line).
+   *
+   * Returns `{ immediateReportee: { name, phone } | null }`:
+   *   • the viewer's DIRECT report through whom the chain of command reaches the outlet's
+   *     assigned rep (the direct report `m` such that an assigned rep is `m` or a descendant
+   *     of `m`), with that reportee's contact name + phone; else
+   *   • null when the viewer is not a manager / has no reportee in the chain (an ISR or leaf
+   *     view), OR when the outlet is NOT within the viewer's reach (cross-scope / forged id).
+   *
+   * SCOPING: reuses the SAME outlet-access rule the rest of /sales uses — an outlet is in the
+   * viewer's reach iff it is actively assigned to someone in the viewer's reporting subtree
+   * (descendantSalesUserIds). The assignment query is tenant-scoped (outlet.clientId), and only
+   * assigned reps that fall inside the viewer's subtree are considered, so an outlet outside the
+   * subtree (or another tenant's) can never reveal a reportee.
+   */
+  async getOutletReportee(
+    user: JwtPayload,
+    outletId?: string,
+  ): Promise<{ immediateReportee: { name: string; phone: string } | null }> {
+    const none = { immediateReportee: null };
+    if (!outletId) return none;
+
+    // Resolve the viewer's own SalesUser (tenant-scoped). A non-sales caller → nothing.
+    const viewer = await this.prisma.salesUser.findFirst({
+      where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true },
+    });
+    if (!viewer) return none;
+
+    // Tenant reporting edges → the viewer's whole subtree (the access boundary).
+    const edges = await this.prisma.salesUser.findMany({
+      where: { user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true, reportingToId: true },
+    });
+    const subtree = descendantSalesUserIds(viewer.id, edges);
+
+    // The outlet's active assignments, tenant-scoped via the outlet relation. Only the reps
+    // that fall inside the viewer's subtree make the outlet accessible to the viewer — if none
+    // do, the outlet is out of the viewer's reach (cross-scope / forged id) → leak nothing.
+    const assignments = await this.prisma.salesUserAssignment.findMany({
+      where: { outletId, unassignedAt: null, outlet: { clientId: user.clientId } },
+      select: { salesUserId: true },
+    });
+    const assignedInSubtree = [
+      ...new Set(assignments.map((a) => a.salesUserId).filter((sid) => subtree.has(sid))),
+    ];
+    if (assignedInSubtree.length === 0) return none;
+
+    // The viewer's DIRECT report through whom the chain reaches an assigned rep. Null for a
+    // leaf viewer, or when the outlet is assigned directly to the viewer (no reportee to call).
+    const reporteeId = immediateReporteeForOutlet(viewer.id, assignedInSubtree, edges);
+    if (!reporteeId) return none;
+
+    const reportee = await this.prisma.salesUser.findFirst({
+      where: { id: reporteeId, deletedAt: null, user: { clientId: user.clientId } },
+      select: { user: { select: { name: true, phone: true } } },
+    });
+    if (!reportee) return none;
+
+    return {
+      immediateReportee: {
+        name: reportee.user.name ?? '',
+        phone: reportee.user.phone ?? '',
+      },
+    };
   }
 
   /**

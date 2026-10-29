@@ -117,6 +117,17 @@ export class SalesController {
     return this.sales.getLeaderboard(user, scope, period);
   }
 
+  // Outlet-detail "immediate reportee" line: for a single outlet (by id), the viewing manager's
+  // DIRECT report through whom the chain reaches the outlet's assigned rep — so a reviewer knows
+  // whom to call. Returns { immediateReportee: { name, phone } | null }; null for a leaf viewer,
+  // no reportee in the chain, or an outlet outside the viewer's subtree (scoping). Must sit ABOVE
+  // the `team/:memberId` routes so 'outlet-reportee' is matched as a literal, not a :memberId.
+  @Get('outlet-reportee')
+  @RequirePermission('sales_org:read')
+  getOutletReportee(@CurrentUser() user: JwtPayload, @Query('outletId') outletId?: string) {
+    return this.sales.getOutletReportee(user, outletId);
+  }
+
   @Get('team/:memberId')
   @RequirePermission('sales_org:read')
   getMember(@CurrentUser() user: JwtPayload, @Param('memberId') memberId: string) {

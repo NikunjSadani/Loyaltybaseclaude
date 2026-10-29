@@ -22,7 +22,8 @@ vi.mock('next/link', () => ({
     <a href={href} {...props}>{children}</a>
   ),
 }));
-vi.mock('@/lib/sales-role', () => ({ getRole: () => 'XSR' }));
+// getRole pinned to XSR (a leaf) → hasTeamView false, so the manager-only reportee row never renders.
+vi.mock('@/lib/sales-role', () => ({ getRole: () => 'XSR', hasTeamView: () => false }));
 
 let mockSettings: GifsySettings = DEFAULT_SETTINGS;
 vi.mock('@/lib/gifsy-settings', async (importOriginal) => {

@@ -37,7 +37,8 @@ vi.mock('next/link', () => ({
 }));
 
 // The page reads the sales role from localStorage via getRole(); pin it to XSR.
-vi.mock('@/lib/sales-role', () => ({ getRole: () => 'XSR' }));
+// getRole pinned to XSR (a leaf) → hasTeamView false, so the manager-only reportee row never renders.
+vi.mock('@/lib/sales-role', () => ({ getRole: () => 'XSR', hasTeamView: () => false }));
 
 // useGifsySettings is still consumed by the page (other cards); pin it to defaults.
 let mockSettings: GifsySettings = DEFAULT_SETTINGS;

@@ -2,6 +2,7 @@ import {
   isSelfOrDescendant,
   descendantSalesUserIds,
   firstActiveApproverId,
+  immediateReporteeForOutlet,
 } from './sales-hierarchy-access.helper';
 
 /**
@@ -83,6 +84,60 @@ describe('firstActiveApproverId', () => {
 
   it('returns null for an unknown submitter', () => {
     expect(firstActiveApproverId('ghost', nodes())).toBeNull();
+  });
+});
+
+describe('immediateReporteeForOutlet', () => {
+  // Tree (see top of file): asm ─ so ─ {xsr, xsr2}; asm ─ so2 ─ xsr3; rsm ─ asm; nsm ─ rsm.
+
+  it('returns the DIRECT report (one level up) when the outlet is assigned to a leaf rep', () => {
+    // SO viewing an outlet assigned to their own XSR → the XSR IS the direct report.
+    expect(immediateReporteeForOutlet('so', ['xsr'], EDGES)).toBe('xsr');
+  });
+
+  it('two levels up resolves to the DIRECT report, not the leaf rep', () => {
+    // ASM viewing an outlet assigned to xsr (ASM → so → xsr): the ASM must be told to call SO.
+    expect(immediateReporteeForOutlet('asm', ['xsr'], EDGES)).toBe('so');
+  });
+
+  it('three levels up resolves to the DIRECT report', () => {
+    // RSM viewing the same outlet: RSM → asm → so → xsr ⇒ the RSM calls ASM.
+    expect(immediateReporteeForOutlet('rsm', ['xsr'], EDGES)).toBe('asm');
+  });
+
+  it('resolves across the correct branch when siblings exist', () => {
+    // ASM has two direct reports (so, so2). An outlet under so2's branch → so2.
+    expect(immediateReporteeForOutlet('asm', ['xsr3'], EDGES)).toBe('so2');
+  });
+
+  it('returns null for a leaf viewer (an ISR with no reports)', () => {
+    expect(immediateReporteeForOutlet('xsr', ['xsr'], EDGES)).toBeNull();
+  });
+
+  it('returns null when the outlet is assigned directly to the viewer (no reportee to call)', () => {
+    expect(immediateReporteeForOutlet('so', ['so'], EDGES)).toBeNull();
+  });
+
+  it('returns null when no assigned rep sits under the viewer (out of chain)', () => {
+    // so2's subtree is {so2, xsr3}; an outlet assigned to so's branch is out of so2's chain.
+    expect(immediateReporteeForOutlet('so2', ['xsr'], EDGES)).toBeNull();
+  });
+
+  it('ignores an assigned rep that is not in the tenant edge list', () => {
+    expect(immediateReporteeForOutlet('asm', ['ghost'], EDGES)).toBeNull();
+  });
+
+  it('returns null for no assignments', () => {
+    expect(immediateReporteeForOutlet('asm', [], EDGES)).toBeNull();
+  });
+
+  it('is cycle-safe', () => {
+    const cyclic = [
+      { id: 'a', reportingToId: 'b' },
+      { id: 'b', reportingToId: 'a' },
+    ];
+    // No node's parent is the viewer 'v' (not in the cycle) → null, and it does not hang.
+    expect(immediateReporteeForOutlet('v', ['a'], cyclic)).toBeNull();
   });
 });
 
