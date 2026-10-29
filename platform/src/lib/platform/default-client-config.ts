@@ -50,6 +50,7 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     hubbleVoucherEnabled: false,
     rlpBscView: false,
     catalogueMrpSlash: false,
+    partnerDashboardV2: false,
     partnerApp: {
       showSchemes: true,
       showInvoices: false,

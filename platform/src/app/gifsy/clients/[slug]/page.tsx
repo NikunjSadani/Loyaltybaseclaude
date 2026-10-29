@@ -31,6 +31,7 @@ const FEATURE_META: Record<FeatureKey, { label: string; description: string }> =
   hubbleVoucherEnabled:     { label: 'Hubble Voucher Auto-Issue', description: 'Auto-issue the Amazon Pay voucher on a GIFT_CARD redemption (needs a Hubble productId on the item + Hubble credentials). Money path — leave OFF unless integrated.' },
   rlpBscView:               { label: 'RLP/BSC Sales Toggle', description: 'Show the RLP/BSC outlet-type toggle on the sales-team dashboard (scopes targets, comparison, trend; gates Visibility to RLP). Button labels come from the outlet-type display names.' },
   catalogueMrpSlash:        { label: 'Catalogue MRP Slash', description: "Show each item's MRP (converted to points at the tenant's rate) as a struck-through list price above the redeem points. Only appears where an MRP is set and is above the redeem price." },
+  partnerDashboardV2:       { label: 'Partner Dashboard V2 (Trade)', description: "Bajaj trade partner dashboard: hides the trend chart, enlarges the points balance + Redeem, shows a 'to go' banner in the hero, and adds a this-month-vs-last-month primary-KPI card." },
 };
 
 const FEATURE_KEYS = Object.keys(FEATURE_META) as FeatureKey[];

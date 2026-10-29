@@ -18,6 +18,7 @@ import {
   type Banner, type Popup,
 } from '@/lib/banner';
 import { formatPoints } from '@/lib/utils';
+import { formatInrCompact, isInrUnit } from '@/lib/format-inr';
 import { buildCasesToGoMsg, classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import type { OutletType } from '@/lib/partner-session';
@@ -183,6 +184,107 @@ function PerformanceChart({ primary }: { primary: AggKpi | null }) {
   );
 }
 
+/* ─── This-month vs last-month comparison (partnerDashboardV2) ────────────────
+   Current vs previous calendar month for the PRIMARY KPI, derived from the SAME
+   trend series the chart uses (GET /api/partner/targets/trend — oldest-first
+   { month, target, achieved }). PURE + exported for unit testing. Returns nulls
+   where a month is missing so the card renders "—"/"n/a" — never NaN/Infinity.
+─────────────────────────────────────────────────────────────────────────────── */
+
+export interface MonthComparison {
+  current: number | null;      // latest month's achieved (null = no current month row)
+  previous: number | null;     // prior month's achieved (null = no previous month)
+  delta: number | null;        // current − previous (null when either is absent)
+  pctChange: number | null;    // round((delta/previous)*100); null when previous is 0/absent
+}
+
+export function computeMonthComparison(trend: TrendPoint[]): MonthComparison {
+  const n = trend.length;
+  const cur  = n >= 1 ? trend[n - 1] : null;
+  const prev = n >= 2 ? trend[n - 2] : null;
+  const current  = cur  ? (cur.achieved  ?? 0) : null;
+  const previous = prev ? (prev.achieved ?? 0) : null;
+  const delta = current !== null && previous !== null ? current - previous : null;
+  const pctChange =
+    delta !== null && previous !== null && previous > 0
+      ? Math.round((delta / previous) * 100)
+      : null;
+  return { current, previous, delta, pctChange };
+}
+
+/** Format a KPI value the way the hero does: compact ₹ for INR units, else points + unit suffix. */
+function fmtKpiValue(value: number, unit: string): string {
+  return isInrUnit(unit) ? formatInrCompact(value) : `${formatPoints(value)} ${unit}`;
+}
+
+function MonthlyComparisonCard({ primary }: { primary: AggKpi | null }) {
+  // Keep the FULL trend response — its `unit`/`kpiName` are authoritative even when the
+  // partner has history but NO current-month target (then `primary` is null, because the
+  // targets endpoint is scoped to the current period). Mirrors PerformanceChart's
+  // `trend?.unit ?? primary?.unit` so INR compact formatting stays correct.
+  const [trend, setTrend] = useState<TrendResponse | null>(null);
+  const primaryCode = primary?.code;
+
+  useEffect(() => {
+    let cancelled = false;
+    const kpiParam = primaryCode ? `&kpi=${encodeURIComponent(primaryCode)}` : '';
+    fetch(`/api/partner/targets/trend?months=24${kpiParam}`, { headers: { ...authHeader() } })
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: TrendResponse }) => {
+        if (!cancelled && json.success && json.data) setTrend(json.data);
+      })
+      .catch(() => { if (!cancelled) setTrend({ kpiName: null, unit: null, trend: [] }); }); // honest empty state
+    return () => { cancelled = true; };
+  }, [primaryCode]);
+
+  const unit  = trend?.unit ?? primary?.unit ?? 'cases';
+  const title = trend?.kpiName ?? primary?.name ?? 'Primary KPI';
+  const cmp   = computeMonthComparison(trend?.trend ?? []);
+  const deltaUp = cmp.delta !== null && cmp.delta >= 0;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-sm">
+          <TrendingUp className="h-4 w-4 text-[var(--brand-primary)]" />
+          {title} · This month vs last
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-stretch gap-3">
+          <div className="flex-1 rounded-xl bg-gray-50 px-3 py-2.5">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Last month</p>
+            <p className="text-lg font-extrabold text-gray-700 mt-0.5">
+              {cmp.previous === null ? '—' : fmtKpiValue(cmp.previous, unit)}
+            </p>
+          </div>
+          <div className="flex-1 rounded-xl px-3 py-2.5" style={{ backgroundColor: 'var(--brand-primary-light)' }}>
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">This month (so far)</p>
+            <p className="text-lg font-extrabold text-[var(--brand-primary-dark)] mt-0.5">
+              {cmp.current === null ? '—' : fmtKpiValue(cmp.current, unit)}
+            </p>
+          </div>
+        </div>
+        <div className="mt-2.5 flex items-center justify-between text-xs">
+          <span className="text-gray-400">Change vs last month</span>
+          {cmp.delta === null ? (
+            <span className="font-semibold text-gray-400">n/a</span>
+          ) : (
+            <span className={`font-bold ${deltaUp ? 'text-emerald-600' : 'text-red-600'}`}>
+              {deltaUp ? '+' : '-'}{fmtKpiValue(Math.abs(cmp.delta), unit)}
+              {cmp.pctChange !== null && (
+                <span className="ml-1 text-[11px] font-semibold">
+                  ({deltaUp ? '+' : '-'}{Math.abs(cmp.pctChange)}%)
+                </span>
+              )}
+            </span>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 /* ─── Quick actions (outlet-specific) ────────────────────────────────────── */
 
 function QuickActions({ outletType }: { outletType: OutletType }) {
@@ -245,8 +347,8 @@ function kpiView(primary: AggKpi | null, daysLeft: number, timePct: number) {
 ══════════════════════════════════════════════════════════════════════════ */
 
 function WholesalerHero({
-  primary, walletPoints, lastUpdatedLabel,
-}: { primary: AggKpi | null; walletPoints: number | null; lastUpdatedLabel?: string }) {
+  primary, walletPoints, lastUpdatedLabel, v2 = false,
+}: { primary: AggKpi | null; walletPoints: number | null; lastUpdatedLabel?: string; v2?: boolean }) {
   const { daysLeft, timePct } = computePace();
   const v = kpiView(primary, daysLeft, timePct);
   const label = primary?.name ?? 'Monthly Volume';
@@ -289,6 +391,12 @@ function WholesalerHero({
 
         <ProgressBar pct={v.achievedPct} status={v.status} />
 
+        {v2 && v.remaining > 0 && (
+          <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-white/20 px-3 py-1 text-xs font-bold text-white">
+            <Target className="h-3.5 w-3.5" /> {v.remaining} {v.unit} to go
+          </div>
+        )}
+
         {v.isMet ? (
           <p className="text-[11px] text-emerald-300 font-semibold mt-2">Target achieved 🎉</p>
         ) : v.target === 0 ? (
@@ -297,17 +405,17 @@ function WholesalerHero({
       </Link>
 
       {/* ── Zone 2: Wallet ──────────────────────────────────────────────── */}
-      <div className="border-t border-white/10 bg-black/25 px-4 py-3 flex items-center justify-between">
+      <div className={`border-t border-white/10 bg-black/25 px-4 flex items-center justify-between ${v2 ? 'py-4' : 'py-3'}`}>
         <div>
           <p className="text-[10px] text-white/40 font-medium mb-0.5">Available</p>
-          <p className="text-base font-extrabold text-white">
+          <p className={`font-extrabold text-white ${v2 ? 'text-4xl leading-none' : 'text-base'}`}>
             {walletPoints === null ? '—' : formatPoints(walletPoints)}
-            <span className="text-sm font-medium text-white/50 ml-1">pts</span>
+            <span className={`font-medium text-white/50 ml-1 ${v2 ? 'text-base' : 'text-sm'}`}>pts</span>
           </p>
         </div>
         <Link href="/partner/rewards"
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-white rounded-lg text-xs font-bold text-[var(--brand-primary)] hover:bg-white/90 active:scale-95 transition-all">
-          Redeem <ArrowRight className="h-3.5 w-3.5" />
+          className={`flex items-center gap-1.5 bg-white rounded-lg font-bold text-[var(--brand-primary)] hover:bg-white/90 active:scale-95 transition-all ${v2 ? 'px-5 py-3 text-base' : 'px-3 py-1.5 text-xs'}`}>
+          Redeem <ArrowRight className={v2 ? 'h-5 w-5' : 'h-3.5 w-3.5'} />
         </Link>
       </div>
     </div>
@@ -319,8 +427,8 @@ function WholesalerHero({
 ══════════════════════════════════════════════════════════════════════════ */
 
 function RetailerHero({
-  primary, lastUpdatedLabel,
-}: { primary: AggKpi | null; lastUpdatedLabel?: string }) {
+  primary, lastUpdatedLabel, v2 = false,
+}: { primary: AggKpi | null; lastUpdatedLabel?: string; v2?: boolean }) {
   const { daysLeft, timePct } = computePace();
   const v = kpiView(primary, daysLeft, timePct);
   const label = primary?.name ?? 'Monthly Target';
@@ -365,6 +473,12 @@ function RetailerHero({
 
         <ProgressBar pct={v.achievedPct} status={v.status} />
 
+        {v2 && v.remaining > 0 && (
+          <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-white/20 px-3 py-1 text-xs font-bold text-white">
+            <Target className="h-3.5 w-3.5" /> {v.remaining} {v.unit} to go
+          </div>
+        )}
+
         {v.isMet ? (
           <p className="text-[11px] text-emerald-300 font-semibold mt-2">Target achieved 🎉</p>
         ) : v.target === 0 ? (
@@ -382,9 +496,11 @@ function RetailerHero({
 ══════════════════════════════════════════════════════════════════════════ */
 
 function MTHero({
-  aggKpis, lastUpdatedLabel,
-}: { aggKpis: AggKpi[]; lastUpdatedLabel?: string }) {
+  aggKpis, lastUpdatedLabel, v2 = false,
+}: { aggKpis: AggKpi[]; lastUpdatedLabel?: string; v2?: boolean }) {
   const { daysLeft, timePct } = computePace();
+  const mtPrimary = aggKpis.find(k => k.isPrimary) ?? aggKpis[0] ?? null;
+  const mtRemaining = mtPrimary ? Math.max(0, mtPrimary.target - mtPrimary.achieved) : 0;
 
   const kpiRows = aggKpis.map((k) => {
     const achievedPct = pct(k.achieved, k.target);
@@ -448,6 +564,12 @@ function MTHero({
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {v2 && mtPrimary && mtRemaining > 0 && (
+          <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-white/20 px-3 py-1 text-xs font-bold text-white">
+            <Target className="h-3.5 w-3.5" /> {mtRemaining} {mtPrimary.unit} to go
           </div>
         )}
 
@@ -539,6 +661,14 @@ export default function PartnerDashboard() {
   // Outlet type is sourced from the AUTHORITATIVE /partner/me identity hook (NOT the
   // unreliable denormalized target-upload string) — see the hero selection below.
   const identity = usePartnerIdentity();
+
+  // partnerDashboardV2 (Bajaj trade) — hides the trend chart, enlarges the wallet
+  // points + Redeem, surfaces a "to go" banner in the hero, and adds a
+  // this-month-vs-last-month card. Default OFF → Deoleo renders byte-identically.
+  // Read from the EXISTING identity (/partner/me) result — normalized features from the
+  // same fetch — so there is no duplicate request and no v2=false→true flash (the page's
+  // loading gate already waits on identity.loading).
+  const v2 = !!identity.features?.partnerDashboardV2;
 
   // Touch / swipe state
   const touchStartX = React.useRef<number | null>(null);
@@ -739,15 +869,17 @@ export default function PartnerDashboard() {
       )}
 
       {/* ── 1. CURRENT CYCLE KPI HERO (outlet-specific) ── */}
-      {isWholesaler && <WholesalerHero primary={primary} walletPoints={walletPoints} lastUpdatedLabel={lastUpdatedLabel} />}
-      {isMT         && <MTHero aggKpis={aggKpis} lastUpdatedLabel={lastUpdatedLabel} />}
-      {!isWholesaler && !isMT && <RetailerHero primary={primary} lastUpdatedLabel={lastUpdatedLabel} />}
+      {isWholesaler && <WholesalerHero primary={primary} walletPoints={walletPoints} lastUpdatedLabel={lastUpdatedLabel} v2={v2} />}
+      {isMT         && <MTHero aggKpis={aggKpis} lastUpdatedLabel={lastUpdatedLabel} v2={v2} />}
+      {!isWholesaler && !isMT && <RetailerHero primary={primary} lastUpdatedLabel={lastUpdatedLabel} v2={v2} />}
 
       {/* ── 1b. ACTIVATIONS (SCHEMES) ENTRY — all outlet types (D22) ── */}
       <SchemesCard />
 
-      {/* ── 2. SALES vs TARGET CHART ── */}
-      <PerformanceChart primary={primary} />
+      {/* ── 2. SALES vs TARGET CHART (V2: replaced by the month-comparison card) ── */}
+      {v2
+        ? <MonthlyComparisonCard primary={primary} />
+        : <PerformanceChart primary={primary} />}
 
       {/* ── 3. QUICK ACTIONS ── */}
       <QuickActions outletType={outletType} />

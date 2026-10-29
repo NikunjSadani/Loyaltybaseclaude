@@ -58,6 +58,11 @@ export interface FeatureFlags {
   // genuinely higher real anchor; the FE only ever shows the slash when it is strictly greater than
   // the redeem price. This IS a gifsy-console toggle (included in FeatureKey). Default OFF; Deoleo stays OFF.
   catalogueMrpSlash: boolean;
+  // Partner Dashboard V2 (Trade): when ON, the partner home dashboard drops the Target-vs-Achievement
+  // trend chart, enlarges the wallet points balance + Redeem CTA in the wholesaler hero, surfaces a
+  // "{remaining} {unit} to go" banner in the target hero, and adds a this-month-vs-last-month primary-KPI
+  // card. Bajaj trade partner UI. This IS a gifsy-console toggle (included in FeatureKey). Default OFF; Deoleo stays OFF.
+  partnerDashboardV2: boolean;
 
   // Partner app tab visibility (CLIENT_ADMIN cannot change these)
   partnerApp: {
