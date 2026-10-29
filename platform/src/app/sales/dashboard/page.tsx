@@ -32,7 +32,7 @@ import { TargetTrendChart } from '@/components/target-trend-chart';
 import { useOutletTypeLabels } from '@/lib/platform/use-outlet-type-labels';
 import { useTenantFeatures } from '@/lib/tenant-features';
 import { TradeComparisonCard } from '@/components/sales/trade-comparison-card';
-import { formatInrCompact, isInrUnit } from '@/lib/format-inr';
+import { formatCompact, isInrUnit } from '@/lib/format-inr';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -151,8 +151,9 @@ function TargetSummaryCard({ targets }: { targets: SalesTargets }) {
               {kpis.map((k) => {
                 const p   = k.target > 0 ? pct(k.achieved, k.target) : 0;
                 const bar = pctBarColor(p);
-                // ₹ KPIs (SUM-rolled with a rupee unit) render as compact Indian ₹ (K/L/Cr) so
-                // lakhs/crores don't overflow the line; the ₹ sits in the value, so no unit suffix.
+                // ₹ KPIs (SUM-rolled with a rupee unit) render as compact Indian scale (K/L/Cr) so
+                // lakhs/crores don't overflow the line. The paired achieved/target drops the ₹ symbol
+                // (repeating it on both sides reads as congested); magnitude is clear from the K/L/Cr.
                 // Volume/count KPIs (Litre, Unit) and OUTLET_COUNT KPIs keep today's exact rendering.
                 const isInrKpi = k.rollup !== 'OUTLET_COUNT' && isInrUnit(k.unit);
                 return (
@@ -163,7 +164,7 @@ function TargetSummaryCard({ targets }: { targets: SalesTargets }) {
                       </p>
                       <span className={`text-[11px] font-bold shrink-0 ${p >= 100 ? 'text-emerald-600' : p >= 80 ? 'text-amber-600' : p >= 60 ? 'text-orange-500' : 'text-red-500'}`}>
                         {isInrKpi
-                          ? `${formatInrCompact(k.achieved)}/${formatInrCompact(k.target)} · ${p}%`
+                          ? `${formatCompact(k.achieved)}/${formatCompact(k.target)} · ${p}%`
                           : `${k.achieved.toLocaleString('en-IN')}/${k.target.toLocaleString('en-IN')}${kpiUnitLabel(k) ? ` ${kpiUnitLabel(k)}` : ''} · ${p}%`}
                       </span>
                     </div>

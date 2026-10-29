@@ -35,22 +35,29 @@ function trimTwoDp(s: string): string {
  *
  * Negatives are prefixed with `-` (e.g. `-₹5.2K`). Non-finite / NaN → `₹0`.
  */
+/** The compact magnitude body for a NON-negative amount — `582`, `5.2K`, `5.8L`, `1.23Cr`. */
+function compactBody(n: number): string {
+  if (n < 1_000) return String(Math.round(n));
+  if (n < 1_00_000) return `${trimOneDp((n / 1_000).toFixed(1))}K`;
+  if (n < 1_00_00_000) return `${trimOneDp((n / 1_00_000).toFixed(1))}L`;
+  return `${trimTwoDp((n / 1_00_00_000).toFixed(2))}Cr`;
+}
+
 export function formatInrCompact(rupees: number): string {
   if (!Number.isFinite(rupees)) return '₹0';
   const sign = rupees < 0 ? '-' : '';
-  const n = Math.abs(rupees);
+  return `${sign}₹${compactBody(Math.abs(rupees))}`;
+}
 
-  let body: string;
-  if (n < 1_000) {
-    body = String(Math.round(n));
-  } else if (n < 1_00_000) {
-    body = `${trimOneDp((n / 1_000).toFixed(1))}K`;
-  } else if (n < 1_00_00_000) {
-    body = `${trimOneDp((n / 1_00_000).toFixed(1))}L`;
-  } else {
-    body = `${trimTwoDp((n / 1_00_00_000).toFixed(2))}Cr`;
-  }
-  return `${sign}₹${body}`;
+/**
+ * Same compact Indian scale as `formatInrCompact` but WITHOUT the ₹ prefix — for tight paired
+ * displays like the Target Achievement card's `achieved/target` (where repeating ₹ on both sides
+ * reads as congested). `582`, `5.2K`, `5.8L`, `1.23Cr`; negatives `-`-prefixed; non-finite → `0`.
+ */
+export function formatCompact(rupees: number): string {
+  if (!Number.isFinite(rupees)) return '0';
+  const sign = rupees < 0 ? '-' : '';
+  return `${sign}${compactBody(Math.abs(rupees))}`;
 }
 
 /** Full-precision rupee display with Indian digit grouping — `₹1,23,45,678`. Non-finite / NaN → `₹0`. */

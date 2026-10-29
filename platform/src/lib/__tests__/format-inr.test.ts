@@ -1,5 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import { formatInrCompact, formatInrExact, isInrUnit } from '@/lib/format-inr';
+import { formatInrCompact, formatCompact, formatInrExact, isInrUnit } from '@/lib/format-inr';
+
+describe('formatCompact (no ₹ symbol — paired achieved/target displays)', () => {
+  it('matches the compact scale without the ₹ prefix', () => {
+    expect(formatCompact(0)).toBe('0');
+    expect(formatCompact(582)).toBe('582');
+    expect(formatCompact(1_000)).toBe('1K');
+    expect(formatCompact(5_200)).toBe('5.2K');
+    expect(formatCompact(5_80_000)).toBe('5.8L');
+    expect(formatCompact(1_23_00_000)).toBe('1.23Cr');
+    expect(formatCompact(-5_200)).toBe('-5.2K');
+    expect(formatCompact(Number.NaN)).toBe('0');
+  });
+});
 
 describe('formatInrCompact', () => {
   it('< 1,000 → exact integer, no decimals', () => {
