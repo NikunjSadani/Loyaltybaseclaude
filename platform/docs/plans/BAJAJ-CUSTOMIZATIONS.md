@@ -117,7 +117,9 @@ Bajaj change. Last updated: 2026-10-29.
 ---
 
 ## Deploy snapshot (staging `develop`)
-**`ed16d51` serving** (api + frontend) — batch = VOUCHER_ISSUED + RLP/BSC Phase B + ISR fix.
+**`7c07357` serving** (api + frontend — verified via gcloud image SHA `staging-7c07357…`, 2026-10-29)
+— batch = partner wishlist + catalogue MRP-slash (flag OFF) + authoritative outlet-type (hero fix +
+root-fix Phase 1) + PWA/header/notification fixes. Prev **`ed16d51`**.
 Dashboard backend (schema + migration + sales.service) remains **uncommitted/held** for its own
 push after the FE. Prod untouched; the voucher Deoleo-prod nod is still pending prod cutover.
 
@@ -133,3 +135,49 @@ push after the FE. Prod untouched; the voucher Deoleo-prod nod is still pending 
   Voucher code: 9000000066652873"** (owner-only feed). WhatsApp `voucher_code` leg executed with
   no "[DEV] not configured"/no send failure in logs (MSG91 configured); actual handset delivery
   depends on the template being approved for the recipient's WhatsApp number.
+
+---
+
+## Batch `7c07357` (staging, 2026-10-29) — orchestrated, full-gated, dual-audited, runtime-verified
+
+Six changes shipped together (full gates green: api jest 171 suites/3682 tests, nest build, platform
+vitest 302 files, tsc — all exit 0). Independent correctness + security audits run; the findings fixed
+before push. `terraform/`, `.claude/`, `CLAUDE.md` deliberately excluded from the commit.
+
+1. **Missing partner "Available points" — root-caused + fixed (platform-wide).** The hero was chosen
+   from the **target-upload's denormalized `outletType` snapshot** (`OutletTarget`/`OutletSalesRecord`),
+   which goes **stale when an outlet is reclassified between uploads** (OUT-2026-005 reclassified to
+   WHOLESALER/BSC but its target row still said "SSS" → RetailerHero → no points zone).
+   - **Hero fix:** dashboard reads `outletType` from the authoritative `/partner/me` (`usePartnerIdentity`).
+   - **Root-fix Phase 1 (resolve-at-read):** `getTargets`, group rollup, `getPace`, and both target/
+     achievement exports resolve `outletType` from `Outlet.outletType.code`, never the snapshot. Sales
+     side already authoritative (confirmed). **Phase 2 (drop the `outletType` column from
+     `outlet_targets` + `outlet_sales_records`) shipped as `1c8c2b4`** — writes/selects removed,
+     clean build proves no dangling reference. ⚠️ PROD cutover of this destructive drop must be
+     sequenced (no-write code live before the drop) or run at low traffic (prod keeps an old
+     instance during the migrate→deploy gap).
+   - Runtime-verified: `/partner/targets` now returns `WHOLESALER` (was "SSS") for OUT-2026-005.
+2. **Catalogue MRP-slash** — per-tenant flag **`catalogueMrpSlash` (default OFF → Deoleo byte-identical)**;
+   shows MRP-in-points struck above the redeem price, only when MRP is set and strictly > redeem price.
+   ⚠️ Rate-based: the struck price uses the *current* tenant rate while `pointsCost` was set at pricing
+   time → can overstate if a tenant **changes its rate after pricing** (accept for Bajaj, rate stable).
+   **Follow-up (owner-chosen):** capture **selling value** on `/admin/gifts` entry (reuses the existing
+   `sellingValuePaise` field, which `/admin/gifts` does NOT capture today — only `mrpPaise`+`pointsCost`)
+   → rate-independent slash *and* tightens TDS/valuation (null sellingValue currently falls back to
+   points÷rate). Flag is OFF until the owner enables it for Bajaj.
+3. **Partner wishlist (ALL tenants, no flag)** — new `PartnerWishlist` table + migration; GET/POST/DELETE
+   `/v1/rewards/wishlist` (tenant-scoped, cross-tenant guard, **member-visibility gates** so a wishlisted
+   item can't out-live the catalogue's hide rules — security-audit fix; `rewards:read` perm matches the
+   redeem precedent). FE: persistent heart (optimistic + revert), "♥ Wishlist" filter chip, "Wishlist (n)"
+   header pill. Runtime-verified add→list→delete e2e (proves the migration applied).
+4. **PWA/header/notifications** — desktop Chrome no longer mis-detected as iOS Safari (real Install hint);
+   partner header shows `Outlet.name` (falls back to businessName); notification "Enable" banner persists
+   until acted on (no silent snooze on the default outcome).
+
+**Accepted tradeoffs (owner-confirmed, not silently shipped):** hero falls to RetailerHero on a *transient*
+`/partner/me` failure (self-corrects on reload; whole app already depends on `/me`); MRP rate-drift (above).
+
+**Platform-wide approval enforcement (local, not committed):** a `PreToolUse` hook
+(`.claude/hooks/platform-wide-gate.js` + `.claude/settings.json`) now gates every `git push` / prod-deploy
+with a platform-wide checklist, plus a "🚦 PLATFORM-WIDE CHANGE GATE" block in `CLAUDE.md`. Activates on the
+next `claude` session (a fresh settings.json isn't loaded mid-session).
