@@ -621,7 +621,6 @@ describe('PartnerService', () => {
         {
           outletCode: 'O001',
           outletName: 'Outlet One',
-          outletType: 'RETAIL',
           targetValues: { MONTH_TGT: 100, FOCUS_PACK_1: 50 },
         },
       ]);
@@ -662,12 +661,11 @@ describe('PartnerService', () => {
       mockPrisma.outlet.findMany.mockResolvedValue([
         { outletCode: 'O001', outletType: { code: 'WHOLESALER' } },
       ]);
-      // …but the target row froze the OLD "SSS" type at upload time.
+      // …and the denormalized target snapshot is gone — type must resolve from the Outlet join.
       mockPrisma.outletTarget.findMany.mockResolvedValue([
         {
           outletCode: 'O001',
           outletName: 'Outlet One',
-          outletType: 'SSS',
           targetValues: { MONTH_TGT: 100 },
         },
       ]);
@@ -690,7 +688,7 @@ describe('PartnerService', () => {
       // Roster query returns an outlet with a missing type relation (defensive absence).
       mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'O001' }]);
       mockPrisma.outletTarget.findMany.mockResolvedValue([
-        { outletCode: 'O001', outletName: 'Outlet One', outletType: 'SSS', targetValues: { MONTH_TGT: 100 } },
+        { outletCode: 'O001', outletName: 'Outlet One', targetValues: { MONTH_TGT: 100 } },
       ]);
       mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
 
@@ -710,7 +708,6 @@ describe('PartnerService', () => {
         {
           outletCode: 'O001',
           outletName: 'Outlet One',
-          outletType: 'SSS',
           targetValues: { MONTH_TGT: 800, FOCUS_PACK_1: 50 },
         },
       ]);
@@ -743,7 +740,6 @@ describe('PartnerService', () => {
         {
           outletCode: 'O001',
           outletName: 'Outlet One',
-          outletType: 'RETAIL',
           // __names is the reserved override-name key — must NOT become a KPI row.
           targetValues: {
             MONTH_TGT: 100,
@@ -774,7 +770,6 @@ describe('PartnerService', () => {
         {
           outletCode: 'O001',
           outletName: 'Outlet One',
-          outletType: 'RETAIL',
           targetValues: { MONTH_TGT: 0 },
         },
       ]);
@@ -798,7 +793,6 @@ describe('PartnerService', () => {
         {
           outletCode: 'O001',
           outletName: 'Outlet One',
-          outletType: 'RETAIL',
           targetValues: {},
         },
       ]);
@@ -841,7 +835,6 @@ describe('PartnerService', () => {
         {
           outletCode: 'O001',
           outletName: 'Outlet One',
-          outletType: 'RETAIL',
           targetValues: { MONTH_TGT: 100 },
         },
       ]);

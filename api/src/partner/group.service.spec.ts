@@ -351,10 +351,11 @@ describe('GroupService.getTargetsRollup', () => {
       { outletCode: 'OUT-2', outletType: { code: 'RETAIL' } },
     ]);
 
-    // Explicit period → no most-recent-month lookup. Target rows froze the STALE "RETAIL" snapshot.
+    // Explicit period → no most-recent-month lookup. The denormalized target-type snapshot is gone;
+    // outlet type must resolve from the Outlet join (OUT-1 → WHOLESALER).
     mockPrisma.outletTarget.findMany.mockResolvedValueOnce([
-      { outletCode: 'OUT-1', outletName: 'Shop One', outletType: 'RETAIL', targetValues: { SALES: 100 } },
-      { outletCode: 'OUT-2', outletName: 'Shop Two', outletType: 'RETAIL', targetValues: { SALES: 200 } },
+      { outletCode: 'OUT-1', outletName: 'Shop One', targetValues: { SALES: 100 } },
+      { outletCode: 'OUT-2', outletName: 'Shop Two', targetValues: { SALES: 200 } },
     ]);
     mockPrisma.outletSalesRecord.findMany.mockResolvedValueOnce([
       { outletCode: 'OUT-1', kpiValues: { SALES: 50 } },

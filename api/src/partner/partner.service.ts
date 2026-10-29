@@ -355,7 +355,7 @@ export class PartnerService {
     const [targetRows, achievementRows, kpiRows] = await Promise.all([
       this.prisma.outletTarget.findMany({
         where: whereBase,
-        select: { outletCode: true, outletName: true, outletType: true, targetValues: true },
+        select: { outletCode: true, outletName: true, targetValues: true },
       }),
       this.prisma.outletSalesRecord.findMany({
         where: whereBase,

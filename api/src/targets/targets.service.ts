@@ -344,7 +344,6 @@ export class TargetsService {
       select: {
         outletCode: true,
         outletName: true,
-        outletType: true,
         targetValues: true,
       },
     });
@@ -422,7 +421,6 @@ export class TargetsService {
       select: {
         outletCode: true,
         outletName: true,
-        outletType: true,
         kpiValues: true,
       },
     });
@@ -582,7 +580,6 @@ export class TargetsService {
               clientId:     user.clientId,
               outletCode,
               outletName:   meta?.name ?? outletCode,
-              outletType:   meta?.type ?? '',
               month,
               targetValues: kpiMap as unknown as Prisma.InputJsonValue,
               batchId:      batch.id,
@@ -590,7 +587,6 @@ export class TargetsService {
             update: {
               targetValues: kpiMap as unknown as Prisma.InputJsonValue,
               outletName:   meta?.name ?? outletCode,
-              outletType:   meta?.type ?? '',
               batchId:      batch.id,
               updatedAt:    new Date(),
             },
@@ -814,7 +810,6 @@ export class TargetsService {
               clientId:   user.clientId,
               outletCode,
               outletName: meta?.name ?? outletCode,
-              outletType: meta?.type ?? '',
               month,
               kpiValues:  kpiMap as unknown as Prisma.InputJsonValue,
               batchId:    batch.id,
@@ -822,7 +817,6 @@ export class TargetsService {
             update: {
               kpiValues:  kpiMap as unknown as Prisma.InputJsonValue,
               outletName: meta?.name ?? outletCode,
-              outletType: meta?.type ?? '',
               batchId:    batch.id,
               updatedAt:  new Date(),
             },
@@ -921,7 +915,7 @@ export class TargetsService {
     const [targetRows, achievementRows] = await Promise.all([
       this.prisma.outletTarget.findMany({
         where: whereBase,
-        select: { outletCode: true, outletName: true, outletType: true, targetValues: true },
+        select: { outletCode: true, outletName: true, targetValues: true },
       }),
       this.prisma.outletSalesRecord.findMany({
         where: whereBase,

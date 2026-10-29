@@ -719,9 +719,9 @@ describe('TargetsService', () => {
       mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, kpiRow2]);
       mockPrisma.outletTarget.findMany.mockResolvedValue([
         // RT-1 has both KPIs; RT-2 only the primary (FOCUS_PACK_1 omitted → blank).
-        // Both rows froze the STALE "SSS" snapshot at upload time.
-        { outletCode: 'RT-1', outletName: 'Shop One', outletType: 'SSS', targetValues: { MONTH_TGT: 100, FOCUS_PACK_1: 20 } },
-        { outletCode: 'RT-2', outletName: 'Shop Two', outletType: 'SSS', targetValues: { MONTH_TGT: 50 } },
+        // The denormalized outletType snapshot is gone; type resolves from the Outlet join below.
+        { outletCode: 'RT-1', outletName: 'Shop One', targetValues: { MONTH_TGT: 100, FOCUS_PACK_1: 20 } },
+        { outletCode: 'RT-2', outletName: 'Shop Two', targetValues: { MONTH_TGT: 50 } },
       ]);
       // programName AND the AUTHORITATIVE outletType are joined from Outlet by (clientId, outletCode).
       // RT-1 was reclassified to WHOLESALER since upload — the export must reflect that, not "SSS".
@@ -787,9 +787,9 @@ describe('TargetsService', () => {
       mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, kpiRow2]);
       mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
         // RT-1 has both KPIs; RT-2 only the primary (FOCUS_PACK_1 omitted → blank).
-        // Both rows froze the STALE "SSS" snapshot at upload time.
-        { outletCode: 'RT-1', outletName: 'Shop One', outletType: 'SSS', kpiValues: { MONTH_TGT: 100, FOCUS_PACK_1: 20 } },
-        { outletCode: 'RT-2', outletName: 'Shop Two', outletType: 'SSS', kpiValues: { MONTH_TGT: 50 } },
+        // The denormalized outletType snapshot is gone; type resolves from the Outlet join below.
+        { outletCode: 'RT-1', outletName: 'Shop One', kpiValues: { MONTH_TGT: 100, FOCUS_PACK_1: 20 } },
+        { outletCode: 'RT-2', outletName: 'Shop Two', kpiValues: { MONTH_TGT: 50 } },
       ]);
       // programName AND the AUTHORITATIVE outletType come from the Outlet join (NOT the sales snapshot).
       // RT-1 was reclassified to WHOLESALER since upload — the export must reflect that.
@@ -1059,12 +1059,11 @@ describe('TargetsService', () => {
     });
 
     it('ROOT-FIX Phase 1: outletType resolves from the AUTHORITATIVE Outlet.outletType.code, NOT the stale snapshot', async () => {
-      // Stored target row froze "SSS"…
+      // The denormalized target-type snapshot is gone — type must come from the Outlet join…
       mockPrisma.outletTarget.findMany.mockResolvedValue([
         {
           outletCode: 'O001',
           outletName: 'Outlet One',
-          outletType: 'SSS',
           targetValues: { MONTH_TGT: 100 },
         },
       ]);
@@ -1118,7 +1117,6 @@ describe('TargetsService', () => {
         {
           outletCode: 'O001',
           outletName: 'Outlet One',
-          outletType: 'RETAIL',
           targetValues: { MONTH_TGT: 200 },
         },
       ]);
@@ -1138,7 +1136,6 @@ describe('TargetsService', () => {
         {
           outletCode: 'O001',
           outletName: 'Outlet One',
-          outletType: 'RETAIL',
           targetValues: { MONTH_TGT: 0 },
         },
       ]);
@@ -1156,7 +1153,6 @@ describe('TargetsService', () => {
         {
           outletCode: 'O001',
           outletName: 'Outlet One',
-          outletType: 'RETAIL',
           targetValues: { MONTH_TGT: 100, __names: { MONTH_TGT: 'Diwali Combo' } },
         },
       ]);
@@ -1176,7 +1172,6 @@ describe('TargetsService', () => {
         {
           outletCode: 'O001',
           outletName: 'Outlet One',
-          outletType: 'RETAIL',
           targetValues: {},
         },
       ]);
@@ -1209,7 +1204,6 @@ describe('TargetsService', () => {
         {
           outletCode: 'O001',
           outletName: 'Outlet One',
-          outletType: 'RETAIL',
           targetValues: { MONTH_TGT: 100 },
         },
       ]);
@@ -1228,7 +1222,6 @@ describe('TargetsService', () => {
         {
           outletCode: 'O001',
           outletName: 'Outlet One',
-          outletType: 'RETAIL',
           targetValues: { MONTH_TGT: 100 },
         },
       ]);
@@ -1244,8 +1237,8 @@ describe('TargetsService', () => {
 
     it('results are sorted by outletCode', async () => {
       mockPrisma.outletTarget.findMany.mockResolvedValue([
-        { outletCode: 'Z999', outletName: 'Z', outletType: 'RETAIL', targetValues: { MONTH_TGT: 1 } },
-        { outletCode: 'A001', outletName: 'A', outletType: 'RETAIL', targetValues: { MONTH_TGT: 2 } },
+        { outletCode: 'Z999', outletName: 'Z', targetValues: { MONTH_TGT: 1 } },
+        { outletCode: 'A001', outletName: 'A', targetValues: { MONTH_TGT: 2 } },
       ]);
       mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
 

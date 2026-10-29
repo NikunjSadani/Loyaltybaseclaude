@@ -2885,7 +2885,6 @@ model OutletSalesRecord {
   clientId   String
   outletCode String
   outletName String
-  outletType String
   month      String
   kpiValues  Json
   batchId    String
@@ -2968,7 +2967,6 @@ model OutletTarget {
   clientId     String
   outletCode   String
   outletName   String
-  outletType   String
   month        String
   targetValues Json
   batchId      String
