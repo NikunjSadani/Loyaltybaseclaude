@@ -56,6 +56,7 @@ export class EventsMapDto {
   @IsOptional() @ValidateNested() @Type(() => EventChannelDto) POINTS_CREDITED?: EventChannelDto;
   @IsOptional() @ValidateNested() @Type(() => EventChannelDto) PAYOUT_CREDITED?: EventChannelDto;
   @IsOptional() @ValidateNested() @Type(() => EventChannelDto) REDEMPTION_CONFIRMED?: EventChannelDto;
+  @IsOptional() @ValidateNested() @Type(() => EventChannelDto) VOUCHER_ISSUED?: EventChannelDto;
   @IsOptional() @ValidateNested() @Type(() => EventChannelDto) ORDER_DISPATCHED?: EventChannelDto;
   @IsOptional() @ValidateNested() @Type(() => EventChannelDto) ORDER_DELIVERED?: EventChannelDto;
   @IsOptional() @ValidateNested() @Type(() => EventChannelDto) ORDER_CANCELLED?: EventChannelDto;

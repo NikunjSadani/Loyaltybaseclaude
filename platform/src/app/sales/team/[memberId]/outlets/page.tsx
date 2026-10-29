@@ -15,6 +15,7 @@ import {
 } from '@/lib/targets';
 import { kycOrderRank } from '@/lib/kyc-order';
 import { istDateKey } from '@/lib/ist-date';
+import { useOutletTypeLabels } from '@/lib/platform/use-outlet-type-labels';
 
 /* ─── Outlet metadata ───────────────────────────────────────────────────────── */
 
@@ -123,6 +124,8 @@ export default function MemberOutletsPage() {
   const [targetsByOutlet, setTargetsByOutlet] = useState<Record<string, OutletKpis>>({});
   const [view,       setView]       = useState<'table' | 'cards'>('cards');
   const [typeFilter, setTypeFilter] = useState<OutletType | 'ALL'>('ALL');
+  // Per-tenant outlet-type display labels; falls back to the TYPE_FILTERS labels until resolved.
+  const { label: outletTypeLabel } = useOutletTypeLabels();
   const [beatFilter, setBeatFilter] = useState<string>('ALL');
   const [programFilter, setProgramFilter] = useState<string>('ALL');
   // KPI chosen in the Team view → sort outlets ascending by that KPI (lowest first); '' = default.
@@ -346,7 +349,7 @@ export default function MemberOutletsPage() {
             }`}
           >
             {TYPE_FILTERS.map((f) => (
-              <option key={f.value} value={f.value}>{f.value === 'ALL' ? 'All Types' : f.label}</option>
+              <option key={f.value} value={f.value}>{f.value === 'ALL' ? 'All Types' : outletTypeLabel(f.value, f.label)}</option>
             ))}
           </select>
           <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${typeFilter !== 'ALL' ? 'text-[#16a34a]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none">

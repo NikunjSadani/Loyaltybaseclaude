@@ -13,6 +13,7 @@ import { SearchableSelect } from '@/components/ui/searchable-select';
 import { INDIAN_STATES } from '@/lib/indian-states';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
+import { useOutletTypeLabels } from '@/lib/platform/use-outlet-type-labels';
 
 type PartnerType = 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
 
@@ -123,6 +124,9 @@ export function KYCForm({ initialData, onSuccess, redirectOnSuccess = '/sales/ky
   const [locating, setLocating] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Per-tenant outlet-type display labels (e.g. Bajaj SSS→"RLP"); falls back to the hardcoded
+  // labels below until it resolves / on failure, so Deoleo stays byte-identical.
+  const { label: outletTypeLabel } = useOutletTypeLabels();
 
   const update = useCallback(<K extends keyof KYCFormData>(key: K, value: KYCFormData[K]) => {
     setData((d) => ({ ...d, [key]: value }));
@@ -233,9 +237,9 @@ export function KYCForm({ initialData, onSuccess, redirectOnSuccess = '/sales/ky
         {step === 0 && (
           <div className="space-y-3">
             {[
-              { value: 'SSS', label: 'SSS', desc: 'Direct seller to end consumers' },
-              { value: 'WHOLESALER', label: 'Wholesaler', desc: 'Bulk distributor to retailers' },
-              { value: 'SUB_STOCKIST', label: 'Sub-Stockist', desc: 'Regional distributor under stockist' },
+              { value: 'SSS', label: outletTypeLabel('SSS', 'SSS'), desc: 'Direct seller to end consumers' },
+              { value: 'WHOLESALER', label: outletTypeLabel('WHOLESALER', 'Wholesaler'), desc: 'Bulk distributor to retailers' },
+              { value: 'SUB_STOCKIST', label: outletTypeLabel('SUB_STOCKIST', 'Sub-Stockist'), desc: 'Regional distributor under stockist' },
             ].map((opt) => (
               <button
                 key={opt.value}

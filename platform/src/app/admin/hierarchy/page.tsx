@@ -28,6 +28,7 @@ import {
   buildHierarchyChainExportRows,
 } from '@/lib/employee-hierarchy';
 import { useClientConfig } from '@/lib/platform/client-config-context';
+import { useAuthClientId } from '@/lib/platform/use-auth-tenant';
 import type {
   TenantHierarchyLevel,
   HierarchyEmployee,
@@ -249,10 +250,16 @@ function downloadGuide(config: TenantHierarchyLevel[]) {
 
 export default function HierarchyPage() {
   // Per-tenant hierarchy config (Bajaj renames the display labels + column headers; every
-  // other tenant — Deoleo included — is byte-identical). The slug comes from the tenant
-  // context resolved server-side from the request host (e.g. bajaj.gifsy.in → 'bajaj').
+  // other tenant — Deoleo included — is byte-identical).
+  //
+  // AUTHORITATIVE tenant source: the SSR host-slug (useClientConfig) silently degrades to the
+  // neutral 'default' config for DB-provisioned tenants whenever the `x-tenant-slug` header is
+  // absent (no live Next middleware sets it) — which made Bajaj's ISR/SM/ZH column headers fall
+  // back to the Deoleo (XSR) template on staging. Derive the real tenant from the authenticated
+  // session instead (/auth/me → clientId; also correct for a GIFSY operator assumed into a
+  // tenant, where clientId is the assumed tenant), falling back to the SSR slug until it resolves.
   const clientConfig = useClientConfig();
-  const slug = clientConfig.slug;
+  const slug = useAuthClientId() ?? clientConfig.slug;
   const config = useMemo(() => hierarchyConfigForTenant(slug), [slug]);
 
   const [employees, setEmployees] = useState<HierarchyEmployee[]>([]);

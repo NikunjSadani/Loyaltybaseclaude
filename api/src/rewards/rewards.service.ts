@@ -2154,11 +2154,17 @@ export class RewardsService {
       return o;
     });
 
-    // Notify the partner on the customer-visible milestones.
+    // A voucher code assigned on THIS transition (null → set) — computed before the milestone notify
+    // so a single action never fires BOTH a generic milestone bell AND the VOUCHER_ISSUED code bell.
+    const voucherNewlyIssued = !order.voucherCode && !!updated.voucherCode;
+
+    // Notify the partner on the customer-visible milestones — UNLESS this same transition just issued
+    // the voucher code, in which case the VOUCHER_ISSUED message below supersedes the generic milestone.
     if (
-      toStatus === RedemptionStatus.DISPATCHED ||
-      toStatus === RedemptionStatus.DELIVERED ||
-      toStatus === RedemptionStatus.CANCELLED
+      !voucherNewlyIssued &&
+      (toStatus === RedemptionStatus.DISPATCHED ||
+        toStatus === RedemptionStatus.DELIVERED ||
+        toStatus === RedemptionStatus.CANCELLED)
     ) {
       const partner = await this.prisma.channelPartner.findFirst({
         where: { id: order.partnerId },
@@ -2186,6 +2192,13 @@ export class RewardsService {
           event: `REDEMPTION_${toStatus}`,
         });
       }
+    }
+
+    // Manual voucher fulfilment: a code was JUST assigned (null → set) on this transition, at
+    // whatever status ops issues it. Send the owner the code (bell + WhatsApp `voucher_code`).
+    // Fires once (guarded on the prior value) and only for the outlet owner. Best-effort.
+    if (voucherNewlyIssued) {
+      await this.notifyVoucherIssued(id, user.clientId);
     }
 
     return { order: updated };
@@ -2707,10 +2720,14 @@ export class RewardsService {
         ? 'We could not issue your voucher, so your points have been refunded. Please try again.'
         : 'Redemption confirmed. Your voucher is being issued and will appear shortly.';
 
-    if (ctx.notifyUserId) {
-      // AUDIT-FIX: best-effort. A notification failure must NEVER throw out of a confirm
-      // whose points are already debited (and whose voucher may already be DELIVERED) —
-      // that would 500 a redemption that actually succeeded and block retry. Log + swallow.
+    if (isDelivered) {
+      // Voucher is live — send the OWNER their CODE (in-app bell + config-driven WhatsApp via the
+      // `voucher_code` template). Owner-only, self-loading, best-effort (never throws out of a
+      // confirm whose points are already debited and whose voucher is already DELIVERED).
+      await this.notifyVoucherIssued(order.id, ctx.clientId);
+    } else if (ctx.notifyUserId) {
+      // AUDIT-FIX: best-effort. A notification failure must NEVER throw out of a confirm whose
+      // points are already debited — that would 500 a redemption and block retry. Log + swallow.
       try {
         await this.notifications.notifyUserWithChannels({
           clientId: ctx.clientId,
@@ -2735,6 +2752,76 @@ export class RewardsService {
     }
 
     return { orderId: order.id, status, message };
+  }
+
+  /**
+   * "<Tenant brand> Loyalty" — the {{3}} `program` variable of the voucher_code WhatsApp template.
+   * Reads the client's branding display name (falls back to internalName, then the slug).
+   */
+  private async programLabel(clientId: string): Promise<string> {
+    try {
+      const c = await this.prisma.client.findUnique({
+        where: { id: clientId },
+        select: { branding: true, internalName: true },
+      });
+      const brand = ((c?.branding ?? {}) as Record<string, unknown>).displayName;
+      const name = typeof brand === 'string' && brand.trim() ? brand.trim() : c?.internalName ?? clientId;
+      return `${name} Loyalty`;
+    } catch {
+      return 'Loyalty';
+    }
+  }
+
+  /**
+   * Send the outlet OWNER their voucher code once it is issued — in-app bell + the config-driven
+   * WhatsApp `voucher_code` template (VOUCHER_ISSUED event). Fired from BOTH issue paths: Hubble
+   * auto-issue (finishHubbleConfirm, DELIVERED) and manual fulfilment (transitionOrder, when a
+   * code is first assigned). Self-loading from the order id so the two call sites stay trivial.
+   *
+   * OWNER-ONLY by construction: the recipient is the order's partner (`partner.userId` for the bell,
+   * `partner.phone` for WhatsApp) — never the acting sales rep or any sales view. Best-effort: a
+   * notification failure must never throw into a flow whose voucher is already live.
+   */
+  private async notifyVoucherIssued(orderId: string, clientId: string): Promise<void> {
+    try {
+      const o = await this.prisma.redemptionOrder.findUnique({
+        where: { id: orderId },
+        select: {
+          voucherCode: true,
+          valuePaise: true,
+          orderNumber: true,
+          reward: { select: { name: true } },
+          partner: { select: { userId: true, phone: true, ownerName: true } },
+        },
+      });
+      // Nothing to send without a code and a login user to deliver the bell to.
+      if (!o?.voucherCode || !o.partner?.userId) return;
+
+      const program = await this.programLabel(clientId);
+      const amount =
+        o.valuePaise != null ? `₹${(Number(o.valuePaise) / 100).toLocaleString('en-IN')}` : '';
+      const voucherName = o.reward?.name ?? 'voucher';
+
+      await this.notifications.notifyUserWithChannels({
+        clientId,
+        userId: o.partner.userId,
+        eventKey: 'VOUCHER_ISSUED' as EventKey,
+        recipientPhone: o.partner.phone ?? null,
+        vars: {
+          ownerName: o.partner.ownerName ?? 'Partner',
+          amount,
+          program,
+          voucherName,
+          code: o.voucherCode,
+        },
+        subject: 'Your voucher code',
+        body: `Your ${voucherName} code: ${o.voucherCode}`,
+        url: '/partner/rewards/orders',
+        event: 'VOUCHER_ISSUED',
+      });
+    } catch (e) {
+      this.logger.error(`[voucher] VOUCHER_ISSUED notify failed for order ${orderId} (non-fatal): ${e}`);
+    }
   }
 
   /** The outcome of an auto-issuance attempt. */

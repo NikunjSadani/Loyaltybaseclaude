@@ -36,6 +36,7 @@ import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportBut
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import { useTenantFeatures } from '@/lib/tenant-features';
 import { useClientConfig } from '@/lib/platform/client-config-context';
+import { useAuthClientId } from '@/lib/platform/use-auth-tenant';
 import { leafIdHeaderForTenant } from '@/lib/employee-hierarchy';
 import { downloadBlob } from '@/lib/download';
 import { chunkArray } from '@/lib/chunk';
@@ -671,8 +672,11 @@ export default function OutletsPage() {
   const { features } = useTenantFeatures('/api/admin/settings/config');
   const geoEnabled = features.outletMasterGeo;
   // Tenant slug — drives the leaf hierarchy column header ("ISR Code" for Bajaj, "XSR ID" otherwise)
-  // in the upload template, validation, guide, and error report.
-  const { slug } = useClientConfig();
+  // in the upload template, validation, guide, and error report. Prefer the AUTHENTICATED tenant
+  // (/auth/me clientId) over the SSR host-slug, which degrades to 'default' for DB tenants when the
+  // x-tenant-slug header is absent → would otherwise show the Deoleo "XSR ID" leaf for Bajaj.
+  const { slug: ssrSlug } = useClientConfig();
+  const slug = useAuthClientId() ?? ssrSlug;
   const leafHeader = leafIdHeaderForTenant(slug);
 
   // ── Outlet list state ──

@@ -34,6 +34,7 @@ export const EVENT_KEYS = [
   'POINTS_CREDITED',
   'PAYOUT_CREDITED',
   'REDEMPTION_CONFIRMED',
+  'VOUCHER_ISSUED',
   'ORDER_DISPATCHED',
   'ORDER_DELIVERED',
   'ORDER_CANCELLED',
@@ -160,6 +161,13 @@ const RAW_VARIABLE_CONTRACTS: Record<EventKey, Omit<EventVariableContract, 'free
     whatsapp: ['ownerName', 'rewardName', 'points'],
     sms: ['ownerName', 'rewardName'],
   },
+  VOUCHER_ISSUED: {
+    label: 'Voucher Issued',
+    // whatsapp contract per the `voucher_code` template:
+    // {{1}} owner, {{2}} amount (₹N), {{3}} program (<tenant> Loyalty), {{4}} voucher name, {{5}} code
+    whatsapp: ['ownerName', 'amount', 'program', 'voucherName', 'code'],
+    sms: ['ownerName', 'amount', 'voucherName', 'code'],
+  },
   ORDER_DISPATCHED: {
     label: 'Order Dispatched',
     whatsapp: ['ownerName', 'orderId', 'trackingId'],
@@ -192,6 +200,10 @@ export const VARIABLE_CONTRACTS: Record<EventKey, EventVariableContract> = Objec
  * '' (nothing configured). Keeps unconfigured tenants byte-identical to today's WhatsApp names.
  */
 export function whatsappTemplateDefault(clientId: string, eventKey: EventKey): string {
+  // VOUCHER_ISSUED ships with a platform-wide default template (`voucher_code`) for EVERY tenant,
+  // not just WHATSAPP_KYC ones — the voucher-code message is a product-wide feature. A stored
+  // config row can still override the name per tenant.
+  if (eventKey === 'VOUCHER_ISSUED') return 'voucher_code';
   const kyc = WHATSAPP_KYC[clientId];
   if (!kyc) return '';
   switch (eventKey) {
@@ -239,18 +251,26 @@ export function defaultConfig(clientId: string): NotificationTemplatesConfig {
   const events = {} as Record<EventKey, EventChannelConfig>;
   for (const key of EVENT_KEYS) {
     const whatsappTemplate = whatsappTemplateDefault(clientId, key);
-    // Preserve today's live WhatsApp: a WHATSAPP_KYC tenant's four live events default to WHATSAPP
-    // (only when a seeded template actually exists). All other events/tenants default OFF.
+    // Preserve today's live WhatsApp (a WHATSAPP_KYC tenant's four live events), AND default the
+    // platform-wide VOUCHER_ISSUED to WHATSAPP for EVERY tenant (its template always resolves to
+    // `voucher_code`). All other events/tenants default OFF. Actual delivery still needs a live
+    // WhatsApp number + approved template + a recipient phone, so a tenant with no WhatsApp set up
+    // stays effectively dark (the sender skips) — only the free in-app bell fires there.
     const mode: NotificationMode =
-      kycConfigured && WHATSAPP_DEFAULT_ON_EVENTS.has(key) && whatsappTemplate ? 'WHATSAPP' : 'OFF';
+      ((kycConfigured && WHATSAPP_DEFAULT_ON_EVENTS.has(key)) || key === 'VOUCHER_ISSUED') &&
+      whatsappTemplate
+        ? 'WHATSAPP'
+        : 'OFF';
     events[key] = {
       mode,
       whatsappTemplate,
       smsTemplateId: '',
     };
   }
-  // masterWhatsapp defaults ON for a WHATSAPP_KYC tenant (else the per-event WHATSAPP default is
-  // gated off by the master and the live channel would still go dark). SMS master stays OFF.
+  // masterWhatsapp defaults ON only for a WHATSAPP_KYC tenant (else the per-event WHATSAPP default is
+  // gated off by the master and that tenant's live channel would go dark). SMS master stays OFF.
+  // NOTE: VOUCHER_ISSUED is a TRANSACTIONAL message exempt from this master gate in NotificationsService
+  // (like OTP), so it still sends for non-KYC tenants without flipping this "dark by default" default.
   return { masterSms: false, masterWhatsapp: kycConfigured, events };
 }
 

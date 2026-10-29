@@ -142,8 +142,9 @@ describe('Notification Templates page', () => {
     const body = JSON.parse((putCall![1] as RequestInit).body as string);
     expect(body.masterSms).toBe(true);
     expect(body.masterWhatsapp).toBe(true);
-    // All 10 event keys present in the persisted map (normalized), with the edit applied.
-    expect(Object.keys(body.events)).toHaveLength(10);
+    // All 11 event keys present in the persisted map (normalized), with the edit applied.
+    expect(Object.keys(body.events)).toHaveLength(11);
+    expect(body.events.VOUCHER_ISSUED).toBeTruthy();
     expect(body.events.ORDER_DISPATCHED.mode).toBe('BOTH');
     expect(body.events.KYC_SUBMITTED.smsTemplateId).toBe('111');
   });

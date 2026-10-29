@@ -250,7 +250,7 @@ export class NotificationsService implements OnModuleInit {
         const def = defaultConfig(params.clientId);
         const ev = def.events[params.eventKey];
         const wouldHaveFiredWhatsapp =
-          def.masterWhatsapp &&
+          (def.masterWhatsapp || params.eventKey === 'VOUCHER_ISSUED') &&
           !!ev &&
           (ev.mode === 'WHATSAPP' || ev.mode === 'BOTH') &&
           !!ev.whatsappTemplate &&
@@ -295,8 +295,12 @@ export class NotificationsService implements OnModuleInit {
     }
 
     // (d) WhatsApp leg — DIRECT send. Gated on master + mode + template + phone. Never throws.
+    // VOUCHER_ISSUED is a TRANSACTIONAL voucher-delivery message (the member just redeemed and needs
+    // their code), so — like OTP — it is EXEMPT from the tenant-wide marketing master switch. It still
+    // respects its own per-event mode (an operator can set it OFF), the template, and a recipient phone.
+    const whatsappMasterOk = cfg.masterWhatsapp || params.eventKey === 'VOUCHER_ISSUED';
     if (
-      cfg.masterWhatsapp &&
+      whatsappMasterOk &&
       (cfg.mode === 'WHATSAPP' || cfg.mode === 'BOTH') &&
       cfg.whatsappTemplate &&
       phone

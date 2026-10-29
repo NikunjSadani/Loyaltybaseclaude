@@ -19,6 +19,7 @@ import { getGifsySettings } from '@/lib/gifsy-settings';
 import { isValidUpiId } from '@/lib/upi-utils';
 import { INDIAN_STATES } from '@/lib/indian-states';
 import { isValidGstin, panFromGstin, GSTIN_LENGTH } from '@/lib/gstin';
+import { useOutletTypeLabels } from '@/lib/platform/use-outlet-type-labels';
 import {
   hasReKycFlags, isReKycActionable, reKycRemarks, flaggedLabels,
   isWizardFieldFlagged, isWizardFieldEditable,
@@ -302,6 +303,8 @@ function StepGate({ missing, busy }: { missing: string[]; busy: string | null })
 
 export default function NewKYCPage() {
   const router = useRouter();
+  // Per-tenant outlet-type display labels; falls back to TYPE_LABEL until resolved (Deoleo identical).
+  const { label: outletTypeLabel } = useOutletTypeLabels();
   const [step,       setStep]       = useState<Step>('outlet');
   const [submitting, setSubmitting] = useState(false);
 
@@ -2249,7 +2252,7 @@ export default function NewKYCPage() {
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-gray-900 truncate">{selectedOutlet.name}</p>
-                      <p className="text-[11px] text-gray-400">{selectedOutlet.outletCode} · {TYPE_LABEL[selectedOutlet.type]}</p>
+                      <p className="text-[11px] text-gray-400">{selectedOutlet.outletCode} · {outletTypeLabel(selectedOutlet.type, TYPE_LABEL[selectedOutlet.type])}</p>
                     </div>
                   </div>
                 ) : (
@@ -2307,7 +2310,7 @@ export default function NewKYCPage() {
                             </div>
                             <p className="text-xs text-gray-400">{o.outletCode} · {o.beat}</p>
                           </div>
-                          <span className="text-[11px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full shrink-0">{TYPE_LABEL[o.type]}</span>
+                          <span className="text-[11px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full shrink-0">{outletTypeLabel(o.type, TYPE_LABEL[o.type])}</span>
                           {selectedOutlet?.outletId === o.outletId && <Check className="h-4 w-4 text-[var(--brand-primary)] shrink-0" />}
                         </button>
                       </div>
@@ -2404,7 +2407,7 @@ export default function NewKYCPage() {
                 <Building2 className="h-3.5 w-3.5 text-gray-400 shrink-0" />
                 <div className="min-w-0">
                   <p className="text-xs font-semibold text-gray-700 truncate">{selectedOutlet?.name}</p>
-                  <p className="text-[11px] text-gray-400 truncate">{selectedOutlet?.outletCode} · {TYPE_LABEL[selectedOutlet?.type ?? 'SSS']}</p>
+                  <p className="text-[11px] text-gray-400 truncate">{selectedOutlet?.outletCode} · {outletTypeLabel(selectedOutlet?.type ?? 'SSS', TYPE_LABEL[selectedOutlet?.type ?? 'SSS'])}</p>
                 </div>
               </div>
               <div className="flex items-center gap-2 px-3 py-1.5 bg-[var(--brand-primary)]/5 rounded-lg border border-[var(--brand-primary)]/20 min-w-0">

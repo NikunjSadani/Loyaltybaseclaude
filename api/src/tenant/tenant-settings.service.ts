@@ -1,6 +1,29 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { TdsMethodology, TdsSection } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { loadOutletTypeDisplayNames, labelFor } from '../common/outlet-type-display';
+
+/**
+ * One enabled outlet type for the caller tenant, projected for every front-end that renders an
+ * outlet-type picker / filter / label (sales, KYC, admin, partner).
+ *
+ * `code`        — the STABLE logic key (SSS / WHOLESALER / …); logic + filtering key only, never
+ *                 localized.
+ * `name`        — the global `OutletType.name`.
+ * `displayName` — the tenant's per-type override (`OutletTypeClientConfig.displayName`), trimmed to
+ *                 a non-blank value or `null`. This is the ONLY signal a surface needs to decide
+ *                 "use the override vs keep my OWN current hardcoded label": a tenant with no
+ *                 override (e.g. Deoleo) yields `displayName: null` for every type ⇒ every surface
+ *                 keeps its current label BYTE-IDENTICAL. Bajaj's SSS→"RLP" / WHOLESALER→"BSC" set
+ *                 it, so only those surfaces change, only for Bajaj, purely via config.
+ * `label`       — convenience `displayName ?? name`, for a consumer that has no hardcoded fallback.
+ */
+export interface OutletTypeOption {
+  code: string;
+  label: string;
+  name: string;
+  displayName: string | null;
+}
 
 /**
  * TenantSettingsService — the SINGLE typed reader for the per-tenant "Gifsy Settings".
@@ -256,6 +279,31 @@ export class TenantSettingsService {
   private readonly CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes; also busted on write
 
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * The caller-tenant's ENABLED outlet types for the FE outlet-type picker/filter/label surfaces.
+   * Scoped by the JWT `clientId` (no cross-tenant exposure). Reuses the shared
+   * `loadOutletTypeDisplayNames` / `labelFor` helpers so the override-resolution rule cannot
+   * diverge from the admin-outlets list projection. A tenant with no `displayName` override (e.g.
+   * Deoleo) ⇒ every row's `displayName` is `null` ⇒ every FE surface keeps its current label.
+   */
+  async getOutletTypes(clientId: string): Promise<OutletTypeOption[]> {
+    const [displayNames, configs] = await Promise.all([
+      loadOutletTypeDisplayNames(this.prisma, clientId),
+      this.prisma.outletTypeClientConfig.findMany({
+        where: { clientId, isEnabled: true, outletType: { isActive: true } },
+        select: { outletTypeId: true, outletType: { select: { code: true, name: true } } },
+      }),
+    ]);
+    return configs
+      .map((c) => ({
+        code: c.outletType.code,
+        name: c.outletType.name,
+        displayName: displayNames.get(c.outletTypeId) ?? null,
+        label: labelFor(displayNames, c.outletTypeId, c.outletType.name),
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }
 
   /**
    * Default conversion rate, derived from the env var so the boot guard in main.ts

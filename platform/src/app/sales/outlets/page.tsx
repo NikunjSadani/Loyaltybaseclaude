@@ -23,6 +23,7 @@ import {
 import { visibilityApi } from '@/lib/visibility';
 import { classifyVisibilityCapture, type VisibilitySummaryBucket } from '@/lib/visibility-types';
 import { useClientConfig } from '@/lib/platform/client-config-context';
+import { useOutletTypeLabels } from '@/lib/platform/use-outlet-type-labels';
 
 /* ─── Outlet roster ─────────────────────────────────────────────────────────── */
 
@@ -175,6 +176,8 @@ export default function SalesOutletsPage() {
   // Bajaj-scoped outlets-page additions (program filter, photo-visibility badge, primary sort)
   // — keeps every other tenant's outlets page byte-identical.
   const isBajaj = (useClientConfig().slug ?? '').trim().toLowerCase() === 'bajaj';
+  // Per-tenant outlet-type display labels; falls back to the TYPE_FILTERS labels until resolved.
+  const { label: outletTypeLabel } = useOutletTypeLabels();
 
   const [visibilityMap, setVisibilityMap] = useState<VisibilityStatusMap>({});
   // Photo-approval (PHOTO_APPROVAL) per-outlet 5-status, keyed by outletCode (Bajaj). Only
@@ -434,7 +437,7 @@ export default function SalesOutletsPage() {
             }`}
           >
             {TYPE_FILTERS.map((f) => (
-              <option key={f.value} value={f.value}>{f.value === 'ALL' ? 'All Types' : f.label}</option>
+              <option key={f.value} value={f.value}>{f.value === 'ALL' ? 'All Types' : outletTypeLabel(f.value, f.label)}</option>
             ))}
           </select>
           <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${typeFilter !== 'ALL' ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">

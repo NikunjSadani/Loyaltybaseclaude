@@ -14,15 +14,32 @@ import {
   newPopup,
   type Banner, type Popup, type BannerAudience, type PopupFrequency,
 } from '@/lib/banner';
+import { useOutletTypeLabels } from '@/lib/platform/use-outlet-type-labels';
 
 type Tab = 'banners' | 'popups';
 
+/**
+ * Current audience labels — the per-outlet-type entries (SSS/WHOLESALER/SUB_STOCKIST) are the
+ * byte-identical FALLBACK used when the tenant set no displayName override (e.g. Deoleo). When an
+ * override exists (e.g. Bajaj SSS→"RLP"), `audienceLabelFor` renders `"<override> only"` instead,
+ * keeping the "<audience> only" phrasing. `ALL` has no outlet type and never changes.
+ */
 const AUDIENCE_LABELS: Record<BannerAudience, string> = {
   ALL: 'All Partners',
   SSS: 'Retailers only',
   WHOLESALER: 'Wholesalers only',
   SUB_STOCKIST: 'Sub-Stockists only',
 };
+
+/** Resolve an audience → its display label, applying the per-tenant outlet-type override. */
+type AudienceLabelFn = (a: BannerAudience) => string;
+function makeAudienceLabel(overrides: ReadonlyMap<string, string>): AudienceLabelFn {
+  return (a) => {
+    if (a === 'ALL') return AUDIENCE_LABELS.ALL;
+    const override = overrides.get(a);
+    return override ? `${override} only` : AUDIENCE_LABELS[a];
+  };
+}
 
 const FREQUENCY_LABELS: Record<PopupFrequency, string> = {
   always: 'Every visit',
@@ -108,7 +125,7 @@ const inputCls = 'w-full border border-gray-200 rounded-xl px-3 py-2 text-sm foc
 const labelCls = 'text-xs font-medium text-gray-600 block mb-1';
 
 // ── Banner form ───────────────────────────────────────────────────────────────
-function BannerForm({ initial, onSave, onCancel }: { initial: Banner; onSave: (b: Banner) => void; onCancel: () => void }) {
+function BannerForm({ initial, onSave, onCancel, audienceLabel }: { initial: Banner; onSave: (b: Banner) => void; onCancel: () => void; audienceLabel: AudienceLabelFn }) {
   const [form, setForm] = useState<Banner>(initial);
   const set = <K extends keyof Banner>(k: K, v: Banner[K]) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -167,7 +184,7 @@ function BannerForm({ initial, onSave, onCancel }: { initial: Banner; onSave: (b
             <p className={labelCls}>Show To</p>
             <select className={inputCls} value={form.audience} onChange={(e) => set('audience', e.target.value as BannerAudience)}>
               {(Object.keys(AUDIENCE_LABELS) as BannerAudience[]).map((a) => (
-                <option key={a} value={a}>{AUDIENCE_LABELS[a]}</option>
+                <option key={a} value={a}>{audienceLabel(a)}</option>
               ))}
             </select>
           </div>
@@ -247,7 +264,7 @@ function BannerForm({ initial, onSave, onCancel }: { initial: Banner; onSave: (b
 }
 
 // ── Popup form ────────────────────────────────────────────────────────────────
-function PopupForm({ initial, onSave, onCancel }: { initial: Popup; onSave: (p: Popup) => void; onCancel: () => void }) {
+function PopupForm({ initial, onSave, onCancel, audienceLabel }: { initial: Popup; onSave: (p: Popup) => void; onCancel: () => void; audienceLabel: AudienceLabelFn }) {
   const [form, setForm] = useState<Popup>(initial);
   const set = <K extends keyof Popup>(k: K, v: Popup[K]) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -314,7 +331,7 @@ function PopupForm({ initial, onSave, onCancel }: { initial: Popup; onSave: (p: 
             <p className={labelCls}>Show To</p>
             <select className={inputCls} value={form.audience} onChange={(e) => set('audience', e.target.value as BannerAudience)}>
               {(Object.keys(AUDIENCE_LABELS) as BannerAudience[]).map((a) => (
-                <option key={a} value={a}>{AUDIENCE_LABELS[a]}</option>
+                <option key={a} value={a}>{audienceLabel(a)}</option>
               ))}
             </select>
           </div>
@@ -348,8 +365,8 @@ function PopupForm({ initial, onSave, onCancel }: { initial: Popup; onSave: (p: 
 
 // ── Row components ────────────────────────────────────────────────────────────
 function ItemRow<T extends { id: string; active: boolean; type: string; title: string; audience: BannerAudience; updatedAt: string; ctaUrl?: string; priority?: number; startDate?: string; endDate?: string }>({
-  item, typeIcon, onToggle, onEdit, onDelete,
-}: { item: T; typeIcon: React.ReactNode; onToggle: () => void; onEdit: () => void; onDelete: () => void }) {
+  item, typeIcon, onToggle, onEdit, onDelete, audienceLabel,
+}: { item: T; typeIcon: React.ReactNode; onToggle: () => void; onEdit: () => void; onDelete: () => void; audienceLabel: AudienceLabelFn }) {
   return (
     <div className={`flex items-center gap-4 px-5 py-4 ${item.active ? 'bg-emerald-50/40' : ''}`}>
       <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${item.type === 'video' ? 'bg-blue-100 text-blue-600' : item.type === 'image' ? 'bg-purple-100 text-purple-600' : 'bg-gray-100 text-gray-500'}`}>
@@ -358,7 +375,7 @@ function ItemRow<T extends { id: string; active: boolean; type: string; title: s
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold text-gray-900 truncate">{item.title || `${item.type} content`}</p>
         <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-          <span className="text-xs text-gray-400">{AUDIENCE_LABELS[item.audience]}</span>
+          <span className="text-xs text-gray-400">{audienceLabel(item.audience)}</span>
           {item.priority !== undefined && (
             <>
               <span className="text-gray-300">·</span>
@@ -409,6 +426,10 @@ export default function BannersPage() {
   const [editingPopup,  setEditingPopup]  = useState<Popup | null>(null);
   const [creatingBanner, setCreatingBanner] = useState(false);
   const [creatingPopup,  setCreatingPopup]  = useState(false);
+  // Per-tenant outlet-type overrides → audience labels (e.g. Bajaj "RLP only"); empty for Deoleo
+  // ⇒ the AUDIENCE_LABELS fallbacks render byte-identically.
+  const { overrides: outletTypeOverrides } = useOutletTypeLabels();
+  const audienceLabel = makeAudienceLabel(outletTypeOverrides);
 
   useEffect(() => {
     fetchBanners().then(({ banners: b, popups: p }) => {
@@ -473,7 +494,7 @@ export default function BannersPage() {
         {(creatingBanner || editingBanner) && (
           <div className="bg-white rounded-xl border border-gray-200 p-6">
             <h2 className="text-sm font-semibold text-gray-800 mb-4">{editingBanner ? 'Edit Banner' : 'New Banner'}</h2>
-            <BannerForm initial={editingBanner ?? newBanner()} onSave={saveBanner} onCancel={() => { setEditingBanner(null); setCreatingBanner(false); }} />
+            <BannerForm initial={editingBanner ?? newBanner()} onSave={saveBanner} onCancel={() => { setEditingBanner(null); setCreatingBanner(false); }} audienceLabel={audienceLabel} />
           </div>
         )}
         {activeBanners.length > 0 && !editingBanner && !creatingBanner && (
@@ -508,7 +529,7 @@ export default function BannersPage() {
             </div>
             <div className="divide-y divide-gray-50">
               {banners.map((b) => (
-                <ItemRow key={b.id} item={b} typeIcon={typeIcon(b.type)} onToggle={() => toggleBanner(b.id)} onEdit={() => setEditingBanner(b)} onDelete={() => deleteBanner(b.id)} />
+                <ItemRow key={b.id} item={b} typeIcon={typeIcon(b.type)} onToggle={() => toggleBanner(b.id)} onEdit={() => setEditingBanner(b)} onDelete={() => deleteBanner(b.id)} audienceLabel={audienceLabel} />
               ))}
             </div>
           </div>
@@ -520,7 +541,7 @@ export default function BannersPage() {
         {(creatingPopup || editingPopup) && (
           <div className="bg-white rounded-xl border border-gray-200 p-6">
             <h2 className="text-sm font-semibold text-gray-800 mb-4">{editingPopup ? 'Edit Popup' : 'New Popup'}</h2>
-            <PopupForm initial={editingPopup ?? newPopup()} onSave={savePopup} onCancel={() => { setEditingPopup(null); setCreatingPopup(false); }} />
+            <PopupForm initial={editingPopup ?? newPopup()} onSave={savePopup} onCancel={() => { setEditingPopup(null); setCreatingPopup(false); }} audienceLabel={audienceLabel} />
           </div>
         )}
         {activePopup && !editingPopup && !creatingPopup && (
@@ -548,7 +569,7 @@ export default function BannersPage() {
             </div>
             <div className="divide-y divide-gray-50">
               {popups.map((p) => (
-                <ItemRow key={p.id} item={{ ...p, title: p.title || (p.type === 'image' ? 'Poster popup' : p.type === 'video' ? 'Video popup' : 'Text popup') }} typeIcon={typeIcon(p.type)} onToggle={() => togglePopup(p.id)} onEdit={() => setEditingPopup(p)} onDelete={() => deletePopup(p.id)} />
+                <ItemRow key={p.id} item={{ ...p, title: p.title || (p.type === 'image' ? 'Poster popup' : p.type === 'video' ? 'Video popup' : 'Text popup') }} typeIcon={typeIcon(p.type)} onToggle={() => togglePopup(p.id)} onEdit={() => setEditingPopup(p)} onDelete={() => deletePopup(p.id)} audienceLabel={audienceLabel} />
               ))}
             </div>
           </div>

@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { Filter } from 'lucide-react';
+import { useOutletTypeLabels } from '@/lib/platform/use-outlet-type-labels';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -78,6 +79,8 @@ export function FilterBar({ onChange, showOutletType = false }: FilterBarProps) 
   const [region,       setRegion]       = useState('all');
   const [partnerClass, setPartnerClass] = useState('All');
   const [outletType,   setOutletType]   = useState('all');
+  // Per-tenant outlet-type display labels; falls back to the OUTLET_TYPES labels until resolved.
+  const { label: outletTypeLabel } = useOutletTypeLabels();
 
   function notify(next: Partial<FilterValues>) {
     const values: FilterValues = {
@@ -192,7 +195,7 @@ export function FilterBar({ onChange, showOutletType = false }: FilterBarProps) 
               className="text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)] bg-white text-gray-700"
             >
               {OUTLET_TYPES.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
+                <option key={o.value} value={o.value}>{o.value === 'all' ? o.label : outletTypeLabel(o.value, o.label)}</option>
               ))}
             </select>
           </>

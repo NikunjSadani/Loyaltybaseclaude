@@ -478,4 +478,68 @@ describe('TenantSettingsService', () => {
     const s = await svc.getEffectiveSettings('deoleo');
     expect(s.minBankTransferAmount).toBe(250);
   });
+
+  describe('getOutletTypes', () => {
+    // The service calls outletTypeClientConfig.findMany TWICE (once via the shared
+    // loadOutletTypeDisplayNames helper, once for code/name); a single mock serves both.
+    function makeOutletTypePrisma(
+      rows: Array<{ outletTypeId: string; displayName: string | null; code: string; name: string }>,
+    ) {
+      return {
+        outletTypeClientConfig: {
+          findMany: jest.fn(({ select }: { select: Record<string, unknown> }) =>
+            // The helper selects {outletTypeId, displayName}; the service selects
+            // {outletTypeId, outletType:{code,name}}. Return the shape each caller asked for.
+            Promise.resolve(
+              rows.map((r) =>
+                'displayName' in select
+                  ? { outletTypeId: r.outletTypeId, displayName: r.displayName }
+                  : { outletTypeId: r.outletTypeId, outletType: { code: r.code, name: r.name } },
+              ),
+            ),
+          ),
+        },
+      } as any;
+    }
+
+    it('DEOLEO (no displayName overrides) → every row carries displayName:null and label===name (byte-identical fallback)', async () => {
+      const svc = new TenantSettingsService(
+        makeOutletTypePrisma([
+          { outletTypeId: 't1', displayName: null, code: 'SSS', name: 'SSS' },
+          { outletTypeId: 't2', displayName: null, code: 'WHOLESALER', name: 'Wholesaler' },
+        ]),
+      );
+      const out = await svc.getOutletTypes('deoleo');
+      expect(out).toEqual([
+        { code: 'SSS', label: 'SSS', name: 'SSS', displayName: null },
+        { code: 'WHOLESALER', label: 'Wholesaler', name: 'Wholesaler', displayName: null },
+      ]);
+    });
+
+    it('BAJAJ (SSS→RLP, WHOLESALER→BSC) → overrides surface in displayName+label; code stays stable', async () => {
+      const svc = new TenantSettingsService(
+        makeOutletTypePrisma([
+          { outletTypeId: 't1', displayName: 'RLP', code: 'SSS', name: 'SSS' },
+          { outletTypeId: 't2', displayName: 'BSC', code: 'WHOLESALER', name: 'Wholesaler' },
+          { outletTypeId: 't3', displayName: null, code: 'SUB_STOCKIST', name: 'Sub-Stockist' },
+        ]),
+      );
+      const out = await svc.getOutletTypes('bajaj');
+      const byCode = Object.fromEntries(out.map((o) => [o.code, o]));
+      expect(byCode.SSS).toEqual({ code: 'SSS', label: 'RLP', name: 'SSS', displayName: 'RLP' });
+      expect(byCode.WHOLESALER).toEqual({ code: 'WHOLESALER', label: 'BSC', name: 'Wholesaler', displayName: 'BSC' });
+      // Unset type falls back to its global name, displayName null.
+      expect(byCode.SUB_STOCKIST).toEqual({
+        code: 'SUB_STOCKIST', label: 'Sub-Stockist', name: 'Sub-Stockist', displayName: null,
+      });
+    });
+
+    it('a blank/whitespace displayName is treated as unset (trimmed → null fallback)', async () => {
+      const svc = new TenantSettingsService(
+        makeOutletTypePrisma([{ outletTypeId: 't1', displayName: '   ', code: 'SSS', name: 'SSS' }]),
+      );
+      const out = await svc.getOutletTypes('x');
+      expect(out[0]).toEqual({ code: 'SSS', label: 'SSS', name: 'SSS', displayName: null });
+    });
+  });
 });
