@@ -66,9 +66,9 @@ describe('TradeComparisonCard', () => {
   it('TC1: renders the KPI name, ₹ monthly sales, and target-met pct', async () => {
     render(<TradeComparisonCard outletType="SSS" />);
     await waitFor(() => expect(screen.getByText('Primary Sales')).toBeInTheDocument());
-    expect(screen.getByText('₹1,20,000')).toBeInTheDocument(); // current, en-IN grouping
-    expect(screen.getByText('₹90,000')).toBeInTheDocument();   // last month
-    expect(screen.getByText('₹1,00,000')).toBeInTheDocument(); // last 3 months avg
+    expect(screen.getByText('₹1.2L')).toBeInTheDocument();  // current (1,20,000 → compact lakhs)
+    expect(screen.getByText('₹90K')).toBeInTheDocument();   // last month (90,000 → compact thousands)
+    expect(screen.getByText('₹1L')).toBeInTheDocument();    // last 3 months avg (1,00,000 → compact lakhs)
     expect(screen.getByText('80%')).toBeInTheDocument();
     expect(screen.getByText('60%')).toBeInTheDocument();
     expect(screen.getByText('70%')).toBeInTheDocument();
@@ -103,8 +103,8 @@ describe('TradeComparisonCard', () => {
 
   it('TC5: a failed refetch after a type change clears stale data and shows the error (no wrong bucket)', async () => {
     const { rerender } = render(<TradeComparisonCard outletType="SSS" />);
-    // First load succeeds — RLP numbers on screen.
-    await waitFor(() => expect(screen.getByText('₹1,20,000')).toBeInTheDocument());
+    // First load succeeds — RLP numbers on screen (compact ₹).
+    await waitFor(() => expect(screen.getByText('₹1.2L')).toBeInTheDocument());
 
     // Backend now errors for the comparison; switch the outlet type → refetch.
     fetchMock.mockImplementation((url: string) => {
@@ -120,7 +120,7 @@ describe('TradeComparisonCard', () => {
 
     // The error state shows and the previous (RLP) numbers are GONE — never shown under the new type.
     await waitFor(() => expect(screen.getByText(/Couldn.t load the comparison/i)).toBeInTheDocument());
-    expect(screen.queryByText('₹1,20,000')).not.toBeInTheDocument();
-    expect(screen.queryByText('₹90,000')).not.toBeInTheDocument();
+    expect(screen.queryByText('₹1.2L')).not.toBeInTheDocument();
+    expect(screen.queryByText('₹90K')).not.toBeInTheDocument();
   });
 });

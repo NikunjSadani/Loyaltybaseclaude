@@ -4,6 +4,8 @@
  * Pure presentational: pass any `{ month, target, achieved }[]` series + the display unit.
  */
 
+import { formatInrCompact, isInrUnit } from '@/lib/format-inr';
+
 export interface TrendPoint {
   month: string;
   target: number;
@@ -18,6 +20,10 @@ export function TargetTrendChart({
     return <p className="text-xs text-gray-400 text-center py-6">{emptyText}</p>;
   }
   const max = Math.max(1, ...trend.map((t) => Math.max(t.target, t.achieved)));
+  // A ₹ series shows compact Indian ₹ (K/L/Cr) in the bar tooltips — the ₹ sits in the value, so the
+  // unit suffix is dropped. Volume/count series keep today's full-digit value + unit suffix.
+  const inr = isInrUnit(unit);
+  const fmt = (v: number) => (inr ? formatInrCompact(v) : `${v.toLocaleString('en-IN')} ${unit}`);
   return (
     <div className="flex items-end justify-between gap-2 h-40 px-1 pt-2">
       {trend.map((t) => {
@@ -25,8 +31,8 @@ export function TargetTrendChart({
         return (
           <div key={t.month} className="flex-1 flex flex-col items-center gap-1 min-w-0">
             <div className="flex items-end gap-0.5 h-32 w-full justify-center">
-              <div className="w-2.5 bg-gray-200 rounded-t" style={{ height: `${(t.target / max) * 100}%` }} title={`Target ${t.target.toLocaleString('en-IN')} ${unit}`} />
-              <div className="w-2.5 bg-[var(--brand-primary)] rounded-t" style={{ height: `${(t.achieved / max) * 100}%` }} title={`Achieved ${t.achieved.toLocaleString('en-IN')} ${unit}`} />
+              <div className="w-2.5 bg-gray-200 rounded-t" style={{ height: `${(t.target / max) * 100}%` }} title={`Target ${fmt(t.target)}`} />
+              <div className="w-2.5 bg-[var(--brand-primary)] rounded-t" style={{ height: `${(t.achieved / max) * 100}%` }} title={`Achieved ${fmt(t.achieved)}`} />
             </div>
             <span className="text-[9px] text-gray-400">{label}</span>
           </div>

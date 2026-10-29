@@ -21,6 +21,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Spinner } from '@/components/ui/spinner';
 import { fetchTradeComparison, type TradeComparisonResult, type TradeComparisonBucket } from '@/lib/sales-trade-comparison';
 import { fetchTeamView } from '@/lib/sales-team';
+import { formatInrCompact } from '@/lib/format-inr';
 
 interface MemberOption { id: string; name: string; roleLabel: string }
 
@@ -177,7 +178,8 @@ export function TradeComparisonCard({ outletType }: { outletType: string }) {
               <div className="text-[11px] font-medium text-gray-600">Monthly sale</div>
               {columns.map((c) => (
                 <div key={c.key} className="text-sm font-bold text-gray-800 text-center">
-                  ₹{data.buckets[c.key].monthlySale.toLocaleString('en-IN')}
+                  {/* Compact Indian ₹ (K/L/Cr) so lakhs/crores don't overflow the card. */}
+                  {formatInrCompact(data.buckets[c.key].monthlySale)}
                 </div>
               ))}
             </div>
