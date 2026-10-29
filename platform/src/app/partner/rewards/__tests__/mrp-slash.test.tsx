@@ -2,17 +2,15 @@
 /**
  * MRP — Partner Rewards catalogue MRP-slash (per-tenant `catalogueMrpSlash`)
  *
- * The item's MRP (converted to points at the tenant rate, POINTS-PER-₹) renders as a
- * struck-through "list price" above the redeem price — but ONLY when it is honest:
- *   MRP1: flag ON + MRP-in-points > redeem price  → struck price shows
- *   MRP2: flag OFF                                 → no struck price (byte-identical to today)
- *   MRP3: mrpPaise null                            → no struck price
- *   MRP4: MRP-in-points <= redeem price (inverted) → no struck price (never equal/inverted)
- *   MRP5: FREE_AMOUNT / cash item (pointsCost 0)   → no struck price (no fixed redeem anchor)
- *
- * The redeem price (pointsCost) derives from the ₹ SELLING value, not MRP, so MRP-in-points is a
- * genuinely higher real anchor — the slash is truthful. effectiveRate falls back to the mocked
- * gifsy-settings pointsConversionRate (1) since /api/auth/me carries no conversionRate here.
+ * The struck-through "list price" is now computed SERVER-SIDE (rate-INDEPENDENT:
+ * pointsCost × mrpPaise ÷ sellingValuePaise) and delivered on each item as `slashPoints`.
+ * The FE renders it when the flag is ON and the server sent a value — it NO LONGER derives
+ * it from the conversion rate:
+ *   MRP1: flag ON + server slashPoints present  → struck price shows (the server value)
+ *   MRP2: flag OFF                              → no struck price (byte-identical to today)
+ *   MRP3: slashPoints null                      → no struck price
+ *   MRP4: server suppressed an inverted slash (slashPoints null) → no struck price
+ *   MRP5: FREE_AMOUNT item (server slashPoints null) → no struck price
  */
 
 import React from 'react';
@@ -48,15 +46,15 @@ vi.mock('@/components/ui/toast', () => ({
 
 import RewardsPage from '../page';
 
-// A physical gift (default "Physical" tab): ₹800 MRP, 500-pt redeem price.
-// At rate 1 → MRP-in-points = 800 > 500 → an honest slash.
+// A physical gift (default "Physical" tab): 500-pt redeem price with a server-computed
+// slashPoints of 800 (rate-independent — the FE just renders it struck-through).
 const PHYSICAL = {
   id: 'ph1',
   name: 'Bluetooth Headphones',
   brand: 'Sony',
   category: 'Electronics',
   pointsCost: 500,
-  mrpPaise: 80_000,          // ₹800
+  slashPoints: 800,          // computed + flag-gated server-side; member never receives mrpPaise
   redemptionMode: 'PHYSICAL_GIFT',
   available: true,
   isAffordable: true,
@@ -96,13 +94,13 @@ beforeEach(() => { pushMock.mockClear(); });
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('MRP — catalogue MRP-slash on the partner rewards grid card', () => {
-  it('MRP1: flag ON + MRP-in-points > redeem price → shows the struck-through list price', async () => {
+  it('MRP1: flag ON + server slashPoints present → shows the struck-through list price', async () => {
     stubFetch([PHYSICAL], true);
     render(<RewardsPage />);
     const card = await cardFor('Bluetooth Headphones');
     // The redeem price is always present…
     expect(card).toHaveTextContent('500 pts');
-    // …and the MRP-in-points (₹800 × rate 1 = 800) renders struck-through above it.
+    // …and the server slashPoints (800) renders struck-through above it.
     const struck = await screen.findByText('800 pts');
     expect(struck.className).toContain('line-through');
   });
@@ -115,32 +113,34 @@ describe('MRP — catalogue MRP-slash on the partner rewards grid card', () => {
     expect(screen.queryByText('800 pts')).not.toBeInTheDocument();
   });
 
-  it('MRP3: flag ON but mrpPaise null → no struck list price', async () => {
-    stubFetch([{ ...PHYSICAL, mrpPaise: null }], true);
+  it('MRP3: flag ON but server slashPoints null → no struck list price', async () => {
+    stubFetch([{ ...PHYSICAL, slashPoints: null }], true);
     render(<RewardsPage />);
     const card = await cardFor('Bluetooth Headphones');
     expect(card).toHaveTextContent('500 pts');
     expect(screen.queryByText('800 pts')).not.toBeInTheDocument();
   });
 
-  it('MRP4: flag ON but MRP-in-points <= redeem price (inverted) → no struck list price', async () => {
-    // ₹400 MRP at rate 1 = 400 pts, which is NOT strictly greater than the 500-pt redeem price.
-    stubFetch([{ ...PHYSICAL, mrpPaise: 40_000 }], true);
+  it('MRP4: flag ON but the server suppressed an inverted slash (slashPoints null) → no struck list price', async () => {
+    // The server only returns slashPoints when strictly greater than the redeem price; an
+    // inverted/equal pair comes back as null, so the FE shows nothing.
+    stubFetch([{ ...PHYSICAL, slashPoints: null }], true);
     render(<RewardsPage />);
     const card = await cardFor('Bluetooth Headphones');
     expect(card).toHaveTextContent('500 pts');
-    expect(screen.queryByText('400 pts')).not.toBeInTheDocument();
+    expect(screen.queryByText('800 pts')).not.toBeInTheDocument();
   });
 
-  it('MRP5: flag ON but a FREE_AMOUNT / cash item (pointsCost 0) → no struck list price', async () => {
-    // A FREE_AMOUNT voucher carries a (nonsensical) MRP but has NO fixed redeem anchor.
+  it('MRP5: flag ON but a FREE_AMOUNT item (server slashPoints null) → no struck list price', async () => {
+    // A FREE_AMOUNT voucher (pointsCost 0) has NO fixed redeem anchor, so the server returns
+    // slashPoints null for it.
     const freeAmount = {
       id: 'fa1',
       name: 'Flexi Voucher',
       brand: 'Flipkart',
       category: 'Vouchers',
       pointsCost: 0,
-      mrpPaise: 80_000,
+      slashPoints: null,
       redemptionMode: 'GIFT_CARD',
       voucherType: 'FREE_AMOUNT',
       minRedemptionPoints: 250,

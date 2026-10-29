@@ -66,6 +66,8 @@ interface CatalogItem {
   imageUrls?: string[] | null;
   pointsCost: number;
   mrpPaise?: number | null;
+  /** Optional ₹ selling value (paise) — cost basis for the rate-independent MRP-slash + 194R freeze. */
+  sellingValuePaise?: number | null;
   redemptionMode: PayoutMode;
   status: CatalogStatus;
   minRedemptionPoints?: number | null;
@@ -466,6 +468,7 @@ interface ItemFormState {
   voucherMode: VoucherMode;
   pointsCost: number;
   mrpRupees: string;            // optional ₹ input → mrpPaise
+  sellingValueRupees: string;   // optional ₹ input → sellingValuePaise (cost basis)
   minRedemptionPoints: string;
   maxRedemptionPoints: string;
   stockTracked: boolean;
@@ -481,7 +484,7 @@ function blankItemForm(categoryId: string): ItemFormState {
     categoryId,
     code: '', name: '', description: '', imageUrls: [],
     redemptionMode: 'GIFT_CARD', voucherMode: 'FIXED',
-    pointsCost: 0, mrpRupees: '',
+    pointsCost: 0, mrpRupees: '', sellingValueRupees: '',
     minRedemptionPoints: '', maxRedemptionPoints: '',
     stockTracked: false, stockQuantity: 0,
     termsAndConditions: '', status: 'ACTIVE',
@@ -520,6 +523,7 @@ function ItemModal({
       voucherMode: isFree ? 'FREE_AMOUNT' : 'FIXED',
       pointsCost: editing.pointsCost,
       mrpRupees: editing.mrpPaise != null ? String(editing.mrpPaise / 100) : '',
+      sellingValueRupees: editing.sellingValuePaise != null ? String(editing.sellingValuePaise / 100) : '',
       minRedemptionPoints: editing.minRedemptionPoints != null ? String(editing.minRedemptionPoints) : '',
       maxRedemptionPoints: editing.maxRedemptionPoints != null ? String(editing.maxRedemptionPoints) : '',
       stockTracked: editing.stockQuantity != null,
@@ -559,6 +563,14 @@ function ItemModal({
     } else {
       if (form.pointsCost <= 0) e.pointsCost = 'Points cost must be > 0';
     }
+    // Selling value (optional) can't exceed MRP when both are entered (mirrors the backend bound).
+    if (form.sellingValueRupees.trim() && form.mrpRupees.trim()) {
+      const sv = parseFloat(form.sellingValueRupees);
+      const mrp = parseFloat(form.mrpRupees);
+      if (Number.isFinite(sv) && Number.isFinite(mrp) && sv > mrp) {
+        e.sellingValueRupees = 'Selling value cannot exceed MRP';
+      }
+    }
     setErrors(e);
     return Object.keys(e).length === 0;
   };
@@ -584,6 +596,11 @@ function ItemModal({
     }
     if (form.mrpRupees.trim()) {
       payload.mrpPaise = Math.round(parseFloat(form.mrpRupees) * 100);
+    }
+    // Optional ₹ selling value (cost basis). Blank = leave unset. The backend bounds it
+    // (sellingValuePaise <= mrpPaise) and uses it for the rate-independent slash + 194R freeze.
+    if (form.sellingValueRupees.trim()) {
+      payload.sellingValuePaise = Math.round(parseFloat(form.sellingValueRupees) * 100);
     }
     if (isFreeAmount) {
       payload.pointsCost = 0;
@@ -805,6 +822,19 @@ function ItemModal({
                   placeholder="(optional)"
                   className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
                 />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-gray-700">Selling value (₹)</label>
+                <input
+                  type="number"
+                  value={form.sellingValueRupees}
+                  onChange={(e) => set('sellingValueRupees', e.target.value)}
+                  placeholder="(optional)"
+                  className={inputCls('sellingValueRupees')}
+                />
+                {errors.sellingValueRupees
+                  ? <p className="text-xs text-red-500">{errors.sellingValueRupees}</p>
+                  : <p className="text-[10px] text-gray-400">Cost basis — drives the member MRP-slash &amp; tax value. Must be ≤ MRP.</p>}
               </div>
             </div>
           )}

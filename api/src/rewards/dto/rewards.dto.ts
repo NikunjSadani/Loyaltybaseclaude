@@ -533,6 +533,20 @@ export class CreateRewardCatalogDto {
   @Min(0)
   mrpPaise?: number;
 
+  /**
+   * OPTIONAL per-item ₹ SELLING VALUE in paise (the real cost basis Gifsy pays for the
+   * item). Drives (a) the rate-INDEPENDENT catalogue MRP-slash the member sees (computed
+   * server-side as pointsCost × mrpPaise ÷ sellingValuePaise) and (b) the rate-immune
+   * 194R/valuation freeze (sellingValuePaise × qty). COST BASIS — never projected to a
+   * member (excluded from MEMBER_CATALOG_SELECT; computed then stripped on member reads).
+   * Bound: when both are set, sellingValuePaise <= mrpPaise (a sell price can't exceed MRP).
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  sellingValuePaise?: number;
+
   @IsEnum(PayoutMode)
   redemptionMode!: PayoutMode;
 
@@ -616,6 +630,17 @@ export class UpdateRewardCatalogDto {
   @IsInt()
   @Min(0)
   mrpPaise?: number;
+
+  /**
+   * OPTIONAL ₹ selling value in paise (see CreateRewardCatalogDto.sellingValuePaise).
+   * `undefined` leaves the stored value unchanged. Bound (on the effective values):
+   * when both selling value and MRP are set, sellingValuePaise <= mrpPaise.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  sellingValuePaise?: number;
 
   @IsOptional()
   @IsEnum(PayoutMode)

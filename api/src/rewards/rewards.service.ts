@@ -111,6 +111,14 @@ export function vendorVisibilityFilter(clientId: string): Prisma.RewardCatalogWh
  * (listCatalog / getCatalogItem). Deliberately EXCLUDES ops/internal columns —
  * sellingValuePaise (194R/cost basis), sourceType, vendorId, giftMasterId,
  * giftCategoryId and the moderation* fields — that a member must never see.
+ *
+ * SECURITY (cost-basis inference leak, review HIGH): `mrpPaise` is ALSO excluded here.
+ * It is no longer needed FE-side (the slash is server-computed) and, shipped next to the
+ * public `pointsCost` + a derived `slashPoints`, it lets a member solve back the hidden
+ * cost basis: sellingValuePaise ≈ pointsCost × mrpPaise / slashPoints. The slash paths
+ * select `mrpPaise` + `sellingValuePaise` TRANSIENTLY (flag-gated) to compute slashPoints,
+ * then strip BOTH — the member only ever receives (pointsCost, slashPoints), from which the
+ * absolute cost basis is unrecoverable (one equation, two unknowns).
  */
 const MEMBER_CATALOG_SELECT = {
   id: true,
@@ -119,7 +127,6 @@ const MEMBER_CATALOG_SELECT = {
   description: true,
   imageUrls: true,
   pointsCost: true,
-  mrpPaise: true,
   redemptionMode: true,
   status: true,
   minRedemptionPoints: true,
@@ -291,17 +298,26 @@ export class RewardsService {
       };
     }
 
+    // Per-tenant MRP-slash flag (default OFF, incl. Deoleo). When OFF we neither select the
+    // cost-basis columns nor compute/emit slashPoints — the response is cost-basis-free.
+    const mrpSlashEnabled = await this.isCatalogueMrpSlashEnabled(user.clientId);
+
     const [items, total] = await Promise.all([
       this.prisma.rewardCatalog.findMany({
         where,
         skip,
         take: limit,
         orderBy: { pointsCost: 'asc' },
-        // Member-safe projection — drops ops/internal columns (sellingValuePaise,
-        // vendorId, giftMasterId, giftCategoryId, moderation*). sourceType is read
-        // ONLY to derive the member-safe `requiresConsent` boolean below and is
-        // stripped from the response (never leaked to the member).
-        select: { ...MEMBER_CATALOG_SELECT, sourceType: true },
+        // Member-safe projection — drops ops/internal columns (vendorId, giftMasterId,
+        // giftCategoryId, moderation*, and mrpPaise — see MEMBER_CATALOG_SELECT). sourceType
+        // is read to derive requiresConsent; mrpPaise + sellingValuePaise are selected
+        // TRANSIENTLY only when the slash flag is ON (to compute slashPoints) and are BOTH
+        // stripped below — the member never receives either cost-basis column.
+        select: {
+          ...MEMBER_CATALOG_SELECT,
+          sourceType: true,
+          ...(mrpSlashEnabled ? { mrpPaise: true, sellingValuePaise: true } : {}),
+        },
       }),
       this.prisma.rewardCatalog.count({ where }),
     ]);
@@ -312,12 +328,21 @@ export class RewardsService {
       // nested relation the admin endpoint returns). Derive `requiresConsent`
       // (DPDP consent gate, decision #15) from sourceType, then DROP sourceType so
       // the raw source/vendor origin never reaches the member.
-      const { category, sourceType, ...rest } = item;
+      // Compute the rate-INDEPENDENT MRP-slash (flag ON only) BEFORE stripping the cost basis,
+      // then DROP BOTH mrpPaise and sellingValuePaise so neither reaches the member — only the
+      // derived slashPoints does. When the flag is OFF the columns were not even selected.
+      // Cast to a view with OPTIONAL cost-basis keys: they are present only under the
+      // flag-ON select. Destructuring them by name strips BOTH from `rest` (the response)
+      // whether or not they were selected (a no-op strip when absent).
+      const row = item as typeof item & { mrpPaise?: number | null; sellingValuePaise?: number | null };
+      const slashPoints = mrpSlashEnabled ? this.computeSlashPoints(row) : null;
+      const { category, sourceType, mrpPaise: _mrp, sellingValuePaise: _sv, ...rest } = row;
       return {
         ...rest,
         category: category?.name,
         requiresConsent: sourceType === 'VENDOR',
-        isAffordable: userBalance >= item.pointsCost,
+        isAffordable: userBalance >= row.pointsCost,
+        ...(mrpSlashEnabled ? { slashPoints } : {}),
       };
     });
 
@@ -330,6 +355,8 @@ export class RewardsService {
 
   /** GET /v1/rewards/catalog/:id — a single active (non-deleted) catalog item in the tenant. */
   async getCatalogItem(user: JwtPayload, id: string, requestedPartnerId?: string) {
+    // Per-tenant MRP-slash flag (default OFF). When OFF: no cost-basis select, no slashPoints.
+    const mrpSlashEnabled = await this.isCatalogueMrpSlashEnabled(user.clientId);
     const item = await this.prisma.rewardCatalog.findFirst({
       // Moderation gate: a non-APPROVED item is not viewable even by deep-link/stale
       // cart. status=ACTIVE parity with listCatalog — a DISCONTINUED/OUT_OF_STOCK/
@@ -343,9 +370,15 @@ export class RewardsService {
         moderationStatus: 'APPROVED',
         ...vendorVisibilityFilter(user.clientId),
       },
-      // Member-safe projection (same as listCatalog) — no ops/internal columns.
-      // sourceType is read ONLY to derive `requiresConsent`; stripped below.
-      select: { ...MEMBER_CATALOG_SELECT, sourceType: true },
+      // Member-safe projection (same as listCatalog) — no ops/internal columns and no
+      // mrpPaise by default. sourceType derives requiresConsent; mrpPaise + sellingValuePaise
+      // are selected TRANSIENTLY only when the slash flag is ON (to compute slashPoints) and
+      // are BOTH stripped below (cost-basis leak guard).
+      select: {
+        ...MEMBER_CATALOG_SELECT,
+        sourceType: true,
+        ...(mrpSlashEnabled ? { mrpPaise: true, sellingValuePaise: true } : {}),
+      },
     });
     if (!item) throw new NotFoundException('Reward item not found');
     // The item is tenant-scoped (not partner-scoped), so the response is identical
@@ -362,10 +395,18 @@ export class RewardsService {
     ) {
       throw new NotFoundException('Reward item not found or not available');
     }
-    // Derive the DPDP consent gate (decision #15) from sourceType, then DROP
-    // sourceType so the member never sees the raw source/vendor origin.
-    const { sourceType, ...rest } = item;
-    return { item: { ...rest, requiresConsent: sourceType === 'VENDOR' } };
+    // Compute the rate-independent slash (flag ON only), then DROP sourceType AND both
+    // cost-basis columns so the member never sees the raw origin OR the cost basis.
+    const row = item as typeof item & { mrpPaise?: number | null; sellingValuePaise?: number | null };
+    const slashPoints = mrpSlashEnabled ? this.computeSlashPoints(row) : null;
+    const { sourceType, mrpPaise: _mrp, sellingValuePaise: _sv, ...rest } = row;
+    return {
+      item: {
+        ...rest,
+        requiresConsent: sourceType === 'VENDOR',
+        ...(mrpSlashEnabled ? { slashPoints } : {}),
+      },
+    };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -399,6 +440,9 @@ export class RewardsService {
       return { items: [], rewardIds: [] };
     }
 
+    // Per-tenant MRP-slash flag (default OFF). When OFF: no cost-basis select, no slashPoints.
+    const mrpSlashEnabled = await this.isCatalogueMrpSlashEnabled(user.clientId);
+
     const rows = await this.prisma.partnerWishlist.findMany({
       // Tenant + partner scoped — a partner only ever sees its own bookmarks — AND the
       // bookmarked reward must still be MEMBER-VISIBLE (the SAME filter listCatalog applies:
@@ -423,15 +467,32 @@ export class RewardsService {
       select: {
         rewardId: true,
         createdAt: true,
-        // Member-safe reward projection (drops sellingValuePaise/sourceType/vendorId/
-        // moderation* — identical to listCatalog). Flattened to a `category` label below.
-        reward: { select: MEMBER_CATALOG_SELECT },
+        // Member-safe reward projection (identical to listCatalog). mrpPaise + sellingValuePaise
+        // are selected TRANSIENTLY only when the slash flag is ON (to compute slashPoints) and
+        // are BOTH stripped below (never projected to the member). Flattened to `category` below.
+        reward: {
+          select: {
+            ...MEMBER_CATALOG_SELECT,
+            ...(mrpSlashEnabled ? { mrpPaise: true, sellingValuePaise: true } : {}),
+          },
+        },
       },
     });
 
     const items = rows.map((r) => {
-      const { category, ...rest } = r.reward;
-      return { ...rest, category: category?.name, wishlistedAt: r.createdAt };
+      // Compute the slash (flag ON only), then DROP BOTH cost-basis columns (leak guard).
+      const reward = r.reward as typeof r.reward & {
+        mrpPaise?: number | null;
+        sellingValuePaise?: number | null;
+      };
+      const slashPoints = mrpSlashEnabled ? this.computeSlashPoints(reward) : null;
+      const { category, mrpPaise: _mrp, sellingValuePaise: _sv, ...rest } = reward;
+      return {
+        ...rest,
+        category: category?.name,
+        wishlistedAt: r.createdAt,
+        ...(mrpSlashEnabled ? { slashPoints } : {}),
+      };
     });
 
     return { items, rewardIds: rows.map((r) => r.rewardId) };
@@ -2812,6 +2873,21 @@ export class RewardsService {
   }
 
   /**
+   * Read the per-tenant catalogue MRP-slash feature flag (clients.features.catalogueMrpSlash,
+   * default OFF). Mirrors isHubbleEnabledForTenant. Gates the SERVER-SIDE slashPoints computation:
+   * when OFF (incl. Deoleo), the member catalogue reads neither compute nor emit slashPoints AND do
+   * not even transiently select the cost-basis columns (mrpPaise/sellingValuePaise) — so a flag-OFF
+   * member response carries no slash and no cost-basis columns at all (defense-in-depth).
+   */
+  private async isCatalogueMrpSlashEnabled(clientId: string): Promise<boolean> {
+    const client = await this.prisma.client.findFirst({
+      where: { id: clientId },
+      select: { features: true },
+    });
+    return (client?.features as Record<string, unknown> | null)?.catalogueMrpSlash === true;
+  }
+
+  /**
    * Eligibility for auto-issuance. ORDER MATTERS for byte-identical behaviour: the
    * cheap, DB-free checks (GIFT_CARD + a productId on the item) run FIRST, so a
    * Deoleo / non-Hubble item never even reads the tenant flag. Only a GIFT_CARD that
@@ -3625,6 +3701,10 @@ export class RewardsService {
 
     this.assertRedemptionRange(dto.minRedemptionPoints, dto.maxRedemptionPoints);
 
+    // Selling value can't exceed MRP when both are supplied (price integrity + an honest
+    // slash: slashPoints only shows when mrp > selling, so an inverted pair is a config error).
+    this.assertSellingValueBounds(dto.sellingValuePaise, dto.mrpPaise);
+
     // A pointsCost-0 item is only ever a FREE_AMOUNT voucher, and it MUST carry a
     // complete [min, max] range — reject a half-configured one (see the helper).
     this.assertFreeAmountComplete(
@@ -3666,6 +3746,8 @@ export class RewardsService {
         imageUrls: (dto.imageUrls ?? undefined) as Prisma.InputJsonValue | undefined,
         pointsCost: dto.pointsCost,
         mrpPaise: dto.mrpPaise,
+        // Cost basis for the rate-independent slash + rate-immune 194R freeze (optional).
+        sellingValuePaise: dto.sellingValuePaise,
         redemptionMode: dto.redemptionMode,
         status,
         minRedemptionPoints: dto.minRedemptionPoints,
@@ -3705,6 +3787,13 @@ export class RewardsService {
       dto.maxRedemptionPoints !== undefined ? dto.maxRedemptionPoints : existing.maxRedemptionPoints;
     this.assertRedemptionRange(effMin, effMax);
     this.assertFreeAmountComplete(effPoints, effMin, effMax);
+
+    // Validate the EFFECTIVE selling value vs MRP (payload value if present, else stored),
+    // so a PATCH that raises selling value above MRP — or lowers MRP below it — is rejected.
+    const effSellingValue =
+      dto.sellingValuePaise !== undefined ? dto.sellingValuePaise : existing.sellingValuePaise;
+    const effMrp = dto.mrpPaise !== undefined ? dto.mrpPaise : existing.mrpPaise;
+    this.assertSellingValueBounds(effSellingValue, effMrp);
 
     if (dto.code !== undefined && dto.code !== existing.code) {
       const clash = await this.prisma.rewardCatalog.findFirst({
@@ -3754,6 +3843,8 @@ export class RewardsService {
         imageUrls: (dto.imageUrls ?? undefined) as Prisma.InputJsonValue | undefined,
         pointsCost: dto.pointsCost,
         mrpPaise: dto.mrpPaise,
+        // Cost basis (optional). undefined = leave unchanged (Prisma skips it).
+        sellingValuePaise: dto.sellingValuePaise,
         redemptionMode: dto.redemptionMode,
         status,
         // Bounds are meaningful ONLY for a FREE_AMOUNT item (effPoints === 0). On a
@@ -3800,6 +3891,49 @@ export class RewardsService {
         'A valid 6-digit delivery pincode is required for physical gifts.',
       );
     }
+  }
+
+  /**
+   * sellingValuePaise <= mrpPaise when BOTH are provided (a selling price can't exceed MRP).
+   * Both are OPTIONAL on an admin item, so a missing value skips the check (nothing to bound).
+   * A 0 is a real value and still participates (0 <= mrp always holds).
+   */
+  private assertSellingValueBounds(
+    sellingValuePaise?: number | null,
+    mrpPaise?: number | null,
+  ) {
+    if (
+      sellingValuePaise != null &&
+      mrpPaise != null &&
+      sellingValuePaise > mrpPaise
+    ) {
+      throw new BadRequestException('sellingValuePaise must be <= mrpPaise');
+    }
+  }
+
+  /**
+   * Rate-INDEPENDENT catalogue MRP-slash, computed member-side from the item's cost basis.
+   * Returns the struck-through "list price" in POINTS, or null when the slash must not show.
+   *
+   * slashPoints = round(pointsCost × mrpPaise ÷ sellingValuePaise), returned ONLY when ALL hold:
+   *   - sellingValuePaise is a real positive value (the cost basis anchor);
+   *   - mrpPaise is a real positive value;
+   *   - pointsCost > 0 (a fixed-price item — excludes FREE_AMOUNT / cash-band items); AND
+   *   - the result is STRICTLY greater than pointsCost (never equal/inverted — an honest slash).
+   * Unlike the retired FE `mrpPaise × rate` math, this is INDEPENDENT of the tenant conversion
+   * rate, so it never drifts when the rate changes after the item was priced.
+   */
+  private computeSlashPoints(item: {
+    pointsCost: number;
+    mrpPaise?: number | null;
+    sellingValuePaise?: number | null;
+  }): number | null {
+    const { pointsCost, mrpPaise, sellingValuePaise } = item;
+    if (sellingValuePaise == null || sellingValuePaise <= 0) return null;
+    if (mrpPaise == null || mrpPaise <= 0) return null;
+    if (!(pointsCost > 0)) return null;
+    const slash = Math.round((pointsCost * mrpPaise) / sellingValuePaise);
+    return slash > pointsCost ? slash : null;
   }
 
   /** min <= max when both bounds are provided (FREE_AMOUNT voucher range). */

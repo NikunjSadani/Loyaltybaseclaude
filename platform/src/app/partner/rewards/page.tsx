@@ -74,11 +74,14 @@ interface CatalogueItem {
   minRedemptionPoints?: number | null;
   maxRedemptionPoints?: number | null;
   /**
-   * Item MRP in paise (nullable). Drives the per-tenant `catalogueMrpSlash` struck-through
-   * "list price": MRP → points at the tenant rate, shown above the redeem price as an honest
-   * "was" anchor. Honest because `points` (pointsCost) derives from the ₹ SELLING value, not MRP.
+   * Rate-INDEPENDENT catalogue MRP-slash, in POINTS, computed SERVER-SIDE
+   * (pointsCost × mrpPaise ÷ sellingValuePaise, where both cost-basis inputs stay server-side)
+   * and returned by GET /api/rewards/catalog ONLY when the per-tenant `catalogueMrpSlash` flag
+   * is ON. null/absent ⇒ no honest slash (flag OFF, no selling value, inverted, or FREE_AMOUNT).
+   * The FE renders this struck-through — it NO LONGER derives it from mrpPaise × rate (which
+   * drifted when the rate changed; `mrpPaise` is no longer shipped to the member at all).
    */
-  mrpPaise?: number | null;
+  slashPoints?: number | null;
   /**
    * DPDP consent gate (design decision #15). TRUE when this item is vendor-sourced
    * (sourceType=VENDOR) and redeeming it shares the member's delivery name/address/phone
@@ -111,8 +114,8 @@ interface ApiCatalogItem {
   fixedAmount?: number | null;
   minRedemptionPoints?: number | null;
   maxRedemptionPoints?: number | null;
-  /** Item MRP in paise (nullable) — already served by MEMBER_CATALOG_SELECT. See CatalogueItem.mrpPaise. */
-  mrpPaise?: number | null;
+  /** Rate-independent MRP-slash in points, computed server-side (flag-gated). See CatalogueItem.slashPoints. */
+  slashPoints?: number | null;
   /** See CatalogueItem.requiresConsent — vendor-sourced items set this true (BE-exposed). */
   requiresConsent?: boolean | null;
 }
@@ -171,7 +174,7 @@ function mapCatalogItem(item: ApiCatalogItem): CatalogueItem {
     fixedAmount:  item.fixedAmount ?? (voucherType === 'FIXED' ? item.pointsCost : undefined),
     minRedemptionPoints: item.minRedemptionPoints ?? null,
     maxRedemptionPoints: item.maxRedemptionPoints ?? null,
-    mrpPaise:     item.mrpPaise ?? null,
+    slashPoints:  item.slashPoints ?? null,
     // DPDP consent gate — FAIL CLOSED for deliverable (physical) items: redeeming one
     // shares the member's delivery name/address/phone with a third-party fulfilment
     // partner, so an ABSENT/null flag must NOT silently drop the gate. A physical item
@@ -208,32 +211,22 @@ function isFreeAmount(
 }
 
 /**
- * Catalogue MRP-slash (per-tenant `catalogueMrpSlash`): the item's MRP converted to points at the
- * tenant conversion rate, to show struck-through as an honest "was" anchor above the redeem price.
- * Returns the MRP-in-points to DISPLAY, or null when the slash must NOT be shown.
+ * Catalogue MRP-slash (per-tenant `catalogueMrpSlash`): the struck-through "list price" in POINTS
+ * to show above the redeem price. This is now computed SERVER-SIDE (rate-INDEPENDENT:
+ * pointsCost × mrpPaise ÷ sellingValuePaise) and delivered on each catalogue item as `slashPoints`.
+ * The FE no longer derives it from the conversion rate — that drifted whenever the tenant rate
+ * changed after the item was priced. Here we only gate it behind the per-tenant flag.
  *
- * Honesty invariant (do not break): `points` (pointsCost) already derives from the ₹ SELLING value,
- * NOT the MRP, so MRP-in-points is a genuinely higher real anchor. We therefore render it ONLY when:
- *   - the feature flag is ON;
- *   - the item carries a positive MRP (`mrpPaise > 0`);
- *   - the item has a fixed positive redeem price (`points > 0` → excludes FREE_AMOUNT / cash-band items);
- *   - a usable conversion rate is available; AND
- *   - the computed MRP-in-points is STRICTLY greater than the redeem price (never equal/inverted).
- * Direction: `effectiveRate` is POINTS-PER-₹ (points = ₹ × rate), so points = (mrpPaise / 100) × rate.
+ * Returns the server `slashPoints` to DISPLAY, or null when the slash must NOT be shown:
+ *   - the feature flag is OFF; OR
+ *   - the server returned no honest slash (null — no selling value, inverted, or FREE_AMOUNT).
  */
 function mrpSlashPoints(
-  item: Pick<CatalogueItem, 'points' | 'mrpPaise' | 'minRedemptionPoints' | 'maxRedemptionPoints'>,
-  effectiveRate: number,
+  item: Pick<CatalogueItem, 'slashPoints'>,
   enabled: boolean,
 ): number | null {
   if (!enabled) return null;
-  if (item.mrpPaise == null || item.mrpPaise <= 0) return null;
-  // A fixed, positive redeem price only — never a FREE_AMOUNT / cash-band item (pointsCost 0).
-  if (!(item.points > 0) || isFreeAmount(item)) return null;
-  if (!Number.isFinite(effectiveRate) || effectiveRate <= 0) return null;
-  const mrpInPoints = Math.round((item.mrpPaise / 100) * effectiveRate);
-  // Only ever show the slash when it is truthful (strictly greater than the redeem price).
-  return mrpInPoints > item.points ? mrpInPoints : null;
+  return item.slashPoints != null && item.slashPoints > 0 ? item.slashPoints : null;
 }
 
 /* ─── Real redeem flow (POST /api/rewards/redeem → OTP → confirm) ──────────────
@@ -338,7 +331,7 @@ type RedemptionStep = 'detail' | 'form' | 'otp' | 'success';
 
 function GiftDetailSheet({
   gift, onClose, myBalance, mobile, memberName, onWishlist, isWishlisted, onRedeemed,
-  mrpSlashEnabled, conversionRate,
+  mrpSlashEnabled,
 }: {
   gift: CatalogueItem;
   onClose: () => void;
@@ -350,8 +343,6 @@ function GiftDetailSheet({
   onRedeemed: (pts: number) => void;
   /** Per-tenant catalogueMrpSlash flag — drives the struck-through MRP list price. */
   mrpSlashEnabled: boolean;
-  /** POINTS-PER-₹ tenant conversion rate (effectiveRate from the page). */
-  conversionRate: number;
 }) {
   const toast = useToast();
   const [step,       setStep]       = useState<RedemptionStep>('detail');
@@ -374,7 +365,8 @@ function GiftDetailSheet({
   const delivery  = deliveryLabel(gift.category);
   const needMore  = !canAfford ? gift.points - myBalance : 0;
   // Struck-through MRP "list price" in points (per-tenant catalogueMrpSlash). Null ⇒ not shown.
-  const mrpPoints = mrpSlashPoints(gift, conversionRate, mrpSlashEnabled);
+  // Server-driven, rate-independent (gift.slashPoints); the flag only gates visibility.
+  const mrpPoints = mrpSlashPoints(gift, mrpSlashEnabled);
 
   // Step 1: create the PENDING order + trigger OTP.
   const handleSendOtp = async () => {
@@ -1427,7 +1419,8 @@ export default function RewardsPage() {
                   : balance >= gift.points;
                 const isWishlisted = wishlist.has(gift.id);
                 // Struck-through MRP "list price" in points (per-tenant catalogueMrpSlash). Null ⇒ not shown.
-                const mrpPoints   = mrpSlashPoints(gift, effectiveRate, tenantFeatures.catalogueMrpSlash);
+                // Server-driven, rate-independent (gift.slashPoints); the flag only gates visibility.
+                const mrpPoints   = mrpSlashPoints(gift, tenantFeatures.catalogueMrpSlash);
                 return (
                   <div
                     key={gift.id}
@@ -1509,7 +1502,7 @@ export default function RewardsPage() {
           myBalance={balance} mobile={mobile} memberName={memberName}
           onWishlist={toggleWishlist} isWishlisted={wishlist.has(detail.id)}
           onRedeemed={handleRedeemed}
-          mrpSlashEnabled={tenantFeatures.catalogueMrpSlash} conversionRate={effectiveRate}
+          mrpSlashEnabled={tenantFeatures.catalogueMrpSlash}
         />
       )}
       {voucherDetail && (

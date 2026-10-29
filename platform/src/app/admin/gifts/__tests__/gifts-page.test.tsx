@@ -282,6 +282,53 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
     expect(hubbleField.value).toBe('amz-stored');
   });
 
+  it('GIF13: entering a Selling value (₹) includes sellingValuePaise in the create payload', async () => {
+    const { calls } = installFetch();
+    render(<AdminGiftsPage />);
+    const addButtons = await screen.findAllByRole('button', { name: /add reward/i });
+    await userEvent.click(addButtons[addButtons.length - 1]);
+
+    const dialog = await screen.findByText('Add Reward', { selector: 'h2' });
+    const modal = dialog.closest('div.relative') as HTMLElement;
+    const scope = within(modal);
+
+    await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'SV-1');
+    await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'Selling Value Reward');
+    await userEvent.type(scope.getByPlaceholderText('2500'), '500');
+    // MRP and Selling value share the "(optional)" placeholder — target selling value by its label.
+    const svInput = scope.getByText('Selling value (₹)').closest('div')!.querySelector('input')!;
+    await userEvent.type(svInput, '400');
+
+    await userEvent.click(scope.getByRole('button', { name: /add reward/i }));
+
+    await waitFor(() => {
+      const post = calls.find(
+        (c) => c.url.startsWith('/api/admin/rewards/catalog') && c.init?.method === 'POST',
+      );
+      expect(post).toBeTruthy();
+      const body = JSON.parse(String(post!.init!.body));
+      expect(body.sellingValuePaise).toBe(40000); // ₹400 → paise
+    });
+  });
+
+  it('GIF14: an existing item prefills its stored selling value', async () => {
+    const ITEM_WITH_SV = { ...CATALOG_ITEMS[0], id: 'r-sv', sellingValuePaise: 40000 };
+    installFetch((url, init) =>
+      url.startsWith('/api/admin/rewards/catalog') && (!init?.method || init.method === 'GET')
+        ? jsonOk({ items: [ITEM_WITH_SV], pagination: { page: 1, limit: 200, total: 1, pages: 1 } })
+        : undefined,
+    );
+    render(<AdminGiftsPage />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /edit reward/i }));
+    const dialog = await screen.findByText('Edit Reward', { selector: 'h2' });
+    const modal = dialog.closest('div.relative') as HTMLElement;
+    const scope = within(modal);
+
+    const svInput = scope.getByText('Selling value (₹)').closest('div')!.querySelector('input') as HTMLInputElement;
+    expect(svInput.value).toBe('400');
+  });
+
   it('GIF4: fulfilment upload POSTs the file and renders the per-row error list', async () => {
     let uploadBody: unknown;
     const { fn } = installFetch((url, init) => {

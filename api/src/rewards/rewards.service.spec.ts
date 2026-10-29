@@ -250,8 +250,11 @@ describe('RewardsService', () => {
       expect(call.select).toBeDefined();
       expect(call.include).toBeUndefined();
       expect(call.select.category).toEqual({ select: { name: true } });
-      // Ops/internal columns must NOT be selected for members.
+      // Flag OFF (default) → the cost-basis columns are NOT even selected for members, and
+      // mrpPaise is never part of the member projection (cost-basis inference leak guard).
       expect(call.select.sellingValuePaise).toBeUndefined();
+      expect(call.select.mrpPaise).toBeUndefined();
+      // Other ops/internal columns must NOT be selected for members.
       expect(call.select.vendorId).toBeUndefined();
       expect(call.select.giftMasterId).toBeUndefined();
       expect(call.select.giftCategoryId).toBeUndefined();
@@ -260,6 +263,7 @@ describe('RewardsService', () => {
       // STRIPPED from the response — the raw source/vendor origin never reaches members.
       expect(call.select.sourceType).toBe(true);
       expect(res.items[0]).not.toHaveProperty('sourceType');
+      expect(res.items[0]).not.toHaveProperty('mrpPaise');
       // The nested relation is flattened to a plain string label.
       expect(res.items[0].category).toBe('Gift Vouchers');
       expect(res.items[0].redemptionMode).toBe('GIFT_CARD');
@@ -292,6 +296,70 @@ describe('RewardsService', () => {
       expect(res.userBalance).toBe(0);
       expect(res.items[0].isAffordable).toBe(false);
     });
+
+    it('flag ON: computes a rate-independent slashPoints AND never leaks mrpPaise/sellingValuePaise', async () => {
+      // Flag ON → the slash paths transiently select the cost-basis columns to compute.
+      mockPrisma.client.findFirst.mockResolvedValue({ features: { catalogueMrpSlash: true } });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 100000 });
+      mockPrisma.rewardCatalog.findMany.mockResolvedValue([
+        // round(500 × 60000 / 50000) = 600 (> 500) → slash shown; independent of any rate.
+        { id: 'r1', pointsCost: 500, mrpPaise: 60000, sellingValuePaise: 50000, category: { name: 'A' } },
+      ]);
+      mockPrisma.rewardCatalog.count.mockResolvedValue(1);
+
+      const res = await service.listCatalog(partner, {});
+      // Flag ON → cost-basis columns ARE selected transiently…
+      const call = mockPrisma.rewardCatalog.findMany.mock.calls[0][0];
+      expect(call.select.mrpPaise).toBe(true);
+      expect(call.select.sellingValuePaise).toBe(true);
+      expect(res.items[0].slashPoints).toBe(600);
+      // …but NEITHER cost-basis column reaches the member — only the derived slash does.
+      expect(res.items[0]).not.toHaveProperty('sellingValuePaise');
+      expect(res.items[0]).not.toHaveProperty('mrpPaise');
+    });
+
+    it('flag ON: slashPoints is null when the selling value is absent / inverted / FREE_AMOUNT', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({ features: { catalogueMrpSlash: true } });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 100000 });
+      mockPrisma.rewardCatalog.findMany.mockResolvedValue([
+        // no selling value → null
+        { id: 'r1', pointsCost: 500, mrpPaise: 60000, sellingValuePaise: null, category: { name: 'A' } },
+        // inverted: round(500 × 50000 / 60000) = 417 (< 500) → not strictly greater → null
+        { id: 'r2', pointsCost: 500, mrpPaise: 50000, sellingValuePaise: 60000, category: { name: 'A' } },
+        // FREE_AMOUNT (pointsCost 0) → null
+        { id: 'r3', pointsCost: 0, mrpPaise: 60000, sellingValuePaise: 50000, category: { name: 'A' } },
+      ]);
+      mockPrisma.rewardCatalog.count.mockResolvedValue(3);
+
+      const res = await service.listCatalog(partner, {});
+      expect(res.items.map((i: { slashPoints?: number | null }) => i.slashPoints)).toEqual([null, null, null]);
+      res.items.forEach((i: Record<string, unknown>) => {
+        expect(i).not.toHaveProperty('sellingValuePaise');
+        expect(i).not.toHaveProperty('mrpPaise');
+      });
+    });
+
+    it('flag OFF (default): no slashPoints emitted and cost-basis columns not even selected, even with mrp+selling set', async () => {
+      // Default beforeEach → features {} → catalogueMrpSlash OFF (incl. Deoleo).
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 100000 });
+      mockPrisma.rewardCatalog.findMany.mockResolvedValue([
+        { id: 'r1', pointsCost: 500, mrpPaise: 60000, sellingValuePaise: 50000, category: { name: 'A' } },
+      ]);
+      mockPrisma.rewardCatalog.count.mockResolvedValue(1);
+
+      const res = await service.listCatalog(partner, {});
+      const call = mockPrisma.rewardCatalog.findMany.mock.calls[0][0];
+      // Defense-in-depth: the cost-basis columns are not read from the DB when the flag is OFF.
+      expect(call.select.mrpPaise).toBeUndefined();
+      expect(call.select.sellingValuePaise).toBeUndefined();
+      // No slash field, and no cost-basis columns in the response.
+      expect(res.items[0]).not.toHaveProperty('slashPoints');
+      expect(res.items[0]).not.toHaveProperty('mrpPaise');
+      expect(res.items[0]).not.toHaveProperty('sellingValuePaise');
+    });
   });
 
   describe('getCatalogItem', () => {
@@ -316,15 +384,18 @@ describe('RewardsService', () => {
         ],
       });
       expect(call.select).toBeDefined();
+      // Flag OFF (default) → cost-basis columns NOT selected; mrpPaise never in the member projection.
       expect(call.select.sellingValuePaise).toBeUndefined();
+      expect(call.select.mrpPaise).toBeUndefined();
       expect(call.select.moderationStatus).toBeUndefined();
       // sourceType selected only to derive requiresConsent (stripped from the response).
       expect(call.select.sourceType).toBe(true);
     });
 
-    it('returns the item with requiresConsent (false for PLATFORM) and no sourceType', async () => {
+    it('returns the item with requiresConsent (false for PLATFORM) and no sourceType (flag OFF → no slashPoints)', async () => {
       mockPrisma.rewardCatalog.findFirst.mockResolvedValue({ id: 'r1', sourceType: 'PLATFORM' });
       const res = await service.getCatalogItem(partner, 'r1');
+      // Flag OFF default → byte-identical to pre-feature: no slashPoints field.
       expect(res).toEqual({ item: { id: 'r1', requiresConsent: false } });
     });
 
@@ -333,6 +404,30 @@ describe('RewardsService', () => {
       const res = await service.getCatalogItem(partner, 'r1');
       expect(res.item).toMatchObject({ id: 'r1', requiresConsent: true });
       expect(res.item).not.toHaveProperty('sourceType');
+    });
+
+    it('flag ON: computes slashPoints and selects the cost basis transiently, but strips mrpPaise/sellingValuePaise', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({ features: { catalogueMrpSlash: true } });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        id: 'r1', sourceType: 'PLATFORM', pointsCost: 500, mrpPaise: 60000, sellingValuePaise: 50000,
+      });
+      const res = await service.getCatalogItem(partner, 'r1');
+      const call = mockPrisma.rewardCatalog.findFirst.mock.calls[0][0];
+      expect(call.select.mrpPaise).toBe(true);
+      expect(call.select.sellingValuePaise).toBe(true);
+      expect(res.item.slashPoints).toBe(600);
+      expect(res.item).not.toHaveProperty('mrpPaise');
+      expect(res.item).not.toHaveProperty('sellingValuePaise');
+    });
+
+    it('flag OFF: no slashPoints even when the item has mrp + selling value', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        id: 'r1', sourceType: 'PLATFORM', pointsCost: 500, mrpPaise: 60000, sellingValuePaise: 50000,
+      });
+      const res = await service.getCatalogItem(partner, 'r1');
+      expect(res.item).not.toHaveProperty('slashPoints');
+      expect(res.item).not.toHaveProperty('mrpPaise');
+      expect(res.item).not.toHaveProperty('sellingValuePaise');
     });
   });
 
@@ -2353,6 +2448,24 @@ describe('RewardsService', () => {
       expect(call.data.status).toBe('ACTIVE');
       expect(res).toEqual({ item: { id: 'r1' } });
     });
+
+    it('persists an optional sellingValuePaise', async () => {
+      mockPrisma.rewardCategory.findFirst.mockResolvedValue({ id: 'c1' });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null);
+      mockPrisma.rewardCatalog.create.mockResolvedValue({ id: 'r1' });
+      await service.createCatalogItem(gifsy, { ...base, mrpPaise: 60000, sellingValuePaise: 50000 });
+      const call = mockPrisma.rewardCatalog.create.mock.calls?.[0]?.[0];
+      expect(call.data.sellingValuePaise).toBe(50000);
+    });
+
+    it('rejects sellingValuePaise > mrpPaise', async () => {
+      mockPrisma.rewardCategory.findFirst.mockResolvedValue({ id: 'c1' });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null);
+      await expect(
+        service.createCatalogItem(gifsy, { ...base, mrpPaise: 50000, sellingValuePaise: 60000 }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.rewardCatalog.create).not.toHaveBeenCalled();
+    });
   });
 
   describe('updateCatalogItem', () => {
@@ -2388,6 +2501,29 @@ describe('RewardsService', () => {
       await service.updateCatalogItem(gifsy, 'r1', { status: 'ACTIVE' });
       const call = mockPrisma.rewardCatalog.update.mock.calls?.[0]?.[0];
       expect(call.data.status).toBe('ACTIVE');
+    });
+
+    it('persists an optional sellingValuePaise', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        id: 'r1', code: 'AMZ500', stockQuantity: 5, mrpPaise: 60000,
+        minRedemptionPoints: null, maxRedemptionPoints: null,
+      });
+      mockPrisma.rewardCatalog.update.mockResolvedValue({ id: 'r1' });
+      await service.updateCatalogItem(gifsy, 'r1', { sellingValuePaise: 50000 });
+      const call = mockPrisma.rewardCatalog.update.mock.calls?.[0]?.[0];
+      expect(call.data.sellingValuePaise).toBe(50000);
+    });
+
+    it('rejects an EFFECTIVE sellingValuePaise > mrpPaise (payload selling value vs stored MRP)', async () => {
+      // Stored MRP 50000; a PATCH raising selling value to 60000 must be rejected.
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        id: 'r1', code: 'AMZ500', stockQuantity: 5, mrpPaise: 50000,
+        minRedemptionPoints: null, maxRedemptionPoints: null,
+      });
+      await expect(
+        service.updateCatalogItem(gifsy, 'r1', { sellingValuePaise: 60000 }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.rewardCatalog.update).not.toHaveBeenCalled();
     });
   });
 
@@ -3632,6 +3768,49 @@ describe('RewardsService', () => {
       expect(res.rewardIds).toEqual(['visible1']);
       expect(res.rewardIds).not.toContain('hidden');
       expect(res.items).toHaveLength(1);
+    });
+
+    it('flag ON: getWishlist computes slashPoints and strips mrpPaise/sellingValuePaise', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({ features: { catalogueMrpSlash: true } });
+      mockPrisma.partnerWishlist.findMany.mockResolvedValue([
+        {
+          rewardId: 'r1',
+          createdAt: new Date('2026-02-02'),
+          reward: {
+            id: 'r1', name: 'Gift', pointsCost: 500, mrpPaise: 60000, sellingValuePaise: 50000,
+            category: { name: 'Vouchers' },
+          },
+        },
+      ]);
+      const res = await service.getWishlist(partner);
+      // Flag ON → the nested reward select pulls the cost basis transiently…
+      const call = mockPrisma.partnerWishlist.findMany.mock.calls[0][0];
+      expect(call.select.reward.select.mrpPaise).toBe(true);
+      expect(call.select.reward.select.sellingValuePaise).toBe(true);
+      expect(res.items[0].slashPoints).toBe(600);
+      // …but neither cost-basis column reaches the member.
+      expect(res.items[0]).not.toHaveProperty('mrpPaise');
+      expect(res.items[0]).not.toHaveProperty('sellingValuePaise');
+    });
+
+    it('flag OFF (default): getWishlist emits no slashPoints and never selects the cost basis', async () => {
+      mockPrisma.partnerWishlist.findMany.mockResolvedValue([
+        {
+          rewardId: 'r1',
+          createdAt: new Date('2026-02-02'),
+          reward: {
+            id: 'r1', name: 'Gift', pointsCost: 500, mrpPaise: 60000, sellingValuePaise: 50000,
+            category: { name: 'Vouchers' },
+          },
+        },
+      ]);
+      const res = await service.getWishlist(partner);
+      const call = mockPrisma.partnerWishlist.findMany.mock.calls[0][0];
+      expect(call.select.reward.select.mrpPaise).toBeUndefined();
+      expect(call.select.reward.select.sellingValuePaise).toBeUndefined();
+      expect(res.items[0]).not.toHaveProperty('slashPoints');
+      expect(res.items[0]).not.toHaveProperty('mrpPaise');
+      expect(res.items[0]).not.toHaveProperty('sellingValuePaise');
     });
 
     it('loyalty-OFF outlet type → add rejected (404) and getWishlist empty (no DB read of rows)', async () => {
