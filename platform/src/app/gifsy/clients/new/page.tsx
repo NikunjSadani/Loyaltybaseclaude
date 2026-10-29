@@ -46,6 +46,7 @@ const DEFAULT_FEATURES: Record<FeatureKey, boolean> = {
   rbacEnforcement:         false,
   hubbleVoucherEnabled:    false,
   rlpBscView:              false,
+  catalogueMrpSlash:       false,
 };
 
 const FEATURE_META: Record<FeatureKey, { label: string; description: string }> = {
@@ -61,6 +62,7 @@ const FEATURE_META: Record<FeatureKey, { label: string; description: string }> =
   rbacEnforcement:          { label: 'RBAC Enforcement',     description: 'Enforce permission checks on admin routes (requires RBAC_ENFORCEMENT env=true)' },
   hubbleVoucherEnabled:     { label: 'Hubble Voucher Auto-Issue', description: 'Auto-issue Amazon Pay vouchers on GIFT_CARD redemptions (needs Hubble setup). Leave OFF unless integrated.' },
   rlpBscView:               { label: 'RLP/BSC Sales Toggle', description: 'Show the RLP/BSC outlet-type toggle on the sales-team dashboard. Button labels come from the outlet-type display names.' },
+  catalogueMrpSlash:        { label: 'Catalogue MRP Slash', description: "Show each item's MRP (converted to points at the tenant's rate) as a struck-through list price above the redeem points. Only appears where an MRP is set and is above the redeem price." },
 };
 
 const STEPS: { key: Step; label: string }[] = [

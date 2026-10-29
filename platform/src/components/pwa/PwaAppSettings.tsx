@@ -68,7 +68,7 @@ function InstallSection() {
   } else {
     body = (
       <p className="text-sm text-gray-500">
-        Open this site in your mobile browser to install the app.
+        Use your browser&apos;s Install option (the install icon in the address bar) to add the app.
       </p>
     );
   }

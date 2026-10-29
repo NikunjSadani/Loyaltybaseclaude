@@ -719,13 +719,15 @@ describe('TargetsService', () => {
       mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, kpiRow2]);
       mockPrisma.outletTarget.findMany.mockResolvedValue([
         // RT-1 has both KPIs; RT-2 only the primary (FOCUS_PACK_1 omitted → blank).
+        // Both rows froze the STALE "SSS" snapshot at upload time.
         { outletCode: 'RT-1', outletName: 'Shop One', outletType: 'SSS', targetValues: { MONTH_TGT: 100, FOCUS_PACK_1: 20 } },
         { outletCode: 'RT-2', outletName: 'Shop Two', outletType: 'SSS', targetValues: { MONTH_TGT: 50 } },
       ]);
-      // programName is joined from Outlet by (clientId, outletCode) — mock the lookup.
+      // programName AND the AUTHORITATIVE outletType are joined from Outlet by (clientId, outletCode).
+      // RT-1 was reclassified to WHOLESALER since upload — the export must reflect that, not "SSS".
       mockPrisma.outlet.findMany.mockResolvedValue([
-        { outletCode: 'RT-1', programName: 'Trade Loyalty' },
-        { outletCode: 'RT-2', programName: 'Gold Programme' },
+        { outletCode: 'RT-1', programName: 'Trade Loyalty', outletType: { code: 'WHOLESALER' } },
+        { outletCode: 'RT-2', programName: 'Gold Programme', outletType: { code: 'SSS' } },
       ]);
 
       const buf = await service.exportTargetsBuffer(admin, '2026-07');
@@ -743,7 +745,8 @@ describe('TargetsService', () => {
       // A read-only "Program Name" identity column is injected after Outlet Type (shifts KPI cols +1).
       expect(rows[0][4]).toBe("Jul '26 Target");
       expect(rows[1]).toEqual(['Outlet ID', 'Outlet Name', 'Outlet Type', 'Program Name', 'Month Target', 'Focus Pack - 1']);
-      expect(rows[2]).toEqual(['RT-1', 'Shop One', 'SSS', 'Trade Loyalty', 100, 20]);
+      // Outlet Type is the AUTHORITATIVE current type (WHOLESALER), NOT the frozen "SSS" snapshot.
+      expect(rows[2]).toEqual(['RT-1', 'Shop One', 'WHOLESALER', 'Trade Loyalty', 100, 20]);
       // RT-2's omitted FOCUS_PACK_1 cell is blank (empty), not 0.
       expect(rows[3][3]).toBe('Gold Programme');
       expect(rows[3][4]).toBe(50);
@@ -784,13 +787,15 @@ describe('TargetsService', () => {
       mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, kpiRow2]);
       mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
         // RT-1 has both KPIs; RT-2 only the primary (FOCUS_PACK_1 omitted → blank).
+        // Both rows froze the STALE "SSS" snapshot at upload time.
         { outletCode: 'RT-1', outletName: 'Shop One', outletType: 'SSS', kpiValues: { MONTH_TGT: 100, FOCUS_PACK_1: 20 } },
         { outletCode: 'RT-2', outletName: 'Shop Two', outletType: 'SSS', kpiValues: { MONTH_TGT: 50 } },
       ]);
-      // programName is NOT on OutletSalesRecord — it comes from the Outlet join.
+      // programName AND the AUTHORITATIVE outletType come from the Outlet join (NOT the sales snapshot).
+      // RT-1 was reclassified to WHOLESALER since upload — the export must reflect that.
       mockPrisma.outlet.findMany.mockResolvedValue([
-        { outletCode: 'RT-1', programName: 'Deoleo Gold' },
-        { outletCode: 'RT-2', programName: null }, // unset → blank cell
+        { outletCode: 'RT-1', programName: 'Deoleo Gold', outletType: { code: 'WHOLESALER' } },
+        { outletCode: 'RT-2', programName: null, outletType: { code: 'SSS' } }, // unset programName → blank cell
       ]);
 
       const buf = await service.exportAchievementsBuffer(admin, '2026-07');
@@ -813,8 +818,8 @@ describe('TargetsService', () => {
       expect(rows[1]).toEqual([
         'Outlet ID', 'Outlet Name', 'Outlet Type', 'Program Name', 'Month Target', 'Focus Pack - 1',
       ]);
-      // RT-1: program name from join + both KPI values verbatim.
-      expect(rows[2]).toEqual(['RT-1', 'Shop One', 'SSS', 'Deoleo Gold', 100, 20]);
+      // RT-1: AUTHORITATIVE outletType (WHOLESALER) from the join + program name + KPI values verbatim.
+      expect(rows[2]).toEqual(['RT-1', 'Shop One', 'WHOLESALER', 'Deoleo Gold', 100, 20]);
       // RT-2: null programName → blank; omitted FOCUS_PACK_1 → blank (not 0).
       expect(rows[3][3]).toBe('');   // Program Name blank
       expect(rows[3][4]).toBe(50);   // MONTH_TGT
@@ -1048,6 +1053,37 @@ describe('TargetsService', () => {
     beforeEach(() => {
       mockPrisma.outletTarget.findMany.mockResolvedValue([]);
       mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+      // getPace now joins Outlet for the AUTHORITATIVE outletType (Phase 1 root-fix);
+      // default to an empty roster so existing pace tests resolve outletType to ''.
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+    });
+
+    it('ROOT-FIX Phase 1: outletType resolves from the AUTHORITATIVE Outlet.outletType.code, NOT the stale snapshot', async () => {
+      // Stored target row froze "SSS"…
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        {
+          outletCode: 'O001',
+          outletName: 'Outlet One',
+          outletType: 'SSS',
+          targetValues: { MONTH_TGT: 100 },
+        },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+      // …but the Outlet is authoritatively WHOLESALER now.
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'O001', outletType: { code: 'WHOLESALER' } },
+      ]);
+
+      const res = await service.getPace(admin, { month: '2026-07' });
+
+      // Resolved by joining Outlet, scoped to the result codes + tenant.
+      const outletArg = mockPrisma.outlet.findMany.mock.calls.at(-1)![0];
+      expect(outletArg.where.clientId).toBe('deoleo');
+      expect(outletArg.where.outletCode).toEqual({ in: ['O001'] });
+      expect(outletArg.select).toEqual(
+        expect.objectContaining({ outletType: { select: { code: true } } }),
+      );
+      expect(res.outlets[0].outletType).toBe('WHOLESALER');
     });
 
     it('throws BadRequestException when month is not provided', async () => {

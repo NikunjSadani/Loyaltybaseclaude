@@ -368,6 +368,142 @@ export class RewardsService {
     return { item: { ...rest, requiresConsent: sourceType === 'VENDOR' } };
   }
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // PERSISTENT PARTNER WISHLIST (member "save for later").
+  //
+  // Scoped EXACTLY like the partner-facing catalogue reads: the acting partner is
+  // resolved through `resolveActive` (own by default, or an authorized switched
+  // sibling named by x-active-partner-id — a bogus id throws 403 there), and every
+  // wishlist row is tied to that resolved partnerId + the caller's clientId. A
+  // rewardId that is not in the caller's own tenant is REJECTED on add (never
+  // silently stored). An empty wishlist (every tenant at rest) is today's behaviour.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * GET /v1/rewards/wishlist — the CALLER's wishlisted items. Returns BOTH the
+   * member-safe reward projection (same shape/fields as listCatalog, ops/internal
+   * columns stripped) AND a plain `rewardIds` array, so a FE can both render the
+   * saved list and answer "is reward X wishlisted" with one call. Newest first.
+   */
+  async getWishlist(user: JwtPayload, requestedPartnerId?: string) {
+    // Re-authorize the active partner (own / authorized sibling); null = no outlet.
+    const activePartnerId = await this.resolveActive(user, requestedPartnerId);
+    if (!activePartnerId) {
+      return { items: [], rewardIds: [] };
+    }
+
+    // Per-outlet-type Loyalty gate — parity with listCatalog: when the active outlet's type
+    // has Loyalty OFF the whole catalogue (and therefore the wishlist view) is EMPTY. Missing
+    // config → default true. The stored rows are kept; they just aren't surfaced.
+    if (!(await isLoyaltyEnabledForPartner(this.prisma, user.clientId, activePartnerId))) {
+      return { items: [], rewardIds: [] };
+    }
+
+    const rows = await this.prisma.partnerWishlist.findMany({
+      // Tenant + partner scoped — a partner only ever sees its own bookmarks — AND the
+      // bookmarked reward must still be MEMBER-VISIBLE (the SAME filter listCatalog applies:
+      // ACTIVE + moderation APPROVED + vendor ACTIVE/granted + not soft-deleted). A reward the
+      // catalogue is now hiding (suspended vendor / revoked grant / DISCONTINUED|INACTIVE /
+      // PENDING|REJECTED moderation / soft-deleted) drops out of BOTH `items` and `rewardIds`;
+      // its stored row is retained (not deleted) so it reappears if the reward becomes visible
+      // again. Relation filter on the required to-one `reward`.
+      where: {
+        partnerId: activePartnerId,
+        clientId: user.clientId,
+        reward: {
+          is: {
+            deletedAt: null,
+            status: 'ACTIVE',
+            moderationStatus: 'APPROVED',
+            ...vendorVisibilityFilter(user.clientId),
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        rewardId: true,
+        createdAt: true,
+        // Member-safe reward projection (drops sellingValuePaise/sourceType/vendorId/
+        // moderation* — identical to listCatalog). Flattened to a `category` label below.
+        reward: { select: MEMBER_CATALOG_SELECT },
+      },
+    });
+
+    const items = rows.map((r) => {
+      const { category, ...rest } = r.reward;
+      return { ...rest, category: category?.name, wishlistedAt: r.createdAt };
+    });
+
+    return { items, rewardIds: rows.map((r) => r.rewardId) };
+  }
+
+  /**
+   * POST /v1/rewards/wishlist — add a reward to the caller's wishlist. Idempotent:
+   * adding an already-wishlisted reward is a no-op success (upsert on the
+   * partnerId×rewardId unique constraint). The reward MUST exist under the caller's
+   * own clientId (a cross-tenant id is rejected with 404 — never silently stored).
+   */
+  async addToWishlist(user: JwtPayload, rewardId: string, requestedPartnerId?: string) {
+    const activePartnerId = await this.resolveActive(user, requestedPartnerId);
+    if (!activePartnerId) {
+      throw new ForbiddenException('No outlet is available to wishlist for.');
+    }
+
+    // CROSS-TENANT + MEMBER-VISIBILITY GUARD: the reward must be MEMBER-VISIBLE under the
+    // caller's tenant — the SAME filter getCatalogItem/listCatalog apply: in-tenant + ACTIVE
+    // + moderation APPROVED + vendor ACTIVE/granted (vendorVisibilityFilter) + not soft-
+    // deleted. Without this a cross-tenant id, or a reward the catalogue is actively hiding
+    // (vendor suspended / grant revoked / DISCONTINUED|INACTIVE / PENDING|REJECTED moderation
+    // / soft-deleted), could be bookmarked. Reject with the same message for every miss so
+    // the response is not an existence oracle.
+    const reward = await this.prisma.rewardCatalog.findFirst({
+      where: {
+        id: rewardId,
+        clientId: user.clientId,
+        deletedAt: null,
+        status: 'ACTIVE',
+        moderationStatus: 'APPROVED',
+        ...vendorVisibilityFilter(user.clientId),
+      },
+      select: { id: true },
+    });
+    if (!reward) throw new NotFoundException('Reward item not found');
+
+    // Per-outlet-type Loyalty gate — the SAME server-enforced gate the catalogue reads apply:
+    // a reward can't be wishlisted for an outlet whose type has Loyalty OFF. Same message (no
+    // existence oracle). Missing config → default true (never hide on missing config).
+    if (!(await isLoyaltyEnabledForPartner(this.prisma, user.clientId, activePartnerId))) {
+      throw new NotFoundException('Reward item not found');
+    }
+
+    await this.prisma.partnerWishlist.upsert({
+      where: { partnerId_rewardId: { partnerId: activePartnerId, rewardId } },
+      create: { clientId: user.clientId, partnerId: activePartnerId, rewardId },
+      update: {}, // already wishlisted → no-op success (idempotent)
+    });
+
+    return { success: true, wishlisted: true, rewardId };
+  }
+
+  /**
+   * DELETE /v1/rewards/wishlist/:rewardId — remove a reward from the caller's
+   * wishlist. Idempotent: removing a reward that is not wishlisted is a no-op
+   * success. Scoped to the resolved active partner + the caller's clientId.
+   */
+  async removeFromWishlist(user: JwtPayload, rewardId: string, requestedPartnerId?: string) {
+    const activePartnerId = await this.resolveActive(user, requestedPartnerId);
+    if (!activePartnerId) {
+      // No operable outlet → nothing to remove; treat as a no-op success.
+      return { success: true, wishlisted: false, rewardId };
+    }
+
+    await this.prisma.partnerWishlist.deleteMany({
+      where: { partnerId: activePartnerId, rewardId, clientId: user.clientId },
+    });
+
+    return { success: true, wishlisted: false, rewardId };
+  }
+
   /** GET /v1/rewards/orders — paginated redemption orders (own only for non-admins). */
   async listOrders(user: JwtPayload, q: ListOrdersQueryDto, requestedPartnerId?: string) {
     const page = q.page ?? 1;

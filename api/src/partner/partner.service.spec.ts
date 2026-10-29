@@ -93,6 +93,7 @@ describe('PartnerService', () => {
       const res = await service.getMe(partner);
       expect(res).toEqual({
         businessName: null,
+        outletName: null,
         ownerName: null,
         partnerCode: null,
         phone: null,
@@ -216,8 +217,8 @@ describe('PartnerService', () => {
     it('resolves the PRIMARY outlet type (order by isPrimary desc, createdAt asc — not isPrimary:true)', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', businessName: 'Firm', ownerName: 'Owner', partnerCode: 'P1' });
       mockPrisma.outlet.findMany.mockResolvedValue([
-        { id: 'o1', outletType: { code: 'WHOLESALER' } },
-        { id: 'o2', outletType: { code: 'SSS' } },
+        { id: 'o1', name: 'Primary Outlet', outletType: { code: 'WHOLESALER' } },
+        { id: 'o2', name: 'Second Outlet', outletType: { code: 'SSS' } },
       ]);
       mockPrisma.wallet.findFirst.mockResolvedValue(null);
       mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue(null);
@@ -232,6 +233,20 @@ describe('PartnerService', () => {
         }),
       );
       expect(res.outletType).toBe('WHOLESALER');
+      // FIX 2: the active outlet's MASTER name (Outlet.name) comes from the SAME primary-outlet row.
+      expect(res.outletName).toBe('Primary Outlet');
+      expect(res.businessName).toBe('Firm');
+    });
+
+    it('outletName is null when the partner has no outlet (FE falls back to businessName)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', businessName: 'Firm', ownerName: 'Owner', partnerCode: 'P1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      mockPrisma.wallet.findFirst.mockResolvedValue(null);
+      mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue(null);
+      mockPrisma.payoutTransaction.findFirst.mockResolvedValue(null);
+
+      const res = await service.getMe(partner);
+      expect(res.outletName).toBeNull();
       expect(res.businessName).toBe('Firm');
     });
 
@@ -639,6 +654,49 @@ describe('PartnerService', () => {
       expect(focusPack.achieved).toBe(0);
       // pace = 0 / 50 = 0  (0 achieved, non-zero target → pace = 0, not null)
       expect(focusPack.pace).toBe(0);
+    });
+
+    it('ROOT-FIX Phase 1: outletType resolves from the AUTHORITATIVE Outlet.outletType.code, NOT the stale target snapshot', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      // The Outlet is authoritatively WHOLESALER now (reclassified since the last upload)…
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'O001', outletType: { code: 'WHOLESALER' } },
+      ]);
+      // …but the target row froze the OLD "SSS" type at upload time.
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        {
+          outletCode: 'O001',
+          outletName: 'Outlet One',
+          outletType: 'SSS',
+          targetValues: { MONTH_TGT: 100 },
+        },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+
+      const res = await service.getTargets(partner, { period: '2026-05' });
+
+      // The outlet query must pull the authoritative type relation.
+      expect(mockPrisma.outlet.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          select: expect.objectContaining({ outletType: { select: { code: true } } }),
+        }),
+      );
+      // Response reflects the CURRENT Outlet type, not the frozen "SSS" snapshot.
+      expect(res.outlets[0].outletType).toBe('WHOLESALER');
+    });
+
+    it('outletType falls back to "" when the outlet is genuinely absent from the roster map', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      // Roster query returns an outlet with a missing type relation (defensive absence).
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'O001' }]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O001', outletName: 'Outlet One', outletType: 'SSS', targetValues: { MONTH_TGT: 100 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+
+      const res = await service.getTargets(partner, { period: '2026-05' });
+
+      expect(res.outlets[0].outletType).toBe('');
     });
 
     it('returns isPrimary + unit per KPI (so the dashboard hero can pick THE primary KPI + label it)', async () => {

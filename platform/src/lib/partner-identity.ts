@@ -25,6 +25,8 @@ export interface OperableOutlet {
   partnerId: string;
   outletId: string;
   outletCode: string;
+  /** The outlet's MASTER name (Outlet.name); the switcher prefers it over businessName. May be null. */
+  outletName: string | null;
   businessName: string;
   ownerName: string;
   isOwnLogin: boolean;
@@ -40,6 +42,12 @@ export interface GroupParent {
 export interface PartnerIdentity {
   /** firm/business name for the shell header (channelPartner.businessName). */
   businessName: string;
+  /**
+   * The ACTIVE outlet's MASTER name (Outlet.name, the admin-roster name). The shell header shows
+   * this (falling back to businessName) so it matches the outlet master. Null while loading / when
+   * the partner has no outlet.
+   */
+  outletName: string | null;
   /** owner/person name for the shell sub-line (channelPartner.ownerName). */
   ownerName: string;
   partnerCode: string | null;
@@ -106,6 +114,7 @@ export function usePartnerIdentity(): PartnerIdentity {
   const fallbackName = getStoredUser()?.name ?? '';
   const [identity, setIdentity] = useState<PartnerIdentity>({
     businessName: fallbackName,
+    outletName: null,
     ownerName: fallbackName,
     partnerCode: null,
     outletType: null,
@@ -153,6 +162,8 @@ export function usePartnerIdentity(): PartnerIdentity {
         // resolved "no activity" state, not an eternal load.
         setIdentity((prev) => ({
           businessName: d?.businessName || name || prev.businessName,
+          // Active outlet's master name; null when absent so the header falls back to businessName.
+          outletName: d?.outletName ?? null,
           ownerName: d?.ownerName || name || prev.ownerName,
           partnerCode: d?.partnerCode ?? null,
           outletType: d?.outletType ?? null,

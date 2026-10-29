@@ -265,6 +265,17 @@ export class RedeemConfirmDto {
 }
 
 /**
+ * POST /v1/rewards/wishlist — add a catalogue reward to the caller's persistent
+ * wishlist. `rewardId` must belong to the caller's own tenant (validated in the
+ * service); a cross-tenant id is rejected. Idempotent (upsert on partner×reward).
+ */
+export class WishlistAddDto {
+  @IsString()
+  @MinLength(1)
+  rewardId!: string;
+}
+
+/**
  * POST /v1/rewards/redeem-for-outlet — SALES-ASSISTED redeem (B1, #50-E).
  * A sales user redeems on behalf of an OUTLET they are assigned to. Points,
  * wallet and the order all belong to the OUTLET; `targetPartnerId` names it.

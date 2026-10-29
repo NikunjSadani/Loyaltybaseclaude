@@ -26,6 +26,7 @@ import { loadPortalSchemes, statusOf } from '@/app/partner/schemes/portal-api';
 import { formatLastUpdated, getLastSalesUploadDate } from '@/lib/sales-upload-utils';
 import { authHeader } from '@/lib/api-client';
 import { istDateKey } from '@/lib/ist-date';
+import { usePartnerIdentity } from '@/lib/partner-identity';
 
 /* ─── Real-data model ────────────────────────────────────────────────────────
    The dashboard hero consumes the SAME endpoints as the Targets page
@@ -533,8 +534,11 @@ export default function PartnerDashboard() {
 
   // ── Real data: aggregated targets + wallet ──────────────────────────────
   const [aggKpis,      setAggKpis]      = useState<AggKpi[]>([]);
-  const [outletType,   setOutletType]   = useState<OutletType>('SSS');
   const [walletPoints, setWalletPoints] = useState<number | null>(null);
+
+  // Outlet type is sourced from the AUTHORITATIVE /partner/me identity hook (NOT the
+  // unreliable denormalized target-upload string) — see the hero selection below.
+  const identity = usePartnerIdentity();
 
   // Touch / swipe state
   const touchStartX = React.useRef<number | null>(null);
@@ -595,7 +599,8 @@ export default function PartnerDashboard() {
           }
         }
         setAggKpis(order.map(c => byCode.get(c)!));
-        setOutletType((outlets[0]?.outletType as OutletType) ?? 'SSS');
+        // NOTE: outletType is NOT taken from targets here — the target-upload row's
+        // denormalized string is unreliable. It comes from /partner/me (identity).
       })
       .catch(() => {}); // honest empty state — heroes render "No targets yet"
 
@@ -644,11 +649,19 @@ export default function PartnerDashboard() {
 
   const banner = banners[bannerIndex] ?? null;
 
-  if (loading) {
+  // Gate on BOTH the targets/wallet load AND partner identity so the hero never
+  // flashes the wrong variant before the authoritative outlet type resolves.
+  if (loading || identity.loading) {
     return <div className="flex items-center justify-center min-h-64"><Spinner size="lg" /></div>;
   }
 
   const primary = aggKpis.find(k => k.isPrimary) ?? aggKpis[0] ?? null;
+
+  // AUTHORITATIVE outlet type from /partner/me (identity). Fall back to 'SSS' only
+  // once identity has genuinely resolved with no outlet type. This is the fix: a
+  // wholesaler whose target-upload row disagreed (e.g. said "SSS") now still gets the
+  // WholesalerHero — and its Available-points wallet zone — keyed off /partner/me.
+  const outletType: OutletType = (identity.outletType as OutletType | null) ?? 'SSS';
   const isMT         = outletType === 'SSS_TOT';
   const isWholesaler = outletType === 'WHOLESALER';
 

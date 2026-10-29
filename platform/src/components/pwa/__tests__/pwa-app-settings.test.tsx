@@ -89,6 +89,18 @@ describe('PwaAppSettings', () => {
     expect(screen.getByText(/Add to Home Screen/)).toBeTruthy();
   });
 
+  it('shows the browser Install-option fallback when NOT iOS and not installable', () => {
+    vi.stubEnv('NEXT_PUBLIC_PWA_INSTALL_ENABLED', 'true');
+    installState = { canInstall: false, installed: false };
+    iosSafari = false;
+    stubNotification('default');
+    render(<PwaAppSettings />);
+    // Desktop Chromium (non-iOS, no beforeinstallprompt yet): point at the address-bar
+    // install control, NOT the wrong "open in your mobile browser" copy.
+    expect(screen.getByText(/browser's Install option/)).toBeTruthy();
+    expect(screen.queryByText(/mobile browser/)).toBeNull();
+  });
+
   it('renders an Enable button when notification permission is "default"', () => {
     vi.stubEnv('NEXT_PUBLIC_PWA_PUSH_ENABLED', 'true');
     stubNotification('default');

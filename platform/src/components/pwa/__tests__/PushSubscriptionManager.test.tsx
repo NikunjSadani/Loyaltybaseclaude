@@ -162,6 +162,32 @@ describe('PushSubscriptionManager', () => {
     expect(subscribeToPush).not.toHaveBeenCalled();
   });
 
+  it('Bajaj auto-ask "default" does NOT snooze, so the banner keeps showing on later loads', async () => {
+    // The native prompt never showed (gesture-required browser resolved 'default'). A silent
+    // auto-request must NOT write a snooze — else isSnoozed() would hide the banner next load.
+    stubNotification('default', 'default');
+    const { unmount } = render(<PushSubscriptionManager tenantSlug="bajaj" />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Enable' })).toBeTruthy());
+    expect(localStorage.getItem(SNOOZE_KEY)).toBeNull();
+    unmount();
+
+    // Simulate a later load: no snooze present → the banner must appear again.
+    stubNotification('default', 'default');
+    render(<PushSubscriptionManager tenantSlug="bajaj" />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Enable' })).toBeTruthy());
+    expect(localStorage.getItem(SNOOZE_KEY)).toBeNull();
+  });
+
+  it('Bajaj explicit "Not now" DOES snooze (the only path that snoozes)', async () => {
+    stubNotification('default', 'default');
+    render(<PushSubscriptionManager tenantSlug="bajaj" />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Not now' })).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
+    const stored = Number(localStorage.getItem(SNOOZE_KEY));
+    expect(Number.isFinite(stored)).toBe(true);
+    expect(Date.now() - stored).toBeLessThan(5000);
+  });
+
   it('renders nothing for a non-Bajaj tenant with the flag OFF (byte-identical)', () => {
     const requestPermission = stubNotification('default');
     const { container } = render(<PushSubscriptionManager tenantSlug="deoleo" />);

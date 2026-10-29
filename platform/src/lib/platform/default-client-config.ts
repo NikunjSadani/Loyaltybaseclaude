@@ -49,6 +49,7 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     rbacEnforcement: false,
     hubbleVoucherEnabled: false,
     rlpBscView: false,
+    catalogueMrpSlash: false,
     partnerApp: {
       showSchemes: true,
       showInvoices: false,

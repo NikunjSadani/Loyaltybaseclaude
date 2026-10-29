@@ -45,20 +45,30 @@ vi.mock('@/lib/banner', () => ({
 
 import PartnerDashboardPage from '../page';
 
-/** Builds a fetch stub routing /api/partner/targets and /api/auth/me. */
+/** Builds a fetch stub routing /api/partner/targets, /api/partner/me and /api/auth/me. */
 function stubFetch({
   targets,
   me,
+  partnerMeOutletType,
   targetsReject = false,
 }: {
   targets?: unknown;
   me?: unknown;
+  /** AUTHORITATIVE outlet type served by /api/partner/me (usePartnerIdentity) — drives the hero. */
+  partnerMeOutletType?: string | null;
   targetsReject?: boolean;
 }) {
   return vi.fn((url: string) => {
     if (url.includes('/api/partner/targets')) {
       if (targetsReject) return Promise.reject(new Error('Network error'));
       return Promise.resolve({ ok: true, json: () => Promise.resolve(targets) });
+    }
+    // usePartnerIdentity() — the authoritative outlet type the hero now keys off.
+    if (url.includes('/api/partner/me')) {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ success: true, data: { outletType: partnerMeOutletType ?? null } }),
+      });
     }
     if (url.includes('/api/auth/me')) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve(me) });
@@ -126,7 +136,8 @@ describe('PDB — Partner Dashboard real-data wiring', () => {
       success: true,
       data: { user: { channelPartner: { wallets: [{ redeemablePoints: 1234 }] } } },
     };
-    vi.stubGlobal('fetch', stubFetch({ targets, me }));
+    // Hero is now keyed off /partner/me (authoritative), not the targets outletType.
+    vi.stubGlobal('fetch', stubFetch({ targets, me, partnerMeOutletType: 'WHOLESALER' }));
 
     render(<PartnerDashboardPage />);
 

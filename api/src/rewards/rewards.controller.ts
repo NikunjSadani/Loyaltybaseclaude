@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query } from '@nestjs/common';
 import { RewardsService } from './rewards.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -12,6 +12,7 @@ import {
   SalesRedeemDto,
   TransitionOrderDto,
   UpdateOrderDto,
+  WishlistAddDto,
 } from './dto/rewards.dto';
 
 /** Sales hierarchy roles that may redeem on behalf of an assigned outlet. */
@@ -110,6 +111,50 @@ export class RewardsController {
     @Headers('x-active-partner-id') activePartnerId?: string,
   ) {
     return this.rewards.getCatalogItem(user, id, activePartnerId);
+  }
+
+  // ── PERSISTENT PARTNER WISHLIST ────────────────────────────────────────────
+  // Same guard/permission as the sibling catalogue reads (partners + sales reps,
+  // `rewards:read`). Partner-scoped in the service via resolveActive (own outlet or
+  // an authorized x-active-partner-id sibling); a cross-tenant rewardId is rejected
+  // on add. Placed BEFORE `orders/:id` — distinct path, no route-collision.
+  @Get('wishlist')
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST', ...SALES_ROLES)
+  @RequirePermission('rewards:read')
+  getWishlist(
+    @CurrentUser() user: JwtPayload,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.rewards.getWishlist(user, activePartnerId);
+  }
+
+  // PERMISSION NOTE: this is a mutating route but intentionally uses `rewards:read`
+  // (not rewards:write) — matching the partner-facing POST /redeem precedent. Partners
+  // only ever hold `rewards:read`; rewards:write/manage_inventory are admin-only
+  // (AdminRewardsController). A wishlist add is a self-scoped, idempotent bookmark on
+  // the caller's own partner (no shared/financial state), so the read key is the fit.
+  @Post('wishlist')
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST', ...SALES_ROLES)
+  @RequirePermission('rewards:read')
+  addToWishlist(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: WishlistAddDto,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.rewards.addToWishlist(user, dto.rewardId, activePartnerId);
+  }
+
+  // PERMISSION NOTE: see POST /wishlist above — a mutating but self-scoped, idempotent
+  // bookmark removal; `rewards:read` matches the partner-facing redeem precedent.
+  @Delete('wishlist/:rewardId')
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST', ...SALES_ROLES)
+  @RequirePermission('rewards:read')
+  removeFromWishlist(
+    @CurrentUser() user: JwtPayload,
+    @Param('rewardId') rewardId: string,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.rewards.removeFromWishlist(user, rewardId, activePartnerId);
   }
 
   // Orders reads are multi-audience + self-scoping in the service (partner → own,

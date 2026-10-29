@@ -108,10 +108,12 @@ export default function PushSubscriptionManager({ tenantSlug }: { tenantSlug?: s
           return;
         }
         if (result === 'denied') return;
-        // 'default'/undefined: dismissed or gesture-required. Snooze so we don't re-prompt
-        // on every reload (Chromium auto-blocks repeated dismissals), and offer the
-        // tap-to-enable banner for this session.
-        persistSnooze();
+        // 'default'/undefined: the native prompt never actually SHOWED (gesture-required
+        // browsers like desktop Chrome resolve 'default' without showing it). Do NOT snooze
+        // here — snoozing would hide the in-app "Enable" banner on later loads (isSnoozed()
+        // is checked early) and strip the user's easy tap-to-grant path. Only an EXPLICIT
+        // dismiss ("Not now") snoozes. The auto-request still fires once per load, with the
+        // banner as the persistent fallback.
         setShowPrompt(true);
       })();
       return () => { cancelled = true; };

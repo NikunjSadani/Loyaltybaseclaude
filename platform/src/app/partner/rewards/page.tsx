@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Gift, Search, CheckCircle,
   Shield, Package, Truck, Zap, Heart,
@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils';
 import { api } from '@/lib/api-client';
 import { usePartnerIdentity } from '@/lib/partner-identity';
 import { getGifsySettings } from '@/lib/gifsy-settings';
+import { useTenantFeatures } from '@/lib/tenant-features';
 
 /* ─── Partner cash beneficiary (from GET /api/auth/me) ─────────────────────────
    The partner's real, on-file KYC payout details + the tenant conversionRate.
@@ -73,6 +74,12 @@ interface CatalogueItem {
   minRedemptionPoints?: number | null;
   maxRedemptionPoints?: number | null;
   /**
+   * Item MRP in paise (nullable). Drives the per-tenant `catalogueMrpSlash` struck-through
+   * "list price": MRP → points at the tenant rate, shown above the redeem price as an honest
+   * "was" anchor. Honest because `points` (pointsCost) derives from the ₹ SELLING value, not MRP.
+   */
+  mrpPaise?: number | null;
+  /**
    * DPDP consent gate (design decision #15). TRUE when this item is vendor-sourced
    * (sourceType=VENDOR) and redeeming it shares the member's delivery name/address/phone
    * with a third-party fulfilment partner → a blocking, default-unticked consent
@@ -104,6 +111,8 @@ interface ApiCatalogItem {
   fixedAmount?: number | null;
   minRedemptionPoints?: number | null;
   maxRedemptionPoints?: number | null;
+  /** Item MRP in paise (nullable) — already served by MEMBER_CATALOG_SELECT. See CatalogueItem.mrpPaise. */
+  mrpPaise?: number | null;
   /** See CatalogueItem.requiresConsent — vendor-sourced items set this true (BE-exposed). */
   requiresConsent?: boolean | null;
 }
@@ -162,6 +171,7 @@ function mapCatalogItem(item: ApiCatalogItem): CatalogueItem {
     fixedAmount:  item.fixedAmount ?? (voucherType === 'FIXED' ? item.pointsCost : undefined),
     minRedemptionPoints: item.minRedemptionPoints ?? null,
     maxRedemptionPoints: item.maxRedemptionPoints ?? null,
+    mrpPaise:     item.mrpPaise ?? null,
     // DPDP consent gate — FAIL CLOSED for deliverable (physical) items: redeeming one
     // shares the member's delivery name/address/phone with a third-party fulfilment
     // partner, so an ABSENT/null flag must NOT silently drop the gate. A physical item
@@ -195,6 +205,35 @@ function isFreeAmount(
   item: Pick<CatalogueItem, 'points' | 'minRedemptionPoints' | 'maxRedemptionPoints'>,
 ): boolean {
   return item.points === 0 && (item.minRedemptionPoints != null || item.maxRedemptionPoints != null);
+}
+
+/**
+ * Catalogue MRP-slash (per-tenant `catalogueMrpSlash`): the item's MRP converted to points at the
+ * tenant conversion rate, to show struck-through as an honest "was" anchor above the redeem price.
+ * Returns the MRP-in-points to DISPLAY, or null when the slash must NOT be shown.
+ *
+ * Honesty invariant (do not break): `points` (pointsCost) already derives from the ₹ SELLING value,
+ * NOT the MRP, so MRP-in-points is a genuinely higher real anchor. We therefore render it ONLY when:
+ *   - the feature flag is ON;
+ *   - the item carries a positive MRP (`mrpPaise > 0`);
+ *   - the item has a fixed positive redeem price (`points > 0` → excludes FREE_AMOUNT / cash-band items);
+ *   - a usable conversion rate is available; AND
+ *   - the computed MRP-in-points is STRICTLY greater than the redeem price (never equal/inverted).
+ * Direction: `effectiveRate` is POINTS-PER-₹ (points = ₹ × rate), so points = (mrpPaise / 100) × rate.
+ */
+function mrpSlashPoints(
+  item: Pick<CatalogueItem, 'points' | 'mrpPaise' | 'minRedemptionPoints' | 'maxRedemptionPoints'>,
+  effectiveRate: number,
+  enabled: boolean,
+): number | null {
+  if (!enabled) return null;
+  if (item.mrpPaise == null || item.mrpPaise <= 0) return null;
+  // A fixed, positive redeem price only — never a FREE_AMOUNT / cash-band item (pointsCost 0).
+  if (!(item.points > 0) || isFreeAmount(item)) return null;
+  if (!Number.isFinite(effectiveRate) || effectiveRate <= 0) return null;
+  const mrpInPoints = Math.round((item.mrpPaise / 100) * effectiveRate);
+  // Only ever show the slash when it is truthful (strictly greater than the redeem price).
+  return mrpInPoints > item.points ? mrpInPoints : null;
 }
 
 /* ─── Real redeem flow (POST /api/rewards/redeem → OTP → confirm) ──────────────
@@ -299,6 +338,7 @@ type RedemptionStep = 'detail' | 'form' | 'otp' | 'success';
 
 function GiftDetailSheet({
   gift, onClose, myBalance, mobile, memberName, onWishlist, isWishlisted, onRedeemed,
+  mrpSlashEnabled, conversionRate,
 }: {
   gift: CatalogueItem;
   onClose: () => void;
@@ -308,6 +348,10 @@ function GiftDetailSheet({
   onWishlist: (id: string) => void;
   isWishlisted: boolean;
   onRedeemed: (pts: number) => void;
+  /** Per-tenant catalogueMrpSlash flag — drives the struck-through MRP list price. */
+  mrpSlashEnabled: boolean;
+  /** POINTS-PER-₹ tenant conversion rate (effectiveRate from the page). */
+  conversionRate: number;
 }) {
   const toast = useToast();
   const [step,       setStep]       = useState<RedemptionStep>('detail');
@@ -329,6 +373,8 @@ function GiftDetailSheet({
   const canAfford = myBalance >= gift.points;
   const delivery  = deliveryLabel(gift.category);
   const needMore  = !canAfford ? gift.points - myBalance : 0;
+  // Struck-through MRP "list price" in points (per-tenant catalogueMrpSlash). Null ⇒ not shown.
+  const mrpPoints = mrpSlashPoints(gift, conversionRate, mrpSlashEnabled);
 
   // Step 1: create the PENDING order + trigger OTP.
   const handleSendOtp = async () => {
@@ -439,6 +485,11 @@ function GiftDetailSheet({
             </div>
             <div className="flex items-center gap-3 p-3.5 bg-gray-50 rounded-2xl">
               <div className="flex-1">
+                {mrpPoints != null && (
+                  <p className="text-sm text-gray-400 line-through font-medium leading-none mb-0.5">
+                    {formatPoints(mrpPoints)} pts
+                  </p>
+                )}
                 <p className={`text-2xl font-bold ${canAfford ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`}>
                   {formatPoints(gift.points)} pts
                 </p>
@@ -965,6 +1016,12 @@ export default function RewardsPage() {
   const [category,  setCategory]  = useState('All');
   const [search,    setSearch]    = useState('');
   const [wishlist,  setWishlist]  = useState<Set<string>>(new Set());
+  // Persistent-wishlist UI: the "♥ Wishlist" filter toggle (catalogue tab only).
+  const [wishlistFilter, setWishlistFilter] = useState(false);
+  // Per-id in-flight guard so a rapid double-tap on a heart can't fire two
+  // conflicting POST/DELETE requests for the same reward (optimistic race).
+  const wishlistInFlight = useRef<Set<string>>(new Set());
+  const toast = useToast();
   const [detail,    setDetail]    = useState<CatalogueItem | null>(null);
   const [voucherDetail, setVoucherDetail] = useState<CatalogueItem | null>(null);
   const [showBank,  setShowBank]  = useState(false);
@@ -978,6 +1035,10 @@ export default function RewardsPage() {
   // so the vendor can address the parcel (never the gift brand). See GiftDetailSheet.
   const [memberName,     setMemberName]     = useState('');
   const settings = getGifsySettings();
+  // Per-tenant catalogueMrpSlash flag (DB-backed, authenticated) — drives the struck-through MRP
+  // "list price". Defaults OFF while loading / for every tenant not opted-in (Deoleo stays OFF →
+  // byte-identical). Same hook the sales dashboard uses for rlpBscView (there with /api/sales/me).
+  const { features: tenantFeatures } = useTenantFeatures('/api/partner/me');
 
   useEffect(() => {
     // Live catalogue only — no localStorage / GIFT_CATALOGUE fallback.
@@ -994,6 +1055,15 @@ export default function RewardsPage() {
         // On failure we simply show an empty catalogue (EmptyState) — no demo data.
       })
       .finally(() => setLoading(false));
+
+    // Seed the persistent wishlist (backend source of truth). Failure → empty Set,
+    // no crash: the hearts simply render un-filled until the next successful toggle.
+    api.get<{ items: unknown[]; rewardIds: string[] }>('/api/rewards/wishlist')
+      .then((result) => {
+        if (result.success && Array.isArray(result.data?.rewardIds)) {
+          setWishlist(new Set(result.data.rewardIds));
+        }
+      });
 
     // Real beneficiary + conversionRate for the cash-payout flow.
     // No hardcoded bank/UPI literals — these come straight from the KYC record.
@@ -1089,15 +1159,48 @@ export default function RewardsPage() {
   const filtered = useMemo(() => {
     let items = effectiveTab === 'catalogue' ? physicalItems : voucherItems;
     if (effectiveTab === 'catalogue' && category !== 'All') items = items.filter(g => g.category === category);
+    // "♥ Wishlist" filter — catalogue (physical) tab only; intersect with the saved Set.
+    if (effectiveTab === 'catalogue' && wishlistFilter) items = items.filter(g => wishlist.has(g.id));
     if (search) items = items.filter(g => g.name.toLowerCase().includes(search.toLowerCase()) || g.brand.toLowerCase().includes(search.toLowerCase()));
     return items.filter(g => g.available);
   // effectiveTab changes when tab or settings change — exhaustive-deps not needed here
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveTab, physicalItems, voucherItems, category, search]);
+  }, [effectiveTab, physicalItems, voucherItems, category, search, wishlistFilter, wishlist]);
 
-  const toggleWishlist = (id: string) => setWishlist(prev => {
-    const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
-  });
+  // Optimistic persistent-wishlist toggle: flip the Set immediately, then POST (add)
+  // or DELETE (remove). On a failed request REVERT the Set and surface a toast. A
+  // per-id in-flight guard prevents a double-tap from firing conflicting requests.
+  const toggleWishlist = (id: string) => {
+    if (wishlistInFlight.current.has(id)) return;
+    const willWishlist = !wishlist.has(id);
+    // Optimistic update.
+    setWishlist(prev => {
+      const n = new Set(prev);
+      if (willWishlist) n.add(id); else n.delete(id);
+      return n;
+    });
+    const revert = () => setWishlist(prev => {
+      const n = new Set(prev);
+      if (willWishlist) n.delete(id); else n.add(id);
+      return n;
+    });
+    wishlistInFlight.current.add(id);
+    const req = willWishlist
+      ? api.post('/api/rewards/wishlist', { rewardId: id })
+      : api.del(`/api/rewards/wishlist/${id}`);
+    req
+      .then(result => {
+        if (!result.success) {
+          revert();
+          toast.error(result.error || 'Could not update your wishlist');
+        }
+      })
+      .catch(() => {
+        revert();
+        toast.error('Could not update your wishlist');
+      })
+      .finally(() => { wishlistInFlight.current.delete(id); });
+  };
 
   // Live debit succeeded — reflect it optimistically in the local balance.
   // The wallet/catalog endpoints are the source of truth on next load.
@@ -1153,12 +1256,23 @@ export default function RewardsPage() {
           <span className="text-sm font-bold text-[var(--brand-primary)]">{formatPoints(balance)} pts</span>
           <span className="text-[10px] text-emerald-600 font-medium">= {fmtInr(Math.floor(balance / effectiveRate))}</span>
         </div>
-        <button
-          onClick={() => router.push('/partner/rewards/orders')}
-          className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1 rounded-full border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
-        >
-          <CheckCircle className="h-3.5 w-3.5" /> Orders
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Wishlist pill — activates the ♥ filter and ensures the catalogue tab is shown. */}
+          <button
+            type="button"
+            onClick={() => { setWishlistFilter(true); setTab('catalogue'); }}
+            aria-label={`Wishlist, ${wishlist.size} ${wishlist.size === 1 ? 'item' : 'items'}`}
+            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1 rounded-full border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+          >
+            <Heart className="h-3.5 w-3.5" /> Wishlist{wishlist.size > 0 ? ` (${wishlist.size})` : ''}
+          </button>
+          <button
+            onClick={() => router.push('/partner/rewards/orders')}
+            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1 rounded-full border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+          >
+            <CheckCircle className="h-3.5 w-3.5" /> Orders
+          </button>
+        </div>
       </div>
 
       {/* Main tabs */}
@@ -1275,6 +1389,18 @@ export default function RewardsPage() {
           {/* Category pills — catalogue only */}
           {activeTab === 'catalogue' && (
             <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none" style={{ scrollbarWidth: 'none' }}>
+              {/* ♥ Wishlist filter chip — when active, show only wishlisted items. */}
+              <button
+                type="button"
+                onClick={() => setWishlistFilter(v => !v)}
+                aria-pressed={wishlistFilter}
+                className={cn(
+                  'flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors shrink-0',
+                  wishlistFilter ? 'bg-red-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200',
+                )}
+              >
+                <Heart className={cn('h-3 w-3', wishlistFilter && 'fill-white')} /> Wishlist
+              </button>
               {categories.map(cat => (
                 <button
                   key={cat}
@@ -1300,6 +1426,8 @@ export default function RewardsPage() {
                   ? balance >= Math.ceil(settings.minVoucherFreeAmount * settings.pointsConversionRate)
                   : balance >= gift.points;
                 const isWishlisted = wishlist.has(gift.id);
+                // Struck-through MRP "list price" in points (per-tenant catalogueMrpSlash). Null ⇒ not shown.
+                const mrpPoints   = mrpSlashPoints(gift, effectiveRate, tenantFeatures.catalogueMrpSlash);
                 return (
                   <div
                     key={gift.id}
@@ -1352,8 +1480,15 @@ export default function RewardsPage() {
                         {isFreeAmount(gift) ? (
                           <span className="text-sm font-bold text-[var(--brand-primary)]">You set the amount</span>
                         ) : (
-                          <span className={`text-sm font-bold ${canAfford ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`}>
-                            {formatPoints(gift.points)} pts
+                          <span className="flex flex-col leading-none">
+                            {mrpPoints != null && (
+                              <span className="text-[10px] text-gray-400 line-through mb-0.5">
+                                {formatPoints(mrpPoints)} pts
+                              </span>
+                            )}
+                            <span className={`text-sm font-bold ${canAfford ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`}>
+                              {formatPoints(gift.points)} pts
+                            </span>
                           </span>
                         )}
                         <span className="text-[10px] text-gray-400 underline">Details</span>
@@ -1374,6 +1509,7 @@ export default function RewardsPage() {
           myBalance={balance} mobile={mobile} memberName={memberName}
           onWishlist={toggleWishlist} isWishlisted={wishlist.has(detail.id)}
           onRedeemed={handleRedeemed}
+          mrpSlashEnabled={tenantFeatures.catalogueMrpSlash} conversionRate={effectiveRate}
         />
       )}
       {voucherDetail && (

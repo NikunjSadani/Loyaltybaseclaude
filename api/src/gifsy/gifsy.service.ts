@@ -613,6 +613,7 @@ export class GifsyService {
         rbacEnforcement: !!features.rbacEnforcement,
         hubbleVoucherEnabled: !!features.hubbleVoucherEnabled,
         rlpBscView: !!features.rlpBscView,
+        catalogueMrpSlash: !!features.catalogueMrpSlash,
       },
     };
   }
@@ -755,6 +756,7 @@ export class GifsyService {
         rbacEnforcement: !!features.rbacEnforcement,
         hubbleVoucherEnabled: !!features.hubbleVoucherEnabled,
         rlpBscView: !!features.rlpBscView,
+        catalogueMrpSlash: !!features.catalogueMrpSlash,
       },
     };
   }
@@ -1004,6 +1006,7 @@ export class GifsyService {
         rbacEnforcement: !!features.rbacEnforcement,
         hubbleVoucherEnabled: !!features.hubbleVoucherEnabled,
         rlpBscView: !!features.rlpBscView,
+        catalogueMrpSlash: !!features.catalogueMrpSlash,
         partnerApp: {
           showSchemes: partnerApp.showSchemes !== false,
           showInvoices: !!partnerApp.showInvoices,

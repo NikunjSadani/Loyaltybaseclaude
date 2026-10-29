@@ -51,6 +51,13 @@ export interface FeatureFlags {
   // RELABELING (the button text still comes from the per-tenant outlet-type displayNames). This
   // IS a gifsy-console toggle (included in FeatureKey). Default OFF; Deoleo stays OFF.
   rlpBscView: boolean;
+  // Catalogue MRP-slash: when ON, each partner-rewards catalogue item that carries an MRP shows
+  // that MRP converted to points (at the tenant conversion rate) as a struck-through "list price"
+  // above the actual redeem points — e-commerce "was/now" framing. It is HONEST because the redeem
+  // price (pointsCost) already derives from the ₹ SELLING value, not the MRP, so MRP-in-points is a
+  // genuinely higher real anchor; the FE only ever shows the slash when it is strictly greater than
+  // the redeem price. This IS a gifsy-console toggle (included in FeatureKey). Default OFF; Deoleo stays OFF.
+  catalogueMrpSlash: boolean;
 
   // Partner app tab visibility (CLIENT_ADMIN cannot change these)
   partnerApp: {

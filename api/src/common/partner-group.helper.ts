@@ -655,6 +655,8 @@ export interface OperablePartner {
   partnerId: string;
   outletId: string | null;
   outletCode: string | null;
+  /** The representative outlet's MASTER name (Outlet.name) — what the shell/switcher prefers over businessName. */
+  outletName: string | null;
   businessName: string | null;
   ownerName: string | null;
   isOwnLogin: boolean; // true = the login's own partner (userId = user.sub)
@@ -684,7 +686,7 @@ const OPERABLE_OUTLET_SELECT = {
 
 function pickOutlet(outlets: { id: string; outletCode: string | null; name: string | null }[] | undefined) {
   const o = outlets?.[0];
-  return { outletId: o?.id ?? null, outletCode: o?.outletCode ?? null };
+  return { outletId: o?.id ?? null, outletCode: o?.outletCode ?? null, outletName: o?.name ?? null };
 }
 
 /**

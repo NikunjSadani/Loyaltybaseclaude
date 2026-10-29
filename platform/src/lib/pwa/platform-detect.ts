@@ -21,9 +21,14 @@ export function isStandalone(): boolean {
 export function isIosSafari(): boolean {
   if (typeof navigator === 'undefined') return false;
   const ua = navigator.userAgent;
+  // Exclude every Chromium/Gecko browser. Critical: DESKTOP CHROME's UA also contains the
+  // "Safari" token (and on a Mac, Chrome exposes `ontouchend`, which would otherwise trip the
+  // iPadOS heuristic below) — so without excluding `chrome`/`android`/`edg`/`opr` here, desktop
+  // Chrome is misdetected as iOS Safari and shown the (impossible) "Share → Add to Home Screen".
+  const nonSafari = /crios|fxios|edgios|opios|edg\/|opr\/|chrome|chromium|android|firefox/i.test(ua);
   const iOS =
     /iphone|ipad|ipod/i.test(ua) ||
     (/macintosh/i.test(ua) && typeof document !== 'undefined' && 'ontouchend' in document);
-  const safari = /safari/i.test(ua) && !/crios|fxios|edgios|opios/i.test(ua);
+  const safari = /safari/i.test(ua) && !nonSafari;
   return iOS && safari;
 }

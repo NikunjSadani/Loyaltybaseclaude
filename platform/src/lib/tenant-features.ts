@@ -61,6 +61,7 @@ export function normalizeFeatures(raw: unknown): FeatureFlags {
     rbacEnforcement:         bool(f.rbacEnforcement,         d.rbacEnforcement),
     hubbleVoucherEnabled:    bool(f.hubbleVoucherEnabled,    d.hubbleVoucherEnabled),
     rlpBscView:              bool(f.rlpBscView,              d.rlpBscView),
+    catalogueMrpSlash:       bool(f.catalogueMrpSlash,       d.catalogueMrpSlash),
     partnerApp: {
       showSchemes:     bool(pa.showSchemes,     d.partnerApp.showSchemes),
       showInvoices:    bool(pa.showInvoices,    d.partnerApp.showInvoices),

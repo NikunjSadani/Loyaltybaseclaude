@@ -32,11 +32,11 @@ vi.mock('@/lib/auth-client', () => ({ logout: vi.fn(), PORTAL_ROLES: { partner: 
 import { OutletSwitcher } from '../layout';
 
 const OWN = {
-  partnerId: 'p-own', outletId: 'o-own', outletCode: 'OUT-001',
+  partnerId: 'p-own', outletId: 'o-own', outletCode: 'OUT-001', outletName: null,
   businessName: 'Kumar General Store', ownerName: 'Rajesh', isOwnLogin: true,
 };
 const SIB = {
-  partnerId: 'p-sib', outletId: 'o-sib', outletCode: 'OUT-002',
+  partnerId: 'p-sib', outletId: 'o-sib', outletCode: 'OUT-002', outletName: null,
   businessName: 'Kumar Wholesale', ownerName: 'Rajesh', isOwnLogin: false,
 };
 

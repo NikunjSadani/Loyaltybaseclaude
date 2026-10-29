@@ -345,12 +345,13 @@ describe('GroupService.getTargetsRollup', () => {
       .mockResolvedValueOnce({ groupId: 'parent1' }) // own-group guard passes
       .mockResolvedValueOnce({ businessName: 'Group HQ', ownerName: 'Big Boss' }); // parent identity
 
+    // OUT-1 is authoritatively WHOLESALER now (reclassified), OUT-2 stays RETAIL.
     mockPrisma.outlet.findMany.mockResolvedValueOnce([
-      { outletCode: 'OUT-1' },
-      { outletCode: 'OUT-2' },
+      { outletCode: 'OUT-1', outletType: { code: 'WHOLESALER' } },
+      { outletCode: 'OUT-2', outletType: { code: 'RETAIL' } },
     ]);
 
-    // Explicit period → no most-recent-month lookup.
+    // Explicit period → no most-recent-month lookup. Target rows froze the STALE "RETAIL" snapshot.
     mockPrisma.outletTarget.findMany.mockResolvedValueOnce([
       { outletCode: 'OUT-1', outletName: 'Shop One', outletType: 'RETAIL', targetValues: { SALES: 100 } },
       { outletCode: 'OUT-2', outletName: 'Shop Two', outletType: 'RETAIL', targetValues: { SALES: 200 } },
@@ -375,7 +376,8 @@ describe('GroupService.getTargetsRollup', () => {
     expect(result.outlets[0]).toEqual({
       outletCode: 'OUT-1',
       outletName: 'Shop One',
-      outletType: 'RETAIL',
+      // AUTHORITATIVE Outlet.outletType.code (WHOLESALER), NOT the frozen "RETAIL" target snapshot.
+      outletType: 'WHOLESALER',
       kpis: [{ code: 'SALES', name: 'Sales', target: 100, achieved: 50, pace: 0.5, unit: 'cases', isPrimary: true }],
     });
 

@@ -224,7 +224,9 @@ export class GroupService {
       // trigger-derived partner.groupId). Tenant-scoped by clientId, non-deleted only.
       this.prisma.outlet.findMany({
         where: { parentId, clientId, deletedAt: null },
-        select: { outletCode: true },
+        // outletType resolves from the AUTHORITATIVE Outlet.outletType.code (Phase 1 root-fix),
+        // NOT the stale OutletTarget.outletType snapshot.
+        select: { outletCode: true, outletType: { select: { code: true } } },
       }),
     ]);
 
@@ -233,6 +235,9 @@ export class GroupService {
       ownerName: parent?.ownerName ?? null,
     };
     const outletCodes = outlets.map((o) => o.outletCode);
+
+    // outletCode → current (authoritative) outlet-type code, for the per-outlet projection below.
+    const outletTypeByCode = new Map(outlets.map((o) => [o.outletCode, o.outletType?.code]));
 
     if (outletCodes.length === 0) {
       return { available: true as const, parent: parentInfo, period: q?.period ?? null, kpiTotals: [], outlets: [] };
@@ -325,7 +330,7 @@ export class GroupService {
       return {
         outletCode,
         outletName: tRow?.outletName ?? outletCode,
-        outletType: tRow?.outletType ?? '',
+        outletType: outletTypeByCode.get(outletCode) ?? '',
         kpis,
       };
     });

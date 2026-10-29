@@ -357,12 +357,19 @@ export class TargetsService {
     const outletsForProgram = codes.length
       ? await this.prisma.outlet.findMany({
           where: { clientId: user.clientId, outletCode: { in: codes }, deletedAt: null },
-          select: { outletCode: true, programName: true },
+          // outletType resolves from the AUTHORITATIVE Outlet.outletType.code (Phase 1 root-fix),
+          // NOT the stale OutletTarget.outletType snapshot. Matches the sales-export twin.
+          select: { outletCode: true, programName: true, outletType: { select: { code: true } } },
         })
       : [];
     const programByCode = new Map(outletsForProgram.map((o) => [o.outletCode, o.programName ?? '']));
+    const outletTypeByCode = new Map(outletsForProgram.map((o) => [o.outletCode, o.outletType?.code]));
     const rowsWithProgram = targetRows.map((r) => ({
       ...r,
+      // Always the current authoritative Outlet.outletType.code; blank when the outlet is
+      // absent from the roster join (e.g. soft-deleted) — matches the achievements-export +
+      // getPace twins, never the stale OutletTarget.outletType snapshot (Phase 1 root-fix).
+      outletType: outletTypeByCode.get(r.outletCode) ?? '',
       programName: programByCode.get(r.outletCode) ?? '',
     }));
 
@@ -427,10 +434,13 @@ export class TargetsService {
     const outlets = codes.length
       ? await this.prisma.outlet.findMany({
           where: { clientId: user.clientId, outletCode: { in: codes }, deletedAt: null },
-          select: { outletCode: true, programName: true },
+          // outletType resolves from the AUTHORITATIVE Outlet.outletType.code (Phase 1 root-fix),
+          // NOT the stale OutletSalesRecord.outletType snapshot.
+          select: { outletCode: true, programName: true, outletType: { select: { code: true } } },
         })
       : [];
     const programNameByCode = new Map(outlets.map((o) => [o.outletCode, o.programName]));
+    const outletTypeByCode = new Map(outlets.map((o) => [o.outletCode, o.outletType?.code]));
 
     const kpis: KpiDefLike[] = kpiRows.map((k) => ({
       code: k.code,
@@ -445,7 +455,7 @@ export class TargetsService {
     const rows = salesRows.map((r) => ({
       outletCode: r.outletCode,
       outletName: r.outletName,
-      outletType: r.outletType,
+      outletType: outletTypeByCode.get(r.outletCode) ?? '',
       programName: programNameByCode.get(r.outletCode) ?? null,
       kpiValues: r.kpiValues,
     }));
@@ -929,6 +939,20 @@ export class TargetsService {
       ...achievementIndex.keys(),
     ]);
 
+    // outletType resolves from the AUTHORITATIVE Outlet.outletType.code (Phase 1 root-fix), NOT the
+    // stale OutletTarget.outletType snapshot. Scoped to only the codes present in this month's result.
+    const outletTypeRows = allOutletCodes.size
+      ? await this.prisma.outlet.findMany({
+          where: {
+            clientId: user.clientId,
+            outletCode: { in: [...allOutletCodes] },
+            deletedAt: null,
+          },
+          select: { outletCode: true, outletType: { select: { code: true } } },
+        })
+      : [];
+    const outletTypeByCode = new Map(outletTypeRows.map((o) => [o.outletCode, o.outletType?.code]));
+
     const results: Array<{
       outletCode: string;
       outletName: string;
@@ -984,7 +1008,7 @@ export class TargetsService {
       results.push({
         outletCode,
         outletName: targetRow?.outletName ?? achievementRow?.outletCode ?? outletCode,
-        outletType: targetRow?.outletType ?? '',
+        outletType: outletTypeByCode.get(outletCode) ?? '',
         month: q.month,
         kpis,
       });

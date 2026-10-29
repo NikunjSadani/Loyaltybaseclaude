@@ -58,7 +58,7 @@ export function OutletSwitcher({
       >
         <Store className="h-4 w-4 shrink-0 text-[var(--brand-primary)]" />
         <span className="hidden sm:block text-sm font-medium truncate">
-          {current?.businessName ?? 'Switch outlet'}
+          {current?.outletName || current?.businessName || 'Switch outlet'}
         </span>
         <ChevronDown className="h-3.5 w-3.5 shrink-0" />
       </button>
@@ -86,7 +86,7 @@ export function OutletSwitcher({
                   className="w-full flex items-center gap-2 text-left px-3 py-2.5 hover:bg-gray-50 disabled:opacity-60"
                 >
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-900 truncate">{o.businessName}</p>
+                    <p className="text-sm font-medium text-gray-900 truncate">{o.outletName || o.businessName}</p>
                     <p className="text-xs text-gray-400 truncate">{o.outletCode}</p>
                   </div>
                   {active && <Check className="h-4 w-4 text-[var(--brand-primary)] shrink-0" />}
@@ -199,7 +199,7 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
                 </Link>
               )}
               <div className="min-w-0">
-                <p className="text-sm font-bold text-gray-900 leading-tight truncate">{identity.businessName}</p>
+                <p className="text-sm font-bold text-gray-900 leading-tight truncate">{identity.outletName || identity.businessName}</p>
                 <p className="text-xs text-gray-400 leading-tight truncate">
                   {identity.ownerName}
                 </p>

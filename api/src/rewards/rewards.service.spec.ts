@@ -56,6 +56,8 @@ const mockPrisma = {
     updateMany: jest.fn(),
   },
   redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
+  // Persistent partner wishlist (getWishlist / addToWishlist / removeFromWishlist).
+  partnerWishlist: { findMany: jest.fn(), upsert: jest.fn(), deleteMany: jest.fn() },
   redemptionStatusHistory: { create: jest.fn() },
   payoutTransaction: { create: jest.fn() },
   // clients.features read for the Hubble feature flag (default OFF via beforeEach).
@@ -3447,6 +3449,208 @@ describe('RewardsService', () => {
         expect(mockPrisma.client.findFirst).not.toHaveBeenCalled();
         expect(res.status).toBe('CONFIRMED');
       });
+    });
+  });
+
+  // ── Persistent partner wishlist ───────────────────────────────────────────────
+  describe('wishlist', () => {
+    // resolveActive → resolveActivePartnerId reads channelPartner.findFirst for the
+    // login's OWN partner. Default: partner `user1` owns `cpA` (ungrouped).
+    beforeEach(() => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cpA', groupId: null });
+      mockPrisma.partnerWishlist.upsert.mockResolvedValue({ id: 'w1' });
+      mockPrisma.partnerWishlist.deleteMany.mockResolvedValue({ count: 1 });
+      mockPrisma.partnerWishlist.findMany.mockResolvedValue([]);
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({ id: 'r1' });
+    });
+
+    it('add → list shows it; delete → list no longer shows it', async () => {
+      // ADD
+      const added = await service.addToWishlist(partner, 'r1');
+      expect(added).toEqual({ success: true, wishlisted: true, rewardId: 'r1' });
+      expect(mockPrisma.partnerWishlist.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { partnerId_rewardId: { partnerId: 'cpA', rewardId: 'r1' } },
+          create: { clientId: 'deoleo', partnerId: 'cpA', rewardId: 'r1' },
+          update: {},
+        }),
+      );
+
+      // LIST — reward is projected member-safe + the category flattened to a label.
+      mockPrisma.partnerWishlist.findMany.mockResolvedValue([
+        {
+          rewardId: 'r1',
+          createdAt: new Date('2026-02-01'),
+          reward: { id: 'r1', name: 'Gift Card', pointsCost: 50, category: { name: 'Vouchers' } },
+        },
+      ]);
+      const list = await service.getWishlist(partner);
+      expect(list.rewardIds).toEqual(['r1']);
+      expect(list.items[0]).toMatchObject({ id: 'r1', name: 'Gift Card', category: 'Vouchers' });
+      expect(mockPrisma.partnerWishlist.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ partnerId: 'cpA', clientId: 'deoleo' }),
+        }),
+      );
+
+      // DELETE
+      const removed = await service.removeFromWishlist(partner, 'r1');
+      expect(removed).toEqual({ success: true, wishlisted: false, rewardId: 'r1' });
+      expect(mockPrisma.partnerWishlist.deleteMany).toHaveBeenCalledWith({
+        where: { partnerId: 'cpA', rewardId: 'r1', clientId: 'deoleo' },
+      });
+
+      // LIST after delete → empty
+      mockPrisma.partnerWishlist.findMany.mockResolvedValue([]);
+      const after = await service.getWishlist(partner);
+      expect(after.rewardIds).toEqual([]);
+      expect(after.items).toEqual([]);
+    });
+
+    it('idempotent add (twice) → upsert no-op, success both times (single row by the unique constraint)', async () => {
+      const a = await service.addToWishlist(partner, 'r1');
+      const b = await service.addToWishlist(partner, 'r1');
+      expect(a.wishlisted).toBe(true);
+      expect(b.wishlisted).toBe(true);
+      expect(mockPrisma.partnerWishlist.upsert).toHaveBeenCalledTimes(2);
+      // Every call is an idempotent no-op update ({}), so a duplicate never creates a second row.
+      expect(
+        mockPrisma.partnerWishlist.upsert.mock.calls.every(
+          (c) => Object.keys((c[0] as { update: object }).update).length === 0,
+        ),
+      ).toBe(true);
+    });
+
+    it('cross-tenant rewardId → rejected (404), nothing stored', async () => {
+      // The reward does not exist under the caller's clientId.
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null);
+      await expect(service.addToWishlist(partner, 'foreign-reward')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      // The lookup was tenant-scoped, and NO wishlist row was written.
+      expect(mockPrisma.rewardCatalog.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: 'foreign-reward',
+            clientId: 'deoleo',
+            deletedAt: null,
+          }),
+        }),
+      );
+      expect(mockPrisma.partnerWishlist.upsert).not.toHaveBeenCalled();
+    });
+
+    it('scoping: a partner cannot read/act on another partner wishlist via x-active-partner-id', async () => {
+      // Own partner is cpA (ungrouped) → a foreign active-partner selector is forbidden.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cpA', groupId: null });
+      await expect(service.getWishlist(partner, 'cpB')).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(service.addToWishlist(partner, 'r1', 'cpB')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      // Never read/wrote another partner's rows.
+      expect(mockPrisma.partnerWishlist.findMany).not.toHaveBeenCalled();
+      expect(mockPrisma.partnerWishlist.upsert).not.toHaveBeenCalled();
+    });
+
+    // ── Member-visibility gates (security FIX 1) ───────────────────────────────
+    // vendorVisibilityFilter(clientId) → the PLATFORM-or-active-granted-VENDOR OR clause.
+    const VENDOR_VISIBILITY = {
+      OR: [
+        { sourceType: 'PLATFORM' },
+        {
+          sourceType: 'VENDOR',
+          vendor: { is: { status: 'ACTIVE', grants: { some: { clientId: 'deoleo', status: 'ACTIVE' } } } },
+        },
+      ],
+    };
+
+    it('addToWishlist applies the FULL member-visibility filter (status/moderation/soft-delete/vendor)', async () => {
+      await service.addToWishlist(partner, 'r1');
+      expect(mockPrisma.rewardCatalog.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: 'r1',
+            clientId: 'deoleo',
+            deletedAt: null,
+            status: 'ACTIVE',
+            moderationStatus: 'APPROVED',
+            ...VENDOR_VISIBILITY,
+          }),
+        }),
+      );
+    });
+
+    it('getWishlist filters the reward relation by the SAME member-visibility gates', async () => {
+      await service.getWishlist(partner);
+      expect(mockPrisma.partnerWishlist.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            partnerId: 'cpA',
+            clientId: 'deoleo',
+            reward: {
+              is: {
+                deletedAt: null,
+                status: 'ACTIVE',
+                moderationStatus: 'APPROVED',
+                ...VENDOR_VISIBILITY,
+              },
+            },
+          },
+        }),
+      );
+    });
+
+    // A reward hidden by ANY catalogue gate — suspended-vendor / grant-revoked /
+    // DISCONTINUED|INACTIVE status / PENDING|REJECTED moderation / soft-deleted — is
+    // excluded by the member-visibility `where`, so the tenant-scoped findFirst returns
+    // null. Each such case therefore collapses to "not found": the add is rejected and
+    // (via the same relation filter) the row never appears in getWishlist.
+    it.each([
+      'suspended-vendor (vendorVisibilityFilter)',
+      'DISCONTINUED / INACTIVE status',
+      'PENDING / REJECTED moderation',
+      'soft-deleted (deletedAt set)',
+    ])('cannot add a reward hidden by: %s → 404, nothing stored', async (_gate) => {
+      // The member-visibility where excludes it → findFirst resolves null.
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null);
+      await expect(service.addToWishlist(partner, 'hidden')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(mockPrisma.partnerWishlist.upsert).not.toHaveBeenCalled();
+    });
+
+    it('a reward hidden by a gate does not appear in getWishlist (filtered out by the DB)', async () => {
+      // The relation filter drops the hidden row → findMany returns only the visible one.
+      mockPrisma.partnerWishlist.findMany.mockResolvedValue([
+        {
+          rewardId: 'visible1',
+          createdAt: new Date('2026-02-02'),
+          reward: { id: 'visible1', name: 'Live Gift', pointsCost: 40, category: { name: 'Vouchers' } },
+        },
+      ]);
+      const res = await service.getWishlist(partner);
+      expect(res.rewardIds).toEqual(['visible1']);
+      expect(res.rewardIds).not.toContain('hidden');
+      expect(res.items).toHaveLength(1);
+    });
+
+    it('loyalty-OFF outlet type → add rejected (404) and getWishlist empty (no DB read of rows)', async () => {
+      // Per-outlet-type Loyalty gate OFF for this outlet's type.
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletTypeId: 'ot1', outletType: { code: 'KIRANA' } });
+      mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue({ loyaltyEnabled: false });
+
+      await expect(service.addToWishlist(partner, 'r1')).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockPrisma.partnerWishlist.upsert).not.toHaveBeenCalled();
+
+      const res = await service.getWishlist(partner);
+      expect(res).toEqual({ items: [], rewardIds: [] });
+      expect(mockPrisma.partnerWishlist.findMany).not.toHaveBeenCalled();
+    });
+
+    it('remove a non-wishlisted reward → no-op success', async () => {
+      mockPrisma.partnerWishlist.deleteMany.mockResolvedValue({ count: 0 });
+      const res = await service.removeFromWishlist(partner, 'never-saved');
+      expect(res).toEqual({ success: true, wishlisted: false, rewardId: 'never-saved' });
     });
   });
 });

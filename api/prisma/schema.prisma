@@ -914,6 +914,8 @@ model ChannelPartner {
   leaderboardEntries    LeaderboardEntry[]
   // Wave-0 scheme data-collection: roster rows whose matched (linked) owner is this partner.
   schemeRosterEntries   SchemeOutlet[]         @relation("SchemeRosterPartner")
+  // Persistent partner wishlist — this partner's bookmarked catalogue rewards (additive).
+  wishlist              PartnerWishlist[]
 
   @@unique([clientId, partnerCode])
   // NOTE: the old `@@unique([clientId, gstNumber])` is REPLACED by a PARTIAL unique index
@@ -1554,6 +1556,8 @@ model RewardCatalog {
   giftMaster   GiftMaster?       @relation(fields: [giftMasterId], references: [id], onDelete: Restrict)
   vendor       Vendor?           @relation(fields: [vendorId], references: [id], onDelete: Restrict)
   orders       RedemptionOrder[]
+  // Persistent partner wishlist — rows that have bookmarked this reward (additive; see PartnerWishlist).
+  wishlistedBy PartnerWishlist[]
 
   @@index([clientId])
   @@index([categoryId])
@@ -1566,6 +1570,28 @@ model RewardCatalog {
   @@index([giftCategoryId])
   @@index([moderationStatus])
   @@map("reward_catalog")
+}
+
+/// Persistent PARTNER WISHLIST — a partner's bookmarked catalogue rewards (the member
+/// "save for later"). One row per (partner × reward); additive + safe — an empty wishlist
+/// (every existing tenant at rest) is today's behaviour. Scoped by the owning partner's
+/// clientId (denormalised, matching every other model) + partnerId; a reward is only ever
+/// wishlisted under its own tenant (the service validates the reward's clientId on add).
+/// FK Cascade on both sides: deleting the partner or the reward drops the bookmark.
+model PartnerWishlist {
+  id        String   @id @default(cuid())
+  clientId  String // tenant slug — denormalised for efficient tenant-scoped reads
+  partnerId String
+  rewardId  String
+  createdAt DateTime @default(now())
+
+  partner ChannelPartner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  reward  RewardCatalog  @relation(fields: [rewardId], references: [id], onDelete: Cascade)
+
+  @@unique([partnerId, rewardId]) // idempotent add (upsert); one bookmark per partner×reward
+  @@index([clientId, partnerId]) // the caller's wishlist read
+  @@index([rewardId])
+  @@map("partner_wishlists")
 }
 
 model RedemptionOrder {

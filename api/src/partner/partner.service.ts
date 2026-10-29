@@ -115,9 +115,9 @@ export class PartnerService {
         })
       : null;
 
-    const { outletType, hasPointsActivity, hasPayoutActivity, loyaltyEnabled } = partner
+    const { outletType, outletName, hasPointsActivity, hasPayoutActivity, loyaltyEnabled } = partner
       ? await this.resolvePartnerActivity(user.clientId, partner.id)
-      : { outletType: null, hasPointsActivity: false, hasPayoutActivity: false, loyaltyEnabled: true };
+      : { outletType: null, outletName: null, hasPointsActivity: false, hasPayoutActivity: false, loyaltyEnabled: true };
 
     // Per-tenant feature blob (DB-backed via TenantService.resolveClient — D-1). The
     // partner shell reads its runtime feature gating (walletModule / partnerApp.*)
@@ -126,6 +126,9 @@ export class PartnerService {
 
     return {
       businessName: partner?.businessName ?? null,
+      // The active outlet's MASTER name (Outlet.name) — the partner shell header shows this so it
+      // matches the admin outlet master; the FE falls back to businessName when it's null.
+      outletName,
       ownerName: partner?.ownerName ?? null,
       partnerCode: partner?.partnerCode ?? null,
       phone: partner?.phone ?? null,
@@ -170,20 +173,25 @@ export class PartnerService {
     partnerId: string,
   ): Promise<{
     outletType: string | null;
+    outletName: string | null;
     hasPointsActivity: boolean;
     hasPayoutActivity: boolean;
     loyaltyEnabled: boolean;
   }> {
-    // Partner's outlets — outletCode (payout-entry scoping) + primary-outlet type in one query.
+    // Partner's outlets — outletCode (payout-entry scoping) + primary-outlet type + name in one query.
     // NB: CreditPayoutEntry.outletId stores the outlet CODE (not the Outlet PK) — it is a
     // bare string set from the uploaded "Outlet ID", resolved elsewhere via outletCode
     // (credits.service confirmBatch). So the credit-payout scope MUST key on outletCode.
     const outlets = await this.prisma.outlet.findMany({
       where: { clientId, partnerId, deletedAt: null },
       orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
-      select: { outletCode: true, outletTypeId: true, outletType: { select: { code: true } } },
+      select: { name: true, outletCode: true, outletTypeId: true, outletType: { select: { code: true } } },
     });
     const outletType = outlets[0]?.outletType?.code ?? null;
+    // The ACTIVE outlet's MASTER name (the admin-roster Outlet.name) for the partner-shell header,
+    // resolved from the SAME primary-outlet selection as outletType. Null when the partner has no
+    // outlet — the FE then falls back to businessName so the header never shows blank.
+    const outletName = outlets[0]?.name ?? null;
     const outletCodes = outlets.map((o) => o.outletCode);
 
     // Per-outlet-type Loyalty (Rewards) gate — resolved via the shared helper (single source
@@ -231,7 +239,7 @@ export class PartnerService {
     ]);
     const hasPayoutActivity = !!payoutEntry || !!payoutTxn;
 
-    return { outletType, hasPointsActivity, hasPayoutActivity, loyaltyEnabled };
+    return { outletType, outletName, hasPointsActivity, hasPayoutActivity, loyaltyEnabled };
   }
 
   /**
@@ -309,12 +317,17 @@ export class PartnerService {
         isActive: true,
         deletedAt: null,
       },
-      select: { outletCode: true },
+      // outletType resolves from the AUTHORITATIVE Outlet.outletType.code (Phase 1 root-fix),
+      // NOT the stale OutletTarget.outletType snapshot which only refreshes on re-upload.
+      select: { outletCode: true, outletType: { select: { code: true } } },
     });
 
     if (outlets.length === 0) return { period: q.period ?? null, outlets: [] };
 
     const outletCodes = outlets.map((o) => o.outletCode);
+
+    // outletCode → current (authoritative) outlet-type code, for the per-outlet projection below.
+    const outletTypeByCode = new Map(outlets.map((o) => [o.outletCode, o.outletType?.code]));
 
     // ── Determine the month to query ──────────────────────────────────────────
     // If the caller passes a period, use it.  Otherwise, find the most-recent
@@ -415,7 +428,7 @@ export class PartnerService {
         return {
           outletCode,
           outletName: tRow?.outletName ?? outletCode,
-          outletType: tRow?.outletType ?? '',
+          outletType: outletTypeByCode.get(outletCode) ?? '',
           kpis,
         };
       });

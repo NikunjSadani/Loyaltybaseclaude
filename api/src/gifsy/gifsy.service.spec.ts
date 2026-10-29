@@ -342,6 +342,44 @@ describe('GifsyService', () => {
       expect(feats.campaignEnrollmentForm).toBe(false);
     });
 
+    it('round-trips the catalogueMrpSlash flag through the PATCH projection (merged + echoed)', async () => {
+      // The per-tenant MRP-slash console toggle must survive the update merge and be echoed on
+      // the return (so the console reflects it immediately), with a default-OFF for any tenant
+      // whose blob never set it — Deoleo stays byte-identical.
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: { walletModule: true },
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: data.features,
+      }));
+
+      const res = await service.updateClient(gifsy, 'bajaj', { features: { catalogueMrpSlash: true } });
+
+      // Persisted: flag merged in without dropping the sibling walletModule.
+      const written = mockPrisma.client.update.mock.calls[0][0].data.features;
+      expect(written).toEqual({ walletModule: true, catalogueMrpSlash: true });
+      // Projected: echoed true on the return payload.
+      const feats = res.features as Record<string, boolean>;
+      expect(feats.catalogueMrpSlash).toBe(true);
+    });
+
+    it('projects catalogueMrpSlash:false when a tenant blob never set it (Deoleo byte-identical default)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: { walletModule: true },
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: data.features,
+      }));
+
+      const res = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
+      const feats = res.features as Record<string, boolean>;
+      expect(feats.catalogueMrpSlash).toBe(false);
+    });
+
     it('F1: deep-merges the nested features.partnerApp so a partial PATCH keeps sibling flags', async () => {
       mockPrisma.client.findFirst.mockResolvedValue({
         id: 'deoleo',
