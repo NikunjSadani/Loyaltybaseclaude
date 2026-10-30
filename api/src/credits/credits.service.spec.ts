@@ -1059,11 +1059,12 @@ describe('CreditsService', () => {
       const res = await service.eligibleOutlets(admin);
       const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
       expect(where.partner).toEqual({ clientId: 'deoleo', isActive: true });
-      // No per-tenant displayName (default []) → `type` stays the outletType.code (Deoleo parity).
-      expect(res[0]).toEqual({ id: 'O1', name: 'A', type: 'GT', phone: '900' });
+      // No per-tenant displayName (default []) → BOTH `type` (match key) and `typeLabel`
+      // (display) fall back to the outletType.code (Deoleo parity).
+      expect(res[0]).toEqual({ id: 'O1', name: 'A', type: 'GT', typeLabel: 'GT', phone: '900' });
     });
 
-    it('renders the tenant displayName for a renamed outlet type (displayName ?? code)', async () => {
+    it('a renamed outlet type keeps `type` = code (award-match key) and puts the displayName in `typeLabel`', async () => {
       mockPrisma.outlet.findMany.mockResolvedValue([
         { outletCode: 'O1', name: 'A', phone: '900', outletType: { id: 'ot_gt', code: 'GT' } },
       ]);
@@ -1072,7 +1073,11 @@ describe('CreditsService', () => {
         { outletTypeId: 'ot_gt', displayName: 'General Trade' },
       ]);
       const res = await service.eligibleOutlets(admin);
-      expect(res[0].type).toBe('General Trade');
+      // `type` MUST stay the code — the upload parser resolves `field.outletTypeAwards[outlet.type]`
+      // and that map is keyed by code. Returning the displayName here (the old bug) made every award
+      // lookup miss → NA for any tenant with a display name. The friendly label goes in `typeLabel`.
+      expect(res[0].type).toBe('GT');
+      expect(res[0].typeLabel).toBe('General Trade');
       expect(mockPrisma.outletTypeClientConfig.findMany.mock.calls[0][0].where).toMatchObject({ clientId: 'deoleo' });
     });
   });

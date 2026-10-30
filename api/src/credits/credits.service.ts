@@ -1341,7 +1341,14 @@ export class CreditsService {
     return outlets.map((o) => ({
       id: o.outletCode,
       name: o.name,
-      type: labelFor(typeDisplayById, o.outletType.id, o.outletType.code),
+      // `type` MUST be the OutletType.code — the upload parser resolves awards as
+      // `field.outletTypeAwards[outlet.type]`, and that map (set in Field Configuration) is
+      // keyed by code. Returning the display LABEL here broke award resolution for any tenant
+      // with a per-type displayName (every lookup missed → everything fell to NA), while Deoleo
+      // (no displayNames → labelFor == code) stayed byte-identical, so it was never caught.
+      // `typeLabel` carries the friendly display name for the parser's skip/error messages only.
+      type: o.outletType.code,
+      typeLabel: labelFor(typeDisplayById, o.outletType.id, o.outletType.code),
       phone: o.phone ?? undefined,
     }));
   }

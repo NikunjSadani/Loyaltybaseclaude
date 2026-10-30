@@ -198,7 +198,7 @@ export function parseCreditUpload(
           awardType: 'POINTS',
           status:    'SKIP',
           errors:    [],
-          skipReason: `Field "${field.name}" is set to Not Applicable (NA) for outlet type "${outlet.type}". Configure its award type in Field Configuration to credit this outlet.`,
+          skipReason: `Field "${field.name}" is set to Not Applicable (NA) for outlet type "${outlet.typeLabel ?? outlet.type}". Configure its award type in Field Configuration to credit this outlet.`,
         });
         continue;
       }

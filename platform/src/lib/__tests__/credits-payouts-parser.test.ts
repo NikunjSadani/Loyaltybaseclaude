@@ -355,6 +355,47 @@ describe('E — Skip conditions (zero/blank/NA → SKIP, not error)', () => {
   });
 });
 
+// ─── E6/E7 — Regression: award resolves on outlet.type (code), message shows label ──
+// Reproduces the Bajaj bug: a tenant with a per-type display label (code ≠ label). The award
+// map is keyed by CODE, so the parser must match on outlet.type (= code), NOT the display label,
+// and should surface the friendly label (typeLabel) in the NA skip message.
+describe('E6/E7 — typeLabel ≠ code (Bajaj regression)', () => {
+  const FIELD_ADHOC: CreditField = {
+    id: 'f_adhoc', name: 'Adhoc', isActive: true, isSeparatePayout: false,
+    outletTypeAwards: { BSC: 'POINTS' },          // keyed by OutletType.code
+    createdAt: '2026-01-04T00:00:00.000Z', order: 4,
+  };
+  // Bajaj-style outlet: the code is 'BSC', the per-tenant display label is different.
+  const OUTLET_LABELLED: TemplateOutlet = {
+    id: 'OUT-BSC-1', name: 'Verma Traders', type: 'BSC', typeLabel: 'Bajaj Super Core',
+  };
+
+  it('E6: award matches on the code even when typeLabel differs → OK/POINTS (not NA)', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_ADHOC]),
+      [['OUT-BSC-1', 'Verma Traders', 500, '']],
+    );
+    const result = parseCreditUpload(buf, { ...DEFAULT_OPTS, fields: [FIELD_ADHOC], outlets: [OUTLET_LABELLED] });
+    const row = result.rows.find((r) => r.outletId === 'OUT-BSC-1');
+    expect(row?.status).toBe('OK');
+    expect(row?.awardType).toBe('POINTS');
+  });
+
+  it('E7: a genuinely-NA type → SKIP whose message shows the friendly typeLabel, not the raw code', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const FIELD_ADHOC_NA: CreditField = { ...FIELD_ADHOC, id: 'f_adhoc_na', outletTypeAwards: {} };
+    const buf = buildXlsx(
+      makeHeaders([FIELD_ADHOC_NA]),
+      [['OUT-BSC-1', 'Verma Traders', 500, '']],
+    );
+    const result = parseCreditUpload(buf, { ...DEFAULT_OPTS, fields: [FIELD_ADHOC_NA], outlets: [OUTLET_LABELLED] });
+    const row = result.rows.find((r) => r.outletId === 'OUT-BSC-1');
+    expect(row?.status).toBe('SKIP');
+    expect(row?.skipReason).toMatch(/Bajaj Super Core/);   // the typeLabel, not the code
+  });
+});
+
 // ─── F — Duplicate detection ──────────────────────────────────────────────────
 
 describe('F — Duplicate detection', () => {

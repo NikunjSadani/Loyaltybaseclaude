@@ -117,11 +117,25 @@ Bajaj change. Last updated: 2026-10-29.
 ---
 
 ## Deploy snapshot (staging `develop`)
-**`7c07357` serving** (api + frontend — verified via gcloud image SHA `staging-7c07357…`, 2026-10-29)
-— batch = partner wishlist + catalogue MRP-slash (flag OFF) + authoritative outlet-type (hero fix +
-root-fix Phase 1) + PWA/header/notification fixes. Prev **`ed16d51`**.
-Dashboard backend (schema + migration + sales.service) remains **uncommitted/held** for its own
-push after the FE. Prod untouched; the voucher Deoleo-prod nod is still pending prod cutover.
+**`967465a` serving** (api + frontend — verified via gcloud image SHA, 2026-10-29). Serving chain since
+`ed16d51`: **`7c07357`** (wishlist + catalogue MRP-slash flag + authoritative outlet-type [hero + root-fix
+Phase 1] + PWA/header/notif) → **`e72e91f`/`1c8c2b4`** (root-fix **Phase 2**: dropped the stale `outletType`
+column from `outlet_targets`/`outlet_sales_records`) → **`dd54210`** (seed-compile hotfix, see incident
+below) → **`36f6a59`** (selling-value → **rate-independent** MRP-slash + cost-basis leak fix, dual-audited
+closed) → **`967465a`** (**Bajaj partner dashboard V2** behind `partnerDashboardV2`: chart→this-month-vs-last
+card, bigger points/Redeem, to-go banner). Every feature flag defaults OFF → **Deoleo byte-identical**.
+Prod untouched; prod cutover still owner-gated.
+
+⚠️ **Deploy incident (2026-10-29, resolved):** Phase-2's column drop broke the api Docker build — `prisma/seed.ts`
+still wrote the dropped `outletType`, and seed/bootstrap are compiled ONLY in the Dockerfile (`tsc prisma/seed.ts`),
+a step NEITHER `jest` NOR `nest build` covers. The frontend deployed while the api image never built (split deploy);
+the migration never ran, so nothing broke (column still present, old api consistent). Fixed in `dd54210` (removed the
+seed writes; reproduced all 3 Dockerfile tsc steps green). Lesson in memory — reproduce the Dockerfile compile steps +
+sweep seed/bootstrap before any schema change.
+
+**Owner next steps:** enable `partnerDashboardV2` + `catalogueMrpSlash` for Bajaj in the Gifsy console to UAT; the
+slash also needs items to have a **selling value** entered on `/admin/gifts` (optional field — `/admin/gifts` is the
+live catalogue-entry screen; it captures MRP + points + now selling value). Then the prod cutover (owner-gated).
 
 ## E2E results (staging `ed16d51`, 2026-10-29) — automated, no manual UAT
 - **Phase B labels ✅** — `GET /api/settings/outlet-types` as **Bajaj → SSS="RLP", WHOLESALER="BSC"**
@@ -181,3 +195,27 @@ before push. `terraform/`, `.claude/`, `CLAUDE.md` deliberately excluded from th
 (`.claude/hooks/platform-wide-gate.js` + `.claude/settings.json`) now gates every `git push` / prod-deploy
 with a platform-wide checklist, plus a "🚦 PLATFORM-WIDE CHANGE GATE" block in `CLAUDE.md`. Activates on the
 next `claude` session (a fresh settings.json isn't loaded mid-session).
+
+## 8. Credits & Payouts upload — award resolved "NA" for relabelled outlet types (Bajaj) — FIXED (shared code, Deoleo byte-identical)
+- **Symptom (2026-10-30):** uploading points for a Bajaj **BSC** outlet (Adhoc field) reported
+  *"Field 'Adhoc' is set to Not Applicable (NA) for outlet type 'BSC'"* even though Field
+  Configuration showed BSC → Adhoc = POINTS.
+- **Root cause:** `eligibleOutlets` (`api/src/credits/credits.service.ts`) returned each outlet's
+  `type` as the per-tenant **display label** (`labelFor(...)`), but the award map
+  `field.outletTypeAwards` is keyed by **`OutletType.code`** (Field Configuration saves by code).
+  Bajaj set `displayName` `WHOLESALER`→"BSC", `SSS`→"RLP" (§5), so the label "BSC" ≠ the code
+  `WHOLESALER` → the parser's `outletTypeAwards[outlet.type]` missed → fell to NA. Deoleo sets no
+  displayName → `labelFor` returned the code → never hit this (why it slipped through unnoticed).
+- **Fix:** `eligibleOutlets` now returns `type: OutletType.code` (the award-match key) + a new
+  `typeLabel` (display) used only in the parser's skip/error message. Award logic unchanged. Also
+  flipped a backend spec that had *encoded* the bug (asserted `type` === label) + added parser
+  regression tests (`credits-payouts-parser.test.ts` E6/E7: code ≠ label).
+- **Scope:** shared credits code — **owner-approved platform-wide** (this session). Deoleo
+  byte-identical (`type` = code before and after). Sibling `labelFor` sweep clean (every other call
+  feeds a display field, not a lookup key). **Dual money-path audit clean**: the server trusts the
+  client-computed `awardType` (sole authority — no re-resolution mismatch).
+- **Status:** ✅ Built, full gates green, dual-audited + regression tests. Awaiting staging push →
+  owner re-upload verify (BSC/Adhoc should now credit) → prod.
+- **Separate hardening (owner's call, NOT in this fix):** `createBatch`/`confirmBatch` trust the
+  client `awardType` within safety caps; defense-in-depth = re-resolve the award server-side from
+  `field.outletTypeAwards[outlet.outletType.code]` instead of trusting the DTO.

@@ -24,7 +24,10 @@ import type { CreditField } from '@/types';
 export interface TemplateOutlet {
   id:       string;
   name:     string;
+  /** OutletType.code — the key the award map (field.outletTypeAwards) is resolved on. */
   type:     string;
+  /** Friendly display label (per-tenant displayName ?? code) — used only in skip/error messages. */
+  typeLabel?: string;
   phone?:   string;
 }
 
