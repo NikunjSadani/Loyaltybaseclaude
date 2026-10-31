@@ -953,6 +953,8 @@ model KycSubmission {
   agreementSignedAt   DateTime?
   escalatedFrom       String? // SalesRole that was skipped due to resignation (e.g. 'SO')
   version             Int       @default(1)
+  // Vendor data-migration provenance (additive; null = native). Set by the enrollment importer.
+  enrollmentSource    EnrollmentSource?
 
   // ── SO Declaration KYC variant (additive; STANDARD keeps every tenant byte-identical) ──
   // See platform/docs/plans/SO-DECLARATION-KYC.md. STANDARD = document-submission flow.
@@ -1186,6 +1188,12 @@ model OutletTypeClientConfig {
   @@map("outlet_type_client_configs")
 }
 
+// Provenance for rows brought in by the one-time vendor data-migration importer (not native
+// Gifsy enrollment). Additive; a null enrollmentSource = native → every existing tenant byte-identical.
+enum EnrollmentSource {
+  VENDOR_IMPORT
+}
+
 model Outlet {
   id                  String            @id @default(cuid())
   clientId            String // tenant slug — outlet carries its own tenant tag (may exist before its owner/partner)
@@ -1235,6 +1243,11 @@ model Outlet {
   deletedAt           DateTime?
   deactivatedAt       DateTime?
   reactivatedAt       DateTime?
+  // Vendor data-migration provenance (additive; null = native Gifsy enrollment → every tenant
+  // byte-identical). Set ONLY by the one-time enrollment importer.
+  enrollmentSource    EnrollmentSource?
+  importBatchId       String?
+  importedAt          DateTime?
 
   partner               ChannelPartner?        @relation("OutletOwner", fields: [partnerId], references: [id], onDelete: SetNull)
   // The parent owner of this outlet's group (isParent ChannelPartner), set by the admin upload.
@@ -1257,6 +1270,7 @@ model Outlet {
   @@index([state])
   @@index([isActive])
   @@index([deletedAt])
+  @@index([importBatchId])
   @@map("outlets")
 }
 
