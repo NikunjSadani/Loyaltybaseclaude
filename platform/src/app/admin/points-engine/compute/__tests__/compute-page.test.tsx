@@ -339,8 +339,14 @@ describe('Points Engine compute page', () => {
     fireEvent.click(payoutBtn);
 
     await waitFor(() => expect(payoutReportMock).toHaveBeenCalledTimes(1));
+    // Period defaults to the previous calendar month — mirror getPreviousMonth() in page.tsx and
+    // compute it relative to now, so this never breaks on a month rollover (date-relative-tests rule).
+    const _now = new Date();
+    const _py = _now.getMonth() === 0 ? _now.getFullYear() - 1 : _now.getFullYear();
+    const _pm = _now.getMonth() === 0 ? 12 : _now.getMonth();
+    const expectedPeriod = `${_py}-${String(_pm).padStart(2, '0')}`;
     expect(payoutReportMock).toHaveBeenCalledWith(
-      expect.objectContaining({ period: '2026-09' }),
+      expect.objectContaining({ period: expectedPeriod }),
     );
     expect(await screen.findByText(/payout report downloaded/i)).toBeInTheDocument();
   });
