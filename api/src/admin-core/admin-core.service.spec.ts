@@ -949,8 +949,8 @@ describe('AdminCoreService', () => {
       const res = await service.getSettings(clientAdmin);
       // Values come from auth.constants (single source of truth) + env JWT TTL.
       expect(res.settings).toMatchObject({
-        refreshTtlDays: 7, // sliding-session idle window (SESSION_TTL_DAYS)
-        assumedSessionTtlHours: 168,
+        refreshTtlDays: 30, // sliding-session idle window (SESSION_TTL_DAYS)
+        assumedSessionTtlHours: 720,
         otpExpiryMinutes: 10,
         maxOtpAttempts: 3,
         otpResendWindowHours: 1,

@@ -146,8 +146,9 @@ export async function verifyOTP(
     // AF-6 refresh: the (single-use, rotating) refresh token also lives ONLY in an
     // httpOnly cookie (NOT localStorage — that would re-open the XSS exposure AF-6 closed).
     // SessionExpiryGuard (XHR) and the proxy (page-nav) use it to silently refresh an expired
-    // ~60m access token before bouncing to login. TTL tracks the backend's SLIDING 7-day session
-    // (REFRESH_MAX_AGE) — NOT 30d, which outlived the real session and masked expiry.
+    // ~60m access token before bouncing to login. TTL tracks the backend's SLIDING 30-day session
+    // (REFRESH_MAX_AGE) — kept in LOCKSTEP so the cookie neither outlives the session (masking
+    // expiry) nor dies first (logging the user out early).
     if (refreshToken) {
       cookieStore.set('refresh_token', refreshToken, { ...cookieBase, maxAge: REFRESH_MAX_AGE });
     }

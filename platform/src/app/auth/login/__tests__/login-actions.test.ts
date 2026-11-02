@@ -1,13 +1,13 @@
 /**
  * login verifyOTP — auth cookie TTLs for the rolling 7-day session.
  *
- * The core fix: the refresh_token cookie is written at 7 days (SESSION_TTL_DAYS), NOT the old
+ * The core fix: the refresh_token cookie is written at 30 days (SESSION_TTL_DAYS), NOT the old
  * 30 days that outlived the real backend session. The access `token` cookie tracks the JWT's
- * real `exp` (~7d, drift-proof).
+ * real `exp` (~30d, drift-proof).
  */
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
-const SEVEN_DAYS = 60 * 60 * 24 * 7; // 604800
+const REFRESH_SECS = 60 * 60 * 24 * 30; // 2592000 — matches REFRESH_MAX_AGE (30d)
 
 const setCalls: Array<{ name: string; value: string; opts: { maxAge?: number } }> = [];
 const cookieStore = {
@@ -34,8 +34,8 @@ const setOf = (name: string) => setCalls.filter((c) => c.name === name).at(-1);
 beforeEach(() => { setCalls.length = 0; cookieStore.set.mockClear(); });
 
 describe('verifyOTP — cookie TTLs', () => {
-  it('sets refresh_token cookie maxAge = 7d (604800) and token cookie ≈ access TTL', async () => {
-    const exp = nowSecs() + SEVEN_DAYS;
+  it('sets refresh_token cookie maxAge = 30d (2592000) and token cookie ≈ access TTL', async () => {
+    const exp = nowSecs() + REFRESH_SECS;
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({
@@ -46,12 +46,12 @@ describe('verifyOTP — cookie TTLs', () => {
     const res = await verifyOTP('9830011252', '123456');
 
     expect(res.success).toBe(true);
-    // Core fix: refresh cookie tracks the sliding 7-day session, not 30d.
+    // Core: refresh cookie tracks the sliding 30-day session (REFRESH_MAX_AGE), in lockstep with the backend.
     expect(setOf('refresh_token')?.value).toBe('r-login');
-    expect(setOf('refresh_token')?.opts.maxAge).toBe(SEVEN_DAYS);
-    // Access cookie tracks the JWT exp (~7d, drift-proof).
+    expect(setOf('refresh_token')?.opts.maxAge).toBe(REFRESH_SECS);
+    // Access cookie tracks the JWT exp (~30d, drift-proof).
     const tokenMaxAge = setOf('token')?.opts.maxAge ?? 0;
-    expect(tokenMaxAge).toBeGreaterThan(SEVEN_DAYS - 5);
-    expect(tokenMaxAge).toBeLessThanOrEqual(SEVEN_DAYS);
+    expect(tokenMaxAge).toBeGreaterThan(REFRESH_SECS - 5);
+    expect(tokenMaxAge).toBeLessThanOrEqual(REFRESH_SECS);
   });
 });

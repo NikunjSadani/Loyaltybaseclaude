@@ -1,16 +1,16 @@
 /**
  * Rolling 7-day session — FE cookie TTL + multi-tab refresh safety.
  *
- * The backend session/refresh idle window is a SLIDING 7 days (SESSION_TTL_DAYS=7). These tests
+ * The backend session/refresh idle window is a SLIDING 30 days (SESSION_TTL_DAYS=30). These tests
  * pin the FE cookie half:
- *  - refresh-token cookie writes use 7d (604800), NOT the old 30d that outlived the real session;
- *  - the access cookie tracks the JWT's real `exp` (~7d);
+ *  - refresh-token cookie writes use 30d (2592000) = REFRESH_MAX_AGE, kept in lockstep with the 30d backend session (neither outlives it nor dies first);
+ *  - the access cookie tracks the JWT's real `exp` (~30d);
  *  - refreshSession does NOT delete the refresh cookie on a non-success/contended response
  *    (deleting it strands other tabs whose session is still alive).
  */
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
-const SEVEN_DAYS = 60 * 60 * 24 * 7; // 604800
+const REFRESH_SECS = 60 * 60 * 24 * 30; // 2592000 — matches REFRESH_MAX_AGE (30d)
 const ONE_HOUR = 60 * 60; // access token is now short-lived (~60m)
 
 const store = new Map<string, string>();
@@ -62,9 +62,9 @@ describe('refreshSession — multi-tab safety + 7-day TTL', () => {
     expect(store.get('refresh_token')).toBe('r-alive'); // still present for the other tabs
   });
 
-  it('sets BOTH token and refresh cookies on success — refresh maxAge = 7d, token maxAge ≈ access exp', async () => {
+  it('sets BOTH token and refresh cookies on success — refresh maxAge = 30d, token maxAge ≈ access exp', async () => {
     store.set('refresh_token', 'r-old');
-    const exp = nowSecs() + SEVEN_DAYS;
+    const exp = nowSecs() + REFRESH_SECS;
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ data: { accessToken: jwtWithExp(exp), refreshToken: 'r-new' } }),
@@ -74,16 +74,16 @@ describe('refreshSession — multi-tab safety + 7-day TTL', () => {
 
     expect(res).toEqual({ ok: true });
     expect(setOf('refresh_token')?.value).toBe('r-new');
-    expect(setOf('refresh_token')?.opts.maxAge).toBe(SEVEN_DAYS);
-    // access cookie tracks the JWT exp (drift-proof) — within a couple seconds of 7d.
+    expect(setOf('refresh_token')?.opts.maxAge).toBe(REFRESH_SECS);
+    // access cookie tracks the JWT exp (drift-proof) — within a couple seconds of the mock's 30d exp.
     const tokenMaxAge = setOf('token')?.opts.maxAge ?? 0;
-    expect(tokenMaxAge).toBeGreaterThan(SEVEN_DAYS - 5);
-    expect(tokenMaxAge).toBeLessThanOrEqual(SEVEN_DAYS);
+    expect(tokenMaxAge).toBeGreaterThan(REFRESH_SECS - 5);
+    expect(tokenMaxAge).toBeLessThanOrEqual(REFRESH_SECS);
   });
 });
 
-describe('assume / exit — refresh-cookie writes use 7d, not 30d', () => {
-  it('assumeTenantAction writes refresh_token AND home_refresh_token at 7d, and stashes home_token at 7d (NOT the ~60m access exp)', async () => {
+describe('assume / exit — refresh-cookie writes use the 30d session window', () => {
+  it('assumeTenantAction writes refresh_token AND home_refresh_token at 30d, and stashes home_token at 30d (NOT the ~60m access exp)', async () => {
     // The operator's HOME access token is now short-lived (~60m). Capture the exact value so the
     // assertion compares against the SAME token (recomputing jwtWithExp could drift by a second).
     const homeAccess = jwtWithExp(nowSecs() + ONE_HOUR);
@@ -99,17 +99,17 @@ describe('assume / exit — refresh-cookie writes use 7d, not 30d', () => {
     const res = await assumeTenantAction('acme');
 
     expect(res.success).toBe(true);
-    expect(setOf('home_refresh_token')?.opts.maxAge).toBe(SEVEN_DAYS);
+    expect(setOf('home_refresh_token')?.opts.maxAge).toBe(REFRESH_SECS);
     expect(setOf('refresh_token')?.value).toBe('assumed-refresh');
-    expect(setOf('refresh_token')?.opts.maxAge).toBe(SEVEN_DAYS);
-    // SHIP-BLOCKER guard: home_token must be stashed at 7d, NOT accessCookieMaxAge(~60m) — else the
+    expect(setOf('refresh_token')?.opts.maxAge).toBe(REFRESH_SECS);
+    // SHIP-BLOCKER guard: home_token must be stashed at 30d, NOT accessCookieMaxAge(~60m) — else the
     // browser drops it after ~60m and Exit can no longer restore the home context. Its maxAge must
-    // track its home_refresh_token sibling (7d), even though the stashed VALUE is a ~60m token.
-    expect(setOf('home_token')?.opts.maxAge).toBe(SEVEN_DAYS);
+    // track its home_refresh_token sibling (30d), even though the stashed VALUE is a ~60m token.
+    expect(setOf('home_token')?.opts.maxAge).toBe(REFRESH_SECS);
     expect(setOf('home_token')?.value).toBe(homeAccess);
   });
 
-  it('exitTenantAction restores home refresh_token at 7d', async () => {
+  it('exitTenantAction restores home refresh_token at 30d', async () => {
     store.set('home_token', jwtWithExp(nowSecs() + ONE_HOUR));
     store.set('home_refresh_token', 'home-refresh');
 
@@ -117,7 +117,7 @@ describe('assume / exit — refresh-cookie writes use 7d, not 30d', () => {
 
     expect(res).toEqual({ success: true });
     expect(setOf('refresh_token')?.value).toBe('home-refresh');
-    expect(setOf('refresh_token')?.opts.maxAge).toBe(SEVEN_DAYS);
+    expect(setOf('refresh_token')?.opts.maxAge).toBe(REFRESH_SECS);
   });
 
   it('exitTenantAction — fast path with NO home_refresh stashed drops the assumed refresh (prevents silent re-assume)', async () => {
@@ -136,7 +136,7 @@ describe('assume / exit — refresh-cookie writes use 7d, not 30d', () => {
 
   it('exitTenantAction restores home context even when the home ACCESS token has EXPIRED (the ship-blocker regression)', async () => {
     // Simulates >60m of assumed work: the home ACCESS token value is expired, but the home_token
-    // COOKIE is still present (it is now stashed at 7d maxAge, so the browser still holds it).
+    // COOKIE is still present (it is now stashed at 30d maxAge, so the browser still holds it).
     const expiredHome = jwtWithExp(nowSecs() - 60);
     store.set('home_token', expiredHome);
     store.set('home_refresh_token', 'home-refresh');
@@ -152,7 +152,7 @@ describe('assume / exit — refresh-cookie writes use 7d, not 30d', () => {
     // session on the next navigation), and the home refresh token restored so that refresh works.
     expect(setOf('token')?.value).toBe(expiredHome);
     expect(setOf('refresh_token')?.value).toBe('home-refresh');
-    expect(setOf('refresh_token')?.opts.maxAge).toBe(SEVEN_DAYS);
+    expect(setOf('refresh_token')?.opts.maxAge).toBe(REFRESH_SECS);
     // The stash is consumed, not orphaned: BOTH home_token and home_refresh_token are deleted.
     expect(deleted).toContain('home_token');
     expect(deleted).toContain('home_refresh_token');
@@ -163,7 +163,7 @@ describe('assume / exit — refresh-cookie writes use 7d, not 30d', () => {
     // left the assumed token in place. The fallback must exit authoritatively via the backend.
     store.set('token', 'assumed-token');
     store.set('refresh_token', 'assumed-refresh');
-    const homeExp = nowSecs() + SEVEN_DAYS;
+    const homeExp = nowSecs() + REFRESH_SECS;
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       // full interceptor envelope, so the test pins the real {success,data} contract.
@@ -182,13 +182,13 @@ describe('assume / exit — refresh-cookie writes use 7d, not 30d', () => {
     // fresh un-assumed home session written
     expect(setOf('token')?.value).toBe(jwtWithExp(homeExp));
     expect(setOf('refresh_token')?.value).toBe('home-new');
-    expect(setOf('refresh_token')?.opts.maxAge).toBe(SEVEN_DAYS);
+    expect(setOf('refresh_token')?.opts.maxAge).toBe(REFRESH_SECS);
   });
 
   it('exitTenantAction — fallback success with NO refresh in the response drops the stale assumed refresh (no re-assume)', async () => {
     store.set('token', 'assumed-token');
     store.set('refresh_token', 'assumed-refresh'); // the ASSUMED refresh — must NOT survive exit
-    const homeExp = nowSecs() + SEVEN_DAYS;
+    const homeExp = nowSecs() + REFRESH_SECS;
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ success: true, data: { accessToken: jwtWithExp(homeExp), clientId: 'gifsy' } }), // no refreshToken

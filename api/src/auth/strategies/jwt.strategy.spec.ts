@@ -9,6 +9,7 @@
 
 import { UnauthorizedException } from '@nestjs/common';
 import { JwtStrategy } from './jwt.strategy';
+import { SESSION_TTL_DAYS } from '../auth.constants';
 
 const mockPrisma = {
   // updateMany drives the fire-and-forget sliding-session bump; default to a resolved
@@ -18,8 +19,8 @@ const mockPrisma = {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Far-future expiry so the slide guard is a no-op in tests that don't exercise it
-// (expiresAt already beyond now + 6d → no bump).
-const freshExpiry = () => new Date(Date.now() + 7 * DAY_MS);
+// (expiresAt at the full window → decayed 0 → within the 1-day throttle → no bump).
+const freshExpiry = () => new Date(Date.now() + SESSION_TTL_DAYS * DAY_MS);
 
 const mockActivity = { markActive: jest.fn() };
 
@@ -66,8 +67,8 @@ describe('JwtStrategy', () => {
       expect(mockActivity.markActive).toHaveBeenCalledWith('user_1', 'deoleo');
     });
 
-    // ── Sliding-session bump (SESSION_TTL_DAYS = 7) ─────────────────────────────
-    it('SL1: slides expiresAt to ≈ now + 7d when the session has decayed by > 1 day', async () => {
+    // ── Sliding-session bump (SESSION_TTL_DAYS = 30) ────────────────────────────
+    it('SL1: slides expiresAt to ≈ now + window when the session has decayed by > 1 day', async () => {
       // expiresAt only 2 days out → decayed well past the 1-day throttle → bump fires.
       mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: new Date(Date.now() + 2 * DAY_MS) });
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9', name: 'T' };
@@ -81,13 +82,13 @@ describe('JwtStrategy', () => {
       expect(arg.where.expiresAt.lt).toBeInstanceOf(Date);
       expect(Object.keys(arg.data)).toEqual(['expiresAt']);
       const target: Date = arg.data.expiresAt;
-      expect(target.getTime()).toBeGreaterThanOrEqual(Date.now() + 7 * DAY_MS - 2000);
-      expect(target.getTime()).toBeLessThanOrEqual(Date.now() + 7 * DAY_MS + 2000);
+      expect(target.getTime()).toBeGreaterThanOrEqual(Date.now() + SESSION_TTL_DAYS * DAY_MS - 2000);
+      expect(target.getTime()).toBeLessThanOrEqual(Date.now() + SESSION_TTL_DAYS * DAY_MS + 2000);
     });
 
     it('SL2: does NOT slide when the session is still fresh (decayed < 1 day)', async () => {
-      // expiresAt 6.5 days out → within the 1-day throttle band → no write.
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: new Date(Date.now() + 6.5 * DAY_MS) });
+      // expiresAt half a day inside the full window → decayed < 1 day → within the throttle → no write.
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: new Date(Date.now() + (SESSION_TTL_DAYS - 0.5) * DAY_MS) });
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9', name: 'T' };
 
       await strategy.validate(payload as any);

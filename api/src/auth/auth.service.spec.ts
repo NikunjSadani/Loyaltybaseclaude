@@ -5,6 +5,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ForbiddenException, NotFoundException, BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { AuthService } from './auth.service';
+import { SESSION_TTL_DAYS } from './auth.constants';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -46,7 +47,7 @@ const mockConfig = {
   get: jest.fn((key: string) => {
     const cfg: Record<string, string> = {
       JWT_SECRET:              'test-secret',
-      // Deployment now sets the access-token TTL to 60m (decoupled from the 7d session).
+      // Deployment now sets the access-token TTL to 60m (decoupled from the 30d session).
       JWT_EXPIRES_IN:          '60m',
       MSG91_AUTH_KEY:          'test-msg91-key',
       MSG91_SENDER_ID:         'GIFSY',
@@ -828,8 +829,8 @@ describe('AuthService', () => {
   });
 
   // ── Sliding 7-day session TTL (roll-on-refresh) ──────────────────────────────
-  describe('sliding session TTL (SESSION_TTL_DAYS = 7)', () => {
-    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+  describe('sliding session TTL (SESSION_TTL_DAYS = 30)', () => {
+    const WINDOW_MS = SESSION_TTL_DAYS * 24 * 60 * 60 * 1000;
 
     beforeEach(() => {
       // Fixed "now" so TTL math is exact — computed RELATIVE to the mocked clock,
@@ -840,15 +841,15 @@ describe('AuthService', () => {
       jest.useRealTimers();
     });
 
-    it('login (generateTokens) stamps expiresAt ≈ now + 7d (not 30d)', async () => {
+    it('login (generateTokens) stamps expiresAt ≈ now + the 30d sliding window', async () => {
       mockPrisma.userSession.create.mockResolvedValue({ id: 'sess_1' });
       await service.generateTokens({ id: 'u1', role: 'RETAILER', clientId: 'deoleo', phone: '99' } as any);
 
       const expiresAt: Date = mockPrisma.userSession.create.mock.calls[0][0].data.expiresAt;
-      expect(expiresAt.getTime()).toBe(Date.now() + SEVEN_DAYS_MS);
+      expect(expiresAt.getTime()).toBe(Date.now() + WINDOW_MS);
     });
 
-    it('refresh re-mints expiresAt ≈ now + 7d AND writes rotatedFromId = predecessor.id', async () => {
+    it('refresh re-mints expiresAt ≈ now + 30d AND writes rotatedFromId = predecessor.id', async () => {
       mockPrisma.userSession.findFirst.mockResolvedValue({
         id: 'pred_1', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
         expiresAt: new Date(Date.now() + 60_000),
@@ -860,11 +861,11 @@ describe('AuthService', () => {
       await service.refreshToken('rt');
 
       const data = mockPrisma.userSession.create.mock.calls[0][0].data;
-      expect((data.expiresAt as Date).getTime()).toBe(Date.now() + SEVEN_DAYS_MS);
+      expect((data.expiresAt as Date).getTime()).toBe(Date.now() + WINDOW_MS);
       expect(data.rotatedFromId).toBe('pred_1');
     });
 
-    it('assumed refresh re-mints expiresAt ≈ now + 7d and preserves assumed:true + tenant clientId', async () => {
+    it('assumed refresh re-mints expiresAt ≈ now + 30d and preserves assumed:true + tenant clientId', async () => {
       mockPrisma.userSession.findFirst.mockResolvedValue({
         id: 'pred_a', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
         expiresAt: new Date(Date.now() + 60_000),
@@ -876,7 +877,7 @@ describe('AuthService', () => {
       await service.refreshToken('rt');
 
       const data = mockPrisma.userSession.create.mock.calls[0][0].data;
-      expect((data.expiresAt as Date).getTime()).toBe(Date.now() + SEVEN_DAYS_MS);
+      expect((data.expiresAt as Date).getTime()).toBe(Date.now() + WINDOW_MS);
       expect(data.clientId).toBe('deoleo'); // tenant scope preserved
       const payload = mockJwt.sign.mock.calls[0][0];
       expect(payload).toMatchObject({ clientId: 'deoleo', assumed: true });
@@ -885,10 +886,10 @@ describe('AuthService', () => {
 
   // ── Access-token TTL DECOUPLED from the session window (FIX 1a) ──────────────
   // The access JWT must be SHORT (ACCESS_TTL = 60m) on BOTH the normal and the assumed
-  // paths so activity forces frequent refreshes; the SESSION ROW stays 7d (sliding), which
-  // is what makes the rolling session non-inert. Fake timers → exact 7d math (relative to now).
-  describe('access-token TTL (ACCESS_TTL = 60m, session row 7d)', () => {
-    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+  // paths so activity forces frequent refreshes; the SESSION ROW stays 30d (sliding), which
+  // is what makes the rolling session non-inert. Fake timers → exact 30d math (relative to now).
+  describe('access-token TTL (ACCESS_TTL = 60m, session row 30d)', () => {
+    const WINDOW_MS = SESSION_TTL_DAYS * 24 * 60 * 60 * 1000;
 
     beforeEach(() => {
       jest.useFakeTimers().setSystemTime(new Date('2026-08-12T00:00:00.000Z'));
@@ -898,27 +899,27 @@ describe('AuthService', () => {
     });
     afterEach(() => jest.useRealTimers());
 
-    it('NORMAL login signs the access token with expiresIn = 60m (JWT_EXPIRES_IN), NOT 7d', async () => {
+    it('NORMAL login signs the access token with expiresIn = 60m (JWT_EXPIRES_IN), NOT 30d', async () => {
       mockPrisma.userSession.create.mockResolvedValue({ id: 'sess_1' });
       await service.generateTokens({ id: 'u1', role: 'RETAILER', clientId: 'deoleo', phone: '99' } as any);
 
       // 2nd sign arg carries the JWT options; expiresIn is the SHORT access TTL.
       expect(mockJwt.sign.mock.calls[0][1].expiresIn).toBe('60m');
-      // …while the persisted SESSION row still lives a full 7 days.
+      // …while the persisted SESSION row still lives the full 30-day window.
       const expiresAt: Date = mockPrisma.userSession.create.mock.calls[0][0].data.expiresAt;
-      expect(expiresAt.getTime()).toBe(Date.now() + SEVEN_DAYS_MS);
+      expect(expiresAt.getTime()).toBe(Date.now() + WINDOW_MS);
     });
 
-    it('ASSUMED (assume-tenant) signs the access token with expiresIn = 60m (not 168h), session row 7d', async () => {
+    it('ASSUMED (assume-tenant) signs the access token with expiresIn = 60m (not 720h), session row 30d', async () => {
       mockPrisma.userSession.create.mockResolvedValue({ id: 'sess_a' });
       await service.assumeTenant(gifsyOp, 'deoleo');
 
       expect(mockJwt.sign.mock.calls[0][1].expiresIn).toBe('60m');
       const expiresAt: Date = mockPrisma.userSession.create.mock.calls[0][0].data.expiresAt;
-      expect(expiresAt.getTime()).toBe(Date.now() + SEVEN_DAYS_MS); // 7d, NOT 168h-as-access
+      expect(expiresAt.getTime()).toBe(Date.now() + WINDOW_MS); // 30d, NOT 720h-as-access
     });
 
-    it('CODE default falls back to ACCESS_TTL (60m) when JWT_EXPIRES_IN is unset — never 7d', async () => {
+    it('CODE default falls back to ACCESS_TTL (60m) when JWT_EXPIRES_IN is unset — never 30d', async () => {
       // Config returns undefined for JWT_EXPIRES_IN → the code default must be 60m.
       // Restore the shared default impl in finally so later describes aren't polluted.
       try {

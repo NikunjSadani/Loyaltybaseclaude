@@ -395,7 +395,7 @@ export class AuthService {
     const clientId = opts?.clientIdOverride ?? user.clientId;
     // Pre-generate the session id so it can be embedded in the JWT (`sid`) AND used as
     // the UserSession PK — jwt.strategy then binds the bearer token to THIS session, so
-    // revoke/rotate kills the access token on its next request (not after a 7-day TTL).
+    // revoke/rotate kills the access token on its next request (not after a 30-day TTL).
     const sid = crypto.randomUUID();
     const payload = {
       sub:      user.id,
@@ -416,11 +416,11 @@ export class AuthService {
       ...(user.vendorId ? { vendorId: user.vendorId } : {}),
     };
 
-    // SHORT access-token lifetime — DECOUPLED from the 7-day session/refresh window so
+    // SHORT access-token lifetime — DECOUPLED from the 30-day session/refresh window so
     // the rolling session actually rolls. Both the normal and the assumed (A2) paths sign
     // a 60m (ACCESS_TTL) access token; env JWT_EXPIRES_IN may override in a deployment (set
-    // to 60m everywhere), and the CODE default is ACCESS_TTL — NEVER the old 7d, which made
-    // the feature inert. The session ROW below still lives SESSION_TTL_DAYS (7d), sliding on
+    // to 60m everywhere), and the CODE default is ACCESS_TTL — NEVER the old 30d, which made
+    // the feature inert. The session ROW below still lives SESSION_TTL_DAYS (30d), sliding on
     // each refresh/guard hit. expiresIn accepts the `ms` StringValue | number; cast to string.
     const expiresIn = (opts?.expiresIn ?? this.config.get('JWT_EXPIRES_IN') ?? ACCESS_TTL) as string;
     const accessToken  = this.jwt.sign(payload, {
@@ -429,11 +429,11 @@ export class AuthService {
     });
 
     const refreshToken = crypto.randomBytes(40).toString('hex');
-    // Sliding-session idle window — both the assumed (ASSUMED_SESSION_TTL_HOURS = 168h)
-    // and normal (SESSION_TTL_DAYS = 7d) branches are now exactly 7 days. Each refresh
-    // calls generateTokens, so expiresAt is re-minted to now+7d on every refresh (roll-on-
+    // Sliding-session idle window — both the assumed (ASSUMED_SESSION_TTL_HOURS = 720h)
+    // and normal (SESSION_TTL_DAYS = 30d) branches are exactly 30 days. Each refresh
+    // calls generateTokens, so expiresAt is re-minted to now+30d on every refresh (roll-on-
     // refresh); the jwt.strategy guard slides it the same way on ordinary access.
-    const ttlMs        = SESSION_TTL_DAYS * 24 * 60 * 60 * 1000;   // 7 days (assumed == normal)
+    const ttlMs        = SESSION_TTL_DAYS * 24 * 60 * 60 * 1000;   // 30 days (assumed == normal)
     const expiresAt    = new Date(Date.now() + ttlMs);
 
     await this.prisma.userSession.create({
@@ -467,7 +467,7 @@ export class AuthService {
    *   - `sub` stays the real operator → audit logs attribute actions to them;
    *   - every assume is audit-logged (action LOGIN + metadata.event=ASSUME_TENANT);
    *   - the access token is short-lived (ACCESS_TTL, 60m) and flagged `assumed:true` (FE banner);
-   *     the assumed SESSION row still lives the 7-day sliding window (ASSUMED_SESSION_TTL_HOURS==7d).
+   *     the assumed SESSION row still lives the 30-day sliding window (ASSUMED_SESSION_TTL_HOURS==30d).
    */
   async assumeTenant(
     operator: JwtPayload,
@@ -525,7 +525,7 @@ export class AuthService {
       clientIdOverride: targetClientId,
       assumed: true,
       // Access token is the SHORT ACCESS_TTL (60m) — same as the normal path. The session
-      // row is 7d (SESSION_TTL_DAYS) inside generateTokens, so the assumed session slides.
+      // row is 30d (SESSION_TTL_DAYS) inside generateTokens, so the assumed session slides.
       expiresIn: ACCESS_TTL,
     });
 
@@ -542,7 +542,7 @@ export class AuthService {
    * Re-mints a fresh UN-ASSUMED session for the operator's REAL home identity, derived from
    * the (assumed) token's `sub` — so it does NOT depend on the client-side `home_token`
    * cookie stash. That stash is only a fast-path optimisation; when it is missing or expired
-   * (>7d of assumed work, a multi-tab drop, or a pre-stash assume) the FE's cookie-swap Exit
+   * (>30d of assumed work, a multi-tab drop, or a pre-stash assume) the FE's cookie-swap Exit
    * silently no-ops and STRANDS the operator on the assumed token under platform chrome
    * (the reported bug). This endpoint is the stash-independent fallback the FE calls in that
    * case, guaranteeing Exit always lands the operator back in their home (un-assumed) context.
@@ -579,7 +579,7 @@ export class AuthService {
 
     // AUTHORITATIVE termination (audit F1): revoke the assumed session being exited AND any live
     // successor it rotated into, so the assumed refresh-token lineage can no longer self-renew for
-    // the 7-day session window after Exit — a second device / prior tab still holding the assumed
+    // the 30-day session window after Exit — a second device / prior tab still holding the assumed
     // refresh token is cut off (its next refresh hits a revoked row → 401). Scoped to the caller's
     // own userId (defense-in-depth). Skipped only for legacy tokens with no `sid`.
     if (operator.sid) {
@@ -705,7 +705,7 @@ export class AuthService {
         // Mint the successor, chaining rotatedFromId back to THIS predecessor so a
         // slow sibling replay can be handed the successor's stored tokens (grace).
         // The assumed access token uses the SHORT ACCESS_TTL (60m) — same as normal;
-        // the successor SESSION row is 7d (SESSION_TTL_DAYS) inside generateTokens.
+        // the successor SESSION row is 30d (SESSION_TTL_DAYS) inside generateTokens.
         const tokens = await this.generateTokens(
           session.user,
           isAssumed

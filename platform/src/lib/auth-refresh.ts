@@ -6,7 +6,7 @@
  *   - the `refreshSession` server action (lib/auth-actions.ts), fired by
  *     SessionExpiryGuard on an XHR 401, and
  *   - the edge proxy (proxy.ts), which silently refreshes on a FULL PAGE navigation
- *     when the ~60m access token has expired but the 7d refresh cookie is still valid.
+ *     when the ~60m access token has expired but the 30d refresh cookie is still valid.
  *
  * Cookie SETTING differs by caller (server action mutates `cookies()`; proxy mutates
  * `NextResponse.cookies`), but the backend call, the maxAge derivation and the cookie
@@ -25,15 +25,23 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
  */
 export const ACCESS_MAX_AGE_FALLBACK = 60 * 60;
 
-// The backend session/refresh idle window is a SLIDING 7 days (SESSION_TTL_DAYS=7). The
-// refresh cookie must track that TTL — NOT outlive it (an over-long value masks the real
-// session and strands users whose backend session has already lapsed).
-export const REFRESH_MAX_AGE = 60 * 60 * 24 * 7;
+// The backend session/refresh idle window is a SLIDING 30 days (SESSION_TTL_DAYS=30). The
+// refresh cookie must track that TTL EXACTLY — NOT outlive it (an over-long value masks the
+// real session and strands users whose backend session has lapsed) and NOT fall short (a
+// shorter cookie logs the user out while the backend session is still alive). Kept in
+// lockstep with SESSION_TTL_DAYS on the backend.
+export const REFRESH_MAX_AGE = 60 * 60 * 24 * 30;
 
 /**
  * Cookie options shared by every session-cookie write. The shape is accepted verbatim by
  * both `cookies().set(name, value, opts)` (server action) and
  * `NextResponse.cookies.set(name, value, opts)` (proxy).
+ *
+ * NOTE: cookies are deliberately HOST-ONLY (no `domain`). A parent-domain (".gifsy.in") scope
+ * was considered to fix the operator cross-subdomain hop but REJECTED after a security audit —
+ * it would broadcast the httpOnly refresh token to every *.gifsy.in host (opshub, kwality, the
+ * edge worker), widen the same-site/CSRF surface, and strand cookies on rollout. The operator
+ * cross-subdomain case needs a narrower, dedicated design, not a blanket domain cookie.
  */
 export const sessionCookieOptions = (maxAge: number) => ({
   httpOnly: true as const,

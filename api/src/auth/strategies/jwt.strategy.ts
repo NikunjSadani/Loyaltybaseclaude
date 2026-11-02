@@ -29,7 +29,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     // Bind the bearer token to its OWN session row. Tokens minted after the
     // auth-hardening change carry `sid` (the UserSession PK) → match on it, so
     // revoking/rotating that exact session invalidates this access token on its
-    // NEXT request (instead of letting it live out its 7-day TTL).
+    // NEXT request (instead of letting it live out its 30-day TTL).
     //
     // Legacy fallback: tokens issued before `sid` existed match on (userId,
     // clientId) — a GIFSY operator can hold concurrent sessions for the same user
@@ -52,7 +52,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
 
     // ── Sliding session: roll expiresAt forward on activity (fire-and-forget) ────
     // A valid access re-mints the idle window to now + SESSION_TTL_DAYS, so an
-    // actively-used session never lapses while an idle one still expires after 7 days
+    // actively-used session never lapses while an idle one still expires after 30 days
     // (the refresh path slides it identically on token renewal). THROTTLED to ≈once/day
     // per session — only fires when the stored expiresAt has already decayed by >1 day —
     // to avoid a DB write on every request. Fire-and-forget (never awaited, never

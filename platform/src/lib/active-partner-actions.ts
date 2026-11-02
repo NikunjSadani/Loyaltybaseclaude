@@ -17,7 +17,9 @@
 
 import { cookies } from 'next/headers';
 
-const WEEK = 60 * 60 * 24 * 7;
+// Matches the 30-day sliding session window (SESSION_TTL_DAYS) so an outlet idle within the
+// session never loses its selected-partner on reopen before the session itself would lapse.
+const SELECTION_MAX_AGE = 60 * 60 * 24 * 30;
 
 const cookieOptions = (maxAge: number) => ({
   httpOnly: true as const,
@@ -37,7 +39,7 @@ export async function setActivePartner(
 ): Promise<{ success: boolean }> {
   const cookieStore = await cookies();
   if (partnerId) {
-    cookieStore.set('active_partner_id', partnerId, cookieOptions(WEEK));
+    cookieStore.set('active_partner_id', partnerId, cookieOptions(SELECTION_MAX_AGE));
   } else {
     cookieStore.delete('active_partner_id');
   }

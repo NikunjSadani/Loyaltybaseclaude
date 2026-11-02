@@ -58,7 +58,7 @@ export async function assumeTenantAction(
     // Stash the home (operator) session ONCE — both token AND refresh token — so Exit
     // restores the exact home session and refresh works in either context.
     if (!cookieStore.get('home_token')) {
-      // Stash home_token at the 7d REFRESH_MAX_AGE (NOT the access token's own ~60m exp): the
+      // Stash home_token at the 30d REFRESH_MAX_AGE (NOT the access token's own ~60m exp): the
       // access token is now short-lived, so a maxAge of accessCookieMaxAge(token) would drop the
       // home_token cookie after ~60m of assumed work — then Exit's `if (home)` restore block would
       // be skipped, stranding the operator on the assumed tenant token under platform chrome. The
@@ -83,7 +83,7 @@ export async function assumeTenantAction(
  * FAST PATH (unchanged): restore the stashed home session if the `home_token` cookie is
  * present — no backend round-trip, preserves the original home session's continuity.
  *
- * ROBUST FALLBACK (the #51 strand fix): if the stash is GONE (>7d of assumed work, a
+ * ROBUST FALLBACK (the #51 strand fix): if the stash is GONE (>30d of assumed work, a
  * multi-tab drop, a pre-stash assume), the old cookie-swap silently no-opped and left the
  * operator stranded on the assumed token under platform chrome. Instead, ask the backend to
  * mint a fresh UN-ASSUMED home session from the operator's real identity — independent of any

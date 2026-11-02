@@ -202,7 +202,7 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
   }
 
   // PAGE navigation / hard reload: the ~60m access cookie has expired (the browser drops a
-  // cookie past its maxAge, so `token` is typically ABSENT here) while the 7d refresh cookie
+  // cookie past its maxAge, so `token` is typically ABSENT here) while the 30d refresh cookie
   // is still valid. Silently refresh SERVER-SIDE so the user isn't bounced to login ~hourly.
   const refreshToken = request.cookies.get('refresh_token')?.value
   if (refreshToken) {
@@ -219,7 +219,7 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
       if (newPayload) {
         const res = forwardAuthed(request, headers, refreshed.accessToken, newPayload)
         // Persist the rotated pair on the outgoing response (access maxAge tracks the new
-        // token's exp; refresh at 7d). Setting Set-Cookie is valid on both the next() and the
+        // token's exp; refresh at 30d). Setting Set-Cookie is valid on both the next() and the
         // role-redirect responses forwardAuthed may return.
         res.cookies.set('token', refreshed.accessToken, sessionCookieOptions(accessCookieMaxAge(refreshed.accessToken)))
         if (refreshed.refreshToken) {
