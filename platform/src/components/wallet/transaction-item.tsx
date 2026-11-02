@@ -69,7 +69,10 @@ export function TransactionItem({ transaction: tx, isLockedEntry = false }: Tran
       {/* Amount + running balance */}
       <div className="text-right shrink-0 pl-2">
         <p className={`text-[13px] font-bold ${amtColor} whitespace-nowrap`}>
-          {amtSign}{formatPoints(tx.amount)}<span className="text-[10px] font-normal ml-0.5">pts</span>
+          {/* amtSign already carries the direction (+/−); render the magnitude so a
+              negatively-stored debit/expiry amount doesn't double up as "−-6,939".
+              LOCK rows have no prefix (amtSign === '') → keep their raw value. */}
+          {amtSign}{formatPoints(amtSign ? Math.abs(tx.amount) : tx.amount)}<span className="text-[10px] font-normal ml-0.5">pts</span>
         </p>
         {!isLockedEntry && (
           <p className="text-[10px] text-gray-400 mt-0.5 whitespace-nowrap">

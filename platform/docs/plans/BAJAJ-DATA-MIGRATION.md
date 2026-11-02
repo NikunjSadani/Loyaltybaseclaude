@@ -1,9 +1,9 @@
 # Bajaj — Data Migration (from prior provider) — living plan doc
 
-**Status:** PLANNING / analysis done for the enrollment dump; no importer built yet.
+**Status:** Enrollment imported; **POINTS being rebuilt from the Earn & Burn ledger (2026-11-02 pivot — see §0)**; payout + TDS + visibility pending owner files.
 **Target:** the **Bajaj** tenant on **STAGING** first — `uat-bajaj.gifsy.in` / `clientId='bajaj'` /
 DB `gifsy_staging`. Prod is a later, owner-gated step.
-**Last updated:** 2026-10-31.
+**Last updated:** 2026-11-02.
 
 > ⚠️ **TENANT-SAFETY RULE (learned the hard way):** on 2026-10-30 a Bajaj hierarchy file was
 > bulk-uploaded into the **Deoleo** staging tenant by mistake (1,048 rows; cleaned up 2026-10-31).
@@ -12,22 +12,49 @@ DB `gifsy_staging`. Prod is a later, owner-gated step.
 
 ---
 
+## 0. ⚠️ 2026-11-02 UPDATE — Final UAT data set + POINTS pivot (authoritative; SUPERSEDES the points parts below)
+
+**Final data folder (owner-shared):** `D:\Work\Gifsy\Clients\Bajaj Consumer Care\Loyalty\Files received\Final UAT data upload\` — the 5 UAT files:
+- **`Earn & Burn Points of 25 to 26 Year & Expire points data Year 25.xlsx`** — the WHOLESALER points ledger (monthly earn / burn(redemption) / FY laps + a rolling **Final Closing Points**). **NOW THE SOURCE OF TRUTH FOR POINTS.**
+- `Enrollment dump.xlsx` — outlet master + KYC + doc links (category #2; already imported).
+- `Retailer payout earning april 25 to sept 26.xlsx` — ⚠️ the earlier use of this file's BSC sheet for POINTS was WRONG. Correct retailer-payout source still TBD (below).
+- `TDS Sheet.zip` — TDS already-submitted-to-govt data (for the FY27 reconciliation).
+- `Visibility Dump 25 TO 26.xlsx` — visibility history (category #3).
+
+**THE PIVOT (why):** the trial points import credited earn from the **payout file's BSC sheet (`Capped @125%`)**; that earn **MISMATCHED the authoritative Earn & Burn ledger for 72% of outlets** (±13.1 lakh pts; e.g. outlet 197325 payout-file=7,295 vs ledger=4,676). So the payout file was the WRONG source. On **2026-11-02 BOTH payout-file imports were DELETED** (points: 23,942 txns / 3.24 cr / 2,322 wallets REVERSED — counters decremented + rows deleted; payout: 50,128 `CreditPayoutEntry` / ₹3.02 cr / 18 batches deleted), **backed up** to `gs://gifsy-platform-files/migrations/backups/bajaj-payoutfile-import-backup-2026-11-02T07-40-19-267Z.json`. Old import pipeline (9 Cloud Run jobs) removed.
+
+**POINTS — rebuild from the Earn & Burn ledger (owner decisions 2026-11-02):**
+- **Source of truth = Earn & Burn ledger.** Each wholesaler's wallet is set from its vendor **"Final Closing Points"** — the LAST of 5 period-progressive "Final Closing Points" columns (after 1Apr–30Jun → 1Jul–25Aug → 26Aug–15Sep → 16Sep–15Oct). VERIFIED: it is the latest cumulative net (earn − burn − laps), and it **already EXCLUDES the expired pre-Apr'25 Last-Year-Closing** (Cispl-Closing = Earn − Burn, not LYC+Earn−Burn).
+- **`redeemablePoints` = net** (Final Closing Points). **`earnedPoints`/`lifetimeEarned` = GROSS earn** = net + Σ(all period burns) + FY laps = total earned Apr'25→now; `redeemedPoints` = gross − net. → the partner sees honest **lifetime-earned (gross)** + **available (net)**.
+- **Negatives PRESERVED** (9 outlets — legit sales-return clawbacks → negative redeemable; the platform's never-negative invariant is a noted latent edge, safe now: non-expiring + redemption gated). **Fractions round half-up.** Outlets with gross=0 AND net=0 skipped.
+- **Scope = CODE exists in STAGING** (else skip + flag). ✅ **LIVE + DB-VERIFIED 2026-11-02:** **2,317 wallets** set (2,316 carry ledger lots; 1 fully-inactive 0/0 outlet correctly skipped) / 372 not-in-staging. Wallets tie out **EXACTLY** to the manifest on all four totals — **net 79,94,576** · **gross 3,30,86,843** · burn 2,45,68,785 · laps 5,23,482; per-record `redeemable==net` & `earned==gross` (0 mismatch); coherence invariant `redeemable = earned − redeemed − expired` holds for every wallet (0 violations); 0 non-Bajaj contamination. Data quality: **0 duplicate CODEs**. DUAL-audited (correctness + safety); guards: `gifsy_staging` DB guard, advisory lock, dedup-abort, pooled-refusal, overwrite-abort, gross=net+burn+laps validation, `VENDOR_IMPORT` tag on every row. Verify jobs: `scratchpad/verify-earnburn*.job.js`.
+
+**RETAILER PAYOUT — DELETED; owner will share the CORRECT source separately** (the Earn & Burn ledger is points/wholesalers only). Re-import when shared.
+
+**TDS — PARKED:** load `TDS Sheet.zip` (already-deposited TDS) later; compute **FY2026-27 (FY27)** liability on BOTH **points-redemption** AND **payout**, then **subtract TDS already deposited** → net outstanding. **NOT FY26.** The platform fix (`compute194R` excludes `VENDOR_IMPORT` payout batches) is **RETAINED** — vendor imports carry NO live TDS.
+
+**STANDING RULES (every vendor import):** tag all rows `VENDOR_IMPORT`; run data-quality checks (duplicate outlet IDs + inconsistencies) on each file; in-VPC Cloud Run jobs (DRY_RUN-first, `current_database` guard, advisory lock); dual-audit money paths; owner-gated live writes.
+
+**Artifacts (scratchpad):** `earnburn-parser.js` → manifest `gs://…/migrations/bajaj-earnburn-manifest.json`; `bajaj-earnburn-import.job.js`; `delete-payoutfile-import.job.js`. See memory [[bajaj-data-migration]].
+
+---
+
 ## 1. Scope — 6 data categories (prior provider → our platform)
 1. **Employee hierarchy** (ISR→SO→ASM→RSM→ZNM→NSM).
 2. **Outlet master + KYC + document links** ← the **"Enrollment dump"** analysed below.
 3. **Visibility details** (POSM).
 4. **Historical sales & targets** from **1-Apr-2025**.
-5. **Historical points / payouts** — opening balance @1-Apr-2025 + full transaction history.
+5. **Historical points (wholesaler)** — set from the **Earn & Burn ledger's Final Closing Points** (net); gross earn → lifetime-earned (see §0). **Retailer payout** — correct source pending from owner.
 6. **TDS data** (reconcile FY26-27).
 
 ## 2. Locked decisions (owner)
 - **Overwrite-style** import (append-vs-overwrite is moot under overwrite).
-- Data from **1-Apr-2025**.
-- Points: opening balance @1-Apr-2025 + full ledger; **redeemable going forward**.
-- Reconcile: **FY25-26 nothing**; **FY26-27 reconcile** (if low-effort).
+- Data from **1-Apr-2025** (pre-Apr'25 = expired/settled → excluded).
+- **Points → see §0 (2026-11-02 pivot):** source of truth = the **Earn & Burn ledger**; set redeemable = **Final Closing Points** (net), lifetime-earned = gross. *(The earlier "payout-file BSC + full ledger" approach was WRONG — 72% earn mismatch — and was deleted.)*
+- **TDS reconcile (parked): FY2026-27 (FY27)** on points-redemption + payout, minus already-deposited; **FY25-26 nothing**. Vendor imports carry NO live TDS.
 - Docs: prior provider's **public download links are IN the outlet-master/enrollment file** → extract + store in our portal.
 - Cutover timestamp: **not required** for the staging test import.
-- **Program→earn-model (confirmed 2026-10-31): RLP = Retailer = PAYOUT (cash-on-target) + Visibility; BSC = Wholesaler = POINTS (reward catalogue).** Routed by outlet type via `CreditField.outletTypeAwards` (not by program name). Both streams taxed 194R (report-only). See [[bajaj-onboarding]].
+- **Program→earn-model (confirmed 2026-10-31): RLP = Retailer = PAYOUT (cash-on-target) + Visibility; BSC = Wholesaler = POINTS (reward catalogue).** Routed by outlet type via `CreditField.outletTypeAwards` (not by program name). *(Vendor-imported points/payout carry NO live TDS — `VENDOR_IMPORT`-tagged + excluded from `compute194R`; statutory TDS is the separate parked FY27 reconciliation, §0.)* See [[bajaj-onboarding]].
 - **Import as ALREADY-APPROVED (confirmed 2026-10-31):** these outlets are live/approved upstream (Active=1), so import them as **pre-approved outlets, KYC-APPROVED straightaway, with docs attached — NO re-validation, do NOT push 6,505 through the KYC wizard.** Needs a dedicated enrollment importer.
 - **PROVENANCE marker (owner, 2026-10-31):** our records MUST show these are **imported / vendor-enrolled** outlets (enrolled by the prior vendor, not by Gifsy). The importer stamps a provenance marker on each imported outlet/KYC (e.g. `enrollmentSource='VENDOR_IMPORT'` + an import batch id/date). ⚠️ likely a small **additive schema field** → platform-wide schema change → flagged approval before building.
 - Sequence (dependency order): **hierarchy → outlets/KYC/docs → sales/targets → points/payouts → TDS.**
@@ -115,7 +142,7 @@ Clean: 0 invalid mobiles, 0 duplicate outlet codes, all UPI VPAs valid, every ou
 - **New build needed:**
   - **Enrollment importer** — lands outlet master + owner (ChannelPartner) + bank mandate (UPI transform) + marks **pre-approved/enrolled** + attaches the 5 docs (download from both hosts). Idempotent, tenant-asserted (`bajaj`), overwrite semantics.
   - **Historical sales/targets backfill (#4)** — the sales/target upload **locks past months** (`isMonthLocked` → skip, `targets.service.ts:568`) → needs a **GIFSY-gated `allowLockedMonths` mode** to write Apr-2025+.
-  - **Points/payouts import (#5)** — opening balance @1-Apr-2025 + ledger (one-time), redeemable. **Money path → dual audit.**
+  - **Points import (#5) — built via the Earn & Burn pivot (§0):** sets wholesaler redeemable = Final Closing Points (net) + gross→lifetime-earned; dual-audited. ✅ **LIVE + DB-VERIFIED 2026-11-02** (2,317 wallets; exact 4-way tie-out to manifest). **Retailer payout** awaits the correct source file.
   - **TDS import + FY26-27 reconcile (#6).**
   - **Visibility history (#3).**
 
@@ -125,7 +152,9 @@ Clean: 0 invalid mobiles, 0 duplicate outlet codes, all UPI VPAs valid, every ou
 - ❓ OPEN — **minor-fix defaults:** auto-fix 27 IFSC O→0 where valid; drop/flag 23 bad pincodes; resolve the 1 dup-mobile pair; exclude the 2 enr≠1 rows?
 - ❓ OPEN — run the full **GST+cheque dead-link sweep** (~5,800 req) for exact missing-doc counts before import?
 - ⚠️ **Provenance marker** = additive schema field → PLATFORM-WIDE → flagged approval before building.
-- ▶ **NEXT (on go):** build the enrollment importer — tenant-asserted `bajaj`, idempotent, overwrite, UPI transform, doc download+store (3 hosts, log dead links), **KYC-APPROVED + provenance**; dry-run on Bajaj staging → verify → then down the sequence (sales/targets backfill → points/payouts → TDS → visibility).
+- ✅ **DONE:** enrollment importer (outlets + owner + bank + KYC-APPROVED + provenance + docs) built & run on staging (6,505 outlets). **POINTS** rebuilt from the Earn & Burn ledger — see §0 (✅ LIVE + DB-VERIFIED 2026-11-02: 2,317 wallets, exact 4-way tie-out).
+- ▶ **REMAINING (awaiting owner files):** retailer payout (correct source), historical sales/targets (needs the GIFSY-gated `allowLockedMonths` mode), TDS (`TDS Sheet.zip` → FY27 reconcile), visibility (`Visibility Dump 25 TO 26.xlsx`). Prod cutover = later, owner-gated (land the TDS `compute194R` fix on `main` first).
+- ✅ **SHIPPED to develop→staging (2026-11-02, batched with the 30-day session change):** partner-wallet statement **double-negative** display fix. Root cause: backend stores `wallet_transactions.points` SIGNED (neg on debit) + API returns raw, but shared `platform/src/components/wallet/transaction-item.tsx` prepended its own `−` → `−-6,939` on every debit/expiry (latent on Deoleo too). Fix = render magnitude (`formatPoints(amtSign ? Math.abs(tx.amount) : tx.amount)`); LOCK rows (no prefix) untouched. Regression test `platform/src/components/__tests__/transaction-item.test.tsx`. **⚠️ PLATFORM-WIDE** (shared component). Gates GREEN (tsc + full vitest 2,853). Working-tree only — NOT committed/pushed; fold into the next batched `develop` push, then verify on staging (`uat-bajaj.gifsy.in/partner/wallet` for DILIP KUMAR `9234722895` shows `−6,939`).
 
 ## 8. Staging pre-import checks — RESULTS (2026-10-31, read-only in-VPC job vs `gifsy_staging`)
 - **Outlet-type config:** ✅ `SSS`(label **RLP**), `WHOLESALER`(label **BSC**), `SSS_TOT`, `SUB_STOCKIST` — all active/enabled for bajaj. Import won't reject on type. Programs = free-text (no validation) → won't reject on any Program/Sub-program value.
