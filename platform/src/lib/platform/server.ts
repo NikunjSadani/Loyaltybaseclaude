@@ -5,7 +5,7 @@
 
 import { headers } from 'next/headers';
 import { resolveClientConfig } from './tenant-resolution';
-import { refreshIfStale } from './tenant-routing-cache';
+import { ensureWarm } from './tenant-routing-cache';
 import { buildCssVariables } from './client-config';
 import { DEFAULT_CLIENT_CONFIG } from './default-client-config';
 import type { ClientConfig } from './client-config';
@@ -26,11 +26,14 @@ import type { ClientConfig } from './client-config';
  * endpoint + a wired middleware) is a separate feature — see POST-GO-LIVE-BACKLOG.md §A.
  */
 export async function getTenantConfig(): Promise<ClientConfig> {
-  // §A-DOMAIN Phase 2: keep the DB routing/branding snapshot warm for SSR-only
-  // entry paths (non-blocking; the proxy usually primes it first). resolveClientConfig
-  // reads the snapshot and overlays any non-empty DB branding, falling back to the
-  // registry — so this is DB-aware without an inline network wait.
-  void refreshIfStale();
+  // §A-DOMAIN Phase 2: ensure the DB routing/branding snapshot is warm BEFORE resolving,
+  // so a cold Cloud Run instance doesn't render a DB-only tenant (e.g. Bajaj, absent from
+  // CLIENT_REGISTRY) with the neutral DEFAULT_CLIENT_CONFIG and flash "LoyaltyBase" branding
+  // (header/title/favicon) until a later warm render corrects it. `ensureWarm()` awaits a
+  // single ~2s-capped fetch ONLY on the first request of a cold instance, is a no-op once
+  // warm, and on failure leaves the snapshot null → registry fallback (so registry tenants
+  // like Deoleo are unaffected). Mirrors the blocking warm the proxy already performs.
+  await ensureWarm();
 
   const hdrs = await headers();
   const slug = hdrs.get('x-tenant-slug');
