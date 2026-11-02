@@ -26,6 +26,7 @@ import {
 } from '@/lib/targets';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { istDateKey } from '@/lib/ist-date';
+import { useClientConfig } from '@/lib/platform/client-config-context';
 
 /* ─── Backend response types ─────────────────────────────────────────────────── */
 
@@ -110,6 +111,7 @@ function ParamCard({
   timePct:  number;
   daysLeft: number;
 }) {
+  const clientName = useClientConfig().branding.displayName;
   const p          = pct(achieved, param.target);
   const col        = pctColor(p);
   const bar        = pctBarColor(p);
@@ -164,7 +166,7 @@ function ParamCard({
         {isAchieved && (
           <div className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2">
             <Award className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
-            <span className="text-xs text-emerald-700 font-semibold">Target achieved! Incentive being verified by Deoleo.</span>
+            <span className="text-xs text-emerald-700 font-semibold">Target achieved! Incentive being verified by {clientName}.</span>
           </div>
         )}
       </div>
@@ -194,6 +196,7 @@ function currentPeriodValue(): string {
 /* ─── Page ────────────────────────────────────────────────────────────────────── */
 
 export default function PartnerTargetsPage() {
+  const clientName = useClientConfig().branding.displayName;
   const periodOptions = useMemo(() => getPeriodOptions(), []);
   const [period,  setPeriod]  = useState(currentPeriodValue);
   const [loading, setLoading] = useState(true);
@@ -414,7 +417,7 @@ export default function PartnerTargetsPage() {
                 <div className={`mx-3 mb-3 rounded-xl px-3 py-2.5 flex items-center gap-2 text-[11px] font-bold ${cfg.strip}`}>
                   <StripIcon className="h-3.5 w-3.5 shrink-0" />
                   {cardState === 'ALL_MET'
-                    ? 'All targets achieved! Incentive being verified by Deoleo.'
+                    ? `All targets achieved! Incentive being verified by ${clientName}.`
                     : `${notHit} target${notHit !== 1 ? 's' : ''} still to close · ${daysLeft} ${dWord} left`}
                 </div>
               </div>
