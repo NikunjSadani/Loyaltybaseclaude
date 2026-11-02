@@ -120,7 +120,7 @@ describe('PDV2 — partnerDashboardV2 ON', () => {
 
     // Comparison card present — wait on a trend-derived value (trend fetch settles after mount).
     await waitFor(() => expect(screen.getByText('1,000 cases')).toBeInTheDocument());
-    expect(screen.getByText('Secondary Volume · This month vs last')).toBeInTheDocument();
+    expect(screen.getByText('Achievement · This month vs last')).toBeInTheDocument();
     expect(screen.getByText('This month (so far)')).toBeInTheDocument();  // honest partial-month label
     expect(screen.getByText('Last month')).toBeInTheDocument();
     expect(screen.getByText('800 cases')).toBeInTheDocument();
@@ -141,7 +141,7 @@ describe('PDV2 — partnerDashboardV2 ON', () => {
     expect(fetchMock.mock.calls.some(c => String(c[0]).includes('/api/partner/me'))).toBe(false);
   });
 
-  it('Finding 2: primary null (no current-month target) → card title + unit come from the trend (INR formatted)', async () => {
+  it('Finding 2: primary null (no current-month target) → unit comes from the trend (INR formatted); title is the static Achievement label', async () => {
     identityRef.current = identity('WHOLESALER', true);
     const inrTrend: TrendResp = {
       kpiName: 'Net Revenue', unit: 'INR',
@@ -153,9 +153,9 @@ describe('PDV2 — partnerDashboardV2 ON', () => {
     vi.stubGlobal('fetch', stubFetch({ kpi: null, walletPts: 500, trend: inrTrend }));
     render(<PartnerDashboardPage />);
 
-    // Title + values resolve from the trend even though `primary` is null.
+    // Unit + values resolve from the trend even though `primary` is null (title is the static Achievement label).
     await waitFor(() => expect(screen.getByText('₹5.8L')).toBeInTheDocument());
-    expect(screen.getByText('Net Revenue · This month vs last')).toBeInTheDocument();
+    expect(screen.getByText('Achievement · This month vs last')).toBeInTheDocument();
     expect(screen.getByText('₹5L')).toBeInTheDocument();                 // last month, INR compact
     expect(screen.getByText(/\+16%/)).toBeInTheDocument();               // +₹80K → +16%
   });

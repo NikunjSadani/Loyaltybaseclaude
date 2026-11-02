@@ -218,10 +218,11 @@ function fmtKpiValue(value: number, unit: string): string {
 }
 
 function MonthlyComparisonCard({ primary }: { primary: AggKpi | null }) {
-  // Keep the FULL trend response — its `unit`/`kpiName` are authoritative even when the
-  // partner has history but NO current-month target (then `primary` is null, because the
-  // targets endpoint is scoped to the current period). Mirrors PerformanceChart's
-  // `trend?.unit ?? primary?.unit` so INR compact formatting stays correct.
+  // Keep the FULL trend response — its `unit` is authoritative even when the partner has
+  // history but NO current-month target (then `primary` is null, because the targets endpoint
+  // is scoped to the current period). Mirrors PerformanceChart's `trend?.unit ?? primary?.unit`
+  // so INR compact formatting stays correct. (The card title is a static "Achievement" label —
+  // it no longer uses the KPI name, which read ambiguously as a target.)
   const [trend, setTrend] = useState<TrendResponse | null>(null);
   const primaryCode = primary?.code;
 
@@ -238,7 +239,6 @@ function MonthlyComparisonCard({ primary }: { primary: AggKpi | null }) {
   }, [primaryCode]);
 
   const unit  = trend?.unit ?? primary?.unit ?? 'cases';
-  const title = trend?.kpiName ?? primary?.name ?? 'Primary KPI';
   const cmp   = computeMonthComparison(trend?.trend ?? []);
   const deltaUp = cmp.delta !== null && cmp.delta >= 0;
 
@@ -247,7 +247,7 @@ function MonthlyComparisonCard({ primary }: { primary: AggKpi | null }) {
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-sm">
           <TrendingUp className="h-4 w-4 text-[var(--brand-primary)]" />
-          {title} · This month vs last
+          Achievement · This month vs last
         </CardTitle>
       </CardHeader>
       <CardContent>
