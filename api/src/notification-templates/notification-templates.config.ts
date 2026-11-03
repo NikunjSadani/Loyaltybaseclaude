@@ -251,16 +251,17 @@ export function defaultConfig(clientId: string): NotificationTemplatesConfig {
   const events = {} as Record<EventKey, EventChannelConfig>;
   for (const key of EVENT_KEYS) {
     const whatsappTemplate = whatsappTemplateDefault(clientId, key);
-    // Preserve today's live WhatsApp (a WHATSAPP_KYC tenant's four live events), AND default the
-    // platform-wide VOUCHER_ISSUED to WHATSAPP for EVERY tenant (its template always resolves to
-    // `voucher_code`). All other events/tenants default OFF. Actual delivery still needs a live
-    // WhatsApp number + approved template + a recipient phone, so a tenant with no WhatsApp set up
-    // stays effectively dark (the sender skips) — only the free in-app bell fires there.
-    const mode: NotificationMode =
-      ((kycConfigured && WHATSAPP_DEFAULT_ON_EVENTS.has(key)) || key === 'VOUCHER_ISSUED') &&
-      whatsappTemplate
-        ? 'WHATSAPP'
-        : 'OFF';
+    // Preserve today's live WhatsApp (a WHATSAPP_KYC tenant's four live events) at mode WHATSAPP, AND
+    // default the platform-wide VOUCHER_ISSUED to BOTH for EVERY tenant (owner 2026-11-03) — the voucher
+    // code is a transactional message that should reach the member on every available channel. Its
+    // template always resolves to `voucher_code`. All other events/tenants default OFF. Delivery still
+    // needs the channel set up: the WhatsApp leg fires once a live number + approved template + recipient
+    // phone exist (VOUCHER_ISSUED is exempt from the WhatsApp master), while the SMS leg stays gated on
+    // masterSms + a DLT-approved smsTemplateId (both OFF/empty by default) — so BOTH sends only WhatsApp
+    // until SMS is configured. A tenant with nothing set up stays dark except the free in-app bell.
+    let mode: NotificationMode = 'OFF';
+    if (key === 'VOUCHER_ISSUED' && whatsappTemplate) mode = 'BOTH';
+    else if (kycConfigured && WHATSAPP_DEFAULT_ON_EVENTS.has(key) && whatsappTemplate) mode = 'WHATSAPP';
     events[key] = {
       mode,
       whatsappTemplate,

@@ -88,6 +88,15 @@ describe('NotificationTemplatesService', () => {
       expect(cfg.events.KYC_SUBMITTED.mode).toBe('OFF');
       expect(cfg.events.KYC_APPROVED.mode).toBe('OFF');
     });
+
+    it('VOUCHER_ISSUED defaults to BOTH for EVERY tenant (transactional voucher code → both channels) with the voucher_code template', async () => {
+      mockPrisma.programSetting.findUnique.mockResolvedValue(null);
+      for (const t of ['deoleo', 'bajaj', 'acme']) {
+        const cfg = await service.getConfig(t);
+        expect(cfg.events.VOUCHER_ISSUED.mode).toBe('BOTH');
+        expect(cfg.events.VOUCHER_ISSUED.whatsappTemplate).toBe('voucher_code');
+      }
+    });
   });
 
   // ── DB-over-default merge ───────────────────────────────────────────────────
