@@ -38,4 +38,14 @@ describe('normalizeFeatures', () => {
     expect(f.walletModule).toBe(DEFAULT_FEATURES.walletModule);
     expect(f.partnerApp.showLeaderboard).toBe(DEFAULT_FEATURES.partnerApp.showLeaderboard);
   });
+
+  it('carries the captureBankAtRedemption flag, defaulting OFF', () => {
+    // JOB A: default OFF everywhere → Deoleo + all tenants byte-identical until enabled.
+    expect(DEFAULT_FEATURES.captureBankAtRedemption).toBe(false);
+    expect(normalizeFeatures({}).captureBankAtRedemption).toBe(false);
+    // A tenant (e.g. Bajaj) that turns it on via the console reads back true.
+    expect(normalizeFeatures({ captureBankAtRedemption: true }).captureBankAtRedemption).toBe(true);
+    // Non-boolean junk falls back to the default (OFF).
+    expect(normalizeFeatures({ captureBankAtRedemption: 'yes' }).captureBankAtRedemption).toBe(false);
+  });
 });

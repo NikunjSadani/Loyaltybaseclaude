@@ -63,6 +63,13 @@ export interface FeatureFlags {
   // "{remaining} {unit} to go" banner in the target hero, and adds a this-month-vs-last-month primary-KPI
   // card. Bajaj trade partner UI. This IS a gifsy-console toggle (included in FeatureKey). Default OFF; Deoleo stays OFF.
   partnerDashboardV2: boolean;
+  // Capture bank/UPI payout details in-flow at redemption: when ON, a wholesaler with no
+  // beneficiary on file (or NEEDS_RECAPTURE) is shown a capture sheet (same form/rules as KYC)
+  // at the Redeem → Cash dead-end, and those details stay hidden from Store Information until a
+  // payout on them completes (paymentDetailsStatus VERIFIED). Bajaj-only. This IS a gifsy-console
+  // toggle (included in FeatureKey). Default OFF; Deoleo stays OFF. See
+  // platform/docs/plans/PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md.
+  captureBankAtRedemption: boolean;
 
   // Partner app tab visibility (CLIENT_ADMIN cannot change these)
   partnerApp: {

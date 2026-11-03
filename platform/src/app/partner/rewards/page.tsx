@@ -1,11 +1,12 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   Gift, Search, CheckCircle,
   Shield, Package, Truck, Zap, Heart,
   Banknote, CreditCard, Tag,
   AlertCircle, Phone,
+  Upload, FileText, Loader2, X,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
@@ -20,6 +21,8 @@ import { api } from '@/lib/api-client';
 import { usePartnerIdentity } from '@/lib/partner-identity';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { useTenantFeatures } from '@/lib/tenant-features';
+import { BankOrUpiSection, type PaymentMode } from '@/components/bank-or-upi-section';
+import { pinnedPaymentMode, type OutletPaymentType } from '@/lib/payment-type';
 
 /* ─── Partner cash beneficiary (from GET /api/auth/me) ─────────────────────────
    The partner's real, on-file KYC payout details + the tenant conversionRate.
@@ -995,6 +998,236 @@ function CashPayoutSheet({
   );
 }
 
+/* ─── Inline payout-details capture sheet (feature `captureBankAtRedemption`) ───
+   Replaces the Cash-Payout dead-end for a wholesaler with no beneficiary on file
+   (or whose details are NEEDS_RECAPTURE after a failed payout). Reuses the SAME
+   capture component + rules as KYC (BankOrUpiSection + lib/payment-type) rather
+   than reinventing: bank↔UPI toggle gated by the tenant `salesApp.upiEnabled` and
+   the outlet's payout MANDATE (requiredPaymentType → pinnedPaymentMode); UPI is
+   QR-scan-only; a cancelled cheque is REQUIRED in bank mode and HIDDEN in UPI mode.
+
+   Write-before-confirm: on submit the details persist to the ChannelPartner
+   (UNVERIFIED) via POST /api/partner/payout-details, then the parent re-fetches
+   /api/auth/me so `partnerHasBeneficiary` flips true and the partner proceeds into
+   the EXISTING CashPayoutSheet (amount → OTP → confirm), which is unchanged.
+
+   Both POSTs are same-origin, so the edge proxy injects `x-active-partner-id` from
+   the httpOnly `active_partner_id` cookie exactly as the redeem calls on this page
+   do (the FE never sets that header — the proxy strips any inbound value). */
+function PayoutCaptureSheet({
+  requiredPaymentType,
+  onCaptured,
+}: {
+  /** The active outlet's payout mandate (BANK/UPI/ANY). Absent ⇒ 'ANY' (partner chooses). */
+  requiredPaymentType: OutletPaymentType;
+  /** Called after a successful save — the parent re-fetches /api/auth/me to refresh the beneficiary. */
+  onCaptured: () => void | Promise<void>;
+}) {
+  // Tenant UPI gate — same source BankOrUpiSection reads. UPI off ⇒ bank-only.
+  const upiEnabled = getGifsySettings().salesApp?.upiEnabled === true;
+  // The one mode the outlet mandate PINS (rep/partner can't change), or undefined when free.
+  const lockedMode = pinnedPaymentMode(requiredPaymentType, upiEnabled) ?? undefined;
+
+  const [paymentMode,       setPaymentMode]       = useState<PaymentMode>(lockedMode ?? 'bank');
+  const [bankName,          setBankName]          = useState('');
+  const [accountHolderName, setAccountHolderName] = useState('');
+  const [accountNumber,     setAccountNumber]     = useState('');
+  const [ifscCode,          setIfscCode]          = useState('');
+  const [upiId,             setUpiId]             = useState('');
+  const [chequeFile,        setChequeFile]        = useState<File | null>(null);
+  const [chequeFileKey,     setChequeFileKey]     = useState<string | null>(null);
+  const [uploadingCheque,   setUploadingCheque]   = useState(false);
+  const [submitting,        setSubmitting]        = useState(false);
+  const [error,             setError]             = useState('');
+  const chequeInputRef = useRef<HTMLInputElement>(null);
+
+  // Effective mode mirrors BankOrUpiSection: a mandate pin wins; else tenant-gated bank/upi.
+  const effectiveMode: PaymentMode = lockedMode ?? (upiEnabled ? paymentMode : 'bank');
+
+  const onFieldChange =
+    (field: 'bankName' | 'accountHolderName' | 'accountNumber' | 'ifscCode') =>
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      // Uppercase-normalize IFSC as typed (mirrors the KYC wizard) so the submitted value
+      // matches what uniqueness/validation see on the backend.
+      const v = field === 'ifscCode' ? e.target.value.toUpperCase() : e.target.value;
+      if (field === 'bankName')          setBankName(v);
+      else if (field === 'accountHolderName') setAccountHolderName(v);
+      else if (field === 'accountNumber')     setAccountNumber(v);
+      else                                     setIfscCode(v);
+    };
+
+  // Cheque upload — POST /api/partner/documents (multipart `file` + documentType), returns
+  // {fileKey,fileUrl}. Raw fetch (NOT api.post) so the browser sets the multipart boundary;
+  // same-origin ⇒ the proxy injects x-active-partner-id from the cookie.
+  const handleChequeSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setChequeFile(file);
+    setChequeFileKey(null);
+    setUploadingCheque(true);
+    setError('');
+    try {
+      const fd = new FormData();
+      fd.append('file', file, file.name);
+      fd.append('documentType', 'CANCELLED_CHEQUE');
+      const res = await fetch('/api/partner/documents', { method: 'POST', body: fd });
+      const body = await res.json().catch(() => ({} as Record<string, unknown>));
+      // Tolerate both the {success,data:{…}} envelope and a bare {fileKey,fileUrl} body.
+      const data = ((body as { data?: unknown }).data ?? body) as { fileKey?: string };
+      if (!res.ok || (body as { success?: boolean }).success === false || !data?.fileKey) {
+        const msg = (body as { error?: string; message?: string }).error
+          ?? (body as { message?: string }).message
+          ?? 'Could not upload the cheque — please try again';
+        throw new Error(msg);
+      }
+      setChequeFileKey(data.fileKey);
+    } catch (err) {
+      setChequeFile(null);
+      setError(err instanceof Error ? err.message : 'Could not upload the cheque — please try again');
+    } finally {
+      setUploadingCheque(false);
+    }
+  };
+
+  const clearCheque = () => {
+    setChequeFile(null);
+    setChequeFileKey(null);
+    if (chequeInputRef.current) chequeInputRef.current.value = '';
+  };
+
+  const handleSubmit = async () => {
+    setError('');
+    if (effectiveMode === 'bank') {
+      if (!bankName.trim() || !accountHolderName.trim() || !accountNumber.trim() || !ifscCode.trim()) {
+        setError('Please fill in all bank fields'); return;
+      }
+      if (!chequeFileKey) {
+        setError('Please upload a cancelled cheque'); return;
+      }
+    } else if (!upiId) {
+      setError('Please scan your UPI QR code to continue'); return;
+    }
+
+    setSubmitting(true);
+    const payload =
+      effectiveMode === 'bank'
+        ? {
+            paymentMode: 'bank' as const,
+            bankName:          bankName.trim(),
+            accountHolderName: accountHolderName.trim(),
+            accountNumber:     accountNumber.trim(),
+            ifscCode:          ifscCode.trim(),
+            chequeFileKey,
+          }
+        : { paymentMode: 'upi' as const, upiId };
+    const result = await api.post('/api/partner/payout-details', payload);
+    setSubmitting(false);
+    if (!result.success) {
+      // Surface the backend message inline (missing field, or a uniqueness collision like
+      // "This bank account is already registered to another outlet…").
+      setError(result.error || 'Could not save your payout details — please try again');
+      return;
+    }
+    await onCaptured();
+  };
+
+  return (
+    <div
+      data-testid="payout-capture-sheet"
+      className="bg-white border border-gray-200 rounded-xl px-4 py-4 space-y-4"
+    >
+      <div>
+        <p className="text-sm font-semibold text-gray-900">Add payout details</p>
+        <p className="text-xs text-gray-500 mt-0.5">
+          Enter where you&apos;d like your cash payout sent. We&apos;ll use these the same way your KYC
+          bank/UPI details are used.
+        </p>
+      </div>
+
+      <BankOrUpiSection
+        paymentMode={paymentMode}
+        onPaymentModeChange={setPaymentMode}
+        lockedMode={lockedMode}
+        bankName={bankName}
+        accountHolderName={accountHolderName}
+        accountNumber={accountNumber}
+        ifscCode={ifscCode}
+        onFieldChange={onFieldChange}
+        upiId={upiId}
+        onUpiChange={setUpiId}
+      >
+        {/* Cancelled-cheque upload — rendered only in bank mode (BankOrUpiSection gates children
+            to bank mode, mirroring KYC). File-picker (camera-or-gallery), NOT a forced live camera. */}
+        <div>
+          <label className="text-xs font-medium text-gray-600 block mb-1">
+            Cancelled Cheque <span className="text-[var(--brand-primary)]">*</span>
+          </label>
+          <input
+            ref={chequeInputRef}
+            data-testid="payout-cheque-input"
+            type="file"
+            accept="image/*,application/pdf"
+            className="hidden"
+            onChange={handleChequeSelect}
+          />
+          {chequeFile && chequeFileKey ? (
+            <div className="flex items-center gap-3 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5">
+              <FileText className="h-4 w-4 text-gray-500 shrink-0" />
+              <p className="flex-1 min-w-0 text-xs text-gray-700 truncate">{chequeFile.name}</p>
+              <button
+                type="button"
+                onClick={clearCheque}
+                className="shrink-0 p-1 rounded-full text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors"
+                title="Remove and re-upload"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => chequeInputRef.current?.click()}
+              disabled={uploadingCheque}
+              className="w-full border-2 border-dashed border-gray-200 rounded-xl px-3 py-3 flex items-center justify-center gap-2 text-sm font-medium text-gray-500 hover:bg-gray-50 active:scale-[0.99] transition disabled:opacity-50"
+            >
+              {uploadingCheque ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" /> Uploading…
+                </>
+              ) : (
+                <>
+                  <Upload className="h-4 w-4" /> Upload cancelled cheque
+                </>
+              )}
+            </button>
+          )}
+          <p className="text-[11px] text-gray-400 mt-1">
+            PDF or image · Max 5 MB. Used to verify your bank account before payout.
+          </p>
+        </div>
+      </BankOrUpiSection>
+
+      {error && (
+        <p data-testid="payout-capture-error" className="text-xs text-red-600 flex items-start gap-1.5">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          {error}
+        </p>
+      )}
+
+      <Button
+        variant="primary"
+        className="w-full"
+        data-testid="payout-capture-submit"
+        loading={submitting}
+        disabled={uploadingCheque}
+        onClick={handleSubmit}
+      >
+        Save &amp; continue
+      </Button>
+    </div>
+  );
+}
+
 /* ─── Main Page ───────────────────────────────────────────────────────────── */
 
 type MainTab = 'catalogue' | 'vouchers' | 'bank';
@@ -1026,11 +1259,65 @@ export default function RewardsPage() {
   // The member's real name (from /api/auth/me) — seeds the physical-gift "Recipient name"
   // so the vendor can address the parcel (never the gift brand). See GiftDetailSheet.
   const [memberName,     setMemberName]     = useState('');
+  // Payout-details status (captureBankAtRedemption). VERIFIED (default) / UNVERIFIED /
+  // NEEDS_RECAPTURE — NEEDS_RECAPTURE re-prompts the capture sheet even when stale beneficiary
+  // fields exist. Null until /api/auth/me resolves (absent ⇒ treated as not NEEDS_RECAPTURE).
+  const [paymentDetailsStatus, setPaymentDetailsStatus] = useState<string | null>(null);
+  // The active outlet's payout MANDATE (requiredPaymentType). Honored by the capture sheet via
+  // pinnedPaymentMode (same as sales/kyc/new). Absent on the payload ⇒ 'ANY' (partner chooses,
+  // subject to the tenant UPI gate); the backend re-validates the chosen mode regardless.
+  const [requiredPaymentType, setRequiredPaymentType] = useState<OutletPaymentType>('ANY');
   const settings = getGifsySettings();
   // Per-tenant catalogueMrpSlash flag (DB-backed, authenticated) — drives the struck-through MRP
   // "list price". Defaults OFF while loading / for every tenant not opted-in (Deoleo stays OFF →
   // byte-identical). Same hook the sales dashboard uses for rlpBscView (there with /api/sales/me).
   const { features: tenantFeatures } = useTenantFeatures('/api/partner/me');
+
+  // Real beneficiary + conversionRate + payout status for the cash-payout flow, from
+  // /api/auth/me. No hardcoded bank/UPI literals — these come straight from the KYC record.
+  // Extracted so the inline payout-capture sheet can RE-FETCH after a successful save (so
+  // `partnerHasBeneficiary` flips true and the partner proceeds into the existing CashPayoutSheet).
+  const refreshBeneficiary = useCallback(async () => {
+    const result = await api.get<{
+      conversionRate?: number;
+      user?: {
+        name?: string | null;
+        phone?: string | null;
+        channelPartner?: {
+          bankName?: string | null;
+          bankAccountNumber?: string | null;
+          bankAccountHolder?: string | null;
+          ifscCode?: string | null;
+          upiId?: string | null;
+          paymentMode?: string | null;
+          // captureBankAtRedemption additions on the channelPartner payload.
+          paymentDetailsStatus?: string | null;
+          requiredPaymentType?: OutletPaymentType | null;
+        } | null;
+      };
+    }>('/api/auth/me');
+    if (!result.success || !result.data) return;
+    const cp = result.data.user?.channelPartner;
+    // Real registered mobile (for the physical-gift delivery address) — no demo literal.
+    if (result.data.user?.phone) setMobile(result.data.user.phone);
+    // Real member name — seeds the editable "Recipient name" on the delivery form.
+    if (result.data.user?.name) setMemberName(result.data.user.name);
+    if (cp) {
+      setBeneficiary({
+        bankName:          cp.bankName ?? null,
+        bankAccountNumber: cp.bankAccountNumber ?? null,
+        bankAccountHolder: cp.bankAccountHolder ?? null,
+        ifscCode:          cp.ifscCode ?? null,
+        upiId:             cp.upiId ?? null,
+        paymentMode:       cp.paymentMode ?? null,
+      });
+      setPaymentDetailsStatus(cp.paymentDetailsStatus ?? null);
+      if (cp.requiredPaymentType) setRequiredPaymentType(cp.requiredPaymentType);
+    }
+    if (typeof result.data.conversionRate === 'number') {
+      setConversionRate(result.data.conversionRate);
+    }
+  }, []);
 
   useEffect(() => {
     // Live catalogue only — no localStorage / GIFT_CATALOGUE fallback.
@@ -1057,46 +1344,9 @@ export default function RewardsPage() {
         }
       });
 
-    // Real beneficiary + conversionRate for the cash-payout flow.
-    // No hardcoded bank/UPI literals — these come straight from the KYC record.
-    api.get<{
-      conversionRate?: number;
-      user?: {
-        name?: string | null;
-        phone?: string | null;
-        channelPartner?: {
-          bankName?: string | null;
-          bankAccountNumber?: string | null;
-          bankAccountHolder?: string | null;
-          ifscCode?: string | null;
-          upiId?: string | null;
-          paymentMode?: string | null;
-        } | null;
-      };
-    }>('/api/auth/me')
-      .then((result) => {
-        if (!result.success || !result.data) return;
-        const cp = result.data.user?.channelPartner;
-        // Real registered mobile (for the physical-gift delivery address) — no demo literal.
-        if (result.data.user?.phone) setMobile(result.data.user.phone);
-        // Real member name — seeds the editable "Recipient name" on the delivery form.
-        if (result.data.user?.name) setMemberName(result.data.user.name);
-        if (cp) {
-          setBeneficiary({
-            bankName:          cp.bankName ?? null,
-            bankAccountNumber: cp.bankAccountNumber ?? null,
-            bankAccountHolder: cp.bankAccountHolder ?? null,
-            ifscCode:          cp.ifscCode ?? null,
-            upiId:             cp.upiId ?? null,
-            paymentMode:       cp.paymentMode ?? null,
-          });
-        }
-        if (typeof result.data.conversionRate === 'number') {
-          setConversionRate(result.data.conversionRate);
-        }
-      });
-      // Failure simply leaves beneficiary null → the cash tab shows the KYC empty-state.
-  }, []);
+    // Failure simply leaves beneficiary null → the cash tab shows the KYC empty-state.
+    void refreshBeneficiary();
+  }, [refreshBeneficiary]);
 
   // NOTE: the loyalty-OFF gate (the "Rewards not available" wall) is applied AFTER all
   // hooks below, next to the loading-spinner return — returning early HERE would skip the
@@ -1133,6 +1383,13 @@ export default function RewardsPage() {
   // floor so the ₹-min is never below the configured minimum.
   const cashMinPoints = cashItem?.minRedemptionPoints ?? 1;
   const partnerHasBeneficiary = hasBeneficiary(beneficiary);
+  // captureBankAtRedemption: only when the per-tenant flag is ON do we replace the Cash-Payout
+  // dead-end with the inline capture sheet — for a partner with NO beneficiary on file OR whose
+  // details are NEEDS_RECAPTURE (a prior payout on them failed). Flag OFF / absent ⇒ false ⇒ the
+  // existing dead-end card is byte-identical (Deoleo + every non-opted tenant unchanged).
+  const showPayoutCapture =
+    tenantFeatures.captureBankAtRedemption &&
+    (!partnerHasBeneficiary || paymentDetailsStatus === 'NEEDS_RECAPTURE');
 
   const categories = useMemo(() => {
     const cats = Array.from(new Set(physicalItems.map(g => g.category)));
@@ -1297,7 +1554,14 @@ export default function RewardsPage() {
             </p>
           </div>
 
-          {!partnerHasBeneficiary ? (
+          {showPayoutCapture ? (
+            /* captureBankAtRedemption ON + (no beneficiary OR NEEDS_RECAPTURE): capture bank/UPI
+               in-flow (reusing the KYC form/rules), then proceed into the existing CashPayoutSheet. */
+            <PayoutCaptureSheet
+              requiredPaymentType={requiredPaymentType}
+              onCaptured={refreshBeneficiary}
+            />
+          ) : !partnerHasBeneficiary ? (
             /* No bank or UPI on file — mirror the backend guard; hide the form. */
             <div
               data-testid="cash-no-beneficiary"

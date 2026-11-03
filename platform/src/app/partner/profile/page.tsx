@@ -36,6 +36,13 @@ interface ProfileData {
     ifscCode: string | null;
     upiId: string | null;
   };
+  /**
+   * JOB B (PAYMENT-DETAILS-AT-REDEMPTION): payout-details verification state. 'VERIFIED' (the
+   * default for every existing/KYC-captured record) → show the Payment Details card. Anything else
+   * (UNVERIFIED redemption-captured-but-unpaid, NEEDS_RECAPTURE) → the beneficiary exists on the raw
+   * record (the rewards flow still uses it) but is NOT shown here until a payout confirms it.
+   */
+  paymentDetailsStatus: string;
 }
 
 /* ─── Config ─────────────────────────────────────────────────────────────────── */
@@ -97,6 +104,7 @@ export default function ProfilePage() {
           bankAccountNumber?: string | null;
           ifscCode?:          string | null;
           upiId?:             string | null;
+          paymentDetailsStatus?: string | null;
           wallets?: Array<{ redeemablePoints?: number; lockedPoints?: number }>;
         } | null;
       };
@@ -128,6 +136,8 @@ export default function ProfilePage() {
               ifscCode:      cp?.ifscCode          ?? null,
               upiId:         cp?.upiId             ?? null,
             },
+            // Default VERIFIED so an older record / Deoleo (no status, or always VERIFIED) shows.
+            paymentDetailsStatus: cp?.paymentDetailsStatus ?? 'VERIFIED',
           });
         } else {
           setError('Could not load your profile. Please try again.');
@@ -189,6 +199,10 @@ export default function ProfilePage() {
   const { bankName, accountNumber, ifscCode, upiId } = profile.bank;
   const hasBank = Boolean(bankName || accountNumber || ifscCode);
   const hasPaymentDetails = hasBank || Boolean(upiId);
+  // JOB B: show the beneficiary only once it is VERIFIED (a payout on it has completed). Details
+  // captured in-flow at redemption are UNVERIFIED until paid, so they stay hidden here even though
+  // the rewards flow uses the raw fields. Default VERIFIED → existing records + Deoleo unchanged.
+  const payoutVerified = profile.paymentDetailsStatus === 'VERIFIED';
 
   return (
     <div className="space-y-5 fade-in">
@@ -314,7 +328,11 @@ export default function ProfilePage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {hasPaymentDetails ? (
+          {!payoutVerified ? (
+            <p data-testid="payment-pending-verification" className="text-sm text-gray-500 py-1">
+              Payment details are pending verification. They will appear here once your first payout is processed.
+            </p>
+          ) : hasPaymentDetails ? (
             <div className="space-y-2">
               {hasBank && (
                 <>

@@ -51,6 +51,7 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     rlpBscView: false,
     catalogueMrpSlash: false,
     partnerDashboardV2: false,
+    captureBankAtRedemption: false,
     partnerApp: {
       showSchemes: true,
       showInvoices: false,
