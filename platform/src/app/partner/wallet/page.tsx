@@ -197,8 +197,10 @@ function PayoutSummary({ payouts }: { payouts: PayoutLedgerEntry[] }) {
 
   return (
     <div data-testid="payout-summary" className="rounded-2xl p-5 text-white" style={{ background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)' }}>
-      <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Lifetime Payout Received</p>
-      <p className="text-3xl font-extrabold mt-1 mb-4 tracking-tight">{fmtInr(lifetimePaid)}</p>
+      <div className="flex items-baseline justify-between gap-3 mb-4">
+        <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Lifetime Payout</p>
+        <p className="text-3xl font-extrabold tracking-tight">{fmtInr(lifetimePaid)}</p>
+      </div>
       <div className="bg-white/10 rounded-xl px-4 py-3 flex items-center justify-between">
         <div>
           <p className="text-[10px] text-slate-400 font-medium">Last Month Payout</p>
