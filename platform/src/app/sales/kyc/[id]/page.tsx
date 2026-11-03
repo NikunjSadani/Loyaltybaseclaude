@@ -29,6 +29,7 @@ import { pct, pctBg, pctBarColor, getPrimaryParam } from '@/lib/targets';
 import { istMonthKey } from '@/lib/ist-date';
 import { fetchTargetTrend, type TargetTrendResult } from '@/lib/sales-trend';
 import { TargetTrendChart } from '@/components/target-trend-chart';
+import { OutletTrendComparisonCard } from '@/components/sales/OutletTrendComparisonCard';
 import { RejectionModal } from './RejectionModal';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -1803,8 +1804,12 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           view, for this outlet + current month. Self-hides when there are no targets. */}
       {kyc.outletCode && <TargetAchievementCard outletCode={kyc.outletCode} />}
 
-      {/* Historical 6-month Target-vs-Achievement trend for this outlet (platform-wide; KPI filter). */}
-      {kyc.outletCode && <OutletTrendCard outletCode={kyc.outletCode} />}
+      {/* Historical Target-vs-Achievement trend for this outlet. Bajaj gets a text "Trend
+          Comparison" card (single-outlet, 3-bucket); every other tenant keeps the 6-month graph.
+          Both self-hide together with the per-month Target Achievement card (no targets → null). */}
+      {kyc.outletCode && (isBajajSlug(slug)
+        ? <OutletTrendComparisonCard outletCode={kyc.outletCode} />
+        : <OutletTrendCard outletCode={kyc.outletCode} />)}
 
       {/* ─── Partner + Document + Bank details (collapsible for all, default closed) ── */}
       <div className="rounded-xl border border-gray-200 overflow-hidden">
