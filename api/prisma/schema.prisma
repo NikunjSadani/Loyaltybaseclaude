@@ -105,6 +105,15 @@ enum OutletPaymentType {
   ANY
 }
 
+// Trust state of a ChannelPartner's bank/UPI payout details (capture-bank-at-redemption).
+// Gates whether the details show in Store Information. See
+// docs/plans/PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md.
+enum PaymentDetailsStatus {
+  VERIFIED // operator/KYC-captured OR confirmed by a completed payout → SHOWN (default)
+  UNVERIFIED // self-captured at redemption, no completed payout yet → HIDDEN
+  NEEDS_RECAPTURE // a payout on these details FAILED → HIDDEN + re-prompt next redemption
+}
+
 enum KycDocumentType {
   AADHAAR_FRONT
   AADHAAR_BACK
@@ -880,6 +889,14 @@ model ChannelPartner {
   ifscCode            String?
   upiId               String?
   paymentMode         String? // 'bank' | 'upi'
+  // ── Payout-detail trust (capture-bank-at-redemption, docs/plans/PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md) ──
+  // VERIFIED (default) = operator/KYC-captured OR payout-confirmed → shown in Store Info. Only the
+  // redemption self-capture path writes UNVERIFIED; a PAID redemption payout flips it to VERIFIED
+  // (and stamps bankVerifiedAt), a FAILED one → NEEDS_RECAPTURE. Default VERIFIED keeps every
+  // existing row + all of Deoleo unchanged. The KYC submit path NEVER writes UNVERIFIED.
+  paymentDetailsStatus PaymentDetailsStatus @default(VERIFIED)
+  bankVerifiedAt       DateTime?
+  payoutChequeFileKey  String? // redemption-captured cancelled cheque (GCS key kyc/<clientId>/…)
   totalEarnedPoints   Int                  @default(0)
   referredBy          String?
   isActive            Boolean              @default(true)
