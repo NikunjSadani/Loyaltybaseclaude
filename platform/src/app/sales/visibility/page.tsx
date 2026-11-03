@@ -20,7 +20,7 @@
 
 import React, { Suspense, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { useSearchParams } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   ArrowLeft, Camera, CheckCircle, Clock, Eye, AlertTriangle, XCircle, Loader2, Search,
 } from 'lucide-react';
@@ -102,6 +102,7 @@ function FilterPill({
 function SalesVisibilityContent() {
   const settings = useGifsySettings();
   const captureMode = settings.visibilityCaptureMode ?? 'PHOTO_APPROVAL';
+  const router = useRouter();
   const searchParams = useSearchParams();
   const preselectId = searchParams.get('outletId');
 
@@ -379,7 +380,17 @@ function SalesVisibilityContent() {
         <VisibilityCaptureSheet
           outlet={activeOutlet}
           onCaptured={(outletId, next) => setCaptured((prev) => ({ ...prev, [outletId]: next }))}
-          onClose={() => setActiveOutletId(null)}
+          onClose={() => {
+            // When this sheet was opened via the outlet-detail deep-link (?outletId=), return the
+            // rep to that OUTLET DETAIL on close (after capture OR dismiss) instead of dropping them
+            // onto the visibility LIST — they came FROM the outlet screen. A list-initiated capture
+            // (activeOutletId set by a list tap, so != preselectId) closes back to the list as before.
+            const returnOutletId = activeOutletId;
+            setActiveOutletId(null);
+            if (returnOutletId && returnOutletId === preselectId) {
+              router.push(`/sales/kyc/${returnOutletId}`);
+            }
+          }}
         />
       )}
     </div>

@@ -21,8 +21,16 @@ vi.mock('@/lib/gifsy-settings', () => ({
   useGifsySettings: () => mockSettings,
 }));
 
+// Hoisted so the vi.mock factory (itself hoisted) can reference them. `searchState.outletId`
+// drives the ?outletId= deep-link; `mockPush` is the router spy for the return-to-outlet nav.
+const { mockPush, searchState } = vi.hoisted(() => ({
+  mockPush: vi.fn(),
+  searchState: { outletId: '' },
+}));
 vi.mock('next/navigation', () => ({
-  useSearchParams: () => new URLSearchParams(''),
+  useSearchParams: () =>
+    new URLSearchParams(searchState.outletId ? `outletId=${searchState.outletId}` : ''),
+  useRouter: () => ({ push: mockPush, replace: vi.fn(), back: vi.fn() }),
 }));
 vi.mock('next/link', () => ({
   default: ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) => (
@@ -35,6 +43,7 @@ vi.mock('@/lib/visibility', () => ({
   visibilityApi: {
     getSalesEligible: () => getSalesEligible(),
     getForm: vi.fn(),
+    getSalesForm: vi.fn(),
     submitCapture: vi.fn(),
     resubmitCapture: vi.fn(),
     getOutletStatus: vi.fn(),
@@ -44,6 +53,7 @@ vi.mock('@/lib/visibility', () => ({
 }));
 
 import SalesVisibilityPage from '../page';
+import { visibilityApi } from '@/lib/visibility';
 
 const RESP: SalesEligibleResponse = {
   windowKey: '2026-07-P1',
@@ -65,6 +75,8 @@ const RESP: SalesEligibleResponse = {
 beforeEach(() => {
   mockSettings = { visibilityEnabled: true, visibilityCaptureMode: 'PHOTO_APPROVAL' };
   getSalesEligible.mockReset();
+  mockPush.mockReset();
+  searchState.outletId = '';
 });
 
 describe('VIS — Sales Visibility list', () => {
@@ -122,5 +134,21 @@ describe('VIS — Sales Visibility list', () => {
     render(<SalesVisibilityPage />);
     const badge = await screen.findByTestId('visibility-due-badge');
     expect(badge).toHaveTextContent('1 due');
+  });
+
+  it('VIS5: a deep-linked (?outletId=) capture returns to the outlet detail on close', async () => {
+    searchState.outletId = 'o-due';
+    getSalesEligible.mockResolvedValue({ success: true, data: RESP });
+    // The sheet loads a form on open; a null form resolves to the harmless "no form configured"
+    // state that still renders the sheet shell (incl. the Close button) — all this nav test needs.
+    (visibilityApi.getSalesForm as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      data: null,
+    });
+    render(<SalesVisibilityPage />);
+    // The preselect effect auto-opens the capture sheet for the deep-linked actionable outlet.
+    const closeBtn = await screen.findByLabelText('Close');
+    fireEvent.click(closeBtn);
+    expect(mockPush).toHaveBeenCalledWith('/sales/kyc/o-due');
   });
 });
