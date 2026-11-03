@@ -219,3 +219,17 @@ next `claude` session (a fresh settings.json isn't loaded mid-session).
 - **Separate hardening (owner's call, NOT in this fix):** `createBatch`/`confirmBatch` trust the
   client `awardType` within safety caps; defense-in-depth = re-resolve the award server-side from
   `field.outletTypeAwards[outlet.outletType.code]` instead of trusting the DTO.
+
+## 9. Capture bank/UPI at redemption — per-tenant flag (Bajaj-first) — BUILT + DUAL-AUDITED (2026-11-03)
+- **What:** a wholesaler with no payout details captures bank/UPI **in-flow** when redeeming points
+  for cash (reusing the KYC validator + `bank-or-upi-section`), stored **UNVERIFIED** and hidden from
+  Store Info until a **redemption payout (PayoutTransaction) is PAID** → VERIFIED (FAILED → re-capture).
+- **Flag:** `clients.features.captureBankAtRedemption` (default OFF, console-toggleable). Deoleo &
+  all others untouched; additive schema `ChannelPartner.paymentDetailsStatus @default(VERIFIED)` +
+  `bankVerifiedAt` + `payoutChequeFileKey` (migration `20261103120000_add_payment_details_status`).
+- **Uniqueness:** Bajaj `uniquenessPolicy.bank+upi` already ON (verified 2026-11-02, 0 dups); capture
+  runs `checkGroupUniqueness`.
+- **Status:** ✅ Built, full gates green (api jest 3807 · nest 0 · FE vitest 2874 · tsc 0), dual
+  adversarial audit (money + identity) → all confirmed findings fixed. ▶ push to `develop` → migration
+  via in-VPC job → enable Bajaj flag on staging → owner runtime UAT. Source of truth:
+  `platform/docs/plans/PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md`. ⚠️ **PLATFORM-WIDE** (owner-approved).

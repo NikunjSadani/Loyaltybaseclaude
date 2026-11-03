@@ -198,7 +198,26 @@ Mirror `hubbleVoucherEnabled` (a `clients.features` `FeatureKey`):
 - **D4 Sales-assisted redemption** (`confirmRedeemForOutlet`) — reps already capture via KYC; the
   self-service capture sheet is partner-only for now. *rec: out of scope this iteration.*
 
-## 14. File touch-list (from the surface maps)
+## 14. Audit hardening (dual adversarial audit, 2026-11-03)
+
+A dual audit (money + identity/privacy) ran after the build; all confirmed findings were fixed:
+
+- **Capture guard (HIGH):** `capturePayoutDetails` now rejects when a beneficiary is already on file
+  unless status is `NEEDS_RECAPTURE` — mirrors the FE gate server-side so a direct POST can't wipe a
+  VERIFIED rail (which the credits bank-file reads live) or re-capture mid-payout.
+- **Verify-stamp (MED):** the PAID stamp promotes `{UNVERIFIED, NEEDS_RECAPTURE}` **and** snapshot-matches
+  the paid rail (`upiId` or `bankAccountNumber`+`ifscCode`) so a never-paid, re-captured rail can't ride
+  a payout on old details into VERIFIED, and a real payment clears a prior `NEEDS_RECAPTURE`.
+- **Missed emitter (MED):** `sales.service.buildOutlets` (re-KYC prefill) and `resolveGroupIdentity`
+  (grouped-child prefill) now blank the payout fields when the source is not VERIFIED, so a self-captured
+  unpaid rail never leaks into a rep's KYC form.
+- **Upload flag-gate (LOW):** `POST /v1/partner/documents` is now gated on `captureBankAtRedemption` too.
+- **Cheque-key hardening (LOW):** `chequeFileKey` is rejected if it contains `..` (path traversal), in
+  addition to the `kyc/<clientId>/` prefix check.
+- **Accepted (no fix):** `/auth/me` returns the raw bank/UPI (the redeem flow needs them) + the status,
+  and the partner's OWN profile hides them on the FE — the partner's own data, not a cross-tenant leak.
+
+## 15. File touch-list (from the surface maps)
 - Schema/BE: `api/prisma/schema.prisma`, new migration, `prisma/seed.ts`+`bootstrap.ts` sweep;
   `api/src/partner/partner.service.ts` + `partner.controller.ts` (new routes); `api/src/payouts/payouts.service.ts` (stamp);
   `api/src/common/partner-group.helper.ts` + `payment-type.helper.ts` (reuse); display emitters in
