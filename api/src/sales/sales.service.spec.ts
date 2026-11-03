@@ -26,7 +26,7 @@ const mockPrisma = {
   outletTarget: { findFirst: jest.fn(), findMany: jest.fn() },
   outletSalesRecord: { findFirst: jest.fn(), findMany: jest.fn() },
   kpiDef: { findMany: jest.fn() },
-  salesHierarchyLevel: { findFirst: jest.fn() },
+  salesHierarchyLevel: { findFirst: jest.fn(), findMany: jest.fn() },
   // Used by resolveGroupPan (owner-group PAN resolution) for the KYC pre-fill in buildOutlets.
   channelPartner: { findUnique: jest.fn(), findFirst: jest.fn() },
   outlet: { findFirst: jest.fn(), findMany: jest.fn() },
@@ -1666,12 +1666,16 @@ describe('SalesService', () => {
 
     it('(a) getLeaderboard achievementPct/activeOutlets count ONLY the approved+active outlet', async () => {
       // Inline wiring (the getLeaderboard describe's `wire` helper is out of scope here):
-      // caller lookup → population/edges → ZNM level → assignments → kpiDef → curr/prev reads.
+      // caller lookup → population/edges → ZNM level → levels → assignments → kpiDef → curr/prev reads.
+      // The caller's immediate manager rm1 (a higher level) must be present so the ancestor
+      // walk resolves a tab; scope = that manager's id selects it.
       mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' });
       mockPrisma.salesUser.findMany.mockResolvedValue([
         { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+        { id: 'rm1', userId: 'user-rm1', reportingToId: null, hierarchyLevelId: 'L2', region: 'North', zone: null, isActive: true, user: { name: 'RM One' } },
       ]);
       mockPrisma.salesHierarchyLevel.findFirst.mockResolvedValue(null);
+      mockPrisma.salesHierarchyLevel.findMany.mockResolvedValue([]);
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
         { salesUserId: 'su-me', outlet: { outletCode: 'OA', isActive: true } },
         { salesUserId: 'su-me', outlet: { outletCode: 'OP', isActive: false } },
@@ -1683,7 +1687,7 @@ describe('SalesService', () => {
       mockPrisma.outletSalesRecord.findMany
         .mockResolvedValueOnce(ACH)
         .mockResolvedValueOnce([]);
-      const res = await service.getLeaderboard(caller, 'rm', '2026-06');
+      const res = await service.getLeaderboard(caller, 'rm1', '2026-06');
       expect(res.entries).toHaveLength(1);
       // pct = 70/100 (OA only); OP's 100 target + 10 ach are excluded.
       expect(res.entries[0].achievementPct).toBe(70);
@@ -1807,11 +1811,14 @@ describe('SalesService', () => {
       prevTargets?: unknown[];
       prevAch?: unknown[];
       znmLevel?: unknown;
+      levels?: unknown[];
     }) => {
       mockPrisma.salesUser.findFirst.mockResolvedValue(opts.caller);
       mockPrisma.salesUser.findMany.mockResolvedValue(opts.users ?? []);
       // ZNM hierarchy level (territory proxy); default null = no ZNM level → region/zone fallback.
       mockPrisma.salesHierarchyLevel.findFirst.mockResolvedValue(opts.znmLevel ?? null);
+      // Hierarchy levels (id→name) for the tab-label fallback + the national-head tab name.
+      mockPrisma.salesHierarchyLevel.findMany.mockResolvedValue(opts.levels ?? []);
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue(opts.assignments ?? []);
       mockPrisma.kpiDef.findMany.mockResolvedValue(opts.kpis ?? []);
       // curr month read first, then prev month read.
@@ -1825,41 +1832,163 @@ describe('SalesService', () => {
 
     const PRIMARY = [{ code: 'SALES', isPrimary: true }];
 
+    // Shared row builder for a sales user in the population/edge set.
+    const su = (
+      id: string,
+      userId: string,
+      reportingToId: string | null,
+      name: string,
+      level = 'L1',
+      extra: Record<string, unknown> = {},
+    ) => ({
+      id, userId, reportingToId, hierarchyLevelId: level,
+      region: 'North', zone: null, isActive: true, user: { name }, ...extra,
+    });
+
+    // ── TABS = the caller's reporting chain, up to MAX_LEADERBOARD_LEVELS (3). ──────────────────
+    it('tabs = the caller\'s ancestor chain (names), capped at 3, selectedTabId defaults to the immediate manager', async () => {
+      // caller L1 → sm1 L2 → zh1 L3 → nsm1 L4 → ceo L5. The walk collects 3 ancestors (sm1,zh1,nsm1);
+      // ceo is beyond the cap and must NOT appear. All managers present so the chain resolves.
+      wire({
+        caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'sm1', hierarchyLevelId: 'L1', region: 'North' },
+        users: [
+          su('su-me', 'user-mgr', 'sm1',  'Me',      'L1'),
+          su('sm1',   'user-sm1', 'zh1',  'SM One',  'L2'),
+          su('zh1',   'user-zh1', 'nsm1', 'ZH One',  'L3'),
+          su('nsm1',  'user-nsm', 'ceo',  'NSM One', 'L4'),
+          su('ceo',   'user-ceo', null,   'CEO',     'L5'),
+        ],
+        kpis: PRIMARY,
+      });
+      // No scope passed → selectedTabId defaults to the immediate manager (tabs[0]).
+      const res = await service.getLeaderboard(caller, undefined, '2026-06');
+      expect(res.tabs).toEqual([
+        { id: 'sm1',  name: 'SM One' },
+        { id: 'zh1',  name: 'ZH One' },
+        { id: 'nsm1', name: 'NSM One' },
+      ]);
+      expect(res.selectedTabId).toBe('sm1');
+    });
+
+    it('tab label falls back to the hierarchy-level name when the ancestor\'s name is blank', async () => {
+      wire({
+        caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'sm1', hierarchyLevelId: 'L1', region: 'North' },
+        users: [
+          su('su-me', 'user-mgr', 'sm1', 'Me', 'L1'),
+          // blank name → label resolves from the level-name map.
+          su('sm1',   'user-sm1', null, '   ', 'L2'),
+        ],
+        levels: [{ id: 'L2', name: 'Sales Manager' }],
+        kpis: PRIMARY,
+      });
+      const res = await service.getLeaderboard(caller, 'sm1', '2026-06');
+      expect(res.tabs).toEqual([{ id: 'sm1', name: 'Sales Manager' }]);
+    });
+
+    // ── COHORT = the selected ancestor's sub-tree at the caller's level, widening up the chain. ──
+    it('cohort = the selected ancestor\'s sub-tree at the caller\'s level, and widens up the chain', async () => {
+      // caller L1 → sm1 L2 → zh1 L3. A peer under sm1, and a cousin under sm2 (also under zh1).
+      const users = [
+        su('su-me',     'user-mgr', 'sm1', 'Me',     'L1'),
+        su('su-peer',   'user-p',   'sm1', 'Peer',   'L1'),
+        su('su-cousin', 'user-cz',  'sm2', 'Cousin', 'L1'),
+        su('sm1',       'user-sm1', 'zh1', 'SM One', 'L2'),
+        su('sm2',       'user-sm2', 'zh1', 'SM Two', 'L2'),
+        su('zh1',       'user-zh1', null,  'ZH One', 'L3'),
+      ];
+      const callerSu = { id: 'su-me', userId: 'user-mgr', reportingToId: 'sm1', hierarchyLevelId: 'L1', region: 'North' };
+
+      // Immediate-manager tab (sm1) → only sm1's L1 downline: Me + Peer.
+      wire({ caller: callerSu, users, kpis: PRIMARY });
+      const atSm1 = await service.getLeaderboard(caller, 'sm1', '2026-06');
+      expect(atSm1.selectedTabId).toBe('sm1');
+      expect(atSm1.entries.map((e) => e.name).sort()).toEqual(['Me', 'Peer']);
+
+      // Grand-manager tab (zh1) → the whole zh1 L1 downline: Me + Peer + Cousin.
+      wire({ caller: callerSu, users, kpis: PRIMARY });
+      const atZh1 = await service.getLeaderboard(caller, 'zh1', '2026-06');
+      expect(atZh1.selectedTabId).toBe('zh1');
+      expect(atZh1.entries.map((e) => e.name).sort()).toEqual(['Cousin', 'Me', 'Peer']);
+    });
+
+    // ── NATIONAL HEAD: no manager → a single 'national' tab, cohort = all same-level peers. ──────
+    it('a national head (no manager) gets a single \'national\' tab named after their level', async () => {
+      wire({
+        caller: { id: 'su-head', userId: 'user-mgr', reportingToId: null, hierarchyLevelId: 'L4', region: 'North' },
+        users: [
+          su('su-head', 'user-mgr',  null,        'Me',       'L4'),
+          // another L4 head under a DIFFERENT (absent) parent → still in the national cohort (level-wide).
+          su('su-peer', 'user-p',    'other-ceo', 'PeerHead', 'L4'),
+          // a lower-level user → excluded (not the caller's level).
+          su('su-low',  'user-l',    'su-head',   'Low',      'L1'),
+        ],
+        levels: [{ id: 'L4', name: 'National Sales Manager' }],
+        kpis: PRIMARY,
+      });
+      const res = await service.getLeaderboard(caller, undefined, '2026-06');
+      expect(res.tabs).toEqual([{ id: 'national', name: 'National Sales Manager' }]);
+      expect(res.selectedTabId).toBe('national');
+      expect(res.entries.map((e) => e.name).sort()).toEqual(['Me', 'PeerHead']);
+    });
+
+    // ── SECURITY: a forged/foreign scope id can never rank the caller outside their own chain. ───
+    it('a forged/foreign scope id falls back to the immediate-manager tab (security boundary)', async () => {
+      const users = [
+        su('su-me',     'user-mgr', 'sm1', 'Me',     'L1'),
+        su('su-peer',   'user-p',   'sm1', 'Peer',   'L1'),
+        su('su-cousin', 'user-cz',  'sm2', 'Cousin', 'L1'),
+        su('sm1',       'user-sm1', 'zh1', 'SM One', 'L2'),
+        su('sm2',       'user-sm2', 'zh1', 'SM Two', 'L2'),
+        su('zh1',       'user-zh1', null,  'ZH One', 'L3'),
+      ];
+      wire({
+        caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'sm1', hierarchyLevelId: 'L1', region: 'North' },
+        users,
+        kpis: PRIMARY,
+      });
+      // sm2 is a REAL ancestor id in the tenant but NOT one of the caller's tabs → must not be honoured.
+      const res = await service.getLeaderboard(caller, 'sm2', '2026-06');
+      expect(res.selectedTabId).toBe('sm1'); // tabs[0] = immediate manager
+      // Cohort = sm1's downline only (Me + Peer) — Cousin (under sm2) must NOT leak in.
+      expect(res.entries.map((e) => e.name).sort()).toEqual(['Me', 'Peer']);
+    });
+
+    it('no caller → { tabs: [], selectedTabId: \'\', entries: [] }', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      const res = await service.getLeaderboard(caller, 'sm1');
+      expect(res).toEqual({ tabs: [], selectedTabId: '', entries: [] });
+      // Never loads the population.
+      expect(mockPrisma.salesUser.findMany).not.toHaveBeenCalled();
+    });
+
     it('territory = the ZNM ancestor name (zone proxy); falls back to region when no ZNM', async () => {
       const usersWithZnm = [
-        { id: 'su-me', userId: 'user-mgr', reportingToId: 'znm-1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
-        // The ZNM ancestor (different level — NOT in the population, but used for the walk-up).
-        { id: 'znm-1', userId: 'user-znm', reportingToId: null, hierarchyLevelId: 'LZ', region: null, zone: null, isActive: true, user: { name: 'North Zone Mgr' } },
+        su('su-me', 'user-mgr', 'znm-1', 'Me', 'L1'),
+        // The ZNM ancestor (different level — the caller's immediate manager AND the ZNM node for the walk-up).
+        su('znm-1', 'user-znm', null, 'North Zone Mgr', 'LZ', { region: null }),
       ];
       const callerSu = { id: 'su-me', userId: 'user-mgr', reportingToId: 'znm-1', hierarchyLevelId: 'L1', region: 'North' };
 
       // With a ZNM level configured → territory walks up to the ZNM's name.
       wire({ caller: callerSu, users: usersWithZnm, znmLevel: { id: 'LZ' }, kpis: PRIMARY });
-      const withZnm = await service.getLeaderboard(caller, 'national', '2026-06');
+      const withZnm = await service.getLeaderboard(caller, 'znm-1', '2026-06');
       expect(withZnm.entries.find((e) => e.name === 'Me')!.territory).toBe('North Zone Mgr');
 
       // No ZNM level → falls back to the rep's own region.
       wire({ caller: callerSu, users: usersWithZnm, znmLevel: null, kpis: PRIMARY });
-      const noZnm = await service.getLeaderboard(caller, 'national', '2026-06');
+      const noZnm = await service.getLeaderboard(caller, 'znm-1', '2026-06');
       expect(noZnm.entries.find((e) => e.name === 'Me')!.territory).toBe('North');
     });
 
-    it('(g) returns {entries:[]} when the caller is not a sales user', async () => {
-      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
-      const res = await service.getLeaderboard(caller, 'rm');
-      expect(res).toEqual({ entries: [] });
-      // Never loads the population.
-      expect(mockPrisma.salesUser.findMany).not.toHaveBeenCalled();
-    });
-
     it('(a) ranks by achievementPct desc; (e) isMe set on the caller', async () => {
-      // Three same-level peers under the same RM. su-me 50%, su-b 90%, su-c 0%.
+      // Three same-level peers under the same manager rm1. su-me 50%, su-b 90%, su-c 0%.
       wire({
         caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
         users: [
-          { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
-          { id: 'su-b',  userId: 'user-b',   reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Bravo' } },
-          { id: 'su-c',  userId: 'user-c',   reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Charlie' } },
+          su('su-me', 'user-mgr', 'rm1', 'Me',      'L1'),
+          su('su-b',  'user-b',   'rm1', 'Bravo',   'L1'),
+          su('su-c',  'user-c',   'rm1', 'Charlie', 'L1'),
+          su('rm1',   'user-rm1', null,  'RM One',  'L2'),
         ],
         assignments: [
           { salesUserId: 'su-me', outlet: { outletCode: 'OM', isActive: true } },
@@ -1879,7 +2008,7 @@ describe('SalesService', () => {
         ],
       });
 
-      const res = await service.getLeaderboard(caller, 'rm', '2026-06');
+      const res = await service.getLeaderboard(caller, 'rm1', '2026-06');
       expect(res.entries.map((e) => [e.name, e.achievementPct])).toEqual([
         ['Bravo', 90],
         ['Me', 50],
@@ -1889,54 +2018,19 @@ describe('SalesService', () => {
       expect(res.entries.find((e) => e.name === 'Bravo')!.isMe).toBe(false);
     });
 
-    it('(b) rm scope returns only same-reportingTo peers incl. the caller', async () => {
-      wire({
-        caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
-        users: [
-          { id: 'su-me',    userId: 'user-mgr', reportingToId: 'rm1',   hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
-          { id: 'su-peer',  userId: 'user-p',   reportingToId: 'rm1',   hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Peer' } },
-          // different RM → excluded for rm scope even though same level
-          { id: 'su-other', userId: 'user-o',   reportingToId: 'rm2',   hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Other' } },
-        ],
-        kpis: PRIMARY,
-      });
-
-      const res = await service.getLeaderboard(caller, 'rm', '2026-06');
-      const names = res.entries.map((e) => e.name).sort();
-      expect(names).toEqual(['Me', 'Peer']);
-    });
-
-    it('(c) state filters by region+level; national by level only', async () => {
-      const users = [
-        { id: 'su-me',  userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
-        { id: 'su-n',   userId: 'user-n',   reportingToId: 'rm2', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'NorthPeer' } },
-        { id: 'su-s',   userId: 'user-s',   reportingToId: 'rm3', hierarchyLevelId: 'L1', region: 'South', zone: null, isActive: true, user: { name: 'SouthPeer' } },
-        // different level → never in any scope
-        { id: 'su-lvl', userId: 'user-l',   reportingToId: 'rm2', hierarchyLevelId: 'L2', region: 'North', zone: null, isActive: true, user: { name: 'OtherLevel' } },
-      ];
-      const callerSu = { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' };
-
-      wire({ caller: callerSu, users, kpis: PRIMARY });
-      const stateRes = await service.getLeaderboard(caller, 'state', '2026-06');
-      expect(stateRes.entries.map((e) => e.name).sort()).toEqual(['Me', 'NorthPeer']);
-
-      wire({ caller: callerSu, users, kpis: PRIMARY });
-      const natRes = await service.getLeaderboard(caller, 'national', '2026-06');
-      expect(natRes.entries.map((e) => e.name).sort()).toEqual(['Me', 'NorthPeer', 'SouthPeer']);
-    });
-
     it('(d) achievementPct = 0 when the subtree target sum is 0 (no div-by-zero)', async () => {
       wire({
         caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
         users: [
-          { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+          su('su-me', 'user-mgr', 'rm1', 'Me',     'L1'),
+          su('rm1',   'user-rm1', null,  'RM One', 'L2'),
         ],
         assignments: [{ salesUserId: 'su-me', outlet: { outletCode: 'OM', isActive: true } }],
         kpis: PRIMARY,
         currTargets: [], // no target rows → target sum 0
         currAch: [{ outletCode: 'OM', kpiValues: { SALES: 500 } }],
       });
-      const res = await service.getLeaderboard(caller, 'rm', '2026-06');
+      const res = await service.getLeaderboard(caller, 'rm1', '2026-06');
       expect(res.entries).toHaveLength(1);
       expect(res.entries[0].achievementPct).toBe(0);
       expect(Number.isFinite(res.entries[0].achievementPct)).toBe(true);
@@ -1950,8 +2044,9 @@ describe('SalesService', () => {
       wire({
         caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
         users: [
-          { id: 'su-me',   userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
-          { id: 'su-peer', userId: 'user-p',   reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Peer' } },
+          su('su-me',   'user-mgr', 'rm1', 'Me',     'L1'),
+          su('su-peer', 'user-p',   'rm1', 'Peer',   'L1'),
+          su('rm1',     'user-rm1', null,  'RM One', 'L2'),
         ],
         assignments: [
           { salesUserId: 'su-me',   outlet: { outletCode: 'OM', isActive: true } },
@@ -1975,7 +2070,7 @@ describe('SalesService', () => {
           { outletCode: 'OP', kpiValues: { SALES: 80 } },
         ],
       });
-      const res = await service.getLeaderboard(caller, 'rm', '2026-06');
+      const res = await service.getLeaderboard(caller, 'rm1', '2026-06');
       const me = res.entries.find((e) => e.name === 'Me')!;
       const peer = res.entries.find((e) => e.name === 'Peer')!;
       expect(me.change).toBe(1);
@@ -1985,7 +2080,8 @@ describe('SalesService', () => {
       wire({
         caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
         users: [
-          { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+          su('su-me', 'user-mgr', 'rm1', 'Me',     'L1'),
+          su('rm1',   'user-rm1', null,  'RM One', 'L2'),
         ],
         assignments: [{ salesUserId: 'su-me', outlet: { outletCode: 'OM', isActive: true } }],
         kpis: PRIMARY,
@@ -1994,7 +2090,7 @@ describe('SalesService', () => {
         prevTargets: [], // no prior-month target data
         prevAch: [],
       });
-      const res2 = await service.getLeaderboard(caller, 'rm', '2026-06');
+      const res2 = await service.getLeaderboard(caller, 'rm1', '2026-06');
       expect(res2.entries[0].change).toBe(0);
     });
 
@@ -2004,9 +2100,10 @@ describe('SalesService', () => {
       wire({
         caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
         users: [
-          { id: 'su-me',  userId: 'user-mgr', reportingToId: 'rm1',   hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+          su('su-me',  'user-mgr', 'rm1',   'Me',     'L1'),
           // subordinate is a DIFFERENT level — not in the population, but rolls into su-me's subtree
-          { id: 'su-sub', userId: 'user-s',   reportingToId: 'su-me', hierarchyLevelId: 'L2', region: 'North', zone: null, isActive: true, user: { name: 'Sub' } },
+          su('su-sub', 'user-s',   'su-me', 'Sub',    'L2'),
+          su('rm1',    'user-rm1', null,    'RM One', 'L2'),
         ],
         assignments: [
           { salesUserId: 'su-me',  outlet: { outletCode: 'OM', isActive: true } },
@@ -2022,7 +2119,7 @@ describe('SalesService', () => {
           { outletCode: 'OS', kpiValues: { SALES: 120 } },
         ],
       });
-      const res = await service.getLeaderboard(caller, 'rm', '2026-06');
+      const res = await service.getLeaderboard(caller, 'rm1', '2026-06');
       // only su-me is at L1 → single entry, subtree-aggregated
       expect(res.entries).toHaveLength(1);
       expect(res.entries[0].achievementPct).toBe(100); // (80+120)/(100+100)
@@ -2035,11 +2132,12 @@ describe('SalesService', () => {
       wire({
         caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
         users: [
-          { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+          su('su-me', 'user-mgr', 'rm1', 'Me',     'L1'),
+          su('rm1',   'user-rm1', null,  'RM One', 'L2'),
         ],
         kpis: PRIMARY,
       });
-      await service.getLeaderboard(caller, 'national', '2026-06');
+      await service.getLeaderboard(caller, 'rm1', '2026-06');
 
       // caller lookup tenant-scoped
       expect(mockPrisma.salesUser.findFirst.mock.calls[0][0].where).toMatchObject({
@@ -2048,6 +2146,10 @@ describe('SalesService', () => {
       // population/edges tenant-scoped
       expect(mockPrisma.salesUser.findMany.mock.calls[0][0].where).toEqual({
         user: { clientId: 'deoleo' }, deletedAt: null,
+      });
+      // the level-name lookup is tenant-scoped
+      expect(mockPrisma.salesHierarchyLevel.findMany.mock.calls[0][0].where).toMatchObject({
+        clientId: 'deoleo',
       });
       // both month target reads tenant-scoped
       for (const call of mockPrisma.outletTarget.findMany.mock.calls) {
@@ -2062,26 +2164,13 @@ describe('SalesService', () => {
       wire({
         caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
         users: [
-          { id: 'su-me',   userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true,  user: { name: 'Me' } },
-          { id: 'su-dead', userId: 'user-d',   reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: false, user: { name: 'Inactive' } },
+          su('su-me',   'user-mgr', 'rm1', 'Me',       'L1'),
+          su('su-dead', 'user-d',   'rm1', 'Inactive', 'L1', { isActive: false }),
+          su('rm1',     'user-rm1', null,  'RM One',   'L2'),
         ],
         kpis: PRIMARY,
       });
-      const res = await service.getLeaderboard(caller, 'rm', '2026-06');
-      expect(res.entries.map((e) => e.name)).toEqual(['Me']);
-    });
-
-    it('defaults an unknown scope to rm', async () => {
-      wire({
-        caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
-        users: [
-          { id: 'su-me',    userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
-          { id: 'su-other', userId: 'user-o',   reportingToId: 'rm2', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Other' } },
-        ],
-        kpis: PRIMARY,
-      });
-      const res = await service.getLeaderboard(caller, 'bogus' as string, '2026-06');
-      // rm behaviour: only same-reportingTo peers
+      const res = await service.getLeaderboard(caller, 'rm1', '2026-06');
       expect(res.entries.map((e) => e.name)).toEqual(['Me']);
     });
   });

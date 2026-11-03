@@ -42,6 +42,9 @@ const NOT_PARKED_OUTLET = {
  * already sorted best-first; the FE assigns rank by array order.
  */
 export interface SalesEntry {
+  /** Opaque, stable per-row key (the peer's login user id) — the FE keys the rankings list on this
+   *  so identically-named peers in a large cohort can't collide on a React key. Not displayed. */
+  userId: string;
   name: string;
   territory: string;
   achievementPct: number;
@@ -51,8 +54,20 @@ export interface SalesEntry {
   isMe?: boolean;
 }
 
-/** Scopes that widen the same-level peer net for the leaderboard. */
-type LeaderboardScope = 'rm' | 'state' | 'national';
+/** One leaderboard tab = an ancestor manager up the caller's reporting chain (or the national-head
+ * sentinel). The cohort ranked under a tab is the caller's SAME-LEVEL peers within that ancestor's
+ * sub-tree. See docs/plans/HIERARCHY-LEADERBOARD-DESIGN.md. */
+export interface LeaderboardTab {
+  id: string; // the ancestor's SalesUser id, or 'national' for a top-of-chain caller
+  name: string; // the ancestor's name (fallback: their hierarchy-level name)
+}
+export interface LeaderboardResult {
+  tabs: LeaderboardTab[];
+  selectedTabId: string;
+  entries: SalesEntry[];
+}
+const NATIONAL_LEADERBOARD_TAB = 'national';
+const MAX_LEADERBOARD_LEVELS = 3;
 
 /**
  * One in-scope outlet, as rolled up from a sales user's assignments for the team-view /
@@ -1718,19 +1733,15 @@ export class SalesService {
    */
   async getLeaderboard(
     user: JwtPayload,
-    scope: string = 'rm',
+    scope?: string, // the SELECTED tab id (an ancestor SalesUser id, or 'national'); resolved below
     period?: string,
-  ): Promise<{ entries: SalesEntry[] }> {
+  ): Promise<LeaderboardResult> {
     // ── 1. Resolve the caller's own SalesUser (tenant-scoped). ─────────────────
     const caller = await this.prisma.salesUser.findFirst({
       where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
       select: { id: true, userId: true, reportingToId: true, hierarchyLevelId: true, region: true },
     });
-    if (!caller) return { entries: [] };
-
-    // ── 2. Validate scope; default 'rm' on anything else. ─────────────────────
-    const validScope: LeaderboardScope =
-      scope === 'state' || scope === 'national' || scope === 'rm' ? scope : 'rm';
+    if (!caller) return { tabs: [], selectedTabId: '', entries: [] };
 
     // Sanitise the user-supplied period: only a well-formed YYYY-MM (months 01-12)
     // is honoured; anything else falls back to the current month. Prevents a garbage
@@ -1782,15 +1793,57 @@ export class SalesService {
       return '';
     };
 
-    // Population: active, at the caller's level, narrowed by scope.
-    const population = allUsers.filter((u) => {
-      if (!u.isActive) return false;
-      if (u.hierarchyLevelId !== caller.hierarchyLevelId) return false;
-      if (validScope === 'rm') return u.reportingToId === caller.reportingToId;
-      if (validScope === 'state') return u.region === caller.region;
-      return true; // national — same level, whole tenant
+    // ── TABS: the caller's reporting chain, up to MAX_LEADERBOARD_LEVELS managers up. Each tab ranks
+    //    the caller's SAME-LEVEL peers within that ancestor's sub-tree. A caller with NO manager
+    //    (top of the chain) gets a single nationwide tab of their own-level peers. Tab labels are the
+    //    ancestor's name, falling back to their hierarchy-level name when the name is blank. ───────
+    const levels = await this.prisma.salesHierarchyLevel.findMany({
+      where: { clientId: user.clientId },
+      select: { id: true, name: true },
     });
-    if (population.length === 0) return { entries: [] };
+    const levelNameById = new Map(levels.map((l) => [l.id, l.name]));
+
+    const ancestors: LeaderboardTab[] = [];
+    {
+      // Walk UP reportingToId from the caller, up to MAX_LEADERBOARD_LEVELS. A `seen` set breaks on a
+      // cyclic reporting chain (parity with isSelfOrDescendant/firstActiveApproverId); the hop cap is a
+      // belt-and-braces second bound.
+      const seen = new Set<string>();
+      let curId: string | null = caller.reportingToId;
+      for (let hops = 0; curId && ancestors.length < MAX_LEADERBOARD_LEVELS && hops <= allUsers.length; hops++) {
+        if (seen.has(curId)) break;
+        seen.add(curId);
+        const a = usersById.get(curId);
+        if (!a) break;
+        ancestors.push({
+          id: a.id,
+          name: a.user.name?.trim() || levelNameById.get(a.hierarchyLevelId) || 'Manager',
+        });
+        curId = a.reportingToId;
+      }
+    }
+    const tabs: LeaderboardTab[] =
+      ancestors.length > 0
+        ? ancestors
+        : [{ id: NATIONAL_LEADERBOARD_TAB, name: levelNameById.get(caller.hierarchyLevelId) || 'National' }];
+    // Resolve the selected tab: the ?scope= id only if it names one of the CALLER'S OWN tabs (so a
+    // forged id can never rank outside the caller's chain); else default to the first (immediate mgr).
+    const selectedTabId = tabs.some((t) => t.id === scope) ? (scope as string) : tabs[0].id;
+
+    // Population: active, at the caller's level, WITHIN the selected ancestor's sub-tree (or the whole
+    // tenant for the national-head tab). descendantSalesUserIds walks DOWN only, so the cohort is
+    // strictly that ancestor's downline — a caller can never rank against users outside their chain.
+    const inSelectedScope: (salesUserId: string) => boolean =
+      selectedTabId === NATIONAL_LEADERBOARD_TAB
+        ? () => true
+        : ((sub) => (id: string) => sub.has(id))(descendantSalesUserIds(selectedTabId, edges));
+    const population = allUsers.filter(
+      (u) =>
+        u.isActive &&
+        u.hierarchyLevelId === caller.hierarchyLevelId &&
+        inSelectedScope(u.id),
+    );
+    if (population.length === 0) return { tabs, selectedTabId, entries: [] };
 
     // ── 4. Load active assignments once → salesUserId → [outletCode]. ─────────
     // KPI ranking counts APPROVED + ACTIVE outlets only (outlet.isActive:true —
@@ -1925,6 +1978,7 @@ export class SalesService {
       // No prior-month target data in the subtree → change = 0.
       const change = c.hadPrevTarget ? prevRankByUser.get(c.userId)! - currRank : 0;
       return {
+        userId: c.userId,
         name: c.name,
         territory: c.territory,
         achievementPct: c.achievementPct,
@@ -1934,7 +1988,7 @@ export class SalesService {
       };
     });
 
-    return { entries };
+    return { tabs, selectedTabId, entries };
   }
 
   /**

@@ -7,6 +7,7 @@ import { Spinner } from '@/components/ui/spinner';
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
 interface SalesEntry {
+  userId:         string;   // opaque stable key for the list (not displayed)
   name:           string;
   territory:      string;
   achievementPct: number;
@@ -15,15 +16,12 @@ interface SalesEntry {
   isMe?:          boolean;
 }
 
-type ScopeFilter = 'rm' | 'state' | 'national';
+interface LeaderboardTab {
+  id:   string;
+  name: string;
+}
 
-const SCOPE_LABELS: Record<ScopeFilter, string> = {
-  rm:       'Reporting Mgr',
-  state:    'State',
-  national: 'National',
-};
-
-/* (leaderboard data loaded from /api/sales/leaderboard) */
+/* (leaderboard data loaded from /api/sales/leaderboard — tabs = caller's reporting chain) */
 
 /* ─── Helpers ────────────────────────────────────────────────────────────────── */
 
@@ -58,18 +56,44 @@ function pctBg(p: number) {
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function SalesLeaderboardPage() {
-  const [scope,      setScope]     = useState<ScopeFilter>('rm');
-  const [entries,    setEntries]   = useState<SalesEntry[]>([]);
-  const [loading,    setLoading]   = useState(false);
+  // `scope` is the tab id to request. null = first load → fetch with no scope param,
+  // and the server resolves the default tab (the immediate manager).
+  const [scope,         setScope]         = useState<string | null>(null);
+  const [tabs,          setTabs]          = useState<LeaderboardTab[]>([]);
+  const [selectedTabId, setSelectedTabId] = useState<string>('');
+  const [entries,       setEntries]       = useState<SalesEntry[]>([]);
+  const [loading,       setLoading]       = useState(false);
 
   useEffect(() => {
+    // `cancelled` guards against an out-of-order response: a fast A→B tab switch fires two fetches;
+    // if A resolves after B, A's stale body must NOT overwrite B's board (the cleanup flips it).
+    let cancelled = false;
     setLoading(true);
-    fetch(`/api/sales/leaderboard?scope=${scope}`)
+    const qs = scope ? `?scope=${encodeURIComponent(scope)}` : '';
+    fetch(`/api/sales/leaderboard${qs}`)
       .then((r) => r.json())
-      .then((body) => { if (body.success) setEntries(body.data.entries ?? []); })
+      .then((body) => {
+        if (cancelled) return;
+        if (body.success) {
+          const data = body.data ?? {};
+          setTabs(data.tabs ?? []);
+          setSelectedTabId(data.selectedTabId ?? '');
+          setEntries(data.entries ?? []);
+        }
+      })
       .catch(() => {})
-      .finally(() => setLoading(false));
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [scope]);
+
+  // Clicking a tab: mark it active immediately and refetch its cohort.
+  const selectTab = (tabId: string) => {
+    setSelectedTabId(tabId);
+    setScope(tabId);
+  };
+
+  const selectedTab = tabs.find((t) => t.id === selectedTabId);
+  const scopeName   = selectedTab?.name ?? '';
 
   const ranked = useMemo(
     () => entries.map((e, i) => ({ ...e, rank: i + 1 })),
@@ -87,27 +111,29 @@ export default function SalesLeaderboardPage() {
       <div>
         <h1 className="text-2xl font-black text-gray-900 tracking-tight">Leaderboard</h1>
         <p className="text-xs font-medium text-gray-500 mt-0.5">
-          {SCOPE_LABELS[scope]} peers · {myEntry?.name ?? ''}
+          {scopeName} peers · {myEntry?.name ?? ''}
           {loading && <span className="ml-2 text-gray-300">loading…</span>}
         </p>
       </div>
 
-      {/* ── Scope filter pills ── */}
-      <div className="flex gap-2">
-        {(['rm', 'state', 'national'] as ScopeFilter[]).map((s) => (
-          <button
-            key={s}
-            onClick={() => setScope(s)}
-            className={`flex-1 py-2 rounded-xl text-xs font-semibold border transition-all ${
-              scope === s
-                ? 'bg-[#1A1A2E] text-white border-[#1A1A2E]'
-                : 'bg-white text-gray-500 border-gray-200 hover:border-gray-300'
-            }`}
-          >
-            {SCOPE_LABELS[s]}
-          </button>
-        ))}
-      </div>
+      {/* ── Scope filter pills (dynamic: caller's reporting chain, 1–3 tabs) ── */}
+      {tabs.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => selectTab(t.id)}
+              className={`flex-1 min-w-[6rem] py-2 px-2 rounded-xl text-xs font-semibold border transition-all truncate ${
+                selectedTabId === t.id
+                  ? 'bg-[#1A1A2E] text-white border-[#1A1A2E]'
+                  : 'bg-white text-gray-500 border-gray-200 hover:border-gray-300'
+              }`}
+            >
+              {t.name}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* My rank hero */}
       {myEntry ? (
@@ -144,7 +170,7 @@ export default function SalesLeaderboardPage() {
             <Users className="h-6 w-6 text-white/40" />
             <div>
               <p className="text-sm font-bold">National Overview</p>
-              <p className="text-xs text-white/50">National overview · {SCOPE_LABELS[scope]} peers</p>
+              <p className="text-xs text-white/50">National overview · {scopeName} peers</p>
             </div>
           </div>
         </div>
@@ -192,7 +218,7 @@ export default function SalesLeaderboardPage() {
             <p className="text-sm text-gray-400 text-center py-8">No leaderboard data available</p>
           )}
           {ranked.map((entry) => (
-            <div key={entry.name}
+            <div key={entry.userId}
               className={`flex items-center gap-3 px-4 py-3 ${
                 entry.isMe ? 'bg-emerald-50/60 border-l-2 border-l-[var(--brand-primary)]' : 'hover:bg-gray-50'
               }`}

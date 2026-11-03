@@ -104,9 +104,10 @@ export class SalesController {
     return this.sales.getTargetTrend(user, kpi, program, outlet, outletType);
   }
 
-  // Sales team leaderboard — ranks the caller against same-level peers (scope
-  // widens the net: rm | state | national), each scored by their own team's
-  // primary-KPI achievement. Entries come back sorted best-first.
+  // Sales team leaderboard — ranks the caller against same-level peers. `scope` is a TAB id (an
+  // ancestor manager up the caller's reporting chain, or 'national'); the response carries the
+  // caller's dynamic tabs + the selected one. Each peer is scored by their own team's primary-KPI
+  // achievement; entries come back sorted best-first. See HIERARCHY-LEADERBOARD-DESIGN.md.
   @Get('leaderboard')
   @RequirePermission('sales_org:read')
   getLeaderboard(
