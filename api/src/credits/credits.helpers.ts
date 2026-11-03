@@ -216,9 +216,62 @@ function buildIstDateOnly(
   return { date: startOfIstDay(utc) };
 }
 
-function parseSuccess(raw: string): boolean {
-  const v = String(raw).trim().toUpperCase();
-  return ['SUCCESS', '1', 'Y', 'YES', 'TRUE'].includes(v);
+export type PaymentOutcome = 'SUCCESS' | 'FAILURE' | 'INVALID';
+
+// Tokens an operator may type in the "Success/Failure" column, matched
+// case-insensitively on the trimmed cell. "PAID" is included because the UI
+// labels a paid row PAID everywhere, so an operator naturally types "Paid".
+// "P" is deliberately EXCLUDED — it is ambiguous (Paid vs Pending); a bare "P"
+// falls through to INVALID so it is flagged, never silently treated as paid.
+const SUCCESS_TOKENS = new Set([
+  'SUCCESS',
+  'PAID',
+  'YES',
+  'Y',
+  '1',
+  'TRUE',
+  'T',
+]);
+const FAILURE_TOKENS = new Set([
+  'FAILED',
+  'FAILURE',
+  'FAIL',
+  'NO',
+  'N',
+  '0',
+  'FALSE',
+  'F',
+  'REJECTED',
+  'BOUNCED',
+  'RETURNED',
+]);
+
+/**
+ * Classify the "Success/Failure" cell of a payout UTR-upload row into a 3-state
+ * outcome. Matched case-insensitively on the trimmed cell.
+ *
+ *   - SUCCESS → the operator marked the payout paid. The caller STILL requires a
+ *     valid UTR before treating the entry as PAID.
+ *   - FAILURE → the operator legitimately marked the payout failed (e.g. a bank
+ *     bounce). The caller marks the entry FAILED.
+ *   - INVALID → an unrecognized value OR a blank cell. This is NOT a failure: the
+ *     caller flags the row as an ERROR (so it is not applied and the entry stays
+ *     PROCESSING / re-uploadable) rather than silently marking it FAILED.
+ *
+ * (Replaces the old boolean `parseSuccess`, whose "anything not in the success
+ * list → failure" behaviour silently marked a row typed "Paid" as a FAILED
+ * payout — money lost from the wallet with no visible error.)
+ */
+export function classifyPaymentOutcome(
+  raw: string | number | null | undefined,
+): PaymentOutcome {
+  const v = String(raw ?? '')
+    .trim()
+    .toUpperCase();
+  if (!v) return 'INVALID';
+  if (SUCCESS_TOKENS.has(v)) return 'SUCCESS';
+  if (FAILURE_TOKENS.has(v)) return 'FAILURE';
+  return 'INVALID';
 }
 
 export interface UtrUploadRow {
@@ -226,6 +279,12 @@ export interface UtrUploadRow {
   outletId: string;
   batchId: string;
   utr: string;
+  /**
+   * Whether this row is a PAID row. Only meaningful for `status: 'OK'` (and the
+   * idempotent `'SKIP'`, which is always a prior success) — for an `'ERROR'` row
+   * (unrecognized/blank Success/Failure, missing UTR, etc.) it is NOT load-bearing
+   * and the row must not be applied.
+   */
   success: boolean;
   remarks: string;
   status: 'OK' | 'ERROR' | 'SKIP';
@@ -395,7 +454,19 @@ export function parseUtrUpload(
       errors.push(`Batch ID "${fileBatchId}" does not match expected "${downloadCode}".`);
     }
 
-    const success = parseSuccess(successRaw);
+    // 3-state classification. INVALID (unrecognized OR blank) is a clear ERROR,
+    // never a silent FAILURE — so the row is not applied and the entry stays
+    // PROCESSING / re-uploadable instead of being wrongly marked FAILED.
+    const outcome = classifyPaymentOutcome(successRaw);
+    const success = outcome === 'SUCCESS';
+
+    if (outcome === 'INVALID') {
+      errors.push(
+        successRaw
+          ? `Success/Failure value "${successRaw}" is not recognized. Use Success/Paid/Yes for a paid row, or Failed/No for a failed one.`
+          : 'Success/Failure is blank. Enter Success/Paid for a paid row, or Failed/No for a failed one.',
+      );
+    }
 
     if (success) {
       if (!utrRaw) {

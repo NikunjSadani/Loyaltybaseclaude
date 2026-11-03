@@ -12,6 +12,7 @@ import * as XLSX from 'xlsx';
 import {
   generatePayoutFileBuffer,
   parseUtrUpload,
+  classifyPaymentOutcome,
   PAYOUT_FILE_HEADERS,
   PayoutBatch,
   PayoutBatchRow,
@@ -87,5 +88,187 @@ describe('generatePayoutFileBuffer — formula-injection sanitisation (AF-5)', (
     expect(data[2]).toBe('Kumar Store'); // Outlet Name unchanged
     expect(data[4]).toBe('HDFC'); // Bank Name unchanged
     expect(data[10]).toBe('2500'); // Payout Amount (raw:false → string "2500")
+  });
+});
+
+// ─── classifyPaymentOutcome — 3-state Success/Failure classifier ───────────────
+//
+// Regression: the old boolean parseSuccess treated ANY non-success token (incl.
+// the UI's own "Paid" label and a blank cell) as a FAILURE, silently marking the
+// payout entry FAILED and clearing it from the wallet with no error. The money
+// path must now resolve to exactly one of SUCCESS / FAILURE / INVALID.
+
+describe('classifyPaymentOutcome — 3-state success/failure classifier', () => {
+  it.each([
+    'Success', 'SUCCESS', 'success',
+    'Paid', 'PAID', 'paid',
+    'Yes', 'YES', 'Y', 'y',
+    '1', 'True', 'TRUE', 'T',
+    '  Paid  ', // trimmed
+  ])('treats %j as SUCCESS', (raw) => {
+    expect(classifyPaymentOutcome(raw)).toBe('SUCCESS');
+  });
+
+  it.each([
+    'Failed', 'FAILED', 'Failure', 'FAILURE', 'Fail',
+    'No', 'NO', 'N', 'n',
+    '0', 'False', 'FALSE', 'F',
+    'Rejected', 'Bounced', 'Returned',
+  ])('treats %j as FAILURE', (raw) => {
+    expect(classifyPaymentOutcome(raw)).toBe('FAILURE');
+  });
+
+  it.each(['xyz', 'done', 'processing', 'ok', 'pending', 'paidd', 'yep', '2', 'P', 'p'])(
+    'treats the unrecognized value %j as INVALID',
+    (raw) => {
+      expect(classifyPaymentOutcome(raw)).toBe('INVALID');
+    },
+  );
+
+  it.each(['', '   ', null, undefined])(
+    'treats the blank/empty value %j as INVALID',
+    (raw) => {
+      expect(classifyPaymentOutcome(raw as string)).toBe('INVALID');
+    },
+  );
+});
+
+// ─── parseUtrUpload — Success/Failure handling end-to-end ──────────────────────
+
+const UTR_HEADERS = PAYOUT_FILE_HEADERS; // title row + these headers (row index 1)
+
+/** Build an in-memory payout xlsx the parser understands (title, headers, data). */
+function buildUtrBuffer(dataRows: (string | number)[][]): ArrayBuffer {
+  const ws = XLSX.utils.aoa_to_sheet([['Payout File Title'], UTR_HEADERS, ...dataRows]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Payout');
+  return XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+}
+
+// Column order mirrors PAYOUT_FILE_HEADERS:
+//  Batch ID, Outlet ID, Outlet Name, Phone, Bank Name, Account Number, IFSC,
+//  UPI ID, KYC Status, Deactivated, Payout Amount, UTR, Payment Date,
+//  Success/Failure, Remarks
+function dataRow(opts: {
+  batchId?: string;
+  outletId: string;
+  utr?: string;
+  successCell: string;
+  remarks?: string;
+}): (string | number)[] {
+  return [
+    opts.batchId ?? 'PD-2026-06-001',
+    opts.outletId,
+    '', '', '', '', '', '', '', '', '', // name…amount (unused by the parser)
+    opts.utr ?? '',
+    '', // Payment Date
+    opts.successCell,
+    opts.remarks ?? '',
+  ];
+}
+
+const DOWNLOAD_CODE = 'PD-2026-06-001';
+const UTR_OPTS = (batchRows: UtrBatchRow[]) => ({
+  downloadCode: DOWNLOAD_CODE,
+  batchRows,
+  knownUtrs: new Map<string, Set<string>>(),
+});
+
+describe('parseUtrUpload — Success/Failure outcome handling (payout money path)', () => {
+  const batchRows: UtrBatchRow[] = [{ outletId: 'OUT-1', utrStatus: 'PENDING' }];
+
+  it.each(['Paid', 'PAID', 'Success', 'Yes'])(
+    'a %j row with a valid UTR is OK + success (will be paid)',
+    (cell) => {
+      const buf = buildUtrBuffer([
+        dataRow({ outletId: 'OUT-1', utr: 'UTR12345678', successCell: cell }),
+      ]);
+      const res = parseUtrUpload(buf, UTR_OPTS(batchRows));
+      const r = res.rows[0];
+      expect(r.status).toBe('OK');
+      expect(r.success).toBe(true);
+      expect(r.errors).toEqual([]);
+      expect(res.canProceed).toBe(true);
+      expect(res.summary.paidCount).toBe(1);
+      expect(res.summary.failedCount).toBe(0);
+      expect(res.summary.errors).toBe(0);
+    },
+  );
+
+  it.each(['Failed', 'No', '0'])(
+    'a %j row is OK + failure (legitimately marks the entry FAILED)',
+    (cell) => {
+      const buf = buildUtrBuffer([dataRow({ outletId: 'OUT-1', successCell: cell })]);
+      const res = parseUtrUpload(buf, UTR_OPTS(batchRows));
+      const r = res.rows[0];
+      expect(r.status).toBe('OK');
+      expect(r.success).toBe(false);
+      expect(r.errors).toEqual([]);
+      expect(res.summary.failedCount).toBe(1);
+      expect(res.summary.paidCount).toBe(0);
+      expect(res.summary.errors).toBe(0);
+      // A failure row needs no UTR and still proceeds.
+      expect(res.canProceed).toBe(true);
+    },
+  );
+
+  it('an unrecognized value is an ERROR row (not applied), blocking the apply', () => {
+    const buf = buildUtrBuffer([
+      dataRow({ outletId: 'OUT-1', utr: 'UTR12345678', successCell: 'xyz' }),
+    ]);
+    const res = parseUtrUpload(buf, UTR_OPTS(batchRows));
+    const r = res.rows[0];
+    expect(r.status).toBe('ERROR');
+    expect(r.errors.join(' ')).toMatch(/not recognized/i);
+    expect(r.errors.join(' ')).toContain('xyz');
+    expect(res.hasErrors).toBe(true);
+    expect(res.canProceed).toBe(false); // blind apply blocked
+    expect(res.summary.errors).toBe(1);
+    expect(res.summary.paidCount).toBe(0);
+    expect(res.summary.failedCount).toBe(0);
+  });
+
+  it('a BLANK Success/Failure cell is an ERROR row (not a silent failure)', () => {
+    const buf = buildUtrBuffer([
+      dataRow({ outletId: 'OUT-1', utr: 'UTR12345678', successCell: '' }),
+    ]);
+    const res = parseUtrUpload(buf, UTR_OPTS(batchRows));
+    const r = res.rows[0];
+    expect(r.status).toBe('ERROR');
+    expect(r.errors.join(' ')).toMatch(/blank/i);
+    expect(res.canProceed).toBe(false);
+    expect(res.summary.errors).toBe(1);
+    expect(res.summary.failedCount).toBe(0);
+  });
+
+  it('a SUCCESS row with a blank UTR still errors ("UTR is required")', () => {
+    const buf = buildUtrBuffer([
+      dataRow({ outletId: 'OUT-1', utr: '', successCell: 'Paid' }),
+    ]);
+    const res = parseUtrUpload(buf, UTR_OPTS(batchRows));
+    const r = res.rows[0];
+    expect(r.status).toBe('ERROR');
+    expect(r.errors.join(' ')).toMatch(/UTR is required/i);
+    expect(res.canProceed).toBe(false);
+  });
+
+  it('a mixed file (paid + failed + invalid) blocks the apply on the invalid row', () => {
+    const buf = buildUtrBuffer([
+      dataRow({ outletId: 'OUT-1', utr: 'UTR11112222', successCell: 'Paid' }),
+      dataRow({ outletId: 'OUT-2', successCell: 'Failed' }),
+      dataRow({ outletId: 'OUT-3', utr: 'UTR33334444', successCell: 'processing' }),
+    ]);
+    const res = parseUtrUpload(
+      buf,
+      UTR_OPTS([
+        { outletId: 'OUT-1', utrStatus: 'PENDING' },
+        { outletId: 'OUT-2', utrStatus: 'PENDING' },
+        { outletId: 'OUT-3', utrStatus: 'PENDING' },
+      ]),
+    );
+    expect(res.summary.paidCount).toBe(1);
+    expect(res.summary.failedCount).toBe(1);
+    expect(res.summary.errors).toBe(1);
+    expect(res.canProceed).toBe(false); // one invalid row blocks the whole apply
   });
 });

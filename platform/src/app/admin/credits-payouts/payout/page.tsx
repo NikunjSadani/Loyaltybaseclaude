@@ -154,6 +154,7 @@ function PayoutPageInner() {
   const [utrResult,      setUtrResult]      = useState<UtrParseResult | null>(null);
   const [utrApplying,    setUtrApplying]    = useState(false);
   const [utrApplied,     setUtrApplied]     = useState(false);
+  const [utrApplyResult, setUtrApplyResult] = useState<{ paidCount: number; failedCount: number; skippedCount: number } | null>(null);
   const [utrMsg,         setUtrMsg]         = useState('');
   const [expandedUtr,    setExpandedUtr]    = useState(false);
 
@@ -297,6 +298,11 @@ function PayoutPageInner() {
       setUtrMsg(json.error ?? 'Failed to apply UTR results');
     } else {
       setUtrApplied(true);
+      setUtrApplyResult({
+        paidCount:    Number(json.data.paidCount)    || 0,
+        failedCount:  Number(json.data.failedCount)  || 0,
+        skippedCount: Number(json.data.skippedCount) || 0,
+      });
       setUtrMsg(`Applied: ${json.data.paidCount} paid, ${json.data.failedCount} failed, ${json.data.skippedCount} skipped.`);
       loadAll();
     }
@@ -307,6 +313,7 @@ function PayoutPageInner() {
     setUtrFile(null);
     setUtrResult(null);
     setUtrApplied(false);
+    setUtrApplyResult(null);
     setUtrMsg('');
     setExpandedUtr(false);
     if (utrFileRef.current) utrFileRef.current.value = '';
@@ -535,6 +542,23 @@ function PayoutPageInner() {
                   ))}
                 </div>
 
+                {/* Errors block the apply — prominent warning so a green summary
+                    grid can't be mistaken for "all good". No entry is changed
+                    until every row is valid (the entry stays PROCESSING). */}
+                {utrResult.summary.errors > 0 && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-3">
+                    <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-semibold text-amber-800">Upload has errors — nothing applied</p>
+                      <p className="text-xs text-amber-700 mt-0.5">
+                        {utrResult.summary.errors} row{utrResult.summary.errors === 1 ? '' : 's'} could not be read
+                        {utrResult.summary.ok > 0 ? ` (${utrResult.summary.ok} row${utrResult.summary.ok === 1 ? '' : 's'} OK)` : ''}.
+                        Fix the highlighted rows and re-upload — no payout entry is changed until every row is valid.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 {/* Row details toggle */}
                 {utrResult.rows.length > 0 && (
                   <button
@@ -612,18 +636,35 @@ function PayoutPageInner() {
               </div>
             )}
 
-            {utrApplied && (
-              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 flex items-center gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600" />
-                <div>
-                  <p className="text-sm font-semibold text-emerald-800">UTR results applied</p>
-                  <p className="text-xs text-emerald-700 mt-0.5">{utrMsg}</p>
+            {utrApplied && utrApplyResult && (() => {
+              // Amber (not green) whenever some rows were marked FAILED — a bank
+              // bounce is a real-money outcome the operator must see, never a
+              // green "success" banner. Green ONLY when every applied row paid.
+              const hasIssues = utrApplyResult.failedCount > 0;
+              return (
+                <div className={`rounded-xl p-4 flex items-center gap-3 border ${
+                  hasIssues ? 'bg-amber-50 border-amber-200' : 'bg-emerald-50 border-emerald-200'
+                }`}>
+                  {hasIssues
+                    ? <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0" />
+                    : <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0" />}
+                  <div>
+                    <p className={`text-sm font-semibold ${hasIssues ? 'text-amber-800' : 'text-emerald-800'}`}>
+                      {hasIssues ? 'Applied with issues' : 'UTR results applied'}
+                    </p>
+                    <p className={`text-xs mt-0.5 ${hasIssues ? 'text-amber-700' : 'text-emerald-700'}`}>
+                      {utrApplyResult.paidCount} paid · {utrApplyResult.failedCount} failed · {utrApplyResult.skippedCount} skipped
+                    </p>
+                  </div>
+                  <button
+                    onClick={resetUtrForm}
+                    className={`ml-auto text-xs hover:underline ${hasIssues ? 'text-amber-700' : 'text-emerald-700'}`}
+                  >
+                    Upload another
+                  </button>
                 </div>
-                <button onClick={resetUtrForm} className="ml-auto text-xs text-emerald-700 hover:underline">
-                  Upload another
-                </button>
-              </div>
-            )}
+              );
+            })()}
           </>
         )}
       </div>
