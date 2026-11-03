@@ -5,6 +5,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { resolveCreditFieldNames } from '../common/credit-field-name.helper';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
+import { istMonthBounds } from '../common/ist-date';
 import { AdjustType, AdjustWalletDto, ListTransactionsQueryDto } from './dto/wallet.dto';
 
 /**
@@ -426,6 +427,64 @@ export class WalletService {
     }
 
     return this.loadPassbook(active.partnerId, user.clientId, q);
+  }
+
+  /**
+   * GET /v1/wallet/points-credited?month=YYYY-MM — total points CREDITED (earned) to the caller's
+   * ACTIVE partner wallet during the IST calendar month `monthKey`.
+   *
+   * WHY a dedicated aggregate (not the passbook): /wallet/transactions is PAGINATED (page 1,
+   * limit 20, newest-first). For an active wholesaler with months of credits + a daily expiry
+   * sweep, last month's earn credit sits far past page 1, so summing the first page would under-
+   * report (often to 0). This sums server-side over the WHOLE month window via a DB aggregate, so
+   * it is correct at any scale and never fetches more than one row's worth of data to the client.
+   *
+   * WHAT counts as "credited": the genuine EARN credits — CREDIT_POINTS_EARNED, CREDIT_BONUS and
+   * CREDIT_ADJUSTMENT (the credit types that bump lifetimeEarned per the wallet invariant above).
+   * CREDIT_REVERSAL is EXCLUDED: it re-credits redeemable points from a reversed redemption but is
+   * NOT new earning, so it must not inflate a "reward credited last month" figure.
+   *
+   * Tenant- + partner-scoped via the same login-picker access boundary as the passbook. Returns
+   * { month, points } with points 0 when the caller has no operable partner / no wallet / no
+   * credits in that month. Additive read-only — no existing behaviour changes.
+   */
+  async pointsCreditedInMonth(user: JwtPayload, monthKey: string, requestedPartnerId?: string) {
+    if (!/^\d{4}-\d{2}$/.test(monthKey ?? '')) {
+      throw new BadRequestException('month must be a YYYY-MM value');
+    }
+
+    const active = await resolveActivePartnerId(this.prisma, {
+      clientId: user.clientId,
+      userSub: user.sub,
+      phone: user.phone,
+      requestedPartnerId,
+    });
+    if (active.forbidden) throw new ForbiddenException('You cannot act on that outlet.');
+    if (!active.partnerId) return { month: monthKey, points: 0 };
+
+    const wallet = await this.prisma.wallet.findFirst({
+      where: { partnerId: active.partnerId },
+      select: { id: true },
+    });
+    if (!wallet) return { month: monthKey, points: 0 };
+
+    const { start, endExclusive } = istMonthBounds(monthKey);
+    const agg = await this.prisma.walletTransaction.aggregate({
+      _sum: { points: true },
+      where: {
+        walletId: wallet.id,
+        transactionType: {
+          in: [
+            WalletTransactionType.CREDIT_POINTS_EARNED,
+            WalletTransactionType.CREDIT_BONUS,
+            WalletTransactionType.CREDIT_ADJUSTMENT,
+          ],
+        },
+        createdAt: { gte: start, lt: endExclusive },
+      },
+    });
+
+    return { month: monthKey, points: agg._sum.points ?? 0 };
   }
 
   // ─── GIFSY-only admin: wallet BY OUTLET ─────────────────────────────────────

@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 import {
   TrendingUp, Gift, Wallet, Target,
   HeadphonesIcon,
-  ChevronRight, X, Megaphone, ArrowRight, Sparkles,
+  ChevronRight, X, Megaphone, ArrowRight, Sparkles, Calendar,
 } from 'lucide-react';
 import Link from 'next/link';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
@@ -19,6 +19,7 @@ import {
 } from '@/lib/banner';
 import { formatPoints } from '@/lib/utils';
 import { formatInrCompact, isInrUnit } from '@/lib/format-inr';
+import type { PayoutLedgerEntry } from '@/types';
 import { buildCasesToGoMsg, classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import type { OutletType } from '@/lib/partner-session';
@@ -26,7 +27,7 @@ import { pct, currentPeriod } from '@/lib/targets';
 import { loadPortalSchemes, statusOf } from '@/app/partner/schemes/portal-api';
 import { formatLastUpdated, getLastSalesUploadDate } from '@/lib/sales-upload-utils';
 import { authHeader } from '@/lib/api-client';
-import { istDateKey } from '@/lib/ist-date';
+import { istDateKey, istMonthKey } from '@/lib/ist-date';
 import { usePartnerIdentity } from '@/lib/partner-identity';
 
 /* ─── Real-data model ────────────────────────────────────────────────────────
@@ -279,6 +280,198 @@ function MonthlyComparisonCard({ primary }: { primary: AggKpi | null }) {
               )}
             </span>
           )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/* ─── Last-month summary (partnerDashboardV2) ─────────────────────────────────
+   ONE "Last Month" card: last CALENDAR month's target-vs-achievement for the PRIMARY
+   KPI (reusing the SAME trend series the comparison card/chart use — GET
+   /api/partner/targets/trend) + the reward CREDITED during last month. The
+   points-vs-payout choice reuses the EXACT presence signals that already drive the
+   wallet page's PointsSummary/PayoutSummary (identity.hasPointsActivity /
+   hasPayoutActivity, from GET /partner/me) — never a new/invented flag. v2-only so
+   Deoleo (flag OFF) renders byte-identically.
+
+   "Last month" = the previous calendar month (IST). "Credited" = the points/payout
+   that LANDED during that calendar month. Points come from a SCALE-SAFE server aggregate
+   (GET /api/wallet/points-credited?month=…) — NOT the paginated passbook — so an active
+   wholesaler's last-month earn is never missed past page 1. Payout is summed from the
+   (uncapped-per-partner, ≤100) credit-payout statement by paidAt.
+─────────────────────────────────────────────────────────────────────────────── */
+
+/** Last calendar month's { target, achieved } for `monthKey`, matched by the row's month KEY
+ *  (not array position) so a UTC/IST month-rollover can't skew the heading vs the number.
+ *  Returns nulls when the trend has no row for that month (new outlet). PURE. */
+export function lastMonthFromTrend(
+  trend: TrendPoint[],
+  monthKey: string,
+): { target: number | null; achieved: number | null } {
+  const row = trend.find((p) => p.month === monthKey) ?? null;
+  return { target: row?.target ?? null, achieved: row?.achieved ?? null };
+}
+
+/** The previous calendar month as a 'YYYY-MM' IST key (prod/SSR run UTC). Derived from
+ *  `now` so it is always relative to today — never a hardcoded month. PURE. */
+export function previousMonthKey(now: Date = new Date()): string {
+  const [y, m] = istMonthKey(now).split('-').map(Number); // m is 1-based
+  const d = new Date(Date.UTC(y, m - 2, 1));              // step back one calendar month
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+/** Payout (₹, from integer paise) CREDITED during `monthKey` (IST) — PAID entries whose
+ *  paidAt falls in that calendar month. PURE. */
+export function sumPayoutCreditedInMonth(payouts: PayoutLedgerEntry[], monthKey: string): number {
+  return payouts
+    .filter((p) => p.status === 'PAID' && p.paidAt && istMonthKey(p.paidAt) === monthKey)
+    .reduce((s, p) => s + p.payoutAmountPaise, 0) / 100;
+}
+
+const MONTH_FULL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+function monthKeyLabel(key: string): string {
+  const [y, m] = key.split('-');
+  return `${MONTH_FULL[Number(m) - 1] ?? ''} ${y}`.trim();
+}
+
+function LastMonthCard({
+  primary, hasPointsActivity, hasPayoutActivity,
+}: { primary: AggKpi | null; hasPointsActivity: boolean; hasPayoutActivity: boolean }) {
+  const [trend,    setTrend]    = useState<TrendResponse | null>(null);
+  const [pointsCr, setPointsCr] = useState<number | null>(null);
+  const [payoutCr, setPayoutCr] = useState<number | null>(null);
+  const primaryCode = primary?.code;
+  const monthKey    = previousMonthKey();
+
+  // Last-month target/achievement — the SAME trend endpoint the comparison card uses, so
+  // the two cards can never disagree about last month's achieved value.
+  useEffect(() => {
+    let cancelled = false;
+    const kpiParam = primaryCode ? `&kpi=${encodeURIComponent(primaryCode)}` : '';
+    fetch(`/api/partner/targets/trend?months=24${kpiParam}`, { headers: { ...authHeader() } })
+      .then((r) => r.json())
+      .then((json: { success: boolean; data?: TrendResponse }) => {
+        if (!cancelled && json.success && json.data) setTrend(json.data);
+      })
+      .catch(() => { if (!cancelled) setTrend({ kpiName: null, unit: null, trend: [] }); }); // honest empty state
+    return () => { cancelled = true; };
+  }, [primaryCode]);
+
+  // Points credited last month — a SCALE-SAFE server aggregate for the exact month (NOT the
+  // paginated /wallet/transactions passbook, whose page 1 would miss an active wholesaler's
+  // last-month earn). Fetched ONLY for a points outlet.
+  useEffect(() => {
+    if (!hasPointsActivity) return;
+    let cancelled = false;
+    fetch(`/api/wallet/points-credited?month=${monthKey}`, { headers: { ...authHeader() } })
+      .then((r) => r.json())
+      .then((json: { success: boolean; data?: { points?: number } }) => {
+        if (cancelled) return;
+        setPointsCr(json.success && typeof json.data?.points === 'number' ? json.data.points : 0);
+      })
+      .catch(() => { if (!cancelled) setPointsCr(0); }); // honest zero
+    return () => { cancelled = true; };
+  }, [hasPointsActivity, monthKey]);
+
+  // Payout credited last month — fetched ONLY for a payout outlet.
+  useEffect(() => {
+    if (!hasPayoutActivity) return;
+    let cancelled = false;
+    fetch('/api/partner/payouts', { headers: { ...authHeader() } })
+      .then((r) => r.json())
+      .then((json: { success: boolean; data?: { payouts?: PayoutLedgerEntry[] } }) => {
+        if (cancelled) return;
+        const payouts = json.success && Array.isArray(json.data?.payouts) ? json.data!.payouts! : [];
+        setPayoutCr(sumPayoutCreditedInMonth(payouts, monthKey));
+      })
+      .catch(() => { if (!cancelled) setPayoutCr(0); }); // honest zero
+    return () => { cancelled = true; };
+  }, [hasPayoutActivity, monthKey]);
+
+  const unit      = trend?.unit ?? primary?.unit ?? 'cases';
+  const lm        = lastMonthFromTrend(trend?.trend ?? [], monthKey);
+  const hasTarget = lm.target !== null && lm.target > 0;
+  const achieved  = lm.achieved ?? 0;
+  const target    = lm.target ?? 0;
+  const achPct    = hasTarget ? pct(achieved, target) : null;
+
+  // Empty state: a brand-new outlet with no prior-month target history AND no reward reality.
+  const noReward = !hasPointsActivity && !hasPayoutActivity;
+  const noTarget = lm.target === null && lm.achieved === null;
+  if (noTarget && noReward) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Calendar className="h-4 w-4 text-[var(--brand-primary)]" />
+            Last Month
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-gray-400">No activity last month</p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Calendar className="h-4 w-4 text-[var(--brand-primary)]" />
+            Last Month
+          </CardTitle>
+          <span className="text-[11px] font-semibold text-gray-400">{monthKeyLabel(monthKey)}</span>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-stretch gap-3">
+          {/* Target achievement (last month) */}
+          <div className="flex-1 rounded-xl bg-gray-50 px-3 py-2.5">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Target achieved</p>
+            {hasTarget ? (
+              <>
+                <p className="text-lg font-extrabold text-gray-700 mt-0.5">{achPct}%</p>
+                <p className="text-[11px] text-gray-400 mt-0.5">
+                  {fmtKpiValue(achieved, unit)} of {fmtKpiValue(target, unit)}
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-lg font-extrabold text-gray-300 mt-0.5">—</p>
+                <p className="text-[11px] text-gray-400 mt-0.5">No target set</p>
+              </>
+            )}
+          </div>
+
+          {/* Reward credited (last month) — points OR payout, keyed to the outlet's reality */}
+          <div className="flex-1 rounded-xl px-3 py-2.5" style={{ backgroundColor: 'var(--brand-primary-light)' }}>
+            {hasPointsActivity && (
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Points credited</p>
+                <p className="text-lg font-extrabold text-[var(--brand-primary-dark)] mt-0.5">
+                  {pointsCr === null ? '—' : formatPoints(pointsCr)}
+                  <span className="text-sm font-medium text-gray-400 ml-1">pts</span>
+                </p>
+              </div>
+            )}
+            {hasPayoutActivity && (
+              <div className={hasPointsActivity ? 'mt-2' : ''}>
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Payout credited</p>
+                <p className="text-lg font-extrabold text-[var(--brand-primary-dark)] mt-0.5">
+                  {payoutCr === null ? '—' : formatInrCompact(payoutCr)}
+                </p>
+              </div>
+            )}
+            {noReward && (
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Reward credited</p>
+                <p className="text-lg font-extrabold text-gray-300 mt-0.5">—</p>
+              </div>
+            )}
+          </div>
         </div>
       </CardContent>
     </Card>
@@ -880,6 +1073,16 @@ export default function PartnerDashboard() {
       {v2
         ? <MonthlyComparisonCard primary={primary} />
         : <PerformanceChart primary={primary} />}
+
+      {/* ── 2b. LAST MONTH SUMMARY (V2 only → Deoleo byte-identical) — last month's
+             target achievement + reward credited (points or payout, per the outlet) ── */}
+      {v2 && (
+        <LastMonthCard
+          primary={primary}
+          hasPointsActivity={identity.hasPointsActivity}
+          hasPayoutActivity={identity.hasPayoutActivity}
+        />
+      )}
 
       {/* ── 3. QUICK ACTIONS ── */}
       <QuickActions outletType={outletType} />

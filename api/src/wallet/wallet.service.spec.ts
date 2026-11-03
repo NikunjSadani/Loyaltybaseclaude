@@ -586,6 +586,69 @@ describe('WalletService', () => {
     });
   });
 
+  // ─── pointsCreditedInMonth — scale-safe month aggregate (NOT the paginated passbook) ──
+  describe('pointsCreditedInMonth', () => {
+    // Attach the aggregate mock (not in the base mock object). Re-set per test since
+    // resetAllMocks() in beforeEach clears call state.
+    const agg = () =>
+      ((mockPrisma.walletTransaction as unknown as { aggregate: jest.Mock }).aggregate ??=
+        jest.fn());
+
+    it('rejects a malformed month before any DB work', async () => {
+      await expect(service.pointsCreditedInMonth(partner, '2026-9')).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(mockPrisma.channelPartner.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('returns 0 when the caller has no operable partner', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      const res = await service.pointsCreditedInMonth(partner, '2026-09');
+      expect(res).toEqual({ month: '2026-09', points: 0 });
+    });
+
+    it('returns 0 when the partner has no wallet', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue(null);
+      const res = await service.pointsCreditedInMonth(partner, '2026-09');
+      expect(res).toEqual({ month: '2026-09', points: 0 });
+    });
+
+    it('sums only EARN credit types over the IST month window (reversals/debits excluded by the query)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1' });
+      const aggMock = agg();
+      aggMock.mockResolvedValue({ _sum: { points: 42_000 } });
+
+      const res = await service.pointsCreditedInMonth(partner, '2026-09');
+      expect(res).toEqual({ month: '2026-09', points: 42_000 });
+
+      // The aggregate is scoped to the wallet, the three EARN credit types, and the
+      // IST month window [00:00 IST 1 Sep, 00:00 IST 1 Oct) — 05:30 earlier in UTC.
+      const call = aggMock.mock.calls[0][0];
+      expect(call._sum).toEqual({ points: true });
+      expect(call.where.walletId).toBe('w1');
+      expect(call.where.transactionType.in).toEqual([
+        'CREDIT_POINTS_EARNED',
+        'CREDIT_BONUS',
+        'CREDIT_ADJUSTMENT',
+      ]);
+      expect(call.where.transactionType.in).not.toContain('CREDIT_REVERSAL');
+      expect((call.where.createdAt.gte as Date).toISOString()).toBe('2026-08-31T18:30:00.000Z');
+      expect((call.where.createdAt.lt as Date).toISOString()).toBe('2026-09-30T18:30:00.000Z');
+      // Never touches the paginated passbook query → correct at any scale.
+      expect(mockPrisma.walletTransaction.findMany).not.toHaveBeenCalled();
+    });
+
+    it('coerces a null aggregate (no credits that month) to 0', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1' });
+      agg().mockResolvedValue({ _sum: { points: null } });
+      const res = await service.pointsCreditedInMonth(partner, '2026-09');
+      expect(res).toEqual({ month: '2026-09', points: 0 });
+    });
+  });
+
   // ─── GIFSY-only admin: wallet BY OUTLET (keyed on outlet CODE + tenant scope) ──────
   describe('admin outlet wallet', () => {
     const wsummary = {

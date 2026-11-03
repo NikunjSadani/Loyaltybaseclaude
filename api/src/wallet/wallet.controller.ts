@@ -56,6 +56,19 @@ export class WalletController {
     return this.wallet.listTransactions(user, query, activePartnerId);
   }
 
+  // Total points CREDITED (earned) in a given IST calendar month — a scale-safe aggregate
+  // for the partner dashboard "Last Month" card (NOT the paginated passbook). ?month=YYYY-MM.
+  @Get('points-credited')
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
+  @RequirePermission('wallet:read')
+  pointsCredited(
+    @CurrentUser() user: JwtPayload,
+    @Query('month') month: string,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.wallet.pointsCreditedInMonth(user, month, activePartnerId);
+  }
+
   /**
    * GET /v1/wallet/admin/outlet/:outletCode/summary — GIFSY-only wallet summary BY OUTLET.
    * Support/ops tooling: resolve any outlet's wallet by outlet CODE, tenant-scoped to the
