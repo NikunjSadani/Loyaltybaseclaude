@@ -11,6 +11,7 @@ import {
   AlertTriangle,
   Check,
   Loader2,
+  Info,
 } from 'lucide-react';
 import { useAdminSession } from '@/lib/admin-session';
 import type { CreditField, FieldAwardType } from '@/types';
@@ -146,8 +147,12 @@ function FieldRow({
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-medium text-gray-900">{field.name}</span>
             {field.isSeparatePayout && (
-              <span className="text-xs bg-purple-100 text-purple-700 rounded-full px-2 py-0.5">
+              <span
+                className="inline-flex items-center gap-1 text-xs bg-purple-100 text-purple-700 rounded-full px-2 py-0.5"
+                title="Separate payout stream: Gifsy downloads and pays this field on its own — it is EXCLUDED from the standard combined incentive-payout download — and its entries are handled under 194C (not 194R) for TDS/invoicing. Turn this OFF to include the field in the regular incentive payout."
+              >
                 Separate
+                <Info className="h-3 w-3 opacity-70" aria-hidden />
               </span>
             )}
             {!field.isActive && (
