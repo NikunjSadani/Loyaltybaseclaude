@@ -1108,7 +1108,9 @@ function OutletTrendCard({ outletCode }: { outletCode: string }) {
  * Manager-only contact line on the outlet-detail view: the viewer's IMMEDIATE REPORTEE for this
  * outlet — the direct report through whom the chain of command reaches the outlet's assigned rep —
  * so a reviewer knows whom to call to action it. Fetches GET /api/sales/outlet-reportee?outletId=
- * and renders a compact "Contact: {name}" row with a tap-to-call link when a phone is present.
+ * and renders a compact "{designation}: {name}" row (the reportee's sales designation, e.g.
+ * "SO: …"/"ASM: …"; falls back to "Contact: {name}" when the backend returns no designation)
+ * with a tap-to-call link when a phone is present.
  *
  * Renders NOTHING when the backend resolves no reportee (null) — a leaf/ISR view, an outlet
  * outside the viewer's chain, a missing phone-free name, or a failed fetch — so an ISR/leaf view
@@ -1116,7 +1118,7 @@ function OutletTrendCard({ outletCode }: { outletCode: string }) {
  * hasTeamView(role) so a leaf role never even fetches; the backend is the authoritative guard.
  */
 function ImmediateReporteeRow({ outletId }: { outletId: string }) {
-  const [reportee, setReportee] = useState<{ name: string; phone: string } | null>(null);
+  const [reportee, setReportee] = useState<{ name: string; phone: string; designation?: string | null } | null>(null);
 
   useEffect(() => {
     if (!outletId) { setReportee(null); return; }
@@ -1140,8 +1142,8 @@ function ImmediateReporteeRow({ outletId }: { outletId: string }) {
       className="flex items-center gap-2 text-xs text-gray-600 pl-11 -mt-1"
     >
       <Users className="h-3.5 w-3.5 text-gray-400 shrink-0" />
-      <span className="text-gray-500">Contact:</span>
-      <span className="font-semibold text-gray-700 truncate">{reportee.name}</span>
+      <span className="text-gray-500 shrink-0 whitespace-nowrap">{reportee.designation?.trim() ? `${reportee.designation}:` : 'Contact:'}</span>
+      <span className="font-semibold text-gray-700 truncate min-w-0">{reportee.name}</span>
       {reportee.phone && (
         <a
           href={`tel:${reportee.phone}`}

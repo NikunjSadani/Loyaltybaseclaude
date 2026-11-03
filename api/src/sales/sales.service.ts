@@ -1007,7 +1007,7 @@ export class SalesService {
    * GET /v1/sales/outlet-reportee?outletId= — the viewing manager's IMMEDIATE REPORTEE for a
    * single outlet (the outlet-detail view's "whom to call to action this outlet" line).
    *
-   * Returns `{ immediateReportee: { name, phone } | null }`:
+   * Returns `{ immediateReportee: { name, phone, designation } | null }`:
    *   • the viewer's DIRECT report through whom the chain of command reaches the outlet's
    *     assigned rep (the direct report `m` such that an assigned rep is `m` or a descendant
    *     of `m`), with that reportee's contact name + phone; else
@@ -1023,7 +1023,9 @@ export class SalesService {
   async getOutletReportee(
     user: JwtPayload,
     outletId?: string,
-  ): Promise<{ immediateReportee: { name: string; phone: string } | null }> {
+  ): Promise<{
+    immediateReportee: { name: string; phone: string; designation: string | null } | null;
+  }> {
     const none = { immediateReportee: null };
     if (!outletId) return none;
 
@@ -1060,7 +1062,14 @@ export class SalesService {
 
     const reportee = await this.prisma.salesUser.findFirst({
       where: { id: reporteeId, deletedAt: null, user: { clientId: user.clientId } },
-      select: { user: { select: { name: true, phone: true } } },
+      // `hierarchyLevel.name` is the per-tenant sales designation surfaced everywhere as
+      // `roleLabel` (getMe/getTeam) — reuse it so the "whom to call" row shows the reportee's
+      // actual designation (e.g. "SO"/"ASM" for Bajaj, "Sales Officer" for Deoleo). Null-safe:
+      // a reportee with no hierarchy level → designation null, and the FE falls back to "Contact:".
+      select: {
+        user: { select: { name: true, phone: true } },
+        hierarchyLevel: { select: { name: true } },
+      },
     });
     if (!reportee) return none;
 
@@ -1068,6 +1077,7 @@ export class SalesService {
       immediateReportee: {
         name: reportee.user.name ?? '',
         phone: reportee.user.phone ?? '',
+        designation: reportee.hierarchyLevel?.name ?? null,
       },
     };
   }

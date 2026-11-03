@@ -2419,20 +2419,30 @@ describe('SalesService', () => {
       expect(mockPrisma.salesUser.findFirst).not.toHaveBeenCalled();
     });
 
-    it('a manager two levels up gets the DIRECT report (SO), not the leaf rep (XSR)', async () => {
+    it('a manager two levels up gets the DIRECT report (SO), not the leaf rep (XSR), with the designation', async () => {
       // Viewer = ASM; outlet assigned to the leaf XSR (ASM → so → xsr). Must resolve to SO.
       mockPrisma.salesUser.findFirst
         .mockResolvedValueOnce({ id: 'asm' }) // viewer
-        .mockResolvedValueOnce({ user: { name: 'SO One', phone: '9900000001' } }); // reportee
+        .mockResolvedValueOnce({ // reportee
+          user: { name: 'SO One', phone: '9900000001' },
+          hierarchyLevel: { name: 'Sales Officer' },
+        });
       mockPrisma.salesUser.findMany.mockResolvedValue(REPORTEE_EDGES);
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ salesUserId: 'xsr' }]);
 
       const res = await service.getOutletReportee(caller, 'outlet-1');
-      expect(res).toEqual({ immediateReportee: { name: 'SO One', phone: '9900000001' } });
-      // The reportee lookup targeted the DIRECT report 'so' (not the leaf 'xsr'), tenant-scoped.
+      // designation = the reportee's hierarchyLevel.name (the per-tenant `roleLabel`).
+      expect(res).toEqual({
+        immediateReportee: { name: 'SO One', phone: '9900000001', designation: 'Sales Officer' },
+      });
+      // The reportee lookup targeted the DIRECT report 'so' (not the leaf 'xsr'), tenant-scoped,
+      // and selects the hierarchyLevel so the designation needs no extra query.
       expect(mockPrisma.salesUser.findFirst).toHaveBeenLastCalledWith({
         where: { id: 'so', deletedAt: null, user: { clientId: 'deoleo' } },
-        select: { user: { select: { name: true, phone: true } } },
+        select: {
+          user: { select: { name: true, phone: true } },
+          hierarchyLevel: { select: { name: true } },
+        },
       });
     });
 
@@ -2440,15 +2450,37 @@ describe('SalesService', () => {
       // Viewer = ASM; outlet under so2's branch (xsr3) → the DIRECT report is so2, not so.
       mockPrisma.salesUser.findFirst
         .mockResolvedValueOnce({ id: 'asm' })
-        .mockResolvedValueOnce({ user: { name: 'SO Two', phone: '9900000002' } });
+        .mockResolvedValueOnce({
+          user: { name: 'SO Two', phone: '9900000002' },
+          hierarchyLevel: { name: 'Sales Officer' },
+        });
       mockPrisma.salesUser.findMany.mockResolvedValue(REPORTEE_EDGES);
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ salesUserId: 'xsr3' }]);
 
       const res = await service.getOutletReportee(caller, 'outlet-2');
-      expect(res).toEqual({ immediateReportee: { name: 'SO Two', phone: '9900000002' } });
+      expect(res).toEqual({
+        immediateReportee: { name: 'SO Two', phone: '9900000002', designation: 'Sales Officer' },
+      });
       expect(mockPrisma.salesUser.findFirst).toHaveBeenLastCalledWith({
         where: { id: 'so2', deletedAt: null, user: { clientId: 'deoleo' } },
-        select: { user: { select: { name: true, phone: true } } },
+        select: {
+          user: { select: { name: true, phone: true } },
+          hierarchyLevel: { select: { name: true } },
+        },
+      });
+    });
+
+    it('designation is null when the reportee has no hierarchy level (graceful fallback)', async () => {
+      // A reportee with no hierarchyLevel loaded → designation null (FE falls back to "Contact:").
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'asm' })
+        .mockResolvedValueOnce({ user: { name: 'SO One', phone: '9900000001' }, hierarchyLevel: null });
+      mockPrisma.salesUser.findMany.mockResolvedValue(REPORTEE_EDGES);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ salesUserId: 'xsr' }]);
+
+      const res = await service.getOutletReportee(caller, 'outlet-1');
+      expect(res).toEqual({
+        immediateReportee: { name: 'SO One', phone: '9900000001', designation: null },
       });
     });
 

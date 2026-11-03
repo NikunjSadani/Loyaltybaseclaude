@@ -112,14 +112,24 @@ beforeEach(() => { mockSettings = DEFAULT_SETTINGS; roleMock = 'ASM'; });
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); setHistoryLength(1); });
 
 describe('Outlet-detail immediate-reportee contact row', () => {
-  it('IR1: a manager sees "Contact: {name}" with a tap-to-call tel: link', async () => {
+  it('IR1: a manager sees "{designation}: {name}" with a tap-to-call tel: link', async () => {
+    stubFetch({ success: true, data: { immediateReportee: { name: 'Ravi SO', phone: '9876500001', designation: 'SO' } } });
+    await renderPage('KYC42');
+
+    const row = await screen.findByTestId('immediate-reportee-row');
+    expect(row).toHaveTextContent('SO:');
+    expect(row).toHaveTextContent('Ravi SO');
+    const call = await screen.findByTestId('immediate-reportee-call');
+    expect(call).toHaveAttribute('href', 'tel:9876500001');
+  });
+
+  it('IR1b: falls back to "Contact:" when the backend returns no designation', async () => {
     stubFetch({ success: true, data: { immediateReportee: { name: 'Ravi SO', phone: '9876500001' } } });
     await renderPage('KYC42');
 
     const row = await screen.findByTestId('immediate-reportee-row');
+    expect(row).toHaveTextContent('Contact:');
     expect(row).toHaveTextContent('Ravi SO');
-    const call = await screen.findByTestId('immediate-reportee-call');
-    expect(call).toHaveAttribute('href', 'tel:9876500001');
   });
 
   it('IR2: renders nothing when the backend resolves null (no reportee in chain)', async () => {
