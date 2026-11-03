@@ -25,6 +25,7 @@ vi.mock('next/navigation', () => ({
 let mockIdentity = {
   businessName: 'Anil Traders', ownerName: 'Owner', partnerCode: 'P1',
   outletType: 'WHOLESALER' as string | null, hasPointsActivity: true, hasPayoutActivity: false,
+  loyaltyEnabled: true,
 };
 vi.mock('@/lib/partner-identity', () => ({
   usePartnerIdentity: () => mockIdentity,
@@ -95,5 +96,20 @@ describe('PC — presence-based summary cards', () => {
     mockIdentity = { ...mockIdentity, hasPointsActivity: false, hasPayoutActivity: true };
     await renderAndWait();
     expect(screen.getByTestId('statement-controls-row')).toBeInTheDocument();
+  });
+
+  it('PC5: a loyalty-ON outlet shows the Earn/Burn filter chips', async () => {
+    mockIdentity = { ...mockIdentity, loyaltyEnabled: true, hasPointsActivity: true, hasPayoutActivity: false };
+    await renderAndWait();
+    expect(screen.getByRole('button', { name: 'Earn' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Burn' })).toBeInTheDocument();
+  });
+
+  it('PC6: a loyalty-OFF (payout-only) outlet hides the Earn/Burn chips but keeps the KPI filter', async () => {
+    mockIdentity = { ...mockIdentity, loyaltyEnabled: false, outletType: 'SSS', hasPointsActivity: false, hasPayoutActivity: true };
+    await renderAndWait();
+    expect(screen.queryByRole('button', { name: 'Earn' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Burn' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('wallet-kpi-filter')).toBeInTheDocument();
   });
 });

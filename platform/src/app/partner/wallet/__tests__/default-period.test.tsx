@@ -30,6 +30,7 @@ vi.mock('@/lib/partner-identity', () => ({
   usePartnerIdentity: () => ({
     businessName: 'Anil Traders', ownerName: 'Owner', partnerCode: 'P1',
     outletType: 'WHOLESALER', hasPointsActivity: false, hasPayoutActivity: true,
+    loyaltyEnabled: true,
   }),
 }));
 

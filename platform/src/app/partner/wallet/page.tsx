@@ -468,9 +468,12 @@ export default function WalletPage() {
               </div>
               </div>
 
-              {/* Earn / Burn filter chips + KPI filter */}
+              {/* Earn / Burn filter chips + KPI filter. The Earn/Burn chips are points concepts
+                  (earn=credit, burn=debit) — meaningless for a loyalty-OFF (payout-only) outlet whose
+                  statement is all inbound payouts — so they are shown ONLY when loyalty is enabled.
+                  The KPI ("All Parameters") filter stays for every outlet type. */}
               <div className="flex items-center gap-1.5 flex-wrap">
-                {([
+                {identity.loyaltyEnabled && ([
                   { value: 'all',  label: 'All'  },
                   { value: 'earn', label: 'Earn' },
                   { value: 'burn', label: 'Burn' },
