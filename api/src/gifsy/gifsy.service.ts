@@ -615,6 +615,7 @@ export class GifsyService {
         rlpBscView: !!features.rlpBscView,
         catalogueMrpSlash: !!features.catalogueMrpSlash,
         partnerDashboardV2: !!features.partnerDashboardV2,
+        captureBankAtRedemption: !!features.captureBankAtRedemption,
       },
     };
   }
@@ -759,6 +760,7 @@ export class GifsyService {
         rlpBscView: !!features.rlpBscView,
         catalogueMrpSlash: !!features.catalogueMrpSlash,
         partnerDashboardV2: !!features.partnerDashboardV2,
+        captureBankAtRedemption: !!features.captureBankAtRedemption,
       },
     };
   }
@@ -1010,6 +1012,7 @@ export class GifsyService {
         rlpBscView: !!features.rlpBscView,
         catalogueMrpSlash: !!features.catalogueMrpSlash,
         partnerDashboardV2: !!features.partnerDashboardV2,
+        captureBankAtRedemption: !!features.captureBankAtRedemption,
         partnerApp: {
           showSchemes: partnerApp.showSchemes !== false,
           showInvoices: !!partnerApp.showInvoices,

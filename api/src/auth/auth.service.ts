@@ -79,8 +79,22 @@ export class AuthService {
           phone: true, email: true, gstNumber: true, panNumber: true, entityType: true,
           // Beneficiary (KYC) — the partner reading THEIR OWN payout rails so the
           // cash-redeem FE can show what it will pay to (tenant-safe: keyed on user.sub).
+          // JOB B (PAYMENT-DETAILS-AT-REDEMPTION): the RAW bank/upi fields are KEPT unchanged
+          // here — the partner redemption flow needs them to decide "has beneficiary" and to
+          // create the payout. We additionally return `paymentDetailsStatus` so the FE profile
+          // page can HIDE the payout card until a payout confirms the details (VERIFIED). The
+          // rewards page keeps reading the raw fields.
           bankName: true, bankAccountNumber: true, bankAccountHolder: true,
           ifscCode: true, upiId: true, paymentMode: true,
+          paymentDetailsStatus: true,
+          // Primary outlet's payout MANDATE — so the capture-at-redemption FE can PIN the
+          // bank/UPI mode client-side (the backend re-validates it authoritatively regardless).
+          outlets: {
+            where: { deletedAt: null },
+            select: { requiredPaymentType: true },
+            orderBy: { createdAt: 'asc' },
+            take: 1,
+          },
         },
       }),
       this.prisma.salesUser.findUnique({
@@ -150,7 +164,15 @@ export class AuthService {
         phone: dbUser?.phone ?? null,
         role: user.role,
         channelPartner: channelPartner
-          ? { ...channelPartner, wallets: wallet ? [wallet] : [] }
+          ? (() => {
+              const { outlets, ...cp } = channelPartner;
+              return {
+                ...cp,
+                // Flat payout mandate for the FE mode pin; the raw outlets[] is not surfaced.
+                requiredPaymentType: outlets?.[0]?.requiredPaymentType ?? null,
+                wallets: wallet ? [wallet] : [],
+              };
+            })()
           : null,
         salesUser: salesUser ?? null,
       },

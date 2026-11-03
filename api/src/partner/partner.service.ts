@@ -1,15 +1,35 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+} from '@nestjs/common';
+import { OutletPaymentType, PaymentDetailsStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
+import {
+  CapturePayoutDetailsDto,
+  ListPartnerTargetsQueryDto,
+  UploadPartnerDocumentDto,
+} from './dto/partner.dto';
 import { kpiCodeKeys, NAMES_KEY, lastNMonths } from '../targets/targets.helpers';
 import { buildPayoutStatement } from '../common/payout-statement.helper';
 import { TenantService } from '../tenant/tenant.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { StorageService } from '../storage/storage.service';
+import { sniffFileType } from '../common/file-signature';
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import {
+  acquireIdentityLocks,
+  checkGroupUniqueness,
+  normalizeIdentityValue,
   resolveActivePartnerId,
   resolveOperableContexts,
 } from '../common/partner-group.helper';
+import {
+  allowedPaymentModes,
+  isPaymentModeAllowed,
+  PaymentMode,
+} from '../common/payment-type.helper';
 import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
 
 /**
@@ -28,6 +48,8 @@ export class PartnerService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tenant: TenantService,
+    private readonly tenantSettings: TenantSettingsService,
+    private readonly storage: StorageService,
   ) {}
 
   private readonly bannerSettingKey = 'banner_config';
@@ -615,4 +637,199 @@ export class PartnerService {
     return { team };
   }
 
+  // ── Capture-bank-at-redemption (docs/plans/PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md) ──────────
+  /**
+   * POST /v1/partner/documents — partner-scoped cheque upload (cancelled cheque only). Mirrors
+   * KycService.uploadDocument (magic-byte sniff, 5 MB cap, tenant-foldered GCS key) so the bytes
+   * live in object storage, not the DB. Partners cannot reach the KYC `kyc:initiate` doc route, so
+   * the redemption capture needs its own partner-roled upload. Returns the object reference; the
+   * caller passes { fileKey } to POST /v1/partner/payout-details.
+   */
+  async uploadPayoutDocument(user: JwtPayload, file: Express.Multer.File) {
+    // Same feature gate as the capture itself — a tenant without the flag (incl. Deoleo) cannot use
+    // this upload route at all (no storage abuse on a capability they don't have).
+    const features = await resolveTenantFeatures(this.tenant, user.clientId);
+    if ((features as Record<string, unknown>).captureBankAtRedemption !== true) {
+      throw new ForbiddenException('Payout-detail capture is not enabled for this account.');
+    }
+    if (!file) throw new BadRequestException('No file uploaded');
+    if (!file.buffer?.length) throw new BadRequestException('Empty file');
+    const MAX_BYTES = 5 * 1024 * 1024; // 5 MB — same cap as KYC docs
+    if (file.size > MAX_BYTES) throw new BadRequestException('File too large (max 5 MB)');
+    // Untrusted client mimetype → sniff the real type from the file's magic bytes (AF-10).
+    const sniffed = sniffFileType(file.buffer);
+    if (!sniffed) {
+      throw new BadRequestException(
+        'Unsupported or corrupt file. Upload a JPG, PNG, WEBP, GIF, or PDF.',
+      );
+    }
+    const key = this.storage.generateKey(
+      `kyc/${user.clientId}`,
+      file.originalname || `CANCELLED_CHEQUE.${sniffed.ext}`,
+    );
+    const fileUrl = await this.storage.uploadFile(file.buffer, key, sniffed.mime);
+    return {
+      documentType: 'CANCELLED_CHEQUE' as const,
+      fileKey: key,
+      fileUrl,
+      fileName: file.originalname ?? null,
+      mimeType: sniffed.mime, // trusted (sniffed), not client-supplied
+      fileSizeBytes: file.size,
+    };
+  }
+
+  /**
+   * POST /v1/partner/payout-details — a wholesaler self-captures bank/UPI IN-FLOW at redemption.
+   * Reuses the SAME validation + uniqueness rules as KYC (payment-type.helper, checkGroupUniqueness,
+   * normalizeIdentityValue) but writes DIRECTLY to the partner (NOT a KYC submission → never flips an
+   * approved outlet back to review). Persists with paymentDetailsStatus=UNVERIFIED; the details stay
+   * HIDDEN from Store Info until a redemption payout on them is marked PAID (payouts.processBatch),
+   * which flips the status to VERIFIED. Gated by the per-tenant `captureBankAtRedemption` flag
+   * (default OFF → Deoleo & all other tenants cannot reach this path).
+   */
+  async capturePayoutDetails(
+    user: JwtPayload,
+    dto: CapturePayoutDetailsDto,
+    requestedPartnerId?: string,
+  ) {
+    const partnerId = await this.resolveActivePartner(user, requestedPartnerId);
+    if (!partnerId) throw new ForbiddenException('No operable outlet for this login.');
+
+    // Feature gate — a no-op capability for any tenant without the flag.
+    const features = await resolveTenantFeatures(this.tenant, user.clientId);
+    if ((features as Record<string, unknown>).captureBankAtRedemption !== true) {
+      throw new ForbiddenException('Payout-detail capture is not enabled for this account.');
+    }
+
+    // The partner + its primary outlet (payout mandate + owner-group for the uniqueness check) +
+    // its CURRENT rails/status (to guard against overwriting an already-on-file beneficiary).
+    const partner = await this.prisma.channelPartner.findFirst({
+      where: { id: partnerId, clientId: user.clientId },
+      select: {
+        id: true,
+        bankAccountNumber: true,
+        ifscCode: true,
+        upiId: true,
+        paymentDetailsStatus: true,
+        outlets: {
+          where: { deletedAt: null },
+          select: { requiredPaymentType: true, parentId: true },
+          orderBy: { createdAt: 'asc' },
+          take: 1,
+        },
+      },
+    });
+    if (!partner) throw new ForbiddenException('No operable outlet for this login.');
+
+    // AUDIT FIX (HIGH): capture is only for an outlet with NO usable beneficiary, or one explicitly
+    // flagged for re-capture after a FAILED payout. Mirror the FE gate SERVER-SIDE (the route is the
+    // authority) so a direct POST can NEVER overwrite/wipe a beneficiary already on file — this both
+    // protects VERIFIED details the credits bank-file reads live AND closes the re-capture-mid-flight
+    // window that could let a never-paid rail ride a payout into VERIFIED.
+    const hasBeneficiary = !!(
+      partner.upiId || (partner.bankAccountNumber && partner.ifscCode)
+    );
+    if (
+      hasBeneficiary &&
+      partner.paymentDetailsStatus !== PaymentDetailsStatus.NEEDS_RECAPTURE
+    ) {
+      throw new BadRequestException(
+        'Payout details are already on file for this outlet and cannot be changed here.',
+      );
+    }
+
+    const requiredType = partner.outlets[0]?.requiredPaymentType ?? OutletPaymentType.ANY;
+    const ourParentId = partner.outlets[0]?.parentId ?? null;
+
+    const { salesApp, uniquenessPolicy } =
+      await this.tenantSettings.getEffectiveSettings(user.clientId);
+    const upiEnabled = salesApp.upiEnabled;
+    const mode: PaymentMode = dto.paymentMode;
+
+    // 1. Mode must satisfy the outlet mandate + tenant UPI gate (identical to kyc.service.create).
+    if (!isPaymentModeAllowed(requiredType, mode, upiEnabled)) {
+      const allowed = allowedPaymentModes(requiredType, upiEnabled);
+      const label = allowed.length > 1 ? 'bank or UPI' : allowed[0] === 'upi' ? 'UPI' : 'bank';
+      throw new BadRequestException(`This outlet requires payout by ${label}.`);
+    }
+
+    // 2. Required fields for the chosen mode (bank → name/acct/IFSC + cheque; UPI → upiId).
+    const filled = (v?: string) => typeof v === 'string' && v.trim() !== '';
+    if (mode === 'bank') {
+      const missing = (['bankName', 'accountNumber', 'ifscCode'] as const).filter(
+        (k) => !filled(dto[k]),
+      );
+      if (missing.length) {
+        throw new BadRequestException(`Bank payout requires: ${missing.join(', ')}.`);
+      }
+      if (!filled(dto.chequeFileKey)) {
+        throw new BadRequestException('A cancelled cheque is required for bank payout.');
+      }
+      // The cheque must be an object THIS tenant uploaded (reject a forged cross-tenant key). Also
+      // reject any path-traversal segment so a crafted key can't escape the tenant folder on a
+      // filesystem-backed StorageService (defense-in-depth; GCS keys are literal, but don't rely on it).
+      if (
+        !dto.chequeFileKey!.startsWith(`kyc/${user.clientId}/`) ||
+        dto.chequeFileKey!.includes('..')
+      ) {
+        throw new BadRequestException('Invalid cheque reference.');
+      }
+    } else if (!filled(dto.upiId)) {
+      throw new BadRequestException('UPI payout requires a UPI ID.');
+    }
+
+    // 3. Normalized identity values (the SAME canonical form KYC persists AND locks/checks on).
+    const bankAcct = mode === 'bank' ? normalizeIdentityValue('bank', dto.accountNumber) : null;
+    const upi = mode === 'upi' ? normalizeIdentityValue('upi', dto.upiId) : null;
+
+    // 4. Atomic: advisory-lock the identity value(s) → re-check group-uniqueness → write. bank/UPI
+    //    have NO DB unique index, so this lock + check is their ONLY race guard (mirrors kyc.service).
+    await this.prisma.$transaction(async (tx) => {
+      await acquireIdentityLocks(tx, {
+        clientId: user.clientId,
+        details: { bankAccountNumber: bankAcct, upiId: upi },
+        policy: uniquenessPolicy,
+      });
+      const violation = await checkGroupUniqueness(tx, {
+        clientId: user.clientId,
+        ourParentId,
+        details: { bankAccountNumber: bankAcct, upiId: upi },
+        policy: uniquenessPolicy,
+        exceptPartnerId: partnerId,
+      });
+      if (violation) throw new BadRequestException(violation.message);
+
+      await tx.channelPartner.update({
+        where: { id: partnerId },
+        data:
+          mode === 'bank'
+            ? {
+                paymentMode: 'bank',
+                bankName: dto.bankName!.trim(),
+                bankAccountHolder: dto.accountHolderName?.trim() || null,
+                bankAccountNumber: bankAcct,
+                ifscCode: dto.ifscCode!.trim().toUpperCase(),
+                upiId: null, // clear the other rail so a payout can't misroute to a stale UPI
+                payoutChequeFileKey: dto.chequeFileKey!,
+                paymentDetailsStatus: PaymentDetailsStatus.UNVERIFIED,
+              }
+            : {
+                paymentMode: 'upi',
+                upiId: upi,
+                bankName: null,
+                bankAccountHolder: null,
+                bankAccountNumber: null,
+                ifscCode: null,
+                payoutChequeFileKey: null,
+                paymentDetailsStatus: PaymentDetailsStatus.UNVERIFIED,
+              },
+      });
+    });
+
+    return {
+      ok: true,
+      paymentMode: mode,
+      paymentDetailsStatus: PaymentDetailsStatus.UNVERIFIED,
+    };
+  }
 }

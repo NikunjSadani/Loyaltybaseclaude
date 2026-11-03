@@ -23,6 +23,9 @@ const mockTx = {
     update: jest.fn(),
     updateMany: jest.fn(),
   },
+  // capture-bank-at-redemption: the PAID/FAILED verify-stamp updates the partner's
+  // paymentDetailsStatus inside the disbursement tx (guarded on UNVERIFIED).
+  channelPartner: { updateMany: jest.fn() },
 };
 
 const mockPrisma = {
@@ -840,6 +843,67 @@ describe('PayoutsService', () => {
         }),
       );
       expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    // capture-bank-at-redemption: a PAID payout verifies the partner ONLY when the current rail still
+    // equals the paid snapshot, promoting UNVERIFIED *or* NEEDS_RECAPTURE (audit fixes money-F2/F3 + id-F1).
+    it('PAID → verify-stamps the partner on a matching paid rail (in[UNVERIFIED,NEEDS_RECAPTURE] + snapshot match)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([
+          {
+            id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'UPI',
+            partnerId: 'p1', redemptionOrderId: 'o1',
+            upiId: 'shop@upi', bankAccountNumber: null, ifscCode: null,
+          },
+        ])
+        .mockResolvedValueOnce([]);
+
+      await service.uploadPayoutUtr(
+        gifsy,
+        'b1',
+        buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]),
+        true,
+      );
+
+      expect(mockTx.channelPartner.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: 'p1',
+            paymentDetailsStatus: { in: ['UNVERIFIED', 'NEEDS_RECAPTURE'] },
+            upiId: 'shop@upi', // snapshot match on the paid rail
+          }),
+          data: expect.objectContaining({ paymentDetailsStatus: 'VERIFIED' }),
+        }),
+      );
+    });
+
+    it('FAILED → flags the partner NEEDS_RECAPTURE only when currently UNVERIFIED', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([
+          {
+            id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'UPI',
+            partnerId: 'p1', redemptionOrderId: 'o1',
+            upiId: 'shop@upi', bankAccountNumber: null, ifscCode: null,
+          },
+        ])
+        .mockResolvedValueOnce([]);
+      mockTx.redemptionOrder.findFirst.mockResolvedValue({
+        pointsDeducted: 0, partnerId: 'p1', orderNumber: 'o1',
+      });
+
+      await service.uploadPayoutUtr(
+        gifsy,
+        'b1',
+        buildUpload([{ txnId: 'txn1', status: 'FAILED' }]),
+        true,
+      );
+
+      expect(mockTx.channelPartner.updateMany).toHaveBeenCalledWith({
+        where: { id: 'p1', paymentDetailsStatus: 'UNVERIFIED' },
+        data: { paymentDetailsStatus: 'NEEDS_RECAPTURE' },
+      });
     });
 
     it('PAID → sends the payout-credit WhatsApp POST-COMMIT with the right ordered bodyValues (Flow B)', async () => {

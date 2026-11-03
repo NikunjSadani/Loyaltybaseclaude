@@ -2020,6 +2020,9 @@ export class SalesService {
                 bankAccountHolder: true,
                 ifscCode: true,
                 upiId: true,
+                // Capture-bank-at-redemption: gate the payout prefill on this so a self-captured,
+                // not-yet-paid (UNVERIFIED/NEEDS_RECAPTURE) rail is NOT leaked into the rep's re-KYC form.
+                paymentDetailsStatus: true,
                 // Sales-assisted redeem (B1) drives off the outlet's partnerId +
                 // its real redeemable balance, so the FE can offer "redeem for
                 // this outlet" with the points headroom shown.
@@ -2113,6 +2116,14 @@ export class SalesService {
           const fullAddress = [outlet.addressLine1, outlet.addressLine2]
             .filter(Boolean)
             .join(', ');
+          // Capture-bank-at-redemption: only VERIFIED payout details (operator/KYC-captured or
+          // payout-confirmed) are surfaced in the re-KYC prefill. A self-captured, not-yet-paid rail
+          // (UNVERIFIED/NEEDS_RECAPTURE) is blanked so it never leaks into the rep's form.
+          // Shown unless EXPLICITLY unverified (mirrors kyc.service's isPayoutHidden: a real row is
+          // always VERIFIED by default, only redemption-capture writes a hidden status).
+          const payoutVerified =
+            partner?.paymentDetailsStatus !== 'UNVERIFIED' &&
+            partner?.paymentDetailsStatus !== 'NEEDS_RECAPTURE';
           const existingKyc =
             partner && isReEntry
               ? {
@@ -2124,11 +2135,11 @@ export class SalesService {
                   city: outlet.city ?? '',
                   state: outlet.state ?? '',
                   pincode: outlet.pincode ?? '',
-                  bankName: partner.bankName ?? '',
-                  accountNumber: partner.bankAccountNumber ?? '',
-                  accountHolderName: partner.bankAccountHolder ?? '',
-                  ifscCode: partner.ifscCode ?? '',
-                  upiId: partner.upiId ?? '',
+                  bankName: payoutVerified ? (partner.bankName ?? '') : '',
+                  accountNumber: payoutVerified ? (partner.bankAccountNumber ?? '') : '',
+                  accountHolderName: payoutVerified ? (partner.bankAccountHolder ?? '') : '',
+                  ifscCode: payoutVerified ? (partner.ifscCode ?? '') : '',
+                  upiId: payoutVerified ? (partner.upiId ?? '') : '',
                 }
               : null;
 

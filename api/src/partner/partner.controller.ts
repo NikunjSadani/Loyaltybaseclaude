@@ -1,9 +1,23 @@
-import { Controller, Get, Headers, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  Post,
+  Query,
+  UploadedFile,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { PartnerService } from './partner.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
+import {
+  CapturePayoutDetailsDto,
+  ListPartnerTargetsQueryDto,
+  UploadPartnerDocumentDto,
+} from './dto/partner.dto';
 
 /**
  * Partner self-service API — re-homed from platform/src/app/api/partner/* onto
@@ -72,5 +86,31 @@ export class PartnerController {
     @Headers('x-active-partner-id') activePartnerId?: string,
   ) {
     return this.partner.getSalesTeam(user, activePartnerId);
+  }
+
+  // ── Capture-bank-at-redemption (PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md) ──────────
+  // Partner-scoped cheque upload (cancelled cheque only) — partners can't reach the
+  // KYC `kyc:initiate` doc route. Service gates the actual capture on the tenant flag.
+  @Post('documents')
+  @RequirePermission('rewards:read')
+  @UseInterceptors(FileInterceptor('file'))
+  uploadPayoutDocument(
+    @CurrentUser() user: JwtPayload,
+    @UploadedFile() file: Express.Multer.File,
+    // Validated (@IsIn CANCELLED_CHEQUE) by the global pipe; the cheque is the only partner doc.
+    @Body() _dto: UploadPartnerDocumentDto,
+  ) {
+    return this.partner.uploadPayoutDocument(user, file);
+  }
+
+  // Self-capture bank/UPI in-flow at redemption. Feature-gated + uniqueness-enforced in the service.
+  @Post('payout-details')
+  @RequirePermission('rewards:read')
+  capturePayoutDetails(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: CapturePayoutDetailsDto,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.partner.capturePayoutDetails(user, dto, activePartnerId);
   }
 }

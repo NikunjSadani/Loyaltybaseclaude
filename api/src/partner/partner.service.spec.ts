@@ -9,6 +9,8 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { PartnerService } from './partner.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 // ─── Mock Prisma ───────────────────────────────────────────────────────────────
@@ -16,7 +18,8 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 const mockPrisma = {
   programSetting:    { findFirst: jest.fn() },
   // findMany added for Wave 3 resolveOperableContexts (login-less same-group sibling lookup).
-  channelPartner:    { findFirst: jest.fn(), findMany: jest.fn() },
+  // update added for capturePayoutDetails (capture-bank-at-redemption write).
+  channelPartner:    { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn() },
   payoutTransaction: { findMany: jest.fn(), findFirst: jest.fn() },
   creditPayoutEntry: { findFirst: jest.fn(), findMany: jest.fn() },
   wallet:            { findFirst: jest.fn() },
@@ -29,6 +32,21 @@ const mockPrisma = {
   outletSalesRecord: { findMany: jest.fn() },
   kpiDef:            { findMany: jest.fn() },
   salesUserAssignment: { findMany: jest.fn() },
+  // capturePayoutDetails runs its uniqueness check + write inside an interactive tx; the tx
+  // client reuses the same channelPartner mock + a no-op advisory-lock ($executeRaw).
+  $transaction: jest.fn(async (fn: (tx: unknown) => unknown) =>
+    fn({ ...mockPrisma, $executeRaw: jest.fn() }),
+  ),
+};
+
+// TenantSettingsService.getEffectiveSettings — capture reads salesApp.upiEnabled + uniquenessPolicy.
+const mockTenantSettings = {
+  getEffectiveSettings: jest.fn(),
+};
+// StorageService — partner cheque upload (uploadPayoutDocument).
+const mockStorage = {
+  generateKey: jest.fn((folder: string, name: string) => `${folder}/${name}`),
+  uploadFile: jest.fn(async () => 'https://storage.example/obj'),
 };
 
 // TenantService.resolveClient feeds the DB-backed feature blob into /partner/me
@@ -75,11 +93,19 @@ describe('PartnerService', () => {
     // isLoyaltyEnabledForPartner returns true (schema default). Loyalty-off cases override.
     mockPrisma.outlet.findFirst.mockResolvedValue(null);
     mockPrisma.outletTypeClientConfig.findUnique.mockResolvedValue(null);
+    // Capture defaults: UPI enabled, bank+UPI uniqueness ON (Bajaj-shaped), clean uniqueness check.
+    mockTenantSettings.getEffectiveSettings.mockResolvedValue({
+      salesApp: { upiEnabled: true },
+      uniquenessPolicy: { gst: true, phone: true, bank: true, upi: true },
+    });
+    mockPrisma.channelPartner.findMany.mockResolvedValue([]); // no uniqueness clash by default
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PartnerService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TenantService, useValue: mockTenant },
+        { provide: TenantSettingsService, useValue: mockTenantSettings },
+        { provide: StorageService, useValue: mockStorage },
       ],
     }).compile();
     service = module.get(PartnerService);
@@ -1047,6 +1073,176 @@ describe('PartnerService', () => {
       expect(mockPrisma.outletTarget.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: expect.objectContaining({ clientId: 'deoleo' }) }),
       );
+    });
+  });
+
+  // ─── capturePayoutDetails (capture-bank-at-redemption) ────────────────────────
+  describe('capturePayoutDetails', () => {
+    const FLAG_ON = { features: { captureBankAtRedemption: true } };
+    // resolveActivePartner → own partner; the capture then re-reads the partner + its outlet.
+    const primePartner = (
+      outlet: { requiredPaymentType?: string; parentId?: string | null } | null,
+      current: {
+        upiId?: string | null;
+        bankAccountNumber?: string | null;
+        ifscCode?: string | null;
+        paymentDetailsStatus?: string;
+      } = {},
+    ) => {
+      // 1st findFirst: resolveActivePartnerId's own-partner lookup (Wave 3). 2nd: capture's partner+outlet read.
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'cp1', userId: 'user1' })
+        .mockResolvedValueOnce({
+          id: 'cp1',
+          outlets: outlet ? [outlet] : [],
+          ...current,
+        });
+    };
+
+    it('is forbidden when the tenant feature flag is OFF', async () => {
+      mockTenant.resolveClient.mockResolvedValue({ features: {} });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce({ id: 'cp1', userId: 'user1' });
+      await expect(
+        service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi' }),
+      ).rejects.toThrow(/not enabled/i);
+      expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+    });
+
+    it('writes a UPI capture as UNVERIFIED and clears the bank rail', async () => {
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      primePartner({ requiredPaymentType: 'ANY', parentId: null });
+      const res = await service.capturePayoutDetails(switcher, {
+        paymentMode: 'upi',
+        upiId: '  Shop@UPI  ',
+      });
+      expect(res).toEqual({
+        ok: true,
+        paymentMode: 'upi',
+        paymentDetailsStatus: 'UNVERIFIED',
+      });
+      const data = mockPrisma.channelPartner.update.mock.calls[0][0].data;
+      expect(data).toMatchObject({
+        paymentMode: 'upi',
+        upiId: 'Shop@UPI', // trimmed (bank/UPI are trim-only)
+        bankName: null,
+        bankAccountNumber: null,
+        payoutChequeFileKey: null,
+        paymentDetailsStatus: 'UNVERIFIED',
+      });
+    });
+
+    it('requires a cancelled cheque for a bank capture', async () => {
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      primePartner({ requiredPaymentType: 'ANY', parentId: null });
+      await expect(
+        service.capturePayoutDetails(switcher, {
+          paymentMode: 'bank',
+          bankName: 'HDFC',
+          accountNumber: '50100',
+          ifscCode: 'hdfc0001',
+        }),
+      ).rejects.toThrow(/cancelled cheque is required/i);
+      expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects a cheque key from another tenant', async () => {
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      primePartner({ requiredPaymentType: 'ANY', parentId: null });
+      await expect(
+        service.capturePayoutDetails(switcher, {
+          paymentMode: 'bank',
+          bankName: 'HDFC',
+          accountNumber: '50100',
+          ifscCode: 'HDFC0001',
+          chequeFileKey: 'kyc/otherclient/cheque.jpg',
+        }),
+      ).rejects.toThrow(/invalid cheque reference/i);
+    });
+
+    it('persists a bank capture (cheque + upper-cased IFSC) as UNVERIFIED and clears UPI', async () => {
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      primePartner({ requiredPaymentType: 'BANK', parentId: null });
+      await service.capturePayoutDetails(switcher, {
+        paymentMode: 'bank',
+        bankName: ' HDFC ',
+        accountHolderName: 'Shop Owner',
+        accountNumber: ' 50100123 ',
+        ifscCode: 'hdfc0001',
+        chequeFileKey: 'kyc/deoleo/cheque.jpg',
+      });
+      const data = mockPrisma.channelPartner.update.mock.calls[0][0].data;
+      expect(data).toMatchObject({
+        paymentMode: 'bank',
+        bankName: 'HDFC',
+        bankAccountNumber: '50100123',
+        ifscCode: 'HDFC0001',
+        upiId: null,
+        payoutChequeFileKey: 'kyc/deoleo/cheque.jpg',
+        paymentDetailsStatus: 'UNVERIFIED',
+      });
+    });
+
+    it('rejects UPI when the outlet mandate is BANK-only', async () => {
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      primePartner({ requiredPaymentType: 'BANK', parentId: null });
+      await expect(
+        service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi' }),
+      ).rejects.toThrow(/requires payout by bank/i);
+    });
+
+    it('surfaces a uniqueness collision as a 400', async () => {
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      primePartner({ requiredPaymentType: 'ANY', parentId: null });
+      // A different partner already owns this UPI (outside any group) → clash.
+      mockPrisma.channelPartner.findMany.mockResolvedValue([
+        { id: 'other', isParent: false, outlets: [{ parentId: null }] },
+      ]);
+      await expect(
+        service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi' }),
+      ).rejects.toThrow(/already registered to another outlet/i);
+      expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+    });
+
+    // AUDIT FIX (HIGH): a direct POST must not overwrite a beneficiary already on file.
+    it('rejects capture when a VERIFIED beneficiary is already on file', async () => {
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      primePartner(
+        { requiredPaymentType: 'ANY', parentId: null },
+        { upiId: 'existing@upi', paymentDetailsStatus: 'VERIFIED' },
+      );
+      await expect(
+        service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'new@upi' }),
+      ).rejects.toThrow(/already on file/i);
+      expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+    });
+
+    it('allows re-capture when the status is NEEDS_RECAPTURE (failed payout)', async () => {
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      primePartner(
+        { requiredPaymentType: 'ANY', parentId: null },
+        { bankAccountNumber: 'OLD123', ifscCode: 'OLD0001', paymentDetailsStatus: 'NEEDS_RECAPTURE' },
+      );
+      const res = await service.capturePayoutDetails(switcher, {
+        paymentMode: 'upi',
+        upiId: 'new@upi',
+      });
+      expect(res.paymentDetailsStatus).toBe('UNVERIFIED');
+      expect(mockPrisma.channelPartner.update).toHaveBeenCalled();
+    });
+  });
+
+  // AUDIT FIX (id-F4): the cheque upload route is feature-gated too (no storage abuse off-flag).
+  describe('uploadPayoutDocument', () => {
+    it('is forbidden when the feature flag is OFF', async () => {
+      mockTenant.resolveClient.mockResolvedValue({ features: {} });
+      await expect(
+        service.uploadPayoutDocument(switcher, {
+          buffer: Buffer.from('x'),
+          size: 1,
+          originalname: 'cheque.jpg',
+        } as Express.Multer.File),
+      ).rejects.toThrow(/not enabled/i);
+      expect(mockStorage.uploadFile).not.toHaveBeenCalled();
     });
   });
 });

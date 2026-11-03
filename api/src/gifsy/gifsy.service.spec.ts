@@ -380,6 +380,32 @@ describe('GifsyService', () => {
       expect(feats.catalogueMrpSlash).toBe(false);
     });
 
+    it('JOB A: round-trips captureBankAtRedemption through the PATCH projection; defaults OFF for a tenant that never set it', async () => {
+      // Bajaj turns it ON via the console → echoed true. Deoleo (blob never set it) → projected false
+      // so it stays byte-identical until explicitly enabled.
+      mockPrisma.client.findFirst.mockResolvedValueOnce({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: { walletModule: true },
+      });
+      mockPrisma.client.update.mockImplementationOnce(async ({ data }) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: data.features,
+      }));
+      const onRes = await service.updateClient(gifsy, 'bajaj', { features: { captureBankAtRedemption: true } });
+      expect((onRes.features as Record<string, boolean>).captureBankAtRedemption).toBe(true);
+
+      mockPrisma.client.findFirst.mockResolvedValueOnce({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: { walletModule: true },
+      });
+      mockPrisma.client.update.mockImplementationOnce(async ({ data }) => ({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: data.features,
+      }));
+      const offRes = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
+      expect((offRes.features as Record<string, boolean>).captureBankAtRedemption).toBe(false);
+    });
+
     it('F1: deep-merges the nested features.partnerApp so a partial PATCH keeps sibling flags', async () => {
       mockPrisma.client.findFirst.mockResolvedValue({
         id: 'deoleo',

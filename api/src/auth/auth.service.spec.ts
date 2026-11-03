@@ -158,6 +158,37 @@ describe('AuthService', () => {
       expect((result as any).conversionRate).toBe(2);
     });
 
+    it('JOB B: returns the RAW beneficiary + paymentDetailsStatus even when UNVERIFIED (rewards flow needs the raw fields)', async () => {
+      // The redemption flow reads the raw bank/upi to decide "has beneficiary" and create the payout,
+      // so /auth/me must NOT hide them — it only ADDS paymentDetailsStatus so the FE profile can hide.
+      (mockPrisma as any).user.findUnique = jest.fn().mockResolvedValue({ name: 'P', phone: '99' });
+      (mockPrisma as any).channelPartner.findUnique.mockResolvedValue({
+        id: 'cp1', partnerCode: 'PC1', businessName: 'Biz', ownerName: 'Owner',
+        phone: '99', email: 'e@e.com', gstNumber: null, panNumber: null, entityType: 'PROPRIETORSHIP',
+        bankName: 'HDFC', bankAccountNumber: '123456', bankAccountHolder: 'Owner',
+        ifscCode: 'HDFC0001', upiId: 'owner@upi', paymentMode: 'UPI',
+        paymentDetailsStatus: 'UNVERIFIED',
+      });
+      (mockPrisma as any).salesUser.findUnique.mockResolvedValue(null);
+      (mockPrisma as any).wallet.findUnique.mockResolvedValue({
+        earnedPoints: 100, redeemablePoints: 80, lockedPoints: 0, lifetimeEarned: 100,
+      });
+
+      const result = await service.getMe(partnerUser);
+
+      // The select requests paymentDetailsStatus alongside the (still-raw) beneficiary fields.
+      const selectArg = (mockPrisma as any).channelPartner.findUnique.mock.calls[0][0].select;
+      expect(selectArg.paymentDetailsStatus).toBe(true);
+
+      const cp = result.user.channelPartner as any;
+      // Raw payout fields are UNCHANGED (not nulled) even for an UNVERIFIED partner.
+      expect(cp.bankName).toBe('HDFC');
+      expect(cp.bankAccountNumber).toBe('123456');
+      expect(cp.upiId).toBe('owner@upi');
+      // ...and the status is surfaced so the FE profile page can gate the display.
+      expect(cp.paymentDetailsStatus).toBe('UNVERIFIED');
+    });
+
     it('defaults conversionRate to 1 when POINTS_CONVERSION_RATE is unset', async () => {
       delete process.env.POINTS_CONVERSION_RATE;
       (mockPrisma as any).user.findUnique = jest.fn().mockResolvedValue({ name: 'P', phone: '99' });

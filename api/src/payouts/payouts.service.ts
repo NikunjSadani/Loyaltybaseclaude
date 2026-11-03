@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
-import { PayoutStatus, Prisma, RedemptionStatus } from '@prisma/client';
+import { PayoutStatus, PaymentDetailsStatus, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { Msg91Service } from '../notifications/msg91.service';
@@ -655,6 +655,12 @@ export class PayoutsService {
         payoutMode: true,
         partnerId: true,
         redemptionOrderId: true,
+        // Frozen beneficiary snapshot — used by the capture-bank-at-redemption verify-stamp to
+        // confirm the partner's CURRENT rails still equal the ones that were actually paid before
+        // flipping paymentDetailsStatus to VERIFIED (never verify details a payout didn't pay).
+        upiId: true,
+        bankAccountNumber: true,
+        ifscCode: true,
       },
     });
 
@@ -735,6 +741,27 @@ export class PayoutsService {
           });
           paidCount++;
 
+          // Capture-bank-at-redemption: a COMPLETED payout verifies the partner's self-captured
+          // bank/UPI so they surface in Store Information (docs/plans/PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md).
+          // Two guards (audit-hardened):
+          //  - status IN {UNVERIFIED, NEEDS_RECAPTURE}: a real payment is authoritative and also
+          //    clears a prior NEEDS_RECAPTURE; it never downgrades a VERIFIED (operator/KYC/Deoleo) row.
+          //  - SNAPSHOT MATCH: the partner's CURRENT rail must still equal the one this txn actually
+          //    paid (the frozen snapshot) — so re-captured, never-paid details can't ride a payout on
+          //    old details into VERIFIED. Match the rail that was paid (UPI if present, else bank+IFSC).
+          await tx.channelPartner.updateMany({
+            where: {
+              id: txn.partnerId,
+              paymentDetailsStatus: {
+                in: [PaymentDetailsStatus.UNVERIFIED, PaymentDetailsStatus.NEEDS_RECAPTURE],
+              },
+              ...(txn.upiId
+                ? { upiId: txn.upiId }
+                : { bankAccountNumber: txn.bankAccountNumber, ifscCode: txn.ifscCode }),
+            },
+            data: { paymentDetailsStatus: PaymentDetailsStatus.VERIFIED, bankVerifiedAt: now },
+          });
+
           // Gather (do NO reads here) the payout-credit WhatsApp payload: push only the
           // ids already on the txn — the partner/order rows are batch-read AFTER commit
           // so a gather read can never abort this atomic money mutation. Tenant-gated so
@@ -775,6 +802,14 @@ export class PayoutsService {
             },
           });
           failedCount++;
+
+          // Capture-bank-at-redemption: a FAILED payout on still-unverified self-captured details
+          // marks them for recapture (hidden + re-prompted next redemption). Guarded on UNVERIFIED
+          // so a failed payout can NEVER hide operator/KYC-verified details or touch Deoleo.
+          await tx.channelPartner.updateMany({
+            where: { id: txn.partnerId, paymentDetailsStatus: PaymentDetailsStatus.UNVERIFIED },
+            data: { paymentDetailsStatus: PaymentDetailsStatus.NEEDS_RECAPTURE },
+          });
 
           // Reverse the redemption points ONCE (M2 claim), then mark the order
           // FAILED. The claim makes a re-upload of the same FAILED a no-op.

@@ -621,6 +621,39 @@ export class KycService {
   }
 
   /**
+   * JOB B — PAYMENT-DETAILS-AT-REDEMPTION display gate.
+   * Hide the five payout rails (+ the redemption cheque key) on any reviewer-facing emitter when the
+   * partner's `paymentDetailsStatus` is explicitly non-VERIFIED (UNVERIFIED / NEEDS_RECAPTURE). The
+   * ONLY code path that writes those values is the redemption self-capture; the DB column is
+   * non-nullable `@default(VERIFIED)`, so every existing row, every KYC-captured (operator/rep)
+   * record and all of Deoleo carry VERIFIED and pass through byte-identical. A missing status (never
+   * happens on a real selected row, only in a synthetic object) is treated as the default VERIFIED
+   * state → shown; the real protection is that the capture path marks hidden rows explicitly AND
+   * every emitter selects the column. Nulls the ChannelPartner field names
+   * (bankName/bankAccountNumber/bankAccountHolder/ifscCode/upiId); the emit layer renames
+   * accountNumber/accountHolderName AFTER this runs.
+   */
+  private isPayoutHidden(status: unknown): boolean {
+    return status === 'UNVERIFIED' || status === 'NEEDS_RECAPTURE';
+  }
+
+  private hidePayoutUnlessVerified<T extends Record<string, unknown>>(partner: T | null): T | null {
+    if (!partner) return partner;
+    if (!this.isPayoutHidden((partner as { paymentDetailsStatus?: unknown }).paymentDetailsStatus)) {
+      return partner;
+    }
+    return {
+      ...partner,
+      bankName: null,
+      bankAccountNumber: null,
+      bankAccountHolder: null,
+      ifscCode: null,
+      upiId: null,
+      payoutChequeFileKey: null,
+    };
+  }
+
+  /**
    * Reviewer-facing EFFECTIVE identity/payout values (stage-at-approval model). A re-KYC stages its
    * PROPOSED values on `KycSubmission.proposedPartner` and does NOT write them to the live
    * ChannelPartner until approval — so a reviewer queue/export must OVERLAY those proposed values
@@ -2614,8 +2647,14 @@ export class KycService {
     // submission). TODO: switch the privileged check to the `kyc:view_documents`
     // permission once the RBAC flag-gate is enforced (currently role-based).
     const masked = !this.canSeeFullKycPii(user.role) && submission.userId !== user.sub;
+    // JOB B: hide the payout rails on this detail view unless the live partner is VERIFIED
+    // (redemption-captured-but-unpaid details stay hidden until a payout confirms them). Default
+    // VERIFIED → every existing/KYC-captured record (and all of Deoleo) is unchanged.
+    const payoutUnverified = this.isPayoutHidden(
+      (submission.partner as { paymentDetailsStatus?: unknown } | null)?.paymentDetailsStatus,
+    );
     const partner = submission.partner
-      ? this.maskPartnerSensitiveFields(submission.partner, masked)
+      ? this.hidePayoutUnlessVerified(this.maskPartnerSensitiveFields(submission.partner, masked))
       : null;
 
     // Resolve a viewable URL per document so the reviewer (sales SO/ASM or Gifsy
@@ -2667,10 +2706,16 @@ export class KycService {
     // FE follow-up (orchestrator): the KYC detail page should render this `proposedPartner` diff for a
     // re-KYC (current vs proposed) — the live `partner` no longer reflects the pending change at draft time.
     const proposedRaw = submission.proposedPartner;
-    const proposedPartner =
+    const proposedMasked =
       proposedRaw && typeof proposedRaw === 'object' && !Array.isArray(proposedRaw)
         ? this.maskPartnerSensitiveFields(proposedRaw as Record<string, unknown>, masked)
         : null;
+    // JOB B: the staged proposed payout values are gated on the LIVE partner's status too, so an
+    // UNVERIFIED (redemption-captured) partner never surfaces payout rails via the proposed diff.
+    const proposedPartner =
+      proposedMasked && payoutUnverified
+        ? this.hidePayoutUnlessVerified({ ...proposedMasked, paymentDetailsStatus: 'UNVERIFIED' })
+        : proposedMasked;
 
     // ── Stream C: per-field "verified on parent" signal ──────────────────────
     // When a child outlet was grouped-BEFORE-KYC (Outlet.parentId set) under an APPROVED parent
@@ -5134,6 +5179,8 @@ export class KycService {
             ifscCode: true,
             upiId: true,
             paymentMode: true,
+            // JOB B: drives the hide-unless-VERIFIED payout gate on this emitter.
+            paymentDetailsStatus: true,
             // real outlets are isPrimary=false → prefer primary if flagged, else first outlet (avoids an empty outlets[]).
             outlets: {
               where: { deletedAt: null },
@@ -5166,7 +5213,9 @@ export class KycService {
     const entries = submissions.map((s) => {
       // Overlay the re-KYC PROPOSED values (stage-at-approval) so the queue shows what's UNDER
       // REVIEW, not the stale live-partner values (which a re-KYC only overwrites at approval).
-      const p = this.overlayProposedIdentity(s.partner, s.proposedPartner);
+      // JOB B: null the payout rails unless VERIFIED (default VERIFIED → unchanged for every
+      // existing/KYC-captured record + Deoleo; only redemption-captured-but-unpaid rows hide).
+      const p = this.hidePayoutUnlessVerified(this.overlayProposedIdentity(s.partner, s.proposedPartner));
       const o = p?.outlets[0];
       const typeDisplay = typeDisplayByClient.get(s.user.clientId) ?? EMPTY_TYPE_DISPLAY;
       const holder = p?.bankAccountHolder?.trim().toLowerCase();
@@ -5234,6 +5283,8 @@ export class KycService {
             ifscCode: true,
             upiId: true,
             paymentMode: true,
+            // JOB B: drives the hide-unless-VERIFIED payout gate on this emitter.
+            paymentDetailsStatus: true,
             // real outlets are isPrimary=false → prefer primary if flagged, else first outlet (avoids an empty outlets[]).
             outlets: {
               where: { deletedAt: null },
@@ -5266,7 +5317,9 @@ export class KycService {
     for (const s of submissions) {
       // Overlay the re-KYC PROPOSED values (stage-at-approval) so the export reflects what's UNDER
       // REVIEW, not the stale live-partner values (a re-KYC only overwrites the partner at approval).
-      const p = this.overlayProposedIdentity(s.partner, s.proposedPartner);
+      // JOB B: null the payout rails unless VERIFIED (default VERIFIED → unchanged for every
+      // existing/KYC-captured record + Deoleo; only redemption-captured-but-unpaid rows hide).
+      const p = this.hidePayoutUnlessVerified(this.overlayProposedIdentity(s.partner, s.proposedPartner));
       const o = p?.outlets[0];
       const typeDisplay = typeDisplayByClient.get(s.user.clientId) ?? EMPTY_TYPE_DISPLAY;
       const holder = p?.bankAccountHolder?.trim().toLowerCase();
@@ -5343,6 +5396,8 @@ export class KycService {
             ifscCode: true,
             upiId: true,
             paymentMode: true,
+            // JOB B: drives the hide-unless-VERIFIED payout gate on this emitter.
+            paymentDetailsStatus: true,
             // real outlets are isPrimary=false → prefer primary if flagged, else first outlet (avoids an empty outlets[]).
             outlets: {
               where: { deletedAt: null },
@@ -5386,7 +5441,9 @@ export class KycService {
     const rows: RejectedKycRow[] = submissions.map((s) => {
       // A rejected re-KYC's proposed values were never applied to the live partner; the reviewer
       // rejected the PROPOSED payload, so overlay it here to show what was actually submitted/rejected.
-      const p = this.overlayProposedIdentity(s.partner, s.proposedPartner);
+      // JOB B: null the payout rails unless VERIFIED (default VERIFIED → unchanged for every
+      // existing/KYC-captured record + Deoleo; only redemption-captured-but-unpaid rows hide).
+      const p = this.hidePayoutUnlessVerified(this.overlayProposedIdentity(s.partner, s.proposedPartner));
       const o = p?.outlets[0];
       const hist = s.statusHistory[0];
       const rejectedAt = hist?.createdAt ?? s.reviewedAt ?? null;

@@ -207,6 +207,9 @@ export async function resolveGroupIdentity(
     select: {
       onboardedAt: true, businessName: true, ownerName: true, gstNumber: true, panNumber: true,
       bankName: true, bankAccountNumber: true, bankAccountHolder: true, ifscCode: true, upiId: true,
+      // Capture-bank-at-redemption: only VERIFIED payout details feed a child's prefill (a source
+      // that self-captured not-yet-paid details must NOT seed them into grouped children's KYC).
+      paymentDetailsStatus: true,
     },
   });
   const parentHasDetails = !!(
@@ -214,7 +217,7 @@ export async function resolveGroupIdentity(
   );
   // A PARENT's approval marker IS ChannelPartner.onboardedAt (set by ParentsService at approval).
   if (parent && parent.onboardedAt != null && parentHasDetails) {
-    return pickGroupIdentity(parent, parentId);
+    return pickGroupIdentity(parent, parentId, !isPayoutStatusHidden(parent.paymentDetailsStatus));
   }
 
   // Approved SIBLING: a non-parent partner with an outlet in this group whose KYC is APPROVED.
@@ -244,9 +247,21 @@ export async function resolveGroupIdentity(
       id: true,
       businessName: true, ownerName: true, gstNumber: true, panNumber: true,
       bankName: true, bankAccountNumber: true, bankAccountHolder: true, ifscCode: true, upiId: true,
+      paymentDetailsStatus: true,
     },
   });
-  return sibling ? pickGroupIdentity(sibling, sibling.id) : null;
+  return sibling
+    ? pickGroupIdentity(sibling, sibling.id, !isPayoutStatusHidden(sibling.paymentDetailsStatus))
+    : null;
+}
+
+/**
+ * Capture-bank-at-redemption: payout details are HIDDEN only when EXPLICITLY unverified. A real
+ * ChannelPartner row is `VERIFIED` by default (migration backfill), so an absent/undefined status
+ * (e.g. an old test fixture) reads as shown — mirrors kyc.service's `isPayoutHidden`.
+ */
+function isPayoutStatusHidden(status: string | null | undefined): boolean {
+  return status === 'UNVERIFIED' || status === 'NEEDS_RECAPTURE';
 }
 
 /**
@@ -317,18 +332,27 @@ export async function resolveGroupClassification(
   return null;
 }
 
-/** Project a partner row onto the GroupIdentity shape (identity text only) + its source partner id. */
-function pickGroupIdentity(p: Partial<GroupIdentity>, sourcePartnerId: string): GroupIdentity {
+/**
+ * Project a partner row onto the GroupIdentity shape (identity text only) + its source partner id.
+ * `payoutVerified` gates the payout fields (capture-bank-at-redemption): a source whose payout
+ * details are not VERIFIED contributes its name/GST/PAN but NOT its (unconfirmed) bank/UPI, so a
+ * self-captured, not-yet-paid rail never pre-fills a grouped child's KYC form.
+ */
+function pickGroupIdentity(
+  p: Partial<GroupIdentity>,
+  sourcePartnerId: string,
+  payoutVerified: boolean,
+): GroupIdentity {
   return {
     businessName: p.businessName ?? null,
     ownerName: p.ownerName ?? null,
     gstNumber: p.gstNumber ?? null,
     panNumber: p.panNumber ?? null,
-    bankName: p.bankName ?? null,
-    bankAccountNumber: p.bankAccountNumber ?? null,
-    bankAccountHolder: p.bankAccountHolder ?? null,
-    ifscCode: p.ifscCode ?? null,
-    upiId: p.upiId ?? null,
+    bankName: payoutVerified ? (p.bankName ?? null) : null,
+    bankAccountNumber: payoutVerified ? (p.bankAccountNumber ?? null) : null,
+    bankAccountHolder: payoutVerified ? (p.bankAccountHolder ?? null) : null,
+    ifscCode: payoutVerified ? (p.ifscCode ?? null) : null,
+    upiId: payoutVerified ? (p.upiId ?? null) : null,
     sourcePartnerId,
   };
 }

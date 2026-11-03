@@ -1,4 +1,4 @@
-import { IsOptional, IsString } from 'class-validator';
+import { IsIn, IsOptional, IsString } from 'class-validator';
 
 /**
  * Query DTO for GET /v1/partner/targets.
@@ -10,4 +10,47 @@ export class ListPartnerTargetsQueryDto {
   @IsOptional()
   @IsString()
   period?: string;
+}
+
+/**
+ * Body for POST /v1/partner/payout-details — a wholesaler self-captures bank/UPI at
+ * redemption (capture-bank-at-redemption; see PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md).
+ * Field names mirror the KYC CreateKycDto payout block so the FE bank-or-upi-section
+ * component is reused verbatim. Server-side validation (mode↔mandate, required fields,
+ * uniqueness) mirrors kyc.service.create and lives in PartnerService.capturePayoutDetails.
+ */
+export class CapturePayoutDetailsDto {
+  @IsIn(['bank', 'upi'])
+  paymentMode!: 'bank' | 'upi';
+
+  @IsOptional()
+  @IsString()
+  bankName?: string;
+
+  @IsOptional()
+  @IsString()
+  accountHolderName?: string;
+
+  @IsOptional()
+  @IsString()
+  accountNumber?: string;
+
+  @IsOptional()
+  @IsString()
+  ifscCode?: string;
+
+  @IsOptional()
+  @IsString()
+  upiId?: string;
+
+  /** GCS key of the cancelled-cheque uploaded via POST /v1/partner/documents (bank mode). */
+  @IsOptional()
+  @IsString()
+  chequeFileKey?: string;
+}
+
+/** Body for POST /v1/partner/documents — partner-scoped cheque upload (cheque only). */
+export class UploadPartnerDocumentDto {
+  @IsIn(['CANCELLED_CHEQUE'])
+  documentType!: 'CANCELLED_CHEQUE';
 }

@@ -5401,6 +5401,118 @@ describe('KycService', () => {
     });
   });
 
+  // ── JOB B: PAYMENT-DETAILS-AT-REDEMPTION — hide payout rails unless VERIFIED ──
+  describe('payment-details display gate (paymentDetailsStatus)', () => {
+    const queuePartner = (paymentDetailsStatus: string | undefined) => ({
+      id: 'SUB-GATE',
+      boardPhotoLat: null,
+      boardPhotoLng: null,
+      user: { name: 'Owner A', phone: '9820100001', clientId: 'bajaj' },
+      partner: {
+        businessName: 'Kumar Store',
+        ownerName: 'Kumar',
+        phone: '9820100001',
+        gstNumber: 'GSTXXX',
+        panNumber: 'PANXXX',
+        bankName: 'HDFC',
+        bankAccountNumber: '50100',
+        bankAccountHolder: 'Kumar',
+        ifscCode: 'HDFC0001',
+        upiId: 'kumar@upi',
+        paymentMode: 'bank',
+        ...(paymentDetailsStatus ? { paymentDetailsStatus } : {}),
+        outlets: [
+          { outletCode: 'OUT-GATE', name: 'Kumar Store', addressLine1: 'x', addressLine2: null,
+            city: 'M', state: 'MH', pincode: '400058', programName: 'Gold', outletType: { name: 'SSS' } },
+        ],
+      },
+      verificationItems: [],
+    });
+
+    it('review-queue NULLS the five payout fields for an UNVERIFIED partner (redemption-captured, unpaid)', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([queuePartner('UNVERIFIED')]);
+      const entry = (await service.reviewQueue(gifsy)).entries[0];
+      expect(entry.bankName).toBeNull();
+      expect(entry.accountHolderName).toBeNull();
+      expect(entry.accountNumber).toBeNull();
+      expect(entry.ifscCode).toBeNull();
+      expect(entry.upiId).toBeNull();
+      // Non-payout identity is untouched.
+      expect(entry.gstNumber).toBe('GSTXXX');
+      expect(entry.panNumber).toBe('PANXXX');
+    });
+
+    it('review-queue NULLS the payout fields for a NEEDS_RECAPTURE partner (failed payout)', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([queuePartner('NEEDS_RECAPTURE')]);
+      const entry = (await service.reviewQueue(gifsy)).entries[0];
+      expect(entry.bankName).toBeNull();
+      expect(entry.upiId).toBeNull();
+    });
+
+    it('review-queue SHOWS the payout fields for a VERIFIED partner', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([queuePartner('VERIFIED')]);
+      const entry = (await service.reviewQueue(gifsy)).entries[0];
+      expect(entry.bankName).toBe('HDFC');
+      expect(entry.accountNumber).toBe('50100');
+      expect(entry.ifscCode).toBe('HDFC0001');
+      expect(entry.upiId).toBe('kumar@upi');
+    });
+
+    it('review-queue SHOWS the payout fields when the status column is absent (default-VERIFIED / Deoleo parity)', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([queuePartner(undefined)]);
+      const entry = (await service.reviewQueue(gifsy)).entries[0];
+      expect(entry.bankName).toBe('HDFC');
+      expect(entry.upiId).toBe('kumar@upi');
+    });
+
+    it('selects paymentDetailsStatus in the review-queue partner select (so the gate has a value)', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([]);
+      await service.reviewQueue(gifsy);
+      const sel = mockPrisma.kycSubmission.findMany.mock.calls[0][0].include.partner.select;
+      expect(sel.paymentDetailsStatus).toBe(true);
+    });
+
+    it('getOne NULLS the payout fields for an UNVERIFIED partner (Gifsy, unmasked)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'admin1',
+        partner: {
+          id: 'p1',
+          bankName: 'HDFC', bankAccountNumber: '123456789012', bankAccountHolder: 'Kumar',
+          ifscCode: 'HDFC0001', upiId: 'kumar@upi', panNumber: 'ABCDE1234F',
+          paymentDetailsStatus: 'UNVERIFIED', outlets: [],
+        },
+        documents: [], statusHistory: [],
+        user: { id: 'admin1', name: 'Admin', phone: '9', role: 'GIFSY_ADMIN' },
+      });
+      const res = await service.getOne(gifsy, 's1');
+      expect(res.submission.partner?.bankName).toBeNull();
+      expect(res.submission.partner?.bankAccountNumber).toBeNull();
+      expect(res.submission.partner?.upiId).toBeNull();
+      // Non-payout identity still present.
+      expect(res.submission.partner?.panNumber).toBe('ABCDE1234F');
+    });
+
+    it('getOne SHOWS the payout fields for a VERIFIED partner (Gifsy, unmasked)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'admin1',
+        partner: {
+          id: 'p1',
+          bankName: 'HDFC', bankAccountNumber: '123456789012', bankAccountHolder: 'Kumar',
+          ifscCode: 'HDFC0001', upiId: 'kumar@upi', panNumber: 'ABCDE1234F',
+          paymentDetailsStatus: 'VERIFIED', outlets: [],
+        },
+        documents: [], statusHistory: [],
+        user: { id: 'admin1', name: 'Admin', phone: '9', role: 'GIFSY_ADMIN' },
+      });
+      const res = await service.getOne(gifsy, 's1');
+      expect(res.submission.partner?.bankName).toBe('HDFC');
+      expect(res.submission.partner?.bankAccountNumber).toBe('123456789012');
+      expect(res.submission.partner?.upiId).toBe('kumar@upi');
+    });
+  });
+
   // ── Cross-tenant read boundary: the KYC tenant filter (A1). Feeds ~27 consumers. ──
   describe('kycTenantFilter (assumed-vs-unassumed)', () => {
     // Private; the returned where-fragment IS the whole cross-tenant contract.
