@@ -11,8 +11,8 @@ import { expectNoFabricatedData } from '../helpers/assert';
  *
  * The page tab labels (from the actual page component), given visibilityEnabled=true:
  *   - "Bulk Upload"           — always rendered (the primary tab)
- *   - "Approval Queue (N)"   — only when visibilityPhotoEnabled = true (Gifsy setting)
- *   - "Fraud Log (N)"        — only when visibilityPhotoEnabled = true
+ *   - "Approval Queue (N)"   — only in PHOTO_APPROVAL capture mode (photoApprovalEnabled)
+ *   - "Fraud Log (N)"        — only in PHOTO_APPROVAL capture mode
  *
  * The default active tab is "upload" (Bulk Upload) when photoApprovalEnabled is false,
  * or "queue" (Approval Queue) when photoApprovalEnabled is true.
@@ -41,7 +41,7 @@ test.describe('@clientAdmin visibility', () => {
   test('"Bulk Upload" tab button always renders', async ({ page }) => {
     await page.goto('/admin/visibility');
     // "Bulk Upload" is the only tab guaranteed to be present regardless of the
-    // visibilityPhotoEnabled Gifsy setting.  "Approval Queue" and "Fraud Log" are
+    // visibility capture mode.  "Approval Queue" and "Fraud Log" are
     // only rendered when photoApprovalEnabled === true.
     await expect(page.getByRole('button', { name: /Bulk Upload/i })).toBeVisible({ timeout: 10_000 });
   });

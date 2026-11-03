@@ -2102,15 +2102,10 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           const ledgerLabel = settings.salesApp?.ledgerLabel ?? 'View Points Ledger';
           // "Redeem for Outlet" is surfaced as the PROMINENT primary button above
           // (same showRedeem gate), so it is intentionally NOT repeated in this list.
-          // Visibility-photo action precedence: the authoritative DB flag (visibilityCaptureMode)
-          // wins. The backend REJECTS photo upload unless the tenant is in PHOTO_APPROVAL mode, so
-          // showing the action when the display-only visibilityPhotoEnabled disagrees would lead the
-          // agent into a guaranteed backend rejection. Require BOTH: PHOTO_APPROVAL mode AND the
-          // display flag — they can no longer contradict the backend.
-          const showVis     = settings.visibilityEnabled === true && captureMode === 'PHOTO_APPROVAL' && settings.visibilityPhotoEnabled === true;
+          // Visibility capture is reached from the PROMINENT "Visibility — this period" card
+          // above (gated by visibilityEnabled + PHOTO_APPROVAL), so it is not duplicated here.
           const actions = [
             { href: `/sales/kyc/${id}/ledger`,         icon: <BookOpen       className="h-4 w-4 text-blue-500" />,    bg: 'bg-blue-50',       title: ledgerLabel,              sub: 'Transaction history & balance',             show: true      },
-            { href: `/sales/visibility?outletId=${id}`, icon: <Camera         className="h-4 w-4 text-[#16a34a]" />,   bg: 'bg-[#16a34a]/10',  title: 'Capture Visibility',     sub: 'Take the POSM photo for this outlet',       show: showVis    },
             { href: '/sales/support',                  icon: <HeadphonesIcon className="h-4 w-4 text-rose-500" />,    bg: 'bg-rose-50',       title: 'Raise Support Ticket',  sub: 'Report an issue on behalf of this outlet',  show: true      },
           ];
           return actions.filter(a => a.show).map(action => (

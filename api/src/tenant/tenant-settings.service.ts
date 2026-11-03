@@ -169,15 +169,13 @@ export interface EffectiveSettings {
   minVoucherFreeAmount:   number;
   /** Amber pace-zone threshold as a % of time elapsed. */
   paceAmberThreshold:     number;
-  /** Whether the sales app may submit visibility photos. */
-  visibilityPhotoEnabled: boolean;
   /**
    * Per-tenant MASTER switch for the whole Visibility module (photo-approval AND
    * amount-upload paths). When false, every visibility endpoint returns 403 and the
    * FE hides all visibility surfaces. Default is FALSE (opt-in) — a tenant must be
-   * explicitly turned ON in the Gifsy Settings panel. Distinct from (and above) both
-   * `visibilityPhotoEnabled` and the ClientConfig `visibilityCaptureMode` selector,
-   * and from the per-outlet-type `OutletTypeClientConfig.visibilityEnabled` column.
+   * explicitly turned ON in the Gifsy Settings panel. Distinct from (and above) the
+   * ClientConfig `visibilityCaptureMode` selector, and from the per-outlet-type
+   * `OutletTypeClientConfig.visibilityEnabled` column.
    */
   visibilityEnabled:      boolean;
   /**
@@ -247,7 +245,6 @@ type SettingKey =
   | 'minBankTransferAmount'
   | 'minVoucherFreeAmount'
   | 'paceAmberThreshold'
-  | 'visibilityPhotoEnabled'
   | 'visibilityEnabled'
   | 'kycGstinRequired'
   | 'redemptionChannels'
@@ -331,7 +328,6 @@ export class TenantSettingsService {
       minBankTransferAmount:  250,
       minVoucherFreeAmount:   250,
       paceAmberThreshold:     10,
-      visibilityPhotoEnabled: false,
       // Master Visibility switch defaults OFF — visibility is opt-in per tenant
       // (owner decision 2026-06-25). A tenant must be turned ON in Gifsy Settings.
       visibilityEnabled:      false,
@@ -588,10 +584,6 @@ export class TenantSettingsService {
         case 'paceAmberThreshold': {
           const n = this.num(v);
           if (n != null && n >= 0) out.paceAmberThreshold = n;
-          break;
-        }
-        case 'visibilityPhotoEnabled': {
-          if (typeof v === 'boolean') out.visibilityPhotoEnabled = v;
           break;
         }
         case 'visibilityEnabled': {

@@ -140,7 +140,6 @@ export class AuthService {
         minBankTransferAmount:  settings.minBankTransferAmount,
         minVoucherFreeAmount:   settings.minVoucherFreeAmount,
         paceAmberThreshold:     settings.paceAmberThreshold,
-        visibilityPhotoEnabled: settings.visibilityPhotoEnabled,
         visibilityCaptureMode,
         redemptionChannels:     settings.redemptionChannels,
         salesApp:               settings.salesApp,

@@ -106,7 +106,6 @@ const LENIENT_SETTINGS = () => ({
   minBankTransferAmount: 0,
   minVoucherFreeAmount: 0,
   paceAmberThreshold: 10,
-  visibilityPhotoEnabled: false,
   redemptionChannels: { physicalGifts: true, vouchers: true, bankTransfer: true },
   salesApp: { ledgerLabel: 'Wallet', upiEnabled: false },
   creditsPayouts: { monthCutoffDay: 28, safetyCapPoints: 50000, safetyCapInr: 100000, fourEyesEnabled: false, notifyEmails: [] },

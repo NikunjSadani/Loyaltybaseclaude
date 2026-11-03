@@ -56,6 +56,12 @@ Current reality of each field (all localStorage today unless noted):
   KYC-detail `salesRedeemEnabled`; configured in Outlet Type Configuration → Feature flags.)
 - `visibilityPhotoEnabled` — FE-only, but **overlaps** the already-DB-backed
   `visibilityCaptureMode`. Consolidate, don't duplicate.
+  > **RETIRED 2026-11-02 (platform-wide, owner-approved):** this flag was never a real
+  > knob — it only toggled a redundant "Capture Visibility" Quick-Actions shortcut on the
+  > KYC page (the prominent card already provides that path under `visibilityEnabled` +
+  > PHOTO_APPROVAL). Removed from backend `EffectiveSettings`/`/me`/`/settings`, FE
+  > `GifsySettings`, and the KYC page. All tenants (staging+prod) were `false`, so zero
+  > behavioural change. The rest of this section is historical.
 
 Every backend entrypoint that needs a setting already receives `user.clientId` (JWT). Good.
 

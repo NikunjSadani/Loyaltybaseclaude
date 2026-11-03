@@ -460,12 +460,6 @@ export interface GifsySettings {
    */
   paceAmberThreshold:      number;
   /**
-   * Whether the sales team can submit visibility photos through the app.
-   * Default: true (enabled). Set to false for tenants like Deoleo who
-   * handle visibility photo capture through their own internal process.
-   */
-  visibilityPhotoEnabled?: boolean;
-  /**
    * Per-tenant master switch for the entire Visibility module. Default: false (OFF).
    * When false, ALL visibility capture/approval/upload surfaces are hidden in the FE
    * and the backend rejects visibility actions for this tenant. Treat missing/undefined

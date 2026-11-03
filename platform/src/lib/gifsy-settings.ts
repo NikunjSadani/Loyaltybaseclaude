@@ -25,7 +25,6 @@ export const DEFAULT_SETTINGS: GifsySettings = {
   minVoucherFreeAmount:    250,
   paceAmberThreshold:      10,
   visibilityEnabled:       false,
-  visibilityPhotoEnabled:  false,
   visibilityCaptureMode:   'PHOTO_APPROVAL',
   kycGstinRequired:        true,
   redemptionChannels: {
@@ -64,7 +63,6 @@ interface ServerSettings {
   minVoucherFreeAmount:   number;
   paceAmberThreshold:     number;
   visibilityEnabled:      boolean;
-  visibilityPhotoEnabled: boolean;
   /** Present on the /me settings block only (authoritative ClientConfig flag). */
   visibilityCaptureMode?: 'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD';
   kycGstinRequired:       boolean;
@@ -112,7 +110,6 @@ function fromServer(srv: ServerSettings, prev: GifsySettings): GifsySettings {
     minVoucherFreeAmount:   srv.minVoucherFreeAmount   ?? prev.minVoucherFreeAmount,
     paceAmberThreshold:     srv.paceAmberThreshold     ?? prev.paceAmberThreshold,
     visibilityEnabled:      srv.visibilityEnabled      ?? prev.visibilityEnabled,
-    visibilityPhotoEnabled: srv.visibilityPhotoEnabled ?? prev.visibilityPhotoEnabled,
     visibilityCaptureMode:  srv.visibilityCaptureMode  ?? prev.visibilityCaptureMode ?? 'PHOTO_APPROVAL',
     // Default TRUE when absent (GSTIN compulsory; opt-out) — prev is seeded from DEFAULT_SETTINGS (true).
     kycGstinRequired:       srv.kycGstinRequired       ?? prev.kycGstinRequired,
@@ -170,7 +167,6 @@ const SAVE_KEY_MAP: Partial<Record<keyof GifsySettings, string>> = {
   minVoucherFreeAmount:   'minVoucherFreeAmount',
   paceAmberThreshold:     'paceAmberThreshold',
   visibilityEnabled:      'visibilityEnabled',
-  visibilityPhotoEnabled: 'visibilityPhotoEnabled',
   kycGstinRequired:       'kycGstinRequired',
   redemptionChannels:     'redemptionChannels',
   salesApp:               'salesApp',
