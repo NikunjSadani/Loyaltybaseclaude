@@ -60,7 +60,13 @@ vi.mock('@/lib/partner-identity', () => ({
   usePartnerIdentity: () => identityRef.current,
 }));
 
-import PartnerDashboardPage, { computeMonthComparison } from '../page';
+import { istMonthKey } from '@/lib/ist-date';
+import PartnerDashboardPage, { computeMonthComparison, previousMonthKey } from '../page';
+
+// Date-relative month keys (IST) — the merged Performance card derives its months the same
+// way, so position-based (computeMonthComparison) and key-based (per-month target) rows align.
+const CUR  = istMonthKey(new Date());
+const PREV = previousMonthKey();
 
 /** A resolved identity with the given outletType + v2 flag (features normalized upstream). */
 function identity(outletType: string, v2: boolean) {
@@ -91,6 +97,9 @@ function stubFetch(opts: { kpi: Kpi | null; walletPts: number; trend: TrendResp 
         : [];
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { period: '2026-10', outlets } }) });
     }
+    if (url.includes('/api/wallet/points-credited')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { month: PREV, points: 0 } }) });
+    }
     if (url.includes('/api/auth/me')) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { user: { channelPartner: { wallets: [{ redeemablePoints: opts.walletPts }] } } } }) });
     }
@@ -101,8 +110,8 @@ function stubFetch(opts: { kpi: Kpi | null; walletPts: number; trend: TrendResp 
 const CASES_TREND: TrendResp = {
   kpiName: 'Secondary Volume', unit: 'cases',
   trend: [
-    { month: '2026-09', target: 1000, achieved: 800 },   // last month
-    { month: '2026-10', target: 1000, achieved: 1000 },  // this month
+    { month: PREV, target: 1000, achieved: 800 },   // last month
+    { month: CUR,  target: 1000, achieved: 1000 },  // this month
   ],
 };
 
@@ -112,19 +121,15 @@ afterEach(() => {
 });
 
 describe('PDV2 — partnerDashboardV2 ON', () => {
-  it('hides the chart, shows the to-go banner + comparison card, enlarges points, and does NOT re-fetch /partner/me', async () => {
+  it('hides the chart, shows the merged Performance card + to-go banner, enlarges points, and does NOT re-fetch /partner/me', async () => {
     identityRef.current = identity('WHOLESALER', true);
     const fetchMock = stubFetch({ kpi: { code: 'SV', name: 'Secondary Volume', target: 800, achieved: 400, unit: 'cases' }, walletPts: 500, trend: CASES_TREND });
     vi.stubGlobal('fetch', fetchMock);
     render(<PartnerDashboardPage />);
 
-    // Comparison card present — wait on a trend-derived value (trend fetch settles after mount).
-    await waitFor(() => expect(screen.getByText('1,000 cases')).toBeInTheDocument());
-    expect(screen.getByText('Achievement · This month vs last')).toBeInTheDocument();
-    expect(screen.getByText('This month (so far)')).toBeInTheDocument();  // honest partial-month label
-    expect(screen.getByText('Last month')).toBeInTheDocument();
-    expect(screen.getByText('800 cases')).toBeInTheDocument();
-    expect(screen.getByText(/\+25%/)).toBeInTheDocument();
+    // The single merged Performance card replaces the chart in v2 (its content is covered in
+    // performance-card.test.tsx; here we only assert the v2 GATING).
+    await waitFor(() => expect(screen.getByText('Performance')).toBeInTheDocument());
 
     // Trend chart hidden.
     expect(screen.queryByTestId('achievement-chart')).not.toBeInTheDocument();
@@ -140,38 +145,19 @@ describe('PDV2 — partnerDashboardV2 ON', () => {
     // SINGLE identity source — the page must NOT fetch /partner/me itself (the hook is mocked).
     expect(fetchMock.mock.calls.some(c => String(c[0]).includes('/api/partner/me'))).toBe(false);
   });
-
-  it('Finding 2: primary null (no current-month target) → unit comes from the trend (INR formatted); title is the static Achievement label', async () => {
-    identityRef.current = identity('WHOLESALER', true);
-    const inrTrend: TrendResp = {
-      kpiName: 'Net Revenue', unit: 'INR',
-      trend: [
-        { month: '2026-09', target: 600000, achieved: 500000 },  // last month ₹5L
-        { month: '2026-10', target: 600000, achieved: 580000 },  // this month ₹5.8L
-      ],
-    };
-    vi.stubGlobal('fetch', stubFetch({ kpi: null, walletPts: 500, trend: inrTrend }));
-    render(<PartnerDashboardPage />);
-
-    // Unit + values resolve from the trend even though `primary` is null (title is the static Achievement label).
-    await waitFor(() => expect(screen.getByText('₹5.8L')).toBeInTheDocument());
-    expect(screen.getByText('Achievement · This month vs last')).toBeInTheDocument();
-    expect(screen.getByText('₹5L')).toBeInTheDocument();                 // last month, INR compact
-    expect(screen.getByText(/\+16%/)).toBeInTheDocument();               // +₹80K → +16%
-  });
 });
 
 describe('PDV2 — partnerDashboardV2 OFF (byte-identical to today)', () => {
-  it('shows the trend chart, no comparison card, no to-go banner, points stay text-base', async () => {
+  it('shows the trend chart, no Performance card, no to-go banner, points stay text-base', async () => {
     identityRef.current = identity('WHOLESALER', false);
     vi.stubGlobal('fetch', stubFetch({ kpi: { code: 'SV', name: 'Secondary Volume', target: 800, achieved: 400, unit: 'cases' }, walletPts: 500, trend: CASES_TREND }));
     render(<PartnerDashboardPage />);
 
     await waitFor(() => expect(screen.getByTestId('achievement-chart')).toBeInTheDocument());
 
-    // No comparison card, no hero to-go banner (the chart's own footer still reads
+    // No merged Performance card, no hero to-go banner (the chart's own footer still reads
     // "… to go · N days left" as today — that is a DIFFERENT, non-exact string).
-    expect(screen.queryByText(/This month vs last/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Performance')).not.toBeInTheDocument();
     expect(screen.queryByText('400 cases to go')).not.toBeInTheDocument();
 
     // Points stay small.
@@ -183,7 +169,7 @@ describe('PDV2 — partnerDashboardV2 OFF (byte-identical to today)', () => {
 
 describe('PDV2 — to-go banner uses the SAME exact remaining>0 condition in all heroes (Finding 3)', () => {
   // 996/1000 rounds to 100% (isMet), but raw remaining is 4 → every hero must still show "4 to go".
-  const boundaryTrend: TrendResp = { kpiName: 'Secondary Volume', unit: 'cases', trend: [{ month: '2026-10', target: 1000, achieved: 996 }] };
+  const boundaryTrend: TrendResp = { kpiName: 'Secondary Volume', unit: 'cases', trend: [{ month: CUR, target: 1000, achieved: 996 }] };
 
   it.each([
     ['WHOLESALER'],
