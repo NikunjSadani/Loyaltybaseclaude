@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#
+# Pre-push gate. Blocks a push unless the FULL gates pass — removing any reliance on
+# remembering to run them (or on reading a piped exit code, which `nest build | tail`
+# can mask). Runs `scripts/gates.sh` (api jest + api build + platform vitest + platform
+# tsc, ~5 min) ONLY when the push actually changes code.
+#
+# - Docs/config-only pushes skip the gates (no wasted run on a README push).
+# - Set GATES_SKIP=1 to bypass in an emergency (e.g. a hotfix revert).
+# - CI's `needs: test` is the deploy-time backstop; this is the pre-push one.
+#
+# Activate once per clone:  bash scripts/setup-hooks.sh   (sets core.hooksPath=.githooks)
+#
+set -u
+[ "${GATES_SKIP:-0}" = "1" ] && { echo "pre-push: GATES_SKIP=1 → skipping gates."; exit 0; }
+ROOT="$(git rev-parse --show-toplevel)"
+ZERO="0000000000000000000000000000000000000000"
+
+changed=""
+while read -r _localref localsha _remoteref remotesha; do
+  [ "$localsha" = "$ZERO" ] && continue   # branch deletion — nothing to compile
+  if [ "$remotesha" = "$ZERO" ]; then
+    files="$(git diff-tree --no-commit-id --name-only -r "$localsha" 2>/dev/null)"   # new branch
+  else
+    files="$(git diff --name-only "$remotesha" "$localsha" 2>/dev/null)"
+  fi
+  changed="$changed"$'\n'"$files"
+done
+
+if echo "$changed" | grep -qE '^(api/|platform/src/).*\.(ts|tsx|prisma)$'; then
+  echo "pre-push: code changed → running FULL gates (scripts/gates.sh)…"
+  if ! bash "$ROOT/scripts/gates.sh"; then
+    echo "pre-push: ❌ gates FAILED — push aborted. Fix it, or GATES_SKIP=1 git push to override."
+    exit 1
+  fi
+else
+  echo "pre-push: no code changes (docs/config only) → skipping compile gates."
+fi
+exit 0
