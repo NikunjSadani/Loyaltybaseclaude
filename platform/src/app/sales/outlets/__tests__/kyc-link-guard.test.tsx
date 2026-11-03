@@ -16,7 +16,11 @@ vi.mock('next/link', () => ({
   default: ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) =>
     <a href={href} {...props}>{children}</a>,
 }));
-vi.mock('@/lib/sales-role', () => ({ getRole: () => 'SO' }));
+vi.mock('@/lib/sales-role', () => ({
+  getRole: () => 'SO',
+  hasTeamView: (role: string) => role !== 'XSR',
+  childRoleLabelFor: () => 'XSR',
+}));
 vi.mock('@/lib/gifsy-settings', () => ({ getGifsySettings: () => ({ paceAmberThreshold: 10 }) }));
 vi.mock('@/lib/visibility-upload', () => ({
   fetchOutletVisibilityStatuses: () => Promise.resolve({}),

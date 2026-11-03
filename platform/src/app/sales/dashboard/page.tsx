@@ -768,7 +768,11 @@ export default function SalesDashboard() {
     </Card>
   );
 
-  const trendCard = salesTargets && (
+  // Bajaj managers (SO+) get the text Trend Comparison card INSTEAD of this graph — but that card
+  // only renders in the RLP/BSC-toggle branch (showToggle = rlpBscView). So we hide the graph ONLY
+  // when that replacement actually renders; otherwise (rlpBscView OFF, incl. the /me-error default)
+  // we KEEP the graph rather than leave a blank gap. A Bajaj rep and every non-Bajaj tenant: unchanged.
+  const trendCard = salesTargets && !(isBajaj && hasTeamView(role) && showToggle) && (
     <Card>
       <CardHeader>
         <div className="flex items-center justify-between gap-2">

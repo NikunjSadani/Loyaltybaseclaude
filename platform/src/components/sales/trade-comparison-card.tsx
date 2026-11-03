@@ -192,15 +192,27 @@ export function TradeComparisonCard({ outletType }: { outletType: string }) {
               ))}
             </div>
 
-            {/* Row: the selected KPI's value (labelled with the KPI name, so it isn't stuck on
-                "Monthly sale" when another KPI is picked) */}
+            {/* Row: Achievement — the selected KPI's achieved value (₹ sold / count). The KPI name
+                lives in the header selector, so this row reads plainly as "Achievement" rather than
+                the KPI's own name (which for Bajaj is "Month Target" and misled as a target figure). */}
             <div className="grid grid-cols-4 gap-1 items-center py-1.5 border-t border-gray-50">
-              <div className="text-[11px] font-medium text-gray-600">{data.kpiName}</div>
+              <div className="text-[11px] font-medium text-gray-600">Achievement</div>
               {columns.map((c) => (
                 <div key={c.key} className="text-sm font-bold text-gray-800 text-center">
                   {/* Formatted by the selected KPI's unit — INR → compact ₹ (K/L/Cr) so lakhs/crores
                       don't overflow the card; any other unit → compact value + unit suffix. */}
                   {formatByUnit(data.buckets[c.key].monthlySale, data.kpiUnit)}
+                </div>
+              ))}
+            </div>
+
+            {/* Row: Target — the ₹ target for the selected KPI, summed over the SAME outlet set as
+                Achievement above (so the two rows are directly comparable). */}
+            <div className="grid grid-cols-4 gap-1 items-center py-1.5 border-t border-gray-50">
+              <div className="text-[11px] font-medium text-gray-600">Target</div>
+              {columns.map((c) => (
+                <div key={c.key} className="text-sm font-bold text-gray-800 text-center">
+                  {formatByUnit(data.buckets[c.key].monthlyTarget, data.kpiUnit)}
                 </div>
               ))}
             </div>

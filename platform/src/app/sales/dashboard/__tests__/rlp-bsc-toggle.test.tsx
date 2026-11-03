@@ -82,9 +82,9 @@ const TEAM_VIEW = { success: true, data: {
 const COMPARISON = { success: true, data: {
   outletType: 'SSS', program: null, kpiCode: 'P', kpiName: 'Primary',
   buckets: {
-    current:     { monthlySale: 10, targetMet: { achieved: 1, withTarget: 2, pct: 50 } },
-    lastMonth:   { monthlySale: 8,  targetMet: { achieved: 1, withTarget: 2, pct: 50 } },
-    last3Months: { monthlySale: 9,  targetMet: { achieved: null, withTarget: null, pct: 50 } },
+    current:     { monthlySale: 10, monthlyTarget: 20, targetMet: { achieved: 1, withTarget: 2, pct: 50 } },
+    lastMonth:   { monthlySale: 8,  monthlyTarget: 16, targetMet: { achieved: 1, withTarget: 2, pct: 50 } },
+    last3Months: { monthlySale: 9,  monthlyTarget: 18, targetMet: { achieved: null, withTarget: null, pct: 50 } },
   },
 } };
 
@@ -132,6 +132,17 @@ describe('Sales dashboard — RLP/BSC toggle gate', () => {
     );
     expect(screen.queryByTestId('rlp-bsc-toggle')).not.toBeInTheDocument();
     expect(screen.queryByTestId('trade-comparison-card')).not.toBeInTheDocument();
+    // Audit fix: with rlpBscView OFF the Trade Comparison card does NOT render, so the graph must be
+    // KEPT (never hidden into a blank gap) even for a Bajaj manager.
+    expect(screen.getByText('Target vs. Achievement')).toBeInTheDocument();
+  });
+
+  it('BT8: Bajaj manager with rlpBscView ON — graph is REPLACED by the Trade Comparison card (no blank)', async () => {
+    setupFetch(true); // showToggle on → the Trade Comparison card renders
+    render(<SalesDashboardPage />);
+    expect(await screen.findByTestId('trade-comparison-card')).toBeInTheDocument();
+    // The graph is hidden ONLY because its replacement is present.
+    expect(screen.queryByText('Target vs. Achievement')).not.toBeInTheDocument();
   });
 
   it('BT3: Trade comparison card shows for SO but not for XSR (SO-and-above gate)', async () => {

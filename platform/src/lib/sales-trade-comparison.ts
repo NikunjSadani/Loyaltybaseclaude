@@ -22,6 +22,8 @@ export interface TradeTargetMet {
 
 export interface TradeComparisonBucket {
   monthlySale: number;
+  /** The ₹ TARGET summed over the same outlet set as monthlySale (the "Target" row). */
+  monthlyTarget: number;
   targetMet: TradeTargetMet;
 }
 

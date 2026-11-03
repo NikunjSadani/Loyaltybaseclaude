@@ -97,7 +97,8 @@ export function aggregateTargetMet(
     kycPending = 0,
     withTarget = 0,
     achieved = 0,
-    achievedSum = 0;
+    achievedSum = 0,
+    targetSum = 0;
   for (const sid of subtree) {
     for (const o of outletsByUser.get(sid) ?? []) {
       if (seen.has(o.id)) continue;
@@ -108,7 +109,11 @@ export function aggregateTargetMet(
       if (approved) kycDone++;
       if (!TERMINAL_KYC.includes(o.status)) kycPending++;
       // monthly-sale sum: the KPI's achievement over every passing outlet (trade-comparison only).
-      if (o.code) achievedSum += aMap.get(o.code) ?? 0;
+      // targetSum pairs the ₹ TARGET over the SAME outlet set (Achievement vs Target headline rows).
+      if (o.code) {
+        achievedSum += aMap.get(o.code) ?? 0;
+        targetSum += tMap.get(o.code) ?? 0;
+      }
       if (approved && o.code) {
         const t = tMap.get(o.code) ?? 0;
         if (t > 0) {
@@ -119,7 +124,7 @@ export function aggregateTargetMet(
     }
   }
   const pct = withTarget > 0 ? Math.round((100 * achieved) / withTarget) : null;
-  return { outlets, kycDone, kycPending, withTarget, achieved, pct, achievedSum };
+  return { outlets, kycDone, kycPending, withTarget, achieved, pct, achievedSum, targetSum };
 }
 
 /**
@@ -896,11 +901,13 @@ export class SalesService {
 
     const emptyBucket = () => ({
       monthlySale: 0,
+      monthlyTarget: 0,
       targetMet: { achieved: 0 as number | null, withTarget: 0 as number | null, pct: null as number | null },
     });
     // last3Months mirrors the populated path: only the averaged ratio, so achieved/withTarget = null.
     const emptyLast3 = () => ({
       monthlySale: 0,
+      monthlyTarget: 0,
       targetMet: { achieved: null as number | null, withTarget: null as number | null, pct: null as number | null },
     });
     const base = {
@@ -944,6 +951,7 @@ export class SalesService {
         return {
           month: m,
           monthlySale: agg.achievedSum,
+          monthlyTarget: agg.targetSum,
           targetMet: { achieved: agg.achieved, withTarget: agg.withTarget, pct: agg.pct },
         };
       }),
@@ -951,7 +959,7 @@ export class SalesService {
     const byMonth = new Map(perMonth.map((p) => [p.month, p]));
     const bucketOf = (m: string) => {
       const p = byMonth.get(m)!;
-      return { monthlySale: p.monthlySale, targetMet: p.targetMet };
+      return { monthlySale: p.monthlySale, monthlyTarget: p.monthlyTarget, targetMet: p.targetMet };
     };
 
     // last3Months: monthlySale = mean of the 3 monthly sums; targetMet.pct = mean of the NON-NULL
@@ -964,6 +972,7 @@ export class SalesService {
       .filter((v): v is number => v !== null);
     const last3Months = {
       monthlySale: Math.round(avg(perMonth.map((p) => p.monthlySale))),
+      monthlyTarget: Math.round(avg(perMonth.map((p) => p.monthlyTarget))),
       targetMet: {
         achieved: null as number | null,
         withTarget: null as number | null,
@@ -1215,18 +1224,53 @@ export class SalesService {
   async getMyOutlets(user: JwtPayload) {
     const salesUser = await this.prisma.salesUser.findFirst({
       where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
-      select: { id: true },
+      select: {
+        id: true,
+        // Direct reports → the manager-only "Team Member" filter options on the FE
+        // outlets screen (mirrors getTeam). A leaf rep has none → empty members → the
+        // FE hides the filter. Shaped like getTeam's member rows (id/name/employeeCode
+        // + submitterUserIds = the report's own user id + their whole downline's).
+        subordinates: {
+          where: { isActive: true, deletedAt: null },
+          select: {
+            id: true,
+            employeeCode: true,
+            user: { select: { name: true } },
+            hierarchyLevel: { select: { code: true, name: true } },
+          },
+        },
+      },
     });
 
-    if (!salesUser) return { outlets: [] };
+    if (!salesUser) return { outlets: [], members: [] };
 
     const edges = await this.prisma.salesUser.findMany({
       where: { user: { clientId: user.clientId }, deletedAt: null },
-      select: { id: true, reportingToId: true },
+      select: { id: true, reportingToId: true, userId: true },
     });
     const subtreeIds = [...descendantSalesUserIds(salesUser.id, edges)];
 
-    return { outlets: await this.buildOutlets(subtreeIds, user.clientId) };
+    // Team-member filter options: each DIRECT report enriched with the login-User ids
+    // of that report PLUS their whole downline (submitterUserIds), so "filter by a
+    // member" on the outlets list matches every outlet assigned anywhere in that
+    // member's branch (via the outlet's assignedUserId). Reuses the SAME hierarchy
+    // walk (descendantSalesUserIds) as getTeam / the KYC-list filter — not re-derived.
+    // SECURITY: each member's branch is a slice of the caller's own subtree (the
+    // report is a direct subordinate and descendantSalesUserIds only walks DOWN), so a
+    // manager can never see or filter another manager's team. Empty for a leaf rep.
+    const userIdBySalesUserId = new Map(edges.map((s) => [s.id, s.userId]));
+    const members = (salesUser.subordinates ?? []).map((sub) => ({
+      id: sub.id,
+      name: sub.user.name,
+      employeeCode: sub.employeeCode,
+      role: sub.hierarchyLevel.code,
+      roleLabel: sub.hierarchyLevel.name,
+      submitterUserIds: [...descendantSalesUserIds(sub.id, edges)]
+        .map((id) => userIdBySalesUserId.get(id))
+        .filter((v): v is string => !!v),
+    }));
+
+    return { outlets: await this.buildOutlets(subtreeIds, user.clientId), members };
   }
 
   /**

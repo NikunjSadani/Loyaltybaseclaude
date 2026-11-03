@@ -11,7 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import { PERIODS, CURRENT_MONTH, pct, pctBg, pctBarColor, getPrimaryParam } from '@/lib/targets';
 import { kycOrderRank } from '@/lib/kyc-order';
 import { KYCStatus } from '@/types';
-import { getRole, type SalesRole } from '@/lib/sales-role';
+import { getRole, hasTeamView, childRoleLabelFor, type SalesRole } from '@/lib/sales-role';
 import { classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { istDateKey } from '@/lib/ist-date';
@@ -41,7 +41,16 @@ interface Outlet {
   type:       OutletType;
   kycStatus:  KYCStatus;
   programName?: string;  // from the outlet master (sales roster payload) — drives the Program filter
+  /** The rep this outlet is ASSIGNED to (login-User id). Member-filter key: an outlet
+   *  matches a selected team member when its assignedUserId is in that member's sub-tree.
+   *  Supplied by buildOutlets on the /api/sales/outlets payload. */
+  assignedUserId?: string;
 }
+
+/** A manager's direct report, enriched with the login-User ids of that report + their
+ *  whole downline (submitterUserIds) — the manager-only Team Member filter options.
+ *  Shaped exactly like the KYC list's team members (/api/sales/outlets body.data.members). */
+interface TeamMember { id: string; name: string; employeeCode: string; submitterUserIds: string[]; }
 
 /* ─── Real per-outlet target data (GET /api/sales/outlet-targets) ─────────────── */
 
@@ -171,11 +180,14 @@ export default function SalesOutletsPage() {
   const [typeFilter, setTypeFilter] = useState<OutletType | 'ALL'>('ALL');
   const [beatFilter, setBeatFilter] = useState<string>('ALL');
   const [programFilter, setProgramFilter] = useState<string>('ALL');
+  const [memberFilter, setMemberFilter] = useState<string>('');
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [role,       setRoleState]  = useState<SalesRole>('SO');
 
   // Bajaj-scoped outlets-page additions (program filter, photo-visibility badge, primary sort)
   // — keeps every other tenant's outlets page byte-identical.
-  const isBajaj = (useClientConfig().slug ?? '').trim().toLowerCase() === 'bajaj';
+  const slug = useClientConfig().slug ?? '';
+  const isBajaj = slug.trim().toLowerCase() === 'bajaj';
   // Per-tenant outlet-type display labels; falls back to the TYPE_FILTERS labels until resolved.
   const { label: outletTypeLabel } = useOutletTypeLabels();
 
@@ -197,7 +209,20 @@ export default function SalesOutletsPage() {
     setRoleState(getRole());
     fetch('/api/sales/outlets')
       .then((r) => r.json())
-      .then((body) => { if (body.success) setOutlets(body.data.outlets ?? []); })
+      .then((body) => {
+        if (body.success) {
+          setOutlets(body.data.outlets ?? []);
+          // Manager-only Team Member filter options (empty for a leaf rep → filter hidden).
+          setTeamMembers((body.data.members ?? []).map((m: {
+            id: string; name: string; employeeCode?: string; submitterUserIds?: string[];
+          }) => ({
+            id: m.id,
+            name: m.name,
+            employeeCode: (m.employeeCode ?? '') as string,
+            submitterUserIds: (m.submitterUserIds ?? []) as string[],
+          })));
+        }
+      })
       .catch(() => {});
   }, []);
 
@@ -291,12 +316,25 @@ export default function SalesOutletsPage() {
 
   const kpisFor = (o: Outlet): OutletKpis => targetsByOutlet[o.outletCode] ?? {};
 
+  // Member filter = the selected direct report's WHOLE branch (self + downline), resolved
+  // server-side into submitterUserIds. An outlet matches when its assigned rep
+  // (assignedUserId) is anywhere in that member's sub-tree — same sub-tree semantics as
+  // the KYC-list member filter (owner 2026-07-03).
+  const selectedMemberUserIds = useMemo(
+    () => memberFilter
+      ? new Set(teamMembers.find((m) => m.id === memberFilter)?.submitterUserIds ?? [])
+      : null,
+    [memberFilter, teamMembers],
+  );
+
   const visibleOutlets = useMemo(() => outlets.filter((o) => {
     const matchesType = typeFilter === 'ALL' || o.type === typeFilter;
     const matchesBeat = beatFilter === 'ALL' || o.beat === beatFilter;
     const matchesProgram = programFilter === 'ALL' || o.programName === programFilter;
-    return matchesType && matchesBeat && matchesProgram;
-  }), [outlets, typeFilter, beatFilter, programFilter]);
+    const matchesMember = !selectedMemberUserIds
+      || (!!o.assignedUserId && selectedMemberUserIds.has(o.assignedUserId));
+    return matchesType && matchesBeat && matchesProgram && matchesMember;
+  }), [outlets, typeFilter, beatFilter, programFilter, selectedMemberUserIds]);
 
   // Owner-specified outlet order (2026-07-03): Approved → Re-KYC → Rejected →
   // Pending → Not Interested (see kycOrderRank). Within Approved, worst performer
@@ -408,6 +446,32 @@ export default function SalesOutletsPage() {
         </div>
 
         <div className="h-4 w-px bg-gray-200 shrink-0" />
+
+        {/* Team Member filter — managers only (SO and above, with at least one direct
+            report). A plain rep (XSR / no downline) gets no members → not rendered.
+            Same gate + sub-tree semantics as the KYC-list member filter. */}
+        {hasTeamView(role) && teamMembers.length > 0 && (
+          <div className="relative shrink-0">
+            <select
+              data-testid="outlets-member-filter"
+              value={memberFilter}
+              onChange={(e) => setMemberFilter(e.target.value)}
+              className={`appearance-none text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1 bg-white focus:outline-none transition-colors cursor-pointer ${
+                memberFilter ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-gray-200 text-gray-600 focus:border-[var(--brand-primary)]'
+              }`}
+            >
+              <option value="">{`All ${childRoleLabelFor(slug, role) ?? 'Members'}`}</option>
+              {teamMembers.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.employeeCode ? `${m.employeeCode} · ${m.name}` : m.name}
+                </option>
+              ))}
+            </select>
+            <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${memberFilter ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </div>
+        )}
 
         {isFieldRole && (
           <div className="relative shrink-0">
@@ -615,7 +679,7 @@ export default function SalesOutletsPage() {
               <AlertTriangle className="h-7 w-7 text-gray-300" />
               <p className="text-sm text-gray-400">No outlets match the selected filters</p>
               <button
-                onClick={() => { setTypeFilter('ALL'); setBeatFilter('ALL'); setProgramFilter('ALL'); }}
+                onClick={() => { setTypeFilter('ALL'); setBeatFilter('ALL'); setProgramFilter('ALL'); setMemberFilter(''); }}
                 className="text-xs text-[var(--brand-primary)] font-semibold hover:underline mt-1"
               >
                 Clear all filters

@@ -423,7 +423,50 @@ describe('SalesService', () => {
     it('returns an empty list when the caller is not a sales user', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue(null);
       const res = await service.getMyOutlets(caller);
-      expect(res).toEqual({ outlets: [] });
+      expect(res).toEqual({ outlets: [], members: [] });
+    });
+
+    it('a leaf rep (no subordinates) gets an EMPTY members list → the FE hides the Team Member filter', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su', subordinates: [] });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'caller-su', reportingToId: null, userId: 'u-caller' }]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+      const res = await service.getMyOutlets(caller);
+      expect(res.members).toEqual([]);
+    });
+
+    it('a manager gets a members row per DIRECT report, submitterUserIds scoped to that report\'s OWN sub-tree', async () => {
+      // mgr → so1 (which manages isr1) and so2. The manager sees so1 + so2 as filter
+      // options; so1's branch is {so1, isr1}, so2's branch is just {so2}. isr1 (a
+      // grand-child) is NOT itself a filter option — it is folded into so1's branch.
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'mgr',
+        subordinates: [
+          { id: 'so1', employeeCode: 'E-SO1', user: { name: 'Officer One' }, hierarchyLevel: { code: 'SO', name: 'Sales Officer' } },
+          { id: 'so2', employeeCode: 'E-SO2', user: { name: 'Officer Two' }, hierarchyLevel: { code: 'SO', name: 'Sales Officer' } },
+        ],
+      });
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'mgr',  reportingToId: null,  userId: 'u-mgr'  },
+        { id: 'so1',  reportingToId: 'mgr', userId: 'u-so1'  },
+        { id: 'so2',  reportingToId: 'mgr', userId: 'u-so2'  },
+        { id: 'isr1', reportingToId: 'so1', userId: 'u-isr1' },
+      ]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+      const res = await service.getMyOutlets(caller);
+
+      expect(res.members.map((m: { id: string }) => m.id)).toEqual(['so1', 'so2']);
+      const so1 = res.members.find((m: { id: string }) => m.id === 'so1')!;
+      const so2 = res.members.find((m: { id: string }) => m.id === 'so2')!;
+      expect(so1).toMatchObject({ id: 'so1', name: 'Officer One', employeeCode: 'E-SO1' });
+      // so1's branch = its OWN sub-tree (so1 + its downline isr1). The manager's other
+      // branch (so2) is NOT leaked into so1's set — a manager can never filter outside
+      // the relevant member's own branch.
+      expect([...so1.submitterUserIds].sort()).toEqual(['u-isr1', 'u-so1']);
+      expect(so2.submitterUserIds).toEqual(['u-so2']);
+
+      // The outlet query stays scoped to the caller's WHOLE subtree (unchanged).
+      const where = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
+      expect([...where.salesUserId.in].sort()).toEqual(['isr1', 'mgr', 'so1', 'so2']);
     });
 
     it('scopes to the caller + downline and INCLUDES partner-less (un-KYC\'d) outlets as NOT_STARTED so the rep can enrol them', async () => {
@@ -2227,6 +2270,7 @@ describe('SalesService', () => {
       expect(res.kpiCode).toBeNull();
       expect(res.buckets.current).toEqual({
         monthlySale: 0,
+        monthlyTarget: 0,
         targetMet: { achieved: 0, withTarget: 0, pct: null },
       });
       expect(res.buckets.last3Months.targetMet.pct).toBeNull();
@@ -2255,12 +2299,14 @@ describe('SalesService', () => {
       // Only O1 (SSS) is in scope → monthlySale = 120, targetMet 1/1 = 100%.
       expect(res.buckets.current).toEqual({
         monthlySale: 120,
+        monthlyTarget: 100, // O1's RLP target (O2 is WHOLESALER → out of SSS scope)
         targetMet: { achieved: 1, withTarget: 1, pct: 100 },
       });
       // All 3 months identical → sale average matches; last3 exposes ONLY the averaged pct
       // (achieved/withTarget are null — a mean of counts would not reconcile with the averaged ratio).
       expect(res.buckets.last3Months).toEqual({
         monthlySale: 120,
+        monthlyTarget: 100, // mean of 3 identical months
         targetMet: { achieved: null, withTarget: null, pct: 100 },
       });
     });

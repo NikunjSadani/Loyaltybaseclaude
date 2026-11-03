@@ -51,9 +51,9 @@ const COMPARISON = {
     outletType: 'SSS', program: null, kpiCode: 'PRIMARY', kpiName: 'Primary Sales', kpiUnit: 'INR',
     kpis: KPI_LIST,
     buckets: {
-      current:     { monthlySale: 120000, targetMet: { achieved: 8, withTarget: 10, pct: 80 } },
-      lastMonth:   { monthlySale: 90000,  targetMet: { achieved: 6, withTarget: 10, pct: 60 } },
-      last3Months: { monthlySale: 100000, targetMet: { achieved: null, withTarget: null, pct: 70 } },
+      current:     { monthlySale: 120000, monthlyTarget: 200000, targetMet: { achieved: 8, withTarget: 10, pct: 80 } },
+      lastMonth:   { monthlySale: 90000,  monthlyTarget: 160000, targetMet: { achieved: 6, withTarget: 10, pct: 60 } },
+      last3Months: { monthlySale: 100000, monthlyTarget: 180000, targetMet: { achieved: null, withTarget: null, pct: 70 } },
     },
   },
 };
@@ -65,9 +65,9 @@ const COMPARISON_VOL = {
     outletType: 'SSS', program: null, kpiCode: 'VOL', kpiName: 'Volume', kpiUnit: 'Litre',
     kpis: KPI_LIST,
     buckets: {
-      current:     { monthlySale: 500, targetMet: { achieved: 2, withTarget: 4, pct: 50 } },
-      lastMonth:   { monthlySale: 400, targetMet: { achieved: 1, withTarget: 4, pct: 25 } },
-      last3Months: { monthlySale: 450, targetMet: { achieved: null, withTarget: null, pct: 40 } },
+      current:     { monthlySale: 500, monthlyTarget: 800, targetMet: { achieved: 2, withTarget: 4, pct: 50 } },
+      lastMonth:   { monthlySale: 400, monthlyTarget: 700, targetMet: { achieved: 1, withTarget: 4, pct: 25 } },
+      last3Months: { monthlySale: 450, monthlyTarget: 750, targetMet: { achieved: null, withTarget: null, pct: 40 } },
     },
   },
 };
@@ -188,5 +188,15 @@ describe('TradeComparisonCard', () => {
   it('TC8: the card header reads "Trend Comparison"', async () => {
     render(<TradeComparisonCard outletType="SSS" />);
     expect(await screen.findByText('Trend Comparison')).toBeInTheDocument();
+  });
+
+  it('TC9: renders the Achievement and Target rows with ₹ values', async () => {
+    render(<TradeComparisonCard outletType="SSS" />);
+    await waitFor(() => expect(screen.getByText('Achievement')).toBeInTheDocument());
+    expect(screen.getByText('Target')).toBeInTheDocument();
+    // Target values (distinct from the achievement figures) — current ₹2L / last mo ₹1.6L / 3-mo ₹1.8L.
+    expect(screen.getByText('₹2L')).toBeInTheDocument();
+    expect(screen.getByText('₹1.6L')).toBeInTheDocument();
+    expect(screen.getByText('₹1.8L')).toBeInTheDocument();
   });
 });
