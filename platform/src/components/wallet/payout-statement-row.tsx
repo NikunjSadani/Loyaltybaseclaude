@@ -39,7 +39,7 @@ export function PayoutStatementRow({ entry: p }: { entry: PayoutLedgerEntry }) {
 
       {/* Description */}
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-semibold text-gray-900 truncate">{p.kpiLabel} · {monthLabel(p.period)}</p>
+        <p className="text-[13px] text-gray-800 leading-snug truncate">{p.kpiLabel} · {monthLabel(p.period)}</p>
         {p.utr && <p className="text-[10px] text-gray-400 font-mono">UTR {p.utr}</p>}
         {!isPaid && (
           <span
@@ -55,7 +55,7 @@ export function PayoutStatementRow({ entry: p }: { entry: PayoutLedgerEntry }) {
       </div>
 
       {/* Amount — muted until the payout is actually paid. payoutAmountPaise is integer paise. */}
-      <p className={`text-sm font-bold shrink-0 ${isPaid ? 'text-emerald-700' : 'text-gray-400'}`}>{fmtInr(p.payoutAmountPaise / 100)}</p>
+      <p className={`text-[13px] font-bold shrink-0 ${isPaid ? 'text-emerald-600' : 'text-gray-400'}`}>{fmtInr(p.payoutAmountPaise / 100)}</p>
     </div>
   );
 }
