@@ -1,0 +1,5 @@
+# Shell scripts and git hooks MUST stay LF — a CRLF shebang (`#!/usr/bin/env bash\r`)
+# breaks on Linux/CI with "bad interpreter", and the committed gate runner + pre-push
+# hook have to run on any platform. (Added with the scripts/gates.sh gate runner.)
+*.sh        text eol=lf
+.githooks/* text eol=lf
