@@ -1472,6 +1472,12 @@ model PointsLedger {
   schemeId        String?
   transactionType PointsLedgerType
   points          Int
+  // FIFO "spendable lot" tracking: for a spendable credit lot (EARN / REVERSE / credit-ADJUST,
+  // i.e. points > 0) this starts = points and is consumed oldest-first by redeem/debit, and
+  // expired down to 0 by the sweep. Non-spendable rows (REDEEM/EXPIRE/debit-ADJUST/LOCK/UNLOCK)
+  // keep the default 0. wallet.redeemablePoints is the denormalised mirror of Σ remainingPoints
+  // over non-expired spendable lots. See POINTS-EXPIRY-FIFO-DESIGN.md.
+  remainingPoints Int              @default(0)
   lockedUntil     DateTime?
   expiresAt       DateTime?
   isExpired       Boolean          @default(false)

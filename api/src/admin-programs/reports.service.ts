@@ -645,12 +645,17 @@ export class ReportsService {
         const beforePeriod = ledger.filter((e) => e.createdAt < periodStart);
         const inPeriod = ledger.filter((e) => e.createdAt >= periodStart);
 
-        // Opening balance = net EARN − REDEEM − EXPIRE before period start.
+        // Opening balance = the redeemable-points balance as of period start. Ledger
+        // `points` is SIGNED (credits +, debits −), so the balance is simply their sum
+        // over every balance-affecting row — including REVERSE/ADJUST, which the prior
+        // code dropped. LOCK/UNLOCK touch the locked bucket, not this balance, so skip them.
+        // Σ signed points equals wallet.redeemablePoints for every real outlet (verified on
+        // staging); the authoritative balance is the wallet scalar — a reconstruction can only
+        // diverge on a seeded-scalar demo wallet or a legacy clawback-shortfall row (where the
+        // ledger intentionally records more than was decremented), both negligible here.
         const openingBalance = beforePeriod.reduce((sum, e) => {
-          if (e.transactionType === 'EARN') return sum + e.points;
-          if (e.transactionType === 'REDEEM') return sum - e.points;
-          if (e.transactionType === 'EXPIRE') return sum - e.points;
-          return sum;
+          if (e.transactionType === 'LOCK' || e.transactionType === 'UNLOCK') return sum;
+          return sum + e.points;
         }, 0);
 
         return aggregateLedgerToRow(

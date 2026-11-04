@@ -181,7 +181,7 @@ describe('ProgramHealthDashboardService', () => {
       .mockResolvedValueOnce(aggSum('points', 1000)) // issued (EARN)
       .mockResolvedValueOnce(aggSum('points', -400)) // redeemed (REDEEM, negative)
       .mockResolvedValueOnce(aggSum('points', -50)) // expired (EXPIRE, negative)
-      .mockResolvedValueOnce(aggSum('points', 120)); // expiring-30d (EARN)
+      .mockResolvedValueOnce(aggSum('remainingPoints', 120)); // expiring-30d = Σ remainingPoints of spendable lots
     mockPrisma.wallet.aggregate.mockResolvedValue(aggSum('redeemablePoints', 5000));
 
     const res = await service.programHealth(user, PERIOD);

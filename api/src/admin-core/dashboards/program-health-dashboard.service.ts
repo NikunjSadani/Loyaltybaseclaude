@@ -237,13 +237,17 @@ export class ProgramHealthDashboardService {
         _sum: { redeemablePoints: true },
         where: { partner: { user: { clientId } } },
       }),
-      // expiring in 30d = Σ EARN points not yet expired whose expiresAt ∈ [now, now+30d]
+      // expiring in 30d = Σ REMAINING (unspent) points of spendable lots not yet expired
+      // whose expiresAt ∈ [now, now+30d]. Mirrors the sweep's own selection exactly
+      // (EARN/REVERSE/credit-ADJUST, remainingPoints > 0) so the projection matches what
+      // will actually expire — not the lots' original grant.
       this.prisma.pointsLedger.aggregate({
-        _sum: { points: true },
+        _sum: { remainingPoints: true },
         where: {
           ...ledgerTenant,
-          transactionType: 'EARN',
+          transactionType: { in: ['EARN', 'REVERSE', 'ADJUST'] },
           isExpired: false,
+          remainingPoints: { gt: 0 },
           expiresAt: { gte: now, lt: new Date(now.getTime() + 30 * 86_400_000) },
         },
       }),
@@ -261,7 +265,7 @@ export class ProgramHealthDashboardService {
     const breakagePct = ProgramHealthDashboardService.round1(
       ProgramHealthDashboardService.pctOf(expiredInPeriod, issued),
     );
-    const expiringIn30dPoints = expiringAgg._sum.points ?? 0;
+    const expiringIn30dPoints = expiringAgg._sum.remainingPoints ?? 0;
 
     // ── TARGET ACHIEVEMENT (no-compute rollup across addressable outlets) ────────
     // KpiDefs for the tenant (enabled, ordered). Sum targetValues[code] and kpiValues[code]

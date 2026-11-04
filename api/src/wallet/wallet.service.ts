@@ -109,6 +109,15 @@ export class WalletService {
     const magnitude = Math.abs(points);
     let balanceBefore = wallet.redeemablePoints;
 
+    // A "spendable lot" is a positive credit row of a type that represents available
+    // balance (EARN / REVERSE / credit-ADJUST). Only these carry remainingPoints for
+    // FIFO consume + expiry; every debit / lock row keeps the default 0.
+    const isSpendableCreditLot =
+      isCredit &&
+      (ledgerType === PointsLedgerType.EARN ||
+        ledgerType === PointsLedgerType.REVERSE ||
+        ledgerType === PointsLedgerType.ADJUST);
+
     // Aggregate updates per the invariant. earnedPoints/lifetimeEarned are bumped
     // ONLY for true earning movements (EARN/credit-adjust/bonus), never on reversal
     // or any debit. redeemable floors at 0 on debit (never goes negative).
@@ -185,6 +194,8 @@ export class WalletService {
         schemeId,
         transactionType: ledgerType,
         points,
+        // Spendable credit lots start fully-remaining; everything else (debits, locks) at 0.
+        remainingPoints: isSpendableCreditLot ? magnitude : 0,
         expiresAt,
         sourceType,
         sourceId,
@@ -192,11 +203,69 @@ export class WalletService {
       },
     });
 
+    // FIFO bookkeeping: a SPENDING debit (redeem / debit-adjust / clawback) consumes the
+    // oldest spendable lots' remainingPoints so the lot mirror tracks the scalar. The expiry
+    // sweep is EXCLUDED — it decrements the specific due lot itself (see expireDuePoints).
+    // This never touches redeemablePoints (already moved above) — pure lot bookkeeping.
+    if (!isCredit && ledgerType !== PointsLedgerType.EXPIRE) {
+      await this.consumeFifoLots(tx, wallet.id, magnitude);
+    }
+
     return {
       transactionId: txRecord.id,
       newRedeemable: updatedWallet.redeemablePoints,
       ledgerId: ledgerRow.id,
     };
+  }
+
+  /**
+   * FIFO-consume `amount` points from the oldest spendable lots of a wallet by decrementing
+   * each lot's `remainingPoints` (oldest earn first: createdAt asc, id tiebreak). Each decrement
+   * is guarded (`isExpired:false AND remainingPoints >= take`) so it can't race a concurrent
+   * redeem or the expiry sweep (which fences a lot by flipping isExpired first) into negative.
+   *
+   * Bookkeeping ONLY — the caller (applyMovement) has already moved the authoritative
+   * `wallet.redeemablePoints` scalar; this just keeps the lot mirror aligned. It is tolerant of a
+   * shortfall: a pre-fix wallet whose lots predate this feature has remainingPoints 0, so there is
+   * nothing to consume — the scalar (guarded elsewhere) remains the source of truth for
+   * sufficiency, and the mirror re-converges as new lots are earned/spent. Returns the amount
+   * actually consumed from lots.
+   */
+  private async consumeFifoLots(
+    tx: Prisma.TransactionClient,
+    walletId: string,
+    amount: number,
+  ): Promise<number> {
+    let remaining = amount;
+    const lots = await tx.pointsLedger.findMany({
+      where: {
+        walletId,
+        isExpired: false,
+        remainingPoints: { gt: 0 },
+        points: { gt: 0 },
+        transactionType: {
+          in: [
+            PointsLedgerType.EARN,
+            PointsLedgerType.REVERSE,
+            PointsLedgerType.ADJUST,
+          ],
+        },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+
+    for (const lot of lots) {
+      if (remaining <= 0) break;
+      const take = Math.min(lot.remainingPoints, remaining);
+      // Guarded decrement: only when the lot is still unexpired and still holds >= take.
+      // count 0 ⇒ a concurrent movement changed it; skip and let the scalar guard govern.
+      const res = await tx.pointsLedger.updateMany({
+        where: { id: lot.id, isExpired: false, remainingPoints: { gte: take } },
+        data: { remainingPoints: { decrement: take } },
+      });
+      if (res.count === 1) remaining -= take;
+    }
+    return amount - remaining;
   }
 
   /** Run `fn` inside the supplied tx, or open a fresh $transaction if none given. */
@@ -647,11 +716,22 @@ export class WalletService {
 
     return this.withTx(tx, async (t) => {
       const wallet = await this.requireWallet(t, partnerId);
+      // A reversed/refunded redemption becomes a fresh spendable lot with a FRESH expiry
+      // window (owner-confirmed): restored points are re-dated per the tenant's current
+      // expiry config, so the REVERSE lot is expirable like any other credit lot.
+      const partner = await t.channelPartner.findFirst({
+        where: { id: partnerId },
+        select: { clientId: true },
+      });
+      const expiresAt = partner
+        ? await this.resolveExpiresAt(t, partner.clientId, null)
+        : null;
       return this.applyMovement(t, {
         wallet,
         walletTxType: 'CREDIT_REVERSAL',
         ledgerType: PointsLedgerType.REVERSE,
         points: amount,
+        expiresAt,
         referenceType: 'REDEMPTION_ORDER',
         referenceId: opts.referenceId ?? null,
         description: opts.description ?? null,
@@ -673,6 +753,11 @@ export class WalletService {
     }
 
     const result = await this.prisma.$transaction(async (tx) => {
+      // A manual CREDIT is treated as earning → create an expirable spendable lot with a
+      // fresh expiry window (like EARN). A DEBIT carries no expiry and FIFO-consumes lots.
+      const expiresAt = isCredit
+        ? await this.resolveExpiresAt(tx, user.clientId, null)
+        : null;
       // Route through the single write-path: writes WalletTransaction AND
       // PointsLedger (ADJUST). On debit this decrements redeemablePoints ONLY —
       // it no longer decrements earnedPoints/lifetimeEarned (bug #1 fixed).
@@ -681,6 +766,7 @@ export class WalletService {
         walletTxType: isCredit ? 'CREDIT_ADJUSTMENT' : 'DEBIT_ADJUSTMENT',
         ledgerType: PointsLedgerType.ADJUST,
         points: isCredit ? dto.amount : -dto.amount,
+        expiresAt,
         description: `Manual ${dto.type.toLowerCase()} by admin. Reason: ${dto.reason}`,
         sourceType: 'ADMIN_ADJUSTMENT',
         sourceId: user.sub,
@@ -721,25 +807,28 @@ export class WalletService {
    * supplied transaction so it is atomic with the reversal status update.
    *
    * Invariant-aware decrement rules:
-   *  - earnedPoints: decremented by `points` (the full approved amount).
    *  - redeemablePoints: decremented by min(points, redeemablePoints) — CLAMPED at 0.
    *    If the partner has already redeemed some of the awarded points, redeemablePoints
    *    may be < points. We clamp rather than throw so the reversal still lands; the
    *    shortfall is recorded in the ledger description for owner review.
-   *  - lifetimeEarned / lifetimeRedeemed / lifetimeExpired: UNTOUCHED (monotonic).
+   *  - earnedPoints / lifetimeEarned / lifetimeRedeemed / lifetimeExpired: UNTOUCHED.
+   *    Every lifetime* counter AND earnedPoints are monotonic (the locked-wallet invariant):
+   *    a clawback only reduces the spendable balance, exactly like a DEBIT_ADJUSTMENT.
    *
    * ⚠️  OWNER REVIEW FLAG — partial-redemption shortfall:
-   *   When redeemablePoints < points the full earnedPoints decrement still fires but
-   *   only partial redeemable is removed. The delta (`shortfall`) is appended to the
-   *   description so it is visible in the passbook. A future enhancement could write
-   *   a compensating debit against future credits or flag the partner account.
-   *   Do NOT silently ignore this — it means the client credited points that the
-   *   partner already spent, and a cash settlement may be needed out-of-band.
+   *   When redeemablePoints < points only the available part is removed from the balance,
+   *   but the PointsLedger/WalletTransaction row still records the FULL `-points` (with the
+   *   `shortfall` appended to the description, so it is visible in the passbook). That is
+   *   deliberate — it records the client's full reversal of points the partner had already
+   *   spent — but it means the ledger row intentionally debits more than the scalar moved,
+   *   so a balance reconstructed purely from ledger `points` can trail the true scalar for
+   *   such a wallet (the authoritative balance is always wallet.redeemablePoints). A future
+   *   enhancement could write a compensating debit against future credits or flag the account.
+   *   Do NOT silently ignore this — a cash settlement may be needed out-of-band.
    *
-   * NOTE: applyMovement does NOT decrement earnedPoints (by design — it only touches
-   * redeemable + ledger/expiry counters). We therefore do the earnedPoints decrement
-   * here as a separate wallet.update BEFORE calling applyMovement, so both writes
-   * happen inside the same tx and can never desync.
+   * NOTE: this routes through applyMovement's floored-debit path (redeemable decrements by
+   * min(magnitude, balance); no lifetime/earned counter moves). The read of redeemablePoints
+   * below is only to derive `shortfall` for the description — not a second balance write.
    */
   async clawbackAward(
     partnerId: string,
@@ -790,15 +879,18 @@ export class WalletService {
   // ─── Expiry sweep ────────────────────────────────────────────────────────────
 
   /**
-   * Expire due points. Finds EARN ledger lots that are past their expiresAt and
-   * not yet expired, and for each writes a DEBIT_EXPIRY / ledger EXPIRE movement,
-   * decrementing redeemablePoints (floored at 0), bumping expiredPoints +
-   * lifetimeExpired, and marking the source EARN lot isExpired = true.
+   * Expire due points. Finds SPENDABLE lots (EARN / REVERSE / credit-ADJUST) that are past
+   * their expiresAt, still hold unspent `remainingPoints`, and are not yet expired. For each,
+   * expires only the lot's REMAINING (unspent) points — never the lot's original amount — so
+   * FIFO redemption of an older lot can never cause a newer lot's valid points to be destroyed.
    *
-   * Idempotent + safe to re-run: a lot is only swept once (isExpired guard), and
-   * the redeemable decrement floors at 0 so over-expiry can never drive the balance
-   * negative. No cron here — scheduling is DEFERRED to P7/infra; this is exposed as
-   * a GIFSY-triggerable method/endpoint so it can be run manually or by a future job.
+   * Per lot it: (1) claims the lot by flipping isExpired false→true (fencing it off from any
+   * concurrent redeem FIFO-consume), (2) reads the now-frozen remainingPoints, (3) zeroes the
+   * lot's remainingPoints and writes a DEBIT_EXPIRY / ledger EXPIRE movement for exactly that
+   * amount (decrementing redeemablePoints, floored at 0; bumping expiredPoints + lifetimeExpired).
+   *
+   * Idempotent + concurrency-safe: the isExpired claim admits only one sweep; a fully-redeemed
+   * lot (remainingPoints 0) is marked expired with no balance move and no EXPIRE row.
    *
    * @returns a summary of what was swept (counts + total points expired).
    */
@@ -808,9 +900,16 @@ export class WalletService {
 
     const dueLots = await this.prisma.pointsLedger.findMany({
       where: {
-        transactionType: PointsLedgerType.EARN,
+        transactionType: {
+          in: [
+            PointsLedgerType.EARN,
+            PointsLedgerType.REVERSE,
+            PointsLedgerType.ADJUST,
+          ],
+        },
         isExpired: false,
         points: { gt: 0 },
+        remainingPoints: { gt: 0 },
         expiresAt: { lte: now },
       },
       orderBy: { expiresAt: 'asc' },
@@ -826,42 +925,54 @@ export class WalletService {
 
     for (const lot of dueLots) {
       await this.prisma.$transaction(async (tx) => {
-        // Claim the lot with a GUARDED update: only the run that flips isExpired
-        // false→true proceeds. A concurrent sweep (manual double-trigger or a future
-        // cron overlap) sees count 0 here and skips — this is what makes re-runs
-        // concurrency-safe, not just single-threaded-idempotent.
+        // 0) LOCK THE WALLET ROW FIRST — before claiming the lot. A redeem locks the wallet
+        //    (guarded scalar update) THEN its lots; by taking the wallet lock first the sweep
+        //    acquires locks in the SAME order (wallet → lot), so the two can never deadlock.
+        //    It also pins the scalar: nothing can change redeemablePoints between our read and
+        //    our decrement below, so the floor is exact and the balance can never go negative.
+        await tx.$queryRaw`SELECT id FROM wallets WHERE id = ${lot.walletId} FOR UPDATE`;
+
+        // 1) CLAIM the lot by flipping isExpired false→true. Makes re-runs concurrency-safe
+        //    (a second sweep sees count 0 and skips) AND fences the lot from any concurrent
+        //    redeem (consumeFifoLots only touches isExpired:false lots).
         const claim = await tx.pointsLedger.updateMany({
           where: { id: lot.id, isExpired: false },
           data: { isExpired: true },
         });
-        if (claim.count === 0) return false;
+        if (claim.count === 0) return;
 
-        // Re-read the wallet inside the tx so the redeemable floor is consistent.
-        const wallet = await tx.wallet.findFirst({ where: { id: lot.walletId } });
-        if (!wallet) return false;
-
-        // Expire only the portion still available in the spendable balance — never
-        // more than what the lot granted, never more than redeemable holds. If the
-        // lot's points were already redeemed (expirable === 0) the lot is still
-        // marked consumed above, but no balance moves and no movement row is written.
-        const expirable = Math.min(lot.points, wallet.redeemablePoints);
-
-        if (expirable > 0) {
-          await this.applyMovement(tx, {
-            wallet,
-            walletTxType: 'DEBIT_EXPIRY',
-            ledgerType: PointsLedgerType.EXPIRE,
-            points: -expirable,
-            schemeId: lot.schemeId,
-            referenceType: 'POINTS_LEDGER',
-            referenceId: lot.id,
-            sourceType: 'EXPIRY_SWEEP',
-            sourceId: lot.id,
-            description: 'Points expired',
-          });
-          expiredLots += 1;
-          totalExpired += expirable;
+        // 2) Read the now-frozen remaining and the (locked) wallet.
+        const fresh = await tx.pointsLedger.findUnique({ where: { id: lot.id } });
+        const remaining = fresh?.remainingPoints ?? 0;
+        if (remaining > 0) {
+          // The lot is expired → zero its remaining regardless of how much is still backed.
+          await tx.pointsLedger.update({ where: { id: lot.id }, data: { remainingPoints: 0 } });
         }
+        const wallet = await tx.wallet.findFirst({ where: { id: lot.walletId } });
+        if (!wallet) return;
+
+        // 3) Expire only what the locked scalar actually still backs for this lot — never
+        //    more. Aligned wallet: remaining <= scalar → expire = remaining. Transiently
+        //    drifted wallet (Σremaining > scalar from a concurrent-redeem race): clamp to the
+        //    scalar so we neither go negative nor write a phantom EXPIRE row the balance can't
+        //    back. applyMovement does NOT FIFO-consume on EXPIRE, so no other lot is touched.
+        const expire = Math.min(remaining, wallet.redeemablePoints);
+        if (expire <= 0) return; // fully redeemed before expiry — nothing to expire
+
+        await this.applyMovement(tx, {
+          wallet,
+          walletTxType: 'DEBIT_EXPIRY',
+          ledgerType: PointsLedgerType.EXPIRE,
+          points: -expire,
+          schemeId: lot.schemeId,
+          referenceType: 'POINTS_LEDGER',
+          referenceId: lot.id,
+          sourceType: 'EXPIRY_SWEEP',
+          sourceId: lot.id,
+          description: 'Points expired',
+        });
+        expiredLots += 1;
+        totalExpired += expire;
       });
     }
 

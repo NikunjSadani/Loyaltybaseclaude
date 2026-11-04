@@ -107,15 +107,35 @@ export function aggregateLedgerToRow(
     const d = entry.createdAt instanceof Date ? entry.createdAt : new Date(entry.createdAt);
     const monthKey = istMonthKey(d);
     const cell = cellByKey.get(monthKey);
-
-    if (entry.type === 'EARN') {
-      totalEarn += entry.points;
-      if (cell) cell.earn += entry.points;
-    } else if (entry.type === 'REDEEM') {
-      totalBurn += entry.points;
-      if (cell) cell.burn += entry.points;
-    } else if (entry.type === 'EXPIRE') {
-      totalExpired += entry.points;
+    // Ledger `points` is SIGNED: credits are positive, debits (redeem/expire/debit-adjust)
+    // negative. Bucket each row by its REAL direction so earn/burn/expired are positive
+    // magnitudes and the net is correct (prior code did `+= points` on negative rows and
+    // `- totalBurn` on an already-negative sum → it ADDED burn back into the balance).
+    const p = entry.points;
+    switch (entry.type) {
+      case 'EARN':
+      case 'REVERSE': // a refund restores spendable points → a credit on the statement
+        totalEarn += p;
+        if (cell) cell.earn += p;
+        break;
+      case 'ADJUST': // one ledger type carries both directions — the sign distinguishes
+        if (p >= 0) {
+          totalEarn += p;
+          if (cell) cell.earn += p;
+        } else {
+          totalBurn += -p;
+          if (cell) cell.burn += -p;
+        }
+        break;
+      case 'REDEEM':
+        totalBurn += -p; // p < 0 → magnitude
+        if (cell) cell.burn += -p;
+        break;
+      case 'EXPIRE':
+        totalExpired += -p; // p < 0 → magnitude
+        break;
+      // LOCK / UNLOCK move points to/from the locked bucket, not the redeemable balance
+      // this statement tracks → ignored.
     }
   }
 
