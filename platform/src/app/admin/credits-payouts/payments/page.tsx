@@ -313,6 +313,7 @@ export default function AdminPaymentsReportPage() {
                   <th className="text-left px-3 py-3">Group Type</th>
                   <th className="text-left px-3 py-3">Payout Field</th>
                   <th className="text-left px-3 py-3">Remarks</th>
+                  <th className="text-left px-3 py-3">Failure Reason</th>
                   <th className="text-left px-3 py-3">Period</th>
                   <th className="text-left px-3 py-3">TDS Section</th>
                   <th className="text-right px-3 py-3">TDS Deducted</th>
@@ -360,6 +361,7 @@ export default function AdminPaymentsReportPage() {
                     <td className="px-3 py-3 text-gray-600">{r.groupType ?? '—'}</td>
                     <td className="px-3 py-3 text-gray-600">{r.payoutField ?? '—'}</td>
                     <td className="px-3 py-3 text-gray-500">{r.remarks ?? '—'}</td>
+                    <td className="px-3 py-3 text-red-600">{r.failureReason ?? '—'}</td>
                     <td className="px-3 py-3 text-gray-600">{r.period ?? '—'}</td>
                     <td className="px-3 py-3 text-gray-600">{r.tdsSection ?? '—'}</td>
                     <td className="px-3 py-3 text-right">

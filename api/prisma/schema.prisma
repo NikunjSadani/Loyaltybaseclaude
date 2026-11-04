@@ -3202,6 +3202,12 @@ model CreditPayoutEntry {
   tdsSection       TdsSection?
   tdsMethodology   TdsMethodology?
   tdsDeductedPaise BigInt          @default(0) // DEDUCT-method net withheld at download; 0 for gross-up/incentive
+  // Non-success payout capture (recording rejected/failed payouts). Both nullable → additive,
+  // zero backfill, Deoleo byte-identical. failureReason = the raw bank/vendor reason from the UTR
+  // upload's Remarks cell; attemptedAt = the uploaded failure/attempt date (distinct from paidAt,
+  // which MUST stay null for a non-success row so it never leaks into the default/PAID report view).
+  failureReason  String?
+  attemptedAt    DateTime?
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
 

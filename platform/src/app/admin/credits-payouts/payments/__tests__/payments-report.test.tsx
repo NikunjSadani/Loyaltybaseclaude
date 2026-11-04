@@ -69,6 +69,7 @@ const ROW = {
   groupType: 'INDIVIDUAL',
   payoutField: 'visibility',
   remarks: 'ok',
+  failureReason: null,
   period: '2026-07',
   tdsSection: 'SEC_194C',
   tdsMethodology: 'GROSS_UP',
@@ -128,6 +129,33 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
     expect(screen.getAllByText('PAID').length).toBeGreaterThan(0)     // status badge
     expect(screen.getByText('SEC_194C')).toBeInTheDocument()          // TDS section
     expect(screen.getByText('ABCDE1234F')).toBeInTheDocument()        // PAN
+  })
+
+  it('renders the Failure Reason column for a FAILED row (empty on PAID)', async () => {
+    asRole('GIFSY_ADMIN')
+    const failedRow = {
+      ...ROW,
+      status: 'FAILED',
+      paymentDate: '2026-07-20T00:00:00.000Z', // from attemptedAt (service maps paidAt ?? attemptedAt)
+      utr: 'UTR-FAIL',
+      failureReason: 'Account Closed',
+    }
+    const fetchMock = vi.fn((url: string) => {
+      if (url.startsWith('/api/admin/payments-report')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ success: true, data: { scope: { clientId: null }, count: 1, totals: { amount: { paise: '0', inr: 0 } }, rows: [failedRow] } }),
+        })
+      }
+      return Promise.reject(new Error('unexpected fetch in test: ' + url))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<AdminPaymentsReportPage />)
+    await screen.findByText('Shop A')
+    // The captured bank reason renders in the new Failure Reason column.
+    expect(screen.getByText('Account Closed')).toBeInTheDocument()
+    expect(screen.getByText('UTR-FAIL')).toBeInTheDocument() // UTR kept on FAILED
   })
 
   it('Export button fetches the export URL carrying the current filters', async () => {

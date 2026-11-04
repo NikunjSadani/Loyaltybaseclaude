@@ -1812,7 +1812,17 @@ export class CreditsService {
         if (payableEntryIds.length > 0) {
           const claimed = await tx.creditPayoutEntry.updateMany({
             where: { id: { in: payableEntryIds }, status: { in: ['PENDING', 'FAILED'] } },
-            data: { downloadId: rec.id, status: 'PROCESSING' },
+            // Re-banking a previously-FAILED entry: clear the stale failure capture (reason, date,
+            // AND the failed-attempt UTR reference) so the re-attempt starts fully clean — a
+            // subsequent PAID shows no leftover failure info, and a re-FAIL overwrites it fresh.
+            // PENDING entries already carry nulls here (harmless).
+            data: {
+              downloadId: rec.id,
+              status: 'PROCESSING',
+              failureReason: null,
+              attemptedAt: null,
+              utr: null,
+            },
           });
           if (claimed.count !== payableEntryIds.length) {
             throw new ConflictException(
@@ -2006,8 +2016,13 @@ export class CreditsService {
     // Known UTRs across all downloads for this client (dup detection). We also need
     // each prior use's bank account so the same-account shared-UTR rule can allow a
     // legitimate combined transfer while still rejecting a cross-account copy-paste.
+    // SCOPED TO status:'PAID' — the guard's job is to stop reusing a UTR that actually PAID
+    // money. A FAILED entry now also carries a UTR (its failed-attempt reference), but that
+    // reference never moved money, so it must NOT enter this set, else it would falsely block a
+    // later legitimate payment that reuses the reference. (Byte-identical for old data: a FAILED
+    // entry previously had a null UTR, so it was already excluded by the not-null filter.)
     const usedUtrs = await this.prisma.creditPayoutEntry.findMany({
-      where: { clientId: user.clientId, utr: { not: null } },
+      where: { clientId: user.clientId, utr: { not: null }, status: 'PAID' },
       select: { utr: true, outletId: true },
     });
 
@@ -2119,18 +2134,38 @@ export class CreditsService {
         const entry = freshByOutlet.get(row.outletId);
         if (!entry) continue;
 
+        // Non-success capture: the uploaded Remarks cell (bank/vendor reason) + the attempt date,
+        // surfaced by the parser on row.remarks / row.paymentDate for FAILED rows too. Stored in
+        // dedicated columns (failureReason / attemptedAt); OVERWRITTEN each apply (idempotent — no
+        // accretion). The uploaded UTR reference is now kept on FAILED as well (it used to be
+        // nulled), normalised to upper-case like the PAID path.
+        const normUtr = row.utr?.trim() ? row.utr.trim().toUpperCase() : null;
+        const bankReason = (row.remarks ?? '').trim() || null;
+
         // FIX-C: GUARDED flip — only an entry still PROCESSING transitions. A concurrent apply that
         // already moved it returns count 0 → we skip it (and never reverse its withholding twice).
         const flip = await tx.creditPayoutEntry.updateMany({
           where: { id: entry.id, status: 'PROCESSING' },
-          data: {
-            status: row.success ? 'PAID' : 'FAILED',
-            utr: row.success ? row.utr || null : null,
-            // Use the operator-supplied Payment Date when present, else the apply time.
-            paidAt: row.success ? (row.paymentDate ?? now) : null,
-            // FIX-3: a FAILED payout withheld nothing → clear the stamped deduction.
-            ...(row.success ? {} : { tdsDeductedPaise: 0n }),
-          },
+          data: row.success
+            ? {
+                status: 'PAID',
+                utr: row.utr || null,
+                // Use the operator-supplied Payment Date when present, else the apply time.
+                paidAt: row.paymentDate ?? now,
+              }
+            : {
+                status: 'FAILED',
+                // paidAt MUST stay null — a non-null paidAt would leak the row into the default/
+                // PAID report view (which filters paidAt IS NOT NULL).
+                paidAt: null,
+                // Keep the uploaded UTR reference if the operator supplied one.
+                utr: normUtr,
+                // FIX-3: a FAILED payout withheld nothing → clear the stamped deduction.
+                tdsDeductedPaise: 0n,
+                // NEW: capture the bank reason + attempt date for the admin audit report.
+                failureReason: bankReason,
+                attemptedAt: row.paymentDate ?? null,
+              },
         });
         if (flip.count === 0) continue; // not transitioned by THIS call → no reversal
 

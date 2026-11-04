@@ -137,6 +137,64 @@ describe('PaymentsReportService', () => {
       expect(call.where.status).toBe('FAILED');
     });
 
+    it('a NON-PAID status (FAILED) DROPS the paidAt not-null floor and orders by attemptedAt desc (nulls last)', async () => {
+      // A FAILED entry (bank-rejected) has paidAt null; forcing paidAt not-null would hide it. The
+      // status filter therefore relaxes the floor and orders by the uploaded failure date newest-first.
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        {
+          id: 'f1', clientId: 'deoleo', outletId: 'OUT1', outletName: 'Shop 1', fieldName: 'Incentive',
+          period: '2026-06', amountPaise: 300000n, narration: 'incentive payout', status: 'FAILED',
+          utr: 'UTR-FAIL', paidAt: null, attemptedAt: new Date('2026-06-20T00:00:00Z'),
+          failureReason: 'Account Closed', tdsSection: null, tdsMethodology: null, tdsDeductedPaise: 0n,
+          download: null, autoInvoice: null,
+        },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([OUTLET]);
+
+      const res = await service.paymentReport({ clientId: 'deoleo', status: 'FAILED' as never });
+      const call = mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0];
+      expect(call.where.status).toBe('FAILED');
+      expect(call.where).not.toHaveProperty('paidAt'); // the not-null floor is dropped for FAILED
+      expect(call.where.clientId).toBe('deoleo'); // tenant scope intact
+      expect(call.orderBy).toEqual([
+        { attemptedAt: { sort: 'desc', nulls: 'last' } },
+        { createdAt: 'desc' },
+      ]);
+
+      // The FAILED row surfaces: its reason + the attempt date as the display date (paidAt ?? attemptedAt).
+      expect(res.count).toBe(1);
+      expect(res.rows[0].status).toBe('FAILED');
+      expect(res.rows[0].failureReason).toBe('Account Closed');
+      expect(res.rows[0].paymentDate).toBe('2026-06-20T00:00:00.000Z'); // from attemptedAt (paidAt null)
+      expect(res.rows[0].utr).toBe('UTR-FAIL'); // uploaded reference kept
+    });
+
+    it('a NON-PAID status + date range bounds attemptedAt (FAILED rows have no paidAt to range on)', async () => {
+      await service.paymentReport({ clientId: 'deoleo', status: 'FAILED' as never, from: '2026-06-01', to: '2026-06-30' });
+      const call = mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0];
+      expect(call.where).not.toHaveProperty('paidAt');
+      expect(call.where.attemptedAt).toEqual({
+        gte: startOfIstDay(new Date('2026-06-01')),
+        lte: endOfIstDay(new Date('2026-06-30')),
+      });
+    });
+
+    it('status=PAID KEEPS the paidAt not-null floor + the paidAt-desc order (byte-identical default)', async () => {
+      await service.paymentReport({ clientId: 'deoleo', status: 'PAID' as never });
+      const call = mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0];
+      expect(call.where.status).toBe('PAID');
+      expect(call.where.paidAt).toEqual({ not: null });
+      expect(call.orderBy).toEqual([{ paidAt: 'desc' }, { createdAt: 'desc' }]);
+    });
+
+    it('the default (no status) path is byte-identical: paidAt floor + paidAt-desc order', async () => {
+      await service.paymentReport({ clientId: 'deoleo' });
+      const call = mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0];
+      expect(call.where.paidAt).toEqual({ not: null });
+      expect(call.where).not.toHaveProperty('attemptedAt');
+      expect(call.orderBy).toEqual([{ paidAt: 'desc' }, { createdAt: 'desc' }]);
+    });
+
     it('platform-wide scope (no clientId) does not pin the query to a tenant', async () => {
       await service.paymentReport({});
       const call = mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0];

@@ -1182,9 +1182,10 @@ describe('CreditsService', () => {
 
       expect(res.downloadCode).toBe('PD-2026-05-001');
       expect(res.downloadId).toBe('d1');
-      // Entries marked PROCESSING with the new download id.
+      // Entries marked PROCESSING with the new download id; any stale failure capture is cleared
+      // (reason, date, AND the failed-attempt UTR) so a re-banked entry starts fully clean.
       const updateArg = mockTx.creditPayoutEntry.updateMany.mock.calls[0][0];
-      expect(updateArg.data).toEqual({ downloadId: 'd1', status: 'PROCESSING' });
+      expect(updateArg.data).toEqual({ downloadId: 'd1', status: 'PROCESSING', failureReason: null, attemptedAt: null, utr: null });
       expect(updateArg.where.id.in).toEqual(['e1', 'e2']);
 
       // totalAmountPaise stored as BigInt: 10000 + 5000 = 15000 paise
@@ -1293,6 +1294,9 @@ describe('CreditsService', () => {
       // The FAILED entry was included and therefore marked PROCESSING.
       const updateArg = mockTx.creditPayoutEntry.updateMany.mock.calls[0][0];
       expect(updateArg.where.id.in).toContain('e-fail');
+      // Re-banking CLEARS any stale failure capture so the re-attempt starts clean (a later PAID
+      // shows no leftover reason/date; a re-FAIL overwrites fresh).
+      expect(updateArg.data).toMatchObject({ status: 'PROCESSING', failureReason: null, attemptedAt: null, utr: null });
     });
 
     it('GLM-2: a REVERSED entry is NOT re-selected (excluded by status filter)', async () => {
@@ -1502,6 +1506,48 @@ describe('CreditsService', () => {
       await expect(service.uploadUtr(gifsy, 'd1', file, true)).rejects.toBeInstanceOf(
         BadRequestException,
       );
+    });
+
+    it('the dup-UTR guard is scoped to PAID entries so a FAILED attempt’s UTR never blocks a later payment', async () => {
+      // The payout download being applied: one PROCESSING entry for O1 (no UTR yet).
+      mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
+        id: 'd1', downloadCode, period: '2026-05', downloadedBy: 'g1',
+        entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: BigInt(10000) }],
+      });
+      // FIX-C: the in-tx fresh read.
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: BigInt(10000), tdsDeductedPaise: 0n, tdsSection: null, period: '2026-05' },
+      ]);
+      // Simulate the DB for the dup-UTR guard query: a FAILED entry on a DIFFERENT outlet (O2)
+      // carries the reference 'UTR123456' (its failed-attempt UTR). The guard must only see PAID
+      // entries — so a PAID-scoped query excludes the FAILED one (returns []); an (old, buggy)
+      // unscoped query would surface it. This mock HONOURS the where.status so the test proves the
+      // scope, not just asserts the argument.
+      mockPrisma.creditPayoutEntry.findMany.mockImplementation(async (arg: { where?: { status?: string } }) =>
+        arg?.where?.status === 'PAID' ? [] : [{ utr: 'UTR123456', outletId: 'O2' }],
+      );
+      // Bank account for O1 (the only outletCode needed — usedUtrs is empty under the PAID scope).
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'O1', name: 'A', partnerId: 'p1', partner: { ownerName: 'Ravi', phone: '', bankAccountNumber: 'ACC1' } },
+      ]);
+
+      // O1 is paid with a UTR that MATCHES the FAILED O2 reference. Under the PAID scope this is NOT
+      // a duplicate (the FAILED reference never moved money), so the payment must apply.
+      const file = buildUtrFile([[downloadCode, 'O1', 'UTR123456', 'Success', '']]);
+      const res = (await service.uploadUtr(gifsy, 'd1', file, true)) as { applied: boolean; paidCount: number };
+
+      // (1) The dup-detection findMany (select { utr, outletId }) is scoped to status:'PAID'.
+      const dedupCall = mockPrisma.creditPayoutEntry.findMany.mock.calls.find(
+        ([a]) => a?.select?.utr === true && a?.select?.outletId === true,
+      )![0];
+      expect(dedupCall.where).toMatchObject({ clientId: 'deoleo', status: 'PAID', utr: { not: null } });
+
+      // (2) Behavioural: the SUCCESS row was NOT rejected as a duplicate — it applied as PAID.
+      expect(res.applied).toBe(true);
+      expect(res.paidCount).toBe(1);
+      const flip = mockTx.creditPayoutEntry.updateMany.mock.calls.find(([a]) => a.where.id === 'e1')![0];
+      expect(flip.data.status).toBe('PAID');
+      expect(flip.data.utr).toBe('UTR123456');
     });
   });
 
@@ -2127,10 +2173,14 @@ describe('CreditsService', () => {
       await service.uploadUtr(gifsy, 'd1', file, true);
 
       // FIX-C: the entry flips via a GUARDED updateMany (status:'PROCESSING'); a failed payout
-      // withheld nothing → tdsDeductedPaise cleared.
+      // withheld nothing → tdsDeductedPaise cleared. The bank reason ("bounced" from the file's
+      // Remarks cell) is captured into failureReason; no payment date / UTR in this file → both null.
       expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
         where: { id: 'e1', status: 'PROCESSING' },
-        data: { status: 'FAILED', utr: null, paidAt: null, tdsDeductedPaise: 0n },
+        data: {
+          status: 'FAILED', utr: null, paidAt: null, tdsDeductedPaise: 0n,
+          failureReason: 'bounced', attemptedAt: null,
+        },
       });
       // Compensating NEGATIVE ledger row (PAN from the original deduction) so the next event's
       // priorDeducted drops the un-withheld ₹500; linked back to the entry via creditPayoutEntryId.
@@ -2140,6 +2190,118 @@ describe('CreditsService', () => {
       expect(rev.fyLabel).toBe('2026-27'); // FY of period 2026-05
       expect(rev.creditPayoutEntryId).toBe('e1');
       expect(rev.tdsDeductedThisPaise).toBe(-50000n);
+    });
+
+    // ── Non-success capture: failureReason + attemptedAt + uploaded UTR ──────────────────────────
+    it('a FAILED payout captures failureReason, attemptedAt and the uploaded UTR from the row', async () => {
+      mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
+        id: 'd1', downloadCode: 'PD-2026-05-001', period: '2026-05', downloadedBy: 'g1',
+        entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: 5000000n }],
+      });
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]); // used-UTR dedup query
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([{
+        id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: 5000000n,
+        tdsDeductedPaise: 0n, tdsSection: null, period: '2026-05',
+      }]);
+
+      // A failed row CAN carry a UTR + a Payment Date (the bank reference + attempt date).
+      const aoa = [
+        ['title'],
+        ['Batch ID', 'Outlet ID', 'UTR', 'Success/Failure', 'Remarks', 'Payment Date'],
+        ['PD-2026-05-001', 'O1', 'utr99887766', 'Failed', 'Account Closed', '2026-05-20'],
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Payout');
+      const file = { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File;
+
+      await service.uploadUtr(gifsy, 'd1', file, true);
+
+      const data = mockTx.creditPayoutEntry.updateMany.mock.calls.at(-1)![0].data;
+      expect(data.status).toBe('FAILED');
+      expect(data.paidAt).toBeNull(); // MUST stay null so it never leaks into the default/PAID view
+      expect(data.failureReason).toBe('Account Closed'); // raw bank reason from the Remarks cell
+      expect(data.utr).toBe('UTR99887766'); // uploaded reference kept + upper-cased
+      expect(data.attemptedAt).toBeInstanceOf(Date); // the uploaded failure/attempt date
+      expect(data.tdsDeductedPaise).toBe(0n);
+      // narration is NEVER touched by the capture now (operator remark preserved as-is).
+      expect(data).not.toHaveProperty('narration');
+    });
+
+    it('a FAILED payout with a blank Remarks cell stores failureReason null (no reason to record)', async () => {
+      mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
+        id: 'd1', downloadCode: 'PD-2026-05-001', period: '2026-05', downloadedBy: 'g1',
+        entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: 5000000n }],
+      });
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([{
+        id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: 5000000n,
+        tdsDeductedPaise: 0n, tdsSection: null, period: '2026-05',
+      }]);
+
+      const aoa = [['title'], ['Batch ID', 'Outlet ID', 'UTR', 'Success/Failure', 'Remarks'], ['PD-2026-05-001', 'O1', '', 'Failed', '']];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Payout');
+      const file = { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File;
+
+      await service.uploadUtr(gifsy, 'd1', file, true);
+
+      const data = mockTx.creditPayoutEntry.updateMany.mock.calls.at(-1)![0].data;
+      expect(data).toMatchObject({ status: 'FAILED', paidAt: null, utr: null, failureReason: null, attemptedAt: null });
+    });
+
+    // ── Re-upload idempotency: the SAME FAILED file applied twice does NOT change state ───────────
+    // The protection is the FIX-C guarded flip (where:{ status:'PROCESSING' }): once FAILED the entry
+    // is no longer PROCESSING, so the second apply matches 0 rows. And because failureReason is
+    // OVERWRITTEN (not appended), even a hypothetical re-apply would be value-stable — no accretion.
+    it('does NOT mutate a FAILED entry (reason/reversal) when the SAME file is applied twice', async () => {
+      const store = {
+        id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: 5000000n,
+        tdsDeductedPaise: 50000n, tdsSection: 'SEC_194C', period: '2026-05',
+        failureReason: null as string | null, attemptedAt: null as Date | null, utr: null as string | null,
+      };
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]); // used-UTR dedup (both applies)
+      mockTx.creditPayoutEntry.findMany.mockImplementation(async () => [{ ...store }]);
+      mockTx.creditPayoutEntry.updateMany.mockImplementation(async (arg: { where: { id: string; status: string }; data: Record<string, unknown> }) => {
+        if (arg.where.id === store.id && store.status === arg.where.status) {
+          Object.assign(store, arg.data);
+          return { count: 1 };
+        }
+        return { count: 0 };
+      });
+      mockTx.tdsDeductionEntry.findMany.mockResolvedValue([{ creditPayoutEntryId: 'e1', panNumber: 'PAN1' }]);
+
+      const buildFailFile = () => {
+        const aoa = [['title'], ['Batch ID', 'Outlet ID', 'UTR', 'Success/Failure', 'Remarks'], ['PD-2026-05-001', 'O1', '', 'Failed', 'Account Closed']];
+        const ws = XLSX.utils.aoa_to_sheet(aoa);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Payout');
+        return { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File;
+      };
+
+      // First apply: PROCESSING → FAILED, reason captured, withholding reversed once.
+      mockPrisma.creditPayoutDownload.findFirst.mockResolvedValueOnce({
+        id: 'd1', downloadCode: 'PD-2026-05-001', period: '2026-05', downloadedBy: 'g1',
+        entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: 5000000n }],
+      });
+      await service.uploadUtr(gifsy, 'd1', buildFailFile(), true);
+      expect(store.status).toBe('FAILED');
+      expect(store.failureReason).toBe('Account Closed');
+      expect(mockTx.tdsDeductionEntry.createMany).toHaveBeenCalledTimes(1);
+
+      // Second apply of the SAME file: entry is now FAILED (NOT PROCESSING) → guarded flip = 0 rows.
+      mockPrisma.creditPayoutDownload.findFirst.mockResolvedValueOnce({
+        id: 'd1', downloadCode: 'PD-2026-05-001', period: '2026-05', downloadedBy: 'g1',
+        entries: [{ id: 'e1', outletId: 'O1', status: 'FAILED', utr: null, amountPaise: 5000000n }],
+      });
+      await service.uploadUtr(gifsy, 'd1', buildFailFile(), true);
+
+      const lastFlip = mockTx.creditPayoutEntry.updateMany.mock.calls.at(-1)![0];
+      expect(lastFlip.where).toEqual({ id: 'e1', status: 'PROCESSING' }); // guard unchanged
+      expect(store.failureReason).toBe('Account Closed'); // unchanged (single value, no accretion)
+      expect(store.status).toBe('FAILED');
+      expect(mockTx.tdsDeductionEntry.createMany).toHaveBeenCalledTimes(1); // no second reversal
     });
 
     // ── FIX-C: concurrent apply — the guarded PROCESSING flip prevents a double reversal ─────────

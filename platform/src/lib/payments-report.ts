@@ -49,6 +49,8 @@ export interface PaymentRow {
   groupType: string | null;
   payoutField: string | null;
   remarks: string | null;
+  /** Raw bank/vendor reason captured on a FAILED payout (null on PAID rows). */
+  failureReason: string | null;
   period: string | null;
   tdsSection: string | null;
   tdsMethodology: string | null;

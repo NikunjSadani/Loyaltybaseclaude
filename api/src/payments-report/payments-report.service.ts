@@ -85,21 +85,44 @@ export class PaymentsReportService {
    * chain.
    */
   async paymentReport(scope: PaymentsReportScope) {
-    // paidAt is ALWAYS constrained not-null (a payment is a paid entry); the range narrows further.
     // A date-only from/to (YYYY-MM-DD from <input type="date">) is interpreted as a FULL INCLUSIVE
     // IST day via the shared istDayRangeFilter — otherwise a naive `new Date("YYYY-MM-DD")` (= 05:30
     // IST) skips the first 5.5h of `from` AND truncates almost all of `to` (same trap the roster /
     // gift / reports / payout date filters fix). A full ISO datetime is used as-given.
-    const paidAt: Prisma.DateTimeNullableFilter = { not: null };
     const range = istDayRangeFilter(scope.from, scope.to);
-    if (range?.gte) paidAt.gte = range.gte;
-    if (range?.lte) paidAt.lte = range.lte;
 
-    const where: Prisma.CreditPayoutEntryWhereInput = { paidAt };
+    const where: Prisma.CreditPayoutEntryWhereInput = {};
     if (scope.clientId) where.clientId = scope.clientId;
     if (scope.status) where.status = scope.status;
     // NOTE: intentionally NO tdsSection filter — that is the TDS report's job and would drop
     // every incentive/standard-stream payment from this cross-stream payments report.
+
+    // By default a "payment" is an actually-PAID entry: paidAt is constrained not-null and the
+    // [from,to] range narrows it. This is the report's long-standing behaviour and keeps it
+    // byte-identical for every tenant (incl. live Deoleo) when no status / a PAID status is asked.
+    // To let an admin audit NON-SUCCESS payouts (bank-rejected FAILED / REVERSED — whose paidAt is
+    // null, so the not-null floor would hide them), a non-PAID status filter RELAXES that floor and
+    // the range then bounds attemptedAt (the uploaded failure date) instead.
+    const nonPaidStatus = !!scope.status && scope.status !== CreditEntryStatus.PAID;
+    if (nonPaidStatus) {
+      if (range?.gte || range?.lte) {
+        const attemptedAt: Prisma.DateTimeNullableFilter = {};
+        if (range.gte) attemptedAt.gte = range.gte;
+        if (range.lte) attemptedAt.lte = range.lte;
+        where.attemptedAt = attemptedAt;
+      }
+    } else {
+      const paidAt: Prisma.DateTimeNullableFilter = { not: null };
+      if (range?.gte) paidAt.gte = range.gte;
+      if (range?.lte) paidAt.lte = range.lte;
+      where.paidAt = paidAt;
+    }
+
+    // Default/PAID: newest PAYMENT first (byte-identical). Non-PAID audit: newest FAILURE first by
+    // the uploaded attempt date (nulls last so reason-less rows sink), then createdAt as a tiebreak.
+    const orderBy: Prisma.CreditPayoutEntryOrderByWithRelationInput[] = nonPaidStatus
+      ? [{ attemptedAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }]
+      : [{ paidAt: 'desc' }, { createdAt: 'desc' }];
 
     // Bound the result set: a huge date range (or platform-wide + no filters) could otherwise load
     // every paid entry across all tenants + build the whole xlsx in memory (OOM on a capped pod).
@@ -107,7 +130,7 @@ export class PaymentsReportService {
     // banner rather than a silently-partial financial report. take + orderBy return the most-recent.
     const rawEntries = await this.prisma.creditPayoutEntry.findMany({
       where,
-      orderBy: [{ paidAt: 'desc' }, { createdAt: 'desc' }],
+      orderBy,
       take: PaymentsReportService.MAX_ROWS + 1,
       select: {
         id: true,
@@ -121,6 +144,8 @@ export class PaymentsReportService {
         status: true,
         utr: true,
         paidAt: true,
+        attemptedAt: true,
+        failureReason: true,
         tdsSection: true,
         tdsMethodology: true,
         tdsDeductedPaise: true,
@@ -203,9 +228,12 @@ export class PaymentsReportService {
       const o = outletMap.get(`${e.clientId}|${e.outletId}`);
       const repId = o ? repByOutletPk.get(o.id) : undefined;
       const rep = repId ? salesMap.get(repId) : undefined;
+      // A non-success row has a null paidAt but carries the uploaded failure date in attemptedAt —
+      // show that so a FAILED row has a date instead of a blank. PAID rows use paidAt as before.
+      const displayDate = e.paidAt ?? e.attemptedAt;
       return {
         clientId: e.clientId,
-        paymentDate: e.paidAt ? e.paidAt.toISOString() : null,
+        paymentDate: displayDate ? displayDate.toISOString() : null,
         outletCode: e.outletId,
         outletName: e.outletName,
         businessName: o?.partner?.businessName ?? null,
@@ -224,6 +252,8 @@ export class PaymentsReportService {
         groupType: e.download?.groupType ?? null,
         payoutField: e.fieldName,
         remarks: e.narration ?? null,
+        // The raw bank/vendor reason captured from the UTR upload on a FAILED row (null on PAID).
+        failureReason: e.failureReason ?? null,
         period: e.period,
         tdsSection: e.tdsSection,
         tdsMethodology: e.tdsMethodology,
@@ -281,6 +311,7 @@ export class PaymentsReportService {
       'Group Type': r.groupType ?? '',
       'Payout Field': r.payoutField,
       'Remarks': r.remarks ?? '',
+      'Failure Reason': r.failureReason ?? '',
       'Period': r.period,
       'TDS Section': r.tdsSection ?? '',
       'TDS Methodology': r.tdsMethodology ?? '',
