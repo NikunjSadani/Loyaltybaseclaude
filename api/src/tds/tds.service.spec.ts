@@ -122,23 +122,6 @@ describe('TdsService', () => {
     });
   });
 
-  // ─── 194R: VENDOR_IMPORT historical payouts excluded ──────────────────────
-  describe('compute194R — excludes VENDOR_IMPORT historical payouts', () => {
-    it('issues the paid-entry query with a NULL-safe batch.sourceKind != VENDOR_IMPORT filter', async () => {
-      await service.compute194R(CLIENT_ID, FY);
-      // The paidAt-window query is the one carrying a `paidAt` range; it must exclude entries whose
-      // parent batch is a VENDOR_IMPORT (already-settled historical payouts), NULL-safe so ordinary
-      // operator uploads (batch.sourceKind = null) are still counted.
-      const paidAtCall = mockPrisma.creditPayoutEntry.findMany.mock.calls
-        .map((c) => c[0])
-        .find((a) => a?.where?.paidAt);
-      expect(paidAtCall).toBeDefined();
-      expect(paidAtCall.where.batch).toEqual({
-        OR: [{ sourceKind: null }, { sourceKind: { not: 'VENDOR_IMPORT' } }],
-      });
-    });
-  });
-
   // ─── 194R: above threshold (PAN) ─────────────────────────────────────────
 
   describe('compute194R — above threshold, PAN holder', () => {

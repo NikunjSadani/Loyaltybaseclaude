@@ -197,18 +197,7 @@ export class TdsService {
     // in a DIFFERENT FY (but whose paidAt happened to fall in this one) is dropped.
     // NOTE: CreditPayoutEntry.outletId stores the outletCode (string code), NOT the Outlet PK.
     const paidAtEntries = await this.prisma.creditPayoutEntry.findMany({
-      where: {
-        clientId,
-        status: 'PAID',
-        paidAt: { gte: start, lt: endExclusive },
-        // Exclude historical VENDOR_IMPORT payouts: these were already settled off-platform by the
-        // prior vendor and are recorded as display-only history — they must NEVER enter statutory
-        // TDS (194R). Provenance lives on the parent CreditBatch.sourceKind. NULL-safe: a bare
-        // `{ not: 'VENDOR_IMPORT' }` would silently DROP ordinary operator-upload entries (whose
-        // batch.sourceKind is NULL) under Prisma's three-valued logic, so OR-wrap to keep them.
-        // Tenants with no import batches (e.g. Deoleo) match every row here → behaviour unchanged.
-        batch: { OR: [{ sourceKind: null }, { sourceKind: { not: 'VENDOR_IMPORT' } }] },
-      },
+      where: { clientId, status: 'PAID', paidAt: { gte: start, lt: endExclusive } },
       select: { id: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, period: true },
     });
     const periodVisEntries = visFieldIdArr.length
