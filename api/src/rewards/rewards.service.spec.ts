@@ -248,7 +248,7 @@ describe('RewardsService', () => {
       const call = mockPrisma.rewardCatalog.findMany.mock.calls[0][0];
       expect(call.select).toBeDefined();
       expect(call.include).toBeUndefined();
-      expect(call.select.category).toEqual({ select: { name: true } });
+      expect(call.select.category).toEqual({ select: { name: true, sortOrder: true } });
       // Flag OFF (default) → the cost-basis columns are NOT even selected for members, and
       // mrpPaise is never part of the member projection (cost-basis inference leak guard).
       expect(call.select.sellingValuePaise).toBeUndefined();
@@ -266,6 +266,19 @@ describe('RewardsService', () => {
       // The nested relation is flattened to a plain string label.
       expect(res.items[0].category).toBe('Gift Vouchers');
       expect(res.items[0].redemptionMode).toBe('GIFT_CARD');
+    });
+
+    it('surfaces the category sortOrder as a flat categorySort for the dynamic chip row', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 100 });
+      mockPrisma.rewardCatalog.findMany.mockResolvedValue([
+        { id: 'r1', pointsCost: 50, category: { name: 'Electronics', sortOrder: 5 } },
+      ]);
+      mockPrisma.rewardCatalog.count.mockResolvedValue(1);
+
+      const res = await service.listCatalog(partner, {});
+      expect(res.items[0].category).toBe('Electronics');
+      expect(res.items[0].categorySort).toBe(5);
     });
 
     it('derives requiresConsent from sourceType (true for VENDOR) without leaking sourceType', async () => {

@@ -134,7 +134,11 @@ describe('Sales dashboard — RLP/BSC toggle gate', () => {
     expect(screen.queryByTestId('trade-comparison-card')).not.toBeInTheDocument();
     // Audit fix: with rlpBscView OFF the Trade Comparison card does NOT render, so the graph must be
     // KEPT (never hidden into a blank gap) even for a Bajaj manager.
-    expect(screen.getByText('Target vs. Achievement')).toBeInTheDocument();
+    // NOTE: the trend card ("Target vs. Achievement") renders only AFTER salesTargets commits, i.e.
+    // /api/sales/me resolves (featuresLoading→false) → the /api/sales/targets fetch resolves →
+    // setSalesTargets re-renders. `await findByText` waits out that async chain; a synchronous
+    // getByText here raced it and flaked under the full suite's load (passed solo, intermittent in-suite).
+    expect(await screen.findByText('Target vs. Achievement')).toBeInTheDocument();
   });
 
   it('BT8: Bajaj manager with rlpBscView ON — graph is REPLACED by the Trade Comparison card (no blank)', async () => {

@@ -15,6 +15,12 @@ resource "google_sql_database_instance" "gifsy_db" {
     tier              = var.db_tier
     availability_type = "ZONAL"   # upgrade to REGIONAL when production traffic warrants HA
 
+    # GCP-NATIVE deletion protection — blocks a console/gcloud/API DELETE of the instance.
+    # DISTINCT from the resource-level `deletion_protection` below (which only blocks
+    # `terraform destroy`). Both must be true to be fully protected. Enabled live
+    # 2026-08-25 via `gcloud sql instances patch`; declared here so a future apply keeps it.
+    deletion_protection_enabled = true
+
     ip_configuration {
       ipv4_enabled    = false      # no public IP
       private_network = google_compute_network.gifsy_vpc.id

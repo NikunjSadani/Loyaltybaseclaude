@@ -89,9 +89,17 @@ export function BankOrUpiSection({
   const videoRef  = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  /* Fires onPaymentGeoTrigger ONCE on the first keystroke of a fresh manual UPI entry.
+     Re-armed below when upiId is cleared, so a later fresh entry triggers geo again. */
+  const manualGeoFiredRef = useRef(false);
 
   /* ── Per-tenant UPI gate (default OFF → bank-transfer only) ── */
   const upiEnabled = getGifsySettings().salesApp?.upiEnabled === true;
+
+  /* ── Per-tenant OPTIONAL manual UPI text entry (default OFF → QR-scan only).
+        When ON (e.g. Bajaj) the UPI panel also offers a text <input> alongside the
+        QR scanner; both drive the same `upiId`. ── */
+  const upiManualEntry = getGifsySettings().salesApp?.upiManualEntry === true;
 
   /* ── When UPI is disabled, force the effective mode to 'bank' so the parent's
         submit-validation `paymentMode === 'upi'` branch can never fire. Guarded so it
@@ -167,11 +175,28 @@ export function BankOrUpiSection({
     setQrScanning(false);
   }, []);
 
+  /* ── Re-arm the manual-entry geo trigger whenever the UPI value is cleared, so the
+        NEXT fresh manual entry (or a cleared-then-retyped value) fires geo once again. ── */
+  useEffect(() => {
+    if (!upiId) manualGeoFiredRef.current = false;
+  }, [upiId]);
+
   /* ── Toggle handler ── */
   const handleModeClick = (mode: PaymentMode) => {
     if (mode === paymentMode) return;
     if (qrScanning) stopCamera();
     onPaymentModeChange(mode);
+  };
+
+  /* ── Manual UPI text entry → same submit path as a scanned value. Fires the
+        presence/geo capture ONCE on the first keystroke of a fresh entry. ── */
+  const handleManualUpiChange: React.ChangeEventHandler<HTMLInputElement> = (e) => {
+    const value = e.target.value;
+    if (!manualGeoFiredRef.current && value) {
+      manualGeoFiredRef.current = true;
+      onPaymentGeoTrigger?.();
+    }
+    onUpiChange(value);
   };
 
   // Effective mode: a per-outlet MANDATE pin (lockedMode) always wins. Otherwise, when UPI
@@ -281,12 +306,32 @@ export function BankOrUpiSection({
         </div>
       )}
 
-      {/* ── UPI mode panel — QR scan only, no manual text entry ── */}
+      {/* ── UPI mode panel — QR scan, plus OPTIONAL manual text entry (tenant-gated) ── */}
       {effectiveMode === 'upi' && (
         <div className="space-y-3">
 
-          {/* Scanned UPI ID display — shown only after a successful scan */}
-          {upiId ? (
+          {/* Manual UPI text entry — rendered only when the tenant flag is ON. Controlled by
+              upiId/onUpiChange so it flows through the exact same submit path as a scanned
+              value. Respects the re-KYC per-field lock (disabledFields.upiId → upiLocked). */}
+          {upiManualEntry && (
+            <div>
+              <label className={labelCls}>UPI ID</label>
+              <input
+                data-testid="manual-upi-input"
+                className={lockedInputCls}
+                placeholder="yourname@bank"
+                value={upiId}
+                onChange={handleManualUpiChange}
+                autoComplete="off"
+                disabled={upiLocked}
+                readOnly={upiLocked}
+              />
+            </div>
+          )}
+
+          {/* Scanned UPI ID display — QR-scan feedback (QR-only tenants). In manual-entry
+              mode the input above is the source of truth, so this is suppressed there. */}
+          {!upiManualEntry && upiId ? (
             <div
               data-testid="scanned-upi-display"
               className="flex items-center gap-3 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2.5"
@@ -357,10 +402,16 @@ export function BankOrUpiSection({
 
           {/* Helper hint */}
           {!qrScanning && (
-            <p className="text-[11px] text-gray-400">
-              Scan the QR code from the shop owner&apos;s payment app to capture the UPI ID.
-              Manual entry is not permitted.
-            </p>
+            upiManualEntry ? (
+              <p className="text-[11px] text-gray-400">
+                Scan the QR code, or enter the UPI ID manually.
+              </p>
+            ) : (
+              <p className="text-[11px] text-gray-400">
+                Scan the QR code from the shop owner&apos;s payment app to capture the UPI ID.
+                Manual entry is not permitted.
+              </p>
+            )
           )}
         </div>
       )}

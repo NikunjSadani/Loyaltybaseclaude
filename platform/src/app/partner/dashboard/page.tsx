@@ -649,7 +649,7 @@ function WholesalerHero({
       <div className={`border-t border-white/10 bg-black/25 px-4 flex items-center justify-between ${v2 ? 'py-4' : 'py-3'}`}>
         <div>
           <p className="text-[10px] text-white/40 font-medium mb-0.5">Available</p>
-          <p className={`font-extrabold text-white ${v2 ? 'text-4xl leading-none' : 'text-base'}`}>
+          <p className={`font-extrabold text-white ${v2 ? 'text-3xl leading-none' : 'text-base'}`}>
             {walletPoints === null ? '—' : formatPoints(walletPoints)}
             <span className={`font-medium text-white/50 ml-1 ${v2 ? 'text-base' : 'text-sm'}`}>pts</span>
           </p>

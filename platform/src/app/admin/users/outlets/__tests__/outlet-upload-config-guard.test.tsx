@@ -46,9 +46,13 @@ describe('Outlet Master upload — tenant-config load guard', () => {
     mockConfig(['SSS', 'WHOLESALER']);
     render(<OutletsPage />);
     // Active dropzone appears (config ready) and the disabled placeholder is gone.
-    await waitFor(() => expect(screen.getByText(/Drop your XLSX file/i)).toBeInTheDocument());
+    // The dropzone only mounts after the 250ms-debounced outlet load (page.tsx) + its async
+    // fetch settle. waitFor's default 1000ms budget is too tight for that chain when the whole
+    // suite is contending for the CPU → it flaked red in-suite (passed solo). A generous timeout
+    // waits the chain out and still fails fast on a genuine regression (element never appears).
+    await waitFor(() => expect(screen.getByText(/Drop your XLSX file/i)).toBeInTheDocument(), { timeout: 10000 });
     expect(screen.queryByTestId('upload-disabled')).not.toBeInTheDocument();
-  });
+  }, 15000);
 
   it('blocks the upload with a tenant-workspace hint when zero outlet types are enabled (no false rejection)', async () => {
     mockConfig([]);
@@ -57,10 +61,14 @@ describe('Outlet Master upload — tenant-config load guard', () => {
     // "Loading outlet configuration…" before it settles to the tenant-workspace hint once
     // the (empty) outlet-type list has loaded. Wait for the SETTLED reason, not just the
     // element's presence, so we assert the corrected message rather than the loading state.
+    // Generous timeout: the settled hint arrives only after the 250ms-debounced load + async
+    // fetch resolve, which exceeds waitFor's default 1000ms under full-suite CPU load (this flaked
+    // red in-suite, green solo). Waiting the chain out is deterministic; a real break still fails.
     await waitFor(() =>
       expect(screen.getByTestId('upload-disabled')).toHaveTextContent(/correct tenant workspace/i),
+      { timeout: 10000 },
     );
     // The active dropzone is hidden so a file can't be validated against an empty list.
     expect(screen.queryByText(/Drop your XLSX file/i)).not.toBeInTheDocument();
-  });
+  }, 15000);
 });

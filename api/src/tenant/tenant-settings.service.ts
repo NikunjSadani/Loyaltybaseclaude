@@ -67,6 +67,8 @@ export interface SalesAppSettings {
   ledgerLabel:              string;
   /** When true, the sales KYC form offers UPI as a payout option. Default false = bank-only. */
   upiEnabled:               boolean;
+  /** When true, the UPI ID may be typed manually (in addition to QR scan). Default false = QR scan only. */
+  upiManualEntry:           boolean;
 }
 // NOTE: the former `redeemGiftWholesalerOnly` binary was replaced by the per-outlet-type
 // `OutletTypeClientConfig.salesAssistedRedeemEnabled` flag (see sales-redeem-eligibility.ts).
@@ -334,7 +336,7 @@ export class TenantSettingsService {
       // GSTIN compulsory by default (opt-out); a tenant with unregistered outlets is turned OFF.
       kycGstinRequired:       true,
       redemptionChannels:     { physicalGifts: true, vouchers: true, bankTransfer: true },
-      salesApp:               { ledgerLabel: 'Wallet', upiEnabled: false },
+      salesApp:               { ledgerLabel: 'Wallet', upiEnabled: false, upiManualEntry: false },
       creditsPayouts: {
         monthCutoffDay:  28,
         safetyCapPoints: 50000,
@@ -621,6 +623,7 @@ export class TenantSettingsService {
               ledgerLabel: typeof v.ledgerLabel === 'string' && v.ledgerLabel.trim()
                 ? v.ledgerLabel : base.salesApp.ledgerLabel,
               upiEnabled: this.bool(v.upiEnabled, base.salesApp.upiEnabled),
+              upiManualEntry: this.bool(v.upiManualEntry, base.salesApp.upiManualEntry),
             };
           }
           break;

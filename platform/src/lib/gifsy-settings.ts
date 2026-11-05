@@ -35,6 +35,7 @@ export const DEFAULT_SETTINGS: GifsySettings = {
   salesApp: {
     ledgerLabel:              'Wallet',
     upiEnabled:               false,
+    upiManualEntry:           false,
   },
   creditsPayouts: {
     monthCutoffDay:  28,

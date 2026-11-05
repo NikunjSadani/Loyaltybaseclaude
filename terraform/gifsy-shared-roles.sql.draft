@@ -1,0 +1,56 @@
+-- ═══════════════════════════════════════════════════════════════════════════
+-- DRAFT — least-privilege lockdown for the gifsy-shared instance.
+-- Run ONCE, as the admin/postgres role, AFTER the terraform users exist.
+-- Connect via the Cloud SQL Auth Proxy (private IP) — see platform/docs/plans/DEV-DB.md.
+--
+-- Why this is needed: Terraform's google_sql_user only creates the login and sets
+-- a password. By Postgres default, EVERY role can CONNECT to EVERY database on the
+-- instance (CONNECT is granted to PUBLIC). So without the REVOKEs below, opshub_user
+-- could \c kwality_posm and read its data. This file removes that cross-database reach
+-- so an app compromise is confined to its own database — the whole point of the split.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- 1) Remove the blanket "anyone can connect" default from each product database.
+REVOKE CONNECT ON DATABASE opshub       FROM PUBLIC;
+REVOKE CONNECT ON DATABASE kwality_posm FROM PUBLIC;
+REVOKE CONNECT ON DATABASE gifsy_staging FROM PUBLIC;
+
+-- 2) Grant CONNECT back to ONLY the owning role for each database.
+GRANT CONNECT ON DATABASE opshub        TO opshub_user;
+GRANT CONNECT ON DATABASE kwality_posm  TO kwality_user;
+GRANT CONNECT ON DATABASE gifsy_staging TO staging_user;
+
+-- 3) Lock down the public schema inside each database so the owning role owns its
+--    own schema and other roles cannot create objects in it. Run the block for each
+--    database while CONNECTED TO THAT DATABASE (schema privileges are per-database).
+
+-- ── while connected to  opshub  ────────────────────────────────────────────
+--   \c opshub
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+ALTER SCHEMA public OWNER TO opshub_user;
+GRANT ALL ON SCHEMA public TO opshub_user;
+
+-- ── while connected to  kwality_posm  ──────────────────────────────────────
+--   \c kwality_posm
+-- REVOKE ALL ON SCHEMA public FROM PUBLIC;
+-- ALTER SCHEMA public OWNER TO kwality_user;
+-- GRANT ALL ON SCHEMA public TO kwality_user;
+
+-- ── while connected to  gifsy_staging  ─────────────────────────────────────
+--   \c gifsy_staging
+-- REVOKE ALL ON SCHEMA public FROM PUBLIC;
+-- ALTER SCHEMA public OWNER TO staging_user;
+-- GRANT ALL ON SCHEMA public TO staging_user;
+
+-- 4) (Recommended) per-role safety timeouts so one app can't wedge the shared
+--    instance with a runaway or leaked transaction.
+ALTER ROLE opshub_user  SET statement_timeout = '30s';
+ALTER ROLE opshub_user  SET idle_in_transaction_session_timeout = '60s';
+ALTER ROLE kwality_user SET statement_timeout = '30s';
+ALTER ROLE kwality_user SET idle_in_transaction_session_timeout = '60s';
+ALTER ROLE staging_user SET statement_timeout = '30s';
+ALTER ROLE staging_user SET idle_in_transaction_session_timeout = '60s';
+
+-- Verify (should show each role able to connect ONLY to its own database):
+--   SELECT datname, has_database_privilege('opshub_user',  datname, 'CONNECT') FROM pg_database;
+--   SELECT datname, has_database_privilege('kwality_user', datname, 'CONNECT') FROM pg_database;

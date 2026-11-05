@@ -1,0 +1,152 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# DRAFT — NOT APPLIED. Terraform ignores *.tf.draft (it only reads *.tf).
+# Rename to `cloud-sql-shared.tf` to activate, AFTER review.
+#
+# Purpose: a SECOND Cloud SQL instance — `gifsy-shared` — that holds every
+# workload EXCEPT live paying-client production. Splits by trust/failure domain
+# (per the 2026-08-25 architecture review), NOT by "criticality":
+#   • gifsy_staging   — loyalty staging, moved OFF the prod instance
+#   • opshub          — OpsHub internal ERP (financials)
+#   • kwality_posm    — Kwality POSM (dedicated single-tenant build)
+# Each database gets its OWN least-privilege login role (see the companion
+# gifsy-shared-roles.sql.draft — Terraform creates the logins; the REVOKE/GRANT
+# lockdown is SQL that must run once against the instance).
+#
+# Iron rule this design enforces: ONE database per product. Never two products
+# in one database. Live paying-client prod (`gifsy_prod`) stays on `gifsy-db`
+# alone and NEVER joins this instance.
+#
+# Cost: ~₹2,700/mo (db-g1-small, SSD, ZONAL, backups). Reuses the existing VPC,
+# private networking, and Secret Manager — no new fixed floors beyond the box.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Passwords (sensitive — pass via TF_VAR_* env vars, never commit values) ────
+variable "opshub_db_password" {
+  description = "gifsy-shared: opshub_user password (TF_VAR_opshub_db_password)"
+  type        = string
+  sensitive   = true
+}
+
+variable "kwality_db_password" {
+  description = "gifsy-shared: kwality_user password (TF_VAR_kwality_db_password)"
+  type        = string
+  sensitive   = true
+}
+
+variable "shared_staging_db_password" {
+  description = "gifsy-shared: staging_user password (TF_VAR_shared_staging_db_password)"
+  type        = string
+  sensitive   = true
+}
+
+# ── The instance ──────────────────────────────────────────────────────────────
+resource "google_sql_database_instance" "gifsy_shared" {
+  name             = "gifsy-shared"
+  database_version = "POSTGRES_15" # match prod so dumps/restores are compatible
+  region           = var.region
+
+  settings {
+    tier              = "db-g1-small" # 1 shared vCPU, 1.7 GB — start here; upgrade when connections > 50 / CPU > 70% / mem > 80%
+    availability_type = "ZONAL"       # single-zone for cost; go REGIONAL only if a client SLA demands it
+
+    # Both deletion-protection flags ON (the lesson from 2026-08-25 — they are DISTINCT):
+    deletion_protection_enabled = true # blocks a console/gcloud/API delete of the instance
+
+    disk_type       = "PD_SSD" # SSD, not HDD — real OLTP workloads need the IOPS
+    disk_size       = 10       # GB; grows automatically up to the cap below
+    disk_autoresize = true
+
+    # Disk is a RATCHET — it grows and NEVER shrinks. Cap it so one runaway table
+    # can't permanently raise the monthly floor. Instance throws write errors at the
+    # cap (loud + reversible) instead of silently ballooning (quiet + permanent).
+    disk_autoresize_limit = 50
+
+    ip_configuration {
+      ipv4_enabled    = false # NO public IP — private only, unlike gifsy-db-dev
+      private_network = google_compute_network.gifsy_vpc.id
+      ssl_mode        = "ENCRYPTED_ONLY"
+    }
+
+    backup_configuration {
+      enabled                        = true
+      start_time                     = "20:30" # 02:00 IST
+      point_in_time_recovery_enabled = true    # PITR on from day one — real data lives here
+      transaction_log_retention_days = 7
+      backup_retention_settings {
+        retained_backups = 14
+      }
+    }
+
+    maintenance_window {
+      day          = 7 # Sunday
+      hour         = 3
+      update_track = "stable"
+    }
+
+    database_flags {
+      name  = "max_connections"
+      value = "100" # 3 databases share this — budget pools: pool 2-5/app, cap maxInstances
+    }
+
+    insights_config {
+      query_insights_enabled  = true
+      query_string_length     = 1024
+      record_application_tags = true
+      record_client_address   = false
+    }
+  }
+
+  deletion_protection = true # Terraform-level guard — blocks `terraform destroy` (distinct from the native flag above)
+
+  depends_on = [
+    google_service_networking_connection.private_vpc_connection,
+    google_project_service.apis,
+  ]
+}
+
+# ── Databases — one per product, never merged ─────────────────────────────────
+resource "google_sql_database" "shared_staging_db" {
+  name     = "gifsy_staging"
+  instance = google_sql_database_instance.gifsy_shared.name
+}
+
+resource "google_sql_database" "opshub_db" {
+  name     = "opshub"
+  instance = google_sql_database_instance.gifsy_shared.name
+}
+
+resource "google_sql_database" "kwality_posm_db" {
+  name     = "kwality_posm"
+  instance = google_sql_database_instance.gifsy_shared.name
+}
+
+# ── Users — one least-privilege login per database ────────────────────────────
+# NOTE: google_sql_user only creates the login + sets the password. The actual
+# least-privilege lockdown (REVOKE CONNECT on the OTHER databases, schema
+# ownership, no cross-DB reach) is SQL — run gifsy-shared-roles.sql.draft ONCE
+# after these users exist. Without that step these roles can still CONNECT to
+# every database on the instance (Postgres default), which defeats the isolation.
+resource "google_sql_user" "opshub_user" {
+  name     = "opshub_user"
+  instance = google_sql_database_instance.gifsy_shared.name
+  password = var.opshub_db_password
+}
+
+resource "google_sql_user" "kwality_user" {
+  name     = "kwality_user"
+  instance = google_sql_database_instance.gifsy_shared.name
+  password = var.kwality_db_password
+}
+
+resource "google_sql_user" "shared_staging_user" {
+  name     = "staging_user"
+  instance = google_sql_database_instance.gifsy_shared.name
+  password = var.shared_staging_db_password
+}
+
+# ── Follow-ups (NOT in this draft — do when activating) ───────────────────────
+# 1. Run gifsy-shared-roles.sql.draft to lock down cross-database CONNECT.
+# 2. Build each app's DATABASE_URL secret (mirror the prod pattern in cloud-sql.tf:
+#    postgresql://<user>:<pw>@localhost/<db>?host=/cloudsql/<conn>), pointing each
+#    app at its OWN db + user. Migrate gifsy_staging data off gifsy-db as its own step.
+# 3. Point OpsHub + POSM at this instance from day one (never gifsy-db-dev).
