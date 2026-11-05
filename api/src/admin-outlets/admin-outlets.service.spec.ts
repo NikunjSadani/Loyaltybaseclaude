@@ -880,7 +880,7 @@ describe('AdminOutletsService', () => {
         { outletType: { id: 'type1', code: 'SSS', isActive: true } },
       ]);
 
-    it('CREATE with a blank Payout Method defaults requiredPaymentType to BANK', async () => {
+    it('CREATE with a blank Payout Method defaults requiredPaymentType to ANY (free choice)', async () => {
       enableType();
       mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
       mockTx.outlet.findUnique.mockResolvedValue(null); // CREATE
@@ -889,7 +889,7 @@ describe('AdminOutletsService', () => {
       await service.upsert(admin, {
         rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: 'ISR-1', payoutMethod: '' }],
       });
-      expect(mockTx.outlet.upsert.mock.calls[0][0].create.requiredPaymentType).toBe('BANK');
+      expect(mockTx.outlet.upsert.mock.calls[0][0].create.requiredPaymentType).toBe('ANY');
     });
 
     it('CREATE parses the Payout Method case-insensitively ("any" → ANY)', async () => {
