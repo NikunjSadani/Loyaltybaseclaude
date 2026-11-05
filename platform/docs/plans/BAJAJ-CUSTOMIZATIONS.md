@@ -233,3 +233,21 @@ next `claude` session (a fresh settings.json isn't loaded mid-session).
   adversarial audit (money + identity) → all confirmed findings fixed. ▶ push to `develop` → migration
   via in-VPC job → enable Bajaj flag on staging → owner runtime UAT. Source of truth:
   `platform/docs/plans/PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md`. ⚠️ **PLATFORM-WIDE** (owner-approved).
+
+## Payout rail = FREE CHOICE for Bajaj (bank/UPI toggle), not a per-outlet mandate (2026-11-05)
+
+Bajaj wants partners to choose **bank OR UPI** at KYC/redemption (the toggle + UPI-QR capture), not be
+locked to one rail. The bank/UPI toggle is shown only when the outlet's `requiredPaymentType` is **ANY**
+AND the tenant `salesApp.upiEnabled` is true; a BANK/UPI mandate pins the mode and HIDES the toggle
+(same rule in KYC and the cash-redemption capture — `pinnedPaymentMode`). Bajaj `upiEnabled=true`.
+
+Two changes (owner-approved, Option B):
+1. **Importer default → ANY** (platform-wide, Deoleo-neutral): a CREATE with a **blank Payout Method**
+   cell now defaults `requiredPaymentType` to **ANY** (was BANK). `api/src/admin-outlets/admin-outlets.service.ts`
+   (buildOutletCreate `?? OutletPaymentType.ANY`). Deoleo unaffected — its `upiEnabled=false` still forces
+   bank regardless of ANY. So future Bajaj imports are free-choice unless a row explicitly sets BANK/UPI.
+2. **Existing Bajaj outlets re-set to ANY** (staging, 2026-11-05): 6,506 outlets that the original import
+   had mandated (5,229 BANK + 1,277 UPI) were updated to ANY via a guarded in-VPC job; snapshot kept in
+   `_bak_bajaj_req_payment` (reversible: `UPDATE outlets o SET "requiredPaymentType"=b."requiredPaymentType"
+   FROM _bak_bajaj_req_payment b WHERE o.id=b.id;`). All ~6,515 Bajaj outlets are now ANY → the toggle
+   shows everywhere. (prod has no Bajaj outlets yet; apply the same if/when Bajaj goes live on prod.)
