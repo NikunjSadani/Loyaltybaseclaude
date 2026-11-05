@@ -299,8 +299,8 @@ export default function MemberOutletsPage() {
         </div>
       </div>
 
-      {/* Filter strip */}
-      <div className="flex items-center gap-1.5 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
+      {/* Filter strip — wraps so every filter stays visible on a narrow phone */}
+      <div className="flex flex-wrap items-center gap-2">
         {/* Period */}
         <div className="relative shrink-0">
           <select

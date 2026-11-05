@@ -428,8 +428,8 @@ export default function SalesOutletsPage() {
         </div>
       </div>
 
-      {/* Row 2: filter strip */}
-      <div className="flex items-center gap-1.5 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
+      {/* Row 2: filter strip — wraps so every filter stays visible on a narrow phone */}
+      <div className="flex flex-wrap items-center gap-2">
         <div className="relative shrink-0">
           <select
             value={period}
@@ -456,7 +456,7 @@ export default function SalesOutletsPage() {
               data-testid="outlets-member-filter"
               value={memberFilter}
               onChange={(e) => setMemberFilter(e.target.value)}
-              className={`appearance-none text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1 bg-white focus:outline-none transition-colors cursor-pointer ${
+              className={`appearance-none max-w-[160px] text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1 bg-white focus:outline-none transition-colors cursor-pointer ${
                 memberFilter ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-gray-200 text-gray-600 focus:border-[var(--brand-primary)]'
               }`}
             >

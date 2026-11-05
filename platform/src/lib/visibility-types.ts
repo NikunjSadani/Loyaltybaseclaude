@@ -322,6 +322,13 @@ export interface SalesEligibleOutlet {
   zone: string | null;
   state: string | null;
   outletType: { code: string; name: string } | null;
+  /**
+   * The rep this outlet is ASSIGNED to (login-User id) — the Team Member filter key. An
+   * outlet matches a selected team member when its `assignedUserId` is in that member's
+   * `submitterUserIds` sub-tree (same semantics as the Outlets-screen member filter).
+   * Supplied by the backend's getSalesEligible; null when unassigned / unresolved.
+   */
+  assignedUserId?: string | null;
   /** The outlet's Program (`Outlet.programName`, e.g. Unnati/SAMT/BSC) — drives the sales
    *  Visibility list's Program filter. Supplied by the backend; absent/blank = unset. */
   programName?: string | null;
@@ -444,12 +451,26 @@ export function summarizeVisibilityCaptures(
   return counts;
 }
 
+/**
+ * One direct-report option for the Visibility list's Team Member filter. `submitterUserIds`
+ * is that report's own login-User id PLUS their whole downline's — an outlet matches the
+ * member when its `assignedUserId` is in this set. Mirrors the Outlets-screen member rows.
+ */
+export interface SalesEligibleMember {
+  id: string;
+  name: string;
+  submitterUserIds: string[];
+}
+
 /** GET /sales/eligible response — the current window + its in-scope outlets. */
 export interface SalesEligibleResponse {
   windowKey: string;
   window: { startDay: number; endDay: number };
   /** Whether the caller's sales level is in the tenant's allowedSalesLevels. */
   levelAllowed: boolean;
+  /** The caller's DIRECT downline members (manager-only Team Member filter options); [] for a
+   *  leaf rep with no downline, so the FE hides the filter. */
+  members: SalesEligibleMember[];
   outlets: SalesEligibleOutlet[];
 }
 

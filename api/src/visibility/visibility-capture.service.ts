@@ -209,7 +209,29 @@ export class VisibilityCaptureService {
   async getSalesEligible(user: JwtPayload) {
     await this.assertEnabled(user.clientId);
     const config = await this.getConfig(user.clientId);
-    const caller = await this.requireCallerSalesUser(user);
+
+    // Caller identity + DIRECT reports (the manager-only "Team Member" filter options) in ONE
+    // read — mirrors sales.service getMyOutlets. A leaf rep has no subordinates → members [] →
+    // the FE hides the filter.
+    const callerSu = await this.prisma.salesUser.findFirst({
+      where: { userId: user.sub, clientId: user.clientId, deletedAt: null },
+      select: {
+        id: true,
+        hierarchyLevel: { select: { code: true } },
+        subordinates: {
+          where: { isActive: true, deletedAt: null },
+          select: { id: true, employeeCode: true, user: { select: { name: true } } },
+          orderBy: { employeeCode: 'asc' },
+        },
+      },
+    });
+    if (!callerSu) {
+      throw new ForbiddenException('Only sales users may capture visibility.');
+    }
+    const caller: CallerSalesUser = {
+      id: callerSu.id,
+      levelCode: callerSu.hierarchyLevel.code,
+    };
 
     const levelAllowed = config.allowedSalesLevels.includes(caller.levelCode);
     const now = new Date();
@@ -218,12 +240,52 @@ export class VisibilityCaptureService {
     const { startDay, endDay } = windowBoundsForKey(windowKey, freq);
     const windowClosed = isWindowClosed(windowKey, now, freq);
 
-    const reach = await this.reachOutletIds(user.clientId, caller.id);
+    // Hierarchy edges loaded ONCE (reused for the subtree reach + each direct report's
+    // submitter sub-tree) — the SAME walk getMyOutlets uses, no N+1.
+    const edges = await this.prisma.salesUser.findMany({
+      where: { clientId: user.clientId, deletedAt: null },
+      select: { id: true, reportingToId: true, userId: true },
+    });
+    const userIdBySalesUserId = new Map(edges.map((e) => [e.id, e.userId]));
+
+    // Each DIRECT report enriched with the login-User ids of that report PLUS their whole
+    // downline (submitterUserIds). The Team Member filter matches an outlet whose assignedUserId
+    // is anywhere in that sub-tree — the SAME sub-tree semantics as the Outlets-screen member
+    // filter. Each member's branch is a slice of the caller's own subtree (descendantSalesUserIds
+    // walks DOWN only), so a manager can never filter another manager's team.
+    const members = (callerSu.subordinates ?? []).map((sub) => ({
+      id: sub.id,
+      name: sub.user?.name ?? '',
+      submitterUserIds: [...descendantSalesUserIds(sub.id, edges)]
+        .map((id) => userIdBySalesUserId.get(id))
+        .filter((v): v is string => !!v),
+    }));
+
+    // Active assignments across the caller's subtree → reach outletIds + the rep each outlet is
+    // assigned to (assignedUserId = that rep's login-User id — the member-filter key). Same
+    // scoping as reachOutletIds, plus the assignee's userId so the FE can filter by member.
+    const subtree = [...descendantSalesUserIds(caller.id, edges)];
+    const assignments = await this.prisma.salesUserAssignment.findMany({
+      where: { salesUserId: { in: subtree }, unassignedAt: null, outletId: { not: null } },
+      select: { outletId: true, salesUser: { select: { userId: true } } },
+    });
+    const reach = new Set<string>();
+    const assignedUserIdByOutlet = new Map<string, string | null>();
+    for (const a of assignments) {
+      if (!a.outletId) continue;
+      reach.add(a.outletId);
+      // First active assignment wins (an outlet normally has exactly one).
+      if (!assignedUserIdByOutlet.has(a.outletId)) {
+        assignedUserIdByOutlet.set(a.outletId, a.salesUser?.userId ?? null);
+      }
+    }
+
     if (reach.size === 0 || config.outletScope.length === 0) {
       return {
         windowKey,
         window: { startDay, endDay },
         levelAllowed,
+        members,
         outlets: [],
       };
     }
@@ -271,6 +333,7 @@ export class VisibilityCaptureService {
       windowKey,
       window: { startDay, endDay },
       levelAllowed,
+      members,
       outlets: outlets.map((o) => {
         const cap = byOutlet.get(o.id) ?? null;
         return {
@@ -282,6 +345,8 @@ export class VisibilityCaptureService {
           programName: o.programName ?? null,
           programCategory: o.programCategory ?? null,
           outletType: o.outletType,
+          // The rep this outlet is assigned to (login-User id) — the Team Member filter key.
+          assignedUserId: assignedUserIdByOutlet.get(o.id) ?? null,
           captureId: cap?.id ?? null,
           status: cap?.status ?? null,
           currentVersion: cap?.currentVersion ?? null,

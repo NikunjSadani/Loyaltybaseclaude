@@ -410,6 +410,44 @@ describe('VisibilityCaptureService', () => {
     expect(res.outlets[0]).toHaveProperty('programCategory', 'Premium');
   });
 
+  it('getSalesEligible returns each outlet assignedUserId + the caller’s direct-report members (Team Member filter)', async () => {
+    // Manager su1 with one direct report su2; o1 is assigned to su2 (login-User u2).
+    mockPrisma.salesUser.findFirst.mockResolvedValue({
+      id: 'su1',
+      hierarchyLevel: { code: 'SO' },
+      subordinates: [{ id: 'su2', employeeCode: 'E2', user: { name: 'Rep Two' } }],
+    });
+    mockPrisma.salesUser.findMany.mockResolvedValue([
+      { id: 'su1', reportingToId: null, userId: 'u1' },
+      { id: 'su2', reportingToId: 'su1', userId: 'u2' },
+    ]);
+    mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+      { outletId: 'o1', salesUser: { userId: 'u2' } },
+    ]);
+    mockPrisma.outlet.findMany.mockResolvedValue([
+      { id: 'o1', outletCode: 'OC1', name: 'Shop 1', zone: null, state: null, outletType: { code: 'SSS' } },
+    ]);
+    mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
+
+    const res = await service.getSalesEligible(user);
+    // Each outlet carries the assigned rep's login-User id (the member-filter key).
+    expect(res.outlets[0].assignedUserId).toBe('u2');
+    // Direct-report members, each with their whole-sub-tree submitterUserIds.
+    expect(res.members).toEqual([
+      { id: 'su2', name: 'Rep Two', submitterUserIds: ['u2'] },
+    ]);
+  });
+
+  it('getSalesEligible returns members [] for a leaf rep with no downline', async () => {
+    mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1', hierarchyLevel: { code: 'SO' }, subordinates: [] });
+    mockPrisma.outlet.findMany.mockResolvedValue([
+      { id: 'o1', outletCode: 'OC1', name: 'Shop 1', zone: null, state: null, outletType: { code: 'SSS' } },
+    ]);
+    mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
+    const res = await service.getSalesEligible(user);
+    expect(res.members).toEqual([]);
+  });
+
   // ── H1: geo-fence fail-CLOSED on garbage/missing capture geo ─────────────────
   it('H1: BLOCKS a garbage present GPS value at validation (400) — cannot slip through as empty geo', async () => {
     mockPrisma.channelPartner.findFirst.mockResolvedValue(refKyc(12.9, 77.5)); // reference present

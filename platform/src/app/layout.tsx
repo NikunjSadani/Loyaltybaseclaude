@@ -61,7 +61,7 @@ export default async function RootLayout({
       : null;
 
   return (
-    <html lang="en" className={`${inter.variable} h-full antialiased overflow-x-hidden`}>
+    <html lang="en" className={`${inter.variable} h-full antialiased overflow-x-clip`}>
       <head>
         {/* Inject per-tenant CSS variables — drives all brand colours.
             brandStyle is sanitised at the source (buildCssVariables, AF-9): the
@@ -85,7 +85,7 @@ export default async function RootLayout({
       </head>
       <body
         suppressHydrationWarning
-        className="min-h-full flex flex-col bg-gray-50 text-gray-900 font-sans overflow-x-hidden"
+        className="min-h-full flex flex-col bg-gray-50 text-gray-900 font-sans overflow-x-clip"
       >
         <ClientConfigProvider config={config}>
           <ToastProvider>

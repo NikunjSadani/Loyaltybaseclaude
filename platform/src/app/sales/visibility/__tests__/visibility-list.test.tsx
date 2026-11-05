@@ -59,6 +59,8 @@ const RESP: SalesEligibleResponse = {
   windowKey: '2026-07-P1',
   window: { startDay: 1, endDay: 15 },
   levelAllowed: true,
+  // Leaf rep: no downline → no Team Member filter.
+  members: [],
   outlets: [
     { outletId: 'o-due', outletCode: 'C-DUE', outletName: 'Due Store', zone: null, state: null,
       outletType: null, captureId: null, status: null, currentVersion: null, rejectionReason: null,
@@ -69,6 +71,32 @@ const RESP: SalesEligibleResponse = {
     { outletId: 'o-view', outletCode: 'C-VIEW', outletName: 'Viewer Store', zone: null, state: null,
       outletType: null, captureId: null, status: null, currentVersion: null, rejectionReason: null,
       windowState: 'due', canCapture: false },
+  ],
+};
+
+/**
+ * Manager scenario: two direct reports, each with a submitter sub-tree (login-User ids).
+ * Each outlet is assigned to a rep (assignedUserId) — the Team Member filter matches an
+ * outlet whose assignedUserId is in the selected member's sub-tree.
+ */
+const MANAGER_RESP: SalesEligibleResponse = {
+  windowKey: '2026-07-P1',
+  window: { startDay: 1, endDay: 15 },
+  levelAllowed: true,
+  members: [
+    { id: 'm-ann', name: 'Ann Rep', submitterUserIds: ['u-ann', 'u-ann-child'] },
+    { id: 'm-bob', name: 'Bob Rep', submitterUserIds: ['u-bob'] },
+  ],
+  outlets: [
+    { outletId: 'o-ann', outletCode: 'C-ANN', outletName: 'Ann Store', zone: null, state: null,
+      outletType: null, assignedUserId: 'u-ann', captureId: null, status: null, currentVersion: null,
+      rejectionReason: null, windowState: 'due', canCapture: true },
+    { outletId: 'o-ann2', outletCode: 'C-ANN2', outletName: 'Ann Child Store', zone: null, state: null,
+      outletType: null, assignedUserId: 'u-ann-child', captureId: null, status: null, currentVersion: null,
+      rejectionReason: null, windowState: 'due', canCapture: true },
+    { outletId: 'o-bob', outletCode: 'C-BOB', outletName: 'Bob Store', zone: null, state: null,
+      outletType: null, assignedUserId: 'u-bob', captureId: null, status: null, currentVersion: null,
+      rejectionReason: null, windowState: 'due', canCapture: true },
   ],
 };
 
@@ -134,6 +162,35 @@ describe('VIS — Sales Visibility list', () => {
     render(<SalesVisibilityPage />);
     const badge = await screen.findByTestId('visibility-due-badge');
     expect(badge).toHaveTextContent('1 due');
+  });
+
+  it('VIS7: the Team Member filter is hidden for a plain rep (no downline → members empty)', async () => {
+    getSalesEligible.mockResolvedValue({ success: true, data: RESP });
+    render(<SalesVisibilityPage />);
+    await screen.findByText('Due Store');
+    expect(screen.queryByDisplayValue('All team')).not.toBeInTheDocument();
+  });
+
+  it('VIS8: the Team Member filter renders for a manager (members present)', async () => {
+    getSalesEligible.mockResolvedValue({ success: true, data: MANAGER_RESP });
+    render(<SalesVisibilityPage />);
+    await screen.findByText('Ann Store');
+    // The "All team" pill + both member options are present.
+    expect(screen.getByDisplayValue('All team')).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Ann Rep' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Bob Rep' })).toBeInTheDocument();
+  });
+
+  it('VIS9: filtering by a member narrows the list to that member’s assignedUserId sub-tree', async () => {
+    getSalesEligible.mockResolvedValue({ success: true, data: MANAGER_RESP });
+    render(<SalesVisibilityPage />);
+    await screen.findByText('Ann Store');
+    // Select Ann (whose sub-tree = [u-ann, u-ann-child]).
+    fireEvent.change(screen.getByDisplayValue('All team'), { target: { value: 'm-ann' } });
+    // Ann's two outlets stay; Bob's outlet (u-bob, outside Ann's sub-tree) drops.
+    expect(screen.getByText('Ann Store')).toBeInTheDocument();
+    expect(screen.getByText('Ann Child Store')).toBeInTheDocument();
+    expect(screen.queryByText('Bob Store')).not.toBeInTheDocument();
   });
 
   it('VIS5: a deep-linked (?outletId=) capture returns to the outlet detail on close', async () => {

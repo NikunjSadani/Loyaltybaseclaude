@@ -331,8 +331,8 @@ function CatalogueInner() {
             />
           </div>
 
-          {/* Category chips */}
-          <div className="flex gap-1.5 flex-nowrap overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none' }}>
+          {/* Category chips — wrap so every category stays visible */}
+          <div className="flex flex-wrap items-center gap-2">
             {categories.map((c) => (
               <button
                 key={c}
