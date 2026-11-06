@@ -90,4 +90,21 @@ describe('PL — sales outlet ledger payout rows', () => {
     expect(options).toContain('Visibility');       // payout KPI label
     expect(options).toContain('Incentive');        // payout KPI label
   });
+
+  it('PL4: a payout paid 31 Mar 19:00 UTC (= 1 Apr IST) is bucketed into April (IST), matching the download', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      json: () => Promise.resolve({
+        success: true,
+        data: {
+          meta: { name: 'Verma Traders', outletCode: 'OUT-1', mobile: '9', balance: 0, lifetime: 0, redeemed: 0 },
+          transactions: [],
+          payouts: [{ id: 'p9', period: '2026-03', kpiLabel: 'Edge', achievedPct: 100, payoutAmountPaise: 100000,
+            uploadedAt: '2026-03-31T19:00:00.000Z', paidAt: '2026-03-31T19:00:00.000Z', utr: 'U', status: 'PAID' }],
+        },
+      }),
+    }));
+    await renderLedger('k1');
+    expect(screen.getByText(/Statement · Apr 2026$/)).toBeInTheDocument();
+    expect(screen.getByText('Edge · March 2026')).toBeInTheDocument();
+  });
 });

@@ -7,10 +7,11 @@
 > It can't be done per tenant: the wallet page, the ledger page and the passbook service are single shared code paths,
 > and the fixes below (missing Balance, broken `--50` sign, 20-row truncation) are defects in that shared code.
 > There's no per-tenant config to hang this on, and adding a flag just to hide a correctness fix would be YAGNI.
-> **Status: BUILT (2026-11-06) on branch `worktree-agent-aa3654f9fde6b0c8a`, NOT pushed — EXCEPT D9 (embedded Unicode font), which is ON
-> HOLD pending an owner decision (see §D9 FINDING). Approved as PLATFORM-WIDE by the owner; §OWNER DECISIONS (final)
-> override anything below where they differ.** Task 0 (staging DB chain audit) still to be run before the push. No schema change, no migration, and **no new npm dependency** (D9's font would be
-> a static asset, not a package).
+> **Status: BUILT + independently reviewed (2026-11-06) on branch `worktree-agent-aa3654f9fde6b0c8a`, NOT pushed.
+> D9 final (owner, 2026-11-06): KEEP the interim PDF text — "Rs." for ₹ and names in English letters only (see §D9
+> FINDING). Approved as PLATFORM-WIDE by the owner; §OWNER DECISIONS (final) override anything below where they differ.**
+> Task 0 (staging DB chain audit) still to be run before the push. No schema change, no migration, no new npm
+> dependency, no font asset.
 
 ---
 
@@ -456,7 +457,7 @@ fixing the on-screen month filter's local-TZ `getMonth()` (separate janitorial i
 | D6 | **(A)** Files generated in the BROWSER with the existing `xlsx` + `jspdf`; backend returns data only. No new npm dependency except the D9 font asset. |
 | D7 | **(A)** One "Download" button opening an Excel / PDF menu. |
 | D8 | **(A)** ₹ payout rows interleaved, with a blank Balance cell. |
-| D9 | **(B)** Embed a Unicode font in the PDF so ₹ and Hindi/regional (Devanagari etc.) names render: an open-licensed font (e.g. Noto Sans + Noto Sans Devanagari, SIL OFL) shipped as a static asset under `platform/public/`, lazy-loaded only when a PDF is generated. A new `public/` subdir needs the `platform/src/proxy.ts` matcher exclusion (RESUME trap 17). **Precondition:** jsPDF must shape Devanagari correctly (it has no complex-script shaping). If it can't, STOP this sub-task and go back to the owner with options rather than shipping broken text. |
+| D9 | **FINAL: keep the interim** ("Rs." for ₹; names in English letters only — non-Latin characters print as `?`, never dropped). Originally chose (B): embed a Unicode font in the PDF so ₹ and Hindi/regional (Devanagari etc.) names render: an open-licensed font (e.g. Noto Sans + Noto Sans Devanagari, SIL OFL) shipped as a static asset under `platform/public/`, lazy-loaded only when a PDF is generated. A new `public/` subdir needs the `platform/src/proxy.ts` matcher exclusion (RESUME trap 17). **Precondition:** jsPDF must shape Devanagari correctly (it has no complex-script shaping). If it can't, STOP this sub-task and go back to the owner with options rather than shipping broken text. |
 | D10 | **(A)** If closing ≠ live wallet balance: show the stored values and log a server warning (no partner-facing note, don't block). |
 | D11 | **(A)** Fixed title "Wallet Statement". |
 | D12 | **(A)** Oldest first. |
@@ -467,7 +468,11 @@ chain-mismatch handling meanwhile.
 
 The Out-of-scope line "embedding a Unicode/Devanagari font" is superseded by D9 (B).
 
-## D9 FINDING (2026-11-06): jsPDF cannot shape Devanagari → font embed ON HOLD, owner decision needed
+## D9 FINDING (2026-11-06): jsPDF cannot shape Devanagari → owner DECIDED: keep the interim
+
+**Owner decision (2026-11-06): keep option (6), the interim** — the PDF prints "Rs." for ₹ and names in English
+letters only; any non-Latin character falls back to `?` (it is never dropped, because Helvetica's WinAnsi path is used,
+not an embedded font). No font asset is shipped. The finding and the options considered are kept below for the record.
 
 jsPDF 4.2.1 (installed) writes Unicode text by mapping each UTF-16 code unit to ONE glyph through the font's `cmap`
 (`pdfEscape16` → `TTFFont.characterToGlyph`, `node_modules/jspdf/dist/jspdf.es.js`). There is no OpenType shaping:

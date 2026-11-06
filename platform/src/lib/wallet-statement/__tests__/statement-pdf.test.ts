@@ -93,6 +93,62 @@ describe('statementToPdfBlob', () => {
   });
 });
 
+describe('statementToPdfBlob — long text', () => {
+  /** Every drawn text string, in order (jsPDF writes "(text) Tj"; parentheses are escaped). */
+  const drawn = (pdf: string) => [...pdf.matchAll(/\(((?:\\.|[^\\)])*)\) Tj/g)].map((m) => m[1]);
+
+  it('prints a 300-character description in full (no line limit)', async () => {
+    const words = Array.from({ length: 60 }, (_, i) => `w${String(i).padStart(3, '0')}`);
+    const description = words.join(' ');
+    expect(description.length).toBeGreaterThanOrEqual(299);
+    const pdf = await pdfText(
+      await statementToPdfBlob(
+        docOf([{ kind: 'points', id: 'a', date: new Date('2026-04-05T06:00:00Z'), description, type: 'Earned', points: 1, balance: 101 }]),
+      ),
+    );
+    const text = drawn(pdf).join(' ');
+    for (const w of words) expect(text).toContain(w);
+    expect(text).not.toContain('...');
+  });
+
+  it('a very long description that cannot fit one page still prints in full across pages, header repeated', async () => {
+    const words = Array.from({ length: 1500 }, (_, i) => `v${i}`);
+    const pdf = await pdfText(
+      await statementToPdfBlob(
+        docOf([{ kind: 'points', id: 'a', date: new Date('2026-04-05T06:00:00Z'), description: words.join(' '), type: 'Earned', points: 1, balance: 101 }]),
+      ),
+    );
+    const text = drawn(pdf).join(' ');
+    expect(text).toContain('v0 ');
+    expect(text).toContain('v1499');
+    const pages = pageCount(pdf);
+    expect(pages).toBeGreaterThan(1);
+    expect(count(pdf, '(Balance) Tj')).toBe(pages);
+  });
+
+  it('wraps a long outlet name/code header line instead of running off the page', async () => {
+    const name = Array.from({ length: 40 }, (_, i) => `Name${i}`).join(' ');
+    const pdf = await pdfText(await statementToPdfBlob(docOf([], { outletName: name })));
+    const strings = drawn(pdf);
+    // no single drawn string holds the whole header…
+    expect(strings.some((s) => s.includes('Name0') && s.includes('Name39'))).toBe(false);
+    // …but every part of it (and the code) is printed
+    const text = strings.join(' ');
+    expect(text).toContain('Name0');
+    expect(text).toContain('Name39');
+    expect(text).toContain('OUT-1');
+  });
+
+  it('passes the payout UTR through pdfSafe', async () => {
+    const pdf = await pdfText(
+      await statementToPdfBlob(
+        docOf([{ kind: 'payout', id: 'p', date: new Date('2026-04-06T06:00:00Z'), description: 'Payout', type: 'Payout', amountInr: 1, utr: 'UTR₹हि' }]),
+      ),
+    );
+    expect(pdf).toMatch(/UTR: UTRRs\.\?+\) Tj/);
+  });
+});
+
 describe('pdfSafe', () => {
   it('maps the rupee sign to "Rs." and characters Helvetica cannot draw to "?"', () => {
     expect(pdfSafe('₹100 हिंदी')).toMatch(/^Rs\.100 \?+$/);

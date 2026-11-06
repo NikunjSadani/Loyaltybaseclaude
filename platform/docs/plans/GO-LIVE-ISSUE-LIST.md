@@ -32,7 +32,7 @@
 
 🟡 **Wallet statement Excel/PDF + Balance column (PLATFORM-WIDE, approved 2026-11-06) — BUILT, NOT pushed** (branch
 `worktree-agent-aa3654f9fde6b0c8a`). Fixes the partner wallet 20-row truncation, the `--50` Excel debit sign and the sales ledger 200-row cap.
-Open: plan Task 0 staging audit + owner decision on D9 (Devanagari in PDF; jsPDF has no shaping). See
+Open: plan Task 0 staging audit. D9 decided: the PDF keeps "Rs." + English-letter names (jsPDF has no Devanagari shaping). See
 `WALLET-STATEMENT-EXPORT-PLAN.md`.
 
 ✅ Cutover #6 is DONE — prod serves `c36f6c8` (per-tenant per-purpose OTP templates [headline] + re-KYC Step-1 deep-link auto-skip + assumed-session TTL 8h→24h + doc reframes). Gate: api jest 1446 · nest 0 · FE vitest 1786 · tsc 0. **Post-cutover: the Deoleo `otpTemplates` config-row was written** (guarded job; login/redemptionSelf=`6a391d46…`, kycConsent/redemptionSales=`6a391cf2…`) and ✅ **RUNTIME-VERIFIED IN PROD** — owner did a real-phone login, OTP arrived on the new `login` template (the other 3 purposes share the resolver → confirm on first real redemption/KYC).

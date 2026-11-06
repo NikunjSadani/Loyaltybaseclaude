@@ -4,10 +4,10 @@
  *
  * TEXT / FONT: this uses jsPDF's built-in Helvetica, which only covers WinAnsi (Latin-1 + a few
  * punctuation marks) — so `pdfSafe` writes ₹ as "Rs." and any other character it can't draw as
- * "?". Owner decision D9 asked for an embedded Unicode font (₹ + Devanagari) instead; that is ON
- * HOLD because jsPDF has no complex-script shaping (it maps one code point → one glyph via the
- * font cmap, no GSUB/GPOS), so Devanagari conjuncts and pre-base matras would render visibly
- * wrong. See platform/docs/plans/WALLET-STATEMENT-EXPORT-PLAN.md §"D9 FINDING" for the options.
+ * "?" (never dropped). This is the owner's FINAL D9 decision ("Rs." + names in English letters): an
+ * embedded Unicode font was rejected because jsPDF has no complex-script shaping (one code point →
+ * one glyph via the font cmap, no GSUB/GPOS), so Devanagari would render visibly wrong. See
+ * platform/docs/plans/WALLET-STATEMENT-EXPORT-PLAN.md §"D9 FINDING".
  */
 import { formatISTDate, formatISTDateTime } from '@/lib/ist-date';
 import { EMPTY_STATEMENT_TEXT } from './statement-xlsx';
@@ -91,8 +91,11 @@ export async function statementToPdfBlob(doc: StatementDoc): Promise<Blob> {
   pdf.setFont('helvetica', 'normal');
   pdf.setFontSize(9);
   pdf.setTextColor(60, 60, 60);
-  text(`${doc.outletName} (${doc.outletCode})`, M, y);
-  y += 4.5;
+  // Long outlet names wrap instead of running off the page.
+  for (const line of pdf.splitTextToSize(pdfSafe(`${doc.outletName} (${doc.outletCode})`), PW - 2 * M) as string[]) {
+    pdf.text(line, M, y);
+    y += 4.5;
+  }
   text(`Period: ${doc.periodLabel}`, M, y);
   y += 4.5;
   text(`Generated: ${formatISTDateTime(doc.generatedAt)}`, M, y);
@@ -113,18 +116,17 @@ export async function statementToPdfBlob(doc: StatementDoc): Promise<Blob> {
   }
 
   pdf.setFontSize(8);
+  // Tallest row that is kept on one page; anything taller flows line-by-line across pages.
+  const MAX_ROW_ON_ONE_PAGE = BOTTOM - M - 10;
   for (const l of doc.lines) {
-    const extra = l.kind === 'payout' && l.utr ? [`UTR: ${l.utr}`] : [];
-    // Description wraps to at most 2 lines; longer text is truncated with "...".
-    const wrapped = pdf.splitTextToSize(pdfSafe(l.description), COL.descW) as string[];
-    const descLines = wrapped.slice(0, 2);
-    if (wrapped.length > 2) descLines[1] = `${descLines[1].replace(/.{0,3}$/, '')}...`;
+    // The description is printed IN FULL (no line limit); the row height adapts.
+    const descLines = pdf.splitTextToSize(pdfSafe(l.description), COL.descW) as string[];
+    const extra = l.kind === 'payout' && l.utr ? [pdfSafe(`UTR: ${l.utr}`)] : [];
     const allDesc = [...descLines, ...extra];
     const h = allDesc.length * LINE_H + 1.2;
-    ensureSpace(h);
+    ensureSpace(Math.min(h, MAX_ROW_ON_ONE_PAGE));
     const base = y;
     text(formatISTDate(l.date), COL.date, base);
-    allDesc.forEach((d, i) => pdf.text(d, COL.desc, base + i * LINE_H));
     text(l.type, COL.type, base);
     if (l.kind === 'points') {
       text(fmtPoints(l.points), COL.points, base, 'right');
@@ -132,7 +134,19 @@ export async function statementToPdfBlob(doc: StatementDoc): Promise<Blob> {
     } else {
       text(fmtInr(l.amountInr), COL.amount, base, 'right');
     }
-    y += h;
+    allDesc.forEach((d, i) => {
+      if (i > 0 && y + LINE_H > BOTTOM) {
+        // Only a row taller than a page gets here: continue it on the next page (header repeated).
+        pdf.addPage();
+        y = M;
+        columnHeader();
+        pdf.setFontSize(8);
+      } else if (i > 0) {
+        y += LINE_H;
+      }
+      pdf.text(d, COL.desc, y);
+    });
+    y += LINE_H + 1.2;
   }
 
   // ── Closing balance ──

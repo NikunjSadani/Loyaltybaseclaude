@@ -4,6 +4,7 @@ import React, { useState, useEffect, useMemo, use } from 'react';
 import Link from 'next/link';
 import { ArrowLeft, AlertTriangle, Calendar, X, Coins } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
+import { istDateKey, istMonthKey } from '@/lib/ist-date';
 import { StatementDownloadButton } from '@/components/wallet/statement-download-button';
 import { buildStatementDoc, type StatementApiResponse } from '@/lib/wallet-statement/statement-model';
 import { TransactionItem } from '@/components/wallet/transaction-item';
@@ -38,8 +39,9 @@ interface OutletMeta {
 /* Combined statement rows — points transactions AND ₹ payout entries, interleaved
    by date (mirrors the partner wallet). Payout rows carry no points/running-balance
    (balance stays points-only); points rows carry no ₹/UTR. */
-type SalesPointsRow = { kind: 'points'; date: Date; label?: string; entry: LedgerEntry };
-type SalesPayoutRow = { kind: 'payout'; date: Date; label?: string; payout: PayoutLedgerEntry };
+// `monthKey` (YYYYMM) is the row's IST calendar month — the SAME bucketing the download uses.
+type SalesPointsRow = { kind: 'points'; date: Date; monthKey: number; label?: string; entry: LedgerEntry };
+type SalesPayoutRow = { kind: 'payout'; date: Date; monthKey: number; label?: string; payout: PayoutLedgerEntry };
 type SalesLedgerRow = SalesPointsRow | SalesPayoutRow;
 
 /* ─── (mock data removed — wired to /api/kyc/[id]/ledger) ─────────────────── */
@@ -86,10 +88,6 @@ type EarnBurnFilter = 'all' | 'earn' | 'burn';
 const EARN_TYPES = new Set<TxType>(['earn', 'credit']);
 const BURN_TYPES = new Set<TxType>(['redeem', 'expire', 'hold']);
 
-// TZ-safe month key: points dates are UTC-midnight ('YYYY-MM-DD') and payout dates are
-// UTC ISO / a UTC-constructed period day, so read UTC getters — matches the string-based
-// auto-range (.slice) and never rolls a month-boundary row into the wrong month.
-function dateMonthKey(d: Date): number { return d.getUTCFullYear() * 100 + (d.getUTCMonth() + 1); }
 function inputToKey(val: string): number {
   const [yr, mo] = val.split('-');
   return parseInt(yr, 10) * 100 + parseInt(mo, 10);
@@ -145,7 +143,8 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
         const dates: string[] = [
           ...((transactions ?? []) as LedgerEntry[]).map((t) => t.date),
           ...((payouts ?? []) as PayoutLedgerEntry[]).map(
-            (p) => (p.paidAt ?? p.uploadedAt ?? `${p.period}-01`).slice(0, 10),
+            // IST calendar day of the payout instant (prod/browsers may not be IST).
+            (p) => (p.paidAt || p.uploadedAt ? istDateKey(p.paidAt ?? p.uploadedAt) : `${p.period}-01`),
           ),
         ];
         if (dates.length) {
@@ -165,7 +164,8 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
   /* ── Combined rows: points transactions + ₹ payout entries (interleaved) ── */
   const allRows = useMemo<SalesLedgerRow[]>(() => {
     const pointsRows: SalesLedgerRow[] = rawEntries.map((e) => ({
-      kind: 'points', date: new Date(e.date), label: e.fieldName ?? undefined, entry: e,
+      // points rows already carry their IST date key ('YYYY-MM-DD')
+      kind: 'points', date: new Date(e.date), monthKey: inputToKey(e.date.slice(0, 7)), label: e.fieldName ?? undefined, entry: e,
     }));
     const payoutRows: SalesLedgerRow[] = rawPayouts
       .filter((p) => p.status !== 'FAILED')
@@ -173,8 +173,8 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
         const [yr, mo] = p.period.split('-');
         const date = p.paidAt ? new Date(p.paidAt)
           : p.uploadedAt ? new Date(p.uploadedAt)
-          : new Date(Date.UTC(+yr, +mo - 1, 1)); // UTC so dateMonthKey's UTC getters key it right
-        return { kind: 'payout', date, label: p.kpiLabel, payout: p };
+          : new Date(Date.UTC(+yr, +mo - 1, 1) - 330 * 60_000); // 00:00 IST on the period's 1st
+        return { kind: 'payout', date, monthKey: inputToKey(istMonthKey(date)), label: p.kpiLabel, payout: p };
       });
     return [...pointsRows, ...payoutRows];
   }, [rawEntries, rawPayouts]);
@@ -182,7 +182,7 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
   /* Bounds for <input type="month"> — across the COMBINED history */
   const [minMonth, maxMonth] = useMemo(() => {
     if (!allRows.length) return [DEFAULT_FROM, DEFAULT_TO];
-    const keys = allRows.map((r) => dateMonthKey(r.date));
+    const keys = allRows.map((r) => r.monthKey);
     return [keyToInput(Math.min(...keys)), keyToInput(Math.max(...keys))];
   }, [allRows]);
 
@@ -195,7 +195,7 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
   const rangeRows = useMemo(() => {
     const fromKey = inputToKey(fromMonth);
     const toKey   = inputToKey(toMonth);
-    return allRows.filter((r) => { const k = dateMonthKey(r.date); return k >= fromKey && k <= toKey; });
+    return allRows.filter((r) => r.monthKey >= fromKey && r.monthKey <= toKey);
   }, [allRows, fromMonth, toMonth]);
 
   /* Apply earn/burn + KPI filter to the period rows, newest-first */

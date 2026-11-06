@@ -156,10 +156,30 @@ describe('PW — Partner wallet API wiring (live data)', () => {
 
   // ── Error fallback ───────────────────────────────────────────────────────────
 
-  it('PW5: graceful fallback when fetch fails — page controls still render', async () => {
+  it('PW5: graceful fallback when fetch fails — page controls still render, and the statement says it failed to load', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network error')));
     await renderWallet();
     expect(screen.queryByTestId('wallet-kpi-filter')).toBeInTheDocument();
+    expect(screen.getByTestId('statement-load-error')).toHaveTextContent(/couldn.t load your statement/i);
+  });
+
+  it('PW8: a statement error response shows an error state, never a silently empty statement', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/api/wallet/statement'))
+        return Promise.resolve({ ok: false, json: () => Promise.resolve({ success: false, error: 'boom' }) });
+      if (String(url).includes('/api/partner/payouts'))
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { payouts: [] } }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: REAL_API_BALANCE }) });
+    }));
+    await renderWallet();
+    expect(screen.getByTestId('statement-load-error')).toBeInTheDocument();
+    expect(screen.queryByText(/No transactions for this period/i)).toBeNull();
+  });
+
+  it('PW9: a successful statement shows no load error', async () => {
+    stubFetch();
+    await renderWallet();
+    expect(screen.queryByTestId('statement-load-error')).toBeNull();
   });
 
   // ── No mock/demo scaffolding (#57 mock-data removal) ──────────────────────────

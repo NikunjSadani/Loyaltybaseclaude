@@ -76,6 +76,35 @@ describe('orderStatementRows', () => {
     expect(out.map((r) => r.id)).toEqual(['p', 'w', 'x']);
   });
 
+  // A long batch tx (credits/payouts run with a 180 s timeout) stamps createdAt at its START, so
+  // its row can sort BEFORE a redemption that actually committed first.
+  it('repairs a batch-tx inversion: credit stamped t0 but applied after a t1 redemption → chain order, ends at the live 700', () => {
+    const prior = tx({ id: 'p', at: '2026-05-01T10:00:00Z', points: 1000, before: 0, after: 1000 });
+    // batch tx started 10:05:00 (stamp) but read the wallet AFTER the redemption committed
+    const credit = tx({ id: 'c', at: '2026-05-01T10:05:00Z', points: 200, before: 500, after: 700 });
+    const redeem = tx({ id: 'r', at: '2026-05-01T10:05:40Z', points: -500, before: 1000, after: 500 });
+    const out = orderStatementRows([credit, redeem, prior]);
+    expect(out.map((r) => r.id)).toEqual(['p', 'r', 'c']);
+    expect(buildStatementWindow(out, {}).closingBalance).toBe(700);
+  });
+
+  it('leaves a genuine chain break in place (no matching row within the repair window)', () => {
+    const a = tx({ id: 'a', at: '2026-05-01T10:00:00Z', points: 100, before: 0, after: 100 });
+    const b = tx({ id: 'b', at: '2026-05-01T10:01:00Z', points: 10, before: 250, after: 260 }); // break
+    // matches a.after, but is far outside the window → must NOT be pulled up
+    const c = tx({ id: 'c', at: '2026-05-02T10:00:00Z', points: 5, before: 100, after: 105 });
+    expect(orderStatementRows([c, b, a]).map((r) => r.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('orders same-timestamp rows with identical balances deterministically (id ASC), whatever the input order', () => {
+    const prior = tx({ id: 'p', at: '2026-05-01T09:00:00Z', points: 100, before: 0, after: 100 });
+    const same = '2026-05-01T10:00:00Z';
+    const x = tx({ id: 'x', at: same, type: 'DEBIT_EXPIRY', points: 0, before: 100, after: 100 });
+    const y = tx({ id: 'y', at: same, type: 'DEBIT_EXPIRY', points: 0, before: 100, after: 100 });
+    expect(orderStatementRows([y, x, prior]).map((r) => r.id)).toEqual(['p', 'x', 'y']);
+    expect(orderStatementRows([prior, x, y]).map((r) => r.id)).toEqual(['p', 'x', 'y']);
+  });
+
   it('does not mutate the input array', () => {
     const rows = [
       tx({ id: '2', at: '2026-02-01T00:00:00Z', points: 1, before: 1, after: 2 }),
@@ -173,6 +202,23 @@ describe('buildStatementWindow', () => {
       {},
     );
     expect(w.closingBalance).toBe(0);
+  });
+
+  it('a repaired pair straddling the range edge stays contiguous: adjacent ranges tie out (closing of one = opening of the next)', () => {
+    // credit stamped 23:59:30 on 31 May but applied AFTER a redemption stamped 00:00:20 on 1 Jun.
+    const prior = tx({ id: 'p', at: '2026-05-10T00:00:00Z', points: 1000, before: 0, after: 1000 });
+    const credit = tx({ id: 'c', at: '2026-05-31T23:59:30Z', points: 200, before: 500, after: 700 });
+    const redeem = tx({ id: 'r', at: '2026-06-01T00:00:20Z', points: -500, before: 1000, after: 500 });
+    const ordered = orderStatementRows([prior, credit, redeem]);
+    const edge = new Date('2026-06-01T00:00:00Z');
+    const may = buildStatementWindow(ordered, { start: new Date('2026-05-01T00:00:00Z'), endExclusive: edge });
+    const jun = buildStatementWindow(ordered, { start: edge, endExclusive: new Date('2026-07-01T00:00:00Z') });
+    expect(may.rows.map((r) => r.id)).toEqual(['p']);
+    expect(jun.rows.map((r) => r.id)).toEqual(['r', 'c']);
+    expect(may.closingBalance).toBe(jun.openingBalance);
+    expect(jun.closingBalance).toBe(700);
+    // each range ties out internally
+    expect(jun.openingBalance + jun.rows.reduce((s, r) => s + r.points, 0)).toBe(jun.closingBalance);
   });
 
   it('window bounds are start <= createdAt < endExclusive', () => {
@@ -322,23 +368,33 @@ describe('loadPointsStatement', () => {
     ]);
   });
 
-  it(`rejects a range with more than MAX_STATEMENT_ROWS (${MAX_STATEMENT_ROWS}) rows, asking to narrow the date range`, async () => {
+  const overCap = () => {
     const rows: StatementTx[] = [];
     for (let i = 0; i <= MAX_STATEMENT_ROWS; i++) {
       rows.push(
         tx({
           id: `r${String(i).padStart(6, '0')}`,
-          at: new Date(Date.UTC(2026, 0, 1) + i * 1000),
+          at: new Date(Date.UTC(2026, 0, 1) + i * 1000), // all inside Jan 2026 (IST)
           points: 1,
           before: i,
           after: i + 1,
         }),
       );
     }
-    const prisma = makePrisma(rows);
-    const run = loadPointsStatement(prisma, base);
+    return rows;
+  };
+
+  // The cap guards the DOWNLOAD (a requested range); it must never blank a screen.
+  it(`rejects a requested range with more than MAX_STATEMENT_ROWS (${MAX_STATEMENT_ROWS}) rows, asking to narrow the date range`, async () => {
+    const prisma = makePrisma(overCap());
+    const run = loadPointsStatement(prisma, { ...base, from: '2026-01', to: '2026-01' });
     await expect(run).rejects.toThrow(BadRequestException);
     await expect(run).rejects.toThrow(/narrow the date range/i);
+  });
+
+  it('does NOT cap the no-range (on-screen) load', async () => {
+    const out = await loadPointsStatement(makePrisma(overCap()), base);
+    expect(out.rows).toHaveLength(MAX_STATEMENT_ROWS + 1);
   });
 
   it.each([

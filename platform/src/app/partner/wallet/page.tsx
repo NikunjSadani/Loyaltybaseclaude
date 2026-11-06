@@ -189,6 +189,8 @@ export default function WalletPage() {
   const [transactions, setTransactions] = useState<WalletTransaction[]>([]);
   const [payouts,      setPayouts]      = useState<PayoutLedgerEntry[]>([]);
   const [outletCode,   setOutletCode]   = useState('');
+  /* True when the statement could not be loaded — shown as an error, never as an empty statement. */
+  const [statementError, setStatementError] = useState(false);
   const [loading,      setLoading]      = useState(true);
 
   /* Earn / Burn filter (points rows only) */
@@ -239,6 +241,9 @@ export default function WalletPage() {
           : [];
       if (apiTxs.length > 0) {
         setTransactions(apiTxs);
+      }
+      if (!(txJson?.success && Array.isArray(txJson.data?.rows))) {
+        setStatementError(true);
       }
       if (txJson?.success && typeof txJson.data?.outletCode === 'string') {
         setOutletCode(txJson.data.outletCode);
@@ -501,7 +506,12 @@ export default function WalletPage() {
               </div>
             </div>
 
-            {displayedRows.length === 0 ? (
+            {statementError ? (
+              <div data-testid="statement-load-error" className="flex flex-col items-center gap-2 py-12">
+                <Coins className="h-8 w-8 text-gray-200" />
+                <p className="text-sm text-red-500">Couldn&apos;t load your statement. Please try again.</p>
+              </div>
+            ) : displayedRows.length === 0 ? (
               <div className="flex flex-col items-center gap-2 py-12">
                 <Coins className="h-8 w-8 text-gray-200" />
                 <p className="text-sm text-gray-400">No transactions for this period</p>

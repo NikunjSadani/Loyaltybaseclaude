@@ -45,8 +45,8 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
   `GET /v1/wallet/statement` + `GET /v1/kyc/:id/ledger/statement` (shared `points-statement.helper`: stored-balance chain,
   opening/closing, D10 tie-out warn); partner wallet + sales ledger get one Download → Excel/PDF picker with a Balance
   column. Fixes: partner wallet newest-20-rows truncation (screen + file), the `--50` debit sign in the old Excel, and the
-  sales ledger `take: 200` cap. ⏳ Before push: run plan Task 0 (staging chain audit) + owner decision on **D9** (jsPDF
-  can't shape Devanagari → font embed on hold; PDF prints `Rs.` + `?`). Plan: `WALLET-STATEMENT-EXPORT-PLAN.md`.
+  sales ledger `take: 200` cap. ⏳ Before push: run plan Task 0 (staging chain audit). **D9 decided:** PDF keeps `Rs.`
+  + English-letter names (non-Latin → `?`; jsPDF can't shape Devanagari). Plan: `WALLET-STATEMENT-EXPORT-PLAN.md`.
 - **Dormant-activation TODOs (owner-gated, from #37):** MSG91 `WHATSAPP_*` env + marketing templates + webhook (broadcasts) · notification SMS DLT templates · deoleo `physicalGifts` channel + real vendors (gift marketplace) · delivery-status: `DELIVERY_RECEIPTS_ENABLED` + `NOTIFICATIONS_STATUS_SECRET` + `NOTIFICATIONS_RETENTION_ENABLED` + MSG91 DLR callbacks + confirm the live SMS-DLR payload · email-report PROD recipients (#29) · **RBAC staff = owner creates the 2 staff + brand grants in the console** (Bajaj; runbook `runbooks/RBAC-PROD-ENABLE.md`).
 - **Dormant surfaces awaiting owner UAT (nothing blocks Deoleo):** VISIBILITY POSM `visibilityConfig` activation (#16) · TDS payout write-path + `/admin/users/parents` grouping UI + a real visibility-stream payout UAT (#17) · the SCHEME instrument on a real phone (camera/GPS/signature).
 - **Lower-priority (written, not built):** `RBAC-COMPLETION-PLAN.md` (⚠️ flipping RBAC today 403s all sales+partner routes) · staging-mode E2E CI harness as a fast-follow to onboarding the 2nd tenant (`[[e2e-harness]]`).

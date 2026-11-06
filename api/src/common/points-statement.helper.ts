@@ -74,6 +74,39 @@ export function orderStatementRows(rows: StatementTx[]): StatementTx[] {
     running = out[out.length - 1].balanceAfter;
     i = j;
   }
+  return repairChainInversions(out);
+}
+
+/**
+ * How far ahead (in createdAt time) the repair pass may look for the row that continues the chain.
+ * createdAt is Postgres' TRANSACTION-START time, and the credit / payout batch transactions run with
+ * `timeout: 180_000` (credits.service, payouts.service). So a batch row can be stamped up to ~180 s
+ * EARLIER than a redemption that committed before the batch read the wallet. 200 s covers that with
+ * margin; rows are never moved further than this, so a genuine break stays where it is (and the
+ * D10 tie-out warning still fires for it).
+ */
+export const CHAIN_REPAIR_WINDOW_MS = 200_000;
+
+/**
+ * Bounded repair: when a row's balanceBefore ≠ the previous row's balanceAfter, look ahead (only
+ * within CHAIN_REPAIR_WINDOW_MS of that row's stamp) for the first row whose balanceBefore DOES
+ * match, and move it up into place. No match → leave the break as-is. Each move strictly fixes the
+ * link at position i, so the pass terminates; it is O(n·k) with k = rows inside the window.
+ */
+function repairChainInversions(rows: StatementTx[]): StatementTx[] {
+  const out = rows.slice();
+  for (let i = 1; i < out.length; i++) {
+    const want = out[i - 1].balanceAfter;
+    if (out[i].balanceBefore === want) continue;
+    const limit = out[i].createdAt.getTime() + CHAIN_REPAIR_WINDOW_MS;
+    for (let j = i + 1; j < out.length && out[j].createdAt.getTime() <= limit; j++) {
+      if (out[j].balanceBefore === want) {
+        const [row] = out.splice(j, 1);
+        out.splice(i, 0, row);
+        break;
+      }
+    }
+  }
   return out;
 }
 
@@ -81,6 +114,12 @@ export function orderStatementRows(rows: StatementTx[]): StatementTx[] {
  * Slice an ORDERED history (see orderStatementRows; it may include rows before the window) to
  * `start <= createdAt < endExclusive` and derive the opening/closing balance from the STORED
  * per-row balances. Either bound may be omitted.
+ *
+ * Window membership uses each row's EFFECTIVE time = the running max of createdAt along the ordered
+ * list. For a plain chronological list that IS createdAt; for a row the repair pass moved after a
+ * later-stamped row, it is that later stamp. So every range is a CONTIGUOUS slice of the ordered
+ * chain — a repaired pair (or a same-timestamp group) never straddles a range edge, and adjacent
+ * ranges always tie out (closing of one = opening of the next).
  */
 export function buildStatementWindow(
   ordered: StatementTx[],
@@ -91,8 +130,10 @@ export function buildStatementWindow(
 
   let lastBefore: StatementTx | undefined;
   const rows: StatementTx[] = [];
+  let effective = -Infinity;
   for (const r of ordered) {
-    const ms = r.createdAt.getTime();
+    effective = Math.max(effective, r.createdAt.getTime());
+    const ms = effective;
     if (ms < startMs) lastBefore = r;
     else if (ms < endMs) rows.push(r);
   }
@@ -126,7 +167,7 @@ export function defaultTxDescription(transactionType: string): string {
 
 // ─── DB loader ────────────────────────────────────────────────────────────────
 
-/** Hard cap on rows in ONE statement range (the statement is deliberately unpaginated). */
+/** Hard cap on rows in ONE requested range (the download). No-range (on-screen) loads are uncapped. */
 export const MAX_STATEMENT_ROWS = 20_000;
 
 const MONTH_KEY = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -197,7 +238,9 @@ export async function loadPointsStatement(
   for (let k = 1; k < ordered.length; k++) {
     if (ordered[k].balanceBefore !== ordered[k - 1].balanceAfter) chainBreaks++;
   }
-  if (rows.length > MAX_STATEMENT_ROWS) {
+  // The cap guards a requested RANGE (the download). The no-range load feeds the SCREENS (partner
+  // wallet, sales ledger) and is never capped — a cap there would blank the statement.
+  if (from !== undefined && rows.length > MAX_STATEMENT_ROWS) {
     throw new BadRequestException(
       `This statement has more than ${MAX_STATEMENT_ROWS} transactions. Please narrow the date range.`,
     );

@@ -68,6 +68,14 @@ describe('StatementDownloadButton', () => {
     expect(statementToPdfBlob).not.toHaveBeenCalled();
   });
 
+  it('sanitises the file name (outlet codes may carry /, spaces etc.)', async () => {
+    const { button } = setup({ fileBase: 'wallet-statement-OUT/12 A.B-2026-04_2026-05' });
+    fireEvent.click(button);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Excel (.xlsx)' }));
+    await waitFor(() => expect(downloadBlob).toHaveBeenCalledTimes(1));
+    expect(downloadBlob.mock.calls[0][1]).toBe('wallet-statement-OUT-12-A-B-2026-04_2026-05.xlsx');
+  });
+
   it('PDF loads the doc, renders pdf and saves x.pdf', async () => {
     const { button } = setup();
     fireEvent.click(button);

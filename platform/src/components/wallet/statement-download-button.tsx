@@ -54,7 +54,8 @@ export function StatementDownloadButton({ disabled, loadDoc, fileBase }: Stateme
         format === 'xlsx'
           ? (await import('@/lib/wallet-statement/statement-xlsx')).statementToXlsxBlob(doc)
           : await (await import('@/lib/wallet-statement/statement-pdf')).statementToPdfBlob(doc);
-      downloadBlob(blob, `${fileBase}.${format}`);
+      // Outlet codes / names are tenant data — keep the file name to [A-Za-z0-9_-].
+      downloadBlob(blob, `${fileBase.replace(/[^\w-]/g, '-')}.${format}`);
     } catch {
       setError(true);
     } finally {
