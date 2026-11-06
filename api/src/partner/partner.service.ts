@@ -31,6 +31,7 @@ import {
   PaymentMode,
 } from '../common/payment-type.helper';
 import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
+import { pickDeliveryDefaults, DeliveryDefaults } from './delivery-defaults.helper';
 
 /**
  * Partner self-service — ported from platform/src/app/api/partner/* onto /v1.
@@ -137,9 +138,16 @@ export class PartnerService {
         })
       : null;
 
-    const { outletType, outletName, hasPointsActivity, hasPayoutActivity, loyaltyEnabled } = partner
+    const { outletType, outletName, hasPointsActivity, hasPayoutActivity, loyaltyEnabled, deliveryDefaults } = partner
       ? await this.resolvePartnerActivity(user.clientId, partner.id)
-      : { outletType: null, outletName: null, hasPointsActivity: false, hasPayoutActivity: false, loyaltyEnabled: true };
+      : {
+          outletType: null,
+          outletName: null,
+          hasPointsActivity: false,
+          hasPayoutActivity: false,
+          loyaltyEnabled: true,
+          deliveryDefaults: null,
+        };
 
     // Per-tenant feature blob (DB-backed via TenantService.resolveClient — D-1). The
     // partner shell reads its runtime feature gating (walletModule / partnerApp.*)
@@ -175,6 +183,11 @@ export class PartnerService {
       operableOutlets: operable,
       groupOverviewAvailable: groupParent != null,
       groupParent,
+      // The ACTIVE outlet's pre-fill for the physical-gift delivery form (PLATFORM-WIDE,
+      // owner-approved): the primary outlet's address on file — the partner's OWN data, keyed on
+      // the re-authorized active partner (resolveActivePartnerId) + tenant. Null when nothing is on
+      // file. Never logged; never written back to the outlet.
+      deliveryDefaults,
     };
   }
 
@@ -199,6 +212,7 @@ export class PartnerService {
     hasPointsActivity: boolean;
     hasPayoutActivity: boolean;
     loyaltyEnabled: boolean;
+    deliveryDefaults: DeliveryDefaults | null;
   }> {
     // Partner's outlets — outletCode (payout-entry scoping) + primary-outlet type + name in one query.
     // NB: CreditPayoutEntry.outletId stores the outlet CODE (not the Outlet PK) — it is a
@@ -207,7 +221,18 @@ export class PartnerService {
     const outlets = await this.prisma.outlet.findMany({
       where: { clientId, partnerId, deletedAt: null },
       orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
-      select: { name: true, outletCode: true, outletTypeId: true, outletType: { select: { code: true } } },
+      select: {
+        name: true,
+        outletCode: true,
+        outletTypeId: true,
+        outletType: { select: { code: true } },
+        // Delivery-address pre-fill reads the SAME primary-outlet row (no extra query).
+        addressLine1: true,
+        addressLine2: true,
+        city: true,
+        state: true,
+        pincode: true,
+      },
     });
     const outletType = outlets[0]?.outletType?.code ?? null;
     // The ACTIVE outlet's MASTER name (the admin-roster Outlet.name) for the partner-shell header,
@@ -215,6 +240,8 @@ export class PartnerService {
     // outlet — the FE then falls back to businessName so the header never shows blank.
     const outletName = outlets[0]?.name ?? null;
     const outletCodes = outlets.map((o) => o.outletCode);
+    // Redeem-form address pre-fill from the SAME primary-outlet row (outlet address only).
+    const deliveryDefaults = pickDeliveryDefaults(outlets[0] ?? null);
 
     // Per-outlet-type Loyalty (Rewards) gate — resolved via the shared helper (single source
     // of truth, also used by the rewards-service enforcement). Defaults true when there is no
@@ -261,7 +288,7 @@ export class PartnerService {
     ]);
     const hasPayoutActivity = !!payoutEntry || !!payoutTxn;
 
-    return { outletType, outletName, hasPointsActivity, hasPayoutActivity, loyaltyEnabled };
+    return { outletType, outletName, hasPointsActivity, hasPayoutActivity, loyaltyEnabled, deliveryDefaults };
   }
 
   /**
