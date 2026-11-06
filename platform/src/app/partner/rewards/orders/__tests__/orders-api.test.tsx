@@ -40,7 +40,6 @@ const VOUCHER_ORDER = {
   voucherProvider: 'Gifsy',
   createdAt: '2026-05-01T00:00:00.000Z',
   updatedAt: '2026-05-05T00:00:00.000Z',
-  confirmedAt: '2026-05-01T01:00:00.000Z',
 };
 
 const PHYSICAL_ORDER = {

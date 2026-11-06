@@ -8,6 +8,8 @@ import { Spinner } from '@/components/ui/spinner';
 import { EmptyState } from '@/components/ui/empty-state';
 import { formatDate, formatPoints } from '@/lib/utils';
 import { authHeader } from '@/lib/api-client';
+import { buildOrderSteps } from '@/lib/order-timeline';
+import { OrderStepper } from '@/components/partner/order-stepper';
 
 /* ─── Live order shape (GET /api/rewards/orders) ──────────────────────────────
    The {success,data} envelope is unwrapped in the effect; `data.orders` is the
@@ -32,15 +34,12 @@ interface ApiOrder {
   logisticsPartner?: string | null;
   createdAt: string;
   updatedAt: string;
-  confirmedAt?: string | null;
-  processedAt?: string | null;
+  // The only date columns the list endpoint sends (no confirmed/processed/returned columns
+  // exist; per-step dates come from /track when a timeline is expanded).
   dispatchedAt?: string | null;
   deliveredAt?: string | null;
   cancelledAt?: string | null;
-  returnedAt?: string | null;
 }
-
-interface TimelineStep { status: string; date: string; note?: string }
 
 interface Order {
   id: string;
@@ -56,7 +55,9 @@ interface Order {
   logisticsPartner?: string | null;
   createdAt: string;
   updatedAt: string;
-  timeline: TimelineStep[];
+  dispatchedAt: string | null;
+  deliveredAt: string | null;
+  cancelledAt: string | null;
 }
 
 const statusConfig: Record<string, { icon: React.ReactNode; label: string; variant: BadgeVariant }> = {
@@ -75,28 +76,6 @@ function statusFor(status: string) {
   return statusConfig[status] ?? { icon: <Clock className="h-4 w-4" />, label: status, variant: 'default' as BadgeVariant };
 }
 
-/** Build a status timeline from the order's stamped timestamps. */
-function buildTimeline(o: ApiOrder): TimelineStep[] {
-  const steps: TimelineStep[] = [{ status: 'Order Placed', date: o.createdAt }];
-  if (o.confirmedAt) steps.push({ status: 'Confirmed', date: o.confirmedAt });
-  if (o.processedAt) steps.push({ status: 'Processing', date: o.processedAt });
-  if (o.dispatchedAt) {
-    steps.push({
-      status: 'Dispatched', date: o.dispatchedAt,
-      note: o.trackingNumber ? `Tracking: ${o.trackingNumber}` : undefined,
-    });
-  }
-  if (o.deliveredAt)  steps.push({ status: 'Delivered', date: o.deliveredAt });
-  if (o.returnedAt)   steps.push({ status: 'Returned', date: o.returnedAt });
-  if (o.cancelledAt)  steps.push({ status: 'Cancelled', date: o.cancelledAt });
-  // Fallback: if no intermediate stamp but the current status is past PENDING,
-  // surface it so the timeline reflects the live status.
-  if (steps.length === 1 && o.status !== 'PENDING') {
-    steps.push({ status: statusFor(o.status).label, date: o.updatedAt });
-  }
-  return steps;
-}
-
 function mapApiOrder(o: ApiOrder): Order {
   return {
     id:              o.id,
@@ -112,7 +91,9 @@ function mapApiOrder(o: ApiOrder): Order {
     logisticsPartner: o.logisticsPartner ?? null,
     createdAt:       o.createdAt,
     updatedAt:       o.updatedAt,
-    timeline:        buildTimeline(o),
+    dispatchedAt:    o.dispatchedAt ?? null,
+    deliveredAt:     o.deliveredAt ?? null,
+    cancelledAt:     o.cancelledAt ?? null,
   };
 }
 
@@ -267,6 +248,9 @@ export default function OrdersPage() {
                     </div>
                   </div>
 
+                  {/* Compact progress bar — status-only (no fetch), always visible */}
+                  <OrderStepper variant="compact" steps={buildOrderSteps(order)} />
+
                   {/* Voucher code (GIFT_CARD / VOUCHER, once confirmed) */}
                   {showVoucher && order.voucherCode && (
                     <VoucherCodeBlock code={order.voucherCode} brand={brandLabel(order.rewardName)} />
@@ -304,30 +288,8 @@ export default function OrdersPage() {
                     {isExpanded ? 'Hide timeline' : 'View timeline'}
                   </button>
 
-                  {/* Timeline */}
-                  {isExpanded && (
-                    <div className="mt-3 pl-3 border-l-2 border-gray-100 space-y-3">
-                      {order.timeline.map((step, idx) => {
-                        const isLast = idx === order.timeline.length - 1;
-                        return (
-                          <div key={idx} className="relative flex items-start gap-3">
-                            <div
-                              className={`w-2 h-2 rounded-full mt-1.5 shrink-0 -ml-[17px] ${
-                                isLast ? 'bg-[var(--brand-primary)]' : 'bg-gray-300'
-                              }`}
-                            />
-                            <div>
-                              <p className="text-xs font-medium text-gray-800">{step.status}</p>
-                              <p className="text-xs text-gray-400">{formatDate(step.date)}</p>
-                              {step.note && (
-                                <p className="text-xs text-gray-500 mt-0.5">{step.note}</p>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                  {/* Timeline — the dated vertical stepper */}
+                  {isExpanded && <OrderStepper variant="detail" steps={buildOrderSteps(order)} />}
                 </CardContent>
               </Card>
             );
