@@ -6,9 +6,12 @@
  * MT2: a RETURNED order renders the "Returned" status
  * MT3: the view is READ-ONLY — no fulfilment controls (no channel select, no status-advance)
  * MT4: ops-only fields are never exposed to the member (channel enum / supplier ref)
+ * MT5: every card shows the compact progress bar (status-only — no extra fetch)
+ * MT6: "View timeline" expands the vertical stepper (status-derived steps + column dates)
+ * MT7: a terminal (cancelled) order shows the red branch with no upcoming steps
  */
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import OrdersPage from '../page';
 
@@ -82,5 +85,40 @@ describe('Member order-tracking', () => {
     // Expand the timeline too, to be sure nothing ops-only surfaces there.
     fireEvent.click(screen.getByText('View timeline'));
     expect(screen.queryByText(/FULFILLED_BY_AMAZON|GIFSY_WAREHOUSE|Supplier ref|Fulfilled by/i)).not.toBeInTheDocument();
+  });
+
+  it('MT5: shows the compact bar with the dispatched dot current, without any fetch beyond the list call', async () => {
+    stubOrders([DISPATCHED]);
+    render(<OrdersPage />);
+    const bar = await screen.findByTestId('order-stepper-compact');
+    expect(within(bar).getByTestId('order-compact-step-dispatched')).toHaveAttribute('data-state', 'current');
+    expect(within(bar).getByTestId('order-compact-step-delivered')).toHaveAttribute('data-state', 'upcoming');
+    expect(screen.getByTestId('order-stepper-next')).toHaveTextContent('Next: Delivered');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fetch).mock.calls[0][0]).toBe('/api/rewards/orders');
+  });
+
+  it('MT6: "View timeline" expands the vertical stepper with the dispatch date + tracking note', async () => {
+    stubOrders([DISPATCHED]);
+    render(<OrdersPage />);
+    await screen.findByTestId('order-stepper-compact');
+    expect(screen.queryByTestId('order-stepper-detail')).toBeNull(); // collapsed by default
+    fireEvent.click(screen.getByText('View timeline'));
+    const detail = screen.getByTestId('order-stepper-detail');
+    expect(within(detail).getByTestId('order-step-dispatched')).toHaveAttribute('aria-current', 'step');
+    expect(within(detail).getByTestId('order-step-date-dispatched')).toBeInTheDocument();
+    expect(within(detail).getByText('Tracking: DEOLEO-5512')).toBeInTheDocument();
+    expect(screen.getByText('Hide timeline')).toBeInTheDocument();
+  });
+
+  it('MT7: a cancelled order shows the red branch and no upcoming steps', async () => {
+    stubOrders([{
+      ...DISPATCHED, id: 'o3', status: 'CANCELLED', trackingNumber: null, trackingUrl: null,
+      dispatchedAt: null, cancelledAt: '2026-05-12T00:00:00.000Z',
+    }]);
+    render(<OrdersPage />);
+    const bar = await screen.findByTestId('order-stepper-compact');
+    expect(within(bar).getByTestId('order-compact-step-cancelled')).toHaveAttribute('data-state', 'failed');
+    expect(within(bar).queryAllByRole('listitem').some((li) => li.getAttribute('data-state') === 'upcoming')).toBe(false);
   });
 });

@@ -23,6 +23,8 @@ const mockTx = {
     update: jest.fn(),
     updateMany: jest.fn(),
   },
+  // Shared order-status transition writes the status-history row inside the same tx.
+  redemptionStatusHistory: { create: jest.fn() },
   // capture-bank-at-redemption: the PAID/FAILED verify-stamp updates the partner's
   // paymentDetailsStatus inside the disbursement tx (guarded on UNVERIFIED).
   channelPartner: { updateMany: jest.fn() },
@@ -1179,6 +1181,82 @@ describe('PayoutsService', () => {
       expect(res).toMatchObject({ paidCount: 0, failedCount: 0, reversedCount: 0 });
       expect(mockTx.payoutTransaction.update).not.toHaveBeenCalled();
       expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    // Order-timeline D1 — the UTR upload now routes its order status writes through the shared
+    // transition, which records a RedemptionStatusHistory row in the SAME tx. Money effects
+    // (payout flip, M2 refund claim, wallet.reverse, counts) must stay exactly as before.
+    describe('status history (shared order-status transition)', () => {
+      const oneTxn = () =>
+        mockPrisma.payoutTransaction.findMany
+          .mockResolvedValueOnce([
+            { id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'UPI', partnerId: 'p1', redemptionOrderId: 'o1' },
+          ])
+          .mockResolvedValueOnce([]);
+      beforeEach(() => {
+        mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+        mockTx.redemptionStatusHistory.create.mockResolvedValue({});
+      });
+
+      it('PAID: the guarded DELIVERED claim is byte-identical and writes ONE DELIVERED history row (actor = uploader)', async () => {
+        oneTxn();
+        const res = await service.uploadPayoutUtr(gifsy, 'b1', buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]), true);
+        expect(res).toMatchObject({ applied: true, paidCount: 1, failedCount: 0, reversedCount: 0 });
+        expect(mockTx.redemptionOrder.updateMany).toHaveBeenCalledTimes(1);
+        expect(mockTx.redemptionOrder.updateMany).toHaveBeenCalledWith({
+          where: { id: 'o1', status: { notIn: ['DELIVERED', 'CANCELLED', 'RETURNED', 'FAILED'] } },
+          data: { status: 'DELIVERED', deliveredAt: expect.any(Date) },
+        });
+        expect(mockTx.redemptionStatusHistory.create).toHaveBeenCalledTimes(1);
+        expect(mockTx.redemptionStatusHistory.create).toHaveBeenCalledWith({
+          data: { orderId: 'o1', fromStatus: null, toStatus: 'DELIVERED', changedById: gifsy.sub, notes: null },
+        });
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+      });
+
+      it('PAID on an already-terminal order (claim count 0) writes NO history row', async () => {
+        oneTxn();
+        mockTx.redemptionOrder.updateMany.mockResolvedValue({ count: 0 });
+        await service.uploadPayoutUtr(gifsy, 'b1', buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]), true);
+        expect(mockTx.redemptionStatusHistory.create).not.toHaveBeenCalled();
+      });
+
+      it('FAILED: refund + order flip unchanged, plus ONE FAILED history row from the prior status', async () => {
+        oneTxn();
+        mockTx.redemptionOrder.findFirst.mockResolvedValue({ pointsDeducted: 500, partnerId: 'p1', orderNumber: 'RO-1', status: 'CONFIRMED' });
+        const res = await service.uploadPayoutUtr(gifsy, 'b1', buildUpload([{ txnId: 'txn1', status: 'FAILED' }]), true);
+        expect(res).toMatchObject({ applied: true, paidCount: 0, failedCount: 1, reversedCount: 1 });
+        expect(mockTx.redemptionOrder.findFirst).toHaveBeenCalledWith({
+          where: { id: 'o1' },
+          select: { pointsDeducted: true, partnerId: true, orderNumber: true, status: true },
+        });
+        expect(mockWallet.reverse).toHaveBeenCalledTimes(1);
+        expect(mockWallet.reverse).toHaveBeenCalledWith('p1', 500, { referenceId: 'o1', description: 'Reversal RO-1' }, mockTx);
+        expect(mockTx.redemptionOrder.update).toHaveBeenCalledTimes(1);
+        expect(mockTx.redemptionOrder.update).toHaveBeenCalledWith({ where: { id: 'o1' }, data: { status: 'FAILED' } });
+        expect(mockTx.redemptionStatusHistory.create).toHaveBeenCalledTimes(1);
+        expect(mockTx.redemptionStatusHistory.create).toHaveBeenCalledWith({
+          data: { orderId: 'o1', fromStatus: 'CONFIRMED', toStatus: 'FAILED', changedById: gifsy.sub, notes: null },
+        });
+      });
+
+      it('FAILED on an order that is already FAILED: no refund, no duplicate history row', async () => {
+        oneTxn();
+        mockTx.redemptionOrder.findFirst.mockResolvedValue({ pointsDeducted: 0, partnerId: 'p1', orderNumber: 'RO-1', status: 'FAILED' });
+        mockTx.redemptionOrder.updateMany.mockResolvedValue({ count: 0 });
+        const res = await service.uploadPayoutUtr(gifsy, 'b1', buildUpload([{ txnId: 'txn1', status: 'FAILED' }]), true);
+        expect(res).toMatchObject({ failedCount: 1, reversedCount: 0 });
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+        expect(mockTx.redemptionStatusHistory.create).not.toHaveBeenCalled();
+      });
+
+      it('a history-write failure aborts the whole upload tx (same atomicity as the money path)', async () => {
+        oneTxn();
+        mockTx.redemptionStatusHistory.create.mockRejectedValue(new Error('db down'));
+        await expect(
+          service.uploadPayoutUtr(gifsy, 'b1', buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]), true),
+        ).rejects.toThrow('db down');
+      });
     });
   });
 });

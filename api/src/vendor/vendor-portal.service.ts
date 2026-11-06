@@ -14,6 +14,7 @@ import { EventKey } from '../notification-templates/notification-templates.confi
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { assertVendorPriceBounds, VendorPriceError } from './vendor-pricing.helper';
 import { applyVendorPiiRetention } from './vendor-pii.helper';
+import { transitionOrderStatus } from '../rewards/order-status-transition';
 import {
   parseVendorUploadBuffer,
   buildVendorUploadTemplateBuffer,
@@ -698,8 +699,7 @@ export class VendorPortalService {
     }
 
     const now = new Date();
-    const data: Prisma.RedemptionOrderUpdateInput = {
-      status: toStatus,
+    const data: Omit<Prisma.RedemptionOrderUpdateInput, 'status'> = {
       voucherCode: dto.voucherCode,
       voucherProvider: dto.voucherProvider,
       trackingNumber: dto.trackingNumber,
@@ -713,13 +713,17 @@ export class VendorPortalService {
     if (toStatus === RedemptionStatus.DISPATCHED) data.dispatchedAt = now;
     if (toStatus === RedemptionStatus.DELIVERED) data.deliveredAt = now;
 
-    await this.prisma.$transaction(async (tx) => {
-      const o = await tx.redemptionOrder.update({ where: { id }, data });
-      await tx.redemptionStatusHistory.create({
-        data: { orderId: id, fromStatus, toStatus, changedById: user.sub, notes: dto.notes },
-      });
-      return o;
-    });
+    // Shared transition: status + history row in one tx (order-timeline plan D1).
+    await this.prisma.$transaction((tx) =>
+      transitionOrderStatus(tx, {
+        orderId: id,
+        fromStatus,
+        toStatus,
+        data,
+        changedById: user.sub,
+        notes: dto.notes,
+      }),
+    );
 
     // Member notification on the customer-visible milestones (same path as Gifsy).
     if (toStatus === RedemptionStatus.DISPATCHED || toStatus === RedemptionStatus.DELIVERED) {

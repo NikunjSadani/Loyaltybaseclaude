@@ -26,6 +26,7 @@ import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
 import { isSalesRedeemEnabledForPartner } from '../common/sales-redeem-eligibility';
 import { isGifsyOperator, tenantScope } from '../common/tenant-scope';
 import { generateTenantOrderNumber } from './order-number.helper';
+import { supersedePendingOrders, transitionOrderStatus } from './order-status-transition';
 import { derivePointsCost } from './derive-points-cost.helper';
 import { computeFrozenValuePaise } from './gift-value.helper';
 import { computeDispatchSla } from '../common/dispatch-sla';
@@ -193,6 +194,16 @@ interface HubbleLoadedOrder {
   metadata: Prisma.JsonValue;
   reward: { metadata: Prisma.JsonValue } | null;
 }
+
+/** Statuses that prove an order got past OTP confirmation (points were deducted). */
+const REACHED_CONFIRMED_STATUSES: RedemptionStatus[] = [
+  RedemptionStatus.CONFIRMED,
+  RedemptionStatus.PROCESSING,
+  RedemptionStatus.DISPATCHED,
+  RedemptionStatus.DELIVERED,
+  RedemptionStatus.RETURNED,
+  RedemptionStatus.FAILED,
+];
 
 @Injectable()
 export class RewardsService {
@@ -584,6 +595,30 @@ export class RewardsService {
       // switched sibling named by x-active-partner-id — re-authorized here).
       const activePartnerId = await this.resolveActive(user, requestedPartnerId);
       where.partnerId = activePartnerId ?? 'none';
+      // Order-timeline D4 (owner): hide NEVER-CONFIRMED orders from the partner's My Orders —
+      // a CANCELLED order that never reached CONFIRMED (abandoned/superseded OTP, or an ops
+      // cancel of a PENDING order), so no points were ever deducted. "Never confirmed" =
+      // CANCELLED, no dispatch/delivery stamp, and no history row that proves confirmation.
+      // A row proves it when EITHER its toStatus (it moved INTO a reached-confirmed status, e.g.
+      // PENDING→CONFIRMED) OR its fromStatus (it moved OUT of one, e.g. CONFIRMED→CANCELLED) is
+      // in the set — the second clause covers an order whose PENDING→CONFIRMED row is missing.
+      // (The confirm paths have always written PENDING→CONFIRMED in the confirm tx and only
+      // redeem/redeemForOutlet create orders, so this holds for legacy rows too.)
+      // In the WHERE so findMany + count (pagination) agree. Member branch only: the
+      // Gifsy/admin views are unchanged.
+      where.NOT = {
+        status: RedemptionStatus.CANCELLED,
+        dispatchedAt: null,
+        deliveredAt: null,
+        statusHistory: {
+          none: {
+            OR: [
+              { toStatus: { in: REACHED_CONFIRMED_STATUSES } },
+              { fromStatus: { in: REACHED_CONFIRMED_STATUSES } },
+            ],
+          },
+        },
+      };
     }
     if (q.status) where.status = q.status;
 
@@ -702,6 +737,20 @@ export class RewardsService {
       }
     }
 
+    // Order-timeline D5: when were this order's points refunded, if ever? Every refund goes
+    // through wallet.reverse → one CREDIT_REVERSAL row referencing the order (indexed on
+    // referenceType+referenceId), scoped to the order's own wallet. null = no refund recorded.
+    const refund = await this.prisma.walletTransaction.findFirst({
+      where: {
+        transactionType: 'CREDIT_REVERSAL',
+        referenceType: 'REDEMPTION_ORDER',
+        referenceId: order.id,
+        wallet: { partnerId: order.partnerId },
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { createdAt: true },
+    });
+
     // NOTE: `fulfilmentChannel` is an ops-only field and is deliberately NOT surfaced on
     // the member tracking payload (matches the docstring's member-safe promise).
     return {
@@ -717,6 +766,7 @@ export class RewardsService {
         dispatchedAt: order.dispatchedAt,
         deliveredAt: order.deliveredAt,
         cancelledAt: order.cancelledAt,
+        refundedAt: refund?.createdAt ?? null,
         timeline: order.statusHistory,
       },
     };
@@ -1066,10 +1116,7 @@ export class RewardsService {
     // the new OTP can confirm only THIS order. Scope is the OUTLET, not the caller.
     let otpCodeId: string | undefined; // captured for the light D1 OTP delivery-handle write after send
     const order = await this.prisma.$transaction(async (tx) => {
-      await tx.redemptionOrder.updateMany({
-        where: { partnerId: partner.id, status: 'PENDING' },
-        data: { status: 'CANCELLED', cancelledAt: new Date() },
-      });
+      await supersedePendingOrders(tx, partner.id, user.sub, new Date());
       await tx.otpCode.deleteMany({
         where: { userId: otpUserId, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null },
       });
@@ -1159,7 +1206,17 @@ export class RewardsService {
       try {
         await this.prisma.$transaction(async (tx) => {
           await tx.otpCode.deleteMany({ where: { userId: otpUserId, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null } });
-          await tx.redemptionOrder.update({ where: { id: order.id }, data: { status: 'CANCELLED', cancelledAt: new Date() } });
+          // PENDING-guarded: never cancels (or writes history for) an order that a concurrent
+          // confirm already CONFIRMED or a later redeem already superseded.
+          await transitionOrderStatus(tx, {
+            orderId: order.id,
+            guard: { status: RedemptionStatus.PENDING },
+            fromStatus: RedemptionStatus.PENDING,
+            toStatus: RedemptionStatus.CANCELLED,
+            data: { cancelledAt: new Date() },
+            changedById: user.sub,
+            notes: 'OTP could not be sent',
+          });
         });
       } catch (ce) {
         this.logger.error(`[redeemForOutlet] cleanup after OTP-send failure failed for order ${order.id}: ${ce}`);
@@ -1372,9 +1429,15 @@ export class RewardsService {
 
       // Atomic claim: only the tx that flips PENDING→CONFIRMED proceeds → a single
       // order can never be debited twice (double-submit matches 0 rows, aborts).
-      const claim = await tx.redemptionOrder.updateMany({
-        where: { id: order.id, status: 'PENDING' },
-        data: { status: 'CONFIRMED', pointsDeducted: requiredPoints, valuePaise },
+      // The PENDING→CONFIRMED history row is written by the shared transition, in this tx,
+      // only when the claim wins (actor = the confirming user).
+      const claim = await transitionOrderStatus(tx, {
+        orderId: order.id,
+        guard: { status: 'PENDING' },
+        fromStatus: RedemptionStatus.PENDING,
+        toStatus: RedemptionStatus.CONFIRMED,
+        data: { pointsDeducted: requiredPoints, valuePaise },
+        changedById: user.sub,
       });
       if (claim.count === 0) {
         throw new ConflictException('Order is no longer awaiting confirmation');
@@ -1390,16 +1453,6 @@ export class RewardsService {
         { referenceId: order.id, description: `Redemption ${order.orderNumber}` },
         tx,
       );
-
-      // The operating sales user is the recorded actor.
-      await tx.redemptionStatusHistory.create({
-        data: {
-          orderId: order.id,
-          fromStatus: RedemptionStatus.PENDING,
-          toStatus: RedemptionStatus.CONFIRMED,
-          changedById: user.sub,
-        },
-      });
 
       // Guarded stock claim — concurrent confirms of the last unit can't oversell.
       if (order.reward?.stockQuantity != null) {
@@ -1672,10 +1725,7 @@ export class RewardsService {
       // Supersede the ACTIVE partner's abandoned PENDING orders (never debited). The
       // OTP delete/create stay bound to user.sub — the OTP is LOGIN-level (one active
       // REDEMPTION_CONFIRM per login), while the order/wallet are the active outlet's.
-      await tx.redemptionOrder.updateMany({
-        where: { partnerId: activePartnerId, status: 'PENDING' },
-        data: { status: 'CANCELLED', cancelledAt: new Date() },
-      });
+      await supersedePendingOrders(tx, activePartnerId, user.sub, new Date());
       await tx.otpCode.deleteMany({
         where: { userId: user.sub, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null },
       });
@@ -1748,7 +1798,17 @@ export class RewardsService {
       try {
         await this.prisma.$transaction(async (tx) => {
           await tx.otpCode.deleteMany({ where: { userId: user.sub, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null } });
-          await tx.redemptionOrder.update({ where: { id: order.id }, data: { status: 'CANCELLED', cancelledAt: new Date() } });
+          // PENDING-guarded: never cancels (or writes history for) an order that a concurrent
+          // confirm already CONFIRMED or a later redeem already superseded.
+          await transitionOrderStatus(tx, {
+            orderId: order.id,
+            guard: { status: RedemptionStatus.PENDING },
+            fromStatus: RedemptionStatus.PENDING,
+            toStatus: RedemptionStatus.CANCELLED,
+            data: { cancelledAt: new Date() },
+            changedById: user.sub,
+            notes: 'OTP could not be sent',
+          });
         });
       } catch (ce) {
         this.logger.error(`[redeem] cleanup after OTP-send failure failed for order ${order.id}: ${ce}`);
@@ -1973,9 +2033,15 @@ export class RewardsService {
         throw new ForbiddenException('Sales-assisted redemption is not enabled for this outlet type.');
       }
 
-      const claim = await tx.redemptionOrder.updateMany({
-        where: { id: order.id, status: 'PENDING' },
-        data: { status: 'CONFIRMED', pointsDeducted: requiredPoints, valuePaise },
+      // The PENDING→CONFIRMED history row is written by the shared transition, in this tx,
+      // only when the claim wins (actor = the confirming user).
+      const claim = await transitionOrderStatus(tx, {
+        orderId: order.id,
+        guard: { status: 'PENDING' },
+        fromStatus: RedemptionStatus.PENDING,
+        toStatus: RedemptionStatus.CONFIRMED,
+        data: { pointsDeducted: requiredPoints, valuePaise },
+        changedById: user.sub,
       });
       if (claim.count === 0) {
         throw new ConflictException('Order is no longer awaiting confirmation');
@@ -1993,15 +2059,6 @@ export class RewardsService {
         { referenceId: order.id, description: `Redemption ${order.orderNumber}` },
         tx,
       );
-
-      await tx.redemptionStatusHistory.create({
-        data: {
-          orderId: order.id,
-          fromStatus: RedemptionStatus.PENDING,
-          toStatus: RedemptionStatus.CONFIRMED,
-          changedById: user.sub,
-        },
-      });
 
       // H1 — guarded stock claim: only decrement if enough stock remains, so
       // concurrent confirms of the last unit can't oversell. If the claim fails,
@@ -2294,8 +2351,7 @@ export class RewardsService {
     }
 
     const now = new Date();
-    const data: Prisma.RedemptionOrderUpdateInput = {
-      status: toStatus,
+    const data: Omit<Prisma.RedemptionOrderUpdateInput, 'status'> = {
       voucherCode: dto.voucherCode,
       voucherProvider: dto.voucherProvider,
       trackingNumber: dto.trackingNumber,
@@ -2338,19 +2394,14 @@ export class RewardsService {
         }
       }
 
-      const o = await tx.redemptionOrder.update({ where: { id }, data });
-
-      await tx.redemptionStatusHistory.create({
-        data: {
-          orderId: id,
-          fromStatus,
-          toStatus,
-          changedById: user.sub,
-          notes: dto.notes,
-        },
+      return transitionOrderStatus(tx, {
+        orderId: id,
+        fromStatus,
+        toStatus,
+        data,
+        changedById: user.sub,
+        notes: dto.notes,
       });
-
-      return o;
     });
 
     // A voucher code assigned on THIS transition (null → set) — computed before the milestone notify
@@ -3316,13 +3367,15 @@ export class RewardsService {
 
     const now = new Date();
     await this.prisma.$transaction(async (tx) => {
-      const claim = await tx.redemptionOrder.updateMany({
-        where: {
-          id: order.id,
-          status: { in: [RedemptionStatus.CONFIRMED, RedemptionStatus.PROCESSING] },
-        },
+      // Shared transition: claim + the (fromStatus null) DELIVERED history row, only when won.
+      await transitionOrderStatus(tx, {
+        orderId: order.id,
+        guard: { status: { in: [RedemptionStatus.CONFIRMED, RedemptionStatus.PROCESSING] } },
+        fromStatus: null,
+        toStatus: RedemptionStatus.DELIVERED,
+        changedById: actorId ?? null,
+        notes: 'Hubble voucher issued',
         data: {
-          status: RedemptionStatus.DELIVERED,
           fulfilmentChannel: GiftFulfilmentChannel.DIGITAL_VOUCHER,
           voucherCode,
           voucherProvider: 'Hubble',
@@ -3335,17 +3388,7 @@ export class RewardsService {
             this.buildHubbleVoucherMetadata(voucher, body),
           ),
         },
-      });
-      if (claim.count === 0) return; // already resolved by a concurrent apply — no-op
-      await tx.redemptionStatusHistory.create({
-        data: {
-          orderId: order.id,
-          fromStatus: null,
-          toStatus: RedemptionStatus.DELIVERED,
-          changedById: actorId ?? null,
-          notes: 'Hubble voucher issued',
-        },
-      });
+      }); // count 0 = already resolved by a concurrent apply — no-op (no history row)
     });
     this.logger.log(`[hubble] order ${order.orderNumber} voucher issued + marked DELIVERED`);
   }
@@ -3357,10 +3400,14 @@ export class RewardsService {
     actorId?: string,
   ): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
-      const claim = await tx.redemptionOrder.updateMany({
-        where: { id: order.id, status: RedemptionStatus.CONFIRMED },
+      await transitionOrderStatus(tx, {
+        orderId: order.id,
+        guard: { status: RedemptionStatus.CONFIRMED },
+        fromStatus: RedemptionStatus.CONFIRMED,
+        toStatus: RedemptionStatus.PROCESSING,
+        changedById: actorId ?? null,
+        notes: 'Hubble voucher processing',
         data: {
-          status: RedemptionStatus.PROCESSING,
           fulfilmentChannel: GiftFulfilmentChannel.DIGITAL_VOUCHER,
           supplierOrderRef: body.id ?? body.orderId ?? null,
           voucherProvider: 'Hubble',
@@ -3368,16 +3415,6 @@ export class RewardsService {
             hubbleStatus: 'PROCESSING',
             hubbleOrderId: body.id ?? body.orderId ?? null,
           }),
-        },
-      });
-      if (claim.count === 0) return;
-      await tx.redemptionStatusHistory.create({
-        data: {
-          orderId: order.id,
-          fromStatus: RedemptionStatus.CONFIRMED,
-          toStatus: RedemptionStatus.PROCESSING,
-          changedById: actorId ?? null,
-          notes: 'Hubble voucher processing',
         },
       });
     });
@@ -3423,9 +3460,12 @@ export class RewardsService {
         );
       }
       // Flip to FAILED (from any non-terminal state) + zero the value + record the reason.
-      await tx.redemptionOrder.updateMany({
-        where: {
-          id: order.id,
+      // Shared transition: the FAILED history row is now written only when the flip wins
+      // (previously unconditional → a repeat failure on an already-terminal order added a
+      // stray FAILED row, even on a DELIVERED voucher).
+      await transitionOrderStatus(tx, {
+        orderId: order.id,
+        guard: {
           status: {
             in: [
               RedemptionStatus.CONFIRMED,
@@ -3434,21 +3474,15 @@ export class RewardsService {
             ],
           },
         },
+        fromStatus: null,
+        toStatus: RedemptionStatus.FAILED,
+        changedById: actorId ?? null,
+        notes: `Hubble failed — points refunded: ${reason}`.slice(0, 500),
         data: {
-          status: RedemptionStatus.FAILED,
           valuePaise: 0n,
           voucherProvider: 'Hubble',
           cancelReason: reason.slice(0, 500),
           notes: `Hubble issuance failed: ${reason}`.slice(0, 500),
-        },
-      });
-      await tx.redemptionStatusHistory.create({
-        data: {
-          orderId: order.id,
-          fromStatus: null,
-          toStatus: RedemptionStatus.FAILED,
-          changedById: actorId ?? null,
-          notes: `Hubble failed — points refunded: ${reason}`.slice(0, 500),
         },
       });
     });

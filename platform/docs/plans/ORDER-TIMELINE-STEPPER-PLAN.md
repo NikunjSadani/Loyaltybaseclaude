@@ -6,11 +6,24 @@
 > approved scope, but **re-confirm D1 with the owner before building the backend tasks**. No schema change and no
 > migration under any option.
 >
-> **Status:** PLAN ONLY. Nothing built. Written 2026-11-06 against develop `35e6ad8c`.
+> **Status:** BUILT 2026-11-06 (not pushed) — `2bf64006` shared transition fn · `7506cd22` cash UTR · `2eeffbe5` all other status writers · `cf9a0c02` D4 hide never-confirmed + D5 refundedAt · `5fca4b36` step builder · `841e4fac` OrderStepper · `0a8bee73` page wiring · `96d0ff8a` /track dates. No migration, forward-only history, legacy gaps remain by design. The "Not confirmed" step (old D4=A) was not built: those orders are now hidden by the backend. Written 2026-11-06 against develop `35e6ad8c`.
 
 ---
 
-## OPEN DECISIONS for the owner (answer before Task 1)
+## ✅ OWNER DECISIONS (2026-11-06) — these OVERRIDE the "recommended" answers below
+
+| # | Owner's choice | What it means for the build |
+|---|---|---|
+| **D1** | **Long-term fix only** (a stronger C) | Build the **backend first**. ONE shared status-transition function in `api/src/rewards/` updates `RedemptionOrder.status` **and** inserts the `RedemptionStatusHistory` row in the **same transaction** (takes a Prisma tx client). **Every** status-changing path is routed through it — incl. the ones that write no history today: cash UTR `DELIVERED`/`FAILED` (`payouts.service.ts`), auto-supersede of abandoned `PENDING` in `redeem(` **and** `redeemForOutlet(`, both OTP-send-failure cleanups, Hubble, the confirm paths, the admin + vendor transitions. No migration, no backfill. Money-path behaviour other than the added history row stays byte-identical (proved by tests). Then the stepper loads real dates from the existing `GET /v1/rewards/orders/:id/track` when an order is expanded. |
+| **D2** | **B** (plan recommendation) | Compact progress bar always visible on each card + dated vertical stepper on "View timeline". |
+| **D3** | **A** — per order type (§3) | Physical / voucher / cash label sets as in §3. |
+| **D4** | **B — HIDE never-confirmed orders** | `CANCELLED` orders that never reached `CONFIRMED` (no points deducted) are removed from the partner's My Orders **in the backend list endpoint** (`rewards.service` `listOrders`, member branch only) so pagination + counts stay correct. "Never confirmed" = `CANCELLED` **and** no history row with `toStatus ∈ {CONFIRMED, PROCESSING, DISPATCHED, DELIVERED, RETURNED, FAILED}` **and** `dispatchedAt`/`deliveredAt` both null (there are no confirmed/processed timestamp columns; the confirm paths have written the `CONFIRMED` history row in the same tx since day one, and only `redeem(`/`redeemForOutlet(` create orders). Admin/Gifsy order views are unchanged. The frontend's "Not confirmed" branch is therefore never reached from the list and is not built. |
+| **D5** | **Refund line only when a refund was recorded** | Every refund goes through `wallet.reverse` → a `WalletTransaction` `CREDIT_REVERSAL` with `referenceType='REDEMPTION_ORDER'`, `referenceId=<order id>` (indexed). `/track` returns `refundedAt` (that row's `createdAt`, or `null`) and the stepper shows "Points refunded to your wallet" **only** when it is set. The compact bar (no `/track` fetch) never shows refund copy. |
+
+The remaining sections below are the original plan; where they say "recommended … D1=B / D4=A / D5=A", read the
+table above instead. Task 5 (backend) now runs **first**, generalised to the shared function.
+
+## OPEN DECISIONS for the owner (answered above — kept for the record)
 
 **D1 — Where do the step dates come from?** *(this is the main one)*
 The backend already keeps a per-transition audit table (`RedemptionStatusHistory`), and a member-safe endpoint that
