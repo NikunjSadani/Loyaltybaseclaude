@@ -8,7 +8,12 @@
 > but with a per-tenant flag defaulting OFF, Deoleo behaves exactly as it does today. Precedent: `catalogueMrpSlash` and
 > `captureBankAtRedemption` both shipped as "PLATFORM-WIDE, Bajaj-flagged, Deoleo byte-identical".
 >
-> **Status:** APPROVED BY THE OWNER (2026-11-06), PLATFORM-WIDE, building. See **OWNER DECISIONS (taken)** at the
+> **Status:** BUILT on a worktree branch (2026-11-06), NOT pushed / NOT on staging yet. Owner-approved PLATFORM-WIDE.
+> Shipped: `api/src/partner/delivery-defaults.helper.ts` (pure selector), `deliveryDefaults` on `GET /partner/me`
+> (read from the existing primary-outlet query, no extra query), `usePartnerIdentity().deliveryDefaults`,
+> `platform/src/app/partner/rewards/address-prefill.ts` (`applyAddressPrefill`), and the redeem-sheet wiring (the shown
+> address is DERIVED from what the partner typed + the outlet defaults, so no effect and no overwrite).
+> Pending: independent review, push to `develop`, staging runtime-verify (steps below, minus the flag / last-order steps). See **OWNER DECISIONS (taken)** at the
 > bottom, which **override** the task text wherever they differ: always ON for every tenant incl. Deoleo (no flag,
 > Task 3 dropped), outlet address ONLY (no last-order source, no `redemptionOrder` query), Task 0 is not part of
 > the build (the feature degrades gracefully when nothing is on file).
@@ -391,6 +396,10 @@ That is a comment-only edit in `api/prisma/schema.prisma`, with **no** migration
 - **Hard rule:** the pre-fill NEVER overwrites anything the partner has typed (or deliberately cleared), including when
   `/partner/me` resolves after they started typing.
 - Out of scope (unchanged): the sales-assisted physical-redeem address gap (`platform/src/app/sales/catalogue`).
+- **As built:** Task 0, Task 3 (flag) and every last-order element were skipped per the above. `BAJAJ-CUSTOMIZATIONS.md`
+  is untouched (no flag) and the `addressLine1` schema comment is untouched (Task 0 not run). Staging verify = steps 2, 3,
+  5 and 7 of "How to verify on staging", plus: a Deoleo staging partner now ALSO sees its outlet address pre-filled
+  (always-on), and `/api/partner/me` carries `deliveryDefaults` for it.
 
 ## Original open decisions (for the record; superseded by the section above)
 
