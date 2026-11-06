@@ -638,6 +638,7 @@ describe('WalletService', () => {
         openingBalance: 0,
         closingBalance: 0,
         currentBalance: 0,
+        outletCode: '',
         rows: [],
       });
     });
@@ -649,6 +650,7 @@ describe('WalletService', () => {
         openingBalance: 0,
         closingBalance: 0,
         currentBalance: 0,
+        outletCode: '',
         rows: [],
       });
       expect(mockPrisma.walletTransaction.findMany).not.toHaveBeenCalled();
@@ -676,6 +678,7 @@ describe('WalletService', () => {
       expect(res.openingBalance).toBe(0);
       expect(res.closingBalance).toBe(66); // 24 × 4 − 30
       expect(res.currentBalance).toBe(66);
+      expect(res.outletCode).toBe('OUT-1'); // the outlet whose field names were resolved
       expect(res.rows[0]).toEqual({
         id: 't00',
         date: '2026-01-01T06:00:00.000Z',

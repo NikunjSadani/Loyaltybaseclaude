@@ -32,6 +32,7 @@ vi.mock('@/lib/partner-identity', () => ({
 }));
 
 import WalletPage from '../page';
+import { statementPayload } from './statement-fixture';
 
 const BALANCE = {
   earnedPoints: 4250, lockedPoints: 0, redeemablePoints: 4250, redeemedPoints: 0,
@@ -50,8 +51,8 @@ const PAYOUTS = [
 function stubFetch() {
   vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
     const u = url as string;
-    if (u.includes('/api/wallet/transactions'))
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { transactions: TXNS } }) });
+    if (u.includes('/api/wallet/statement'))
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(statementPayload(TXNS)) });
     if (u.includes('/api/partner/payouts'))
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { payouts: PAYOUTS } }) });
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: BALANCE }) });

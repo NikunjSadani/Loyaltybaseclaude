@@ -3334,6 +3334,7 @@ describe('KycService', () => {
         expect(all.openingBalance).toBe(0);
         expect(all.closingBalance).toBe(30);
         expect(all.currentBalance).toBe(30);
+        expect(all.outletCode).toBe('OUT-1');
         expect(all.rows.map((r) => r.id)).toEqual(['t0000', 't0001', 't0002']);
         expect(all.rows[0]).toMatchObject({ description: 'Points earned', narration: null, balanceBefore: 0, balanceAfter: 10 });
 
@@ -3349,7 +3350,7 @@ describe('KycService', () => {
           partner: { clientId: 'deoleo', businessName: 'B', phone: 'p', outlets: [], wallets: [] },
         });
         await expect(service.ledgerStatement(sss, 's1', {})).resolves.toEqual({
-          openingBalance: 0, closingBalance: 0, currentBalance: 0, rows: [],
+          openingBalance: 0, closingBalance: 0, currentBalance: 0, outletCode: '', rows: [],
         });
       });
 

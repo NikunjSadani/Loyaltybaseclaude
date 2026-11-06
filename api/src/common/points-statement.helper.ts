@@ -239,6 +239,7 @@ export interface StatementApiResponse {
   openingBalance: number;
   closingBalance: number;
   currentBalance: number; // live Wallet.redeemablePoints (what the balance card shows)
+  outletCode: string; // the outlet the statement (and its credit field names) was resolved for
   rows: StatementApiRow[]; // OLDEST first
 }
 
@@ -246,6 +247,7 @@ export const EMPTY_STATEMENT: StatementApiResponse = Object.freeze({
   openingBalance: 0,
   closingBalance: 0,
   currentBalance: 0,
+  outletCode: '',
   rows: [],
 }) as StatementApiResponse;
 
@@ -288,6 +290,7 @@ export async function buildStatementResponse(
     openingBalance: stmt.openingBalance,
     closingBalance: stmt.closingBalance,
     currentBalance: wallet.redeemablePoints,
+    outletCode: args.outletCode,
     rows: stmt.rows.map((r) => ({
       id: r.id,
       date: r.createdAt.toISOString(),

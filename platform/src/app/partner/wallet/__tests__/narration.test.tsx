@@ -34,6 +34,7 @@ vi.mock('@/lib/partner-identity', () => ({
 }));
 
 import WalletPage from '../page';
+import { statementPayload } from './statement-fixture';
 
 // Real API shapes — the page renders narration only from live data. Stub the live
 // endpoints with a PAID payout (payout row) and an earned transaction (points row)
@@ -59,8 +60,8 @@ const BALANCE = {
 function stubFetch() {
   vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
     const u = url as string;
-    if (u.includes('/api/wallet/transactions'))
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { transactions: [TX_WITH_NARRATION] } }) });
+    if (u.includes('/api/wallet/statement'))
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(statementPayload([TX_WITH_NARRATION])) });
     if (u.includes('/api/partner/payouts'))
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { payouts: [PAYOUT_WITH_NARRATION] } }) });
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: BALANCE }) });

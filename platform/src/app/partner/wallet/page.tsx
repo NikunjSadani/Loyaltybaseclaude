@@ -1,10 +1,10 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { Coins, Calendar, X, Download } from 'lucide-react';
-import * as XLSX from 'xlsx';
-import { jsonToSheetSafe } from '@/lib/xlsx-safe';
+import { Coins, Calendar, X } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
+import { StatementDownloadButton } from '@/components/wallet/statement-download-button';
+import { buildStatementDoc, type StatementApiResponse } from '@/lib/wallet-statement/statement-model';
 import { BalanceCard } from '@/components/wallet/balance-card';
 import { TransactionItem } from '@/components/wallet/transaction-item';
 import { PayoutStatementRow } from '@/components/wallet/payout-statement-row';
@@ -12,7 +12,6 @@ import { TransactionType, WalletBucket, type WalletBalance, type WalletTransacti
 import type { PayoutLedgerEntry } from '@/types';
 import { usePartnerIdentity } from '@/lib/partner-identity';
 import { authHeader } from '@/lib/api-client';
-import { formatISTDate } from '@/lib/ist-date';
 
 
 /* ─── API types & mappers (wallet wiring) ────────────────────────────────────── */
@@ -30,14 +29,15 @@ interface ApiWalletBalance {
   conversionRate:   number;
 }
 
-/** Exact shape returned by each item in GET /api/wallet/transactions */
+/** A row of GET /api/wallet/statement (the FULL, unpaginated statement — it replaced the
+ *  paginated /api/wallet/transactions, whose default page was only the newest 20 rows). */
 interface ApiWalletTransaction {
   id:              string;
   transactionType: string;   // e.g. 'CREDIT_POINTS_EARNED', 'DEBIT_REDEMPTION'
   description:     string;
-  points:          number;   // signed or unsigned — always positive for CREDIT, positive for DEBIT
+  points:          number;   // SIGNED: positive credit, negative debit/expiry
   date:            string;   // ISO string
-  balanceType:     string;   // 'EARNED' | 'REDEEMED' | 'EXPIRED' | 'LOCKED'
+  balanceType?:    string;   // not on statement rows (always the redeemable balance)
   balanceAfter:    number;
   referenceType:   string | null;
   referenceId:     string | null;
@@ -88,7 +88,7 @@ function mapApiTransaction(t: ApiWalletTransaction): WalletTransaction {
     walletId:       'w1',
     userId:         'u1',
     type:           mapTransactionType(t.transactionType),
-    bucket:         mapBucket(t.balanceType),
+    bucket:         mapBucket(t.balanceType ?? ''),
     amount:         t.points,
     balanceAfter:   t.balanceAfter,
     description:    header,
@@ -132,38 +132,6 @@ function isMainEntry(tx: WalletTransaction) { return tx.type===TransactionType.C
 type PointsRow = { kind: 'points'; date: Date; label?: string; tx: WalletTransaction };
 type PayoutRow = { kind: 'payout'; date: Date; label?: string; entry: PayoutLedgerEntry };
 type LedgerRow = PointsRow | PayoutRow;
-
-function downloadCombinedStatement(rows: LedgerRow[], period: string) {
-  const TYPE_LABEL: Record<string,string> = { CREDIT:'Credited', DEBIT:'Redeemed', EXPIRE:'Expired', LOCK:'On Hold', UNLOCK:'Released' };
-  const sheetRows = rows.map((r) => {
-    if (r.kind === 'points') {
-      const tx = r.tx;
-      return {
-        Date: formatISTDate(r.date),
-        Description: tx.description,
-        Type: TYPE_LABEL[tx.type] ?? tx.type,
-        Points: tx.type === TransactionType.CREDIT ? `+${tx.amount}` : `-${tx.amount}`,
-        'Amount (₹)': '',
-        UTR: '',
-      };
-    }
-    const p = r.entry;
-    return {
-      Date: formatISTDate(r.date),
-      Description: `${p.kpiLabel} · ${monthLabel(p.period)}`,
-      Type: p.status === 'PAID' ? 'Payout' : 'Payout (Pending)',
-      Points: '',
-      // payoutAmountPaise is integer paise; divide by 100 for the Excel sheet
-      'Amount (₹)': p.payoutAmountPaise / 100,
-      UTR: p.utr ?? '—',
-    };
-  });
-  const ws = jsonToSheetSafe(sheetRows);
-  ws['!cols'] = [{ wch: 16 }, { wch: 42 }, { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 20 }];
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Wallet Statement');
-  XLSX.writeFile(wb, `wallet-statement-${period}.xlsx`);
-}
 
 /** Current calendar month as a `YYYY-MM` month-input value, computed from `new Date()`.
  *  Used as the FIRST-paint default (before live data arrives) and as the empty-history
@@ -220,6 +188,7 @@ export default function WalletPage() {
   const [balance,      setBalance]      = useState<WalletBalance | null>(null);
   const [transactions, setTransactions] = useState<WalletTransaction[]>([]);
   const [payouts,      setPayouts]      = useState<PayoutLedgerEntry[]>([]);
+  const [outletCode,   setOutletCode]   = useState('');
   const [loading,      setLoading]      = useState(true);
 
   /* Earn / Burn filter (points rows only) */
@@ -251,7 +220,8 @@ export default function WalletPage() {
     // shows the full history (points AND payouts), independent of which cards are shown.
     Promise.all([
       fetch('/api/wallet', { headers: { ...authHeader() } }).then(r => r.json()).catch(() => null),
-      fetch('/api/wallet/transactions', { headers: { ...authHeader() } }).then(r => r.json()).catch(() => null),
+      // The FULL statement (no pagination) — the on-screen list, date bounds and download all agree.
+      fetch('/api/wallet/statement', { headers: { ...authHeader() } }).then(r => r.json()).catch(() => null),
       fetch('/api/partner/payouts', { headers: { ...authHeader() } }).then(r => r.json()).catch(() => null),
     ]).then(([walletJson, txJson, payoutJson]) => {
       // Balance — API returns the flat {success,data} envelope; data is the
@@ -261,13 +231,17 @@ export default function WalletPage() {
         setBalance(mapApiBalance(walletJson.data as ApiWalletBalance));
       }
 
-      // Transactions — straight from the passbook endpoint.
+      // Transactions — the statement is OLDEST first (balance-chain order); the screen shows
+      // newest first, so reverse it (keeps same-timestamp rows in correct reverse-chain order).
       const apiTxs =
-        txJson?.success && Array.isArray(txJson.data?.transactions)
-          ? (txJson.data.transactions as ApiWalletTransaction[]).map(mapApiTransaction)
+        txJson?.success && Array.isArray(txJson.data?.rows)
+          ? [...(txJson.data.rows as ApiWalletTransaction[])].reverse().map(mapApiTransaction)
           : [];
       if (apiTxs.length > 0) {
         setTransactions(apiTxs);
+      }
+      if (txJson?.success && typeof txJson.data?.outletCode === 'string') {
+        setOutletCode(txJson.data.outletCode);
       }
 
       // Payouts — INR credit-payout ledger for the combined statement + payout card.
@@ -337,12 +311,16 @@ export default function WalletPage() {
   const pickerMax = maxMonth > currentMonth ? maxMonth : currentMonth;
   const pickerMin = minMonth < currentMonth ? minMonth : currentMonth;
 
-  /* Period- + earn/burn-filtered rows (before the KPI filter) */
-  const periodRows = useMemo(() => {
+  /* Rows in the selected period, BEFORE the earn/burn + KPI filters (the download covers all of them). */
+  const rangeRows = useMemo(() => {
     const fromKey = monthInputToKey(activeFrom);
     const toKey   = monthInputToKey(activeTo);
-    return allRows
-      .filter((r) => { const k = toMonthKey(r.date); return k >= fromKey && k <= toKey; })
+    return allRows.filter((r) => { const k = toMonthKey(r.date); return k >= fromKey && k <= toKey; });
+  }, [allRows, activeFrom, activeTo]);
+
+  /* Period- + earn/burn-filtered rows (before the KPI filter) */
+  const periodRows = useMemo(() => {
+    return rangeRows
       .filter((r) => {
         // Earn/Burn applies to points rows; payout rows are inbound value → treated as "earn".
         if (earnBurnFilter === 'all') return true;
@@ -350,7 +328,7 @@ export default function WalletPage() {
         if (earnBurnFilter === 'earn') return r.tx.type === TransactionType.CREDIT;
         return r.tx.type === TransactionType.DEBIT || r.tx.type === TransactionType.EXPIRE;
       });
-  }, [allRows, activeFrom, activeTo, earnBurnFilter]);
+  }, [rangeRows, earnBurnFilter]);
 
   /* KPI options — derived from the period rows; Visibility only for RETAILER/MT */
   const kpiOptions = useMemo(() => {
@@ -369,6 +347,22 @@ export default function WalletPage() {
   }, [periodRows, kpiFilter]);
 
   const periodDisp = rangeLabel(activeFrom, activeTo);
+
+  /* Download (owner D4): the FULL statement for the selected date range — every transaction type,
+     ignoring the on-screen Earn/Burn + KPI filters — with the opening/closing balance, so it ties
+     out. Fetched fresh for exactly [activeFrom..activeTo] (IST months) at click time. */
+  const loadStatementDoc = async () => {
+    const res = await fetch(`/api/wallet/statement?from=${activeFrom}&to=${activeTo}`, { headers: { ...authHeader() } });
+    const json = await res.json();
+    if (!res.ok || !json?.success || !Array.isArray(json.data?.rows)) throw new Error('statement unavailable');
+    const api = json.data as StatementApiResponse & { outletCode?: string };
+    return buildStatementDoc(api, payouts, {
+      outletName: identity.outletName || identity.businessName,
+      outletCode: api.outletCode ?? outletCode,
+      from: activeFrom,
+      to: activeTo,
+    });
+  };
 
   return (
     <div className="space-y-5 fade-in">
@@ -390,24 +384,19 @@ export default function WalletPage() {
           {/* ── Combined statement — ALWAYS the full history (points + payouts) ── */}
           <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden">
             <div className="px-4 pt-3 pb-2 border-b border-gray-50 space-y-2">
-              {/* Row 1: label + Excel + date picker */}
+              {/* Row 1: label + Download (Excel/PDF) + date picker */}
               <div data-testid="statement-controls-row" className="flex items-center justify-between">
                 <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide">
                   Statement · {periodDisp}
                 </p>
 
               <div className="flex items-center gap-2">
-                {/* Excel download — always present; disabled when nothing to export */}
-                <button
-                  data-testid="excel-btn"
-                  onClick={() => { if (displayedRows.length > 0) downloadCombinedStatement(displayedRows, `${activeFrom}_${activeTo}`); }}
-                  disabled={displayedRows.length === 0}
-                  title="Download as Excel"
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border border-gray-200 bg-white text-gray-600 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-gray-200 disabled:hover:text-gray-600"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  Excel
-                </button>
+                {/* Download → Excel / PDF (full statement for the period); disabled when the period is empty */}
+                <StatementDownloadButton
+                  disabled={rangeRows.length === 0}
+                  loadDoc={loadStatementDoc}
+                  fileBase={`wallet-statement-${outletCode || 'outlet'}-${activeFrom}_${activeTo}`}
+                />
 
                 <div className="relative">
                   <button
