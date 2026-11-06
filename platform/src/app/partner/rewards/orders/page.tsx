@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Package, CheckCircle, Truck, Clock, XCircle, RotateCcw, Copy, Check, ExternalLink, Ticket } from 'lucide-react';
 import { Badge, type BadgeVariant } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
@@ -8,7 +8,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { EmptyState } from '@/components/ui/empty-state';
 import { formatDate, formatPoints } from '@/lib/utils';
 import { authHeader } from '@/lib/api-client';
-import { buildOrderSteps } from '@/lib/order-timeline';
+import { buildOrderSteps, type OrderTracking } from '@/lib/order-timeline';
 import { OrderStepper } from '@/components/partner/order-stepper';
 
 /* ─── Live order shape (GET /api/rewards/orders) ──────────────────────────────
@@ -155,6 +155,30 @@ export default function OrdersPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Per-order /track result (history + refundedAt) for the DETAIL stepper only — fetched once,
+  // on first expand. The compact bar stays status-only so the list never fans out N requests.
+  const [trackingById, setTrackingById] = useState<Record<string, OrderTracking>>({});
+  const requested = useRef<Set<string>>(new Set());
+
+  const loadTracking = useCallback((id: string) => {
+    if (requested.current.has(id)) return;
+    requested.current.add(id);
+    const store = (t: OrderTracking) => setTrackingById(prev => ({ ...prev, [id]: t }));
+    fetch(`/api/rewards/orders/${encodeURIComponent(id)}/track`, { headers: { ...authHeader() } })
+      .then(r => r.json())
+      .then((json: { success?: boolean; data?: { tracking?: { timeline?: OrderTracking['timeline']; refundedAt?: string | null } } }) => {
+        const t = json?.success ? json.data?.tracking : undefined;
+        // A failed/malformed /track keeps the status-only stepper (stored empty → not refetched).
+        store(Array.isArray(t?.timeline) ? { timeline: t.timeline, refundedAt: t.refundedAt ?? null } : { timeline: [] });
+      })
+      .catch(() => store({ timeline: [] }));
+  }, []);
+
+  const toggle = (id: string) => {
+    if (expanded === id) { setExpanded(null); return; }
+    setExpanded(id);
+    loadTracking(id);
+  };
 
   const load = useCallback(() => {
     setLoading(true);
@@ -282,14 +306,16 @@ export default function OrdersPage() {
 
                   {/* Timeline toggle */}
                   <button
-                    onClick={() => setExpanded(isExpanded ? null : order.id)}
+                    onClick={() => toggle(order.id)}
                     className="mt-3 w-full text-xs text-[var(--brand-primary)] font-medium text-left hover:underline"
                   >
                     {isExpanded ? 'Hide timeline' : 'View timeline'}
                   </button>
 
                   {/* Timeline — the dated vertical stepper */}
-                  {isExpanded && <OrderStepper variant="detail" steps={buildOrderSteps(order)} />}
+                  {isExpanded && (
+                    <OrderStepper variant="detail" steps={buildOrderSteps(order, trackingById[order.id])} />
+                  )}
                 </CardContent>
               </Card>
             );
