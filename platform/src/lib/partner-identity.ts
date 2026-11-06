@@ -39,6 +39,26 @@ export interface GroupParent {
   ownerName: string;
 }
 
+/**
+ * The ACTIVE outlet's address on file, used ONLY to pre-fill the physical-gift delivery form
+ * (GET /partner/me `deliveryDefaults`; PLATFORM-WIDE, outlet address only). Any field may be
+ * null when it isn't on file. Same shape as the backend helper (not imported from api/).
+ */
+export interface DeliveryDefaults {
+  line1: string | null;
+  city: string | null;
+  state: string | null;
+  pincode: string | null;
+}
+
+function isDeliveryDefaults(v: unknown): v is DeliveryDefaults {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+  const o = v as Record<string, unknown>;
+  return (['line1', 'city', 'state', 'pincode'] as const).every(
+    (k) => o[k] === null || typeof o[k] === 'string',
+  );
+}
+
 export interface PartnerIdentity {
   /** firm/business name for the shell header (channelPartner.businessName). */
   businessName: string;
@@ -98,6 +118,11 @@ export interface PartnerIdentity {
    */
   activeSelectorInvalid: boolean;
   /**
+   * The ACTIVE outlet's delivery-address pre-fill for the gift redeem form. Null while loading,
+   * when nothing is on file, or when the response lacks/malforms it (older backend).
+   */
+  deliveryDefaults: DeliveryDefaults | null;
+  /**
    * True until GET /partner/me settles (resolve OR error). Consumers that GATE on the
    * presence signals (e.g. the rewards page) must wait for this to be false before
    * deciding "no points" — otherwise the false-while-loading defaults would flash the
@@ -134,6 +159,7 @@ export function usePartnerIdentity(): PartnerIdentity {
     groupOverviewAvailable: false,
     groupParent: null,
     activeSelectorInvalid: false,
+    deliveryDefaults: null,
     loading: true,
   });
 
@@ -177,6 +203,7 @@ export function usePartnerIdentity(): PartnerIdentity {
           groupOverviewAvailable: d?.groupOverviewAvailable === true,
           groupParent: d?.groupParent ?? null,
           activeSelectorInvalid: d?.activeSelectorInvalid === true,
+          deliveryDefaults: isDeliveryDefaults(d?.deliveryDefaults) ? d.deliveryDefaults : null,
           loading: false,
         }));
       })

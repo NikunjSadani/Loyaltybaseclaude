@@ -56,6 +56,7 @@ function makeIdentity(over: Partial<PartnerIdentity>): PartnerIdentity {
     groupOverviewAvailable: false,
     groupParent: null,
     activeSelectorInvalid: false,
+    deliveryDefaults: null,
     loading: false,
     ...over,
   };
