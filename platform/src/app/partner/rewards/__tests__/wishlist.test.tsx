@@ -7,8 +7,10 @@
  * WL2: toggling an item from the detail sheet calls POST (add) then DELETE (remove),
  *      applying the optimistic flip immediately.
  * WL2b: a REJECTED write reverts the optimistic flip and surfaces a toast.
- * WL3: the "♥ Wishlist" filter chip shows ONLY wishlisted items.
- * WL4: the header "Wishlist (n)" pill shows the correct count and activating it filters.
+ * WL3: there is NO Wishlist chip in the filter row — the header pill is the only Wishlist control.
+ * WL4: the header "Wishlist (n)" pill shows the correct count; the first tap filters to wishlisted
+ *      items, switches to the Physical tab and reads aria-pressed="true".
+ * WL5: a second tap on the header pill turns the filter OFF (all items back, aria-pressed="false").
  *
  * Auth/header pattern: the page calls /api/rewards/* via the shared `api` helper (cookie
  * auth, no JS-readable token), exactly as the existing catalogue/redeem calls do — so the
@@ -169,30 +171,50 @@ describe('WL — persistent partner wishlist', () => {
     expect(screen.queryByRole('button', { name: /remove from wishlist/i })).not.toBeInTheDocument();
   });
 
-  it('WL3: the ♥ Wishlist filter chip shows only wishlisted items', async () => {
-    stubFetch(['ph1']); // only ph1 wishlisted
+  it('WL3: the filter row has no Wishlist chip — only the header pill carries the Wishlist name', async () => {
+    stubFetch(['ph1']);
     render(<RewardsPage />);
-    const user = userEvent.setup();
-    // Both items visible initially.
     expect(await screen.findByText('Alpha Headphones')).toBeInTheDocument();
-    expect(screen.getByText('Beta Speaker')).toBeInTheDocument();
-    // The filter chip (exact name "Wishlist") is distinct from the header pill ("Wishlist, n items").
-    await user.click(screen.getByRole('button', { name: 'Wishlist' }));
-    // Now only the wishlisted item remains.
-    expect(screen.getByText('Alpha Headphones')).toBeInTheDocument();
-    expect(screen.queryByText('Beta Speaker')).not.toBeInTheDocument();
+    // Exactly one control whose accessible name starts with "Wishlist": the header pill.
+    const wishlistButtons = screen.getAllByRole('button', { name: /^wishlist/i });
+    expect(wishlistButtons).toHaveLength(1);
+    expect(wishlistButtons[0]).toHaveAccessibleName(/wishlist, 1 item/i);
   });
 
-  it('WL4: the header Wishlist (n) pill shows the count and activating it filters the list', async () => {
+  it('WL4: the header Wishlist (n) pill shows the count; first tap filters, switches to Physical and is pressed', async () => {
     stubFetch(['ph1']); // only ph1 wishlisted → count 1
     render(<RewardsPage />);
     const user = userEvent.setup();
     expect(await screen.findByText('Beta Speaker')).toBeInTheDocument();
-    // The pill carries the seeded count.
-    const pill = await screen.findByRole('button', { name: /wishlist, 1 item/i });
+    // Start from the Vouchers tab so we can see the pill switch back to Physical.
+    await user.click(screen.getByRole('button', { name: /vouchers/i }));
+    expect(screen.queryByText('Beta Speaker')).not.toBeInTheDocument();
+
+    // The pill carries the seeded count and starts un-pressed.
+    const pill = screen.getByRole('button', { name: /wishlist, 1 item/i });
+    expect(pill).toHaveAttribute('aria-pressed', 'false');
     await user.click(pill);
-    // Activating the pill filters to wishlisted-only (catalogue tab).
+
+    // Activating the pill filters to wishlisted-only on the Physical (catalogue) tab.
+    expect(pill).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByPlaceholderText('Search rewards…')).toBeInTheDocument();
     expect(screen.getByText('Alpha Headphones')).toBeInTheDocument();
     expect(screen.queryByText('Beta Speaker')).not.toBeInTheDocument();
+  });
+
+  it('WL5: a second tap on the header pill turns the filter off and brings every item back', async () => {
+    stubFetch(['ph1']);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    expect(await screen.findByText('Beta Speaker')).toBeInTheDocument();
+    const pill = await screen.findByRole('button', { name: /wishlist, 1 item/i });
+
+    await user.click(pill);
+    expect(screen.queryByText('Beta Speaker')).not.toBeInTheDocument();
+
+    await user.click(pill);
+    expect(pill).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByText('Alpha Headphones')).toBeInTheDocument();
+    expect(screen.getByText('Beta Speaker')).toBeInTheDocument();
   });
 });

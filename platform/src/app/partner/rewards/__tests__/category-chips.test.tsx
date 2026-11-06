@@ -80,13 +80,12 @@ describe('CHIP — dynamic category chip row on the partner rewards catalogue', 
     render(<RewardsPage />);
 
     // The 'All' chip is unique to the category pill row — anchor on it, then read the
-    // ordered chip labels from its container (dropping the non-category filter chips:
-    // "Within my points" and the legacy ♥ Wishlist chip).
+    // ordered chip labels from its container (dropping the leading "Within my points" filter chip).
     const allChip = await screen.findByRole('button', { name: 'All' });
     const pillRow = allChip.parentElement as HTMLElement;
     const chipLabels = Array.from(pillRow.querySelectorAll('button'))
       .map(b => b.textContent?.trim())
-      .filter((t): t is string => !!t && t !== 'Wishlist' && t !== 'Within my points');
+      .filter((t): t is string => !!t && t !== 'Within my points');
 
     expect(chipLabels).toEqual(['All', 'Electronics', 'Luggage']);
   });
@@ -107,7 +106,7 @@ describe('CHIP — dynamic category chip row on the partner rewards catalogue', 
     const pillRow = allChip.parentElement as HTMLElement;
     const chipLabels = Array.from(pillRow.querySelectorAll('button'))
       .map(b => b.textContent?.trim())
-      .filter((t): t is string => !!t && t !== 'Wishlist' && t !== 'Within my points');
+      .filter((t): t is string => !!t && t !== 'Within my points');
 
     // Only the two real categories survive — the whitespace name is dropped, no blank chip.
     expect(chipLabels).toEqual(['All', 'Electronics', 'Luggage']);

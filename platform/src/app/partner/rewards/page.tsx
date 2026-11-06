@@ -1260,7 +1260,7 @@ export default function RewardsPage() {
   const [category,  setCategory]  = useState('All');
   const [search,    setSearch]    = useState('');
   const [wishlist,  setWishlist]  = useState<Set<string>>(new Set());
-  // Persistent-wishlist UI: the "♥ Wishlist" filter toggle (catalogue tab only).
+  // Persistent-wishlist UI: the ♥ Wishlist filter (catalogue tab only), toggled by the header pill.
   const [wishlistFilter, setWishlistFilter] = useState(false);
   // "Within my points" affordability filter (Physical + Vouchers). Shared across both tabs on
   // purpose — a partner who turned it on keeps it on when switching tab.
@@ -1549,14 +1549,19 @@ export default function RewardsPage() {
           <span className="text-[10px] text-emerald-600 font-medium">= {fmtInr(Math.floor(balance / effectiveRate))}</span>
         </div>
         <div className="flex items-center gap-2">
-          {/* Wishlist pill — activates the ♥ filter and ensures the catalogue tab is shown. */}
+          {/* Wishlist pill — the ONLY Wishlist control: toggles the ♥ filter on/off and ensures the
+              catalogue tab is shown. Shows its ON state so a partner can't get stuck filtered. */}
           <button
             type="button"
-            onClick={() => { setWishlistFilter(true); setTab('catalogue'); }}
+            onClick={() => { setWishlistFilter(v => !v); setTab('catalogue'); }}
+            aria-pressed={wishlistFilter}
             aria-label={`Wishlist, ${wishlist.size} ${wishlist.size === 1 ? 'item' : 'items'}`}
-            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1 rounded-full border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+            className={cn(
+              'flex items-center gap-1.5 text-xs font-semibold px-3 py-1 rounded-full border transition-colors',
+              wishlistFilter ? 'bg-red-500 text-white border-red-500' : 'border-gray-200 text-gray-600 hover:bg-gray-50',
+            )}
           >
-            <Heart className="h-3.5 w-3.5" /> Wishlist{wishlist.size > 0 ? ` (${wishlist.size})` : ''}
+            <Heart className={cn('h-3.5 w-3.5', wishlistFilter && 'fill-white')} /> Wishlist{wishlist.size > 0 ? ` (${wishlist.size})` : ''}
           </button>
           <button
             onClick={() => router.push('/partner/rewards/orders')}
@@ -1700,20 +1705,7 @@ export default function RewardsPage() {
               >
                 Within my points
               </button>
-              {activeTab === 'catalogue' && (<>
-              {/* ♥ Wishlist filter chip — when active, show only wishlisted items. */}
-              <button
-                type="button"
-                onClick={() => setWishlistFilter(v => !v)}
-                aria-pressed={wishlistFilter}
-                className={cn(
-                  'flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors shrink-0',
-                  wishlistFilter ? 'bg-red-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200',
-                )}
-              >
-                <Heart className={cn('h-3 w-3', wishlistFilter && 'fill-white')} /> Wishlist
-              </button>
-              {categories.map(cat => (
+              {activeTab === 'catalogue' && categories.map(cat => (
                 <button
                   key={cat}
                   onClick={() => setCategory(cat)}
@@ -1725,7 +1717,6 @@ export default function RewardsPage() {
                   {cat}
                 </button>
               ))}
-              </>)}
             </div>
           )}
 
