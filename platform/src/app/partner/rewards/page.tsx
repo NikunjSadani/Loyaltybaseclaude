@@ -570,7 +570,7 @@ function GiftDetailSheet({
         {step === 'form' && (
           <div className="space-y-4">
             <p className="text-xs text-gray-500">Enter who this is for and where to deliver it</p>
-            {showPrefillHint && <p className="text-xs text-gray-400">From your outlet address</p>}
+            {showPrefillHint && <p id="addr-prefill-hint" className="text-xs text-gray-500">From your outlet address</p>}
             <div>
               <label className="text-xs font-medium text-gray-600 block mb-1" htmlFor="recipient-name">Recipient name *</label>
               <input
@@ -589,7 +589,7 @@ function GiftDetailSheet({
             ] as { key: keyof AddressForm; label: string; placeholder: string }[]).map(f => (
               <div key={f.key}>
                 <label className="text-xs font-medium text-gray-600 block mb-1" htmlFor={`addr-${f.key}`}>{f.label}</label>
-                <input id={`addr-${f.key}`} className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+                <input id={`addr-${f.key}`} aria-describedby={showPrefillHint ? 'addr-prefill-hint' : undefined} className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
                   placeholder={f.placeholder}
                   value={address[f.key]}
                   onChange={e => {

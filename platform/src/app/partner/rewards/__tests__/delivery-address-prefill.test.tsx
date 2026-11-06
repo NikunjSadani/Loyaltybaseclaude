@@ -220,6 +220,27 @@ describe('DAP — delivery address pre-fill from the active outlet', () => {
     expect(field('State').value).toBe('Maharashtra');
   });
 
+  it('ties the hint to the address inputs as their accessible description', async () => {
+    mockIdentity.deliveryDefaults = FULL;
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await openGiftForm(user);
+
+    for (const label of ['Street address *', 'City *', 'State', 'Pincode *']) {
+      expect(field(label)).toHaveAccessibleDescription(HINT);
+    }
+  });
+
+  it('gives the address inputs no dangling description when there is no hint', async () => {
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await openGiftForm(user);
+
+    for (const label of ['Street address *', 'City *', 'State', 'Pincode *']) {
+      expect(field(label)).not.toHaveAttribute('aria-describedby');
+    }
+  });
+
   it('hides the hint once the partner has replaced every pre-filled value', async () => {
     mockIdentity.deliveryDefaults = { line1: null, city: 'Pune', state: null, pincode: null };
     render(<RewardsPage />);
