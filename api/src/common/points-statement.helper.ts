@@ -108,6 +108,22 @@ export function buildStatementWindow(
   return { openingBalance: carried, closingBalance: carried, rows };
 }
 
+/** Fallback description per transaction type (used when the row carries no narration). */
+export function defaultTxDescription(transactionType: string): string {
+  const map: Record<string, string> = {
+    CREDIT_POINTS_EARNED: 'Points earned',
+    CREDIT_BONUS: 'Bonus points credited',
+    CREDIT_REVERSAL: 'Points reversed to wallet',
+    CREDIT_ADJUSTMENT: 'Manual credit adjustment',
+    DEBIT_REDEMPTION: 'Points redeemed',
+    DEBIT_EXPIRY: 'Points expired',
+    DEBIT_ADJUSTMENT: 'Manual debit adjustment',
+    LOCK_HOLDING: 'Points locked',
+    UNLOCK_HOLDING: 'Points unlocked',
+  };
+  return map[transactionType] ?? 'Wallet transaction';
+}
+
 // ─── DB loader ────────────────────────────────────────────────────────────────
 
 /** Hard cap on rows in ONE statement range (the statement is deliberately unpaginated). */
@@ -127,6 +143,9 @@ export interface PointsStatement {
   openingBalance: number;
   closingBalance: number;
   rows: StatementRow[]; // OLDEST first
+  /** Integrity of the WHOLE history (not just the window), for the caller's D10 tie-out warning. */
+  historyClosingBalance: number | null; // last row's balanceAfter, null when the wallet has no rows
+  chainBreaks: number; // rows whose balanceBefore ≠ the previous row's balanceAfter
 }
 
 /**
@@ -172,10 +191,12 @@ export async function loadPointsStatement(
     },
   });
 
-  const { openingBalance, closingBalance, rows } = buildStatementWindow(
-    orderStatementRows(all),
-    window,
-  );
+  const ordered = orderStatementRows(all);
+  const { openingBalance, closingBalance, rows } = buildStatementWindow(ordered, window);
+  let chainBreaks = 0;
+  for (let k = 1; k < ordered.length; k++) {
+    if (ordered[k].balanceBefore !== ordered[k - 1].balanceAfter) chainBreaks++;
+  }
   if (rows.length > MAX_STATEMENT_ROWS) {
     throw new BadRequestException(
       `This statement has more than ${MAX_STATEMENT_ROWS} transactions. Please narrow the date range.`,
@@ -193,5 +214,92 @@ export async function loadPointsStatement(
     openingBalance,
     closingBalance,
     rows: rows.map((r) => ({ ...r, fieldName: fieldNameByTxId.get(r.id) ?? null })),
+    historyClosingBalance: ordered.length ? ordered[ordered.length - 1].balanceAfter : null,
+    chainBreaks,
+  };
+}
+
+// ─── API response (shared by /wallet/statement and /kyc/:id/ledger/statement) ──
+
+export interface StatementApiRow {
+  id: string;
+  date: string; // ISO instant (the FE formats it in IST)
+  transactionType: string;
+  description: string; // narration, else the per-type default
+  narration: string | null; // RAW upload narration
+  fieldName: string | null;
+  points: number; // signed
+  balanceBefore: number;
+  balanceAfter: number;
+  referenceType: string | null;
+  referenceId: string | null;
+}
+
+export interface StatementApiResponse {
+  openingBalance: number;
+  closingBalance: number;
+  currentBalance: number; // live Wallet.redeemablePoints (what the balance card shows)
+  rows: StatementApiRow[]; // OLDEST first
+}
+
+export const EMPTY_STATEMENT: StatementApiResponse = Object.freeze({
+  openingBalance: 0,
+  closingBalance: 0,
+  currentBalance: 0,
+  rows: [],
+}) as StatementApiResponse;
+
+/**
+ * Load + present a wallet's statement, and run the D10 tie-out on the FULL history: when the
+ * last stored balanceAfter ≠ the live Wallet.redeemablePoints, or the balance chain has breaks,
+ * log a server warning for ops — and STILL return the stored values (never block, no
+ * partner-facing note).
+ */
+export async function buildStatementResponse(
+  prisma: PointsStatementReader,
+  logger: { warn: (message: string) => void },
+  args: {
+    wallet: { id: string; redeemablePoints: number };
+    clientId: string;
+    outletCode: string;
+    from?: string;
+    to?: string;
+  },
+): Promise<StatementApiResponse> {
+  const { wallet } = args;
+  const stmt = await loadPointsStatement(prisma, {
+    walletId: wallet.id,
+    clientId: args.clientId,
+    outletCode: args.outletCode,
+    from: args.from,
+    to: args.to,
+  });
+
+  const historyClosing = stmt.historyClosingBalance ?? 0;
+  if (historyClosing !== wallet.redeemablePoints || stmt.chainBreaks > 0) {
+    logger.warn(
+      `Wallet statement tie-out mismatch: walletId=${wallet.id} ` +
+        `lastBalanceAfter=${historyClosing} redeemablePoints=${wallet.redeemablePoints} ` +
+        `chainBreaks=${stmt.chainBreaks}`,
+    );
+  }
+
+  return {
+    openingBalance: stmt.openingBalance,
+    closingBalance: stmt.closingBalance,
+    currentBalance: wallet.redeemablePoints,
+    rows: stmt.rows.map((r) => ({
+      id: r.id,
+      date: r.createdAt.toISOString(),
+      transactionType: r.transactionType,
+      description: r.description ?? defaultTxDescription(r.transactionType),
+      narration: r.description,
+      fieldName: r.fieldName,
+      points: r.points,
+      balanceBefore: r.balanceBefore,
+      balanceAfter: r.balanceAfter,
+      referenceType: r.referenceType,
+      referenceId: r.referenceId,
+    })),
   };
 }

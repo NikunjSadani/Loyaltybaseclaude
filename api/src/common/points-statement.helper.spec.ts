@@ -277,6 +277,24 @@ describe('loadPointsStatement', () => {
     expect(out.closingBalance).toBe(70);
   });
 
+  it('reports full-history integrity (last balanceAfter + chain breaks) independent of the window', async () => {
+    const prisma = makePrisma([
+      tx({ id: 'a', at: '2026-01-01T00:00:00Z', points: 100, before: 0, after: 100 }),
+      tx({ id: 'b', at: '2026-02-01T00:00:00Z', points: 10, before: 250, after: 260 }), // break
+      tx({ id: 'c', at: '2026-03-01T00:00:00Z', points: -60, before: 260, after: 200 }),
+    ]);
+    const out = await loadPointsStatement(prisma, { ...base, from: '2026-01', to: '2026-01' });
+    expect(out.closingBalance).toBe(100);
+    expect(out.historyClosingBalance).toBe(200);
+    expect(out.chainBreaks).toBe(1);
+  });
+
+  it('an empty history reports historyClosingBalance null and no chain breaks', async () => {
+    const out = await loadPointsStatement(makePrisma([]), base);
+    expect(out.historyClosingBalance).toBeNull();
+    expect(out.chainBreaks).toBe(0);
+  });
+
   it('attaches fieldName resolved over ALL the wallet CREDIT_BATCH rows, not only the windowed ones', async () => {
     const prisma = makePrisma([
       credit({ id: 'cb1', at: '2026-01-15T00:00:00Z', points: 100, before: 0, after: 100 }, 'b1'),
