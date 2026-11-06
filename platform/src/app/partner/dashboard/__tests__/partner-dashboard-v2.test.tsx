@@ -139,8 +139,8 @@ describe('PDV2 — partnerDashboardV2 ON', () => {
     // can't be confused with the OFF-mode chart footer ("… to go · N days left").
     expect(screen.getByText('400 cases to go')).toBeInTheDocument();
 
-    // Enlarged wallet points (500 → the points <p> carries text-4xl).
-    expect(screen.getByText('500').className).toContain('text-4xl');
+    // Enlarged wallet points (500 → the points <p> carries text-3xl).
+    expect(screen.getByText('500').className).toContain('text-3xl');
 
     // SINGLE identity source — the page must NOT fetch /partner/me itself (the hook is mocked).
     expect(fetchMock.mock.calls.some(c => String(c[0]).includes('/api/partner/me'))).toBe(false);

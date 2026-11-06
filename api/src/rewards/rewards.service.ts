@@ -137,7 +137,7 @@ const MEMBER_CATALOG_SELECT = {
   sortOrder: true,
   createdAt: true,
   updatedAt: true,
-  category: { select: { name: true } },
+  category: { select: { name: true, sortOrder: true } },
 } satisfies Prisma.RewardCatalogSelect;
 
 /**
@@ -341,6 +341,7 @@ export class RewardsService {
       return {
         ...rest,
         category: category?.name,
+        categorySort: category?.sortOrder ?? null,
         requiresConsent: sourceType === 'VENDOR',
         isAffordable: userBalance >= row.pointsCost,
         ...(mrpSlashEnabled ? { slashPoints } : {}),

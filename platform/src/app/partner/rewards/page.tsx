@@ -76,6 +76,7 @@ interface CatalogueItem {
   /** Min/max redeemable points for FREE_AMOUNT vouchers (server-validated). */
   minRedemptionPoints?: number | null;
   maxRedemptionPoints?: number | null;
+  categorySort?: number | null;
   /**
    * Rate-INDEPENDENT catalogue MRP-slash, in POINTS, computed SERVER-SIDE
    * (pointsCost × mrpPaise ÷ sellingValuePaise, where both cost-basis inputs stay server-side)
@@ -119,6 +120,7 @@ interface ApiCatalogItem {
   maxRedemptionPoints?: number | null;
   /** Rate-independent MRP-slash in points, computed server-side (flag-gated). See CatalogueItem.slashPoints. */
   slashPoints?: number | null;
+  categorySort?: number | null;
   /** See CatalogueItem.requiresConsent — vendor-sourced items set this true (BE-exposed). */
   requiresConsent?: boolean | null;
 }
@@ -161,6 +163,7 @@ function mapCatalogItem(item: ApiCatalogItem): CatalogueItem {
     name:         item.name,
     brand:        item.brand ?? '',
     category:     item.category,
+    categorySort: item.categorySort ?? null,
     points:       item.pointsCost,
     description:  item.description ?? '',
     details:      item.details ?? item.description ?? '',
@@ -191,8 +194,6 @@ function mapCatalogItem(item: ApiCatalogItem): CatalogueItem {
 }
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
-
-const PHYSICAL_CATEGORIES = ['Electronics', 'Home & Kitchen', 'Personal Appliances', 'Health', 'Travel'];
 
 function deliveryLabel(category: string): string {
   return category === 'Vouchers' ? 'Instant via WhatsApp' : '5–7 business days';
@@ -1392,9 +1393,28 @@ export default function RewardsPage() {
     (!partnerHasBeneficiary || paymentDetailsStatus === 'NEEDS_RECAPTURE');
 
   const categories = useMemo(() => {
-    const cats = Array.from(new Set(physicalItems.map(g => g.category)));
-    return ['All', ...PHYSICAL_CATEGORIES.filter(c => cats.includes(c))];
+    // Dynamic category row — driven entirely by the RewardCategory names the tenant's
+    // physical rewards are tagged with (no hard-coded whitelist). Ordered by the category's
+    // admin-set sortOrder, then name, so operators control ordering from the admin UI with zero code.
+    const order = new Map<string, number>();
+    for (const g of physicalItems) {
+      // Skip null/empty/whitespace-only category names so they can't render a blank chip.
+      if (!g.category || !g.category.trim()) continue;
+      if (!order.has(g.category)) order.set(g.category, g.categorySort ?? 0);
+    }
+    const ordered = Array.from(order.entries())
+      .sort((a, b) => (a[1] - b[1]) || a[0].localeCompare(b[0]))
+      .map(([name]) => name);
+    return ['All', ...ordered];
   }, [physicalItems]);
+
+  // Stale-selection guard: if the chosen category leaves the dynamic list (its rewards were
+  // discontinued, or the category was deactivated), fall back to 'All'. Without this the grid
+  // would show "No items found" with no chip highlighted and no obvious way back. The old
+  // hard-coded whitelist couldn't hit this because its chip set was fixed.
+  useEffect(() => {
+    if (category !== 'All' && !categories.includes(category)) setCategory('All');
+  }, [categories, category]);
 
   // Resolve the effective tab early (needed by filtered memo, which runs before loading gate)
   const ch = settings.redemptionChannels ?? { physicalGifts: true, vouchers: true, bankTransfer: true };
