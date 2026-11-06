@@ -8,10 +8,10 @@
 > but with a per-tenant flag defaulting OFF, Deoleo behaves exactly as it does today. Precedent: `catalogueMrpSlash` and
 > `captureBankAtRedemption` both shipped as "PLATFORM-WIDE, Bajaj-flagged, Deoleo byte-identical".
 >
-> **Status:** PLAN ONLY (2026-11-06). Nothing built. **Blocked on:** (1) the owner approving the platform-wide
-> change, (2) the **OPEN DECISIONS** at the bottom, and (3) the **staging data count** (Task 0). The feature is
-> designed to **degrade gracefully** even if the Bajaj data turns out mostly empty, so the count changes how much
-> value we expect, not whether the code is safe.
+> **Status:** APPROVED BY THE OWNER (2026-11-06), PLATFORM-WIDE, building. See **OWNER DECISIONS (taken)** at the
+> bottom, which **override** the task text wherever they differ: always ON for every tenant incl. Deoleo (no flag,
+> Task 3 dropped), outlet address ONLY (no last-order source, no `redemptionOrder` query), Task 0 is not part of
+> the build (the feature degrades gracefully when nothing is on file).
 >
 > **Backend change: YES (small, additive, no schema/migration).** One new nullable key on the `/partner/me`
 > response. **No** change to the redeem endpoint, DTO, validation or the `RedemptionOrder` table.
@@ -373,7 +373,26 @@ That is a comment-only edit in `api/prisma/schema.prisma`, with **no** migration
 
 ---
 
-## OPEN DECISIONS for the owner (pick one each; ★ = recommended)
+## OWNER DECISIONS (taken 2026-11-06; these override the tasks above where they differ)
+
+- **D1 = A (always ON, every tenant incl. live Deoleo).** No per-tenant flag. **Task 3 is dropped.** The owner approved
+  the platform-wide change explicitly.
+- **D2 = A.** Extend `GET /partner/me` (active-outlet aware). Never `/auth/me` (wrong outlet after a multi-outlet switch).
+- **D3 = C (outlet address ONLY).** The pre-fill is the ACTIVE partner's primary outlet address on file. **No** last-order
+  source: no `redemptionOrder.findFirst`, no `LAST_ORDER` source, no "last gift delivery" hint. Because there is only one
+  source, the payload drops the `source` discriminator: `deliveryDefaults: { line1, city, state, pincode } | null`.
+  The helper takes only the outlet. The Task 1/2/6 test cases about last orders and "no mixing" do not apply.
+- **D4 = A.** Fill whatever parts are on file; the existing required-field validation makes the partner complete blanks.
+- **D5 = A, simplified copy.** One small grey hint line, "From your outlet address", shown only when at least one field
+  was actually pre-filled.
+- **D6 = ship regardless** of how empty the Bajaj outlet data is. With nothing on file: no hint, empty fields as today.
+  **Task 0 is not part of the build.**
+- **D7 = A.** Never write an edited address back to the outlet.
+- **Hard rule:** the pre-fill NEVER overwrites anything the partner has typed (or deliberately cleared), including when
+  `/partner/me` resolves after they started typing.
+- Out of scope (unchanged): the sales-assisted physical-redeem address gap (`platform/src/app/sales/catalogue`).
+
+## Original open decisions (for the record; superseded by the section above)
 
 **D1. Rollout scope (the platform-wide gate).**
 - A) Always ON for every tenant incl. live Deoleo (simplest, but Deoleo's form changes).
