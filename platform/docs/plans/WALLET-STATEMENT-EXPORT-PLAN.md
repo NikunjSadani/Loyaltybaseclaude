@@ -7,8 +7,9 @@
 > It can't be done per tenant: the wallet page, the ledger page and the passbook service are single shared code paths,
 > and the fixes below (missing Balance, broken `--50` sign, 20-row truncation) are defects in that shared code.
 > There's no per-tenant config to hang this on, and adding a flag just to hide a correctness fix would be YAGNI.
-> **Status: PROPOSED (2026-11-06). Nothing is built. Wait for the owner's explicit YES and answers to §OPEN DECISIONS.**
-> No schema change, no migration, and **no new npm dependency** under the recommended options.
+> **Status: APPROVED (2026-11-06) as PLATFORM-WIDE by the owner. See §OWNER DECISIONS (final), which override
+> anything below where they differ.** No schema change, no migration, and **no new npm dependency** (D9's font would be
+> a static asset, not a package).
 
 ---
 
@@ -442,7 +443,30 @@ fixing the on-screen month filter's local-TZ `getMonth()` (separate janitorial i
 
 ---
 
-## OPEN DECISIONS for the owner (answer before Task 1)
+## OWNER DECISIONS (final, 2026-11-06), these override the options below
+
+| # | Decision |
+|---|---|
+| D1 | **(A)** Approved as PLATFORM-WIDE. |
+| D2 | **(A)** Partner wallet AND sales-rep outlet ledger, sharing one statement builder. |
+| D3 | **(A)** Balance = the STORED per-row `balanceBefore`/`balanceAfter`; opening = the first in-range row's `balanceBefore`. |
+| D4 | **(A)** The download covers the chosen DATE RANGE with ALL transaction types (on-screen Earn/Burn/KPI filters ignored), with opening + closing balance so it reconciles. |
+| D5 | **(A)** Fix the newest-20-rows truncation on screen AND in the download (the screen uses the new endpoint). |
+| D6 | **(A)** Files generated in the BROWSER with the existing `xlsx` + `jspdf`; backend returns data only. No new npm dependency except the D9 font asset. |
+| D7 | **(A)** One "Download" button opening an Excel / PDF menu. |
+| D8 | **(A)** ₹ payout rows interleaved, with a blank Balance cell. |
+| D9 | **(B)** Embed a Unicode font in the PDF so ₹ and Hindi/regional (Devanagari etc.) names render: an open-licensed font (e.g. Noto Sans + Noto Sans Devanagari, SIL OFL) shipped as a static asset under `platform/public/`, lazy-loaded only when a PDF is generated. A new `public/` subdir needs the `platform/src/proxy.ts` matcher exclusion (RESUME trap 17). **Precondition:** jsPDF must shape Devanagari correctly (it has no complex-script shaping). If it can't, STOP this sub-task and go back to the owner with options rather than shipping broken text. |
+| D10 | **(A)** If closing ≠ live wallet balance: show the stored values and log a server warning (no partner-facing note, don't block). |
+| D11 | **(A)** Fixed title "Wallet Statement". |
+| D12 | **(A)** Oldest first. |
+
+**Task 0** (staging DB balance-chain audit) is skipped for the implementation pass (the build agent has no DB
+access). It remains an orchestrator/owner step before the staging push; the backend D10 warning and its tests cover
+chain-mismatch handling meanwhile.
+
+The Out-of-scope line "embedding a Unicode/Devanagari font" is superseded by D9 (B).
+
+## OPEN DECISIONS for the owner (answered above; kept for the record)
 
 **D1. Approve as PLATFORM-WIDE?** This changes the partner wallet + sales ledger for all tenants incl. live Deoleo.
 - **(A) Yes, approve as scoped here** ← recommended
