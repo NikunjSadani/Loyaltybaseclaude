@@ -18,7 +18,8 @@ import { useToast } from '@/components/ui/toast';
 import { formatPoints, maskAccountNumber } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import { api } from '@/lib/api-client';
-import { usePartnerIdentity } from '@/lib/partner-identity';
+import { usePartnerIdentity, type DeliveryDefaults } from '@/lib/partner-identity';
+import { applyAddressPrefill, type AddressForm, type TouchedFields } from './address-prefill';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { useTenantFeatures } from '@/lib/tenant-features';
 import { BankOrUpiSection, type PaymentMode } from '@/components/bank-or-upi-section';
@@ -359,9 +360,11 @@ function GiftImage({ gift, size }: GiftImageProps) {
 
 type RedemptionStep = 'detail' | 'form' | 'otp' | 'success';
 
+const EMPTY_ADDRESS: AddressForm = { line1: '', city: '', state: '', pincode: '' };
+
 function GiftDetailSheet({
   gift, onClose, myBalance, mobile, memberName, onWishlist, isWishlisted, onRedeemed,
-  mrpSlashEnabled,
+  mrpSlashEnabled, deliveryDefaults,
 }: {
   gift: CatalogueItem;
   onClose: () => void;
@@ -373,10 +376,25 @@ function GiftDetailSheet({
   onRedeemed: (pts: number) => void;
   /** Per-tenant catalogueMrpSlash flag — drives the struck-through MRP list price. */
   mrpSlashEnabled: boolean;
+  /** The ACTIVE outlet's address on file (identity.deliveryDefaults) — pre-fills the delivery form. */
+  deliveryDefaults: DeliveryDefaults | null;
 }) {
   const toast = useToast();
   const [step,       setStep]       = useState<RedemptionStep>('detail');
-  const [address,    setAddress]    = useState({ line1: '', city: '', state: '', pincode: '' });
+  // Delivery address — pre-filled from the active outlet's address on file (PLATFORM-WIDE).
+  // `typed` holds ONLY what the partner entered (+ `touched` marks every field they edited);
+  // the shown address is DERIVED: applyAddressPrefill fills only empty, untouched fields, so a
+  // late /partner/me never overwrites typing or a deliberate clear. No effect, no write-back.
+  const [typed,      setTyped]      = useState<AddressForm>(EMPTY_ADDRESS);
+  const [touched,    setTouched]    = useState<TouchedFields>({});
+  const address = useMemo(
+    () => applyAddressPrefill(typed, touched, deliveryDefaults),
+    [typed, touched, deliveryDefaults],
+  );
+  // Hint only while at least one untouched field still holds its pre-filled value.
+  const showPrefillHint = !!deliveryDefaults && (Object.keys(EMPTY_ADDRESS) as (keyof AddressForm)[]).some(
+    (k) => !touched[k] && !!deliveryDefaults[k] && address[k] === deliveryDefaults[k],
+  );
   // Recipient name for the parcel — seeded from the member's real name (never the gift
   // brand), editable so it can be corrected, but never left blank. If /api/auth/me
   // resolves AFTER this sheet opens, seed the (untouched) field once the name arrives.
@@ -552,6 +570,7 @@ function GiftDetailSheet({
         {step === 'form' && (
           <div className="space-y-4">
             <p className="text-xs text-gray-500">Enter who this is for and where to deliver it</p>
+            {showPrefillHint && <p className="text-xs text-gray-400">From your outlet address</p>}
             <div>
               <label className="text-xs font-medium text-gray-600 block mb-1" htmlFor="recipient-name">Recipient name *</label>
               <input
@@ -562,18 +581,21 @@ function GiftDetailSheet({
                 onChange={e => { setRecipientTouched(true); setRecipientName(e.target.value); }}
               />
             </div>
-            {[
+            {([
               { key: 'line1',   label: 'Street address *', placeholder: 'Shop no., street name' },
               { key: 'city',    label: 'City *',           placeholder: 'City' },
               { key: 'state',   label: 'State',            placeholder: 'State' },
               { key: 'pincode', label: 'Pincode *',        placeholder: '400001' },
-            ].map(f => (
+            ] as { key: keyof AddressForm; label: string; placeholder: string }[]).map(f => (
               <div key={f.key}>
-                <label className="text-xs font-medium text-gray-600 block mb-1">{f.label}</label>
-                <input className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+                <label className="text-xs font-medium text-gray-600 block mb-1" htmlFor={`addr-${f.key}`}>{f.label}</label>
+                <input id={`addr-${f.key}`} className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
                   placeholder={f.placeholder}
-                  value={(address as Record<string,string>)[f.key]}
-                  onChange={e => setAddress(prev => ({ ...prev, [f.key]: e.target.value }))} />
+                  value={address[f.key]}
+                  onChange={e => {
+                    setTouched(prev => (prev[f.key] ? prev : { ...prev, [f.key]: true }));
+                    setTyped(prev => ({ ...prev, [f.key]: e.target.value }));
+                  }} />
               </div>
             ))}
             {needConsent && <ConsentCheckbox checked={consent} onChange={setConsent} />}
@@ -1865,6 +1887,8 @@ export default function RewardsPage() {
           onWishlist={toggleWishlist} isWishlisted={wishlist.has(detail.id)}
           onRedeemed={handleRedeemed}
           mrpSlashEnabled={tenantFeatures.catalogueMrpSlash}
+          // `?? null`: older backends (and tests) omit the field — nothing on file.
+          deliveryDefaults={identity.deliveryDefaults ?? null}
         />
       )}
       {voucherDetail && (
