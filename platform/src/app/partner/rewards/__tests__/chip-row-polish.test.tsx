@@ -6,6 +6,7 @@
  *          right-edge fade (data-testid="chip-row-fade", aria-hidden) hinting there is more to scroll.
  * POLISH2: selecting a category scrolls THAT chip into view with block/inline 'nearest'
  *          ('nearest' block so the page itself does not jump vertically).
+ * POLISH3: returning to the Physical tab re-scrolls the still-selected chip into view.
  */
 
 import React from 'react';
@@ -88,6 +89,8 @@ describe('POLISH — rewards chip row edge fade + keep the selected chip in view
 
     const fade = screen.getByTestId('chip-row-fade');
     expect(fade).toHaveAttribute('aria-hidden', 'true');
+    // Taps must pass through the fade to the chip underneath (here the class IS the behaviour).
+    expect(fade).toHaveClass('pointer-events-none');
     const wrapper = fade.parentElement as HTMLElement;
     expect(wrapper).toHaveClass('relative');
     // The scrolling chip row is the fade's sibling inside that same wrapper.
@@ -105,6 +108,22 @@ describe('POLISH — rewards chip row edge fade + keep the selected chip in view
 
     expect(scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ block: 'nearest', inline: 'nearest' }));
     // The element scrolled is the chip the partner just selected.
+    expect(scrollIntoView.mock.contexts.at(-1)).toBe(luggage);
+  });
+
+  it('POLISH3: returning to the Physical tab scrolls the still-selected chip back into view', async () => {
+    stubFetch();
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Luggage' }));
+    await user.click(screen.getByRole('button', { name: /vouchers/i }));
+    scrollIntoView.mockClear();
+
+    await user.click(screen.getByRole('button', { name: /physical/i }));
+
+    // The chip row re-mounted with fresh buttons — the NEW Luggage chip is the one scrolled.
+    const luggage = screen.getByRole('button', { name: 'Luggage' });
+    expect(scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ block: 'nearest', inline: 'nearest' }));
     expect(scrollIntoView.mock.contexts.at(-1)).toBe(luggage);
   });
 });

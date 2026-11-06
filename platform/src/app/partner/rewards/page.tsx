@@ -214,22 +214,30 @@ function isFreeAmount(
   return item.points === 0 && (item.minRedemptionPoints != null || item.maxRedemptionPoints != null);
 }
 
+type AffordabilityItem = Pick<CatalogueItem, 'points' | 'voucherType' | 'minRedemptionPoints'>;
+/** Pass the LIVE rate (the page's `effectiveRate`), the same one the voucher sheet uses. */
+type AffordabilitySettings = { minVoucherFreeAmount: number; pointsConversionRate: number };
+
 /**
- * The ONE affordability rule for the rewards grid — used by the card dimming AND the
- * "Within my points" filter. Do NOT use the backend `isAffordable` flag: it is
- * `balance >= pointsCost`, and FREE_AMOUNT vouchers have pointsCost 0, so it reads
- * "affordable" even when the partner can't meet the voucher minimum.
- *   FIXED / physical → balance >= item.points
- *   FREE_AMOUNT      → balance >= ceil(minVoucherFreeAmount × pointsConversionRate)
+ * The ONE "points needed" rule for the rewards grid — used by the card dimming, the
+ * "Need N more" badge AND the "Within my points" filter. Mirrors what the BACKEND enforces at
+ * redeem time (api/src/rewards/rewards.service.ts, FREE_AMOUNT branch):
+ *   FIXED / physical → item.points
+ *   FREE_AMOUNT      → max(item.minRedemptionPoints ?? 0, Math.round(minVoucherFreeAmount × rate))
+ *                      (Math.round, like the backend — not ceil; the tenant floor and the item
+ *                      min both apply, so the larger wins. A rate of 0 collapses the floor to 0.)
+ * Do NOT use the backend `isAffordable` flag: it is `balance >= pointsCost`, and FREE_AMOUNT
+ * vouchers have pointsCost 0, so it reads "affordable" even when the minimum is out of reach.
  */
-export function isWithinPoints(
-  item: Pick<CatalogueItem, 'points' | 'voucherType'>,
-  balance: number,
-  settings: { minVoucherFreeAmount: number; pointsConversionRate: number },
-): boolean {
-  return item.voucherType === 'FREE_AMOUNT'
-    ? balance >= Math.ceil(settings.minVoucherFreeAmount * settings.pointsConversionRate)
-    : balance >= item.points;
+export function pointsRequired(item: AffordabilityItem, settings: AffordabilitySettings): number {
+  if (item.voucherType !== 'FREE_AMOUNT') return item.points;
+  const floorPoints = Math.round(settings.minVoucherFreeAmount * settings.pointsConversionRate);
+  return Math.max(item.minRedemptionPoints ?? 0, floorPoints);
+}
+
+/** True when the partner's balance covers `pointsRequired` for this item. */
+export function isWithinPoints(item: AffordabilityItem, balance: number, settings: AffordabilitySettings): boolean {
+  return balance >= pointsRequired(item, settings);
 }
 
 /**
@@ -1437,16 +1445,6 @@ export default function RewardsPage() {
     if (category !== 'All' && !categories.includes(category)) setCategory('All');
   }, [categories, category]);
 
-  // Keep the selected category chip in view on narrow screens. block:'nearest' stops the PAGE
-  // jumping vertically; `?.` on scrollIntoView keeps old browsers / jsdom safe.
-  // (Looked up via data-category on the row rather than a per-chip ref Map: a ref callback that
-  // writes into a ref trips the react-hooks/refs lint rule.)
-  const chipRowRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const chip = Array.from(chipRowRef.current?.querySelectorAll<HTMLButtonElement>('button[data-category]') ?? [])
-      .find(b => b.dataset.category === category);
-    chip?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
-  }, [category]);
 
   // Resolve the effective tab early (needed by filtered memo, which runs before loading gate)
   const ch = settings.redemptionChannels ?? { physicalGifts: true, vouchers: true, bankTransfer: true };
@@ -1457,18 +1455,36 @@ export default function RewardsPage() {
     return tab;
   })();
 
+  // Keep the selected category chip in view on narrow screens. block:'nearest' stops the PAGE
+  // jumping vertically; `?.` on scrollIntoView keeps old browsers / jsdom safe.
+  // (Looked up via data-category on the row rather than a per-chip ref Map: a ref callback that
+  // writes into a ref trips the react-hooks/refs lint rule.)
+  const chipRowRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const chip = Array.from(chipRowRef.current?.querySelectorAll<HTMLButtonElement>('button[data-category]') ?? [])
+      .find(b => b.dataset.category === category);
+    chip?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+  // effectiveTab: returning to Physical re-mounts the row → re-scroll the still-selected chip.
+  }, [category, effectiveTab]);
+
+  // The live rate (same one the voucher sheet uses) feeds the shared affordability rule.
+  const affordability = useMemo(
+    () => ({ minVoucherFreeAmount: settings.minVoucherFreeAmount, pointsConversionRate: effectiveRate }),
+    [settings.minVoucherFreeAmount, effectiveRate],
+  );
+  // The wishlist filter only filters on the Physical tab — show it as ON only there.
+  const wishlistFilterActive = wishlistFilter && effectiveTab === 'catalogue';
+
   const filtered = useMemo(() => {
     let items = effectiveTab === 'catalogue' ? physicalItems : voucherItems;
     if (effectiveTab === 'catalogue' && category !== 'All') items = items.filter(g => g.category === category);
     // "♥ Wishlist" filter — catalogue (physical) tab only; intersect with the saved Set.
     if (effectiveTab === 'catalogue' && wishlistFilter) items = items.filter(g => wishlist.has(g.id));
     // "Within my points" — same shared rule as the card dimming (never the backend isAffordable).
-    if (withinPointsOnly) items = items.filter(g => isWithinPoints(g, balance, settings));
+    if (withinPointsOnly) items = items.filter(g => isWithinPoints(g, balance, affordability));
     if (search) items = items.filter(g => g.name.toLowerCase().includes(search.toLowerCase()) || g.brand.toLowerCase().includes(search.toLowerCase()));
     return items.filter(g => g.available);
-  // effectiveTab changes when tab or settings change — exhaustive-deps not needed here
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveTab, physicalItems, voucherItems, category, search, wishlistFilter, wishlist, withinPointsOnly, balance, settings.minVoucherFreeAmount, settings.pointsConversionRate]);
+  }, [effectiveTab, physicalItems, voucherItems, category, search, wishlistFilter, wishlist, withinPointsOnly, balance, affordability]);
 
   // Optimistic persistent-wishlist toggle: flip the Set immediately, then POST (add)
   // or DELETE (remove). On a failed request REVERT the Set and surface a toast. A
@@ -1564,15 +1580,19 @@ export default function RewardsPage() {
               catalogue tab is shown. Shows its ON state so a partner can't get stuck filtered. */}
           <button
             type="button"
-            onClick={() => { setWishlistFilter(v => !v); setTab('catalogue'); }}
-            aria-pressed={wishlistFilter}
+            onClick={() => {
+              // From another tab: jump to Physical with the filter ON (never toggle it off unseen).
+              if (effectiveTab !== 'catalogue') { setWishlistFilter(true); setTab('catalogue'); }
+              else setWishlistFilter(v => !v);
+            }}
+            aria-pressed={wishlistFilterActive}
             aria-label={`Wishlist, ${wishlist.size} ${wishlist.size === 1 ? 'item' : 'items'}`}
             className={cn(
               'flex items-center gap-1.5 text-xs font-semibold px-3 py-1 rounded-full border transition-colors',
-              wishlistFilter ? 'bg-red-500 text-white border-red-500' : 'border-gray-200 text-gray-600 hover:bg-gray-50',
+              wishlistFilterActive ? 'bg-red-500 text-white border-red-500' : 'border-gray-200 text-gray-600 hover:bg-gray-50',
             )}
           >
-            <Heart className={cn('h-3.5 w-3.5', wishlistFilter && 'fill-white')} /> Wishlist{wishlist.size > 0 ? ` (${wishlist.size})` : ''}
+            <Heart className={cn('h-3.5 w-3.5', wishlistFilterActive && 'fill-white')} /> Wishlist{wishlist.size > 0 ? ` (${wishlist.size})` : ''}
           </button>
           <button
             onClick={() => router.push('/partner/rewards/orders')}
@@ -1743,11 +1763,22 @@ export default function RewardsPage() {
 
           {/* Grid */}
           {filtered.length === 0 ? (
-            <EmptyState icon={<Gift className="h-8 w-8" />} title="No items found" description="Try a different search or category" />
+            <EmptyState
+              icon={<Gift className="h-8 w-8" />}
+              title="No items found"
+              description={
+                withinPointsOnly
+                  ? 'Nothing within your points yet — turn off "Within my points" to see all rewards'
+                  : wishlistFilterActive
+                    ? 'Your wishlist is empty — tap ♥ on a reward to save it'
+                    : 'Try a different search or category'
+              }
+            />
           ) : (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
               {filtered.map(gift => {
-                const canAfford   = isWithinPoints(gift, balance, settings);
+                const needPoints  = pointsRequired(gift, affordability);
+                const canAfford   = balance >= needPoints;
                 const isWishlisted = wishlist.has(gift.id);
                 // Struck-through MRP "list price" in points (per-tenant catalogueMrpSlash). Null ⇒ not shown.
                 // Server-driven, rate-independent (gift.slashPoints); the flag only gates visibility.
@@ -1791,7 +1822,7 @@ export default function RewardsPage() {
                       {!canAfford && (
                         <div className="absolute inset-0 flex items-end justify-center pb-2">
                           <span className="text-[9px] font-bold bg-gray-800/70 text-white px-2 py-0.5 rounded-full">
-                            {gift.voucherType === 'FREE_AMOUNT' ? `Need ${formatPoints(Math.ceil(settings.minVoucherFreeAmount * settings.pointsConversionRate) - balance)} more` : `Need ${formatPoints(gift.points - balance)} more pts`}
+                            {`Need ${formatPoints(needPoints - balance)} more${gift.voucherType === 'FREE_AMOUNT' ? '' : ' pts'}`}
                           </span>
                         </div>
                       )}

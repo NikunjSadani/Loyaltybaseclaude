@@ -64,8 +64,15 @@ const VOUCHERS = [
     maxRedemptionPoints: 10_000, available: true, isAffordable: true },
 ];
 
-function stubFetch(items: unknown[], userBalance: number) {
+/** `liveRate` — the conversionRate served by /api/auth/me (the page's live effectiveRate). */
+function stubFetch(items: unknown[], userBalance: number, liveRate?: number) {
   vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+    if (url.includes('/api/auth/me') && liveRate !== undefined) {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ success: true, data: { conversionRate: liveRate } }),
+      });
+    }
     if (url.includes('/api/rewards/catalog')) {
       return Promise.resolve({
         ok: true,
@@ -164,11 +171,39 @@ describe('WMP — "Within my points" filter chip', () => {
     expect(screen.queryByText('Shopping Card')).not.toBeInTheDocument();
   });
 
-  it('WMP6: when nothing is within points, the empty state renders instead of crashing', async () => {
+  it('WMP6: when nothing is within points, the empty state says so and how to see everything', async () => {
     stubFetch(PHYSICAL, 0);
     render(<RewardsPage />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: chipName }));
     expect(screen.getByText('No items found')).toBeInTheDocument();
+    expect(screen.getByText('Nothing within your points yet — turn off "Within my points" to see all rewards')).toBeInTheDocument();
+    expect(screen.queryByText('Try a different search or category')).not.toBeInTheDocument();
+  });
+
+  it('WMP7: card dimming uses the shared rule — a FREE_AMOUNT card whose item minimum exceeds the balance shows "Need … more"', async () => {
+    // Floor is ₹250 × 1 = 250 pts (500 balance clears it), but the item's own minimum is 1000.
+    stubFetch([
+      { id: 'v9', name: 'Premium Card', brand: 'Mall', category: 'Vouchers', pointsCost: 0,
+        redemptionMode: 'GIFT_CARD', voucherType: 'FREE_AMOUNT', minRedemptionPoints: 1000,
+        maxRedemptionPoints: 10_000, available: true, isAffordable: true },
+    ], 500);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /vouchers/i }));
+    expect(await screen.findByText('Premium Card')).toBeInTheDocument();
+    expect(screen.getByText('Need 500 more')).toBeInTheDocument();
+  });
+
+  it('WMP8: affordability uses the LIVE conversion rate from /api/auth/me, not the cached settings rate', async () => {
+    // Settings rate 1 → floor 250 pts (400 balance would clear it); live rate 2 → floor 500 pts.
+    stubFetch([VOUCHERS[2]], 400, 2);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /vouchers/i }));
+    expect(await screen.findByText('Need 100 more')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: chipName }));
+    expect(screen.queryByText('Shopping Card')).not.toBeInTheDocument();
   });
 });

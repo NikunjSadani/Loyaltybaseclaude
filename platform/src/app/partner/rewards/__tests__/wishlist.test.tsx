@@ -11,6 +11,9 @@
  * WL4: the header "Wishlist (n)" pill shows the correct count; the first tap filters to wishlisted
  *      items, switches to the Physical tab and reads aria-pressed="true".
  * WL5: a second tap on the header pill turns the filter OFF (all items back, aria-pressed="false").
+ * WL6: filter ON → Vouchers tab: the pill reads not-pressed (it isn't filtering there); tapping it
+ *      returns to Physical with the filter still ON (it does not toggle it off).
+ * WL7: filter ON with an empty wishlist → the empty state explains how to save a reward.
  *
  * Auth/header pattern: the page calls /api/rewards/* via the shared `api` helper (cookie
  * auth, no JS-readable token), exactly as the existing catalogue/redeem calls do — so the
@@ -216,5 +219,37 @@ describe('WL — persistent partner wishlist', () => {
     expect(pill).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByText('Alpha Headphones')).toBeInTheDocument();
     expect(screen.getByText('Beta Speaker')).toBeInTheDocument();
+  });
+
+  it('WL6: from the Vouchers tab with the filter ON, the pill is not pressed and a tap returns to Physical still filtered', async () => {
+    stubFetch(['ph1']);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    expect(await screen.findByText('Beta Speaker')).toBeInTheDocument();
+    const pill = await screen.findByRole('button', { name: /wishlist, 1 item/i });
+
+    await user.click(pill); // filter ON (Physical)
+    expect(pill).toHaveAttribute('aria-pressed', 'true');
+
+    await user.click(screen.getByRole('button', { name: /vouchers/i }));
+    // On Vouchers the wishlist filter isn't filtering anything → not shown as pressed.
+    expect(pill).toHaveAttribute('aria-pressed', 'false');
+
+    await user.click(pill);
+    // Back on Physical with the filter still ON — not toggled off by the tab jump.
+    expect(screen.getByPlaceholderText('Search rewards…')).toBeInTheDocument();
+    expect(pill).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('Alpha Headphones')).toBeInTheDocument();
+    expect(screen.queryByText('Beta Speaker')).not.toBeInTheDocument();
+  });
+
+  it('WL7: with the filter ON and nothing wishlisted, the empty state explains how to save a reward', async () => {
+    stubFetch([]);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    expect(await screen.findByText('Beta Speaker')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /wishlist, 0 items/i }));
+    expect(screen.getByText('No items found')).toBeInTheDocument();
+    expect(screen.getByText('Your wishlist is empty — tap ♥ on a reward to save it')).toBeInTheDocument();
   });
 });
