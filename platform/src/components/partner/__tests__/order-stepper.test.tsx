@@ -56,6 +56,30 @@ describe('OrderStepper — detail', () => {
   });
 });
 
+describe('OrderStepper — detail a11y (review)', () => {
+  it('announces each step state as screen-reader text', () => {
+    render(<OrderStepper steps={[...STEPS.slice(0, 4), STEPS[4]]} variant="detail" />);
+    expect(within(screen.getByTestId('order-step-placed')).getByText('(completed)')).toHaveClass('sr-only');
+    expect(within(screen.getByTestId('order-step-dispatched')).getByText('(current)')).toHaveClass('sr-only');
+    expect(within(screen.getByTestId('order-step-delivered')).getByText('(upcoming)')).toHaveClass('sr-only');
+    render(<OrderStepper steps={FAILED_STEPS} variant="detail" />);
+    expect(within(screen.getByTestId('order-step-cancelled')).getByText('(failed)')).toHaveClass('sr-only');
+  });
+});
+
+describe('OrderStepper — connectors (review)', () => {
+  it('the connector INTO a failed step is not green (complete) — it uses the failed colour', () => {
+    const { unmount } = render(<OrderStepper steps={FAILED_STEPS} variant="compact" />);
+    const into = screen.getByTestId('order-compact-connector-confirmed');
+    expect(into).toHaveAttribute('data-tone', 'failed');
+    expect(into).not.toHaveClass('bg-emerald-400');
+    unmount();
+    render(<OrderStepper steps={STEPS} variant="compact" />);
+    expect(screen.getByTestId('order-compact-connector-placed')).toHaveAttribute('data-tone', 'complete');
+    expect(screen.getByTestId('order-compact-connector-dispatched')).toHaveAttribute('data-tone', 'upcoming');
+  });
+});
+
 describe('OrderStepper — compact', () => {
   it('renders the compact bar with no dates and an aria-label "<label> — <state>" per dot', () => {
     render(<OrderStepper steps={STEPS} variant="compact" />);

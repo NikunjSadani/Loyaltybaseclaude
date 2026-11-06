@@ -16,6 +16,15 @@ const DOT: Record<StepState, string> = {
   upcoming: 'bg-gray-100 border-gray-300 text-gray-300',
 };
 
+/** Connector tone = the state of the step it leads INTO (never green into a failed step). */
+type Tone = 'complete' | 'failed' | 'upcoming';
+const toneInto = (next: OrderStep): Tone =>
+  next.state === 'failed' ? 'failed' : next.state === 'upcoming' ? 'upcoming' : 'complete';
+const TONE: Record<Tone, string> = { complete: 'bg-emerald-400', failed: 'bg-red-300', upcoming: 'bg-gray-200' };
+const SR_STATE: Record<StepState, string> = {
+  complete: 'completed', current: 'current', upcoming: 'upcoming', failed: 'failed',
+};
+
 function DotIcon({ state, size }: { state: StepState; size: string }) {
   if (state === 'complete') return <CheckCircle className={size} />;
   if (state === 'current') return <Clock className={size} />;
@@ -46,7 +55,9 @@ export function OrderStepper({ steps, variant }: { steps: OrderStep[]; variant: 
               {i < steps.length - 1 && (
                 <span
                   aria-hidden="true"
-                  className={`flex-1 h-0.5 mx-1 ${steps[i + 1].state === 'upcoming' ? 'bg-gray-200' : 'bg-emerald-400'}`}
+                  data-testid={`order-compact-connector-${s.key}`}
+                  data-tone={toneInto(steps[i + 1])}
+                  className={`flex-1 h-0.5 mx-1 ${TONE[toneInto(steps[i + 1])]}`}
                 />
               )}
             </li>
@@ -75,7 +86,9 @@ export function OrderStepper({ steps, variant }: { steps: OrderStep[]; variant: 
             <span className={`w-7 h-7 rounded-full border-2 flex items-center justify-center shrink-0 ${DOT[s.state]}`}>
               <DotIcon state={s.state} size="h-3.5 w-3.5" />
             </span>
-            {i < steps.length - 1 && <span aria-hidden="true" className="w-0.5 flex-1 min-h-3 bg-gray-200" />}
+            {i < steps.length - 1 && (
+              <span aria-hidden="true" className={`w-0.5 flex-1 min-h-3 ${TONE[toneInto(steps[i + 1])]}`} />
+            )}
           </div>
           <div className="pb-3 min-w-0">
             <p
@@ -83,7 +96,7 @@ export function OrderStepper({ steps, variant }: { steps: OrderStep[]; variant: 
                 s.state === 'current' || s.state === 'failed' ? 'font-semibold' : 'font-medium'
               } ${s.state === 'failed' ? 'text-red-700' : ''}`}
             >
-              {s.label}
+              {s.label} <span className="sr-only">({SR_STATE[s.state]})</span>
             </p>
             {s.date && (
               <p data-testid={`order-step-date-${s.key}`} className="text-xs text-gray-400">

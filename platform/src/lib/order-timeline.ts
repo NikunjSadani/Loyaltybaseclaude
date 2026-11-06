@@ -142,7 +142,8 @@ export function buildOrderSteps(order: OrderTimelineInput, tracking?: OrderTrack
     // Unknown / future status (e.g. REVERSED): never throw, show it as-is.
     return [step(0, 'complete'), { key: 'status', label: order.status, state: 'current' }];
   }
-  if (order.status === 'PENDING') current = 1; // waiting on the OTP to confirm
+  // PENDING: "Order placed" is the current step (waiting on the OTP); Confirmed is still upcoming,
+  // so PENDING and CONFIRMED look different on the compact bar ("Next: Confirmed").
   // Ops can march a manual voucher through PROCESSING/DISPATCHED: it is "being issued" until a code exists.
   if (kind === 'voucher' && (order.status === 'PROCESSING' || order.status === 'DISPATCHED')) current = last;
   if ((issued && order.status !== 'PENDING') || order.status === 'DELIVERED') current = last + 1; // finished

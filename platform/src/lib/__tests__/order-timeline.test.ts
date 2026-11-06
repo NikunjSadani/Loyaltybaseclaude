@@ -53,13 +53,24 @@ describe('orderKind', () => {
 });
 
 describe('buildOrderSteps — physical happy paths', () => {
-  it('PENDING: placed complete, confirmed current waiting for OTP, rest upcoming', () => {
+  it('PENDING: placed is CURRENT (waiting for OTP, dated createdAt), confirmed and the rest upcoming', () => {
     const s = buildOrderSteps(order());
     expect(keys(s)).toEqual(['placed', 'confirmed', 'processing', 'dispatched', 'delivered']);
     expect(s.map((x) => x.label)).toEqual(['Order placed', 'Confirmed', 'Processing', 'Dispatched', 'Delivered']);
-    expect(states(s)).toEqual(['complete', 'current', 'upcoming', 'upcoming', 'upcoming']);
-    expect(byKey(s, 'confirmed').sublabel).toBe('Waiting for OTP confirmation');
+    expect(states(s)).toEqual(['current', 'upcoming', 'upcoming', 'upcoming', 'upcoming']);
+    expect(byKey(s, 'placed').sublabel).toBe('Waiting for OTP confirmation');
+    expect(byKey(s, 'confirmed').sublabel).toBeUndefined();
     expect(byKey(s, 'placed').date).toBe(T0);
+  });
+
+  it('PENDING and CONFIRMED render differently (the confirm step only lights up once reached)', () => {
+    const pending = buildOrderSteps(order({ status: 'PENDING' }));
+    const confirmed = buildOrderSteps(order({ status: 'CONFIRMED' }));
+    expect(states(pending)).not.toEqual(states(confirmed));
+    expect(byKey(pending, 'confirmed').state).toBe('upcoming');
+    expect(byKey(confirmed, 'confirmed').state).toBe('current');
+    // so the compact caption's "next upcoming step" is Confirmed while pending
+    expect(pending.find((x) => x.state === 'upcoming')!.label).toBe('Confirmed');
   });
 
   it('PROCESSING with history: earlier steps complete with history dates, processing current', () => {
@@ -162,10 +173,10 @@ describe('buildOrderSteps — vouchers', () => {
     expect(byKey(s, 'issued').sublabel).toBe('Being processed');
   });
 
-  it('a PENDING / CONFIRMED voucher waits on Confirmed (issued stays upcoming)', () => {
+  it('a PENDING voucher waits on the OTP; a CONFIRMED one sits on Confirmed (issued stays upcoming)', () => {
     const p = buildOrderSteps(order({ status: 'PENDING', redemptionMode: 'GIFT_CARD' }));
-    expect(states(p)).toEqual(['complete', 'current', 'upcoming']);
-    expect(byKey(p, 'confirmed').sublabel).toBe('Waiting for OTP confirmation');
+    expect(states(p)).toEqual(['current', 'upcoming', 'upcoming']);
+    expect(byKey(p, 'placed').sublabel).toBe('Waiting for OTP confirmation');
     const c = buildOrderSteps(order({ status: 'CONFIRMED', redemptionMode: 'GIFT_CARD' }));
     expect(states(c)).toEqual(['complete', 'current', 'upcoming']);
     expect(byKey(c, 'issued').sublabel).toBeUndefined();
@@ -197,8 +208,8 @@ describe('buildOrderSteps — cash', () => {
     expect(byKey(s, 'failed').sublabel).toBe('Points refunded to your wallet');
   });
 
-  it('PENDING / CONFIRMED cash request waits on Confirmed; "Paid to your bank" upcoming', () => {
-    expect(states(buildOrderSteps(order({ status: 'PENDING', redemptionMode: 'UPI' })))).toEqual(['complete', 'current', 'upcoming']);
+  it('PENDING cash request waits on the OTP; CONFIRMED sits on Confirmed; "Paid to your bank" upcoming', () => {
+    expect(states(buildOrderSteps(order({ status: 'PENDING', redemptionMode: 'UPI' })))).toEqual(['current', 'upcoming', 'upcoming']);
     expect(states(buildOrderSteps(order({ status: 'CONFIRMED', redemptionMode: 'UPI' })))).toEqual(['complete', 'current', 'upcoming']);
   });
 

@@ -7,7 +7,10 @@
  * OH2: nothing is fetched before expanding, and never for other orders
  * OH3: a CONFIRMED history row dates the Confirmed step
  * OH4: while /track is loading the status-only stepper stays rendered
- * OH5: /track failure (ok:false / success:false / rejected) keeps the status-only stepper, no throw
+ * OH5: /track failure (ok:false / success:false / rejected / malformed) keeps the status-only stepper + a muted notice, no auto-refetch
+ * OH7: a later expand retries a failed /track
+ * OH8: the list Retry starts with a clean /track cache
+ * OH9: the toggle exposes aria-expanded
  * OH6: refund copy appears only when /track reports refundedAt
  */
 import React from 'react';
@@ -116,17 +119,63 @@ describe('OH — dated timeline from /track', () => {
     ['success:false', () => Promise.resolve({ ok: true, json: () => Promise.resolve({ success: false, error: 'x' }) })],
     ['rejected', () => Promise.reject(new Error('network'))],
     ['malformed', () => Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) })],
-  ])('OH5: /track failure (%s) keeps the status-only stepper and does not refetch in a loop', async (_n, track) => {
+  ])('OH5: /track failure (%s) keeps the status-only stepper, says dates could not be loaded, and never auto-refetches', async (_n, track) => {
     const fetchMock = stubFetch([PROCESSING], track as () => Promise<unknown>);
     render(<OrdersPage />);
     await expandFirst();
     await waitFor(() => expect(trackCalls(fetchMock)).toHaveLength(1));
     const detail = screen.getByTestId('order-stepper-detail');
     expect(within(detail).getByTestId('order-step-processing')).toHaveAttribute('data-state', 'current');
+    expect(await screen.findByTestId('order-timeline-dates-failed')).toHaveTextContent("Dates couldn't be loaded");
     expect(screen.getByText('Bluetooth Speaker (JBL)')).toBeInTheDocument(); // card intact
+    await new Promise((r) => setTimeout(r, 20));
+    expect(trackCalls(fetchMock)).toHaveLength(1); // no loop
+  });
+
+  it('OH7: after a failure, collapsing and re-expanding retries /track; a successful retry shows dates and clears the notice', async () => {
+    let n = 0;
+    const fetchMock = stubFetch([PROCESSING], () => (++n === 1 ? Promise.reject(new Error('network')) : Promise.resolve(TRACK_OK())));
+    render(<OrdersPage />);
+    await expandFirst();
+    await screen.findByTestId('order-timeline-dates-failed');
     fireEvent.click(screen.getByText('Hide timeline'));
     fireEvent.click(screen.getByText('View timeline'));
-    expect(trackCalls(fetchMock)).toHaveLength(1);
+    await waitFor(() => expect(trackCalls(fetchMock)).toHaveLength(2));
+    expect(await screen.findByTestId('order-step-date-confirmed')).toBeInTheDocument();
+    expect(screen.queryByTestId('order-timeline-dates-failed')).toBeNull();
+    // success is cached: a further re-expand does not refetch
+    fireEvent.click(screen.getByText('Hide timeline'));
+    fireEvent.click(screen.getByText('View timeline'));
+    expect(trackCalls(fetchMock)).toHaveLength(2);
+  });
+
+  it('OH8: the list Retry reload starts with a clean /track cache (expanding afterwards fetches /track)', async () => {
+    let listCalls = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url === '/api/rewards/orders') {
+        listCalls++;
+        return listCalls === 1
+          ? Promise.reject(new Error('Network error'))
+          : Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { orders: [PROCESSING] } }) });
+      }
+      return Promise.resolve(TRACK_OK());
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<OrdersPage />);
+    fireEvent.click(await screen.findByTestId('orders-retry'));
+    await expandFirst();
+    await waitFor(() => expect(trackCalls(fetchMock)).toHaveLength(1));
+    expect(await screen.findByTestId('order-step-date-confirmed')).toBeInTheDocument();
+  });
+
+  it('OH9: the "View timeline" toggle exposes aria-expanded', async () => {
+    stubFetch([PROCESSING], () => Promise.resolve(TRACK_OK()));
+    render(<OrdersPage />);
+    await screen.findByText('Bluetooth Speaker (JBL)');
+    const btn = screen.getByText('View timeline');
+    expect(btn).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(btn);
+    expect(screen.getByText('Hide timeline')).toHaveAttribute('aria-expanded', 'true');
   });
 
   it('OH6: "Points refunded" shows only when /track reports a recorded refund', async () => {

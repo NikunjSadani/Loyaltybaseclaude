@@ -159,19 +159,28 @@ export default function OrdersPage() {
   // on first expand. The compact bar stays status-only so the list never fans out N requests.
   const [trackingById, setTrackingById] = useState<Record<string, OrderTracking>>({});
   const requested = useRef<Set<string>>(new Set());
+  // Ids whose LAST /track attempt failed → a muted "Dates couldn't be loaded" notice. A failed id
+  // is dropped from `requested`, so the next expand retries (user-driven — never an auto loop).
+  const [trackFailed, setTrackFailed] = useState<Record<string, boolean>>({});
 
   const loadTracking = useCallback((id: string) => {
     if (requested.current.has(id)) return;
     requested.current.add(id);
-    const store = (t: OrderTracking) => setTrackingById(prev => ({ ...prev, [id]: t }));
+    const fail = () => {
+      requested.current.delete(id);
+      setTrackFailed(prev => ({ ...prev, [id]: true }));
+    };
     fetch(`/api/rewards/orders/${encodeURIComponent(id)}/track`, { headers: { ...authHeader() } })
       .then(r => r.json())
       .then((json: { success?: boolean; data?: { tracking?: { timeline?: OrderTracking['timeline']; refundedAt?: string | null } } }) => {
         const t = json?.success ? json.data?.tracking : undefined;
-        // A failed/malformed /track keeps the status-only stepper (stored empty → not refetched).
-        store(Array.isArray(t?.timeline) ? { timeline: t.timeline, refundedAt: t.refundedAt ?? null } : { timeline: [] });
+        // A failed/malformed /track keeps the status-only stepper.
+        if (!t || !Array.isArray(t.timeline)) { fail(); return; }
+        const tracking: OrderTracking = { timeline: t.timeline, refundedAt: t.refundedAt ?? null };
+        setTrackingById(prev => ({ ...prev, [id]: tracking }));
+        setTrackFailed(prev => ({ ...prev, [id]: false }));
       })
-      .catch(() => store({ timeline: [] }));
+      .catch(fail);
   }, []);
 
   const toggle = (id: string) => {
@@ -198,6 +207,14 @@ export default function OrdersPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Retry reloads the list from scratch, so drop every cached/failed /track result too.
+  const reload = () => {
+    requested.current.clear();
+    setTrackingById({});
+    setTrackFailed({});
+    load();
+  };
+
   return (
     <div className="space-y-5 fade-in">
       <div className="flex items-center justify-between">
@@ -214,7 +231,7 @@ export default function OrdersPage() {
           <p className="text-sm text-red-500">{error}</p>
           <button
             type="button"
-            onClick={load}
+            onClick={reload}
             data-testid="orders-retry"
             className="mt-3 px-4 py-1.5 text-xs font-medium border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
           >
@@ -306,7 +323,9 @@ export default function OrdersPage() {
 
                   {/* Timeline toggle */}
                   <button
+                    type="button"
                     onClick={() => toggle(order.id)}
+                    aria-expanded={isExpanded}
                     className="mt-3 w-full text-xs text-[var(--brand-primary)] font-medium text-left hover:underline"
                   >
                     {isExpanded ? 'Hide timeline' : 'View timeline'}
@@ -314,7 +333,14 @@ export default function OrdersPage() {
 
                   {/* Timeline — the dated vertical stepper */}
                   {isExpanded && (
-                    <OrderStepper variant="detail" steps={buildOrderSteps(order, trackingById[order.id])} />
+                    <>
+                      <OrderStepper variant="detail" steps={buildOrderSteps(order, trackingById[order.id])} />
+                      {trackFailed[order.id] && (
+                        <p data-testid="order-timeline-dates-failed" className="text-[11px] text-gray-400">
+                          Dates couldn&apos;t be loaded
+                        </p>
+                      )}
+                    </>
                   )}
                 </CardContent>
               </Card>
