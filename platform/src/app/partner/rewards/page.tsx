@@ -18,7 +18,8 @@ import { useToast } from '@/components/ui/toast';
 import { formatPoints, maskAccountNumber } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import { api } from '@/lib/api-client';
-import { usePartnerIdentity } from '@/lib/partner-identity';
+import { usePartnerIdentity, type DeliveryDefaults } from '@/lib/partner-identity';
+import { applyAddressPrefill, type AddressForm, type TouchedFields } from './address-prefill';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { useTenantFeatures } from '@/lib/tenant-features';
 import { BankOrUpiSection, type PaymentMode } from '@/components/bank-or-upi-section';
@@ -76,6 +77,7 @@ interface CatalogueItem {
   /** Min/max redeemable points for FREE_AMOUNT vouchers (server-validated). */
   minRedemptionPoints?: number | null;
   maxRedemptionPoints?: number | null;
+  categorySort?: number | null;
   /**
    * Rate-INDEPENDENT catalogue MRP-slash, in POINTS, computed SERVER-SIDE
    * (pointsCost × mrpPaise ÷ sellingValuePaise, where both cost-basis inputs stay server-side)
@@ -119,6 +121,7 @@ interface ApiCatalogItem {
   maxRedemptionPoints?: number | null;
   /** Rate-independent MRP-slash in points, computed server-side (flag-gated). See CatalogueItem.slashPoints. */
   slashPoints?: number | null;
+  categorySort?: number | null;
   /** See CatalogueItem.requiresConsent — vendor-sourced items set this true (BE-exposed). */
   requiresConsent?: boolean | null;
 }
@@ -161,6 +164,7 @@ function mapCatalogItem(item: ApiCatalogItem): CatalogueItem {
     name:         item.name,
     brand:        item.brand ?? '',
     category:     item.category,
+    categorySort: item.categorySort ?? null,
     points:       item.pointsCost,
     description:  item.description ?? '',
     details:      item.details ?? item.description ?? '',
@@ -192,8 +196,6 @@ function mapCatalogItem(item: ApiCatalogItem): CatalogueItem {
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
 
-const PHYSICAL_CATEGORIES = ['Electronics', 'Home & Kitchen', 'Personal Appliances', 'Health', 'Travel'];
-
 function deliveryLabel(category: string): string {
   return category === 'Vouchers' ? 'Instant via WhatsApp' : '5–7 business days';
 }
@@ -211,6 +213,32 @@ function isFreeAmount(
   item: Pick<CatalogueItem, 'points' | 'minRedemptionPoints' | 'maxRedemptionPoints'>,
 ): boolean {
   return item.points === 0 && (item.minRedemptionPoints != null || item.maxRedemptionPoints != null);
+}
+
+type AffordabilityItem = Pick<CatalogueItem, 'points' | 'voucherType' | 'minRedemptionPoints'>;
+/** Pass the LIVE rate (the page's `effectiveRate`), the same one the voucher sheet uses. */
+type AffordabilitySettings = { minVoucherFreeAmount: number; pointsConversionRate: number };
+
+/**
+ * The ONE "points needed" rule for the rewards grid — used by the card dimming, the
+ * "Need N more" badge AND the "Within my points" filter. Mirrors what the BACKEND enforces at
+ * redeem time (api/src/rewards/rewards.service.ts, FREE_AMOUNT branch):
+ *   FIXED / physical → item.points
+ *   FREE_AMOUNT      → max(item.minRedemptionPoints ?? 0, Math.round(minVoucherFreeAmount × rate))
+ *                      (Math.round, like the backend — not ceil; the tenant floor and the item
+ *                      min both apply, so the larger wins. A rate of 0 collapses the floor to 0.)
+ * Do NOT use the backend `isAffordable` flag: it is `balance >= pointsCost`, and FREE_AMOUNT
+ * vouchers have pointsCost 0, so it reads "affordable" even when the minimum is out of reach.
+ */
+export function pointsRequired(item: AffordabilityItem, settings: AffordabilitySettings): number {
+  if (item.voucherType !== 'FREE_AMOUNT') return item.points;
+  const floorPoints = Math.round(settings.minVoucherFreeAmount * settings.pointsConversionRate);
+  return Math.max(item.minRedemptionPoints ?? 0, floorPoints);
+}
+
+/** True when the partner's balance covers `pointsRequired` for this item. */
+export function isWithinPoints(item: AffordabilityItem, balance: number, settings: AffordabilitySettings): boolean {
+  return balance >= pointsRequired(item, settings);
 }
 
 /**
@@ -332,9 +360,11 @@ function GiftImage({ gift, size }: GiftImageProps) {
 
 type RedemptionStep = 'detail' | 'form' | 'otp' | 'success';
 
+const EMPTY_ADDRESS: AddressForm = { line1: '', city: '', state: '', pincode: '' };
+
 function GiftDetailSheet({
   gift, onClose, myBalance, mobile, memberName, onWishlist, isWishlisted, onRedeemed,
-  mrpSlashEnabled,
+  mrpSlashEnabled, deliveryDefaults,
 }: {
   gift: CatalogueItem;
   onClose: () => void;
@@ -346,10 +376,25 @@ function GiftDetailSheet({
   onRedeemed: (pts: number) => void;
   /** Per-tenant catalogueMrpSlash flag — drives the struck-through MRP list price. */
   mrpSlashEnabled: boolean;
+  /** The ACTIVE outlet's address on file (identity.deliveryDefaults) — pre-fills the delivery form. */
+  deliveryDefaults: DeliveryDefaults | null;
 }) {
   const toast = useToast();
   const [step,       setStep]       = useState<RedemptionStep>('detail');
-  const [address,    setAddress]    = useState({ line1: '', city: '', state: '', pincode: '' });
+  // Delivery address — pre-filled from the active outlet's address on file (PLATFORM-WIDE).
+  // `typed` holds ONLY what the partner entered (+ `touched` marks every field they edited);
+  // the shown address is DERIVED: applyAddressPrefill fills only empty, untouched fields, so a
+  // late /partner/me never overwrites typing or a deliberate clear. No effect, no write-back.
+  const [typed,      setTyped]      = useState<AddressForm>(EMPTY_ADDRESS);
+  const [touched,    setTouched]    = useState<TouchedFields>({});
+  const address = useMemo(
+    () => applyAddressPrefill(typed, touched, deliveryDefaults),
+    [typed, touched, deliveryDefaults],
+  );
+  // Hint only while at least one untouched field still holds its pre-filled value.
+  const showPrefillHint = !!deliveryDefaults && (Object.keys(EMPTY_ADDRESS) as (keyof AddressForm)[]).some(
+    (k) => !touched[k] && !!deliveryDefaults[k] && address[k] === deliveryDefaults[k],
+  );
   // Recipient name for the parcel — seeded from the member's real name (never the gift
   // brand), editable so it can be corrected, but never left blank. If /api/auth/me
   // resolves AFTER this sheet opens, seed the (untouched) field once the name arrives.
@@ -525,6 +570,7 @@ function GiftDetailSheet({
         {step === 'form' && (
           <div className="space-y-4">
             <p className="text-xs text-gray-500">Enter who this is for and where to deliver it</p>
+            {showPrefillHint && <p id="addr-prefill-hint" className="text-xs text-gray-500">From your outlet address</p>}
             <div>
               <label className="text-xs font-medium text-gray-600 block mb-1" htmlFor="recipient-name">Recipient name *</label>
               <input
@@ -535,18 +581,21 @@ function GiftDetailSheet({
                 onChange={e => { setRecipientTouched(true); setRecipientName(e.target.value); }}
               />
             </div>
-            {[
+            {([
               { key: 'line1',   label: 'Street address *', placeholder: 'Shop no., street name' },
               { key: 'city',    label: 'City *',           placeholder: 'City' },
               { key: 'state',   label: 'State',            placeholder: 'State' },
               { key: 'pincode', label: 'Pincode *',        placeholder: '400001' },
-            ].map(f => (
+            ] as { key: keyof AddressForm; label: string; placeholder: string }[]).map(f => (
               <div key={f.key}>
-                <label className="text-xs font-medium text-gray-600 block mb-1">{f.label}</label>
-                <input className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+                <label className="text-xs font-medium text-gray-600 block mb-1" htmlFor={`addr-${f.key}`}>{f.label}</label>
+                <input id={`addr-${f.key}`} aria-describedby={showPrefillHint ? 'addr-prefill-hint' : undefined} className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
                   placeholder={f.placeholder}
-                  value={(address as Record<string,string>)[f.key]}
-                  onChange={e => setAddress(prev => ({ ...prev, [f.key]: e.target.value }))} />
+                  value={address[f.key]}
+                  onChange={e => {
+                    setTouched(prev => (prev[f.key] ? prev : { ...prev, [f.key]: true }));
+                    setTyped(prev => ({ ...prev, [f.key]: e.target.value }));
+                  }} />
               </div>
             ))}
             {needConsent && <ConsentCheckbox checked={consent} onChange={setConsent} />}
@@ -1241,8 +1290,11 @@ export default function RewardsPage() {
   const [category,  setCategory]  = useState('All');
   const [search,    setSearch]    = useState('');
   const [wishlist,  setWishlist]  = useState<Set<string>>(new Set());
-  // Persistent-wishlist UI: the "♥ Wishlist" filter toggle (catalogue tab only).
+  // Persistent-wishlist UI: the ♥ Wishlist filter (catalogue tab only), toggled by the header pill.
   const [wishlistFilter, setWishlistFilter] = useState(false);
+  // "Within my points" affordability filter (Physical + Vouchers). Shared across both tabs on
+  // purpose — a partner who turned it on keeps it on when switching tab.
+  const [withinPointsOnly, setWithinPointsOnly] = useState(false);
   // Per-id in-flight guard so a rapid double-tap on a heart can't fire two
   // conflicting POST/DELETE requests for the same reward (optimistic race).
   const wishlistInFlight = useRef<Set<string>>(new Set());
@@ -1392,9 +1444,29 @@ export default function RewardsPage() {
     (!partnerHasBeneficiary || paymentDetailsStatus === 'NEEDS_RECAPTURE');
 
   const categories = useMemo(() => {
-    const cats = Array.from(new Set(physicalItems.map(g => g.category)));
-    return ['All', ...PHYSICAL_CATEGORIES.filter(c => cats.includes(c))];
+    // Dynamic category row — driven entirely by the RewardCategory names the tenant's
+    // physical rewards are tagged with (no hard-coded whitelist). Ordered by the category's
+    // admin-set sortOrder, then name, so operators control ordering from the admin UI with zero code.
+    const order = new Map<string, number>();
+    for (const g of physicalItems) {
+      // Skip null/empty/whitespace-only category names so they can't render a blank chip.
+      if (!g.category || !g.category.trim()) continue;
+      if (!order.has(g.category)) order.set(g.category, g.categorySort ?? 0);
+    }
+    const ordered = Array.from(order.entries())
+      .sort((a, b) => (a[1] - b[1]) || a[0].localeCompare(b[0]))
+      .map(([name]) => name);
+    return ['All', ...ordered];
   }, [physicalItems]);
+
+  // Stale-selection guard: if the chosen category leaves the dynamic list (its rewards were
+  // discontinued, or the category was deactivated), fall back to 'All'. Without this the grid
+  // would show "No items found" with no chip highlighted and no obvious way back. The old
+  // hard-coded whitelist couldn't hit this because its chip set was fixed.
+  useEffect(() => {
+    if (category !== 'All' && !categories.includes(category)) setCategory('All');
+  }, [categories, category]);
+
 
   // Resolve the effective tab early (needed by filtered memo, which runs before loading gate)
   const ch = settings.redemptionChannels ?? { physicalGifts: true, vouchers: true, bankTransfer: true };
@@ -1405,16 +1477,36 @@ export default function RewardsPage() {
     return tab;
   })();
 
+  // Keep the selected category chip in view on narrow screens. block:'nearest' stops the PAGE
+  // jumping vertically; `?.` on scrollIntoView keeps old browsers / jsdom safe.
+  // (Looked up via data-category on the row rather than a per-chip ref Map: a ref callback that
+  // writes into a ref trips the react-hooks/refs lint rule.)
+  const chipRowRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const chip = Array.from(chipRowRef.current?.querySelectorAll<HTMLButtonElement>('button[data-category]') ?? [])
+      .find(b => b.dataset.category === category);
+    chip?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+  // effectiveTab: returning to Physical re-mounts the row → re-scroll the still-selected chip.
+  }, [category, effectiveTab]);
+
+  // The live rate (same one the voucher sheet uses) feeds the shared affordability rule.
+  const affordability = useMemo(
+    () => ({ minVoucherFreeAmount: settings.minVoucherFreeAmount, pointsConversionRate: effectiveRate }),
+    [settings.minVoucherFreeAmount, effectiveRate],
+  );
+  // The wishlist filter only filters on the Physical tab — show it as ON only there.
+  const wishlistFilterActive = wishlistFilter && effectiveTab === 'catalogue';
+
   const filtered = useMemo(() => {
     let items = effectiveTab === 'catalogue' ? physicalItems : voucherItems;
     if (effectiveTab === 'catalogue' && category !== 'All') items = items.filter(g => g.category === category);
     // "♥ Wishlist" filter — catalogue (physical) tab only; intersect with the saved Set.
     if (effectiveTab === 'catalogue' && wishlistFilter) items = items.filter(g => wishlist.has(g.id));
+    // "Within my points" — same shared rule as the card dimming (never the backend isAffordable).
+    if (withinPointsOnly) items = items.filter(g => isWithinPoints(g, balance, affordability));
     if (search) items = items.filter(g => g.name.toLowerCase().includes(search.toLowerCase()) || g.brand.toLowerCase().includes(search.toLowerCase()));
     return items.filter(g => g.available);
-  // effectiveTab changes when tab or settings change — exhaustive-deps not needed here
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveTab, physicalItems, voucherItems, category, search, wishlistFilter, wishlist]);
+  }, [effectiveTab, physicalItems, voucherItems, category, search, wishlistFilter, wishlist, withinPointsOnly, balance, affordability]);
 
   // Optimistic persistent-wishlist toggle: flip the Set immediately, then POST (add)
   // or DELETE (remove). On a failed request REVERT the Set and surface a toast. A
@@ -1506,14 +1598,23 @@ export default function RewardsPage() {
           <span className="text-[10px] text-emerald-600 font-medium">= {fmtInr(Math.floor(balance / effectiveRate))}</span>
         </div>
         <div className="flex items-center gap-2">
-          {/* Wishlist pill — activates the ♥ filter and ensures the catalogue tab is shown. */}
+          {/* Wishlist pill — the ONLY Wishlist control: toggles the ♥ filter on/off and ensures the
+              catalogue tab is shown. Shows its ON state so a partner can't get stuck filtered. */}
           <button
             type="button"
-            onClick={() => { setWishlistFilter(true); setTab('catalogue'); }}
+            onClick={() => {
+              // From another tab: jump to Physical with the filter ON (never toggle it off unseen).
+              if (effectiveTab !== 'catalogue') { setWishlistFilter(true); setTab('catalogue'); }
+              else setWishlistFilter(v => !v);
+            }}
+            aria-pressed={wishlistFilterActive}
             aria-label={`Wishlist, ${wishlist.size} ${wishlist.size === 1 ? 'item' : 'items'}`}
-            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1 rounded-full border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+            className={cn(
+              'flex items-center gap-1.5 text-xs font-semibold px-3 py-1 rounded-full border transition-colors',
+              wishlistFilterActive ? 'bg-red-500 text-white border-red-500' : 'border-gray-200 text-gray-600 hover:bg-gray-50',
+            )}
           >
-            <Heart className="h-3.5 w-3.5" /> Wishlist{wishlist.size > 0 ? ` (${wishlist.size})` : ''}
+            <Heart className={cn('h-3.5 w-3.5', wishlistFilterActive && 'fill-white')} /> Wishlist{wishlist.size > 0 ? ` (${wishlist.size})` : ''}
           </button>
           <button
             onClick={() => router.push('/partner/rewards/orders')}
@@ -1642,24 +1743,27 @@ export default function RewardsPage() {
             />
           </div>
 
-          {/* Category pills — catalogue only */}
-          {activeTab === 'catalogue' && (
-            <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none" style={{ scrollbarWidth: 'none' }}>
-              {/* ♥ Wishlist filter chip — when active, show only wishlisted items. */}
+          {/* Filter chips — "Within my points" on Physical + Vouchers; category pills catalogue only */}
+          {(activeTab === 'catalogue' || activeTab === 'vouchers') && (
+            <div className="relative">
+            {/* pr-8 lets the last chip scroll fully clear of the right-edge fade. */}
+            <div ref={chipRowRef} className="flex gap-2 overflow-x-auto pb-1 pr-8 scrollbar-none" style={{ scrollbarWidth: 'none' }}>
+              {/* Affordability filter — always first. */}
               <button
                 type="button"
-                onClick={() => setWishlistFilter(v => !v)}
-                aria-pressed={wishlistFilter}
+                onClick={() => setWithinPointsOnly(v => !v)}
+                aria-pressed={withinPointsOnly}
                 className={cn(
-                  'flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors shrink-0',
-                  wishlistFilter ? 'bg-red-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200',
+                  'px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors shrink-0',
+                  withinPointsOnly ? 'bg-[var(--brand-primary)] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200',
                 )}
               >
-                <Heart className={cn('h-3 w-3', wishlistFilter && 'fill-white')} /> Wishlist
+                Within my points
               </button>
-              {categories.map(cat => (
+              {activeTab === 'catalogue' && categories.map(cat => (
                 <button
                   key={cat}
+                  data-category={cat}
                   onClick={() => setCategory(cat)}
                   className={cn(
                     'px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors shrink-0',
@@ -1670,17 +1774,33 @@ export default function RewardsPage() {
                 </button>
               ))}
             </div>
+            {/* Decorative right-edge fade — hints the row scrolls. Matches the body background (--background). */}
+            <div
+              data-testid="chip-row-fade"
+              aria-hidden="true"
+              className="pointer-events-none absolute right-0 top-0 bottom-1 w-8 bg-gradient-to-l from-[var(--background,white)] to-transparent"
+            />
+            </div>
           )}
 
           {/* Grid */}
           {filtered.length === 0 ? (
-            <EmptyState icon={<Gift className="h-8 w-8" />} title="No items found" description="Try a different search or category" />
+            <EmptyState
+              icon={<Gift className="h-8 w-8" />}
+              title="No items found"
+              description={
+                withinPointsOnly
+                  ? 'Nothing within your points yet — turn off "Within my points" to see all rewards'
+                  : wishlistFilterActive
+                    ? 'Your wishlist is empty — tap ♥ on a reward to save it'
+                    : 'Try a different search or category'
+              }
+            />
           ) : (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
               {filtered.map(gift => {
-                const canAfford   = gift.voucherType === 'FREE_AMOUNT'
-                  ? balance >= Math.ceil(settings.minVoucherFreeAmount * settings.pointsConversionRate)
-                  : balance >= gift.points;
+                const needPoints  = pointsRequired(gift, affordability);
+                const canAfford   = balance >= needPoints;
                 const isWishlisted = wishlist.has(gift.id);
                 // Struck-through MRP "list price" in points (per-tenant catalogueMrpSlash). Null ⇒ not shown.
                 // Server-driven, rate-independent (gift.slashPoints); the flag only gates visibility.
@@ -1724,7 +1844,7 @@ export default function RewardsPage() {
                       {!canAfford && (
                         <div className="absolute inset-0 flex items-end justify-center pb-2">
                           <span className="text-[9px] font-bold bg-gray-800/70 text-white px-2 py-0.5 rounded-full">
-                            {gift.voucherType === 'FREE_AMOUNT' ? `Need ${formatPoints(Math.ceil(settings.minVoucherFreeAmount * settings.pointsConversionRate) - balance)} more` : `Need ${formatPoints(gift.points - balance)} more pts`}
+                            {`Need ${formatPoints(needPoints - balance)} more${gift.voucherType === 'FREE_AMOUNT' ? '' : ' pts'}`}
                           </span>
                         </div>
                       )}
@@ -1767,6 +1887,8 @@ export default function RewardsPage() {
           onWishlist={toggleWishlist} isWishlisted={wishlist.has(detail.id)}
           onRedeemed={handleRedeemed}
           mrpSlashEnabled={tenantFeatures.catalogueMrpSlash}
+          // `?? null`: older backends (and tests) omit the field — nothing on file.
+          deliveryDefaults={identity.deliveryDefaults ?? null}
         />
       )}
       {voucherDetail && (

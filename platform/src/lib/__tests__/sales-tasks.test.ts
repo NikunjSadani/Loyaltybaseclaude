@@ -81,7 +81,7 @@ describe('ST — buildPhotoCaptureTaskItems (PHOTO_APPROVAL mode)', () => {
     ...over,
   });
   const resp = (outlets: SalesEligibleResponse['outlets']): SalesEligibleResponse => ({
-    windowKey: '2026-07-P1', window: { startDay: 1, endDay: 15 }, levelAllowed: true, outlets,
+    windowKey: '2026-07-P1', window: { startDay: 1, endDay: 15 }, levelAllowed: true, members: [], outlets,
   });
 
   it('ST6: includes only canCapture outlets in due/rejected/late; excludes awaiting/approved + view-only', () => {

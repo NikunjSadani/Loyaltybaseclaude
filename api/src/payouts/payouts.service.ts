@@ -15,6 +15,7 @@ import { buildXlsx } from '../common/xlsx';
 import { rupeesToPaise } from '../common/money';
 import { monthYearIST, formatDateIST, istDayRangeFilter, istDateKey } from '../common/ist-date';
 import { parsePayoutUtrUpload } from './payout-utr.helpers';
+import { transitionOrderStatus } from '../rewards/order-status-transition';
 import { resolveEffectiveKycStatus } from '../kyc/kyc-eligibility';
 import {
   BatchDetailQueryDto,
@@ -775,11 +776,12 @@ export class PayoutsService {
           }
 
           // Complete the linked redemption (DELIVERED) unless it is already in a
-          // terminal state. No points change on success.
+          // terminal state. No points change on success. Shared transition: the DELIVERED
+          // history row (actor = uploader) is written only when this claim wins.
           if (txn.redemptionOrderId) {
-            await tx.redemptionOrder.updateMany({
-              where: {
-                id: txn.redemptionOrderId,
+            await transitionOrderStatus(tx, {
+              orderId: txn.redemptionOrderId,
+              guard: {
                 status: {
                   notIn: [
                     RedemptionStatus.DELIVERED,
@@ -789,7 +791,10 @@ export class PayoutsService {
                   ],
                 },
               },
-              data: { status: RedemptionStatus.DELIVERED, deliveredAt: now },
+              fromStatus: null,
+              toStatus: RedemptionStatus.DELIVERED,
+              data: { deliveredAt: now },
+              changedById: user.sub,
             });
           }
         } else {
@@ -817,7 +822,7 @@ export class PayoutsService {
             const orderId = txn.redemptionOrderId;
             const order = await tx.redemptionOrder.findFirst({
               where: { id: orderId },
-              select: { pointsDeducted: true, partnerId: true, orderNumber: true },
+              select: { pointsDeducted: true, partnerId: true, orderNumber: true, status: true },
             });
             if (order) {
               const refundClaim = await tx.redemptionOrder.updateMany({
@@ -836,9 +841,13 @@ export class PayoutsService {
                 );
                 reversedCount++;
               }
-              await tx.redemptionOrder.update({
-                where: { id: orderId },
-                data: { status: RedemptionStatus.FAILED },
+              // Shared transition: status + FAILED history row (actor = uploader); no row when
+              // the order was already FAILED (same-status no-op).
+              await transitionOrderStatus(tx, {
+                orderId,
+                fromStatus: order.status,
+                toStatus: RedemptionStatus.FAILED,
+                changedById: user.sub,
               });
             }
           }

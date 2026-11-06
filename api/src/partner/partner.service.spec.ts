@@ -137,6 +137,8 @@ describe('PartnerService', () => {
         operableOutlets: [],
         groupOverviewAvailable: false,
         groupParent: null,
+        // Delivery-address pre-fill: nothing to pre-fill without an active partner/outlet.
+        deliveryDefaults: null,
       });
       // No activity queries when there is no partner to resolve.
       expect(mockPrisma.outlet.findMany).not.toHaveBeenCalled();
@@ -274,6 +276,109 @@ describe('PartnerService', () => {
       const res = await service.getMe(partner);
       expect(res.outletName).toBeNull();
       expect(res.businessName).toBe('Firm');
+    });
+
+    // ── Delivery-address pre-fill (PLATFORM-WIDE, owner D3 = outlet address only) ──────────
+    describe('deliveryDefaults (redeem address pre-fill)', () => {
+      beforeEach(() => {
+        mockPrisma.wallet.findFirst.mockResolvedValue(null);
+        mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue(null);
+        mockPrisma.payoutTransaction.findFirst.mockResolvedValue(null);
+      });
+
+      it('returns the PRIMARY outlet address on file, read from the same tenant-scoped outlet query', async () => {
+        mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', businessName: 'Firm' });
+        mockPrisma.outlet.findMany.mockResolvedValue([
+          { name: 'Primary', outletCode: 'OC1', outletType: { code: 'WHOLESALER' },
+            addressLine1: '12 MG Road', addressLine2: null, city: 'Pune', state: 'Maharashtra', pincode: '411001' },
+          { name: 'Second', outletCode: 'OC2', outletType: null,
+            addressLine1: 'Other St', addressLine2: null, city: 'Nashik', state: 'Maharashtra', pincode: '422001' },
+        ]);
+
+        const res = await service.getMe(partner);
+
+        expect(res.deliveryDefaults).toEqual({ line1: '12 MG Road', city: 'Pune', state: 'Maharashtra', pincode: '411001' });
+        expect(mockPrisma.outlet.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { clientId: 'deoleo', partnerId: 'cp1', deletedAt: null },
+            orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+            select: expect.objectContaining({
+              addressLine1: true, addressLine2: true, city: true, state: true, pincode: true,
+            }),
+          }),
+        );
+        // Outlet address ONLY (owner D3) — no extra outlet query.
+        expect(mockPrisma.outlet.findMany).toHaveBeenCalledTimes(1);
+      });
+
+      it('pre-fills only the parts on file (Bajaj outlet with no street/pincode keeps city/state)', async () => {
+        mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+        mockPrisma.outlet.findMany.mockResolvedValue([
+          { name: 'Shop', outletCode: 'OC1', outletType: null,
+            addressLine1: null, addressLine2: null, city: 'Pune', state: 'Maharashtra', pincode: null },
+        ]);
+        const res = await service.getMe(partner);
+        expect(res.deliveryDefaults).toEqual({ line1: null, city: 'Pune', state: 'Maharashtra', pincode: null });
+      });
+
+      it('is null when the partner has no outlet (nothing throws)', async () => {
+        mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+        mockPrisma.outlet.findMany.mockResolvedValue([]);
+        const res = await service.getMe(partner);
+        expect(res.deliveryDefaults).toBeNull();
+      });
+
+      it('uses the SWITCHED sibling outlet address (keyed on the authorized active partner), never the login own', async () => {
+        mockPrisma.channelPartner.findFirst.mockImplementation((args: any) => {
+          const w = args.where;
+          if (w.isParent === true) return Promise.resolve(null);
+          if (w.userId) return Promise.resolve({ id: 'cp1', groupId: 'g1', isParent: false,
+            businessName: 'My Shop', ownerName: 'Me', outlets: [] });
+          return Promise.resolve({ id: 'sib1', partnerCode: 'P2', businessName: 'Sibling Shop',
+            ownerName: 'Me', phone: '9800000001', email: null, entityType: 'FIRM' });
+        });
+        mockPrisma.channelPartner.findMany.mockResolvedValue([]);
+        mockPrisma.outlet.findMany.mockImplementation((args: any) =>
+          Promise.resolve(args.where.partnerId === 'sib1'
+            ? [{ name: 'Sibling Shop', outletCode: 'OC2', outletType: null,
+                addressLine1: '7 Station Rd', addressLine2: null, city: 'Nashik', state: 'Maharashtra', pincode: '422001' }]
+            : [{ name: 'My Shop', outletCode: 'OC1', outletType: null,
+                addressLine1: '12 MG Road', addressLine2: null, city: 'Pune', state: 'Maharashtra', pincode: '411001' }]),
+        );
+
+        const res = await service.getMe(switcher, 'sib1');
+
+        expect(res.deliveryDefaults).toEqual({ line1: '7 Station Rd', city: 'Nashik', state: 'Maharashtra', pincode: '422001' });
+        expect(mockPrisma.outlet.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { clientId: 'deoleo', partnerId: 'sib1', deletedAt: null } }),
+        );
+      });
+
+      it('falls back to the login OWN outlet address when the selector is forbidden (degraded identity)', async () => {
+        mockPrisma.channelPartner.findFirst.mockImplementation((args: any) => {
+          const w = args.where;
+          if (w.isParent === true) return Promise.resolve(null);
+          if (w.userId) return Promise.resolve({ id: 'cp1', groupId: null, isParent: false,
+            businessName: 'My Shop', ownerName: 'Me', outlets: [] });
+          return Promise.resolve({ id: 'cp1', partnerCode: 'P1', businessName: 'My Shop',
+            ownerName: 'Me', phone: '9800000001', email: null, entityType: 'FIRM' });
+        });
+        mockPrisma.channelPartner.findMany.mockResolvedValue([]);
+        mockPrisma.outlet.findMany.mockImplementation((args: any) =>
+          Promise.resolve(args.where.partnerId === 'cp1'
+            ? [{ name: 'My Shop', outletCode: 'OC1', outletType: null,
+                addressLine1: '12 MG Road', addressLine2: null, city: 'Pune', state: 'Maharashtra', pincode: '411001' }]
+            : [{ name: 'Evil', outletCode: 'X', outletType: null,
+                addressLine1: 'Foreign St', addressLine2: null, city: 'X', state: 'X', pincode: '110001' }]),
+        );
+
+        const res = await service.getMe(switcher, 'evil');
+
+        expect(res.deliveryDefaults).toEqual({ line1: '12 MG Road', city: 'Pune', state: 'Maharashtra', pincode: '411001' });
+        expect(mockPrisma.outlet.findMany).not.toHaveBeenCalledWith(
+          expect.objectContaining({ where: expect.objectContaining({ partnerId: 'evil' }) }),
+        );
+      });
     });
 
     it('hasPointsActivity is true when the wallet has redeemablePoints > 0 (no ledger lookup needed)', async () => {

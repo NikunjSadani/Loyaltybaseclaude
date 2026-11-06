@@ -61,6 +61,7 @@ const managerOutlet = (canCapture: boolean): SalesEligibleResponse => ({
   windowKey: '2026-07-P1',
   window: { startDay: 1, endDay: 15 },
   levelAllowed: canCapture,
+  members: [],
   outlets: [
     { outletId: 'o1', outletCode: 'C1', outletName: 'Downline Store', zone: null, state: null,
       outletType: null, captureId: null, status: null, currentVersion: null, rejectionReason: null,

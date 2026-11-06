@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsPositive, IsString, Max, MinLength } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, IsPositive, IsString, Matches, Max, MinLength } from 'class-validator';
 import { WalletTransactionType } from '@prisma/client';
 
 /** Sanity ceiling on a single manual adjust (points). Guards fat-finger / overflow.
@@ -35,6 +35,25 @@ export class AdjustWalletDto {
   @IsString()
   @MinLength(1, { message: 'Approver is required' })
   approvedBy!: string;
+}
+
+/** YYYY-MM (IST calendar month) — the statement range bounds. */
+const MONTH_KEY_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+/**
+ * GET /v1/wallet/statement (and /v1/kyc/:id/ledger/statement) — optional inclusive IST month
+ * range. Both-or-neither and from <= to are enforced by loadPointsStatement (400).
+ */
+export class StatementQueryDto {
+  @IsOptional()
+  @IsString()
+  @Matches(MONTH_KEY_RE, { message: 'from must be a YYYY-MM month' })
+  from?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(MONTH_KEY_RE, { message: 'to must be a YYYY-MM month' })
+  to?: string;
 }
 
 export class ListTransactionsQueryDto {

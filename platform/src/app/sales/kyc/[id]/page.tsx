@@ -1079,7 +1079,7 @@ function OutletTrendCard({ outletCode }: { outletCode: string }) {
         <CardTitle className="text-sm flex items-center gap-2">
           <TrendingUp className="h-4 w-4 text-[var(--brand-primary)]" /> Target vs. Achievement
         </CardTitle>
-        <div className="flex items-center gap-1.5 mt-2 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
+        <div className="flex flex-wrap items-center gap-2 mt-2">
           <div className="relative shrink-0">
             <select
               value={kpi}

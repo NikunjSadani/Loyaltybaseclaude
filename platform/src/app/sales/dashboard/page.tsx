@@ -160,7 +160,7 @@ function TargetSummaryCard({ targets, role }: { targets: SalesTargets; role: Sal
                   <div key={k.code} className="space-y-1">
                     <div className="flex items-center gap-2">
                       <p className="text-xs font-medium text-gray-700 flex-1 truncate">
-                        {k.name}{k.isPrimary && <span className="ml-1 text-[9px] font-bold text-[var(--brand-primary)] align-middle">PRIMARY</span>}
+                        {k.name}
                       </p>
                       <span className={`text-[11px] font-bold shrink-0 ${p >= 100 ? 'text-emerald-600' : p >= 80 ? 'text-amber-600' : p >= 60 ? 'text-orange-500' : 'text-red-500'}`}>
                         {isInrKpi
@@ -787,7 +787,7 @@ export default function SalesDashboard() {
 
         {/* KPI + Program filters — Bajaj only (other tenants keep the primary/all trend). */}
         {isBajaj && (
-          <div className="flex items-center gap-1.5 mt-2 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
+          <div className="flex flex-wrap items-center gap-2 mt-2">
             <div className="relative shrink-0">
               <select
                 value={trendKpi}

@@ -30,6 +30,7 @@ vi.mock('@/lib/partner-identity', () => ({
 }));
 
 import WalletPage from '../page';
+import { statementPayload } from './statement-fixture';
 
 // ₹800 PAID + ₹400 still-PENDING, both in the default 2026-05 window.
 const PAID_PAYOUT = {
@@ -45,8 +46,8 @@ const PENDING_PAYOUT = {
 function stubFetch() {
   vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
     const u = url as string;
-    if (u.includes('/api/wallet/transactions'))
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { transactions: [] } }) });
+    if (u.includes('/api/wallet/statement'))
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(statementPayload([])) });
     if (u.includes('/api/partner/payouts'))
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { payouts: [PAID_PAYOUT, PENDING_PAYOUT] } }) });
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });

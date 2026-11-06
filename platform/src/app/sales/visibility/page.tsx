@@ -72,19 +72,21 @@ function windowLabel(windowKey: string, window: { startDay: number; endDay: numb
 /* ─── Filter pill (shared select styling, matches the Outlets filter strip) ────── */
 
 function FilterPill({
-  value, onChange, active, children,
+  value, onChange, active, children, widthClass,
 }: {
   value: string;
   onChange: (v: string) => void;
   active: boolean;
   children: React.ReactNode;
+  /** Optional max-width cap so a long member/program name can't blow out the filter row. */
+  widthClass?: string;
 }) {
   return (
-    <div className="relative shrink-0">
+    <div className={`relative shrink-0 ${widthClass ?? ''}`}>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className={`appearance-none text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1.5 bg-white focus:outline-none transition-colors cursor-pointer ${
+        className={`appearance-none max-w-full truncate text-[11px] font-semibold border rounded-full pl-2.5 pr-6 py-1.5 bg-white focus:outline-none transition-colors cursor-pointer ${
           active ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-gray-200 text-gray-600 focus:border-[var(--brand-primary)]'
         }`}
       >
@@ -110,9 +112,11 @@ function SalesVisibilityContent() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
-  // Filters (mirroring the KYC-submissions list): status · program.
+  // Filters (mirroring the KYC-submissions list): status · program · team member.
   const [statusFilter, setStatusFilter] = useState<CaptureUiState | 'ALL'>('ALL');
   const [programFilter, setProgramFilter] = useState<string>('ALL');
+  // Team Member filter — a manager's direct report (value = member id; '' = all team).
+  const [memberFilter, setMemberFilter] = useState<string>('');
   // Session read-back of a fresh capture — outletId → its new window state.
   const [captured, setCaptured] = useState<Record<string, CaptureUiState>>({});
   const [activeOutletId, setActiveOutletId] = useState<string | null>(null);
@@ -142,6 +146,16 @@ function SalesVisibilityContent() {
   const stateOf = (o: SalesEligibleOutlet): CaptureUiState =>
     captured[o.outletId] ?? (isChangesRequested(o) ? 'changes_requested' : o.windowState);
 
+  // Manager-only Team Member filter options (empty for a leaf rep → the filter is hidden).
+  const members = eligible?.members ?? [];
+  // The selected member's whole branch (self + downline) as a Set of login-User ids. An outlet
+  // matches when its assignedUserId is in this set — SAME sub-tree semantics as the Outlets
+  // screen's member filter.
+  const selectedMemberUserIds = useMemo(
+    () => (memberFilter ? new Set(members.find((m) => m.id === memberFilter)?.submitterUserIds ?? []) : null),
+    [memberFilter, members],
+  );
+
   // Filter option lists, derived from the loaded outlets.
   const programOptions = useMemo(
     () => Array.from(new Set((eligible?.outlets ?? []).map((o) => o.programName).filter((p): p is string => !!p))).sort(),
@@ -156,7 +170,7 @@ function SalesVisibilityContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eligible, captured]);
 
-  const anyFilter = search.trim() !== '' || statusFilter !== 'ALL' || programFilter !== 'ALL';
+  const anyFilter = search.trim() !== '' || statusFilter !== 'ALL' || programFilter !== 'ALL' || memberFilter !== '';
 
   // If the selected status leaves the option set (e.g. the last outlet of that status was just
   // captured), fall back to "All" so the list doesn't get stuck on an empty, blank-select state.
@@ -171,6 +185,9 @@ function SalesVisibilityContent() {
       if (q && !(o.outletName.toLowerCase().includes(q) || o.outletCode.toLowerCase().includes(q))) return false;
       if (statusFilter !== 'ALL' && stateOf(o) !== statusFilter) return false;
       if (programFilter !== 'ALL' && o.programName !== programFilter) return false;
+      // Team Member: match an outlet whose assigned rep (assignedUserId) is in the selected
+      // member's sub-tree (mirrors the Outlets-screen member filter).
+      if (selectedMemberUserIds && !(o.assignedUserId && selectedMemberUserIds.has(o.assignedUserId))) return false;
       return true;
     });
     const actionRank = (o: SalesEligibleOutlet) =>
@@ -181,7 +198,7 @@ function SalesVisibilityContent() {
       return d !== 0 ? d : a.outletName.localeCompare(b.outletName);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eligible, search, captured, statusFilter, programFilter]);
+  }, [eligible, search, captured, statusFilter, programFilter, selectedMemberUserIds]);
 
   const dueCount = useMemo(
     () =>
@@ -292,15 +309,24 @@ function SalesVisibilityContent() {
         </div>
       )}
 
-      {/* Filter strip — status · program (mirrors the KYC list). */}
+      {/* Filter strip — status · team member · program (mirrors the KYC list). Wraps so every
+          filter stays visible (no hidden horizontal scroll); long names are width-capped. */}
       {(eligible?.outlets.length ?? 0) > 0 && (
-        <div className="flex items-center gap-1.5 overflow-x-auto mb-4" style={{ scrollbarWidth: 'none' }}>
+        <div className="flex flex-wrap items-center gap-2 mb-4">
           <FilterPill value={statusFilter} onChange={(v) => setStatusFilter(v as CaptureUiState | 'ALL')} active={statusFilter !== 'ALL'}>
             <option value="ALL">All statuses</option>
             {statusOptions.map((s) => <option key={s} value={s}>{STATE_CONFIG[s].label}</option>)}
           </FilterPill>
+          {/* Team Member — managers only (a direct downline present). A plain rep gets no
+              members → not rendered. Same gate + sub-tree semantics as the Outlets screen. */}
+          {members.length > 0 && (
+            <FilterPill value={memberFilter} onChange={setMemberFilter} active={memberFilter !== ''} widthClass="max-w-[180px]">
+              <option value="">All team</option>
+              {members.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </FilterPill>
+          )}
           {programOptions.length > 1 && (
-            <FilterPill value={programFilter} onChange={setProgramFilter} active={programFilter !== 'ALL'}>
+            <FilterPill value={programFilter} onChange={setProgramFilter} active={programFilter !== 'ALL'} widthClass="max-w-[180px]">
               <option value="ALL">All programs</option>
               {programOptions.map((p) => <option key={p} value={p}>{p}</option>)}
             </FilterPill>
@@ -325,7 +351,7 @@ function SalesVisibilityContent() {
           </p>
           {anyFilter && (
             <button
-              onClick={() => { setSearch(''); setStatusFilter('ALL'); setProgramFilter('ALL'); }}
+              onClick={() => { setSearch(''); setStatusFilter('ALL'); setProgramFilter('ALL'); setMemberFilter(''); }}
               className="text-xs text-[var(--brand-primary)] font-semibold hover:underline mt-1"
             >
               Clear all filters

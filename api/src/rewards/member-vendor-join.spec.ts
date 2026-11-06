@@ -30,7 +30,8 @@ const mockPrisma = {
   // clients.features read for the per-tenant feature flags (catalogueMrpSlash, etc.).
   // Default OFF → listCatalog neither selects the cost basis nor emits slashPoints.
   client: { findFirst: jest.fn().mockResolvedValue({ features: {} }) },
-  redemptionOrder: { create: jest.fn(), updateMany: jest.fn() },
+  // findMany: the supersede-abandoned-PENDING read (shared order-status-transition) — none by default.
+  redemptionOrder: { create: jest.fn(), updateMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   otpCode: { create: jest.fn(), deleteMany: jest.fn() },
   $executeRaw: jest.fn().mockResolvedValue(1),
   $queryRaw: jest.fn().mockResolvedValue([]),

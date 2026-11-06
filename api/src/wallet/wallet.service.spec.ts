@@ -5,7 +5,7 @@
 // Run: npx jest src/wallet/wallet.service.spec.ts
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Logger, NotFoundException } from '@nestjs/common';
 import { WalletService } from './wallet.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -601,6 +601,160 @@ describe('WalletService', () => {
       expect(res.transactions[0].narration).toBe('Redeemed a voucher');
       // No CREDIT_BATCH txns → the batch lookup is skipped entirely.
       expect(mockPrisma.creditBatch.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── statement — full, UNPAGINATED statement with stored balances (GET /v1/wallet/statement) ──
+  describe('statement', () => {
+    const row = (p: { id: string; at: string; type?: string; points: number; before: number; after: number; description?: string | null }) => ({
+      id: p.id,
+      createdAt: new Date(p.at),
+      transactionType: p.type ?? (p.points >= 0 ? 'CREDIT_POINTS_EARNED' : 'DEBIT_REDEMPTION'),
+      points: p.points,
+      balanceBefore: p.before,
+      balanceAfter: p.after,
+      description: p.description ?? null,
+      referenceType: null,
+      referenceId: null,
+    });
+    let warnSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    });
+    afterEach(() => warnSpy.mockRestore());
+
+    it('a foreign x-active-partner-id → ForbiddenException (same access boundary as the passbook)', async () => {
+      mockPrisma.channelPartner.findFirst.mockImplementation((args: any) =>
+        args.where.userId ? Promise.resolve({ id: 'cp1', groupId: 'g1' }) : Promise.resolve(null),
+      );
+      await expect(service.statement(switcher, {}, 'someone-else')).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.walletTransaction.findMany).not.toHaveBeenCalled();
+    });
+
+    it('no operable partner → an empty zero statement', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      await expect(service.statement(partner, {})).resolves.toEqual({
+        openingBalance: 0,
+        closingBalance: 0,
+        currentBalance: 0,
+        outletCode: '',
+        rows: [],
+      });
+    });
+
+    it('no wallet yet (pre-KYC) → an empty zero statement, not a 404', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue(null);
+      await expect(service.statement(partner, {})).resolves.toEqual({
+        openingBalance: 0,
+        closingBalance: 0,
+        currentBalance: 0,
+        outletCode: '',
+        rows: [],
+      });
+      expect(mockPrisma.walletTransaction.findMany).not.toHaveBeenCalled();
+    });
+
+    it('returns every row oldest-first with stored balances, currentBalance and the API row shape', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 66 });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletCode: 'OUT-1' });
+      // 25 rows: more than the old 20-row passbook page, so the statement can't be truncated.
+      const rows = [] as ReturnType<typeof row>[];
+      let bal = 0;
+      for (let i = 0; i < 25; i++) {
+        const pts = i === 24 ? -30 : 4;
+        rows.push(row({ id: `t${String(i).padStart(2, '0')}`, at: `2026-01-${String(i + 1).padStart(2, '0')}T06:00:00Z`, points: pts, before: bal, after: bal + pts }));
+        bal += pts;
+      }
+      rows[24].description = 'Redeemed a voucher';
+      mockPrisma.walletTransaction.findMany.mockResolvedValue(rows);
+
+      const res = await service.statement(partner, {});
+
+      expect(mockPrisma.wallet.findFirst).toHaveBeenCalledWith({ where: { partnerId: 'cp1' } });
+      expect(res.rows).toHaveLength(25);
+      expect(res.openingBalance).toBe(0);
+      expect(res.closingBalance).toBe(66); // 24 × 4 − 30
+      expect(res.currentBalance).toBe(66);
+      expect(res.outletCode).toBe('OUT-1'); // the outlet whose field names were resolved
+      expect(res.rows[0]).toEqual({
+        id: 't00',
+        date: '2026-01-01T06:00:00.000Z',
+        transactionType: 'CREDIT_POINTS_EARNED',
+        description: 'Points earned', // getDefaultDescription fallback
+        narration: null, // RAW description
+        fieldName: null,
+        points: 4,
+        balanceBefore: 0,
+        balanceAfter: 4,
+        referenceType: null,
+        referenceId: null,
+      });
+      expect(res.rows[24]).toMatchObject({ points: -30, balanceAfter: 66, description: 'Redeemed a voucher', narration: 'Redeemed a voucher' });
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it('passes from/to through as an IST month window', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 145 });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletCode: 'OUT-1' });
+      mockPrisma.walletTransaction.findMany.mockResolvedValue([
+        row({ id: 'a', at: '2026-03-15T00:00:00Z', points: 100, before: 0, after: 100 }),
+        row({ id: 'b', at: '2026-04-15T00:00:00Z', points: 45, before: 100, after: 145 }),
+      ]);
+      const res = await service.statement(partner, { from: '2026-04', to: '2026-04' });
+      expect(res.rows.map((r) => r.id)).toEqual(['b']);
+      expect(res.openingBalance).toBe(100);
+      expect(res.closingBalance).toBe(145);
+    });
+
+    it('tie-out: a full statement whose closing ≠ the live wallet balance logs a warning and still returns the stored values', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 999 });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletCode: 'OUT-1' });
+      mockPrisma.walletTransaction.findMany.mockResolvedValue([
+        row({ id: 'a', at: '2026-03-15T00:00:00Z', points: 100, before: 0, after: 100 }),
+      ]);
+      const res = await service.statement(partner, {});
+      expect(res.closingBalance).toBe(100);
+      expect(res.currentBalance).toBe(999);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const msg = String(warnSpy.mock.calls[0][0]);
+      expect(msg).toContain('w1');
+      expect(msg).toContain('100');
+      expect(msg).toContain('999');
+    });
+
+    it('tie-out: a broken balance chain (a row whose balanceBefore ≠ the previous balanceAfter) logs a warning and keeps the stored values', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 260 });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletCode: 'OUT-1' });
+      mockPrisma.walletTransaction.findMany.mockResolvedValue([
+        row({ id: 'a', at: '2026-03-15T00:00:00Z', points: 100, before: 0, after: 100 }),
+        // gap: before should be 100
+        row({ id: 'b', at: '2026-03-16T00:00:00Z', points: 10, before: 250, after: 260 }),
+      ]);
+      const res = await service.statement(partner, {});
+      expect(res.rows.map((r) => r.balanceAfter)).toEqual([100, 260]);
+      expect(res.closingBalance).toBe(260);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const msg = String(warnSpy.mock.calls[0][0]);
+      expect(msg).toContain('w1');
+      expect(msg).toMatch(/chain/i);
+    });
+
+    it('the tie-out runs on the FULL history, so a mid-history range of a consistent wallet logs nothing', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 145 });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletCode: 'OUT-1' });
+      mockPrisma.walletTransaction.findMany.mockResolvedValue([
+        row({ id: 'a', at: '2026-03-15T00:00:00Z', points: 100, before: 0, after: 100 }),
+        row({ id: 'b', at: '2026-04-15T00:00:00Z', points: 45, before: 100, after: 145 }),
+      ]);
+      await service.statement(partner, { from: '2026-03', to: '2026-03' });
+      expect(warnSpy).not.toHaveBeenCalled();
     });
   });
 

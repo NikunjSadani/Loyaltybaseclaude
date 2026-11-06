@@ -13,7 +13,7 @@ import { WalletService } from './wallet.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Public, Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { AdjustWalletDto, AdminOutletTxQueryDto, ListTransactionsQueryDto } from './dto/wallet.dto';
+import { AdjustWalletDto, AdminOutletTxQueryDto, ListTransactionsQueryDto, StatementQueryDto } from './dto/wallet.dto';
 
 /**
  * Wallet & Points API — re-homed from platform/src/app/api/wallet/* onto /v1.
@@ -54,6 +54,22 @@ export class WalletController {
     @Headers('x-active-partner-id') activePartnerId?: string,
   ) {
     return this.wallet.listTransactions(user, query, activePartnerId);
+  }
+
+  /**
+   * GET /v1/wallet/statement?from=YYYY-MM&to=YYYY-MM — the ACTIVE partner's FULL, unpaginated
+   * points statement (oldest first) with the stored per-row balances + opening/closing balance.
+   * Feeds the on-screen statement AND the Excel/PDF download. Same guards as `transactions`.
+   */
+  @Get('statement')
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
+  @RequirePermission('wallet:read')
+  statement(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: StatementQueryDto,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.wallet.statement(user, query, activePartnerId);
   }
 
   // Total points CREDITED (earned) in a given IST calendar month — a scale-safe aggregate

@@ -203,7 +203,8 @@ function mapRowToOutletData(
 }
 
 /** create payload for a new Outlet — partnerId omitted (NULL); created PENDING.
- *  A CREATE always persists a payout mandate — a blank cell defaults to BANK.
+ *  A CREATE always persists a payout mandate — a blank cell defaults to ANY (free choice;
+ *  the tenant UPI gate still forces bank when upiEnabled=false).
  *  parentId (owner-group link) is written only when a Parent ID resolved to a parent. */
 function buildOutletCreate(
   clientId: string,
@@ -990,7 +991,7 @@ export class AdminOutletsService {
       }
 
       // 2b. Resolve the payout MANDATE (optional column). Blank → null here (CREATE defaults it
-      //     to BANK; UPDATE leaves the existing value untouched). A non-blank cell must parse to
+      //     to ANY = free choice; UPDATE leaves the existing value untouched). A non-blank cell must parse to
       //     BANK/UPI/ANY, and a UPI cell is REJECTED when the tenant has UPI disabled.
       let requiredPaymentType: OutletPaymentType | null = null;
       const rawPayout = (row.payoutMethod ?? '').trim();
@@ -1127,7 +1128,11 @@ export class AdminOutletsService {
               clientId,
               outletCode,
               data,
-              requiredPaymentType ?? OutletPaymentType.BANK,
+              // Blank Payout cell on CREATE → ANY (free choice): the partner picks bank or UPI
+              // at KYC/redemption, subject to the tenant UPI gate (upiEnabled=false still forces
+              // bank, so Deoleo is unaffected). Was BANK — changed so a blank import doesn't
+              // silently mandate a rail (owner, Bajaj free-choice).
+              requiredPaymentType ?? OutletPaymentType.ANY,
               linkParentId,
             ),
             // UPDATE only overwrites the mandate when the column was present/non-blank, and

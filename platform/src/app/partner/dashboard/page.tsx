@@ -18,12 +18,12 @@ import {
   type Banner, type Popup,
 } from '@/lib/banner';
 import { formatPoints } from '@/lib/utils';
-import { formatInrCompact, isInrUnit } from '@/lib/format-inr';
+import { formatInrCompact, formatCompact, isInrUnit } from '@/lib/format-inr';
 import type { PayoutLedgerEntry } from '@/types';
 import { buildCasesToGoMsg, classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import type { OutletType } from '@/lib/partner-session';
-import { pct, currentPeriod } from '@/lib/targets';
+import { pct, pctColor, pctBarColor, currentPeriod } from '@/lib/targets';
 import { loadPortalSchemes, statusOf } from '@/app/partner/schemes/portal-api';
 import { formatLastUpdated, getLastSalesUploadDate } from '@/lib/sales-upload-utils';
 import { authHeader } from '@/lib/api-client';
@@ -438,6 +438,94 @@ function PerformanceCard({
   );
 }
 
+/* ─── Target Achievement card (multi-KPI breakdown for THIS outlet) ───────────
+   Mirrors the SALES dashboard's "Target Achievement" card, but scoped to the single
+   partner/outlet (aggKpis = this partner's KPIs, already loaded by the page — NO extra
+   fetch). One row per KPI (name + "achieved/target unit · pct%" coloured by pace, with a
+   thin progress bar), and a footer that REUSES the SAME remaining/days-left values the hero
+   computes (primary KPI remaining via kpiView's math + computePace().daysLeft) so the two
+   never disagree. No "PRIMARY" badge (intentionally dropped — see the sales card). Renders
+   nothing when there are no KPIs so it never shows a broken empty card.
+─────────────────────────────────────────────────────────────────────────────── */
+
+function TargetAchievementCard({ aggKpis }: { aggKpis: AggKpi[] }) {
+  // No targets at all → render nothing (the hero already carries the empty state).
+  if (aggKpis.length === 0) return null;
+
+  const { daysLeft, timePct } = computePace();
+  // Current IST month label for the muted header (matches how the dashboard labels periods).
+  const periodLabel = new Date().toLocaleDateString('en-IN', {
+    month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata',
+  });
+
+  // Footer derives from the PRIMARY KPI — the SAME remaining/unit the hero's "to go" banner
+  // uses (kpiView: remaining = max(0, target − achieved)); daysLeft is the shared computePace().
+  const primary       = aggKpis.find((k) => k.isPrimary) ?? aggKpis[0];
+  const primaryPct    = pct(primary.achieved, primary.target);
+  const primaryLeft   = Math.max(0, primary.target - primary.achieved);
+  const paceStatus    = primaryLeft === 0
+    ? 'green'
+    : classifyPaceGap(timePct - primaryPct, timePct, getGifsySettings().paceAmberThreshold ?? 10);
+  const paceBg        = paceStatus === 'green' ? 'bg-emerald-50' : paceStatus === 'amber' ? 'bg-amber-50' : 'bg-red-50';
+  const paceTextColor = paceStatus === 'green' ? 'text-emerald-700' : paceStatus === 'amber' ? 'text-amber-700' : 'text-red-600';
+  const footerText    = primaryLeft === 0
+    ? `${primary.name} target met 🎉`
+    : `${fmtKpiValue(primaryLeft, primary.unit)} to go · ${daysLeft} day${daysLeft !== 1 ? 's' : ''} left`;
+
+  return (
+    <Card data-testid="target-achievement-card">
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Target className="h-4 w-4 text-[var(--brand-primary)]" /> Target Achievement
+          </CardTitle>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-gray-400 font-medium">{periodLabel}</span>
+            {daysLeft > 0 && (
+              <span className={`text-[11px] font-semibold ${daysLeft <= 7 ? 'text-red-500' : daysLeft <= 14 ? 'text-amber-600' : 'text-gray-400'}`}>
+                · {daysLeft}d left
+              </span>
+            )}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-2.5">
+        {aggKpis.map((k) => {
+          const hasTarget = k.target > 0;
+          // pct() already guards target===0 → 0 (never NaN/Infinity).
+          const p         = pct(k.achieved, k.target);
+          const isInrKpi  = isInrUnit(k.unit);
+          // Paired achieved/target: "—" when there is no target; compact ₹ for INR units;
+          // en-IN grouped with the unit suffix otherwise (same rules as the sales card).
+          const paired = !hasTarget
+            ? '—'
+            : isInrKpi
+              ? `${formatCompact(k.achieved)}/${formatCompact(k.target)}`
+              : `${k.achieved.toLocaleString('en-IN')}/${k.target.toLocaleString('en-IN')}${k.unit ? ` ${k.unit}` : ''}`;
+          return (
+            <div key={k.code} className="space-y-1">
+              <div className="flex items-center gap-2">
+                <p className="text-xs font-medium text-gray-700 flex-1 truncate">{k.name}</p>
+                <span className={`text-[11px] font-bold shrink-0 ${pctColor(p)}`}>
+                  {paired} · {p}%
+                </span>
+              </div>
+              <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                <div className={`h-full rounded-full transition-all ${pctBarColor(p)}`} style={{ width: `${Math.min(p, 100)}%` }} />
+              </div>
+            </div>
+          );
+        })}
+
+        <div className={`flex items-center gap-1.5 text-[11px] font-semibold px-2 py-1.5 rounded-lg mt-1 ${paceBg} ${paceTextColor}`}>
+          <TrendingUp className="h-3 w-3 shrink-0" />
+          {footerText}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 /* ─── Quick actions (outlet-specific) ────────────────────────────────────── */
 
 function QuickActions({ outletType }: { outletType: OutletType }) {
@@ -561,7 +649,7 @@ function WholesalerHero({
       <div className={`border-t border-white/10 bg-black/25 px-4 flex items-center justify-between ${v2 ? 'py-4' : 'py-3'}`}>
         <div>
           <p className="text-[10px] text-white/40 font-medium mb-0.5">Available</p>
-          <p className={`font-extrabold text-white ${v2 ? 'text-4xl leading-none' : 'text-base'}`}>
+          <p className={`font-extrabold text-white ${v2 ? 'text-3xl leading-none' : 'text-base'}`}>
             {walletPoints === null ? '—' : formatPoints(walletPoints)}
             <span className={`font-medium text-white/50 ml-1 ${v2 ? 'text-base' : 'text-sm'}`}>pts</span>
           </p>
@@ -1040,6 +1128,12 @@ export default function PartnerDashboard() {
             hasPayoutActivity={identity.hasPayoutActivity}
           />
         : <PerformanceChart primary={primary} />}
+
+      {/* ── 2b. TARGET ACHIEVEMENT — full multi-KPI breakdown for THIS outlet, directly below
+             the Performance card. v2 ONLY: the non-v2 (Deoleo) dashboard already renders a
+             Target-vs-Achievement chart above, so the card would duplicate it there. Reuses the
+             aggKpis the page already loaded (no extra fetch); self-hides when the outlet has no KPIs. ── */}
+      {v2 && <TargetAchievementCard aggKpis={aggKpis} />}
 
       {/* ── 3. QUICK ACTIONS ── */}
       <QuickActions outletType={outletType} />
