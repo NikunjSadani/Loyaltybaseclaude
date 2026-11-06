@@ -6,7 +6,7 @@
 > approved scope, but **re-confirm D1 with the owner before building the backend tasks**. No schema change and no
 > migration under any option.
 >
-> **Status:** OWNER DECISIONS RECORDED (see table below) — build in progress. Written 2026-11-06 against develop `35e6ad8c`.
+> **Status:** BUILT 2026-11-06 (not pushed) — `2bf64006` shared transition fn · `7506cd22` cash UTR · `2eeffbe5` all other status writers · `cf9a0c02` D4 hide never-confirmed + D5 refundedAt · `5fca4b36` step builder · `841e4fac` OrderStepper · `0a8bee73` page wiring · `96d0ff8a` /track dates. No migration, forward-only history, legacy gaps remain by design. The "Not confirmed" step (old D4=A) was not built: those orders are now hidden by the backend. Written 2026-11-06 against develop `35e6ad8c`.
 
 ---
 
