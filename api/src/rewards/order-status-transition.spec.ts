@@ -142,6 +142,7 @@ describe('supersedePendingOrders — auto-cancel of abandoned PENDING orders', (
     expect(tx.redemptionOrder.findMany).toHaveBeenCalledWith({
       where: { partnerId: 'p1', status: 'PENDING' },
       select: { id: true },
+      orderBy: { id: 'asc' }, // consistent lock order across concurrent redeems
     });
     expect(tx.redemptionOrder.updateMany).toHaveBeenNthCalledWith(1, {
       where: { id: 'a', partnerId: 'p1', status: 'PENDING' },

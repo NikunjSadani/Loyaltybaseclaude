@@ -598,16 +598,26 @@ export class RewardsService {
       // Order-timeline D4 (owner): hide NEVER-CONFIRMED orders from the partner's My Orders —
       // a CANCELLED order that never reached CONFIRMED (abandoned/superseded OTP, or an ops
       // cancel of a PENDING order), so no points were ever deducted. "Never confirmed" =
-      // CANCELLED, no dispatch/delivery stamp, and no history row at/after CONFIRMED (the
-      // confirm paths have always written the PENDING→CONFIRMED row in the confirm tx, and
-      // only redeem/redeemForOutlet create orders, so this holds for legacy rows too).
+      // CANCELLED, no dispatch/delivery stamp, and no history row that proves confirmation.
+      // A row proves it when EITHER its toStatus (it moved INTO a reached-confirmed status, e.g.
+      // PENDING→CONFIRMED) OR its fromStatus (it moved OUT of one, e.g. CONFIRMED→CANCELLED) is
+      // in the set — the second clause covers an order whose PENDING→CONFIRMED row is missing.
+      // (The confirm paths have always written PENDING→CONFIRMED in the confirm tx and only
+      // redeem/redeemForOutlet create orders, so this holds for legacy rows too.)
       // In the WHERE so findMany + count (pagination) agree. Member branch only: the
       // Gifsy/admin views are unchanged.
       where.NOT = {
         status: RedemptionStatus.CANCELLED,
         dispatchedAt: null,
         deliveredAt: null,
-        statusHistory: { none: { toStatus: { in: REACHED_CONFIRMED_STATUSES } } },
+        statusHistory: {
+          none: {
+            OR: [
+              { toStatus: { in: REACHED_CONFIRMED_STATUSES } },
+              { fromStatus: { in: REACHED_CONFIRMED_STATUSES } },
+            ],
+          },
+        },
       };
     }
     if (q.status) where.status = q.status;
@@ -1196,8 +1206,11 @@ export class RewardsService {
       try {
         await this.prisma.$transaction(async (tx) => {
           await tx.otpCode.deleteMany({ where: { userId: otpUserId, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null } });
+          // PENDING-guarded: never cancels (or writes history for) an order that a concurrent
+          // confirm already CONFIRMED or a later redeem already superseded.
           await transitionOrderStatus(tx, {
             orderId: order.id,
+            guard: { status: RedemptionStatus.PENDING },
             fromStatus: RedemptionStatus.PENDING,
             toStatus: RedemptionStatus.CANCELLED,
             data: { cancelledAt: new Date() },
@@ -1785,8 +1798,11 @@ export class RewardsService {
       try {
         await this.prisma.$transaction(async (tx) => {
           await tx.otpCode.deleteMany({ where: { userId: user.sub, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null } });
+          // PENDING-guarded: never cancels (or writes history for) an order that a concurrent
+          // confirm already CONFIRMED or a later redeem already superseded.
           await transitionOrderStatus(tx, {
             orderId: order.id,
+            guard: { status: RedemptionStatus.PENDING },
             fromStatus: RedemptionStatus.PENDING,
             toStatus: RedemptionStatus.CANCELLED,
             data: { cancelledAt: new Date() },

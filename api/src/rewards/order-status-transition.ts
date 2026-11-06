@@ -92,7 +92,8 @@ export async function supersedePendingOrders(
   now: Date,
 ): Promise<void> {
   const where = { partnerId, status: 'PENDING' as const };
-  const pending = await tx.redemptionOrder.findMany({ where, select: { id: true } });
+  // Claim in id order so two concurrent redeems lock rows in the same order (no deadlock).
+  const pending = await tx.redemptionOrder.findMany({ where, select: { id: true }, orderBy: { id: 'asc' } });
   for (const { id } of pending) {
     await transitionOrderStatus(tx, {
       orderId: id,

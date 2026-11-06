@@ -239,6 +239,23 @@ describe('VendorPortalService', () => {
       expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalled();
     });
 
+    it('order-timeline D1: the vendor transition writes its history row via the shared status transition (same tx)', async () => {
+      grantScope();
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'o1', status: 'PROCESSING', partnerId: 'cp1', orderNumber: 'D-26-1' });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'DISPATCHED' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      await service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never, trackingNumber: 'TRK1', notes: 'n1' });
+      expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.redemptionOrder.update).toHaveBeenCalledWith({
+        where: { id: 'o1' },
+        data: expect.objectContaining({ status: 'DISPATCHED', trackingNumber: 'TRK1', dispatchedAt: expect.any(Date) }),
+      });
+      expect(mockPrisma.redemptionStatusHistory.create).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.redemptionStatusHistory.create).toHaveBeenCalledWith({
+        data: { orderId: 'o1', fromStatus: 'PROCESSING', toStatus: 'DISPATCHED', changedById: 'vu1', notes: 'n1' },
+      });
+    });
+
     it('transition is idempotent (same status → skip)', async () => {
       grantScope();
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'o1', status: 'DISPATCHED', partnerId: 'cp1', orderNumber: 'D-26-1' });

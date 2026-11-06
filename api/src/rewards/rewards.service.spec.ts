@@ -560,7 +560,13 @@ describe('RewardsService', () => {
       dispatchedAt: null,
       deliveredAt: null,
       statusHistory: {
-        none: { toStatus: { in: ['CONFIRMED', 'PROCESSING', 'DISPATCHED', 'DELIVERED', 'RETURNED', 'FAILED'] } },
+        none: {
+          OR: [
+            { toStatus: { in: ['CONFIRMED', 'PROCESSING', 'DISPATCHED', 'DELIVERED', 'RETURNED', 'FAILED'] } },
+            // review: a CONFIRMED→CANCELLED row also proves confirmation (PENDING→CONFIRMED row missing)
+            { fromStatus: { in: ['CONFIRMED', 'PROCESSING', 'DISPATCHED', 'DELIVERED', 'RETURNED', 'FAILED'] } },
+          ],
+        },
       },
     };
 
@@ -1049,8 +1055,9 @@ describe('RewardsService', () => {
         .rejects.toBeInstanceOf(ServiceUnavailableException);
 
       // No debit happens at redeem, so cleanup = cancel the just-created order + clear the unverified OTP.
-      expect(mockPrisma.redemptionOrder.update).toHaveBeenCalledWith({
-        where: { id: 'o1' },
+      // The cancel is a PENDING-guarded claim so it can never undo a concurrent confirm (review fix).
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
+        where: { id: 'o1', status: 'PENDING' },
         data: { status: 'CANCELLED', cancelledAt: expect.any(Date) },
       });
       expect(mockPrisma.otpCode.deleteMany).toHaveBeenCalledWith({
@@ -1060,6 +1067,22 @@ describe('RewardsService', () => {
       expect(mockPrisma.redemptionStatusHistory.create).toHaveBeenCalledWith({
         data: { orderId: 'o1', fromStatus: 'PENDING', toStatus: 'CANCELLED', changedById: 'user1', notes: 'OTP could not be sent' },
       });
+    });
+
+    it('review: OTP-send-failure cleanup never touches an order a concurrent confirm already CONFIRMED (no history) and still 503s', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedItem);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.create.mockResolvedValue({ id: 'o1', orderNumber: 'RDM-x' });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
+      mockMsg91.sendOtp.mockRejectedValueOnce(new Error('MSG91 unreachable'));
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 0 }); // no longer PENDING
+
+      await expect(service.redeem(partner, { rewardId: 'r1', quantity: 1 }))
+        .rejects.toThrow('Could not send the confirmation OTP. Please try again in a moment.');
+
+      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
     });
 
     it('D1: superseding abandoned PENDING orders on redeem writes one PENDING→CANCELLED history row each', async () => {
@@ -1075,6 +1098,7 @@ describe('RewardsService', () => {
       expect(mockPrisma.redemptionOrder.findMany).toHaveBeenCalledWith({
         where: { partnerId: 'cp1', status: 'PENDING' },
         select: { id: true },
+        orderBy: { id: 'asc' },
       });
       for (const id of ['old1', 'old2']) {
         expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
@@ -1089,6 +1113,25 @@ describe('RewardsService', () => {
       // Superseding never touches money.
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
       expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('review: a superseded order that a concurrent confirm wins (claim count 0) gets no history row and redeem proceeds', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedItem);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.create.mockResolvedValue({ id: 'o-new', orderNumber: 'RDM-x' });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([{ id: 'raced' }]);
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 0 }); // confirmed concurrently
+
+      const res = await service.redeem(partner, { rewardId: 'r1', quantity: 1 });
+
+      expect(res.orderId).toBe('o-new');
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
+        where: { id: 'raced', partnerId: 'cp1', status: 'PENDING' },
+        data: { status: 'CANCELLED', cancelledAt: expect.any(Date) },
+      });
+      expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
     });
 
     it('D1: no abandoned PENDING orders → no supersede write and no history row', async () => {
@@ -1201,6 +1244,25 @@ describe('RewardsService', () => {
       const res = await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
       expect(res.status).toBe('CONFIRMED');
       expect(mockWallet.debitRedeem).toHaveBeenCalled();
+    });
+
+    it('review: inside the confirm tx the order is claim + history insert, then OTP consume, then debit', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(pendingOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+        expiresAt: new Date(Date.now() + 60000),
+      });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+
+      await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
+
+      const claimOrder = mockPrisma.redemptionOrder.updateMany.mock.invocationCallOrder[0];
+      const histOrder = mockPrisma.redemptionStatusHistory.create.mock.invocationCallOrder[0];
+      const otpOrder = mockPrisma.otpCode.update.mock.invocationCallOrder[0];
+      const debitOrder = mockWallet.debitRedeem.mock.invocationCallOrder[0];
+      expect(claimOrder).toBeLessThan(histOrder);
+      expect(histOrder).toBeLessThan(otpOrder);
+      expect(otpOrder).toBeLessThan(debitOrder);
     });
 
     it('happy path: debits via WalletService(tx), sets CONFIRMED, writes history', async () => {
@@ -1689,6 +1751,7 @@ describe('RewardsService', () => {
       expect(mockPrisma.redemptionOrder.findMany).toHaveBeenCalledWith({
         where: { partnerId: 'cp-sib', status: 'PENDING' },
         select: { id: true },
+        orderBy: { id: 'asc' },
       });
       expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
         where: { id: 'old-sib', partnerId: 'cp-sib', status: 'PENDING' },
@@ -1918,6 +1981,7 @@ describe('RewardsService', () => {
       expect(mockPrisma.redemptionOrder.findMany).toHaveBeenCalledWith({
         where: { partnerId: 'cp-out', status: 'PENDING' },
         select: { id: true },
+        orderBy: { id: 'asc' },
       });
       expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
         where: { id: 'old-out', partnerId: 'cp-out', status: 'PENDING' },
@@ -1972,8 +2036,8 @@ describe('RewardsService', () => {
       await expect(service.redeemForOutlet(sales, { rewardId: 'r1', quantity: 1, targetPartnerId: 'cp-out' }))
         .rejects.toBeInstanceOf(ServiceUnavailableException);
 
-      expect(mockPrisma.redemptionOrder.update).toHaveBeenCalledWith({
-        where: { id: 'o-out' },
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
+        where: { id: 'o-out', status: 'PENDING' },
         data: { status: 'CANCELLED', cancelledAt: expect.any(Date) },
       });
       expect(mockPrisma.redemptionStatusHistory.create).toHaveBeenCalledWith({
@@ -1981,6 +2045,18 @@ describe('RewardsService', () => {
       });
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
       expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('review: OTP-send-failure cleanup leaves an already-CONFIRMED outlet order untouched (no history) and still 503s', async () => {
+      wireAssigned();
+      mockMsg91.sendOtp.mockRejectedValueOnce(new Error('MSG91 unreachable'));
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(service.redeemForOutlet(sales, { rewardId: 'r1', quantity: 1, targetPartnerId: 'cp-out' }))
+        .rejects.toThrow('Could not send the confirmation OTP. Please try again in a moment.');
+
+      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
     });
 
     it('resolves the per-tenant redemptionSales template and passes it to sendOtp', async () => {
