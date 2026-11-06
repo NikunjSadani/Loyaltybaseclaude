@@ -1,4 +1,8 @@
-// Shared POINTS-STATEMENT builder: the single source of truth for a wallet's
+import { BadRequestException } from '@nestjs/common';
+import { CreditBatchReader, resolveCreditFieldNames } from './credit-field-name.helper';
+import { istMonthBounds } from './ist-date';
+
+// Shared POINTS-STATEMENT builder:the single source of truth for a wallet's
 // statement (passbook rows + opening/closing balance), used by BOTH the partner
 // wallet (GET /v1/wallet/statement) and the sales outlet ledger (GET /v1/kyc/:id/ledger
 // and /ledger/statement), so the two can never drift (mirrors payout-statement.helper).
@@ -102,4 +106,92 @@ export function buildStatementWindow(
   }
   const carried = lastBefore?.balanceAfter ?? 0;
   return { openingBalance: carried, closingBalance: carried, rows };
+}
+
+// ─── DB loader ────────────────────────────────────────────────────────────────
+
+/** Hard cap on rows in ONE statement range (the statement is deliberately unpaginated). */
+export const MAX_STATEMENT_ROWS = 20_000;
+
+const MONTH_KEY = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+/** The minimal Prisma shape the loader needs (PrismaService or a tx client both satisfy it). */
+export interface PointsStatementReader extends CreditBatchReader {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Prisma's generic findMany args
+  walletTransaction: { findMany: (args: any) => Promise<StatementTx[]> };
+}
+
+export type StatementRow = StatementTx & { fieldName: string | null };
+
+export interface PointsStatement {
+  openingBalance: number;
+  closingBalance: number;
+  rows: StatementRow[]; // OLDEST first
+}
+
+/**
+ * Load a wallet's full, UNPAGINATED points statement for an optional IST month range
+ * (`from`/`to` = 'YYYY-MM', both or neither, inclusive). Loads ALL main rows for the wallet in
+ * one query (per-wallet, indexed on walletId) so the same-timestamp chain ordering is correct at
+ * the window edge, then orders → windows → caps → attaches the credit field name (resolved over
+ * ALL the wallet's CREDIT_BATCH rows, exactly like loadPassbook, so consumption order is right).
+ *
+ * Tenant scope / caller authorization of `walletId` is the CALLER's responsibility; `clientId`
+ * scopes the credit-batch lookup.
+ */
+export async function loadPointsStatement(
+  prisma: PointsStatementReader,
+  args: { walletId: string; clientId: string; outletCode: string; from?: string; to?: string },
+): Promise<PointsStatement> {
+  const { from, to } = args;
+  if ((from === undefined) !== (to === undefined)) {
+    throw new BadRequestException('Provide both from and to (YYYY-MM), or neither.');
+  }
+  let window: { start?: Date; endExclusive?: Date } = {};
+  if (from !== undefined && to !== undefined) {
+    if (!MONTH_KEY.test(from) || !MONTH_KEY.test(to)) {
+      throw new BadRequestException('from and to must be YYYY-MM months.');
+    }
+    if (from > to) throw new BadRequestException('from must not be after to.');
+    window = { start: istMonthBounds(from).start, endExclusive: istMonthBounds(to).endExclusive };
+  }
+
+  const all = await prisma.walletTransaction.findMany({
+    where: { walletId: args.walletId, transactionType: { notIn: [...NON_STATEMENT_TX_TYPES] } },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    select: {
+      id: true,
+      createdAt: true,
+      transactionType: true,
+      points: true,
+      balanceBefore: true,
+      balanceAfter: true,
+      description: true,
+      referenceType: true,
+      referenceId: true,
+    },
+  });
+
+  const { openingBalance, closingBalance, rows } = buildStatementWindow(
+    orderStatementRows(all),
+    window,
+  );
+  if (rows.length > MAX_STATEMENT_ROWS) {
+    throw new BadRequestException(
+      `This statement has more than ${MAX_STATEMENT_ROWS} transactions. Please narrow the date range.`,
+    );
+  }
+
+  const fieldNameByTxId = await resolveCreditFieldNames(
+    prisma,
+    args.clientId,
+    args.outletCode,
+    all.filter((r) => r.referenceType === 'CREDIT_BATCH'),
+  );
+
+  return {
+    openingBalance,
+    closingBalance,
+    rows: rows.map((r) => ({ ...r, fieldName: fieldNameByTxId.get(r.id) ?? null })),
+  };
 }

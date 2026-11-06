@@ -1,4 +1,16 @@
-import { buildStatementWindow, orderStatementRows, StatementTx } from './points-statement.helper';
+import { BadRequestException } from '@nestjs/common';
+import { resolveCreditFieldNames } from './credit-field-name.helper';
+import {
+  buildStatementWindow,
+  loadPointsStatement,
+  MAX_STATEMENT_ROWS,
+  orderStatementRows,
+  StatementTx,
+} from './points-statement.helper';
+
+jest.mock('./credit-field-name.helper', () => ({
+  resolveCreditFieldNames: jest.fn(),
+}));
 
 /** Tiny fixture factory: only the fields a test cares about. */
 function tx(p: {
@@ -202,5 +214,126 @@ describe('buildStatementWindow', () => {
     expect(ordered.map((r) => r.id)).toEqual(rows.map((r) => r.id));
     expect(w.closingBalance).toBe(bal);
     expect(ms).toBeLessThan(200);
+  });
+});
+
+describe('loadPointsStatement', () => {
+  const resolveMock = resolveCreditFieldNames as jest.MockedFunction<typeof resolveCreditFieldNames>;
+
+  function makePrisma(rows: StatementTx[]) {
+    return {
+      walletTransaction: { findMany: jest.fn().mockResolvedValue(rows) },
+      creditBatch: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+  }
+  const base = { walletId: 'w1', clientId: 'c1', outletCode: 'OUT1' };
+  const credit = (p: Parameters<typeof tx>[0], batchId: string): StatementTx => ({
+    ...tx(p),
+    referenceType: 'CREDIT_BATCH',
+    referenceId: batchId,
+  });
+
+  beforeEach(() => {
+    resolveMock.mockReset();
+    resolveMock.mockResolvedValue(new Map());
+  });
+
+  it('loads ALL main rows for the wallet in one unpaginated query (no take/skip)', async () => {
+    const prisma = makePrisma([]);
+    await loadPointsStatement(prisma, base);
+    expect(prisma.walletTransaction.findMany).toHaveBeenCalledTimes(1);
+    const args = prisma.walletTransaction.findMany.mock.calls[0][0];
+    expect(args.where).toEqual({
+      walletId: 'w1',
+      transactionType: { notIn: ['LOCK_HOLDING', 'UNLOCK_HOLDING'] },
+    });
+    expect(args.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }]);
+    expect(args).not.toHaveProperty('take');
+    expect(args).not.toHaveProperty('skip');
+  });
+
+  it('windows on exact IST month bounds (2026-04..2026-06 = 2026-03-31T18:30Z .. 2026-06-30T18:30Z)', async () => {
+    const prisma = makePrisma([
+      tx({ id: 'mar', at: '2026-03-31T18:29:59.000Z', points: 100, before: 0, after: 100 }),
+      tx({ id: 'apr', at: '2026-03-31T18:30:00.000Z', points: 50, before: 100, after: 150 }),
+      tx({ id: 'jun', at: '2026-06-30T18:29:59.999Z', points: -10, before: 150, after: 140 }),
+      tx({ id: 'jul', at: '2026-06-30T18:30:00.000Z', points: 5, before: 140, after: 145 }),
+    ]);
+    const out = await loadPointsStatement(prisma, { ...base, from: '2026-04', to: '2026-06' });
+    // 'mar' (still 31 Mar IST) falls into the opening; 'apr' (1 Apr IST) is the first in-range row.
+    expect(out.rows.map((r) => r.id)).toEqual(['apr', 'jun']);
+    expect(out.openingBalance).toBe(100);
+    expect(out.closingBalance).toBe(140);
+  });
+
+  it('with no range returns the whole history', async () => {
+    const prisma = makePrisma([
+      tx({ id: 'a', at: '2026-01-01T00:00:00Z', points: 100, before: 0, after: 100 }),
+      tx({ id: 'b', at: '2026-02-01T00:00:00Z', points: -30, before: 100, after: 70 }),
+    ]);
+    const out = await loadPointsStatement(prisma, base);
+    expect(out.rows.map((r) => r.id)).toEqual(['a', 'b']);
+    expect(out.openingBalance).toBe(0);
+    expect(out.closingBalance).toBe(70);
+  });
+
+  it('attaches fieldName resolved over ALL the wallet CREDIT_BATCH rows, not only the windowed ones', async () => {
+    const prisma = makePrisma([
+      credit({ id: 'cb1', at: '2026-01-15T00:00:00Z', points: 100, before: 0, after: 100 }, 'b1'),
+      credit({ id: 'cb2', at: '2026-04-15T00:00:00Z', points: 40, before: 100, after: 140 }, 'b1'),
+      tx({ id: 'red', at: '2026-04-20T00:00:00Z', points: -40, before: 140, after: 100 }),
+    ]);
+    resolveMock.mockResolvedValue(
+      new Map([
+        ['cb1', 'Volume'],
+        ['cb2', 'Visibility'],
+      ]),
+    );
+
+    const out = await loadPointsStatement(prisma, { ...base, from: '2026-04', to: '2026-04' });
+
+    expect(resolveMock).toHaveBeenCalledTimes(1);
+    const [reader, clientId, outletCode, txns] = resolveMock.mock.calls[0];
+    expect(reader).toBe(prisma);
+    expect(clientId).toBe('c1');
+    expect(outletCode).toBe('OUT1');
+    expect(txns.map((t) => t.id).sort()).toEqual(['cb1', 'cb2']);
+    expect(out.rows.map((r) => [r.id, r.fieldName])).toEqual([
+      ['cb2', 'Visibility'],
+      ['red', null],
+    ]);
+  });
+
+  it(`rejects a range with more than MAX_STATEMENT_ROWS (${MAX_STATEMENT_ROWS}) rows, asking to narrow the date range`, async () => {
+    const rows: StatementTx[] = [];
+    for (let i = 0; i <= MAX_STATEMENT_ROWS; i++) {
+      rows.push(
+        tx({
+          id: `r${String(i).padStart(6, '0')}`,
+          at: new Date(Date.UTC(2026, 0, 1) + i * 1000),
+          points: 1,
+          before: i,
+          after: i + 1,
+        }),
+      );
+    }
+    const prisma = makePrisma(rows);
+    const run = loadPointsStatement(prisma, base);
+    await expect(run).rejects.toThrow(BadRequestException);
+    await expect(run).rejects.toThrow(/narrow the date range/i);
+  });
+
+  it.each([
+    ['only from', { from: '2026-04' }],
+    ['only to', { to: '2026-04' }],
+    ['a malformed month', { from: '2026-4', to: '2026-05' }],
+    ['month 13', { from: '2026-13', to: '2026-13' }],
+    ['from after to', { from: '2026-06', to: '2026-04' }],
+  ])('rejects %s with BadRequestException before querying', async (_label, range) => {
+    const prisma = makePrisma([]);
+    await expect(loadPointsStatement(prisma, { ...base, ...range })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(prisma.walletTransaction.findMany).not.toHaveBeenCalled();
   });
 });
