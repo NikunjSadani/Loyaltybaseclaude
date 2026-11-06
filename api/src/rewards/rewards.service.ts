@@ -195,6 +195,16 @@ interface HubbleLoadedOrder {
   reward: { metadata: Prisma.JsonValue } | null;
 }
 
+/** Statuses that prove an order got past OTP confirmation (points were deducted). */
+const REACHED_CONFIRMED_STATUSES: RedemptionStatus[] = [
+  RedemptionStatus.CONFIRMED,
+  RedemptionStatus.PROCESSING,
+  RedemptionStatus.DISPATCHED,
+  RedemptionStatus.DELIVERED,
+  RedemptionStatus.RETURNED,
+  RedemptionStatus.FAILED,
+];
+
 @Injectable()
 export class RewardsService {
   private readonly logger = new Logger(RewardsService.name);
@@ -585,6 +595,20 @@ export class RewardsService {
       // switched sibling named by x-active-partner-id — re-authorized here).
       const activePartnerId = await this.resolveActive(user, requestedPartnerId);
       where.partnerId = activePartnerId ?? 'none';
+      // Order-timeline D4 (owner): hide NEVER-CONFIRMED orders from the partner's My Orders —
+      // a CANCELLED order that never reached CONFIRMED (abandoned/superseded OTP, or an ops
+      // cancel of a PENDING order), so no points were ever deducted. "Never confirmed" =
+      // CANCELLED, no dispatch/delivery stamp, and no history row at/after CONFIRMED (the
+      // confirm paths have always written the PENDING→CONFIRMED row in the confirm tx, and
+      // only redeem/redeemForOutlet create orders, so this holds for legacy rows too).
+      // In the WHERE so findMany + count (pagination) agree. Member branch only: the
+      // Gifsy/admin views are unchanged.
+      where.NOT = {
+        status: RedemptionStatus.CANCELLED,
+        dispatchedAt: null,
+        deliveredAt: null,
+        statusHistory: { none: { toStatus: { in: REACHED_CONFIRMED_STATUSES } } },
+      };
     }
     if (q.status) where.status = q.status;
 
@@ -703,6 +727,20 @@ export class RewardsService {
       }
     }
 
+    // Order-timeline D5: when were this order's points refunded, if ever? Every refund goes
+    // through wallet.reverse → one CREDIT_REVERSAL row referencing the order (indexed on
+    // referenceType+referenceId), scoped to the order's own wallet. null = no refund recorded.
+    const refund = await this.prisma.walletTransaction.findFirst({
+      where: {
+        transactionType: 'CREDIT_REVERSAL',
+        referenceType: 'REDEMPTION_ORDER',
+        referenceId: order.id,
+        wallet: { partnerId: order.partnerId },
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { createdAt: true },
+    });
+
     // NOTE: `fulfilmentChannel` is an ops-only field and is deliberately NOT surfaced on
     // the member tracking payload (matches the docstring's member-safe promise).
     return {
@@ -718,6 +756,7 @@ export class RewardsService {
         dispatchedAt: order.dispatchedAt,
         deliveredAt: order.deliveredAt,
         cancelledAt: order.cancelledAt,
+        refundedAt: refund?.createdAt ?? null,
         timeline: order.statusHistory,
       },
     };

@@ -40,6 +40,8 @@ const mockPrisma = {
   outletTypeClientConfig: { findUnique: jest.fn() },
   auditLog: { create: jest.fn() },
   wallet: { findFirst: jest.fn() },
+  // trackOrder reads the order's refund (CREDIT_REVERSAL) wallet row — order-timeline D5.
+  walletTransaction: { findFirst: jest.fn() },
   otpCode: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), deleteMany: jest.fn() },
   rewardCategory: {
     findFirst: jest.fn(),
@@ -550,6 +552,55 @@ describe('RewardsService', () => {
   });
 
   describe('listOrders', () => {
+    // Order-timeline D4 (owner): a partner's My Orders HIDES never-confirmed orders — CANCELLED
+    // with no history row at/after CONFIRMED and no dispatch/delivery stamp (no points were ever
+    // deducted). Applied in the WHERE so findMany + count (pagination) agree. Locked literally.
+    const HIDE_NEVER_CONFIRMED = {
+      status: 'CANCELLED',
+      dispatchedAt: null,
+      deliveredAt: null,
+      statusHistory: {
+        none: { toStatus: { in: ['CONFIRMED', 'PROCESSING', 'DISPATCHED', 'DELIVERED', 'RETURNED', 'FAILED'] } },
+      },
+    };
+
+    it('D4: the member exclusion is applied to BOTH the page query and the count (pagination stays correct)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(7);
+
+      const res = await service.listOrders(partner, { page: 2, limit: 5 });
+
+      const findWhere = mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where;
+      const countWhere = mockPrisma.redemptionOrder.count.mock.calls[0][0].where;
+      expect(findWhere.NOT).toEqual(HIDE_NEVER_CONFIRMED);
+      expect(countWhere).toEqual(findWhere);
+      expect(res.pagination).toEqual({ page: 2, limit: 5, total: 7, pages: 2 });
+    });
+
+    it('D4: a member status filter still combines with the exclusion (CANCELLED shows only once-confirmed cancels)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(0);
+
+      await service.listOrders(partner, { status: 'CANCELLED' as never });
+
+      expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where).toEqual({
+        partner: { clientId: 'deoleo' }, partnerId: 'cp1', status: 'CANCELLED', NOT: HIDE_NEVER_CONFIRMED,
+      });
+    });
+
+    it('D4: admin (GIFSY) order views are unchanged — no exclusion, never-confirmed cancels still listed', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(0);
+
+      await service.listOrders(gifsy, { status: 'CANCELLED' as never });
+
+      const where = mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({ partner: { clientId: 'deoleo' }, status: 'CANCELLED' });
+      expect(where.NOT).toBeUndefined();
+    });
+
     it('scopes a non-admin to their own partner orders', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
       mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
@@ -560,7 +611,7 @@ describe('RewardsService', () => {
       // switched sibling's orders are visible); non-admin still pins to their partnerId.
       expect(mockPrisma.redemptionOrder.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { partner: { clientId: 'deoleo' }, partnerId: 'cp1' },
+          where: { partner: { clientId: 'deoleo' }, partnerId: 'cp1', NOT: HIDE_NEVER_CONFIRMED },
         }),
       );
     });
@@ -573,7 +624,7 @@ describe('RewardsService', () => {
       await service.listOrders(partner, {});
       expect(mockPrisma.redemptionOrder.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { partner: { clientId: 'deoleo' }, partnerId: 'none' },
+          where: { partner: { clientId: 'deoleo' }, partnerId: 'none', NOT: HIDE_NEVER_CONFIRMED },
         }),
       );
     });
@@ -602,7 +653,7 @@ describe('RewardsService', () => {
       await service.listOrders(partner, {}, 'cp-sib');
       expect(mockPrisma.redemptionOrder.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { partner: { clientId: 'deoleo' }, partnerId: 'cp-sib' },
+          where: { partner: { clientId: 'deoleo' }, partnerId: 'cp-sib', NOT: HIDE_NEVER_CONFIRMED },
         }),
       );
     });
@@ -701,6 +752,57 @@ describe('RewardsService', () => {
       const call = mockPrisma.redemptionOrder.findFirst.mock.calls[0][0];
       expect(call.include.statusHistory.select).toEqual({ fromStatus: true, toStatus: true, createdAt: true });
       expect(call.include.statusHistory.select.notes).toBeUndefined();
+    });
+
+    // Order-timeline D5: "Points refunded" is shown ONLY when a refund was actually recorded —
+    // every refund goes through wallet.reverse → a CREDIT_REVERSAL wallet row whose
+    // referenceId is the order id (referenceType REDEMPTION_ORDER).
+    const trackable = (over: Record<string, unknown> = {}) => ({
+      id: 'o1', partnerId: 'cp1', orderNumber: 'D-1', status: 'CANCELLED',
+      reward: { id: 'r1', name: 'TV', imageUrls: [] }, quantity: 1,
+      logisticsPartner: null, trackingNumber: null, trackingUrl: null,
+      dispatchedAt: null, deliveredAt: null, cancelledAt: new Date('2026-05-02T00:00:00Z'),
+      statusHistory: [],
+      ...over,
+    });
+
+    it('D5: returns refundedAt from the order’s CREDIT_REVERSAL wallet row (scoped to the order’s own wallet)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(trackable());
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      const refundedAt = new Date('2026-05-02T00:00:01Z');
+      mockPrisma.walletTransaction.findFirst.mockResolvedValue({ createdAt: refundedAt });
+
+      const res = await service.trackOrder(partner, 'o1');
+
+      expect(res.tracking.refundedAt).toEqual(refundedAt);
+      expect(mockPrisma.walletTransaction.findFirst).toHaveBeenCalledWith({
+        where: {
+          transactionType: 'CREDIT_REVERSAL',
+          referenceType: 'REDEMPTION_ORDER',
+          referenceId: 'o1',
+          wallet: { partnerId: 'cp1' },
+        },
+        orderBy: { createdAt: 'asc' },
+        select: { createdAt: true },
+      });
+    });
+
+    it('D5: refundedAt is null when no refund was recorded (e.g. a cancel that never deducted points)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(trackable());
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.walletTransaction.findFirst.mockResolvedValue(null);
+
+      const res = await service.trackOrder(partner, 'o1');
+
+      expect(res.tracking.refundedAt).toBeNull();
+    });
+
+    it('D5: a forbidden (other partner’s) order never reads the wallet', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(trackable({ partnerId: 'cp-other' }));
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+
+      await expect(service.trackOrder(partner, 'o1')).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.walletTransaction.findFirst).not.toHaveBeenCalled();
     });
   });
 
