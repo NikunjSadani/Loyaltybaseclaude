@@ -1437,6 +1437,17 @@ export default function RewardsPage() {
     if (category !== 'All' && !categories.includes(category)) setCategory('All');
   }, [categories, category]);
 
+  // Keep the selected category chip in view on narrow screens. block:'nearest' stops the PAGE
+  // jumping vertically; `?.` on scrollIntoView keeps old browsers / jsdom safe.
+  // (Looked up via data-category on the row rather than a per-chip ref Map: a ref callback that
+  // writes into a ref trips the react-hooks/refs lint rule.)
+  const chipRowRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const chip = Array.from(chipRowRef.current?.querySelectorAll<HTMLButtonElement>('button[data-category]') ?? [])
+      .find(b => b.dataset.category === category);
+    chip?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+  }, [category]);
+
   // Resolve the effective tab early (needed by filtered memo, which runs before loading gate)
   const ch = settings.redemptionChannels ?? { physicalGifts: true, vouchers: true, bankTransfer: true };
   const effectiveTab: MainTab = (() => {
@@ -1692,7 +1703,9 @@ export default function RewardsPage() {
 
           {/* Filter chips — "Within my points" on Physical + Vouchers; category pills catalogue only */}
           {(activeTab === 'catalogue' || activeTab === 'vouchers') && (
-            <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none" style={{ scrollbarWidth: 'none' }}>
+            <div className="relative">
+            {/* pr-8 lets the last chip scroll fully clear of the right-edge fade. */}
+            <div ref={chipRowRef} className="flex gap-2 overflow-x-auto pb-1 pr-8 scrollbar-none" style={{ scrollbarWidth: 'none' }}>
               {/* Affordability filter — always first. */}
               <button
                 type="button"
@@ -1708,6 +1721,7 @@ export default function RewardsPage() {
               {activeTab === 'catalogue' && categories.map(cat => (
                 <button
                   key={cat}
+                  data-category={cat}
                   onClick={() => setCategory(cat)}
                   className={cn(
                     'px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors shrink-0',
@@ -1717,6 +1731,13 @@ export default function RewardsPage() {
                   {cat}
                 </button>
               ))}
+            </div>
+            {/* Decorative right-edge fade — hints the row scrolls. Matches the body background (--background). */}
+            <div
+              data-testid="chip-row-fade"
+              aria-hidden="true"
+              className="pointer-events-none absolute right-0 top-0 bottom-1 w-8 bg-gradient-to-l from-[var(--background,white)] to-transparent"
+            />
             </div>
           )}
 
