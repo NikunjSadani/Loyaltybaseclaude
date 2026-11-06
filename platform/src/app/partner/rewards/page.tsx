@@ -1262,6 +1262,9 @@ export default function RewardsPage() {
   const [wishlist,  setWishlist]  = useState<Set<string>>(new Set());
   // Persistent-wishlist UI: the "♥ Wishlist" filter toggle (catalogue tab only).
   const [wishlistFilter, setWishlistFilter] = useState(false);
+  // "Within my points" affordability filter (Physical + Vouchers). Shared across both tabs on
+  // purpose — a partner who turned it on keeps it on when switching tab.
+  const [withinPointsOnly, setWithinPointsOnly] = useState(false);
   // Per-id in-flight guard so a rapid double-tap on a heart can't fire two
   // conflicting POST/DELETE requests for the same reward (optimistic race).
   const wishlistInFlight = useRef<Set<string>>(new Set());
@@ -1448,11 +1451,13 @@ export default function RewardsPage() {
     if (effectiveTab === 'catalogue' && category !== 'All') items = items.filter(g => g.category === category);
     // "♥ Wishlist" filter — catalogue (physical) tab only; intersect with the saved Set.
     if (effectiveTab === 'catalogue' && wishlistFilter) items = items.filter(g => wishlist.has(g.id));
+    // "Within my points" — same shared rule as the card dimming (never the backend isAffordable).
+    if (withinPointsOnly) items = items.filter(g => isWithinPoints(g, balance, settings));
     if (search) items = items.filter(g => g.name.toLowerCase().includes(search.toLowerCase()) || g.brand.toLowerCase().includes(search.toLowerCase()));
     return items.filter(g => g.available);
   // effectiveTab changes when tab or settings change — exhaustive-deps not needed here
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveTab, physicalItems, voucherItems, category, search, wishlistFilter, wishlist]);
+  }, [effectiveTab, physicalItems, voucherItems, category, search, wishlistFilter, wishlist, withinPointsOnly, balance, settings.minVoucherFreeAmount, settings.pointsConversionRate]);
 
   // Optimistic persistent-wishlist toggle: flip the Set immediately, then POST (add)
   // or DELETE (remove). On a failed request REVERT the Set and surface a toast. A
@@ -1680,9 +1685,22 @@ export default function RewardsPage() {
             />
           </div>
 
-          {/* Category pills — catalogue only */}
-          {activeTab === 'catalogue' && (
+          {/* Filter chips — "Within my points" on Physical + Vouchers; category pills catalogue only */}
+          {(activeTab === 'catalogue' || activeTab === 'vouchers') && (
             <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none" style={{ scrollbarWidth: 'none' }}>
+              {/* Affordability filter — always first. */}
+              <button
+                type="button"
+                onClick={() => setWithinPointsOnly(v => !v)}
+                aria-pressed={withinPointsOnly}
+                className={cn(
+                  'px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors shrink-0',
+                  withinPointsOnly ? 'bg-[var(--brand-primary)] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200',
+                )}
+              >
+                Within my points
+              </button>
+              {activeTab === 'catalogue' && (<>
               {/* ♥ Wishlist filter chip — when active, show only wishlisted items. */}
               <button
                 type="button"
@@ -1707,6 +1725,7 @@ export default function RewardsPage() {
                   {cat}
                 </button>
               ))}
+              </>)}
             </div>
           )}
 
