@@ -215,6 +215,24 @@ function isFreeAmount(
 }
 
 /**
+ * The ONE affordability rule for the rewards grid — used by the card dimming AND the
+ * "Within my points" filter. Do NOT use the backend `isAffordable` flag: it is
+ * `balance >= pointsCost`, and FREE_AMOUNT vouchers have pointsCost 0, so it reads
+ * "affordable" even when the partner can't meet the voucher minimum.
+ *   FIXED / physical → balance >= item.points
+ *   FREE_AMOUNT      → balance >= ceil(minVoucherFreeAmount × pointsConversionRate)
+ */
+export function isWithinPoints(
+  item: Pick<CatalogueItem, 'points' | 'voucherType'>,
+  balance: number,
+  settings: { minVoucherFreeAmount: number; pointsConversionRate: number },
+): boolean {
+  return item.voucherType === 'FREE_AMOUNT'
+    ? balance >= Math.ceil(settings.minVoucherFreeAmount * settings.pointsConversionRate)
+    : balance >= item.points;
+}
+
+/**
  * Catalogue MRP-slash (per-tenant `catalogueMrpSlash`): the struck-through "list price" in POINTS
  * to show above the redeem price. This is now computed SERVER-SIDE (rate-INDEPENDENT:
  * pointsCost × mrpPaise ÷ sellingValuePaise) and delivered on each catalogue item as `slashPoints`.
@@ -1698,9 +1716,7 @@ export default function RewardsPage() {
           ) : (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
               {filtered.map(gift => {
-                const canAfford   = gift.voucherType === 'FREE_AMOUNT'
-                  ? balance >= Math.ceil(settings.minVoucherFreeAmount * settings.pointsConversionRate)
-                  : balance >= gift.points;
+                const canAfford   = isWithinPoints(gift, balance, settings);
                 const isWishlisted = wishlist.has(gift.id);
                 // Struck-through MRP "list price" in points (per-tenant catalogueMrpSlash). Null ⇒ not shown.
                 // Server-driven, rate-independent (gift.slashPoints); the flag only gates visibility.
