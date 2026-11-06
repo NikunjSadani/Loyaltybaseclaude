@@ -1,0 +1,413 @@
+import { BadRequestException } from '@nestjs/common';
+import { resolveCreditFieldNames } from './credit-field-name.helper';
+import {
+  buildStatementWindow,
+  loadPointsStatement,
+  MAX_STATEMENT_ROWS,
+  orderStatementRows,
+  StatementTx,
+} from './points-statement.helper';
+
+jest.mock('./credit-field-name.helper', () => ({
+  resolveCreditFieldNames: jest.fn(),
+}));
+
+/** Tiny fixture factory: only the fields a test cares about. */
+function tx(p: {
+  id: string;
+  at: string | Date;
+  type?: string;
+  points: number;
+  before: number;
+  after: number;
+}): StatementTx {
+  return {
+    id: p.id,
+    createdAt: typeof p.at === 'string' ? new Date(p.at) : p.at,
+    transactionType: p.type ?? (p.points >= 0 ? 'CREDIT_POINTS_EARNED' : 'DEBIT_REDEMPTION'),
+    points: p.points,
+    balanceBefore: p.before,
+    balanceAfter: p.after,
+    description: null,
+    referenceType: null,
+    referenceId: null,
+  };
+}
+
+describe('orderStatementRows', () => {
+  it('sorts by createdAt ascending regardless of input order', () => {
+    const a = tx({ id: 'c', at: '2026-01-01T00:00:00Z', points: 100, before: 0, after: 100 });
+    const b = tx({ id: 'a', at: '2026-02-01T00:00:00Z', points: 50, before: 100, after: 150 });
+    const c = tx({ id: 'b', at: '2026-03-01T00:00:00Z', points: -30, before: 150, after: 120 });
+    expect(orderStatementRows([c, a, b]).map((r) => r.id)).toEqual(['c', 'a', 'b']);
+  });
+
+  it('drops LOCK_HOLDING and UNLOCK_HOLDING rows (they move the locked bucket, not the balance)', () => {
+    const rows = [
+      tx({ id: '1', at: '2026-01-01T00:00:00Z', points: 100, before: 0, after: 100 }),
+      tx({ id: '2', at: '2026-01-02T00:00:00Z', type: 'LOCK_HOLDING', points: -10, before: 100, after: 90 }),
+      tx({ id: '3', at: '2026-01-03T00:00:00Z', type: 'UNLOCK_HOLDING', points: 10, before: 90, after: 100 }),
+    ];
+    expect(orderStatementRows(rows).map((r) => r.id)).toEqual(['1']);
+  });
+
+  it('orders a same-timestamp group in balance-chain order, not id order', () => {
+    const prior = tx({ id: 'p', at: '2026-01-01T00:00:00Z', points: 100, before: 0, after: 100 });
+    const same = '2026-01-05T10:00:00Z';
+    // B has the LOWER id but chains after A (B.before 150 == A.after 150).
+    const B = tx({ id: 'b1', at: same, points: -50, before: 150, after: 100 });
+    const A = tx({ id: 'z9', at: same, points: 50, before: 100, after: 150 });
+    expect(orderStatementRows([B, A, prior]).map((r) => r.id)).toEqual(['p', 'z9', 'b1']);
+  });
+
+  it('orders a same-timestamp group at the very start of history by finding the chain head', () => {
+    const same = '2026-01-05T10:00:00Z';
+    const second = tx({ id: 'a', at: same, points: 20, before: 100, after: 120 });
+    const first = tx({ id: 'b', at: same, points: 100, before: 0, after: 100 });
+    expect(orderStatementRows([second, first]).map((r) => r.id)).toEqual(['b', 'a']);
+  });
+
+  it('falls back to id order for a same-timestamp group with no chain match, without dropping rows', () => {
+    const prior = tx({ id: 'p', at: '2026-01-01T00:00:00Z', points: 100, before: 0, after: 100 });
+    const same = '2026-01-05T10:00:00Z';
+    const x = tx({ id: 'x', at: same, points: 5, before: 999, after: 1004 });
+    const w = tx({ id: 'w', at: same, points: 7, before: 555, after: 562 });
+    const out = orderStatementRows([x, prior, w]);
+    expect(out.map((r) => r.id)).toEqual(['p', 'w', 'x']);
+  });
+
+  // A long batch tx (credits/payouts run with a 180 s timeout) stamps createdAt at its START, so
+  // its row can sort BEFORE a redemption that actually committed first.
+  it('repairs a batch-tx inversion: credit stamped t0 but applied after a t1 redemption → chain order, ends at the live 700', () => {
+    const prior = tx({ id: 'p', at: '2026-05-01T10:00:00Z', points: 1000, before: 0, after: 1000 });
+    // batch tx started 10:05:00 (stamp) but read the wallet AFTER the redemption committed
+    const credit = tx({ id: 'c', at: '2026-05-01T10:05:00Z', points: 200, before: 500, after: 700 });
+    const redeem = tx({ id: 'r', at: '2026-05-01T10:05:40Z', points: -500, before: 1000, after: 500 });
+    const out = orderStatementRows([credit, redeem, prior]);
+    expect(out.map((r) => r.id)).toEqual(['p', 'r', 'c']);
+    expect(buildStatementWindow(out, {}).closingBalance).toBe(700);
+  });
+
+  it('leaves a genuine chain break in place (no matching row within the repair window)', () => {
+    const a = tx({ id: 'a', at: '2026-05-01T10:00:00Z', points: 100, before: 0, after: 100 });
+    const b = tx({ id: 'b', at: '2026-05-01T10:01:00Z', points: 10, before: 250, after: 260 }); // break
+    // matches a.after, but is far outside the window → must NOT be pulled up
+    const c = tx({ id: 'c', at: '2026-05-02T10:00:00Z', points: 5, before: 100, after: 105 });
+    expect(orderStatementRows([c, b, a]).map((r) => r.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('orders same-timestamp rows with identical balances deterministically (id ASC), whatever the input order', () => {
+    const prior = tx({ id: 'p', at: '2026-05-01T09:00:00Z', points: 100, before: 0, after: 100 });
+    const same = '2026-05-01T10:00:00Z';
+    const x = tx({ id: 'x', at: same, type: 'DEBIT_EXPIRY', points: 0, before: 100, after: 100 });
+    const y = tx({ id: 'y', at: same, type: 'DEBIT_EXPIRY', points: 0, before: 100, after: 100 });
+    expect(orderStatementRows([y, x, prior]).map((r) => r.id)).toEqual(['p', 'x', 'y']);
+    expect(orderStatementRows([prior, x, y]).map((r) => r.id)).toEqual(['p', 'x', 'y']);
+  });
+
+  it('does not mutate the input array', () => {
+    const rows = [
+      tx({ id: '2', at: '2026-02-01T00:00:00Z', points: 1, before: 1, after: 2 }),
+      tx({ id: '1', at: '2026-01-01T00:00:00Z', points: 1, before: 0, after: 1 }),
+    ];
+    orderStatementRows(rows);
+    expect(rows.map((r) => r.id)).toEqual(['2', '1']);
+  });
+});
+
+describe('buildStatementWindow', () => {
+  const history = [
+    tx({ id: '1', at: '2026-01-10T00:00:00Z', points: 100, before: 0, after: 100 }),
+    tx({ id: '2', at: '2026-02-10T00:00:00Z', points: 150, before: 100, after: 250 }),
+    tx({ id: '3', at: '2026-03-10T00:00:00Z', points: -50, before: 250, after: 200 }),
+  ];
+
+  it('with no window returns all rows, opening 0 and closing = the last balanceAfter', () => {
+    const w = buildStatementWindow(history, {});
+    expect(w.rows).toHaveLength(3);
+    expect(w.openingBalance).toBe(0);
+    expect(w.closingBalance).toBe(200);
+  });
+
+  it('with no window and history that does not start at 0, opening is the first row balanceBefore', () => {
+    const w = buildStatementWindow(
+      [tx({ id: '1', at: '2026-01-10T00:00:00Z', points: 10, before: 40, after: 50 })],
+      {},
+    );
+    expect(w.openingBalance).toBe(40);
+    expect(w.closingBalance).toBe(50);
+  });
+
+  it("opening balance is the first in-range row's balanceBefore", () => {
+    const w = buildStatementWindow(history, {
+      start: new Date('2026-03-01T00:00:00Z'),
+      endExclusive: new Date('2026-04-01T00:00:00Z'),
+    });
+    expect(w.openingBalance).toBe(250);
+    expect(w.closingBalance).toBe(200);
+    expect(w.rows.map((r) => r.id)).toEqual(['3']);
+  });
+
+  it('a window after all activity is empty with opening = closing = the last prior balanceAfter', () => {
+    const w = buildStatementWindow(history, {
+      start: new Date('2026-06-01T00:00:00Z'),
+      endExclusive: new Date('2026-07-01T00:00:00Z'),
+    });
+    expect(w.rows).toEqual([]);
+    expect(w.openingBalance).toBe(200);
+    expect(w.closingBalance).toBe(200);
+  });
+
+  it('a window before all activity is empty with opening = closing = 0', () => {
+    const w = buildStatementWindow(history, {
+      start: new Date('2025-01-01T00:00:00Z'),
+      endExclusive: new Date('2025-02-01T00:00:00Z'),
+    });
+    expect(w.rows).toEqual([]);
+    expect(w.openingBalance).toBe(0);
+    expect(w.closingBalance).toBe(0);
+  });
+
+  it('an empty wallet history gives opening = closing = 0', () => {
+    expect(buildStatementWindow([], {})).toEqual({ openingBalance: 0, closingBalance: 0, rows: [] });
+  });
+
+  it('keeps a debit row signed and closes on its stored balanceAfter', () => {
+    const w = buildStatementWindow(
+      [tx({ id: 'd', at: '2026-01-01T00:00:00Z', points: -50, before: 200, after: 150 })],
+      {},
+    );
+    expect(w.rows[0].points).toBe(-50);
+    expect(w.closingBalance).toBe(150);
+  });
+
+  it('expiry and reversal rows carry their stored balances', () => {
+    const w = buildStatementWindow(
+      [
+        tx({ id: 'e', at: '2026-01-01T00:00:00Z', type: 'DEBIT_EXPIRY', points: -20, before: 100, after: 80 }),
+        tx({ id: 'r', at: '2026-01-02T00:00:00Z', type: 'CREDIT_REVERSAL', points: 80, before: 80, after: 160 }),
+      ],
+      {},
+    );
+    expect(w.rows.map((r) => r.balanceAfter)).toEqual([80, 160]);
+    expect(w.closingBalance).toBe(160);
+  });
+
+  it('a clawback shortfall closes on the stored balance (0), never the sum of points (-200)', () => {
+    const w = buildStatementWindow(
+      [
+        tx({ id: '1', at: '2026-01-01T00:00:00Z', points: 300, before: 0, after: 300 }),
+        tx({ id: '2', at: '2026-01-02T00:00:00Z', type: 'DEBIT_ADJUSTMENT', points: -500, before: 300, after: 0 }),
+      ],
+      {},
+    );
+    expect(w.closingBalance).toBe(0);
+  });
+
+  it('a repaired pair straddling the range edge stays contiguous: adjacent ranges tie out (closing of one = opening of the next)', () => {
+    // credit stamped 23:59:30 on 31 May but applied AFTER a redemption stamped 00:00:20 on 1 Jun.
+    const prior = tx({ id: 'p', at: '2026-05-10T00:00:00Z', points: 1000, before: 0, after: 1000 });
+    const credit = tx({ id: 'c', at: '2026-05-31T23:59:30Z', points: 200, before: 500, after: 700 });
+    const redeem = tx({ id: 'r', at: '2026-06-01T00:00:20Z', points: -500, before: 1000, after: 500 });
+    const ordered = orderStatementRows([prior, credit, redeem]);
+    const edge = new Date('2026-06-01T00:00:00Z');
+    const may = buildStatementWindow(ordered, { start: new Date('2026-05-01T00:00:00Z'), endExclusive: edge });
+    const jun = buildStatementWindow(ordered, { start: edge, endExclusive: new Date('2026-07-01T00:00:00Z') });
+    expect(may.rows.map((r) => r.id)).toEqual(['p']);
+    expect(jun.rows.map((r) => r.id)).toEqual(['r', 'c']);
+    expect(may.closingBalance).toBe(jun.openingBalance);
+    expect(jun.closingBalance).toBe(700);
+    // each range ties out internally
+    expect(jun.openingBalance + jun.rows.reduce((s, r) => s + r.points, 0)).toBe(jun.closingBalance);
+  });
+
+  it('window bounds are start <= createdAt < endExclusive', () => {
+    const rows = [
+      tx({ id: 'atStart', at: '2026-03-01T00:00:00Z', points: 10, before: 0, after: 10 }),
+      tx({ id: 'atEnd', at: '2026-04-01T00:00:00Z', points: 10, before: 10, after: 20 }),
+    ];
+    const w = buildStatementWindow(rows, {
+      start: new Date('2026-03-01T00:00:00Z'),
+      endExclusive: new Date('2026-04-01T00:00:00Z'),
+    });
+    expect(w.rows.map((r) => r.id)).toEqual(['atStart']);
+    expect(w.closingBalance).toBe(10);
+  });
+
+  it('orders and windows 5,000 shuffled rows correctly and quickly', () => {
+    const rows: StatementTx[] = [];
+    let bal = 0;
+    const t0 = Date.UTC(2024, 0, 1);
+    for (let i = 0; i < 5000; i++) {
+      const pts = i % 2 === 0 ? 100 : -40;
+      rows.push(
+        tx({
+          id: `id${String(i).padStart(5, '0')}`,
+          // pairs share a timestamp so the chain tie-break is exercised at scale
+          at: new Date(t0 + Math.floor(i / 2) * 60_000),
+          points: pts,
+          before: bal,
+          after: bal + pts,
+        }),
+      );
+      bal += pts;
+    }
+    const shuffled = [...rows].reverse();
+    const start = performance.now();
+    const ordered = orderStatementRows(shuffled);
+    const w = buildStatementWindow(ordered, {});
+    const ms = performance.now() - start;
+    expect(ordered.map((r) => r.id)).toEqual(rows.map((r) => r.id));
+    expect(w.closingBalance).toBe(bal);
+    expect(ms).toBeLessThan(200);
+  });
+});
+
+describe('loadPointsStatement', () => {
+  const resolveMock = resolveCreditFieldNames as jest.MockedFunction<typeof resolveCreditFieldNames>;
+
+  function makePrisma(rows: StatementTx[]) {
+    return {
+      walletTransaction: { findMany: jest.fn().mockResolvedValue(rows) },
+      creditBatch: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+  }
+  const base = { walletId: 'w1', clientId: 'c1', outletCode: 'OUT1' };
+  const credit = (p: Parameters<typeof tx>[0], batchId: string): StatementTx => ({
+    ...tx(p),
+    referenceType: 'CREDIT_BATCH',
+    referenceId: batchId,
+  });
+
+  beforeEach(() => {
+    resolveMock.mockReset();
+    resolveMock.mockResolvedValue(new Map());
+  });
+
+  it('loads ALL main rows for the wallet in one unpaginated query (no take/skip)', async () => {
+    const prisma = makePrisma([]);
+    await loadPointsStatement(prisma, base);
+    expect(prisma.walletTransaction.findMany).toHaveBeenCalledTimes(1);
+    const args = prisma.walletTransaction.findMany.mock.calls[0][0];
+    expect(args.where).toEqual({
+      walletId: 'w1',
+      transactionType: { notIn: ['LOCK_HOLDING', 'UNLOCK_HOLDING'] },
+    });
+    expect(args.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }]);
+    expect(args).not.toHaveProperty('take');
+    expect(args).not.toHaveProperty('skip');
+  });
+
+  it('windows on exact IST month bounds (2026-04..2026-06 = 2026-03-31T18:30Z .. 2026-06-30T18:30Z)', async () => {
+    const prisma = makePrisma([
+      tx({ id: 'mar', at: '2026-03-31T18:29:59.000Z', points: 100, before: 0, after: 100 }),
+      tx({ id: 'apr', at: '2026-03-31T18:30:00.000Z', points: 50, before: 100, after: 150 }),
+      tx({ id: 'jun', at: '2026-06-30T18:29:59.999Z', points: -10, before: 150, after: 140 }),
+      tx({ id: 'jul', at: '2026-06-30T18:30:00.000Z', points: 5, before: 140, after: 145 }),
+    ]);
+    const out = await loadPointsStatement(prisma, { ...base, from: '2026-04', to: '2026-06' });
+    // 'mar' (still 31 Mar IST) falls into the opening; 'apr' (1 Apr IST) is the first in-range row.
+    expect(out.rows.map((r) => r.id)).toEqual(['apr', 'jun']);
+    expect(out.openingBalance).toBe(100);
+    expect(out.closingBalance).toBe(140);
+  });
+
+  it('with no range returns the whole history', async () => {
+    const prisma = makePrisma([
+      tx({ id: 'a', at: '2026-01-01T00:00:00Z', points: 100, before: 0, after: 100 }),
+      tx({ id: 'b', at: '2026-02-01T00:00:00Z', points: -30, before: 100, after: 70 }),
+    ]);
+    const out = await loadPointsStatement(prisma, base);
+    expect(out.rows.map((r) => r.id)).toEqual(['a', 'b']);
+    expect(out.openingBalance).toBe(0);
+    expect(out.closingBalance).toBe(70);
+  });
+
+  it('reports full-history integrity (last balanceAfter + chain breaks) independent of the window', async () => {
+    const prisma = makePrisma([
+      tx({ id: 'a', at: '2026-01-01T00:00:00Z', points: 100, before: 0, after: 100 }),
+      tx({ id: 'b', at: '2026-02-01T00:00:00Z', points: 10, before: 250, after: 260 }), // break
+      tx({ id: 'c', at: '2026-03-01T00:00:00Z', points: -60, before: 260, after: 200 }),
+    ]);
+    const out = await loadPointsStatement(prisma, { ...base, from: '2026-01', to: '2026-01' });
+    expect(out.closingBalance).toBe(100);
+    expect(out.historyClosingBalance).toBe(200);
+    expect(out.chainBreaks).toBe(1);
+  });
+
+  it('an empty history reports historyClosingBalance null and no chain breaks', async () => {
+    const out = await loadPointsStatement(makePrisma([]), base);
+    expect(out.historyClosingBalance).toBeNull();
+    expect(out.chainBreaks).toBe(0);
+  });
+
+  it('attaches fieldName resolved over ALL the wallet CREDIT_BATCH rows, not only the windowed ones', async () => {
+    const prisma = makePrisma([
+      credit({ id: 'cb1', at: '2026-01-15T00:00:00Z', points: 100, before: 0, after: 100 }, 'b1'),
+      credit({ id: 'cb2', at: '2026-04-15T00:00:00Z', points: 40, before: 100, after: 140 }, 'b1'),
+      tx({ id: 'red', at: '2026-04-20T00:00:00Z', points: -40, before: 140, after: 100 }),
+    ]);
+    resolveMock.mockResolvedValue(
+      new Map([
+        ['cb1', 'Volume'],
+        ['cb2', 'Visibility'],
+      ]),
+    );
+
+    const out = await loadPointsStatement(prisma, { ...base, from: '2026-04', to: '2026-04' });
+
+    expect(resolveMock).toHaveBeenCalledTimes(1);
+    const [reader, clientId, outletCode, txns] = resolveMock.mock.calls[0];
+    expect(reader).toBe(prisma);
+    expect(clientId).toBe('c1');
+    expect(outletCode).toBe('OUT1');
+    expect(txns.map((t) => t.id).sort()).toEqual(['cb1', 'cb2']);
+    expect(out.rows.map((r) => [r.id, r.fieldName])).toEqual([
+      ['cb2', 'Visibility'],
+      ['red', null],
+    ]);
+  });
+
+  const overCap = () => {
+    const rows: StatementTx[] = [];
+    for (let i = 0; i <= MAX_STATEMENT_ROWS; i++) {
+      rows.push(
+        tx({
+          id: `r${String(i).padStart(6, '0')}`,
+          at: new Date(Date.UTC(2026, 0, 1) + i * 1000), // all inside Jan 2026 (IST)
+          points: 1,
+          before: i,
+          after: i + 1,
+        }),
+      );
+    }
+    return rows;
+  };
+
+  // The cap guards the DOWNLOAD (a requested range); it must never blank a screen.
+  it(`rejects a requested range with more than MAX_STATEMENT_ROWS (${MAX_STATEMENT_ROWS}) rows, asking to narrow the date range`, async () => {
+    const prisma = makePrisma(overCap());
+    const run = loadPointsStatement(prisma, { ...base, from: '2026-01', to: '2026-01' });
+    await expect(run).rejects.toThrow(BadRequestException);
+    await expect(run).rejects.toThrow(/narrow the date range/i);
+  });
+
+  it('does NOT cap the no-range (on-screen) load', async () => {
+    const out = await loadPointsStatement(makePrisma(overCap()), base);
+    expect(out.rows).toHaveLength(MAX_STATEMENT_ROWS + 1);
+  });
+
+  it.each([
+    ['only from', { from: '2026-04' }],
+    ['only to', { to: '2026-04' }],
+    ['a malformed month', { from: '2026-4', to: '2026-05' }],
+    ['month 13', { from: '2026-13', to: '2026-13' }],
+    ['from after to', { from: '2026-06', to: '2026-04' }],
+  ])('rejects %s with BadRequestException before querying', async (_label, range) => {
+    const prisma = makePrisma([]);
+    await expect(loadPointsStatement(prisma, { ...base, ...range })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(prisma.walletTransaction.findMany).not.toHaveBeenCalled();
+  });
+});

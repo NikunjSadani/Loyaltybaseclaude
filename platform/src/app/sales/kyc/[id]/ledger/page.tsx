@@ -2,11 +2,11 @@
 
 import React, { useState, useEffect, useMemo, use } from 'react';
 import Link from 'next/link';
-import { ArrowLeft, AlertTriangle, Calendar, X, Download, Coins } from 'lucide-react';
-import { istDateKey } from '@/lib/ist-date';
-import * as XLSX from 'xlsx';
-import { jsonToSheetSafe } from '@/lib/xlsx-safe';
+import { ArrowLeft, AlertTriangle, Calendar, X, Coins } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
+import { istDateKey, istMonthKey } from '@/lib/ist-date';
+import { StatementDownloadButton } from '@/components/wallet/statement-download-button';
+import { buildStatementDoc, type StatementApiResponse } from '@/lib/wallet-statement/statement-model';
 import { TransactionItem } from '@/components/wallet/transaction-item';
 import { PayoutStatementRow } from '@/components/wallet/payout-statement-row';
 import { TransactionType, WalletBucket, type WalletTransaction, type PayoutLedgerEntry } from '@/types';
@@ -39,8 +39,9 @@ interface OutletMeta {
 /* Combined statement rows — points transactions AND ₹ payout entries, interleaved
    by date (mirrors the partner wallet). Payout rows carry no points/running-balance
    (balance stays points-only); points rows carry no ₹/UTR. */
-type SalesPointsRow = { kind: 'points'; date: Date; label?: string; entry: LedgerEntry };
-type SalesPayoutRow = { kind: 'payout'; date: Date; label?: string; payout: PayoutLedgerEntry };
+// `monthKey` (YYYYMM) is the row's IST calendar month — the SAME bucketing the download uses.
+type SalesPointsRow = { kind: 'points'; date: Date; monthKey: number; label?: string; entry: LedgerEntry };
+type SalesPayoutRow = { kind: 'payout'; date: Date; monthKey: number; label?: string; payout: PayoutLedgerEntry };
 type SalesLedgerRow = SalesPointsRow | SalesPayoutRow;
 
 /* ─── (mock data removed — wired to /api/kyc/[id]/ledger) ─────────────────── */
@@ -87,10 +88,6 @@ type EarnBurnFilter = 'all' | 'earn' | 'burn';
 const EARN_TYPES = new Set<TxType>(['earn', 'credit']);
 const BURN_TYPES = new Set<TxType>(['redeem', 'expire', 'hold']);
 
-// TZ-safe month key: points dates are UTC-midnight ('YYYY-MM-DD') and payout dates are
-// UTC ISO / a UTC-constructed period day, so read UTC getters — matches the string-based
-// auto-range (.slice) and never rolls a month-boundary row into the wrong month.
-function dateMonthKey(d: Date): number { return d.getUTCFullYear() * 100 + (d.getUTCMonth() + 1); }
 function inputToKey(val: string): number {
   const [yr, mo] = val.split('-');
   return parseInt(yr, 10) * 100 + parseInt(mo, 10);
@@ -110,57 +107,6 @@ function rangeLabel(from: string, to: string): string {
 const CURRENT_MONTH = new Date().toISOString().slice(0, 7);
 const DEFAULT_FROM  = CURRENT_MONTH;
 const DEFAULT_TO    = CURRENT_MONTH;
-
-/* period 'YYYY-MM' → 'May 2026' (matches the payout row's on-screen label). */
-function periodLabel(period: string): string {
-  const [yr, mo] = period.split('-');
-  return new Date(+yr, +mo - 1, 1).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
-}
-/** A JS Date → the IST YYYY-MM-DD the points rows carry, for the Excel Date column.
- *  IST-pinned (prod/SSR runs UTC) so this sales-ledger export matches the partner-wallet export. */
-function dateToYmd(d: Date): string {
-  return istDateKey(d);
-}
-
-/* ─── Excel download — unified points + payout statement ──────────────────────── */
-
-function downloadLedger(rows: SalesLedgerRow[], outletName: string, period: string) {
-  const TYPE_LABEL: Record<TxType, string> = {
-    earn: 'Earned', credit: 'Credited', redeem: 'Redeemed', hold: 'On Hold', expire: 'Expired',
-  };
-  const sheetRows = rows.map((r) => {
-    if (r.kind === 'points') {
-      const e = r.entry;
-      return {
-        Date:         e.date,
-        Description:  e.description,
-        Type:         TYPE_LABEL[e.type],
-        Points:       e.points > 0 ? `+${e.points}` : String(e.points),
-        Balance:      e.balance,
-        'Amount (₹)': '' as string | number,
-        UTR:          '',
-        Reference:    e.ref ?? '',
-      };
-    }
-    // Payout row: ₹ + UTR; points/running-balance stay blank (balance is points-only).
-    const p = r.payout;
-    return {
-      Date:         dateToYmd(r.date),
-      Description:  `${p.kpiLabel} · ${periodLabel(p.period)}`,
-      Type:         p.status === 'PAID' ? 'Payout' : 'Payout (Pending)',
-      Points:       '',
-      Balance:      '' as string | number,
-      'Amount (₹)': p.payoutAmountPaise / 100,
-      UTR:          p.utr ?? '—',
-      Reference:    p.narration ?? '',
-    };
-  });
-  const ws = jsonToSheetSafe(sheetRows);
-  ws['!cols'] = [{ wch: 13 }, { wch: 48 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 14 }, { wch: 20 }, { wch: 18 }];
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Wallet Statement');
-  XLSX.writeFile(wb, `${outletName.replace(/[^a-z0-9]/gi, '-').toLowerCase()}-ledger-${period}.xlsx`);
-}
 
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
@@ -197,7 +143,8 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
         const dates: string[] = [
           ...((transactions ?? []) as LedgerEntry[]).map((t) => t.date),
           ...((payouts ?? []) as PayoutLedgerEntry[]).map(
-            (p) => (p.paidAt ?? p.uploadedAt ?? `${p.period}-01`).slice(0, 10),
+            // IST calendar day of the payout instant (prod/browsers may not be IST).
+            (p) => (p.paidAt || p.uploadedAt ? istDateKey(p.paidAt ?? p.uploadedAt) : `${p.period}-01`),
           ),
         ];
         if (dates.length) {
@@ -217,7 +164,8 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
   /* ── Combined rows: points transactions + ₹ payout entries (interleaved) ── */
   const allRows = useMemo<SalesLedgerRow[]>(() => {
     const pointsRows: SalesLedgerRow[] = rawEntries.map((e) => ({
-      kind: 'points', date: new Date(e.date), label: e.fieldName ?? undefined, entry: e,
+      // points rows already carry their IST date key ('YYYY-MM-DD')
+      kind: 'points', date: new Date(e.date), monthKey: inputToKey(e.date.slice(0, 7)), label: e.fieldName ?? undefined, entry: e,
     }));
     const payoutRows: SalesLedgerRow[] = rawPayouts
       .filter((p) => p.status !== 'FAILED')
@@ -225,8 +173,8 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
         const [yr, mo] = p.period.split('-');
         const date = p.paidAt ? new Date(p.paidAt)
           : p.uploadedAt ? new Date(p.uploadedAt)
-          : new Date(Date.UTC(+yr, +mo - 1, 1)); // UTC so dateMonthKey's UTC getters key it right
-        return { kind: 'payout', date, label: p.kpiLabel, payout: p };
+          : new Date(Date.UTC(+yr, +mo - 1, 1) - 330 * 60_000); // 00:00 IST on the period's 1st
+        return { kind: 'payout', date, monthKey: inputToKey(istMonthKey(date)), label: p.kpiLabel, payout: p };
       });
     return [...pointsRows, ...payoutRows];
   }, [rawEntries, rawPayouts]);
@@ -234,7 +182,7 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
   /* Bounds for <input type="month"> — across the COMBINED history */
   const [minMonth, maxMonth] = useMemo(() => {
     if (!allRows.length) return [DEFAULT_FROM, DEFAULT_TO];
-    const keys = allRows.map((r) => dateMonthKey(r.date));
+    const keys = allRows.map((r) => r.monthKey);
     return [keyToInput(Math.min(...keys)), keyToInput(Math.max(...keys))];
   }, [allRows]);
 
@@ -243,12 +191,16 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
     ...new Set(allRows.map((r) => r.label).filter((l): l is string => !!l)),
   ], [allRows]);
 
-  /* Apply date-range + earn/burn + KPI filter, newest-first */
-  const displayedRows = useMemo(() => {
+  /* Rows in the selected period, BEFORE the earn/burn + KPI filters (the download covers all of them). */
+  const rangeRows = useMemo(() => {
     const fromKey = inputToKey(fromMonth);
     const toKey   = inputToKey(toMonth);
-    return allRows
-      .filter((r) => { const k = dateMonthKey(r.date); return k >= fromKey && k <= toKey; })
+    return allRows.filter((r) => r.monthKey >= fromKey && r.monthKey <= toKey);
+  }, [allRows, fromMonth, toMonth]);
+
+  /* Apply earn/burn + KPI filter to the period rows, newest-first */
+  const displayedRows = useMemo(() => {
+    return rangeRows
       .filter((r) => {
         // Earn/Burn applies to points rows; payout rows are inbound ₹ → treated as "earn".
         if (earnBurnFilter === 'all') return true;
@@ -258,9 +210,23 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
       })
       .filter((r) => !kpiFilter || r.label === kpiFilter)
       .sort((a, b) => +b.date - +a.date);
-  }, [allRows, fromMonth, toMonth, earnBurnFilter, kpiFilter]);
+  }, [rangeRows, earnBurnFilter, kpiFilter]);
 
   const periodDisp = rangeLabel(fromMonth, toMonth);
+
+  /* Download (owner D4): the FULL statement for the selected range (all types, filters ignored)
+     from the SAME shared builder + renderers the partner wallet uses, so the files can't drift. */
+  const loadStatementDoc = async () => {
+    const res = await fetch(`/api/kyc/${id}/ledger/statement?from=${fromMonth}&to=${toMonth}`);
+    const json = await res.json();
+    if (!res.ok || !json?.success || !Array.isArray(json.data?.rows)) throw new Error('statement unavailable');
+    return buildStatementDoc(json.data as StatementApiResponse, rawPayouts, {
+      outletName: outlet?.name ?? '',
+      outletCode: outlet?.outletCode ?? '',
+      from: fromMonth,
+      to: toMonth,
+    });
+  };
 
   function applyRange()  { setFromMonth(pendingFrom); setToMonth(pendingTo); setCalOpen(false); }
   function clearRange()  {
@@ -355,17 +321,12 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
                 </p>
 
                 <div className="flex items-center gap-2">
-                  {/* Excel download */}
-                  {displayedRows.length > 0 && (
-                    <button
-                      onClick={() => downloadLedger(displayedRows, o.name, `${fromMonth}_${toMonth}`)}
-                      title="Download as Excel"
-                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border border-gray-200 bg-white text-gray-600 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] transition-all"
-                    >
-                      <Download className="h-3.5 w-3.5" />
-                      Excel
-                    </button>
-                  )}
+                  {/* Download → Excel / PDF (full statement for the period) */}
+                  <StatementDownloadButton
+                    disabled={rangeRows.length === 0}
+                    loadDoc={loadStatementDoc}
+                    fileBase={`wallet-statement-${o.outletCode}-${fromMonth}_${toMonth}`}
+                  />
 
                   {/* Period picker */}
                   <div className="relative">

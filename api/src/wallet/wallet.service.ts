@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, PointsLedgerType, WalletTransactionType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -6,7 +6,8 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { resolveCreditFieldNames } from '../common/credit-field-name.helper';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { istMonthBounds } from '../common/ist-date';
-import { AdjustType, AdjustWalletDto, ListTransactionsQueryDto } from './dto/wallet.dto';
+import { AdjustType, AdjustWalletDto, ListTransactionsQueryDto, StatementQueryDto } from './dto/wallet.dto';
+import { buildStatementResponse, defaultTxDescription, EMPTY_STATEMENT } from '../common/points-statement.helper';
 
 /**
  * Wallet & Points — ported from platform/src/app/api/wallet/* onto /v1.
@@ -44,6 +45,8 @@ import { AdjustType, AdjustWalletDto, ListTransactionsQueryDto } from './dto/wal
  */
 @Injectable()
 export class WalletService {
+  private readonly logger = new Logger(WalletService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly tenantSettings: TenantSettingsService,
@@ -496,6 +499,41 @@ export class WalletService {
     }
 
     return this.loadPassbook(active.partnerId, user.clientId, q);
+  }
+
+  /**
+   * GET /v1/wallet/statement — the caller's ACTIVE partner's FULL, UNPAGINATED points statement
+   * (oldest first) for an optional IST month range, with the STORED per-row balances and the
+   * opening/closing balance (owner decision D3). Built by the shared loader the sales ledger also
+   * uses, so the two can never drift. Same access boundary as the passbook (forged selector →
+   * 403). No partner / no wallet yet (pre-KYC) → an empty zero statement, not a 404.
+   */
+  async statement(user: JwtPayload, q: StatementQueryDto, requestedPartnerId?: string) {
+    const active = await resolveActivePartnerId(this.prisma, {
+      clientId: user.clientId,
+      userSub: user.sub,
+      phone: user.phone,
+      requestedPartnerId,
+    });
+    if (active.forbidden) throw new ForbiddenException('You cannot act on that outlet.');
+    if (!active.partnerId) return { ...EMPTY_STATEMENT, rows: [] };
+
+    const wallet = await this.prisma.wallet.findFirst({ where: { partnerId: active.partnerId } });
+    if (!wallet) return { ...EMPTY_STATEMENT, rows: [] };
+
+    const outlet = await this.prisma.outlet.findFirst({
+      where: { clientId: user.clientId, partnerId: active.partnerId, deletedAt: null },
+      orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+      select: { outletCode: true },
+    });
+
+    return buildStatementResponse(this.prisma, this.logger, {
+      wallet,
+      clientId: user.clientId,
+      outletCode: outlet?.outletCode ?? '',
+      from: q.from,
+      to: q.to,
+    });
   }
 
   /**
@@ -980,17 +1018,7 @@ export class WalletService {
   }
 
   private getDefaultDescription(transactionType: string): string {
-    const map: Record<string, string> = {
-      CREDIT_POINTS_EARNED: 'Points earned',
-      CREDIT_BONUS: 'Bonus points credited',
-      CREDIT_REVERSAL: 'Points reversed to wallet',
-      CREDIT_ADJUSTMENT: 'Manual credit adjustment',
-      DEBIT_REDEMPTION: 'Points redeemed',
-      DEBIT_EXPIRY: 'Points expired',
-      DEBIT_ADJUSTMENT: 'Manual debit adjustment',
-      LOCK_HOLDING: 'Points locked',
-      UNLOCK_HOLDING: 'Points unlocked',
-    };
-    return map[transactionType] ?? 'Wallet transaction';
+    // Shared with the statement builder so the passbook and statement can't drift.
+    return defaultTxDescription(transactionType);
   }
 }

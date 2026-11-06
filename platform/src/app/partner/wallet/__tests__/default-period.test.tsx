@@ -35,6 +35,7 @@ vi.mock('@/lib/partner-identity', () => ({
 }));
 
 import WalletPage from '../page';
+import { statementPayload } from './statement-fixture';
 
 /* ── Relative-date helpers (never hardcode a month) ───────────────────────────── */
 const MONTH_SHORT = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -52,8 +53,8 @@ function makePayout(overrides: Record<string, unknown>) {
 function stubFetch(payouts: unknown[]) {
   vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
     const u = url as string;
-    if (u.includes('/api/wallet/transactions'))
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { transactions: [] } }) });
+    if (u.includes('/api/wallet/statement'))
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(statementPayload([])) });
     if (u.includes('/api/partner/payouts'))
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { payouts } }) });
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });

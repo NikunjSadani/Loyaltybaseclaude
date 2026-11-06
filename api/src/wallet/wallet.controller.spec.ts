@@ -4,9 +4,53 @@
 // WalletService.expireDuePoints(). EXPIRE_SWEEP_SECRET is set/restored per-test.
 // Run: npx jest src/wallet/wallet.controller.spec.ts
 
+import 'reflect-metadata';
 import { ForbiddenException } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import { WalletController } from './wallet.controller';
 import { WalletService } from './wallet.service';
+import { StatementQueryDto } from './dto/wallet.dto';
+import { ROLES_KEY } from '../common/decorators/roles.decorator';
+import { PERMISSION_KEY } from '../common/decorators/require-permission.decorator';
+import { JwtPayload } from '../common/decorators/current-user.decorator';
+
+describe('WalletController — statement', () => {
+  it('GET statement has the same guards as GET transactions (partner roles + wallet:read)', () => {
+    const h = WalletController.prototype.statement;
+    expect(Reflect.getMetadata(ROLES_KEY, h)).toEqual(['SSS', 'WHOLESALER', 'SUB_STOCKIST']);
+    expect(Reflect.getMetadata(ROLES_KEY, h)).toEqual(
+      Reflect.getMetadata(ROLES_KEY, WalletController.prototype.listTransactions),
+    );
+    expect(Reflect.getMetadata(PERMISSION_KEY, h)).toBe('wallet:read');
+  });
+
+  it('passes the query and the x-active-partner-id selector through to the service', async () => {
+    const statement = jest.fn().mockResolvedValue({ rows: [] });
+    const controller = new WalletController({ statement } as unknown as WalletService);
+    const user = { sub: 'u1', clientId: 'c1' } as JwtPayload;
+    await controller.statement(user, { from: '2026-04', to: '2026-06' }, 'sib1');
+    expect(statement).toHaveBeenCalledWith(user, { from: '2026-04', to: '2026-06' }, 'sib1');
+  });
+
+  describe('StatementQueryDto', () => {
+    const errs = async (input: Record<string, unknown>) =>
+      (await validate(plainToInstance(StatementQueryDto, input))).map((e) => e.property);
+
+    it('accepts no params and a valid YYYY-MM pair', async () => {
+      expect(await errs({})).toEqual([]);
+      expect(await errs({ from: '2026-04', to: '2026-12' })).toEqual([]);
+    });
+
+    it.each(['2026-4', '2026-13', '2026-00', '26-04', '2026-04-01', 'abc'])(
+      'rejects the malformed month %s',
+      async (bad) => {
+        expect(await errs({ from: bad, to: '2026-04' })).toEqual(['from']);
+        expect(await errs({ from: '2026-04', to: bad })).toEqual(['to']);
+      },
+    );
+  });
+});
 
 describe('WalletController — expireSweep', () => {
   let controller: WalletController;

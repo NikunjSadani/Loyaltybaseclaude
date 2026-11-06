@@ -7,8 +7,11 @@
 > It can't be done per tenant: the wallet page, the ledger page and the passbook service are single shared code paths,
 > and the fixes below (missing Balance, broken `--50` sign, 20-row truncation) are defects in that shared code.
 > There's no per-tenant config to hang this on, and adding a flag just to hide a correctness fix would be YAGNI.
-> **Status: PROPOSED (2026-11-06). Nothing is built. Wait for the owner's explicit YES and answers to §OPEN DECISIONS.**
-> No schema change, no migration, and **no new npm dependency** under the recommended options.
+> **Status: BUILT + independently reviewed (2026-11-06) on branch `worktree-agent-aa3654f9fde6b0c8a`, NOT pushed.
+> D9 final (owner, 2026-11-06): KEEP the interim PDF text — "Rs." for ₹ and names in English letters only (see §D9
+> FINDING). Approved as PLATFORM-WIDE by the owner; §OWNER DECISIONS (final) override anything below where they differ.**
+> Task 0 (staging DB chain audit) still to be run before the push. No schema change, no migration, no new npm
+> dependency, no font asset.
 
 ---
 
@@ -442,7 +445,61 @@ fixing the on-screen month filter's local-TZ `getMonth()` (separate janitorial i
 
 ---
 
-## OPEN DECISIONS for the owner (answer before Task 1)
+## OWNER DECISIONS (final, 2026-11-06), these override the options below
+
+| # | Decision |
+|---|---|
+| D1 | **(A)** Approved as PLATFORM-WIDE. |
+| D2 | **(A)** Partner wallet AND sales-rep outlet ledger, sharing one statement builder. |
+| D3 | **(A)** Balance = the STORED per-row `balanceBefore`/`balanceAfter`; opening = the first in-range row's `balanceBefore`. |
+| D4 | **(A)** The download covers the chosen DATE RANGE with ALL transaction types (on-screen Earn/Burn/KPI filters ignored), with opening + closing balance so it reconciles. |
+| D5 | **(A)** Fix the newest-20-rows truncation on screen AND in the download (the screen uses the new endpoint). |
+| D6 | **(A)** Files generated in the BROWSER with the existing `xlsx` + `jspdf`; backend returns data only. No new npm dependency except the D9 font asset. |
+| D7 | **(A)** One "Download" button opening an Excel / PDF menu. |
+| D8 | **(A)** ₹ payout rows interleaved, with a blank Balance cell. |
+| D9 | **FINAL: keep the interim** ("Rs." for ₹; names in English letters only — non-Latin characters print as `?`, never dropped). Originally chose (B): embed a Unicode font in the PDF so ₹ and Hindi/regional (Devanagari etc.) names render: an open-licensed font (e.g. Noto Sans + Noto Sans Devanagari, SIL OFL) shipped as a static asset under `platform/public/`, lazy-loaded only when a PDF is generated. A new `public/` subdir needs the `platform/src/proxy.ts` matcher exclusion (RESUME trap 17). **Precondition:** jsPDF must shape Devanagari correctly (it has no complex-script shaping). If it can't, STOP this sub-task and go back to the owner with options rather than shipping broken text. |
+| D10 | **(A)** If closing ≠ live wallet balance: show the stored values and log a server warning (no partner-facing note, don't block). |
+| D11 | **(A)** Fixed title "Wallet Statement". |
+| D12 | **(A)** Oldest first. |
+
+**Task 0** (staging DB balance-chain audit) is skipped for the implementation pass (the build agent has no DB
+access). It remains an orchestrator/owner step before the staging push; the backend D10 warning and its tests cover
+chain-mismatch handling meanwhile.
+
+The Out-of-scope line "embedding a Unicode/Devanagari font" is superseded by D9 (B).
+
+## D9 FINDING (2026-11-06): jsPDF cannot shape Devanagari → owner DECIDED: keep the interim
+
+**Owner decision (2026-11-06): keep option (6), the interim** — the PDF prints "Rs." for ₹ and names in English
+letters only; any non-Latin character falls back to `?` (it is never dropped, because Helvetica's WinAnsi path is used,
+not an embedded font). No font asset is shipped. The finding and the options considered are kept below for the record.
+
+jsPDF 4.2.1 (installed) writes Unicode text by mapping each UTF-16 code unit to ONE glyph through the font's `cmap`
+(`pdfEscape16` → `TTFFont.characterToGlyph`, `node_modules/jspdf/dist/jspdf.es.js`). There is no OpenType shaping:
+no GSUB (conjuncts / half-forms / reph / nukta forms), no GPOS (matra and anusvara positioning), no pre-base reordering
+(`ि` must draw BEFORE its consonant). jsPDF's only script processing is Arabic (`processArabic`). So with an embedded
+Noto Sans Devanagari, "हिंदी" would print as ह ि ं द ी (i-matra after the consonant), "शर्मा"/"मिश्रा"/"क्षत्रिय" as
+consonant + visible halant + consonant. That is broken text, so per the owner's rule the font was NOT shipped.
+(Also: jsPDF silently DROPS the rest of a string at the first character the embedded font lacks — `if (t == "0") return`.)
+₹ alone needs no shaping and WOULD render correctly from an embedded font.
+
+**What shipped instead (interim, same as the plan's original D9-A):** Helvetica + `pdfSafe` — `₹` → `Rs.`, any character
+outside WinAnsi → `?`. The Excel file is unaffected (₹ and Hindi render natively there). No font asset, no
+`proxy.ts` matcher change.
+
+**Options for the owner:**
+- **(1) Embed Noto Sans (Latin + ₹ only, SIL OFL; a subset is a few hundred KB or less) + keep `?` for Indic** — true ₹, Indic names still `?`.
+- **(2) Same as (1) + transliterate Indic names to Latin** (e.g. a small ITRANS-style table) — readable but not the original script.
+- **(3) Rasterise only the non-Latin cells**: draw them on a `<canvas>` (the browser's own shaper, HarfBuzz in Chrome) with a
+  lazily-loaded Noto Sans Devanagari web font and insert as images. Correct shaping, no new npm dep; those cells aren't
+  selectable/searchable text, slightly larger PDF.
+- **(4) Add a shaping engine** (e.g. `harfbuzzjs` WASM, a new dependency ~0.5 MB lazy) and emit shaped glyph runs into jsPDF —
+  correct + selectable, but jsPDF has no glyph-ID text API, so it means patching its text path. Highest effort/risk.
+- **(5) Backend PDF with `pdfkit` (uses `fontkit`, which has an Indic shaper)** — correct + selectable; reverses D6 and adds a
+  backend dependency.
+- **(6) Keep the interim** (`Rs.` + `?`).
+
+## OPEN DECISIONS for the owner (answered above; kept for the record)
 
 **D1. Approve as PLATFORM-WIDE?** This changes the partner wallet + sales ledger for all tenants incl. live Deoleo.
 - **(A) Yes, approve as scoped here** ← recommended

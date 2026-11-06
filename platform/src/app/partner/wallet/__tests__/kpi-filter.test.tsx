@@ -37,6 +37,7 @@ vi.mock('@/lib/partner-identity', () => ({
 }));
 
 import WalletPage from '../page';
+import { statementPayload } from './statement-fixture';
 
 // Real API data. In the default 2026-05 window: a CREDIT with a kpiLabel (dropdown
 // option, W2), a DEBIT redemption with no kpiLabel (W3 hide / W4 restore), and a PAID
@@ -47,8 +48,9 @@ const POINTS_TXNS = [
     points: 1000, date: '2026-05-10T00:00:00.000Z', balanceType: 'EARNED', balanceAfter: 1000,
     referenceType: 'CREDIT_BATCH', referenceId: 'b1', fieldName: 'Monthly Target' },
   // A redemption (non-credit) row: no field name → keeps its own header, no filter option.
+  // Statement rows carry SIGNED points (a debit is negative), exactly as the backend stores them.
   { id: 'tx2', transactionType: 'DEBIT_REDEMPTION', description: 'Redemption — Amazon Voucher',
-    points: 500, date: '2026-05-12T00:00:00.000Z', balanceType: 'REDEEMED', balanceAfter: 500,
+    points: -500, date: '2026-05-12T00:00:00.000Z', balanceType: 'REDEEMED', balanceAfter: 500,
     referenceType: 'REDEMPTION', referenceId: 'r1', fieldName: null },
 ];
 const INR_PAYOUTS = [
@@ -63,8 +65,8 @@ const BALANCE = {
 function stubFetch() {
   vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
     const u = url as string;
-    if (u.includes('/api/wallet/transactions'))
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { transactions: POINTS_TXNS } }) });
+    if (u.includes('/api/wallet/statement'))
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(statementPayload(POINTS_TXNS)) });
     if (u.includes('/api/partner/payouts'))
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { payouts: INR_PAYOUTS } }) });
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: BALANCE }) });

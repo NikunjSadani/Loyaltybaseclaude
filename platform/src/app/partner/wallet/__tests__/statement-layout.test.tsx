@@ -4,12 +4,12 @@
  *
  * The wallet now renders ONE combined statement (points + payouts) below the
  * presence-based summary cards. The statement header layout is unchanged:
- *   Row 1 (controls): "STATEMENT · <period>"  |  Excel  |  <date picker>
+ *   Row 1 (controls): "STATEMENT · <period>"  |  Download (Excel/PDF)  |  <date picker>
  *   Row 2 (filters):  earn/burn chips + KPI dropdown
  *
  * V1: data-testid="statement-controls-row" is rendered
  * V2: KPI filter (wallet-kpi-filter) is NOT inside statement-controls-row
- * V3: Excel button IS inside statement-controls-row
+ * V3: Download (Excel/PDF picker) button IS inside statement-controls-row
  * V4: date/period button IS inside statement-controls-row
  * V5: KPI filter exists somewhere in the statement section
  */
@@ -31,12 +31,13 @@ vi.mock('@/lib/partner-identity', () => ({
 }));
 
 import WalletPage from '../page';
+import { statementPayload } from './statement-fixture';
 
 function stubFetch() {
   vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
     const u = url as string;
-    if (u.includes('/api/wallet/transactions'))
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { transactions: [] } }) });
+    if (u.includes('/api/wallet/statement'))
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(statementPayload([])) });
     if (u.includes('/api/partner/payouts'))
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { payouts: [] } }) });
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
@@ -74,10 +75,12 @@ describe('V — Statement header layout (combined statement)', () => {
     expect(controlsRow.contains(kpiFilter)).toBe(false);
   });
 
-  it('V3: Excel button is inside statement-controls-row', async () => {
+  it('V3: the Download (Excel/PDF) button is inside statement-controls-row', async () => {
     await renderAndWait();
     const controlsRow = screen.getByTestId('statement-controls-row');
-    expect(controlsRow.querySelector('[data-testid="excel-btn"]')).not.toBeNull();
+    // The single Excel button became one Download button with an Excel / PDF menu (D7).
+    expect(controlsRow.querySelector('[data-testid="statement-download-btn"]')).not.toBeNull();
+    expect(controlsRow.querySelector('[data-testid="excel-btn"]')).toBeNull();
   });
 
   it('V4: date picker button is inside statement-controls-row', async () => {
