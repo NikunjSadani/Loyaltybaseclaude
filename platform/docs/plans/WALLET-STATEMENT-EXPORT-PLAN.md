@@ -7,8 +7,9 @@
 > It can't be done per tenant: the wallet page, the ledger page and the passbook service are single shared code paths,
 > and the fixes below (missing Balance, broken `--50` sign, 20-row truncation) are defects in that shared code.
 > There's no per-tenant config to hang this on, and adding a flag just to hide a correctness fix would be YAGNI.
-> **Status: APPROVED (2026-11-06) as PLATFORM-WIDE by the owner. See §OWNER DECISIONS (final), which override
-> anything below where they differ.** No schema change, no migration, and **no new npm dependency** (D9's font would be
+> **Status: BUILT (2026-11-06) on branch `worktree-agent-aa3654f9fde6b0c8a`, NOT pushed — EXCEPT D9 (embedded Unicode font), which is ON
+> HOLD pending an owner decision (see §D9 FINDING). Approved as PLATFORM-WIDE by the owner; §OWNER DECISIONS (final)
+> override anything below where they differ.** Task 0 (staging DB chain audit) still to be run before the push. No schema change, no migration, and **no new npm dependency** (D9's font would be
 > a static asset, not a package).
 
 ---
@@ -465,6 +466,33 @@ access). It remains an orchestrator/owner step before the staging push; the back
 chain-mismatch handling meanwhile.
 
 The Out-of-scope line "embedding a Unicode/Devanagari font" is superseded by D9 (B).
+
+## D9 FINDING (2026-11-06): jsPDF cannot shape Devanagari → font embed ON HOLD, owner decision needed
+
+jsPDF 4.2.1 (installed) writes Unicode text by mapping each UTF-16 code unit to ONE glyph through the font's `cmap`
+(`pdfEscape16` → `TTFFont.characterToGlyph`, `node_modules/jspdf/dist/jspdf.es.js`). There is no OpenType shaping:
+no GSUB (conjuncts / half-forms / reph / nukta forms), no GPOS (matra and anusvara positioning), no pre-base reordering
+(`ि` must draw BEFORE its consonant). jsPDF's only script processing is Arabic (`processArabic`). So with an embedded
+Noto Sans Devanagari, "हिंदी" would print as ह ि ं द ी (i-matra after the consonant), "शर्मा"/"मिश्रा"/"क्षत्रिय" as
+consonant + visible halant + consonant. That is broken text, so per the owner's rule the font was NOT shipped.
+(Also: jsPDF silently DROPS the rest of a string at the first character the embedded font lacks — `if (t == "0") return`.)
+₹ alone needs no shaping and WOULD render correctly from an embedded font.
+
+**What shipped instead (interim, same as the plan's original D9-A):** Helvetica + `pdfSafe` — `₹` → `Rs.`, any character
+outside WinAnsi → `?`. The Excel file is unaffected (₹ and Hindi render natively there). No font asset, no
+`proxy.ts` matcher change.
+
+**Options for the owner:**
+- **(1) Embed Noto Sans (Latin + ₹ only, SIL OFL; a subset is a few hundred KB or less) + keep `?` for Indic** — true ₹, Indic names still `?`.
+- **(2) Same as (1) + transliterate Indic names to Latin** (e.g. a small ITRANS-style table) — readable but not the original script.
+- **(3) Rasterise only the non-Latin cells**: draw them on a `<canvas>` (the browser's own shaper, HarfBuzz in Chrome) with a
+  lazily-loaded Noto Sans Devanagari web font and insert as images. Correct shaping, no new npm dep; those cells aren't
+  selectable/searchable text, slightly larger PDF.
+- **(4) Add a shaping engine** (e.g. `harfbuzzjs` WASM, a new dependency ~0.5 MB lazy) and emit shaped glyph runs into jsPDF —
+  correct + selectable, but jsPDF has no glyph-ID text API, so it means patching its text path. Highest effort/risk.
+- **(5) Backend PDF with `pdfkit` (uses `fontkit`, which has an Indic shaper)** — correct + selectable; reverses D6 and adds a
+  backend dependency.
+- **(6) Keep the interim** (`Rs.` + `?`).
 
 ## OPEN DECISIONS for the owner (answered above; kept for the record)
 

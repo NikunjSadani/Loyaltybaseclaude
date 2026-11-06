@@ -7,7 +7,7 @@
  * "?". Owner decision D9 asked for an embedded Unicode font (₹ + Devanagari) instead; that is ON
  * HOLD because jsPDF has no complex-script shaping (it maps one code point → one glyph via the
  * font cmap, no GSUB/GPOS), so Devanagari conjuncts and pre-base matras would render visibly
- * wrong. See platform/docs/plans/WALLET-STATEMENT-EXPORT-PLAN.md §D9 for the options.
+ * wrong. See platform/docs/plans/WALLET-STATEMENT-EXPORT-PLAN.md §"D9 FINDING" for the options.
  */
 import { formatISTDate, formatISTDateTime } from '@/lib/ist-date';
 import { EMPTY_STATEMENT_TEXT } from './statement-xlsx';
