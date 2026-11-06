@@ -52,7 +52,7 @@ import {
   KYC_FIELD_STATUSES,
   KYC_GIFSY_STATUS,
 } from '../common/kyc-sla-stage';
-import { resolveCreditFieldNames } from '../common/credit-field-name.helper';
+import { buildStatementResponse, EMPTY_STATEMENT, StatementApiResponse } from '../common/points-statement.helper';
 import { buildPayoutStatement } from '../common/payout-statement.helper';
 import {
   isPaymentModeAllowed,
@@ -3593,8 +3593,12 @@ export class KycService {
     };
   }
 
-  // ─── GET /v1/kyc/:id/ledger ──────────────────────────────────────────────────
-  async ledger(user: JwtPayload, id: string) {
+  // ─── GET /v1/kyc/:id/ledger (+ /ledger/statement) ─────────────────────────────
+  /**
+   * The shared, access-checked lookup behind BOTH ledger routes: resolves the submission's
+   * partner, wallet and primary outlet code, enforcing the same read boundary for each.
+   */
+  private async resolveLedgerContext(user: JwtPayload, id: string) {
     // Intra-tenant read leak fix: a partner could read ANY submission's wallet
     // ledger in their tenant (PII). Restrict partner callers to their own
     // submission; admins + sales stay tenant-wide (mirrors list()).
@@ -3617,23 +3621,10 @@ export class KycService {
               select: { outletCode: true },
               take: 1,
             },
+            // The passbook rows are NOT nested here any more (that carried a `take: 200`
+            // newest-rows cap). They are read in full by the shared loadPointsStatement.
             wallets: {
-              include: {
-                transactions: {
-                  orderBy: { createdAt: 'desc' },
-                  take: 200,
-                  select: {
-                    id: true,
-                    createdAt: true,
-                    description: true,
-                    transactionType: true,
-                    points: true,
-                    balanceAfter: true,
-                    referenceType: true,
-                    referenceId: true,
-                  },
-                },
-              },
+              select: { id: true, redeemablePoints: true, lifetimeEarned: true, lifetimeRedeemed: true },
             },
           },
         },
@@ -3650,56 +3641,80 @@ export class KycService {
     await this.assertCanViewSubmission(user, submission.userId, submission.partnerId);
 
     const partner = submission.partner;
-    const wallet = partner?.wallets[0] ?? null;
-    const outletCode = partner?.outlets[0]?.outletCode ?? '';
-    const transactions = wallet?.transactions ?? [];
+    return {
+      submission,
+      partner,
+      wallet: partner?.wallets[0] ?? null,
+      outletCode: partner?.outlets[0]?.outletCode ?? '',
+      clientId: partner?.clientId ?? user.clientId,
+    };
+  }
 
-    // ── Resolve the credit FIELD NAME for each CREDIT_BATCH transaction ──────────
-    // WalletTransaction does not persist the field name (it stores the batch id as
-    // referenceId + the narration as description). The shared resolver replays the
-    // batch's `rows` JSON read-time (POINTS-only pool, 1:1 consumption match) so the
-    // sales ledger and the partner wallet can never drift.
-    const fieldNameByTxId = await resolveCreditFieldNames(
-      this.prisma,
-      partner?.clientId ?? '',
-      outletCode,
-      transactions,
-    );
+  /** The FULL statement for the context's wallet (empty zero statement when there is no wallet). */
+  private async ledgerStatementFor(
+    ctx: Awaited<ReturnType<KycService['resolveLedgerContext']>>,
+    range: { from?: string; to?: string },
+  ): Promise<StatementApiResponse> {
+    if (!ctx.wallet) return { ...EMPTY_STATEMENT, rows: [] };
+    return buildStatementResponse(this.prisma, this.logger, {
+      wallet: ctx.wallet,
+      clientId: ctx.clientId,
+      outletCode: ctx.outletCode,
+      from: range.from,
+      to: range.to,
+    });
+  }
+
+  async ledger(user: JwtPayload, id: string) {
+    const ctx = await this.resolveLedgerContext(user, id);
+    const { submission, partner, wallet } = ctx;
+
+    // ALL points rows (no 200-row cap) from the SAME shared loader the partner wallet
+    // statement uses — stored balances, chain-ordered, credit FIELD NAME resolved over all
+    // the wallet's CREDIT_BATCH rows — so the sales ledger and partner wallet can never drift.
+    const statement = await this.ledgerStatementFor(ctx, {});
 
     // Unified payout history for this outlet's owner (₹ + UTR), from the SAME shared
     // builder the partner wallet uses (buildPayoutStatement) — so the sales outlet
     // ledger and the partner wallet can never drift. Scoped to the submission's
     // partner; access is already gated by assertCanViewSubmission above.
     const payouts = submission.partnerId
-      ? await buildPayoutStatement(
-          this.prisma,
-          partner?.clientId ?? user.clientId,
-          submission.partnerId,
-        )
+      ? await buildPayoutStatement(this.prisma, ctx.clientId, submission.partnerId)
       : [];
 
     return {
       meta: {
         name: partner?.businessName ?? 'Unknown',
-        outletCode,
+        outletCode: ctx.outletCode,
         mobile: partner?.phone ?? '',
         balance: wallet?.redeemablePoints ?? 0,
         lifetime: wallet?.lifetimeEarned ?? 0,
         redeemed: wallet?.lifetimeRedeemed ?? 0,
       },
-      transactions: transactions.map((tx) => ({
+      // Existing on-screen contract (unchanged shape): newest first, IST date key.
+      transactions: [...statement.rows].reverse().map((tx) => ({
         id: tx.id,
-        date: istDateKey(tx.createdAt),
-        description: tx.description ?? '',
+        date: istDateKey(new Date(tx.date)),
+        description: tx.narration ?? '',
         type: mapTxType(tx.transactionType),
         points: tx.points,
         balance: tx.balanceAfter,
         ref: tx.referenceId ?? undefined,
         // Credit rows resolve to their batch field name; everything else is null.
-        fieldName: fieldNameByTxId.get(tx.id) ?? null,
+        fieldName: tx.fieldName,
       })),
       payouts,
     };
+  }
+
+  /**
+   * GET /v1/kyc/:id/ledger/statement?from=YYYY-MM&to=YYYY-MM — the outlet's statement (oldest
+   * first, stored balances, opening/closing) in the SAME shape as GET /v1/wallet/statement, for
+   * the sales ledger's Excel/PDF download. Same access boundary as ledger().
+   */
+  async ledgerStatement(user: JwtPayload, id: string, range: { from?: string; to?: string }) {
+    const ctx = await this.resolveLedgerContext(user, id);
+    return this.ledgerStatementFor(ctx, range);
   }
 
   // ─── POST /v1/kyc/consent ────────────────────────────────────────────────────

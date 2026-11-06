@@ -20,6 +20,7 @@ import { KycService } from './kyc.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Public, Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
+import { StatementQueryDto } from '../wallet/dto/wallet.dto';
 import {
   BulkVerifyQueryDto,
   ConsentKycDto,
@@ -314,6 +315,19 @@ export class KycController {
   @RequirePermission('kyc:read')
   ledger(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.kyc.ledger(user, id);
+  }
+
+  // The outlet's points statement (oldest first, stored balances, opening/closing) for an
+  // optional IST month range — same shape as GET /v1/wallet/statement; feeds the sales
+  // ledger's Excel/PDF download. Same permission + access boundary as :id/ledger.
+  @Get(':id/ledger/statement')
+  @RequirePermission('kyc:read')
+  ledgerStatement(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Query() query: StatementQueryDto,
+  ) {
+    return this.kyc.ledgerStatement(user, id, query);
   }
 
   /**

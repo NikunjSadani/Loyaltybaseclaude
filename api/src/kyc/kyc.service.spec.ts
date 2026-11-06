@@ -90,6 +90,9 @@ const mockPrisma = {
   salesUserAssignment: { findFirst: jest.fn() },
   // ledger() resolves each credit tx's field name from its CreditBatch rows JSON.
   creditBatch: { findMany: jest.fn() },
+  // ledger()/ledgerStatement() read the wallet's FULL passbook via the shared
+  // loadPointsStatement (one unpaginated findMany; default: no rows).
+  walletTransaction: { findMany: jest.fn().mockResolvedValue([]) },
   // ledger() also unions the outlet's payouts via buildPayoutStatement (shared with the
   // partner wallet) → these findMany must exist (default: no payouts, so ledger resolves).
   payoutTransaction: { findMany: jest.fn().mockResolvedValue([]) },
@@ -242,6 +245,7 @@ describe('KycService', () => {
     mockPrisma.outlet.findMany.mockResolvedValue([]);
     mockPrisma.payoutTransaction.findMany.mockResolvedValue([]);
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+    mockPrisma.walletTransaction.findMany.mockResolvedValue([]);
     // Default: no per-tenant outlet-type displayName (reviewQueue/reviewDump) → empty map →
     // outletType.name passes through. Rename tests override per case.
     mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
@@ -3210,19 +3214,24 @@ describe('KycService', () => {
     describe('credit field-name resolution', () => {
       const wt = (over: Partial<Record<string, unknown>>) => ({
         id: 'wt', createdAt: new Date('2026-01-01'), description: '',
-        transactionType: 'CREDIT_BONUS', points: 100, balanceAfter: 100,
+        transactionType: 'CREDIT_BONUS', points: 100, balanceBefore: 0, balanceAfter: 100,
         referenceType: null, referenceId: null, ...over,
       });
 
-      const seedWithTxs = (transactions: unknown[]) =>
+      // The passbook rows are no longer nested under the submission include (that carried the
+      // 200-row cap); they come from the shared loader's walletTransaction.findMany for the
+      // submission's wallet. Same rows, same assertions — only the seeding seam moved.
+      const seedWithTxs = (transactions: unknown[]) => {
         mockPrisma.kycSubmission.findFirst.mockResolvedValue({
           id: 's1', userId: 'sss1',
           partner: {
             clientId: 'deoleo', businessName: 'B', phone: 'p',
             outlets: [{ outletCode: 'OUT-1' }],
-            wallets: [{ redeemablePoints: 0, lifetimeEarned: 0, lifetimeRedeemed: 0, transactions }],
+            wallets: [{ id: 'w1', redeemablePoints: 0, lifetimeEarned: 0, lifetimeRedeemed: 0 }],
           },
         });
+        mockPrisma.walletTransaction.findMany.mockResolvedValue(transactions);
+      };
 
       it('resolves fieldName from the batch row by amount when the narration is blank', async () => {
         seedWithTxs([
@@ -3264,6 +3273,112 @@ describe('KycService', () => {
         const res = await service.ledger(sss, 's1');
         expect(res.transactions.find((t) => t.id === 'r1')?.fieldName).toBeNull();
         expect(mockPrisma.creditBatch.findMany).not.toHaveBeenCalled();
+      });
+    });
+
+    // ── full history via the shared loader (removes the 200-row cap) ──────────
+    describe('full statement via the shared loader', () => {
+      const seedWallet = (rows: unknown[], redeemablePoints: number) => {
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's1', userId: 'sss1', partnerId: 'p1',
+          partner: {
+            clientId: 'deoleo', businessName: 'Biz', phone: '98', outlets: [{ outletCode: 'OUT-1' }],
+            wallets: [{ id: 'w1', redeemablePoints, lifetimeEarned: 0, lifetimeRedeemed: 0 }],
+          },
+        });
+        mockPrisma.walletTransaction.findMany.mockResolvedValue(rows);
+      };
+      const chain = (n: number) => {
+        const rows: Array<Record<string, unknown>> = [];
+        for (let i = 0; i < n; i++) {
+          rows.push({
+            id: `t${String(i).padStart(4, '0')}`, createdAt: new Date(Date.UTC(2025, 0, 1) + i * 3_600_000),
+            description: null, transactionType: 'CREDIT_POINTS_EARNED', points: 10,
+            balanceBefore: i * 10, balanceAfter: (i + 1) * 10, referenceType: null, referenceId: null,
+          });
+        }
+        return rows;
+      };
+
+      it('ledger() returns ALL 250 points rows (was capped at 200), newest first, in the existing shape', async () => {
+        seedWallet(chain(250), 2500);
+        const res = await service.ledger(sss, 's1');
+        expect(res.transactions).toHaveLength(250);
+        expect(res.transactions[0]).toEqual({
+          id: 't0249', date: '2025-01-11', description: '', type: 'earn',
+          points: 10, balance: 2500, ref: undefined, fieldName: null,
+        });
+        expect(res.transactions[249].id).toBe('t0000');
+        // The loader's query is per-wallet and unpaginated.
+        const args = mockPrisma.walletTransaction.findMany.mock.calls[0][0];
+        expect(args.where.walletId).toBe('w1');
+        expect(args.take).toBeUndefined();
+        // The submission include no longer nests a capped transactions list.
+        const include = mockPrisma.kycSubmission.findFirst.mock.calls[0][0].include;
+        expect(JSON.stringify(include)).not.toContain('transactions');
+      });
+
+      it('ledger() with no wallet yet (pre-KYC) returns no transactions and does not query the passbook', async () => {
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's1', userId: 'sss1', partnerId: null,
+          partner: { clientId: 'deoleo', businessName: 'B', phone: 'p', outlets: [], wallets: [] },
+        });
+        const res = await service.ledger(sss, 's1');
+        expect(res.transactions).toEqual([]);
+        expect(mockPrisma.walletTransaction.findMany).not.toHaveBeenCalled();
+      });
+
+      it('ledgerStatement() returns the shared statement shape (oldest first, opening/closing, currentBalance) for the range', async () => {
+        seedWallet(chain(3), 30); // t0000..t0002 on 2025-01-01 (IST)
+        const all = await service.ledgerStatement(sss, 's1', {});
+        expect(all.openingBalance).toBe(0);
+        expect(all.closingBalance).toBe(30);
+        expect(all.currentBalance).toBe(30);
+        expect(all.rows.map((r) => r.id)).toEqual(['t0000', 't0001', 't0002']);
+        expect(all.rows[0]).toMatchObject({ description: 'Points earned', narration: null, balanceBefore: 0, balanceAfter: 10 });
+
+        const later = await service.ledgerStatement(sss, 's1', { from: '2025-02', to: '2025-03' });
+        expect(later.rows).toEqual([]);
+        expect(later.openingBalance).toBe(30);
+        expect(later.closingBalance).toBe(30);
+      });
+
+      it('ledgerStatement() with no wallet yet returns the empty zero statement', async () => {
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's1', userId: 'sss1', partnerId: null,
+          partner: { clientId: 'deoleo', businessName: 'B', phone: 'p', outlets: [], wallets: [] },
+        });
+        await expect(service.ledgerStatement(sss, 's1', {})).resolves.toEqual({
+          openingBalance: 0, closingBalance: 0, currentBalance: 0, rows: [],
+        });
+      });
+
+      // Access is unchanged: the SAME scoped lookup + assertCanViewSubmission gate both routes.
+      it('ledgerStatement() restricts a partner caller to their own submission → a foreign id 404s', async () => {
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue(null);
+        await expect(service.ledgerStatement(sss, 's-foreign', {})).rejects.toBeInstanceOf(NotFoundException);
+        const where = mockPrisma.kycSubmission.findFirst.mock.calls[0][0].where;
+        expect(where).toEqual({ id: 's-foreign', user: { clientId: 'deoleo' }, userId: 'sss1' });
+        expect(mockPrisma.walletTransaction.findMany).not.toHaveBeenCalled();
+      });
+
+      it('ledgerStatement() forbids an OUT-OF-CHAIN sales manager', async () => {
+        primeSalesNodes([
+          { id: 'so-su', reportingToId: null, userId: 'so1' },
+          { id: 'far-su', reportingToId: null, userId: 'someone-else' },
+        ]);
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's1', userId: 'someone-else', partnerId: 'p1',
+          partner: { clientId: 'deoleo', businessName: 'B', phone: 'p', outlets: [], wallets: [{ id: 'w1', redeemablePoints: 0 }] },
+        });
+        mockPrisma.salesUserAssignment.findFirst.mockResolvedValue(null);
+        await expect(service.ledgerStatement(so, 's1', {})).rejects.toBeInstanceOf(ForbiddenException);
+        expect(mockPrisma.walletTransaction.findMany).not.toHaveBeenCalled();
+      });
+
+      it('ledgerStatement() rejects a malformed range with 400', async () => {
+        seedWallet(chain(1), 10);
+        await expect(service.ledgerStatement(sss, 's1', { from: '2025-05', to: '2025-01' })).rejects.toBeInstanceOf(BadRequestException);
       });
     });
   });
