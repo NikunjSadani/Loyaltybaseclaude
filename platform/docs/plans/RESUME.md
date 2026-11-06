@@ -10,6 +10,62 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ---
 
+## 📍 HANDOFF 2026-11-06 — read this FIRST (work done on a borrowed Mac while the laptop was in repair)
+
+**Recovery.** The laptop died 2026-11-05 21:15 IST; its uncommitted work was pushed as `backup/wip-20261105-batt`.
+On the laptop, its working tree still holds that same uncommitted work — **discard the tracked-file edits**
+(`git checkout -- .`); they are all on GitHub. Do **NOT** `git clean` — the laptop's untracked drafts
+(`.claude/` hooks, `terraform/*.draft`, `EMPLOYEE-REWARDS-*.md`) live only there.
+
+**Branch to continue from: `feat/partner-orders-wallet-address`** (pushed, NOT on `develop`, NOT deployed). It is
+`develop` (`35e6ad8c`) + the three features below + plans. Full gates green on the combined branch (see the merge
+commit notes / re-run `bash scripts/gates.sh`). **Next step: runtime-verify on staging → push to `develop`.**
+
+**Shipped to `develop`/staging today (owner-approved, staging-verified on Bajaj, `uat-bajaj.gifsy.in`, partner 9830011252):**
+- `635595f8` dynamic reward **category chip row** (tenant RewardCategory names, ordered by admin `sortOrder`, then
+  name; ⚠️ PLATFORM-WIDE, approved) + dashboard v2 points font `text-4xl→3xl` (v2-flag only).
+- `14aad1dd`…`35e6ad8c` Rewards **filter-row UX** (⚠️ PLATFORM-WIDE, approved): "Within my points" chip (Physical +
+  Vouchers; shared `pointsRequired`/`isWithinPoints` = what the backend enforces: FIXED → points; FREE_AMOUNT →
+  max(item.minRedemptionPoints, round(minVoucherFreeAmount × LIVE effectiveRate)) — never the backend `isAffordable`);
+  Wishlist chip removed (header pill toggles, shows ON only on Physical); chip-row edge fade + selected chip kept in view;
+  filter-aware empty states. Plan: `REWARDS-FILTER-UX-PLAN.md`.
+- Staging test data left in Bajaj: categories Luggage (code `LUGGAGELUGGAGE` — typo, codes are immutable) + Lifestyle;
+  Snitch 3pcs → Luggage, Titan watch → Lifestyle. Someone also added Electronics / Kitchen Appliances on staging.
+
+**On `feat/partner-orders-wallet-address` (built, independently reviewed, review fixes applied, NOT pushed to develop):**
+1. **Order timeline** (`ORDER-TIMELINE-STEPPER-PLAN.md`, ⚠️ PLATFORM-WIDE approved). Owner chose the LONG-TERM fix: ONE
+   shared `transitionOrderStatus` (`api/src/rewards/order-status-transition.ts`) writes status + `RedemptionStatusHistory`
+   in one tx for EVERY status change (incl. cash UTR DELIVERED/FAILED, auto-supersede, OTP-send-failure cleanup — now
+   GUARDED on PENDING, Hubble, vendor). Money paths byte-identical (dual review). Partner My Orders: compact progress bar
+   + dated stepper from `/rewards/orders/:id/track` (per-type labels); **never-confirmed orders hidden** from members;
+   "Points refunded" only when a CREDIT_REVERSAL exists. No migration, no backfill (old orders show undated steps).
+2. **Wallet statement** (`WALLET-STATEMENT-EXPORT-PLAN.md`, ⚠️ PLATFORM-WIDE approved): partner wallet + sales ledger,
+   one Download → Excel/PDF menu, Balance from STORED `balanceBefore/After` with bounded chain-inversion repair (200 s
+   window), opening/closing per date range (all tx types), fixes the old newest-20-rows truncation + `--50` sign bug.
+   PDF = jsPDF, "Rs." + English-letter names (owner D9; jsPDF can't shape Devanagari). ⚠️ **Task 0 still open:** a
+   guarded read-only staging check of the balance chain before pushing.
+3. **Delivery-address pre-fill** (`DELIVERY-ADDRESS-PREFILL-PLAN.md`, ⚠️ PLATFORM-WIDE approved, every brand, no flag):
+   physical-gift redeem form pre-fills from the ACTIVE outlet's address only (via `/partner/me` `deliveryDefaults`),
+   junk placeholders ('-', 'NA', '0'…) treated as empty, never overwrites typing, hint "From your outlet address".
+
+**Open / next (owner):**
+- Staging runtime check of the 3 features above (real logins per role) → push to `develop`.
+- **Deoleo live category-name check** (REQUIRED before the next prod cutover — the dynamic row removed the whitelist).
+- Prod cutover (manual) for everything on `develop`.
+- **UPI manual entry SHELVED** (code on `backup/wip-20261105-batt`) until 3 platform-wide money fixes: lowercase-normalise
+  UPI + dupe scan/backfill; backend UPI validator; `upiManualEntry` ⇒ require `uniquenessPolicy.upi`.
+- **Bug (not fixed):** sales-assisted physical-gift redeem (`sales/catalogue` → `/rewards/redeem-for-outlet`) sends no
+  `deliveryAddress` → 400.
+- Pre-existing, noted by reviewers: admin/vendor `transitionOrder` have no status guard (stale-read race); OTP-send-failure
+  cleanup deletes a concurrent redeem's fresh OTP; My Orders page fetches only the newest 20 orders; wallet payout list caps
+  at 100 rows.
+- **TDS 194R:** `e8c3f463` reverted the VENDOR_IMPORT exclusion on `main` only — still present on `develop`; owner to decide.
+- Owner preferences captured this session: implementation plans in the "zero-context engineer, bite-sized TDD tasks,
+  exact files, frequent commits" format; ask ONE multiple-choice question per message; Claude orchestrates (agents build,
+  Claude gates + independent review + runtime-verify).
+
+---
+
 ## 📮 POST-COMPACT PROMPT (tight restart — everything below this section is reference detail)
 > **Loyaltybase** (Gifsy operator / Deoleo client). Repo `C:\Users\nikun\Loyaltybaseclaude`; backend `api/` (NestJS+Prisma, owns all logic), thin FE `platform/` (Next.js, proxies `/api`→`/v1`). Work on `develop`. Read this file + memory `[[deoleo-go-live-bundle]]` first; verify HEADs via `git log`, never trust a hardcoded SHA.
 > **prod SERVING = `7e47d75` (CUTOVER #50 LIVE + VERIFIED 2026-09-18).** (api rev `gifsy-api-00072-2t5` + frontend `gifsy-frontend-00063-cd9` @100% on the bare `:7e47d75` tag; migrate `gifsy-migrate-22rhl` succeeded = no-op; real domains deoleo/app/gifsy.in + `/auth/login` all HTTP 200; api healthy.) **#50 shipped 3 (all staging-verified):** scheme-report **"Enrollment Status (Excel)" de-collision** (`26efaec`, client complaint — an uploaded status-synonym column no longer looks like a duplicate of the live "Status"; + every Excel header de-duped on its FINAL value) · **WhatsApp send success log** (`6fc5e79` — `msg91.sendWhatsappTemplate` now logs a PII-safe INFO line: template + masked ••••last4 + var COUNT + req id; closes the #49 silent-success finding) · **KYC "Pending — Gifsy" filter** (`25c70bc` — a "Pending — Gifsy (N)" Status-dropdown option filtering to `awaitingGifsy`/PENDING_GIFSY rows; export aligns). ⚠️ confirm the SERVING image SHA via gcloud, never the branch HEAD (main carries docs-only commits past the deployed sha). *(prev #49 = `3257cd9`, 2026-09-17; #48 = `64e8d46`.)*
