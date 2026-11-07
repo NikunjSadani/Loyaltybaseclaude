@@ -3818,6 +3818,29 @@ describe('KycService', () => {
       expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].where.outletId).toEqual({ in: ['O1'] });
     });
 
+    it('fix/list-caps: the sales ledger returns EVERY payout row past the old 100-cap (totals sum every row)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'sss1', partnerId: 'p1',
+        partner: { clientId: 'deoleo', businessName: 'B', phone: 'p', outlets: [{ outletCode: 'O1' }], wallets: [] },
+      });
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([{ outletCode: 'O1' }]);
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([]);
+      const base = Date.now(); // relative dates — never a hardcoded future date
+      const rows = Array.from({ length: 150 }, (_, i) => ({
+        id: `ce${i}`, period: '2026-05', fieldName: 'Visibility', amountPaise: 1000n,
+        narration: '', status: i % 3 === 0 ? 'PENDING' : 'PAID', utr: null,
+        paidAt: null, createdAt: new Date(base - i * 60_000),
+      }));
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValueOnce(rows);
+
+      const res = await service.ledger(sss, 's1');
+
+      expect(res.payouts).toHaveLength(150);
+      expect(res.payouts.map((p) => p.id)).toEqual(rows.map((r) => r.id)); // newest-first unchanged
+      expect(res.payouts.reduce((s, p) => s + p.payoutAmountPaise, 0)).toBe(150 * 1000);
+      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].take).toBeUndefined();
+    });
+
     it('forbids the ledger read when the outlet is NOT assigned into the subtree (unrelated SO preserved)', async () => {
       primeSalesNodes([
         { id: 'so-su', reportingToId: null, userId: 'so1' },

@@ -10,8 +10,15 @@
 // outlet sees a payout is coming, then the SAME row flips to PAID with its UTR —
 // mirroring the redemption side. FAILED/REVERSED are excluded (a transient bank
 // reject that GLM-2 re-banks / a clawed-back award — not a payout to show). The
-// merged list sorts newest-first on the effective date (paid/completed else added)
-// and caps at 100.
+// merged list sorts newest-first on the effective date (paid/completed else added).
+//
+// NO row cap (fix/list-caps): this is the outlet's FULL payout history. It used to be capped
+// at 100 rows, which silently dropped older payouts from the wallet statement, understated the
+// FE-summed Lifetime/Last-Month Payout and the statement download, and truncated the sales
+// ledger. Volume is small and bounded (staging measured 2026-11-07: max 18 credit entries per
+// outlet over 48,422 rows / 4,005 outlets; 2 redemption payouts total), mirroring the already
+// unpaginated points statement (/wallet/statement). Do NOT re-add a cap or paging here — every
+// consumer (wallet list, totals, download, sales ledger) assumes the complete set.
 
 /** One payout row as surfaced to the wallet / ledger (INR, integer paise). */
 import { istMonthKey } from './ist-date';
@@ -119,11 +126,10 @@ export async function buildPayoutStatement(
 
   const [transactions, creditEntries] = await Promise.all([
     prisma.payoutTransaction.findMany({
-      // Hide FAILED/REVERSED at the query so they don't consume the 100-cap.
+      // FAILED/REVERSED are hidden from the statement (and from the presence card).
       where: { partnerId, status: { notIn: ['FAILED', 'REVERSED'] } },
       include: { batch: { select: { batchCode: true, notes: true, createdAt: true } } },
       orderBy: { createdAt: 'desc' },
-      take: 100,
     }),
     outletCodes.length
       ? prisma.creditPayoutEntry.findMany({
@@ -144,7 +150,6 @@ export async function buildPayoutStatement(
             createdAt: true,
           },
           orderBy: { createdAt: 'desc' },
-          take: 100,
         })
       : Promise.resolve([] as CreditEntryRow[]),
   ]);
@@ -179,6 +184,5 @@ export async function buildPayoutStatement(
 
   return [...redemptionPayouts, ...creditPayouts]
     .sort((a, b) => b._sortAt - a._sortAt)
-    .slice(0, 100)
     .map(({ _sortAt: _drop, ...p }) => p);
 }

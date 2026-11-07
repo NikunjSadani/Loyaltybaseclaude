@@ -558,13 +558,13 @@ describe('PartnerService', () => {
         },
       ]);
       const res = await service.getPayouts(partner);
-      // FAILED/REVERSED are excluded at the query so they never crowd the 100-cap or the card.
+      // FAILED/REVERSED are excluded at the query; the statement is the FULL history (no take cap).
       expect(mockPrisma.payoutTransaction.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { partnerId: 'cp1', status: { notIn: ['FAILED', 'REVERSED'] } },
-          take: 100,
         }),
       );
+      expect(mockPrisma.payoutTransaction.findMany.mock.calls[0][0].take).toBeUndefined();
       // With no outlets, credit payouts are not queried at all.
       expect(mockPrisma.creditPayoutEntry.findMany).not.toHaveBeenCalled();
       expect(res.payouts[0]).toMatchObject({
@@ -630,9 +630,9 @@ describe('PartnerService', () => {
             outletId: { in: ['O001', 'O002'] },
             status: { in: ['PENDING', 'PROCESSING', 'PAID'] },
           }),
-          take: 100,
         }),
       );
+      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].take).toBeUndefined();
 
       // All three surface; sorted by effective date desc: pending-added-Jul-2, redemption-May-10… wait
       // effective date = paidAt ?? createdAt → ce-pending(Jul-2) > ce-paid(Jun-20) > t1(May-10).
@@ -656,6 +656,49 @@ describe('PartnerService', () => {
 
       // No leaked internal sort key on the wire.
       expect((res.payouts[0] as unknown as Record<string, unknown>)._sortAt).toBeUndefined();
+    });
+
+    it('fix/list-caps: returns EVERY row past the old 100-cap, newest-first, and the rows sum to the full total', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'O001' }]);
+      // 130 PAID credit entries (₹1.00 × i) + 5 redemption payouts (₹10.00 each) = 135 rows.
+      // Dates are relative to "now" (never a hardcoded future date).
+      const base = Date.now();
+      const credits = Array.from({ length: 130 }, (_, i) => ({
+        id: `ce${i}`,
+        period: '2026-01',
+        fieldName: 'Monthly Scheme',
+        amountPaise: BigInt(100 * (i + 1)),
+        narration: '',
+        status: 'PAID',
+        utr: `UTR${i}`,
+        paidAt: new Date(base - i * 3_600_000),
+        createdAt: new Date(base - i * 3_600_000 - 1000),
+      }));
+      const txns = Array.from({ length: 5 }, (_, i) => ({
+        id: `t${i}`,
+        status: 'SUCCESS',
+        netAmountPaise: 1000n,
+        providerRefId: null,
+        completedAt: new Date(base - (200 + i) * 3_600_000), // older than every credit row
+        createdAt: new Date(base - (200 + i) * 3_600_000),
+        batch: null,
+      }));
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue(credits);
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue(txns);
+
+      const res = await service.getPayouts(partner);
+
+      expect(res.payouts).toHaveLength(135);
+      // Sort unchanged: newest-first on the effective date → credits ce0..ce129, then t0..t4
+      // (the 5 oldest — exactly the rows the old cap dropped).
+      expect(res.payouts.map((p) => p.id)).toEqual([
+        ...credits.map((c) => c.id),
+        ...txns.map((t) => t.id),
+      ]);
+      // Totals = every row: Σ credits 100×(1..130) = 8,51,500 paise + 5 × 1000 = 8,56,500 paise.
+      const sum = res.payouts.reduce((s, p) => s + p.payoutAmountPaise, 0);
+      expect(sum).toBe(100 * (130 * 131) / 2 + 5 * 1000);
     });
   });
 

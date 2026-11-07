@@ -315,7 +315,7 @@ export class PartnerService {
   }
 
   /**
-   * GET /v1/partner/payouts — the caller's own payout history (most recent 100).
+   * GET /v1/partner/payouts — the caller's own FULL payout history (no row cap).
    * Scoped to the caller's channel partner within the tenant; returns an empty
    * list when the caller has no channel partner.
    */
@@ -328,7 +328,7 @@ export class PartnerService {
     // Delegated to the shared builder so the partner wallet + the sales outlet
     // ledger (kyc.service.ledger) can never drift — it does the exact two-rail
     // union (redemption by partnerId + credit by outlet CODE), status mapping,
-    // FAILED/REVERSED exclusion, newest-first sort and 100-cap.
+    // FAILED/REVERSED exclusion and newest-first sort — the complete history, uncapped.
     const payouts = await buildPayoutStatement(
       this.prisma,
       user.clientId,
