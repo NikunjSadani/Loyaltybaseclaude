@@ -129,14 +129,20 @@ describe('PII RETENTION #16 — 180-day boundary from a STABLE terminal timestam
 
   it('EXACT 180-day boundary → PII SHOWN (window is inclusive; withholding is strictly > 180d)', () => {
     // now - terminalAt == exactly 180d → ageMs === retentionMs → NOT withheld.
+    // Pin ONE `now` for both the terminal timestamp and the evaluation clock. Computing deliveredAt
+    // from one Date.now() and then evaluating against a second, later `new Date()` made
+    // ageMs = 180d + δ; any δ>0 (a scheduling/GC gap under full-suite load) tipped it past the
+    // strictly->180d withhold rule → flaky red (passed solo, failed in-suite). One clock = exact,
+    // deterministic boundary. (Product logic unchanged; this only fixes the test's own clock race.)
+    const now = Date.now();
     const order = {
       ...basePii,
       status: RedemptionStatus.DELIVERED,
-      deliveredAt: new Date(Date.now() - VENDOR_PII_RETENTION_DAYS * MS_DAY),
+      deliveredAt: new Date(now - VENDOR_PII_RETENTION_DAYS * MS_DAY),
       cancelledAt: null,
-      updatedAt: new Date(),
+      updatedAt: new Date(now),
     };
-    expect(shouldWithholdVendorPii(order, new Date())).toBe(false);
+    expect(shouldWithholdVendorPii(order, new Date(now))).toBe(false);
   });
 
   it('180 days + 1ms after DELIVERED → PII WITHHELD', () => {

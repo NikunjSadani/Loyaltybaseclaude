@@ -136,11 +136,16 @@ export interface PartnerIdentity {
  * (real) and upgrades to the channel-partner record once /partner/me responds.
  */
 export function usePartnerIdentity(): PartnerIdentity {
-  const fallbackName = getStoredUser()?.name ?? '';
+  // The initial render must NOT read client-only storage (getStoredUser → localStorage):
+  // during SSR it returns '' and on the client's first paint it returns the cached name,
+  // so the shell header text differs server↔client → a hydration mismatch (React #418,
+  // app-wide). Start empty so SSR and the first client paint agree, then seed the cached
+  // name in the post-mount effect below — it fills on the first post-mount commit (a ≤1-frame
+  // blank name is the accepted tradeoff for removing the app-wide hydration error).
   const [identity, setIdentity] = useState<PartnerIdentity>({
-    businessName: fallbackName,
+    businessName: '',
     outletName: null,
-    ownerName: fallbackName,
+    ownerName: '',
     partnerCode: null,
     outletType: null,
     hasPointsActivity: false,
@@ -167,6 +172,21 @@ export function usePartnerIdentity(): PartnerIdentity {
   // per component mount — clearing it triggers no refetch here, but this makes the intent
   // (fire-once, no loop) explicit and robust against any future re-fetch.
   const healedRef = useRef(false);
+
+  // Seed the cached display name AFTER mount — not during render (that localStorage read
+  // during the initial render is what caused the React #418 hydration mismatch). Post-
+  // hydration SSR and the first client paint agree (both empty), then this fills the name
+  // on the first post-mount commit (≤1 frame later), well before /partner/me resolves. The
+  // old code filled it during the first paint but at the cost of the app-wide hydration error.
+  useEffect(() => {
+    const stored = getStoredUser()?.name ?? '';
+    if (!stored) return;
+    setIdentity((prev) => ({
+      ...prev,
+      businessName: prev.businessName || stored,
+      ownerName: prev.ownerName || stored,
+    }));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

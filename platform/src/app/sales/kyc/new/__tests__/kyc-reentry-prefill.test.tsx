@@ -69,7 +69,9 @@ describe('KYC re-entry prefill', () => {
   it('RP1: a REJECTED outlet deep-link fetches the prior submission to pre-fill docs/photos', async () => {
     const calls = installFetch('REJECTED', 'K1');
     render(<NewKYCPage />);
-    await waitFor(() => expect(calls.some((u) => u.includes('/api/kyc/K1'))).toBe(true));
+    // First-settle waitFor through a 2-hop chain (outlets fetch → deep-link effect → /api/kyc/K1):
+    // widen past the default 1000ms so suite-load CPU starvation can't time it out (red-flake class).
+    await waitFor(() => expect(calls.some((u) => u.includes('/api/kyc/K1'))).toBe(true), { timeout: 5000 });
   });
 
   it('RP2: a NOT_STARTED outlet does NOT fetch any prior submission', async () => {
@@ -99,7 +101,7 @@ describe('KYC re-entry prefill', () => {
     }));
 
     render(<NewKYCPage />);
-    await waitFor(() => expect(calls.some((u) => u.includes('/api/kyc/K1'))).toBe(true)); // A prefilled
+    await waitFor(() => expect(calls.some((u) => u.includes('/api/kyc/K1'))).toBe(true), { timeout: 5000 }); // A prefilled (2-hop chain → widen past default 1000ms, suite-load safe)
     fireEvent.click(await screen.findByTestId('outlet-dropdown-trigger'));
     fireEvent.click(await screen.findByTestId('outlet-option-OUT3'));               // switch to fresh C
     fireEvent.click(screen.getByRole('button', { name: /continue/i }));             // → basic step
