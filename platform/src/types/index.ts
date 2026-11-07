@@ -494,6 +494,8 @@ export interface GifsySettings {
     // "Sales-Assisted Redemption" flag (OutletTypeClientConfig.salesAssistedRedeemEnabled).
     /** When true, the sales KYC form offers UPI as a payout option. Default: false (bank-only). */
     upiEnabled?: boolean;
+    /** When true, the UPI ID may be typed manually (in addition to QR scan). Default: false (QR scan only). */
+    upiManualEntry?: boolean;
   };
   /** Credits & Payouts bulk upload module settings */
   creditsPayouts?: {

@@ -23,6 +23,7 @@ import { applyAddressPrefill, type AddressForm, type TouchedFields } from './add
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { useTenantFeatures } from '@/lib/tenant-features';
 import { BankOrUpiSection, type PaymentMode } from '@/components/bank-or-upi-section';
+import { isValidUpiId } from '@/lib/upi-utils';
 import { pinnedPaymentMode, type OutletPaymentType } from '@/lib/payment-type';
 
 /* ─── Partner cash beneficiary (from GET /api/auth/me) ─────────────────────────
@@ -1155,6 +1156,8 @@ function PayoutCaptureSheet({
       }
     } else if (!upiId) {
       setError('Please scan your UPI QR code to continue'); return;
+    } else if (!isValidUpiId(upiId)) {
+      setError('Enter a valid UPI ID'); return;
     }
 
     setSubmitting(true);

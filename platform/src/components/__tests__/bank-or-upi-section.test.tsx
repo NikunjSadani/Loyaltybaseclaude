@@ -18,7 +18,9 @@ vi.mock('jsqr', () => ({ default: vi.fn().mockReturnValue(null) }));
 
 // Per-tenant UPI gate. The existing suites below assume UPI is available, so the default
 // mock returns upiEnabled: true. The dedicated "UPI gate" describe overrides it per-test.
-const getGifsySettingsMock = vi.fn(() => ({ salesApp: { upiEnabled: true } }));
+const getGifsySettingsMock = vi.fn(
+  (): { salesApp: { upiEnabled: boolean; upiManualEntry?: boolean } } => ({ salesApp: { upiEnabled: true } }),
+);
 vi.mock('@/lib/gifsy-settings', () => ({
   getGifsySettings: () => getGifsySettingsMock(),
 }));
@@ -322,6 +324,68 @@ describe('QR scanner', () => {
     });
 
     vi.useRealTimers();
+  });
+});
+
+/* ─── G: Optional manual UPI entry (salesApp.upiManualEntry) ────────────────── */
+
+describe('UPI manual entry — salesApp.upiManualEntry', () => {
+  describe('enabled (upiManualEntry === true)', () => {
+    beforeEach(() => {
+      getGifsySettingsMock.mockReturnValue({ salesApp: { upiEnabled: true, upiManualEntry: true } });
+    });
+
+    it('renders a manual UPI text input in UPI mode', () => {
+      render(<BankOrUpiSection {...upiProps} />);
+      expect(screen.getByTestId('manual-upi-input')).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/yourname@bank/i)).toBeInTheDocument();
+    });
+
+    it('calls onUpiChange when typing into the manual input', async () => {
+      const onUpiChange = vi.fn();
+      render(<BankOrUpiSection {...upiProps} onUpiChange={onUpiChange} />);
+      await userEvent.type(screen.getByTestId('manual-upi-input'), 'x');
+      expect(onUpiChange).toHaveBeenCalledWith('x');
+    });
+
+    it('fires onPaymentGeoTrigger exactly once on the first keystroke of a fresh entry', async () => {
+      const onPaymentGeoTrigger = vi.fn();
+      render(<BankOrUpiSection {...upiProps} onPaymentGeoTrigger={onPaymentGeoTrigger} />);
+      await userEvent.type(screen.getByTestId('manual-upi-input'), 'abc');
+      expect(onPaymentGeoTrigger).toHaveBeenCalledOnce();
+    });
+
+    it('does NOT show the "Manual entry is not permitted." copy', () => {
+      render(<BankOrUpiSection {...upiProps} />);
+      expect(screen.queryByText(/manual entry is not permitted/i)).not.toBeInTheDocument();
+    });
+
+    it('keeps the Scan QR Code button available alongside manual entry', () => {
+      render(<BankOrUpiSection {...upiProps} />);
+      expect(screen.getByRole('button', { name: /scan qr/i })).toBeInTheDocument();
+    });
+
+    it('disables the manual input when the field is re-KYC locked', () => {
+      render(<BankOrUpiSection {...upiProps} upiId="user@paytm" disabledFields={{ upiId: true }} />);
+      expect(screen.getByTestId('manual-upi-input')).toBeDisabled();
+    });
+  });
+
+  describe('disabled (upiManualEntry falsy — default, byte-identical to today)', () => {
+    beforeEach(() => {
+      // Explicit: upiEnabled on, upiManualEntry absent → manual entry off.
+      getGifsySettingsMock.mockReturnValue({ salesApp: { upiEnabled: true } });
+    });
+
+    it('does NOT render a manual UPI input', () => {
+      render(<BankOrUpiSection {...upiProps} />);
+      expect(screen.queryByTestId('manual-upi-input')).not.toBeInTheDocument();
+    });
+
+    it('SHOWS the "Manual entry is not permitted." copy', () => {
+      render(<BankOrUpiSection {...upiProps} />);
+      expect(screen.getByText(/manual entry is not permitted/i)).toBeInTheDocument();
+    });
   });
 });
 

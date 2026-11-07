@@ -31,16 +31,20 @@ vi.mock('@/lib/partner-identity', () => ({
   }),
 }));
 
-// upiEnabled:false → BankOrUpiSection forces BANK mode (no toggle, cheque required) — the
-// deterministic path for the submit test (UPI is QR-scan-only, not drivable in jsdom).
+// Gifsy settings are read through a MUTABLE ref so individual tests can flip the salesApp
+// gates. Default: upiEnabled:false → BankOrUpiSection forces BANK mode (no toggle, cheque
+// required) — the deterministic path for the bank submit test (QR is not drivable in jsdom).
+// The UPI-validation test flips upiEnabled+upiManualEntry on to drive the manual UPI input.
+const BANK_ONLY_SETTINGS = {
+  pointsConversionRate: 1,
+  minBankTransferAmount: 250,
+  minVoucherFreeAmount: 250,
+  redemptionChannels: { physicalGifts: true, vouchers: true, bankTransfer: true },
+  salesApp: { upiEnabled: false } as { upiEnabled: boolean; upiManualEntry?: boolean },
+};
+const settingsRef = vi.hoisted(() => ({ current: null as unknown }));
 vi.mock('@/lib/gifsy-settings', () => ({
-  getGifsySettings: () => ({
-    pointsConversionRate: 1,
-    minBankTransferAmount: 250,
-    minVoucherFreeAmount: 250,
-    redemptionChannels: { physicalGifts: true, vouchers: true, bankTransfer: true },
-    salesApp: { upiEnabled: false },
-  }),
+  getGifsySettings: () => settingsRef.current,
 }));
 
 const toastError = vi.fn();
@@ -130,7 +134,12 @@ async function openCashTab(user: ReturnType<typeof userEvent.setup>) {
   await user.click(await screen.findByRole('button', { name: /cash payout/i }));
 }
 
-beforeEach(() => { pushMock.mockClear(); toastError.mockClear(); });
+beforeEach(() => {
+  pushMock.mockClear();
+  toastError.mockClear();
+  // Reset to the bank-only default before every test (fresh copy so a test's override can't leak).
+  settingsRef.current = { ...BANK_ONLY_SETTINGS, salesApp: { upiEnabled: false } };
+});
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('PC — Cash Payout inline capture sheet (captureBankAtRedemption)', () => {
@@ -206,5 +215,32 @@ describe('PC — Cash Payout inline capture sheet (captureBankAtRedemption)', ()
       const meCallsAfter = fetchMock.mock.calls.filter(([u]) => String(u).includes('/api/auth/me')).length;
       expect(meCallsAfter).toBeGreaterThan(meCallsBefore);
     });
+  });
+
+  it('PC5: invalid manual UPI is blocked by isValidUpiId BEFORE submit (no POST)', async () => {
+    // Enable UPI + manual entry so the manual UPI <input> is drivable in jsdom.
+    settingsRef.current = {
+      ...BANK_ONLY_SETTINGS,
+      salesApp: { upiEnabled: true, upiManualEntry: true },
+    };
+    const fetchMock = makeFetch({ captureBankAtRedemption: true, channelPartner: CP_EMPTY });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await openCashTab(user);
+
+    await screen.findByTestId('payout-capture-sheet');
+
+    // Switch to UPI mode, then type an invalid VPA into the manual input.
+    await user.click(screen.getByRole('button', { name: /upi id/i }));
+    fireEvent.change(await screen.findByTestId('manual-upi-input'), { target: { value: 'notaupi' } });
+
+    // Submit → the new isValidUpiId gate blocks it inline; NO payout-details POST fires.
+    await user.click(screen.getByTestId('payout-capture-submit'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('payout-capture-error')).toHaveTextContent(/valid upi id/i);
+    });
+    expect(fetchMock.mock.calls.some(([u]) => u === '/api/partner/payout-details')).toBe(false);
   });
 });

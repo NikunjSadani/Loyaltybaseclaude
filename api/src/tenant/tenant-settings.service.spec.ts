@@ -29,7 +29,7 @@ describe('TenantSettingsService', () => {
     expect(s.minVoucherFreeAmount).toBe(250);
     expect(s.paceAmberThreshold).toBe(10);
     expect(s.redemptionChannels).toEqual({ physicalGifts: true, vouchers: true, bankTransfer: true });
-    expect(s.salesApp).toEqual({ ledgerLabel: 'Wallet', upiEnabled: false });
+    expect(s.salesApp).toEqual({ ledgerLabel: 'Wallet', upiEnabled: false, upiManualEntry: false });
     expect(s.creditsPayouts.notifyEmails).toEqual([]);
     // Master visibility switch defaults OFF (opt-in per tenant).
     expect(s.visibilityEnabled).toBe(false);
@@ -104,6 +104,40 @@ describe('TenantSettingsService', () => {
       makePrisma([{ settingKey: 'visibilityEnabled', settingValue: 'yes' }]),
     ).getEffectiveSettings('deoleo');
     expect(bad.visibilityEnabled).toBe(false);
+  });
+
+  it('overlays salesApp.upiManualEntry=true; a partial salesApp PUT keeps the default (false)', async () => {
+    const on = await new TenantSettingsService(
+      makePrisma([{ settingKey: 'salesApp', settingValue: { upiManualEntry: true } }]),
+    ).getEffectiveSettings('deoleo');
+    expect(on.salesApp.upiManualEntry).toBe(true);
+
+    // A partial salesApp overlay that omits upiManualEntry keeps the default (false).
+    const partial = await new TenantSettingsService(
+      makePrisma([{ settingKey: 'salesApp', settingValue: { upiEnabled: true } }]),
+    ).getEffectiveSettings('deoleo');
+    expect(partial.salesApp.upiManualEntry).toBe(false);
+  });
+
+  it('Fix B — salesApp.upiManualEntry=true FORCES uniquenessPolicy.upi=true even when the policy flag is off', async () => {
+    // Manual UPI entry can collide (a hand-typed VPA), so dedup must run regardless of the
+    // uniqueness policy flag. upiManualEntry=true + upi=false → effective upi flipped to true.
+    const forced = await new TenantSettingsService(
+      makePrisma([
+        { settingKey: 'salesApp',         settingValue: { upiManualEntry: true } },
+        { settingKey: 'uniquenessPolicy', settingValue: { gst: true, phone: true, bank: false, upi: false } },
+      ]),
+    ).getEffectiveSettings('deoleo');
+    expect(forced.uniquenessPolicy.upi).toBe(true);
+
+    // QR-only tenant (upiManualEntry=false) with upi=false → effective upi stays false (unaffected).
+    const unaffected = await new TenantSettingsService(
+      makePrisma([
+        { settingKey: 'salesApp',         settingValue: { upiManualEntry: false } },
+        { settingKey: 'uniquenessPolicy', settingValue: { gst: true, phone: true, bank: false, upi: false } },
+      ]),
+    ).getEffectiveSettings('deoleo');
+    expect(unaffected.uniquenessPolicy.upi).toBe(false);
   });
 
   it('derives the default conversionRate from POINTS_CONVERSION_RATE env', async () => {

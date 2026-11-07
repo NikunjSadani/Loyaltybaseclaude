@@ -574,6 +574,35 @@ export default function SettingsPage() {
     setTimeout(() => setUpiEnabledSaved(false), 3000)
   }
 
+  // ── UPI manual-entry toggle (per-tenant; saved via GifsySettings) ──
+  // Mirrors the UPI collection toggle above: saveGifsySettings PUTs to /v1/admin/settings
+  // (GIFSY_ADMIN-only), so the control is editable only for GIFSY_ADMIN. Default OFF — treat
+  // missing as OFF. salesApp is a REPLACE-WHOLE nested key, so we MUST send the COMPLETE object.
+  const [upiManualEntry,      setUpiManualEntry]      = useState<boolean>(() => getGifsySettings().salesApp?.upiManualEntry === true)
+  const [upiManualEntrySaved, setUpiManualEntrySaved] = useState(false)
+  const [upiManualEntryError, setUpiManualEntryError] = useState<string | null>(null)
+
+  // Keep the displayed value in sync once server settings hydrate (/me → cache).
+  useEffect(() => {
+    setUpiManualEntry(getGifsySettings().salesApp?.upiManualEntry === true)
+  }, [])
+
+  async function handleUpiManualEntryChange(next: boolean) {
+    setUpiManualEntryError(null)
+    const previous = upiManualEntry
+    setUpiManualEntry(next) // optimistic
+    const ok = await saveGifsySettings({
+      salesApp: { ...getGifsySettings().salesApp, upiManualEntry: next },
+    })
+    if (!ok) {
+      setUpiManualEntry(previous) // revert
+      setUpiManualEntryError('Could not save — UPI manual entry can only be changed by a Gifsy Admin.')
+      return
+    }
+    setUpiManualEntrySaved(true)
+    setTimeout(() => setUpiManualEntrySaved(false), 3000)
+  }
+
   // ── Identity & payout uniqueness policy (per-tenant; saved via GifsySettings) ──
   // saveGifsySettings PUTs to /v1/admin/settings (GIFSY_ADMIN-only), so the toggles are editable
   // only for GIFSY_ADMIN. `uniquenessPolicy` is a REPLACE-WHOLE nested key — every save MUST send
@@ -1128,6 +1157,49 @@ export default function SettingsPage() {
           )}
           {upiEnabledError && (
             <p className="text-xs text-red-600 mt-2">{upiEnabledError}</p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ── UPI Manual Entry — per-tenant ── */}
+      <Card data-testid="upi-manual-entry-card">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2">
+                <Smartphone className="h-4 w-4 text-[var(--brand-primary)]" /> UPI Manual Entry
+              </CardTitle>
+              <CardDescription className="mt-1">
+                Allow typing the UPI ID manually (in addition to QR scan) on KYC and cash-payout
+                capture. Off = QR scan only. This is a Gifsy-operated setting — only a Gifsy Admin
+                can change it.
+              </CardDescription>
+            </div>
+            {upiManualEntrySaved && (
+              <span className="text-xs font-semibold text-emerald-600 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg shrink-0">
+                ✓ Saved
+              </span>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center gap-3">
+            {/* Segmented ON/OFF control */}
+            <SegmentedControl
+              options={[['OFF', false], ['ON', true]] as const}
+              value={upiManualEntry}
+              onChange={handleUpiManualEntryChange}
+              disabled={!isGifsyAdmin}
+              ariaLabel="UPI manual entry"
+            />
+          </div>
+          {!isGifsyAdmin && (
+            <p className="text-xs text-gray-400 mt-2">
+              UPI manual entry is a Gifsy-operated setting — only a Gifsy Admin can change it.
+            </p>
+          )}
+          {upiManualEntryError && (
+            <p className="text-xs text-red-600 mt-2">{upiManualEntryError}</p>
           )}
         </CardContent>
       </Card>
