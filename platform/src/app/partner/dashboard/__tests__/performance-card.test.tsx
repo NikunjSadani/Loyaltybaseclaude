@@ -156,8 +156,10 @@ describe('Performance card — rendering', () => {
     expect(screen.getByText(/^Last month · /)).toBeInTheDocument();
     expect(screen.getByText('800 cases')).toBeInTheDocument();
     expect(screen.getByText('below target')).toBeInTheDocument();
-    // Reward credited (points outlet only)
-    expect(screen.getByText('+750 pts credited')).toBeInTheDocument();
+    // Reward credited (points outlet only). The points line comes from the SEPARATE
+    // /wallet/points-credited effect (setPointsCr), not the trend fetch awaited above — so await
+    // it independently; a sync getByText here raced that cross-source commit under suite load.
+    expect(await screen.findByText('+750 pts credited')).toBeInTheDocument();
     expect(screen.queryByText(/payout/)).not.toBeInTheDocument();
     // Change vs last month: 1000 − 800 = +200 (+25%)
     expect(screen.getByText('Change vs last month')).toBeInTheDocument();
@@ -206,7 +208,9 @@ describe('Performance card — rendering', () => {
     render(<PartnerDashboardPage />);
 
     await waitFor(() => expect(screen.getByText('+320 pts credited')).toBeInTheDocument());
-    expect(screen.getByText('₹5K payout')).toBeInTheDocument();
+    // The payout line comes from the SEPARATE /partner/payouts effect (setPayoutCr), a different
+    // async source than the points line awaited above → await it too (was a sync cross-source race).
+    expect(await screen.findByText('₹5K payout')).toBeInTheDocument();
   });
 
   it('INR unit + no primary (no current-month target row) → ₹ formatting from the trend', async () => {
