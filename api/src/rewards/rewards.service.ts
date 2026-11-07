@@ -89,6 +89,28 @@ export const DISPATCH_SLA_BUSINESS_HOURS = 48;
 export const VENDOR_PII_CONSENT_VERSION = 'v1-2026-08';
 
 /**
+ * Opaque keyset cursor for listOrders — base64url of `<createdAt ISO>|<id>` (the same
+ * encoding the notifications feed uses). Decode returns null for anything malformed.
+ */
+export function encodeOrderCursor(createdAt: Date, id: string): string {
+  return Buffer.from(`${createdAt.toISOString()}|${id}`).toString('base64url');
+}
+
+export function decodeOrderCursor(cursor: string): { createdAt: Date; id: string } | null {
+  try {
+    const raw = Buffer.from(cursor, 'base64url').toString('utf8');
+    const sep = raw.indexOf('|');
+    if (sep < 0) return null;
+    const createdAt = new Date(raw.slice(0, sep));
+    const id = raw.slice(sep + 1);
+    if (Number.isNaN(createdAt.getTime()) || !id) return null;
+    return { createdAt, id };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Member-catalogue VENDOR visibility filter (review CRITICAL #2 — the suspend/revoke
  * cascade). A PLATFORM row is always visible; a VENDOR row is visible ONLY while its
  * Vendor is ACTIVE and holds an ACTIVE VendorTenantGrant for this tenant. Because the
@@ -582,11 +604,24 @@ export class RewardsService {
     return { success: true, wishlisted: false, rewardId };
   }
 
-  /** GET /v1/rewards/orders — paginated redemption orders (own only for non-admins). */
+  /**
+   * GET /v1/rewards/orders — paginated redemption orders (own only for non-admins).
+   *
+   * Two paging modes over ONE stable order (createdAt DESC, id DESC — the id tie-break makes
+   * equal-timestamp rows page deterministically):
+   *   • page/limit (offset) — the legacy mode the admin Gift-Catalogue console uses; unchanged.
+   *   • cursor (keyset)     — the partner My Orders "Load more": rows strictly after the cursor,
+   *     so a row added at the top, or one leaving the member view mid-scroll (D4 hide), can never
+   *     duplicate or skip a row across pages.
+   * Both return `nextCursor` (null on the last page). `pagination.total` always counts the FULL
+   * filtered set (cursor excluded) so "N orders" stays the true total.
+   */
   async listOrders(user: JwtPayload, q: ListOrdersQueryDto, requestedPartnerId?: string) {
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
-    const skip = (page - 1) * limit;
+    const cursor = q.cursor ? decodeOrderCursor(q.cursor) : null;
+    if (q.cursor && !cursor) throw new BadRequestException('Invalid cursor');
+    const skip = cursor ? 0 : (page - 1) * limit;
 
     // Tenant scope by the partner's own clientId column (NOT partner.user.clientId):
     // a login-less sibling has no linked user, so a user-relation scope would hide
@@ -631,9 +666,25 @@ export class RewardsService {
     // and delivery PII, and never returns the BigInt valuePaise. logisticsPartner (the
     // courier name) IS member-safe and included. Also serves the legacy /admin/gifts
     // console, which reads a strict subset of these fields.
-    const [orders, total] = await Promise.all([
+    // Keyset predicate lives ONLY on the page query — the count keeps the base `where` so the
+    // total is the whole filtered set (and the D4 exclusion still applies to both).
+    const pageWhere: Prisma.RedemptionOrderWhereInput = cursor
+      ? {
+          AND: [
+            where,
+            {
+              OR: [
+                { createdAt: { lt: cursor.createdAt } },
+                { createdAt: cursor.createdAt, id: { lt: cursor.id } },
+              ],
+            },
+          ],
+        }
+      : where;
+
+    const [rows, total] = await Promise.all([
       this.prisma.redemptionOrder.findMany({
-        where,
+        where: pageWhere,
         select: {
           id: true,
           orderNumber: true,
@@ -655,11 +706,16 @@ export class RewardsService {
           partner: { select: { id: true, businessName: true } },
         },
         skip,
-        take: limit,
-        orderBy: { createdAt: 'desc' },
+        // One extra row tells us whether another page exists (it is never returned).
+        take: limit + 1,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       this.prisma.redemptionOrder.count({ where }),
     ]);
+
+    const hasMore = rows.length > limit;
+    const orders = hasMore ? rows.slice(0, limit) : rows;
+    const last = orders[orders.length - 1];
 
     // No dedicated returnedAt column — surface it (member-safe) when the order is RETURNED.
     const mapped = orders.map((o) => ({
@@ -670,6 +726,7 @@ export class RewardsService {
     return {
       orders: mapped,
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+      nextCursor: hasMore && last ? encodeOrderCursor(last.createdAt, last.id) : null,
     };
   }
 

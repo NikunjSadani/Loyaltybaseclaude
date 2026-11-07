@@ -97,6 +97,18 @@ function mapApiOrder(o: ApiOrder): Order {
   };
 }
 
+/** GET /api/rewards/orders envelope. `nextCursor` (keyset, opaque) is null on the last page;
+ *  `pagination.total` is the partner's full visible order count. */
+interface OrdersListResponse {
+  success: boolean;
+  data?: {
+    orders: ApiOrder[];
+    nextCursor?: string | null;
+    pagination?: { total?: number };
+  };
+  error?: string;
+}
+
 const VOUCHER_MODES = new Set(['GIFT_CARD', 'VOUCHER']);
 
 /** Partner-facing brand label for a voucher — the reward's brand, never the back-end
@@ -189,21 +201,62 @@ export default function OrdersPage() {
     loadTracking(id);
   };
 
+  // "Load more" paging — the first page stays the backend default (newest 20, fast); older
+  // orders are appended via the keyset `nextCursor` (null = nothing older → button hidden).
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [total, setTotal] = useState<number | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState(false);
+  // Bumped on every full (re)load so a Load-more response that lands after a Retry is dropped.
+  const generation = useRef(0);
+
   const load = useCallback(() => {
+    const gen = ++generation.current;
     setLoading(true);
     setError(null);
+    setNextCursor(null);
+    setTotal(null);
+    setLoadingMore(false);
+    setLoadMoreError(false);
     fetch('/api/rewards/orders', { headers: { ...authHeader() } })
       .then(r => r.json())
-      .then((json: { success: boolean; data?: { orders: ApiOrder[] }; error?: string }) => {
+      .then((json: OrdersListResponse) => {
+        if (gen !== generation.current) return;
         if (json.success && json.data) {
           setOrders(json.data.orders.map(mapApiOrder));
+          setNextCursor(json.data.nextCursor ?? null);
+          setTotal(typeof json.data.pagination?.total === 'number' ? json.data.pagination.total : null);
         } else {
           setError(json.error ?? 'Failed to load orders');
         }
       })
-      .catch(() => setError('Failed to load orders'))
-      .finally(() => setLoading(false));
+      .catch(() => { if (gen === generation.current) setError('Failed to load orders'); })
+      .finally(() => { if (gen === generation.current) setLoading(false); });
   }, []);
+
+  const loadMore = () => {
+    if (!nextCursor || loadingMore) return;
+    const gen = generation.current;
+    setLoadingMore(true);
+    setLoadMoreError(false);
+    fetch(`/api/rewards/orders?cursor=${encodeURIComponent(nextCursor)}`, { headers: { ...authHeader() } })
+      .then(r => r.json())
+      .then((json: OrdersListResponse) => {
+        if (gen !== generation.current) return;
+        if (!json.success || !json.data) { setLoadMoreError(true); return; }
+        const more = json.data.orders.map(mapApiOrder);
+        // Keyset pages never overlap, but de-dupe by id defensively so a card (and its
+        // per-order /track cache, keyed by id) can never render twice.
+        setOrders(prev => {
+          const seen = new Set(prev.map(o => o.id));
+          return [...prev, ...more.filter(o => !seen.has(o.id))];
+        });
+        setNextCursor(json.data.nextCursor ?? null);
+        if (typeof json.data.pagination?.total === 'number') setTotal(json.data.pagination.total);
+      })
+      .catch(() => { if (gen === generation.current) setLoadMoreError(true); })
+      .finally(() => { if (gen === generation.current) setLoadingMore(false); });
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -219,7 +272,8 @@ export default function OrdersPage() {
     <div className="space-y-5 fade-in">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-900">My Orders</h1>
-        <span className="text-sm text-gray-500">{orders.length} orders</span>
+        {/* The TRUE total (backend count), not just the loaded page — falls back to the loaded count. */}
+        <span data-testid="orders-count" className="text-sm text-gray-500">{total ?? orders.length} orders</span>
       </div>
 
       {loading ? (
@@ -346,6 +400,27 @@ export default function OrdersPage() {
               </Card>
             );
           })}
+
+          {/* Load more — appends the next (older) page; hidden once the cursor is exhausted. */}
+          {nextCursor && (
+            <div className="pt-1 text-center">
+              {loadMoreError && (
+                <p data-testid="orders-load-more-error" className="mb-2 text-xs text-red-500">
+                  Couldn&apos;t load more orders. Please try again.
+                </p>
+              )}
+              <button
+                type="button"
+                onClick={loadMore}
+                disabled={loadingMore}
+                data-testid="orders-load-more"
+                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-60"
+              >
+                {loadingMore && <Spinner size="sm" />}
+                {loadingMore ? 'Loading…' : 'Load more'}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

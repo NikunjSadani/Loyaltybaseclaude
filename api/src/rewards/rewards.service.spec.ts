@@ -13,7 +13,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
-import { RewardsService } from './rewards.service';
+import { RewardsService, decodeOrderCursor, encodeOrderCursor } from './rewards.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -671,6 +671,121 @@ describe('RewardsService', () => {
       await expect(service.listOrders(partner, {}, 'cp-foreign'))
         .rejects.toBeInstanceOf(ForbiddenException);
       expect(mockPrisma.redemptionOrder.findMany).not.toHaveBeenCalled();
+    });
+
+    // ── "Load more" paging (fix/list-caps) ─────────────────────────────────────────
+    // Rows newest-first; the service fetches limit+1 to learn whether another page exists.
+    const orderRow = (n: number) => ({
+      id: `o${String(n).padStart(3, '0')}`,
+      status: 'CONFIRMED',
+      createdAt: new Date(Date.now() - n * 60_000),
+      updatedAt: new Date(Date.now() - n * 60_000),
+    });
+
+    it('page mode: page 2 skips page 1, uses a stable (createdAt,id) order and returns the next rows', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      // DB holds 7 rows; page 2 @ limit 5 → rows 6..7 (no extra row → last page).
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([orderRow(6), orderRow(7)]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(7);
+
+      const res = await service.listOrders(partner, { page: 2, limit: 5 });
+
+      const args = mockPrisma.redemptionOrder.findMany.mock.calls[0][0];
+      expect(args.skip).toBe(5);
+      expect(args.take).toBe(6); // limit + 1 sentinel
+      expect(args.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }]);
+      expect(res.orders.map((o: { id: string }) => o.id)).toEqual(['o006', 'o007']);
+      expect(res.nextCursor).toBeNull();
+      expect(res.pagination).toEqual({ page: 2, limit: 5, total: 7, pages: 2 });
+    });
+
+    it('returns exactly `limit` rows + a nextCursor of the LAST returned row when more exist', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      // limit 3 → the DB answers 4 rows (the sentinel says "more exist").
+      const rows = [orderRow(1), orderRow(2), orderRow(3), orderRow(4)];
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue(rows);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(10);
+
+      const res = await service.listOrders(partner, { limit: 3 });
+
+      expect(res.orders.map((o: { id: string }) => o.id)).toEqual(['o001', 'o002', 'o003']);
+      expect(res.nextCursor).toBe(encodeOrderCursor(rows[2].createdAt, 'o003'));
+      expect(decodeOrderCursor(res.nextCursor as string)).toEqual({ createdAt: rows[2].createdAt, id: 'o003' });
+    });
+
+    it('cursor mode: page 2 = rows strictly after the cursor; D4 exclusion + partner scope kept; total is the full set', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([orderRow(4), orderRow(5)]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(5);
+      const at = new Date('2026-10-01T10:00:00.000Z');
+      const cursor = encodeOrderCursor(at, 'o003');
+
+      // A cursor REPLACES the offset even if a page is also sent.
+      const res = await service.listOrders(partner, { page: 9, limit: 3, cursor });
+
+      const args = mockPrisma.redemptionOrder.findMany.mock.calls[0][0];
+      const base = { partner: { clientId: 'deoleo' }, partnerId: 'cp1', NOT: HIDE_NEVER_CONFIRMED };
+      expect(args.where).toEqual({
+        AND: [
+          base,
+          { OR: [{ createdAt: { lt: at } }, { createdAt: at, id: { lt: 'o003' } }] },
+        ],
+      });
+      expect(args.skip).toBe(0);
+      expect(args.take).toBe(4);
+      // The count is the WHOLE filtered set (no keyset), still with the D4 exclusion.
+      expect(mockPrisma.redemptionOrder.count.mock.calls[0][0].where).toEqual(base);
+      expect(res.orders.map((o: { id: string }) => o.id)).toEqual(['o004', 'o005']);
+      expect(res.nextCursor).toBeNull();
+      expect(res.pagination.total).toBe(5);
+    });
+
+    it('cursor mode keeps the SWITCHED-sibling scope (and a status filter) inside the keyset query', async () => {
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'cp1', groupId: 'grp1' })
+        .mockResolvedValueOnce({ id: 'cp-sib' });
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(0);
+      const at = new Date('2026-10-01T10:00:00.000Z');
+
+      await service.listOrders(
+        partner,
+        { cursor: encodeOrderCursor(at, 'oX'), status: 'DELIVERED' as never },
+        'cp-sib',
+      );
+
+      const where = mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where;
+      expect(where.AND[0]).toEqual({
+        partner: { clientId: 'deoleo' }, partnerId: 'cp-sib', status: 'DELIVERED', NOT: HIDE_NEVER_CONFIRMED,
+      });
+    });
+
+    it('cursor mode still 403s a forged sibling id (no rows read)', async () => {
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'cp1', groupId: 'grp1' })
+        .mockResolvedValueOnce(null);
+      await expect(
+        service.listOrders(partner, { cursor: encodeOrderCursor(new Date(), 'o1') }, 'cp-foreign'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.redemptionOrder.findMany).not.toHaveBeenCalled();
+    });
+
+    it('rejects a malformed cursor with 400 (never silently restarts from the top)', async () => {
+      await expect(service.listOrders(partner, { cursor: 'not-a-cursor' }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.redemptionOrder.findMany).not.toHaveBeenCalled();
+    });
+
+    it('GIFSY admin page mode is unchanged apart from the id tie-break (no exclusion, offset paging)', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(0);
+
+      await service.listOrders(gifsy, { page: 1, limit: 100 });
+
+      const args = mockPrisma.redemptionOrder.findMany.mock.calls[0][0];
+      expect(args.where).toEqual({ partner: { clientId: 'deoleo' } });
+      expect(args.skip).toBe(0);
+      expect(args.take).toBe(101);
     });
   });
 

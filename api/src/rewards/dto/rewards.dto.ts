@@ -102,6 +102,17 @@ export class ListOrdersQueryDto {
   @IsInt()
   @Min(1)
   limit?: number = 20;
+
+  /**
+   * Keyset cursor (opaque, from a previous page's `nextCursor`) — the partner My Orders
+   * "Load more". When present it REPLACES `page` (offset): rows strictly older than the
+   * cursor on (createdAt DESC, id DESC), stable under inserts and under rows leaving the
+   * member view mid-scroll. Absent → the legacy page/offset mode (admin console) unchanged.
+   */
+  @IsOptional()
+  @IsString()
+  @Length(1, 200)
+  cursor?: string;
 }
 
 /**
