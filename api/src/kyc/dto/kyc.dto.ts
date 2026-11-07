@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsArray,
   IsBoolean,
@@ -167,7 +167,12 @@ export class CreateKycDto {
   ifscCode?: string;
 
   @IsOptional()
+  @ValidateIf((o: CreateKycDto) => !!o.upiId && o.upiId.trim() !== '')
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
+  @Matches(/^[a-zA-Z0-9._-]{2,}@[a-zA-Z][a-zA-Z0-9]{1,}$/, {
+    message: 'upiId must be a valid UPI ID (e.g. name@bank)',
+  })
   upiId?: string;
 
   // Geo captures

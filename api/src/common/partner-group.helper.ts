@@ -95,7 +95,8 @@ export function isFieldEnforced(field: UniquenessField, policy: UniquenessPolicy
 /**
  * Canonical form used for comparison, advisory-locking, AND persistence — the three MUST agree
  * or a whitespace/case variant can slip a duplicate past the check (audit finding). PAN and GST
- * are case-insensitive legal IDs → upper-cased; bank/UPI are trimmed only. Empty → null.
+ * are case-insensitive legal IDs → upper-cased; UPI VPAs are case-insensitive (NPCI) → lower-cased;
+ * bank/phone are trimmed only. Empty → null.
  * The caller (kyc.service) persists this exact value, so a stored value always equals its
  * normalized form and the equality query below matches.
  */
@@ -106,7 +107,9 @@ export function normalizeIdentityValue(
   if (typeof value !== 'string') return value ?? null;
   const trimmed = value.trim();
   if (!trimmed) return null;
-  return field === 'pan' || field === 'gst' ? trimmed.toUpperCase() : trimmed;
+  if (field === 'pan' || field === 'gst') return trimmed.toUpperCase();
+  if (field === 'upi') return trimmed.toLowerCase();
+  return trimmed;
 }
 
 /**
