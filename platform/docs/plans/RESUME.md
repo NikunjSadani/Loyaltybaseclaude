@@ -17,14 +17,15 @@ On the laptop, its working tree still holds that same uncommitted work — **dis
 (`git checkout -- .`); they are all on GitHub. Do **NOT** `git clean` — the laptop's untracked drafts
 (`.claude/` hooks, `terraform/*.draft`, `EMPLOYEE-REWARDS-*.md`) live only there.
 
+**✅ SHIPPED — CUTOVER #58 (`e98f047`, 2026-11-07).** Partner-shell **React #418 hydration fix** (⚠️ PLATFORM-WIDE) — `usePartnerIdentity` stopped reading `getStoredUser()` localStorage during the INITIAL render (server rendered an empty shell-header name vs the client's cached name → app-wide #418 on every partner page); now starts empty + seeds the cached name post-mount. Plus a **test-only flaky-test sweep** (`e23f49b`) + a RESUME doc. **LIVE on prod + VERIFIED** (api `gifsy-api-00080-6d4` + frontend serving bare `:e98f047` @100%; `deoleo.gifsy.in/auth/login` 200, `gifsy.in` 200, send-otp-empty→400). **Staging-verified** (`staging-eeb3f90`: partner dashboard + wallet consoles BOTH completely clean — were 3× #418). Independently audited (no other render-time client-only read remains in the shell). TDS still reverted; NO migration. develop `eeb3f90` → main (clean merge `e98f047`, no conflicts). See [[deoleo-go-live-bundle]] #58.
+
 **✅ SHIPPED — CUTOVER #57 (`ff45f6b`, 2026-11-07).** `feat/partner-orders-wallet-address` → develop (`9dbbfa4`) → merged into main
 (`ff45f6b`) → **LIVE on prod + VERIFIED** (api `gifsy-api-00079-d7x` + frontend both serving bare `:ff45f6b` @100%;
 `deoleo.gifsy.in/auth/login` 200, `gifsy.in` 200, send-otp-empty→400 JSON envelope). All 3 features below are LIVE
 (staging-verified on Bajaj `uat-bajaj.gifsy.in` first: order-stepper, wallet Excel/PDF+Balance, delivery-address pre-fill;
 Task 0 balance-chain audit ran CLEAN 0/0/0). TDS 194R stays **reverted** on prod; NO migration. Deoleo category-name check
 WAIVED by owner (Deoleo has no physical-gift rewards). See [[deoleo-go-live-bundle]] #57. **Open (owner):** the 3 shelved
-UPI money fixes (code on `backup/wip-20261105-batt`); the React #418 hydration console warning on the partner wallet page
-(non-blocking, likely time-dependent/pre-existing — verify).
+UPI money fixes (code on `backup/wip-20261105-batt`). _(The React #418 hydration warning was root-caused + FIXED + shipped in #58 — see above.)_
 
 **Shipped to `develop`/staging today (owner-approved, staging-verified on Bajaj, `uat-bajaj.gifsy.in`, partner 9830011252):**
 - `635595f8` dynamic reward **category chip row** (tenant RewardCategory names, ordered by admin `sortOrder`, then
