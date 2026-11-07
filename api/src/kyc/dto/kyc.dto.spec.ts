@@ -29,6 +29,14 @@ async function gstErrors(gstNumber: unknown): Promise<string[]> {
   return gst ? Object.keys(gst.constraints ?? {}) : [];
 }
 
+// Returns the constraint keys that failed for the upiId property (empty when valid).
+async function upiErrors(upiId: unknown): Promise<string[]> {
+  const dto = plainToInstance(CreateKycDto, { ...baseDto, upiId });
+  const errors = await validate(dto);
+  const upi = errors.find((e) => e.property === 'upiId');
+  return upi ? Object.keys(upi.constraints ?? {}) : [];
+}
+
 describe('CreateKycDto — gstNumber GSTIN validation', () => {
   it('accepts a valid 15-character GSTIN', async () => {
     expect(await gstErrors('07AAACT9811F1Z9')).toEqual([]);
@@ -64,5 +72,42 @@ describe('CreateKycDto — gstNumber GSTIN validation', () => {
 
   it('stays optional — whitespace-only gstNumber passes', async () => {
     expect(await gstErrors('   ')).toEqual([]);
+  });
+});
+
+// Fix A — backend UPI format guard. upiId stays OPTIONAL but, when a non-empty value
+// is provided, it must match the VPA shape mirrored from platform/src/lib/upi-utils.ts
+// isValidUpiId. Validation runs BEFORE the service lowercase-normalizes, so MIXED-case
+// VPAs must pass.
+describe('CreateKycDto — upiId VPA validation', () => {
+  it('accepts a valid VPA', async () => {
+    expect(await upiErrors('name@okicici')).toEqual([]);
+  });
+
+  it('accepts a MIXED-CASE VPA (validation runs before lowercase-normalize)', async () => {
+    expect(await upiErrors('Name@OKICICI')).toEqual([]);
+  });
+
+  it('accepts a whitespace-padded VPA and trims it (mobile autofill/paste)', async () => {
+    expect(await upiErrors('  name@okicici  ')).toEqual([]);
+    // @Transform runs during plainToInstance, so the instance already holds the trimmed value.
+    const dto = plainToInstance(CreateKycDto, { ...baseDto, upiId: '  name@okicici  ' });
+    expect(dto.upiId).toBe('name@okicici');
+  });
+
+  it('rejects a malformed value (no @) with the upiId message', async () => {
+    expect(await upiErrors('garbage')).toContain('matches');
+  });
+
+  it('stays optional — undefined upiId passes', async () => {
+    expect(await upiErrors(undefined)).toEqual([]);
+  });
+
+  it('stays optional — empty-string upiId passes', async () => {
+    expect(await upiErrors('')).toEqual([]);
+  });
+
+  it('stays optional — whitespace-only upiId passes', async () => {
+    expect(await upiErrors('   ')).toEqual([]);
   });
 });

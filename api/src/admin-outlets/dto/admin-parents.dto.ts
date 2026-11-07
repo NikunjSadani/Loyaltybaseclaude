@@ -1,5 +1,5 @@
 import { Transform } from 'class-transformer';
-import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { IsNotEmpty, IsOptional, IsString, Matches, ValidateIf } from 'class-validator';
 
 /**
  * Upper-case + trim a legal-ID field (PAN/GST) at DTO transform time — defense-in-depth so a
@@ -68,6 +68,11 @@ export class CreateParentDto {
   ifscCode?: string;
 
   @IsOptional()
+  @ValidateIf((o: CreateParentDto) => !!o.upiId && o.upiId.trim() !== '')
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
+  @Matches(/^[a-zA-Z0-9._-]{2,}@[a-zA-Z][a-zA-Z0-9]{1,}$/, {
+    message: 'upiId must be a valid UPI ID (e.g. name@bank)',
+  })
   upiId?: string;
 }

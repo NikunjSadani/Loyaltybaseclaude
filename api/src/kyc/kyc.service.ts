@@ -4645,19 +4645,25 @@ export class KycService {
 
         // (iii) APPLY the proposed patch to the live partner. `undefined` (an absent JSON key) leaves
         // that field untouched — the exact semantics of the old draft-time in-place update.
+        // WRITE-SIDE NORMALIZATION: the uniqueness identity fields (gst/pan/bank/upi) are persisted
+        // through the SAME `normalizeIdentityValue` used by the lock/check above (:4634-4635), so the
+        // stored value equals its canonical form (PAN/GST upper, UPI lower, bank trimmed). A re-KYC
+        // staged with a mixed-case UPI BEFORE this normalizer change, approved AFTER, would otherwise
+        // persist the raw mixed-case value while the check compared lowercase → divergence. A
+        // normalized-empty value maps to `undefined` (not null) to preserve "undefined = untouched".
         await tx.channelPartner.update({
           where: { id: submission.partnerId },
           data: {
             businessName: asStr(proposed.businessName),
             ownerName: asStr(proposed.ownerName),
             phone: asStr(proposed.phone),
-            gstNumber: asStr(proposed.gstNumber),
-            panNumber: asStr(proposed.panNumber),
+            gstNumber: normalizeIdentityValue('gst', asStr(proposed.gstNumber)) ?? undefined,
+            panNumber: normalizeIdentityValue('pan', asStr(proposed.panNumber)) ?? undefined,
             bankName: asStr(proposed.bankName),
-            bankAccountNumber: asStr(proposed.bankAccountNumber),
+            bankAccountNumber: normalizeIdentityValue('bank', asStr(proposed.bankAccountNumber)) ?? undefined,
             bankAccountHolder: asStr(proposed.bankAccountHolder),
             ifscCode: asStr(proposed.ifscCode),
-            upiId: asStr(proposed.upiId),
+            upiId: normalizeIdentityValue('upi', asStr(proposed.upiId)) ?? undefined,
             paymentMode: asStr(proposed.paymentMode),
           },
         });

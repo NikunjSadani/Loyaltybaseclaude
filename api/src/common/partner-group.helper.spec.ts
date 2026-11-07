@@ -3,6 +3,7 @@ import {
   clashIsOutsideGroup,
   checkGroupUniqueness,
   checkPanMatchesGroup,
+  normalizeIdentityValue,
   normalizePhoneLast10,
   resolveOperableContexts,
   resolveActivePartnerId,
@@ -26,6 +27,29 @@ describe('partner-group.helper — pure predicates', () => {
       expect(isFieldEnforced('bank', GST_ONLY)).toBe(false);
       expect(isFieldEnforced('upi', ALL_ON)).toBe(true);
       expect(isFieldEnforced('upi', GST_ONLY)).toBe(false);
+    });
+  });
+
+  describe('normalizeIdentityValue', () => {
+    it('lower-cases UPI VPAs (NPCI case-insensitive) so a mixed-case variant cannot evade dedup', () => {
+      expect(normalizeIdentityValue('upi', 'User@OKICICI')).toBe('user@okicici');
+    });
+    it('trims AND lower-cases UPI', () => {
+      expect(normalizeIdentityValue('upi', '  name@ybl  ')).toBe('name@ybl');
+    });
+    it('upper-cases PAN and GST (case-insensitive legal IDs)', () => {
+      expect(normalizeIdentityValue('pan', ' abcde1234f ')).toBe('ABCDE1234F');
+      expect(normalizeIdentityValue('gst', '22aaaaa0000a1z5')).toBe('22AAAAA0000A1Z5');
+    });
+    it('leaves bank account numbers case-unchanged (trim only — not case-folded)', () => {
+      expect(normalizeIdentityValue('bank', '123ABC')).toBe('123ABC');
+      expect(normalizeIdentityValue('bank', '  00ab12  ')).toBe('00ab12');
+    });
+    it('maps empty/whitespace/nullish to null', () => {
+      expect(normalizeIdentityValue('upi', '')).toBeNull();
+      expect(normalizeIdentityValue('upi', '   ')).toBeNull();
+      expect(normalizeIdentityValue('upi', null)).toBeNull();
+      expect(normalizeIdentityValue('upi', undefined)).toBeNull();
     });
   });
 

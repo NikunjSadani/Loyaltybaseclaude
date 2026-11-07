@@ -3806,6 +3806,26 @@ describe('KycService', () => {
       });
     });
 
+    it('NORMALIZES the staged UPI at apply — a mixed-case VPA persists LOWER-cased (Fix C: persist == check)', async () => {
+      // A re-KYC staged with a mixed-case UPI BEFORE the normalizer lower-cased UPI would, on
+      // approval AFTER the fix, persist the raw mixed-case value while the lock/check compared
+      // lowercase → divergence that evades the uniqueness dedup. The apply must re-normalize so the
+      // persisted value equals the canonical (lower-cased) form the check used.
+      seedReKycApprove({ upiId: 'User@OKICICI', panNumber: ' abcde1234f ' });
+      mockTx.channelPartner.findMany.mockResolvedValue([]); // group-uniqueness → clean
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'p1' }); // the apply
+
+      await service.approve(gifsy, 's1');
+
+      expect(mockTx.channelPartner.update).toHaveBeenCalledWith({
+        where: { id: 'p1' },
+        data: expect.objectContaining({
+          upiId: 'user@okicici', // lower-cased + trimmed
+          panNumber: 'ABCDE1234F', // PAN still upper-cased + trimmed
+        }),
+      });
+    });
+
     it('APPLIES the staged outlet ADDRESS to the PRIMARY outlet at approval (same tx as the identity apply)', async () => {
       seedReKycApprove({ addressLine1: 'New Addr 42', city: 'Pune', state: 'MH', pincode: '411001' });
       mockTx.channelPartner.findMany.mockResolvedValue([]); // group-uniqueness → clean

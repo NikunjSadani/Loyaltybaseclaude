@@ -1228,7 +1228,7 @@ describe('PartnerService', () => {
       const data = mockPrisma.channelPartner.update.mock.calls[0][0].data;
       expect(data).toMatchObject({
         paymentMode: 'upi',
-        upiId: 'Shop@UPI', // trimmed (bank/UPI are trim-only)
+        upiId: 'shop@upi', // trimmed + lowercased (UPI VPAs are case-insensitive)
         bankName: null,
         bankAccountNumber: null,
         payoutChequeFileKey: null,

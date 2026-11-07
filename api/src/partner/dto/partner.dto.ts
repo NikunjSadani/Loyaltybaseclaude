@@ -1,4 +1,5 @@
-import { IsIn, IsOptional, IsString } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { IsIn, IsOptional, IsString, Matches, ValidateIf } from 'class-validator';
 
 /**
  * Query DTO for GET /v1/partner/targets.
@@ -40,7 +41,12 @@ export class CapturePayoutDetailsDto {
   ifscCode?: string;
 
   @IsOptional()
+  @ValidateIf((o: CapturePayoutDetailsDto) => !!o.upiId && o.upiId.trim() !== '')
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
+  @Matches(/^[a-zA-Z0-9._-]{2,}@[a-zA-Z][a-zA-Z0-9]{1,}$/, {
+    message: 'upiId must be a valid UPI ID (e.g. name@bank)',
+  })
   upiId?: string;
 
   /** GCS key of the cancelled-cheque uploaded via POST /v1/partner/documents (bank mode). */
