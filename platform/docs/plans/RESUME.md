@@ -17,9 +17,14 @@ On the laptop, its working tree still holds that same uncommitted work — **dis
 (`git checkout -- .`); they are all on GitHub. Do **NOT** `git clean` — the laptop's untracked drafts
 (`.claude/` hooks, `terraform/*.draft`, `EMPLOYEE-REWARDS-*.md`) live only there.
 
-**Branch to continue from: `feat/partner-orders-wallet-address`** (pushed, NOT on `develop`, NOT deployed). It is
-`develop` (`35e6ad8c`) + the three features below + plans. Full gates green on the combined branch (see the merge
-commit notes / re-run `bash scripts/gates.sh`). **Next step: runtime-verify on staging → push to `develop`.**
+**✅ SHIPPED — CUTOVER #57 (`ff45f6b`, 2026-11-07).** `feat/partner-orders-wallet-address` → develop (`9dbbfa4`) → merged into main
+(`ff45f6b`) → **LIVE on prod + VERIFIED** (api `gifsy-api-00079-d7x` + frontend both serving bare `:ff45f6b` @100%;
+`deoleo.gifsy.in/auth/login` 200, `gifsy.in` 200, send-otp-empty→400 JSON envelope). All 3 features below are LIVE
+(staging-verified on Bajaj `uat-bajaj.gifsy.in` first: order-stepper, wallet Excel/PDF+Balance, delivery-address pre-fill;
+Task 0 balance-chain audit ran CLEAN 0/0/0). TDS 194R stays **reverted** on prod; NO migration. Deoleo category-name check
+WAIVED by owner (Deoleo has no physical-gift rewards). See [[deoleo-go-live-bundle]] #57. **Open (owner):** the 3 shelved
+UPI money fixes (code on `backup/wip-20261105-batt`); the React #418 hydration console warning on the partner wallet page
+(non-blocking, likely time-dependent/pre-existing — verify).
 
 **Shipped to `develop`/staging today (owner-approved, staging-verified on Bajaj, `uat-bajaj.gifsy.in`, partner 9830011252):**
 - `635595f8` dynamic reward **category chip row** (tenant RewardCategory names, ordered by admin `sortOrder`, then
