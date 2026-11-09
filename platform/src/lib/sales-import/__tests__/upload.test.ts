@@ -1,0 +1,161 @@
+/// <reference types="vitest/globals" />
+/**
+ * Sales Import chunked upload (plan §11 F-1).
+ * Run: npx vitest run src/lib/sales-import/__tests__/upload.test.ts
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  planParts, validateSalesFile, withRetry, uploadInParts, SalesImportHttpError, UploadAbortedError,
+} from '../upload';
+import { SALES_IMPORT_PART_SIZE, SALES_IMPORT_MAX_FILE_BYTES } from '../types';
+
+const noSleep = () => Promise.resolve();
+
+function json(status: number, body: unknown) {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+}
+
+describe('planParts', () => {
+  it('slices into exact parts with a short last part', () => {
+    const size = 2 * SALES_IMPORT_PART_SIZE + 123;
+    const parts = planParts(size, SALES_IMPORT_PART_SIZE);
+    expect(parts).toHaveLength(3);
+    expect(parts[0]).toEqual({ n: 0, start: 0, end: SALES_IMPORT_PART_SIZE });
+    expect(parts[2]).toEqual({ n: 2, start: 2 * SALES_IMPORT_PART_SIZE, end: size });
+    expect(parts.reduce((s, p) => s + (p.end - p.start), 0)).toBe(size);
+  });
+
+  it('an exact multiple has no empty trailing part', () => {
+    expect(planParts(2 * 10, 10)).toEqual([{ n: 0, start: 0, end: 10 }, { n: 1, start: 10, end: 20 }]);
+  });
+
+  it('a file smaller than one part is one part', () => {
+    expect(planParts(5, 10)).toEqual([{ n: 0, start: 0, end: 5 }]);
+  });
+});
+
+describe('validateSalesFile', () => {
+  it.each([
+    [{ name: 'dms.xlsx', size: 10 }, null],
+    [{ name: 'DMS.CSV', size: 10 }, null],
+    [{ name: 'dms.xls', size: 10 }, 'Only .xlsx or .csv files are supported.'],
+    [{ name: 'dms.csv', size: 0 }, 'The file is empty.'],
+  ])('%o → %p', (f, msg) => expect(validateSalesFile(f)).toBe(msg));
+
+  it('rejects a file over the max size', () => {
+    expect(validateSalesFile({ name: 'a.csv', size: SALES_IMPORT_MAX_FILE_BYTES + 1 })).toMatch(/larger than 600 MB/);
+  });
+});
+
+describe('withRetry', () => {
+  it('retries a transient failure then succeeds, with exponential backoff', async () => {
+    const sleep = vi.fn((_ms: number) => Promise.resolve());
+    const fn = vi.fn()
+      .mockRejectedValueOnce(new SalesImportHttpError('boom', 503))
+      .mockRejectedValueOnce(new Error('network'))
+      .mockResolvedValueOnce('ok');
+    await expect(withRetry(fn, 4, { sleep })).resolves.toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(3);
+    expect(sleep.mock.calls.map((c) => c[0])).toEqual([500, 1000]);
+  });
+
+  it('gives up after the retry budget', async () => {
+    const fn = vi.fn().mockRejectedValue(new SalesImportHttpError('down', 502));
+    await expect(withRetry(fn, 4, { sleep: noSleep })).rejects.toThrow('down');
+    expect(fn).toHaveBeenCalledTimes(5);
+  });
+
+  it('does not retry a 409 (real refusal)', async () => {
+    const fn = vi.fn().mockRejectedValue(new SalesImportHttpError('not uploading', 409));
+    await expect(withRetry(fn, 4, { sleep: noSleep })).rejects.toThrow('not uploading');
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops when aborted', async () => {
+    const ctl = new AbortController();
+    ctl.abort();
+    const fn = vi.fn().mockResolvedValue('x');
+    await expect(withRetry(fn, 4, { signal: ctl.signal, sleep: noSleep })).rejects.toBeInstanceOf(UploadAbortedError);
+    expect(fn).not.toHaveBeenCalled();
+  });
+});
+
+describe('uploadInParts', () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => { fetchMock.mockReset(); vi.stubGlobal('fetch', fetchMock); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  function file(size: number) {
+    return new File([new Uint8Array(size)], 'dms.csv', { type: 'text/csv' });
+  }
+
+  it('creates, uploads every part in order with the right byte sizes, completes, reports progress', async () => {
+    const partSize = 4;
+    const sizes: number[] = [];
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url === '/api/admin/sales-import/uploads') {
+        expect(JSON.parse(String(init.body))).toEqual({ filename: 'dms.csv', sizeBytes: 10 });
+        return json(200, { success: true, data: { importId: 'imp1', partSize, partCount: 3 } });
+      }
+      const m = url.match(/\/api\/admin\/sales-import\/imp1\/parts\/(\d+)$/);
+      if (m) {
+        const part = (init.body as FormData).get('file') as Blob;
+        sizes[Number(m[1])] = part.size;
+        return json(200, { success: true, data: { partsReceived: Number(m[1]) + 1 } });
+      }
+      if (url === '/api/admin/sales-import/imp1/complete') return json(200, { success: true, data: { id: 'imp1', status: 'QUEUED' } });
+      throw new Error(`unexpected ${url}`);
+    });
+    const progress: number[] = [];
+    const id = await uploadInParts(file(10), { onProgress: (p) => progress.push(p), sleep: noSleep });
+    expect(id).toBe('imp1');
+    expect(sizes).toEqual([4, 4, 2]);
+    expect(progress).toEqual([0, 1 / 3, 2 / 3, 1]);
+  });
+
+  it('retries a failed part then continues', async () => {
+    let part0Calls = 0;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.endsWith('/uploads')) return json(200, { success: true, data: { importId: 'i', partSize: 8, partCount: 1 } });
+      if (url.endsWith('/parts/0')) {
+        part0Calls++;
+        return part0Calls === 1 ? json(503, { success: false, error: 'busy' }) : json(200, { success: true, data: { partsReceived: 1 } });
+      }
+      return json(200, { success: true, data: {} });
+    });
+    await expect(uploadInParts(file(5), { onProgress: () => {}, sleep: noSleep })).resolves.toBe('i');
+    expect(part0Calls).toBe(2);
+  });
+
+  it('surfaces the complete error (e.g. size mismatch)', async () => {
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.endsWith('/uploads')) return json(200, { success: true, data: { importId: 'i', partSize: 8, partCount: 1 } });
+      if (url.endsWith('/parts/0')) return json(200, { success: true, data: { partsReceived: 1 } });
+      return json(400, { success: false, error: 'Uploaded size does not match' });
+    });
+    await expect(uploadInParts(file(5), { onProgress: () => {}, sleep: noSleep })).rejects.toThrow('Uploaded size does not match');
+  });
+
+  it('surfaces the create error and never posts parts', async () => {
+    fetchMock.mockResolvedValue(json(403, { success: false, error: 'Sales Import is not enabled for this tenant.' }));
+    await expect(uploadInParts(file(5), { onProgress: () => {} })).rejects.toThrow('not enabled');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('abort stops before the next part and never completes', async () => {
+    const ctl = new AbortController();
+    const urls: string[] = [];
+    fetchMock.mockImplementation(async (url: string) => {
+      urls.push(url);
+      if (url.endsWith('/uploads')) return json(200, { success: true, data: { importId: 'i', partSize: 2, partCount: 3 } });
+      if (url.endsWith('/parts/0')) { ctl.abort(); return json(200, { success: true, data: { partsReceived: 1 } }); }
+      return json(200, { success: true, data: {} });
+    });
+    const onCreated = vi.fn();
+    await expect(uploadInParts(file(6), { onProgress: () => {}, signal: ctl.signal, sleep: noSleep, onCreated }))
+      .rejects.toBeInstanceOf(UploadAbortedError);
+    expect(onCreated).toHaveBeenCalledWith('i');
+    expect(urls.some((u) => u.endsWith('/parts/1'))).toBe(false);
+    expect(urls.some((u) => u.endsWith('/complete'))).toBe(false);
+  });
+});
