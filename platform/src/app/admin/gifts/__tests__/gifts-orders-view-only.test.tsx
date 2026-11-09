@@ -98,12 +98,12 @@ describe('GIFV — Fulfilment access by role', () => {
     expect((fetchMock.mock.calls as [string][]).some(([u]) => u.includes('/fulfilment/'))).toBe(false);
   });
 
-  it('GIFV1b: CLIENT_ADMIN renders the server-MASKED voucher code as-is (flagged masked for screen readers)', async () => {
-    installFetch([{ ...ORDERS[0], status: 'DELIVERED', voucherCode: '••••WXYZ', voucherCodeMasked: true }]);
+  it('GIFV1b: CLIENT_ADMIN never needs the code — the server sends only an "issued" flag, shown as "Voucher issued"', async () => {
+    installFetch([{ ...ORDERS[0], status: 'DELIVERED', voucherCode: null, voucherIssued: true, voucherCodeMasked: true }]);
     await openFulfilment();
     const code = await screen.findByTestId('order-voucher-code');
-    expect(code).toHaveTextContent('••••WXYZ');
-    expect(code).toHaveTextContent('(masked)');
+    expect(code).toHaveTextContent('Voucher issued');
+    expect(code.textContent).not.toMatch(/•|[A-Z0-9]{4}-/);
   });
 
   it('GIFV2: GIFSY_ADMIN keeps the Advance + bulk controls and sees no view-only note', async () => {

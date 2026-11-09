@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -25,6 +26,7 @@ import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
 import { isSalesRedeemEnabledForPartner } from '../common/sales-redeem-eligibility';
 import { isGifsyOperator, isTenantAdmin, tenantScope } from '../common/tenant-scope';
+import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
 import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
 import { NOT_PARKED_OUTLET } from '../sales/sales.service';
 import { generateTenantOrderNumber } from './order-number.helper';
@@ -36,6 +38,7 @@ import {
   transitionOrderStatus,
   transitionOrderStatusOrConflict,
 } from './order-status-transition';
+import { combineGuards, planVoucherWrite, VOUCHER_WRITE_CONFLICT_MESSAGE } from './voucher-write-guard';
 import { derivePointsCost } from './derive-points-cost.helper';
 import { computeFrozenValuePaise } from './gift-value.helper';
 import { computeDispatchSla } from '../common/dispatch-sla';
@@ -109,6 +112,19 @@ export function encodeOrderCursor(createdAt: Date, id: string): string {
 export function maskVoucherCode(code: string): string {
   const trimmed = code.trim();
   return trimmed.length >= 8 ? `••••${trimmed.slice(-4)}` : '••••';
+}
+
+/**
+ * The order-read projection for a viewer who must NOT see a voucher code: no character of it,
+ * only whether one is issued. Spread over the row (overrides voucherCode).
+ */
+export function hiddenVoucherFields(code: string | null | undefined): {
+  voucherCode: null;
+  voucherIssued: boolean;
+  voucherCodeMasked: boolean;
+} {
+  const issued = code != null && code !== '';
+  return { voucherCode: null, voucherIssued: issued, voucherCodeMasked: issued };
 }
 
 export function decodeOrderCursor(cursor: string): { createdAt: Date; id: string } | null {
@@ -257,7 +273,25 @@ export class RewardsService {
     private readonly notifications: NotificationsService,
     private readonly msg91: Msg91Service,
     private readonly hubble: HubbleService,
+    // @Global RbacModule — always present in the app. @Optional only so unit-test modules that
+    // don't wire it still construct; absent → staff is treated as NOT permitted (fail closed).
+    @Optional() private readonly gifsyRoles?: GifsyRoleService,
   ) {}
+
+  /**
+   * May this OPERATOR see a full voucher code (a spendable bearer credential)? Only those who
+   * fulfil orders: GIFSY_ADMIN, or GIFSY_STAFF whose resolved GifsyRole grants
+   * rewards:manage_orders. Everyone else on an operator/admin read (CLIENT_ADMIN, read-only
+   * staff) gets the "issued" indicator only. (The member's OWN orders are a separate path.)
+   */
+  private async canSeeFullVoucherCode(user: JwtPayload): Promise<boolean> {
+    if (user.role === 'GIFSY_ADMIN') return true;
+    if (user.role === 'GIFSY_STAFF' && this.gifsyRoles) {
+      const perms = await this.gifsyRoles.getPermissions(user.gifsyRoleId);
+      return perms.has('rewards:manage_orders');
+    }
+    return false;
+  }
 
   private isGifsy(user: JwtPayload): boolean {
     // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
@@ -742,14 +776,15 @@ export class RewardsService {
     const last = orders[orders.length - 1];
 
     // No dedicated returnedAt column — surface it (member-safe) when the order is RETURNED.
-    // A TENANT admin's view-only list never carries a live voucher code (it is a bearer
-    // credential belonging to the member): masked to the last 4 + `voucherCodeMasked: true`.
-    // Gifsy operators (they fulfil) and the member's own list keep the real code.
+    // VOUCHER CODES: a code is a spendable bearer credential. The member's OWN list keeps it; on
+    // the operator/admin view only a fulfilling operator (canSeeFullVoucherCode) gets it — every
+    // other viewer (CLIENT_ADMIN, read-only staff) gets NO character of it: voucherCode null +
+    // voucherIssued/voucherCodeMasked true.
+    const memberView = !this.isGifsy(user) && !tenantAdmin;
+    const hideCodes = !memberView && !(await this.canSeeFullVoucherCode(user));
     const mapped = orders.map((o) => ({
       ...o,
-      ...(tenantAdmin && o.voucherCode
-        ? { voucherCode: maskVoucherCode(o.voucherCode), voucherCodeMasked: true }
-        : {}),
+      ...(hideCodes ? hiddenVoucherFields(o.voucherCode) : {}),
       returnedAt: o.status === 'RETURNED' ? o.updatedAt : null,
     }));
 
@@ -779,6 +814,10 @@ export class RewardsService {
         },
       });
       if (!order) throw new NotFoundException('Order not found');
+      // Read-only staff get the "issued" indicator, never the code itself.
+      if (!(await this.canSeeFullVoucherCode(user))) {
+        return { order: { ...order, ...hiddenVoucherFields(order.voucherCode) } };
+      }
       return { order };
     }
 
@@ -878,22 +917,33 @@ export class RewardsService {
     });
     if (!existingOrder) throw new NotFoundException('Order not found');
 
-    const order = await this.prisma.redemptionOrder.update({
-      where: { id },
-      data: {
-        trackingNumber: dto.trackingNumber,
-        trackingUrl: dto.trackingUrl,
-        voucherCode: dto.voucherCode,
-        voucherProvider: dto.voucherProvider,
-        notes: dto.notes,
-        // Dispatch fields (§5) — non-status console/bulk edits.
-        fulfilmentChannel: dto.fulfilmentChannel,
-        logisticsPartner: dto.logisticsPartner,
-        supplierOrderRef: dto.supplierOrderRef,
-        podUrl: dto.podUrl,
-      },
+    // VOUCHER WRITE INVARIANT: no clear / blank, no overwrite of a stored code (only
+    // "Voucher cancelled with vendor" clears one), a new code only on a paid open order.
+    const voucherPlan = planVoucherWrite(existingOrder, {
+      voucherCode: dto.voucherCode,
+      voucherProvider: dto.voucherProvider,
     });
+    const data = {
+      trackingNumber: dto.trackingNumber,
+      trackingUrl: dto.trackingUrl,
+      ...voucherPlan.data,
+      notes: dto.notes,
+      // Dispatch fields (§5) — non-status console/bulk edits.
+      fulfilmentChannel: dto.fulfilmentChannel,
+      logisticsPartner: dto.logisticsPartner,
+      supplierOrderRef: dto.supplierOrderRef,
+      podUrl: dto.podUrl,
+    };
 
+    if (!voucherPlan.guard) {
+      const order = await this.prisma.redemptionOrder.update({ where: { id }, data });
+      return { order };
+    }
+    // Setting a NEW code: compare-and-set on "no code stored + paid open order" so a concurrent
+    // refund / vendor-cancel / other voucher write makes this lose (409) instead of overwriting.
+    const claim = await this.prisma.redemptionOrder.updateMany({ where: { id, ...voucherPlan.guard }, data });
+    if (claim.count === 0) throw new ConflictException(VOUCHER_WRITE_CONFLICT_MESSAGE);
+    const order = await this.prisma.redemptionOrder.findUniqueOrThrow({ where: { id } });
     return { order };
   }
 
@@ -2453,6 +2503,10 @@ export class RewardsService {
       throw new BadRequestException(VOUCHER_ISSUED_REFUND_BLOCK_MESSAGE);
     }
 
+    // VOUCHER WRITE INVARIANT (every edge): no clear / blank, no overwrite of a stored code, a new
+    // code only on a paid open order — and the status claim carries the voucher CAS.
+    const voucherPlan = planVoucherWrite(order, { voucherCode: dto.voucherCode, voucherProvider: dto.voucherProvider });
+
     // BUG-1 — a DIGITAL_VOUCHER order cannot be marked DELIVERED without an actual voucher
     // code to deliver. The effective channel is the stored one unless this transition
     // overrides it (same precedence the update below uses: dto value wins, else unchanged);
@@ -2471,8 +2525,7 @@ export class RewardsService {
 
     const now = new Date();
     const data: Omit<Prisma.RedemptionOrderUpdateManyMutationInput, 'status'> = {
-      voucherCode: dto.voucherCode,
-      voucherProvider: dto.voucherProvider,
+      ...voucherPlan.data, // only a validated NEW code/provider — never a clear or an overwrite
       trackingNumber: dto.trackingNumber,
       trackingUrl: dto.trackingUrl,
       notes: dto.notes,
@@ -2501,7 +2554,7 @@ export class RewardsService {
         expectedFrom: fromStatus,
         // A refund only lands if NO voucher code is on the row at write time (a code set
         // concurrently after our read → 0 rows → 409, no refund).
-        ...(isRefundTarget ? { extraGuard: NO_ISSUED_VOUCHER_GUARD } : {}),
+        extraGuard: combineGuards(isRefundTarget ? NO_ISSUED_VOUCHER_GUARD : null, voucherPlan.guard),
         toStatus,
         data,
         changedById: user.sub,
@@ -2624,7 +2677,13 @@ export class RewardsService {
     const masked = maskVoucherCode(code);
     const updated = await this.prisma.$transaction(async (tx) => {
       const claim = await tx.redemptionOrder.updateMany({
-        where: { id, voucherCode: code },
+        // CAS on the code read AND never a Hubble voucher (a provider stamped concurrently loses).
+        // OR-wrapped: a bare `{ not: 'Hubble' }` would also drop NULL-provider rows (SQL NULL).
+        where: {
+          id,
+          voucherCode: code,
+          OR: [{ voucherProvider: null }, { voucherProvider: { not: 'Hubble' } }],
+        },
         data: { voucherCode: null, voucherProvider: null },
       });
       if (claim.count === 0) {
@@ -2646,16 +2705,18 @@ export class RewardsService {
           },
         },
       });
+      // The response never carries the code (cleared anyway) — no voucherCode in the select.
       return tx.redemptionOrder.findUniqueOrThrow({
         where: { id },
-        select: { id: true, status: true, voucherCode: true, voucherProvider: true, updatedAt: true },
+        select: { id: true, status: true, voucherProvider: true, updatedAt: true },
       });
     });
 
     this.logger.log(
       `order ${order.orderNumber}: voucher (${masked}) recorded cancelled with vendor by ${user.sub}`,
     );
-    return { order: updated };
+    // voucherCode: null states the post-condition explicitly (the row's code was just cleared).
+    return { order: { ...updated, voucherCode: null } };
   }
 
   // ───────────────────────────────────────────────────────────────────────────

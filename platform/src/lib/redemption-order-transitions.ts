@@ -29,8 +29,10 @@ export interface TransitionableOrder {
   status: string;
   redemptionMode?: string | null;
   voucherProvider?: string | null;
-  /** The stored voucher code (masked or real) — any non-empty value means "issued". */
+  /** The stored voucher code — any non-empty value means "issued". */
   voucherCode?: string | null;
+  /** Server indicator for viewers who don't receive the code itself (voucherCode is null). */
+  voucherIssued?: boolean;
 }
 
 /** Mirrors the backend `hasIssuedVoucher` (null / '' = none). */
@@ -50,7 +52,7 @@ export function nextStatusOptions(order: TransitionableOrder): string[] {
   const edges = NEXT_STATUS[order.status] ?? [];
   const isCash = CASH_REDEMPTION_MODES.has(order.redemptionMode ?? '');
   const isHubble = order.voucherProvider === 'Hubble';
-  const voucherIssued = hasIssuedVoucher(order.voucherCode);
+  const voucherIssued = hasIssuedVoucher(order.voucherCode) || order.voucherIssued === true;
   return edges.filter((to) => {
     if (isCash && (REFUND_TARGETS.has(to) || FORWARD_DISPATCH_TARGETS.has(to))) return false;
     if ((isHubble || voucherIssued) && REFUND_TARGETS.has(to)) return false;

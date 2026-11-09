@@ -281,9 +281,13 @@ describe('transition state-machine + channel-required-fields (service level)', (
       voucherCode: 'AMZN-XYZ-123',
     });
     // The effective voucher code (supplied on the call) satisfies the channel guard.
-    expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'o1', status: 'DISPATCHED' } }),
-    );
+    // The status CAS also carries the voucher-write CAS (no code stored + paid open order).
+    const where = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].where;
+    expect(where).toMatchObject({ id: 'o1', status: 'DISPATCHED' });
+    expect(where.AND).toEqual(expect.arrayContaining([
+      { OR: [{ voucherCode: null }, { voucherCode: '' }] },
+      { pointsDeducted: { gt: 0 } },
+    ]));
     expect(res.order.status).toBe('DELIVERED');
   });
 });

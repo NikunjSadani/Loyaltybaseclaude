@@ -327,6 +327,57 @@ describe('VendorPortalService', () => {
       expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
     });
 
+    // VOUCHER WRITE INVARIANT (shared voucher-write-guard): a vendor can never clear / blank /
+    // overwrite a stored code, nor write one on an unpaid order; a new code is a CAS.
+    describe('voucher write invariant (vendor)', () => {
+      const open = (extra: Record<string, unknown> = {}) => ({
+        id: 'o1', status: 'PROCESSING', partnerId: 'cp1', orderNumber: 'D-26-1', pointsDeducted: 500,
+        voucherCode: null, voucherProvider: null, fulfilledByVendorId: 'v1', ...extra,
+      });
+      afterEach(() => mockPrisma.redemptionOrder.findFirst.mockReset());
+
+      it.each([
+        ['clear (null)', { voucherCode: null }],
+        ['blank', { voucherCode: '  ' }],
+        ['overwrite', { voucherCode: 'OTHER-0000' }],
+      ])('updateFulfilment %s on a stored code → 400, no write', async (_n, dto) => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ voucherCode: 'AMZ-STORED-1234', voucherProvider: 'Vendor' }));
+        await expect(service.updateFulfilment(vendor, 'o1', dto as never)).rejects.toBeInstanceOf(BadRequestException);
+        expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('updateFulfilment: a code on an unpaid order → 400, no write', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ pointsDeducted: 0 }));
+        await expect(service.updateFulfilment(vendor, 'o1', { voucherCode: 'NEW-1' } as never))
+          .rejects.toThrow(/only be issued on a confirmed, paid order/);
+        expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('updateFulfilment: a NEW code carries the voucher CAS alongside the vendor scope', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open());
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        await service.updateFulfilment(vendor, 'o1', { voucherCode: 'NEW-1' } as never);
+        const { where, data } = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+        expect(data.voucherCode).toBe('NEW-1');
+        expect(where.fulfilledByVendorId).toBe('v1');
+        expect(where.AND).toEqual(expect.arrayContaining([{ OR: [{ voucherCode: null }, { voucherCode: '' }] }]));
+      });
+
+      it.each([
+        ['clear (null)', { voucherCode: null }],
+        ['overwrite', { voucherCode: 'OTHER-0000' }],
+      ])('transition → DELIVERED with %s on a stored code → 400, no write', async (_n, extra) => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ status: 'DISPATCHED', voucherCode: 'AMZ-STORED-1234' }));
+        await expect(service.transition(vendor, 'o1', { toStatus: 'DELIVERED', ...extra } as never))
+          .rejects.toBeInstanceOf(BadRequestException);
+        expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      });
+    });
+
     // Concurrency: the open/assigned checks come from a read; the write must re-assert them
     // atomically so a close / reassignment that lands between read and write is never overwritten.
     describe('updateFulfilment guarded write (read-then-write race)', () => {
@@ -484,7 +535,7 @@ describe('VendorPortalService', () => {
       mockPrisma.redemptionOrder.findFirst
         .mockResolvedValueOnce({
           id: 'o1', status: 'DISPATCHED', partnerId: 'cp1', orderNumber: 'D-26-1',
-          fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: null,
+          fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: null, pointsDeducted: 500,
         })
         .mockResolvedValueOnce({
           id: 'o1', status: 'DELIVERED', deliveredAt: new Date(), cancelledAt: null,

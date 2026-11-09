@@ -99,8 +99,10 @@ interface OrderItem {
   redemptionMode?: PayoutMode | string | null;
   totalPointsCost: number;
   voucherCode?: string | null;
-  /** True when the server masked voucherCode ("••••" + last 4) — the tenant-admin view. */
+  /** True when the server withheld the code (voucherCode null) — CLIENT_ADMIN / read-only staff. */
   voucherCodeMasked?: boolean;
+  /** Server indicator that a code is issued, for viewers who don't receive the code itself. */
+  voucherIssued?: boolean;
   voucherProvider?: string | null;
   trackingNumber?: string | null;
   trackingUrl?: string | null;
@@ -1280,13 +1282,14 @@ function OrderRow({
   /** GIFSY_ADMIN only — may record "Voucher cancelled with vendor". */
   canCancelVoucher: boolean;
 }) {
-  const voucherIssued = hasIssuedVoucher(order.voucherCode);
+  const voucherIssued = hasIssuedVoucher(order.voucherCode) || order.voucherIssued === true;
   const isHubble = order.voucherProvider === 'Hubble';
   const options = nextStatusOptions({
     status: order.status,
     redemptionMode: order.redemptionMode ?? order.reward?.redemptionMode ?? null,
     voucherProvider: order.voucherProvider ?? null,
     voucherCode: order.voucherCode ?? null,
+    voucherIssued: order.voucherIssued,
   });
   // Refund edges the backend would allow for this status, hidden ONLY because a code is issued —
   // the "Voucher cancelled with vendor" action is what unlocks them.
@@ -1380,16 +1383,16 @@ function OrderRow({
           <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full border ${ORDER_STATUS_BADGE[order.status] ?? ORDER_STATUS_BADGE.REVERSED}`}>
             {order.status}
           </span>
-          {order.voucherCode && (
-            <span
-              className="block mt-1 text-[10px] font-mono text-emerald-600"
-              title={order.voucherCodeMasked ? 'Voucher code (masked)' : undefined}
-              data-testid="order-voucher-code"
-            >
+          {/* View-only viewers never receive the code — the server sends only an "issued" flag. */}
+          {order.voucherCode ? (
+            <span className="block mt-1 text-[10px] font-mono text-emerald-600" data-testid="order-voucher-code">
               {order.voucherCode}
-              {order.voucherCodeMasked && <span className="sr-only"> (masked)</span>}
             </span>
-          )}
+          ) : order.voucherIssued ? (
+            <span className="block mt-1 text-[10px] font-semibold text-emerald-600" data-testid="order-voucher-code">
+              Voucher issued
+            </span>
+          ) : null}
           {order.trackingNumber && (
             <span className="block mt-1 text-[10px] text-gray-500 flex items-center gap-1">
               <Truck className="h-2.5 w-2.5" />{order.trackingNumber}
@@ -2032,7 +2035,7 @@ function FulfilmentQueue({
                     remounts the row and its "Advance to" draft re-initialises from the NEW options. */}
                 {orders.map((o) => (
                   <OrderRow
-                    key={`${o.id}:${o.status}:${o.voucherCode ? 'v' : '-'}`}
+                    key={`${o.id}:${o.status}:${o.voucherCode || o.voucherIssued ? 'v' : '-'}`}
                     order={o}
                     onTransitioned={applyOrderUpdate}
                     canManage={canManage}

@@ -15,6 +15,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { assertVendorPriceBounds, VendorPriceError } from './vendor-pricing.helper';
 import { applyVendorPiiRetention } from './vendor-pii.helper';
 import { transitionOrderStatusOrConflict } from '../rewards/order-status-transition';
+import { combineGuards, planVoucherWrite } from '../rewards/voucher-write-guard';
 import {
   parseVendorUploadBuffer,
   buildVendorUploadTemplateBuffer,
@@ -612,7 +613,7 @@ export class VendorPortalService {
         partner: { clientId: scope.clientId },
         status: { not: RedemptionStatus.PENDING },
       },
-      select: { id: true, status: true },
+      select: { id: true, status: true, voucherCode: true, voucherProvider: true, pointsDeducted: true },
     });
     if (!existing) throw new NotFoundException('Order not found');
     // A CLOSED order is immutable to the vendor (Wave-2 audit MED#4b) — this also stops a
@@ -620,6 +621,12 @@ export class VendorPortalService {
     if (VENDOR_TERMINAL_STATUSES.includes(existing.status)) {
       throw new BadRequestException('This order is closed and can no longer be updated.');
     }
+    // VOUCHER WRITE INVARIANT (shared with Gifsy paths): no clear / blank / overwrite of a stored
+    // code, a new code only on a paid open order — CAS carried on the write below.
+    const voucherPlan = planVoucherWrite(existing, {
+      voucherCode: dto.voucherCode,
+      voucherProvider: dto.voucherProvider,
+    });
 
     // GUARDED write (compare-and-set): the "open + assigned to me" checks above come from a
     // read, so a concurrent close (DELIVERED/RETURNED/CANCELLED/FAILED by Gifsy, a UTR upload,
@@ -631,12 +638,12 @@ export class VendorPortalService {
         fulfilledByVendorId: scope.vendorId,
         partner: { clientId: scope.clientId },
         status: { notIn: [...VENDOR_TERMINAL_STATUSES, RedemptionStatus.PENDING] },
+        ...(voucherPlan.guard ?? {}),
       },
       data: {
         trackingNumber: dto.trackingNumber,
         trackingUrl: dto.trackingUrl,
-        voucherCode: dto.voucherCode,
-        voucherProvider: dto.voucherProvider,
+        ...voucherPlan.data,
         notes: dto.notes,
         fulfilmentChannel: dto.fulfilmentChannel,
         logisticsPartner: dto.logisticsPartner,
@@ -694,6 +701,12 @@ export class VendorPortalService {
       );
     }
 
+    // VOUCHER WRITE INVARIANT (shared with Gifsy paths) — see voucher-write-guard.ts.
+    const voucherPlan = planVoucherWrite(order, {
+      voucherCode: dto.voucherCode,
+      voucherProvider: dto.voucherProvider,
+    });
+
     // BUG-1: a DIGITAL_VOUCHER order cannot be marked DELIVERED without a voucher code —
     // the member would have nothing to redeem. Check the EFFECTIVE channel/code (the value
     // arriving on this transition dto, else the one already stored). Mirrors the identical
@@ -712,8 +725,7 @@ export class VendorPortalService {
 
     const now = new Date();
     const data: Omit<Prisma.RedemptionOrderUpdateManyMutationInput, 'status'> = {
-      voucherCode: dto.voucherCode,
-      voucherProvider: dto.voucherProvider,
+      ...voucherPlan.data,
       trackingNumber: dto.trackingNumber,
       trackingUrl: dto.trackingUrl,
       notes: dto.notes,
@@ -733,7 +745,7 @@ export class VendorPortalService {
       transitionOrderStatusOrConflict(tx, {
         orderId: id,
         expectedFrom: fromStatus,
-        extraGuard: { fulfilledByVendorId: scope.vendorId },
+        extraGuard: combineGuards({ fulfilledByVendorId: scope.vendorId }, voucherPlan.guard),
         toStatus,
         data,
         changedById: user.sub,

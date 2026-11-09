@@ -159,6 +159,24 @@ describe('GIFVC — voucher handling', () => {
     expect(within(row).getByText('AMZN-1234-5678-WXYZ')).toBeInTheDocument();
   });
 
+  it('GIFVC8: read-only staff (code withheld, voucherIssued only) see "Voucher issued" and no controls', async () => {
+    session.role = 'GIFSY_STAFF'; session.perms = ['rewards:read'];
+    installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, voucherIssued: true, voucherCodeMasked: true }]);
+    const row = await openRow('RDM-1');
+    expect(within(row).getByTestId('order-voucher-code')).toHaveTextContent('Voucher issued');
+    expect(within(row).queryByRole('button', { name: /advance/i })).toBeNull();
+  });
+
+  it('GIFVC9: an operator row flagged voucherIssued (code withheld) still hides refund targets', async () => {
+    session.role = 'GIFSY_STAFF'; session.perms = ['rewards:read', 'rewards:manage_orders'];
+    installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, voucherIssued: true }]);
+    const row = await openRow('RDM-1');
+    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    expect(optionValues(advanceSelect())).toEqual(['PROCESSING']);
+    // No editable code input either (a code is already issued).
+    expect(screen.queryByLabelText('Voucher code')).toBeNull();
+  });
+
   it('GIFVC7: a permissioned GIFSY_STAFF can advance but never sees the vendor-cancel action (GIFSY_ADMIN only)', async () => {
     session.role = 'GIFSY_STAFF'; session.perms = ['rewards:read', 'rewards:manage_orders'];
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: 'AMZN-1234-5678-WXYZ', voucherProvider: 'Gifsy' }]);
