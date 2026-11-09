@@ -23,6 +23,14 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { randomUUID } from 'node:crypto';
+import {
+  SALES_IMPORT_BATCH_STATUS,
+  achievementHeaderLabels,
+  importerOwnedKpiCodes,
+  lockSalesMonth,
+  ownedSubsetSql,
+} from '../common/sales-kpi-ownership';
 import {
   ListKpisQueryDto,
   UpsertKpiDefDto,
@@ -651,7 +659,7 @@ export class TargetsService {
     }
 
     // Enabled KPIs for the tenant — same query as the target template path.
-    const kpiRows = await this.prisma.kpiDef.findMany({
+    let kpiRows = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId, enabled: true },
       orderBy: [{ order: 'asc' }, { code: 'asc' }],
     });
@@ -660,6 +668,18 @@ export class TargetsService {
       throw new BadRequestException(
         'No enabled KPIs found for this tenant. Seed KPIs first via POST /v1/admin/kpis/seed-defaults.',
       );
+    }
+
+    // Sales Import source ownership (§7.4): importer-owned KPIs get no column in the manual template.
+    // A tenant with no SalesKpiDefinition (Deoleo, every tenant today) → [] → this block never runs.
+    const owned = await importerOwnedKpiCodes(this.prisma, user.clientId);
+    if (owned.length > 0) {
+      kpiRows = kpiRows.filter((k) => !owned.includes(k.code));
+      if (kpiRows.length === 0) {
+        throw new BadRequestException(
+          'Every enabled KPI is fed by Sales Import, so there is nothing to upload manually.',
+        );
+      }
     }
 
     // All non-deleted outlets — identical query to getTemplateBuffer (no mocks).
@@ -750,9 +770,28 @@ export class TargetsService {
       enabled: k.enabled,
     }));
 
+    // Sales Import source ownership (§7.4). Importer-owned KPI columns are NOT accepted here: they are
+    // dropped from the parse (unknown labels are already skipped by the parser) and reported back.
+    // A tenant with no SalesKpiDefinition (Deoleo, every tenant today) → [] → the existing path, unchanged.
+    const owned = await importerOwnedKpiCodes(this.prisma, user.clientId);
+    let parseKpis = kpis;
+    let skippedImporterOwnedKpis: string[] | undefined;
+    if (owned.length > 0) {
+      parseKpis = kpis.filter((k) => !owned.includes(k.code));
+      if (parseKpis.length === 0) {
+        throw new BadRequestException(
+          'Every enabled KPI is fed by Sales Import, so there is nothing to upload manually.',
+        );
+      }
+      const headerLabels = achievementHeaderLabels(file.buffer);
+      skippedImporterOwnedKpis = kpis
+        .filter((k) => owned.includes(k.code) && headerLabels.has(k.label.toLowerCase().trim()))
+        .map((k) => k.code);
+    }
+
     let parseResult: ReturnType<typeof parseTargetUploadBuffer>;
     try {
-      parseResult = parseTargetUploadBuffer(file.buffer, kpis, knownOutletCodes);
+      parseResult = parseTargetUploadBuffer(file.buffer, parseKpis, knownOutletCodes);
     } catch {
       throw new BadRequestException('Invalid or corrupted xlsx file');
     }
@@ -801,6 +840,25 @@ export class TargetsService {
 
         const meta = outletMeta.get(outletCode);
 
+        // Sales Import ownership: the row's importer-owned keys SURVIVE the manual rewrite. The carry-over
+        // is done inside the statement (no read-then-write window vs a concurrent apply). Never runs for a
+        // tenant without owned KPIs.
+        if (owned.length > 0) {
+          salesOps.push(
+            this.prisma.$executeRaw(Prisma.sql`
+              INSERT INTO "outlet_sales_records"
+                ("id","clientId","outletCode","outletName","month","kpiValues","batchId","createdAt","updatedAt")
+              VALUES (${randomUUID()}, ${user.clientId}, ${outletCode}, ${meta?.name ?? outletCode}, ${month},
+                      ${JSON.stringify(kpiMap)}::jsonb, ${batch.id}, now(), now())
+              ON CONFLICT ("clientId","outletCode","month") DO UPDATE SET
+                "kpiValues"  = ${ownedSubsetSql(Prisma.sql`"outlet_sales_records"."kpiValues"`, owned)} || EXCLUDED."kpiValues",
+                "outletName" = EXCLUDED."outletName",
+                "batchId"    = EXCLUDED."batchId",
+                "updatedAt"  = now()`),
+          );
+          continue;
+        }
+
         salesOps.push(
           this.prisma.outletSalesRecord.upsert({
             where: {
@@ -837,6 +895,8 @@ export class TargetsService {
       acceptedCount,
       rejectedCount,
       rows:          parseResult.rows,
+      // Additive, ONLY for tenants with importer-owned KPIs (absent otherwise → Deoleo response unchanged).
+      ...(skippedImporterOwnedKpis !== undefined ? { skippedImporterOwnedKpis } : {}),
     };
   }
 
@@ -865,8 +925,62 @@ export class TargetsService {
     });
     if (!batch) throw new NotFoundException('Upload batch not found');
 
+    // Sales Import (§7.4): an importer batch is managed by Sales Import only (no tenant without the
+    // feature can have one — Deoleo never does).
+    if (batch.status === SALES_IMPORT_BATCH_STATUS) {
+      throw new ConflictException('This batch was written by Sales Import; manage it there.');
+    }
+
+    // Owned-tenant branch: deleting a MANUAL batch must not take importer-owned values with it (the
+    // schema cascade would delete whole rows). Never runs for a tenant without owned KPIs.
+    const owned = await importerOwnedKpiCodes(this.prisma, user.clientId);
+    if (owned.length > 0) {
+      await this.deleteManualBatchKeepingOwned(user.clientId, id, owned);
+      return { deleted: true, id, removedRecords: batch.acceptedCount };
+    }
+
     await this.prisma.salesUploadBatch.delete({ where: { id } });
     return { deleted: true, id, removedRecords: batch.acceptedCount };
+  }
+
+  /**
+   * One transaction, per month of the batch's rows (advisory-locked with the same key as a Sales Import apply /
+   * close, in sorted order): rows of this batch that carry an importer-owned key keep ONLY their owned keys and
+   * are re-pointed to that month's latest SALES_IMPORT batch; then the batch is deleted and the cascade removes
+   * the rows that held only manual data. A month with no SALES_IMPORT batch has never been applied, so its
+   * owned-key values are themselves manual data (written before the KPI became importer-owned) → they go too.
+   */
+  private async deleteManualBatchKeepingOwned(clientId: string, batchId: string, owned: string[]) {
+    await this.prisma.$transaction(
+      async (tx) => {
+        const monthRows = await tx.outletSalesRecord.findMany({
+          where: { clientId, batchId },
+          select: { month: true },
+          distinct: ['month'],
+        });
+        const months = monthRows.map((r) => r.month).sort();
+        for (const month of months) {
+          await lockSalesMonth(tx, clientId, month);
+        }
+        for (const month of months) {
+          const importerBatch = await tx.salesUploadBatch.findFirst({
+            where: { clientId, month, status: SALES_IMPORT_BATCH_STATUS },
+            orderBy: { createdAt: 'desc' },
+            select: { id: true },
+          });
+          if (!importerBatch) continue;
+          await tx.$executeRaw(Prisma.sql`
+            UPDATE "outlet_sales_records"
+               SET "kpiValues" = ${ownedSubsetSql(Prisma.sql`"kpiValues"`, owned)},
+                   "batchId"   = ${importerBatch.id},
+                   "updatedAt" = now()
+             WHERE "clientId" = ${clientId} AND "batchId" = ${batchId} AND "month" = ${month}
+               AND "kpiValues" ?| ${owned}::text[]`);
+        }
+        await tx.salesUploadBatch.delete({ where: { id: batchId } });
+      },
+      { timeout: 60_000, maxWait: 10_000 },
+    );
   }
 
   // ─── List achievement rows ──────────────────────────────────────────────────

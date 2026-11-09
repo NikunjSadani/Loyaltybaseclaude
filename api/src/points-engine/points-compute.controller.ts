@@ -15,7 +15,8 @@
  * fine gate @RequirePermission('points_rules:read'). Tenant scope comes from @CurrentUser().clientId.
  */
 
-import { Body, Controller, ForbiddenException, Get, Post, Query, StreamableFile } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Post, Query, StreamableFile, UseGuards } from '@nestjs/common';
+import { SalesMonthClosedGuard } from '../sales-import/months/sales-month-closed.guard';
 import { PointsComputeService } from './points-compute.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
@@ -54,6 +55,7 @@ export class PointsComputeController {
   @Post('commit')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('credits:upload')
+  @UseGuards(SalesMonthClosedGuard) // D-1: 409 while the month is OPEN in Sales Import (inert unless features.salesImport)
   commit(@CurrentUser() user: JwtPayload, @Body() dto: CommitComputeDto) {
     return this.compute.commitCompute(user, {
       period: dto.period,
@@ -79,6 +81,7 @@ export class PointsComputeController {
   @Get('export')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('points_rules:read')
+  @UseGuards(SalesMonthClosedGuard) // D-1: 409 while the month is OPEN in Sales Import (inert unless features.salesImport)
   async export(@CurrentUser() user: JwtPayload, @Query() q: PreviewComputeDto): Promise<StreamableFile> {
     // The credit-upload file IS the creditable artifact (it uploads through the ordinary credits flow, which
     // knows nothing of the engine toggle), so withhold it when the engine is disabled. Read the flag UNCACHED
@@ -105,6 +108,7 @@ export class PointsComputeController {
   @Get('preview-report')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('points_rules:read')
+  @UseGuards(SalesMonthClosedGuard) // D-1: 409 while the month is OPEN in Sales Import (inert unless features.salesImport)
   async previewReport(@CurrentUser() user: JwtPayload, @Query() q: PreviewComputeDto): Promise<StreamableFile> {
     const preview = await this.compute.previewCompute(user, {
       period: q.period,
@@ -127,6 +131,7 @@ export class PointsComputeController {
   @Get('payout-report')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('points_rules:read')
+  @UseGuards(SalesMonthClosedGuard) // D-1: 409 while the month is OPEN in Sales Import (inert unless features.salesImport)
   async payoutReport(@CurrentUser() user: JwtPayload, @Query() q: PreviewComputeDto): Promise<StreamableFile> {
     const preview = await this.compute.previewCompute(user, {
       period: q.period,

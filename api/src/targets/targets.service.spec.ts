@@ -44,8 +44,9 @@ const mockTx = {
   kpiDef:             { upsert: jest.fn(), updateMany: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
   targetUploadBatch:  { create: jest.fn() },
   outletTarget:       { upsert: jest.fn() },
-  salesUploadBatch:   { create: jest.fn() },
-  outletSalesRecord:  { upsert: jest.fn() },
+  salesUploadBatch:   { create: jest.fn(), findFirst: jest.fn(), delete: jest.fn() },
+  outletSalesRecord:  { upsert: jest.fn(), findMany: jest.fn() },
+  $executeRaw:        jest.fn(),
 };
 
 const mockPrisma = {
@@ -78,8 +79,16 @@ const mockPrisma = {
   },
   salesUploadBatch: {
     findMany: jest.fn(),
+    findFirst: jest.fn(),
+    delete: jest.fn(),
     create: mockTx.salesUploadBatch.create,
   },
+  // Sales Import ownership (§7.4). Default: the tenant owns NO KPI (Deoleo / every tenant today), so every
+  // pre-existing test below exercises the unchanged path. Ownership tests override it explicitly.
+  salesKpiDefinition: {
+    findMany: jest.fn().mockResolvedValue([]),
+  },
+  $executeRaw: jest.fn(),
   // Handles BOTH forms: the array form ($transaction([...ops])) used by the chunked
   // upload persistence, and the interactive callback form used by upsertKpi.
   $transaction: jest.fn((arg: unknown) =>
@@ -1246,5 +1255,184 @@ describe('TargetsService', () => {
       expect(res.outlets[0].outletCode).toBe('A001');
       expect(res.outlets[1].outletCode).toBe('Z999');
     });
+  });
+});
+
+// ─── Sales Import source ownership (plan §7.4, task K-7) ──────────────────────
+//
+// The BYTE-IDENTICAL guard: a tenant with NO importer-owned KPI (Deoleo, every tenant today) must issue exactly the
+// same writes and return exactly the same response shape as before the ownership edits.
+
+describe('TargetsService — Sales Import ownership (K-7)', () => {
+  let service: TargetsService;
+  const xlsxFile = (rows: (string | number | null)[][]) =>
+    ({
+      buffer: buildTestXlsx(rows),
+      originalname: 'test.xlsx',
+      mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    }) as Express.Multer.File;
+  // Prisma.Sql (tagged-template $executeRaw) → text + bound values.
+  const sqlText = (call: unknown[]) => {
+    const q = call[0] as { strings?: readonly string[]; sql?: string } | readonly string[];
+    if (Array.isArray(q)) return (q as readonly string[]).join('?');
+    return (q as { strings: readonly string[] }).strings.join('?');
+  };
+  const sqlValues = (call: unknown[]): unknown[] => {
+    if (Array.isArray(call[0])) return call.slice(1);
+    return (call[0] as { values?: unknown[] }).values ?? [];
+  };
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([]);
+    mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, kpiRow2]);
+    mockPrisma.outlet.findMany.mockResolvedValue([
+      { outletCode: 'O001', name: 'Outlet One', outletType: { code: 'RETAIL' } },
+    ]);
+    mockTx.salesUploadBatch.create.mockResolvedValue({ id: 'sales-batch-1' });
+    mockTx.outletSalesRecord.upsert.mockResolvedValue({});
+    mockPrisma.$executeRaw.mockResolvedValue(1);
+    mockTx.$executeRaw.mockResolvedValue(1);
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        TargetsService,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: SalesNotificationsService, useValue: {} },
+      ],
+    }).compile();
+    service = module.get(TargetsService);
+  });
+  afterAll(() => mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([]));
+
+  describe('BYTE-IDENTICAL when the tenant owns no KPI (Deoleo)', () => {
+    it('uploadAchievements: exact same upsert args, no raw SQL, no extra read, no new response key', async () => {
+      const result = await service.uploadAchievements(admin, xlsxFile([['O001', 'Outlet One', 'RETAIL', 55.5, 30]]));
+
+      expect(mockPrisma.salesKpiDefinition.findMany).toHaveBeenCalledWith({
+        where: { clientId: 'deoleo', enabled: true },
+        select: { kpiCode: true },
+      });
+      expect(mockTx.outletSalesRecord.upsert).toHaveBeenCalledTimes(1);
+      // The full pre-change argument shape, field by field (only updatedAt is a fresh Date).
+      expect(mockTx.outletSalesRecord.upsert.mock.calls[0][0]).toEqual({
+        where: { clientId_outletCode_month: { clientId: 'deoleo', outletCode: 'O001', month: WRITABLE_MONTH.ym } },
+        create: {
+          clientId: 'deoleo',
+          outletCode: 'O001',
+          outletName: 'Outlet One',
+          month: WRITABLE_MONTH.ym,
+          kpiValues: { MONTH_TGT: 55.5, FOCUS_PACK_1: 30 },
+          batchId: 'sales-batch-1',
+        },
+        update: {
+          kpiValues: { MONTH_TGT: 55.5, FOCUS_PACK_1: 30 },
+          outletName: 'Outlet One',
+          batchId: 'sales-batch-1',
+          updatedAt: expect.any(Date),
+        },
+      });
+      expect(mockPrisma.$executeRaw).not.toHaveBeenCalled();
+      expect(mockPrisma.outletSalesRecord.findMany).not.toHaveBeenCalled();
+      expect(Object.keys(result).sort()).toEqual(
+        ['acceptedCount', 'batchId', 'month', 'monthsInBatch', 'rejectedCount', 'rows', 'totalRows'].sort(),
+      );
+      expect('skippedImporterOwnedKpis' in result).toBe(false);
+    });
+
+    it('buildAchievementTemplate: every enabled KPI keeps its column', async () => {
+      const buf = await service.buildAchievementTemplate(admin, WRITABLE_MONTH.ym);
+      const wb = XLSX.read(buf);
+      const aoa = XLSX.utils.sheet_to_json<string[]>(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+      expect(aoa[1]).toEqual(expect.arrayContaining(['Month Target', 'Focus Pack - 1']));
+    });
+
+    it('deleteAchievementBatch: the plain cascade delete, no transaction, no raw SQL', async () => {
+      mockPrisma.salesUploadBatch.findFirst.mockResolvedValue({ id: 'b1', clientId: 'deoleo', status: 'COMPLETED', acceptedCount: 4 });
+      mockPrisma.salesUploadBatch.delete.mockResolvedValue({});
+      await expect(service.deleteAchievementBatch(admin, 'b1')).resolves.toEqual({ deleted: true, id: 'b1', removedRecords: 4 });
+      expect(mockPrisma.salesUploadBatch.delete).toHaveBeenCalledWith({ where: { id: 'b1' } });
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      expect(mockPrisma.$executeRaw).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('tenant owns FOCUS_PACK_1 (importer-owned)', () => {
+    beforeEach(() => mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([{ kpiCode: 'FOCUS_PACK_1' }]));
+
+    it('upload: the owned column is skipped + reported; the write keeps existing owned keys atomically', async () => {
+      const result = await service.uploadAchievements(admin, xlsxFile([['O001', 'Outlet One', 'RETAIL', 10, 999]]));
+
+      expect(result.skippedImporterOwnedKpis).toEqual(['FOCUS_PACK_1']);
+      expect(mockTx.outletSalesRecord.upsert).not.toHaveBeenCalled();
+      expect(mockPrisma.$executeRaw).toHaveBeenCalledTimes(1);
+      const call = mockPrisma.$executeRaw.mock.calls[0];
+      const sql = sqlText(call);
+      expect(sql).toContain('ON CONFLICT ("clientId","outletCode","month") DO UPDATE');
+      expect(sql).toContain('jsonb_each');
+      const values = sqlValues(call);
+      // kpiValues written = manual keys only (owned value 999 NOT written) …
+      expect(values).toContain(JSON.stringify({ MONTH_TGT: 10 }));
+      expect(values.some((v) => typeof v === 'string' && v.includes('999'))).toBe(false);
+      // … and the owned list drives the carry-over of the existing row's owned keys.
+      expect(values).toContainEqual(['FOCUS_PACK_1']);
+      expect(values).toContain('deoleo');
+    });
+
+    it('upload without an owned column → skippedImporterOwnedKpis: []', async () => {
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(
+        wb,
+        XLSX.utils.aoa_to_sheet([
+          ['', '', '', WRITABLE_MONTH.label],
+          ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target'],
+          ['O001', 'Outlet One', 'RETAIL', 7],
+        ]),
+        'Targets',
+      );
+      const file = { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }), originalname: 'a.xlsx' } as Express.Multer.File;
+      const result = await service.uploadAchievements(admin, file);
+      expect(result.skippedImporterOwnedKpis).toEqual([]);
+    });
+
+    it('upload when EVERY enabled KPI is owned → 400 with a clear message', async () => {
+      mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([{ kpiCode: 'FOCUS_PACK_1' }, { kpiCode: 'MONTH_TGT' }]);
+      await expect(service.uploadAchievements(admin, xlsxFile([['O001', 'O', 'RETAIL', 1, 2]]))).rejects.toThrow(/fed by Sales Import/);
+    });
+
+    it('template excludes the owned column', async () => {
+      const buf = await service.buildAchievementTemplate(admin, WRITABLE_MONTH.ym);
+      const wb = XLSX.read(buf);
+      const aoa = XLSX.utils.sheet_to_json<string[]>(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+      expect(aoa[1]).toContain('Month Target');
+      expect(aoa[1]).not.toContain('Focus Pack - 1');
+    });
+
+    it('delete a MANUAL batch: owned keys kept + re-pointed to the latest SALES_IMPORT batch, manual keys stripped', async () => {
+      mockPrisma.salesUploadBatch.findFirst.mockResolvedValue({ id: 'b1', clientId: 'deoleo', status: 'COMPLETED', acceptedCount: 2 });
+      mockTx.outletSalesRecord.findMany.mockResolvedValue([{ month: '2026-10' }, { month: '2026-09' }]);
+      mockTx.salesUploadBatch.findFirst.mockImplementation(async ({ where }: { where: { month: string } }) =>
+        where.month === '2026-10' ? { id: 'imp-batch-oct' } : null,
+      );
+      mockTx.salesUploadBatch.delete.mockResolvedValue({});
+
+      await service.deleteAchievementBatch(admin, 'b1');
+
+      const raw = mockTx.$executeRaw.mock.calls.map((c) => ({ sql: sqlText(c), values: sqlValues(c) }));
+      // advisory locks for BOTH months first (sorted), then ONE strip/re-point (Oct only — Sep was never applied)
+      expect(raw[0].sql).toContain('pg_advisory_xact_lock');
+      expect(raw[0].values).toEqual(['sales-month:deoleo:2026-09']);
+      expect(raw[1].values).toEqual(['sales-month:deoleo:2026-10']);
+      const updates = raw.filter((r) => r.sql.includes('UPDATE "outlet_sales_records"'));
+      expect(updates).toHaveLength(1);
+      expect(updates[0].values).toEqual(expect.arrayContaining(['imp-batch-oct', 'deoleo', 'b1', '2026-10', ['FOCUS_PACK_1']]));
+      expect(mockTx.salesUploadBatch.delete).toHaveBeenCalledWith({ where: { id: 'b1' } });
+      expect(mockPrisma.salesUploadBatch.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  it('delete a SALES_IMPORT batch → 409 (always), nothing deleted', async () => {
+    mockPrisma.salesUploadBatch.findFirst.mockResolvedValue({ id: 'b9', clientId: 'deoleo', status: 'SALES_IMPORT', acceptedCount: 1 });
+    await expect(service.deleteAchievementBatch(admin, 'b9')).rejects.toBeInstanceOf(ConflictException);
+    expect(mockPrisma.salesUploadBatch.delete).not.toHaveBeenCalled();
   });
 });
