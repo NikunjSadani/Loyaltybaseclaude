@@ -37,7 +37,7 @@ function tile(over: Partial<OfferTileAdmin> = {}): OfferTileAdmin {
     unitLabel: 'per case', product: 'ADHO 50 ml', label: 'Earn on every case', details: null,
     validFrom: first, validTo: last, sortOrder: 0, isActive: true,
     programNames: ['Gold'], outletTypeCodes: ['WHOLESALER'], zones: [], states: [],
-    kpiCode: 'ADHO50', copiedFromId: null, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    kpiCode: 'ADHO50', copiedFromId: null, copiedToMonth: null, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
     ...over,
   };
 }
@@ -300,5 +300,60 @@ describe('OffersAdminPage', () => {
     fireEvent.change(within(form).getByLabelText('Value type'), { target: { value: 'RUPEES' } });
     fireEvent.change(within(form).getByLabelText(/^Value \(₹\)/), { target: { value: '1500.5' } });
     expect(within(preview).getByTestId('offer-tile-value')).toHaveTextContent('₹1,500.50');
+  });
+
+  it('copy result: plain-words warnings for cleared KPI links + unknown outlet types; affected drafts marked', async () => {
+    listByMonth[PREV] = [
+      tile({ id: 'p1', validFrom: `${PREV}-01`, validTo: monthBounds(PREV).last }),
+      tile({ id: 'p2', validFrom: `${PREV}-01`, validTo: monthBounds(PREV).last }),
+    ];
+    post.mockImplementation(() => {
+      listByMonth[CUR] = [
+        tile({ id: 'c1', label: 'Copy one', isActive: false, kpiCode: null, copiedFromId: 'p1', copiedToMonth: CUR }),
+        tile({ id: 'c2', label: 'Copy two', isActive: false, kpiCode: null, copiedFromId: 'p2', copiedToMonth: CUR }),
+      ];
+      return Promise.resolve({
+        success: true,
+        data: { created: 2, skipped: 0, kpiCleared: ['c1', 'c2'], unknownOutletTypes: ['c2'], tiles: [] },
+      });
+    });
+    renderPage();
+    await screen.findByTestId('offer-row');
+    fireEvent.click(screen.getByTestId('copy-month-btn'));
+    const modal = await screen.findByTestId('copy-modal');
+    await within(modal).findByText(/Copy 2 tiles/);
+    fireEvent.click(within(modal).getByTestId('confirm-copy'));
+
+    const panel = await screen.findByTestId('copy-warnings');
+    expect(panel).toHaveTextContent('2 copies had their target link removed');
+    expect(panel).toHaveTextContent('1 copy has outlet types that no longer exist — fix before publishing.');
+    await screen.findByText(/Copy two/);
+    const rows = screen.getAllByTestId('offer-row');
+    expect(within(rows[0]).getByTestId('row-kpi-cleared')).toBeInTheDocument();
+    expect(within(rows[0]).queryByTestId('row-unknown-types')).not.toBeInTheDocument();
+    expect(within(rows[1]).getByTestId('row-unknown-types')).toHaveTextContent('fix before publishing');
+
+    fireEvent.click(screen.getByLabelText('Dismiss copy warnings'));
+    expect(screen.queryByTestId('copy-warnings')).not.toBeInTheDocument();
+  });
+
+  it('marks a row whose outlet type no longer exists in the tenant master (survives reload)', async () => {
+    listByMonth[CUR] = [tile({ id: 'x', outletTypeCodes: ['GONE_TYPE'] })];
+    renderPage();
+    const row = await screen.findByTestId('offer-row');
+    expect(await within(row).findByTestId('row-unknown-types')).toBeInTheDocument();
+  });
+
+  it('no copy warnings panel when the copy reports none', async () => {
+    listByMonth[PREV] = [tile({ id: 'p1', validFrom: `${PREV}-01`, validTo: monthBounds(PREV).last })];
+    post.mockResolvedValue({ success: true, data: { created: 1, skipped: 0, kpiCleared: [], unknownOutletTypes: [], tiles: [] } });
+    renderPage();
+    await screen.findByTestId('offer-row');
+    fireEvent.click(screen.getByTestId('copy-month-btn'));
+    const modal = await screen.findByTestId('copy-modal');
+    await within(modal).findByText(/Copy 1 tile/);
+    fireEvent.click(within(modal).getByTestId('confirm-copy'));
+    expect(await screen.findByText('Created 1, skipped 0 (already copied)')).toBeInTheDocument();
+    expect(screen.queryByTestId('copy-warnings')).not.toBeInTheDocument();
   });
 });

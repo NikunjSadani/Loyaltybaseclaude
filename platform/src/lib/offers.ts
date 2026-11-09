@@ -35,6 +35,8 @@ export interface OfferTileAdmin {
   states: string[];
   kpiCode: string | null;
   copiedFromId: string | null;
+  /** 'YYYY-MM' the tile was copied into (copy-month idempotency key with copiedFromId); null if not a copy. */
+  copiedToMonth: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -46,7 +48,8 @@ export interface OfferProgress {
   /** null ⇒ this outlet has no target for the KPI this month. */
   target: number | null;
   achieved: number;
-  /** round(achieved/target*100); null when target null/0. */
+  /** floor(achieved/target*100), clamped 0–100 and capped at 99 unless unlocked (100 ONLY when
+   *  unlocked, i.e. achieved ≥ target); null when target null/0. */
   pct: number | null;
   unlocked: boolean;
 }
@@ -273,10 +276,21 @@ export function deleteOffer(id: string): Promise<ApiResponse<{ id: string }>> {
   return api.del(`/api/admin/offers/${encodeURIComponent(id)}`);
 }
 
+/** POST /admin/offers/copy-month result. `kpiCleared` / `unknownOutletTypes` are ids of the NEW
+ *  draft copies: KPI link removed (KPI deleted/disabled) / outlet types that no longer exist
+ *  (publishing those is refused until fixed). */
+export interface CopyMonthResult {
+  created: number;
+  skipped: number;
+  kpiCleared: string[];
+  unknownOutletTypes: string[];
+  tiles: OfferTileAdmin[];
+}
+
 export function copyOffersMonth(
   fromMonth: string,
   toMonth: string,
-): Promise<ApiResponse<{ created: number; skipped: number; tiles: OfferTileAdmin[] }>> {
+): Promise<ApiResponse<CopyMonthResult>> {
   return api.post('/api/admin/offers/copy-month', { fromMonth, toMonth });
 }
 

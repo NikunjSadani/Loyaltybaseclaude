@@ -34,6 +34,11 @@ import { OfferForm } from './_components/offer-form';
 
 const EMPTY_SEGMENTS: OfferSegmentOptions = { programNames: [], zones: [], states: [] };
 
+const copyWarningKpi = (n: number) =>
+  `${n} ${n === 1 ? 'copy' : 'copies'} had ${n === 1 ? 'its' : 'their'} target link removed (the KPI no longer exists), so no progress bar will show.`;
+const copyWarningTypes = (n: number) =>
+  `${n} ${n === 1 ? 'copy has' : 'copies have'} outlet types that no longer exist — fix before publishing.`;
+
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December',
@@ -94,6 +99,10 @@ export default function OffersAdminPage() {
   const [copyError, setCopyError] = useState<string | null>(null);
   // Latest list request — an older month's response that lands late is ignored.
   const listSeq = useRef(0);
+  // Last copy's warnings (ids are the NEW draft copies), kept for the month they were copied into.
+  const [copyResult, setCopyResult] = useState<{
+    month: string; kpiCleared: string[]; unknownOutletTypes: string[];
+  } | null>(null);
   const copySeq = useRef(0);
   const [busy, setBusy] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
@@ -134,6 +143,16 @@ export default function OffersAdminPage() {
   const fromMonth = month ? previousMonth(month) : '';
   const typeLabel = useMemo(() => new Map(outletTypes.map((t) => [t.code, t.label])), [outletTypes]);
   const kpiLabel = useMemo(() => new Map(kpis.map((k) => [k.code, k.label])), [kpis]);
+
+  const liveTypeCodes = useMemo(() => new Set(outletTypes.map((t) => t.code.toUpperCase())), [outletTypes]);
+
+  /** Outlet types on this tile that no longer exist — from the last copy result, or (when the
+   *  tenant's outlet types loaded) derived from the row itself so the mark survives a reload. */
+  function hasUnknownTypes(t: OfferTileAdmin): boolean {
+    if (copyResult?.unknownOutletTypes.includes(t.id)) return true;
+    return liveTypeCodes.size > 0 && t.outletTypeCodes.some((c) => !liveTypeCodes.has(c.toUpperCase()));
+  }
+  const kpiWasCleared = (t: OfferTileAdmin) => !!copyResult?.kpiCleared.includes(t.id);
 
   function audience(t: OfferTileAdmin): string {
     const parts = [
@@ -192,6 +211,11 @@ export default function OffersAdminPage() {
     setCopyOpen(false);
     if (!r.success) { setError(r.error || 'Could not copy last month.'); return; }
     toast.success(`Created ${r.data?.created ?? 0}, skipped ${r.data?.skipped ?? 0} (already copied)`);
+    const kpiCleared = Array.isArray(r.data?.kpiCleared) ? r.data.kpiCleared : [];
+    const unknownOutletTypes = Array.isArray(r.data?.unknownOutletTypes) ? r.data.unknownOutletTypes : [];
+    setCopyResult(
+      kpiCleared.length || unknownOutletTypes.length ? { month, kpiCleared, unknownOutletTypes } : null,
+    );
     void load(month);
   }
 
@@ -226,6 +250,23 @@ export default function OffersAdminPage() {
         </p>
       )}
 
+      {copyResult && copyResult.month === month && (
+        <div role="status" data-testid="copy-warnings"
+          className="flex items-start justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <ul className="list-disc space-y-0.5 pl-4">
+            {copyResult.kpiCleared.length > 0 && (
+              <li>{copyWarningKpi(copyResult.kpiCleared.length)}</li>
+            )}
+            {copyResult.unknownOutletTypes.length > 0 && (
+              <li>{copyWarningTypes(copyResult.unknownOutletTypes.length)}</li>
+            )}
+          </ul>
+          <Button variant="ghost" size="sm" onClick={() => setCopyResult(null)} aria-label="Dismiss copy warnings">
+            Dismiss
+          </Button>
+        </div>
+      )}
+
       {loading ? (
         <div className="flex justify-center py-12"><Spinner size="lg" /></div>
       ) : tiles.length === 0 ? (
@@ -252,6 +293,20 @@ export default function OffersAdminPage() {
                       {formatOfferDayShort(t.validFrom)} – {formatOfferDayShort(t.validTo)} · {audience(t)}
                       {t.kpiCode ? ` · Progress: ${kpiLabel.get(t.kpiCode) ?? t.kpiCode}` : ''}
                     </p>
+                    {(kpiWasCleared(t) || hasUnknownTypes(t)) && (
+                      <div className="mt-1 flex flex-wrap gap-1.5">
+                        {kpiWasCleared(t) && (
+                          <span data-testid="row-kpi-cleared" className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800">
+                            Target link removed (its KPI no longer exists)
+                          </span>
+                        )}
+                        {hasUnknownTypes(t) && (
+                          <span data-testid="row-unknown-types" className="rounded-full bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700">
+                            Outlet types no longer exist — fix before publishing
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <button
                     type="button"

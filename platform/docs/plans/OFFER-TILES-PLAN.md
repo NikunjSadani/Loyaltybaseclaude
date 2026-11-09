@@ -1,6 +1,9 @@
 # "This month's offers" tiles — implementation plan
 
-> **Status:** PLAN ONLY (no feature code written). Branch at plan time: `feat/upi-manual-entry`.
+> **Status:** BUILT on `feat/upi-manual-entry` (BE `aab09f6` + audit fix `7d53cb7`; FE fix rounds
+> `0202fce` + the copy-warnings round). Where this plan and the shipped code differ, **§0.1 "Shipped
+> behaviour" wins** — the original plan text below is kept for context and is updated inline where it
+> was contradicted.
 > **Classification:** ⚠️ **PLATFORM-WIDE** (new Prisma table, shared partner-dashboard code, shared
 > admin nav). **Owner-approved as platform-wide-but-dormant.** It stays dormant because the partner
 > section renders nothing unless an active tile applies to that outlet; see §9 for the Deoleo
@@ -21,6 +24,39 @@ shows a 2-column grid of the tiles that apply to the logged-in outlet. A tile li
 shows **this outlet's** live progress (achieved/target %, "Unlocked" at ≥100%). Tapping a tile opens
 a bottom sheet with its details and terms. Tiles **never credit, compute or promise points
 programmatically**: they are content. If no tile applies, the section is absent from the page.
+
+### 0.1 Shipped behaviour (authoritative — supersedes the plan text where they differ)
+
+- **The `offerTiles` flag gates the WHOLE feature** (default OFF; Deoleo OFF): the admin nav item +
+  `/admin/offers` route (FE gate; a failed settings fetch shows "Couldn't load settings — Retry", never
+  "not enabled"), every admin API call (403 when OFF), the partner API (`tiles: []` when OFF), AND
+  the partner dashboard, which mounts `OffersSection` only when `identity.features.offerTiles` is
+  true — so a flag-OFF tenant makes **zero** offers requests.
+- **Progress:** `pct = floor(achieved/target*100)` clamped to 0–100 and **capped at 99 unless
+  unlocked**; `pct` is 100 **only** when `unlocked` (achieved ≥ target). Negative/NaN achieved → 0. A
+  disabled KPI → `progress: null`. The FE shows the "Unlocked" pill exactly when `unlocked`, never a
+  full bar without it, and clamps `aria-valuenow` to 0–100.
+- **Validation (400, human form-label messages shown verbatim by the admin form):** an explicit
+  `null` on any non-nullable field (POST or PATCH) → 400 (send `[]` to target everyone); validity
+  window ≤ **366 days**, years **2020–2100**; `sortOrder` whole number **0–1,000,000**; value > 0,
+  ≤ 9,999,999 (PERCENT ≤ 100); TEXT value 1–12 chars. The admin form mirrors these client-side.
+- **Publish re-check:** PATCH `isActive` false→true re-validates `kpiCode` (exists + enabled) and
+  `outletTypeCodes` (still exist); a dead reference refuses the publish with a human message.
+- **Copy last month:** idempotent on **(`copiedFromId`, `copiedToMonth`)** — not on the editable
+  `validFrom`; a per-(tenant, toMonth) advisory lock serialises double-clicks. Copies land as drafts.
+  The result adds `kpiCleared: string[]` (new copy ids whose dead KPI link was removed → no progress
+  bar) and `unknownOutletTypes: string[]` (new copy ids that keep outlet types which no longer exist —
+  kept rather than dropped because dropping could widen the audience to "all"; publishing is refused
+  until fixed). The admin page shows these in plain words ("2 copies had their target link removed…",
+  "1 copy has outlet types that no longer exist — fix before publishing.") and marks the affected
+  draft rows; the unknown-outlet-type mark is also derived from the tenant's outlet-type list, so it
+  survives a reload.
+- **Admin UI:** month + year `<select>` pair (no `type="month"`), stale month responses ignored,
+  copy-count fetch failure shown as an error (not "nothing to copy").
+- **Partner UI:** value never truncates (shrinks/wraps at 320–360px; the unit label sits on its own
+  truncating line); small print is `text-xs text-gray-600`; the sheet keeps the last tile while
+  closing and pads for the iOS safe area; footer wording "Offer details are shared by {brand}. Terms
+  apply." unchanged.
 
 ---
 
@@ -310,6 +346,7 @@ export interface OfferTileAdmin {
   states: string[];
   kpiCode: string | null;
   copiedFromId: string | null;
+  copiedToMonth: string | null; // 'YYYY-MM' the copy was made into (copy idempotency key with copiedFromId)
   createdAt: string;            // ISO
   updatedAt: string;            // ISO
 }
@@ -332,7 +369,7 @@ export interface OfferTilePartner {
     unit: string;               // KpiDef.unit
     target: number | null;      // null ⇒ this outlet has no target for the KPI this month
     achieved: number;           // 0 when no achievement row
-    pct: number | null;         // round(achieved/target*100); null when target null/0
+    pct: number | null;         // floor(achieved/target*100), 0–100, capped at 99 unless unlocked; null when target null/0
     unlocked: boolean;          // target > 0 && achieved >= target
   };
 }
@@ -387,7 +424,7 @@ on every route.
 | POST | `/v1/admin/offers` | `OfferTileInput` | `{ tile: OfferTileAdmin }` (201) |
 | PATCH | `/v1/admin/offers/:id` | `Partial<OfferTileInput>` | `{ tile: OfferTileAdmin }` |
 | DELETE | `/v1/admin/offers/:id` | — | `{ id }` (soft delete) |
-| POST | `/v1/admin/offers/copy-month` | `{ fromMonth: "YYYY-MM", toMonth: "YYYY-MM" }` | `{ created: number, skipped: number, tiles: OfferTileAdmin[] }` |
+| POST | `/v1/admin/offers/copy-month` | `{ fromMonth: "YYYY-MM", toMonth: "YYYY-MM" }` | `{ created: number, skipped: number, kpiCleared: string[], unknownOutletTypes: string[], tiles: OfferTileAdmin[] }` |
 
 Outlet types and KPIs come from the **existing** `GET /v1/settings/outlet-types` and
 `GET /v1/admin/kpis?enabledOnly=true` (`ListKpisQueryDto.enabledOnly`, verified in `api/src/targets/dto`).
@@ -423,7 +460,11 @@ it verbatim:
   decimal places, and `valueText` is forced to null. `PERCENT` additionally requires `n ≤ 100`.
 - `valueType = TEXT` ⇒ `valueText` is required, 1–12 chars (it must fit the big tile number slot),
   and `valueNumber` is forced to null.
-- `validFrom`/`validTo` match `^\d{4}-\d{2}-\d{2}$`, are real dates, and `validTo >= validFrom`.
+- `validFrom`/`validTo` match `^\d{4}-\d{2}-\d{2}$`, are real dates, and `validTo >= validFrom`;
+  years 2020–2100 and a window of at most 366 days.
+- An explicit `null` on any non-nullable field (POST or PATCH) → 400. `sortOrder` is a whole number
+  0–1,000,000.
+- PATCH `isActive` false→true re-validates `kpiCode` and `outletTypeCodes` against the live masters.
 - Each array has ≤ 50 entries of ≤ 80 chars, trimmed, with empties dropped.
   `outletTypeCodes ⊆ codes from /settings/outlet-types for the tenant`.
 - `kpiCode` (nullable) must exist in `KpiDef` for `clientId` with `enabled: true`. Otherwise 400
@@ -434,9 +475,12 @@ it verbatim:
 Copy-month semantics:
 - Source = non-deleted tiles with `validFrom` inside `fromMonth` (IST).
 - Each copy gets `validFrom = <toMonth>-01` and `validTo = last day of toMonth`, `isActive = false`
-  (draft, see D3) and `copiedFromId = source.id`. Every other field is copied verbatim.
-- **Idempotent:** a source already copied into `toMonth` (a non-deleted row with that `copiedFromId`
-  whose `validFrom` is in `toMonth`) is skipped and counted in `skipped`.
+  (draft, see D3), `copiedFromId = source.id` and `copiedToMonth = toMonth`. Every other field is
+  copied verbatim, except a dead KPI link is nulled (id reported in `kpiCleared`); outlet types that
+  no longer exist are kept and reported in `unknownOutletTypes` (publish refused until fixed).
+- **Idempotent:** a source with a non-deleted copy tagged `copiedToMonth = toMonth` (same
+  `copiedFromId`) is skipped and counted in `skipped` — editing the copy's `validFrom` does not
+  defeat this. A per-(tenant, toMonth) advisory lock serialises concurrent copies.
 - `fromMonth === toMonth` → 400.
 - Runs in one `$transaction` and writes one audit row with action `CREATE`, entityType `OFFER_TILE`,
   entityId `copy:<from>→<to>`, and the created ids in `metadata`.
@@ -858,10 +902,9 @@ export function OffersSection() {
   ```tsx
   {v2 && <TargetAchievementCard aggKpis={aggKpis} />}
 
-  {/* ── 2c. THIS MONTH'S OFFERS — BOTH variants. Self-fetching, self-hiding (renders null with no
-         active tile for this outlet ⇒ Deoleo byte-identical). Below Target Achievement (v2) /
-         the Target-vs-Achievement chart (non-v2). ── */}
-  <OffersSection />
+  {/* ── 2c. THIS MONTH'S OFFERS — BOTH variants, ONLY when offerTiles is ON (shipped: flag OFF ⇒
+         not mounted, zero requests). Self-fetching, self-hiding. ── */}
+  {offersOn && <OffersSection />}   // offersOn = !!identity.features?.offerTiles
   ```
 - **Tests first:** add to `partner-dashboard-v2.test.tsx`, or a new `offers-placement.test.tsx` with
   the same mocks, plus `vi.mock('@/lib/offers', ...)`:
@@ -967,9 +1010,9 @@ targeting, KPI progress, and copy-last-month creating drafts.
 | Existing dashboard tests break on the new fetch | `fetchPartnerOffers` coerces a bad shape to `[]`. Mock the section where counts are asserted (F3). |
 
 ## 9. Deoleo byte-identical guarantee
-- **Partner dashboard:** `<OffersSection/>` returns `null` on its first render and stays `null` while
-  `/v1/partner/offers` returns `tiles: []`. Deoleo has **zero** `offer_tiles` rows, so the rendered
-  DOM is identical. The only difference is **one extra GET** per dashboard mount, which returns `[]`.
+- **Partner dashboard:** with `offerTiles` OFF (Deoleo), `<OffersSection/>` is **never mounted** and
+  **no** offers request is made — the DOM and network are identical. (The partner API also returns
+  `tiles: []` when the flag is OFF.)
 - **Schema:** purely additive (2 enums + 1 table). No existing column, default or index changes.
 - **Backend:** the new module adds routes only. No existing service, guard or query is modified.
   `app.module.ts` gains one import.
