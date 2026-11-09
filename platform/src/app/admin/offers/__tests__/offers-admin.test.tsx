@@ -108,6 +108,15 @@ describe('OffersAdminPage', () => {
 
     // Live preview reuses the partner tile.
     expect(within(screen.getByTestId('offer-preview')).getByText('+35 pts')).toBeInTheDocument();
+    // …with the same group colours partners see: brand tint, then amber when the group flips.
+    const previewTile = () => within(screen.getByTestId('offer-preview')).getByTestId('offer-tile');
+    expect(previewTile()).toHaveAttribute('data-group', 'TARGET_REWARD');
+    expect(previewTile().className).toContain('bg-[var(--brand-primary-light,#ecf8f0)]');
+    fireEvent.click(within(form).getByLabelText('Extra schemes this month'));
+    expect(previewTile()).toHaveAttribute('data-group', 'EXTRA_SCHEME');
+    expect(previewTile().className).toContain('bg-amber-50');
+    fireEvent.click(within(form).getByLabelText('Earn on your targets'));
+    expect(previewTile().className).toContain('bg-[var(--brand-primary-light,#ecf8f0)]');
 
     fireEvent.click(within(form).getByTestId('offer-save'));
     await waitFor(() => expect(post).toHaveBeenCalled());

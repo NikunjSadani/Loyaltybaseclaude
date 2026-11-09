@@ -7,6 +7,7 @@ import { DEFAULT_CLIENT_CONFIG } from '@/lib/platform/default-client-config';
 import {
   formatOfferValue, formatOfferDay, offerProgressView, OFFER_GROUP_LABEL, type OfferTilePartner,
 } from '@/lib/offers';
+import { OFFER_TILE_TONE } from './offer-tile-card';
 
 /** Bottom-sheet override for the shared Radix Modal (focus trap + Esc come from Radix). The bottom
  *  padding adds the iOS home-indicator safe area so the footer is never under it. */
@@ -49,7 +50,10 @@ export function OfferSheet({ tile, onClose }: { tile: OfferTilePartner | null; o
       {shown && (
         <div className="space-y-4" data-testid="offer-sheet">
           <div>
-            <p className="text-3xl font-extrabold leading-tight text-[var(--brand-primary)] [overflow-wrap:anywhere]">
+            <p
+              data-testid="offer-sheet-value"
+              className={`text-3xl font-extrabold leading-tight ${(OFFER_TILE_TONE[shown.group] ?? OFFER_TILE_TONE.TARGET_REWARD).sheetValue} [overflow-wrap:anywhere]`}
+            >
               {formatOfferValue(shown)}
               {shown.unitLabel && (
                 <span className="ml-1.5 text-sm font-medium text-gray-600">{shown.unitLabel}</span>

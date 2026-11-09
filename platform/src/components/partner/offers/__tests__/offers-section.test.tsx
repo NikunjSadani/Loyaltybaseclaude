@@ -23,6 +23,8 @@ vi.mock('@/lib/platform/client-config-context', () => ({
 
 import { OffersSection } from '../offers-section';
 
+const BRAND_TEXT = 'text-[color:color-mix(in_srgb,var(--brand-primary,#16a34a)_40%,black)]';
+
 const T1: OfferTilePartner = {
   id: 't1', group: 'TARGET_REWARD', valueType: 'POINTS', valueNumber: 35, valueText: null,
   unitLabel: 'per case', product: 'ADHO 50 ml', label: 'Earn on every case',
@@ -152,7 +154,7 @@ describe('OffersSection', () => {
     expect(within(tile).getByTestId('offer-tile-unit').className).toContain('truncate');
   });
 
-  it('small print meets contrast: gray-600 and ≥ 12px (Valid till, per-tile till, footer)', async () => {
+  it('small print meets contrast: ≥ 12px, gray-600 off-tile, group tone on-tile (Valid till, per-tile till, footer)', async () => {
     fetchPartnerOffers.mockResolvedValue([T1, T2]);
     const { unmount } = render(<OffersSection />);
     const vt = await screen.findByTestId('offers-valid-till');
@@ -166,9 +168,83 @@ describe('OffersSection', () => {
 
     fetchPartnerOffers.mockResolvedValue([T1, { ...T2, validTo: '2026-11-15' }]);
     render(<OffersSection />);
+    // On-tile "till" uses the group's secondary tone: amber-800 on amber-50 (6.8:1), and the
+    // derived brand dark shade on the brand tint (≥ 5.7:1 for any brand colour).
     const till = await screen.findByText('till 15 Nov');
-    expect(till.className).toContain('text-gray-600');
+    expect(till.className).toContain('text-amber-800');
     expect(till.className).toContain('text-xs');
+    const tillBrand = screen.getByText('till 30 Nov');
+    expect(tillBrand.className).toContain(BRAND_TEXT);
+    expect(tillBrand.className).toContain('text-xs');
+  });
+
+  it('group colours: TARGET_REWARD = brand tint + brand dark text; EXTRA_SCHEME = amber tint', async () => {
+    fetchPartnerOffers.mockResolvedValue([T1, T2]);
+    render(<OffersSection />);
+    await screen.findByTestId('offers-section');
+
+    const target = within(screen.getByTestId('offers-grid-TARGET_REWARD')).getByTestId('offer-tile');
+    expect(target).toHaveAttribute('data-group', 'TARGET_REWARD');
+    expect(target.className).toContain('bg-[var(--brand-primary-light,#ecf8f0)]');
+    expect(target.className).toContain('border-[color:color-mix(in_srgb,var(--brand-primary,#16a34a)_25%,white)]');
+    expect(target.className).not.toContain('bg-white');
+    expect(target.className).not.toMatch(/amber/);
+    for (const id of ['offer-tile-value', 'offer-tile-unit', 'offer-tile-product', 'offer-tile-label', 'offer-tile-pct']) {
+      expect(within(target).getByTestId(id).className).toContain(BRAND_TEXT);
+    }
+    // No hardcoded tenant colour anywhere on the brand tile.
+    expect(target.outerHTML).not.toMatch(/#[0-9a-f]{6}(?!\)|\])/i);
+
+    const extra = within(screen.getByTestId('offers-grid-EXTRA_SCHEME')).getByTestId('offer-tile');
+    expect(extra).toHaveAttribute('data-group', 'EXTRA_SCHEME');
+    expect(extra.className).toContain('bg-amber-50');
+    expect(extra.className).toContain('border-amber-200');
+    expect(extra.className).not.toContain('bg-white');
+    expect(within(extra).getByTestId('offer-tile-value').className).toContain('text-amber-900');
+    expect(within(extra).getByTestId('offer-tile-product').className).toContain('text-amber-900');
+    expect(within(extra).getByTestId('offer-tile-unit').className).toContain('text-amber-800');
+    expect(within(extra).getByTestId('offer-tile-label').className).toContain('text-amber-800');
+    expect(extra.className).not.toContain('brand-primary-light');
+  });
+
+  it('progress bar + Unlocked pill keep contrast on tinted tiles: white track, -700 fills, ringed pill', async () => {
+    const at85: OfferTilePartner = { ...T1, id: 't6', progress: { ...T1.progress!, achieved: 170, pct: 85 } };
+    fetchPartnerOffers.mockResolvedValue([T1, T3, at85, { ...T2, id: 't7', progress: T1.progress }]);
+    render(<OffersSection />);
+    await screen.findByTestId('offers-section');
+    const tiles = screen.getAllByTestId('offer-tile');
+    const bar = (t: HTMLElement) => within(t).getByRole('progressbar');
+    const fill = (t: HTMLElement) => within(t).getByTestId('offer-tile-bar-fill');
+
+    for (const t of tiles) expect(bar(t).className).toContain('bg-white');
+    expect(fill(tiles[0]).className).toContain('bg-orange-700'); // 60%
+    expect(fill(tiles[1]).className).toContain('bg-emerald-700'); // unlocked
+    expect(fill(tiles[2]).className).toContain('bg-amber-700');  // 85%
+    expect(fill(tiles[3]).className).toContain('bg-orange-700'); // EXTRA_SCHEME tile, 60%
+    for (const t of tiles) expect(fill(t).className).not.toMatch(/-(400|500)\b/);
+    expect(within(tiles[3]).getByTestId('offer-tile-pct').className).toContain('text-amber-800');
+
+    const pill = within(tiles[1]).getByTestId('offer-tile-unlocked');
+    expect(pill.className).toContain('bg-emerald-50');
+    expect(pill.className).toContain('text-emerald-700');
+    expect(pill.className).toContain('ring-emerald-200');
+    expect(pill.className).toContain('text-xs');
+  });
+
+  it('detail sheet stays white; the value carries the group accent colour', async () => {
+    fetchPartnerOffers.mockResolvedValue([T1, T2]);
+    render(<OffersSection />);
+    await screen.findByTestId('offers-section');
+    fireEvent.click(screen.getByText('Earn on every case').closest('button')!);
+    let dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByTestId('offer-sheet-value').className).toContain('text-[var(--brand-primary)]');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByText('Festive bonus').closest('button')!);
+    dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByTestId('offer-sheet-value').className).toContain('text-amber-700');
+    expect(within(dialog).getByTestId('offer-sheet').className).not.toMatch(/bg-amber|brand-primary-light/);
   });
 
   it('tapping a tile opens the sheet with details + Valid till + brand footer; close works', async () => {
