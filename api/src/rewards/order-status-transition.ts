@@ -85,6 +85,36 @@ export async function transitionOrderStatus(
 
 export const ORDER_STATUS_CONFLICT_MESSAGE = 'Order status changed — refresh and try again';
 
+/**
+ * ISSUED-VOUCHER REFUND BLOCK (owner money rule, all voucher providers).
+ *
+ * A voucher code is a live bearer credential the member already holds: refunding the points
+ * (CANCELLED / RETURNED / FAILED) while it stands is a double benefit. Every refund edge on an
+ * order with an issued code is therefore rejected until ops records "Voucher cancelled with
+ * vendor" (RewardsService.voucherCancelledWithVendor), which clears the code under audit.
+ * The status claim additionally carries NO_ISSUED_VOUCHER_GUARD so a code set concurrently
+ * (between the read and the write) makes the refund lose with a 409 instead of slipping through.
+ */
+export const REFUND_TARGET_STATUSES: ReadonlySet<RedemptionStatus> = new Set([
+  RedemptionStatus.CANCELLED,
+  RedemptionStatus.RETURNED,
+  RedemptionStatus.FAILED,
+]);
+
+export const VOUCHER_ISSUED_REFUND_BLOCK_MESSAGE =
+  "A voucher code was issued for this order. Record 'Voucher cancelled with vendor' first, then refund.";
+
+/** True when a voucher code is stored on the order — exactly the complement of
+ *  NO_ISSUED_VOUCHER_GUARD (null / '' = none), so the read check and the claim never disagree. */
+export function hasIssuedVoucher(code: string | null | undefined): boolean {
+  return code != null && code !== '';
+}
+
+/** Claim predicate: the row holds NO issued voucher code at write time. */
+export const NO_ISSUED_VOUCHER_GUARD: Prisma.RedemptionOrderWhereInput = {
+  OR: [{ voucherCode: null }, { voucherCode: '' }],
+};
+
 export interface CompareAndSetTransition {
   orderId: string;
   /** The status the caller READ and validated the edge against. The write only lands if the

@@ -12,6 +12,7 @@ import {
   SalesRedeemDto,
   TransitionOrderDto,
   UpdateOrderDto,
+  VoucherCancelledWithVendorDto,
   WishlistAddDto,
 } from './dto/rewards.dto';
 
@@ -216,5 +217,21 @@ export class RewardsController {
     @Body() dto: TransitionOrderDto,
   ) {
     return this.rewards.transitionOrder(user, id, dto);
+  }
+
+  /**
+   * GIFSY_ADMIN-only "Voucher cancelled with vendor": clears the issued voucher code (CAS on the
+   * current code, audited with the reason + a masked code) so a refund transition is allowed.
+   * The service re-checks GIFSY_ADMIN (RolesGuard would otherwise admit a permissioned staff).
+   */
+  @Post('orders/:id/voucher-cancelled')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('rewards:manage_orders')
+  voucherCancelledWithVendor(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: VoucherCancelledWithVendorDto,
+  ) {
+    return this.rewards.voucherCancelledWithVendor(user, id, dto.reason);
   }
 }

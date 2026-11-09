@@ -12,10 +12,15 @@
  *                 PATCH/DELETE /api/admin/rewards/categories/:id
  *     Catalog:    GET/POST /api/admin/rewards/catalog,
  *                 PATCH/DELETE /api/admin/rewards/catalog/:id
- *     Orders:     GET /api/rewards/orders (admin sees all tenant orders; server-side status
- *                 filter, keyset "Load more" via nextCursor, count = server pagination.total),
- *                 POST /api/rewards/orders/:id/transition (guarded edge-map)
- *     Bulk fulfilment:
+ *     Orders:     GET /api/rewards/orders — a Gifsy operator sees the tenant's orders; a
+ *                 CLIENT_ADMIN a VIEW-ONLY list of its own tenant's orders (voucher codes
+ *                 MASKED server-side); other roles (e.g. MIS_USER) get no order list here.
+ *                 Server-side status filter, keyset "Load more" via nextCursor, count =
+ *                 server pagination.total.
+ *                 POST /api/rewards/orders/:id/transition (guarded edge-map; Gifsy only)
+ *                 POST /api/rewards/orders/:id/voucher-cancelled ("Voucher cancelled with
+ *                 vendor" — GIFSY_ADMIN only; clears an issued code so a refund is allowed)
+ *     Bulk fulfilment (Gifsy only):
  *                 GET  /api/admin/rewards/fulfilment/template  (xlsx blob)
  *                 POST /api/admin/rewards/fulfilment/upload    (multipart "file")
  *
@@ -38,9 +43,10 @@ import { authHeader } from '@/lib/api-client';
 import { GiftImageUpload } from '@/components/GiftImageUpload';
 import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings';
 import { useAdminSession } from '@/lib/admin-session';
-import { redemptionModeLabel, canonicalRedemptionMode } from '@/lib/redemption-mode';
+import { redemptionModeLabel, canonicalRedemptionMode, CASH_REDEMPTION_MODES } from '@/lib/redemption-mode';
+import { usePermissions } from '@/lib/use-permissions';
 import { derivePointsCost, parseRupeesToPaise } from '@/lib/gift-catalogue';
-import { nextStatusOptions } from '@/lib/redemption-order-transitions';
+import { nextStatusOptions, hasIssuedVoucher, REFUND_TARGETS } from '@/lib/redemption-order-transitions';
 import type { GifsySettings } from '@/types';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
@@ -93,6 +99,8 @@ interface OrderItem {
   redemptionMode?: PayoutMode | string | null;
   totalPointsCost: number;
   voucherCode?: string | null;
+  /** True when the server masked voucherCode ("••••" + last 4) — the tenant-admin view. */
+  voucherCodeMasked?: boolean;
   voucherProvider?: string | null;
   trackingNumber?: string | null;
   trackingUrl?: string | null;
@@ -113,7 +121,7 @@ interface FulfilmentUploadResult {
 // The two cash modes (UPI / BANK_TRANSFER) are unified into a single "Cash Payout"
 // option. The canonical STORED value is BANK_TRANSFER; existing stored-UPI items are
 // normalised to this option when editing (see ItemModal) and still behave as cash
-// (CASH_MODES / supportsFreeAmount recognise BOTH values). No enum/data migration —
+// (CASH_REDEMPTION_MODES / supportsFreeAmount recognise BOTH values). No enum/data migration —
 // the real payout rail follows the partner's on-file beneficiary (backend).
 const REDEMPTION_MODES: { value: PayoutMode; label: string }[] = [
   { value: 'GIFT_CARD',      label: 'Gift Card / Voucher' },
@@ -145,11 +153,9 @@ const ORDER_STATUS_BADGE: Record<string, string> = {
 
 const VOUCHER_LIKE = new Set<PayoutMode | string>(['GIFT_CARD']);
 
-/** Cash payout modes (points → INR) — these also support a free-amount minimum. */
-const CASH_MODES = new Set<PayoutMode | string>(['UPI', 'BANK_TRANSFER']);
-/** Modes that support the FIXED / FREE_AMOUNT toggle + min/max config. */
+/** Modes that support the FIXED / FREE_AMOUNT toggle + min/max config (gift cards + cash payouts). */
 function supportsFreeAmount(mode: PayoutMode | string): boolean {
-  return mode === 'GIFT_CARD' || CASH_MODES.has(mode);
+  return mode === 'GIFT_CARD' || CASH_REDEMPTION_MODES.has(mode);
 }
 
 function fmtPts(n: number) { return n.toLocaleString('en-IN'); }
@@ -536,7 +542,7 @@ function ItemModal({
   const set = <K extends keyof ItemFormState>(k: K, v: ItemFormState[K]) =>
     setForm((f) => ({ ...f, [k]: v }));
 
-  const isCashMode = CASH_MODES.has(form.redemptionMode);
+  const isCashMode = CASH_REDEMPTION_MODES.has(form.redemptionMode);
   // Free-amount config is available for gift cards and cash modes (UPI / BANK_TRANSFER).
   const canFreeAmount = supportsFreeAmount(form.redemptionMode);
   const isFreeAmount = canFreeAmount && form.voucherMode === 'FREE_AMOUNT';
@@ -1252,48 +1258,80 @@ interface TransitionDraft {
   notes: string;
 }
 
-/** Fields of the transition response's raw order that the queue row displays. */
+/** Fields of a transition / voucher-cancel response's order that the queue row displays. */
 type OrderPatch = Pick<OrderItem, 'id'> &
   Partial<Pick<OrderItem, 'status' | 'voucherCode' | 'voucherProvider' | 'trackingNumber' | 'trackingUrl' | 'updatedAt'>>;
 
+const FORWARD_VOUCHER_TARGETS = new Set(['PROCESSING', 'DISPATCHED', 'DELIVERED']);
+
+/** A fresh draft for `toStatus` — every target-specific field starts EMPTY, so a value typed for
+ *  one target can never ride along on another (e.g. a code typed, then switched to CANCELLED). */
+function blankDraft(toStatus: string, notes = ''): TransitionDraft {
+  return { toStatus, voucherCode: '', voucherProvider: '', trackingNumber: '', trackingUrl: '', notes };
+}
+
 function OrderRow({
-  order, onTransitioned, canManage,
+  order, onTransitioned, canManage, canCancelVoucher,
 }: {
   order: OrderItem;
   onTransitioned: (updated: OrderPatch | null) => void;
   /** Gifsy operator → Advance controls; a tenant admin's list is VIEW-ONLY (no action column). */
   canManage: boolean;
+  /** GIFSY_ADMIN only — may record "Voucher cancelled with vendor". */
+  canCancelVoucher: boolean;
 }) {
+  const voucherIssued = hasIssuedVoucher(order.voucherCode);
+  const isHubble = order.voucherProvider === 'Hubble';
   const options = nextStatusOptions({
     status: order.status,
     redemptionMode: order.redemptionMode ?? order.reward?.redemptionMode ?? null,
     voucherProvider: order.voucherProvider ?? null,
+    voucherCode: order.voucherCode ?? null,
   });
+  // Refund edges the backend would allow for this status, hidden ONLY because a code is issued —
+  // the "Voucher cancelled with vendor" action is what unlocks them.
+  const refundBlockedByVoucher =
+    voucherIssued && !isHubble &&
+    nextStatusOptions({
+      status: order.status,
+      redemptionMode: order.redemptionMode ?? order.reward?.redemptionMode ?? null,
+      voucherProvider: order.voucherProvider ?? null,
+      voucherCode: null,
+    }).some((s) => REFUND_TARGETS.has(s));
+
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState<TransitionDraft>({
-    toStatus: options[0] ?? '', voucherCode: '', voucherProvider: '',
-    trackingNumber: '', trackingUrl: '', notes: '',
-  });
+  const [draft, setDraft] = useState<TransitionDraft>(() => blankDraft(options[0] ?? ''));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  // "Voucher cancelled with vendor" — inline reason prompt.
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelReason, setCancelReason] = useState('');
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [cancelErr, setCancelErr] = useState('');
 
   const isVoucher = VOUCHER_LIKE.has(order.redemptionMode ?? order.reward?.redemptionMode ?? '');
-  // PENDING→CONFIRMED is not a console edge (the member's OTP confirms), so the voucher code is
-  // captured on a FORWARD move instead — the backend accepts voucherCode on any transition and
-  // requires one before a digital voucher can be DELIVERED.
+  // The voucher code is captured on a FORWARD move (PENDING→CONFIRMED is the member's OTP, not a
+  // console edge). Only when NO code is on the order yet (an existing code is shown read-only)
+  // and never for Hubble (auto-issued by the integration).
   const advancingForwardWithVoucher =
-    isVoucher && ['PROCESSING', 'DISPATCHED', 'DELIVERED'].includes(draft.toStatus);
+    isVoucher && !voucherIssued && !isHubble && FORWARD_VOUCHER_TARGETS.has(draft.toStatus);
   const advancingToDispatched = draft.toStatus === 'DISPATCHED';
 
   const submit = async () => {
     if (!draft.toStatus) return;
     setBusy(true); setErr('');
     const body: Record<string, unknown> = { toStatus: draft.toStatus };
-    if (draft.voucherCode.trim())     body.voucherCode = draft.voucherCode.trim();
-    if (draft.voucherProvider.trim()) body.voucherProvider = draft.voucherProvider.trim();
-    if (draft.trackingNumber.trim())  body.trackingNumber = draft.trackingNumber.trim();
-    if (draft.trackingUrl.trim())     body.trackingUrl = draft.trackingUrl.trim();
-    if (draft.notes.trim())           body.notes = draft.notes.trim();
+    // Target-specific fields are sent ONLY when their inputs are on screen for THIS target —
+    // never a hidden leftover (a code must never ride on a refund move).
+    if (advancingForwardWithVoucher) {
+      if (draft.voucherCode.trim())     body.voucherCode = draft.voucherCode.trim();
+      if (draft.voucherProvider.trim()) body.voucherProvider = draft.voucherProvider.trim();
+    }
+    if (advancingToDispatched) {
+      if (draft.trackingNumber.trim()) body.trackingNumber = draft.trackingNumber.trim();
+      if (draft.trackingUrl.trim())    body.trackingUrl = draft.trackingUrl.trim();
+    }
+    if (draft.notes.trim()) body.notes = draft.notes.trim();
     try {
       // Backend returns { order: <updated row> } (or { order, skipped } when already there).
       const res = await apiJson<{ order?: OrderPatch } | null>(`/api/rewards/orders/${order.id}/transition`, {
@@ -1306,6 +1344,25 @@ function OrderRow({
       setErr(e instanceof Error ? e.message : 'Transition failed');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const submitVoucherCancelled = async () => {
+    const reason = cancelReason.trim();
+    if (!reason) { setCancelErr('Enter a reason (e.g. the vendor cancellation reference).'); return; }
+    setCancelBusy(true); setCancelErr('');
+    try {
+      const res = await apiJson<{ order?: OrderPatch } | null>(`/api/rewards/orders/${order.id}/voucher-cancelled`, {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      });
+      setCancelOpen(false);
+      // The code is cleared server-side → the row re-keys and refund targets appear.
+      onTransitioned(res?.order?.id ? res.order : { id: order.id, voucherCode: null, voucherProvider: null });
+    } catch (e) {
+      setCancelErr(e instanceof Error ? e.message : 'Could not record the cancellation');
+    } finally {
+      setCancelBusy(false);
     }
   };
 
@@ -1324,7 +1381,14 @@ function OrderRow({
             {order.status}
           </span>
           {order.voucherCode && (
-            <span className="block mt-1 text-[10px] font-mono text-emerald-600">{order.voucherCode}</span>
+            <span
+              className="block mt-1 text-[10px] font-mono text-emerald-600"
+              title={order.voucherCodeMasked ? 'Voucher code (masked)' : undefined}
+              data-testid="order-voucher-code"
+            >
+              {order.voucherCode}
+              {order.voucherCodeMasked && <span className="sr-only"> (masked)</span>}
+            </span>
           )}
           {order.trackingNumber && (
             <span className="block mt-1 text-[10px] text-gray-500 flex items-center gap-1">
@@ -1334,19 +1398,70 @@ function OrderRow({
         </td>
         {canManage && (
           <td className="px-4 py-3 text-right">
-            {options.length > 0 ? (
-              <button
-                onClick={() => { setOpen((o) => !o); setErr(''); }}
-                className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50"
-              >
-                {open ? 'Close' : 'Advance'}
-              </button>
-            ) : (
-              <span className="text-[10px] text-gray-300">—</span>
-            )}
+            <div className="flex flex-col items-end gap-1">
+              {options.length > 0 ? (
+                <button
+                  onClick={() => { setOpen((o) => !o); setErr(''); }}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50"
+                >
+                  {open ? 'Close' : 'Advance'}
+                </button>
+              ) : (
+                <span className="text-[10px] text-gray-300">—</span>
+              )}
+              {canCancelVoucher && refundBlockedByVoucher && (
+                <button
+                  onClick={() => { setCancelOpen((o) => !o); setCancelErr(''); }}
+                  className="text-[10px] font-semibold text-red-600 hover:underline"
+                >
+                  Voucher cancelled with vendor…
+                </button>
+              )}
+            </div>
           </td>
         )}
       </tr>
+      {canManage && canCancelVoucher && cancelOpen && (
+        <tr>
+          <td colSpan={7} className="px-4 py-4 bg-red-50/40">
+            <div className="space-y-2 max-w-2xl">
+              <p className="text-xs text-gray-700">
+                Record that voucher <span className="font-mono">{order.voucherCode}</span> was cancelled with the vendor.
+                This clears the code so the order can be refunded. It is logged with your reason.
+              </p>
+              <label className="text-xs font-medium text-gray-700" htmlFor={`vc-reason-${order.id}`}>Reason *</label>
+              <input
+                id={`vc-reason-${order.id}`}
+                value={cancelReason}
+                onChange={(e) => setCancelReason(e.target.value)}
+                placeholder="e.g. Vendor cancellation ref VC-123"
+                maxLength={500}
+                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+              />
+              {cancelErr && (
+                <div className="flex items-center gap-2 text-xs text-red-600" role="alert">
+                  <XCircle className="w-3.5 h-3.5 shrink-0" /> {cancelErr}
+                </div>
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={submitVoucherCancelled}
+                  disabled={cancelBusy || !cancelReason.trim()}
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg text-xs font-semibold hover:bg-red-700 disabled:opacity-50"
+                >
+                  {cancelBusy ? 'Saving…' : 'Confirm voucher cancelled'}
+                </button>
+                <button
+                  onClick={() => setCancelOpen(false)}
+                  className="px-4 py-2 border border-gray-200 rounded-lg text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
       {canManage && open && (
         <tr>
           <td colSpan={7} className="px-4 py-4 bg-gray-50/70">
@@ -1356,17 +1471,27 @@ function OrderRow({
                   <label className="text-xs font-medium text-gray-700">Advance to</label>
                   <select
                     value={draft.toStatus}
-                    onChange={(e) => setDraft((d) => ({ ...d, toStatus: e.target.value }))}
+                    // A new target starts with EMPTY target-specific fields (notes kept).
+                    onChange={(e) => setDraft((d) => blankDraft(e.target.value, d.notes))}
                     className="text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:border-gray-400"
                   >
                     {options.map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
                 </div>
+                {isVoucher && voucherIssued && FORWARD_VOUCHER_TARGETS.has(draft.toStatus) && (
+                  <div className="space-y-1">
+                    <span className="text-xs font-medium text-gray-700">Voucher code</span>
+                    <p className="text-sm font-mono text-gray-700 px-3 py-2" data-testid="voucher-code-readonly">
+                      {order.voucherCode}
+                    </p>
+                  </div>
+                )}
                 {advancingForwardWithVoucher && (
                   <>
                     <div className="space-y-1">
-                      <label className="text-xs font-medium text-gray-700">Voucher code</label>
+                      <label className="text-xs font-medium text-gray-700" htmlFor={`vc-code-${order.id}`}>Voucher code</label>
                       <input
+                        id={`vc-code-${order.id}`}
                         value={draft.voucherCode}
                         onChange={(e) => setDraft((d) => ({ ...d, voucherCode: e.target.value }))}
                         placeholder="AMZ-XXXX"
@@ -1374,8 +1499,9 @@ function OrderRow({
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="text-xs font-medium text-gray-700">Provider</label>
+                      <label className="text-xs font-medium text-gray-700" htmlFor={`vc-prov-${order.id}`}>Provider</label>
                       <input
+                        id={`vc-prov-${order.id}`}
                         value={draft.voucherProvider}
                         onChange={(e) => setDraft((d) => ({ ...d, voucherProvider: e.target.value }))}
                         placeholder="Gifsy"
@@ -1456,18 +1582,81 @@ function ordersUrl(status: string, limit: number, cursor?: string | null): strin
   return `/api/rewards/orders?${p.toString()}`;
 }
 
+/** What the signed-in user may do on the Fulfilment tab. */
+type OrderAccess =
+  | { kind: 'loading' }
+  | { kind: 'permError'; retry: () => void }
+  | { kind: 'none' }
+  | { kind: 'view'; note: string }
+  | { kind: 'manage'; canCancelVoucher: boolean };
+
 /**
- * Who may change order status / run bulk fulfilment. The backend gates the transition +
- * fulfilment template/upload to GIFSY_ADMIN (@Roles), with GIFSY_STAFF admitted only via a
- * rewards:manage_orders grant (RolesGuard defers staff to PermissionGuard). A tenant admin
- * (CLIENT_ADMIN) gets a VIEW-ONLY list of its own tenant's orders.
+ * Who may see / change orders here (mirrors the backend):
+ *  - GIFSY_ADMIN → manage (transition, bulk fulfilment, "Voucher cancelled with vendor");
+ *  - GIFSY_STAFF → manage only WITH the rewards:manage_orders grant (RolesGuard defers staff to
+ *    PermissionGuard), else a view-only list; the voucher-cancel action stays GIFSY_ADMIN-only;
+ *  - CLIENT_ADMIN → VIEW-ONLY list of its own tenant's orders (codes masked server-side);
+ *  - anyone else (e.g. MIS_USER) → no order list: GET /rewards/orders scopes them to their own
+ *    (non-existent) partner, so an empty table would be a lie.
+ * Unknown role (pre-hydration) / staff permissions still loading → render nothing yet.
  */
-function canManageOrders(role: string): boolean {
-  return role === 'GIFSY_ADMIN' || role === 'GIFSY_STAFF';
+function resolveOrderAccess(p: Pick<UsePermissionsLike, 'role' | 'ready' | 'error' | 'has' | 'retry'>): OrderAccess {
+  if (!p.role) return { kind: 'loading' };
+  if (p.role === 'GIFSY_ADMIN') return { kind: 'manage', canCancelVoucher: true };
+  if (p.role === 'GIFSY_STAFF') {
+    if (p.error) return { kind: 'permError', retry: p.retry };
+    if (!p.ready) return { kind: 'loading' };
+    return p.has('rewards:manage_orders')
+      ? { kind: 'manage', canCancelVoucher: false }
+      : { kind: 'view', note: "View only — your role can't update order status." };
+  }
+  if (p.role === 'CLIENT_ADMIN') return { kind: 'view', note: 'View only — Gifsy updates order status.' };
+  return { kind: 'none' };
 }
 
+type UsePermissionsLike = ReturnType<typeof usePermissions>;
+
 function FulfilmentTab() {
-  const canManage = canManageOrders(useAdminSession().role);
+  const access = resolveOrderAccess(usePermissions());
+  if (access.kind === 'loading') {
+    return (
+      <div className="flex items-center justify-center py-16" aria-label="Loading">
+        <div className="w-6 h-6 border-2 border-gray-200 border-t-[var(--brand-primary)] rounded-full animate-spin" />
+      </div>
+    );
+  }
+  if (access.kind === 'permError') {
+    return (
+      <div className="flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700" role="alert">
+        <XCircle className="h-4 w-4 shrink-0" />
+        <span className="flex-1">Couldn&apos;t load your permissions.</span>
+        <button onClick={access.retry} className="px-2.5 py-1 text-xs font-semibold rounded-lg border border-red-200 bg-white hover:bg-red-50">
+          Retry
+        </button>
+      </div>
+    );
+  }
+  if (access.kind === 'none') {
+    return (
+      <div className="flex items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600" role="note">
+        <Info className="h-4 w-4 shrink-0" />
+        Redemption orders aren&apos;t available for your role here — ask your client admin or Gifsy.
+      </div>
+    );
+  }
+  return access.kind === 'manage'
+    ? <FulfilmentQueue canManage canCancelVoucher={access.canCancelVoucher} viewNote={null} />
+    : <FulfilmentQueue canManage={false} canCancelVoucher={false} viewNote={access.note} />;
+}
+
+function FulfilmentQueue({
+  canManage, canCancelVoucher, viewNote,
+}: {
+  canManage: boolean;
+  canCancelVoucher: boolean;
+  /** Shown when the list is view-only (null for an operator who can manage). */
+  viewNote: string | null;
+}) {
   const [orders, setOrders] = useState<OrderItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -1659,9 +1848,9 @@ function FulfilmentTab() {
 
   return (
     <div className="space-y-5">
-      {!canManage && (
+      {viewNote && (
         <div className="flex items-center gap-2 rounded-xl border border-blue-100 bg-blue-50 px-4 py-2.5 text-xs text-blue-800" role="note">
-          <Info className="h-3.5 w-3.5 shrink-0" /> View only — Gifsy updates order status.
+          <Info className="h-3.5 w-3.5 shrink-0" /> {viewNote}
         </div>
       )}
       {/* Bulk fulfilment (Gifsy operators only — the template/upload endpoints are GIFSY-gated) */}
@@ -1839,10 +2028,16 @@ function FulfilmentTab() {
                 </tr>
               </thead>
               <tbody ref={tableRef} className="divide-y divide-gray-50">
-                {/* Keyed by id+status so an in-place status change remounts the row and its
-                    "Advance to" draft re-initialises from the NEW status's options. */}
+                {/* Keyed by id+status+voucher-presence so an in-place status change OR a cleared code
+                    remounts the row and its "Advance to" draft re-initialises from the NEW options. */}
                 {orders.map((o) => (
-                  <OrderRow key={`${o.id}:${o.status}`} order={o} onTransitioned={applyOrderUpdate} canManage={canManage} />
+                  <OrderRow
+                    key={`${o.id}:${o.status}:${o.voucherCode ? 'v' : '-'}`}
+                    order={o}
+                    onTransitioned={applyOrderUpdate}
+                    canManage={canManage}
+                    canCancelVoucher={canCancelVoucher}
+                  />
                 ))}
               </tbody>
             </table>

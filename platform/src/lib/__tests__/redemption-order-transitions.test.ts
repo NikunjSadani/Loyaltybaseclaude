@@ -45,6 +45,17 @@ describe('redemption-order transitions', () => {
       .toEqual([]);
   });
 
+  it('ANY issued voucher code hides every refund target (owner rule, all providers)', () => {
+    for (const status of Object.keys(BACKEND_ALLOWED)) {
+      const opts = nextStatusOptions({ status, redemptionMode: 'GIFT_CARD', voucherProvider: 'Gifsy', voucherCode: '••••WXYZ' });
+      expect(opts.filter((s) => ['CANCELLED', 'RETURNED', 'FAILED'].includes(s))).toEqual([]);
+    }
+    expect(nextStatusOptions({ status: 'CONFIRMED', redemptionMode: 'GIFT_CARD', voucherCode: 'X' })).toEqual(['PROCESSING']);
+    // Cleared code ('' / null) → refund targets are back.
+    expect(nextStatusOptions({ status: 'CONFIRMED', redemptionMode: 'GIFT_CARD', voucherCode: '' }))
+      .toEqual(['PROCESSING', 'CANCELLED', 'RETURNED']);
+  });
+
   it('a physical gift gets the full edge set', () => {
     expect(nextStatusOptions({ status: 'CONFIRMED', redemptionMode: 'PHYSICAL_GIFT' }))
       .toEqual(['PROCESSING', 'CANCELLED', 'RETURNED']);

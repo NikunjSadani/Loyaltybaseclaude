@@ -18,6 +18,9 @@ import AdminGiftsPage from '../page';
 // The Fulfilment tab's Advance + bulk controls are Gifsy-operator only; these suites exercise
 // them as GIFSY_ADMIN (the view-only CLIENT_ADMIN path is covered in gifts-orders-view-only).
 vi.mock('@/lib/admin-session', () => ({ useAdminSession: () => ({ role: 'GIFSY_ADMIN' }) }));
+vi.mock('@/lib/use-permissions', () => ({
+  usePermissions: () => ({ role: 'GIFSY_ADMIN', permissions: [], ready: true, error: false, has: () => true, retry: () => {} }),
+}));
 
 const CATEGORIES = [
   { id: 'cat1', code: 'VOUCHERS', name: 'Vouchers', description: null, parentId: null, sortOrder: 0, isActive: true },

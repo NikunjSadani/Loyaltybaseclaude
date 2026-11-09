@@ -223,6 +223,20 @@ describe('VendorPortalService', () => {
       expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
     });
 
+    it('transition can never refund a voucher order with an issued code (every refund edge rejected, no write)', async () => {
+      grantScope();
+      for (const toStatus of ['CANCELLED', 'RETURNED', 'FAILED']) {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+          id: 'o1', status: 'DISPATCHED', partnerId: 'cp1', orderNumber: 'D-26-1',
+          voucherCode: 'AMZN-1234-5678', voucherProvider: 'Gifsy',
+        });
+        await expect(
+          service.transition(vendor, 'o1', { toStatus: toStatus as never }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      }
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+    });
+
     it('transition CONFIRMED→PROCESSING succeeds without touching points/valuePaise', async () => {
       grantScope();
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'D-26-1' });

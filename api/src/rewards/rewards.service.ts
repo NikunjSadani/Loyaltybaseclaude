@@ -29,6 +29,9 @@ import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
 import { NOT_PARKED_OUTLET } from '../sales/sales.service';
 import { generateTenantOrderNumber } from './order-number.helper';
 import {
+  NO_ISSUED_VOUCHER_GUARD,
+  VOUCHER_ISSUED_REFUND_BLOCK_MESSAGE,
+  hasIssuedVoucher,
   supersedePendingOrders,
   transitionOrderStatus,
   transitionOrderStatusOrConflict,
@@ -96,6 +99,16 @@ export const VENDOR_PII_CONSENT_VERSION = 'v1-2026-08';
  */
 export function encodeOrderCursor(createdAt: Date, id: string): string {
   return Buffer.from(`${createdAt.toISOString()}|${id}`).toString('base64url');
+}
+
+/**
+ * Mask a voucher code for a non-fulfilling viewer: "••••" + the last 4 characters, but only
+ * for a code of 8+ chars (the tail is then at most half the code); a shorter code is fully
+ * masked so it can never be reconstructed from the hint. Never reversible.
+ */
+export function maskVoucherCode(code: string): string {
+  const trimmed = code.trim();
+  return trimmed.length >= 8 ? `••••${trimmed.slice(-4)}` : '••••';
 }
 
 export function decodeOrderCursor(cursor: string): { createdAt: Date; id: string } | null {
@@ -729,8 +742,14 @@ export class RewardsService {
     const last = orders[orders.length - 1];
 
     // No dedicated returnedAt column — surface it (member-safe) when the order is RETURNED.
+    // A TENANT admin's view-only list never carries a live voucher code (it is a bearer
+    // credential belonging to the member): masked to the last 4 + `voucherCodeMasked: true`.
+    // Gifsy operators (they fulfil) and the member's own list keep the real code.
     const mapped = orders.map((o) => ({
       ...o,
+      ...(tenantAdmin && o.voucherCode
+        ? { voucherCode: maskVoucherCode(o.voucherCode), voucherCodeMasked: true }
+        : {}),
       returnedAt: o.status === 'RETURNED' ? o.updatedAt : null,
     }));
 
@@ -2425,6 +2444,15 @@ export class RewardsService {
       );
     }
 
+    // ISSUED-VOUCHER REFUND BLOCK (owner money rule, ALL providers): a refund edge on an order
+    // holding a voucher code (stored, or supplied on this very call) would refund the points
+    // while the member keeps a live code. Ops must record "Voucher cancelled with vendor" first
+    // (clears the code under audit). Covers the console, the dispatch controller and the bulk
+    // fulfilment upload — all three route through here. The claim below re-checks it atomically.
+    if (isRefundTarget && (hasIssuedVoucher(order.voucherCode) || hasIssuedVoucher(dto.voucherCode))) {
+      throw new BadRequestException(VOUCHER_ISSUED_REFUND_BLOCK_MESSAGE);
+    }
+
     // BUG-1 — a DIGITAL_VOUCHER order cannot be marked DELIVERED without an actual voucher
     // code to deliver. The effective channel is the stored one unless this transition
     // overrides it (same precedence the update below uses: dto value wins, else unchanged);
@@ -2471,6 +2499,9 @@ export class RewardsService {
       const moved = await transitionOrderStatusOrConflict(tx, {
         orderId: id,
         expectedFrom: fromStatus,
+        // A refund only lands if NO voucher code is on the row at write time (a code set
+        // concurrently after our read → 0 rows → 409, no refund).
+        ...(isRefundTarget ? { extraGuard: NO_ISSUED_VOUCHER_GUARD } : {}),
         toStatus,
         data,
         changedById: user.sub,
@@ -2549,6 +2580,81 @@ export class RewardsService {
       await this.notifyVoucherIssued(id, user.clientId);
     }
 
+    return { order: updated };
+  }
+
+  /**
+   * POST /v1/rewards/orders/:id/voucher-cancelled — "Voucher cancelled with vendor" (GIFSY_ADMIN).
+   *
+   * Records that ops cancelled the issued voucher with its vendor, CLEARING the code (+ provider)
+   * so the issued-voucher refund block lifts and a refund transition becomes possible. One tx:
+   *   1. compare-and-set on the CURRENT code (`updateMany where { id, voucherCode: <read> }`):
+   *      a double-click / concurrent edit makes the loser match 0 rows → 409, no audit row;
+   *   2. an AuditLog row (who = actorId, when = createdAt, reason, last 4 of the cleared code —
+   *      NEVER the full code; it is a bearer credential).
+   * Status is NOT changed (the refund is a separate, normal transition), so no member timeline row.
+   * Hubble-issued vouchers are refused: Hubble has no cancel/clawback (they stay non-reversible).
+   */
+  async voucherCancelledWithVendor(user: JwtPayload, id: string, reason: string) {
+    // Owner rule: GIFSY_ADMIN only (the route's @Roles would otherwise admit a permissioned
+    // GIFSY_STAFF via RolesGuard deferral) — never CLIENT_ADMIN / vendors.
+    if (user.role !== 'GIFSY_ADMIN') {
+      throw new ForbiddenException('Only a Gifsy admin can record a vendor voucher cancellation.');
+    }
+    const why = (reason ?? '').trim();
+    if (!why) throw new BadRequestException('A reason is required.');
+
+    const scope = tenantScope(user);
+    const order = await this.prisma.redemptionOrder.findFirst({
+      where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
+      select: { id: true, orderNumber: true, status: true, voucherCode: true, voucherProvider: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (!hasIssuedVoucher(order.voucherCode)) {
+      throw new ConflictException('This order has no voucher code to cancel — refresh and try again.');
+    }
+    if (order.voucherProvider === 'Hubble') {
+      throw new BadRequestException(
+        'A Hubble-issued voucher cannot be cancelled with the vendor; it is non-reversible once issued.',
+      );
+    }
+
+    const code = order.voucherCode as string;
+    // Never the full code anywhere (audit / logs): the same last-4 mask the tenant-admin list uses.
+    const masked = maskVoucherCode(code);
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const claim = await tx.redemptionOrder.updateMany({
+        where: { id, voucherCode: code },
+        data: { voucherCode: null, voucherProvider: null },
+      });
+      if (claim.count === 0) {
+        throw new ConflictException('The voucher code changed — refresh and try again.');
+      }
+      await tx.auditLog.create({
+        data: {
+          actorId: user.sub,
+          action: 'UPDATE',
+          entityType: 'REDEMPTION_ORDER',
+          entityId: id,
+          metadata: {
+            event: 'VOUCHER_CANCELLED_WITH_VENDOR',
+            orderNumber: order.orderNumber,
+            status: order.status,
+            reason: why,
+            clearedVoucherCode: masked, // "••••" + last 4 (fully masked if < 8 chars)
+            clearedVoucherProvider: order.voucherProvider ?? null,
+          },
+        },
+      });
+      return tx.redemptionOrder.findUniqueOrThrow({
+        where: { id },
+        select: { id: true, status: true, voucherCode: true, voucherProvider: true, updatedAt: true },
+      });
+    });
+
+    this.logger.log(
+      `order ${order.orderNumber}: voucher (${masked}) recorded cancelled with vendor by ${user.sub}`,
+    );
     return { order: updated };
   }
 

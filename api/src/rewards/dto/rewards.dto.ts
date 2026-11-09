@@ -85,6 +85,18 @@ export class AdminListCatalogQueryDto extends ListCatalogQueryDto {
   categoryId?: string;
 }
 
+/** POST /v1/rewards/orders/:id/voucher-cancelled — "Voucher cancelled with vendor" (GIFSY_ADMIN). */
+export class VoucherCancelledWithVendorDto {
+  /** Why / vendor reference — required, trimmed, stored in the audit log. */
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @Length(1, 500)
+  reason!: string;
+}
+
+/** Hard cap on GET /v1/rewards/orders `limit` (one request never reads more rows than this). */
+export const ORDERS_LIST_MAX_LIMIT = 500;
+
 /** Orders listing filters — mirror the source GET /api/rewards/orders params. */
 export class ListOrdersQueryDto {
   @IsOptional()
@@ -97,10 +109,15 @@ export class ListOrdersQueryDto {
   @Min(1)
   page?: number = 1;
 
+  /**
+   * Page size. Capped at ORDERS_LIST_MAX_LIMIT (500): the partner My Orders uses the default 20,
+   * the admin Fulfilment queue pages by 100 and re-fetches at most a 500-row window on refresh.
+   */
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(ORDERS_LIST_MAX_LIMIT)
   limit?: number = 20;
 
   /**
