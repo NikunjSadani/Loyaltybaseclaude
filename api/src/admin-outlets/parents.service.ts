@@ -309,6 +309,13 @@ export class ParentsService {
         }
         throw e;
       }
+    }).catch((e: unknown): never => {
+      // A lock-conflict abort (P2034 / Postgres 40P01 deadlock / 40001) → a clean 409, never a raw
+      // 500 (same mapping as approveParent). Every other error propagates unchanged.
+      if (isLockConflictError(e)) {
+        throw new ConflictException('This parent was changed by another action at the same time — please retry.');
+      }
+      throw e;
     });
 
     await this.prisma.auditLog.create({

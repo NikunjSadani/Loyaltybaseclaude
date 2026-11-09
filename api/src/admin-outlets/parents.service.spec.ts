@@ -170,6 +170,32 @@ describe('ParentsService', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
+    it.each([
+      ['P2034 on an identity lock', 'executeRaw', { code: 'P2034', message: 'write conflict or a deadlock' }],
+      ['40P01 deadlock on the insert', 'create', { code: 'P2010', meta: { code: '40P01' }, message: 'Raw query failed' }],
+      ['40001 serialization failure on the insert', 'create', { code: 'P2010', meta: { code: '40001' } }],
+    ])('maps a lock conflict (%s) on create to a clean 409 — never a raw 500, no audit row', async (_label, where, err) => {
+      mockPrisma.channelPartner.findUnique.mockResolvedValue(null);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([]);
+      mockPrisma.channelPartner.create.mockResolvedValue({ id: 'parent1' });
+      if (where === 'executeRaw') mockPrisma.$executeRaw.mockRejectedValueOnce(err);
+      if (where === 'create') mockPrisma.channelPartner.create.mockRejectedValueOnce(err);
+
+      await expect(
+        service.createParent(admin, { partnerCode: 'CPP01', panNumber: 'ZXCVB1234Z' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('a non-lock error on create still propagates unchanged (not mapped to 409)', async () => {
+      mockPrisma.channelPartner.findUnique.mockResolvedValue(null);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([]);
+      mockPrisma.channelPartner.create.mockRejectedValueOnce(new Error('connection reset'));
+      await expect(
+        service.createParent(admin, { partnerCode: 'CPP01', panNumber: 'ZXCVB1234Z' }),
+      ).rejects.toThrow('connection reset');
+    });
+
     it('rejects a duplicate partnerCode', async () => {
       mockPrisma.channelPartner.findUnique.mockResolvedValue({ id: 'exists' });
       await expect(service.createParent(admin, { partnerCode: 'CPP01' })).rejects.toBeInstanceOf(
