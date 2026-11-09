@@ -68,10 +68,19 @@ describe('SalesImportModule (Lane-0 skeleton)', () => {
     }
   });
 
-  it('Lane-0 skeleton is inert: the worker finds nothing to claim and the runner never throws', async () => {
-    const proc = new SalesImportProcessorService({} as never, {} as never);
+  // Updated by Lane I (the skeleton stubs are now real): nothing queued → the worker claims nothing, and
+  // with SALES_IMPORT_RUNNER unset the runner is a no-op that never throws.
+  it('is inert when nothing is queued and no runner is configured', async () => {
+    const proc = new SalesImportProcessorService({ $queryRaw: jest.fn().mockResolvedValue([]) } as never, {} as never);
     await expect(proc.claimNext()).resolves.toBeNull();
-    const runner = new SalesImportRunnerService();
-    await expect(runner.kick()).resolves.toBe('none');
+    const saved = process.env.SALES_IMPORT_RUNNER;
+    delete process.env.SALES_IMPORT_RUNNER;
+    try {
+      const runner = new SalesImportRunnerService(proc);
+      jest.spyOn((runner as unknown as { logger: { warn: () => void } }).logger, 'warn').mockImplementation(() => undefined);
+      await expect(runner.kick()).resolves.toBe('none');
+    } finally {
+      if (saved !== undefined) process.env.SALES_IMPORT_RUNNER = saved;
+    }
   });
 });

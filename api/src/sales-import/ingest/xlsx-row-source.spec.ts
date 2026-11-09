@@ -34,7 +34,11 @@ async function readDirect(buf: Buffer, sheet?: string | null): Promise<SourceRow
   const src = Readable.from((function* () {
     for (let i = 0; i < buf.length; i += 1024) yield buf.subarray(i, i + 1024);
   })());
-  for await (const r of xlsxRows(src, sheet)) out.push(r);
+  try {
+    for await (const r of xlsxRows(src, sheet)) out.push(r);
+  } finally {
+    src.destroy(); // a failed exceljs parse must not leave the input piped (jest worker teardown)
+  }
   return out;
 }
 

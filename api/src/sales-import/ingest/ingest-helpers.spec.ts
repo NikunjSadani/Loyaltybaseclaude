@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { claimNextImport, hasClaimableImports } from './claim';
 import { expectedPartSize, partCountFor, partKey, PartsFile, unmatchedCsvKey } from './parts-file';
-import { computeRosterHash, loadRoster } from './roster';
+import { computeRosterHash, loadRoster, rosterHashOf } from './roster';
 import { csvText, scaledToText, unmatchedCsvLines } from './unmatched-csv';
 import { SALES_IMPORT_PART_SIZE, SALES_IMPORT_STALE_HEARTBEAT_MINUTES } from '../sales-import.contract';
 
@@ -56,8 +57,15 @@ describe('parts-file', () => {
 });
 
 describe('roster', () => {
-  it('hash is order/duplicate independent and changes when the roster changes', () => {
-    expect(computeRosterHash(['b', 'a', 'a'])).toBe(computeRosterHash(['a', 'b']));
+  it('fixed vector: sort ascending, join "\n", sha256 hex (identical to Lane K rosterHashOf)', () => {
+    // sha256("A\nB"), computed independently.
+    expect(computeRosterHash(['B', 'A'])).toBe('23519a43c66b4c342f25b32e09797ec5f3fc0be388cd8243fb3449afbdce4013');
+    expect(computeRosterHash(['B', 'A'])).toBe(createHash('sha256').update(['A', 'B'].join('\n')).digest('hex'));
+    expect(rosterHashOf).toBe(computeRosterHash);
+  });
+
+  it('hash is order independent and changes when the roster changes', () => {
+    expect(computeRosterHash(['b', 'a'])).toBe(computeRosterHash(['a', 'b']));
     expect(computeRosterHash(['a', 'b'])).not.toBe(computeRosterHash(['a', 'b', 'c']));
   });
 
