@@ -3863,6 +3863,58 @@ describe('RewardsService', () => {
       expect(mockWallet.reverse).not.toHaveBeenCalled();
     });
 
+    // ── Never-placed Hubble orders stay refundable (owner decision on the item-7 dead end) ──
+    const flagged = (reason: string, extra: Record<string, unknown> = {}) => ({
+      id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'RDM-n', pointsDeducted: 500,
+      redemptionMode: 'GIFT_CARD', voucherCode: null, voucherProvider: null,
+      metadata: { hubbleNeedsReconcile: true, hubbleReconcileReason: reason, hubbleReconcileAt: '2026-11-09T00:00:00Z' },
+      ...extra,
+    });
+
+    it.each(['HUBBLE_NOT_CONFIGURED', 'HUBBLE_INVALID_AMOUNT'])(
+      'a %s order (nothing ever placed with Hubble, no code) CAN be refunded by hand', async (reason) => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(flagged(reason));
+        mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValue({ id: 'o1', status: 'CANCELLED', pointsDeducted: 500, voucherCode: null });
+        mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'user1', phone: '9991112222' });
+        await service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED });
+        expect(mockWallet.reverse).toHaveBeenCalledWith('cp1', 500, expect.anything(), mockPrisma);
+      },
+    );
+
+    it.each([
+      'HUBBLE_INDETERMINATE',
+      'HUBBLE_PROCESSING_NOT_FOUND',
+      'HUBBLE_SUCCESS_NO_CODE',
+      'HUBBLE_UNKNOWN_STATUS:WEIRD',
+      'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT',
+      'HUBBLE_UNEXPECTED',
+    ])('a %s order stays refund-BLOCKED (Hubble may hold / have issued a voucher)', async (reason) => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(flagged(reason));
+      await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }))
+        .rejects.toThrow(/sent to Hubble cannot be cancelled/);
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a Hubble order id', { metadata: { hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_NOT_CONFIGURED', hubbleOrderId: 'hub-1' } }],
+      ['provider Hubble', { voucherProvider: 'Hubble' }],
+      ['a hubbleStatus', { metadata: { hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INVALID_AMOUNT', hubbleStatus: 'PROCESSING' } }],
+    ])('a "never placed" reason WITH another Hubble trace (%s) stays refund-blocked', async (_n, extra) => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(flagged('HUBBLE_NOT_CONFIGURED', extra));
+      await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }))
+        .rejects.toThrow(/sent to Hubble cannot be cancelled/);
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('a never-placed order WITH a stored code is still refund-blocked (code present → not "never placed")', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(flagged('HUBBLE_NOT_CONFIGURED', { voucherCode: 'MANUAL-1' }));
+      // The Hubble-marker block fires first (isHubbleNeverPlaced requires no code); the issued-voucher
+      // block would refuse it too. Either way: 400, no refund.
+      await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
     it('transition-issued code notifies under the ORDER tenant', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
         id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'R', pointsDeducted: 500, redemptionMode: 'GIFT_CARD',

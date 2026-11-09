@@ -1310,6 +1310,7 @@ function OrderRow({
     voucherCode: order.voucherCode ?? null,
     voucherIssued: order.voucherIssued,
     hubbleNeedsReconcile: order.hubbleNeedsReconcile,
+    hubbleReconcileReason: order.hubbleReconcileReason,
   });
   // Refund edges the backend would allow for this status, hidden ONLY because a code is issued —
   // the "Voucher cancelled with vendor" action is what unlocks them.

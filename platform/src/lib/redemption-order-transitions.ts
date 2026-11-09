@@ -35,7 +35,15 @@ export interface TransitionableOrder {
   voucherIssued?: boolean;
   /** The order was sent to Hubble and is stuck for ops — no manual refund (a voucher may exist). */
   hubbleNeedsReconcile?: boolean;
+  /** Why it is stuck — a "never placed" reason keeps refunds available (mirrors the backend). */
+  hubbleReconcileReason?: string | null;
 }
+
+/** Mirrors backend HUBBLE_NEVER_PLACED_REASONS: set before any Hubble order was placed. */
+export const HUBBLE_NEVER_PLACED_REASONS: ReadonlySet<string> = new Set([
+  'HUBBLE_NOT_CONFIGURED',
+  'HUBBLE_INVALID_AMOUNT',
+]);
 
 /** Mirrors the backend `hasIssuedVoucher` (null / '' = none). */
 export function hasIssuedVoucher(code: string | null | undefined): boolean {
@@ -57,7 +65,10 @@ export function nextStatusOptions(order: TransitionableOrder): string[] {
   const voucherIssued = hasIssuedVoucher(order.voucherCode) || order.voucherIssued === true;
   return edges.filter((to) => {
     if (isCash && (REFUND_TARGETS.has(to) || FORWARD_DISPATCH_TARGETS.has(to))) return false;
-    if ((isHubble || voucherIssued || order.hubbleNeedsReconcile === true) && REFUND_TARGETS.has(to)) return false;
+    const hubbleBlocksRefund =
+      order.hubbleNeedsReconcile === true &&
+      !(HUBBLE_NEVER_PLACED_REASONS.has(order.hubbleReconcileReason ?? '') && !voucherIssued && !isHubble);
+    if ((isHubble || voucherIssued || hubbleBlocksRefund) && REFUND_TARGETS.has(to)) return false;
     return true;
   });
 }

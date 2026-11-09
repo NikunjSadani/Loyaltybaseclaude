@@ -187,6 +187,15 @@ describe('GIFVC — voucher handling', () => {
     expect(screen.queryByLabelText('Voucher code')).toBeNull(); // no plain manual code on a Hubble order
   });
 
+  it('GIFVC10b: a "Hubble not configured" order (never placed) keeps its refund targets', async () => {
+    installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null,
+      voucherProvider: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_NOT_CONFIGURED' }]);
+    const row = await openRow('RDM-1');
+    expect(within(row).getByTestId('hubble-needs-reconcile')).toHaveTextContent('Hubble not configured');
+    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    expect(optionValues(advanceSelect())).toEqual(['PROCESSING', 'CANCELLED', 'RETURNED']);
+  });
+
   it('GIFVC11: "Retry with Hubble" POSTs hubble-reconcile and re-fetches', async () => {
     const calls = installFetch(
       [{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_NOT_CONFIGURED' }],

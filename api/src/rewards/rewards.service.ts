@@ -44,6 +44,7 @@ import {
   hashVoucherCode,
   isCancelledVoucherCode,
   isHubbleIssuedCode,
+  isHubbleNeverPlaced,
   planVoucherWrite,
   VOUCHER_WRITE_CONFLICT_MESSAGE,
   VoucherWriteOptions,
@@ -2589,7 +2590,9 @@ export class RewardsService {
     // Any Hubble marker (not just provider='Hubble'): an order handed to Hubble may hold a live
     // voucher Hubble issued (INDETERMINATE / PROCESSING_NOT_FOUND …) — never refund it by hand.
     // Ops exits: "Retry with Hubble" (reconcile) or a GIFSY_ADMIN "Fulfil manually" override.
-    if (hasHubbleMarkers(order) && isRefundTarget) {
+    // EXCEPT an order whose only Hubble trace proves nothing was ever placed (NOT_CONFIGURED /
+    // INVALID_AMOUNT, no code): Hubble never held a voucher, so a manual refund is safe.
+    if (hasHubbleMarkers(order) && isRefundTarget && !isHubbleNeverPlaced(order)) {
       throw new BadRequestException(
         'An order sent to Hubble cannot be cancelled, returned or failed manually ' +
           '(a Hubble voucher may exist). Retry with Hubble, or fulfil it manually.',

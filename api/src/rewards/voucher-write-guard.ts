@@ -129,6 +129,39 @@ export function hasHubbleMarkers(order: { voucherProvider?: string | null; metad
 }
 
 /**
+ * Reconcile reasons that PROVE no Hubble order was ever placed — both are set by
+ * issueHubbleVoucherForOrder BEFORE placeOrder is called:
+ *  - HUBBLE_NOT_CONFIGURED: the tenant flag is on but the Hubble client isn't provisioned;
+ *  - HUBBLE_INVALID_AMOUNT: no issuable whole-rupee value, so nothing was sent to Hubble.
+ * Deliberately EXCLUDED (Hubble may hold / have issued a voucher): HUBBLE_INDETERMINATE,
+ * HUBBLE_PROCESSING_NOT_FOUND, HUBBLE_SUCCESS_NO_CODE, HUBBLE_UNKNOWN_STATUS:*,
+ * HUBBLE_SUCCESS_MANUAL_CODE_PRESENT, and HUBBLE_UNEXPECTED (the catch-all can fire AFTER a
+ * successful placement, e.g. a DB error while storing the voucher). HUBBLE_FAILED_VOUCHER_PRESENT
+ * is resolved separately: cancelling its manual code releases the flag (voucherCancelledWithVendor).
+ */
+export const HUBBLE_NEVER_PLACED_REASONS: ReadonlySet<string> = new Set([
+  'HUBBLE_NOT_CONFIGURED',
+  'HUBBLE_INVALID_AMOUNT',
+]);
+
+/**
+ * The order's ONLY Hubble trace is a reconcile reason proving nothing was ever placed with Hubble
+ * (no Hubble provider / status / order id / voucher), and no code is stored — so Hubble never held
+ * a voucher for it and a manual refund is safe.
+ */
+export function isHubbleNeverPlaced(order: {
+  voucherCode?: string | null;
+  voucherProvider?: string | null;
+  metadata?: Prisma.JsonValue | null;
+}): boolean {
+  if (norm(order.voucherCode) !== null) return false;
+  if (isHubbleProvider(order.voucherProvider)) return false;
+  const m = metaObj(order.metadata);
+  if (m.hubbleStatus != null || m.hubbleOrderId != null || m.hubbleVoucher != null) return false;
+  return typeof m.hubbleReconcileReason === 'string' && HUBBLE_NEVER_PLACED_REASONS.has(m.hubbleReconcileReason);
+}
+
+/**
  * The stored code was ISSUED BY HUBBLE (a real Amazon voucher Hubble can't claw back) — as opposed
  * to a manual code sitting on an order whose only Hubble trace is an ops flag.
  */
