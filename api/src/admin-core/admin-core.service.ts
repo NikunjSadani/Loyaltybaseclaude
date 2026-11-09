@@ -1216,6 +1216,39 @@ export class AdminCoreService {
       dto.value = !explicitlyOff;
     }
 
+    // VPA safeguard — manual (typed) UPI entry ⇄ STORED UPI-ID uniqueness (uniquenessPolicyStored, NOT
+    // the derived uniquenessPolicy, which ORs in upiManualEntry itself). Both directions are checked
+    // against the PREVIOUS values read fresh from the DB (cache busted first, so never a ≤5-min-stale
+    // copy from another write on another instance):
+    //  (a) salesApp: reject ONLY an OFF→ON transition of upiManualEntry while stored UPI uniqueness
+    //      is OFF. Re-saving salesApp with manual entry already ON (e.g. editing the ledger label) is
+    //      not a transition and is allowed. Only an explicit boolean `true` turns it on (the reader's
+    //      strict `bool` semantics); turning it OFF / omitting it never needs the check.
+    //  (b) uniquenessPolicy: reject a write whose resulting stored `upi` is OFF while manual entry is
+    //      stored ON. The key is REPLACE-WHOLE and the reader's default upi is false, so anything other
+    //      than an explicit boolean `upi: true` (an explicit false, an omitted upi, a non-object) turns
+    //      it OFF.
+    const isPlainObj = (v: unknown): v is Record<string, unknown> =>
+      typeof v === 'object' && v !== null && !Array.isArray(v);
+    const turnsManualOn =
+      dto.key === 'salesApp' && isPlainObj(dto.value) && dto.value.upiManualEntry === true;
+    // A uniquenessPolicy write whose stored `upi` ends up ON is ALWAYS allowed (never read, never
+    // gated) — it is the recovery path out of an invalid stored state (manual entry ON with stored
+    // upi OFF); only the OFF direction is gated below.
+    const turnsUpiUniquenessOn =
+      dto.key === 'uniquenessPolicy' && isPlainObj(dto.value) && dto.value.upi === true;
+    const turnsUpiUniquenessOff = dto.key === 'uniquenessPolicy' && !turnsUpiUniquenessOn;
+    if (turnsManualOn || turnsUpiUniquenessOff) {
+      this.tenantSettings.invalidate(clientId);
+      const prev = await this.tenantSettings.getEffectiveSettings(clientId);
+      if (turnsManualOn && !prev.salesApp.upiManualEntry && !prev.uniquenessPolicyStored.upi) {
+        throw new BadRequestException('Turn on UPI ID uniqueness first');
+      }
+      if (turnsUpiUniquenessOff && prev.salesApp.upiManualEntry) {
+        throw new BadRequestException('Turn off UPI Manual Entry first');
+      }
+    }
+
     // For the TDS policy (a money-path config), capture the PRIOR value BEFORE the write so
     // the dedicated audit row below records the exact old→new transition (W0-C).
     const isTdsPolicyWrite =

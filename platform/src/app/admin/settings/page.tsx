@@ -1,11 +1,11 @@
 ﻿'use client'
 
-import { useState, useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useState, useEffect, useRef, useId, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone, Clock, Coins, Lock, Fingerprint, FileText } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { fetchTaskConfig, updateTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig, type CustomTaskItem } from '@/lib/task-config'
-import { getGifsySettings, saveGifsySettings, useGifsySettings, refreshGifsySettings } from '@/lib/gifsy-settings'
+import { getGifsySettings, saveGifsySettings, saveGifsySettingsDetailed, useGifsySettings, refreshGifsySettings } from '@/lib/gifsy-settings'
 import { fetchPointsExpiry, savePointsExpiry } from '@/lib/points-expiry'
 import { fetchKycSlaTargets, saveKycSlaTargets } from '@/lib/kyc-sla'
 import {
@@ -104,20 +104,30 @@ function SettingRow({ label, description, value, onChange, type = 'number', min,
  * Enter/Space on the focused option (native <button> activation) — never on arrow/Home/End.
  * aria-checked reflects the actual COMMITTED value; the roving-focus option may differ from
  * the checked option until activated (the valid ARIA variant for side-effecting controls).
+ * DISABLED OPTIONS (SET-G7): an individually disabled option (disabledValues) is skipped by the
+ * arrows/Home/End and never holds the roving tab stop — if the checked option is disabled the
+ * tab stop moves to the first ENABLED option, so the group always stays keyboard-reachable
+ * (unless the WHOLE control is disabled). `describedBy` links explanatory notes (why an option
+ * is unavailable) to the group via aria-describedby.
  * Styling, sizes, labels, testIds, and the disabled guard are unchanged. Generic over the
  * option value so it drives both the boolean ON/OFF toggles and the string capture-mode control.
  */
 function SegmentedControl<T>({
-  options, value, onChange, ariaLabel, disabled = false, size = 'md', testIdFor,
+  options, value, onChange, ariaLabel, disabled = false, disabledValues, size = 'md', testIdFor, describedBy,
 }: {
   options: readonly (readonly [string, T])[]
   value: T
   onChange: (v: T) => void
   ariaLabel: string
   disabled?: boolean
+  /** Individual options that can't be selected (the rest of the control stays usable). */
+  disabledValues?: readonly T[]
   size?: 'sm' | 'md'
   testIdFor?: (label: string) => string | undefined
+  /** Space-separated ids of the notes that explain the control (→ aria-describedby). */
+  describedBy?: string
 }) {
+  const isOptionDisabled = (v: T) => disabled || (disabledValues?.includes(v) ?? false)
   const btnRefs = useRef<(HTMLButtonElement | null)[]>([])
   const pad = size === 'sm' ? 'px-3.5 py-1.5 text-xs' : 'px-4 py-2 text-sm'
 
@@ -125,13 +135,30 @@ function SegmentedControl<T>({
   // committed option and moves with the arrows WITHOUT committing (selection on activation).
   const checkedIndex = Math.max(0, options.findIndex(([, v]) => v === value))
   const [focusIndex, setFocusIndex] = useState(checkedIndex)
+  // Re-home the roving stop when the committed value changes underneath (e.g. the post-mount
+  // server refresh), so it never lingers on a stale option.
+  useEffect(() => { setFocusIndex(checkedIndex) }, [checkedIndex])
 
-  // Move keyboard FOCUS to option `index` (wrapping). Does NOT commit / fire onChange.
-  function moveFocus(index: number) {
+  const enabledIndexes = options.flatMap(([, v], i) => (isOptionDisabled(v) ? [] : [i]))
+  // The option that actually holds tabIndex=0: the roving index if enabled, else the checked
+  // option if enabled, else the first enabled option (whole control disabled → checked).
+  const tabStopIndex =
+    enabledIndexes.includes(focusIndex) ? focusIndex
+      : enabledIndexes.includes(checkedIndex) ? checkedIndex
+      : enabledIndexes[0] ?? checkedIndex
+
+  // Move keyboard FOCUS from `from` in direction `dir` (±1, wrapping), skipping disabled
+  // options. Does NOT commit / fire onChange. No-op when no option is enabled.
+  function moveFocus(from: number, dir: 1 | -1) {
     const n = options.length
-    const i = ((index % n) + n) % n
-    setFocusIndex(i)
-    btnRefs.current[i]?.focus()
+    for (let step = 1; step <= n; step++) {
+      const i = (((from + dir * step) % n) + n) % n
+      if (!isOptionDisabled(options[i][1])) {
+        setFocusIndex(i)
+        btnRefs.current[i]?.focus()
+        return
+      }
+    }
   }
 
   // Commit option `index` — fires onChange if it changed. Activation only (click / Enter /
@@ -139,6 +166,7 @@ function SegmentedControl<T>({
   function commit(index: number) {
     if (disabled) return
     const [, v] = options[index]
+    if (isOptionDisabled(v)) return
     setFocusIndex(index)
     if (v !== value) onChange(v)
   }
@@ -148,16 +176,22 @@ function SegmentedControl<T>({
     switch (e.key) {
       // Arrow / Home / End move focus only — activation (Enter/Space) commits via onClick.
       case 'ArrowRight':
-      case 'ArrowDown': e.preventDefault(); moveFocus(index + 1); break
+      case 'ArrowDown': e.preventDefault(); moveFocus(index, 1); break
       case 'ArrowLeft':
-      case 'ArrowUp':   e.preventDefault(); moveFocus(index - 1); break
-      case 'Home':      e.preventDefault(); moveFocus(0); break
-      case 'End':       e.preventDefault(); moveFocus(options.length - 1); break
+      case 'ArrowUp':   e.preventDefault(); moveFocus(index, -1); break
+      // Home = first ENABLED option; End = last ENABLED option.
+      case 'Home':      e.preventDefault(); moveFocus(options.length - 1, 1); break
+      case 'End':       e.preventDefault(); moveFocus(0, -1); break
     }
   }
 
   return (
-    <div className="flex bg-gray-100 rounded-lg p-1 gap-1 shrink-0" role="radiogroup" aria-label={ariaLabel}>
+    <div
+      className="flex bg-gray-100 rounded-lg p-1 gap-1 shrink-0"
+      role="radiogroup"
+      aria-label={ariaLabel}
+      aria-describedby={describedBy || undefined}
+    >
       {options.map(([label, val], i) => {
         const checked = value === val
         return (
@@ -167,9 +201,9 @@ function SegmentedControl<T>({
             type="button"
             role="radio"
             aria-checked={checked}
-            tabIndex={i === focusIndex ? 0 : -1}
+            tabIndex={i === tabStopIndex ? 0 : -1}
             data-testid={testIdFor?.(label)}
-            disabled={disabled}
+            disabled={isOptionDisabled(val)}
             onClick={() => commit(i)}
             onKeyDown={(e) => handleKeyDown(e, i)}
             className={`${pad} rounded-md font-medium transition-all disabled:opacity-60 disabled:cursor-not-allowed ${
@@ -191,10 +225,16 @@ function SegmentedControl<T>({
  * golden keys that can never be turned off — they render an "Always on" pill instead of a toggle.
  * Editable fields render a segmented OFF/ON control matching the other toggles on this page.
  */
-function UniquenessToggleRow({ label, description, value, onChange, locked = false, disabled = false, testId }: {
+function UniquenessToggleRow({ label, description, value, onChange, locked = false, disabled = false, disabledValues, note, testId }: {
   label: string, description: string, value: boolean,
-  onChange?: (v: boolean) => void, locked?: boolean, disabled?: boolean, testId?: string
+  onChange?: (v: boolean) => void, locked?: boolean, disabled?: boolean,
+  /** Individual options that can't be selected (e.g. only OFF while a dependency forces ON). */
+  disabledValues?: readonly boolean[],
+  /** Short explanatory note shown under the description (e.g. why the toggle is disabled). */
+  note?: string, testId?: string
 }) {
+  const descId = useId()
+  const noteId = useId()
   return (
     <div className="flex items-start justify-between gap-4 py-3 border-b border-gray-100 last:border-0">
       <div className="flex-1">
@@ -202,7 +242,10 @@ function UniquenessToggleRow({ label, description, value, onChange, locked = fal
           {label}
           {locked && <Lock className="h-3 w-3 text-gray-400" aria-label="Always on" />}
         </p>
-        <p className="text-xs text-gray-500 mt-0.5">{description}</p>
+        <p id={descId} className="text-xs text-gray-500 mt-0.5">{description}</p>
+        {note && (
+          <p id={noteId} className="text-xs text-amber-700 mt-1" data-testid={testId ? `${testId}-note` : undefined}>{note}</p>
+        )}
       </div>
       {locked ? (
         <span
@@ -217,7 +260,10 @@ function UniquenessToggleRow({ label, description, value, onChange, locked = fal
           value={value}
           onChange={(v) => onChange?.(v)}
           disabled={disabled}
+          disabledValues={disabledValues}
           ariaLabel={label}
+          // The description + (when shown) the note explaining why the toggle is unavailable.
+          describedBy={note ? `${descId} ${noteId}` : descId}
           size="sm"
           testIdFor={(lbl) => (testId ? `${testId}-${lbl.toLowerCase()}` : undefined)}
         />
@@ -545,62 +591,93 @@ export default function SettingsPage() {
     setTimeout(() => setKycGstinRequiredSaved(false), 3000)
   }
 
-  // ── UPI collection toggle (per-tenant; saved via GifsySettings) ──
+  // ── salesApp toggles: UPI collection + UPI manual entry (per-tenant; saved via GifsySettings) ──
   // Like the visibility switch, saveGifsySettings PUTs to /v1/admin/settings (GIFSY_ADMIN-only),
-  // so the control is editable only for GIFSY_ADMIN. Default OFF — treat missing as OFF.
-  // salesApp is a REPLACE-WHOLE nested key, so we MUST send the COMPLETE salesApp object.
-  const [upiEnabled,      setUpiEnabled]      = useState<boolean>(() => getGifsySettings().salesApp?.upiEnabled === true)
-  const [upiEnabledSaved, setUpiEnabledSaved] = useState(false)
-  const [upiEnabledError, setUpiEnabledError] = useState<string | null>(null)
-
-  // Keep the displayed value in sync once server settings hydrate (/me → cache).
-  useEffect(() => {
-    setUpiEnabled(getGifsySettings().salesApp?.upiEnabled === true)
-  }, [])
-
-  async function handleUpiEnabledChange(next: boolean) {
-    setUpiEnabledError(null)
-    const previous = upiEnabled
-    setUpiEnabled(next) // optimistic
-    const ok = await saveGifsySettings({
-      salesApp: { ...getGifsySettings().salesApp, upiEnabled: next },
-    })
-    if (!ok) {
-      setUpiEnabled(previous) // revert
-      setUpiEnabledError('Could not save — UPI collection can only be changed by a Gifsy Admin.')
-      return
-    }
-    setUpiEnabledSaved(true)
-    setTimeout(() => setUpiEnabledSaved(false), 3000)
-  }
-
-  // ── UPI manual-entry toggle (per-tenant; saved via GifsySettings) ──
-  // Mirrors the UPI collection toggle above: saveGifsySettings PUTs to /v1/admin/settings
-  // (GIFSY_ADMIN-only), so the control is editable only for GIFSY_ADMIN. Default OFF — treat
-  // missing as OFF. salesApp is a REPLACE-WHOLE nested key, so we MUST send the COMPLETE object.
-  const [upiManualEntry,      setUpiManualEntry]      = useState<boolean>(() => getGifsySettings().salesApp?.upiManualEntry === true)
+  // so the controls are editable only for GIFSY_ADMIN. Default OFF — treat missing as OFF.
+  // salesApp is ONE REPLACE-WHOLE nested key shared by BOTH toggles, so every save MUST send the
+  // COMPLETE salesApp object merged onto the freshest cache — and the two toggles share ONE
+  // in-flight guard: two overlapping wholesale PUTs could otherwise clobber each other's field.
+  // Displayed state is driven from the REACTIVE settings source (useGifsySettings) plus a
+  // transient optimistic override while a save is pending; both controls stay disabled until
+  // the first server refresh after mount completes, so an admin can't save on a stale cache.
+  // AFTER a save there is deliberately NO refresh: the server caches settings per instance for
+  // 5 minutes, so a post-save GET can land on another instance and serve the PRE-save snapshot
+  // — reverting both the displayed toggle and the uniquenessPolicyStored save base. The local
+  // update in saveGifsySettingsDetailed (which re-derives the enforced policy) is authoritative.
+  const gifsySettings = useGifsySettings()
+  const [salesAppReady,      setSalesAppReady]      = useState(false)
+  const [salesAppSaving,     setSalesAppSaving]     = useState(false)
+  const salesAppSavingRef = useRef(false)
+  const [salesAppOptimistic, setSalesAppOptimistic] = useState<{ upiEnabled?: boolean; upiManualEntry?: boolean }>({})
+  const [upiEnabledSaved,     setUpiEnabledSaved]     = useState(false)
+  const [upiEnabledError,     setUpiEnabledError]     = useState<string | null>(null)
   const [upiManualEntrySaved, setUpiManualEntrySaved] = useState(false)
   const [upiManualEntryError, setUpiManualEntryError] = useState<string | null>(null)
+  // a11y: ids of the explanatory notes / errors linked to each control via aria-describedby.
+  const upiEnabledNoteId      = useId()
+  const upiEnabledErrorId     = useId()
+  const upiManualNeedsUniqId  = useId()
+  const upiManualNoteId       = useId()
+  const upiManualErrorId      = useId()
 
-  // Keep the displayed value in sync once server settings hydrate (/me → cache).
   useEffect(() => {
-    setUpiManualEntry(getGifsySettings().salesApp?.upiManualEntry === true)
+    let alive = true
+    refreshGifsySettings()
+      .catch(() => { /* keep the cached values */ })
+      .finally(() => { if (alive) setSalesAppReady(true) })
+    return () => { alive = false }
   }, [])
 
-  async function handleUpiManualEntryChange(next: boolean) {
-    setUpiManualEntryError(null)
-    const previous = upiManualEntry
-    setUpiManualEntry(next) // optimistic
-    const ok = await saveGifsySettings({
-      salesApp: { ...getGifsySettings().salesApp, upiManualEntry: next },
-    })
-    if (!ok) {
-      setUpiManualEntry(previous) // revert
-      setUpiManualEntryError('Could not save — UPI manual entry can only be changed by a Gifsy Admin.')
+  const upiEnabled     = salesAppOptimistic.upiEnabled     ?? (gifsySettings.salesApp?.upiEnabled === true)
+  const upiManualEntry = salesAppOptimistic.upiManualEntry ?? (gifsySettings.salesApp?.upiManualEntry === true)
+
+  async function saveSalesAppField(
+    field: 'upiEnabled' | 'upiManualEntry',
+    next: boolean,
+    setError: (e: string | null) => void,
+    setSaved: (v: boolean) => void,
+    fallbackErrorMsg: string,
+  ) {
+    if (salesAppSavingRef.current || !salesAppReady) return // shared in-flight guard
+    salesAppSavingRef.current = true
+    setSalesAppSaving(true)
+    setError(null)
+    setSalesAppOptimistic({ [field]: next }) // optimistic
+    try {
+      const res = await saveGifsySettingsDetailed({
+        salesApp: { ...getGifsySettings().salesApp, [field]: next },
+      })
+      if (!res.ok) {
+        // Show the server's reason (e.g. "Turn on UPI ID uniqueness first"); the fixed copy is
+        // only a fallback for a failure with no message. The optimistic override is dropped
+        // below → the control reverts to the cache value.
+        setError(res.error || fallbackErrorMsg)
+        return
+      }
+      // No post-save refresh (see above) — the local cache update is authoritative.
+      setSaved(true)
+      setTimeout(() => setSaved(false), 3000)
+    } finally {
+      setSalesAppOptimistic({})
+      salesAppSavingRef.current = false
+      setSalesAppSaving(false)
+    }
+  }
+
+  function handleUpiEnabledChange(next: boolean) {
+    void saveSalesAppField('upiEnabled', next, setUpiEnabledError, setUpiEnabledSaved,
+      'Could not save — UPI collection can only be changed by a Gifsy Admin.')
+  }
+
+  function handleUpiManualEntryChange(next: boolean) {
+    // Manual entry can only be turned ON once UPI ID uniqueness is STORED on (turning OFF is
+    // always allowed). The ON option is also disabled in the UI; this is the handler-level guard.
+    if (next && !storedUpiUniqueness()) {
+      setUpiManualEntryError('Turn on UPI ID uniqueness first.')
       return
     }
-    setUpiManualEntrySaved(true)
-    setTimeout(() => setUpiManualEntrySaved(false), 3000)
+    void saveSalesAppField('upiManualEntry', next, setUpiManualEntryError, setUpiManualEntrySaved,
+      'Could not save — UPI manual entry can only be changed by a Gifsy Admin.')
   }
 
   // ── Identity & payout uniqueness policy (per-tenant; saved via GifsySettings) ──
@@ -617,30 +694,49 @@ export default function SettingsPage() {
   // KYC-enforcement path a stale snapshot could otherwise wholesale-overwrite the server policy and
   // silently flip a sibling field's uniqueness check OFF. A `savingUniq` in-flight guard prevents
   // two rapid toggles from racing two overlapping wholesale saves that clobber each other.
+  //
+  // STORED vs DERIVED: the server returns both `uniquenessPolicyStored` (what was saved) and
+  // `uniquenessPolicy` (the ENFORCED value — upi forced true while salesApp.upiManualEntry is on).
+  // The card DISPLAYS and SAVES from the STORED policy only — never the derived one — so a save
+  // can never persist the derived upi=true (which would silently survive turning manual entry off).
   const UNIQ_DEFAULT = { gst: true, phone: true, bank: false, upi: false }
-  const gifsySettings = useGifsySettings()
-  const uniqPolicy = { ...UNIQ_DEFAULT, ...gifsySettings.uniquenessPolicy }
+  const uniqPolicy = { ...UNIQ_DEFAULT, ...(gifsySettings.uniquenessPolicyStored ?? gifsySettings.uniquenessPolicy) }
   const [uniqPolicySaved, setUniqPolicySaved] = useState(false)
   const [uniqPolicyError, setUniqPolicyError] = useState<string | null>(null)
   const [savingUniq,      setSavingUniq]      = useState(false)
 
+  /** STORED upi uniqueness from the freshest (synchronous) cache. */
+  function storedUpiUniqueness(): boolean {
+    const s = getGifsySettings()
+    return (s.uniquenessPolicyStored ?? s.uniquenessPolicy)?.upi === true
+  }
+
   async function handleUniqPolicyChange(field: 'phone' | 'bank' | 'upi', next: boolean) {
     if (savingUniq) return // in-flight guard: no overlapping wholesale saves
+    // UPI uniqueness is enforced automatically while UPI Manual Entry is on — only its OFF option
+    // is disabled in the UI (ON stays selectable so an admin can repair an invalid stored state:
+    // manual entry ON + stored upi OFF; the server always allows a upi-ON write). This is the
+    // handler-level guard (also blocks any upi change during a salesApp save).
+    if (field === 'upi' && ((upiManualEntry && !next) || salesAppSaving)) return
     setUniqPolicyError(null)
-    // Merge the single changed field onto the FRESHEST known policy (the synchronous cache), never
-    // a stale local snapshot — so a sibling field's setting can never be silently reverted. gst
-    // stays true (PAN + GST are DB-enforced golden keys regardless of the flag). REPLACE-WHOLE.
-    const freshest = { ...UNIQ_DEFAULT, ...getGifsySettings().uniquenessPolicy }
+    // Merge the single changed field onto the FRESHEST known STORED policy (the synchronous
+    // cache), never a stale local snapshot nor the derived value — so a sibling field's setting can
+    // never be silently reverted. gst stays true (PAN + GST are DB-enforced golden keys regardless
+    // of the flag). REPLACE-WHOLE.
+    const cached = getGifsySettings()
+    const freshest = { ...UNIQ_DEFAULT, ...(cached.uniquenessPolicyStored ?? cached.uniquenessPolicy) }
     const updated = { ...freshest, [field]: next, gst: true }
     setSavingUniq(true)
     try {
-      const ok = await saveGifsySettings({ uniquenessPolicy: updated })
-      if (!ok) {
-        setUniqPolicyError('Could not save — the uniqueness policy can only be changed by a Gifsy Admin.')
+      const res = await saveGifsySettingsDetailed({ uniquenessPolicy: updated })
+      if (!res.ok) {
+        // Server reason first (e.g. "Turn off UPI Manual Entry first"); fixed copy as fallback.
+        setUniqPolicyError(res.error || 'Could not save — the uniqueness policy can only be changed by a Gifsy Admin.')
         return
       }
-      // Revalidate the reactive source so the UI + the next merge both see the new server truth.
-      await refreshGifsySettings().catch(() => { /* cache already holds the saved value */ })
+      // No post-save refresh: a GET can hit another instance's 5-minute settings cache and
+      // revert the stored policy (the save base). saveGifsySettingsDetailed already updated
+      // the cache with the saved STORED policy + the re-derived enforced one.
       setUniqPolicySaved(true)
       setTimeout(() => setUniqPolicySaved(false), 3000)
     } finally {
@@ -1146,17 +1242,22 @@ export default function SettingsPage() {
               options={[['OFF', false], ['ON', true]] as const}
               value={upiEnabled}
               onChange={handleUpiEnabledChange}
-              disabled={!isGifsyAdmin}
+              disabled={!isGifsyAdmin || !salesAppReady || salesAppSaving}
               ariaLabel="UPI collection"
+              describedBy={[
+                !isGifsyAdmin && upiEnabledNoteId,
+                upiEnabledError && upiEnabledErrorId,
+              ].filter(Boolean).join(' ')}
+              testIdFor={(lbl) => `upi-collection-${lbl.toLowerCase()}`}
             />
           </div>
           {!isGifsyAdmin && (
-            <p className="text-xs text-gray-400 mt-2">
+            <p id={upiEnabledNoteId} className="text-xs text-gray-400 mt-2">
               UPI collection is a Gifsy-operated setting — only a Gifsy Admin can change it.
             </p>
           )}
           {upiEnabledError && (
-            <p className="text-xs text-red-600 mt-2">{upiEnabledError}</p>
+            <p id={upiEnabledErrorId} role="alert" data-testid="upi-collection-error" className="text-xs text-red-600 mt-2">{upiEnabledError}</p>
           )}
         </CardContent>
       </Card>
@@ -1189,17 +1290,31 @@ export default function SettingsPage() {
               options={[['OFF', false], ['ON', true]] as const}
               value={upiManualEntry}
               onChange={handleUpiManualEntryChange}
-              disabled={!isGifsyAdmin}
+              disabled={!isGifsyAdmin || !salesAppReady || salesAppSaving}
+              // ON requires STORED UPI ID uniqueness (and no in-flight uniqueness save that could
+              // be turning it off). Turning OFF is always allowed.
+              disabledValues={!uniqPolicy.upi || savingUniq ? [true] : undefined}
               ariaLabel="UPI manual entry"
+              describedBy={[
+                isGifsyAdmin && !uniqPolicy.upi && !upiManualEntry && upiManualNeedsUniqId,
+                !isGifsyAdmin && upiManualNoteId,
+                upiManualEntryError && upiManualErrorId,
+              ].filter(Boolean).join(' ')}
+              testIdFor={(lbl) => `upi-manual-entry-${lbl.toLowerCase()}`}
             />
           </div>
+          {isGifsyAdmin && !uniqPolicy.upi && !upiManualEntry && (
+            <p id={upiManualNeedsUniqId} className="text-xs text-amber-700 mt-2" data-testid="upi-manual-entry-needs-uniqueness">
+              Turn on UPI ID uniqueness first
+            </p>
+          )}
           {!isGifsyAdmin && (
-            <p className="text-xs text-gray-400 mt-2">
+            <p id={upiManualNoteId} className="text-xs text-gray-400 mt-2">
               UPI manual entry is a Gifsy-operated setting — only a Gifsy Admin can change it.
             </p>
           )}
           {upiManualEntryError && (
-            <p className="text-xs text-red-600 mt-2">{upiManualEntryError}</p>
+            <p id={upiManualErrorId} role="alert" data-testid="upi-manual-entry-error" className="text-xs text-red-600 mt-2">{upiManualEntryError}</p>
           )}
         </CardContent>
       </Card>
@@ -1261,7 +1376,13 @@ export default function SettingsPage() {
           <UniquenessToggleRow
             label="UPI ID" value={uniqPolicy.upi}
             description="When ON, a UPI ID can't be shared by outlets of DIFFERENT owners (same-group siblings still can)."
-            onChange={(v) => handleUniqPolicyChange('upi', v)} disabled={!isGifsyAdmin || savingUniq} testId="uniq-upi"
+            onChange={(v) => handleUniqPolicyChange('upi', v)}
+            disabled={!isGifsyAdmin || savingUniq || salesAppSaving || !salesAppReady}
+            // While manual entry is on only OFF is blocked — ON stays selectable to recover from
+            // an invalid stored state (manual ON + stored upi OFF).
+            disabledValues={upiManualEntry ? [false] : undefined}
+            note={upiManualEntry ? 'Enforced automatically while UPI Manual Entry is on' : undefined}
+            testId="uniq-upi"
           />
           {!isGifsyAdmin && (
             <p className="text-xs text-gray-500 mt-3">
@@ -1269,7 +1390,7 @@ export default function SettingsPage() {
             </p>
           )}
           {uniqPolicyError && (
-            <p className="text-xs text-red-600 mt-2">{uniqPolicyError}</p>
+            <p role="alert" data-testid="uniq-policy-error" className="text-xs text-red-600 mt-2">{uniqPolicyError}</p>
           )}
         </CardContent>
       </Card>

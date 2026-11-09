@@ -23,8 +23,10 @@ import {
   checkGroupUniqueness,
   normalizeIdentityValue,
   resolveActivePartnerId,
+  resolveGroupIdentity,
   resolveOperableContexts,
 } from '../common/partner-group.helper';
+import { asUpiCaptureMethod, resolveUpiCaptureMethod } from '../common/payout-rail.helper';
 import {
   allowedPaymentModes,
   isPaymentModeAllowed,
@@ -737,6 +739,7 @@ export class PartnerService {
         bankAccountNumber: true,
         ifscCode: true,
         upiId: true,
+        upiCaptureMethod: true,
         paymentDetailsStatus: true,
         outlets: {
           where: { deletedAt: null },
@@ -768,10 +771,15 @@ export class PartnerService {
     const requiredType = partner.outlets[0]?.requiredPaymentType ?? OutletPaymentType.ANY;
     const ourParentId = partner.outlets[0]?.parentId ?? null;
 
-    const { salesApp, uniquenessPolicy } =
-      await this.tenantSettings.getEffectiveSettings(user.clientId);
-    const upiEnabled = salesApp.upiEnabled;
     const mode: PaymentMode = dto.paymentMode;
+    // M1: a UPI capture WRITES a upiId → read the settings UNCACHED ONCE and use that copy for BOTH
+    // the manual-entry gate and the UPI uniqueness lock/check below (a just-enabled flag / policy is
+    // never refused or skipped from a stale per-instance cache). A bank capture keeps the cached read.
+    const { salesApp, uniquenessPolicy } =
+      mode === 'upi'
+        ? await this.tenantSettings.getEffectiveSettings(user.clientId, { fresh: true })
+        : await this.tenantSettings.getEffectiveSettings(user.clientId);
+    const upiEnabled = salesApp.upiEnabled;
 
     // 1. Mode must satisfy the outlet mandate + tenant UPI gate (identical to kyc.service.create).
     if (!isPaymentModeAllowed(requiredType, mode, upiEnabled)) {
@@ -803,6 +811,41 @@ export class PartnerService {
       }
     } else if (!filled(dto.upiId)) {
       throw new BadRequestException('UPI payout requires a UPI ID.');
+    }
+
+    // 2b. VPA safeguard — UPI capture method + manual-entry gate (mirrors kyc.service.create, R6/R7).
+    //  Manual (typed) UPI entry is a per-tenant opt-in and the server is the authority — but a UPI
+    //  that canonically EQUALS the partner's stored UPI, or the group UPI it was prefilled from, is not
+    //  a fresh manual capture: it is accepted and keeps that prior's recorded method (also when no
+    //  method was sent by an old cached FE). The settings were read UNCACHED above for a UPI capture
+    //  (M1), so a just-enabled flag is never refused from a stale per-instance cache.
+    let upiCaptureMethod: string | null = null;
+    if (mode === 'upi') {
+      const submittedUpi = normalizeIdentityValue('upi', dto.upiId);
+      let prior: { upiCaptureMethod?: unknown } | null =
+        submittedUpi != null && normalizeIdentityValue('upi', partner.upiId) === submittedUpi ? partner : null;
+      const manualAllowed = salesApp.upiManualEntry;
+      const sentMethod = asUpiCaptureMethod(dto.upiCaptureMethod);
+      const explicitMethod = sentMethod === 'QR' || (sentMethod === 'MANUAL' && manualAllowed);
+      // L3: no usable method sent (none / MANUAL with manual entry OFF) → a UPI equal to the group
+      // prefill keeps the group's recorded method.
+      if (!prior && !explicitMethod && ourParentId) {
+        const gi = await resolveGroupIdentity(this.prisma, user.clientId, ourParentId);
+        if (gi && submittedUpi != null && normalizeIdentityValue('upi', gi.upiId) === submittedUpi) prior = gi;
+      }
+      if (!prior && sentMethod === 'MANUAL' && !manualAllowed) {
+        throw new BadRequestException('Manual UPI entry is not enabled');
+      }
+      upiCaptureMethod = resolveUpiCaptureMethod(dto.upiCaptureMethod, manualAllowed, prior);
+      if (
+        asUpiCaptureMethod(dto.upiCaptureMethod) === 'MANUAL' &&
+        manualAllowed &&
+        normalizeIdentityValue('upi', dto.upiIdConfirm) !== submittedUpi
+      ) {
+        // VPA safeguard: a TYPED UPI ID must be confirmed by re-entry (case/space-insensitive — the
+        // same canonical form we persist). A scanned (QR) UPI needs no confirmation.
+        throw new BadRequestException('UPI IDs do not match');
+      }
     }
 
     // 3. Normalized identity values (the SAME canonical form KYC persists AND locks/checks on).
@@ -837,12 +880,14 @@ export class PartnerService {
                 bankAccountNumber: bankAcct,
                 ifscCode: dto.ifscCode!.trim().toUpperCase(),
                 upiId: null, // clear the other rail so a payout can't misroute to a stale UPI
+                upiCaptureMethod: null,
                 payoutChequeFileKey: dto.chequeFileKey!,
                 paymentDetailsStatus: PaymentDetailsStatus.UNVERIFIED,
               }
             : {
                 paymentMode: 'upi',
                 upiId: upi,
+                upiCaptureMethod,
                 bankName: null,
                 bankAccountHolder: null,
                 bankAccountNumber: null,

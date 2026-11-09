@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, useId } from 'react';
 import {
   Gift, Search, CheckCircle,
   Shield, Package, Truck, Zap, Heart,
@@ -22,7 +22,7 @@ import { usePartnerIdentity, type DeliveryDefaults } from '@/lib/partner-identit
 import { applyAddressPrefill, type AddressForm, type TouchedFields } from './address-prefill';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { useTenantFeatures } from '@/lib/tenant-features';
-import { BankOrUpiSection, type PaymentMode } from '@/components/bank-or-upi-section';
+import { BankOrUpiSection, type PaymentMode, type UpiCaptureMethod } from '@/components/bank-or-upi-section';
 import { isValidUpiId } from '@/lib/upi-utils';
 import { pinnedPaymentMode, type OutletPaymentType } from '@/lib/payment-type';
 
@@ -1064,6 +1064,10 @@ function CashPayoutSheet({
    Both POSTs are same-origin, so the edge proxy injects `x-active-partner-id` from
    the httpOnly `active_partner_id` cookie exactly as the redeem calls on this page
    do (the FE never sets that header — the proxy strips any inbound value). */
+
+/** Type-it-twice mismatch copy — also keys the confirm input's aria-invalid/describedby. */
+const UPI_MISMATCH_ERROR = 'UPI IDs do not match';
+
 function PayoutCaptureSheet({
   requiredPaymentType,
   onCaptured,
@@ -1084,6 +1088,12 @@ function PayoutCaptureSheet({
   const [accountNumber,     setAccountNumber]     = useState('');
   const [ifscCode,          setIfscCode]          = useState('');
   const [upiId,             setUpiId]             = useState('');
+  // VPA safeguards: how the UPI ID was captured (QR vs typed) + the type-it-twice confirm
+  // value (only used/sent when the ID was typed — a scanned ID has no typo risk).
+  const [upiCaptureMethod,  setUpiCaptureMethod]  = useState<UpiCaptureMethod | null>(null);
+  const [upiIdConfirm,      setUpiIdConfirm]      = useState('');
+  const upiConfirmInputId = useId();
+  const captureErrorId = useId();
   const [chequeFile,        setChequeFile]        = useState<File | null>(null);
   const [chequeFileKey,     setChequeFileKey]     = useState<string | null>(null);
   const [uploadingCheque,   setUploadingCheque]   = useState(false);
@@ -1154,10 +1164,27 @@ function PayoutCaptureSheet({
       if (!chequeFileKey) {
         setError('Please upload a cancelled cheque'); return;
       }
-    } else if (!upiId) {
-      setError('Please scan your UPI QR code to continue'); return;
-    } else if (!isValidUpiId(upiId)) {
-      setError('Enter a valid UPI ID'); return;
+    }
+    // Trim once: a padded/whitespace-only manual entry must hit the EMPTY-state copy (not
+    // "valid"), and the trimmed value is what's validated AND sent.
+    const upi = upiId.trim();
+    if (effectiveMode === 'upi') {
+      if (!upi) {
+        setError(
+          getGifsySettings().salesApp?.upiManualEntry === true
+            ? 'Enter or scan your UPI ID to continue'
+            : 'Please scan your UPI QR code to continue',
+        );
+        return;
+      }
+      if (!isValidUpiId(upi)) {
+        setError('Enter a valid UPI ID'); return;
+      }
+      // Type-it-twice: a hand-typed ID must be re-entered identically (case/space-insensitive;
+      // the server enforces the same rule). Blocks BEFORE any POST.
+      if (upiCaptureMethod === 'MANUAL' && upiIdConfirm.trim().toLowerCase() !== upi.toLowerCase()) {
+        setError(UPI_MISMATCH_ERROR); return;
+      }
     }
 
     setSubmitting(true);
@@ -1171,7 +1198,14 @@ function PayoutCaptureSheet({
             ifscCode:          ifscCode.trim(),
             chequeFileKey,
           }
-        : { paymentMode: 'upi' as const, upiId };
+        // UPI mode sends ONLY the UPI fields (no bank fields); bank mode above sends no upiId.
+        // upiCaptureMethod is sent when known; upiIdConfirm only for a typed (MANUAL) ID.
+        : {
+            paymentMode: 'upi' as const,
+            upiId: upi,
+            ...(upiCaptureMethod ? { upiCaptureMethod } : {}),
+            ...(upiCaptureMethod === 'MANUAL' ? { upiIdConfirm: upiIdConfirm.trim() } : {}),
+          };
     const result = await api.post('/api/partner/payout-details', payload);
     setSubmitting(false);
     if (!result.success) {
@@ -1207,6 +1241,11 @@ function PayoutCaptureSheet({
         onFieldChange={onFieldChange}
         upiId={upiId}
         onUpiChange={setUpiId}
+        onUpiCaptureMethodChange={(m) => {
+          setUpiCaptureMethod(m);
+          // A scanned or cleared ID needs no confirmation — drop any stale confirm text.
+          if (m !== 'MANUAL') setUpiIdConfirm('');
+        }}
       >
         {/* Cancelled-cheque upload — rendered only in bank mode (BankOrUpiSection gates children
             to bank mode, mirroring KYC). File-picker (camera-or-gallery), NOT a forced live camera. */}
@@ -1259,8 +1298,43 @@ function PayoutCaptureSheet({
         </div>
       </BankOrUpiSection>
 
+      {/* Type-it-twice confirm — only for a hand-typed UPI ID (QR captures skip it). Same
+          keyboard attrs as the manual input. Paste is deliberately ALLOWED: partners copy their
+          VPA from their UPI app, and a paste block is bypassable anyway (keyboard clipboard
+          chips) — the second entry is the requirement. A mismatch error is linked to this
+          input (aria-invalid + aria-describedby) so assistive tech announces it in place. */}
+      {effectiveMode === 'upi' && upiCaptureMethod === 'MANUAL' && (
+        <div>
+          <label htmlFor={upiConfirmInputId} className="text-xs font-medium text-gray-600 block mb-1">
+            Re-enter UPI ID *
+          </label>
+          <input
+            id={upiConfirmInputId}
+            data-testid="manual-upi-confirm-input"
+            className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)] bg-white"
+            placeholder="Type the UPI ID again"
+            value={upiIdConfirm}
+            onChange={(e) => setUpiIdConfirm(e.target.value)}
+            aria-required="true"
+            aria-invalid={error === UPI_MISMATCH_ERROR ? true : undefined}
+            aria-describedby={error === UPI_MISMATCH_ERROR ? captureErrorId : undefined}
+            autoComplete="off"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            inputMode="email"
+            maxLength={100}
+          />
+        </div>
+      )}
+
       {error && (
-        <p data-testid="payout-capture-error" className="text-xs text-red-600 flex items-start gap-1.5">
+        <p
+          id={captureErrorId}
+          role="alert"
+          data-testid="payout-capture-error"
+          className="text-xs text-red-600 flex items-start gap-1.5"
+        >
           <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           {error}
         </p>

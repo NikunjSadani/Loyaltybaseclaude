@@ -888,6 +888,9 @@ model ChannelPartner {
   bankAccountHolder   String?
   ifscCode            String?
   upiId               String?
+  // How the UPI ID was captured: 'QR' (scanned) | 'MANUAL' (typed, confirm-entry). NULL = legacy /
+  // unknown. Always written alongside upiId and nulled whenever upiId is nulled (exclusive rails).
+  upiCaptureMethod    String?
   paymentMode         String? // 'bank' | 'upi'
   // ── Payout-detail trust (capture-bank-at-redemption, docs/plans/PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md) ──
   // VERIFIED (default) = operator/KYC-captured OR payout-confirmed → shown in Store Info. Only the

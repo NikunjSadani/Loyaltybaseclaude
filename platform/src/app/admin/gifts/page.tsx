@@ -1669,6 +1669,18 @@ function FulfilmentTab() {
    Gifsy Settings panel (retained — localStorage settings, NOT the gift blob)
    ════════════════════════════════════════════════════════════════════════════ */
 
+/** The settings keys the Gifsy Settings panel actually edits — the ONLY keys its Save PUTs. */
+function pickPanelSettings(
+  s: GifsySettings,
+): Pick<GifsySettings, 'redemptionChannels' | 'pointsConversionRate' | 'minBankTransferAmount' | 'minVoucherFreeAmount'> {
+  return {
+    redemptionChannels:    s.redemptionChannels,
+    pointsConversionRate:  s.pointsConversionRate,
+    minBankTransferAmount: s.minBankTransferAmount,
+    minVoucherFreeAmount:  s.minVoucherFreeAmount,
+  };
+}
+
 function GifsySettingsPanel() {
   const [settings, setSettings] = useState<GifsySettings>(() => getGifsySettings());
   const [saved, setSaved] = useState(false);
@@ -1689,16 +1701,19 @@ function GifsySettingsPanel() {
     }
   };
 
+  // Save ONLY the keys this panel edits (redemption channels + conversion rate + the two minimum
+  // thresholds). Never PUT the whole settings snapshot: that would also write back the DERIVED
+  // uniquenessPolicy and a mount-time salesApp / creditsPayouts / visibilityConfig snapshot,
+  // clobbering changes made elsewhere since this panel mounted.
   const applyAndSave = (updater: (s: GifsySettings) => GifsySettings) => {
-    setSettings((prev) => {
-      const next = updater(prev);
-      void saveGifsySettings(next).then(flash);
-      return next;
-    });
+    const next = updater(settings);
+    setSettings(next);
+    // The only instant-save control here is the channel toggle → persist just that key.
+    void saveGifsySettings({ redemptionChannels: next.redemptionChannels }).then(flash);
   };
 
   const handleSave = () => {
-    void saveGifsySettings(settings).then(flash);
+    void saveGifsySettings(pickPanelSettings(settings)).then(flash);
   };
 
   return (

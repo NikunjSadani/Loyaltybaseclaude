@@ -3,6 +3,7 @@ import {
   IsArray,
   IsBoolean,
   IsEnum,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -174,6 +175,12 @@ export class CreateKycDto {
     message: 'upiId must be a valid UPI ID (e.g. name@bank)',
   })
   upiId?: string;
+
+  // How the UPI ID was captured: 'QR' (scanned) | 'MANUAL' (typed). Persisted alongside upiId
+  // (staged on proposedPartner for a re-KYC); absent → NULL (legacy/unknown).
+  @IsOptional()
+  @IsIn(['QR', 'MANUAL'])
+  upiCaptureMethod?: 'QR' | 'MANUAL';
 
   // Geo captures
   @IsOptional()

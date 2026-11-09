@@ -85,7 +85,7 @@ export class AuthService {
           // page can HIDE the payout card until a payout confirms the details (VERIFIED). The
           // rewards page keeps reading the raw fields.
           bankName: true, bankAccountNumber: true, bankAccountHolder: true,
-          ifscCode: true, upiId: true, paymentMode: true,
+          ifscCode: true, upiId: true, upiCaptureMethod: true, paymentMode: true,
           paymentDetailsStatus: true,
           // Primary outlet's payout MANDATE — so the capture-at-redemption FE can PIN the
           // bank/UPI mode client-side (the backend re-validates it authoritatively regardless).

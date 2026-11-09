@@ -714,6 +714,53 @@ describe('SalesService', () => {
       expect(existingKyc.accountHolderName).toBe('');
       expect(existingKyc.address).toBe('');
       expect(existingKyc.pincode).toBe('');
+      // R5: no rail at all → paymentMode null.
+      expect(existingKyc.paymentMode).toBeNull();
+    });
+
+    describe('R5 — existingKyc.paymentMode = the partner CURRENT rail (re-KYC wizard default)', () => {
+      const primeReentryPartner = (p: Record<string, unknown>) => {
+        mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
+        mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'caller-su', reportingToId: null }]);
+        mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+          {
+            outlet: {
+              id: 'o1', outletCode: 'OC1', name: 'Outlet 1', phone: '999',
+              addressLine1: null, addressLine2: null, city: 'Delhi', district: 'C', state: 'DL', pincode: null,
+              outletType: { code: 'RETAIL' },
+              partner: {
+                id: 'cp1', phone: '888', businessName: 'Acme', gstNumber: null, panNumber: null,
+                bankName: null, bankAccountNumber: null, bankAccountHolder: null, ifscCode: null, upiId: null,
+                wallets: [],
+                kycSubmissions: [
+                  { id: 'k1', status: 'REJECTED', createdAt: new Date('2024-06-01T00:00:00.000Z'), rejectionReason: null },
+                ],
+                ...p,
+              },
+            },
+          },
+        ]);
+      };
+
+      it("a visible UPI → 'upi' (UPI-first, even when a bank account is also on file)", async () => {
+        primeReentryPartner({ upiId: 'shop@upi', bankAccountNumber: '123', ifscCode: 'HDFC0001' });
+        const res = await service.getMyOutlets(caller);
+        expect(res.outlets[0].existingKyc!.paymentMode).toBe('upi');
+      });
+
+      it("bank only → 'bank'", async () => {
+        primeReentryPartner({ bankAccountNumber: '123', ifscCode: 'HDFC0001' });
+        const res = await service.getMyOutlets(caller);
+        expect(res.outlets[0].existingKyc!.paymentMode).toBe('bank');
+      });
+
+      it('an UNVERIFIED / NEEDS_RECAPTURE (hidden) rail → null, like the payout fields', async () => {
+        for (const status of ['UNVERIFIED', 'NEEDS_RECAPTURE']) {
+          primeReentryPartner({ upiId: 'self@upi', paymentDetailsStatus: status });
+          const res = await service.getMyOutlets(caller);
+          expect(res.outlets[0].existingKyc).toMatchObject({ upiId: '', paymentMode: null });
+        }
+      });
     });
 
     it('FULLY hides admin-PARKED outlets via a null-safe OR-wrap (drops PARKED, keeps null + NOT_INTERESTED)', async () => {
@@ -817,6 +864,46 @@ describe('SalesService', () => {
         businessName: 'Sibling Store', ownerName: 'Sib Owner', upiId: 'sib@upi',
         panNumber: 'AAACT9811F', groupPan: 'AAACT9811F',
       });
+    });
+
+    // F9 — the group's upiCaptureMethod travels with the UPI it prefills, under the SAME
+    // payout-verified gating (resolveGroupIdentity blanks both for an unverified source).
+    const primeApprovedParent = (extra: Record<string, unknown>) => {
+      primeCaller();
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        groupedOutlet({ onboardedAt: new Date('2024-01-01T00:00:00.000Z') }),
+      ]);
+      mockPrisma.channelPartner.findFirst.mockImplementation(({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(where.id
+          ? {
+              onboardedAt: new Date('2024-01-01T00:00:00.000Z'),
+              businessName: 'Group Owner Co', ownerName: 'Group Owner',
+              gstNumber: '07AAACT9811F1Z9', panNumber: 'AAACT9811F',
+              bankName: null, bankAccountNumber: null, bankAccountHolder: null,
+              ifscCode: null, upiId: 'owner@upi',
+              ...extra,
+            }
+          : null),
+      );
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({ panNumber: 'AAACT9811F' });
+    };
+
+    it('F9: parentPrefill carries the group UPI upiCaptureMethod alongside the UPI', async () => {
+      primeApprovedParent({ upiCaptureMethod: 'MANUAL', paymentDetailsStatus: 'VERIFIED' });
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0].parentPrefill).toMatchObject({ upiId: 'owner@upi', upiCaptureMethod: 'MANUAL' });
+    });
+
+    it('F9: parentPrefill blanks upiCaptureMethod with the UPI when the group source payout is UNVERIFIED', async () => {
+      primeApprovedParent({ upiCaptureMethod: 'QR', paymentDetailsStatus: 'UNVERIFIED' });
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0].parentPrefill).toMatchObject({ upiId: '', upiCaptureMethod: null });
+    });
+
+    it('F9: a legacy group UPI with no recorded method prefills upiCaptureMethod null', async () => {
+      primeApprovedParent({});
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0].parentPrefill).toMatchObject({ upiId: 'owner@upi', upiCaptureMethod: null });
     });
 
     it('OMITS parentPrefill when the group has nothing verified (unapproved parent, no approved sibling)', async () => {

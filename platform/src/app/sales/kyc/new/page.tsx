@@ -12,9 +12,10 @@ import {
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { BankOrUpiSection, type PaymentMode } from '@/components/bank-or-upi-section';
+import { BankOrUpiSection, type PaymentMode, type UpiCaptureMethod } from '@/components/bank-or-upi-section';
 import { SearchableSelect } from '@/components/ui/searchable-select';
-import { pinnedPaymentMode, type OutletPaymentType } from '@/lib/payment-type';
+import { allowedPaymentModes, type OutletPaymentType } from '@/lib/payment-type';
+import { decidePayoutRail, isPayoutFieldEditable, type PayoutRailContext } from '@/lib/payout-rail';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { isValidUpiId } from '@/lib/upi-utils';
 import { INDIAN_STATES } from '@/lib/indian-states';
@@ -79,6 +80,11 @@ interface AssignedOutlet {
     partnerName: string; mobile: string; gstNumber: string; panNumber: string;
     address: string; city: string; state: string; pincode: string;
     bankName: string; accountHolderName: string; accountNumber: string; ifscCode: string; upiId: string;
+    /** How the prior UPI ID was captured (absent/null → unknown, e.g. legacy data). */
+    upiCaptureMethod?: UpiCaptureMethod | null;
+    /** The partner's CURRENT (live) payout rail — null/absent when none is on file.
+     *  Drives the re-KYC default payment mode + rail lock (see railDecision / lib/payout-rail). */
+    paymentMode?: PaymentMode | null;
   };
   reKycRemarks?: string;
   /** Wave-3 grouped-before-KYC child: present ONLY when this outlet has an APPROVED
@@ -92,6 +98,7 @@ interface AssignedOutlet {
     gstNumber?: string; panNumber?: string;
     bankName?: string; bankAccountNumber?: string; bankAccountHolder?: string;
     ifscCode?: string; upiId?: string;
+    upiCaptureMethod?: UpiCaptureMethod | null;
     groupPan?: string | null;
     /** The APPROVED group source has a GST certificate the backend can attach
      *  authoritatively → the child rep may keep the unchanged group GST without
@@ -365,6 +372,10 @@ export default function NewKYCPage() {
   /* Bank vs UPI toggle */
   const [paymentMode, setPaymentMode] = useState<PaymentMode>('bank');
 
+  /* How the current form.upiId was captured (QR scan vs typed). Sent as `upiCaptureMethod`
+   * in UPI mode only; null = unknown (e.g. a pre-filled value with no recorded provenance). */
+  const [upiCaptureMethod, setUpiCaptureMethod] = useState<UpiCaptureMethod | null>(null);
+
   /* Docs */
   type DocsState = {
     businessDoc:      UploadedFile | null;
@@ -600,22 +611,58 @@ export default function NewKYCPage() {
    *   The tenant gate wins inside the helper (a UPI outlet on upiEnabled=false → 'bank').
    *   `pinnedMode` also feeds <BankOrUpiSection lockedMode> below to lock/hide the toggle. */
   const upiEnabled = getGifsySettings().salesApp?.upiEnabled === true;
+  // Per-tenant manual UPI entry (default OFF → QR scan only). Only changes user-facing copy here
+  // ("scan or enter"); BankOrUpiSection owns the input itself.
+  const upiManualEntry = getGifsySettings().salesApp?.upiManualEntry === true;
   // Per-tenant GSTIN-compulsory switch (default ON). Drives the entry-form required marker +
   // a pre-submit guard; the BACKEND (kyc.service create) is the authoritative enforcer.
   // SO-variant makes GSTIN optional (plain field on the Declaration step); STANDARD unchanged.
   const gstinRequired = getGifsySettings().kycGstinRequired !== false && !isSoVariant;
-  const pinnedMode: PaymentMode | null = selectedOutlet
-    ? pinnedPaymentMode(selectedOutlet.requiredPaymentType ?? 'ANY', upiEnabled)
-    : null;
+  /* ── Payout rail: allowed rails, lock + default (lib/payout-rail — mirrors the backend) ──
+   *   permitted = the rails the tenant UPI gate + the outlet MANDATE allow (allowedPaymentModes;
+   *               the tenant gate wins — a UPI outlet on upiEnabled=false → bank only).
+   *   reachable = a rail whose routing fields (upi: upiId · bank: accountNumber + ifscCode) are each
+   *               EDITABLE (brand-new KYC / blanket re-KYC / flagged) or already STORED (existingKyc).
+   *   allowed   = permitted ∩ reachable. One → toggle LOCKED to it ("can't be changed in this
+   *               re-KYC" only when the re-KYC is the reason); two → free; zero → locked to the
+   *               live rail (or bank) and its locked payout fields raise no validation errors.
+   *   Default   = the one rail with a FLAGGED routing field (if allowed), else the live rail
+   *               (existingKyc.paymentMode) if allowed, else the first allowed rail.
+   *   The SAME editable() definition drives the payout inputs' lock + the Bank-step gate below, so
+   *   the form never blocks on a field the rep can't change and never offers a rail the server
+   *   would reject. `lockedPaymentMode` feeds <BankOrUpiSection lockedMode> to hide the toggle. */
+  const railCtx: PayoutRailContext = {
+    isNewKyc:       !selectedOutlet?.existingKyc,
+    flags:          selectedOutlet?.reKycFlags,
+    stored:         selectedOutlet?.existingKyc
+      ? {
+          upiId:         selectedOutlet.existingKyc.upiId,
+          accountNumber: selectedOutlet.existingKyc.accountNumber,
+          ifscCode:      selectedOutlet.existingKyc.ifscCode,
+        }
+      : null,
+    liveRail:       selectedOutlet?.existingKyc?.paymentMode ?? null,
+    permittedRails: allowedPaymentModes(selectedOutlet?.requiredPaymentType ?? 'ANY', upiEnabled),
+  };
+  const railDecision = selectedOutlet ? decidePayoutRail(railCtx) : null;
+  /* The mode the toggle is pinned to (mandate / tenant gate / re-KYC reachability), or null. */
+  const lockedPaymentMode: PaymentMode | null = railDecision?.lockedRail ?? null;
+  /* Show the "can't be changed in this re-KYC" note only when the re-KYC itself caused the lock. */
+  const reKycRailLock: PaymentMode | null =
+    isReKYC && railDecision?.lockedByReKyc ? lockedPaymentMode : null;
+  const railDefault: PaymentMode | null = railDecision?.defaultRail ?? null;
+  /** Payout field editability (form keys + the 'cheque' slot) — the backend's editable(f). */
+  const isPayoutEditable = (f: Parameters<typeof isPayoutFieldEditable>[0]) => isPayoutFieldEditable(f, railCtx);
 
-  /* Force paymentMode to the pinned mode whenever the selected outlet changes AND on the
+  /* Force paymentMode to the locked rail whenever the selected outlet changes AND on the
    * ?outletId= re-entry prefill (keyed on outletId so re-derivation fires on outlet switch).
    * This also fixes the latent re-entry bug where a UPI outlet re-opened in bank mode
-   * (paymentMode defaults to 'bank' and was never re-derived). ANY (pinnedMode=null) keeps
-   * the rep's current choice. */
+   * (paymentMode defaults to 'bank' and was never re-derived). An unlocked FIRST-TIME KYC keeps
+   * the rep's current choice; an unlocked re-KYC opens on the derived default rail. */
   useEffect(() => {
-    if (pinnedMode) setPaymentMode(pinnedMode);
-  }, [selectedOutlet?.outletId, pinnedMode]);
+    if (lockedPaymentMode) setPaymentMode(lockedPaymentMode);
+    else if (isReKYC && railDefault) setPaymentMode(railDefault);
+  }, [selectedOutlet?.outletId, lockedPaymentMode, isReKYC, railDefault]);
 
   /* ── Group-PAN lock (grouped-before-KYC child of an APPROVED parent) ──
    *   When the outlet's approved parent has a canonical PAN, the child PAN is PINNED to
@@ -681,9 +728,11 @@ export default function NewKYCPage() {
       // previously-selected re-entry outlet — else one outlet's bank/UPI details bleed into
       // this outlet's submission (the per-outlet pinned-mode mandate makes this easier to hit).
       setForm((f) => ({ ...f, bankName: '', accountHolderName: '', accountNumber: '', ifscCode: '', upiId: '' }));
+      setUpiCaptureMethod(null);
       return;
     }
     const k = selectedOutlet.existingKyc;
+    setUpiCaptureMethod(k.upiId ? (k.upiCaptureMethod ?? null) : null);
     setForm((f) => ({
       ...f,
       partnerName:   k.partnerName,
@@ -721,6 +770,7 @@ export default function NewKYCPage() {
   useEffect(() => {
     const pf = selectedOutlet?.parentPrefill;
     if (!pf || selectedOutlet?.existingKyc) return; // no parent, or a re-entry → skip
+    if (pf.upiId) setUpiCaptureMethod(pf.upiCaptureMethod ?? null);
     setForm((f) => ({
       ...f,
       partnerName:       pf.ownerName          ?? f.partnerName,
@@ -947,6 +997,17 @@ export default function NewKYCPage() {
       },
       { timeout: 12000, maximumAge: 0 },
     );
+  }, []);
+
+  /* UPI value change from <BankOrUpiSection> (QR scan or manual entry). MEMOIZED (stable
+   * identity): it is a dependency of the section's camera/QR-poll effect, so an inline arrow
+   * would restart the camera on every parent render. Only touches setters + a ref. */
+  const handleUpiChange = useCallback((val: string) => {
+    setForm((f) => ({ ...f, upiId: val }));
+    // Clearing a scanned UPI resets the payment geo (user must re-scan)
+    if (!val) {
+      setPaymentGeo(null); setPaymentGeoLoading(false); setPaymentGeoError(''); paymentGeoLoadingRef.current = false;
+    }
   }, []);
 
   /* ── Camera stream ── */
@@ -1517,11 +1578,21 @@ export default function NewKYCPage() {
           state:            form.state,
           pincode:          form.pincode,
           paymentMode,
-          bankName:         form.bankName,
-          accountHolderName:form.accountHolderName,
-          accountNumber:    form.accountNumber,
-          ifscCode:         form.ifscCode,
-          upiId:            form.upiId,
+          // Send ONLY the selected payout method's fields — never the other method's (stale
+          // values typed before a mode switch, or empty strings). The cancelled cheque rides in
+          // `documents` (unchanged) and the inherited-cheque waiver is bank-mode-only already.
+          ...(paymentMode === 'bank'
+            ? {
+                bankName:          form.bankName,
+                accountHolderName: form.accountHolderName,
+                accountNumber:     form.accountNumber,
+                ifscCode:          form.ifscCode,
+              }
+            : {
+                upiId: form.upiId.trim(),
+                // Provenance of the VPA (QR vs typed) — UPI mode only; omitted when unknown.
+                ...(upiCaptureMethod ? { upiCaptureMethod } : {}),
+              }),
           boardPhotoGeo:    boardPhotoGeo ?? undefined,
           // Instrumentation (geo-fence tenants only; undefined otherwise → Deoleo byte-identical).
           boardPhotoLockMs: boardPhotoLockMs ?? undefined,
@@ -1538,9 +1609,21 @@ export default function NewKYCPage() {
       // A failed submission must NOT silently advance to the OTP step — surface
       // the real error (e.g. duplicate / employee phone) and stay on the form.
       if (!res.ok) {
+        // The server's message is shown VERBATIM (e.g. a 400 "Payment method can't be changed in
+        // this re-KYC" / "Enter both account number and IFSC" / "Enter a UPI ID" / "Flagged payout
+        // details not provided"). The backend envelope is { success:false, error }; a raw Nest
+        // { message } (string or validator array) is accepted as a fallback.
         const errorData = await res.json().catch(() => ({}));
+        const serverMsg =
+          typeof errorData.error === 'string' && errorData.error.trim()
+            ? errorData.error
+            : Array.isArray(errorData.message)
+              ? errorData.message.join(', ')
+              : typeof errorData.message === 'string' && errorData.message.trim()
+                ? errorData.message
+                : null;
         setSubmitting(false);
-        setSubmitError(errorData.error ?? 'Could not submit the KYC. Please review and try again.');
+        setSubmitError(serverMsg ?? 'Could not submit the KYC. Please review and try again.');
         return;
       }
 
@@ -2068,19 +2151,28 @@ export default function NewKYCPage() {
         ? 'Waiting for upload to finish…'
         : null;
   const bankMissing: string[] = [];
+  // Only EDITABLE payout fields are required (isPayoutEditable — the backend's editable(f)): a
+  // field the rep can't change on this re-KYC never blocks the step (the server keeps its stored
+  // value). Brand-new / blanket KYCs → every field editable → unchanged gate. The cheque slot
+  // follows the same lock the upload card renders (isFieldLocked('cheque'), minus post-submit).
+  const chequeEditable = isWizardFieldEditable(selectedOutlet?.reKycFlags, 'cheque');
   if (paymentMode === 'bank') {
-    if (!form.bankName) bankMissing.push('Bank name');
+    if (isPayoutEditable('bankName') && !form.bankName) bankMissing.push('Bank name');
     // KYC-M1: Account Holder Name is a required `*` field but was never in the gate.
-    if (!form.accountHolderName) bankMissing.push('Account holder name');
-    if (!form.accountNumber) bankMissing.push('Account number');
+    if (isPayoutEditable('accountHolderName') && !form.accountHolderName) bankMissing.push('Account holder name');
+    if (isPayoutEditable('accountNumber') && !form.accountNumber) bankMissing.push('Account number');
     // KYC-M2: IFSC must match the standard format (mirrors the GST format gate) —
     // empty blocks as "IFSC code", a malformed value blocks as "A valid IFSC code".
-    if (!form.ifscCode) bankMissing.push('IFSC code');
-    else if (!isValidIfsc(form.ifscCode)) bankMissing.push('A valid IFSC code');
-    if (!docs.cheque && !chequeInherited) bankMissing.push('Cancelled cheque');
-  } else {
-    if (!form.upiId) bankMissing.push('UPI ID');
-    else if (!isValidUpiId(form.upiId)) bankMissing.push('A valid UPI ID');
+    if (isPayoutEditable('ifscCode')) {
+      if (!form.ifscCode) bankMissing.push('IFSC code');
+      else if (!isValidIfsc(form.ifscCode)) bankMissing.push('A valid IFSC code');
+    }
+    if (chequeEditable && !docs.cheque && !chequeInherited) bankMissing.push('Cancelled cheque');
+  } else if (isPayoutEditable('upiId')) {
+    // Trim first: a whitespace-only manual entry blocks as the REQUIRED item, not "valid".
+    const upiTrimmed = form.upiId.trim();
+    if (!upiTrimmed) bankMissing.push('UPI ID');
+    else if (!isValidUpiId(upiTrimmed)) bankMissing.push('A valid UPI ID');
   }
   if (!agreedToTerms) bankMissing.push('Agree to the Terms & Conditions');
   if (!agreedToComms) bankMissing.push('Agree to SMS / WhatsApp communications');
@@ -2088,8 +2180,12 @@ export default function NewKYCPage() {
   // Payment location is required in BOTH modes; only actionable once a cheque/UPI (or an
   // inherited cheque) exists — otherwise the cheque/UPI item above already blocks. Keeping it
   // unconditional-when-actionable preserves the old `!paymentGeo` gate exactly.
-  if ((docs.cheque || form.upiId || chequeInherited) && !paymentGeo && !paymentGeoLoading)
-    bankMissing.push('Payment location (upload cheque / scan UPI, then tap Retry location if needed)');
+  if ((docs.cheque || form.upiId.trim() || chequeInherited) && !paymentGeo && !paymentGeoLoading)
+    bankMissing.push(
+      upiManualEntry
+        ? 'Payment location (upload cheque / scan or enter UPI, then tap Retry location if needed)'
+        : 'Payment location (upload cheque / scan UPI, then tap Retry location if needed)',
+    );
   const bankBlocked = bankMissing.length > 0 || bankBusy !== null;
 
   // Step 5 (SO-Declaration variant) — PAN/GSTIN are OPTIONAL, but a non-empty value must be
@@ -2912,11 +3008,23 @@ export default function NewKYCPage() {
               </div>
             )}
 
+            {/* Re-KYC rail lock: the re-KYC's field flags leave only ONE reachable rail (or none),
+                so the payout method can't be switched (lib/payout-rail decidePayoutRail). */}
+            {reKycRailLock && (
+              <div
+                data-testid="rekyc-rail-lock-note"
+                className="flex items-start gap-2 p-3 rounded-xl bg-gray-50 border border-gray-200 text-xs text-gray-600"
+              >
+                <Lock className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                <span>Payment method can&apos;t be changed in this re-KYC</span>
+              </div>
+            )}
+
             {/* Bank / UPI toggle section */}
             <BankOrUpiSection
               paymentMode={paymentMode}
               onPaymentModeChange={setPaymentMode}
-              lockedMode={pinnedMode ?? undefined}
+              lockedMode={lockedPaymentMode ?? undefined}
               bankName={form.bankName}
               accountHolderName={form.accountHolderName}
               accountNumber={form.accountNumber}
@@ -2929,22 +3037,25 @@ export default function NewKYCPage() {
                   [field]: field === 'ifscCode' ? e.target.value.toUpperCase() : e.target.value,
                 }))
               }
+              // Same editable() the Bank-step gate + rail reachability use (lib/payout-rail), so an
+              // input is never required while locked; post-submit everything locks (KYC-M5).
               disabledFields={{
-                bankName:          isFieldLocked('bankName'),
-                accountHolderName: isFieldLocked('accountHolderName'),
-                accountNumber:     isFieldLocked('accountNumber'),
-                ifscCode:          isFieldLocked('ifscCode'),
-                upiId:             isFieldLocked('upiId'),
+                bankName:          isSubmitted || !isPayoutEditable('bankName'),
+                accountHolderName: isSubmitted || !isPayoutEditable('accountHolderName'),
+                accountNumber:     isSubmitted || !isPayoutEditable('accountNumber'),
+                ifscCode:          isSubmitted || !isPayoutEditable('ifscCode'),
+                upiId:             isSubmitted || !isPayoutEditable('upiId'),
               }}
               upiId={form.upiId}
-              onUpiChange={(val) => {
-                setForm((f) => ({ ...f, upiId: val }));
-                // Clearing a scanned UPI resets the payment geo (user must re-scan)
-                if (!val) {
-                  setPaymentGeo(null); setPaymentGeoLoading(false); setPaymentGeoError(''); paymentGeoLoadingRef.current = false;
-                }
-              }}
+              // Stable identities (useCallback / state setter) — they feed the section's
+              // camera/QR-poll effect deps, so an inline arrow would restart the camera per render.
+              onUpiChange={handleUpiChange}
+              onUpiCaptureMethodChange={setUpiCaptureMethod}
               onPaymentGeoTrigger={capturePaymentGeo}
+              // Seeds the manual-entry fire-once geo guard from whether a payment geo ALREADY
+              // exists (e.g. carried over on a re-KYC), not from whether a UPI is pre-filled —
+              // a parent-prefilled child with no payment geo must still fire on first keystroke.
+              paymentGeoCaptured={!!paymentGeo}
             >
               {/* Cheque upload — shown inside bank mode */}
               <div className={isReKYCFlagged('cheque') ? 'rounded-xl border border-amber-300 p-2 bg-amber-50/40' : ''}>
@@ -2965,7 +3076,7 @@ export default function NewKYCPage() {
             {/* KYC-M2: IFSC format hint. The IFSC input lives inside BankOrUpiSection, so the
                 inline error renders here (same style as the GST field); the Continue gate
                 also blocks on a malformed IFSC via bankMissing above. */}
-            {paymentMode === 'bank' && form.ifscCode.length > 0 && !isValidIfsc(form.ifscCode) && (
+            {paymentMode === 'bank' && isPayoutEditable('ifscCode') && form.ifscCode.length > 0 && !isValidIfsc(form.ifscCode) && (
               <p className="text-[11px] text-red-600 -mt-2 flex items-center gap-1"><AlertCircle className="h-3 w-3 shrink-0" /> Enter a valid IFSC code (e.g. HDFC0001234)</p>
             )}
 
@@ -3018,6 +3129,27 @@ export default function NewKYCPage() {
             {/* ── B: Consent checkboxes ── */}
             <div className="border-t border-gray-100 pt-4 space-y-3">
               <p className="text-xs font-semibold text-gray-700">Programme Consent</p>
+
+              {/* VPA safeguard: show the payout UPI ID in full, readably, right where the owner
+                  consents — a typed ID gets an explicit double-check prompt. */}
+              {paymentMode === 'upi' && form.upiId.trim() && (
+                <div
+                  data-testid="consent-upi-summary"
+                  className={`rounded-xl border px-3 py-2.5 text-sm ${
+                    upiCaptureMethod === 'MANUAL' ? 'bg-amber-50 border-amber-200' : 'bg-gray-50 border-gray-200'
+                  }`}
+                >
+                  <p className="text-gray-700">
+                    Payouts will be sent to UPI ID:{' '}
+                    <span className="font-mono font-semibold text-gray-900 break-all">{form.upiId.trim()}</span>
+                  </p>
+                  {upiCaptureMethod === 'MANUAL' && (
+                    <p data-testid="consent-upi-manual-note" className="text-xs text-amber-700 mt-0.5">
+                      (typed manually — please double-check)
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* KYC-H4: real, accessible checkbox controls. The WHOLE row is the tap target
                   and toggles via click / Space / Enter; screen readers announce role + state.

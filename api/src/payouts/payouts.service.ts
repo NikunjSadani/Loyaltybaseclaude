@@ -17,6 +17,7 @@ import { monthYearIST, formatDateIST, istDayRangeFilter, istDateKey } from '../c
 import { parsePayoutUtrUpload } from './payout-utr.helpers';
 import { transitionOrderStatus } from '../rewards/order-status-transition';
 import { resolveEffectiveKycStatus } from '../kyc/kyc-eligibility';
+import { normalizeIdentityValue } from '../common/partner-group.helper';
 import {
   BatchDetailQueryDto,
   CreateBatchDto,
@@ -633,6 +634,13 @@ export class PayoutsService {
    * and the FAILED refund uses the exact M2 claim
    * (updateMany where pointsDeducted>0 → 0; reverse only if count>0), so
    * re-uploading the same report is a no-op.
+   *
+   * Concurrency: each payout's terminal write is a compare-and-set inside the tx
+   * (`updateMany where { id, status: <non-terminal status read> }`). Of two overlapping
+   * uploads for the same payout (e.g. one PAID, one FAILED) exactly one wins; the loser's
+   * row is returned in `skipped` and NONE of its side effects run (no refund, no order
+   * status write, no partner verify/demote, no WhatsApp). The order FAILED write is a
+   * guarded claim too, so it adds at most one FAILED history row.
    */
   async uploadPayoutUtr(
     user: JwtPayload,
@@ -708,6 +716,13 @@ export class PayoutsService {
     let paidCount = 0;
     let failedCount = 0;
     let reversedCount = 0;
+    // Rows whose compare-and-set claim lost to an overlapping upload (see the claim below).
+    const skipped: Array<{
+      rowNum: number;
+      txnId: string;
+      outcome: 'PAID' | 'FAILED';
+      reason: string;
+    }> = [];
 
     // Collected DURING the tx (do NOT read/send inside it): one payout-credit WhatsApp
     // per PAID redemption cash-out, dispatched AFTER the tx commits so neither a read
@@ -720,8 +735,15 @@ export class PayoutsService {
     }> = [];
 
     // Bulk money mutation over uploaded rows — raise the interactive-tx timeout (default 5s) so the ATOMIC transaction survives a full-tenant batch; must stay all-or-nothing (do NOT chunk — would risk partial/double credit).
+    // DETERMINISTIC LOCK ORDER: process rows sorted by txnId (plain code-unit compare, not
+    // locale) so two overlapping uploads touching the same payouts acquire the payout row locks
+    // in the same order — they serialise instead of deadlocking. Sorting a COPY keeps each row's
+    // reported rowNum (file position) unchanged.
+    const rowsInLockOrder = [...parseResult.rows].sort((a, b) =>
+      a.txnId < b.txnId ? -1 : a.txnId > b.txnId ? 1 : a.rowNum - b.rowNum,
+    );
     await this.prisma.$transaction(async (tx) => {
-      for (const row of parseResult.rows) {
+      for (const row of rowsInLockOrder) {
         if (row.status !== 'OK' || !row.outcome) continue;
 
         const txn = txnMap.get(row.txnId);
@@ -731,15 +753,35 @@ export class PayoutsService {
         // state. A re-upload of the same report falls through here as a no-op.
         if (TERMINAL_PAYOUT.includes(txn.status)) continue;
 
-        if (row.outcome === 'PAID') {
-          await tx.payoutTransaction.update({
-            where: { id: txn.id },
-            data: {
-              status: 'SUCCESS',
-              providerRefId: row.utr,
-              completedAt: now,
-            },
+        // CONCURRENCY CLAIM (compare-and-set): the terminal check above is from a read taken
+        // BEFORE this tx, so an overlapping upload (e.g. PAID vs FAILED for the same payout)
+        // may already have moved this row. The terminal write is therefore conditional on the
+        // row still holding the exact non-terminal status we read. Postgres re-evaluates the
+        // predicate after the competing tx commits, so exactly ONE upload wins. A lost claim
+        // (count 0) skips the row with a row-level result and runs NONE of its side effects
+        // (refund, order status, partner verify/demote, WhatsApp gather) — every side effect
+        // below runs only for the winner, after its claim.
+        const claim = await tx.payoutTransaction.updateMany({
+          where: { id: txn.id, status: txn.status },
+          data:
+            row.outcome === 'PAID'
+              ? { status: PayoutStatus.SUCCESS, providerRefId: row.utr, completedAt: now }
+              : {
+                  status: PayoutStatus.FAILED,
+                  failureReason: row.remarks || 'UTR report: FAILED',
+                },
+        });
+        if (claim.count === 0) {
+          skipped.push({
+            rowNum: row.rowNum,
+            txnId: txn.id,
+            outcome: row.outcome,
+            reason: 'Payout already updated by another upload',
           });
+          continue;
+        }
+
+        if (row.outcome === 'PAID') {
           paidCount++;
 
           // Capture-bank-at-redemption: a COMPLETED payout verifies the partner's self-captured
@@ -750,18 +792,18 @@ export class PayoutsService {
           //  - SNAPSHOT MATCH: the partner's CURRENT rail must still equal the one this txn actually
           //    paid (the frozen snapshot) — so re-captured, never-paid details can't ride a payout on
           //    old details into VERIFIED. Match the rail that was paid (UPI if present, else bank+IFSC).
-          await tx.channelPartner.updateMany({
-            where: {
-              id: txn.partnerId,
-              paymentDetailsStatus: {
-                in: [PaymentDetailsStatus.UNVERIFIED, PaymentDetailsStatus.NEEDS_RECAPTURE],
-              },
-              ...(txn.upiId
-                ? { upiId: txn.upiId }
-                : { bankAccountNumber: txn.bankAccountNumber, ifscCode: txn.ifscCode }),
-            },
-            data: { paymentDetailsStatus: PaymentDetailsStatus.VERIFIED, bankVerifiedAt: now },
-          });
+          //  - UPI is compared CASE-INSENSITIVELY via normalizeIdentityValue('upi') (VPAs are
+          //    case-insensitive per NPCI; partners now store the lower-cased form while older payout
+          //    snapshots may be mixed-case). Done in JS, not Prisma `mode:'insensitive'` (which
+          //    compiles to ILIKE and would treat `_`/`%` in a VPA as wildcards). The update then
+          //    CAS-guards on the EXACT upiId value just read, so a concurrent re-capture between the
+          //    read and the write still cannot be promoted to VERIFIED.
+          await this.updatePartnerIfSnapshotRailMatches(
+            tx,
+            txn,
+            { in: [PaymentDetailsStatus.UNVERIFIED, PaymentDetailsStatus.NEEDS_RECAPTURE] },
+            { paymentDetailsStatus: PaymentDetailsStatus.VERIFIED, bankVerifiedAt: now },
+          );
 
           // Gather (do NO reads here) the payout-credit WhatsApp payload: push only the
           // ids already on the txn — the partner/order rows are batch-read AFTER commit
@@ -798,23 +840,21 @@ export class PayoutsService {
             });
           }
         } else {
-          // FAILED.
-          await tx.payoutTransaction.update({
-            where: { id: txn.id },
-            data: {
-              status: 'FAILED',
-              failureReason: row.remarks || 'UTR report: FAILED',
-            },
-          });
+          // FAILED (payout row already flipped by the claim above).
           failedCount++;
 
           // Capture-bank-at-redemption: a FAILED payout on still-unverified self-captured details
           // marks them for recapture (hidden + re-prompted next redemption). Guarded on UNVERIFIED
-          // so a failed payout can NEVER hide operator/KYC-verified details or touch Deoleo.
-          await tx.channelPartner.updateMany({
-            where: { id: txn.partnerId, paymentDetailsStatus: PaymentDetailsStatus.UNVERIFIED },
-            data: { paymentDetailsStatus: PaymentDetailsStatus.NEEDS_RECAPTURE },
-          });
+          // so a failed payout can NEVER hide operator/KYC-verified details or touch Deoleo. SNAPSHOT
+          // MATCH (mirrors the PAID path): only when the failed txn's rail is the partner's CURRENT
+          // rail — a failure on OLD details (the partner has since re-captured a new rail) must not
+          // demote the new, not-yet-tried details.
+          await this.updatePartnerIfSnapshotRailMatches(
+            tx,
+            txn,
+            PaymentDetailsStatus.UNVERIFIED,
+            { paymentDetailsStatus: PaymentDetailsStatus.NEEDS_RECAPTURE },
+          );
 
           // Reverse the redemption points ONCE (M2 claim), then mark the order
           // FAILED. The claim makes a re-upload of the same FAILED a no-op.
@@ -841,14 +881,19 @@ export class PayoutsService {
                 );
                 reversedCount++;
               }
-              // Shared transition: status + FAILED history row (actor = uploader); no row when
-              // the order was already FAILED (same-status no-op).
-              await transitionOrderStatus(tx, {
-                orderId,
-                fromStatus: order.status,
-                toStatus: RedemptionStatus.FAILED,
-                changedById: user.sub,
-              });
+              // Shared transition: status + FAILED history row (actor = uploader). GUARDED
+              // (atomic claim `status != FAILED`): the history row is written only when this
+              // write actually moves the order to FAILED, so an overlapping/repeat upload can
+              // never add a duplicate FAILED row. Already FAILED on read → no write at all.
+              if (order.status !== RedemptionStatus.FAILED) {
+                await transitionOrderStatus(tx, {
+                  orderId,
+                  guard: { status: { not: RedemptionStatus.FAILED } },
+                  fromStatus: order.status,
+                  toStatus: RedemptionStatus.FAILED,
+                  changedById: user.sub,
+                });
+              }
             }
           }
         }
@@ -946,7 +991,7 @@ export class PayoutsService {
       }
     }
 
-    return { applied: true, paidCount, failedCount, reversedCount };
+    return { applied: true, paidCount, failedCount, reversedCount, skipped };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -956,6 +1001,52 @@ export class PayoutsService {
   // post-commit payout-credit WhatsApp; they never run inside the payout tx and can
   // never affect the payout or the notification (all three swallow their own errors).
   // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Capture-bank-at-redemption SNAPSHOT MATCH — shared by the UTR upload's PAID (→ VERIFIED) and
+   * FAILED (→ NEEDS_RECAPTURE) paths. Applies `data` to the partner ONLY when (a) its
+   * paymentDetailsStatus matches `status` AND (b) the rail this txn actually tried (its frozen
+   * snapshot: UPI if present, else bank+IFSC) is STILL the partner's CURRENT rail — so an outcome on
+   * OLD details never promotes/demotes details the partner has since re-captured.
+   *  - UPI: compared CASE-INSENSITIVELY via normalizeIdentityValue('upi') (VPAs are case-insensitive
+   *    per NPCI; partners store the lower-cased form while older snapshots may be mixed-case). Done in
+   *    JS, not Prisma `mode:'insensitive'` (ILIKE would treat `_`/`%` in a VPA as wildcards). The
+   *    update CAS-guards on the EXACT upiId just read, so a concurrent re-capture between the read and
+   *    the write still cannot be touched.
+   *  - BANK: both account number AND IFSC must be present on the snapshot (a null snapshot would
+   *    otherwise match `bankAccountNumber: null` on a partner with no bank details) and equal.
+   *  - A snapshot with neither rail → no-op.
+   */
+  private async updatePartnerIfSnapshotRailMatches(
+    tx: Prisma.TransactionClient,
+    txn: { partnerId: string; upiId: string | null; bankAccountNumber: string | null; ifscCode: string | null },
+    status: Prisma.ChannelPartnerWhereInput['paymentDetailsStatus'],
+    data: Prisma.ChannelPartnerUpdateManyMutationInput,
+  ): Promise<void> {
+    if (txn.upiId) {
+      const current = await tx.channelPartner.findFirst({
+        where: { id: txn.partnerId, paymentDetailsStatus: status },
+        select: { upiId: true },
+      });
+      const currentUpi = normalizeIdentityValue('upi', current?.upiId);
+      if (current?.upiId && currentUpi && currentUpi === normalizeIdentityValue('upi', txn.upiId)) {
+        await tx.channelPartner.updateMany({
+          where: { id: txn.partnerId, paymentDetailsStatus: status, upiId: current.upiId },
+          data,
+        });
+      }
+    } else if (txn.bankAccountNumber && txn.ifscCode) {
+      await tx.channelPartner.updateMany({
+        where: {
+          id: txn.partnerId,
+          paymentDetailsStatus: status,
+          bankAccountNumber: txn.bankAccountNumber,
+          ifscCode: txn.ifscCode,
+        },
+        data,
+      });
+    }
+  }
 
   /**
    * Create a QUEUED MessageDeliveryReceipt (channel WHATSAPP) for a to-be-sent payout-credit

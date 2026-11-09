@@ -111,3 +111,22 @@ describe('CreateKycDto — upiId VPA validation', () => {
     expect(await upiErrors('   ')).toEqual([]);
   });
 });
+
+// VPA safeguards — how the UPI was captured ('QR' | 'MANUAL'; optional).
+describe('CreateKycDto — upiCaptureMethod', () => {
+  const methodErrors = async (upiCaptureMethod: unknown): Promise<string[]> => {
+    const errors = await validate(plainToInstance(CreateKycDto, { ...baseDto, upiCaptureMethod }));
+    const e = errors.find((x) => x.property === 'upiCaptureMethod');
+    return e ? Object.keys(e.constraints ?? {}) : [];
+  };
+
+  it('accepts QR, MANUAL and omitted', async () => {
+    expect(await methodErrors('QR')).toEqual([]);
+    expect(await methodErrors('MANUAL')).toEqual([]);
+    expect(await methodErrors(undefined)).toEqual([]);
+  });
+
+  it("rejects 'FOO'", async () => {
+    expect(await methodErrors('FOO')).toContain('isIn');
+  });
+});

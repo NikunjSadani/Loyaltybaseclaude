@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { RedemptionStatus } from '@prisma/client';
 import { VendorPortalService } from './vendor-portal.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -13,7 +13,7 @@ const mockPrisma = {
   giftCategory: { findFirst: jest.fn(), findMany: jest.fn() },
   rewardCategory: { findFirst: jest.fn(), create: jest.fn() },
   rewardCatalog: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn() },
-  redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn() },
+  redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
   redemptionStatusHistory: { create: jest.fn() },
   channelPartner: { findFirst: jest.fn() },
   auditLog: { create: jest.fn().mockResolvedValue({}) },
@@ -304,6 +304,67 @@ describe('VendorPortalService', () => {
         service.updateFulfilment(vendor, 'o1', { trackingNumber: 'TRK9' } as never),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+    });
+
+    // Concurrency: the open/assigned checks come from a read; the write must re-assert them
+    // atomically so a close / reassignment that lands between read and write is never overwritten.
+    describe('updateFulfilment guarded write (read-then-write race)', () => {
+      const dto = { trackingNumber: 'TRK9' } as never;
+
+      it('writes via a CAS that re-asserts open + this vendor + this tenant', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst
+          .mockResolvedValueOnce({ id: 'o1', status: 'PROCESSING' }) // the pre-check read
+          .mockResolvedValueOnce({ id: 'o1', status: 'PROCESSING' }); // getOrder re-read
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        await service.updateFulfilment(vendor, 'o1', dto);
+        expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+        expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledTimes(1);
+        const { where, data } = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+        expect(where).toEqual({
+          id: 'o1',
+          fulfilledByVendorId: 'v1',
+          partner: { clientId: 'deoleo' },
+          status: {
+            notIn: expect.arrayContaining(['DELIVERED', 'RETURNED', 'CANCELLED', 'FAILED', 'PENDING']),
+          },
+        });
+        expect(data).toMatchObject({ trackingNumber: 'TRK9' });
+      });
+
+      // Evaluate the write's where-clause against the row's CURRENT (post-race) state.
+      const rowNow = (row: { status: string; fulfilledByVendorId: string; clientId: string }) =>
+        async ({ where }: {
+          where: { fulfilledByVendorId?: string; partner?: { clientId: string }; status?: { notIn?: string[] } };
+        }) => {
+          const ok =
+            (where.fulfilledByVendorId === undefined || where.fulfilledByVendorId === row.fulfilledByVendorId) &&
+            (where.partner === undefined || where.partner.clientId === row.clientId) &&
+            !(where.status?.notIn ?? []).includes(row.status);
+          return { count: ok ? 1 : 0 };
+        };
+
+      it('order CLOSED concurrently (open on read, now DELIVERED) → 409, no write applied, no re-read', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValueOnce({ id: 'o1', status: 'DISPATCHED' });
+        mockPrisma.redemptionOrder.updateMany.mockImplementationOnce(
+          rowNow({ status: 'DELIVERED', fulfilledByVendorId: 'v1', clientId: 'deoleo' }),
+        );
+        const err = await service.updateFulfilment(vendor, 'o1', dto).catch((e) => e);
+        expect(err).toBeInstanceOf(ConflictException);
+        expect(err.message).toBe('Order status changed — refresh and try again');
+        expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledTimes(1);
+      });
+
+      it('order REASSIGNED to another vendor concurrently (now v2) → 409', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValueOnce({ id: 'o1', status: 'CONFIRMED' });
+        mockPrisma.redemptionOrder.updateMany.mockImplementationOnce(
+          rowNow({ status: 'CONFIRMED', fulfilledByVendorId: 'v2', clientId: 'deoleo' }),
+        );
+        await expect(service.updateFulfilment(vendor, 'o1', dto)).rejects.toBeInstanceOf(ConflictException);
+      });
     });
 
     it('listOrders + getOrder EXCLUDE PENDING (pre-payment) orders (LOW#6)', async () => {

@@ -621,8 +621,17 @@ export class VendorPortalService {
       throw new BadRequestException('This order is closed and can no longer be updated.');
     }
 
-    await this.prisma.redemptionOrder.update({
-      where: { id },
+    // GUARDED write (compare-and-set): the "open + assigned to me" checks above come from a
+    // read, so a concurrent close (DELIVERED/RETURNED/CANCELLED/FAILED by Gifsy, a UTR upload,
+    // etc.) or a reassignment to another vendor between that read and this write must NOT be
+    // overwritten. The same predicates are re-asserted atomically on the write; count 0 → 409.
+    const claim = await this.prisma.redemptionOrder.updateMany({
+      where: {
+        id,
+        fulfilledByVendorId: scope.vendorId,
+        partner: { clientId: scope.clientId },
+        status: { notIn: [...VENDOR_TERMINAL_STATUSES, RedemptionStatus.PENDING] },
+      },
       data: {
         trackingNumber: dto.trackingNumber,
         trackingUrl: dto.trackingUrl,
@@ -635,6 +644,9 @@ export class VendorPortalService {
         podUrl: dto.podUrl,
       },
     });
+    if (claim.count === 0) {
+      throw new ConflictException('Order status changed — refresh and try again');
+    }
     return this.getOrder(user, id);
   }
 

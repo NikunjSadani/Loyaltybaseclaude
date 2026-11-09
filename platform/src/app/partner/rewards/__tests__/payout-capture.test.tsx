@@ -53,7 +53,12 @@ vi.mock('@/components/ui/toast', () => ({
   ToastProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
+// jsqr is dynamically imported by BankOrUpiSection's QR poll; default = no QR in frame. The
+// VPA7 test overrides it to "see" a UPI QR (camera APIs are stubbed by the global test setup).
+vi.mock('jsqr', () => ({ default: vi.fn().mockReturnValue(null) }));
+
 import RewardsPage from '../page';
+import jsqrDefault from 'jsqr';
 
 // A FREE_AMOUNT cash catalog item (pointsCost 0 + a min) — the deterministic cash item.
 const CASH_ITEM = {
@@ -208,6 +213,8 @@ describe('PC — Cash Payout inline capture sheet (captureBankAtRedemption)', ()
       expect(body.paymentMode).toBe('bank');
       expect(body.chequeFileKey).toBe('chk_1');
       expect(body.ifscCode).toBe('UTIB0001234');
+      // Bank mode sends ONLY bank fields — never a upiId.
+      expect(body).not.toHaveProperty('upiId');
     });
 
     // …then the sheet triggers a re-fetch of /api/auth/me so partnerHasBeneficiary refreshes.
@@ -243,4 +250,210 @@ describe('PC — Cash Payout inline capture sheet (captureBankAtRedemption)', ()
     });
     expect(fetchMock.mock.calls.some(([u]) => u === '/api/partner/payout-details')).toBe(false);
   });
+
+  it('PC6: a padded valid manual UPI is trimmed → POST carries the trimmed upiId and NO bank fields', async () => {
+    settingsRef.current = {
+      ...BANK_ONLY_SETTINGS,
+      salesApp: { upiEnabled: true, upiManualEntry: true },
+    };
+    const fetchMock = makeFetch({ captureBankAtRedemption: true, channelPartner: CP_EMPTY });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await openCashTab(user);
+
+    await screen.findByTestId('payout-capture-sheet');
+    await user.click(screen.getByRole('button', { name: /upi id/i }));
+    fireEvent.change(await screen.findByTestId('manual-upi-input'), { target: { value: '  shop@okaxis  ' } });
+    // Typed ID → the type-it-twice confirm field is required (VPA safeguards).
+    fireEvent.change(await screen.findByTestId('manual-upi-confirm-input'), { target: { value: ' shop@okaxis ' } });
+
+    await user.click(screen.getByTestId('payout-capture-submit'));
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) => u === '/api/partner/payout-details');
+      expect(call).toBeTruthy();
+      const body = JSON.parse((call![1] as RequestInit).body as string);
+      expect(body).toEqual({
+        paymentMode: 'upi', upiId: 'shop@okaxis', upiIdConfirm: 'shop@okaxis', upiCaptureMethod: 'MANUAL',
+      });
+    });
+  });
+
+  it('PC7: a whitespace-only manual UPI is blocked with the EMPTY-state copy (no POST)', async () => {
+    settingsRef.current = {
+      ...BANK_ONLY_SETTINGS,
+      salesApp: { upiEnabled: true, upiManualEntry: true },
+    };
+    const fetchMock = makeFetch({ captureBankAtRedemption: true, channelPartner: CP_EMPTY });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await openCashTab(user);
+
+    await screen.findByTestId('payout-capture-sheet');
+    await user.click(screen.getByRole('button', { name: /upi id/i }));
+    fireEvent.change(await screen.findByTestId('manual-upi-input'), { target: { value: '   ' } });
+
+    await user.click(screen.getByTestId('payout-capture-submit'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('payout-capture-error')).toHaveTextContent('Enter or scan your UPI ID to continue');
+    });
+    expect(screen.getByTestId('payout-capture-error')).not.toHaveTextContent(/valid upi id/i);
+    expect(fetchMock.mock.calls.some(([u]) => u === '/api/partner/payout-details')).toBe(false);
+  });
+});
+
+/* ─── VPA safeguards: type-it-twice for a typed UPI ID; QR captures skip it ───────────── */
+describe('PC-VPA — UPI capture method + confirm entry', () => {
+  const MANUAL_SETTINGS = () => ({ ...BANK_ONLY_SETTINGS, salesApp: { upiEnabled: true, upiManualEntry: true } });
+
+  async function openUpiSheet(fetchMock: ReturnType<typeof makeFetch>) {
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await openCashTab(user);
+    await screen.findByTestId('payout-capture-sheet');
+    await user.click(screen.getByRole('button', { name: /upi id/i }));
+    return user;
+  }
+  const payoutCall = (fetchMock: ReturnType<typeof makeFetch>) =>
+    fetchMock.mock.calls.find(([u]) => u === '/api/partner/payout-details');
+
+  afterEach(() => { vi.mocked(jsqrDefault).mockReset(); vi.mocked(jsqrDefault).mockReturnValue(null); });
+
+  it('VPA1: a typed UPI ID shows the "Re-enter UPI ID" field with the manual-input keyboard attrs', async () => {
+    settingsRef.current = MANUAL_SETTINGS();
+    await openUpiSheet(makeFetch({ captureBankAtRedemption: true, channelPartner: CP_EMPTY }));
+
+    expect(screen.queryByTestId('manual-upi-confirm-input')).not.toBeInTheDocument();
+    fireEvent.change(await screen.findByTestId('manual-upi-input'), { target: { value: 'shop@okaxis' } });
+
+    const confirm = await screen.findByTestId('manual-upi-confirm-input');
+    expect(screen.getByLabelText('Re-enter UPI ID *')).toBe(confirm);
+    expect(confirm).toHaveAttribute('autocapitalize', 'none');
+    expect(confirm).toHaveAttribute('autocorrect', 'off');
+    expect(confirm).toHaveAttribute('spellcheck', 'false');
+    expect(confirm).toHaveAttribute('inputmode', 'email');
+    expect(confirm).toHaveAttribute('autocomplete', 'off');
+    expect(confirm).toHaveAttribute('maxlength', '100');
+  });
+
+  it('VPA2: a mismatched confirm blocks submit with "UPI IDs do not match" and NO POST', async () => {
+    settingsRef.current = MANUAL_SETTINGS();
+    const fetchMock = makeFetch({ captureBankAtRedemption: true, channelPartner: CP_EMPTY });
+    const user = await openUpiSheet(fetchMock);
+
+    fireEvent.change(await screen.findByTestId('manual-upi-input'), { target: { value: 'shop@okaxis' } });
+    fireEvent.change(await screen.findByTestId('manual-upi-confirm-input'), { target: { value: 'shop@okaxsi' } });
+    await user.click(screen.getByTestId('payout-capture-submit'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('payout-capture-error')).toHaveTextContent('UPI IDs do not match');
+    });
+    expect(payoutCall(fetchMock)).toBeUndefined();
+    // a11y: the error is announced (role=alert) and linked to the confirm input.
+    const err = screen.getByTestId('payout-capture-error');
+    expect(err).toHaveAttribute('role', 'alert');
+    const confirm = screen.getByTestId('manual-upi-confirm-input');
+    expect(confirm).toHaveAttribute('aria-invalid', 'true');
+    expect(confirm.getAttribute('aria-describedby')).toBe(err.id);
+    expect(err.id).not.toBe('');
+  });
+
+  it('VPA3: an empty confirm also blocks (no POST)', async () => {
+    settingsRef.current = MANUAL_SETTINGS();
+    const fetchMock = makeFetch({ captureBankAtRedemption: true, channelPartner: CP_EMPTY });
+    const user = await openUpiSheet(fetchMock);
+
+    fireEvent.change(await screen.findByTestId('manual-upi-input'), { target: { value: 'shop@okaxis' } });
+    await user.click(screen.getByTestId('payout-capture-submit'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('payout-capture-error')).toHaveTextContent('UPI IDs do not match');
+    });
+    expect(payoutCall(fetchMock)).toBeUndefined();
+  });
+
+  it('VPA4: a case/space-different but matching confirm POSTs upiId + upiIdConfirm + MANUAL', async () => {
+    settingsRef.current = MANUAL_SETTINGS();
+    const fetchMock = makeFetch({ captureBankAtRedemption: true, channelPartner: CP_EMPTY });
+    const user = await openUpiSheet(fetchMock);
+
+    fireEvent.change(await screen.findByTestId('manual-upi-input'), { target: { value: 'shop@okaxis' } });
+    fireEvent.change(await screen.findByTestId('manual-upi-confirm-input'), { target: { value: '  Shop@OKAXIS ' } });
+    await user.click(screen.getByTestId('payout-capture-submit'));
+
+    await waitFor(() => {
+      const call = payoutCall(fetchMock);
+      expect(call).toBeTruthy();
+      expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({
+        paymentMode: 'upi', upiId: 'shop@okaxis', upiIdConfirm: 'Shop@OKAXIS', upiCaptureMethod: 'MANUAL',
+      });
+    });
+  });
+
+  it('VPA5: paste into the confirm field is ALLOWED (partners copy their VPA from their UPI app); the second entry is still required', async () => {
+    settingsRef.current = MANUAL_SETTINGS();
+    const fetchMock = makeFetch({ captureBankAtRedemption: true, channelPartner: CP_EMPTY });
+    const user = await openUpiSheet(fetchMock);
+
+    fireEvent.change(await screen.findByTestId('manual-upi-input'), { target: { value: 'shop@okaxis' } });
+    const confirm = await screen.findByTestId('manual-upi-confirm-input');
+    // fireEvent returns true when NO handler called preventDefault() → the paste goes through.
+    const notPrevented = fireEvent.paste(confirm, { clipboardData: { getData: () => 'shop@okaxis' } });
+    expect(notPrevented).toBe(true);
+    // No mismatch flagged before a submit attempt.
+    expect(confirm).not.toHaveAttribute('aria-invalid');
+    // The second entry itself is still required: an un-filled confirm blocks the POST.
+    await user.click(screen.getByTestId('payout-capture-submit'));
+    await waitFor(() => {
+      expect(screen.getByTestId('payout-capture-error')).toHaveTextContent('UPI IDs do not match');
+    });
+    expect(payoutCall(fetchMock)).toBeUndefined();
+  });
+
+  it('VPA6: a server 400 message is surfaced as the error text', async () => {
+    settingsRef.current = MANUAL_SETTINGS();
+    const fetchMock = makeFetch({
+      captureBankAtRedemption: true,
+      channelPartner: CP_EMPTY,
+      payoutResult: { ok: false, body: { success: false, error: 'UPI IDs do not match' } },
+    });
+    const user = await openUpiSheet(fetchMock);
+
+    fireEvent.change(await screen.findByTestId('manual-upi-input'), { target: { value: 'shop@okaxis' } });
+    fireEvent.change(await screen.findByTestId('manual-upi-confirm-input'), { target: { value: 'shop@okaxis' } });
+    await user.click(screen.getByTestId('payout-capture-submit'));
+
+    await waitFor(() => expect(payoutCall(fetchMock)).toBeTruthy());
+    await waitFor(() => {
+      expect(screen.getByTestId('payout-capture-error')).toHaveTextContent('UPI IDs do not match');
+    });
+  });
+
+  it('VPA7: a QR-scanned UPI ID shows NO confirm field and POSTs upiCaptureMethod QR (no upiIdConfirm)', async () => {
+    // QR-only tenant (no manual entry): the scan is the only capture path.
+    settingsRef.current = { ...BANK_ONLY_SETTINGS, salesApp: { upiEnabled: true } };
+    vi.mocked(jsqrDefault).mockReturnValue({
+      data: 'upi://pay?pa=shop@okaxis&pn=Shop',
+      location: {} as never, binaryData: [], chunks: [], version: 1,
+    } as never);
+    const fetchMock = makeFetch({ captureBankAtRedemption: true, channelPartner: CP_EMPTY });
+    const user = await openUpiSheet(fetchMock);
+
+    await user.click(screen.getByRole('button', { name: /scan qr/i }));
+    await waitFor(() => expect(screen.getByTestId('scanned-upi-display')).toHaveTextContent('shop@okaxis'), { timeout: 5000 });
+    expect(screen.queryByTestId('manual-upi-confirm-input')).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId('payout-capture-submit'));
+    await waitFor(() => {
+      const call = payoutCall(fetchMock);
+      expect(call).toBeTruthy();
+      expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({
+        paymentMode: 'upi', upiId: 'shop@okaxis', upiCaptureMethod: 'QR',
+      });
+    });
+  }, 15000);
 });

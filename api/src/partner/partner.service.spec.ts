@@ -1189,6 +1189,7 @@ describe('PartnerService', () => {
       outlet: { requiredPaymentType?: string; parentId?: string | null } | null,
       current: {
         upiId?: string | null;
+        upiCaptureMethod?: string | null;
         bankAccountNumber?: string | null;
         ifscCode?: string | null;
         paymentDetailsStatus?: string;
@@ -1333,6 +1334,218 @@ describe('PartnerService', () => {
       });
       expect(res.paymentDetailsStatus).toBe('UNVERIFIED');
       expect(mockPrisma.channelPartner.update).toHaveBeenCalled();
+    });
+
+    // ── VPA safeguards: confirm-entry for a MANUALLY typed UPI + capture-method provenance ──
+    describe('VPA safeguards (upiCaptureMethod / upiIdConfirm)', () => {
+      // Manual UPI entry is a per-tenant opt-in (salesApp.upiManualEntry) — ON for this block.
+      beforeEach(() => {
+        mockTenantSettings.getEffectiveSettings.mockResolvedValue({
+          salesApp: { upiEnabled: true, upiManualEntry: true },
+          uniquenessPolicy: { gst: true, phone: true, bank: true, upi: true },
+        });
+      });
+
+      it('F7: rejects a MANUAL UPI capture when the tenant has manual entry OFF (400, nothing written)', async () => {
+        mockTenantSettings.getEffectiveSettings.mockResolvedValue({
+          salesApp: { upiEnabled: true, upiManualEntry: false },
+          uniquenessPolicy: { gst: true, phone: true, bank: true, upi: true },
+        });
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'ANY', parentId: null });
+        await expect(
+          service.capturePayoutDetails(switcher, {
+            paymentMode: 'upi',
+            upiId: 'shop@upi',
+            upiIdConfirm: 'shop@upi',
+            upiCaptureMethod: 'MANUAL',
+          }),
+        ).rejects.toThrow('Manual UPI entry is not enabled');
+        expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+      });
+
+      it('F7: a QR UPI capture is unaffected when manual entry is OFF', async () => {
+        mockTenantSettings.getEffectiveSettings.mockResolvedValue({
+          salesApp: { upiEnabled: true, upiManualEntry: false },
+          uniquenessPolicy: { gst: true, phone: true, bank: true, upi: true },
+        });
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'ANY', parentId: null });
+        await service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi', upiCaptureMethod: 'QR' });
+        expect(mockPrisma.channelPartner.update.mock.calls[0][0].data).toMatchObject({ upiCaptureMethod: 'QR' });
+      });
+
+      it('F6: a UPI capture still nulls the redemption cheque key (self-serve behaviour unchanged)', async () => {
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'ANY', parentId: null });
+        await service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi', upiCaptureMethod: 'QR' });
+        expect(mockPrisma.channelPartner.update.mock.calls[0][0].data).toMatchObject({
+          payoutChequeFileKey: null, bankName: null, bankAccountHolder: null, bankAccountNumber: null, ifscCode: null,
+        });
+      });
+      it('rejects a MANUAL UPI capture with NO confirmation (400, nothing written)', async () => {
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'ANY', parentId: null });
+        await expect(
+          service.capturePayoutDetails(switcher, {
+            paymentMode: 'upi',
+            upiId: 'shop@upi',
+            upiCaptureMethod: 'MANUAL',
+          }),
+        ).rejects.toThrow('UPI IDs do not match');
+        expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+      });
+
+      it('rejects a MANUAL UPI capture whose confirmation differs (400, nothing written)', async () => {
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'ANY', parentId: null });
+        await expect(
+          service.capturePayoutDetails(switcher, {
+            paymentMode: 'upi',
+            upiId: 'shop@upi',
+            upiIdConfirm: 'shop@ybl',
+            upiCaptureMethod: 'MANUAL',
+          }),
+        ).rejects.toThrow('UPI IDs do not match');
+        expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+      });
+
+      it('accepts a MANUAL UPI whose confirmation matches case/space-insensitively + records MANUAL', async () => {
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'ANY', parentId: null });
+        await service.capturePayoutDetails(switcher, {
+          paymentMode: 'upi',
+          upiId: 'Shop@UPI',
+          upiIdConfirm: '  shop@upi ',
+          upiCaptureMethod: 'MANUAL',
+        });
+        const data = mockPrisma.channelPartner.update.mock.calls[0][0].data;
+        expect(data).toMatchObject({ upiId: 'shop@upi', upiCaptureMethod: 'MANUAL', bankAccountNumber: null });
+      });
+
+      it('accepts a QR UPI capture WITHOUT a confirmation + records QR', async () => {
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'ANY', parentId: null });
+        await service.capturePayoutDetails(switcher, {
+          paymentMode: 'upi',
+          upiId: 'shop@upi',
+          upiCaptureMethod: 'QR',
+        });
+        const data = mockPrisma.channelPartner.update.mock.calls[0][0].data;
+        expect(data).toMatchObject({ upiId: 'shop@upi', upiCaptureMethod: 'QR' });
+      });
+
+      it('a UPI capture with no method records upiCaptureMethod NULL (unknown)', async () => {
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'ANY', parentId: null });
+        await service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi' });
+        const data = mockPrisma.channelPartner.update.mock.calls[0][0].data;
+        expect(data.upiCaptureMethod).toBeNull();
+      });
+
+      it('a bank capture nulls upiCaptureMethod alongside upiId', async () => {
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'BANK', parentId: null });
+        await service.capturePayoutDetails(switcher, {
+          paymentMode: 'bank',
+          bankName: 'HDFC',
+          accountNumber: '50100123',
+          ifscCode: 'HDFC0001',
+          chequeFileKey: 'kyc/deoleo/cheque.jpg',
+        });
+        const data = mockPrisma.channelPartner.update.mock.calls[0][0].data;
+        expect(data).toMatchObject({ upiId: null, upiCaptureMethod: null });
+      });
+
+      // ── R6 / R7: manual-entry gate only for a genuinely NEW typed UPI; prior method preserved ──
+      const manualOff = {
+        salesApp: { upiEnabled: true, upiManualEntry: false },
+        uniquenessPolicy: { gst: true, phone: true, bank: true, upi: true },
+      };
+      const NEEDS_RECAPTURE_UPI = { upiId: 'shop@upi', upiCaptureMethod: 'QR', paymentDetailsStatus: 'NEEDS_RECAPTURE' };
+
+      it('R6: re-entering the STORED UPI as MANUAL with manual entry OFF → accepted, stored method kept', async () => {
+        mockTenantSettings.getEffectiveSettings.mockResolvedValue(manualOff);
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'ANY', parentId: null }, NEEDS_RECAPTURE_UPI);
+        await service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'Shop@UPI', upiCaptureMethod: 'MANUAL' });
+        expect(mockPrisma.channelPartner.update.mock.calls[0][0].data).toMatchObject({
+          upiId: 'shop@upi', upiCaptureMethod: 'QR',
+        });
+      });
+
+      it('R6: a NEW typed UPI with manual entry OFF → 400 after an UNCACHED settings re-read', async () => {
+        mockTenantSettings.getEffectiveSettings.mockResolvedValue(manualOff);
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'ANY', parentId: null }, NEEDS_RECAPTURE_UPI);
+        await expect(
+          service.capturePayoutDetails(switcher, {
+            paymentMode: 'upi', upiId: 'other@upi', upiIdConfirm: 'other@upi', upiCaptureMethod: 'MANUAL',
+          }),
+        ).rejects.toThrow('Manual UPI entry is not enabled');
+        expect(mockTenantSettings.getEffectiveSettings).toHaveBeenCalledWith(expect.any(String), { fresh: true });
+        expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+      });
+
+      it('R6: stale cache says OFF but the fresh read says ON → accepted as MANUAL', async () => {
+        mockTenantSettings.getEffectiveSettings.mockImplementation(async (_c: string, opts?: { fresh?: boolean }) => ({
+          salesApp: { upiEnabled: true, upiManualEntry: !!opts?.fresh },
+          uniquenessPolicy: { gst: true, phone: true, bank: true, upi: true },
+        }));
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'ANY', parentId: null });
+        await service.capturePayoutDetails(switcher, {
+          paymentMode: 'upi', upiId: 'new@upi', upiIdConfirm: 'new@upi', upiCaptureMethod: 'MANUAL',
+        });
+        expect(mockPrisma.channelPartner.update.mock.calls[0][0].data).toMatchObject({ upiCaptureMethod: 'MANUAL' });
+      });
+
+      it('R7: re-entering the stored UPI with NO method (old cached FE) keeps the stored method, not null', async () => {
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'ANY', parentId: null }, NEEDS_RECAPTURE_UPI);
+        await service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi' });
+        expect(mockPrisma.channelPartner.update.mock.calls[0][0].data.upiCaptureMethod).toBe('QR');
+      });
+
+      it('M1: stale cache (UPI uniqueness OFF) but the fresh read ON → a duplicate UPI is rejected', async () => {
+        mockTenantSettings.getEffectiveSettings.mockImplementation(async (_c: string, opts?: { fresh?: boolean }) => ({
+          salesApp: { upiEnabled: true, upiManualEntry: true },
+          uniquenessPolicy: { gst: true, phone: true, bank: false, upi: !!opts?.fresh },
+        }));
+        mockPrisma.channelPartner.findMany.mockImplementation(async (args: { where?: Record<string, unknown> }) =>
+          args?.where && 'upiId' in args.where ? [{ id: 'cp-other', isParent: false, outlets: [{ parentId: null }] }] : [],
+        );
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'ANY', parentId: null });
+        await expect(
+          service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'dup@upi', upiCaptureMethod: 'QR' }),
+        ).rejects.toThrow(/already registered/);
+        expect(mockTenantSettings.getEffectiveSettings).toHaveBeenCalledWith(expect.any(String), { fresh: true });
+        expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+      });
+
+      it('M1: a bank capture keeps the cached settings read (no uncached read)', async () => {
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'ANY', parentId: null });
+        await service.capturePayoutDetails(switcher, {
+          paymentMode: 'bank', bankName: 'HDFC', accountNumber: '50100', ifscCode: 'HDFC0001',
+          chequeFileKey: 'kyc/deoleo/cheque.jpg',
+        } as never);
+        for (const call of mockTenantSettings.getEffectiveSettings.mock.calls) expect(call[1]).toBeUndefined();
+      });
+
+      it('L3: no method sent + UPI equal to the GROUP prefill → the group method (QR) is kept', async () => {
+        mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+        primePartner({ requiredPaymentType: 'ANY', parentId: 'parent-1' });
+        // 3rd findFirst: resolveGroupIdentity's approved-parent read
+        mockPrisma.channelPartner.findFirst.mockResolvedValueOnce({
+          onboardedAt: new Date(), businessName: 'P', ownerName: 'P', gstNumber: null, panNumber: null,
+          bankName: null, bankAccountNumber: null, bankAccountHolder: null, ifscCode: null,
+          upiId: 'group@upi', upiCaptureMethod: 'QR', paymentDetailsStatus: 'VERIFIED',
+        });
+        await service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'Group@UPI' });
+        expect(mockPrisma.channelPartner.update.mock.calls[0][0].data).toMatchObject({ upiId: 'group@upi', upiCaptureMethod: 'QR' });
+      });
     });
   });
 

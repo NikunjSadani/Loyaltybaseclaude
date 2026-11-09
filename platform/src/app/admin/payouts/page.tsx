@@ -18,6 +18,22 @@ import {
 import { Spinner } from '@/components/ui/spinner';
 import { authHeader } from '@/lib/api-client';
 
+/* ─── UTR upload result (payouts.service.ts uploadPayoutUtr) ───────────────── */
+
+/** A row whose payout was already moved to SUCCESS/FAILED by an overlapping upload — not applied. */
+interface UtrSkippedRow {
+  rowNum: number;
+  txnId: string;
+  outcome: 'PAID' | 'FAILED';
+  reason: string;
+}
+
+interface UtrUploadResult {
+  paidCount: number;
+  failedCount: number;
+  skipped: UtrSkippedRow[];
+}
+
 /* ─── Batch status types (REAL schema from payouts.service.ts) ──────────────── */
 
 type PayoutBatchStatus =
@@ -153,7 +169,7 @@ export default function PayoutsPage() {
   const [utrDownloadErr, setUtrDownloadErr] = useState<string | null>(null);
   const [utrUploading,   setUtrUploading]   = useState(false);
   const [utrUploadErr,   setUtrUploadErr]   = useState<string | null>(null);
-  const [utrUploadResult, setUtrUploadResult] = useState<{ paidCount: number; failedCount: number } | null>(null);
+  const [utrUploadResult, setUtrUploadResult] = useState<UtrUploadResult | null>(null);
   const [recoDownloading, setRecoDownloading] = useState(false);
   const [recoDownloadErr, setRecoDownloadErr] = useState<string | null>(null);
   const utrFileRef = useRef<HTMLInputElement>(null);
@@ -347,7 +363,12 @@ export default function PayoutsPage() {
         setUtrUploadErr(json.error ?? `HTTP ${res.status}`);
         return;
       }
-      setUtrUploadResult({ paidCount: json.data.paidCount, failedCount: json.data.failedCount });
+      setUtrUploadResult({
+        paidCount: json.data.paidCount,
+        failedCount: json.data.failedCount,
+        // Older API builds omit `skipped` — treat as none.
+        skipped: Array.isArray(json.data.skipped) ? json.data.skipped : [],
+      });
       // Reload to reflect updated transaction statuses.
       load();
     } catch (err) {
@@ -696,6 +717,30 @@ export default function PayoutsPage() {
                 <div className="bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-xs text-green-700 flex items-start gap-2">
                   <CheckCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                   UTR applied: {utrUploadResult.paidCount} paid, {utrUploadResult.failedCount} failed.
+                </div>
+              )}
+              {/* Rows NOT applied because an overlapping upload already updated that payout.
+                  Listed per row (sheet row number + reason) like row errors, so a mixed result
+                  can't read as "all applied". */}
+              {utrUploadResult && utrUploadResult.skipped.length > 0 && (
+                <div
+                  role="status"
+                  data-testid="utr-skipped"
+                  className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800 flex items-start gap-2"
+                >
+                  <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-semibold">
+                      {utrUploadResult.skipped.length} row{utrUploadResult.skipped.length === 1 ? '' : 's'} not applied
+                    </p>
+                    <ul className="mt-1 space-y-0.5">
+                      {utrUploadResult.skipped.map((s) => (
+                        <li key={`${s.rowNum}-${s.txnId}`}>
+                          Row {s.rowNum} <span className="font-mono text-amber-700">({s.txnId})</span>: {s.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 </div>
               )}
               {utrDownloadErr && (

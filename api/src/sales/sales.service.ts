@@ -2118,6 +2118,7 @@ export class SalesService {
                 bankAccountHolder: true,
                 ifscCode: true,
                 upiId: true,
+                upiCaptureMethod: true,
                 // Capture-bank-at-redemption: gate the payout prefill on this so a self-captured,
                 // not-yet-paid (UNVERIFIED/NEEDS_RECAPTURE) rail is NOT leaked into the rep's re-KYC form.
                 paymentDetailsStatus: true,
@@ -2238,6 +2239,19 @@ export class SalesService {
                   accountHolderName: payoutVerified ? (partner.bankAccountHolder ?? '') : '',
                   ifscCode: payoutVerified ? (partner.ifscCode ?? '') : '',
                   upiId: payoutVerified ? (partner.upiId ?? '') : '',
+                  // How the stored UPI was captured ('QR' | 'MANUAL' | null = legacy/unknown).
+                  upiCaptureMethod: payoutVerified ? (partner.upiCaptureMethod ?? null) : null,
+                  // The partner's CURRENT payout rail — FE contract: the re-KYC wizard defaults its
+                  // payment method to this. Payouts route UPI-first, so a visible UPI wins; else a
+                  // visible bank account; else null. Same visibility gate as the payout fields above
+                  // (a hidden self-captured rail never surfaces, not even as its mode).
+                  paymentMode: !payoutVerified
+                    ? null
+                    : partner.upiId?.trim()
+                      ? ('upi' as const)
+                      : partner.bankAccountNumber?.trim()
+                        ? ('bank' as const)
+                        : null,
                 }
               : null;
 
@@ -2258,6 +2272,10 @@ export class SalesService {
                 bankAccountHolder: groupInfo.identity.bankAccountHolder ?? '',
                 ifscCode: groupInfo.identity.ifscCode ?? '',
                 upiId: groupInfo.identity.upiId ?? '',
+                // How the group's UPI was captured ('QR' | 'MANUAL' | null = legacy/unknown) — travels
+                // with the UPI it describes, under the SAME payout-verified gating (resolveGroupIdentity
+                // blanks both when the group source's payout is unverified).
+                upiCaptureMethod: groupInfo.identity.upiCaptureMethod ?? null,
                 // PAN = the authoritative group PAN (what the child's PAN is locked to + the backend
                 // enforces via checkPanMatchesGroup). Aligning the displayed PAN with the lock avoids a
                 // self-contradictory payload when the identity source carries no PAN but a sibling does.

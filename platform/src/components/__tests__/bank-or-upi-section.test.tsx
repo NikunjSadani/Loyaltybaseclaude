@@ -9,7 +9,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
@@ -46,7 +46,9 @@ const upiProps = { ...baseProps, paymentMode: 'upi' as const };
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // Restore the default (UPI enabled) — clearAllMocks wipes the implementation.
+  // Full reset (incl. any queued *Once values) then restore the default (UPI enabled, manual
+  // entry OFF) — so a describe that turns manual entry ON can never leak into a later block.
+  getGifsySettingsMock.mockReset();
   getGifsySettingsMock.mockReturnValue({ salesApp: { upiEnabled: true } });
 });
 afterEach(() => vi.useRealTimers());
@@ -369,6 +371,174 @@ describe('UPI manual entry — salesApp.upiManualEntry', () => {
       render(<BankOrUpiSection {...upiProps} upiId="user@paytm" disabledFields={{ upiId: true }} />);
       expect(screen.getByTestId('manual-upi-input')).toBeDisabled();
     });
+
+    it('sets mobile-friendly attributes + a required label on the manual input', () => {
+      render(<BankOrUpiSection {...upiProps} />);
+      const input = screen.getByTestId('manual-upi-input');
+      expect(input).toHaveAttribute('autocapitalize', 'none');
+      expect(input).toHaveAttribute('autocorrect', 'off');
+      expect(input).toHaveAttribute('spellcheck', 'false');
+      expect(input).toHaveAttribute('inputmode', 'email');
+      expect(input).toHaveAttribute('autocomplete', 'off');
+      expect(input).toHaveAttribute('maxlength', '100');
+      expect(screen.getByLabelText('UPI ID *')).toBe(input);
+      // The "*" is conveyed to assistive tech too.
+      expect(input).toHaveAttribute('aria-required', 'true');
+    });
+
+    /* Controlled harness: the parent owns upiId (as KYC / payout-capture do), so a scan or a
+       keystroke round-trips through the prop exactly like production. */
+    function Controlled({ initial = '', onGeo }: { initial?: string; onGeo: () => void }) {
+      const [upi, setUpi] = React.useState(initial);
+      return <BankOrUpiSection {...upiProps} upiId={upi} onUpiChange={setUpi} onPaymentGeoTrigger={onGeo} />;
+    }
+
+    it('QR scan then a manual edit fires onPaymentGeoTrigger ONCE in total', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const jsqrModule = await import('jsqr');
+      vi.mocked(jsqrModule.default).mockReturnValueOnce({
+        data: 'upi://pay?pa=user@paytm',
+        location: {} as any,
+        binaryData: [],
+        chunks: [],
+        version: 1,
+      });
+      const onGeo = vi.fn();
+      render(<Controlled onGeo={onGeo} />);
+
+      await userEvent.click(screen.getByRole('button', { name: /scan qr/i }));
+      await act(async () => { vi.advanceTimersByTime(400); });
+      await waitFor(() => expect(screen.getByTestId('manual-upi-input')).toHaveValue('user@paytm'));
+      expect(onGeo).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
+
+      await userEvent.type(screen.getByTestId('manual-upi-input'), 'x');
+      expect(screen.getByTestId('manual-upi-input')).toHaveValue('user@paytmx');
+      expect(onGeo).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT fire geo when editing a UPI ID already present at mount', async () => {
+      const onGeo = vi.fn();
+      render(<Controlled initial="user@paytm" onGeo={onGeo} />);
+      await userEvent.type(screen.getByTestId('manual-upi-input'), 'x');
+      expect(screen.getByTestId('manual-upi-input')).toHaveValue('user@paytmx');
+      expect(onGeo).not.toHaveBeenCalled();
+    });
+
+    it('re-arms after clearing: clear then type fires geo again', async () => {
+      const onGeo = vi.fn();
+      render(<Controlled onGeo={onGeo} />);
+      const input = screen.getByTestId('manual-upi-input');
+      await userEvent.type(input, 'a');
+      expect(onGeo).toHaveBeenCalledTimes(1);
+      await userEvent.clear(input);
+      expect(input).toHaveValue('');
+      await userEvent.type(input, 'b');
+      expect(onGeo).toHaveBeenCalledTimes(2);
+    });
+
+    it('typing while the camera is scanning stops the scan', async () => {
+      render(<Controlled onGeo={vi.fn()} />);
+      await userEvent.click(screen.getByRole('button', { name: /scan qr/i }));
+      await waitFor(() => expect(screen.getByTestId('qr-camera-view')).toBeInTheDocument());
+      await userEvent.type(screen.getByTestId('manual-upi-input'), 'a');
+      await waitFor(() => expect(screen.queryByTestId('qr-camera-view')).not.toBeInTheDocument());
+    });
+
+    /* G6 — the fire-once geo guard seeds from `paymentGeoCaptured` when the parent provides it. */
+    it('G6: a PRE-FILLED UPI with paymentGeoCaptured=false still fires geo ONCE on the first keystroke', async () => {
+      const onGeo = vi.fn();
+      function PrefilledNoGeo() {
+        const [upi, setUpi] = React.useState('owner@okaxis'); // e.g. parent-prefilled child
+        return (
+          <BankOrUpiSection {...upiProps} upiId={upi} onUpiChange={setUpi}
+            onPaymentGeoTrigger={onGeo} paymentGeoCaptured={false} />
+        );
+      }
+      render(<PrefilledNoGeo />);
+      await userEvent.type(screen.getByTestId('manual-upi-input'), 'xy');
+      expect(screen.getByTestId('manual-upi-input')).toHaveValue('owner@okaxisxy');
+      expect(onGeo).toHaveBeenCalledTimes(1);
+    });
+
+    it('G6: a pre-filled UPI with paymentGeoCaptured=true (e.g. re-KYC carried geo) does NOT re-fire geo on edit', async () => {
+      const onGeo = vi.fn();
+      function GeoAlready() {
+        const [upi, setUpi] = React.useState('owner@okaxis');
+        return (
+          <BankOrUpiSection {...upiProps} upiId={upi} onUpiChange={setUpi}
+            onPaymentGeoTrigger={onGeo} paymentGeoCaptured />
+        );
+      }
+      render(<GeoAlready />);
+      await userEvent.type(screen.getByTestId('manual-upi-input'), 'a');
+      expect(screen.getByTestId('manual-upi-input')).toHaveValue('owner@okaxisa');
+      expect(onGeo).not.toHaveBeenCalled();
+    });
+
+    /* G4 — a QR decode already in flight when the scan stops / typing begins is DROPPED. */
+    async function startScanAndKickDecode(onStop: () => void) {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const jsqrModule = await import('jsqr');
+      vi.mocked(jsqrModule.default).mockReturnValue({
+        data: 'upi://pay?pa=late@paytm',
+        location: {} as any,
+        binaryData: [],
+        chunks: [],
+        version: 1,
+      });
+      await userEvent.click(screen.getByRole('button', { name: /scan qr/i }));
+      await waitFor(() => expect(screen.getByTestId('qr-camera-view')).toBeInTheDocument());
+      await act(async () => {}); // let getUserMedia/play resolve → the poll interval is armed
+      // One poll tick kicks off a decode (its dynamic import resolves asynchronously); the
+      // stop/typing happens in the SAME synchronous turn, i.e. while that decode is in flight.
+      act(() => {
+        vi.advanceTimersByTime(310);
+        onStop();
+      });
+      await act(async () => { await vi.dynamicImportSettled(); });
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+      return jsqrModule;
+    }
+
+    it('G4: Stop Scanning while a decode is in flight → the late result is ignored (no value, no QR, no geo)', async () => {
+      const onUpiChange = vi.fn();
+      const onMethod = vi.fn();
+      const onGeo = vi.fn();
+      render(
+        <BankOrUpiSection {...upiProps} onUpiChange={onUpiChange}
+          onUpiCaptureMethodChange={onMethod} onPaymentGeoTrigger={onGeo} />,
+      );
+      const jsqrModule = await startScanAndKickDecode(() => {
+        fireEvent.click(screen.getByRole('button', { name: /stop scanning/i }));
+      });
+      // The decode DID run to completion (non-vacuous) — its result was dropped.
+      expect(jsqrModule.default).toHaveBeenCalled();
+      expect(onUpiChange).not.toHaveBeenCalled();
+      expect(onMethod).not.toHaveBeenCalledWith('QR');
+      expect(onGeo).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('qr-camera-view')).not.toBeInTheDocument();
+      vi.mocked(jsqrModule.default).mockReset();
+      vi.mocked(jsqrModule.default).mockReturnValue(null);
+    });
+
+    it('G4: typing while a decode is in flight → the typed value survives and the method stays MANUAL', async () => {
+      const onMethod = vi.fn();
+      function Typed() {
+        const [upi, setUpi] = React.useState('');
+        return <BankOrUpiSection {...upiProps} upiId={upi} onUpiChange={setUpi} onUpiCaptureMethodChange={onMethod} />;
+      }
+      render(<Typed />);
+      const jsqrModule = await startScanAndKickDecode(() => {
+        fireEvent.change(screen.getByTestId('manual-upi-input'), { target: { value: 'typed@okaxis' } });
+      });
+      expect(jsqrModule.default).toHaveBeenCalled();
+      expect(screen.getByTestId('manual-upi-input')).toHaveValue('typed@okaxis');
+      expect(onMethod).toHaveBeenCalledWith('MANUAL');
+      expect(onMethod).not.toHaveBeenCalledWith('QR');
+      vi.mocked(jsqrModule.default).mockReset();
+      vi.mocked(jsqrModule.default).mockReturnValue(null);
+    });
   });
 
   describe('disabled (upiManualEntry falsy — default, byte-identical to today)', () => {
@@ -454,6 +624,120 @@ describe('UPI gate — salesApp.upiEnabled', () => {
       const onPaymentModeChange = vi.fn();
       render(<BankOrUpiSection {...upiProps} onPaymentModeChange={onPaymentModeChange} />);
       expect(onPaymentModeChange).not.toHaveBeenCalled();
+    });
+  });
+});
+
+/* ─── H: UPI capture-method provenance (VPA safeguards) ─────────────────────── */
+
+describe('onUpiCaptureMethodChange — QR / MANUAL / null', () => {
+  /* Controlled harness: parent owns upiId so scans/keystrokes round-trip like production. */
+  function Controlled({ initial = '', onMethod }: { initial?: string; onMethod: (m: 'QR' | 'MANUAL' | null) => void }) {
+    const [upi, setUpi] = React.useState(initial);
+    return <BankOrUpiSection {...upiProps} upiId={upi} onUpiChange={setUpi} onUpiCaptureMethodChange={onMethod} />;
+  }
+
+  async function scanQr(vpa: string) {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const jsqrModule = await import('jsqr');
+    vi.mocked(jsqrModule.default).mockReturnValueOnce({
+      data: `upi://pay?pa=${vpa}`,
+      location: {} as any,
+      binaryData: [],
+      chunks: [],
+      version: 1,
+    });
+    await userEvent.click(screen.getByRole('button', { name: /scan qr/i }));
+    await act(async () => { vi.advanceTimersByTime(400); });
+    vi.useRealTimers();
+  }
+
+  it('emits QR after a successful scan (QR-only tenant)', async () => {
+    const onMethod = vi.fn();
+    render(<Controlled onMethod={onMethod} />);
+    await scanQr('user@paytm');
+    await waitFor(() => expect(screen.getByTestId('scanned-upi-display')).toBeInTheDocument());
+    expect(onMethod).toHaveBeenLastCalledWith('QR');
+    expect(onMethod).not.toHaveBeenCalledWith('MANUAL');
+  });
+
+  it('emits null when a scanned ID is cleared via the clear button', async () => {
+    const onMethod = vi.fn();
+    render(<Controlled onMethod={onMethod} />);
+    await scanQr('user@paytm');
+    await waitFor(() => expect(screen.getByTestId('clear-scanned-upi')).toBeInTheDocument());
+    await userEvent.click(screen.getByTestId('clear-scanned-upi'));
+    expect(onMethod).toHaveBeenLastCalledWith(null);
+  });
+
+  describe('manual entry tenant', () => {
+    beforeEach(() => {
+      getGifsySettingsMock.mockReturnValue({ salesApp: { upiEnabled: true, upiManualEntry: true } });
+    });
+
+    it('emits MANUAL when typing into the manual input', async () => {
+      const onMethod = vi.fn();
+      render(<Controlled onMethod={onMethod} />);
+      await userEvent.type(screen.getByTestId('manual-upi-input'), 'shop@upi');
+      expect(onMethod).toHaveBeenLastCalledWith('MANUAL');
+      expect(onMethod).not.toHaveBeenCalledWith('QR');
+    });
+
+    it('emits null when the typed value is cleared', async () => {
+      const onMethod = vi.fn();
+      render(<Controlled onMethod={onMethod} />);
+      const input = screen.getByTestId('manual-upi-input');
+      await userEvent.type(input, 'a');
+      expect(onMethod).toHaveBeenLastCalledWith('MANUAL');
+      await userEvent.clear(input);
+      expect(onMethod).toHaveBeenLastCalledWith(null);
+    });
+
+    it('emits QR on scan, then MANUAL once the scanned value is hand-edited', async () => {
+      const onMethod = vi.fn();
+      render(<Controlled onMethod={onMethod} />);
+      await scanQr('user@paytm');
+      await waitFor(() => expect(screen.getByTestId('manual-upi-input')).toHaveValue('user@paytm'));
+      expect(onMethod).toHaveBeenLastCalledWith('QR');
+      await userEvent.type(screen.getByTestId('manual-upi-input'), 'x');
+      expect(onMethod).toHaveBeenLastCalledWith('MANUAL');
+    });
+  });
+
+  it('is optional — omitting it does not throw on scan or clear', async () => {
+    function NoCb() {
+      const [upi, setUpi] = React.useState('');
+      return <BankOrUpiSection {...upiProps} upiId={upi} onUpiChange={setUpi} />;
+    }
+    render(<NoCb />);
+    await scanQr('user@paytm');
+    await waitFor(() => expect(screen.getByTestId('clear-scanned-upi')).toBeInTheDocument());
+    await userEvent.click(screen.getByTestId('clear-scanned-upi'));
+    expect(screen.queryByTestId('scanned-upi-display')).not.toBeInTheDocument();
+  });
+
+  /* U3: only a value decoded from a QR scan IN THIS SESSION is labelled "UPI ID Scanned"; a
+     pre-filled UPI (re-KYC / group prefill) gets the neutral "UPI ID" label. */
+  describe('scanned-display label honesty', () => {
+    it('a PRE-FILLED UPI (not scanned this session) is labelled "UPI ID", not "UPI ID Scanned"', () => {
+      render(<Controlled initial="prefilled@okaxis" onMethod={vi.fn()} />);
+      expect(screen.getByTestId('scanned-upi-display')).toHaveTextContent('prefilled@okaxis');
+      expect(screen.getByTestId('scanned-upi-label')).toHaveTextContent(/^UPI ID$/);
+      expect(screen.queryByText('UPI ID Scanned')).not.toBeInTheDocument();
+    });
+
+    it('a value scanned THIS session is labelled "UPI ID Scanned"', async () => {
+      render(<Controlled onMethod={vi.fn()} />);
+      await scanQr('user@paytm');
+      await waitFor(() => expect(screen.getByTestId('scanned-upi-label')).toHaveTextContent('UPI ID Scanned'));
+    });
+
+    it('re-scanning over a pre-filled value flips the label to "UPI ID Scanned"', async () => {
+      render(<Controlled initial="prefilled@okaxis" onMethod={vi.fn()} />);
+      expect(screen.getByTestId('scanned-upi-label')).toHaveTextContent(/^UPI ID$/);
+      await scanQr('fresh@paytm');
+      await waitFor(() => expect(screen.getByTestId('scanned-upi-display')).toHaveTextContent('fresh@paytm'));
+      expect(screen.getByTestId('scanned-upi-label')).toHaveTextContent('UPI ID Scanned');
     });
   });
 });

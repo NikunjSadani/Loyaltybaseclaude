@@ -177,6 +177,8 @@ export interface GroupIdentity {
   bankAccountHolder: string | null;
   ifscCode: string | null;
   upiId: string | null;
+  /** How `upiId` was captured ('QR' | 'MANUAL' | null = legacy/unknown) — gated like upiId. */
+  upiCaptureMethod: string | null;
   /**
    * The APPROVED group member (parent or sibling ChannelPartner) this identity was resolved from —
    * the SAME source used for DOCUMENT carry-forward (resolveGroupCarryForwardDocs). Null only when
@@ -210,6 +212,7 @@ export async function resolveGroupIdentity(
     select: {
       onboardedAt: true, businessName: true, ownerName: true, gstNumber: true, panNumber: true,
       bankName: true, bankAccountNumber: true, bankAccountHolder: true, ifscCode: true, upiId: true,
+      upiCaptureMethod: true,
       // Capture-bank-at-redemption: only VERIFIED payout details feed a child's prefill (a source
       // that self-captured not-yet-paid details must NOT seed them into grouped children's KYC).
       paymentDetailsStatus: true,
@@ -250,6 +253,7 @@ export async function resolveGroupIdentity(
       id: true,
       businessName: true, ownerName: true, gstNumber: true, panNumber: true,
       bankName: true, bankAccountNumber: true, bankAccountHolder: true, ifscCode: true, upiId: true,
+      upiCaptureMethod: true,
       paymentDetailsStatus: true,
     },
   });
@@ -356,6 +360,7 @@ function pickGroupIdentity(
     bankAccountHolder: payoutVerified ? (p.bankAccountHolder ?? null) : null,
     ifscCode: payoutVerified ? (p.ifscCode ?? null) : null,
     upiId: payoutVerified ? (p.upiId ?? null) : null,
+    upiCaptureMethod: payoutVerified ? (p.upiCaptureMethod ?? null) : null,
     sourcePartnerId,
   };
 }

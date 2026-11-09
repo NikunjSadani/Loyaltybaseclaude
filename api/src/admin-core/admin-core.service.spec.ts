@@ -59,6 +59,8 @@ const mockTenant = { resolveClient: jest.fn(), invalidateCache: jest.fn() };
 const mockTenantSettings = {
   invalidate: jest.fn(),
   getVisibilityEnabledUncached: jest.fn().mockResolvedValue(true),
+  // VPA safeguard (salesApp.upiManualEntry guard) reads the STORED uniqueness policy.
+  getEffectiveSettings: jest.fn(),
 };
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
@@ -1004,6 +1006,124 @@ describe('AdminCoreService', () => {
       expect(call.create.settingValue).toBe(12);
       // Cache bust so the new value is visible immediately.
       expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
+    });
+
+    // ── VPA safeguard: manual UPI entry requires STORED UPI-ID uniqueness ──
+    describe('salesApp.upiManualEntry guard', () => {
+      const stored = (upi: boolean, upiManualEntry = false) =>
+        mockTenantSettings.getEffectiveSettings.mockResolvedValueOnce({
+          // The DERIVED policy may already read upi=true (it ORs in upiManualEntry) — the guard
+          // must ignore it and use the STORED value.
+          uniquenessPolicy: { gst: true, phone: true, bank: false, upi: true },
+          uniquenessPolicyStored: { gst: true, phone: true, bank: false, upi },
+          salesApp: { ledgerLabel: 'Wallet', upiEnabled: true, upiManualEntry },
+        });
+
+      it('rejects turning manual entry ON while STORED UPI uniqueness is OFF (400, nothing written)', async () => {
+        stored(false);
+        await expect(
+          service.upsertSetting(gifsy, {
+            key: 'salesApp',
+            value: { ledgerLabel: 'Wallet', upiEnabled: true, upiManualEntry: true },
+          }),
+        ).rejects.toThrow('Turn on UPI ID uniqueness first');
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+        // Cache busted first so the check reads the DB, not a stale copy.
+        expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
+      });
+
+      it('allows turning manual entry ON when STORED UPI uniqueness is ON', async () => {
+        stored(true);
+        await service.upsertSetting(gifsy, {
+          key: 'salesApp',
+          value: { ledgerLabel: 'Wallet', upiEnabled: true, upiManualEntry: true },
+        });
+        expect(mockPrisma.programSetting.upsert).toHaveBeenCalled();
+      });
+
+      it('always allows turning manual entry OFF (no policy read needed)', async () => {
+        await service.upsertSetting(gifsy, {
+          key: 'salesApp',
+          value: { ledgerLabel: 'Wallet', upiEnabled: true, upiManualEntry: false },
+        });
+        expect(mockTenantSettings.getEffectiveSettings).not.toHaveBeenCalled();
+        expect(mockPrisma.programSetting.upsert).toHaveBeenCalled();
+      });
+
+      // F8 — only an OFF→ON TRANSITION is gated (previous value read fresh from the DB).
+      it('allows re-saving salesApp with manual entry ALREADY ON even if stored UPI uniqueness reads OFF (not a transition)', async () => {
+        stored(false, true);
+        await service.upsertSetting(gifsy, {
+          key: 'salesApp',
+          value: { ledgerLabel: 'Points', upiEnabled: true, upiManualEntry: true },
+        });
+        expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
+        expect(mockPrisma.programSetting.upsert).toHaveBeenCalled();
+      });
+
+      it('rejects uniquenessPolicy.upi=false while manual entry is STORED ON (400, nothing written)', async () => {
+        stored(true, true);
+        await expect(
+          service.upsertSetting(gifsy, {
+            key: 'uniquenessPolicy',
+            value: { gst: true, phone: true, bank: true, upi: false },
+          }),
+        ).rejects.toThrow('Turn off UPI Manual Entry first');
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+        expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
+      });
+
+      it('rejects a uniquenessPolicy write that OMITS upi (replace-whole → OFF) while manual entry is ON', async () => {
+        stored(true, true);
+        await expect(
+          service.upsertSetting(gifsy, { key: 'uniquenessPolicy', value: { gst: true, phone: true, bank: true } }),
+        ).rejects.toThrow('Turn off UPI Manual Entry first');
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+      });
+
+      it('allows uniquenessPolicy.upi=false when manual entry is stored OFF', async () => {
+        stored(true, false);
+        await service.upsertSetting(gifsy, {
+          key: 'uniquenessPolicy',
+          value: { gst: true, phone: true, bank: false, upi: false },
+        });
+        expect(mockPrisma.programSetting.upsert).toHaveBeenCalled();
+      });
+
+      it('allows a uniquenessPolicy write keeping upi=true without reading settings', async () => {
+        await service.upsertSetting(gifsy, {
+          key: 'uniquenessPolicy',
+          value: { gst: true, phone: true, bank: false, upi: true },
+        });
+        expect(mockTenantSettings.getEffectiveSettings).not.toHaveBeenCalled();
+        expect(mockPrisma.programSetting.upsert).toHaveBeenCalled();
+      });
+
+      // R9 — recovery from an INVALID stored state (manual entry ON while stored upi uniqueness OFF).
+      it('R9: invalid stored state (manual ON, upi OFF) → a uniquenessPolicy write turning upi ON is allowed', async () => {
+        // Stored state is irrelevant: the ON direction is never read nor gated.
+        await service.upsertSetting(gifsy, {
+          key: 'uniquenessPolicy',
+          value: { gst: true, phone: true, bank: false, upi: true },
+        });
+        expect(mockTenantSettings.getEffectiveSettings).not.toHaveBeenCalled();
+        expect(mockPrisma.programSetting.upsert).toHaveBeenCalledWith(
+          expect.objectContaining({
+            update: expect.objectContaining({ settingValue: { gst: true, phone: true, bank: false, upi: true } }),
+          }),
+        );
+      });
+
+      it('R9: invalid stored state (manual ON, upi OFF) → a write keeping upi OFF is still rejected', async () => {
+        stored(false, true);
+        await expect(
+          service.upsertSetting(gifsy, {
+            key: 'uniquenessPolicy',
+            value: { gst: true, phone: true, bank: false, upi: false },
+          }),
+        ).rejects.toThrow('Turn off UPI Manual Entry first');
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+      });
     });
 
     it('persists gifsySlaTargetHours as a normalised integer, tenant-scoped', async () => {

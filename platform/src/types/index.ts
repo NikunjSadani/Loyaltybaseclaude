@@ -557,6 +557,18 @@ export interface GifsySettings {
     bank:  boolean;
     upi:   boolean;
   };
+  /**
+   * The uniqueness policy as STORED (what the admin last saved). `uniquenessPolicy` above is the
+   * DERIVED/enforced value (upi forced true while salesApp.upiManualEntry is on). Admin
+   * display + save base MUST use this, never the derived value, so a save can't persist a
+   * derived upi=true. Same shape as `uniquenessPolicy`.
+   */
+  uniquenessPolicyStored?: {
+    gst:   boolean;
+    phone: boolean;
+    bank:  boolean;
+    upi:   boolean;
+  };
 }
 
 // ─── INR Payout Ledger Entry (Retailer / Sub-Stockist / MT) ──────────────────
