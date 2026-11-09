@@ -158,8 +158,9 @@ export class RewardsController {
   }
 
   // Orders reads are multi-audience + self-scoping in the service (partner → own,
-  // GIFSY → all-tenant, others → empty; getOrder additionally throws Forbidden for
-  // a non-owner non-GIFSY). Intentionally NOT @Roles-gated: the admin Gift-Catalogue
+  // GIFSY → all-tenant, CLIENT_ADMIN → its OWN tenant's orders, all partners — the view-only
+  // admin Fulfilment list; others → empty; getOrder additionally throws Forbidden for a
+  // non-owner non-GIFSY). Intentionally NOT @Roles-gated: the admin Gift-Catalogue
   // Fulfilment tab (CLIENT_ADMIN) also reads this, and gating it to partners 403'd
   // that page. Safety is the service-layer scoping, not a role allowlist here.
   @Get('orders')

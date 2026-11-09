@@ -24,7 +24,7 @@ import { resolveEffectiveKycStatus, isPartnerPayable } from '../kyc/kyc-eligibil
 import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
 import { isSalesRedeemEnabledForPartner } from '../common/sales-redeem-eligibility';
-import { isGifsyOperator, tenantScope } from '../common/tenant-scope';
+import { isGifsyOperator, isTenantAdmin, tenantScope } from '../common/tenant-scope';
 import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
 import { NOT_PARKED_OUTLET } from '../sales/sales.service';
 import { generateTenantOrderNumber } from './order-number.helper';
@@ -607,7 +607,8 @@ export class RewardsService {
   }
 
   /**
-   * GET /v1/rewards/orders — paginated redemption orders (own only for non-admins).
+   * GET /v1/rewards/orders — paginated redemption orders (own only for partners/sales; the
+   * whole tenant for a Gifsy operator; the caller's OWN tenant for a CLIENT_ADMIN, view-only).
    *
    * Two paging modes over ONE stable order (createdAt DESC, id DESC — the id tie-break makes
    * equal-timestamp rows page deterministically):
@@ -628,10 +629,18 @@ export class RewardsService {
     // Tenant scope by the partner's own clientId column (NOT partner.user.clientId):
     // a login-less sibling has no linked user, so a user-relation scope would hide
     // the switched sibling's orders. partner.clientId is authoritative for both.
+    // Tenant admin (CLIENT_ADMIN) → the VIEW-ONLY admin list of its OWN tenant's orders (all
+    // partners, no D4 exclusion — same rows a Gifsy operator sees for that tenant). Scoped
+    // strictly by the JWT clientId; the x-active-partner-id header is ignored. Fail closed on a
+    // blank clientId: `partner: { clientId: undefined }` would drop the tenant filter entirely.
+    const tenantAdmin = !this.isGifsy(user) && isTenantAdmin(user);
+    if (tenantAdmin && !user.clientId) {
+      throw new ForbiddenException('No tenant context for this admin.');
+    }
     const where: Prisma.RedemptionOrderWhereInput = {
       partner: { clientId: user.clientId },
     };
-    if (!this.isGifsy(user)) {
+    if (!this.isGifsy(user) && !tenantAdmin) {
       // Non-admins see only the ACTIVE partner's orders (own by default, or a
       // switched sibling named by x-active-partner-id — re-authorized here).
       const activePartnerId = await this.resolveActive(user, requestedPartnerId);

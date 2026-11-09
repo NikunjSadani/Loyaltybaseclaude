@@ -13,6 +13,10 @@ import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import AdminGiftsPage from '../page';
 
+// The Fulfilment tab's Advance + bulk controls are Gifsy-operator only; these suites exercise
+// them as GIFSY_ADMIN (the view-only CLIENT_ADMIN path is covered in gifts-orders-view-only).
+vi.mock('@/lib/admin-session', () => ({ useAdminSession: () => ({ role: 'GIFSY_ADMIN' }) }));
+
 function order(i: number, status = 'PENDING') {
   return {
     id: `o${i}`,
@@ -180,7 +184,7 @@ describe('GIFP — admin fulfilment queue paging', () => {
     const before = orderUrls.length;
 
     await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
-    await userEvent.selectOptions(screen.getByDisplayValue('CONFIRMED'), 'CANCELLED');
+    // PENDING's only console edge is CANCELLED (mirrors the backend table).
     await userEvent.click(screen.getByRole('button', { name: /confirm → CANCELLED/i }));
 
     const updated = (await screen.findByText('RDM-150')).closest('tr') as HTMLElement;
@@ -192,18 +196,16 @@ describe('GIFP — admin fulfilment queue paging', () => {
 
   it('GIFP5b: under a status filter, a transitioned row that no longer matches leaves the view and the total drops by one', async () => {
     installFetch(
-      (qs) => (qs.get('status') === 'PENDING'
-        ? jsonOk({ orders: range(1, 3), pagination: { page: 1, limit: 100, total: 3, pages: 1 }, nextCursor: null })
-        : jsonOk({ orders: range(1, 3), pagination: { page: 1, limit: 100, total: 3, pages: 1 }, nextCursor: null })),
+      () => jsonOk({ orders: range(1, 3, 'CONFIRMED'), pagination: { page: 1, limit: 100, total: 3, pages: 1 }, nextCursor: null }),
       (url, init) => (url === '/api/rewards/orders/o2/transition' && init?.method === 'POST'
-        ? jsonOk({ order: { id: 'o2', status: 'CONFIRMED' } })
+        ? jsonOk({ order: { id: 'o2', status: 'PROCESSING' } })
         : undefined),
     );
     await openFulfilment();
-    await userEvent.selectOptions(await screen.findByDisplayValue('All statuses'), 'PENDING');
+    await userEvent.selectOptions(await screen.findByDisplayValue('All statuses'), 'CONFIRMED');
     const row = (await screen.findByText('RDM-2')).closest('tr') as HTMLElement;
     await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
-    await userEvent.click(screen.getByRole('button', { name: /confirm → CONFIRMED/i }));
+    await userEvent.click(screen.getByRole('button', { name: /confirm → PROCESSING/i }));
 
     await waitFor(() => expect(screen.queryByText('RDM-2')).toBeNull());
     expect(screen.getByTestId('orders-count')).toHaveTextContent('(2)');

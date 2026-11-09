@@ -40,6 +40,7 @@ import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings';
 import { useAdminSession } from '@/lib/admin-session';
 import { redemptionModeLabel, canonicalRedemptionMode } from '@/lib/redemption-mode';
 import { derivePointsCost, parseRupeesToPaise } from '@/lib/gift-catalogue';
+import { nextStatusOptions } from '@/lib/redemption-order-transitions';
 import type { GifsySettings } from '@/types';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
@@ -140,14 +141,6 @@ const ORDER_STATUS_BADGE: Record<string, string> = {
   CANCELLED:  'bg-red-50 text-red-600 border-red-100',
   RETURNED:   'bg-red-50 text-red-600 border-red-100',
   REVERSED:   'bg-gray-50 text-gray-500 border-gray-200',
-};
-
-/** Guarded next-status options keyed by current status (mirrors the backend edge-map). */
-const NEXT_STATUS: Record<string, string[]> = {
-  PENDING:    ['CONFIRMED', 'CANCELLED'],
-  CONFIRMED:  ['PROCESSING', 'CANCELLED'],
-  PROCESSING: ['DISPATCHED', 'FAILED', 'CANCELLED'],
-  DISPATCHED: ['DELIVERED', 'RETURNED'],
 };
 
 const VOUCHER_LIKE = new Set<PayoutMode | string>(['GIFT_CARD']);
@@ -1263,8 +1256,19 @@ interface TransitionDraft {
 type OrderPatch = Pick<OrderItem, 'id'> &
   Partial<Pick<OrderItem, 'status' | 'voucherCode' | 'voucherProvider' | 'trackingNumber' | 'trackingUrl' | 'updatedAt'>>;
 
-function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned: (updated: OrderPatch | null) => void }) {
-  const options = NEXT_STATUS[order.status] ?? [];
+function OrderRow({
+  order, onTransitioned, canManage,
+}: {
+  order: OrderItem;
+  onTransitioned: (updated: OrderPatch | null) => void;
+  /** Gifsy operator → Advance controls; a tenant admin's list is VIEW-ONLY (no action column). */
+  canManage: boolean;
+}) {
+  const options = nextStatusOptions({
+    status: order.status,
+    redemptionMode: order.redemptionMode ?? order.reward?.redemptionMode ?? null,
+    voucherProvider: order.voucherProvider ?? null,
+  });
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<TransitionDraft>({
     toStatus: options[0] ?? '', voucherCode: '', voucherProvider: '',
@@ -1274,7 +1278,11 @@ function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned:
   const [err, setErr] = useState('');
 
   const isVoucher = VOUCHER_LIKE.has(order.redemptionMode ?? order.reward?.redemptionMode ?? '');
-  const advancingToConfirmed = draft.toStatus === 'CONFIRMED';
+  // PENDING→CONFIRMED is not a console edge (the member's OTP confirms), so the voucher code is
+  // captured on a FORWARD move instead — the backend accepts voucherCode on any transition and
+  // requires one before a digital voucher can be DELIVERED.
+  const advancingForwardWithVoucher =
+    isVoucher && ['PROCESSING', 'DISPATCHED', 'DELIVERED'].includes(draft.toStatus);
   const advancingToDispatched = draft.toStatus === 'DISPATCHED';
 
   const submit = async () => {
@@ -1324,20 +1332,22 @@ function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned:
             </span>
           )}
         </td>
-        <td className="px-4 py-3 text-right">
-          {options.length > 0 ? (
-            <button
-              onClick={() => { setOpen((o) => !o); setErr(''); }}
-              className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50"
-            >
-              {open ? 'Close' : 'Advance'}
-            </button>
-          ) : (
-            <span className="text-[10px] text-gray-300">—</span>
-          )}
-        </td>
+        {canManage && (
+          <td className="px-4 py-3 text-right">
+            {options.length > 0 ? (
+              <button
+                onClick={() => { setOpen((o) => !o); setErr(''); }}
+                className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50"
+              >
+                {open ? 'Close' : 'Advance'}
+              </button>
+            ) : (
+              <span className="text-[10px] text-gray-300">—</span>
+            )}
+          </td>
+        )}
       </tr>
-      {open && (
+      {canManage && open && (
         <tr>
           <td colSpan={7} className="px-4 py-4 bg-gray-50/70">
             <div className="space-y-3 max-w-2xl">
@@ -1352,7 +1362,7 @@ function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned:
                     {options.map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
                 </div>
-                {advancingToConfirmed && isVoucher && (
+                {advancingForwardWithVoucher && (
                   <>
                     <div className="space-y-1">
                       <label className="text-xs font-medium text-gray-700">Voucher code</label>
@@ -1446,7 +1456,18 @@ function ordersUrl(status: string, limit: number, cursor?: string | null): strin
   return `/api/rewards/orders?${p.toString()}`;
 }
 
+/**
+ * Who may change order status / run bulk fulfilment. The backend gates the transition +
+ * fulfilment template/upload to GIFSY_ADMIN (@Roles), with GIFSY_STAFF admitted only via a
+ * rewards:manage_orders grant (RolesGuard defers staff to PermissionGuard). A tenant admin
+ * (CLIENT_ADMIN) gets a VIEW-ONLY list of its own tenant's orders.
+ */
+function canManageOrders(role: string): boolean {
+  return role === 'GIFSY_ADMIN' || role === 'GIFSY_STAFF';
+}
+
 function FulfilmentTab() {
+  const canManage = canManageOrders(useAdminSession().role);
   const [orders, setOrders] = useState<OrderItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -1638,7 +1659,13 @@ function FulfilmentTab() {
 
   return (
     <div className="space-y-5">
-      {/* Bulk fulfilment */}
+      {!canManage && (
+        <div className="flex items-center gap-2 rounded-xl border border-blue-100 bg-blue-50 px-4 py-2.5 text-xs text-blue-800" role="note">
+          <Info className="h-3.5 w-3.5 shrink-0" /> View only — Gifsy updates order status.
+        </div>
+      )}
+      {/* Bulk fulfilment (Gifsy operators only — the template/upload endpoints are GIFSY-gated) */}
+      {canManage && (
       <div className="bg-white rounded-2xl border border-gray-100 shadow-sm px-6 py-5 space-y-4">
         <div className="flex items-center gap-3">
           <div className="p-2 rounded-xl bg-green-50">
@@ -1732,6 +1759,7 @@ function FulfilmentTab() {
           </div>
         )}
       </div>
+      )}
 
       {/* Orders queue */}
       <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
@@ -1807,14 +1835,14 @@ function FulfilmentTab() {
                   <th className="px-4 py-3 font-medium">Mode</th>
                   <th className="px-4 py-3 font-medium">Points</th>
                   <th className="px-4 py-3 font-medium">Status</th>
-                  <th className="px-4 py-3 font-medium text-right">Action</th>
+                  {canManage && <th className="px-4 py-3 font-medium text-right">Action</th>}
                 </tr>
               </thead>
               <tbody ref={tableRef} className="divide-y divide-gray-50">
                 {/* Keyed by id+status so an in-place status change remounts the row and its
                     "Advance to" draft re-initialises from the NEW status's options. */}
                 {orders.map((o) => (
-                  <OrderRow key={`${o.id}:${o.status}`} order={o} onTransitioned={applyOrderUpdate} />
+                  <OrderRow key={`${o.id}:${o.status}`} order={o} onTransitioned={applyOrderUpdate} canManage={canManage} />
                 ))}
               </tbody>
             </table>

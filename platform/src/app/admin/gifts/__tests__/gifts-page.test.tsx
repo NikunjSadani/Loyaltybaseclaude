@@ -15,6 +15,10 @@ import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import AdminGiftsPage from '../page';
 
+// The Fulfilment tab's Advance + bulk controls are Gifsy-operator only; these suites exercise
+// them as GIFSY_ADMIN (the view-only CLIENT_ADMIN path is covered in gifts-orders-view-only).
+vi.mock('@/lib/admin-session', () => ({ useAdminSession: () => ({ role: 'GIFSY_ADMIN' }) }));
+
 const CATEGORIES = [
   { id: 'cat1', code: 'VOUCHERS', name: 'Vouchers', description: null, parentId: null, sortOrder: 0, isActive: true },
 ];

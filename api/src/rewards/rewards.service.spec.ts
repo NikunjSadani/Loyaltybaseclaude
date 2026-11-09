@@ -778,6 +778,71 @@ describe('RewardsService', () => {
       expect(mockPrisma.redemptionOrder.findMany).not.toHaveBeenCalled();
     });
 
+    // ── View-only tenant-admin list (owner decision: CLIENT_ADMIN sees its OWN tenant's orders) ──
+    const clientAdminA: JwtPayload = { sub: 'ca-a', role: 'CLIENT_ADMIN', clientId: 'tenantA', phone: '9990002222', name: '' };
+
+    it('CLIENT_ADMIN of tenant A gets the ADMIN branch scoped to A only (all partners, no D4, no partner lookup)', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(42);
+
+      const res = await service.listOrders(clientAdminA, { limit: 100 });
+
+      expect(mockPrisma.channelPartner.findFirst).not.toHaveBeenCalled();
+      const where = mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({ partner: { clientId: 'tenantA' } });
+      expect(where.partnerId).toBeUndefined();
+      expect(where.NOT).toBeUndefined();
+      expect(mockPrisma.redemptionOrder.count.mock.calls[0][0].where).toEqual({ partner: { clientId: 'tenantA' } });
+      expect(res.pagination.total).toBe(42);
+    });
+
+    it('CLIENT_ADMIN can never reach another tenant: the partner header is ignored and the scope stays its JWT clientId', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(0);
+
+      await service.listOrders(clientAdminA, { status: 'DELIVERED' as never }, 'cp-of-tenantB');
+
+      expect(mockPrisma.channelPartner.findFirst).not.toHaveBeenCalled();
+      const where = mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({ partner: { clientId: 'tenantA' }, status: 'DELIVERED' });
+      expect(JSON.stringify(where)).not.toContain('tenantB');
+    });
+
+    it('CLIENT_ADMIN cursor mode keeps the tenant-A scope inside the keyset query', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(0);
+      const at = new Date('2026-10-01T10:00:00.000Z');
+
+      await service.listOrders(clientAdminA, { cursor: encodeOrderCursor(at, 'oX') });
+
+      const where = mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where;
+      expect(where.AND[0]).toEqual({ partner: { clientId: 'tenantA' } });
+    });
+
+    it('CLIENT_ADMIN with a blank clientId fails closed (never an unscoped, cross-tenant read)', async () => {
+      await expect(service.listOrders({ ...clientAdminA, clientId: '' }, {}))
+        .rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.redemptionOrder.findMany).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.count).not.toHaveBeenCalled();
+    });
+
+    it('MIS_USER and sales roles stay on the member branch (own partner only → empty for a non-partner)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(0);
+      const mis: JwtPayload = { sub: 'mis1', role: 'MIS_USER', clientId: 'tenantA', phone: '9990003333', name: '' };
+
+      await service.listOrders(mis, {});
+      await service.listOrders(sales, {});
+
+      expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where).toEqual({
+        partner: { clientId: 'tenantA' }, partnerId: 'none', NOT: HIDE_NEVER_CONFIRMED,
+      });
+      expect(mockPrisma.redemptionOrder.findMany.mock.calls[1][0].where).toEqual({
+        partner: { clientId: 'deoleo' }, partnerId: 'none', NOT: HIDE_NEVER_CONFIRMED,
+      });
+    });
+
     it('GIFSY admin page mode is unchanged apart from the id tie-break (no exclusion, offset paging)', async () => {
       mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
       mockPrisma.redemptionOrder.count.mockResolvedValue(0);
