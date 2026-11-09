@@ -10,7 +10,15 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ---
 
-## 📍 HANDOFF 2026-11-06 — read this FIRST (work done on a borrowed Mac while the laptop was in repair)
+## 📍 STATE 2026-11-09 — read this FIRST
+
+**▶ BATCH #59 (held for owner's prod go):** develop = `93ed888` = **STAGING-VERIFIED** (serving `staging-93ed888`); prod still `e98f047`; `main` = `e5ab52c` (#59 A+C UPI money fixes, never dispatched — rides this batch). Prod deploy = merge develop→main **keeping the TDS-194R revert** (verify `git diff e5ab52c HEAD -- api/src/tds/` empty) → owner dispatches "Deploy — Production (main)" → verify serving SHA via gcloud. Owner said "not yet" on 2026-11-09. GitHub Actions is FREE-TIER → batch every push/deploy.
+Batch contents (all platform-wide, owner-approved, gated + multi-round adversarial audits): UPI manual entry + safeguards (upiCaptureMethod QR/MANUAL migration `20261107120000`, type-it-twice on partner capture, one complete payout rail per KYC, re-KYC "never block the rep for what they can't fix" rail rules, reviewer removedRail/proposed values, approval verifies only fully-staged rails + FOR UPDATE lock + changed-carried-value 409, capture CAS); UTR upload CAS per payout (never paid+refunded) + sorted lock order + skipped rows UI; order-status CAS (no double refund) + OTP cleanup scoped; manager redeem for whole downline (outlet-keyed, not parked); sales gift-redeem delivery address (was 400); My Orders "Load more" (cursor) + payout statement cap removed; lock-order fixes (admin-outlets/parents) + PATCH-approve bypass closed; **This Month's Offers** tiles (migration `20261109120000_add_offer_tiles`, per-tenant `offerTiles` flag default OFF, two-colour tiles); admin payouts `?batchId=` list fix (pre-existing prod bug).
+**Runtime-verified on staging with ZZ TEST fixtures (created + removed):** offers (Bajaj ON, Deoleo 403), manual-entry guards, partner typed-UPI type-twice + ₹500 cash payout, concurrent PAID-vs-FAILED UTR upload (PAID won, FAILED skipped, no refund, UPI→VERIFIED), manager physical-gift redeem for rep's outlet, cancel-vs-process (single refund). NOT runtime-checked: rep KYC wizard typed UPI + reviewer badge (needs camera/signature) — unit-tested only.
+**Staging state left on purpose:** Bajaj `offerTiles` ON + 4 example tiles (Nov 2026); Bajaj `upiManualEntry` ON.
+**Next / open:** admin gifts 100-row cap fix (building, next batch) · Bajaj TDS import BLOCKED on vendor PAN numbers (outlet master `Customer Data (1)(EnrollmentReport).csv` has no PAN column; feedback Excel with Remarks in Downloads) · Bajaj prod go-live + flags · staging cleanups (2 both-rail partners, 1 malformed UPI).
+
+## 📍 HANDOFF 2026-11-06 (historical)
 
 **Recovery.** The laptop died 2026-11-05 21:15 IST; its uncommitted work was pushed as `backup/wip-20261105-batt`.
 On the laptop, its working tree still holds that same uncommitted work — **discard the tracked-file edits**
