@@ -53,6 +53,7 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     partnerDashboardV2: false,
     captureBankAtRedemption: false,
     offerTiles: false,
+    salesImport: false,
     partnerApp: {
       showSchemes: true,
       showInvoices: false,

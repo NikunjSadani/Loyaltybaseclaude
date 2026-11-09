@@ -617,6 +617,7 @@ export class GifsyService {
         partnerDashboardV2: !!features.partnerDashboardV2,
         captureBankAtRedemption: !!features.captureBankAtRedemption,
         offerTiles: !!features.offerTiles,
+        salesImport: !!features.salesImport,
       },
     };
   }
@@ -763,6 +764,7 @@ export class GifsyService {
         partnerDashboardV2: !!features.partnerDashboardV2,
         captureBankAtRedemption: !!features.captureBankAtRedemption,
         offerTiles: !!features.offerTiles,
+        salesImport: !!features.salesImport,
       },
     };
   }
@@ -1016,6 +1018,7 @@ export class GifsyService {
         partnerDashboardV2: !!features.partnerDashboardV2,
         captureBankAtRedemption: !!features.captureBankAtRedemption,
         offerTiles: !!features.offerTiles,
+        salesImport: !!features.salesImport,
         partnerApp: {
           showSchemes: partnerApp.showSchemes !== false,
           showInvoices: !!partnerApp.showInvoices,

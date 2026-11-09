@@ -50,6 +50,7 @@ const DEFAULT_FEATURES: Record<FeatureKey, boolean> = {
   partnerDashboardV2:      false,
   captureBankAtRedemption: false,
   offerTiles:              false,
+  salesImport:             false,
 };
 
 const FEATURE_META: Record<FeatureKey, { label: string; description: string }> = {
@@ -69,6 +70,7 @@ const FEATURE_META: Record<FeatureKey, { label: string; description: string }> =
   partnerDashboardV2:       { label: 'Partner Dashboard V2 (Trade)', description: "Bajaj trade partner dashboard: hides the trend chart, enlarges the points balance + Redeem, shows a 'to go' banner in the hero, and adds a this-month-vs-last-month primary-KPI card." },
   captureBankAtRedemption:  { label: 'Capture bank/UPI at redemption', description: 'Let a wholesaler with no beneficiary on file add bank/UPI in-flow at Redeem → Cash (same form/rules as KYC). Captured details stay hidden from Store Information until a payout on them completes.' },
   offerTiles:               { label: "This month's offers", description: "Turns on the whole offers feature: the This Month's Offers admin page and the offer tiles on the partner dashboard. When off, partners see no offers section." },
+  salesImport:              { label: 'Sales Import (DMS file)', description: "Upload the distributor invoice-line file to compute importer-owned KPI achievements per month. Leave OFF unless the tenant's column mapping and KPIs are configured." },
 };
 
 const STEPS: { key: Step; label: string }[] = [

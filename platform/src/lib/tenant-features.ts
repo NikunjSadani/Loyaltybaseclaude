@@ -65,6 +65,7 @@ export function normalizeFeatures(raw: unknown): FeatureFlags {
     partnerDashboardV2:      bool(f.partnerDashboardV2,      d.partnerDashboardV2),
     captureBankAtRedemption: bool(f.captureBankAtRedemption, d.captureBankAtRedemption),
     offerTiles:              bool(f.offerTiles,              d.offerTiles),
+    salesImport:             bool(f.salesImport,             d.salesImport),
     partnerApp: {
       showSchemes:     bool(pa.showSchemes,     d.partnerApp.showSchemes),
       showInvoices:    bool(pa.showInvoices,    d.partnerApp.showInvoices),

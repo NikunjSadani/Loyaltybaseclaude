@@ -3024,6 +3024,142 @@ model OutletTarget {
   @@map("outlet_targets")
 }
 
+// ─── MODULE: SALES IMPORT — DMS invoice-line file → importer-owned KPI achievements ───
+// Dormant unless features.salesImport === true (per tenant, default OFF; Deoleo OFF). Additive only:
+// no existing table is altered. The importer WRITES into the existing OutletSalesRecord.kpiValues
+// (only importer-owned KpiDef codes = an enabled SalesKpiDefinition row). Status columns are plain
+// Strings (not Prisma enums) so this stays an additive migration (same convention as KpiDef.rollup).
+// See platform/docs/plans/SALES-IMPORT-PIPELINE-PLAN.md.
+
+/// One per tenant: how to read THIS tenant's DMS file (SalesColumnMapping, plan §6.1).
+model SalesImportProfile {
+  id            String   @id @default(cuid())
+  clientId      String   @unique
+  columnMapping Json
+  updatedById   String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("sales_import_profiles")
+}
+
+/// Existence + enabled ⇒ the KPI is IMPORTER-OWNED (plan G4).
+model SalesKpiDefinition {
+  id          String   @id @default(cuid())
+  clientId    String
+  kpiCode     String // MUST be an enabled KpiDef.code of this tenant (validated on save)
+  measure     String // 'AMOUNT' | 'QUANTITY'
+  filter      Json // SalesKpiFilter (plan §6.2)
+  outletTypes String[] @default([]) // optional scope by Outlet.outletType.code; [] = all
+  programs    String[] @default([]) // optional scope by Outlet.programName; [] = all
+  enabled     Boolean  @default(true)
+  order       Int      @default(0)
+  updatedById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([clientId, kpiCode])
+  @@index([clientId])
+  @@map("sales_kpi_definitions")
+}
+
+model SalesImport {
+  id               String    @id @default(cuid())
+  clientId         String
+  uploadedById     String
+  originalFilename String
+  fileKind         String // 'XLSX' | 'CSV'
+  sizeBytes        BigInt
+  partCount        Int
+  partsReceived    Int       @default(0)
+  gcsPrefix        String // sales-imports/<clientId>/<id>/
+  status           String    @default("UPLOADING") // UPLOADING|QUEUED|PROCESSING|NEEDS_MAPPING|READY|FAILED|CANCELLED
+  contentSha256    String?
+  duplicateOfId    String? // earlier READY import with the same sha256 (same tenant)
+  mappingSnapshot  Json? // profile used for this run
+  detectedHeaders  Json? // first 10 rows' cells (NEEDS_MAPPING wizard)
+  rosterHash       String? // sha256 of sorted roster outletCodes at processing time
+  bytesRead        BigInt    @default(0)
+  rowsRead         Int       @default(0)
+  rowsSkipped      Int       @default(0)
+  errorSamples     Json? // ≤ 200 {row, column, reason}
+  monthSummaries   Json? // MonthSummary[] (plan §6.3)
+  dimensionValues  Json? // {dimKey: [{value, lines, amountPaise}]} top 200 per dim
+  dimensionCombos  Json? // [{dims, lines, amountPaise, qtyMicro}] distinct full combos (≤ 2,000 by |₹|)
+  error            String?
+  attempts         Int       @default(0)
+  heartbeatAt      DateTime?
+  startedAt        DateTime?
+  finishedAt       DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  aggregates SalesImportAggregate[]
+  applies    SalesImportApply[]
+
+  @@index([clientId, createdAt])
+  @@index([status])
+  @@index([clientId, contentSha256])
+  @@map("sales_imports")
+}
+
+model SalesImportAggregate {
+  id          BigInt @id @default(autoincrement()) // keyset pagination key
+  importId    String
+  month       String // YYYY-MM (invoice calendar month)
+  outletCode  String
+  dims        Json // {"dimA":"X","dimB":"500"} normalized (plan §6.1)
+  dimKey      String // stable JSON of dims (sorted keys)
+  amountPaise BigInt // Σ amount in paise (signed, returns net off)
+  qtyMicro    BigInt // Σ quantity × 1e6 (signed)
+  lines       Int
+
+  import SalesImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  @@index([importId, month, id])
+  @@map("sales_import_aggregates")
+}
+
+/// Immutable history of every apply (audit + "what was written").
+model SalesImportApply {
+  id                  String   @id @default(cuid())
+  importId            String
+  clientId            String
+  month               String
+  appliedById         String
+  batchId             String // the SalesUploadBatch(status 'SALES_IMPORT') created for this apply
+  definitionsHash     String
+  definitionsSnapshot Json // frozen SalesKpiDefinition[] used
+  outletsWritten      Int
+  outletsZeroFilled   Int
+  totals              Json // {kpiCode: {before, after}}
+  createdAt           DateTime @default(now())
+
+  import SalesImport @relation(fields: [importId], references: [id], onDelete: Restrict)
+
+  @@index([clientId, month, createdAt])
+  @@map("sales_import_applies")
+}
+
+/// Explicit override of the implicit open/closed month rule (plan §7.3).
+model SalesMonthStatus {
+  id                  String    @id @default(cuid())
+  clientId            String
+  month               String
+  state               String // 'OPEN' | 'CLOSED'
+  closedAt            DateTime?
+  closedById          String?
+  reopenedAt          DateTime?
+  reopenedById        String?
+  lastAppliedImportId String?
+  lastAppliedAt       DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@unique([clientId, month])
+  @@map("sales_month_statuses")
+}
+
 // ─── MODULE: OFFER TILES — per-tenant "This month's offers" content (display-only) ───
 // Admin-authored tiles shown on the PARTNER dashboard. DISPLAY-ONLY: nothing here credits,
 // computes or reserves points. Value is identical for every outlet in the segment; only the

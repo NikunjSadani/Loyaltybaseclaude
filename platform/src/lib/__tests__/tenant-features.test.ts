@@ -55,4 +55,11 @@ describe('normalizeFeatures', () => {
     expect(normalizeFeatures({ offerTiles: true }).offerTiles).toBe(true);
     expect(normalizeFeatures({ offerTiles: 'yes' }).offerTiles).toBe(false);
   });
+
+  it('carries the salesImport flag, defaulting OFF', () => {
+    expect(DEFAULT_FEATURES.salesImport).toBe(false);
+    expect(normalizeFeatures({}).salesImport).toBe(false);
+    expect(normalizeFeatures({ salesImport: true }).salesImport).toBe(true);
+    expect(normalizeFeatures({ salesImport: 'yes' }).salesImport).toBe(false);
+  });
 });

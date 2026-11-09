@@ -51,6 +51,7 @@ import { PushModule }         from './push/push.module';
 import { WhatsappBroadcastsModule } from './whatsapp-broadcasts/whatsapp-broadcasts.module';
 import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
 import { OffersModule }       from './offers/offers.module';
+import { SalesImportModule }  from './sales-import/sales-import.module';
 // Phase S (S1): World-A domain modules deleted. The real domain (users, partners,
 // kyc, outlets, sales, wallet, payouts, schemes/campaigns, targets, admin, visibility,
 // leaderboard, notifications) is rebuilt from platform/lib as services in S3/S4.
@@ -115,6 +116,9 @@ import { OffersModule }       from './offers/offers.module';
     WhatsappBroadcastsModule,
     TenantRoutingModule,
     OffersModule,
+    // Sales Import (DMS invoice-line file → importer-owned KPI achievements). Dormant: every route
+    // 403s unless features.salesImport === true. platform/docs/plans/SALES-IMPORT-PIPELINE-PLAN.md.
+    SalesImportModule,
   ],
   controllers: [AppController],
   providers: [

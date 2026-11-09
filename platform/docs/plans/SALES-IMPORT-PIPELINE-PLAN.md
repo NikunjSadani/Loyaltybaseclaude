@@ -1,6 +1,8 @@
 # Sales Import Pipeline — Implementation Plan (DMS invoice-line file → monthly KPI achievements)
 
-> **Status:** PLAN ONLY, no feature code yet. Branch `feat/upi-manual-entry`. Authored 2026-11-09.
+> **Status:** PHASE 0 (Lane-0) LANDED on branch `feat/sales-import` (2026-11-09): migration, contract, flag, module skeleton,
+> spikes. Lanes I / K / F start from that commit. **Read §10a first** (Phase-0 outcome, deviations, file ownership).
+> Owner decisions (final): D-1 = A (guard), D-3 = A (`exceljs`), D-4 = A (Cloud Run Job), D-5 = A (reuse `targets:*`).
 > **Classification:** ⚠️ **PLATFORM-WIDE but TENANT-GATED.** The owner approved it as such: new shared module + schema +
 > two small, data-gated edits to the shared manual achievement upload. It is dormant for every tenant until the
 > per-tenant flag `salesImport` is ON *and* the tenant has importer-owned KPIs. **Deoleo stays byte-identical** (§12).
@@ -67,7 +69,7 @@ change things outside the new module.
 | **D-1** | Engine guard: refuse points compute for an OPEN month? | **A** Add `@UseGuards(SalesMonthClosedGuard)` to 4 routes of `points-compute.controller.ts` (`export` `:79`, `commit` `:54`, `preview-report` `:105`, `payout-report` `:127`). Preview stays allowed (read-only, useful mid-month). Guard is a no-op unless `features.salesImport === true`. It returns 409 "May 2026 is still OPEN. Close it in Sales Import first." **B** No engine change. Rely on process and on the Close button. **C** Warn only (needs a preview response-shape change, so it is an engine change). | **A.** The export and report are what the client approves offline. If they are generated on a month that can still be rewritten, the approved points and the stored achievements can silently diverge. That breaks money trust. A is 4 decorator lines plus one import. It does not touch the evaluator, rule store, compute service or response shapes, and it is inert for every tenant without the flag. It is still an edit to an engine file, so per G1 the owner must say yes. If the answer is no, lanes ship B and the FE shows "Month is OPEN; numbers may still change" on the Sales Import month screen only. |
 | **D-2** | Large-file transport | **A (rec.)** Browser slices the file into 4 MiB parts → `POST /admin/sales-import/:id/parts/:n` (multipart, same as `targets.controller.ts:281-289`) → API `uploadFile` to `sales-imports/<clientId>/<importId>/parts/<n>` → worker streams parts in order as one stream. **B** Browser PUTs directly to a GCS **resumable session URI** created server-side (`file.createResumableUpload({origin})`, needs no signing). This needs bucket CORS for the exact tenant origins with `Range` exposed. The current CORS is `https://*.gifsy.in` with headers `Content-Type, x-goog-resumable` (`terraform/gcs-memorystore.tf:12-24`); GCS CORS may not honour that sub-domain wildcard, which is unverified. **C** V4 signed PUT URL: rejected, signing is known-broken on Cloud Run here (`storage.service.ts:76-79`). | **A.** No infra, CORS or signing dependency, and it uses only proven paths (multipart through the Next proxy and `uploadFile`). 200 MB ≈ 50 requests ≈ 1–3 min. Each part is retried idempotently (same `n` overwrites). B is faster but has two unverified infra premises (WAYS #11). Keep it as a later optimisation behind the same FE `uploadInParts()` abstraction. |
 | **D-3** | New dependency `exceljs` (streaming xlsx reader) | **A (rec.)** Add `exceljs` to `api/package.json` **dependencies** (in package.json + lockfile, imported only by the worker parser). **B** CSV-only: admin saves the DMS export as CSV (Excel handles 635k < 1,048,576 rows); the xlsx path is not built. | **A.** It is essential. SheetJS 0.18.5 (`xlsx`) loads the whole workbook: 635k × 76 cells ≈ 48M cells, many GB, so it cannot run in 2 GiB. `exceljs.stream.xlsx.WorkbookReader` streams rows. ⚠️ Per the delivery-status memory, an import missing from `package.json` builds green but **crashes at boot**. So the gate for Task I-0 asserts `require.resolve('exceljs')` inside the built runner image (`npm ci --omit=dev`). CSV is supported in both options with a hand-rolled RFC-4180 streaming parser (no dep). |
-| **D-4** | Where the worker runs | **A (rec.)** A Cloud Run **Job** `gifsy-sales-import[-staging]`: same api image, `--command=node --args=dist/sales-import/worker.main.js`, 2Gi/1 CPU, task-timeout 3600s, max-retries 1, same VPC/SQL/SA flags as `deploy-staging.yml:98-109`. The API triggers it via the Cloud Run Admin REST `POST https://run.googleapis.com/v2/projects/{P}/locations/{R}/jobs/{J}:run` with a metadata-server token (built-in `fetch`, **no new dep**, no overrides). The job claims QUEUED imports itself (`FOR UPDATE SKIP LOCKED`). **Infra:** grant the api SA `roles/run.invoker` (contains `run.jobs.run`) on that job, plus a deploy step in `deploy-staging.yml` / `deploy.yml`. **B** Raise the API service to 2Gi + `--timeout=3600` + no CPU throttling and process inside a held request. This changes the live API service for every tenant (cost, blast radius). **C** Request-driven chunk processing on the 512Mi API. xlsx (a zip) can't be resumed mid-stream, so CSV only. | **A.** It is isolated (a crash or OOM can't take down Deoleo's API) and sized for the job. It follows the proven migrate-job pattern. Infra is an IAM binding plus a deploy step, so the owner must approve, as with any deploy-workflow change. Local dev and tests use `SALES_IMPORT_RUNNER=inline` (in-process). Exact IAM role to confirm in the Phase-0 spike (`run.jobs.run`). |
+| **D-4** | Where the worker runs | **A (rec.)** A Cloud Run **Job** `gifsy-sales-import[-staging]`: same api image, `--command=node --args=dist/sales-import/worker.main.js`, 2Gi/1 CPU, task-timeout 3600s, max-retries 1, same VPC/SQL/SA flags as `deploy-staging.yml:98-109`. The API triggers it via the Cloud Run Admin REST `POST https://run.googleapis.com/v2/projects/{P}/locations/{R}/jobs/{J}:run` with a metadata-server token (built-in `fetch`, **no new dep**, no overrides). The job claims QUEUED imports itself (`FOR UPDATE SKIP LOCKED`). **Infra:** grant the api SA `roles/run.invoker` (contains `run.jobs.run`) on that job, plus a deploy step in `deploy-staging.yml` / `deploy.yml`. **B** Raise the API service to 2Gi + `--timeout=3600` + no CPU throttling and process inside a held request. This changes the live API service for every tenant (cost, blast radius). **C** Request-driven chunk processing on the 512Mi API. xlsx (a zip) can't be resumed mid-stream, so CSV only. | **A.** It is isolated (a crash or OOM can't take down Deoleo's API) and sized for the job. It follows the proven migrate-job pattern. Infra is an IAM binding plus a deploy step, so the owner must approve, as with any deploy-workflow change. Local dev and tests use `SALES_IMPORT_RUNNER=inline` (in-process). IAM checked in Phase 0 (§10a.5): `roles/run.invoker` (or the narrower `roles/run.jobsExecutor`) covers `jobs:run` WITHOUT overrides; WITH overrides it needs `roles/run.jobsExecutorWithOverrides` (`run.jobs.runWithOverrides`). |
 | **D-5** | Permissions | **A (rec.)** Reuse `targets:read` (view), `targets:upload` (upload/process/apply/close), `targets:manage_config` (mapping + KPI definitions). **Reopen = `@Roles('GIFSY_ADMIN')` + assumed tenant.** **B** New `sales_import:*` keys (catalog + seed-roles + reserved list changes = more platform-wide surface). | **A.** These are exactly the keys guarding the manual achievement upload (`targets.controller.ts:278-280`) and KPI config (`:80-110`). "Mirror existing upload permissions" says the same. |
 | D-6 | Should the manual achievement upload respect month close for NON-owned KPIs? | Leave it as today (it does not) / lock it too | **Leave it as today.** Close applies to importer data. Otherwise G2 is violated. (Owner may revisit.) |
 | D-7 | Negative monthly KPI (returns > sales) | store as-is / clamp 0 | **Store as-is** (honest data). The engine's gate (`pct ≥ 100`) or `floor`/`cap` handles it. The preview flags outlets with negative values. |
@@ -635,6 +637,112 @@ created. ⚠️ Infra and IAM need the owner's go (D-4).
 
 ---
 
+## 10a. Phase-0 outcome (Lane-0 landed, 2026-11-09). READ BEFORE STARTING A LANE
+
+Branch `feat/sales-import` (worktree `.claude/worktrees/sales-import`). Gates at that commit: api tsc (only the known TS6059
+noise), FULL api jest, `nest build`, platform tsc, FULL platform vitest. Real exit codes are in the commit message.
+
+### 10a.1 What landed
+| Item | Where |
+|---|---|
+| Migration `20261110120000_add_sales_import`: 6 `CREATE TABLE`, 9 indexes, 2 FKs (both to `sales_imports`). **No existing table altered.** Generated with `prisma migrate diff --from-schema <before> --to-schema prisma/schema.prisma --script`; no dev DB touched. | `api/prisma/migrations/20261110120000_add_sales_import/migration.sql`; models after `OutletTarget` in `schema.prisma` |
+| `exceljs@4.4.0` (exact pin, published 2023-10-19, in `dependencies`) | `api/package.json` + lockfile. The dependency half of task I-0 is DONE |
+| Docker guards: `RUN ls dist/sales-import/worker.main.js` (builder) and `RUN node -e "require('exceljs')"` after `npm ci --omit=dev` (runner) | `api/Dockerfile` |
+| Jest guard: every bare import under `src/sales-import/**` (non-spec) must be a node builtin or a package.json **`dependencies`** entry; exceljs must be exact-pinned | `api/src/sales-import/sales-import.contract.spec.ts` |
+| Contract + FE mirror, with a jest PARITY test (bodies identical below the header comment) | `api/src/sales-import/sales-import.contract.ts`, `platform/src/lib/sales-import/types.ts` |
+| Flag `features.salesImport` (default OFF): BE console projections (3 sites) + spec; FE `FeatureFlags`, default, `normalizeFeatures`, console labels (edit + new client) + vitest | `gifsy.service.ts`, `client-config.ts`, `default-client-config.ts`, `tenant-features.ts`, `app/gifsy/clients/[slug]/page.tsx`, `clients/new/page.tsx` |
+| Access gate + spec | `api/src/sales-import/sales-import-access.ts` |
+| Module skeleton registered in `app.module.ts` after `OffersModule`; worker entry + worker module | see 10a.3 |
+
+**No routes exist yet.** The controllers are empty classes, so the API surface is unchanged until the lanes add handlers.
+
+### 10a.2 Deviations from §5 / §10 (binding for the lanes)
+1. **Access helper signature.** `assertSalesImportAccess(user, { tenant, prisma }, { write })`, not `tenantSettings`. The uncached
+   write-path read is `isSalesImportEnabledUncached(prisma, clientId)` in the same file: a direct `clients.features` read, fail-closed,
+   INACTIVE → false. Reason: no uncached `clients.features` read existed, and adding one to the shared `TenantSettingsService` would be
+   a platform-wide edit for no gain. The worker (§7.1 step 2) and the D-1 guard (K-8) MUST use `isSalesImportEnabledUncached`.
+2. **Wire numbers are rupees/cases, never BigInt.** `dimensionValues` = `{dimKey: [{value, lines, amountRupees}]}` and
+   `dimensionCombos` = `[{dims, lines, amountRupees, quantity}]` (the plan text said `amountPaise`/`qtyMicro`). The worker stores these
+   JSON columns in exactly the contract shape (`SalesDimensionValues`, `SalesDimensionCombo[]`), so the read endpoint is a pass-through.
+3. **Types the plan used but did not name** were added: `SalesKpiDefinitionList` (GET kpis = `{definitions, definitionsHash}`),
+   `SalesKpiDefinitionPatch`, `SalesKpiTestRequest`/`SalesKpiTestResult` (§6.2a shape; `importId` may be `'latest'`),
+   `CreateSalesImportUploadRequest/Result`, `SalesImportPartResult`, `SalesImportList`, `SalesImportDetail`, `SalesImportErrorSample`,
+   `SalesImportCombos` (includes the resolved `importId`), `SalesMonthWarning`, `MonthPreviewKpi`, `ApplyMonthResult`,
+   `SalesImportDrainResult`, `AchievementUploadOwnershipExtension`, `SalesDimensionMapping`, `SalesImportFileKind`, `SalesMonthState`.
+4. **Shared constants** live in the contract (both sides): part size 4 MiB, max file 600 MB, part limit (+64 KiB), allowed extensions,
+   `SALES_IMPORT_BATCH_STATUS='SALES_IMPORT'`, max dims 6, dim-key regex, 200-entry filter cap, error/value/combo caps, stale heartbeat
+   10 min, max attempts 3. Use them; do not re-declare the literals.
+5. **Schema = §4 verbatim** (formatting only).
+6. Task 0-5 spike (a) ran on the REAL 205 MB file instead of a synthetic one (owner request). Spike (b) was a documentation check, not a
+   staging deploy: no GCP resource was created and no IAM was changed (owner instruction).
+
+### 10a.3 File ownership (no two lanes edit the same file)
+| File | Owner | Notes |
+|---|---|---|
+| `sales-import.module.ts` | Lane-0 (frozen) | Imports `SalesImportIngestModule` + `SalesImportKpiModule`. **Controller order is load-bearing** (static `profile`/`kpis` before `:id`), pinned by `sales-import.module.spec.ts` |
+| `sales-import.contract.ts` + FE `types.ts` | Lane-0 | A change needs BOTH files in the same commit (parity test) plus a note here |
+| `sales-import-access.ts` | Lane-0 | |
+| `ingest/**` (`normalize.ts`, processor, runner, `sales-import-ingest.module.ts`, `sales-import-worker.module.ts`), `worker.main.ts`, `sales-import.controller.ts`, `sales-import-drain.controller.ts`, the `storage.service.ts` additions, `api/scripts/make-synthetic-sales.ts` | **Lane I** | Register new ingest injectables in `sales-import-ingest.module.ts`. In `normalize.ts`, `normalizeHeader/Dim/OutletCode` are implemented (Lane K imports `normalizeDim`); `toPaise/toMicro/parseInvoiceDate` are throwing stubs |
+| `kpi/**`, `months/**`, `apply/**`, `sales-import-config.controller.ts`, `sales-import-apply.controller.ts`, `sales-months.controller.ts`, `common/sales-kpi-ownership.ts`, the `targets.service.ts` edits, the D-1 guard + `points-compute.controller.ts` decorators | **Lane K** | Register new K injectables in `kpi/sales-import-kpi.module.ts`. It has no controllers and no engine import, so `PointsEngineModule` may import it for the D-1 guard |
+| `platform/src/app/admin/sales-import/**`, `platform/src/lib/sales-import/**` except `types.ts`, the nav entry in `app/admin/layout.tsx`, the `app/admin/sales/page.tsx` tweak | **Lane F** | |
+
+Skeleton injections already in place: config controller ← `SalesProfileService`, `SalesKpiDefService`; apply controller ←
+`SalesPreviewService`, `SalesApplyService`; months controller ← `SalesMonthsService`; import and drain controllers ←
+`SalesImportRunnerService`. Every admin controller also gets `TenantService` + `PrismaService` for the access gate and already carries
+`@Roles('CLIENT_ADMIN','GIFSY_ADMIN')`; handlers add `@RequirePermission('targets:…')`. Reopen uses a METHOD-level
+`@Roles('GIFSY_ADMIN')` (RolesGuard uses `getAllAndOverride`, so it replaces the class roles) plus an `assumed` check.
+
+### 10a.4 Spike (a): exceljs streaming read of the REAL DMS file (measured; Node 24.14.1, local Windows desktop)
+File: 204.8 MB xlsx, 1 sheet, 635,430 rows (header at row 2; the marker row above it is skipped by auto-detect), 76 columns,
+635,428 data rows, 2 rows with a blank customer code. **Every invoice date is a real date cell** (0 text dates) and every customer code
+is a numeric cell. 2 months, 198,772 distinct customer codes. Shared strings come BEFORE the sheet in this file (first row after ~5 s).
+The script read only the 7 Appendix-A columns by header and built a BigInt Map keyed `month|code|{brand,skuGroup}` for **every**
+customer (586,120 keys). That is a deliberate upper bound: the real worker aggregates only roster-matched outlets (~6.5k) plus a small
+unmatched map. No row values were printed or stored.
+
+| Run | Wall | CPU (user+sys) | Peak RSS | Peak heap used |
+|---|---|---|---|---|
+| exceljs only, no aggregation, default heap (4.3 GB limit) | 71.6 s | 86.6 s | **505 MB** | 348 MB |
+| full aggregation, `--max-old-space-size=1536`, all cores | 82.8 s | 106.6 s | **790 MB** | 619 MB |
+| full aggregation, heap 1536, **pinned to ONE core**, uncontended | **86.9 s** | 80.1 s | **572 MB** | 439 MB |
+| full aggregation, `--max-old-space-size=768` (machine busy) | 169.2 s | 182.5 s | 729 MB | 523 MB (still completes) |
+| full aggregation, default heap (lazy GC; machine busy) | 136.2 s | 124.5 s | 1,034 MB | 1,012 MB |
+
+**Extrapolation to a 300 MB file (×1.47, linear; conservative, because the shared-strings cache grows with DISTINCT strings, not rows):**
+about 930k rows, ≈ 130 s on one local core. Budget **3–7 min on one Cloud Run vCPU** (assume it is 1.5–3× slower than this desktop
+core). Peak RSS ≈ 0.85–1.2 GB in the all-customer worst case with the heap capped at 1.5 GB.
+
+**Recommended job size: 2 GiB memory, 1 vCPU, `NODE_OPTIONS=--max-old-space-size=1536`, task-timeout 3600 s, max-retries 1.** That
+leaves ≥ 0.8 GB headroom at 300 MB. 2 vCPU is not needed (≈ 1.2 cores of parallelism observed: zlib + GC threads); 4 GiB is not
+needed. Task 0-5a's pass criterion (< 10 min, < 1.5 GB) is met. Without the heap cap V8 collects lazily (1,034 MB in the default-heap
+run), so set the cap. ⚠️ Lane I: Cloud Run's filesystem is in-memory. If a file puts `sharedStrings.xml` AFTER the worksheet in the zip,
+exceljs may buffer the sheet. Cover that order in the I-4 tests and fail with a readable message rather than an OOM.
+
+### 10a.5 Spike (b): IAM to start a Cloud Run Job execution from the API (docs-checked 2026-11-09; TO VERIFY on staging)
+From the Cloud Run IAM roles reference (docs.cloud.google.com/run/docs/reference/iam/roles) and the "Execute jobs" page:
+- `run.jobs.run` (execute, NO overrides) is in `roles/run.invoker`, `roles/run.jobsExecutor`, `roles/run.jobsExecutorWithOverrides`,
+  `roles/run.developer`, `roles/run.admin`.
+- `run.jobs.runWithOverrides` (execute WITH overrides: args/env/task count/timeout) is in `roles/run.jobsExecutorWithOverrides`,
+  `roles/run.developer`, `roles/run.admin`. It is **NOT** in `roles/run.invoker`.
+- **Recommendation:** grant `gifsy-api-sa` **`roles/run.jobsExecutorWithOverrides` on the single job resource** if the runner passes
+  overrides (it contains `run.jobs.run`, `run.jobs.runWithOverrides`, `run.executions.cancel`). If the runner keeps the plan's
+  no-override design (the job claims QUEUED rows itself), `roles/run.jobsExecutor` is enough. Bind on the job, not the project, so the
+  API SA cannot start the migrate/seed jobs.
+- `iam.serviceAccounts.actAs` is not listed for executing a job (it applies to deploy/update). It is moot anyway: the job runs as the same
+  `gifsy-api-sa`. Still to verify on staging, with the owner's go for the binding: `POST …/jobs/{job}:run` from the API → HTTP 200 and
+  an execution created.
+
+### 10a.6 What the lanes must know before starting
+- Run `npm ci` in `api/` and `platform/`, then `npx prisma generate` in `api/` (tsc needs the new models).
+- The flag is read UNCACHED on writes; reads use the 5-min cached tenant config. Both fail closed.
+- Deoleo is byte-identical so far. The only observable change: the Gifsy console's client GET/PATCH/list projections now include
+  `salesImport: false` (the same as when `offerTiles` was added). No new routes are live.
+- In the real file every date is a date cell and every code a number. Codes are integers (`normalizeOutletCode` strips `.0`); compare
+  roster codes as strings after that normalization (risk R-6).
+- Never print or commit real file values; the file stays outside the repo.
+
+---
+
 ## 11. Lane tasks (TDD: write the test first, see it fail, implement, see it pass; run `cd api && npx jest src/sales-import` or `cd platform && npx vitest run src/app/admin/sales-import src/lib/sales-import`)
 
 ### Lane I — Backend ingest (owner of `api/src/sales-import/ingest/**`, `worker.main.ts`, runner, upload endpoints)
@@ -923,7 +1031,10 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
   --service-account=gifsy-api-sa@…` (no `--execute-now`).
 - API service env: `SALES_IMPORT_RUNNER=job,SALES_IMPORT_JOB=gifsy-sales-import-staging,GCP_PROJECT=${PROJECT_ID}` (+ secret
   `SALES_IMPORT_DRAIN_SECRET` if the Scheduler fallback is wanted).
-- `terraform/iam.tf`: `google_cloud_run_v2_job_iam_member` `roles/run.invoker` for `gifsy-api-sa` on the job (confirm the role in spike 0-5b).
+- `terraform/iam.tf`: `google_cloud_run_v2_job_iam_member` for `gifsy-api-sa` on the job: `roles/run.jobsExecutor` if the runner
+  calls `jobs:run` with NO overrides (the plan's design), or `roles/run.jobsExecutorWithOverrides` if it passes overrides (e.g. an
+  `IMPORT_ID` env). See §10a.5 (to verify on staging with the owner's go).
+- Job env: `NODE_OPTIONS=--max-old-space-size=1536` (so V8 collects before the 2Gi container limit; §10a.4).
 - Optional Cloud Scheduler hitting `POST /v1/sales-import/drain` every 10 min (only if the kick proves unreliable).
 - GCS: parts + unmatched under `sales-imports/<clientId>/<importId>/`. The API deletes parts 30 days after READY (lazy, on list) or
   immediately on DELETE. Bucket lifecycle is unchanged.

@@ -77,6 +77,12 @@ export interface FeatureFlags {
   // the partner dashboard makes no offers request. This IS a gifsy-console toggle (included in
   // FeatureKey). Default OFF; Deoleo stays OFF. See platform/docs/plans/OFFER-TILES-PLAN.md.
   offerTiles: boolean;
+  // Sales Import (DMS invoice-line file → importer-owned monthly KPI achievements). When ON, the admin
+  // console shows the Sales Import pages (upload, preview/apply per month, month close, column mapping
+  // and KPI definitions). The backend 403s every Sales Import route when OFF. This IS a gifsy-console
+  // toggle (included in FeatureKey). Default OFF; Deoleo stays OFF. See
+  // platform/docs/plans/SALES-IMPORT-PIPELINE-PLAN.md.
+  salesImport: boolean;
 
   // Partner app tab visibility (CLIENT_ADMIN cannot change these)
   partnerApp: {
