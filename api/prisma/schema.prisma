@@ -3024,6 +3024,64 @@ model OutletTarget {
   @@map("outlet_targets")
 }
 
+// ─── MODULE: OFFER TILES — per-tenant "This month's offers" content (display-only) ───
+// Admin-authored tiles shown on the PARTNER dashboard. DISPLAY-ONLY: nothing here credits,
+// computes or reserves points. Value is identical for every outlet in the segment; only the
+// optional KPI progress (OutletTarget/OutletSalesRecord) is per-outlet, computed at read time.
+// Additive + dormant: gated by the per-tenant `features.offerTiles` flag (default OFF) AND zero
+// rows ⇒ the partner dashboard renders no section (Deoleo byte-identical).
+// See platform/docs/plans/OFFER-TILES-PLAN.md.
+
+// Declaration ORDER matters: `orderBy: { group: 'asc' }` sorts by Postgres enum declaration
+// order, so TARGET_REWARD ("Earn on your targets") must stay first.
+enum OfferGroup {
+  TARGET_REWARD // "Earn on your targets"
+  EXTRA_SCHEME // "Extra schemes this month"
+}
+
+enum OfferValueType {
+  POINTS
+  PERCENT
+  RUPEES
+  TEXT
+}
+
+model OfferTile {
+  id              String         @id @default(cuid())
+  clientId        String
+  group           OfferGroup
+  valueType       OfferValueType
+  // Exactly one of valueNumber / valueText is set (service-validated):
+  //   POINTS | PERCENT | RUPEES → valueNumber (> 0, ≤ 2 dp); TEXT → valueText (≤ 12 chars).
+  valueNumber     Decimal?       @db.Decimal(12, 2)
+  valueText       String?
+  unitLabel       String? // "per case"
+  product         String? // "ADHO 50 ml"
+  label           String // headline
+  details         String? // plain-text details / terms (bottom sheet)
+  validFrom       DateTime       @db.Date // IST calendar day, inclusive
+  validTo         DateTime       @db.Date // IST calendar day, inclusive
+  sortOrder       Int            @default(0)
+  isActive        Boolean        @default(true) // publish toggle; copies land FALSE (draft)
+  // Targeting — EMPTY array = "all". Matched case-insensitively against the outlet master.
+  programNames    String[]       @default([])
+  outletTypeCodes String[]       @default([]) // OutletType.code
+  zones           String[]       @default([])
+  states          String[]       @default([])
+  // Optional link to a tenant KPI (KpiDef.code) → per-outlet live progress.
+  kpiCode         String?
+  copiedFromId    String? // set by "Copy last month" (idempotency key)
+  createdById     String
+  updatedById     String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  deletedAt       DateTime?
+
+  @@index([clientId, deletedAt, validFrom, validTo])
+  @@index([clientId, copiedFromId])
+  @@map("offer_tiles")
+}
+
 // ─── MODULE: POINTS COMPUTE ENGINE (Wave 0) — versioned rule store ────────────
 // A PointsRule is a versioned, immutable config row that mirrors the shared
 // PointsRuleConfig contract (api/src/points-engine/points-engine.types.ts). A

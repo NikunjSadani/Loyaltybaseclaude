@@ -29,6 +29,7 @@ import { formatLastUpdated, getLastSalesUploadDate } from '@/lib/sales-upload-ut
 import { authHeader } from '@/lib/api-client';
 import { istDateKey, istMonthKey } from '@/lib/ist-date';
 import { usePartnerIdentity } from '@/lib/partner-identity';
+import { OffersSection } from '@/components/partner/offers/offers-section';
 
 /* ─── Real-data model ────────────────────────────────────────────────────────
    The dashboard hero consumes the SAME endpoints as the Targets page
@@ -1134,6 +1135,11 @@ export default function PartnerDashboard() {
              Target-vs-Achievement chart above, so the card would duplicate it there. Reuses the
              aggKpis the page already loaded (no extra fetch); self-hides when the outlet has no KPIs. ── */}
       {v2 && <TargetAchievementCard aggKpis={aggKpis} />}
+
+      {/* ── 2c. THIS MONTH'S OFFERS — BOTH variants. Self-fetching, self-hiding (renders null with no
+             active tile for this outlet ⇒ Deoleo byte-identical). Below Target Achievement (v2) /
+             the Target-vs-Achievement chart (non-v2). ── */}
+      <OffersSection />
 
       {/* ── 3. QUICK ACTIONS ── */}
       <QuickActions outletType={outletType} />

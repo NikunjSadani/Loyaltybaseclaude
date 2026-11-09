@@ -50,6 +50,7 @@ import { NotificationTemplatesModule } from './notification-templates/notificati
 import { PushModule }         from './push/push.module';
 import { WhatsappBroadcastsModule } from './whatsapp-broadcasts/whatsapp-broadcasts.module';
 import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
+import { OffersModule }       from './offers/offers.module';
 // Phase S (S1): World-A domain modules deleted. The real domain (users, partners,
 // kyc, outlets, sales, wallet, payouts, schemes/campaigns, targets, admin, visibility,
 // leaderboard, notifications) is rebuilt from platform/lib as services in S3/S4.
@@ -113,6 +114,7 @@ import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
     PushModule,
     WhatsappBroadcastsModule,
     TenantRoutingModule,
+    OffersModule,
   ],
   controllers: [AppController],
   providers: [

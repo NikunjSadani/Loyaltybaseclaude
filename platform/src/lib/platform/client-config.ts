@@ -70,6 +70,12 @@ export interface FeatureFlags {
   // toggle (included in FeatureKey). Default OFF; Deoleo stays OFF. See
   // platform/docs/plans/PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md.
   captureBankAtRedemption: boolean;
+  // This month's offers: when ON, the admin console shows the "This Month's Offers" page where
+  // the tenant publishes display-only offer tiles on the partner dashboard. The partner section
+  // itself is data-driven (renders nothing with no active tile), so this flag only gates the admin
+  // nav + /admin/offers route. This IS a gifsy-console toggle (included in FeatureKey). Default
+  // OFF; Deoleo stays OFF. See platform/docs/plans/OFFER-TILES-PLAN.md.
+  offerTiles: boolean;
 
   // Partner app tab visibility (CLIENT_ADMIN cannot change these)
   partnerApp: {
