@@ -68,6 +68,9 @@ export class PayoutsService {
     if (q.status && !q.unbatched) where.status = q.status;
     if (q.mode) where.payoutMode = q.mode;
     if (q.partnerId) where.partnerId = q.partnerId;
+    // Still tenant-scoped via `batch: { clientId }` above, so another tenant's batch id
+    // simply matches nothing. Ignored with `unbatched` (which pins batchId null).
+    if (q.batchId && !q.unbatched) where.batchId = q.batchId;
     // Date-only FE `<input type="date">` bounds are treated as FULL INCLUSIVE IST days
     // (a raw `new Date("YYYY-MM-DD")` is 05:30 IST → would skew the start and truncate the
     // last IST day); a full ISO datetime is used as-given. Mirrors rewards/gift/reports.

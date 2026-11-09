@@ -128,6 +128,22 @@ describe('PayoutsService', () => {
       expect(where.createdAt).toEqual({ gte: new Date(from), lte: new Date(to) });
     });
 
+    it('filters to one batch via batchId, still tenant-scoped through the batch relation', async () => {
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([]);
+      mockPrisma.payoutTransaction.count.mockResolvedValue(0);
+      await service.listTransactions(gifsy, { batchId: 'b1' });
+      const where = mockPrisma.payoutTransaction.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({ batch: { clientId: 'deoleo' }, batchId: 'b1' });
+    });
+
+    it('ignores batchId when unbatched is set (unbatched pins batchId null)', async () => {
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([]);
+      mockPrisma.payoutTransaction.count.mockResolvedValue(0);
+      await service.listTransactions(gifsy, { unbatched: true, batchId: 'b1' });
+      const where = mockPrisma.payoutTransaction.findMany.mock.calls[0][0].where;
+      expect(where.batchId).toBeNull();
+    });
+
     it('scopes unbatched by partner.clientId (not the null batch relation)', async () => {
       mockPrisma.payoutTransaction.findMany.mockResolvedValue([]);
       mockPrisma.payoutTransaction.count.mockResolvedValue(0);
