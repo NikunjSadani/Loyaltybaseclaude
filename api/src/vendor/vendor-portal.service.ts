@@ -15,7 +15,8 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { assertVendorPriceBounds, VendorPriceError } from './vendor-pricing.helper';
 import { applyVendorPiiRetention } from './vendor-pii.helper';
 import { transitionOrderStatusOrConflict } from '../rewards/order-status-transition';
-import { combineGuards, planVoucherWrite } from '../rewards/voucher-write-guard';
+import { combineGuards, isHubbleManagedOrder, planVoucherWrite } from '../rewards/voucher-write-guard';
+import { notifyVoucherIssued, recordVoucherIssuedAudit } from '../rewards/voucher-issuance';
 import {
   parseVendorUploadBuffer,
   buildVendorUploadTemplateBuffer,
@@ -613,7 +614,10 @@ export class VendorPortalService {
         partner: { clientId: scope.clientId },
         status: { not: RedemptionStatus.PENDING },
       },
-      select: { id: true, status: true, voucherCode: true, voucherProvider: true, pointsDeducted: true },
+      select: {
+        id: true, status: true, voucherCode: true, voucherProvider: true, pointsDeducted: true,
+        redemptionMode: true, metadata: true, updatedAt: true, rewardId: true,
+      },
     });
     if (!existing) throw new NotFoundException('Order not found');
     // A CLOSED order is immutable to the vendor (Wave-2 audit MED#4b) — this also stops a
@@ -623,38 +627,69 @@ export class VendorPortalService {
     }
     // VOUCHER WRITE INVARIANT (shared with Gifsy paths): no clear / blank / overwrite of a stored
     // code, a new code only on a paid open order — CAS carried on the write below.
-    const voucherPlan = planVoucherWrite(existing, {
-      voucherCode: dto.voucherCode,
-      voucherProvider: dto.voucherProvider,
+    const voucherInput = { voucherCode: dto.voucherCode, voucherProvider: dto.voucherProvider };
+    const voucherPlan = planVoucherWrite(existing, voucherInput, {
+      hubbleEligible: await this.hubbleManagedIfWriting(existing, voucherInput),
     });
 
     // GUARDED write (compare-and-set): the "open + assigned to me" checks above come from a
     // read, so a concurrent close (DELIVERED/RETURNED/CANCELLED/FAILED by Gifsy, a UTR upload,
     // etc.) or a reassignment to another vendor between that read and this write must NOT be
     // overwritten. The same predicates are re-asserted atomically on the write; count 0 → 409.
-    const claim = await this.prisma.redemptionOrder.updateMany({
-      where: {
-        id,
-        fulfilledByVendorId: scope.vendorId,
-        partner: { clientId: scope.clientId },
-        status: { notIn: [...VENDOR_TERMINAL_STATUSES, RedemptionStatus.PENDING] },
-        ...(voucherPlan.guard ?? {}),
-      },
-      data: {
-        trackingNumber: dto.trackingNumber,
-        trackingUrl: dto.trackingUrl,
-        ...voucherPlan.data,
-        notes: dto.notes,
-        fulfilmentChannel: dto.fulfilmentChannel,
-        logisticsPartner: dto.logisticsPartner,
-        supplierOrderRef: dto.supplierOrderRef,
-        podUrl: dto.podUrl,
-      },
+    // A NEW voucher code is audited in the same tx (no code without its audit row).
+    await this.prisma.$transaction(async (tx) => {
+      const claim = await tx.redemptionOrder.updateMany({
+        where: {
+          id,
+          fulfilledByVendorId: scope.vendorId,
+          partner: { clientId: scope.clientId },
+          status: { notIn: [...VENDOR_TERMINAL_STATUSES, RedemptionStatus.PENDING] },
+          ...(voucherPlan.guard ?? {}),
+        },
+        data: {
+          trackingNumber: dto.trackingNumber,
+          trackingUrl: dto.trackingUrl,
+          ...voucherPlan.data,
+          notes: dto.notes,
+          fulfilmentChannel: dto.fulfilmentChannel,
+          logisticsPartner: dto.logisticsPartner,
+          supplierOrderRef: dto.supplierOrderRef,
+          podUrl: dto.podUrl,
+        },
+      });
+      if (claim.count === 0) {
+        throw new ConflictException('Order status changed — refresh and try again');
+      }
+      if (voucherPlan.issuesNewCode && voucherPlan.data.voucherCode) {
+        await recordVoucherIssuedAudit(tx, {
+          actorId: user.sub,
+          orderId: id,
+          code: voucherPlan.data.voucherCode,
+          provider: voucherPlan.data.voucherProvider ?? existing.voucherProvider,
+          path: 'PATCH /vendor/orders/:id/fulfilment',
+        });
+      }
     });
-    if (claim.count === 0) {
-      throw new ConflictException('Order status changed — refresh and try again');
-    }
+    // The member gets their code, exactly as the Gifsy transition path sends it.
+    if (voucherPlan.issuesNewCode) await this.notifyIssued(id, scope.clientId);
     return this.getOrder(user, id);
+  }
+
+  /** Hubble-eligibility (async half of the voucher guard) — only when a voucher field is sent. */
+  private async hubbleManagedIfWriting(
+    order: Parameters<typeof isHubbleManagedOrder>[1],
+    input: { voucherCode?: string | null; voucherProvider?: string | null },
+  ): Promise<boolean> {
+    if (input.voucherCode === undefined && input.voucherProvider === undefined) return false;
+    return isHubbleManagedOrder(this.prisma, order);
+  }
+
+  private notifyIssued(orderId: string, clientId: string): Promise<void> {
+    return notifyVoucherIssued(
+      { prisma: this.prisma, notifications: this.notifications, logger: this.logger },
+      orderId,
+      clientId,
+    );
   }
 
   /**
@@ -702,9 +737,9 @@ export class VendorPortalService {
     }
 
     // VOUCHER WRITE INVARIANT (shared with Gifsy paths) — see voucher-write-guard.ts.
-    const voucherPlan = planVoucherWrite(order, {
-      voucherCode: dto.voucherCode,
-      voucherProvider: dto.voucherProvider,
+    const voucherInput = { voucherCode: dto.voucherCode, voucherProvider: dto.voucherProvider };
+    const voucherPlan = planVoucherWrite(order, voucherInput, {
+      hubbleEligible: await this.hubbleManagedIfWriting(order, voucherInput),
     });
 
     // BUG-1: a DIGITAL_VOUCHER order cannot be marked DELIVERED without a voucher code —
@@ -741,8 +776,8 @@ export class VendorPortalService {
     // compare-and-set on the status read above — a concurrent transition (vendor double-click,
     // or Gifsy moving/cancelling the order meanwhile) makes the loser a 409, never a second
     // write/history row. The claim is also re-pinned to THIS vendor's assignment.
-    await this.prisma.$transaction((tx) =>
-      transitionOrderStatusOrConflict(tx, {
+    await this.prisma.$transaction(async (tx) => {
+      await transitionOrderStatusOrConflict(tx, {
         orderId: id,
         expectedFrom: fromStatus,
         extraGuard: combineGuards({ fulfilledByVendorId: scope.vendorId }, voucherPlan.guard),
@@ -750,11 +785,25 @@ export class VendorPortalService {
         data,
         changedById: user.sub,
         notes: dto.notes,
-      }),
-    );
+      });
+      if (voucherPlan.issuesNewCode && voucherPlan.data.voucherCode) {
+        await recordVoucherIssuedAudit(tx, {
+          actorId: user.sub,
+          orderId: id,
+          code: voucherPlan.data.voucherCode,
+          provider: voucherPlan.data.voucherProvider ?? order.voucherProvider,
+          path: 'POST /vendor/orders/:id/transition',
+        });
+      }
+    });
+    if (voucherPlan.issuesNewCode) await this.notifyIssued(id, scope.clientId);
 
-    // Member notification on the customer-visible milestones (same path as Gifsy).
-    if (toStatus === RedemptionStatus.DISPATCHED || toStatus === RedemptionStatus.DELIVERED) {
+    // Member notification on the customer-visible milestones (same path as Gifsy) — unless this
+    // same move just issued the code, whose VOUCHER_ISSUED message supersedes it (as on Gifsy).
+    if (
+      !voucherPlan.issuesNewCode &&
+      (toStatus === RedemptionStatus.DISPATCHED || toStatus === RedemptionStatus.DELIVERED)
+    ) {
       const partner = await this.prisma.channelPartner.findFirst({
         where: { id: order.partnerId },
         select: { userId: true, phone: true, ownerName: true },

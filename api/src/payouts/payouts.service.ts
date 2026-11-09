@@ -15,7 +15,11 @@ import { buildXlsx } from '../common/xlsx';
 import { rupeesToPaise } from '../common/money';
 import { monthYearIST, formatDateIST, istDayRangeFilter, istDateKey } from '../common/ist-date';
 import { parsePayoutUtrUpload } from './payout-utr.helpers';
-import { transitionOrderStatus } from '../rewards/order-status-transition';
+import {
+  NO_ISSUED_VOUCHER_GUARD,
+  hasIssuedVoucher,
+  transitionOrderStatus,
+} from '../rewards/order-status-transition';
 import { resolveEffectiveKycStatus } from '../kyc/kyc-eligibility';
 import { normalizeIdentityValue } from '../common/partner-group.helper';
 import {
@@ -865,13 +869,21 @@ export class PayoutsService {
             const orderId = txn.redemptionOrderId;
             const order = await tx.redemptionOrder.findFirst({
               where: { id: orderId },
-              select: { pointsDeducted: true, partnerId: true, orderNumber: true, status: true },
+              select: { pointsDeducted: true, partnerId: true, orderNumber: true, status: true, voucherCode: true },
             });
             if (order) {
+              // Issued-voucher refund block (owner money rule, all paths): never refund points while
+              // a voucher code is on the order. A cash order should never carry one (the voucher
+              // write guard refuses it), so a block here is an anomaly → log loudly for ops.
               const refundClaim = await tx.redemptionOrder.updateMany({
-                where: { id: orderId, pointsDeducted: { gt: 0 } },
+                where: { id: orderId, pointsDeducted: { gt: 0 }, ...NO_ISSUED_VOUCHER_GUARD },
                 data: { pointsDeducted: 0 },
               });
+              if (refundClaim.count === 0 && order.pointsDeducted > 0 && hasIssuedVoucher(order.voucherCode)) {
+                this.logger.error(
+                  `[payout-utr] order ${order.orderNumber}: UTR FAILED but a voucher code is on the order — points NOT refunded; needs ops review`,
+                );
+              }
               if (refundClaim.count > 0) {
                 await this.wallet.reverse(
                   order.partnerId,

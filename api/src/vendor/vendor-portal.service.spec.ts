@@ -13,7 +13,9 @@ const mockPrisma = {
   giftCategory: { findFirst: jest.fn(), findMany: jest.fn() },
   rewardCategory: { findFirst: jest.fn(), create: jest.fn() },
   rewardCatalog: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn() },
-  redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findUniqueOrThrow: jest.fn() },
+  redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findUniqueOrThrow: jest.fn() },
+  // programLabel + Hubble-eligibility reads (voucher issuance helpers).
+  client: { findUnique: jest.fn(), findFirst: jest.fn() },
   redemptionStatusHistory: { create: jest.fn() },
   channelPartner: { findFirst: jest.fn() },
   auditLog: { create: jest.fn().mockResolvedValue({}) },
@@ -364,6 +366,31 @@ describe('VendorPortalService', () => {
         expect(data.voucherCode).toBe('NEW-1');
         expect(where.fulfilledByVendorId).toBe('v1');
         expect(where.AND).toEqual(expect.arrayContaining([{ OR: [{ voucherCode: null }, { voucherCode: '' }] }]));
+      });
+
+      it('updateFulfilment: a NEW code writes a masked AuditLog row and sends the member VOUCHER_ISSUED', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open());
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        mockPrisma.redemptionOrder.findUnique.mockResolvedValueOnce({
+          voucherCode: 'VEND-CODE-4321', valuePaise: 50000n, orderNumber: 'D-26-1',
+          reward: { name: 'Amazon 500' }, partner: { userId: 'm1', phone: '9', ownerName: 'A' },
+        });
+        mockPrisma.client.findUnique.mockResolvedValueOnce({ branding: { displayName: 'Bajaj' }, internalName: 'bajaj' });
+        await service.updateFulfilment(vendor, 'o1', { voucherCode: 'VEND-CODE-4321' } as never);
+        const audit = mockPrisma.auditLog.create.mock.calls.find((c) => c[0]?.data?.metadata?.event === 'VOUCHER_ISSUED_MANUAL')?.[0];
+        expect(audit?.data).toMatchObject({ actorId: vendor.sub, entityId: 'o1' });
+        expect(audit?.data.metadata).toMatchObject({ path: 'PATCH /vendor/orders/:id/fulfilment', voucherCode: '••••4321' });
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(
+          expect.objectContaining({ eventKey: 'VOUCHER_ISSUED', userId: 'm1' }),
+        );
+      });
+
+      it('updateFulfilment: a Hubble-managed order refuses a vendor code', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ metadata: { hubbleStatus: 'PROCESSING' } }));
+        await expect(service.updateFulfilment(vendor, 'o1', { voucherCode: 'NEW-1' } as never)).rejects.toThrow(/Hubble integration/);
+        expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
       });
 
       it.each([

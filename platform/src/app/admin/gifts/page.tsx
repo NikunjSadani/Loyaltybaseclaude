@@ -1283,7 +1283,7 @@ function OrderRow({
   canCancelVoucher: boolean;
 }) {
   const voucherIssued = hasIssuedVoucher(order.voucherCode) || order.voucherIssued === true;
-  const isHubble = order.voucherProvider === 'Hubble';
+  const isHubble = (order.voucherProvider ?? '').trim().toLowerCase() === 'hubble';
   const options = nextStatusOptions({
     status: order.status,
     redemptionMode: order.redemptionMode ?? order.reward?.redemptionMode ?? null,

@@ -163,6 +163,8 @@ const mockPrisma = {
     findUniqueOrThrow: jest.fn(),
   },
   redemptionStatusHistory: { create: jest.fn() },
+  // Manual voucher issuance writes an AuditLog row (voucher-issuance.ts).
+  auditLog: { create: jest.fn() },
   giftCategory: { findFirst: jest.fn(), count: jest.fn(), delete: jest.fn() },
   giftMaster: { count: jest.fn() },
   $executeRaw: jest.fn().mockResolvedValue(1),

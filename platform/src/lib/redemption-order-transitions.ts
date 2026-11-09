@@ -51,7 +51,7 @@ export function hasIssuedVoucher(code: string | null | undefined): boolean {
 export function nextStatusOptions(order: TransitionableOrder): string[] {
   const edges = NEXT_STATUS[order.status] ?? [];
   const isCash = CASH_REDEMPTION_MODES.has(order.redemptionMode ?? '');
-  const isHubble = order.voucherProvider === 'Hubble';
+  const isHubble = (order.voucherProvider ?? '').trim().toLowerCase() === 'hubble';
   const voucherIssued = hasIssuedVoucher(order.voucherCode) || order.voucherIssued === true;
   return edges.filter((to) => {
     if (isCash && (REFUND_TARGETS.has(to) || FORWARD_DISPATCH_TARGETS.has(to))) return false;

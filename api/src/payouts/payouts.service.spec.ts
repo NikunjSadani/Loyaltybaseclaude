@@ -1273,9 +1273,9 @@ describe('PayoutsService', () => {
         where: { id: 'txn1', status: 'INITIATED' },
         data: expect.objectContaining({ status: 'FAILED' }),
       });
-      // The exact M2 claim shape.
+      // The exact M2 claim shape — plus the issued-voucher refund block (no code on the order).
       expect(mockTx.redemptionOrder.updateMany).toHaveBeenCalledWith({
-        where: { id: 'o1', pointsDeducted: { gt: 0 } },
+        where: { id: 'o1', pointsDeducted: { gt: 0 }, OR: [{ voucherCode: null }, { voucherCode: '' }] },
         data: { pointsDeducted: 0 },
       });
       expect(mockWallet.reverse).toHaveBeenCalledWith(
@@ -1354,6 +1354,24 @@ describe('PayoutsService', () => {
         mockTx.redemptionStatusHistory.create.mockResolvedValue({});
       });
 
+      it('FAILED on an order holding a voucher code: the refund claim refuses (no reverse) and it is logged for ops', async () => {
+        oneTxn();
+        mockTx.redemptionOrder.findFirst.mockResolvedValue({
+          pointsDeducted: 500, partnerId: 'p1', orderNumber: 'RO-1', status: 'CONFIRMED', voucherCode: 'ODD-CODE-1',
+        });
+        // The guarded M2 claim matches 0 rows (a code is on the order); the FAILED flip still lands.
+        mockTx.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
+        const errSpy = jest.spyOn((service as unknown as { logger: { error: (m: string) => void } }).logger, 'error');
+        const res = await service.uploadPayoutUtr(gifsy, 'b1', buildUpload([{ txnId: 'txn1', status: 'FAILED' }]), true);
+        expect(res).toMatchObject({ failedCount: 1, reversedCount: 0 });
+        expect(mockTx.redemptionOrder.updateMany.mock.calls[0][0].where).toMatchObject({
+          OR: [{ voucherCode: null }, { voucherCode: '' }],
+        });
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+        expect(errSpy.mock.calls.some(([m]) => /voucher code is on the order/.test(String(m)))).toBe(true);
+        expect(JSON.stringify(errSpy.mock.calls)).not.toContain('ODD-CODE-1');
+      });
+
       it('PAID: the guarded DELIVERED claim is byte-identical and writes ONE DELIVERED history row (actor = uploader)', async () => {
         oneTxn();
         const res = await service.uploadPayoutUtr(gifsy, 'b1', buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]), true);
@@ -1384,7 +1402,7 @@ describe('PayoutsService', () => {
         expect(res).toMatchObject({ applied: true, paidCount: 0, failedCount: 1, reversedCount: 1 });
         expect(mockTx.redemptionOrder.findFirst).toHaveBeenCalledWith({
           where: { id: 'o1' },
-          select: { pointsDeducted: true, partnerId: true, orderNumber: true, status: true },
+          select: { pointsDeducted: true, partnerId: true, orderNumber: true, status: true, voucherCode: true },
         });
         expect(mockWallet.reverse).toHaveBeenCalledTimes(1);
         expect(mockWallet.reverse).toHaveBeenCalledWith('p1', 500, { referenceId: 'o1', description: 'Reversal RO-1' }, mockTx);
