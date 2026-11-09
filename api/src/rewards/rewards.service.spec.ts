@@ -32,7 +32,8 @@ jest.mock('../common/reward-account.helper', () => ({
 
 const mockPrisma = {
   channelPartner: { findFirst: jest.fn() },
-  salesUser: { findFirst: jest.fn() },
+  // findMany = the tenant-scoped reporting edges for the downline walk (requireAssignedPartner).
+  salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   salesUserAssignment: { findFirst: jest.fn() },
   // outlet.findFirst + outletTypeClientConfig added for the per-outlet-type Loyalty gate
   // (isLoyaltyEnabledForPartner). Defaulted in beforeEach so existing tests default loyalty ON.
@@ -183,6 +184,7 @@ describe('RewardsService', () => {
     mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
     mockPrisma.auditLog.create.mockResolvedValue({ id: 'audit1' });
     mockPrisma.outlet.findMany.mockResolvedValue([]); // default: no extra outlet-keyed assignments
+    mockPrisma.salesUser.findMany.mockResolvedValue([]); // default: no edges → downline = caller only
     // Per-outlet-type gate defaults (Loyalty + Sales-Assisted Redemption): a WHOLESALER primary
     // outlet + no config row → isLoyaltyEnabledForPartner true (schema default) AND
     // isSalesRedeemEnabledForPartner true (preserve-today default = wholesalers only). Loyalty-off
@@ -2067,7 +2069,7 @@ describe('RewardsService', () => {
       // Authorizes by partnerId OR the partner's outletIds (production assignments
       // key on outletId; seed/admin-reassign key on partnerId).
       const where = mockPrisma.salesUserAssignment.findFirst.mock.calls[0][0].where;
-      expect(where).toMatchObject({ salesUserId: 'su1', unassignedAt: null });
+      expect(where).toMatchObject({ salesUserId: { in: ['su1'] }, unassignedAt: null });
       expect(where.OR).toEqual([
         { partnerId: 'cp-out' },
         { outletId: { in: ['out-1'] } },
@@ -2589,6 +2591,198 @@ describe('RewardsService', () => {
         }),
       ).resolves.toMatchObject({ status: 'CONFIRMED' });
       expect(mockWallet.debitRedeem).toHaveBeenCalled();
+    });
+  });
+
+  // ─── Sales-assisted redeem: WHOLE-DOWNLINE scoping (mirrors GET /v1/sales/outlets) ───
+  describe('requireAssignedPartner — whole-downline scoping (same scope as /sales/outlets)', () => {
+    // Tenant 'deoleo' hierarchy (edges as SalesService.getMyOutlets loads them):
+    //   su-ho → su-asm → su-so → { su-isr1, su-isr2 }      su-asm2 → su-isr3
+    // plus su-x in ANOTHER tenant whose reportingToId (bogusly) points at su-asm.
+    const EDGES = [
+      { id: 'su-ho', reportingToId: null, clientId: 'deoleo' },
+      { id: 'su-asm', reportingToId: 'su-ho', clientId: 'deoleo' },
+      { id: 'su-so', reportingToId: 'su-asm', clientId: 'deoleo' },
+      { id: 'su-isr1', reportingToId: 'su-so', clientId: 'deoleo' },
+      { id: 'su-isr2', reportingToId: 'su-so', clientId: 'deoleo' },
+      { id: 'su-asm2', reportingToId: 'su-ho', clientId: 'deoleo' },
+      { id: 'su-isr3', reportingToId: 'su-asm2', clientId: 'deoleo' },
+      { id: 'su-x', reportingToId: 'su-asm', clientId: 'other' },
+    ];
+    type Asg = { salesUserId: string; partnerId: string | null; outletId: string | null; unassignedAt: Date | null };
+    let assignments: Asg[];
+
+    const jwt = (salesUserId: string, role = 'SALES_ASM'): JwtPayload => ({
+      sub: `user-${salesUserId}`, role, clientId: 'deoleo', phone: '9990000000', name: '',
+    });
+
+    const fixedItem = {
+      id: 'r1', clientId: 'deoleo', status: 'ACTIVE', deletedAt: null,
+      pointsCost: 500, redemptionMode: 'GIFT_CARD',
+      minRedemptionPoints: null, maxRedemptionPoints: null, stockQuantity: null,
+    };
+    const outletPartner = {
+      id: 'cp-out', userId: 'outletUser1', user: { id: 'outletUser1', phone: '9000000000' },
+      phone: '9000000001', ownerName: 'Outlet Owner', isActive: true, deletedAt: null,
+      kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+    };
+    const pendingOrder = {
+      id: 'o-out', status: 'PENDING', partnerId: 'cp-out', orderNumber: 'RDM-OUT',
+      totalPointsCost: 1000, quantity: 1, redemptionMode: 'GIFT_CARD',
+      partner: { id: 'cp-out', userId: 'outletUser1', isActive: true, deletedAt: null, kycSubmissions: [{ status: 'APPROVED' }] },
+      reward: { name: 'Amazon ₹500', stockQuantity: null },
+    };
+
+    beforeEach(() => {
+      // cp-out's outlet out-1 is assigned (outletId-keyed, the master-upload shape) to su-isr1.
+      assignments = [{ salesUserId: 'su-isr1', partnerId: null, outletId: 'out-1', unassignedAt: null }];
+      // Caller resolution: JWT sub `user-<suId>` → that SalesUser, tenant-scoped.
+      mockPrisma.salesUser.findFirst.mockImplementation(async ({ where }: any) => {
+        const id = String(where.userId).replace(/^user-/, '');
+        const e = EDGES.find((x) => x.id === id && x.clientId === where.clientId);
+        return e ? { id: e.id } : null;
+      });
+      // Edge list honours the tenant filter (as Prisma would) — the cross-tenant su-x is excluded.
+      mockPrisma.salesUser.findMany.mockImplementation(async ({ where }: any) =>
+        EDGES.filter((e) => where?.user?.clientId === undefined || e.clientId === where.user.clientId).map(
+          ({ id, reportingToId }) => ({ id, reportingToId }),
+        ),
+      );
+      mockPrisma.channelPartner.findFirst.mockImplementation(async ({ where }: any) =>
+        // The in-tx TOCTOU re-check looks up by id only (no clientId) — honour clientId when given.
+        where.id === 'cp-out' && (where.clientId === undefined || where.clientId === 'deoleo') ? outletPartner : null,
+      );
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'out-1' }]);
+      // Evaluate the guard's real where-clause against the assignment fixture.
+      mockPrisma.salesUserAssignment.findFirst.mockImplementation(async ({ where }: any) => {
+        const inIds: string[] = where.salesUserId?.in ?? [where.salesUserId];
+        const hit = assignments.find(
+          (a) =>
+            inIds.includes(a.salesUserId) &&
+            (where.unassignedAt === null ? a.unassignedAt === null : true) &&
+            (where.OR as any[]).some((c) =>
+              'partnerId' in c ? a.partnerId === c.partnerId : (c.outletId.in as string[]).includes(a.outletId ?? ''),
+            ),
+        );
+        return hit ? { id: 'asg-hit' } : null;
+      });
+      // Redeem + confirm plumbing.
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedItem);
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.create.mockResolvedValue({ id: 'o-out', orderNumber: 'RDM-OUT' });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(pendingOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+        expiresAt: new Date(Date.now() + 60_000), verifiedAt: null,
+      });
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockWallet.debitRedeem.mockResolvedValue({});
+      mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
+    });
+
+    const redeem = (u: JwtPayload) => service.redeemForOutlet(u, { rewardId: 'r1', quantity: 1, targetPartnerId: 'cp-out' });
+    const confirm = (u: JwtPayload) =>
+      service.confirmRedeemForOutlet(u, { orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out' });
+
+    it('loads edges with EXACTLY the getMyOutlets query (tenant-scoped, non-deleted, no isActive filter)', async () => {
+      await redeem(jwt('su-asm'));
+      expect(mockPrisma.salesUser.findMany).toHaveBeenCalledWith({
+        where: { user: { clientId: 'deoleo' }, deletedAt: null },
+        select: { id: true, reportingToId: true },
+      });
+      const where = mockPrisma.salesUserAssignment.findFirst.mock.calls[0][0].where;
+      expect([...where.salesUserId.in].sort()).toEqual(['su-asm', 'su-isr1', 'su-isr2', 'su-so']);
+    });
+
+    it('manager (ASM) redeems for a subordinate rep\'s outlet → allowed; OTP still bound to the OUTLET', async () => {
+      await expect(redeem(jwt('su-asm'))).resolves.toBeDefined();
+      expect(mockPrisma.redemptionOrder.create.mock.calls[0][0].data.partnerId).toBe('cp-out');
+      expect(mockPrisma.otpCode.create.mock.calls[0][0].data).toMatchObject({
+        userId: 'outletUser1', purpose: 'REDEMPTION_CONFIRM',
+      });
+    });
+
+    it('manager (ASM) confirms for a subordinate rep\'s outlet → allowed; debits the OUTLET wallet', async () => {
+      await expect(confirm(jwt('su-asm'))).resolves.toMatchObject({ status: 'CONFIRMED' });
+      expect(mockPrisma.otpCode.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ userId: 'outletUser1', referenceId: 'o-out' }) }),
+      );
+      expect(mockWallet.debitRedeem).toHaveBeenCalledWith('cp-out', 1000, expect.anything(), mockPrisma);
+    });
+
+    it('a deep ancestor (HO, 3 levels up) is allowed on both redeem and confirm', async () => {
+      await expect(redeem(jwt('su-ho', 'SALES_HO'))).resolves.toBeDefined();
+      await expect(confirm(jwt('su-ho', 'SALES_HO'))).resolves.toMatchObject({ status: 'CONFIRMED' });
+    });
+
+    it('the assigned rep himself is still allowed (reps unchanged)', async () => {
+      await expect(redeem(jwt('su-isr1', 'SALES_ISR'))).resolves.toBeDefined();
+      await expect(confirm(jwt('su-isr1', 'SALES_ISR'))).resolves.toMatchObject({ status: 'CONFIRMED' });
+    });
+
+    it('a sibling rep (another rep\'s outlet) → 403 with the same message, on redeem AND confirm', async () => {
+      await expect(redeem(jwt('su-isr2', 'SALES_ISR'))).rejects.toThrow(
+        new ForbiddenException('You are not assigned to this outlet'),
+      );
+      await expect(confirm(jwt('su-isr2', 'SALES_ISR'))).rejects.toThrow(
+        new ForbiddenException('You are not assigned to this outlet'),
+      );
+      expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('a manager OUTSIDE the downline (other branch ASM) → 403 on redeem AND confirm', async () => {
+      await expect(redeem(jwt('su-asm2'))).rejects.toThrow(new ForbiddenException('You are not assigned to this outlet'));
+      await expect(confirm(jwt('su-asm2'))).rejects.toThrow(new ForbiddenException('You are not assigned to this outlet'));
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('an outlet assigned to a subordinate who is in ANOTHER tenant (bogus edge) → 403 (edges are tenant-scoped)', async () => {
+      assignments = [{ salesUserId: 'su-x', partnerId: 'cp-out', outletId: null, unassignedAt: null }];
+      await expect(redeem(jwt('su-asm'))).rejects.toThrow(new ForbiddenException('You are not assigned to this outlet'));
+      await expect(confirm(jwt('su-asm'))).rejects.toThrow(new ForbiddenException('You are not assigned to this outlet'));
+    });
+
+    it('a cross-tenant OUTLET is still rejected before any assignment check (tenant isolation unchanged)', async () => {
+      await expect(
+        service.redeemForOutlet(jwt('su-asm'), { rewardId: 'r1', targetPartnerId: 'cp-other-tenant' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockPrisma.salesUserAssignment.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('an UNASSIGNED outlet (unassignedAt set) is rejected for the manager and the ex-rep alike — as the list hides it', async () => {
+      assignments = [{ salesUserId: 'su-isr1', partnerId: null, outletId: 'out-1', unassignedAt: new Date() }];
+      await expect(redeem(jwt('su-asm'))).rejects.toThrow(new ForbiddenException('You are not assigned to this outlet'));
+      await expect(redeem(jwt('su-isr1', 'SALES_ISR'))).rejects.toThrow(
+        new ForbiddenException('You are not assigned to this outlet'),
+      );
+      expect(mockPrisma.salesUserAssignment.findFirst.mock.calls[0][0].where.unassignedAt).toBeNull();
+    });
+
+    it('MIS_USER mirrors the outlet list: no tenant-wide bypass — without a SalesUser row it is forbidden', async () => {
+      const mis: JwtPayload = { sub: 'user-mis', role: 'MIS_USER', clientId: 'deoleo', phone: '9990000001', name: '' };
+      await expect(redeem(mis)).rejects.toThrow(
+        new ForbiddenException('Only sales users may redeem on behalf of an outlet'),
+      );
+      await expect(confirm(mis)).rejects.toThrow(
+        new ForbiddenException('Only sales users may redeem on behalf of an outlet'),
+      );
+      expect(mockPrisma.salesUserAssignment.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('MIS_USER is excluded by the same @Roles gate as /sales/outlets (role sets identical)', () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { RewardsController } = require('./rewards.controller');
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { SalesController } = require('../sales/sales.controller');
+      const rf = new (require('@nestjs/core').Reflector)();
+      const salesRoles: string[] = rf.getAllAndOverride('roles', [SalesController.prototype.getMyOutlets, SalesController]);
+      for (const m of ['redeemForOutlet', 'confirmRedeemForOutlet']) {
+        const r: string[] = rf.getAllAndOverride('roles', [RewardsController.prototype[m], RewardsController]);
+        expect([...r].sort()).toEqual([...salesRoles].sort());
+        expect(r).not.toContain('MIS_USER');
+      }
     });
   });
 

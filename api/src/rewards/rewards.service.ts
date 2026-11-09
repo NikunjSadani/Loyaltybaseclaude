@@ -25,6 +25,7 @@ import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
 import { isSalesRedeemEnabledForPartner } from '../common/sales-redeem-eligibility';
 import { isGifsyOperator, tenantScope } from '../common/tenant-scope';
+import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
 import { generateTenantOrderNumber } from './order-number.helper';
 import {
   supersedePendingOrders,
@@ -978,7 +979,8 @@ export class RewardsService {
   // ───────────────────────────────────────────────────────────────────────────
   // B1 / #50-E — SALES-ASSISTED redemption (redeem ON BEHALF OF an outlet).
   //
-  // A sales user redeems for an OUTLET they are actively assigned to. Points,
+  // A sales user redeems for an OUTLET actively assigned to them OR to anyone in
+  // their reporting downline (the same scope as GET /v1/sales/outlets). Points,
   // the wallet debit, and the order all belong to the OUTLET — the sales user is
   // only the operator (recorded for audit). The OTP is sent to the OUTLET's phone
   // (owner decision: the outlet consents; the rep submits the code the outlet
@@ -987,7 +989,8 @@ export class RewardsService {
   //
   // Scoping shape is the PROVEN sales-on-behalf guard from schemes.service.ts:
   //   caller SalesUser in tenant → target ChannelPartner in tenant → active
-  //   salesUserAssignment(salesUserId + partnerId + unassignedAt null).
+  //   salesUserAssignment(salesUserId ∈ caller's downline + partnerId/outletId +
+  //   unassignedAt null).
   // ───────────────────────────────────────────────────────────────────────────
 
   /**
@@ -1012,11 +1015,22 @@ export class RewardsService {
     });
     if (!partner) throw new NotFoundException('Outlet not found in this tenant');
 
-    // 3. Caller must have an ACTIVE assignment to this outlet. Assignments may be
-    //    keyed by partnerId (admin re-assign / seed) OR by outletId (the master
-    //    outlet-upload path, where partnerId is null at upload time — the partner
-    //    is attached later at KYC and not backfilled). Accept EITHER so the guard
-    //    matches real production assignments, not just the seeded shape.
+    // 3. The outlet must have an ACTIVE assignment to the caller OR to anyone in the
+    //    caller's reporting DOWNLINE — EXACTLY the scope GET /v1/sales/outlets
+    //    (SalesService.getMyOutlets) lists: same tenant-scoped edge query, same
+    //    descendantSalesUserIds walk. A manager may therefore redeem for any outlet
+    //    he can see; a leaf rep's subtree is just himself (unchanged). There is no
+    //    role-based tenant-wide branch here, mirroring getMyOutlets (MIS_USER is not
+    //    a sales role and is already rejected at the controller @Roles gate).
+    //    Assignments may be keyed by partnerId (admin re-assign / seed) OR by
+    //    outletId (the master outlet-upload path, where partnerId is null at upload
+    //    time — the partner is attached later at KYC and not backfilled). Accept
+    //    EITHER so the guard matches real production assignments.
+    const edges = await this.prisma.salesUser.findMany({
+      where: { user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true, reportingToId: true },
+    });
+    const subtreeIds = [...descendantSalesUserIds(callerSalesUser.id, edges)];
     const partnerOutlets = await this.prisma.outlet.findMany({
       where: { partnerId: targetPartnerId, deletedAt: null },
       select: { id: true },
@@ -1024,7 +1038,7 @@ export class RewardsService {
     const outletIds = partnerOutlets.map((o) => o.id);
     const assignment = await this.prisma.salesUserAssignment.findFirst({
       where: {
-        salesUserId: callerSalesUser.id,
+        salesUserId: { in: subtreeIds },
         unassignedAt: null,
         OR: [
           { partnerId: targetPartnerId },
