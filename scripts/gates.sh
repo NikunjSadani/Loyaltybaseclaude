@@ -39,7 +39,15 @@ run() { # run <name> <dir> <cmd...>
 }
 
 [ "$FAST" -eq 0 ] && run "api jest"        api      npx jest --no-coverage
+# A stale incremental tsbuildinfo makes `nest build` (deleteOutDir:true) exit 0 while emitting NOTHING
+# (2026-11-10: a "green" build gate with no dist/ at all). Remove it so the build always really compiles,
+# then assert the entrypoint was actually emitted.
+rm -f "$ROOT/api/tsconfig.build.tsbuildinfo" "$ROOT/api/tsconfig.tsbuildinfo"
 run                      "api build"       api      npx nest build
+if [ ! -f "$ROOT/api/dist/main.js" ]; then
+  printf '❌ api build emitted no dist/main.js — the build did not really compile\n\n'
+  fail=1
+fi
 [ "$FAST" -eq 0 ] && run "platform vitest" platform npx vitest run
 run                      "platform tsc"    platform npx tsc --noEmit
 
