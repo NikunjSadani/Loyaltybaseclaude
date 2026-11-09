@@ -3070,7 +3070,10 @@ model OfferTile {
   states          String[]       @default([])
   // Optional link to a tenant KPI (KpiDef.code) → per-outlet live progress.
   kpiCode         String?
-  copiedFromId    String? // set by "Copy last month" (idempotency key)
+  copiedFromId    String? // set by "Copy last month" (source tile id)
+  // 'YYYY-MM' target month of a copy-month run. Idempotency key with copiedFromId — NOT validFrom,
+  // which the admin may edit after copying (that used to let a re-copy duplicate the tile).
+  copiedToMonth   String?
   createdById     String
   updatedById     String?
   createdAt       DateTime       @default(now())
@@ -3078,7 +3081,7 @@ model OfferTile {
   deletedAt       DateTime?
 
   @@index([clientId, deletedAt, validFrom, validTo])
-  @@index([clientId, copiedFromId])
+  @@index([clientId, copiedFromId, copiedToMonth])
   @@map("offer_tiles")
 }
 

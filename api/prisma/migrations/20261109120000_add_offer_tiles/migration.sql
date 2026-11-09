@@ -30,6 +30,7 @@ CREATE TABLE "offer_tiles" (
     "states" TEXT[] DEFAULT ARRAY[]::TEXT[],
     "kpiCode" TEXT,
     "copiedFromId" TEXT,
+    "copiedToMonth" TEXT,
     "createdById" TEXT NOT NULL,
     "updatedById" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -43,4 +44,4 @@ CREATE TABLE "offer_tiles" (
 CREATE INDEX "offer_tiles_clientId_deletedAt_validFrom_validTo_idx" ON "offer_tiles"("clientId", "deletedAt", "validFrom", "validTo");
 
 -- CreateIndex
-CREATE INDEX "offer_tiles_clientId_copiedFromId_idx" ON "offer_tiles"("clientId", "copiedFromId");
+CREATE INDEX "offer_tiles_clientId_copiedFromId_copiedToMonth_idx" ON "offer_tiles"("clientId", "copiedFromId", "copiedToMonth");

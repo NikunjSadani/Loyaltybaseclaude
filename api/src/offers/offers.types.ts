@@ -32,6 +32,8 @@ export interface OfferTileAdmin {
   states: string[];
   kpiCode: string | null;
   copiedFromId: string | null;
+  /** 'YYYY-MM' a copy-month run tagged this copy for (idempotency key); null for hand-made tiles. */
+  copiedToMonth: string | null;
   createdAt: string;
   updatedAt: string;
 }

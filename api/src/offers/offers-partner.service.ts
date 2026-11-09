@@ -114,7 +114,8 @@ export class OffersPartnerService {
         this.prisma.outletTarget.findMany({ where, select: { outletCode: true, targetValues: true } }),
         this.prisma.outletSalesRecord.findMany({ where, select: { outletCode: true, kpiValues: true } }),
         this.prisma.kpiDef.findMany({
-          where: { clientId: user.clientId, code: { in: kpiCodes } },
+          // DISABLED KPIs are ignored: a tile pointing at one shows no progress (below).
+          where: { clientId: user.clientId, code: { in: kpiCodes }, enabled: true },
           select: { code: true, label: true, unit: true },
         }),
       ]);
@@ -125,6 +126,8 @@ export class OffersPartnerService {
 
     const progressFor = (kpiCode: string, codes: string[]) => {
       if (kpiCode === NAMES_KEY) return null; // never a KPI
+      const meta = kpiMeta.get(kpiCode);
+      if (!meta) return null; // KPI deleted or disabled since the tile was saved → no progress
       let target: number | null = null;
       let achieved = 0;
       for (const c of codes) {
@@ -132,11 +135,10 @@ export class OffersPartnerService {
         if (t !== null) target = (target ?? 0) + t;
         achieved += kpiNumber(achievedByOutlet.get(c)?.[kpiCode]) ?? 0;
       }
-      const meta = kpiMeta.get(kpiCode);
       return {
         kpiCode,
-        kpiName: meta?.label || kpiCode,
-        unit: meta?.unit ?? '',
+        kpiName: meta.label || kpiCode,
+        unit: meta.unit ?? '',
         ...computeProgress(target, achieved),
       };
     };

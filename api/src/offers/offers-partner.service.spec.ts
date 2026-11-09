@@ -145,15 +145,16 @@ describe('OffersPartnerService', () => {
       expect.objectContaining({ where: { clientId: 'bajaj', month, outletCode: { in: ['O1'] } } }),
     );
     expect(mockPrisma.kpiDef.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { clientId: 'bajaj', code: { in: ['ADHO50'] } } }),
+      expect.objectContaining({ where: { clientId: 'bajaj', code: { in: ['ADHO50'] }, enabled: true } }),
     );
     expect(res.tiles[0].progress).toEqual({
       kpiCode: 'ADHO50', kpiName: 'ADHO 50 ml', unit: 'cases', target: 200, achieved: 120, pct: 60, unlocked: false,
     });
   });
 
-  it('5b. multi-outlet sum across two matching outlets → unlocked at ≥100%', async () => {
+  it('5b. multi-outlet sum across two matching outlets → unlocked at ≥100% (pct clamped to 100)', async () => {
     mockPrisma.offerTile.findMany.mockResolvedValue([tile({ id: 'k', kpiCode: 'ADHO50' })]);
+    mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'ADHO50', label: '', unit: '' }]);
     mockPrisma.outletTarget.findMany.mockResolvedValue([
       { outletCode: 'O1', targetValues: { ADHO50: 100 } },
       { outletCode: 'O2', targetValues: { ADHO50: 100 } },
@@ -163,15 +164,38 @@ describe('OffersPartnerService', () => {
       { outletCode: 'O2', kpiValues: { ADHO50: '60' } },
     ]);
     const res = await service.listForPartner(partner);
-    expect(res.tiles[0].progress).toMatchObject({ target: 200, achieved: 210, pct: 105, unlocked: true, kpiName: 'ADHO50', unit: '' });
+    expect(res.tiles[0].progress).toMatchObject({ target: 200, achieved: 210, pct: 100, unlocked: true, kpiName: 'ADHO50', unit: '' });
   });
 
   it('6. KPI-linked tile with no target row → target null, pct null, not unlocked — still returned', async () => {
     mockPrisma.offerTile.findMany.mockResolvedValue([tile({ id: 'k', kpiCode: 'ADHO50' })]);
+    mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'ADHO50', label: 'ADHO 50 ml', unit: 'cases' }]);
     mockPrisma.outletSalesRecord.findMany.mockResolvedValue([{ outletCode: 'O1', kpiValues: { ADHO50: 5 } }]);
     const res = await service.listForPartner(partner);
     expect(res.tiles).toHaveLength(1);
     expect(res.tiles[0].progress).toMatchObject({ target: null, achieved: 5, pct: null, unlocked: false });
+  });
+
+  it('6a. 199/200 never reads 100% while locked (floor), negative achieved → 0', async () => {
+    mockPrisma.offerTile.findMany.mockResolvedValue([tile({ id: 'k', kpiCode: 'ADHO50' })]);
+    mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'ADHO50', label: 'ADHO 50 ml', unit: 'cases' }]);
+    mockPrisma.outletTarget.findMany.mockResolvedValue([{ outletCode: 'O1', targetValues: { ADHO50: 200 } }]);
+    mockPrisma.outletSalesRecord.findMany.mockResolvedValue([{ outletCode: 'O1', kpiValues: { ADHO50: 199.5 } }]);
+    let res = await service.listForPartner(partner);
+    expect(res.tiles[0].progress).toMatchObject({ pct: 99, unlocked: false });
+    mockPrisma.outletSalesRecord.findMany.mockResolvedValue([{ outletCode: 'O1', kpiValues: { ADHO50: -40 } }]);
+    res = await service.listForPartner(partner);
+    expect(res.tiles[0].progress).toMatchObject({ achieved: 0, pct: 0, unlocked: false });
+  });
+
+  it('6c. tile linked to a DISABLED (or deleted) KPI → progress null, tile still shown', async () => {
+    mockPrisma.offerTile.findMany.mockResolvedValue([tile({ id: 'k', kpiCode: 'OLDKPI' })]);
+    mockPrisma.kpiDef.findMany.mockResolvedValue([]); // enabled:true filter excludes it
+    mockPrisma.outletTarget.findMany.mockResolvedValue([{ outletCode: 'O1', targetValues: { OLDKPI: 10 } }]);
+    mockPrisma.outletSalesRecord.findMany.mockResolvedValue([{ outletCode: 'O1', kpiValues: { OLDKPI: 10 } }]);
+    const res = await service.listForPartner(partner);
+    expect(res.tiles).toHaveLength(1);
+    expect(res.tiles[0].progress).toBeNull();
   });
 
   it('6b. no KPI-linked tile → no target/achievement/kpi queries; progress null', async () => {

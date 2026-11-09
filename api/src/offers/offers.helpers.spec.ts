@@ -3,6 +3,7 @@
 
 import { BadRequestException } from '@nestjs/common';
 import {
+  assertNoNulls,
   computeProgress,
   dateToIstDay,
   istDayToDate,
@@ -62,7 +63,16 @@ describe('offers.helpers', () => {
     expect(computeProgress(0, 5)).toEqual({ target: 0, achieved: 5, pct: null, unlocked: false });
     expect(computeProgress(200, 120)).toEqual({ target: 200, achieved: 120, pct: 60, unlocked: false });
     expect(computeProgress(200, 200)).toMatchObject({ pct: 100, unlocked: true });
-    expect(computeProgress(200, 260)).toMatchObject({ pct: 130, unlocked: true });
+  });
+
+  it('computeProgress: pct never reads 100 while locked; clamped to [0,100]; negative achieved → 0', () => {
+    expect(computeProgress(200, 199)).toMatchObject({ pct: 99, unlocked: false }); // round() said 100
+    expect(computeProgress(1000, 999.9)).toMatchObject({ pct: 99, unlocked: false });
+    expect(computeProgress(3, 2)).toMatchObject({ pct: 66, unlocked: false }); // floor, not round
+    expect(computeProgress(200, 260)).toEqual({ target: 200, achieved: 260, pct: 100, unlocked: true });
+    expect(computeProgress(200, -50)).toEqual({ target: 200, achieved: 0, pct: 0, unlocked: false });
+    expect(computeProgress(null, -50)).toEqual({ target: null, achieved: 0, pct: null, unlocked: false });
+    expect(computeProgress(200, Number.NaN)).toMatchObject({ achieved: 0, pct: 0 });
   });
 
   describe('validateTileInput', () => {
@@ -76,22 +86,26 @@ describe('offers.helpers', () => {
     });
 
     it('enforces value-type rules', () => {
-      expect(() => validateTileInput({ ...base, valueType: 'PERCENT', valueNumber: 120 })).toThrow(/100/);
+      expect(() => validateTileInput({ ...base, valueType: 'PERCENT', valueNumber: 120 })).toThrow("Percent can't exceed 100");
       expect(() => validateTileInput({ ...base, valueType: 'TEXT', valueText: '' })).toThrow(BadRequestException);
       expect(
         validateTileInput({ ...base, valueType: 'TEXT', valueText: 'Free kit', valueNumber: 5 }).valueNumber,
       ).toBeNull();
-      expect(() => validateTileInput({ ...base, validFrom: '2026-11-30', validTo: '2026-11-01' })).toThrow(/validTo/);
+      expect(() => validateTileInput({ ...base, validFrom: '2026-11-30', validTo: '2026-11-01' })).toThrow(
+        'Valid to must be on or after Valid from',
+      );
       expect(() => validateTileInput({ ...base, valueNumber: 1.234 })).toThrow(/2 decimal/);
+      expect(() => validateTileInput({ ...base, valueNumber: -5 })).toThrow('Value must be greater than 0');
+      expect(() => validateTileInput({ ...base, valueNumber: null })).toThrow('Value is required');
       expect(validateTileInput({ ...base, valueNumber: 1.1 }).valueNumber).toBe(1.1);
-      expect(() => validateTileInput({ ...base, valueNumber: 0 })).toThrow(BadRequestException);
+      expect(() => validateTileInput({ ...base, valueNumber: 0 })).toThrow('Value must be greater than 0');
       expect(() => validateTileInput({ ...base, valueNumber: null })).toThrow(BadRequestException);
       expect(() => validateTileInput({ ...base, valueNumber: 10_000_000 })).toThrow(BadRequestException);
       expect(() => validateTileInput({ ...base, valueType: 'TEXT', valueText: 'x'.repeat(13) })).toThrow(/12/);
     });
 
     it('enforces text length limits and non-empty label', () => {
-      expect(() => validateTileInput({ ...base, label: '   ' })).toThrow(/label/i);
+      expect(() => validateTileInput({ ...base, label: '   ' })).toThrow('Headline is required');
       expect(() => validateTileInput({ ...base, label: 'x'.repeat(61) })).toThrow(/60/);
       expect(() => validateTileInput({ ...base, product: 'x'.repeat(41) })).toThrow(/40/);
       expect(() => validateTileInput({ ...base, unitLabel: 'x'.repeat(21) })).toThrow(/20/);
@@ -99,8 +113,39 @@ describe('offers.helpers', () => {
     });
 
     it('rejects malformed or impossible dates', () => {
-      expect(() => validateTileInput({ ...base, validFrom: '2026-02-30' })).toThrow(/validFrom/);
-      expect(() => validateTileInput({ ...base, validTo: '30-11-2026' })).toThrow(/validTo/);
+      expect(() => validateTileInput({ ...base, validFrom: '2026-02-30' })).toThrow(/Valid from/);
+      expect(() => validateTileInput({ ...base, validTo: '30-11-2026' })).toThrow(/Valid to/);
+    });
+
+    it('caps the validity window at 366 days and years at 2020–2100', () => {
+      // 366 inclusive days (leap year 2028) is fine; 367 is not.
+      expect(validateTileInput({ ...base, validFrom: '2028-01-01', validTo: '2028-12-31' }).validTo).toBe('2028-12-31');
+      expect(() => validateTileInput({ ...base, validFrom: '2028-01-01', validTo: '2029-01-01' })).toThrow(/366 days/);
+      expect(() => validateTileInput({ ...base, validFrom: '2026-01-01', validTo: '2099-12-31' })).toThrow(/366 days/);
+      expect(() => validateTileInput({ ...base, validFrom: '2019-12-31', validTo: '2020-01-05' })).toThrow(
+        'Valid from must be between 2020 and 2100',
+      );
+      expect(() => validateTileInput({ ...base, validFrom: '2100-12-31', validTo: '2101-01-01' })).toThrow(
+        'Valid to must be between 2020 and 2100',
+      );
+      expect(() => validateTileInput({ ...base, validFrom: '0001-01-01', validTo: '0001-01-02' })).toThrow(/2020/);
+    });
+
+    it('sortOrder must be a whole number in [0, 1,000,000]', () => {
+      const msg = 'Sort order must be a whole number between 0 and 1,000,000';
+      expect(validateTileInput({ ...base, sortOrder: 1_000_000 }).sortOrder).toBe(1_000_000);
+      expect(() => validateTileInput({ ...base, sortOrder: -1 })).toThrow(msg);
+      expect(() => validateTileInput({ ...base, sortOrder: 1_000_001 })).toThrow(msg);
+      expect(() => validateTileInput({ ...base, sortOrder: 1.5 })).toThrow(msg);
+    });
+
+    it('assertNoNulls refuses explicit null on non-nullable fields only', () => {
+      expect(() => assertNoNulls({ isActive: null })).toThrow("Published can't be empty");
+      expect(() => assertNoNulls({ sortOrder: null })).toThrow("Sort order can't be empty");
+      expect(() => assertNoNulls({ zones: null })).toThrow(/empty list/);
+      expect(() => assertNoNulls({ kpiCode: null, product: null, details: null, valueNumber: null })).not.toThrow();
+      expect(() => assertNoNulls({ zones: [], isActive: false })).not.toThrow();
+      expect(() => assertNoNulls(undefined)).not.toThrow();
     });
 
     it('enforces array limits', () => {

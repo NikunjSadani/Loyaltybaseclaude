@@ -14,7 +14,7 @@ import { CreateOfferTileDto } from './dto/offers.dto';
 
 const mockPrisma = {
   offerTile: { findMany: jest.fn(), findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
-  kpiDef: { findFirst: jest.fn() },
+  kpiDef: { findFirst: jest.fn(), findMany: jest.fn() },
   outlet: { findMany: jest.fn() },
   auditLog: { create: jest.fn() },
   $executeRaw: jest.fn(),
@@ -26,6 +26,8 @@ const tenant = { resolveClient: jest.fn() };
 const admin: JwtPayload = { sub: 'u1', role: 'CLIENT_ADMIN', clientId: 'bajaj', phone: '', name: '' };
 const ownerUnassumed: JwtPayload = { sub: 'g1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: '', assumed: false };
 const ownerAssumed: JwtPayload = { sub: 'g1', role: 'GIFSY_ADMIN', clientId: 'bajaj', phone: '', name: '', assumed: true };
+const staffUnassumed: JwtPayload = { sub: 's1', role: 'GIFSY_STAFF', clientId: 'gifsy', phone: '', name: '', assumed: false };
+const staffAssumed: JwtPayload = { sub: 's1', role: 'GIFSY_STAFF', clientId: 'bajaj', phone: '', name: '', assumed: true };
 
 const body: CreateOfferTileDto = {
   group: 'TARGET_REWARD',
@@ -55,7 +57,7 @@ function row(over: Record<string, unknown> = {}) {
     label: 'Earn on every case', details: null,
     validFrom: istDayToDate('2026-11-01'), validTo: istDayToDate('2026-11-30'),
     sortOrder: 0, isActive: true, programNames: [], outletTypeCodes: [], zones: [], states: [],
-    kpiCode: null, copiedFromId: null, createdById: 'u1', updatedById: null,
+    kpiCode: null, copiedFromId: null, copiedToMonth: null, createdById: 'u1', updatedById: null,
     createdAt: new Date('2026-11-01T10:00:00Z'), updatedAt: new Date('2026-11-01T10:00:00Z'), deletedAt: null,
     ...over,
   };
@@ -69,6 +71,7 @@ describe('OffersAdminService', () => {
     tenant.resolveClient.mockResolvedValue({ features: { offerTiles: true } });
     tenantSettings.getOutletTypes.mockResolvedValue([{ code: 'SSS' }, { code: 'WHOLESALER' }]);
     mockPrisma.kpiDef.findFirst.mockResolvedValue({ code: 'ADHO50' });
+    mockPrisma.kpiDef.findMany.mockResolvedValue([]);
     mockPrisma.offerTile.create.mockImplementation(async ({ data }) => row({ ...data, id: 'new1' }));
     mockPrisma.offerTile.update.mockImplementation(async ({ data }) => row(data));
     const module: TestingModule = await Test.createTestingModule({
@@ -116,6 +119,21 @@ describe('OffersAdminService', () => {
     expect(mockPrisma.offerTile.create).not.toHaveBeenCalled();
     expect(mockPrisma.offerTile.findMany).not.toHaveBeenCalled();
     expect(mockPrisma.outlet.findMany).not.toHaveBeenCalled();
+  });
+
+  it('2a. un-assumed GIFSY_STAFF → the same 400 on every route; an ASSUMED staff works', async () => {
+    await expect(service.create(staffUnassumed, body)).rejects.toThrow('Assume a tenant to manage offers.');
+    await expect(service.list(staffUnassumed, '2026-11')).rejects.toThrow('Assume a tenant to manage offers.');
+    await expect(service.segmentOptions(staffUnassumed)).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.update(staffUnassumed, 't1', {})).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.remove(staffUnassumed, 't1')).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.copyMonth(staffUnassumed, { fromMonth: '2026-10', toMonth: '2026-11' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(tenant.resolveClient).not.toHaveBeenCalled();
+    expect(mockPrisma.offerTile.create).not.toHaveBeenCalled();
+    await service.create(staffAssumed, body);
+    expect(mockPrisma.offerTile.create.mock.calls[0][0].data).toMatchObject({ clientId: 'bajaj', createdById: 's1' });
   });
 
   it('2b. tenant flag offerTiles OFF → 403 on every route, no offer query', async () => {
@@ -186,6 +204,60 @@ describe('OffersAdminService', () => {
     await expect(service.update(admin, 't1', { kpiCode: 'NOPE' })).rejects.toThrow('Unknown KPI');
   });
 
+  it('6d. PUBLISHING a draft (isActive false→true) re-validates kpiCode + outletTypeCodes', async () => {
+    // dead KPI (deleted or disabled → findFirst with enabled:true returns null)
+    mockPrisma.offerTile.findFirst.mockResolvedValue(row({ isActive: false, kpiCode: 'OLD' }));
+    mockPrisma.kpiDef.findFirst.mockResolvedValue(null);
+    await expect(service.update(admin, 't1', { isActive: true })).rejects.toThrow('Unknown KPI');
+    expect(mockPrisma.kpiDef.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { clientId: 'bajaj', code: 'OLD', enabled: true } }),
+    );
+    // retired outlet type
+    mockPrisma.offerTile.findFirst.mockResolvedValue(row({ isActive: false, outletTypeCodes: ['RETIRED'] }));
+    await expect(service.update(admin, 't1', { isActive: true })).rejects.toThrow(/Unknown outlet type: RETIRED/);
+    expect(mockPrisma.offerTile.update).not.toHaveBeenCalled();
+    // healthy draft publishes
+    mockPrisma.kpiDef.findFirst.mockResolvedValue({ code: 'ADHO50' });
+    mockPrisma.offerTile.findFirst.mockResolvedValue(
+      row({ isActive: false, kpiCode: 'ADHO50', outletTypeCodes: ['SSS'] }),
+    );
+    const res = await service.update(admin, 't1', { isActive: true });
+    expect(res.tile.isActive).toBe(true);
+    // an already-active tile edited without touching refs is NOT re-checked
+    jest.clearAllMocks();
+    mockPrisma.offerTile.update.mockImplementation(async ({ data }) => row(data));
+    mockPrisma.offerTile.findFirst.mockResolvedValue(row({ isActive: true, kpiCode: 'OLD' }));
+    tenant.resolveClient.mockResolvedValue({ features: { offerTiles: true } });
+    await service.update(admin, 't1', { isActive: true, label: 'New' });
+    expect(mockPrisma.kpiDef.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('6e. explicit null on a non-nullable field → 400 (PATCH and POST), never a silent default', async () => {
+    mockPrisma.offerTile.findFirst.mockResolvedValue(row({ isActive: false }));
+    const nulls: [string, RegExp][] = [
+      ['isActive', /Published can't be empty/],
+      ['sortOrder', /Sort order can't be empty/],
+      ['label', /Headline can't be empty/],
+      ['validFrom', /Valid from can't be empty/],
+      ['group', /Group can't be empty/],
+      ['programNames', /empty list/],
+      ['outletTypeCodes', /empty list/],
+      ['zones', /empty list/],
+      ['states', /empty list/],
+    ];
+    for (const [k, msg] of nulls) {
+      await expect(service.update(admin, 't1', { [k]: null } as never)).rejects.toThrow(msg);
+    }
+    await expect(service.create(admin, { ...body, isActive: null } as never)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(mockPrisma.offerTile.update).not.toHaveBeenCalled();
+    expect(mockPrisma.offerTile.create).not.toHaveBeenCalled();
+    // nullable fields still clear with null; an empty list still means "all"
+    const res = await service.update(admin, 't1', { product: null, kpiCode: null, zones: [] });
+    expect(res.tile.product).toBeNull();
+  });
+
   it('7. remove soft-deletes + DELETE audit, never hard-deletes', async () => {
     mockPrisma.offerTile.findFirst.mockResolvedValue(row());
     const res = await service.remove(admin, 't1');
@@ -226,7 +298,7 @@ describe('OffersAdminService', () => {
     expect(Object.keys(res.tiles[0])).toEqual([
       'id', 'group', 'valueType', 'valueNumber', 'valueText', 'unitLabel', 'product', 'label', 'details',
       'validFrom', 'validTo', 'sortOrder', 'isActive', 'programNames', 'outletTypeCodes', 'zones', 'states',
-      'kpiCode', 'copiedFromId', 'createdAt', 'updatedAt',
+      'kpiCode', 'copiedFromId', 'copiedToMonth', 'createdAt', 'updatedAt',
     ]);
   });
 
@@ -243,26 +315,70 @@ describe('OffersAdminService', () => {
       clientId: 'bajaj', deletedAt: null,
       validFrom: { gte: istDayToDate('2026-10-01'), lte: istDayToDate('2026-10-31') },
     });
-    // already-copied query: copies of these sources whose validFrom is inside November
+    // already-copied query: keyed on copiedToMonth (NOT the editable validFrom)
     expect(mockPrisma.offerTile.findMany.mock.calls[1][0].where).toEqual({
-      clientId: 'bajaj', deletedAt: null, copiedFromId: { in: ['s1', 's2'] },
-      validFrom: { gte: istDayToDate('2026-11-01'), lte: istDayToDate('2026-11-30') },
+      clientId: 'bajaj', deletedAt: null, copiedFromId: { in: ['s1', 's2'] }, copiedToMonth: '2026-11',
     });
     expect(mockPrisma.$executeRaw).toHaveBeenCalled(); // advisory lock against a double-click race
     expect(mockPrisma.offerTile.create).toHaveBeenCalledTimes(1);
     const data = mockPrisma.offerTile.create.mock.calls[0][0].data;
     expect(data).toMatchObject({
-      clientId: 'bajaj', isActive: false, copiedFromId: 's1', createdById: 'u1',
+      clientId: 'bajaj', isActive: false, copiedFromId: 's1', copiedToMonth: '2026-11', createdById: 'u1',
       validFrom: istDayToDate('2026-11-01'), validTo: istDayToDate('2026-11-30'),
       label: 'Earn on every case',
     });
     expect(res.created).toBe(1);
     expect(res.skipped).toBe(1);
     expect(res.tiles).toHaveLength(1);
+    expect(res.tiles[0].copiedToMonth).toBe('2026-11');
+    expect(res.kpiCleared).toEqual([]);
+    expect(res.unknownOutletTypes).toEqual([]);
     expect(mockPrisma.auditLog.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         action: 'CREATE', entityType: 'OFFER_TILE', entityId: 'copy:2026-10→2026-11',
         metadata: expect.objectContaining({ clientId: 'bajaj', createdIds: ['new1'] }),
+      }),
+    });
+  });
+
+  it('9b. copyMonth idempotency survives an edited validFrom (a moved copy is still "already copied")', async () => {
+    // The copy of s1 was moved to start in December — but it is still tagged copiedToMonth=2026-11.
+    mockPrisma.offerTile.findMany
+      .mockResolvedValueOnce([row({ id: 's1', validFrom: istDayToDate('2026-10-05') })])
+      .mockImplementationOnce(async ({ where }) =>
+        where.copiedToMonth === '2026-11' ? [{ copiedFromId: 's1' }] : [],
+      );
+    const res = await service.copyMonth(admin, { fromMonth: '2026-10', toMonth: '2026-11' });
+    expect(res).toMatchObject({ created: 0, skipped: 1 });
+    expect(mockPrisma.offerTile.create).not.toHaveBeenCalled();
+  });
+
+  it('9c. copyMonth: dead KPI → copy gets kpiCode=null + reported; unknown outlet type → kept + reported', async () => {
+    mockPrisma.offerTile.findMany
+      .mockResolvedValueOnce([
+        row({ id: 's1', kpiCode: 'GONE' }),
+        row({ id: 's2', kpiCode: 'ADHO50', outletTypeCodes: ['RETIRED', 'SSS'] }),
+        row({ id: 's3', kpiCode: null, outletTypeCodes: ['sss'] }),
+      ])
+      .mockResolvedValueOnce([]);
+    mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'ADHO50' }]);
+    let n = 0;
+    mockPrisma.offerTile.create.mockImplementation(async ({ data }) => row({ ...data, id: `c${++n}` }));
+    const res = await service.copyMonth(admin, { fromMonth: '2026-10', toMonth: '2026-11' });
+    expect(mockPrisma.kpiDef.findMany).toHaveBeenCalledWith({
+      where: { clientId: 'bajaj', code: { in: ['GONE', 'ADHO50'] }, enabled: true },
+      select: { code: true },
+    });
+    const datas = mockPrisma.offerTile.create.mock.calls.map((c) => c[0].data);
+    expect(datas.map((d) => d.kpiCode)).toEqual([null, 'ADHO50', null]);
+    // outlet types are NEVER rewritten (dropping one could widen the audience to "all")
+    expect(datas[1].outletTypeCodes).toEqual(['RETIRED', 'SSS']);
+    expect(datas.every((d) => d.isActive === false)).toBe(true);
+    expect(res.kpiCleared).toEqual(['c1']);
+    expect(res.unknownOutletTypes).toEqual(['c2']);
+    expect(mockPrisma.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        metadata: expect.objectContaining({ kpiCleared: ['c1'], unknownOutletTypes: ['c2'] }),
       }),
     });
   });

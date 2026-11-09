@@ -12,6 +12,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide } from '../common/tenant-scope';
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import {
+  assertNoNulls,
   dateToIstDay,
   istDayToDate,
   monthBounds,
@@ -51,6 +52,7 @@ export function toAdminView(r: OfferTile): OfferTileAdmin {
     states: r.states,
     kpiCode: r.kpiCode,
     copiedFromId: r.copiedFromId,
+    copiedToMonth: r.copiedToMonth,
     createdAt: r.createdAt.toISOString(),
     updatedAt: r.updatedAt.toISOString(),
   };
@@ -110,7 +112,8 @@ const auditJson = (r: OfferTile) => toAdminView(r) as unknown as Prisma.InputJso
  * platform/docs/plans/OFFER-TILES-PLAN.md §3.3).
  *
  * Gates on EVERY method, in order:
- *   1. tenant context — an UN-ASSUMED GIFSY_ADMIN gets 400 (else rows would land under 'gifsy');
+ *   1. tenant context — an UN-ASSUMED Gifsy operator (GIFSY_ADMIN or GIFSY_STAFF) gets 400 (else
+ *      rows would land under 'gifsy');
  *   2. the per-tenant `features.offerTiles` flag (default OFF) — 403 when not true (fail-closed:
  *      an unresolvable tenant reads as OFF), mirroring the Visibility master-switch pattern.
  * Every query is scoped by `clientId: user.clientId`.
@@ -124,7 +127,11 @@ export class OffersAdminService {
   ) {}
 
   private async assertAccess(user: JwtPayload): Promise<void> {
-    if (platformWide(user)) throw new BadRequestException('Assume a tenant to manage offers.');
+    // platformWide() is OWNER-only (an un-assumed GIFSY_STAFF is not platform-wide, it is pinned
+    // to its home 'gifsy' clientId) — so check both operator roles explicitly.
+    const unassumedOperator =
+      platformWide(user) || (user.role === 'GIFSY_STAFF' && !user.assumed);
+    if (unassumedOperator) throw new BadRequestException('Assume a tenant to manage offers.');
     const features = await resolveTenantFeatures(this.tenant, user.clientId);
     if (features.offerTiles !== true) {
       throw new ForbiddenException("This month's offers is not enabled for this tenant.");
@@ -206,6 +213,7 @@ export class OffersAdminService {
   /** POST /v1/admin/offers */
   async create(user: JwtPayload, dto: CreateOfferTileDto) {
     await this.assertAccess(user);
+    assertNoNulls(dto);
     const input = validateTileInput(dto as OfferTileInput);
     await this.assertRefs(user.clientId, input, { kpi: true, outletTypes: true });
     return this.prisma.$transaction(async (tx) => {
@@ -227,20 +235,24 @@ export class OffersAdminService {
   }
 
   /**
-   * PATCH /v1/admin/offers/:id — validates the MERGED (existing + patch) row. kpiCode /
-   * outletTypeCodes are re-checked against the tenant masters only when the patch sets them, so a
-   * KPI or outlet type disabled after creation never blocks an unrelated edit (e.g. unpublishing).
+   * PATCH /v1/admin/offers/:id — validates the MERGED (existing + patch) row. An explicit null on a
+   * non-nullable field is a 400 (never a silent default). kpiCode / outletTypeCodes are re-checked
+   * against the tenant masters when the patch sets them OR when the patch PUBLISHES the tile
+   * (isActive false→true, e.g. a copied draft) — so a dead reference can't go live, while a KPI or
+   * outlet type disabled after creation still never blocks an unrelated edit (e.g. unpublishing).
    */
   async update(user: JwtPayload, id: string, dto: UpdateOfferTileDto) {
     await this.assertAccess(user);
+    assertNoNulls(dto);
     const existing = await this.findOwned(user.clientId, id);
     const patch = Object.fromEntries(
       Object.entries(dto ?? {}).filter(([, v]) => v !== undefined),
     ) as Partial<OfferTileInput>;
     const input = validateTileInput({ ...rowToInput(existing), ...patch });
+    const publishing = !existing.isActive && input.isActive;
     await this.assertRefs(user.clientId, input, {
-      kpi: 'kpiCode' in patch,
-      outletTypes: 'outletTypeCodes' in patch,
+      kpi: publishing || 'kpiCode' in patch,
+      outletTypes: publishing || 'outletTypeCodes' in patch,
     });
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.offerTile.update({
@@ -287,9 +299,17 @@ export class OffersAdminService {
 
   /**
    * POST /v1/admin/offers/copy-month — copy every non-deleted tile whose validFrom is in fromMonth
-   * into toMonth as a DRAFT (isActive=false) spanning the whole target month. Idempotent: a source
-   * already copied into toMonth (non-deleted row with that copiedFromId, validFrom in toMonth) is
-   * skipped. A per-(tenant,toMonth) advisory lock serialises concurrent copies (double-click race).
+   * into toMonth as a DRAFT (isActive=false) spanning the whole target month.
+   *
+   * Idempotent on (copiedFromId, copiedToMonth) — NOT on validFrom, which the admin may edit after
+   * copying: a source with a non-deleted copy tagged for toMonth is skipped. A per-(tenant,toMonth)
+   * advisory lock serialises concurrent copies (double-click race).
+   *
+   * Dead references (the source's KPI was deleted/disabled since): the copy gets kpiCode = null (no
+   * progress bar) and its id is reported in `kpiCleared`. Outlet types are NOT rewritten — dropping
+   * an unknown code could widen the audience to "all" — the copy keeps them and its id is reported in
+   * `unknownOutletTypes`; it stays a draft and publishing it is refused until the admin fixes it
+   * (PATCH re-validates refs on isActive false→true).
    */
   async copyMonth(user: JwtPayload, dto: CopyMonthDto) {
     await this.assertAccess(user);
@@ -320,11 +340,31 @@ export class OffersAdminService {
                 clientId,
                 deletedAt: null,
                 copiedFromId: { in: sources.map((s) => s.id) },
-                validFrom: { gte: istDayToDate(to.first), lte: istDayToDate(to.last) },
+                copiedToMonth: dto.toMonth,
               },
               select: { copiedFromId: true },
             });
       const copied = new Set(already.map((a) => a.copiedFromId));
+
+      // Tenant masters, read once: ENABLED KPI codes + enabled outlet-type codes.
+      const pending = sources.filter((s) => !copied.has(s.id));
+      const wantKpis = [...new Set(pending.map((s) => s.kpiCode).filter((c): c is string => !!c))];
+      const liveKpis = new Set(
+        wantKpis.length === 0
+          ? []
+          : (
+              await tx.kpiDef.findMany({
+                where: { clientId, code: { in: wantKpis }, enabled: true },
+                select: { code: true },
+              })
+            ).map((k) => k.code),
+      );
+      const needTypes = pending.some((s) => s.outletTypeCodes.length > 0);
+      const liveTypes = needTypes
+        ? new Set((await this.tenantSettings.getOutletTypes(clientId)).map((t) => t.code.toUpperCase()))
+        : new Set<string>();
+      const kpiCleared: string[] = [];
+      const unknownOutletTypes: string[] = [];
 
       const createdRows: OfferTile[] = [];
       let skipped = 0;
@@ -334,32 +374,36 @@ export class OffersAdminService {
           continue;
         }
         const s = rowToInput(src);
-        createdRows.push(
-          await tx.offerTile.create({
-            data: {
-              group: s.group,
-              valueType: s.valueType,
-              valueNumber: s.valueNumber ?? null,
-              valueText: s.valueText ?? null,
-              unitLabel: s.unitLabel ?? null,
-              product: s.product ?? null,
-              label: s.label,
-              details: s.details ?? null,
-              validFrom: istDayToDate(to.first),
-              validTo: istDayToDate(to.last),
-              sortOrder: s.sortOrder ?? 0,
-              isActive: false,
-              programNames: s.programNames ?? [],
-              outletTypeCodes: s.outletTypeCodes ?? [],
-              zones: s.zones ?? [],
-              states: s.states ?? [],
-              kpiCode: s.kpiCode ?? null,
-              copiedFromId: src.id,
-              clientId,
-              createdById: user.sub,
-            },
-          }),
-        );
+        const kpiDead = !!s.kpiCode && !liveKpis.has(s.kpiCode);
+        const typesDead = (s.outletTypeCodes ?? []).some((c) => !liveTypes.has(c.toUpperCase()));
+        const row = await tx.offerTile.create({
+          data: {
+            group: s.group,
+            valueType: s.valueType,
+            valueNumber: s.valueNumber ?? null,
+            valueText: s.valueText ?? null,
+            unitLabel: s.unitLabel ?? null,
+            product: s.product ?? null,
+            label: s.label,
+            details: s.details ?? null,
+            validFrom: istDayToDate(to.first),
+            validTo: istDayToDate(to.last),
+            sortOrder: s.sortOrder ?? 0,
+            isActive: false,
+            programNames: s.programNames ?? [],
+            outletTypeCodes: s.outletTypeCodes ?? [],
+            zones: s.zones ?? [],
+            states: s.states ?? [],
+            kpiCode: kpiDead ? null : (s.kpiCode ?? null),
+            copiedFromId: src.id,
+            copiedToMonth: dto.toMonth,
+            clientId,
+            createdById: user.sub,
+          },
+        });
+        createdRows.push(row);
+        if (kpiDead) kpiCleared.push(row.id);
+        if (typesDead) unknownOutletTypes.push(row.id);
       }
 
       await tx.auditLog.create({
@@ -374,11 +418,19 @@ export class OffersAdminService {
             toMonth: dto.toMonth,
             createdIds: createdRows.map((r) => r.id),
             skipped,
+            kpiCleared,
+            unknownOutletTypes,
           },
         },
       });
 
-      return { created: createdRows.length, skipped, tiles: createdRows.map(toAdminView) };
+      return {
+        created: createdRows.length,
+        skipped,
+        kpiCleared,
+        unknownOutletTypes,
+        tiles: createdRows.map(toAdminView),
+      };
     });
   }
 }
