@@ -1,5 +1,11 @@
+import { ConflictException } from '@nestjs/common';
 import { RedemptionStatus } from '@prisma/client';
-import { supersedePendingOrders, transitionOrderStatus } from './order-status-transition';
+import {
+  ORDER_STATUS_CONFLICT_MESSAGE,
+  supersedePendingOrders,
+  transitionOrderStatus,
+  transitionOrderStatusOrConflict,
+} from './order-status-transition';
 
 function makeTx() {
   return {
@@ -7,6 +13,7 @@ function makeTx() {
       update: jest.fn().mockResolvedValue({ id: 'o1', status: 'X' }),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       findMany: jest.fn().mockResolvedValue([]),
+      findUniqueOrThrow: jest.fn().mockResolvedValue({ id: 'o1', status: 'DISPATCHED' }),
     },
     redemptionStatusHistory: { create: jest.fn().mockResolvedValue({}) },
   };
@@ -129,6 +136,61 @@ describe('transitionOrderStatus — the single status-write choke point', () => 
       });
       expect(res).toEqual({ count: 0 });
       expect(tx.redemptionStatusHistory.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('compare-and-set (transitionOrderStatusOrConflict) form', () => {
+    it('claims on { ...extraGuard, id, status: expectedFrom }, writes history, returns the re-read row', async () => {
+      const tx = makeTx();
+      const res = await transitionOrderStatusOrConflict(tx as never, {
+        orderId: 'o1',
+        expectedFrom: RedemptionStatus.PROCESSING,
+        toStatus: RedemptionStatus.DISPATCHED,
+        extraGuard: { fulfilledByVendorId: 'v1' },
+        data: { trackingNumber: 'TN1' },
+        changedById: 'u1',
+        notes: 'n',
+      });
+      expect(tx.redemptionOrder.updateMany).toHaveBeenCalledWith({
+        where: { id: 'o1', fulfilledByVendorId: 'v1', status: RedemptionStatus.PROCESSING },
+        data: { status: RedemptionStatus.DISPATCHED, trackingNumber: 'TN1' },
+      });
+      expect(tx.redemptionStatusHistory.create).toHaveBeenCalledWith({
+        data: {
+          orderId: 'o1',
+          fromStatus: RedemptionStatus.PROCESSING,
+          toStatus: RedemptionStatus.DISPATCHED,
+          changedById: 'u1',
+          notes: 'n',
+        },
+      });
+      expect(tx.redemptionOrder.findUniqueOrThrow).toHaveBeenCalledWith({ where: { id: 'o1' } });
+      expect(res).toEqual({ id: 'o1', status: 'DISPATCHED' });
+    });
+
+    it('an extraGuard can never override the status predicate', async () => {
+      const tx = makeTx();
+      await transitionOrderStatusOrConflict(tx as never, {
+        orderId: 'o1',
+        expectedFrom: RedemptionStatus.PROCESSING,
+        toStatus: RedemptionStatus.DISPATCHED,
+        extraGuard: { status: RedemptionStatus.DELIVERED },
+      });
+      expect(tx.redemptionOrder.updateMany.mock.calls[0][0].where.status).toBe(RedemptionStatus.PROCESSING);
+    });
+
+    it('a lost claim (status moved since the read) → 409 ConflictException, NO history, NO re-read', async () => {
+      const tx = makeTx();
+      tx.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 });
+      const p = transitionOrderStatusOrConflict(tx as never, {
+        orderId: 'o1',
+        expectedFrom: RedemptionStatus.PROCESSING,
+        toStatus: RedemptionStatus.DISPATCHED,
+      });
+      await expect(p).rejects.toBeInstanceOf(ConflictException);
+      await expect(p).rejects.toThrow(ORDER_STATUS_CONFLICT_MESSAGE);
+      expect(tx.redemptionStatusHistory.create).not.toHaveBeenCalled();
+      expect(tx.redemptionOrder.findUniqueOrThrow).not.toHaveBeenCalled();
     });
   });
 });

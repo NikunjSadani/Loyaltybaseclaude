@@ -14,7 +14,7 @@ import { EventKey } from '../notification-templates/notification-templates.confi
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { assertVendorPriceBounds, VendorPriceError } from './vendor-pricing.helper';
 import { applyVendorPiiRetention } from './vendor-pii.helper';
-import { transitionOrderStatus } from '../rewards/order-status-transition';
+import { transitionOrderStatusOrConflict } from '../rewards/order-status-transition';
 import {
   parseVendorUploadBuffer,
   buildVendorUploadTemplateBuffer,
@@ -711,7 +711,7 @@ export class VendorPortalService {
     }
 
     const now = new Date();
-    const data: Omit<Prisma.RedemptionOrderUpdateInput, 'status'> = {
+    const data: Omit<Prisma.RedemptionOrderUpdateManyMutationInput, 'status'> = {
       voucherCode: dto.voucherCode,
       voucherProvider: dto.voucherProvider,
       trackingNumber: dto.trackingNumber,
@@ -725,11 +725,15 @@ export class VendorPortalService {
     if (toStatus === RedemptionStatus.DISPATCHED) data.dispatchedAt = now;
     if (toStatus === RedemptionStatus.DELIVERED) data.deliveredAt = now;
 
-    // Shared transition: status + history row in one tx (order-timeline plan D1).
+    // Shared transition: status + history row in one tx (order-timeline plan D1), as a
+    // compare-and-set on the status read above — a concurrent transition (vendor double-click,
+    // or Gifsy moving/cancelling the order meanwhile) makes the loser a 409, never a second
+    // write/history row. The claim is also re-pinned to THIS vendor's assignment.
     await this.prisma.$transaction((tx) =>
-      transitionOrderStatus(tx, {
+      transitionOrderStatusOrConflict(tx, {
         orderId: id,
-        fromStatus,
+        expectedFrom: fromStatus,
+        extraGuard: { fulfilledByVendorId: scope.vendorId },
         toStatus,
         data,
         changedById: user.sub,

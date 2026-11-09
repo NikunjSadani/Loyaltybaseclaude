@@ -13,7 +13,7 @@ const mockPrisma = {
   giftCategory: { findFirst: jest.fn(), findMany: jest.fn() },
   rewardCategory: { findFirst: jest.fn(), create: jest.fn() },
   rewardCatalog: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn() },
-  redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
+  redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findUniqueOrThrow: jest.fn() },
   redemptionStatusHistory: { create: jest.fn() },
   channelPartner: { findFirst: jest.fn() },
   auditLog: { create: jest.fn().mockResolvedValue({}) },
@@ -38,6 +38,11 @@ describe('VendorPortalService', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     mockTenantSettings.getConversionRate.mockResolvedValue(1);
+    // Status write = compare-and-set claim; wins by default (race tests override).
+    mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.redemptionOrder.findUniqueOrThrow.mockImplementation(
+      async ({ where }: { where: { id: string } }) => ({ id: where.id }),
+    );
     const mod: TestingModule = await Test.createTestingModule({
       providers: [
         VendorPortalService,
@@ -215,7 +220,7 @@ describe('VendorPortalService', () => {
       await expect(
         service.transition(vendor, 'o1', { toStatus: 'CANCELLED' as never }),
       ).rejects.toBeInstanceOf(BadRequestException);
-      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
     });
 
     it('transition CONFIRMED→PROCESSING succeeds without touching points/valuePaise', async () => {
@@ -223,7 +228,7 @@ describe('VendorPortalService', () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'D-26-1' });
       mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'PROCESSING' });
       await service.transition(vendor, 'o1', { toStatus: 'PROCESSING' as never });
-      const data = mockPrisma.redemptionOrder.update.mock.calls[0][0].data;
+      const data = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].data;
       expect(data.status).toBe('PROCESSING');
       expect(data).not.toHaveProperty('valuePaise');
       expect(data).not.toHaveProperty('pointsDeducted');
@@ -235,7 +240,7 @@ describe('VendorPortalService', () => {
       mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'DISPATCHED' });
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'member1', phone: '9990000000', ownerName: 'Asha' });
       await service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never, trackingNumber: 'TRK1' });
-      expect(mockPrisma.redemptionOrder.update.mock.calls[0][0].data.dispatchedAt).toBeInstanceOf(Date);
+      expect(mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].data.dispatchedAt).toBeInstanceOf(Date);
       expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalled();
     });
 
@@ -246,8 +251,9 @@ describe('VendorPortalService', () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
       await service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never, trackingNumber: 'TRK1', notes: 'n1' });
       expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
-      expect(mockPrisma.redemptionOrder.update).toHaveBeenCalledWith({
-        where: { id: 'o1' },
+      // Compare-and-set on the status READ (PROCESSING), re-pinned to this vendor.
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
+        where: { id: 'o1', fulfilledByVendorId: 'v1', status: 'PROCESSING' },
         data: expect.objectContaining({ status: 'DISPATCHED', trackingNumber: 'TRK1', dispatchedAt: expect.any(Date) }),
       });
       expect(mockPrisma.redemptionStatusHistory.create).toHaveBeenCalledTimes(1);
@@ -261,7 +267,7 @@ describe('VendorPortalService', () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'o1', status: 'DISPATCHED', partnerId: 'cp1', orderNumber: 'D-26-1' });
       const res = await service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never });
       expect((res as { skipped?: boolean }).skipped).toBe(true);
-      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
     });
 
     it('transition response is the MEMBER-SAFE projection — no valuePaise/pointsDeducted/metadata (HIGH#1)', async () => {
@@ -294,7 +300,7 @@ describe('VendorPortalService', () => {
       await expect(
         service.transition(vendor, 'o1', { toStatus: 'PROCESSING' as never }),
       ).rejects.toBeInstanceOf(BadRequestException);
-      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
     });
 
     it('updateFulfilment BLOCKS a CLOSED (terminal) order (MED#4b)', async () => {
@@ -456,7 +462,7 @@ describe('VendorPortalService', () => {
       await expect(
         service.transition(vendor, 'o1', { toStatus: 'DELIVERED' as never }),
       ).rejects.toBeInstanceOf(BadRequestException);
-      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
     });
 
     it('transition → DELIVERED on a DIGITAL_VOUCHER order SUCCEEDS with a code on the dto (BUG-1)', async () => {
@@ -476,7 +482,7 @@ describe('VendorPortalService', () => {
         toStatus: 'DELIVERED' as never,
         voucherCode: 'AMZ-1234',
       });
-      expect(mockPrisma.redemptionOrder.update).toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalled();
       expect(res.order.status).toBe('DELIVERED');
     });
 
@@ -494,7 +500,87 @@ describe('VendorPortalService', () => {
       mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'DELIVERED' });
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'm1', phone: '9', ownerName: 'A' });
       await service.transition(vendor, 'o1', { toStatus: 'DELIVERED' as never });
-      expect(mockPrisma.redemptionOrder.update).toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalled();
+    });
+
+    // ── Race guard: compare-and-set on the status the vendor READ ────────────────
+    describe('compare-and-set race guard', () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let row: Record<string, any>;
+      afterEach(() => {
+        mockPrisma.redemptionOrder.findFirst.mockReset();
+        mockPrisma.redemptionOrder.updateMany.mockReset();
+      });
+      const installOrderRow = (initial: Record<string, unknown>) => {
+        row = { ...initial };
+        const snapshot = { ...initial };
+        // Every pre-tx read (transition lookup AND the post-write getOrder projection) sees
+        // the same stale snapshot; only updateMany consults the LIVE row.
+        mockPrisma.redemptionOrder.findFirst.mockImplementation(async () => ({
+          ...snapshot, updatedAt: new Date(), reward: null, statusHistory: [],
+        }));
+        mockPrisma.redemptionOrder.updateMany.mockImplementation(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          async ({ where, data }: { where: any; data: Record<string, unknown> }) => {
+            if (where.id !== row.id) return { count: 0 };
+            if ('status' in where && where.status !== row.status) return { count: 0 };
+            if ('fulfilledByVendorId' in where && where.fulfilledByVendorId !== row.fulfilledByVendorId) {
+              return { count: 0 };
+            }
+            for (const [k, v] of Object.entries(data)) if (v !== undefined) row[k] = v;
+            return { count: 1 };
+          },
+        );
+      };
+      const vendorOrder = (status: string) => ({
+        id: 'o1', status, partnerId: 'cp1', orderNumber: 'D-26-1', fulfilledByVendorId: 'v1',
+      });
+
+      it('two concurrent DISPATCHED (double click) → exactly one wins, loser 409, ONE history row + ONE notification', async () => {
+        grantScope();
+        installOrderRow(vendorOrder('PROCESSING'));
+        mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'm1', phone: '9', ownerName: 'A' });
+
+        const results = await Promise.allSettled([
+          service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never }),
+          service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never }),
+        ]);
+
+        expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+        const lost = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+        expect(lost).toHaveLength(1);
+        expect(lost[0].reason).toBeInstanceOf(ConflictException);
+        expect(lost[0].reason.getStatus()).toBe(409);
+        expect(lost[0].reason.message).toBe('Order status changed — refresh and try again');
+        expect(mockPrisma.redemptionStatusHistory.create).toHaveBeenCalledTimes(1);
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+        expect(row.status).toBe('DISPATCHED');
+      });
+
+      it('a STALE read (Gifsy cancelled the order meanwhile) → 409, no write, no history, no notification', async () => {
+        grantScope();
+        installOrderRow(vendorOrder('PROCESSING'));
+        row.status = 'CANCELLED'; // moved by Gifsy after the vendor's read
+
+        await expect(
+          service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(row.status).toBe('CANCELLED');
+        expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
+        expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+      });
+
+      it('an order RE-ASSIGNED to another vendor after the read → 409 (claim re-pinned to this vendor)', async () => {
+        grantScope();
+        installOrderRow(vendorOrder('PROCESSING'));
+        row.fulfilledByVendorId = 'v2';
+
+        await expect(
+          service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(row.status).toBe('PROCESSING');
+        expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
+      });
     });
   });
 });

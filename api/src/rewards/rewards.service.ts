@@ -26,7 +26,11 @@ import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
 import { isSalesRedeemEnabledForPartner } from '../common/sales-redeem-eligibility';
 import { isGifsyOperator, tenantScope } from '../common/tenant-scope';
 import { generateTenantOrderNumber } from './order-number.helper';
-import { supersedePendingOrders, transitionOrderStatus } from './order-status-transition';
+import {
+  supersedePendingOrders,
+  transitionOrderStatus,
+  transitionOrderStatusOrConflict,
+} from './order-status-transition';
 import { derivePointsCost } from './derive-points-cost.helper';
 import { computeFrozenValuePaise } from './gift-value.helper';
 import { computeDispatchSla } from '../common/dispatch-sla';
@@ -1205,7 +1209,12 @@ export class RewardsService {
       // NEVER mask the user-facing 503 (audit A-2a F5).
       try {
         await this.prisma.$transaction(async (tx) => {
-          await tx.otpCode.deleteMany({ where: { userId: otpUserId, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null } });
+          // Delete ONLY the OTP row THIS request created (by id). A login/outlet-wide delete
+          // would also wipe a CONCURRENT redeem's fresh OTP (created after ours), stranding it.
+          // Guarded on a set id: Prisma treats `id: undefined` as NO filter (= delete all).
+          if (otpCodeId) {
+            await tx.otpCode.deleteMany({ where: { id: otpCodeId, verifiedAt: null } });
+          }
           // PENDING-guarded: never cancels (or writes history for) an order that a concurrent
           // confirm already CONFIRMED or a later redeem already superseded.
           await transitionOrderStatus(tx, {
@@ -1797,7 +1806,12 @@ export class RewardsService {
       // NEVER mask the user-facing 503 (audit A-2a F5).
       try {
         await this.prisma.$transaction(async (tx) => {
-          await tx.otpCode.deleteMany({ where: { userId: user.sub, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null } });
+          // Delete ONLY the OTP row THIS request created (by id). A login-wide delete would
+          // also wipe a CONCURRENT redeem's fresh OTP (created after ours), stranding it.
+          // Guarded on a set id: Prisma treats `id: undefined` as NO filter (= delete all).
+          if (otpCodeId) {
+            await tx.otpCode.deleteMany({ where: { id: otpCodeId, verifiedAt: null } });
+          }
           // PENDING-guarded: never cancels (or writes history for) an order that a concurrent
           // confirm already CONFIRMED or a later redeem already superseded.
           await transitionOrderStatus(tx, {
@@ -2351,7 +2365,7 @@ export class RewardsService {
     }
 
     const now = new Date();
-    const data: Omit<Prisma.RedemptionOrderUpdateInput, 'status'> = {
+    const data: Omit<Prisma.RedemptionOrderUpdateManyMutationInput, 'status'> = {
       voucherCode: dto.voucherCode,
       voucherProvider: dto.voucherProvider,
       trackingNumber: dto.trackingNumber,
@@ -2373,13 +2387,27 @@ export class RewardsService {
     if (toStatus === RedemptionStatus.RETURNED) data.valuePaise = 0n;
 
     const updated = await this.prisma.$transaction(async (tx) => {
+      // RACE GUARD (FIRST write in the tx): compare-and-set the status on the `fromStatus` we
+      // read + validated above. A concurrent transition / stale read that already moved the
+      // order makes this claim match 0 rows → 409, rolling back the whole tx — so the loser
+      // writes NO history row and runs NO refund. The winner holds the row lock from here on.
+      const moved = await transitionOrderStatusOrConflict(tx, {
+        orderId: id,
+        expectedFrom: fromStatus,
+        toStatus,
+        data,
+        changedById: user.sub,
+        notes: dto.notes,
+      });
+
       // M2 — refund at most ONCE: atomically claim the debited points
       // (pointsDeducted > 0 → 0). Only the tx that wins the claim re-credits, so
-      // two concurrent refund-bound transitions can't double-refund.
+      // two concurrent refund-bound transitions can't double-refund. The amount is the
+      // in-tx value read under the row lock (not the pre-tx read).
       // STOCK: intentionally NOT restored here (owner decision 2026-08-19) — a
       // confirmed redemption consumes its stock unit permanently; cancel / return
       // / failed refunds POINTS only. See the STOCK RULE note near the catalog CRUD.
-      if (isRefundTarget) {
+      if (isRefundTarget && moved.pointsDeducted > 0) {
         const refundClaim = await tx.redemptionOrder.updateMany({
           where: { id, pointsDeducted: { gt: 0 } },
           data: { pointsDeducted: 0 },
@@ -2387,21 +2415,14 @@ export class RewardsService {
         if (refundClaim.count > 0) {
           await this.wallet.reverse(
             order.partnerId,
-            order.pointsDeducted,
+            moved.pointsDeducted,
             { referenceId: id, description: `Refund ${order.orderNumber}` },
             tx,
           );
+          return { ...moved, pointsDeducted: 0 };
         }
       }
-
-      return transitionOrderStatus(tx, {
-        orderId: id,
-        fromStatus,
-        toStatus,
-        data,
-        changedById: user.sub,
-        notes: dto.notes,
-      });
+      return moved;
     });
 
     // A voucher code assigned on THIS transition (null → set) — computed before the milestone notify

@@ -57,7 +57,7 @@ const mockPrisma = {
     update: jest.fn(),
     updateMany: jest.fn(),
   },
-  redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
+  redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findUniqueOrThrow: jest.fn() },
   // Persistent partner wishlist (getWishlist / addToWishlist / removeFromWishlist).
   partnerWishlist: { findMany: jest.fn(), upsert: jest.fn(), deleteMany: jest.fn() },
   redemptionStatusHistory: { create: jest.fn() },
@@ -1060,8 +1060,9 @@ describe('RewardsService', () => {
         where: { id: 'o1', status: 'PENDING' },
         data: { status: 'CANCELLED', cancelledAt: expect.any(Date) },
       });
-      expect(mockPrisma.otpCode.deleteMany).toHaveBeenCalledWith({
-        where: { userId: 'user1', purpose: 'REDEMPTION_CONFIRM', verifiedAt: null },
+      // The cleanup deletes ONLY this request's OTP row (by id) — never login-wide.
+      expect(mockPrisma.otpCode.deleteMany).toHaveBeenLastCalledWith({
+        where: { id: 'otp1', verifiedAt: null },
       });
       // Order-timeline D1: the cleanup cancel is recorded in history (same tx).
       expect(mockPrisma.redemptionStatusHistory.create).toHaveBeenCalledWith({
@@ -1083,6 +1084,44 @@ describe('RewardsService', () => {
 
       expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
       expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
+    });
+
+    it('OTP-send-failure cleanup deletes ONLY its own OTP — a CONCURRENT redeem\'s fresh OTP for the same login survives', async () => {
+      // In-memory otp_codes table honouring deleteMany's where (id / userId / purpose / verifiedAt).
+      type Otp = { id: string; userId: string; purpose: string; verifiedAt: Date | null };
+      let otps: Otp[] = [];
+      const matches = (o: Otp, w: Partial<Otp>) =>
+        (w.id === undefined || o.id === w.id) &&
+        (w.userId === undefined || o.userId === w.userId) &&
+        (w.purpose === undefined || o.purpose === w.purpose) &&
+        (w.verifiedAt === undefined || o.verifiedAt === w.verifiedAt);
+      mockPrisma.otpCode.deleteMany.mockImplementation(async ({ where }: { where: Partial<Otp> }) => {
+        const before = otps.length;
+        otps = otps.filter((o) => !matches(o, where));
+        return { count: before - otps.length };
+      });
+      mockPrisma.otpCode.create.mockImplementation(async ({ data }: { data: Otp }) => {
+        const row = { ...data, id: 'otp-mine', verifiedAt: null };
+        otps.push(row);
+        return row;
+      });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedItem);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.create.mockResolvedValue({ id: 'o1', orderNumber: 'RDM-x' });
+      // While OUR SMS send is in flight, a concurrent redeem (same login, e.g. another outlet)
+      // commits its own fresh OTP — then our send fails.
+      mockMsg91.sendOtp.mockImplementationOnce(async () => {
+        otps.push({ id: 'otp-concurrent', userId: 'user1', purpose: 'REDEMPTION_CONFIRM', verifiedAt: null });
+        throw new Error('MSG91 unreachable');
+      });
+
+      await expect(service.redeem(partner, { rewardId: 'r1', quantity: 1 }))
+        .rejects.toBeInstanceOf(ServiceUnavailableException);
+
+      expect(otps.map((o) => o.id)).toEqual(['otp-concurrent']);
+      mockPrisma.otpCode.deleteMany.mockReset();
+      mockPrisma.otpCode.create.mockReset();
     });
 
     it('D1: superseding abandoned PENDING orders on redeem writes one PENDING→CANCELLED history row each', async () => {
@@ -2043,8 +2082,45 @@ describe('RewardsService', () => {
       expect(mockPrisma.redemptionStatusHistory.create).toHaveBeenCalledWith({
         data: { orderId: 'o-out', fromStatus: 'PENDING', toStatus: 'CANCELLED', changedById: 'salesUser1', notes: 'OTP could not be sent' },
       });
+      // Cleanup deletes ONLY this request's OTP row (by id), never the outlet-login-wide set.
+      expect(mockPrisma.otpCode.deleteMany).toHaveBeenLastCalledWith({
+        where: { id: 'otp1', verifiedAt: null },
+      });
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
       expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('OTP-send-failure cleanup leaves a CONCURRENT redeem\'s fresh OTP for the same outlet untouched', async () => {
+      wireAssigned();
+      type Otp = { id: string; userId: string; purpose: string; verifiedAt: Date | null };
+      let otps: Otp[] = [];
+      const matches = (o: Otp, w: Partial<Otp>) =>
+        (w.id === undefined || o.id === w.id) &&
+        (w.userId === undefined || o.userId === w.userId) &&
+        (w.purpose === undefined || o.purpose === w.purpose) &&
+        (w.verifiedAt === undefined || o.verifiedAt === w.verifiedAt);
+      mockPrisma.otpCode.deleteMany.mockImplementation(async ({ where }: { where: Partial<Otp> }) => {
+        const before = otps.length;
+        otps = otps.filter((o) => !matches(o, where));
+        return { count: before - otps.length };
+      });
+      mockPrisma.otpCode.create.mockImplementation(async ({ data }: { data: Otp }) => {
+        const row = { ...data, id: 'otp-mine', verifiedAt: null };
+        otps.push(row);
+        return row;
+      });
+      // A second rep / the owner's self-redeem for the SAME outlet commits a fresh OTP while our send is in flight.
+      mockMsg91.sendOtp.mockImplementationOnce(async () => {
+        otps.push({ id: 'otp-concurrent', userId: 'outletUser1', purpose: 'REDEMPTION_CONFIRM', verifiedAt: null });
+        throw new Error('MSG91 unreachable');
+      });
+
+      await expect(service.redeemForOutlet(sales, { rewardId: 'r1', quantity: 1, targetPartnerId: 'cp-out' }))
+        .rejects.toBeInstanceOf(ServiceUnavailableException);
+
+      expect(otps.map((o) => o.id)).toEqual(['otp-concurrent']);
+      mockPrisma.otpCode.deleteMany.mockReset();
+      mockPrisma.otpCode.create.mockReset();
     });
 
     it('review: OTP-send-failure cleanup leaves an already-CONFIRMED outlet order untouched (no history) and still 503s', async () => {
@@ -2402,6 +2478,30 @@ describe('RewardsService', () => {
   });
 
   describe('transitionOrder', () => {
+    // The status write is now a compare-and-set `updateMany where { id, status: <read status> }`
+    // (the only redemptionOrder.updateMany whose `where` carries `status`).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const casCall = (): any =>
+      mockPrisma.redemptionOrder.updateMany.mock.calls
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .map((c: any[]) => c[0])
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .find((a: any) => a?.where && 'status' in a.where);
+
+    beforeEach(() => {
+      // Post-CAS in-tx re-read (row lock held): carries the authoritative pointsDeducted.
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockImplementation(
+        async ({ where }: { where: { id: string } }) => ({ id: where.id, pointsDeducted: 1000, voucherCode: null }),
+      );
+    });
+    afterEach(() => {
+      // clearAllMocks keeps implementations — drop this block's stateful fakes so they can't
+      // leak into later describes (the top-level beforeEach re-seeds updateMany's default).
+      mockPrisma.redemptionOrder.findFirst.mockReset();
+      mockPrisma.redemptionOrder.updateMany.mockReset();
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockReset();
+    });
+
     it('rejects an illegal edge (PENDING→DISPATCHED) with 400', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
         id: 'o1', status: 'PENDING', partnerId: 'cp1', orderNumber: 'RDM-x', pointsDeducted: 0,
@@ -2431,7 +2531,7 @@ describe('RewardsService', () => {
         { referenceId: 'o1', description: 'Refund RDM-x' },
         mockPrisma,
       );
-      const upd = mockPrisma.redemptionOrder.update.mock.calls?.[0]?.[0];
+      const upd = casCall();
       expect(upd.data.cancelledAt).toBeInstanceOf(Date);
     });
 
@@ -2440,8 +2540,9 @@ describe('RewardsService', () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
         id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'RDM-x', pointsDeducted: 1000,
       });
-      mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 0 }); // lost the claim
-      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'CANCELLED' });
+      mockPrisma.redemptionOrder.updateMany
+        .mockResolvedValueOnce({ count: 1 }) // status CAS wins…
+        .mockResolvedValueOnce({ count: 0 }); // …but the refund claim is lost
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'user1', phone: '9991112222' });
 
       await service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED });
@@ -2513,7 +2614,7 @@ describe('RewardsService', () => {
         data: { pointsDeducted: 0 },
       });
       expect(mockWallet.reverse).toHaveBeenCalled();
-      const upd = mockPrisma.redemptionOrder.update.mock.calls?.[0]?.[0];
+      const upd = casCall();
       expect(upd.data.cancelledAt).toBeInstanceOf(Date);
     });
 
@@ -2529,7 +2630,7 @@ describe('RewardsService', () => {
       await service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.RETURNED });
 
       // valuePaise zeroed so 194R Source-2 + the disbursal report drop it.
-      const upd = mockPrisma.redemptionOrder.update.mock.calls?.[0]?.[0];
+      const upd = casCall();
       expect(upd.data.valuePaise).toBe(0n);
       // Points refunded via the atomic claim + wallet.reverse.
       expect(mockWallet.reverse).toHaveBeenCalledWith(
@@ -2561,7 +2662,7 @@ describe('RewardsService', () => {
         logisticsPartner: 'BlueDart',
         supplierOrderRef: 'AMZ-123',
       });
-      const upd = mockPrisma.redemptionOrder.update.mock.calls?.[0]?.[0];
+      const upd = casCall();
       expect(upd.data).toMatchObject({
         fulfilmentChannel: 'GIFSY_WAREHOUSE',
         logisticsPartner: 'BlueDart',
@@ -2580,7 +2681,7 @@ describe('RewardsService', () => {
         toStatus: UpdatableOrderStatus.DISPATCHED, trackingNumber: 'TN9',
       });
 
-      const upd = mockPrisma.redemptionOrder.update.mock.calls?.[0]?.[0];
+      const upd = casCall();
       expect(upd.data.dispatchedAt).toBeInstanceOf(Date);
       expect(upd.data.trackingNumber).toBe('TN9');
       expect(mockWallet.reverse).not.toHaveBeenCalled(); // forward move, no refund
@@ -2605,6 +2706,127 @@ describe('RewardsService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith({
         where: { id: 'o9' },
+      });
+    });
+
+    // ── Race guard: the status write is a compare-and-set on the status that was READ. ──
+    // A stateful in-memory order row: every caller's pre-tx read sees the SAME snapshot (the
+    // stale-read / concurrent-click window), while updateMany honours its `where` against the
+    // LIVE row — exactly the Postgres semantics the CAS relies on.
+    describe('compare-and-set race guard', () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let row: Record<string, any>;
+      const installOrderRow = (initial: Record<string, unknown>) => {
+        row = { ...initial };
+        const snapshot = { ...initial };
+        mockPrisma.redemptionOrder.findFirst.mockImplementation(async () => ({ ...snapshot }));
+        mockPrisma.redemptionOrder.updateMany.mockImplementation(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          async ({ where, data }: { where: any; data: Record<string, unknown> }) => {
+            if (where.id !== row.id) return { count: 0 };
+            if ('status' in where && where.status !== row.status) return { count: 0 };
+            if (where.pointsDeducted?.gt !== undefined && !(row.pointsDeducted > where.pointsDeducted.gt)) {
+              return { count: 0 };
+            }
+            for (const [k, v] of Object.entries(data)) if (v !== undefined) row[k] = v;
+            return { count: 1 };
+          },
+        );
+        mockPrisma.redemptionOrder.findUniqueOrThrow.mockImplementation(async () => ({ ...row }));
+      };
+      const giftOrder = (status: string) => ({
+        id: 'o1', status, partnerId: 'cp1', orderNumber: 'RDM-x',
+        pointsDeducted: 1000, redemptionMode: 'PHYSICAL_GIFT', voucherCode: null,
+      });
+
+      it('two concurrent CANCELLED from the same state → exactly one wins, loser 409, ONE refund + ONE history row', async () => {
+        installOrderRow(giftOrder('CONFIRMED'));
+
+        const results = await Promise.allSettled([
+          service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }),
+          service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }),
+        ]);
+
+        const won = results.filter((r) => r.status === 'fulfilled');
+        const lost = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+        expect(won).toHaveLength(1);
+        expect(lost).toHaveLength(1);
+        expect(lost[0].reason).toBeInstanceOf(ConflictException);
+        expect(lost[0].reason.getStatus()).toBe(409);
+        expect(lost[0].reason.message).toBe('Order status changed — refresh and try again');
+        expect(mockWallet.reverse).toHaveBeenCalledTimes(1);
+        expect(mockWallet.reverse).toHaveBeenCalledWith(
+          'cp1', 1000, { referenceId: 'o1', description: 'Refund RDM-x' }, mockPrisma,
+        );
+        expect(mockPrisma.redemptionStatusHistory.create).toHaveBeenCalledTimes(1);
+        expect(row.status).toBe('CANCELLED');
+        expect(row.pointsDeducted).toBe(0);
+        // The winner's response reflects the refund claim.
+        expect((won[0] as PromiseFulfilledResult<{ order: { pointsDeducted: number } }>).value.order.pointsDeducted).toBe(0);
+      });
+
+      it('two concurrent DISPATCHED (double click) → one write, one history row, loser 409', async () => {
+        installOrderRow(giftOrder('PROCESSING'));
+
+        const results = await Promise.allSettled([
+          service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DISPATCHED }),
+          service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DISPATCHED }),
+        ]);
+
+        expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+        const lost = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+        expect(lost).toHaveLength(1);
+        expect(lost[0].reason).toBeInstanceOf(ConflictException);
+        expect(mockPrisma.redemptionStatusHistory.create).toHaveBeenCalledTimes(1);
+        // Only the winner notifies the member.
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+        expect(row.status).toBe('DISPATCHED');
+      });
+
+      it('RETURNED racing DELIVERED from DISPATCHED → exactly one lands; the refund runs only if RETURNED won', async () => {
+        installOrderRow(giftOrder('DISPATCHED'));
+
+        const results = await Promise.allSettled([
+          service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.RETURNED }),
+          service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DELIVERED }),
+        ]);
+
+        expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+        const lost = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+        expect(lost[0].reason).toBeInstanceOf(ConflictException);
+        expect(mockPrisma.redemptionStatusHistory.create).toHaveBeenCalledTimes(1);
+        if (row.status === 'RETURNED') {
+          expect(mockWallet.reverse).toHaveBeenCalledTimes(1);
+          expect(row.pointsDeducted).toBe(0);
+        } else {
+          expect(row.status).toBe('DELIVERED');
+          expect(mockWallet.reverse).not.toHaveBeenCalled();
+          expect(row.pointsDeducted).toBe(1000); // a delivered order keeps its debit
+        }
+      });
+
+      it('a STALE read (order already moved on) → 409, NO refund, NO history, row untouched', async () => {
+        installOrderRow(giftOrder('PROCESSING'));
+        // Someone else dispatched it after our read was taken.
+        row.status = 'DISPATCHED';
+
+        await expect(
+          service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }),
+        ).rejects.toBeInstanceOf(ConflictException);
+
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+        expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
+        expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+        expect(row).toMatchObject({ status: 'DISPATCHED', pointsDeducted: 1000 });
+      });
+
+      it('the CAS is the FIRST write and is keyed on the status that was read', async () => {
+        installOrderRow(giftOrder('CONFIRMED'));
+        await service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED });
+        const first = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+        expect(first.where).toEqual({ id: 'o1', status: 'CONFIRMED' });
+        expect(first.data.status).toBe('CANCELLED');
       });
     });
   });
