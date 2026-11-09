@@ -12,7 +12,8 @@
  *                 PATCH/DELETE /api/admin/rewards/categories/:id
  *     Catalog:    GET/POST /api/admin/rewards/catalog,
  *                 PATCH/DELETE /api/admin/rewards/catalog/:id
- *     Orders:     GET /api/rewards/orders (admin sees all tenant orders),
+ *     Orders:     GET /api/rewards/orders (admin sees all tenant orders; server-side status
+ *                 filter, keyset "Load more" via nextCursor, count = server pagination.total),
  *                 POST /api/rewards/orders/:id/transition (guarded edge-map)
  *     Bulk fulfilment:
  *                 GET  /api/admin/rewards/fulfilment/template  (xlsx blob)
@@ -1419,11 +1420,38 @@ function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned:
 
 const ORDER_STATUS_FILTERS = ['all', 'PENDING', 'CONFIRMED', 'PROCESSING', 'DISPATCHED', 'DELIVERED', 'CANCELLED'];
 
+/** Orders fetched per "Load more" step (and the minimum window on a refresh). */
+const ORDERS_PAGE_SIZE = 100;
+
+interface OrdersPage { orders: OrderItem[]; pagination?: Pagination; nextCursor?: string | null }
+
+/**
+ * Build the GET /api/rewards/orders URL. The status filter is applied SERVER-side (the only
+ * filter this queue has), so the server `pagination.total` is the honest count for the view.
+ * `cursor` = the backend keyset cursor (createdAt DESC, id DESC) — stable under new orders
+ * landing at the top while the admin pages down, unlike page/offset.
+ */
+function ordersUrl(status: string, limit: number, cursor?: string | null): string {
+  const p = new URLSearchParams();
+  if (status !== 'all') p.set('status', status);
+  p.set('limit', String(limit));
+  if (cursor) p.set('cursor', cursor);
+  return `/api/rewards/orders?${p.toString()}`;
+}
+
 function FulfilmentTab() {
   const [orders, setOrders] = useState<OrderItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  // Server-side total for the current status filter (never derived from the loaded rows).
+  const [total, setTotal] = useState<number | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreErr, setLoadMoreErr] = useState('');
+  // Request generation: a filter change / refresh bumps it so an in-flight (stale) first-page
+  // or load-more response for the previous view can never overwrite or append into the new one.
+  const genRef = useRef(0);
 
   // Bulk
   const fileRef = useRef<HTMLInputElement>(null);
@@ -1433,22 +1461,55 @@ function FulfilmentTab() {
   const [uploadErr, setUploadErr] = useState('');
   const [result, setResult] = useState<FulfilmentUploadResult | null>(null);
 
-  const loadOrders = useCallback(async (status: string) => {
-    setLoading(true); setError('');
+  /**
+   * (Re)load the queue from the top. `keep` = how many rows are currently loaded: a refresh
+   * (Refresh button / after a transition / after a bulk upload) re-fetches the SAME window in one
+   * request so an admin who has paged deep keeps their place, with fresh statuses + total + cursor.
+   * A filter change passes nothing → back to one page.
+   */
+  const loadOrders = useCallback(async (status: string, keep = 0) => {
+    const gen = ++genRef.current;
+    // Any in-flight load-more is now stale (its result is discarded) — release its spinner.
+    setLoading(true); setError(''); setLoadMoreErr(''); setLoadingMore(false);
     try {
-      const qs = status === 'all' ? '' : `?status=${encodeURIComponent(status)}`;
-      const data = await apiJson<{ orders: OrderItem[]; pagination?: Pagination }>(
-        `/api/rewards/orders${qs}${qs ? '&' : '?'}page=1&limit=100`,
-      );
+      const data = await apiJson<OrdersPage>(ordersUrl(status, Math.max(ORDERS_PAGE_SIZE, keep)));
+      if (gen !== genRef.current) return;
       setOrders(data.orders ?? []);
+      setTotal(data.pagination?.total ?? null);
+      setNextCursor(data.nextCursor ?? null);
     } catch (e) {
+      if (gen !== genRef.current) return;
       setError(e instanceof Error ? e.message : 'Failed to load orders');
     } finally {
-      setLoading(false);
+      if (gen === genRef.current) setLoading(false);
     }
   }, []);
 
+  const loadMore = async () => {
+    if (!nextCursor || loadingMore) return;
+    const gen = genRef.current;
+    setLoadingMore(true); setLoadMoreErr('');
+    try {
+      const data = await apiJson<OrdersPage>(ordersUrl(statusFilter, ORDERS_PAGE_SIZE, nextCursor));
+      if (gen !== genRef.current) return;
+      setOrders((prev) => {
+        const seen = new Set(prev.map((o) => o.id));
+        return [...prev, ...(data.orders ?? []).filter((o) => !seen.has(o.id))];
+      });
+      setTotal(data.pagination?.total ?? null);
+      setNextCursor(data.nextCursor ?? null);
+    } catch (e) {
+      if (gen !== genRef.current) return;
+      setLoadMoreErr(e instanceof Error ? e.message : 'Failed to load more orders');
+    } finally {
+      if (gen === genRef.current) setLoadingMore(false);
+    }
+  };
+
+  // Filter change → back to the first page. Also invalidates any in-flight load-more.
   useEffect(() => { loadOrders(statusFilter); }, [loadOrders, statusFilter]);
+
+  const refreshOrders = () => loadOrders(statusFilter, orders.length);
 
   async function downloadTemplate() {
     setDownloading(true); setDownloadErr('');
@@ -1487,7 +1548,7 @@ function FulfilmentTab() {
         return;
       }
       setResult(json.data ?? null);
-      await loadOrders(statusFilter);
+      await refreshOrders();
     } catch (e) {
       setUploadErr(e instanceof Error ? e.message : 'Upload failed');
     } finally {
@@ -1604,7 +1665,13 @@ function FulfilmentTab() {
           <div className="flex items-center gap-2">
             <Package className="h-4 w-4 text-[var(--brand-primary)]" />
             <h2 className="text-sm font-bold text-gray-900">Redemption orders</h2>
-            <span className="text-xs text-gray-400">({orders.length})</span>
+            {total != null && (
+              <span className="text-xs text-gray-400" data-testid="orders-count">
+                {orders.length < total
+                  ? `(showing ${fmtPts(orders.length)} of ${fmtPts(total)})`
+                  : `(${fmtPts(total)})`}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <select
@@ -1617,7 +1684,7 @@ function FulfilmentTab() {
               ))}
             </select>
             <button
-              onClick={() => loadOrders(statusFilter)}
+              onClick={refreshOrders}
               className="p-2 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-50"
               aria-label="Refresh orders"
             >
@@ -1654,10 +1721,29 @@ function FulfilmentTab() {
               </thead>
               <tbody className="divide-y divide-gray-50">
                 {orders.map((o) => (
-                  <OrderRow key={o.id} order={o} onTransitioned={() => loadOrders(statusFilter)} />
+                  <OrderRow key={o.id} order={o} onTransitioned={refreshOrders} />
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {!loading && orders.length > 0 && (nextCursor || loadMoreErr) && (
+          <div className="flex flex-col items-center gap-2 px-4 py-4 border-t border-gray-100">
+            {loadMoreErr && (
+              <div className="flex items-center gap-2 text-xs text-red-600" role="alert">
+                <XCircle className="w-3.5 h-3.5 shrink-0" /> {loadMoreErr}
+              </div>
+            )}
+            {nextCursor && (
+              <button
+                onClick={loadMore}
+                disabled={loadingMore}
+                className="px-4 py-2 text-xs font-semibold rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                {loadingMore ? 'Loading…' : loadMoreErr ? 'Retry load more' : 'Load more orders'}
+              </button>
+            )}
           </div>
         )}
       </div>
