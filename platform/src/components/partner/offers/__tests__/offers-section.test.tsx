@@ -111,7 +111,64 @@ describe('OffersSection', () => {
     expect(within(tiles[0]).queryByText('Unlocked')).not.toBeInTheDocument();
 
     expect(within(tiles[1]).getByText('Unlocked')).toBeInTheDocument();
+    // pct 110 is clamped for aria (0–100).
+    expect(within(tiles[1]).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '100');
     expect(within(tiles[2]).queryByRole('progressbar')).not.toBeInTheDocument();
+  });
+
+  it('never a full bar without "Unlocked": pct rounds to 100 but API says locked ⇒ 99, no pill', async () => {
+    const almost: OfferTilePartner = {
+      ...T1, id: 't5', label: 'Almost there',
+      progress: { ...T1.progress!, achieved: 199, pct: 100, unlocked: false },
+    };
+    fetchPartnerOffers.mockResolvedValue([almost]);
+    render(<OffersSection />);
+    const tile = (await screen.findAllByTestId('offer-tile'))[0];
+    const bar = within(tile).getByRole('progressbar');
+    expect(bar).toHaveAttribute('aria-valuenow', '99');
+    expect((bar.firstElementChild as HTMLElement).style.width).toBe('99%');
+    expect(within(tile).queryByText('Unlocked')).not.toBeInTheDocument();
+  });
+
+  it('tile button has a concise aria-label: headline + value + unit + progress', async () => {
+    fetchPartnerOffers.mockResolvedValue([T1, T3]);
+    render(<OffersSection />);
+    await screen.findByTestId('offers-section');
+    expect(screen.getByRole('button', { name: 'Earn on every case, +35 pts per case, ADHO 50 ml, 60% of target' }))
+      .toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Hit the target, get a kit, Free kit, Pomace 5 L, Unlocked' }))
+      .toBeInTheDocument();
+  });
+
+  it('narrow layout: the value never truncates; the unit label sits on its own (truncating) line', async () => {
+    fetchPartnerOffers.mockResolvedValue([{ ...T1, valueNumber: 9999999 }]);
+    render(<OffersSection />);
+    const tile = (await screen.findAllByTestId('offer-tile'))[0];
+    const value = within(tile).getByTestId('offer-tile-value');
+    expect(value).toHaveTextContent('+99,99,999 pts');
+    expect(value.className).not.toContain('truncate');
+    expect(value.className).toContain('text-xl');
+    expect(value).not.toContainElement(within(tile).getByTestId('offer-tile-unit'));
+    expect(within(tile).getByTestId('offer-tile-unit').className).toContain('truncate');
+  });
+
+  it('small print meets contrast: gray-600 and ≥ 12px (Valid till, per-tile till, footer)', async () => {
+    fetchPartnerOffers.mockResolvedValue([T1, T2]);
+    const { unmount } = render(<OffersSection />);
+    const vt = await screen.findByTestId('offers-valid-till');
+    expect(vt.className).toContain('text-gray-600');
+    expect(vt.className).toContain('text-xs');
+    fireEvent.click(screen.getByText('Festive bonus').closest('button')!);
+    const footer = within(await screen.findByRole('dialog')).getByTestId('offer-sheet-footer');
+    expect(footer.className).toContain('text-gray-600');
+    expect(footer.className).toContain('text-xs');
+    unmount();
+
+    fetchPartnerOffers.mockResolvedValue([T1, { ...T2, validTo: '2026-11-15' }]);
+    render(<OffersSection />);
+    const till = await screen.findByText('till 15 Nov');
+    expect(till.className).toContain('text-gray-600');
+    expect(till.className).toContain('text-xs');
   });
 
   it('tapping a tile opens the sheet with details + Valid till + brand footer; close works', async () => {

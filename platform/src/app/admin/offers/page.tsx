@@ -4,7 +4,9 @@
  * /admin/offers — "This month's offers" admin (OFFER-TILES-PLAN F4).
  *
  * Per-tenant, DISPLAY-ONLY tiles shown on the partner dashboard. The tenant is JWT-scoped by the
- * backend — this page NEVER sends a clientId. Every BE 400 message is shown verbatim.
+ * backend — this page NEVER sends a clientId. Every BE 400 message (human field labels) is shown
+ * verbatim. Month switching ignores stale list responses (request sequence id), and the month
+ * picker is a month + year <select> pair (type="month" is unsupported in Firefox/Safari).
  *
  *   GET    /api/admin/offers?month=YYYY-MM    → { month, tiles }
  *   GET    /api/admin/offers/segment-options  → { programNames, zones, states }
@@ -15,7 +17,7 @@
  *   GET    /api/settings/outlet-types · GET /api/admin/kpis?enabledOnly=true (existing)
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, Copy, Pencil, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Modal } from '@/components/ui/modal';
@@ -25,18 +27,57 @@ import { istMonthKey } from '@/lib/ist-date';
 import {
   listOffers, getOfferSegmentOptions, getOfferOutletTypes, getOfferKpis, updateOffer, deleteOffer,
   copyOffersMonth, groupOffers, formatOfferValue, formatOfferDayShort, formatMonthLabel,
-  previousMonth, OFFER_GROUP_LABEL,
+  previousMonth, offerPickerYears, OFFER_GROUP_LABEL,
   type OfferTileAdmin, type OfferSegmentOptions, type OfferOutletTypeOption, type OfferKpiOption,
 } from '@/lib/offers';
 import { OfferForm } from './_components/offer-form';
 
 const EMPTY_SEGMENTS: OfferSegmentOptions = { programNames: [], zones: [], states: [] };
 
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+/** Month + year <select> pair — works in every browser (no type="month"). Emits 'YYYY-MM'. */
+function MonthYearPicker({
+  month, currentYear, onChange,
+}: { month: string; currentYear: number; onChange: (m: string) => void }) {
+  const [y, m] = month ? month.split('-').map(Number) : [NaN, NaN];
+  const sel = 'rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900';
+  return (
+    <fieldset className="flex gap-1.5" data-testid="offers-month" disabled={!month}>
+      <legend className="block text-xs font-semibold text-gray-700 mb-1">Month</legend>
+      <select
+        aria-label="Month"
+        data-testid="offers-month-select"
+        className={sel}
+        value={month ? String(m) : ''}
+        onChange={(e) => onChange(`${y}-${String(Number(e.target.value)).padStart(2, '0')}`)}
+      >
+        {!month && <option value="">—</option>}
+        {MONTH_NAMES.map((name, i) => <option key={name} value={String(i + 1)}>{name}</option>)}
+      </select>
+      <select
+        aria-label="Year"
+        data-testid="offers-year-select"
+        className={sel}
+        value={month ? String(y) : ''}
+        onChange={(e) => onChange(`${e.target.value}-${String(m).padStart(2, '0')}`)}
+      >
+        {!month && <option value="">—</option>}
+        {month && offerPickerYears(currentYear, y).map((yr) => <option key={yr} value={String(yr)}>{yr}</option>)}
+      </select>
+    </fieldset>
+  );
+}
+
 export default function OffersAdminPage() {
   const toast = useToast();
 
   // Month is computed in an effect (no render-time Date ⇒ no hydration mismatch).
   const [month, setMonth] = useState('');
+  const [currentYear, setCurrentYear] = useState(0);
   const [tiles, setTiles] = useState<OfferTileAdmin[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -50,10 +91,18 @@ export default function OffersAdminPage() {
   const [deleting, setDeleting] = useState<OfferTileAdmin | null>(null);
   const [copyOpen, setCopyOpen] = useState(false);
   const [copyCount, setCopyCount] = useState<number | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  // Latest list request — an older month's response that lands late is ignored.
+  const listSeq = useRef(0);
+  const copySeq = useRef(0);
   const [busy, setBusy] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
 
-  useEffect(() => { setMonth(istMonthKey(new Date())); }, []);
+  useEffect(() => {
+    const m = istMonthKey(new Date());
+    setMonth(m);
+    setCurrentYear(Number(m.slice(0, 4)));
+  }, []);
 
   // Reference data for the form + list labels (loaded once; failures degrade to empty lists).
   useEffect(() => {
@@ -66,9 +115,11 @@ export default function OffersAdminPage() {
 
   const load = useCallback(async (m: string) => {
     if (!m) return;
+    const seq = ++listSeq.current;
     setLoading(true);
     setError(null);
     const r = await listOffers(m);
+    if (seq !== listSeq.current) return; // a newer month was requested meanwhile — drop this one
     if (r.success) {
       setTiles(Array.isArray(r.data?.tiles) ? r.data.tiles : []);
     } else {
@@ -117,12 +168,21 @@ export default function OffersAdminPage() {
   }
 
   async function openCopy() {
+    const seq = ++copySeq.current;
+    const src = fromMonth;
     setCopyCount(null);
+    setCopyError(null);
     setCopyOpen(true);
     // Sources = last month's tiles that START in last month (BE copy-month semantics).
-    const r = await listOffers(fromMonth);
-    const src = r.success && Array.isArray(r.data?.tiles) ? r.data.tiles : [];
-    setCopyCount(src.filter((t) => t.validFrom.startsWith(`${fromMonth}-`)).length);
+    const r = await listOffers(src);
+    if (seq !== copySeq.current) return;
+    if (!r.success || !Array.isArray(r.data?.tiles)) {
+      // A failed count is NOT "nothing to copy" — say so and keep Copy disabled.
+      const msg = !r.success ? r.error : '';
+      setCopyError(msg || `Could not check ${formatMonthLabel(src)}'s tiles. Close and try again.`);
+      return;
+    }
+    setCopyCount(r.data.tiles.filter((t) => t.validFrom.startsWith(`${src}-`)).length);
   }
 
   async function confirmCopy() {
@@ -145,17 +205,7 @@ export default function OffersAdminPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-end gap-2">
-          <div>
-            <label htmlFor="offers-month" className="block text-xs font-semibold text-gray-700 mb-1">Month</label>
-            <input
-              id="offers-month"
-              data-testid="offers-month"
-              type="month"
-              value={month}
-              onChange={(e) => { if (e.target.value) setMonth(e.target.value); }}
-              className="rounded-lg border border-gray-300 px-3 py-2 text-sm"
-            />
-          </div>
+          <MonthYearPicker month={month} currentYear={currentYear} onChange={setMonth} />
           <Button variant="outline" onClick={openCopy} disabled={!month} data-testid="copy-month-btn">
             <Copy className="h-4 w-4" /> Copy last month
           </Button>
@@ -268,7 +318,11 @@ export default function OffersAdminPage() {
         description="Copies land as drafts. Publish each one when it is ready."
       >
         <div className="space-y-4" data-testid="copy-modal">
-          {copyCount === null ? (
+          {copyError ? (
+            <p role="alert" data-testid="copy-count-error" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+              {copyError}
+            </p>
+          ) : copyCount === null ? (
             <div className="flex justify-center py-4"><Spinner /></div>
           ) : copyCount === 0 ? (
             <p className="text-sm text-gray-600">
@@ -285,7 +339,7 @@ export default function OffersAdminPage() {
             <Button
               variant="primary"
               loading={busy}
-              disabled={!copyCount}
+              disabled={!copyCount || !!copyError}
               onClick={confirmCopy}
               data-testid="confirm-copy"
             >

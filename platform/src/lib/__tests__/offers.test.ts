@@ -14,6 +14,7 @@ vi.mock('@/lib/api-client', () => ({
 import {
   formatOfferValue, groupOffers, sectionValidTill, OFFER_GROUP_LABEL, formatOfferDay,
   formatOfferDayShort, formatMonthLabel, monthBounds, previousMonth, fetchPartnerOffers,
+  OFFER_VALUE_PLACEHOLDER, offerProgressView,
   type OfferGroup, type OfferTilePartner,
 } from '@/lib/offers';
 
@@ -34,6 +35,26 @@ describe('offers lib', () => {
     expect(formatOfferValue({ valueType: 'PERCENT', valueNumber: 2.5, valueText: null })).toBe('+2.5%');
     expect(formatOfferValue({ valueType: 'RUPEES', valueNumber: 1500, valueText: null })).toBe('₹1,500');
     expect(formatOfferValue({ valueType: 'TEXT', valueNumber: null, valueText: 'Free kit' })).toBe('Free kit');
+  });
+
+  it('rupees show 2 decimals when non-integer; empty numeric value shows a placeholder, not +0', () => {
+    expect(formatOfferValue({ valueType: 'RUPEES', valueNumber: 1500.5, valueText: null })).toBe('₹1,500.50');
+    expect(formatOfferValue({ valueType: 'RUPEES', valueNumber: 0.75, valueText: null })).toBe('₹0.75');
+    expect(formatOfferValue({ valueType: 'RUPEES', valueNumber: 150000, valueText: null })).toBe('₹1,50,000');
+    for (const vt of ['POINTS', 'PERCENT', 'RUPEES'] as const) {
+      expect(formatOfferValue({ valueType: vt, valueNumber: null, valueText: null })).toBe(OFFER_VALUE_PLACEHOLDER);
+    }
+  });
+
+  it('offerProgressView: full bar only when unlocked; pct clamped 0–100', () => {
+    const p = { kpiCode: 'K', kpiName: 'K', unit: 'cases', target: 200, achieved: 0, pct: 0, unlocked: false };
+    expect(offerProgressView(null)).toEqual({ showBar: false, pct: 0, unlocked: false });
+    expect(offerProgressView({ ...p, target: null, pct: null })).toEqual({ showBar: false, pct: 0, unlocked: false });
+    expect(offerProgressView({ ...p, pct: 60 })).toEqual({ showBar: true, pct: 60, unlocked: false });
+    // Rounded to 100 but the API says NOT unlocked ⇒ never a full bar.
+    expect(offerProgressView({ ...p, pct: 100 })).toEqual({ showBar: true, pct: 99, unlocked: false });
+    expect(offerProgressView({ ...p, pct: 140, unlocked: true })).toEqual({ showBar: true, pct: 100, unlocked: true });
+    expect(offerProgressView({ ...p, pct: -5 })).toEqual({ showBar: true, pct: 0, unlocked: false });
   });
 
   it('groups in fixed order and drops empty groups', () => {

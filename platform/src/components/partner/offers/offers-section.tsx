@@ -10,10 +10,14 @@ import { OfferSheet } from './offer-sheet';
 /**
  * "This month's offers" — partner dashboard section (both dashboard variants).
  *
+ * Mounted by the dashboard ONLY when the tenant's `offerTiles` flag is ON — the flag controls the
+ * WHOLE feature (admin page AND these partner tiles), so a flag-OFF tenant (Deoleo) never mounts
+ * this and makes zero offers requests.
+ *
  * Self-fetching + self-hiding, like SchemesCard: `tiles` starts null so the FIRST render is
  * empty on server AND client (no hydration mismatch — the #58 lesson: no localStorage / Date
  * reads before mount). It stays absent (zero DOM) when the API returns no tile for this outlet
- * or errors — so a tenant with no offers (Deoleo) renders byte-identically.
+ * or errors.
  */
 export function OffersSection() {
   const [tiles, setTiles] = useState<OfferTilePartner[] | null>(null);
@@ -36,7 +40,7 @@ export function OffersSection() {
       <div className="flex items-baseline justify-between gap-2">
         <h2 id="offers-heading" className="text-sm font-semibold text-gray-900">This month&apos;s offers</h2>
         {validTill && (
-          <span data-testid="offers-valid-till" className="shrink-0 text-[11px] text-gray-400">
+          <span data-testid="offers-valid-till" className="shrink-0 text-xs text-gray-600">
             Valid till {validTill}
           </span>
         )}

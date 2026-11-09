@@ -20,18 +20,21 @@ A tile is a short piece of **content** shown to partners, for example **+35 pts 
 
 - Tiles are **display-only**. They never credit, compute or reserve points or money. Rewards are still credited only through the normal programme flows (uploads, payouts, the points engine).
 - Each tile belongs to one of two groups: **Earn on your targets** or **Extra schemes this month**.
-- The big value can be **Points** (+35 pts), **Percent** (+2.5%), **Rupees** (₹1,500) or short **Text** (up to 12 characters, e.g. "Free kit").
+- The big value can be **Points** (+35 pts), **Percent** (+2.5%, up to 100), **Rupees** (₹1,500 or ₹1,500.50) or short **Text** (up to 12 characters, e.g. "Free kit"). Numbers must be greater than 0. The unit label (e.g. "per case") shows on its own line under the value.
 - Partners tap a tile to see its details and terms in a bottom sheet. The sheet always ends with "Offer details are shared by [tenant name]. Terms apply."
 
 ## Switching it on for a tenant
 
-The feature is **off by default** for every tenant. Turn on **This month's offers** in the Gifsy console for the client. After that, the **This Month's Offers** page appears in that tenant's admin menu for Gifsy admins (while assumed into the tenant) and the tenant's client admins.
+The feature is **off by default** for every tenant. One switch, **This month's offers** in the Gifsy console for the client, controls the **whole** feature:
 
-The partner section has no switch of its own. It shows only when at least one **published**, **currently valid** tile matches that outlet. With no such tile, the dashboard looks exactly as before.
+- **On:** the **This Month's Offers** page appears in that tenant's admin menu for Gifsy admins (while assumed into the tenant) and the tenant's client admins, **and** partners of that tenant can see the "This month's offers" section on their dashboard.
+- **Off:** neither the admin page nor the partner section appears. The partner dashboard looks exactly as before, even if tiles were created earlier.
+
+With the switch on, the partner section shows only when at least one **published**, **currently valid** tile matches that outlet. With no such tile, the dashboard looks exactly as before.
 
 ## Creating a tile
 
-1. Open **This Month's Offers** and pick the month.
+1. Open **This Month's Offers** and pick the month and year.
 2. Click **New tile**, then fill in the value, unit label, product, headline and details.
 3. Set **Valid from / Valid to**. These are calendar days in India time, both inclusive. They default to the selected month.
 4. Choose the **audience** (below) and, optionally, a KPI for progress.

@@ -197,4 +197,108 @@ describe('OffersAdminPage', () => {
     fireEvent.click(within(form).getByTestId('offer-save'));
     expect(await within(form).findByTestId('offer-form-error')).toHaveTextContent('Unknown KPI');
   });
+
+  it('month picker is a month + year select pair (no type="month"); switching lists that month', async () => {
+    const [y, m] = PREV.split('-');
+    listByMonth[PREV] = [tile({ id: 'p1', label: 'Last month tile' })];
+    renderPage();
+    await screen.findByTestId('offer-row');
+    expect(document.querySelector('input[type="month"]')).toBeNull();
+    const monthSel = screen.getByLabelText('Month') as HTMLSelectElement;
+    const yearSel = screen.getByLabelText('Year') as HTMLSelectElement;
+    expect(monthSel.tagName).toBe('SELECT');
+    expect(yearSel.value).toBe(CUR.slice(0, 4));
+    fireEvent.change(yearSel, { target: { value: y } });
+    fireEvent.change(screen.getByLabelText('Month'), { target: { value: String(Number(m)) } });
+    expect(await screen.findByText(/Last month tile/)).toBeInTheDocument();
+    expect(get).toHaveBeenCalledWith(`/api/admin/offers?month=${PREV}`);
+  });
+
+  it('ignores a stale (slower) month response after a fast switch', async () => {
+    const resolvers: Record<string, (v: unknown) => void> = {};
+    renderPage();
+    await screen.findByTestId('offer-row');
+    get.mockImplementation((url: string) => {
+      if (url.startsWith('/api/admin/offers?')) {
+        const mo = new URL(url, 'http://x').searchParams.get('month') ?? '';
+        return new Promise((r) => { resolvers[mo] = r; });
+      }
+      return Promise.resolve({ success: true, data: [] });
+    });
+    const [, curM] = CUR.split('-').map(Number);
+    const a = curM === 1 ? 2 : curM - 1; // two other months in the same year
+    const b = curM === 12 ? 11 : curM + 1;
+    const key = (mm: number) => `${CUR.slice(0, 4)}-${String(mm).padStart(2, '0')}`;
+    fireEvent.change(screen.getByLabelText('Month'), { target: { value: String(a) } });
+    fireEvent.change(screen.getByLabelText('Month'), { target: { value: String(b) } });
+    await waitFor(() => expect(resolvers[key(b)]).toBeDefined());
+    resolvers[key(b)]({ success: true, data: { month: key(b), tiles: [tile({ id: 'nb', label: 'Newest month' })] } });
+    expect(await screen.findByText(/Newest month/)).toBeInTheDocument();
+    // The older request lands late — it must not overwrite the list.
+    resolvers[key(a)]({ success: true, data: { month: key(a), tiles: [tile({ id: 'old', label: 'Stale month' })] } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByText(/Stale month/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Newest month/)).toBeInTheDocument();
+  });
+
+  it('copy dialog shows an error (not "nothing to copy") when the count fetch fails', async () => {
+    renderPage();
+    await screen.findByTestId('offer-row');
+    get.mockImplementation((url: string) =>
+      url === `/api/admin/offers?month=${PREV}`
+        ? Promise.resolve({ success: false, error: 'Network error' })
+        : Promise.resolve({ success: true, data: [] }),
+    );
+    fireEvent.click(screen.getByTestId('copy-month-btn'));
+    const modal = await screen.findByTestId('copy-modal');
+    expect(await within(modal).findByTestId('copy-count-error')).toHaveTextContent('Network error');
+    expect(within(modal).queryByText(/nothing to copy/)).not.toBeInTheDocument();
+    expect(within(modal).getByTestId('confirm-copy')).toBeDisabled();
+  });
+
+  it('form validation: whitespace headline, value ≤ 0, percent > 100, sort order out of range — no request', async () => {
+    renderPage();
+    await screen.findByTestId('offer-row');
+    fireEvent.click(screen.getByTestId('new-tile-btn'));
+    const form = await screen.findByTestId('offer-form');
+    const value = within(form).getByLabelText(/^Value \(points\)/);
+    expect(value).toHaveAttribute('min', '0.01');
+    expect(within(form).getByLabelText('Sort order')).toHaveAttribute('max', '1000000');
+
+    fireEvent.change(value, { target: { value: '5' } });
+    fireEvent.change(within(form).getByLabelText('Headline'), { target: { value: '   ' } });
+    fireEvent.submit(form);
+    expect(await within(form).findByTestId('offer-form-error')).toHaveTextContent('Headline is required.');
+
+    fireEvent.change(within(form).getByLabelText('Headline'), { target: { value: 'H' } });
+    fireEvent.change(value, { target: { value: '0' } });
+    fireEvent.submit(form);
+    expect(await within(form).findByTestId('offer-form-error')).toHaveTextContent('Value must be greater than 0.');
+
+    fireEvent.change(within(form).getByLabelText('Value type'), { target: { value: 'PERCENT' } });
+    const pctInput = within(form).getByLabelText(/^Value \(%\)/);
+    expect(pctInput).toHaveAttribute('max', '100');
+    fireEvent.change(pctInput, { target: { value: '101' } });
+    fireEvent.submit(form);
+    expect(await within(form).findByTestId('offer-form-error')).toHaveTextContent('Value must be at most 100%.');
+
+    fireEvent.change(pctInput, { target: { value: '5' } });
+    fireEvent.change(within(form).getByLabelText('Sort order'), { target: { value: '-1' } });
+    fireEvent.submit(form);
+    expect(await within(form).findByTestId('offer-form-error')).toHaveTextContent(/Sort order must be a whole number from 0 to/);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('preview: empty value shows a placeholder (not +0 pts); fractional rupees show 2 decimals', async () => {
+    renderPage();
+    await screen.findByTestId('offer-row');
+    fireEvent.click(screen.getByTestId('new-tile-btn'));
+    const form = await screen.findByTestId('offer-form');
+    const preview = screen.getByTestId('offer-preview');
+    expect(within(preview).getByTestId('offer-tile-value')).toHaveTextContent('—');
+    expect(within(preview).queryByText('+0 pts')).not.toBeInTheDocument();
+    fireEvent.change(within(form).getByLabelText('Value type'), { target: { value: 'RUPEES' } });
+    fireEvent.change(within(form).getByLabelText(/^Value \(₹\)/), { target: { value: '1500.5' } });
+    expect(within(preview).getByTestId('offer-tile-value')).toHaveTextContent('₹1,500.50');
+  });
 });

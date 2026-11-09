@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { OfferTileCard } from '@/components/partner/offers/offer-tile-card';
 import {
   createOffer, updateOffer, monthBounds, OFFER_GROUP_LABEL, OFFER_GROUP_ORDER, OFFER_VALUE_TYPE_LABEL,
+  OFFER_LIMITS, OFFER_VALUE_PLACEHOLDER,
   type OfferGroup, type OfferValueType, type OfferTileAdmin, type OfferTileInput,
   type OfferSegmentOptions, type OfferOutletTypeOption, type OfferKpiOption, type OfferTilePartner,
 } from '@/lib/offers';
@@ -65,6 +66,31 @@ function initialState(tile: OfferTileAdmin | null, month: string): FormState {
 }
 
 const orNull = (s: string) => (s.trim() === '' ? null : s.trim());
+
+/**
+ * Client-side checks that mirror the backend validator, so the admin gets an immediate, specific
+ * message (the browser's native constraint UI is skipped by programmatic submits and is
+ * inconsistent across browsers). The backend stays the authority — its message is shown verbatim.
+ */
+function validateOfferForm(f: FormState): string | null {
+  if (f.label.trim() === '') return 'Headline is required.';
+  if (f.valueType === 'TEXT') {
+    if (f.valueText.trim() === '') return `Value text is required (1–${OFFER_LIMITS.valueText} characters).`;
+  } else {
+    const n = Number(f.valueNumber);
+    if (f.valueNumber.trim() === '' || !Number.isFinite(n)) return 'Value is required.';
+    if (n <= 0) return 'Value must be greater than 0.';
+    const max = f.valueType === 'PERCENT' ? OFFER_LIMITS.percentMax : OFFER_LIMITS.valueMax;
+    if (n > max) return `Value must be at most ${max.toLocaleString('en-IN')}${f.valueType === 'PERCENT' ? '%' : ''}.`;
+  }
+  const so = Number(f.sortOrder);
+  if (f.sortOrder.trim() !== '' &&
+      (!Number.isInteger(so) || so < OFFER_LIMITS.sortOrderMin || so > OFFER_LIMITS.sortOrderMax)) {
+    return `Sort order must be a whole number from ${OFFER_LIMITS.sortOrderMin} to ${OFFER_LIMITS.sortOrderMax.toLocaleString('en-IN')}.`;
+  }
+  if (f.validFrom && f.validTo && f.validTo < f.validFrom) return 'Valid to must be on or after Valid from.';
+  return null;
+}
 
 /** Form state → the §3.3 OfferTileInput body. Numeric types null valueText; TEXT nulls valueNumber. */
 function toOfferInput(f: FormState): OfferTileInput {
@@ -175,7 +201,8 @@ export function OfferForm({
     const body = toOfferInput(f);
     return {
       id: 'preview', group: body.group, valueType: body.valueType,
-      valueNumber: body.valueNumber, valueText: body.valueText ?? (isText ? '' : null),
+      // Empty value ⇒ placeholder (formatOfferValue renders '—' for a null number), never '+0 pts'.
+      valueNumber: body.valueNumber, valueText: isText ? (body.valueText ?? OFFER_VALUE_PLACEHOLDER) : null,
       unitLabel: body.unitLabel, product: body.product, label: body.label || 'Headline',
       details: body.details, validTo: body.validTo,
       progress: body.kpiCode
@@ -187,6 +214,8 @@ export function OfferForm({
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    const invalid = validateOfferForm(f);
+    if (invalid) { setError(invalid); return; }
     setSaving(true);
     setError(null);
     const body = toOfferInput(f);
@@ -239,11 +268,12 @@ export function OfferForm({
             <div>
               {isText ? (
                 <>
-                  <label htmlFor="offer-value-text" className={LABEL}>Value text (max 12)</label>
+                  <label htmlFor="offer-value-text" className={LABEL}>Value text (max {OFFER_LIMITS.valueText})</label>
                   <input
                     id="offer-value-text"
                     className={INPUT}
-                    maxLength={12}
+                    required
+                    maxLength={OFFER_LIMITS.valueText}
                     value={f.valueText}
                     onChange={(e) => set('valueText', e.target.value)}
                     placeholder="Free kit"
@@ -259,7 +289,9 @@ export function OfferForm({
                     className={INPUT}
                     type="number"
                     inputMode="decimal"
-                    min="0"
+                    required
+                    min="0.01"
+                    max={f.valueType === 'PERCENT' ? OFFER_LIMITS.percentMax : OFFER_LIMITS.valueMax}
                     step="0.01"
                     value={f.valueNumber}
                     onChange={(e) => set('valueNumber', e.target.value)}
@@ -272,25 +304,25 @@ export function OfferForm({
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label htmlFor="offer-unit" className={LABEL}>Unit label</label>
-              <input id="offer-unit" className={INPUT} maxLength={20} value={f.unitLabel}
+              <input id="offer-unit" className={INPUT} maxLength={OFFER_LIMITS.unitLabel} value={f.unitLabel}
                 onChange={(e) => set('unitLabel', e.target.value)} placeholder="per case" />
             </div>
             <div>
               <label htmlFor="offer-product" className={LABEL}>Product</label>
-              <input id="offer-product" className={INPUT} maxLength={40} value={f.product}
+              <input id="offer-product" className={INPUT} maxLength={OFFER_LIMITS.product} value={f.product}
                 onChange={(e) => set('product', e.target.value)} placeholder="ADHO 50 ml" />
             </div>
           </div>
 
           <div>
             <label htmlFor="offer-label" className={LABEL}>Headline</label>
-            <input id="offer-label" className={INPUT} maxLength={60} required value={f.label}
+            <input id="offer-label" className={INPUT} maxLength={OFFER_LIMITS.label} required value={f.label}
               onChange={(e) => set('label', e.target.value)} placeholder="Earn on every case" />
           </div>
 
           <div>
             <label htmlFor="offer-details" className={LABEL}>Details / terms</label>
-            <textarea id="offer-details" className={INPUT} rows={3} maxLength={1000} value={f.details}
+            <textarea id="offer-details" className={INPUT} rows={3} maxLength={OFFER_LIMITS.details} value={f.details}
               onChange={(e) => set('details', e.target.value)} />
           </div>
 
@@ -307,7 +339,8 @@ export function OfferForm({
             </div>
             <div>
               <label htmlFor="offer-sort" className={LABEL}>Sort order</label>
-              <input id="offer-sort" type="number" step="1" className={INPUT} value={f.sortOrder}
+              <input id="offer-sort" type="number" step="1" min={OFFER_LIMITS.sortOrderMin}
+                max={OFFER_LIMITS.sortOrderMax} className={INPUT} value={f.sortOrder}
                 onChange={(e) => set('sortOrder', e.target.value)} />
             </div>
           </div>
@@ -362,7 +395,7 @@ export function OfferForm({
             <OfferTileCard tile={preview} />
           </div>
           {preview.progress && (
-            <p className="text-[11px] text-gray-400">Progress shown is illustrative; partners see their own.</p>
+            <p className="text-xs text-gray-600">Progress shown is illustrative; partners see their own.</p>
           )}
         </div>
       </form>

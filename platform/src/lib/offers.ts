@@ -110,18 +110,60 @@ export const OFFER_VALUE_TYPE_LABEL: Record<OfferValueType, string> = {
   TEXT: 'Text',
 };
 
-const num = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+/* Field limits — MIRROR the backend validator (api/src/offers/offers.helpers.ts validateTileInput).
+   TEXT values are capped at 12 so they fit a 2-column tile at 320px (they may wrap, never ellipsis). */
+export const OFFER_LIMITS = {
+  valueText: 12,
+  unitLabel: 20,
+  product: 40,
+  label: 60,
+  details: 1000,
+  valueMax: 9_999_999,
+  percentMax: 100,
+  sortOrderMin: 0,
+  sortOrderMax: 1_000_000,
+} as const;
 
-/** The big value shown first on a tile: '+35 pts', '+1 pt', '+2.5%', '₹1,500', or the text. */
+/** Shown instead of a value when a numeric tile has no number yet (admin live preview). */
+export const OFFER_VALUE_PLACEHOLDER = '—';
+
+const num = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+/** Rupees: whole numbers stay whole ('₹1,500'); anything fractional shows 2 decimals ('₹1,500.50'). */
+const rupees = (n: number) =>
+  Number.isInteger(n)
+    ? n.toLocaleString('en-IN', { maximumFractionDigits: 0 })
+    : n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/**
+ * The big value shown first on a tile: '+35 pts', '+1 pt', '+2.5%', '₹1,500', '₹1,500.50', or
+ * the text. A numeric tile with no number (only possible in the admin preview while the field is
+ * empty) renders the placeholder — never a misleading '+0 pts'.
+ */
 export function formatOfferValue(
   t: Pick<OfferTilePartner, 'valueType' | 'valueNumber' | 'valueText'>,
 ): string {
+  if (t.valueType === 'TEXT') return t.valueText ?? '';
+  const n = t.valueNumber;
+  if (n === null || n === undefined || !Number.isFinite(n)) return OFFER_VALUE_PLACEHOLDER;
   switch (t.valueType) {
-    case 'POINTS':  return `+${num(t.valueNumber ?? 0)} ${t.valueNumber === 1 ? 'pt' : 'pts'}`;
-    case 'PERCENT': return `+${num(t.valueNumber ?? 0)}%`;
-    case 'RUPEES':  return `₹${num(t.valueNumber ?? 0)}`;
-    default:        return t.valueText ?? '';
+    case 'POINTS':  return `+${num(n)} ${n === 1 ? 'pt' : 'pts'}`;
+    case 'PERCENT': return `+${num(n)}%`;
+    default:        return `₹${rupees(n)}`;
   }
+}
+
+/** Progress shown on a tile/sheet, clamped so the bar is NEVER full unless the API says unlocked. */
+export function offerProgressView(p: OfferProgress | null): {
+  showBar: boolean;
+  /** 0–100, safe for width + aria-valuenow. < 100 whenever !unlocked. */
+  pct: number;
+  unlocked: boolean;
+} {
+  const unlocked = !!p?.unlocked;
+  const showBar = !!p && p.target !== null && p.target > 0 && p.pct !== null;
+  if (!showBar) return { showBar: false, pct: 0, unlocked };
+  const raw = Math.max(0, Math.min(100, Math.round(p!.pct as number)));
+  return { showBar, pct: unlocked ? 100 : Math.min(raw, 99), unlocked };
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -170,6 +212,16 @@ export function monthBounds(month: string): { first: string; last: string } {
 export function previousMonth(month: string): string {
   const [y, m] = month.split('-').map(Number);
   return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`;
+}
+
+/** Admin month picker years: two back, one ahead of the current IST year (+ the selected one). */
+export function offerPickerYears(currentYear: number, selectedYear: number): number[] {
+  const ys = new Set<number>();
+  if (Number.isFinite(currentYear) && currentYear > 0) {
+    for (let y = currentYear - 2; y <= currentYear + 1; y++) ys.add(y);
+  }
+  if (Number.isFinite(selectedYear)) ys.add(selectedYear);
+  return [...ys].sort((a, b) => a - b);
 }
 
 /** Group tiles in the fixed order, dropping empty groups. Keeps the server's in-group order. */

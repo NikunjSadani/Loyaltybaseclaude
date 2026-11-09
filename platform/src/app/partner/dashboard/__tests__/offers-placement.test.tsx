@@ -3,7 +3,8 @@
  * "This month's offers" placement on the partner dashboard (OFFER-TILES-PLAN F3), BOTH variants:
  *   v2 ON  → section after the Target Achievement card, before Quick actions.
  *   v2 OFF → section after the Target-vs-Achievement chart, before Quick actions.
- *   no tiles (either variant) → section absent (Deoleo byte-identical).
+ *   no tiles (either variant) → section absent.
+ *   offerTiles flag OFF (Deoleo) → section never mounted, ZERO offers requests.
  * Run: npx vitest run src/app/partner/dashboard/__tests__/offers-placement.test.tsx
  */
 import React from 'react';
@@ -41,9 +42,10 @@ const identityRef: { current: unknown } = { current: null };
 vi.mock('@/lib/partner-identity', () => ({ usePartnerIdentity: () => identityRef.current }));
 
 const offersRef: { current: OfferTilePartner[] } = { current: [] };
+const fetchPartnerOffers = vi.fn(() => Promise.resolve(offersRef.current));
 vi.mock('@/lib/offers', async (orig) => {
   const actual = await orig<typeof import('@/lib/offers')>();
-  return { ...actual, fetchPartnerOffers: () => Promise.resolve(offersRef.current) };
+  return { ...actual, fetchPartnerOffers: () => fetchPartnerOffers() };
 });
 
 import { istMonthKey } from '@/lib/ist-date';
@@ -51,12 +53,12 @@ import PartnerDashboardPage from '../page';
 
 const CUR = istMonthKey(new Date());
 
-function identity(v2: boolean) {
+function identity(v2: boolean, offerTiles = true) {
   return {
     businessName: 'Test Firm', outletName: 'Test Outlet', ownerName: 'Owner',
     partnerCode: 'P-1', outletType: 'WHOLESALER', hasPointsActivity: true,
     hasPayoutActivity: false, loyaltyEnabled: true,
-    features: { partnerDashboardV2: v2 },
+    features: { partnerDashboardV2: v2, offerTiles },
     activePartnerId: null, operableOutlets: [], groupOverviewAvailable: false,
     groupParent: null, activeSelectorInvalid: false, loading: false,
   };
@@ -98,6 +100,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   identityRef.current = null;
   offersRef.current = [];
+  fetchPartnerOffers.mockClear();
 });
 
 describe('Offers section placement', () => {
@@ -134,5 +137,18 @@ describe('Offers section placement', () => {
     await waitFor(() => expect(quickActions()).toBeInTheDocument());
     await new Promise((r) => setTimeout(r, 0));
     expect(screen.queryByTestId('offers-section')).not.toBeInTheDocument();
+  });
+
+  it.each([[true], [false]])('v2=%s with offerTiles OFF: section never mounted, zero offers requests', async (v2) => {
+    identityRef.current = identity(v2, false);
+    offersRef.current = [TILE];
+    const f = stubFetch();
+    vi.stubGlobal('fetch', f);
+    render(<PartnerDashboardPage />);
+    await waitFor(() => expect(quickActions()).toBeInTheDocument());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByTestId('offers-section')).not.toBeInTheDocument();
+    expect(fetchPartnerOffers).not.toHaveBeenCalled();
+    for (const [url] of f.mock.calls) expect(String(url)).not.toContain('offers');
   });
 });
