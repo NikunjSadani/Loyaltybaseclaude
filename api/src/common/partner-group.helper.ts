@@ -504,6 +504,20 @@ export async function checkGroupUniqueness(
 }
 
 /**
+ * True for a transaction aborted by a lock conflict: Prisma P2034 (write conflict / deadlock), or a
+ * Postgres deadlock (40P01) / serialization failure (40001) surfaced through a raw query (Prisma P2010
+ * carries the SQLSTATE in `meta.code`). Callers map it to a clean 409 instead of a raw 500.
+ */
+export function isLockConflictError(e: unknown): boolean {
+  if (!e || typeof e !== 'object') return false;
+  const err = e as { code?: unknown; meta?: { code?: unknown } | null; message?: unknown };
+  if (err.code === 'P2034' || err.code === '40P01' || err.code === '40001') return true;
+  const metaCode = err.meta && typeof err.meta === 'object' ? err.meta.code : undefined;
+  if (metaCode === '40P01' || metaCode === '40001') return true;
+  return typeof err.message === 'string' && /\b40P01\b|deadlock detected/i.test(err.message);
+}
+
+/**
  * Serialize concurrent writers of the SAME identity value so the read-then-write in
  * `checkGroupUniqueness` can't race. Takes a transaction-scoped Postgres advisory lock per
  * enforced (clientId, field, value) — auto-released when the tx commits/rolls back (never orphaned).

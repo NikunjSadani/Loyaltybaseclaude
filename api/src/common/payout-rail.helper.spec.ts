@@ -1,7 +1,11 @@
 import {
   CLEAR_BANK_RAIL,
   type PayoutField,
+  PAYOUT_CARRIED_KEY,
+  carriedPayoutRouting,
   carriesBothPayoutRails,
+  payoutCarriedChanged,
+  stripPayoutCarried,
   effectiveProposedPayout,
   incompletePayoutRailMessage,
   isCompletePayoutRail,
@@ -262,6 +266,41 @@ describe('payout-rail.helper', () => {
       expect(isPayoutRailFullyStaged('bank', { bankAccountNumber: '50100', ifscCode: '  ' })).toBe(false);
       expect(isPayoutRailFullyStaged('upi', { upiId: 'a@upi' })).toBe(true);
       expect(isPayoutRailFullyStaged('upi', { upiCaptureMethod: 'QR' })).toBe(false);
+    });
+  });
+
+  describe('FIX 2 — payoutCarried (carried routing values; "changed, not just vanished")', () => {
+    it('carriedPayoutRouting records only the routing values the proposal does NOT stage, from the live partner', () => {
+      expect(carriedPayoutRouting('bank', { bankAccountNumber: '222' }, { bankAccountNumber: '111', ifscCode: 'HDFC0001' }))
+        .toEqual({ ifscCode: 'HDFC0001' });
+      expect(carriedPayoutRouting('bank', { ifscCode: 'ICIC0002' }, { bankAccountNumber: '111', ifscCode: 'HDFC0001' }))
+        .toEqual({ bankAccountNumber: '111' });
+      expect(carriedPayoutRouting('bank', { bankAccountNumber: '2', ifscCode: 'I' }, { bankAccountNumber: '1', ifscCode: 'H' }))
+        .toBeUndefined();
+      expect(carriedPayoutRouting('upi', { upiId: 'a@upi' }, { upiId: 'b@upi' })).toBeUndefined();
+      expect(carriedPayoutRouting('bank', { bankAccountNumber: '2' }, { ifscCode: '  ' })).toBeUndefined();
+      expect(carriedPayoutRouting('bank', { bankAccountNumber: '2' }, null)).toBeUndefined();
+    });
+
+    it('payoutCarriedChanged: normalized compare (IFSC upper-trim, account trim, UPI lower-trim); legacy → false', () => {
+      const p = (c: Record<string, unknown>) => ({ payoutRail: 'bank', [PAYOUT_CARRIED_KEY]: c });
+      expect(payoutCarriedChanged(p({ ifscCode: ' hdfc0001 ' }), { ifscCode: 'HDFC0001' })).toBe(false);
+      expect(payoutCarriedChanged(p({ ifscCode: 'HDFC0001' }), { ifscCode: 'ICIC0009' })).toBe(true);
+      expect(payoutCarriedChanged(p({ ifscCode: 'HDFC0001' }), { ifscCode: null })).toBe(true);
+      expect(payoutCarriedChanged(p({ bankAccountNumber: ' 111 ' }), { bankAccountNumber: '111' })).toBe(false);
+      expect(payoutCarriedChanged(p({ bankAccountNumber: '111' }), { bankAccountNumber: '112' })).toBe(true);
+      expect(payoutCarriedChanged(p({ upiId: 'Shop@UPI ' }), { upiId: 'shop@upi' })).toBe(false);
+      expect(payoutCarriedChanged({ payoutRail: 'bank', bankAccountNumber: '2' }, { ifscCode: 'X' })).toBe(false);
+    });
+
+    it('effectiveProposedPayout / stripPayoutCarried never present payoutCarried', () => {
+      const staged = { payoutRail: 'bank', bankAccountNumber: '222', payoutCarried: { ifscCode: 'HDFC0001' } };
+      const eff = effectiveProposedPayout(staged, { accountNumber: true }, { ifscCode: 'HDFC0001' });
+      expect(eff.rail).toBe('bank');
+      expect('payoutCarried' in eff.proposal).toBe(false);
+      expect(stripPayoutCarried(staged)).toEqual({ payoutRail: 'bank', bankAccountNumber: '222' });
+      expect(stripPayoutCarried(null)).toBeNull();
+      expect('payoutCarried' in staged).toBe(true); // input not mutated
     });
   });
 });

@@ -10,6 +10,7 @@ import {
   resolveGroupParentByPhone,
   resolveGroupIdentity,
   resolveGroupClassification,
+  isLockConflictError,
   type UniquenessPolicy,
 } from './partner-group.helper';
 
@@ -455,5 +456,21 @@ describe('partner-group.helper — resolveGroupParentByPhone', () => {
   it('null when no parent matches / phone invalid', async () => {
     expect(await resolveGroupParentByPhone(ctxDb({ parent: null }), { clientId: 'd', phone: '9830011252' })).toBeNull();
     expect(await resolveGroupParentByPhone(ctxDb({ parent: { id: 'X' } }), { clientId: 'd', phone: '123' })).toBeNull();
+  });
+});
+
+describe('isLockConflictError (P2034 / 40P01 / 40001 → clean 409 upstream)', () => {
+  it('matches a lock-conflict abort in every shape Prisma surfaces it', () => {
+    expect(isLockConflictError({ code: 'P2034', message: 'write conflict or a deadlock' })).toBe(true);
+    expect(isLockConflictError({ code: 'P2010', meta: { code: '40P01' }, message: 'Raw query failed' })).toBe(true);
+    expect(isLockConflictError({ code: 'P2010', meta: { code: '40001' } })).toBe(true);
+    expect(isLockConflictError(new Error('ERROR: deadlock detected'))).toBe(true);
+    expect(isLockConflictError({ code: '40P01' })).toBe(true);
+  });
+  it('does not swallow unrelated errors', () => {
+    expect(isLockConflictError({ code: 'P2002', meta: { target: ['gstNumber'] } })).toBe(false);
+    expect(isLockConflictError(new Error('connection reset'))).toBe(false);
+    expect(isLockConflictError(null)).toBe(false);
+    expect(isLockConflictError('40P01-ish string')).toBe(false);
   });
 });

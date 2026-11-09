@@ -1609,6 +1609,34 @@ describe('KycService', () => {
       for (const k of ['ifscCode', 'bankName', 'upiId']) expect(proposed[k]).toBeUndefined();
     });
 
+    it('FIX 2: a staged bank rail completed by a LOCKED IFSC records the carried IFSC in payoutCarried (not as ifscCode)', async () => {
+      primeReKyc({ accountNumber: true }, { bankName: 'B', bankAccountNumber: '111', ifscCode: 'HDFC0001' });
+      await service.create(so, {
+        ...dtoBase, bankName: 'B', accountNumber: '222', ifscCode: 'HDFC0001', paymentMode: 'bank',
+      } as never);
+      const proposed = stagedProposal();
+      expect(proposed.payoutCarried).toEqual({ ifscCode: 'HDFC0001' });
+      expect(proposed.ifscCode).toBeUndefined(); // still never a writable/staged value
+    });
+
+    it('FIX 2: both routing fields rep-entered → nothing carried (no payoutCarried key)', async () => {
+      primeReKyc({ accountNumber: true, ifscCode: true }, { bankName: 'B', bankAccountNumber: '111', ifscCode: 'HDFC0001' });
+      await service.create(so, {
+        ...dtoBase, bankName: 'B', accountNumber: '222', ifscCode: 'ICIC0002', paymentMode: 'bank',
+      } as never);
+      const proposed = stagedProposal();
+      expect(proposed).toMatchObject({ bankAccountNumber: '222', ifscCode: 'ICIC0002', payoutRail: 'bank' });
+      expect(proposed.payoutCarried).toBeUndefined();
+    });
+
+    it('FIX 2: no rail staged (IN-RAIL bankName edit) → no payoutCarried', async () => {
+      primeReKyc({ bankName: true }, { bankName: 'Old Bank', bankAccountNumber: '123', ifscCode: 'IFSC0001' }, 'BANK');
+      await service.create(so, {
+        ...dtoBase, bankName: 'New Bank', accountNumber: '123', ifscCode: 'IFSC0001', paymentMode: 'bank',
+      } as never);
+      expect(stagedProposal().payoutCarried).toBeUndefined();
+    });
+
     it('R4c: flagged accountNumber ONLY on a partner with NO IFSC → bank unreachable, no live rail → 201, nothing staged', async () => {
       primeReKyc({ accountNumber: true }, { bankAccountNumber: '111', ifscCode: null });
       const res = await service.create(so, { ...dtoBase, accountNumber: '222', paymentMode: 'bank' } as never);
@@ -3465,6 +3493,23 @@ describe('KycService', () => {
       expect(res.submissions[1].status).toBe('APPROVED');        // no flags → unchanged
     });
 
+    it('FIX 2: never ships the internal proposedPartner.payoutCarried bookkeeping (other proposal keys kept)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([
+        {
+          id: 's1', status: 'PENDING_GIFSY', partner: null,
+          proposedPartner: { payoutRail: 'bank', bankAccountNumber: '222', payoutCarried: { ifscCode: 'HDFC0001' } },
+        },
+        { id: 's2', status: 'PENDING_GIFSY', partner: null, proposedPartner: null },
+      ]);
+      mockPrisma.kycSubmission.count.mockResolvedValue(2);
+      mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
+      const res = await service.list(partner, {});
+      const p0 = (res.submissions[0] as { proposedPartner: Record<string, unknown> }).proposedPartner;
+      expect(p0).toEqual({ payoutRail: 'bank', bankAccountNumber: '222' });
+      expect((res.submissions[1] as { proposedPartner: unknown }).proposedPartner).toBeNull();
+    });
+
     it('hides a DRAFT from another user but returns the caller’s OWN DRAFT (owner 2026-08-11)', async () => {
       // DRAFT is a WIP owned by its creator: the where-clause NOT guard excludes any DRAFT
       // whose submitter is not the caller, so an approver/manager queue never sees a foreign
@@ -4687,6 +4732,75 @@ describe('KycService', () => {
         { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100' },
         { live: { upiId: 'old@upi' } },
       );
+    });
+
+    // ── FIX 2 ("changed, not just vanished"): a CARRIED (locked) routing value that CHANGED on the
+    //    row-locked partner between draft and approval → 409 (the rail would route to an unreviewed
+    //    beneficiary: staged account + someone else's IFSC). ──
+    it('FIX 2: carried IFSC CHANGED between draft and approval (rail still complete) → 409, nothing written', async () => {
+      await expectPayoutChanged409(
+        { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123', payoutCarried: { ifscCode: 'HDFC0001' } },
+        {
+          live: { bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001', paymentDetailsStatus: 'NEEDS_RECAPTURE' },
+          // A self-capture re-wrote the bank rail with a DIFFERENT IFSC → still complete, but changed.
+          locked: { bankAccountNumber: '777888', ifscCode: 'ICIC0009', paymentDetailsStatus: 'UNVERIFIED' },
+          reKycFlags: { accountNumber: true },
+        },
+      );
+    });
+
+    it('FIX 2: carried IFSC UNCHANGED (case/space-normalized compare) → approves; payoutCarried never written to the partner', async () => {
+      const data = await approveWith(
+        { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123', payoutCarried: { ifscCode: ' hdfc0001 ' } },
+        { live: { bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001' }, reKycFlags: { accountNumber: true } },
+      );
+      expect(data).toMatchObject({ bankAccountNumber: '50100123', paymentMode: 'bank' });
+      expect('payoutCarried' in data).toBe(false);
+    });
+
+    it('FIX 2: LEGACY draft (no payoutCarried) whose locked IFSC changed → approves exactly as before', async () => {
+      const data = await approveWith(
+        { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123' },
+        {
+          live: { bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001' },
+          locked: { ifscCode: 'ICIC0009' },
+          reKycFlags: { accountNumber: true },
+        },
+      );
+      expect(data).toMatchObject({ bankAccountNumber: '50100123', paymentMode: 'bank' });
+    });
+
+    it('LOCK CONFLICT: a Postgres deadlock (40P01) on the approval row lock → the clean payout-changed 409', async () => {
+      seedReKycApprove({ payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi' }, { live: { upiId: 'old@upi' } });
+      mockTx.$queryRaw.mockReset();
+      mockTx.$queryRaw.mockRejectedValueOnce(
+        Object.assign(new Error('Raw query failed. Code: `40P01`. Message: `deadlock detected`'), {
+          code: 'P2010',
+          meta: { code: '40P01' },
+        }),
+      );
+      const err = await service.approve(gifsy, 's1').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as Error).message).toMatch(/payment details changed after this KYC was submitted/);
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+    });
+
+    it('LOCK CONFLICT: P2034 on the identity advisory lock → 409 (not a raw 500)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: true, upi: true }; // UPI identity lock taken
+      seedReKycApprove({ payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi' }, { live: { upiId: 'old@upi' } });
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      mockTx.$executeRaw.mockRejectedValueOnce(Object.assign(new Error('write conflict or a deadlock'), { code: 'P2034' }));
+      const err = await service.approve(gifsy, 's1').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ConflictException);
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+    });
+
+    it('LOCK ORDER: approval locks the partner row (FOR UPDATE) BEFORE the identity advisory locks', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: true, upi: true }; // UPI identity lock taken
+      await approveWith({ payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi' }, { live: { upiId: 'old@upi' } });
+      expect(mockTx.$executeRaw).toHaveBeenCalled();
+      const rowLockAt = mockTx.$queryRaw.mock.invocationCallOrder[0];
+      for (const at of mockTx.$executeRaw.mock.invocationCallOrder) expect(rowLockAt).toBeLessThan(at);
     });
 
     it('F1: GST-only re-KYC (new draft, no payout staged) on a BOTH-rails partner → upiId AND bank untouched', async () => {
@@ -6131,6 +6245,15 @@ describe('KycService', () => {
       expect(proposed.ifscCode ?? undefined).toBeUndefined();
       expect(proposed.paymentMode ?? undefined).toBeUndefined();
       expect('upiId' in proposed).toBe(false); // not presented as "will be removed"
+    });
+
+    it('FIX 2: getOne never presents the internal payoutCarried bookkeeping (a possibly hidden live value)', async () => {
+      const proposed = await getOneWith({
+        partner: livePartner({ bankAccountNumber: '111', ifscCode: 'HDFC0001' }, { accountNumber: true }),
+        proposedPartner: { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '999000', payoutCarried: { ifscCode: 'HDFC0001' } },
+      });
+      expect(proposed.bankAccountNumber).toBe('999000');
+      expect('payoutCarried' in proposed).toBe(false);
     });
 
     // R3 — the reviewer must SEE what they approve, even on an UNVERIFIED / NEEDS_RECAPTURE partner.

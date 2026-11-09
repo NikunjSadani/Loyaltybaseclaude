@@ -352,6 +352,75 @@ export function isPayoutRailFullyStaged(rail: PayoutRail, proposed: Record<strin
   return PAYOUT_ROUTING_FIELDS[rail].every((f) => filled(proposed[ROUTING_FIELD_PARTNER_KEY[f]]));
 }
 
+/**
+ * FIX 2 ("changed, not just vanished") — the proposedPartner key recording the routing values of the
+ * staged rail that were NOT rep-entered but CARRIED from the live partner (a LOCKED field completing the
+ * rail, e.g. account number staged + IFSC carried). INTERNAL bookkeeping only: never written to the
+ * partner (the apply writes an explicit key list) and stripped from every reviewer/rep-facing surface
+ * (effectiveProposedPayout / stripPayoutCarried) — it may hold a hidden, unverified live value.
+ */
+export const PAYOUT_CARRIED_KEY = 'payoutCarried';
+
+/** Live payout routing columns (ChannelPartner names). */
+export interface LivePayoutRouting {
+  upiId?: string | null;
+  bankAccountNumber?: string | null;
+  ifscCode?: string | null;
+}
+
+/**
+ * The routing values (ChannelPartner keys) of `rail` that the staged `proposal` does NOT carry itself
+ * and that therefore complete the rail from the LIVE partner at approval. Undefined when nothing is
+ * carried (every routing field staged, or the stored value is empty).
+ */
+export function carriedPayoutRouting(
+  rail: PayoutRail,
+  proposal: Record<string, unknown>,
+  stored: LivePayoutRouting | null | undefined,
+): Record<string, string> | undefined {
+  const carried: Record<string, string> = {};
+  for (const f of PAYOUT_ROUTING_FIELDS[rail]) {
+    const key = ROUTING_FIELD_PARTNER_KEY[f];
+    if (filled(proposal[key])) continue;
+    const v = (stored as Record<string, unknown> | null | undefined)?.[key];
+    if (typeof v === 'string' && filled(v)) carried[key] = v;
+  }
+  return Object.keys(carried).length > 0 ? carried : undefined;
+}
+
+/** Canonical compare form of a carried routing value (UPI lower, IFSC upper, account trimmed). */
+function canonicalRouting(key: string, v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const t = v.trim();
+  if (!t) return null;
+  if (key === 'upiId') return t.toLowerCase(); // == normalizeIdentityValue('upi')
+  if (key === 'ifscCode') return t.toUpperCase();
+  return t; // bankAccountNumber == normalizeIdentityValue('bank')
+}
+
+/**
+ * True when ANY routing value recorded as carried at draft time (proposal.payoutCarried) differs from
+ * the live (row-locked) partner's current value — the outlet's payout details CHANGED after the KYC
+ * was submitted, so the rail the reviewer approved can no longer be applied as seen. A legacy draft
+ * without the key → false (behaves as before).
+ */
+export function payoutCarriedChanged(proposal: Record<string, unknown>, live: LivePayoutRouting): boolean {
+  const carried = proposal[PAYOUT_CARRIED_KEY];
+  if (!carried || typeof carried !== 'object' || Array.isArray(carried)) return false;
+  return Object.entries(carried as Record<string, unknown>).some(
+    ([key, v]) => canonicalRouting(key, v) !== canonicalRouting(key, (live as Record<string, unknown>)[key]),
+  );
+}
+
+/** The proposal WITHOUT the internal payoutCarried bookkeeping (for every outward-facing surface). */
+export function stripPayoutCarried<T>(proposal: T): T {
+  if (!proposal || typeof proposal !== 'object' || Array.isArray(proposal)) return proposal;
+  if (!(PAYOUT_CARRIED_KEY in (proposal as Record<string, unknown>))) return proposal;
+  const { [PAYOUT_CARRIED_KEY]: _omit, ...rest } = proposal as Record<string, unknown>;
+  void _omit;
+  return rest as T;
+}
+
 export interface EffectiveProposedPayout {
   /** The proposal to apply/present — payout keys the rep could not edit (legacy drafts) removed. */
   proposal: Record<string, unknown>;
@@ -384,10 +453,12 @@ export interface EffectiveProposedPayout {
  *    pre-change write-back behaviour).
  */
 export function effectiveProposedPayout(
-  proposed: Record<string, unknown>,
+  stagedProposal: Record<string, unknown>,
   outletReKycFlags: unknown,
   livePartner?: Record<string, unknown> | null,
 ): EffectiveProposedPayout {
+  // FIX 2: the internal `payoutCarried` bookkeeping never reaches a presented/applied proposal.
+  const proposed = stripPayoutCarried(stagedProposal);
   // An explicit rail counts only when the rail is COMPLETE after approval (isCompletePayoutRail) —
   // an incomplete one sets nothing and therefore clears nothing. A re-KYC stages ONLY the editable
   // fields, so a LOCKED routing field (e.g. the stored IFSC when only the account number was

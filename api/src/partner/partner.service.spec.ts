@@ -32,12 +32,17 @@ const mockPrisma = {
   outletSalesRecord: { findMany: jest.fn() },
   kpiDef:            { findMany: jest.fn() },
   salesUserAssignment: { findMany: jest.fn() },
-  // capturePayoutDetails runs its uniqueness check + write inside an interactive tx; the tx
-  // client reuses the same channelPartner mock + a no-op advisory-lock ($executeRaw).
-  $transaction: jest.fn(async (fn: (tx: unknown) => unknown) =>
-    fn({ ...mockPrisma, $executeRaw: jest.fn() }),
-  ),
+  // capturePayoutDetails runs its partner row-lock (SELECT … FOR UPDATE via $queryRaw), uniqueness
+  // check + write inside an interactive tx; the tx client reuses the same mocks (shared so call ORDER
+  // across the row lock and the advisory identity locks ($executeRaw) is observable).
+  $queryRaw: jest.fn(),
+  $executeRaw: jest.fn(),
+  $transaction: jest.fn(async (fn: (tx: unknown) => unknown) => fn({ ...mockPrisma })),
 };
+
+// The ROW-LOCKED partner payout row the capture's SELECT … FOR UPDATE returns (primed by primePartner,
+// overridable per test to simulate a concurrent commit between the unlocked gate read and the lock).
+let lockedPartnerRow: Record<string, unknown> | null = null;
 
 // TenantSettingsService.getEffectiveSettings — capture reads salesApp.upiEnabled + uniquenessPolicy.
 const mockTenantSettings = {
@@ -99,6 +104,9 @@ describe('PartnerService', () => {
       uniquenessPolicy: { gst: true, phone: true, bank: true, upi: true },
     });
     mockPrisma.channelPartner.findMany.mockResolvedValue([]); // no uniqueness clash by default
+    lockedPartnerRow = null;
+    mockPrisma.$queryRaw.mockImplementation(async () => (lockedPartnerRow ? [lockedPartnerRow] : []));
+    mockPrisma.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn({ ...mockPrisma }));
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PartnerService,
@@ -1246,6 +1254,13 @@ describe('PartnerService', () => {
           outlets: outlet ? [outlet] : [],
           ...current,
         });
+      // The row-locked read returns the SAME values by default (no concurrent commit).
+      lockedPartnerRow = {
+        upiId: current.upiId ?? null,
+        bankAccountNumber: current.bankAccountNumber ?? null,
+        ifscCode: current.ifscCode ?? null,
+        paymentDetailsStatus: current.paymentDetailsStatus ?? null,
+      };
     };
 
     it('is forbidden when the tenant feature flag is OFF', async () => {
@@ -1429,6 +1444,75 @@ describe('PartnerService', () => {
         service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'new@upi' }),
       ).rejects.toThrow(/payout details changed/i);
       expect(row).toMatchObject({ paymentDetailsStatus: 'VERIFIED', bankAccountNumber: '50100123', ifscCode: 'HDFC0001' });
+    });
+
+    // ── DEADLOCK FIX: lock order = partner row FIRST, identity advisory locks SECOND (same as the
+    //    re-KYC approval, kyc.service applyBridgeOutcome). ──
+    it('LOCK ORDER: the partner row is locked (SELECT … FOR UPDATE) BEFORE any identity advisory lock and the write', async () => {
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      primePartner({ requiredPaymentType: 'ANY', parentId: null });
+      await service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi' });
+      expect(mockPrisma.$queryRaw).toHaveBeenCalledTimes(1);
+      const [strings, id] = mockPrisma.$queryRaw.mock.calls[0];
+      expect((strings as string[]).join('?')).toMatch(/FROM channel_partners WHERE id = \? FOR UPDATE/);
+      expect(id).toBe('cp1');
+      expect(mockPrisma.$executeRaw).toHaveBeenCalled(); // the UPI identity advisory lock
+      const rowLockAt = mockPrisma.$queryRaw.mock.invocationCallOrder[0];
+      for (const at of mockPrisma.$executeRaw.mock.invocationCallOrder) expect(rowLockAt).toBeLessThan(at);
+      expect(rowLockAt).toBeLessThan(mockPrisma.channelPartner.updateMany.mock.invocationCallOrder[0]);
+    });
+
+    it('re-runs the overwrite gate on the ROW-LOCKED partner: an approval VERIFIED a rail after the unlocked read → 400, no identity lock, nothing written', async () => {
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      // Unlocked read: NEEDS_RECAPTURE (re-capture allowed). Locked row: a concurrent approval committed.
+      primePartner(
+        { requiredPaymentType: 'ANY', parentId: null },
+        { bankAccountNumber: 'OLD123', ifscCode: 'OLD0001', paymentDetailsStatus: 'NEEDS_RECAPTURE' },
+      );
+      lockedPartnerRow = { upiId: null, bankAccountNumber: '50100123', ifscCode: 'HDFC0001', paymentDetailsStatus: 'VERIFIED' };
+      await expect(
+        service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'new@upi' }),
+      ).rejects.toThrow(/already on file/i);
+      expect(mockPrisma.$executeRaw).not.toHaveBeenCalled();
+      expect(mockPrisma.channelPartner.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('a lock-conflict abort (Prisma P2034) → clean 409, never a raw 500', async () => {
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      primePartner({ requiredPaymentType: 'ANY', parentId: null });
+      mockPrisma.$transaction.mockRejectedValueOnce(
+        Object.assign(new Error('Transaction failed due to a write conflict or a deadlock'), { code: 'P2034' }),
+      );
+      const err = await service
+        .capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi' })
+        .catch((e: unknown) => e);
+      expect((err as { getStatus?: () => number }).getStatus?.()).toBe(409);
+      expect((err as Error).message).toMatch(/payout details changed/i);
+    });
+
+    it('a Postgres deadlock (40P01) raised by the row lock → clean 409', async () => {
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      primePartner({ requiredPaymentType: 'ANY', parentId: null });
+      mockPrisma.$queryRaw.mockRejectedValueOnce(
+        Object.assign(new Error('Raw query failed. Code: `40P01`. Message: `deadlock detected`'), {
+          code: 'P2010',
+          meta: { code: '40P01', message: 'deadlock detected' },
+        }),
+      );
+      const err = await service
+        .capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi' })
+        .catch((e: unknown) => e);
+      expect((err as { getStatus?: () => number }).getStatus?.()).toBe(409);
+      expect(mockPrisma.channelPartner.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('a non-conflict DB error is NOT masked as 409', async () => {
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      primePartner({ requiredPaymentType: 'ANY', parentId: null });
+      mockPrisma.$queryRaw.mockRejectedValueOnce(Object.assign(new Error('connection reset'), { code: 'P1017' }));
+      await expect(
+        service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi' }),
+      ).rejects.toThrow('connection reset');
     });
 
     // ── VPA safeguards: confirm-entry for a MANUALLY typed UPI + capture-method provenance ──

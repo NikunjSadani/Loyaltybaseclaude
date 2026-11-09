@@ -22,6 +22,7 @@ import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import {
   acquireIdentityLocks,
   checkGroupUniqueness,
+  isLockConflictError,
   normalizeIdentityValue,
   resolveActivePartnerId,
   resolveGroupIdentity,
@@ -853,67 +854,95 @@ export class PartnerService {
     const bankAcct = mode === 'bank' ? normalizeIdentityValue('bank', dto.accountNumber) : null;
     const upi = mode === 'upi' ? normalizeIdentityValue('upi', dto.upiId) : null;
 
-    // 4. Atomic: advisory-lock the identity value(s) → re-check group-uniqueness → write. bank/UPI
-    //    have NO DB unique index, so this lock + check is their ONLY race guard (mirrors kyc.service).
-    await this.prisma.$transaction(async (tx) => {
-      await acquireIdentityLocks(tx, {
-        clientId: user.clientId,
-        details: { bankAccountNumber: bankAcct, upiId: upi },
-        policy: uniquenessPolicy,
-      });
-      const violation = await checkGroupUniqueness(tx, {
-        clientId: user.clientId,
-        ourParentId,
-        details: { bankAccountNumber: bankAcct, upiId: upi },
-        policy: uniquenessPolicy,
-        exceptPartnerId: partnerId,
-      });
-      if (violation) throw new BadRequestException(violation.message);
-
-      // F3 (race): the overwrite gate above ran on an UNLOCKED read. A re-KYC approval committing in
-      // between (kyc.service applyBridgeOutcome — it row-locks the partner and may write a rail +
-      // promote the status to VERIFIED) must WIN. So the write is CONDITIONED on exactly the status +
-      // routing values the gate read: if any changed, 0 rows match → 409, nothing is written. Under
-      // READ COMMITTED a concurrent locker makes this UPDATE wait and then re-evaluate the predicate
-      // against the committed row, so the check-and-write is atomic.
-      const { count } = await tx.channelPartner.updateMany({
-        where: {
-          id: partnerId,
+    // 4. Atomic: row-lock the partner → re-run the overwrite gate on the LOCKED row → advisory-lock the
+    //    identity value(s) → re-check group-uniqueness → conditional write. bank/UPI have NO DB unique
+    //    index, so the identity lock + check is their ONLY race guard (mirrors kyc.service).
+    //    LOCK ORDER (deadlock fix): the partner row FIRST, identity advisory locks SECOND — the SAME
+    //    order as the re-KYC approval (kyc.service applyBridgeOutcome: SELECT … FOR UPDATE on
+    //    channel_partners, then acquireIdentityLocks). The opposite order let a capture holding an
+    //    identity lock wait on the partner row an approval held while that approval waited on the
+    //    capture's identity lock → Postgres deadlock (40P01) → a raw 500.
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw<
+          Array<{
+            upiId: string | null;
+            bankAccountNumber: string | null;
+            ifscCode: string | null;
+            paymentDetailsStatus: string | null;
+          }>
+        >`SELECT "upiId", "bankAccountNumber", "ifscCode", "paymentDetailsStatus"::text AS "paymentDetailsStatus"
+          FROM channel_partners WHERE id = ${partnerId} FOR UPDATE`;
+        const locked = lockedRows?.[0];
+        if (!locked) throw new ForbiddenException('No operable outlet for this login.');
+        // The overwrite gate, re-run on the ROW-LOCKED values (the gate above read an unlocked snapshot;
+        // a re-KYC approval may have committed a VERIFIED rail in between). Same rule, same message.
+        const lockedHasBeneficiary = !!(locked.upiId || (locked.bankAccountNumber && locked.ifscCode));
+        if (lockedHasBeneficiary && locked.paymentDetailsStatus !== PaymentDetailsStatus.NEEDS_RECAPTURE) {
+          throw new BadRequestException(
+            'Payout details are already on file for this outlet and cannot be changed here.',
+          );
+        }
+        await acquireIdentityLocks(tx, {
           clientId: user.clientId,
-          paymentDetailsStatus: partner.paymentDetailsStatus,
-          upiId: partner.upiId ?? null,
-          bankAccountNumber: partner.bankAccountNumber ?? null,
-          ifscCode: partner.ifscCode ?? null,
-        },
-        data:
-          mode === 'bank'
-            ? {
-                paymentMode: 'bank',
-                bankName: dto.bankName!.trim(),
-                bankAccountHolder: dto.accountHolderName?.trim() || null,
-                bankAccountNumber: bankAcct,
-                ifscCode: dto.ifscCode!.trim().toUpperCase(),
-                upiId: null, // clear the other rail so a payout can't misroute to a stale UPI
-                upiCaptureMethod: null,
-                payoutChequeFileKey: dto.chequeFileKey!,
-                paymentDetailsStatus: PaymentDetailsStatus.UNVERIFIED,
-              }
-            : {
-                paymentMode: 'upi',
-                upiId: upi,
-                upiCaptureMethod,
-                bankName: null,
-                bankAccountHolder: null,
-                bankAccountNumber: null,
-                ifscCode: null,
-                payoutChequeFileKey: null,
-                paymentDetailsStatus: PaymentDetailsStatus.UNVERIFIED,
-              },
+          details: { bankAccountNumber: bankAcct, upiId: upi },
+          policy: uniquenessPolicy,
+        });
+        const violation = await checkGroupUniqueness(tx, {
+          clientId: user.clientId,
+          ourParentId,
+          details: { bankAccountNumber: bankAcct, upiId: upi },
+          policy: uniquenessPolicy,
+          exceptPartnerId: partnerId,
+        });
+        if (violation) throw new BadRequestException(violation.message);
+
+        // F3 (race, belt-and-braces): the row is now locked above, but the write stays CONDITIONED on
+        // exactly the status + routing values the UNLOCKED gate read (and that the UPI capture-method
+        // prior was derived from): if any changed before the lock, 0 rows match → 409, nothing written.
+        const { count } = await tx.channelPartner.updateMany({
+          where: {
+            id: partnerId,
+            clientId: user.clientId,
+            paymentDetailsStatus: partner.paymentDetailsStatus,
+            upiId: partner.upiId ?? null,
+            bankAccountNumber: partner.bankAccountNumber ?? null,
+            ifscCode: partner.ifscCode ?? null,
+          },
+          data:
+            mode === 'bank'
+              ? {
+                  paymentMode: 'bank',
+                  bankName: dto.bankName!.trim(),
+                  bankAccountHolder: dto.accountHolderName?.trim() || null,
+                  bankAccountNumber: bankAcct,
+                  ifscCode: dto.ifscCode!.trim().toUpperCase(),
+                  upiId: null, // clear the other rail so a payout can't misroute to a stale UPI
+                  upiCaptureMethod: null,
+                  payoutChequeFileKey: dto.chequeFileKey!,
+                  paymentDetailsStatus: PaymentDetailsStatus.UNVERIFIED,
+                }
+              : {
+                  paymentMode: 'upi',
+                  upiId: upi,
+                  upiCaptureMethod,
+                  bankName: null,
+                  bankAccountHolder: null,
+                  bankAccountNumber: null,
+                  ifscCode: null,
+                  payoutChequeFileKey: null,
+                  paymentDetailsStatus: PaymentDetailsStatus.UNVERIFIED,
+                },
+        });
+        if (count === 0) {
+          throw new ConflictException('Payout details changed — please refresh');
+        }
       });
-      if (count === 0) {
-        throw new ConflictException('Payout details changed — please refresh');
-      }
-    });
+    } catch (e) {
+      // A lock-conflict abort (P2034 / Postgres 40P01 deadlock / 40001) → the same clean 409, never a 500.
+      if (isLockConflictError(e)) throw new ConflictException('Payout details changed — please refresh');
+      throw e;
+    }
 
     return {
       ok: true,

@@ -73,6 +73,7 @@ import {
 import {
   checkGroupUniqueness,
   acquireIdentityLocks,
+  isLockConflictError,
   normalizeIdentityValue,
   resolveGroupPan,
   resolveGroupIdentity,
@@ -87,8 +88,12 @@ import {
   PAYOUT_RAIL_FIELDS,
   PAYOUT_ROUTING_FIELDS,
   asUpiCaptureMethod,
+  carriedPayoutRouting,
   carriesBothPayoutRails,
   effectiveProposedPayout,
+  payoutCarriedChanged,
+  PAYOUT_CARRIED_KEY,
+  stripPayoutCarried,
   incompletePayoutRailMessage,
   payoutFieldEditability,
   payoutRailFor,
@@ -163,6 +168,10 @@ const KYC_EVENT_ROUTING: Record<string, { eventKey?: EventKey; subject: string }
   KYC_RE_UPLOAD_REQUIRED: { subject: 'KYC re-upload required' },
   KYC_RE_KYC_REQUIRED: { subject: 'Re-KYC required' },
 };
+
+/** 409 refusing a re-KYC approval whose payout details changed after submission (F2 / FIX 2 / lock conflict). */
+const PAYOUT_CHANGED_AFTER_SUBMIT_MESSAGE =
+  "The outlet's payment details changed after this KYC was submitted — reject it and submit a new re-KYC";
 
 /** Outcome for a single submission in a bulk-verify commit. */
 export interface BulkVerifySubmissionResult {
@@ -2141,6 +2150,14 @@ export class KycService {
           // the live partner at approval. Absent (payout fields locked / rail empty → undefined, dropped
           // by JSON) → no payout keys are staged and approval writes/clears nothing payout-related.
           payoutRail,
+          // FIX 2: the routing values of the staged rail CARRIED from the live partner (a LOCKED field
+          // completing the rail — never rep-entered). Approval refuses (409) when any of them differs on
+          // the row-locked partner ("changed, not just vanished"). Internal bookkeeping: never written
+          // to the partner, stripped from every reviewer/rep surface (stripPayoutCarried). Absent when
+          // no rail is staged or every routing field is rep-entered (dropped by JSON as undefined).
+          [PAYOUT_CARRIED_KEY]: payoutRail
+            ? carriedPayoutRouting(payoutRail, partnerDetails as Record<string, unknown>, storedPayout)
+            : undefined,
           addressLine1: text.address as string,
           city: text.city as string,
           state: text.state as string,
@@ -2779,7 +2796,8 @@ export class KycService {
         !isKycInFlight(s.status) && s.partner?.outlets?.some((o) => isReKycPending(o.reKycFlags))
           ? ('RE_KYC_REQUIRED' as (typeof s)['status'])
           : s.status;
-      return { ...rest, status, gifsyEnteredAt };
+      // FIX 2: never ship the internal payoutCarried bookkeeping (it may hold a hidden live value).
+      return { ...rest, proposedPartner: stripPayoutCarried(rest.proposedPartner), status, gifsyEnteredAt };
     });
 
     return {
@@ -3289,7 +3307,8 @@ export class KycService {
       return result;
     });
 
-    return { submission: updated };
+    // FIX 2: never ship the internal payoutCarried bookkeeping.
+    return { submission: { ...updated, proposedPartner: stripPayoutCarried(updated.proposedPartner) } };
   }
 
   // ─── POST /v1/kyc/:id/first-approve ──────────────────────────────────────────
@@ -4841,18 +4860,38 @@ export class KycService {
         // completeness, the other-rail clear, the VERIFIED rule) uses these values. The lock is held to
         // commit, so the write below cannot interleave with a capture (whose own write is conditioned on
         // the values its gate read — partner.service capturePayoutDetails, F3).
-        const lockedRows = await tx.$queryRaw<
-          Array<{
-            upiId: string | null;
-            bankAccountNumber: string | null;
-            ifscCode: string | null;
-            paymentDetailsStatus: string | null;
-          }>
-        >`SELECT "upiId", "bankAccountNumber", "ifscCode", "paymentDetailsStatus"::text AS "paymentDetailsStatus"
-          FROM channel_partners WHERE id = ${submission.partnerId} FOR UPDATE`;
+        // A lock-conflict abort (P2034 / Postgres 40P01 deadlock / 40001) on the payout lock steps
+        // below (partner row lock, identity advisory locks, the partner write) → the SAME clean 409 as
+        // the payout-changed refusal, never a raw 500. Lock order = partner row FIRST, identity locks
+        // SECOND (partner.service capturePayoutDetails takes them in the same order).
+        const lockStep = <T>(p: Promise<T>): Promise<T> =>
+          p.catch((e: unknown) => {
+            if (isLockConflictError(e)) throw new ConflictException(PAYOUT_CHANGED_AFTER_SUBMIT_MESSAGE);
+            throw e;
+          });
+        const lockedRows = await lockStep(
+          tx.$queryRaw<
+            Array<{
+              upiId: string | null;
+              bankAccountNumber: string | null;
+              ifscCode: string | null;
+              paymentDetailsStatus: string | null;
+            }>
+          >`SELECT "upiId", "bankAccountNumber", "ifscCode", "paymentDetailsStatus"::text AS "paymentDetailsStatus"
+          FROM channel_partners WHERE id = ${submission.partnerId} FOR UPDATE`,
+        );
         const lockedPayout = lockedRows?.[0];
         if (!lockedPayout) throw new NotFoundException('Outlet not found');
         const rawProposed = submission.proposedPartner as Record<string, unknown>;
+        // FIX 2 ("changed, not just vanished"): a routing value the draft CARRIED from the live partner
+        // (a LOCKED field completing the staged rail — recorded as proposal.payoutCarried at create)
+        // that now DIFFERS on the locked row means the outlet's payout details changed after this KYC
+        // was submitted (e.g. a self-capture replaced the IFSC). Applying the staged account over the
+        // new IFSC would route money to a beneficiary nobody reviewed → refuse the WHOLE approval (409,
+        // tx rolls back). Legacy drafts without payoutCarried → no check (unchanged behaviour).
+        if (payoutCarriedChanged(rawProposed, lockedPayout)) {
+          throw new ConflictException(PAYOUT_CHANGED_AFTER_SUBMIT_MESSAGE);
+        }
         const payout = effectiveProposedPayout(rawProposed, submission.partner.outlets[0]?.reKycFlags, {
           ...(submission.partner as unknown as Record<string, unknown>),
           upiId: lockedPayout.upiId,
@@ -4865,9 +4904,7 @@ export class KycService {
         // that can no longer be applied as seen. Refuse the WHOLE approval (409 → tx rolls back: status
         // flip, identity, address — nothing is approved). The bulk Excel commit surfaces it as the row's error.
         if (resolveProposedPayoutRail(rawProposed) != null && payout.rail == null) {
-          throw new ConflictException(
-            "The outlet's payment details changed after this KYC was submitted — reject it and submit a new re-KYC",
-          );
+          throw new ConflictException(PAYOUT_CHANGED_AFTER_SUBMIT_MESSAGE);
         }
         const proposed = payout.proposal;
         const payoutRail = payout.rail;
@@ -4926,7 +4963,7 @@ export class KycService {
           bankAccountNumber: payoutRail === 'upi' ? null : (asStr(proposed.bankAccountNumber) ?? null),
           upiId: payoutRail === 'bank' ? null : (asStr(proposed.upiId) ?? null),
         };
-        await acquireIdentityLocks(tx, { clientId, details: identityDetails, policy: uniquenessPolicy });
+        await lockStep(acquireIdentityLocks(tx, { clientId, details: identityDetails, policy: uniquenessPolicy }));
         const violation = await checkGroupUniqueness(tx, {
           clientId,
           // Departure → validate as STANDALONE (effectiveParentId=null) so the changed PAN is allowed
@@ -4963,7 +5000,7 @@ export class KycService {
           payoutRail != null &&
           isPayoutRailFullyStaged(payoutRail, rawProposed) &&
           (liveStatus === PaymentDetailsStatus.NEEDS_RECAPTURE || liveStatus === PaymentDetailsStatus.UNVERIFIED);
-        await tx.channelPartner.update({
+        await lockStep(tx.channelPartner.update({
           where: { id: submission.partnerId },
           data: {
             businessName: asStr(proposed.businessName),
@@ -4987,7 +5024,7 @@ export class KycService {
             ...payout.clears,
             ...(verifiesPayout ? { paymentDetailsStatus: PaymentDetailsStatus.VERIFIED } : {}),
           },
-        });
+        }));
 
         // (iv) APPLY the staged OUTLET ADDRESS (stage-at-approval, same model as the identity/payout
         // fields above). The submitted address lives on the Outlet, not the ChannelPartner; a re-KYC
