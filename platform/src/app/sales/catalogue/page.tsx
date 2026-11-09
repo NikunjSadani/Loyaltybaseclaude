@@ -11,6 +11,8 @@ import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { type GiftCatalogueItem, GIFT_CATALOGUE } from '@/lib/gifts';
 import { api } from '@/lib/api-client';
+import { isDeliveryDefaults, type DeliveryDefaults } from '@/lib/partner-identity';
+import { applyAddressPrefill, type AddressForm, type TouchedFields } from '@/lib/address-prefill';
 
 type GiftItem = GiftCatalogueItem;
 
@@ -23,6 +25,11 @@ interface Outlet {
   name: string;
   mobile: string;
   balance: number;
+  /** THIS outlet's address on file (GET /sales/outlets, already junk-cleaned server-side) —
+   *  pre-fills the physical-gift delivery form. Null when nothing usable is on file. */
+  deliveryDefaults: DeliveryDefaults | null;
+  /** Outlet owner's name — seeds the editable "Recipient name". '' when unknown. */
+  ownerName: string;
 }
 
 /* ─── Flow types ─────────────────────────────────────────────────────────────── */
@@ -40,12 +47,33 @@ interface RedeemState {
   otpResendCountdown: number;
   /** ₹ amount for a FREE_AMOUNT (variable) voucher/bank-transfer redemption; '' otherwise. */
   amount: string;
+  /** PHYSICAL_GIFT delivery address — ONLY what the rep typed (+ `addrTouched` marks every edited
+   *  field). The shown address is DERIVED via applyAddressPrefill from the target outlet's
+   *  deliveryDefaults, so the pre-fill never overwrites typing or a deliberate clear. */
+  addrTyped: AddressForm;
+  addrTouched: TouchedFields;
+  /** Recipient name as typed; until touched, the shown value is the outlet's ownerName. */
+  recipientName: string;
+  recipientTouched: boolean;
 }
+
+const EMPTY_ADDRESS: AddressForm = { line1: '', city: '', state: '', pincode: '' };
 
 const INITIAL_REDEEM: RedeemState = {
   outlet: null, orderId: '', otpSending: false, otpSent: false, otp: '',
   verifying: false, error: '', otpResendCountdown: 0, amount: '',
+  addrTyped: EMPTY_ADDRESS, addrTouched: {}, recipientName: '', recipientTouched: false,
 };
+
+/** Reset the per-outlet delivery inputs (a different outlet → its own address pre-fill). */
+const RESET_DELIVERY: Pick<RedeemState, 'addrTyped' | 'addrTouched' | 'recipientName' | 'recipientTouched'> = {
+  addrTyped: EMPTY_ADDRESS, addrTouched: {}, recipientName: '', recipientTouched: false,
+};
+
+/** A physical gift ships to an address — the backend REQUIRES deliveryAddress for this mode. */
+function isPhysicalGift(g: GiftItem | null): boolean {
+  return !!g && g.redemptionMode === 'PHYSICAL_GIFT';
+}
 
 /** A FREE_AMOUNT (variable) reward: pointsCost 0 AND both band bounds set — the redeemer supplies
  *  the ₹ amount (converted to points server-side). Mirrors the backend isFreeAmount predicate. */
@@ -127,6 +155,8 @@ function CatalogueInner() {
             name:      o.name,
             mobile:    o.mobile ?? '',
             balance:   o.balance ?? 0,
+            deliveryDefaults: isDeliveryDefaults(o.deliveryDefaults) ? o.deliveryDefaults : null,
+            ownerName: typeof o.ownerName === 'string' ? o.ownerName : '',
           }));
           setOutlets(mapped);
           if (preselectedId) {
@@ -234,9 +264,33 @@ function CatalogueInner() {
   /* ── Redemption handlers ── */
 
   const selectOutlet = (outlet: Outlet) => {
-    setRedeem((r) => ({ ...r, outlet }));
+    // A different outlet → its own address pre-fill (never carry typing across outlets).
+    setRedeem((r) => (r.outlet?.id === outlet.id ? { ...r, outlet } : { ...r, outlet, ...RESET_DELIVERY }));
     setSheetStep('confirm');
   };
+
+  /* ── Physical-gift delivery address (PLATFORM-WIDE, mirrors the partner redeem sheet) ── */
+
+  // Shown address = what the rep typed + the TARGET outlet's address on file for every empty,
+  // untouched field (applyAddressPrefill — shared with the partner flow). Derived, no effect.
+  const deliveryAddress = useMemo(
+    () => applyAddressPrefill(redeem.addrTyped, redeem.addrTouched, redeem.outlet?.deliveryDefaults),
+    [redeem.addrTyped, redeem.addrTouched, redeem.outlet?.deliveryDefaults],
+  );
+  const recipientName = redeem.recipientTouched ? redeem.recipientName : (redeem.outlet?.ownerName ?? '');
+  const outletDefaults = redeem.outlet?.deliveryDefaults ?? null;
+  // Hint only while at least one untouched field still holds its pre-filled value.
+  const showPrefillHint = !!outletDefaults && (Object.keys(EMPTY_ADDRESS) as (keyof AddressForm)[]).some(
+    (k) => !redeem.addrTouched[k] && !!outletDefaults[k] && deliveryAddress[k] === outletDefaults[k],
+  );
+
+  const setAddressField = (key: keyof AddressForm, value: string) =>
+    setRedeem((r) => ({
+      ...r,
+      error: '',
+      addrTouched: r.addrTouched[key] ? r.addrTouched : { ...r.addrTouched, [key]: true },
+      addrTyped: { ...r.addrTyped, [key]: value },
+    }));
 
   // Sales-assisted redeem (B1): create the PENDING order; the backend sends the
   // OTP to the OUTLET's registered mobile. The rep enters the code the outlet shares.
@@ -253,6 +307,26 @@ function CatalogueInner() {
       setRedeem((r) => ({ ...r, error: 'Enter the amount (₹) to redeem for this outlet.' }));
       return;
     }
+    // PHYSICAL_GIFT: the backend REQUIRES a full deliveryAddress (else 400). Same rules as the
+    // partner redeem sheet; the phone is the outlet's registered mobile (as the partner's is).
+    let delivery: Record<string, string> | null = null;
+    if (isPhysicalGift(selectedGift)) {
+      const a = {
+        line1: deliveryAddress.line1.trim(), city: deliveryAddress.city.trim(),
+        state: deliveryAddress.state.trim(), pincode: deliveryAddress.pincode.trim(),
+      };
+      const mobile = redeem.outlet.mobile.replace(/\D/g, '').slice(-10);
+      let err = '';
+      if (!recipientName.trim()) err = 'Please enter the recipient name';
+      else if (!a.line1 || !a.city || !a.pincode) err = 'Please fill in all required address fields';
+      else if (!/^[1-9]\d{5}$/.test(a.pincode)) err = 'Enter a valid 6-digit pincode';
+      else if (!/^\d{10}$/.test(mobile)) err = 'This outlet has no valid 10-digit mobile on file.';
+      if (err) { setRedeem((r) => ({ ...r, error: err })); return; }
+      delivery = {
+        name: recipientName.trim(), mobile,
+        address: a.line1, city: a.city, state: a.state || a.city, pincode: a.pincode,
+      };
+    }
     setRedeem((r) => ({ ...r, otpSending: true, error: '' }));
     const res = await api.post<{ orderId: string; orderNumber: string }>(
       '/api/rewards/redeem-for-outlet',
@@ -260,6 +334,7 @@ function CatalogueInner() {
         rewardId: selectedGift.id,
         targetPartnerId: redeem.outlet.partnerId,
         ...(freeAmount ? { amount: amountNum } : {}),
+        ...(delivery ? { deliveryAddress: delivery } : {}),
       },
     );
     if (res.success && res.data?.orderId) {
@@ -639,6 +714,51 @@ function CatalogueInner() {
                         <div key={r.label} className="flex items-center justify-between">
                           <span className="text-xs text-gray-500">{r.label}</span>
                           <span className={`text-sm ${r.color}`}>{r.value} pts</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* PHYSICAL_GIFT → delivery address, pre-filled from THIS outlet's address on file. */}
+                  {isPhysicalGift(selectedGift) && (
+                    <div className="space-y-3" data-testid="delivery-address-form">
+                      <div>
+                        <p className="text-sm font-semibold text-gray-900">Delivery address</p>
+                        <p className="text-xs text-gray-500">Who this is for and where to deliver it</p>
+                        {showPrefillHint && (
+                          <p id="addr-prefill-hint" className="text-xs text-gray-500">From the outlet address</p>
+                        )}
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium text-gray-600 block mb-1" htmlFor="recipient-name">Recipient name *</label>
+                        <input
+                          id="recipient-name"
+                          className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+                          placeholder="Full name for the parcel"
+                          value={recipientName}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            setRedeem((r) => ({ ...r, error: '', recipientTouched: true, recipientName: v }));
+                          }}
+                        />
+                      </div>
+                      {([
+                        { key: 'line1',   label: 'Street address *', placeholder: 'Shop no., street name' },
+                        { key: 'city',    label: 'City *',           placeholder: 'City' },
+                        { key: 'state',   label: 'State',            placeholder: 'State' },
+                        { key: 'pincode', label: 'Pincode *',        placeholder: '400001' },
+                      ] as { key: keyof AddressForm; label: string; placeholder: string }[]).map((f) => (
+                        <div key={f.key}>
+                          <label className="text-xs font-medium text-gray-600 block mb-1" htmlFor={`addr-${f.key}`}>{f.label}</label>
+                          <input
+                            id={`addr-${f.key}`}
+                            aria-describedby={showPrefillHint ? 'addr-prefill-hint' : undefined}
+                            inputMode={f.key === 'pincode' ? 'numeric' : undefined}
+                            className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+                            placeholder={f.placeholder}
+                            value={deliveryAddress[f.key]}
+                            onChange={(e) => setAddressField(f.key, e.target.value)}
+                          />
                         </div>
                       ))}
                     </div>

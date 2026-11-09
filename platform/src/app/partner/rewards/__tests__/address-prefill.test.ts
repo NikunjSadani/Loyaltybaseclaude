@@ -3,7 +3,7 @@
  * function (PLATFORM-WIDE, outlet address only).
  */
 import { describe, it, expect } from 'vitest';
-import { applyAddressPrefill, type AddressForm } from '../address-prefill';
+import { applyAddressPrefill, type AddressForm } from '@/lib/address-prefill';
 
 const EMPTY: AddressForm = { line1: '', city: '', state: '', pincode: '' };
 const FULL = { line1: '12 MG Road', city: 'Pune', state: 'Maharashtra', pincode: '411001' };

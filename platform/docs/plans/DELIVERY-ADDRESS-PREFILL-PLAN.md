@@ -11,7 +11,8 @@
 > **Status:** BUILT on a worktree branch (2026-11-06), NOT pushed / NOT on staging yet. Owner-approved PLATFORM-WIDE.
 > Shipped: `api/src/partner/delivery-defaults.helper.ts` (pure selector), `deliveryDefaults` on `GET /partner/me`
 > (read from the existing primary-outlet query, no extra query), `usePartnerIdentity().deliveryDefaults`,
-> `platform/src/app/partner/rewards/address-prefill.ts` (`applyAddressPrefill`), and the redeem-sheet wiring (the shown
+> `platform/src/lib/address-prefill.ts` (`applyAddressPrefill`; moved from `app/partner/rewards/` on 2026-11-07 so the
+> sales catalogue shares it), and the redeem-sheet wiring (the shown
 > address is DERIVED from what the partner typed + the outlet defaults, so no effect and no overwrite).
 > Pending: independent review, push to `develop`, staging runtime-verify (steps below, minus the flag / last-order steps). See **OWNER DECISIONS (taken)** at the
 > bottom, which **override** the task text wherever they differ: always ON for every tenant incl. Deoleo (no flag,
@@ -85,9 +86,14 @@ login can *act as* a login-less same-group sibling through the picker (`x-active
 (`POST /rewards/redeem`) is charged to the **active** partner, so the pre-fill must be the **active partner's primary
 outlet**, which `/partner/me` already resolves. A parent (`isParent`) has no outlet and no wallet, so it never redeems.
 
-**Adjacent finding (out of scope, report only).** The sales-assisted redeem (`platform/src/app/sales/catalogue/page.tsx`
-→ `POST /rewards/redeem-for-outlet`) **never sends a `deliveryAddress`**, so a rep redeeming a *physical* gift for an outlet
-gets a 400. This is a separate bug. Flag it to the owner; don't fix it here.
+**Adjacent finding — FIXED 2026-11-07 (branch `fix/sales-gift-redeem-address`, owner-approved platform-wide).** The
+sales-assisted redeem (`platform/src/app/sales/catalogue/page.tsx` → `POST /rewards/redeem-for-outlet`) sent no
+`deliveryAddress`, so a rep redeeming a *physical* gift got a 400. Now: `GET /sales/outlets` (`buildOutlets`, already
+tenant + downline scoped) carries each outlet's `deliveryDefaults` (same `pickDeliveryDefaults`) + `ownerName`; the
+catalogue's confirm step shows the address form for `PHYSICAL_GIFT` only, pre-filled via the shared
+`@/lib/address-prefill`, hint "From the outlet address", phone = the outlet's mobile. No document upload (the partner
+flow has none either). Vouchers/cash unchanged. **Still open:** VENDOR-sourced physical gifts need `consent: true`,
+which the sales flow does not send (owner decision: who consents on the outlet's behalf).
 
 ### File landmarks (search for the quoted text; line numbers are approximate)
 
@@ -374,7 +380,7 @@ That is a comment-only edit in `api/prisma/schema.prisma`, with **no** migration
 - Pincode → city/state lookup service; server-side address validation beyond today's rules.
 - Any schema change or migration; changing `RedeemDto` or `GET /rewards/orders`.
 - Backfilling Bajaj outlet addresses (a separate, owner-gated data task: D6).
-- The sales-assisted physical-redeem address gap (noted above; separate ticket).
+- The sales-assisted physical-redeem address gap (noted above; fixed separately on 2026-11-07).
 
 ---
 
@@ -395,7 +401,8 @@ That is a comment-only edit in `api/prisma/schema.prisma`, with **no** migration
 - **D7 = A.** Never write an edited address back to the outlet.
 - **Hard rule:** the pre-fill NEVER overwrites anything the partner has typed (or deliberately cleared), including when
   `/partner/me` resolves after they started typing.
-- Out of scope (unchanged): the sales-assisted physical-redeem address gap (`platform/src/app/sales/catalogue`).
+- Out of scope here: the sales-assisted physical-redeem address gap (`platform/src/app/sales/catalogue`) — since fixed
+  separately (2026-11-07, see the "Adjacent finding" note in §0).
 - **As built:** Task 0, Task 3 (flag) and every last-order element were skipped per the above. `BAJAJ-CUSTOMIZATIONS.md`
   is untouched (no flag) and the `addressLine1` schema comment is untouched (Task 0 not run). Staging verify = steps 2, 3,
   5 and 7 of "How to verify on staging", plus: a Deoleo staging partner now ALSO sees its outlet address pre-filled

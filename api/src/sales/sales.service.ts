@@ -22,6 +22,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 // pseudo-KPI's "current window" MUST use the same formula the capture/notify services use.
 import { currentWindowKey } from '../visibility/visibility-window.helper';
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
+import { pickDeliveryDefaults } from '../partner/delivery-defaults.helper';
 
 /**
  * Relation filter that FULLY hides admin-PARKED outlets from sales reps: an outlet whose
@@ -2108,6 +2109,8 @@ export class SalesService {
               select: {
                 id: true,
                 phone: true,
+                // Sales-assisted physical-gift redeem: seeds the editable "Recipient name".
+                ownerName: true,
                 // Prior-KYC fields — surfaced so the new-KYC wizard can pre-fill
                 // when a senior/admin rejected the submission and the rep re-enters.
                 businessName: true,
@@ -2336,6 +2339,13 @@ export class SalesService {
             existingKyc,
             // Owner-group pre-fill (approved parent only) — undefined when ungrouped/unapproved.
             parentPrefill,
+            // Sales-assisted physical-gift redeem (PLATFORM-WIDE, owner-approved): THIS outlet's
+            // address on file pre-fills the rep's delivery form — the same pickDeliveryDefaults as
+            // /partner/me (junk placeholders + invalid pincodes → null; null when nothing usable).
+            // Scoped like every field here: only outlets in the caller's tenant + downline.
+            deliveryDefaults: pickDeliveryDefaults(outlet),
+            // Seeds the editable "Recipient name" (the outlet's own owner, else the partner's).
+            ownerName: outlet.ownerName?.trim() || partner?.ownerName?.trim() || null,
             targetPct: 0,
           };
         })

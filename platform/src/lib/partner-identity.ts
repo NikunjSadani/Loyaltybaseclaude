@@ -51,7 +51,7 @@ export interface DeliveryDefaults {
   pincode: string | null;
 }
 
-function isDeliveryDefaults(v: unknown): v is DeliveryDefaults {
+export function isDeliveryDefaults(v: unknown): v is DeliveryDefaults {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
   const o = v as Record<string, unknown>;
   return (['line1', 'city', 'state', 'pincode'] as const).every(

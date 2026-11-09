@@ -980,6 +980,93 @@ describe('SalesService', () => {
       expect(prefill.gstCertInheritable).toBe(false);
       expect(prefill.chequeInheritable).toBe(false);
     });
+
+    // ── Sales-assisted physical-gift redeem: delivery-address pre-fill (PLATFORM-WIDE) ──
+    // The rep's redeem form pre-fills from the TARGET outlet's address on file — the same
+    // pickDeliveryDefaults (junk-placeholder cleaning + valid-pincode rule) as /partner/me.
+    const addrOutlet = (over: Record<string, unknown>) => ({
+      salesUserId: 'caller-su',
+      outlet: {
+        id: 'o1', outletCode: 'OC1', name: 'Shop One', phone: '9830011252',
+        addressLine1: '12 MG Road', addressLine2: null, city: 'Pune', district: 'West',
+        state: 'Maharashtra', pincode: '411001', ownerName: null,
+        outletType: { code: 'BSC' },
+        partner: {
+          id: 'cp1', phone: '9830011252', ownerName: 'Asha Patil',
+          wallets: [{ redeemablePoints: 5000 }],
+          kycSubmissions: [{ id: 'k1', status: 'APPROVED', createdAt: new Date('2024-05-01T00:00:00.000Z') }],
+        },
+        ...over,
+      },
+    });
+
+    it('DA1: surfaces deliveryDefaults from the outlet address on file + the owner name for the recipient', async () => {
+      primeCaller();
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([addrOutlet({ addressLine2: 'Near Bus Stand' })]);
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0].deliveryDefaults).toEqual({
+        line1: '12 MG Road, Near Bus Stand', city: 'Pune', state: 'Maharashtra', pincode: '411001',
+      });
+      expect(res.outlets[0].ownerName).toBe('Asha Patil');
+      // Read from the EXISTING assignment query (no extra outlet query) — partner.ownerName selected.
+      const include = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].include;
+      expect(include.outlet.include.partner.select.ownerName).toBe(true);
+      expect(mockPrisma.outlet.findMany).not.toHaveBeenCalled();
+    });
+
+    it('DA2: junk placeholders (-, NA, 0) and an invalid pincode become null — never pre-filled', async () => {
+      primeCaller();
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        addrOutlet({ addressLine1: '-', addressLine2: 'NA', pincode: '0', city: 'Pune', state: 'n/a' }),
+      ]);
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0].deliveryDefaults).toEqual({ line1: null, city: 'Pune', state: null, pincode: null });
+    });
+
+    it('DA3: nothing usable on file → deliveryDefaults null; the outlet\'s own ownerName wins over the partner\'s', async () => {
+      primeCaller();
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        addrOutlet({ addressLine1: null, city: ' ', state: '.', pincode: null, ownerName: 'Outlet Owner' }),
+      ]);
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0].deliveryDefaults).toBeNull();
+      expect(res.outlets[0].ownerName).toBe('Outlet Owner');
+    });
+
+    it('DA4 (scoping): a rep never receives the address of an outlet outside their downline', async () => {
+      // Tree: caller-su → isr1 (caller's downline); other-mgr → isr2 (a SIBLING branch).
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su', subordinates: [] });
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'caller-su', reportingToId: null, userId: 'u-c' },
+        { id: 'isr1', reportingToId: 'caller-su', userId: 'u-1' },
+        { id: 'other-mgr', reportingToId: null, userId: 'u-o' },
+        { id: 'isr2', reportingToId: 'other-mgr', userId: 'u-2' },
+      ]);
+      // Fake DB: honour the salesUserId scope the service asks for.
+      const rows = [
+        { ...addrOutlet({ id: 'o-mine', addressLine1: 'Mine Street' }), salesUserId: 'isr1' },
+        { ...addrOutlet({ id: 'o-foreign', addressLine1: 'Foreign Street' }), salesUserId: 'isr2' },
+      ];
+      mockPrisma.salesUserAssignment.findMany.mockImplementationOnce(({ where }: { where: { salesUserId: { in: string[] } } }) =>
+        Promise.resolve(rows.filter((r) => where.salesUserId.in.includes(r.salesUserId))),
+      );
+
+      const res = await service.getMyOutlets(caller);
+      const scope = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where.salesUserId.in;
+      expect([...scope].sort()).toEqual(['caller-su', 'isr1']);
+      expect(res.outlets.map((o: { id: string }) => o.id)).toEqual(['o-mine']);
+      expect(JSON.stringify(res)).not.toContain('Foreign Street');
+    });
+
+    it('DA5 (tenant scoping): a cross-tenant / non-sales caller gets no outlets and no addresses', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      const res = await service.getMyOutlets(caller);
+      expect(res).toEqual({ outlets: [], members: [] });
+      expect(mockPrisma.salesUser.findFirst.mock.calls[0][0].where).toMatchObject({
+        userId: 'user-mgr', user: { clientId: 'deoleo' },
+      });
+      expect(mockPrisma.salesUserAssignment.findMany).not.toHaveBeenCalled();
+    });
   });
 
   // ─── getMe (real sales identity for the header employee ID + profile) ──────────

@@ -19,7 +19,7 @@ import { formatPoints, maskAccountNumber } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import { api } from '@/lib/api-client';
 import { usePartnerIdentity, type DeliveryDefaults } from '@/lib/partner-identity';
-import { applyAddressPrefill, type AddressForm, type TouchedFields } from './address-prefill';
+import { applyAddressPrefill, type AddressForm, type TouchedFields } from '@/lib/address-prefill';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { useTenantFeatures } from '@/lib/tenant-features';
 import { BankOrUpiSection, type PaymentMode, type UpiCaptureMethod } from '@/components/bank-or-upi-section';
