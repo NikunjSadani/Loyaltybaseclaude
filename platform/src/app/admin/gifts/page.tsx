@@ -1259,7 +1259,11 @@ interface TransitionDraft {
   notes: string;
 }
 
-function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned: () => void }) {
+/** Fields of the transition response's raw order that the queue row displays. */
+type OrderPatch = Pick<OrderItem, 'id'> &
+  Partial<Pick<OrderItem, 'status' | 'voucherCode' | 'voucherProvider' | 'trackingNumber' | 'trackingUrl' | 'updatedAt'>>;
+
+function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned: (updated: OrderPatch | null) => void }) {
   const options = NEXT_STATUS[order.status] ?? [];
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<TransitionDraft>({
@@ -1283,12 +1287,13 @@ function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned:
     if (draft.trackingUrl.trim())     body.trackingUrl = draft.trackingUrl.trim();
     if (draft.notes.trim())           body.notes = draft.notes.trim();
     try {
-      await apiJson(`/api/rewards/orders/${order.id}/transition`, {
+      // Backend returns { order: <updated row> } (or { order, skipped } when already there).
+      const res = await apiJson<{ order?: OrderPatch } | null>(`/api/rewards/orders/${order.id}/transition`, {
         method: 'POST',
         body: JSON.stringify(body),
       });
       setOpen(false);
-      onTransitioned();
+      onTransitioned(res?.order?.id ? res.order : null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Transition failed');
     } finally {
@@ -1298,7 +1303,7 @@ function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned:
 
   return (
     <>
-      <tr className="hover:bg-gray-50/50">
+      <tr className="hover:bg-gray-50/50 focus:outline-none focus:bg-gray-50" data-order-id={order.id} tabIndex={-1}>
         <td className="px-4 py-3">
           <p className="font-mono text-xs text-gray-600">{order.orderNumber ?? order.id.slice(-8)}</p>
         </td>
@@ -1422,6 +1427,8 @@ const ORDER_STATUS_FILTERS = ['all', 'PENDING', 'CONFIRMED', 'PROCESSING', 'DISP
 
 /** Orders fetched per "Load more" step (and the minimum window on a refresh). */
 const ORDERS_PAGE_SIZE = 100;
+/** Largest window a Refresh re-fetches in one request; deeper → reset to the first page. */
+const REFRESH_WINDOW_MAX = 500;
 
 interface OrdersPage { orders: OrderItem[]; pagination?: Pagination; nextCursor?: string | null }
 
@@ -1461,24 +1468,39 @@ function FulfilmentTab() {
   const [uploadErr, setUploadErr] = useState('');
   const [result, setResult] = useState<FulfilmentUploadResult | null>(null);
 
+  // Latest filter + loaded rows, read at CALL time by async callers (bulk upload, a row's
+  // transition) — their closures may predate a filter change / load-more.
+  const statusRef = useRef(statusFilter);
+  statusRef.current = statusFilter;
+  const ordersRef = useRef<OrderItem[]>(orders);
+  ordersRef.current = orders;
+  // Short note when a refresh had to shrink the window back to the first page.
+  const [refreshNote, setRefreshNote] = useState('');
+  // Focus target after a load-more: the first newly-appended row (keyboard/screen-reader users
+  // otherwise lose their place when the "Load more" button unmounts on the last page).
+  const focusOrderIdRef = useRef<string | null>(null);
+  const tableRef = useRef<HTMLTableSectionElement>(null);
+
   /**
-   * (Re)load the queue from the top. `keep` = how many rows are currently loaded: a refresh
-   * (Refresh button / after a transition / after a bulk upload) re-fetches the SAME window in one
-   * request so an admin who has paged deep keeps their place, with fresh statuses + total + cursor.
-   * A filter change passes nothing → back to one page.
+   * (Re)load the queue from the top with `limit` rows (one page on a filter change; the current
+   * window on a refresh). On FAILURE the previous view's rows/total/cursor are CLEARED — they
+   * may belong to another filter, and "Load more" must never continue a stale cursor.
    */
-  const loadOrders = useCallback(async (status: string, keep = 0) => {
+  const loadOrders = useCallback(async (status: string, limit = ORDERS_PAGE_SIZE) => {
     const gen = ++genRef.current;
     // Any in-flight load-more is now stale (its result is discarded) — release its spinner.
     setLoading(true); setError(''); setLoadMoreErr(''); setLoadingMore(false);
     try {
-      const data = await apiJson<OrdersPage>(ordersUrl(status, Math.max(ORDERS_PAGE_SIZE, keep)));
+      const data = await apiJson<OrdersPage>(ordersUrl(status, limit));
       if (gen !== genRef.current) return;
       setOrders(data.orders ?? []);
       setTotal(data.pagination?.total ?? null);
       setNextCursor(data.nextCursor ?? null);
     } catch (e) {
       if (gen !== genRef.current) return;
+      setOrders([]);
+      setTotal(null);
+      setNextCursor(null);
       setError(e instanceof Error ? e.message : 'Failed to load orders');
     } finally {
       if (gen === genRef.current) setLoading(false);
@@ -1492,9 +1514,12 @@ function FulfilmentTab() {
     try {
       const data = await apiJson<OrdersPage>(ordersUrl(statusFilter, ORDERS_PAGE_SIZE, nextCursor));
       if (gen !== genRef.current) return;
+      const seen = new Set(ordersRef.current.map((o) => o.id));
+      const fresh = (data.orders ?? []).filter((o) => !seen.has(o.id));
+      focusOrderIdRef.current = fresh[0]?.id ?? null;
       setOrders((prev) => {
-        const seen = new Set(prev.map((o) => o.id));
-        return [...prev, ...(data.orders ?? []).filter((o) => !seen.has(o.id))];
+        const have = new Set(prev.map((o) => o.id));
+        return [...prev, ...fresh.filter((o) => !have.has(o.id))];
       });
       setTotal(data.pagination?.total ?? null);
       setNextCursor(data.nextCursor ?? null);
@@ -1506,10 +1531,59 @@ function FulfilmentTab() {
     }
   };
 
-  // Filter change → back to the first page. Also invalidates any in-flight load-more.
-  useEffect(() => { loadOrders(statusFilter); }, [loadOrders, statusFilter]);
+  // Move focus to the first appended row once it renders.
+  useEffect(() => {
+    const id = focusOrderIdRef.current;
+    if (!id) return;
+    focusOrderIdRef.current = null;
+    const rows = tableRef.current?.querySelectorAll<HTMLElement>('tr[data-order-id]') ?? [];
+    Array.from(rows).find((r) => r.dataset.orderId === id)?.focus();
+  }, [orders]);
 
-  const refreshOrders = () => loadOrders(statusFilter, orders.length);
+  // Filter change → back to the first page. Also invalidates any in-flight load-more.
+  useEffect(() => { setRefreshNote(''); loadOrders(statusFilter); }, [loadOrders, statusFilter]);
+
+  /**
+   * Refresh (Refresh button / after a bulk upload): re-fetch the CURRENT filter's loaded window in
+   * one request, capped at REFRESH_WINDOW_MAX rows. Deeper than that → back to the first page (and
+   * say so) rather than one very large request. Reads filter + window from refs (call-time values).
+   */
+  const refreshOrders = useCallback(async () => {
+    const loaded = ordersRef.current.length;
+    if (loaded > REFRESH_WINDOW_MAX) {
+      setRefreshNote(`Reloaded the first ${ORDERS_PAGE_SIZE} orders — use "Load more" to page further.`);
+      await loadOrders(statusRef.current, ORDERS_PAGE_SIZE);
+    } else {
+      setRefreshNote('');
+      await loadOrders(statusRef.current, Math.max(ORDERS_PAGE_SIZE, loaded));
+    }
+  }, [loadOrders]);
+
+  /**
+   * A single-order transition: patch that row IN PLACE from the transition response (no window
+   * reload). If the row no longer matches the active status filter it leaves the view and the
+   * server total drops by one. No usable response → fall back to a refresh.
+   */
+  const applyOrderUpdate = useCallback((updated: OrderPatch | null) => {
+    if (!updated) { void refreshOrders(); return; }
+    const present = ordersRef.current.some((o) => o.id === updated.id);
+    if (!present) return; // the view changed since the transition started
+    const filter = statusRef.current;
+    const leaves = filter !== 'all' && updated.status != null && updated.status !== filter;
+    const patch: Partial<OrderItem> = {};
+    for (const k of ['status', 'voucherCode', 'voucherProvider', 'trackingNumber', 'trackingUrl', 'updatedAt'] as const) {
+      if (updated[k] !== undefined) (patch as Record<string, unknown>)[k] = updated[k];
+    }
+    setOrders((prev) => (leaves
+      ? prev.filter((o) => o.id !== updated.id)
+      : prev.map((o) => (o.id === updated.id ? { ...o, ...patch } : o))));
+    if (leaves) setTotal((t) => (t == null ? t : Math.max(0, t - 1)));
+  }, [refreshOrders]);
+
+  // Header count: the SERVER total, but never fewer than the rows actually on screen.
+  const shownTotal = total == null ? null : Math.max(total, orders.length);
+  // Everything below is loaded (no cursor) yet the server counts more → newer orders arrived above.
+  const hasNewAbove = !loading && !nextCursor && total != null && total > orders.length;
 
   async function downloadTemplate() {
     setDownloading(true); setDownloadErr('');
@@ -1665,12 +1739,20 @@ function FulfilmentTab() {
           <div className="flex items-center gap-2">
             <Package className="h-4 w-4 text-[var(--brand-primary)]" />
             <h2 className="text-sm font-bold text-gray-900">Redemption orders</h2>
-            {total != null && (
-              <span className="text-xs text-gray-400" data-testid="orders-count">
-                {orders.length < total
-                  ? `(showing ${fmtPts(orders.length)} of ${fmtPts(total)})`
-                  : `(${fmtPts(total)})`}
-              </span>
+            <span className="text-xs text-gray-400" data-testid="orders-count" aria-live="polite">
+              {shownTotal == null
+                ? ''
+                : orders.length < shownTotal
+                  ? `(showing ${fmtPts(orders.length)} of ${fmtPts(shownTotal)})`
+                  : `(${fmtPts(shownTotal)})`}
+            </span>
+            {hasNewAbove && (
+              <button
+                onClick={() => { void refreshOrders(); }}
+                className="text-[11px] font-semibold text-[var(--brand-primary)] hover:underline"
+              >
+                New orders — Refresh
+              </button>
             )}
           </div>
           <div className="flex items-center gap-2">
@@ -1684,7 +1766,7 @@ function FulfilmentTab() {
               ))}
             </select>
             <button
-              onClick={refreshOrders}
+              onClick={() => { void refreshOrders(); }}
               className="p-2 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-50"
               aria-label="Refresh orders"
             >
@@ -1694,9 +1776,18 @@ function FulfilmentTab() {
         </div>
 
         {error && (
-          <div className="m-4 flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2 text-sm text-red-700">
-            <XCircle className="w-4 h-4 shrink-0" /> {error}
+          <div className="m-4 flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2 text-sm text-red-700" role="alert">
+            <XCircle className="w-4 h-4 shrink-0" /> <span className="flex-1">{error}</span>
+            <button
+              onClick={() => { void loadOrders(statusRef.current); }}
+              className="px-2.5 py-1 text-xs font-semibold rounded-lg border border-red-200 bg-white hover:bg-red-50"
+            >
+              Retry
+            </button>
           </div>
+        )}
+        {refreshNote && !error && (
+          <p className="mx-4 mt-3 text-xs text-gray-500" role="status">{refreshNote}</p>
         )}
 
         {loading ? (
@@ -1704,7 +1795,7 @@ function FulfilmentTab() {
             <div className="w-6 h-6 border-2 border-gray-200 border-t-[var(--brand-primary)] rounded-full animate-spin" />
           </div>
         ) : orders.length === 0 ? (
-          <p className="text-sm text-gray-400 text-center py-12">No orders in this view.</p>
+          error ? null : <p className="text-sm text-gray-400 text-center py-12">No orders in this view.</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -1719,9 +1810,11 @@ function FulfilmentTab() {
                   <th className="px-4 py-3 font-medium text-right">Action</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-50">
+              <tbody ref={tableRef} className="divide-y divide-gray-50">
+                {/* Keyed by id+status so an in-place status change remounts the row and its
+                    "Advance to" draft re-initialises from the NEW status's options. */}
                 {orders.map((o) => (
-                  <OrderRow key={o.id} order={o} onTransitioned={refreshOrders} />
+                  <OrderRow key={`${o.id}:${o.status}`} order={o} onTransitioned={applyOrderUpdate} />
                 ))}
               </tbody>
             </table>
@@ -1739,6 +1832,7 @@ function FulfilmentTab() {
               <button
                 onClick={loadMore}
                 disabled={loadingMore}
+                aria-busy={loadingMore}
                 className="px-4 py-2 text-xs font-semibold rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
               >
                 {loadingMore ? 'Loading…' : loadMoreErr ? 'Retry load more' : 'Load more orders'}
