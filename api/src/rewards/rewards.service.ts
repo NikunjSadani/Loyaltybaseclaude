@@ -26,6 +26,7 @@ import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
 import { isSalesRedeemEnabledForPartner } from '../common/sales-redeem-eligibility';
 import { isGifsyOperator, tenantScope } from '../common/tenant-scope';
 import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
+import { NOT_PARKED_OUTLET } from '../sales/sales.service';
 import { generateTenantOrderNumber } from './order-number.helper';
 import {
   supersedePendingOrders,
@@ -989,8 +990,8 @@ export class RewardsService {
   //
   // Scoping shape is the PROVEN sales-on-behalf guard from schemes.service.ts:
   //   caller SalesUser in tenant → target ChannelPartner in tenant → active
-  //   salesUserAssignment(salesUserId ∈ caller's downline + partnerId/outletId +
-  //   unassignedAt null).
+  //   salesUserAssignment(salesUserId ∈ caller's downline + outletId of a live,
+  //   non-PARKED outlet of this partner + unassignedAt null) — the outlet-list scope.
   // ───────────────────────────────────────────────────────────────────────────
 
   /**
@@ -1022,28 +1023,24 @@ export class RewardsService {
     //    he can see; a leaf rep's subtree is just himself (unchanged). There is no
     //    role-based tenant-wide branch here, mirroring getMyOutlets (MIS_USER is not
     //    a sales role and is already rejected at the controller @Roles gate).
-    //    Assignments may be keyed by partnerId (admin re-assign / seed) OR by
-    //    outletId (the master outlet-upload path, where partnerId is null at upload
-    //    time — the partner is attached later at KYC and not backfilled). Accept
-    //    EITHER so the guard matches real production assignments.
+    //    F5 — the ASSIGNMENT must match the list row-for-row (SalesService.buildOutlets):
+    //    an OUTLET-keyed assignment (outletId non-null) whose outlet belongs to this
+    //    partner, is not deleted and is NOT admin-PARKED (the SAME NOT_PARKED_OUTLET
+    //    filter the list uses). A partnerId-only assignment (outletId null — legacy /
+    //    seed shape; both live assignment writers key on outletId) never appears in the
+    //    list, so it no longer authorizes; nor does a PARKED outlet the rep cannot see.
+    //    Same rule for reps and managers.
     const edges = await this.prisma.salesUser.findMany({
       where: { user: { clientId: user.clientId }, deletedAt: null },
       select: { id: true, reportingToId: true },
     });
     const subtreeIds = [...descendantSalesUserIds(callerSalesUser.id, edges)];
-    const partnerOutlets = await this.prisma.outlet.findMany({
-      where: { partnerId: targetPartnerId, deletedAt: null },
-      select: { id: true },
-    });
-    const outletIds = partnerOutlets.map((o) => o.id);
     const assignment = await this.prisma.salesUserAssignment.findFirst({
       where: {
         salesUserId: { in: subtreeIds },
         unassignedAt: null,
-        OR: [
-          { partnerId: targetPartnerId },
-          ...(outletIds.length ? [{ outletId: { in: outletIds } }] : []),
-        ],
+        outletId: { not: null },
+        outlet: { partnerId: targetPartnerId, deletedAt: null, ...NOT_PARKED_OUTLET },
       },
       select: { id: true },
     });

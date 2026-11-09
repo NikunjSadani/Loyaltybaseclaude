@@ -92,6 +92,8 @@ import {
   incompletePayoutRailMessage,
   payoutFieldEditability,
   payoutRailFor,
+  isPayoutRailFullyStaged,
+  resolveProposedPayoutRail,
   resolveReKycPayout,
   resolveUpiCaptureMethod,
 } from '../common/payout-rail.helper';
@@ -4831,11 +4833,42 @@ export class KycService {
         //  • NO payoutRail: nothing inferred, nothing cleared. A LEGACY draft's staged payout keys are
         //    kept only where the outlet's re-KYC flags (outlets[0].reKycFlags — still set until this
         //    approval clears them) say the rep could edit them; no field flags → unchanged write-back.
-        const payout = effectiveProposedPayout(
-          submission.proposedPartner as Record<string, unknown>,
-          submission.partner.outlets[0]?.reKycFlags,
-          submission.partner as unknown as Record<string, unknown>,
-        );
+        //
+        // F2 (race): never decide from the UNLOCKED snapshot `submission.partner` (loaded before this
+        // point — a concurrent redemption self-capture can rewrite the payout columns / status in
+        // between). Row-lock the partner FOR UPDATE inside this approval tx and read the payout routing
+        // columns + paymentDetailsStatus FROM THE LOCKED ROW; every payout decision below (rail
+        // completeness, the other-rail clear, the VERIFIED rule) uses these values. The lock is held to
+        // commit, so the write below cannot interleave with a capture (whose own write is conditioned on
+        // the values its gate read — partner.service capturePayoutDetails, F3).
+        const lockedRows = await tx.$queryRaw<
+          Array<{
+            upiId: string | null;
+            bankAccountNumber: string | null;
+            ifscCode: string | null;
+            paymentDetailsStatus: string | null;
+          }>
+        >`SELECT "upiId", "bankAccountNumber", "ifscCode", "paymentDetailsStatus"::text AS "paymentDetailsStatus"
+          FROM channel_partners WHERE id = ${submission.partnerId} FOR UPDATE`;
+        const lockedPayout = lockedRows?.[0];
+        if (!lockedPayout) throw new NotFoundException('Outlet not found');
+        const rawProposed = submission.proposedPartner as Record<string, unknown>;
+        const payout = effectiveProposedPayout(rawProposed, submission.partner.outlets[0]?.reKycFlags, {
+          ...(submission.partner as unknown as Record<string, unknown>),
+          upiId: lockedPayout.upiId,
+          bankAccountNumber: lockedPayout.bankAccountNumber,
+          ifscCode: lockedPayout.ifscCode,
+        });
+        // F2: a staged explicit rail that is INCOMPLETE over the LOCKED live partner means the outlet's
+        // payout details changed after this KYC was submitted (e.g. a locked IFSC vanished via a
+        // self-capture). Never silently drop it (the old FIX-B path) — the reviewer approved something
+        // that can no longer be applied as seen. Refuse the WHOLE approval (409 → tx rolls back: status
+        // flip, identity, address — nothing is approved). The bulk Excel commit surfaces it as the row's error.
+        if (resolveProposedPayoutRail(rawProposed) != null && payout.rail == null) {
+          throw new ConflictException(
+            "The outlet's payment details changed after this KYC was submitted — reject it and submit a new re-KYC",
+          );
+        }
         const proposed = payout.proposal;
         const payoutRail = payout.rail;
         const asStr = (v: unknown): string | undefined =>
@@ -4921,9 +4954,14 @@ export class KycService {
         // would let the partner's redemption self-capture (partner.service capturePayoutDetails gate)
         // overwrite reviewer-approved details. Never touched otherwise — no rail written (incl. an
         // incomplete rail, payout-locked or legacy drafts) or already VERIFIED → status unchanged.
-        const liveStatus = submission.partner.paymentDetailsStatus;
+        // F1: ONLY when EVERY routing field of the rail is in the STAGED proposal (rep-entered, hence
+        // visible to the reviewer). A rail completed from a LOCKED live value (e.g. account number
+        // staged, IFSC carried from the partner) is still written, but its approval does not verify the
+        // beneficiary → status unchanged. The status is the LOCKED row's (F2), never the snapshot's.
+        const liveStatus = lockedPayout.paymentDetailsStatus;
         const verifiesPayout =
           payoutRail != null &&
+          isPayoutRailFullyStaged(payoutRail, rawProposed) &&
           (liveStatus === PaymentDetailsStatus.NEEDS_RECAPTURE || liveStatus === PaymentDetailsStatus.UNVERIFIED);
         await tx.channelPartner.update({
           where: { id: submission.partnerId },

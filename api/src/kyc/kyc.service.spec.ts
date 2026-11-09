@@ -60,6 +60,9 @@ const mockTx = {
   // $executeRaw is the advisory-lock primitive acquireIdentityLocks issues inside create()'s
   // tx (partner-child owner groups) BEFORE the uniqueness check. A no-op mock here.
   $executeRaw: jest.fn(),
+  // F2: applyBridgeOutcome row-locks the partner (SELECT … FOR UPDATE) and reads the payout columns +
+  // status from the LOCKED row. Primed per test (seedReKycApprove mirrors the live partner).
+  $queryRaw: jest.fn(),
 };
 
 const mockPrisma = {
@@ -4416,6 +4419,10 @@ describe('KycService', () => {
         // VPA safeguard tests: the outlet's re-KYC flags + the LIVE partner payout columns.
         reKycFlags?: Record<string, boolean> | null;
         live?: Record<string, unknown>;
+        // F2: the ROW-LOCKED partner's payout columns/status read inside the approval tx. Defaults to
+        // the snapshot (`live`); a test overrides it to simulate a concurrent capture committing between
+        // the reviewer's view (snapshot) and the approval's row lock.
+        locked?: Record<string, unknown>;
       } = {},
     ) => {
       const partner = {
@@ -4429,6 +4436,15 @@ describe('KycService', () => {
         ...(opts.live ?? {}),
         outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, parentId: null, reKycFlags: opts.reKycFlags ?? null }],
       };
+      const lockedSrc = { ...partner, ...(opts.locked ?? {}) } as Record<string, unknown>;
+      mockTx.$queryRaw.mockResolvedValueOnce([
+        {
+          upiId: lockedSrc.upiId ?? null,
+          bankAccountNumber: lockedSrc.bankAccountNumber ?? null,
+          ifscCode: lockedSrc.ifscCode ?? null,
+          paymentDetailsStatus: lockedSrc.paymentDetailsStatus ?? 'VERIFIED',
+        },
+      ]);
       const subRow = {
         id: 's1', userId: 'user1', status: 'PENDING_GIFSY', partnerId: 'p1',
         proposedPartner: proposed, user: { name: 'n', phone: 'p' }, partner,
@@ -4543,15 +4559,45 @@ describe('KycService', () => {
       }
     });
 
-    it('FIX A: NEEDS_RECAPTURE partner + approved BANK re-KYC (IFSC locked, from live) → VERIFIED', async () => {
+    it('F1: NEEDS_RECAPTURE partner + BANK re-KYC with the IFSC LOCKED (completed from live) → rail written, status NOT promoted', async () => {
+      for (const status of ['UNVERIFIED', 'NEEDS_RECAPTURE']) {
+        jest.clearAllMocks();
+        const data = await approveWith(
+          { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123' },
+          {
+            live: { upiId: 'old@upi', bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001', paymentDetailsStatus: status },
+            reKycFlags: { accountNumber: true },
+          },
+        );
+        // The rail IS applied (complete merged over the locked IFSC) and the other rail cleared…
+        expect(data).toMatchObject({ bankAccountNumber: '50100123', paymentMode: 'bank', upiId: null });
+        // …but the reviewer never saw the IFSC as part of the proposal → not a verification.
+        expect('paymentDetailsStatus' in data).toBe(false);
+      }
+    });
+
+    it('F1: BANK re-KYC with BOTH routing fields STAGED (rep-entered) on a NEEDS_RECAPTURE partner → VERIFIED', async () => {
       const data = await approveWith(
-        { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123' },
+        { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123', ifscCode: 'HDFC0002' },
         {
           live: { bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001', paymentDetailsStatus: 'NEEDS_RECAPTURE' },
-          reKycFlags: { accountNumber: true },
+          reKycFlags: { accountNumber: true, ifscCode: true },
         },
       );
-      expect(data).toMatchObject({ bankAccountNumber: '50100123', paymentMode: 'bank', paymentDetailsStatus: 'VERIFIED' });
+      expect(data).toMatchObject({ bankAccountNumber: '50100123', ifscCode: 'HDFC0002', paymentDetailsStatus: 'VERIFIED' });
+    });
+
+    it('F2: the VERIFIED rule reads the ROW-LOCKED status, not the snapshot (snapshot NEEDS_RECAPTURE, locked VERIFIED → no status write)', async () => {
+      const data = await approveWith(
+        { payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi', upiCaptureMethod: 'QR' },
+        { live: { upiId: 'old@upi', paymentDetailsStatus: 'NEEDS_RECAPTURE' }, locked: { paymentDetailsStatus: 'VERIFIED' } },
+      );
+      expect(data.upiId).toBe('new@upi');
+      expect('paymentDetailsStatus' in data).toBe(false);
+      // The lock is a SELECT … FOR UPDATE on channel_partners for THIS partner.
+      const [strings, ...values] = mockTx.$queryRaw.mock.calls[0];
+      expect((strings as string[]).join('?')).toMatch(/FROM channel_partners WHERE id = \? FOR UPDATE/);
+      expect(values).toEqual(['p1']);
     });
 
     it('FIX A: an already-VERIFIED partner is never re-written (status key absent)', async () => {
@@ -4584,33 +4630,63 @@ describe('KycService', () => {
       expect('paymentDetailsStatus' in data).toBe(false); // …but it never verifies
     });
 
-    it('FIX A: an INCOMPLETE staged rail (locked IFSC vanished) on a NEEDS_RECAPTURE partner → status unchanged', async () => {
+    /** F2: seed an approval whose staged explicit rail is INCOMPLETE over the LOCKED row → expect a 409, nothing written. */
+    const expectPayoutChanged409 = async (proposed: Record<string, unknown>, opts: Parameters<typeof seedReKycApprove>[1]) => {
+      seedReKycApprove(proposed, opts);
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'p1' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      const err = await service.approve(gifsy, 's1').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as Error).message).toBe(
+        "The outlet's payment details changed after this KYC was submitted — reject it and submit a new re-KYC",
+      );
+      // Nothing of the re-KYC is applied (the tx — incl. the status flip — rolls back on the throw):
+      // no partner write (identity / payout / status), no address write, no activation, no notify.
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+      expect(mockTx.outlet.updateMany).not.toHaveBeenCalled();
+      expect(mockTx.wallet.create).not.toHaveBeenCalled();
+      expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+    };
+
+    it('F2: a concurrent capture between the reviewer view and approval made the staged rail incomplete → 409, nothing written', async () => {
+      // Reviewer saw: bank partner (account OLD123 + IFSC HDFC0001), staged new account (IFSC locked).
+      // Before the approval locked the row, the partner self-captured a UPI (bank rail nulled).
+      await expectPayoutChanged409(
+        { payoutRail: 'bank', paymentMode: 'bank', bankName: 'HDFC', bankAccountNumber: '50100123', addressLine1: 'New Addr' },
+        {
+          live: { bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001', paymentDetailsStatus: 'NEEDS_RECAPTURE' },
+          locked: { upiId: 'self@upi', bankAccountNumber: null, ifscCode: null, paymentDetailsStatus: 'UNVERIFIED' },
+          reKycFlags: { accountNumber: true, bankName: true },
+        },
+      );
+    });
+
+    it('F2: the snapshot alone (no change) still decides nothing — locked row complete → approval proceeds', async () => {
+      // Control for the test above: same staged proposal, the locked row still carries the IFSC → applied.
       const data = await approveWith(
         { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123' },
-        { live: { upiId: 'old@upi', ifscCode: null, paymentDetailsStatus: 'NEEDS_RECAPTURE' }, reKycFlags: { accountNumber: true } },
+        {
+          live: { bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001' },
+          reKycFlags: { accountNumber: true },
+        },
       );
-      expect('paymentDetailsStatus' in data).toBe(false);
+      expect(data).toMatchObject({ bankAccountNumber: '50100123', paymentMode: 'bank' });
     });
 
-    it('FIX B (M3): staged bank rail INCOMPLETE after merge (locked IFSC vanished) → no account / IFSC / paymentMode written, UPI kept', async () => {
-      const data = await approveWith(
+    it('F2 (replaces FIX B silent drop): staged bank rail INCOMPLETE after merge (locked IFSC vanished) → 409, nothing written', async () => {
+      await expectPayoutChanged409(
         { payoutRail: 'bank', paymentMode: 'bank', bankName: 'HDFC', bankAccountNumber: '50100123' },
-        { live: { upiId: 'old@upi', ifscCode: null }, reKycFlags: { accountNumber: true, bankName: true } },
+        { live: { upiId: 'old@upi', ifscCode: null, paymentDetailsStatus: 'NEEDS_RECAPTURE' }, reKycFlags: { accountNumber: true, bankName: true } },
       );
-      expect(data.bankAccountNumber).toBeUndefined();
-      expect(data.ifscCode).toBeUndefined();
-      expect(data.paymentMode).toBeUndefined();
-      expect(data.upiId).toBeUndefined(); // nothing cleared either
-      expect(data.bankName).toBe('HDFC'); // non-routing field still applies
     });
 
-    it('R4a: a staged payoutRail=bank WITHOUT an IFSC is incomplete → clears nothing (UPI kept)', async () => {
-      const data = await approveWith(
+    it('R4a/F2: a staged payoutRail=bank WITHOUT an IFSC anywhere → 409 (never a half rail, UPI kept)', async () => {
+      await expectPayoutChanged409(
         { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100' },
         { live: { upiId: 'old@upi' } },
       );
-      expect(data.upiId).toBeUndefined();
-      expect(data.upiCaptureMethod).toBeUndefined();
     });
 
     it('F1: GST-only re-KYC (new draft, no payout staged) on a BOTH-rails partner → upiId AND bank untouched', async () => {
@@ -4784,6 +4860,8 @@ describe('KycService', () => {
       mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 7 });
       mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
       mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      // F2: the row-locked partner payout read (no payout columns live here).
+      mockTx.$queryRaw.mockResolvedValueOnce([{ upiId: null, bankAccountNumber: null, ifscCode: null, paymentDetailsStatus: 'VERIFIED' }]);
       // resolveGroupPan's parent PAN read is now findFirst (FIX 5); resolveGroupClassification also
       // reads findFirst (parent → no classification here → no lock). Route by id → group PAN.
       mockTx.channelPartner.findFirst.mockImplementation(async (args: any) =>
@@ -4888,6 +4966,8 @@ describe('KycService', () => {
       mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 7 });
       mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
       mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      // F2: the row-locked partner payout read (no payout columns live here).
+      mockTx.$queryRaw.mockResolvedValueOnce([{ upiId: null, bankAccountNumber: null, ifscCode: null, paymentDetailsStatus: 'VERIFIED' }]);
       mockTx.channelPartner.findMany.mockResolvedValue([]); // standalone uniqueness → clean
       // resolveGroupPan's parent PAN read is now findFirst (FIX 5); route by id → group PAN.
       mockTx.channelPartner.findFirst.mockImplementation(async (args: any) =>

@@ -2066,14 +2066,20 @@ describe('RewardsService', () => {
       await expect(
         service.redeemForOutlet(sales, { rewardId: 'r1', targetPartnerId: 'cp-out' }),
       ).rejects.toBeInstanceOf(ForbiddenException);
-      // Authorizes by partnerId OR the partner's outletIds (production assignments
-      // key on outletId; seed/admin-reassign key on partnerId).
+      // F5: authorizes EXACTLY the outlet-list row shape (SalesService.buildOutlets) — an
+      // OUTLET-keyed assignment whose outlet belongs to this partner, is not deleted and is
+      // not admin-PARKED (null-safe NOT_PARKED_OUTLET OR-wrap). No partnerId-only branch.
       const where = mockPrisma.salesUserAssignment.findFirst.mock.calls[0][0].where;
-      expect(where).toMatchObject({ salesUserId: { in: ['su1'] }, unassignedAt: null });
-      expect(where.OR).toEqual([
-        { partnerId: 'cp-out' },
-        { outletId: { in: ['out-1'] } },
-      ]);
+      expect(where).toEqual({
+        salesUserId: { in: ['su1'] },
+        unassignedAt: null,
+        outletId: { not: null },
+        outlet: {
+          partnerId: 'cp-out',
+          deletedAt: null,
+          OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }],
+        },
+      });
     });
   });
 
@@ -2611,6 +2617,7 @@ describe('RewardsService', () => {
     ];
     type Asg = { salesUserId: string; partnerId: string | null; outletId: string | null; unassignedAt: Date | null };
     let assignments: Asg[];
+    let outlets: Record<string, { partnerId: string; deletedAt: Date | null; kycIntent: string | null }>;
 
     const jwt = (salesUserId: string, role = 'SALES_ASM'): JwtPayload => ({
       sub: `user-${salesUserId}`, role, clientId: 'deoleo', phone: '9990000000', name: '',
@@ -2652,17 +2659,33 @@ describe('RewardsService', () => {
         // The in-tx TOCTOU re-check looks up by id only (no clientId) — honour clientId when given.
         where.id === 'cp-out' && (where.clientId === undefined || where.clientId === 'deoleo') ? outletPartner : null,
       );
-      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'out-1' }]);
-      // Evaluate the guard's real where-clause against the assignment fixture.
+      // Outlet fixture (the relation the guard filters through): out-1 belongs to cp-out.
+      outlets = { 'out-1': { partnerId: 'cp-out', deletedAt: null, kycIntent: null } };
+      // Evaluate the guard's real where-clause against the assignment + outlet fixtures, with
+      // Prisma semantics (a relation filter on a null outletId never matches; `{ not: X }` on a
+      // NULL column is false — hence the OR-wrap with `{ kycIntent: null }`).
       mockPrisma.salesUserAssignment.findFirst.mockImplementation(async ({ where }: any) => {
         const inIds: string[] = where.salesUserId?.in ?? [where.salesUserId];
+        const outletMatches = (a: Asg): boolean => {
+          if (where.outletId && 'not' in where.outletId && where.outletId.not === null && a.outletId == null) return false;
+          if (!where.outlet) return true;
+          const o = a.outletId ? outlets[a.outletId] : undefined;
+          if (!o) return false;
+          const w = where.outlet;
+          if (w.partnerId !== undefined && o.partnerId !== w.partnerId) return false;
+          if (w.deletedAt === null && o.deletedAt !== null) return false;
+          if (w.OR) {
+            return (w.OR as any[]).some((c) =>
+              c.kycIntent === null ? o.kycIntent === null : o.kycIntent != null && o.kycIntent !== c.kycIntent.not,
+            );
+          }
+          return true;
+        };
         const hit = assignments.find(
           (a) =>
             inIds.includes(a.salesUserId) &&
             (where.unassignedAt === null ? a.unassignedAt === null : true) &&
-            (where.OR as any[]).some((c) =>
-              'partnerId' in c ? a.partnerId === c.partnerId : (c.outletId.in as string[]).includes(a.outletId ?? ''),
-            ),
+            outletMatches(a),
         );
         return hit ? { id: 'asg-hit' } : null;
       });
@@ -2739,9 +2762,50 @@ describe('RewardsService', () => {
     });
 
     it('an outlet assigned to a subordinate who is in ANOTHER tenant (bogus edge) → 403 (edges are tenant-scoped)', async () => {
-      assignments = [{ salesUserId: 'su-x', partnerId: 'cp-out', outletId: null, unassignedAt: null }];
+      assignments = [{ salesUserId: 'su-x', partnerId: 'cp-out', outletId: 'out-1', unassignedAt: null }];
       await expect(redeem(jwt('su-asm'))).rejects.toThrow(new ForbiddenException('You are not assigned to this outlet'));
       await expect(confirm(jwt('su-asm'))).rejects.toThrow(new ForbiddenException('You are not assigned to this outlet'));
+    });
+
+    // ── F5: the guard matches the outlet LIST exactly (buildOutlets row shape) ──
+    it('F5: an admin-PARKED outlet (hidden from the list) → 403 for the assigned rep AND the manager, on redeem and confirm', async () => {
+      outlets['out-1'].kycIntent = 'PARKED';
+      for (const u of [jwt('su-isr1', 'SALES_ISR'), jwt('su-asm')]) {
+        await expect(redeem(u)).rejects.toThrow(new ForbiddenException('You are not assigned to this outlet'));
+        await expect(confirm(u)).rejects.toThrow(new ForbiddenException('You are not assigned to this outlet'));
+      }
+      expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('F5: a NOT_INTERESTED outlet stays visible in the list → still allowed (null-safe parked filter)', async () => {
+      outlets['out-1'].kycIntent = 'NOT_INTERESTED';
+      await expect(redeem(jwt('su-isr1', 'SALES_ISR'))).resolves.toBeDefined();
+      await expect(redeem(jwt('su-asm'))).resolves.toBeDefined();
+    });
+
+    it('F5: a partnerId-only assignment (outletId null — never in the list) → 403 for rep and manager', async () => {
+      assignments = [{ salesUserId: 'su-isr1', partnerId: 'cp-out', outletId: null, unassignedAt: null }];
+      for (const u of [jwt('su-isr1', 'SALES_ISR'), jwt('su-asm')]) {
+        await expect(redeem(u)).rejects.toThrow(new ForbiddenException('You are not assigned to this outlet'));
+        await expect(confirm(u)).rejects.toThrow(new ForbiddenException('You are not assigned to this outlet'));
+      }
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('F5: a DELETED outlet → 403 for rep and manager', async () => {
+      outlets['out-1'].deletedAt = new Date();
+      for (const u of [jwt('su-isr1', 'SALES_ISR'), jwt('su-asm')]) {
+        await expect(redeem(u)).rejects.toThrow(new ForbiddenException('You are not assigned to this outlet'));
+      }
+    });
+
+    it('F5: an outlet-keyed assignment to ANOTHER partner\'s outlet never authorizes this partner', async () => {
+      outlets['out-9'] = { partnerId: 'cp-other', deletedAt: null, kycIntent: null };
+      assignments = [{ salesUserId: 'su-isr1', partnerId: 'cp-out', outletId: 'out-9', unassignedAt: null }];
+      await expect(redeem(jwt('su-isr1', 'SALES_ISR'))).rejects.toThrow(
+        new ForbiddenException('You are not assigned to this outlet'),
+      );
     });
 
     it('a cross-tenant OUTLET is still rejected before any assignment check (tenant isolation unchanged)', async () => {

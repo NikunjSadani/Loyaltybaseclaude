@@ -7,6 +7,7 @@ import {
   isCompletePayoutRail,
   isPayoutFieldEditable,
   isPayoutRailCompleteForSubmission,
+  isPayoutRailFullyStaged,
   isPayoutRailReachable,
   livePayoutRail,
   missingEditablePayoutRoutingFields,
@@ -252,6 +253,15 @@ describe('payout-rail.helper', () => {
     it('no method and no prior → null (unknown)', () => {
       expect(resolveUpiCaptureMethod(undefined, true, null)).toBeNull();
       expect(resolveUpiCaptureMethod('bogus', true, null)).toBeNull();
+    });
+  });
+  describe('F1 — isPayoutRailFullyStaged: every routing field of the rail is IN the staged proposal', () => {
+    it('bank needs BOTH bankAccountNumber AND ifscCode staged; upi needs upiId; blanks / live-only values do not count', () => {
+      expect(isPayoutRailFullyStaged('bank', { bankAccountNumber: '50100', ifscCode: 'HDFC0001' })).toBe(true);
+      expect(isPayoutRailFullyStaged('bank', { bankAccountNumber: '50100' })).toBe(false); // IFSC locked/live
+      expect(isPayoutRailFullyStaged('bank', { bankAccountNumber: '50100', ifscCode: '  ' })).toBe(false);
+      expect(isPayoutRailFullyStaged('upi', { upiId: 'a@upi' })).toBe(true);
+      expect(isPayoutRailFullyStaged('upi', { upiCaptureMethod: 'QR' })).toBe(false);
     });
   });
 });

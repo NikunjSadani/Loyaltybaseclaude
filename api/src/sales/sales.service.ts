@@ -33,7 +33,7 @@ import { pickDeliveryDefaults } from '../partner/delivery-defaults.helper';
  * normal outlet (kycIntent null) or a NOT_INTERESTED outlet would vanish too. The OR-wrap with
  * `{ kycIntent: null }` KEEPS those and drops ONLY the PARKED ones.
  */
-const NOT_PARKED_OUTLET = {
+export const NOT_PARKED_OUTLET = {
   OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' as const } }],
 };
 

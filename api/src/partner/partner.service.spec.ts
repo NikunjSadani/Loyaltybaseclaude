@@ -19,7 +19,7 @@ const mockPrisma = {
   programSetting:    { findFirst: jest.fn() },
   // findMany added for Wave 3 resolveOperableContexts (login-less same-group sibling lookup).
   // update added for capturePayoutDetails (capture-bank-at-redemption write).
-  channelPartner:    { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn() },
+  channelPartner:    { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
   payoutTransaction: { findMany: jest.fn(), findFirst: jest.fn() },
   creditPayoutEntry: { findFirst: jest.fn(), findMany: jest.fn() },
   wallet:            { findFirst: jest.fn() },
@@ -1254,7 +1254,7 @@ describe('PartnerService', () => {
       await expect(
         service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi' }),
       ).rejects.toThrow(/not enabled/i);
-      expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+      expect(mockPrisma.channelPartner.updateMany).not.toHaveBeenCalled();
     });
 
     it('writes a UPI capture as UNVERIFIED and clears the bank rail', async () => {
@@ -1269,7 +1269,7 @@ describe('PartnerService', () => {
         paymentMode: 'upi',
         paymentDetailsStatus: 'UNVERIFIED',
       });
-      const data = mockPrisma.channelPartner.update.mock.calls[0][0].data;
+      const data = mockPrisma.channelPartner.updateMany.mock.calls[0][0].data;
       expect(data).toMatchObject({
         paymentMode: 'upi',
         upiId: 'shop@upi', // trimmed + lowercased (UPI VPAs are case-insensitive)
@@ -1291,7 +1291,7 @@ describe('PartnerService', () => {
           ifscCode: 'hdfc0001',
         }),
       ).rejects.toThrow(/cancelled cheque is required/i);
-      expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+      expect(mockPrisma.channelPartner.updateMany).not.toHaveBeenCalled();
     });
 
     it('rejects a cheque key from another tenant', async () => {
@@ -1319,7 +1319,7 @@ describe('PartnerService', () => {
         ifscCode: 'hdfc0001',
         chequeFileKey: 'kyc/deoleo/cheque.jpg',
       });
-      const data = mockPrisma.channelPartner.update.mock.calls[0][0].data;
+      const data = mockPrisma.channelPartner.updateMany.mock.calls[0][0].data;
       expect(data).toMatchObject({
         paymentMode: 'bank',
         bankName: 'HDFC',
@@ -1349,7 +1349,7 @@ describe('PartnerService', () => {
       await expect(
         service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi' }),
       ).rejects.toThrow(/already registered to another outlet/i);
-      expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+      expect(mockPrisma.channelPartner.updateMany).not.toHaveBeenCalled();
     });
 
     // AUDIT FIX (HIGH): a direct POST must not overwrite a beneficiary already on file.
@@ -1362,7 +1362,7 @@ describe('PartnerService', () => {
       await expect(
         service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'new@upi' }),
       ).rejects.toThrow(/already on file/i);
-      expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+      expect(mockPrisma.channelPartner.updateMany).not.toHaveBeenCalled();
     });
 
     it('FIX A: after a re-KYC approval wrote + VERIFIED the bank rail of a NEEDS_RECAPTURE partner, capture is rejected', async () => {
@@ -1377,7 +1377,7 @@ describe('PartnerService', () => {
       await expect(
         service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'new@upi' }),
       ).rejects.toThrow(/already on file/i);
-      expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+      expect(mockPrisma.channelPartner.updateMany).not.toHaveBeenCalled();
     });
 
     it('allows re-capture when the status is NEEDS_RECAPTURE (failed payout)', async () => {
@@ -1391,7 +1391,44 @@ describe('PartnerService', () => {
         upiId: 'new@upi',
       });
       expect(res.paymentDetailsStatus).toBe('UNVERIFIED');
-      expect(mockPrisma.channelPartner.update).toHaveBeenCalled();
+      expect(mockPrisma.channelPartner.updateMany).toHaveBeenCalled();
+    });
+
+    it('F3: the write is CONDITIONED on the status + routing values the gate read', async () => {
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      primePartner(
+        { requiredPaymentType: 'ANY', parentId: null },
+        { bankAccountNumber: 'OLD123', ifscCode: 'OLD0001', paymentDetailsStatus: 'NEEDS_RECAPTURE' },
+      );
+      await service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'new@upi' });
+      expect(mockPrisma.channelPartner.updateMany.mock.calls[0][0].where).toEqual({
+        id: 'cp1',
+        clientId: switcher.clientId,
+        paymentDetailsStatus: 'NEEDS_RECAPTURE',
+        upiId: null,
+        bankAccountNumber: 'OLD123',
+        ifscCode: 'OLD0001',
+      });
+    });
+
+    it('F3: a re-KYC approval that VERIFIED the partner between the gate read and the write WINS → 409, approved details intact', async () => {
+      // The gate read saw NEEDS_RECAPTURE (re-capture allowed); a concurrent approval then committed
+      // reviewer-approved bank details + VERIFIED, so the conditioned write matches 0 rows.
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      primePartner(
+        { requiredPaymentType: 'ANY', parentId: null },
+        { bankAccountNumber: 'OLD123', ifscCode: 'OLD0001', paymentDetailsStatus: 'NEEDS_RECAPTURE' },
+      );
+      // Simulated DB row AFTER the approval committed.
+      const row = { id: 'cp1', paymentDetailsStatus: 'VERIFIED', upiId: null, bankAccountNumber: '50100123', ifscCode: 'HDFC0001' };
+      mockPrisma.channelPartner.updateMany.mockImplementationOnce(async (args: { where: Record<string, unknown> }) => {
+        const matches = Object.entries(args.where).every(([k, v]) => k === 'clientId' || (row as Record<string, unknown>)[k] === v);
+        return { count: matches ? 1 : 0 };
+      });
+      await expect(
+        service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'new@upi' }),
+      ).rejects.toThrow(/payout details changed/i);
+      expect(row).toMatchObject({ paymentDetailsStatus: 'VERIFIED', bankAccountNumber: '50100123', ifscCode: 'HDFC0001' });
     });
 
     // ── VPA safeguards: confirm-entry for a MANUALLY typed UPI + capture-method provenance ──
@@ -1419,7 +1456,7 @@ describe('PartnerService', () => {
             upiCaptureMethod: 'MANUAL',
           }),
         ).rejects.toThrow('Manual UPI entry is not enabled');
-        expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+        expect(mockPrisma.channelPartner.updateMany).not.toHaveBeenCalled();
       });
 
       it('F7: a QR UPI capture is unaffected when manual entry is OFF', async () => {
@@ -1430,14 +1467,14 @@ describe('PartnerService', () => {
         mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
         primePartner({ requiredPaymentType: 'ANY', parentId: null });
         await service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi', upiCaptureMethod: 'QR' });
-        expect(mockPrisma.channelPartner.update.mock.calls[0][0].data).toMatchObject({ upiCaptureMethod: 'QR' });
+        expect(mockPrisma.channelPartner.updateMany.mock.calls[0][0].data).toMatchObject({ upiCaptureMethod: 'QR' });
       });
 
       it('F6: a UPI capture still nulls the redemption cheque key (self-serve behaviour unchanged)', async () => {
         mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
         primePartner({ requiredPaymentType: 'ANY', parentId: null });
         await service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi', upiCaptureMethod: 'QR' });
-        expect(mockPrisma.channelPartner.update.mock.calls[0][0].data).toMatchObject({
+        expect(mockPrisma.channelPartner.updateMany.mock.calls[0][0].data).toMatchObject({
           payoutChequeFileKey: null, bankName: null, bankAccountHolder: null, bankAccountNumber: null, ifscCode: null,
         });
       });
@@ -1451,7 +1488,7 @@ describe('PartnerService', () => {
             upiCaptureMethod: 'MANUAL',
           }),
         ).rejects.toThrow('UPI IDs do not match');
-        expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+        expect(mockPrisma.channelPartner.updateMany).not.toHaveBeenCalled();
       });
 
       it('rejects a MANUAL UPI capture whose confirmation differs (400, nothing written)', async () => {
@@ -1465,7 +1502,7 @@ describe('PartnerService', () => {
             upiCaptureMethod: 'MANUAL',
           }),
         ).rejects.toThrow('UPI IDs do not match');
-        expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+        expect(mockPrisma.channelPartner.updateMany).not.toHaveBeenCalled();
       });
 
       it('accepts a MANUAL UPI whose confirmation matches case/space-insensitively + records MANUAL', async () => {
@@ -1477,7 +1514,7 @@ describe('PartnerService', () => {
           upiIdConfirm: '  shop@upi ',
           upiCaptureMethod: 'MANUAL',
         });
-        const data = mockPrisma.channelPartner.update.mock.calls[0][0].data;
+        const data = mockPrisma.channelPartner.updateMany.mock.calls[0][0].data;
         expect(data).toMatchObject({ upiId: 'shop@upi', upiCaptureMethod: 'MANUAL', bankAccountNumber: null });
       });
 
@@ -1489,7 +1526,7 @@ describe('PartnerService', () => {
           upiId: 'shop@upi',
           upiCaptureMethod: 'QR',
         });
-        const data = mockPrisma.channelPartner.update.mock.calls[0][0].data;
+        const data = mockPrisma.channelPartner.updateMany.mock.calls[0][0].data;
         expect(data).toMatchObject({ upiId: 'shop@upi', upiCaptureMethod: 'QR' });
       });
 
@@ -1497,7 +1534,7 @@ describe('PartnerService', () => {
         mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
         primePartner({ requiredPaymentType: 'ANY', parentId: null });
         await service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi' });
-        const data = mockPrisma.channelPartner.update.mock.calls[0][0].data;
+        const data = mockPrisma.channelPartner.updateMany.mock.calls[0][0].data;
         expect(data.upiCaptureMethod).toBeNull();
       });
 
@@ -1511,7 +1548,7 @@ describe('PartnerService', () => {
           ifscCode: 'HDFC0001',
           chequeFileKey: 'kyc/deoleo/cheque.jpg',
         });
-        const data = mockPrisma.channelPartner.update.mock.calls[0][0].data;
+        const data = mockPrisma.channelPartner.updateMany.mock.calls[0][0].data;
         expect(data).toMatchObject({ upiId: null, upiCaptureMethod: null });
       });
 
@@ -1527,7 +1564,7 @@ describe('PartnerService', () => {
         mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
         primePartner({ requiredPaymentType: 'ANY', parentId: null }, NEEDS_RECAPTURE_UPI);
         await service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'Shop@UPI', upiCaptureMethod: 'MANUAL' });
-        expect(mockPrisma.channelPartner.update.mock.calls[0][0].data).toMatchObject({
+        expect(mockPrisma.channelPartner.updateMany.mock.calls[0][0].data).toMatchObject({
           upiId: 'shop@upi', upiCaptureMethod: 'QR',
         });
       });
@@ -1542,7 +1579,7 @@ describe('PartnerService', () => {
           }),
         ).rejects.toThrow('Manual UPI entry is not enabled');
         expect(mockTenantSettings.getEffectiveSettings).toHaveBeenCalledWith(expect.any(String), { fresh: true });
-        expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+        expect(mockPrisma.channelPartner.updateMany).not.toHaveBeenCalled();
       });
 
       it('R6: stale cache says OFF but the fresh read says ON → accepted as MANUAL', async () => {
@@ -1555,14 +1592,14 @@ describe('PartnerService', () => {
         await service.capturePayoutDetails(switcher, {
           paymentMode: 'upi', upiId: 'new@upi', upiIdConfirm: 'new@upi', upiCaptureMethod: 'MANUAL',
         });
-        expect(mockPrisma.channelPartner.update.mock.calls[0][0].data).toMatchObject({ upiCaptureMethod: 'MANUAL' });
+        expect(mockPrisma.channelPartner.updateMany.mock.calls[0][0].data).toMatchObject({ upiCaptureMethod: 'MANUAL' });
       });
 
       it('R7: re-entering the stored UPI with NO method (old cached FE) keeps the stored method, not null', async () => {
         mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
         primePartner({ requiredPaymentType: 'ANY', parentId: null }, NEEDS_RECAPTURE_UPI);
         await service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'shop@upi' });
-        expect(mockPrisma.channelPartner.update.mock.calls[0][0].data.upiCaptureMethod).toBe('QR');
+        expect(mockPrisma.channelPartner.updateMany.mock.calls[0][0].data.upiCaptureMethod).toBe('QR');
       });
 
       it('M1: stale cache (UPI uniqueness OFF) but the fresh read ON → a duplicate UPI is rejected', async () => {
@@ -1579,7 +1616,7 @@ describe('PartnerService', () => {
           service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'dup@upi', upiCaptureMethod: 'QR' }),
         ).rejects.toThrow(/already registered/);
         expect(mockTenantSettings.getEffectiveSettings).toHaveBeenCalledWith(expect.any(String), { fresh: true });
-        expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+        expect(mockPrisma.channelPartner.updateMany).not.toHaveBeenCalled();
       });
 
       it('M1: a bank capture keeps the cached settings read (no uncached read)', async () => {
@@ -1602,7 +1639,7 @@ describe('PartnerService', () => {
           upiId: 'group@upi', upiCaptureMethod: 'QR', paymentDetailsStatus: 'VERIFIED',
         });
         await service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'Group@UPI' });
-        expect(mockPrisma.channelPartner.update.mock.calls[0][0].data).toMatchObject({ upiId: 'group@upi', upiCaptureMethod: 'QR' });
+        expect(mockPrisma.channelPartner.updateMany.mock.calls[0][0].data).toMatchObject({ upiId: 'group@upi', upiCaptureMethod: 'QR' });
       });
     });
   });

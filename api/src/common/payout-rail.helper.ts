@@ -334,6 +334,24 @@ function omitKeys(o: Record<string, unknown>, keys: readonly string[]): Record<s
   return out;
 }
 
+/** PAYOUT_ROUTING_FIELDS (DTO names) → the ChannelPartner / proposedPartner key each one stages as. */
+const ROUTING_FIELD_PARTNER_KEY: Readonly<Record<string, string>> = {
+  upiId: 'upiId',
+  accountNumber: 'bankAccountNumber',
+  ifscCode: 'ifscCode',
+};
+
+/**
+ * F1 — is EVERY routing field of `rail` present (non-empty) in the STAGED proposal itself
+ * (KycSubmission.proposedPartner, ChannelPartner field names)? Only then were all the routing values
+ * rep-entered and therefore visible to the reviewer as the proposal they approve. A rail completed from
+ * a LOCKED live value (absent from the proposal) is applied, but its approval is NOT a verification of
+ * the whole beneficiary — so it must never promote paymentDetailsStatus to VERIFIED.
+ */
+export function isPayoutRailFullyStaged(rail: PayoutRail, proposed: Record<string, unknown>): boolean {
+  return PAYOUT_ROUTING_FIELDS[rail].every((f) => filled(proposed[ROUTING_FIELD_PARTNER_KEY[f]]));
+}
+
 export interface EffectiveProposedPayout {
   /** The proposal to apply/present — payout keys the rep could not edit (legacy drafts) removed. */
   proposal: Record<string, unknown>;
@@ -388,8 +406,10 @@ export function effectiveProposedPayout(
   // partner (e.g. the locked stored IFSC disappeared between draft and approval). Approval must then
   // write NONE of that rail's routing columns and NO paymentMode — otherwise it would leave a half
   // bank rail and a paymentMode contradicting the rail payouts actually route on. Non-routing fields
-  // (bankName / bankAccountHolder) route nothing and still apply. Done HERE so the apply, getOne and
-  // the reviewer queue/export all present exactly what approval writes.
+  // (bankName / bankAccountHolder) route nothing and still apply. Done HERE so getOne and the reviewer
+  // queue/export never present a half rail. NOTE (F2): the APPROVAL apply (kyc.service
+  // applyBridgeOutcome) re-evaluates this over the ROW-LOCKED partner and REFUSES (409) a proposal whose
+  // explicit rail is incomplete — it never silently applies this dropped form.
   const base: Record<string, unknown> = explicitRail
     ? omitKeys(proposed, [...INCOMPLETE_RAIL_DROP_KEYS[explicitRail], 'paymentMode'])
     : proposed;

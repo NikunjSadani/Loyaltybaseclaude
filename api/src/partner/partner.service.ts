@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
 } from '@nestjs/common';
@@ -869,8 +870,21 @@ export class PartnerService {
       });
       if (violation) throw new BadRequestException(violation.message);
 
-      await tx.channelPartner.update({
-        where: { id: partnerId },
+      // F3 (race): the overwrite gate above ran on an UNLOCKED read. A re-KYC approval committing in
+      // between (kyc.service applyBridgeOutcome — it row-locks the partner and may write a rail +
+      // promote the status to VERIFIED) must WIN. So the write is CONDITIONED on exactly the status +
+      // routing values the gate read: if any changed, 0 rows match → 409, nothing is written. Under
+      // READ COMMITTED a concurrent locker makes this UPDATE wait and then re-evaluate the predicate
+      // against the committed row, so the check-and-write is atomic.
+      const { count } = await tx.channelPartner.updateMany({
+        where: {
+          id: partnerId,
+          clientId: user.clientId,
+          paymentDetailsStatus: partner.paymentDetailsStatus,
+          upiId: partner.upiId ?? null,
+          bankAccountNumber: partner.bankAccountNumber ?? null,
+          ifscCode: partner.ifscCode ?? null,
+        },
         data:
           mode === 'bank'
             ? {
@@ -896,6 +910,9 @@ export class PartnerService {
                 paymentDetailsStatus: PaymentDetailsStatus.UNVERIFIED,
               },
       });
+      if (count === 0) {
+        throw new ConflictException('Payout details changed — please refresh');
+      }
     });
 
     return {
