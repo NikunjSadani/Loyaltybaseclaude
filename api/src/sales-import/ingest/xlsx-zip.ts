@@ -211,10 +211,20 @@ export interface RangeSource {
  */
 export function resequencedXlsxStream(src: RangeSource, plan: XlsxReadPlan, onBytes?: (n: number) => void): Readable {
   const out = new PassThrough({ highWaterMark: 1024 * 1024 });
+  // Resolves on 'drain'; rejects once the consumer destroyed the stream (early stop / error), so the
+  // copy loop ends and its GCS read streams are released instead of waiting forever.
   const write = (chunk: Buffer) =>
-    new Promise<void>((resolve) => {
-      if (out.write(chunk)) resolve();
-      else out.once('drain', resolve);
+    new Promise<void>((resolve, reject) => {
+      if (out.destroyed) return reject(new Error('re-sequenced stream closed'));
+      if (out.write(chunk)) return resolve();
+      const done = () => {
+        out.off('drain', done);
+        out.off('close', done);
+        if (out.destroyed) reject(new Error('re-sequenced stream closed'));
+        else resolve();
+      };
+      out.on('drain', done);
+      out.on('close', done);
     });
 
   const run = async () => {
@@ -244,7 +254,9 @@ export function resequencedXlsxStream(src: RangeSource, plan: XlsxReadPlan, onBy
     await write(eocd);
     out.end();
   };
-  run().catch((err: unknown) => out.destroy(err instanceof Error ? err : new Error(String(err))));
+  run().catch((err: unknown) => {
+    if (!out.destroyed) out.destroy(err instanceof Error ? err : new Error(String(err)));
+  });
   return out;
 }
 

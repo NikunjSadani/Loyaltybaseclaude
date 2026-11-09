@@ -3,6 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { Storage } from '@google-cloud/storage';
 import { randomUUID } from 'node:crypto';
 import * as path from 'path';
+import type { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 /**
  * GCS object storage — the Nest port of platform/src/lib/s3.ts (function
@@ -135,5 +137,33 @@ export class StorageService {
   /** Delete an object. */
   async deleteFile(key: string): Promise<void> {
     await this.storage.bucket(this.bucket).file(key).delete();
+  }
+
+  // ─── Large-object helpers (Sales Import: chunked uploads streamed by the worker) ───────────────
+  // Additive; signing-free (plain object read/write/list/delete via the runtime SA's objectAdmin).
+
+  /** Stream a private object, optionally a byte range (`end` INCLUSIVE, GCS semantics). */
+  openReadStream(key: string, range?: { start?: number; end?: number }): Readable {
+    const file = this.storage.bucket(this.bucket).file(key);
+    return range ? file.createReadStream({ start: range.start, end: range.end, validation: false }) : file.createReadStream();
+  }
+
+  /** Objects under a prefix, with their byte sizes. */
+  async listPrefix(prefix: string): Promise<Array<{ name: string; size: number }>> {
+    const [files] = await this.storage.bucket(this.bucket).getFiles({ prefix });
+    return files.map((f) => ({ name: f.name, size: Number(f.metadata?.size ?? 0) }));
+  }
+
+  /** Delete every object under a prefix (no-op when there are none). */
+  async deletePrefix(prefix: string): Promise<void> {
+    if (!prefix || !prefix.endsWith('/')) throw new Error(`deletePrefix: refusing a non-folder prefix "${prefix}"`);
+    await this.storage.bucket(this.bucket).deleteFiles({ prefix, force: true });
+  }
+
+  /** Upload from a stream without buffering it (non-resumable, like uploadFile). */
+  async uploadStream(key: string, source: Readable, contentType: string): Promise<string> {
+    const file = this.storage.bucket(this.bucket).file(key);
+    await pipeline(source, file.createWriteStream({ resumable: false, contentType }));
+    return this.publicUrl(key);
   }
 }

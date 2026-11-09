@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
+import { PassThrough, Readable, Writable } from 'node:stream';
 import { StorageService } from './storage.service';
 
 const mockConfig = { get: jest.fn(() => undefined) };
@@ -101,6 +102,65 @@ describe('StorageService', () => {
       stubFile({ size: 1, bytes: Buffer.from('z') });
       const out = await service.downloadAsDataUrl('kyc/x.bin');
       expect(out).toBe(`data:application/octet-stream;base64,${Buffer.from('z').toString('base64')}`);
+    });
+  });
+
+  describe('large-object helpers (Sales Import)', () => {
+    function stubBucket() {
+      const written: Buffer[] = [];
+      const file = {
+        createReadStream: jest.fn(() => Readable.from([Buffer.from('abc')])),
+        createWriteStream: jest.fn(() =>
+          new Writable({
+            write(chunk, _enc, cb) {
+              written.push(Buffer.from(chunk));
+              cb();
+            },
+          }),
+        ),
+      };
+      const bucket = {
+        file: jest.fn(() => file),
+        getFiles: jest.fn().mockResolvedValue([[{ name: 'p/parts/00000', metadata: { size: '4' } }, { name: 'p/parts/00001', metadata: {} }]]),
+        deleteFiles: jest.fn().mockResolvedValue(undefined),
+      };
+      (service as unknown as { storage: unknown }).storage = { bucket: () => bucket };
+      return { bucket, file, written };
+    }
+
+    it('openReadStream passes a byte range (validation off) or reads the whole object', () => {
+      const { file } = stubBucket();
+      service.openReadStream('k', { start: 10, end: 19 });
+      expect(file.createReadStream).toHaveBeenLastCalledWith({ start: 10, end: 19, validation: false });
+      service.openReadStream('k');
+      expect(file.createReadStream).toHaveBeenLastCalledWith();
+    });
+
+    it('listPrefix returns names and numeric sizes', async () => {
+      const { bucket } = stubBucket();
+      await expect(service.listPrefix('p/parts/')).resolves.toEqual([
+        { name: 'p/parts/00000', size: 4 },
+        { name: 'p/parts/00001', size: 0 },
+      ]);
+      expect(bucket.getFiles).toHaveBeenCalledWith({ prefix: 'p/parts/' });
+    });
+
+    it('deletePrefix deletes by folder prefix and refuses a non-folder prefix', async () => {
+      const { bucket } = stubBucket();
+      await service.deletePrefix('sales-imports/c/i/');
+      expect(bucket.deleteFiles).toHaveBeenCalledWith({ prefix: 'sales-imports/c/i/', force: true });
+      await expect(service.deletePrefix('')).rejects.toThrow('non-folder');
+      await expect(service.deletePrefix('sales-imports/c')).rejects.toThrow('non-folder');
+    });
+
+    it('uploadStream pipes the source into a non-resumable write stream', async () => {
+      const { file, written } = stubBucket();
+      const src = new PassThrough();
+      const done = service.uploadStream('x/u.csv', src, 'text/csv');
+      src.end('a,b;');
+      await expect(done).resolves.toBe('https://storage.googleapis.com/gifsy-platform-files/x/u.csv');
+      expect(file.createWriteStream).toHaveBeenCalledWith({ resumable: false, contentType: 'text/csv' });
+      expect(Buffer.concat(written).toString()).toBe('a,b;');
     });
   });
 });
