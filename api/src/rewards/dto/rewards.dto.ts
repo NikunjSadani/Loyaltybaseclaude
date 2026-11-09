@@ -176,6 +176,21 @@ export class UpdateOrderDto {
   @Matches(/\S/, { message: 'voucherProvider cannot be blank' })
   voucherProvider?: string;
 
+  /**
+   * GIFSY_ADMIN-only MANUAL FULFILMENT OVERRIDE of an order that was sent to Hubble (the ops exit
+   * for hubbleNeedsReconcile): must carry a new voucherCode + overrideReason. Every other voucher
+   * rule still applies (no overwrite, status, points, cash, tenant-wide reuse). Audited.
+   */
+  @IsOptional()
+  @IsBoolean()
+  manualOverride?: boolean;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @Length(1, 500)
+  overrideReason?: string;
+
   @IsOptional()
   @IsString()
   notes?: string;
@@ -352,6 +367,21 @@ export class TransitionOrderDto {
   @IsString()
   @Matches(/\S/, { message: 'voucherProvider cannot be blank' })
   voucherProvider?: string;
+
+  /**
+   * GIFSY_ADMIN-only MANUAL FULFILMENT OVERRIDE of an order that was sent to Hubble (the ops exit
+   * for hubbleNeedsReconcile): must carry a new voucherCode + overrideReason. Every other voucher
+   * rule still applies (no overwrite, status, points, cash, tenant-wide reuse). Audited.
+   */
+  @IsOptional()
+  @IsBoolean()
+  manualOverride?: boolean;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @Length(1, 500)
+  overrideReason?: string;
 
   @IsOptional()
   @IsString()

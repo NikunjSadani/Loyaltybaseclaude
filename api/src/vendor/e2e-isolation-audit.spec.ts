@@ -38,6 +38,8 @@ jest.mock('../common/reward-account.helper', () => ({
 
 // ── Shared Prisma mock ────────────────────────────────────────────────────────
 const mockPrisma = {
+  // Tenant-wide cancelled-voucher reuse guard (voucher-write-guard.ts) — default: never cancelled.
+  cancelledVoucherCode: { findFirst: jest.fn().mockResolvedValue(null), createMany: jest.fn().mockResolvedValue({ count: 1 }) },
   vendor: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn() },
   vendorTenantGrant: { findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
   giftCategory: { findFirst: jest.fn(), findMany: jest.fn() },

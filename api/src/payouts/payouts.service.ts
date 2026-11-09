@@ -730,6 +730,15 @@ export class PayoutsService {
       outcome: 'PAID' | 'FAILED';
       reason: string;
     }> = [];
+    // FAILED rows whose ORDER holds a voucher code: the payout is marked FAILED, but the order is
+    // left exactly as is (no refund, no FAILED flip) for ops — the issued-voucher refund block.
+    const blockedOrders: Array<{
+      rowNum: number;
+      txnId: string;
+      orderId: string;
+      orderNumber: string;
+      reason: string;
+    }> = [];
 
     // Collected DURING the tx (do NOT read/send inside it): one payout-credit WhatsApp
     // per PAID redemption cash-out, dispatched AFTER the tx commits so neither a read
@@ -871,19 +880,28 @@ export class PayoutsService {
               where: { id: orderId },
               select: { pointsDeducted: true, partnerId: true, orderNumber: true, status: true, voucherCode: true },
             });
-            if (order) {
-              // Issued-voucher refund block (owner money rule, all paths): never refund points while
-              // a voucher code is on the order. A cash order should never carry one (the voucher
-              // write guard refuses it), so a block here is an anomaly → log loudly for ops.
+            if (order && hasIssuedVoucher(order.voucherCode)) {
+              // Issued-voucher refund block (owner money rule, all paths): a voucher code is on the
+              // order → do NOT refund and do NOT flip it to FAILED (leave it exactly as is, like the
+              // Hubble path). A cash order should never carry one (the voucher write guard refuses
+              // it), so this is an anomaly → reported in the response + logged for ops.
+              blockedOrders.push({
+                rowNum: row.rowNum,
+                txnId: txn.id,
+                orderId,
+                orderNumber: order.orderNumber,
+                reason: 'A voucher code is on this order — points not refunded and order left unchanged; needs ops review',
+              });
+              this.logger.error(
+                `[payout-utr] order ${order.orderNumber}: UTR FAILED but a voucher code is on the order — NOT refunded, order left as is`,
+              );
+            } else if (order) {
+              // The claims ALSO carry the no-issued-voucher guard, so a code set after our read
+              // still blocks the refund and the FAILED flip atomically.
               const refundClaim = await tx.redemptionOrder.updateMany({
                 where: { id: orderId, pointsDeducted: { gt: 0 }, ...NO_ISSUED_VOUCHER_GUARD },
                 data: { pointsDeducted: 0 },
               });
-              if (refundClaim.count === 0 && order.pointsDeducted > 0 && hasIssuedVoucher(order.voucherCode)) {
-                this.logger.error(
-                  `[payout-utr] order ${order.orderNumber}: UTR FAILED but a voucher code is on the order — points NOT refunded; needs ops review`,
-                );
-              }
               if (refundClaim.count > 0) {
                 await this.wallet.reverse(
                   order.partnerId,
@@ -903,7 +921,7 @@ export class PayoutsService {
               if (order.status !== RedemptionStatus.FAILED) {
                 await transitionOrderStatus(tx, {
                   orderId,
-                  guard: { status: { not: RedemptionStatus.FAILED } },
+                  guard: { status: { not: RedemptionStatus.FAILED }, ...NO_ISSUED_VOUCHER_GUARD },
                   fromStatus: order.status,
                   toStatus: RedemptionStatus.FAILED,
                   changedById: user.sub,
@@ -1006,7 +1024,7 @@ export class PayoutsService {
       }
     }
 
-    return { applied: true, paidCount, failedCount, reversedCount, skipped };
+    return { applied: true, paidCount, failedCount, reversedCount, skipped, blockedOrders };
   }
 
   // ───────────────────────────────────────────────────────────────────────────

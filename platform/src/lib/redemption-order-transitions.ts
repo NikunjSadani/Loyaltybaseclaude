@@ -33,6 +33,8 @@ export interface TransitionableOrder {
   voucherCode?: string | null;
   /** Server indicator for viewers who don't receive the code itself (voucherCode is null). */
   voucherIssued?: boolean;
+  /** The order was sent to Hubble and is stuck for ops — no manual refund (a voucher may exist). */
+  hubbleNeedsReconcile?: boolean;
 }
 
 /** Mirrors the backend `hasIssuedVoucher` (null / '' = none). */
@@ -55,7 +57,7 @@ export function nextStatusOptions(order: TransitionableOrder): string[] {
   const voucherIssued = hasIssuedVoucher(order.voucherCode) || order.voucherIssued === true;
   return edges.filter((to) => {
     if (isCash && (REFUND_TARGETS.has(to) || FORWARD_DISPATCH_TARGETS.has(to))) return false;
-    if ((isHubble || voucherIssued) && REFUND_TARGETS.has(to)) return false;
+    if ((isHubble || voucherIssued || order.hubbleNeedsReconcile === true) && REFUND_TARGETS.has(to)) return false;
     return true;
   });
 }

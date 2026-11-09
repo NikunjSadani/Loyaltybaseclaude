@@ -177,6 +177,60 @@ describe('GIFVC — voucher handling', () => {
     expect(screen.queryByLabelText('Voucher code')).toBeNull();
   });
 
+  it('GIFVC10: a stuck Hubble order shows "Needs reconcile" + reason and hides refund targets', async () => {
+    installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null,
+      voucherProvider: 'Hubble', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE' }]);
+    const row = await openRow('RDM-1');
+    expect(within(row).getByTestId('hubble-needs-reconcile')).toHaveTextContent('Needs reconcile · Hubble state unknown');
+    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    expect(optionValues(advanceSelect())).toEqual(['PROCESSING']);
+    expect(screen.queryByLabelText('Voucher code')).toBeNull(); // no plain manual code on a Hubble order
+  });
+
+  it('GIFVC11: "Retry with Hubble" POSTs hubble-reconcile and re-fetches', async () => {
+    const calls = installFetch(
+      [{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_NOT_CONFIGURED' }],
+      (url, init) => (url === '/api/rewards/orders/o1/hubble-reconcile' && init?.method === 'POST' ? jsonOk({ orderId: 'o1', outcome: 'DELIVERED' }) : undefined),
+    );
+    const row = await openRow('RDM-1');
+    const before = calls.filter((c) => c.url.startsWith('/api/rewards/orders?')).length;
+    await userEvent.click(within(row).getByRole('button', { name: /retry with hubble/i }));
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith('/hubble-reconcile'))).toBe(true));
+    await waitFor(() => expect(calls.filter((c) => c.url.startsWith('/api/rewards/orders?')).length).toBeGreaterThan(before));
+  });
+
+  it('GIFVC12: "Fulfil manually" needs a code + reason and PATCHes a manual override; the badge clears', async () => {
+    const calls = installFetch(
+      [{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: null, voucherProvider: 'Hubble', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_NOT_FOUND' }],
+      (url, init) => (url === '/api/rewards/orders/o1' && init?.method === 'PATCH'
+        ? jsonOk({ order: { id: 'o1', voucherCode: 'POOL-7777', voucherProvider: 'Manual' } })
+        : undefined),
+    );
+    const row = await openRow('RDM-1');
+    await userEvent.click(within(row).getByRole('button', { name: /fulfil manually/i }));
+    const confirm = screen.getByRole('button', { name: /confirm manual fulfilment/i });
+    expect(confirm).toBeDisabled();
+    await userEvent.type(screen.getByLabelText('Voucher code *'), 'POOL-7777');
+    expect(confirm).toBeDisabled(); // reason still required
+    await userEvent.type(screen.getByLabelText('Reason *'), 'Hubble down');
+    await userEvent.click(confirm);
+    await waitFor(() => expect(calls.some((c) => c.url === '/api/rewards/orders/o1' && c.init?.method === 'PATCH')).toBe(true));
+    const body = JSON.parse(String(calls.find((c) => c.init?.method === 'PATCH')!.init!.body));
+    expect(body).toEqual({ voucherCode: 'POOL-7777', manualOverride: true, overrideReason: 'Hubble down' });
+    const updated = (await screen.findByText('RDM-1')).closest('tr') as HTMLElement;
+    await waitFor(() => expect(within(updated).queryByTestId('hubble-needs-reconcile')).toBeNull());
+    expect(within(updated).getByText('POOL-7777')).toBeInTheDocument();
+  });
+
+  it('GIFVC13: a permissioned GIFSY_STAFF sees the badge but not the Hubble ops actions (GIFSY_ADMIN only)', async () => {
+    session.role = 'GIFSY_STAFF'; session.perms = ['rewards:read', 'rewards:manage_orders'];
+    installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE' }]);
+    const row = await openRow('RDM-1');
+    expect(within(row).getByTestId('hubble-needs-reconcile')).toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: /retry with hubble/i })).toBeNull();
+    expect(within(row).queryByRole('button', { name: /fulfil manually/i })).toBeNull();
+  });
+
   it('GIFVC7: a permissioned GIFSY_STAFF can advance but never sees the vendor-cancel action (GIFSY_ADMIN only)', async () => {
     session.role = 'GIFSY_STAFF'; session.perms = ['rewards:read', 'rewards:manage_orders'];
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: 'AMZN-1234-5678-WXYZ', voucherProvider: 'Gifsy' }]);

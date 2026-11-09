@@ -234,4 +234,15 @@ export class RewardsController {
   ) {
     return this.rewards.voucherCancelledWithVendor(user, id, dto.reason);
   }
+
+  /**
+   * GIFSY_ADMIN-only "Retry with Hubble": re-runs the idempotent Hubble reconcile for one flagged
+   * order (audited). The service re-checks GIFSY_ADMIN.
+   */
+  @Post('orders/:id/hubble-reconcile')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('rewards:manage_orders')
+  retryHubbleReconcile(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.rewards.retryHubbleReconcile(user, id);
+  }
 }

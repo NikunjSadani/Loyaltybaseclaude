@@ -1286,7 +1286,7 @@ describe('PayoutsService', () => {
       );
       // Order FAILED write is a guarded claim (never re-FAILs / never duplicates history).
       expect(mockTx.redemptionOrder.updateMany).toHaveBeenCalledWith({
-        where: { id: 'o1', status: { not: 'FAILED' } },
+        where: { id: 'o1', status: { not: 'FAILED' }, OR: [{ voucherCode: null }, { voucherCode: '' }] },
         data: { status: 'FAILED' },
       });
       expect(mockTx.redemptionOrder.update).not.toHaveBeenCalled();
@@ -1354,20 +1354,22 @@ describe('PayoutsService', () => {
         mockTx.redemptionStatusHistory.create.mockResolvedValue({});
       });
 
-      it('FAILED on an order holding a voucher code: the refund claim refuses (no reverse) and it is logged for ops', async () => {
+      it('FAILED on an order holding a voucher code: order left untouched (no refund, no FAILED flip), reported + logged', async () => {
         oneTxn();
         mockTx.redemptionOrder.findFirst.mockResolvedValue({
           pointsDeducted: 500, partnerId: 'p1', orderNumber: 'RO-1', status: 'CONFIRMED', voucherCode: 'ODD-CODE-1',
         });
-        // The guarded M2 claim matches 0 rows (a code is on the order); the FAILED flip still lands.
-        mockTx.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
         const errSpy = jest.spyOn((service as unknown as { logger: { error: (m: string) => void } }).logger, 'error');
         const res = await service.uploadPayoutUtr(gifsy, 'b1', buildUpload([{ txnId: 'txn1', status: 'FAILED' }]), true);
         expect(res).toMatchObject({ failedCount: 1, reversedCount: 0 });
-        expect(mockTx.redemptionOrder.updateMany.mock.calls[0][0].where).toMatchObject({
-          OR: [{ voucherCode: null }, { voucherCode: '' }],
-        });
+        // The ORDER is left exactly as is: no refund claim, no FAILED flip, no history row.
+        expect(mockTx.redemptionOrder.updateMany).not.toHaveBeenCalled();
+        expect(mockTx.redemptionStatusHistory.create).not.toHaveBeenCalled();
         expect(mockWallet.reverse).not.toHaveBeenCalled();
+        // …and it is reported back for the admin payouts screen.
+        expect(res.blockedOrders).toEqual([
+          expect.objectContaining({ txnId: 'txn1', orderId: 'o1', orderNumber: 'RO-1', reason: expect.stringMatching(/voucher code/) }),
+        ]);
         expect(errSpy.mock.calls.some(([m]) => /voucher code is on the order/.test(String(m)))).toBe(true);
         expect(JSON.stringify(errSpy.mock.calls)).not.toContain('ODD-CODE-1');
       });
@@ -1409,7 +1411,7 @@ describe('PayoutsService', () => {
         // Two guarded claims on the order: the M2 refund claim, then the FAILED status claim.
         expect(mockTx.redemptionOrder.updateMany).toHaveBeenCalledTimes(2);
         expect(mockTx.redemptionOrder.updateMany).toHaveBeenLastCalledWith({
-          where: { id: 'o1', status: { not: 'FAILED' } },
+          where: { id: 'o1', status: { not: 'FAILED' }, OR: [{ voucherCode: null }, { voucherCode: '' }] },
           data: { status: 'FAILED' },
         });
         expect(mockTx.redemptionOrder.update).not.toHaveBeenCalled();

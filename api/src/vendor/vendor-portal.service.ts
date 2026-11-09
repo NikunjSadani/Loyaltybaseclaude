@@ -15,7 +15,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { assertVendorPriceBounds, VendorPriceError } from './vendor-pricing.helper';
 import { applyVendorPiiRetention } from './vendor-pii.helper';
 import { transitionOrderStatusOrConflict } from '../rewards/order-status-transition';
-import { combineGuards, isHubbleManagedOrder, planVoucherWrite } from '../rewards/voucher-write-guard';
+import { combineGuards, isCancelledVoucherCode, planVoucherWrite } from '../rewards/voucher-write-guard';
 import { notifyVoucherIssued, recordVoucherIssuedAudit } from '../rewards/voucher-issuance';
 import {
   parseVendorUploadBuffer,
@@ -629,7 +629,7 @@ export class VendorPortalService {
     // code, a new code only on a paid open order — CAS carried on the write below.
     const voucherInput = { voucherCode: dto.voucherCode, voucherProvider: dto.voucherProvider };
     const voucherPlan = planVoucherWrite(existing, voucherInput, {
-      hubbleEligible: await this.hubbleManagedIfWriting(existing, voucherInput),
+      cancelledCodeReused: await this.cancelledCodeReused(scope.clientId, voucherInput.voucherCode),
     });
 
     // GUARDED write (compare-and-set): the "open + assigned to me" checks above come from a
@@ -676,12 +676,10 @@ export class VendorPortalService {
   }
 
   /** Hubble-eligibility (async half of the voucher guard) — only when a voucher field is sent. */
-  private async hubbleManagedIfWriting(
-    order: Parameters<typeof isHubbleManagedOrder>[1],
-    input: { voucherCode?: string | null; voucherProvider?: string | null },
-  ): Promise<boolean> {
-    if (input.voucherCode === undefined && input.voucherProvider === undefined) return false;
-    return isHubbleManagedOrder(this.prisma, order);
+  /** Tenant-wide reuse guard: was this code cancelled with the vendor anywhere in the tenant? */
+  private cancelledCodeReused(clientId: string, code: string | null | undefined): Promise<boolean> {
+    if (code === undefined) return Promise.resolve(false);
+    return isCancelledVoucherCode(this.prisma, clientId, code);
   }
 
   private notifyIssued(orderId: string, clientId: string): Promise<void> {
@@ -719,7 +717,16 @@ export class VendorPortalService {
     const toStatus = dto.toStatus as unknown as RedemptionStatus;
     if (order.status === toStatus) {
       // Idempotent no-op — return the MEMBER-SAFE projection (VENDOR_ORDER_SELECT +
-      // retention), never the raw order (Wave-2 audit HIGH#1).
+      // retention), never the raw order (Wave-2 audit HIGH#1). A voucher code/provider sent with
+      // it is NOT dropped: it is applied through the guarded non-status write (updateFulfilment —
+      // same invariant, CAS, audit + member notification), exactly like the Gifsy path.
+      if (dto.voucherCode !== undefined || dto.voucherProvider !== undefined) {
+        const updated = await this.updateFulfilment(user, id, {
+          voucherCode: dto.voucherCode,
+          voucherProvider: dto.voucherProvider,
+        } as VendorFulfilmentDto);
+        return { order: updated, skipped: true as const };
+      }
       return { order: await this.getOrder(user, id), skipped: true as const };
     }
 
@@ -739,7 +746,7 @@ export class VendorPortalService {
     // VOUCHER WRITE INVARIANT (shared with Gifsy paths) — see voucher-write-guard.ts.
     const voucherInput = { voucherCode: dto.voucherCode, voucherProvider: dto.voucherProvider };
     const voucherPlan = planVoucherWrite(order, voucherInput, {
-      hubbleEligible: await this.hubbleManagedIfWriting(order, voucherInput),
+      cancelledCodeReused: await this.cancelledCodeReused(scope.clientId, voucherInput.voucherCode),
     });
 
     // BUG-1: a DIGITAL_VOUCHER order cannot be marked DELIVERED without a voucher code —

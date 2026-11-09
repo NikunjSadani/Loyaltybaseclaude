@@ -21,7 +21,15 @@ export function maskVoucherCodeForAudit(code: string): string {
 
 export async function recordVoucherIssuedAudit(
   db: Db,
-  args: { actorId: string | null; orderId: string; code: string; path: string; provider?: string | null },
+  args: {
+    actorId: string | null;
+    orderId: string;
+    code: string;
+    path: string;
+    provider?: string | null;
+    /** Set when a GIFSY_ADMIN manually fulfilled a Hubble-handed order (the ops exit). */
+    overrideReason?: string | null;
+  },
 ): Promise<void> {
   await db.auditLog.create({
     data: {
@@ -34,6 +42,7 @@ export async function recordVoucherIssuedAudit(
         path: args.path,
         voucherCode: maskVoucherCodeForAudit(args.code),
         voucherProvider: args.provider ?? null,
+        ...(args.overrideReason ? { manualOverride: true, overrideReason: args.overrideReason } : {}),
       },
     },
   });

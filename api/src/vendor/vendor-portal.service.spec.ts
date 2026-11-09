@@ -8,6 +8,8 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockPrisma = {
+  // Tenant-wide cancelled-voucher reuse guard (voucher-write-guard.ts) — default: never cancelled.
+  cancelledVoucherCode: { findFirst: jest.fn().mockResolvedValue(null), createMany: jest.fn().mockResolvedValue({ count: 1 }) },
   vendor: { findFirst: jest.fn() },
   vendorTenantGrant: { findFirst: jest.fn() },
   giftCategory: { findFirst: jest.fn(), findMany: jest.fn() },
@@ -384,6 +386,26 @@ describe('VendorPortalService', () => {
         expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(
           expect.objectContaining({ eventKey: 'VOUCHER_ISSUED', userId: 'm1' }),
         );
+      });
+
+      it('same-status transition WITH a new code applies it via the guarded updateFulfilment (not dropped)', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ status: 'PROCESSING' }));
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        const res = await service.transition(vendor, 'o1', { toStatus: 'PROCESSING', voucherCode: 'SAME-STATUS-1' } as never);
+        expect(res.skipped).toBe(true);
+        const { where, data } = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+        expect(data.voucherCode).toBe('SAME-STATUS-1');
+        expect(where.fulfilledByVendorId).toBe('v1');
+        expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
+      });
+
+      it('a code cancelled elsewhere in the tenant is refused for a vendor too', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open());
+        mockPrisma.cancelledVoucherCode.findFirst.mockResolvedValueOnce({ id: 'cv' });
+        await expect(service.updateFulfilment(vendor, 'o1', { voucherCode: 'OLD-1' } as never)).rejects.toThrow(/can't be reused/);
+        expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
       });
 
       it('updateFulfilment: a Hubble-managed order refuses a vendor code', async () => {

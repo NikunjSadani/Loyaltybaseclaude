@@ -39,14 +39,14 @@ import {
   transitionOrderStatusOrConflict,
 } from './order-status-transition';
 import {
-  CANCELLED_VOUCHER_HASHES_KEY,
-  cancelledVoucherHashes,
   combineGuards,
   hasHubbleMarkers,
   hashVoucherCode,
-  isHubbleManagedOrder,
+  isCancelledVoucherCode,
+  isHubbleIssuedCode,
   planVoucherWrite,
   VOUCHER_WRITE_CONFLICT_MESSAGE,
+  VoucherWriteOptions,
 } from './voucher-write-guard';
 import {
   notifyVoucherIssued as notifyVoucherIssuedShared,
@@ -139,6 +139,23 @@ export function hiddenVoucherFields(code: string | null | undefined): {
 } {
   const issued = code != null && code !== '';
   return { voucherCode: null, voucherIssued: issued, voucherCodeMasked: issued };
+}
+
+/** Operator-console projection of an order's Hubble reconcile state (from metadata). */
+export function hubbleReconcileFlags(metadata: unknown): {
+  hubbleNeedsReconcile: boolean;
+  hubbleReconcileReason: string | null;
+} {
+  const m = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+    ? (metadata as Record<string, unknown>)
+    : {};
+  // A manual override sets hubbleNeedsReconcile false; a LATER flag (e.g. Hubble succeeded on top
+  // of the manual code) sets it true again and must surface.
+  const needs = m.hubbleNeedsReconcile === true;
+  return {
+    hubbleNeedsReconcile: needs,
+    hubbleReconcileReason: needs && typeof m.hubbleReconcileReason === 'string' ? m.hubbleReconcileReason : null,
+  };
 }
 
 export function decodeOrderCursor(cursor: string): { createdAt: Date; id: string } | null {
@@ -776,6 +793,8 @@ export class RewardsService {
           updatedAt: true,
           reward: { select: { id: true, name: true, imageUrls: true, redemptionMode: true } },
           partner: { select: { id: true, businessName: true } },
+          // Read for the operator-only Hubble reconcile flags below; NEVER returned as-is.
+          metadata: true,
         },
         skip,
         // One extra row tells us whether another page exists (it is never returned).
@@ -796,9 +815,12 @@ export class RewardsService {
     // voucherIssued/voucherCodeMasked true.
     const memberView = !this.isGifsy(user) && !tenantAdmin;
     const hideCodes = !memberView && !(await this.canSeeFullVoucherCode(user));
-    const mapped = orders.map((o) => ({
+    const mapped = orders.map(({ metadata, ...o }) => ({
       ...o,
       ...(hideCodes ? hiddenVoucherFields(o.voucherCode) : {}),
+      // Operator console only: a Hubble order stuck for ops ("Needs reconcile" + reason). The raw
+      // metadata blob (redeem snapshot etc.) is never returned to anyone from this list.
+      ...(memberView ? {} : hubbleReconcileFlags(metadata)),
       returnedAt: o.status === 'RETURNED' ? o.updatedAt : null,
     }));
 
@@ -928,16 +950,22 @@ export class RewardsService {
     const scope = tenantScope(user);
     const existingOrder = await this.prisma.redemptionOrder.findFirst({
       where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
+      include: { partner: { select: { clientId: true } } },
     });
     if (!existingOrder) throw new NotFoundException('Order not found');
+    // The ORDER's tenant (a platform-wide Gifsy caller's own clientId is 'gifsy').
+    const orderClientId = existingOrder.partner?.clientId ?? user.clientId;
 
     // VOUCHER WRITE INVARIANT: no clear / blank, no overwrite of a stored code (only
-    // "Voucher cancelled with vendor" clears one), never on a Hubble-managed / cash order, never a
-    // previously-cancelled code, a new code only on a paid open order.
+    // "Voucher cancelled with vendor" clears one), never on a Hubble-handed order (unless a
+    // GIFSY_ADMIN's reasoned manual override) or a cash order, never a code cancelled anywhere in
+    // the tenant, a new code only on a paid open order.
     const voucherInput = { voucherCode: dto.voucherCode, voucherProvider: dto.voucherProvider };
-    const voucherPlan = planVoucherWrite(existingOrder, voucherInput, {
-      hubbleEligible: await this.hubbleManagedIfWriting(existingOrder, voucherInput),
-    });
+    const voucherPlan = planVoucherWrite(
+      existingOrder,
+      voucherInput,
+      await this.voucherWriteOptions(user, orderClientId, voucherInput, dto),
+    );
     const data = {
       trackingNumber: dto.trackingNumber,
       trackingUrl: dto.trackingUrl,
@@ -968,25 +996,40 @@ export class RewardsService {
           code: voucherPlan.data.voucherCode,
           provider: voucherPlan.data.voucherProvider ?? existingOrder.voucherProvider,
           path: 'PATCH /rewards/orders/:id',
+          overrideReason: voucherPlan.overridden ? dto.overrideReason?.trim() : null,
         });
       }
       return tx.redemptionOrder.findUniqueOrThrow({ where: { id } });
     });
-    // Same member notification transitionOrder sends when a code is first issued.
-    if (voucherPlan.issuesNewCode) await this.notifyVoucherIssued(id, user.clientId);
+    // Same member notification transitionOrder sends when a code is first issued — under the
+    // ORDER's tenant (branding / templates), never the caller's.
+    if (voucherPlan.issuesNewCode) await this.notifyVoucherIssued(id, orderClientId);
     return { order };
   }
 
   /**
-   * Hubble-eligibility (async half of the voucher guard) — only paid for when the write actually
-   * carries a voucher field. Markers on the row are re-checked inside planVoucherWrite anyway.
+   * The async + identity half of the voucher guard, only paid for when a voucher field is sent:
+   *  - tenant-wide reuse: is the incoming code one cancelled with the vendor in this tenant?
+   *  - manual override (the ops exit for a Hubble-handed order): GIFSY_ADMIN only, reason required.
    */
-  private async hubbleManagedIfWriting(
-    order: Parameters<typeof isHubbleManagedOrder>[1],
+  private async voucherWriteOptions(
+    user: JwtPayload,
+    orderClientId: string,
     input: { voucherCode?: string | null; voucherProvider?: string | null },
-  ): Promise<boolean> {
-    if (input.voucherCode === undefined && input.voucherProvider === undefined) return false;
-    return isHubbleManagedOrder(this.prisma, order);
+    dto: { manualOverride?: boolean; overrideReason?: string },
+  ): Promise<VoucherWriteOptions> {
+    let manualOverride: VoucherWriteOptions['manualOverride'] = null;
+    if (dto.manualOverride === true) {
+      if (user.role !== 'GIFSY_ADMIN') {
+        throw new ForbiddenException('Only a Gifsy admin can manually fulfil an order sent to Hubble.');
+      }
+      manualOverride = { reason: (dto.overrideReason ?? '').trim(), actorId: user.sub, at: new Date() };
+    }
+    if (input.voucherCode === undefined && input.voucherProvider === undefined) return { manualOverride };
+    return {
+      manualOverride,
+      cancelledCodeReused: await isCancelledVoucherCode(this.prisma, orderClientId, input.voucherCode),
+    };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -2456,8 +2499,11 @@ export class RewardsService {
     const scope = tenantScope(user);
     const order = await this.prisma.redemptionOrder.findFirst({
       where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
+      include: { partner: { select: { clientId: true } } },
     });
     if (!order) throw new NotFoundException('Order not found');
+    // The ORDER's tenant — notifications/templates + the tenant-wide cancelled-code lookup.
+    const orderClientId = order.partner?.clientId ?? user.clientId;
 
     const toStatus = dto.toStatus as unknown as RedemptionStatus;
 
@@ -2470,6 +2516,8 @@ export class RewardsService {
         const res = await this.updateOrder(user, id, {
           voucherCode: dto.voucherCode,
           voucherProvider: dto.voucherProvider,
+          manualOverride: dto.manualOverride,
+          overrideReason: dto.overrideReason,
         });
         return { order: res.order, skipped: true as const };
       }
@@ -2537,11 +2585,14 @@ export class RewardsService {
     // (CANCELLED / RETURNED / FAILED) would re-credit the points while the voucher stays
     // live → double benefit; it would also clobber a DELIVERED order under a confirm↔webhook
     // race. Block it: Hubble failures auto-refund via the issuance path, never here.
-    // (Deoleo / non-Hubble orders have no voucherProvider='Hubble' → unaffected.)
-    if (order.voucherProvider === 'Hubble' && isRefundTarget) {
+    // (Deoleo / non-Hubble orders carry no Hubble marker → unaffected.)
+    // Any Hubble marker (not just provider='Hubble'): an order handed to Hubble may hold a live
+    // voucher Hubble issued (INDETERMINATE / PROCESSING_NOT_FOUND …) — never refund it by hand.
+    // Ops exits: "Retry with Hubble" (reconcile) or a GIFSY_ADMIN "Fulfil manually" override.
+    if (hasHubbleMarkers(order) && isRefundTarget) {
       throw new BadRequestException(
-        'A Hubble-issued voucher cannot be cancelled, returned or failed manually; ' +
-          'it is non-reversible once issued.',
+        'An order sent to Hubble cannot be cancelled, returned or failed manually ' +
+          '(a Hubble voucher may exist). Retry with Hubble, or fulfil it manually.',
       );
     }
 
@@ -2557,9 +2608,11 @@ export class RewardsService {
     // VOUCHER WRITE INVARIANT (every edge): no clear / blank, no overwrite of a stored code, a new
     // code only on a paid open order — and the status claim carries the voucher CAS.
     const voucherInput = { voucherCode: dto.voucherCode, voucherProvider: dto.voucherProvider };
-    const voucherPlan = planVoucherWrite(order, voucherInput, {
-      hubbleEligible: await this.hubbleManagedIfWriting(order, voucherInput),
-    });
+    const voucherPlan = planVoucherWrite(
+      order,
+      voucherInput,
+      await this.voucherWriteOptions(user, orderClientId, voucherInput, dto),
+    );
 
     // BUG-1 — a DIGITAL_VOUCHER order cannot be marked DELIVERED without an actual voucher
     // code to deliver. The effective channel is the stored one unless this transition
@@ -2621,6 +2674,7 @@ export class RewardsService {
           code: voucherPlan.data.voucherCode,
           provider: voucherPlan.data.voucherProvider ?? order.voucherProvider,
           path: 'POST /rewards/orders/:id/transition',
+          overrideReason: voucherPlan.overridden ? dto.overrideReason?.trim() : null,
         });
       }
 
@@ -2671,7 +2725,7 @@ export class RewardsService {
         // direct SMS enqueue is removed; the ORDER_* paid channels default OFF until a tenant
         // enables them. Best-effort: never throws into the transition path.
         await this.notifications.notifyUserWithChannels({
-          clientId: user.clientId,
+          clientId: orderClientId, // the ORDER's tenant (a platform-wide Gifsy caller is 'gifsy')
           userId: partner.userId,
           eventKey: `ORDER_${toStatus}` as EventKey,
           recipientPhone: partner.phone ?? null,
@@ -2693,7 +2747,7 @@ export class RewardsService {
     // whatever status ops issues it. Send the owner the code (bell + WhatsApp `voucher_code`).
     // Fires once (guarded on the prior value) and only for the outlet owner. Best-effort.
     if (voucherNewlyIssued) {
-      await this.notifyVoucherIssued(id, user.clientId);
+      await this.notifyVoucherIssued(id, orderClientId);
     }
 
     return { order: updated };
@@ -2723,17 +2777,37 @@ export class RewardsService {
     const scope = tenantScope(user);
     const order = await this.prisma.redemptionOrder.findFirst({
       where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
-      select: { id: true, orderNumber: true, status: true, voucherCode: true, voucherProvider: true, metadata: true },
+      select: {
+        id: true, orderNumber: true, status: true, voucherCode: true, voucherProvider: true, metadata: true,
+        partner: { select: { clientId: true } },
+      },
     });
     if (!order) throw new NotFoundException('Order not found');
     if (!hasIssuedVoucher(order.voucherCode)) {
       throw new ConflictException('This order has no voucher code to cancel — refresh and try again.');
     }
-    if (hasHubbleMarkers(order)) {
+    // Only a code HUBBLE ISSUED is non-reversible. A MANUAL code on an order whose only Hubble
+    // trace is an ops flag (HUBBLE_SUCCESS_MANUAL_CODE_PRESENT / HUBBLE_FAILED_VOUCHER_PRESENT, or
+    // a manual-fulfilment override) is a normal vendor voucher and may be cancelled.
+    if (isHubbleIssuedCode(order)) {
       throw new BadRequestException(
         'A Hubble-issued voucher cannot be cancelled with the vendor; it is non-reversible once issued.',
       );
     }
+    const orderClientId = order.partner?.clientId ?? user.clientId;
+    const meta = (order.metadata && typeof order.metadata === 'object' && !Array.isArray(order.metadata)
+      ? order.metadata
+      : {}) as Record<string, unknown>;
+    const releaseHubble: Prisma.InputJsonValue | null =
+      meta.hubbleReconcileReason === 'HUBBLE_FAILED_VOUCHER_PRESENT'
+        ? ({
+            ...meta,
+            hubbleNeedsReconcile: false,
+            hubbleStatus: 'RELEASED',
+            hubbleReleasedAt: new Date().toISOString(),
+            hubbleReleasedBy: user.sub,
+          } as Prisma.InputJsonValue)
+        : null;
 
     const code = order.voucherCode as string;
     // Never the full code anywhere (audit / logs): the same last-4 mask the tenant-admin list uses.
@@ -2745,26 +2819,31 @@ export class RewardsService {
         where: {
           id,
           voucherCode: code,
-          OR: [{ voucherProvider: null }, { voucherProvider: { not: 'Hubble' } }],
+          OR: [
+            { voucherProvider: null },
+            // Case-insensitive "not Hubble" (NULL handled by the branch above).
+            { NOT: { voucherProvider: { equals: 'hubble', mode: 'insensitive' } } },
+          ],
         },
         data: {
           voucherCode: null,
           voucherProvider: null,
-          // Remember the cancelled code (sha256 only — never the code) so a stale sheet / request
-          // can never re-issue it on this order (planVoucherWrite refuses a known hash).
-          metadata: {
-            ...((order.metadata && typeof order.metadata === 'object' && !Array.isArray(order.metadata)
-              ? order.metadata
-              : {}) as Record<string, unknown>),
-            [CANCELLED_VOUCHER_HASHES_KEY]: Array.from(
-              new Set([...cancelledVoucherHashes(order.metadata), hashVoucherCode(code)]),
-            ),
-          } as Prisma.InputJsonValue,
+          // HUBBLE_FAILED_VOUCHER_PRESENT: Hubble definitively FAILED (no Hubble voucher exists) and
+          // the only code was this manual one — once it is cancelled the order is a plain order
+          // again, so release the Hubble flag (otherwise the refund block would dead-end it).
+          // HUBBLE_SUCCESS_MANUAL_CODE_PRESENT stays flagged: Hubble DID issue a voucher.
+          ...(releaseHubble ? { metadata: releaseHubble } : {}),
         },
       });
       if (claim.count === 0) {
         throw new ConflictException('The voucher code changed — refresh and try again.');
       }
+      // Remember the cancelled code TENANT-WIDE (sha256 of the normalised code — never the code)
+      // so no stale sheet / request can re-issue it on ANY order of this tenant.
+      await tx.cancelledVoucherCode.createMany({
+        data: [{ clientId: orderClientId, codeHash: hashVoucherCode(code), orderId: id, cancelledById: user.sub }],
+        skipDuplicates: true,
+      });
       await tx.auditLog.create({
         data: {
           actorId: user.sub,
@@ -2793,6 +2872,42 @@ export class RewardsService {
     );
     // voucherCode: null states the post-condition explicitly (the row's code was just cleared).
     return { order: { ...updated, voucherCode: null } };
+  }
+
+  /**
+   * POST /v1/rewards/orders/:id/hubble-reconcile — "Retry with Hubble" (GIFSY_ADMIN only): the ops
+   * exit for an order flagged hubbleNeedsReconcile. Runs the EXISTING webhook reconcile
+   * (get-by-reference → apply the authoritative Hubble state idempotently; never places a new
+   * Hubble order, never refunds off a miss) for this one order, and audits who ran it + the outcome.
+   */
+  async retryHubbleReconcile(user: JwtPayload, id: string) {
+    if (user.role !== 'GIFSY_ADMIN') {
+      throw new ForbiddenException('Only a Gifsy admin can retry a Hubble reconcile.');
+    }
+    const scope = tenantScope(user);
+    const order = await this.prisma.redemptionOrder.findFirst({
+      where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
+      select: { id: true, orderNumber: true, status: true, metadata: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    const before = (order.metadata as Record<string, unknown> | null)?.hubbleReconcileReason ?? null;
+    const outcome = await this.reconcileHubbleOrder(order.id);
+    await this.prisma.auditLog.create({
+      data: {
+        actorId: user.sub,
+        action: 'UPDATE',
+        entityType: 'REDEMPTION_ORDER',
+        entityId: order.id,
+        metadata: {
+          event: 'HUBBLE_RECONCILE_RETRY',
+          orderNumber: order.orderNumber,
+          statusBefore: order.status,
+          reconcileReasonBefore: before as Prisma.InputJsonValue,
+          outcome,
+        },
+      },
+    });
+    return { orderId: order.id, outcome };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -3494,12 +3609,14 @@ export class RewardsService {
         }
         if (body === null) {
           // Definitively never placed (404 on recovery) → safe to refund.
-          await this.refundAndFailHubble(
+          // Blocked (a voucher code is on the order) → NOT refunded: report pending, never
+          // "points refunded" to the member.
+          const refunded = await this.refundAndFailHubble(
             order,
             'Hubble order was not placed (not found on recovery)',
             actorId,
           );
-          return this.HUBBLE_OUTCOME.FAILED_REFUNDED;
+          return refunded ? this.HUBBLE_OUTCOME.FAILED_REFUNDED : this.HUBBLE_OUTCOME.PENDING_RECONCILE;
         }
       }
 
@@ -3624,12 +3741,12 @@ export class RewardsService {
       return this.HUBBLE_OUTCOME.PROCESSING;
     }
     if (status === 'FAILED') {
-      await this.refundAndFailHubble(
+      const refunded = await this.refundAndFailHubble(
         order,
         body.failureReason ?? 'Hubble reported FAILED',
         actorId,
       );
-      return this.HUBBLE_OUTCOME.FAILED_REFUNDED;
+      return refunded ? this.HUBBLE_OUTCOME.FAILED_REFUNDED : this.HUBBLE_OUTCOME.PENDING_RECONCILE;
     }
     // Unknown status → treat as still-pending (safer than refunding).
     this.logger.warn(
@@ -3753,7 +3870,9 @@ export class RewardsService {
     order: HubbleLoadedOrder,
     reason: string,
     actorId?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    // Returns true when THIS call moved the order to FAILED (points refunded if still debited);
+    // false when it did not (already terminal, or BLOCKED by an issued voucher code).
     const flip = await this.prisma.$transaction(async (tx) => {
       // AUDIT-FIX (money): refund ONLY while the order is still non-terminal. Folding the
       // status predicate into the SAME atomic claim as the pointsDeducted zeroing means a
@@ -3831,9 +3950,10 @@ export class RewardsService {
         );
         await this.markHubblePendingReconcile(order.id, 'HUBBLE_FAILED_VOUCHER_PRESENT');
       }
-      return;
+      return false;
     }
     this.logger.warn(`[hubble] order ${order.orderNumber} FAILED + points refunded: ${reason}`);
+    return true;
   }
 
   /** Flag an order as needing reconcile (money held pending webhook / ops), no status flip. */
