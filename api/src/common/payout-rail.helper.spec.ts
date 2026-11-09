@@ -218,6 +218,25 @@ describe('payout-rail.helper', () => {
       expect(withLive.clears).toEqual({ upiId: null, upiCaptureMethod: null });
       expect(effectiveProposedPayout(proposed, { accountNumber: true }).rail).toBeNull();
     });
+
+    it('FIX B (M3): an INCOMPLETE explicit rail drops its routing keys + paymentMode (non-routing kept), clears nothing', () => {
+      const bank = effectiveProposedPayout(
+        { payoutRail: 'bank', paymentMode: 'bank', bankName: 'HDFC', bankAccountHolder: 'H', bankAccountNumber: '2', gstNumber: 'G' },
+        null, // no field flags → no legacy narrowing; only the M3 drop applies
+        { upiId: 'a@upi', ifscCode: null },
+      );
+      expect(bank.rail).toBeNull();
+      expect(bank.clears).toEqual({});
+      expect(bank.proposal).toEqual({ payoutRail: 'bank', bankName: 'HDFC', bankAccountHolder: 'H', gstNumber: 'G' });
+      const upi = effectiveProposedPayout(
+        { payoutRail: 'upi', paymentMode: 'upi', upiId: ' ', upiCaptureMethod: 'QR' },
+        null,
+        { bankAccountNumber: '1', ifscCode: 'X' },
+      );
+      expect(upi.proposal).toEqual({ payoutRail: 'upi' });
+      // A COMPLETE rail is untouched (paymentMode kept).
+      expect(effectiveProposedPayout({ payoutRail: 'upi', paymentMode: 'upi', upiId: 'a@upi' }, null).proposal.paymentMode).toBe('upi');
+    });
   });
 
   describe('resolveUpiCaptureMethod (R6/R7)', () => {

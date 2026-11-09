@@ -4503,7 +4503,7 @@ describe('KycService', () => {
       bankName: 'Live Bank', bankAccountHolder: 'H', bankAccountNumber: '111222', ifscCode: 'LIVE0001',
     };
 
-    it('payout-editable re-KYC switching UPI → bank: bank written, upiId + upiCaptureMethod nulled, status untouched', async () => {
+    it('payout-editable re-KYC switching UPI → bank: bank written, upiId + upiCaptureMethod nulled, UNVERIFIED → VERIFIED', async () => {
       const data = await approveWith(
         { payoutRail: 'bank', paymentMode: 'bank', bankName: 'HDFC', bankAccountNumber: '50100123', ifscCode: 'HDFC0001' },
         { live: { upiId: 'old@upi', paymentDetailsStatus: 'UNVERIFIED' } },
@@ -4512,8 +4512,8 @@ describe('KycService', () => {
         bankAccountNumber: '50100123', ifscCode: 'HDFC0001', paymentMode: 'bank',
         upiId: null, upiCaptureMethod: null,
       });
-      // R1: a re-KYC approval never changes paymentDetailsStatus (only a PAID payout verifies).
-      expect(data.paymentDetailsStatus).toBeUndefined();
+      // FIX A: the approval WROTE a rail on an UNVERIFIED partner → reviewer approval verifies it.
+      expect(data.paymentDetailsStatus).toBe('VERIFIED');
       // Only the routing columns — the cheque evidence key is never touched by the KYC apply (F6).
       expect(data.payoutChequeFileKey).toBeUndefined();
     });
@@ -4531,7 +4531,7 @@ describe('KycService', () => {
       expect(data.payoutChequeFileKey).toBeUndefined();
     });
 
-    it('R1: re-KYC approval NEVER sets paymentDetailsStatus — not on a NEW rail of an UNVERIFIED / NEEDS_RECAPTURE partner', async () => {
+    it('FIX A: a re-KYC approval that WRITES a rail promotes an UNVERIFIED / NEEDS_RECAPTURE partner to VERIFIED', async () => {
       for (const status of ['UNVERIFIED', 'NEEDS_RECAPTURE']) {
         jest.clearAllMocks();
         const data = await approveWith(
@@ -4539,8 +4539,69 @@ describe('KycService', () => {
           { live: { upiId: 'self@upi', paymentDetailsStatus: status } },
         );
         expect(data.upiId).toBe('brand-new@upi');
+        expect(data.paymentDetailsStatus).toBe('VERIFIED');
+      }
+    });
+
+    it('FIX A: NEEDS_RECAPTURE partner + approved BANK re-KYC (IFSC locked, from live) → VERIFIED', async () => {
+      const data = await approveWith(
+        { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123' },
+        {
+          live: { bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001', paymentDetailsStatus: 'NEEDS_RECAPTURE' },
+          reKycFlags: { accountNumber: true },
+        },
+      );
+      expect(data).toMatchObject({ bankAccountNumber: '50100123', paymentMode: 'bank', paymentDetailsStatus: 'VERIFIED' });
+    });
+
+    it('FIX A: an already-VERIFIED partner is never re-written (status key absent)', async () => {
+      const data = await approveWith(
+        { payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi', upiCaptureMethod: 'QR' },
+        { live: { upiId: 'old@upi', paymentDetailsStatus: 'VERIFIED' } },
+      );
+      expect(data.upiId).toBe('new@upi');
+      expect('paymentDetailsStatus' in data).toBe(false);
+    });
+
+    it('FIX A: NO rail written (identity-only re-KYC) on a NEEDS_RECAPTURE / UNVERIFIED partner → status unchanged', async () => {
+      for (const status of ['UNVERIFIED', 'NEEDS_RECAPTURE']) {
+        jest.clearAllMocks();
+        const data = await approveWith(
+          { gstNumber: '29ABCDE1234F1Z5', bankName: 'Renamed Bank' },
+          { live: { bankAccountNumber: '111', ifscCode: 'HDFC0001', paymentDetailsStatus: status }, reKycFlags: { gstNumber: true, bankName: true } },
+        );
+        expect(data.gstNumber).toBe('29ABCDE1234F1Z5');
         expect('paymentDetailsStatus' in data).toBe(false);
       }
+    });
+
+    it('FIX A: LEGACY draft (no payoutRail) writing a UPI on a NEEDS_RECAPTURE partner → status unchanged', async () => {
+      const data = await approveWith(
+        { paymentMode: 'upi', upiId: 'shop@upi' },
+        { live: { upiId: 'old@upi', paymentDetailsStatus: 'NEEDS_RECAPTURE' }, reKycFlags: null },
+      );
+      expect(data.upiId).toBe('shop@upi'); // legacy write-back still happens…
+      expect('paymentDetailsStatus' in data).toBe(false); // …but it never verifies
+    });
+
+    it('FIX A: an INCOMPLETE staged rail (locked IFSC vanished) on a NEEDS_RECAPTURE partner → status unchanged', async () => {
+      const data = await approveWith(
+        { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123' },
+        { live: { upiId: 'old@upi', ifscCode: null, paymentDetailsStatus: 'NEEDS_RECAPTURE' }, reKycFlags: { accountNumber: true } },
+      );
+      expect('paymentDetailsStatus' in data).toBe(false);
+    });
+
+    it('FIX B (M3): staged bank rail INCOMPLETE after merge (locked IFSC vanished) → no account / IFSC / paymentMode written, UPI kept', async () => {
+      const data = await approveWith(
+        { payoutRail: 'bank', paymentMode: 'bank', bankName: 'HDFC', bankAccountNumber: '50100123' },
+        { live: { upiId: 'old@upi', ifscCode: null }, reKycFlags: { accountNumber: true, bankName: true } },
+      );
+      expect(data.bankAccountNumber).toBeUndefined();
+      expect(data.ifscCode).toBeUndefined();
+      expect(data.paymentMode).toBeUndefined();
+      expect(data.upiId).toBeUndefined(); // nothing cleared either
+      expect(data.bankName).toBe('HDFC'); // non-routing field still applies
     });
 
     it('R4a: a staged payoutRail=bank WITHOUT an IFSC is incomplete → clears nothing (UPI kept)', async () => {
@@ -5981,6 +6042,17 @@ describe('KycService', () => {
       }
     });
 
+    it('FIX B (M3): getOne presents an INCOMPLETE staged bank rail (locked IFSC vanished) as approval writes it — no account / IFSC / mode, nothing nulled', async () => {
+      const proposed = await getOneWith({
+        partner: livePartner({ upiId: 'old@upi', ifscCode: null }, { accountNumber: true }),
+        proposedPartner: { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '999000' },
+      });
+      expect(proposed.bankAccountNumber ?? undefined).toBeUndefined();
+      expect(proposed.ifscCode ?? undefined).toBeUndefined();
+      expect(proposed.paymentMode ?? undefined).toBeUndefined();
+      expect('upiId' in proposed).toBe(false); // not presented as "will be removed"
+    });
+
     // R3 — the reviewer must SEE what they approve, even on an UNVERIFIED / NEEDS_RECAPTURE partner.
     const getOneFull = async (row: Record<string, unknown>, caller: JwtPayload = gifsy) => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
@@ -6562,6 +6634,21 @@ describe('KycService', () => {
       const entry = (await service.reviewQueue(gifsy)).entries[0];
       expect(entry.bankName).toBe('HDFC');
       expect(entry.upiId).toBe('kumar@upi');
+    });
+
+    it('FIX B (M3): review-queue shows an INCOMPLETE staged bank rail exactly as approval writes it (live account/IFSC/mode, UPI kept)', async () => {
+      const base = queuePartner('VERIFIED');
+      const row = {
+        ...base,
+        // Locked IFSC vanished from the live partner after the draft.
+        partner: { ...base.partner, ifscCode: null, outlets: [{ ...base.partner.outlets[0], reKycFlags: { accountNumber: true } }] },
+        proposedPartner: { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '999000' },
+      };
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([row]);
+      const entry = (await service.reviewQueue(gifsy)).entries[0];
+      expect(entry.accountNumber).toBe('50100'); // live — the staged account is NOT written
+      expect(entry.paymentMode).toBe('bank'); // live mode — NOT the staged one
+      expect(entry.upiId).toBe('kumar@upi'); // nothing cleared
     });
 
     // R3 — the LIVE rails are hidden BEFORE the proposal is overlaid, so the rep-entered PROPOSED

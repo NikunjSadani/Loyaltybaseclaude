@@ -8,7 +8,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, KycFieldKey, KycDocumentType, KycFieldSource, KycStatus, EntityType, GstRegistrationType } from '@prisma/client';
+import { Prisma, KycFieldKey, KycDocumentType, KycFieldSource, KycStatus, EntityType, GstRegistrationType, PaymentDetailsStatus } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as XLSX from 'xlsx';
@@ -4774,6 +4774,9 @@ export class KycService {
         upiId?: string | null;
         bankAccountNumber?: string | null;
         ifscCode?: string | null;
+        // The LIVE payout-verification status: an approval that WRITES a rail promotes a
+        // NEEDS_RECAPTURE / UNVERIFIED partner to VERIFIED (reviewer approval = verification).
+        paymentDetailsStatus?: PaymentDetailsStatus | null;
         outlets: Array<{
           id: string;
           // The outlet's GROUP key — its owner group (parentId) for the re-KYC apply's
@@ -4910,8 +4913,18 @@ export class KycService {
         // staged with a mixed-case UPI BEFORE this normalizer change, approved AFTER, would otherwise
         // persist the raw mixed-case value while the check compared lowercase → divergence. A
         // normalized-empty value maps to `undefined` (not null) to preserve "undefined = untouched".
-        // paymentDetailsStatus is NEVER written here: a re-KYC approval does not verify (or un-verify)
-        // the payout rail — only a COMPLETED payout (payouts.service PAID path) promotes it to VERIFIED.
+        // paymentDetailsStatus (owner decision): when this approval actually WRITES a payout rail
+        // (payout.rail non-null ⇔ the staged chosen rail is COMPLETE merged over the live partner — the
+        // same condition under which the other rail is cleared) AND the partner is currently
+        // NEEDS_RECAPTURE / UNVERIFIED, promote it to VERIFIED: the reviewer approved the visible
+        // proposed details, which counts as verification. Without this a stale "needs re-capture" mark
+        // would let the partner's redemption self-capture (partner.service capturePayoutDetails gate)
+        // overwrite reviewer-approved details. Never touched otherwise — no rail written (incl. an
+        // incomplete rail, payout-locked or legacy drafts) or already VERIFIED → status unchanged.
+        const liveStatus = submission.partner.paymentDetailsStatus;
+        const verifiesPayout =
+          payoutRail != null &&
+          (liveStatus === PaymentDetailsStatus.NEEDS_RECAPTURE || liveStatus === PaymentDetailsStatus.UNVERIFIED);
         await tx.channelPartner.update({
           where: { id: submission.partnerId },
           data: {
@@ -4934,6 +4947,7 @@ export class KycService {
             // Payout-ROUTING columns only — KYC document / cheque evidence (incl. the redemption
             // payoutChequeFileKey) is untouched. Empty when no rail is set (legacy / payout-locked).
             ...payout.clears,
+            ...(verifiesPayout ? { paymentDetailsStatus: PaymentDetailsStatus.VERIFIED } : {}),
           },
         });
 

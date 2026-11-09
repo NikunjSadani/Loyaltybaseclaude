@@ -1365,6 +1365,21 @@ describe('PartnerService', () => {
       expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
     });
 
+    it('FIX A: after a re-KYC approval wrote + VERIFIED the bank rail of a NEEDS_RECAPTURE partner, capture is rejected', async () => {
+      // Post-approval state: the live NEEDS_RECAPTURE partner with the approval's write merged over it
+      // (kyc.service.spec "NEEDS_RECAPTURE partner + approved BANK re-KYC → VERIFIED"). Pre-fix the status
+      // stayed NEEDS_RECAPTURE and this capture (see the next test) would overwrite the approved details.
+      mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
+      primePartner(
+        { requiredPaymentType: 'ANY', parentId: null },
+        { bankAccountNumber: '50100123', ifscCode: 'HDFC0001', paymentDetailsStatus: 'VERIFIED' },
+      );
+      await expect(
+        service.capturePayoutDetails(switcher, { paymentMode: 'upi', upiId: 'new@upi' }),
+      ).rejects.toThrow(/already on file/i);
+      expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+    });
+
     it('allows re-capture when the status is NEEDS_RECAPTURE (failed payout)', async () => {
       mockTenant.resolveClient.mockResolvedValue(FLAG_ON);
       primePartner(

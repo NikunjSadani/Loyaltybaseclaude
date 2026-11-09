@@ -318,6 +318,22 @@ const LEGACY_PAYOUT_KEY_FLAG: Record<string, (typeof PAYOUT_REKYC_FLAG_KEYS)[num
   paymentMode: 'any',
 };
 
+/**
+ * Staged keys (ChannelPartner field names) dropped from a proposal whose explicit payoutRail is
+ * INCOMPLETE at approval: that rail's ROUTING columns (+ the UPI capture provenance, meaningless
+ * without a UPI ID). paymentMode is dropped alongside (see effectiveProposedPayout).
+ */
+const INCOMPLETE_RAIL_DROP_KEYS: Readonly<Record<PayoutRail, readonly string[]>> = {
+  upi: ['upiId', 'upiCaptureMethod'],
+  bank: ['bankAccountNumber', 'ifscCode'],
+};
+
+function omitKeys(o: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...o };
+  for (const k of keys) delete out[k];
+  return out;
+}
+
 export interface EffectiveProposedPayout {
   /** The proposal to apply/present — payout keys the rep could not edit (legacy drafts) removed. */
   proposal: Record<string, unknown>;
@@ -335,6 +351,9 @@ export interface EffectiveProposedPayout {
  *  • NEW drafts with an explicit `payoutRail` (create() staged it because the rep SET at least one
  *    routing field of that rail — resolveReKycPayout rule d) that is COMPLETE once merged over the
  *    live partner: apply the staged rail's values and clear the other rail.
+ *  • An explicit `payoutRail` that is INCOMPLETE once merged (a locked routing value vanished before
+ *    approval): rail null, nothing cleared, AND that rail's routing keys + paymentMode are dropped
+ *    from the proposal (never a half rail / a paymentMode contradicting the routed rail).
  *  • Drafts WITHOUT `payoutRail`: never infer a rail, never clear. A new draft that set no routing
  *    field (payout fields locked, or only bankName / accountHolderName edited) stages only those
  *    editable fields (each kept by the flag filter below, no paymentMode). A LEGACY draft (staged before this
@@ -365,11 +384,20 @@ export function effectiveProposedPayout(
   if (rail) {
     return { proposal: proposed, rail, clears: rail === 'upi' ? { ...CLEAR_BANK_RAIL } : { ...CLEAR_UPI_RAIL } };
   }
+  // INCOMPLETE explicit rail (M3): the staged chosen rail is NOT complete once merged over the live
+  // partner (e.g. the locked stored IFSC disappeared between draft and approval). Approval must then
+  // write NONE of that rail's routing columns and NO paymentMode — otherwise it would leave a half
+  // bank rail and a paymentMode contradicting the rail payouts actually route on. Non-routing fields
+  // (bankName / bankAccountHolder) route nothing and still apply. Done HERE so the apply, getOne and
+  // the reviewer queue/export all present exactly what approval writes.
+  const base: Record<string, unknown> = explicitRail
+    ? omitKeys(proposed, [...INCOMPLETE_RAIL_DROP_KEYS[explicitRail], 'paymentMode'])
+    : proposed;
   const flags = outletReKycFlags as ReKycFlags;
-  if (!hasReKycFlags(flags)) return { proposal: proposed, rail: null, clears: {} };
+  if (!hasReKycFlags(flags)) return { proposal: base, rail: null, clears: {} };
   const f = flags as Record<string, unknown>;
   const anyPayoutFlag = PAYOUT_REKYC_FLAG_KEYS.some((k) => f[k] === true);
-  const proposal: Record<string, unknown> = { ...proposed };
+  const proposal: Record<string, unknown> = { ...base };
   for (const [key, flag] of Object.entries(LEGACY_PAYOUT_KEY_FLAG)) {
     if (!(key in proposal)) continue;
     const editable = flag === 'any' ? anyPayoutFlag : f[flag] === true;
