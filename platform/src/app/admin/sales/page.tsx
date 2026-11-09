@@ -9,6 +9,7 @@ import { buildAchievementReportBuffer } from '@/lib/achievement-report';
 import { DEOLEO_DEFAULT_KPIS } from '@/lib/platform/tenant-kpi-config';
 import type { TenantKpiDef } from '@/lib/platform/tenant-kpi-config';
 import { formatMonth } from '@/lib/targets';
+import { SALES_IMPORT_BATCH_STATUS } from '@/lib/sales-import/types';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -59,6 +60,8 @@ interface UploadResult {
   acceptedCount: number;
   rejectedCount: number;
   rows:          UploadResultRow[];
+  /** Sales Import: KPI columns in the file that are importer-owned and were NOT written (absent for most tenants). */
+  skippedImporterOwnedKpis?: string[];
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -192,12 +195,20 @@ function UploadHistory({ refreshKey }: { refreshKey: number }) {
                   {batch.rejectedCount} skipped
                 </span>
               )}
+              {batch.status === SALES_IMPORT_BATCH_STATUS && (
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                  Sales Import
+                </span>
+              )}
             </div>
             <p className="text-xs text-gray-400 mt-0.5">{formatDate(batch.createdAt)}</p>
           </div>
 
-          {/* Confirm → Delete flow */}
-          {confirmId === batch.id ? (
+          {/* Confirm → Delete flow. Sales Import batches are managed under Sales Import (the backend refuses
+              to delete them), so they get no Delete action here. */}
+          {batch.status === SALES_IMPORT_BATCH_STATUS ? (
+            <span className="text-xs text-gray-400 shrink-0">Managed in Sales Import</span>
+          ) : confirmId === batch.id ? (
             <div className="flex items-center gap-2 shrink-0">
               <span className="text-xs text-red-600 font-medium flex items-center gap-1">
                 <AlertTriangle className="w-3.5 h-3.5" />
@@ -696,6 +707,18 @@ export default function SalesUploadPage() {
               </div>
             ))}
           </div>
+
+          {/* Sales Import ownership: KPI columns that now come only from the sales file were not written. */}
+          {(uploadResult.skippedImporterOwnedKpis?.length ?? 0) > 0 && (
+            <div role="status" data-testid="skipped-importer-owned-kpis" className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
+              <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <span>
+                These columns were skipped because their KPIs come from Sales Import (the sales file):{' '}
+                <strong>{uploadResult.skippedImporterOwnedKpis!.join(', ')}</strong>. Their stored values were not changed.
+                All other columns were saved as usual.
+              </span>
+            </div>
+          )}
 
           {/* Skipped / rejected rows from backend */}
           {uploadResult.rows.filter(r => r.status !== 'accepted').length > 0 && (
