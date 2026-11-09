@@ -1,5 +1,5 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { KycStatus, Prisma } from '@prisma/client';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ChannelPartner, KycStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -8,6 +8,7 @@ import {
   acquireIdentityLocks,
   checkGroupUniqueness,
   childSharesDetailWithGroup,
+  isLockConflictError,
   normalizeIdentityValue,
   resolveUniquenessPolicy,
   type PartnerIdentityDetails,
@@ -352,67 +353,96 @@ export class ParentsService {
     // at approval — keeping the stored value equal to the form the app check + partial-unique DB
     // index rely on.
     const policy = await this.policy(clientId);
-    const details: PartnerIdentityDetails = {
-      gstNumber: normalizeIdentityValue('gst', parent.gstNumber),
-      panNumber: normalizeIdentityValue('pan', parent.panNumber),
-      bankAccountNumber: normalizeIdentityValue('bank', parent.bankAccountNumber),
-      upiId: normalizeIdentityValue('upi', parent.upiId),
-    };
     const now = new Date();
 
     // Check + write in ONE interactive tx, advisory-locked BEFORE the check (bank/UPI have no DB
     // index → the lock is their only race guard). A partial-unique index P2002 → clean 400.
-    const updated = await this.prisma.$transaction(async (tx) => {
-      await acquireIdentityLocks(tx, { clientId, details, policy });
-      const violation = await checkGroupUniqueness(tx, {
-        clientId,
-        ourParentId: parent.id, // its own group (children share its parentId)
-        details,
-        policy,
-        exceptPartnerId: parent.id, // exclude self from the clash search
-      });
-      if (violation) throw new BadRequestException(violation.message);
-
-      try {
-        const u = await tx.channelPartner.update({
-          where: { id: parent.id },
-          data: {
-            onboardedAt: now,
-            isActive: true,
-            // Re-persist canonical identity values (defense-in-depth normalisation).
-            gstNumber: details.gstNumber,
-            panNumber: details.panNumber,
-            bankAccountNumber: details.bankAccountNumber,
-            upiId: details.upiId,
-          },
+    // LOCK ORDER (deadlock fix): row-lock the parent's channel_partners row FIRST (SELECT … FOR
+    // UPDATE), identity advisory locks SECOND, then the write — the SAME order as the re-KYC
+    // approval (kyc.service applyBridgeOutcome) and the payout capture (partner.service
+    // capturePayoutDetails). Taking the identity locks first and the row second (via the update)
+    // could deadlock against another writer of this row. A lock-conflict abort → clean 409.
+    let updated: ChannelPartner;
+    try {
+      updated = await this.prisma.$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw<
+          Array<{
+            gstNumber: string | null;
+            panNumber: string | null;
+            bankAccountNumber: string | null;
+            upiId: string | null;
+          }>
+        >`SELECT "gstNumber", "panNumber", "bankAccountNumber", "upiId"
+          FROM channel_partners WHERE id = ${parent.id} FOR UPDATE`;
+        const locked = lockedRows?.[0];
+        if (!locked) throw new NotFoundException('Parent owner not found');
+        // CANONICAL identity values (helper §normalizeIdentityValue), read FROM THE LOCKED ROW so the
+        // lock + check + re-persist below run on exactly what is committed (not the pre-tx snapshot).
+        // Re-persisted on the update so a parent stored un-normalized (e.g. a legacy lower-case
+        // PAN/GST) is canonicalised at approval.
+        const details: PartnerIdentityDetails = {
+          gstNumber: normalizeIdentityValue('gst', locked.gstNumber),
+          panNumber: normalizeIdentityValue('pan', locked.panNumber),
+          bankAccountNumber: normalizeIdentityValue('bank', locked.bankAccountNumber),
+          upiId: normalizeIdentityValue('upi', locked.upiId),
+        };
+        await acquireIdentityLocks(tx, { clientId, details, policy });
+        const violation = await checkGroupUniqueness(tx, {
+          clientId,
+          ourParentId: parent.id, // its own group (children share its parentId)
+          details,
+          policy,
+          exceptPartnerId: parent.id, // exclude self from the clash search
         });
-
-        // If the parent gained a login user (a phone-backed parent, wired by a later stream),
-        // activate it. NO wallet, NO outlet activation — a parent operates nothing. (Same tx, so
-        // it rolls back with the update on any failure.)
-        if (parent.userId) {
-          await tx.user.update({
-            where: { id: parent.userId },
-            data: { status: 'ACTIVE' },
+        if (violation) throw new BadRequestException(violation.message);
+  
+        try {
+          const u = await tx.channelPartner.update({
+            where: { id: parent.id },
+            data: {
+              onboardedAt: now,
+              isActive: true,
+              // Re-persist canonical identity values (defense-in-depth normalisation).
+              gstNumber: details.gstNumber,
+              panNumber: details.panNumber,
+              bankAccountNumber: details.bankAccountNumber,
+              upiId: details.upiId,
+            },
           });
+  
+          // If the parent gained a login user (a phone-backed parent, wired by a later stream),
+          // activate it. NO wallet, NO outlet activation — a parent operates nothing. (Same tx, so
+          // it rolls back with the update on any failure.)
+          if (parent.userId) {
+            await tx.user.update({
+              where: { id: parent.userId },
+              data: { status: 'ACTIVE' },
+            });
+          }
+  
+          return u;
+        } catch (e) {
+          // The parent-activation update above is an ACTIVE-maker: if the parent's phone is already
+          // held by another ACTIVE user, the failure is the PHONE partial index, not identity —
+          // surface the correct message rather than a misleading identity one.
+          if (isActivePhoneConflict(e)) {
+            throw new BadRequestException(ACTIVE_PHONE_IN_USE_MSG);
+          }
+          if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+            throw new BadRequestException(
+              "This parent's identity details (PAN/GST/bank/UPI) are already registered in this tenant.",
+            );
+          }
+          throw e;
         }
-
-        return u;
-      } catch (e) {
-        // The parent-activation update above is an ACTIVE-maker: if the parent's phone is already
-        // held by another ACTIVE user, the failure is the PHONE partial index, not identity —
-        // surface the correct message rather than a misleading identity one.
-        if (isActivePhoneConflict(e)) {
-          throw new BadRequestException(ACTIVE_PHONE_IN_USE_MSG);
-        }
-        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-          throw new BadRequestException(
-            "This parent's identity details (PAN/GST/bank/UPI) are already registered in this tenant.",
-          );
-        }
-        throw e;
+      });
+    } catch (e) {
+      // A lock-conflict abort (P2034 / Postgres 40P01 deadlock / 40001) → a clean 409, never a raw 500.
+      if (isLockConflictError(e)) {
+        throw new ConflictException('This parent was changed by another action at the same time — please retry.');
       }
-    });
+      throw e;
+    }
 
     await this.prisma.auditLog.create({
       data: {

@@ -5954,54 +5954,55 @@ describe('KycService', () => {
     });
   });
 
-  // ── FIX 1: PATCH /v1/kyc/:id → APPROVED must not bypass the classification gate ──
-  describe('update() PATCH status=APPROVED classification gate (FIX 1)', () => {
-    /** Prime update() up to the tx classification check + the status write. */
-    const seedPatchApprove = (partner: Record<string, unknown> | null) => {
-      // Outer tenant-scoped load (no partner include).
-      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({ id: 's1', status: 'PENDING_GIFSY', userId: 'u1' });
-      // The in-tx classification load (partnerId + partner classification + primary outlet parentId).
-      mockTx.kycSubmission.findFirst.mockResolvedValueOnce({ partnerId: partner ? 'p1' : null, partner });
-      mockTx.kycSubmission.update.mockResolvedValueOnce({ id: 's1', status: 'APPROVED' });
-      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
-    };
-
-    it('BLOCKS PATCH status=APPROVED when classification is null and there is NO group lock (no status write)', async () => {
-      seedPatchApprove({ clientId: 'deoleo', entityType: null, gstRegistrationType: null, outlets: [{ parentId: null }] });
+  // ── PATCH /v1/kyc/:id → status=APPROVED is REFUSED (it would bypass applyBridgeOutcome) ──
+  describe('update() PATCH status=APPROVED is refused (approval bypass guard)', () => {
+    it('REJECTS PATCH status=APPROVED with 400 "Use the KYC review flow to approve" — no read, no tx, no write', async () => {
+      const p = service.update(gifsy, 's1', { status: 'APPROVED' } as never);
+      await expect(p).rejects.toBeInstanceOf(BadRequestException);
       await expect(service.update(gifsy, 's1', { status: 'APPROVED' } as never)).rejects.toThrow(
-        /Set Entity Type and GST Registration Type/i,
+        'Use the KYC review flow to approve',
       );
+      expect(mockPrisma.kycSubmission.findFirst).not.toHaveBeenCalled();
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      expect(mockTx.kycSubmission.update).not.toHaveBeenCalled();
+      expect(mockTx.kycStatusHistory.create).not.toHaveBeenCalled();
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+    });
+
+    it('REJECTS status=APPROVED even when combined with reviewerNotes (nothing partially written)', async () => {
+      await expect(
+        service.update(gifsy, 's1', { status: 'APPROVED', reviewerNotes: 'ok' } as never),
+      ).rejects.toThrow('Use the KYC review flow to approve');
       expect(mockTx.kycSubmission.update).not.toHaveBeenCalled();
     });
 
-    it('ALLOWS PATCH status=APPROVED when classification is already set', async () => {
-      seedPatchApprove({ clientId: 'deoleo', entityType: 'COMPANY', gstRegistrationType: 'REGULAR', outlets: [{ parentId: null }] });
-      await service.update(gifsy, 's1', { status: 'APPROVED' } as never);
-      expect(mockTx.kycSubmission.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: expect.objectContaining({ status: 'APPROVED' }) }),
+    it('still ALLOWS a non-APPROVED status change (REJECTED + reason) — writes status + history, unchanged', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({ id: 's1', status: 'PENDING_GIFSY', userId: 'u1' });
+      mockTx.kycSubmission.update.mockResolvedValueOnce({ id: 's1', status: 'REJECTED' });
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      await service.update(gifsy, 's1', { status: 'REJECTED', rejectionReason: 'blurry' } as never);
+      expect(mockTx.kycSubmission.update).toHaveBeenCalledWith({
+        where: { id: 's1' },
+        data: { status: 'REJECTED', rejectionReason: 'blurry' },
+      });
+      expect(mockTx.kycStatusHistory.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ fromStatus: 'PENDING_GIFSY', toStatus: 'REJECTED', notes: 'blurry' }),
+      });
+    });
+
+    it('still requires a reason for REJECTED (unchanged 400)', async () => {
+      await expect(service.update(gifsy, 's1', { status: 'REJECTED' } as never)).rejects.toThrow(
+        /Rejection reason is mandatory/,
       );
     });
 
-    it('ALLOWS PATCH status=APPROVED for a grouped child with null classification when the group has a lock (auto-persists it)', async () => {
-      seedPatchApprove({ clientId: 'deoleo', entityType: null, gstRegistrationType: null, outlets: [{ parentId: 'parent-1' }] });
-      // resolveGroupClassification (tx) → APPROVED parent lock.
-      mockTx.channelPartner.findFirst.mockResolvedValueOnce({ onboardedAt: new Date(), entityType: 'COMPANY', gstRegistrationType: 'REGULAR' });
-      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'p1' });
-      await service.update(gifsy, 's1', { status: 'APPROVED' } as never);
-      expect(mockTx.channelPartner.update).toHaveBeenCalledWith({
-        where: { id: 'p1' },
-        data: { entityType: 'COMPANY', gstRegistrationType: 'REGULAR' },
-      });
-      expect(mockTx.kycSubmission.update).toHaveBeenCalled();
-    });
-
-    it('does NOT run the classification gate for a non-APPROVED PATCH (e.g. reviewerNotes only)', async () => {
+    it('still ALLOWS a reviewerNotes-only PATCH (no status, no history row)', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({ id: 's1', status: 'PENDING_GIFSY', userId: 'u1' });
       mockTx.kycSubmission.update.mockResolvedValueOnce({ id: 's1' });
       await service.update(gifsy, 's1', { reviewerNotes: 'note' } as never);
-      // No →APPROVED transition → no in-tx classification load.
       expect(mockTx.kycSubmission.findFirst).not.toHaveBeenCalled();
-      expect(mockTx.kycSubmission.update).toHaveBeenCalled();
+      expect(mockTx.kycSubmission.update).toHaveBeenCalledWith({ where: { id: 's1' }, data: { reviewerNotes: 'note' } });
+      expect(mockTx.kycStatusHistory.create).not.toHaveBeenCalled();
     });
   });
 

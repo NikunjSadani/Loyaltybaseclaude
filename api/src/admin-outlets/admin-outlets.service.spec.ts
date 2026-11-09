@@ -4,7 +4,7 @@
 // Run: npx jest src/admin-outlets/admin-outlets.service.spec.ts
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { AdminOutletsService, deriveKycStatus } from './admin-outlets.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -33,6 +33,8 @@ const mockTx = {
   userSession: { updateMany: jest.fn() },
   auditLog: { create: jest.fn() },
   $executeRaw: jest.fn(),
+  // Add-to-parent row-locks the outlet's partner (SELECT … FOR UPDATE) BEFORE the identity locks.
+  $queryRaw: jest.fn(),
 };
 
 const mockPrisma = {
@@ -85,6 +87,12 @@ describe('AdminOutletsService', () => {
     mockTx.channelPartner.findMany.mockResolvedValue([]);
     mockTx.channelPartner.findUnique.mockResolvedValue(null);
     mockTx.channelPartner.findFirst.mockResolvedValue(null); // resolveGroupPan parent read (FIX 5)
+    // Partner row lock default: no row returned → the code falls back to the preloaded snapshot,
+    // so the pre-existing grouping tests keep their snapshot-driven fixtures.
+    mockTx.$queryRaw.mockReset();
+    mockTx.$queryRaw.mockResolvedValue([]);
+    mockTx.$executeRaw.mockReset();
+    mockTx.$executeRaw.mockResolvedValue(1);
     // Default: UPI disabled for the tenant (matches the platform default). uniquenessPolicy
     // all-on so the owner-group grouping tests exercise every enforced field.
     mockTenantSettings.getEffectiveSettings.mockResolvedValue({
@@ -1120,6 +1128,114 @@ describe('AdminOutletsService', () => {
       if (execOrder.includes('check')) expect(execOrder.indexOf('lock')).toBeLessThan(execOrder.indexOf('check'));
       // On a clean fit the link is written.
       expect(mockTx.outlet.upsert.mock.calls[0][0].create.parentId).toBe('parent1');
+    });
+
+    // ── LOCK ORDER (deadlock fix): partner row FIRST, identity advisory locks SECOND, write THIRD ──
+    // The outlet upsert writes parentId → the outlet_group_id_sync trigger UPDATEs the partner row,
+    // so the partner row must be locked BEFORE the identity locks (same order as re-KYC approval +
+    // payout capture).
+    const primeLinkedOutlet = (partner: Record<string, unknown> | null) => {
+      enableType();
+      mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
+      mockPrisma.channelPartner.findMany.mockResolvedValueOnce([
+        { partnerCode: 'CPP01', id: 'parent1', isParent: true },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([
+        { id: 'o1', outletCode: 'OUT-1', parentId: null, partner },
+      ]);
+      mockTx.channelPartner.findFirst.mockResolvedValueOnce({ panNumber: 'GROUPPAN99Z' });
+      mockTx.outlet.findUnique.mockResolvedValue({ id: 'o1' }); // existing → UPDATE
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+    };
+    const cp1 = { id: 'cp1', panNumber: 'GROUPPAN99Z', gstNumber: null, bankAccountNumber: null, upiId: null };
+
+    it('LOCK ORDER: row-locks the outlet partner (FOR UPDATE) BEFORE the identity locks, both BEFORE the parentId write', async () => {
+      primeLinkedOutlet(cp1);
+      mockTx.$queryRaw.mockResolvedValueOnce([
+        { gstNumber: null, panNumber: 'GROUPPAN99Z', bankAccountNumber: null, upiId: null },
+      ]);
+
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: 'ISR-1', parentId: 'CPP01' }],
+      });
+
+      expect(res.rows[0].status).toBe('OK');
+      expect(mockTx.$queryRaw).toHaveBeenCalledTimes(1);
+      const [strings, ...values] = mockTx.$queryRaw.mock.calls[0];
+      expect((strings as string[]).join('?')).toMatch(/FROM channel_partners WHERE id = \? FOR UPDATE/);
+      expect(values).toEqual(['cp1']);
+      const rowLock = mockTx.$queryRaw.mock.invocationCallOrder[0];
+      const firstIdentityLock = mockTx.$executeRaw.mock.invocationCallOrder[0];
+      const write = mockTx.outlet.upsert.mock.invocationCallOrder[0];
+      expect(firstIdentityLock).toBeDefined();
+      expect(rowLock).toBeLessThan(firstIdentityLock);
+      expect(firstIdentityLock).toBeLessThan(write);
+    });
+
+    it('locks + checks the identity values read FROM THE LOCKED partner row (a concurrently-changed PAN is caught)', async () => {
+      primeLinkedOutlet(cp1); // snapshot PAN fits the group…
+      // …but the committed row (read under the lock) now carries a different PAN.
+      mockTx.$queryRaw.mockResolvedValueOnce([
+        { gstNumber: null, panNumber: 'CHANGED11Z', bankAccountNumber: null, upiId: null },
+      ]);
+
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', parentId: 'CPP01' }],
+      });
+
+      expect(res.rows[0].status).toBe('ERROR');
+      expect(res.rows[0].errors.join(' ')).toMatch(/re-kyc|PAN/i);
+      const keys = mockTx.$executeRaw.mock.calls.map((c) => c.slice(1).join(','));
+      expect(keys.some((k) => k.includes('pan:CHANGED11Z'))).toBe(true);
+      expect(mockTx.outlet.upsert).not.toHaveBeenCalled();
+    });
+
+    it('a pre-KYC outlet (no partner) takes NO partner row lock (nothing to lock) and still links', async () => {
+      primeLinkedOutlet(null);
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: 'ISR-1', parentId: 'CPP01' }],
+      });
+      expect(res.rows[0].status).toBe('OK');
+      expect(mockTx.$queryRaw).not.toHaveBeenCalled();
+    });
+
+    it('a row WITHOUT a Parent ID takes no partner row lock and no identity lock (unchanged)', async () => {
+      enableType();
+      mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
+      mockTx.outlet.findUnique.mockResolvedValue(null);
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: 'ISR-1' }],
+      });
+      expect(res.rows[0].status).toBe('OK');
+      expect(mockTx.$queryRaw).not.toHaveBeenCalled();
+      expect(mockTx.$executeRaw).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['P2034 on the partner row lock', 'queryRaw', { code: 'P2034', message: 'write conflict or a deadlock' }],
+      ['40P01 deadlock on an identity lock', 'executeRaw', { code: 'P2010', meta: { code: '40P01' }, message: 'Raw query failed' }],
+      ['40001 serialization failure on the write', 'upsert', { code: 'P2010', meta: { code: '40001' } }],
+    ])('maps a lock conflict (%s) to a clean 409 — never a raw 500', async (_label, where, err) => {
+      primeLinkedOutlet(cp1);
+      if (where === 'queryRaw') mockTx.$queryRaw.mockRejectedValueOnce(err);
+      if (where === 'executeRaw') mockTx.$executeRaw.mockRejectedValueOnce(err);
+      if (where === 'upsert') mockTx.outlet.upsert.mockRejectedValueOnce(err);
+      await expect(
+        service.upsert(admin, {
+          rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', parentId: 'CPP01' }],
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('a non-lock error still propagates unchanged (not mapped to 409)', async () => {
+      primeLinkedOutlet(cp1);
+      mockTx.outlet.upsert.mockRejectedValueOnce(new Error('connection reset'));
+      await expect(
+        service.upsert(admin, {
+          rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', parentId: 'CPP01' }],
+        }),
+      ).rejects.toThrow('connection reset');
     });
 
     it('BLOCKS a re-link A→B: an outlet already grouped under a DIFFERENT parent is NOT moved by upload (§4.5)', async () => {

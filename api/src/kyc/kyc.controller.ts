@@ -253,7 +253,8 @@ export class KycController {
     return this.kyc.getOne(user, id);
   }
 
-  // PATCH is a Gifsy-side RAW status writer (PATCH_STATUSES incl. APPROVED/REJECTED), so it is
+  // PATCH is a Gifsy-side RAW status writer (PATCH_STATUSES incl. REJECTED etc.; status=APPROVED is
+  // REFUSED with 400 by the service — approval must run applyBridgeOutcome via the review flow), so it is
   // gated at the Gifsy-terminal tier `kyc:gifsy_approve` — the same tier as /approve, /verify,
   // /re-kyc — NOT the field-approver `kyc:approve`. This matters once RBAC Option-X makes routes
   // reachable by a GIFSY_STAFF: a field-tier `kyc:approve` grant must not drive a terminal status

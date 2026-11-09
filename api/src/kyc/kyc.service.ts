@@ -3238,6 +3238,16 @@ export class KycService {
 
     const { status, rejectionReason, reviewerNotes } = dto;
 
+    // APPROVAL BYPASS GUARD: PATCH is a raw status writer. A status=APPROVED here would skip
+    // applyBridgeOutcome entirely — the re-KYC apply, payout-rail / verify rules, the partner row
+    // lock + identity locks + group-uniqueness re-check, activation and wallet creation. No caller
+    // (platform UI, e2e, scripts) sends APPROVED through this route; approval goes through the KYC
+    // review flow (POST /:id/approve, /:id/verify, bulk-verify) which all funnel into applyBridgeOutcome.
+    // Refuse it outright (400) BEFORE any read/write; every other PATCH behaviour is unchanged.
+    if (status === 'APPROVED') {
+      throw new BadRequestException('Use the KYC review flow to approve');
+    }
+
     // Reason is mandatory for REJECTED and RE_UPLOAD_REQUIRED.
     if ((status === 'REJECTED' || status === 'RE_UPLOAD_REQUIRED') && !rejectionReason) {
       throw new BadRequestException(
@@ -3251,38 +3261,8 @@ export class KycService {
     if (!submission) throw new NotFoundException('KYC submission not found');
 
     const updated = await this.prisma.$transaction(async (tx) => {
-      // FIX 1 (gate bypass): PATCH is a raw status writer and PATCH_STATUSES includes 'APPROVED', so a
-      // direct PATCH status=APPROVED would otherwise skip the compulsory classification gate + one-per-
-      // org invariant that applyBridgeOutcome enforces (and that unclassified partner would then seed
-      // resolveGroupIdentity). Apply the SAME classification path here for a →APPROVED transition:
-      // auto-inherit/overwrite the owner-group lock, then throw the same 400 if still unclassified.
-      // (Deliberately NOT adding activation/wallet here — that pre-existing PATCH gap is out of scope.)
-      if (status === 'APPROVED') {
-        const withPartner = await tx.kycSubmission.findFirst({
-          where: { id },
-          select: {
-            partnerId: true,
-            partner: {
-              select: {
-                clientId: true,
-                entityType: true,
-                gstRegistrationType: true,
-                outlets: {
-                  where: { deletedAt: null },
-                  orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
-                  take: 1,
-                  select: { parentId: true },
-                },
-              },
-            },
-          },
-        });
-        if (withPartner) {
-          await this.ensureGroupClassification(tx, withPartner);
-          this.assertClassificationSet(withPartner.partner);
-        }
-      }
-
+      // (status=APPROVED never reaches here — refused at the top of update(); the old in-tx
+      // classification gate for a PATCH approval is therefore gone.)
       const result = await tx.kycSubmission.update({
         where: { id },
         data: {
