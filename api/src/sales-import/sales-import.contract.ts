@@ -151,6 +151,8 @@ export interface SalesSegmentOptions {
  *   POST   :id/reprocess  READY | NEEDS_MAPPING | FAILED | stalled PROCESSING → QUEUED. 409 once applied / purged /
  *                         while an apply is running.
  *   POST   :id/cancel     QUEUED | stalled PROCESSING → CANCELLED (the worker notices and stops). 409 otherwise.
+ *   POST   :id/reprocess-as-new  (canReprocessAsNew) → the NEW import's summary (QUEUED; same file, new id,
+ *                         `reprocessedFromId` = this import). 409 when not applied / mapping unchanged / purged.
  *   DELETE :id            never-applied import → CANCELLED + files/aggregates purged. 409 once applied / live PROCESSING.
  * POST uploads → 409 when SALES_IMPORT_MAX_INFLIGHT_UPLOADS imports are already UPLOADING.
  */
@@ -198,6 +200,8 @@ export interface SalesImportSummary {
   /** Server time the import last entered QUEUED (complete / reprocess); null before. For "waiting > 2 min". */
   queuedAt: string | null;
   heartbeatAt: string | null;
+  /** Set on an import created by POST :id/reprocess-as-new: the applied import whose stored file it re-reads. */
+  reprocessedFromId: string | null;
   /** PROCESSING with a heartbeat older than SALES_IMPORT_STALE_HEARTBEAT_MINUTES (worker died): can be cancelled/reprocessed. */
   stalled: boolean;
   /** At least one month was applied from this import: it can no longer be reprocessed, cancelled or deleted. */
@@ -205,7 +209,13 @@ export interface SalesImportSummary {
   /** Raw file + aggregates purged (retention); preview/apply/reprocess/unmatched.csv are no longer possible. */
   purgedAt: string | null;
   canReprocess: boolean; // READY / NEEDS_MAPPING / FAILED, or stalled PROCESSING; never applied; not purged
-  canCancel: boolean;    // QUEUED, or stalled PROCESSING (POST :id/cancel)
+  /**
+   * An APPLIED import whose column mapping has changed since it was processed (so it can no longer be applied and
+   * cannot be reprocessed in place): POST :id/reprocess-as-new creates a NEW import from the same stored file and
+   * queues it; this import stays as the record of what was written. Never true once purged.
+   */
+  canReprocessAsNew: boolean;
+  canCancel: boolean;    // QUEUED, or stalled PROCESSING (POST :id/cancel); never for an applied import
   canDelete: boolean;    // never applied and not live PROCESSING (DELETE = cancel + purge files/aggregates)
 }
 
