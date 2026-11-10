@@ -81,7 +81,7 @@ const mockPrisma = {
   },
   kycStatusHistory: { create: jest.fn(), findMany: jest.fn() },
   kycDocument: { create: jest.fn(), findUnique: jest.fn() },
-  otpCode: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn(), deleteMany: jest.fn() },
+  otpCode: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn(), deleteMany: jest.fn() },
   outlet: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   // reviewQueue/reviewDump resolve each row's per-tenant outlet-type displayName (scoped to the
   // submission's own tenant). Default [] (set in beforeEach after the reset loop) → empty map →
@@ -250,6 +250,9 @@ describe('KycService', () => {
     // definition-level defaults). Payout-specific tests override with mockResolvedValueOnce.
     mockPrisma.outlet.findMany.mockResolvedValue([]);
     mockPrisma.payoutTransaction.findMany.mockResolvedValue([]);
+    // Claim-before-compare: consent() claims one OTP attempt atomically first — default: the claim wins
+    // (set AFTER the reset loop above, which wipes every mockPrisma op).
+    mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
     mockPrisma.walletTransaction.findMany.mockResolvedValue([]);
     // Default: no per-tenant outlet-type displayName (reviewQueue/reviewDump) → empty map →
@@ -5650,6 +5653,48 @@ describe('KycService', () => {
       expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
     });
 
+    it('claim-before-compare: a wrong code claims atomically (no read-then-write) and keeps the 401 copy', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o3', code: '999999', attempts: 1, maxAttempts: 3 });
+      const err = await service
+        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
+        .catch((e) => e);
+      expect(err.getStatus()).toBe(401);
+      expect(err.message).toBe('Invalid OTP. 1 attempt(s) remaining.');
+      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
+        where: { id: 'o3', verifiedAt: null, attempts: { lt: 3 } },
+        data: { attempts: { increment: 1 } },
+      });
+      expect(mockPrisma.otpCode.update).not.toHaveBeenCalled();
+    });
+
+    it('claim-before-compare: a lost claim → the existing 429 "OTP locked…", the right code is never accepted', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o4', code: '111111', attempts: 0, maxAttempts: 3 });
+      mockPrisma.otpCode.updateMany.mockResolvedValueOnce({ count: 0 });
+      const err = await service
+        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' })
+        .catch((e) => e);
+      expect(err.getStatus()).toBe(429);
+      expect(err.message).toBe('OTP locked due to too many attempts. Request a new OTP.');
+      expect(mockPrisma.otpCode.update).not.toHaveBeenCalled(); // never marked verified
+      expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
+    });
+
+    it('claim-before-compare: 100 parallel consents (all reading attempts=0), right code LAST → no consent', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'o5', code: '111111', attempts: 0, maxAttempts: 3 });
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 's1' });
+      mockPrisma.consentRecord.create.mockResolvedValue({ id: 'cr1' });
+      const row = simulateOtpClaims(mockPrisma.otpCode.updateMany);
+      const otps = Array.from({ length: 100 }, (_, i) => (i === 99 ? '111111' : String(200000 + i)));
+      const results = await Promise.allSettled(otps.map((otp) =>
+        service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp })));
+      const msgs = results.map((r) => (r.status === 'rejected' ? (r.reason as Error).message : 'OK'));
+      expect(msgs.filter((m) => m.startsWith('Invalid OTP'))).toHaveLength(3);
+      expect(msgs.filter((m) => m === 'OTP locked due to too many attempts. Request a new OTP.')).toHaveLength(97);
+      expect(msgs).not.toContain('OK');
+      expect(row.attempts).toBe(3);
+      expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
+    });
+
     it('Task 3.5: does NOT write a ConsentRecord when OTP is expired (findFirst returns null)', async () => {
       mockPrisma.otpCode.findFirst.mockResolvedValueOnce(null);
 
@@ -7420,3 +7465,21 @@ describe('KycService', () => {
     });
   });
 });
+
+/**
+ * Claim-before-compare (2026-11-10): simulate the OtpCode row's atomic conditional increment — the
+ * ONLY serialisation point — so N parallel verifies that all READ attempts=0 can be exercised.
+ */
+function simulateOtpClaims(updateMany: jest.Mock, maxAttempts = 3) {
+  const state = { attempts: 0 };
+  updateMany.mockImplementation(async ({ where, data }: any) => {
+    await new Promise((r) => setImmediate(r)); // interleave the parallel callers
+    if (data?.attempts?.increment) {
+      if (state.attempts < (where?.attempts?.lt ?? maxAttempts)) { state.attempts++; return { count: 1 }; }
+      return { count: 0 };
+    }
+    if (data?.attempts?.decrement) { if (state.attempts > 0) state.attempts--; return { count: 1 }; }
+    return { count: 1 };
+  });
+  return state;
+}

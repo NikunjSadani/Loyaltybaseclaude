@@ -13,6 +13,7 @@ import { GiftFulfilmentChannel, PayoutMode, Prisma, RedemptionStatus } from '@pr
 import { PrismaService } from '../prisma/prisma.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
+import { claimOtpAttempt, refundOtpAttempt } from '../common/otp-attempt';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -3318,7 +3319,7 @@ export class RewardsService {
   /**
    * Validate the unverified REDEMPTION_CONFIRM OTP issued for a SPECIFIC order and return its id.
    * Self-contained (does NOT reuse auth.verifyOtp, which auto-registers users).
-   * Bumps attempts + 401 on a miss. Does NOT set verifiedAt — the caller marks it
+   * Claims an attempt atomically before comparing (401 on a miss; a correct code gets it back). Does NOT set verifiedAt — the caller marks it
    * INSIDE the confirm transaction so a failed debit rolls the OTP back (M1).
    * FIXED_OTP is honoured ONLY outside production — a dev backdoor on a money
    * confirm must never be live in prod (H2).
@@ -3343,19 +3344,25 @@ export class RewardsService {
       throw new UnauthorizedException('OTP expired — please restart the redemption.');
     }
 
+    // Claim-before-compare (common/otp-attempt): claim one attempt ATOMICALLY before comparing, so
+    // parallel guesses that all read the same `attempts` can't exceed maxAttempts; a losing claim is
+    // refused with the existing "too many attempts" error and its code is never compared.
+    if (!(await claimOtpAttempt(this.prisma, record))) {
+      throw new UnauthorizedException('Too many attempts — please restart the redemption.');
+    }
+
     const fixedOtp = isFixedOtpAllowed() ? process.env.FIXED_OTP : undefined;
     const isCorrect = fixedOtp ? otp === fixedOtp : otp === record.code;
     if (!isCorrect) {
-      await this.prisma.otpCode.update({
-        where: { id: record.id },
-        data: { attempts: record.attempts + 1 },
-      });
       const remaining = record.maxAttempts - record.attempts - 1;
       throw new UnauthorizedException(
         `Invalid OTP. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`,
       );
     }
 
+    // A correct code did not consume an attempt before (verifiedAt is only set inside the confirm
+    // transaction, so a failed debit leaves the OTP retryable) — give the claimed attempt back.
+    await refundOtpAttempt(this.prisma, record.id);
     return record.id;
   }
 

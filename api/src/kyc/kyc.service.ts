@@ -24,6 +24,7 @@ import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import { EventKey } from '../notification-templates/notification-templates.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
+import { claimOtpAttempt } from '../common/otp-attempt';
 import { sniffFileType } from '../common/file-signature';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { isActivePhoneConflict } from '../common/phone-conflict';
@@ -3975,13 +3976,17 @@ export class KycService {
     }
     // FIXED_OTP is a dev/staging-only bypass (gated by isFixedOtpAllowed; always
     // refused on the prod DB). Permanent path is the real MSG91 code stored above.
+    // Claim-before-compare (common/otp-attempt): the attempt is claimed ATOMICALLY before the code is
+    // compared, so parallel guesses can't exceed maxAttempts; a losing claim gets the same 429 as above.
+    if (!(await claimOtpAttempt(this.prisma, otpRecord))) {
+      throw new HttpException(
+        'OTP locked due to too many attempts. Request a new OTP.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
     const fixedOtp = isFixedOtpAllowed() ? process.env.FIXED_OTP : undefined;
     const otpMatches = otpRecord.code === otp || (!!fixedOtp && otp === fixedOtp);
     if (!otpMatches) {
-      await this.prisma.otpCode.update({
-        where: { id: otpRecord.id },
-        data: { attempts: { increment: 1 } },
-      });
       const remaining = otpRecord.maxAttempts - otpRecord.attempts - 1;
       throw new UnauthorizedOtp(`Invalid OTP. ${remaining} attempt(s) remaining.`);
     }

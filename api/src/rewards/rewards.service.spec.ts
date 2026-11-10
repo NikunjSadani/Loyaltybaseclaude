@@ -51,7 +51,7 @@ const mockPrisma = {
   wallet: { findFirst: jest.fn() },
   // trackOrder reads the order's refund (CREDIT_REVERSAL) wallet row — order-timeline D5.
   walletTransaction: { findFirst: jest.fn() },
-  otpCode: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), deleteMany: jest.fn() },
+  otpCode: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn(), deleteMany: jest.fn() },
   rewardCategory: {
     findFirst: jest.fn(),
     findMany: jest.fn(),
@@ -195,6 +195,8 @@ describe('RewardsService', () => {
     mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
     mockPrisma.rewardCatalog.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
+    // Claim-before-compare: each OTP verify claims one attempt atomically first — default: the claim wins.
+    mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.auditLog.create.mockResolvedValue({ id: 'audit1' });
     mockPrisma.outlet.findMany.mockResolvedValue([]); // default: no extra outlet-keyed assignments
     mockPrisma.salesUser.findMany.mockResolvedValue([]); // default: no edges → downline = caller only
@@ -1453,7 +1455,7 @@ describe('RewardsService', () => {
       reward: { name: 'Amazon ₹500', stockQuantity: null },
     };
 
-    it('bumps attempts and 401s on a wrong OTP', async () => {
+    it('bumps attempts (atomic claim) and 401s on a wrong OTP', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(pendingOrder);
       mockPrisma.otpCode.findFirst.mockResolvedValue({
         id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
@@ -1461,11 +1463,63 @@ describe('RewardsService', () => {
       });
 
       await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '000000' }))
-        .rejects.toBeInstanceOf(UnauthorizedException);
-      expect(mockPrisma.otpCode.update).toHaveBeenCalledWith({
-        where: { id: 'otp1' },
-        data: { attempts: 1 },
+        .rejects.toThrow('Invalid OTP. 2 attempts remaining.');
+      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
+        where: { id: 'otp1', verifiedAt: null, attempts: { lt: 3 } },
+        data: { attempts: { increment: 1 } },
       });
+      // the claim is never refunded on a miss
+      expect(mockPrisma.otpCode.updateMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ data: { attempts: { decrement: 1 } } }),
+      );
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('claim-before-compare: a lost claim → the existing 401 "Too many attempts", the code is never compared, no debit', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(pendingOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000),
+      });
+      mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 0 });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+
+      const err = await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }).catch((e) => e);
+      expect(err).toBeInstanceOf(UnauthorizedException);
+      expect(err.message).toBe('Too many attempts — please restart the redemption.');
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('claim-before-compare: a CORRECT code gives its claimed attempt back (a failed debit can be retried as before)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(pendingOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000),
+      });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'CONFIRMED' });
+
+      await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
+      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
+        where: { id: 'otp1', attempts: { gt: 0 } },
+        data: { attempts: { decrement: 1 } },
+      });
+    });
+
+    it('claim-before-compare: 100 parallel confirms (all reading attempts=0), right code LAST → no success, no debit', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(pendingOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000),
+      });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+      const row = simulateOtpClaims(mockPrisma.otpCode.updateMany);
+
+      const otps = Array.from({ length: 100 }, (_, i) => (i === 99 ? '123456' : String(200000 + i)));
+      const results = await Promise.allSettled(otps.map((otp) => service.confirmRedeem(partner, { orderId: 'o1', otp })));
+      const msgs = results.map((r) => (r.status === 'rejected' ? (r.reason as Error).message : 'OK'));
+      expect(msgs.filter((m) => m.startsWith('Invalid OTP'))).toHaveLength(3);
+      expect(msgs.filter((m) => m === 'Too many attempts — please restart the redemption.')).toHaveLength(97);
+      expect(msgs).not.toContain('OK');
+      expect(row.attempts).toBe(3);
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
 
@@ -2464,10 +2518,13 @@ describe('RewardsService', () => {
       },
       reward: { name: 'Amazon ₹500', stockQuantity: null },
     };
-    const goodOtp = {
+    // Factory (NOT a shared const): expiresAt is computed at TEST-RUN time. A describe-level const is
+    // evaluated when Jest COLLECTS the file, so under full-suite load a test running >60 s later saw
+    // an already-expired OTP ("OTP expired" flake, 2026-11-10).
+    const goodOtp = () => ({
       id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
       expiresAt: new Date(Date.now() + 60_000), verifiedAt: null,
-    };
+    });
 
     /** Wire an assigned outlet with a confirmable PENDING order + valid OTP. */
     const wireConfirm = () => {
@@ -2475,11 +2532,36 @@ describe('RewardsService', () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue(outletPartner);
       mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(pendingOrder);
-      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp());
       mockPrisma.otpCode.update.mockResolvedValue({});
       mockWallet.debitRedeem.mockResolvedValue({});
       mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
     };
+
+    it('claim-before-compare: 100 parallel sales-assisted confirms, right code LAST → no success, no debit', async () => {
+      wireConfirm();
+      const row = simulateOtpClaims(mockPrisma.otpCode.updateMany);
+      const otps = Array.from({ length: 100 }, (_, i) => (i === 99 ? '123456' : String(200000 + i)));
+      const results = await Promise.allSettled(otps.map((otp) =>
+        service.confirmRedeemForOutlet(sales, { orderId: 'o-out', otp, targetPartnerId: 'cp-out' })));
+      const msgs = results.map((r) => (r.status === 'rejected' ? (r.reason as Error).message : 'OK'));
+      expect(msgs.filter((m) => m.startsWith('Invalid OTP'))).toHaveLength(3);
+      expect(msgs.filter((m) => m === 'Too many attempts — please restart the redemption.')).toHaveLength(97);
+      expect(msgs).not.toContain('OK');
+      expect(row.attempts).toBe(3);
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('claim-before-compare: sales-assisted lost claim → existing 401 "Too many attempts", no debit', async () => {
+      wireConfirm();
+      mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 0 });
+      const err = await service.confirmRedeemForOutlet(sales, {
+        orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
+      }).catch((e) => e);
+      expect(err).toBeInstanceOf(UnauthorizedException);
+      expect(err.message).toBe('Too many attempts — please restart the redemption.');
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
 
     it('TOCTOU: if Sales-Assisted Redemption is turned OFF mid-flight, confirm is blocked and NO debit happens', async () => {
       wireConfirm();
@@ -2570,7 +2652,7 @@ describe('RewardsService', () => {
 
     it('a wrong OTP 401s and does NOT debit', async () => {
       wireConfirm();
-      mockPrisma.otpCode.findFirst.mockResolvedValue({ ...goodOtp, code: '999999' });
+      mockPrisma.otpCode.findFirst.mockResolvedValue({ ...goodOtp(), code: '999999' });
 
       await expect(
         service.confirmRedeemForOutlet(sales, {
@@ -2637,7 +2719,7 @@ describe('RewardsService', () => {
           kycSubmissions: [{ status: 'DRAFT' }],
         },
       });
-      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp());
 
       await expect(
         service.confirmRedeemForOutlet(sales, {
@@ -2663,7 +2745,7 @@ describe('RewardsService', () => {
           kycSubmissions: [{ status: 'APPROVED' }],
         },
       });
-      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp());
       await expect(
         service.confirmRedeemForOutlet(sales, {
           orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
@@ -2716,7 +2798,7 @@ describe('RewardsService', () => {
           bankAccountNumber: null, ifscCode: null, upiId: 'outlet@upi',
         },
       });
-      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp());
       mockPrisma.otpCode.update.mockResolvedValue({});
       mockWallet.debitRedeem.mockResolvedValue({});
       mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
@@ -4824,13 +4906,16 @@ describe('RewardsService', () => {
       redemptionMode: 'GIFT_CARD',
     };
 
-    const goodOtp = {
+    // Factory (NOT a shared const): expiresAt is computed at TEST-RUN time. A describe-level const is
+    // evaluated when Jest COLLECTS the file, so under full-suite load a test running >60 s later saw
+    // an already-expired OTP ("OTP expired" flake, 2026-11-10).
+    const goodOtp = () => ({
       id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
       expiresAt: new Date(Date.now() + 60_000), verifiedAt: null,
-    };
+    });
 
     beforeEach(() => {
-      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp());
       mockPrisma.otpCode.update.mockResolvedValue({});
       mockWallet.debitRedeem.mockResolvedValue({});
       mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
@@ -4960,7 +5045,7 @@ describe('RewardsService', () => {
       // Rate now comes from TenantSettingsService. upiOrder has no snapshot → live rate 0.
       mockSettings.conversionRate = 0;
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(upiOrder);
-      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp());
       mockPrisma.otpCode.update.mockResolvedValue({});
       mockWallet.debitRedeem.mockResolvedValue({});
       mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
@@ -4993,10 +5078,13 @@ describe('RewardsService', () => {
   // ─── GLB-1b / TOCTOU — additional eligibility gate coverage ─────────────────
 
   describe('confirmRedeem — GLB-1b cash-eligibility extended coverage', () => {
-    const goodOtp = {
+    // Factory (NOT a shared const): expiresAt is computed at TEST-RUN time. A describe-level const is
+    // evaluated when Jest COLLECTS the file, so under full-suite load a test running >60 s later saw
+    // an already-expired OTP ("OTP expired" flake, 2026-11-10).
+    const goodOtp = () => ({
       id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
       expiresAt: new Date(Date.now() + 60_000), verifiedAt: null,
-    };
+    });
 
     /** An order whose partner is APPROVED at the pre-tx read. */
     const approvedCashOrder = {
@@ -5036,7 +5124,7 @@ describe('RewardsService', () => {
       // Pre-tx: partner is APPROVED. In-tx fresh read returns RE_KYC_REQUIRED.
       // The TOCTOU guard must catch the suspension and throw, rolling back the tx.
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(approvedCashOrder);
-      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp());
       mockPrisma.otpCode.update.mockResolvedValue({});
 
       // The first channelPartner.findFirst (in-tx TOCTOU) returns ineligible partner;
@@ -5059,7 +5147,7 @@ describe('RewardsService', () => {
     it('fully eligible APPROVED partner completes confirmRedeem for a UPI order', async () => {
       // End-to-end happy path: pre-tx gate passes, TOCTOU passes, debit + payout created.
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(approvedCashOrder);
-      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp());
       mockPrisma.otpCode.update.mockResolvedValue({});
       mockWallet.debitRedeem.mockResolvedValue({});
       mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
@@ -5821,3 +5909,21 @@ describe('RewardsService', () => {
     });
   });
 });
+
+/**
+ * Claim-before-compare (2026-11-10): simulate the OtpCode row's atomic conditional increment — the
+ * ONLY serialisation point — so N parallel verifies that all READ attempts=0 can be exercised.
+ */
+function simulateOtpClaims(updateMany: jest.Mock, maxAttempts = 3) {
+  const state = { attempts: 0 };
+  updateMany.mockImplementation(async ({ where, data }: any) => {
+    await new Promise((r) => setImmediate(r)); // interleave the parallel callers
+    if (data?.attempts?.increment) {
+      if (state.attempts < (where?.attempts?.lt ?? maxAttempts)) { state.attempts++; return { count: 1 }; }
+      return { count: 0 };
+    }
+    if (data?.attempts?.decrement) { if (state.attempts > 0) state.attempts--; return { count: 1 }; }
+    return { count: 1 };
+  });
+  return state;
+}

@@ -23,6 +23,19 @@ interface VerifyOTPResult {
 
 const DEFAULT_CLIENT_ID = 'deoleo';
 
+const TOO_MANY_ATTEMPTS = 'Too many attempts. Please wait a minute and try again.';
+
+/**
+ * The error to show for a failed send/verify. A throttler 429 arrives as the raw Nest text
+ * "ThrottlerException: Too Many Requests" → friendly copy. Any OTHER 429 message is the API's own
+ * deliberate copy (the per-phone hourly OTP cap: "Too many OTP requests for this number…") → kept.
+ */
+function loginErrorMessage(status: number, apiError: unknown, fallback: string): string {
+  const msg = typeof apiError === 'string' && apiError.trim() ? apiError : undefined;
+  if (status === 429) return msg && !msg.startsWith('ThrottlerException') ? msg : TOO_MANY_ATTEMPTS;
+  return msg ?? fallback;
+}
+
 /**
  * Resolve the tenant clientId from the request Host header. Delegates to the
  * shared DB-aware `resolveTenant` so login uses the SAME resolution as the rest
@@ -76,7 +89,7 @@ export async function sendOTP(
     const data = await res.json();
 
     if (!res.ok) {
-      return { success: false, error: data.error ?? 'Failed to send OTP. Please try again.' };
+      return { success: false, error: loginErrorMessage(res.status, data?.error, 'Failed to send OTP. Please try again.') };
     }
 
     return { success: true };
@@ -122,7 +135,7 @@ export async function verifyOTP(
     const data = await res.json();
 
     if (!res.ok) {
-      return { success: false, error: data.error ?? 'Invalid OTP. Please try again.' };
+      return { success: false, error: loginErrorMessage(res.status, data?.error, 'Invalid OTP. Please try again.') };
     }
 
     // Backend returns { success, data: { accessToken, refreshToken, user } }.

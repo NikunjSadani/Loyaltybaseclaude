@@ -13,6 +13,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
+import { claimOtpAttempt } from '../common/otp-attempt';
 import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
 import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
 import { ALL_PERMISSIONS } from '../common/rbac/permissions';
@@ -198,7 +199,7 @@ export class AuthService {
     // testable on staging. Skipped only when clientId is absent (legacy/unbranded caller) → falls back to
     // the prior send-then-check-at-verify behaviour. Enumeration note: this reveals which numbers are
     // registered, an owner-accepted trade-off for the clearer UX on a closed KYC-only platform; the
-    // controller's per-IP @Throttle (5/60s) bounds probing (verifyOtp remains the authoritative gate).
+    // controller's per-phone @Throttle (5/60s) bounds probing (verifyOtp remains the authoritative gate).
     if (clientId) {
       const account = await this.prisma.user.findFirst({
         // ACTIVE-only reservation (partial unique index `users_clientId_phone_active_key`):
@@ -216,8 +217,8 @@ export class AuthService {
     }
 
     // AF-10 — per-phone send cap over a rolling window, enforced in the DB so it holds
-    // across ALL Cloud Run instances (the controller's @Throttle is per-IP AND
-    // per-instance, so multi-instance distribution bypasses it). This is the real
+    // across ALL Cloud Run instances (the controller's @Throttle is per-phone but in-memory
+    // PER-INSTANCE, so multi-instance distribution bypasses it). This is the real
     // anti-SMS-bombing control — a simple cooldown still allows sustained volume; a
     // windowed COUNT caps the total a victim's number can receive. Skipped only when the
     // fixed-OTP dev/staging bypass is active so UAT can request freely.
@@ -231,14 +232,18 @@ export class AuthService {
         where: { phone: cleanPhone, createdAt: { gte: windowStart } },
       });
       if (recentSends >= OTP_MAX_PER_WINDOW) {
-        this.logger.warn(`OTP send cap hit for ${cleanPhone} (${recentSends} in window)`);
+        // Distinct from the throttler's "throttle.rejected" line (IdentityThrottlerGuard): this is the
+        // cross-instance DB cap. Masked — never log the raw number.
+        this.logger.warn(
+          `[otp-send-cap] ${JSON.stringify({ event: 'otp.send_cap', phone: `******${cleanPhone.slice(-4)}`, recentSends, max: OTP_MAX_PER_WINDOW, windowHours: OTP_RESEND_WINDOW_HOURS })}`,
+        );
         throw new HttpException(
           'Too many OTP requests for this number. Please wait a while before trying again.',
           HttpStatus.TOO_MANY_REQUESTS,
         );
       }
       // (Small race at the window boundary can let a couple extra through under high
-      // concurrency — acceptable for an anti-abuse cap; the per-IP throttle bounds the
+      // concurrency — acceptable for an anti-abuse cap; the per-phone throttle bounds the
       // concurrent source and each send still costs an SMS.)
     }
 
@@ -312,13 +317,19 @@ export class AuthService {
     // NODE_ENV, or an explicit ALLOW_FIXED_OTP opt-in; always refused on the prod DB) so a
     // misconfig can't turn into a universal-OTP backdoor. (Mirrors the redemption OTP path.)
     const fixedOtp = isFixedOtpAllowed() ? this.config.get<string>('FIXED_OTP') : undefined;
+
+    // Claim this attempt ATOMICALLY before comparing the code. The read above is only a cheap
+    // pre-check: N parallel requests all read the same `attempts`, so a read-then-write counter let
+    // ~100 concurrent guesses through before it reached maxAttempts (audit L1). The conditional
+    // increment is the single serialisation point — only maxAttempts claims can ever win, and a
+    // losing claim is never compared (even a correct code), so it cannot mint a session.
+    if (!(await claimOtpAttempt(this.prisma, record))) {
+      throw new ForbiddenException('Too many attempts — please request a new OTP.');
+    }
+
     const isCorrect = fixedOtp ? otp === fixedOtp : otp === record.code;
 
     if (!isCorrect) {
-      await this.prisma.otpCode.update({
-        where: { id: record.id },
-        data:  { attempts: record.attempts + 1 },
-      });
       const remaining = record.maxAttempts - record.attempts - 1;
       throw new UnauthorizedException(`Invalid OTP. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`);
     }
