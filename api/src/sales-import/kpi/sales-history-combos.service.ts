@@ -12,7 +12,7 @@ import {
 } from '../sales-import.contract';
 import { paiseToRupees, picoToCases } from '../ingest/normalize';
 import { isMonthKey } from '../months/month-state';
-import { classifyMonthSummaries, type SummaryHead } from './month-combos';
+import { classifyMonthSummaries } from './month-combos';
 
 export interface SalesHistoryCombosQuery {
   month?: string;
@@ -25,6 +25,16 @@ const MAX_SET_ROWS = (SALES_MONTH_HISTORY_RETENTION_YEARS + 2) * 12;
 export const HISTORY_COMBOS_STATEMENT_TIMEOUT_MS = 10_000;
 /** The read transaction's own bound (a handful of statements, each ≤ the statement timeout). */
 export const HISTORY_COMBOS_TX_TIMEOUT_MS = 45_000;
+/**
+ * A month with NO summary is read from its stored lines only up to this many line rows (re-check M2): a large month
+ * would not fit the statement timeout, so it is listed in `refreshingMonths` with no combos until the background
+ * refresh has built its summary.
+ */
+export const HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS = 50_000;
+/** 503 copy (re-check M2: accurate for both causes). */
+export const HISTORY_COMBOS_TIMEOUT_MESSAGE =
+  'Reading the stored months took too long. Try fewer months, or try again in a few minutes.';
+export const HISTORY_COMBOS_BUSY_MESSAGE = 'The server is busy right now. Try again in a moment.';
 
 interface ComboRow { dims: Prisma.JsonValue; lines: bigint | number; paise: string; pico: string; total: bigint | number }
 interface ValueRow { key: string; value: string; lines: bigint | number; paise: string }
@@ -60,9 +70,10 @@ function sourceRows(clientId: string, summaryMonths: string[], lineMonths: strin
  * (sales_month_history_sets), a per-month head of the combos SUMMARY (sales_month_history_combos), then two aggregate
  * statements one after the other — distinct combos across the chosen months (GROUP BY dims, top
  * SALES_IMPORT_MAX_DIMENSION_COMBOS by |₹| + the uncapped count) and per-key values (top SALES_IMPORT_MAX_DIMENSION_VALUES
- * by |₹|). A month whose summary is from another history set (e.g. written by an older revision during a deploy) is
- * answered from that summary; a month with NO summary is answered from its stored lines; both are reported in
- * `refreshingMonths`, and the worker's background refresh (month-combos.ts refreshStaleMonthCombos) rebuilds them.
+ * by |₹|). The summary state comes from the set header's stamp. A month whose summary is from another history set (e.g.
+ * written by an older revision during a deploy) is answered from that summary; a month with NO summary is answered from
+ * its stored lines when it has ≤ HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS of them (else not at all); all are reported in
+ * `refreshingMonths`, and the background refresh (month-combos.ts refreshStaleMonthCombos) rebuilds them.
  */
 @Injectable()
 export class SalesHistoryCombosService {
@@ -89,7 +100,10 @@ export class SalesHistoryCombosService {
           await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${HISTORY_COMBOS_STATEMENT_TIMEOUT_MS}`);
           const sets = await tx.salesMonthHistorySet.findMany({
             where: { clientId },
-            select: { month: true, dimensionKeys: true, sourceImportId: true, appliedAt: true, lineRows: true },
+            select: {
+              month: true, dimensionKeys: true, sourceImportId: true, appliedAt: true, lineRows: true,
+              combosSourceImportId: true, combosAppliedAt: true,
+            },
             orderBy: { month: 'desc' },
             take: MAX_SET_ROWS,
           });
@@ -110,17 +124,14 @@ export class SalesHistoryCombosService {
           };
           if (months.length === 0) return empty;
 
-          const heads = await tx.$queryRaw<SummaryHead[]>(Prisma.sql`
-            SELECT c."month" AS "month",
-                   MIN(c."sourceImportId") AS "srcMin", MAX(c."sourceImportId") AS "srcMax",
-                   MIN(c."appliedAt") AS "atMin", MAX(c."appliedAt") AS "atMax"
-              FROM "sales_month_history_combos" c
-             WHERE c."clientId" = ${clientId} AND c."month" = ANY(${months}::text[])
-             GROUP BY c."month"`);
-          const state = classifyMonthSummaries(chosen, heads);
-          const summaryMonths = months.filter((m) => state.get(m) !== 'missing');
-          const lineMonths = months.filter((m) => state.get(m) === 'missing');
+          // Summary state from the header stamp alone (re-check L1: no scan of the summary rows).
+          const state = classifyMonthSummaries(chosen);
+          const lineRowsOf = new Map(chosen.map((s) => [s.month, s.lineRows]));
+          const summaryMonths = months.filter((m) => state.get(m) === 'current' || state.get(m) === 'stale');
+          // Missing summary: small months are read from their lines; large ones wait for the refresh (re-check M2).
+          const lineMonths = months.filter((m) => state.get(m) === 'missing' && (lineRowsOf.get(m) ?? 0) <= HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS);
           const refreshingMonths = months.filter((m) => state.get(m) === 'stale' || state.get(m) === 'missing');
+          if (summaryMonths.length === 0 && lineMonths.length === 0) return { ...empty, refreshingMonths };
 
           const comboRows = await tx.$queryRaw<ComboRow[]>(Prisma.sql`
             WITH src AS (${sourceRows(clientId, summaryMonths, lineMonths)})
@@ -169,9 +180,8 @@ export class SalesHistoryCombosService {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // A statement timeout, or no transaction could be started (P2028: pool busy / tx timeout) → the friendly 503.
-      if (/statement timeout|canceling statement|57014/i.test(msg) || (e as { code?: unknown })?.code === 'P2028') {
-        throw new ServiceUnavailableException('Listing the stored months took too long. Choose fewer months and try again.');
-      }
+      if ((e as { code?: unknown })?.code === 'P2028') throw new ServiceUnavailableException(HISTORY_COMBOS_BUSY_MESSAGE);
+      if (/statement timeout|canceling statement|57014/i.test(msg)) throw new ServiceUnavailableException(HISTORY_COMBOS_TIMEOUT_MESSAGE);
       throw e;
     }
   }

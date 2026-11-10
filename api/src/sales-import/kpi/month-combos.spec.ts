@@ -1,34 +1,31 @@
 import type { Prisma } from '@prisma/client';
 import { lockSalesMonth } from '../../common/sales-kpi-ownership';
 import {
-  COMBOS_REFRESH_MAX_MONTHS,
-  COMBOS_REFRESH_STATEMENT_TIMEOUT_MS,
+  COMBOS_REFRESH_HTTP_LIMITS,
+  COMBOS_REFRESH_WORKER_LIMITS,
   classifyMonthSummaries,
   insertMonthCombosSql,
   refreshStaleMonthCombos,
   salesMonthLockKey,
+  type CombosRefreshLimits,
 } from './month-combos';
 
 const AT = new Date('2026-11-01T10:00:00.000Z');
 
-describe('classifyMonthSummaries', () => {
-  const set = (month: string, lineRows = 5) => ({ month, sourceImportId: `imp-${month}`, appliedAt: AT, lineRows });
-  const head = (month: string, over: Partial<{ srcMin: string; srcMax: string; atMin: Date; atMax: Date }> = {}) =>
-    ({ month, srcMin: `imp-${month}`, srcMax: `imp-${month}`, atMin: AT, atMax: AT, ...over });
+describe('classifyMonthSummaries (from the set header stamp alone)', () => {
+  const head = (month: string, over: Partial<{ lineRows: number; combosSourceImportId: string | null; combosAppliedAt: Date | null }> = {}) => ({
+    month, sourceImportId: `imp-${month}`, appliedAt: AT, lineRows: 5, combosSourceImportId: `imp-${month}`, combosAppliedAt: AT, ...over,
+  });
 
-  it('current / stale (other import, other apply time, two sets mixed) / missing / empty', () => {
-    const s = classifyMonthSummaries(
-      [set('2026-01'), set('2026-02'), set('2026-03'), set('2026-04'), set('2026-05'), set('2026-06', 0)],
-      [
-        head('2026-01'),
-        head('2026-02', { srcMin: 'imp-OLD', srcMax: 'imp-OLD' }),
-        head('2026-03', { atMin: new Date(AT.getTime() - 1), atMax: new Date(AT.getTime() - 1) }),
-        head('2026-04', { srcMax: 'imp-zzz' }),
-      ],
-    );
-    expect(Object.fromEntries(s)).toEqual({
-      '2026-01': 'current', '2026-02': 'stale', '2026-03': 'stale', '2026-04': 'stale', '2026-05': 'missing', '2026-06': 'empty',
-    });
+  it('current / stale (other import or other apply time) / missing (never stamped, has lines) / empty', () => {
+    const s = classifyMonthSummaries([
+      head('2026-01'),
+      head('2026-02', { combosSourceImportId: 'imp-OLD' }),
+      head('2026-03', { combosAppliedAt: new Date(AT.getTime() - 1) }),
+      head('2026-04', { combosSourceImportId: null, combosAppliedAt: null }),
+      head('2026-05', { combosSourceImportId: null, combosAppliedAt: null, lineRows: 0 }),
+    ]);
+    expect(Object.fromEntries(s)).toEqual({ '2026-01': 'current', '2026-02': 'stale', '2026-03': 'stale', '2026-04': 'missing', '2026-05': 'empty' });
   });
 });
 
@@ -42,6 +39,21 @@ describe('insertMonthCombosSql', () => {
   });
 });
 
+describe('refresh limits (re-check M1 / L2)', () => {
+  it('statements stay at 25 s (below the 30 s close / reopen and 60 s upload waiters on the month lock)', () => {
+    expect(COMBOS_REFRESH_WORKER_LIMITS.statementTimeoutMs).toBe(25_000);
+    expect(COMBOS_REFRESH_HTTP_LIMITS.statementTimeoutMs).toBe(25_000);
+  });
+
+  it('the HTTP path (Cloud Scheduler drain) ends well inside the 170 s attempt deadline even in the worst case', () => {
+    const { limit, budgetMs, txTimeoutMs } = COMBOS_REFRESH_HTTP_LIMITS;
+    expect(limit).toBeLessThanOrEqual(2);
+    // the last month can start just before the budget ends and then run to its tx bound (+ maxWait 5 s)
+    const worstMs = Math.min(budgetMs + txTimeoutMs + 5_000, limit * (txTimeoutMs + 5_000));
+    expect(worstMs).toBeLessThanOrEqual(80_000); // leaves ~90 s for the retention sweep under a 170 s deadline
+  });
+});
+
 describe('refreshStaleMonthCombos (background repair; never on a request)', () => {
   it('uses the SAME advisory-lock key as the apply (lockSalesMonth)', async () => {
     const tx = { $executeRaw: jest.fn(async (_q: Prisma.Sql) => 1) };
@@ -49,9 +61,12 @@ describe('refreshStaleMonthCombos (background repair; never on a request)', () =
     expect(tx.$executeRaw.mock.calls[0][0].values[0]).toBe(salesMonthLockKey('t1', '2026-10'));
   });
 
+  const LIMITS: CombosRefreshLimits = { limit: 5, budgetMs: 60_000, statementTimeoutMs: 25_000, txTimeoutMs: 30_000 };
+
   function make(opts: { candidates?: Array<{ clientId: string; month: string }>; locked?: string[]; fresh?: string[]; fail?: string[] } = {}) {
     const candidates = opts.candidates ?? [{ clientId: 't1', month: '2026-10' }, { clientId: 't2', month: '2026-09' }];
     const events: string[] = [];
+    const writes: Prisma.Sql[] = [];
     let current = '';
     const tx = {
       $executeRawUnsafe: jest.fn(async (s: string) => { events.push(`${current}:${s}`); return 0; }),
@@ -65,67 +80,67 @@ describe('refreshStaleMonthCombos (background repair; never on a request)', () =
         return (opts.fresh ?? []).includes(current) ? [] : [{ sourceImportId: `imp-${current}`, appliedAt: AT }];
       }),
       $executeRaw: jest.fn(async (q: Prisma.Sql) => {
-        events.push(`${current}:${/^\s*DELETE/.test(q.sql) ? 'delete' : 'insert'}`);
+        writes.push(q);
+        events.push(`${current}:${/^\s*DELETE/.test(q.sql) ? 'delete' : /^\s*UPDATE/.test(q.sql) ? 'stamp' : 'insert'}`);
         return 7;
       }),
     };
+    let i = 0;
     const db = {
       $queryRaw: jest.fn(async (_q: Prisma.Sql) => candidates),
-      $transaction: jest.fn(async (fn: (t: typeof tx) => Promise<unknown>, _o?: unknown) => fn(tx)),
+      $transaction: jest.fn(async (fn: (t: typeof tx) => Promise<unknown>, _o?: unknown) => {
+        current = candidates[i++].month;
+        return fn(tx);
+      }),
     };
-    // Each candidate runs in its own transaction: tag events with the candidate being processed.
-    const realTx = db.$transaction.getMockImplementation()!;
-    let i = 0;
-    db.$transaction.mockImplementation(async (fn, o) => {
-      const c = candidates[i++];
-      current = c.month;
-      return realTx(fn, o);
-    });
     const log = { log: jest.fn(), warn: jest.fn() };
-    return { db, tx, log, events };
+    return { db, tx, log, events, writes };
   }
 
-  it('lists stale / missing months (bounded) and rebuilds each in its own tx: timeout → try-lock → re-check → DELETE + INSERT', async () => {
-    const { db, log, events } = make();
-    const r = await refreshStaleMonthCombos(db as never, log);
+  it('lists stale months from the HEADER stamp (no summary scan) and rebuilds each in its own tx; stamps the header', async () => {
+    const { db, log, events, writes } = make();
+    const r = await refreshStaleMonthCombos(db as never, log, LIMITS);
     expect(r).toEqual({ found: 2, rebuilt: 2, busy: 0, fresh: 0, failed: 0, skipped: 0 });
     const list = db.$queryRaw.mock.calls[0][0];
     expect(list.sql).toMatch(/FROM "sales_month_history_sets" s/);
-    expect(list.sql).toMatch(/NOT EXISTS/);
-    expect(list.sql).toMatch(/c\."sourceImportId" <> s\."sourceImportId" OR c\."appliedAt" <> s\."appliedAt"/);
-    expect(list.values).toContain(COMBOS_REFRESH_MAX_MONTHS);
+    expect(list.sql).toMatch(/s\."combosSourceImportId" IS DISTINCT FROM s\."sourceImportId" OR s\."combosAppliedAt" IS DISTINCT FROM s\."appliedAt"/);
+    expect(list.sql).not.toMatch(/sales_month_history_combos/);
+    expect(list.values).toContain(LIMITS.limit);
     expect(events.filter((e) => e.startsWith('2026-10:'))).toEqual([
-      `2026-10:SET LOCAL statement_timeout = ${COMBOS_REFRESH_STATEMENT_TIMEOUT_MS}`,
+      '2026-10:SET LOCAL statement_timeout = 25000',
       `2026-10:trylock:${salesMonthLockKey('t1', '2026-10')}`,
-      '2026-10:recheck', '2026-10:delete', '2026-10:insert',
+      '2026-10:recheck', '2026-10:delete', '2026-10:insert', '2026-10:stamp',
     ]);
-    expect(COMBOS_REFRESH_STATEMENT_TIMEOUT_MS).toBe(120_000);
-    expect(db.$transaction).toHaveBeenCalledTimes(2);
+    const stamp = writes.find((w) => /^\s*UPDATE "sales_month_history_sets"/.test(w.sql))!;
+    expect(stamp.sql).toMatch(/SET "combosSourceImportId" = \?, "combosAppliedAt" = /);
+    expect(stamp.sql).toMatch(/AND "sourceImportId" = \? AND "appliedAt" = /); // guarded by the set it rebuilt from
+    expect(stamp.values).toEqual(['imp-2026-10', AT.toISOString(), 't1', '2026-10', 'imp-2026-10', AT.toISOString()]);
+    expect(db.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: LIMITS.txTimeoutMs, maxWait: 5_000 });
   });
 
   it('a month an apply holds (try-lock fails) is skipped without waiting; one already fixed after the lock is left alone', async () => {
     const { db, log, events } = make({ locked: ['2026-10'], fresh: ['2026-09'] });
-    const r = await refreshStaleMonthCombos(db as never, log);
+    const r = await refreshStaleMonthCombos(db as never, log, LIMITS);
     expect(r).toEqual({ found: 2, rebuilt: 0, busy: 1, fresh: 1, failed: 0, skipped: 0 });
-    expect(events.some((e) => /delete|insert/.test(e))).toBe(false);
+    expect(events.some((e) => /delete|insert|stamp/.test(e))).toBe(false);
   });
 
   it('a failing month is logged and counted; the others still run; never throws', async () => {
     const { db, log } = make({ fail: ['2026-10'] });
-    const r = await refreshStaleMonthCombos(db as never, log);
+    const r = await refreshStaleMonthCombos(db as never, log, LIMITS);
     expect(r).toMatchObject({ failed: 1, rebuilt: 1 });
     expect(log.warn).toHaveBeenCalledWith(expect.stringMatching(/2026-10 failed/));
     db.$queryRaw.mockRejectedValueOnce(new Error('db down'));
-    await expect(refreshStaleMonthCombos(db as never, log)).resolves.toMatchObject({ found: 0 });
+    await expect(refreshStaleMonthCombos(db as never, log, LIMITS)).resolves.toMatchObject({ found: 0 });
   });
 
   it('stops starting new months past the budget or when the worker is stopping', async () => {
     const a = make();
     let t = 0;
-    const ra = await refreshStaleMonthCombos(a.db as never, a.log, { budgetMs: 1000, now: () => (t += 600) });
+    const ra = await refreshStaleMonthCombos(a.db as never, a.log, { ...LIMITS, budgetMs: 1000 }, { now: () => (t += 600) });
     expect(ra).toMatchObject({ rebuilt: 1, skipped: 1 });
     const b = make();
-    const rb = await refreshStaleMonthCombos(b.db as never, b.log, { shouldStop: () => true });
+    const rb = await refreshStaleMonthCombos(b.db as never, b.log, LIMITS, { shouldStop: () => true });
     expect(rb).toMatchObject({ rebuilt: 0, skipped: 2 });
     expect(b.db.$transaction).not.toHaveBeenCalled();
   });

@@ -15,6 +15,7 @@ const apiMock = vi.hoisted(() => ({ testKpi: vi.fn(), createKpi: vi.fn(), patchK
 vi.mock('@/lib/sales-import/api', () => ({ salesImportApi: apiMock }));
 
 import { KpiEditor } from '../settings/_components/kpi-editor';
+import { HISTORY_REFRESH_POLL_MS } from '../settings/_components/product-set-builder';
 
 const MAPPING: SalesColumnMapping = {
   sheetName: null, headerRow: 'auto', outletCode: 'CUST', outletName: null, invoiceDate: 'DATE', amount: 'AMT',
@@ -160,7 +161,56 @@ describe('product set builder — stored month history source', () => {
     await act(async () => { fireEvent.change(sel, { target: { value: 'last:3' } }); });
     const note = await screen.findByTestId('product-set-refreshing');
     expect(note).toHaveAttribute('role', 'status');
-    expect(note).toHaveTextContent('The product list for September 2026 is being refreshed — it updates within about 10 minutes.');
+    expect(note).toHaveTextContent('The product list for September 2026 is being refreshed in the background — reload in a few minutes.');
+    // Reload fetches the same selection again; the list stays on screen meanwhile, and the notice goes once it is current
+    apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, months: ['2026-08', '2026-09', '2026-10'], refreshingMonths: [] }));
+    await act(async () => { fireEvent.click(within(note).getByRole('button', { name: 'Reload' })); });
+    expect(apiMock.historyCombos).toHaveBeenLastCalledWith({ lastMonths: 3 }, expect.any(AbortSignal));
+    await waitFor(() => expect(screen.queryByTestId('product-set-refreshing')).not.toBeInTheDocument());
+    expect(screen.getByText('Pick combinations from August 2026 – October 2026 (3 stored months)')).toBeInTheDocument();
+  });
+
+  it('L3: while a month is refreshing the list is polled every ~60 s (quietly), and polling stops once it is current', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, refreshingMonths: ['2026-10'] }));
+      renderEditor();
+      await useStored();
+      await screen.findByTestId('product-set-refreshing');
+      expect(apiMock.historyCombos).toHaveBeenCalledTimes(1);
+      // a failing poll keeps the list (no error box)
+      apiMock.historyCombos.mockResolvedValueOnce({ success: false, error: 'boom', status: 500 });
+      await act(async () => { vi.advanceTimersByTime(HISTORY_REFRESH_POLL_MS); });
+      await waitFor(() => expect(apiMock.historyCombos).toHaveBeenCalledTimes(2));
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.getByText('Pick combinations from October 2026')).toBeInTheDocument();
+      await waitFor(() => expect(within(screen.getByTestId('product-set-refreshing')).getByRole('button', { name: 'Reload' })).toBeEnabled());
+      // the next poll gets a current list → notice gone, no further polls
+      apiMock.historyCombos.mockResolvedValue(ok(HISTORY));
+      await act(async () => { vi.advanceTimersByTime(HISTORY_REFRESH_POLL_MS); });
+      await waitFor(() => expect(screen.queryByTestId('product-set-refreshing')).not.toBeInTheDocument());
+      const calls = apiMock.historyCombos.mock.calls.length;
+      await act(async () => { vi.advanceTimersByTime(HISTORY_REFRESH_POLL_MS * 3); });
+      expect(apiMock.historyCombos).toHaveBeenCalledTimes(calls);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('L3: polling stops on unmount', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, refreshingMonths: ['2026-10'] }));
+      const { unmount } = render(<KpiEditor initial={NEW} tenantKpis={KPIS} ownedCodes={[]} mapping={MAPPING} combos={LATEST}
+        onSaved={vi.fn()} onCancel={vi.fn()} onDuplicateAsCases={vi.fn()} />);
+      await useStored();
+      await screen.findByTestId('product-set-refreshing');
+      unmount();
+      await act(async () => { vi.advanceTimersByTime(HISTORY_REFRESH_POLL_MS * 2); });
+      expect(apiMock.historyCombos).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('the live "never appears" check follows the selected source', async () => {

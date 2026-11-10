@@ -2,12 +2,13 @@ import { Prisma } from '@prisma/client';
 import { sqlUtc } from '../sql-time';
 
 /**
- * The per-month combos summary (plan §10c): sales_month_history_combos, one row per (tenant, month, product combo),
- * stamped with the history set it summarises (`sourceImportId` + `appliedAt` = the SalesMonthHistorySet header).
- *   - WRITE: the apply, right after the history INSERT, in its transaction (insertMonthCombosSql).
+ * The per-month combos summary (plan §10c): sales_month_history_combos, one row per (tenant, month, product combo). The
+ * month's set header (sales_month_history_sets) records which history set the summary was built from
+ * (`combosSourceImportId` + `combosAppliedAt`, written in the SAME transaction as the summary).
+ *   - WRITE: the apply, right after the history INSERT, in its transaction (insertMonthCombosSql + the header stamp).
  *   - READ: GET history-combos — strictly read-only; a month whose summary is missing or from another set is answered
- *     anyway and flagged `refreshingMonths` (classifyMonthSummaries).
- *   - REPAIR: refreshStaleMonthCombos, in the BACKGROUND (worker drain + the Cloud Scheduler drain), never on a request.
+ *     as well as it can be and flagged `refreshingMonths` (classifyMonthSummaries).
+ *   - REPAIR: refreshStaleMonthCombos, in the BACKGROUND (worker drain, inline drain, Cloud Scheduler drain) only.
  */
 
 /** ONE INSERT … SELECT … GROUP BY over the month's stored lines (dimKey is the stable key of dims, 1:1). The caller
@@ -23,48 +24,59 @@ export function insertMonthCombosSql(clientId: string, month: string, sourceImpo
      GROUP BY h."clientId", h."month", h."dimKey", h."dims"`;
 }
 
-/** Per-month head of the summary rows (a month with rows of two sets has srcMin ≠ srcMax). */
-export interface SummaryHead { month: string; srcMin: string; srcMax: string; atMin: Date; atMax: Date }
-export interface SetHead { month: string; sourceImportId: string; appliedAt: Date; lineRows: number }
+export interface SetHead {
+  month: string;
+  sourceImportId: string;
+  appliedAt: Date;
+  lineRows: number;
+  combosSourceImportId: string | null;
+  combosAppliedAt: Date | null;
+}
 export type SummaryState = 'current' | 'stale' | 'missing' | 'empty';
 
 /**
- * current = every summary row is from the month's set; stale = rows exist but (some) are from another set;
- * missing = no rows while the set has lines; empty = no rows and no lines (nothing to summarise).
+ * From the set header alone (no summary scan): current = the summary was built from this set; missing = no summary was
+ * ever built for the month (stamp null) while it has lines; empty = no lines and no summary; stale = the summary was
+ * built from another set (e.g. an older revision re-applied the month during a deploy and did not rebuild it).
  */
-export function classifyMonthSummaries(sets: SetHead[], heads: SummaryHead[]): Map<string, SummaryState> {
-  const byMonth = new Map(heads.map((h) => [h.month, h]));
+export function classifyMonthSummaries(sets: SetHead[]): Map<string, SummaryState> {
   const out = new Map<string, SummaryState>();
   for (const s of sets) {
-    const h = byMonth.get(s.month);
-    if (!h) {
-      out.set(s.month, s.lineRows > 0 ? 'missing' : 'empty');
-      continue;
-    }
-    const at = new Date(s.appliedAt).getTime();
-    const same = h.srcMin === s.sourceImportId && h.srcMax === s.sourceImportId
-      && new Date(h.atMin).getTime() === at && new Date(h.atMax).getTime() === at;
-    out.set(s.month, same ? 'current' : 'stale');
+    const at = s.combosAppliedAt ? new Date(s.combosAppliedAt).getTime() : null;
+    if (s.combosSourceImportId === s.sourceImportId && at === new Date(s.appliedAt).getTime()) out.set(s.month, 'current');
+    else if (s.combosSourceImportId === null) out.set(s.month, s.lineRows > 0 ? 'missing' : 'empty');
+    else out.set(s.month, 'stale');
   }
   return out;
 }
 
-/** Background refresh bounds: months per run, statement timeout (apply scale), and a wall-clock budget per run. */
-export const COMBOS_REFRESH_MAX_MONTHS = 12;
-export const COMBOS_REFRESH_STATEMENT_TIMEOUT_MS = 120_000;
-export const COMBOS_REFRESH_BUDGET_MS = 5 * 60_000;
+/** Bounds of one background refresh run. */
+export interface CombosRefreshLimits {
+  /** Months rebuilt at most per run. */
+  limit: number;
+  /** No new month is started after this much wall time (a started month runs to its tx bound). */
+  budgetMs: number;
+  /** Per statement (re-check L2: below the 30 s close / reopen and 60 s target-upload waiters on the month lock). */
+  statementTimeoutMs: number;
+  /** Per month transaction. */
+  txTimeoutMs: number;
+}
+
+/** The job worker (no HTTP deadline): up to 12 months in ≤ 5 min; a month's tx may span several 25 s statements. */
+export const COMBOS_REFRESH_WORKER_LIMITS: CombosRefreshLimits = { limit: 12, budgetMs: 5 * 60_000, statementTimeoutMs: 25_000, txTimeoutMs: 110_000 };
+/**
+ * Inside an HTTP request (Cloud Scheduler drain; also the API's inline drain): at most 2 months, no new month after 45 s,
+ * each month ≤ 30 s → the refresh ends within ~75 s, well inside the scheduler's attempt deadline (plan §14: 170 s)
+ * together with the retention sweep. A month that does not fit is retried by the next run.
+ */
+export const COMBOS_REFRESH_HTTP_LIMITS: CombosRefreshLimits = { limit: 2, budgetMs: 45_000, statementTimeoutMs: 25_000, txTimeoutMs: 30_000 };
 
 /** The month lock key — IDENTICAL to lockSalesMonth (common/sales-kpi-ownership.ts), so apply and refresh exclude. */
 export const salesMonthLockKey = (clientId: string, month: string) => `sales-month:${clientId}:${month}`;
 
-/** A set header whose summary is missing (lines but no rows) or not entirely from that set. */
-const STALE_PREDICATE = Prisma.sql`
-  (s."lineRows" > 0 AND NOT EXISTS (
-      SELECT 1 FROM "sales_month_history_combos" c WHERE c."clientId" = s."clientId" AND c."month" = s."month"))
-  OR EXISTS (
-      SELECT 1 FROM "sales_month_history_combos" c
-       WHERE c."clientId" = s."clientId" AND c."month" = s."month"
-         AND (c."sourceImportId" <> s."sourceImportId" OR c."appliedAt" <> s."appliedAt"))`;
+/** A set header whose summary stamp is not the set itself (a header-row comparison; never scans the summary). */
+const STALE_HEADER = Prisma.sql`
+  (s."combosSourceImportId" IS DISTINCT FROM s."sourceImportId" OR s."combosAppliedAt" IS DISTINCT FROM s."appliedAt")`;
 
 export interface CombosRefreshResult { found: number; rebuilt: number; busy: number; fresh: number; failed: number; skipped: number }
 
@@ -73,14 +85,16 @@ type RefreshDb = Pick<Prisma.TransactionClient, '$queryRaw'> & {
 };
 
 /**
- * Rebuild stale / missing month summaries (bounded). For each month, in ITS OWN transaction under an apply-scale
+ * Rebuild stale / missing month summaries (bounded by `limits`). For each month, in ITS OWN transaction under the
  * statement timeout: pg_TRY_advisory_xact_lock on the same month key as apply (busy → skip, the next run retries),
- * re-check staleness after the lock, then DELETE + ONE INSERT … SELECT. Never throws; logs and returns counts.
+ * re-check the header after the lock, then DELETE + ONE INSERT … SELECT + stamp the header (guarded by the set it
+ * read). Never throws; logs and returns counts.
  */
 export async function refreshStaleMonthCombos(
   db: RefreshDb,
   log: { log(m: string): void; warn(m: string): void },
-  opts: { limit?: number; budgetMs?: number; now?: () => number; shouldStop?: () => boolean } = {},
+  limits: CombosRefreshLimits,
+  opts: { now?: () => number; shouldStop?: () => boolean } = {},
 ): Promise<CombosRefreshResult> {
   const out: CombosRefreshResult = { found: 0, rebuilt: 0, busy: 0, fresh: 0, failed: 0, skipped: 0 };
   const clock = opts.now ?? (() => Date.now());
@@ -90,23 +104,23 @@ export async function refreshStaleMonthCombos(
     candidates = await db.$queryRaw<Array<{ clientId: string; month: string }>>(Prisma.sql`
       SELECT s."clientId" AS "clientId", s."month" AS "month"
         FROM "sales_month_history_sets" s
-       WHERE ${STALE_PREDICATE}
+       WHERE ${STALE_HEADER}
        ORDER BY s."appliedAt" DESC
-       LIMIT ${opts.limit ?? COMBOS_REFRESH_MAX_MONTHS}`);
+       LIMIT ${limits.limit}`);
   } catch (e) {
     log.warn(`sales-import combos refresh: could not list stale months: ${(e as Error).message}`);
     return out;
   }
   out.found = candidates.length;
   for (const { clientId, month } of candidates) {
-    if (opts.shouldStop?.() || clock() - t0 >= (opts.budgetMs ?? COMBOS_REFRESH_BUDGET_MS)) {
+    if (opts.shouldStop?.() || clock() - t0 >= limits.budgetMs) {
       out.skipped++;
       continue;
     }
     try {
       const r = await db.$transaction(
         async (tx) => {
-          await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${COMBOS_REFRESH_STATEMENT_TIMEOUT_MS}`);
+          await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${Math.floor(limits.statementTimeoutMs)}`);
           const lock = await tx.$queryRaw<Array<{ ok: boolean }>>(
             Prisma.sql`SELECT pg_try_advisory_xact_lock(hashtextextended(${salesMonthLockKey(clientId, month)}, 0)) AS "ok"`,
           );
@@ -114,14 +128,21 @@ export async function refreshStaleMonthCombos(
           const still = await tx.$queryRaw<Array<{ sourceImportId: string; appliedAt: Date }>>(Prisma.sql`
             SELECT s."sourceImportId" AS "sourceImportId", s."appliedAt" AS "appliedAt"
               FROM "sales_month_history_sets" s
-             WHERE s."clientId" = ${clientId} AND s."month" = ${month} AND (${STALE_PREDICATE})`);
+             WHERE s."clientId" = ${clientId} AND s."month" = ${month} AND ${STALE_HEADER}`);
           if (still.length === 0) return 'fresh' as const; // rebuilt by another run / re-applied meanwhile
+          const src = still[0].sourceImportId;
+          const at = new Date(still[0].appliedAt);
           await tx.$executeRaw(Prisma.sql`DELETE FROM "sales_month_history_combos" WHERE "clientId" = ${clientId} AND "month" = ${month}`);
-          const rows = await tx.$executeRaw(insertMonthCombosSql(clientId, month, still[0].sourceImportId, new Date(still[0].appliedAt)));
+          const rows = await tx.$executeRaw(insertMonthCombosSql(clientId, month, src, at));
+          await tx.$executeRaw(Prisma.sql`
+            UPDATE "sales_month_history_sets"
+               SET "combosSourceImportId" = ${src}, "combosAppliedAt" = ${sqlUtc(at)}
+             WHERE "clientId" = ${clientId} AND "month" = ${month}
+               AND "sourceImportId" = ${src} AND "appliedAt" = ${sqlUtc(at)}`);
           log.log(JSON.stringify({ msg: 'sales-import combos summary rebuilt', clientId, month, rows: Number(rows) }));
           return 'rebuilt' as const;
         },
-        { timeout: COMBOS_REFRESH_STATEMENT_TIMEOUT_MS + 30_000, maxWait: 10_000 },
+        { timeout: limits.txTimeoutMs, maxWait: 5_000 },
       );
       out[r]++;
     } catch (e) {

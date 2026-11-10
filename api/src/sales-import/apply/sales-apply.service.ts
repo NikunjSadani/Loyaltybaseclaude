@@ -331,6 +331,9 @@ export class SalesApplyService {
         mappingFingerprint: w.mapping?.fingerprint ?? null,
         dimensionKeys: w.mapping?.dimensionKeys ?? [],
         lineRows: Number(inserted),
+        // The combos summary written above is this set's (§10c): stamped in the same transaction.
+        combosSourceImportId: w.sourceImportId,
+        combosAppliedAt: now,
       };
       await tx.salesMonthHistorySet.upsert({
         where: { clientId_month: { clientId, month } },

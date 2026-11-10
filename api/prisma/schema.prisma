@@ -3210,6 +3210,10 @@ model SalesMonthHistorySet {
   mappingFingerprint String? // the column mapping the lines were parsed with (SalesImport.mappingFingerprint)
   dimensionKeys      String[] @default([]) // that mapping's dimension keys
   lineRows           Int      @default(0)
+  /// The history set the month's combos summary (sales_month_history_combos) was built from — written in the same
+  /// transaction as the summary (apply, background rebuild). ≠ sourceImportId / appliedAt (or null) → summary stale (§10c).
+  combosSourceImportId String?
+  combosAppliedAt      DateTime?
 
   @@unique([clientId, month])
   @@map("sales_month_history_sets")

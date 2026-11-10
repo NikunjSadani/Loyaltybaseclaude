@@ -6,6 +6,7 @@ import type { SalesImportDrainResult } from './sales-import.contract';
 import { hasClaimableImports } from './ingest/claim';
 import { SalesImportRunnerService } from './ingest/sales-import-runner.service';
 import { SalesImportRetentionService } from './ingest/sales-import-retention.service';
+import { COMBOS_REFRESH_HTTP_LIMITS } from './kpi/month-combos';
 
 /**
  * POST /v1/sales-import/drain: `@Public`, header `x-drain-secret` = SALES_IMPORT_DRAIN_SECRET,
@@ -17,9 +18,6 @@ import { SalesImportRetentionService } from './ingest/sales-import-retention.ser
  * REQUIRED in staging/prod: it is what recovers an import whose worker died (heartbeat-stale PROCESSING is reclaimed
  * on the next kick) and, when nothing is queued, it drives the retention sweep. See plan §14.
  */
-/** Wall-clock budget for the combos-summary repair inside the scheduler's drain request (a started month finishes). */
-export const DRAIN_COMBOS_REFRESH_BUDGET_MS = 60_000;
-
 @Controller('sales-import')
 export class SalesImportDrainController {
   constructor(
@@ -40,8 +38,9 @@ export class SalesImportDrainController {
     if (got.length !== want.length || !timingSafeEqual(got, want)) throw new ForbiddenException('Invalid drain secret');
     if (!(await hasClaimableImports(this.prisma))) {
       await this.retention.sweep({ limit: 50 }); // never throws
-      // §10c: repair stale combos summaries; budget kept well inside the scheduler's HTTP deadline (never throws).
-      await this.retention.refreshHistoryCombos({ budgetMs: DRAIN_COMBOS_REFRESH_BUDGET_MS });
+      // §10c: repair stale combos summaries with the small HTTP limits (≤ 2 months, 25 s statements, 30 s per month,
+      // no new month after 45 s) so the request ends well inside the scheduler's attempt deadline (§14: 170 s).
+      await this.retention.refreshHistoryCombos(COMBOS_REFRESH_HTTP_LIMITS);
       return { kicked: false };
     }
     return { kicked: (await this.runner.kick()) !== 'none' };

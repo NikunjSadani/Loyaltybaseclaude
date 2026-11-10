@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { SalesImportProcessorService } from './sales-import-processor.service';
 import { SalesImportRetentionService } from './sales-import-retention.service';
+import { COMBOS_REFRESH_HTTP_LIMITS } from '../kpi/month-combos';
 
 export type SalesImportKickResult = 'inline' | 'job' | 'none';
 
@@ -75,7 +76,8 @@ export class SalesImportRunnerService {
       } while (this.inlineAgain);
       // S5: the inline drain sweeps retention like the job does (never throws).
       await this.retention?.sweep({ limit: 50 });
-      await this.retention?.refreshHistoryCombos(); // §10c background summary repair (never throws)
+      // §10c background summary repair (never throws); this runs in the API process → the small HTTP-path limits.
+      await this.retention?.refreshHistoryCombos({ ...COMBOS_REFRESH_HTTP_LIMITS, budgetMs: 60_000 });
     } catch (e) {
       this.logger.error(`Sales Import inline worker stopped: ${(e as Error).message}`);
     }
