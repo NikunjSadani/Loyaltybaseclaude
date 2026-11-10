@@ -12,6 +12,7 @@ import {
 import { Request, Response } from 'express';
 import { SchemeReportService } from './scheme-report.service';
 import { SchemeNotifyService } from './scheme-notify.service';
+import { SkipThrottle } from '@nestjs/throttler';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Public, Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
@@ -47,7 +48,12 @@ export class SchemeReportController {
    * full security contract. Static path declared BEFORE the `:id` routes so Nest never
    * matches 'media' as an :id param (mirrors kyc.controller's documents/view).
    */
+  // @SkipThrottle (audit L3): a reviewer's gallery fires one GET per photo through the Next
+  // rewrite (one shared IP), so the global 60/min bucket broke images for every reviewer at once.
+  // Each request is authorised SOLELY by an HS256-signed, short-lived, single-object token (bad
+  // token → bare 404 after one local verify), so — like gift-image — it is exempt.
   @Public()
+  @SkipThrottle()
   @Get('media/view')
   async viewMedia(
     @Query('token') token: string,

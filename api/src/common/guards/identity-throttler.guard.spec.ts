@@ -10,6 +10,10 @@ import { AuthService } from '../../auth/auth.service';
 import { Public } from '../decorators/roles.decorator';
 import { IdentityThrottlerGuard, THROTTLE_KEY_BY } from './identity-throttler.guard';
 
+
+// Dozens of sequential supertest round-trips per test: under full-suite load these exceed jest's
+// 5 s default (seen 2026-11-10), so give the HTTP-loop tests real headroom.
+jest.setTimeout(30_000);
 /**
  * Per-identity throttling (2026-11-10). Prod logs showed 220 × 429 on POST /v1/auth/send-otp and none
  * elsewhere: every login arrives through the Next server action / proxy, so `req.ip` is effectively one
@@ -126,6 +130,20 @@ describe('IdentityThrottlerGuard', () => {
       expect((await sendOtp({ phone: '9876543210', channel: 'SMS', clientId: 'deoleo' })).status).toBe(429);
     });
 
+    it('a NUMERIC phone (ValidationPipe implicit conversion makes it a valid string) shares the string bucket', async () => {
+      // main.ts runs ValidationPipe({ transform, enableImplicitConversion }), so {"phone": 9876543211}
+      // reaches the handler as "9876543211". The guard runs BEFORE the pipe and sees the number --
+      // it must key it identically, or each victim gets a second (numeric) bucket.
+      for (let i = 0; i < 3; i++) {
+        expect((await sendOtp({ phone: '9876543211', channel: 'SMS', clientId: 'deoleo' })).status).toBe(200);
+      }
+      for (let i = 0; i < 2; i++) {
+        expect((await sendOtp({ phone: 9876543211, channel: 'SMS', clientId: 'deoleo' })).status).toBe(200);
+      }
+      expect((await sendOtp({ phone: 9876543211, channel: 'SMS', clientId: 'deoleo' })).status).toBe(429);
+      expect((await sendOtp({ phone: '9876543211', channel: 'SMS', clientId: 'deoleo' })).status).toBe(429);
+    });
+
     it('missing body / missing phone / malformed phone → IP fallback (never throws), shared IP bucket', async () => {
       const bad: unknown[] = [undefined, {}, { phone: 12345 }, { phone: 'abc' }, { phone: '123' }];
       // The guard lets them through (no ValidationPipe in this harness, so the handler may 500 on an
@@ -150,13 +168,14 @@ describe('IdentityThrottlerGuard', () => {
       } as never;
       const track = (req: Record<string, unknown>) =>
         (guard as unknown as { getTracker: (r: unknown, c: unknown) => Promise<string> }).getTracker(req, ctx);
-      for (const body of [undefined, null, 'str', 42, [], {}, { phone: null }, { phone: {} }, { phone: '12345678901' }]) {
+      for (const body of [undefined, null, 'str', 42, [], {}, { phone: null }, { phone: {} }, { phone: '12345678901' }, { phone: 12345 }, { phone: 1.5e10 }, { phone: NaN }, { phone: 98765.4321 }, { phone: -9876543210 }, { phone: true }]) {
         await expect(track({ ip: '10.0.0.1', body })).resolves.toBe('ip:10.0.0.1');
       }
       await expect(track({ body: {} })).resolves.toBe('ip:unknown');
       const k = await track({ ip: '10.0.0.1', body: { phone: '9876543210' } });
       expect(k).toMatch(/^phone:[0-9a-f]{64}$/);
       expect(k).not.toContain('9876543210');
+      await expect(track({ ip: '10.0.0.1', body: { phone: 9876543210 } })).resolves.toBe(k);
     });
 
     it('the throttle 429 logs a structured warn with route + key kind and NEVER the raw phone', async () => {

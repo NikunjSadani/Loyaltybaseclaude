@@ -142,11 +142,19 @@ export class IdentityThrottlerGuard extends ThrottlerGuard {
   }
 }
 
-/** The 10 digits AuthService.sendOtp/verifyOtp would use (`phone.replace(/\D/g, '')`), or null. */
+/**
+ * The 10 digits AuthService.sendOtp/verifyOtp would use (`phone.replace(/\D/g, '')`), or null.
+ * A NUMERIC phone is accepted too: this guard runs BEFORE the global ValidationPipe, whose
+ * `enableImplicitConversion` turns `{"phone": 9876543210}` into the string the handler acts on —
+ * keying only strings would hand every victim a second (numeric) bucket.
+ */
 function normalisePhone(body: unknown): string | null {
   if (!body || typeof body !== 'object') return null;
-  const phone = (body as { phone?: unknown }).phone;
-  if (typeof phone !== 'string') return null;
+  const raw = (body as { phone?: unknown }).phone;
+  let phone: string;
+  if (typeof raw === 'string') phone = raw;
+  else if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0) phone = String(raw);
+  else return null;
   const digits = phone.replace(/\D/g, '');
   return digits.length === 10 ? digits : null;
 }

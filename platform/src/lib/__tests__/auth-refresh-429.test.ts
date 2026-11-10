@@ -10,9 +10,11 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { refreshTokensViaBackend } from '@/lib/auth-refresh';
 
 const ok = { ok: true, status: 200, headers: new Headers(), json: () => Promise.resolve({ data: { accessToken: 'a2', refreshToken: 'r2' } }) };
+const cancels: Array<ReturnType<typeof vi.fn>> = [];
 const tooMany = (retryAfter?: string) => ({
   ok: false,
   status: 429,
+  body: (() => { const cancel = vi.fn().mockResolvedValue(undefined); cancels.push(cancel); return { cancel }; })(),
   headers: new Headers(retryAfter ? { 'Retry-After': retryAfter } : {}),
   json: () => Promise.resolve({ success: false, error: 'ThrottlerException: Too Many Requests' }),
 });
@@ -48,6 +50,26 @@ describe('refreshTokensViaBackend — 429 handling', () => {
     await vi.advanceTimersByTimeAsync(2_000); // cap
     await expect(p).resolves.toEqual({ accessToken: 'a2', refreshToken: 'r2' });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('releases each unread 429 body (cancel) before waiting -- no leaked sockets', async () => {
+    cancels.length = 0;
+    const fetchMock = vi.fn().mockResolvedValueOnce(tooMany()).mockResolvedValueOnce(tooMany()).mockResolvedValueOnce(ok);
+    vi.stubGlobal('fetch', fetchMock);
+    const p = refreshTokensViaBackend('r1');
+    await vi.runAllTimersAsync();
+    await expect(p).resolves.toEqual({ accessToken: 'a2', refreshToken: 'r2' });
+    expect(cancels).toHaveLength(2);
+    for (const c of cancels) expect(c).toHaveBeenCalledTimes(1);
+  });
+
+  it('a body.cancel() that rejects does not break the retry', async () => {
+    const bad = { ...tooMany(), body: { cancel: vi.fn().mockRejectedValue(new Error('locked')) } };
+    const fetchMock = vi.fn().mockResolvedValueOnce(bad).mockResolvedValueOnce(ok);
+    vi.stubGlobal('fetch', fetchMock);
+    const p = refreshTokensViaBackend('r1');
+    await vi.runAllTimersAsync();
+    await expect(p).resolves.toEqual({ accessToken: 'a2', refreshToken: 'r2' });
   });
 
   it('a non-429 failure (401 dead session) is NOT retried', async () => {

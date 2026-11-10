@@ -104,6 +104,8 @@ export async function refreshTokensViaBackend(
         const wait = Number.isFinite(retryAfterSecs) && retryAfterSecs > 0
           ? Math.min(retryAfterSecs * 1000, REFRESH_429_MAX_WAIT_MS)
           : REFRESH_429_BACKOFF_MS[attempt];
+        // Release the unread 429 body first so its connection isn't held open across the wait.
+        await res.body?.cancel().catch(() => {});
         await new Promise((resolve) => setTimeout(resolve, wait));
         continue;
       }

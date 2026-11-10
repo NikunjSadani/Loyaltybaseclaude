@@ -316,13 +316,23 @@ export class AuthService {
     // NODE_ENV, or an explicit ALLOW_FIXED_OTP opt-in; always refused on the prod DB) so a
     // misconfig can't turn into a universal-OTP backdoor. (Mirrors the redemption OTP path.)
     const fixedOtp = isFixedOtpAllowed() ? this.config.get<string>('FIXED_OTP') : undefined;
+
+    // Claim this attempt ATOMICALLY before comparing the code. The read above is only a cheap
+    // pre-check: N parallel requests all read the same `attempts`, so a read-then-write counter let
+    // ~100 concurrent guesses through before it reached maxAttempts (audit L1). The conditional
+    // increment is the single serialisation point — only maxAttempts claims can ever win, and a
+    // losing claim is never compared (even a correct code), so it cannot mint a session.
+    const claim = await this.prisma.otpCode.updateMany({
+      where: { id: record.id, verifiedAt: null, attempts: { lt: record.maxAttempts } },
+      data:  { attempts: { increment: 1 } },
+    });
+    if (claim.count === 0) {
+      throw new ForbiddenException('Too many attempts — please request a new OTP.');
+    }
+
     const isCorrect = fixedOtp ? otp === fixedOtp : otp === record.code;
 
     if (!isCorrect) {
-      await this.prisma.otpCode.update({
-        where: { id: record.id },
-        data:  { attempts: record.attempts + 1 },
-      });
       const remaining = record.maxAttempts - record.attempts - 1;
       throw new UnauthorizedException(`Invalid OTP. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`);
     }
