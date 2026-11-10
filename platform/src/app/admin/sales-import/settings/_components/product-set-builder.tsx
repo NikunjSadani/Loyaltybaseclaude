@@ -140,7 +140,8 @@ export function ProductSetBuilder({
       label: historyLabel(h?.months ?? []),
       capped: Boolean(h && h.totalCombos > h.dimensionCombos.length),
       total: h?.totalCombos ?? 0,
-      drift: h ? dimensionKeyDrift(h.dimensionKeys, dims) : null,
+      // The set header's keys; a header without keys (e.g. a backfilled one) falls back to the combos' own keys.
+      drift: h ? (h.dimensionKeys.length ? dimensionKeyDrift(h.dimensionKeys, dims) : comboMappingDrift(h.dimensionCombos, dims)) : null,
       keysDiffer: Boolean(h?.dimensionKeysDiffer),
     };
   }, [source, combos, history.data, dims]);

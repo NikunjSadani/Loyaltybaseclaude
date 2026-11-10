@@ -115,6 +115,15 @@ describe('product set builder — stored month history source', () => {
     expect(w).toHaveTextContent('different product columns in different months');
   });
 
+  it('a stored set without declared keys falls back to the combos\' own keys for the drift warning', async () => {
+    apiMock.historyCombos.mockResolvedValue(ok({
+      ...HISTORY, dimensionKeys: [], dimensionCombos: [{ dims: { dimA: 'R' }, lines: 1, amountRupees: 1, quantity: 1 }],
+    }));
+    renderEditor();
+    await useStored();
+    expect(screen.getByTestId('product-set-mapping-drift')).toHaveTextContent('no SKU group column');
+  });
+
   it('the live "never appears" check follows the selected source', async () => {
     apiMock.historyCombos.mockResolvedValue(ok(HISTORY));
     renderEditor({ initial: { ...NEW, filter: { anyOf: [{ dimA: 'P' }] } } });
