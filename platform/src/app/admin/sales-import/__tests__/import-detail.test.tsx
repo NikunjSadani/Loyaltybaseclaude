@@ -432,4 +432,15 @@ describe('import detail — preview + apply', () => {
     await screen.findByTestId('sales-import-reprocessed-from');
     expect(screen.queryByTestId('sales-import-duplicate')).not.toBeInTheDocument();
   });
+
+  it('skipped rows: the server reason is shown and the note names the 200-character product-value limit', async () => {
+    apiMock.get.mockResolvedValue(ok(detail({
+      rowsSkipped: 1,
+      errorSamples: [{ row: 7, column: 'BRAND', reason: 'product value longer than 200 characters' }],
+    })));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    render(<Page />);
+    expect(await screen.findByText('product value longer than 200 characters')).toBeInTheDocument();
+    expect(screen.getByTestId('skip-reasons-note')).toHaveTextContent('a product value longer than 200 characters');
+  });
 });

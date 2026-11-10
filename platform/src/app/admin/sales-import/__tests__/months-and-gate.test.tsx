@@ -213,6 +213,31 @@ describe('months page — recalculate from stored history', () => {
     expect(screen.getByTestId('recalc-blocked')).toHaveTextContent('October 2026 is closed.');
   });
 
+  it('MAPPING_CHANGED is explained in full without hover; recalculation stays possible', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc({ warnings: ['MAPPING_CHANGED'] })));
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+    expect(await screen.findByTestId('recalc-warnings')).toHaveTextContent(
+      /column settings changed after this month was saved\. Every KPI can still be calculated from the stored lines.*check the totals before you recalculate/,
+    );
+    expect(screen.getByTestId('recalc-apply')).toBeEnabled();
+  });
+
+  it('a blocked recalculation shows the reason prominently (alert), not only beside the button', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc({
+      canApply: false, blockedReason: 'KPI_X uses the "Pack size" column, which the stored lines for October 2026 do not have.',
+    })));
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+    const b = await screen.findByTestId('recalc-blocked-banner');
+    expect(b).toHaveAttribute('role', 'alert');
+    expect(b).toHaveTextContent('October 2026 cannot be recalculated: KPI_X uses the "Pack size" column');
+    expect(b.textContent).not.toContain('..');
+    expect(screen.getByTestId('recalc-apply')).toBeDisabled();
+  });
+
   it('404 (no stored history) is explained', async () => {
     apiMock.months.mockResolvedValue(ok([histRow()]));
     apiMock.recalcPreview.mockResolvedValue({ success: false, error: 'Not found', status: 404 });

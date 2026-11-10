@@ -28,7 +28,7 @@ import {
 import { getUploadState, subscribeUpload } from '@/lib/sales-import/upload-store';
 import { usePermissions } from '@/lib/use-permissions';
 import {
-  SALES_IMPORT_ABANDONED_UPLOAD_HOURS, SALES_IMPORT_STALE_HEARTBEAT_MINUTES,
+  SALES_IMPORT_ABANDONED_UPLOAD_HOURS, SALES_IMPORT_MAX_DIM_VALUE_CHARS, SALES_IMPORT_STALE_HEARTBEAT_MINUTES,
   type ApplyMonthResult, type MonthPreview, type SalesImportDetail, type SalesImportPreview,
 } from '@/lib/sales-import/types';
 
@@ -832,6 +832,11 @@ export default function SalesImportDetailPage() {
               ))}
             </tbody>
           </table>
+          <p className="text-[11px] text-gray-500 mt-2" data-testid="skip-reasons-note">
+            A row is skipped when it has no outlet code, an invoice date or amount / cases the portal cannot read, or a
+            product value longer than {SALES_IMPORT_MAX_DIM_VALUE_CHARS} characters. Skipped rows are not counted in any
+            month.
+          </p>
           <Button size="sm" variant="outline" className="mt-2"
             onClick={() => download(salesImportApi.errorsXlsxUrl(d.id), `skipped-rows-${d.id}.xlsx`, setActionError)}>
             <Download className="w-3.5 h-3.5" /> Download all skipped-row examples

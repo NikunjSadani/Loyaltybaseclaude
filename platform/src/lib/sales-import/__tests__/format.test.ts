@@ -52,6 +52,10 @@ describe('labels', () => {
     expect(`${sentence('Closed.')}. Next`).toBe('Closed. Next');
     expect(sentence(null)).toBe('');
   });
+  it('MAPPING_CHANGED has plain-English text and a short chip label', () => {
+    expect(warningText('MAPPING_CHANGED', { month: '2026-10', firstDate: '2026-10-01', lastDate: '2026-10-31' }))
+      .toMatch(/column settings changed after this month was saved.*check the totals/);
+  });
   it('older-data text compares this file with the applied range', () => {
     expect(warningText('OLDER_THAN_LAST_APPLIED', {
       month: '2026-10', firstDate: '2026-10-01', lastDate: '2026-10-20',

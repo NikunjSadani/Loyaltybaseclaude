@@ -118,8 +118,15 @@ export function RecalculatePanel({ month, onClose, onApplied }: {
             lines and get 0; {formatCount(preview.unmatchedCustomers)} customers are not in the programme
             ({formatRupees(preview.unmatchedAmountRupees)}, ignored).
           </p>
+          {!preview.canApply && preview.blockedReason && (
+            <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 flex gap-2"
+              data-testid="recalc-blocked-banner">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span><strong>{label} cannot be recalculated:</strong> {sentence(preview.blockedReason)}.</span>
+            </div>
+          )}
           {preview.warnings.length > 0 && (
-            <ul className="space-y-1">
+            <ul className="space-y-1" data-testid="recalc-warnings">
               {preview.warnings.map((w) => (
                 <li key={w} className="text-xs text-amber-800 flex gap-1.5">
                   <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />

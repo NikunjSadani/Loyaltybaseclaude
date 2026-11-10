@@ -127,6 +127,9 @@ export function warningText(
     }
     case 'REPLACES_MANUAL_VALUES':
       return 'Some outlets have values for these KPIs from the manual achievement upload. Applying replaces them with the sales-file values.';
+    case 'MAPPING_CHANGED':
+      return 'The column settings changed after this month was saved. Every KPI can still be calculated from the ' +
+        'stored lines (read as they were when the month was applied) — check the totals before you recalculate.';
     case 'NEGATIVE_VALUES':
       return 'Some outlets come out negative (returns are bigger than sales). They are stored as-is.';
     default:
@@ -140,6 +143,7 @@ export const WARNING_SHORT: Record<SalesMonthWarning, string> = {
   OLDER_THAN_LAST_APPLIED: 'Older data than last applied',
   REPLACES_MANUAL_VALUES: 'Replaces manual values',
   NEGATIVE_VALUES: 'Negative values',
+  MAPPING_CHANGED: 'Column settings changed',
 };
 
 export function isPartialMonth(m: Pick<MonthPreview, 'warnings'>): boolean {
