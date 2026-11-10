@@ -2,7 +2,6 @@ import { Body, Controller, ForbiddenException, Headers, Logger, Post, Req } from
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { Request } from 'express';
 import { Public } from '../common/decorators/roles.decorator';
-import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { RewardsService } from '../rewards/rewards.service';
 
 /** express Request augmented with the raw body captured in main.ts (for HMAC verification). */
@@ -25,8 +24,9 @@ type RawBodyRequest = Request & { rawBody?: Buffer };
  * it can never inject a fake voucher or a fake failure. The signature is defense in
  * depth (stops reconcile-spam / enumeration), not the money-integrity control.
  *
- * Fail-closed once HUBBLE_WEBHOOK_SECRET is configured (prod). Dev-bypass only where
- * FIXED_OTP is allowed (non-prod) so staging UAT works before the secret is provisioned.
+ * FAIL-CLOSED in every environment: with no signing secret configured the webhook rejects
+ * (403) — there is no dev-bypass. Secret = HUBBLE_WEBHOOK_SECRET (env-neutral; prod + staging
+ * bind it), falling back to HUBBLE_WEBHOOK_SECRET_STAGING.
  */
 @Controller('hubble')
 export class HubbleWebhookController {
@@ -41,7 +41,7 @@ export class HubbleWebhookController {
     @Body() payload: unknown,
     @Headers('x-verify') signature?: string,
   ): Promise<{ ok: true; reconciled: boolean; outcome?: string }> {
-    this.assertSignature(req.rawBody, signature, { devBypass: isFixedOtpAllowed() });
+    this.assertSignature(req.rawBody, signature);
 
     const referenceId = this.extractReferenceId(payload);
     if (!referenceId) {
@@ -79,18 +79,13 @@ export class HubbleWebhookController {
 
   /**
    * Verify Hubble's `X-Verify` header = Base64(HMAC-SHA256(rawBody, HUBBLE_WEBHOOK_SECRET)),
-   * using a constant-time compare. Fail-closed when the secret is set (prod); dev-bypass
-   * only where FIXED_OTP is allowed (non-prod), so staging UAT works before the secret
-   * is provisioned. Computes over the exact received bytes (req.rawBody).
+   * using a constant-time compare. FAIL-CLOSED: no configured secret (unset or blank) → 403 in
+   * every environment. Computes over the exact received bytes (req.rawBody).
    */
-  private assertSignature(
-    rawBody: Buffer | undefined,
-    signature: string | undefined,
-    opts: { devBypass: boolean },
-  ): void {
-    const secret = process.env.HUBBLE_WEBHOOK_SECRET;
+  private assertSignature(rawBody: Buffer | undefined, signature: string | undefined): void {
+    const secret =
+      process.env.HUBBLE_WEBHOOK_SECRET?.trim() || process.env.HUBBLE_WEBHOOK_SECRET_STAGING?.trim();
     if (!secret) {
-      if (opts.devBypass) return; // non-prod convenience (no secret provisioned yet)
       throw new ForbiddenException('Webhook disabled (no signing secret configured).');
     }
     if (!signature) throw new ForbiddenException('Missing X-Verify signature.');

@@ -139,6 +139,19 @@ jobs:
             --service-account=gifsy-api-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com \
             --execute-now --wait
 
+      # ════════════════════════════════════════════════════════════════════════════════════════
+      # ⚠️⚠️ HUBBLE MONEY (prod) — THE 3 SECRETS BELOW MUST EXIST IN SECRET MANAGER *BEFORE* THIS RUNS ⚠️⚠️
+      #   HUBBLE_CLIENT_ID, HUBBLE_CLIENT_SECRET, HUBBLE_WEBHOOK_SECRET   (project gifsy-platform)
+      #   + gifsy-api-sa@gifsy-platform.iam.gserviceaccount.com needs roles/secretmanager.secretAccessor
+      #   on each. A --set-secrets reference to a MISSING (or unreadable) secret FAILS THIS WHOLE STEP:
+      #   the prod API (LIVE DEOLEO) stays on its previous revision and this release does not ship.
+      #   The OWNER creates them in the console (values never pasted into chat/commits) — runbook:
+      #   platform/docs/plans/BAJAJ-PROD-GO-LIVE-CHECKLIST.md § "F3 runbook — Hubble on prod".
+      #   HUBBLE_BASE_URL=https://api.myhubble.money (prod Hubble) is set in --set-env-vars below.
+      #   Credentials are PLATFORM-level (one Hubble account); a tenant only uses them when its
+      #   features.hubbleVoucherEnabled flag is ON (Deoleo: OFF → no Hubble calls, no behaviour change).
+      #   The webhook (/v1/hubble/webhook) is FAIL-CLOSED: it 403s unless HUBBLE_WEBHOOK_SECRET is set.
+      # ════════════════════════════════════════════════════════════════════════════════════════
       - name: Deploy API to Cloud Run
         run: |
           gcloud run deploy gifsy-api \
@@ -159,7 +172,7 @@ jobs:
             --subnet=gifsy-subnet-asia-south1 \
             --vpc-egress=private-ranges-only \
             --startup-probe=httpGet.path=/health/ready,httpGet.port=4000,initialDelaySeconds=0,periodSeconds=5,timeoutSeconds=3,failureThreshold=30 \
-            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=60m,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in,MSG91_WHATSAPP_NUMBER=917003202293,REPORTS_FROM_EMAIL=reports@notify.gifsy.in" \
+            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=60m,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in,MSG91_WHATSAPP_NUMBER=917003202293,REPORTS_FROM_EMAIL=reports@notify.gifsy.in,HUBBLE_BASE_URL=https://api.myhubble.money" \
             --set-secrets="\
               DATABASE_URL=DATABASE_URL:latest,\
               JWT_SECRET=JWT_SECRET:latest,\
@@ -177,7 +190,10 @@ jobs:
               PUSH_DRAIN_SECRET=PUSH_DRAIN_SECRET:latest,\
               EXPIRE_SWEEP_SECRET=EXPIRE_SWEEP_SECRET:latest,\
               KYC_CLEANUP_SECRET=KYC_CLEANUP_SECRET:latest,\
-              VISIBILITY_REMINDER_SECRET=VISIBILITY_REMINDER_SECRET:latest"
+              VISIBILITY_REMINDER_SECRET=VISIBILITY_REMINDER_SECRET:latest,\
+              HUBBLE_CLIENT_ID=HUBBLE_CLIENT_ID:latest,\
+              HUBBLE_CLIENT_SECRET=HUBBLE_CLIENT_SECRET:latest,\
+              HUBBLE_WEBHOOK_SECRET=HUBBLE_WEBHOOK_SECRET:latest"
 
   # ── Build & Deploy Frontend ──────────────────────────────────────────────────
   deploy-frontend:

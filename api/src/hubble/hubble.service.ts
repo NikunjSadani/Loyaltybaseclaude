@@ -85,14 +85,24 @@ export class HubbleService {
     return (raw || 'https://api.dev.myhubble.money').replace(/\/+$/, '');
   }
 
+  /**
+   * Resolve a credential by its ENVIRONMENT-NEUTRAL name (prod binds HUBBLE_CLIENT_ID /
+   * HUBBLE_CLIENT_SECRET), falling back to the legacy `*_STAGING` name (what staging binds), so
+   * staging keeps working unchanged. A blank value counts as unset. Hubble credentials are
+   * PLATFORM-level (one Hubble account); per-tenant enablement is the hubbleVoucherEnabled flag.
+   */
+  private cred(name: 'HUBBLE_CLIENT_ID' | 'HUBBLE_CLIENT_SECRET'): string | undefined {
+    const neutral = this.config.get<string>(name)?.trim();
+    if (neutral) return neutral;
+    return this.config.get<string>(`${name}_STAGING`)?.trim() || undefined;
+  }
+
   private clientId(): string | undefined {
-    // TODO(prod): resolve prod creds (HUBBLE_CLIENT_ID / _PROD) once prod onboarding
-    // is done. Staging is wired now; prod secrets are a later, deliberate step.
-    return this.config.get<string>('HUBBLE_CLIENT_ID_STAGING')?.trim();
+    return this.cred('HUBBLE_CLIENT_ID');
   }
 
   private clientSecret(): string | undefined {
-    return this.config.get<string>('HUBBLE_CLIENT_SECRET_STAGING')?.trim();
+    return this.cred('HUBBLE_CLIENT_SECRET');
   }
 
   /**

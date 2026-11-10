@@ -47,6 +47,36 @@ describe('HubbleService', () => {
     expect(makeService({ HUBBLE_CLIENT_SECRET_STAGING: undefined }).isConfigured()).toBe(false);
   });
 
+  // ── F3: environment-neutral credential names (prod) with *_STAGING fallback (staging) ──
+  it('F3: the neutral HUBBLE_CLIENT_ID/SECRET alone configure the service (prod wiring)', () => {
+    const svc = makeService({
+      HUBBLE_CLIENT_ID_STAGING: undefined,
+      HUBBLE_CLIENT_SECRET_STAGING: undefined,
+      HUBBLE_CLIENT_ID: 'prod-cid',
+      HUBBLE_CLIENT_SECRET: 'prod-secret',
+    });
+    expect(svc.isConfigured()).toBe(true);
+  });
+
+  it('F3: the neutral names WIN over the *_STAGING ones at login', async () => {
+    fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
+    fetchMock.mockResolvedValueOnce(jsonRes(404, undefined));
+    const svc = makeService({ HUBBLE_CLIENT_ID: 'prod-cid', HUBBLE_CLIENT_SECRET: 'prod-secret' });
+    await svc.getOrderByReference('ref-1');
+    const loginBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(loginBody).toEqual({ clientId: 'prod-cid', clientSecret: 'prod-secret' });
+  });
+
+  it('F3: blank neutral names fall back to *_STAGING (staging keeps working unchanged)', async () => {
+    fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
+    fetchMock.mockResolvedValueOnce(jsonRes(404, undefined));
+    const svc = makeService({ HUBBLE_CLIENT_ID: '  ', HUBBLE_CLIENT_SECRET: '' });
+    expect(svc.isConfigured()).toBe(true);
+    await svc.getOrderByReference('ref-2');
+    const loginBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(loginBody).toEqual({ clientId: 'cid-123', clientSecret: 'secret-xyz' });
+  });
+
   it('logs in once and caches the token across calls', async () => {
     const svc = makeService();
     fetchMock
