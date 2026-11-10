@@ -53,6 +53,8 @@ export const SALES_IMPORT_SAMPLE_ROWS = 3;
 export const SALES_IMPORT_SAMPLE_CELL_CHARS = 50;
 /** A file with more distinct customer codes than this fails with a readable message. */
 export const SALES_IMPORT_MAX_DISTINCT_CODES = 600_000; // memory budget: plan §7.1 step 11
+/** A dimension value longer than this is skipped at ingest (row counted as skipped) so stored keys stay bounded. */
+export const SALES_IMPORT_MAX_DIM_VALUE_CHARS = 200;
 /** QUANTITY KPI values (and every cases number on the wire) are rounded to this many decimals. */
 export const SALES_KPI_QUANTITY_DECIMALS = 3;
 
@@ -274,13 +276,17 @@ export interface SalesImportCombos {
  * OLDER_THAN_LAST_APPLIED = this file's latest invoice date in the month (MonthPreview.lastDate) is EARLIER than
  * the latest invoice date of the import last applied to the month (MonthPreview.lastApplied.lastInvoiceDate).
  * (ROSTER_CHANGED was removed: apply maps the file's customer codes to the roster CURRENT at apply time.)
+ * MAPPING_CHANGED (recalculate preview only): the column mapping changed since this month's stored lines were applied;
+ * every dimension the current KPIs use still exists in them, so recalculating is possible but reads the lines as they
+ * were parsed then. (A KPI using a dimension the stored lines lack BLOCKS the recalculation instead.)
  */
 export type SalesMonthWarning =
   | 'STARTS_AFTER_FIRST'
   | 'ENDS_BEFORE_MONTH_END'
   | 'OLDER_THAN_LAST_APPLIED'
   | 'REPLACES_MANUAL_VALUES'
-  | 'NEGATIVE_VALUES';
+  | 'NEGATIVE_VALUES'
+  | 'MAPPING_CHANGED';
 
 export interface MonthPreviewKpi {
   kpiCode: string;
