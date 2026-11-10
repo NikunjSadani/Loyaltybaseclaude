@@ -946,15 +946,22 @@ covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct cou
 - **Combos summary (audit M1).** New table `sales_month_history_combos` (migration
   `20261112140000_sales_month_history_combos`, additive, backfills every stored month): one row per (tenant, month,
   product combo) — clientId, month, dims, dimKey, `keyHash = md5(dimKey)` (unique with clientId + month), amountPaise /
-  qtyPico as NUMERIC(38,0) (a month total can exceed BIGINT pico-cases), lines. Every APPLY replaces the month's rows in the
-  SAME transaction, right after the history INSERT, with ONE `INSERT … SELECT … FROM sales_month_histories WHERE month
-  GROUP BY dimKey` (the apply log line adds `comboRows`, `combosMs`). Recalculate does not change the history, so it does
-  not touch the summary. The 10-year retention deletes summary rows with the history. history-combos reads ONLY this table
-  (thousands of rows per month): two aggregate statements run ONE AFTER THE OTHER in one transaction after
-  `SET LOCAL statement_timeout = 10000` (`HISTORY_COMBOS_STATEMENT_TIMEOUT_MS`); a timeout → 503 "choose fewer months".
+  qtyPico as NUMERIC(38,0) (a month total can exceed BIGINT pico-cases), lines, and the history set it summarises
+  (`sourceImportId`, `appliedAt` = the set header's). Every APPLY replaces the month's rows in the SAME transaction, right
+  after the history INSERT, with ONE `INSERT … SELECT … FROM sales_month_histories WHERE month GROUP BY dimKey, dims`
+  (`kpi/month-combos.ts`, shared with the rebuild; dimKey is 1:1 with dims, no array_agg; the apply log line adds
+  `comboRows`, `combosMs`). Recalculate does not change the history, so it does not touch the summary. The 10-year
+  retention deletes summary rows with the history. history-combos reads ONLY this table (thousands of rows per month), in
+  one transaction after `SET LOCAL statement_timeout = 10000` (`HISTORY_COMBOS_STATEMENT_TIMEOUT_MS`; tx bound 60 s):
+  first a per-month head check — a chosen month whose summary is missing (set has lines) or stamped with another set (e.g.
+  an apply by an older revision during a deploy) is REBUILT under the month lock from the header as re-read after the lock
+  (re-check L-a; logged `sales-import combos summary rebuilt`) — then the two aggregate statements ONE AFTER THE OTHER. A
+  statement timeout or P2028 (no transaction could be started / pool busy) → 503 "choose fewer months". The migration was
+  edited in place for the source columns (it has not been applied to any shared database).
 - **FE:** the product-set builder has a source selector (Latest file / Stored month(s) → most recent, last 3/6/12, or one
   month); a change of the month select is debounced 300 ms and a superseded request is aborted (`historyCombos(q,
-  signal)` uses plain fetch — the shared api client takes no signal). Combos pin only the keys their stored lines carry
+  signal)` uses plain fetch with the shared client's error conventions — 403 → "You don't have permission to do that" —
+  because adding a signal to the SHARED `api.get` is a platform-wide change held for the owner's approval). Combos pin only the keys their stored lines carry
   (`comboEntry`, unchanged rule); a drift note compares the stored `dimensionKeys` (fallback: the combos' keys) with the
   current mapping and flags months read with different columns; the live "never appears" check uses the selected source
   and is off when the list is capped (`totalCombos > dimensionCombos.length`, or ≥ 2,000 for the file). "Test" still runs
@@ -1044,13 +1051,16 @@ error message; reprocess deletes old aggregates first; duplicate sha sets `dupli
 **I-7 Claim loop and worker entry** `ingest/claim.ts` (raw SQL of §7.1.1, with a spec against mocked `$queryRaw`) and
 `api/src/sales-import/worker.main.ts`:
 ```ts
+// (as built, §10c: heap re-exec + SIGTERM handling around this; see worker.main.ts / ingest/worker-stop.ts)
 async function main() {
+  const stop = new WorkerStop(); installWorkerSignals({ stop, on, exit, log });
   const app = await NestFactory.createApplicationContext(SalesImportWorkerModule, { bufferLogs: true });
   const proc = app.get(SalesImportProcessorService);
-  let n = 0;
-  for (let row = await proc.claimNext(); row; row = await proc.claimNext()) { await proc.processClaimed(row); n++; }
+  const drained = await drainImports(proc, stop); // { finished, released, superseded }
+  const retention = stop.requested ? null : await app.get(SalesImportRetentionService).sweep({ limit: 50 });
   await app.close();
-  console.log(JSON.stringify({ msg: 'sales-import worker done', processed: n }));
+  console.log(JSON.stringify({ msg: 'sales-import worker done', ...drained, retention, stoppedBy: stop.reason }));
+  if (stop.requested) process.exit(143);
 }
 main().catch((e) => { console.error(e); process.exit(1); });
 ```
