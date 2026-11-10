@@ -73,7 +73,9 @@ export default function SalesMonthsPage() {
     setActionMsg(null);
     let r = await salesImportApi.reopenMonth(row.month, hasDownstream ? { acknowledgeDownstream: true } : {});
     // Points work appeared after this page loaded → the server asks for the acknowledgement: confirm once more.
-    if (!r.success && r.status === 409 && !hasDownstream) {
+    // Only the downstream-acknowledgement 409 is re-asked ("…needs confirmation: …"); any other 409 (already open,
+    // current month…) falls through to the message + re-fetch below.
+    if (!r.success && r.status === 409 && !hasDownstream && /needs confirmation/i.test(r.error ?? '')) {
       if (window.confirm(`${sentence(r.error)}.\n\nReopen ${label} anyway? Points already credited or exported for it may no longer match.`)) {
         r = await salesImportApi.reopenMonth(row.month, { acknowledgeDownstream: true });
       } else {

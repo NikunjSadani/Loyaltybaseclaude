@@ -15,6 +15,7 @@ import {
   SALES_IMPORT_MAX_FILE_BYTES,
   type CreateSalesImportUploadResult,
   type SalesImportPartResult,
+  type SalesImportStatus,
   type SalesImportSummary,
 } from './types';
 
@@ -56,8 +57,16 @@ export function validateSalesFile(file: { name: string; size: number }): string 
   return null;
 }
 
+/** Thrown by an UploadInPartsOptions.guard to stop the upload for good (never retried). */
+export class UploadStoppedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UploadStoppedError';
+  }
+}
+
 function isRetryable(err: unknown): boolean {
-  if (err instanceof UploadAbortedError) return false;
+  if (err instanceof UploadAbortedError || err instanceof UploadStoppedError) return false;
   if (err instanceof SalesImportHttpError) {
     const s = err.status;
     return s === undefined || s === 408 || s === 429 || s >= 500;
@@ -137,26 +146,55 @@ export interface UploadInPartsOptions {
   onProgress(p: number): void;
   /** Called once the server has created the import — keep the session to resume after a failure. */
   onCreated?(importId: string, session: UploadSession): void;
+  /**
+   * Called before every server request after the create (each part, /complete). Throw to stop the upload — e.g.
+   * the signed-in user / assumed brand changed mid-upload, so further requests would hit another tenant.
+   */
+  guard?(): void;
   signal?: AbortSignal;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 const importPath = (importId: string) => `/api/admin/sales-import/${encodeURIComponent(importId)}`;
 
+/** The import is gone (CANCELLED server-side, or deleted → 404): nothing to resume, nothing to delete. */
+export class UploadGoneError extends Error {
+  constructor() {
+    super('This upload was cancelled or deleted');
+    this.name = 'UploadGoneError';
+  }
+}
+
+/** Statuses meaning "/complete went through" — the file is with the server, whatever happens to it next. */
+export const COMPLETED_UPLOAD_STATUSES: ReadonlySet<SalesImportStatus> = new Set<SalesImportStatus>([
+  'QUEUED', 'PROCESSING', 'NEEDS_MAPPING', 'READY', 'FAILED',
+]);
+
+export type ImportStatusRead = SalesImportStatus | 'GONE' | null;
+
 /**
- * Has the server already moved the import past UPLOADING (i.e. a /complete we could not see the answer to did
- * succeed)? Returns the status, or null when it could not be read.
+ * Reads the import's status back: the status, 'GONE' for a 404 (deleted), or null when it could not be read
+ * (network / 5xx / 401 — unknown, so the caller must not act destructively).
  */
-export async function readImportStatus(importId: string): Promise<SalesImportSummary['status'] | null> {
+export async function readImportStatus(importId: string): Promise<ImportStatusRead> {
   const r = await api.get<SalesImportSummary>(importPath(importId));
-  return r.success ? r.data.status : null;
+  if (r.success) return r.data.status;
+  return r.status === 404 ? 'GONE' : null;
+}
+
+/** 'completed' (with the server) / 'gone' (CANCELLED or deleted) / 'uploading' / 'unknown'. */
+export function classifyUploadStatus(s: ImportStatusRead): 'completed' | 'gone' | 'uploading' | 'unknown' {
+  if (s === null) return 'unknown';
+  if (s === 'GONE' || s === 'CANCELLED') return 'gone';
+  if (s === 'UPLOADING') return 'uploading';
+  return COMPLETED_UPLOAD_STATUSES.has(s) ? 'completed' : 'unknown';
 }
 
 /**
  * Sends every part not yet confirmed in `session`, then completes the import. Resolves with the import id (status
  * QUEUED). On failure the session keeps the confirmed parts, so calling this again re-sends only the missing ones.
  * If /complete fails, the import status is read back first: a /complete that actually succeeded (response lost) is
- * treated as success, never as a failure.
+ * treated as success; a cancelled / deleted import throws UploadGoneError.
  */
 export async function continueUpload(
   file: File,
@@ -172,15 +210,17 @@ export async function continueUpload(
   for (const p of parts) {
     if (session.confirmed.has(p.n)) continue;
     const blob = file.slice(p.start, p.end);
-    await withRetry(() => postPart(importId, p.n, blob, opts.signal), UPLOAD_RETRIES, { signal: opts.signal, sleep: opts.sleep });
+    await withRetry(() => { opts.guard?.(); return postPart(importId, p.n, blob, opts.signal); }, UPLOAD_RETRIES, { signal: opts.signal, sleep: opts.sleep });
     session.confirmed.add(p.n);
     opts.onProgress(session.confirmed.size / partCount);
   }
   if (opts.signal?.aborted) throw new UploadAbortedError();
+  opts.guard?.();
   const done = await api.post<SalesImportSummary>(`${importPath(importId)}/complete`, {});
   if (!done.success) {
-    const status = await readImportStatus(importId);
-    if (status && status !== 'UPLOADING') return importId; // /complete went through; only its answer was lost
+    const kind = classifyUploadStatus(await readImportStatus(importId));
+    if (kind === 'completed') return importId; // /complete went through; only its answer was lost
+    if (kind === 'gone') throw new UploadGoneError();
     throw new SalesImportHttpError(done.error, done.status);
   }
   return importId;
@@ -188,6 +228,7 @@ export async function continueUpload(
 
 /** Creates the import, uploads `file` in parts and completes it. Resolves with the import id (status QUEUED). */
 export async function uploadInParts(file: File, opts: UploadInPartsOptions): Promise<string> {
+  opts.guard?.();
   const init = await api.post<CreateSalesImportUploadResult>('/api/admin/sales-import/uploads', {
     filename: file.name,
     sizeBytes: file.size,

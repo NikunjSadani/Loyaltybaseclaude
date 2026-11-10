@@ -4,8 +4,9 @@
  * "Product set" builder (SALES-IMPORT-PIPELINE-PLAN §6.2a, §11 F-6). Three ways to add an entry to the Include
  * (anyOf) or Exclude (noneOf) list:
  *   1. pick combinations seen in the latest processed file (searchable, sortable, multi-select) — a picked combo pins
- *      EVERY product column to its value, a blank one included (blank = "this column is empty", not "any"),
- *   2. whole-value chips (e.g. a whole brand, every SKU group; "(blank)" = lines where that column is empty),
+ *      each product column that file had to its value, a blank one included (blank = "this column is empty", not
+ *      "any"); a combo whose values are ALL blank cannot be picked (the backend refuses such an entry),
+ *   2. whole-value chips (e.g. a whole brand, every SKU group) — non-blank values only,
  *   3. free entry for products not in any file yet (an empty box there means "any value").
  * The set shows as chips. Warnings are computed LIVE from the loaded file (never appears in it / already included by
  * another entry / both included and excluded / cancelled by an exclusion); the last "Test" adds the server's view.
@@ -14,8 +15,8 @@ import React, { useId, useMemo, useRef, useState } from 'react';
 import { Plus, Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
-  addEntries, comboEntry, coveringEntryIndex, entriesNotInCombos, entryKey, entryLabel, hasEntry,
-  includeExcludeConflicts, listOf, removeEntry, removeEntryAt,
+  ALL_BLANK_MESSAGE, addEntries, comboEntry, comboMappingDrift, coveringEntryIndex, entriesNotInCombos, entryKey,
+  entryLabel, hasEntry, includeExcludeConflicts, isAllBlank, listOf, removeEntry, removeEntryAt,
   type FilterList, type NormalizeOptions,
 } from '@/lib/sales-import/product-set';
 import { formatCases, formatCount, formatRupees } from '@/lib/sales-import/format';
@@ -56,10 +57,12 @@ export function ProductSetBuilder({
     [filter, combos],
   );
   const conflicts = useMemo(() => includeExcludeConflicts(filter), [filter]);
+  const drift = useMemo(() => comboMappingDrift(combos?.dimensionCombos, dims), [combos, dims]);
 
   function add(list: FilterList, raw: Array<Record<string, unknown>>, opts: NormalizeOptions = {}) {
     const r = addEntries(filter, list, raw, { ...opts, max: SALES_KPI_MAX_FILTER_ENTRIES });
     const parts: string[] = [];
+    if (r.allBlank > 0) parts.push(`${r.allBlank} skipped: ${ALL_BLANK_MESSAGE}`);
     if (r.duplicates > 0) parts.push(`${r.duplicates} already in the set — skipped.`);
     if (r.overCap > 0) {
       parts.push(`${r.overCap} not added: a list can hold at most ${SALES_KPI_MAX_FILTER_ENTRIES} entries. ` +
@@ -136,6 +139,15 @@ export function ProductSetBuilder({
             : ''}
         </p>
       </div>
+
+      {drift && (
+        <p role="status" className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2" data-testid="product-set-mapping-drift">
+          The latest processed file was read with a different column mapping
+          {drift.missing.length ? ` (it has no ${drift.missing.map((k) => dims.find((d) => d.key === k)?.label ?? k).join(', ')} column)` : ''}.
+          Picks from it only pin the columns that file had. Reprocess or upload a file with the current mapping for
+          an up-to-date list.
+        </p>
+      )}
 
       {/* Include / Exclude tabs (WAI-ARIA tabs: arrow keys move between them) */}
       <div role="tablist" aria-label="Add products" className="flex gap-1 border-b border-gray-200">
@@ -215,7 +227,9 @@ function ComboPicker({
 
   const shown = rows.slice(0, MAX_ROWS);
   const current = listOf(filter, list).length;
-  const notYetPicked = rows.filter((c) => !hasEntry(filter, list, comboEntry(c.dims, dims)));
+  const pickable = rows.filter((c) => !isAllBlank(comboEntry(c.dims, dims)));
+  const blankRows = rows.length - pickable.length;
+  const notYetPicked = pickable.filter((c) => !hasEntry(filter, list, comboEntry(c.dims, dims)));
   const room = Math.max(0, SALES_KPI_MAX_FILTER_ENTRIES - current);
   const willAdd = Math.min(room, notYetPicked.length);
 
@@ -247,6 +261,11 @@ function ComboPicker({
           onClick={() => onAdd(notYetPicked.slice(0, room).map((c) => comboEntry(c.dims, dims)), { keepBlank: true })}>
           Select all {q.trim() ? `"${q.trim()}" ` : ''}({willAdd})
         </Button>
+        {blankRows > 0 && (
+          <span className="text-[11px] text-gray-500" data-testid="combo-all-blank-note">
+            {blankRows} combination{blankRows === 1 ? '' : 's'} with every product column blank cannot be picked.
+          </span>
+        )}
         {notYetPicked.length > room && (
           <span className="text-[11px] text-amber-700">
             Only {room} more fit (max {SALES_KPI_MAX_FILTER_ENTRIES} entries) — narrow the search or use a whole-value chip.
@@ -270,11 +289,13 @@ function ComboPicker({
               const checked = hasEntry(filter, list, entry);
               const name = entryLabel(entry, dims);
               const full = !checked && current >= SALES_KPI_MAX_FILTER_ENTRIES;
+              const allBlank = isAllBlank(entry);
               return (
                 <tr key={entryKey(entry)} className="border-t border-gray-100">
                   <td className="px-2 py-1">
-                    <input type="checkbox" aria-label={`Pick ${name}`} checked={checked} disabled={full}
-                      title={full ? `The list is full (${SALES_KPI_MAX_FILTER_ENTRIES} entries)` : undefined}
+                    <input type="checkbox" aria-label={allBlank ? 'Cannot pick: every product column is blank' : `Pick ${name}`}
+                      checked={checked} disabled={full || allBlank}
+                      title={allBlank ? ALL_BLANK_MESSAGE : full ? `The list is full (${SALES_KPI_MAX_FILTER_ENTRIES} entries)` : undefined}
                       onChange={() => (checked ? onChange(removeEntry(filter, list, entry)) : onAdd([entry], { keepBlank: true }))} />
                   </td>
                   {dims.map((d) => <td key={d.key} className="px-2 py-1 text-gray-800">{c.dims[d.key] || <span className="text-gray-400">(blank)</span>}</td>)}
@@ -298,7 +319,9 @@ function WholeValueChips({
   const [picked, setDimKey] = useState(dims[0]?.key ?? '');
   const dim = dims.find((d) => d.key === picked) ?? dims[0];
   const dimKey = dim?.key ?? '';
-  const values = combos?.dimensionValues?.[dimKey] ?? [];
+  // Non-blank values only: a whole-column "(blank)" entry would match only lines with that column empty and is
+  // refused by the backend when it is the entry's only value.
+  const values = (combos?.dimensionValues?.[dimKey] ?? []).filter((v) => v.value.trim() !== '');
   if (!dim || values.length === 0) return null;
   const verb = list === 'anyOf' ? 'Add' : 'Exclude';
   return (
@@ -313,18 +336,14 @@ function WholeValueChips({
         ) : <span className="text-xs text-gray-700">{dim.label}</span>}
       </div>
       <div className="flex flex-wrap gap-1.5">
-        {values.slice(0, 40).map((v) => {
-          const blank = v.value.trim() === '';
-          return (
-            <button key={v.value} type="button"
-              // A blank value is an exact "this column is empty" match — keep it, never widen to "any".
-              onClick={() => onAdd([{ [dim.key]: v.value }], { keepBlank: true })}
-              aria-label={blank ? `${verb} all lines with a blank ${dim.label}` : `${verb} all of ${v.value}`}
-              className="inline-flex items-center gap-1 text-xs border border-gray-300 rounded-full px-2 py-0.5 hover:border-[var(--brand-primary)]">
-              <Plus className="w-3 h-3" />{blank ? `(blank ${dim.label.toLowerCase()})` : v.value}
-            </button>
-          );
-        })}
+        {values.slice(0, 40).map((v) => (
+          <button key={v.value} type="button"
+            onClick={() => onAdd([{ [dim.key]: v.value }])}
+            aria-label={`${verb} all of ${v.value}`}
+            className="inline-flex items-center gap-1 text-xs border border-gray-300 rounded-full px-2 py-0.5 hover:border-[var(--brand-primary)]">
+            <Plus className="w-3 h-3" />{v.value}
+          </button>
+        ))}
       </div>
     </div>
   );

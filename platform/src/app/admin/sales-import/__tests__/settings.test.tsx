@@ -199,12 +199,50 @@ describe('KPI editor — product set (audit fixes)', () => {
     expect(apiMock.createKpi.mock.calls[0][0].filter).toEqual({ anyOf: [{ dimA: 'P', dimB: '' }] });
   });
 
-  it('the "(blank)" whole-value chip adds an exact blank match', async () => {
-    apiMock.createKpi.mockImplementation(async (d: SalesKpiDefinitionDto) => ok(d));
+  it('no "(blank)" whole-value chip is offered (an all-blank entry is refused by the backend)', () => {
     renderEditor({ combos: BLANK_COMBOS, initial: { ...NEW, kpiCode: 'KPI_X' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Add all lines with a blank Brand' }));
+    expect(screen.getByRole('button', { name: 'Add all of P' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /blank/i })).not.toBeInTheDocument();
+  });
+
+  it('a combo whose values are ALL blank cannot be picked, and Select all skips it', () => {
+    const combos: SalesImportCombos = {
+      ...BLANK_COMBOS,
+      dimensionCombos: [...BLANK_COMBOS.dimensionCombos, { dims: { dimA: '', dimB: '' }, lines: 9, amountRupees: 5, quantity: 1 }],
+    };
+    renderEditor({ combos, initial: { ...NEW, kpiCode: 'KPI_X' } });
+    expect(screen.getByRole('checkbox', { name: 'Cannot pick: every product column is blank' })).toBeDisabled();
+    expect(screen.getByTestId('combo-all-blank-note')).toHaveTextContent('1 combination with every product column blank');
+    fireEvent.click(screen.getByRole('button', { name: /Select all \(2\)/ }));
+    expect(screen.getAllByTestId('product-set-chip')).toHaveLength(2);
+    expect(screen.getByTestId('product-set-chips')).not.toHaveTextContent('(blank brand) (blank sku group)');
+  });
+
+  it('an all-blank entry already in the set blocks Save with a clear message', () => {
+    renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X', filter: { anyOf: [{ dimA: '', dimB: '' }] } } });
+    expect(screen.getByTestId('kpi-editor-blockers')).toHaveTextContent('entry 1 has only blank values');
+    expect(screen.getByRole('button', { name: 'Save KPI' })).toBeDisabled();
+  });
+
+  it('a combo from a file processed with an older mapping pins only that file\'s columns, with a warning', async () => {
+    apiMock.createKpi.mockImplementation(async (d: SalesKpiDefinitionDto) => ok(d));
+    const old: SalesImportCombos = {
+      importId: 'old', dimensionValues: {},
+      dimensionCombos: [{ dims: { dimA: 'P' }, lines: 1, amountRupees: 1, quantity: 1 }],
+    };
+    renderEditor({ combos: old, initial: { ...NEW, kpiCode: 'KPI_X' } });
+    expect(screen.getByTestId('product-set-mapping-drift')).toHaveTextContent('has no SKU group column');
+    fireEvent.click(screen.getByRole('checkbox', { name: /Pick P/ }));
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save KPI' })); });
-    expect(apiMock.createKpi.mock.calls[0][0].filter).toEqual({ anyOf: [{ dimA: '' }] });
+    expect(apiMock.createKpi.mock.calls[0][0].filter).toEqual({ anyOf: [{ dimA: 'P' }] });
+  });
+
+  it('read-only without manage permission: every control in the editor is disabled', () => {
+    renderEditor({ canEdit: false, initial: { ...NEW, id: 'k1', kpiCode: 'KPI_X' } });
+    expect(screen.getByTestId('kpi-editor-fields')).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Pick P 500' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Duplicate as cases KPI' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Close' })).toBeEnabled();
   });
 
   it('flags an entry both included and excluded, and an exclusion that cancels an inclusion', () => {
@@ -388,6 +426,9 @@ describe('column mapping — keys', () => {
     render(<ColumnMappingForm initial={MAPPING} detectedHeaders={[]} onSaved={vi.fn()} canEdit={false} />);
     expect(screen.queryByRole('button', { name: 'Save column mapping' })).not.toBeInTheDocument();
     expect(screen.getByTestId('mapping-read-only')).toBeInTheDocument();
+    expect(screen.getByLabelText(/Outlet \/ customer code/)).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Add product column/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Remove product column 1' })).toBeDisabled();
   });
 });
 

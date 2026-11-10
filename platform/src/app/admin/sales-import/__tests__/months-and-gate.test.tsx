@@ -100,7 +100,7 @@ describe('months page', () => {
     roleRef.current = 'GIFSY_ADMIN';
     apiMock.months.mockResolvedValue(ok([row({ month: '2026-09', state: 'CLOSED', canClose: false, canReopen: true })]));
     apiMock.reopenMonth
-      .mockResolvedValueOnce({ success: false, error: 'Credit batches exist for this month.', status: 409 })
+      .mockResolvedValueOnce({ success: false, error: 'Reopening September 2026 needs confirmation: 2 credit batches exist for 2026-09.', status: 409 })
       .mockResolvedValueOnce(ok({ ...row({ month: '2026-09' }), warnings: [] }));
     render(<MonthsPage />);
     const reopenBtn = await screen.findByRole('button', { name: 'Reopen September 2026' });
@@ -141,5 +141,18 @@ describe('SalesImportFeatureGate', () => {
     stubConfig(json({}, 500));
     render(<SalesImportFeatureGate><p>inner</p></SalesImportFeatureGate>);
     expect(await screen.findByTestId('sales-import-gate-error')).toBeInTheDocument();
+  });
+
+  it('a 409 that is NOT the downstream acknowledgement is shown, not re-asked', async () => {
+    roleRef.current = 'GIFSY_ADMIN';
+    apiMock.months.mockResolvedValue(ok([row({ month: '2026-09', state: 'CLOSED', canClose: false, canReopen: true })]));
+    apiMock.reopenMonth.mockResolvedValue({ success: false, error: 'September 2026 is already open.', status: 409 });
+    render(<MonthsPage />);
+    const reopenBtn = await screen.findByRole('button', { name: 'Reopen September 2026' });
+    await act(async () => { fireEvent.click(reopenBtn); });
+    expect(apiMock.reopenMonth).toHaveBeenCalledTimes(1);
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole('alert')).toHaveTextContent('September 2026 was not reopened: September 2026 is already open.');
+    expect(apiMock.months).toHaveBeenCalledTimes(2); // re-fetched
   });
 });

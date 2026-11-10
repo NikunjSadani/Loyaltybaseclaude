@@ -8,12 +8,21 @@
  *
  * Failure keeps the import (status UPLOADING) and the parts the server confirmed, so `resume()` re-sends only the
  * missing parts. An import is DELETED only on an explicit Cancel / Discard, and only after reading its status back:
- * an import whose /complete went through server-side (status no longer UPLOADING) is never deleted.
+ * an import whose /complete went through (QUEUED / PROCESSING / NEEDS_MAPPING / READY / FAILED) is never deleted;
+ * a CANCELLED or deleted (404) import is "gone" — the state resets with an honest message, no endless Resume.
+ *
+ * Session safety: the user + assumed brand are recorded at start; if they change mid-upload every further request
+ * is refused (the upload stops, nothing is deleted with the wrong session). Logout / brand switching first run the
+ * session-change guard registered here: it asks, then cancels + discards the unfinished upload with the CURRENT
+ * session before the switch.
  */
+import { getAssumedBrand, getStoredUser } from '@/lib/auth-client';
+import { registerSessionChangeGuard, type SessionChangeKind } from '@/lib/session-change-guards';
 import { salesImportApi } from './api';
 import { sentence } from './format';
 import {
-  SalesImportHttpError, UploadAbortedError, continueUpload, readImportStatus, uploadInParts, type UploadSession,
+  SalesImportHttpError, UploadAbortedError, UploadGoneError, UploadStoppedError, classifyUploadStatus, continueUpload,
+  readImportStatus, uploadInParts, type UploadSession,
 } from './upload';
 
 export type UploadPhase = 'idle' | 'uploading' | 'failed' | 'done';
@@ -29,16 +38,30 @@ export interface UploadState {
   importId: string | null;
   /** True when the import exists and the browser still holds the file, so the missing parts can be re-sent. */
   canResume: boolean;
+  /** A Discard / Cancel clean-up is in flight (Resume / Discard are disabled meanwhile). */
+  busy: boolean;
 }
 
-const IDLE: UploadState = { phase: 'idle', fileName: null, progress: 0, error: null, importId: null, canResume: false };
+const IDLE: UploadState = { phase: 'idle', fileName: null, progress: 0, error: null, importId: null, canResume: false, busy: false };
+
+export const GONE_MESSAGE = 'This upload was cancelled or deleted — upload the file again.';
+const LEFTOVER_MESSAGE =
+  'The unfinished import could not be removed. Open it from the list below (status "Uploading / incomplete") and ' +
+  'delete it there — unfinished uploads are also removed automatically after a day.';
 
 let state: UploadState = IDLE;
 let file: File | null = null;
 let session: UploadSession | null = null;
 let controller: AbortController | null = null;
 let cancelRequested = false;
+let running: Promise<void> | null = null;
+/** "<userId>|<assumed brand>" when the upload started — requests stop if it changes. */
+let sessionKey: string | null = null;
 const listeners = new Set<() => void>();
+
+function currentSessionKey(): string {
+  return `${getStoredUser()?.id ?? ''}|${getAssumedBrand() ?? ''}`;
+}
 
 function set(patch: Partial<UploadState>) {
   state = { ...state, ...patch };
@@ -70,13 +93,36 @@ function failureText(err: unknown): string {
   return sentence(err instanceof Error ? err.message : 'Upload failed');
 }
 
-/** Deletes the half-uploaded import — but only when the server confirms it is still UPLOADING. */
-async function deleteIfStillUploading(importId: string): Promise<'deleted' | 'kept' | 'unknown'> {
-  const status = await readImportStatus(importId);
-  if (status === null) return 'unknown';
-  if (status !== 'UPLOADING') return 'kept';
-  const r = await salesImportApi.remove(importId);
-  return r.success ? 'deleted' : 'unknown';
+/** Throws once the signed-in user / assumed brand differs from the one the upload started under. */
+function guard() {
+  if (sessionKey !== null && currentSessionKey() !== sessionKey) {
+    throw new UploadStoppedError('You signed out or switched brand during the upload, so it was stopped');
+  }
+}
+
+function forget() {
+  file = null;
+  session = null;
+  sessionKey = null;
+}
+
+/**
+ * Deletes the half-uploaded import — but only when the server confirms it is still UPLOADING (and only with the
+ * session it was created under).
+ */
+async function deleteIfStillUploading(importId: string): Promise<'deleted' | 'completed' | 'gone' | 'unknown'> {
+  if (sessionKey !== null && currentSessionKey() !== sessionKey) return 'unknown';
+  try {
+    const kind = classifyUploadStatus(await readImportStatus(importId));
+    if (kind === 'completed') return 'completed';
+    if (kind === 'gone') return 'gone';
+    if (kind === 'unknown') return 'unknown';
+    const r = await salesImportApi.remove(importId);
+    if (r.success) return 'deleted';
+    return r.status === 404 ? 'gone' : 'unknown';
+  } catch {
+    return 'unknown'; // never leave the card stuck "busy"
+  }
 }
 
 async function run(work: (signal: AbortSignal) => Promise<string>) {
@@ -85,32 +131,53 @@ async function run(work: (signal: AbortSignal) => Promise<string>) {
   cancelRequested = false;
   try {
     const importId = await work(ctl.signal);
-    file = null;
-    session = null;
-    set({ phase: 'done', progress: 1, importId, error: null, canResume: false });
+    forget();
+    set({ ...IDLE, fileName: state.fileName, phase: 'done', progress: 1, importId });
   } catch (err) {
     const id = session?.importId ?? state.importId;
+    if (err instanceof UploadStoppedError) {
+      // Session changed: never touch the server with the new session; the import ages out (or is deleted by hand).
+      forget();
+      set({ ...IDLE, error: `${failureText(err)}. Upload the file again.` });
+      return;
+    }
+    if (err instanceof UploadGoneError) {
+      forget();
+      set({ ...IDLE, error: GONE_MESSAGE });
+      return;
+    }
     if (cancelRequested || err instanceof UploadAbortedError) {
       const outcome = id ? await deleteIfStillUploading(id) : 'deleted';
-      file = null;
-      session = null;
-      if (outcome === 'kept' && id) {
+      const fileName = state.fileName;
+      forget();
+      if (outcome === 'completed' && id) {
         // The upload had already completed server-side — nothing was cancelled.
-        set({ phase: 'done', progress: 1, importId: id, error: null, canResume: false });
+        set({ ...IDLE, fileName, phase: 'done', progress: 1, importId: id });
         return;
       }
       set({
         ...IDLE,
-        error: outcome === 'unknown'
-          ? 'Upload cancelled. The unfinished import could not be removed — delete it from the list below.'
-          : 'Upload cancelled. Nothing was imported.',
+        error: outcome === 'unknown' ? `Upload cancelled. ${LEFTOVER_MESSAGE}` : 'Upload cancelled. Nothing was imported.',
       });
       return;
     }
     if (!id || !session) {
       // The server never created the import — nothing to resume or clean up.
-      file = null;
+      forget();
       set({ ...IDLE, fileName: state.fileName, phase: 'failed', error: `${failureText(err)}. Nothing was imported — try again.` });
+      return;
+    }
+    // A refused part (404 / 409) may mean the import was cancelled or deleted meanwhile → check before offering Resume.
+    const kind = classifyUploadStatus(await readImportStatus(id));
+    if (kind === 'gone') {
+      forget();
+      set({ ...IDLE, error: GONE_MESSAGE });
+      return;
+    }
+    if (kind === 'completed') {
+      const fileName = state.fileName;
+      forget();
+      set({ ...IDLE, fileName, phase: 'done', progress: 1, importId: id });
       return;
     }
     const refused = err instanceof SalesImportHttpError && err.status !== undefined && err.status >= 400 && err.status < 500
@@ -128,14 +195,21 @@ async function run(work: (signal: AbortSignal) => Promise<string>) {
   }
 }
 
-/** Starts uploading `f`. Ignored while another upload in this tab is running. */
+function launch(work: (signal: AbortSignal) => Promise<string>) {
+  const p = run(work).finally(() => { if (running === p) running = null; });
+  running = p;
+}
+
+/** Starts uploading `f`. Ignored while an upload in this tab is running, or a failed one awaits Resume / Discard. */
 export function startUpload(f: File): void {
-  if (state.phase === 'uploading') return;
+  if (state.phase === 'uploading' || state.phase === 'failed') return;
   file = f;
   session = null;
+  sessionKey = currentSessionKey();
   set({ ...IDLE, phase: 'uploading', fileName: f.name });
-  void run((signal) => uploadInParts(f, {
+  launch((signal) => uploadInParts(f, {
     signal,
+    guard,
     onCreated: (importId, s) => { session = s; set({ importId }); },
     onProgress: (p) => set({ progress: p }),
   }));
@@ -143,17 +217,16 @@ export function startUpload(f: File): void {
 
 /** Re-sends only the parts the server has not confirmed, then completes the import. */
 export function resumeUpload(): void {
-  if (state.phase !== 'failed' || !file || !session) return;
+  if (state.phase !== 'failed' || state.busy || !file || !session) return;
   const f = file;
   const s = session;
   set({ phase: 'uploading', error: null, canResume: false });
-  void run(async (signal) => {
-    const status = await readImportStatus(s.importId);
-    if (status && status !== 'UPLOADING') {
-      if (status === 'CANCELLED') throw new SalesImportHttpError('This import was cancelled on the server', 409);
-      return s.importId; // already completed server-side
-    }
-    return continueUpload(f, s, { signal, onProgress: (p) => set({ progress: p }) });
+  launch(async (signal) => {
+    guard();
+    const kind = classifyUploadStatus(await readImportStatus(s.importId));
+    if (kind === 'gone') throw new UploadGoneError();
+    if (kind === 'completed') return s.importId; // already completed server-side
+    return continueUpload(f, s, { signal, guard, onProgress: (p) => set({ progress: p }) });
   });
 }
 
@@ -161,42 +234,64 @@ export function resumeUpload(): void {
 export function cancelUpload(): void {
   if (state.phase !== 'uploading') return;
   cancelRequested = true;
+  set({ busy: true });
   controller?.abort();
 }
 
 /** Gives up on a failed upload: removes its import (only if still UPLOADING) and resets. */
 export async function discardUpload(): Promise<void> {
-  if (state.phase !== 'failed') return;
+  if (state.phase !== 'failed' || state.busy) return;
   const id = state.importId;
+  const fileName = state.fileName;
+  set({ busy: true });
   const outcome = id ? await deleteIfStillUploading(id) : 'deleted';
-  file = null;
-  session = null;
-  if (outcome === 'kept' && id) {
-    set({ phase: 'done', progress: 1, importId: id, error: null, canResume: false });
+  forget();
+  if (outcome === 'completed' && id) {
+    set({ ...IDLE, fileName, phase: 'done', progress: 1, importId: id });
     return;
   }
-  set({
-    ...IDLE,
-    error: outcome === 'unknown' ? 'The unfinished import could not be removed — delete it from the list below.' : null,
-  });
+  set({ ...IDLE, error: outcome === 'unknown' ? LEFTOVER_MESSAGE : null });
 }
 
 /** Clears a finished / failed-to-create state (e.g. after opening the finished import). */
 export function resetUpload(): void {
   if (state.phase === 'uploading') return;
-  file = null;
-  session = null;
+  forget();
   set(IDLE);
 }
+
+/**
+ * Before logout / a brand switch: if an upload is running or unfinished, ask; on "yes" cancel + discard it with
+ * the CURRENT session (awaited) and allow the change; on "no" veto it.
+ */
+export async function releaseUploadForSessionChange(kind: SessionChangeKind): Promise<boolean> {
+  if (state.phase !== 'uploading' && state.phase !== 'failed') return true;
+  const what = kind === 'logout' ? 'Signing out' : 'Switching brand';
+  const ok = typeof window !== 'undefined' && window.confirm(
+    `A sales file ${state.phase === 'uploading' ? 'is still uploading' : 'upload is unfinished'}` +
+    `${state.fileName ? ` (${state.fileName})` : ''}. ${what} cancels it and removes the unfinished import.\n\nContinue?`,
+  );
+  if (!ok) return false;
+  if (state.phase === 'uploading') {
+    cancelUpload();
+    await running;
+  } else {
+    await discardUpload();
+  }
+  return true;
+}
+
+registerSessionChangeGuard(releaseUploadForSessionChange);
 
 /** Test-only. */
 export function __resetUploadStoreForTests(): void {
   controller?.abort();
   controller = null;
-  file = null;
-  session = null;
+  running = null;
+  forget();
   cancelRequested = false;
   state = IDLE;
   syncBeforeUnload();
   listeners.clear();
+  registerSessionChangeGuard(releaseUploadForSessionChange); // Set → idempotent
 }

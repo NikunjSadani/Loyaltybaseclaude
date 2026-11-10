@@ -78,7 +78,9 @@ export function sentence(s: string | null | undefined): string {
 
 /** Cases with up to SALES_KPI_QUANTITY_DECIMALS (3) decimals — the precision the backend stores and sends. */
 export function formatCases(v: number): string {
-  return v.toLocaleString('en-IN', { maximumFractionDigits: SALES_KPI_QUANTITY_DECIMALS });
+  const text = Math.abs(v).toLocaleString('en-IN', { maximumFractionDigits: SALES_KPI_QUANTITY_DECIMALS });
+  // Typographic minus, like formatRupees ("−12.5"); a value that rounds to 0 shows no sign.
+  return v < 0 && /[1-9]/.test(text) ? `−${text}` : text;
 }
 
 export function formatCount(v: number): string {

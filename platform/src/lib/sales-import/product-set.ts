@@ -32,10 +32,21 @@ export interface NormalizeOptions {
   /**
    * Keep blank values as an EXACT-match "this column is blank" (the backend's entryMatches compares
    * `(dims[k] ?? '') === value`, so `{skuGroup:''}` matches only lines whose SKU group is empty). Used for entries
-   * picked from the file (combo rows, the "(blank)" whole-value chip). Default false: a blank means "any value"
-   * and the key is dropped — that is what an empty free-entry box means.
+   * picked from the file (combo rows). Default false: a blank means "any value" and the key is dropped — that is
+   * what an empty free-entry box means. An entry whose values are ALL blank is refused either way (the backend
+   * rejects it: it would match only lines with no product information at all) — see isAllBlank.
    */
   keepBlank?: boolean;
+}
+
+/** User-facing reason an all-blank entry is refused (kept identical in the builder, the validator and notes). */
+export const ALL_BLANK_MESSAGE =
+  'An entry needs at least one non-blank value — lines with every product column empty cannot be picked.';
+
+/** True for an entry with ≥ 1 key whose values are ALL blank (`{brand:'', size:''}`) — never allowed. */
+export function isAllBlank(e: DimMatch): boolean {
+  const keys = Object.keys(e);
+  return keys.length > 0 && keys.every((k) => normalizeDim(e[k]) === '');
 }
 
 /**
@@ -51,10 +62,32 @@ export function normalizeEntry(raw: Record<string, unknown>, opts: NormalizeOpti
   return out;
 }
 
-/** A combo picked from the file → an entry pinning EVERY mapped column (blank included) to that combo's value. */
+/**
+ * A combo picked from the file → an entry pinning each column the combo's OWN import read (its keys — the worker
+ * writes every mapped key, '' for a blank cell) to that combo's value, blank included. Only keys still in the
+ * current mapping are kept: a column added to the mapping after that import was processed is NOT pinned to blank
+ * (the file never had it), and a column since removed is dropped (the backend would refuse an unknown key).
+ */
 export function comboEntry(comboDims: DimMatch, dims: SalesDimensionMapping[]): DimMatch {
-  const keys = dims.length ? dims.map((d) => d.key) : Object.keys(comboDims);
+  const current = new Set(dims.map((d) => d.key));
+  const keys = Object.keys(comboDims).filter((k) => dims.length === 0 || current.has(k));
   return normalizeEntry(Object.fromEntries(keys.map((k) => [k, comboDims[k] ?? ''])), { keepBlank: true });
+}
+
+/**
+ * Do the combos' product columns differ from the current mapping (the file was processed with an older mapping)?
+ * Returns the differing keys, or null when they match / there is nothing to compare.
+ */
+export function comboMappingDrift(
+  combos: Array<{ dims: DimMatch }> | null | undefined,
+  dims: SalesDimensionMapping[],
+): { missing: string[]; extra: string[] } | null {
+  if (!combos || combos.length === 0) return null;
+  const fileKeys = new Set(combos.flatMap((c) => Object.keys(c.dims)));
+  const mapKeys = new Set(dims.map((d) => d.key));
+  const missing = [...mapKeys].filter((k) => !fileKeys.has(k));
+  const extra = [...fileKeys].filter((k) => !mapKeys.has(k));
+  return missing.length || extra.length ? { missing, extra } : null;
 }
 
 /** Does a line/combo with these dims match the entry? Mirrors backend entryMatches (missing dim = blank). */
@@ -100,21 +133,23 @@ export function addEntries(
   list: FilterList,
   raw: Array<Record<string, unknown>>,
   opts: NormalizeOptions & { max?: number } = {},
-): { filter: SalesKpiFilter; added: number; duplicates: number; overCap: number } {
+): { filter: SalesKpiFilter; added: number; duplicates: number; overCap: number; allBlank: number } {
   const cur = [...listOf(f, list)];
   const max = opts.max ?? Infinity;
   let added = 0;
   let duplicates = 0;
   let overCap = 0;
+  let allBlank = 0;
   for (const r of raw) {
     const e = normalizeEntry(r, opts);
     if (Object.keys(e).length === 0) continue;
+    if (isAllBlank(e)) { allBlank++; continue; }
     if (cur.some((c) => sameEntry(c, e))) { duplicates++; continue; }
     if (cur.length >= max) { overCap++; continue; }
     cur.push(e);
     added++;
   }
-  return { filter: withList(f, list, cur), added, duplicates, overCap };
+  return { filter: withList(f, list, cur), added, duplicates, overCap, allBlank };
 }
 
 export function removeEntryAt(f: SalesKpiFilter, list: FilterList, index: number): SalesKpiFilter {
@@ -219,6 +254,7 @@ export function validateFilter(f: SalesKpiFilter, dimKeys: string[]): FilterVali
     entries.forEach((e, i) => {
       // A key with a blank value is a deliberate "this column is blank" match, not an empty entry.
       if (Object.keys(e).length === 0) errors.push(`${name}: entry ${i + 1} is empty. Remove it or pick a value.`);
+      else if (isAllBlank(e)) errors.push(`${name}: entry ${i + 1} has only blank values. ${ALL_BLANK_MESSAGE}`);
       for (const k of Object.keys(e)) {
         if (!allowed.has(k)) errors.push(`${name}: entry ${i + 1} uses "${k}", which is not a mapped product column.`);
       }

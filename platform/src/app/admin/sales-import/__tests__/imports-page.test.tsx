@@ -34,7 +34,7 @@ vi.mock('@/lib/use-permissions', () => ({
 }));
 
 import Page from '../page';
-import { __resetUploadStoreForTests } from '@/lib/sales-import/upload-store';
+import { __resetUploadStoreForTests, releaseUploadForSessionChange } from '@/lib/sales-import/upload-store';
 import type { UploadSession } from '@/lib/sales-import/upload';
 
 function item(over: Partial<SalesImportSummary> = {}): SalesImportSummary {
@@ -42,7 +42,7 @@ function item(over: Partial<SalesImportSummary> = {}): SalesImportSummary {
     id: 'i1', status: 'READY', originalFilename: 'oct.xlsx', fileKind: 'XLSX', sizeBytes: 2 * 1024 * 1024, partCount: 1,
     partsReceived: 1, bytesRead: 0, rowsRead: 635430, rowsSkipped: 2, progressPct: null, duplicateOfId: null, error: null,
     detectedHeaders: null, createdAt: '2026-11-01T10:00:00.000Z', finishedAt: null, uploadedBy: 'Asha',
-    queuedAt: null, heartbeatAt: null, stalled: false, applied: false, purgedAt: null, canReprocess: true, canCancel: false, canDelete: true,
+    queuedAt: null, heartbeatAt: null, stalled: false, applied: false, purgedAt: null, canReprocess: true, canCancel: false, canDelete: true, reprocessedFromId: null, canReprocessAsNew: false,
     ...over,
   };
 }
@@ -158,7 +158,7 @@ describe('imports page', () => {
   it('Resume when the server already completed the import opens it instead of re-uploading', async () => {
     apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
     failAfterFirstPart();
-    uploadMock.readImportStatus.mockResolvedValue('QUEUED');
+    uploadMock.readImportStatus.mockResolvedValueOnce('UPLOADING').mockResolvedValue('QUEUED');
     render(<Page />);
     pick(new File(['a'], 'dms.csv'));
     await screen.findByRole('alert');
@@ -170,7 +170,7 @@ describe('imports page', () => {
   it('Discard deletes only an import that is still UPLOADING', async () => {
     apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
     failAfterFirstPart();
-    uploadMock.readImportStatus.mockResolvedValue('QUEUED'); // /complete went through server-side
+    uploadMock.readImportStatus.mockResolvedValueOnce('UPLOADING').mockResolvedValue('QUEUED'); // completed meanwhile
     render(<Page />);
     pick(new File(['a'], 'dms.csv'));
     await screen.findByRole('alert');
@@ -242,5 +242,135 @@ describe('imports page', () => {
     render(<Page />);
     expect(await screen.findByTestId('sales-import-upload-denied')).toBeInTheDocument();
     expect(screen.queryByTestId('sales-import-file-input')).not.toBeInTheDocument();
+  });
+
+  it('a failed part on an import that was cancelled meanwhile resets honestly (no Resume)', async () => {
+    apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
+    failAfterFirstPart();
+    uploadMock.readImportStatus.mockResolvedValue('CANCELLED');
+    render(<Page />);
+    pick(new File(['a'], 'dms.csv'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('This upload was cancelled or deleted — upload the file again.');
+    expect(screen.queryByRole('button', { name: /Resume upload/ })).not.toBeInTheDocument();
+    expect(apiMock.remove).not.toHaveBeenCalled();
+  });
+
+  it('Resume on an import deleted meanwhile (404) clears the session — no endless Resume', async () => {
+    apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
+    failAfterFirstPart();
+    uploadMock.readImportStatus.mockResolvedValueOnce('UPLOADING').mockResolvedValue('GONE');
+    render(<Page />);
+    pick(new File(['a'], 'dms.csv'));
+    await screen.findByRole('button', { name: /Resume upload/ });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Resume upload/ })); });
+    expect(uploadMock.continueUpload).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('cancelled or deleted');
+    expect(screen.queryByRole('button', { name: /Resume upload/ })).not.toBeInTheDocument();
+  });
+
+  it('Discard of an import cancelled meanwhile does not delete and resets', async () => {
+    apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
+    failAfterFirstPart();
+    uploadMock.readImportStatus.mockResolvedValueOnce('UPLOADING').mockResolvedValue('CANCELLED');
+    render(<Page />);
+    pick(new File(['a'], 'dms.csv'));
+    await screen.findByRole('button', { name: 'Discard this upload' });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Discard this upload' })); });
+    expect(apiMock.remove).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('sales-import-upload-failed-actions')).not.toBeInTheDocument();
+  });
+
+  it('a failed upload blocks picking a new file; an invalid pick keeps Resume / Discard visible', async () => {
+    apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
+    failAfterFirstPart();
+    uploadMock.readImportStatus.mockResolvedValue('UPLOADING');
+    render(<Page />);
+    pick(new File(['a'], 'dms.csv'));
+    await screen.findByRole('button', { name: /Resume upload/ });
+    expect(screen.getByTestId('sales-import-dropzone')).toHaveAttribute('aria-disabled', 'true');
+    pick(new File(['b'], 'other.csv'));
+    expect(uploadMock.uploadInParts).toHaveBeenCalledTimes(1);
+    pick(new File(['x'], 'bad.xls'));
+    expect(screen.getByRole('button', { name: /Resume upload/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Discard this upload' })).toBeInTheDocument();
+  });
+
+  it('Resume is disabled while a discard is running', async () => {
+    apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
+    failAfterFirstPart();
+    let release!: (v: unknown) => void;
+    uploadMock.readImportStatus.mockResolvedValueOnce('UPLOADING').mockImplementation(() => new Promise((r) => { release = r; }));
+    render(<Page />);
+    pick(new File(['a'], 'dms.csv'));
+    await screen.findByRole('button', { name: /Resume upload/ });
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Discard this upload' })); });
+    expect(screen.getByRole('button', { name: /Resume upload/ })).toBeDisabled();
+    apiMock.remove.mockResolvedValue(ok(null));
+    await act(async () => { release('UPLOADING'); });
+    expect(apiMock.remove).toHaveBeenCalledWith('half');
+    expect(screen.queryByRole('button', { name: /Resume upload/ })).not.toBeInTheDocument();
+  });
+
+  it('cancel removes the import and re-lists the imports', async () => {
+    apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
+    apiMock.remove.mockResolvedValue(ok(null));
+    uploadMock.readImportStatus.mockResolvedValue('UPLOADING');
+    uploadMock.uploadInParts.mockImplementation((_f: File, opts: { signal?: AbortSignal; onCreated?(id: string, s: UploadSession): void }) => {
+      opts.onCreated?.('c1', { importId: 'c1', partSize: 4, partCount: 2, confirmed: new Set() });
+      return new Promise<string>((_res, rej) => opts.signal?.addEventListener('abort', () => rej(new Error('aborted'))));
+    });
+    render(<Page />);
+    await screen.findByText(/No files uploaded yet/);
+    const listCalls = apiMock.list.mock.calls.length;
+    pick(new File(['a'], 'dms.csv'));
+    await screen.findByRole('progressbar', { name: 'Upload progress' });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Cancel/ })); });
+    expect(apiMock.remove).toHaveBeenCalledWith('c1');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Upload cancelled. Nothing was imported.');
+    expect(apiMock.list.mock.calls.length).toBeGreaterThan(listCalls);
+  });
+
+  it('logout / brand switch mid-upload: asks; "stay" vetoes; "continue" cancels + deletes with the current session', async () => {
+    apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
+    apiMock.remove.mockResolvedValue(ok(null));
+    uploadMock.readImportStatus.mockResolvedValue('UPLOADING');
+    uploadMock.uploadInParts.mockImplementation((_f: File, opts: { signal?: AbortSignal; onCreated?(id: string, s: UploadSession): void }) => {
+      opts.onCreated?.('s1', { importId: 's1', partSize: 4, partCount: 2, confirmed: new Set() });
+      return new Promise<string>((_res, rej) => opts.signal?.addEventListener('abort', () => rej(new Error('aborted'))));
+    });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
+    render(<Page />);
+    pick(new File(['a'], 'dms.csv'));
+    await screen.findByRole('progressbar', { name: 'Upload progress' });
+    let allowed = true;
+    await act(async () => { allowed = await releaseUploadForSessionChange('switch-brand'); });
+    expect(allowed).toBe(false);
+    expect(confirm.mock.calls[0][0]).toMatch(/Switching brand cancels it/);
+    expect(apiMock.remove).not.toHaveBeenCalled();
+    await act(async () => { allowed = await releaseUploadForSessionChange('logout'); });
+    expect(allowed).toBe(true);
+    expect(apiMock.remove).toHaveBeenCalledWith('s1');
+  });
+
+  it('the upload stops (and deletes nothing) when the user / brand changes mid-upload', async () => {
+    apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
+    localStorage.setItem('user', JSON.stringify({ id: 'u1', name: 'A', role: 'CLIENT_ADMIN', phone: '' }));
+    uploadMock.uploadInParts.mockImplementation(async (_f: File, opts: { guard?(): void; onCreated?(id: string, s: UploadSession): void }) => {
+      opts.onCreated?.('t1', { importId: 't1', partSize: 4, partCount: 2, confirmed: new Set() });
+      localStorage.setItem('assumedBrand', 'Other brand'); // switched in another tab
+      opts.guard?.();
+      return 't1';
+    });
+    try {
+      render(<Page />);
+      pick(new File(['a'], 'dms.csv'));
+      expect(await screen.findByRole('alert')).toHaveTextContent('You signed out or switched brand during the upload');
+      expect(apiMock.remove).not.toHaveBeenCalled();
+      expect(push).not.toHaveBeenCalled();
+    } finally {
+      localStorage.removeItem('user');
+      localStorage.removeItem('assumedBrand');
+    }
   });
 });

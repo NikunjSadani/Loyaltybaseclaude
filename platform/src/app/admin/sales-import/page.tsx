@@ -61,7 +61,6 @@ function UploadCard({ canUpload }: { canUpload: boolean }) {
   const up = useSyncExternalStore(subscribeUpload, getUploadState, getUploadState);
   const [localError, setLocalError] = useState<{ fileName: string; text: string } | null>(null);
   const [dragOver, setDragOver] = useState(false);
-  const [discarding, setDiscarding] = useState(false);
   // Navigate to the import only when it finished while this page was open; a finish that happened while the user
   // was elsewhere shows a banner instead of yanking them away on return.
   const sawUploadingRef = useRef(false);
@@ -80,7 +79,9 @@ function UploadCard({ canUpload }: { canUpload: boolean }) {
   }, [up.phase, up.importId, router]);
 
   const start = useCallback((file: File) => {
-    if (getUploadState().phase === 'uploading') return; // double-submit guard
+    // Double-submit guard; a failed upload must be resumed or discarded before a new file is picked.
+    const phase = getUploadState().phase;
+    if (phase === 'uploading' || phase === 'failed') return;
     const invalid = validateSalesFile(file);
     if (invalid) { setLocalError({ fileName: file.name, text: invalid }); return; }
     setLocalError(null);
@@ -96,21 +97,15 @@ function UploadCard({ canUpload }: { canUpload: boolean }) {
   function onDrop(e: React.DragEvent<HTMLDivElement>) {
     e.preventDefault();
     setDragOver(false);
-    if (uploading || !canUpload) return;
+    if (pickDisabled) return;
     const f = e.dataTransfer.files?.[0];
     if (f) start(f);
   }
 
-  async function discard() {
-    setDiscarding(true);
-    await discardUpload();
-    setDiscarding(false);
-  }
-
   const pct = Math.round(up.progress * 100);
+  const failed = up.phase === 'failed';
   const fileName = localError?.fileName ?? up.fileName;
-  const error = localError?.text ?? up.error;
-  const pickDisabled = uploading || !canUpload;
+  const pickDisabled = uploading || failed || !canUpload;
 
   if (!canUpload) {
     return (
@@ -183,7 +178,7 @@ function UploadCard({ canUpload }: { canUpload: boolean }) {
               Uploading… {pct}%. Keep this browser tab open until it finishes — you can use other portal pages in the
               meantime, but closing or reloading the tab stops the upload.
             </span>
-            <Button size="sm" variant="ghost" onClick={() => cancelUpload()}>
+            <Button size="sm" variant="ghost" onClick={() => cancelUpload()} loading={up.busy}>
               <X className="w-3.5 h-3.5" /> Cancel
             </Button>
           </div>
@@ -193,22 +188,28 @@ function UploadCard({ canUpload }: { canUpload: boolean }) {
         </div>
       )}
 
-      {error && (
-        <p role="alert" className="text-sm text-red-600 flex items-center gap-1.5">
-          <AlertTriangle className="w-4 h-4 shrink-0" /> {error}
-        </p>
+      {(localError || up.error) && (
+        <div role="alert" className="text-sm text-red-600 space-y-1">
+          {localError && <p className="flex items-center gap-1.5"><AlertTriangle className="w-4 h-4 shrink-0" /> {localError.text}</p>}
+          {up.error && <p className="flex items-center gap-1.5"><AlertTriangle className="w-4 h-4 shrink-0" /> {up.error}</p>}
+        </div>
       )}
 
-      {!localError && up.phase === 'failed' && (
-        <div className="flex flex-wrap gap-2" data-testid="sales-import-upload-failed-actions">
-          {up.canResume && (
-            <Button size="sm" variant="primary" onClick={() => resumeUpload()}>
-              <RefreshCw className="w-3.5 h-3.5" /> Resume upload ({pct}% sent)
+      {failed && (
+        <div className="space-y-2" data-testid="sales-import-upload-failed-actions">
+          <div className="flex flex-wrap gap-2">
+            {up.canResume && (
+              <Button size="sm" variant="primary" onClick={() => resumeUpload()} disabled={up.busy}>
+                <RefreshCw className="w-3.5 h-3.5" /> Resume upload ({pct}% sent)
+              </Button>
+            )}
+            <Button size="sm" variant="outline" onClick={() => { void discardUpload(); }} loading={up.busy}>
+              {up.canResume ? 'Discard this upload' : 'Dismiss'}
             </Button>
+          </div>
+          {up.canResume && (
+            <p className="text-xs text-gray-500">Resume or discard this upload before choosing another file.</p>
           )}
-          <Button size="sm" variant="outline" onClick={discard} loading={discarding}>
-            {up.canResume ? 'Discard this upload' : 'Dismiss'}
-          </Button>
         </div>
       )}
     </section>
@@ -217,7 +218,7 @@ function UploadCard({ canUpload }: { canUpload: boolean }) {
 
 // ── Imports list ─────────────────────────────────────────────────────────────
 
-function ImportsList() {
+function ImportsList({ refreshKey }: { refreshKey: string }) {
   const [items, setItems] = useState<SalesImportSummary[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -225,18 +226,21 @@ function ImportsList() {
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
 
+  const loadedOnceRef = useRef(false);
+
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    // A re-list triggered by an upload state change refreshes silently (no "Loading…" flash over the table).
+    if (!loadedOnceRef.current) setLoading(true);
     setError(null);
     salesImportApi.list(null).then((r) => {
       if (cancelled) return;
-      if (r.success) { setItems(r.data.items); setCursor(r.data.nextCursor); }
+      if (r.success) { setItems(r.data.items); setCursor(r.data.nextCursor); loadedOnceRef.current = true; }
       else setError(r.error);
       setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [attempt]);
+  }, [attempt, refreshKey]);
 
   async function loadMore() {
     if (!cursor || loadingMore) return;
@@ -318,6 +322,8 @@ function ImportsList() {
 
 export default function SalesImportPage() {
   const { ready, has } = usePermissions();
+  // Re-list when an upload starts, finishes, fails or is cancelled (so a removed import disappears).
+  const up = useSyncExternalStore(subscribeUpload, getUploadState, getUploadState);
   return (
     <div className="space-y-5 pb-10">
       <div>
@@ -328,7 +334,7 @@ export default function SalesImportPage() {
         </p>
       </div>
       {ready && <UploadCard canUpload={has('targets:upload')} />}
-      <ImportsList />
+      <ImportsList refreshKey={`${up.phase}:${up.importId ?? ''}`} />
     </div>
   );
 }

@@ -47,6 +47,8 @@ export const salesImportApi = {
     api.get<SalesImportList>(`${BASE}?limit=${limit}${cursor ? `&cursor=${id(cursor)}` : ''}`),
   get: (importId: string) => api.get<SalesImportDetail>(`${BASE}/${id(importId)}`),
   reprocess: (importId: string) => api.post<SalesImportSummary>(`${BASE}/${id(importId)}/reprocess`, {}),
+  /** Applied import whose mapping changed (canReprocessAsNew) → a NEW import from the same stored file (QUEUED). */
+  reprocessAsNew: (importId: string) => api.post<SalesImportSummary>(`${BASE}/${id(importId)}/reprocess-as-new`, {}),
   /** QUEUED or stalled PROCESSING → CANCELLED (409 otherwise). */
   cancel: (importId: string) => api.post<SalesImportSummary>(`${BASE}/${id(importId)}/cancel`, {}),
   remove: (importId: string) => api.del<SalesImportSummary>(`${BASE}/${id(importId)}`),

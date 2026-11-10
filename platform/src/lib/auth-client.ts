@@ -14,6 +14,7 @@
 
 import { assumeTenantAction, exitTenantAction, logoutAction } from './auth-actions';
 import { unsubscribeFromPush } from './pwa/push';
+import { runSessionChangeGuards } from './session-change-guards';
 
 const USER_KEY = 'user';
 const ASSUMED_BRAND_KEY = 'assumedBrand';
@@ -97,6 +98,9 @@ export function getRoleHome(role?: string | null): string {
 
 /** Clear the session (httpOnly cookies server-side + local display state) and return to login. */
 export async function logout(): Promise<void> {
+  // Something in flight in this tab (e.g. a Sales Import upload) may ask the user first and clean up with the
+  // current session; "stay" cancels the logout. No guard registered (the usual case) → no prompt, unchanged.
+  if (!(await runSessionChangeGuards('logout'))) return;
   // Best-effort: drop this browser's push subscription BEFORE clearing the session
   // (the /api/push/unsubscribe call still carries the cookie here), so the next user
   // on this device never inherits the previous user's push notifications. No-ops if

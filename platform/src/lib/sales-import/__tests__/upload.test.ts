@@ -6,7 +6,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   planParts, validateSalesFile, withRetry, uploadInParts, continueUpload, backoffMs, UPLOAD_RETRIES,
-  SalesImportHttpError, UploadAbortedError, type UploadSession,
+  SalesImportHttpError, UploadAbortedError, UploadGoneError, UploadStoppedError, readImportStatus, classifyUploadStatus,
+  type UploadSession,
 } from '../upload';
 import { SALES_IMPORT_PART_SIZE, SALES_IMPORT_MAX_FILE_BYTES } from '../types';
 
@@ -214,5 +215,43 @@ describe('uploadInParts', () => {
       return json(200, { success: true, data: { id: 'i', status: 'UPLOADING' } });
     });
     await expect(uploadInParts(file(5), { onProgress: () => {}, sleep: noSleep })).rejects.toThrow('Bad gateway');
+  });
+
+  it('readImportStatus: 404 → GONE, other failures → null (unknown)', async () => {
+    fetchMock.mockResolvedValueOnce(json(404, { success: false, error: 'Not found' }));
+    await expect(readImportStatus('x')).resolves.toBe('GONE');
+    fetchMock.mockResolvedValueOnce(json(503, { success: false, error: 'down' }));
+    await expect(readImportStatus('x')).resolves.toBeNull();
+  });
+
+  it('classifyUploadStatus: only QUEUED/PROCESSING/NEEDS_MAPPING/READY/FAILED count as completed', () => {
+    for (const s of ['QUEUED', 'PROCESSING', 'NEEDS_MAPPING', 'READY', 'FAILED'] as const) expect(classifyUploadStatus(s)).toBe('completed');
+    expect(classifyUploadStatus('CANCELLED')).toBe('gone');
+    expect(classifyUploadStatus('GONE')).toBe('gone');
+    expect(classifyUploadStatus('UPLOADING')).toBe('uploading');
+    expect(classifyUploadStatus(null)).toBe('unknown');
+  });
+
+  it('a lost /complete on an import that was CANCELLED meanwhile throws UploadGoneError (not success)', async () => {
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.endsWith('/uploads')) return json(200, { success: true, data: { importId: 'i', partSize: 8, partCount: 1 } });
+      if (url.endsWith('/parts/0')) return json(200, { success: true, data: { partsReceived: 1 } });
+      if (url.endsWith('/complete')) return json(409, { success: false, error: 'Not uploading' });
+      return json(200, { success: true, data: { id: 'i', status: 'CANCELLED' } });
+    });
+    await expect(uploadInParts(file(5), { onProgress: () => {}, sleep: noSleep })).rejects.toBeInstanceOf(UploadGoneError);
+  });
+
+  it('a guard that throws stops the upload at once (never retried, no further requests)', async () => {
+    const urls: string[] = [];
+    fetchMock.mockImplementation(async (url: string) => {
+      urls.push(url);
+      if (url.endsWith('/uploads')) return json(200, { success: true, data: { importId: 'i', partSize: 2, partCount: 2 } });
+      return json(200, { success: true, data: { partsReceived: 1 } });
+    });
+    let calls = 0;
+    const guard = () => { calls++; if (calls > 1) throw new UploadStoppedError('session changed'); };
+    await expect(uploadInParts(file(4), { onProgress: () => {}, sleep: noSleep, guard })).rejects.toBeInstanceOf(UploadStoppedError);
+    expect(urls).toEqual(['/api/admin/sales-import/uploads']);
   });
 });

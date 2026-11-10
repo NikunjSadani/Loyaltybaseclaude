@@ -7,6 +7,7 @@ import { describe, it, expect } from 'vitest';
 import {
   normalizeDim, normalizeEntry, addEntries, removeEntry, removeEntryAt, hasEntry, entryLabel,
   coveringEntryIndex, validateFilter, describeFilter, comboEntry, entryMatchesDims, includeExcludeConflicts, entriesNotInCombos,
+  isAllBlank, comboMappingDrift,
 } from '../product-set';
 import type { DimMatch, SalesDimensionMapping } from '../types';
 
@@ -113,9 +114,12 @@ describe('validateFilter (blocking)', () => {
 describe('blank values, conflicts, live checks, cap (audit fixes)', () => {
   const dims = [{ key: 'dimA', label: 'Brand', header: 'A' }, { key: 'dimB', label: 'Size', header: 'B' }];
 
-  it('normalizeEntry keeps blanks only when asked; comboEntry pins every mapped column', () => {
+  it('normalizeEntry keeps blanks only when asked; comboEntry pins the combo\'s own columns (blank included)', () => {
     expect(normalizeEntry({ dimA: 'p', dimB: ' ' }, { keepBlank: true })).toEqual({ dimA: 'P', dimB: '' });
-    expect(comboEntry({ dimA: 'P' }, dims)).toEqual({ dimA: 'P', dimB: '' });
+    expect(comboEntry({ dimA: 'P', dimB: '' }, dims)).toEqual({ dimA: 'P', dimB: '' });
+    // a column the combo's import did not have is NOT pinned; one no longer mapped is dropped
+    expect(comboEntry({ dimA: 'P' }, dims)).toEqual({ dimA: 'P' });
+    expect(comboEntry({ dimA: 'P', gone: 'X' }, dims)).toEqual({ dimA: 'P' });
     expect(entryLabel({ dimA: 'P', dimB: '' }, dims)).toBe('P (blank size)');
   });
 
@@ -144,8 +148,25 @@ describe('blank values, conflicts, live checks, cap (audit fixes)', () => {
     expect(r.filter.anyOf).toHaveLength(2);
   });
 
-  it('validateFilter accepts a deliberate blank-value entry but still rejects {}', () => {
-    expect(validateFilter({ anyOf: [{ dimA: '' }] }, ['dimA']).errors).toEqual([]);
+  it('validateFilter: SOME blank values are fine; ALL blank (or {}) is refused', () => {
+    expect(validateFilter({ anyOf: [{ dimA: 'P', dimB: '' }] }, ['dimA', 'dimB']).errors).toEqual([]);
+    expect(validateFilter({ anyOf: [{ dimA: '' }] }, ['dimA']).errors[0]).toMatch(/only blank values/);
+    expect(validateFilter({ noneOf: [{ dimA: '', dimB: '' }] }, ['dimA', 'dimB']).errors[0]).toMatch(/only blank values/);
     expect(validateFilter({ anyOf: [{}] }, ['dimA']).errors[0]).toMatch(/empty/);
+  });
+
+  it('isAllBlank / addEntries refuse all-blank entries and count them', () => {
+    expect(isAllBlank({ dimA: '', dimB: ' ' })).toBe(true);
+    expect(isAllBlank({ dimA: 'P', dimB: '' })).toBe(false);
+    expect(isAllBlank({})).toBe(false);
+    const r = addEntries({}, 'anyOf', [{ dimA: '', dimB: '' }, { dimA: 'P', dimB: '' }], { keepBlank: true });
+    expect(r.allBlank).toBe(1);
+    expect(r.filter.anyOf).toEqual([{ dimA: 'P', dimB: '' }]);
+  });
+
+  it('comboMappingDrift reports columns the file lacks / the mapping no longer has', () => {
+    expect(comboMappingDrift([{ dims: { dimA: 'P', dimB: '' } }], dims)).toBeNull();
+    expect(comboMappingDrift([{ dims: { dimA: 'P', old: 'x' } }], dims)).toEqual({ missing: ['dimB'], extra: ['old'] });
+    expect(comboMappingDrift([], dims)).toBeNull();
   });
 });

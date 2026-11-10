@@ -163,9 +163,11 @@ export function KpiEditor({
   return (
     <div className="rounded-xl border border-gray-300 bg-white p-5 space-y-5" data-testid="kpi-editor">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-gray-900">{editing ? `Edit ${def.kpiCode}` : 'New Sales Import KPI'}</h3>
+        <h3 className="text-sm font-semibold text-gray-900">{!canEdit ? `${def.kpiCode} (view only)` : editing ? `Edit ${def.kpiCode}` : 'New Sales Import KPI'}</h3>
       </div>
 
+      {/* Read-only without targets:manage_config: the disabled fieldset disables every control inside. */}
+      <fieldset disabled={!canEdit} className="space-y-5 min-w-0 border-0 p-0 m-0" data-testid="kpi-editor-fields">
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="text-xs font-medium text-gray-700">
           <label>
@@ -229,6 +231,7 @@ export function KpiEditor({
         )}
       </div>
       <p className="text-[11px] text-gray-500 -mt-3">Leave both empty for every outlet. Outlets outside the scope get no value (blank, not 0).</p>
+      </fieldset>
 
       {/* Test */}
       <div className="rounded-lg border border-gray-200 p-3 space-y-2">
@@ -286,8 +289,8 @@ export function KpiEditor({
 
       <div className="flex flex-wrap gap-2">
         {canEdit && <Button variant="primary" type="button" onClick={save} loading={saving} disabled={blockers.length > 0}>Save KPI</Button>}
-        <Button variant="outline" type="button" onClick={onCancel}>Cancel</Button>
-        {def.measure === 'AMOUNT' && hasQty && (
+        <Button variant="outline" type="button" onClick={onCancel}>{canEdit ? 'Cancel' : 'Close'}</Button>
+        {canEdit && def.measure === 'AMOUNT' && hasQty && (
           <Button variant="ghost" type="button" onClick={() => {
             if (!window.confirm('Start a new cases KPI with the same products? Unsaved changes to this KPI are discarded — save it first if you changed it.')) return;
             onDuplicateAsCases({

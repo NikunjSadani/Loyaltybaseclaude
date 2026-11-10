@@ -177,7 +177,9 @@ function UploadingCard({ d }: { d: SalesImportDetail }) {
   );
 }
 
-function NeedsMappingCard({ d, onReprocess, busy, canAct }: { d: SalesImportDetail; onReprocess(): void; busy: boolean; canAct: boolean }) {
+function NeedsMappingCard({ d, onReprocess, busy, canAct, canConfigure }: {
+  d: SalesImportDetail; onReprocess(): void; busy: boolean; canAct: boolean; canConfigure: boolean;
+}) {
   const [header, ...samples] = d.detectedHeaders ?? [];
   const width = Math.max(header?.length ?? 0, ...samples.map((r) => r.length));
   return (
@@ -186,8 +188,11 @@ function NeedsMappingCard({ d, onReprocess, busy, canAct }: { d: SalesImportDeta
       {d.error && <p className="text-sm text-amber-800">{d.error}</p>}
       <p className="text-sm text-gray-600">
         Below is the row the portal took as the heading row{samples.length ? ', followed by the first rows of data' : ''}.
-        Tell the portal which column is the outlet code, invoice date, amount, cases and product details, then press
-        Reprocess.
+        {canConfigure && canAct
+          ? ' Tell the portal which column is the outlet code, invoice date, amount, cases and product details, then press Reprocess.'
+          : canConfigure
+            ? ' Tell the portal which column is the outlet code, invoice date, amount, cases and product details; someone who can upload sales files then reprocesses it.'
+            : ' Ask someone who can change the Sales Import settings to set up the column mapping for this file.'}
       </p>
       {header && (
         <div className="overflow-x-auto border border-gray-100 rounded-lg">
@@ -214,10 +219,12 @@ function NeedsMappingCard({ d, onReprocess, busy, canAct }: { d: SalesImportDeta
         </div>
       )}
       <div className="flex gap-2">
-        <Link href={`/admin/sales-import/settings?fromImport=${encodeURIComponent(d.id)}`}
-          className="inline-flex items-center px-4 py-2 text-sm font-medium rounded-lg bg-[var(--brand-primary)] text-white hover:opacity-90">
-          Set up column mapping
-        </Link>
+        {canConfigure && (
+          <Link href={`/admin/sales-import/settings?fromImport=${encodeURIComponent(d.id)}`}
+            className="inline-flex items-center px-4 py-2 text-sm font-medium rounded-lg bg-[var(--brand-primary)] text-white hover:opacity-90">
+            Set up column mapping
+          </Link>
+        )}
         {canAct && d.canReprocess && (
           <Button variant="outline" onClick={onReprocess} loading={busy}><RefreshCw className="w-4 h-4" /> Reprocess</Button>
         )}
@@ -370,8 +377,15 @@ function MonthRow({
 }
 
 function PreviewSection({
-  importId, onReprocess, reprocessing, canAct, canReprocess,
-}: { importId: string; onReprocess(): void; reprocessing: boolean; canAct: boolean; canReprocess: boolean }) {
+  importId, onReprocess, reprocessing, canAct, canReprocess, onApplied, canReprocessAsNew = false, onReprocessAsNew,
+  reprocessingAsNew = false,
+}: {
+  importId: string; onReprocess(): void; reprocessing: boolean; canAct: boolean; canReprocess: boolean;
+  /** Applied import whose mapping changed: re-read the stored file as a NEW import. */
+  canReprocessAsNew?: boolean; onReprocessAsNew?(): void; reprocessingAsNew?: boolean;
+  /** After an apply attempt that changed (or may have changed) server state: refresh the import detail too. */
+  onApplied(): void;
+}) {
   const [preview, setPreview] = useState<SalesImportPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -384,24 +398,29 @@ function PreviewSection({
   const [results, setResults] = useState<ApplyMonthResult[] | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const seqRef = useRef(0);
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
-  useEffect(() => {
-    let cancelled = false;
+  /** Loads the preview; resolves true only when THIS load landed successfully (stale / failed → false). */
+  const loadPreview = useCallback(async (): Promise<boolean> => {
     const seq = ++seqRef.current;
-    setError(null);
     setLoading(true);
-    salesImportApi.preview(importId).then((r) => {
-      if (cancelled || seq !== seqRef.current) return;
-      setLoading(false);
-      if (r.success) {
-        setPreview(r.data);
-        // Drop selections that are no longer applicable after a refresh.
-        const ok = new Set(r.data.months.filter((m) => m.canApply).map((m) => m.month));
-        setSelected((prev) => new Set([...prev].filter((m) => ok.has(m))));
-      } else setError(finalErrorText(r.status) ?? r.error);
-    });
-    return () => { cancelled = true; };
-  }, [importId, tick]);
+    const r = await salesImportApi.preview(importId);
+    if (!mountedRef.current || seq !== seqRef.current) return false;
+    setLoading(false);
+    if (r.success) {
+      setError(null);
+      setPreview(r.data);
+      // Drop selections that are no longer applicable after a refresh.
+      const ok = new Set(r.data.months.filter((m) => m.canApply).map((m) => m.month));
+      setSelected((prev) => new Set([...prev].filter((m) => ok.has(m))));
+      return true;
+    }
+    setError(finalErrorText(r.status) ?? r.error);
+    return false;
+  }, [importId]);
+
+  useEffect(() => { void loadPreview(); }, [loadPreview, tick]);
 
   const refetch = useCallback(() => setTick((t) => t + 1), []);
 
@@ -454,24 +473,36 @@ function PreviewSection({
       ...(partialMonths.length ? { acknowledgePartialMonths: partialMonths } : {}),
       ...(anyOlder ? { acknowledgeOlderThanLastApplied: true } : {}),
     });
-    setApplying(false);
     if (!r.success) {
       if (r.status === 401) {
+        setApplying(false);
         setNotice('Nothing was applied: your session has expired. Sign in again, then apply.');
+      } else if (r.status === 403) {
+        setApplying(false);
+        setNotice('Nothing was applied: you don\u2019t have permission to apply sales files.');
       } else if (r.status !== undefined && r.status >= 400 && r.status < 500) {
         // Any refusal (definitions / processing version changed, a month closed, an ack now needed…) means the
-        // preview on screen is out of date → reload it so the admin decides on the current state.
-        setNotice(`Nothing was applied: ${sentence(r.error) || 'the preview is out of date'}. The preview has been refreshed — check it and apply again.`);
-        refetch();
+        // preview on screen may be out of date → reload it (and the import) so the admin decides on the current
+        // state. Only claim "refreshed" when the reload actually landed.
+        onApplied();
+        const refreshed = await loadPreview();
+        setApplying(false);
+        const why = sentence(r.error) || 'the preview is out of date';
+        setNotice(refreshed
+          ? `Nothing was applied: ${why}. The preview has been refreshed — check it and apply again.`
+          : `Nothing was applied: ${why}. The preview could not be refreshed — press Refresh preview before applying again.`);
       } else {
+        setApplying(false);
         setNotice(`Nothing was applied: ${sentence(r.error)}. Try again in a moment.`);
       }
       return;
     }
+    setApplying(false);
     setResults(r.data.results);
     setSelected(new Set(r.data.results.filter((x) => !x.ok).map((x) => x.month)));
     setPartialAcks(new Set());
     setOlderAck(false);
+    onApplied();
     refetch();
   }
 
@@ -479,11 +510,20 @@ function PreviewSection({
     <section className="space-y-4" data-testid="sales-import-preview">
       {preview.mappingChanged && (
         <Banner tone="red" testId="sales-import-mapping-changed">
-          The column mapping was changed after this file was processed, so no month can be applied from it. Reprocess
-          the file to read it with the current mapping.
+          The column mapping was changed after this file was processed, so no month can be applied from it.{' '}
+          {canAct && canReprocess && 'Reprocess the file to read it with the current mapping.'}
+          {canAct && !canReprocess && canReprocessAsNew &&
+            'Months were already applied from it, so it is kept as the record of what was written; read the same file again as a new import to use the current mapping.'}
+          {!canAct && 'Someone who can upload sales files needs to read it again with the current mapping.'}
           {canAct && canReprocess && (
             <Button size="sm" variant="outline" className="ml-2" onClick={onReprocess} loading={reprocessing}>
               <RefreshCw className="w-3.5 h-3.5" /> Reprocess
+            </Button>
+          )}
+          {canAct && !canReprocess && canReprocessAsNew && onReprocessAsNew && (
+            <Button size="sm" variant="outline" className="ml-2" onClick={onReprocessAsNew} loading={reprocessingAsNew}
+              data-testid="sales-import-reprocess-as-new-banner">
+              <Copy className="w-3.5 h-3.5" /> Read again as a new import
             </Button>
           )}
         </Banner>
@@ -498,6 +538,12 @@ function PreviewSection({
               today&apos;s outlet list.
             </span>
           </span>
+        </Banner>
+      )}
+      {error && (
+        <Banner tone="red" testId="sales-import-preview-error">
+          Couldn&apos;t refresh the preview: {sentence(error)}. The figures below may be out of date.{' '}
+          <Button size="sm" variant="outline" className="ml-2" onClick={refetch}>Retry</Button>
         </Banner>
       )}
       {notice && <Banner tone="amber" testId="sales-import-apply-notice">{notice}</Banner>}
@@ -618,7 +664,8 @@ export default function SalesImportDetailPage() {
   const { detail: d, error, queuedTooLong, refresh } = useImportDetail(importId);
   const { ready, has } = usePermissions();
   const canAct = ready && has('targets:upload');
-  const [busy, setBusy] = useState<'reprocess' | 'delete' | 'cancel' | null>(null);
+  const canConfigure = ready && has('targets:manage_config');
+  const [busy, setBusy] = useState<'reprocess' | 'reprocess-new' | 'delete' | 'cancel' | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   async function reprocess() {
@@ -629,6 +676,21 @@ export default function SalesImportDetailPage() {
     setBusy(null);
     if (!r.success) { setActionError(`Not reprocessed: ${sentence(r.error)}.`); refresh(); return; }
     refresh();
+  }
+
+  async function reprocessAsNew() {
+    if (!importId || busy) return;
+    if (!window.confirm(
+      'Read this file again as a NEW import with the current column mapping?\n\nThis import stays as the record of ' +
+      'what was already applied. The new import is processed and previewed separately; nothing is applied until you ' +
+      'apply it.',
+    )) return;
+    setBusy('reprocess-new');
+    setActionError(null);
+    const r = await salesImportApi.reprocessAsNew(importId);
+    setBusy(null);
+    if (!r.success) { setActionError(`Not started: ${sentence(r.error)}.`); refresh(); return; }
+    router.push(`/admin/sales-import/${r.data.id}`);
   }
 
   async function cancel() {
@@ -689,6 +751,11 @@ export default function SalesImportDetailPage() {
                 <Ban className="w-3.5 h-3.5" /> Cancel processing
               </Button>
             )}
+            {d.canReprocessAsNew && (
+              <Button size="sm" variant="outline" onClick={reprocessAsNew} loading={busy === 'reprocess-new'} data-testid="sales-import-reprocess-as-new">
+                <Copy className="w-3.5 h-3.5" /> Read again as a new import
+              </Button>
+            )}
             {d.canReprocess && d.status !== 'NEEDS_MAPPING' && (
               <Button size="sm" variant="outline" onClick={reprocess} loading={busy === 'reprocess'}>
                 <RefreshCw className="w-3.5 h-3.5" /> Reprocess
@@ -710,6 +777,13 @@ export default function SalesImportDetailPage() {
       )}
       {actionError && <Banner tone="red">{actionError}</Banner>}
 
+      {d.reprocessedFromId && (
+        <Banner tone="blue" testId="sales-import-reprocessed-from">
+          This import re-reads the file of an earlier, already-applied import with the current column mapping.{' '}
+          <Link href={`/admin/sales-import/${d.reprocessedFromId}`} className="underline">Open the original import</Link>.
+        </Banner>
+      )}
+
       {d.duplicateOfId && (
         <Banner tone="blue" testId="sales-import-duplicate">
           <span className="inline-flex items-center gap-1.5"><Copy className="w-4 h-4" /> This is the same file as an earlier upload.</span>{' '}
@@ -719,7 +793,7 @@ export default function SalesImportDetailPage() {
         </Banner>
       )}
 
-      {purged && (
+      {purged && d.status !== 'CANCELLED' && (
         <Banner tone="amber" testId="sales-import-purged">
           This file&apos;s data was removed on {dateTimeLabel(d.purgedAt)} (files are kept for a limited time), so it can
           no longer be previewed, applied or reprocessed. Upload the file again if you need it.
@@ -728,13 +802,22 @@ export default function SalesImportDetailPage() {
 
       {d.status === 'UPLOADING' && <UploadingCard d={d} />}
       {isActiveStatus(d.status) && <ProcessingCard d={d} queuedTooLong={queuedTooLong} />}
-      {d.status === 'NEEDS_MAPPING' && <NeedsMappingCard d={d} onReprocess={reprocess} busy={busy === 'reprocess'} canAct={canAct} />}
+      {d.status === 'NEEDS_MAPPING' && (
+        <NeedsMappingCard d={d} onReprocess={reprocess} busy={busy === 'reprocess'} canAct={canAct} canConfigure={canConfigure} />
+      )}
       {d.status === 'FAILED' && (
         <Banner tone="red" testId="sales-import-failed">
-          Processing failed: {sentence(d.error) || 'unknown error'}. Fix the file or the column mapping, then press Reprocess.
+          Processing failed: {sentence(d.error) || 'unknown error'}.{' '}
+          {canAct && d.canReprocess
+            ? 'Fix the file or the column mapping, then press Reprocess.'
+            : 'Ask someone who can upload sales files to fix the file or the column mapping and reprocess it.'}
         </Banner>
       )}
-      {d.status === 'CANCELLED' && <Banner tone="amber">This import was cancelled. Nothing from it was imported.</Banner>}
+      {d.status === 'CANCELLED' && (
+        <Banner tone="amber" testId="sales-import-cancelled">
+          This import was cancelled or deleted{purged ? ', and its file was removed' : ''}. Nothing from it was imported.
+        </Banner>
+      )}
 
       {(d.errorSamples?.length ?? 0) > 0 && (
         <details className="bg-white rounded-xl border border-gray-200 px-4 py-3">
@@ -757,7 +840,9 @@ export default function SalesImportDetailPage() {
       )}
 
       {d.status === 'READY' && !purged && (
-        <PreviewSection importId={d.id} onReprocess={reprocess} reprocessing={busy === 'reprocess'} canAct={canAct} canReprocess={d.canReprocess} />
+        <PreviewSection importId={d.id} onReprocess={reprocess} reprocessing={busy === 'reprocess'} canAct={canAct}
+          canReprocess={d.canReprocess} onApplied={refresh} canReprocessAsNew={d.canReprocessAsNew}
+          onReprocessAsNew={reprocessAsNew} reprocessingAsNew={busy === 'reprocess-new'} />
       )}
     </div>
   );

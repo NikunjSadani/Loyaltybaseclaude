@@ -4,7 +4,7 @@
  * Run: npx vitest run src/lib/sales-import/__tests__/format.test.ts
  */
 import { describe, it, expect } from 'vitest';
-import { applyBlockers, monthLabel, dayLabel, warningText, formatSigned, formatRupees, formatBytes, sentence } from '../format';
+import { applyBlockers, monthLabel, dayLabel, warningText, formatSigned, formatRupees, formatBytes, sentence, formatCases } from '../format';
 import type { MonthPreview } from '../types';
 
 function month(over: Partial<MonthPreview>): MonthPreview {
@@ -37,6 +37,11 @@ describe('labels', () => {
     expect(formatRupees(-500)).toBe('−₹500');
     expect(formatRupees(-1234.5)).toBe('−₹1,234.50');
     expect(formatRupees(-0.001)).toBe('₹0');
+  });
+  it('cases: typographic minus, up to 3 decimals, no "−0"', () => {
+    expect(formatCases(-12.5)).toBe('−12.5');
+    expect(formatCases(1.2345)).toBe('1.235');
+    expect(formatCases(-0.0001)).toBe('0');
   });
   it('bytes: binary units, no "1024.0 KB"', () => {
     expect(formatBytes(1023)).toBe('1023 B');

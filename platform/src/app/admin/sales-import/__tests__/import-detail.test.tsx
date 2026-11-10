@@ -20,13 +20,16 @@ vi.mock('next/link', () => ({
 }));
 
 const apiMock = vi.hoisted(() => ({
-  get: vi.fn(), preview: vi.fn(), apply: vi.fn(), reprocess: vi.fn(), remove: vi.fn(), cancel: vi.fn(),
+  get: vi.fn(), preview: vi.fn(), apply: vi.fn(), reprocess: vi.fn(), remove: vi.fn(), cancel: vi.fn(), reprocessAsNew: vi.fn(),
   unmatchedCsvUrl: (id: string) => `/u/${id}`, errorsXlsxUrl: (id: string) => `/e/${id}`,
 }));
 vi.mock('@/lib/sales-import/api', () => ({ salesImportApi: apiMock, fetchDownload: vi.fn() }));
-const perms = vi.hoisted(() => ({ granted: true }));
+const perms = vi.hoisted(() => ({ granted: true, config: true }));
 vi.mock('@/lib/use-permissions', () => ({
-  usePermissions: () => ({ role: 'CLIENT_ADMIN', permissions: [], ready: true, error: false, retry: () => {}, has: () => perms.granted }),
+  usePermissions: () => ({
+    role: 'CLIENT_ADMIN', permissions: [], ready: true, error: false, retry: () => {},
+    has: (p: string) => (p === 'targets:manage_config' ? perms.config : perms.granted),
+  }),
 }));
 
 import Page from '../[id]/page';
@@ -36,7 +39,7 @@ function detail(over: Partial<SalesImportDetail> = {}): SalesImportDetail {
     id: 'imp1', status: 'READY', originalFilename: 'dms.xlsx', fileKind: 'XLSX', sizeBytes: 1000, partCount: 1,
     partsReceived: 1, bytesRead: 1000, rowsRead: 50, rowsSkipped: 0, progressPct: null, duplicateOfId: null,
     error: null, detectedHeaders: null, createdAt: '2026-11-01T10:00:00.000Z', finishedAt: null, uploadedBy: 'Asha',
-    queuedAt: null, heartbeatAt: null, stalled: false, applied: false, purgedAt: null, canReprocess: true, canCancel: false, canDelete: true,
+    queuedAt: null, heartbeatAt: null, stalled: false, applied: false, purgedAt: null, canReprocess: true, canCancel: false, canDelete: true, reprocessedFromId: null, canReprocessAsNew: false,
     monthSummaries: null, errorSamples: null, ...over,
   };
 }
@@ -64,6 +67,7 @@ beforeEach(() => {
   Object.values(apiMock).forEach((f) => typeof f === 'function' && 'mockReset' in f && (f as ReturnType<typeof vi.fn>).mockReset());
   push.mockReset();
   perms.granted = true;
+  perms.config = true;
   vi.spyOn(window, 'confirm').mockReturnValue(true);
 });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
@@ -333,5 +337,91 @@ describe('import detail — preview + apply', () => {
     expect(row).toHaveTextContent('₹1,200');
     expect(row).toHaveTextContent('₹1,000');
     expect(row).toHaveTextContent('+₹200');
+  });
+
+  it('a successful apply refreshes the import detail too', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue(ok({ results: [{ month: '2026-10', ok: true, outletsWritten: 1, outletsZeroFilled: 0 }] }));
+    render(<Page />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Apply October 2026' }));
+    const before = apiMock.get.mock.calls.length;
+    await act(async () => { fireEvent.click(screen.getByTestId('sales-import-apply')); });
+    await screen.findByTestId('sales-import-apply-results');
+    expect(apiMock.get.mock.calls.length).toBeGreaterThan(before);
+  });
+
+  it('apply 4xx whose preview reload FAILS says so (never "refreshed") and shows the preview error', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValueOnce(ok(preview([month()]))).mockResolvedValue({ success: false, error: 'HTTP 503', status: 503 });
+    apiMock.apply.mockResolvedValue({ success: false, error: 'Definitions changed', status: 409 });
+    render(<Page />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Apply October 2026' }));
+    const before = apiMock.get.mock.calls.length;
+    await act(async () => { fireEvent.click(screen.getByTestId('sales-import-apply')); });
+    const notice = await screen.findByTestId('sales-import-apply-notice');
+    expect(notice).toHaveTextContent('could not be refreshed');
+    expect(notice).not.toHaveTextContent('has been refreshed');
+    expect(screen.getByTestId('sales-import-preview-error')).toHaveTextContent('HTTP 503');
+    expect(screen.getByTestId('sales-import-preview')).toBeInTheDocument(); // the old preview stays visible
+    expect(apiMock.get.mock.calls.length).toBeGreaterThan(before);
+  });
+
+  it('apply 403 explains the missing permission', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue({ success: false, error: 'Forbidden', status: 403 });
+    render(<Page />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Apply October 2026' }));
+    await act(async () => { fireEvent.click(screen.getByTestId('sales-import-apply')); });
+    expect(await screen.findByTestId('sales-import-apply-notice')).toHaveTextContent('permission to apply sales files');
+  });
+
+  it('applied import with a changed mapping offers "Read again as a new import" and opens the new one', async () => {
+    apiMock.get.mockResolvedValue(ok(detail({ applied: true, canReprocess: false, canDelete: false, canReprocessAsNew: true })));
+    apiMock.preview.mockResolvedValue(ok(preview([month({ canApply: false })], { mappingChanged: true })));
+    apiMock.reprocessAsNew.mockResolvedValue(ok(detail({ id: 'new9', status: 'QUEUED', reprocessedFromId: 'imp1' })));
+    render(<Page />);
+    const banner = await screen.findByTestId('sales-import-mapping-changed');
+    expect(banner).toHaveTextContent('read the same file again as a new import');
+    expect(within(banner).queryByRole('button', { name: /^Reprocess$/ })).not.toBeInTheDocument();
+    await act(async () => { fireEvent.click(within(banner).getByTestId('sales-import-reprocess-as-new-banner')); });
+    expect(apiMock.reprocessAsNew).toHaveBeenCalledWith('imp1');
+    expect(push).toHaveBeenCalledWith('/admin/sales-import/new9');
+  });
+
+  it('an import created by reprocess-as-new links back to the original', async () => {
+    apiMock.get.mockResolvedValue(ok(detail({ reprocessedFromId: 'orig1' })));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    render(<Page />);
+    const b = await screen.findByTestId('sales-import-reprocessed-from');
+    expect(within(b).getByRole('link', { name: /original import/ })).toHaveAttribute('href', '/admin/sales-import/orig1');
+  });
+
+  it('without upload / settings permission the copy never tells the user to press Reprocess or set up the mapping', async () => {
+    perms.granted = false;
+    perms.config = false;
+    apiMock.get.mockResolvedValue(ok(detail({ status: 'NEEDS_MAPPING', detectedHeaders: [['CUST']] })));
+    render(<Page />);
+    const card = await screen.findByTestId('sales-import-needs-mapping');
+    expect(card).not.toHaveTextContent(/press Reprocess/);
+    expect(within(card).queryByRole('link', { name: /Set up column mapping/ })).not.toBeInTheDocument();
+    expect(card).toHaveTextContent(/Ask someone who can change the Sales Import settings/);
+  });
+
+  it('FAILED without upload permission does not say "press Reprocess"', async () => {
+    perms.granted = false;
+    apiMock.get.mockResolvedValue(ok(detail({ status: 'FAILED', error: 'Bad file.' })));
+    render(<Page />);
+    const b = await screen.findByTestId('sales-import-failed');
+    expect(b).not.toHaveTextContent(/press Reprocess/);
+    expect(b.textContent).not.toContain('..');
+  });
+
+  it('a cancelled / deleted import does not blame retention', async () => {
+    apiMock.get.mockResolvedValue(ok(detail({ status: 'CANCELLED', purgedAt: '2026-11-03T10:00:00.000Z', canDelete: false })));
+    render(<Page />);
+    expect(await screen.findByTestId('sales-import-cancelled')).toHaveTextContent('cancelled or deleted, and its file was removed');
+    expect(screen.queryByTestId('sales-import-purged')).not.toBeInTheDocument();
   });
 });

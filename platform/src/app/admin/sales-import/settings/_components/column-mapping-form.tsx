@@ -126,6 +126,8 @@ export function ColumnMappingForm({
         </p>
       </div>
       <datalist id={listId}>{detectedHeaders.map((h) => <option key={h} value={h} />)}</datalist>
+      {/* Read-only for users without targets:manage_config: a disabled fieldset disables every input / button inside. */}
+      <fieldset disabled={!canEdit} className="space-y-4 min-w-0 border-0 p-0 m-0" data-testid="mapping-fields">
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <HeaderInput id="map-outlet" label="Outlet / customer code" required value={m.outletCode} onChange={(v) => set('outletCode', v)} suggestionsId={listId} />
@@ -229,6 +231,8 @@ export function ColumnMappingForm({
           Changing a key breaks KPIs that use it. Edit the label instead if you only want a different name.
         </p>
       </div>
+
+      </fieldset>
 
       {touched && errors.length > 0 && (
         <ul className="text-xs text-red-700 list-disc pl-4" data-testid="mapping-errors">{errors.map((e) => <li key={e}>{e}</li>)}</ul>
