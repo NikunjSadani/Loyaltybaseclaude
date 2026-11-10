@@ -51,6 +51,10 @@ function db(rows: Array<Record<string, unknown>> = [], downstream: { batches?: A
   return d;
 }
 
+// Timed out at jest's 5 s default under full-suite CPU load (2026-11-10; passes alone in ~13 s for the file).
+// A red suite skips the staging deploy, so give real headroom.
+jest.setTimeout(30_000);
+
 describe('SalesMonthsService (K-4)', () => {
   it('close current month → 409; future → 409', async () => {
     const s = new SalesMonthsService(db() as never);

@@ -63,6 +63,10 @@ async function dmsOrdered(): Promise<Buffer> {
   return moveEntriesToEnd(await exceljsWorkbook([['Data', ROWS]]), ['xl/worksheets/sheet1.xml']);
 }
 
+// Builds and streams real xlsx workbooks (exceljs + zlib): fast alone, but can exceed jest's 5 s default under
+// full-suite CPU load (seen 2026-11-10). A red suite skips the staging deploy, so give real headroom.
+jest.setTimeout(30_000);
+
 describe('xlsxRows over the re-sequenced stream', () => {
   it('SheetJS file (inline strings, NO shared-strings table): marker row, header, 50 lines, dates, numeric code, fraction', async () => {
     const buf = sheetjsWorkbook([['Data', ROWS]]);
