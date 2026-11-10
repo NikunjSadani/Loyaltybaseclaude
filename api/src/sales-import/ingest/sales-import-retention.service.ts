@@ -10,7 +10,6 @@ import {
 import { currentMonthKey } from '../../targets/targets.helpers';
 import { shiftMonthKey } from '../months/month-state';
 import { isLockNotAvailable, lockImportRow, type LockedImport } from './import-lock';
-import { refreshStaleMonthCombos, type CombosRefreshLimits, type CombosRefreshResult } from '../kpi/month-combos';
 
 /** Statuses after which the raw file is no longer needed (retention clock = finishedAt). */
 export const RETENTION_STATUSES = ['READY', 'NEEDS_MAPPING', 'FAILED', 'CANCELLED'];
@@ -42,13 +41,33 @@ export interface PurgeOptions {
  * Each purge holds `FOR UPDATE NOWAIT` on the import row, so it never races an apply / the worker's final write
  * (a busy row is simply retried by the next sweep).
  */
-/** One purge's worst case: row-lock wait + its transaction bound + the GCS prefix delete after it (re-check M2). */
+/**
+ * Bounds of every retention step (re-check M2 / L1), so a sweep with a deadline can tell what still fits:
+ * one purge = pool wait + its transaction (each statement ≤ PURGE_STATEMENT_TIMEOUT_MS) + the GCS prefix delete after it.
+ */
+export const PURGE_STATEMENT_TIMEOUT_MS = 100_000;
 export const PURGE_TX_TIMEOUT_MS = 120_000;
 export const PURGE_MAX_WAIT_MS = 10_000;
-export const PURGE_FILES_ALLOWANCE_MS = 15_000;
-export const PURGE_STEP_MS = PURGE_TX_TIMEOUT_MS + PURGE_MAX_WAIT_MS + PURGE_FILES_ALLOWANCE_MS;
-/** A GCS-only step (retrying a failed file delete) or the 10-year history delete. */
-export const SWEEP_SMALL_STEP_MS = 15_000;
+/** The GCS prefix delete is abandoned (and retried by the next sweep) after this long. */
+export const GCS_DELETE_TIMEOUT_MS = 15_000;
+export const PURGE_STEP_MS = PURGE_TX_TIMEOUT_MS + PURGE_MAX_WAIT_MS + GCS_DELETE_TIMEOUT_MS;
+/** A GCS-only step (retrying a failed file delete). */
+export const SWEEP_SMALL_STEP_MS = GCS_DELETE_TIMEOUT_MS + 5_000;
+/** The 10-year history delete: at most this many line / summary rows per sweep, each statement bounded. */
+export const HISTORY_PURGE_CHUNK_ROWS = 50_000;
+export const HISTORY_PURGE_STATEMENT_TIMEOUT_MS = 12_000;
+export const HISTORY_PURGE_TX_TIMEOUT_MS = 40_000;
+export const HISTORY_PURGE_STEP_MS = HISTORY_PURGE_TX_TIMEOUT_MS + 5_000;
+
+/** Rejects after `ms` (the GCS client takes no abort signal, so the request itself is not cancelled; the sweep moves on). */
+function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms} ms`)), ms);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
 
 @Injectable()
 export class SalesImportRetentionService {
@@ -69,6 +88,8 @@ export class SalesImportRetentionService {
     try {
       const outcome = await this.prisma.$transaction(
         async (tx): Promise<PurgeOutcome> => {
+          // Every statement of the purge is bounded (re-check L1); a timeout rolls the purge back for the next sweep.
+          await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${PURGE_STATEMENT_TIMEOUT_MS}`);
           const row = await lockImportRow(tx, id, clientId, 'UPDATE NOWAIT');
           if (!row) return 'notFound';
           const refusal = opts.check ? await opts.check(row, tx) : null;
@@ -107,7 +128,7 @@ export class SalesImportRetentionService {
       const row = await this.prisma.salesImport.findFirst({ where: { id, clientId }, select: { gcsPrefix: true } });
       if (!row) return false;
       const prefix = `sales-imports/${clientId}/${id}/`;
-      if (row.gcsPrefix === prefix) await this.storage.deletePrefix(prefix);
+      if (row.gcsPrefix === prefix) await withTimeout(this.storage.deletePrefix(prefix), GCS_DELETE_TIMEOUT_MS, 'GCS delete');
       else this.logger.error(`sales-import ${id}: unexpected gcsPrefix "${row.gcsPrefix}", storage cleanup skipped`);
       await this.prisma.salesImport.updateMany({ where: { id, clientId, purgedAt: { not: null } }, data: { filesPurgedAt: new Date() } });
       return true;
@@ -119,30 +140,39 @@ export class SalesImportRetentionService {
 
   /**
    * SalesMonthHistory is kept SALES_MONTH_HISTORY_RETENTION_YEARS: months older than that (vs the current IST month) are
-   * deleted. Never throws. Returns the number of history rows deleted.
+   * deleted — BOUNDED (re-check L1): one transaction, every statement under HISTORY_PURGE_STATEMENT_TIMEOUT_MS, at most
+   * HISTORY_PURGE_CHUNK_ROWS line rows and summary rows per call; a month's set header goes once its lines and summary are
+   * gone. A large backlog drains over several sweeps. Never throws. Returns the line rows deleted.
    */
   async purgeOldHistory(opts: { clientId?: string; currentMonth?: string } = {}): Promise<number> {
     try {
       const cutoff = shiftMonthKey(opts.currentMonth ?? currentMonthKey(), -12 * SALES_MONTH_HISTORY_RETENTION_YEARS);
-      const where = { ...(opts.clientId ? { clientId: opts.clientId } : {}), month: { lt: cutoff } };
-      const r = await this.prisma.salesMonthHistory.deleteMany({ where });
-      await this.prisma.salesMonthHistoryCombo.deleteMany({ where }); // the per-month combos summary (§10c)
-      await this.prisma.salesMonthHistorySet.deleteMany({ where });
-      return r.count;
+      const tenant = (alias: string) =>
+        opts.clientId ? Prisma.sql`AND ${Prisma.raw(alias)}."clientId" = ${opts.clientId}` : Prisma.empty;
+      return await this.prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${HISTORY_PURGE_STATEMENT_TIMEOUT_MS}`);
+          const lines = await tx.$executeRaw(Prisma.sql`
+            DELETE FROM "sales_month_histories" WHERE "id" IN (
+              SELECT h."id" FROM "sales_month_histories" h
+               WHERE h."month" < ${cutoff} ${tenant('h')} LIMIT ${HISTORY_PURGE_CHUNK_ROWS})`);
+          await tx.$executeRaw(Prisma.sql`
+            DELETE FROM "sales_month_history_combos" WHERE "id" IN (
+              SELECT c."id" FROM "sales_month_history_combos" c
+               WHERE c."month" < ${cutoff} ${tenant('c')} LIMIT ${HISTORY_PURGE_CHUNK_ROWS})`);
+          await tx.$executeRaw(Prisma.sql`
+            DELETE FROM "sales_month_history_sets" s
+             WHERE s."month" < ${cutoff} ${tenant('s')}
+               AND NOT EXISTS (SELECT 1 FROM "sales_month_histories" h WHERE h."clientId" = s."clientId" AND h."month" = s."month")
+               AND NOT EXISTS (SELECT 1 FROM "sales_month_history_combos" c WHERE c."clientId" = s."clientId" AND c."month" = s."month")`);
+          return Number(lines);
+        },
+        { timeout: HISTORY_PURGE_TX_TIMEOUT_MS, maxWait: 5_000 },
+      );
     } catch (e) {
-      this.logger.warn(`sales-import history retention failed: ${(e as Error).message}`);
+      this.logger.warn(`sales-import history retention failed (the next sweep retries): ${(e as Error).message}`);
       return 0;
     }
-  }
-
-  /**
-   * Background repair of the per-month combos summary (plan §10c): rebuilds months whose summary is missing or from
-   * another history set (bounded by `limits`; try-lock on the month, skip when an apply holds it). Called by the WORKER
-   * drain (COMBOS_REFRESH_WORKER_LIMITS) and by the HTTP drains (COMBOS_REFRESH_HTTP_LIMITS) — never by a user request
-   * (sweep() is also called from the list route). Never throws.
-   */
-  refreshHistoryCombos(limits: CombosRefreshLimits, opts: { shouldStop?: () => boolean } = {}): Promise<CombosRefreshResult> {
-    return refreshStaleMonthCombos(this.prisma as never, this.logger, limits, opts);
   }
 
   /**
@@ -203,7 +233,7 @@ export class SalesImportRetentionService {
       this.logger.warn(`sales-import retention sweep failed: ${(e as Error).message}`);
     }
     // 10-year month history (cheap indexed delete; usually nothing).
-    if (fits(SWEEP_SMALL_STEP_MS)) await this.purgeOldHistory({ clientId: opts.clientId });
+    if (fits(HISTORY_PURGE_STEP_MS)) await this.purgeOldHistory({ clientId: opts.clientId });
     return out;
   }
 }

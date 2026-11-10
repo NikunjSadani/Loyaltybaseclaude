@@ -1,7 +1,8 @@
 -- Sales Import extras (plan §10c, audit M1): a small per-month product-combo summary of the stored month history, so
 -- the KPI picker's "Stored month(s)" source never scans the line rows. Additive; touches only sales-import tables.
--- Each row records the history set it summarises (sourceImportId + appliedAt = the set header's): a reader that finds
--- them different from the header (e.g. an apply by an older revision during a deploy) rebuilds that month (re-check L-a).
+-- Each row records the history set it summarises (sourceImportId + appliedAt = the set header's); the header records it
+-- too (combosSourceImportId / combosAppliedAt). A reader that finds them different from the header (only possible if an
+-- older revision applied the month during the deploy introducing this table) reads that month from its stored lines.
 
 -- CreateTable
 CREATE TABLE "sales_month_history_combos" (
@@ -38,6 +39,5 @@ SELECT h."clientId", h."month", h."dims", h."dimKey", md5(h."dimKey"),
 -- The set header records which set its summary was built from (re-check L1: staleness is a header-row comparison, never
 -- a scan of the summary rows). Every stored month was just summarised from its own lines, so stamp it with itself.
 ALTER TABLE "sales_month_history_sets" ADD COLUMN "combosSourceImportId" TEXT,
-                                       ADD COLUMN "combosAppliedAt" TIMESTAMP(3),
-                                       ADD COLUMN "combosRefreshFailedAt" TIMESTAMP(3);
+                                       ADD COLUMN "combosAppliedAt" TIMESTAMP(3);
 UPDATE "sales_month_history_sets" SET "combosSourceImportId" = "sourceImportId", "combosAppliedAt" = "appliedAt";

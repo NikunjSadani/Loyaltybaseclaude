@@ -44,18 +44,14 @@ async function main(): Promise<void> {
   const { SalesImportWorkerModule } = await import('./ingest/sales-import-worker.module');
   const { SalesImportProcessorService } = await import('./ingest/sales-import-processor.service');
   const { SalesImportRetentionService } = await import('./ingest/sales-import-retention.service');
-  const { COMBOS_REFRESH_WORKER_LIMITS } = await import('./kpi/month-combos');
   const app = await NestFactory.createApplicationContext(SalesImportWorkerModule, { bufferLogs: true });
   const proc = app.get(SalesImportProcessorService);
   const drained = await drainImports(proc, stop);
   // S5: every drain also runs a bounded retention sweep across tenants (expired files, abandoned uploads). Skipped when
   // stopping (the next drain runs it).
-  const retentionSvc = app.get(SalesImportRetentionService);
-  const retention = stop.requested ? null : await retentionSvc.sweep({ limit: 50 });
-  // §10c: rebuild stale / missing month combos summaries in the background (bounded; stops starting new months on SIGTERM).
-  const combos = stop.requested ? null : await retentionSvc.refreshHistoryCombos(COMBOS_REFRESH_WORKER_LIMITS, { shouldStop: () => stop.requested });
+  const retention = stop.requested ? null : await app.get(SalesImportRetentionService).sweep({ limit: 50 });
   await app.close();
-  console.log(JSON.stringify({ msg: 'sales-import worker done', ...drained, retention, combos, stoppedBy: stop.reason }));
+  console.log(JSON.stringify({ msg: 'sales-import worker done', ...drained, retention, stoppedBy: stop.reason }));
   // Audit L1: a stopped worker exits non-zero so Cloud Run's task retry picks the handed-back import up promptly.
   if (stop.requested) process.exit(WORKER_STOP_EXIT_CODE);
 }

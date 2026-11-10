@@ -295,12 +295,12 @@ export interface SalesHistoryCombos {
   /** Distinct combos in the covered months; more than dimensionCombos.length = the list is capped. */
   totalCombos: number;
   /**
-   * Covered months whose product summary is being refreshed in the background (missing, or from an earlier apply than
-   * the month's stored lines): their combos come from the older summary, or — when it is missing — straight from the
-   * stored lines if the month is small (else the month contributes NO combos until rebuilt). The background refresh
-   * rebuilds them (worker / Cloud Scheduler drain, every ~10 min). Empty when everything is current.
+   * Covered months whose product list cannot be shown: their stored product summary is missing or out of date (only if an
+   * older revision applied the month while this feature was being deployed) and their stored lines are too many to read
+   * directly. They contribute NO combos; re-applying the month (Months page) rebuilds the summary. Empty when every
+   * covered month is included.
    */
-  refreshingMonths: string[];
+  unavailableMonths: string[];
 }
 
 // ─── Preview / apply ────────────────────────────────────────────────────────────

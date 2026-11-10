@@ -13,6 +13,7 @@
  * by another entry / both included and excluded / cancelled by an exclusion); the last "Test" (always against the
  * latest file) adds the server's view.
  */
+import Link from 'next/link';
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Plus, Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -39,9 +40,6 @@ type AddFn = (raw: Array<Record<string, unknown>>, opts?: NormalizeOptions) => v
 /** What the picker / whole-value chips read: the latest file's combos or the stored history's (same shape). */
 type ComboList = Pick<SalesImportCombos, 'dimensionValues' | 'dimensionCombos'>;
 type Source = 'latest' | 'history';
-
-/** While some chosen month's product summary is being refreshed, the list is fetched again this often. */
-export const HISTORY_REFRESH_POLL_MS = 60_000;
 
 /** A change of the stored-months select waits this long before it is fetched (quick changes send one request). */
 export const HISTORY_SELECT_DEBOUNCE_MS = 300;
@@ -82,39 +80,27 @@ interface SourceView {
 function useHistoryCombos(active: boolean, sel: string) {
   const [tick, setTick] = useState(0);
   const key = `${sel}#${tick}`;
-  const [res, setRes] = useState<{ key: string; sel: string; data: SalesHistoryCombos | null; error: string | null } | null>(null);
+  const [res, setRes] = useState<{ key: string; data: SalesHistoryCombos | null; error: string | null } | null>(null);
   const [availableMonths, setAvailableMonths] = useState<string[]>([]);
   /** The month choice last sent; a CHANGE of choice is debounced (first load / Retry / re-activation are not). */
   const lastSent = useRef<string | null>(null);
-  /**
-   * The selection the background poll was armed for (re-check L3): only ITS reload is quiet (a failure keeps the list
-   * on screen); a different selection's first load is never quiet.
-   */
-  const silentFor = useRef<string | null>(null);
   useEffect(() => {
     if (!active) return;
     // Audit M1: a superseded request is aborted (and its late answer ignored); quick changes of the select are debounced.
     const ctrl = new AbortController();
-    const quiet = silentFor.current === sel;
-    silentFor.current = null;
-    const fail = (error: string) => {
-      // A failed background poll keeps the list it already shows (same selection); anything else shows the error.
-      if (!quiet) setRes({ key, sel, data: null, error });
-      else setRes((prev) => (prev && prev.sel === sel ? { ...prev, key } : prev)); // settled: not "reloading" any more
-    };
     const load = () => {
       lastSent.current = sel;
       salesImportApi.historyCombos(historyQuery(sel), ctrl.signal)
         .then((r) => {
           if (ctrl.signal.aborted) return;
           if (r.success) {
-            setRes({ key, sel, data: r.data, error: null });
+            setRes({ key, data: r.data, error: null });
             setAvailableMonths(r.data.availableMonths);
           } else {
-            fail(r.error);
+            setRes({ key, data: null, error: r.error });
           }
         })
-        .catch((e: unknown) => { if (!ctrl.signal.aborted) fail(e instanceof Error ? e.message : 'Network error'); });
+        .catch((e: unknown) => { if (!ctrl.signal.aborted) setRes({ key, data: null, error: e instanceof Error ? e.message : 'Network error' }); });
     };
     let timer: ReturnType<typeof setTimeout> | null = null;
     if (lastSent.current !== null && lastSent.current !== sel) timer = setTimeout(load, HISTORY_SELECT_DEBOUNCE_MS);
@@ -124,29 +110,13 @@ function useHistoryCombos(active: boolean, sel: string) {
       ctrl.abort();
     };
   }, [active, sel, key]);
-  // While the same selection reloads (Reload button / background poll), the list it already has stays on screen.
-  const current = res && (res.key === key || (res.sel === sel && res.data)) ? res : null;
-  const refreshing = Boolean(active && current?.data && current.data.refreshingMonths.length > 0);
-  // Background poll (re-check L3): while some month's summary is being rebuilt, look again every ~60 s; stops when the
-  // list is current, the source changes or the builder unmounts (cleanup).
-  useEffect(() => {
-    if (!refreshing) return;
-    const t = setTimeout(() => {
-      silentFor.current = sel;
-      setTick((n) => n + 1);
-    }, HISTORY_REFRESH_POLL_MS);
-    return () => clearTimeout(t);
-  }, [refreshing, key, sel]);
+  const current = res && res.key === key ? res : null;
   return {
     loading: active && current === null,
-    reloading: active && current !== null && res?.key !== key,
     data: current?.data ?? null,
     error: current?.error ?? null,
     availableMonths,
-    retry: () => {
-      silentFor.current = null;
-      setTick((t) => t + 1);
-    },
+    retry: () => setTick((t) => t + 1),
   };
 }
 
@@ -312,18 +282,15 @@ export function ProductSetBuilder({
         </p>
       )}
 
-      {source === 'history' && history.data && history.data.refreshingMonths.length > 0 && (
-        <div role="status" className="flex flex-wrap items-center gap-2 text-xs text-blue-800 bg-blue-50 border border-blue-100 rounded-md px-3 py-2" data-testid="product-set-refreshing">
-          <span>
-            {history.data.refreshingMonths.length === 1 ? 'The product list for ' : 'The product lists for '}
-            {history.data.refreshingMonths.map(monthLabel).join(', ')}{' '}
-            {history.data.refreshingMonths.length === 1 ? 'is' : 'are'} being refreshed in the background — reload in a few
-            minutes. Until then it may be incomplete or out of date.
-          </span>
-          <Button size="sm" variant="outline" type="button" onClick={history.retry} loading={history.reloading} disabled={history.reloading}>
-            Reload
-          </Button>
-        </div>
+      {source === 'history' && history.data && history.data.unavailableMonths.length > 0 && (
+        <p role="status" className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2" data-testid="product-set-unavailable">
+          {history.data.unavailableMonths.length === 1 ? 'The product list for ' : 'The product lists for '}
+          {history.data.unavailableMonths.map(monthLabel).join(', ')}{' '}
+          {history.data.unavailableMonths.length === 1 ? "isn't" : "aren't"} available — re-apply{' '}
+          {history.data.unavailableMonths.length === 1 ? 'the month' : 'those months'} (
+          <Link href="/admin/sales-import/months" className="underline font-medium">Months page</Link>) to rebuild it.
+          {history.data.months.length > history.data.unavailableMonths.length ? ' The list below leaves it out.' : ''}
+        </p>
       )}
 
       {(drift || view.keysDiffer) && (

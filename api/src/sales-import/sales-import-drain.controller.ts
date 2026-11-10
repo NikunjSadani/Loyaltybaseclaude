@@ -6,7 +6,6 @@ import type { SalesImportDrainResult } from './sales-import.contract';
 import { hasClaimableImports } from './ingest/claim';
 import { SalesImportRunnerService } from './ingest/sales-import-runner.service';
 import { SalesImportRetentionService } from './ingest/sales-import-retention.service';
-import { COMBOS_REFRESH_HTTP_LIMITS, refreshBudgetMs } from './kpi/month-combos';
 
 /**
  * POST /v1/sales-import/drain: `@Public`, header `x-drain-secret` = SALES_IMPORT_DRAIN_SECRET,
@@ -46,8 +45,6 @@ export class SalesImportDrainController {
     if (!(await hasClaimableImports(this.prisma))) {
       const deadline = Date.now() + DRAIN_DEADLINE_MS;
       await this.retention.sweep({ limit: 50, deadline }); // never throws; starts nothing that could pass the deadline
-      // §10c: repair stale combos summaries with the HTTP limits; no month is started that could end after the deadline.
-      await this.retention.refreshHistoryCombos({ ...COMBOS_REFRESH_HTTP_LIMITS, budgetMs: refreshBudgetMs(deadline, Date.now(), COMBOS_REFRESH_HTTP_LIMITS) });
       return { kicked: false };
     }
     return { kicked: (await this.runner.kick()) !== 'none' };

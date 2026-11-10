@@ -13,7 +13,7 @@ import {
  * KPI product picker — "Stored month(s)" source (plan §10c). STRICTLY READ-ONLY: one READ ONLY transaction under
  * SET LOCAL statement_timeout; the set headers (with their summary stamp) read INSIDE it; two aggregate statements one
  * after the other over the per-month combos SUMMARY (+ the stored lines only for a SMALL month whose summary is
- * missing). Never writes, never locks; stale / missing months are reported in `refreshingMonths`.
+ * missing). Never writes, never locks; months that cannot be read within the cap are reported in `unavailableMonths`.
  */
 const AT = new Date('2026-11-01T10:00:00.000Z');
 type SetRow = {
@@ -102,7 +102,7 @@ describe('SalesHistoryCombosService', () => {
     expect(r.availableMonths).toEqual(['2026-10', '2026-09', '2026-08', '2026-07']);
     expect(r.dimensionKeys).toEqual(['brand', 'size']);
     expect(r.dimensionKeysDiffer).toBe(false);
-    expect(r.refreshingMonths).toEqual([]);
+    expect(r.unavailableMonths).toEqual([]);
     expect(r.dimensionCombos).toEqual([
       { dims: { brand: 'ADHO', size: '500' }, lines: 12, amountRupees: 1234.56, quantity: 2.5 },
       { dims: { brand: 'CNO', size: '' }, lines: 3, amountRupees: -5, quantity: 0 },
@@ -128,7 +128,7 @@ describe('SalesHistoryCombosService', () => {
     expect(prisma.salesMonthHistory.findMany).not.toHaveBeenCalled();
   });
 
-  it('NEVER writes or locks: a stale month is answered from its old summary, a missing small one from its lines; both flagged', async () => {
+  it('NEVER writes or locks: stale and missing months are read from their stored lines (not the old summary); nothing unavailable', async () => {
     const sets = [
       set('2026-10', ['brand'], { combosSourceImportId: 'imp-OLD' }), // re-applied by an older revision → stale
       set('2026-09', ['brand'], { combosAppliedAt: new Date(AT.getTime() - 1) }), // same import re-applied → stale
@@ -137,9 +137,10 @@ describe('SalesHistoryCombosService', () => {
     ];
     const { svc, queries, tx, prisma, order } = make({ sets });
     const r = await svc.combos('t1', { lastMonths: '4' });
-    expect(r.refreshingMonths).toEqual(['2026-08', '2026-09', '2026-10']);
+    expect(r.unavailableMonths).toEqual([]);
     for (const q of queries) {
-      expect(q.values).toEqual(expect.arrayContaining(['t1', ['2026-07', '2026-09', '2026-10'], ['2026-08']]));
+      // the summary only for the CURRENT month; the stored lines for the other three
+      expect(q.values).toEqual(expect.arrayContaining(['t1', ['2026-07'], ['2026-08', '2026-09', '2026-10']]));
       expect(q.sql).toMatch(/FROM "sales_month_histories" h\s+WHERE h\."clientId" = \? AND h\."month" = ANY\(\?::text\[\]\)/);
     }
     expect(tx.$executeRaw).not.toHaveBeenCalled();
@@ -148,38 +149,39 @@ describe('SalesHistoryCombosService', () => {
     expect(order[0]).toBe('SET TRANSACTION READ ONLY');
   });
 
-  it(`M2: a missing summary over ${HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS} line rows is NOT read from the lines — flagged, no combos`, async () => {
+  it(`a month without a current summary and over ${HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS} line rows is unavailable — no combos`, async () => {
     const big = set('2026-10', ['brand'], { combosSourceImportId: null, combosAppliedAt: null, lineRows: HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS + 1 });
     const only = make({ sets: [big] });
     const r = await only.svc.combos('t1', {});
-    expect(r).toEqual(expect.objectContaining({ months: ['2026-10'], refreshingMonths: ['2026-10'], dimensionCombos: [], totalCombos: 0 }));
+    expect(r).toEqual(expect.objectContaining({ months: ['2026-10'], unavailableMonths: ['2026-10'], dimensionCombos: [], totalCombos: 0 }));
     expect(only.queries).toHaveLength(0); // nothing to read → no aggregate statement at all
+
+    const staleBig = make({ sets: [set('2026-10', ['brand'], { combosSourceImportId: 'imp-OLD', lineRows: HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS + 1 })] });
+    expect((await staleBig.svc.combos('t1', {})).unavailableMonths).toEqual(['2026-10']); // a stale summary is NOT served
 
     const mixed = make({ sets: [big, set('2026-09', ['brand'])] });
     const r2 = await mixed.svc.combos('t1', { lastMonths: '2' });
-    expect(r2.refreshingMonths).toEqual(['2026-10']);
+    expect(r2.unavailableMonths).toEqual(['2026-10']);
     expect(mixed.queries[0].values).toEqual(expect.arrayContaining([['2026-09'], []])); // 10 neither summary nor lines
     const atLimit = make({ sets: [set('2026-10', ['brand'], { combosSourceImportId: null, combosAppliedAt: null, lineRows: HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS })] });
     await atLimit.svc.combos('t1', {});
     expect(atLimit.queries[0].values).toEqual(expect.arrayContaining([[], ['2026-10']])); // at the limit: read from lines
   });
 
-  it('L1: the line fallback is capped on the SUM of line rows across the months read from lines (newest first)', async () => {
+  it('the line fallback is capped on the SUM of line rows across those months (newest first); the rest are unavailable', async () => {
     const missing = (month: string, lineRows: number) => set(month, ['brand'], { combosSourceImportId: null, combosAppliedAt: null, lineRows });
     const third = Math.floor(HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS / 3);
-    // three missing months of ~1/3 of the cap each fit; a fourth one would pass it → that one (the oldest) is not read
     const sets = [missing('2026-10', third), missing('2026-09', third), missing('2026-08', third), missing('2026-07', third)];
     const { svc, queries } = make({ sets });
     const r = await svc.combos('t1', { lastMonths: '4' });
-    expect(r.refreshingMonths).toEqual(['2026-07', '2026-08', '2026-09', '2026-10']);
+    expect(r.unavailableMonths).toEqual(['2026-07']);
     expect(queries[0].values).toEqual(expect.arrayContaining([[], ['2026-08', '2026-09', '2026-10']]));
-    expect(queries[0].values).not.toEqual(expect.arrayContaining([expect.arrayContaining(['2026-07'])]));
   });
 
-  it('a set without lines and without a summary is neither read nor "refreshing"', async () => {
+  it('a set without lines and without a summary is neither read nor unavailable', async () => {
     const { svc, queries } = make({ sets: [set('2026-10', ['brand'], { lineRows: 0, combosSourceImportId: null, combosAppliedAt: null })] });
     const r = await svc.combos('t1', {});
-    expect(r.refreshingMonths).toEqual([]);
+    expect(r.unavailableMonths).toEqual([]);
     expect(queries).toHaveLength(0);
   });
 
@@ -207,7 +209,7 @@ describe('SalesHistoryCombosService', () => {
     const r = await b.svc.combos('t1', { lastMonths: '3' });
     expect(r).toEqual({
       months: [], availableMonths: [], dimensionKeys: [], dimensionKeysDiffer: false,
-      dimensionValues: {}, dimensionCombos: [], totalCombos: 0, refreshingMonths: [],
+      dimensionValues: {}, dimensionCombos: [], totalCombos: 0, unavailableMonths: [],
     });
     expect(b.queries).toHaveLength(0);
   });
