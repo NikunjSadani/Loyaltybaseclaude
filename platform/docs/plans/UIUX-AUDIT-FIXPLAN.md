@@ -14,7 +14,7 @@ recently-shipped FE: sales KYC wizard, scheme authoring + roster, scheme enrollm
 owner-group grouping. Four independent UX auditors; findings deduped + triaged below.
 
 **Deployment state legend:** `PROD` = live in prod (fix rides a future cutover) · `#23` = on develop, not yet in prod
-(fix rides the pending cutover #23, no extra cutover) · `GEOTAG` = per-photo-geotag optional polish (on develop `ee00dd2`).
+(fix rides the pending cutover #23, no extra cutover) · `GEOTAG` = per-photo-geotag optional polish (`ee00dd2` — IN PROD, rode cutover #23; dormant for every tenant).
 
 Estimates are orchestrated build time (code) and EXCLUDE the per-batch gate + independent audit + staging-verify (add ~0.5d
 per batch). "d" = ideal engineer-day.
@@ -112,7 +112,7 @@ chose **(a) keep the hard block + add a "Retry location" button + guidance** (KY
 at-source geo integrity (every KYC photo genuinely geo-verified) even though a rep in a true no-fix spot still cannot onboard
 that outlet. So KYC-H2 = add Retry + clear guidance ONLY; the hard block stays.
 
-## G1 — Geotag optional polish (`GEOTAG`, on develop `ee00dd2`)
+## G1 — Geotag optional polish (`GEOTAG`, `ee00dd2` — IN PROD)
 | ID | Sev | Bug | Fix | Est. |
 |---|---|---|---|---|
 | GEO-M6 | MED | Reviewer shows raw lat/lng, no map link | Wrap coords in a maps link | 0.15d |

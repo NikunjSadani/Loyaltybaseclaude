@@ -1,7 +1,16 @@
 # Sales Import Pipeline — Implementation Plan (DMS invoice-line file → monthly KPI achievements)
 
-> **Status:** PHASE 0 (Lane-0) LANDED on branch `feat/sales-import` (2026-11-09): migration, contract, flag, module skeleton,
-> spikes. Lanes I / K / F start from that commit. **Read §10a first** (Phase-0 outcome, deviations, file ownership).
+> **Status (2026-11-10):** P0–P3 COMPLETE on branch `feat/sales-import` (worktree `.claude/worktrees/sales-import`, merged locally with
+> develop `af155bb`, NOT pushed). P3 hardening = 3 audit rounds + 3 re-checks, all findings fixed (§10a.8–§10a.10); month history +
+> "Recalculate from stored history" added (§10b). Real-file proof on a throwaway local Postgres: 635,427 rows; Oct ₹586,716,492.12 /
+> 170,312.543 cases; Nov ₹34,439,896.87 / 10,085.354 cases — exact vs an independent calculation; worker ~3 min, heap peak ~1.06 GB;
+> apply Oct ~12–16 s. Full gates on the combined branch: api jest 4,996 · platform vitest 3,510 (+87 skipped) · build + tsc green.
+> **Next = P4 staging (§13.2):** owner APPROVED (2026-11-10) the push to develop + staging infra (job `gifsy-sales-import-staging`,
+> secret `SALES_IMPORT_DRAIN_SECRET_STAGING` — create it BEFORE the push, `run.jobsExecutor` binding, 10-min Scheduler drain).
+> Prod infra = a separate owner OK at release; the owner releases this TOGETHER with batch #59 in one prod release.
+> Extras in progress on `feat/sales-import-extras` (KPI picker from month history; graceful worker SIGTERM).
+> Owner also approved (2026-11-10, platform-wide) the upload guard on logout / brand-switch / exit-tenant / log-out-all-devices
+> (force mode, 5 s timeout; no behaviour change when no upload runs). **Read §10a first** for deviations and file ownership.
 > Owner decisions (final): D-1 = A (guard), D-3 = A (`exceljs`), D-4 = A (Cloud Run Job), D-5 = A (reuse `targets:*`).
 > **Classification:** ⚠️ **PLATFORM-WIDE but TENANT-GATED.** The owner approved it as such: new shared module + schema +
 > two small, data-gated edits to the shared manual achievement upload. It is dormant for every tenant until the
@@ -1237,7 +1246,7 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
   BEFORE the new API revision serves. Verified in the workflows: `deploy-staging.yml` and `deploy.yml` both run the
   `gifsy-migrate[-staging]` Cloud Run job with `--execute-now --wait` in the SAME job, BEFORE the `gcloud run deploy`
   step, so a failed migration fails the job and the API is not deployed. The worker job (`gifsy-sales-import[-staging]`)
-  deploy step (still to be added, owner-gated) must also come AFTER the migrate step.
+  deploy step (added for staging in `deploy-staging.yml` on this branch; the prod `deploy.yml` step is still owner-gated) must also come AFTER the migrate step.
 - GCS: parts + unmatched under `sales-imports/<clientId>/<importId>/`. The API deletes parts 30 days after READY (lazy, on list) or
   immediately on DELETE. Bucket lifecycle is unchanged.
 - **Retention (current):** per-import data (raw parts, per-run unmatched.csv, aggregates, sample rows) 30 days after the
@@ -1276,9 +1285,13 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
 - New RBAC permission keys (D-5 A).
 
 ## 17. Open questions (to the owner)
-1. D-1: approve the 4-decorator engine guard (A), or no engine edit (B)?
-2. D-3: approve adding `exceljs` (or go CSV-only)?
-3. D-4: approve the Cloud Run job + IAM binding + deploy-workflow step?
+_(Status 2026-11-10: Q1–Q3 DECIDED — D-1 = A, D-3 = A, D-4 = A; staging infra approved 2026-11-10, prod infra = separate OK at release.
+Q7 decided = 30 days for per-import data (§14). Q4–Q5 still open: the owner supplies points per case, monthly cap, KPI list and focus sets
+(BSC wholesalers only) when configuring Bajaj on staging.)_
+
+1. ~~D-1: approve the 4-decorator engine guard (A), or no engine edit (B)?~~ Decided: A.
+2. ~~D-3: approve adding `exceljs` (or go CSV-only)?~~ Decided: A.
+3. ~~D-4: approve the Cloud Run job + IAM binding + deploy-workflow step?~~ Decided: A (staging approved; prod at release).
 4. D-8: BSC points per whole case, monthly cap, and is it WHOLESALER-only?
 5. D-9: final KPI codes/labels/units for Bajaj (`ADHO TARGET`, `NON ADHO`, `CNO 500` ₹ and cases, `BSC CASES`); should `MONTH TARGET`
    become importer-owned (it is currently manually backfilled)?
