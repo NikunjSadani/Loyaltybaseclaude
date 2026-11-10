@@ -15,6 +15,10 @@ const apiMock = vi.hoisted(() => ({
   getProfile: vi.fn(), list: vi.fn(), get: vi.fn(), listKpis: vi.fn(), combos: vi.fn(), disableKpi: vi.fn(), segmentOptions: vi.fn(),
 }));
 vi.mock('@/lib/sales-import/api', () => ({ salesImportApi: apiMock }));
+vi.mock('next/link', () => ({
+  default: ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) =>
+    <a href={href} {...props}>{children}</a>,
+}));
 const clientApi = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock('@/lib/api-client', async (orig) => {
   const actual = await orig<typeof import('@/lib/api-client')>();
@@ -494,5 +498,22 @@ describe('settings page', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Add KPI/ }));
     expect(apiMock.segmentOptions).toHaveBeenCalledTimes(1);
     expect(await screen.findByRole('checkbox', { name: 'Wholesaler (WHOLESALER)' })).toBeInTheDocument();
+  });
+
+  it('after saving a KPI, points to the Months page to fill past months from stored history', async () => {
+    apiMock.getProfile.mockResolvedValue(ok(MAPPING));
+    apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
+    apiMock.listKpis.mockResolvedValue(ok({ definitionsHash: 'h', definitions: [] }));
+    clientApi.get.mockResolvedValue(ok(KPIS));
+    apiMock.combos.mockResolvedValue({ success: false, error: 'No READY import', status: 404 });
+    apiMock.segmentOptions.mockResolvedValue(ok({ outletTypes: [], programs: [] }));
+    apiMock.createKpi.mockImplementation(async (d: SalesKpiDefinitionDto) => ok({ ...d, id: 'k9' }));
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /Add KPI/ }));
+    fireEvent.change(await screen.findByRole('combobox', { name: 'KPI' }), { target: { value: 'KPI_X' } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save KPI' })); });
+    const note = await screen.findByTestId('kpi-saved-fill-past');
+    expect(note).toHaveTextContent('KPI_X is saved');
+    expect(within(note).getByRole('link', { name: /Recalculate from stored history/ })).toHaveAttribute('href', '/admin/sales-import/months');
   });
 });

@@ -18,6 +18,9 @@ import type {
   SalesKpiDefinitionPatch,
   SalesKpiTestRequest,
   SalesKpiTestResult,
+  SalesMonthRecalcPreview,
+  SalesMonthRecalcRequest,
+  SalesMonthRecalcResult,
   SalesMonthReopenRequest,
   SalesMonthReopenResult,
   SalesMonthRow,
@@ -66,6 +69,11 @@ export const salesImportApi = {
     return api.get<SalesMonthRow[]>(`${MONTHS}${qs ? `?${qs}` : ''}`);
   },
   closeMonth: (month: string) => api.post<SalesMonthRow>(`${MONTHS}/${id(month)}/close`, {}),
+  /** What "Recalculate from stored history" would write for an OPEN month (404 = no stored history). */
+  recalcPreview: (month: string) => api.get<SalesMonthRecalcPreview>(`${MONTHS}/${id(month)}/recalculate/preview`),
+  /** Rewrites the month's importer-owned KPIs from stored history (409 when a token is stale). */
+  recalculate: (month: string, body: SalesMonthRecalcRequest) =>
+    api.post<SalesMonthRecalcResult>(`${MONTHS}/${id(month)}/recalculate`, body),
   reopenMonth: (month: string, body: SalesMonthReopenRequest = {}) =>
     api.post<SalesMonthReopenResult>(`${MONTHS}/${id(month)}/reopen`, body),
 };

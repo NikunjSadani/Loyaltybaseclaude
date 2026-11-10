@@ -784,7 +784,7 @@ export default function SalesImportDetailPage() {
         </Banner>
       )}
 
-      {d.duplicateOfId && (
+      {d.duplicateOfId && d.duplicateOfId !== d.reprocessedFromId && (
         <Banner tone="blue" testId="sales-import-duplicate">
           <span className="inline-flex items-center gap-1.5"><Copy className="w-4 h-4" /> This is the same file as an earlier upload.</span>{' '}
           <Link href={`/admin/sales-import/${d.duplicateOfId}`} className="underline">Open the earlier import</Link>.

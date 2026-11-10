@@ -52,7 +52,7 @@ export function OperatorBanner() {
       </span>
       <button
         onClick={async () => {
-          await exitTenant();
+          if (!(await exitTenant())) return; // the operator chose to stay (e.g. an upload is still running)
           window.location.href = '/gifsy';
         }}
         className="inline-flex items-center gap-1 rounded bg-amber-950/10 hover:bg-amber-950/20 px-2 py-0.5 transition-colors"

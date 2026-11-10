@@ -373,4 +373,23 @@ describe('imports page', () => {
       localStorage.removeItem('assumedBrand');
     }
   });
+
+  it('a forced session change (logout-all) never prompts and still cleans up', async () => {
+    apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
+    apiMock.remove.mockResolvedValue(ok(null));
+    uploadMock.readImportStatus.mockResolvedValue('UPLOADING');
+    uploadMock.uploadInParts.mockImplementation((_f: File, opts: { signal?: AbortSignal; onCreated?(id: string, s: UploadSession): void }) => {
+      opts.onCreated?.('f1', { importId: 'f1', partSize: 4, partCount: 2, confirmed: new Set() });
+      return new Promise<string>((_res, rej) => opts.signal?.addEventListener('abort', () => rej(new Error('aborted'))));
+    });
+    const confirm = vi.spyOn(window, 'confirm');
+    render(<Page />);
+    pick(new File(['a'], 'dms.csv'));
+    await screen.findByRole('progressbar', { name: 'Upload progress' });
+    let allowed = false;
+    await act(async () => { allowed = await releaseUploadForSessionChange('logout', { force: true }); });
+    expect(allowed).toBe(true);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(apiMock.remove).toHaveBeenCalledWith('f1');
+  });
 });

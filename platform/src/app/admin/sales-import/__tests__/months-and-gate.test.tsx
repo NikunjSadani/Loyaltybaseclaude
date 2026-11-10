@@ -6,12 +6,16 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import type { SalesMonthRow } from '@/lib/sales-import/types';
+import type { SalesMonthRecalcPreview, SalesMonthRow } from '@/lib/sales-import/types';
 
 const roleRef = { current: 'CLIENT_ADMIN' };
 vi.mock('@/lib/admin-session', () => ({ useAdminSession: () => ({ role: roleRef.current }) }));
 
-const apiMock = vi.hoisted(() => ({ months: vi.fn(), closeMonth: vi.fn(), reopenMonth: vi.fn() }));
+const apiMock = vi.hoisted(() => ({ months: vi.fn(), closeMonth: vi.fn(), reopenMonth: vi.fn(), recalcPreview: vi.fn(), recalculate: vi.fn() }));
+const perms = vi.hoisted(() => ({ granted: true }));
+vi.mock('@/lib/use-permissions', () => ({
+  usePermissions: () => ({ role: 'CLIENT_ADMIN', permissions: [], ready: true, error: false, retry: () => {}, has: () => perms.granted }),
+}));
 vi.mock('@/lib/sales-import/api', () => ({ salesImportApi: apiMock }));
 
 import MonthsPage from '../months/page';
@@ -20,12 +24,24 @@ import { SalesImportFeatureGate } from '../_components/sales-import-feature-gate
 function row(over: Partial<SalesMonthRow>): SalesMonthRow {
   return {
     month: '2026-10', state: 'OPEN', implicit: true, closedAt: null, closedBy: null, lastAppliedAt: '2026-11-02T05:00:00.000Z',
-    lastAppliedImportId: 'i1', canClose: true, canReopen: false, downstream: { creditBatches: 0, exports: 0 }, ...over,
+    lastAppliedImportId: 'i1', canClose: true, canReopen: false, downstream: { creditBatches: 0, exports: 0 },
+    hasHistory: false, historySourceImportId: null, historyAppliedAt: null, ...over,
   };
 }
 const ok = <T,>(data: T) => ({ success: true as const, data });
 
+function recalc(over: Partial<SalesMonthRecalcPreview> = {}): SalesMonthRecalcPreview {
+  return {
+    month: '2026-10', monthState: 'OPEN', canApply: true, definitionsHash: 'dh1', historySourceImportId: 'i1',
+    historyAppliedAt: '2026-11-02T05:00:00.000Z', matchedOutlets: 3, unmatchedCustomers: 1, matchedAmountRupees: 1200,
+    matchedQuantity: 4, unmatchedAmountRupees: 30, unmatchedQuantity: 0, zeroFillOutlets: 2, outletsAffected: 5,
+    warnings: [], kpis: [{ kpiCode: 'KPI_NEW', label: 'New KPI', measure: 'AMOUNT', newTotal: 900, currentTotal: 0, delta: 900, outletsNonZero: 3, outletsNegative: 0 }],
+    ...over,
+  };
+}
+
 beforeEach(() => {
+  perms.granted = true;
   roleRef.current = 'CLIENT_ADMIN';
   Object.values(apiMock).forEach((f) => f.mockReset());
   vi.spyOn(window, 'confirm').mockReturnValue(true);
@@ -115,6 +131,94 @@ describe('months page', () => {
     const target = await screen.findByRole('button', { name: 'Close October 2026' });
     await act(async () => { fireEvent.click(target); });
     expect(await screen.findByRole('alert')).toHaveTextContent('cannot be closed');
+  });
+});
+
+describe('months page — recalculate from stored history', () => {
+  const histRow = (over: Partial<SalesMonthRow> = {}) => row({
+    month: '2026-10', hasHistory: true, historySourceImportId: 'i1', historyAppliedAt: '2026-11-02T05:00:00.000Z', ...over,
+  });
+
+  it('an OPEN month with history: preview (totals, change, outlets affected) → confirm → apply with both tokens', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+    apiMock.recalculate.mockResolvedValue(ok({ month: '2026-10', ok: true, outletsWritten: 5, outletsZeroFilled: 2 }));
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+    const panel = await screen.findByTestId('recalc-preview');
+    expect(panel).toHaveTextContent('5 outlets would change');
+    expect(panel).toHaveTextContent('New KPI');
+    expect(panel).toHaveTextContent('+₹900');
+    expect(screen.getByTestId('recalc-panel-2026-10')).toHaveTextContent('nothing is re-uploaded');
+    const callsBefore = apiMock.months.mock.calls.length;
+    await act(async () => { fireEvent.click(screen.getByTestId('recalc-apply')); });
+    expect((window.confirm as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatch(/Nothing is re-uploaded/);
+    expect(apiMock.recalculate).toHaveBeenCalledWith('2026-10', { expectedDefinitionsHash: 'dh1', expectedHistoryAppliedAt: '2026-11-02T05:00:00.000Z' });
+    expect(await screen.findByTestId('recalc-result')).toHaveTextContent('October 2026 recalculated: 5 outlets updated, 2 set to 0');
+    expect(apiMock.months.mock.calls.length).toBeGreaterThan(callsBefore);
+  });
+
+  it('cancelling the confirm changes nothing', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+    (window.confirm as unknown as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+    await screen.findByTestId('recalc-preview');
+    await act(async () => { fireEvent.click(screen.getByTestId('recalc-apply')); });
+    expect(apiMock.recalculate).not.toHaveBeenCalled();
+  });
+
+  it('a stale token (409) reloads the preview and says so', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc()));
+    apiMock.recalculate.mockResolvedValue({ success: false, error: 'The KPI definitions changed.', status: 409 });
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+    await screen.findByTestId('recalc-preview');
+    await act(async () => { fireEvent.click(screen.getByTestId('recalc-apply')); });
+    const n = await screen.findByTestId('recalc-notice');
+    expect(n).toHaveTextContent('Nothing was changed: The KPI definitions changed. The preview has been refreshed');
+    expect(n.textContent).not.toContain('..');
+    expect(apiMock.recalcPreview).toHaveBeenCalledTimes(2);
+  });
+
+  it('a CLOSED month with history shows the action disabled with the reason', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow({ state: 'CLOSED', canClose: false, canReopen: true })]));
+    render(<MonthsPage />);
+    const btn = await screen.findByRole('button', { name: 'Recalculate October 2026 from stored history' });
+    expect(btn).toBeDisabled();
+    expect(screen.getByText('Gifsy must reopen this month first')).toBeInTheDocument();
+  });
+
+  it('no action for a month without history, or without targets:upload', async () => {
+    apiMock.months.mockResolvedValue(ok([row({ month: '2026-10' })]));
+    const view = render(<MonthsPage />);
+    await screen.findByText('October 2026');
+    expect(screen.queryByRole('button', { name: /Recalculate/ })).not.toBeInTheDocument();
+    view.unmount();
+    perms.granted = false;
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    render(<MonthsPage />);
+    await screen.findByText('October 2026');
+    expect(screen.queryByRole('button', { name: /Recalculate/ })).not.toBeInTheDocument();
+  });
+
+  it('a blocked preview (e.g. no KPIs / month closed meanwhile) disables Recalculate with the reason', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    apiMock.recalcPreview.mockResolvedValue(ok(recalc({ canApply: false, blockedReason: 'October 2026 is closed.' })));
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+    expect(await screen.findByTestId('recalc-apply')).toBeDisabled();
+    expect(screen.getByTestId('recalc-blocked')).toHaveTextContent('October 2026 is closed.');
+  });
+
+  it('404 (no stored history) is explained', async () => {
+    apiMock.months.mockResolvedValue(ok([histRow()]));
+    apiMock.recalcPreview.mockResolvedValue({ success: false, error: 'Not found', status: 404 });
+    render(<MonthsPage />);
+    fireEvent.click(await screen.findByTestId('recalc-open-2026-10'));
+    expect(await screen.findByTestId('recalc-error')).toHaveTextContent('has no stored history yet');
   });
 });
 

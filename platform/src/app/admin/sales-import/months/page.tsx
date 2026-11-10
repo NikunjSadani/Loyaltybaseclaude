@@ -5,9 +5,12 @@
  *
  * Close = targets:upload (CLIENT_ADMIN or assumed GIFSY_ADMIN). Reopen = GIFSY_ADMIN only (the button is shown only
  * to GIFSY_ADMIN; the backend enforces the role + assumed tenant). The current month can never be closed.
+ * "Recalculate from stored history" (targets:upload): an OPEN month with stored history (hasHistory) can be rewritten
+ * from the final figures saved at its last apply, with today's KPI definitions — preview → confirm → apply. A CLOSED
+ * month shows the action disabled ("Gifsy must reopen this month first").
  */
 import React, { useCallback, useEffect, useState } from 'react';
-import { Lock, LockOpen, RefreshCw } from 'lucide-react';
+import { Calculator, Lock, LockOpen, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { useAdminSession } from '@/lib/admin-session';
@@ -15,6 +18,7 @@ import { salesImportApi } from '@/lib/sales-import/api';
 import { dateTimeLabel, monthLabel, sentence } from '@/lib/sales-import/format';
 import { usePermissions } from '@/lib/use-permissions';
 import type { SalesMonthRow } from '@/lib/sales-import/types';
+import { RecalculatePanel } from './_components/recalculate-panel';
 
 export default function SalesMonthsPage() {
   const { role } = useAdminSession();
@@ -26,6 +30,7 @@ export default function SalesMonthsPage() {
   const canClose = ready && has('targets:upload');
   const [busyMonth, setBusyMonth] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  const [recalcMonth, setRecalcMonth] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,7 +105,8 @@ export default function SalesMonthsPage() {
           <p className="text-sm text-gray-500 mt-0.5 max-w-3xl">
             The current month is always open. The previous month stays open until someone closes it; older months are
             closed unless Gifsy reopened them. Close a month once its final sales file is applied — points should only be
-            computed for closed months.
+            computed for closed months. After adding or changing a KPI, use Recalculate on an open month to fill it from
+            the figures stored at its last apply — nothing is re-uploaded.
           </p>
         </div>
         <Button size="sm" variant="ghost" onClick={reload} aria-label="Refresh months"><RefreshCw className="w-3.5 h-3.5" /> Refresh</Button>
@@ -114,6 +120,10 @@ export default function SalesMonthsPage() {
                 : 'bg-emerald-50 border-emerald-200 text-emerald-800'}`}>
           {actionMsg.text}
         </div>
+      )}
+
+      {recalcMonth && (
+        <RecalculatePanel key={recalcMonth} month={recalcMonth} onClose={() => setRecalcMonth(null)} onApplied={reload} />
       )}
 
       {rows === null ? (
@@ -163,6 +173,22 @@ export default function SalesMonthsPage() {
                           aria-label={`Close ${label}`}>
                           <Lock className="w-3.5 h-3.5" /> Close {label}
                         </Button>
+                      )}
+                      {canClose && row.hasHistory && (
+                        row.state === 'OPEN' ? (
+                          <Button size="sm" variant="ghost" onClick={() => setRecalcMonth(row.month)}
+                            aria-label={`Recalculate ${label} from stored history`} data-testid={`recalc-open-${row.month}`}>
+                            <Calculator className="w-3.5 h-3.5" /> Recalculate
+                          </Button>
+                        ) : (
+                          <span className="inline-flex flex-col items-end align-middle mr-2">
+                            <Button size="sm" variant="ghost" disabled aria-describedby={`recalc-closed-${row.month}`}
+                              aria-label={`Recalculate ${label} from stored history`}>
+                              <Calculator className="w-3.5 h-3.5" /> Recalculate
+                            </Button>
+                            <span id={`recalc-closed-${row.month}`} className="text-[11px] text-gray-500">Gifsy must reopen this month first</span>
+                          </span>
+                        )
                       )}
                       {isGifsyAdmin && canClose && row.canReopen && (
                         <Button size="sm" variant="ghost" onClick={() => reopen(row)} loading={busyMonth === row.month}

@@ -149,8 +149,9 @@ export default function SalesProfilePage() {
     } finally {
       // Route through the shared logout() so "all devices" cleans THIS device exactly as
       // thoroughly as plain logout: clears the httpOnly cookies + localStorage identity +
-      // this browser's push subscription, then hard-navigates (no stale authed-UI flash).
-      await logout();
+      // this browser's push subscription, then hard-navigates (no stale authed-UI flash). `force`: the session is
+      // already revoked, so nothing in flight may prompt or veto — the logout must always complete.
+      await logout({ force: true });
     }
   };
 

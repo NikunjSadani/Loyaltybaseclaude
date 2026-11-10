@@ -17,7 +17,7 @@
  * session before the switch.
  */
 import { getAssumedBrand, getStoredUser } from '@/lib/auth-client';
-import { registerSessionChangeGuard, type SessionChangeKind } from '@/lib/session-change-guards';
+import { registerSessionChangeGuard, type SessionChangeKind, type SessionChangeOptions } from '@/lib/session-change-guards';
 import { salesImportApi } from './api';
 import { sentence } from './format';
 import {
@@ -262,21 +262,26 @@ export function resetUpload(): void {
 
 /**
  * Before logout / a brand switch: if an upload is running or unfinished, ask; on "yes" cancel + discard it with
- * the CURRENT session (awaited) and allow the change; on "no" veto it.
+ * the CURRENT session (awaited — the registry time-boxes it) and allow the change; on "no" veto it. With `force`
+ * (session already revoked) there is no prompt: the clean-up is attempted and the change always proceeds.
  */
-export async function releaseUploadForSessionChange(kind: SessionChangeKind): Promise<boolean> {
+export async function releaseUploadForSessionChange(kind: SessionChangeKind, opts: SessionChangeOptions = {}): Promise<boolean> {
   if (state.phase !== 'uploading' && state.phase !== 'failed') return true;
   const what = kind === 'logout' ? 'Signing out' : 'Switching brand';
-  const ok = typeof window !== 'undefined' && window.confirm(
+  const ok = opts.force || (typeof window !== 'undefined' && window.confirm(
     `A sales file ${state.phase === 'uploading' ? 'is still uploading' : 'upload is unfinished'}` +
     `${state.fileName ? ` (${state.fileName})` : ''}. ${what} cancels it and removes the unfinished import.\n\nContinue?`,
-  );
+  ));
   if (!ok) return false;
-  if (state.phase === 'uploading') {
-    cancelUpload();
-    await running;
-  } else {
-    await discardUpload();
+  try {
+    if (state.phase === 'uploading') {
+      cancelUpload();
+      await running;
+    } else {
+      await discardUpload();
+    }
+  } catch {
+    /* best-effort: never block the session change */
   }
   return true;
 }

@@ -424,4 +424,12 @@ describe('import detail — preview + apply', () => {
     expect(await screen.findByTestId('sales-import-cancelled')).toHaveTextContent('cancelled or deleted, and its file was removed');
     expect(screen.queryByTestId('sales-import-purged')).not.toBeInTheDocument();
   });
+
+  it('no "same file as an earlier upload" banner when the duplicate is this import\'s reprocess-as-new parent', async () => {
+    apiMock.get.mockResolvedValue(ok(detail({ duplicateOfId: 'orig1', reprocessedFromId: 'orig1' })));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    render(<Page />);
+    await screen.findByTestId('sales-import-reprocessed-from');
+    expect(screen.queryByTestId('sales-import-duplicate')).not.toBeInTheDocument();
+  });
 });

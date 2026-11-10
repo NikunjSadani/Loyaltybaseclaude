@@ -6,6 +6,7 @@
  *   2. Sales Import KPIs (rupees or cases × a product set × optional outlet scope), each testable against the
  *      latest processed file. A KPI defined here is "importer-owned": the manual achievement upload skips it.
  */
+import Link from 'next/link';
 import React, { useCallback, useEffect, useState } from 'react';
 import { Pencil, Plus, Power, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -56,6 +57,8 @@ function KpiSection({ mapping, canEdit }: { mapping: SalesColumnMapping; canEdit
   const [editing, setEditing] = useState<SalesKpiDefinitionDto | null>(null);
   const [editorKey, setEditorKey] = useState(0);
   const [rowMsg, setRowMsg] = useState<string | null>(null);
+  /** KPI code just saved → "fill past months" pointer to the Months page. */
+  const [savedKpi, setSavedKpi] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
@@ -80,7 +83,7 @@ function KpiSection({ mapping, canEdit }: { mapping: SalesColumnMapping; canEdit
 
   const reload = useCallback(() => setTick((t) => t + 1), []);
 
-  function open(d: SalesKpiDefinitionDto) { setEditing(d); setEditorKey((k) => k + 1); setRowMsg(null); }
+  function open(d: SalesKpiDefinitionDto) { setEditing(d); setEditorKey((k) => k + 1); setRowMsg(null); setSavedKpi(null); }
 
   async function setEnabled(d: SalesKpiDefinitionDto, enabled: boolean) {
     if (!d.id) return;
@@ -114,6 +117,14 @@ function KpiSection({ mapping, canEdit }: { mapping: SalesColumnMapping; canEdit
       </div>
 
       {rowMsg && <p role="alert" className="text-sm text-red-600">{rowMsg}</p>}
+      {savedKpi && (
+        <div role="status" data-testid="kpi-saved-fill-past"
+          className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+          <strong>{savedKpi}</strong> is saved. It applies to months you apply from now on. To fill it for past months
+          from the figures already stored, open{' '}
+          <Link href="/admin/sales-import/months" className="underline font-medium">Months → Recalculate from stored history</Link>.
+        </div>
+      )}
 
       {defs === null ? (
         error ? (
@@ -185,7 +196,7 @@ function KpiSection({ mapping, canEdit }: { mapping: SalesColumnMapping; canEdit
           mapping={mapping}
           combos={combos}
           segments={segments}
-          onSaved={() => { setEditing(null); reload(); }}
+          onSaved={(saved) => { setEditing(null); setSavedKpi(saved.kpiCode || null); reload(); }}
           onCancel={() => setEditing(null)}
           onDuplicateAsCases={(d) => open(d)}
         />
