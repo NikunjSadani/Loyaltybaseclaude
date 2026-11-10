@@ -1,6 +1,7 @@
 import {
+  WORKER_STOP_AFTER_CRITICAL_MS,
   WORKER_STOP_DEADLINE_MS,
-  WORKER_STOP_FORCED_EXIT_CODE,
+  WORKER_STOP_EXIT_CODE,
   WorkerStop,
   drainImports,
   installWorkerSignals,
@@ -75,7 +76,8 @@ describe('installWorkerSignals (Cloud Run Jobs: SIGTERM, then SIGKILL after ~10 
     expect(deps.exit).not.toHaveBeenCalled();
     jest.advanceTimersByTime(1);
     expect(deps.exit).toHaveBeenCalledTimes(1);
-    expect(deps.exit).toHaveBeenCalledWith(WORKER_STOP_FORCED_EXIT_CODE);
+    expect(deps.exit).toHaveBeenCalledWith(WORKER_STOP_EXIT_CODE);
+    expect(WORKER_STOP_EXIT_CODE).toBe(143);
     expect(WORKER_STOP_DEADLINE_MS).toBeLessThanOrEqual(8_000);
   });
 
@@ -87,14 +89,40 @@ describe('installWorkerSignals (Cloud Run Jobs: SIGTERM, then SIGKILL after ~10 
     expect(deps.exit).not.toHaveBeenCalled();
     expect(deps.log.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/READY write in progress/);
   });
+
+  it('L2: a READY transaction that outlives the deadline re-arms a short forced exit when it ends', () => {
+    const { handlers, stop, deps } = setup();
+    stop.enterCritical();
+    handlers.SIGTERM();
+    jest.advanceTimersByTime(WORKER_STOP_DEADLINE_MS + 5_000);
+    expect(deps.exit).not.toHaveBeenCalled();
+    stop.exitCritical();
+    jest.advanceTimersByTime(WORKER_STOP_AFTER_CRITICAL_MS - 1);
+    expect(deps.exit).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(1);
+    expect(deps.exit).toHaveBeenCalledWith(WORKER_STOP_EXIT_CODE);
+  });
+
+  it('a critical section that ends BEFORE the deadline does not shorten it', () => {
+    const { handlers, stop, deps } = setup();
+    stop.enterCritical();
+    handlers.SIGTERM();
+    stop.exitCritical();
+    jest.advanceTimersByTime(WORKER_STOP_AFTER_CRITICAL_MS);
+    expect(deps.exit).not.toHaveBeenCalled();
+    jest.advanceTimersByTime(WORKER_STOP_DEADLINE_MS);
+    expect(deps.exit).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('drainImports (worker loop)', () => {
   it('claims until nothing is claimable, passing the stop token to every run', async () => {
     const stop = new WorkerStop();
     const rows = [{ id: 'a' }, { id: 'b' }];
-    const proc = { claimNext: jest.fn(async () => rows.shift() ?? null), processClaimed: jest.fn(async () => undefined) };
-    expect(await drainImports(proc as never, stop)).toBe(2);
+    const outcomes = ['finished', 'superseded'];
+    const proc = { claimNext: jest.fn(async () => rows.shift() ?? null), processClaimed: jest.fn(async () => outcomes.shift()) };
+    // L3: only runs that wrote a result count as finished
+    expect(await drainImports(proc as never, stop)).toEqual({ finished: 1, released: 0, superseded: 1 });
     expect(proc.processClaimed).toHaveBeenCalledWith({ id: 'a' }, stop);
     expect(proc.claimNext).toHaveBeenCalledTimes(3);
   });
@@ -103,9 +131,9 @@ describe('drainImports (worker loop)', () => {
     const stop = new WorkerStop();
     const proc = {
       claimNext: jest.fn(async () => ({ id: 'x' })),
-      processClaimed: jest.fn(async () => { stop.request('SIGTERM'); }),
+      processClaimed: jest.fn(async () => { stop.request('SIGTERM'); return 'released'; }),
     };
-    expect(await drainImports(proc as never, stop)).toBe(1);
+    expect(await drainImports(proc as never, stop)).toEqual({ finished: 0, released: 1, superseded: 0 });
     expect(proc.claimNext).toHaveBeenCalledTimes(1);
   });
 
@@ -113,7 +141,7 @@ describe('drainImports (worker loop)', () => {
     const stop = new WorkerStop();
     stop.request('SIGTERM');
     const proc = { claimNext: jest.fn(), processClaimed: jest.fn() };
-    expect(await drainImports(proc as never, stop)).toBe(0);
+    expect(await drainImports(proc as never, stop)).toEqual({ finished: 0, released: 0, superseded: 0 });
     expect(proc.claimNext).not.toHaveBeenCalled();
   });
 
@@ -121,9 +149,9 @@ describe('drainImports (worker loop)', () => {
     const stop = new WorkerStop();
     const proc = {
       claimNext: jest.fn(async () => { stop.request('SIGTERM'); return { id: 'late' }; }),
-      processClaimed: jest.fn(async () => undefined),
+      processClaimed: jest.fn(async () => 'released'),
     };
-    expect(await drainImports(proc as never, stop)).toBe(1);
+    expect(await drainImports(proc as never, stop)).toEqual({ finished: 0, released: 1, superseded: 0 });
     expect(proc.processClaimed).toHaveBeenCalledWith({ id: 'late' }, stop);
     expect(proc.claimNext).toHaveBeenCalledTimes(1);
   });

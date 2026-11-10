@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { SalesImport } from '@prisma/client';
 import type { SalesColumnMapping } from '../sales-import.contract';
-import { AGGREGATE_CHUNK, HeapGuard, SalesImportProcessorService } from './sales-import-processor.service';
+import { AGGREGATE_CHUNK, HeapGuard, STOP_RESTORES_ATTEMPT_WITHIN_MS, SalesImportProcessorService } from './sales-import-processor.service';
 import { heapTripBytes } from './heap-budget';
 import { partKey, unmatchedCsvKey } from './parts-file';
 import { SALES_IMPORT_PART_SIZE } from '../sales-import.contract';
@@ -703,7 +703,7 @@ describe('graceful stop (Cloud Run SIGTERM before SIGKILL)', () => {
     const stop = new WorkerStop();
     stop.request('SIGTERM');
     prisma.salesImport.updateMany.mockRejectedValue(new Error('db down'));
-    await expect(svc.processClaimed(row, stop)).resolves.toBeUndefined();
+    await expect(svc.processClaimed(row, stop)).resolves.toBe('released');
   });
 
   it('a stop while an .xlsx entry is being copied releases (never FAILED as "corrupt") and stops within the grace', async () => {
@@ -735,6 +735,36 @@ describe('graceful stop (Cloud Run SIGTERM before SIGKILL)', () => {
     expect(statuses).toEqual(['QUEUED']);
     expect(prisma.$transaction).not.toHaveBeenCalled();
   }, 20_000);
+
+  it('H1: a stop near the task timeout COUNTS the attempt (only an early, deploy-type stop restores it)', async () => {
+    const { svc, prisma, row } = setup({ file: Buffer.from(CSV), attempts: 2 });
+    const stop = new WorkerStop();
+    stop.request('SIGTERM');
+    svc.clock = jest.fn().mockReturnValueOnce(0).mockReturnValueOnce(STOP_RESTORES_ATTEMPT_WITHIN_MS + 50 * 60_000);
+    expect(await svc.processClaimed(row, stop)).toBe('released');
+    expect(releaseOf(prisma)[0].data).toEqual(expect.objectContaining({ status: 'QUEUED', claimToken: null, attempts: 2 }));
+
+    const early = setup({ file: Buffer.from(CSV), attempts: 2 });
+    early.svc.clock = jest.fn().mockReturnValueOnce(0).mockReturnValueOnce(STOP_RESTORES_ATTEMPT_WITHIN_MS - 1);
+    await early.svc.processClaimed(early.row, stop);
+    expect(releaseOf(early.prisma)[0].data).toEqual(expect.objectContaining({ attempts: 1 }));
+  });
+
+  it('H1: repeated late stops end FAILED with a readable "took too long / stopped repeatedly" message', async () => {
+    // three counted stops → the 4th claim has attempts = 4 > SALES_IMPORT_MAX_ATTEMPTS
+    const { svc, row, final } = setup({ file: Buffer.from(CSV), attempts: 4 });
+    expect(await svc.processClaimed(row, new WorkerStop())).toBe('finished');
+    expect(final().data.status).toBe('FAILED');
+    expect(final().data.error).toMatch(/3 times without finishing \(it took too long or was stopped repeatedly\)/);
+  });
+
+  it('L3: processClaimed reports its outcome (finished / released / superseded)', async () => {
+    const a = setup({ file: Buffer.from(CSV) });
+    expect(await a.svc.processClaimed(a.row)).toBe('finished');
+    const b = setup({ file: Buffer.from(CSV) });
+    b.prisma.$queryRaw.mockResolvedValue([]); // token gone at the final lock
+    expect(await b.svc.processClaimed(b.row)).toBe('superseded');
+  });
 
   it('without a stop token (inline runner) behaviour is unchanged', async () => {
     const { svc, row, final } = setup({ file: Buffer.from(CSV) });

@@ -24,7 +24,7 @@ import { PartsFile, unmatchedCsvKey } from './parts-file';
 import { loadRoster } from './roster';
 import { unmatchedCsvLines } from './unmatched-csv';
 import { XlsxSheetNotFoundError, xlsxRows } from './xlsx-row-source';
-import { WorkerStoppingError, type WorkerStop } from './worker-stop';
+import { WorkerStoppingError, type RunOutcome, type WorkerStop } from './worker-stop';
 import { loadCentralDirectory, planXlsxRead, resequencedXlsxStream, XlsxFileError } from './xlsx-zip';
 
 /** createMany batch size for SalesImportAggregate (plan §7.1 step 10). */
@@ -152,6 +152,14 @@ export function decideDecimal(ev: DecimalEvidenceSummary, start: DecimalSeparato
   }
   return { decimal: start };
 }
+/**
+ * A run stopped by a signal within this long of its claim is a deploy / scale-down stop: its claim is released WITHOUT
+ * counting the attempt. A later stop (e.g. the job's task timeout on a file that never finishes, or a stalled read)
+ * counts it, so SALES_IMPORT_MAX_ATTEMPTS still ends such an import FAILED instead of handing it back forever (claims are
+ * oldest-first across tenants, so a forever-requeued import would block every later one). Audit H1.
+ */
+export const STOP_RESTORES_ATTEMPT_WITHIN_MS = 10 * 60_000;
+
 /** This worker's claim was superseded (reprocess / cancel / reclaim): stop, write nothing. */
 export class ClaimLostError extends Error {}
 
@@ -207,6 +215,9 @@ export function detectedHeadersOf(head: SourceRow[], headerIdx: number | null): 
 export class SalesImportProcessorService {
   private readonly logger = new Logger(SalesImportProcessorService.name);
 
+  /** Wall clock (ms); a seam for tests of the stop-attempt rule. */
+  clock: () => number = () => Date.now();
+
   constructor(
     readonly prisma: PrismaService,
     readonly storage: StorageService,
@@ -220,20 +231,25 @@ export class SalesImportProcessorService {
   /**
    * §7.1 steps 2–10 for one claimed import. Never throws for a per-import problem.
    * `stop` (the job worker; plan §10c): once requested, the read is aborted and — unless the READY transaction already
-   * committed — the claim is RELEASED (QUEUED again, not counted, never FAILED) for the next drain. Whatever error the
-   * abort produced, a run that ends after a stop request is released, not failed.
+   * committed — the claim is RELEASED (QUEUED again, never FAILED here) for the next drain. Whatever error the abort
+   * produced, a run that ends after a stop request is released, not failed. The attempt is NOT counted only when the stop
+   * came within STOP_RESTORES_ATTEMPT_WITHIN_MS of the start (audit H1).
+   * Returns the outcome: 'finished' (READY / NEEDS_MAPPING / FAILED written), 'released', or 'superseded'.
    */
-  async processClaimed(row: SalesImport, stop?: WorkerStop): Promise<void> {
+  async processClaimed(row: SalesImport, stop?: WorkerStop): Promise<RunOutcome> {
+    const startedAt = this.clock();
     try {
       await this.run(row, stop);
+      return 'finished';
     } catch (e) {
       if (e instanceof ClaimLostError) {
         this.logger.warn(`sales-import ${row.id}: claim superseded (reprocessed / cancelled); stopped without writing`);
-        return;
+        return 'superseded';
       }
       if (stop?.requested) {
-        await this.release(row, stop.reason);
-        return;
+        const elapsedMs = this.clock() - startedAt;
+        await this.release(row, stop.reason, elapsedMs >= STOP_RESTORES_ATTEMPT_WITHIN_MS, elapsedMs);
+        return 'released';
       }
       const readable = e instanceof FileProblem || e instanceof XlsxFileError || e instanceof AggregatorLimitError;
       const message = readable ? e.message : GENERIC_FAILURE;
@@ -243,6 +259,7 @@ export class SalesImportProcessorService {
       await this.finish(row, { status: 'FAILED', error: message }).catch((err: unknown) =>
         this.logger.error(`sales-import ${row.id}: could not record FAILED: ${(err as Error).message}`),
       );
+      return 'finished';
     }
   }
 
@@ -252,11 +269,12 @@ export class SalesImportProcessorService {
 
   /**
    * Graceful stop (plan §10c): hand the claim back so the next drain picks the import up at once — QUEUED, token and
-   * heartbeat cleared, progress reset, and `attempts` back to its value before this claim (the claim added 1; a stopped
-   * run is not an attempt). Guarded by the claim token: a superseded claim matches nothing. `queuedAt` is kept (claims
-   * are ordered by createdAt). Never throws: if it fails, the stale-heartbeat reclaim recovers the row later.
+   * heartbeat cleared, progress reset. `attempts`: back to its value before this claim (the claim added 1) for an early
+   * stop; kept (= counted) when `countAttempt` (audit H1). Guarded by the claim token: a superseded claim matches nothing.
+   * `queuedAt` is kept (claims are ordered by createdAt). Never throws: if it fails, the stale-heartbeat reclaim
+   * recovers the row later.
    */
-  private async release(row: SalesImport, reason: string | null): Promise<void> {
+  private async release(row: SalesImport, reason: string | null, countAttempt: boolean, elapsedMs: number): Promise<void> {
     if (!row.claimToken) return;
     try {
       const r = await this.prisma.salesImport.updateMany({
@@ -266,14 +284,14 @@ export class SalesImportProcessorService {
           claimToken: null,
           heartbeatAt: null,
           startedAt: null,
-          attempts: Math.max(0, row.attempts - 1),
+          attempts: countAttempt ? row.attempts : Math.max(0, row.attempts - 1),
           bytesRead: 0n,
           rowsRead: 0,
         },
       });
       this.logger.warn(
         r.count > 0
-          ? `sales-import ${row.id}: worker stopping (${reason ?? 'signal'}); claim released, back to QUEUED`
+          ? `sales-import ${row.id}: worker stopping (${reason ?? 'signal'}) after ${Math.round(elapsedMs / 1000)} s; claim released, back to QUEUED (${countAttempt ? `attempt ${row.attempts} counted` : 'attempt not counted'})`
           : `sales-import ${row.id}: worker stopping (${reason ?? 'signal'}); claim already gone, nothing released`,
       );
     } catch (err) {
@@ -305,7 +323,10 @@ export class SalesImportProcessorService {
     if (!row.claimToken) throw new ClaimLostError();
     if (stop?.requested) throw new WorkerStoppingError();
     if (row.attempts > SALES_IMPORT_MAX_ATTEMPTS) {
-      throw new FileProblem(`Processing was attempted ${row.attempts - 1} times without finishing. Try Reprocess, or contact Gifsy support.`);
+      throw new FileProblem(
+        `Processing was attempted ${row.attempts - 1} times without finishing (it took too long or was stopped repeatedly). ` +
+          'Try Reprocess (splitting the file by month helps), or contact Gifsy support.',
+      );
     }
     if (!(await isSalesImportEnabledUncached(this.prisma, row.clientId))) {
       throw new FileProblem('Sales Import is not enabled for this tenant.');

@@ -7,8 +7,8 @@
  * Same image as the API; compiled by `tsc -p tsconfig.build.json` to dist/sales-import/worker.main.js
  * (the api Dockerfile asserts the file exists). Claims imports until none is claimable, then exits 0.
  * Graceful stop (plan §10c, ingest/worker-stop.ts): SIGTERM / SIGINT → no new claims, the current read is aborted and its
- * claim RELEASED (back to QUEUED, not counted, never FAILED), exit within ~8 s; a READY transaction in progress is left
- * to commit. A re-executing parent forwards the signal to its child.
+ * claim RELEASED (back to QUEUED; the attempt counted unless the stop came early), exit 143 within ~8 s so Cloud Run's
+ * retry picks it up; a READY transaction in progress is left to commit. A re-executing parent forwards the signal.
  * OWNER: Lane I (task I-7). Lane-0 skeleton: claimNext() returns null → "processed: 0".
  */
 // L-1: ONLY Node built-ins + the tiny heap / stop helpers (no imports of their own) are imported up front. Nest / Prisma / ExcelJS / Storage are loaded
@@ -16,7 +16,7 @@
 import { spawn } from 'node:child_process';
 import * as v8 from 'node:v8';
 import { ensureWorkerHeap } from './ingest/worker-heap';
-import { WorkerStop, drainImports, installWorkerSignals } from './ingest/worker-stop';
+import { WORKER_STOP_EXIT_CODE, WorkerStop, drainImports, installWorkerSignals } from './ingest/worker-stop';
 
 // Same BigInt JSON rule as main.ts (paise/micro BigInt must never crash a JSON.stringify).
 (BigInt.prototype as unknown as { toJSON: () => number }).toJSON = function () {
@@ -46,12 +46,14 @@ async function main(): Promise<void> {
   const { SalesImportRetentionService } = await import('./ingest/sales-import-retention.service');
   const app = await NestFactory.createApplicationContext(SalesImportWorkerModule, { bufferLogs: true });
   const proc = app.get(SalesImportProcessorService);
-  const processed = await drainImports(proc, stop);
+  const drained = await drainImports(proc, stop);
   // S5: every drain also runs a bounded retention sweep across tenants (expired files, abandoned uploads). Skipped when
   // stopping (the next drain runs it).
   const retention = stop.requested ? null : await app.get(SalesImportRetentionService).sweep({ limit: 50 });
   await app.close();
-  console.log(JSON.stringify({ msg: 'sales-import worker done', processed, retention, stoppedBy: stop.reason }));
+  console.log(JSON.stringify({ msg: 'sales-import worker done', ...drained, retention, stoppedBy: stop.reason }));
+  // Audit L1: a stopped worker exits non-zero so Cloud Run's task retry picks the handed-back import up promptly.
+  if (stop.requested) process.exit(WORKER_STOP_EXIT_CODE);
 }
 
 main().catch((e: unknown) => {
