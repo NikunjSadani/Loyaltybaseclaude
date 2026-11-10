@@ -28,6 +28,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { api } from '@/lib/api-client';
+import { useOutletTypeLabels, type OutletTypeOption } from '@/lib/platform/use-outlet-type-labels';
 
 /* ─── Types (mirror backend KpiDef) ─────────────────────────────────────────── */
 
@@ -44,9 +45,31 @@ export interface KpiDef {
    *  that met their own target. Absent on older payloads → treated as 'SUM'. */
   rollup?:           'SUM' | 'OUTLET_COUNT';
   enabled:           boolean;
+  /** Per-outlet-TYPE tag: null = applies to ALL outlet types (every existing KPI); a code = that
+   *  type only (used by the RLP/BSC sales views). Absent on older payloads → treated as null. */
+  outletType?:       string | null;
 }
 
 type UpsertPayload = Omit<KpiDef, 'id'>;
+
+/**
+ * The exact body POST /api/admin/kpis accepts. The backend ValidationPipe is forbidNonWhitelisted,
+ * so the edit form must NEVER echo the row's own id / clientId / timestamps (that 400s the save).
+ */
+function toUpsertBody(f: UpsertPayload): UpsertPayload {
+  return {
+    code:              f.code,
+    label:             f.label,
+    unit:              f.unit,
+    isPrimary:         f.isPrimary,
+    hasNameOverride:   f.hasNameOverride,
+    nameOverrideLabel: f.nameOverrideLabel,
+    order:             f.order,
+    rollup:            f.rollup ?? 'SUM',
+    enabled:           f.enabled,
+    outletType:        f.outletType ? f.outletType : null,
+  };
+}
 
 /* ─── Blank form ─────────────────────────────────────────────────────────────── */
 
@@ -61,7 +84,13 @@ function blankForm(order: number): UpsertPayload {
     order,
     rollup:            'SUM',
     enabled:           true,
+    outletType:        null,
   };
+}
+
+/** The tenant's display label for an outlet-type code (falls back to the raw code). */
+function outletTypeLabel(code: string, types: OutletTypeOption[]): string {
+  return types.find((t) => t.code === code)?.label ?? code;
 }
 
 /* ─── KPI row ────────────────────────────────────────────────────────────────── */
@@ -72,12 +101,14 @@ function KpiRow({
   onDelete,
   onSetPrimary,
   settingPrimary,
+  outletTypes,
 }: {
   kpi: KpiDef;
   onEdit: (k: KpiDef) => void;
   onDelete: (id: string) => void;
   onSetPrimary: (id: string) => void;
   settingPrimary: boolean;
+  outletTypes: OutletTypeOption[];
 }) {
   return (
     <tr className={`text-sm border-b border-gray-50 ${!kpi.enabled ? 'opacity-50' : ''}`}>
@@ -112,6 +143,9 @@ function KpiRow({
         )}
       </td>
       <td className="py-2.5 px-2 text-xs text-gray-400">{kpi.unit}</td>
+      <td className="py-2.5 px-2 text-xs text-gray-500" data-testid={`kpi-outlet-type-${kpi.code}`}>
+        {kpi.outletType ? outletTypeLabel(kpi.outletType, outletTypes) : 'All'}
+      </td>
       <td className="py-2.5 px-2 text-xs text-center">
         <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${kpi.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}>
           {kpi.enabled ? 'Enabled' : 'Disabled'}
@@ -148,12 +182,14 @@ function KpiForm({
   onCancel,
   saving,
   error,
+  outletTypes,
 }: {
   initial: UpsertPayload & { id?: string };
   onSave:  (payload: UpsertPayload) => void;
   onCancel: () => void;
   saving: boolean;
   error: string;
+  outletTypes: OutletTypeOption[];
 }) {
   const [form, setForm] = useState<UpsertPayload>({ ...initial });
 
@@ -230,6 +266,33 @@ function KpiForm({
           {form.rollup === 'OUTLET_COUNT'
             ? 'Dashboard shows how many outlets met their own target (e.g. 12 / 40 outlets). Per-outlet values are unchanged.'
             : 'Dashboard sums this KPI across all outlets.'}
+        </p>
+      </div>
+
+      {/* Outlet type (E1) — null = every outlet type (all existing KPIs); a code = that type only. */}
+      <div>
+        <label htmlFor="kpi-outlet-type" className="block text-xs font-semibold text-gray-500 mb-1">Outlet type</label>
+        <select
+          id="kpi-outlet-type"
+          data-testid="kpi-outlet-type-select"
+          value={form.outletType ?? ''}
+          onChange={e => set('outletType', e.target.value || null)}
+          className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+        >
+          <option value="">All outlet types</option>
+          {outletTypes.map(t => (
+            <option key={t.code} value={t.code}>{t.label}</option>
+          ))}
+          {/* Keep a stored code selectable even if that type is no longer enabled, so opening the
+              form never silently changes it (the backend re-validates on save). */}
+          {form.outletType && !outletTypes.some(t => t.code === form.outletType) && (
+            <option value={form.outletType}>{form.outletType} (not enabled)</option>
+          )}
+        </select>
+        <p className="text-[11px] text-gray-400 mt-1">
+          {form.outletType
+            ? 'Shown only when this outlet type is selected in the sales RLP/BSC views. Shared KPIs always show too.'
+            : 'Applies to every outlet type (the usual choice).'}
         </p>
       </div>
 
@@ -311,6 +374,7 @@ export default function AdminTargetsPage() {
   const [primaryError,   setPrimaryError]   = useState('');
 
   const [showEnabled, setShowEnabled] = useState<'all' | 'enabled' | 'disabled'>('all');
+  const { types: outletTypes } = useOutletTypeLabels();
   const [expandHelp, setExpandHelp]  = useState(false);
 
   /* ── Load ─────────────────────────────────────────────────────────────────── */
@@ -334,7 +398,7 @@ export default function AdminTargetsPage() {
   const handleSave = async (payload: UpsertPayload) => {
     setSaving(true);
     setSaveError('');
-    const res = await api.post<KpiDef>('/api/admin/kpis', payload);
+    const res = await api.post<KpiDef>('/api/admin/kpis', toUpsertBody(payload));
     if (res.success) {
       setFormOpen(false);
       setEditing(null);
@@ -502,6 +566,7 @@ export default function AdminTargetsPage() {
           onCancel={() => { setFormOpen(false); setSaveError(''); }}
           saving={saving}
           error={saveError}
+          outletTypes={outletTypes}
         />
       )}
 
@@ -512,6 +577,7 @@ export default function AdminTargetsPage() {
           onCancel={() => { setEditing(null); setSaveError(''); }}
           saving={saving}
           error={saveError}
+          outletTypes={outletTypes}
         />
       )}
 
@@ -574,6 +640,7 @@ export default function AdminTargetsPage() {
                   <th className="py-2.5 pl-2 pr-2">Code</th>
                   <th className="py-2.5 px-2">Label</th>
                   <th className="py-2.5 px-2">Unit</th>
+                  <th className="py-2.5 px-2">Outlet type</th>
                   <th className="py-2.5 px-2 text-center">Status</th>
                   <th className="py-2.5 px-2 text-right">Order</th>
                   <th className="py-2.5 pl-2 pr-4" />
@@ -592,6 +659,7 @@ export default function AdminTargetsPage() {
                         onDelete={handleDelete}
                         onSetPrimary={handleSetPrimary}
                         settingPrimary={settingPrimary}
+                        outletTypes={outletTypes}
                       />
                     )
                   ))}

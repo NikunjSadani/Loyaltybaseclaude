@@ -130,6 +130,9 @@ export class TargetsService {
   async upsertKpi(user: JwtPayload, dto: UpsertKpiDefDto) {
     const { code, label, unit, isPrimary, hasNameOverride, nameOverrideLabel, order, rollup, enabled } =
       dto;
+    // E1 — outletType: undefined = leave as-is (create → null); null/'' = shared (all types);
+    // a code must be one of the tenant's ENABLED outlet types (stored as the canonical code).
+    const outletType = await this.resolveKpiOutletType(user.clientId, dto.outletType);
 
     // Invariant: at most ONE primary KpiDef per tenant. The upsert is keyed by
     // (clientId, code), so when this write makes a KPI primary we first demote
@@ -161,6 +164,7 @@ export class TargetsService {
             order: order ?? 0,
             rollup: rollup ?? 'SUM',
             enabled: enabled ?? true,
+            outletType: outletType ?? null,
           },
           update: {
             label,
@@ -171,6 +175,7 @@ export class TargetsService {
             ...(order !== undefined ? { order } : {}),
             ...(rollup !== undefined ? { rollup } : {}),
             ...(enabled !== undefined ? { enabled } : {}),
+            ...(outletType !== undefined ? { outletType } : {}),
           },
         });
       });
@@ -185,6 +190,36 @@ export class TargetsService {
       }
       throw error;
     }
+  }
+
+  /**
+   * E1 — resolve a KPI's outletType write. `undefined` → undefined (no change); null / blank →
+   * null (SHARED, every outlet type — the value every existing KPI has); otherwise the value must
+   * match (case-insensitively) one of the tenant's ENABLED, active outlet type codes and the
+   * canonical code is returned, because consumers (kpisForOutletType) compare it with `===`
+   * against Outlet.outletType.code. Anything else is a 400.
+   */
+  private async resolveKpiOutletType(
+    clientId: string,
+    raw: string | null | undefined,
+  ): Promise<string | null | undefined> {
+    if (raw === undefined) return undefined;
+    const wanted = (raw ?? '').trim();
+    if (wanted === '') return null;
+    const rows = await this.prisma.outletTypeClientConfig.findMany({
+      where: { clientId, isEnabled: true, outletType: { isActive: true } },
+      select: { outletType: { select: { code: true } } },
+    });
+    const codes = rows.map((r) => r.outletType.code);
+    const match = codes.find((c) => c.toUpperCase() === wanted.toUpperCase());
+    if (!match) {
+      throw new BadRequestException(
+        `outletType "${wanted}" is not an enabled outlet type for this tenant` +
+          (codes.length ? ` (enabled: ${codes.join(', ')}).` : ' (no outlet types are enabled).') +
+          ' Leave it empty for a KPI that applies to all outlet types.',
+      );
+    }
+    return match;
   }
 
   // ─── KpiDef: set primary (MOVES the single primary) ──────────────────────────
