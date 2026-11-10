@@ -5,6 +5,8 @@ import {
   parseInvoiceDate,
   parseInvoiceDateDetailed,
   stableDimKey,
+  microToCases,
+  paiseToRupees,
   toMicro,
   toPaise,
 } from './normalize';
@@ -182,4 +184,13 @@ describe('stableDimKey', () => {
   it('is independent of key insertion order', () =>
     expect(stableDimKey({ dimB: '500', dimA: 'X' })).toBe('{"dimA":"X","dimB":"500"}'));
   it('is "{}" for no dims', () => expect(stableDimKey({})).toBe('{}'));
+});
+
+describe('paiseToRupees / microToCases (single source for BigInt → wire numbers)', () => {
+  it('inverts toPaise / toMicro', () => {
+    expect(paiseToRupees(toPaise('1,234.50')!)).toBe(1234.5);
+    expect(paiseToRupees(-1235n)).toBe(-12.35);
+    expect(microToCases(toMicro('0.04')!)).toBe(0.04);
+    expect(microToCases(1_750_000n)).toBe(1.75);
+  });
 });

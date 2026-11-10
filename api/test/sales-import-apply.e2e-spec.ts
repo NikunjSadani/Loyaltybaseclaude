@@ -13,7 +13,8 @@ import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { SalesApplyService } from '../src/sales-import/apply/sales-apply.service';
 import { SalesKpiDefService } from '../src/sales-import/kpi/sales-kpi-def.service';
-import { definitionsHash, rosterHashOf, stableStringify } from '../src/sales-import/kpi/sales-kpi.helper';
+import { definitionsHash, stableStringify } from '../src/sales-import/kpi/sales-kpi.helper';
+import { rosterHashOf } from '../src/sales-import/ingest/roster';
 import { currentMonthKey } from '../src/targets/targets.helpers';
 
 const enabled = !!process.env.DATABASE_URL && process.env.SALES_IMPORT_E2E === '1';

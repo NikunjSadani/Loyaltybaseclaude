@@ -4,7 +4,7 @@ import type { SalesImport } from '@prisma/client';
 import type { SalesColumnMapping } from '../sales-import.contract';
 import { AGGREGATE_CHUNK, SalesImportProcessorService } from './sales-import-processor.service';
 import { partKey, unmatchedCsvKey } from './parts-file';
-import { computeRosterHash } from './roster';
+import { rosterHashOf } from './roster';
 import { exceljsWorkbook } from './test-fixtures.testspec';
 
 // Synthetic tenant "t1", outlets O1/O2, neutral dims. Dates relative to a fixed past month are fine
@@ -147,7 +147,7 @@ describe('SalesImportProcessorService.processClaimed', () => {
       error: null,
       contentSha256: createHash('sha256').update(file).digest('hex'),
       duplicateOfId: null,
-      rosterHash: computeRosterHash(['O1', 'O2']),
+      rosterHash: rosterHashOf(['O1', 'O2']),
       rowsRead: 6,
       rowsSkipped: 1,
       bytesRead: BigInt(file.length),

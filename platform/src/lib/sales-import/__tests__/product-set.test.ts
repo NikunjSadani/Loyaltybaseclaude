@@ -16,7 +16,24 @@ const DIMS: SalesDimensionMapping[] = [
 ];
 
 describe('normalize', () => {
-  it.each([[500, '500'], [' p  q ', 'P Q'], ['', ''], [null, '']])('normalizeDim(%p) → %p', (i, o) => {
+  // SAME vectors as api/src/sales-import/ingest/normalize.spec.ts `normalizeDim` (keep the two tables identical).
+  it.each([
+    [500, '500'],
+    [500.0, '500'],
+    [0.5, '0.5'],
+    [' cno  enrich ', 'CNO ENRICH'],
+    ['adho', 'ADHO'],
+    ['500.0', '500'],
+    ['500.50', '500.5'],
+    ['0500', '0500'],
+    ['', ''],
+    ['   ', ''],
+    [null, ''],
+    [undefined, ''],
+    [Number.NaN, ''],
+    [true, 'TRUE'],
+    [' p  q ', 'P Q'],
+  ])('normalizeDim(%p) → %p (backend parity)', (i, o) => {
     expect(normalizeDim(i)).toBe(o);
   });
   it('normalizeEntry drops blank keys', () => {

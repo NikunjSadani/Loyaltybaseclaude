@@ -5,7 +5,7 @@ import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decor
 import { TenantService } from '../tenant/tenant.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesProfileService } from './kpi/sales-profile.service';
-import { SalesKpiDefService, type SalesSegmentOptions } from './kpi/sales-kpi-def.service';
+import { SalesKpiDefService } from './kpi/sales-kpi-def.service';
 import { assertSalesImportAccess } from './sales-import-access';
 import type {
   SalesColumnMapping,
@@ -14,6 +14,7 @@ import type {
   SalesKpiDefinitionPatch,
   SalesKpiTestRequest,
   SalesKpiTestResult,
+  SalesSegmentOptions,
 } from './sales-import.contract';
 
 /**
@@ -22,7 +23,7 @@ import type {
  *   GET/POST     admin/sales-import/kpis             targets:read / targets:manage_config
  *   PATCH/DELETE admin/sales-import/kpis/:id         targets:manage_config
  *   POST         admin/sales-import/kpis/test        targets:read  (no write; 404 when `latest` has no READY import)
- *   GET          admin/sales-import/segment-options  targets:read  (Lane F request: outlet types + programmes)
+ *   GET          admin/sales-import/segment-options  targets:read  (outlet types + programmes for the KPI scope pickers)
  * OWNER: Lane K. Every handler calls assertSalesImportAccess(user, {tenant, prisma}, {write}) FIRST.
  * Registered BEFORE SalesImportController in SalesImportModule so the static `profile` / `kpis` / `segment-options`
  * segments win over Lane I's `GET admin/sales-import/:id`.

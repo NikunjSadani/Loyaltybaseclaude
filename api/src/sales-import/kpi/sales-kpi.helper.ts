@@ -10,7 +10,7 @@
  *     OMITTED (blank ≠ 0, the engine's null policy). An in-scope outlet with no matching lines → 0 (full rewrite).
  */
 import { createHash } from 'node:crypto';
-import { normalizeDim } from '../ingest/normalize';
+import { microToCases, normalizeDim, paiseToRupees } from '../ingest/normalize';
 import {
   SALES_IMPORT_DIM_KEY_PATTERN,
   SALES_KPI_MAX_FILTER_ENTRIES,
@@ -90,7 +90,7 @@ export function sumMeasure(aggs: Iterable<KpiAgg>, def: Pick<KpiDefLite, 'measur
 
 /** BigInt paise → rupees (2 dp) / micro-cases → cases (≤ 6 dp). One float conversion, at the end. */
 export function measureToNumber(sum: bigint, measure: SalesKpiMeasure): number {
-  return measure === 'AMOUNT' ? Number(sum) / 100 : Number(sum) / 1_000_000;
+  return measure === 'AMOUNT' ? paiseToRupees(sum) : microToCases(sum);
 }
 
 /**
@@ -328,13 +328,4 @@ export function definitionsHash(
     }))
     .sort((a, b) => (a.kpiCode < b.kpiCode ? -1 : a.kpiCode > b.kpiCode ? 1 : 0));
   return createHash('sha256').update(stableStringify(canon)).digest('hex');
-}
-
-/**
- * Roster fingerprint: sha256 of the sorted roster outlet codes joined by '\n'. The worker (Lane I) MUST compute
- * `SalesImport.rosterHash` with this exact function, or every preview reports ROSTER_CHANGED.
- */
-export function rosterHashOf(codes: Iterable<string>): string {
-  const sorted = [...codes].sort();
-  return createHash('sha256').update(sorted.join('\n')).digest('hex');
 }

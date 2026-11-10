@@ -12,7 +12,7 @@ import type {
 
 const apiMock = vi.hoisted(() => ({
   testKpi: vi.fn(), createKpi: vi.fn(), patchKpi: vi.fn(), saveProfile: vi.fn(),
-  getProfile: vi.fn(), list: vi.fn(), get: vi.fn(), listKpis: vi.fn(), combos: vi.fn(), disableKpi: vi.fn(),
+  getProfile: vi.fn(), list: vi.fn(), get: vi.fn(), listKpis: vi.fn(), combos: vi.fn(), disableKpi: vi.fn(), segmentOptions: vi.fn(),
 }));
 vi.mock('@/lib/sales-import/api', () => ({ salesImportApi: apiMock }));
 const clientApi = vi.hoisted(() => ({ get: vi.fn() }));
@@ -177,6 +177,51 @@ describe('KPI editor — product set', () => {
   });
 });
 
+describe('KPI editor — outlet scope', () => {
+  const SEG = {
+    outletTypes: [{ code: 'RETAILER', name: 'Retailer' }, { code: 'WHOLESALER', name: 'Wholesaler' }],
+    programs: ['Gold', 'Silver'],
+  };
+
+  it('outlet types and programmes are multi-selects fed by segment-options; save sends the picked codes', async () => {
+    apiMock.createKpi.mockImplementation(async (d: SalesKpiDefinitionDto) => ok(d));
+    renderEditor({ segments: SEG });
+    expect(screen.queryByRole('textbox', { name: /Only these outlet types/ })).not.toBeInTheDocument();
+    const types = screen.getByRole('group', { name: /Only these outlet types/ });
+    const progs = screen.getByRole('group', { name: /Only these programmes/ });
+    expect(within(types).getAllByRole('checkbox')).toHaveLength(2);
+    fireEvent.change(screen.getByRole('combobox', { name: 'KPI' }), { target: { value: 'KPI_X' } });
+    fireEvent.click(within(types).getByRole('checkbox', { name: 'Wholesaler (WHOLESALER)' }));
+    fireEvent.click(within(progs).getByRole('checkbox', { name: 'Gold' }));
+    fireEvent.click(within(progs).getByRole('checkbox', { name: 'Silver' }));
+    fireEvent.click(within(progs).getByRole('checkbox', { name: 'Silver' })); // untick
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save KPI' })); });
+    expect(apiMock.createKpi).toHaveBeenCalledWith(expect.objectContaining({ outletTypes: ['WHOLESALER'], programs: ['Gold'] }));
+  });
+
+  it('saved values match case-insensitively; a value no longer offered stays ticked and removable', () => {
+    renderEditor({ segments: SEG, initial: { ...NEW, kpiCode: 'KPI_X', outletTypes: ['retailer', 'OLD_TYPE'] } });
+    const types = screen.getByRole('group', { name: /Only these outlet types/ });
+    expect(within(types).getByRole('checkbox', { name: 'Retailer (RETAILER)' })).toBeChecked();
+    const stale = within(types).getByRole('checkbox', { name: /OLD_TYPE \(no outlets now\)/ });
+    expect(stale).toBeChecked();
+    fireEvent.click(stale);
+    expect(within(types).queryByRole('checkbox', { name: /OLD_TYPE/ })).not.toBeInTheDocument();
+  });
+
+  it('falls back to free text when the list is empty or unavailable', () => {
+    renderEditor({ segments: { outletTypes: [], programs: ['Gold'] } });
+    expect(screen.getByRole('textbox', { name: /Only these outlet types/ })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /Only these programmes/ })).toBeInTheDocument();
+  });
+
+  it('no segments prop → both free text', () => {
+    renderEditor();
+    expect(screen.getByRole('textbox', { name: /Only these outlet types/ })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: /Only these programmes/ })).toBeInTheDocument();
+  });
+});
+
 describe('column mapping', () => {
   it('validateMapping: required fields, ≥1 measure, key shape, duplicate headings', () => {
     const base = { ...MAPPING };
@@ -229,9 +274,23 @@ describe('settings page', () => {
     clientApi.get.mockResolvedValue(ok(KPIS));
     apiMock.combos.mockResolvedValue({ success: false, error: 'No READY import', status: 404 });
     apiMock.disableKpi.mockResolvedValue(ok({}));
+    apiMock.segmentOptions.mockResolvedValue(ok({ outletTypes: [], programs: [] }));
     render(<SettingsPage />);
     expect(await screen.findByText('All products except P (all sku groups)')).toBeInTheDocument();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Stop importing KPI_X' })); });
     expect(apiMock.disableKpi).toHaveBeenCalledWith('k1');
+  });
+
+  it('loads segment-options and passes them to the KPI editor', async () => {
+    apiMock.getProfile.mockResolvedValue(ok(MAPPING));
+    apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
+    apiMock.listKpis.mockResolvedValue(ok({ definitionsHash: 'h', definitions: [] }));
+    clientApi.get.mockResolvedValue(ok(KPIS));
+    apiMock.combos.mockResolvedValue({ success: false, error: 'No READY import', status: 404 });
+    apiMock.segmentOptions.mockResolvedValue(ok({ outletTypes: [{ code: 'WHOLESALER', name: 'Wholesaler' }], programs: [] }));
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /Add KPI/ }));
+    expect(apiMock.segmentOptions).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole('checkbox', { name: 'Wholesaler (WHOLESALER)' })).toBeInTheDocument();
   });
 });

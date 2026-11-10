@@ -14,7 +14,7 @@ import { api } from '@/lib/api-client';
 import { salesImportApi } from '@/lib/sales-import/api';
 import { describeFilter } from '@/lib/sales-import/product-set';
 import type {
-  SalesColumnMapping, SalesImportCombos, SalesKpiDefinitionDto,
+  SalesColumnMapping, SalesImportCombos, SalesKpiDefinitionDto, SalesSegmentOptions,
 } from '@/lib/sales-import/types';
 import { ColumnMappingForm } from './_components/column-mapping-form';
 import { KpiEditor, type TenantKpi } from './_components/kpi-editor';
@@ -42,6 +42,7 @@ function KpiSection({ mapping }: { mapping: SalesColumnMapping }) {
   const [defs, setDefs] = useState<SalesKpiDefinitionDto[] | null>(null);
   const [tenantKpis, setTenantKpis] = useState<TenantKpi[]>([]);
   const [combos, setCombos] = useState<SalesImportCombos | null>(null);
+  const [segments, setSegments] = useState<SalesSegmentOptions | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<SalesKpiDefinitionDto | null>(null);
   const [editorKey, setEditorKey] = useState(0);
@@ -55,12 +56,14 @@ function KpiSection({ mapping }: { mapping: SalesColumnMapping }) {
       salesImportApi.listKpis(),
       api.get<TenantKpi[]>('/api/admin/kpis'),
       salesImportApi.combos('latest'),
-    ]).then(([d, k, c]) => {
+      salesImportApi.segmentOptions(),
+    ]).then(([d, k, c, s]) => {
       if (cancelled) return;
       if (d.success) setDefs([...d.data.definitions].sort((a, b) => a.order - b.order || a.kpiCode.localeCompare(b.kpiCode)));
       else setError(d.error);
       if (k.success && Array.isArray(k.data)) setTenantKpis(k.data);
       setCombos(c.success ? c.data : null); // 404 = no processed file yet → no picker list
+      setSegments(s.success ? s.data : null); // unavailable → the scope inputs fall back to free text
     });
     return () => { cancelled = true; };
   }, [tick]);
@@ -166,6 +169,7 @@ function KpiSection({ mapping }: { mapping: SalesColumnMapping }) {
           ownedCodes={ownedBy(editing.id)}
           mapping={mapping}
           combos={combos}
+          segments={segments}
           onSaved={() => { setEditing(null); reload(); }}
           onCancel={() => setEditing(null)}
           onDuplicateAsCases={(d) => open(d)}

@@ -12,6 +12,7 @@ import { entryKey, listOf, validateFilter } from '@/lib/sales-import/product-set
 import { formatCases, formatCount, formatRupees, monthLabel } from '@/lib/sales-import/format';
 import type {
   SalesColumnMapping, SalesImportCombos, SalesKpiDefinitionDto, SalesKpiFilter, SalesKpiMeasure, SalesKpiTestResult,
+  SalesSegmentOptions,
 } from '@/lib/sales-import/types';
 import { ProductSetBuilder } from './product-set-builder';
 
@@ -47,8 +48,43 @@ function TokenInput({ label, values, onChange, placeholder }: { label: string; v
   );
 }
 
+const sameValue = (a: string, b: string) => a.trim().toUpperCase() === b.trim().toUpperCase();
+
+/**
+ * Checkbox multi-select over the tenant's real outlet types / programmes (GET segment-options). The backend matches
+ * scope case- and space-insensitively (and upper-cases outlet types on save), so selection is compared the same way.
+ * A saved value that is no longer offered (e.g. its outlets were deleted) stays listed, ticked, so it can be removed.
+ */
+function ScopeMultiSelect({ label, options, values, onChange }: {
+  label: string;
+  options: Array<{ value: string; label: string }>;
+  values: string[];
+  onChange(v: string[]): void;
+}) {
+  const stale = values.filter((v) => !options.some((o) => sameValue(o.value, v)));
+  const rows = [...options, ...stale.map((v) => ({ value: v, label: `${v} (no outlets now)` }))];
+  const isOn = (v: string) => values.some((x) => sameValue(x, v));
+  function toggle(v: string) {
+    onChange(isOn(v) ? values.filter((x) => !sameValue(x, v)) : [...values, v]);
+  }
+  return (
+    <fieldset>
+      <legend className="text-xs font-medium text-gray-700">{label}</legend>
+      <div className="mt-1 max-h-40 overflow-y-auto rounded-md border border-gray-200 px-2 py-1.5 space-y-1">
+        {rows.map((o) => (
+          <label key={o.value} className="flex items-center gap-2 text-xs text-gray-800">
+            <input type="checkbox" checked={isOn(o.value)} onChange={() => toggle(o.value)} />
+            {o.label}
+          </label>
+        ))}
+      </div>
+      {values.length > 0 && <p className="mt-1 text-[11px] text-gray-500">{values.length} selected</p>}
+    </fieldset>
+  );
+}
+
 export function KpiEditor({
-  initial, tenantKpis, ownedCodes, mapping, combos, onSaved, onCancel, onDuplicateAsCases,
+  initial, tenantKpis, ownedCodes, mapping, combos, segments = null, onSaved, onCancel, onDuplicateAsCases,
 }: {
   initial: SalesKpiDefinitionDto;
   tenantKpis: TenantKpi[];
@@ -56,6 +92,8 @@ export function KpiEditor({
   ownedCodes: string[];
   mapping: SalesColumnMapping;
   combos: SalesImportCombos | null;
+  /** The tenant's outlet types / programmes; an empty (or unavailable) list falls back to free text. */
+  segments?: SalesSegmentOptions | null;
   onSaved(d: SalesKpiDefinitionDto): void;
   onCancel(): void;
   onDuplicateAsCases(d: SalesKpiDefinitionDto): void;
@@ -150,10 +188,22 @@ export function KpiEditor({
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <TokenInput label="Only these outlet types (optional)" values={def.outletTypes} placeholder="e.g. WHOLESALER, Enter"
-          onChange={(v) => setDef((d) => ({ ...d, outletTypes: v }))} />
-        <TokenInput label="Only these programmes (optional)" values={def.programs} placeholder="Programme name, Enter"
-          onChange={(v) => setDef((d) => ({ ...d, programs: v }))} />
+        {segments && segments.outletTypes.length > 0 ? (
+          <ScopeMultiSelect label="Only these outlet types (optional)" values={def.outletTypes}
+            options={segments.outletTypes.map((t) => ({ value: t.code, label: t.name && t.name !== t.code ? `${t.name} (${t.code})` : t.code }))}
+            onChange={(v) => setDef((d) => ({ ...d, outletTypes: v }))} />
+        ) : (
+          <TokenInput label="Only these outlet types (optional)" values={def.outletTypes} placeholder="e.g. WHOLESALER, Enter"
+            onChange={(v) => setDef((d) => ({ ...d, outletTypes: v }))} />
+        )}
+        {segments && segments.programs.length > 0 ? (
+          <ScopeMultiSelect label="Only these programmes (optional)" values={def.programs}
+            options={segments.programs.map((p) => ({ value: p, label: p }))}
+            onChange={(v) => setDef((d) => ({ ...d, programs: v }))} />
+        ) : (
+          <TokenInput label="Only these programmes (optional)" values={def.programs} placeholder="Programme name, Enter"
+            onChange={(v) => setDef((d) => ({ ...d, programs: v }))} />
+        )}
       </div>
       <p className="text-[11px] text-gray-500 -mt-3">Leave both empty for every outlet. Outlets outside the scope get no value (blank, not 0).</p>
 

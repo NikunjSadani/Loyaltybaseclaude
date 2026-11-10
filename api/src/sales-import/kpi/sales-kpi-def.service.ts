@@ -11,6 +11,7 @@ import type {
   SalesKpiMeasure,
   SalesKpiTestRequest,
   SalesKpiTestResult,
+  SalesSegmentOptions,
 } from '../sales-import.contract';
 import {
   OutletKpiAccumulator,
@@ -24,15 +25,6 @@ import {
   type KpiDefLite,
 } from './sales-kpi.helper';
 import { forEachAggregatePage, loadRosterMeta, resolveReadyImport } from './sales-import-data';
-
-/**
- * GET admin/sales-import/segment-options response. NOT yet in sales-import.contract.ts (Lane-0 owns it) — proposed
- * contract addition, reported to the orchestrator; kept identical to what the FE mirror must declare.
- */
-export interface SalesSegmentOptions {
-  outletTypes: Array<{ code: string; name: string }>;
-  programs: string[];
-}
 
 export function toDto(row: SalesKpiDefinition): SalesKpiDefinitionDto {
   return {

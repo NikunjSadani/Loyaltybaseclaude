@@ -6,7 +6,7 @@ import { ConflictException, NotFoundException } from '@nestjs/common';
 import type { Prisma, SalesImport } from '@prisma/client';
 import type { PrismaService } from '../../prisma/prisma.service';
 import type { KpiAgg, OutletScopeMeta } from './sales-kpi.helper';
-import { rosterHashOf } from './sales-kpi.helper';
+import { rosterHashOf, rosterOutletWhere } from '../ingest/roster';
 
 type Db = PrismaService | Prisma.TransactionClient;
 
@@ -35,10 +35,14 @@ export async function resolveReadyImport(db: Db, clientId: string, importId: str
   return imp;
 }
 
-/** The tenant's roster (non-deleted outlets) → scope facets + name. */
+/**
+ * The tenant's roster (non-deleted outlets) → scope facets + name, keyed by the RAW stored `Outlet.outletCode` (the
+ * same code the worker writes into `SalesImportAggregate.outletCode`). Same outlet set as the worker's `loadRoster`
+ * (`rosterOutletWhere`), so `rosterHashOfMap(loadRosterMeta(...)) === loadRoster(...).rosterHash` for an unchanged roster.
+ */
 export async function loadRosterMeta(db: Db, clientId: string): Promise<Map<string, RosterOutlet>> {
   const outlets = await db.outlet.findMany({
-    where: { clientId, deletedAt: null },
+    where: rosterOutletWhere(clientId),
     select: { outletCode: true, name: true, programName: true, outletType: { select: { code: true } } },
   });
   return new Map(
@@ -49,6 +53,7 @@ export async function loadRosterMeta(db: Db, clientId: string): Promise<Map<stri
   );
 }
 
+/** The preview/apply side of the ROSTER_CHANGED check: the single `rosterHashOf` over the roster map's keys. */
 export function rosterHashOfMap(roster: Map<string, unknown>): string {
   return rosterHashOf(roster.keys());
 }

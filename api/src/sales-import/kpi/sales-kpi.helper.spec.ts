@@ -6,7 +6,6 @@ import {
   lineMatches,
   outletInScope,
   redundantAnyOfEntries,
-  rosterHashOf,
   stableStringify,
   sumMeasure,
   measureToNumber,
@@ -159,5 +158,4 @@ describe('hashes', () => {
   });
   it('stableStringify sorts keys recursively', () =>
     expect(stableStringify({ b: 1, a: { d: [2, { z: 1, y: 2 }], c: null } })).toBe('{"a":{"c":null,"d":[2,{"y":2,"z":1}]},"b":1}'));
-  it('rosterHashOf is order-independent', () => expect(rosterHashOf(['b', 'a'])).toBe(rosterHashOf(['a', 'b'])));
 });

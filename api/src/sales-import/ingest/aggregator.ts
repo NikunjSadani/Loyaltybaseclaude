@@ -19,7 +19,17 @@ import {
   type SalesImportErrorSample,
 } from '../sales-import.contract';
 import type { ColumnIndex } from './header';
-import { normalizeDim, normalizeHeader, normalizeOutletCode, parseInvoiceDateDetailed, stableDimKey, toMicro, toPaise } from './normalize';
+import {
+  microToCases,
+  normalizeDim,
+  normalizeHeader,
+  normalizeOutletCode,
+  paiseToRupees,
+  parseInvoiceDateDetailed,
+  stableDimKey,
+  toMicro,
+  toPaise,
+} from './normalize';
 
 export interface AggValue {
   amountPaise: bigint;
@@ -87,8 +97,8 @@ export interface AggregatorResult {
   get(month: string, outletCode: string, dimKey: string): AggValue | undefined;
 }
 
-const rupees = (paise: bigint) => Number(paise) / 100;
-const cases = (micro: bigint) => Number(micro) / 1e6;
+const rupees = paiseToRupees;
+const cases = microToCases;
 const absBig = (v: bigint) => (v < 0n ? -v : v);
 const byAbsDesc = (a: bigint, b: bigint) => {
   const x = absBig(a);

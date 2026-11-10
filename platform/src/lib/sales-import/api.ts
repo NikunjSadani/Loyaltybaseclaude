@@ -19,6 +19,7 @@ import type {
   SalesKpiTestRequest,
   SalesKpiTestResult,
   SalesMonthRow,
+  SalesSegmentOptions,
 } from './types';
 
 const BASE = '/api/admin/sales-import';
@@ -36,6 +37,7 @@ export const salesImportApi = {
   patchKpi: (kpiId: string, p: SalesKpiDefinitionPatch) => api.patch<SalesKpiDefinitionDto>(`${BASE}/kpis/${id(kpiId)}`, p),
   disableKpi: (kpiId: string) => api.del<SalesKpiDefinitionDto>(`${BASE}/kpis/${id(kpiId)}`),
   testKpi: (req: SalesKpiTestRequest) => api.post<SalesKpiTestResult>(`${BASE}/kpis/test`, req),
+  segmentOptions: () => api.get<SalesSegmentOptions>(`${BASE}/segment-options`),
   combos: (importId: string | 'latest' = 'latest') => api.get<SalesImportCombos>(`${BASE}/${id(importId)}/combos`),
 
   // Imports
@@ -43,7 +45,7 @@ export const salesImportApi = {
     api.get<SalesImportList>(`${BASE}?limit=${limit}${cursor ? `&cursor=${id(cursor)}` : ''}`),
   get: (importId: string) => api.get<SalesImportDetail>(`${BASE}/${id(importId)}`),
   reprocess: (importId: string) => api.post<SalesImportSummary>(`${BASE}/${id(importId)}/reprocess`, {}),
-  remove: (importId: string) => api.del<unknown>(`${BASE}/${id(importId)}`),
+  remove: (importId: string) => api.del<SalesImportSummary>(`${BASE}/${id(importId)}`),
   preview: (importId: string) => api.get<SalesImportPreview>(`${BASE}/${id(importId)}/preview`),
   apply: (importId: string, req: ApplyRequest) => api.post<ApplyResult>(`${BASE}/${id(importId)}/apply`, req),
   unmatchedCsvUrl: (importId: string) => `${BASE}/${id(importId)}/unmatched.csv`,

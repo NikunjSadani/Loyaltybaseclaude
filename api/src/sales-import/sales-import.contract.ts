@@ -114,6 +114,15 @@ export interface SalesKpiTestResult {
   matchedLines: number;
 }
 
+/**
+ * GET admin/sales-import/segment-options: the tenant's DISTINCT outlet-type codes (+ display name) and programme names
+ * among non-deleted outlets, both sorted. Feeds the KPI editor's outlet-type / programme scope multi-selects.
+ */
+export interface SalesSegmentOptions {
+  outletTypes: Array<{ code: string; name: string }>;
+  programs: string[];
+}
+
 // ─── Imports ────────────────────────────────────────────────────────────────────
 
 /** POST admin/sales-import/uploads body. */

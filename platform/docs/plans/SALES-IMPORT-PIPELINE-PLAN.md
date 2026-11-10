@@ -741,6 +741,20 @@ From the Cloud Run IAM roles reference (docs.cloud.google.com/run/docs/reference
   roster codes as strings after that normalization (risk R-6).
 - Never print or commit real file values; the file stays outside the repo.
 
+### 10a.7 Phase-2 integration (after lanes I, K, F merged)
+- **Contract addition:** `SalesSegmentOptions { outletTypes: Array<{code,name}>; programs: string[] }` for
+  `GET admin/sales-import/segment-options` (targets:read) — in both `sales-import.contract.ts` and FE `types.ts`; the
+  temporary declaration in `kpi/sales-kpi-def.service.ts` is gone. The KPI editor's outlet-type / programme scope are
+  checkbox multi-selects fed by it (free text only when a list is empty/unavailable).
+- **One roster hash:** `rosterHashOf` + `rosterOutletWhere` in `ingest/roster.ts` are the single source; the worker
+  (`loadRoster`) and preview/apply (`loadRosterMeta` → `rosterHashOfMap`) both use them. Pinned by
+  `roster-hash.parity.spec.ts`. Lane K's copy in `sales-kpi.helper.ts` was removed.
+- **Single-source helpers:** `paiseToRupees` / `microToCases` in `ingest/normalize.ts` (aggregator + KPI evaluator).
+  FE `normalizeDim` (`lib/sales-import/product-set.ts`) now mirrors the backend exactly (it lacked the "500.0" → "500"
+  decimal-zero trim), with the backend's vectors copied into its test.
+- **FE ↔ BE route parity** is pinned by `api/src/sales-import/fe-route-parity.spec.ts` (every FE call in `api.ts`/
+  `upload.ts` hits a real handler; every admin handler is used by the FE; only `POST sales-import/drain` is BE-only).
+
 ---
 
 ## 11. Lane tasks (TDD: write the test first, see it fail, implement, see it pass; run `cd api && npx jest src/sales-import` or `cd platform && npx vitest run src/app/admin/sales-import src/lib/sales-import`)

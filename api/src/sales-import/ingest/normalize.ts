@@ -115,6 +115,17 @@ export function toMicro(v: unknown): bigint | null {
   return toScaled(v, 6);
 }
 
+/**
+ * The ONLY BigInt → wire-number conversions (inverse of toPaise / toMicro), used by the worker's frozen summaries and
+ * the KPI evaluator alike, so ₹ and cases are rounded identically everywhere. One float conversion, at the end.
+ */
+export function paiseToRupees(paise: bigint): number {
+  return Number(paise) / 100;
+}
+export function microToCases(micro: bigint): number {
+  return Number(micro) / 1_000_000;
+}
+
 // ─── Dates ───────────────────────────────────────────────────────────────────────
 
 const MONTHS: Record<string, number> = {

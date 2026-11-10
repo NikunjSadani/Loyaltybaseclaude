@@ -15,11 +15,17 @@ import {
 
 export type FilterList = 'anyOf' | 'noneOf';
 
-/** Mirror of the backend normalizeDim: number → canonical string; string → trim, collapse spaces, uppercase. */
+/**
+ * EXACT mirror of the backend `normalizeDim` (api/src/sales-import/ingest/normalize.ts): number → canonical string;
+ * string → trim, collapse spaces, uppercase, and a pure decimal string loses trailing fractional zeros ("500.0" → "500",
+ * leading zeros kept). Must stay byte-for-byte equivalent or a typed "500.0" chip never matches the file's "500"
+ * combo; the shared vectors in `__tests__/product-set.test.ts` mirror `normalize.spec.ts`.
+ */
 export function normalizeDim(v: unknown): string {
   if (v === null || v === undefined) return '';
   if (typeof v === 'number') return Number.isFinite(v) ? String(v) : '';
-  return String(v).trim().replace(/\s+/g, ' ').toUpperCase();
+  const s = String(v).trim().replace(/\s+/g, ' ').toUpperCase();
+  return /^-?\d+\.\d+$/.test(s) ? s.replace(/\.?0+$/, '') : s;
 }
 
 /** Normalizes every value and drops blank keys. `{brand:' adho ', skuGroup:''}` → `{brand:'ADHO'}`. */
