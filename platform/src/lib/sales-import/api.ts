@@ -8,6 +8,7 @@ import type {
   ApplyRequest,
   ApplyResult,
   SalesColumnMapping,
+  SalesHistoryCombos,
   SalesImportCombos,
   SalesImportDetail,
   SalesImportList,
@@ -44,6 +45,9 @@ export const salesImportApi = {
   testKpi: (req: SalesKpiTestRequest) => api.post<SalesKpiTestResult>(`${BASE}/kpis/test`, req),
   segmentOptions: () => api.get<SalesSegmentOptions>(`${BASE}/segment-options`),
   combos: (importId: string | 'latest' = 'latest') => api.get<SalesImportCombos>(`${BASE}/${id(importId)}/combos`),
+  /** Product combos from the STORED month history: one month, or the N most recent stored months (1..12). */
+  historyCombos: (q: { month: string } | { lastMonths: number }) =>
+    api.get<SalesHistoryCombos>(`${BASE}/history-combos?${'month' in q ? `month=${id(q.month)}` : `lastMonths=${q.lastMonths}`}`),
 
   // Imports
   list: (cursor?: string | null, limit = 20) =>

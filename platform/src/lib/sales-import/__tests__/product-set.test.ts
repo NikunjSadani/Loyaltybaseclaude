@@ -7,7 +7,7 @@ import { describe, it, expect } from 'vitest';
 import {
   normalizeDim, normalizeEntry, addEntries, removeEntry, removeEntryAt, hasEntry, entryLabel,
   coveringEntryIndex, validateFilter, describeFilter, comboEntry, entryMatchesDims, includeExcludeConflicts, entriesNotInCombos,
-  isAllBlank, comboMappingDrift,
+  isAllBlank, comboMappingDrift, dimensionKeyDrift,
 } from '../product-set';
 import type { DimMatch, SalesDimensionMapping } from '../types';
 
@@ -168,5 +168,17 @@ describe('blank values, conflicts, live checks, cap (audit fixes)', () => {
     expect(comboMappingDrift([{ dims: { dimA: 'P', dimB: '' } }], dims)).toBeNull();
     expect(comboMappingDrift([{ dims: { dimA: 'P', old: 'x' } }], dims)).toEqual({ missing: ['dimB'], extra: ['old'] });
     expect(comboMappingDrift([], dims)).toBeNull();
+  });
+
+  it('dimensionKeyDrift compares a stored set\'s declared keys with the mapping (history source)', () => {
+    expect(dimensionKeyDrift(['dimA', 'dimB'], dims)).toBeNull();
+    expect(dimensionKeyDrift(['dimA', 'old'], dims)).toEqual({ missing: ['dimB'], extra: ['old'] });
+    expect(dimensionKeyDrift([], dims)).toBeNull(); // nothing stored → nothing to compare
+  });
+
+  it('entriesNotInCombos is null when the caller knows the list is capped, even below the max', () => {
+    const combos = [{ dims: { dimA: 'P', dimB: '5' } }];
+    expect(entriesNotInCombos({ anyOf: [{ dimA: 'Z' }] }, combos, 2000, true)).toBeNull();
+    expect(entriesNotInCombos({ anyOf: [{ dimA: 'Z' }] }, combos, 2000, false)).toEqual({ anyOf: [0], noneOf: [] });
   });
 });

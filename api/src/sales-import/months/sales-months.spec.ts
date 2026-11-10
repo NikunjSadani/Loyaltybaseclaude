@@ -173,6 +173,7 @@ describe('route metadata (roles / permissions)', () => {
     [SalesImportConfigController, 'deleteKpi', 'targets:manage_config'],
     [SalesImportConfigController, 'testKpi', 'targets:read'],
     [SalesImportConfigController, 'segmentOptions', 'targets:read'],
+    [SalesImportConfigController, 'historyCombos', 'targets:read'],
   ])('%p.%s requires %s (D-5)', (cls, m, perm) => expect(meta(PERMISSION_KEY, cls as never, m as string)).toBe(perm));
 });
 
@@ -182,8 +183,9 @@ describe('controllers call the access gate FIRST (flag off → 403, nothing else
   const never = new Proxy({}, { get: () => () => { throw new Error('service must not be reached'); } });
 
   it.each([
-    ['config getProfile', () => new SalesImportConfigController(never as never, never as never, tenant as never, prisma as never).getProfile(clientAdmin)],
-    ['config createKpi', () => new SalesImportConfigController(never as never, never as never, tenant as never, prisma as never).createKpi(clientAdmin, {} as never)],
+    ['config getProfile', () => new SalesImportConfigController(never as never, never as never, tenant as never, prisma as never, never as never).getProfile(clientAdmin)],
+    ['config createKpi', () => new SalesImportConfigController(never as never, never as never, tenant as never, prisma as never, never as never).createKpi(clientAdmin, {} as never)],
+    ['config historyCombos', () => new SalesImportConfigController(never as never, never as never, tenant as never, prisma as never, never as never).historyCombos(clientAdmin, {})],
     ['apply preview', () => new SalesImportApplyController(never as never, never as never, tenant as never, prisma as never).getPreview(clientAdmin, 'x')],
     ['apply apply', () => new SalesImportApplyController(never as never, never as never, tenant as never, prisma as never).postApply(clientAdmin, 'x', {} as never)],
     ['months close', () => new SalesMonthsController(never as never, tenant as never, prisma as never, never as never).close(clientAdmin, PREV)],

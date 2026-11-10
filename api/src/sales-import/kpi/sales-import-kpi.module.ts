@@ -5,6 +5,7 @@ import { SalesKpiDefService } from './sales-kpi-def.service';
 import { SalesMonthsService } from '../months/sales-months.service';
 import { SalesPreviewService } from '../apply/sales-preview.service';
 import { SalesApplyService } from '../apply/sales-apply.service';
+import { SalesHistoryCombosService } from './sales-history-combos.service';
 
 /**
  * Lane K's providers (kpi/**, months/**, apply/**). OWNER: Lane K — add new K injectables (incl. the
@@ -12,7 +13,7 @@ import { SalesApplyService } from '../apply/sales-apply.service';
  * controllers and does not import the points engine, so PointsEngineModule can import it for the D-1
  * guard without a circular import.
  */
-const PROVIDERS = [SalesProfileService, SalesKpiDefService, SalesMonthsService, SalesPreviewService, SalesApplyService];
+const PROVIDERS = [SalesProfileService, SalesKpiDefService, SalesMonthsService, SalesPreviewService, SalesApplyService, SalesHistoryCombosService];
 
 @Module({
   imports: [PrismaModule],
