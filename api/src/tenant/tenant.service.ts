@@ -3,6 +3,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from './tenant-settings.service';
+import { toServableBrandingUrl } from '../storage/branding-asset';
 import { LoyaltyType } from '../common/loyalty-capabilities.helper';
 
 /**
@@ -84,7 +85,8 @@ export class TenantService {
       branding: {
         primaryColor: b.primaryColor ?? '#16a34a',
         displayName:  b.displayName ?? client.internalName,
-        logoUrl:      b.logoUrl,
+        // Legacy private-bucket branding URL → public route (read-time; static paths unchanged).
+        logoUrl:      toServableBrandingUrl(b.logoUrl),
       },
       features: (client.features ?? {}) as unknown as ClientFeatures,
     };

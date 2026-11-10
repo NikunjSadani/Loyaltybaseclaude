@@ -708,6 +708,32 @@ describe('GifsyService', () => {
       expect(detail.wallet.pointsExpiryDays).toBeNull();
     });
 
+    it('maps legacy private-bucket branding URLs to the public route; Deoleo static paths unchanged', async () => {
+      const prev = process.env.GCS_BUCKET;
+      delete process.env.GCS_BUCKET;
+      try {
+        const LOGO = 'branding/bajaj/2026-11/5d3daa20-92f7-4ff8-8d2e-8ff59a429201-bajaj-logo.png';
+        mockPrisma.client.findUnique.mockResolvedValue({
+          id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+          branding: {
+            logoUrl: `https://storage.googleapis.com/gifsy-platform-files/${LOGO}`,
+            wordmarkWhiteUrl: '/brand/deoleo-wordmark-white.png',
+            faviconUrl: '/favicons/deoleo.ico',
+          },
+          features: {}, approvalHierarchy: {}, notifications: {}, invoicing: {}, wallet: {},
+        });
+        mockPrisma.clientDomain.findMany.mockResolvedValue([]);
+        const detail = await service.getClientDetail(gifsy, 'bajaj');
+        expect(detail.branding.logoUrl).toBe(`/api/public/branding-assets?key=${encodeURIComponent(LOGO)}`);
+        expect(detail.branding.wordmarkWhiteUrl).toBe('/brand/deoleo-wordmark-white.png');
+        expect(detail.branding.wordmarkColorUrl).toBe('');
+        expect(detail.branding.faviconUrl).toBe('/favicons/deoleo.ico');
+      } finally {
+        if (prev === undefined) delete process.env.GCS_BUCKET;
+        else process.env.GCS_BUCKET = prev;
+      }
+    });
+
     it('returns a complete shape even when every config blob is empty', async () => {
       mockPrisma.client.findUnique.mockResolvedValue({
         id: 'fresh',
@@ -1191,21 +1217,17 @@ describe('GifsyService', () => {
         ...baseClient(),
         branding: data.branding,
       }));
-      mockStorage.generateKey.mockReturnValue('branding/deoleo/2026-07/uuid-logo.png');
-      mockStorage.uploadFile.mockResolvedValue(
-        'https://storage.googleapis.com/b/branding/deoleo/2026-07/uuid-logo.png',
-      );
+      const key = 'branding/deoleo/2026-07/5d3daa20-92f7-4ff8-8d2e-8ff59a429201-logo.png';
+      mockStorage.generateKey.mockReturnValue(key);
+      mockStorage.uploadFile.mockResolvedValue(`https://storage.googleapis.com/b/${key}`);
 
       const res = await service.uploadBrandingAsset(gifsy, 'deoleo', pngFile, 'logo');
 
-      expect(res.url).toBe('https://storage.googleapis.com/b/branding/deoleo/2026-07/uuid-logo.png');
+      // The PUBLIC same-origin route URL (the bucket is private → a GCS URL 403s pre-login).
+      expect(res.url).toBe(`/api/public/branding-assets?key=${encodeURIComponent(key)}`);
       expect(mockStorage.generateKey).toHaveBeenCalledWith('branding/deoleo', 'logo.png');
       // Trusted (sniffed) mime, not the client's claim.
-      expect(mockStorage.uploadFile).toHaveBeenCalledWith(
-        PNG_BYTES,
-        'branding/deoleo/2026-07/uuid-logo.png',
-        'image/png',
-      );
+      expect(mockStorage.uploadFile).toHaveBeenCalledWith(PNG_BYTES, key, 'image/png');
       const written = mockPrisma.client.update.mock.calls[0][0].data.branding;
       expect(written.logoUrl).toBe(res.url);
       expect(written.displayName).toBe('Deoleo'); // branding merge preserved
@@ -1217,7 +1239,8 @@ describe('GifsyService', () => {
         ...baseClient(),
         branding: data.branding,
       }));
-      mockStorage.generateKey.mockReturnValue('branding/deoleo/k.png');
+      const key = 'branding/deoleo/2026-07/5d3daa20-92f7-4ff8-8d2e-8ff59a429201-f.png';
+      mockStorage.generateKey.mockReturnValue(key);
       mockStorage.uploadFile.mockResolvedValue('https://cdn/fav.png');
 
       await service.uploadBrandingAsset(
@@ -1228,7 +1251,64 @@ describe('GifsyService', () => {
       );
 
       const written = mockPrisma.client.update.mock.calls[0][0].data.branding;
-      expect(written.faviconUrl).toBe('https://cdn/fav.png');
+      expect(written.faviconUrl).toBe(`/api/public/branding-assets?key=${encodeURIComponent(key)}`);
+    });
+
+    it('derives the stored extension from the SNIFFED type, not the client filename', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue(baseClient());
+      mockPrisma.client.update.mockImplementation(async ({ data }: { data: { branding: unknown } }) => ({
+        ...baseClient(),
+        branding: data.branding,
+      }));
+      mockStorage.generateKey.mockReturnValue('branding/deoleo/2026-07/5d3daa20-92f7-4ff8-8d2e-8ff59a429201-My_Logo.png');
+      mockStorage.uploadFile.mockResolvedValue('x');
+      await service.uploadBrandingAsset(
+        gifsy,
+        'deoleo',
+        { buffer: PNG_BYTES, size: PNG_BYTES.length, originalname: 'My Logo.p ng' } as Express.Multer.File,
+        'logo',
+      );
+      expect(mockStorage.generateKey).toHaveBeenCalledWith('branding/deoleo', 'My Logo.png');
+    });
+
+    it('caps a very long client filename at 100 chars (key stays servable)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue(baseClient());
+      mockPrisma.client.update.mockImplementation(async ({ data }: { data: { branding: unknown } }) => ({
+        ...baseClient(),
+        branding: data.branding,
+      }));
+      mockStorage.generateKey.mockReturnValue('branding/deoleo/2026-07/5d3daa20-92f7-4ff8-8d2e-8ff59a429201-x.png');
+      mockStorage.uploadFile.mockResolvedValue('x');
+      await service.uploadBrandingAsset(
+        gifsy,
+        'deoleo',
+        { buffer: PNG_BYTES, size: PNG_BYTES.length, originalname: `${'a'.repeat(400)}.png` } as Express.Multer.File,
+        'logo',
+      );
+      expect(mockStorage.generateKey).toHaveBeenCalledWith('branding/deoleo', `${'a'.repeat(100)}.png`);
+    });
+
+    it('refuses (and never uploads) when the derived key would not be servable by the public route', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue(baseClient());
+      mockStorage.generateKey.mockReturnValue('branding/deoleo/not-a-valid-shape.png');
+      await expect(
+        service.uploadBrandingAsset(gifsy, 'deoleo', pngFile, 'logo'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockStorage.uploadFile).not.toHaveBeenCalled();
+    });
+
+    it('rejects a TIFF (a sniffable image no <img> renders)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue(baseClient());
+      const tiff = Buffer.from([0x49, 0x49, 0x2a, 0x00, 1, 2, 3, 4]);
+      await expect(
+        service.uploadBrandingAsset(
+          gifsy,
+          'deoleo',
+          { buffer: tiff, size: tiff.length, originalname: 'x.tif' } as Express.Multer.File,
+          'logo',
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockStorage.uploadFile).not.toHaveBeenCalled();
     });
 
     it('rejects a non-image (PDF) even with a valid magic signature', async () => {

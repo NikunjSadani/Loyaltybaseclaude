@@ -134,6 +134,34 @@ export class StorageService {
     }
   }
 
+  /**
+   * Object size + stored content-type, or null when missing / unreadable (never throws).
+   * Lets a caller enforce a size cap BEFORE reading or streaming any bytes.
+   */
+  async statObject(key: string): Promise<{ size: number; contentType: string } | null> {
+    try {
+      const [meta] = await this.storage.bucket(this.bucket).file(key).getMetadata();
+      return { size: Number(meta.size ?? 0), contentType: meta.contentType || 'application/octet-stream' };
+    } catch (err) {
+      this.logger.warn(`statObject: failed to read metadata for ${key}: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Download an object's bytes directly (no metadata round-trip), or null on any read
+   * error. For callers that already sized the object via statObject.
+   */
+  async downloadObject(key: string): Promise<Buffer | null> {
+    try {
+      const [buf] = await this.storage.bucket(this.bucket).file(key).download();
+      return buf;
+    } catch (err) {
+      this.logger.warn(`downloadObject: failed to read ${key}: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
   /** Delete an object. */
   async deleteFile(key: string): Promise<void> {
     await this.storage.bucket(this.bucket).file(key).delete();

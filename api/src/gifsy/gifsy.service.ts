@@ -12,6 +12,12 @@ import { AdminCoreService } from '../admin-core/admin-core.service';
 import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { sniffFileType } from '../common/file-signature';
+import {
+  BRANDING_ASSET_MIME,
+  brandingAssetRouteUrl,
+  normaliseBrandingKey,
+  toServableBrandingUrl,
+} from '../storage/branding-asset';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide, isGifsyOperator } from '../common/tenant-scope';
 import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
@@ -697,7 +703,7 @@ export class GifsyService {
       onboardedAt: client.onboardedAt,
       displayName: branding.displayName,
       primaryColor: branding.primaryColor,
-      logoUrl: branding.logoUrl,
+      logoUrl: toServableBrandingUrl(branding.logoUrl),
       supportEmail: branding.supportEmail,
       supportPhone: branding.supportPhone,
       invoicePrefix: branding.invoicePrefix,
@@ -827,7 +833,7 @@ export class GifsyService {
       onboardedAt: client.onboardedAt,
       displayName: branding.displayName,
       primaryColor: branding.primaryColor,
-      logoUrl: branding.logoUrl,
+      logoUrl: toServableBrandingUrl(branding.logoUrl),
       supportEmail: branding.supportEmail,
       supportPhone: branding.supportPhone,
       invoicePrefix: branding.invoicePrefix,
@@ -877,18 +883,30 @@ export class GifsyService {
 
     // Untrusted client mimetype: derive the REAL type from the bytes and require
     // an image (rejects PDF, and any SVG/HTML/script payload labelled image/*).
+    // Only the four BROWSER-RENDERABLE types (the public branding route serves exactly
+    // these): sniffFileType also recognises TIFF/BMP/HEIC, which no <img> renders.
     const sniffed = sniffFileType(file.buffer);
-    if (!sniffed || !sniffed.mime.startsWith('image/')) {
+    if (!sniffed || !BRANDING_ASSET_MIME.has(sniffed.mime)) {
       throw new BadRequestException(
         'Unsupported or corrupt file. Upload a PNG, JPG, WEBP, or GIF image.',
       );
     }
 
-    const key = this.storage.generateKey(
-      `branding/${slug}`,
-      file.originalname || `${kind}.${sniffed.ext}`,
-    );
-    const url = await this.storage.uploadFile(file.buffer, key, sniffed.mime);
+    // Name = the client's base name + the SNIFFED extension (never the client's), so the
+    // key always has the clean shape the public route accepts (normaliseBrandingKey).
+    const rawName = (file.originalname || kind).trim();
+    const dot = rawName.lastIndexOf('.');
+    const base = ((dot > 0 ? rawName.slice(0, dot) : rawName) || kind).slice(0, 100);
+    const key = this.storage.generateKey(`branding/${slug}`, `${base}.${sniffed.ext}`);
+    // Fail loudly BEFORE storing anything the public route would refuse to serve.
+    if (!normaliseBrandingKey(key)) {
+      throw new BadRequestException('Could not derive a valid storage key for this asset.');
+    }
+    await this.storage.uploadFile(file.buffer, key, sniffed.mime);
+    // The bucket is PRIVATE (a storage.googleapis.com URL 403s), and branding must render
+    // pre-login → store the PUBLIC same-origin route URL (`/api/public/branding-assets?key=…`,
+    // served on every tenant host via the FE `/api` → `/v1` rewrite).
+    const url = brandingAssetRouteUrl(key);
 
     // Persist through the existing branding-merge update path.
     await this.updateClient(user, slug, { [field]: url } as UpdateClientDto);
@@ -915,7 +933,7 @@ export class GifsyService {
         onboardedAt: c.onboardedAt,
         displayName: branding.displayName,
         primaryColor: branding.primaryColor,
-        logoUrl: branding.logoUrl,
+        logoUrl: toServableBrandingUrl(branding.logoUrl),
         supportEmail: branding.supportEmail,
         supportPhone: branding.supportPhone,
         invoicePrefix: branding.invoicePrefix,
@@ -1061,10 +1079,10 @@ export class GifsyService {
       branding: {
         displayName: (branding.displayName as string) ?? c.internalName,
         primaryColor: (branding.primaryColor as string) ?? '#6b7280',
-        logoUrl: (branding.logoUrl as string) ?? '',
-        wordmarkWhiteUrl: (branding.wordmarkWhiteUrl as string) ?? '',
-        wordmarkColorUrl: (branding.wordmarkColorUrl as string) ?? '',
-        faviconUrl: (branding.faviconUrl as string) ?? '',
+        logoUrl: toServableBrandingUrl((branding.logoUrl as string) ?? ''),
+        wordmarkWhiteUrl: toServableBrandingUrl((branding.wordmarkWhiteUrl as string) ?? ''),
+        wordmarkColorUrl: toServableBrandingUrl((branding.wordmarkColorUrl as string) ?? ''),
+        faviconUrl: toServableBrandingUrl((branding.faviconUrl as string) ?? ''),
         supportEmail: (branding.supportEmail as string) ?? '',
         supportPhone: (branding.supportPhone as string) ?? '',
         productBrands: (branding.productBrands as string[]) ?? [],

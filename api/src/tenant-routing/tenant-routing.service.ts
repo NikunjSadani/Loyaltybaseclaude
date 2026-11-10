@@ -1,5 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { toServableBrandingUrl } from '../storage/branding-asset';
 
 /** Tenant routing/status values exposed publicly (INACTIVE is never returned). */
 export type PublicTenantStatus = 'ACTIVE' | 'ONBOARDING';
@@ -29,9 +30,56 @@ export interface TenantRoutingResponse {
   tenants: PublicTenantRoute[];
 }
 
+/** How long the known-slug set (isKnownTenantSlug) is reused before a re-query. */
+const SLUG_SET_TTL_MS = 60_000;
+/** An unknown slug triggers one re-query only if the set is at least this old. */
+const SLUG_SET_MISS_REQUERY_MS = 5_000;
+
 @Injectable()
 export class TenantRoutingService {
-  constructor(private readonly prisma: PrismaService) {}
+  private slugSet: { slugs: Set<string>; at: number } | null = null;
+  private slugLoad: Promise<void> | null = null;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    // Test seam only (no provider registers this token → Nest injects undefined → Date.now).
+    @Optional() @Inject('TENANT_ROUTING_CLOCK') private readonly now: () => number = Date.now,
+  ) {}
+
+  /**
+   * Whether `slug` is an existing tenant (ANY status — the Gifsy console previews an
+   * INACTIVE tenant's uploaded branding too). Used by the public branding-asset route to
+   * 404 keys for non-existent tenants BEFORE any storage call. One cached `select id` query
+   * (60s TTL, coalesced); an unknown slug re-queries once if the set is > 5s old so a tenant
+   * created moments ago is found. FAILS OPEN (true) when the set cannot be loaded: this is a
+   * load-shedding filter — the key-shape validation is the security boundary.
+   */
+  async isKnownTenantSlug(slug: string): Promise<boolean> {
+    if (!this.slugSet || this.now() - this.slugSet.at > SLUG_SET_TTL_MS) await this.loadSlugs();
+    if (!this.slugSet) return true; // could not load → fail open
+    if (this.slugSet.slugs.has(slug)) return true;
+    if (this.now() - this.slugSet.at >= SLUG_SET_MISS_REQUERY_MS) {
+      await this.loadSlugs();
+      return this.slugSet?.slugs.has(slug) ?? true;
+    }
+    return false;
+  }
+
+  private loadSlugs(): Promise<void> {
+    if (this.slugLoad) return this.slugLoad;
+    this.slugLoad = this.prisma.client
+      .findMany({ select: { id: true } })
+      .then((rows) => {
+        this.slugSet = { slugs: new Set(rows.map((r) => r.id)), at: this.now() };
+      })
+      .catch(() => {
+        // Keep any last-good set; with none, isKnownTenantSlug fails open.
+      })
+      .finally(() => {
+        this.slugLoad = null;
+      });
+    return this.slugLoad;
+  }
 
   /**
    * Public, unauthenticated tenant-routing table. The Next.js edge proxy calls
@@ -99,19 +147,26 @@ export class TenantRoutingService {
 
     const asString = (v: unknown): string | undefined =>
       typeof v === 'string' ? v : undefined;
+    // Image URLs: a stored private-bucket `branding/` object URL (403 in a browser) is
+    // re-pointed at the public branding-asset route at READ time (no data migration).
+    // Static paths (`/brand/…`, `/logos/…`, `/favicons/…` — Deoleo) pass through unchanged.
+    const asAssetUrl = (v: unknown): string | undefined => {
+      const s = asString(v);
+      return s === undefined ? undefined : toServableBrandingUrl(s);
+    };
 
     const branding: PublicBranding = {
       displayName: asString(b.displayName) ?? '',
       primaryColor: asString(b.primaryColor) ?? '',
     };
 
-    const logoUrl = asString(b.logoUrl);
+    const logoUrl = asAssetUrl(b.logoUrl);
     if (logoUrl !== undefined) branding.logoUrl = logoUrl;
-    const wordmarkWhiteUrl = asString(b.wordmarkWhiteUrl);
+    const wordmarkWhiteUrl = asAssetUrl(b.wordmarkWhiteUrl);
     if (wordmarkWhiteUrl !== undefined) branding.wordmarkWhiteUrl = wordmarkWhiteUrl;
-    const wordmarkColorUrl = asString(b.wordmarkColorUrl);
+    const wordmarkColorUrl = asAssetUrl(b.wordmarkColorUrl);
     if (wordmarkColorUrl !== undefined) branding.wordmarkColorUrl = wordmarkColorUrl;
-    const faviconUrl = asString(b.faviconUrl);
+    const faviconUrl = asAssetUrl(b.faviconUrl);
     if (faviconUrl !== undefined) branding.faviconUrl = faviconUrl;
 
     return branding;

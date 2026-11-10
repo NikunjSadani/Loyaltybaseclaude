@@ -105,6 +105,35 @@ describe('StorageService', () => {
     });
   });
 
+  describe('statObject', () => {
+    it('returns the numeric size + content-type from metadata', async () => {
+      const file = { getMetadata: jest.fn().mockResolvedValue([{ size: '1234', contentType: 'image/png' }]) };
+      (service as unknown as { storage: unknown }).storage = { bucket: () => ({ file: () => file }) };
+      await expect(service.statObject('branding/x')).resolves.toEqual({ size: 1234, contentType: 'image/png' });
+    });
+
+    it('returns null (never throws) for a missing object / read error', async () => {
+      const file = { getMetadata: jest.fn().mockRejectedValue(new Error('No such object')) };
+      (service as unknown as { storage: unknown }).storage = { bucket: () => ({ file: () => file }) };
+      await expect(service.statObject('branding/missing')).resolves.toBeNull();
+    });
+  });
+
+  describe('downloadObject', () => {
+    it('downloads the bytes directly, with no metadata round-trip', async () => {
+      const file = { getMetadata: jest.fn(), download: jest.fn().mockResolvedValue([Buffer.from('abc')]) };
+      (service as unknown as { storage: unknown }).storage = { bucket: () => ({ file: () => file }) };
+      await expect(service.downloadObject('branding/x')).resolves.toEqual(Buffer.from('abc'));
+      expect(file.getMetadata).not.toHaveBeenCalled();
+    });
+
+    it('returns null (never throws) on a read error', async () => {
+      const file = { download: jest.fn().mockRejectedValue(new Error('gone')) };
+      (service as unknown as { storage: unknown }).storage = { bucket: () => ({ file: () => file }) };
+      await expect(service.downloadObject('branding/x')).resolves.toBeNull();
+    });
+  });
+
   describe('large-object helpers (Sales Import)', () => {
     function stubBucket() {
       const written: Buffer[] = [];

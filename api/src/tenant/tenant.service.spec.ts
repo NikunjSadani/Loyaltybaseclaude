@@ -96,6 +96,28 @@ describe('TenantService', () => {
       expect(result.branding.primaryColor).toBe('#16a34a');
       expect(result.branding.displayName).toBe('Deoleo India'); // internalName fallback
     });
+
+    it('maps a legacy private-bucket branding logoUrl to the public route; static paths unchanged', async () => {
+      const prev = process.env.GCS_BUCKET;
+      delete process.env.GCS_BUCKET;
+      try {
+        const key = 'branding/bajaj/2026-11/5d3daa20-92f7-4ff8-8d2e-8ff59a429201-bajaj-logo.png';
+        mockPrisma.client.findUnique.mockResolvedValueOnce({
+          ...mockDeoleoRow, id: 'bajaj',
+          branding: { logoUrl: `https://storage.googleapis.com/gifsy-platform-files/${key}` },
+        });
+        expect((await service.resolveClient('bajaj')).branding.logoUrl).toBe(
+          `/api/public/branding-assets?key=${encodeURIComponent(key)}`,
+        );
+        mockPrisma.client.findUnique.mockResolvedValueOnce({
+          ...mockDeoleoRow, branding: { logoUrl: '/logos/deoleo.svg' },
+        });
+        expect((await service.resolveClient('deoleo')).branding.logoUrl).toBe('/logos/deoleo.svg');
+      } finally {
+        if (prev === undefined) delete process.env.GCS_BUCKET;
+        else process.env.GCS_BUCKET = prev;
+      }
+    });
   });
 
   describe('isFeatureEnabled', () => {
