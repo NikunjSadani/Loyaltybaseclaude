@@ -4,7 +4,7 @@
  * Run: npx vitest run src/lib/sales-import/__tests__/format.test.ts
  */
 import { describe, it, expect } from 'vitest';
-import { applyBlockers, monthLabel, dayLabel, warningText, formatSigned, formatRupees, formatBytes } from '../format';
+import { applyBlockers, monthLabel, dayLabel, warningText, formatSigned, formatRupees, formatBytes, sentence } from '../format';
 import type { MonthPreview } from '../types';
 
 function month(over: Partial<MonthPreview>): MonthPreview {
@@ -29,6 +29,29 @@ describe('labels', () => {
     expect(formatSigned(-1500, formatRupees)).toBe('−₹1,500');
     expect(formatSigned(20, formatRupees)).toBe('+₹20');
     expect(formatBytes(5 * 1024 * 1024)).toBe('5.0 MB');
+  });
+  it('rupees: 2 decimals whenever there are paise, minus before the symbol', () => {
+    expect(formatRupees(1500)).toBe('₹1,500');
+    expect(formatRupees(1500.5)).toBe('₹1,500.50');
+    expect(formatRupees(0.1 + 0.2)).toBe('₹0.30');
+    expect(formatRupees(-500)).toBe('−₹500');
+    expect(formatRupees(-1234.5)).toBe('−₹1,234.50');
+    expect(formatRupees(-0.001)).toBe('₹0');
+  });
+  it('bytes: binary units, no "1024.0 KB"', () => {
+    expect(formatBytes(1023)).toBe('1023 B');
+    expect(formatBytes(1024 * 1024 - 1)).toBe('1.0 MB');
+    expect(formatBytes(600 * 1024 * 1024)).toBe('600.0 MB');
+  });
+  it('sentence() avoids ".." when a server message already ends with a full stop', () => {
+    expect(`${sentence('Closed.')}. Next`).toBe('Closed. Next');
+    expect(sentence(null)).toBe('');
+  });
+  it('older-data text compares this file with the applied range', () => {
+    expect(warningText('OLDER_THAN_LAST_APPLIED', {
+      month: '2026-10', firstDate: '2026-10-01', lastDate: '2026-10-20',
+      lastApplied: { importId: 'x', at: '', byName: 'R', lastInvoiceDate: '2026-10-31' },
+    })).toMatch(/stop on 20 Oct, but the file applied last time goes up to 31 Oct/);
   });
 });
 

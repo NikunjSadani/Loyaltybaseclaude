@@ -18,8 +18,13 @@ import { ProductSetBuilder } from './product-set-builder';
 
 export interface TenantKpi { code: string; label: string; unit: string; enabled: boolean }
 
-function filterSignature(f: SalesKpiFilter): string {
-  return JSON.stringify([listOf(f, 'anyOf').map(entryKey), listOf(f, 'noneOf').map(entryKey)]);
+/** Everything a Test result depends on: the product set AND the outlet-type / programme scope. */
+function testSignature(d: Pick<SalesKpiDefinitionDto, 'filter' | 'outletTypes' | 'programs'>): string {
+  const norm = (xs: string[]) => [...new Set(xs.map((x) => x.trim().toUpperCase()))].sort();
+  return JSON.stringify([
+    listOf(d.filter, 'anyOf').map(entryKey), listOf(d.filter, 'noneOf').map(entryKey),
+    norm(d.outletTypes), norm(d.programs),
+  ]);
 }
 
 function TokenInput({ label, values, onChange, placeholder }: { label: string; values: string[]; onChange(v: string[]): void; placeholder: string }) {
@@ -84,10 +89,16 @@ function ScopeMultiSelect({ label, options, values, onChange }: {
 }
 
 export function KpiEditor({
-  initial, tenantKpis, ownedCodes, mapping, combos, segments = null, onSaved, onCancel, onDuplicateAsCases,
+  initial, tenantKpis, tenantKpisError = null, onRetryTenantKpis, ownedCodes, mapping, combos, segments = null,
+  onSaved, onCancel, onDuplicateAsCases, canEdit = true,
 }: {
   initial: SalesKpiDefinitionDto;
   tenantKpis: TenantKpi[];
+  /** The tenant KPI list failed to load (so an empty dropdown is NOT "every KPI is taken"). */
+  tenantKpisError?: string | null;
+  onRetryTenantKpis?(): void;
+  /** False → the user lacks targets:manage_config; Save is hidden. */
+  canEdit?: boolean;
   /** KPI codes already owned by OTHER enabled definitions. */
   ownedCodes: string[];
   mapping: SalesColumnMapping;
@@ -110,10 +121,16 @@ export function KpiEditor({
   const hasAmount = Boolean(mapping.amount);
   const hasQty = Boolean(mapping.quantity);
   const validation = validateFilter(def.filter, dims.map((d) => d.key));
-  const sig = filterSignature(def.filter);
+  const sig = testSignature(def);
   const freshTest = test && test.sig === sig && test.result;
 
   const options = tenantKpis.filter((k) => k.enabled && (k.code === def.kpiCode || !ownedCodes.includes(k.code)));
+  let noOptionsText: string | null = null;
+  if (options.length === 0 && !editing && !tenantKpisError) {
+    if (tenantKpis.length === 0) noOptionsText = 'This programme has no KPIs yet. Create one under Targets first, then come back.';
+    else if (!tenantKpis.some((k) => k.enabled)) noOptionsText = 'Every KPI of this programme is switched off. Switch one on under Targets first.';
+    else noOptionsText = 'Every enabled KPI already comes from Sales Import. Create a new KPI under Targets first.';
+  }
 
   const blockers: string[] = [...validation.errors];
   if (!def.kpiCode) blockers.push('Choose a KPI.');
@@ -131,7 +148,7 @@ export function KpiEditor({
   }
 
   async function save() {
-    if (blockers.length || saving) return;
+    if (!canEdit || blockers.length || saving) return;
     setSaving(true);
     setSaveError(null);
     const { id, ...body } = def;
@@ -150,18 +167,24 @@ export function KpiEditor({
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <label className="text-xs font-medium text-gray-700">
-          KPI
-          <select value={def.kpiCode} disabled={editing} aria-label="KPI"
-            onChange={(e) => setDef((d) => ({ ...d, kpiCode: e.target.value }))}
-            className="mt-1 block w-full text-sm border border-gray-300 rounded-md px-2 py-1.5 disabled:bg-gray-50">
-            <option value="">Choose a KPI…</option>
-            {options.map((k) => <option key={k.code} value={k.code}>{k.label} ({k.code}{k.unit ? `, ${k.unit}` : ''})</option>)}
-          </select>
-          {options.length === 0 && !editing && (
-            <span className="block mt-1 font-normal text-gray-500">Every enabled KPI already comes from Sales Import. Create a new KPI under Targets first.</span>
+        <div className="text-xs font-medium text-gray-700">
+          <label>
+            KPI
+            <select value={def.kpiCode} disabled={editing} aria-label="KPI"
+              onChange={(e) => setDef((d) => ({ ...d, kpiCode: e.target.value }))}
+              className="mt-1 block w-full text-sm border border-gray-300 rounded-md px-2 py-1.5 disabled:bg-gray-50">
+              <option value="">Choose a KPI…</option>
+              {options.map((k) => <option key={k.code} value={k.code}>{k.label} ({k.code}{k.unit ? `, ${k.unit}` : ''})</option>)}
+            </select>
+          </label>
+          {tenantKpisError && !editing && (
+            <div role="alert" className="mt-1 flex items-center gap-2 font-normal text-red-600" data-testid="kpi-list-error">
+              Couldn&apos;t load the KPI list: {tenantKpisError}
+              {onRetryTenantKpis && <Button size="sm" variant="outline" type="button" onClick={onRetryTenantKpis}>Retry</Button>}
+            </div>
           )}
-        </label>
+          {noOptionsText && <p className="mt-1 font-normal text-gray-500">{noOptionsText}</p>}
+        </div>
         <fieldset>
           <legend className="text-xs font-medium text-gray-700">Count</legend>
           <div className="mt-1 flex gap-4 text-sm">
@@ -216,7 +239,7 @@ export function KpiEditor({
           <span className="text-[11px] text-gray-500">Shows the monthly totals this KPI would get. Nothing is saved.</span>
         </div>
         {testError && <p className="text-xs text-red-600" role="alert">{testError}</p>}
-        {test && !freshTest && <p className="text-xs text-gray-500">The products changed since the last test — test again.</p>}
+        {test && !freshTest && <p className="text-xs text-gray-500">The products or the outlet scope changed since the last test — test again.</p>}
         {freshTest && (
           <div className="space-y-1" data-testid="kpi-test-result">
             <p className="text-xs text-gray-600">{formatCount(freshTest.matchedLines)} invoice lines match.</p>
@@ -247,6 +270,10 @@ export function KpiEditor({
         <span>
           {def.kpiCode ? <strong>{def.kpiCode}</strong> : 'This KPI'} will no longer be accepted from the manual achievement
           upload — its values will come only from sales files ({measureLabel}).
+          {editing && (
+            <> Changes apply only to months you apply from now on: months already applied keep their old values until
+              you apply a file to them again (closed months must be reopened by Gifsy first).</>
+          )}
         </span>
       </div>
 
@@ -258,7 +285,7 @@ export function KpiEditor({
       {saveError && <p className="text-sm text-red-600" role="alert">{saveError}</p>}
 
       <div className="flex flex-wrap gap-2">
-        <Button variant="primary" type="button" onClick={save} loading={saving} disabled={blockers.length > 0}>Save KPI</Button>
+        {canEdit && <Button variant="primary" type="button" onClick={save} loading={saving} disabled={blockers.length > 0}>Save KPI</Button>}
         <Button variant="outline" type="button" onClick={onCancel}>Cancel</Button>
         {def.measure === 'AMOUNT' && hasQty && (
           <Button variant="ghost" type="button" onClick={() => {

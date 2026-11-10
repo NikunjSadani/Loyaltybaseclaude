@@ -138,9 +138,9 @@ describe('KPI editor — product set', () => {
     expect(chips[2]).toHaveTextContent('P 999 never appears in the latest file');
   });
 
-  it('warnings disappear once the set changes (stale test)', async () => {
+  it('server warnings disappear once the set changes (stale test)', async () => {
     apiMock.testKpi.mockResolvedValue(ok({ months: [], unmatchedEntries: { anyOf: [0], noneOf: [] }, redundantEntries: { anyOf: [] }, matchedLines: 0 }));
-    renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X', filter: { anyOf: [{ dimA: 'ZZ' }] } } });
+    renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X', filter: { anyOf: [{ dimA: 'P' }] } } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Test against latest import/ })); });
     expect(screen.getByTestId('product-set-chip-warning')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Add all of Q' }));
@@ -174,6 +174,117 @@ describe('KPI editor — product set', () => {
     const p = renderEditor({ initial: { ...NEW, id: 'k1', kpiCode: 'KPI_X', filter: { anyOf: [{ dimA: 'P' }] } } });
     fireEvent.click(screen.getByRole('button', { name: 'Duplicate as cases KPI' }));
     expect(p.onDuplicateAsCases).toHaveBeenCalledWith(expect.objectContaining({ kpiCode: '', measure: 'QUANTITY', filter: { anyOf: [{ dimA: 'P' }] } }));
+  });
+});
+
+describe('KPI editor — product set (audit fixes)', () => {
+  const BLANK_COMBOS: SalesImportCombos = {
+    importId: 'imp1',
+    dimensionValues: { dimA: [{ value: 'P', lines: 3, amountRupees: 50 }, { value: '', lines: 2, amountRupees: 20 }] },
+    dimensionCombos: [
+      { dims: { dimA: 'P', dimB: '' }, lines: 3, amountRupees: 50, quantity: 1 },
+      { dims: { dimA: '', dimB: '500' }, lines: 2, amountRupees: 20, quantity: 1 },
+    ],
+  };
+
+  it('ticking a combo with a blank value keeps the blank as an exact match (never widens to the whole brand)', async () => {
+    apiMock.createKpi.mockImplementation(async (d: SalesKpiDefinitionDto) => ok(d));
+    renderEditor({ combos: BLANK_COMBOS, initial: { ...NEW, kpiCode: 'KPI_X' } });
+    const box = screen.getByRole('checkbox', { name: 'Pick P (blank sku group)' });
+    fireEvent.click(box);
+    expect(box).toBeChecked();
+    expect(screen.getByTestId('product-set-chips')).toHaveTextContent('P (blank sku group)');
+    expect(screen.getByTestId('product-set-chips')).not.toHaveTextContent('all sku groups');
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save KPI' })); });
+    expect(apiMock.createKpi.mock.calls[0][0].filter).toEqual({ anyOf: [{ dimA: 'P', dimB: '' }] });
+  });
+
+  it('the "(blank)" whole-value chip adds an exact blank match', async () => {
+    apiMock.createKpi.mockImplementation(async (d: SalesKpiDefinitionDto) => ok(d));
+    renderEditor({ combos: BLANK_COMBOS, initial: { ...NEW, kpiCode: 'KPI_X' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add all lines with a blank Brand' }));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save KPI' })); });
+    expect(apiMock.createKpi.mock.calls[0][0].filter).toEqual({ anyOf: [{ dimA: '' }] });
+  });
+
+  it('flags an entry both included and excluded, and an exclusion that cancels an inclusion', () => {
+    renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X', filter: { anyOf: [{ dimA: 'P', dimB: '500' }, { dimA: 'Q' }], noneOf: [{ dimA: 'P' }, { dimA: 'Q' }] } } });
+    const chips = screen.getAllByTestId('product-set-chip');
+    expect(chips[0]).toHaveTextContent('P 500 counts nothing: "except P (all sku groups)" removes all of it.');
+    expect(chips[1]).toHaveTextContent('Q (all sku groups) is both included and excluded');
+  });
+
+  it('"never appears in the latest file" shows live, without pressing Test', () => {
+    renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X', filter: { anyOf: [{ dimA: 'ZZ' }] } } });
+    expect(screen.getByTestId('product-set-chip-warning')).toHaveTextContent('ZZ (all sku groups) never appears in the latest file');
+    expect(apiMock.testKpi).not.toHaveBeenCalled();
+  });
+
+  it('"Select all" stops at the 200-entry cap and says so', () => {
+    const many: SalesImportCombos = {
+      importId: 'imp1', dimensionValues: {},
+      dimensionCombos: Array.from({ length: 205 }, (_, i) => ({ dims: { dimA: `B${i}`, dimB: '1' }, lines: 1, amountRupees: 1, quantity: 1 })),
+    };
+    const existing = Array.from({ length: 10 }, (_, i) => ({ dimA: `X${i}` }));
+    renderEditor({ combos: many, initial: { ...NEW, kpiCode: 'KPI_X', filter: { anyOf: existing } } });
+    expect(screen.getByText(/Only 190 more fit/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Select all \(190\)/ }));
+    expect(screen.getByRole('tab', { name: /Include \(200\)/ })).toBeInTheDocument();
+    expect(screen.queryByTestId('kpi-editor-blockers')).not.toBeInTheDocument();
+  });
+
+  it('Include / Exclude tabs: aria-controls + arrow keys', () => {
+    renderEditor();
+    const inc = screen.getByRole('tab', { name: /Include/ });
+    expect(inc).toHaveAttribute('aria-controls', screen.getByRole('tabpanel').id);
+    fireEvent.keyDown(inc, { key: 'ArrowRight' });
+    expect(screen.getByRole('tab', { name: /Exclude/ })).toHaveAttribute('aria-selected', 'true');
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: /Exclude/ }));
+  });
+
+  it('sort headers expose aria-sort', () => {
+    renderEditor();
+    const amountHeader = screen.getByRole('button', { name: 'Sort by ₹' }).closest('th')!;
+    expect(amountHeader).toHaveAttribute('aria-sort', 'descending');
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Lines' }));
+    expect(screen.getByRole('button', { name: 'Sort by Lines' }).closest('th')).toHaveAttribute('aria-sort', 'descending');
+    expect(amountHeader).toHaveAttribute('aria-sort', 'none');
+  });
+
+  it('a Test result goes stale when the outlet scope changes', async () => {
+    apiMock.testKpi.mockResolvedValue(ok({ months: [], unmatchedEntries: { anyOf: [], noneOf: [] }, redundantEntries: { anyOf: [] }, matchedLines: 4 }));
+    renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X' }, segments: { outletTypes: [{ code: 'RETAILER', name: 'Retailer' }], programs: [] } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Test against latest import/ })); });
+    expect(screen.getByTestId('kpi-test-result')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Retailer (RETAILER)' }));
+    expect(screen.queryByTestId('kpi-test-result')).not.toBeInTheDocument();
+    expect(screen.getByText(/outlet scope changed since the last test/)).toBeInTheDocument();
+  });
+});
+
+describe('KPI editor — KPI list states', () => {
+  it('a failed KPI-list load shows an error + Retry, not "every KPI already comes from Sales Import"', () => {
+    const onRetry = vi.fn();
+    renderEditor({ tenantKpis: [], tenantKpisError: 'HTTP 500', onRetryTenantKpis: onRetry });
+    expect(screen.getByTestId('kpi-list-error')).toHaveTextContent('HTTP 500');
+    expect(screen.queryByText(/already comes from Sales Import/)).not.toBeInTheDocument();
+    fireEvent.click(within(screen.getByTestId('kpi-list-error')).getByRole('button', { name: 'Retry' }));
+    expect(onRetry).toHaveBeenCalled();
+  });
+
+  it('a tenant with zero KPIs gets accurate copy', () => {
+    renderEditor({ tenantKpis: [] });
+    expect(screen.getByText(/This programme has no KPIs yet/)).toBeInTheDocument();
+  });
+
+  it('editing explains that already-applied months keep old values until re-applied', () => {
+    renderEditor({ initial: { ...NEW, id: 'k1', kpiCode: 'KPI_X' } });
+    expect(screen.getByText(/months already applied keep their old values until/)).toBeInTheDocument();
+  });
+
+  it('without manage permission Save is hidden', () => {
+    renderEditor({ canEdit: false, initial: { ...NEW, kpiCode: 'KPI_X' } });
+    expect(screen.queryByRole('button', { name: 'Save KPI' })).not.toBeInTheDocument();
   });
 });
 
@@ -257,7 +368,57 @@ describe('column mapping', () => {
   });
 });
 
+describe('column mapping — keys', () => {
+  it('a saved column keeps its key when the label changes; a new column gets a suggested key', () => {
+    render(<ColumnMappingForm initial={MAPPING} detectedHeaders={[]} onSaved={vi.fn()} />);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Product column 1 label' }), { target: { value: 'Brand name' } });
+    expect(screen.getByRole('textbox', { name: 'Product column 1 key' })).toHaveValue('dimA');
+    fireEvent.click(screen.getByRole('button', { name: /Add product column/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Product column 3 label' }), { target: { value: 'Pack size' } });
+    expect(screen.getByRole('textbox', { name: 'Product column 3 key' })).toHaveValue('packSize');
+  });
+
+  it('a saved column whose key happens to equal the suggestion still keeps it', () => {
+    render(<ColumnMappingForm initial={{ ...MAPPING, dimensions: [{ key: 'brand', label: 'Brand', header: 'A' }] }} detectedHeaders={[]} onSaved={vi.fn()} />);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Product column 1 label' }), { target: { value: 'Make' } });
+    expect(screen.getByRole('textbox', { name: 'Product column 1 key' })).toHaveValue('brand');
+  });
+
+  it('read-only without manage permission', () => {
+    render(<ColumnMappingForm initial={MAPPING} detectedHeaders={[]} onSaved={vi.fn()} canEdit={false} />);
+    expect(screen.queryByRole('button', { name: 'Save column mapping' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('mapping-read-only')).toBeInTheDocument();
+  });
+});
+
 describe('settings page', () => {
+  it('a failed tenant-KPI load is shown in the editor with Retry', async () => {
+    apiMock.getProfile.mockResolvedValue(ok(MAPPING));
+    apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));
+    apiMock.listKpis.mockResolvedValue(ok({ definitionsHash: 'h', definitions: [] }));
+    clientApi.get.mockResolvedValueOnce({ success: false, error: 'HTTP 503', status: 503 }).mockResolvedValue(ok(KPIS));
+    apiMock.combos.mockResolvedValue({ success: false, error: 'No READY import', status: 404 });
+    apiMock.segmentOptions.mockResolvedValue(ok({ outletTypes: [], programs: [] }));
+    render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /Add KPI/ }));
+    const err = await screen.findByTestId('kpi-list-error');
+    expect(err).toHaveTextContent('HTTP 503');
+    await act(async () => { fireEvent.click(within(err).getByRole('button', { name: 'Retry' })); });
+    expect(await screen.findByRole('option', { name: /KPI X/ })).toBeInTheDocument();
+  });
+
+  it('heading suggestions come from the heading row only (never sample data rows)', async () => {
+    apiMock.getProfile.mockResolvedValue(ok(null));
+    apiMock.list.mockResolvedValue(ok({ items: [{ id: 'nm1', status: 'NEEDS_MAPPING', purgedAt: null, detectedHeaders: null }], nextCursor: null }));
+    apiMock.get.mockResolvedValue(ok({ id: 'nm1', detectedHeaders: [['CUST CODE', 'INV DATE'], ['C001', '05-10-2026']] }));
+    const { container } = render(<SettingsPage />);
+    await screen.findByText(/Save the column mapping first/);
+    await vi.waitFor(() => expect(container.querySelectorAll('datalist option')).toHaveLength(2));
+    const values = [...container.querySelectorAll('datalist option')].map((o) => o.getAttribute('value'));
+    expect(values).toEqual(['CUST CODE', 'INV DATE']);
+    expect(apiMock.get).toHaveBeenCalledWith('nm1');
+  });
+
   it('without a mapping, KPIs wait for it', async () => {
     apiMock.getProfile.mockResolvedValue(ok(null));
     apiMock.list.mockResolvedValue(ok({ items: [], nextCursor: null }));

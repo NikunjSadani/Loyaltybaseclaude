@@ -18,6 +18,8 @@ import type {
   SalesKpiDefinitionPatch,
   SalesKpiTestRequest,
   SalesKpiTestResult,
+  SalesMonthReopenRequest,
+  SalesMonthReopenResult,
   SalesMonthRow,
   SalesSegmentOptions,
 } from './types';
@@ -45,6 +47,8 @@ export const salesImportApi = {
     api.get<SalesImportList>(`${BASE}?limit=${limit}${cursor ? `&cursor=${id(cursor)}` : ''}`),
   get: (importId: string) => api.get<SalesImportDetail>(`${BASE}/${id(importId)}`),
   reprocess: (importId: string) => api.post<SalesImportSummary>(`${BASE}/${id(importId)}/reprocess`, {}),
+  /** QUEUED or stalled PROCESSING → CANCELLED (409 otherwise). */
+  cancel: (importId: string) => api.post<SalesImportSummary>(`${BASE}/${id(importId)}/cancel`, {}),
   remove: (importId: string) => api.del<SalesImportSummary>(`${BASE}/${id(importId)}`),
   preview: (importId: string) => api.get<SalesImportPreview>(`${BASE}/${id(importId)}/preview`),
   apply: (importId: string, req: ApplyRequest) => api.post<ApplyResult>(`${BASE}/${id(importId)}/apply`, req),
@@ -60,7 +64,8 @@ export const salesImportApi = {
     return api.get<SalesMonthRow[]>(`${MONTHS}${qs ? `?${qs}` : ''}`);
   },
   closeMonth: (month: string) => api.post<SalesMonthRow>(`${MONTHS}/${id(month)}/close`, {}),
-  reopenMonth: (month: string) => api.post<SalesMonthRow>(`${MONTHS}/${id(month)}/reopen`, {}),
+  reopenMonth: (month: string, body: SalesMonthReopenRequest = {}) =>
+    api.post<SalesMonthReopenResult>(`${MONTHS}/${id(month)}/reopen`, body),
 };
 
 /** Fetches a binary download (csv/xlsx) and returns the Blob, or an error message from the JSON envelope. */

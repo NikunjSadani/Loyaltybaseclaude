@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { api } from '@/lib/api-client';
 import { salesImportApi } from '@/lib/sales-import/api';
+import { usePermissions } from '@/lib/use-permissions';
 import { describeFilter } from '@/lib/sales-import/product-set';
 import type {
   SalesColumnMapping, SalesImportCombos, SalesKpiDefinitionDto, SalesSegmentOptions,
@@ -19,28 +20,36 @@ import type {
 import { ColumnMappingForm } from './_components/column-mapping-form';
 import { KpiEditor, type TenantKpi } from './_components/kpi-editor';
 
-/** Distinct non-empty cells of the detected rows — suggestions for the heading inputs. */
+/**
+ * Distinct non-empty cells of the detected HEADING row — suggestions for the heading inputs. detectedHeaders is
+ * [headingRow, ...sampleRows]; sample rows are data (outlet codes, amounts), never suggested as headings.
+ */
 function headerSuggestions(rows: string[][] | null | undefined): string[] {
   const out = new Set<string>();
-  for (const r of rows ?? []) for (const c of r) { const v = String(c ?? '').trim(); if (v) out.add(v); }
+  for (const c of rows?.[0] ?? []) { const v = String(c ?? '').trim(); if (v) out.add(v); }
   return [...out];
 }
 
 async function loadDetectedHeaders(): Promise<string[]> {
-  // ?fromImport=<id> (link from an import that needed mapping) wins; else the newest import that has detected rows.
+  // ?fromImport=<id> (link from an import that needed mapping) wins; else the newest import that needed mapping.
+  // Only GET :id carries detectedHeaders (the list always returns null), so the newest candidate is fetched.
   const fromImport = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('fromImport') : null;
   if (fromImport) {
     const r = await salesImportApi.get(fromImport);
-    if (r.success && r.data.detectedHeaders) return headerSuggestions(r.data.detectedHeaders);
+    if (r.success && r.data.detectedHeaders?.length) return headerSuggestions(r.data.detectedHeaders);
   }
   const list = await salesImportApi.list(null, 10);
   if (!list.success) return [];
-  return headerSuggestions(list.data.items.find((i) => i.detectedHeaders && i.detectedHeaders.length)?.detectedHeaders);
+  const candidate = list.data.items.find((i) => i.status === 'NEEDS_MAPPING' && !i.purgedAt);
+  if (!candidate) return [];
+  const r = await salesImportApi.get(candidate.id);
+  return r.success ? headerSuggestions(r.data.detectedHeaders) : [];
 }
 
-function KpiSection({ mapping }: { mapping: SalesColumnMapping }) {
+function KpiSection({ mapping, canEdit }: { mapping: SalesColumnMapping; canEdit: boolean }) {
   const [defs, setDefs] = useState<SalesKpiDefinitionDto[] | null>(null);
   const [tenantKpis, setTenantKpis] = useState<TenantKpi[]>([]);
+  const [tenantKpisError, setTenantKpisError] = useState<string | null>(null);
   const [combos, setCombos] = useState<SalesImportCombos | null>(null);
   const [segments, setSegments] = useState<SalesSegmentOptions | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -61,7 +70,8 @@ function KpiSection({ mapping }: { mapping: SalesColumnMapping }) {
       if (cancelled) return;
       if (d.success) setDefs([...d.data.definitions].sort((a, b) => a.order - b.order || a.kpiCode.localeCompare(b.kpiCode)));
       else setError(d.error);
-      if (k.success && Array.isArray(k.data)) setTenantKpis(k.data);
+      if (k.success && Array.isArray(k.data)) { setTenantKpis(k.data); setTenantKpisError(null); }
+      else setTenantKpisError(k.success ? 'unexpected response' : k.error);
       setCombos(c.success ? c.data : null); // 404 = no processed file yet → no picker list
       setSegments(s.success ? s.data : null); // unavailable → the scope inputs fall back to free text
     });
@@ -93,7 +103,7 @@ function KpiSection({ mapping }: { mapping: SalesColumnMapping }) {
             KPIs not listed here keep coming from the manual upload. Targets are uploaded as today.
           </p>
         </div>
-        {!editing && (
+        {!editing && canEdit && (
           <Button size="sm" variant="primary" onClick={() => open({
             kpiCode: '', measure: mapping.amount ? 'AMOUNT' : 'QUANTITY', filter: {}, outletTypes: [], programs: [],
             enabled: true, order: defs?.length ?? 0,
@@ -112,7 +122,9 @@ function KpiSection({ mapping }: { mapping: SalesColumnMapping }) {
           </div>
         ) : <div className="py-4"><Spinner size="sm" /></div>
       ) : defs.length === 0 ? (
-        <p className="text-sm text-gray-500">No KPIs yet. Press Add KPI to define the first one.</p>
+        <p className="text-sm text-gray-500">
+          {canEdit ? 'No KPIs yet. Press Add KPI to define the first one.' : 'No KPIs are set up for Sales Import yet.'}
+        </p>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -141,10 +153,10 @@ function KpiSection({ mapping }: { mapping: SalesColumnMapping }) {
                       : 'All'}
                   </td>
                   <td className="px-3 py-2 text-right whitespace-nowrap">
-                    <Button size="sm" variant="ghost" onClick={() => open(d)} aria-label={`Edit ${d.kpiCode}`} disabled={Boolean(editing)}>
-                      <Pencil className="w-3.5 h-3.5" /> Edit
+                    <Button size="sm" variant="ghost" onClick={() => open(d)} aria-label={`${canEdit ? 'Edit' : 'View'} ${d.kpiCode}`} disabled={Boolean(editing)}>
+                      <Pencil className="w-3.5 h-3.5" /> {canEdit ? 'Edit' : 'View'}
                     </Button>
-                    {d.enabled ? (
+                    {!canEdit ? null : d.enabled ? (
                       <Button size="sm" variant="ghost" onClick={() => setEnabled(d, false)} aria-label={`Stop importing ${d.kpiCode}`} className="text-red-600">
                         <Power className="w-3.5 h-3.5" /> Stop importing
                       </Button>
@@ -166,6 +178,9 @@ function KpiSection({ mapping }: { mapping: SalesColumnMapping }) {
           key={editorKey}
           initial={editing}
           tenantKpis={tenantKpis}
+          tenantKpisError={tenantKpisError}
+          onRetryTenantKpis={reload}
+          canEdit={canEdit}
           ownedCodes={ownedBy(editing.id)}
           mapping={mapping}
           combos={combos}
@@ -180,6 +195,8 @@ function KpiSection({ mapping }: { mapping: SalesColumnMapping }) {
 }
 
 export default function SalesImportSettingsPage() {
+  const { ready, has } = usePermissions();
+  const canEdit = ready && has('targets:manage_config');
   const [profile, setProfile] = useState<SalesColumnMapping | null | undefined>(undefined);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [detected, setDetected] = useState<string[]>([]);
@@ -213,9 +230,9 @@ export default function SalesImportSettingsPage() {
         ) : <div className="py-10 flex justify-center"><Spinner size="lg" /></div>
       ) : (
         <>
-          <ColumnMappingForm initial={profile} detectedHeaders={detected} onSaved={(m) => setProfile(m)} />
+          <ColumnMappingForm initial={profile} detectedHeaders={detected} onSaved={(m) => setProfile(m)} canEdit={canEdit} />
           {profile ? (
-            <KpiSection mapping={profile} />
+            <KpiSection mapping={profile} canEdit={canEdit} />
           ) : (
             <p className="text-sm text-gray-500 bg-white rounded-xl border border-gray-200 p-6">
               Save the column mapping first; then you can define the KPIs.

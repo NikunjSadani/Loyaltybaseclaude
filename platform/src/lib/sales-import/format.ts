@@ -2,7 +2,7 @@
  * Sales Import — display helpers (plain-English warning text, status chips, number formatting). Pure; no Date
  * reads at module scope (hydration lesson #58: pages call these only after data has loaded).
  */
-import type { MonthPreview, SalesImportStatus, SalesMonthWarning } from './types';
+import { SALES_KPI_QUANTITY_DECIMALS, type MonthPreview, type SalesImportStatus, type SalesMonthWarning } from './types';
 
 export const ACTIVE_STATUSES: readonly SalesImportStatus[] = ['QUEUED', 'PROCESSING'];
 
@@ -11,7 +11,7 @@ export function isActiveStatus(s: SalesImportStatus): boolean {
 }
 
 export const STATUS_LABEL: Record<SalesImportStatus, string> = {
-  UPLOADING: 'Upload incomplete',
+  UPLOADING: 'Uploading / incomplete',
   QUEUED: 'Queued',
   PROCESSING: 'Processing',
   NEEDS_MAPPING: 'Needs column mapping',
@@ -57,12 +57,28 @@ export function dateTimeLabel(iso: string | null | undefined): string {
   });
 }
 
+/**
+ * ₹ with Indian grouping: whole rupees show no decimals ("₹1,500"); anything with paise always shows two
+ * ("₹1,500.50", never "₹1,500.5"). Negative values put the sign before the symbol: "−₹500".
+ */
 export function formatRupees(v: number): string {
-  return `₹${v.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+  const abs = Math.abs(v);
+  const paise = Math.round(abs * 100);
+  const whole = paise % 100 === 0;
+  const text = (paise / 100).toLocaleString('en-IN', {
+    minimumFractionDigits: whole ? 0 : 2, maximumFractionDigits: whole ? 0 : 2,
+  });
+  return `${v < 0 && paise !== 0 ? '−' : ''}₹${text}`;
 }
 
+/** Drops one trailing full stop so "…: {message}. Next sentence" never renders "..". */
+export function sentence(s: string | null | undefined): string {
+  return String(s ?? '').trim().replace(/\.+$/, '');
+}
+
+/** Cases with up to SALES_KPI_QUANTITY_DECIMALS (3) decimals — the precision the backend stores and sends. */
 export function formatCases(v: number): string {
-  return v.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+  return v.toLocaleString('en-IN', { maximumFractionDigits: SALES_KPI_QUANTITY_DECIMALS });
 }
 
 export function formatCount(v: number): string {
@@ -74,10 +90,17 @@ export function formatSigned(v: number, fmt: (n: number) => string): string {
   return v > 0 ? `+${fmt(v)}` : `−${fmt(Math.abs(v))}`;
 }
 
+/**
+ * File sizes in BINARY units everywhere in Sales Import (1 KB = 1024 B, 1 MB = 1024² B — what Windows Explorer
+ * shows), so "600 MB" in the limit copy, the size column and the server limit (SALES_IMPORT_MAX_FILE_BYTES = 600·1024²)
+ * all agree.
+ */
 export function formatBytes(b: number): string {
-  if (b < 1024) return `${b} B`;
-  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
-  return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+  const KB = 1024;
+  const MB = 1024 * 1024;
+  if (b < KB) return `${b} B`;
+  if (b < MB && Number((b / KB).toFixed(1)) < 1024) return `${(b / KB).toFixed(1)} KB`;
+  return `${(b / MB).toFixed(1)} MB`;
 }
 
 export function formatKpiValue(v: number, measure: 'AMOUNT' | 'QUANTITY'): string {
@@ -85,20 +108,25 @@ export function formatKpiValue(v: number, measure: 'AMOUNT' | 'QUANTITY'): strin
 }
 
 /** Plain-English text for a month warning chip (the "why" an admin needs before applying). */
-export function warningText(w: SalesMonthWarning, m: Pick<MonthPreview, 'month' | 'firstDate' | 'lastDate'>): string {
+export function warningText(
+  w: SalesMonthWarning,
+  m: Pick<MonthPreview, 'month' | 'firstDate' | 'lastDate'> & { lastApplied?: MonthPreview['lastApplied'] },
+): string {
   switch (w) {
     case 'STARTS_AFTER_FIRST':
       return `Partial month: the file starts on ${dayLabel(m.firstDate)}, not the 1st. Applying replaces ALL of ${monthLabel(m.month)} with only these dates.`;
     case 'ENDS_BEFORE_MONTH_END':
       return `Partial month: the file stops on ${dayLabel(m.lastDate)}, before the month ended. Applying replaces ALL of ${monthLabel(m.month)} with only these dates.`;
-    case 'OLDER_THAN_LAST_APPLIED':
-      return 'This file was uploaded before the file that was last applied to this month. Applying it would replace newer numbers with older ones.';
+    case 'OLDER_THAN_LAST_APPLIED': {
+      const theirs = m.lastApplied?.lastInvoiceDate;
+      return `Older data: this file's sales for ${monthLabel(m.month)} stop on ${dayLabel(m.lastDate)}` +
+        (theirs ? `, but the file applied last time goes up to ${dayLabel(theirs)}` : ', earlier than the file applied last time') +
+        '. Applying it would roll the month back and replace the newer numbers with older ones.';
+    }
     case 'REPLACES_MANUAL_VALUES':
       return 'Some outlets have values for these KPIs from the manual achievement upload. Applying replaces them with the sales-file values.';
     case 'NEGATIVE_VALUES':
       return 'Some outlets come out negative (returns are bigger than sales). They are stored as-is.';
-    case 'ROSTER_CHANGED':
-      return 'The outlet list changed after this file was processed. Reprocess the file before applying.';
     default:
       return String(w);
   }
@@ -107,10 +135,9 @@ export function warningText(w: SalesMonthWarning, m: Pick<MonthPreview, 'month' 
 export const WARNING_SHORT: Record<SalesMonthWarning, string> = {
   STARTS_AFTER_FIRST: 'Starts after the 1st',
   ENDS_BEFORE_MONTH_END: 'Ends before month end',
-  OLDER_THAN_LAST_APPLIED: 'Older than last applied',
+  OLDER_THAN_LAST_APPLIED: 'Older data than last applied',
   REPLACES_MANUAL_VALUES: 'Replaces manual values',
   NEGATIVE_VALUES: 'Negative values',
-  ROSTER_CHANGED: 'Outlet list changed',
 };
 
 export function isPartialMonth(m: Pick<MonthPreview, 'warnings'>): boolean {
@@ -132,11 +159,11 @@ export function applyBlockers(
   const picked = months.filter((m) => selected.has(m.month));
   if (picked.length === 0) out.push('Tick at least one month.');
   for (const m of picked) {
-    if (!m.canApply) out.push(`${monthLabel(m.month)} cannot be applied${m.blockedReason ? `: ${m.blockedReason}` : '.'}`);
+    if (!m.canApply) out.push(`${monthLabel(m.month)} cannot be applied${m.blockedReason ? `: ${sentence(m.blockedReason)}.` : '.'}`);
     if (isPartialMonth(m) && !partialAcks.has(m.month)) out.push(`Confirm the partial-month replacement for ${monthLabel(m.month)}.`);
   }
   if (picked.some((m) => m.warnings.includes('OLDER_THAN_LAST_APPLIED')) && !olderAck) {
-    out.push('Confirm that you want to apply an older file over a newer one.');
+    out.push("Confirm that you want to roll a month back to this file's older data.");
   }
   return out;
 }

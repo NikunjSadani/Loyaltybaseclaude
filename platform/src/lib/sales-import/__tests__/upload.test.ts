@@ -5,7 +5,8 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-  planParts, validateSalesFile, withRetry, uploadInParts, SalesImportHttpError, UploadAbortedError,
+  planParts, validateSalesFile, withRetry, uploadInParts, continueUpload, backoffMs, UPLOAD_RETRIES,
+  SalesImportHttpError, UploadAbortedError, type UploadSession,
 } from '../upload';
 import { SALES_IMPORT_PART_SIZE, SALES_IMPORT_MAX_FILE_BYTES } from '../types';
 
@@ -57,6 +58,12 @@ describe('withRetry', () => {
     await expect(withRetry(fn, 4, { sleep })).resolves.toBe('ok');
     expect(fn).toHaveBeenCalledTimes(3);
     expect(sleep.mock.calls.map((c) => c[0])).toEqual([500, 1000]);
+  });
+
+  it('the default budget waits ~60 s in total, capped at 30 s per wait', () => {
+    const waits = Array.from({ length: UPLOAD_RETRIES }, (_, i) => backoffMs(i));
+    expect(waits).toEqual([500, 1000, 2000, 4000, 8000, 16000, 30000]);
+    expect(waits.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(60000);
   });
 
   it('gives up after the retry budget', async () => {
@@ -154,8 +161,58 @@ describe('uploadInParts', () => {
     const onCreated = vi.fn();
     await expect(uploadInParts(file(6), { onProgress: () => {}, signal: ctl.signal, sleep: noSleep, onCreated }))
       .rejects.toBeInstanceOf(UploadAbortedError);
-    expect(onCreated).toHaveBeenCalledWith('i');
+    expect(onCreated).toHaveBeenCalledWith('i', expect.objectContaining({ importId: 'i' }));
     expect(urls.some((u) => u.endsWith('/parts/1'))).toBe(false);
     expect(urls.some((u) => u.endsWith('/complete'))).toBe(false);
+  });
+
+  it('continueUpload re-sends ONLY the parts not yet confirmed, then completes', async () => {
+    const posted: number[] = [];
+    fetchMock.mockImplementation(async (url: string) => {
+      const m = url.match(/\/parts\/(\d+)$/);
+      if (m) { posted.push(Number(m[1])); return json(200, { success: true, data: { partsReceived: 3 } }); }
+      if (url.endsWith('/complete')) return json(200, { success: true, data: { id: 'i', status: 'QUEUED' } });
+      throw new Error(`unexpected ${url}`);
+    });
+    const session: UploadSession = { importId: 'i', partSize: 2, partCount: 3, confirmed: new Set([0, 2]) };
+    const progress: number[] = [];
+    await expect(continueUpload(file(6), session, { onProgress: (p) => progress.push(p), sleep: noSleep })).resolves.toBe('i');
+    expect(posted).toEqual([1]);
+    expect(progress).toEqual([2 / 3, 1]);
+  });
+
+  it('a failed part leaves the confirmed set intact for a later resume', async () => {
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.endsWith('/uploads')) return json(200, { success: true, data: { importId: 'i', partSize: 2, partCount: 2 } });
+      if (url.endsWith('/parts/0')) return json(200, { success: true, data: { partsReceived: 1 } });
+      return json(409, { success: false, error: 'Import is not uploading' });
+    });
+    let session: UploadSession | null = null;
+    await expect(uploadInParts(file(4), { onProgress: () => {}, sleep: noSleep, onCreated: (_id, s) => { session = s; } }))
+      .rejects.toThrow('Import is not uploading');
+    expect([...(session as unknown as UploadSession).confirmed]).toEqual([0]);
+  });
+
+  it('a /complete whose answer was lost but which succeeded server-side counts as success', async () => {
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/uploads')) return json(200, { success: true, data: { importId: 'i', partSize: 8, partCount: 1 } });
+      if (url.endsWith('/parts/0')) return json(200, { success: true, data: { partsReceived: 1 } });
+      if (url.endsWith('/complete')) return json(502, { success: false, error: 'Bad gateway' });
+      if (url.endsWith('/sales-import/i') && (!init?.method || init.method === 'GET')) {
+        return json(200, { success: true, data: { id: 'i', status: 'QUEUED' } });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    await expect(uploadInParts(file(5), { onProgress: () => {}, sleep: noSleep })).resolves.toBe('i');
+  });
+
+  it('a /complete that really failed (still UPLOADING) is reported', async () => {
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.endsWith('/uploads')) return json(200, { success: true, data: { importId: 'i', partSize: 8, partCount: 1 } });
+      if (url.endsWith('/parts/0')) return json(200, { success: true, data: { partsReceived: 1 } });
+      if (url.endsWith('/complete')) return json(502, { success: false, error: 'Bad gateway' });
+      return json(200, { success: true, data: { id: 'i', status: 'UPLOADING' } });
+    });
+    await expect(uploadInParts(file(5), { onProgress: () => {}, sleep: noSleep })).rejects.toThrow('Bad gateway');
   });
 });

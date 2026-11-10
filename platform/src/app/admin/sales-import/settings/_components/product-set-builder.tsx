@@ -3,22 +3,25 @@
 /**
  * "Product set" builder (SALES-IMPORT-PIPELINE-PLAN §6.2a, §11 F-6). Three ways to add an entry to the Include
  * (anyOf) or Exclude (noneOf) list:
- *   1. pick combinations seen in the latest processed file (searchable, sortable, multi-select),
- *   2. whole-value chips (e.g. a whole brand, every SKU group),
- *   3. free entry for products not in any file yet.
- * The set shows as chips. Chips the last "Test" flagged get an amber warning ("never appears in the latest file" /
- * "already included by …").
+ *   1. pick combinations seen in the latest processed file (searchable, sortable, multi-select) — a picked combo pins
+ *      EVERY product column to its value, a blank one included (blank = "this column is empty", not "any"),
+ *   2. whole-value chips (e.g. a whole brand, every SKU group; "(blank)" = lines where that column is empty),
+ *   3. free entry for products not in any file yet (an empty box there means "any value").
+ * The set shows as chips. Warnings are computed LIVE from the loaded file (never appears in it / already included by
+ * another entry / both included and excluded / cancelled by an exclusion); the last "Test" adds the server's view.
  */
-import React, { useMemo, useState } from 'react';
+import React, { useId, useMemo, useRef, useState } from 'react';
 import { Plus, Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
-  addEntries, coveringEntryIndex, entryKey, entryLabel, hasEntry, listOf, removeEntry, removeEntryAt,
-  type FilterList,
+  addEntries, comboEntry, coveringEntryIndex, entriesNotInCombos, entryKey, entryLabel, hasEntry,
+  includeExcludeConflicts, listOf, removeEntry, removeEntryAt,
+  type FilterList, type NormalizeOptions,
 } from '@/lib/sales-import/product-set';
 import { formatCases, formatCount, formatRupees } from '@/lib/sales-import/format';
-import type {
-  SalesDimensionMapping, SalesImportCombos, SalesKpiFilter,
+import {
+  SALES_IMPORT_MAX_DIMENSION_COMBOS, SALES_KPI_MAX_FILTER_ENTRIES,
+  type SalesDimensionMapping, type SalesImportCombos, type SalesKpiFilter,
 } from '@/lib/sales-import/types';
 
 export interface EntryWarnings {
@@ -28,6 +31,7 @@ export interface EntryWarnings {
 
 const MAX_ROWS = 100;
 type SortKey = { kind: 'dim'; key: string } | { kind: 'lines' | 'amount' | 'qty' };
+type AddFn = (raw: Array<Record<string, unknown>>, opts?: NormalizeOptions) => void;
 
 export function ProductSetBuilder({
   filter, onChange, dims, combos, warnings,
@@ -36,32 +40,77 @@ export function ProductSetBuilder({
   onChange(f: SalesKpiFilter): void;
   dims: SalesDimensionMapping[];
   combos: SalesImportCombos | null;
+  /** From the last fresh "Test" (server-side); merged with the live checks. */
   warnings: EntryWarnings | null;
 }) {
   const [tab, setTab] = useState<FilterList>('anyOf');
   const [note, setNote] = useState<string | null>(null);
+  const baseId = useId();
+  const tabRefs = useRef<Record<FilterList, HTMLButtonElement | null>>({ anyOf: null, noneOf: null });
 
   const include = listOf(filter, 'anyOf');
   const exclude = listOf(filter, 'noneOf');
 
-  function add(list: FilterList, raw: Array<Record<string, unknown>>) {
-    const r = addEntries(filter, list, raw);
-    setNote(r.duplicates > 0 ? `${r.duplicates} already in the set — skipped.` : null);
+  const live = useMemo(
+    () => entriesNotInCombos(filter, combos?.dimensionCombos, SALES_IMPORT_MAX_DIMENSION_COMBOS),
+    [filter, combos],
+  );
+  const conflicts = useMemo(() => includeExcludeConflicts(filter), [filter]);
+
+  function add(list: FilterList, raw: Array<Record<string, unknown>>, opts: NormalizeOptions = {}) {
+    const r = addEntries(filter, list, raw, { ...opts, max: SALES_KPI_MAX_FILTER_ENTRIES });
+    const parts: string[] = [];
+    if (r.duplicates > 0) parts.push(`${r.duplicates} already in the set — skipped.`);
+    if (r.overCap > 0) {
+      parts.push(`${r.overCap} not added: a list can hold at most ${SALES_KPI_MAX_FILTER_ENTRIES} entries. ` +
+        'Use a whole-value chip (e.g. a whole brand) to cover many combinations with one entry.');
+    }
+    setNote(parts.length ? parts.join(' ') : null);
     if (r.added > 0) onChange(r.filter);
   }
 
   function chipWarning(list: FilterList, i: number): string | null {
-    if (!warnings) return null;
-    if (warnings.unmatched[list].includes(i)) {
-      return `${entryLabel(listOf(filter, list)[i], dims)} never appears in the latest file. Check the spelling or size.`;
+    const entries = listOf(filter, list);
+    const label = entryLabel(entries[i], dims);
+    const own = (k: 'include' | 'exclude') => conflicts.filter((c) => (k === 'include' ? c.include : c.exclude) === i);
+    if (list === 'anyOf') {
+      const c = own('include')[0];
+      if (c) {
+        return c.kind === 'same'
+          ? `${label} is both included and excluded, so it counts nothing.`
+          : `${label} counts nothing: "except ${entryLabel(exclude[c.exclude], dims)}" removes all of it.`;
+      }
+    } else {
+      const c = own('exclude')[0];
+      if (c) {
+        return c.kind === 'same'
+          ? `${label} is both included and excluded.`
+          : `This exclusion removes all of the included ${entryLabel(include[c.include], dims)}.`;
+      }
     }
-    if (list === 'anyOf' && warnings.redundant.anyOf.includes(i)) {
+    if (live?.[list].includes(i) || warnings?.unmatched[list].includes(i)) {
+      return `${label} never appears in the latest file. Check the spelling or size.`;
+    }
+    if (list === 'anyOf') {
       const by = coveringEntryIndex(include, i);
-      const byText = by >= 0 ? entryLabel(include[by], dims) : 'another entry';
-      return `${entryLabel(include[i], dims)} is already included by ${byText}.`;
+      if (by >= 0) return `${label} is already included by ${entryLabel(include[by], dims)}.`;
+      if (warnings?.redundant.anyOf.includes(i)) return `${label} is already included by another entry.`;
     }
     return null;
   }
+
+  const tabs: FilterList[] = ['anyOf', 'noneOf'];
+  function onTabKey(e: React.KeyboardEvent<HTMLButtonElement>) {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft' && e.key !== 'Home' && e.key !== 'End') return;
+    e.preventDefault();
+    const idx = tabs.indexOf(tab);
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1
+      : (idx + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    setTab(tabs[next]);
+    tabRefs.current[tabs[next]]?.focus();
+  }
+  const tabId = (l: FilterList) => `${baseId}-tab-${l}`;
+  const panelId = `${baseId}-panel`;
 
   return (
     <div className="space-y-3" data-testid="product-set-builder">
@@ -82,23 +131,28 @@ export function ProductSetBuilder({
         <p className="text-[11px] text-gray-500">
           A line is counted when it matches at least one included entry and no excluded entry. A line matching two
           entries is counted once.
+          {combos && combos.dimensionCombos.length >= SALES_IMPORT_MAX_DIMENSION_COMBOS
+            ? ' The latest file has too many product combinations to check every entry here — press Test to check them.'
+            : ''}
         </p>
       </div>
 
-      {/* Include / Exclude tabs */}
+      {/* Include / Exclude tabs (WAI-ARIA tabs: arrow keys move between them) */}
       <div role="tablist" aria-label="Add products" className="flex gap-1 border-b border-gray-200">
-        {(['anyOf', 'noneOf'] as const).map((l) => (
-          <button key={l} type="button" role="tab" aria-selected={tab === l} onClick={() => setTab(l)}
+        {tabs.map((l) => (
+          <button key={l} type="button" role="tab" id={tabId(l)} aria-selected={tab === l} aria-controls={panelId}
+            tabIndex={tab === l ? 0 : -1} ref={(el) => { tabRefs.current[l] = el; }}
+            onClick={() => setTab(l)} onKeyDown={onTabKey}
             className={`px-3 py-1.5 text-xs font-medium -mb-px border-b-2 ${tab === l ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-transparent text-gray-500'}`}>
             {l === 'anyOf' ? `Include (${include.length})` : `Exclude (${exclude.length})`}
           </button>
         ))}
       </div>
-      {note && <p className="text-xs text-gray-500" role="status">{note}</p>}
+      <p className="text-xs text-gray-500" aria-live="polite">{note}</p>
 
-      <div role="tabpanel" className="space-y-4">
-        <ComboPicker list={tab} filter={filter} onChange={onChange} onAdd={(raw) => add(tab, raw)} dims={dims} combos={combos} />
-        <WholeValueChips list={tab} onAdd={(raw) => add(tab, raw)} dims={dims} combos={combos} />
+      <div role="tabpanel" id={panelId} aria-labelledby={tabId(tab)} className="space-y-4">
+        <ComboPicker list={tab} filter={filter} onChange={onChange} onAdd={(raw, o) => add(tab, raw, o)} dims={dims} combos={combos} />
+        <WholeValueChips list={tab} onAdd={(raw, o) => add(tab, raw, o)} dims={dims} combos={combos} />
         <FreeEntry list={tab} onAdd={(raw) => add(tab, raw)} dims={dims} />
       </div>
     </div>
@@ -123,7 +177,7 @@ function Chip({ label, warning, onRemove, exclude }: { label: string; warning: s
 function ComboPicker({
   list, filter, onChange, onAdd, dims, combos,
 }: {
-  list: FilterList; filter: SalesKpiFilter; onChange(f: SalesKpiFilter): void; onAdd(raw: Array<Record<string, unknown>>): void;
+  list: FilterList; filter: SalesKpiFilter; onChange(f: SalesKpiFilter): void; onAdd: AddFn;
   dims: SalesDimensionMapping[]; combos: SalesImportCombos | null;
 }) {
   const [q, setQ] = useState('');
@@ -160,10 +214,19 @@ function ComboPicker({
   }
 
   const shown = rows.slice(0, MAX_ROWS);
+  const current = listOf(filter, list).length;
+  const notYetPicked = rows.filter((c) => !hasEntry(filter, list, comboEntry(c.dims, dims)));
+  const room = Math.max(0, SALES_KPI_MAX_FILTER_ENTRIES - current);
+  const willAdd = Math.min(room, notYetPicked.length);
+
+  const isActive = (key: SortKey) => JSON.stringify(key) === JSON.stringify(sort);
+  const ariaSort = (key: SortKey): React.AriaAttributes['aria-sort'] =>
+    (isActive(key) ? (desc ? 'descending' : 'ascending') : 'none');
   const sortBtn = (key: SortKey, label: string) => {
-    const active = JSON.stringify(key) === JSON.stringify(sort);
+    const active = isActive(key);
     return (
       <button type="button" className={`font-medium ${active ? 'text-gray-900' : ''}`}
+        aria-label={`Sort by ${label}`}
         onClick={() => { if (active) setDesc((v) => !v); else { setSort(key); setDesc(key.kind !== 'dim'); } }}>
         {label}{active ? (desc ? ' ↓' : ' ↑') : ''}
       </button>
@@ -180,31 +243,39 @@ function ComboPicker({
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search, e.g. a brand"
             className="pl-7 pr-2 py-1.5 text-xs border border-gray-300 rounded-md w-56" />
         </label>
-        <Button size="sm" variant="outline" type="button" disabled={rows.length === 0}
-          onClick={() => onAdd(rows.map((c) => c.dims))}>
-          Select all {q.trim() ? `"${q.trim()}" ` : ''}({rows.length})
+        <Button size="sm" variant="outline" type="button" disabled={willAdd === 0}
+          onClick={() => onAdd(notYetPicked.slice(0, room).map((c) => comboEntry(c.dims, dims)), { keepBlank: true })}>
+          Select all {q.trim() ? `"${q.trim()}" ` : ''}({willAdd})
         </Button>
+        {notYetPicked.length > room && (
+          <span className="text-[11px] text-amber-700">
+            Only {room} more fit (max {SALES_KPI_MAX_FILTER_ENTRIES} entries) — narrow the search or use a whole-value chip.
+          </span>
+        )}
       </div>
       <div className="max-h-72 overflow-auto border border-gray-200 rounded-lg">
         <table className="w-full text-xs">
           <thead className="sticky top-0 bg-gray-50">
             <tr className="text-left text-gray-500">
               <th className="px-2 py-1 w-6"><span className="sr-only">Pick</span></th>
-              {dims.map((d) => <th key={d.key} className="px-2 py-1">{sortBtn({ kind: 'dim', key: d.key }, d.label)}</th>)}
-              <th className="px-2 py-1 text-right">{sortBtn({ kind: 'lines' }, 'Lines')}</th>
-              <th className="px-2 py-1 text-right">{sortBtn({ kind: 'amount' }, '₹')}</th>
-              <th className="px-2 py-1 text-right">{sortBtn({ kind: 'qty' }, 'Cases')}</th>
+              {dims.map((d) => <th key={d.key} className="px-2 py-1" aria-sort={ariaSort({ kind: 'dim', key: d.key })}>{sortBtn({ kind: 'dim', key: d.key }, d.label)}</th>)}
+              <th className="px-2 py-1 text-right" aria-sort={ariaSort({ kind: 'lines' })}>{sortBtn({ kind: 'lines' }, 'Lines')}</th>
+              <th className="px-2 py-1 text-right" aria-sort={ariaSort({ kind: 'amount' })}>{sortBtn({ kind: 'amount' }, '₹')}</th>
+              <th className="px-2 py-1 text-right" aria-sort={ariaSort({ kind: 'qty' })}>{sortBtn({ kind: 'qty' }, 'Cases')}</th>
             </tr>
           </thead>
           <tbody>
             {shown.map((c) => {
-              const checked = hasEntry(filter, list, c.dims);
-              const name = entryLabel(c.dims, dims);
+              const entry = comboEntry(c.dims, dims);
+              const checked = hasEntry(filter, list, entry);
+              const name = entryLabel(entry, dims);
+              const full = !checked && current >= SALES_KPI_MAX_FILTER_ENTRIES;
               return (
-                <tr key={entryKey(c.dims)} className="border-t border-gray-100">
+                <tr key={entryKey(entry)} className="border-t border-gray-100">
                   <td className="px-2 py-1">
-                    <input type="checkbox" aria-label={`Pick ${name}`} checked={checked}
-                      onChange={() => (checked ? onChange(removeEntry(filter, list, c.dims)) : onAdd([c.dims]))} />
+                    <input type="checkbox" aria-label={`Pick ${name}`} checked={checked} disabled={full}
+                      title={full ? `The list is full (${SALES_KPI_MAX_FILTER_ENTRIES} entries)` : undefined}
+                      onChange={() => (checked ? onChange(removeEntry(filter, list, entry)) : onAdd([entry], { keepBlank: true }))} />
                   </td>
                   {dims.map((d) => <td key={d.key} className="px-2 py-1 text-gray-800">{c.dims[d.key] || <span className="text-gray-400">(blank)</span>}</td>)}
                   <td className="px-2 py-1 text-right text-gray-600">{formatCount(c.lines)}</td>
@@ -223,16 +294,17 @@ function ComboPicker({
 
 function WholeValueChips({
   list, onAdd, dims, combos,
-}: { list: FilterList; onAdd(raw: Array<Record<string, unknown>>): void; dims: SalesDimensionMapping[]; combos: SalesImportCombos | null }) {
+}: { list: FilterList; onAdd: AddFn; dims: SalesDimensionMapping[]; combos: SalesImportCombos | null }) {
   const [picked, setDimKey] = useState(dims[0]?.key ?? '');
   const dim = dims.find((d) => d.key === picked) ?? dims[0];
   const dimKey = dim?.key ?? '';
   const values = combos?.dimensionValues?.[dimKey] ?? [];
   if (!dim || values.length === 0) return null;
+  const verb = list === 'anyOf' ? 'Add' : 'Exclude';
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2">
-        <p className="text-xs font-medium text-gray-700">{list === 'anyOf' ? 'Add' : 'Exclude'} a whole</p>
+        <p className="text-xs font-medium text-gray-700">{verb} a whole</p>
         {dims.length > 1 ? (
           <select value={dimKey} onChange={(e) => setDimKey(e.target.value)} aria-label="Whole-value column"
             className="text-xs border border-gray-300 rounded-md px-1.5 py-1">
@@ -241,13 +313,18 @@ function WholeValueChips({
         ) : <span className="text-xs text-gray-700">{dim.label}</span>}
       </div>
       <div className="flex flex-wrap gap-1.5">
-        {values.slice(0, 40).map((v) => (
-          <button key={v.value} type="button" onClick={() => onAdd([{ [dim.key]: v.value }])}
-            aria-label={`${list === 'anyOf' ? 'Add' : 'Exclude'} all of ${v.value}`}
-            className="inline-flex items-center gap-1 text-xs border border-gray-300 rounded-full px-2 py-0.5 hover:border-[var(--brand-primary)]">
-            <Plus className="w-3 h-3" />{v.value || '(blank)'}
-          </button>
-        ))}
+        {values.slice(0, 40).map((v) => {
+          const blank = v.value.trim() === '';
+          return (
+            <button key={v.value} type="button"
+              // A blank value is an exact "this column is empty" match — keep it, never widen to "any".
+              onClick={() => onAdd([{ [dim.key]: v.value }], { keepBlank: true })}
+              aria-label={blank ? `${verb} all lines with a blank ${dim.label}` : `${verb} all of ${v.value}`}
+              className="inline-flex items-center gap-1 text-xs border border-gray-300 rounded-full px-2 py-0.5 hover:border-[var(--brand-primary)]">
+              <Plus className="w-3 h-3" />{blank ? `(blank ${dim.label.toLowerCase()})` : v.value}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -275,12 +352,13 @@ function FreeEntry({ list, onAdd, dims }: { list: FilterList; onAdd(raw: Array<R
             <input value={vals[d.key] ?? ''} onChange={(e) => setVals((p) => ({ ...p, [d.key]: e.target.value }))}
               onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }}
               aria-label={`Free entry ${d.label}`}
+              aria-invalid={err ? true : undefined}
               className="block mt-0.5 px-2 py-1 text-xs border border-gray-300 rounded-md w-36" />
           </label>
         ))}
         <Button size="sm" variant="outline" type="button" onClick={submit}><Plus className="w-3.5 h-3.5" /> {list === 'anyOf' ? 'Include' : 'Exclude'}</Button>
       </div>
-      {err && <p className="text-xs text-red-600">{err}</p>}
+      <p className="text-xs text-red-600" aria-live="assertive" data-testid="free-entry-error">{err}</p>
       <p className="text-[11px] text-gray-400">Leave a column empty to mean &ldquo;all&rdquo; (e.g. only a brand = every size of it).</p>
     </div>
   );

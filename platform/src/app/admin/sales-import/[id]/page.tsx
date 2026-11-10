@@ -3,15 +3,18 @@
 /**
  * /admin/sales-import/[id] — one import (SALES-IMPORT-PIPELINE-PLAN §11 F-4).
  *
- * QUEUED/PROCESSING → polls GET :id every 2 s (stale responses dropped via a request sequence; stops on unmount and
- * on a terminal status). NEEDS_MAPPING → detected headings + link to Settings. FAILED → message + Reprocess.
- * READY → the per-month preview: tick OPEN months, acknowledge partial / older-file warnings, Apply.
+ * QUEUED/PROCESSING → polls GET :id every 2 s (stale responses dropped via a request sequence; stops on unmount, on
+ * a terminal status and on 401/403/404). UPLOADING → polls slowly (the upload may still be running in another tab).
+ * NEEDS_MAPPING → detected heading row + sample rows + link to Settings. FAILED → message + Reprocess.
+ * READY → the per-month preview: tick OPEN months, acknowledge partial / older-data warnings, Apply (sends the
+ * definitions hash + processing version; ANY 4xx refreshes the preview). Cancel = QUEUED or stalled PROCESSING.
+ * Actions that change data are shown only to users holding targets:upload (usePermissions).
  */
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import {
-  AlertTriangle, ArrowLeft, CheckCircle2, ChevronDown, ChevronRight, Copy, Download, Lock, RefreshCw, Trash2, XCircle,
+  AlertTriangle, ArrowLeft, Ban, CheckCircle2, ChevronDown, ChevronRight, Copy, Download, Info, Lock, RefreshCw, Trash2, XCircle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
@@ -19,23 +22,38 @@ import { downloadBlob } from '@/lib/download';
 import { fetchDownload, salesImportApi } from '@/lib/sales-import/api';
 import {
   STATUS_CHIP, STATUS_LABEL, WARNING_SHORT, applyBlockers, dateTimeLabel, dayLabel, formatBytes, formatCases,
-  formatCount, formatKpiValue, formatRupees, formatSigned, isActiveStatus, isPartialMonth, monthLabel, warningText,
+  formatCount, formatKpiValue, formatRupees, formatSigned, isActiveStatus, isPartialMonth, monthLabel, sentence,
+  warningText,
 } from '@/lib/sales-import/format';
-import type {
-  ApplyMonthResult, MonthPreview, SalesImportDetail, SalesImportPreview,
+import { getUploadState, subscribeUpload } from '@/lib/sales-import/upload-store';
+import { usePermissions } from '@/lib/use-permissions';
+import {
+  SALES_IMPORT_ABANDONED_UPLOAD_HOURS, SALES_IMPORT_STALE_HEARTBEAT_MINUTES,
+  type ApplyMonthResult, type MonthPreview, type SalesImportDetail, type SalesImportPreview,
 } from '@/lib/sales-import/types';
 
 const POLL_MS = 2000;
+const UPLOADING_POLL_MS = 5000;
 const QUEUED_TOO_LONG_MS = 2 * 60 * 1000;
+
+/** A failed request that will not get better by polling again. */
+function finalErrorText(status: number | undefined): string | null {
+  if (status === 401) return 'Your session has expired. Sign in again to see this import.';
+  if (status === 403) return 'You don’t have access to this import.';
+  if (status === 404) return 'This import was not found. It may have been deleted.';
+  return null;
+}
 
 // ── Polling the import ───────────────────────────────────────────────────────
 
 function useImportDetail(importId: string | undefined) {
   const [detail, setDetail] = useState<SalesImportDetail | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ text: string; final: boolean } | null>(null);
   const [queuedTooLong, setQueuedTooLong] = useState(false);
   const [tick, setTick] = useState(0);
   const seqRef = useRef(0);
+  // There is no server "queued at" timestamp; this counts from when THIS page first saw the import queued, so the
+  // "waiting for more than 2 minutes" notice is a lower bound (it is never shown too early).
   const queuedSinceRef = useRef<number | null>(null);
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
@@ -50,9 +68,10 @@ function useImportDetail(importId: string | undefined) {
       const r = await salesImportApi.get(importId);
       if (cancelled || seq !== seqRef.current) return; // stale response
       if (!r.success) {
-        setError(r.status === 404 ? 'This import was not found.' : r.error);
-        // Keep polling through a transient error while processing; a 404 is final.
-        if (r.status !== 404 && r.status !== 403) timer = setTimeout(load, POLL_MS * 2);
+        const final = finalErrorText(r.status);
+        setError({ text: final ?? r.error, final: final !== null });
+        // Keep polling through a transient error; 401/403/404 are final.
+        if (!final) timer = setTimeout(load, POLL_MS * 2);
         return;
       }
       setError(null);
@@ -66,6 +85,7 @@ function useImportDetail(importId: string | undefined) {
         setQueuedTooLong(false);
       }
       if (isActiveStatus(r.data.status)) timer = setTimeout(load, POLL_MS);
+      else if (r.data.status === 'UPLOADING') timer = setTimeout(load, UPLOADING_POLL_MS);
     };
     void load();
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
@@ -111,36 +131,83 @@ function ProcessingCard({ d, queuedTooLong }: { d: SalesImportDetail; queuedTooL
         {pct !== null ? `${pct}% of ${formatBytes(d.sizeBytes)} read · ` : ''}{formatCount(d.rowsRead)} rows read
         {d.rowsSkipped > 0 ? ` · ${formatCount(d.rowsSkipped)} skipped` : ''}. You can leave this page and come back.
       </p>
-      {queuedTooLong && (
+      {d.stalled && (
+        <Banner tone="amber" testId="sales-import-stalled">
+          The processor has not reported progress for more than {SALES_IMPORT_STALE_HEARTBEAT_MINUTES} minutes. It is
+          picked up again automatically; you can also cancel it, or press Reprocess to start it again.
+        </Banner>
+      )}
+      {queuedTooLong && !d.stalled && (
         <Banner tone="amber" testId="sales-import-queued-long">
-          This file has been queued for more than 2 minutes. If it does not start soon, contact Gifsy support.
+          This file has been waiting for more than 2 minutes. If it does not start soon, contact Gifsy support.
         </Banner>
       )}
     </section>
   );
 }
 
-function NeedsMappingCard({ d, onReprocess, busy }: { d: SalesImportDetail; onReprocess(): void; busy: boolean }) {
-  const rows = d.detectedHeaders ?? [];
+function UploadingCard({ d }: { d: SalesImportDetail }) {
+  const up = useSyncExternalStore(subscribeUpload, getUploadState, getUploadState);
+  const mine = up.importId === d.id;
+  if (mine && up.phase === 'uploading') {
+    return (
+      <Banner tone="blue" testId="sales-import-uploading-here">
+        This file is still uploading in this browser tab ({Math.round(up.progress * 100)}%). Keep the tab open — this page
+        updates when the upload finishes.
+      </Banner>
+    );
+  }
+  if (mine && up.phase === 'failed') {
+    return (
+      <Banner tone="amber" testId="sales-import-uploading-failed">
+        The upload of this file stopped part-way ({sentence(up.error)}).{' '}
+        <Link href="/admin/sales-import" className="underline font-medium">Go to Sales Import to resume it</Link>.
+      </Banner>
+    );
+  }
+  return (
+    <Banner tone="amber" testId="sales-import-uploading">
+      This file has not finished uploading ({formatCount(d.partsReceived)} of {formatCount(d.partCount)} parts received).
+      If it is still uploading in another tab or window, keep that open — this page updates when it finishes. If the
+      upload stopped, delete this import and upload the file again; unfinished uploads are removed automatically after
+      {` ${SALES_IMPORT_ABANDONED_UPLOAD_HOURS}`} hours.
+    </Banner>
+  );
+}
+
+function NeedsMappingCard({ d, onReprocess, busy, canAct }: { d: SalesImportDetail; onReprocess(): void; busy: boolean; canAct: boolean }) {
+  const [header, ...samples] = d.detectedHeaders ?? [];
+  const width = Math.max(header?.length ?? 0, ...samples.map((r) => r.length));
   return (
     <section className="bg-white rounded-xl border border-amber-200 p-6 space-y-3" data-testid="sales-import-needs-mapping">
       <h2 className="text-sm font-semibold text-gray-900">The portal could not find the columns it needs</h2>
       {d.error && <p className="text-sm text-amber-800">{d.error}</p>}
       <p className="text-sm text-gray-600">
-        These are the first rows of the file. Tell the portal which column is the outlet code, invoice date, amount,
-        cases and product details, then press Reprocess.
+        Below is the row the portal took as the heading row{samples.length ? ', followed by the first rows of data' : ''}.
+        Tell the portal which column is the outlet code, invoice date, amount, cases and product details, then press
+        Reprocess.
       </p>
-      {rows.length > 0 && (
+      {header && (
         <div className="overflow-x-auto border border-gray-100 rounded-lg">
           <table className="text-xs">
-            <tbody>
-              {rows.map((r, i) => (
-                <tr key={i} className="border-b border-gray-100">
-                  <td className="px-2 py-1 text-gray-400">{i + 1}</td>
-                  {r.map((c, j) => <td key={j} className="px-2 py-1 whitespace-nowrap text-gray-700">{c}</td>)}
-                </tr>
-              ))}
-            </tbody>
+            <thead>
+              <tr className="bg-gray-50 border-b border-gray-200">
+                <th scope="row" className="px-2 py-1 text-left font-medium text-gray-500">Headings</th>
+                {Array.from({ length: width }, (_, j) => (
+                  <th key={j} scope="col" className="px-2 py-1 text-left font-semibold whitespace-nowrap text-gray-800">{header[j] ?? ''}</th>
+                ))}
+              </tr>
+            </thead>
+            {samples.length > 0 && (
+              <tbody>
+                {samples.map((r, i) => (
+                  <tr key={i} className="border-b border-gray-100">
+                    <th scope="row" className="px-2 py-1 text-left font-normal text-gray-400">Row {i + 1}</th>
+                    {Array.from({ length: width }, (_, j) => <td key={j} className="px-2 py-1 whitespace-nowrap text-gray-700">{r[j] ?? ''}</td>)}
+                  </tr>
+                ))}
+              </tbody>
+            )}
           </table>
         </div>
       )}
@@ -149,7 +216,9 @@ function NeedsMappingCard({ d, onReprocess, busy }: { d: SalesImportDetail; onRe
           className="inline-flex items-center px-4 py-2 text-sm font-medium rounded-lg bg-[var(--brand-primary)] text-white hover:opacity-90">
           Set up column mapping
         </Link>
-        <Button variant="outline" onClick={onReprocess} loading={busy}><RefreshCw className="w-4 h-4" /> Reprocess</Button>
+        {canAct && d.canReprocess && (
+          <Button variant="outline" onClick={onReprocess} loading={busy}><RefreshCw className="w-4 h-4" /> Reprocess</Button>
+        )}
       </div>
     </section>
   );
@@ -157,15 +226,29 @@ function NeedsMappingCard({ d, onReprocess, busy }: { d: SalesImportDetail; onRe
 
 // ── Month preview table ──────────────────────────────────────────────────────
 
+/** "Last applied: up to 31 Oct" under the file's own dates; amber when this file's data ends earlier. */
+function LastAppliedRange({ m }: { m: MonthPreview }) {
+  if (!m.lastApplied) return <span className="block text-[11px] text-gray-400">Never applied from a sales file</span>;
+  const older = m.warnings.includes('OLDER_THAN_LAST_APPLIED');
+  const until = m.lastApplied.lastInvoiceDate;
+  return (
+    <span className={`block text-[11px] ${older ? 'text-amber-700 font-medium' : 'text-gray-500'}`} data-testid={`last-applied-${m.month}`}>
+      {older && <AlertTriangle className="inline w-3 h-3 mr-0.5 -mt-0.5" />}
+      Applied now: {until ? `up to ${dayLabel(until)}` : 'an earlier file'}
+    </span>
+  );
+}
+
 function MonthRow({
-  m, selected, onToggle, partialAck, onPartialAck, importId, onDownloadError,
+  m, selected, onToggle, partialAck, onPartialAck, importId, onDownloadError, canAct,
 }: {
   m: MonthPreview; selected: boolean; onToggle(): void; partialAck: boolean; onPartialAck(v: boolean): void;
-  importId: string; onDownloadError(msg: string): void;
+  importId: string; onDownloadError(msg: string): void; canAct: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const partial = isPartialMonth(m);
   const label = monthLabel(m.month);
+  const showDetail = open || m.warnings.length > 0;
   return (
     <>
       <tr className="border-b border-gray-100 align-top" data-testid={`month-row-${m.month}`}>
@@ -174,7 +257,7 @@ function MonthRow({
             type="checkbox"
             aria-label={`Apply ${label}`}
             checked={selected}
-            disabled={!m.canApply}
+            disabled={!m.canApply || !canAct}
             onChange={onToggle}
             title={m.canApply ? undefined : m.blockedReason}
             className="w-4 h-4"
@@ -191,13 +274,16 @@ function MonthRow({
           </span>
           {!m.canApply && m.blockedReason && <p className="mt-1 text-xs text-gray-500 max-w-[14rem]">{m.blockedReason}</p>}
         </td>
-        <td className="px-3 py-2 whitespace-nowrap text-gray-600">{dayLabel(m.firstDate)} – {dayLabel(m.lastDate)}</td>
+        <td className="px-3 py-2 whitespace-nowrap text-gray-600">
+          This file: {dayLabel(m.firstDate)} – {dayLabel(m.lastDate)}
+          <LastAppliedRange m={m} />
+        </td>
         <td className="px-3 py-2 text-right text-gray-600">{formatCount(m.lines)}</td>
         <td className="px-3 py-2 text-right text-gray-600">{formatCount(m.matchedOutlets)}</td>
         <td className="px-3 py-2 text-right text-gray-600">
           {m.unmatchedCustomers > 0 ? (
             <button type="button" className="text-[var(--brand-primary)] underline"
-              title="Download the customers in the file that are not programme outlets"
+              aria-label={`Download the ${formatCount(m.unmatchedCustomers)} customers not in the programme`}
               onClick={() => download(salesImportApi.unmatchedCsvUrl(importId), `unmatched-${m.month}.csv`, onDownloadError)}>
               {formatCount(m.unmatchedCustomers)}
             </button>
@@ -208,27 +294,25 @@ function MonthRow({
         <td className="px-3 py-2">
           <div className="flex flex-wrap gap-1">
             {m.warnings.map((w) => (
-              <span key={w} title={warningText(w, m)}
-                className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${
-                  w === 'ROSTER_CHANGED' ? 'bg-red-50 text-red-700 border-red-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+              <span key={w} className="text-[10px] font-semibold px-1.5 py-0.5 rounded border bg-amber-50 text-amber-700 border-amber-200">
                 {WARNING_SHORT[w]}
               </span>
             ))}
           </div>
         </td>
       </tr>
-      {(partial || open) && (
+      {showDetail && (
         <tr className="border-b border-gray-100 bg-gray-50/50">
           <td />
           <td colSpan={8} className="px-3 py-3 space-y-3">
             {m.warnings.length > 0 && (
-              <ul className="space-y-1">
+              <ul className="space-y-1" data-testid={`month-warnings-${m.month}`}>
                 {m.warnings.map((w) => (
                   <li key={w} className="text-xs text-amber-800 flex gap-1.5"><AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />{warningText(w, m)}</li>
                 ))}
               </ul>
             )}
-            {partial && m.canApply && (
+            {partial && m.canApply && canAct && (
               <label className="flex items-start gap-2 text-xs text-gray-800">
                 <input type="checkbox" className="mt-0.5" checked={partialAck} onChange={(e) => onPartialAck(e.target.checked)}
                   aria-label={`I understand this replaces the whole of ${label} with this partial file`} />
@@ -270,7 +354,9 @@ function MonthRow({
                 <p className="text-xs text-gray-500">
                   {formatCount(m.zeroFillOutlets)} programme outlets have no lines in the file for {label} and will be set to 0.
                   Customers not in the programme: {formatCount(m.unmatchedCustomers)} ({formatRupees(m.unmatchedAmountRupees)}, ignored).
-                  {m.lastApplied ? ` Last applied ${dateTimeLabel(m.lastApplied.at)} by ${m.lastApplied.byName}.` : ' Never applied from a sales file.'}
+                  {m.lastApplied
+                    ? ` Last applied ${dateTimeLabel(m.lastApplied.at)} by ${m.lastApplied.byName}${m.lastApplied.lastInvoiceDate ? ` (sales up to ${dayLabel(m.lastApplied.lastInvoiceDate)})` : ''}.`
+                    : ' Never applied from a sales file.'}
                 </p>
               </div>
             )}
@@ -281,9 +367,12 @@ function MonthRow({
   );
 }
 
-function PreviewSection({ importId, onReprocess, reprocessing }: { importId: string; onReprocess(): void; reprocessing: boolean }) {
+function PreviewSection({
+  importId, onReprocess, reprocessing, canAct, canReprocess,
+}: { importId: string; onReprocess(): void; reprocessing: boolean; canAct: boolean; canReprocess: boolean }) {
   const [preview, setPreview] = useState<SalesImportPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -298,14 +387,16 @@ function PreviewSection({ importId, onReprocess, reprocessing }: { importId: str
     let cancelled = false;
     const seq = ++seqRef.current;
     setError(null);
+    setLoading(true);
     salesImportApi.preview(importId).then((r) => {
       if (cancelled || seq !== seqRef.current) return;
+      setLoading(false);
       if (r.success) {
         setPreview(r.data);
         // Drop selections that are no longer applicable after a refresh.
         const ok = new Set(r.data.months.filter((m) => m.canApply).map((m) => m.month));
         setSelected((prev) => new Set([...prev].filter((m) => ok.has(m))));
-      } else setError(r.error);
+      } else setError(finalErrorText(r.status) ?? r.error);
     });
     return () => { cancelled = true; };
   }, [importId, tick]);
@@ -323,7 +414,11 @@ function PreviewSection({ importId, onReprocess, reprocessing }: { importId: str
   if (!preview) return <div className="py-6 flex items-center gap-2 text-sm text-gray-500"><Spinner size="sm" /> Building the preview…</div>;
 
   const months = preview.months;
-  const blockers = applyBlockers(months, selected, partialAcks, olderAck);
+  const noKpis = months.length > 0 && months.every((m) => m.kpis.length === 0);
+  const blockers = [
+    ...(noKpis ? ['No KPIs are set up for Sales Import yet, so there is nothing to apply. Add them under Settings first.'] : []),
+    ...applyBlockers(months, selected, partialAcks, olderAck),
+  ];
   const anyOlder = months.some((m) => selected.has(m.month) && m.warnings.includes('OLDER_THAN_LAST_APPLIED'));
   const kpiNames = Array.from(new Set(months.flatMap((m) => m.kpis.map((k) => k.label || k.kpiCode))));
 
@@ -337,7 +432,7 @@ function PreviewSection({ importId, onReprocess, reprocessing }: { importId: str
   }
 
   async function apply() {
-    if (!preview || blockers.length > 0 || applying) return;
+    if (!preview || blockers.length > 0 || applying || !canAct) return;
     const picked = months.filter((m) => selected.has(m.month));
     const names = picked.map((m) => monthLabel(m.month)).join(', ');
     const ok = window.confirm(
@@ -353,16 +448,21 @@ function PreviewSection({ importId, onReprocess, reprocessing }: { importId: str
     const r = await salesImportApi.apply(importId, {
       months: picked.map((m) => m.month),
       expectedDefinitionsHash: preview.definitionsHash,
+      processingVersion: preview.processingVersion,
       ...(partialMonths.length ? { acknowledgePartialMonths: partialMonths } : {}),
       ...(anyOlder ? { acknowledgeOlderThanLastApplied: true } : {}),
     });
     setApplying(false);
     if (!r.success) {
-      if (r.status === 409) {
-        setNotice(`Nothing was applied: ${r.error || 'the KPI definitions changed'}. The preview has been refreshed — check it and apply again.`);
+      if (r.status === 401) {
+        setNotice('Nothing was applied: your session has expired. Sign in again, then apply.');
+      } else if (r.status !== undefined && r.status >= 400 && r.status < 500) {
+        // Any refusal (definitions / processing version changed, a month closed, an ack now needed…) means the
+        // preview on screen is out of date → reload it so the admin decides on the current state.
+        setNotice(`Nothing was applied: ${sentence(r.error) || 'the preview is out of date'}. The preview has been refreshed — check it and apply again.`);
         refetch();
       } else {
-        setNotice(`Nothing was applied: ${r.error}`);
+        setNotice(`Nothing was applied: ${sentence(r.error)}. Try again in a moment.`);
       }
       return;
     }
@@ -375,25 +475,45 @@ function PreviewSection({ importId, onReprocess, reprocessing }: { importId: str
 
   return (
     <section className="space-y-4" data-testid="sales-import-preview">
-      {!preview.rosterHashMatches && (
-        <Banner tone="red" testId="sales-import-roster-changed">
-          The outlet list changed after this file was processed, so it cannot be applied as-is.{' '}
-          <Button size="sm" variant="outline" className="ml-2" onClick={onReprocess} loading={reprocessing}>
-            <RefreshCw className="w-3.5 h-3.5" /> Reprocess
-          </Button>
+      {preview.mappingChanged && (
+        <Banner tone="red" testId="sales-import-mapping-changed">
+          The column mapping was changed after this file was processed, so no month can be applied from it. Reprocess
+          the file to read it with the current mapping.
+          {canAct && canReprocess && (
+            <Button size="sm" variant="outline" className="ml-2" onClick={onReprocess} loading={reprocessing}>
+              <RefreshCw className="w-3.5 h-3.5" /> Reprocess
+            </Button>
+          )}
+        </Banner>
+      )}
+      {preview.rosterOutletsAddedSinceProcessing > 0 && (
+        <Banner tone="blue" testId="sales-import-roster-added">
+          <span className="inline-flex items-start gap-1.5">
+            <Info className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>
+              {formatCount(preview.rosterOutletsAddedSinceProcessing)} outlet{preview.rosterOutletsAddedSinceProcessing === 1 ? ' was' : 's were'} added
+              to the programme after this file was processed. They are included: the figures below and the apply use
+              today&apos;s outlet list.
+            </span>
+          </span>
         </Banner>
       )}
       {notice && <Banner tone="amber" testId="sales-import-apply-notice">{notice}</Banner>}
       {downloadError && <Banner tone="red">{downloadError}</Banner>}
 
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-x-auto">
-        <div className="px-4 py-3 border-b border-gray-100">
-          <h2 className="text-sm font-semibold text-gray-900">Months in this file</h2>
-          <p className="text-xs text-gray-500 mt-0.5">
-            Tick the months to update. Each ticked month is replaced completely by this file. Only open months can be
-            ticked; a closed month needs Gifsy to reopen it. Open months can still change, so compute points only after
-            closing the month under <Link href="/admin/sales-import/months" className="underline">Months</Link>.
-          </p>
+        <div className="px-4 py-3 border-b border-gray-100 flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-gray-900">Months in this file</h2>
+            <p className="text-xs text-gray-500 mt-0.5 max-w-3xl">
+              Tick the months to update. Each ticked month is replaced completely by this file. Only open months can be
+              ticked; a closed month needs Gifsy to reopen it. Open months can still change, so compute points only after
+              closing the month under <Link href="/admin/sales-import/months" className="underline">Months</Link>.
+            </p>
+          </div>
+          <Button size="sm" variant="ghost" onClick={refetch} loading={loading} aria-label="Refresh preview" data-testid="sales-import-refresh-preview">
+            <RefreshCw className="w-3.5 h-3.5" /> Refresh preview
+          </Button>
         </div>
         {months.length === 0 ? (
           <p className="px-4 py-6 text-sm text-gray-500">No usable invoice lines were found in this file.</p>
@@ -403,7 +523,7 @@ function PreviewSection({ importId, onReprocess, reprocessing }: { importId: str
               <tr className="text-left text-xs text-gray-500 bg-gray-50 border-b border-gray-200">
                 <th className="px-3 py-2 w-8"><span className="sr-only">Apply</span></th>
                 <th className="px-3 py-2 font-medium">Month</th>
-                <th className="px-3 py-2 font-medium">Dates</th>
+                <th className="px-3 py-2 font-medium">Sales dates</th>
                 <th className="px-3 py-2 font-medium text-right">Lines</th>
                 <th className="px-3 py-2 font-medium text-right">Outlets found</th>
                 <th className="px-3 py-2 font-medium text-right">Not in programme</th>
@@ -418,6 +538,7 @@ function PreviewSection({ importId, onReprocess, reprocessing }: { importId: str
                   key={m.month}
                   m={m}
                   importId={importId}
+                  canAct={canAct}
                   selected={selected.has(m.month)}
                   onToggle={() => toggle(m.month)}
                   partialAck={partialAcks.has(m.month)}
@@ -434,24 +555,33 @@ function PreviewSection({ importId, onReprocess, reprocessing }: { importId: str
         )}
       </div>
 
-      {anyOlder && (
+      {canAct && anyOlder && (
         <label className="flex items-start gap-2 text-sm text-gray-800 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
           <input type="checkbox" className="mt-1" checked={olderAck} onChange={(e) => setOlderAck(e.target.checked)}
             aria-label="I want to apply this older file over the newer one" />
-          <span>This file is older than the file last applied to a ticked month. I want to apply it anyway and replace the newer numbers.</span>
+          <span>
+            For a ticked month, this file&apos;s sales stop earlier than the file applied now. Applying rolls that month
+            back to this file&apos;s older data. I want to apply it anyway.
+          </span>
         </label>
       )}
 
-      <div className="flex flex-wrap items-center gap-3">
-        <Button variant="primary" onClick={apply} disabled={blockers.length > 0} loading={applying} data-testid="sales-import-apply">
-          Apply {selected.size > 0 ? `${selected.size} month${selected.size > 1 ? 's' : ''}` : ''}
-        </Button>
-        {selected.size > 0 && blockers.length > 0 && (
-          <ul className="text-xs text-gray-600 list-disc pl-4" data-testid="sales-import-apply-blockers">
-            {blockers.map((b) => <li key={b}>{b}</li>)}
-          </ul>
-        )}
-      </div>
+      {canAct ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <Button variant="primary" onClick={apply} disabled={blockers.length > 0} loading={applying} data-testid="sales-import-apply">
+            Apply {selected.size > 0 ? `${selected.size} month${selected.size > 1 ? 's' : ''}` : ''}
+          </Button>
+          {(selected.size > 0 || noKpis) && blockers.length > 0 && (
+            <ul className="text-xs text-gray-600 list-disc pl-4" data-testid="sales-import-apply-blockers">
+              {blockers.map((b) => <li key={b}>{b}</li>)}
+            </ul>
+          )}
+        </div>
+      ) : (
+        <p className="text-xs text-gray-500" data-testid="sales-import-apply-denied">
+          You can view this preview, but you don&apos;t have permission to apply sales files.
+        </p>
+      )}
 
       {results && (
         <div className="grid gap-3 sm:grid-cols-2" data-testid="sales-import-apply-results">
@@ -484,7 +614,9 @@ export default function SalesImportDetailPage() {
   const router = useRouter();
   const importId = (Array.isArray(params.id) ? params.id[0] : params.id) as string | undefined;
   const { detail: d, error, queuedTooLong, refresh } = useImportDetail(importId);
-  const [busy, setBusy] = useState<'reprocess' | 'delete' | null>(null);
+  const { ready, has } = usePermissions();
+  const canAct = ready && has('targets:upload');
+  const [busy, setBusy] = useState<'reprocess' | 'delete' | 'cancel' | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   async function reprocess() {
@@ -493,7 +625,18 @@ export default function SalesImportDetailPage() {
     setActionError(null);
     const r = await salesImportApi.reprocess(importId);
     setBusy(null);
-    if (!r.success) { setActionError(r.error); return; }
+    if (!r.success) { setActionError(`Not reprocessed: ${sentence(r.error)}.`); refresh(); return; }
+    refresh();
+  }
+
+  async function cancel() {
+    if (!importId || busy) return;
+    if (!window.confirm('Cancel processing this file? Nothing from it will be imported. You can upload it again later.')) return;
+    setBusy('cancel');
+    setActionError(null);
+    const r = await salesImportApi.cancel(importId);
+    setBusy(null);
+    if (!r.success) { setActionError(`Not cancelled: ${sentence(r.error)}.`); }
     refresh();
   }
 
@@ -504,7 +647,7 @@ export default function SalesImportDetailPage() {
     setActionError(null);
     const r = await salesImportApi.remove(importId);
     setBusy(null);
-    if (!r.success) { setActionError(r.error); return; }
+    if (!r.success) { setActionError(`Not deleted: ${sentence(r.error)}.`); refresh(); return; }
     router.push('/admin/sales-import');
   }
 
@@ -512,7 +655,8 @@ export default function SalesImportDetailPage() {
     if (error) {
       return (
         <div className="space-y-3">
-          <Banner tone="red">{error}</Banner>
+          <Banner tone="red">{error.text}</Banner>
+          {!error.final && <p className="text-xs text-gray-500">Still trying…</p>}
           <Link href="/admin/sales-import" className="text-sm text-[var(--brand-primary)] underline">Back to imports</Link>
         </div>
       );
@@ -520,7 +664,7 @@ export default function SalesImportDetailPage() {
     return <div className="py-10 flex justify-center"><Spinner size="lg" /></div>;
   }
 
-  const canReprocess = d.status === 'READY' || d.status === 'NEEDS_MAPPING' || d.status === 'FAILED';
+  const purged = Boolean(d.purgedAt);
 
   return (
     <div className="space-y-5 pb-10">
@@ -536,42 +680,59 @@ export default function SalesImportDetailPage() {
             {d.status === 'READY' && ` · ${formatCount(d.rowsRead)} rows read, ${formatCount(d.rowsSkipped)} skipped`}
           </p>
         </div>
-        <div className="flex gap-2">
-          {canReprocess && d.status !== 'NEEDS_MAPPING' && (
-            <Button size="sm" variant="outline" onClick={reprocess} loading={busy === 'reprocess'}>
-              <RefreshCw className="w-3.5 h-3.5" /> Reprocess
-            </Button>
-          )}
-          {!isActiveStatus(d.status) && (
-            <Button size="sm" variant="ghost" onClick={remove} loading={busy === 'delete'} className="text-red-600">
-              <Trash2 className="w-3.5 h-3.5" /> Delete
-            </Button>
-          )}
-        </div>
+        {canAct && (
+          <div className="flex gap-2">
+            {d.canCancel && (
+              <Button size="sm" variant="outline" onClick={cancel} loading={busy === 'cancel'} data-testid="sales-import-cancel">
+                <Ban className="w-3.5 h-3.5" /> Cancel processing
+              </Button>
+            )}
+            {d.canReprocess && d.status !== 'NEEDS_MAPPING' && (
+              <Button size="sm" variant="outline" onClick={reprocess} loading={busy === 'reprocess'}>
+                <RefreshCw className="w-3.5 h-3.5" /> Reprocess
+              </Button>
+            )}
+            {d.canDelete && (
+              <Button size="sm" variant="ghost" onClick={remove} loading={busy === 'delete'} className="text-red-600">
+                <Trash2 className="w-3.5 h-3.5" /> Delete
+              </Button>
+            )}
+          </div>
+        )}
       </div>
 
-      {error && <Banner tone="amber">Lost contact with the server ({error}). Still trying…</Banner>}
+      {error && (
+        <Banner tone={error.final ? 'red' : 'amber'}>
+          {error.final ? error.text : `Lost contact with the server (${sentence(error.text)}). Still trying…`}
+        </Banner>
+      )}
       {actionError && <Banner tone="red">{actionError}</Banner>}
 
       {d.duplicateOfId && (
         <Banner tone="blue" testId="sales-import-duplicate">
           <span className="inline-flex items-center gap-1.5"><Copy className="w-4 h-4" /> This is the same file as an earlier upload.</span>{' '}
-          <Link href={`/admin/sales-import/${d.duplicateOfId}`} className="underline">Open the earlier import</Link>. Applying it again
-          gives the same numbers, so it is harmless.
+          <Link href={`/admin/sales-import/${d.duplicateOfId}`} className="underline">Open the earlier import</Link>.
+          Applying it gives the numbers of that earlier file. If a newer file has been applied since, applying this one
+          would roll those months back — compare &ldquo;This file&rdquo; with &ldquo;Applied now&rdquo; for each month below.
         </Banner>
       )}
 
-      {d.status === 'UPLOADING' && (
-        <Banner tone="amber">This upload did not finish. Delete it and upload the file again.</Banner>
-      )}
-      {isActiveStatus(d.status) && <ProcessingCard d={d} queuedTooLong={queuedTooLong} />}
-      {d.status === 'NEEDS_MAPPING' && <NeedsMappingCard d={d} onReprocess={reprocess} busy={busy === 'reprocess'} />}
-      {d.status === 'FAILED' && (
-        <Banner tone="red" testId="sales-import-failed">
-          Processing failed: {d.error ?? 'unknown error'}. Fix the file or the column mapping, then press Reprocess.
+      {purged && (
+        <Banner tone="amber" testId="sales-import-purged">
+          This file&apos;s data was removed on {dateTimeLabel(d.purgedAt)} (files are kept for a limited time), so it can
+          no longer be previewed, applied or reprocessed. Upload the file again if you need it.
         </Banner>
       )}
-      {d.status === 'CANCELLED' && <Banner tone="amber">This import was cancelled.</Banner>}
+
+      {d.status === 'UPLOADING' && <UploadingCard d={d} />}
+      {isActiveStatus(d.status) && <ProcessingCard d={d} queuedTooLong={queuedTooLong} />}
+      {d.status === 'NEEDS_MAPPING' && <NeedsMappingCard d={d} onReprocess={reprocess} busy={busy === 'reprocess'} canAct={canAct} />}
+      {d.status === 'FAILED' && (
+        <Banner tone="red" testId="sales-import-failed">
+          Processing failed: {sentence(d.error) || 'unknown error'}. Fix the file or the column mapping, then press Reprocess.
+        </Banner>
+      )}
+      {d.status === 'CANCELLED' && <Banner tone="amber">This import was cancelled. Nothing from it was imported.</Banner>}
 
       {(d.errorSamples?.length ?? 0) > 0 && (
         <details className="bg-white rounded-xl border border-gray-200 px-4 py-3">
@@ -593,7 +754,9 @@ export default function SalesImportDetailPage() {
         </details>
       )}
 
-      {d.status === 'READY' && <PreviewSection importId={d.id} onReprocess={reprocess} reprocessing={busy === 'reprocess'} />}
+      {d.status === 'READY' && !purged && (
+        <PreviewSection importId={d.id} onReprocess={reprocess} reprocessing={busy === 'reprocess'} canAct={canAct} canReprocess={d.canReprocess} />
+      )}
     </div>
   );
 }

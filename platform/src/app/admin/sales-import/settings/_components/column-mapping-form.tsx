@@ -71,9 +71,16 @@ function HeaderInput({ id, label, value, onChange, required, suggestionsId }: {
 }
 
 export function ColumnMappingForm({
-  initial, detectedHeaders, onSaved,
-}: { initial: SalesColumnMapping | null; detectedHeaders: string[]; onSaved(m: SalesColumnMapping): void }) {
+  initial, detectedHeaders, onSaved, canEdit = true,
+}: {
+  initial: SalesColumnMapping | null; detectedHeaders: string[]; onSaved(m: SalesColumnMapping): void;
+  /** False → read-only (the user lacks targets:manage_config); Save is hidden. */
+  canEdit?: boolean;
+}) {
   const [m, setM] = useState<SalesColumnMapping>(initial ?? EMPTY_MAPPING);
+  // Per row: true = added in this session and not saved yet. Only such rows get a key auto-suggested from the label;
+  // a saved key is what KPIs reference, so renaming the label must never change it.
+  const [isNewRow, setIsNewRow] = useState<boolean[]>(() => (initial ?? EMPTY_MAPPING).dimensions.map(() => false));
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
   const [touched, setTouched] = useState(false);
@@ -105,6 +112,7 @@ export function ColumnMappingForm({
     setSaving(false);
     if (!r.success) { setMsg({ tone: 'err', text: `Not saved: ${r.error}` }); return; }
     setMsg({ tone: 'ok', text: 'Column mapping saved. Reprocess any file that was waiting for it.' });
+    setIsNewRow(clean.dimensions.map(() => false));
     onSaved(r.data ?? clean);
   }
 
@@ -160,6 +168,17 @@ export function ColumnMappingForm({
           </select>
           <span className="block mt-1 font-normal text-gray-500">Real Excel date cells are read correctly whatever this says.</span>
         </label>
+        <label className="text-xs font-medium text-gray-700">
+          Decimal mark in amounts typed as text
+          <select value={m.decimalSeparator ?? 'auto'} aria-label="Decimal mark"
+            onChange={(e) => set('decimalSeparator', e.target.value as NonNullable<SalesColumnMapping['decimalSeparator']>)}
+            className="mt-1 block w-full text-sm border border-gray-300 rounded-md px-2 py-1.5">
+            <option value="auto">Automatic (comma for &ldquo;;&rdquo;-separated CSV files, else point)</option>
+            <option value=".">Point: 1,234.56</option>
+            <option value=",">Comma: 1.234,56</option>
+          </select>
+          <span className="block mt-1 font-normal text-gray-500">Real Excel number cells are read correctly whatever this says.</span>
+        </label>
       </div>
 
       <div className="space-y-2">
@@ -169,7 +188,11 @@ export function ColumnMappingForm({
           <div key={i} className="flex flex-wrap items-end gap-2" data-testid={`dimension-row-${i}`}>
             <label className="text-[11px] text-gray-500">Label
               <input value={d.label} aria-label={`Product column ${i + 1} label`}
-                onChange={(e) => setDim(i, { label: e.target.value, ...(d.key === '' || d.key === suggestDimKey(d.label) ? { key: suggestDimKey(e.target.value) } : {}) })}
+                onChange={(e) => setDim(i, {
+                  label: e.target.value,
+                  // Auto-suggest only for a NEW row whose key the user has not typed themselves.
+                  ...(isNewRow[i] && (d.key === '' || d.key === suggestDimKey(d.label)) ? { key: suggestDimKey(e.target.value) } : {}),
+                })}
                 className="block mt-0.5 w-40 text-sm border border-gray-300 rounded-md px-2 py-1" placeholder="Brand" />
             </label>
             <label className="text-[11px] text-gray-500">Heading in file
@@ -183,14 +206,22 @@ export function ColumnMappingForm({
                 className="block mt-0.5 w-32 font-mono text-xs border border-gray-300 rounded-md px-2 py-1.5" />
             </label>
             <Button size="sm" variant="ghost" type="button" aria-label={`Remove product column ${i + 1}`}
-              onClick={() => { setTouched(true); setM((p) => ({ ...p, dimensions: p.dimensions.filter((_, j) => j !== i) })); }}>
+              onClick={() => {
+                setTouched(true);
+                setM((p) => ({ ...p, dimensions: p.dimensions.filter((_, j) => j !== i) }));
+                setIsNewRow((p) => p.filter((_, j) => j !== i));
+              }}>
               <Trash2 className="w-3.5 h-3.5" />
             </Button>
           </div>
         ))}
         {m.dimensions.length < SALES_IMPORT_MAX_DIMENSIONS && (
           <Button size="sm" variant="outline" type="button"
-            onClick={() => { setTouched(true); setM((p) => ({ ...p, dimensions: [...p.dimensions, { key: '', label: '', header: '' }] })); }}>
+            onClick={() => {
+              setTouched(true);
+              setM((p) => ({ ...p, dimensions: [...p.dimensions, { key: '', label: '', header: '' }] }));
+              setIsNewRow((p) => [...p, true]);
+            }}>
             <Plus className="w-3.5 h-3.5" /> Add product column
           </Button>
         )}
@@ -203,7 +234,11 @@ export function ColumnMappingForm({
         <ul className="text-xs text-red-700 list-disc pl-4" data-testid="mapping-errors">{errors.map((e) => <li key={e}>{e}</li>)}</ul>
       )}
       {msg && <p role={msg.tone === 'err' ? 'alert' : 'status'} className={`text-sm ${msg.tone === 'err' ? 'text-red-600' : 'text-emerald-700'}`}>{msg.text}</p>}
-      <Button variant="primary" type="button" onClick={save} loading={saving} disabled={touched && errors.length > 0}>Save column mapping</Button>
+      {canEdit ? (
+        <Button variant="primary" type="button" onClick={save} loading={saving} disabled={touched && errors.length > 0}>Save column mapping</Button>
+      ) : (
+        <p className="text-xs text-gray-500" data-testid="mapping-read-only">You can view the column mapping, but you don&apos;t have permission to change it.</p>
+      )}
     </section>
   );
 }

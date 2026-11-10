@@ -6,7 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   normalizeDim, normalizeEntry, addEntries, removeEntry, removeEntryAt, hasEntry, entryLabel,
-  coveringEntryIndex, validateFilter, describeFilter,
+  coveringEntryIndex, validateFilter, describeFilter, comboEntry, entryMatchesDims, includeExcludeConflicts, entriesNotInCombos,
 } from '../product-set';
 import type { DimMatch, SalesDimensionMapping } from '../types';
 
@@ -107,5 +107,45 @@ describe('validateFilter (blocking)', () => {
   it('blocks more than 200 entries', () => {
     const anyOf = Array.from({ length: 201 }, (_, i) => ({ dimA: `V${i}` }));
     expect(validateFilter({ anyOf }, keys).errors[0]).toMatch(/at most 200/);
+  });
+});
+
+describe('blank values, conflicts, live checks, cap (audit fixes)', () => {
+  const dims = [{ key: 'dimA', label: 'Brand', header: 'A' }, { key: 'dimB', label: 'Size', header: 'B' }];
+
+  it('normalizeEntry keeps blanks only when asked; comboEntry pins every mapped column', () => {
+    expect(normalizeEntry({ dimA: 'p', dimB: ' ' }, { keepBlank: true })).toEqual({ dimA: 'P', dimB: '' });
+    expect(comboEntry({ dimA: 'P' }, dims)).toEqual({ dimA: 'P', dimB: '' });
+    expect(entryLabel({ dimA: 'P', dimB: '' }, dims)).toBe('P (blank size)');
+  });
+
+  it('entryMatchesDims treats a missing dim as blank (mirrors backend entryMatches)', () => {
+    expect(entryMatchesDims({ dimB: '' }, { dimA: 'P' })).toBe(true);
+    expect(entryMatchesDims({ dimB: '' }, { dimA: 'P', dimB: '5' })).toBe(false);
+  });
+
+  it('includeExcludeConflicts: same entry, and an exclusion that covers an inclusion', () => {
+    expect(includeExcludeConflicts({ anyOf: [{ dimA: 'P', dimB: '5' }, { dimA: 'Q' }], noneOf: [{ dimA: 'P' }, { dimA: 'Q' }] }))
+      .toEqual([{ include: 0, exclude: 0, kind: 'cancels' }, { include: 1, exclude: 1, kind: 'same' }]);
+    expect(includeExcludeConflicts({ anyOf: [{ dimA: 'P' }], noneOf: [{ dimA: 'P', dimB: '5' }] })).toEqual([]);
+  });
+
+  it('entriesNotInCombos is null when the combo list is capped (absence is not proof)', () => {
+    const combos = [{ dims: { dimA: 'P', dimB: '5' } }];
+    expect(entriesNotInCombos({ anyOf: [{ dimA: 'P' }, { dimA: 'Z' }], noneOf: [{ dimB: '9' }] }, combos, 2000))
+      .toEqual({ anyOf: [1], noneOf: [0] });
+    expect(entriesNotInCombos({ anyOf: [{ dimA: 'Z' }] }, combos, 1)).toBeNull();
+  });
+
+  it('addEntries respects a max and reports what did not fit', () => {
+    const r = addEntries({ anyOf: [{ dimA: 'A' }] }, 'anyOf', [{ dimA: 'B' }, { dimA: 'C' }], { max: 2 });
+    expect(r.added).toBe(1);
+    expect(r.overCap).toBe(1);
+    expect(r.filter.anyOf).toHaveLength(2);
+  });
+
+  it('validateFilter accepts a deliberate blank-value entry but still rejects {}', () => {
+    expect(validateFilter({ anyOf: [{ dimA: '' }] }, ['dimA']).errors).toEqual([]);
+    expect(validateFilter({ anyOf: [{}] }, ['dimA']).errors[0]).toMatch(/empty/);
   });
 });

@@ -3,17 +3,23 @@
 /**
  * /admin/sales-import — upload a DMS invoice-line file + list of imports (SALES-IMPORT-PIPELINE-PLAN §11 F-3).
  *
- * Upload = chunked (4 MiB parts, retried) via uploadInParts(); on success → the import's detail page, which polls
- * processing and shows the per-month preview. Leaving the page mid-upload asks first (beforeunload); a cancelled
- * or failed upload deletes its half-created import (best effort).
+ * Upload = chunked (4 MiB parts, retried) via the tab-level upload store (lib/sales-import/upload-store.ts): it
+ * keeps running while the user moves to other portal pages (links ask first) and stops only when the tab closes
+ * (beforeunload asks first). A failed upload keeps its import + confirmed parts and offers "Resume upload"; only an
+ * explicit Cancel / Discard deletes the half-created import, and only after confirming it is still UPLOADING.
+ * On success → the import's detail page, which polls processing and shows the per-month preview.
  */
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { AlertTriangle, Copy, FileSpreadsheet, Info, RefreshCw, Upload, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Copy, FileSpreadsheet, Info, RefreshCw, Upload, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { salesImportApi } from '@/lib/sales-import/api';
-import { uploadInParts, validateSalesFile, UploadAbortedError } from '@/lib/sales-import/upload';
+import { validateSalesFile } from '@/lib/sales-import/upload';
+import {
+  cancelUpload, discardUpload, getUploadState, resetUpload, resumeUpload, startUpload, subscribeUpload,
+} from '@/lib/sales-import/upload-store';
+import { usePermissions } from '@/lib/use-permissions';
 import {
   STATUS_CHIP, STATUS_LABEL, dateTimeLabel, formatBytes, formatCount,
 } from '@/lib/sales-import/format';
@@ -21,75 +27,98 @@ import type { SalesImportSummary } from '@/lib/sales-import/types';
 
 // ── Upload card ──────────────────────────────────────────────────────────────
 
-function UploadCard() {
+const LEAVE_MID_UPLOAD =
+  'A file is still uploading. It keeps uploading in the background while this browser tab stays open, and you can ' +
+  'come back to Sales Import to see it. Closing or reloading the tab stops it.\n\nLeave this page?';
+
+/**
+ * While an upload runs, in-app link clicks ask first. Capture phase on `document` runs before React / Next's Link
+ * handler, so a "Stay" stops the navigation entirely. (Tab close / reload is covered by the store's beforeunload.)
+ */
+function useConfirmLeaveWhile(active: boolean) {
+  useEffect(() => {
+    if (!active) return;
+    const onClick = (e: MouseEvent) => {
+      if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const a = (e.target as Element | null)?.closest?.('a[href]') as HTMLAnchorElement | null;
+      if (!a || a.target === '_blank' || a.hasAttribute('download')) return;
+      const url = new URL(a.href, window.location.href);
+      if (url.origin !== window.location.origin) return;
+      if (url.pathname === window.location.pathname && url.search === window.location.search) return;
+      if (!window.confirm(LEAVE_MID_UPLOAD)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+    };
+    document.addEventListener('click', onClick, true);
+    return () => document.removeEventListener('click', onClick, true);
+  }, [active]);
+}
+
+function UploadCard({ canUpload }: { canUpload: boolean }) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  const busyRef = useRef(false); // double-submit guard (state updates are async)
-  const [fileName, setFileName] = useState<string | null>(null);
-  const [progress, setProgress] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const up = useSyncExternalStore(subscribeUpload, getUploadState, getUploadState);
+  const [localError, setLocalError] = useState<{ fileName: string; text: string } | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
+  // Navigate to the import only when it finished while this page was open; a finish that happened while the user
+  // was elsewhere shows a banner instead of yanking them away on return.
+  const sawUploadingRef = useRef(false);
 
-  const uploading = progress !== null;
+  const uploading = up.phase === 'uploading';
+  useConfirmLeaveWhile(uploading);
 
-  // Leaving mid-upload loses it → ask first.
   useEffect(() => {
-    if (!uploading) return;
-    const onBeforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
-    window.addEventListener('beforeunload', onBeforeUnload);
-    return () => window.removeEventListener('beforeunload', onBeforeUnload);
-  }, [uploading]);
-
-  // Abort an in-flight upload if the component unmounts (in-app navigation).
-  useEffect(() => () => abortRef.current?.abort(), []);
-
-  const start = useCallback(async (file: File) => {
-    if (busyRef.current) return;
-    const invalid = validateSalesFile(file);
-    if (invalid) { setError(invalid); setFileName(file.name); return; }
-    busyRef.current = true;
-    setError(null);
-    setFileName(file.name);
-    setProgress(0);
-    const ctl = new AbortController();
-    abortRef.current = ctl;
-    let createdId: string | null = null;
-    try {
-      const importId = await uploadInParts(file, {
-        signal: ctl.signal,
-        onCreated: (id) => { createdId = id; },
-        onProgress: (p) => setProgress(p),
-      });
-      router.push(`/admin/sales-import/${importId}`);
-    } catch (err) {
-      // Best-effort clean-up of the half-uploaded import (never applied, so DELETE is allowed).
-      if (createdId) void salesImportApi.remove(createdId);
-      setError(err instanceof UploadAbortedError
-        ? 'Upload cancelled.'
-        : `${err instanceof Error ? err.message : 'Upload failed'}. Nothing was imported — try again.`);
-      setProgress(null);
-    } finally {
-      busyRef.current = false;
-      abortRef.current = null;
+    if (up.phase === 'uploading') sawUploadingRef.current = true;
+    if (up.phase === 'done' && up.importId && sawUploadingRef.current) {
+      const id = up.importId;
+      sawUploadingRef.current = false;
+      resetUpload();
+      router.push(`/admin/sales-import/${id}`);
     }
-  }, [router]);
+  }, [up.phase, up.importId, router]);
+
+  const start = useCallback((file: File) => {
+    if (getUploadState().phase === 'uploading') return; // double-submit guard
+    const invalid = validateSalesFile(file);
+    if (invalid) { setLocalError({ fileName: file.name, text: invalid }); return; }
+    setLocalError(null);
+    startUpload(file);
+  }, []);
 
   function onPick(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     e.target.value = '';
-    if (f) void start(f);
+    if (f) start(f);
   }
 
   function onDrop(e: React.DragEvent<HTMLDivElement>) {
     e.preventDefault();
     setDragOver(false);
-    if (uploading) return;
+    if (uploading || !canUpload) return;
     const f = e.dataTransfer.files?.[0];
-    if (f) void start(f);
+    if (f) start(f);
   }
 
-  const pct = progress === null ? 0 : Math.round(progress * 100);
+  async function discard() {
+    setDiscarding(true);
+    await discardUpload();
+    setDiscarding(false);
+  }
+
+  const pct = Math.round(up.progress * 100);
+  const fileName = localError?.fileName ?? up.fileName;
+  const error = localError?.text ?? up.error;
+  const pickDisabled = uploading || !canUpload;
+
+  if (!canUpload) {
+    return (
+      <section className="bg-white rounded-xl border border-gray-200 shadow-sm px-6 py-5" data-testid="sales-import-upload-denied">
+        <p className="text-sm text-gray-600">You can view sales imports, but you don&apos;t have permission to upload sales files.</p>
+      </section>
+    );
+  }
 
   return (
     <section className="bg-white rounded-xl border border-gray-200 shadow-sm px-6 py-5 space-y-4">
@@ -113,19 +142,28 @@ function UploadCard() {
         </span>
       </div>
 
+      {up.phase === 'done' && up.importId && (
+        <div role="status" className="flex flex-wrap items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-3 text-sm text-emerald-800" data-testid="sales-import-upload-finished">
+          <CheckCircle2 className="w-4 h-4 shrink-0" />
+          <span>{up.fileName ?? 'The file'} finished uploading.</span>
+          <Link href={`/admin/sales-import/${up.importId}`} onClick={() => resetUpload()} className="underline font-medium">Open the import</Link>
+          <Button size="sm" variant="ghost" onClick={() => resetUpload()} aria-label="Dismiss"><X className="w-3.5 h-3.5" /></Button>
+        </div>
+      )}
+
       <div
         role="button"
-        tabIndex={uploading ? -1 : 0}
-        aria-disabled={uploading}
+        tabIndex={pickDisabled ? -1 : 0}
+        aria-disabled={pickDisabled}
         aria-label="Choose a sales file to upload"
-        onClick={() => { if (!uploading) inputRef.current?.click(); }}
-        onKeyDown={(e) => { if (!uploading && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); inputRef.current?.click(); } }}
-        onDragOver={(e) => { e.preventDefault(); if (!uploading) setDragOver(true); }}
+        onClick={() => { if (!pickDisabled) inputRef.current?.click(); }}
+        onKeyDown={(e) => { if (!pickDisabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); inputRef.current?.click(); } }}
+        onDragOver={(e) => { e.preventDefault(); if (!pickDisabled) setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
         onDrop={onDrop}
         data-testid="sales-import-dropzone"
         className={`border-2 border-dashed rounded-xl px-8 py-8 text-center transition-colors ${
-          uploading ? 'cursor-not-allowed opacity-70 border-gray-200'
+          pickDisabled ? 'cursor-not-allowed opacity-70 border-gray-200'
             : dragOver ? 'cursor-pointer border-[var(--brand-primary)] bg-gray-50'
               : 'cursor-pointer border-gray-200 hover:border-[var(--brand-primary)]'
         }`}
@@ -140,9 +178,12 @@ function UploadCard() {
 
       {uploading && (
         <div className="space-y-2" data-testid="sales-import-upload-progress">
-          <div className="flex items-center justify-between text-xs text-gray-600">
-            <span>Uploading… {pct}% — keep this tab open until the upload finishes.</span>
-            <Button size="sm" variant="ghost" onClick={() => abortRef.current?.abort()}>
+          <div className="flex items-center justify-between gap-3 text-xs text-gray-600">
+            <span>
+              Uploading… {pct}%. Keep this browser tab open until it finishes — you can use other portal pages in the
+              meantime, but closing or reloading the tab stops the upload.
+            </span>
+            <Button size="sm" variant="ghost" onClick={() => cancelUpload()}>
               <X className="w-3.5 h-3.5" /> Cancel
             </Button>
           </div>
@@ -156,6 +197,19 @@ function UploadCard() {
         <p role="alert" className="text-sm text-red-600 flex items-center gap-1.5">
           <AlertTriangle className="w-4 h-4 shrink-0" /> {error}
         </p>
+      )}
+
+      {!localError && up.phase === 'failed' && (
+        <div className="flex flex-wrap gap-2" data-testid="sales-import-upload-failed-actions">
+          {up.canResume && (
+            <Button size="sm" variant="primary" onClick={() => resumeUpload()}>
+              <RefreshCw className="w-3.5 h-3.5" /> Resume upload ({pct}% sent)
+            </Button>
+          )}
+          <Button size="sm" variant="outline" onClick={discard} loading={discarding}>
+            {up.canResume ? 'Discard this upload' : 'Dismiss'}
+          </Button>
+        </div>
       )}
     </section>
   );
@@ -263,6 +317,7 @@ function ImportsList() {
 }
 
 export default function SalesImportPage() {
+  const { ready, has } = usePermissions();
   return (
     <div className="space-y-5 pb-10">
       <div>
@@ -272,7 +327,7 @@ export default function SalesImportPage() {
           mapping and KPIs once under <Link href="/admin/sales-import/settings" className="text-[var(--brand-primary)] underline">Settings</Link>.
         </p>
       </div>
-      <UploadCard />
+      {ready && <UploadCard canUpload={has('targets:upload')} />}
       <ImportsList />
     </div>
   );

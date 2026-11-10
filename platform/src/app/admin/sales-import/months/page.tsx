@@ -12,7 +12,8 @@ import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { useAdminSession } from '@/lib/admin-session';
 import { salesImportApi } from '@/lib/sales-import/api';
-import { dateTimeLabel, monthLabel } from '@/lib/sales-import/format';
+import { dateTimeLabel, monthLabel, sentence } from '@/lib/sales-import/format';
+import { usePermissions } from '@/lib/use-permissions';
 import type { SalesMonthRow } from '@/lib/sales-import/types';
 
 export default function SalesMonthsPage() {
@@ -20,7 +21,9 @@ export default function SalesMonthsPage() {
   const isGifsyAdmin = role === 'GIFSY_ADMIN';
   const [rows, setRows] = useState<SalesMonthRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [actionMsg, setActionMsg] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
+  const [actionMsg, setActionMsg] = useState<{ tone: 'ok' | 'err' | 'warn'; text: string } | null>(null);
+  const { ready, has } = usePermissions();
+  const canClose = ready && has('targets:upload');
   const [busyMonth, setBusyMonth] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
 
@@ -48,7 +51,7 @@ export default function SalesMonthsPage() {
     setActionMsg(null);
     const r = await salesImportApi.closeMonth(row.month);
     setBusyMonth(null);
-    if (!r.success) { setActionMsg({ tone: 'err', text: `${label} was not closed: ${r.error}` }); reload(); return; }
+    if (!r.success) { setActionMsg({ tone: 'err', text: `${label} was not closed: ${sentence(r.error)}.` }); reload(); return; }
     setActionMsg({ tone: 'ok', text: `${label} is closed. You can now compute points for it in the Points Engine.` });
     setRows((prev) => prev?.map((x) => (x.month === row.month ? r.data : x)) ?? prev);
   }
@@ -56,14 +59,35 @@ export default function SalesMonthsPage() {
   async function reopen(row: SalesMonthRow) {
     if (busyMonth) return;
     const label = monthLabel(row.month);
-    if (!window.confirm(`Reopen ${label}? Sales files can then change it again. If points were already credited for ${label}, any difference must go through the existing reversal process. This is recorded in the audit log.`)) return;
+    const ds = row.downstream ?? { creditBatches: 0, exports: 0 };
+    const hasDownstream = ds.creditBatches > 0 || ds.exports > 0;
+    const downstreamText = hasDownstream
+      ? `\n\nPoints work already exists for ${label}: ${[
+        ds.creditBatches ? `${ds.creditBatches} credit batch${ds.creditBatches === 1 ? '' : 'es'}` : '',
+        ds.exports ? `${ds.exports} points export${ds.exports === 1 ? '' : 's'} / report download${ds.exports === 1 ? '' : 's'}` : '',
+      ].filter(Boolean).join(' and ')}. If the sales numbers change after reopening, those will no longer match and any ` +
+        'difference must go through the existing reversal process. Reopen anyway?'
+      : '';
+    if (!window.confirm(`Reopen ${label}? Sales files can then change it again. If points were already credited for ${label}, any difference must go through the existing reversal process. This is recorded in the audit log.${downstreamText}`)) return;
     setBusyMonth(row.month);
     setActionMsg(null);
-    const r = await salesImportApi.reopenMonth(row.month);
+    let r = await salesImportApi.reopenMonth(row.month, hasDownstream ? { acknowledgeDownstream: true } : {});
+    // Points work appeared after this page loaded → the server asks for the acknowledgement: confirm once more.
+    if (!r.success && r.status === 409 && !hasDownstream) {
+      if (window.confirm(`${sentence(r.error)}.\n\nReopen ${label} anyway? Points already credited or exported for it may no longer match.`)) {
+        r = await salesImportApi.reopenMonth(row.month, { acknowledgeDownstream: true });
+      } else {
+        setBusyMonth(null);
+        reload();
+        return;
+      }
+    }
     setBusyMonth(null);
-    if (!r.success) { setActionMsg({ tone: 'err', text: `${label} was not reopened: ${r.error}` }); reload(); return; }
-    setActionMsg({ tone: 'ok', text: `${label} is open again. Close it once the corrected file is applied.` });
-    setRows((prev) => prev?.map((x) => (x.month === row.month ? r.data : x)) ?? prev);
+    if (!r.success) { setActionMsg({ tone: 'err', text: `${label} was not reopened: ${sentence(r.error)}.` }); reload(); return; }
+    const { warnings, ...updated } = r.data;
+    const extra = warnings?.length ? ` Check: ${warnings.map(sentence).join('; ')}.` : '';
+    setActionMsg({ tone: warnings?.length ? 'warn' : 'ok', text: `${label} is open again. Close it once the corrected file is applied.${extra}` });
+    setRows((prev) => prev?.map((x) => (x.month === row.month ? updated : x)) ?? prev);
   }
 
   return (
@@ -82,7 +106,10 @@ export default function SalesMonthsPage() {
 
       {actionMsg && (
         <div role={actionMsg.tone === 'err' ? 'alert' : 'status'}
-          className={`rounded-lg border px-4 py-3 text-sm ${actionMsg.tone === 'err' ? 'bg-red-50 border-red-200 text-red-800' : 'bg-emerald-50 border-emerald-200 text-emerald-800'}`}>
+          className={`rounded-lg border px-4 py-3 text-sm ${
+            actionMsg.tone === 'err' ? 'bg-red-50 border-red-200 text-red-800'
+              : actionMsg.tone === 'warn' ? 'bg-amber-50 border-amber-200 text-amber-800'
+                : 'bg-emerald-50 border-emerald-200 text-emerald-800'}`}>
           {actionMsg.text}
         </div>
       )}
@@ -129,13 +156,13 @@ export default function SalesMonthsPage() {
                       {row.closedAt ? `${dateTimeLabel(row.closedAt)}${row.closedBy ? ` by ${row.closedBy}` : ''}` : '—'}
                     </td>
                     <td className="px-4 py-2 text-right whitespace-nowrap">
-                      {row.canClose && (
+                      {canClose && row.canClose && (
                         <Button size="sm" variant="outline" onClick={() => close(row)} loading={busyMonth === row.month}
                           aria-label={`Close ${label}`}>
                           <Lock className="w-3.5 h-3.5" /> Close {label}
                         </Button>
                       )}
-                      {isGifsyAdmin && row.canReopen && (
+                      {isGifsyAdmin && canClose && row.canReopen && (
                         <Button size="sm" variant="ghost" onClick={() => reopen(row)} loading={busyMonth === row.month}
                           aria-label={`Reopen ${label}`}>
                           <LockOpen className="w-3.5 h-3.5" /> Reopen

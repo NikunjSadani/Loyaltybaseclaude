@@ -20,7 +20,7 @@ import { SalesImportFeatureGate } from '../_components/sales-import-feature-gate
 function row(over: Partial<SalesMonthRow>): SalesMonthRow {
   return {
     month: '2026-10', state: 'OPEN', implicit: true, closedAt: null, closedBy: null, lastAppliedAt: '2026-11-02T05:00:00.000Z',
-    lastAppliedImportId: 'i1', canClose: true, canReopen: false, ...over,
+    lastAppliedImportId: 'i1', canClose: true, canReopen: false, downstream: { creditBatches: 0, exports: 0 }, ...over,
   };
 }
 const ok = <T,>(data: T) => ({ success: true as const, data });
@@ -72,11 +72,40 @@ describe('months page', () => {
   it('GIFSY_ADMIN can reopen a closed month', async () => {
     roleRef.current = 'GIFSY_ADMIN';
     apiMock.months.mockResolvedValue(ok(rows));
-    apiMock.reopenMonth.mockResolvedValue(ok(row({ month: '2026-09' })));
+    apiMock.reopenMonth.mockResolvedValue(ok({ ...row({ month: '2026-09' }), warnings: [] }));
     render(<MonthsPage />);
     const target = await screen.findByRole('button', { name: 'Reopen September 2026' });
     await act(async () => { fireEvent.click(target); });
-    expect(apiMock.reopenMonth).toHaveBeenCalledWith('2026-09');
+    expect(apiMock.reopenMonth).toHaveBeenCalledWith('2026-09', {});
+    expect(await screen.findByRole('status')).toHaveTextContent('September 2026 is open again');
+  });
+
+  it('reopening a month with credit batches / exports names them and sends the acknowledgement', async () => {
+    roleRef.current = 'GIFSY_ADMIN';
+    apiMock.months.mockResolvedValue(ok([row({
+      month: '2026-09', state: 'CLOSED', canClose: false, canReopen: true, downstream: { creditBatches: 2, exports: 1 },
+    })]));
+    apiMock.reopenMonth.mockResolvedValue(ok({ ...row({ month: '2026-09' }), warnings: ['2 credit batches exist for 2026-09.'] }));
+    render(<MonthsPage />);
+    const reopenBtn = await screen.findByRole('button', { name: 'Reopen September 2026' });
+    await act(async () => { fireEvent.click(reopenBtn); });
+    expect((window.confirm as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatch(/2 credit batches and 1 points export/);
+    expect(apiMock.reopenMonth).toHaveBeenCalledWith('2026-09', { acknowledgeDownstream: true });
+    const msg = await screen.findByRole('status');
+    expect(msg).toHaveTextContent('Check: 2 credit batches exist for 2026-09.');
+    expect(msg.textContent).not.toContain('..');
+  });
+
+  it('a 409 asking for the acknowledgement re-confirms, then retries with it', async () => {
+    roleRef.current = 'GIFSY_ADMIN';
+    apiMock.months.mockResolvedValue(ok([row({ month: '2026-09', state: 'CLOSED', canClose: false, canReopen: true })]));
+    apiMock.reopenMonth
+      .mockResolvedValueOnce({ success: false, error: 'Credit batches exist for this month.', status: 409 })
+      .mockResolvedValueOnce(ok({ ...row({ month: '2026-09' }), warnings: [] }));
+    render(<MonthsPage />);
+    const reopenBtn = await screen.findByRole('button', { name: 'Reopen September 2026' });
+    await act(async () => { fireEvent.click(reopenBtn); });
+    expect(apiMock.reopenMonth).toHaveBeenNthCalledWith(2, '2026-09', { acknowledgeDownstream: true });
   });
 
   it('a refused close shows the server reason', async () => {

@@ -20,10 +20,14 @@ vi.mock('next/link', () => ({
 }));
 
 const apiMock = vi.hoisted(() => ({
-  get: vi.fn(), preview: vi.fn(), apply: vi.fn(), reprocess: vi.fn(), remove: vi.fn(),
+  get: vi.fn(), preview: vi.fn(), apply: vi.fn(), reprocess: vi.fn(), remove: vi.fn(), cancel: vi.fn(),
   unmatchedCsvUrl: (id: string) => `/u/${id}`, errorsXlsxUrl: (id: string) => `/e/${id}`,
 }));
 vi.mock('@/lib/sales-import/api', () => ({ salesImportApi: apiMock, fetchDownload: vi.fn() }));
+const perms = vi.hoisted(() => ({ granted: true }));
+vi.mock('@/lib/use-permissions', () => ({
+  usePermissions: () => ({ role: 'CLIENT_ADMIN', permissions: [], ready: true, error: false, retry: () => {}, has: () => perms.granted }),
+}));
 
 import Page from '../[id]/page';
 
@@ -32,6 +36,7 @@ function detail(over: Partial<SalesImportDetail> = {}): SalesImportDetail {
     id: 'imp1', status: 'READY', originalFilename: 'dms.xlsx', fileKind: 'XLSX', sizeBytes: 1000, partCount: 1,
     partsReceived: 1, bytesRead: 1000, rowsRead: 50, rowsSkipped: 0, progressPct: null, duplicateOfId: null,
     error: null, detectedHeaders: null, createdAt: '2026-11-01T10:00:00.000Z', finishedAt: null, uploadedBy: 'Asha',
+    heartbeatAt: null, stalled: false, applied: false, purgedAt: null, canReprocess: true, canCancel: false, canDelete: true,
     monthSummaries: null, errorSamples: null, ...over,
   };
 }
@@ -47,7 +52,10 @@ function month(over: Partial<MonthPreview> = {}): MonthPreview {
 }
 
 function preview(months: MonthPreview[], over: Partial<SalesImportPreview> = {}): SalesImportPreview {
-  return { importId: 'imp1', definitionsHash: 'h1', rosterHashMatches: true, months, ...over };
+  return {
+    importId: 'imp1', definitionsHash: 'h1', processingVersion: 7, mappingChanged: false, rosterOutletsAddedSinceProcessing: 0,
+    months, ...over,
+  };
 }
 
 const ok = <T,>(data: T) => ({ success: true as const, data });
@@ -55,6 +63,7 @@ const ok = <T,>(data: T) => ({ success: true as const, data });
 beforeEach(() => {
   Object.values(apiMock).forEach((f) => typeof f === 'function' && 'mockReset' in f && (f as ReturnType<typeof vi.fn>).mockReset());
   push.mockReset();
+  perms.granted = true;
   vi.spyOn(window, 'confirm').mockReturnValue(true);
 });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
@@ -78,6 +87,52 @@ describe('import detail — processing', () => {
     expect(apiMock.get).toHaveBeenCalledTimes(2);
   });
 
+  it('stops polling on 403 with a final message', async () => {
+    vi.useFakeTimers();
+    apiMock.get.mockResolvedValue({ success: false, error: 'Forbidden', status: 403 });
+    render(<Page />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByText(/have access to this import/)).toBeInTheDocument();
+    expect(screen.queryByText(/Still trying/)).not.toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+    expect(apiMock.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('a transient error keeps polling and says so', async () => {
+    vi.useFakeTimers();
+    apiMock.get.mockResolvedValueOnce({ success: false, error: 'HTTP 502', status: 502 })
+      .mockResolvedValue(ok(detail({ status: 'QUEUED', canCancel: true })));
+    render(<Page />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByText(/Still trying/)).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    expect(screen.getByTestId('sales-import-processing')).toBeInTheDocument();
+  });
+
+  it('QUEUED can be cancelled', async () => {
+    apiMock.get.mockResolvedValueOnce(ok(detail({ status: 'QUEUED', canCancel: true, canDelete: false })))
+      .mockResolvedValue(ok(detail({ status: 'CANCELLED', canCancel: false })));
+    apiMock.cancel.mockResolvedValue(ok(detail({ status: 'CANCELLED' })));
+    render(<Page />);
+    fireEvent.click(await screen.findByTestId('sales-import-cancel'));
+    expect(await screen.findByText(/This import was cancelled/)).toBeInTheDocument();
+    expect(apiMock.cancel).toHaveBeenCalledWith('imp1');
+  });
+
+  it('UPLOADING explains it may still be uploading elsewhere', async () => {
+    apiMock.get.mockResolvedValue(ok(detail({ status: 'UPLOADING', partsReceived: 2, partCount: 5 })));
+    render(<Page />);
+    expect(await screen.findByTestId('sales-import-uploading')).toHaveTextContent(/2 of 5 parts.*another tab/);
+  });
+
+  it('NEEDS_MAPPING separates the heading row from sample rows', async () => {
+    apiMock.get.mockResolvedValue(ok(detail({ status: 'NEEDS_MAPPING', detectedHeaders: [['CUST', 'DATE'], ['C001', '05-10-2026']] })));
+    render(<Page />);
+    const card = await screen.findByTestId('sales-import-needs-mapping');
+    expect(within(card).getByRole('columnheader', { name: 'CUST' })).toBeInTheDocument();
+    expect(within(card).getByRole('cell', { name: 'C001' })).toBeInTheDocument();
+  });
+
   it('NEEDS_MAPPING shows the detected headings and links to Settings', async () => {
     apiMock.get.mockResolvedValue(ok(detail({ status: 'NEEDS_MAPPING', detectedHeaders: [['X', 'X'], ['CUST', 'DATE']], error: 'Missing: INVOICE DATE' })));
     render(<Page />);
@@ -99,12 +154,14 @@ describe('import detail — processing', () => {
 });
 
 describe('import detail — preview + apply', () => {
-  it('shows a duplicate-file banner', async () => {
+  it('shows a duplicate-file banner that never calls a re-apply harmless', async () => {
     apiMock.get.mockResolvedValue(ok(detail({ duplicateOfId: 'old1' })));
     apiMock.preview.mockResolvedValue(ok(preview([month()])));
     render(<Page />);
     const b = await screen.findByTestId('sales-import-duplicate');
     expect(within(b).getByRole('link', { name: /earlier import/ })).toHaveAttribute('href', '/admin/sales-import/old1');
+    expect(b.textContent).not.toMatch(/harmless/i);
+    expect(b).toHaveTextContent(/roll those months back/);
   });
 
   it('a closed month cannot be ticked and shows why', async () => {
@@ -130,7 +187,7 @@ describe('import detail — preview + apply', () => {
     await act(async () => { fireEvent.click(apply); });
     expect(window.confirm).toHaveBeenCalled();
     expect(apiMock.apply).toHaveBeenCalledWith('imp1', {
-      months: ['2026-10'], expectedDefinitionsHash: 'h1', acknowledgePartialMonths: ['2026-10'],
+      months: ['2026-10'], expectedDefinitionsHash: 'h1', processingVersion: 7, acknowledgePartialMonths: ['2026-10'],
     });
     expect(await screen.findByTestId('sales-import-apply-results')).toHaveTextContent('3 outlets updated, 1 set to 0');
   });
@@ -185,12 +242,86 @@ describe('import detail — preview + apply', () => {
     expect(results).toHaveTextContent('November 2026: applied');
   });
 
-  it('roster changed → red banner with Reprocess', async () => {
+  it('mapping changed → red banner with Reprocess; roster additions are informational', async () => {
     apiMock.get.mockResolvedValue(ok(detail()));
-    apiMock.preview.mockResolvedValue(ok(preview([month({ canApply: false, warnings: ['ROSTER_CHANGED'] })], { rosterHashMatches: false })));
+    apiMock.preview.mockResolvedValue(ok(preview([month({ canApply: false, blockedReason: 'The column mapping changed.' })], {
+      mappingChanged: true, rosterOutletsAddedSinceProcessing: 4,
+    })));
     render(<Page />);
-    const b = await screen.findByTestId('sales-import-roster-changed');
+    const b = await screen.findByTestId('sales-import-mapping-changed');
     expect(within(b).getByRole('button', { name: /Reprocess/ })).toBeInTheDocument();
+    expect(screen.getByTestId('sales-import-roster-added')).toHaveTextContent('4 outlets were added');
+  });
+
+  it('any 4xx from Apply refreshes the preview (not only 409)', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue({ success: false, error: 'October 2026 is closed.', status: 400 });
+    render(<Page />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Apply October 2026' }));
+    await act(async () => { fireEvent.click(screen.getByTestId('sales-import-apply')); });
+    const notice = await screen.findByTestId('sales-import-apply-notice');
+    expect(notice).toHaveTextContent('Nothing was applied: October 2026 is closed. The preview has been refreshed');
+    expect(notice.textContent).not.toContain('..');
+    expect(apiMock.preview).toHaveBeenCalledTimes(2);
+  });
+
+  it('a 5xx from Apply does not pretend the preview was refreshed', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    apiMock.apply.mockResolvedValue({ success: false, error: 'HTTP 502', status: 502 });
+    render(<Page />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Apply October 2026' }));
+    await act(async () => { fireEvent.click(screen.getByTestId('sales-import-apply')); });
+    expect(await screen.findByTestId('sales-import-apply-notice')).toHaveTextContent('Try again in a moment');
+    expect(apiMock.preview).toHaveBeenCalledTimes(1);
+  });
+
+  it('the Refresh preview button reloads the preview', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    render(<Page />);
+    await screen.findByTestId('sales-import-preview');
+    await act(async () => { fireEvent.click(screen.getByTestId('sales-import-refresh-preview')); });
+    expect(apiMock.preview).toHaveBeenCalledTimes(2);
+  });
+
+  it('older data: shows this file vs the applied range, explains the roll-back without hover', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month({
+      lastDate: '2026-10-20', warnings: ['OLDER_THAN_LAST_APPLIED'],
+      lastApplied: { importId: 'new1', at: '2026-11-02T10:00:00.000Z', byName: 'Ravi', lastInvoiceDate: '2026-10-31' },
+    })])));
+    render(<Page />);
+    expect(await screen.findByTestId('last-applied-2026-10')).toHaveTextContent('Applied now: up to 31 Oct');
+    expect(screen.getByTestId('month-warnings-2026-10')).toHaveTextContent(/stop on 20 Oct.*goes up to 31 Oct.*roll the month back/);
+  });
+
+  it('REPLACES_MANUAL_VALUES is explained without hover', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month({ warnings: ['REPLACES_MANUAL_VALUES'] })])));
+    render(<Page />);
+    expect(await screen.findByTestId('month-warnings-2026-10')).toHaveTextContent(/manual achievement upload/);
+  });
+
+  it('zero KPIs → Apply disabled with the reason', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month({ kpis: [] })])));
+    render(<Page />);
+    await screen.findByTestId('sales-import-preview');
+    expect(screen.getByTestId('sales-import-apply')).toBeDisabled();
+    expect(screen.getByTestId('sales-import-apply-blockers')).toHaveTextContent('No KPIs are set up for Sales Import');
+  });
+
+  it('without targets:upload: no Apply / Reprocess / Delete, months cannot be ticked', async () => {
+    perms.granted = false;
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    render(<Page />);
+    expect(await screen.findByTestId('sales-import-apply-denied')).toBeInTheDocument();
+    expect(screen.queryByTestId('sales-import-apply')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Reprocess|Delete/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Apply October 2026' })).toBeDisabled();
   });
 
   it('expanding a month shows per-KPI new / stored / change', async () => {
