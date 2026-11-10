@@ -12,6 +12,7 @@ import {
 import { SalesKpiDefService } from '../kpi/sales-kpi-def.service';
 import {
   MAPPING_CHANGED_REASON,
+  importPager,
   loadRosterMeta,
   mappingChangedSince,
   resolveReadyImport,
@@ -111,7 +112,7 @@ export class SalesPreviewService {
     const owned = defs.map((d) => d.kpiCode);
     const state = resolveMonthState(month, current, ctx.status);
 
-    const comp = await computeMonthRows(this.prisma, imp.id, month, defs, roster);
+    const comp = await computeMonthRows(importPager(this.prisma, imp.id, month), defs, roster);
     const existing = await this.prisma.outletSalesRecord.findMany({
       where: { clientId, month },
       select: { outletCode: true, kpiValues: true, batch: { select: { status: true, createdAt: true } } },

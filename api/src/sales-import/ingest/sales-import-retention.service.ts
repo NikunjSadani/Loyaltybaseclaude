@@ -5,7 +5,10 @@ import { StorageService } from '../../storage/storage.service';
 import {
   SALES_IMPORT_ABANDONED_UPLOAD_HOURS,
   SALES_IMPORT_RETENTION_DAYS,
+  SALES_MONTH_HISTORY_RETENTION_YEARS,
 } from '../sales-import.contract';
+import { currentMonthKey } from '../../targets/targets.helpers';
+import { shiftMonthKey } from '../months/month-state';
 import { isLockNotAvailable, lockImportRow, type LockedImport } from './import-lock';
 
 /** Statuses after which the raw file is no longer needed (retention clock = finishedAt). */
@@ -103,6 +106,23 @@ export class SalesImportRetentionService {
     }
   }
 
+  /**
+   * SalesMonthHistory is kept SALES_MONTH_HISTORY_RETENTION_YEARS: months older than that (vs the current IST month) are
+   * deleted. Never throws. Returns the number of history rows deleted.
+   */
+  async purgeOldHistory(opts: { clientId?: string; currentMonth?: string } = {}): Promise<number> {
+    try {
+      const cutoff = shiftMonthKey(opts.currentMonth ?? currentMonthKey(), -12 * SALES_MONTH_HISTORY_RETENTION_YEARS);
+      const r = await this.prisma.salesMonthHistory.deleteMany({
+        where: { ...(opts.clientId ? { clientId: opts.clientId } : {}), month: { lt: cutoff } },
+      });
+      return r.count;
+    } catch (e) {
+      this.logger.warn(`sales-import history retention failed: ${(e as Error).message}`);
+      return 0;
+    }
+  }
+
   /** One bounded sweep (never throws: retention must not break the list call or the worker). */
   async sweep(opts: { clientId?: string; limit?: number; now?: Date } = {}): Promise<{ abandoned: number; purged: number }> {
     const now = opts.now ?? new Date();
@@ -150,6 +170,8 @@ export class SalesImportRetentionService {
     } catch (e) {
       this.logger.warn(`sales-import retention sweep failed: ${(e as Error).message}`);
     }
+    // 10-year month history (cheap indexed delete; usually nothing).
+    await this.purgeOldHistory({ clientId: opts.clientId });
     return out;
   }
 }

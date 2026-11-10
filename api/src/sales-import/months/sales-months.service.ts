@@ -43,6 +43,23 @@ export async function downstreamArtifacts(
   return out;
 }
 
+type HistoryMeta = { sourceImportId: string; appliedAt: Date };
+
+/** The stored month history (SalesMonthHistory) per month: which import it holds and when it was applied. */
+export async function historyMetaByMonth(
+  db: Pick<Prisma.TransactionClient, 'salesMonthHistory'>,
+  clientId: string,
+  months: string[],
+): Promise<Map<string, HistoryMeta>> {
+  if (months.length === 0) return new Map();
+  const rows = await db.salesMonthHistory.findMany({
+    where: { clientId, month: { in: months } },
+    distinct: ['month'],
+    select: { month: true, sourceImportId: true, appliedAt: true },
+  });
+  return new Map(rows.map((r) => [r.month, { sourceImportId: r.sourceImportId, appliedAt: r.appliedAt }]));
+}
+
 export function downstreamWarnings(month: string, d: Downstream): string[] {
   const w: string[] = [];
   if (d.creditBatches > 0) {
@@ -74,8 +91,11 @@ export class SalesMonthsService {
     const rows = await this.prisma.salesMonthStatus.findMany({ where: { clientId, month: { in: months } } });
     const byMonth = new Map(rows.map((r) => [r.month, r]));
     const names = await this.userNames(rows.map((r) => r.closedById));
-    const downstream = await downstreamArtifacts(this.prisma, clientId, months);
-    return months.reverse().map((m) => this.toRow(m, current, byMonth.get(m) ?? null, names, downstream.get(m)));
+    const [downstream, history] = await Promise.all([
+      downstreamArtifacts(this.prisma, clientId, months),
+      historyMetaByMonth(this.prisma, clientId, months),
+    ]);
+    return months.reverse().map((m) => this.toRow(m, current, byMonth.get(m) ?? null, names, downstream.get(m), history.get(m)));
   }
 
   async close(user: JwtPayload, month: string): Promise<SalesMonthRow> {
@@ -112,7 +132,8 @@ export class SalesMonthsService {
       { timeout: 30_000, maxWait: 10_000 },
     );
     const downstream = (await downstreamArtifacts(this.prisma, clientId, [month])).get(month);
-    return this.toRow(month, currentMonthKey(), row, await this.userNames([row.closedById]), downstream);
+    const history = (await historyMetaByMonth(this.prisma, clientId, [month])).get(month);
+    return this.toRow(month, currentMonthKey(), row, await this.userNames([row.closedById]), downstream, history);
   }
 
   /**
@@ -163,7 +184,8 @@ export class SalesMonthsService {
       },
       { timeout: 30_000, maxWait: 10_000 },
     );
-    return { ...this.toRow(month, currentMonthKey(), row, await this.userNames([row.closedById]), downstream), warnings };
+    const history = (await historyMetaByMonth(this.prisma, clientId, [month])).get(month);
+    return { ...this.toRow(month, currentMonthKey(), row, await this.userNames([row.closedById]), downstream, history), warnings };
   }
 
   private toRow(
@@ -172,6 +194,7 @@ export class SalesMonthsService {
     row: SalesMonthStatus | null,
     names: Map<string, string>,
     downstream: Downstream = NO_DOWNSTREAM,
+    history?: HistoryMeta,
   ): SalesMonthRow {
     const st = resolveMonthState(month, current, row);
     const closedExplicit = st.state === 'CLOSED' && !st.implicit;
@@ -186,6 +209,9 @@ export class SalesMonthsService {
       canClose: st.canClose,
       canReopen: st.canReopen,
       downstream: { ...downstream },
+      hasHistory: !!history,
+      historySourceImportId: history?.sourceImportId ?? null,
+      historyAppliedAt: history ? history.appliedAt.toISOString() : null,
     };
   }
 

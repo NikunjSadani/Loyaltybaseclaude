@@ -13,9 +13,13 @@ export function partKey(gcsPrefix: string, n: number): string {
   return `${gcsPrefix}parts/${String(n).padStart(5, '0')}`;
 }
 
-/** Object key of the frozen unmatched-customers CSV. */
-export function unmatchedCsvKey(gcsPrefix: string): string {
-  return `${gcsPrefix}unmatched.csv`;
+/**
+ * Object key of the frozen unmatched-customers CSV of ONE processing run (re-check M1: per run, so a superseded worker
+ * can never overwrite the file of the run that became READY). The READY transaction stores it on the row
+ * (`SalesImport.unmatchedCsvKey`); readers use the stored key only.
+ */
+export function unmatchedCsvKey(gcsPrefix: string, runId: string): string {
+  return `${gcsPrefix}unmatched-${runId.replace(/[^A-Za-z0-9-]/g, '')}.csv`;
 }
 
 export function partCountFor(sizeBytes: number, partSize = SALES_IMPORT_PART_SIZE): number {

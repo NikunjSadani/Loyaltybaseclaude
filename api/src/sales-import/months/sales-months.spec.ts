@@ -23,7 +23,7 @@ const AT = new Date();
 const clientAdmin: JwtPayload = { sub: 'ca', role: 'CLIENT_ADMIN', clientId: 't1', phone: '', name: 'CA' };
 const gifsyAssumed: JwtPayload = { sub: 'ga', role: 'GIFSY_ADMIN', clientId: 't1', phone: '', name: 'GA', assumed: true };
 
-function db(rows: Array<Record<string, unknown>> = [], downstream: { batches?: Array<{ period: string; n: number }>; exports?: Array<{ month: string; n: number }> } = {}) {
+function db(rows: Array<Record<string, unknown>> = [], downstream: { batches?: Array<{ period: string; n: number }>; exports?: Array<{ month: string; n: number }>; history?: Array<Record<string, unknown>> } = {}) {
   const log: string[] = [];
   const d: Record<string, any> = {
     log,
@@ -40,6 +40,7 @@ function db(rows: Array<Record<string, unknown>> = [], downstream: { batches?: A
       groupBy: jest.fn(async () => (downstream.exports ?? []).map((e) => ({ entityId: `t1:${e.month}`, _count: { _all: e.n } }))),
     },
     creditBatch: { groupBy: jest.fn(async () => (downstream.batches ?? []).map((b) => ({ period: b.period, _count: { _all: b.n } }))) },
+    salesMonthHistory: { findMany: jest.fn(async () => (downstream.history ?? []) as Array<Record<string, unknown>>) },
     user: { findMany: jest.fn(async () => [{ id: 'ca', name: 'Client Admin' }]) },
     $executeRaw: jest.fn(async (q: Prisma.Sql) => { log.push(`lock:${q.values[0]}`); return 1; }),
   };
@@ -118,6 +119,15 @@ describe('SalesMonthsService (K-4)', () => {
     expect(rows[1]).toEqual(expect.objectContaining({ state: 'CLOSED', closedBy: 'Client Admin', lastAppliedImportId: 'imp1', canReopen: true }));
     expect(rows[2]).toEqual(expect.objectContaining({ state: 'CLOSED', implicit: true }));
     expect(rows[0].downstream).toEqual({ creditBatches: 0, exports: 0 });
+    expect(rows[1]).toEqual(expect.objectContaining({ hasHistory: false, historySourceImportId: null, historyAppliedAt: null }));
+  });
+
+  it('month history: list exposes hasHistory / historySourceImportId / historyAppliedAt per month (tenant-scoped)', async () => {
+    const d = db([], { history: [{ month: PREV, sourceImportId: 'imp9', appliedAt: AT }] });
+    const rows = await new SalesMonthsService(d as never).list('t1');
+    expect(rows[1]).toEqual(expect.objectContaining({ month: PREV, hasHistory: true, historySourceImportId: 'imp9', historyAppliedAt: AT.toISOString() }));
+    expect(rows[0].hasHistory).toBe(false);
+    expect(d.salesMonthHistory.findMany.mock.calls[0][0]).toEqual(expect.objectContaining({ where: { clientId: 't1', month: { in: expect.arrayContaining([PREV, CUR]) } }, distinct: ['month'] }));
     await expect(new SalesMonthsService(d as never).list('t1', '2026-13')).rejects.toBeInstanceOf(BadRequestException);
   });
 });
@@ -143,6 +153,8 @@ describe('route metadata (roles / permissions)', () => {
   it.each([
     [SalesMonthsController, 'list', 'targets:read'],
     [SalesMonthsController, 'close', 'targets:upload'],
+    [SalesMonthsController, 'recalcPreview', 'targets:read'],
+    [SalesMonthsController, 'recalculate', 'targets:upload'],
     [SalesImportApplyController, 'getPreview', 'targets:read'],
     [SalesImportApplyController, 'postApply', 'targets:upload'],
     [SalesImportConfigController, 'getProfile', 'targets:read'],
@@ -166,14 +178,16 @@ describe('controllers call the access gate FIRST (flag off → 403, nothing else
     ['config createKpi', () => new SalesImportConfigController(never as never, never as never, tenant as never, prisma as never).createKpi(clientAdmin, {} as never)],
     ['apply preview', () => new SalesImportApplyController(never as never, never as never, tenant as never, prisma as never).getPreview(clientAdmin, 'x')],
     ['apply apply', () => new SalesImportApplyController(never as never, never as never, tenant as never, prisma as never).postApply(clientAdmin, 'x', {} as never)],
-    ['months close', () => new SalesMonthsController(never as never, tenant as never, prisma as never).close(clientAdmin, PREV)],
-    ['months reopen', () => new SalesMonthsController(never as never, tenant as never, prisma as never).reopen(gifsyAssumed, OLD)],
+    ['months close', () => new SalesMonthsController(never as never, tenant as never, prisma as never, never as never).close(clientAdmin, PREV)],
+    ['months recalculate preview', () => new SalesMonthsController(never as never, tenant as never, prisma as never, never as never).recalcPreview(clientAdmin, PREV)],
+    ['months recalculate', () => new SalesMonthsController(never as never, tenant as never, prisma as never, never as never).recalculate(clientAdmin, PREV, {} as never)],
+    ['months reopen', () => new SalesMonthsController(never as never, tenant as never, prisma as never, never as never).reopen(gifsyAssumed, OLD)],
   ])('%s → 403 for a tenant without the flag (Deoleo)', async (_n, call) => {
     await expect(call()).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   it('reopen by an un-assumed GIFSY_ADMIN → 400 at the gate', async () => {
-    const c = new SalesMonthsController(never as never, tenant as never, prisma as never);
+    const c = new SalesMonthsController(never as never, tenant as never, prisma as never, never as never);
     await expect(c.reopen({ ...gifsyAssumed, clientId: 'gifsy', assumed: false }, OLD)).rejects.toBeInstanceOf(BadRequestException);
   });
 });
@@ -181,6 +195,7 @@ describe('controllers call the access gate FIRST (flag off → 403, nothing else
 // ─── D-1 guard (K-8) ─────────────────────────────────────────────────────────
 
 describe('SalesMonthClosedGuard (D-1)', () => {
+  beforeEach(() => SalesMonthClosedGuard.lastKnownFlag.clear());
   function guardWith(features: Record<string, unknown> | null, override: Record<string, unknown> | null = null, applied = false) {
     const prisma = {
       client: { findUnique: jest.fn(async () => (features === null ? null : { status: 'ACTIVE', features })) },
@@ -267,6 +282,31 @@ describe('SalesMonthClosedGuard (D-1)', () => {
     // flag OFF: the apply lookup comes AFTER the flag read and the month table is never touched
     expect(b.client.findUnique.mock.invocationCallOrder[0]).toBeLessThan(b.salesImportApply.findFirst.mock.invocationCallOrder[0]);
     expect(b.salesMonthStatus.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('L5: a failed flag read is retried once; a transient failure is invisible', async () => {
+    let n = 0;
+    const prisma = {
+      client: { findUnique: jest.fn(async () => { if (n++ === 0) throw new Error('blip'); return { status: 'ACTIVE', features: { salesImport: true } }; }) },
+      salesImportApply: { findFirst: jest.fn(async () => null) },
+      salesMonthStatus: { findUnique: jest.fn(async () => null) },
+    };
+    await expect(new SalesMonthClosedGuard(prisma as never).canActivate(ctx(PREV))).rejects.toThrow(/still OPEN/);
+    expect(prisma.client.findUnique).toHaveBeenCalledTimes(2);
+  });
+
+  it('L5: both reads failing → the last-known flag decides: ON → guarded (month-read failure → 503); OFF/unknown → open', async () => {
+    const ok = { client: { findUnique: jest.fn(async () => ({ status: 'ACTIVE', features: { salesImport: true } })) }, salesImportApply: { findFirst: jest.fn() }, salesMonthStatus: { findUnique: jest.fn(async () => null) } };
+    await expect(new SalesMonthClosedGuard(ok as never).canActivate(ctx(OLD))).resolves.toBe(true); // learns ON for t1
+    const down = { client: { findUnique: failing() }, salesImportApply: { findFirst: jest.fn(async () => null) }, salesMonthStatus: { findUnique: failing() } };
+    await expect(new SalesMonthClosedGuard(down as never).canActivate(ctx(PREV))).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(down.salesImportApply.findFirst).not.toHaveBeenCalled();
+    // a tenant last seen with the flag OFF (Deoleo) is never blocked
+    const deoleo: JwtPayload = { ...clientAdmin, clientId: 'deoleo' };
+    const off = { client: { findUnique: jest.fn(async () => ({ status: 'ACTIVE', features: {} })) }, salesImportApply: { findFirst: jest.fn(async () => null) }, salesMonthStatus: { findUnique: jest.fn() } };
+    await new SalesMonthClosedGuard(off as never).canActivate(ctx(PREV, 'query', deoleo));
+    const deoleoDown = { client: { findUnique: failing() }, salesImportApply: { findFirst: failing() }, salesMonthStatus: { findUnique: failing() } };
+    await expect(new SalesMonthClosedGuard(deoleoDown as never).canActivate(ctx(PREV, 'query', deoleo))).resolves.toBe(true);
   });
 
   it('L3: once Sales Import is involved (flag ON, or importer data for the month), a failed month read fails CLOSED (503)', async () => {

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { SalesImport } from '@prisma/client';
 import type { SalesColumnMapping } from '../sales-import.contract';
-import { AGGREGATE_CHUNK, SalesImportProcessorService } from './sales-import-processor.service';
+import { AGGREGATE_CHUNK, HeapGuard, SalesImportProcessorService } from './sales-import-processor.service';
 import { partKey, unmatchedCsvKey } from './parts-file';
 import { SALES_IMPORT_PART_SIZE } from '../sales-import.contract';
 import { mappingFingerprint } from './mapping-fingerprint';
@@ -197,7 +197,9 @@ describe('SalesImportProcessorService.processClaimed', () => {
       { importId: 'imp1', month: '2026-10', outletCode: 'U9', dims: { dimA: 'P', dimB: '500' }, dimKey: '{"dimA":"P","dimB":"500"}', amountPaise: 750n, qtyPico: 1_000_000n * 1_000_000n, lines: 1 },
       { importId: 'imp1', month: '2026-11', outletCode: 'O1', dims: { dimA: 'P', dimB: '500' }, dimKey: '{"dimA":"P","dimB":"500"}', amountPaise: 1000n, qtyPico: 40_000n * 1_000_000n, lines: 1 },
     ]);
-    expect(storage.uploads.get(unmatchedCsvKey(row.gcsPrefix))).toBe(
+    // M1 (re-check): the CSV is per run (claim token) and its key is stored on the row in the READY write
+    expect(f.data.unmatchedCsvKey).toBe(unmatchedCsvKey(row.gcsPrefix, 'tok'));
+    expect(storage.uploads.get(unmatchedCsvKey(row.gcsPrefix, 'tok'))).toBe(
       'Customer code,Customer name,Month,Lines,Amount (Rs),Quantity\r\nU9,Stranger,2026-10,1,7.5,1\r\n',
     );
   });
@@ -238,7 +240,13 @@ describe('SalesImportProcessorService.processClaimed', () => {
     prisma.salesImport.findFirst.mockResolvedValue({ id: 'older' });
     await svc.processClaimed(row);
     expect(final().data.duplicateOfId).toBe('older');
-    expect(prisma.salesImport.findFirst.mock.calls[0][0].where).toMatchObject({ clientId: 't1', status: 'READY', id: { not: 'imp1' } });
+    expect(prisma.salesImport.findFirst.mock.calls[0][0].where).toMatchObject({ clientId: 't1', status: 'READY', id: { notIn: ['imp1'] } });
+  });
+
+  it("L2 (re-check): a 'reprocess as new' import is never a duplicate of its own parent", async () => {
+    const { svc, prisma, row } = setup({ file: Buffer.from(CSV) });
+    await svc.processClaimed({ ...row, reprocessedFromId: 'parent' } as never);
+    expect(prisma.salesImport.findFirst.mock.calls[0][0].where.id).toEqual({ notIn: ['imp1', 'parent'] });
   });
 
   it('NEEDS_MAPPING when no profile exists: detectedHeaders = best-guess header row + 3 sample rows (S3)', async () => {
@@ -445,10 +453,11 @@ describe('SalesImportProcessorService — re-audit H1 (auto decimal separator de
 describe('SalesImportProcessorService — re-audit memory / M2', () => {
   it('a heap past the guard fails the import readably (FileProblem) instead of an OOM kill', async () => {
     const lines = ['Invoice Date,Customer Code,Customer,Code,Group,Net Amt,Qty'];
-    for (let i = 0; i < 10_050; i++) lines.push('03-10-2026,O1,S,P,500,1,1');
+    for (let i = 0; i < 20_050; i++) lines.push('03-10-2026,O1,S,P,500,1,1'); // two checks (10k rows apart) must both be over
     const { svc, row, final } = setup({ file: Buffer.from(lines.join('\n')) });
-    const real = process.memoryUsage;
-    const spy = jest.spyOn(process, 'memoryUsage').mockImplementation(() => ({ ...real.call(process), heapUsed: Number.MAX_SAFE_INTEGER }));
+    const v8 = jest.requireActual('node:v8') as typeof import('node:v8');
+    const real = v8.getHeapStatistics();
+    const spy = jest.spyOn(v8, 'getHeapStatistics').mockImplementation(() => ({ ...real, used_heap_size: real.heap_size_limit }));
     try {
       await svc.processClaimed(row);
     } finally {
@@ -473,5 +482,26 @@ describe('SalesImportProcessorService — re-audit memory / M2', () => {
     await svc.processClaimed(row);
     expect(final().data.status).toBe('FAILED');
     expect(final().data.error).toMatch(/unpacks to more than its declared/);
+  });
+});
+
+describe('HeapGuard (re-check M4)', () => {
+  it('fails only after TWO consecutive over-threshold checks, from V8 heap statistics (used vs limit, or too little available)', () => {
+    const v8 = jest.requireActual('node:v8') as typeof import('node:v8');
+    const base = v8.getHeapStatistics();
+    const seq = [
+      { used_heap_size: base.heap_size_limit, total_available_size: base.heap_size_limit }, // over (used)
+      { used_heap_size: 1, total_available_size: base.heap_size_limit }, // fine → resets
+      { used_heap_size: base.heap_size_limit, total_available_size: base.heap_size_limit }, // over
+      { used_heap_size: 1, total_available_size: 1 }, // over (nothing left) → second strike
+    ];
+    let i = 0;
+    const spy = jest.spyOn(v8, 'getHeapStatistics').mockImplementation(() => ({ ...base, ...seq[i++] }));
+    try {
+      const g = new HeapGuard();
+      expect([g.overLimit(), g.overLimit(), g.overLimit(), g.overLimit()]).toEqual([false, false, false, true]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

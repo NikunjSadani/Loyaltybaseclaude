@@ -8,7 +8,7 @@ import { mappingFingerprint } from '../ingest/mapping-fingerprint';
 import type { SalesColumnMapping } from '../sales-import.contract';
 import { lastDayOfMonth, shiftMonthKey } from '../months/month-state';
 import { SalesPreviewService } from './sales-preview.service';
-import { SalesApplyService } from './sales-apply.service';
+import { SalesApplyService, outletsAffected } from './sales-apply.service';
 
 // ─── Date-relative months ──────────────────────────────────────────────────────
 const CUR = currentMonthKey();
@@ -32,9 +32,9 @@ const MAPPING: SalesColumnMapping = {
 const VERSION = 3;
 
 const ROSTER = [
-  { outletCode: 'O1', name: 'One', programName: null, outletType: { code: 'WHOLESALER' } },
-  { outletCode: 'O2', name: 'Two', programName: null, outletType: { code: 'RETAIL' } },
-  { outletCode: 'O3', name: 'Three', programName: null, outletType: { code: 'RETAIL' } }, // no lines → zero-fill
+  { id: 'id-O1', outletCode: 'O1', name: 'One', programName: null, outletType: { code: 'WHOLESALER' } },
+  { id: 'id-O2', outletCode: 'O2', name: 'Two', programName: null, outletType: { code: 'RETAIL' } },
+  { id: 'id-O3', outletCode: 'O3', name: 'Three', programName: null, outletType: { code: 'RETAIL' } }, // no lines → zero-fill
 ];
 const summary = (month: string, over: Record<string, unknown> = {}) => ({
   month,
@@ -60,7 +60,10 @@ function makeDb(opts: {
   defs?: typeof DEF_ROWS;
   /** The newest SalesImportApply of the month (another import `imp0` whose latest invoice in the month is `lastDate`). */
   lastApply?: { lastDate: string } | null;
-  roster?: typeof ROSTER;
+  roster?: Array<Record<string, unknown>>;
+  /** Stored month history (SalesMonthHistory rows, aggregate-shaped with customerCode). */
+  history?: Array<Record<string, unknown>>;
+  historyAppliedAt?: Date;
   profile?: SalesColumnMapping;
   rosterAdded?: number;
 } = {}) {
@@ -88,6 +91,11 @@ function makeDb(opts: {
         where.clientId !== 't1' ? null : where.id === 'imp0' ? lastImp : !where.id || where.id === 'imp1' ? imp : null),
     },
     salesImportProfile: { findUnique: jest.fn(async () => ({ columnMapping: opts.profile ?? MAPPING })) },
+    salesMonthHistory: {
+      findFirst: jest.fn(async () => (opts.history ? { sourceImportId: 'imp0', appliedAt: opts.historyAppliedAt ?? AT } : null)),
+      findMany: jest.fn(async ({ where, take }: { where: { month: string; id?: { gt: bigint } }; take: number }) =>
+        (opts.history ?? []).filter((h) => h.month === where.month && (!where.id || (h.id as bigint) > where.id.gt)).slice(0, take)),
+    },
     // lockImportRow(…, 'SHARE') — H1: the apply holds the import row FOR SHARE
     $queryRaw: jest.fn(async (q: Prisma.Sql) => {
       log.push(`import.${/FOR (\w+)/.exec(q.strings.join('?'))?.[1]?.toLowerCase()}`);
@@ -121,7 +129,11 @@ function makeDb(opts: {
     user: { findUnique: jest.fn(async () => ({ name: 'Applier' })) },
     $executeRaw: jest.fn(async (q: Prisma.Sql | TemplateStringsArray) => {
       const text = 'strings' in (q as Prisma.Sql) ? (q as Prisma.Sql).strings.join('?') : (q as TemplateStringsArray).join('?');
-      log.push(text.includes('pg_advisory_xact_lock') ? 'lock' : text.includes('INSERT') ? 'insert' : 'strip');
+      log.push(
+        text.includes('pg_advisory_xact_lock') ? 'lock'
+          : text.includes('sales_month_histories') ? (text.includes('DELETE') ? 'history.delete' : 'history.insert')
+          : text.includes('INSERT') ? 'insert' : 'strip',
+      );
       return 1;
     }),
     $transaction: jest.fn(async (cb: (tx: unknown) => unknown) => cb(db)),
@@ -299,7 +311,7 @@ describe('SalesApplyService', () => {
     const db = makeDb();
     const r = await services(db).apply.apply(user, 'imp1', body([PREV]));
     expect(r.results).toEqual([{ month: PREV, ok: true, applyId: 'apply1', outletsWritten: 3, outletsZeroFilled: 1 }]);
-    expect(db.log).toEqual(['lock', 'import.share', 'batch.create', 'insert', 'strip', 'apply.create', 'status.upsert', 'audit']);
+    expect(db.log).toEqual(['lock', 'import.share', 'batch.create', 'insert', 'strip', 'history.delete', 'history.insert', 'apply.create', 'status.upsert', 'audit']);
 
     const sql = sqlCalls(db);
     expect(sql[0].values).toEqual([`sales-month:t1:${PREV}`]);
@@ -380,5 +392,89 @@ describe('SalesApplyService', () => {
 
   it('cross-tenant import id → 404', async () => {
     await expect(services(makeDb()).apply.apply({ ...user, clientId: 't2' }, 'imp1', body([PREV]))).rejects.toBeInstanceOf(NotFoundException);
+  });
+});
+
+// ─── MONTH HISTORY + RECALCULATE (owner decision 2026-11-10) ─────────────────────────────────────────────────────
+
+describe('month history', () => {
+  const body = (months: string[]) => ({ months, expectedDefinitionsHash: HASH, processingVersion: VERSION });
+
+  it('apply REPLACES the month history with this import’s lines (every customer code; outletId from the roster now) inside the same tx', async () => {
+    const db = makeDb();
+    await services(db).apply.apply(user, 'imp1', body([PREV]));
+    const sql = sqlCalls(db);
+    const del = sql.find((q) => q.text.includes('DELETE FROM "sales_month_histories"'))!;
+    expect(del.values).toEqual(['t1', PREV]);
+    const ins = sql.find((q) => q.text.includes('INSERT INTO "sales_month_histories"'))!;
+    expect(ins.text).toContain('FROM "sales_import_aggregates" a');
+    expect(ins.text).toContain('LEFT JOIN unnest('); // unmatched codes kept, outletId null
+    expect(ins.values).toEqual(expect.arrayContaining(['t1', 'imp1', 'u1', ['O1', 'O2', 'O3'], ['id-O1', 'id-O2', 'id-O3'], PREV]));
+    expect(db.log.indexOf('history.delete')).toBeLessThan(db.log.indexOf('history.insert'));
+    expect(db.log.indexOf('history.insert')).toBeLessThan(db.log.indexOf('apply.create'));
+    expect((db.salesImportApply.create.mock.calls[0] as unknown as [{ data: Record<string, unknown> }])[0].data.source).toBe('IMPORT');
+  });
+
+  const hist = (id: number, month: string, code: string, dims: Record<string, string>, paise: bigint, micro: bigint) => ({
+    id: BigInt(id), month, customerCode: code, dims, dimKey: stableStringify(dims), amountPaise: paise, qtyPico: micro * 1_000_000n, lines: 1,
+  });
+  const HISTORY = [
+    hist(1, PREV, 'O1', { dimA: 'P', dimB: '500' }, 10000n, 1_500000n),
+    hist(2, PREV, 'O2', { dimA: 'P', dimB: '50' }, -2500n, 0n),
+    hist(3, PREV, 'O4', { dimA: 'P', dimB: '50' }, 700n, 0n), // unmatched when applied; on the roster now
+    hist(4, PREV, 'ZZ', { dimA: 'P', dimB: '50' }, 99n, 0n), // still unmatched
+  ];
+
+  it('recalculate preview: CURRENT definitions × CURRENT roster over the stored history; deltas + outlets affected; 404 without history', async () => {
+    const roster = [...ROSTER, { id: 'id-O4', outletCode: 'O4', name: 'Four', programName: null, outletType: { code: 'RETAIL' } }];
+    const db = makeDb({ roster, history: HISTORY, existing: [{ outletCode: 'O1', kpiValues: { OWN_AMT: 100, OWN_QTY: 1.5 }, batch: { status: 'SALES_IMPORT', createdAt: AT } }] });
+    const p = await services(db).apply.recalcPreview('t1', PREV);
+    expect(p).toMatchObject({
+      month: PREV, monthState: 'OPEN', canApply: true, definitionsHash: HASH, historySourceImportId: 'imp0', historyAppliedAt: AT.toISOString(),
+      matchedOutlets: 3, unmatchedCustomers: 1, unmatchedAmountRupees: 0.99, zeroFillOutlets: 1,
+    });
+    expect(p.kpis.find((k) => k.kpiCode === 'OWN_AMT')).toEqual(expect.objectContaining({ newTotal: 82, currentTotal: 100, delta: -18 }));
+    // O1 unchanged; O2, O3, O4 are new rows → 3 affected
+    expect(p.outletsAffected).toBe(3);
+    expect(p.warnings).toContain('NEGATIVE_VALUES');
+    await expect(services(makeDb()).apply.recalcPreview('t1', PREV)).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('recalculate: rewrites like apply with source HISTORY (history itself untouched), under the month lock', async () => {
+    const db = makeDb({ history: HISTORY });
+    const r = await services(db).apply.recalculate(user, PREV, { expectedDefinitionsHash: HASH, expectedHistoryAppliedAt: AT.toISOString() });
+    expect(r).toEqual(expect.objectContaining({ month: PREV, ok: true, outletsWritten: 3 }));
+    expect(db.log).toEqual(['lock', 'batch.create', 'insert', 'strip', 'apply.create', 'status.upsert', 'audit']);
+    const apply = (db.salesImportApply.create.mock.calls[0] as unknown as [{ data: Record<string, unknown> }])[0].data;
+    expect(apply).toEqual(expect.objectContaining({ source: 'HISTORY', importId: 'imp0' }));
+    const audit = (db.auditLog.create.mock.calls[0] as unknown as [{ data: { newValues: Record<string, unknown> } }])[0].data;
+    expect(audit.newValues).toEqual(expect.objectContaining({ source: 'HISTORY', importId: 'imp0' }));
+    expect(sqlCalls(db)[1].values).toContainEqual(['O1', 'O2', 'O3']);
+  });
+
+  it('recalculate refuses: CLOSED month, stale history / definitions (409), no history (404), bad body (400)', async () => {
+    const ok = { expectedDefinitionsHash: HASH, expectedHistoryAppliedAt: AT.toISOString() };
+    const closed = makeDb({ history: HISTORY, statuses: [{ month: PREV, state: 'CLOSED', closedAt: AT }] });
+    await expect(services(closed).apply.recalculate(user, PREV, ok)).rejects.toThrow(/CLOSED/);
+    expect(closed.salesUploadBatch.create).not.toHaveBeenCalled();
+    const stale = makeDb({ history: HISTORY, historyAppliedAt: new Date(AT.getTime() + 1000) });
+    await expect(services(stale).apply.recalculate(user, PREV, ok)).rejects.toBeInstanceOf(ConflictException);
+    await expect(services(makeDb({ history: HISTORY })).apply.recalculate(user, PREV, { ...ok, expectedDefinitionsHash: 'x' })).rejects.toBeInstanceOf(ConflictException);
+    await expect(services(makeDb()).apply.recalculate(user, PREV, ok)).rejects.toBeInstanceOf(NotFoundException);
+    await expect(services(makeDb({ history: HISTORY })).apply.recalculate(user, PREV, {} as never)).rejects.toBeInstanceOf(BadRequestException);
+    await expect(services(makeDb({ history: HISTORY })).apply.recalculate(user, 'bad', ok)).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+describe('outletsAffected', () => {
+  it('counts changed, new and stripped rows; ignores identical and non-owned keys', () => {
+    const existing = [
+      { outletCode: 'A', kpiValues: { K: 1, M: 9 } }, // unchanged
+      { outletCode: 'B', kpiValues: { K: 1 } }, // changed
+      { outletCode: 'C', kpiValues: { K: 2 } }, // not written → owned key stripped
+      { outletCode: 'D', kpiValues: { M: 3 } }, // only non-owned → untouched
+    ];
+    const rows = [{ outletCode: 'A', values: { K: 1 } }, { outletCode: 'B', values: { K: 2 } }, { outletCode: 'E', values: { K: 0 } }];
+    expect(outletsAffected(existing, rows, ['K'])).toBe(3); // B, C, E
   });
 });

@@ -3,9 +3,8 @@
  * numbers apply writes (same function, same aggregates, same definitions).
  */
 import type { Prisma } from '@prisma/client';
-import type { PrismaService } from '../../prisma/prisma.service';
 import { OutletKpiAccumulator, measureToNumber, outletInScope, type KpiDefLite } from '../kpi/sales-kpi.helper';
-import { forEachAggregatePage, rosterIndexOf, type RosterOutlet } from '../kpi/sales-import-data';
+import { rosterIndexOf, type AggregatePager, type RosterOutlet } from '../kpi/sales-import-data';
 
 export interface MonthOutletRow {
   outletCode: string;
@@ -41,10 +40,12 @@ export interface MonthComputation {
   split: MonthRosterSplit;
 }
 
+/**
+ * `pager` = the month's lines: an import's aggregates (importPager — preview / apply) or the month's stored history
+ * (historyPager — recalculate). Same computation either way.
+ */
 export async function computeMonthRows(
-  db: PrismaService | Prisma.TransactionClient,
-  importId: string,
-  month: string,
+  pager: AggregatePager,
   defs: readonly KpiDefLite[],
   roster: Map<string, RosterOutlet>,
 ): Promise<MonthComputation> {
@@ -57,7 +58,7 @@ export async function computeMonthRows(
   const split: MonthRosterSplit = {
     matchedOutlets: 0, matchedPaise: 0n, matchedPico: 0n, unmatchedCustomers: 0, unmatchedPaise: 0n, unmatchedPico: 0n,
   };
-  await forEachAggregatePage(db, importId, month, (page) => {
+  await pager((page) => {
     for (const a of page) {
       const code = index.get(a.outletCode);
       if (code === undefined) {

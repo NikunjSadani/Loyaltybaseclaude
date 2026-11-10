@@ -34,7 +34,7 @@ import {
 } from '../sales-import.contract';
 import { isStalled, lockImportRow, rethrowBusy, IMPORT_BUSY_MESSAGE, type LockedImport } from './import-lock';
 import { mappingFingerprint } from './mapping-fingerprint';
-import { expectedPartSize, partCountFor, partKey, unmatchedCsvKey } from './parts-file';
+import { expectedPartSize, partCountFor, partKey } from './parts-file';
 import { SalesImportRetentionService } from './sales-import-retention.service';
 import { SalesImportRunnerService } from './sales-import-runner.service';
 
@@ -89,6 +89,7 @@ const SUMMARY_SELECT = {
   gcsPrefix: true,
   mappingFingerprint: true,
   reprocessedFromId: true,
+  unmatchedCsvKey: true,
 } satisfies Prisma.SalesImportSelect;
 type SummaryRow = Prisma.SalesImportGetPayload<{ select: typeof SUMMARY_SELECT }>;
 
@@ -147,6 +148,36 @@ export class SalesImportUploadService {
 
   // ─── Upload ───────────────────────────────────────────────────────────────────
 
+  /**
+   * A failed "reprocess as new" child must never linger as a live child (it would block retries): cancel + purge it;
+   * if the purge cannot lock the row right now (busy), mark it CANCELLED anyway — retention purges it later.
+   */
+  private async abandonChild(user: JwtPayload, childId: string): Promise<void> {
+    const r = await this.retention.purgeImport(childId, user.clientId, { cancel: true }).catch(() => 'busy' as const);
+    if (r !== 'purged') {
+      await this.prisma.salesImport
+        .updateMany({
+          where: { id: childId, clientId: user.clientId, status: { notIn: ['CANCELLED'] } },
+          data: { status: 'CANCELLED', finishedAt: new Date(), claimToken: null },
+        })
+        .catch(() => undefined);
+    }
+  }
+
+  /** ≤ SALES_IMPORT_MAX_INFLIGHT_UPLOADS imports UPLOADING per tenant (abandoned ones are swept first). */
+  private async assertUploadCapacity(user: JwtPayload): Promise<void> {
+    await this.retention.sweep({ clientId: user.clientId, limit: 5 });
+    const since = new Date(Date.now() - SALES_IMPORT_ABANDONED_UPLOAD_HOURS * 3_600_000);
+    const inflight = await this.prisma.salesImport.count({
+      where: { clientId: user.clientId, status: 'UPLOADING', createdAt: { gte: since } },
+    });
+    if (inflight >= SALES_IMPORT_MAX_INFLIGHT_UPLOADS) {
+      throw new ConflictException(
+        `${inflight} uploads are already in progress for this tenant (the limit is ${SALES_IMPORT_MAX_INFLIGHT_UPLOADS}). Finish or delete one, then try again.`,
+      );
+    }
+  }
+
   async createUpload(user: JwtPayload, body: { filename: string; sizeBytes: number }): Promise<CreateSalesImportUploadResult> {
     const filename = String(body.filename ?? '').split(/[\\/]/).pop()!.trim().slice(0, 255);
     const lower = filename.toLowerCase();
@@ -158,16 +189,7 @@ export class SalesImportUploadService {
       throw new BadRequestException(`The file is larger than the ${SALES_IMPORT_MAX_FILE_BYTES / (1024 * 1024)} MB limit.`);
     }
     // S5: abandoned uploads (> 24 h) are cancelled + purged first, so they never count against the cap.
-    await this.retention.sweep({ clientId: user.clientId, limit: 5 });
-    const since = new Date(Date.now() - SALES_IMPORT_ABANDONED_UPLOAD_HOURS * 3_600_000);
-    const inflight = await this.prisma.salesImport.count({
-      where: { clientId: user.clientId, status: 'UPLOADING', createdAt: { gte: since } },
-    });
-    if (inflight >= SALES_IMPORT_MAX_INFLIGHT_UPLOADS) {
-      throw new ConflictException(
-        `${inflight} uploads are already in progress for this tenant (the limit is ${SALES_IMPORT_MAX_INFLIGHT_UPLOADS}). Finish or delete one, then try again.`,
-      );
-    }
+    await this.assertUploadCapacity(user);
     const id = randomUUID();
     const partCount = partCountFor(sizeBytes);
     await this.prisma.$transaction(async (tx) => {
@@ -212,7 +234,16 @@ export class SalesImportUploadService {
       where: { id: row.id, clientId: user.clientId, status: 'UPLOADING' },
       data: { partsReceived: received },
     });
-    if (upd.count === 0) throw new ConflictException('This import is no longer accepting parts (it was completed or cancelled meanwhile).');
+    if (upd.count === 0) {
+      // Re-check M2: a part that lands after a CANCEL / purge re-creates an object under a prefix that was already
+      // cleaned → delete it again. After a COMPLETE the object is kept: it is byte-identical to the part complete
+      // verified (same n of the same file), and the queued import needs it.
+      const now = await this.prisma.salesImport.findFirst({ where: { id: row.id, clientId: user.clientId }, select: { status: true, purgedAt: true } });
+      if (!now || now.status === 'CANCELLED' || now.purgedAt) {
+        await this.storage.deleteFile(partKey(row.gcsPrefix, n)).catch(() => undefined);
+      }
+      throw new ConflictException('This import is no longer accepting parts (it was completed or cancelled meanwhile).');
+    }
     return { partsReceived: received };
   }
 
@@ -293,33 +324,50 @@ export class SalesImportUploadService {
     }
     const child = (await this.liveChildren(user.clientId, [old.id])).get(old.id);
     if (child) throw new ConflictException(`This file is already being re-imported (import ${child}).`);
+    await this.assertUploadCapacity(user); // re-check L4: the per-tenant in-flight cap applies here too
 
     const newId = randomUUID();
     const gcsPrefix = `sales-imports/${user.clientId}/${newId}/`;
-    await this.prisma.$transaction(async (tx) => {
-      await tx.salesImport.create({
-        data: {
-          id: newId,
-          clientId: user.clientId,
-          uploadedById: user.sub,
-          originalFilename: old.originalFilename,
-          fileKind: old.fileKind,
-          sizeBytes: old.sizeBytes,
-          partCount: old.partCount,
-          gcsPrefix,
-          status: 'UPLOADING',
-          reprocessedFromId: old.id,
-        },
+    await this.prisma
+      .$transaction(async (tx) => {
+        // Re-check M3: the parent row is locked (NOWAIT → 409 busy) and the "one live re-import" rule re-checked under the
+        // lock, so two concurrent clicks cannot both create a child (the partial unique index is the last line).
+        const parent = await lockImportRow(tx, old.id, user.clientId, 'UPDATE NOWAIT');
+        if (!parent || parent.purgedAt || parent.status !== 'READY') throw new ConflictException('This import changed meanwhile; refresh and try again.');
+        const live = await tx.salesImport.findFirst({
+          where: { clientId: user.clientId, reprocessedFromId: old.id, status: { notIn: ['CANCELLED', 'FAILED'] } },
+          select: { id: true },
+        });
+        if (live) throw new ConflictException(`This file is already being re-imported (import ${live.id}).`);
+        await tx.salesImport.create({
+          data: {
+            id: newId,
+            clientId: user.clientId,
+            uploadedById: user.sub,
+            originalFilename: old.originalFilename,
+            fileKind: old.fileKind,
+            sizeBytes: old.sizeBytes,
+            partCount: old.partCount,
+            gcsPrefix,
+            status: 'UPLOADING',
+            reprocessedFromId: old.id,
+          },
+        });
+        await this.audit(tx, user, 'CREATE', newId, { action: 'reprocess-as-new', fromImportId: old.id });
+      })
+      .catch((e: unknown) => {
+        if ((e as { code?: string })?.code === 'P2002') throw new ConflictException('This file is already being re-imported.');
+        return rethrowBusy(e);
       });
-      await this.audit(tx, user, 'CREATE', newId, { action: 'reprocess-as-new', fromImportId: old.id });
-    });
     const fresh = { id: newId, gcsPrefix, partCount: old.partCount, sizeBytes: old.sizeBytes };
     try {
       for (let n = 0; n < old.partCount; n++) await this.storage.copyFile(partKey(old.gcsPrefix, n), partKey(gcsPrefix, n));
       await this.verifyParts(fresh);
+      // Re-check L4: the parent may have been purged while we copied (its parts gone mid-copy) → don't trust the copy.
+      const parentNow = await this.prisma.salesImport.findFirst({ where: { id: old.id, clientId: user.clientId }, select: { purgedAt: true } });
+      if (!parentNow || parentNow.purgedAt) throw new Error('the original import was purged during the copy');
     } catch (e) {
-      // Don't leave a half-copied import behind: cancel + purge it (files deleted after the marking commit).
-      await this.retention.purgeImport(newId, user.clientId, { cancel: true }).catch(() => undefined);
+      await this.abandonChild(user, newId);
       this.logger.warn(`sales-import ${old.id}: re-import copy failed: ${(e as Error)?.message}`);
       throw new ConflictException('The stored file could not be copied for the re-import (it may have been deleted). Upload the file again.');
     }
@@ -584,7 +632,8 @@ export class SalesImportUploadService {
     const row = await this.find(user, id);
     if (row.status !== 'READY') throw new NotFoundException('The unmatched-customers file is available once the import is READY.');
     if (row.purgedAt) throw new NotFoundException('The unmatched-customers file was deleted after the retention period.');
-    const key = unmatchedCsvKey(row.gcsPrefix);
+    const key = row.unmatchedCsvKey; // the READY run's own file (re-check M1)
+    if (!key || !key.startsWith(row.gcsPrefix)) throw new NotFoundException('The unmatched-customers file is not available for this import.');
     const exists = (await this.storage.listPrefix(key)).some((o) => o.name === key);
     if (!exists) throw new NotFoundException('The unmatched-customers file is not available for this import.');
     await this.audit(this.prisma, user, 'EXPORT', row.id, { action: 'unmatched.csv' });

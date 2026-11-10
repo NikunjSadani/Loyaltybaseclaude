@@ -8,7 +8,8 @@ import { SALES_IMPORT_PART_SIZE, SALES_IMPORT_STALE_HEARTBEAT_MINUTES } from '..
 describe('parts-file', () => {
   it('keys parts zero-padded under the import prefix', () => {
     expect(partKey('sales-imports/t1/i1/', 7)).toBe('sales-imports/t1/i1/parts/00007');
-    expect(unmatchedCsvKey('sales-imports/t1/i1/')).toBe('sales-imports/t1/i1/unmatched.csv');
+    expect(unmatchedCsvKey('sales-imports/t1/i1/', 'tok-1')).toBe('sales-imports/t1/i1/unmatched-tok-1.csv');
+    expect(unmatchedCsvKey('sales-imports/t1/i1/', '../x')).toBe('sales-imports/t1/i1/unmatched-x.csv'); // sanitised
   });
 
   it('part count and expected part sizes (exact last part)', () => {

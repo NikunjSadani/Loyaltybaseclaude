@@ -25,7 +25,12 @@ export interface AggRow extends KpiAgg {
 
 export interface RosterOutlet extends OutletScopeMeta {
   name: string;
+  /** Outlet.id (SalesMonthHistory.outletId at apply time). */
+  id?: string;
 }
+
+/** Streams aggregate-shaped rows page by page (an import's aggregates, or a month's stored history). */
+export type AggregatePager = (onPage: (rows: AggRow[]) => void | Promise<void>) => Promise<void>;
 
 /** Load an import of THIS tenant (404 otherwise); `latest` = the newest READY import. Must be READY (409) and not purged. */
 export async function resolveReadyImport(db: Db, clientId: string, importId: string): Promise<SalesImport> {
@@ -59,12 +64,12 @@ export const MAPPING_CHANGED_REASON =
 export async function loadRosterMeta(db: Db, clientId: string): Promise<Map<string, RosterOutlet>> {
   const outlets = await db.outlet.findMany({
     where: rosterOutletWhere(clientId),
-    select: { outletCode: true, name: true, programName: true, outletType: { select: { code: true } } },
+    select: { id: true, outletCode: true, name: true, programName: true, outletType: { select: { code: true } } },
   });
   return new Map(
     outlets.map((o) => [
       o.outletCode,
-      { name: o.name, outletType: o.outletType?.code ?? null, program: o.programName ?? null },
+      { id: o.id, name: o.name, outletType: o.outletType?.code ?? null, program: o.programName ?? null },
     ]),
   );
 }
@@ -98,6 +103,40 @@ function toAgg(r: {
     qtyPico: BigInt(r.qtyPico),
     lines: r.lines,
   };
+}
+
+/** An import's aggregates for one month, as a pager. */
+export function importPager(db: Db, importId: string, month: string): AggregatePager {
+  return (onPage) => forEachAggregatePage(db, importId, month, onPage);
+}
+
+/**
+ * A month's stored history (SalesMonthHistory) as a pager, in the aggregate shape (`outletCode` = the stored customer
+ * code, normalized like the aggregates). Keyset-paged on the (clientId, month, id) index.
+ */
+export function historyPager(db: Db, clientId: string, month: string, pageSize = AGG_PAGE_SIZE): AggregatePager {
+  return async (onPage) => {
+    let cursor: bigint | null = null;
+    for (;;) {
+      const page: Array<{
+        id: bigint; month: string; customerCode: string; dims: Prisma.JsonValue; dimKey: string; amountPaise: bigint; qtyPico: bigint; lines: number;
+      }> = await db.salesMonthHistory.findMany({
+        where: { clientId, month, ...(cursor !== null ? { id: { gt: cursor } } : {}) },
+        orderBy: { id: 'asc' },
+        take: pageSize,
+        select: { id: true, month: true, customerCode: true, dims: true, dimKey: true, amountPaise: true, qtyPico: true, lines: true },
+      });
+      if (page.length === 0) return;
+      await onPage(page.map((r) => toAgg({ ...r, outletCode: r.customerCode })));
+      if (page.length < pageSize) return;
+      cursor = page[page.length - 1].id;
+    }
+  };
+}
+
+/** The month's stored history: which import it holds and when it was applied (null = no history). */
+export async function monthHistoryMeta(db: Db, clientId: string, month: string): Promise<{ sourceImportId: string; appliedAt: Date } | null> {
+  return db.salesMonthHistory.findFirst({ where: { clientId, month }, select: { sourceImportId: true, appliedAt: true } });
 }
 
 /**

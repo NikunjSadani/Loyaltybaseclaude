@@ -39,6 +39,23 @@ const FINAL_TX_TIMEOUT_MS = 30 * 60_000;
 const HEAP_GUARD_FRACTION = 0.85;
 const HEAP_CHECK_ROWS = 10_000;
 
+/**
+ * Re-check M4: reads V8's own heap statistics (used size vs heap_size_limit, and what is still available), and only
+ * reports "over" after TWO consecutive over-threshold checks (10k rows apart) — a transient peak that the next GC
+ * clears never fails an import.
+ */
+export class HeapGuard {
+  private strikes = 0;
+  constructor(private readonly fraction = HEAP_GUARD_FRACTION) {}
+
+  overLimit(): boolean {
+    const h = v8.getHeapStatistics();
+    const over = h.used_heap_size > h.heap_size_limit * this.fraction || h.total_available_size < h.heap_size_limit * (1 - this.fraction);
+    this.strikes = over ? this.strikes + 1 : 0;
+    return this.strikes >= 2;
+  }
+}
+
 /** A problem with the FILE (shown to the admin verbatim). */
 class FileProblem extends Error {}
 
@@ -222,13 +239,13 @@ export class SalesImportProcessorService {
     const checkClaim = () => {
       if (prog.lost) throw new ClaimLostError();
     };
-    const heapCap = v8.getHeapStatistics().heap_size_limit * HEAP_GUARD_FRACTION;
+    const heapGuard = new HeapGuard();
     const onRow = () => {
       prog.rowsSeen++;
       beat();
       checkClaim();
       // Memory backstop (plan §7.1 step 11): fail readably before an OOM kill, whatever the shape of the file.
-      if (prog.rowsSeen % HEAP_CHECK_ROWS === 0 && process.memoryUsage().heapUsed > heapCap) {
+      if (prog.rowsSeen % HEAP_CHECK_ROWS === 0 && heapGuard.overLimit()) {
         throw new FileProblem('The file is too large to process in one go. Split it by month and upload the parts separately.');
       }
     };
@@ -236,31 +253,37 @@ export class SalesImportProcessorService {
     // ── Pass 1: sha256 of the whole upload + parse (+ decimal-separator evidence when the mapping says 'auto') ──
     const setting = mapping?.decimalSeparator ?? 'auto';
     const hash = createHash('sha256');
-    const p1 = await this.parsePass(row, mapping, roster.byNormalizedCode, parts, size, prog, beat, checkClaim, onRow, {
+    const pass1 = await this.parsePass(row, mapping, roster.byNormalizedCode, parts, size, prog, beat, checkClaim, onRow, {
       hash,
       collectDecimalEvidence: setting === 'auto',
     });
     await inflight;
     checkClaim();
-    let outcome = p1.outcome;
-    if (outcome.kind === 'ok' && p1.hashedBytes !== size) {
-      throw new FileProblem(`The uploaded file is incomplete (${p1.hashedBytes} of ${size} bytes stored). Upload it again.`);
+    const startDecimal = pass1.decimal;
+    let outcome: ParseOutcome | null = pass1.outcome;
+    if (outcome.kind === 'ok' && pass1.hashedBytes !== size) {
+      throw new FileProblem(`The uploaded file is incomplete (${pass1.hashedBytes} of ${size} bytes stored). Upload it again.`);
     }
+    (pass1 as { outcome: ParseOutcome | null }).outcome = null; // only `outcome` holds pass 1's aggregates from here on
 
     // ── 'auto' decimal separator: decided ONCE per file from the evidence; never guessed (H1 re-audit) ──
     if (outcome.kind === 'ok' && setting === 'auto') {
-      const decision = decideDecimal(outcome.result.decimalEvidence, p1.decimal);
+      const decision = decideDecimal(outcome.result.decimalEvidence, startDecimal);
       if ('needsMapping' in decision) {
         outcome = { kind: 'needsMapping', reason: decision.needsMapping, detectedHeaders: outcome.detectedHeaders };
-      } else if (decision.decimal !== p1.decimal) {
-        // Pass 1 read text numbers with the other separator: read the file again with the decided one.
+      } else if (decision.decimal !== startDecimal) {
+        // Pass 1 read text numbers with the other separator: read the file again with the decided one. Pass 1's
+        // aggregates are released FIRST (re-check H2) so the two passes never hold the file's maps at the same time.
+        outcome = null;
         prog.rowsSeen = 0;
-        const p2 = await this.parsePass(row, mapping, roster.byNormalizedCode, parts, size, prog, beat, checkClaim, onRow, {
+        prog.lastBeatRows = 0;
+        prog.bytesRead = 0;
+        const pass2 = await this.parsePass(row, mapping, roster.byNormalizedCode, parts, size, prog, beat, checkClaim, onRow, {
           decimal: decision.decimal,
         });
         await inflight;
         checkClaim();
-        outcome = p2.outcome;
+        outcome = pass2.outcome;
       }
     }
 
@@ -291,6 +314,7 @@ export class SalesImportProcessorService {
     opts: { hash?: ReturnType<typeof createHash>; decimal?: DecimalSeparator; collectDecimalEvidence?: boolean },
   ): Promise<{ outcome: ParseOutcome; hashedBytes: number; decimal: DecimalSeparator }> {
     let hashedBytes = 0;
+    let streamedBytes = 0; // progress for every pass (pass 2 does not hash)
     let csvDelimiter: string | null = null;
     let source: Readable;
     let rows: AsyncGenerator<SourceRow>;
@@ -327,7 +351,8 @@ export class SalesImportProcessorService {
             hash.update(chunk);
             hashedBytes += chunk.length;
           }
-          prog.bytesRead = Math.max(prog.bytesRead, hashedBytes);
+          streamedBytes += chunk.length;
+          prog.bytesRead = streamedBytes;
           beat();
           cb(null, chunk);
         },
@@ -445,7 +470,8 @@ export class SalesImportProcessorService {
   ): Promise<void> {
     // GCS I/O never runs inside a DB transaction (re-audit M1). Written first: if the claim turns out to be lost below,
     // the object is an orphan under this import's own prefix and goes with its delete / retention purge.
-    await this.storage.uploadStream(unmatchedCsvKey(row.gcsPrefix), Readable.from(unmatchedCsvLines(result.unmatched())), 'text/csv; charset=utf-8');
+    const csvKey = unmatchedCsvKey(row.gcsPrefix, row.claimToken!);
+    await this.storage.uploadStream(csvKey, Readable.from(unmatchedCsvLines(result.unmatched())), 'text/csv; charset=utf-8');
     await this.prisma.$transaction(
       async (tx) => {
         const own = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
@@ -476,7 +502,14 @@ export class SalesImportProcessorService {
         if (batch.length) await tx.salesImportAggregate.createMany({ data: batch });
 
         const duplicate = await tx.salesImport.findFirst({
-          where: { clientId: row.clientId, contentSha256: sha256, status: 'READY', id: { not: row.id }, createdAt: { lte: row.createdAt } },
+          // L2: a "reprocess as new" import is never flagged as a duplicate of its own parent.
+          where: {
+            clientId: row.clientId,
+            contentSha256: sha256,
+            status: 'READY',
+            id: { notIn: [row.id, ...(row.reprocessedFromId ? [row.reprocessedFromId] : [])] },
+            createdAt: { lte: row.createdAt },
+          },
           orderBy: { createdAt: 'asc' },
           select: { id: true },
         });
@@ -491,6 +524,7 @@ export class SalesImportProcessorService {
             error: null,
             contentSha256: sha256,
             duplicateOfId: duplicate?.id ?? null,
+            unmatchedCsvKey: csvKey,
             mappingSnapshot: mapping as unknown as Prisma.InputJsonValue,
             mappingFingerprint: mappingFingerprint(mapping),
             processingVersion: { increment: 1 },

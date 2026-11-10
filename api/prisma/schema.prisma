@@ -3086,6 +3086,7 @@ model SalesImport {
   purgedAt         DateTime? // retention purge MARKED (aggregates + sample rows removed in that tx)
   filesPurgedAt    DateTime? // GCS objects (parts, unmatched.csv) deleted — after the marking commit; retried by the sweep
   reprocessedFromId String?  // created by POST :id/reprocess-as-new from this (applied) import's stored file
+  unmatchedCsvKey  String?  // GCS key of the READY run's unmatched.csv (per run; set in the READY transaction)
   bytesRead        BigInt    @default(0)
   rowsRead         Int       @default(0)
   rowsSkipped      Int       @default(0)
@@ -3141,12 +3142,37 @@ model SalesImportApply {
   outletsWritten      Int
   outletsZeroFilled   Int
   totals              Json // {kpiCode: {before, after}}
+  source              String   @default("IMPORT") // IMPORT (a file) | HISTORY (recalculate from SalesMonthHistory)
   createdAt           DateTime @default(now())
 
   import SalesImport @relation(fields: [importId], references: [id], onDelete: Restrict)
 
   @@index([clientId, month, createdAt])
   @@map("sales_import_applies")
+}
+
+/// The FINAL applied file lines of a month (every customer code, matched or not), replaced by each apply and kept
+/// SALES_MONTH_HISTORY_RETENTION_YEARS (10) — the source for "Recalculate from stored history" after the per-import
+/// aggregates are purged (plan §10b). No FK to sales_imports on purpose: it outlives the import's data.
+model SalesMonthHistory {
+  id             BigInt   @id @default(autoincrement())
+  clientId       String
+  month          String // YYYY-MM
+  customerCode   String // normalizeOutletCode of the file cell (same as SalesImportAggregate.outletCode)
+  outletId       String? // the roster outlet at apply time (null = unmatched then)
+  dims           Json
+  dimKey         String
+  amountPaise    BigInt
+  qtyPico        BigInt
+  lines          Int
+  sourceImportId String
+  appliedAt      DateTime
+  appliedById    String
+
+  @@unique([clientId, month, customerCode, dimKey])
+  @@index([clientId, month, id])
+  @@index([month])
+  @@map("sales_month_histories")
 }
 
 /// Explicit override of the implicit open/closed month rule (plan §7.3).

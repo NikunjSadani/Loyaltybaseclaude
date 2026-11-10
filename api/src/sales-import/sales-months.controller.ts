@@ -5,8 +5,16 @@ import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decor
 import { TenantService } from '../tenant/tenant.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesMonthsService } from './months/sales-months.service';
+import { SalesApplyService } from './apply/sales-apply.service';
 import { assertSalesImportAccess } from './sales-import-access';
-import type { SalesMonthReopenRequest, SalesMonthReopenResult, SalesMonthRow } from './sales-import.contract';
+import type {
+  SalesMonthRecalcPreview,
+  SalesMonthRecalcRequest,
+  SalesMonthRecalcResult,
+  SalesMonthReopenRequest,
+  SalesMonthReopenResult,
+  SalesMonthRow,
+} from './sales-import.contract';
 
 /**
  * Sales month state routes (plan §5.2, §7.3):
@@ -15,6 +23,8 @@ import type { SalesMonthReopenRequest, SalesMonthReopenResult, SalesMonthRow } f
  *   POST admin/sales-months/:month/reopen   method-level @Roles('GIFSY_ADMIN') + must be ASSUMED. RolesGuard
  *                                           uses getAllAndOverride, so the method roles REPLACE the class roles.
  *                                           An un-assumed GIFSY_ADMIN → 400 (access gate + service re-check).
+ *   GET  admin/sales-months/:month/recalculate/preview   targets:read   → SalesMonthRecalcPreview (from stored history)
+ *   POST admin/sales-months/:month/recalculate           targets:upload → SalesMonthRecalcResult (month OPEN, month lock)
  * OWNER: Lane K.
  */
 @Controller('admin/sales-months')
@@ -24,6 +34,7 @@ export class SalesMonthsController {
     readonly months: SalesMonthsService,
     readonly tenant: TenantService,
     readonly prisma: PrismaService,
+    readonly apply: SalesApplyService,
   ) {}
 
   @Get()
@@ -35,6 +46,25 @@ export class SalesMonthsController {
   ): Promise<SalesMonthRow[]> {
     await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: false });
     return this.months.list(user.clientId, from || undefined, to || undefined);
+  }
+
+  @Get(':month/recalculate/preview')
+  @RequirePermission('targets:read')
+  async recalcPreview(@CurrentUser() user: JwtPayload, @Param('month') month: string): Promise<SalesMonthRecalcPreview> {
+    await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: false });
+    return this.apply.recalcPreview(user.clientId, month);
+  }
+
+  @Post(':month/recalculate')
+  @HttpCode(200)
+  @RequirePermission('targets:upload')
+  async recalculate(
+    @CurrentUser() user: JwtPayload,
+    @Param('month') month: string,
+    @Body() body: SalesMonthRecalcRequest,
+  ): Promise<SalesMonthRecalcResult> {
+    await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: true });
+    return this.apply.recalculate(user, month, body);
   }
 
   @Post(':month/close')

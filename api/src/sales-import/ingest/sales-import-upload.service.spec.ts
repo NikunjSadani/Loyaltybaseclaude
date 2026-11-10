@@ -85,6 +85,7 @@ function harness() {
       findMany: jest.fn(async ({ where }: { where: { importId: { in: string[] } } }) => applies.filter((a) => where.importId.in.includes(a.importId))),
     },
     auditLog: { create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => (audits.push(data), data)) },
+    salesMonthHistory: { deleteMany: jest.fn(async () => ({ count: 0 })) },
     user: { findMany: jest.fn().mockResolvedValue([{ id: 'u1', name: 'Admin' }]) },
     $executeRaw: jest.fn().mockResolvedValue(0),
     $queryRaw: jest.fn(async (q: { strings: string[]; values: unknown[] }) => {
@@ -485,7 +486,11 @@ describe('SalesImportUploadService — read', () => {
     await expect(h.svc.unmatchedCsv(USER, id)).rejects.toBeInstanceOf(NotFoundException);
     h.rows.get(id)!.status = 'READY';
     await expect(h.svc.unmatchedCsv(USER, id)).rejects.toThrow('not available');
-    h.objects.set(`sales-imports/t1/${id}/unmatched.csv`, Buffer.from('h\r\n'));
+    // re-check M1: only the key the READY run stored is served (a stray file from another run is never picked up)
+    h.objects.set(`sales-imports/t1/${id}/unmatched-old.csv`, Buffer.from('stale'));
+    await expect(h.svc.unmatchedCsv(USER, id)).rejects.toThrow('not available');
+    (h.rows.get(id) as unknown as { unmatchedCsvKey: string }).unmatchedCsvKey = `sales-imports/t1/${id}/unmatched-r1.csv`;
+    h.objects.set(`sales-imports/t1/${id}/unmatched-r1.csv`, Buffer.from('h\r\n'));
     const r = await h.svc.unmatchedCsv(USER, id);
     expect(r.filename).toBe(`sales-import-${id}-unmatched.csv`);
     const chunks: Buffer[] = [];
@@ -577,5 +582,84 @@ describe('SalesImportUploadService — reprocess as a new import (re-audit M3)',
     const child = [...h.rows.values()].find((r) => (r as unknown as { reprocessedFromId: string }).reprocessedFromId === id)!;
     expect(child).toMatchObject({ status: 'CANCELLED', purgedAt: expect.any(Date) });
     expect([...h.objects.keys()].some((k) => k.includes(child.id))).toBe(false);
+  });
+});
+
+describe('SalesImportRetentionService — month history (10 years)', () => {
+  it('deletes history months older than 10 years (vs the current month), tenant-scoped when asked; never throws', async () => {
+    const h = harness();
+    await h.retention.purgeOldHistory({ clientId: 't1', currentMonth: '2036-11' });
+    expect(h.prisma.salesMonthHistory.deleteMany).toHaveBeenCalledWith({ where: { clientId: 't1', month: { lt: '2026-11' } } });
+    h.prisma.salesMonthHistory.deleteMany.mockRejectedValueOnce(new Error('db'));
+    await expect(h.retention.purgeOldHistory()).resolves.toBe(0);
+    // the regular sweep runs it too
+    h.prisma.salesMonthHistory.deleteMany.mockClear();
+    await h.retention.sweep({ clientId: 't1' });
+    expect(h.prisma.salesMonthHistory.deleteMany).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SalesImportUploadService — final re-check fixes', () => {
+  it('M2: a part landing after a CANCEL re-deletes its object; after a COMPLETE the object is kept', async () => {
+    const h = harness();
+    const content = Buffer.from('code,amt\n1,2\n');
+    const { importId: id } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: content.length });
+    h.storage.uploadFile.mockImplementationOnce(async (buf: Buffer, key: string) => {
+      h.objects.set(key, buf);
+      Object.assign(h.rows.get(id)!, { status: 'CANCELLED', purgedAt: new Date() }); // cancelled + purged meanwhile
+      return key;
+    });
+    await expect(h.svc.putPart(USER, id, '0', h.part(content))).rejects.toBeInstanceOf(ConflictException);
+    expect(h.storage.deleteFile).toHaveBeenCalledWith(partKey(`sales-imports/t1/${id}/`, 0));
+    expect(h.objects.size).toBe(0);
+  });
+
+  const MAP_A = { headerRow: 'auto', outletCode: 'CODE', invoiceDate: 'DATE', amount: 'AMT', quantity: null, dimensions: [], dateOrder: 'DMY' };
+  async function appliedParent(h: ReturnType<typeof harness>) {
+    const { importId } = await h.svc.createUpload(USER, { filename: 'f.csv', sizeBytes: 3 });
+    h.objects.set(partKey(`sales-imports/t1/${importId}/`, 0), Buffer.from('abc'));
+    Object.assign(h.rows.get(importId)!, { status: 'READY', finishedAt: new Date(), mappingFingerprint: 'old-fp' });
+    h.setApplies([{ importId }]);
+    h.setProfile(MAP_A);
+    return importId;
+  }
+
+  it('M3: the parent is locked FOR UPDATE NOWAIT in the create tx (busy → 409), and a unique violation maps to 409', async () => {
+    const h = harness();
+    const id = await appliedParent(h);
+    h.held.add(id);
+    await expect(h.svc.reprocessAsNew(USER, id)).rejects.toThrow(/busy/);
+    h.held.delete(id);
+    h.prisma.salesImport.create.mockRejectedValueOnce(Object.assign(new Error('Unique constraint failed'), { code: 'P2002' }));
+    await expect(h.svc.reprocessAsNew(USER, id)).rejects.toThrow(/already being re-imported/);
+    await expect(h.svc.reprocessAsNew(USER, id)).resolves.toMatchObject({ status: 'QUEUED', reprocessedFromId: id });
+    expect(h.lockModes).toContain('UPDATE NOWAIT');
+  });
+
+  it('L4: reprocess-as-new respects the in-flight upload cap', async () => {
+    const h = harness();
+    const id = await appliedParent(h);
+    for (let i = 0; i < SALES_IMPORT_MAX_INFLIGHT_UPLOADS; i++) await h.svc.createUpload(USER, { filename: `u${i}.csv`, sizeBytes: 3 });
+    await expect(h.svc.reprocessAsNew(USER, id)).rejects.toThrow(/uploads are already in progress/);
+  });
+
+  it('L4: parent purged during the copy → child cancelled + purged; a busy cleanup still marks the child CANCELLED', async () => {
+    const h = harness();
+    const id = await appliedParent(h);
+    h.storage.copyFile.mockImplementationOnce(async (from: string, to: string) => {
+      h.objects.set(to, Buffer.from(h.objects.get(from)!));
+      (h.rows.get(id) as unknown as { purgedAt: Date }).purgedAt = new Date(); // retention purged the parent meanwhile
+    });
+    await expect(h.svc.reprocessAsNew(USER, id)).rejects.toThrow(/could not be copied/);
+    const child = [...h.rows.values()].find((r) => (r as unknown as { reprocessedFromId: string }).reprocessedFromId === id)!;
+    expect(child).toMatchObject({ status: 'CANCELLED', purgedAt: expect.any(Date) });
+
+    const h2 = harness();
+    const id2 = await appliedParent(h2);
+    h2.storage.copyFile.mockRejectedValueOnce(new Error('gcs down'));
+    jest.spyOn(h2.retention, 'purgeImport').mockImplementationOnce(async () => 'busy');
+    await expect(h2.svc.reprocessAsNew(USER, id2)).rejects.toThrow(/could not be copied/);
+    const child2 = [...h2.rows.values()].find((r) => (r as unknown as { reprocessedFromId: string }).reprocessedFromId === id2)!;
+    expect(child2.status).toBe('CANCELLED'); // never left as a live child blocking a retry
   });
 });

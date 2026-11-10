@@ -845,6 +845,54 @@ old aggregate rows instead of rescaling them (they belonged to imports without a
   guard — no further points-compute controller edits). **L5** `combos('latest')` skips purged imports. **canCancel** is
   false for applied imports. **Memory:** §7.1 step 11 (combined entry cap, 600k codes, heap backstop).
 
+### 10a.10 Final re-check fixes (backend, 2026-11-10)
+- **H1** `xlsx-row-source.ts` `FailFast`: one error listener rejects the CURRENTLY pending `next()` through a single
+  shared reference dropped after each row (the per-row `Promise.race` against a never-settling promise retained every
+  row: +204 MB / 300k rows).
+- **H2** auto-decimal pass 2: pass 1's aggregates are released (references nulled) before pass 2 starts, so the file's
+  maps are never held twice. **L1** pass 2 resets the row/heartbeat counters and reports streamed bytes (it does not hash).
+- **M1** unmatched.csv is per run: `<prefix>unmatched-<claimToken>.csv`, its key stored on the row in the READY
+  transaction (`SalesImport.unmatchedCsvKey`); downloads use only the stored key.
+- **M2** a part that lands after a CANCEL / purge deletes its object again (after a COMPLETE it is kept: byte-identical
+  to the verified part, and the queued import needs it).
+- **M3** reprocess-as-new locks the parent `FOR UPDATE NOWAIT` in the create transaction and re-checks live children;
+  a partial unique index (`sales_imports_reprocessedFromId_live_key`: reprocessedFromId where status not CANCELLED /
+  FAILED) is the last line (P2002 → 409). **L4** it applies the in-flight upload cap; a failed copy, or a parent purged
+  during the copy, cancels the child (and marks it CANCELLED even when the purge is busy, so retries are never blocked).
+- **M4** heap backstop reads `v8.getHeapStatistics()` (used vs limit, or too little available) and fails only after TWO
+  consecutive over-threshold checks (10k rows apart).
+- **L2** a re-import is never flagged as a duplicate of its own parent. **L5** D-1 guard: a failed flag read is retried
+  once, then the last flag value this instance read decides (ON → guarded; OFF / never read → fail open).
+
+## 10b. Month history + "Recalculate from stored history" (owner decision 2026-11-10)
+**Why.** Per-import aggregates (every customer's lines) are purged 30 days after an import finishes (§14 retention), so
+without a durable copy a month could never be recomputed after a KPI-definition or roster change. The owner decided to
+keep exactly ONE set of lines per month — the FINAL applied one — for 10 years.
+
+**Model** (`SalesMonthHistory`, table `sales_month_histories`, migration `20261112120000_sales_month_history` — a NEW
+migration so a database that already applied `20261111120000_sales_import_hardening` is not invalidated): clientId,
+month, customerCode (normalized, = the aggregates' code), outletId (the roster outlet at apply time; null = unmatched),
+dims + dimKey (same keys as the aggregates), amountPaise, qtyPico (same exact scales), lines, sourceImportId, appliedAt,
+appliedById. Unique (clientId, month, customerCode, dimKey). No FK to sales_imports (it outlives the import's data).
+`sales_import_applies.source` = `IMPORT` | `HISTORY`.
+
+**Write.** Every APPLY of a month, inside the same transaction and month lock, DELETEs that month's history and INSERTs
+… SELECTs the applying import's aggregates for the month (all customer codes, unmatched included; outletId joined from
+the current roster). So history always equals the last applied file of the month, one set per month.
+
+**Recalculate.** `GET admin/sales-months/:month/recalculate/preview` (targets:read) → `SalesMonthRecalcPreview`: ALL
+importer-owned KPIs recomputed from the history with the CURRENT definitions and the CURRENT roster (customer codes →
+outlets), per-KPI new / current / delta, matched / unmatched, zero-fills, `outletsAffected`, warnings. `POST
+admin/sales-months/:month/recalculate` (targets:upload, flag on, month OPEN — CLOSED / future refused, reopen stays
+Gifsy-only — month lock, 409 when `expectedDefinitionsHash` / `expectedHistoryAppliedAt` are stale) rewrites
+OutletSalesRecord with the SAME write as apply (full rewrite of owned keys, batch, audit) and records a SalesImportApply
+with `source: HISTORY` (importId = the history's source import). The history itself is not changed by a recalculation.
+`SalesMonthRow.hasHistory / historySourceImportId / historyAppliedAt` tell the UI when it is possible.
+
+**Retention.** Per-import aggregates / raw parts / unmatched.csv: 30 days after the import finishes (unchanged). Month
+history: `SALES_MONTH_HISTORY_RETENTION_YEARS` = 10 — the retention sweep (list / worker drain / idle drain) deletes
+history months older than 10 years before the current IST month.
+
 ## 11. Lane tasks (TDD: write the test first, see it fail, implement, see it pass; run `cd api && npx jest src/sales-import` or `cd platform && npx vitest run src/app/admin/sales-import src/lib/sales-import`)
 
 ### Lane I — Backend ingest (owner of `api/src/sales-import/ingest/**`, `worker.main.ts`, runner, upload endpoints)
@@ -1147,6 +1195,8 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
   deploy step (still to be added, owner-gated) must also come AFTER the migrate step.
 - GCS: parts + unmatched under `sales-imports/<clientId>/<importId>/`. The API deletes parts 30 days after READY (lazy, on list) or
   immediately on DELETE. Bucket lifecycle is unchanged.
+- **Retention (current):** per-import data (raw parts, per-run unmatched.csv, aggregates, sample rows) 30 days after the
+  import finishes; abandoned uploads after 24 h; the month history (`sales_month_histories`, §10b) 10 years.
 
 ---
 

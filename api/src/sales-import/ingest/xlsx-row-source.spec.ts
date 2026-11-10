@@ -1,5 +1,5 @@
 import { Readable } from 'node:stream';
-import { xlsxRows, XlsxSheetNotFoundError, denseCells, plainCellValue } from './xlsx-row-source';
+import { FailFast, racing, xlsxRows, XlsxSheetNotFoundError, denseCells, plainCellValue } from './xlsx-row-source';
 import {
   loadCentralDirectory,
   planXlsxRead,
@@ -246,5 +246,35 @@ describe('re-audit M2: inflated bytes are enforced against the declared sizes', 
   it('honest sizes still read end to end (entries are handed to exceljs STORED)', async () => {
     const buf = await exceljsWorkbook([['Data', ROWS]]);
     expectSyntheticRows(await readViaResequencer(buf));
+  });
+});
+
+describe('re-check H1: the fail-fast race retains nothing per row', () => {
+  it('after many rows at most one settle callback is retained, and none once iteration ends', async () => {
+    const ff = new FailFast();
+    async function* many() {
+      for (let i = 0; i < 5000; i++) yield i;
+    }
+    let n = 0;
+    let maxRetained = 0;
+    for await (const v of racing(many(), ff)) {
+      n += v >= 0 ? 1 : 0;
+      maxRetained = Math.max(maxRetained, ff.retained);
+    }
+    expect(n).toBe(5000);
+    expect(maxRetained).toBe(0); // between rows nothing is held
+    expect(ff.retained).toBe(0);
+  });
+
+  it('a failure rejects the pending next() (no hang) and every later call', async () => {
+    const ff = new FailFast();
+    const never: AsyncIterator<number> = { next: () => new Promise(() => undefined) };
+    const it = racing(never, ff)[Symbol.asyncIterator]();
+    const pending = it.next();
+    expect(ff.retained).toBe(1);
+    ff.fail(new Error('input broke'));
+    await expect(pending).rejects.toThrow('input broke');
+    expect(ff.retained).toBe(0);
+    await expect(ff.guard(Promise.resolve(1))).rejects.toThrow('input broke');
   });
 });
