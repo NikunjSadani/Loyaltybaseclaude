@@ -18,7 +18,7 @@ import type { SalesKpiFilter, SalesKpiMeasure } from '../sales-import.contract';
 const agg = (dims: Record<string, string>, amountPaise: bigint, qtyMicro: bigint, lines = 1): KpiAgg => ({
   dims,
   amountPaise,
-  qtyMicro,
+  qtyPico: qtyMicro * 1_000_000n, // fixtures are written in micro-cases; storage is pico (×1e12)
   lines,
 });
 const kpi = (aggs: KpiAgg[], measure: SalesKpiMeasure, filter: SalesKpiFilter) =>
@@ -54,7 +54,7 @@ describe('§6.2 generic examples', () => {
     expect(lineMatches({ dimA: 'CNO' }, { anyOf: [{ dimA: 'CNO ENRICH' }] })).toBe(false);
   });
   it('AMOUNT Number(6000n)/100 === 60', () => expect(measureToNumber(6000n, 'AMOUNT')).toBe(60));
-  it('QUANTITY 0.04 survives', () => expect(measureToNumber(40000n, 'QUANTITY')).toBe(0.04));
+  it('QUANTITY 0.04 survives', () => expect(measureToNumber(40_000_000_000n, 'QUANTITY')).toBe(0.04));
   it('returns net off (negative lines)', () =>
     expect(kpi([agg({ dimA: 'X' }, 10000n, 0n), agg({ dimA: 'X' }, -4000n, 0n)], 'AMOUNT', {})).toBe(60));
   it('a missing dim on a line never equals a value', () =>
@@ -158,4 +158,41 @@ describe('hashes', () => {
   });
   it('stableStringify sorts keys recursively', () =>
     expect(stableStringify({ b: 1, a: { d: [2, { z: 1, y: 2 }], c: null } })).toBe('{"a":{"c":null,"d":[2,{"y":2,"z":1}]},"b":1}'));
+});
+
+describe('audit fix round', () => {
+  it('H3: 12 × (1/12 case as an Excel float) sums EXACTLY and stores 1.000 (no per-line 1e-6 loss)', () => {
+    // toPico keeps 12 decimals of 0.08333333333333333; 12 lines → 0.999999999996 → rounded once to 3 dp.
+    const { toPico } = jest.requireActual('../ingest/normalize') as typeof import('../ingest/normalize');
+    const twelfth = toPico(1 / 12)!;
+    expect(twelfth).toBe(83_333_333_333n);
+    const lines = Array.from({ length: 12 }, () => ({ dims: {}, amountPaise: 0n, qtyPico: twelfth, lines: 1 }));
+    expect(kpi(lines, 'QUANTITY', {})).toBe(1);
+    // the old micro scale lost 4e-6 here (0.083333 × 12 = 0.999996)
+    expect(measureToNumber(-1_234_500_000_000n, 'QUANTITY')).toBe(-1.235); // half away from zero
+  });
+
+  it("blank values: '' is a valid exact 'column is empty' match; a fully blank entry or a non-text blank is rejected", () => {
+    const ok = validateAndNormalizeFilter({ anyOf: [{ dimA: 'P', dimB: '' }], noneOf: [{ dimA: 'Q', dimB: '  ' }] }, ['dimA', 'dimB']);
+    expect(ok.errors).toEqual([]);
+    expect(ok.filter).toEqual({ anyOf: [{ dimA: 'P', dimB: '' }], noneOf: [{ dimA: 'Q', dimB: '' }] });
+    expect(lineMatches({ dimA: 'P', dimB: '' }, ok.filter)).toBe(true);
+    expect(lineMatches({ dimA: 'P', dimB: '500' }, ok.filter)).toBe(false);
+    expect(validateAndNormalizeFilter({ anyOf: [{ dimA: '', dimB: '' }] }, ['dimA', 'dimB']).errors[0]).toMatch(/blank/);
+    expect(validateAndNormalizeFilter({ anyOf: [{ dimA: NaN }] }, ['dimA']).errors[0]).toMatch(/not a valid value/);
+    expect(validateAndNormalizeFilter({ anyOf: [{ dimA: null }] }, ['dimA']).errors[0]).toMatch(/text or number/);
+  });
+
+  it('M4: accumulators sharing one match cache evaluate each distinct combo once', () => {
+    const cache = new Map<string, boolean[]>();
+    const defs = [def('K', 'AMOUNT', { anyOf: [{ dimA: 'P' }] })];
+    const a = new OutletKpiAccumulator(defs, cache);
+    const b = new OutletKpiAccumulator(defs, cache);
+    a.add('O1', agg({ dimA: 'P' }, 100n, 0n), 'k1');
+    b.add('O2', agg({ dimA: 'P' }, 200n, 0n), 'k1');
+    a.add('O1', agg({ dimA: 'Q' }, 300n, 0n), 'k2');
+    expect(cache.size).toBe(2);
+    expect(a.rawSum('O1', 0)).toBe(100n);
+    expect(b.rawSum('O2', 0)).toBe(200n);
+  });
 });

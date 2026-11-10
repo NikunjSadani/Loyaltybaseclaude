@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { SalesImportProcessorService } from './sales-import-processor.service';
+import { SalesImportRetentionService } from './sales-import-retention.service';
 import { SalesImportRunnerService } from './sales-import-runner.service';
 import { SalesImportUploadService } from './sales-import-upload.service';
 
@@ -11,7 +12,7 @@ import { SalesImportUploadService } from './sales-import-upload.service';
  */
 @Module({
   imports: [PrismaModule],
-  providers: [SalesImportProcessorService, SalesImportRunnerService, SalesImportUploadService],
-  exports: [SalesImportProcessorService, SalesImportRunnerService, SalesImportUploadService],
+  providers: [SalesImportProcessorService, SalesImportRunnerService, SalesImportUploadService, SalesImportRetentionService],
+  exports: [SalesImportProcessorService, SalesImportRunnerService, SalesImportUploadService, SalesImportRetentionService],
 })
 export class SalesImportIngestModule {}

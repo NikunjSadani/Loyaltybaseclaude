@@ -5,12 +5,13 @@
  *   - A line (aggregate row) is IN iff (anyOf empty OR it matches ≥1 anyOf entry) AND it matches no noneOf entry.
  *     This is a BOOLEAN per aggregate, so a line matching two anyOf entries is counted ONCE (set, not list).
  *   - An entry matches iff EVERY key it lists equals the line's (normalized) value for that key.
- *   - Sums are BigInt (paise / micro-cases); conversion to a JS number happens once, at the end.
+ *   - Sums are BigInt (paise / pico-cases, exact); conversion to a JS number happens once, at the end of the sum
+ *     (₹ exact at 2 dp; cases rounded to SALES_KPI_QUANTITY_DECIMALS = 3 — H3).
  *   - Outlet scope: a definition with non-empty outletTypes/programs that does not cover the outlet → the key is
  *     OMITTED (blank ≠ 0, the engine's null policy). An in-scope outlet with no matching lines → 0 (full rewrite).
  */
 import { createHash } from 'node:crypto';
-import { microToCases, normalizeDim, paiseToRupees } from '../ingest/normalize';
+import { normalizeDim, paiseToRupees, picoToCases } from '../ingest/normalize';
 import {
   SALES_IMPORT_DIM_KEY_PATTERN,
   SALES_KPI_MAX_FILTER_ENTRIES,
@@ -25,7 +26,7 @@ export const SALES_KPI_MEASURES: readonly SalesKpiMeasure[] = ['AMOUNT', 'QUANTI
 export interface KpiAgg {
   dims: Record<string, string>;
   amountPaise: bigint;
-  qtyMicro: bigint;
+  qtyPico: bigint;
   lines: number;
 }
 
@@ -83,14 +84,14 @@ export function sumMeasure(aggs: Iterable<KpiAgg>, def: Pick<KpiDefLite, 'measur
   let s = 0n;
   for (const a of aggs) {
     if (!lineMatches(a.dims, def.filter)) continue;
-    s += def.measure === 'AMOUNT' ? a.amountPaise : a.qtyMicro;
+    s += def.measure === 'AMOUNT' ? a.amountPaise : a.qtyPico;
   }
   return s;
 }
 
-/** BigInt paise → rupees (2 dp) / micro-cases → cases (≤ 6 dp). One float conversion, at the end. */
+/** BigInt paise → rupees (2 dp) / pico-cases → cases (rounded to 3 dp). One conversion, at the end of the sum. */
 export function measureToNumber(sum: bigint, measure: SalesKpiMeasure): number {
-  return measure === 'AMOUNT' ? paiseToRupees(sum) : microToCases(sum);
+  return measure === 'AMOUNT' ? paiseToRupees(sum) : picoToCases(sum);
 }
 
 /**
@@ -112,15 +113,18 @@ export function computeOutletKpis(
 
 /**
  * Streaming accumulator for many outlets (preview / apply / tester). Each aggregate's match vector is memoised
- * by its dimKey so 400k aggregates × N definitions cost one filter evaluation per DISTINCT combo.
+ * by its dimKey so 400k aggregates × N definitions cost one filter evaluation per DISTINCT combo. Accumulators over
+ * the SAME definitions may share one cache (the tester keeps one accumulator per month).
  */
 export class OutletKpiAccumulator {
   private readonly sums = new Map<string, bigint[]>();
   private readonly lines = new Map<string, number>();
-  private readonly matchCache = new Map<string, boolean[]>();
   matchedLines = 0; // Σ lines of aggregates matching ≥ 1 definition (scope NOT applied)
 
-  constructor(readonly defs: readonly KpiDefLite[]) {}
+  constructor(
+    readonly defs: readonly KpiDefLite[],
+    private readonly matchCache: Map<string, boolean[]> = new Map(),
+  ) {}
 
   add(outletCode: string, agg: KpiAgg, dimKey?: string): void {
     const key = dimKey ?? stableStringify(agg.dims);
@@ -138,7 +142,7 @@ export class OutletKpiAccumulator {
     for (let i = 0; i < this.defs.length; i++) {
       if (!match[i]) continue;
       any = true;
-      arr[i] += this.defs[i].measure === 'AMOUNT' ? agg.amountPaise : agg.qtyMicro;
+      arr[i] += this.defs[i].measure === 'AMOUNT' ? agg.amountPaise : agg.qtyPico;
     }
     if (any) this.matchedLines += agg.lines;
     this.lines.set(outletCode, (this.lines.get(outletCode) ?? 0) + agg.lines);
@@ -204,11 +208,17 @@ function normalizeEntry(raw: unknown, list: 'anyOf' | 'noneOf', idx: number, dim
       continue;
     }
     const nv = normalizeDim(v);
-    if (nv === '') {
-      errors.push(`${list}[${idx}].${k} is blank.`);
+    // A TEXT '' is a valid exact "this column is empty in the file" match (the FE saves blank combo values that way);
+    // a number that normalizes to nothing (NaN / Infinity) is not.
+    if (nv === '' && typeof v !== 'string') {
+      errors.push(`${list}[${idx}].${k} is not a valid value.`);
       continue;
     }
     out[k] = nv;
+  }
+  if (keys.length > 0 && Object.keys(out).length === keys.length && Object.values(out).every((x) => x === '')) {
+    errors.push(`${list}[${idx}] matches only blank values in every column; pick at least one non-blank value.`);
+    return null;
   }
   return out;
 }

@@ -1,8 +1,9 @@
 import 'reflect-metadata';
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
-import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { BadRequestException, ConflictException, ForbiddenException, NotFoundException, type ExecutionContext } from '@nestjs/common';
+import { GUARDS_METADATA, INTERCEPTORS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { PERMISSION_KEY } from '../common/decorators/require-permission.decorator';
 import { SalesImportController } from './sales-import.controller';
+import { SalesImportPartGuard } from './sales-import-access';
 import { SalesImportDrainController } from './sales-import-drain.controller';
 
 const ADMIN = { sub: 'u1', role: 'CLIENT_ADMIN', clientId: 't1', phone: '', name: 'A' };
@@ -14,6 +15,7 @@ function make(flag: boolean) {
     putPart: jest.fn().mockResolvedValue({ partsReceived: 1 }),
     complete: jest.fn().mockResolvedValue({}),
     reprocess: jest.fn().mockResolvedValue({}),
+    cancel: jest.fn().mockResolvedValue({}),
     remove: jest.fn().mockResolvedValue({}),
     list: jest.fn().mockResolvedValue({ items: [], nextCursor: null }),
     get: jest.fn().mockResolvedValue({}),
@@ -23,20 +25,60 @@ function make(flag: boolean) {
   };
   const prisma = { client: { findUnique: jest.fn().mockResolvedValue({ features: { salesImport: flag }, status: 'ACTIVE' }) } };
   const tenant = { resolveClient: jest.fn().mockResolvedValue({ id: 't1', features: { salesImport: flag } }) };
-  const ctrl = new SalesImportController({} as never, tenant as never, prisma as never, uploads as never);
-  return { ctrl, uploads, prisma, tenant };
+  const gifsyRoles = { getPermissions: jest.fn().mockResolvedValue(new Set()) };
+  const ctrl = new SalesImportController({} as never, tenant as never, prisma as never, uploads as never, gifsyRoles as never);
+  return { ctrl, uploads, prisma, tenant, gifsyRoles };
 }
 
 describe('SalesImportController', () => {
   it('flag OFF → 403 before any service call (writes read the flag uncached)', async () => {
     const { ctrl, uploads, prisma } = make(false);
     await expect(ctrl.createUpload(ADMIN, { filename: 'a.csv', sizeBytes: 1 })).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(ctrl.putPart(ADMIN, 'i', '0', {} as never)).rejects.toBeInstanceOf(ForbiddenException);
     await expect(ctrl.remove(ADMIN, 'i')).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(ctrl.cancel(ADMIN, 'i')).rejects.toBeInstanceOf(ForbiddenException);
     expect(prisma.client.findUnique).toHaveBeenCalled();
     expect(uploads.createUpload).not.toHaveBeenCalled();
-    expect(uploads.putPart).not.toHaveBeenCalled();
     expect(uploads.remove).not.toHaveBeenCalled();
+    expect(uploads.cancel).not.toHaveBeenCalled();
+  });
+
+  it('S7: the part route is gated by a GUARD (runs before FileInterceptor buffers the body)', async () => {
+    expect(Reflect.getMetadata(GUARDS_METADATA, SalesImportController.prototype.putPart)).toEqual([SalesImportPartGuard]);
+    expect(Reflect.getMetadata(INTERCEPTORS_METADATA, SalesImportController.prototype.putPart)).toHaveLength(1);
+    const ctx = (user: unknown, id = 'i1') =>
+      ({ switchToHttp: () => ({ getRequest: () => ({ user, params: { id } }) }) }) as unknown as ExecutionContext;
+    const guard = (flag: boolean, row: { status: string } | null) => {
+      const prisma = {
+        client: { findUnique: jest.fn().mockResolvedValue({ features: { salesImport: flag }, status: 'ACTIVE' }) },
+        salesImport: { findFirst: jest.fn().mockResolvedValue(row) },
+      };
+      return { g: new SalesImportPartGuard({} as never, prisma as never), prisma };
+    };
+    await expect(guard(false, { status: 'UPLOADING' }).g.canActivate(ctx(ADMIN))).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(guard(true, { status: 'UPLOADING' }).g.canActivate(ctx(UNASSUMED_GIFSY))).rejects.toBeInstanceOf(BadRequestException);
+    await expect(guard(true, null).g.canActivate(ctx(ADMIN))).rejects.toBeInstanceOf(NotFoundException);
+    await expect(guard(true, { status: 'QUEUED' }).g.canActivate(ctx(ADMIN))).rejects.toBeInstanceOf(ConflictException);
+    const ok = guard(true, { status: 'UPLOADING' });
+    await expect(ok.g.canActivate(ctx(ADMIN))).resolves.toBe(true);
+    expect(ok.prisma.salesImport.findFirst).toHaveBeenCalledWith({ where: { id: 'i1', clientId: 't1' }, select: { status: true } });
+  });
+
+  it('S3: GET :id returns sample rows only to callers holding targets:upload', async () => {
+    const saved = process.env.RBAC_ENFORCEMENT;
+    try {
+      const { ctrl, uploads, gifsyRoles } = make(true);
+      process.env.RBAC_ENFORCEMENT = 'false';
+      await ctrl.get(ADMIN, 'i1');
+      expect(uploads.get).toHaveBeenLastCalledWith(ADMIN, 'i1', { includeSamples: true });
+      // a GIFSY_STAFF whose role lacks targets:upload (it reached GET via targets:read)
+      gifsyRoles.getPermissions.mockResolvedValue(new Set(['targets:read']));
+      const staff = { ...ADMIN, role: 'GIFSY_STAFF', assumed: true };
+      await ctrl.get(staff, 'i1');
+      expect(uploads.get).toHaveBeenLastCalledWith(staff, 'i1', { includeSamples: false });
+    } finally {
+      if (saved === undefined) delete process.env.RBAC_ENFORCEMENT;
+      else process.env.RBAC_ENFORCEMENT = saved;
+    }
   });
 
   it('un-assumed Gifsy operator → 400', async () => {
@@ -63,6 +105,7 @@ describe('SalesImportController', () => {
     expect(route('putPart')).toEqual([1, ':id/parts/:n', 'targets:upload']);
     expect(route('complete')).toEqual([1, ':id/complete', 'targets:upload']);
     expect(route('reprocess')).toEqual([1, ':id/reprocess', 'targets:upload']);
+    expect(route('cancel')).toEqual([1, ':id/cancel', 'targets:upload']);
     expect(route('remove')).toEqual([3, ':id', 'targets:upload']);
     expect(route('list')).toEqual([0, '/', 'targets:read']);
     expect(route('get')).toEqual([0, ':id', 'targets:read']);
@@ -87,7 +130,8 @@ describe('SalesImportDrainController', () => {
   const make = (claimable: number, kick: string) => {
     const runner = { kick: jest.fn().mockResolvedValue(kick) };
     const prisma = { $queryRaw: jest.fn().mockResolvedValue([{ n: claimable }]) };
-    return { ctrl: new SalesImportDrainController(runner as never, prisma as never), runner };
+    const retention = { sweep: jest.fn().mockResolvedValue({ abandoned: 0, purged: 0 }) };
+    return { ctrl: new SalesImportDrainController(runner as never, prisma as never, retention as never), runner, retention };
   };
 
   it('fail-closed: no configured secret → 403 even with a header', async () => {
@@ -108,6 +152,7 @@ describe('SalesImportDrainController', () => {
     const idle = make(0, 'job');
     await expect(idle.ctrl.drain('s3cret')).resolves.toEqual({ kicked: false });
     expect(idle.runner.kick).not.toHaveBeenCalled();
+    expect(idle.retention.sweep).toHaveBeenCalled(); // S5: an idle drain still runs the retention sweep
     await expect(make(2, 'job').ctrl.drain('s3cret')).resolves.toEqual({ kicked: true });
     await expect(make(2, 'none').ctrl.drain('s3cret')).resolves.toEqual({ kicked: false });
   });

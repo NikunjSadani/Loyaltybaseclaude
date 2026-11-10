@@ -69,7 +69,7 @@ describe('validateColumnMapping (K-1)', () => {
 describe('SalesProfileService (K-1)', () => {
   it('put upserts by clientId and writes an audit row in the same transaction', async () => {
     const db = txDb();
-    db.salesImportProfile.findUnique.mockResolvedValueOnce(null);
+    db.salesImportProfile.findUnique.mockResolvedValue(null);
     await new SalesProfileService(db as never).put(user, MAPPING);
     expect(db.salesImportProfile.upsert).toHaveBeenCalledWith(expect.objectContaining({ where: { clientId: 't1' } }));
     expect(db.auditLog.create.mock.calls[0][0].data).toEqual(
@@ -175,7 +175,7 @@ describe('SalesKpiDefService (K-2)', () => {
 
   describe('test (draft-filter tester, §6.2a)', () => {
     const agg = (id: number, month: string, outletCode: string, dims: Record<string, string>, amountPaise: bigint, qtyMicro: bigint) =>
-      ({ id: BigInt(id), month, outletCode, dims, dimKey: stableStringify(dims), amountPaise, qtyMicro, lines: 2 });
+      ({ id: BigInt(id), month, outletCode, dims, dimKey: stableStringify(dims), amountPaise, qtyPico: qtyMicro * 1_000_000n, lines: 2 });
     function testDb() {
       const db = txDb();
       db.salesImport.findFirst.mockImplementation(async ({ where }: { where: { id?: string; clientId: string; status?: string } }) =>
@@ -242,5 +242,62 @@ describe('SalesKpiDefService (K-2)', () => {
     const r = await new SalesKpiDefService(db as never).segmentOptions('t1');
     expect(r).toEqual({ outletTypes: [{ code: 'RETAIL', name: 'Retail' }, { code: 'WHOLESALER', name: 'Wholesaler' }], programs: ['Bronze', 'Gold'] });
     for (const c of db.outlet.findMany.mock.calls) expect(c[0].where).toEqual(expect.objectContaining({ clientId: 't1', deletedAt: null }));
+  });
+});
+
+describe('audit fix round — profile / tester', () => {
+  it('H2: PUT refuses removing or re-pointing the amount column while an enabled AMOUNT KPI uses it', async () => {
+    const db = txDb();
+    db.salesKpiDefinition.findMany.mockImplementation(async ({ select }: { select: Record<string, boolean> }) =>
+      select.measure ? [{ kpiCode: 'K_RS', measure: 'AMOUNT' }] : []);
+    const svc = new SalesProfileService(db as never);
+    await expect(svc.put(user, { ...MAPPING, amount: 'GROSS AMT' })).rejects.toThrow(/amount column is used by K_RS and cannot be changed/);
+    await expect(svc.put(user, { ...MAPPING, amount: null })).rejects.toThrow(/amount column is used by K_RS and cannot be removed/);
+    expect(db.salesImportProfile.upsert).not.toHaveBeenCalled();
+    // header case/space differences are the same column; the unused quantity column may change freely
+    await expect(svc.put(user, { ...MAPPING, amount: ' net  amt ', quantity: 'CASES' })).resolves.toMatchObject({ amount: 'net  amt' });
+  });
+
+  it('L1: decimalSeparator is validated and defaults to auto', () => {
+    expect(validateColumnMapping(MAPPING).decimalSeparator).toBe('auto');
+    expect(validateColumnMapping({ ...MAPPING, decimalSeparator: ',' }).decimalSeparator).toBe(',');
+    expect(() => validateColumnMapping({ ...MAPPING, decimalSeparator: ';' })).toThrow(/decimalSeparator/);
+  });
+
+  function testerDb(rows: Array<Record<string, unknown>>, outlets = [{ outletCode: '00012', name: 'A', programName: null, outletType: { code: 'R' } }]) {
+    const db = txDb();
+    db.salesImport.findFirst.mockResolvedValue({ id: 'imp1', status: 'READY', purgedAt: null });
+    db.outlet.findMany.mockResolvedValue(outlets);
+    db.salesImportAggregate.findMany.mockImplementation(async ({ where, take }: { where: { id?: { gt: bigint } }; take: number }) =>
+      rows.filter((r) => !where.id || (r.id as bigint) > where.id.gt).slice(0, take));
+    return db;
+  }
+  const row = (id: number, code: string, dims: Record<string, string>, paise: bigint) =>
+    ({ id: BigInt(id), month: '2026-09', outletCode: code, dims, dimKey: stableStringify(dims), amountPaise: paise, qtyPico: 0n, lines: 1 });
+  const draft = (filter: Record<string, unknown>) =>
+    ({ kpiCode: 'K', measure: 'AMOUNT', filter, outletTypes: [], programs: [], enabled: true, order: 0 }) as never;
+
+  it("tester accepts an exact-blank value and maps file codes onto the CURRENT roster (M6)", async () => {
+    const db = testerDb([row(1, '00012', { dimA: 'P', dimB: '' }, 500n), row(2, '00012', { dimA: 'P', dimB: '5' }, 900n), row(3, '99', { dimA: 'P', dimB: '' }, 7n)]);
+    const r = await new SalesKpiDefService(db as never).test(user, { importId: 'imp1', definition: draft({ anyOf: [{ dimA: 'P', dimB: '' }] }) });
+    expect(r.months).toEqual([{ month: '2026-09', totalAmountRupees: 5, totalQuantity: 0, outletsNonZero: 1 }]);
+    expect(r.unmatchedEntries).toEqual({ anyOf: [], noneOf: [] });
+  });
+
+  it('M4: entry hits are evaluated once per distinct combo, and a file with too many combos is refused', async () => {
+    const rows = Array.from({ length: 50 }, (_, i) => row(i + 1, '00012', { dimA: 'P', dimB: '' }, 1n));
+    const db = testerDb(rows);
+    const helper = jest.requireActual('./sales-kpi.helper') as typeof import('./sales-kpi.helper');
+    const spy = jest.spyOn(helper, 'entryMatches');
+    await new SalesKpiDefService(db as never).test(user, { importId: 'imp1', definition: draft({ anyOf: [{ dimA: 'Q' }, { dimA: 'R' }] }) });
+    // 1 distinct combo × 2 entries for the hit scan (+ the match-vector evaluation of that one combo)
+    expect(spy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(spy.mock.calls.length).toBeLessThanOrEqual(4);
+    spy.mockRestore();
+
+    const { KPI_TEST_MAX_COMBOS } = jest.requireActual('./sales-kpi-def.service') as typeof import('./sales-kpi-def.service');
+    const many = Array.from({ length: KPI_TEST_MAX_COMBOS + 1 }, (_, i) => row(i + 1, '00012', { dimA: `V${i}` }, 1n));
+    await expect(new SalesKpiDefService(testerDb(many) as never).test(user, { importId: 'imp1', definition: draft({}) }))
+      .rejects.toThrow(/too many to test/);
   });
 });

@@ -5,9 +5,10 @@ import {
   parseInvoiceDate,
   parseInvoiceDateDetailed,
   stableDimKey,
-  microToCases,
+  picoToCases,
   paiseToRupees,
-  toMicro,
+  resolveDecimalSeparator,
+  toPico,
   toPaise,
 } from './normalize';
 
@@ -92,17 +93,41 @@ describe('toPaise', () => {
   ])('toPaise(%p) → %p', (i, o) => expect(toPaise(i)).toBe(o));
 });
 
-describe('toMicro', () => {
-  it('keeps fractional cases', () => expect(toMicro('0.04')).toBe(40000n));
+describe('toPico (quantity at 1e-12, H3)', () => {
+  it('keeps fractional cases', () => expect(toPico('0.04')).toBe(40_000_000_000n));
   it.each([
-    [1.5, 1_500_000n],
-    [-0.5, -500_000n],
-    ['2', 2_000_000n],
-    [0.0000005, 1n], // 5e-7 → rounds half away from zero to 1 micro
-    [1e-7, 0n],
+    [1.5, 1_500_000_000_000n],
+    [-0.5, -500_000_000_000n],
+    ['2', 2_000_000_000_000n],
+    [1 / 12, 83_333_333_333n], // an Excel float keeps 12 decimals (the old micro scale kept 6)
+    [5e-13, 1n], // rounds half away from zero to 1 pico
+    [1e-13, 0n],
     ['', null],
     ['x', null],
-  ])('toMicro(%p) → %p', (i, o) => expect(toMicro(i)).toBe(o));
+  ])('toPico(%p) → %p', (i, o) => expect(toPico(i)).toBe(o));
+});
+
+describe('decimal comma (L1)', () => {
+  it("resolves 'auto' to ',' only for a ';'-delimited CSV; an explicit profile value wins", () => {
+    expect(resolveDecimalSeparator('auto', ';')).toBe(',');
+    expect(resolveDecimalSeparator(undefined, ',')).toBe('.');
+    expect(resolveDecimalSeparator('auto', null)).toBe('.'); // xlsx
+    expect(resolveDecimalSeparator('.', ';')).toBe('.');
+    expect(resolveDecimalSeparator(',', null)).toBe(',');
+  });
+  it.each([
+    ['1.234,56', 123456n],
+    ['1 234,5', 123450n],
+    ['-12,345', -1235n],
+    ['(40,00)', -4000n],
+    ['40,00-', -4000n],
+    ['12.500', 1250000n], // dots-only = thousands grouping
+    ['7', 700n],
+    ['1234.5', null], // ambiguous in a decimal-comma file → invalid, never read 100× too large
+    ['1,2,3', null],
+    [12.5, 1250n], // a NUMBER cell is never re-interpreted
+  ])("toPaise(%p, ',') → %p", (i, o) => expect(toPaise(i, ',')).toBe(o));
+  it('applies to quantities too', () => expect(toPico('0,04', ',')).toBe(40_000_000_000n));
 });
 
 describe('parseInvoiceDate', () => {
@@ -186,11 +211,15 @@ describe('stableDimKey', () => {
   it('is "{}" for no dims', () => expect(stableDimKey({})).toBe('{}'));
 });
 
-describe('paiseToRupees / microToCases (single source for BigInt → wire numbers)', () => {
-  it('inverts toPaise / toMicro', () => {
+describe('paiseToRupees / picoToCases (single source for BigInt → wire numbers)', () => {
+  it('inverts toPaise / toPico; cases are rounded ONCE to 3 dp (half away from zero)', () => {
     expect(paiseToRupees(toPaise('1,234.50')!)).toBe(1234.5);
     expect(paiseToRupees(-1235n)).toBe(-12.35);
-    expect(microToCases(toMicro('0.04')!)).toBe(0.04);
-    expect(microToCases(1_750_000n)).toBe(1.75);
+    expect(picoToCases(toPico('0.04')!)).toBe(0.04);
+    expect(picoToCases(1_750_000_000_000n)).toBe(1.75);
+    expect(picoToCases(toPico(1 / 12)! * 12n)).toBe(1);
+    expect(picoToCases(1_234_500_000_000n)).toBe(1.235);
+    expect(picoToCases(-1_234_500_000_000n)).toBe(-1.235);
+    expect(picoToCases(1_234_499_999_999n)).toBe(1.234);
   });
 });

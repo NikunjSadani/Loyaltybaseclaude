@@ -13,9 +13,11 @@ import {
   type MonthSummary,
 } from '../sales-import.contract';
 import { SalesKpiDefService, toDto } from '../kpi/sales-kpi-def.service';
-import { loadRosterMeta, resolveReadyImport, rosterHashOfMap } from '../kpi/sales-import-data';
+import { MAPPING_CHANGED_REASON, loadRosterMeta, mappingChangedSince, resolveReadyImport } from '../kpi/sales-import-data';
+import { lockImportRow } from '../ingest/import-lock';
 import { isMonthKey, monthLabel, resolveMonthState } from '../months/month-state';
 import { computeMonthRows, sumOwnedValues } from './month-compute';
+import { loadLastApplied } from './last-applied';
 import { isOlderThanLastApplied, partialMonthWarnings } from './warnings';
 import { blockedReasonFor, monthSummariesOf } from './sales-preview.service';
 
@@ -29,7 +31,11 @@ class MonthApplyError extends Error {}
  * Per-month apply into OutletSalesRecord (plan §7.2; task K-6). OWNER: Lane K.
  *
  * Each month = ONE interactive transaction under the per-(tenant, month) advisory lock shared with close/reopen and
- * the manual batch delete. Inside: re-check OPEN, READY, definitions hash and roster; create a SALES_IMPORT batch;
+ * the manual batch delete, PLUS `FOR SHARE` on the import row (H1/S1: a reprocess / cancel / delete / purge needs
+ * FOR UPDATE NOWAIT, so it gets 409 instead of deleting the aggregates under a running apply). Inside: re-check OPEN,
+ * READY + not purged + the reviewed processingVersion (M7), definitions hash, column-mapping fingerprint (H2) and the
+ * partial / older acknowledgements against the month's CURRENT last apply (M7); map the file's customer codes onto
+ * the CURRENT roster (M6); create a SALES_IMPORT batch;
  * bulk-merge the owned keys (`kpiValues - owned || new`, never touching non-owned keys, never changing the batchId
  * or name of an existing row); strip owned keys from every other row of the month (full rewrite); record the apply,
  * the month's last-applied pointer and an audit row. A month that fails is reported and does not affect the others.
@@ -48,30 +54,28 @@ export class SalesApplyService {
     const req = this.validateBody(body);
 
     const imp = await resolveReadyImport(this.prisma, clientId, importId);
+    if (imp.processingVersion !== req.processingVersion) {
+      throw new ConflictException('This file was reprocessed after the preview you reviewed. Refresh the preview and try again.');
+    }
     const { defs, hash } = await this.kpiDefs.enabled(clientId);
     if (hash !== req.expectedDefinitionsHash) {
       throw new ConflictException('KPI definitions changed since the preview. Refresh the preview and try again.');
     }
     if (defs.length === 0) throw new BadRequestException('No importer-owned KPIs are defined yet.');
+    if (await mappingChangedSince(this.prisma, clientId, imp)) throw new ConflictException(MAPPING_CHANGED_REASON);
 
     const summaries = new Map(monthSummariesOf(imp).map((s) => [s.month, s]));
     const current = currentMonthKey();
 
-    // Acknowledgement checks (400 before ANY write).
+    // Acknowledgement checks (400 before ANY write; re-checked per month under the month lock).
     const missingPartial: string[] = [];
     let needsOlderAck = false;
-    const statuses = await this.prisma.salesMonthStatus.findMany({ where: { clientId, month: { in: req.months } } });
-    const lastIds = [...new Set(statuses.map((s) => s.lastAppliedImportId).filter((x): x is string => !!x))];
-    const lastImports = lastIds.length
-      ? await this.prisma.salesImport.findMany({ where: { clientId, id: { in: lastIds } }, select: { id: true, createdAt: true } })
-      : [];
     for (const month of req.months) {
       const s = summaries.get(month);
       if (!s) continue; // reported per month below
       if (partialMonthWarnings(s, current).length > 0 && !req.acknowledgePartialMonths.includes(month)) missingPartial.push(month);
-      const st = statuses.find((x) => x.month === month);
-      const last = st?.lastAppliedImportId ? lastImports.find((i) => i.id === st.lastAppliedImportId) : null;
-      if (isOlderThanLastApplied(imp, last)) needsOlderAck = true;
+      const last = await loadLastApplied(this.prisma, clientId, month);
+      if (isOlderThanLastApplied({ id: imp.id, lastDate: s.lastDate }, last)) needsOlderAck = true;
     }
     if (missingPartial.length > 0) {
       throw new BadRequestException(
@@ -90,7 +94,7 @@ export class SalesApplyService {
         continue;
       }
       try {
-        results.push(await this.applyMonth(user, imp.id, summary, req.expectedDefinitionsHash));
+        results.push(await this.applyMonth(user, imp.id, summary, req));
       } catch (e) {
         const msg = e instanceof MonthApplyError ? e.message : 'Apply failed for this month. Nothing was changed for it.';
         if (!(e instanceof MonthApplyError)) this.log.error(`apply ${imp.id} ${month} failed: ${(e as Error)?.message}`);
@@ -109,6 +113,9 @@ export class SalesApplyService {
     if (typeof body.expectedDefinitionsHash !== 'string' || !body.expectedDefinitionsHash) {
       throw new BadRequestException('expectedDefinitionsHash is required.');
     }
+    if (typeof body.processingVersion !== 'number' || !Number.isInteger(body.processingVersion) || body.processingVersion < 0) {
+      throw new BadRequestException('processingVersion is required (send SalesImportPreview.processingVersion).');
+    }
     const ack = body.acknowledgePartialMonths ?? [];
     if (!Array.isArray(ack) || ack.some((m) => typeof m !== 'string')) {
       throw new BadRequestException('acknowledgePartialMonths must be a list of months.');
@@ -116,12 +123,21 @@ export class SalesApplyService {
     return {
       months: [...months].sort(),
       expectedDefinitionsHash: body.expectedDefinitionsHash,
+      processingVersion: body.processingVersion,
       acknowledgePartialMonths: ack,
       acknowledgeOlderThanLastApplied: body.acknowledgeOlderThanLastApplied === true,
     };
   }
 
-  private async applyMonth(user: JwtPayload, importId: string, summary: MonthSummary, expectedHash: string): Promise<ApplyMonthResult> {
+  private async applyMonth(
+    user: JwtPayload,
+    importId: string,
+    summary: MonthSummary,
+    req: Pick<ApplyRequest, 'expectedDefinitionsHash' | 'processingVersion'> & {
+      acknowledgePartialMonths: string[];
+      acknowledgeOlderThanLastApplied: boolean;
+    },
+  ): Promise<ApplyMonthResult> {
     const clientId = user.clientId;
     const month = summary.month;
 
@@ -129,17 +145,33 @@ export class SalesApplyService {
       async (tx) => {
         await lockSalesMonth(tx, clientId, month);
 
-        // 1. Re-check everything under the lock.
-        const override = await tx.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month } } });
-        const state = resolveMonthState(month, currentMonthKey(), override);
-        const imp = await tx.salesImport.findFirst({ where: { id: importId, clientId } });
+        // 1. Re-check everything under the locks. FOR SHARE on the import row: reprocess / cancel / delete / purge
+        //    (FOR UPDATE NOWAIT) are refused while this transaction runs, and the aggregates read below stay intact.
+        const imp = await lockImportRow(tx, importId, clientId, 'SHARE');
         if (!imp || imp.status !== 'READY') throw new MonthApplyError('The import is no longer READY.');
+        if (imp.purgedAt) throw new MonthApplyError('The data of this import was deleted after the retention period.');
+        if (imp.processingVersion !== req.processingVersion) {
+          throw new MonthApplyError('This file was reprocessed after the preview you reviewed. Refresh the preview.');
+        }
+        const override = await tx.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month } } });
+        const current = currentMonthKey();
+        const state = resolveMonthState(month, current, override);
         const { rows: defRows, defs, hash } = await this.kpiDefs.enabled(clientId, tx);
-        if (hash !== expectedHash) throw new MonthApplyError('KPI definitions changed. Refresh the preview.');
-        const roster = await loadRosterMeta(tx, clientId);
-        const rosterChanged = !imp.rosterHash || rosterHashOfMap(roster) !== imp.rosterHash;
-        const blocked = blockedReasonFor({ month, defsCount: defs.length, rosterChanged, state });
+        if (hash !== req.expectedDefinitionsHash) throw new MonthApplyError('KPI definitions changed. Refresh the preview.');
+        const mappingChanged = await mappingChangedSince(tx, clientId, imp);
+        const blocked = blockedReasonFor({ month, defsCount: defs.length, mappingChanged, state });
         if (blocked) throw new MonthApplyError(blocked);
+        // M7: the acknowledgements, against what is true NOW (another import may have been applied meanwhile).
+        if (partialMonthWarnings(summary, current).length > 0 && !req.acknowledgePartialMonths.includes(month)) {
+          throw new MonthApplyError(`${monthLabel(month)} is partial in this file and would be replaced entirely. Acknowledge it to continue.`);
+        }
+        const last = await loadLastApplied(tx, clientId, month);
+        if (isOlderThanLastApplied({ id: importId, lastDate: summary.lastDate }, last) && !req.acknowledgeOlderThanLastApplied) {
+          throw new MonthApplyError(
+            `${monthLabel(month)}: the latest invoice in this file (${summary.lastDate}) is older than in the file last applied (${last?.lastInvoiceDate}). Refresh the preview and acknowledge it.`,
+          );
+        }
+        const roster = await loadRosterMeta(tx, clientId);
 
         const owned = defs.map((d) => d.kpiCode);
 
@@ -220,7 +252,14 @@ export class SalesApplyService {
             entityType: 'SALES_MONTH',
             entityId: `${clientId}:${month}`,
             actorId: user.sub,
-            newValues: { importId, definitionsHash: hash, outletsWritten: comp.rows.length, outletsZeroFilled, totals } as Prisma.InputJsonValue,
+            newValues: {
+              importId,
+              processingVersion: imp.processingVersion,
+              definitionsHash: hash,
+              outletsWritten: comp.rows.length,
+              outletsZeroFilled,
+              totals,
+            } as Prisma.InputJsonValue,
             metadata: { clientId, applyId: applyRow.id, batchId: batch.id },
           },
         });

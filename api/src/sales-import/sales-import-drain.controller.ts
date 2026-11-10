@@ -5,18 +5,24 @@ import { PrismaService } from '../prisma/prisma.service';
 import type { SalesImportDrainResult } from './sales-import.contract';
 import { hasClaimableImports } from './ingest/claim';
 import { SalesImportRunnerService } from './ingest/sales-import-runner.service';
+import { SalesImportRetentionService } from './ingest/sales-import-retention.service';
 
 /**
  * POST /v1/sales-import/drain: `@Public`, header `x-drain-secret` = SALES_IMPORT_DRAIN_SECRET,
  * constant-time compare, FAIL-CLOSED when the secret is unset (copy of the kyc.controller.ts pattern).
  * Kicks the worker when QUEUED or heartbeat-stale PROCESSING imports exist (Cloud Scheduler fallback,
  * plan R-9). It never reveals what is queued (only whether a kick happened). OWNER: Lane I.
+ *
+ * INFRA NOTE (M3 / S5): a Cloud Scheduler job calling this endpoint (e.g. every 10 min, header x-drain-secret) is
+ * REQUIRED in staging/prod: it is what recovers an import whose worker died (heartbeat-stale PROCESSING is reclaimed
+ * on the next kick) and, when nothing is queued, it drives the retention sweep. See plan §14.
  */
 @Controller('sales-import')
 export class SalesImportDrainController {
   constructor(
     readonly runner: SalesImportRunnerService,
     readonly prisma: PrismaService,
+    readonly retention: SalesImportRetentionService,
   ) {}
 
   @Public()
@@ -29,7 +35,10 @@ export class SalesImportDrainController {
     const got = Buffer.from(secret ?? '');
     const want = Buffer.from(expected);
     if (got.length !== want.length || !timingSafeEqual(got, want)) throw new ForbiddenException('Invalid drain secret');
-    if (!(await hasClaimableImports(this.prisma))) return { kicked: false };
+    if (!(await hasClaimableImports(this.prisma))) {
+      await this.retention.sweep({ limit: 50 }); // never throws
+      return { kicked: false };
+    }
     return { kicked: (await this.runner.kick()) !== 'none' };
   }
 }

@@ -7,6 +7,8 @@
  *   unless given;
  * - blank lines are skipped; `rowNo` is the 1-based physical line where the record starts.
  * Lenient on malformed quoting (a stray quote inside an unquoted field is kept literally).
+ * Bounded (S4): a field longer than CSV_MAX_FIELD_CHARS, a record longer than CSV_MAX_RECORD_CHARS or with more than
+ * CSV_MAX_FIELDS fields → CsvLimitError (e.g. an unclosed quote that would swallow the rest of the file).
  */
 import type { Readable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
@@ -14,6 +16,17 @@ import type { SourceRow } from './header';
 
 const SNIFF_CHARS = 256 * 1024;
 const CANDIDATES = [',', ';', '\t'] as const;
+export const CSV_MAX_FIELD_CHARS = 32 * 1024;
+export const CSV_MAX_RECORD_CHARS = 1024 * 1024;
+export const CSV_MAX_FIELDS = 5000;
+
+/** The CSV breaks a size bound (message shown to the admin). */
+export class CsvLimitError extends Error {}
+
+export interface CsvRowsOptions {
+  /** Called once with the delimiter in use (given or sniffed), before the first row is yielded. */
+  onDelimiter?: (delimiter: string) => void;
+}
 
 /** Count candidate delimiters outside quotes. Ties / none → ','. */
 export function sniffDelimiter(sample: string): string {
@@ -29,7 +42,11 @@ export function sniffDelimiter(sample: string): string {
   return best;
 }
 
-export async function* csvRows(stream: Readable | AsyncIterable<Buffer | string>, delimiter?: string): AsyncGenerator<SourceRow> {
+export async function* csvRows(
+  stream: Readable | AsyncIterable<Buffer | string>,
+  delimiter?: string,
+  opts: CsvRowsOptions = {},
+): AsyncGenerator<SourceRow> {
   const decoder = new StringDecoder('utf8');
   let delim = delimiter;
   let pending = ''; // text not yet parsed (sniff buffer before the delimiter is known)
@@ -45,11 +62,25 @@ export async function* csvRows(stream: Readable | AsyncIterable<Buffer | string>
   let recordLine = 1;
   let fieldStarted = false;
   let pendingQuote = false; // a closing-quote candidate was the last char of the previous chunk
+  let recordChars = 0;
 
   const out: SourceRow[] = [];
 
-  const endRecord = () => {
+  const tooLong = (what: string) =>
+    new CsvLimitError(`Line ${recordLine}: ${what}. Check the file for an unclosed quote (") or a wrong delimiter.`);
+  const pushField = () => {
+    if (record.length >= CSV_MAX_FIELDS) throw tooLong(`more than ${CSV_MAX_FIELDS} columns`);
     record.push(field);
+  };
+  const addChar = (ch: string) => {
+    field += ch;
+    if (field.length > CSV_MAX_FIELD_CHARS) throw tooLong(`a value is longer than ${CSV_MAX_FIELD_CHARS} characters`);
+    if (++recordChars > CSV_MAX_RECORD_CHARS) throw tooLong(`the row is longer than ${CSV_MAX_RECORD_CHARS} characters`);
+  };
+
+  const endRecord = () => {
+    pushField();
+    recordChars = 0;
     const blank = record.length === 1 && record[0] === '' && !fieldStarted;
     if (!blank) out.push({ rowNo: recordLine, cells: record });
     record = [];
@@ -68,7 +99,7 @@ export async function* csvRows(stream: Readable | AsyncIterable<Buffer | string>
       if (inQuotes) {
         if (ch === '"') {
           if (text[i + 1] === '"') {
-            field += '"';
+            addChar('"');
             i++;
           } else if (i + 1 === text.length) {
             // Can't see the next char yet: decide on the next feed via a sentinel.
@@ -82,7 +113,7 @@ export async function* csvRows(stream: Readable | AsyncIterable<Buffer | string>
         } else {
           if (ch === '\n') line++;
           else if (ch === '\r' && text[i + 1] !== '\n') line++;
-          field += ch;
+          addChar(ch);
         }
         continue;
       }
@@ -90,14 +121,14 @@ export async function* csvRows(stream: Readable | AsyncIterable<Buffer | string>
         pendingQuote = false;
         if (ch === '"') {
           // It was an escaped quote split across chunks: reopen.
-          field += '"';
+          addChar('"');
           inQuotes = true;
           quoteClosed = false;
           continue;
         }
       }
       if (ch === delim) {
-        record.push(field);
+        pushField();
         field = '';
         fieldStarted = true;
         quoteClosed = false;
@@ -110,7 +141,7 @@ export async function* csvRows(stream: Readable | AsyncIterable<Buffer | string>
         inQuotes = true;
         fieldStarted = true;
       } else {
-        field += ch;
+        addChar(ch);
         fieldStarted = true;
       }
     }
@@ -126,12 +157,14 @@ export async function* csvRows(stream: Readable | AsyncIterable<Buffer | string>
       pending += text;
       if (pending.length < SNIFF_CHARS) return;
       delim = sniffDelimiter(pending);
+      opts.onDelimiter?.(delim);
       text = pending;
       pending = '';
     }
     feed(text);
   };
 
+  if (delim !== undefined) opts.onDelimiter?.(delim);
   for await (const chunk of stream as AsyncIterable<Buffer | string>) {
     consume(typeof chunk === 'string' ? chunk : decoder.write(chunk));
     for (const r of out.splice(0)) yield r;
@@ -139,6 +172,7 @@ export async function* csvRows(stream: Readable | AsyncIterable<Buffer | string>
   consume(decoder.end());
   if (delim === undefined) {
     delim = sniffDelimiter(pending);
+    opts.onDelimiter?.(delim);
     const text = pending;
     pending = '';
     feed(text);

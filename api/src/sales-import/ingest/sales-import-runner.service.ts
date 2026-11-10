@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { SalesImportProcessorService } from './sales-import-processor.service';
+import { SalesImportRetentionService } from './sales-import-retention.service';
 
 export type SalesImportKickResult = 'inline' | 'job' | 'none';
 
@@ -26,7 +27,10 @@ export class SalesImportRunnerService {
   /** The in-flight inline loop (tests and shutdown can await it). */
   inlineIdle: Promise<void> = Promise.resolve();
 
-  constructor(private readonly processor: SalesImportProcessorService) {}
+  constructor(
+    private readonly processor: SalesImportProcessorService,
+    private readonly retention?: SalesImportRetentionService,
+  ) {}
 
   async kick(): Promise<SalesImportKickResult> {
     try {
@@ -69,6 +73,8 @@ export class SalesImportRunnerService {
           await this.processor.processClaimed(row);
         }
       } while (this.inlineAgain);
+      // S5: the inline drain sweeps retention like the job does (never throws).
+      await this.retention?.sweep({ limit: 50 });
     } catch (e) {
       this.logger.error(`Sales Import inline worker stopped: ${(e as Error).message}`);
     }

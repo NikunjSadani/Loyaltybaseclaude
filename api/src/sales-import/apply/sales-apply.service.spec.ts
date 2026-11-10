@@ -4,7 +4,8 @@ import { currentMonthKey } from '../../targets/targets.helpers';
 import type { JwtPayload } from '../../common/decorators/current-user.decorator';
 import { SalesKpiDefService } from '../kpi/sales-kpi-def.service';
 import { definitionsHash, stableStringify } from '../kpi/sales-kpi.helper';
-import { rosterHashOf } from '../ingest/roster';
+import { mappingFingerprint } from '../ingest/mapping-fingerprint';
+import type { SalesColumnMapping } from '../sales-import.contract';
 import { lastDayOfMonth, shiftMonthKey } from '../months/month-state';
 import { SalesPreviewService } from './sales-preview.service';
 import { SalesApplyService } from './sales-apply.service';
@@ -24,6 +25,11 @@ const DEF_ROWS = [
 ];
 const LITE = DEF_ROWS.map((d) => ({ kpiCode: d.kpiCode, measure: d.measure as 'AMOUNT' | 'QUANTITY', filter: d.filter, outletTypes: d.outletTypes, programs: d.programs }));
 const HASH = definitionsHash(LITE);
+const MAPPING: SalesColumnMapping = {
+  headerRow: 'auto', outletCode: 'CODE', invoiceDate: 'DATE', amount: 'AMT', quantity: 'QTY',
+  dimensions: [{ key: 'dimA', label: 'A', header: 'A' }, { key: 'dimB', label: 'B', header: 'B' }], dateOrder: 'DMY',
+};
+const VERSION = 3;
 
 const ROSTER = [
   { outletCode: 'O1', name: 'One', programName: null, outletType: { code: 'WHOLESALER' } },
@@ -44,16 +50,19 @@ const summary = (month: string, over: Record<string, unknown> = {}) => ({
   ...over,
 });
 const agg = (id: number, month: string, outletCode: string, dims: Record<string, string>, amountPaise: bigint, qtyMicro: bigint) => ({
-  id: BigInt(id), importId: 'imp1', month, outletCode, dims, dimKey: stableStringify(dims), amountPaise, qtyMicro, lines: 1,
+  id: BigInt(id), importId: 'imp1', month, outletCode, dims, dimKey: stableStringify(dims), amountPaise, qtyPico: qtyMicro * 1_000_000n, lines: 1,
 });
 
 function makeDb(opts: {
   months?: string[];
   statuses?: Array<Record<string, unknown>>;
-  rosterHash?: string | null;
   existing?: Array<Record<string, unknown>>;
   defs?: typeof DEF_ROWS;
-  importCreatedAt?: Date;
+  /** The newest SalesImportApply of the month (another import `imp0` whose latest invoice in the month is `lastDate`). */
+  lastApply?: { lastDate: string } | null;
+  roster?: typeof ROSTER;
+  profile?: SalesColumnMapping;
+  rosterAdded?: number;
 } = {}) {
   const months = opts.months ?? [PREV, CUR];
   const log: string[] = [];
@@ -61,24 +70,31 @@ function makeDb(opts: {
     agg(i * 10 + 1, m, 'O1', { dimA: 'P', dimB: '500' }, 10000n, 1_500000n),
     agg(i * 10 + 2, m, 'O1', { dimA: 'Q', dimB: '500' }, 5000n, 500000n),
     agg(i * 10 + 3, m, 'O2', { dimA: 'P', dimB: '50' }, -2500n, 0n),
-    agg(i * 10 + 4, m, 'GONE', { dimA: 'P', dimB: '50' }, 99999n, 0n), // dropped from the roster since processing
+    agg(i * 10 + 4, m, 'GONE', { dimA: 'P', dimB: '50' }, 99999n, 0n), // not on the CURRENT roster → never written
+    agg(i * 10 + 5, m, 'O4', { dimA: 'P', dimB: '50' }, 700n, 0n), // only written if O4 is on the roster at apply time
   ]);
-  const imp = {
-    id: 'imp1', clientId: 't1', status: 'READY', createdAt: opts.importCreatedAt ?? AT,
-    rosterHash: opts.rosterHash === undefined ? rosterHashOf(ROSTER.map((o) => o.outletCode)) : opts.rosterHash,
+  const imp: Record<string, unknown> & { monthSummaries: unknown; processingVersion: number } = {
+    id: 'imp1', clientId: 't1', status: 'READY', createdAt: AT, finishedAt: AT, purgedAt: null,
+    processingVersion: VERSION, mappingFingerprint: mappingFingerprint(MAPPING),
     monthSummaries: months.map((m) => summary(m)),
   };
+  const lastImp = { id: 'imp0', monthSummaries: months.map((m) => summary(m, { lastDate: opts.lastApply?.lastDate ?? `${m}-28` })) };
   const statuses = opts.statuses ?? [];
   const db = {
     log,
     imp,
     salesImport: {
       findFirst: jest.fn(async ({ where }: { where: { id?: string; clientId: string } }) =>
-        where.clientId === 't1' && (!where.id || where.id === 'imp1') ? imp : null),
-      findMany: jest.fn(async () => [{ id: 'imp0', createdAt: new Date(AT.getTime() + 60_000) }]),
+        where.clientId !== 't1' ? null : where.id === 'imp0' ? lastImp : !where.id || where.id === 'imp1' ? imp : null),
     },
+    salesImportProfile: { findUnique: jest.fn(async () => ({ columnMapping: opts.profile ?? MAPPING })) },
+    // lockImportRow(…, 'SHARE') — H1: the apply holds the import row FOR SHARE
+    $queryRaw: jest.fn(async (q: Prisma.Sql) => {
+      log.push(`import.${/FOR (\w+)/.exec(q.strings.join('?'))?.[1]?.toLowerCase()}`);
+      return q.values[0] === 'imp1' && q.values[1] === 't1' ? [{ ...imp }] : [];
+    }),
     salesKpiDefinition: { findMany: jest.fn(async () => opts.defs ?? DEF_ROWS) },
-    outlet: { findMany: jest.fn(async () => ROSTER) },
+    outlet: { findMany: jest.fn(async () => opts.roster ?? ROSTER), count: jest.fn(async () => opts.rosterAdded ?? 0) },
     kpiDef: { findMany: jest.fn(async () => [{ code: 'OWN_AMT', label: 'Owned ₹' }, { code: 'OWN_QTY', label: 'Owned cases' }]) },
     salesMonthStatus: {
       findMany: jest.fn(async () => statuses),
@@ -96,7 +112,8 @@ function makeDb(opts: {
       findMany: jest.fn(async () => opts.existing ?? []),
     },
     salesImportApply: {
-      findFirst: jest.fn(async () => null),
+      findFirst: jest.fn(async () =>
+        opts.lastApply ? { importId: 'imp0', createdAt: AT, appliedById: 'u0', definitionsSnapshot: DEF_ROWS } : null),
       create: jest.fn(async () => { log.push('apply.create'); return { id: 'apply1' }; }),
     },
     salesUploadBatch: { create: jest.fn(async (a: { data: Record<string, unknown> }) => { log.push('batch.create'); return { id: 'batch1', ...a.data }; }) },
@@ -136,7 +153,7 @@ describe('SalesPreviewService', () => {
     });
     const p = await services(db).preview.preview('t1', 'imp1');
     expect(p.definitionsHash).toBe(HASH);
-    expect(p.rosterHashMatches).toBe(true);
+    expect(p).toMatchObject({ processingVersion: VERSION, mappingChanged: false, rosterOutletsAddedSinceProcessing: 0 });
     const prev = p.months.find((m) => m.month === PREV)!;
     const amt = prev.kpis.find((k) => k.kpiCode === 'OWN_AMT')!;
     // O1: P 100.00 ; O2: P -25.00 ; GONE ignored ; O3 zero → 75
@@ -147,6 +164,8 @@ describe('SalesPreviewService', () => {
     expect(prev.warnings).toEqual(expect.arrayContaining(['NEGATIVE_VALUES', 'REPLACES_MANUAL_VALUES']));
     expect(prev.canApply).toBe(true);
     expect(prev.monthState).toBe('OPEN');
+    // M6: matched / unmatched recomputed against the CURRENT roster (GONE + O4 are not on it)
+    expect(prev).toMatchObject({ matchedOutlets: 2, unmatchedCustomers: 2, matchedAmountRupees: 125, unmatchedAmountRupees: 1006.99 });
   });
 
   it('partial months warn; the CURRENT month never gets ENDS_BEFORE_MONTH_END', async () => {
@@ -157,14 +176,26 @@ describe('SalesPreviewService', () => {
     expect(p.months[1].warnings).not.toContain('ENDS_BEFORE_MONTH_END');
   });
 
-  it('ROSTER_CHANGED blocks apply', async () => {
-    const p = await services(makeDb({ rosterHash: 'stale' })).preview.preview('t1', 'imp1');
-    expect(p.rosterHashMatches).toBe(false);
+  it('M6: an outlet added to the roster AFTER processing is included (no ROSTER_CHANGED block); the count is informational', async () => {
+    const roster = [...ROSTER, { outletCode: 'O4', name: 'Four', programName: null, outletType: { code: 'RETAIL' } }];
+    const p = await services(makeDb({ roster, rosterAdded: 1 })).preview.preview('t1', 'imp1');
+    expect(p.rosterOutletsAddedSinceProcessing).toBe(1);
+    const prev = p.months.find((m) => m.month === PREV)!;
+    expect(prev.canApply).toBe(true);
+    expect(prev.kpis.find((k) => k.kpiCode === 'OWN_AMT')!.newTotal).toBe(82); // 100 - 25 + O4's 7
+    expect(prev).toMatchObject({ matchedOutlets: 3, unmatchedCustomers: 1 });
+  });
+
+  it('H2: a changed column mapping blocks every month with a clear reason', async () => {
+    const p = await services(makeDb({ profile: { ...MAPPING, amount: 'GROSS' } })).preview.preview('t1', 'imp1');
+    expect(p.mappingChanged).toBe(true);
     for (const m of p.months) {
-      expect(m.warnings).toContain('ROSTER_CHANGED');
       expect(m.canApply).toBe(false);
-      expect(m.blockedReason).toMatch(/Reprocess/);
+      expect(m.blockedReason).toMatch(/column mapping changed.*Reprocess/);
     }
+    // a label-only change is NOT a mapping change
+    const same = await services(makeDb({ profile: { ...MAPPING, dimensions: MAPPING.dimensions.map((d) => ({ ...d, label: 'x' })) } })).preview.preview('t1', 'imp1');
+    expect(same.mappingChanged).toBe(false);
   });
 
   it('a CLOSED month and an implicitly-closed older month are blocked; a future month is blocked', async () => {
@@ -178,10 +209,18 @@ describe('SalesPreviewService', () => {
     expect(by[FUT].blockedReason).toMatch(/not started/);
   });
 
-  it('OLDER_THAN_LAST_APPLIED when a newer import was last applied', async () => {
-    const db = makeDb({ statuses: [{ month: PREV, state: 'OPEN', lastAppliedImportId: 'imp0' }] });
-    const p = await services(db).preview.preview('t1', 'imp1');
-    expect(p.months.find((m) => m.month === PREV)!.warnings).toContain('OLDER_THAN_LAST_APPLIED');
+  it('UX-1: OLDER_THAN_LAST_APPLIED compares DATA recency (latest invoice date in the month), not upload time; both dates exposed', async () => {
+    // imp1 covers PREV to its last day; the last-applied imp0 ends EARLIER → imp1 is newer data, no warning
+    const newer = await services(makeDb({ lastApply: { lastDate: `${PREV}-10` } })).preview.preview('t1', 'imp1');
+    const m1 = newer.months.find((m) => m.month === PREV)!;
+    expect(m1.warnings).not.toContain('OLDER_THAN_LAST_APPLIED');
+    expect(m1.lastApplied).toEqual(expect.objectContaining({ importId: 'imp0', lastInvoiceDate: `${PREV}-10`, byName: 'Applier' }));
+    expect(m1.lastDate).toBe(lastDayOfMonth(PREV));
+    // imp0 had data up to the 28th, this file (partial) only to the 20th → older data
+    const db = makeDb({ lastApply: { lastDate: `${PREV}-28` } });
+    db.imp.monthSummaries = [summary(PREV, { lastDate: `${PREV}-20` })];
+    const older = await services(db).preview.preview('t1', 'imp1');
+    expect(older.months[0].warnings).toContain('OLDER_THAN_LAST_APPLIED');
   });
 
   it('no owned KPI → every month blocked with a clear reason', async () => {
@@ -193,7 +232,7 @@ describe('SalesPreviewService', () => {
 // ─── APPLY ───────────────────────────────────────────────────────────────────
 
 describe('SalesApplyService', () => {
-  const body = (months: string[], over: Record<string, unknown> = {}) => ({ months, expectedDefinitionsHash: HASH, ...over });
+  const body = (months: string[], over: Record<string, unknown> = {}) => ({ months, expectedDefinitionsHash: HASH, processingVersion: VERSION, ...over });
 
   it('definitions-hash mismatch → 409 BEFORE any transaction', async () => {
     const db = makeDb();
@@ -210,18 +249,57 @@ describe('SalesApplyService', () => {
     expect(r.results[0].ok).toBe(true);
   });
 
-  it('older-than-last-applied needs its own ack', async () => {
-    const db = makeDb({ statuses: [{ month: PREV, state: 'OPEN', lastAppliedImportId: 'imp0' }] });
-    await expect(services(db).apply.apply(user, 'imp1', body([PREV]))).rejects.toThrow(/older/);
-    const r = await services(db).apply.apply(user, 'imp1', body([PREV], { acknowledgeOlderThanLastApplied: true }));
+  it('older-than-last-applied (data recency) needs its own ack', async () => {
+    const db = makeDb({ lastApply: { lastDate: `${PREV}-28` } });
+    db.imp.monthSummaries = [summary(PREV, { lastDate: `${PREV}-20` })];
+    await expect(services(db).apply.apply(user, 'imp1', body([PREV], { acknowledgePartialMonths: [PREV] }))).rejects.toThrow(/older/);
+    const r = await services(db).apply.apply(user, 'imp1', body([PREV], { acknowledgeOlderThanLastApplied: true, acknowledgePartialMonths: [PREV] }));
     expect(r.results[0].ok).toBe(true);
+  });
+
+  it('M7: the older-than-last-applied ack is re-checked UNDER the month lock (another import applied meanwhile)', async () => {
+    const db = makeDb();
+    db.imp.monthSummaries = [summary(PREV, { lastDate: `${PREV}-20` })];
+    let calls = 0; // pre-check: no last apply; inside the locked tx: a newer-data import was applied meanwhile
+    db.salesImportApply.findFirst.mockImplementation(async () =>
+      calls++ === 0 ? null : ({ importId: 'imp0', createdAt: AT, appliedById: 'u0', definitionsSnapshot: DEF_ROWS } as never));
+    const r = await services(db).apply.apply(user, 'imp1', body([PREV], { acknowledgePartialMonths: [PREV] }));
+    expect(r.results[0]).toEqual(expect.objectContaining({ ok: false }));
+    expect(r.results[0].error).toMatch(/older than in the file last applied/);
+    expect(db.salesUploadBatch.create).not.toHaveBeenCalled();
+  });
+
+  it('M7: processingVersion — 409 before any tx when stale; a reprocess racing in → ok:false under the lock', async () => {
+    const db = makeDb();
+    await expect(services(db).apply.apply(user, 'imp1', body([PREV], { processingVersion: VERSION - 1 }))).rejects.toThrow(/reprocessed/);
+    expect(db.$transaction).not.toHaveBeenCalled();
+    await expect(services(db).apply.apply(user, 'imp1', { months: [PREV], expectedDefinitionsHash: HASH } as never)).rejects.toThrow(/processingVersion/);
+    db.$queryRaw.mockImplementation(async () => [{ ...db.imp, processingVersion: VERSION + 1 }]);
+    const r = await services(db).apply.apply(user, 'imp1', body([PREV]));
+    expect(r.results[0].error).toMatch(/reprocessed/);
+    expect(db.salesUploadBatch.create).not.toHaveBeenCalled();
+  });
+
+  it('H1: the import row is re-checked under FOR SHARE — no longer READY / purged → ok:false, nothing written', async () => {
+    const db = makeDb();
+    db.$queryRaw.mockImplementation(async () => [{ ...db.imp, status: 'QUEUED' }]);
+    expect((await services(db).apply.apply(user, 'imp1', body([PREV]))).results[0].error).toMatch(/no longer READY/);
+    db.$queryRaw.mockImplementation(async () => [{ ...db.imp, purgedAt: AT }]);
+    expect((await services(db).apply.apply(user, 'imp1', body([PREV]))).results[0].error).toMatch(/retention/);
+    expect(db.salesUploadBatch.create).not.toHaveBeenCalled();
+  });
+
+  it('H2: a changed column mapping → 409 before any tx', async () => {
+    const db = makeDb({ profile: { ...MAPPING, quantity: 'CASES' } });
+    await expect(services(db).apply.apply(user, 'imp1', body([PREV]))).rejects.toThrow(/column mapping changed/);
+    expect(db.$transaction).not.toHaveBeenCalled();
   });
 
   it('happy path: lock FIRST, SALES_IMPORT batch, owned-only merge SQL, strip of other rows, history, pointer, audit', async () => {
     const db = makeDb();
     const r = await services(db).apply.apply(user, 'imp1', body([PREV]));
     expect(r.results).toEqual([{ month: PREV, ok: true, applyId: 'apply1', outletsWritten: 3, outletsZeroFilled: 1 }]);
-    expect(db.log).toEqual(['lock', 'batch.create', 'insert', 'strip', 'apply.create', 'status.upsert', 'audit']);
+    expect(db.log).toEqual(['lock', 'import.share', 'batch.create', 'insert', 'strip', 'apply.create', 'status.upsert', 'audit']);
 
     const sql = sqlCalls(db);
     expect(sql[0].values).toEqual([`sales-month:t1:${PREV}`]);
@@ -277,19 +355,26 @@ describe('SalesApplyService', () => {
     expect(r.results[1]).toEqual(expect.objectContaining({ month: CUR, ok: true }));
   });
 
-  it('a month not in the file → ok:false; roster changed under the lock → ok:false', async () => {
+  it('a month not in the file → ok:false', async () => {
     const r1 = await services(makeDb()).apply.apply(user, 'imp1', body([OLD]));
     expect(r1.results[0]).toEqual(expect.objectContaining({ ok: false }));
     expect(r1.results[0].error).toMatch(/not in this file/);
-    const r2 = await services(makeDb({ rosterHash: 'stale' })).apply.apply(user, 'imp1', body([PREV]));
-    expect(r2.results[0].error).toMatch(/Reprocess/);
+  });
+
+  it('M6: apply maps file codes onto the roster AT APPLY TIME (an outlet added after processing is written)', async () => {
+    const roster = [...ROSTER, { outletCode: 'O4', name: 'Four', programName: null, outletType: { code: 'RETAIL' } }];
+    const db = makeDb({ roster });
+    const r = await services(db).apply.apply(user, 'imp1', body([PREV]));
+    expect(r.results[0]).toEqual(expect.objectContaining({ ok: true, outletsWritten: 4 }));
+    const ins = sqlCalls(db)[1];
+    expect(ins.values).toContainEqual(['O1', 'O2', 'O3', 'O4']);
   });
 
   it('body validation', async () => {
     const s = services(makeDb()).apply;
-    await expect(s.apply(user, 'imp1', { months: [], expectedDefinitionsHash: HASH })).rejects.toBeInstanceOf(BadRequestException);
-    await expect(s.apply(user, 'imp1', { months: ['2026-13'], expectedDefinitionsHash: HASH })).rejects.toBeInstanceOf(BadRequestException);
-    await expect(s.apply(user, 'imp1', { months: [PREV, PREV], expectedDefinitionsHash: HASH })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(s.apply(user, 'imp1', { months: [], expectedDefinitionsHash: HASH, processingVersion: VERSION })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(s.apply(user, 'imp1', { months: ['2026-13'], expectedDefinitionsHash: HASH, processingVersion: VERSION })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(s.apply(user, 'imp1', { months: [PREV, PREV], expectedDefinitionsHash: HASH, processingVersion: VERSION })).rejects.toBeInstanceOf(BadRequestException);
     await expect(s.apply(user, 'imp1', { months: [PREV] } as never)).rejects.toBeInstanceOf(BadRequestException);
   });
 

@@ -4,7 +4,8 @@ import type { SalesImport } from '@prisma/client';
 import type { SalesColumnMapping } from '../sales-import.contract';
 import { AGGREGATE_CHUNK, SalesImportProcessorService } from './sales-import-processor.service';
 import { partKey, unmatchedCsvKey } from './parts-file';
-import { rosterHashOf } from './roster';
+import { SALES_IMPORT_PART_SIZE } from '../sales-import.contract';
+import { mappingFingerprint } from './mapping-fingerprint';
 import { exceljsWorkbook } from './test-fixtures.testspec';
 
 // Synthetic tenant "t1", outlets O1/O2, neutral dims. Dates relative to a fixed past month are fine
@@ -88,6 +89,11 @@ function makeImport(over: Partial<SalesImport> = {}): SalesImport {
     dimensionCombos: null,
     error: null,
     attempts: 1,
+    claimToken: 'tok',
+    mappingFingerprint: null,
+    processingVersion: 0,
+    purgedAt: null,
+    queuedAt: null,
     heartbeatAt: new Date(),
     startedAt: new Date(),
     finishedAt: null,
@@ -102,14 +108,21 @@ function setup(opts: { file: Buffer; kind?: 'CSV' | 'XLSX'; mapping?: SalesColum
   const row = makeImport({ fileKind: opts.kind ?? 'CSV', sizeBytes: BigInt(opts.storedSize ?? opts.file.length), attempts: opts.attempts ?? 1 });
   storage.objects.set(partKey(row.gcsPrefix, 0), opts.file);
   const calls: string[] = [];
+  const terminal: Array<{ where: unknown; data: Record<string, unknown> }> = [];
   const prisma = {
     client: { findUnique: jest.fn().mockResolvedValue({ features: { salesImport: opts.enabled ?? true }, status: 'ACTIVE' }) },
     salesImportProfile: { findUnique: jest.fn().mockResolvedValue(opts.mapping === null ? null : { columnMapping: opts.mapping ?? MAPPING }) },
     outlet: { findMany: jest.fn().mockResolvedValue((opts.roster ?? ['O1', 'O2']).map((outletCode) => ({ outletCode }))) },
     salesImport: {
-      updateMany: jest.fn().mockImplementation(async () => {
+      updateMany: jest.fn().mockImplementation(async (a: { where: unknown; data: Record<string, unknown> }) => {
         calls.push('updateMany');
+        if (a.data.status) terminal.push(a);
         return { count: 1 };
+      }),
+      update: jest.fn().mockImplementation(async (a: { where: unknown; data: Record<string, unknown> }) => {
+        calls.push('update');
+        if (a.data.status) terminal.push(a);
+        return {};
       }),
       findFirst: jest.fn().mockResolvedValue(null),
     },
@@ -123,14 +136,14 @@ function setup(opts: { file: Buffer; kind?: 'CSV' | 'XLSX'; mapping?: SalesColum
         return { count: data.length };
       }),
     },
-    $queryRaw: jest.fn().mockResolvedValue([]),
+    // The READY transaction re-locks the row by its claim token first (M2).
+    $queryRaw: jest.fn().mockResolvedValue([{ id: 'imp1' }]),
+    $transaction: jest.fn(),
   };
+  prisma.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) => cb(prisma));
   const svc = new SalesImportProcessorService(prisma as never, storage as never);
-  /** The terminal write (last updateMany whose data has a status). */
-  const final = () => {
-    const c = prisma.salesImport.updateMany.mock.calls.map((a) => a[0]).filter((a) => a.data.status);
-    return c[c.length - 1];
-  };
+  /** The terminal write (the last update / updateMany whose data has a status). */
+  const final = () => terminal[terminal.length - 1] as { where: Record<string, unknown>; data: Record<string, any> };
   return { svc, prisma, storage, row, calls, final };
 }
 
@@ -141,13 +154,18 @@ describe('SalesImportProcessorService.processClaimed', () => {
     await svc.processClaimed(row);
 
     const f = final();
-    expect(f.where).toEqual({ id: 'imp1', status: 'PROCESSING', attempts: 1 });
+    expect(f.where).toEqual({ id: 'imp1' });
+    // ...inside ONE transaction that first re-locked the row BY ITS CLAIM TOKEN (M2)
+    const lockSql = prisma.$queryRaw.mock.calls[0][0] as { strings: string[]; values: unknown[] };
+    expect(lockSql.strings.join('?')).toContain('"claimToken" = ?');
+    expect(lockSql.values).toEqual(['imp1', 'tok']);
     expect(f.data).toMatchObject({
       status: 'READY',
       error: null,
       contentSha256: createHash('sha256').update(file).digest('hex'),
       duplicateOfId: null,
-      rosterHash: rosterHashOf(['O1', 'O2']),
+      mappingFingerprint: mappingFingerprint(MAPPING),
+      processingVersion: { increment: 1 },
       rowsRead: 6,
       rowsSkipped: 1,
       bytesRead: BigInt(file.length),
@@ -173,9 +191,11 @@ describe('SalesImportProcessorService.processClaimed', () => {
 
     const written = prisma.salesImportAggregate.createMany.mock.calls.flatMap((c) => c[0].data);
     expect(written).toEqual([
-      { importId: 'imp1', month: '2026-10', outletCode: 'O1', dims: { dimA: 'P', dimB: '500' }, dimKey: '{"dimA":"P","dimB":"500"}', amountPaise: 6000n, qtyMicro: 1_000_000n, lines: 2 },
-      { importId: 'imp1', month: '2026-10', outletCode: 'O2', dims: { dimA: 'Q', dimB: '200' }, dimKey: '{"dimA":"Q","dimB":"200"}', amountPaise: 100050n, qtyMicro: 2_000_000n, lines: 1 },
-      { importId: 'imp1', month: '2026-11', outletCode: 'O1', dims: { dimA: 'P', dimB: '500' }, dimKey: '{"dimA":"P","dimB":"500"}', amountPaise: 1000n, qtyMicro: 40_000n, lines: 1 },
+      { importId: 'imp1', month: '2026-10', outletCode: 'O1', dims: { dimA: 'P', dimB: '500' }, dimKey: '{"dimA":"P","dimB":"500"}', amountPaise: 6000n, qtyPico: 1_000_000n * 1_000_000n, lines: 2 },
+      { importId: 'imp1', month: '2026-10', outletCode: 'O2', dims: { dimA: 'Q', dimB: '200' }, dimKey: '{"dimA":"Q","dimB":"200"}', amountPaise: 100050n, qtyPico: 2_000_000n * 1_000_000n, lines: 1 },
+      // M6: the unmatched customer is aggregated too (apply maps codes onto the roster current at apply time)
+      { importId: 'imp1', month: '2026-10', outletCode: 'U9', dims: { dimA: 'P', dimB: '500' }, dimKey: '{"dimA":"P","dimB":"500"}', amountPaise: 750n, qtyPico: 1_000_000n * 1_000_000n, lines: 1 },
+      { importId: 'imp1', month: '2026-11', outletCode: 'O1', dims: { dimA: 'P', dimB: '500' }, dimKey: '{"dimA":"P","dimB":"500"}', amountPaise: 1000n, qtyPico: 40_000n * 1_000_000n, lines: 1 },
     ]);
     expect(storage.uploads.get(unmatchedCsvKey(row.gcsPrefix))).toBe(
       'Customer code,Customer name,Month,Lines,Amount (Rs),Quantity\r\nU9,Stranger,2026-10,1,7.5,1\r\n',
@@ -209,7 +229,7 @@ describe('SalesImportProcessorService.processClaimed', () => {
     await svc.processClaimed(row);
     expect(final().data).toMatchObject({ status: 'READY', rowsRead: 2, rowsSkipped: 0, contentSha256: createHash('sha256').update(file).digest('hex') });
     expect(prisma.salesImportAggregate.createMany.mock.calls[0][0].data).toEqual([
-      { importId: 'imp1', month: '2026-10', outletCode: 'O1', dims: { dimA: 'P', dimB: '500' }, dimKey: '{"dimA":"P","dimB":"500"}', amountPaise: 10000n, qtyMicro: 2_000_000n, lines: 2 },
+      { importId: 'imp1', month: '2026-10', outletCode: 'O1', dims: { dimA: 'P', dimB: '500' }, dimKey: '{"dimA":"P","dimB":"500"}', amountPaise: 10000n, qtyPico: 2_000_000n * 1_000_000n, lines: 2 },
     ]);
   });
 
@@ -221,14 +241,16 @@ describe('SalesImportProcessorService.processClaimed', () => {
     expect(prisma.salesImport.findFirst.mock.calls[0][0].where).toMatchObject({ clientId: 't1', status: 'READY', id: { not: 'imp1' } });
   });
 
-  it('NEEDS_MAPPING when no profile exists: detectedHeaders = first 10 rows as text', async () => {
+  it('NEEDS_MAPPING when no profile exists: detectedHeaders = best-guess header row + 3 sample rows (S3)', async () => {
     const { svc, prisma, row, final } = setup({ file: Buffer.from(CSV), mapping: null });
     await svc.processClaimed(row);
     const f = final();
     expect(f.data.status).toBe('NEEDS_MAPPING');
     expect(f.data.error).toContain('No column mapping');
-    expect(f.data.detectedHeaders).toHaveLength(8); // the file has 8 non-blank rows
-    expect(f.data.detectedHeaders[1]).toEqual(['Invoice Date', 'Customer Code', 'Customer', 'Code', 'Group', 'Net Amt', 'Qty']);
+    expect(f.where).toEqual({ id: 'imp1', status: 'PROCESSING', claimToken: 'tok' });
+    expect(f.data.detectedHeaders).toHaveLength(4); // the "X" marker row is skipped as the guess
+    expect(f.data.detectedHeaders[0]).toEqual(['Invoice Date', 'Customer Code', 'Customer', 'Code', 'Group', 'Net Amt', 'Qty']);
+    expect(f.data.detectedHeaders[1][1]).toBe('O1');
     expect(prisma.salesImportAggregate.createMany).not.toHaveBeenCalled();
   });
 
@@ -290,5 +312,79 @@ describe('SalesImportProcessorService.processClaimed', () => {
     const { svc, prisma } = setup({ file: Buffer.from(CSV) });
     prisma.$queryRaw.mockResolvedValue([makeImport({ id: 'claimed' })]);
     await expect(svc.claimNext()).resolves.toMatchObject({ id: 'claimed' });
+  });
+});
+
+describe('SalesImportProcessorService — audit fix round', () => {
+  it('M2: a superseded claim (token gone at the final lock) writes NOTHING — no aggregates, no status', async () => {
+    const { svc, prisma, row, final } = setup({ file: Buffer.from(CSV) });
+    prisma.$queryRaw.mockResolvedValue([]); // reprocess / cancel cleared or replaced the token
+    await svc.processClaimed(row);
+    expect(final()).toBeUndefined();
+    expect(prisma.salesImportAggregate.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.salesImportAggregate.createMany).not.toHaveBeenCalled();
+  });
+
+  it('M2/M3: a heartbeat that matches no row (cancelled) stops the parse without writing', async () => {
+    const rows = ['Invoice Date,Customer Code,Customer,Code,Group,Net Amt,Qty'];
+    for (let i = 0; i < 45_000; i++) rows.push(`03-10-2026,O1,S,P,500,1,1`);
+    const { svc, prisma, row, final } = setup({ file: Buffer.from(rows.join('\n')) });
+    prisma.salesImport.updateMany.mockImplementation(async (a: { data: Record<string, unknown> }) => ({ count: a.data.status ? 1 : 0 }));
+    await svc.processClaimed(row);
+    expect(final()).toBeUndefined();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('M2: a claim without a token never runs', async () => {
+    const { svc, prisma, row, final } = setup({ file: Buffer.from(CSV) });
+    await svc.processClaimed({ ...row, claimToken: null });
+    expect(final()).toBeUndefined();
+    expect(prisma.client.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('M1: a storage error mid-stream fails the import cleanly with a readable message (pipeline propagates it)', async () => {
+    const file = Buffer.from(CSV);
+    // declared size spans two parts but part 1 is missing → the GCS read of part 1 errors after part 0 streamed
+    const { svc, row, final } = setup({ file, storedSize: SALES_IMPORT_PART_SIZE + 10 });
+    const big = Buffer.concat([file, Buffer.alloc(SALES_IMPORT_PART_SIZE - file.length, 0x0a)]);
+    (svc as unknown as { storage: { objects: Map<string, Buffer> } }).storage.objects.set(partKey(row.gcsPrefix, 0), big);
+    await svc.processClaimed(row);
+    expect(final().data.status).toBe('FAILED');
+    expect(final().data.error).toMatch(/could not be read: No such object/);
+  });
+
+  it("L1: a ';'-delimited CSV reads ',' as the decimal separator (auto)", async () => {
+    const csv = ['Invoice Date;Customer Code;Customer;Code;Group;Net Amt;Qty', '03-10-2026;O1;S;P;500;1.234,50;0,5'].join('\n');
+    const { svc, prisma, row, final } = setup({ file: Buffer.from(csv) });
+    await svc.processClaimed(row);
+    expect(final().data.status).toBe('READY');
+    expect(prisma.salesImportAggregate.createMany.mock.calls[0][0].data[0]).toMatchObject({ amountPaise: 123450n, qtyPico: 500_000_000_000n });
+  });
+
+  it("L1: the profile's explicit '.' wins over the ';' auto-detection", async () => {
+    const csv = ['Invoice Date;Customer Code;Customer;Code;Group;Net Amt;Qty', '03-10-2026;O1;S;P;500;1234.50;0.5'].join('\n');
+    const { svc, prisma, row } = setup({ file: Buffer.from(csv), mapping: { ...MAPPING, decimalSeparator: '.' } });
+    await svc.processClaimed(row);
+    expect(prisma.salesImportAggregate.createMany.mock.calls[0][0].data[0]).toMatchObject({ amountPaise: 123450n });
+  });
+
+  it('S3: detectedHeaders is capped (columns, 50-char cells, ≤ 3 sample rows)', async () => {
+    const wide = Array.from({ length: 400 }, (_, i) => `H${i}`);
+    const long = 'Z'.repeat(80);
+    const csv = [wide.join(','), ...Array.from({ length: 6 }, () => wide.map(() => long).join(','))].join('\n');
+    const { svc, row, final } = setup({ file: Buffer.from(csv), mapping: null });
+    await svc.processClaimed(row);
+    const dh = final().data.detectedHeaders as string[][];
+    expect(dh).toHaveLength(4);
+    expect(dh[0]).toHaveLength(300);
+    expect(dh[1][0]).toHaveLength(50);
+  });
+
+  it('S4: an unclosed quote that would swallow the file fails with a readable CSV message', async () => {
+    const csv = 'Invoice Date,Customer Code,Customer,Code,Group,Net Amt,Qty\n03-10-2026,O1,"' + 'a'.repeat(40_000);
+    const { svc, row, final } = setup({ file: Buffer.from(csv) });
+    await svc.processClaimed(row);
+    expect(final().data.status).toBe('FAILED');
+    expect(final().data.error).toMatch(/longer than .* characters/);
   });
 });

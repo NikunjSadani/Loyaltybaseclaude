@@ -3077,15 +3077,20 @@ model SalesImport {
   contentSha256    String?
   duplicateOfId    String? // earlier READY import with the same sha256 (same tenant)
   mappingSnapshot  Json? // profile used for this run
-  detectedHeaders  Json? // first 10 rows' cells (NEEDS_MAPPING wizard)
-  rosterHash       String? // sha256 of sorted roster outletCodes at processing time
+  detectedHeaders  Json? // [headerRow, ...<=3 sample rows], capped (SALES_IMPORT_MAX_COLUMNS / _SAMPLE_CELL_CHARS)
+  rosterHash       String? // UNUSED since the audit fix round (apply maps to the CURRENT roster); kept additive
+  mappingFingerprint String? // column mapping this run used (H2: preview/apply block on drift)
+  claimToken       String? // random per claim; only the current claim may heartbeat / finalise (M2)
+  processingVersion Int     @default(0) // bumped on every READY (ApplyRequest.processingVersion, M7)
+  queuedAt         DateTime? // last time the import entered QUEUED (complete / reprocess)
+  purgedAt         DateTime? // retention purge done (raw parts, unmatched.csv, aggregates, sample rows)
   bytesRead        BigInt    @default(0)
   rowsRead         Int       @default(0)
   rowsSkipped      Int       @default(0)
   errorSamples     Json? // ≤ 200 {row, column, reason}
   monthSummaries   Json? // MonthSummary[] (plan §6.3)
   dimensionValues  Json? // {dimKey: [{value, lines, amountPaise}]} top 200 per dim
-  dimensionCombos  Json? // [{dims, lines, amountPaise, qtyMicro}] distinct full combos (≤ 2,000 by |₹|)
+  dimensionCombos  Json? // [{dims, lines, amountRupees, quantity}] (contract shape) distinct full combos (≤ 2,000 by |₹|)
   error            String?
   attempts         Int       @default(0)
   heartbeatAt      DateTime?
@@ -3100,6 +3105,7 @@ model SalesImport {
   @@index([clientId, createdAt])
   @@index([status])
   @@index([clientId, contentSha256])
+  @@index([status, finishedAt])
   @@map("sales_imports")
 }
 
@@ -3111,7 +3117,7 @@ model SalesImportAggregate {
   dims        Json // {"dimA":"X","dimB":"500"} normalized (plan §6.1)
   dimKey      String // stable JSON of dims (sorted keys)
   amountPaise BigInt // Σ amount in paise (signed, returns net off)
-  qtyMicro    BigInt // Σ quantity × 1e6 (signed)
+  qtyPico     BigInt // Σ quantity × 1e12 (signed; exact per-line accumulation, H3)
   lines       Int
 
   import SalesImport @relation(fields: [importId], references: [id], onDelete: Cascade)

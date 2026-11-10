@@ -3,6 +3,8 @@ import { xlsxRows, XlsxSheetNotFoundError, denseCells, plainCellValue } from './
 import {
   loadCentralDirectory,
   planXlsxRead,
+  XLSX_MAX_SHARED_STRINGS_UNCOMPRESSED,
+  XLSX_MAX_TOTAL_UNCOMPRESSED,
   readZipCentralDirectory,
   resequencedXlsxStream,
   XlsxFileError,
@@ -163,6 +165,16 @@ describe('zip directory + plan', () => {
     if (cd.kind !== 'ok') throw new Error(cd.kind);
     const entries = cd.entries.map((e) => (e.name === 'xl/worksheets/sheet1.xml' ? { ...e, flags: e.flags | 1 } : e));
     expect(() => planXlsxRead(entries)).toThrow('encrypted');
+  });
+
+  it('S4: declared unpacked sizes are capped (shared strings and the total)', async () => {
+    const cd = readZipCentralDirectory(await exceljsWorkbook([['Data', ROWS]]), 0);
+    if (cd.kind !== 'ok') throw new Error(cd.kind);
+    const sst = cd.entries.map((e) => (e.name === 'xl/sharedStrings.xml' ? { ...e, uncompressedSize: XLSX_MAX_SHARED_STRINGS_UNCOMPRESSED + 1 } : e));
+    expect(() => planXlsxRead(sst)).toThrow(/shared-text table is too large/);
+    const total = cd.entries.map((e) => (e.name === 'xl/worksheets/sheet1.xml' ? { ...e, uncompressedSize: XLSX_MAX_TOTAL_UNCOMPRESSED + 1 } : e));
+    expect(() => planXlsxRead(total)).toThrow(/unpacks to/);
+    expect(() => planXlsxRead(cd.entries)).not.toThrow();
   });
 
   it('the re-sequenced stream is itself a valid zip with the planned entries', async () => {

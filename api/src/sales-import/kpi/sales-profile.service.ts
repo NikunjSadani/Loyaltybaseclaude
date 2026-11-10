@@ -12,6 +12,7 @@ import {
 import { filterDimKeys } from './sales-kpi.helper';
 
 const DATE_ORDERS = ['DMY', 'MDY', 'YMD'] as const;
+const DECIMAL_SEPARATORS = ['auto', '.', ','] as const;
 const MAX_HEADER_ROW = 50;
 
 function optStr(v: unknown, field: string, errors: string[]): string | null {
@@ -57,6 +58,9 @@ export function validateColumnMapping(raw: unknown): SalesColumnMapping {
 
   const dateOrder = (r.dateOrder ?? 'DMY') as SalesColumnMapping['dateOrder'];
   if (!DATE_ORDERS.includes(dateOrder)) errors.push('dateOrder must be one of DMY, MDY, YMD.');
+
+  const decimalSeparator = (r.decimalSeparator ?? 'auto') as NonNullable<SalesColumnMapping['decimalSeparator']>;
+  if (!DECIMAL_SEPARATORS.includes(decimalSeparator)) errors.push('decimalSeparator must be "auto", "." or ",".');
 
   const dimensions: SalesDimensionMapping[] = [];
   const rawDims = r.dimensions ?? [];
@@ -118,6 +122,7 @@ export function validateColumnMapping(raw: unknown): SalesColumnMapping {
     quantity,
     dimensions,
     dateOrder,
+    decimalSeparator,
   };
 }
 
@@ -152,6 +157,28 @@ export class SalesProfileService {
       throw new BadRequestException(
         `These KPIs use dimensions you are removing: ${broken.map((b) => `${b.kpiCode} (${b.missing.join(', ')})`).join('; ')}. Edit or disable them first.`,
       );
+    }
+
+    // H2: the amount / quantity column of an ENABLED KPI's measure cannot be removed or pointed at another column —
+    // every outlet's value would silently change meaning (or become 0) on the next apply.
+    const measures = await this.prisma.salesKpiDefinition.findMany({
+      where: { clientId, enabled: true },
+      select: { kpiCode: true, measure: true },
+    });
+    const before = await this.prisma.salesImportProfile.findUnique({ where: { clientId }, select: { columnMapping: true } });
+    const old = (before?.columnMapping ?? null) as SalesColumnMapping | null;
+    const col = (h: string | null | undefined) => (h ? normalizeHeader(h) : '');
+    const measureClash: string[] = [];
+    for (const [measure, field, label] of [['AMOUNT', 'amount', 'amount'], ['QUANTITY', 'quantity', 'quantity']] as const) {
+      const users = measures.filter((d) => d.measure === measure).map((d) => d.kpiCode);
+      if (users.length === 0) continue;
+      const was = col(old?.[field]);
+      const now = col(mapping[field]);
+      if (!now) measureClash.push(`the ${label} column is used by ${users.join(', ')} and cannot be removed`);
+      else if (was && was !== now) measureClash.push(`the ${label} column is used by ${users.join(', ')} and cannot be changed from "${was}" to "${now}"`);
+    }
+    if (measureClash.length > 0) {
+      throw new BadRequestException(`${measureClash.join('; ')}. Disable those KPIs first (or create new ones for the new column).`);
     }
 
     await this.prisma.$transaction(async (tx) => {

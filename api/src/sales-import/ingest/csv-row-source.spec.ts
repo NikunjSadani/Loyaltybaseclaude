@@ -1,5 +1,5 @@
 import { Readable } from 'node:stream';
-import { csvRows, sniffDelimiter } from './csv-row-source';
+import { CSV_MAX_FIELDS, CSV_MAX_FIELD_CHARS, CSV_MAX_RECORD_CHARS, CsvLimitError, csvRows, sniffDelimiter } from './csv-row-source';
 
 async function collect(src: Readable, delimiter?: string) {
   const out: Array<{ rowNo: number; cells: string[] }> = [];
@@ -85,5 +85,25 @@ describe('csvRows', () => {
   it('sniffDelimiter ignores delimiters inside quotes and defaults to ","', () => {
     expect(sniffDelimiter('"a;b;c;d",x,y')).toBe(',');
     expect(sniffDelimiter('single')).toBe(',');
+  });
+});
+
+describe('csvRows — audit fix round', () => {
+  it('L1: reports the delimiter in use (sniffed or given) before rows are consumed', async () => {
+    const seen: string[] = [];
+    const out: unknown[] = [];
+    for await (const r of csvRows(whole('a;b\n1,5;2\n'), undefined, { onDelimiter: (d) => seen.push(d) })) out.push(r);
+    expect(seen).toEqual([';']);
+    expect(out).toHaveLength(2);
+    const given: string[] = [];
+    for await (const _ of csvRows(whole('a,b\n'), '\t', { onDelimiter: (d) => given.push(d) })) void _;
+    expect(given).toEqual(['\t']);
+  });
+
+  it('S4: field / record / column caps throw CsvLimitError (an unclosed quote cannot swallow the file)', async () => {
+    await expect(collect(whole('a,"' + 'x'.repeat(CSV_MAX_FIELD_CHARS + 1)))).rejects.toThrow(CsvLimitError);
+    await expect(collect(whole(Array.from({ length: CSV_MAX_FIELDS + 1 }, () => 'a').join(',')))).rejects.toThrow(/columns/);
+    const rec = Array.from({ length: Math.ceil(CSV_MAX_RECORD_CHARS / 1000) + 1 }, () => 'y'.repeat(999)).join(',');
+    await expect(collect(whole(rec))).rejects.toThrow(/row is longer/);
   });
 });

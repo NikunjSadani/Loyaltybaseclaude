@@ -1,6 +1,6 @@
 import type { SalesColumnMapping } from '../sales-import.contract';
 import { SALES_IMPORT_MAX_DIMENSION_COMBOS, SALES_IMPORT_MAX_DIMENSION_VALUES, SALES_IMPORT_MAX_ERROR_SAMPLES } from '../sales-import.contract';
-import { SalesAggregator } from './aggregator';
+import { AggregatorLimitError, SalesAggregator } from './aggregator';
 import type { ColumnIndex } from './header';
 
 // Synthetic, neutral fixtures (plan G3): outlets O1/O2, dims dimA/dimB, round numbers.
@@ -24,6 +24,8 @@ const TODAY = '2026-11-09';
 const roster = (codes: string[]) => new Map(codes.map((c) => [c, c]));
 const row = (code: unknown, date: unknown, a: unknown, b: unknown, amt: unknown, qty: unknown, name: unknown = 'Name') => [code, name, date, a, b, amt, qty];
 const KEY_X500 = '{"dimA":"X","dimB":"500"}';
+/** Fixtures are written in micro-cases; the aggregator stores pico-cases (x1e12, H3). */
+const pico = (micro: bigint) => micro * 1_000_000n;
 
 describe('SalesAggregator', () => {
   it('nets returns within a month and splits by invoice month', () => {
@@ -32,8 +34,8 @@ describe('SalesAggregator', () => {
     a.push(row('O1', '2026-10-20', 'x ', 500, '-40.00', '-0.5'), 4);
     a.push(row('O1', '2026-11-01', 'X', '500', '10.00', '0.04'), 5);
     const r = a.result();
-    expect(r.get('2026-10', 'O1', KEY_X500)).toEqual({ amountPaise: 6000n, qtyMicro: 1_000_000n, lines: 2 });
-    expect(r.get('2026-11', 'O1', KEY_X500)).toEqual({ amountPaise: 1000n, qtyMicro: 40_000n, lines: 1 });
+    expect(r.get('2026-10', 'O1', KEY_X500)).toEqual({ amountPaise: 6000n, qtyPico: pico(1_000_000n), lines: 2 });
+    expect(r.get('2026-11', 'O1', KEY_X500)).toEqual({ amountPaise: 1000n, qtyPico: pico(40_000n), lines: 1 });
     expect(r.monthSummaries.map((m) => [m.month, m.firstDate, m.lastDate, m.lines])).toEqual([
       ['2026-10', '2026-10-03', '2026-10-20', 2],
       ['2026-11', '2026-11-01', '2026-11-01', 1],
@@ -41,8 +43,8 @@ describe('SalesAggregator', () => {
     expect(r.monthSummaries[0]).toMatchObject({ matchedOutlets: 1, matchedAmountRupees: 60, matchedQuantity: 1 });
     expect(r.aggregateCount).toBe(2);
     expect([...r.aggregates()]).toEqual([
-      { month: '2026-10', outletCode: 'O1', dims: { dimA: 'X', dimB: '500' }, dimKey: KEY_X500, amountPaise: 6000n, qtyMicro: 1_000_000n, lines: 2 },
-      { month: '2026-11', outletCode: 'O1', dims: { dimA: 'X', dimB: '500' }, dimKey: KEY_X500, amountPaise: 1000n, qtyMicro: 40_000n, lines: 1 },
+      { month: '2026-10', outletCode: 'O1', dims: { dimA: 'X', dimB: '500' }, dimKey: KEY_X500, amountPaise: 6000n, qtyPico: pico(1_000_000n), lines: 2 },
+      { month: '2026-11', outletCode: 'O1', dims: { dimA: 'X', dimB: '500' }, dimKey: KEY_X500, amountPaise: 1000n, qtyPico: pico(40_000n), lines: 1 },
     ]);
   });
 
@@ -51,29 +53,32 @@ describe('SalesAggregator', () => {
     a.push(row(327852, '2026-10-03', 'X', 500, 10, 1), 3);
     a.push(row('327852', '2026-10-04', 'X', 200, 20, 2), 4);
     const r = a.result();
-    expect(r.get('2026-10', '327852', KEY_X500)).toEqual({ amountPaise: 1000n, qtyMicro: 1_000_000n, lines: 1 });
-    expect(r.get('2026-10', '327852', '{"dimA":"X","dimB":"200"}')).toEqual({ amountPaise: 2000n, qtyMicro: 2_000_000n, lines: 1 });
+    expect(r.get('2026-10', '327852', KEY_X500)).toEqual({ amountPaise: 1000n, qtyPico: pico(1_000_000n), lines: 1 });
+    expect(r.get('2026-10', '327852', '{"dimA":"X","dimB":"200"}')).toEqual({ amountPaise: 2000n, qtyPico: pico(2_000_000n), lines: 1 });
   });
 
-  it("aggregates under the roster's own outlet code (normalized match)", () => {
+  it('M6: aggregates under the NORMALIZED file code (the roster is applied at preview/apply); summary still matches', () => {
     const a = new SalesAggregator(MAP, IDX, new Map([['00123', ' 00123 ']]), TODAY);
     a.push(row('00123', '2026-10-03', 'X', 500, 10, 1), 3);
-    expect(a.result().get('2026-10', ' 00123 ', KEY_X500)).toEqual({ amountPaise: 1000n, qtyMicro: 1_000_000n, lines: 1 });
+    const r = a.result();
+    expect(r.get('2026-10', '00123', KEY_X500)).toEqual({ amountPaise: 1000n, qtyPico: pico(1_000_000n), lines: 1 });
+    expect(r.monthSummaries[0]).toMatchObject({ matchedOutlets: 1, unmatchedCustomers: 0 });
   });
 
-  it('counts unmatched customers per month without aggregating them', () => {
+  it('M6: aggregates EVERY customer (matched or not) and still lists the processing-time unmatched ones', () => {
     const a = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY);
     a.push(row('O1', '2026-10-03', 'X', '500', '100', '1'), 3);
     a.push(row('U9', '2026-10-03', 'X', '500', '7.50', '0.5', ''), 4);
     a.push(row('U9', '2026-10-05', 'Y', '500', '2.50', '0.5', 'Late Name'), 5);
     a.push(row('U8', '2026-11-01', 'X', '500', '1', '1'), 6);
     const r = a.result();
-    expect(r.aggregateCount).toBe(1);
+    expect(r.aggregateCount).toBe(4);
+    expect(r.get('2026-10', 'U9', KEY_X500)).toEqual({ amountPaise: 750n, qtyPico: pico(500_000n), lines: 1 });
     expect(r.monthSummaries[0]).toMatchObject({ lines: 3, matchedOutlets: 1, unmatchedCustomers: 1, unmatchedAmountRupees: 10, unmatchedQuantity: 1 });
     expect(r.monthSummaries[1]).toMatchObject({ unmatchedCustomers: 1, matchedOutlets: 0 });
     expect([...r.unmatched()]).toEqual([
-      { month: '2026-10', code: 'U9', name: 'Late Name', amountPaise: 1000n, qtyMicro: 1_000_000n, lines: 2 },
-      { month: '2026-11', code: 'U8', name: 'Name', amountPaise: 100n, qtyMicro: 1_000_000n, lines: 1 },
+      { month: '2026-10', code: 'U9', name: 'Late Name', amountPaise: 1000n, qtyPico: pico(1_000_000n), lines: 2 },
+      { month: '2026-11', code: 'U8', name: 'Name', amountPaise: 100n, qtyPico: pico(1_000_000n), lines: 1 },
     ]);
   });
 
@@ -83,7 +88,7 @@ describe('SalesAggregator', () => {
     a.push(row('O1', '31-02-2026', 'X', '500', '1', '1'), 4);
     a.push(row('O1', '1999-01-01', 'X', '500', '1', '1'), 5);
     a.push(row('O1', '2026-10-03', 'X', '500', 'abc', '1'), 6);
-    a.push(row('O1', '2026-10-03', 'X', '500', '', '1'), 7);
+    a.push(row('O1', '2026-10-03', 'X', '500', '', ''), 7);
     a.push(row('O1', '2026-10-03', 'X', '500', '1', 'n/a'), 8);
     a.push([null, '', '  ', null, null, null, null], 9); // fully blank: ignored, not counted
     let r = a.result();
@@ -94,7 +99,7 @@ describe('SalesAggregator', () => {
       { row: 4, column: 'DATE', reason: 'invalid date' },
       { row: 5, column: 'DATE', reason: 'date out of range' },
       { row: 6, column: 'AMT', reason: 'invalid amount' },
-      { row: 7, column: 'AMT', reason: 'blank amount' },
+      { row: 7, column: null, reason: 'blank amount and quantity' },
       { row: 8, column: 'QTY', reason: 'invalid quantity' },
     ]);
     for (let i = 0; i < 500; i++) a.push(row('', '2026-10-03', 'X', '500', '1', '1'), 100 + i);
@@ -107,7 +112,7 @@ describe('SalesAggregator', () => {
   it('an unmapped amount or quantity column counts as 0', () => {
     const a = new SalesAggregator({ ...MAP, quantity: null }, { ...IDX, quantity: null }, roster(['O1']), TODAY);
     a.push(row('O1', '2026-10-03', 'X', '500', '5', 'garbage'), 3);
-    expect(a.result().get('2026-10', 'O1', KEY_X500)).toEqual({ amountPaise: 500n, qtyMicro: 0n, lines: 1 });
+    expect(a.result().get('2026-10', 'O1', KEY_X500)).toEqual({ amountPaise: 500n, qtyPico: pico(0n), lines: 1 });
   });
 
   it('no dimensions → a single "{}" bucket per outlet-month and no combos', () => {
@@ -115,7 +120,7 @@ describe('SalesAggregator', () => {
     a.push(row('O1', '2026-10-03', 'X', '500', '5', '1'), 3);
     a.push(row('O1', '2026-10-04', 'Y', '200', '5', '1'), 4);
     const r = a.result();
-    expect(r.get('2026-10', 'O1', '{}')).toEqual({ amountPaise: 1000n, qtyMicro: 2_000_000n, lines: 2 });
+    expect(r.get('2026-10', 'O1', '{}')).toEqual({ amountPaise: 1000n, qtyPico: pico(2_000_000n), lines: 2 });
     expect(r.dimensionCombos).toEqual([]);
     expect(r.dimensionValues).toEqual({});
   });
@@ -161,6 +166,55 @@ describe('SalesAggregator', () => {
   it('amounts sum exactly in BigInt (no float drift)', () => {
     const a = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY);
     for (let i = 0; i < 1000; i++) a.push(row('O1', '2026-10-03', 'X', '500', 0.1, 0.000001), i + 2);
-    expect(a.result().get('2026-10', 'O1', KEY_X500)).toEqual({ amountPaise: 10_000n, qtyMicro: 1000n, lines: 1000 });
+    expect(a.result().get('2026-10', 'O1', KEY_X500)).toEqual({ amountPaise: 10_000n, qtyPico: pico(1000n), lines: 1000 });
+  });
+
+  it('H3: 12 lines of 1/12 case (Excel float) → monthly quantity exactly 1.000', () => {
+    const a = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY);
+    for (let i = 0; i < 12; i++) a.push(row('O1', '2026-10-03', 'X', '500', 1, 1 / 12), i + 2);
+    expect(a.result().monthSummaries[0].matchedQuantity).toBe(1);
+  });
+
+  it('H4: with both measures mapped a blank one counts as 0 (row kept); both blank → skipped', () => {
+    const a = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY);
+    a.push(row('O1', '2026-10-03', 'X', '500', '', '2'), 2); // free goods: qty only
+    a.push(row('O1', '2026-10-04', 'X', '500', '-50', null), 3); // credit note: amount only
+    a.push(row('O1', '2026-10-05', 'X', '500', ' ', ''), 4); // nothing
+    const r = a.result();
+    expect(r.get('2026-10', 'O1', KEY_X500)).toEqual({ amountPaise: -5000n, qtyPico: pico(2_000_000n), lines: 2 });
+    expect(r.errorSamples).toEqual([{ row: 4, column: null, reason: 'blank amount and quantity' }]);
+    // a single mapped measure that is blank is still a skip
+    const b = new SalesAggregator({ ...MAP, quantity: null }, { ...IDX, quantity: null }, roster(['O1']), TODAY);
+    b.push(row('O1', '2026-10-03', 'X', '500', '', '2'), 2);
+    expect(b.result().errorSamples).toEqual([{ row: 2, column: 'AMT', reason: 'blank amount' }]);
+  });
+
+  it('L1: decimal-comma text cells when the run separator is a comma', () => {
+    const a = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY, ',');
+    a.push(row('O1', '2026-10-03', 'X', '500', '1.234,50', '0,5'), 2);
+    a.push(row('O1', '2026-10-03', 'X', '500', '1234.5', '1'), 3); // ambiguous → invalid amount
+    const r = a.result();
+    expect(r.get('2026-10', 'O1', KEY_X500)).toEqual({ amountPaise: 123450n, qtyPico: pico(500_000n), lines: 1 });
+    expect(r.errorSamples).toEqual([{ row: 3, column: 'AMT', reason: 'invalid amount' }]);
+  });
+
+  it('S4/M6: distinct-code, aggregate, unmatched and quantity caps fail with a readable AggregatorLimitError', () => {
+    const codes = new SalesAggregator(MAP, IDX, roster([]), TODAY, '.', { maxCodes: 2 });
+    codes.push(row('A', '2026-10-03', 'X', '500', 1, 1), 2);
+    codes.push(row('B', '2026-10-03', 'X', '500', 1, 1), 3);
+    codes.push(row('A', '2026-10-04', 'X', '500', 1, 1), 4); // known code: fine
+    expect(() => codes.push(row('C', '2026-10-03', 'X', '500', 1, 1), 5)).toThrow(AggregatorLimitError);
+    expect(() => codes.push(row('C', '2026-10-03', 'X', '500', 1, 1), 5)).toThrow(/more than 2 distinct customer codes/);
+
+    const aggs = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY, '.', { maxAggregates: 1 });
+    aggs.push(row('O1', '2026-10-03', 'X', '500', 1, 1), 2);
+    expect(() => aggs.push(row('O1', '2026-10-03', 'X', '200', 1, 1), 3)).toThrow(/month × customer × product/);
+
+    const un = new SalesAggregator(MAP, IDX, roster([]), TODAY, '.', { maxUnmatched: 1 });
+    un.push(row('U1', '2026-10-03', 'X', '500', 1, 1), 2);
+    expect(() => un.push(row('U2', '2026-10-03', 'X', '500', 1, 1), 3)).toThrow(/unmatched customer/);
+
+    const big = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY);
+    expect(() => big.push(row('O1', '2026-10-03', 'X', '500', 1, '9000001'), 2)).toThrow(AggregatorLimitError);
   });
 });

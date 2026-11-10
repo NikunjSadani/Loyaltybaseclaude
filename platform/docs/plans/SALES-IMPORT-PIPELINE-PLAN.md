@@ -443,7 +443,10 @@ with whole-brand entries and exclusions. The §6.2 model expresses this directly
 - `OLDER_THAN_LAST_APPLIED`: this import's `createdAt` < the month's `lastAppliedImportId` import `createdAt`.
 - `REPLACES_MANUAL_VALUES`: some existing row for the month has an owned key whose value was written by a non-`SALES_IMPORT` batch
   (first apply after a KPI moved from manual to importer).
-- `ROSTER_CHANGED`: the current roster hash ≠ `SalesImport.rosterHash`. **Apply is blocked**; the UI offers Reprocess.
+- ~~`ROSTER_CHANGED`~~ — REMOVED in the audit fix round (§10a.8 M6): the worker aggregates every customer code and
+  preview/apply map them onto the roster current at that moment, so a roster change never blocks apply.
+- `OLDER_THAN_LAST_APPLIED` (superseded by §10a.8 UX-1): compares DATA recency — this file's latest invoice date in the
+  month vs the last-applied import's latest invoice date in that month — not upload time.
 
 ---
 
@@ -757,6 +760,52 @@ From the Cloud Run IAM roles reference (docs.cloud.google.com/run/docs/reference
 
 ---
 
+### 10a.8 Audit fix round (backend, 2026-11-10) — binding deviations
+Three independent audits; every item fixed with tests. Contract commits `c5e7d42` + `c93f719` (both contract files).
+Additive migration `20261111120000_sales_import_hardening` (touches only the two unreleased sales-import tables):
+`claimToken`, `mappingFingerprint`, `processingVersion`, `purgedAt`, `queuedAt`, index `(status, finishedAt)`, and
+`sales_import_aggregates.qtyMicro` → `qtyPico` (rescaled ×1e6).
+- **H1/S1/S2 locking:** apply holds the import row `FOR SHARE` (after the month advisory lock) and re-checks READY /
+  not purged / processingVersion; reprocess / cancel / delete / retention purge take `FOR UPDATE NOWAIT` → 409 "busy"
+  while an apply (or the worker's final write) holds it; reprocess and delete refuse once any SalesImportApply exists.
+  Helpers in `ingest/import-lock.ts`.
+- **H2:** `SalesImport.mappingFingerprint` (only parse-relevant fields; labels ignored) vs the current profile → every
+  month blocked ("Reprocess the file first"); profile PUT refuses removing/re-pointing the amount/quantity column while an
+  enabled KPI uses that measure.
+- **H3:** quantities are BigInt pico-cases (×1e12) end to end; cases are rounded ONCE, exactly, to 3 dp
+  (`picoToCases`). 12 × (1/12 as an Excel float) = 1.000.
+- **H4:** both measures mapped → a blank one is 0 (row kept); skipped only when both are blank.
+- **M1** `stream.pipeline` for the CSV source. **M2** random `claimToken` per claim; heartbeat/finalise match it; the
+  READY write (delete + insert aggregates + unmatched.csv + READY) is one transaction re-locking the row by token.
+  **M3** stalled PROCESSING (> 10 min) can be reprocessed / cancelled; `POST admin/sales-import/:id/cancel`
+  (QUEUED / stalled → CANCELLED + purge; a live worker stops at its next heartbeat). Scheduler call REQUIRED (§14).
+- **M4** KPI tester memoises per distinct combo (shared match cache across months; entry hits once per combo); > 100,000
+  combos → 400.
+- **M5** D-1 guard also applies when the flag is OFF but the month holds Sales Import applies; DB error → 503 (fail
+  closed, all four routes); allowed exports/reports are recorded as AuditLog `EXPORT` on `SALES_MONTH <client>:<month>`;
+  reopen → 409 unless `acknowledgeDownstream` when credit batches (any status, `period`) or recorded exports exist;
+  `SalesMonthRow.downstream`, `SalesMonthReopenResult.warnings`.
+- **M6** the worker aggregates EVERY customer code (normalized), capped at 1,000,000 distinct codes / 2,000,000
+  aggregate keys / 2,000,000 unmatched keys (readable FAILED); preview/apply map codes onto the CURRENT roster
+  (`normalizedRosterIndex`, shared with the worker). `ROSTER_CHANGED`, `rosterHashMatches` and the roster-hash helpers
+  are gone (`rosterHash` column kept, unused); preview shows `rosterOutletsAddedSinceProcessing` and recomputes the
+  matched/unmatched figures live.
+- **M7** `ApplyRequest.processingVersion` (409 when reprocessed since preview); partial / older acks re-checked under the
+  month lock against the month's current last apply.
+- **UX-1** older-file warning = data recency; `MonthPreview.lastApplied.lastInvoiceDate` vs `MonthPreview.lastDate`.
+- **L1** `SalesColumnMapping.decimalSeparator` ('auto' = ',' for a ';' CSV); ambiguous dot-only values in comma mode are
+  invalid (never ×100). **L4** owned-tenant manual batch delete reports the rows actually removed.
+- **S3** detectedHeaders = header row (or best guess) + ≤ 3 sample rows, ≤ 300 columns, ≤ 50 chars; GET :id only, samples
+  only for targets:upload; list/get use explicit selects. **S4** xlsx declared unpacked size ≤ 4 GiB total and
+  sharedStrings ≤ 512 MiB; CSV field 32 KiB / record 1 MiB / 5,000 columns. **S5** retention: parts, unmatched.csv,
+  aggregates and sample rows purged 30 days after finishedAt (READY / NEEDS_MAPPING / FAILED / CANCELLED; lazy on list,
+  on every worker / inline drain and idle drain call); UPLOADING > 24 h → CANCELLED + purged; ≤ 3 UPLOADING per tenant.
+  **S6** audit rows (entityType `SALES_IMPORT`) for create-upload, complete, reprocess, delete, cancel, unmatched.csv.
+  **S7** `SalesImportPartGuard` runs flag/operator/state checks before the multipart body is buffered. **S8** parts hold
+  `FOR KEY SHARE`, complete `FOR UPDATE` (30 s lock timeout); a late part → 409 without deleting stored parts.
+- Product-set blanks: a TEXT `''` filter value is an exact "column is empty" match (save + tester); an entry whose every
+  value is blank, or a non-text blank, is rejected. `SalesImportSummary.queuedAt` added.
+
 ## 11. Lane tasks (TDD: write the test first, see it fail, implement, see it pass; run `cd api && npx jest src/sales-import` or `cd platform && npx vitest run src/app/admin/sales-import src/lib/sales-import`)
 
 ### Lane I — Backend ingest (owner of `api/src/sales-import/ingest/**`, `worker.main.ts`, runner, upload endpoints)
@@ -1049,7 +1098,14 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
   calls `jobs:run` with NO overrides (the plan's design), or `roles/run.jobsExecutorWithOverrides` if it passes overrides (e.g. an
   `IMPORT_ID` env). See §10a.5 (to verify on staging with the owner's go).
 - Job env: `NODE_OPTIONS=--max-old-space-size=1536` (so V8 collects before the 2Gi container limit; §10a.4).
-- Optional Cloud Scheduler hitting `POST /v1/sales-import/drain` every 10 min (only if the kick proves unreliable).
+- **REQUIRED (audit fix round M3/S5):** Cloud Scheduler hitting `POST /v1/sales-import/drain` every 10 min with header
+  `x-drain-secret` (+ secret `SALES_IMPORT_DRAIN_SECRET` on the API service). It recovers an import whose worker died
+  (heartbeat-stale PROCESSING is reclaimed on the next kick) and, when nothing is queued, drives the retention sweep.
+- **Migration ordering (L3):** `20261111120000_sales_import_hardening` (and every sales-import migration) must be applied
+  BEFORE the new API revision serves. Verified in the workflows: `deploy-staging.yml` and `deploy.yml` both run the
+  `gifsy-migrate[-staging]` Cloud Run job with `--execute-now --wait` in the SAME job, BEFORE the `gcloud run deploy`
+  step, so a failed migration fails the job and the API is not deployed. The worker job (`gifsy-sales-import[-staging]`)
+  deploy step (still to be added, owner-gated) must also come AFTER the migrate step.
 - GCS: parts + unmatched under `sales-imports/<clientId>/<importId>/`. The API deletes parts 30 days after READY (lazy, on list) or
   immediately on DELETE. Bucket lifecycle is unchanged.
 

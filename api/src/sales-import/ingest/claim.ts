@@ -2,19 +2,27 @@
  * Claim one import for processing (plan §7.1.1). A single UPDATE with a `FOR UPDATE SKIP LOCKED` subquery
  * is atomic, so concurrent workers (two job executions, inline + job) never claim the same row. A
  * PROCESSING row whose heartbeat is older than SALES_IMPORT_STALE_HEARTBEAT_MINUTES is reclaimable (a
- * killed/OOM'd execution). `attempts` is incremented on every claim; it doubles as the claim token
- * (the processor only finalises a row whose attempts still equal what it claimed).
+ * killed/OOM'd execution). `attempts` counts claims (> SALES_IMPORT_MAX_ATTEMPTS → FAILED).
+ *
+ * M2: every claim stamps a fresh RANDOM `claimToken`; the processor heartbeats and finalises only
+ * `WHERE "claimToken" = <its token>`. A reprocess / cancel clears the token, and a reclaim replaces it, so a superseded
+ * worker can never match the row again (unlike the old `attempts` token, which a reset to 0 could make reusable).
  */
 import type { SalesImport } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import type { PrismaService } from '../../prisma/prisma.service';
 import { SALES_IMPORT_STALE_HEARTBEAT_MINUTES } from '../sales-import.contract';
 
-export async function claimNextImport(prisma: Pick<PrismaService, '$queryRaw'>): Promise<SalesImport | null> {
+export async function claimNextImport(
+  prisma: Pick<PrismaService, '$queryRaw'>,
+  token: string = randomUUID(),
+): Promise<SalesImport | null> {
   const rows = await prisma.$queryRaw<SalesImport[]>`
     UPDATE "sales_imports"
        SET "status" = 'PROCESSING',
            "startedAt" = now(),
            "attempts" = "attempts" + 1,
+           "claimToken" = ${token},
            "heartbeatAt" = now(),
            "updatedAt" = now()
      WHERE "id" = (

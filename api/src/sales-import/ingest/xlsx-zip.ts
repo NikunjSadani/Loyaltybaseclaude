@@ -115,6 +115,10 @@ export class XlsxFileError extends Error {}
 
 const SHEET_RE = /^xl\/worksheets\/sheet(\d+)\.xml$/;
 
+/** S4 bounds on what the declared (central-directory) sizes may expand to. */
+export const XLSX_MAX_TOTAL_UNCOMPRESSED = 4 * 1024 ** 3; // 4 GiB across the entries we read
+export const XLSX_MAX_SHARED_STRINGS_UNCOMPRESSED = 512 * 1024 ** 2; // exceljs caches the whole table in memory
+
 export interface XlsxReadPlan {
   entries: ZipEntryInfo[]; // in the order to emit
   synthesizeSharedStrings: boolean;
@@ -141,6 +145,17 @@ export function planXlsxRead(entries: ZipEntryInfo[]): XlsxReadPlan {
   for (const e of chosen) {
     if (e.flags & 0x0001) throw new XlsxFileError('The .xlsx file is encrypted. Save an unprotected copy and upload that.');
     if (e.method !== 0 && e.method !== 8) throw new XlsxFileError(`The .xlsx file uses an unsupported compression method (${e.method}).`);
+  }
+  if (shared && shared.uncompressedSize > XLSX_MAX_SHARED_STRINGS_UNCOMPRESSED) {
+    throw new XlsxFileError(
+      `The .xlsx file's shared-text table is too large (${Math.round(shared.uncompressedSize / 1024 ** 2)} MB unpacked; the limit is ${XLSX_MAX_SHARED_STRINGS_UNCOMPRESSED / 1024 ** 2} MB). Save it as CSV (UTF-8) and upload that.`,
+    );
+  }
+  const totalUncompressed = chosen.reduce((s, e) => s + e.uncompressedSize, 0);
+  if (totalUncompressed > XLSX_MAX_TOTAL_UNCOMPRESSED) {
+    throw new XlsxFileError(
+      `The .xlsx file unpacks to ${Math.round(totalUncompressed / 1024 ** 3)} GB, more than the ${XLSX_MAX_TOTAL_UNCOMPRESSED / 1024 ** 3} GB limit. Remove extra sheets or save it as CSV.`,
+    );
   }
   return {
     entries: chosen,

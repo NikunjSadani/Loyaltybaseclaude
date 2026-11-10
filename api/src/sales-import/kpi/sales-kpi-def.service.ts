@@ -24,7 +24,14 @@ import {
   validateAndNormalizeFilter,
   type KpiDefLite,
 } from './sales-kpi.helper';
-import { forEachAggregatePage, loadRosterMeta, resolveReadyImport } from './sales-import-data';
+import { forEachAggregatePage, loadRosterMeta, resolveReadyImport, rosterIndexOf } from './sales-import-data';
+
+/**
+ * M4: the tester memoises everything per DISTINCT product combo (dimKey) — the KPI match vector (shared by every
+ * month's accumulator) and the per-entry hits — so work is O(aggregates + combos × entries), never
+ * O(aggregates × entries). Bounded: a file with more distinct combos than this is refused with a 400.
+ */
+export const KPI_TEST_MAX_COMBOS = 100_000;
 
 export function toDto(row: SalesKpiDefinition): SalesKpiDefinitionDto {
   return {
@@ -278,21 +285,33 @@ export class SalesKpiDefService {
     ];
     const measureIdx = measure === 'AMOUNT' ? 0 : 1;
     const roster = await loadRosterMeta(this.prisma, clientId);
+    const index = rosterIndexOf(roster); // M6: file code → CURRENT roster outlet
 
     const perMonth = new Map<string, OutletKpiAccumulator>();
+    const matchCache = new Map<string, boolean[]>(); // shared by every month's accumulator
+    const seenCombos = new Set<string>();
     await forEachAggregatePage(this.prisma, imp.id, null, (rows) => {
       for (const a of rows) {
-        rawAny.forEach((e, i) => {
-          if (!anyHit[i] && entryMatches(a.dims, e)) anyHit[i] = true;
-        });
-        rawNone.forEach((e, i) => {
-          if (!noneHit[i] && entryMatches(a.dims, e)) noneHit[i] = true;
-        });
-        const meta = roster.get(a.outletCode);
-        if (!meta || !outletInScope(defs[0], meta)) continue; // unmatched / off-roster / out-of-scope outlets
+        if (!seenCombos.has(a.dimKey)) {
+          if (seenCombos.size >= KPI_TEST_MAX_COMBOS) {
+            throw new BadRequestException(
+              `This file has more than ${KPI_TEST_MAX_COMBOS.toLocaleString('en-IN')} distinct product combinations, too many to test interactively. Check the dimension columns of the mapping.`,
+            );
+          }
+          seenCombos.add(a.dimKey);
+          rawAny.forEach((e, i) => {
+            if (!anyHit[i] && entryMatches(a.dims, e)) anyHit[i] = true;
+          });
+          rawNone.forEach((e, i) => {
+            if (!noneHit[i] && entryMatches(a.dims, e)) noneHit[i] = true;
+          });
+        }
+        const code = index.get(a.outletCode);
+        const meta = code === undefined ? undefined : roster.get(code);
+        if (!code || !meta || !outletInScope(defs[0], meta)) continue; // unmatched / off-roster / out-of-scope outlets
         let acc = perMonth.get(a.month);
-        if (!acc) perMonth.set(a.month, (acc = new OutletKpiAccumulator(defs)));
-        acc.add(a.outletCode, a, a.dimKey);
+        if (!acc) perMonth.set(a.month, (acc = new OutletKpiAccumulator(defs, matchCache)));
+        acc.add(code, a, a.dimKey);
       }
     });
 
@@ -302,17 +321,17 @@ export class SalesKpiDefService {
       const acc = perMonth.get(month)!;
       matchedLines += acc.matchedLines;
       let paise = 0n;
-      let micro = 0n;
+      let pico = 0n;
       let nonZero = 0;
       for (const code of acc.outletCodes()) {
         paise += acc.rawSum(code, 0);
-        micro += acc.rawSum(code, 1);
+        pico += acc.rawSum(code, 1);
         if (acc.rawSum(code, measureIdx) !== 0n) nonZero++;
       }
       months.push({
         month,
         totalAmountRupees: measureToNumber(paise, 'AMOUNT'),
-        totalQuantity: measureToNumber(micro, 'QUANTITY'),
+        totalQuantity: measureToNumber(pico, 'QUANTITY'),
         outletsNonZero: nonZero,
       });
     }

@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { BadRequestException, ConflictException, ForbiddenException, type ExecutionContext } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, ServiceUnavailableException, type ExecutionContext } from '@nestjs/common';
 import { GUARDS_METADATA } from '@nestjs/common/constants';
 import { Prisma } from '@prisma/client';
 import { currentMonthKey } from '../../targets/targets.helpers';
@@ -23,7 +23,7 @@ const AT = new Date();
 const clientAdmin: JwtPayload = { sub: 'ca', role: 'CLIENT_ADMIN', clientId: 't1', phone: '', name: 'CA' };
 const gifsyAssumed: JwtPayload = { sub: 'ga', role: 'GIFSY_ADMIN', clientId: 't1', phone: '', name: 'GA', assumed: true };
 
-function db(rows: Array<Record<string, unknown>> = []) {
+function db(rows: Array<Record<string, unknown>> = [], downstream: { batches?: Array<{ period: string; n: number }>; exports?: Array<{ month: string; n: number }> } = {}) {
   const log: string[] = [];
   const d: Record<string, any> = {
     log,
@@ -35,7 +35,11 @@ function db(rows: Array<Record<string, unknown>> = []) {
         return { ...create, ...update, lastAppliedAt: null, lastAppliedImportId: null };
       }),
     },
-    auditLog: { create: jest.fn(async () => { log.push('audit'); return {}; }) },
+    auditLog: {
+      create: jest.fn(async () => { log.push('audit'); return {}; }),
+      groupBy: jest.fn(async () => (downstream.exports ?? []).map((e) => ({ entityId: `t1:${e.month}`, _count: { _all: e.n } }))),
+    },
+    creditBatch: { groupBy: jest.fn(async () => (downstream.batches ?? []).map((b) => ({ period: b.period, _count: { _all: b.n } }))) },
     user: { findMany: jest.fn(async () => [{ id: 'ca', name: 'Client Admin' }]) },
     $executeRaw: jest.fn(async (q: Prisma.Sql) => { log.push(`lock:${q.values[0]}`); return 1; }),
   };
@@ -86,6 +90,26 @@ describe('SalesMonthsService (K-4)', () => {
     await expect(s.reopen(gifsyAssumed, PREV)).rejects.toThrow(/already open/);
   });
 
+  it('M5: reopen with credit batches / points exports for the month → 409 listing them unless acknowledged; ack → OPEN + warnings + audited', async () => {
+    const d = db([], { batches: [{ period: OLD, n: 2 }], exports: [{ month: OLD, n: 3 }] });
+    const s = new SalesMonthsService(d as never);
+    await expect(s.reopen(gifsyAssumed, OLD)).rejects.toThrow(/needs confirmation: 2 credit batch\(es\).*downloaded 3 time/);
+    expect(d.salesMonthStatus.upsert).not.toHaveBeenCalled();
+    const r = await s.reopen(gifsyAssumed, OLD, { acknowledgeDownstream: true });
+    expect(r).toEqual(expect.objectContaining({ state: 'OPEN', downstream: { creditBatches: 2, exports: 3 } }));
+    expect(r.warnings).toHaveLength(2);
+    expect(d.auditLog.create.mock.calls[0][0].data.metadata).toEqual(expect.objectContaining({ acknowledgedDownstream: true, downstream: { creditBatches: 2, exports: 3 } }));
+    // the downstream lookup is tenant-scoped
+    expect(d.creditBatch.groupBy.mock.calls[0][0].where).toEqual({ clientId: 't1', period: { in: [OLD] } });
+    expect(d.auditLog.groupBy.mock.calls[0][0].where).toEqual({ entityType: 'SALES_MONTH', action: 'EXPORT', entityId: { in: [`t1:${OLD}`] } });
+  });
+
+  it('M5: no downstream artefacts → reopen needs no ack and returns no warnings', async () => {
+    const r = await new SalesMonthsService(db() as never).reopen(gifsyAssumed, OLD);
+    expect(r.warnings).toEqual([]);
+    expect(r.downstream).toEqual({ creditBatches: 0, exports: 0 });
+  });
+
   it('list: default last 6 months newest first, with resolved states', async () => {
     const d = db([{ month: PREV, state: 'CLOSED', closedAt: AT, closedById: 'ca', lastAppliedAt: AT, lastAppliedImportId: 'imp1' }]);
     const rows = await new SalesMonthsService(d as never).list('t1');
@@ -93,6 +117,7 @@ describe('SalesMonthsService (K-4)', () => {
     expect(rows[0]).toEqual(expect.objectContaining({ state: 'OPEN', canClose: false }));
     expect(rows[1]).toEqual(expect.objectContaining({ state: 'CLOSED', closedBy: 'Client Admin', lastAppliedImportId: 'imp1', canReopen: true }));
     expect(rows[2]).toEqual(expect.objectContaining({ state: 'CLOSED', implicit: true }));
+    expect(rows[0].downstream).toEqual({ creditBatches: 0, exports: 0 });
     await expect(new SalesMonthsService(d as never).list('t1', '2026-13')).rejects.toBeInstanceOf(BadRequestException);
   });
 });
@@ -156,20 +181,43 @@ describe('controllers call the access gate FIRST (flag off → 403, nothing else
 // ─── D-1 guard (K-8) ─────────────────────────────────────────────────────────
 
 describe('SalesMonthClosedGuard (D-1)', () => {
-  function guardWith(features: Record<string, unknown> | null, override: Record<string, unknown> | null = null) {
+  function guardWith(features: Record<string, unknown> | null, override: Record<string, unknown> | null = null, applied = false) {
     const prisma = {
       client: { findUnique: jest.fn(async () => (features === null ? null : { status: 'ACTIVE', features })) },
+      salesImportApply: { findFirst: jest.fn(async () => (applied ? { id: 'a1' } : null)) },
       salesMonthStatus: { findUnique: jest.fn(async () => override) },
+      auditLog: { create: jest.fn(async (_a: { data: Record<string, unknown> }) => ({})) },
     };
     return { guard: new SalesMonthClosedGuard(prisma as never), prisma };
   }
-  const ctx = (period: unknown, where: 'body' | 'query' = 'query', user: JwtPayload = clientAdmin) =>
-    ({ switchToHttp: () => ({ getRequest: () => ({ user, body: where === 'body' ? { period } : {}, query: where === 'query' ? { period } : {} }) }) }) as unknown as ExecutionContext;
+  const handler = (name: string) => ({ [name]: function () {} })[name];
+  const ctx = (period: unknown, where: 'body' | 'query' = 'query', user: JwtPayload = clientAdmin, route = 'export') =>
+    ({
+      getHandler: () => handler(route),
+      switchToHttp: () => ({ getRequest: () => ({ user, body: where === 'body' ? { period } : {}, query: where === 'query' ? { period } : {} }) }),
+    }) as unknown as ExecutionContext;
 
-  it('flag OFF (Deoleo) → allow, and the month table is never read', async () => {
+  it('flag OFF and no importer data for the month (Deoleo) → allow; month table never read, nothing recorded', async () => {
     const { guard, prisma } = guardWith({ walletModule: true });
     await expect(guard.canActivate(ctx(CUR))).resolves.toBe(true);
     expect(prisma.salesMonthStatus.findUnique).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    expect(prisma.salesImportApply.findFirst).toHaveBeenCalledWith({ where: { clientId: 't1', month: CUR }, select: { id: true } });
+  });
+
+  it('M5: flag OFF but the month holds importer-written data → still guarded (OPEN → 409)', async () => {
+    await expect(guardWith({}, null, true).guard.canActivate(ctx(PREV))).rejects.toThrow(/still OPEN/);
+    await expect(guardWith({}, { state: 'CLOSED', closedAt: AT }, true).guard.canActivate(ctx(PREV))).resolves.toBe(true);
+  });
+
+  it('M5: an allowed export / report is recorded as an EXPORT on the month (reopen warns); commit is not (it makes a CreditBatch)', async () => {
+    const { guard, prisma } = guardWith({ salesImport: true });
+    await guard.canActivate(ctx(OLD, 'query', clientAdmin, 'previewReport'));
+    expect(prisma.auditLog.create.mock.calls[0][0].data).toEqual(expect.objectContaining({
+      action: 'EXPORT', entityType: 'SALES_MONTH', entityId: `t1:${OLD}`, actorId: 'ca', metadata: expect.objectContaining({ route: 'previewReport' }),
+    }));
+    await guard.canActivate(ctx(OLD, 'body', clientAdmin, 'commit'));
+    expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
   });
 
   it('flag ON + OPEN month (current / previous) → 409 with the month name', async () => {
@@ -183,9 +231,13 @@ describe('SalesMonthClosedGuard (D-1)', () => {
     await expect(guardWith({ salesImport: true }).guard.canActivate(ctx(OLD))).resolves.toBe(true);
   });
 
-  it('flag read failure fails CLOSED to "flag off" → allow (never blocks Deoleo on a DB hiccup)', async () => {
-    const prisma = { client: { findUnique: jest.fn(async () => { throw new Error('db'); }) }, salesMonthStatus: { findUnique: jest.fn() } };
-    await expect(new SalesMonthClosedGuard(prisma as never).canActivate(ctx(CUR))).resolves.toBe(true);
+  it('M5: a DB error while checking fails CLOSED (503) — never an unchecked export', async () => {
+    const prisma = {
+      client: { findUnique: jest.fn(async () => { throw new Error('db'); }) },
+      salesImportApply: { findFirst: jest.fn(async () => null) },
+      salesMonthStatus: { findUnique: jest.fn() },
+    };
+    await expect(new SalesMonthClosedGuard(prisma as never).canActivate(ctx(CUR))).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 
   it('malformed period → allow (the route pipe rejects it)', async () => {

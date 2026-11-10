@@ -2,15 +2,19 @@
  * SalesAggregator (plan §7.1 step 8 / task I-5). Pure, in-memory, BigInt.
  *
  * One pass over the data rows of the file. Per valid line (outlet code, date, amount and/or quantity):
- *  - roster-matched outlet → aggregate[month][outletCode][dimKey] += {paise, micro, lines};
- *  - unmatched customer    → unmatched[month][code] += …  (counted, never an error);
+ *  - EVERY customer code   → aggregate[month][normalizedCode][dimKey] += {paise, pico, lines}. The roster is applied
+ *                            at PREVIEW / APPLY time (M6), so an outlet added after processing is not lost;
+ *  - not on the roster NOW → also unmatched[month][code] (with the name) for unmatched.csv + the frozen summary;
  *  - every valid line      → month summary counters, dimension values, dimension combos.
  * Invalid lines are skipped with a reason (≤ SALES_IMPORT_MAX_ERROR_SAMPLES samples kept, all counted).
  * Fully blank rows are ignored silently (trailing empty rows in an export).
+ * Memory is bounded (S4): more than SALES_IMPORT_MAX_DISTINCT_CODES customer codes, MAX_AGGREGATE_KEYS aggregate keys
+ * or MAX_UNMATCHED_KEYS unmatched keys → AggregatorLimitError (the processor shows its message).
  */
 import {
   SALES_IMPORT_MAX_DIMENSION_COMBOS,
   SALES_IMPORT_MAX_DIMENSION_VALUES,
+  SALES_IMPORT_MAX_DISTINCT_CODES,
   SALES_IMPORT_MAX_ERROR_SAMPLES,
   type MonthSummary,
   type SalesColumnMapping,
@@ -20,25 +24,28 @@ import {
 } from '../sales-import.contract';
 import type { ColumnIndex } from './header';
 import {
-  microToCases,
+  QTY_SCALE,
   normalizeDim,
   normalizeHeader,
   normalizeOutletCode,
   paiseToRupees,
   parseInvoiceDateDetailed,
+  picoToCases,
   stableDimKey,
-  toMicro,
   toPaise,
+  toPico,
+  type DecimalSeparator,
 } from './normalize';
 
 export interface AggValue {
   amountPaise: bigint;
-  qtyMicro: bigint;
+  qtyPico: bigint;
   lines: number;
 }
 
 export interface AggRow extends AggValue {
   month: string;
+  /** normalizeOutletCode(file cell) — NOT necessarily a roster code (M6). */
   outletCode: string;
   dims: Record<string, string>;
   dimKey: string;
@@ -56,10 +63,10 @@ interface MonthAcc {
   lines: number;
   matchedOutlets: Set<string>;
   matchedPaise: bigint;
-  matchedMicro: bigint;
+  matchedPico: bigint;
   unmatchedCustomers: Set<string>;
   unmatchedPaise: bigint;
-  unmatchedMicro: bigint;
+  unmatchedPico: bigint;
 }
 
 interface ValueAcc {
@@ -71,7 +78,7 @@ interface ComboAcc {
   dims: Record<string, string>;
   lines: number;
   paise: bigint;
-  micro: bigint;
+  pico: bigint;
 }
 
 /**
@@ -81,6 +88,14 @@ interface ComboAcc {
  */
 export const TRACKED_VALUES_PER_DIM = 20_000;
 export const TRACKED_COMBOS = 50_000;
+/** Hard memory bounds (S4): exceeding one fails the import with a readable message. */
+export const MAX_AGGREGATE_KEYS = 2_000_000;
+export const MAX_UNMATCHED_KEYS = 2_000_000;
+/** |Σ quantity| of one aggregate row must fit the BIGINT pico-cases column (±9.2e18 / 1e12). */
+export const MAX_AGGREGATE_CASES = 9_000_000n;
+
+/** The file exceeds a memory bound of the worker (message shown to the admin verbatim). */
+export class AggregatorLimitError extends Error {}
 
 export interface AggregatorResult {
   rowsRead: number;
@@ -98,13 +113,15 @@ export interface AggregatorResult {
 }
 
 const rupees = paiseToRupees;
-const cases = microToCases;
+const cases = picoToCases;
+const MAX_PICO = MAX_AGGREGATE_CASES * QTY_SCALE;
 const absBig = (v: bigint) => (v < 0n ? -v : v);
 const byAbsDesc = (a: bigint, b: bigint) => {
   const x = absBig(a);
   const y = absBig(b);
   return x === y ? 0 : x > y ? -1 : 1;
 };
+const fmt = (n: number | bigint) => n.toLocaleString('en-IN');
 
 export class SalesAggregator {
   private readonly aggs = new Map<string, Map<string, Map<string, AggValue>>>(); // month → code → dimKey
@@ -113,21 +130,33 @@ export class SalesAggregator {
   private readonly months = new Map<string, MonthAcc>();
   private readonly values = new Map<string, Map<string, ValueAcc>>(); // dim key → value
   private readonly combos = new Map<string, ComboAcc>(); // dimKey
+  private readonly codes = new Set<string>();
   private readonly errors: SalesImportErrorSample[] = [];
   private truncated = false;
   private aggregateCount = 0;
+  private unmatchedCount = 0;
   private rowsRead = 0;
   private rowsSkipped = 0;
   private readonly dimKeys: string[];
   private readonly headers: Record<string, string>;
+  private readonly maxCodes: number;
+  private readonly maxAggregates: number;
+  private readonly maxUnmatched: number;
 
   constructor(
     private readonly mapping: SalesColumnMapping,
     private readonly idx: ColumnIndex,
-    /** normalizeOutletCode(roster code) → the roster's own outletCode (aggregates are keyed by the latter). */
+    /** normalizeOutletCode(roster code) → the roster's own outletCode (processing-time matched/unmatched only). */
     private readonly roster: ReadonlyMap<string, string>,
     private readonly todayIso?: string,
+    /** Decimal separator of TEXT amount/quantity cells (L1). */
+    private readonly decimal: DecimalSeparator = '.',
+    /** Overridable memory bounds (tests use small ones). */
+    limits: Partial<{ maxCodes: number; maxAggregates: number; maxUnmatched: number }> = {},
   ) {
+    this.maxCodes = limits.maxCodes ?? SALES_IMPORT_MAX_DISTINCT_CODES;
+    this.maxAggregates = limits.maxAggregates ?? MAX_AGGREGATE_KEYS;
+    this.maxUnmatched = limits.maxUnmatched ?? MAX_UNMATCHED_KEYS;
     this.dimKeys = (mapping.dimensions ?? []).map((d) => d.key);
     for (const k of this.dimKeys) this.values.set(k, new Map());
     this.headers = {
@@ -156,30 +185,46 @@ export class SalesAggregator {
     const date = d.date;
     const month = date.slice(0, 7);
 
+    // H4: with BOTH measures mapped, a blank one counts as 0 (e.g. a ₹-only credit note or a free-goods line keeps its
+    // other measure); such a row is skipped only when both are blank. A non-blank, unparsable value is always skipped.
+    const both = idx.amount !== null && idx.quantity !== null;
+    const amountBlank = idx.amount !== null && isBlank(cells[idx.amount]);
+    const qtyBlank = idx.quantity !== null && isBlank(cells[idx.quantity]);
+    if (both && amountBlank && qtyBlank) return this.skip(rowNo, null, 'blank amount and quantity');
     let paise = 0n;
-    if (idx.amount !== null) {
-      const v = toPaise(cells[idx.amount]);
-      if (v === null) return this.skip(rowNo, this.headers.amount, isBlank(cells[idx.amount]) ? 'blank amount' : 'invalid amount');
+    if (idx.amount !== null && !(both && amountBlank)) {
+      const v = toPaise(cells[idx.amount], this.decimal);
+      if (v === null) return this.skip(rowNo, this.headers.amount, amountBlank ? 'blank amount' : 'invalid amount');
       paise = v;
     }
-    let micro = 0n;
-    if (idx.quantity !== null) {
-      const v = toMicro(cells[idx.quantity]);
-      if (v === null) return this.skip(rowNo, this.headers.quantity, isBlank(cells[idx.quantity]) ? 'blank quantity' : 'invalid quantity');
-      micro = v;
+    let pico = 0n;
+    if (idx.quantity !== null && !(both && qtyBlank)) {
+      const v = toPico(cells[idx.quantity], this.decimal);
+      if (v === null) return this.skip(rowNo, this.headers.quantity, qtyBlank ? 'blank quantity' : 'invalid quantity');
+      pico = v;
     }
 
     const dims: Record<string, string> = {};
     for (const k of this.dimKeys) dims[k] = normalizeDim(cells[idx.dims[k]]);
     const dimKey = stableDimKey(dims);
 
+    // Bounds first, so a rejected file never half-updates the counters.
+    if (!this.codes.has(code)) {
+      if (this.codes.size >= this.maxCodes) {
+        throw new AggregatorLimitError(
+          `The file has more than ${fmt(this.maxCodes)} distinct customer codes. Check that the outlet-code column is mapped correctly, or split the file.`,
+        );
+      }
+      this.codes.add(code);
+    }
+
     // Month summary.
     let m = this.months.get(month);
     if (!m) {
       m = {
         firstDate: date, lastDate: date, lines: 0,
-        matchedOutlets: new Set(), matchedPaise: 0n, matchedMicro: 0n,
-        unmatchedCustomers: new Set(), unmatchedPaise: 0n, unmatchedMicro: 0n,
+        matchedOutlets: new Set(), matchedPaise: 0n, matchedPico: 0n,
+        unmatchedCustomers: new Set(), unmatchedPaise: 0n, unmatchedPico: 0n,
       };
       this.months.set(month, m);
     }
@@ -187,40 +232,60 @@ export class SalesAggregator {
     if (date < m.firstDate) m.firstDate = date;
     if (date > m.lastDate) m.lastDate = date;
 
+    // Every customer code is aggregated (M6), keyed by its NORMALIZED code.
+    let byCode = this.aggs.get(month);
+    if (!byCode) this.aggs.set(month, (byCode = new Map()));
+    let byDim = byCode.get(code);
+    if (!byDim) byCode.set(code, (byDim = new Map()));
+    const a = byDim.get(dimKey);
+    if (a) {
+      a.amountPaise += paise;
+      a.qtyPico += pico;
+      a.lines++;
+      if (a.qtyPico > MAX_PICO || a.qtyPico < -MAX_PICO) {
+        throw new AggregatorLimitError(`Row ${rowNo}: one outlet's quantity for a product in a month exceeds ${fmt(MAX_AGGREGATE_CASES)} cases. Check the quantity column.`);
+      }
+    } else {
+      if (this.aggregateCount >= this.maxAggregates) {
+        throw new AggregatorLimitError(
+          `The file has more than ${fmt(this.maxAggregates)} distinct month × customer × product combinations. Check the dimension columns, or split the file.`,
+        );
+      }
+      if (pico > MAX_PICO || pico < -MAX_PICO) {
+        throw new AggregatorLimitError(`Row ${rowNo}: the quantity exceeds ${fmt(MAX_AGGREGATE_CASES)} cases. Check the quantity column.`);
+      }
+      byDim.set(dimKey, { amountPaise: paise, qtyPico: pico, lines: 1 });
+      this.aggregateCount++;
+      if (!this.dimsByKey.has(dimKey)) this.dimsByKey.set(dimKey, dims);
+    }
+
+    // Matched / unmatched against the roster AT PROCESSING TIME (frozen summary + unmatched.csv only).
     const rosterCode = this.roster.get(code);
     if (rosterCode !== undefined) {
       m.matchedOutlets.add(rosterCode);
       m.matchedPaise += paise;
-      m.matchedMicro += micro;
-      let byCode = this.aggs.get(month);
-      if (!byCode) this.aggs.set(month, (byCode = new Map()));
-      let byDim = byCode.get(rosterCode);
-      if (!byDim) byCode.set(rosterCode, (byDim = new Map()));
-      const a = byDim.get(dimKey);
-      if (a) {
-        a.amountPaise += paise;
-        a.qtyMicro += micro;
-        a.lines++;
-      } else {
-        byDim.set(dimKey, { amountPaise: paise, qtyMicro: micro, lines: 1 });
-        this.aggregateCount++;
-        if (!this.dimsByKey.has(dimKey)) this.dimsByKey.set(dimKey, dims);
-      }
+      m.matchedPico += pico;
     } else {
       m.unmatchedCustomers.add(code);
       m.unmatchedPaise += paise;
-      m.unmatchedMicro += micro;
-      let byCode = this.unmatchedMap.get(month);
-      if (!byCode) this.unmatchedMap.set(month, (byCode = new Map()));
-      const u = byCode.get(code);
-      const name = idx.outletName !== null ? String(cells[idx.outletName] ?? '').trim() : '';
+      m.unmatchedPico += pico;
+      let ub = this.unmatchedMap.get(month);
+      if (!ub) this.unmatchedMap.set(month, (ub = new Map()));
+      const u = ub.get(code);
+      const name = idx.outletName !== null ? String(cells[idx.outletName] ?? '').trim().slice(0, 200) : '';
       if (u) {
         u.amountPaise += paise;
-        u.qtyMicro += micro;
+        u.qtyPico += pico;
         u.lines++;
         if (!u.name && name) u.name = name;
       } else {
-        byCode.set(code, { month, code, name, amountPaise: paise, qtyMicro: micro, lines: 1 });
+        if (this.unmatchedCount >= this.maxUnmatched) {
+          throw new AggregatorLimitError(
+            `The file has more than ${fmt(this.maxUnmatched)} unmatched customer × month entries. Check the outlet-code column mapping.`,
+          );
+        }
+        this.unmatchedCount++;
+        ub.set(code, { month, code, name, amountPaise: paise, qtyPico: pico, lines: 1 });
       }
     }
 
@@ -242,9 +307,9 @@ export class SalesAggregator {
       if (c) {
         c.lines++;
         c.paise += paise;
-        c.micro += micro;
+        c.pico += pico;
       } else if (this.combos.size < TRACKED_COMBOS) {
-        this.combos.set(dimKey, { dims, lines: 1, paise, micro });
+        this.combos.set(dimKey, { dims, lines: 1, paise, pico });
       } else {
         this.truncated = true;
       }
@@ -262,9 +327,9 @@ export class SalesAggregator {
         matchedOutlets: m.matchedOutlets.size,
         unmatchedCustomers: m.unmatchedCustomers.size,
         matchedAmountRupees: rupees(m.matchedPaise),
-        matchedQuantity: cases(m.matchedMicro),
+        matchedQuantity: cases(m.matchedPico),
         unmatchedAmountRupees: rupees(m.unmatchedPaise),
-        unmatchedQuantity: cases(m.unmatchedMicro),
+        unmatchedQuantity: cases(m.unmatchedPico),
       }));
 
     const dimensionValues: SalesDimensionValues = {};
@@ -277,7 +342,7 @@ export class SalesAggregator {
     const dimensionCombos: SalesDimensionCombo[] = [...this.combos.entries()]
       .sort(([ka, a], [kb, b]) => byAbsDesc(a.paise, b.paise) || b.lines - a.lines || (ka < kb ? -1 : ka > kb ? 1 : 0))
       .slice(0, SALES_IMPORT_MAX_DIMENSION_COMBOS)
-      .map(([, c]) => ({ dims: c.dims, lines: c.lines, amountRupees: rupees(c.paise), quantity: cases(c.micro) }));
+      .map(([, c]) => ({ dims: c.dims, lines: c.lines, amountRupees: rupees(c.paise), quantity: cases(c.pico) }));
 
     const aggs = this.aggs;
     const dimsByKey = this.dimsByKey;

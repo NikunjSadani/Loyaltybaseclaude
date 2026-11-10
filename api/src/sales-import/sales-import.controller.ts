@@ -8,6 +8,7 @@ import {
   Query,
   StreamableFile,
   UploadedFile,
+  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -17,7 +18,8 @@ import { RequirePermission } from '../common/decorators/require-permission.decor
 import { Roles } from '../common/decorators/roles.decorator';
 import { TenantService } from '../tenant/tenant.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { assertSalesImportAccess } from './sales-import-access';
+import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
+import { assertSalesImportAccess, callerHasPermission, SalesImportPartGuard } from './sales-import-access';
 import {
   SALES_IMPORT_PART_LIMIT_BYTES,
   type CreateSalesImportUploadResult,
@@ -37,6 +39,7 @@ import { CreateSalesImportUploadDto, ListSalesImportsQueryDto } from './ingest/s
  *   POST   admin/sales-import/:id/parts/:n                targets:upload (multipart `file`, ≤ SALES_IMPORT_PART_LIMIT_BYTES)
  *   POST   admin/sales-import/:id/complete                targets:upload
  *   POST   admin/sales-import/:id/reprocess               targets:upload
+ *   POST   admin/sales-import/:id/cancel                  targets:upload (QUEUED / stalled PROCESSING → CANCELLED)
  *   DELETE admin/sales-import/:id                         targets:upload
  *   GET    admin/sales-import                             targets:read
  *   GET    admin/sales-import/:id                         targets:read
@@ -55,6 +58,7 @@ export class SalesImportController {
     readonly tenant: TenantService,
     readonly prisma: PrismaService,
     readonly uploads: SalesImportUploadService,
+    readonly gifsyRoles: GifsyRoleService,
   ) {}
 
   private gate(user: JwtPayload, write: boolean): Promise<void> {
@@ -71,10 +75,13 @@ export class SalesImportController {
   /**
    * The global throttle (60/min per route per IP) would 429 a fast 600 MB upload (150 parts); parts are
    * small, idempotent and size-checked, so this route allows 300/min.
+   * S7: SalesImportPartGuard runs the access gate (flag uncached, operator rule) and the UPLOADING check BEFORE
+   * FileInterceptor buffers the body (guards always run before interceptors).
    */
   @Post(':id/parts/:n')
   @Throttle({ default: { limit: 300, ttl: 60_000 } })
   @RequirePermission('targets:upload')
+  @UseGuards(SalesImportPartGuard)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: SALES_IMPORT_PART_LIMIT_BYTES, files: 1 } }))
   async putPart(
     @CurrentUser() user: JwtPayload,
@@ -82,7 +89,6 @@ export class SalesImportController {
     @Param('n') n: string,
     @UploadedFile() file: Express.Multer.File,
   ): Promise<SalesImportPartResult> {
-    await this.gate(user, true);
     return this.uploads.putPart(user, id, n, file);
   }
 
@@ -98,6 +104,13 @@ export class SalesImportController {
   async reprocess(@CurrentUser() user: JwtPayload, @Param('id') id: string): Promise<SalesImportSummary> {
     await this.gate(user, true);
     return this.uploads.reprocess(user, id);
+  }
+
+  @Post(':id/cancel')
+  @RequirePermission('targets:upload')
+  async cancel(@CurrentUser() user: JwtPayload, @Param('id') id: string): Promise<SalesImportSummary> {
+    await this.gate(user, true);
+    return this.uploads.cancel(user, id);
   }
 
   @Delete(':id')
@@ -144,6 +157,7 @@ export class SalesImportController {
   @RequirePermission('targets:read')
   async get(@CurrentUser() user: JwtPayload, @Param('id') id: string): Promise<SalesImportDetail> {
     await this.gate(user, false);
-    return this.uploads.get(user, id);
+    const includeSamples = await callerHasPermission(user, 'targets:upload', { tenant: this.tenant, gifsyRoles: this.gifsyRoles });
+    return this.uploads.get(user, id, { includeSamples });
   }
 }

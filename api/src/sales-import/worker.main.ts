@@ -9,6 +9,7 @@
 import { NestFactory } from '@nestjs/core';
 import { SalesImportWorkerModule } from './ingest/sales-import-worker.module';
 import { SalesImportProcessorService } from './ingest/sales-import-processor.service';
+import { SalesImportRetentionService } from './ingest/sales-import-retention.service';
 
 // Same BigInt JSON rule as main.ts (paise/micro BigInt must never crash a JSON.stringify).
 (BigInt.prototype as unknown as { toJSON: () => number }).toJSON = function () {
@@ -23,8 +24,10 @@ async function main(): Promise<void> {
     await proc.processClaimed(row);
     processed++;
   }
+  // S5: every drain also runs a bounded retention sweep across tenants (expired files, abandoned uploads).
+  const retention = await app.get(SalesImportRetentionService).sweep({ limit: 50 });
   await app.close();
-  console.log(JSON.stringify({ msg: 'sales-import worker done', processed }));
+  console.log(JSON.stringify({ msg: 'sales-import worker done', processed, retention }));
 }
 
 main().catch((e: unknown) => {

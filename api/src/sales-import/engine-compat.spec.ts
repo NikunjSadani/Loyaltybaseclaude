@@ -48,7 +48,7 @@ const OWNED = DEFS.map((d) => d.kpiCode);
 const line = (amountRupees: number, cases: number): KpiAgg => ({
   dims: { brand: 'X', skuGroup: '500' },
   amountPaise: BigInt(Math.round(amountRupees * 100)),
-  qtyMicro: BigInt(Math.round(cases * 1e6)),
+  qtyPico: BigInt(Math.round(cases * 1e6)) * 1_000_000n,
   lines: 1,
 });
 /** What the apply's SQL does to a row: (existing - owned) || new. */

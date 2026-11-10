@@ -10,23 +10,32 @@ import {
   type SalesMonthWarning,
 } from '../sales-import.contract';
 import { SalesKpiDefService } from '../kpi/sales-kpi-def.service';
-import { loadRosterMeta, resolveReadyImport, rosterHashOfMap, type RosterOutlet } from '../kpi/sales-import-data';
+import {
+  MAPPING_CHANGED_REASON,
+  loadRosterMeta,
+  mappingChangedSince,
+  resolveReadyImport,
+  type RosterOutlet,
+} from '../kpi/sales-import-data';
 import type { KpiDefLite } from '../kpi/sales-kpi.helper';
+import { rosterOutletWhere } from '../ingest/roster';
+import { paiseToRupees, picoToCases } from '../ingest/normalize';
 import { monthLabel, resolveMonthState } from '../months/month-state';
 import { computeMonthRows, sumOwnedValues } from './month-compute';
+import { loadLastApplied } from './last-applied';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
 
 /** Why a month cannot be applied (null = it can). Shared by preview and apply. */
 export function blockedReasonFor(opts: {
   month: string;
   defsCount: number;
-  rosterChanged: boolean;
+  mappingChanged: boolean;
   state: ReturnType<typeof resolveMonthState>;
 }): string | null {
   if (opts.defsCount === 0) return 'No importer-owned KPIs are defined yet. Add them in Sales Import settings.';
   if (opts.state.relation === 'FUTURE') return `${monthLabel(opts.month)} has not started yet.`;
   if (opts.state.state === 'CLOSED') return `${monthLabel(opts.month)} is CLOSED. Only Gifsy can reopen it.`;
-  if (opts.rosterChanged) return 'The outlet list changed after this file was processed. Reprocess the file first.';
+  if (opts.mappingChanged) return MAPPING_CHANGED_REASON;
   return null;
 }
 
@@ -36,7 +45,7 @@ export function monthSummariesOf(imp: Pick<SalesImport, 'monthSummaries'>): Mont
 
 /**
  * Per-month live preview of a READY import (plan §5.2 GET :id/preview, §6.3 warnings; task K-5). OWNER: Lane K.
- * The numbers come from computeMonthRows — the SAME function apply writes with.
+ * The numbers come from computeMonthRows — the SAME function apply writes with — over the roster as it is NOW (M6).
  */
 @Injectable()
 export class SalesPreviewService {
@@ -49,7 +58,10 @@ export class SalesPreviewService {
     const imp = await resolveReadyImport(this.prisma, clientId, importId);
     const { defs, hash } = await this.kpiDefs.enabled(clientId);
     const roster = await loadRosterMeta(this.prisma, clientId);
-    const rosterHashMatches = !!imp.rosterHash && rosterHashOfMap(roster) === imp.rosterHash;
+    const mappingChanged = await mappingChangedSince(this.prisma, clientId, imp);
+    const rosterOutletsAddedSinceProcessing = imp.finishedAt
+      ? await this.prisma.outlet.count({ where: { ...rosterOutletWhere(clientId), createdAt: { gt: imp.finishedAt } } })
+      : 0;
     const summaries = monthSummariesOf(imp);
     const months = summaries.map((s) => s.month);
     const current = currentMonthKey();
@@ -62,23 +74,24 @@ export class SalesPreviewService {
 
     const statuses = await this.prisma.salesMonthStatus.findMany({ where: { clientId, month: { in: months } } });
     const statusOf = new Map(statuses.map((s) => [s.month, s]));
-    const lastImportIds = [...new Set(statuses.map((s) => s.lastAppliedImportId).filter((x): x is string => !!x))];
-    const lastImports = lastImportIds.length
-      ? await this.prisma.salesImport.findMany({ where: { clientId, id: { in: lastImportIds } }, select: { id: true, createdAt: true } })
-      : [];
-    const lastImportOf = new Map(lastImports.map((i) => [i.id, i]));
 
     const out: MonthPreview[] = [];
     for (const summary of summaries) {
       out.push(
-        await this.previewMonth(clientId, imp, summary, defs, roster, rosterHashMatches, current, {
+        await this.previewMonth(clientId, imp, summary, defs, roster, mappingChanged, current, {
           status: statusOf.get(summary.month) ?? null,
-          lastImportOf,
           labelOf,
         }),
       );
     }
-    return { importId: imp.id, definitionsHash: hash, rosterHashMatches, months: out };
+    return {
+      importId: imp.id,
+      definitionsHash: hash,
+      processingVersion: imp.processingVersion,
+      mappingChanged,
+      rosterOutletsAddedSinceProcessing,
+      months: out,
+    };
   }
 
   private async previewMonth(
@@ -87,11 +100,10 @@ export class SalesPreviewService {
     summary: MonthSummary,
     defs: KpiDefLite[],
     roster: Map<string, RosterOutlet>,
-    rosterHashMatches: boolean,
+    mappingChanged: boolean,
     current: string,
     ctx: {
-      status: { state: string; lastAppliedImportId: string | null } | null;
-      lastImportOf: Map<string, { id: string; createdAt: Date }>;
+      status: { state: string } | null;
       labelOf: Map<string, string>;
     },
   ): Promise<MonthPreview> {
@@ -105,42 +117,39 @@ export class SalesPreviewService {
       select: { outletCode: true, kpiValues: true, batch: { select: { status: true, createdAt: true } } },
     });
     const currentTotals = sumOwnedValues(existing, owned);
-
-    const lastApply = await this.prisma.salesImportApply.findFirst({
-      where: { clientId, month },
-      orderBy: { createdAt: 'desc' },
-      select: { importId: true, createdAt: true, appliedById: true, definitionsSnapshot: true },
-    });
-    const lastApplyCodes = Array.isArray(lastApply?.definitionsSnapshot)
-      ? (lastApply!.definitionsSnapshot as Array<{ kpiCode?: string }>).map((d) => String(d?.kpiCode ?? ''))
-      : [];
+    const last = await loadLastApplied(this.prisma, clientId, month);
 
     const warnings: SalesMonthWarning[] = [...partialMonthWarnings(summary, current)];
-    const lastImp = ctx.status?.lastAppliedImportId ? ctx.lastImportOf.get(ctx.status.lastAppliedImportId) : null;
-    if (isOlderThanLastApplied(imp, lastImp)) warnings.push('OLDER_THAN_LAST_APPLIED');
+    if (isOlderThanLastApplied({ id: imp.id, lastDate: summary.lastDate }, last)) warnings.push('OLDER_THAN_LAST_APPLIED');
     if (
       replacesManualValues(
         existing,
         owned,
-        lastApply ? { createdAt: lastApply.createdAt, ownedCodes: lastApplyCodes } : null,
+        last ? { createdAt: last.at, ownedCodes: last.ownedCodes } : null,
         SALES_IMPORT_BATCH_STATUS,
       )
     ) {
       warnings.push('REPLACES_MANUAL_VALUES');
     }
     if (comp.stats.some((s) => s.outletsNegative > 0)) warnings.push('NEGATIVE_VALUES');
-    if (!rosterHashMatches) warnings.push('ROSTER_CHANGED');
 
-    const blockedReason = blockedReasonFor({ month, defsCount: defs.length, rosterChanged: !rosterHashMatches, state });
+    const blockedReason = blockedReasonFor({ month, defsCount: defs.length, mappingChanged, state });
 
     let lastApplied: MonthPreview['lastApplied'] = null;
-    if (lastApply) {
-      const u = await this.prisma.user.findUnique({ where: { id: lastApply.appliedById }, select: { name: true } });
-      lastApplied = { importId: lastApply.importId, at: lastApply.createdAt.toISOString(), byName: u?.name ?? 'Unknown' };
+    if (last) {
+      const u = await this.prisma.user.findUnique({ where: { id: last.appliedById }, select: { name: true } });
+      lastApplied = { importId: last.importId, at: last.at.toISOString(), byName: u?.name ?? 'Unknown', lastInvoiceDate: last.lastInvoiceDate };
     }
 
     return {
       ...summary,
+      // M6: matched / unmatched against the roster as it is NOW (the frozen summary used the processing-time roster).
+      matchedOutlets: comp.split.matchedOutlets,
+      unmatchedCustomers: comp.split.unmatchedCustomers,
+      matchedAmountRupees: paiseToRupees(comp.split.matchedPaise),
+      matchedQuantity: picoToCases(comp.split.matchedPico),
+      unmatchedAmountRupees: paiseToRupees(comp.split.unmatchedPaise),
+      unmatchedQuantity: picoToCases(comp.split.unmatchedPico),
       monthState: state.state,
       canApply: blockedReason === null,
       ...(blockedReason ? { blockedReason } : {}),

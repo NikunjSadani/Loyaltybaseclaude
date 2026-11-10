@@ -85,14 +85,40 @@ function scaleDecimal(text: string, scale: number): bigint | null {
   return sign === '-' ? -result : result;
 }
 
+/**
+ * Decimal separator of TEXT cells (L1). '.' = "1,234.56" (',' = thousands); ',' = "1.234,56" ('.' and spaces =
+ * thousands). Numeric cells (xlsx numbers) never use it.
+ */
+export type DecimalSeparator = '.' | ',';
+
+/** The effective separator for a run: an explicit profile value wins; 'auto' → ',' only for a ';'-delimited CSV. */
+export function resolveDecimalSeparator(setting: 'auto' | '.' | ',' | null | undefined, csvDelimiter: string | null): DecimalSeparator {
+  if (setting === '.' || setting === ',') return setting;
+  return csvDelimiter === ';' ? ',' : '.';
+}
+
+/** "12.500" / "1.234.567" / "(1.234)" / "1.234-": dots that can only be thousands grouping. */
+const THOUSANDS_DOTS_RE = /^[+-]?\(?\d{1,3}(\.\d{3})+\)?-?$/;
+
 /** A cell value → the decimal text to parse, or null for blank / non-numeric types. */
-function numericText(v: unknown): string | null {
+function numericText(v: unknown, decimal: DecimalSeparator = '.'): string | null {
   if (v === null || v === undefined) return null;
   if (typeof v === 'number') return Number.isFinite(v) ? String(v) : null;
   if (typeof v === 'bigint') return v.toString();
   if (typeof v !== 'string') return null;
-  let s = v.replace(/[\s ,₹]/g, '');
+  let s = v.replace(/[\s\u00a0₹]/g, '');
   if (s === '') return null;
+  if (decimal === ',') {
+    // "1.234,56" → "1234.56". A dot-only value is accepted only when it can only be thousands grouping
+    // ("12.500" = 12500); "1234.5" in a decimal-comma file is ambiguous → invalid (skipped with a reason,
+    // never silently read 100× too large).
+    if (!s.includes(',') && s.includes('.') && !THOUSANDS_DOTS_RE.test(s)) return 'invalid';
+    s = s.replace(/\./g, '');
+    if (s.split(',').length > 2) return 'invalid';
+    s = s.replace(',', '.');
+  } else {
+    s = s.replace(/,/g, '');
+  }
   // Accounting negatives: "(40.00)" and the ERP trailing minus "40.00-".
   const paren = /^\((.*)\)$/.exec(s);
   if (paren) s = `-${paren[1]}`;
@@ -100,30 +126,46 @@ function numericText(v: unknown): string | null {
   return s;
 }
 
-function toScaled(v: unknown, scale: number): bigint | null {
-  const t = numericText(v);
+function toScaled(v: unknown, scale: number, decimal: DecimalSeparator): bigint | null {
+  const t = numericText(v, decimal);
   return t === null ? null : scaleDecimal(t, scale);
 }
 
 /** Amount → signed paise (BigInt). null = blank/invalid (row skipped with a reason). */
-export function toPaise(v: unknown): bigint | null {
-  return toScaled(v, 2);
-}
-
-/** Quantity → signed micro-units (×1e6, BigInt; raw fractional cases kept, 0.04 → 40000). null = blank/invalid. */
-export function toMicro(v: unknown): bigint | null {
-  return toScaled(v, 6);
+export function toPaise(v: unknown, decimal: DecimalSeparator = '.'): bigint | null {
+  return toScaled(v, 2, decimal);
 }
 
 /**
- * The ONLY BigInt → wire-number conversions (inverse of toPaise / toMicro), used by the worker's frozen summaries and
- * the KPI evaluator alike, so ₹ and cases are rounded identically everywhere. One float conversion, at the end.
+ * Quantity scale: 1e-12 cases (H3). Per-line rounding ≤ 5e-13, so even a million lines drift < 1e-6 — far below
+ * the final 3-dp rounding. 1/12 case as an Excel float (0.08333333333333333) keeps 12 decimals; 12 of them sum to
+ * 0.999999999996 → 1.000. Fits BIGINT up to ±9.2 million cases per aggregate row (checked by the aggregator).
+ */
+export const QTY_SCALE_DIGITS = 12;
+export const QTY_SCALE = 10n ** BigInt(QTY_SCALE_DIGITS);
+
+/** Quantity → signed pico-cases (×1e12, BigInt). null = blank/invalid. */
+export function toPico(v: unknown, decimal: DecimalSeparator = '.'): bigint | null {
+  return toScaled(v, QTY_SCALE_DIGITS, decimal);
+}
+
+/** BigInt integer division rounding half away from zero. */
+export function divRoundHalfAway(n: bigint, d: bigint): bigint {
+  const neg = n < 0n;
+  const q = ((neg ? -n : n) + d / 2n) / d;
+  return neg ? -q : q;
+}
+
+/**
+ * The ONLY BigInt → wire-number conversions (inverse of toPaise / toPico), used by the worker's frozen summaries and
+ * the KPI evaluator alike, so ₹ and cases are rounded identically everywhere — ONCE, at the end of a sum:
+ * paise are exact at 2 dp; cases are rounded exactly (BigInt, half away from zero) to SALES_KPI_QUANTITY_DECIMALS (3).
  */
 export function paiseToRupees(paise: bigint): number {
   return Number(paise) / 100;
 }
-export function microToCases(micro: bigint): number {
-  return Number(micro) / 1_000_000;
+export function picoToCases(pico: bigint): number {
+  return Number(divRoundHalfAway(pico, QTY_SCALE / 1000n)) / 1000;
 }
 
 // ─── Dates ───────────────────────────────────────────────────────────────────────

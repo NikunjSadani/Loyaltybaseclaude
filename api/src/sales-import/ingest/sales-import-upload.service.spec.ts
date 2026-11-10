@@ -2,54 +2,94 @@ import { BadRequestException, ConflictException, NotFoundException } from '@nest
 import { Readable } from 'node:stream';
 import type { SalesImport } from '@prisma/client';
 import * as XLSX from 'xlsx';
-import { SALES_IMPORT_MAX_FILE_BYTES, SALES_IMPORT_PART_SIZE } from '../sales-import.contract';
+import {
+  SALES_IMPORT_MAX_FILE_BYTES,
+  SALES_IMPORT_MAX_INFLIGHT_UPLOADS,
+  SALES_IMPORT_PART_SIZE,
+  SALES_IMPORT_RETENTION_DAYS,
+  SALES_IMPORT_STALE_HEARTBEAT_MINUTES,
+} from '../sales-import.contract';
 import { partKey } from './parts-file';
 import { sheetjsWorkbook } from './test-fixtures.testspec';
+import { SalesImportRetentionService } from './sales-import-retention.service';
 import { SalesImportUploadService } from './sales-import-upload.service';
 
 const USER = { sub: 'u1', role: 'CLIENT_ADMIN', clientId: 't1', phone: '', name: 'Admin' };
 const OTHER = { ...USER, clientId: 't2' };
 const P = SALES_IMPORT_PART_SIZE;
+const MIN = 60_000;
 
-/** In-memory SalesImport table + bucket, scoped like Prisma would be. */
+/** In-memory SalesImport table + bucket + row locks, scoped like Prisma / Postgres would be. */
 function harness() {
   const rows = new Map<string, SalesImport>();
   const objects = new Map<string, Buffer>();
+  const audits: Array<Record<string, unknown>> = [];
+  let applies: Array<{ importId: string }> = [];
+  /** ids whose row another transaction holds (a NOWAIT lock fails with 55P03). */
+  const held = new Set<string>();
+  const lockModes: string[] = [];
+  const cmp = (val: unknown, v: unknown): boolean => {
+    if (v && typeof v === 'object' && !(v instanceof Date)) {
+      const o = v as Record<string, unknown>;
+      if ('not' in o) return val !== o.not;
+      if ('in' in o) return (o.in as unknown[]).includes(val);
+      if ('lt' in o) return (val as Date) < (o.lt as Date);
+      if ('gte' in o) return (val as Date) >= (o.gte as Date);
+    }
+    return val === v;
+  };
   const matches = (r: SalesImport, where: Record<string, unknown>) =>
-    Object.entries(where).every(([k, v]) => {
-      const val = (r as unknown as Record<string, unknown>)[k];
-      if (v && typeof v === 'object' && 'not' in (v as object)) return val !== (v as { not: unknown }).not;
-      return val === v;
-    });
+    Object.entries(where).every(([k, v]) => cmp((r as unknown as Record<string, unknown>)[k], v));
+  const apply = (r: SalesImport, data: Record<string, unknown>) => {
+    for (const [k, v] of Object.entries(data)) {
+      (r as unknown as Record<string, unknown>)[k] = v && typeof v === 'object' && (v as { constructor?: { name?: string } }).constructor?.name === 'DbNull' ? null : v;
+    }
+  };
   const salesImport = {
     create: jest.fn(async ({ data }: { data: Partial<SalesImport> }) => {
       const r = {
         partsReceived: 0, bytesRead: 0n, rowsRead: 0, rowsSkipped: 0, attempts: 0, error: null, duplicateOfId: null,
         detectedHeaders: null, monthSummaries: null, errorSamples: null, dimensionValues: null, dimensionCombos: null,
+        claimToken: null, heartbeatAt: null, purgedAt: null, queuedAt: null, processingVersion: 0,
         finishedAt: null, createdAt: new Date(), updatedAt: new Date(), ...data,
       } as SalesImport;
       rows.set(r.id, r);
       return r;
     }),
     findFirst: jest.fn(async ({ where }: { where: Record<string, unknown> }) => [...rows.values()].find((r) => matches(r, where)) ?? null),
+    findUnique: jest.fn(async ({ where }: { where: { id: string } }) => rows.get(where.id) ?? null),
     findMany: jest.fn(async ({ where }: { where: Record<string, unknown> }) =>
       [...rows.values()].filter((r) => matches(r, where)).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())),
-    updateMany: jest.fn(async ({ where, data }: { where: Record<string, unknown>; data: Partial<SalesImport> }) => {
+    count: jest.fn(async ({ where }: { where: Record<string, unknown> }) => [...rows.values()].filter((r) => matches(r, where)).length),
+    update: jest.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+      const r = rows.get(where.id)!;
+      apply(r, data);
+      return r;
+    }),
+    updateMany: jest.fn(async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
       let count = 0;
-      for (const r of rows.values()) {
-        if (matches(r, where)) {
-          Object.assign(r, data);
-          count++;
-        }
-      }
+      for (const r of rows.values()) if (matches(r, where)) (apply(r, data), count++);
       return { count };
     }),
   };
   const prisma = {
     salesImport,
     salesImportAggregate: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
-    salesImportApply: { count: jest.fn().mockResolvedValue(0) },
+    salesImportApply: {
+      count: jest.fn(async ({ where }: { where: { importId: string } }) => applies.filter((a) => a.importId === where.importId).length),
+      findMany: jest.fn(async ({ where }: { where: { importId: { in: string[] } } }) => applies.filter((a) => where.importId.in.includes(a.importId))),
+    },
+    auditLog: { create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => (audits.push(data), data)) },
     user: { findMany: jest.fn().mockResolvedValue([{ id: 'u1', name: 'Admin' }]) },
+    $executeRaw: jest.fn().mockResolvedValue(0),
+    $queryRaw: jest.fn(async (q: { strings: string[]; values: unknown[] }) => {
+      const sql = q.strings.join('?');
+      const [id, clientId] = q.values as [string, string];
+      lockModes.push(/FOR (KEY SHARE|SHARE|UPDATE NOWAIT|UPDATE)/.exec(sql)?.[1] ?? '?');
+      if (held.has(id) && sql.includes('NOWAIT')) throw Object.assign(new Error('could not obtain lock on row'), { code: 'P2010', meta: { code: '55P03' } });
+      const r = rows.get(id);
+      return r && r.clientId === clientId ? [{ ...r }] : [];
+    }),
     $transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma)),
   };
   const storage = {
@@ -69,19 +109,22 @@ function harness() {
     }),
   };
   const runner = { kick: jest.fn().mockResolvedValue('inline') };
-  const svc = new SalesImportUploadService(prisma as never, storage as never, runner as never);
+  const retention = new SalesImportRetentionService(prisma as never, storage as never);
+  const svc = new SalesImportUploadService(prisma as never, storage as never, runner as never, retention);
   const part = (b: Buffer | string) => ({ buffer: Buffer.from(b), size: Buffer.from(b).length });
-  return { svc, prisma, storage, runner, rows, objects, part };
+  const setApplies = (a: Array<{ importId: string }>) => (applies = a);
+  return { svc, prisma, storage, runner, rows, objects, part, audits, held, lockModes, setApplies, retention };
 }
 
 describe('SalesImportUploadService — upload', () => {
-  it('createUpload: plans 4 MiB parts under sales-imports/<client>/<id>/ and stores the basename', async () => {
+  it('createUpload: plans 4 MiB parts under sales-imports/<client>/<id>/, stores the basename, audits', async () => {
     const h = harness();
     const r = await h.svc.createUpload(USER, { filename: 'C:\\fakepath\\Sales Nov.XLSX', sizeBytes: 2 * P + 1 });
     expect(r).toEqual({ importId: expect.any(String), partSize: P, partCount: 3 });
     const row = h.rows.get(r.importId)!;
     expect(row).toMatchObject({ clientId: 't1', uploadedById: 'u1', originalFilename: 'Sales Nov.XLSX', fileKind: 'XLSX', status: 'UPLOADING', partCount: 3 });
     expect(row.gcsPrefix).toBe(`sales-imports/t1/${r.importId}/`);
+    expect(h.audits[0]).toMatchObject({ action: 'CREATE', entityType: 'SALES_IMPORT', entityId: r.importId, newValues: expect.objectContaining({ action: 'create-upload' }) });
   });
 
   it.each([
@@ -93,18 +136,32 @@ describe('SalesImportUploadService — upload', () => {
     await expect(harness().svc.createUpload(USER, body)).rejects.toThrow(msg);
   });
 
+  it('S5: at most SALES_IMPORT_MAX_INFLIGHT_UPLOADS uploads in flight per tenant; abandoned (> 24 h) ones are cancelled + purged first', async () => {
+    const h = harness();
+    const ids: string[] = [];
+    for (let i = 0; i < SALES_IMPORT_MAX_INFLIGHT_UPLOADS; i++) ids.push((await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 3 })).importId);
+    await expect(h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 3 })).rejects.toBeInstanceOf(ConflictException);
+    await expect(h.svc.createUpload(OTHER, { filename: 'a.csv', sizeBytes: 3 })).resolves.toBeDefined(); // per tenant
+    h.rows.get(ids[0])!.createdAt = new Date(Date.now() - 25 * 3_600_000);
+    h.objects.set(partKey(`sales-imports/t1/${ids[0]}/`, 0), Buffer.from('abc'));
+    await expect(h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 3 })).resolves.toBeDefined();
+    expect(h.rows.get(ids[0])).toMatchObject({ status: 'CANCELLED', purgedAt: expect.any(Date) });
+    expect(h.objects.size).toBe(0);
+  });
+
   async function started(h: ReturnType<typeof harness>, filename: string, content: Buffer) {
     const { importId, partCount } = await h.svc.createUpload(USER, { filename, sizeBytes: content.length });
     return { id: importId, partCount };
   }
 
-  it('putPart: idempotent per n (a retried part overwrites, the count does not double)', async () => {
+  it('putPart: idempotent per n (a retried part overwrites, the count does not double); row held FOR KEY SHARE', async () => {
     const h = harness();
     const { id } = await started(h, 'a.csv', Buffer.from('a,b\n1,2\n'));
     await expect(h.svc.putPart(USER, id, '0', h.part('a,b\n1,2\n'))).resolves.toEqual({ partsReceived: 1 });
     await expect(h.svc.putPart(USER, id, '0', h.part('a,b\n1,2\n'))).resolves.toEqual({ partsReceived: 1 });
     expect(h.storage.uploadFile).toHaveBeenCalledTimes(2);
     expect(h.objects.has(partKey(`sales-imports/t1/${id}/`, 0))).toBe(true);
+    expect(h.lockModes).toEqual(['KEY SHARE', 'KEY SHARE']);
   });
 
   it('putPart: cross-tenant id → 404, bad n → 400, wrong size → 400, missing file → 400', async () => {
@@ -119,25 +176,28 @@ describe('SalesImportUploadService — upload', () => {
     expect(h.storage.uploadFile).not.toHaveBeenCalled();
   });
 
-  it('putPart: 409 unless UPLOADING; a part racing a cancel is removed again', async () => {
+  it('S8: a part arriving after complete (QUEUED) → 409 and the stored parts are NOT touched', async () => {
     const h = harness();
-    const { id } = await started(h, 'a.csv', Buffer.from('abc'));
-    h.rows.get(id)!.status = 'QUEUED';
-    await expect(h.svc.putPart(USER, id, '0', h.part('abc'))).rejects.toBeInstanceOf(ConflictException);
-    h.rows.get(id)!.status = 'UPLOADING';
-    h.prisma.salesImport.updateMany.mockImplementationOnce(async () => ({ count: 0 })); // cancelled mid-flight
-    await expect(h.svc.putPart(USER, id, '0', h.part('abc'))).rejects.toBeInstanceOf(ConflictException);
-    expect(h.storage.deleteFile).toHaveBeenCalledWith(partKey(`sales-imports/t1/${id}/`, 0));
+    const content = Buffer.from('code,amt\n1,2\n');
+    const { id } = await started(h, 'a.csv', content);
+    await h.svc.putPart(USER, id, '0', h.part(content));
+    await h.svc.complete(USER, id);
+    await expect(h.svc.putPart(USER, id, '0', h.part(content))).rejects.toBeInstanceOf(ConflictException);
+    expect(h.storage.deleteFile).not.toHaveBeenCalled();
+    expect(h.objects.get(partKey(`sales-imports/t1/${id}/`, 0))).toEqual(content);
   });
 
-  it('complete: missing parts → 400 naming them; then QUEUED + kick', async () => {
+  it('complete: missing parts → 400 naming them; then QUEUED (+ queuedAt) under FOR UPDATE with a lock timeout, audit, kick', async () => {
     const h = harness();
     const content = Buffer.from('code,amt\n1,2\n');
     const { id } = await started(h, 'a.csv', content);
     await expect(h.svc.complete(USER, id)).rejects.toThrow('missing part(s) 0');
     await h.svc.putPart(USER, id, '0', h.part(content));
     const s = await h.svc.complete(USER, id);
-    expect(s).toMatchObject({ id, status: 'QUEUED', partsReceived: 1, uploadedBy: 'Admin', progressPct: null });
+    expect(s).toMatchObject({ id, status: 'QUEUED', partsReceived: 1, uploadedBy: 'Admin', progressPct: null, queuedAt: expect.any(String), canCancel: true });
+    expect(h.lockModes).toContain('UPDATE');
+    expect(h.prisma.$executeRaw.mock.calls[0][0].values).toEqual(['30s']);
+    expect(h.audits.map((a) => (a.newValues as { action: string }).action)).toEqual(['create-upload', 'complete']);
     expect(h.runner.kick).toHaveBeenCalledTimes(1);
     await expect(h.svc.complete(USER, id)).rejects.toBeInstanceOf(ConflictException);
   });
@@ -161,15 +221,16 @@ describe('SalesImportUploadService — upload', () => {
     await h.svc.putPart(USER, c1.id, '0', h.part(zip));
     await expect(h.svc.complete(USER, c1.id)).rejects.toThrow('Excel workbook, not a CSV');
 
+    const h2 = harness(); // a fresh tenant budget (in-flight cap)
     const utf16 = Buffer.from('\uFEFFcode,amt\n', 'utf16le');
-    const c2 = await started(h, 'b.csv', utf16);
-    await h.svc.putPart(USER, c2.id, '0', h.part(utf16));
-    await expect(h.svc.complete(USER, c2.id)).rejects.toThrow('UTF-8');
+    const c2 = await started(h2, 'b.csv', utf16);
+    await h2.svc.putPart(USER, c2.id, '0', h2.part(utf16));
+    await expect(h2.svc.complete(USER, c2.id)).rejects.toThrow('UTF-8');
 
     const latin1 = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x2c, 0x31, 0x0a]); // "café,1" in Latin-1
-    const c3 = await started(h, 'c.csv', latin1);
-    await h.svc.putPart(USER, c3.id, '0', h.part(latin1));
-    await expect(h.svc.complete(USER, c3.id)).rejects.toThrow('UTF-8');
+    const c3 = await started(h2, 'c.csv', latin1);
+    await h2.svc.putPart(USER, c3.id, '0', h2.part(latin1));
+    await expect(h2.svc.complete(USER, c3.id)).rejects.toThrow('UTF-8');
   });
 
   it('complete: a multi-byte character cut at the 4 KiB sniff boundary is still valid UTF-8', async () => {
@@ -182,29 +243,68 @@ describe('SalesImportUploadService — upload', () => {
 });
 
 describe('SalesImportUploadService — lifecycle', () => {
-  async function inState(h: ReturnType<typeof harness>, status: string) {
+  async function inState(h: ReturnType<typeof harness>, status: string, over: Partial<SalesImport> = {}) {
     const { importId } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 3 });
-    Object.assign(h.rows.get(importId)!, { status, error: 'old', attempts: 2, rowsRead: 9 });
+    Object.assign(h.rows.get(importId)!, { status, error: 'old', attempts: 2, rowsRead: 9, claimToken: 'old-token', heartbeatAt: new Date(), ...over });
     return importId;
   }
+  const stale = () => new Date(Date.now() - (SALES_IMPORT_STALE_HEARTBEAT_MINUTES + 1) * MIN);
 
-  it.each(['READY', 'NEEDS_MAPPING', 'FAILED'])('reprocess from %s → QUEUED (reset) in one tx with aggregates deleted, then kick', async (st) => {
+  it.each(['READY', 'NEEDS_MAPPING', 'FAILED'])('reprocess from %s → QUEUED (reset, claim token cleared) under FOR UPDATE NOWAIT, audited, kick', async (st) => {
     const h = harness();
     const id = await inState(h, st);
     const s = await h.svc.reprocess(USER, id);
-    expect(s).toMatchObject({ status: 'QUEUED', error: null, rowsRead: 0 });
-    expect(h.rows.get(id)!.attempts).toBe(0);
-    expect(h.prisma.$transaction).toHaveBeenCalledTimes(1);
-    expect(h.prisma.salesImportAggregate.deleteMany).toHaveBeenCalledWith({ where: { importId: id } });
+    expect(s).toMatchObject({ status: 'QUEUED', error: null, rowsRead: 0, queuedAt: expect.any(String) });
+    expect(h.rows.get(id)).toMatchObject({ attempts: 0, claimToken: null });
+    expect(h.lockModes).toContain('UPDATE NOWAIT');
+    expect(h.audits.at(-1)).toMatchObject({ action: 'UPDATE', newValues: expect.objectContaining({ action: 'reprocess', fromStatus: st }) });
     expect(h.runner.kick).toHaveBeenCalled();
   });
 
-  it.each(['UPLOADING', 'QUEUED', 'PROCESSING', 'CANCELLED'])('reprocess from %s → 409', async (st) => {
+  it.each(['UPLOADING', 'QUEUED', 'PROCESSING', 'CANCELLED'])('reprocess from %s (live) → 409', async (st) => {
     const h = harness();
     await expect(h.svc.reprocess(USER, await inState(h, st))).rejects.toBeInstanceOf(ConflictException);
   });
 
-  it.each(['UPLOADING', 'QUEUED', 'READY', 'NEEDS_MAPPING', 'FAILED'])('DELETE from %s → CANCELLED, files + aggregates removed', async (st) => {
+  it('M3: a STALLED PROCESSING import (heartbeat > 10 min) can be reprocessed; the old worker token is cleared', async () => {
+    const h = harness();
+    const id = await inState(h, 'PROCESSING', { heartbeatAt: stale() });
+    expect((await h.svc.get(USER, id)).stalled).toBe(true);
+    await expect(h.svc.reprocess(USER, id)).resolves.toMatchObject({ status: 'QUEUED', stalled: false });
+    expect(h.rows.get(id)!.claimToken).toBeNull();
+  });
+
+  it('S1/S2: reprocess is refused once a month was applied, while an apply holds the row (busy), and once purged', async () => {
+    const h = harness();
+    const applied = await inState(h, 'READY');
+    h.setApplies([{ importId: applied }]);
+    await expect(h.svc.reprocess(USER, applied)).rejects.toThrow(/already applied/);
+    const busy = await inState(h, 'READY');
+    h.held.add(busy); // an apply transaction holds FOR SHARE
+    await expect(h.svc.reprocess(USER, busy)).rejects.toThrow(/busy/);
+    const purged = await inState(h, 'READY', { purgedAt: new Date() } as never);
+    await expect(h.svc.reprocess(USER, purged)).rejects.toThrow(/retention/);
+    expect(h.runner.kick).not.toHaveBeenCalled();
+  });
+
+  it('M3: cancel QUEUED or stalled PROCESSING → CANCELLED + purged + audited; live PROCESSING / READY → 409', async () => {
+    const h = harness();
+    const q = await inState(h, 'QUEUED');
+    h.objects.set(partKey(`sales-imports/t1/${q}/`, 0), Buffer.from('abc'));
+    await expect(h.svc.cancel(USER, q)).resolves.toMatchObject({ status: 'CANCELLED', purgedAt: expect.any(String) });
+    expect(h.rows.get(q)!.claimToken).toBeNull();
+    expect(h.objects.size).toBe(0);
+    expect(h.audits.at(-1)).toMatchObject({ action: 'UPDATE', newValues: expect.objectContaining({ action: 'cancel' }) });
+    const st = await inState(h, 'PROCESSING', { heartbeatAt: stale() });
+    await expect(h.svc.cancel(USER, st)).resolves.toMatchObject({ status: 'CANCELLED' });
+    const live = await inState(h, 'PROCESSING');
+    await expect(h.svc.cancel(USER, live)).rejects.toThrow(/still making progress/);
+    const ready = await inState(h, 'READY');
+    await expect(h.svc.cancel(USER, ready)).rejects.toBeInstanceOf(ConflictException);
+    await expect(h.svc.cancel(OTHER, q)).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it.each(['UPLOADING', 'QUEUED', 'READY', 'NEEDS_MAPPING', 'FAILED'])('DELETE from %s → CANCELLED, files + aggregates removed, audited', async (st) => {
     const h = harness();
     const id = await inState(h, st);
     h.objects.set(partKey(`sales-imports/t1/${id}/`, 0), Buffer.from('abc'));
@@ -213,6 +313,7 @@ describe('SalesImportUploadService — lifecycle', () => {
     expect(h.storage.deletePrefix).toHaveBeenCalledWith(`sales-imports/t1/${id}/`);
     expect(h.objects.size).toBe(0);
     expect(h.prisma.salesImportAggregate.deleteMany).toHaveBeenCalledWith({ where: { importId: id } });
+    expect(h.audits.at(-1)).toMatchObject({ action: 'DELETE', entityId: id });
   });
 
   it('DELETE is idempotent (a second call succeeds and re-runs the cleanup)', async () => {
@@ -223,45 +324,84 @@ describe('SalesImportUploadService — lifecycle', () => {
     expect(h.storage.deletePrefix).toHaveBeenCalledTimes(2);
   });
 
-  it('DELETE refuses PROCESSING and applied imports (409), and other tenants (404)', async () => {
+  it('DELETE refuses live PROCESSING, applied imports and a busy row (409), and other tenants (404)', async () => {
     const h = harness();
     const busy = await inState(h, 'PROCESSING');
     await expect(h.svc.remove(USER, busy)).rejects.toThrow('being processed');
     const applied = await inState(h, 'READY');
-    h.prisma.salesImportApply.count.mockResolvedValueOnce(2);
+    h.setApplies([{ importId: applied }]);
     await expect(h.svc.remove(USER, applied)).rejects.toThrow('applied');
     await expect(h.svc.remove(OTHER, applied)).rejects.toBeInstanceOf(NotFoundException);
+    const locked = await inState(h, 'READY');
+    h.held.add(locked);
+    await expect(h.svc.remove(USER, locked)).rejects.toThrow(/busy/);
     expect(h.storage.deletePrefix).not.toHaveBeenCalled();
   });
 });
 
 describe('SalesImportUploadService — read', () => {
-  it('get: summary + detail, progressPct only while PROCESSING, detectedHeaders only for NEEDS_MAPPING', async () => {
+  it('get: summary + detail, progressPct only while PROCESSING; detectedHeaders samples only with includeSamples (S3)', async () => {
     const h = harness();
     const { importId: id } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 1000 });
-    Object.assign(h.rows.get(id)!, { status: 'PROCESSING', bytesRead: 333n, detectedHeaders: [['A']] });
-    expect(await h.svc.get(USER, id)).toMatchObject({ progressPct: 33.3, detectedHeaders: null, monthSummaries: null, errorSamples: null });
+    Object.assign(h.rows.get(id)!, { status: 'PROCESSING', bytesRead: 333n, heartbeatAt: new Date(), detectedHeaders: [['H1', 'H2'], ['v1', 'v2']] });
+    expect(await h.svc.get(USER, id)).toMatchObject({ progressPct: 33.3, detectedHeaders: [['H1', 'H2']], monthSummaries: null, errorSamples: null, stalled: false, canDelete: false });
+    expect((await h.svc.get(USER, id, { includeSamples: true })).detectedHeaders).toEqual([['H1', 'H2'], ['v1', 'v2']]);
     Object.assign(h.rows.get(id)!, { status: 'NEEDS_MAPPING' });
-    expect(await h.svc.get(USER, id)).toMatchObject({ progressPct: null, detectedHeaders: [['A']] });
+    expect(await h.svc.get(USER, id)).toMatchObject({ progressPct: null, canReprocess: true, canDelete: true, applied: false });
     await expect(h.svc.get(OTHER, id)).rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it('list: tenant-scoped, hides CANCELLED, pages with a cursor, rejects a foreign cursor', async () => {
+  it('list: tenant-scoped, hides CANCELLED, pages with a cursor, explicit select (no JSON blobs), applied flags', async () => {
     const h = harness();
     const ids: string[] = [];
     for (let i = 0; i < 3; i++) {
       const { importId } = await h.svc.createUpload(USER, { filename: `f${i}.csv`, sizeBytes: 1 });
-      h.rows.get(importId)!.createdAt = new Date(Date.UTC(2026, 9, 1 + i));
+      Object.assign(h.rows.get(importId)!, { createdAt: new Date(Date.UTC(2026, 9, 1 + i)), status: 'READY', finishedAt: new Date() });
       ids.push(importId);
     }
     h.rows.get(ids[1])!.status = 'CANCELLED';
+    h.setApplies([{ importId: ids[2] }]);
     const r = await h.svc.list(USER, { limit: 50 });
     expect(r.items.map((i) => i.id)).toEqual([ids[2], ids[0]]);
+    expect(r.items.map((i) => [i.applied, i.canReprocess, i.canDelete, i.detectedHeaders])).toEqual([[true, false, false, null], [false, true, true, null]]);
     expect(r.nextCursor).toBeNull();
-    expect(h.prisma.salesImport.findMany.mock.calls[0][0].where).toEqual({ clientId: 't1', status: { not: 'CANCELLED' } });
-    expect(h.prisma.salesImport.findMany.mock.calls[0][0].take).toBe(51);
+    const call = h.prisma.salesImport.findMany.mock.calls.find((c) => (c[0] as { take?: number }).take === 51)![0] as Record<string, any>;
+    expect(call.where).toEqual({ clientId: 't1', status: { not: 'CANCELLED' } });
+    for (const blob of ['detectedHeaders', 'monthSummaries', 'errorSamples', 'dimensionValues', 'dimensionCombos', 'mappingSnapshot']) {
+      expect(call.select[blob]).toBeUndefined();
+    }
     await expect(h.svc.list(OTHER, { cursor: ids[0] })).rejects.toThrow('Invalid cursor');
     expect((await h.svc.list(OTHER, {})).items).toEqual([]);
+  });
+
+  it('S5: list lazily purges finished imports past retention (parts, aggregates, sample rows) and marks them', async () => {
+    const h = harness();
+    const { importId: id } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 1 });
+    Object.assign(h.rows.get(id)!, {
+      status: 'READY', finishedAt: new Date(Date.now() - (SALES_IMPORT_RETENTION_DAYS + 1) * 86_400_000), detectedHeaders: [['H'], ['secret']],
+    });
+    h.objects.set(partKey(`sales-imports/t1/${id}/`, 0), Buffer.from('abc'));
+    h.objects.set(`sales-imports/t1/${id}/unmatched.csv`, Buffer.from('x'));
+    const r = await h.svc.list(USER, {});
+    expect(r.items[0]).toMatchObject({ id, status: 'READY', purgedAt: expect.any(String), canReprocess: false });
+    expect(h.objects.size).toBe(0);
+    expect(h.rows.get(id)!.detectedHeaders).toEqual([['H']]);
+    expect(h.prisma.salesImportAggregate.deleteMany).toHaveBeenCalledWith({ where: { importId: id } });
+    // a fresh READY import is untouched
+    const { importId: fresh } = await h.svc.createUpload(USER, { filename: 'b.csv', sizeBytes: 1 });
+    Object.assign(h.rows.get(fresh)!, { status: 'READY', finishedAt: new Date() });
+    await h.svc.list(USER, {});
+    expect(h.rows.get(fresh)!.purgedAt).toBeNull();
+  });
+
+  it('S5: retention skips a row another transaction holds (busy) and retries on the next sweep', async () => {
+    const h = harness();
+    const { importId: id } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 1 });
+    Object.assign(h.rows.get(id)!, { status: 'FAILED', finishedAt: new Date(Date.now() - 40 * 86_400_000) });
+    h.held.add(id);
+    await expect(h.retention.sweep({ clientId: 't1' })).resolves.toEqual({ abandoned: 0, purged: 0 });
+    h.held.delete(id);
+    await expect(h.retention.sweep({ clientId: 't1' })).resolves.toEqual({ abandoned: 0, purged: 1 });
   });
 
   it('combos: latest READY, 404 when the tenant has none; a specific id returns its frozen picker data', async () => {
@@ -274,7 +414,7 @@ describe('SalesImportUploadService — read', () => {
     await expect(h.svc.combos(OTHER, id)).rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it('unmatched.csv: READY only and must exist; streams the stored object', async () => {
+  it('unmatched.csv: READY + not purged only and must exist; streams the stored object; download audited (S6)', async () => {
     const h = harness();
     const { importId: id } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 1 });
     await expect(h.svc.unmatchedCsv(USER, id)).rejects.toBeInstanceOf(NotFoundException);
@@ -286,6 +426,9 @@ describe('SalesImportUploadService — read', () => {
     const chunks: Buffer[] = [];
     for await (const c of r.stream) chunks.push(c as Buffer);
     expect(Buffer.concat(chunks).toString()).toBe('h\r\n');
+    expect(h.audits.at(-1)).toMatchObject({ action: 'EXPORT', entityType: 'SALES_IMPORT', entityId: id });
+    (h.rows.get(id) as unknown as { purgedAt: Date }).purgedAt = new Date();
+    await expect(h.svc.unmatchedCsv(USER, id)).rejects.toThrow(/retention/);
   });
 
   it('errors.xlsx: one row per sample (or a "none" row)', async () => {

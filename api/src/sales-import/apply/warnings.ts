@@ -14,12 +14,28 @@ export function partialMonthWarnings(summary: Pick<MonthSummary, 'month' | 'firs
   return out;
 }
 
-/** OLDER_THAN_LAST_APPLIED: this import was created before the import last applied to the month. */
+/**
+ * OLDER_THAN_LAST_APPLIED (UX-1, data recency — not upload time): this file's latest invoice date IN THE MONTH is
+ * earlier than the latest invoice date of the import last applied to the month. Re-applying the same import never warns.
+ */
 export function isOlderThanLastApplied(
-  thisImport: { id: string; createdAt: Date },
-  lastAppliedImport: { id: string; createdAt: Date } | null | undefined,
+  thisImport: { id: string; lastDate: string },
+  lastApplied: { importId: string; lastInvoiceDate: string | null } | null | undefined,
 ): boolean {
-  return !!lastAppliedImport && lastAppliedImport.id !== thisImport.id && thisImport.createdAt < lastAppliedImport.createdAt;
+  return (
+    !!lastApplied &&
+    lastApplied.importId !== thisImport.id &&
+    !!lastApplied.lastInvoiceDate &&
+    !!thisImport.lastDate &&
+    thisImport.lastDate < lastApplied.lastInvoiceDate
+  );
+}
+
+/** The latest invoice date of `month` in an import's frozen month summaries (null when absent). */
+export function lastInvoiceDateOf(monthSummaries: unknown, month: string): string | null {
+  if (!Array.isArray(monthSummaries)) return null;
+  const s = (monthSummaries as Array<{ month?: unknown; lastDate?: unknown }>).find((x) => x?.month === month);
+  return typeof s?.lastDate === 'string' ? s.lastDate : null;
 }
 
 /**

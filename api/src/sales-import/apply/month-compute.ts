@@ -5,7 +5,7 @@
 import type { Prisma } from '@prisma/client';
 import type { PrismaService } from '../../prisma/prisma.service';
 import { OutletKpiAccumulator, measureToNumber, outletInScope, type KpiDefLite } from '../kpi/sales-kpi.helper';
-import { forEachAggregatePage, type RosterOutlet } from '../kpi/sales-import-data';
+import { forEachAggregatePage, rosterIndexOf, type RosterOutlet } from '../kpi/sales-import-data';
 
 export interface MonthOutletRow {
   outletCode: string;
@@ -18,16 +18,27 @@ export interface MonthOutletRow {
 
 export interface MonthKpiStat {
   kpiCode: string;
-  totalRaw: bigint; // paise / micro
+  totalRaw: bigint; // paise / pico-cases
   total: number;
   outletsNonZero: number;
   outletsNegative: number;
+}
+
+/** The file's lines for the month split by the roster CURRENT at compute time (M6; overrides the frozen summary). */
+export interface MonthRosterSplit {
+  matchedOutlets: number;
+  matchedPaise: bigint;
+  matchedPico: bigint;
+  unmatchedCustomers: number;
+  unmatchedPaise: bigint;
+  unmatchedPico: bigint;
 }
 
 export interface MonthComputation {
   rows: MonthOutletRow[];
   stats: MonthKpiStat[];
   zeroFillOutlets: number;
+  split: MonthRosterSplit;
 }
 
 export async function computeMonthRows(
@@ -37,13 +48,32 @@ export async function computeMonthRows(
   defs: readonly KpiDefLite[],
   roster: Map<string, RosterOutlet>,
 ): Promise<MonthComputation> {
+  // M6: aggregates carry the FILE's (normalized) customer code; they are mapped onto the roster as it is NOW, so an
+  // outlet added after processing is written and one removed since is not.
+  const index = rosterIndexOf(roster);
   const acc = new OutletKpiAccumulator(defs);
+  const matched = new Set<string>();
+  const unmatched = new Set<string>();
+  const split: MonthRosterSplit = {
+    matchedOutlets: 0, matchedPaise: 0n, matchedPico: 0n, unmatchedCustomers: 0, unmatchedPaise: 0n, unmatchedPico: 0n,
+  };
   await forEachAggregatePage(db, importId, month, (page) => {
     for (const a of page) {
-      if (!roster.has(a.outletCode)) continue; // dropped from the roster since processing → never written
-      acc.add(a.outletCode, a, a.dimKey);
+      const code = index.get(a.outletCode);
+      if (code === undefined) {
+        unmatched.add(a.outletCode);
+        split.unmatchedPaise += a.amountPaise;
+        split.unmatchedPico += a.qtyPico;
+        continue;
+      }
+      matched.add(code);
+      split.matchedPaise += a.amountPaise;
+      split.matchedPico += a.qtyPico;
+      acc.add(code, a, a.dimKey);
     }
   });
+  split.matchedOutlets = matched.size;
+  split.unmatchedCustomers = unmatched.size;
 
   const stats: MonthKpiStat[] = defs.map((d) => ({ kpiCode: d.kpiCode, totalRaw: 0n, total: 0, outletsNonZero: 0, outletsNegative: 0 }));
   const rows: MonthOutletRow[] = [];
@@ -64,7 +94,7 @@ export async function computeMonthRows(
     rows.push({ outletCode: code, outletName: meta.name, values, zeroFilled });
   }
   defs.forEach((d, i) => (stats[i].total = measureToNumber(stats[i].totalRaw, d.measure)));
-  return { rows, stats, zeroFillOutlets };
+  return { rows, stats, zeroFillOutlets, split };
 }
 
 /** Σ of the owned keys across the month's CURRENT OutletSalesRecord rows (numeric values only). */

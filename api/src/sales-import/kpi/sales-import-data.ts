@@ -5,8 +5,10 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import type { Prisma, SalesImport } from '@prisma/client';
 import type { PrismaService } from '../../prisma/prisma.service';
+import type { SalesColumnMapping } from '../sales-import.contract';
 import type { KpiAgg, OutletScopeMeta } from './sales-kpi.helper';
-import { rosterHashOf, rosterOutletWhere } from '../ingest/roster';
+import { normalizedRosterIndex, rosterOutletWhere } from '../ingest/roster';
+import { mappingFingerprint } from '../ingest/mapping-fingerprint';
 
 type Db = PrismaService | Prisma.TransactionClient;
 
@@ -16,6 +18,7 @@ export const AGG_PAGE_SIZE = 20_000;
 export interface AggRow extends KpiAgg {
   id: bigint;
   month: string;
+  /** normalizeOutletCode of the file's customer code (M6) — map it with RosterIndex.byNormalized. */
   outletCode: string;
   dimKey: string;
 }
@@ -24,21 +27,34 @@ export interface RosterOutlet extends OutletScopeMeta {
   name: string;
 }
 
-/** Load an import of THIS tenant (404 otherwise); `latest` = the newest READY import. Must be READY (409). */
+/** Load an import of THIS tenant (404 otherwise); `latest` = the newest READY import. Must be READY (409) and not purged. */
 export async function resolveReadyImport(db: Db, clientId: string, importId: string): Promise<SalesImport> {
   const imp =
     importId === 'latest'
-      ? await db.salesImport.findFirst({ where: { clientId, status: 'READY' }, orderBy: { createdAt: 'desc' } })
+      ? await db.salesImport.findFirst({ where: { clientId, status: 'READY', purgedAt: null }, orderBy: { createdAt: 'desc' } })
       : await db.salesImport.findFirst({ where: { id: importId, clientId } });
   if (!imp) throw new NotFoundException(importId === 'latest' ? 'No processed (READY) import yet.' : 'Import not found');
   if (imp.status !== 'READY') throw new ConflictException(`This import is ${imp.status}, not READY.`);
+  if (imp.purgedAt) throw new ConflictException('This import\'s data was deleted after the retention period. Upload the file again.');
   return imp;
 }
 
 /**
- * The tenant's roster (non-deleted outlets) → scope facets + name, keyed by the RAW stored `Outlet.outletCode` (the
- * same code the worker writes into `SalesImportAggregate.outletCode`). Same outlet set as the worker's `loadRoster`
- * (`rosterOutletWhere`), so `rosterHashOfMap(loadRosterMeta(...)) === loadRoster(...).rosterHash` for an unchanged roster.
+ * H2: has the tenant's column mapping changed since this import was processed? (Then the aggregates were built under
+ * a different reading of the file — another amount column, dimension, date order… — and must not be applied.)
+ */
+export async function mappingChangedSince(db: Db, clientId: string, imp: Pick<SalesImport, 'mappingFingerprint'>): Promise<boolean> {
+  const p = await db.salesImportProfile.findUnique({ where: { clientId }, select: { columnMapping: true } });
+  const current = mappingFingerprint((p?.columnMapping ?? null) as SalesColumnMapping | null);
+  return !imp.mappingFingerprint || current !== imp.mappingFingerprint;
+}
+
+export const MAPPING_CHANGED_REASON =
+  'The column mapping changed after this file was processed, so its numbers may be read from the wrong columns. Reprocess the file first.';
+
+/**
+ * The tenant's roster (non-deleted outlets) → scope facets + name, keyed by the stored `Outlet.outletCode`
+ * (`rosterOutletWhere`, the same outlet set as the worker's `loadRoster`).
  */
 export async function loadRosterMeta(db: Db, clientId: string): Promise<Map<string, RosterOutlet>> {
   const outlets = await db.outlet.findMany({
@@ -53,9 +69,9 @@ export async function loadRosterMeta(db: Db, clientId: string): Promise<Map<stri
   );
 }
 
-/** The preview/apply side of the ROSTER_CHANGED check: the single `rosterHashOf` over the roster map's keys. */
-export function rosterHashOfMap(roster: Map<string, unknown>): string {
-  return rosterHashOf(roster.keys());
+/** normalizeOutletCode(stored code) → stored code, for mapping an aggregate's file code onto the CURRENT roster (M6). */
+export function rosterIndexOf(roster: Map<string, RosterOutlet>): Map<string, string> {
+  return normalizedRosterIndex(roster.keys());
 }
 
 function toAgg(r: {
@@ -65,7 +81,7 @@ function toAgg(r: {
   dims: Prisma.JsonValue;
   dimKey: string;
   amountPaise: bigint;
-  qtyMicro: bigint;
+  qtyPico: bigint;
   lines: number;
 }): AggRow {
   const dims: Record<string, string> = {};
@@ -79,7 +95,7 @@ function toAgg(r: {
     dims,
     dimKey: r.dimKey,
     amountPaise: BigInt(r.amountPaise),
-    qtyMicro: BigInt(r.qtyMicro),
+    qtyPico: BigInt(r.qtyPico),
     lines: r.lines,
   };
 }
@@ -101,7 +117,7 @@ export async function forEachAggregatePage(
       where: { importId, ...(month ? { month } : {}), ...(cursor !== null ? { id: { gt: cursor } } : {}) },
       orderBy: { id: 'asc' },
       take: pageSize,
-      select: { id: true, month: true, outletCode: true, dims: true, dimKey: true, amountPaise: true, qtyMicro: true, lines: true },
+      select: { id: true, month: true, outletCode: true, dims: true, dimKey: true, amountPaise: true, qtyPico: true, lines: true },
     });
     if (page.length === 0) return;
     await onPage(page.map(toAgg));

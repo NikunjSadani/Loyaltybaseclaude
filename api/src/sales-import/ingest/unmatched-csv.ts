@@ -3,10 +3,11 @@
  * programme roster. Streamed (≈200k lines for the real file), CSV-escaped and formula-injection-safe.
  */
 import type { UnmatchedRow } from './aggregator';
+import { QTY_SCALE, divRoundHalfAway } from './normalize';
 
 export const UNMATCHED_CSV_HEADER = ['Customer code', 'Customer name', 'Month', 'Lines', 'Amount (Rs)', 'Quantity'];
 
-/** Exact decimal text of a scaled BigInt (paise → "12.34", micro → "0.04"). */
+/** Exact decimal text of a scaled BigInt (paise → "12.34", thousandths → "0.04"). */
 export function scaledToText(v: bigint, scale: number): string {
   const neg = v < 0n;
   const abs = neg ? -v : v;
@@ -25,6 +26,6 @@ export function csvText(v: string): string {
 export function* unmatchedCsvLines(rows: Iterable<UnmatchedRow>): Generator<string> {
   yield `${UNMATCHED_CSV_HEADER.join(',')}\r\n`;
   for (const r of rows) {
-    yield `${[csvText(r.code), csvText(r.name), r.month, String(r.lines), scaledToText(r.amountPaise, 2), scaledToText(r.qtyMicro, 6)].join(',')}\r\n`;
+    yield `${[csvText(r.code), csvText(r.name), r.month, String(r.lines), scaledToText(r.amountPaise, 2), scaledToText(divRoundHalfAway(r.qtyPico, QTY_SCALE / 1000n), 3)].join(',')}\r\n`;
   }
 }

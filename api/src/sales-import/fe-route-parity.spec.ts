@@ -41,7 +41,8 @@ function frontendRoutes(): Set<string> {
   const out = new Set<string>();
   const verb: Record<string, string> = { get: 'GET', post: 'POST', put: 'PUT', patch: 'PATCH', del: 'DELETE' };
   const toPath = (raw: string) => {
-    let s = raw.replace(/\$\{BASE\}/g, '/api/admin/sales-import').replace(/\$\{MONTHS\}/g, '/api/admin/sales-months');
+    let s = raw.replace(/\$\{BASE\}/g, '/api/admin/sales-import').replace(/\$\{MONTHS\}/g, '/api/admin/sales-months')
+      .replace(/\$\{importPath\([^)]*\)\}/g, '/api/admin/sales-import/:p'); // upload.ts helper
     const q = s.indexOf('?');
     if (q >= 0) s = s.slice(0, q);
     const open = s.lastIndexOf('${');

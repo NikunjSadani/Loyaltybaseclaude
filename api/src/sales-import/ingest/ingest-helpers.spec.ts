@@ -1,8 +1,7 @@
-import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { claimNextImport, hasClaimableImports } from './claim';
 import { expectedPartSize, partCountFor, partKey, PartsFile, unmatchedCsvKey } from './parts-file';
-import { loadRoster, rosterHashOf, rosterOutletWhere } from './roster';
+import { loadRoster, rosterOutletWhere } from './roster';
 import { csvText, scaledToText, unmatchedCsvLines } from './unmatched-csv';
 import { SALES_IMPORT_PART_SIZE, SALES_IMPORT_STALE_HEARTBEAT_MINUTES } from '../sales-import.contract';
 
@@ -57,24 +56,12 @@ describe('parts-file', () => {
 });
 
 describe('roster', () => {
-  it('fixed vector: sort ascending, join "\n", sha256 hex', () => {
-    // sha256("A\nB"), computed independently.
-    expect(rosterHashOf(['B', 'A'])).toBe('23519a43c66b4c342f25b32e09797ec5f3fc0be388cd8243fb3449afbdce4013');
-    expect(rosterHashOf(['B', 'A'])).toBe(createHash('sha256').update(['A', 'B'].join('\n')).digest('hex'));
-  });
-
-  it('hash is order independent and changes when the roster changes', () => {
-    expect(rosterHashOf(['b', 'a'])).toBe(rosterHashOf(['a', 'b']));
-    expect(rosterHashOf(['a', 'b'])).not.toBe(rosterHashOf(['a', 'b', 'c']));
-  });
-
   it('loads live outlets of the tenant, keyed by normalized code → stored code', async () => {
     const prisma = { outlet: { findMany: jest.fn().mockResolvedValue([{ outletCode: ' 0012 ' }, { outletCode: 'A1' }, { outletCode: '' }]) } };
     const r = await loadRoster(prisma as never, 't1');
     expect(prisma.outlet.findMany).toHaveBeenCalledWith({ where: { clientId: 't1', deletedAt: null }, select: { outletCode: true } });
     expect(rosterOutletWhere('t1')).toEqual({ clientId: 't1', deletedAt: null });
     expect([...r.byNormalizedCode]).toEqual([['0012', ' 0012 '], ['A1', 'A1']]);
-    expect(r.rosterHash).toBe(rosterHashOf([' 0012 ', 'A1', '']));
   });
 });
 
@@ -96,8 +83,9 @@ describe('unmatched csv', () => {
   });
 
   it('writes a header then one line per (code, month)', () => {
-    const lines = [...unmatchedCsvLines([{ month: '2026-10', code: 'U1', name: 'N, One', amountPaise: 750n, qtyMicro: 1_000_000n, lines: 2 }])];
-    expect(lines).toEqual(['Customer code,Customer name,Month,Lines,Amount (Rs),Quantity\r\n', 'U1,"N, One",2026-10,2,7.5,1\r\n']);
+    const lines = [...unmatchedCsvLines([{ month: '2026-10', code: 'U1', name: 'N, One', amountPaise: 750n, qtyPico: 1_083_333_333_333n, lines: 2 }])];
+    // quantity is written at 3 dp (same rounding as everything else on the wire)
+    expect(lines).toEqual(['Customer code,Customer name,Month,Lines,Amount (Rs),Quantity\r\n', 'U1,"N, One",2026-10,2,7.5,1.083\r\n']);
   });
 });
 
@@ -106,7 +94,7 @@ describe('claim', () => {
 
   it('claims QUEUED or heartbeat-stale PROCESSING with FOR UPDATE SKIP LOCKED, oldest first, bumping attempts', async () => {
     const $queryRaw = jest.fn().mockResolvedValue([{ id: 'i1' }]);
-    await expect(claimNextImport({ $queryRaw } as never)).resolves.toEqual({ id: 'i1' });
+    await expect(claimNextImport({ $queryRaw } as never, 'tok-1')).resolves.toEqual({ id: 'i1' });
     const sql = sqlOf($queryRaw);
     expect(sql).toContain(`SET "status" = 'PROCESSING'`);
     expect(sql).toContain('"attempts" = "attempts" + 1');
@@ -114,7 +102,18 @@ describe('claim', () => {
     expect(sql).toContain('FOR UPDATE SKIP LOCKED');
     expect(sql).toContain('ORDER BY "createdAt"');
     expect(sql).toContain('RETURNING *');
-    expect($queryRaw.mock.calls[0][1]).toBe(SALES_IMPORT_STALE_HEARTBEAT_MINUTES);
+    expect(sql).toContain('"claimToken" = ?');
+    expect($queryRaw.mock.calls[0][1]).toBe('tok-1');
+    expect($queryRaw.mock.calls[0][2]).toBe(SALES_IMPORT_STALE_HEARTBEAT_MINUTES);
+  });
+
+  it('M2: every claim gets a fresh random token by default (never a reusable counter)', async () => {
+    const $queryRaw = jest.fn().mockResolvedValue([]);
+    await claimNextImport({ $queryRaw } as never);
+    await claimNextImport({ $queryRaw } as never);
+    const [a, b] = [$queryRaw.mock.calls[0][1], $queryRaw.mock.calls[1][1]];
+    expect(typeof a).toBe('string');
+    expect(a).not.toBe(b);
   });
 
   it('returns null when nothing is claimable', async () => {

@@ -45,7 +45,7 @@ const mockTx = {
   targetUploadBatch:  { create: jest.fn() },
   outletTarget:       { upsert: jest.fn() },
   salesUploadBatch:   { create: jest.fn(), findFirst: jest.fn(), delete: jest.fn() },
-  outletSalesRecord:  { upsert: jest.fn(), findMany: jest.fn() },
+  outletSalesRecord:  { upsert: jest.fn(), findMany: jest.fn(), count: jest.fn() },
   $executeRaw:        jest.fn(),
 };
 
@@ -1414,8 +1414,13 @@ describe('TargetsService — Sales Import ownership (K-7)', () => {
         where.month === '2026-10' ? { id: 'imp-batch-oct' } : null,
       );
       mockTx.salesUploadBatch.delete.mockResolvedValue({});
+      // after the re-pointing, 1 of the batch's 2 rows still points at it (it held only manual data)
+      mockTx.outletSalesRecord.count.mockResolvedValue(1);
 
-      await service.deleteAchievementBatch(admin, 'b1');
+      // L4: removedRecords = rows the cascade ACTUALLY removes, not the batch's acceptedCount
+      await expect(service.deleteAchievementBatch(admin, 'b1')).resolves.toEqual({ deleted: true, id: 'b1', removedRecords: 1 });
+      expect(mockTx.outletSalesRecord.count).toHaveBeenCalledWith({ where: { clientId: 'deoleo', batchId: 'b1' } });
+      expect(mockTx.outletSalesRecord.count.mock.invocationCallOrder[0]).toBeLessThan(mockTx.salesUploadBatch.delete.mock.invocationCallOrder[0]);
 
       const raw = mockTx.$executeRaw.mock.calls.map((c) => ({ sql: sqlText(c), values: sqlValues(c) }));
       // advisory locks for BOTH months first (sorted), then ONE strip/re-point (Oct only — Sep was never applied)

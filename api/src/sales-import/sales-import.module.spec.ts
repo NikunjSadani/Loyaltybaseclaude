@@ -15,6 +15,7 @@ import { StorageService } from '../storage/storage.service';
 import { SalesImportProcessorService } from './ingest/sales-import-processor.service';
 import { SalesImportRunnerService } from './ingest/sales-import-runner.service';
 import { ROLES_KEY } from '../common/decorators/roles.decorator';
+import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
 
 /** Stand-ins for the @Global modules the real app provides (TenantModule, StorageModule). */
 @Global()
@@ -23,8 +24,9 @@ import { ROLES_KEY } from '../common/decorators/roles.decorator';
     { provide: TenantService, useValue: {} },
     { provide: TenantSettingsService, useValue: {} },
     { provide: StorageService, useValue: {} },
+    { provide: GifsyRoleService, useValue: {} }, // @Global RbacModule in the real app
   ],
-  exports: [TenantService, TenantSettingsService, StorageService],
+  exports: [TenantService, TenantSettingsService, StorageService, GifsyRoleService],
 })
 class FakeGlobalsModule {}
 

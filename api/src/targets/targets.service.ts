@@ -935,8 +935,9 @@ export class TargetsService {
     // schema cascade would delete whole rows). Never runs for a tenant without owned KPIs.
     const owned = await importerOwnedKpiCodes(this.prisma, user.clientId);
     if (owned.length > 0) {
-      await this.deleteManualBatchKeepingOwned(user.clientId, id, owned);
-      return { deleted: true, id, removedRecords: batch.acceptedCount };
+      // L4: report the rows ACTUALLY removed (rows that kept importer-owned values were re-pointed, not deleted).
+      const removedRecords = await this.deleteManualBatchKeepingOwned(user.clientId, id, owned);
+      return { deleted: true, id, removedRecords };
     }
 
     await this.prisma.salesUploadBatch.delete({ where: { id } });
@@ -950,8 +951,8 @@ export class TargetsService {
    * the rows that held only manual data. A month with no SALES_IMPORT batch has never been applied, so its
    * owned-key values are themselves manual data (written before the KPI became importer-owned) → they go too.
    */
-  private async deleteManualBatchKeepingOwned(clientId: string, batchId: string, owned: string[]) {
-    await this.prisma.$transaction(
+  private async deleteManualBatchKeepingOwned(clientId: string, batchId: string, owned: string[]): Promise<number> {
+    return this.prisma.$transaction(
       async (tx) => {
         const monthRows = await tx.outletSalesRecord.findMany({
           where: { clientId, batchId },
@@ -977,7 +978,10 @@ export class TargetsService {
              WHERE "clientId" = ${clientId} AND "batchId" = ${batchId} AND "month" = ${month}
                AND "kpiValues" ?| ${owned}::text[]`);
         }
+        // What the cascade below removes = the rows still pointing at this batch after the re-pointing above.
+        const removed = await tx.outletSalesRecord.count({ where: { clientId, batchId } });
         await tx.salesUploadBatch.delete({ where: { id: batchId } });
+        return removed;
       },
       { timeout: 60_000, maxWait: 10_000 },
     );

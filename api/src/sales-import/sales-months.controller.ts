@@ -1,4 +1,4 @@
-import { Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
@@ -6,7 +6,7 @@ import { TenantService } from '../tenant/tenant.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesMonthsService } from './months/sales-months.service';
 import { assertSalesImportAccess } from './sales-import-access';
-import type { SalesMonthRow } from './sales-import.contract';
+import type { SalesMonthReopenRequest, SalesMonthReopenResult, SalesMonthRow } from './sales-import.contract';
 
 /**
  * Sales month state routes (plan §5.2, §7.3):
@@ -49,8 +49,12 @@ export class SalesMonthsController {
   @HttpCode(200)
   @Roles('GIFSY_ADMIN')
   @RequirePermission('targets:upload')
-  async reopen(@CurrentUser() user: JwtPayload, @Param('month') month: string): Promise<SalesMonthRow> {
+  async reopen(
+    @CurrentUser() user: JwtPayload,
+    @Param('month') month: string,
+    @Body() body?: SalesMonthReopenRequest,
+  ): Promise<SalesMonthReopenResult> {
     await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: true });
-    return this.months.reopen(user, month);
+    return this.months.reopen(user, month, body ?? {});
   }
 }

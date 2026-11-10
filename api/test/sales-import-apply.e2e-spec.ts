@@ -14,7 +14,8 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { SalesApplyService } from '../src/sales-import/apply/sales-apply.service';
 import { SalesKpiDefService } from '../src/sales-import/kpi/sales-kpi-def.service';
 import { definitionsHash, stableStringify } from '../src/sales-import/kpi/sales-kpi.helper';
-import { rosterHashOf } from '../src/sales-import/ingest/roster';
+import { mappingFingerprint } from '../src/sales-import/ingest/mapping-fingerprint';
+import type { SalesColumnMapping } from '../src/sales-import/sales-import.contract';
 import { currentMonthKey } from '../src/targets/targets.helpers';
 
 const enabled = !!process.env.DATABASE_URL && process.env.SALES_IMPORT_E2E === '1';
@@ -27,6 +28,10 @@ d('SalesApplyService × real Postgres (K-6)', () => {
   let typeId = '';
   let actorId = '';
   let manualBatchId = '';
+  const MAPPING: SalesColumnMapping = {
+    headerRow: 'auto', outletCode: 'CODE', invoiceDate: 'DATE', amount: 'AMT', quantity: null,
+    dimensions: [{ key: 'dimA', label: 'A', header: 'A' }], dateOrder: 'DMY',
+  };
 
   beforeAll(async () => {
     prisma = new PrismaService();
@@ -48,13 +53,14 @@ d('SalesApplyService × real Postgres (K-6)', () => {
         { clientId, outletCode: 'GONE', outletName: 'Gone', month, kpiValues: { MANUAL_K: 9, OWNED_K: 7 }, batchId: manualBatchId },
       ],
     });
+    await prisma.salesImportProfile.create({ data: { clientId, columnMapping: MAPPING as never, updatedById: actorId } });
     await prisma.salesKpiDefinition.create({
       data: { clientId, kpiCode: 'OWNED_K', measure: 'AMOUNT', filter: {}, updatedById: actorId },
     });
     await prisma.salesImport.create({
       data: {
         id: `${clientId}-imp`, clientId, uploadedById: actorId, originalFilename: 'f.csv', fileKind: 'CSV', sizeBytes: 1n,
-        partCount: 1, gcsPrefix: 'x/', status: 'READY', rosterHash: rosterHashOf(['A1', 'A2', 'A3']),
+        partCount: 1, gcsPrefix: 'x/', status: 'READY', processingVersion: 1, mappingFingerprint: mappingFingerprint(MAPPING),
         monthSummaries: [{ month, firstDate: `${month}-01`, lastDate: `${month}-01`, lines: 2, matchedOutlets: 2, unmatchedCustomers: 0,
           matchedAmountRupees: 0, matchedQuantity: 0, unmatchedAmountRupees: 0, unmatchedQuantity: 0 }],
       },
@@ -62,8 +68,10 @@ d('SalesApplyService × real Postgres (K-6)', () => {
     const dims = { dimA: 'X' };
     await prisma.salesImportAggregate.createMany({
       data: [
-        { importId: `${clientId}-imp`, month, outletCode: 'A1', dims, dimKey: stableStringify(dims), amountPaise: 12345n, qtyMicro: 0n, lines: 1 },
-        { importId: `${clientId}-imp`, month, outletCode: 'A2', dims, dimKey: stableStringify(dims), amountPaise: -500n, qtyMicro: 0n, lines: 1 },
+        { importId: `${clientId}-imp`, month, outletCode: 'A1', dims, dimKey: stableStringify(dims), amountPaise: 12345n, qtyPico: 0n, lines: 1 },
+        { importId: `${clientId}-imp`, month, outletCode: 'A2', dims, dimKey: stableStringify(dims), amountPaise: -500n, qtyPico: 0n, lines: 1 },
+        // M6: a customer not on the roster is aggregated too; apply must ignore it
+        { importId: `${clientId}-imp`, month, outletCode: 'ZZ9', dims, dimKey: stableStringify(dims), amountPaise: 999n, qtyPico: 0n, lines: 1 },
       ],
     });
   });
@@ -75,6 +83,7 @@ d('SalesApplyService × real Postgres (K-6)', () => {
     await prisma.salesImport.deleteMany({ where: { clientId } });
     await prisma.salesMonthStatus.deleteMany({ where: { clientId } });
     await prisma.salesKpiDefinition.deleteMany({ where: { clientId } });
+    await prisma.salesImportProfile.deleteMany({ where: { clientId } });
     await prisma.salesUploadBatch.deleteMany({ where: { clientId } }); // cascades outlet_sales_records
     await prisma.outlet.deleteMany({ where: { clientId } });
     if (typeId) await prisma.outletType.delete({ where: { id: typeId } });
@@ -87,7 +96,7 @@ d('SalesApplyService × real Postgres (K-6)', () => {
     const res = await svc.apply(
       { sub: actorId, role: 'CLIENT_ADMIN', clientId, phone: '', name: 'E2E' },
       `${clientId}-imp`,
-      { months: [month], expectedDefinitionsHash: hash, acknowledgePartialMonths: [month] },
+      { months: [month], expectedDefinitionsHash: hash, processingVersion: 1, acknowledgePartialMonths: [month] },
     );
     expect(res.results[0]).toEqual(expect.objectContaining({ ok: true, outletsWritten: 3, outletsZeroFilled: 1 }));
 
@@ -103,7 +112,7 @@ d('SalesApplyService × real Postgres (K-6)', () => {
     const again = await svc.apply(
       { sub: actorId, role: 'CLIENT_ADMIN', clientId, phone: '', name: 'E2E' },
       `${clientId}-imp`,
-      { months: [month], expectedDefinitionsHash: hash, acknowledgePartialMonths: [month] },
+      { months: [month], expectedDefinitionsHash: hash, processingVersion: 1, acknowledgePartialMonths: [month] },
     );
     expect(again.results[0].ok).toBe(true);
     const rows2 = await prisma.outletSalesRecord.findMany({ where: { clientId, month }, orderBy: { outletCode: 'asc' } });
