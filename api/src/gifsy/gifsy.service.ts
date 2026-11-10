@@ -23,6 +23,10 @@ import { platformWide, isGifsyOperator } from '../common/tenant-scope';
 import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
 import { deriveTenantCode } from '../rewards/order-number.helper';
 import {
+  SALES_IMPORT_RUNNER_NOT_CONFIGURED_MESSAGE,
+  salesImportRunnerConfigured,
+} from '../sales-import/ingest/sales-import-runner.config';
+import {
   CreateClientDto,
   UpdateClientDto,
   UpdateOutletTypeConfigDto,
@@ -150,7 +154,10 @@ const BOOLEAN_FEATURE_KEYS = [
   'offerTiles', 'salesImport', 'outletMasterGeo', 'soDeclarationKyc', 'kycAddressProofWaiver',
 ] as const;
 
-function assertValidFeatures(incoming: Record<string, unknown> | undefined): void {
+function assertValidFeatures(
+  incoming: Record<string, unknown> | undefined,
+  existing: Record<string, unknown> = {},
+): void {
   if (!incoming) return;
   for (const k of BOOLEAN_FEATURE_KEYS) {
     if (k in incoming && typeof incoming[k] !== 'boolean') {
@@ -158,6 +165,12 @@ function assertValidFeatures(incoming: Record<string, unknown> | undefined): voi
     }
   }
   assertValidPartnerApp(incoming.partnerApp);
+  // Integration-audit M1: switching Sales Import ON where no background processor is configured would let the tenant
+  // upload files that stay QUEUED forever. Only the OFF→ON transition is refused (switching OFF, or re-sending ON for a
+  // tenant already ON, is never blocked), so this is a no-op for every tenant that never asks for salesImport.
+  if (incoming.salesImport === true && existing.salesImport !== true && !salesImportRunnerConfigured()) {
+    throw new BadRequestException(SALES_IMPORT_RUNNER_NOT_CONFIGURED_MESSAGE);
+  }
 }
 
 /**
@@ -766,7 +779,7 @@ export class GifsyService {
     if (dto.features !== undefined) {
       const existingFeatures = (existing.features ?? {}) as Record<string, unknown>;
       const incoming = dto.features as Record<string, unknown>;
-      assertValidFeatures(incoming);
+      assertValidFeatures(incoming, existingFeatures);
       const features: Record<string, unknown> = { ...existingFeatures, ...incoming };
       const incomingPartnerApp = incoming.partnerApp;
       if (

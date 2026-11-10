@@ -36,6 +36,7 @@ import { isStalled, lockImportRow, rethrowBusy, IMPORT_BUSY_MESSAGE, type Locked
 import { mappingFingerprint } from './mapping-fingerprint';
 import { expectedPartSize, partCountFor, partKey } from './parts-file';
 import { SalesImportRetentionService } from './sales-import-retention.service';
+import { SALES_IMPORT_RUNNER_NOT_CONFIGURED_MESSAGE } from './sales-import-runner.config';
 import { SalesImportRunnerService } from './sales-import-runner.service';
 
 const REPROCESSABLE: SalesImportStatus[] = ['READY', 'NEEDS_MAPPING', 'FAILED'];
@@ -166,6 +167,14 @@ export class SalesImportUploadService {
     }
   }
 
+  /**
+   * Integration-audit M1: refuse anything that would queue an import when no background processor is configured in
+   * this environment (it would stay QUEUED forever). Reads / cancel / delete stay available.
+   */
+  private assertRunnerConfigured(): void {
+    if (!this.runner.isConfigured()) throw new BadRequestException(SALES_IMPORT_RUNNER_NOT_CONFIGURED_MESSAGE);
+  }
+
   /** ≤ SALES_IMPORT_MAX_INFLIGHT_UPLOADS imports UPLOADING per tenant (abandoned ones are swept first). */
   private async assertUploadCapacity(user: JwtPayload): Promise<void> {
     await this.retention.sweep({ clientId: user.clientId, limit: 5 });
@@ -181,6 +190,7 @@ export class SalesImportUploadService {
   }
 
   async createUpload(user: JwtPayload, body: { filename: string; sizeBytes: number }): Promise<CreateSalesImportUploadResult> {
+    this.assertRunnerConfigured();
     const filename = String(body.filename ?? '').split(/[\\/]/).pop()!.trim().slice(0, 255);
     const lower = filename.toLowerCase();
     const ext = SALES_IMPORT_ALLOWED_EXTENSIONS.find((e) => lower.endsWith(e));
@@ -296,6 +306,7 @@ export class SalesImportUploadService {
    * QUEUED flip is one guarded update. A part racing it either landed before the listing (counted) or gets 409.
    */
   async complete(user: JwtPayload, id: string): Promise<SalesImportSummary> {
+    this.assertRunnerConfigured();
     const row = await this.find(user, id);
     if (row.status !== 'UPLOADING') throw new ConflictException(`This import is already ${row.status}.`);
     await this.verifyParts(row);
@@ -315,6 +326,7 @@ export class SalesImportUploadService {
    * purged, or a live re-import of it already exists.
    */
   async reprocessAsNew(user: JwtPayload, id: string): Promise<SalesImportSummary> {
+    this.assertRunnerConfigured();
     const old = await this.find(user, id);
     if (old.purgedAt) throw new ConflictException("This import's file was deleted after the retention period. Upload the file again.");
     if (old.status !== 'READY') throw new ConflictException(`Only a READY import can be re-imported (this one is ${old.status}).`);
@@ -410,6 +422,7 @@ export class SalesImportUploadService {
    * reset clears the claim token, so the old worker can no longer write.
    */
   async reprocess(user: JwtPayload, id: string): Promise<SalesImportSummary> {
+    this.assertRunnerConfigured();
     await this.prisma
       .$transaction(
         async (tx) => {

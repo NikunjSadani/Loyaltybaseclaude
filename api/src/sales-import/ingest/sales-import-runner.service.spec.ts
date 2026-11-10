@@ -29,6 +29,17 @@ describe('SalesImportRunnerService.kick', () => {
     }
   });
 
+  it('M1: isConfigured() mirrors what kick() can do (unset/job-without-job → false; inline / full job → true)', () => {
+    expect(runner.isConfigured()).toBe(false);
+    process.env.SALES_IMPORT_RUNNER = 'job';
+    expect(runner.isConfigured()).toBe(false);
+    process.env.SALES_IMPORT_JOB = 'gifsy-sales-import';
+    process.env.GCP_PROJECT = 'p';
+    expect(runner.isConfigured()).toBe(true);
+    process.env.SALES_IMPORT_RUNNER = 'inline';
+    expect(runner.isConfigured()).toBe(true);
+  });
+
   it('unset → none, nothing called', async () => {
     await expect(runner.kick()).resolves.toBe('none');
     expect(fetchMock).not.toHaveBeenCalled();

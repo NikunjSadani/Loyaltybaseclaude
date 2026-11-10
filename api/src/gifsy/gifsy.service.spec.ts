@@ -439,7 +439,15 @@ describe('GifsyService', () => {
         id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
         branding: {}, features: data.features,
       }));
-      const onRes = await service.updateClient(gifsy, 'bajaj', { features: { salesImport: true } });
+      const savedRunner = process.env.SALES_IMPORT_RUNNER;
+      process.env.SALES_IMPORT_RUNNER = 'inline'; // M1: switching ON needs a configured runner
+      let onRes;
+      try {
+        onRes = await service.updateClient(gifsy, 'bajaj', { features: { salesImport: true } });
+      } finally {
+        if (savedRunner === undefined) delete process.env.SALES_IMPORT_RUNNER;
+        else process.env.SALES_IMPORT_RUNNER = savedRunner;
+      }
       expect((onRes.features as unknown as Record<string, boolean>).salesImport).toBe(true);
 
       mockPrisma.client.findFirst.mockResolvedValueOnce({
@@ -452,6 +460,71 @@ describe('GifsyService', () => {
       }));
       const offRes = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
       expect((offRes.features as unknown as Record<string, boolean>).salesImport).toBe(false);
+    });
+
+    describe('M1: salesImport cannot be switched ON while the background processor is not configured', () => {
+      const RUNNER_KEYS = ['SALES_IMPORT_RUNNER', 'SALES_IMPORT_JOB', 'GCP_PROJECT', 'GCP_PROJECT_ID'] as const;
+      const saved: Record<string, string | undefined> = {};
+      const MSG = "Sales Import can't be switched on here yet: the background processor isn't set up in this environment.";
+      beforeEach(() => {
+        for (const k of RUNNER_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+      });
+      afterEach(() => {
+        for (const k of RUNNER_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+      });
+      const tenant = (features: Record<string, unknown>) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'), branding: {}, features,
+      });
+      const echoUpdate = () =>
+        mockPrisma.client.update.mockImplementationOnce(async ({ data }) => ({ ...tenant({}), features: data.features }));
+
+      it.each([
+        ['unset', {}],
+        ["'none'", { SALES_IMPORT_RUNNER: 'none' }],
+        ['job without SALES_IMPORT_JOB', { SALES_IMPORT_RUNNER: 'job', GCP_PROJECT: 'p' }],
+      ])('PATCH ON with the runner %s → 400 with the operator message; nothing written', async (_l, env) => {
+        Object.assign(process.env, env);
+        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ walletModule: true }));
+        const p = service.updateClient(gifsy, 'bajaj', { features: { salesImport: true } });
+        await expect(p).rejects.toBeInstanceOf(BadRequestException);
+        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ walletModule: true }));
+        await expect(service.updateClient(gifsy, 'bajaj', { features: { salesImport: true } })).rejects.toThrow(MSG);
+        expect(mockPrisma.client.update).not.toHaveBeenCalled();
+      });
+
+      it('PATCH ON with a job runner fully configured → allowed', async () => {
+        Object.assign(process.env, { SALES_IMPORT_RUNNER: 'job', SALES_IMPORT_JOB: 'gifsy-sales-import', GCP_PROJECT: 'p' });
+        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({}));
+        echoUpdate();
+        const res = await service.updateClient(gifsy, 'bajaj', { features: { salesImport: true } });
+        expect((res.features as unknown as Record<string, boolean>).salesImport).toBe(true);
+      });
+
+      it('switching OFF, and re-sending ON for a tenant already ON, are never blocked (other toggles keep working)', async () => {
+        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ salesImport: true }));
+        echoUpdate();
+        const off = await service.updateClient(gifsy, 'bajaj', { features: { salesImport: false } });
+        expect((off.features as unknown as Record<string, boolean>).salesImport).toBe(false);
+
+        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ salesImport: true }));
+        echoUpdate();
+        const again = await service.updateClient(gifsy, 'bajaj', { features: { salesImport: true, walletModule: true } });
+        expect((again.features as unknown as Record<string, boolean>).salesImport).toBe(true);
+      });
+
+      it('an unrelated toggle on a tenant without salesImport (e.g. Deoleo) is unaffected', async () => {
+        mockPrisma.client.findFirst.mockResolvedValueOnce({ ...tenant({ walletModule: true }), id: 'deoleo' });
+        echoUpdate();
+        const res = await service.updateClient(gifsy, 'deoleo', { features: { offerTiles: true } });
+        expect((res.features as unknown as Record<string, boolean>).offerTiles).toBe(true);
+      });
+
+      it('createClient with features.salesImport=true → 400 before any DB write', async () => {
+        await expect(
+          service.createClient(gifsy, { slug: 'newco', internalName: 'N', features: { salesImport: true } } as never),
+        ).rejects.toThrow(MSG);
+        expect(mockPrisma.client.create).not.toHaveBeenCalled();
+      });
     });
 
     it('F1: deep-merges the nested features.partnerApp so a partial PATCH keeps sibling flags', async () => {

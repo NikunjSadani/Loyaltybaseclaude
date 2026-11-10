@@ -136,7 +136,7 @@ function harness() {
       return Readable.from([range ? b.subarray(range.start, range.end + 1) : b]);
     }),
   };
-  const runner = { kick: jest.fn().mockResolvedValue('inline') };
+  const runner = { kick: jest.fn().mockResolvedValue('inline'), isConfigured: jest.fn().mockReturnValue(true) };
   const retention = new SalesImportRetentionService(prisma as never, storage as never);
   const svc = new SalesImportUploadService(prisma as never, storage as never, runner as never, retention);
   const part = (b: Buffer | string) => ({ buffer: Buffer.from(b), size: Buffer.from(b).length });
@@ -770,5 +770,43 @@ describe('retention re-check L3 / L4', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('SalesImportUploadService — background processor not configured (integration-audit M1)', () => {
+  const MSG = "Sales Import can't be switched on here yet: the background processor isn't set up in this environment.";
+
+  it('createUpload is refused (400, operator message) before anything is created', async () => {
+    const h = harness();
+    h.runner.isConfigured.mockReturnValue(false);
+    const p = h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 3 });
+    await expect(p).rejects.toBeInstanceOf(BadRequestException);
+    await expect(h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 3 })).rejects.toThrow(MSG);
+    expect(h.rows.size).toBe(0);
+    expect(h.audits).toEqual([]);
+  });
+
+  it('complete / reprocess / reprocess-as-new are refused too (nothing is queued that would never process)', async () => {
+    const h = harness();
+    const content = Buffer.from('code,amt\n1,2\n');
+    const { importId } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: content.length });
+    await h.svc.putPart(USER, importId, '0', h.part(content));
+    const ready = (await h.svc.createUpload(USER, { filename: 'b.csv', sizeBytes: 3 })).importId;
+    Object.assign(h.rows.get(ready)!, { status: 'READY', finishedAt: new Date() });
+    h.runner.isConfigured.mockReturnValue(false);
+    await expect(h.svc.complete(USER, importId)).rejects.toThrow(MSG);
+    expect(h.rows.get(importId)!.status).toBe('UPLOADING');
+    await expect(h.svc.reprocess(USER, ready)).rejects.toThrow(MSG);
+    expect(h.rows.get(ready)!.status).toBe('READY');
+    await expect(h.svc.reprocessAsNew(USER, ready)).rejects.toThrow(MSG);
+    expect(h.runner.kick).not.toHaveBeenCalled();
+  });
+
+  it('reads, cancel and delete still work (an operator can clean up)', async () => {
+    const h = harness();
+    const { importId } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 3 });
+    h.runner.isConfigured.mockReturnValue(false);
+    await expect(h.svc.list(USER, {})).resolves.toMatchObject({ items: [expect.objectContaining({ id: importId })] });
+    await expect(h.svc.remove(USER, importId)).resolves.toMatchObject({ status: 'CANCELLED' });
   });
 });

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { SalesImportProcessorService } from './sales-import-processor.service';
 import { SalesImportRetentionService } from './sales-import-retention.service';
+import { salesImportRunnerConfigured } from './sales-import-runner.config';
 
 export type SalesImportKickResult = 'inline' | 'job' | 'none';
 
@@ -31,6 +32,11 @@ export class SalesImportRunnerService {
     private readonly processor: SalesImportProcessorService,
     private readonly retention?: SalesImportRetentionService,
   ) {}
+
+  /** M1: false when kick() could never start processing here (see sales-import-runner.config.ts). */
+  isConfigured(): boolean {
+    return salesImportRunnerConfigured();
+  }
 
   async kick(): Promise<SalesImportKickResult> {
     try {

@@ -211,7 +211,7 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
    * then merges the returned client back into local state. Unlike the in-memory
    * sections below, this is durable.
    */
-  const saveClient = useCallback(async (patch: ClientPatchBody): Promise<boolean> => {
+  const saveClientDetailed = useCallback(async (patch: ClientPatchBody): Promise<{ ok: boolean; error?: string }> => {
     setSaving(true);
     setSaveError(null);
     try {
@@ -260,14 +260,21 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
         },
       }));
       flashSaved();
-      return true;
+      return { ok: true };
     } catch (e) {
-      setSaveError(e instanceof Error ? e.message : 'Save failed');
-      return false;
+      const msg = e instanceof Error ? e.message : 'Save failed';
+      setSaveError(msg);
+      return { ok: false, error: msg };
     } finally {
       setSaving(false);
     }
   }, [config.slug, flashSaved]);
+
+  /** Boolean form for the sections that show their own generic message. */
+  const saveClient = useCallback(
+    async (patch: ClientPatchBody): Promise<boolean> => (await saveClientDetailed(patch)).ok,
+    [saveClientDetailed],
+  );
 
   /**
    * REAL persistence for the tenant's custom-domain set. The backend RECONCILES
@@ -476,7 +483,7 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
       </Section>
 
       <Section icon={Shield} title="Feature Flags" defaultOpen>
-        <FeatureFlagsSection config={config} onSave={saveClient} saving={saving} />
+        <FeatureFlagsSection config={config} onSave={saveClientDetailed} saving={saving} />
       </Section>
 
       {/* Runtime BEHAVIOUR flags (not modules) — same PATCH features path, one key at a time */}
@@ -1037,7 +1044,7 @@ function FeatureFlagsSection({
   saving,
 }: {
   config: ClientConfig;
-  onSave: (patch: ClientPatchBody) => Promise<boolean>;
+  onSave: (patch: ClientPatchBody) => Promise<{ ok: boolean; error?: string }>;
   saving: boolean;
 }) {
   const [pendingKey, setPendingKey] = useState<FeatureKey | null>(null);
@@ -1048,8 +1055,15 @@ function FeatureFlagsSection({
     setPendingKey(key);
     setError(null);
     try {
-      const ok = await onSave({ features: { [key]: next } });
-      if (!ok) setError(`Couldn't update "${FEATURE_META[key].label}". Nothing was changed — please try again.`);
+      const res = await onSave({ features: { [key]: next } });
+      // M1: show the server's reason when it gave one (e.g. Sales Import can't be switched on in this environment).
+      if (!res.ok) {
+        setError(
+          res.error && res.error !== 'Save failed'
+            ? `Couldn't update "${FEATURE_META[key].label}": ${res.error}`
+            : `Couldn't update "${FEATURE_META[key].label}". Nothing was changed — please try again.`,
+        );
+      }
     } finally {
       setPendingKey(null);
     }
