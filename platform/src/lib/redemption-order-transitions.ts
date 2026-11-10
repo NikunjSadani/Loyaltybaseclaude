@@ -29,13 +29,25 @@ export interface TransitionableOrder {
   status: string;
   redemptionMode?: string | null;
   voucherProvider?: string | null;
-  /** The stored voucher code (masked or real) — any non-empty value means "issued". */
+  /** The stored voucher code — any non-empty value means "issued". */
   voucherCode?: string | null;
+  /** Server indicator for viewers who don't receive the code itself (voucherCode is null). */
+  voucherIssued?: boolean;
+  /** The order was sent to Hubble and is stuck for ops — no manual refund (a voucher may exist). */
+  hubbleNeedsReconcile?: boolean;
+  /** Why it is stuck — a "never placed" reason keeps refunds available (mirrors the backend). */
+  hubbleReconcileReason?: string | null;
 }
 
-/** Mirrors the backend `hasIssuedVoucher` (null / '' = none). */
+/** Mirrors backend HUBBLE_NEVER_PLACED_REASONS: set before any Hubble order was placed. */
+export const HUBBLE_NEVER_PLACED_REASONS: ReadonlySet<string> = new Set([
+  'HUBBLE_NOT_CONFIGURED',
+  'HUBBLE_INVALID_AMOUNT',
+]);
+
+/** Mirrors the backend `hasIssuedVoucher` (null / '' / whitespace-only = none). */
 export function hasIssuedVoucher(code: string | null | undefined): boolean {
-  return code != null && code !== '';
+  return typeof code === 'string' && code.trim() !== '';
 }
 
 /**
@@ -49,11 +61,14 @@ export function hasIssuedVoucher(code: string | null | undefined): boolean {
 export function nextStatusOptions(order: TransitionableOrder): string[] {
   const edges = NEXT_STATUS[order.status] ?? [];
   const isCash = CASH_REDEMPTION_MODES.has(order.redemptionMode ?? '');
-  const isHubble = order.voucherProvider === 'Hubble';
-  const voucherIssued = hasIssuedVoucher(order.voucherCode);
+  const isHubble = (order.voucherProvider ?? '').trim().toLowerCase() === 'hubble';
+  const voucherIssued = hasIssuedVoucher(order.voucherCode) || order.voucherIssued === true;
   return edges.filter((to) => {
     if (isCash && (REFUND_TARGETS.has(to) || FORWARD_DISPATCH_TARGETS.has(to))) return false;
-    if ((isHubble || voucherIssued) && REFUND_TARGETS.has(to)) return false;
+    const hubbleBlocksRefund =
+      order.hubbleNeedsReconcile === true &&
+      !(HUBBLE_NEVER_PLACED_REASONS.has(order.hubbleReconcileReason ?? '') && !voucherIssued && !isHubble);
+    if ((isHubble || voucherIssued || hubbleBlocksRefund) && REFUND_TARGETS.has(to)) return false;
     return true;
   });
 }

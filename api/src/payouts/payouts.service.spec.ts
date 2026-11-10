@@ -1273,9 +1273,9 @@ describe('PayoutsService', () => {
         where: { id: 'txn1', status: 'INITIATED' },
         data: expect.objectContaining({ status: 'FAILED' }),
       });
-      // The exact M2 claim shape.
+      // The exact M2 claim shape — plus the issued-voucher refund block (no code on the order).
       expect(mockTx.redemptionOrder.updateMany).toHaveBeenCalledWith({
-        where: { id: 'o1', pointsDeducted: { gt: 0 } },
+        where: { id: 'o1', pointsDeducted: { gt: 0 }, OR: [{ voucherCode: null }, { voucherCode: '' }] },
         data: { pointsDeducted: 0 },
       });
       expect(mockWallet.reverse).toHaveBeenCalledWith(
@@ -1286,7 +1286,7 @@ describe('PayoutsService', () => {
       );
       // Order FAILED write is a guarded claim (never re-FAILs / never duplicates history).
       expect(mockTx.redemptionOrder.updateMany).toHaveBeenCalledWith({
-        where: { id: 'o1', status: { not: 'FAILED' } },
+        where: { id: 'o1', status: { not: 'FAILED' }, OR: [{ voucherCode: null }, { voucherCode: '' }] },
         data: { status: 'FAILED' },
       });
       expect(mockTx.redemptionOrder.update).not.toHaveBeenCalled();
@@ -1354,6 +1354,26 @@ describe('PayoutsService', () => {
         mockTx.redemptionStatusHistory.create.mockResolvedValue({});
       });
 
+      it('FAILED on an order holding a voucher code: order left untouched (no refund, no FAILED flip), reported + logged', async () => {
+        oneTxn();
+        mockTx.redemptionOrder.findFirst.mockResolvedValue({
+          pointsDeducted: 500, partnerId: 'p1', orderNumber: 'RO-1', status: 'CONFIRMED', voucherCode: 'ODD-CODE-1',
+        });
+        const errSpy = jest.spyOn((service as unknown as { logger: { error: (m: string) => void } }).logger, 'error');
+        const res = await service.uploadPayoutUtr(gifsy, 'b1', buildUpload([{ txnId: 'txn1', status: 'FAILED' }]), true);
+        expect(res).toMatchObject({ failedCount: 1, reversedCount: 0 });
+        // The ORDER is left exactly as is: no refund claim, no FAILED flip, no history row.
+        expect(mockTx.redemptionOrder.updateMany).not.toHaveBeenCalled();
+        expect(mockTx.redemptionStatusHistory.create).not.toHaveBeenCalled();
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+        // …and it is reported back for the admin payouts screen.
+        expect(res.blockedOrders).toEqual([
+          expect.objectContaining({ txnId: 'txn1', orderId: 'o1', orderNumber: 'RO-1', reason: expect.stringMatching(/voucher code/) }),
+        ]);
+        expect(errSpy.mock.calls.some(([m]) => /voucher code is on the order/.test(String(m)))).toBe(true);
+        expect(JSON.stringify(errSpy.mock.calls)).not.toContain('ODD-CODE-1');
+      });
+
       it('PAID: the guarded DELIVERED claim is byte-identical and writes ONE DELIVERED history row (actor = uploader)', async () => {
         oneTxn();
         const res = await service.uploadPayoutUtr(gifsy, 'b1', buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]), true);
@@ -1384,14 +1404,14 @@ describe('PayoutsService', () => {
         expect(res).toMatchObject({ applied: true, paidCount: 0, failedCount: 1, reversedCount: 1 });
         expect(mockTx.redemptionOrder.findFirst).toHaveBeenCalledWith({
           where: { id: 'o1' },
-          select: { pointsDeducted: true, partnerId: true, orderNumber: true, status: true },
+          select: { pointsDeducted: true, partnerId: true, orderNumber: true, status: true, voucherCode: true },
         });
         expect(mockWallet.reverse).toHaveBeenCalledTimes(1);
         expect(mockWallet.reverse).toHaveBeenCalledWith('p1', 500, { referenceId: 'o1', description: 'Reversal RO-1' }, mockTx);
         // Two guarded claims on the order: the M2 refund claim, then the FAILED status claim.
         expect(mockTx.redemptionOrder.updateMany).toHaveBeenCalledTimes(2);
         expect(mockTx.redemptionOrder.updateMany).toHaveBeenLastCalledWith({
-          where: { id: 'o1', status: { not: 'FAILED' } },
+          where: { id: 'o1', status: { not: 'FAILED' }, OR: [{ voucherCode: null }, { voucherCode: '' }] },
           data: { status: 'FAILED' },
         });
         expect(mockTx.redemptionOrder.update).not.toHaveBeenCalled();

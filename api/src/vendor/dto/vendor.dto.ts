@@ -9,6 +9,7 @@ import {
   Matches,
   Min,
   MinLength,
+  ValidateIf,
 } from 'class-validator';
 import {
   GiftApprovalPolicy,
@@ -186,12 +187,18 @@ export class VendorFulfilmentDto {
   @IsUrl()
   trackingUrl?: string;
 
-  @IsOptional()
+  // undefined = no change. null / blank is REJECTED: a stored voucher code is only ever cleared
+  // by POST /rewards/orders/:id/voucher-cancelled (voucher-write-guard.ts enforces it too).
+  @ValidateIf((_o, v) => v !== undefined)
   @IsString()
+  @Matches(/\S/, { message: 'voucherCode cannot be blank' })
   voucherCode?: string;
 
-  @IsOptional()
+  // undefined = no change. null / blank is REJECTED: a stored voucher code is only ever cleared
+  // by POST /rewards/orders/:id/voucher-cancelled (voucher-write-guard.ts enforces it too).
+  @ValidateIf((_o, v) => v !== undefined)
   @IsString()
+  @Matches(/\S/, { message: 'voucherProvider cannot be blank' })
   voucherProvider?: string;
 
   @IsOptional()
@@ -230,12 +237,18 @@ export class VendorTransitionDto {
   @IsEnum(VendorTransitionStatus)
   toStatus!: VendorTransitionStatus;
 
-  @IsOptional()
+  // undefined = no change. null / blank is REJECTED: a stored voucher code is only ever cleared
+  // by POST /rewards/orders/:id/voucher-cancelled (voucher-write-guard.ts enforces it too).
+  @ValidateIf((_o, v) => v !== undefined)
   @IsString()
+  @Matches(/\S/, { message: 'voucherCode cannot be blank' })
   voucherCode?: string;
 
-  @IsOptional()
+  // undefined = no change. null / blank is REJECTED: a stored voucher code is only ever cleared
+  // by POST /rewards/orders/:id/voucher-cancelled (voucher-write-guard.ts enforces it too).
+  @ValidateIf((_o, v) => v !== undefined)
   @IsString()
+  @Matches(/\S/, { message: 'voucherProvider cannot be blank' })
   voucherProvider?: string;
 
   @IsOptional()

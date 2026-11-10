@@ -3831,3 +3831,19 @@ enum GiftAmountType {
   FIXED
   FREE_AMOUNT
 }
+
+/// Voucher codes ops recorded as "Voucher cancelled with vendor" — sha256 of the NORMALISED code
+/// (trim + uppercase + no internal whitespace), never the code itself. Tenant-wide reuse guard:
+/// a cancelled code can never be issued again on ANY order of that tenant (voucher-write-guard.ts).
+model CancelledVoucherCode {
+  id            String   @id @default(cuid())
+  clientId      String
+  codeHash      String
+  orderId       String
+  cancelledById String?
+  createdAt     DateTime @default(now())
+
+  @@unique([clientId, codeHash])
+  @@index([orderId])
+  @@map("cancelled_voucher_codes")
+}

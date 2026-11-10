@@ -162,6 +162,24 @@ describe('PAY — UTR upload skipped rows', () => {
     ]);
   });
 
+  it('PAY7: FAILED rows whose order holds a voucher code are listed as "not refunded" (order left unchanged)', async () => {
+    stubUtrFlow({
+      applied: true, paidCount: 0, failedCount: 1, reversedCount: 0, skipped: [],
+      blockedOrders: [
+        { rowNum: 4, txnId: 'txn-b', orderId: 'o9', orderNumber: 'RDM-9',
+          reason: 'A voucher code is on this order — points not refunded and order left unchanged; needs ops review' },
+      ],
+    });
+    await uploadFile();
+    const box = await screen.findByTestId('utr-blocked-orders');
+    expect(within(box).getByText('1 order not refunded (voucher code on the order)')).toBeInTheDocument();
+    expect(within(box).getByRole('listitem').textContent).toBe(
+      'Row 4 (RDM-9): A voucher code is on this order — points not refunded and order left unchanged; needs ops review',
+    );
+    // No "rows not applied" header when only blocked orders are present.
+    expect(screen.queryByText(/rows? not applied/)).not.toBeInTheDocument();
+  });
+
   it('PAY6: no skipped block when nothing was skipped (or an older API omits the field)', async () => {
     stubUtrFlow({ applied: true, paidCount: 2, failedCount: 1, reversedCount: 1 });
     await uploadFile();

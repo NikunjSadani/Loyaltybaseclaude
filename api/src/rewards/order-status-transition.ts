@@ -104,16 +104,32 @@ export const REFUND_TARGET_STATUSES: ReadonlySet<RedemptionStatus> = new Set([
 export const VOUCHER_ISSUED_REFUND_BLOCK_MESSAGE =
   "A voucher code was issued for this order. Record 'Voucher cancelled with vendor' first, then refund.";
 
-/** True when a voucher code is stored on the order — exactly the complement of
- *  NO_ISSUED_VOUCHER_GUARD (null / '' = none), so the read check and the claim never disagree. */
+/**
+ * True when a voucher code is stored on the order. ONE notion everywhere (here, planVoucherWrite,
+ * the FE): null, '' and whitespace-only are all "no code".
+ */
 export function hasIssuedVoucher(code: string | null | undefined): boolean {
-  return code != null && code !== '';
+  return typeof code === 'string' && code.trim() !== '';
 }
 
-/** Claim predicate: the row holds NO issued voucher code at write time. */
+/** Claim predicate: the row holds NO issued voucher code (null / '') at write time. */
 export const NO_ISSUED_VOUCHER_GUARD: Prisma.RedemptionOrderWhereInput = {
   OR: [{ voucherCode: null }, { voucherCode: '' }],
 };
+
+/**
+ * The no-issued-voucher claim for a row whose code was READ as `readCode`. Identical to
+ * NO_ISSUED_VOUCHER_GUARD, except for a legacy whitespace-only value ("no code" by
+ * hasIssuedVoucher): Prisma can't trim, so the claim pins that exact value instead — the read
+ * check and the claim then agree (no permanent 409 loop), and a real code written concurrently
+ * still makes the claim lose.
+ */
+export function noIssuedVoucherGuard(readCode: string | null | undefined): Prisma.RedemptionOrderWhereInput {
+  if (typeof readCode === 'string' && readCode !== '' && readCode.trim() === '') {
+    return { voucherCode: readCode };
+  }
+  return NO_ISSUED_VOUCHER_GUARD;
+}
 
 export interface CompareAndSetTransition {
   orderId: string;

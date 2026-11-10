@@ -56,6 +56,22 @@ describe('redemption-order transitions', () => {
       .toEqual(['PROCESSING', 'CANCELLED', 'RETURNED']);
   });
 
+  it('Hubble "never placed" reasons keep refund targets; every other reconcile reason hides them', () => {
+    for (const r of ['HUBBLE_NOT_CONFIGURED', 'HUBBLE_INVALID_AMOUNT']) {
+      expect(nextStatusOptions({ status: 'CONFIRMED', redemptionMode: 'GIFT_CARD', hubbleNeedsReconcile: true, hubbleReconcileReason: r }))
+        .toEqual(['PROCESSING', 'CANCELLED', 'RETURNED']);
+    }
+    for (const r of ['HUBBLE_INDETERMINATE', 'HUBBLE_PROCESSING_NOT_FOUND', 'HUBBLE_SUCCESS_NO_CODE', 'HUBBLE_UNKNOWN_STATUS:X', 'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT', 'HUBBLE_UNEXPECTED', null]) {
+      expect(nextStatusOptions({ status: 'CONFIRMED', redemptionMode: 'GIFT_CARD', hubbleNeedsReconcile: true, hubbleReconcileReason: r }))
+        .toEqual(['PROCESSING']);
+    }
+    // A never-placed reason with a code or a Hubble provider is still blocked.
+    expect(nextStatusOptions({ status: 'CONFIRMED', redemptionMode: 'GIFT_CARD', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_NOT_CONFIGURED', voucherCode: 'X' }))
+      .toEqual(['PROCESSING']);
+    expect(nextStatusOptions({ status: 'CONFIRMED', redemptionMode: 'GIFT_CARD', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_NOT_CONFIGURED', voucherProvider: 'Hubble' }))
+      .toEqual(['PROCESSING']);
+  });
+
   it('a physical gift gets the full edge set', () => {
     expect(nextStatusOptions({ status: 'CONFIRMED', redemptionMode: 'PHYSICAL_GIFT' }))
       .toEqual(['PROCESSING', 'CANCELLED', 'RETURNED']);

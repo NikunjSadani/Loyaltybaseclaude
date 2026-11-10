@@ -46,7 +46,7 @@ import { useAdminSession } from '@/lib/admin-session';
 import { redemptionModeLabel, canonicalRedemptionMode, CASH_REDEMPTION_MODES } from '@/lib/redemption-mode';
 import { usePermissions } from '@/lib/use-permissions';
 import { derivePointsCost, parseRupeesToPaise } from '@/lib/gift-catalogue';
-import { nextStatusOptions, hasIssuedVoucher, REFUND_TARGETS } from '@/lib/redemption-order-transitions';
+import { nextStatusOptions, hasIssuedVoucher, REFUND_TARGETS, HUBBLE_NEVER_PLACED_REASONS } from '@/lib/redemption-order-transitions';
 import type { GifsySettings } from '@/types';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
@@ -99,8 +99,13 @@ interface OrderItem {
   redemptionMode?: PayoutMode | string | null;
   totalPointsCost: number;
   voucherCode?: string | null;
-  /** True when the server masked voucherCode ("••••" + last 4) — the tenant-admin view. */
+  /** True when the server withheld the code (voucherCode null) — CLIENT_ADMIN / read-only staff. */
   voucherCodeMasked?: boolean;
+  /** Server indicator that a code is issued, for viewers who don't receive the code itself. */
+  voucherIssued?: boolean;
+  /** Operator view: the order was sent to Hubble and needs ops (retry or manual fulfilment). */
+  hubbleNeedsReconcile?: boolean;
+  hubbleReconcileReason?: string | null;
   voucherProvider?: string | null;
   trackingNumber?: string | null;
   trackingUrl?: string | null;
@@ -1260,7 +1265,25 @@ interface TransitionDraft {
 
 /** Fields of a transition / voucher-cancel response's order that the queue row displays. */
 type OrderPatch = Pick<OrderItem, 'id'> &
-  Partial<Pick<OrderItem, 'status' | 'voucherCode' | 'voucherProvider' | 'trackingNumber' | 'trackingUrl' | 'updatedAt'>>;
+  Partial<Pick<OrderItem,
+    'status' | 'voucherCode' | 'voucherProvider' | 'trackingNumber' | 'trackingUrl' | 'updatedAt'
+    | 'hubbleNeedsReconcile' | 'hubbleReconcileReason'>>;
+
+/** Human copy for the backend's Hubble reconcile reasons (fallback: the raw code). */
+const HUBBLE_REASON_LABEL: Record<string, string> = {
+  HUBBLE_NOT_CONFIGURED: 'Hubble not configured',
+  HUBBLE_INVALID_AMOUNT: 'Amount not issuable on Hubble',
+  HUBBLE_SUCCESS_NO_CODE: 'Hubble succeeded without a code',
+  HUBBLE_PROCESSING_NOT_FOUND: 'Hubble has no record of this order',
+  HUBBLE_INDETERMINATE: 'Hubble state unknown',
+  HUBBLE_UNEXPECTED: 'Unexpected Hubble error',
+  HUBBLE_SUCCESS_MANUAL_CODE_PRESENT: 'Hubble issued a voucher on top of a manual code',
+  HUBBLE_FAILED_VOUCHER_PRESENT: 'Hubble failed but a code is on the order',
+  HUBBLE_PROCESSING_AFTER_MANUAL: 'Hubble processing after a manual takeover',
+  HUBBLE_PROCESSING_CLAIM_LOST: 'Order changed while Hubble was processing',
+};
+const hubbleReasonLabel = (r?: string | null) =>
+  !r ? 'Needs review' : HUBBLE_REASON_LABEL[r] ?? (r.startsWith('HUBBLE_UNKNOWN_STATUS') ? 'Unknown Hubble status' : r);
 
 const FORWARD_VOUCHER_TARGETS = new Set(['PROCESSING', 'DISPATCHED', 'DELIVERED']);
 
@@ -1280,13 +1303,16 @@ function OrderRow({
   /** GIFSY_ADMIN only — may record "Voucher cancelled with vendor". */
   canCancelVoucher: boolean;
 }) {
-  const voucherIssued = hasIssuedVoucher(order.voucherCode);
-  const isHubble = order.voucherProvider === 'Hubble';
+  const voucherIssued = hasIssuedVoucher(order.voucherCode) || order.voucherIssued === true;
+  const isHubble = (order.voucherProvider ?? '').trim().toLowerCase() === 'hubble';
   const options = nextStatusOptions({
     status: order.status,
     redemptionMode: order.redemptionMode ?? order.reward?.redemptionMode ?? null,
     voucherProvider: order.voucherProvider ?? null,
     voucherCode: order.voucherCode ?? null,
+    voucherIssued: order.voucherIssued,
+    hubbleNeedsReconcile: order.hubbleNeedsReconcile,
+    hubbleReconcileReason: order.hubbleReconcileReason,
   });
   // Refund edges the backend would allow for this status, hidden ONLY because a code is issued —
   // the "Voucher cancelled with vendor" action is what unlocks them.
@@ -1308,13 +1334,66 @@ function OrderRow({
   const [cancelReason, setCancelReason] = useState('');
   const [cancelBusy, setCancelBusy] = useState(false);
   const [cancelErr, setCancelErr] = useState('');
+  // Hubble ops exits (GIFSY_ADMIN): "Retry with Hubble" + "Fulfil manually" (reasoned override).
+  const needsReconcile = order.hubbleNeedsReconcile === true;
+  // "Retry with Hubble" only re-reads an EXISTING Hubble order — pointless when none was ever placed
+  // (not configured / invalid amount); those keep refund + "Fulfil manually".
+  const canRetryHubble = needsReconcile && !HUBBLE_NEVER_PLACED_REASONS.has(order.hubbleReconcileReason ?? '');
+  const [retryBusy, setRetryBusy] = useState(false);
+  const [retryMsg, setRetryMsg] = useState('');
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualCode, setManualCode] = useState('');
+  const [manualProvider, setManualProvider] = useState('');
+  const [manualReason, setManualReason] = useState('');
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualErr, setManualErr] = useState('');
+
+  const retryWithHubble = async () => {
+    setRetryBusy(true); setRetryMsg('');
+    try {
+      const res = await apiJson<{ outcome?: string } | null>(`/api/rewards/orders/${order.id}/hubble-reconcile`, { method: 'POST' });
+      setRetryMsg(`Hubble: ${res?.outcome ?? 'done'}`);
+      onTransitioned(null); // the outcome may move status / code → re-fetch the window
+    } catch (e) {
+      setRetryMsg(e instanceof Error ? e.message : 'Retry failed');
+    } finally {
+      setRetryBusy(false);
+    }
+  };
+
+  const fulfilManually = async () => {
+    const code = manualCode.trim();
+    const reason = manualReason.trim();
+    if (!code || !reason) { setManualErr('A voucher code and a reason are required.'); return; }
+    setManualBusy(true); setManualErr('');
+    try {
+      const body: Record<string, unknown> = { voucherCode: code, manualOverride: true, overrideReason: reason };
+      if (manualProvider.trim()) body.voucherProvider = manualProvider.trim();
+      const res = await apiJson<{ order?: OrderPatch } | null>(`/api/rewards/orders/${order.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      });
+      setManualOpen(false);
+      onTransitioned({
+        id: order.id,
+        voucherCode: res?.order?.voucherCode ?? code,
+        voucherProvider: res?.order?.voucherProvider ?? (manualProvider.trim() || 'Manual'),
+        hubbleNeedsReconcile: false,
+        hubbleReconcileReason: null,
+      });
+    } catch (e) {
+      setManualErr(e instanceof Error ? e.message : 'Manual fulfilment failed');
+    } finally {
+      setManualBusy(false);
+    }
+  };
 
   const isVoucher = VOUCHER_LIKE.has(order.redemptionMode ?? order.reward?.redemptionMode ?? '');
   // The voucher code is captured on a FORWARD move (PENDING→CONFIRMED is the member's OTP, not a
   // console edge). Only when NO code is on the order yet (an existing code is shown read-only)
   // and never for Hubble (auto-issued by the integration).
   const advancingForwardWithVoucher =
-    isVoucher && !voucherIssued && !isHubble && FORWARD_VOUCHER_TARGETS.has(draft.toStatus);
+    isVoucher && !voucherIssued && !isHubble && !needsReconcile && FORWARD_VOUCHER_TARGETS.has(draft.toStatus);
   const advancingToDispatched = draft.toStatus === 'DISPATCHED';
 
   const submit = async () => {
@@ -1380,19 +1459,28 @@ function OrderRow({
           <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full border ${ORDER_STATUS_BADGE[order.status] ?? ORDER_STATUS_BADGE.REVERSED}`}>
             {order.status}
           </span>
-          {order.voucherCode && (
-            <span
-              className="block mt-1 text-[10px] font-mono text-emerald-600"
-              title={order.voucherCodeMasked ? 'Voucher code (masked)' : undefined}
-              data-testid="order-voucher-code"
-            >
+          {/* View-only viewers never receive the code — the server sends only an "issued" flag. */}
+          {hasIssuedVoucher(order.voucherCode) ? (
+            <span className="block mt-1 text-[10px] font-mono text-emerald-600" data-testid="order-voucher-code">
               {order.voucherCode}
-              {order.voucherCodeMasked && <span className="sr-only"> (masked)</span>}
             </span>
-          )}
+          ) : order.voucherIssued ? (
+            <span className="block mt-1 text-[10px] font-semibold text-emerald-600" data-testid="order-voucher-code">
+              Voucher issued
+            </span>
+          ) : null}
           {order.trackingNumber && (
             <span className="block mt-1 text-[10px] text-gray-500 flex items-center gap-1">
               <Truck className="h-2.5 w-2.5" />{order.trackingNumber}
+            </span>
+          )}
+          {needsReconcile && (
+            <span
+              className="block mt-1 text-[10px] font-semibold text-amber-700"
+              data-testid="hubble-needs-reconcile"
+              title={order.hubbleReconcileReason ?? undefined}
+            >
+              Needs reconcile · {hubbleReasonLabel(order.hubbleReconcileReason)}
             </span>
           )}
         </td>
@@ -1417,10 +1505,95 @@ function OrderRow({
                   Voucher cancelled with vendor…
                 </button>
               )}
+              {canCancelVoucher && needsReconcile && (
+                <>
+                  {canRetryHubble && (
+                    <button
+                      onClick={retryWithHubble}
+                      disabled={retryBusy}
+                      aria-busy={retryBusy}
+                      className="text-[10px] font-semibold text-[var(--brand-primary)] hover:underline disabled:opacity-50"
+                    >
+                      {retryBusy ? 'Retrying…' : 'Retry with Hubble'}
+                    </button>
+                  )}
+                  {!voucherIssued && (
+                    <button
+                      onClick={() => { setManualOpen((o) => !o); setManualErr(''); }}
+                      className="text-[10px] font-semibold text-amber-700 hover:underline"
+                    >
+                      Fulfil manually…
+                    </button>
+                  )}
+                  {retryMsg && <span className="text-[10px] text-gray-500" role="status">{retryMsg}</span>}
+                </>
+              )}
             </div>
           </td>
         )}
       </tr>
+      {canManage && canCancelVoucher && needsReconcile && manualOpen && (
+        <tr>
+          <td colSpan={7} className="px-4 py-4 bg-amber-50/50">
+            <div className="space-y-2 max-w-2xl">
+              <p className="text-xs text-gray-700">
+                Fulfil this Hubble order manually: issue a voucher code yourself. This takes the order over from Hubble
+                and is logged with your reason. Use it only if Hubble did not issue a voucher.
+              </p>
+              <div className="flex flex-wrap gap-3">
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-700" htmlFor={`mo-code-${order.id}`}>Voucher code *</label>
+                  <input
+                    id={`mo-code-${order.id}`}
+                    value={manualCode}
+                    onChange={(e) => setManualCode(e.target.value)}
+                    className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-700" htmlFor={`mo-prov-${order.id}`}>Provider</label>
+                  <input
+                    id={`mo-prov-${order.id}`}
+                    value={manualProvider}
+                    onChange={(e) => setManualProvider(e.target.value)}
+                    placeholder="Manual"
+                    className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+                  />
+                </div>
+              </div>
+              <label className="text-xs font-medium text-gray-700" htmlFor={`mo-reason-${order.id}`}>Reason *</label>
+              <input
+                id={`mo-reason-${order.id}`}
+                value={manualReason}
+                onChange={(e) => setManualReason(e.target.value)}
+                maxLength={500}
+                placeholder="e.g. Hubble down — issued from the Gifsy pool"
+                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+              />
+              {manualErr && (
+                <div className="flex items-center gap-2 text-xs text-red-600" role="alert">
+                  <XCircle className="w-3.5 h-3.5 shrink-0" /> {manualErr}
+                </div>
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={fulfilManually}
+                  disabled={manualBusy || !manualCode.trim() || !manualReason.trim()}
+                  className="px-4 py-2 bg-amber-600 text-white rounded-lg text-xs font-semibold hover:bg-amber-700 disabled:opacity-50"
+                >
+                  {manualBusy ? 'Saving…' : 'Confirm manual fulfilment'}
+                </button>
+                <button
+                  onClick={() => setManualOpen(false)}
+                  className="px-4 py-2 border border-gray-200 rounded-lg text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
       {canManage && canCancelVoucher && cancelOpen && (
         <tr>
           <td colSpan={7} className="px-4 py-4 bg-red-50/40">
@@ -1781,7 +1954,7 @@ function FulfilmentQueue({
     const filter = statusRef.current;
     const leaves = filter !== 'all' && updated.status != null && updated.status !== filter;
     const patch: Partial<OrderItem> = {};
-    for (const k of ['status', 'voucherCode', 'voucherProvider', 'trackingNumber', 'trackingUrl', 'updatedAt'] as const) {
+    for (const k of ['status', 'voucherCode', 'voucherProvider', 'trackingNumber', 'trackingUrl', 'updatedAt', 'hubbleNeedsReconcile', 'hubbleReconcileReason'] as const) {
       if (updated[k] !== undefined) (patch as Record<string, unknown>)[k] = updated[k];
     }
     setOrders((prev) => (leaves
@@ -2032,7 +2205,7 @@ function FulfilmentQueue({
                     remounts the row and its "Advance to" draft re-initialises from the NEW options. */}
                 {orders.map((o) => (
                   <OrderRow
-                    key={`${o.id}:${o.status}:${o.voucherCode ? 'v' : '-'}`}
+                    key={`${o.id}:${o.status}:${o.voucherCode || o.voucherIssued ? 'v' : '-'}:${o.hubbleNeedsReconcile ? 'r' : '-'}`}
                     order={o}
                     onTransitioned={applyOrderUpdate}
                     canManage={canManage}

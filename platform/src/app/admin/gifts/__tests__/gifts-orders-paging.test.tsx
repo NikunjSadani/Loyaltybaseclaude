@@ -114,7 +114,7 @@ describe('GIFP — admin fulfilment queue paging', () => {
 
     expect(new URLSearchParams(orderUrls[1].split('?')[1]).get('cursor')).toBe('c1');
     expect(new URLSearchParams(orderUrls[2].split('?')[1]).get('cursor')).toBe('c2');
-  });
+  }, 15_000); // renders 205 rows across 3 pages — slow under full-suite load, not async-flaky
 
   it('GIFP3: the status filter is sent SERVER-side on the first page AND on load-more; total follows the filter', async () => {
     const { orderUrls } = installFetch((qs) => {

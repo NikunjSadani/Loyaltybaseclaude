@@ -14,7 +14,9 @@ import {
 } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { RewardsService, decodeOrderCursor, encodeOrderCursor, maskVoucherCode } from './rewards.service';
+import { hashVoucherCode } from './voucher-write-guard';
 import { PrismaService } from '../prisma/prisma.service';
+import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -22,8 +24,8 @@ import { Msg91Service } from '../notifications/msg91.service';
 import { HubbleService } from '../hubble/hubble.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
-  AdminListCatalogQueryDto, ListOrdersQueryDto, ORDERS_LIST_MAX_LIMIT, UpdatableOrderStatus,
-  VoucherCancelledWithVendorDto,
+  AdminListCatalogQueryDto, ListOrdersQueryDto, ORDERS_LIST_MAX_LIMIT, TransitionOrderDto, UpdatableOrderStatus,
+  UpdateOrderDto, VoucherCancelledWithVendorDto,
 } from './dto/rewards.dto';
 import { validate } from 'class-validator';
 import { parseFulfilmentUploadBuffer } from './rewards-fulfilment.helpers';
@@ -35,6 +37,8 @@ jest.mock('../common/reward-account.helper', () => ({
 }));
 
 const mockPrisma = {
+  // Tenant-wide cancelled-voucher reuse guard (voucher-write-guard.ts) — default: never cancelled.
+  cancelledVoucherCode: { findFirst: jest.fn().mockResolvedValue(null), createMany: jest.fn().mockResolvedValue({ count: 1 }) },
   channelPartner: { findFirst: jest.fn() },
   // findMany = the tenant-scoped reporting edges for the downline walk (requireAssignedPartner).
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
@@ -78,6 +82,9 @@ const mockPrisma = {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   $transaction: jest.fn((fn: (tx: any) => unknown) => fn(mockPrisma)),
 };
+
+// RBAC Option-X — a GIFSY_STAFF user's resolved GifsyRole permissions (default: none).
+const mockGifsyRoles = { getPermissions: jest.fn() };
 
 const mockWallet = {
   debitRedeem: jest.fn(),
@@ -169,9 +176,11 @@ describe('RewardsService', () => {
         { provide: NotificationsService, useValue: mockNotifications },
         { provide: Msg91Service, useValue: mockMsg91 },
         { provide: HubbleService, useValue: mockHubble },
+        { provide: GifsyRoleService, useValue: mockGifsyRoles },
       ],
     }).compile();
     service = module.get(RewardsService);
+    mockGifsyRoles.getPermissions.mockResolvedValue(new Set());
     mockSettings = LENIENT_SETTINGS();
     // Hubble feature flag OFF by default → the legacy confirm tests are byte-identical
     // (no Hubble call). The dedicated Hubble block flips this on per-case.
@@ -823,7 +832,7 @@ describe('RewardsService', () => {
       expect(where.AND[0]).toEqual({ partner: { clientId: 'tenantA' } });
     });
 
-    it('CLIENT_ADMIN never receives a live voucher code — masked to the last 4 + voucherCodeMasked', async () => {
+    it('CLIENT_ADMIN never receives ANY character of a voucher code — null + voucherIssued indicator', async () => {
       const at = new Date('2026-10-01T10:00:00.000Z');
       mockPrisma.redemptionOrder.findMany.mockResolvedValue([
         { id: 'o1', status: 'DELIVERED', voucherCode: 'AMZN-1234-5678-WXYZ', voucherProvider: 'Gifsy', createdAt: at, updatedAt: at },
@@ -833,16 +842,14 @@ describe('RewardsService', () => {
       mockPrisma.redemptionOrder.count.mockResolvedValue(3);
 
       const res = await service.listOrders(clientAdminA, {});
-      const [a, b, c] = res.orders as Array<{ voucherCode: string | null; voucherCodeMasked?: boolean }>;
+      const [a, b, c] = res.orders as Array<{ voucherCode: string | null; voucherIssued?: boolean; voucherCodeMasked?: boolean }>;
 
-      expect(a.voucherCode).toBe('••••WXYZ');
-      expect(a.voucherCodeMasked).toBe(true);
-      expect(b.voucherCode).toBe('••••'); // short code → fully masked (never reconstructable)
-      expect(b.voucherCodeMasked).toBe(true);
-      expect(c.voucherCode).toBeNull();
-      expect(c.voucherCodeMasked).toBeUndefined();
-      expect(JSON.stringify(res)).not.toContain('AMZN-1234-5678');
-      expect(JSON.stringify(res)).not.toContain('ABC12');
+      expect(a).toMatchObject({ voucherCode: null, voucherIssued: true, voucherCodeMasked: true });
+      expect(b).toMatchObject({ voucherCode: null, voucherIssued: true, voucherCodeMasked: true });
+      expect(c).toMatchObject({ voucherCode: null, voucherIssued: false, voucherCodeMasked: false });
+      const body = JSON.stringify(res);
+      // No part of any code — not even the last 4.
+      for (const frag of ['AMZN', '1234', '5678', 'WXYZ', 'ABC12', 'BC12']) expect(body).not.toContain(frag);
     });
 
     it('GIFSY and the member (own orders) still receive the real voucher code', async () => {
@@ -1064,23 +1071,21 @@ describe('RewardsService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith({
         where: { id: 'o9', partner: { clientId: 'deoleo' } },
+        include: { partner: { select: { clientId: true } } },
       });
     });
 
-    it('updates tracking/voucher/notes (NON-status) within the tenant', async () => {
-      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'o1' });
+    it('updates tracking/notes (NON-status) within the tenant — no voucher write → plain update', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'o1', status: 'CONFIRMED', pointsDeducted: 500, voucherCode: null, voucherProvider: null });
       mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', trackingNumber: 'TN1' });
       const res = await service.updateOrder(gifsy, 'o1', {
         trackingNumber: 'TN1',
-        voucherCode: 'GC-XYZ',
       });
       expect(mockPrisma.redemptionOrder.update).toHaveBeenCalledWith({
         where: { id: 'o1' },
         data: {
           trackingNumber: 'TN1',
           trackingUrl: undefined,
-          voucherCode: 'GC-XYZ',
-          voucherProvider: undefined,
           notes: undefined,
         },
       });
@@ -3195,6 +3200,7 @@ describe('RewardsService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith({
         where: { id: 'o9', partner: { clientId: 'deoleo' } },
+        include: { partner: { select: { clientId: true } } },
       });
     });
 
@@ -3205,6 +3211,7 @@ describe('RewardsService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith({
         where: { id: 'o9' },
+        include: { partner: { select: { clientId: true } } },
       });
     });
 
@@ -3416,9 +3423,21 @@ describe('RewardsService', () => {
         const res = await service.voucherCancelledWithVendor(gifsy, 'o1', '  Vendor ref VC-77 refunded  ');
 
         expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
-          where: { id: 'o1', voucherCode: 'AMZN-1234-5678-WXYZ' },
+          where: {
+            id: 'o1', voucherCode: 'AMZN-1234-5678-WXYZ',
+            OR: [{ voucherProvider: null }, { NOT: { voucherProvider: { equals: 'hubble', mode: 'insensitive' } } }],
+          },
           data: { voucherCode: null, voucherProvider: null },
         });
+        // Tenant-wide reuse record: sha256 of the NORMALISED code (never the code itself).
+        expect(mockPrisma.cancelledVoucherCode.createMany).toHaveBeenCalledWith({
+          data: [{ clientId: 'deoleo', codeHash: hashVoucherCode('amzn-1234-5678-wxyz'), orderId: 'o1', cancelledById: 'admin1' }],
+          skipDuplicates: true,
+        });
+        expect(JSON.stringify(mockPrisma.cancelledVoucherCode.createMany.mock.calls)).not.toContain('AMZN');
+        // F4: the post-write re-read never selects the code.
+        const reread = mockPrisma.redemptionOrder.findUniqueOrThrow.mock.calls[0][0];
+        expect(reread.select).not.toHaveProperty('voucherCode');
         const audit = mockPrisma.auditLog.create.mock.calls[0][0].data;
         expect(audit).toMatchObject({ actorId: 'admin1', action: 'UPDATE', entityType: 'REDEMPTION_ORDER', entityId: 'o1' });
         expect(audit.metadata).toMatchObject({
@@ -3487,6 +3506,550 @@ describe('RewardsService', () => {
         expect(await errs({})).toEqual(['reason']);
         expect(await errs({ reason: 'x'.repeat(501) })).toEqual(['reason']);
       });
+    });
+  });
+
+  // ─── VOUCHER WRITE INVARIANT + code visibility (money + identity audits) ─────────────────
+  // "A stored voucher code can never be cleared or replaced except by POST voucher-cancelled."
+  describe('voucher write invariant', () => {
+    const paid = (extra: Record<string, unknown> = {}) => ({
+      id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'RDM-w', pointsDeducted: 500,
+      redemptionMode: 'GIFT_CARD', voucherCode: null, voucherProvider: null, ...extra,
+    });
+    const issued = (extra: Record<string, unknown> = {}) => paid({ voucherCode: 'AMZN-1234-5678-WXYZ', voucherProvider: 'Gifsy', ...extra });
+    afterEach(() => {
+      mockPrisma.redemptionOrder.findFirst.mockReset();
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockReset();
+    });
+    const noWrite = () => {
+      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+    };
+
+    describe('updateOrder (PATCH + bulk non-status rows)', () => {
+      it('clearing a stored code (null) is rejected, so the refund block still holds', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(issued());
+        await expect(service.updateOrder(gifsy, 'o1', { voucherCode: null as never })).rejects.toThrow(/cleared or blank/);
+        noWrite();
+        await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }))
+          .rejects.toThrow(/Voucher cancelled with vendor/);
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['blank code', { voucherCode: '   ' }],
+        ['null provider', { voucherProvider: null }],
+        ['blank provider', { voucherProvider: '' }],
+      ])('%s is a 400 with no write', async (_n, dto) => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid());
+        await expect(service.updateOrder(gifsy, 'o1', dto as never)).rejects.toBeInstanceOf(BadRequestException);
+        noWrite();
+      });
+
+      it('overwriting a stored code is a 400 "already issued" with no write', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(issued());
+        await expect(service.updateOrder(gifsy, 'o1', { voucherCode: 'OTHER-CODE-0000' }))
+          .rejects.toThrow("A voucher code is already issued; use 'Voucher cancelled with vendor' first.");
+        noWrite();
+      });
+
+      it('re-sending the SAME stored code is an idempotent no-op (no voucher column written)', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(issued());
+        mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1' });
+        await service.updateOrder(gifsy, 'o1', { voucherCode: '  AMZN-1234-5678-WXYZ ', trackingNumber: 'TN' });
+        const data = mockPrisma.redemptionOrder.update.mock.calls[0][0].data;
+        expect(data).not.toHaveProperty('voucherCode');
+        expect(data.trackingNumber).toBe('TN');
+      });
+
+      it('a NEW code on a paid open order is a CAS (no code stored + writable status + paid); a lost claim is a 409', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid());
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1', voucherCode: 'NEW-CODE-1' });
+        await service.updateOrder(gifsy, 'o1', { voucherCode: ' NEW-CODE-1 ' });
+        const call = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+        expect(call.data.voucherCode).toBe('NEW-CODE-1');
+        expect(call.where.id).toBe('o1');
+        expect(call.where.AND).toEqual(expect.arrayContaining([
+          { OR: [{ voucherCode: null }, { voucherCode: '' }] },
+          { status: { in: ['CONFIRMED', 'PROCESSING', 'DISPATCHED'] } },
+          { pointsDeducted: { gt: 0 } },
+        ]));
+
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 });
+        await expect(service.updateOrder(gifsy, 'o1', { voucherCode: 'NEW-CODE-2' })).rejects.toBeInstanceOf(ConflictException);
+      });
+
+      it.each([
+        ['CANCELLED', { status: 'CANCELLED', pointsDeducted: 0 }],
+        ['PENDING', { status: 'PENDING', pointsDeducted: 0 }],
+        ['RETURNED', { status: 'RETURNED', pointsDeducted: 0 }],
+        ['DELIVERED', { status: 'DELIVERED' }],
+        ['unpaid CONFIRMED', { pointsDeducted: 0 }],
+      ])('a code on a %s order is a 400 with no write', async (_n, extra) => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid(extra));
+        await expect(service.updateOrder(gifsy, 'o1', { voucherCode: 'LATE-CODE-1' }))
+          .rejects.toThrow(/only be issued on a confirmed, paid order/);
+        noWrite();
+      });
+
+      it('a stored Hubble provider can never be relabelled, and Hubble is never hand-set', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid({ voucherProvider: 'Hubble' }));
+        await expect(service.updateOrder(gifsy, 'o1', { voucherProvider: 'Gifsy' })).rejects.toThrow(/Hubble integration/);
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid());
+        await expect(service.updateOrder(gifsy, 'o1', { voucherProvider: 'hubble' })).rejects.toThrow("The 'Hubble' provider is set by the integration only.");
+        noWrite();
+      });
+
+      it('bulk upload: a blank-status row writing a code on a refunded order is a ROW error (no write)', async () => {
+        mockPrisma.redemptionOrder.findFirst
+          .mockResolvedValueOnce({ id: 'o1' })
+          .mockResolvedValueOnce(paid({ status: 'CANCELLED', pointsDeducted: 0 }));
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const XLSX = require('xlsx');
+        const ws = XLSX.utils.aoa_to_sheet([
+          ['Order Number', 'Reward', 'Mode', 'Current Status', 'Voucher Code', 'Voucher Provider', 'Tracking Number', 'Tracking URL', 'New Status'],
+          ['RDM-w', 'X', 'GIFT_CARD', 'CANCELLED', 'LATE-CODE-9', '', '', '', ''],
+        ]);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Fulfilment');
+        const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+        const res = await service.uploadFulfilment(gifsy, { buffer, originalname: 'f.xlsx' } as Express.Multer.File);
+        expect(res.failed).toBe(1);
+        expect(res.errors[0].message).toMatch(/only be issued on a confirmed, paid order/);
+        noWrite();
+      });
+
+      // ── Re-audit of 9ea8fd5 ──
+      it.each([
+        ['stored provider "HUBBLE" (any case)', { voucherProvider: 'HUBBLE' }],
+        ['hubbleNeedsReconcile flag', { metadata: { hubbleNeedsReconcile: true } }],
+        ['a Hubble order id in metadata', { metadata: { hubbleOrderId: 'hub-9' } }],
+        ['hubbleStatus PROCESSING', { metadata: { hubbleStatus: 'PROCESSING' } }],
+      ])('a Hubble-managed order (%s) refuses ANY manual voucher write', async (_n, extra) => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid(extra));
+        await expect(service.updateOrder(gifsy, 'o1', { voucherCode: 'MANUAL-1' })).rejects.toThrow(/Hubble integration/);
+        noWrite();
+      });
+
+      it('merely Hubble-ELIGIBLE (flag turned on later, never sent to Hubble — no marker) does NOT block a manual code', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid({ rewardId: 'r1' }));
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1' });
+        await service.updateOrder(gifsy, 'o1', { voucherCode: 'MANUAL-1' });
+        expect(mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].data.voucherCode).toBe('MANUAL-1');
+        // No eligibility lookup at all.
+        expect(mockPrisma.rewardCatalog.findFirst).not.toHaveBeenCalled();
+      });
+
+      it.each(['UPI', 'BANK_TRANSFER'])('a cash (%s) redemption refuses a voucher code', async (mode) => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid({ redemptionMode: mode }));
+        await expect(service.updateOrder(gifsy, 'o1', { voucherCode: 'CODE-1' })).rejects.toThrow('A cash redemption cannot carry a voucher code.');
+        noWrite();
+      });
+
+      it('a code CANCELLED anywhere in the tenant can never be re-written (normalised: case + whitespace)', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid({ partner: { clientId: 'bajaj' } }));
+        mockPrisma.cancelledVoucherCode.findFirst.mockResolvedValueOnce({ id: 'cv1' });
+        await expect(service.updateOrder(gifsy, 'o1', { voucherCode: '  amzn-1234 5678-wxyz ' }))
+          .rejects.toThrow("This voucher code was cancelled with the vendor and can't be reused.");
+        // Looked up in the ORDER's tenant by the normalised hash.
+        expect(mockPrisma.cancelledVoucherCode.findFirst).toHaveBeenCalledWith({
+          where: { clientId: 'bajaj', codeHash: hashVoucherCode('AMZN-12345678-WXYZ') },
+          select: { id: true },
+        });
+        noWrite();
+        // A different code is fine.
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1' });
+        await service.updateOrder(gifsy, 'o1', { voucherCode: 'FRESH-CODE-2' });
+      });
+
+      it('the new-code CAS also pins the row version (updatedAt) as read', async () => {
+        const at = new Date('2026-11-01T10:00:00.000Z');
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid({ updatedAt: at }));
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1' });
+        await service.updateOrder(gifsy, 'o1', { voucherCode: 'NEW-9' });
+        expect(mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].where.AND).toEqual(
+          expect.arrayContaining([{ updatedAt: at }]),
+        );
+      });
+
+      it('a NEW code via PATCH writes an AuditLog row (masked code, actor, path) and notifies the member', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid());
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1' });
+        const notifySpy = jest.spyOn(service as unknown as { notifyVoucherIssued: (a: string, b: string) => Promise<void> }, 'notifyVoucherIssued')
+          .mockResolvedValue(undefined);
+        await service.updateOrder(gifsy, 'o1', { voucherCode: 'GIFT-ABCD-9876' });
+        const audit = mockPrisma.auditLog.create.mock.calls[0][0].data;
+        expect(audit).toMatchObject({ actorId: 'admin1', entityType: 'REDEMPTION_ORDER', entityId: 'o1' });
+        expect(audit.metadata).toMatchObject({ event: 'VOUCHER_ISSUED_MANUAL', path: 'PATCH /rewards/orders/:id', voucherCode: '••••9876' });
+        expect(JSON.stringify(mockPrisma.auditLog.create.mock.calls)).not.toContain('GIFT-ABCD');
+        expect(notifySpy).toHaveBeenCalledWith('o1', 'deoleo');
+      });
+
+      it('trimmed compare: a stored code with stray spaces + the same code re-sent is a no-op, not an "overwrite"', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(issued({ voucherCode: ' AMZN-1234-5678-WXYZ  ' }));
+        mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1' });
+        await service.updateOrder(gifsy, 'o1', { voucherCode: 'AMZN-1234-5678-WXYZ' });
+        expect(mockPrisma.redemptionOrder.update.mock.calls[0][0].data).not.toHaveProperty('voucherCode');
+        expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('same-status transition WITH a new code applies it through the guarded write (not silently dropped)', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid({ status: 'PROCESSING' }));
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1', voucherCode: 'NEW-SAME-1' });
+        const res = await service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.PROCESSING, voucherCode: 'NEW-SAME-1' });
+        expect(res.skipped).toBe(true);
+        expect(mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].data.voucherCode).toBe('NEW-SAME-1');
+        expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled(); // no status move
+        expect(mockPrisma.auditLog.create).toHaveBeenCalledTimes(1);
+      });
+
+      it('same-status transition with a code on an order that already has one → 400 (no silent overwrite)', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(issued({ status: 'PROCESSING' }));
+        await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.PROCESSING, voucherCode: 'OTHER-1' }))
+          .rejects.toThrow(/already issued/);
+        noWrite();
+      });
+
+      it('DTO: null / blank voucher fields are invalid; omitted is fine', async () => {
+        const errs = async (q: Record<string, unknown>) =>
+          validate(plainToInstance(UpdateOrderDto, q)).then((e) => e.map((x) => x.property).sort());
+        expect(await errs({ trackingNumber: 'TN' })).toEqual([]);
+        expect(await errs({ voucherCode: 'GC-1' })).toEqual([]);
+        expect(await errs({ voucherCode: null })).toEqual(['voucherCode']);
+        expect(await errs({ voucherCode: '  ' })).toEqual(['voucherCode']);
+        expect(await errs({ voucherProvider: null })).toEqual(['voucherProvider']);
+        const t = await validate(plainToInstance(TransitionOrderDto, { toStatus: 'DELIVERED', voucherCode: null }));
+        expect(t.map((x) => x.property)).toEqual(['voucherCode']);
+      });
+    });
+
+    describe('transitionOrder (every edge)', () => {
+      it('DELIVERED with voucherCode null never clears the stored code (400, no write)', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(issued({ status: 'DISPATCHED' }));
+        await expect(service.transitionOrder(gifsy, 'o1', {
+          toStatus: UpdatableOrderStatus.DELIVERED, voucherCode: null as never,
+        })).rejects.toBeInstanceOf(BadRequestException);
+        noWrite();
+      });
+
+      it('a forward move cannot overwrite a stored code (400, no write)', async () => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(issued());
+        await expect(service.transitionOrder(gifsy, 'o1', {
+          toStatus: UpdatableOrderStatus.PROCESSING, voucherCode: 'OTHER-CODE-0000',
+        })).rejects.toThrow(/already issued/);
+        noWrite();
+      });
+    });
+  });
+
+  describe('voucher code visibility (operator reads)', () => {
+    const staff: JwtPayload = { sub: 'st1', role: 'GIFSY_STAFF', clientId: 'deoleo', assumed: true, gifsyRoleId: 'role-1', phone: '9990004444', name: '' };
+    const at = new Date('2026-10-01T10:00:00.000Z');
+    const row = { id: 'o1', status: 'DELIVERED', voucherCode: 'AMZN-1234-5678-WXYZ', voucherProvider: 'Gifsy', createdAt: at, updatedAt: at };
+    afterEach(() => mockPrisma.redemptionOrder.findFirst.mockReset());
+
+    it('read-only GIFSY_STAFF (no rewards:manage_orders) gets only the issued indicator in listOrders', async () => {
+      mockGifsyRoles.getPermissions.mockResolvedValue(new Set(['rewards:read']));
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([row]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(1);
+      const res = await service.listOrders(staff, {});
+      expect(mockGifsyRoles.getPermissions).toHaveBeenCalledWith('role-1');
+      expect(res.orders[0]).toMatchObject({ voucherCode: null, voucherIssued: true });
+      expect(JSON.stringify(res)).not.toContain('WXYZ');
+    });
+
+    it('GIFSY_STAFF WITH rewards:manage_orders gets the full code (they fulfil)', async () => {
+      mockGifsyRoles.getPermissions.mockResolvedValue(new Set(['rewards:read', 'rewards:manage_orders']));
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([row]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(1);
+      const res = await service.listOrders(staff, {});
+      expect((res.orders[0] as { voucherCode: string }).voucherCode).toBe('AMZN-1234-5678-WXYZ');
+    });
+
+    it('getOrder (operator branch): read-only staff get the indicator only; GIFSY_ADMIN gets the full code', async () => {
+      mockGifsyRoles.getPermissions.mockResolvedValue(new Set(['rewards:read']));
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ ...row, reward: null, partner: null });
+      const s = await service.getOrder(staff, 'o1');
+      expect(s.order).toMatchObject({ voucherCode: null, voucherIssued: true });
+      expect(JSON.stringify(s)).not.toContain('WXYZ');
+
+      const g = await service.getOrder(gifsy, 'o1');
+      expect((g.order as { voucherCode: string }).voucherCode).toBe('AMZN-1234-5678-WXYZ');
+    });
+  });
+
+  // ─── Final re-audit (e6b4357): Hubble ops exits, tenant-wide reuse, order-tenant notifications ───
+  describe('Hubble ops exits + order-tenant scoping', () => {
+    const stuck = (extra: Record<string, unknown> = {}) => ({
+      id: 'o1', status: 'PROCESSING', partnerId: 'cp1', orderNumber: 'RDM-h', pointsDeducted: 500,
+      redemptionMode: 'GIFT_CARD', voucherCode: null, voucherProvider: 'Hubble',
+      metadata: { hubbleStatus: 'PROCESSING', hubbleOrderId: 'hub-1', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_NOT_FOUND' },
+      partner: { clientId: 'bajaj' },
+      ...extra,
+    });
+    const staffMgr: JwtPayload = { sub: 'st1', role: 'GIFSY_STAFF', clientId: 'bajaj', assumed: true, gifsyRoleId: 'r', phone: '9990004444', name: '' };
+    afterEach(() => {
+      mockPrisma.redemptionOrder.findFirst.mockReset();
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockReset();
+    });
+
+    it('GIFSY_ADMIN manual override fulfils a stuck Hubble order: code + manual provider, flag cleared, audited with the reason', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(stuck());
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1' });
+      const notifySpy = jest.spyOn(service as unknown as { notifyVoucherIssued: (a: string, b: string) => Promise<void> }, 'notifyVoucherIssued')
+        .mockResolvedValue(undefined);
+
+      await service.updateOrder(gifsy, 'o1', {
+        voucherCode: 'POOL-CODE-7777', manualOverride: true, overrideReason: '  Hubble down — issued from pool ',
+      });
+
+      const call = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+      expect(call.data.voucherCode).toBe('POOL-CODE-7777');
+      expect(call.data.voucherProvider).toBe('Manual');
+      expect(call.data.metadata).toMatchObject({
+        hubbleNeedsReconcile: false,
+        hubbleStatus: 'MANUAL_OVERRIDE',
+        hubbleManualOverride: { by: 'admin1', reason: 'Hubble down — issued from pool', previousReason: 'HUBBLE_PROCESSING_NOT_FOUND' },
+      });
+      // CAS still pins "no code + provider as read (Hubble)".
+      expect(call.where.AND).toEqual(expect.arrayContaining([
+        { OR: [{ voucherCode: null }, { voucherCode: '' }] },
+        { voucherProvider: 'Hubble' },
+      ]));
+      const audit = mockPrisma.auditLog.create.mock.calls[0][0].data.metadata;
+      expect(audit).toMatchObject({ manualOverride: true, overrideReason: 'Hubble down — issued from pool', voucherCode: '••••7777' });
+      // Notified under the ORDER's tenant (bajaj), not the caller's.
+      expect(notifySpy).toHaveBeenCalledWith('o1', 'bajaj');
+    });
+
+    it('without the override, a stuck Hubble order refuses a manual code (400, no write)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(stuck());
+      await expect(service.updateOrder(gifsy, 'o1', { voucherCode: 'POOL-1' })).rejects.toThrow(/sent to the Hubble integration/);
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a non-GIFSY_ADMIN (staff)', () => [staffMgr, stuck(), { voucherCode: 'X-1', manualOverride: true, overrideReason: 'r' }], ForbiddenException],
+      ['no reason', () => [gifsy, stuck(), { voucherCode: 'X-1', manualOverride: true }], BadRequestException],
+      ['no code', () => [gifsy, stuck(), { manualOverride: true, overrideReason: 'r' }], BadRequestException],
+      ['an order never sent to Hubble', () => [gifsy, stuck({ voucherProvider: null, metadata: {} }), { voucherCode: 'X-1', manualOverride: true, overrideReason: 'r' }], BadRequestException],
+      ['an order that already has a code (no overwrite, even with override)', () => [gifsy, stuck({ voucherCode: 'HUB-REAL-1' }), { voucherCode: 'X-1', manualOverride: true, overrideReason: 'r' }], BadRequestException],
+      ['a cash order', () => [gifsy, stuck({ redemptionMode: 'UPI' }), { voucherCode: 'X-1', manualOverride: true, overrideReason: 'r' }], BadRequestException],
+    ])('override refused for %s', async (_n, args, err) => {
+      const [who, order, dto] = (args as () => [JwtPayload, Record<string, unknown>, Record<string, unknown>])();
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(order);
+      await expect(service.updateOrder(who, 'o1', dto as never)).rejects.toBeInstanceOf(err as never);
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('override still refuses a code cancelled elsewhere in the tenant', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(stuck());
+      mockPrisma.cancelledVoucherCode.findFirst.mockResolvedValueOnce({ id: 'cv' });
+      await expect(service.updateOrder(gifsy, 'o1', { voucherCode: 'OLD-CODE-1', manualOverride: true, overrideReason: 'r' }))
+        .rejects.toThrow(/can't be reused/);
+    });
+
+    it('a manual REFUND on any Hubble-marked order is blocked (not just provider=Hubble)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(stuck({ voucherProvider: null, status: 'CONFIRMED' }));
+      await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }))
+        .rejects.toThrow(/sent to Hubble cannot be cancelled/);
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    // ── Never-placed Hubble orders stay refundable (owner decision on the item-7 dead end) ──
+    const flagged = (reason: string, extra: Record<string, unknown> = {}) => ({
+      id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'RDM-n', pointsDeducted: 500,
+      redemptionMode: 'GIFT_CARD', voucherCode: null, voucherProvider: null,
+      metadata: { hubbleNeedsReconcile: true, hubbleReconcileReason: reason, hubbleReconcileAt: '2026-11-09T00:00:00Z' },
+      ...extra,
+    });
+
+    it.each(['HUBBLE_NOT_CONFIGURED', 'HUBBLE_INVALID_AMOUNT'])(
+      'a %s order (nothing ever placed with Hubble, no code) CAN be refunded by hand', async (reason) => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(flagged(reason));
+        mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValue({ id: 'o1', status: 'CANCELLED', pointsDeducted: 500, voucherCode: null });
+        mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'user1', phone: '9991112222' });
+        await service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED });
+        expect(mockWallet.reverse).toHaveBeenCalledWith('cp1', 500, expect.anything(), mockPrisma);
+      },
+    );
+
+    it.each([
+      'HUBBLE_INDETERMINATE',
+      'HUBBLE_PROCESSING_NOT_FOUND',
+      'HUBBLE_SUCCESS_NO_CODE',
+      'HUBBLE_UNKNOWN_STATUS:WEIRD',
+      'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT',
+      'HUBBLE_UNEXPECTED',
+    ])('a %s order stays refund-BLOCKED (Hubble may hold / have issued a voucher)', async (reason) => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(flagged(reason));
+      await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }))
+        .rejects.toThrow(/sent to Hubble cannot be cancelled/);
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a Hubble order id', { metadata: { hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_NOT_CONFIGURED', hubbleOrderId: 'hub-1' } }],
+      ['provider Hubble', { voucherProvider: 'Hubble' }],
+      ['a hubbleStatus', { metadata: { hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INVALID_AMOUNT', hubbleStatus: 'PROCESSING' } }],
+    ])('a "never placed" reason WITH another Hubble trace (%s) stays refund-blocked', async (_n, extra) => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(flagged('HUBBLE_NOT_CONFIGURED', extra));
+      await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }))
+        .rejects.toThrow(/sent to Hubble cannot be cancelled/);
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('a never-placed order WITH a stored code is still refund-blocked (code present → not "never placed")', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(flagged('HUBBLE_NOT_CONFIGURED', { voucherCode: 'MANUAL-1' }));
+      // The Hubble-marker block fires first (isHubbleNeverPlaced requires no code); the issued-voucher
+      // block would refuse it too. Either way: 400, no refund.
+      await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    // ── Whole-change audit fixes ──
+    it('an overridden order re-flagged SUCCESS_MANUAL_CODE_PRESENT stays refund-blocked (open flag beats MANUAL_OVERRIDE)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(flagged('HUBBLE_SUCCESS_MANUAL_CODE_PRESENT', {
+        metadata: { hubbleStatus: 'MANUAL_OVERRIDE', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT' },
+      }));
+      await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }))
+        .rejects.toThrow(/sent to Hubble cannot be cancelled/);
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('a whitespace-only stored code is "no code": the refund proceeds and its claim pins that exact value', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(flagged('X', { voucherCode: '   ', metadata: {} }));
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValue({ id: 'o1', status: 'CANCELLED', pointsDeducted: 500, voucherCode: '   ' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'user1', phone: '9991112222' });
+      await service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED });
+      expect(mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].where).toMatchObject({ voucherCode: '   ', status: 'CONFIRMED' });
+      expect(mockWallet.reverse).toHaveBeenCalledTimes(1);
+    });
+
+    it('the tenant-wide reuse check runs INSIDE the write tx, after the advisory lock and before the claim', async () => {
+      const seq: string[] = [];
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'R', pointsDeducted: 500, redemptionMode: 'GIFT_CARD',
+        voucherCode: null, voucherProvider: null, metadata: {}, partner: { clientId: 'bajaj' },
+      });
+      mockPrisma.$transaction.mockImplementationOnce(async (fn: (tx: unknown) => unknown) => { seq.push('tx'); return fn(mockPrisma); });
+      mockPrisma.$executeRaw.mockImplementationOnce(async () => { seq.push('lock'); return 1; });
+      mockPrisma.cancelledVoucherCode.findFirst.mockImplementationOnce(async () => { seq.push('lookup'); return null; });
+      mockPrisma.redemptionOrder.updateMany.mockImplementationOnce(async () => { seq.push('claim'); return { count: 1 }; });
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1' });
+      await service.updateOrder(gifsy, 'o1', { voucherCode: 'NEW-INTX-1' });
+      expect(seq).toEqual(['tx', 'lock', 'lookup', 'claim']);
+    });
+
+    it('voucher-cancel takes the same (tenant, code) advisory lock in its tx', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValueOnce({
+        id: 'o1', orderNumber: 'R', status: 'CONFIRMED', voucherCode: 'MANUAL-CODE-1', voucherProvider: 'Gifsy',
+        metadata: {}, partner: { clientId: 'bajaj' },
+      });
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1', status: 'CONFIRMED', voucherProvider: null, updatedAt: new Date() });
+      await service.voucherCancelledWithVendor(gifsy, 'o1', 'r');
+      expect(mockPrisma.$executeRaw).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(mockPrisma.$executeRaw.mock.calls)).not.toContain('MANUAL-CODE-1');
+    });
+
+    it('same-status transition with ONLY tracking applies it (bulk rows no longer drop it)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(flagged('X', { status: 'DISPATCHED', metadata: {} }));
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', trackingNumber: 'TRK-9' });
+      const res = await service.transitionOrder(gifsy, 'o1', {
+        toStatus: UpdatableOrderStatus.DISPATCHED, trackingNumber: 'TRK-9', trackingUrl: 'https://t/9',
+      });
+      expect(res.skipped).toBe(true);
+      expect(mockPrisma.redemptionOrder.update.mock.calls[0][0].data).toMatchObject({ trackingNumber: 'TRK-9', trackingUrl: 'https://t/9' });
+      expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
+    });
+
+    it('transition-issued code notifies under the ORDER tenant', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'R', pointsDeducted: 500, redemptionMode: 'GIFT_CARD',
+        voucherCode: null, voucherProvider: null, metadata: {}, partner: { clientId: 'bajaj' },
+      });
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValue({ id: 'o1', status: 'PROCESSING', pointsDeducted: 500, voucherCode: 'NEW-T-1' });
+      const notifySpy = jest.spyOn(service as unknown as { notifyVoucherIssued: (a: string, b: string) => Promise<void> }, 'notifyVoucherIssued')
+        .mockResolvedValue(undefined);
+      await service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.PROCESSING, voucherCode: 'NEW-T-1' });
+      expect(notifySpy).toHaveBeenCalledWith('o1', 'bajaj');
+    });
+
+    it('voucher-cancel: a MANUAL code on a HUBBLE_FAILED_VOUCHER_PRESENT order can be cancelled and releases the Hubble flag', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValueOnce({
+        id: 'o1', orderNumber: 'R', status: 'CONFIRMED', voucherCode: 'MANUAL-CODE-1', voucherProvider: 'Gifsy',
+        metadata: { hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_FAILED_VOUCHER_PRESENT' },
+        partner: { clientId: 'bajaj' },
+      });
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1', status: 'CONFIRMED', voucherProvider: null, updatedAt: new Date() });
+      await service.voucherCancelledWithVendor(gifsy, 'o1', 'vendor ref 9');
+      const data = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].data;
+      expect(data).toMatchObject({ voucherCode: null, voucherProvider: null });
+      expect(data.metadata).toMatchObject({ hubbleNeedsReconcile: false, hubbleStatus: 'RELEASED' });
+      expect(mockPrisma.cancelledVoucherCode.createMany.mock.calls[0][0].data[0].clientId).toBe('bajaj');
+    });
+
+    it('voucher-cancel: a HUBBLE-ISSUED code is never cancellable (hubbleVoucher in metadata)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValueOnce({
+        id: 'o1', orderNumber: 'R', status: 'DELIVERED', voucherCode: 'CARD-1', voucherProvider: 'Gifsy',
+        metadata: { hubbleVoucher: { id: 'v1' } }, partner: { clientId: 'bajaj' },
+      });
+      await expect(service.voucherCancelledWithVendor(gifsy, 'o1', 'r')).rejects.toThrow(/Hubble-issued voucher cannot be cancelled/);
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('voucher-cancel: a SUCCESS_MANUAL_CODE_PRESENT order keeps its Hubble flag (Hubble DID issue a voucher)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValueOnce({
+        id: 'o1', orderNumber: 'R', status: 'CONFIRMED', voucherCode: 'MANUAL-CODE-1', voucherProvider: 'Gifsy',
+        metadata: { hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT' },
+        partner: { clientId: 'bajaj' },
+      });
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1', status: 'CONFIRMED', voucherProvider: null, updatedAt: new Date() });
+      await service.voucherCancelledWithVendor(gifsy, 'o1', 'r');
+      expect(mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].data).not.toHaveProperty('metadata');
+    });
+
+    it('retryHubbleReconcile: GIFSY_ADMIN runs the existing reconcile for that order and audits the outcome', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValueOnce({ id: 'o1', orderNumber: 'R', status: 'PROCESSING', metadata: { hubbleReconcileReason: 'HUBBLE_INDETERMINATE' } });
+      const spy = jest.spyOn(service, 'reconcileHubbleOrder').mockResolvedValue('DELIVERED');
+      const res = await service.retryHubbleReconcile(gifsy, 'o1');
+      expect(spy).toHaveBeenCalledWith('o1');
+      expect(res).toEqual({ orderId: 'o1', outcome: 'DELIVERED' });
+      expect(mockPrisma.auditLog.create.mock.calls[0][0].data.metadata).toMatchObject({
+        event: 'HUBBLE_RECONCILE_RETRY', outcome: 'DELIVERED', reconcileReasonBefore: 'HUBBLE_INDETERMINATE',
+      });
+    });
+
+    it.each([['GIFSY_STAFF', staffMgr], ['CLIENT_ADMIN', { sub: 'ca', role: 'CLIENT_ADMIN', clientId: 'bajaj', phone: '1', name: '' } as JwtPayload]])(
+      'retryHubbleReconcile: %s is forbidden', async (_n, who) => {
+        const spy = jest.spyOn(service, 'reconcileHubbleOrder');
+        await expect(service.retryHubbleReconcile(who, 'o1')).rejects.toBeInstanceOf(ForbiddenException);
+        expect(spy).not.toHaveBeenCalled();
+      },
+    );
+
+    it('listOrders: operators see "needs reconcile" + reason; members never see metadata or the flags', async () => {
+      const at = new Date();
+      const row = { id: 'o1', status: 'PROCESSING', voucherCode: null, createdAt: at, updatedAt: at,
+        metadata: { hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE', sellingValuePaise: 50000 } };
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([row]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(1);
+      const op = await service.listOrders(gifsy, {});
+      expect(op.orders[0]).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE' });
+      expect(op.orders[0]).not.toHaveProperty('metadata');
+
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      const mem = await service.listOrders(partner, {});
+      expect(mem.orders[0]).not.toHaveProperty('metadata');
+      expect(mem.orders[0]).not.toHaveProperty('hubbleNeedsReconcile');
     });
   });
 
@@ -4737,6 +5300,79 @@ describe('RewardsService', () => {
         expect(mockHubble.placeOrder).not.toHaveBeenCalled();
       });
 
+      // ── Issued-voucher protection on the Hubble paths (money re-audit) ──
+      it('SUCCESS never overwrites a MANUAL code: the claim requires no code; a lost claim with a code present flags ops', async () => {
+        const errSpy = jest.spyOn((service as unknown as { logger: { error: (m: string) => void } }).logger, 'error');
+        mockPrisma.redemptionOrder.findFirst
+          .mockResolvedValueOnce(loadedOrder())                                            // loadHubbleOrder
+          .mockResolvedValueOnce({ status: 'CONFIRMED', voucherCode: 'MANUAL-CODE-1', voucherProvider: 'Gifsy' }) // post-claim re-read
+          .mockResolvedValueOnce({ metadata: {} });                                        // markHubblePendingReconcile
+        mockHubble.placeOrder.mockResolvedValue({
+          status: 'SUCCESS', id: 'hub-1', vouchers: [{ cardNumber: 'CARD-1', cardType: 'CARD_NUMBER_SECURED' }],
+        });
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 }); // the guarded DELIVERED claim loses
+
+        await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
+
+        const claim = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+        expect(claim.where.OR).toEqual([{ voucherCode: null }, { voucherCode: '' }]);
+        expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
+        expect(errSpy.mock.calls.some(([m]) => /manual voucher code is already on the order/.test(String(m)))).toBe(true);
+        const flag = mockPrisma.redemptionOrder.update.mock.calls.at(-1)![0];
+        expect(flag.data.metadata).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT' });
+      });
+
+      it('FAILED / not-found-on-recovery never refunds an order holding a code (guarded claims) and flags ops', async () => {
+        mockPrisma.redemptionOrder.findFirst
+          .mockResolvedValueOnce(loadedOrder())                                         // loadHubbleOrder
+          .mockResolvedValueOnce({ status: 'CONFIRMED', voucherCode: 'MANUAL-CODE-1' }) // post-flip re-read
+          .mockResolvedValueOnce({ metadata: {} });                                     // reconcile flag read
+        mockHubble.placeOrder.mockRejectedValue(new Error('timeout'));
+        mockHubble.getOrderByReference.mockResolvedValue(null); // "definitively never placed" → refund path
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 0 }); // both guarded claims refuse (code on row)
+
+        const out = await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
+        // Blocked → never reported as "refunded" to the member.
+        expect(out).toBe('PENDING_RECONCILE');
+
+        const [refund, flip] = mockPrisma.redemptionOrder.updateMany.mock.calls.map((c) => c[0]);
+        expect(refund.where.OR).toEqual([{ voucherCode: null }, { voucherCode: '' }]);
+        expect(flip.where.OR).toEqual([{ voucherCode: null }, { voucherCode: '' }]);
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+        const flag = mockPrisma.redemptionOrder.update.mock.calls.at(-1)![0];
+        expect(flag.data.metadata).toMatchObject({ hubbleReconcileReason: 'HUBBLE_FAILED_VOUCHER_PRESENT' });
+      });
+
+      it('PROCESSING on an order ops already took over (MANUAL_OVERRIDE) is NOT re-stamped Hubble — flagged instead', async () => {
+        mockPrisma.redemptionOrder.findFirst
+          .mockResolvedValueOnce(loadedOrder({ metadata: { hubbleStatus: 'MANUAL_OVERRIDE', hubbleNeedsReconcile: false } }))
+          .mockResolvedValueOnce({ metadata: {} }); // markHubblePendingReconcile read
+        mockHubble.placeOrder.mockResolvedValue({ status: 'PROCESSING', id: 'hub-1', vouchers: [] });
+        await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
+        const procCall = mockPrisma.redemptionOrder.updateMany.mock.calls.find(
+          ([arg]) => (arg as { data?: { status?: string } })?.data?.status === 'PROCESSING',
+        );
+        expect(procCall).toBeUndefined();
+        const flag = mockPrisma.redemptionOrder.update.mock.calls.at(-1)![0];
+        expect(flag.data.metadata).toMatchObject({ hubbleReconcileReason: 'HUBBLE_PROCESSING_AFTER_MANUAL' });
+      });
+
+      it('the PROCESSING claim pins no-code + the row version; a lost claim on a still-CONFIRMED order is flagged', async () => {
+        const at = new Date('2026-11-09T10:00:00.000Z');
+        mockPrisma.redemptionOrder.findFirst
+          .mockResolvedValueOnce(loadedOrder({ updatedAt: at }))
+          .mockResolvedValueOnce({ status: 'CONFIRMED' })  // post-loss re-read
+          .mockResolvedValueOnce({ metadata: {} });        // flag read
+        mockHubble.placeOrder.mockResolvedValue({ status: 'PROCESSING', id: 'hub-1', vouchers: [] });
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 });
+        await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
+        const claim = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+        expect(claim.where).toMatchObject({ status: 'CONFIRMED', updatedAt: at, OR: [{ voucherCode: null }, { voucherCode: '' }] });
+        expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
+        const flag = mockPrisma.redemptionOrder.update.mock.calls.at(-1)![0];
+        expect(flag.data.metadata).toMatchObject({ hubbleReconcileReason: 'HUBBLE_PROCESSING_CLAIM_LOST' });
+      });
+
       it('D1: SUCCESS writes ONE DELIVERED history row (fromStatus null) via the shared transition', async () => {
         mockPrisma.redemptionOrder.findFirst.mockResolvedValue(loadedOrder());
         mockHubble.placeOrder.mockResolvedValue({
@@ -4765,7 +5401,7 @@ describe('RewardsService', () => {
         await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
         const nonTerminal = { in: ['CONFIRMED', 'PROCESSING', 'PENDING'] };
         expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
-          where: { id: 'o1', pointsDeducted: { gt: 0 }, status: nonTerminal },
+          where: { id: 'o1', pointsDeducted: { gt: 0 }, status: nonTerminal, OR: [{ voucherCode: null }, { voucherCode: '' }] },
           data: { pointsDeducted: 0 },
         });
         expect(mockWallet.reverse).toHaveBeenCalledTimes(1);
@@ -4773,7 +5409,7 @@ describe('RewardsService', () => {
           'cp1', 1000, { referenceId: 'o1', description: 'Refund RDM-x (Hubble failed)' }, mockPrisma,
         );
         expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
-          where: { id: 'o1', status: nonTerminal },
+          where: { id: 'o1', status: nonTerminal, OR: [{ voucherCode: null }, { voucherCode: '' }] },
           data: {
             status: 'FAILED',
             valuePaise: 0n,
