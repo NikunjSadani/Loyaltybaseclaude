@@ -952,11 +952,18 @@ covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct cou
   dimKey is 1:1 with dims; the apply log line adds `comboRows`, `combosMs`), and stamps the set header
   (`combosSourceImportId` / `combosAppliedAt`) in the same upsert. Recalculate does not change the history, so it does
   not touch the summary. The 10-year retention deletes summary rows with the history.
-- **No background rebuild (lead decision 2026-11-10).** A summary can only be missing or out of date if an OLDER revision
-  applied a month during the rolling deploy that introduces this table (no prod tenant has `salesImport` on; staging
-  pushes are controlled), so there is no repair job: re-applying the month (Months page) rebuilds it. The earlier
+- **No background rebuild (lead decision 2026-11-10); an explicit "Rebuild product list" instead.** A summary can only be
+  missing or out of date if an OLDER revision applied a month during the rolling deploy that introduces this table (no
+  prod tenant has `salesImport` on; staging pushes are controlled), so there is no repair job. The earlier
   background-rebuild design (worker / Scheduler drain, try-lock, failure rotation) was removed after audit — it held the
-  month advisory lock for minutes and could starve or never run.
+  month advisory lock for minutes and could starve or never run. Re-applying a month is NOT the fix (it rewrites
+  achievements and can be refused / purged / closed), so: `POST admin/sales-months/:month/rebuild-product-list`
+  (targets:upload, flag gate, audited `SALES_MONTH` / `rebuild-product-list`) — in ONE transaction with
+  `SET LOCAL statement_timeout = 240000` and a 280 s bound (apply scale), under the SAME blocking month lock as apply
+  (`lockSalesMonth`): DELETE the month's summary, the same INSERT … SELECT from `sales_month_histories`, re-stamp the
+  header from its own source. Allowed for OPEN and CLOSED months — it changes no achievement, KPI value or history line.
+  404 without history; a statement timeout (e.g. the lock wait behind a long apply) → 409 "busy, try again".
+  `SalesMonthRow.productListCurrent` (false only with history and a summary not from it) drives the Months-page button.
 - **Migration note.** `20261112140000` was EDITED IN PLACE several times on this branch; as of 2026-11-10 it exists only
   on the local branches `feat/sales-import-extras` and `feat/sales-import` (not on `develop` / `main` or any remote), so
   no shared database has applied it. **A local DB that applied an older version must be reset** (`prisma migrate reset`
@@ -966,7 +973,8 @@ covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct cou
   stamp) are read INSIDE it, then two aggregate statements ONE AFTER THE OTHER. It never writes and never takes the month
   lock. Per month (from the header stamp, no summary scan): **current** → the summary; **missing or stale** → the stored
   lines (read-only), newest month first, while those months' line rows SUM to ≤ `HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS`
-  = 50,000; the rest → `SalesHistoryCombos.unavailableMonths` (no combos). 503 copy: statement timeout, or a P2028 for an
+  = 50,000; the rest → `SalesHistoryCombos.unavailableMonths` (no combos). Months below the 10-year retention cutoff
+  (being deleted by the sweep) are never offered or read. 503 copy: statement timeout, or a P2028 for an
   expired / already-closed transaction → "Reading the stored months took too long. Try fewer months, or try again in a
   few minutes."; any other P2028 (no transaction could start) → "The server is busy right now. Try again in a moment."
 - **FE:** the product-set builder has a source selector (Latest file / Stored month(s) → most recent, last 3/6/12, or one
@@ -977,8 +985,11 @@ covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct cou
   `dimensionKeys` (fallback: the combos' keys) with the current mapping and flags months read with different columns;
   the live "never appears" check uses the selected source and is off when the list is capped (`totalCombos >
   dimensionCombos.length`, or ≥ 2,000 for the file). "Test" still runs against the latest file (copy says so). Months in
-  `unavailableMonths` get a status notice "The product list for <month> isn't available — re-apply the month (Months
-  page) to rebuild it." (link to the Months page). No polling, no time promise.
+  `unavailableMonths` get a status notice "The product list for <month> isn't available — open Months and choose
+  'Rebuild product list' (it doesn't change any figures)." (plural: "The product lists for … aren't available … for
+  each"; the link is `/admin/sales-import/months?month=<first unavailable>`, and the Months page lists from that month
+  on). The Months page shows "Rebuild product list" (confirm → result message, row updated) on each month with history
+  whose `productListCurrent` is false, OPEN or CLOSED, for targets:upload. No polling, no time promise.
 - **Retention bounds (the idle Scheduler drain).** The drain sets `deadline = start + DRAIN_DEADLINE_MS (150 s)` and
   passes it to `sweep({deadline})`, which starts a step only if its worst case still ends by then: a purge
   (`PURGE_STEP_MS` = 120 s tx + 10 s lock wait + 15 s GCS) — inside it every statement runs under
@@ -986,8 +997,10 @@ covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct cou
   abandoned after `GCS_DELETE_TIMEOUT_MS` = 15 s (the GCS client takes no abort signal, so the request itself is not
   cancelled; `filesPurgedAt` stays null and the next sweep retries). The 10-year history delete is one transaction with
   `statement_timeout = 12 s`, at most 50,000 line rows and 50,000 summary rows per call (headers go once a month's lines
-  and summary are gone), so a large backlog drains over several sweeps. The worker and the list-route sweeps pass no
-  deadline (the statement / GCS bounds still apply).
+  and summary are gone), so a large backlog drains over several sweeps; it runs only on the drains / worker sweeps, never
+  on the import-list GET. That GET's inline sweep passes `history: false` and `stopStartingAfter` = now + 10 s (no new
+  step after that; a started step keeps its own bounds). A GCS prefix whose delete is still in flight (timed out on our
+  side, not yet settled in the client) is skipped (in-memory set) instead of being deleted twice.
 - Not verified against a real DB yet (SQL unit-tested for shape only) — run the migration + picker on staging before
   relying on it; check the `comboRows` / `combosMs` apply log at real scale.
 
