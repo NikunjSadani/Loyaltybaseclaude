@@ -71,6 +71,15 @@ export interface RoutingSnapshot {
 const TTL_MS = 60_000;
 /** Hard cap on the routing fetch so a slow backend can't stall the refresh. */
 const FETCH_TIMEOUT_MS = 2_000;
+/**
+ * Render-path MISS refresh (refreshOnMiss): at most one fetch per this window per
+ * instance — any fetch (SWR, warm or miss) started within it suppresses another — so a
+ * flood of unknown slugs can never hammer the backend, and a slug that is still absent
+ * right after a fetch is treated as a genuine miss.
+ */
+const MISS_REFRESH_MIN_INTERVAL_MS = 5_000;
+/** Upper bound a render ever waits on a miss refresh (belt-and-braces over FETCH_TIMEOUT_MS). */
+const MISS_REFRESH_MAX_WAIT_MS = 2_000;
 
 /** The branding fields we accept from the endpoint (whitelist — no secrets). */
 const BRANDING_FIELDS: (keyof PublicBranding)[] = [
@@ -90,6 +99,8 @@ let forcedStale = false;
 // concurrent invalidate doesn't clear the stale flag on completion (else the
 // admin's just-made edit could be swallowed by an older in-flight fetch).
 let invalidateGen = 0;
+// Date.now() at which the most recent routing fetch was STARTED (miss-refresh throttle).
+let lastFetchStartedAt = Number.NEGATIVE_INFINITY;
 
 /**
  * Whether the DB routing source is active. `TENANT_ROUTING_SOURCE=registry`
@@ -190,8 +201,17 @@ export function refreshIfStale(): Promise<void> {
   const stale =
     snapshot === null || forcedStale || Date.now() - snapshot.fetchedAt > TTL_MS;
   if (!stale) return Promise.resolve();
+  return startRefresh();
+}
+
+/**
+ * Start (or join) the single in-flight routing fetch. Shared by the SWR refresh and the
+ * render-path miss refresh so they always coalesce onto ONE request. Never rejects.
+ */
+function startRefresh(): Promise<void> {
   if (inFlight) return inFlight;
 
+  lastFetchStartedAt = Date.now();
   const gen = invalidateGen; // capture the intent at dispatch (see invalidateGen)
   inFlight = fetchRouting()
     .then((next) => {
@@ -248,6 +268,39 @@ export async function ensureWarm(): Promise<void> {
 }
 
 /**
+ * AWAITED, bounded refresh for a render-path MISS: a slug the proxy already validated
+ * (its own module instance has it) is absent from THIS instance's snapshot — e.g. a tenant
+ * created after this server instance started (proxy and render code are separate module
+ * instances — proxy.md: "you should not attempt relying on shared modules or globals").
+ *
+ *  - Joins an in-flight fetch if there is one (coalesced).
+ *  - Otherwise fetches ONLY if no fetch started in the last 5s (throttle: a genuinely
+ *    unknown slug, or a spoofed header, costs at most one backend call per 5s per instance).
+ *  - Waits at most ~2s (the fetch itself also aborts at 2s), then returns regardless.
+ *  - Never throws; on failure the last-good snapshot (or null → registry) is kept, so the
+ *    caller's fallback is exactly what it was before.
+ */
+export async function refreshOnMiss(): Promise<void> {
+  if (!isDbSourceEnabled()) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    let pending = inFlight;
+    if (!pending) {
+      if (Date.now() - lastFetchStartedAt < MISS_REFRESH_MIN_INTERVAL_MS) return;
+      pending = startRefresh();
+    }
+    const cap = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, MISS_REFRESH_MAX_WAIT_MS);
+    });
+    await Promise.race([pending, cap]);
+  } catch {
+    // startRefresh never rejects; belt-and-braces so a render can never throw here.
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
  * TEST-ONLY: reset all module state between vitest cases. Never called by
  * production code.
  */
@@ -256,4 +309,5 @@ export function __resetRoutingCacheForTests(): void {
   inFlight = null;
   forcedStale = false;
   invalidateGen = 0;
+  lastFetchStartedAt = Number.NEGATIVE_INFINITY;
 }

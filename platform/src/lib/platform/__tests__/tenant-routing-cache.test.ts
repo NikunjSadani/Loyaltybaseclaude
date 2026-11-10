@@ -13,6 +13,7 @@ import {
   refreshIfStale,
   ensureWarm,
   invalidate,
+  refreshOnMiss,
   __resetRoutingCacheForTests,
 } from '../tenant-routing-cache';
 
@@ -227,5 +228,85 @@ describe('fail-safe fetch', () => {
     mockFetchResolving({ data: {} });
     await refreshIfStale();
     expect(getRoutingSnapshot()).toBeNull();
+  });
+});
+
+// ── Render-path miss refresh (a tenant created AFTER this instance warmed) ────────────────
+describe('refreshOnMiss — awaited, coalesced, throttled, bounded, never throws', () => {
+  it('forces a refetch even while the snapshot is still inside its TTL (new tenant appears now)', async () => {
+    const f = mockFetchResolving(GOOD_PAYLOAD);
+    await refreshIfStale();
+    expect(f).toHaveBeenCalledTimes(1);
+
+    now += 10_000; // fresh (< 60s TTL) but older than the 5s miss floor
+    f.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: { tenants: [...GOOD_PAYLOAD.data.tenants, { slug: 'bajaj', status: 'ACTIVE', domains: [], branding: { displayName: 'Bajaj' } }] },
+      }),
+    });
+    await refreshOnMiss();
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(getRoutingSnapshot()?.slugToBranding.get('bajaj')).toEqual({ displayName: 'Bajaj' });
+  });
+
+  it('does NOT refetch when the snapshot was fetched < 5s ago (a genuine miss stays a miss)', async () => {
+    const f = mockFetchResolving(GOOD_PAYLOAD);
+    await refreshIfStale();
+    now += 1_000;
+    await refreshOnMiss();
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it('throttles repeated misses to one fetch per 5s even when fetches keep failing', async () => {
+    const f = vi.fn().mockRejectedValue(new Error('down'));
+    vi.stubGlobal('fetch', f);
+    await refreshOnMiss();
+    await refreshOnMiss();
+    await refreshOnMiss();
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(getRoutingSnapshot()).toBeNull(); // failure → unchanged (registry fallback)
+    now += 5_001;
+    await refreshOnMiss();
+    expect(f).toHaveBeenCalledTimes(2);
+  });
+
+  it('coalesces concurrent misses onto ONE fetch', async () => {
+    const f = mockFetchResolving(GOOD_PAYLOAD);
+    await Promise.all([refreshOnMiss(), refreshOnMiss(), refreshOnMiss(), refreshIfStale()]);
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the last-good snapshot on a non-OK / malformed response and resolves', async () => {
+    const f = mockFetchResolving(GOOD_PAYLOAD);
+    await refreshIfStale();
+    const before = getRoutingSnapshot();
+    now += 10_000;
+    f.mockResolvedValue({ ok: false, json: async () => ({}) });
+    await expect(refreshOnMiss()).resolves.toBeUndefined();
+    expect(getRoutingSnapshot()).toBe(before);
+  });
+
+  it('never waits longer than ~2s even if fetch ignores its abort signal (no hung render)', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {}))); // never settles
+      let done = false;
+      const p = refreshOnMiss().then(() => { done = true; });
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(2);
+      await p;
+      expect(done).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is a no-op under TENANT_ROUTING_SOURCE=registry', async () => {
+    process.env.TENANT_ROUTING_SOURCE = 'registry';
+    const f = mockFetchResolving(GOOD_PAYLOAD);
+    await refreshOnMiss();
+    expect(f).not.toHaveBeenCalled();
   });
 });
