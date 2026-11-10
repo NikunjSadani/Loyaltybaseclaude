@@ -42,6 +42,8 @@ export const SALES_IMPORT_MAX_ATTEMPTS = 3;
 export const SALES_IMPORT_MAX_INFLIGHT_UPLOADS = 3;
 /** Raw parts, unmatched.csv, aggregates and sample rows are purged this long after an import finishes. */
 export const SALES_IMPORT_RETENTION_DAYS = 30;
+/** SalesMonthHistory (the final applied lines per month) is kept this long, then deleted by the retention sweep. */
+export const SALES_MONTH_HISTORY_RETENTION_YEARS = 10;
 /** An UPLOADING import older than this is abandoned: CANCELLED + purged. */
 export const SALES_IMPORT_ABANDONED_UPLOAD_HOURS = 24;
 /** Header detection reads at most this many columns per row (wider rows are truncated). */
@@ -356,7 +358,47 @@ export interface SalesMonthRow {
    * export / report downloads. Non-zero → reopening needs SalesMonthReopenRequest.acknowledgeDownstream.
    */
   downstream: { creditBatches: number; exports: number };
+  /**
+   * Stored month history (SalesMonthHistory): the FINAL applied file lines of this month (every customer code), written
+   * by each apply and kept SALES_MONTH_HISTORY_RETENTION_YEARS. `hasHistory` → POST …/recalculate is possible.
+   */
+  hasHistory: boolean;
+  historySourceImportId: string | null; // the import whose lines the history holds (the last applied one)
+  historyAppliedAt: string | null;      // when those lines were applied (also the recalculate version token)
 }
+
+/**
+ * GET admin/sales-months/:month/recalculate/preview (targets:read): what "Recalculate from stored history" would write —
+ * ALL importer-owned KPIs of the month recomputed from SalesMonthHistory with the CURRENT KPI definitions and the CURRENT
+ * roster (customer codes → outlets). Same KPI shape as the import preview. 404 when the month has no history.
+ */
+export interface SalesMonthRecalcPreview {
+  month: string;
+  monthState: SalesMonthState;
+  canApply: boolean;          // false for CLOSED / future months, no owned KPIs
+  blockedReason?: string;
+  definitionsHash: string;    // send back as SalesMonthRecalcRequest.expectedDefinitionsHash
+  historySourceImportId: string;
+  historyAppliedAt: string;   // send back as SalesMonthRecalcRequest.expectedHistoryAppliedAt
+  matchedOutlets: number;     // history customer codes on the CURRENT roster
+  unmatchedCustomers: number;
+  matchedAmountRupees: number;
+  matchedQuantity: number;
+  unmatchedAmountRupees: number;
+  unmatchedQuantity: number;
+  zeroFillOutlets: number;    // in-scope roster outlets with no history lines → 0
+  outletsAffected: number;    // OutletSalesRecord rows whose owned KPI values would change (incl. keys removed)
+  warnings: SalesMonthWarning[]; // NEGATIVE_VALUES / REPLACES_MANUAL_VALUES
+  kpis: MonthPreviewKpi[];
+}
+
+/** POST admin/sales-months/:month/recalculate body (targets:upload; month OPEN; 409 when either token is stale). */
+export interface SalesMonthRecalcRequest {
+  expectedDefinitionsHash: string;
+  expectedHistoryAppliedAt: string;
+}
+/** POST admin/sales-months/:month/recalculate response (recorded as a SalesImportApply with source HISTORY). */
+export type SalesMonthRecalcResult = ApplyMonthResult;
 
 /** POST admin/sales-months/:month/reopen body. Without the ack, reopen → 409 when `downstream` is non-zero. */
 export interface SalesMonthReopenRequest {
