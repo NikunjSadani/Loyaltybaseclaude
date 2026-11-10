@@ -935,73 +935,59 @@ history months (lines, set headers AND the §10c combos summary) older than 10 y
   DELETE + one set-based INSERT … SELECT log `{msg:'sales-import month history written', deletedRows, insertedRows,
   deleteMs, insertMs}` so the real-scale timing can be measured and the bound adjusted.
 
-## 10c. Extras (branch `feat/sales-import-extras`, 2026-11-10; audit fixes same day)
+## 10c. Extras (branch `feat/sales-import-extras`, 2026-11-10; audit fixes + lead decision same day)
 **KPI product picker from stored month history.** `GET admin/sales-import/history-combos?month=YYYY-MM` or
 `?lastMonths=N` (1..`SALES_HISTORY_COMBOS_MAX_MONTHS` = 12, default 1; never both) — targets:read + the feature-flag gate
 (`assertSalesImportAccess`), tenant-scoped, on the config controller (static segment, before `GET :id`). "Last N" = the N
 most recent months WITH stored history (read from `sales_month_history_sets`, not calendar months). Response
 `SalesHistoryCombos` = the `SalesImportCombos` lists (`dimensionCombos` + `dimensionValues`, same caps: top 2,000 combos /
 200 values per key by |₹|) + `months`, `availableMonths` (newest first, for the picker), `dimensionKeys` (union of the
-covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct count), `refreshingMonths` (see below).
+covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct count), `unavailableMonths` (see below).
 - **Combos summary (audit M1).** New table `sales_month_history_combos` (migration
   `20261112140000_sales_month_history_combos`, additive, backfills every stored month): one row per (tenant, month,
   product combo) — clientId, month, dims, dimKey, `keyHash = md5(dimKey)` (unique with clientId + month), amountPaise /
   qtyPico as NUMERIC(38,0) (a month total can exceed BIGINT pico-cases), lines, and the history set it summarises
-  (`sourceImportId`, `appliedAt` = the set header's). Every APPLY replaces the month's rows in the SAME transaction, right
-  after the history INSERT, with ONE `INSERT … SELECT … FROM sales_month_histories WHERE month GROUP BY dimKey, dims`
-  (`kpi/month-combos.ts`, shared with the rebuild; dimKey is 1:1 with dims, no array_agg; the apply log line adds
-  `comboRows`, `combosMs`). Recalculate does not change the history, so it does not touch the summary. The 10-year
-  retention deletes summary rows with the history.
-- **Summary stamp on the set header (re-check L1).** `sales_month_history_sets.combosSourceImportId` /
-  `combosAppliedAt` record which set the month's summary was built from; written in the SAME transaction as the summary
-  (apply: in the header upsert; rebuild: an UPDATE guarded by the set it read). Staleness is a header-row comparison
-  (`IS DISTINCT FROM` sourceImportId / appliedAt) — the summary rows are never scanned to decide it. Migration
-  `20261112140000` adds the columns (+ `combosRefreshFailedAt`) and stamps every backfilled month. It was EDITED IN PLACE
-  several times on this branch: as of 2026-11-10 it exists only on the local branches `feat/sales-import-extras` and
-  `feat/sales-import` (not on `develop` / `main` or any remote), so no shared database has applied it. **A local DB
-  that applied an older version must be reset** (`prisma migrate reset` on the local dev DB) before applying this one.
-- **Read path = strictly read-only (re-check M1/M2).** GET history-combos runs ONE `SET TRANSACTION READ ONLY`
-  transaction under `SET LOCAL statement_timeout = 10000` (`HISTORY_COMBOS_STATEMENT_TIMEOUT_MS`; tx bound 45 s): the
-  set headers (with their stamp) are read INSIDE it, then two aggregate statements ONE AFTER THE OTHER over the summary.
-  It never writes and never takes the month lock. Per month (from the stamp): current → summary; stale (summary from
-  another set, e.g. an older revision re-applied during a deploy) → the old summary; missing (never summarised) → the
-  stored lines read-only, newest month first, while those months' line rows SUM to ≤
-  `HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS` = 50,000 (the rest contribute no combos until rebuilt — they would not fit the
-  10 s timeout). Stale and missing months are listed in `SalesHistoryCombos.refreshingMonths`. 503 copy: statement
-  timeout, or a P2028 for an expired / already-closed transaction → "Reading the stored months took too long. Try fewer
-  months, or try again in a few minutes."; any other P2028 (no transaction could start) → "The server is busy right now.
-  Try again in a moment."
-- **Background repair.** `refreshStaleMonthCombos(db, log, limits)` (`kpi/month-combos.ts`, via
-  `SalesImportRetentionService.refreshHistoryCombos`) lists months whose header stamp ≠ the set and rebuilds each in ITS
-  OWN transaction: `SET LOCAL statement_timeout`, `pg_try_advisory_xact_lock` on the apply's month key (busy → skip),
-  re-check after the lock, DELETE + the INSERT … SELECT + the header stamp (which clears `combosRefreshFailedAt`). Never
-  on a user request. Candidates: never-failed months first (`ORDER BY combosRefreshFailedAt NULLS FIRST, appliedAt DESC`);
-  a month whose rebuild failed is stamped `combosRefreshFailedAt` and skipped for 60 min, so one month that cannot be
-  rebuilt never blocks the others (re-check M1). Limits per caller:
-  | caller | months / run | statement / per-month tx | no new month after | months above |
-  |---|---|---|---|---|
-  | job worker (after the sweep; stops starting months on SIGTERM) | 3 | 240 s / 280 s (apply scale) | 10 min | — (any size) |
-  | Cloud Scheduler drain (idle) | 2 | 25 s / 30 s | deadline − 35 s | 150k line rows → worker |
-  | API inline runner drain | 2 | 25 s / 30 s | 60 s | 150k line rows → worker |
-  The 25 s statements on the HTTP paths stay below the 30 s close / reopen and 60 s target-upload waiters on the month lock
-  (the worker, like the apply itself, may hold it longer). **Drain deadline (re-check M2):** the idle Scheduler drain sets
-  `deadline = start + DRAIN_DEADLINE_MS (150 s)` and passes it to BOTH `sweep({deadline})` — which starts a purge only if
-  its worst case (`PURGE_STEP_MS` = 120 s tx + 10 s lock wait + 15 s GCS) ends by then, a GCS retry / the 10-year history
-  delete only if 15 s still fit — and the refresh (`budgetMs = refreshBudgetMs(deadline, now)` = deadline − now − 30 s tx
-  − 5 s pool wait). So every transaction / advisory lock ends by start + 150 s (+ a few small un-timeboxed statements),
-  inside the scheduler's 170 s attempt deadline (§14) — the API runs with CPU throttling, so nothing may outlive the
-  response. Logs `{found, rebuilt, busy, fresh, failed, skipped}`.
+  (`sourceImportId`, `appliedAt`). Every APPLY replaces the month's rows in the SAME transaction, right after the history
+  INSERT, with ONE `INSERT … SELECT … FROM sales_month_histories WHERE month GROUP BY dimKey, dims` (`kpi/month-combos.ts`;
+  dimKey is 1:1 with dims; the apply log line adds `comboRows`, `combosMs`), and stamps the set header
+  (`combosSourceImportId` / `combosAppliedAt`) in the same upsert. Recalculate does not change the history, so it does
+  not touch the summary. The 10-year retention deletes summary rows with the history.
+- **No background rebuild (lead decision 2026-11-10).** A summary can only be missing or out of date if an OLDER revision
+  applied a month during the rolling deploy that introduces this table (no prod tenant has `salesImport` on; staging
+  pushes are controlled), so there is no repair job: re-applying the month (Months page) rebuilds it. The earlier
+  background-rebuild design (worker / Scheduler drain, try-lock, failure rotation) was removed after audit — it held the
+  month advisory lock for minutes and could starve or never run.
+- **Migration note.** `20261112140000` was EDITED IN PLACE several times on this branch; as of 2026-11-10 it exists only
+  on the local branches `feat/sales-import-extras` and `feat/sales-import` (not on `develop` / `main` or any remote), so
+  no shared database has applied it. **A local DB that applied an older version must be reset** (`prisma migrate reset`
+  on the local dev DB) before applying this one.
+- **Read path = strictly read-only.** GET history-combos runs ONE `SET TRANSACTION READ ONLY` transaction under
+  `SET LOCAL statement_timeout = 10000` (`HISTORY_COMBOS_STATEMENT_TIMEOUT_MS`; tx bound 45 s): the set headers (with their
+  stamp) are read INSIDE it, then two aggregate statements ONE AFTER THE OTHER. It never writes and never takes the month
+  lock. Per month (from the header stamp, no summary scan): **current** → the summary; **missing or stale** → the stored
+  lines (read-only), newest month first, while those months' line rows SUM to ≤ `HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS`
+  = 50,000; the rest → `SalesHistoryCombos.unavailableMonths` (no combos). 503 copy: statement timeout, or a P2028 for an
+  expired / already-closed transaction → "Reading the stored months took too long. Try fewer months, or try again in a
+  few minutes."; any other P2028 (no transaction could start) → "The server is busy right now. Try again in a moment."
 - **FE:** the product-set builder has a source selector (Latest file / Stored month(s) → most recent, last 3/6/12, or one
   month); a change of the month select is debounced 300 ms and a superseded request is aborted (`historyCombos(q,
   signal)` uses plain fetch with the shared client's error conventions — 403 → "You don't have permission to do that" —
-  because adding a signal to the SHARED `api.get` is a platform-wide change held for the owner's approval). Combos pin only the keys their stored lines carry
-  (`comboEntry`, unchanged rule); a drift note compares the stored `dimensionKeys` (fallback: the combos' keys) with the
-  current mapping and flags months read with different columns; the live "never appears" check uses the selected source
-  and is off when the list is capped (`totalCombos > dimensionCombos.length`, or ≥ 2,000 for the file). "Test" still runs
-  against the latest file (copy says so). Months in `refreshingMonths` get a status notice "The product list for <month> is
-  being refreshed in the background — reload in a few minutes" with a Reload button; while it shows, the list is polled
-  every 60 s (`HISTORY_REFRESH_POLL_MS`; a failed poll keeps the list; stops when current / on unmount). The quiet poll
-  is armed for ITS selection only — another selection's first load always shows its error.
+  because adding a signal to the SHARED `api.get` is a platform-wide change held for the owner's approval). Combos pin
+  only the keys their stored lines carry (`comboEntry`, unchanged rule); a drift note compares the stored
+  `dimensionKeys` (fallback: the combos' keys) with the current mapping and flags months read with different columns;
+  the live "never appears" check uses the selected source and is off when the list is capped (`totalCombos >
+  dimensionCombos.length`, or ≥ 2,000 for the file). "Test" still runs against the latest file (copy says so). Months in
+  `unavailableMonths` get a status notice "The product list for <month> isn't available — re-apply the month (Months
+  page) to rebuild it." (link to the Months page). No polling, no time promise.
+- **Retention bounds (the idle Scheduler drain).** The drain sets `deadline = start + DRAIN_DEADLINE_MS (150 s)` and
+  passes it to `sweep({deadline})`, which starts a step only if its worst case still ends by then: a purge
+  (`PURGE_STEP_MS` = 120 s tx + 10 s lock wait + 15 s GCS) — inside it every statement runs under
+  `SET LOCAL statement_timeout = 100000`; a GCS retry (20 s); the 10-year history delete (45 s). The GCS prefix delete is
+  abandoned after `GCS_DELETE_TIMEOUT_MS` = 15 s (the GCS client takes no abort signal, so the request itself is not
+  cancelled; `filesPurgedAt` stays null and the next sweep retries). The 10-year history delete is one transaction with
+  `statement_timeout = 12 s`, at most 50,000 line rows and 50,000 summary rows per call (headers go once a month's lines
+  and summary are gone), so a large backlog drains over several sweeps. The worker and the list-route sweeps pass no
+  deadline (the statement / GCS bounds still apply).
 - Not verified against a real DB yet (SQL unit-tested for shape only) — run the migration + picker on staging before
   relying on it; check the `comboRows` / `combosMs` apply log at real scale.
 
@@ -1322,12 +1308,12 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
   real file only ~8 % headroom under the heap backstop).
   Memory budget at that setting (§7.1 step 11): old space 1,700 MB → V8 heap_size_limit ≈ 1,892 MB on node:24; heap
   backstop trips at 1,275 MiB of used heap; shared-strings cap 400 MiB; real file peak ≈ 1.06 GB heap / 1.32 GB RSS.
-- **REQUIRED (audit fix round M3/S5; also retries GCS deletions of purged imports; §10c combos-summary repair):** Cloud Scheduler hitting `POST /v1/sales-import/drain` every 10 min with header
+- **REQUIRED (audit fix round M3/S5; also retries GCS deletions of purged imports):** Cloud Scheduler hitting `POST /v1/sales-import/drain` every 10 min with header
   `x-drain-secret` (+ secret `SALES_IMPORT_DRAIN_SECRET` on the API service). It recovers an import whose worker died
   (heartbeat-stale PROCESSING is reclaimed on the next kick) and, when nothing is queued, drives the retention sweep.
 - **Scheduler attempt deadline:** create that job with an explicit `--attempt-deadline=170s` (gcloud scheduler jobs create
-  http … --attempt-deadline=170s). The idle drain bounds the retention sweep AND the combos-summary repair by one request
-  deadline of start + 150 s (§10c), so it finishes inside it.
+  http … --attempt-deadline=170s). The idle drain bounds the retention sweep by one request deadline of start + 150 s
+  (§10c), so it finishes inside it.
 - **Migration ordering (L3):** `20261111120000_sales_import_hardening` (and every sales-import migration) must be applied
   BEFORE the new API revision serves. Verified in the workflows: `deploy-staging.yml` and `deploy.yml` both run the
   `gifsy-migrate[-staging]` Cloud Run job with `--execute-now --wait` in the SAME job, BEFORE the `gcloud run deploy`
