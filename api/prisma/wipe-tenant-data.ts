@@ -543,6 +543,95 @@ function buildSteps(clientIds: string[]): Step[] {
       del: (tx) =>
         tx.kpiDef.deleteMany({ where: { clientId: In } }).then((r) => r.count),
     },
+
+    // ── Sales Import (DMS file → monthly KPI achievements; features.salesImport) ──
+    // Children before parents: sales_import_aggregates (FK importId → sales_imports, CASCADE) and
+    // sales_import_applies (FK importId → sales_imports, RESTRICT) go before sales_imports. The other
+    // tables carry a direct clientId and no FK (reprocessedFromId / duplicateOfId are plain columns).
+    // NOTE: this script never touches storage — the tenant's uploaded files under the GCS prefix
+    // `sales-imports/<clientId>/` must be removed separately (see runbooks/PROD-DATA-WIPE.md §1).
+    {
+      model: 'SalesImportAggregate',
+      scope: 'import.clientId in tenants',
+      count: (tx) =>
+        tx.salesImportAggregate.count({ where: { import: { clientId: In } } }),
+      del: (tx) =>
+        tx.salesImportAggregate
+          .deleteMany({ where: { import: { clientId: In } } })
+          .then((r) => r.count),
+    },
+    {
+      model: 'SalesImportApply',
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.salesImportApply.count({ where: { clientId: In } }),
+      del: (tx) =>
+        tx.salesImportApply
+          .deleteMany({ where: { clientId: In } })
+          .then((r) => r.count),
+    },
+    {
+      model: 'SalesImport',
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.salesImport.count({ where: { clientId: In } }),
+      del: (tx) =>
+        tx.salesImport
+          .deleteMany({ where: { clientId: In } })
+          .then((r) => r.count),
+    },
+    {
+      model: 'SalesMonthHistoryCombo',
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.salesMonthHistoryCombo.count({ where: { clientId: In } }),
+      del: (tx) =>
+        tx.salesMonthHistoryCombo
+          .deleteMany({ where: { clientId: In } })
+          .then((r) => r.count),
+    },
+    {
+      model: 'SalesMonthHistorySet',
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.salesMonthHistorySet.count({ where: { clientId: In } }),
+      del: (tx) =>
+        tx.salesMonthHistorySet
+          .deleteMany({ where: { clientId: In } })
+          .then((r) => r.count),
+    },
+    {
+      model: 'SalesMonthHistory',
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.salesMonthHistory.count({ where: { clientId: In } }),
+      del: (tx) =>
+        tx.salesMonthHistory
+          .deleteMany({ where: { clientId: In } })
+          .then((r) => r.count),
+    },
+    {
+      model: 'SalesMonthStatus',
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.salesMonthStatus.count({ where: { clientId: In } }),
+      del: (tx) =>
+        tx.salesMonthStatus
+          .deleteMany({ where: { clientId: In } })
+          .then((r) => r.count),
+    },
+    {
+      model: 'SalesKpiDefinition',
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.salesKpiDefinition.count({ where: { clientId: In } }),
+      del: (tx) =>
+        tx.salesKpiDefinition
+          .deleteMany({ where: { clientId: In } })
+          .then((r) => r.count),
+    },
+    {
+      model: 'SalesImportProfile',
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.salesImportProfile.count({ where: { clientId: In } }),
+      del: (tx) =>
+        tx.salesImportProfile
+          .deleteMany({ where: { clientId: In } })
+          .then((r) => r.count),
+    },
     {
       model: 'OutletVisibilityRecord',
       scope: 'clientId in tenants (direct)',

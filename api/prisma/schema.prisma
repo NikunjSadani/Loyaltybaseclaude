@@ -3109,6 +3109,11 @@ model SalesImport {
   @@index([status])
   @@index([clientId, contentSha256])
   @@index([status, finishedAt])
+  // NOTE: a PARTIAL unique index `sales_imports_reprocessedFromId_live_key` ON ("reprocessedFromId")
+  // WHERE "reprocessedFromId" IS NOT NULL AND "status" NOT IN ('CANCELLED', 'FAILED') — at most ONE live
+  // "reprocess as new" child per applied import — is defined in the migration 20261112120000_sales_month_history,
+  // not here (Prisma can't express partial indexes). Do NOT drop it: reprocessAsNew relies on it (P2002 → 409)
+  // as the last line behind its row lock.
   @@map("sales_imports")
 }
 
