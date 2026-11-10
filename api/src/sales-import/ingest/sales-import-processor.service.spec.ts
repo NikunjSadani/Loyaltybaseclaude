@@ -9,6 +9,11 @@ import { SALES_IMPORT_PART_SIZE } from '../sales-import.contract';
 import { mappingFingerprint } from './mapping-fingerprint';
 import { exceljsWorkbook } from './test-fixtures.testspec';
 
+// These tests build and stream real xlsx workbooks (exceljs + zlib). They take well under a second each in
+// isolation but can exceed jest's 5 s default under full-suite CPU load (seen 2026-11-10: the whole file took
+// 105 s in the full run, 15 s alone). A red full suite skips the staging deploy, so give them real headroom.
+jest.setTimeout(30_000);
+
 // Synthetic tenant "t1", outlets O1/O2, neutral dims. Dates relative to a fixed past month are fine
 // here (they are in the past, so the today+1 window never rejects them).
 const MAPPING: SalesColumnMapping = {
