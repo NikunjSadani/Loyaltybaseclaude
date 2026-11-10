@@ -39,8 +39,15 @@ export class AuthController {
     return this.authService.verifyOtp(dto.phone, dto.otp, dto.clientId);
   }
 
-  /** Refresh access token */
+  /**
+   * Refresh access token. Stays IP-keyed (no identity before the refresh token is checked) but with
+   * its OWN generous limit: every silent refresh is a server-side call from the Next proxy / server
+   * action, so all users share one IP, and at the 60/min global default thousands of users renewing
+   * their ~60m access token would 429 each other. Abuse is bounded anyway — every call is validated
+   * against the DB (an unknown token is a cheap indexed miss) and the token is 80 random hex chars.
+   */
   @Public()
+  @Throttle({ default: { limit: 1000, ttl: 60_000 } })
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   async refresh(@Body() dto: RefreshTokenDto) {

@@ -53,6 +53,7 @@ describe('IdentityThrottlerGuard', () => {
   const authService = {
     sendOtp:   jest.fn().mockResolvedValue({ success: true, expiresIn: 600 }),
     verifyOtp: jest.fn().mockResolvedValue({ accessToken: 'a', refreshToken: 'r', user: {} }),
+    refreshToken: jest.fn().mockResolvedValue({ accessToken: 'a', refreshToken: 'r' }),
   };
   const savedEnv = { JWT_SECRET: process.env.JWT_SECRET, FIXED_OTP: process.env.FIXED_OTP };
 
@@ -232,6 +233,21 @@ describe('IdentityThrottlerGuard', () => {
       const noSub = `Bearer ${jwt.sign({ clientId: 'deoleo' })}`;
       for (let i = 0; i < 3; i++) expect((await me(noSub)).status).toBe(200);
       expect((await me()).status).toBe(429);
+    });
+  });
+
+  describe('refresh (IP-keyed, own generous limit)', () => {
+    it('stays IP-keyed (no phone marker) and carries its own 1000/min @Throttle', () => {
+      expect(Reflect.getMetadata(THROTTLE_KEY_BY, AuthController.prototype.refresh)).toBeUndefined();
+      expect(Reflect.getMetadata('THROTTLER:LIMITdefault', AuthController.prototype.refresh)).toBe(1000);
+      expect(Reflect.getMetadata('THROTTLER:TTLdefault', AuthController.prototype.refresh)).toBe(60_000);
+    });
+
+    it('silent refresh from many users behind ONE ip is not capped at the 60/min global default', async () => {
+      for (let i = 0; i < 75; i++) {
+        const res = await request(app.getHttpServer()).post('/auth/refresh').send({ refreshToken: `rt-${i}` });
+        expect(res.status).toBe(200);
+      }
     });
   });
 

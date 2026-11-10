@@ -206,7 +206,7 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
   // is still valid. Silently refresh SERVER-SIDE so the user isn't bounced to login ~hourly.
   const refreshToken = request.cookies.get('refresh_token')?.value
   if (refreshToken) {
-    // A single refresh attempt. Parallel page requests may each land here; the backend's
+    // A single refresh (retried only on a 429, inside refreshTokensViaBackend). Parallel page requests may each land here; the backend's
     // rotation grace returns the successor tokens idempotently, so concurrent refreshes are safe.
     const refreshed = await refreshTokensViaBackend(refreshToken)
     if (refreshed) {
