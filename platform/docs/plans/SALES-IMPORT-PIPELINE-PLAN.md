@@ -935,6 +935,34 @@ history months (lines AND set headers) older than 10 years before the current IS
   DELETE + one set-based INSERT … SELECT log `{msg:'sales-import month history written', deletedRows, insertedRows,
   deleteMs, insertMs}` so the real-scale timing can be measured and the bound adjusted.
 
+## 10c. Extras (branch `feat/sales-import-extras`, 2026-11-10)
+**KPI product picker from stored month history.** `GET admin/sales-import/history-combos?month=YYYY-MM` or
+`?lastMonths=N` (1..`SALES_HISTORY_COMBOS_MAX_MONTHS` = 12, default 1; never both) — targets:read + the feature-flag gate
+(`assertSalesImportAccess`), tenant-scoped, on the config controller (static segment, before `GET :id`). "Last N" = the N
+most recent months WITH stored history (read from `sales_month_history_sets`, not calendar months). Response
+`SalesHistoryCombos` = the `SalesImportCombos` lists (`dimensionCombos` + `dimensionValues`, same caps: top 2,000 combos /
+200 values per key by |₹|) + `months`, `availableMonths` (newest first, for the picker), `dimensionKeys` (union of the
+covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct count). Two aggregate SQL statements
+(`kpi/sales-history-combos.service.ts`): `GROUP BY h."dims"` with `count(*) OVER ()` + `LIMIT`, and per-key values via
+`jsonb_each_text` ranked with `row_number() … <= 200` — the line rows never reach Node (no Prisma `distinct`). FE: the
+product-set builder has a source selector (Latest file / Stored month(s) → most recent, last 3/6/12, or one month); combos
+pin only the keys their stored lines carry (`comboEntry`, unchanged rule); a drift note compares the stored
+`dimensionKeys` with the current mapping (and flags months read with different columns); the live "never appears" check
+uses the selected source and is off when the list is capped (`totalCombos > dimensionCombos.length`, or ≥ 2,000 for the
+file). "Test" still runs against the latest file (copy says so). Not verified against a real DB yet (SQL unit-tested
+for shape only) — run it on staging before relying on it.
+
+**Graceful worker stop.** Cloud Run Jobs send SIGTERM, then SIGKILL ~10 s later. `ingest/worker-stop.ts` (no imports;
+loaded before the heap decision): on SIGTERM / SIGINT the worker stops claiming (`drainImports`), the processor destroys
+the current input stream and RELEASES its claim — `updateMany WHERE id, status PROCESSING, claimToken` → `QUEUED`,
+`claimToken`/`heartbeatAt`/`startedAt` null, progress 0, `attempts` = its pre-claim value (`queuedAt` kept) — never FAILED
+(any error after a stop request is released, not failed), so the next drain picks it up immediately. The READY
+transaction is a critical section: a stop arriving during it is ignored (it commits; a SIGKILL rolls it back whole), and
+the forced exit at `WORKER_STOP_DEADLINE_MS` = 8 s (exit 143) is skipped while it runs. A drain that finishes its release
+in time exits 0; the retention sweep is skipped when stopping. The heap re-exec parent forwards SIGTERM / SIGINT to the
+child and mirrors its exit code. No infra change. (The inline runner in the API process is unchanged: a killed inline run
+is still recovered by the stale-heartbeat reclaim.)
+
 ## 11. Lane tasks (TDD: write the test first, see it fail, implement, see it pass; run `cd api && npx jest src/sales-import` or `cd platform && npx vitest run src/app/admin/sales-import src/lib/sales-import`)
 
 ### Lane I — Backend ingest (owner of `api/src/sales-import/ingest/**`, `worker.main.ts`, runner, upload endpoints)
