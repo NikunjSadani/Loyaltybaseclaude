@@ -195,6 +195,8 @@ export interface SalesImportSummary {
   createdAt: string;
   finishedAt: string | null;
   uploadedBy: string;                 // display name
+  /** Server time the import last entered QUEUED (complete / reprocess); null before. For "waiting > 2 min". */
+  queuedAt: string | null;
   heartbeatAt: string | null;
   /** PROCESSING with a heartbeat older than SALES_IMPORT_STALE_HEARTBEAT_MINUTES (worker died): can be cancelled/reprocessed. */
   stalled: boolean;
