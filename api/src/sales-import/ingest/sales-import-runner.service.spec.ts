@@ -1,5 +1,4 @@
 import { SalesImportRunnerService } from './sales-import-runner.service';
-import { COMBOS_REFRESH_HTTP_LIMITS } from '../kpi/month-combos';
 
 const ENV_KEYS = ['SALES_IMPORT_RUNNER', 'SALES_IMPORT_JOB', 'GCP_PROJECT', 'GCP_PROJECT_ID', 'GCP_REGION'] as const;
 
@@ -44,18 +43,14 @@ describe('SalesImportRunnerService.kick', () => {
     expect(processor.processClaimed.mock.calls.map((c) => c[0].id)).toEqual(['a', 'b']);
   });
 
-  it('inline → after the drain: retention sweep, then the combos repair with the small HTTP-path limits and a 60 s budget', async () => {
+  it('inline → after the drain: the retention sweep only (no background combos rebuild)', async () => {
     process.env.SALES_IMPORT_RUNNER = 'inline';
-    const order: string[] = [];
-    const retention = {
-      sweep: jest.fn(async () => { order.push('sweep'); return { abandoned: 0, purged: 0 }; }),
-      refreshHistoryCombos: jest.fn(async () => { order.push('refresh'); return {}; }),
-    };
+    const retention = { sweep: jest.fn(async () => ({ abandoned: 0, purged: 0 })) };
     const r = new SalesImportRunnerService(processor as never, retention as never);
     await expect(r.kick()).resolves.toBe('inline');
     await r.inlineIdle;
-    expect(order).toEqual(['sweep', 'refresh']);
-    expect(retention.refreshHistoryCombos).toHaveBeenCalledWith({ ...COMBOS_REFRESH_HTTP_LIMITS, budgetMs: 60_000 });
+    expect(retention.sweep).toHaveBeenCalledWith({ limit: 50 });
+    expect(Object.keys(retention)).toEqual(['sweep']); // nothing else may be called on it
   });
 
   it('inline → a kick during a run makes the single loop look again (no second loop)', async () => {

@@ -4,8 +4,8 @@ import { GUARDS_METADATA, INTERCEPTORS_METADATA, METHOD_METADATA, PATH_METADATA 
 import { PERMISSION_KEY } from '../common/decorators/require-permission.decorator';
 import { SalesImportController } from './sales-import.controller';
 import { SalesImportPartGuard } from './sales-import-access';
-import { SalesImportDrainController } from './sales-import-drain.controller';
-import { COMBOS_REFRESH_HTTP_LIMITS } from './kpi/month-combos';
+import { DRAIN_DEADLINE_MS, SalesImportDrainController } from './sales-import-drain.controller';
+import { PURGE_STEP_MS } from './ingest/sales-import-retention.service';
 
 const ADMIN = { sub: 'u1', role: 'CLIENT_ADMIN', clientId: 't1', phone: '', name: 'A' };
 const UNASSUMED_GIFSY = { sub: 'g1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: 'G' };
@@ -132,9 +132,24 @@ describe('SalesImportDrainController', () => {
   const make = (claimable: number, kick: string) => {
     const runner = { kick: jest.fn().mockResolvedValue(kick) };
     const prisma = { $queryRaw: jest.fn().mockResolvedValue([{ n: claimable }]) };
-    const retention = { sweep: jest.fn().mockResolvedValue({ abandoned: 0, purged: 0 }), refreshHistoryCombos: jest.fn().mockResolvedValue({}) };
+    const retention = { sweep: jest.fn().mockResolvedValue({ abandoned: 0, purged: 0 }) };
     return { ctrl: new SalesImportDrainController(runner as never, prisma as never, retention as never), runner, retention };
   };
+
+  it('M2: the idle drain bounds the retention sweep by one request deadline (start + 150 s), inside the 170 s attempt deadline', async () => {
+    process.env.SALES_IMPORT_DRAIN_SECRET = 's3cret';
+    const spy = jest.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    try {
+      const a = make(0, 'job');
+      await a.ctrl.drain('s3cret');
+      expect(a.retention.sweep).toHaveBeenCalledWith({ limit: 50, deadline: 1_000_000 + DRAIN_DEADLINE_MS });
+      // the sweep starts nothing that could end after the deadline; a purge's worst case fits inside the window at all
+      expect(PURGE_STEP_MS).toBeLessThanOrEqual(DRAIN_DEADLINE_MS);
+      expect(DRAIN_DEADLINE_MS + 15_000).toBeLessThanOrEqual(170_000); // + the few small un-timeboxed statements
+    } finally {
+      spy.mockRestore();
+    }
+  });
 
   it('fail-closed: no configured secret → 403 even with a header', async () => {
     delete process.env.SALES_IMPORT_DRAIN_SECRET;
@@ -155,11 +170,9 @@ describe('SalesImportDrainController', () => {
     await expect(idle.ctrl.drain('s3cret')).resolves.toEqual({ kicked: false });
     expect(idle.runner.kick).not.toHaveBeenCalled();
     expect(idle.retention.sweep).toHaveBeenCalled(); // S5: an idle drain still runs the retention sweep
-    // §10c: and repairs stale combos summaries with the small HTTP-path limits (inside the scheduler's deadline)
-    expect(idle.retention.refreshHistoryCombos).toHaveBeenCalledWith(COMBOS_REFRESH_HTTP_LIMITS);
     const busy = make(2, 'job');
     await expect(busy.ctrl.drain('s3cret')).resolves.toEqual({ kicked: true });
-    expect(busy.retention.refreshHistoryCombos).not.toHaveBeenCalled(); // the kicked worker does it
+    expect(busy.retention.sweep).not.toHaveBeenCalled(); // the kicked worker sweeps
     await expect(make(2, 'none').ctrl.drain('s3cret')).resolves.toEqual({ kicked: false });
   });
 

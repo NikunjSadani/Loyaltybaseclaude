@@ -6,7 +6,6 @@ import type { SalesImportDrainResult } from './sales-import.contract';
 import { hasClaimableImports } from './ingest/claim';
 import { SalesImportRunnerService } from './ingest/sales-import-runner.service';
 import { SalesImportRetentionService } from './ingest/sales-import-retention.service';
-import { COMBOS_REFRESH_HTTP_LIMITS } from './kpi/month-combos';
 
 /**
  * POST /v1/sales-import/drain: `@Public`, header `x-drain-secret` = SALES_IMPORT_DRAIN_SECRET,
@@ -18,6 +17,13 @@ import { COMBOS_REFRESH_HTTP_LIMITS } from './kpi/month-combos';
  * REQUIRED in staging/prod: it is what recovers an import whose worker died (heartbeat-stale PROCESSING is reclaimed
  * on the next kick) and, when nothing is queued, it drives the retention sweep. See plan §14.
  */
+/**
+ * The idle drain does its work INSIDE the scheduler's request: nothing is started that could still run after start +
+ * DRAIN_DEADLINE_MS (re-check M2), so the response (and every transaction / advisory lock) ends inside the scheduler's
+ * 170 s attempt deadline (plan §14) — the API runs with CPU throttling, so work must not outlive the response.
+ */
+export const DRAIN_DEADLINE_MS = 150_000;
+
 @Controller('sales-import')
 export class SalesImportDrainController {
   constructor(
@@ -37,10 +43,8 @@ export class SalesImportDrainController {
     const want = Buffer.from(expected);
     if (got.length !== want.length || !timingSafeEqual(got, want)) throw new ForbiddenException('Invalid drain secret');
     if (!(await hasClaimableImports(this.prisma))) {
-      await this.retention.sweep({ limit: 50 }); // never throws
-      // §10c: repair stale combos summaries with the small HTTP limits (≤ 2 months, 25 s statements, 30 s per month,
-      // no new month after 45 s) so the request ends well inside the scheduler's attempt deadline (§14: 170 s).
-      await this.retention.refreshHistoryCombos(COMBOS_REFRESH_HTTP_LIMITS);
+      const deadline = Date.now() + DRAIN_DEADLINE_MS;
+      await this.retention.sweep({ limit: 50, deadline }); // never throws; starts nothing that could pass the deadline
       return { kicked: false };
     }
     return { kicked: (await this.runner.kick()) !== 'none' };

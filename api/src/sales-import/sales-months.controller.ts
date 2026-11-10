@@ -8,6 +8,7 @@ import { SalesMonthsService } from './months/sales-months.service';
 import { SalesApplyService } from './apply/sales-apply.service';
 import { assertSalesImportAccess } from './sales-import-access';
 import type {
+  SalesMonthRebuildProductListResult,
   SalesMonthRecalcPreview,
   SalesMonthRecalcRequest,
   SalesMonthRecalcResult,
@@ -25,6 +26,8 @@ import type {
  *                                           An un-assumed GIFSY_ADMIN → 400 (access gate + service re-check).
  *   GET  admin/sales-months/:month/recalculate/preview   targets:read   → SalesMonthRecalcPreview (from stored history)
  *   POST admin/sales-months/:month/recalculate           targets:upload → SalesMonthRecalcResult (month OPEN, month lock)
+ *   POST admin/sales-months/:month/rebuild-product-list  targets:upload → SalesMonthRow (OPEN or CLOSED; month lock;
+ *                                                        rebuilds the stored product list only — no figures change; §10c)
  * OWNER: Lane K.
  */
 @Controller('admin/sales-months')
@@ -65,6 +68,14 @@ export class SalesMonthsController {
   ): Promise<SalesMonthRecalcResult> {
     await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: true });
     return this.apply.recalculate(user, month, body);
+  }
+
+  @Post(':month/rebuild-product-list')
+  @HttpCode(200)
+  @RequirePermission('targets:upload')
+  async rebuildProductList(@CurrentUser() user: JwtPayload, @Param('month') month: string): Promise<SalesMonthRebuildProductListResult> {
+    await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: true });
+    return this.months.rebuildProductList(user, month);
   }
 
   @Post(':month/close')

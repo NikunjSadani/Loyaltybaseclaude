@@ -295,12 +295,13 @@ export interface SalesHistoryCombos {
   /** Distinct combos in the covered months; more than dimensionCombos.length = the list is capped. */
   totalCombos: number;
   /**
-   * Covered months whose product summary is being refreshed in the background (missing, or from an earlier apply than
-   * the month's stored lines): their combos come from the older summary, or — when it is missing — straight from the
-   * stored lines if the month is small (else the month contributes NO combos until rebuilt). The background refresh
-   * rebuilds them (worker / Cloud Scheduler drain, every ~10 min). Empty when everything is current.
+   * Covered months whose product list cannot be shown: their stored product list is missing or out of date (only if an
+   * older revision applied the month while this feature was being deployed) and their stored lines are too many to read
+   * directly. They contribute NO combos. The FE says: "The product list for <month> isn't available — open Months and
+   * choose 'Rebuild product list' (it doesn't change any figures)." (POST admin/sales-months/:month/rebuild-product-list).
+   * Empty when every covered month is included.
    */
-  refreshingMonths: string[];
+  unavailableMonths: string[];
 }
 
 // ─── Preview / apply ────────────────────────────────────────────────────────────
@@ -404,6 +405,12 @@ export interface SalesMonthRow {
   hasHistory: boolean;
   historySourceImportId: string | null; // the import whose lines the history holds (the last applied one)
   historyAppliedAt: string | null;      // when those lines were applied (also the recalculate version token)
+  /**
+   * The month's stored product list (the KPI picker's "Stored month(s)" source, built from the stored lines at apply) is
+   * up to date. False only when hasHistory and the list was built from an earlier apply or never built — then
+   * POST admin/sales-months/:month/rebuild-product-list rebuilds it (it changes no figures). True without history.
+   */
+  productListCurrent: boolean;
 }
 
 /**
@@ -438,6 +445,14 @@ export interface SalesMonthRecalcRequest {
 }
 /** POST admin/sales-months/:month/recalculate response (recorded as a SalesImportApply with source HISTORY). */
 export type SalesMonthRecalcResult = ApplyMonthResult;
+
+/**
+ * POST admin/sales-months/:month/rebuild-product-list (targets:upload; OPEN or CLOSED month — it changes no achievement,
+ * KPI value or history line): rebuilds the month's stored product list from its stored lines under the month lock, and
+ * returns the updated row (productListCurrent: true). 404 when the month has no stored history; 409 when the month is
+ * busy (a file is being applied) for longer than the wait allows.
+ */
+export type SalesMonthRebuildProductListResult = SalesMonthRow;
 
 /** POST admin/sales-months/:month/reopen body. Without the ack, reopen → 409 when `downstream` is non-zero. */
 export interface SalesMonthReopenRequest {

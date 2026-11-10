@@ -1,7 +1,8 @@
 -- Sales Import extras (plan §10c, audit M1): a small per-month product-combo summary of the stored month history, so
 -- the KPI picker's "Stored month(s)" source never scans the line rows. Additive; touches only sales-import tables.
--- Each row records the history set it summarises (sourceImportId + appliedAt = the set header's): a reader that finds
--- them different from the header (e.g. an apply by an older revision during a deploy) rebuilds that month (re-check L-a).
+-- Each row records the history set it summarises (sourceImportId + appliedAt = the set header's); the header records it
+-- too (combosSourceImportId / combosAppliedAt). A reader that finds them different from the header (only possible if an
+-- older revision applied the month during the deploy introducing this table) reads that month from its stored lines.
 
 -- CreateTable
 CREATE TABLE "sales_month_history_combos" (

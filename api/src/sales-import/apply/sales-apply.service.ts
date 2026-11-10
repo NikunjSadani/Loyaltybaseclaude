@@ -317,9 +317,9 @@ export class SalesApplyService {
       const t2 = Date.now();
       // The month's combos summary (plan §10c, audit M1): replaced from the lines just written, in this transaction, with
       // ONE INSERT … SELECT … GROUP BY (dimKey is the stable key of dims, 1:1). Stamped with the same sourceImportId /
-      // appliedAt as the set header below, so a reader can detect (and rebuild) a summary that is not this set's
-      // (re-check L-a). The KPI picker's "Stored month(s)" source reads only this table. Recalculate does not change the
-      // history, so not this either.
+      // appliedAt as the set header below, so the reader can tell a summary that is not this set's (it then reads the
+      // month's stored lines instead). The KPI picker's "Stored month(s)" source reads this table. Recalculate does not
+      // change the history, so not this either.
       await tx.$executeRaw(Prisma.sql`DELETE FROM "sales_month_history_combos" WHERE "clientId" = ${clientId} AND "month" = ${month}`);
       const comboRows = await tx.$executeRaw(insertMonthCombosSql(clientId, month, w.sourceImportId, now));
       const t3 = Date.now();

@@ -11,8 +11,11 @@ import {
 } from '../sales-import.contract';
 import { partKey } from './parts-file';
 import { sheetjsWorkbook } from './test-fixtures.testspec';
-import { SalesImportRetentionService } from './sales-import-retention.service';
-import { SalesImportUploadService } from './sales-import-upload.service';
+import {
+  GCS_DELETE_TIMEOUT_MS, HISTORY_PURGE_CHUNK_ROWS, HISTORY_PURGE_STATEMENT_TIMEOUT_MS, HISTORY_PURGE_TX_TIMEOUT_MS, PURGE_STATEMENT_TIMEOUT_MS, PURGE_STEP_MS,
+  SalesImportRetentionService,
+} from './sales-import-retention.service';
+import { LIST_SWEEP_START_WINDOW_MS, SalesImportUploadService } from './sales-import-upload.service';
 
 const USER = { sub: 'u1', role: 'CLIENT_ADMIN', clientId: 't1', phone: '', name: 'Admin' };
 const OTHER = { ...USER, clientId: 't2' };
@@ -91,6 +94,7 @@ function harness() {
     salesMonthHistoryCombo: { deleteMany: jest.fn(async () => ({ count: 0 })) },
     user: { findMany: jest.fn().mockResolvedValue([{ id: 'u1', name: 'Admin' }]) },
     $executeRaw: jest.fn().mockResolvedValue(0),
+    $executeRawUnsafe: jest.fn(async (s: string) => { order.push(`set:${s}`); return 0; }),
     $queryRaw: jest.fn(async (q: { strings: string[]; values: unknown[] }) => {
       const sql = q.strings.join('?');
       const [id, clientId] = q.values as [string, string];
@@ -239,7 +243,9 @@ describe('SalesImportUploadService — upload', () => {
     const s = await h.svc.complete(USER, id);
     expect(s).toMatchObject({ id, status: 'QUEUED', partsReceived: 1, uploadedBy: 'Admin', progressPct: null, queuedAt: expect.any(String), canCancel: true });
     expect(h.lockModes).toEqual([]);
-    expect(h.prisma.$executeRaw).not.toHaveBeenCalled();
+    // no raw write of its own (the only raw statements are the retention sweep's bounded 10-year history deletes)
+    const raw = h.prisma.$executeRaw.mock.calls.map((c) => (c[0] as unknown as { strings: string[] }).strings.join('?'));
+    expect(raw.filter((s) => !/"sales_month_histor(ies|y_combos|y_sets)"/.test(s))).toEqual([]);
     // every GCS call of complete happened before its (only) transaction started
     const lastTx = h.order.lastIndexOf('tx:start');
     expect(h.order.slice(lastTx).filter((o) => o.startsWith('gcs:'))).toEqual([]);
@@ -460,6 +466,26 @@ describe('SalesImportUploadService — read', () => {
     expect(h.rows.get(fresh)!.purgedAt).toBeNull();
   });
 
+  it('re-check M2: with a deadline, the sweep starts no purge whose worst case (lock wait + tx + GCS) could pass it', async () => {
+    const h = harness();
+    const ids: string[] = [];
+    for (const name of ['a.csv', 'b.csv']) ids.push((await h.svc.createUpload(USER, { filename: name, sizeBytes: 1 })).importId);
+    for (const id of ids) Object.assign(h.rows.get(id)!, { status: 'FAILED', finishedAt: new Date(Date.now() - 40 * 86_400_000) });
+    let clock = 0;
+    h.retention.clock = () => clock;
+    // window too short for even one purge → nothing purged, history purge skipped too unless a small step fits
+    await expect(h.retention.sweep({ clientId: 't1', deadline: PURGE_STEP_MS - 1 })).resolves.toEqual({ abandoned: 0, purged: 0 });
+    expect(ids.every((id) => !h.rows.get(id)!.purgedAt)).toBe(true);
+    // room for exactly one: each purge "takes" 60 s → the second would start at 60 s and could end after the deadline
+    const realPurge = h.retention.purgeImport.bind(h.retention);
+    h.retention.purgeImport = async (...a: Parameters<typeof realPurge>) => { clock += 60_000; return realPurge(...a); };
+    clock = 0;
+    await expect(h.retention.sweep({ clientId: 't1', deadline: PURGE_STEP_MS + 30_000 })).resolves.toEqual({ abandoned: 0, purged: 1 });
+    expect(PURGE_STEP_MS).toBe(145_000); // 120 s tx + 10 s lock wait + 15 s GCS
+    // no deadline (list route / worker): unchanged
+    await expect(h.retention.sweep({ clientId: 't1' })).resolves.toEqual({ abandoned: 0, purged: 1 });
+  });
+
   it('S5: retention skips a row another transaction holds (busy) and retries on the next sweep', async () => {
     const h = harness();
     const { importId: id } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 1 });
@@ -589,18 +615,53 @@ describe('SalesImportUploadService — reprocess as a new import (re-audit M3)',
 });
 
 describe('SalesImportRetentionService — month history (10 years)', () => {
-  it('deletes history months older than 10 years (vs the current month), tenant-scoped when asked; never throws', async () => {
+  it('deletes history months older than 10 years — bounded: one tx, statement_timeout, chunked line / summary deletes, then headers', async () => {
     const h = harness();
-    await h.retention.purgeOldHistory({ clientId: 't1', currentMonth: '2036-11' });
-    expect(h.prisma.salesMonthHistory.deleteMany).toHaveBeenCalledWith({ where: { clientId: 't1', month: { lt: '2026-11' } } });
-    expect(h.prisma.salesMonthHistorySet.deleteMany).toHaveBeenCalledWith({ where: { clientId: 't1', month: { lt: '2026-11' } } });
-    expect(h.prisma.salesMonthHistoryCombo.deleteMany).toHaveBeenCalledWith({ where: { clientId: 't1', month: { lt: '2026-11' } } }); // audit M1
-    h.prisma.salesMonthHistory.deleteMany.mockRejectedValueOnce(new Error('db'));
+    const sql = () => h.prisma.$executeRaw.mock.calls.map((c) => c[0] as unknown as { strings: string[]; values: unknown[] });
+    h.prisma.$executeRaw.mockResolvedValueOnce(7); // the line rows deleted
+    await expect(h.retention.purgeOldHistory({ clientId: 't1', currentMonth: '2036-11' })).resolves.toBe(7);
+    expect(h.prisma.$executeRawUnsafe).toHaveBeenCalledWith(`SET LOCAL statement_timeout = ${HISTORY_PURGE_STATEMENT_TIMEOUT_MS}`);
+    const [lines, combos, sets] = sql();
+    expect(lines.strings.join('?')).toMatch(/DELETE FROM "sales_month_histories" WHERE "id" IN \(\s*SELECT h\."id" FROM "sales_month_histories" h\s+WHERE h\."month" < \? AND h\."clientId" = \? LIMIT \?\)/);
+    expect(lines.values).toEqual(['2026-11', 't1', HISTORY_PURGE_CHUNK_ROWS]);
+    expect(combos.strings.join('?')).toMatch(/DELETE FROM "sales_month_history_combos" WHERE "id" IN/);
+    expect(combos.values).toEqual(['2026-11', 't1', HISTORY_PURGE_CHUNK_ROWS]);
+    // a month's header goes only once its lines AND summary are gone (a big backlog drains over several sweeps)
+    expect(sets.strings.join('?')).toMatch(/DELETE FROM "sales_month_history_sets" s[\s\S]*NOT EXISTS[\s\S]*sales_month_histories[\s\S]*NOT EXISTS[\s\S]*sales_month_history_combos/);
+    expect(h.prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: HISTORY_PURGE_TX_TIMEOUT_MS, maxWait: 5_000 });
+    // all tenants when no clientId
+    h.prisma.$executeRaw.mockClear();
+    await h.retention.purgeOldHistory({ currentMonth: '2036-11' });
+    expect(sql()[0].values).toEqual(['2026-11', HISTORY_PURGE_CHUNK_ROWS]);
+    // never throws
+    h.prisma.$executeRaw.mockRejectedValueOnce(new Error('canceling statement due to statement timeout'));
     await expect(h.retention.purgeOldHistory()).resolves.toBe(0);
     // the regular sweep runs it too
-    h.prisma.salesMonthHistory.deleteMany.mockClear();
+    h.prisma.$executeRaw.mockClear();
     await h.retention.sweep({ clientId: 't1' });
-    expect(h.prisma.salesMonthHistory.deleteMany).toHaveBeenCalledTimes(1);
+    expect(sql().some((q) => q.strings.join('?').includes('DELETE FROM "sales_month_histories"'))).toBe(true);
+  });
+
+  it('L1: every purge statement is bounded (SET LOCAL statement_timeout first) and the GCS delete is abandoned after 15 s', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    try {
+      const h = harness();
+      const { importId: id } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 1 });
+      h.prisma.$executeRawUnsafe.mockClear();
+      Object.assign(h.rows.get(id)!, { status: 'FAILED', finishedAt: new Date(Date.now() - 40 * 86_400_000) });
+      // a GCS delete that never answers
+      h.storage.deletePrefix.mockImplementationOnce(() => new Promise<void>(() => undefined));
+      const p = h.retention.purgeImport(id, 't1');
+      await jest.advanceTimersByTimeAsync(GCS_DELETE_TIMEOUT_MS);
+      await expect(p).resolves.toBe('purged'); // the DB purge stands; files are retried by the next sweep
+      expect(h.prisma.$executeRawUnsafe).toHaveBeenCalledWith(`SET LOCAL statement_timeout = ${PURGE_STATEMENT_TIMEOUT_MS}`);
+      expect(h.order.indexOf(`set:SET LOCAL statement_timeout = ${PURGE_STATEMENT_TIMEOUT_MS}`)).toBeLessThan(h.order.lastIndexOf('tx:end'));
+      expect(h.rows.get(id)!.purgedAt).toBeTruthy();
+      expect(h.rows.get(id)!.filesPurgedAt).toBeNull(); // not marked: the next sweep retries the GCS delete
+      expect(PURGE_STATEMENT_TIMEOUT_MS).toBeLessThan(120_000);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 
@@ -666,5 +727,48 @@ describe('SalesImportUploadService — final re-check fixes', () => {
     await expect(h2.svc.reprocessAsNew(USER, id2)).rejects.toThrow(/could not be copied/);
     const child2 = [...h2.rows.values()].find((r) => (r as unknown as { reprocessedFromId: string }).reprocessedFromId === id2)!;
     expect(child2.status).toBe('CANCELLED'); // never left as a live child blocking a retry
+  });
+});
+
+describe('retention re-check L3 / L4', () => {
+  it('L3: the import-list GET sweep skips the 10-year history delete and starts no step after its 10 s window', async () => {
+    const h = harness();
+    const spy = jest.spyOn(h.retention, 'sweep');
+    await h.svc.list(USER, {});
+    const opts = spy.mock.calls[0][0]!;
+    expect(opts).toEqual(expect.objectContaining({ clientId: 't1', history: false, stopStartingAfter: expect.any(Number) }));
+    expect(opts.stopStartingAfter! - Date.now()).toBeLessThanOrEqual(LIST_SWEEP_START_WINDOW_MS);
+    const raw = h.prisma.$executeRaw.mock.calls.map((c) => (c[0] as unknown as { strings: string[] }).strings.join('?'));
+    expect(raw.some((s) => s.includes('sales_month_histories'))).toBe(false);
+    // past the window nothing new starts (an expired import is left for the drains)
+    const { importId: id } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 1 });
+    Object.assign(h.rows.get(id)!, { status: 'FAILED', finishedAt: new Date(Date.now() - 40 * 86_400_000) });
+    await expect(h.retention.sweep({ clientId: 't1', stopStartingAfter: Date.now() - 1 })).resolves.toEqual({ abandoned: 0, purged: 0 });
+    // the drains / worker (no flag) still run it
+    await h.retention.sweep({});
+    const after = h.prisma.$executeRaw.mock.calls.map((c) => (c[0] as unknown as { strings: string[] }).strings.join('?'));
+    expect(after.some((s) => s.includes('DELETE FROM "sales_month_histories"'))).toBe(true);
+  });
+
+  it('L4: a GCS prefix whose delete is still running (timed out but not settled) is not deleted a second time', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    try {
+      const h = harness();
+      const { importId: id } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 1 });
+      let finish: () => void = () => undefined;
+      h.storage.deletePrefix.mockImplementationOnce(() => new Promise<void>((r) => { finish = r; }));
+      const first = h.retention.deleteFiles(id, 't1');
+      await jest.advanceTimersByTimeAsync(GCS_DELETE_TIMEOUT_MS);
+      await expect(first).resolves.toBe(false); // gave up waiting
+      h.storage.deletePrefix.mockClear();
+      await expect(h.retention.deleteFiles(id, 't1')).resolves.toBe(false); // still in flight → skipped
+      expect(h.storage.deletePrefix).not.toHaveBeenCalled();
+      finish(); // the client call settles
+      await jest.advanceTimersByTimeAsync(0);
+      await expect(h.retention.deleteFiles(id, 't1')).resolves.toBe(true);
+      expect(h.storage.deletePrefix).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

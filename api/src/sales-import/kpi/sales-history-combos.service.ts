@@ -13,6 +13,8 @@ import {
 import { paiseToRupees, picoToCases } from '../ingest/normalize';
 import { isMonthKey } from '../months/month-state';
 import { classifyMonthSummaries } from './month-combos';
+import { currentMonthKey } from '../../targets/targets.helpers';
+import { shiftMonthKey } from '../months/month-state';
 
 export interface SalesHistoryCombosQuery {
   month?: string;
@@ -26,9 +28,10 @@ export const HISTORY_COMBOS_STATEMENT_TIMEOUT_MS = 10_000;
 /** The read transaction's own bound (a handful of statements, each ≤ the statement timeout). */
 export const HISTORY_COMBOS_TX_TIMEOUT_MS = 45_000;
 /**
- * A month with NO summary is read from its stored lines only up to this many line rows (re-check M2): a large month
- * would not fit the statement timeout, so it is listed in `refreshingMonths` with no combos until the background
- * refresh has built its summary.
+ * Months without a CURRENT summary (missing / stale) are read from their stored lines only while their line rows add up
+ * to at most this many (a cap on the SUM across those months, newest first): more would not fit the statement timeout,
+ * so the rest are listed in `unavailableMonths` with no combos (the Months page's "Rebuild product list" action —
+ * POST admin/sales-months/:month/rebuild-product-list — rebuilds their summary).
  */
 export const HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS = 50_000;
 /** 503 copy (re-check M2: accurate for both causes). */
@@ -50,8 +53,8 @@ function dimsOf(raw: Prisma.JsonValue): Record<string, string> {
 
 /**
  * The rows the two aggregates read (one statement each): the per-month SUMMARY rows of `summaryMonths`
- * (sales_month_history_combos) plus — only for months whose summary is MISSING — the stored lines themselves
- * (sales_month_histories, read-only fallback until the background refresh writes the summary).
+ * (sales_month_history_combos) plus — only for months without a current summary — the stored lines themselves
+ * (sales_month_histories, read-only).
  */
 function sourceRows(clientId: string, summaryMonths: string[], lineMonths: string[]): Prisma.Sql {
   return Prisma.sql`
@@ -70,10 +73,11 @@ function sourceRows(clientId: string, summaryMonths: string[], lineMonths: strin
  * (sales_month_history_sets), a per-month head of the combos SUMMARY (sales_month_history_combos), then two aggregate
  * statements one after the other — distinct combos across the chosen months (GROUP BY dims, top
  * SALES_IMPORT_MAX_DIMENSION_COMBOS by |₹| + the uncapped count) and per-key values (top SALES_IMPORT_MAX_DIMENSION_VALUES
- * by |₹|). The summary state comes from the set header's stamp. A month whose summary is from another history set (e.g.
- * written by an older revision during a deploy) is answered from that summary; a month with NO summary is answered from
- * its stored lines when it has ≤ HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS of them (else not at all); all are reported in
- * `refreshingMonths`, and the background refresh (month-combos.ts refreshStaleMonthCombos) rebuilds them.
+ * by |₹|). The summary state comes from the set header's stamp: a CURRENT summary is read; a month whose summary is
+ * missing or from another set (only if an older revision applied it during the deploy introducing the summary) is read
+ * from its stored lines while those months total ≤ HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS rows, newest first; the rest are
+ * returned in `unavailableMonths` (no combos — the FE says: "The product list for <month> isn't available — open Months
+ * and choose 'Rebuild product list' (it doesn't change any figures)."). There is no background rebuild.
  */
 @Injectable()
 export class SalesHistoryCombosService {
@@ -98,8 +102,10 @@ export class SalesHistoryCombosService {
           await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
           // Constant, not user input (SET takes no bind parameters).
           await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${HISTORY_COMBOS_STATEMENT_TIMEOUT_MS}`);
+          // Months older than the 10-year retention are being deleted by the sweep: never offered or read.
+          const cutoff = shiftMonthKey(currentMonthKey(), -12 * SALES_MONTH_HISTORY_RETENTION_YEARS);
           const sets = await tx.salesMonthHistorySet.findMany({
-            where: { clientId },
+            where: { clientId, month: { gte: cutoff } },
             select: {
               month: true, dimensionKeys: true, sourceImportId: true, appliedAt: true, lineRows: true,
               combosSourceImportId: true, combosAppliedAt: true,
@@ -120,18 +126,30 @@ export class SalesHistoryCombosService {
             dimensionValues: {},
             dimensionCombos: [],
             totalCombos: 0,
-            refreshingMonths: [],
+            unavailableMonths: [],
           };
           if (months.length === 0) return empty;
 
           // Summary state from the header stamp alone (re-check L1: no scan of the summary rows).
           const state = classifyMonthSummaries(chosen);
-          const lineRowsOf = new Map(chosen.map((s) => [s.month, s.lineRows]));
-          const summaryMonths = months.filter((m) => state.get(m) === 'current' || state.get(m) === 'stale');
-          // Missing summary: small months are read from their lines; large ones wait for the refresh (re-check M2).
-          const lineMonths = months.filter((m) => state.get(m) === 'missing' && (lineRowsOf.get(m) ?? 0) <= HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS);
-          const refreshingMonths = months.filter((m) => state.get(m) === 'stale' || state.get(m) === 'missing');
-          if (summaryMonths.length === 0 && lineMonths.length === 0) return { ...empty, refreshingMonths };
+          const summaryMonths = months.filter((m) => state.get(m) === 'current');
+          // No current summary (missing / stale): read from the lines, newest month first, while the total fits the cap.
+          const lineMonths: string[] = [];
+          const unavailableMonths: string[] = [];
+          let lineRows = 0;
+          for (const s of chosen) { // newest first
+            const st = state.get(s.month);
+            if (st !== 'missing' && st !== 'stale') continue;
+            if (lineRows + s.lineRows > HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS) {
+              unavailableMonths.push(s.month);
+              continue;
+            }
+            lineRows += s.lineRows;
+            lineMonths.push(s.month);
+          }
+          lineMonths.sort();
+          unavailableMonths.sort();
+          if (summaryMonths.length === 0 && lineMonths.length === 0) return { ...empty, unavailableMonths };
 
           const comboRows = await tx.$queryRaw<ComboRow[]>(Prisma.sql`
             WITH src AS (${sourceRows(clientId, summaryMonths, lineMonths)})
@@ -173,15 +191,18 @@ export class SalesHistoryCombosService {
           for (const v of valueRows) {
             (dimensionValues[v.key] ??= []).push({ value: v.value, lines: Number(v.lines), amountRupees: paiseToRupees(BigInt(v.paise)) });
           }
-          return { ...empty, dimensionValues, dimensionCombos, totalCombos: Number(comboRows[0]?.total ?? 0), refreshingMonths };
+          return { ...empty, dimensionValues, dimensionCombos, totalCombos: Number(comboRows[0]?.total ?? 0), unavailableMonths };
         },
         { timeout: HISTORY_COMBOS_TX_TIMEOUT_MS, maxWait: 5_000 },
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // A statement timeout, or no transaction could be started (P2028: pool busy / tx timeout) → the friendly 503.
+      // Re-check L2: a P2028 for a transaction that EXPIRED / was already closed is the read taking too long; a P2028
+      // that could not even START a transaction is the pool being busy.
+      const tookTooLong = /statement timeout|canceling statement|57014|expired|already closed/i.test(msg);
+      if (tookTooLong) throw new ServiceUnavailableException(HISTORY_COMBOS_TIMEOUT_MESSAGE);
       if ((e as { code?: unknown })?.code === 'P2028') throw new ServiceUnavailableException(HISTORY_COMBOS_BUSY_MESSAGE);
-      if (/statement timeout|canceling statement|57014/i.test(msg)) throw new ServiceUnavailableException(HISTORY_COMBOS_TIMEOUT_MESSAGE);
       throw e;
     }
   }

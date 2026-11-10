@@ -13,9 +13,13 @@ import type {
 
 const apiMock = vi.hoisted(() => ({ testKpi: vi.fn(), createKpi: vi.fn(), patchKpi: vi.fn(), historyCombos: vi.fn() }));
 vi.mock('@/lib/sales-import/api', () => ({ salesImportApi: apiMock }));
+vi.mock('next/link', () => ({
+  default: ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) =>
+    <a href={href} {...props}>{children}</a>,
+}));
 
 import { KpiEditor } from '../settings/_components/kpi-editor';
-import { HISTORY_REFRESH_POLL_MS } from '../settings/_components/product-set-builder';
+import { HISTORY_SELECT_DEBOUNCE_MS, MONTHS_PAGE_MAX_RANGE, monthsPageLinkFor } from '../settings/_components/product-set-builder';
 
 const MAPPING: SalesColumnMapping = {
   sheetName: null, headerRow: 'auto', outletCode: 'CUST', outletName: null, invoiceDate: 'DATE', amount: 'AMT',
@@ -38,7 +42,7 @@ const HISTORY: SalesHistoryCombos = {
     { dims: { dimA: 'S', dimB: '' }, lines: 2, amountRupees: 15, quantity: 0.5 },
   ],
   totalCombos: 2,
-  refreshingMonths: [],
+  unavailableMonths: [],
 };
 const NEW: SalesKpiDefinitionDto = { kpiCode: 'KPI_X', measure: 'AMOUNT', filter: {}, outletTypes: [], programs: [], enabled: true, order: 0 };
 const KPIS = [{ code: 'KPI_X', label: 'KPI X', unit: '₹', enabled: true }];
@@ -151,63 +155,34 @@ describe('product set builder — stored month history source', () => {
     expect(screen.getByTestId('product-set-mapping-drift')).toHaveTextContent('no SKU group column');
   });
 
-  it('months whose product summary is being refreshed get an honest notice', async () => {
-    apiMock.historyCombos.mockResolvedValue(ok(HISTORY));
-    renderEditor();
-    await useStored();
-    expect(screen.queryByTestId('product-set-refreshing')).not.toBeInTheDocument();
-    apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, months: ['2026-08', '2026-09', '2026-10'], refreshingMonths: ['2026-09'] }));
-    const sel = screen.getByRole('combobox', { name: 'Stored months to pick from' });
-    await act(async () => { fireEvent.change(sel, { target: { value: 'last:3' } }); });
-    const note = await screen.findByTestId('product-set-refreshing');
-    expect(note).toHaveAttribute('role', 'status');
-    expect(note).toHaveTextContent('The product list for September 2026 is being refreshed in the background — reload in a few minutes.');
-    // Reload fetches the same selection again; the list stays on screen meanwhile, and the notice goes once it is current
-    apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, months: ['2026-08', '2026-09', '2026-10'], refreshingMonths: [] }));
-    await act(async () => { fireEvent.click(within(note).getByRole('button', { name: 'Reload' })); });
-    expect(apiMock.historyCombos).toHaveBeenLastCalledWith({ lastMonths: 3 }, expect.any(AbortSignal));
-    await waitFor(() => expect(screen.queryByTestId('product-set-refreshing')).not.toBeInTheDocument());
-    expect(screen.getByText('Pick combinations from August 2026 – October 2026 (3 stored months)')).toBeInTheDocument();
-  });
-
-  it('L3: while a month is refreshing the list is polled every ~60 s (quietly), and polling stops once it is current', async () => {
+  it('months whose product list cannot be read get an honest notice pointing to re-apply — no polling, no promise', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
-      apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, refreshingMonths: ['2026-10'] }));
+      apiMock.historyCombos.mockResolvedValue(ok(HISTORY));
       renderEditor();
       await useStored();
-      await screen.findByTestId('product-set-refreshing');
-      expect(apiMock.historyCombos).toHaveBeenCalledTimes(1);
-      // a failing poll keeps the list (no error box)
-      apiMock.historyCombos.mockResolvedValueOnce({ success: false, error: 'boom', status: 500 });
-      await act(async () => { vi.advanceTimersByTime(HISTORY_REFRESH_POLL_MS); });
-      await waitFor(() => expect(apiMock.historyCombos).toHaveBeenCalledTimes(2));
-      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-      expect(screen.getByText('Pick combinations from October 2026')).toBeInTheDocument();
-      await waitFor(() => expect(within(screen.getByTestId('product-set-refreshing')).getByRole('button', { name: 'Reload' })).toBeEnabled());
-      // the next poll gets a current list → notice gone, no further polls
-      apiMock.historyCombos.mockResolvedValue(ok(HISTORY));
-      await act(async () => { vi.advanceTimersByTime(HISTORY_REFRESH_POLL_MS); });
-      await waitFor(() => expect(screen.queryByTestId('product-set-refreshing')).not.toBeInTheDocument());
+      expect(screen.queryByTestId('product-set-unavailable')).not.toBeInTheDocument();
+      apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, months: ['2026-08', '2026-09', '2026-10'], unavailableMonths: ['2026-09'] }));
+      const sel = screen.getByRole('combobox', { name: 'Stored months to pick from' });
+      await act(async () => { fireEvent.change(sel, { target: { value: 'last:3' } }); });
+      const note = await screen.findByTestId('product-set-unavailable');
+      expect(note).toHaveAttribute('role', 'status');
+      expect(note).toHaveTextContent(
+        "The product list for September 2026 isn't available — open Months and choose 'Rebuild product list' (it doesn't change any figures). The list below leaves it out.",
+      );
+      expect(within(note).getByRole('link', { name: 'Months' })).toHaveAttribute('href', '/admin/sales-import/months?from=2026-09&to=2026-09');
+      expect(note).not.toHaveTextContent(/refresh|minutes|re-apply/i);
+      // L1: plural wording
+      apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, months: ['2026-08', '2026-09', '2026-10'], unavailableMonths: ['2026-08', '2026-09'] }));
+      await act(async () => { fireEvent.change(sel, { target: { value: 'last:6' } }); });
+      await waitFor(() => expect(screen.getByTestId('product-set-unavailable')).toHaveTextContent(
+        "The product lists for August 2026, September 2026 aren't available — open Months and choose 'Rebuild product list' for each (it doesn't change any figures). The list below leaves them out.",
+      ));
+      expect(within(screen.getByTestId('product-set-unavailable')).getByRole('link', { name: 'Months' })).toHaveAttribute('href', '/admin/sales-import/months?from=2026-08&to=2026-09');
+      // nothing polls: the list is fetched again only when the user changes something
       const calls = apiMock.historyCombos.mock.calls.length;
-      await act(async () => { vi.advanceTimersByTime(HISTORY_REFRESH_POLL_MS * 3); });
+      await act(async () => { vi.advanceTimersByTime(10 * 60_000); });
       expect(apiMock.historyCombos).toHaveBeenCalledTimes(calls);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('L3: polling stops on unmount', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, refreshingMonths: ['2026-10'] }));
-      const { unmount } = render(<KpiEditor initial={NEW} tenantKpis={KPIS} ownedCodes={[]} mapping={MAPPING} combos={LATEST}
-        onSaved={vi.fn()} onCancel={vi.fn()} onDuplicateAsCases={vi.fn()} />);
-      await useStored();
-      await screen.findByTestId('product-set-refreshing');
-      unmount();
-      await act(async () => { vi.advanceTimersByTime(HISTORY_REFRESH_POLL_MS * 2); });
-      expect(apiMock.historyCombos).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
@@ -251,5 +226,15 @@ describe('product set builder — stored month history source', () => {
   it('read-only viewers cannot switch the source (the editor fieldset is disabled)', () => {
     renderEditor({ canEdit: false, initial: { ...NEW, id: 'k1' } });
     expect(screen.getByRole('radio', { name: 'Stored month(s)' })).toBeDisabled();
+  });
+});
+
+describe('monthsPageLinkFor (L3: every unavailable month visible on the Months page)', () => {
+  it('from the oldest to the newest; a span longer than the page range links from the newest', () => {
+    expect(monthsPageLinkFor(['2026-09'])).toBe('/admin/sales-import/months?from=2026-09&to=2026-09');
+    expect(monthsPageLinkFor(['2026-09', '2025-02', '2026-01'])).toBe('/admin/sales-import/months?from=2025-02&to=2026-09');
+    expect(MONTHS_PAGE_MAX_RANGE).toBe(36);
+    expect(monthsPageLinkFor(['2023-10', '2026-09'])).toBe('/admin/sales-import/months?from=2023-10&to=2026-09'); // exactly 36
+    expect(monthsPageLinkFor(['2023-09', '2026-09'])).toBe('/admin/sales-import/months?from=2026-09'); // 37 → newest
   });
 });

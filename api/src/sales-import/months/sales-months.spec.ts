@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { BadRequestException, ConflictException, ForbiddenException, ServiceUnavailableException, type ExecutionContext } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException, type ExecutionContext } from '@nestjs/common';
 import { GUARDS_METADATA } from '@nestjs/common/constants';
 import { Prisma } from '@prisma/client';
 import { currentMonthKey } from '../../targets/targets.helpers';
@@ -11,9 +11,10 @@ import { PointsComputeController } from '../../points-engine/points-compute.cont
 import { SalesMonthsController } from '../sales-months.controller';
 import { SalesImportConfigController } from '../sales-import-config.controller';
 import { SalesImportApplyController } from '../sales-import-apply.controller';
-import { SalesMonthsService } from './sales-months.service';
+import { REBUILD_PRODUCT_LIST_STATEMENT_TIMEOUT_MS, REBUILD_PRODUCT_LIST_TX_TIMEOUT_MS, SalesMonthsService } from './sales-months.service';
 import { SalesMonthClosedGuard } from './sales-month-closed.guard';
 import { shiftMonthKey } from './month-state';
+import { SALES_MONTH_HISTORY_RETENTION_YEARS } from '../sales-import.contract';
 
 const CUR = currentMonthKey();
 const PREV = shiftMonthKey(CUR, -1);
@@ -133,7 +134,7 @@ describe('SalesMonthsService (K-4)', () => {
     // fetching every row) and no read of the line table at all.
     expect(d.salesMonthHistorySet.findMany).toHaveBeenCalledTimes(1);
     const q = d.salesMonthHistorySet.findMany.mock.calls[0][0];
-    expect(q).toEqual({ where: { clientId: 't1', month: { in: expect.arrayContaining([PREV, CUR]) } }, select: { month: true, sourceImportId: true, appliedAt: true } });
+    expect(q).toEqual({ where: { clientId: 't1', month: { in: expect.arrayContaining([PREV, CUR]) } }, select: { month: true, sourceImportId: true, appliedAt: true, lineRows: true, combosSourceImportId: true, combosAppliedAt: true } });
     expect(q.distinct).toBeUndefined();
     expect(d.salesMonthHistory.findMany).not.toHaveBeenCalled();
     await expect(new SalesMonthsService(d as never).list('t1', '2026-13')).rejects.toBeInstanceOf(BadRequestException);
@@ -335,5 +336,93 @@ describe('SalesMonthClosedGuard (D-1)', () => {
     const guardsOf = (m: string) => Reflect.getMetadata(GUARDS_METADATA, (PointsComputeController.prototype as unknown as Record<string, object>)[m]) ?? [];
     for (const m of ['export', 'commit', 'previewReport', 'payoutReport']) expect(guardsOf(m)).toEqual([SalesMonthClosedGuard]);
     for (const m of ['preview', 'simulate']) expect(guardsOf(m)).toEqual([]);
+  });
+});
+
+describe('Rebuild product list (§10c) + productListCurrent', () => {
+  const HIST = (over: Record<string, unknown> = {}) => ({
+    month: PREV, sourceImportId: 'imp9', appliedAt: AT, lineRows: 10, combosSourceImportId: 'imp9', combosAppliedAt: AT, ...over,
+  });
+
+  it('list: productListCurrent is false only for a month with history whose product list is not from that history', async () => {
+    const current = await new SalesMonthsService(db([], { history: [HIST()] }) as never).list('t1');
+    expect(current[1]).toEqual(expect.objectContaining({ hasHistory: true, productListCurrent: true }));
+    expect(current[0]).toEqual(expect.objectContaining({ hasHistory: false, productListCurrent: true }));
+    const stale = await new SalesMonthsService(db([], { history: [HIST({ combosSourceImportId: 'imp-OLD' })] }) as never).list('t1');
+    expect(stale[1].productListCurrent).toBe(false);
+    const missing = await new SalesMonthsService(db([], { history: [HIST({ combosSourceImportId: null, combosAppliedAt: null })] }) as never).list('t1');
+    expect(missing[1].productListCurrent).toBe(false);
+  });
+
+  function rebuildDb(header: Record<string, unknown> | null, opts: { closed?: boolean; fail?: Error; purgedMeanwhile?: boolean } = {}) {
+    const d = db(opts.closed ? [{ month: OLD, state: 'CLOSED', closedAt: AT, closedById: 'ca', lastAppliedAt: AT, lastAppliedImportId: 'imp9' }] : []);
+    const order: string[] = [];
+    d.$executeRawUnsafe = jest.fn(async (s: string) => { order.push(s); return 0; });
+    d.$executeRaw = jest.fn(async (q: Prisma.Sql) => {
+      if (opts.fail) throw opts.fail;
+      const sql = q.strings.join('?');
+      order.push(/pg_advisory_xact_lock/.test(sql) ? `lock:${q.values[0]}` : /^\s*DELETE/.test(sql) ? 'delete' : 'insert');
+      return 42;
+    });
+    d.salesMonthHistorySet.findUnique = jest.fn(async () => header);
+    d.salesMonthHistorySet.updateMany = jest.fn(async () => { order.push('stamp'); return { count: opts.purgedMeanwhile ? 0 : 1 }; });
+    // the row is re-read AFTER the rebuild: the header then carries the stamp written by update()
+    d.salesMonthHistorySet.findMany = jest.fn(async () => (header ? [HIST({ month: OLD })] : []));
+    d.auditLog.create = jest.fn(async () => { order.push('audit'); return {}; });
+    return { d, order };
+  }
+
+  it('rebuilds a CLOSED month too: timeout → month lock → DELETE + INSERT … SELECT from history → stamp → audit; no figures touched', async () => {
+    const { d, order } = rebuildDb({ sourceImportId: 'imp9', appliedAt: AT, combosSourceImportId: 'imp-OLD', combosAppliedAt: AT }, { closed: true });
+    const row = await new SalesMonthsService(d as never).rebuildProductList(clientAdmin, OLD);
+    expect(order).toEqual([
+      `SET LOCAL statement_timeout = ${REBUILD_PRODUCT_LIST_STATEMENT_TIMEOUT_MS}`,
+      `lock:sales-month:t1:${OLD}`, 'delete', 'insert', 'stamp', 'audit',
+    ]);
+    const insert = d.$executeRaw.mock.calls.map((c: unknown[]) => c[0] as Prisma.Sql).find((q: Prisma.Sql) => /INSERT INTO "sales_month_history_combos"/.test(q.sql))!;
+    expect(insert.sql).toMatch(/FROM "sales_month_histories" h/);
+    expect(insert.values).toEqual(['imp9', AT.toISOString(), 't1', OLD]);
+    expect(d.salesMonthHistorySet.updateMany).toHaveBeenCalledWith({
+      where: { clientId: 't1', month: OLD }, data: { combosSourceImportId: 'imp9', combosAppliedAt: AT },
+    });
+    expect(d.auditLog.create.mock.calls[0][0].data).toEqual(expect.objectContaining({
+      entityType: 'SALES_MONTH', entityId: `t1:${OLD}`, actorId: 'ca',
+      newValues: expect.objectContaining({ action: 'rebuild-product-list', combos: 42, sourceImportId: 'imp9' }),
+    }));
+    expect(d.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: REBUILD_PRODUCT_LIST_TX_TIMEOUT_MS, maxWait: 10_000 });
+    expect(REBUILD_PRODUCT_LIST_STATEMENT_TIMEOUT_MS).toBe(240_000);
+    expect(REBUILD_PRODUCT_LIST_TX_TIMEOUT_MS).toBe(280_000);
+    // side-effect-free on figures: no month state / achievement write
+    expect(d.salesMonthStatus.upsert).not.toHaveBeenCalled();
+    expect(row).toEqual(expect.objectContaining({ month: OLD, state: 'CLOSED', productListCurrent: true }));
+  });
+
+  it('no stored history → 404 (nothing deleted); a bad month → 400; the month busy past the wait → 409', async () => {
+    const none = rebuildDb(null);
+    await expect(new SalesMonthsService(none.d as never).rebuildProductList(clientAdmin, PREV)).rejects.toBeInstanceOf(NotFoundException);
+    expect(none.order).not.toContain('delete');
+    await expect(new SalesMonthsService(rebuildDb(null).d as never).rebuildProductList(clientAdmin, '2026-13')).rejects.toBeInstanceOf(BadRequestException);
+    const busy = rebuildDb({ sourceImportId: 'imp9', appliedAt: AT }, { fail: new Error('canceling statement due to statement timeout') });
+    await expect(new SalesMonthsService(busy.d as never).rebuildProductList(clientAdmin, PREV)).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('L1: a month below the 10-year retention cutoff → 404 before any lock; a header purged meanwhile → 404 (rolled back)', async () => {
+    const cutoff = shiftMonthKey(CUR, -12 * SALES_MONTH_HISTORY_RETENTION_YEARS);
+    const old = rebuildDb({ sourceImportId: 'imp9', appliedAt: AT });
+    await expect(new SalesMonthsService(old.d as never).rebuildProductList(clientAdmin, shiftMonthKey(cutoff, -1))).rejects.toBeInstanceOf(NotFoundException);
+    expect(old.d.$transaction).not.toHaveBeenCalled();
+    const raced = rebuildDb({ sourceImportId: 'imp9', appliedAt: AT }, { purgedMeanwhile: true });
+    await expect(new SalesMonthsService(raced.d as never).rebuildProductList(clientAdmin, PREV)).rejects.toBeInstanceOf(NotFoundException);
+    expect(raced.order).toContain('stamp');
+    expect(raced.order).not.toContain('audit'); // thrown before the audit → the whole tx rolls back
+  });
+
+  it('controller: targets:upload, gate first (flag off → 403)', async () => {
+    expect(Reflect.getMetadata(PERMISSION_KEY, SalesMonthsController.prototype.rebuildProductList)).toBe('targets:upload');
+    const tenant = { resolveClient: jest.fn(async () => ({ features: {} })) };
+    const prisma = { client: { findUnique: jest.fn(async () => ({ status: 'ACTIVE', features: {} })) } };
+    const never = new Proxy({}, { get: () => () => { throw new Error('service must not be reached'); } });
+    await expect(new SalesMonthsController(never as never, tenant as never, prisma as never, never as never).rebuildProductList(clientAdmin, PREV))
+      .rejects.toBeInstanceOf(ForbiddenException);
   });
 });

@@ -8,9 +8,13 @@
  * "Recalculate from stored history" (targets:upload): an OPEN month with stored history (hasHistory) can be rewritten
  * from the final figures saved at its last apply, with today's KPI definitions — preview → confirm → apply. A CLOSED
  * month shows the action disabled ("Gifsy must reopen this month first").
+ * "Rebuild product list" (targets:upload, §10c): a month with stored history whose product list (the KPI picker's
+ * "Stored month(s)" source) is not current (productListCurrent false) — OPEN or CLOSED; it changes no figures.
+ * `?from=YYYY-MM[&to=YYYY-MM]` (link from the KPI picker) lists that range so every month it names is shown (read after
+ * mount, never in render; `to` is clamped at the current IST month).
  */
 import React, { useCallback, useEffect, useState } from 'react';
-import { Calculator, Lock, LockOpen, RefreshCw } from 'lucide-react';
+import { Calculator, Lock, LockOpen, RefreshCw, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { useAdminSession } from '@/lib/admin-session';
@@ -35,7 +39,14 @@ export default function SalesMonthsPage() {
   useEffect(() => {
     let cancelled = false;
     setError(null);
-    salesImportApi.months().then((r) => {
+    // ?from=&to= from the KPI picker: list that range so every month it names is shown (window / clock read in the effect).
+    const qs = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+    const valid = (m: string | null | undefined) => (m && /^\d{4}-(0[1-9]|1[0-2])$/.test(m) ? m : undefined);
+    const from = valid(qs?.get('from'));
+    const nowIst = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 7);
+    const rawTo = valid(qs?.get('to'));
+    const to = rawTo && from ? (rawTo > nowIst ? nowIst : rawTo) : undefined;
+    (from ? (to && to >= from ? salesImportApi.months(from, to) : salesImportApi.months(from)) : salesImportApi.months()).then((r) => {
       if (cancelled) return;
       if (r.success) setRows([...r.data].sort((a, b) => b.month.localeCompare(a.month)));
       else setError(r.error);
@@ -58,6 +69,19 @@ export default function SalesMonthsPage() {
     setBusyMonth(null);
     if (!r.success) { setActionMsg({ tone: 'err', text: `${label} was not closed: ${sentence(r.error)}.` }); reload(); return; }
     setActionMsg({ tone: 'ok', text: `${label} is closed. You can now compute points for it in the Points Engine.` });
+    setRows((prev) => prev?.map((x) => (x.month === row.month ? r.data : x)) ?? prev);
+  }
+
+  async function rebuildProductList(row: SalesMonthRow) {
+    if (busyMonth) return;
+    const label = monthLabel(row.month);
+    if (!window.confirm(`Rebuild the product list for ${label} from its stored sales lines? This only refreshes the list of products the KPI settings offer for ${label} — it doesn't change any figures.`)) return;
+    setBusyMonth(row.month);
+    setActionMsg(null);
+    const r = await salesImportApi.rebuildProductList(row.month);
+    setBusyMonth(null);
+    if (!r.success) { setActionMsg({ tone: 'err', text: `The product list for ${label} was not rebuilt: ${sentence(r.error)}.` }); reload(); return; }
+    setActionMsg({ tone: 'ok', text: `The product list for ${label} is rebuilt. No figures changed.` });
     setRows((prev) => prev?.map((x) => (x.month === row.month ? r.data : x)) ?? prev);
   }
 
@@ -189,6 +213,12 @@ export default function SalesMonthsPage() {
                             <span id={`recalc-closed-${row.month}`} className="text-[11px] text-gray-500">Gifsy must reopen this month first</span>
                           </span>
                         )
+                      )}
+                      {canClose && row.hasHistory && row.productListCurrent === false && (
+                        <Button size="sm" variant="ghost" onClick={() => rebuildProductList(row)} loading={busyMonth === row.month}
+                          aria-label={`Rebuild the product list for ${label}`} data-testid={`rebuild-product-list-${row.month}`}>
+                          <RotateCcw className="w-3.5 h-3.5" /> Rebuild product list
+                        </Button>
                       )}
                       {isGifsyAdmin && canClose && row.canReopen && (
                         <Button size="sm" variant="ghost" onClick={() => reopen(row)} loading={busyMonth === row.month}
