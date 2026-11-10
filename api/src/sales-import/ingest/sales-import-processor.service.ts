@@ -35,18 +35,38 @@ const MAX_PREHEADER_ROWS = 1000;
 /** The final READY write (delete + insert all aggregates) runs in ONE transaction; generous for ~2M rows. */
 const FINAL_TX_TIMEOUT_MS = 30 * 60_000;
 
-/** Memory backstop: fail the import readably when the heap passes this fraction of V8's limit (checked every N rows). */
-const HEAP_GUARD_FRACTION = 0.85;
-const HEAP_CHECK_ROWS = 10_000;
+/**
+ * Memory backstop (plan §7.1 step 11; real-DB finding 1). The real run showed V8 can die in GC at ~82 % of its heap
+ * limit, so the guard trips at 75 % of `heap_size_limit` (relative to whatever NODE_OPTIONS configures: the job runs with
+ * --max-old-space-size=1700 on 2 GiB, so ≈ 1.27 GB vs the real file's measured ≈ 1.06 GB heap peak), checked every
+ * 2,000 rows AND at least every 2 s, and only after TWO consecutive over-threshold checks.
+ */
+export const HEAP_GUARD_FRACTION = 0.75;
+export const HEAP_CHECK_ROWS = 2_000;
+export const HEAP_CHECK_MS = 2_000;
 
 /**
- * Re-check M4: reads V8's own heap statistics (used size vs heap_size_limit, and what is still available), and only
- * reports "over" after TWO consecutive over-threshold checks (10k rows apart) — a transient peak that the next GC
- * clears never fails an import.
+ * Reads V8's own heap statistics (used size vs heap_size_limit, and what is still available) and reports "over" only
+ * after TWO consecutive over-threshold checks — a transient peak that the next GC clears never fails an import.
+ * `due(rows)` decides when to check: every HEAP_CHECK_ROWS rows or HEAP_CHECK_MS, whichever comes first.
  */
 export class HeapGuard {
   private strikes = 0;
-  constructor(private readonly fraction = HEAP_GUARD_FRACTION) {}
+  private lastCheckAt = Date.now();
+  constructor(
+    private readonly fraction = HEAP_GUARD_FRACTION,
+    private readonly everyRows = HEAP_CHECK_ROWS,
+    private readonly everyMs = HEAP_CHECK_MS,
+  ) {}
+
+  /** Is a check due at this row count? */
+  due(rows: number, now = Date.now()): boolean {
+    if (rows % this.everyRows === 0 || now - this.lastCheckAt >= this.everyMs) {
+      this.lastCheckAt = now;
+      return true;
+    }
+    return false;
+  }
 
   overLimit(): boolean {
     const h = v8.getHeapStatistics();
@@ -245,7 +265,7 @@ export class SalesImportProcessorService {
       beat();
       checkClaim();
       // Memory backstop (plan §7.1 step 11): fail readably before an OOM kill, whatever the shape of the file.
-      if (prog.rowsSeen % HEAP_CHECK_ROWS === 0 && heapGuard.overLimit()) {
+      if (heapGuard.due(prog.rowsSeen) && heapGuard.overLimit()) {
         throw new FileProblem('The file is too large to process in one go. Split it by month and upload the parts separately.');
       }
     };

@@ -91,7 +91,8 @@ describe('unmatched csv', () => {
 });
 
 describe('claim', () => {
-  const sqlOf = (mock: jest.Mock) => (mock.mock.calls[0][0] as TemplateStringsArray).join('?');
+  const q = (mock: jest.Mock, i = 0) => mock.mock.calls[i][0] as { strings: string[]; values: unknown[] };
+  const sqlOf = (mock: jest.Mock) => q(mock).strings.join('?');
 
   it('claims QUEUED or heartbeat-stale PROCESSING with FOR UPDATE SKIP LOCKED, oldest first, bumping attempts', async () => {
     const $queryRaw = jest.fn().mockResolvedValue([{ id: 'i1' }]);
@@ -104,15 +105,28 @@ describe('claim', () => {
     expect(sql).toContain('ORDER BY "createdAt"');
     expect(sql).toContain('RETURNING *');
     expect(sql).toContain('"claimToken" = ?');
-    expect($queryRaw.mock.calls[0][1]).toBe('tok-1');
-    expect($queryRaw.mock.calls[0][2]).toBe(SALES_IMPORT_STALE_HEARTBEAT_MINUTES);
+    expect(q($queryRaw).values).toEqual(['tok-1', SALES_IMPORT_STALE_HEARTBEAT_MINUTES]);
+  });
+
+  it('real-DB finding 3: every time write / staleness test uses UTC (now() AT TIME ZONE \'UTC\'), never the session zone', async () => {
+    const $queryRaw = jest.fn().mockResolvedValue([]);
+    await claimNextImport({ $queryRaw } as never, 't');
+    await hasClaimableImports({ $queryRaw: $queryRaw.mockResolvedValueOnce([{ n: 0 }]) } as never);
+    for (const i of [0, 1]) {
+      const sql = q($queryRaw, i).strings.join('?');
+      expect(sql).toContain(`"heartbeatAt" < (now() AT TIME ZONE 'UTC') - make_interval`);
+      expect(sql.replace(/now\(\) AT TIME ZONE 'UTC'/g, '')).not.toContain('now()');
+    }
+    const claim = q($queryRaw, 0).strings.join('?');
+    expect(claim).toContain(`"startedAt" = (now() AT TIME ZONE 'UTC')`);
+    expect(claim).toContain(`"heartbeatAt" = (now() AT TIME ZONE 'UTC')`);
   });
 
   it('M2: every claim gets a fresh random token by default (never a reusable counter)', async () => {
     const $queryRaw = jest.fn().mockResolvedValue([]);
     await claimNextImport({ $queryRaw } as never);
     await claimNextImport({ $queryRaw } as never);
-    const [a, b] = [$queryRaw.mock.calls[0][1], $queryRaw.mock.calls[1][1]];
+    const [a, b] = [q($queryRaw, 0).values[0], q($queryRaw, 1).values[0]];
     expect(typeof a).toBe('string');
     expect(a).not.toBe(b);
   });

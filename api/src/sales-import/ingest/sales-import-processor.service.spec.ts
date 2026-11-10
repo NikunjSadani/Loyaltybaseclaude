@@ -505,3 +505,27 @@ describe('HeapGuard (re-check M4)', () => {
     }
   });
 });
+
+describe('HeapGuard cadence + threshold (real-DB finding 1)', () => {
+  it('checks every 2,000 rows AND at least every 2 s; trips at 75 % of the configured heap limit', () => {
+    const g = new HeapGuard();
+    const t0 = Date.now();
+    expect(g.due(1_999, t0)).toBe(false);
+    expect(g.due(2_000, t0)).toBe(true); // row cadence
+    expect(g.due(2_001, t0 + 1_000)).toBe(false);
+    expect(g.due(2_002, t0 + 2_100)).toBe(true); // time cadence (slow rows)
+    const v8 = jest.requireActual('node:v8') as typeof import('node:v8');
+    const base = v8.getHeapStatistics();
+    const at = (frac: number) => ({ ...base, used_heap_size: Math.round(base.heap_size_limit * frac), total_available_size: base.heap_size_limit });
+    let next = at(0.74);
+    const spy = jest.spyOn(v8, 'getHeapStatistics').mockImplementation(() => next);
+    try {
+      const h = new HeapGuard();
+      expect([h.overLimit(), h.overLimit()]).toEqual([false, false]); // 74 %: never
+      next = at(0.76);
+      expect([h.overLimit(), h.overLimit()]).toEqual([false, true]); // 76 %: second consecutive check trips
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

@@ -472,7 +472,7 @@ with whole-brand entries and exclusions. The §6.2 model expresses this directly
     Upload `unmatched.csv`. Set `contentSha256`, `duplicateOfId` (earlier READY import, same tenant and sha), `monthSummaries`,
     `rosterHash`, `mappingSnapshot`, READY. On any throw → FAILED with a message (no stack).
 11. Memory budget (REVISED in the re-audit: since M6 the worker aggregates EVERY customer, not only the ~6.5k roster
-    outlets). Heap is capped at 1.5 GB (`NODE_OPTIONS=--max-old-space-size=1536`, §14). Measured in spike (a) ≈ 0.4 KB of
+    outlets). Heap is capped at 1.7 GB (`NODE_OPTIONS=--max-old-space-size=1700`, §14; was 1536, see the revision below). Measured in spike (a) ≈ 0.4 KB of
     heap per tracked entry (Map entry + BigInts + key strings). Budget:
     - exceljs shared-strings cache ≤ ~350 MB (sharedStrings.xml itself capped at 512 MB unpacked; the cache is smaller);
     - tracked entries (aggregates + unmatched rows) ≤ **1.8 M combined** (aggregates ≤ 1.5 M, unmatched ≤ 0.9 M) ≈ 720 MB;
@@ -482,6 +482,12 @@ with whole-brand entries and exclusions. The §6.2 model expresses this directly
     - Backstop: every 10k rows the worker compares `heapUsed` with 85 % of V8's heap limit and fails the import with
       "too large to process in one go — split it by month" before an OOM kill, whatever the file's shape.
     Exceeding any cap → FAILED with a readable message (never an OOM).
+    **Revised after the real-DB / real-file run (2026-11-10):** the real 205 MB file peaked at heap ≈ 1.06 GB / RSS ≈ 1.32 GB;
+    a leaky build died in GC at ≈ 1.30 GB of a ≈ 1.58 GB limit (≈ 82 %) without the old 85 % / 10k-row guard firing. Now:
+    job heap `--max-old-space-size=1700` on the 2 GiB job (V8 heap_size_limit ≈ 1.7 GB, RSS headroom ≈ 300 MB); the guard
+    trips at **75 % of heap_size_limit** (≈ 1.27 GB — the real file uses ≈ 83 % of that) after two consecutive
+    over-threshold checks, checked every **2,000 rows and at least every 2 s**. The threshold is relative to whatever
+    limit is configured, so changing NODE_OPTIONS moves it with it.
 
 ### 7.2 Apply (Lane K), per month, ONE interactive transaction (`timeout: 120_000`)
 ```ts
@@ -725,7 +731,7 @@ unmatched map. No row values were printed or stored.
 about 930k rows, ≈ 130 s on one local core. Budget **3–7 min on one Cloud Run vCPU** (assume it is 1.5–3× slower than this desktop
 core). Peak RSS ≈ 0.85–1.2 GB in the all-customer worst case with the heap capped at 1.5 GB.
 
-**Recommended job size: 2 GiB memory, 1 vCPU, `NODE_OPTIONS=--max-old-space-size=1536`, task-timeout 3600 s, max-retries 1.** That
+**Recommended job size: 2 GiB memory, 1 vCPU, `NODE_OPTIONS=--max-old-space-size=1536` (SUPERSEDED: 1700, §7.1 step 11 / §14), task-timeout 3600 s, max-retries 1.** That
 leaves ≥ 0.8 GB headroom at 300 MB. 2 vCPU is not needed (≈ 1.2 cores of parallelism observed: zlib + GC threads); 4 GiB is not
 needed. Task 0-5a's pass criterion (< 10 min, < 1.5 GB) is met. Without the heap cap V8 collects lazily (1,034 MB in the default-heap
 run), so set the cap. ⚠️ Lane I: Cloud Run's filesystem is in-memory. If a file puts `sharedStrings.xml` AFTER the worksheet in the zip,
@@ -905,6 +911,11 @@ history months (lines AND set headers) older than 10 years before the current IS
 - **Bounded keys:** history uniqueness is `(clientId, month, keyHash)` with `keyHash = md5(customerCode ‖ chr(31) ‖
   dimKey)`; ingest skips (and counts) rows whose dimension value or outlet code exceeds
   `SALES_IMPORT_MAX_DIM_VALUE_CHARS` (200).
+- **Totals (real-DB finding 2):** every KPI "new" total (preview, apply audit `after`) is the sum of the per-outlet values
+  actually STORED (paise / thousandths of a case, each rounded once) — an identical re-apply shows Δ 0.
+- **Time zones (real-DB finding 3):** raw SQL never uses a bare `now()`: `sql-time.ts` provides `(now() AT TIME ZONE 'UTC')`
+  and UTC-converted JS dates for the TIMESTAMP(3)-without-zone columns (claim / heartbeat staleness, month writes, owned
+  manual-upload writes); `sql-time.spec.ts` fails on any bare now() / CURRENT_TIMESTAMP in the module.
 - **Month-write budget:** apply / recalculate transactions have an explicit `APPLY_TX_TIMEOUT_MS` = 300 s; the history
   DELETE + one set-based INSERT … SELECT log `{msg:'sales-import month history written', deletedRows, insertedRows,
   deleteMs, insertMs}` so the real-scale timing can be measured and the bound adjusted.
@@ -1200,7 +1211,8 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
 - `terraform/iam.tf`: `google_cloud_run_v2_job_iam_member` for `gifsy-api-sa` on the job: `roles/run.jobsExecutor` if the runner
   calls `jobs:run` with NO overrides (the plan's design), or `roles/run.jobsExecutorWithOverrides` if it passes overrides (e.g. an
   `IMPORT_ID` env). See §10a.5 (to verify on staging with the owner's go).
-- Job env: `NODE_OPTIONS=--max-old-space-size=1536` (so V8 collects before the 2Gi container limit; §10a.4).
+- Job env: `NODE_OPTIONS=--max-old-space-size=1700` (2 GiB job; real-DB finding 1 — see §7.1 step 11. The earlier 1536 left the
+  real file only ~8 % headroom under the heap backstop).
 - **REQUIRED (audit fix round M3/S5; also retries GCS deletions of purged imports):** Cloud Scheduler hitting `POST /v1/sales-import/drain` every 10 min with header
   `x-drain-secret` (+ secret `SALES_IMPORT_DRAIN_SECRET` on the API service). It recovers an import whose worker died
   (heartbeat-stale PROCESSING is reclaimed on the next kick) and, when nothing is queued, drives the retention sweep.

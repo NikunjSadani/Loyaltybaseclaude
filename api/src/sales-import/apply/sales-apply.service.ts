@@ -32,6 +32,7 @@ import { filterDimKeys, type KpiDefLite } from '../kpi/sales-kpi.helper';
 import { mappingFingerprint } from '../ingest/mapping-fingerprint';
 import { paiseToRupees, picoToCases } from '../ingest/normalize';
 import { lockImportRow } from '../ingest/import-lock';
+import { SQL_NOW_UTC, sqlUtc } from '../sql-time';
 import { isMonthKey, monthLabel, resolveMonthState } from '../months/month-state';
 import { computeMonthRows, sumOwnedValues, type MonthComputation } from './month-compute';
 import { loadLastApplied } from './last-applied';
@@ -275,11 +276,11 @@ export class SalesApplyService {
       const vals = chunk.map((r) => JSON.stringify(r.values));
       await tx.$executeRaw(Prisma.sql`
         INSERT INTO "outlet_sales_records" ("id","clientId","outletCode","outletName","month","kpiValues","batchId","createdAt","updatedAt")
-        SELECT u.id, ${clientId}, u.code, u.name, ${month}, u.vals::jsonb, ${batch.id}, now(), now()
+        SELECT u.id, ${clientId}, u.code, u.name, ${month}, u.vals::jsonb, ${batch.id}, ${SQL_NOW_UTC}, ${SQL_NOW_UTC}
           FROM unnest(${ids}::text[], ${codes}::text[], ${names}::text[], ${vals}::text[]) AS u(id, code, name, vals)
         ON CONFLICT ("clientId","outletCode","month") DO UPDATE
           SET "kpiValues" = (outlet_sales_records."kpiValues" - ${owned}::text[]) || EXCLUDED."kpiValues",
-              "updatedAt" = now()`);
+              "updatedAt" = ${SQL_NOW_UTC}`);
     }
 
     // 3. Full rewrite: every OTHER row of the month (off-roster, or now out of every owned KPI's scope) loses its
@@ -287,7 +288,7 @@ export class SalesApplyService {
     const written = comp.rows.map((r) => r.outletCode);
     await tx.$executeRaw(Prisma.sql`
       UPDATE "outlet_sales_records"
-         SET "kpiValues" = "kpiValues" - ${owned}::text[], "updatedAt" = now()
+         SET "kpiValues" = "kpiValues" - ${owned}::text[], "updatedAt" = ${SQL_NOW_UTC}
        WHERE "clientId" = ${clientId} AND "month" = ${month}
          AND NOT ("outletCode" = ANY(${written}::text[]))
          AND "kpiValues" ?| ${owned}::text[]`);
@@ -308,7 +309,7 @@ export class SalesApplyService {
         INSERT INTO "sales_month_histories"
           ("clientId","month","customerCode","outletId","dims","dimKey","keyHash","amountPaise","qtyPico","lines","sourceImportId","appliedAt","appliedById")
         SELECT ${clientId}, a."month", a."outletCode", r.id, a."dims", a."dimKey", md5(a."outletCode" || chr(31) || a."dimKey"),
-               a."amountPaise", a."qtyPico", a."lines", ${w.sourceImportId}, ${now}, ${user.sub}
+               a."amountPaise", a."qtyPico", a."lines", ${w.sourceImportId}, ${sqlUtc(now)}, ${user.sub}
           FROM "sales_import_aggregates" a
           LEFT JOIN unnest(${histCodes}::text[], ${histIds}::text[]) AS r(code, id) ON r.code = a."outletCode"
          WHERE a."importId" = ${w.sourceImportId} AND a."month" = ${month}`);

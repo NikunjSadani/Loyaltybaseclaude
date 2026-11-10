@@ -3,7 +3,8 @@
  * numbers apply writes (same function, same aggregates, same definitions).
  */
 import type { Prisma } from '@prisma/client';
-import { OutletKpiAccumulator, measureToNumber, outletInScope, type KpiDefLite } from '../kpi/sales-kpi.helper';
+import { OutletKpiAccumulator, outletInScope, type KpiDefLite } from '../kpi/sales-kpi.helper';
+import { QTY_SCALE, divRoundHalfAway } from '../ingest/normalize';
 import { rosterIndexOf, type AggregatePager, type RosterOutlet } from '../kpi/sales-import-data';
 
 export interface MonthOutletRow {
@@ -77,6 +78,7 @@ export async function computeMonthRows(
   split.unmatchedCustomers = unmatched.size;
 
   const stats: MonthKpiStat[] = defs.map((d) => ({ kpiCode: d.kpiCode, totalRaw: 0n, total: 0, outletsNonZero: 0, outletsNegative: 0 }));
+  const storedSums = defs.map(() => 0n);
   const rows: MonthOutletRow[] = [];
   let zeroFillOutlets = 0;
   for (const [code, meta] of [...roster.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) {
@@ -85,17 +87,29 @@ export async function computeMonthRows(
     defs.forEach((d, i) => {
       if (!outletInScope(d, meta)) return;
       const raw = acc.rawSum(code, i);
-      values[d.kpiCode] = measureToNumber(raw, d.measure);
+      const units = storedUnits(raw, d.measure);
+      values[d.kpiCode] = unitsToNumber(units, d.measure);
       stats[i].totalRaw += raw;
-      if (raw !== 0n) stats[i].outletsNonZero++;
-      if (raw < 0n) stats[i].outletsNegative++;
+      storedSums[i] += units;
+      if (units !== 0n) stats[i].outletsNonZero++;
+      if (units < 0n) stats[i].outletsNegative++;
     });
     const zeroFilled = !acc.hasLines(code);
     if (zeroFilled) zeroFillOutlets++;
     rows.push({ outletCode: code, outletName: meta.name, values, zeroFilled });
   }
-  defs.forEach((d, i) => (stats[i].total = measureToNumber(stats[i].totalRaw, d.measure)));
+  // Real-DB finding 2: the total is the sum of the per-outlet values that are actually STORED (each rounded once), so a
+  // re-apply of identical data shows Δ 0 and the audit "after" total equals what OutletSalesRecord holds.
+  defs.forEach((d, i) => (stats[i].total = unitsToNumber(storedSums[i], d.measure)));
   return { rows, stats, zeroFillOutlets, split };
+}
+
+/** A raw BigInt sum → the integer units the STORED value has: paise (₹, exact) or thousandths of a case (rounded once). */
+export function storedUnits(raw: bigint, measure: KpiDefLite['measure']): bigint {
+  return measure === 'AMOUNT' ? raw : divRoundHalfAway(raw, QTY_SCALE / 1000n);
+}
+export function unitsToNumber(units: bigint, measure: KpiDefLite['measure']): number {
+  return Number(units) / (measure === 'AMOUNT' ? 100 : 1000);
 }
 
 /** Σ of the owned keys across the month's CURRENT OutletSalesRecord rows (numeric values only). */

@@ -52,6 +52,7 @@ import {
   KpiDefLike,
   OutletLike,
 } from './targets.helpers';
+import { SQL_NOW_UTC } from '../sales-import/sql-time';
 
 // ── Deoleo default KPI seeds (ported from platform/src/lib/platform/tenant-kpi-config.ts) ──
 
@@ -849,12 +850,12 @@ export class TargetsService {
               INSERT INTO "outlet_sales_records"
                 ("id","clientId","outletCode","outletName","month","kpiValues","batchId","createdAt","updatedAt")
               VALUES (${randomUUID()}, ${user.clientId}, ${outletCode}, ${meta?.name ?? outletCode}, ${month},
-                      ${JSON.stringify(kpiMap)}::jsonb, ${batch.id}, now(), now())
+                      ${JSON.stringify(kpiMap)}::jsonb, ${batch.id}, ${SQL_NOW_UTC}, ${SQL_NOW_UTC})
               ON CONFLICT ("clientId","outletCode","month") DO UPDATE SET
                 "kpiValues"  = ${ownedSubsetSql(Prisma.sql`"outlet_sales_records"."kpiValues"`, owned)} || EXCLUDED."kpiValues",
                 "outletName" = EXCLUDED."outletName",
                 "batchId"    = EXCLUDED."batchId",
-                "updatedAt"  = now()`),
+                "updatedAt"  = ${SQL_NOW_UTC}`),
           );
           continue;
         }
@@ -974,7 +975,7 @@ export class TargetsService {
             UPDATE "outlet_sales_records"
                SET "kpiValues" = ${ownedSubsetSql(Prisma.sql`"kpiValues"`, owned)},
                    "batchId"   = ${importerBatch.id},
-                   "updatedAt" = now()
+                   "updatedAt" = ${SQL_NOW_UTC}
              WHERE "clientId" = ${clientId} AND "batchId" = ${batchId} AND "month" = ${month}
                AND "kpiValues" ?| ${owned}::text[]`);
         }
