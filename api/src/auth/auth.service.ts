@@ -13,6 +13,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
+import { claimOtpAttempt } from '../common/otp-attempt';
 import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
 import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
 import { ALL_PERMISSIONS } from '../common/rbac/permissions';
@@ -322,11 +323,7 @@ export class AuthService {
     // ~100 concurrent guesses through before it reached maxAttempts (audit L1). The conditional
     // increment is the single serialisation point — only maxAttempts claims can ever win, and a
     // losing claim is never compared (even a correct code), so it cannot mint a session.
-    const claim = await this.prisma.otpCode.updateMany({
-      where: { id: record.id, verifiedAt: null, attempts: { lt: record.maxAttempts } },
-      data:  { attempts: { increment: 1 } },
-    });
-    if (claim.count === 0) {
+    if (!(await claimOtpAttempt(this.prisma, record))) {
       throw new ForbiddenException('Too many attempts — please request a new OTP.');
     }
 

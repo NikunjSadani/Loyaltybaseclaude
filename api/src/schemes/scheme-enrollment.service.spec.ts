@@ -64,7 +64,7 @@ const mockPrisma = {
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   salesUserAssignment: { findFirst: jest.fn(), findMany: jest.fn() },
   outlet: { findMany: jest.fn(), findFirst: jest.fn() },
-  otpCode: { findFirst: jest.fn(), create: jest.fn(), deleteMany: jest.fn(), update: jest.fn() },
+  otpCode: { findFirst: jest.fn(), create: jest.fn(), deleteMany: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
   $transaction: jest.fn(),
 };
 
@@ -483,6 +483,58 @@ describe('SchemeEnrollmentService', () => {
       expect(res.locked).toBe(true);
       expect(mockPrisma.otpCode.create.mock.calls[0][0].data.phone).toBe('9812345678');
       expect(res.phoneMasked).toBe('******5678');
+    });
+
+    const rosterRow = {
+      id: 'ro9', schemeId: 's1', clientId: 'deoleo', outletRef: 'EXT-42', outletName: 'Kirana',
+      matchedOutletId: null, matchedPartnerId: null, taggedSalesUserId: 'su-child',
+      prefillValues: { 'Owner Phone': '9812345678' },
+    };
+    const verify = (otp: string) =>
+      service.verifyEnrollOtp(salesUser, 's1', { enrollmentMode: 'SALES', targetSchemeOutletId: 'ro9', otp } as never);
+
+    it('verify OTP: claims atomically, keeps the 401 copy on a miss, marks verified on a hit', async () => {
+      primeSalesStandalone(rosterRow);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'otpE', code: '424242', attempts: 0, maxAttempts: 3 });
+      mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.otpCode.update.mockResolvedValue({});
+
+      const err = await verify('000000').catch((e) => e);
+      expect(err.getStatus()).toBe(401);
+      expect(err.message).toBe('Invalid OTP. 2 attempt(s) remaining.');
+      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
+        where: { id: 'otpE', verifiedAt: null, attempts: { lt: 3 } },
+        data: { attempts: { increment: 1 } },
+      });
+      expect(mockPrisma.otpCode.update).not.toHaveBeenCalled();
+
+      await expect(verify('424242')).resolves.toEqual({ verified: true, phone: '9812345678' });
+      expect(mockPrisma.otpCode.update).toHaveBeenCalledWith({ where: { id: 'otpE' }, data: { verifiedAt: expect.any(Date) } });
+    });
+
+    it('verify OTP: a lost claim → the existing 429 "OTP locked…" and the right code is NOT accepted', async () => {
+      primeSalesStandalone(rosterRow);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'otpE', code: '424242', attempts: 0, maxAttempts: 3 });
+      mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 0 });
+      const err = await verify('424242').catch((e) => e);
+      expect(err.getStatus()).toBe(429);
+      expect(err.message).toBe('OTP locked due to too many attempts. Request a new OTP.');
+      expect(mockPrisma.otpCode.update).not.toHaveBeenCalled();
+    });
+
+    it('verify OTP: 100 parallel guesses (all reading attempts=0), right code LAST → never verified', async () => {
+      primeSalesStandalone(rosterRow);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'otpE', code: '424242', attempts: 0, maxAttempts: 3 });
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      const row = simulateOtpClaims(mockPrisma.otpCode.updateMany);
+      const otps = Array.from({ length: 100 }, (_, i) => (i === 99 ? '424242' : String(200000 + i)));
+      const results = await Promise.allSettled(otps.map((otp) => verify(otp)));
+      const msgs = results.map((r) => (r.status === 'rejected' ? (r.reason as Error).message : 'OK'));
+      expect(msgs.filter((m) => m.startsWith('Invalid OTP'))).toHaveLength(3);
+      expect(msgs.filter((m) => m === 'OTP locked due to too many attempts. Request a new OTP.')).toHaveLength(97);
+      expect(msgs).not.toContain('OK');
+      expect(row.attempts).toBe(3);
+      expect(mockPrisma.otpCode.update).not.toHaveBeenCalled();
     });
 
     it('submit records the roster number (a client-typed field/mobile is ignored)', async () => {
@@ -1178,3 +1230,21 @@ describe('SchemeEnrollmentService', () => {
     });
   });
 });
+
+/**
+ * Claim-before-compare (2026-11-10): simulate the OtpCode row's atomic conditional increment — the
+ * ONLY serialisation point — so N parallel verifies that all READ attempts=0 can be exercised.
+ */
+function simulateOtpClaims(updateMany: jest.Mock, maxAttempts = 3) {
+  const state = { attempts: 0 };
+  updateMany.mockImplementation(async ({ where, data }: any) => {
+    await new Promise((r) => setImmediate(r)); // interleave the parallel callers
+    if (data?.attempts?.increment) {
+      if (state.attempts < (where?.attempts?.lt ?? maxAttempts)) { state.attempts++; return { count: 1 }; }
+      return { count: 0 };
+    }
+    if (data?.attempts?.decrement) { if (state.attempts > 0) state.attempts--; return { count: 1 }; }
+    return { count: 1 };
+  });
+  return state;
+}

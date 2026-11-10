@@ -18,6 +18,7 @@ import { platformWide, isGifsyOperator } from '../common/tenant-scope';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { descendantSalesUserIds, SalesUserEdge } from '../sales/sales-hierarchy-access.helper';
 import { generateNumericOtp } from '../common/otp';
+import { claimOtpAttempt } from '../common/otp-attempt';
 import { startOfIstDay, endOfIstDay, istDayRangeFilter } from '../common/ist-date';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { sniffFileType } from '../common/file-signature';
@@ -780,10 +781,14 @@ export class SchemeEnrollmentService {
     if (rec.attempts >= rec.maxAttempts) {
       throw new HttpException('OTP locked due to too many attempts. Request a new OTP.', HttpStatus.TOO_MANY_REQUESTS);
     }
+    // Claim-before-compare (common/otp-attempt): claim the attempt ATOMICALLY before comparing, so
+    // parallel guesses can't exceed maxAttempts; a losing claim gets the same 429 as above.
+    if (!(await claimOtpAttempt(this.prisma, rec))) {
+      throw new HttpException('OTP locked due to too many attempts. Request a new OTP.', HttpStatus.TOO_MANY_REQUESTS);
+    }
     const fixedOtp = isFixedOtpAllowed() ? process.env.FIXED_OTP : undefined;
     const matches = rec.code === dto.otp || (!!fixedOtp && dto.otp === fixedOtp);
     if (!matches) {
-      await this.prisma.otpCode.update({ where: { id: rec.id }, data: { attempts: { increment: 1 } } });
       const remaining = rec.maxAttempts - rec.attempts - 1;
       throw new HttpException(`Invalid OTP. ${remaining} attempt(s) remaining.`, HttpStatus.UNAUTHORIZED);
     }
