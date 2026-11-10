@@ -16,7 +16,7 @@ vi.mock('next/headers', () => ({
 }));
 
 import { getTenantConfig } from '../server';
-import { __resetRoutingCacheForTests, getRoutingSnapshot } from '../tenant-routing-cache';
+import { __resetRoutingCacheForTests, getRoutingSnapshot, refreshIfStale } from '../tenant-routing-cache';
 import { DEFAULT_CLIENT_CONFIG } from '../default-client-config';
 import { CLIENT_REGISTRY } from '../client-registry';
 
@@ -66,8 +66,12 @@ afterEach(() => {
   __resetRoutingCacheForTests();
 });
 
-/** Let fire-and-forget refreshes settle. */
-const flush = () => new Promise((r) => setTimeout(r, 0));
+/**
+ * Deterministically settle a fire-and-forget refresh: refreshIfStale() returns the SAME
+ * coalesced in-flight promise (or resolves immediately when nothing is in flight / the
+ * snapshot is fresh). No wall-clock, no macrotask timing.
+ */
+const settle = () => refreshIfStale();
 
 describe('getTenantConfig — render-path freshness', () => {
   it('Deoleo renders the registry config overlaid with its DB branding — identical to before', async () => {
@@ -104,13 +108,13 @@ describe('getTenantConfig — render-path freshness', () => {
 
     now += 30_000; // within TTL → no refetch
     await getTenantConfig();
-    await flush();
+    await settle();
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     now += 31_000; // past TTL → SWR: this render still gets last-good, the next sees the update
     const swr = await getTenantConfig();
     expect(swr.branding.displayName).toBe('Deoleo');
-    await flush();
+    await settle();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect((await getTenantConfig()).branding.displayName).toBe('Deoleo Renamed');
   });

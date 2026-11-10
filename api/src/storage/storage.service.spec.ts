@@ -105,6 +105,20 @@ describe('StorageService', () => {
     });
   });
 
+  describe('statObject', () => {
+    it('returns the numeric size + content-type from metadata', async () => {
+      const file = { getMetadata: jest.fn().mockResolvedValue([{ size: '1234', contentType: 'image/png' }]) };
+      (service as unknown as { storage: unknown }).storage = { bucket: () => ({ file: () => file }) };
+      await expect(service.statObject('branding/x')).resolves.toEqual({ size: 1234, contentType: 'image/png' });
+    });
+
+    it('returns null (never throws) for a missing object / read error', async () => {
+      const file = { getMetadata: jest.fn().mockRejectedValue(new Error('No such object')) };
+      (service as unknown as { storage: unknown }).storage = { bucket: () => ({ file: () => file }) };
+      await expect(service.statObject('branding/missing')).resolves.toBeNull();
+    });
+  });
+
   describe('large-object helpers (Sales Import)', () => {
     function stubBucket() {
       const written: Buffer[] = [];

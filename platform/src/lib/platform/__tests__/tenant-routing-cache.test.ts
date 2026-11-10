@@ -231,6 +231,62 @@ describe('fail-safe fetch', () => {
   });
 });
 
+describe('failure backoff — a down API is not retried on every render', () => {
+  it('after a failed fetch, refreshIfStale/ensureWarm do not refetch for 30s, then retry', async () => {
+    const f = vi.fn().mockRejectedValue(new Error('down'));
+    vi.stubGlobal('fetch', f);
+    await ensureWarm();
+    expect(f).toHaveBeenCalledTimes(1);
+
+    now += 29_999;
+    await ensureWarm();
+    await refreshIfStale();
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(getRoutingSnapshot()).toBeNull(); // registry fallback meanwhile
+
+    now += 2;
+    f.mockResolvedValue({ ok: true, json: async () => GOOD_PAYLOAD });
+    await refreshIfStale();
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(getRoutingSnapshot()).not.toBeNull();
+  });
+
+  it('a stale-but-present snapshot keeps last-good and backs off after a failed refresh', async () => {
+    const f = mockFetchResolving(GOOD_PAYLOAD);
+    await refreshIfStale();
+    const good = getRoutingSnapshot();
+    now += 61_000;
+    f.mockResolvedValue({ ok: false, json: async () => ({}) });
+    await refreshIfStale();
+    expect(f).toHaveBeenCalledTimes(2);
+    now += 10_000;
+    await refreshIfStale();
+    expect(f).toHaveBeenCalledTimes(2); // backing off
+    expect(getRoutingSnapshot()).toBe(good);
+  });
+
+  it('a success clears the backoff (normal 60s TTL resumes)', async () => {
+    const f = vi.fn().mockRejectedValueOnce(new Error('down'));
+    vi.stubGlobal('fetch', f);
+    await refreshIfStale();
+    now += 30_001;
+    f.mockResolvedValue({ ok: true, json: async () => GOOD_PAYLOAD });
+    await refreshIfStale();
+    now += 60_001;
+    await refreshIfStale();
+    expect(f).toHaveBeenCalledTimes(3);
+  });
+
+  it('invalidate() (an operator edit) bypasses the backoff', async () => {
+    const f = vi.fn().mockRejectedValue(new Error('down'));
+    vi.stubGlobal('fetch', f);
+    await refreshIfStale();
+    invalidate();
+    await refreshIfStale();
+    expect(f).toHaveBeenCalledTimes(2);
+  });
+});
+
 // ── Render-path miss refresh (a tenant created AFTER this instance warmed) ────────────────
 describe('refreshOnMiss — awaited, coalesced, throttled, bounded, never throws', () => {
   it('forces a refetch even while the snapshot is still inside its TTL (new tenant appears now)', async () => {
@@ -258,7 +314,7 @@ describe('refreshOnMiss — awaited, coalesced, throttled, bounded, never throws
     expect(f).toHaveBeenCalledTimes(1);
   });
 
-  it('throttles repeated misses to one fetch per 5s even when fetches keep failing', async () => {
+  it('throttles repeated misses (5s floor; 30s after a failure) even when fetches keep failing', async () => {
     const f = vi.fn().mockRejectedValue(new Error('down'));
     vi.stubGlobal('fetch', f);
     await refreshOnMiss();
@@ -267,6 +323,9 @@ describe('refreshOnMiss — awaited, coalesced, throttled, bounded, never throws
     expect(f).toHaveBeenCalledTimes(1);
     expect(getRoutingSnapshot()).toBeNull(); // failure → unchanged (registry fallback)
     now += 5_001;
+    await refreshOnMiss(); // the 30s failure backoff also applies to misses
+    expect(f).toHaveBeenCalledTimes(1);
+    now += 25_000;
     await refreshOnMiss();
     expect(f).toHaveBeenCalledTimes(2);
   });
@@ -288,7 +347,8 @@ describe('refreshOnMiss — awaited, coalesced, throttled, bounded, never throws
   });
 
   it('never waits longer than ~2s even if fetch ignores its abort signal (no hung render)', async () => {
-    vi.useFakeTimers();
+    // Fake ONLY the timers (Date.now stays on the deterministic spy) — no wall clock involved.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
       vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {}))); // never settles
       let done = false;

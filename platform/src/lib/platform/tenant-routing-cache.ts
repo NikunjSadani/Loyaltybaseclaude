@@ -80,6 +80,12 @@ const FETCH_TIMEOUT_MS = 2_000;
 const MISS_REFRESH_MIN_INTERVAL_MS = 5_000;
 /** Upper bound a render ever waits on a miss refresh (belt-and-braces over FETCH_TIMEOUT_MS). */
 const MISS_REFRESH_MAX_WAIT_MS = 2_000;
+/**
+ * After a FAILED fetch (timeout / network / non-OK / malformed), no refresh of any kind
+ * (warm, SWR, miss) is attempted for this long — so a down API costs one ≤2s fetch per 30s
+ * per instance, not one per render. `invalidate()` (an operator edit) bypasses it.
+ */
+const FAILURE_BACKOFF_MS = 30_000;
 
 /** The branding fields we accept from the endpoint (whitelist — no secrets). */
 const BRANDING_FIELDS: (keyof PublicBranding)[] = [
@@ -101,6 +107,13 @@ let forcedStale = false;
 let invalidateGen = 0;
 // Date.now() at which the most recent routing fetch was STARTED (miss-refresh throttle).
 let lastFetchStartedAt = Number.NEGATIVE_INFINITY;
+// Date.now() of the most recent FAILED fetch; reset by any success (failure backoff).
+let lastFailedAt = Number.NEGATIVE_INFINITY;
+
+/** True while inside the post-failure backoff window (and no operator invalidate is pending). */
+function inFailureBackoff(): boolean {
+  return !forcedStale && Date.now() - lastFailedAt < FAILURE_BACKOFF_MS;
+}
 
 /**
  * Whether the DB routing source is active. `TENANT_ROUTING_SOURCE=registry`
@@ -201,6 +214,8 @@ export function refreshIfStale(): Promise<void> {
   const stale =
     snapshot === null || forcedStale || Date.now() - snapshot.fetchedAt > TTL_MS;
   if (!stale) return Promise.resolve();
+  // Joining an in-flight fetch is always fine; STARTING one is skipped while backing off.
+  if (inFlight === null && inFailureBackoff()) return Promise.resolve();
   return startRefresh();
 }
 
@@ -215,6 +230,7 @@ function startRefresh(): Promise<void> {
   const gen = invalidateGen; // capture the intent at dispatch (see invalidateGen)
   inFlight = fetchRouting()
     .then((next) => {
+      lastFailedAt = next ? Number.NEGATIVE_INFINITY : Date.now();
       if (next) {
         // Atomic swap — a single reference assignment; readers see old or new.
         snapshot = next;
@@ -287,6 +303,7 @@ export async function refreshOnMiss(): Promise<void> {
     let pending = inFlight;
     if (!pending) {
       if (Date.now() - lastFetchStartedAt < MISS_REFRESH_MIN_INTERVAL_MS) return;
+      if (inFailureBackoff()) return;
       pending = startRefresh();
     }
     const cap = new Promise<void>((resolve) => {
@@ -310,4 +327,5 @@ export function __resetRoutingCacheForTests(): void {
   forcedStale = false;
   invalidateGen = 0;
   lastFetchStartedAt = Number.NEGATIVE_INFINITY;
+  lastFailedAt = Number.NEGATIVE_INFINITY;
 }

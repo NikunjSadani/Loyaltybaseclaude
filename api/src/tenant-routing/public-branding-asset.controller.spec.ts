@@ -1,4 +1,5 @@
 import { NotFoundException, StreamableFile } from '@nestjs/common';
+import { Readable } from 'node:stream';
 import { PublicBrandingAssetController } from './public-branding-asset.controller';
 
 const KEY = 'branding/bajaj/2026-11/5d3daa20-92f7-4ff8-8d2e-8ff59a429201-bajaj-logo.png';
@@ -6,42 +7,107 @@ const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0
 const PDF = Buffer.from('%PDF-1.7 fake');
 const HTML = Buffer.from('<html><script>alert(1)</script></html>');
 const TIFF = Buffer.from([0x49, 0x49, 0x2a, 0x00, 1, 2, 3, 4]);
+const MB = 1024 * 1024;
 
-function setup(file: { bytes: Buffer; contentType: string } | null) {
-  const storage = { downloadBytes: jest.fn().mockResolvedValue(file) };
+/** A storage double: one object (or none) with the given bytes; `size` may be overridden. */
+function setup(obj: { bytes: Buffer; contentType?: string; size?: number } | null) {
+  const storage = {
+    statObject: jest.fn().mockResolvedValue(
+      obj ? { size: obj.size ?? obj.bytes.length, contentType: obj.contentType ?? 'image/png' } : null,
+    ),
+    downloadBytes: jest.fn().mockResolvedValue(
+      obj ? { bytes: obj.bytes, contentType: obj.contentType ?? 'image/png' } : null,
+    ),
+    openReadStream: jest.fn((_k: string, range?: { start?: number; end?: number }) => {
+      if (!obj) throw new Error('missing');
+      const b = range ? obj.bytes.subarray(range.start ?? 0, (range.end ?? obj.bytes.length - 1) + 1) : obj.bytes;
+      return Readable.from([b]);
+    }),
+  };
   const controller = new PublicBrandingAssetController(storage as any);
+  return { storage, controller };
+}
+
+function mockRes() {
   const headers: Record<string, string> = {};
   const res = { setHeader: jest.fn((k: string, v: string) => (headers[k] = v)) } as any;
-  return { storage, controller, res, headers };
+  return { res, headers };
+}
+
+async function bodyOf(file: StreamableFile): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const c of file.getStream()) chunks.push(Buffer.from(c));
+  return Buffer.concat(chunks);
 }
 
 describe('PublicBrandingAssetController', () => {
-  it('is @Public() (pre-login: no JWT, no tenant context) and NOT exempt from the global throttler', () => {
+  it('is @Public() and @SkipThrottle() (the IP throttler sees the frontend egress IP, not users)', () => {
     const handler = PublicBrandingAssetController.prototype.get;
     expect(Reflect.getMetadata('isPublic', handler)).toBe(true);
-    // No @SkipThrottle → the global ThrottlerGuard (60/min/IP) still rate-limits it.
     const keys = [
       ...Reflect.getMetadataKeys(handler),
       ...Reflect.getMetadataKeys(PublicBrandingAssetController),
     ].map(String);
-    expect(keys.some((k) => k.startsWith('THROTTLER:SKIP'))).toBe(false);
-    // No @Roles → RolesGuard/PermissionGuard have nothing to enforce.
+    expect(keys.some((k) => k.startsWith('THROTTLER:SKIP'))).toBe(true);
     expect(Reflect.getMetadata('roles', handler)).toBeUndefined();
   });
 
-  it('streams a branding PNG with the SNIFFED type, nosniff and an immutable public cache', async () => {
-    const { controller, storage, res, headers } = setup({ bytes: PNG, contentType: 'image/png' });
+  it('serves a small branding PNG with the SNIFFED type, nosniff and an immutable public cache', async () => {
+    const { controller } = setup({ bytes: PNG });
+    const { res, headers } = mockRes();
     const out = await controller.get(KEY, res);
     expect(out).toBeInstanceOf(StreamableFile);
-    expect(storage.downloadBytes).toHaveBeenCalledWith(KEY, 5 * 1024 * 1024);
+    expect(await bodyOf(out)).toEqual(PNG);
     expect(headers['Content-Type']).toBe('image/png');
     expect(headers['X-Content-Type-Options']).toBe('nosniff');
     expect(headers['Content-Disposition']).toBe('inline');
     expect(headers['Cache-Control']).toBe('public, max-age=31536000, immutable');
   });
 
+  it('caches small objects in-process: the second request does not touch storage', async () => {
+    const { controller, storage } = setup({ bytes: PNG });
+    await controller.get(KEY, mockRes().res);
+    const { res, headers } = mockRes();
+    const out = await controller.get(KEY, res);
+    expect(await bodyOf(out)).toEqual(PNG);
+    expect(headers['Content-Type']).toBe('image/png');
+    expect(storage.statObject).toHaveBeenCalledTimes(1);
+    expect(storage.downloadBytes).toHaveBeenCalledTimes(1);
+  });
+
+  it('remembers a 404 briefly so a repeated missing key does not hit storage each time', async () => {
+    const { controller, storage } = setup(null);
+    await expect(controller.get(KEY, mockRes().res)).rejects.toBeInstanceOf(NotFoundException);
+    await expect(controller.get(KEY, mockRes().res)).rejects.toBeInstanceOf(NotFoundException);
+    expect(storage.statObject).toHaveBeenCalledTimes(1);
+  });
+
+  it('STREAMS a larger (uncached) object after sniffing only its first bytes', async () => {
+    const big = Buffer.concat([PNG, Buffer.alloc(600 * 1024, 7)]);
+    const { controller, storage } = setup({ bytes: big });
+    const { res, headers } = mockRes();
+    const out = await controller.get(KEY, res);
+    expect(storage.downloadBytes).not.toHaveBeenCalled();
+    expect(storage.openReadStream).toHaveBeenCalledWith(KEY, { start: 0, end: 15 });
+    expect(storage.openReadStream).toHaveBeenLastCalledWith(KEY);
+    expect(headers['Content-Type']).toBe('image/png');
+    expect(headers['Content-Length']).toBe(String(big.length));
+    expect((await bodyOf(out)).length).toBe(big.length);
+    // Not cached → a repeat streams again.
+    await controller.get(KEY, mockRes().res);
+    expect(storage.statObject).toHaveBeenCalledTimes(2);
+  });
+
+  it('404s an object over the 5 MB cap WITHOUT reading any bytes', async () => {
+    const { controller, storage } = setup({ bytes: PNG, size: 5 * MB + 1 });
+    await expect(controller.get(KEY, mockRes().res)).rejects.toBeInstanceOf(NotFoundException);
+    expect(storage.downloadBytes).not.toHaveBeenCalled();
+    expect(storage.openReadStream).not.toHaveBeenCalled();
+  });
+
   it('ignores a lying stored content-type — the bytes decide', async () => {
-    const { controller, res, headers } = setup({ bytes: PNG, contentType: 'text/html' });
+    const { controller } = setup({ bytes: PNG, contentType: 'text/html' });
+    const { res, headers } = mockRes();
     await controller.get(KEY, res);
     expect(headers['Content-Type']).toBe('image/png');
   });
@@ -54,23 +120,28 @@ describe('PublicBrandingAssetController', () => {
     ['missing key', undefined],
     ['repeated key param', [KEY, KEY]],
   ])('404s %s WITHOUT touching storage', async (_l, key) => {
-    const { controller, storage, res } = setup({ bytes: PNG, contentType: 'image/png' });
-    await expect(controller.get(key as any, res)).rejects.toBeInstanceOf(NotFoundException);
+    const { controller, storage } = setup({ bytes: PNG });
+    await expect(controller.get(key as any, mockRes().res)).rejects.toBeInstanceOf(NotFoundException);
+    expect(storage.statObject).not.toHaveBeenCalled();
     expect(storage.downloadBytes).not.toHaveBeenCalled();
-  });
-
-  it('404s a missing / oversized object (storage returns null)', async () => {
-    const { controller, res } = setup(null);
-    await expect(controller.get(KEY, res)).rejects.toBeInstanceOf(NotFoundException);
+    expect(storage.openReadStream).not.toHaveBeenCalled();
   });
 
   it.each([
     ['PDF', PDF],
     ['HTML', HTML],
     ['TIFF (not browser-renderable)', TIFF],
-  ])('404s a %s object even under branding/', async (_l, bytes) => {
-    const { controller, res, headers } = setup({ bytes, contentType: 'image/png' });
+  ])('404s a small %s object even under branding/', async (_l, bytes) => {
+    const { controller } = setup({ bytes });
+    const { res, headers } = mockRes();
     await expect(controller.get(KEY, res)).rejects.toBeInstanceOf(NotFoundException);
     expect(headers['Content-Type']).toBeUndefined();
+  });
+
+  it('404s a LARGE non-image object (head sniff) without streaming it', async () => {
+    const bigPdf = Buffer.concat([PDF, Buffer.alloc(600 * 1024)]);
+    const { controller, storage } = setup({ bytes: bigPdf });
+    await expect(controller.get(KEY, mockRes().res)).rejects.toBeInstanceOf(NotFoundException);
+    expect(storage.openReadStream).toHaveBeenCalledTimes(1); // the 16-byte head read only
   });
 });
