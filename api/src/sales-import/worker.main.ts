@@ -6,13 +6,17 @@
  *   itself once with --max-old-space-size=1700, else fails fast (the backstop trips at 75 % of the limit; plan §7.1 step 11).
  * Same image as the API; compiled by `tsc -p tsconfig.build.json` to dist/sales-import/worker.main.js
  * (the api Dockerfile asserts the file exists). Claims imports until none is claimable, then exits 0.
+ * Graceful stop (plan §10c, ingest/worker-stop.ts): SIGTERM / SIGINT → no new claims, the current read is aborted and its
+ * claim RELEASED (back to QUEUED, not counted, never FAILED), exit within ~8 s; a READY transaction in progress is left
+ * to commit. A re-executing parent forwards the signal to its child.
  * OWNER: Lane I (task I-7). Lane-0 skeleton: claimNext() returns null → "processed: 0".
  */
-// L-1: ONLY Node built-ins + the tiny heap helper are imported up front. Nest / Prisma / ExcelJS / Storage are loaded
+// L-1: ONLY Node built-ins + the tiny heap / stop helpers (no imports of their own) are imported up front. Nest / Prisma / ExcelJS / Storage are loaded
 // dynamically after the heap decision, so a parent that re-executes itself never loads them.
 import { spawn } from 'node:child_process';
 import * as v8 from 'node:v8';
 import { ensureWorkerHeap } from './ingest/worker-heap';
+import { WorkerStop, drainImports, installWorkerSignals } from './ingest/worker-stop';
 
 // Same BigInt JSON rule as main.ts (paise/micro BigInt must never crash a JSON.stringify).
 (BigInt.prototype as unknown as { toJSON: () => number }).toJSON = function () {
@@ -30,23 +34,24 @@ async function main(): Promise<void> {
     exit: (code) => process.exit(code),
     log: (l) => console.log(l),
     error: (l) => console.error(l),
+    onSignal: (sig, cb) => process.on(sig, cb),
   });
   if (!run) return;
+  // Installed BEFORE Nest boots: a SIGTERM during startup still means "claim nothing".
+  const stop = new WorkerStop();
+  installWorkerSignals({ stop, on: (sig, cb) => process.on(sig, cb), exit: (code) => process.exit(code), log: (l) => console.log(l) });
   const { NestFactory } = await import('@nestjs/core');
   const { SalesImportWorkerModule } = await import('./ingest/sales-import-worker.module');
   const { SalesImportProcessorService } = await import('./ingest/sales-import-processor.service');
   const { SalesImportRetentionService } = await import('./ingest/sales-import-retention.service');
   const app = await NestFactory.createApplicationContext(SalesImportWorkerModule, { bufferLogs: true });
   const proc = app.get(SalesImportProcessorService);
-  let processed = 0;
-  for (let row = await proc.claimNext(); row; row = await proc.claimNext()) {
-    await proc.processClaimed(row);
-    processed++;
-  }
-  // S5: every drain also runs a bounded retention sweep across tenants (expired files, abandoned uploads).
-  const retention = await app.get(SalesImportRetentionService).sweep({ limit: 50 });
+  const processed = await drainImports(proc, stop);
+  // S5: every drain also runs a bounded retention sweep across tenants (expired files, abandoned uploads). Skipped when
+  // stopping (the next drain runs it).
+  const retention = stop.requested ? null : await app.get(SalesImportRetentionService).sweep({ limit: 50 });
   await app.close();
-  console.log(JSON.stringify({ msg: 'sales-import worker done', processed, retention }));
+  console.log(JSON.stringify({ msg: 'sales-import worker done', processed, retention, stoppedBy: stop.reason }));
 }
 
 main().catch((e: unknown) => {

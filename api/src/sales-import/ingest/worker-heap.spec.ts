@@ -27,13 +27,35 @@ describe('worker heap enforcement (audit M1)', () => {
 describe('ensureWorkerHeap (audit L-1 / L-2)', () => {
   const deps = (heapLimit: number, env: Record<string, string> = {}) => {
     const handlers: Record<string, (...a: unknown[]) => void> = {};
+    const signals: Record<string, () => void> = {};
+    const kill = jest.fn();
     const d = {
       heapLimit, env, execArgv: [], argv: ['node', 'dist/sales-import/worker.main.js'], execPath: '/usr/bin/node',
-      spawn: jest.fn(() => ({ on: (ev: string, cb: (...a: unknown[]) => void) => (handlers[ev] = cb) })),
+      spawn: jest.fn(() => ({ on: (ev: string, cb: (...a: unknown[]) => void) => (handlers[ev] = cb), kill })),
       exit: jest.fn(), log: jest.fn(), error: jest.fn(),
+      onSignal: jest.fn((sig: string, cb: () => void) => (signals[sig] = cb)),
     };
-    return { d, handlers };
+    return { d, handlers, signals, kill };
   };
+
+  it('re-exec → the parent forwards SIGTERM / SIGINT to the child and keeps waiting for its exit', () => {
+    const { d, signals, kill, handlers } = deps(1024 * MiB);
+    ensureWorkerHeap(d as never);
+    expect(Object.keys(signals).sort()).toEqual(['SIGINT', 'SIGTERM']);
+    signals.SIGTERM();
+    expect(kill).toHaveBeenCalledWith('SIGTERM');
+    signals.SIGINT();
+    expect(kill).toHaveBeenLastCalledWith('SIGINT');
+    expect(d.exit).not.toHaveBeenCalled(); // the parent exits only when the child does
+    handlers.exit(0, null);
+    expect(d.exit).toHaveBeenCalledWith(0);
+  });
+
+  it('ok → no signal forwarding is installed (the worker installs its own graceful-stop handlers)', () => {
+    const { d } = deps(1892 * MiB);
+    ensureWorkerHeap(d as never);
+    expect(d.onSignal).not.toHaveBeenCalled();
+  });
 
   it('ok → runs in-process, nothing spawned', () => {
     const { d } = deps(1892 * MiB);
@@ -64,7 +86,14 @@ describe('ensureWorkerHeap (audit L-1 / L-2)', () => {
   it('worker.main.ts loads Nest / Prisma / ExcelJS only AFTER the heap decision (dynamic imports)', () => {
     const src = jest.requireActual('fs').readFileSync(jest.requireActual('path').join(__dirname, '..', 'worker.main.ts'), 'utf8') as string;
     const staticImports = src.split('\n').filter((l) => /^import /.test(l));
-    expect(staticImports.every((l) => /node:|worker-heap/.test(l))).toBe(true);
+    expect(staticImports.every((l) => /node:|worker-heap|worker-stop/.test(l))).toBe(true);
     expect(src).toContain("await import('@nestjs/core')");
+    // worker-stop.ts (graceful SIGTERM) is loaded before the heap decision too, so it must import nothing heavy.
+    const stopSrc = jest.requireActual('fs').readFileSync(jest.requireActual('path').join(__dirname, 'worker-stop.ts'), 'utf8') as string;
+    expect(stopSrc.split('\n').filter((l) => /^import /.test(l) && !/^import type /.test(l))).toEqual([]);
+    // The worker installs its stop handlers BEFORE Nest boots, and the parent forwards signals to a re-executed child.
+    expect(src.indexOf('installWorkerSignals(')).toBeGreaterThan(-1);
+    expect(src.indexOf('installWorkerSignals(')).toBeLessThan(src.indexOf("await import('@nestjs/core')"));
+    expect(src).toMatch(/onSignal:/);
   });
 });

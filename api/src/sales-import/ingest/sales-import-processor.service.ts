@@ -24,6 +24,7 @@ import { PartsFile, unmatchedCsvKey } from './parts-file';
 import { loadRoster } from './roster';
 import { unmatchedCsvLines } from './unmatched-csv';
 import { XlsxSheetNotFoundError, xlsxRows } from './xlsx-row-source';
+import { WorkerStoppingError, type WorkerStop } from './worker-stop';
 import { loadCentralDirectory, planXlsxRead, resequencedXlsxStream, XlsxFileError } from './xlsx-zip';
 
 /** createMany batch size for SalesImportAggregate (plan §7.1 step 10). */
@@ -103,6 +104,10 @@ interface Prog {
   heapTripped: boolean;
   /** Destroys the current pass's input stream (set while a pass runs). */
   abortSource: ((e: Error) => void) | null;
+  /** A graceful stop (SIGTERM) was requested: every loop throws WorkerStoppingError at its next check (plan §10c). */
+  stopping: boolean;
+  /** The READY transaction has started: a stop no longer interrupts the run (it commits whole or rolls back). */
+  finalizing: boolean;
 }
 
 /** Re-yields `lines`, checking `check` every 10,000 lines (the unmatched.csv build can run long without rows). */
@@ -212,13 +217,22 @@ export class SalesImportProcessorService {
     return claimNextImport(this.prisma, randomUUID());
   }
 
-  /** §7.1 steps 2–10 for one claimed import. Never throws for a per-import problem. */
-  async processClaimed(row: SalesImport): Promise<void> {
+  /**
+   * §7.1 steps 2–10 for one claimed import. Never throws for a per-import problem.
+   * `stop` (the job worker; plan §10c): once requested, the read is aborted and — unless the READY transaction already
+   * committed — the claim is RELEASED (QUEUED again, not counted, never FAILED) for the next drain. Whatever error the
+   * abort produced, a run that ends after a stop request is released, not failed.
+   */
+  async processClaimed(row: SalesImport, stop?: WorkerStop): Promise<void> {
     try {
-      await this.run(row);
+      await this.run(row, stop);
     } catch (e) {
       if (e instanceof ClaimLostError) {
         this.logger.warn(`sales-import ${row.id}: claim superseded (reprocessed / cancelled); stopped without writing`);
+        return;
+      }
+      if (stop?.requested) {
+        await this.release(row, stop.reason);
         return;
       }
       const readable = e instanceof FileProblem || e instanceof XlsxFileError || e instanceof AggregatorLimitError;
@@ -234,6 +248,37 @@ export class SalesImportProcessorService {
 
   private ownWhere(row: SalesImport): Prisma.SalesImportWhereInput {
     return { id: row.id, status: 'PROCESSING', claimToken: row.claimToken };
+  }
+
+  /**
+   * Graceful stop (plan §10c): hand the claim back so the next drain picks the import up at once — QUEUED, token and
+   * heartbeat cleared, progress reset, and `attempts` back to its value before this claim (the claim added 1; a stopped
+   * run is not an attempt). Guarded by the claim token: a superseded claim matches nothing. `queuedAt` is kept (claims
+   * are ordered by createdAt). Never throws: if it fails, the stale-heartbeat reclaim recovers the row later.
+   */
+  private async release(row: SalesImport, reason: string | null): Promise<void> {
+    if (!row.claimToken) return;
+    try {
+      const r = await this.prisma.salesImport.updateMany({
+        where: this.ownWhere(row),
+        data: {
+          status: 'QUEUED',
+          claimToken: null,
+          heartbeatAt: null,
+          startedAt: null,
+          attempts: Math.max(0, row.attempts - 1),
+          bytesRead: 0n,
+          rowsRead: 0,
+        },
+      });
+      this.logger.warn(
+        r.count > 0
+          ? `sales-import ${row.id}: worker stopping (${reason ?? 'signal'}); claim released, back to QUEUED`
+          : `sales-import ${row.id}: worker stopping (${reason ?? 'signal'}); claim already gone, nothing released`,
+      );
+    } catch (err) {
+      this.logger.error(`sales-import ${row.id}: could not release the claim on stop: ${(err as Error).message}`);
+    }
   }
 
   /**
@@ -256,8 +301,9 @@ export class SalesImportProcessorService {
     });
   }
 
-  private async run(row: SalesImport): Promise<void> {
+  private async run(row: SalesImport, stop?: WorkerStop): Promise<void> {
     if (!row.claimToken) throw new ClaimLostError();
+    if (stop?.requested) throw new WorkerStoppingError();
     if (row.attempts > SALES_IMPORT_MAX_ATTEMPTS) {
       throw new FileProblem(`Processing was attempted ${row.attempts - 1} times without finishing. Try Reprocess, or contact Gifsy support.`);
     }
@@ -274,7 +320,7 @@ export class SalesImportProcessorService {
     // claim is gone (reprocess / cancel / reclaim): the parse loop stops at the next row.
     const prog: Prog = {
       bytesRead: 0, rowsSeen: 0, lastBeatAt: Date.now(), lastBeatRows: 0, writing: false, lost: false,
-      heapTripped: false, abortSource: null,
+      heapTripped: false, abortSource: null, stopping: false, finalizing: false,
     };
     let inflight: Promise<unknown> = Promise.resolve();
     const beat = () => {
@@ -296,7 +342,14 @@ export class SalesImportProcessorService {
     };
     const checkClaim = () => {
       if (prog.lost) throw new ClaimLostError();
+      if (prog.stopping && !prog.finalizing) throw new WorkerStoppingError();
     };
+    // Graceful stop: flag it and destroy the current input stream (the read loop then throws WorkerStoppingError).
+    const offStop = stop?.onStop(() => {
+      if (prog.finalizing) return;
+      prog.stopping = true;
+      prog.abortSource?.(new WorkerStoppingError());
+    });
     // Memory backstop (plan §7.1 step 11). Checked from every row AND from an unref'd timer (audit M2), so phases with
     // no rows — exceljs building its shared-strings table, the aggregate write loop, the unmatched.csv build — are
     // guarded too. A trip sets a flag (row / write loops throw on it) and destroys the current input stream.
@@ -321,9 +374,10 @@ export class SalesImportProcessorService {
       checkHeap();
     };
     try {
-      await this.runPasses(row, mapping, roster, parts, size, prog, beat, checkClaim, onRow, checkHeap, () => inflight);
+      await this.runPasses(row, mapping, roster, parts, size, prog, beat, checkClaim, onRow, checkHeap, () => inflight, stop);
     } finally {
       clearInterval(heapTimer);
+      offStop?.();
     }
   }
 
@@ -339,6 +393,7 @@ export class SalesImportProcessorService {
     onRow: () => void,
     checkHeap: () => void,
     inflightNow: () => Promise<unknown>,
+    stop?: WorkerStop,
   ): Promise<void> {
     // ── Pass 1: sha256 of the whole upload + parse (+ decimal-separator evidence when the mapping says 'auto') ──
     const setting = mapping?.decimalSeparator ?? 'auto';
@@ -388,7 +443,14 @@ export class SalesImportProcessorService {
       return;
     }
     checkHeap();
-    await this.writeReady(row, mapping!, outcome.result, outcome.detectedHeaders, hash.digest('hex'), size, checkHeap);
+    await this.writeReady(row, mapping!, outcome.result, outcome.detectedHeaders, hash.digest('hex'), size, checkHeap, {
+      checkStop: checkClaim,
+      beginFinal: () => {
+        prog.finalizing = true;
+        stop?.enterCritical();
+      },
+      endFinal: () => stop?.exitCritical(),
+    });
   }
 
   /** One streaming read of the stored file (pass 1 also hashes it). Always releases its streams. */
@@ -427,6 +489,7 @@ export class SalesImportProcessorService {
             if (prog.heapTripped) throw tooLarge();
           }
         } catch (e) {
+          if (prog.stopping) throw new WorkerStoppingError();
           if (prog.heapTripped) throw tooLarge();
           throw e;
         } finally {
@@ -472,6 +535,7 @@ export class SalesImportProcessorService {
       if (!source.destroyed) source.destroy(e);
     };
     if (prog.heapTripped) prog.abortSource(tooLarge());
+    if (prog.stopping) prog.abortSource(new WorkerStoppingError());
     try {
       // Called when the header is resolved (the CSV delimiter is known by then): how the aggregator reads text numbers.
       const aggOpts = () => {
@@ -482,11 +546,15 @@ export class SalesImportProcessorService {
       try {
         outcome = await this.parse(row, mapping, roster, rows, onRow, aggOpts, xlsxFailure);
       } catch (e) {
+        // A graceful stop aborted the read (plan §10c): whatever the reader reported while its input was torn down is a
+        // consequence — the run is released, never failed.
+        if (prog.stopping) throw new WorkerStoppingError();
         // Audit M-2: when the heap backstop aborted the read, THAT is the reason — whatever the reader reported while
         // its input was being torn down (e.g. "re-sequenced stream closed" / a "corrupt" wrap) is a consequence.
         if (prog.heapTripped) throw tooLarge();
         throw e;
       }
+      if (prog.stopping) throw new WorkerStoppingError();
       if (prog.heapTripped) throw tooLarge();
       return { outcome, hashedBytes, decimal };
     } finally {
@@ -529,7 +597,10 @@ export class SalesImportProcessorService {
       // M2: a size violation detected by the xlsx re-sequencer is the root cause, whatever exceljs wrapped it in.
       const e = xlsxFailure.error ?? err;
       if (e instanceof XlsxSheetNotFoundError) return { kind: 'needsMapping', reason: e.message, detectedHeaders: null };
-      if (e instanceof XlsxFileError || e instanceof FileProblem || e instanceof AggregatorLimitError || e instanceof ClaimLostError) throw e;
+      if (
+        e instanceof XlsxFileError || e instanceof FileProblem || e instanceof AggregatorLimitError || e instanceof ClaimLostError ||
+        e instanceof WorkerStoppingError
+      ) throw e;
       if (e instanceof CsvLimitError) throw new FileProblem(`The CSV file could not be read: ${e.message}`);
       const detail = e instanceof Error ? e.message.split('\n')[0].slice(0, 200) : String(e);
       throw new FileProblem(
@@ -587,11 +658,40 @@ export class SalesImportProcessorService {
     sha256: string,
     size: number,
     checkHeap: () => void = () => undefined,
+    final: { checkStop: () => void; beginFinal: () => void; endFinal: () => void } = {
+      checkStop: () => undefined, beginFinal: () => undefined, endFinal: () => undefined,
+    },
   ): Promise<void> {
     // GCS I/O never runs inside a DB transaction (re-audit M1). Written first: if the claim turns out to be lost below,
-    // the object is an orphan under this import's own prefix and goes with its delete / retention purge.
+    // the object is an orphan under this import's own prefix and goes with its delete / retention purge. A graceful stop
+    // during the upload aborts it (plan §10c); the orphan goes the same way.
     const csvKey = unmatchedCsvKey(row.gcsPrefix, row.claimToken!);
-    await this.storage.uploadStream(csvKey, Readable.from(guardedLines(unmatchedCsvLines(result.unmatched()), checkHeap)), 'text/csv; charset=utf-8');
+    const check = () => {
+      checkHeap();
+      final.checkStop();
+    };
+    await this.storage.uploadStream(csvKey, Readable.from(guardedLines(unmatchedCsvLines(result.unmatched()), check)), 'text/csv; charset=utf-8');
+    // Last point a stop is honoured. From here the READY transaction runs to its end (commit, or a whole rollback if the
+    // process is killed first) — never half-written.
+    final.checkStop();
+    final.beginFinal();
+    try {
+      await this.writeReadyTx(row, mapping, result, detectedHeaders, sha256, size, csvKey, checkHeap);
+    } finally {
+      final.endFinal();
+    }
+  }
+
+  private async writeReadyTx(
+    row: SalesImport,
+    mapping: SalesColumnMapping,
+    result: AggregatorResult,
+    detectedHeaders: string[][],
+    sha256: string,
+    size: number,
+    csvKey: string,
+    checkHeap: () => void,
+  ): Promise<void> {
     await this.prisma.$transaction(
       async (tx) => {
         const own = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`

@@ -8,6 +8,7 @@ import { partKey, unmatchedCsvKey } from './parts-file';
 import { SALES_IMPORT_PART_SIZE } from '../sales-import.contract';
 import { mappingFingerprint } from './mapping-fingerprint';
 import { exceljsWorkbook } from './test-fixtures.testspec';
+import { WorkerStop } from './worker-stop';
 
 // These tests build and stream real xlsx workbooks (exceljs + zlib). They take well under a second each in
 // isolation but can exceed jest's 5 s default under full-suite CPU load (seen 2026-11-10: the whole file took
@@ -595,4 +596,149 @@ describe('audit M-2: heap abort during an xlsx read reports "too large", never "
     expect(final().data.error).toMatch(/too large to process in one go/);
     expect(final().data.error).not.toMatch(/corrupt|could not be read/);
   }, 20_000);
+});
+
+describe('graceful stop (Cloud Run SIGTERM before SIGKILL)', () => {
+  /** The release write: back to QUEUED, claim cleared, this claim not counted, guarded by the claim token. */
+  const releaseOf = (prisma: ReturnType<typeof setup>['prisma']) =>
+    prisma.salesImport.updateMany.mock.calls
+      .map((c: unknown[]) => c[0] as { where: Record<string, unknown>; data: Record<string, unknown> })
+      .filter((a: { data: Record<string, unknown> }) => a.data.status === 'QUEUED');
+  const bigCsv = (n: number) => {
+    const rows = ['Invoice Date,Customer Code,Customer,Code,Group,Net Amt,Qty'];
+    for (let i = 0; i < n; i++) rows.push('03-10-2026,O1,S,P,500,1,1');
+    return Buffer.from(rows.join('\n'));
+  };
+
+  it('a stop during the read aborts it and releases the claim: QUEUED, token cleared, attempts not counted — never FAILED', async () => {
+    const { svc, prisma, row, final } = setup({ file: bigCsv(45_000), attempts: 2 });
+    const stop = new WorkerStop();
+    // The first heartbeat (20,000 rows in) is where the signal "arrives".
+    prisma.salesImport.updateMany.mockImplementation(async (a: { data: Record<string, unknown> }) => {
+      if (!a.data.status) stop.request('SIGTERM');
+      return { count: 1 };
+    });
+    await svc.processClaimed(row, stop);
+    const rel = releaseOf(prisma);
+    expect(rel).toHaveLength(1);
+    expect(rel[0].where).toEqual({ id: 'imp1', status: 'PROCESSING', claimToken: 'tok' });
+    expect(rel[0].data).toEqual(expect.objectContaining({ status: 'QUEUED', claimToken: null, heartbeatAt: null, startedAt: null, attempts: 1 }));
+    const statuses = prisma.salesImport.updateMany.mock.calls.map((c: unknown[]) => (c[0] as { data: { status?: string } }).data.status).filter(Boolean);
+    expect(statuses).toEqual(['QUEUED']); // never FAILED / READY
+    // The read stopped at the signal: one heartbeat (20,000 rows), not the second one a full read reaches at 40,000.
+    expect(prisma.salesImport.updateMany.mock.calls.filter((c: unknown[]) => !(c[0] as { data: { status?: string } }).data.status)).toHaveLength(1);
+    expect(final()).toBeUndefined(); // (the overridden mock records nothing else)
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.salesImportAggregate.createMany).not.toHaveBeenCalled();
+  });
+
+  it('a stop requested before the run starts releases at once (nothing read)', async () => {
+    const { svc, prisma, row } = setup({ file: Buffer.from(CSV) });
+    const stop = new WorkerStop();
+    stop.request('SIGTERM');
+    await svc.processClaimed(row, stop);
+    expect(releaseOf(prisma)).toHaveLength(1);
+    expect(prisma.salesImportProfile.findUnique).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('a stop after the read but before the READY transaction (e.g. during the unmatched.csv upload) releases; no READY write', async () => {
+    const { svc, prisma, row, storage } = setup({ file: Buffer.from(CSV) });
+    const stop = new WorkerStop();
+    const realUpload = storage.uploadStream.bind(storage);
+    (storage as unknown as { uploadStream: typeof realUpload }).uploadStream = async (k, s) => {
+      stop.request('SIGTERM');
+      return realUpload(k, s);
+    };
+    await svc.processClaimed(row, stop);
+    expect(releaseOf(prisma)).toHaveLength(1);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('a stop while the READY transaction runs lets it finish (READY, no release) and marks it critical', async () => {
+    const { svc, prisma, row, final } = setup({ file: Buffer.from(CSV) });
+    const stop = new WorkerStop();
+    const critical: boolean[] = [];
+    prisma.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) => {
+      stop.request('SIGTERM');
+      critical.push(stop.inCritical);
+      return cb(prisma);
+    });
+    await svc.processClaimed(row, stop);
+    expect(final().data.status).toBe('READY');
+    expect(releaseOf(prisma)).toHaveLength(0);
+    expect(critical).toEqual([true]);
+    expect(stop.inCritical).toBe(false);
+  });
+
+  it('a file problem surfacing after the stop is NOT recorded as FAILED (released for the next drain instead)', async () => {
+    const { svc, prisma, row, final } = setup({ file: Buffer.from(CSV), storedSize: Buffer.from(CSV).length + 5 });
+    const stop = new WorkerStop();
+    // incomplete upload → FileProblem after pass 1; the stop arrives during pass 1's last heartbeat-free stretch
+    prisma.client.findUnique.mockImplementation(async () => {
+      stop.request('SIGTERM');
+      return { features: { salesImport: true }, status: 'ACTIVE' };
+    });
+    await svc.processClaimed(row, stop);
+    expect(final().data.status).toBe('QUEUED');
+    expect(releaseOf(prisma)).toHaveLength(1);
+  });
+
+  it('a superseded claim + a stop: no READY / FAILED, and any release is guarded by the (gone) token', async () => {
+    const { svc, prisma, row } = setup({ file: bigCsv(45_000) });
+    const stop = new WorkerStop();
+    prisma.salesImport.updateMany.mockImplementation(async (a: { data: Record<string, unknown> }) => {
+      if (!a.data.status) stop.request('SIGTERM');
+      return { count: 0 }; // reprocess / cancel replaced the token: nothing matches
+    });
+    await svc.processClaimed(row, stop);
+    const writes = prisma.salesImport.updateMany.mock.calls.map((c: unknown[]) => c[0] as { where: Record<string, unknown>; data: Record<string, unknown> });
+    expect(writes.filter((w: { data: Record<string, unknown> }) => w.data.status && w.data.status !== 'QUEUED')).toEqual([]);
+    for (const w of writes) expect(w.where).toEqual(expect.objectContaining({ claimToken: 'tok' }));
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('a failing release is logged, never thrown (the stale-heartbeat reclaim recovers the row)', async () => {
+    const { svc, prisma, row } = setup({ file: Buffer.from(CSV) });
+    const stop = new WorkerStop();
+    stop.request('SIGTERM');
+    prisma.salesImport.updateMany.mockRejectedValue(new Error('db down'));
+    await expect(svc.processClaimed(row, stop)).resolves.toBeUndefined();
+  });
+
+  it('a stop while an .xlsx entry is being copied releases (never FAILED as "corrupt") and stops within the grace', async () => {
+    const file = await exceljsWorkbook([['Data', [['Invoice Date', 'Customer Code', 'Customer', 'Code', 'Group', 'Net Amt', 'Qty'],
+      ...Array.from({ length: 300 }, (_, i) => [new Date(Date.UTC(2026, 9, 3)), `O${i}`, 'S', 'P', 500, 1, 1])]]]);
+    const { svc, prisma, row, storage } = setup({ file, kind: 'XLSX' });
+    const fake = storage as unknown as { openReadStream: (k: string, r?: { start?: number; end?: number }) => Readable };
+    const real = fake.openReadStream.bind(storage);
+    const stop = new WorkerStop();
+    // ranged entry copies trickle (seconds); the signal arrives during the first one
+    fake.openReadStream = (k, r) => {
+      const s = real(k, r);
+      if (!r || (r.end ?? 0) - (r.start ?? 0) < 4096) return s;
+      setTimeout(() => stop.request('SIGTERM'), 100);
+      return Readable.from((async function* () {
+        for await (const c of s) {
+          for (let i = 0; i < (c as Buffer).length; i += 64) {
+            await new Promise((res) => setTimeout(res, 40));
+            yield (c as Buffer).subarray(i, i + 64);
+          }
+        }
+      })());
+    };
+    const t0 = Date.now();
+    await svc.processClaimed(row, stop);
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    expect(releaseOf(prisma)).toHaveLength(1);
+    const statuses = prisma.salesImport.updateMany.mock.calls.map((c: unknown[]) => (c[0] as { data: { status?: string } }).data.status).filter(Boolean);
+    expect(statuses).toEqual(['QUEUED']);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  }, 20_000);
+
+  it('without a stop token (inline runner) behaviour is unchanged', async () => {
+    const { svc, row, final } = setup({ file: Buffer.from(CSV) });
+    await svc.processClaimed(row);
+    expect(final().data.status).toBe('READY');
+  });
 });
