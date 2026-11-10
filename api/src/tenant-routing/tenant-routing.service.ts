@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { toServableBrandingUrl } from '../storage/branding-asset';
 
 /** Tenant routing/status values exposed publicly (INACTIVE is never returned). */
 export type PublicTenantStatus = 'ACTIVE' | 'ONBOARDING';
@@ -99,19 +100,26 @@ export class TenantRoutingService {
 
     const asString = (v: unknown): string | undefined =>
       typeof v === 'string' ? v : undefined;
+    // Image URLs: a stored private-bucket `branding/` object URL (403 in a browser) is
+    // re-pointed at the public branding-asset route at READ time (no data migration).
+    // Static paths (`/brand/…`, `/logos/…`, `/favicons/…` — Deoleo) pass through unchanged.
+    const asAssetUrl = (v: unknown): string | undefined => {
+      const s = asString(v);
+      return s === undefined ? undefined : toServableBrandingUrl(s);
+    };
 
     const branding: PublicBranding = {
       displayName: asString(b.displayName) ?? '',
       primaryColor: asString(b.primaryColor) ?? '',
     };
 
-    const logoUrl = asString(b.logoUrl);
+    const logoUrl = asAssetUrl(b.logoUrl);
     if (logoUrl !== undefined) branding.logoUrl = logoUrl;
-    const wordmarkWhiteUrl = asString(b.wordmarkWhiteUrl);
+    const wordmarkWhiteUrl = asAssetUrl(b.wordmarkWhiteUrl);
     if (wordmarkWhiteUrl !== undefined) branding.wordmarkWhiteUrl = wordmarkWhiteUrl;
-    const wordmarkColorUrl = asString(b.wordmarkColorUrl);
+    const wordmarkColorUrl = asAssetUrl(b.wordmarkColorUrl);
     if (wordmarkColorUrl !== undefined) branding.wordmarkColorUrl = wordmarkColorUrl;
-    const faviconUrl = asString(b.faviconUrl);
+    const faviconUrl = asAssetUrl(b.faviconUrl);
     if (faviconUrl !== undefined) branding.faviconUrl = faviconUrl;
 
     return branding;

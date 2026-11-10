@@ -195,6 +195,22 @@ describe('proxy — Step 2: passthroughs before auth', () => {
     expect(res.status).toBe(401);
   });
 
+  // Tenant branding images (logo / wordmark / favicon) are rendered on the SIGN-IN page and
+  // the browser tab BEFORE login → the backend route is @Public and the edge must not 401 it.
+  it('PUBLIC_PATHS (/api/public/branding-assets) passes through without a token cookie', async () => {
+    const res = await run(
+      makeReq('/api/public/branding-assets?key=branding%2Fbajaj%2F2026-11%2Fx-logo.png'),
+    );
+    expect(isNext(res)).toBe(true);
+    expect(res.status).not.toBe(401);
+    expect(fwd(res, 'authorization')).toBeNull();
+  });
+
+  it('other /api/public/* paths are NOT exempt → 401 without a token', async () => {
+    const res = await run(makeReq('/api/public/something-else'));
+    expect(res.status).toBe(401);
+  });
+
   it('"/" redirects to /auth/login', async () => {
     const res = await run(makeReq('/'));
     expect(res.status).toBe(307);

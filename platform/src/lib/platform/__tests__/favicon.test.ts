@@ -43,4 +43,16 @@ describe('resolveFaviconIcoHref', () => {
       '/icons/acme/favicon.ico',
     );
   });
+
+  it('prefers a console-uploaded branding asset served by the public same-origin route', () => {
+    const href = '/api/public/branding-assets?key=branding%2Fbajaj%2F2026-11%2Fuuid-fav.png';
+    expect(resolveFaviconIcoHref(href, 'bajaj')).toBe(href);
+  });
+
+  it('does not prefer other /api paths or a route look-alike', () => {
+    expect(resolveFaviconIcoHref('/api/gift-images?key=x', 'acme')).toBe('/icons/acme/favicon.ico');
+    expect(resolveFaviconIcoHref('/api/public/branding-assets-evil?key=x', 'acme')).toBe(
+      '/icons/acme/favicon.ico',
+    );
+  });
 });

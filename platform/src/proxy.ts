@@ -53,6 +53,12 @@ const PUBLIC_PATHS = [
   '/favicon.ico',
 ]
 
+// EXACT-match public paths (no prefix matching). `/api/public/branding-assets` streams tenant
+// branding images (logo / wordmarks / favicon) that the SIGN-IN page and browser tab render
+// BEFORE login; the backend route is @Public and only ever serves validated `branding/` image
+// keys (api tenant-routing/public-branding-asset.controller.ts), so the edge must not 401 it.
+const PUBLIC_EXACT_PATHS = new Set(['/api/public/branding-assets'])
+
 export const ROLE_ROUTES: Record<string, string[]> = {
   '/admin/gifsy': ['GIFSY_ADMIN'],                                                // Gifsy-internal only — checked before /admin
   // GIFSY_STAFF is admitted to the /admin portal (their home is /gifsy, but an ASSUMED
@@ -138,7 +144,7 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
     return NextResponse.next({ request: { headers } })
   }
 
-  if (PUBLIC_PATHS.some(p => pathname.startsWith(p))) {
+  if (PUBLIC_EXACT_PATHS.has(pathname) || PUBLIC_PATHS.some(p => pathname.startsWith(p))) {
     return NextResponse.next({ request: { headers } })
   }
 
