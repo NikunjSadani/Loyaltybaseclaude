@@ -115,6 +115,7 @@ export class SalesImportRetentionService {
       const cutoff = shiftMonthKey(opts.currentMonth ?? currentMonthKey(), -12 * SALES_MONTH_HISTORY_RETENTION_YEARS);
       const where = { ...(opts.clientId ? { clientId: opts.clientId } : {}), month: { lt: cutoff } };
       const r = await this.prisma.salesMonthHistory.deleteMany({ where });
+      await this.prisma.salesMonthHistoryCombo.deleteMany({ where }); // the per-month combos summary (§10c)
       await this.prisma.salesMonthHistorySet.deleteMany({ where });
       return r.count;
     } catch (e) {

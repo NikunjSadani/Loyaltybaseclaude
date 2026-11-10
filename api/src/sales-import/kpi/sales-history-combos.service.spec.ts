@@ -1,12 +1,13 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { SALES_IMPORT_MAX_DIMENSION_COMBOS, SALES_IMPORT_MAX_DIMENSION_VALUES } from '../sales-import.contract';
-import { SalesHistoryCombosService } from './sales-history-combos.service';
+import { HISTORY_COMBOS_STATEMENT_TIMEOUT_MS, SalesHistoryCombosService } from './sales-history-combos.service';
 
 /**
- * KPI product picker — "Stored month(s)" source (plan §10c). The combos come from sales_month_histories through ONE
- * aggregate SQL per list (GROUP BY dims / per-key values, LIMIT = the existing caps); the line rows are never loaded
- * into Node (Prisma `distinct` / findMany over the table is not used).
+ * KPI product picker — "Stored month(s)" source (plan §10c). The combos come from the per-month combos SUMMARY
+ * (sales_month_history_combos, audit M1) through ONE aggregate SQL per list (GROUP BY dims / per-key values, LIMIT = the
+ * existing caps), run sequentially in one transaction under SET LOCAL statement_timeout; the history line rows are never
+ * read.
  */
 const SETS = [
   { month: '2026-10', dimensionKeys: ['brand', 'size'] },
@@ -15,17 +16,28 @@ const SETS = [
   { month: '2026-07', dimensionKeys: ['brand', 'size'] },
 ];
 
-function make(opts: { sets?: typeof SETS; combos?: unknown[]; values?: unknown[] } = {}) {
+function make(opts: { sets?: typeof SETS; combos?: unknown[]; values?: unknown[]; fail?: Error } = {}) {
   const queries: Prisma.Sql[] = [];
+  const order: string[] = [];
+  const $queryRaw = jest.fn().mockImplementation(async (q: Prisma.Sql) => {
+    const n = queries.push(q);
+    order.push(`start${n}`);
+    await new Promise((r) => setImmediate(r)); // a parallel second query would start before this one ends
+    order.push(`end${n}`);
+    if (opts.fail) throw opts.fail;
+    return /jsonb_each_text/.test(q.sql) ? (opts.values ?? []) : (opts.combos ?? []);
+  });
+  const tx = {
+    $executeRawUnsafe: jest.fn(async (s: string) => { order.push(`set:${s}`); return 0; }),
+    $queryRaw,
+  };
   const prisma = {
     salesMonthHistorySet: { findMany: jest.fn().mockResolvedValue(opts.sets ?? SETS) },
     salesMonthHistory: { findMany: jest.fn(), groupBy: jest.fn() },
-    $queryRaw: jest.fn().mockImplementation(async (q: Prisma.Sql) => {
-      queries.push(q);
-      return /jsonb_each_text/.test(q.sql) ? (opts.values ?? []) : (opts.combos ?? []);
-    }),
+    $queryRaw, // same fn: a read outside the transaction would show up too
+    $transaction: jest.fn(async (cb: (t: typeof tx) => unknown) => cb(tx)),
   };
-  return { svc: new SalesHistoryCombosService(prisma as never), prisma, queries };
+  return { svc: new SalesHistoryCombosService(prisma as never), prisma, queries, order };
 }
 
 describe('SalesHistoryCombosService', () => {
@@ -46,7 +58,7 @@ describe('SalesHistoryCombosService', () => {
   });
 
   it('lastMonths=N → the N most recent STORED months; tenant-scoped aggregate SQL with the caps; rows never loaded', async () => {
-    const { svc, prisma, queries } = make({
+    const { svc, prisma, queries, order } = make({
       combos: [
         { dims: { brand: 'ADHO', size: '500' }, lines: 12n, paise: '123456', pico: '2500000000000', total: 3n },
         { dims: { brand: 'CNO', size: '' }, lines: 3n, paise: '-500', pico: '0', total: 3n },
@@ -74,17 +86,21 @@ describe('SalesHistoryCombosService', () => {
       size: [{ value: '500', lines: 12, amountRupees: 1234.56 }, { value: '', lines: 3, amountRupees: -5 }],
     });
 
-    // Two aggregate statements, both scoped by tenant + the chosen months, both GROUP BY in SQL with a LIMIT / rank cap.
+    // Two aggregate statements over the SUMMARY table, scoped by tenant + the chosen months, GROUP BY in SQL with a LIMIT /
+    // rank cap — one after the other, after SET LOCAL statement_timeout, inside one transaction (audit M1).
     expect(queries).toHaveLength(2);
+    expect(order).toEqual([`set:SET LOCAL statement_timeout = ${HISTORY_COMBOS_STATEMENT_TIMEOUT_MS}`, 'start1', 'end1', 'start2', 'end2']);
+    expect(HISTORY_COMBOS_STATEMENT_TIMEOUT_MS).toBe(10_000);
     for (const q of queries) {
-      expect(q.sql).toMatch(/FROM "sales_month_histories"/);
-      expect(q.sql).toMatch(/h\."clientId" = \? AND h\."month" = ANY\(\?::text\[\]\)/);
+      expect(q.sql).toMatch(/FROM "sales_month_history_combos" c/);
+      expect(q.sql).not.toMatch(/sales_month_histories/);
+      expect(q.sql).toMatch(/c\."clientId" = \? AND c\."month" = ANY\(\?::text\[\]\)/);
       expect(q.sql).toMatch(/GROUP BY/);
       expect(q.values[0]).toBe('t1');
       expect(q.values).toContainEqual(['2026-09', '2026-10']);
     }
     const [combosSql, valuesSql] = /jsonb_each_text/.test(queries[0].sql) ? [queries[1], queries[0]] : [queries[0], queries[1]];
-    expect(combosSql.sql).toMatch(/GROUP BY h\."dims"/);
+    expect(combosSql.sql).toMatch(/GROUP BY c\."dims"/);
     expect(combosSql.sql).toMatch(/count\(\*\) OVER \(\)/i);
     expect(combosSql.values).toContain(SALES_IMPORT_MAX_DIMENSION_COMBOS);
     expect(valuesSql.values).toContain(SALES_IMPORT_MAX_DIMENSION_VALUES);
@@ -121,6 +137,13 @@ describe('SalesHistoryCombosService', () => {
       dimensionValues: {}, dimensionCombos: [], totalCombos: 0,
     });
     expect(b.prisma.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('a statement timeout → 503 with a readable message; other errors propagate', async () => {
+    const a = make({ fail: new Error('ERROR: canceling statement due to statement timeout') });
+    await expect(a.svc.combos('t1', { lastMonths: '12' })).rejects.toBeInstanceOf(ServiceUnavailableException);
+    const b = make({ fail: new Error('connection reset') });
+    await expect(b.svc.combos('t1', { lastMonths: '12' })).rejects.toThrow('connection reset');
   });
 
   it('JSON null / non-string dim values come back as strings ("" for null)', async () => {

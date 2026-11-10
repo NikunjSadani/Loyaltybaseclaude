@@ -40,6 +40,9 @@ type AddFn = (raw: Array<Record<string, unknown>>, opts?: NormalizeOptions) => v
 type ComboList = Pick<SalesImportCombos, 'dimensionValues' | 'dimensionCombos'>;
 type Source = 'latest' | 'history';
 
+/** A change of the stored-months select waits this long before it is fetched (quick changes send one request). */
+export const HISTORY_SELECT_DEBOUNCE_MS = 300;
+
 /** "Last N stored months" choices offered (N ≤ SALES_HISTORY_COMBOS_MAX_MONTHS). */
 const LAST_CHOICES = [1, 3, 6, 12].filter((n) => n <= SALES_HISTORY_COMBOS_MAX_MONTHS);
 
@@ -78,21 +81,33 @@ function useHistoryCombos(active: boolean, sel: string) {
   const key = `${sel}#${tick}`;
   const [res, setRes] = useState<{ key: string; data: SalesHistoryCombos | null; error: string | null } | null>(null);
   const [availableMonths, setAvailableMonths] = useState<string[]>([]);
+  /** The month choice last sent; a CHANGE of choice is debounced (first load / Retry / re-activation are not). */
+  const lastSent = useRef<string | null>(null);
   useEffect(() => {
     if (!active) return;
-    let cancelled = false;
-    salesImportApi.historyCombos(historyQuery(sel))
-      .then((r) => {
-        if (cancelled) return;
-        if (r.success) {
-          setRes({ key, data: r.data, error: null });
-          setAvailableMonths(r.data.availableMonths);
-        } else {
-          setRes({ key, data: null, error: r.error });
-        }
-      })
-      .catch((e: unknown) => { if (!cancelled) setRes({ key, data: null, error: e instanceof Error ? e.message : 'Network error' }); });
-    return () => { cancelled = true; };
+    // Audit M1: a superseded request is aborted (and its late answer ignored); quick changes of the select are debounced.
+    const ctrl = new AbortController();
+    const load = () => {
+      lastSent.current = sel;
+      salesImportApi.historyCombos(historyQuery(sel), ctrl.signal)
+        .then((r) => {
+          if (ctrl.signal.aborted) return;
+          if (r.success) {
+            setRes({ key, data: r.data, error: null });
+            setAvailableMonths(r.data.availableMonths);
+          } else {
+            setRes({ key, data: null, error: r.error });
+          }
+        })
+        .catch((e: unknown) => { if (!ctrl.signal.aborted) setRes({ key, data: null, error: e instanceof Error ? e.message : 'Network error' }); });
+    };
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    if (lastSent.current !== null && lastSent.current !== sel) timer = setTimeout(load, HISTORY_SELECT_DEBOUNCE_MS);
+    else load();
+    return () => {
+      if (timer) clearTimeout(timer);
+      ctrl.abort();
+    };
   }, [active, sel, key]);
   const current = res && res.key === key ? res : null;
   return {

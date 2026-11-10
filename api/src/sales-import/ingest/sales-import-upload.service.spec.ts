@@ -88,6 +88,7 @@ function harness() {
     auditLog: { create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => (audits.push(data), data)) },
     salesMonthHistory: { deleteMany: jest.fn(async () => ({ count: 0 })) },
     salesMonthHistorySet: { deleteMany: jest.fn(async () => ({ count: 0 })) },
+    salesMonthHistoryCombo: { deleteMany: jest.fn(async () => ({ count: 0 })) },
     user: { findMany: jest.fn().mockResolvedValue([{ id: 'u1', name: 'Admin' }]) },
     $executeRaw: jest.fn().mockResolvedValue(0),
     $queryRaw: jest.fn(async (q: { strings: string[]; values: unknown[] }) => {
@@ -593,6 +594,7 @@ describe('SalesImportRetentionService — month history (10 years)', () => {
     await h.retention.purgeOldHistory({ clientId: 't1', currentMonth: '2036-11' });
     expect(h.prisma.salesMonthHistory.deleteMany).toHaveBeenCalledWith({ where: { clientId: 't1', month: { lt: '2026-11' } } });
     expect(h.prisma.salesMonthHistorySet.deleteMany).toHaveBeenCalledWith({ where: { clientId: 't1', month: { lt: '2026-11' } } });
+    expect(h.prisma.salesMonthHistoryCombo.deleteMany).toHaveBeenCalledWith({ where: { clientId: 't1', month: { lt: '2026-11' } } }); // audit M1
     h.prisma.salesMonthHistory.deleteMany.mockRejectedValueOnce(new Error('db'));
     await expect(h.retention.purgeOldHistory()).resolves.toBe(0);
     // the regular sweep runs it too

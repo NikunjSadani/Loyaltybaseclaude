@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
@@ -20,6 +20,8 @@ export interface SalesHistoryCombosQuery {
 
 /** Upper bound on the set headers read for the month picker (one row per stored month; history is kept 10 years). */
 const MAX_SET_ROWS = (SALES_MONTH_HISTORY_RETENTION_YEARS + 2) * 12;
+/** Defensive per-statement bound for the two summary reads (they touch thousands of rows; this caps a pathological case). */
+export const HISTORY_COMBOS_STATEMENT_TIMEOUT_MS = 10_000;
 
 interface ComboRow { dims: Prisma.JsonValue; lines: bigint | number; paise: string; pico: string; total: bigint | number }
 interface ValueRow { key: string; value: string; lines: bigint | number; paise: string }
@@ -34,12 +36,13 @@ function dimsOf(raw: Prisma.JsonValue): Record<string, string> {
 }
 
 /**
- * KPI product picker — "Stored month(s)" source (plan §10c). Reads SalesMonthHistory (the final applied lines of each
- * month) for ONE tenant with two aggregate statements: distinct product combos (GROUP BY the dims JSONB, top
+ * KPI product picker — "Stored month(s)" source (plan §10c). Reads the per-month combos SUMMARY
+ * (sales_month_history_combos: one row per distinct product combo per month, written in the apply transaction together
+ * with the month history — audit M1), never the line rows, with two aggregate statements run one after the other in one
+ * transaction under `SET LOCAL statement_timeout`: distinct combos across the chosen months (GROUP BY the dims JSONB, top
  * SALES_IMPORT_MAX_DIMENSION_COMBOS by |₹|, with the uncapped distinct count) and per-key values (top
- * SALES_IMPORT_MAX_DIMENSION_VALUES by |₹| per key). The line rows never reach Node (Prisma `distinct` is applied in
- * Node after fetching every row — final check H1 — so it is not used). Months come from the set headers
- * (sales_month_history_sets), one indexed row per stored month.
+ * SALES_IMPORT_MAX_DIMENSION_VALUES by |₹| per key). Months come from the set headers (sales_month_history_sets), one
+ * indexed row per stored month.
  */
 @Injectable()
 export class SalesHistoryCombosService {
@@ -81,37 +84,7 @@ export class SalesHistoryCombosService {
     };
     if (months.length === 0) return empty;
 
-    const [comboRows, valueRows] = await Promise.all([
-      this.prisma.$queryRaw<ComboRow[]>(Prisma.sql`
-        SELECT h."dims" AS "dims",
-               SUM(h."lines")::bigint AS "lines",
-               SUM(h."amountPaise")::text AS "paise",
-               SUM(h."qtyPico")::text AS "pico",
-               count(*) OVER () AS "total"
-          FROM "sales_month_histories" h
-         WHERE h."clientId" = ${clientId} AND h."month" = ANY(${months}::text[])
-         GROUP BY h."dims"
-         ORDER BY abs(SUM(h."amountPaise")) DESC, SUM(h."lines") DESC, h."dims"::text COLLATE "C" ASC
-         LIMIT ${SALES_IMPORT_MAX_DIMENSION_COMBOS}`),
-      this.prisma.$queryRaw<ValueRow[]>(Prisma.sql`
-        SELECT t."key", t."value", t."lines", t."paise"
-          FROM (
-            SELECT kv."key" AS "key",
-                   COALESCE(kv."value", '') AS "value",
-                   SUM(h."lines")::bigint AS "lines",
-                   SUM(h."amountPaise")::text AS "paise",
-                   row_number() OVER (
-                     PARTITION BY kv."key"
-                     ORDER BY abs(SUM(h."amountPaise")) DESC, SUM(h."lines") DESC, COALESCE(kv."value", '') COLLATE "C" ASC
-                   ) AS "rn"
-              FROM "sales_month_histories" h
-             CROSS JOIN LATERAL jsonb_each_text(h."dims") AS kv("key", "value")
-             WHERE h."clientId" = ${clientId} AND h."month" = ANY(${months}::text[])
-             GROUP BY kv."key", COALESCE(kv."value", '')
-          ) t
-         WHERE t."rn" <= ${SALES_IMPORT_MAX_DIMENSION_VALUES}
-         ORDER BY t."key" ASC, t."rn" ASC`),
-    ]);
+    const { comboRows, valueRows } = await this.readSummary(clientId, months);
 
     const dimensionCombos: SalesDimensionCombo[] = comboRows.map((r) => ({
       dims: dimsOf(r.dims),
@@ -124,5 +97,53 @@ export class SalesHistoryCombosService {
       (dimensionValues[v.key] ??= []).push({ value: v.value, lines: Number(v.lines), amountRupees: paiseToRupees(BigInt(v.paise)) });
     }
     return { ...empty, dimensionValues, dimensionCombos, totalCombos: Number(comboRows[0]?.total ?? 0) };
+  }
+
+  private async readSummary(clientId: string, months: string[]): Promise<{ comboRows: ComboRow[]; valueRows: ValueRow[] }> {
+    try {
+      return await this.prisma.$transaction(
+        async (tx) => {
+          // Constant, not user input (SET takes no bind parameters).
+          await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${HISTORY_COMBOS_STATEMENT_TIMEOUT_MS}`);
+          const comboRows = await tx.$queryRaw<ComboRow[]>(Prisma.sql`
+            SELECT c."dims" AS "dims",
+                   SUM(c."lines")::bigint AS "lines",
+                   SUM(c."amountPaise")::text AS "paise",
+                   SUM(c."qtyPico")::text AS "pico",
+                   count(*) OVER () AS "total"
+              FROM "sales_month_history_combos" c
+             WHERE c."clientId" = ${clientId} AND c."month" = ANY(${months}::text[])
+             GROUP BY c."dims"
+             ORDER BY abs(SUM(c."amountPaise")) DESC, SUM(c."lines") DESC, c."dims"::text COLLATE "C" ASC
+             LIMIT ${SALES_IMPORT_MAX_DIMENSION_COMBOS}`);
+          const valueRows = await tx.$queryRaw<ValueRow[]>(Prisma.sql`
+            SELECT t."key", t."value", t."lines", t."paise"
+              FROM (
+                SELECT kv."key" AS "key",
+                       COALESCE(kv."value", '') AS "value",
+                       SUM(c."lines")::bigint AS "lines",
+                       SUM(c."amountPaise")::text AS "paise",
+                       row_number() OVER (
+                         PARTITION BY kv."key"
+                         ORDER BY abs(SUM(c."amountPaise")) DESC, SUM(c."lines") DESC, COALESCE(kv."value", '') COLLATE "C" ASC
+                       ) AS "rn"
+                  FROM "sales_month_history_combos" c
+                 CROSS JOIN LATERAL jsonb_each_text(c."dims") AS kv("key", "value")
+                 WHERE c."clientId" = ${clientId} AND c."month" = ANY(${months}::text[])
+                 GROUP BY kv."key", COALESCE(kv."value", '')
+              ) t
+             WHERE t."rn" <= ${SALES_IMPORT_MAX_DIMENSION_VALUES}
+             ORDER BY t."key" ASC, t."rn" ASC`);
+          return { comboRows, valueRows };
+        },
+        { timeout: HISTORY_COMBOS_STATEMENT_TIMEOUT_MS * 2 + 5_000, maxWait: 5_000 },
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/statement timeout|canceling statement|57014/i.test(msg)) {
+        throw new ServiceUnavailableException('Listing the stored months took too long. Choose fewer months and try again.');
+      }
+      throw e;
+    }
   }
 }

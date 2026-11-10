@@ -145,6 +145,7 @@ function makeDb(opts: {
       const text = 'strings' in (q as Prisma.Sql) ? (q as Prisma.Sql).strings.join('?') : (q as TemplateStringsArray).join('?');
       log.push(
         text.includes('pg_advisory_xact_lock') ? 'lock'
+          : text.includes('sales_month_history_combos') ? (text.includes('DELETE') ? 'combos.delete' : 'combos.insert')
           : text.includes('sales_month_histories') ? (text.includes('DELETE') ? 'history.delete' : 'history.insert')
           : text.includes('INSERT') ? 'insert' : 'strip',
       );
@@ -325,7 +326,7 @@ describe('SalesApplyService', () => {
     const db = makeDb();
     const r = await services(db).apply.apply(user, 'imp1', body([PREV]));
     expect(r.results).toEqual([{ month: PREV, ok: true, applyId: 'apply1', outletsWritten: 3, outletsZeroFilled: 1 }]);
-    expect(db.log).toEqual(['lock', 'import.share', 'batch.create', 'insert', 'strip', 'history.delete', 'history.insert', 'history.set', 'apply.create', 'status.upsert', 'audit']);
+    expect(db.log).toEqual(['lock', 'import.share', 'batch.create', 'insert', 'strip', 'history.delete', 'history.insert', 'combos.delete', 'combos.insert', 'history.set', 'apply.create', 'status.upsert', 'audit']);
 
     const sql = sqlCalls(db);
     expect(sql[0].values).toEqual([`sales-month:t1:${PREV}`]);
@@ -432,6 +433,23 @@ describe('month history', () => {
     expect(db.log.indexOf('history.delete')).toBeLessThan(db.log.indexOf('history.insert'));
     expect(db.log.indexOf('history.insert')).toBeLessThan(db.log.indexOf('apply.create'));
     expect((db.salesImportApply.create.mock.calls[0] as unknown as [{ data: Record<string, unknown> }])[0].data.source).toBe('IMPORT');
+  });
+
+  it('audit M1: the per-month combos summary is replaced in the SAME tx from the just-written history lines (one INSERT … SELECT … GROUP BY)', async () => {
+    const db = makeDb();
+    await services(db).apply.apply(user, 'imp1', body([PREV]));
+    const sql = sqlCalls(db);
+    const del = sql.find((q) => q.text.includes('DELETE FROM "sales_month_history_combos"'))!;
+    expect(del.values).toEqual(['t1', PREV]);
+    const ins = sql.filter((q) => q.text.includes('INSERT INTO "sales_month_history_combos"'));
+    expect(ins).toHaveLength(1);
+    expect(ins[0].text).toContain('FROM "sales_month_histories" h');
+    expect(ins[0].text).toMatch(/GROUP BY h."clientId", h."month", h."dimKey"$/);
+    expect(ins[0].text).toContain('md5(h."dimKey")');
+    expect(ins[0].values).toEqual(['t1', PREV]);
+    expect(db.log.indexOf('history.insert')).toBeLessThan(db.log.indexOf('combos.delete'));
+    expect(db.log.indexOf('combos.insert')).toBeLessThan(db.log.indexOf('apply.create'));
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
   });
 
   const hist = (id: number, month: string, code: string, dims: Record<string, string>, paise: bigint, micro: bigint) => ({

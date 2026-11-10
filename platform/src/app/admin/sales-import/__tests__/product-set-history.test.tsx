@@ -6,7 +6,7 @@
  */
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type {
   SalesColumnMapping, SalesHistoryCombos, SalesImportCombos, SalesKpiDefinitionDto,
 } from '@/lib/sales-import/types';
@@ -72,7 +72,7 @@ describe('product set builder — stored month history source', () => {
     apiMock.createKpi.mockImplementation(async (d: SalesKpiDefinitionDto) => ok(d));
     renderEditor();
     await useStored();
-    expect(apiMock.historyCombos).toHaveBeenCalledWith({ lastMonths: 1 });
+    expect(apiMock.historyCombos).toHaveBeenCalledWith({ lastMonths: 1 }, expect.any(AbortSignal));
     expect(screen.getByText('Pick combinations from October 2026')).toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: 'Pick P 500' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('checkbox', { name: 'Pick R 1L' }));
@@ -94,12 +94,37 @@ describe('product set builder — stored month history source', () => {
     ]);
     apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, months: ['2026-08', '2026-09', '2026-10'] }));
     await act(async () => { fireEvent.change(sel, { target: { value: 'last:3' } }); });
-    expect(apiMock.historyCombos).toHaveBeenLastCalledWith({ lastMonths: 3 });
-    expect(screen.getByText('Pick combinations from August 2026 – October 2026 (3 stored months)')).toBeInTheDocument();
+    expect(await screen.findByText('Pick combinations from August 2026 – October 2026 (3 stored months)')).toBeInTheDocument();
+    expect(apiMock.historyCombos).toHaveBeenLastCalledWith({ lastMonths: 3 }, expect.any(AbortSignal));
     apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, months: ['2026-09'] }));
     await act(async () => { fireEvent.change(sel, { target: { value: 'month:2026-09' } }); });
-    expect(apiMock.historyCombos).toHaveBeenLastCalledWith({ month: '2026-09' });
-    expect(screen.getByText('Pick combinations from September 2026')).toBeInTheDocument();
+    expect(await screen.findByText('Pick combinations from September 2026')).toBeInTheDocument();
+    expect(apiMock.historyCombos).toHaveBeenLastCalledWith({ month: '2026-09' }, expect.any(AbortSignal));
+  });
+
+  it('audit M1: quick select changes are debounced into ONE request, and a superseded request is aborted', async () => {
+    apiMock.historyCombos.mockResolvedValue(ok(HISTORY));
+    renderEditor();
+    await useStored();
+    expect(apiMock.historyCombos).toHaveBeenCalledTimes(1);
+    // the next request hangs until we resolve it, so it is still in flight when the choice changes again
+    let resolveSlow: (v: unknown) => void = () => undefined;
+    apiMock.historyCombos.mockImplementationOnce(() => new Promise((r) => { resolveSlow = r; }));
+    const sel = screen.getByRole('combobox', { name: 'Stored months to pick from' });
+    act(() => {
+      fireEvent.change(sel, { target: { value: 'last:3' } });
+      fireEvent.change(sel, { target: { value: 'last:6' } });
+    });
+    await waitFor(() => expect(apiMock.historyCombos).toHaveBeenCalledTimes(2)); // last:3 never sent
+    expect(apiMock.historyCombos).toHaveBeenLastCalledWith({ lastMonths: 6 }, expect.any(AbortSignal));
+    const slowSignal = apiMock.historyCombos.mock.calls[1][1] as AbortSignal;
+    apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, months: ['2026-09'] }));
+    act(() => { fireEvent.change(sel, { target: { value: 'month:2026-09' } }); });
+    expect(slowSignal.aborted).toBe(true); // superseded → aborted at once
+    await act(async () => { resolveSlow(ok({ ...HISTORY, months: ['2026-01'] })); }); // its late answer is ignored
+    expect(await screen.findByText('Pick combinations from September 2026')).toBeInTheDocument();
+    expect(screen.queryByText('Pick combinations from January 2026')).not.toBeInTheDocument();
+    expect(apiMock.historyCombos).toHaveBeenCalledTimes(3);
   });
 
   it('warns when the stored lines were read with different product columns', async () => {

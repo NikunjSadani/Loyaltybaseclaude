@@ -45,9 +45,22 @@ export const salesImportApi = {
   testKpi: (req: SalesKpiTestRequest) => api.post<SalesKpiTestResult>(`${BASE}/kpis/test`, req),
   segmentOptions: () => api.get<SalesSegmentOptions>(`${BASE}/segment-options`),
   combos: (importId: string | 'latest' = 'latest') => api.get<SalesImportCombos>(`${BASE}/${id(importId)}/combos`),
-  /** Product combos from the STORED month history: one month, or the N most recent stored months (1..12). */
-  historyCombos: (q: { month: string } | { lastMonths: number }) =>
-    api.get<SalesHistoryCombos>(`${BASE}/history-combos?${'month' in q ? `month=${id(q.month)}` : `lastMonths=${q.lastMonths}`}`),
+  /**
+   * Product combos from the STORED month history: one month, or the N most recent stored months (1..12). Takes an
+   * AbortSignal so the picker can cancel a superseded request (plain fetch: the shared api client has no signal).
+   */
+  historyCombos: async (q: { month: string } | { lastMonths: number }, signal?: AbortSignal): Promise<ApiResponse<SalesHistoryCombos>> => {
+    const qs = 'month' in q ? `month=${id(q.month)}` : `lastMonths=${q.lastMonths}`;
+    try {
+      const res = await fetch(`${BASE}/history-combos?${qs}`, { method: 'GET', signal, headers: authHeader() });
+      let body: { success?: boolean; data?: SalesHistoryCombos; error?: string; message?: string } | null = null;
+      try { body = await res.json(); } catch { body = null; }
+      if (!res.ok || !body) return { success: false, error: body?.error ?? body?.message ?? `HTTP ${res.status}`, status: res.status };
+      return body as ApiResponse<SalesHistoryCombos>;
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Network error' };
+    }
+  },
 
   // Imports
   list: (cursor?: string | null, limit = 20) =>

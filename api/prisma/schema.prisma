@@ -3176,6 +3176,26 @@ model SalesMonthHistory {
   @@map("sales_month_histories")
 }
 
+/// Per-month product-combo summary of SalesMonthHistory (plan §10c, audit M1): one row per distinct product combo of the
+/// month's stored lines, replaced in the SAME transaction as the history (INSERT … SELECT … GROUP BY) and deleted with it
+/// by the retention sweep. The KPI picker's "Stored month(s)" source aggregates THIS table (thousands of rows per month),
+/// never the line rows. Sums are NUMERIC: a combo's month total over every customer can exceed BIGINT pico-cases.
+model SalesMonthHistoryCombo {
+  id          BigInt  @id @default(autoincrement())
+  clientId    String
+  month       String // YYYY-MM
+  dims        Json
+  dimKey      String
+  keyHash     String // md5(dimKey) — bounded unique key (dimKey can exceed the index row size)
+  amountPaise Decimal @db.Decimal(38, 0)
+  qtyPico     Decimal @db.Decimal(38, 0)
+  lines       Int
+
+  @@unique([clientId, month, keyHash])
+  @@index([month])
+  @@map("sales_month_history_combos")
+}
+
 /// Header of a month's history set (one per tenant × month): month lists read this, never the line rows; recalculate
 /// checks the current KPIs' dimension keys against `dimensionKeys` (plan §10b).
 model SalesMonthHistorySet {
