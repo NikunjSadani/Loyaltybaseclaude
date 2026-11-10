@@ -28,7 +28,11 @@ function txDb(extra: Record<string, unknown> = {}) {
       create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'new', ...data })),
       update: jest.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'd1', clientId: 't1', kpiCode: 'K', measure: 'AMOUNT', filter: {}, outletTypes: [], programs: [], enabled: true, order: 0, ...data })),
     },
-    kpiDef: { findFirst: jest.fn(async ({ where }: { where: { code: string } }) => (where.code.startsWith('K') ? { code: where.code } : null)) },
+    kpiDef: {
+      findFirst: jest.fn(async ({ where }: { where: { code: string } }) => (where.code.startsWith('K') ? { code: where.code } : null)),
+      // L4: KpiDef.outletType lookups (default: every KPI is shared)
+      findMany: jest.fn(async (): Promise<Array<{ code: string; outletType: string | null }>> => []),
+    },
     auditLog: { create: jest.fn(async () => ({})) },
     outlet: { findMany: jest.fn(async () => []) },
     salesImport: { findFirst: jest.fn(async () => null) },
@@ -171,6 +175,10 @@ describe('SalesKpiDefService (K-2)', () => {
     const b = await new SalesKpiDefService(db as never).list('t1');
     expect(b.definitions).toHaveLength(2);
     expect(b.definitionsHash).toBe(a.definitionsHash);
+    // L4: the KPI's own type tag is part of the hash (same as preview / apply compute it)
+    db.kpiDef.findMany.mockResolvedValue([{ code: 'K1', outletType: 'RETAIL' }]);
+    const c = await new SalesKpiDefService(db as never).list('t1');
+    expect(c.definitionsHash).not.toBe(a.definitionsHash);
   });
 
   describe('test (draft-filter tester, §6.2a)', () => {
@@ -216,6 +224,17 @@ describe('SalesKpiDefService (K-2)', () => {
         definition: { kpiCode: 'K', measure: 'QUANTITY', filter: {}, outletTypes: ['WHOLESALER'], programs: [], enabled: true, order: 0 },
       });
       expect(res.months.map((m) => [m.month, m.totalQuantity])).toEqual([['2026-09', 1], ['2026-10', 0.7]]);
+    });
+
+    it('L4: the target KPI own type tag (KpiDef.outletType) also restricts the totals, intersected with outletTypes', async () => {
+      const db = testDb();
+      db.kpiDef.findMany.mockResolvedValue([{ code: 'K', outletType: 'RETAIL' }]);
+      const d = { kpiCode: 'K', measure: 'AMOUNT' as const, filter: {}, outletTypes: [] as string[], programs: [], enabled: true, order: 0 };
+      const res = await new SalesKpiDefService(db as never).test(user, { importId: 'imp1', definition: d });
+      expect(res.months.map((m) => [m.month, m.totalAmountRupees])).toEqual([['2026-09', 40]]); // O2 (RETAIL) only
+      expect(db.kpiDef.findMany).toHaveBeenCalledWith({ where: { clientId: 't1', code: { in: ['K'] } }, select: { code: true, outletType: true } });
+      const disjoint = await new SalesKpiDefService(db as never).test(user, { importId: 'imp1', definition: { ...d, outletTypes: ['WHOLESALER'] } });
+      expect(disjoint.months).toEqual([]);
     });
 
     it('404 when the tenant has no READY import (latest) or the id is foreign', async () => {

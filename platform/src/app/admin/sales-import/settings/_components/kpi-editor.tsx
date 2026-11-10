@@ -16,7 +16,27 @@ import type {
 } from '@/lib/sales-import/types';
 import { ProductSetBuilder } from './product-set-builder';
 
-export interface TenantKpi { code: string; label: string; unit: string; enabled: boolean }
+export interface TenantKpi {
+  code: string; label: string; unit: string; enabled: boolean;
+  /** KpiDef.outletType: the KPI is for this outlet type only (null/absent = every type). */
+  outletType?: string | null;
+}
+
+/**
+ * L4: Sales Import writes a type-tagged KPI only for outlets of the KPI's own type, intersected with the definition's
+ * outlet-type scope. Returns the operator-facing warning when the two scopes disagree (null when they agree).
+ */
+export function scopeConflictWarning(kpi: Pick<TenantKpi, 'code' | 'outletType'> | undefined, outletTypes: string[]): string | null {
+  const kpiType = (kpi?.outletType ?? '').trim().toUpperCase();
+  if (!kpiType) return null;
+  const chosen = [...new Set(outletTypes.map((t) => t.trim().toUpperCase()).filter(Boolean))];
+  if (chosen.length === 0 || (chosen.length === 1 && chosen[0] === kpiType)) return null;
+  if (!chosen.includes(kpiType)) {
+    return `The KPI ${kpi!.code} is set up for ${kpiType} outlets only, but this scope lists ${chosen.join(', ')}. No outlet will get a value. Add ${kpiType} or clear the outlet types.`;
+  }
+  const others = chosen.filter((t) => t !== kpiType);
+  return `The KPI ${kpi!.code} is set up for ${kpiType} outlets only, so ${others.join(', ')} outlets will not get a value.`;
+}
 
 /** Everything a Test result depends on: the product set AND the outlet-type / programme scope. */
 function testSignature(d: Pick<SalesKpiDefinitionDto, 'filter' | 'outletTypes' | 'programs'>): string {
@@ -125,6 +145,9 @@ export function KpiEditor({
   const freshTest = test && test.sig === sig && test.result;
 
   const options = tenantKpis.filter((k) => k.enabled && (k.code === def.kpiCode || !ownedCodes.includes(k.code)));
+  const selectedKpi = tenantKpis.find((k) => k.code === def.kpiCode);
+  const selectedKpiType = (selectedKpi?.outletType ?? '').trim().toUpperCase() || null;
+  const scopeWarning = scopeConflictWarning(selectedKpi, def.outletTypes);
   let noOptionsText: string | null = null;
   if (options.length === 0 && !editing && !tenantKpisError) {
     if (tenantKpis.length === 0) noOptionsText = 'This programme has no KPIs yet. Create one under Targets first, then come back.';
@@ -231,6 +254,16 @@ export function KpiEditor({
         )}
       </div>
       <p className="text-[11px] text-gray-500 -mt-3">Leave both empty for every outlet. Outlets outside the scope get no value (blank, not 0).</p>
+      {scopeWarning && (
+        <p role="status" data-testid="kpi-scope-conflict" className="-mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          {scopeWarning}
+        </p>
+      )}
+      {!scopeWarning && selectedKpiType && def.outletTypes.length === 0 && (
+        <p data-testid="kpi-scope-kpi-type" className="-mt-2 text-[11px] text-gray-500">
+          The KPI {def.kpiCode} is set up for {selectedKpiType} outlets only, so only those outlets get a value.
+        </p>
+      )}
       </fieldset>
 
       {/* Test */}

@@ -25,7 +25,7 @@ vi.mock('@/lib/api-client', async (orig) => {
   return { ...actual, api: { ...actual.api, get: clientApi.get } };
 });
 
-import { KpiEditor } from '../settings/_components/kpi-editor';
+import { KpiEditor, scopeConflictWarning } from '../settings/_components/kpi-editor';
 import { ColumnMappingForm, validateMapping, suggestDimKey } from '../settings/_components/column-mapping-form';
 import SettingsPage from '../settings/page';
 
@@ -372,6 +372,43 @@ describe('KPI editor — outlet scope', () => {
     renderEditor();
     expect(screen.getByRole('textbox', { name: /Only these outlet types/ })).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: /Only these programmes/ })).toBeInTheDocument();
+  });
+});
+
+describe('KPI editor — L4: the KPI\'s own outlet type (KpiDef.outletType) vs the definition scope', () => {
+  const SEG = {
+    outletTypes: [{ code: 'RETAILER', name: 'Retailer' }, { code: 'WHOLESALER', name: 'Wholesaler' }],
+    programs: [],
+  };
+  const TYPED = [{ code: 'KPI_W', label: 'KPI W', unit: '₹', enabled: true, outletType: 'WHOLESALER' }, ...KPIS];
+
+  it('scopeConflictWarning: agree / empty / shared → null; disjoint → "no outlet"; extra types → named', () => {
+    expect(scopeConflictWarning({ code: 'K', outletType: null }, ['RETAILER'])).toBeNull();
+    expect(scopeConflictWarning({ code: 'K', outletType: 'WHOLESALER' }, [])).toBeNull();
+    expect(scopeConflictWarning({ code: 'K', outletType: 'WHOLESALER' }, ['wholesaler'])).toBeNull();
+    expect(scopeConflictWarning({ code: 'K', outletType: 'WHOLESALER' }, ['RETAILER'])).toMatch(/No outlet will get a value/);
+    expect(scopeConflictWarning({ code: 'K', outletType: 'WHOLESALER' }, ['WHOLESALER', 'RETAILER'])).toMatch(/RETAILER outlets will not get a value/);
+    expect(scopeConflictWarning(undefined, ['RETAILER'])).toBeNull();
+  });
+
+  it('warns in the editor when the picked scope disagrees with the KPI\'s type; nothing for a shared KPI', () => {
+    renderEditor({ segments: SEG, tenantKpis: TYPED, initial: { ...NEW, kpiCode: 'KPI_W' } });
+    // no scope chosen: an informational note, not a warning
+    expect(screen.getByTestId('kpi-scope-kpi-type')).toHaveTextContent('WHOLESALER outlets only');
+    expect(screen.queryByTestId('kpi-scope-conflict')).not.toBeInTheDocument();
+    const types = screen.getByRole('group', { name: /Only these outlet types/ });
+    fireEvent.click(within(types).getByRole('checkbox', { name: 'Retailer (RETAILER)' }));
+    expect(screen.getByTestId('kpi-scope-conflict')).toHaveTextContent(/No outlet will get a value/);
+    fireEvent.click(within(types).getByRole('checkbox', { name: 'Wholesaler (WHOLESALER)' }));
+    expect(screen.getByTestId('kpi-scope-conflict')).toHaveTextContent(/RETAILER outlets will not get a value/);
+    fireEvent.click(within(types).getByRole('checkbox', { name: 'Retailer (RETAILER)' })); // untick → agree
+    expect(screen.queryByTestId('kpi-scope-conflict')).not.toBeInTheDocument();
+  });
+
+  it('a shared KPI (no outletType) never shows the warning', () => {
+    renderEditor({ segments: SEG, initial: { ...NEW, kpiCode: 'KPI_X', outletTypes: ['RETAILER'] } });
+    expect(screen.queryByTestId('kpi-scope-conflict')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('kpi-scope-kpi-type')).not.toBeInTheDocument();
   });
 });
 

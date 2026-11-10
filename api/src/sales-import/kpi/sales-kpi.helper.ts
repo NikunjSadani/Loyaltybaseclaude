@@ -9,6 +9,8 @@
  *     (₹ exact at 2 dp; cases rounded to SALES_KPI_QUANTITY_DECIMALS = 3 — H3).
  *   - Outlet scope: a definition with non-empty outletTypes/programs that does not cover the outlet → the key is
  *     OMITTED (blank ≠ 0, the engine's null policy). An in-scope outlet with no matching lines → 0 (full rewrite).
+ *   - L4: the KPI's OWN type tag (KpiDef.outletType, `kpiOutletType`) is a further scope: when set, only outlets of that
+ *     type are in scope, intersected with outletTypes when both are set (an empty intersection = no outlet).
  */
 import { createHash } from 'node:crypto';
 import { normalizeDim, paiseToRupees, picoToCases } from '../ingest/normalize';
@@ -37,6 +39,8 @@ export interface KpiDefLite {
   filter: SalesKpiFilter;
   outletTypes: string[];
   programs: string[];
+  /** KpiDef.outletType of the target KPI (null/undefined = a shared KPI, every outlet type). */
+  kpiOutletType?: string | null;
 }
 
 /** Outlet facets used for scope (Outlet.outletType.code, Outlet.programName). */
@@ -73,8 +77,16 @@ function scopeHas(list: string[], value: string | null): boolean {
 }
 
 /** Is the outlet within the definition's optional outlet-type / programme scope? */
-export function outletInScope(def: Pick<KpiDefLite, 'outletTypes' | 'programs'>, meta: OutletScopeMeta): boolean {
-  return scopeHas(def.outletTypes ?? [], meta.outletType) && scopeHas(def.programs ?? [], meta.program);
+export function outletInScope(
+  def: Pick<KpiDefLite, 'outletTypes' | 'programs' | 'kpiOutletType'>,
+  meta: OutletScopeMeta,
+): boolean {
+  const kpiType = (def.kpiOutletType ?? '').trim();
+  return (
+    (kpiType === '' || scopeHas([kpiType], meta.outletType)) &&
+    scopeHas(def.outletTypes ?? [], meta.outletType) &&
+    scopeHas(def.programs ?? [], meta.program)
+  );
 }
 
 // ─── Measures ────────────────────────────────────────────────────────────────
@@ -322,7 +334,7 @@ export function stableStringify(v: unknown): string {
 
 /**
  * §6.2 `definitionsHash` = sha256 of the stable JSON of the ENABLED definitions sorted by kpiCode, id-free.
- * Only the fields that change what gets written are hashed (kpiCode, measure, filter, scope).
+ * Only the fields that change what gets written are hashed (kpiCode, measure, filter, scope incl. the KPI's own type).
  */
 export function definitionsHash(
   defs: ReadonlyArray<KpiDefLite & { enabled?: boolean }>,
@@ -335,6 +347,8 @@ export function definitionsHash(
       filter: d.filter ?? {},
       outletTypes: [...(d.outletTypes ?? [])].sort(),
       programs: [...(d.programs ?? [])].sort(),
+      // L4: only present for a type-tagged KPI, so every shared-KPI hash is unchanged (undefined keys are dropped).
+      kpiOutletType: (d.kpiOutletType ?? '').trim().toUpperCase() || undefined,
     }))
     .sort((a, b) => (a.kpiCode < b.kpiCode ? -1 : a.kpiCode > b.kpiCode ? 1 : 0));
   return createHash('sha256').update(stableStringify(canon)).digest('hex');

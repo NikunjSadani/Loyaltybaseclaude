@@ -68,6 +68,8 @@ function makeDb(opts: {
   historySet?: { mappingFingerprint?: string | null; dimensionKeys?: string[] };
   profile?: SalesColumnMapping;
   rosterAdded?: number;
+  /** L4: KpiDef.outletType per KPI code (absent = a shared KPI). */
+  kpiTypes?: Record<string, string | null>;
 } = {}) {
   const months = opts.months ?? [PREV, CUR];
   const log: string[] = [];
@@ -117,7 +119,12 @@ function makeDb(opts: {
     }),
     salesKpiDefinition: { findMany: jest.fn(async () => opts.defs ?? DEF_ROWS) },
     outlet: { findMany: jest.fn(async () => opts.roster ?? ROSTER), count: jest.fn(async () => opts.rosterAdded ?? 0) },
-    kpiDef: { findMany: jest.fn(async () => [{ code: 'OWN_AMT', label: 'Owned ₹' }, { code: 'OWN_QTY', label: 'Owned cases' }]) },
+    kpiDef: {
+      findMany: jest.fn(async () => [
+        { code: 'OWN_AMT', label: 'Owned ₹', outletType: opts.kpiTypes?.OWN_AMT ?? null },
+        { code: 'OWN_QTY', label: 'Owned cases', outletType: opts.kpiTypes?.OWN_QTY ?? null },
+      ]),
+    },
     salesMonthStatus: {
       findMany: jest.fn(async () => statuses),
       findUnique: jest.fn(async ({ where }: { where: { clientId_month: { month: string } } }) =>
@@ -533,6 +540,69 @@ describe('month history', () => {
     await expect(services(makeDb()).apply.recalculate(user, PREV, ok)).rejects.toBeInstanceOf(NotFoundException);
     await expect(services(makeDb({ history: HISTORY })).apply.recalculate(user, PREV, {} as never)).rejects.toBeInstanceOf(BadRequestException);
     await expect(services(makeDb({ history: HISTORY })).apply.recalculate(user, 'bad', ok)).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+// ─── L4: KpiDef.outletType scopes apply / recalculate ────────────────────────────────────────────────────────────
+
+describe('L4: a type-tagged KPI (KpiDef.outletType) only writes outlets of that type', () => {
+  const hashWith = (types: Record<string, string>) =>
+    definitionsHash(LITE.map((d) => ({ ...d, kpiOutletType: types[d.kpiCode] ?? null })));
+
+  it('apply: OWN_AMT tagged RETAIL → the WHOLESALER outlet gets no OWN_AMT key (omitted, never 0); retail outlets do', async () => {
+    const kpiTypes = { OWN_AMT: 'RETAIL' };
+    const db = makeDb({ kpiTypes });
+    const p = await services(db).preview.preview('t1', 'imp1');
+    expect(p.definitionsHash).toBe(hashWith(kpiTypes));
+    expect(p.definitionsHash).not.toBe(HASH);
+    expect(p.months.find((m) => m.month === PREV)!.kpis.find((k) => k.kpiCode === 'OWN_AMT')!.newTotal).toBe(-25); // O2 only
+    const r = await services(db).apply.apply(user, 'imp1', { months: [PREV], expectedDefinitionsHash: hashWith(kpiTypes), processingVersion: VERSION });
+    expect(r.results[0]).toEqual(expect.objectContaining({ ok: true, outletsWritten: 3 }));
+    const ins = sqlCalls(db)[1];
+    expect(ins.values).toContainEqual(['O1', 'O2', 'O3']);
+    expect(ins.values).toContainEqual([
+      JSON.stringify({ OWN_QTY: 2 }), // O1 wholesaler: OWN_AMT out of the KPI's type → omitted
+      JSON.stringify({ OWN_AMT: -25 }),
+      JSON.stringify({ OWN_AMT: 0 }),
+    ]);
+  });
+
+  it('both scopes set and disjoint (KpiDef RETAIL × definition WHOLESALER) → no outlet gets that KPI', async () => {
+    const kpiTypes = { OWN_QTY: 'RETAIL' };
+    const db = makeDb({ kpiTypes });
+    await services(db).apply.apply(user, 'imp1', { months: [PREV], expectedDefinitionsHash: hashWith(kpiTypes), processingVersion: VERSION });
+    expect(sqlCalls(db)[1].values).toContainEqual([
+      JSON.stringify({ OWN_AMT: 100 }),
+      JSON.stringify({ OWN_AMT: -25 }),
+      JSON.stringify({ OWN_AMT: 0 }),
+    ]);
+  });
+
+  it('a KpiDef.outletType change after the preview changes the hash → apply 409 before any write', async () => {
+    const db = makeDb({ kpiTypes: { OWN_AMT: 'RETAIL' } });
+    await expect(services(db).apply.apply(user, 'imp1', { months: [PREV], expectedDefinitionsHash: HASH, processingVersion: VERSION }))
+      .rejects.toBeInstanceOf(ConflictException);
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('recalculate honours it too: OWN_AMT tagged WHOLESALER → only O1 is written; retail outlets in no scope are untouched', async () => {
+    const kpiTypes = { OWN_AMT: 'WHOLESALER' };
+    const hist = (id: number, code: string, dims: Record<string, string>, paise: bigint, micro: bigint) => ({
+      id: BigInt(id), month: PREV, customerCode: code, dims, dimKey: stableStringify(dims), amountPaise: paise, qtyPico: micro * 1_000_000n, lines: 1,
+    });
+    const db = makeDb({ kpiTypes, history: [hist(1, 'O1', { dimA: 'P', dimB: '500' }, 10000n, 1_500000n), hist(2, 'O2', { dimA: 'P', dimB: '50' }, -2500n, 0n)] });
+    const pv = await services(db).apply.recalcPreview('t1', PREV);
+    expect(pv.definitionsHash).toBe(hashWith(kpiTypes));
+    const r = await services(db).apply.recalculate(user, PREV, { expectedDefinitionsHash: hashWith(kpiTypes), expectedHistoryAppliedAt: AT.toISOString() });
+    expect(r).toEqual(expect.objectContaining({ ok: true, outletsWritten: 1 }));
+    const ins = sqlCalls(db)[1];
+    expect(ins.values).toContainEqual(['O1']);
+    expect(ins.values).toContainEqual([JSON.stringify({ OWN_AMT: 100, OWN_QTY: 1.5 })]);
+  });
+
+  it('no KpiDef.outletType anywhere (every current tenant) → the hash and the written values are exactly as before', async () => {
+    const p = await services(makeDb()).preview.preview('t1', 'imp1');
+    expect(p.definitionsHash).toBe(HASH);
   });
 });
 

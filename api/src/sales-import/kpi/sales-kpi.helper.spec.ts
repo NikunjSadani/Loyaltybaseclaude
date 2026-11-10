@@ -81,6 +81,40 @@ describe('computeOutletKpis (scope + zero-fill)', () => {
   });
 });
 
+describe('L4: KpiDef.outletType (the KPI\'s own type tag) scopes the KPI', () => {
+  const SSS = { outletType: 'SSS', program: null };
+  const WS = { outletType: 'WHOLESALER', program: null };
+  const NONE = { outletType: null, program: null };
+  it('KpiDef.outletType alone: only that type is in scope (others omitted, never 0); untyped outlets are out', () => {
+    const d = def('K', 'AMOUNT', {}, { kpiOutletType: 'SSS' });
+    expect(computeOutletKpis([agg({ dimA: 'X' }, 500n, 0n)], [d], SSS)).toEqual({ K: 5 });
+    expect(computeOutletKpis([agg({ dimA: 'X' }, 500n, 0n)], [d], WS)).toEqual({});
+    expect(computeOutletKpis([], [d], NONE)).toEqual({});
+    expect(outletInScope(d, { outletType: ' sss ', program: null })).toBe(true); // case/space-insensitive
+  });
+  it('null / blank KpiDef.outletType = shared KPI (every type, unchanged behaviour)', () => {
+    for (const k of [null, undefined, '', '  ']) {
+      expect(outletInScope(def('K', 'AMOUNT', {}, { kpiOutletType: k }), WS)).toBe(true);
+      expect(outletInScope(def('K', 'AMOUNT', {}, { kpiOutletType: k }), NONE)).toBe(true);
+    }
+  });
+  it('both set → intersection; a disjoint pair puts NO outlet in scope', () => {
+    const both = def('K', 'AMOUNT', {}, { kpiOutletType: 'SSS', outletTypes: ['SSS', 'WHOLESALER'] });
+    expect(outletInScope(both, SSS)).toBe(true);
+    expect(outletInScope(both, WS)).toBe(false);
+    const disjoint = def('K', 'AMOUNT', {}, { kpiOutletType: 'SSS', outletTypes: ['WHOLESALER'] });
+    expect(outletInScope(disjoint, SSS)).toBe(false);
+    expect(outletInScope(disjoint, WS)).toBe(false);
+  });
+  it('the accumulator applies the same scope', () => {
+    const d = def('K', 'AMOUNT', {}, { kpiOutletType: 'SSS' });
+    const acc = new OutletKpiAccumulator([d]);
+    acc.add('O1', agg({ dimA: 'X' }, 700n, 0n));
+    expect(acc.valuesFor('O1', SSS)).toEqual({ K: 7 });
+    expect(acc.valuesFor('O1', WS)).toEqual({});
+  });
+});
+
 describe('§6.2a multi-combination (focus SKU set) KPIs', () => {
   const aggs = [
     agg({ dimA: 'P', dimB: '500' }, 10000n, 1_000000n), agg({ dimA: 'P', dimB: '200' }, 4000n, 500000n),
@@ -155,6 +189,14 @@ describe('hashes', () => {
     expect(definitionsHash([{ ...b, outletTypes: ['X', 'Y'] }, a, { ...def('C', 'AMOUNT', {}), enabled: false }])).toBe(h1);
     expect(definitionsHash([a, { ...b, measure: 'AMOUNT' }])).not.toBe(h1);
     expect(h1).toMatch(/^[0-9a-f]{64}$/);
+  });
+  it('L4: a type-tagged KPI changes the hash; a shared KPI (null/blank kpiOutletType) hashes exactly as before', () => {
+    const a = def('A', 'AMOUNT', {});
+    const h = definitionsHash([a]);
+    expect(definitionsHash([{ ...a, kpiOutletType: null }])).toBe(h);
+    expect(definitionsHash([{ ...a, kpiOutletType: '  ' }])).toBe(h);
+    expect(definitionsHash([{ ...a, kpiOutletType: 'SSS' }])).not.toBe(h);
+    expect(definitionsHash([{ ...a, kpiOutletType: 'sss' }])).toBe(definitionsHash([{ ...a, kpiOutletType: 'SSS' }]));
   });
   it('stableStringify sorts keys recursively', () =>
     expect(stableStringify({ b: 1, a: { d: [2, { z: 1, y: 2 }], c: null } })).toBe('{"a":{"c":null,"d":[2,{"y":2,"z":1}]},"b":1}'));
