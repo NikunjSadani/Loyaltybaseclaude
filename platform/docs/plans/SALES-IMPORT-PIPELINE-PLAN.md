@@ -912,7 +912,7 @@ with `source: HISTORY` (importId = the history's source import). The history its
 
 **Retention.** Per-import aggregates / raw parts / unmatched.csv: 30 days after the import finishes (unchanged). Month
 history: `SALES_MONTH_HISTORY_RETENTION_YEARS` = 10 — the retention sweep (list / worker drain / idle drain) deletes
-history months (lines AND set headers) older than 10 years before the current IST month.
+history months (lines, set headers AND the §10c combos summary) older than 10 years before the current IST month.
 
 **Final-check hardening (migration `20261112130000_sales_month_history_sets`, additive; backfills headers):**
 - **Set header** `sales_month_history_sets` (unique clientId+month): sourceImportId, appliedAt, appliedById, the
@@ -935,33 +935,51 @@ history months (lines AND set headers) older than 10 years before the current IS
   DELETE + one set-based INSERT … SELECT log `{msg:'sales-import month history written', deletedRows, insertedRows,
   deleteMs, insertMs}` so the real-scale timing can be measured and the bound adjusted.
 
-## 10c. Extras (branch `feat/sales-import-extras`, 2026-11-10)
+## 10c. Extras (branch `feat/sales-import-extras`, 2026-11-10; audit fixes same day)
 **KPI product picker from stored month history.** `GET admin/sales-import/history-combos?month=YYYY-MM` or
 `?lastMonths=N` (1..`SALES_HISTORY_COMBOS_MAX_MONTHS` = 12, default 1; never both) — targets:read + the feature-flag gate
 (`assertSalesImportAccess`), tenant-scoped, on the config controller (static segment, before `GET :id`). "Last N" = the N
 most recent months WITH stored history (read from `sales_month_history_sets`, not calendar months). Response
 `SalesHistoryCombos` = the `SalesImportCombos` lists (`dimensionCombos` + `dimensionValues`, same caps: top 2,000 combos /
 200 values per key by |₹|) + `months`, `availableMonths` (newest first, for the picker), `dimensionKeys` (union of the
-covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct count). Two aggregate SQL statements
-(`kpi/sales-history-combos.service.ts`): `GROUP BY h."dims"` with `count(*) OVER ()` + `LIMIT`, and per-key values via
-`jsonb_each_text` ranked with `row_number() … <= 200` — the line rows never reach Node (no Prisma `distinct`). FE: the
-product-set builder has a source selector (Latest file / Stored month(s) → most recent, last 3/6/12, or one month); combos
-pin only the keys their stored lines carry (`comboEntry`, unchanged rule); a drift note compares the stored
-`dimensionKeys` with the current mapping (and flags months read with different columns); the live "never appears" check
-uses the selected source and is off when the list is capped (`totalCombos > dimensionCombos.length`, or ≥ 2,000 for the
-file). "Test" still runs against the latest file (copy says so). Not verified against a real DB yet (SQL unit-tested
-for shape only) — run it on staging before relying on it.
+covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct count).
+- **Combos summary (audit M1).** New table `sales_month_history_combos` (migration
+  `20261112140000_sales_month_history_combos`, additive, backfills every stored month): one row per (tenant, month,
+  product combo) — clientId, month, dims, dimKey, `keyHash = md5(dimKey)` (unique with clientId + month), amountPaise /
+  qtyPico as NUMERIC(38,0) (a month total can exceed BIGINT pico-cases), lines. Every APPLY replaces the month's rows in the
+  SAME transaction, right after the history INSERT, with ONE `INSERT … SELECT … FROM sales_month_histories WHERE month
+  GROUP BY dimKey` (the apply log line adds `comboRows`, `combosMs`). Recalculate does not change the history, so it does
+  not touch the summary. The 10-year retention deletes summary rows with the history. history-combos reads ONLY this table
+  (thousands of rows per month): two aggregate statements run ONE AFTER THE OTHER in one transaction after
+  `SET LOCAL statement_timeout = 10000` (`HISTORY_COMBOS_STATEMENT_TIMEOUT_MS`); a timeout → 503 "choose fewer months".
+- **FE:** the product-set builder has a source selector (Latest file / Stored month(s) → most recent, last 3/6/12, or one
+  month); a change of the month select is debounced 300 ms and a superseded request is aborted (`historyCombos(q,
+  signal)` uses plain fetch — the shared api client takes no signal). Combos pin only the keys their stored lines carry
+  (`comboEntry`, unchanged rule); a drift note compares the stored `dimensionKeys` (fallback: the combos' keys) with the
+  current mapping and flags months read with different columns; the live "never appears" check uses the selected source
+  and is off when the list is capped (`totalCombos > dimensionCombos.length`, or ≥ 2,000 for the file). "Test" still runs
+  against the latest file (copy says so).
+- Not verified against a real DB yet (SQL unit-tested for shape only) — run the migration + picker on staging before
+  relying on it; check the `comboRows` / `combosMs` apply log at real scale.
 
 **Graceful worker stop.** Cloud Run Jobs send SIGTERM, then SIGKILL ~10 s later. `ingest/worker-stop.ts` (no imports;
 loaded before the heap decision): on SIGTERM / SIGINT the worker stops claiming (`drainImports`), the processor destroys
 the current input stream and RELEASES its claim — `updateMany WHERE id, status PROCESSING, claimToken` → `QUEUED`,
-`claimToken`/`heartbeatAt`/`startedAt` null, progress 0, `attempts` = its pre-claim value (`queuedAt` kept) — never FAILED
-(any error after a stop request is released, not failed), so the next drain picks it up immediately. The READY
-transaction is a critical section: a stop arriving during it is ignored (it commits; a SIGKILL rolls it back whole), and
-the forced exit at `WORKER_STOP_DEADLINE_MS` = 8 s (exit 143) is skipped while it runs. A drain that finishes its release
-in time exits 0; the retention sweep is skipped when stopping. The heap re-exec parent forwards SIGTERM / SIGINT to the
-child and mirrors its exit code. No infra change. (The inline runner in the API process is unchanged: a killed inline run
-is still recovered by the stale-heartbeat reclaim.)
+`claimToken`/`heartbeatAt`/`startedAt` null, progress 0 (`queuedAt` kept). The stop itself never marks it FAILED (any error
+after a stop request is released, not failed).
+- **Attempts (audit H1).** Only an EARLY stop (within `STOP_RESTORES_ATTEMPT_WITHIN_MS` = 10 min of the run's start — a
+  deploy / scale-down) restores `attempts` to its pre-claim value. A later stop (e.g. the 3600 s task timeout on a file
+  that never finishes, or a stalled read) COUNTS the attempt, so after `SALES_IMPORT_MAX_ATTEMPTS` the next claim ends it
+  FAILED: "Processing was attempted N times without finishing (it took too long or was stopped repeatedly)…". Without
+  this an always-timing-out import would be handed back forever and block every later import (claims are oldest-first).
+- The READY transaction is a critical section: a stop arriving during it is ignored (it commits; a SIGKILL rolls it back
+  whole); the forced exit at `WORKER_STOP_DEADLINE_MS` = 8 s is skipped while it runs, and when it ends after the deadline
+  a `WORKER_STOP_AFTER_CRITICAL_MS` = 1 s forced exit is re-armed (audit L2).
+- A stopped worker exits `WORKER_STOP_EXIT_CODE` = 143 (also after a clean release) so Cloud Run's task retry picks the
+  handed-back import up promptly (audit L1); the retention sweep is skipped when stopping. The final log reports
+  `finished` / `released` / `superseded` separately (`processClaimed` returns the outcome; audit L3).
+- The heap re-exec parent forwards SIGTERM / SIGINT to the child and mirrors its exit code. No infra change. (The inline
+  runner in the API process is unchanged: a killed inline run is still recovered by the stale-heartbeat reclaim.)
 
 ## 11. Lane tasks (TDD: write the test first, see it fail, implement, see it pass; run `cd api && npx jest src/sales-import` or `cd platform && npx vitest run src/app/admin/sales-import src/lib/sales-import`)
 
@@ -1269,7 +1287,7 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
 - GCS: parts + unmatched under `sales-imports/<clientId>/<importId>/`. The API deletes parts 30 days after READY (lazy, on list) or
   immediately on DELETE. Bucket lifecycle is unchanged.
 - **Retention (current):** per-import data (raw parts, per-run unmatched.csv, aggregates, sample rows) 30 days after the
-  import finishes; abandoned uploads after 24 h; the month history (`sales_month_histories`, §10b) 10 years.
+  import finishes; abandoned uploads after 24 h; the month history (`sales_month_histories`, §10b, + its `sales_month_history_combos` summary, §10c) 10 years.
 
 ---
 
