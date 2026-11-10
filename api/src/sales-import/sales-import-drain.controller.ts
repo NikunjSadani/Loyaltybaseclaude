@@ -17,6 +17,9 @@ import { SalesImportRetentionService } from './ingest/sales-import-retention.ser
  * REQUIRED in staging/prod: it is what recovers an import whose worker died (heartbeat-stale PROCESSING is reclaimed
  * on the next kick) and, when nothing is queued, it drives the retention sweep. See plan §14.
  */
+/** Wall-clock budget for the combos-summary repair inside the scheduler's drain request (a started month finishes). */
+export const DRAIN_COMBOS_REFRESH_BUDGET_MS = 60_000;
+
 @Controller('sales-import')
 export class SalesImportDrainController {
   constructor(
@@ -37,6 +40,8 @@ export class SalesImportDrainController {
     if (got.length !== want.length || !timingSafeEqual(got, want)) throw new ForbiddenException('Invalid drain secret');
     if (!(await hasClaimableImports(this.prisma))) {
       await this.retention.sweep({ limit: 50 }); // never throws
+      // §10c: repair stale combos summaries; budget kept well inside the scheduler's HTTP deadline (never throws).
+      await this.retention.refreshHistoryCombos({ budgetMs: DRAIN_COMBOS_REFRESH_BUDGET_MS });
       return { kicked: false };
     }
     return { kicked: (await this.runner.kick()) !== 'none' };

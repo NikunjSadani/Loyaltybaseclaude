@@ -281,6 +281,15 @@ export function ProductSetBuilder({
         </p>
       )}
 
+      {source === 'history' && history.data && history.data.refreshingMonths.length > 0 && (
+        <p role="status" className="text-xs text-blue-800 bg-blue-50 border border-blue-100 rounded-md px-3 py-2" data-testid="product-set-refreshing">
+          {history.data.refreshingMonths.length === 1 ? 'The product list for ' : 'The product lists for '}
+          {history.data.refreshingMonths.map(monthLabel).join(', ')}{' '}
+          {history.data.refreshingMonths.length === 1 ? 'is' : 'are'} being refreshed — it updates within about 10 minutes.
+          Until then it may be out of date.
+        </p>
+      )}
+
       {(drift || view.keysDiffer) && (
         <p role="status" className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2" data-testid="product-set-mapping-drift">
           {drift && (source === 'latest' ? (

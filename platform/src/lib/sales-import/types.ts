@@ -294,6 +294,12 @@ export interface SalesHistoryCombos {
   dimensionCombos: SalesDimensionCombo[];
   /** Distinct combos in the covered months; more than dimensionCombos.length = the list is capped. */
   totalCombos: number;
+  /**
+   * Covered months whose product summary is being refreshed in the background (missing, or from an earlier apply than
+   * the month's stored lines): their combos come from the older summary, or — when it is missing — straight from the
+   * stored lines. The worker rebuilds them (Cloud Scheduler drain, ~10 min). Empty when everything is current.
+   */
+  refreshingMonths: string[];
 }
 
 // ─── Preview / apply ────────────────────────────────────────────────────────────

@@ -4,7 +4,7 @@ import { GUARDS_METADATA, INTERCEPTORS_METADATA, METHOD_METADATA, PATH_METADATA 
 import { PERMISSION_KEY } from '../common/decorators/require-permission.decorator';
 import { SalesImportController } from './sales-import.controller';
 import { SalesImportPartGuard } from './sales-import-access';
-import { SalesImportDrainController } from './sales-import-drain.controller';
+import { DRAIN_COMBOS_REFRESH_BUDGET_MS, SalesImportDrainController } from './sales-import-drain.controller';
 
 const ADMIN = { sub: 'u1', role: 'CLIENT_ADMIN', clientId: 't1', phone: '', name: 'A' };
 const UNASSUMED_GIFSY = { sub: 'g1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: 'G' };
@@ -131,7 +131,7 @@ describe('SalesImportDrainController', () => {
   const make = (claimable: number, kick: string) => {
     const runner = { kick: jest.fn().mockResolvedValue(kick) };
     const prisma = { $queryRaw: jest.fn().mockResolvedValue([{ n: claimable }]) };
-    const retention = { sweep: jest.fn().mockResolvedValue({ abandoned: 0, purged: 0 }) };
+    const retention = { sweep: jest.fn().mockResolvedValue({ abandoned: 0, purged: 0 }), refreshHistoryCombos: jest.fn().mockResolvedValue({}) };
     return { ctrl: new SalesImportDrainController(runner as never, prisma as never, retention as never), runner, retention };
   };
 
@@ -154,7 +154,11 @@ describe('SalesImportDrainController', () => {
     await expect(idle.ctrl.drain('s3cret')).resolves.toEqual({ kicked: false });
     expect(idle.runner.kick).not.toHaveBeenCalled();
     expect(idle.retention.sweep).toHaveBeenCalled(); // S5: an idle drain still runs the retention sweep
-    await expect(make(2, 'job').ctrl.drain('s3cret')).resolves.toEqual({ kicked: true });
+    // §10c: and repairs stale combos summaries in the background, with a budget inside the scheduler's deadline
+    expect(idle.retention.refreshHistoryCombos).toHaveBeenCalledWith({ budgetMs: DRAIN_COMBOS_REFRESH_BUDGET_MS });
+    const busy = make(2, 'job');
+    await expect(busy.ctrl.drain('s3cret')).resolves.toEqual({ kicked: true });
+    expect(busy.retention.refreshHistoryCombos).not.toHaveBeenCalled(); // the kicked worker does it
     await expect(make(2, 'none').ctrl.drain('s3cret')).resolves.toEqual({ kicked: false });
   });
 

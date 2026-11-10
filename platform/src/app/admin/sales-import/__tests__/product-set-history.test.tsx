@@ -37,6 +37,7 @@ const HISTORY: SalesHistoryCombos = {
     { dims: { dimA: 'S', dimB: '' }, lines: 2, amountRupees: 15, quantity: 0.5 },
   ],
   totalCombos: 2,
+  refreshingMonths: [],
 };
 const NEW: SalesKpiDefinitionDto = { kpiCode: 'KPI_X', measure: 'AMOUNT', filter: {}, outletTypes: [], programs: [], enabled: true, order: 0 };
 const KPIS = [{ code: 'KPI_X', label: 'KPI X', unit: '₹', enabled: true }];
@@ -147,6 +148,19 @@ describe('product set builder — stored month history source', () => {
     renderEditor();
     await useStored();
     expect(screen.getByTestId('product-set-mapping-drift')).toHaveTextContent('no SKU group column');
+  });
+
+  it('months whose product summary is being refreshed get an honest notice', async () => {
+    apiMock.historyCombos.mockResolvedValue(ok(HISTORY));
+    renderEditor();
+    await useStored();
+    expect(screen.queryByTestId('product-set-refreshing')).not.toBeInTheDocument();
+    apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, months: ['2026-08', '2026-09', '2026-10'], refreshingMonths: ['2026-09'] }));
+    const sel = screen.getByRole('combobox', { name: 'Stored months to pick from' });
+    await act(async () => { fireEvent.change(sel, { target: { value: 'last:3' } }); });
+    const note = await screen.findByTestId('product-set-refreshing');
+    expect(note).toHaveAttribute('role', 'status');
+    expect(note).toHaveTextContent('The product list for September 2026 is being refreshed — it updates within about 10 minutes.');
   });
 
   it('the live "never appears" check follows the selected source', async () => {

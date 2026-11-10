@@ -75,6 +75,7 @@ export class SalesImportRunnerService {
       } while (this.inlineAgain);
       // S5: the inline drain sweeps retention like the job does (never throws).
       await this.retention?.sweep({ limit: 50 });
+      await this.retention?.refreshHistoryCombos(); // §10c background summary repair (never throws)
     } catch (e) {
       this.logger.error(`Sales Import inline worker stopped: ${(e as Error).message}`);
     }
