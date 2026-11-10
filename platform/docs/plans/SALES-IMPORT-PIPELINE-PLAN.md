@@ -962,7 +962,9 @@ covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct cou
   `SET LOCAL statement_timeout = 240000` and a 280 s bound (apply scale), under the SAME blocking month lock as apply
   (`lockSalesMonth`): DELETE the month's summary, the same INSERT … SELECT from `sales_month_histories`, re-stamp the
   header from its own source. Allowed for OPEN and CLOSED months — it changes no achievement, KPI value or history line.
-  404 without history; a statement timeout (e.g. the lock wait behind a long apply) → 409 "busy, try again".
+  404 without history, for a month below the 10-year retention cutoff, or when the header was purged meanwhile (the
+  stamp is an `updateMany`; count 0 → 404 and the transaction rolls back); a statement timeout (e.g. the lock wait
+  behind a long apply) → 409 "busy, try again".
   `SalesMonthRow.productListCurrent` (false only with history and a summary not from it) drives the Months-page button.
 - **Migration note.** `20261112140000` was EDITED IN PLACE several times on this branch; as of 2026-11-10 it exists only
   on the local branches `feat/sales-import-extras` and `feat/sales-import` (not on `develop` / `main` or any remote), so
@@ -987,8 +989,9 @@ covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct cou
   dimensionCombos.length`, or ≥ 2,000 for the file). "Test" still runs against the latest file (copy says so). Months in
   `unavailableMonths` get a status notice "The product list for <month> isn't available — open Months and choose
   'Rebuild product list' (it doesn't change any figures)." (plural: "The product lists for … aren't available … for
-  each"; the link is `/admin/sales-import/months?month=<first unavailable>`, and the Months page lists from that month
-  on). The Months page shows "Rebuild product list" (confirm → result message, row updated) on each month with history
+  each"; the link is `/admin/sales-import/months?from=<oldest unavailable>&to=<newest unavailable>` — or
+  `?from=<newest>` when the span exceeds the page's 36-month range — and the Months page lists that range, `to`
+  clamped at the current IST month, so every unavailable month's button is visible). The Months page shows "Rebuild product list" (confirm → result message, row updated) on each month with history
   whose `productListCurrent` is false, OPEN or CLOSED, for targets:upload. No polling, no time promise.
 - **Retention bounds (the idle Scheduler drain).** The drain sets `deadline = start + DRAIN_DEADLINE_MS (150 s)` and
   passes it to `sweep({deadline})`, which starts a step only if its worst case still ends by then: a purge
