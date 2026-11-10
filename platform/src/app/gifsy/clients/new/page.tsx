@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { ArrowLeft, ArrowRight, Check, AlertCircle, Building2 } from 'lucide-react';
 import { validateNewClientSlug, validateTenantDomain, normalizeTenantDomain } from '@/lib/platform/platform-admin';
 import type { FeatureKey } from '@/lib/platform/client-config';
+import { BEHAVIOUR_FLAG_META, BEHAVIOUR_FLAG_KEYS, type BehaviourFlagKey } from '@/lib/platform/behaviour-flags';
 import { getToken } from '@/lib/auth-client';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -31,6 +32,8 @@ interface OnboardingForm {
 
   // Features
   features: Record<FeatureKey, boolean>;
+  // Runtime behaviour flags (not modules) — all OFF by default; only the ones switched ON are sent.
+  behaviourFlags: Record<BehaviourFlagKey, boolean>;
 }
 
 const DEFAULT_FEATURES: Record<FeatureKey, boolean> = {
@@ -102,6 +105,7 @@ export default function OnboardClientPage() {
     supportPhone:  '',
     invoicePrefix: 'TGSL-',
     features:      { ...DEFAULT_FEATURES },
+    behaviourFlags: { outletMasterGeo: false, soDeclarationKyc: false },
   });
 
   const [slugErrors, setSlugErrors] = useState<string[]>([]);
@@ -175,7 +179,12 @@ export default function OnboardClientPage() {
           supportEmail: form.supportEmail,
           supportPhone: form.supportPhone,
           invoicePrefix: form.invoicePrefix,
-          features: form.features,
+          // Behaviour flags ride the same features blob, but ONLY the ones switched ON are added —
+          // an untouched wizard sends exactly the module set it always did.
+          features: {
+            ...form.features,
+            ...Object.fromEntries(BEHAVIOUR_FLAG_KEYS.filter((k) => form.behaviourFlags[k]).map((k) => [k, true])),
+          },
           // Only the ADDITIONAL branded domain — the backend always seeds the
           // canonical <slug>.gifsy.in on create. Omit the key when none entered.
           ...(form.brandedDomain.trim()
@@ -502,6 +511,45 @@ function FeaturesStep({
           );
         })}
       </div>
+
+      <div className="pt-2">
+        <p className="text-sm font-semibold text-white">Behaviour flags</p>
+        <p className="text-xs text-white/40 mt-0.5 mb-2">
+          These change how an existing flow behaves (they are not modules). OFF unless switched on.
+        </p>
+        <div className="space-y-2">
+          {BEHAVIOUR_FLAG_KEYS.map((key) => {
+            const on   = form.behaviourFlags[key];
+            const meta = BEHAVIOUR_FLAG_META[key];
+            return (
+              <div
+                key={key}
+                data-testid={`wizard-behaviour-flag-${key}`}
+                role="switch"
+                aria-checked={on}
+                aria-label={meta.label}
+                tabIndex={0}
+                className={`flex items-center gap-4 px-4 py-3 rounded-xl border transition-colors cursor-pointer ${
+                  on ? 'bg-white/5 border-white/15' : 'bg-transparent border-white/5 hover:border-white/10'
+                }`}
+                onClick={() => onChange({ behaviourFlags: { ...form.behaviourFlags, [key]: !on } })}
+                onKeyDown={(e) => {
+                  if (e.key === ' ' || e.key === 'Enter') {
+                    e.preventDefault();
+                    onChange({ behaviourFlags: { ...form.behaviourFlags, [key]: !on } });
+                  }
+                }}
+              >
+                <div className="flex-1 min-w-0">
+                  <p className={`text-sm font-medium ${on ? 'text-white' : 'text-white/50'}`}>{meta.label}</p>
+                  <p className="text-xs text-white/30 mt-0.5">{meta.description}</p>
+                </div>
+                <Toggle enabled={on} />
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }
@@ -543,6 +591,17 @@ function ReviewStep({ form }: { form: OnboardingForm }) {
               </span>
             ))}
             {enabledFeatures.length === 0 && <span className="text-xs text-white/30">No features enabled</span>}
+          </div>
+        </ReviewSection>
+
+        <ReviewSection title="Behaviour flags">
+          <div className="flex flex-wrap gap-1.5">
+            {BEHAVIOUR_FLAG_KEYS.filter((k) => form.behaviourFlags[k]).map((k) => (
+              <span key={k} className="px-2 py-0.5 rounded-full bg-[var(--brand-primary)]/20 text-[var(--brand-primary)] text-xs font-medium border border-[var(--brand-primary)]/30">
+                {BEHAVIOUR_FLAG_META[k].label}
+              </span>
+            ))}
+            {!BEHAVIOUR_FLAG_KEYS.some((k) => form.behaviourFlags[k]) && <span className="text-xs text-white/30">None (all off)</span>}
           </div>
         </ReviewSection>
 

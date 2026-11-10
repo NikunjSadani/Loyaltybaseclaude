@@ -70,6 +70,88 @@ function effectiveSalesRedeem(stored: boolean | null | undefined, code: string):
   return stored ?? code === 'WHOLESALER';
 }
 
+/** The nested `features.partnerApp` keys (partner-app tab visibility). */
+export const PARTNER_APP_KEYS = [
+  'showSchemes',
+  'showInvoices',
+  'showWallet',
+  'showTeam',
+  'showLeaderboard',
+] as const;
+
+/**
+ * EFFECTIVE partner-app tab values when a key is unset. MUST mirror the runtime default the
+ * partner shell applies (FE `DEFAULT_CLIENT_CONFIG.features.partnerApp` via normalizeFeatures),
+ * so the console never shows a value the partner app would not actually use.
+ */
+const PARTNER_APP_DEFAULTS: Record<(typeof PARTNER_APP_KEYS)[number], boolean> = {
+  showSchemes: true,
+  showInvoices: false,
+  showWallet: true,
+  showTeam: true,
+  showLeaderboard: false,
+};
+
+/**
+ * The full, coerced console projection of a tenant's `features` blob — shared by the
+ * create / update / detail responses so they can never drift (a partial projection silently
+ * reverts the un-echoed switches in the console until reload). Module flags + the two runtime
+ * BEHAVIOUR flags (outletMasterGeo, soDeclarationKyc) coerce a missing key to false; the nested
+ * partnerApp block resolves each unset key to its effective runtime default. READ-ONLY: this
+ * never writes, so a tenant's stored blob (e.g. Deoleo's) is untouched by it.
+ */
+function consoleFeatures(features: Record<string, unknown>) {
+  const pa = (features.partnerApp ?? {}) as Record<string, unknown>;
+  const partnerApp = {} as Record<(typeof PARTNER_APP_KEYS)[number], boolean>;
+  for (const k of PARTNER_APP_KEYS) {
+    partnerApp[k] = typeof pa[k] === 'boolean' ? (pa[k] as boolean) : PARTNER_APP_DEFAULTS[k];
+  }
+  return {
+    visibilityInvoiceModule: !!features.visibilityInvoiceModule,
+    kycApprovalFlow: !!features.kycApprovalFlow,
+    campaignEnrollmentForm: !!features.campaignEnrollmentForm,
+    salesTeamApp: !!features.salesTeamApp,
+    walletModule: !!features.walletModule,
+    referralModule: !!features.referralModule,
+    selfEnrollmentAllowed: !!features.selfEnrollmentAllowed,
+    nonKycOutletCampaigns: !!features.nonKycOutletCampaigns,
+    multiLevelApproval: !!features.multiLevelApproval,
+    rbacEnforcement: !!features.rbacEnforcement,
+    hubbleVoucherEnabled: !!features.hubbleVoucherEnabled,
+    rlpBscView: !!features.rlpBscView,
+    catalogueMrpSlash: !!features.catalogueMrpSlash,
+    partnerDashboardV2: !!features.partnerDashboardV2,
+    captureBankAtRedemption: !!features.captureBankAtRedemption,
+    offerTiles: !!features.offerTiles,
+    salesImport: !!features.salesImport,
+    // Runtime BEHAVIOUR flags (not console modules) — edited in the console's
+    // "Behaviour flags" section through this same PATCH features path.
+    outletMasterGeo: !!features.outletMasterGeo,
+    soDeclarationKyc: !!features.soDeclarationKyc,
+    partnerApp,
+  };
+}
+
+/**
+ * Validate an incoming PATCH `features.partnerApp` (when present): a plain object whose keys are
+ * the five known tab keys and whose values are booleans. Anything else is a 400 — the block is
+ * read by the partner shell, so a typo'd key or a string "false" must never be persisted.
+ */
+function assertValidPartnerApp(incoming: unknown): void {
+  if (incoming === undefined) return;
+  if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) {
+    throw new BadRequestException('features.partnerApp must be an object.');
+  }
+  for (const [k, v] of Object.entries(incoming as Record<string, unknown>)) {
+    if (!(PARTNER_APP_KEYS as readonly string[]).includes(k)) {
+      throw new BadRequestException(`features.partnerApp.${k} is not a known partner-app setting.`);
+    }
+    if (typeof v !== 'boolean') {
+      throw new BadRequestException(`features.partnerApp.${k} must be true or false.`);
+    }
+  }
+}
+
 /**
  * The module-level feature keys counted as "modules on" in the operator
  * console (mirrors the FE clients-list `features` projection). partnerClasses
@@ -494,6 +576,7 @@ export class GifsyService {
    */
   async createClient(user: JwtPayload, dto: CreateClientDto) {
     this.assertGifsy(user);
+    assertValidPartnerApp((dto.features as Record<string, unknown> | undefined)?.partnerApp);
 
     // Reserved slugs: `gifsy` is the PLATFORM sentinel — a tenant with that slug would
     // give its CLIENT_ADMIN a `clientId==='gifsy'`, satisfying the platform-context gate
@@ -597,28 +680,10 @@ export class GifsyService {
       supportPhone: branding.supportPhone,
       invoicePrefix: branding.invoicePrefix,
       productBrands: branding.productBrands,
-      // Full, coerced console feature set — mirrors getClientDetail so the operator
-      // console shows the same flags a reload would. A partial projection silently
+      // Full, coerced console feature set (shared helper — identical to getClientDetail) so the
+      // operator console shows the same flags a reload would. A partial projection silently
       // reverts the un-echoed switches (incl. the Hubble money-path flag) until reload.
-      features: {
-        visibilityInvoiceModule: !!features.visibilityInvoiceModule,
-        kycApprovalFlow: !!features.kycApprovalFlow,
-        campaignEnrollmentForm: !!features.campaignEnrollmentForm,
-        salesTeamApp: !!features.salesTeamApp,
-        walletModule: !!features.walletModule,
-        referralModule: !!features.referralModule,
-        selfEnrollmentAllowed: !!features.selfEnrollmentAllowed,
-        nonKycOutletCampaigns: !!features.nonKycOutletCampaigns,
-        multiLevelApproval: !!features.multiLevelApproval,
-        rbacEnforcement: !!features.rbacEnforcement,
-        hubbleVoucherEnabled: !!features.hubbleVoucherEnabled,
-        rlpBscView: !!features.rlpBscView,
-        catalogueMrpSlash: !!features.catalogueMrpSlash,
-        partnerDashboardV2: !!features.partnerDashboardV2,
-        captureBankAtRedemption: !!features.captureBankAtRedemption,
-        offerTiles: !!features.offerTiles,
-        salesImport: !!features.salesImport,
-      },
+      features: consoleFeatures(features),
     };
   }
 
@@ -673,6 +738,7 @@ export class GifsyService {
     if (dto.features !== undefined) {
       const existingFeatures = (existing.features ?? {}) as Record<string, unknown>;
       const incoming = dto.features as Record<string, unknown>;
+      assertValidPartnerApp(incoming.partnerApp);
       const features: Record<string, unknown> = { ...existingFeatures, ...incoming };
       const incomingPartnerApp = incoming.partnerApp;
       if (
@@ -744,28 +810,10 @@ export class GifsyService {
       supportPhone: branding.supportPhone,
       invoicePrefix: branding.invoicePrefix,
       productBrands: branding.productBrands,
-      // Full, coerced console feature set — mirrors getClientDetail so the operator
-      // console shows the same flags a reload would. A partial projection silently
+      // Full, coerced console feature set (shared helper — identical to getClientDetail) so the
+      // operator console shows the same flags a reload would. A partial projection silently
       // reverts the un-echoed switches (incl. the Hubble money-path flag) until reload.
-      features: {
-        visibilityInvoiceModule: !!features.visibilityInvoiceModule,
-        kycApprovalFlow: !!features.kycApprovalFlow,
-        campaignEnrollmentForm: !!features.campaignEnrollmentForm,
-        salesTeamApp: !!features.salesTeamApp,
-        walletModule: !!features.walletModule,
-        referralModule: !!features.referralModule,
-        selfEnrollmentAllowed: !!features.selfEnrollmentAllowed,
-        nonKycOutletCampaigns: !!features.nonKycOutletCampaigns,
-        multiLevelApproval: !!features.multiLevelApproval,
-        rbacEnforcement: !!features.rbacEnforcement,
-        hubbleVoucherEnabled: !!features.hubbleVoucherEnabled,
-        rlpBscView: !!features.rlpBscView,
-        catalogueMrpSlash: !!features.catalogueMrpSlash,
-        partnerDashboardV2: !!features.partnerDashboardV2,
-        captureBankAtRedemption: !!features.captureBankAtRedemption,
-        offerTiles: !!features.offerTiles,
-        salesImport: !!features.salesImport,
-      },
+      features: consoleFeatures(features),
     };
   }
 
@@ -960,7 +1008,6 @@ export class GifsyService {
 
     const branding = (c.branding ?? {}) as Record<string, unknown>;
     const features = (c.features ?? {}) as Record<string, unknown>;
-    const partnerApp = (features.partnerApp ?? {}) as Record<string, unknown>;
     const approvalHierarchy = (c.approvalHierarchy ?? {}) as Record<
       string,
       unknown
@@ -1001,32 +1048,7 @@ export class GifsyService {
         productBrands: (branding.productBrands as string[]) ?? [],
       },
 
-      features: {
-        visibilityInvoiceModule: !!features.visibilityInvoiceModule,
-        kycApprovalFlow: !!features.kycApprovalFlow,
-        campaignEnrollmentForm: !!features.campaignEnrollmentForm,
-        salesTeamApp: !!features.salesTeamApp,
-        walletModule: !!features.walletModule,
-        referralModule: !!features.referralModule,
-        selfEnrollmentAllowed: !!features.selfEnrollmentAllowed,
-        nonKycOutletCampaigns: !!features.nonKycOutletCampaigns,
-        multiLevelApproval: !!features.multiLevelApproval,
-        rbacEnforcement: !!features.rbacEnforcement,
-        hubbleVoucherEnabled: !!features.hubbleVoucherEnabled,
-        rlpBscView: !!features.rlpBscView,
-        catalogueMrpSlash: !!features.catalogueMrpSlash,
-        partnerDashboardV2: !!features.partnerDashboardV2,
-        captureBankAtRedemption: !!features.captureBankAtRedemption,
-        offerTiles: !!features.offerTiles,
-        salesImport: !!features.salesImport,
-        partnerApp: {
-          showSchemes: partnerApp.showSchemes !== false,
-          showInvoices: !!partnerApp.showInvoices,
-          showWallet: !!partnerApp.showWallet,
-          showTeam: partnerApp.showTeam !== false,
-          showLeaderboard: !!partnerApp.showLeaderboard,
-        },
-      },
+      features: consoleFeatures(features),
 
       // partnerClasses is no longer a first-class persisted concept (the column
       // was dropped in S2). If a tenant's features blob still carries a legacy
