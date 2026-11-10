@@ -76,6 +76,23 @@ resource "google_project_iam_member" "api_sa_storage_object_admin" {
   member  = "serviceAccount:${google_service_account.api_sa.email}"
 }
 
+# Sales Import worker (plan SALES-IMPORT-PIPELINE-PLAN.md §14 / §10a.5): the API starts executions of the
+# Cloud Run JOB gifsy-sales-import-staging via `POST …/jobs/{job}:run` with NO overrides
+# (api/src/sales-import/ingest/sales-import-runner.service.ts), so roles/run.jobsExecutor is enough
+# (run.jobs.run). Bound on the single JOB, not the project, so the API SA cannot start the migrate/seed jobs.
+# ⚠️ The job itself is created/updated by .github/workflows/deploy-staging.yml (not terraform, like
+# gifsy-migrate-staging) — apply this ONLY after the first workflow deploy has created the job, e.g.
+#   terraform apply -var-file=environments/gifsy.tfvars -target=google_cloud_run_v2_job_iam_member.api_sa_sales_import_staging_executor
+# Equivalent one-off gcloud command (non-authoritative member binding — both can coexist): see the
+# sales-import staging infra runbook. Prod job (gifsy-sales-import) is a separate owner decision.
+resource "google_cloud_run_v2_job_iam_member" "api_sa_sales_import_staging_executor" {
+  project  = var.project_id
+  location = var.region
+  name     = "gifsy-sales-import-staging"
+  role     = "roles/run.jobsExecutor"
+  member   = "serviceAccount:${google_service_account.api_sa.email}"
+}
+
 # ── Frontend Cloud Run service account ───────────────────────────────────────
 
 resource "google_service_account" "frontend_sa" {
