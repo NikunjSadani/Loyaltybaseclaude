@@ -11,7 +11,7 @@ import {
 } from '../sales-import.contract';
 import { partKey } from './parts-file';
 import { sheetjsWorkbook } from './test-fixtures.testspec';
-import { SalesImportRetentionService } from './sales-import-retention.service';
+import { PURGE_STEP_MS, SalesImportRetentionService } from './sales-import-retention.service';
 import { SalesImportUploadService } from './sales-import-upload.service';
 
 const USER = { sub: 'u1', role: 'CLIENT_ADMIN', clientId: 't1', phone: '', name: 'Admin' };
@@ -458,6 +458,26 @@ describe('SalesImportUploadService — read', () => {
     Object.assign(h.rows.get(fresh)!, { status: 'READY', finishedAt: new Date() });
     await h.svc.list(USER, {});
     expect(h.rows.get(fresh)!.purgedAt).toBeNull();
+  });
+
+  it('re-check M2: with a deadline, the sweep starts no purge whose worst case (lock wait + tx + GCS) could pass it', async () => {
+    const h = harness();
+    const ids: string[] = [];
+    for (const name of ['a.csv', 'b.csv']) ids.push((await h.svc.createUpload(USER, { filename: name, sizeBytes: 1 })).importId);
+    for (const id of ids) Object.assign(h.rows.get(id)!, { status: 'FAILED', finishedAt: new Date(Date.now() - 40 * 86_400_000) });
+    let clock = 0;
+    h.retention.clock = () => clock;
+    // window too short for even one purge → nothing purged, history purge skipped too unless a small step fits
+    await expect(h.retention.sweep({ clientId: 't1', deadline: PURGE_STEP_MS - 1 })).resolves.toEqual({ abandoned: 0, purged: 0 });
+    expect(ids.every((id) => !h.rows.get(id)!.purgedAt)).toBe(true);
+    // room for exactly one: each purge "takes" 60 s → the second would start at 60 s and could end after the deadline
+    const realPurge = h.retention.purgeImport.bind(h.retention);
+    h.retention.purgeImport = async (...a: Parameters<typeof realPurge>) => { clock += 60_000; return realPurge(...a); };
+    clock = 0;
+    await expect(h.retention.sweep({ clientId: 't1', deadline: PURGE_STEP_MS + 30_000 })).resolves.toEqual({ abandoned: 0, purged: 1 });
+    expect(PURGE_STEP_MS).toBe(145_000); // 120 s tx + 10 s lock wait + 15 s GCS
+    // no deadline (list route / worker): unchanged
+    await expect(h.retention.sweep({ clientId: 't1' })).resolves.toEqual({ abandoned: 0, purged: 1 });
   });
 
   it('S5: retention skips a row another transaction holds (busy) and retries on the next sweep', async () => {

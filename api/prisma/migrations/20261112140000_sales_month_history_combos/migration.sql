@@ -38,5 +38,6 @@ SELECT h."clientId", h."month", h."dims", h."dimKey", md5(h."dimKey"),
 -- The set header records which set its summary was built from (re-check L1: staleness is a header-row comparison, never
 -- a scan of the summary rows). Every stored month was just summarised from its own lines, so stamp it with itself.
 ALTER TABLE "sales_month_history_sets" ADD COLUMN "combosSourceImportId" TEXT,
-                                       ADD COLUMN "combosAppliedAt" TIMESTAMP(3);
+                                       ADD COLUMN "combosAppliedAt" TIMESTAMP(3),
+                                       ADD COLUMN "combosRefreshFailedAt" TIMESTAMP(3);
 UPDATE "sales_month_history_sets" SET "combosSourceImportId" = "sourceImportId", "combosAppliedAt" = "appliedAt";

@@ -1,8 +1,11 @@
 import type { Prisma } from '@prisma/client';
 import { lockSalesMonth } from '../../common/sales-kpi-ownership';
 import {
+  COMBOS_REFRESH_FAILED_COOLDOWN_MINUTES,
   COMBOS_REFRESH_HTTP_LIMITS,
+  COMBOS_REFRESH_MAX_WAIT_MS,
   COMBOS_REFRESH_WORKER_LIMITS,
+  refreshBudgetMs,
   classifyMonthSummaries,
   insertMonthCombosSql,
   refreshStaleMonthCombos,
@@ -39,18 +42,22 @@ describe('insertMonthCombosSql', () => {
   });
 });
 
-describe('refresh limits (re-check M1 / L2)', () => {
-  it('statements stay at 25 s (below the 30 s close / reopen and 60 s upload waiters on the month lock)', () => {
-    expect(COMBOS_REFRESH_WORKER_LIMITS.statementTimeoutMs).toBe(25_000);
-    expect(COMBOS_REFRESH_HTTP_LIMITS.statementTimeoutMs).toBe(25_000);
+describe('refresh limits', () => {
+  it('worker: apply-scale bounds so any month can be rebuilt (240 s statements, 280 s per month, ≤ 3 months, no size cap)', () => {
+    expect(COMBOS_REFRESH_WORKER_LIMITS).toEqual({ limit: 3, budgetMs: 600_000, statementTimeoutMs: 240_000, txTimeoutMs: 280_000, maxLineRows: null });
+    // a started month ends inside the job's 3600 s task timeout even when it starts at the end of the budget
+    expect(COMBOS_REFRESH_WORKER_LIMITS.budgetMs + COMBOS_REFRESH_WORKER_LIMITS.txTimeoutMs + COMBOS_REFRESH_MAX_WAIT_MS).toBeLessThan(3_600_000);
   });
 
-  it('the HTTP path (Cloud Scheduler drain) ends well inside the 170 s attempt deadline even in the worst case', () => {
-    const { limit, budgetMs, txTimeoutMs } = COMBOS_REFRESH_HTTP_LIMITS;
-    expect(limit).toBeLessThanOrEqual(2);
-    // the last month can start just before the budget ends and then run to its tx bound (+ maxWait 5 s)
-    const worstMs = Math.min(budgetMs + txTimeoutMs + 5_000, limit * (txTimeoutMs + 5_000));
-    expect(worstMs).toBeLessThanOrEqual(80_000); // leaves ~90 s for the retention sweep under a 170 s deadline
+  it('HTTP: small months only, 25 s statements (below the 30 s close / reopen + 60 s upload waiters), 30 s per month', () => {
+    expect(COMBOS_REFRESH_HTTP_LIMITS).toMatchObject({ limit: 2, statementTimeoutMs: 25_000, txTimeoutMs: 30_000, maxLineRows: 150_000 });
+  });
+
+  it('refreshBudgetMs: a month started at the budget end still finishes (pool wait + tx) by the deadline; never negative', () => {
+    const L = COMBOS_REFRESH_HTTP_LIMITS;
+    expect(refreshBudgetMs(150_000, 10_000, L)).toBe(150_000 - 10_000 - L.txTimeoutMs - COMBOS_REFRESH_MAX_WAIT_MS);
+    expect(refreshBudgetMs(150_000, 10_000, L) + 10_000 + L.txTimeoutMs + COMBOS_REFRESH_MAX_WAIT_MS).toBe(150_000);
+    expect(refreshBudgetMs(150_000, 140_000, L)).toBe(0);
   });
 });
 
@@ -61,7 +68,7 @@ describe('refreshStaleMonthCombos (background repair; never on a request)', () =
     expect(tx.$executeRaw.mock.calls[0][0].values[0]).toBe(salesMonthLockKey('t1', '2026-10'));
   });
 
-  const LIMITS: CombosRefreshLimits = { limit: 5, budgetMs: 60_000, statementTimeoutMs: 25_000, txTimeoutMs: 30_000 };
+  const LIMITS: CombosRefreshLimits = { limit: 5, budgetMs: 60_000, statementTimeoutMs: 25_000, txTimeoutMs: 30_000, maxLineRows: null };
 
   function make(opts: { candidates?: Array<{ clientId: string; month: string }>; locked?: string[]; fresh?: string[]; fail?: string[] } = {}) {
     const candidates = opts.candidates ?? [{ clientId: 't1', month: '2026-10' }, { clientId: 't2', month: '2026-09' }];
@@ -88,6 +95,7 @@ describe('refreshStaleMonthCombos (background repair; never on a request)', () =
     let i = 0;
     const db = {
       $queryRaw: jest.fn(async (_q: Prisma.Sql) => candidates),
+      $executeRaw: jest.fn(async (q: Prisma.Sql) => { events.push(`fail-stamp:${String(q.values[1])}`); return 1; }),
       $transaction: jest.fn(async (fn: (t: typeof tx) => Promise<unknown>, _o?: unknown) => {
         current = candidates[i++].month;
         return fn(tx);
@@ -106,6 +114,13 @@ describe('refreshStaleMonthCombos (background repair; never on a request)', () =
     expect(list.sql).toMatch(/s\."combosSourceImportId" IS DISTINCT FROM s\."sourceImportId" OR s\."combosAppliedAt" IS DISTINCT FROM s\."appliedAt"/);
     expect(list.sql).not.toMatch(/sales_month_history_combos/);
     expect(list.values).toContain(LIMITS.limit);
+    // re-check M1: never-failed months first; a month that failed within the cool-down is skipped
+    expect(list.sql.replace(/\s+/g, ' ')).toContain(
+      `(s."combosRefreshFailedAt" IS NULL OR s."combosRefreshFailedAt" < (now() AT TIME ZONE 'UTC') - make_interval(mins => ?::int))`,
+    );
+    expect(list.values).toContain(COMBOS_REFRESH_FAILED_COOLDOWN_MINUTES);
+    expect(list.sql).toMatch(/ORDER BY s."combosRefreshFailedAt" ASC NULLS FIRST, s."appliedAt" DESC/);
+    expect(list.sql).not.toMatch(/"lineRows" <=/); // no size cap with maxLineRows null (the worker)
     expect(events.filter((e) => e.startsWith('2026-10:'))).toEqual([
       '2026-10:SET LOCAL statement_timeout = 25000',
       `2026-10:trylock:${salesMonthLockKey('t1', '2026-10')}`,
@@ -113,6 +128,7 @@ describe('refreshStaleMonthCombos (background repair; never on a request)', () =
     ]);
     const stamp = writes.find((w) => /^\s*UPDATE "sales_month_history_sets"/.test(w.sql))!;
     expect(stamp.sql).toMatch(/SET "combosSourceImportId" = \?, "combosAppliedAt" = /);
+    expect(stamp.sql).toMatch(/"combosRefreshFailedAt" = NULL/); // a successful rebuild clears the failure mark
     expect(stamp.sql).toMatch(/AND "sourceImportId" = \? AND "appliedAt" = /); // guarded by the set it rebuilt from
     expect(stamp.values).toEqual(['imp-2026-10', AT.toISOString(), 't1', '2026-10', 'imp-2026-10', AT.toISOString()]);
     expect(db.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: LIMITS.txTimeoutMs, maxWait: 5_000 });
@@ -125,11 +141,24 @@ describe('refreshStaleMonthCombos (background repair; never on a request)', () =
     expect(events.some((e) => /delete|insert|stamp/.test(e))).toBe(false);
   });
 
-  it('a failing month is logged and counted; the others still run; never throws', async () => {
-    const { db, log } = make({ fail: ['2026-10'] });
+  it('the HTTP path leaves months above maxLineRows to the worker', async () => {
+    const { db, log } = make();
+    await refreshStaleMonthCombos(db as never, log, { ...LIMITS, maxLineRows: 150_000 });
+    const list = db.$queryRaw.mock.calls[0][0];
+    expect(list.sql).toContain('AND s."lineRows" <= ?');
+    expect(list.values).toContain(150_000);
+  });
+
+  it('a failing month is logged, counted and rotated to the back (combosRefreshFailedAt); the others still run; never throws', async () => {
+    const { db, log, events } = make({ fail: ['2026-10'] });
     const r = await refreshStaleMonthCombos(db as never, log, LIMITS);
     expect(r).toMatchObject({ failed: 1, rebuilt: 1 });
     expect(log.warn).toHaveBeenCalledWith(expect.stringMatching(/2026-10 failed/));
+    expect(events).toContain('fail-stamp:2026-10');
+    const stampSql = db.$executeRaw.mock.calls[0][0];
+    expect(stampSql.sql).toContain('UPDATE "sales_month_history_sets" SET "combosRefreshFailedAt" = (now() AT TIME ZONE \x27UTC\x27)');
+    db.$executeRaw.mockRejectedValueOnce(new Error('db down'));
+    await expect(refreshStaleMonthCombos(make({ fail: ['2026-10'] }).db as never, log, LIMITS)).resolves.toMatchObject({ failed: 1 });
     db.$queryRaw.mockRejectedValueOnce(new Error('db down'));
     await expect(refreshStaleMonthCombos(db as never, log, LIMITS)).resolves.toMatchObject({ found: 0 });
   });

@@ -42,9 +42,19 @@ export interface PurgeOptions {
  * Each purge holds `FOR UPDATE NOWAIT` on the import row, so it never races an apply / the worker's final write
  * (a busy row is simply retried by the next sweep).
  */
+/** One purge's worst case: row-lock wait + its transaction bound + the GCS prefix delete after it (re-check M2). */
+export const PURGE_TX_TIMEOUT_MS = 120_000;
+export const PURGE_MAX_WAIT_MS = 10_000;
+export const PURGE_FILES_ALLOWANCE_MS = 15_000;
+export const PURGE_STEP_MS = PURGE_TX_TIMEOUT_MS + PURGE_MAX_WAIT_MS + PURGE_FILES_ALLOWANCE_MS;
+/** A GCS-only step (retrying a failed file delete) or the 10-year history delete. */
+export const SWEEP_SMALL_STEP_MS = 15_000;
+
 @Injectable()
 export class SalesImportRetentionService {
   private readonly logger = new Logger(SalesImportRetentionService.name);
+  /** Wall clock (epoch ms); a seam for the deadline tests. */
+  clock: () => number = () => Date.now();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -81,7 +91,7 @@ export class SalesImportRetentionService {
           if (opts.onPurged) await opts.onPurged(tx, row);
           return 'purged';
         },
-        { timeout: 120_000, maxWait: 10_000 },
+        { timeout: PURGE_TX_TIMEOUT_MS, maxWait: PURGE_MAX_WAIT_MS },
       );
       if (outcome === 'purged') await this.deleteFiles(id, clientId);
       return outcome;
@@ -135,12 +145,17 @@ export class SalesImportRetentionService {
     return refreshStaleMonthCombos(this.prisma as never, this.logger, limits, opts);
   }
 
-  /** One bounded sweep (never throws: retention must not break the list call or the worker). */
-  async sweep(opts: { clientId?: string; limit?: number; now?: Date } = {}): Promise<{ abandoned: number; purged: number }> {
+  /**
+   * One bounded sweep (never throws: retention must not break the list call or the worker). `deadline` (epoch ms; the
+   * Cloud Scheduler drain passes start + 150 s): no step is STARTED unless its worst case still ends by the deadline
+   * (re-check M2) — the rest waits for the next sweep.
+   */
+  async sweep(opts: { clientId?: string; limit?: number; now?: Date; deadline?: number } = {}): Promise<{ abandoned: number; purged: number }> {
     const now = opts.now ?? new Date();
     const limit = opts.limit ?? 5;
     const tenant = opts.clientId ? { clientId: opts.clientId } : {};
     const out = { abandoned: 0, purged: 0 };
+    const fits = (stepMs: number) => opts.deadline === undefined || this.clock() + stepMs <= opts.deadline;
     try {
       // Retry file deletions that failed after an earlier purge was marked.
       const pendingFiles = await this.prisma.salesImport.findMany({
@@ -148,7 +163,10 @@ export class SalesImportRetentionService {
         select: { id: true, clientId: true },
         take: limit,
       });
-      for (const p of pendingFiles) await this.deleteFiles(p.id, p.clientId);
+      for (const p of pendingFiles) {
+        if (!fits(SWEEP_SMALL_STEP_MS)) break;
+        await this.deleteFiles(p.id, p.clientId);
+      }
       const abandonedBefore = new Date(now.getTime() - SALES_IMPORT_ABANDONED_UPLOAD_HOURS * 3_600_000);
       const abandoned = await this.prisma.salesImport.findMany({
         where: { ...tenant, status: 'UPLOADING', createdAt: { lt: abandonedBefore } },
@@ -157,6 +175,7 @@ export class SalesImportRetentionService {
         take: limit,
       });
       for (const a of abandoned) {
+        if (!fits(PURGE_STEP_MS)) break;
         const r = await this.purgeImport(a.id, a.clientId, {
           cancel: true,
           check: (row) => (row.status === 'UPLOADING' ? null : 'no longer uploading'),
@@ -171,6 +190,7 @@ export class SalesImportRetentionService {
         take: limit,
       });
       for (const e of expired) {
+        if (!fits(PURGE_STEP_MS)) break;
         const r = await this.purgeImport(e.id, e.clientId, {
           check: (row) =>
             RETENTION_STATUSES.includes(row.status) && !row.purgedAt && !!row.finishedAt && row.finishedAt < expiredBefore
@@ -183,7 +203,7 @@ export class SalesImportRetentionService {
       this.logger.warn(`sales-import retention sweep failed: ${(e as Error).message}`);
     }
     // 10-year month history (cheap indexed delete; usually nothing).
-    await this.purgeOldHistory({ clientId: opts.clientId });
+    if (fits(SWEEP_SMALL_STEP_MS)) await this.purgeOldHistory({ clientId: opts.clientId });
     return out;
   }
 }

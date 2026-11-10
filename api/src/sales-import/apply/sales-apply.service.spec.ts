@@ -453,7 +453,7 @@ describe('month history', () => {
     expect(ins[0].values).toEqual(['imp1', header.create.appliedAt.toISOString(), 't1', PREV]);
     expect(header.create.sourceImportId).toBe('imp1');
     // re-check L1: the header is stamped with the summary's set in the same tx
-    expect(header.create).toEqual(expect.objectContaining({ combosSourceImportId: 'imp1', combosAppliedAt: header.create.appliedAt }));
+    expect(header.create).toEqual(expect.objectContaining({ combosSourceImportId: 'imp1', combosAppliedAt: header.create.appliedAt, combosRefreshFailedAt: null }));
     expect(db.log.indexOf('history.insert')).toBeLessThan(db.log.indexOf('combos.delete'));
     expect(db.log.indexOf('combos.insert')).toBeLessThan(db.log.indexOf('apply.create'));
     expect(db.$transaction).toHaveBeenCalledTimes(1);

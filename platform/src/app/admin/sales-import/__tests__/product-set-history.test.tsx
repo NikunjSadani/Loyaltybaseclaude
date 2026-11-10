@@ -15,7 +15,7 @@ const apiMock = vi.hoisted(() => ({ testKpi: vi.fn(), createKpi: vi.fn(), patchK
 vi.mock('@/lib/sales-import/api', () => ({ salesImportApi: apiMock }));
 
 import { KpiEditor } from '../settings/_components/kpi-editor';
-import { HISTORY_REFRESH_POLL_MS } from '../settings/_components/product-set-builder';
+import { HISTORY_REFRESH_POLL_MS, HISTORY_SELECT_DEBOUNCE_MS } from '../settings/_components/product-set-builder';
 
 const MAPPING: SalesColumnMapping = {
   sheetName: null, headerRow: 'auto', outletCode: 'CUST', outletName: null, invoiceDate: 'DATE', amount: 'AMT',
@@ -192,6 +192,29 @@ describe('product set builder — stored month history source', () => {
       const calls = apiMock.historyCombos.mock.calls.length;
       await act(async () => { vi.advanceTimersByTime(HISTORY_REFRESH_POLL_MS * 3); });
       expect(apiMock.historyCombos).toHaveBeenCalledTimes(calls);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('L3: the quiet poll is armed for ITS selection only — a different selection\'s failing first load shows the error', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, refreshingMonths: ['2026-10'] }));
+      renderEditor();
+      await useStored();
+      await screen.findByTestId('product-set-refreshing');
+      // The poll for "most recent" fires (arming a quiet reload) in the SAME batch as the user switching to another
+      // selection: the effect then runs once, for the new selection — its first load must NOT be quiet.
+      apiMock.historyCombos.mockResolvedValue({ success: false, error: 'boom', status: 500 });
+      const sel = screen.getByRole('combobox', { name: 'Stored months to pick from' });
+      act(() => {
+        vi.advanceTimersByTime(HISTORY_REFRESH_POLL_MS);
+        fireEvent.change(sel, { target: { value: 'last:3' } });
+      });
+      await act(async () => { vi.advanceTimersByTime(HISTORY_SELECT_DEBOUNCE_MS + 10); });
+      expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load the stored months: boom");
+      expect(apiMock.historyCombos).toHaveBeenLastCalledWith({ lastMonths: 3 }, expect.any(AbortSignal));
     } finally {
       vi.useRealTimers();
     }

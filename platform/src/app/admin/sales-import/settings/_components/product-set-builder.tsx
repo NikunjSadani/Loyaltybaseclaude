@@ -86,14 +86,17 @@ function useHistoryCombos(active: boolean, sel: string) {
   const [availableMonths, setAvailableMonths] = useState<string[]>([]);
   /** The month choice last sent; a CHANGE of choice is debounced (first load / Retry / re-activation are not). */
   const lastSent = useRef<string | null>(null);
-  /** The next reload is the background poll: a failure keeps the list on screen instead of an error. */
-  const silent = useRef(false);
+  /**
+   * The selection the background poll was armed for (re-check L3): only ITS reload is quiet (a failure keeps the list
+   * on screen); a different selection's first load is never quiet.
+   */
+  const silentFor = useRef<string | null>(null);
   useEffect(() => {
     if (!active) return;
     // Audit M1: a superseded request is aborted (and its late answer ignored); quick changes of the select are debounced.
     const ctrl = new AbortController();
-    const quiet = silent.current;
-    silent.current = false;
+    const quiet = silentFor.current === sel;
+    silentFor.current = null;
     const fail = (error: string) => {
       // A failed background poll keeps the list it already shows (same selection); anything else shows the error.
       if (!quiet) setRes({ key, sel, data: null, error });
@@ -129,11 +132,11 @@ function useHistoryCombos(active: boolean, sel: string) {
   useEffect(() => {
     if (!refreshing) return;
     const t = setTimeout(() => {
-      silent.current = true;
+      silentFor.current = sel;
       setTick((n) => n + 1);
     }, HISTORY_REFRESH_POLL_MS);
     return () => clearTimeout(t);
-  }, [refreshing, key]);
+  }, [refreshing, key, sel]);
   return {
     loading: active && current === null,
     reloading: active && current !== null && res?.key !== key,
@@ -141,7 +144,7 @@ function useHistoryCombos(active: boolean, sel: string) {
     error: current?.error ?? null,
     availableMonths,
     retry: () => {
-      silent.current = false;
+      silentFor.current = null;
       setTick((t) => t + 1);
     },
   };

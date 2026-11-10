@@ -4,8 +4,8 @@ import { GUARDS_METADATA, INTERCEPTORS_METADATA, METHOD_METADATA, PATH_METADATA 
 import { PERMISSION_KEY } from '../common/decorators/require-permission.decorator';
 import { SalesImportController } from './sales-import.controller';
 import { SalesImportPartGuard } from './sales-import-access';
-import { SalesImportDrainController } from './sales-import-drain.controller';
-import { COMBOS_REFRESH_HTTP_LIMITS } from './kpi/month-combos';
+import { DRAIN_DEADLINE_MS, SalesImportDrainController } from './sales-import-drain.controller';
+import { COMBOS_REFRESH_HTTP_LIMITS, COMBOS_REFRESH_MAX_WAIT_MS, refreshBudgetMs } from './kpi/month-combos';
 
 const ADMIN = { sub: 'u1', role: 'CLIENT_ADMIN', clientId: 't1', phone: '', name: 'A' };
 const UNASSUMED_GIFSY = { sub: 'g1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: 'G' };
@@ -136,6 +136,34 @@ describe('SalesImportDrainController', () => {
     return { ctrl: new SalesImportDrainController(runner as never, prisma as never, retention as never), runner, retention };
   };
 
+  it('M2: one request deadline (start + 150 s) bounds BOTH the sweep and the refresh; worst case stays under the 170 s attempt deadline', async () => {
+    process.env.SALES_IMPORT_DRAIN_SECRET = 's3cret';
+    let clock = 1_000_000;
+    const spy = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    try {
+      // a sweep that used 100 s of the window: the refresh may only START months that still end by the deadline
+      const a = make(0, 'job');
+      a.retention.sweep.mockImplementation(async () => { clock += 100_000; return { abandoned: 0, purged: 0 }; });
+      await a.ctrl.drain('s3cret');
+      expect(a.retention.sweep).toHaveBeenCalledWith({ limit: 50, deadline: 1_000_000 + DRAIN_DEADLINE_MS });
+      const budget = (a.retention.refreshHistoryCombos.mock.calls[0] as unknown as [{ budgetMs: number }])[0].budgetMs;
+      expect(budget).toBe(refreshBudgetMs(1_000_000 + DRAIN_DEADLINE_MS, 1_100_000, COMBOS_REFRESH_HTTP_LIMITS));
+      // worst case: the last month starts at the very end of that budget and runs to its pool wait + tx bound
+      const refreshEnd = 1_100_000 + budget + COMBOS_REFRESH_MAX_WAIT_MS + COMBOS_REFRESH_HTTP_LIMITS.txTimeoutMs;
+      expect(refreshEnd - 1_000_000).toBeLessThanOrEqual(DRAIN_DEADLINE_MS);
+      expect(DRAIN_DEADLINE_MS + 15_000).toBeLessThanOrEqual(170_000); // + the few un-timeboxed small statements
+
+      // a sweep that used the whole window: the refresh starts nothing
+      clock = 2_000_000;
+      const b = make(0, 'job');
+      b.retention.sweep.mockImplementation(async () => { clock += DRAIN_DEADLINE_MS; return { abandoned: 0, purged: 0 }; });
+      await b.ctrl.drain('s3cret');
+      expect((b.retention.refreshHistoryCombos.mock.calls[0] as unknown as [{ budgetMs: number }])[0].budgetMs).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('fail-closed: no configured secret → 403 even with a header', async () => {
     delete process.env.SALES_IMPORT_DRAIN_SECRET;
     await expect(make(1, 'job').ctrl.drain('anything')).rejects.toBeInstanceOf(ForbiddenException);
@@ -155,8 +183,8 @@ describe('SalesImportDrainController', () => {
     await expect(idle.ctrl.drain('s3cret')).resolves.toEqual({ kicked: false });
     expect(idle.runner.kick).not.toHaveBeenCalled();
     expect(idle.retention.sweep).toHaveBeenCalled(); // S5: an idle drain still runs the retention sweep
-    // §10c: and repairs stale combos summaries with the small HTTP-path limits (inside the scheduler's deadline)
-    expect(idle.retention.refreshHistoryCombos).toHaveBeenCalledWith(COMBOS_REFRESH_HTTP_LIMITS);
+    // §10c: and repairs stale combos summaries with the HTTP-path limits (inside the scheduler's deadline)
+    expect(idle.retention.refreshHistoryCombos).toHaveBeenCalledWith(expect.objectContaining({ ...COMBOS_REFRESH_HTTP_LIMITS, budgetMs: expect.any(Number) }));
     const busy = make(2, 'job');
     await expect(busy.ctrl.drain('s3cret')).resolves.toEqual({ kicked: true });
     expect(busy.retention.refreshHistoryCombos).not.toHaveBeenCalled(); // the kicked worker does it

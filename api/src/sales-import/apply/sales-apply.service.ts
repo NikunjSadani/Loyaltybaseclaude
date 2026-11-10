@@ -334,6 +334,7 @@ export class SalesApplyService {
         // The combos summary written above is this set's (§10c): stamped in the same transaction.
         combosSourceImportId: w.sourceImportId,
         combosAppliedAt: now,
+        combosRefreshFailedAt: null,
       };
       await tx.salesMonthHistorySet.upsert({
         where: { clientId_month: { clientId, month } },

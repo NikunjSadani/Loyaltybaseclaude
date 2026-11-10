@@ -1,5 +1,5 @@
 import { Prisma } from '@prisma/client';
-import { sqlUtc } from '../sql-time';
+import { SQL_NOW_UTC, sqlUtc } from '../sql-time';
 
 /**
  * The per-month combos summary (plan §10c): sales_month_history_combos, one row per (tenant, month, product combo). The
@@ -60,16 +60,37 @@ export interface CombosRefreshLimits {
   statementTimeoutMs: number;
   /** Per month transaction. */
   txTimeoutMs: number;
+  /** Months whose set has more line rows than this are left to the worker (null = no cap). */
+  maxLineRows: number | null;
 }
 
-/** The job worker (no HTTP deadline): up to 12 months in ≤ 5 min; a month's tx may span several 25 s statements. */
-export const COMBOS_REFRESH_WORKER_LIMITS: CombosRefreshLimits = { limit: 12, budgetMs: 5 * 60_000, statementTimeoutMs: 25_000, txTimeoutMs: 110_000 };
+/** The pool wait allowed before a month's transaction starts (part of every worst-case bound). */
+export const COMBOS_REFRESH_MAX_WAIT_MS = 5_000;
+/** A month whose rebuild failed is skipped by every run for this long (then retried, after the never-failed ones). */
+export const COMBOS_REFRESH_FAILED_COOLDOWN_MINUTES = 60;
 /**
- * Inside an HTTP request (Cloud Scheduler drain; also the API's inline drain): at most 2 months, no new month after 45 s,
- * each month ≤ 30 s → the refresh ends within ~75 s, well inside the scheduler's attempt deadline (plan §14: 170 s)
- * together with the retention sweep. A month that does not fit is retried by the next run.
+ * The job worker (no HTTP deadline; task timeout 3600 s): apply-scale bounds so ANY month can be rebuilt — 240 s per
+ * statement (the apply's own month write allows 300 s), 280 s per month, ≤ 3 months, no new month after 10 min.
  */
-export const COMBOS_REFRESH_HTTP_LIMITS: CombosRefreshLimits = { limit: 2, budgetMs: 45_000, statementTimeoutMs: 25_000, txTimeoutMs: 30_000 };
+export const COMBOS_REFRESH_WORKER_LIMITS: CombosRefreshLimits = {
+  limit: 3, budgetMs: 10 * 60_000, statementTimeoutMs: 240_000, txTimeoutMs: 280_000, maxLineRows: null,
+};
+/**
+ * Inside an HTTP request (Cloud Scheduler drain; also the API's inline drain): at most 2 SMALL months (≤ 150k line rows
+ * — bigger ones are left to the worker), 25 s statements (below the 30 s close / reopen and 60 s target-upload waiters on
+ * the month lock), 30 s per month. The caller sets budgetMs from its request deadline (refreshBudgetMs).
+ */
+export const COMBOS_REFRESH_HTTP_LIMITS: CombosRefreshLimits = {
+  limit: 2, budgetMs: 45_000, statementTimeoutMs: 25_000, txTimeoutMs: 30_000, maxLineRows: 150_000,
+};
+
+/**
+ * "No new month after" for a caller with a hard deadline (epoch ms): a month started at the budget's end still finishes
+ * (pool wait + its tx bound) by the deadline. 0 = start nothing.
+ */
+export function refreshBudgetMs(deadline: number, nowMs: number, limits: CombosRefreshLimits): number {
+  return Math.max(0, deadline - nowMs - limits.txTimeoutMs - COMBOS_REFRESH_MAX_WAIT_MS);
+}
 
 /** The month lock key — IDENTICAL to lockSalesMonth (common/sales-kpi-ownership.ts), so apply and refresh exclude. */
 export const salesMonthLockKey = (clientId: string, month: string) => `sales-month:${clientId}:${month}`;
@@ -80,7 +101,7 @@ const STALE_HEADER = Prisma.sql`
 
 export interface CombosRefreshResult { found: number; rebuilt: number; busy: number; fresh: number; failed: number; skipped: number }
 
-type RefreshDb = Pick<Prisma.TransactionClient, '$queryRaw'> & {
+type RefreshDb = Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'> & {
   $transaction<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>, opts?: { timeout?: number; maxWait?: number }): Promise<T>;
 };
 
@@ -101,11 +122,16 @@ export async function refreshStaleMonthCombos(
   const t0 = clock();
   let candidates: Array<{ clientId: string; month: string }>;
   try {
+    // Re-check M1: never-failed months first; a month that failed within the cool-down is skipped (so one month that
+    // cannot be rebuilt never blocks the others); the HTTP path leaves big months to the worker.
     candidates = await db.$queryRaw<Array<{ clientId: string; month: string }>>(Prisma.sql`
       SELECT s."clientId" AS "clientId", s."month" AS "month"
         FROM "sales_month_history_sets" s
        WHERE ${STALE_HEADER}
-       ORDER BY s."appliedAt" DESC
+         AND (s."combosRefreshFailedAt" IS NULL
+              OR s."combosRefreshFailedAt" < ${SQL_NOW_UTC} - make_interval(mins => ${COMBOS_REFRESH_FAILED_COOLDOWN_MINUTES}::int))
+         ${limits.maxLineRows === null ? Prisma.empty : Prisma.sql`AND s."lineRows" <= ${limits.maxLineRows}`}
+       ORDER BY s."combosRefreshFailedAt" ASC NULLS FIRST, s."appliedAt" DESC
        LIMIT ${limits.limit}`);
   } catch (e) {
     log.warn(`sales-import combos refresh: could not list stale months: ${(e as Error).message}`);
@@ -136,18 +162,23 @@ export async function refreshStaleMonthCombos(
           const rows = await tx.$executeRaw(insertMonthCombosSql(clientId, month, src, at));
           await tx.$executeRaw(Prisma.sql`
             UPDATE "sales_month_history_sets"
-               SET "combosSourceImportId" = ${src}, "combosAppliedAt" = ${sqlUtc(at)}
+               SET "combosSourceImportId" = ${src}, "combosAppliedAt" = ${sqlUtc(at)}, "combosRefreshFailedAt" = NULL
              WHERE "clientId" = ${clientId} AND "month" = ${month}
                AND "sourceImportId" = ${src} AND "appliedAt" = ${sqlUtc(at)}`);
           log.log(JSON.stringify({ msg: 'sales-import combos summary rebuilt', clientId, month, rows: Number(rows) }));
           return 'rebuilt' as const;
         },
-        { timeout: limits.txTimeoutMs, maxWait: 5_000 },
+        { timeout: limits.txTimeoutMs, maxWait: COMBOS_REFRESH_MAX_WAIT_MS },
       );
       out[r]++;
     } catch (e) {
       out.failed++;
-      log.warn(`sales-import combos refresh ${clientId} ${month} failed (next run retries): ${(e as Error).message}`);
+      log.warn(`sales-import combos refresh ${clientId} ${month} failed (retried after ${COMBOS_REFRESH_FAILED_COOLDOWN_MINUTES} min): ${(e as Error).message}`);
+      // Rotate it to the back of the queue (its own statement: the failed transaction is gone).
+      await db.$executeRaw(Prisma.sql`
+        UPDATE "sales_month_history_sets" SET "combosRefreshFailedAt" = ${SQL_NOW_UTC}
+         WHERE "clientId" = ${clientId} AND "month" = ${month}`)
+        .catch((err: unknown) => log.warn(`sales-import combos refresh: could not record the failure: ${(err as Error).message}`));
     }
   }
   if (out.found > 0) log.log(JSON.stringify({ msg: 'sales-import combos refresh', ...out }));

@@ -164,6 +164,18 @@ describe('SalesHistoryCombosService', () => {
     expect(atLimit.queries[0].values).toEqual(expect.arrayContaining([[], ['2026-10']])); // at the limit: read from lines
   });
 
+  it('L1: the line fallback is capped on the SUM of line rows across the months read from lines (newest first)', async () => {
+    const missing = (month: string, lineRows: number) => set(month, ['brand'], { combosSourceImportId: null, combosAppliedAt: null, lineRows });
+    const third = Math.floor(HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS / 3);
+    // three missing months of ~1/3 of the cap each fit; a fourth one would pass it → that one (the oldest) is not read
+    const sets = [missing('2026-10', third), missing('2026-09', third), missing('2026-08', third), missing('2026-07', third)];
+    const { svc, queries } = make({ sets });
+    const r = await svc.combos('t1', { lastMonths: '4' });
+    expect(r.refreshingMonths).toEqual(['2026-07', '2026-08', '2026-09', '2026-10']);
+    expect(queries[0].values).toEqual(expect.arrayContaining([[], ['2026-08', '2026-09', '2026-10']]));
+    expect(queries[0].values).not.toEqual(expect.arrayContaining([expect.arrayContaining(['2026-07'])]));
+  });
+
   it('a set without lines and without a summary is neither read nor "refreshing"', async () => {
     const { svc, queries } = make({ sets: [set('2026-10', ['brand'], { lineRows: 0, combosSourceImportId: null, combosAppliedAt: null })] });
     const r = await svc.combos('t1', {});
@@ -205,6 +217,11 @@ describe('SalesHistoryCombosService', () => {
     await expect(timeout).rejects.toBeInstanceOf(ServiceUnavailableException);
     await expect(make({ fail: new Error('canceling statement due to statement timeout') }).svc.combos('t1', {})).rejects.toThrow(HISTORY_COMBOS_TIMEOUT_MESSAGE);
     await expect(make({ failCode: 'P2028' }).svc.combos('t1', { lastMonths: '3' })).rejects.toThrow(HISTORY_COMBOS_BUSY_MESSAGE);
+    // L2: a P2028 for a transaction that EXPIRED / was already closed is the read taking too long, not a busy pool
+    const expired = make({
+      fail: Object.assign(new Error('Transaction API error: Transaction already closed: A query cannot be executed on an expired transaction.'), { code: 'P2028' }),
+    });
+    await expect(expired.svc.combos('t1', { lastMonths: '3' })).rejects.toThrow(HISTORY_COMBOS_TIMEOUT_MESSAGE);
     await expect(make({ fail: new Error('connection reset') }).svc.combos('t1', { lastMonths: '12' })).rejects.toThrow('connection reset');
   });
 

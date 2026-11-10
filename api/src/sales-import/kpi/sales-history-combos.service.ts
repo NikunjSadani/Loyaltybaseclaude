@@ -26,9 +26,9 @@ export const HISTORY_COMBOS_STATEMENT_TIMEOUT_MS = 10_000;
 /** The read transaction's own bound (a handful of statements, each ≤ the statement timeout). */
 export const HISTORY_COMBOS_TX_TIMEOUT_MS = 45_000;
 /**
- * A month with NO summary is read from its stored lines only up to this many line rows (re-check M2): a large month
- * would not fit the statement timeout, so it is listed in `refreshingMonths` with no combos until the background
- * refresh has built its summary.
+ * Months with NO summary are read from their stored lines only while their line rows add up to at most this many
+ * (re-check M2 / L1: a cap on the SUM across the months read from lines, newest first): more would not fit the statement
+ * timeout, so the rest are listed in `refreshingMonths` with no combos until the background refresh builds them.
  */
 export const HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS = 50_000;
 /** 503 copy (re-check M2: accurate for both causes). */
@@ -72,7 +72,7 @@ function sourceRows(clientId: string, summaryMonths: string[], lineMonths: strin
  * SALES_IMPORT_MAX_DIMENSION_COMBOS by |₹| + the uncapped count) and per-key values (top SALES_IMPORT_MAX_DIMENSION_VALUES
  * by |₹|). The summary state comes from the set header's stamp. A month whose summary is from another history set (e.g.
  * written by an older revision during a deploy) is answered from that summary; a month with NO summary is answered from
- * its stored lines when it has ≤ HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS of them (else not at all); all are reported in
+ * its stored lines while those months total ≤ HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS rows (else not at all); all are in
  * `refreshingMonths`, and the background refresh (month-combos.ts refreshStaleMonthCombos) rebuilds them.
  */
 @Injectable()
@@ -126,10 +126,16 @@ export class SalesHistoryCombosService {
 
           // Summary state from the header stamp alone (re-check L1: no scan of the summary rows).
           const state = classifyMonthSummaries(chosen);
-          const lineRowsOf = new Map(chosen.map((s) => [s.month, s.lineRows]));
           const summaryMonths = months.filter((m) => state.get(m) === 'current' || state.get(m) === 'stale');
-          // Missing summary: small months are read from their lines; large ones wait for the refresh (re-check M2).
-          const lineMonths = months.filter((m) => state.get(m) === 'missing' && (lineRowsOf.get(m) ?? 0) <= HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS);
+          // Missing summary: read from the lines, newest month first, while the total stays within the cap.
+          const lineMonths: string[] = [];
+          let lineRows = 0;
+          for (const s of chosen) { // newest first
+            if (state.get(s.month) !== 'missing' || lineRows + s.lineRows > HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS) continue;
+            lineRows += s.lineRows;
+            lineMonths.push(s.month);
+          }
+          lineMonths.sort();
           const refreshingMonths = months.filter((m) => state.get(m) === 'stale' || state.get(m) === 'missing');
           if (summaryMonths.length === 0 && lineMonths.length === 0) return { ...empty, refreshingMonths };
 
@@ -180,8 +186,11 @@ export class SalesHistoryCombosService {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // A statement timeout, or no transaction could be started (P2028: pool busy / tx timeout) → the friendly 503.
+      // Re-check L2: a P2028 for a transaction that EXPIRED / was already closed is the read taking too long; a P2028
+      // that could not even START a transaction is the pool being busy.
+      const tookTooLong = /statement timeout|canceling statement|57014|expired|already closed/i.test(msg);
+      if (tookTooLong) throw new ServiceUnavailableException(HISTORY_COMBOS_TIMEOUT_MESSAGE);
       if ((e as { code?: unknown })?.code === 'P2028') throw new ServiceUnavailableException(HISTORY_COMBOS_BUSY_MESSAGE);
-      if (/statement timeout|canceling statement|57014/i.test(msg)) throw new ServiceUnavailableException(HISTORY_COMBOS_TIMEOUT_MESSAGE);
       throw e;
     }
   }

@@ -3214,6 +3214,8 @@ model SalesMonthHistorySet {
   /// transaction as the summary (apply, background rebuild). ≠ sourceImportId / appliedAt (or null) → summary stale (§10c).
   combosSourceImportId String?
   combosAppliedAt      DateTime?
+  /// Last failed background rebuild of the summary: such months go to the back of the queue and are skipped for an hour.
+  combosRefreshFailedAt DateTime?
 
   @@unique([clientId, month])
   @@map("sales_month_history_sets")
