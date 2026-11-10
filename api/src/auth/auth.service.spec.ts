@@ -3,7 +3,7 @@
 // Run: npx jest src/auth/auth.service.spec.ts
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { ForbiddenException, NotFoundException, BadRequestException, UnauthorizedException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException, BadRequestException, UnauthorizedException, Logger } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { SESSION_TTL_DAYS } from './auth.constants';
 import { PrismaService } from '../prisma/prisma.service';
@@ -265,6 +265,22 @@ describe('AuthService', () => {
       });
       // No OTP created and no SMS sent once capped.
       expect(mockPrisma.otpCode.create).not.toHaveBeenCalled();
+    });
+
+    it('AF-10: the DB-cap 429 logs its OWN distinct line ([otp-send-cap]) with a masked phone', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      try {
+        mockPrisma.otpCode.count.mockResolvedValue(5);
+        await expect(service.sendOtp('9123456789', 'SMS')).rejects.toMatchObject({ status: 429 });
+        const text = warn.mock.calls.map((c) => String(c[0])).join('\n');
+        expect(text).toContain('[otp-send-cap]');
+        expect(text).toContain('"event":"otp.send_cap"');
+        expect(text).toContain('******6789');
+        expect(text).not.toContain('9123456789');
+        expect(text).not.toContain('throttle.rejected'); // the throttler's line is a different event
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('A2: OTP code stored is exactly 6 digits', async () => {

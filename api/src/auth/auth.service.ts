@@ -198,7 +198,7 @@ export class AuthService {
     // testable on staging. Skipped only when clientId is absent (legacy/unbranded caller) → falls back to
     // the prior send-then-check-at-verify behaviour. Enumeration note: this reveals which numbers are
     // registered, an owner-accepted trade-off for the clearer UX on a closed KYC-only platform; the
-    // controller's per-IP @Throttle (5/60s) bounds probing (verifyOtp remains the authoritative gate).
+    // controller's per-phone @Throttle (5/60s) bounds probing (verifyOtp remains the authoritative gate).
     if (clientId) {
       const account = await this.prisma.user.findFirst({
         // ACTIVE-only reservation (partial unique index `users_clientId_phone_active_key`):
@@ -216,8 +216,8 @@ export class AuthService {
     }
 
     // AF-10 — per-phone send cap over a rolling window, enforced in the DB so it holds
-    // across ALL Cloud Run instances (the controller's @Throttle is per-IP AND
-    // per-instance, so multi-instance distribution bypasses it). This is the real
+    // across ALL Cloud Run instances (the controller's @Throttle is per-phone but in-memory
+    // PER-INSTANCE, so multi-instance distribution bypasses it). This is the real
     // anti-SMS-bombing control — a simple cooldown still allows sustained volume; a
     // windowed COUNT caps the total a victim's number can receive. Skipped only when the
     // fixed-OTP dev/staging bypass is active so UAT can request freely.
@@ -231,14 +231,18 @@ export class AuthService {
         where: { phone: cleanPhone, createdAt: { gte: windowStart } },
       });
       if (recentSends >= OTP_MAX_PER_WINDOW) {
-        this.logger.warn(`OTP send cap hit for ${cleanPhone} (${recentSends} in window)`);
+        // Distinct from the throttler's "throttle.rejected" line (IdentityThrottlerGuard): this is the
+        // cross-instance DB cap. Masked — never log the raw number.
+        this.logger.warn(
+          `[otp-send-cap] ${JSON.stringify({ event: 'otp.send_cap', phone: `******${cleanPhone.slice(-4)}`, recentSends, max: OTP_MAX_PER_WINDOW, windowHours: OTP_RESEND_WINDOW_HOURS })}`,
+        );
         throw new HttpException(
           'Too many OTP requests for this number. Please wait a while before trying again.',
           HttpStatus.TOO_MANY_REQUESTS,
         );
       }
       // (Small race at the window boundary can let a couple extra through under high
-      // concurrency — acceptable for an anti-abuse cap; the per-IP throttle bounds the
+      // concurrency — acceptable for an anti-abuse cap; the per-phone throttle bounds the
       // concurrent source and each send still costs an SMS.)
     }
 

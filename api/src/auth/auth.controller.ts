@@ -7,24 +7,32 @@ import { SendOtpDto, VerifyOtpDto, RefreshTokenDto, AssumeTenantDto } from './dt
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { Public, Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator'
+import { ThrottleByPhone } from '../common/guards/identity-throttler.guard';
 import type { JwtPayload } from '../common/decorators/current-user.decorator';
 
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
-  /** Step 1 — Request OTP (tightly rate-limited: 5 requests per minute per IP) */
+  /**
+   * Step 1 — Request OTP (tightly rate-limited: 5 requests per minute per PHONE). Keyed on the body
+   * phone, not the IP: logins arrive via the Next server action, so the IP is one shared value and an
+   * IP key refused unrelated users (IdentityThrottlerGuard). The DB per-phone cap in sendOtp stays the
+   * cross-instance backstop.
+   */
   @Public()
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @ThrottleByPhone()
   @Post('send-otp')
   @HttpCode(HttpStatus.OK)
   async sendOtp(@Body() dto: SendOtpDto) {
     return this.authService.sendOtp(dto.phone, dto.channel, dto.clientId);
   }
 
-  /** Step 2 — Verify OTP and receive tokens (10 attempts per minute per IP) */
+  /** Step 2 — Verify OTP and receive tokens (10 attempts per minute per PHONE — see send-otp). */
   @Public()
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @ThrottleByPhone()
   @Post('verify-otp')
   @HttpCode(HttpStatus.OK)
   async verifyOtp(@Body() dto: VerifyOtpDto) {

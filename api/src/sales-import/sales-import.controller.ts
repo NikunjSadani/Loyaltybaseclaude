@@ -74,7 +74,7 @@ export class SalesImportController {
   }
 
   /**
-   * The global throttle (60/min per route per IP) would 429 a fast 600 MB upload (150 parts); parts are
+   * The global throttle (60/min per route per user) would 429 a fast 600 MB upload (150 parts); parts are
    * small, idempotent and size-checked, so this route allows 300/min.
    * S7: SalesImportPartGuard runs the access gate (flag uncached, operator rule) and the UPLOADING check BEFORE
    * FileInterceptor buffers the body (guards always run before interceptors).
