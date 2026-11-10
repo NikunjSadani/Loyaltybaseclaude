@@ -942,7 +942,7 @@ history months (lines, set headers AND the §10c combos summary) older than 10 y
 most recent months WITH stored history (read from `sales_month_history_sets`, not calendar months). Response
 `SalesHistoryCombos` = the `SalesImportCombos` lists (`dimensionCombos` + `dimensionValues`, same caps: top 2,000 combos /
 200 values per key by |₹|) + `months`, `availableMonths` (newest first, for the picker), `dimensionKeys` (union of the
-covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct count).
+covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct count), `refreshingMonths` (see below).
 - **Combos summary (audit M1).** New table `sales_month_history_combos` (migration
   `20261112140000_sales_month_history_combos`, additive, backfills every stored month): one row per (tenant, month,
   product combo) — clientId, month, dims, dimKey, `keyHash = md5(dimKey)` (unique with clientId + month), amountPaise /
@@ -951,13 +951,23 @@ covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct cou
   after the history INSERT, with ONE `INSERT … SELECT … FROM sales_month_histories WHERE month GROUP BY dimKey, dims`
   (`kpi/month-combos.ts`, shared with the rebuild; dimKey is 1:1 with dims, no array_agg; the apply log line adds
   `comboRows`, `combosMs`). Recalculate does not change the history, so it does not touch the summary. The 10-year
-  retention deletes summary rows with the history. history-combos reads ONLY this table (thousands of rows per month), in
-  one transaction after `SET LOCAL statement_timeout = 10000` (`HISTORY_COMBOS_STATEMENT_TIMEOUT_MS`; tx bound 60 s):
-  first a per-month head check — a chosen month whose summary is missing (set has lines) or stamped with another set (e.g.
-  an apply by an older revision during a deploy) is REBUILT under the month lock from the header as re-read after the lock
-  (re-check L-a; logged `sales-import combos summary rebuilt`) — then the two aggregate statements ONE AFTER THE OTHER. A
-  statement timeout or P2028 (no transaction could be started / pool busy) → 503 "choose fewer months". The migration was
-  edited in place for the source columns (it has not been applied to any shared database).
+  retention deletes summary rows with the history.
+- **Read path = strictly read-only (re-check M1/M2).** GET history-combos runs ONE `SET TRANSACTION READ ONLY`
+  transaction under `SET LOCAL statement_timeout = 10000` (`HISTORY_COMBOS_STATEMENT_TIMEOUT_MS`; tx bound 45 s): it
+  reads the set headers and a per-month summary head INSIDE the transaction, then two aggregate statements ONE AFTER THE
+  OTHER over the summary. It never writes and never takes the month lock. A month whose summary is from another set (e.g.
+  written by an older revision during a deploy) is answered from that summary; a month with NO summary is answered from
+  its stored lines (read-only fallback, same timeout); both are listed in `SalesHistoryCombos.refreshingMonths` and the
+  FE shows "The product list for <month> is being refreshed — it updates within about 10 minutes". A statement timeout
+  or P2028 (no transaction could be started / pool busy) → 503 "choose fewer months".
+- **Background repair.** `refreshStaleMonthCombos` (`kpi/month-combos.ts`, via `SalesImportRetentionService
+  .refreshHistoryCombos`) runs in the worker drain (after the retention sweep; stops starting months on SIGTERM), the
+  inline runner's drain, and the Cloud Scheduler drain when idle (budget `DRAIN_COMBOS_REFRESH_BUDGET_MS` = 60 s) — never
+  on a user request. It lists ≤ 12 months whose summary is missing (set has lines) or not entirely from the set header,
+  and rebuilds each in ITS OWN transaction: `SET LOCAL statement_timeout = 120000`, `pg_try_advisory_xact_lock` on the
+  apply's month key (busy → skip; the next run retries), re-check after the lock, DELETE + the same INSERT … SELECT.
+  Logs `{found, rebuilt, busy, fresh, failed, skipped}`. The migration was edited in place for the source columns (it
+  has not been applied to any shared database).
 - **FE:** the product-set builder has a source selector (Latest file / Stored month(s) → most recent, last 3/6/12, or one
   month); a change of the month select is debounced 300 ms and a superseded request is aborted (`historyCombos(q,
   signal)` uses plain fetch with the shared client's error conventions — 403 → "You don't have permission to do that" —
