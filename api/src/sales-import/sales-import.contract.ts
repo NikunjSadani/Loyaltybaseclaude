@@ -269,6 +269,39 @@ export interface SalesImportCombos {
   dimensionValues: SalesDimensionValues;
   dimensionCombos: SalesDimensionCombo[];
 }
+/** Most months "last N stored months" may cover in GET admin/sales-import/history-combos. */
+export const SALES_HISTORY_COMBOS_MAX_MONTHS = 12;
+/**
+ * GET admin/sales-import/history-combos (targets:read) — the KPI product picker's "Stored month(s)" source.
+ * Query: `month=YYYY-MM` (one stored month) OR `lastMonths=N` (the N most recent months WITH stored history,
+ * 1..SALES_HISTORY_COMBOS_MAX_MONTHS; the default is 1). Never both.
+ * Combos / values are aggregated in SQL from SalesMonthHistory (the final applied lines of each month, every customer
+ * code), in the same shape as SalesImportCombos and capped the same way (top SALES_IMPORT_MAX_DIMENSION_COMBOS combos
+ * and SALES_IMPORT_MAX_DIMENSION_VALUES values per key, by |₹|). A combo's `dims` carry the keys its month's lines were
+ * read with (SalesMonthHistorySet.dimensionKeys). 404 when `month` has no stored history; a tenant with no history at
+ * all gets `months: []` and empty lists.
+ */
+export interface SalesHistoryCombos {
+  /** The stored months these combos cover, ascending. */
+  months: string[];
+  /** Every month with stored history for this tenant, newest first (for the month picker). */
+  availableMonths: string[];
+  /** Product-column keys the covered months' lines were read with (union, sorted). */
+  dimensionKeys: string[];
+  /** The covered months were read with DIFFERENT product columns (combos from them may pin different keys). */
+  dimensionKeysDiffer: boolean;
+  dimensionValues: SalesDimensionValues;
+  dimensionCombos: SalesDimensionCombo[];
+  /** Distinct combos in the covered months; more than dimensionCombos.length = the list is capped. */
+  totalCombos: number;
+  /**
+   * Covered months whose product summary is being refreshed in the background (missing, or from an earlier apply than
+   * the month's stored lines): their combos come from the older summary, or — when it is missing — straight from the
+   * stored lines if the month is small (else the month contributes NO combos until rebuilt). The background refresh
+   * rebuilds them (worker / Cloud Scheduler drain, every ~10 min). Empty when everything is current.
+   */
+  refreshingMonths: string[];
+}
 
 // ─── Preview / apply ────────────────────────────────────────────────────────────
 

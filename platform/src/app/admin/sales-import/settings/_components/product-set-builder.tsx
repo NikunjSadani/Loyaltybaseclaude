@@ -1,28 +1,31 @@
 'use client';
 
 /**
- * "Product set" builder (SALES-IMPORT-PIPELINE-PLAN §6.2a, §11 F-6). Three ways to add an entry to the Include
+ * "Product set" builder (SALES-IMPORT-PIPELINE-PLAN §6.2a, §11 F-6, §10c). Three ways to add an entry to the Include
  * (anyOf) or Exclude (noneOf) list:
- *   1. pick combinations seen in the latest processed file (searchable, sortable, multi-select) — a picked combo pins
- *      each product column that file had to its value, a blank one included (blank = "this column is empty", not
- *      "any"); a combo whose values are ALL blank cannot be picked (the backend refuses such an entry),
- *   2. whole-value chips (e.g. a whole brand, every SKU group) — non-blank values only,
+ *   1. pick combinations seen in the chosen SOURCE — the latest processed file, or the stored month history (one
+ *      month, or the N most recent stored months) — searchable, sortable, multi-select. A picked combo pins each
+ *      product column its file / stored lines had to its value, a blank one included (blank = "this column is empty",
+ *      not "any"); a combo whose values are ALL blank cannot be picked (the backend refuses such an entry),
+ *   2. whole-value chips (e.g. a whole brand, every SKU group) — non-blank values only, from the same source,
  *   3. free entry for products not in any file yet (an empty box there means "any value").
- * The set shows as chips. Warnings are computed LIVE from the loaded file (never appears in it / already included by
- * another entry / both included and excluded / cancelled by an exclusion); the last "Test" adds the server's view.
+ * The set shows as chips. Warnings are computed LIVE from the selected source (never appears in it / already included
+ * by another entry / both included and excluded / cancelled by an exclusion); the last "Test" (always against the
+ * latest file) adds the server's view.
  */
-import React, { useId, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Plus, Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { salesImportApi } from '@/lib/sales-import/api';
 import {
-  ALL_BLANK_MESSAGE, addEntries, comboEntry, comboMappingDrift, coveringEntryIndex, entriesNotInCombos, entryKey,
-  entryLabel, hasEntry, includeExcludeConflicts, isAllBlank, listOf, removeEntry, removeEntryAt,
-  type FilterList, type NormalizeOptions,
+  ALL_BLANK_MESSAGE, addEntries, comboEntry, comboMappingDrift, coveringEntryIndex, dimensionKeyDrift,
+  entriesNotInCombos, entryKey, entryLabel, hasEntry, includeExcludeConflicts, isAllBlank, listOf, removeEntry,
+  removeEntryAt, type FilterList, type NormalizeOptions,
 } from '@/lib/sales-import/product-set';
-import { formatCases, formatCount, formatRupees } from '@/lib/sales-import/format';
+import { formatCases, formatCount, formatRupees, monthLabel } from '@/lib/sales-import/format';
 import {
-  SALES_IMPORT_MAX_DIMENSION_COMBOS, SALES_KPI_MAX_FILTER_ENTRIES,
-  type SalesDimensionMapping, type SalesImportCombos, type SalesKpiFilter,
+  SALES_HISTORY_COMBOS_MAX_MONTHS, SALES_IMPORT_MAX_DIMENSION_COMBOS, SALES_KPI_MAX_FILTER_ENTRIES,
+  type SalesDimensionMapping, type SalesHistoryCombos, type SalesImportCombos, type SalesKpiFilter,
 } from '@/lib/sales-import/types';
 
 export interface EntryWarnings {
@@ -33,6 +36,116 @@ export interface EntryWarnings {
 const MAX_ROWS = 100;
 type SortKey = { kind: 'dim'; key: string } | { kind: 'lines' | 'amount' | 'qty' };
 type AddFn = (raw: Array<Record<string, unknown>>, opts?: NormalizeOptions) => void;
+/** What the picker / whole-value chips read: the latest file's combos or the stored history's (same shape). */
+type ComboList = Pick<SalesImportCombos, 'dimensionValues' | 'dimensionCombos'>;
+type Source = 'latest' | 'history';
+
+/** While some chosen month's product summary is being refreshed, the list is fetched again this often. */
+export const HISTORY_REFRESH_POLL_MS = 60_000;
+
+/** A change of the stored-months select waits this long before it is fetched (quick changes send one request). */
+export const HISTORY_SELECT_DEBOUNCE_MS = 300;
+
+/** "Last N stored months" choices offered (N ≤ SALES_HISTORY_COMBOS_MAX_MONTHS). */
+const LAST_CHOICES = [1, 3, 6, 12].filter((n) => n <= SALES_HISTORY_COMBOS_MAX_MONTHS);
+
+function historyQuery(sel: string): { month: string } | { lastMonths: number } {
+  return sel.startsWith('month:') ? { month: sel.slice('month:'.length) } : { lastMonths: Number(sel.slice('last:'.length)) };
+}
+
+/** "October 2026" / "August 2026 – October 2026 (3 stored months)". */
+function historyLabel(months: string[]): string {
+  if (months.length === 0) return 'the stored months';
+  if (months.length === 1) return monthLabel(months[0]);
+  return `${monthLabel(months[0])} – ${monthLabel(months[months.length - 1])} (${months.length} stored months)`;
+}
+
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+interface SourceView {
+  combos: ComboList | null;
+  /** How the source is named in copy: "the latest file", "October 2026", … */
+  label: string;
+  /** The list is a top-N cut: absence from it proves nothing, so the live "never appears" check is off. */
+  capped: boolean;
+  /** Distinct combos in the source (history: before the cap). */
+  total: number;
+  drift: { missing: string[]; extra: string[] } | null;
+  /** History only: the covered months were read with different product columns. */
+  keysDiffer: boolean;
+}
+
+/**
+ * The stored-history source: fetched only when chosen (GET history-combos), re-fetched when the month choice changes
+ * or on Retry. `key` ties a result to the request that produced it, so a stale response never shows as current.
+ */
+function useHistoryCombos(active: boolean, sel: string) {
+  const [tick, setTick] = useState(0);
+  const key = `${sel}#${tick}`;
+  const [res, setRes] = useState<{ key: string; sel: string; data: SalesHistoryCombos | null; error: string | null } | null>(null);
+  const [availableMonths, setAvailableMonths] = useState<string[]>([]);
+  /** The month choice last sent; a CHANGE of choice is debounced (first load / Retry / re-activation are not). */
+  const lastSent = useRef<string | null>(null);
+  /** The next reload is the background poll: a failure keeps the list on screen instead of an error. */
+  const silent = useRef(false);
+  useEffect(() => {
+    if (!active) return;
+    // Audit M1: a superseded request is aborted (and its late answer ignored); quick changes of the select are debounced.
+    const ctrl = new AbortController();
+    const quiet = silent.current;
+    silent.current = false;
+    const fail = (error: string) => {
+      // A failed background poll keeps the list it already shows (same selection); anything else shows the error.
+      if (!quiet) setRes({ key, sel, data: null, error });
+      else setRes((prev) => (prev && prev.sel === sel ? { ...prev, key } : prev)); // settled: not "reloading" any more
+    };
+    const load = () => {
+      lastSent.current = sel;
+      salesImportApi.historyCombos(historyQuery(sel), ctrl.signal)
+        .then((r) => {
+          if (ctrl.signal.aborted) return;
+          if (r.success) {
+            setRes({ key, sel, data: r.data, error: null });
+            setAvailableMonths(r.data.availableMonths);
+          } else {
+            fail(r.error);
+          }
+        })
+        .catch((e: unknown) => { if (!ctrl.signal.aborted) fail(e instanceof Error ? e.message : 'Network error'); });
+    };
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    if (lastSent.current !== null && lastSent.current !== sel) timer = setTimeout(load, HISTORY_SELECT_DEBOUNCE_MS);
+    else load();
+    return () => {
+      if (timer) clearTimeout(timer);
+      ctrl.abort();
+    };
+  }, [active, sel, key]);
+  // While the same selection reloads (Reload button / background poll), the list it already has stays on screen.
+  const current = res && (res.key === key || (res.sel === sel && res.data)) ? res : null;
+  const refreshing = Boolean(active && current?.data && current.data.refreshingMonths.length > 0);
+  // Background poll (re-check L3): while some month's summary is being rebuilt, look again every ~60 s; stops when the
+  // list is current, the source changes or the builder unmounts (cleanup).
+  useEffect(() => {
+    if (!refreshing) return;
+    const t = setTimeout(() => {
+      silent.current = true;
+      setTick((n) => n + 1);
+    }, HISTORY_REFRESH_POLL_MS);
+    return () => clearTimeout(t);
+  }, [refreshing, key]);
+  return {
+    loading: active && current === null,
+    reloading: active && current !== null && res?.key !== key,
+    data: current?.data ?? null,
+    error: current?.error ?? null,
+    availableMonths,
+    retry: () => {
+      silent.current = false;
+      setTick((t) => t + 1);
+    },
+  };
+}
 
 export function ProductSetBuilder({
   filter, onChange, dims, combos, warnings,
@@ -49,15 +162,39 @@ export function ProductSetBuilder({
   const baseId = useId();
   const tabRefs = useRef<Record<FilterList, HTMLButtonElement | null>>({ anyOf: null, noneOf: null });
 
+  const [source, setSource] = useState<Source>('latest');
+  const [histSel, setHistSel] = useState('last:1');
+  const history = useHistoryCombos(source === 'history', histSel);
+
   const include = listOf(filter, 'anyOf');
   const exclude = listOf(filter, 'noneOf');
 
+  const view: SourceView = useMemo(() => {
+    if (source === 'latest') {
+      const list = combos?.dimensionCombos ?? [];
+      return {
+        combos, label: 'the latest file', capped: list.length >= SALES_IMPORT_MAX_DIMENSION_COMBOS, total: list.length,
+        drift: comboMappingDrift(list, dims), keysDiffer: false,
+      };
+    }
+    const h = history.data;
+    return {
+      combos: h,
+      label: historyLabel(h?.months ?? []),
+      capped: Boolean(h && h.totalCombos > h.dimensionCombos.length),
+      total: h?.totalCombos ?? 0,
+      // The set header's keys; a header without keys (e.g. a backfilled one) falls back to the combos' own keys.
+      drift: h ? (h.dimensionKeys.length ? dimensionKeyDrift(h.dimensionKeys, dims) : comboMappingDrift(h.dimensionCombos, dims)) : null,
+      keysDiffer: Boolean(h?.dimensionKeysDiffer),
+    };
+  }, [source, combos, history.data, dims]);
+
   const live = useMemo(
-    () => entriesNotInCombos(filter, combos?.dimensionCombos, SALES_IMPORT_MAX_DIMENSION_COMBOS),
-    [filter, combos],
+    () => entriesNotInCombos(filter, view.combos?.dimensionCombos, SALES_IMPORT_MAX_DIMENSION_COMBOS, view.capped),
+    [filter, view],
   );
   const conflicts = useMemo(() => includeExcludeConflicts(filter), [filter]);
-  const drift = useMemo(() => comboMappingDrift(combos?.dimensionCombos, dims), [combos, dims]);
+  const drift = view.drift;
 
   function add(list: FilterList, raw: Array<Record<string, unknown>>, opts: NormalizeOptions = {}) {
     const r = addEntries(filter, list, raw, { ...opts, max: SALES_KPI_MAX_FILTER_ENTRIES });
@@ -91,9 +228,8 @@ export function ProductSetBuilder({
           : `This exclusion removes all of the included ${entryLabel(include[c.include], dims)}.`;
       }
     }
-    if (live?.[list].includes(i) || warnings?.unmatched[list].includes(i)) {
-      return `${label} never appears in the latest file. Check the spelling or size.`;
-    }
+    if (live?.[list].includes(i)) return `${label} never appears in ${view.label}. Check the spelling or size.`;
+    if (warnings?.unmatched[list].includes(i)) return `${label} never appears in the latest file. Check the spelling or size.`;
     if (list === 'anyOf') {
       const by = coveringEntryIndex(include, i);
       if (by >= 0) return `${label} is already included by ${entryLabel(include[by], dims)}.`;
@@ -134,18 +270,76 @@ export function ProductSetBuilder({
         <p className="text-[11px] text-gray-500">
           A line is counted when it matches at least one included entry and no excluded entry. A line matching two
           entries is counted once.
-          {combos && combos.dimensionCombos.length >= SALES_IMPORT_MAX_DIMENSION_COMBOS
-            ? ' The latest file has too many product combinations to check every entry here — press Test to check them.'
-            : ''}
+          {view.capped && (
+            <span data-testid="product-set-capped-note">
+              {source === 'latest'
+                ? ' The latest file has too many product combinations to check every entry here — press Test to check them.'
+                : ` ${capitalize(view.label)} has ${formatCount(view.total)} product combinations; only the ` +
+                  `${formatCount(view.combos?.dimensionCombos.length ?? 0)} largest by ₹ are listed, so entries are not checked against it here.`}
+            </span>
+          )}
         </p>
       </div>
 
-      {drift && (
+      {/* Source of the pick list (WAI-ARIA radio group; the month choice is a labelled select). */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2" data-testid="product-set-source">
+        <span id={`${baseId}-source`} className="text-xs font-medium text-gray-700">Pick products from</span>
+        <div role="radiogroup" aria-labelledby={`${baseId}-source`} className="flex gap-4 text-xs text-gray-800">
+          {(['latest', 'history'] as Source[]).map((s) => (
+            <label key={s} className="flex items-center gap-1.5">
+              <input type="radio" name={`${baseId}-source`} value={s} checked={source === s} onChange={() => setSource(s)} />
+              {s === 'latest' ? 'Latest file' : 'Stored month(s)'}
+            </label>
+          ))}
+        </div>
+        {source === 'history' && (
+          <select value={histSel} onChange={(e) => setHistSel(e.target.value)} aria-label="Stored months to pick from"
+            className="text-xs border border-gray-300 rounded-md px-1.5 py-1">
+            {LAST_CHOICES.map((n) => (
+              <option key={n} value={`last:${n}`}>{n === 1 ? 'Most recent stored month' : `Last ${n} stored months`}</option>
+            ))}
+            {history.availableMonths.map((m) => <option key={m} value={`month:${m}`}>{monthLabel(m)}</option>)}
+          </select>
+        )}
+      </div>
+      {source === 'history' && (
+        <p className="text-[11px] text-gray-500 -mt-1">
+          Stored months hold the lines of the file last applied to each month (every customer). &ldquo;Last N&rdquo; means
+          the N most recent months that have stored lines. Test still checks against the latest file.
+        </p>
+      )}
+
+      {source === 'history' && history.data && history.data.refreshingMonths.length > 0 && (
+        <div role="status" className="flex flex-wrap items-center gap-2 text-xs text-blue-800 bg-blue-50 border border-blue-100 rounded-md px-3 py-2" data-testid="product-set-refreshing">
+          <span>
+            {history.data.refreshingMonths.length === 1 ? 'The product list for ' : 'The product lists for '}
+            {history.data.refreshingMonths.map(monthLabel).join(', ')}{' '}
+            {history.data.refreshingMonths.length === 1 ? 'is' : 'are'} being refreshed in the background — reload in a few
+            minutes. Until then it may be incomplete or out of date.
+          </span>
+          <Button size="sm" variant="outline" type="button" onClick={history.retry} loading={history.reloading} disabled={history.reloading}>
+            Reload
+          </Button>
+        </div>
+      )}
+
+      {(drift || view.keysDiffer) && (
         <p role="status" className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2" data-testid="product-set-mapping-drift">
-          The latest processed file was read with a different column mapping
-          {drift.missing.length ? ` (it has no ${drift.missing.map((k) => dims.find((d) => d.key === k)?.label ?? k).join(', ')} column)` : ''}.
-          Picks from it only pin the columns that file had. Reprocess or upload a file with the current mapping for
-          an up-to-date list.
+          {drift && (source === 'latest' ? (
+            <>
+              The latest processed file was read with a different column mapping
+              {drift.missing.length ? ` (it has no ${drift.missing.map((k) => dims.find((d) => d.key === k)?.label ?? k).join(', ')} column)` : ''}.
+              Picks from it only pin the columns that file had. Reprocess or upload a file with the current mapping for
+              an up-to-date list.
+            </>
+          ) : (
+            <>
+              The stored lines of {view.label} were read with a different column mapping
+              {drift.missing.length ? ` (they have no ${drift.missing.map((k) => dims.find((d) => d.key === k)?.label ?? k).join(', ')} column)` : ''}.
+              Picks from them only pin the columns those lines had.{' '}
+            </>
+          ))}
+          {view.keysDiffer && 'The selected months were read with different product columns in different months, so some combinations pin fewer columns.'}
         </p>
       )}
 
@@ -163,8 +357,25 @@ export function ProductSetBuilder({
       <p className="text-xs text-gray-500" aria-live="polite">{note}</p>
 
       <div role="tabpanel" id={panelId} aria-labelledby={tabId(tab)} className="space-y-4">
-        <ComboPicker list={tab} filter={filter} onChange={onChange} onAdd={(raw, o) => add(tab, raw, o)} dims={dims} combos={combos} />
-        <WholeValueChips list={tab} onAdd={(raw, o) => add(tab, raw, o)} dims={dims} combos={combos} />
+        {source === 'history' && history.loading ? (
+          <p role="status" className="text-xs text-gray-500">Loading the stored months…</p>
+        ) : source === 'history' && history.error ? (
+          <div role="alert" className="text-xs text-red-600 flex items-center gap-2">
+            Couldn&apos;t load the stored months: {history.error}
+            <Button size="sm" variant="outline" type="button" onClick={history.retry}>Retry</Button>
+          </div>
+        ) : (
+          <>
+            <ComboPicker list={tab} filter={filter} onChange={onChange} onAdd={(raw, o) => add(tab, raw, o)} dims={dims}
+              combos={view.combos} sourceLabel={view.label}
+              emptyText={source === 'latest'
+                ? 'No processed file yet, so there is no list of products to pick from. Use the whole-value chips or type entries below — or upload a file first.'
+                : history.data && history.data.months.length > 0
+                  ? `${capitalize(view.label)} has no stored product combinations. Pick from the latest file, or type entries below.`
+                  : 'No month has stored sales lines yet — they are kept once a month is applied from a file. Pick from the latest file, or type entries below.'} />
+            <WholeValueChips list={tab} onAdd={(raw, o) => add(tab, raw, o)} dims={dims} combos={view.combos} />
+          </>
+        )}
         <FreeEntry list={tab} onAdd={(raw) => add(tab, raw)} dims={dims} />
       </div>
     </div>
@@ -187,10 +398,14 @@ function Chip({ label, warning, onRemove, exclude }: { label: string; warning: s
 }
 
 function ComboPicker({
-  list, filter, onChange, onAdd, dims, combos,
+  list, filter, onChange, onAdd, dims, combos, sourceLabel, emptyText,
 }: {
   list: FilterList; filter: SalesKpiFilter; onChange(f: SalesKpiFilter): void; onAdd: AddFn;
-  dims: SalesDimensionMapping[]; combos: SalesImportCombos | null;
+  dims: SalesDimensionMapping[]; combos: ComboList | null;
+  /** "the latest file" / "October 2026" — named in the heading. */
+  sourceLabel: string;
+  /** Shown instead of the table when the source has no combos. */
+  emptyText: string;
 }) {
   const [q, setQ] = useState('');
   const [sort, setSort] = useState<SortKey>({ kind: 'amount' });
@@ -217,12 +432,7 @@ function ComboPicker({
   }, [combos, q, sort, dims, desc]);
 
   if (!combos || combos.dimensionCombos.length === 0) {
-    return (
-      <p className="text-xs text-gray-500">
-        No processed file yet, so there is no list of products to pick from. Use the whole-value chips or type entries
-        below — or upload a file first.
-      </p>
-    );
+    return <p className="text-xs text-gray-500">{emptyText}</p>;
   }
 
   const shown = rows.slice(0, MAX_ROWS);
@@ -249,7 +459,7 @@ function ComboPicker({
 
   return (
     <div className="space-y-2">
-      <p className="text-xs font-medium text-gray-700">Pick combinations from the latest file</p>
+      <p className="text-xs font-medium text-gray-700">Pick combinations from {sourceLabel}</p>
       <div className="flex flex-wrap items-center gap-2">
         <label className="relative">
           <span className="sr-only">Search combinations</span>
@@ -315,7 +525,7 @@ function ComboPicker({
 
 function WholeValueChips({
   list, onAdd, dims, combos,
-}: { list: FilterList; onAdd: AddFn; dims: SalesDimensionMapping[]; combos: SalesImportCombos | null }) {
+}: { list: FilterList; onAdd: AddFn; dims: SalesDimensionMapping[]; combos: ComboList | null }) {
   const [picked, setDimKey] = useState(dims[0]?.key ?? '');
   const dim = dims.find((d) => d.key === picked) ?? dims[0];
   const dimKey = dim?.key ?? '';

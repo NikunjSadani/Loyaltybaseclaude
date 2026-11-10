@@ -10,6 +10,7 @@ import {
 import { currentMonthKey } from '../../targets/targets.helpers';
 import { shiftMonthKey } from '../months/month-state';
 import { isLockNotAvailable, lockImportRow, type LockedImport } from './import-lock';
+import { refreshStaleMonthCombos, type CombosRefreshLimits, type CombosRefreshResult } from '../kpi/month-combos';
 
 /** Statuses after which the raw file is no longer needed (retention clock = finishedAt). */
 export const RETENTION_STATUSES = ['READY', 'NEEDS_MAPPING', 'FAILED', 'CANCELLED'];
@@ -115,12 +116,23 @@ export class SalesImportRetentionService {
       const cutoff = shiftMonthKey(opts.currentMonth ?? currentMonthKey(), -12 * SALES_MONTH_HISTORY_RETENTION_YEARS);
       const where = { ...(opts.clientId ? { clientId: opts.clientId } : {}), month: { lt: cutoff } };
       const r = await this.prisma.salesMonthHistory.deleteMany({ where });
+      await this.prisma.salesMonthHistoryCombo.deleteMany({ where }); // the per-month combos summary (§10c)
       await this.prisma.salesMonthHistorySet.deleteMany({ where });
       return r.count;
     } catch (e) {
       this.logger.warn(`sales-import history retention failed: ${(e as Error).message}`);
       return 0;
     }
+  }
+
+  /**
+   * Background repair of the per-month combos summary (plan §10c): rebuilds months whose summary is missing or from
+   * another history set (bounded by `limits`; try-lock on the month, skip when an apply holds it). Called by the WORKER
+   * drain (COMBOS_REFRESH_WORKER_LIMITS) and by the HTTP drains (COMBOS_REFRESH_HTTP_LIMITS) — never by a user request
+   * (sweep() is also called from the list route). Never throws.
+   */
+  refreshHistoryCombos(limits: CombosRefreshLimits, opts: { shouldStop?: () => boolean } = {}): Promise<CombosRefreshResult> {
+    return refreshStaleMonthCombos(this.prisma as never, this.logger, limits, opts);
   }
 
   /** One bounded sweep (never throws: retention must not break the list call or the worker). */

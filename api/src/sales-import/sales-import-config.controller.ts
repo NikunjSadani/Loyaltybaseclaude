@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Put } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query } from '@nestjs/common';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
@@ -6,9 +6,11 @@ import { TenantService } from '../tenant/tenant.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesProfileService } from './kpi/sales-profile.service';
 import { SalesKpiDefService } from './kpi/sales-kpi-def.service';
+import { SalesHistoryCombosService } from './kpi/sales-history-combos.service';
 import { assertSalesImportAccess } from './sales-import-access';
 import type {
   SalesColumnMapping,
+  SalesHistoryCombos,
   SalesKpiDefinitionDto,
   SalesKpiDefinitionList,
   SalesKpiDefinitionPatch,
@@ -24,6 +26,8 @@ import type {
  *   PATCH/DELETE admin/sales-import/kpis/:id         targets:manage_config
  *   POST         admin/sales-import/kpis/test        targets:read  (no write; 404 when `latest` has no READY import)
  *   GET          admin/sales-import/segment-options  targets:read  (outlet types + programmes for the KPI scope pickers)
+ *   GET          admin/sales-import/history-combos   targets:read  (?month=YYYY-MM | ?lastMonths=N: product combos from
+ *                                                                   the stored month history, for the KPI picker; §10c)
  * OWNER: Lane K. Every handler calls assertSalesImportAccess(user, {tenant, prisma}, {write}) FIRST.
  * Registered BEFORE SalesImportController in SalesImportModule so the static `profile` / `kpis` / `segment-options`
  * segments win over Lane I's `GET admin/sales-import/:id`.
@@ -39,6 +43,7 @@ export class SalesImportConfigController {
     readonly kpis: SalesKpiDefService,
     readonly tenant: TenantService,
     readonly prisma: PrismaService,
+    readonly history: SalesHistoryCombosService,
   ) {}
 
   private gate(user: JwtPayload, write: boolean) {
@@ -103,5 +108,16 @@ export class SalesImportConfigController {
   async segmentOptions(@CurrentUser() user: JwtPayload): Promise<SalesSegmentOptions> {
     await this.gate(user, false);
     return this.kpis.segmentOptions(user.clientId);
+  }
+
+  /** Static segment: this controller is registered before SalesImportController's `GET :id`. */
+  @Get('history-combos')
+  @RequirePermission('targets:read')
+  async historyCombos(
+    @CurrentUser() user: JwtPayload,
+    @Query() q: { month?: string; lastMonths?: string },
+  ): Promise<SalesHistoryCombos> {
+    await this.gate(user, false);
+    return this.history.combos(user.clientId, { month: q?.month, lastMonths: q?.lastMonths });
   }
 }

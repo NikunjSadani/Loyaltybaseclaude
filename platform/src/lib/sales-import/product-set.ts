@@ -83,7 +83,19 @@ export function comboMappingDrift(
   dims: SalesDimensionMapping[],
 ): { missing: string[]; extra: string[] } | null {
   if (!combos || combos.length === 0) return null;
-  const fileKeys = new Set(combos.flatMap((c) => Object.keys(c.dims)));
+  return dimensionKeyDrift(combos.flatMap((c) => Object.keys(c.dims)), dims);
+}
+
+/**
+ * Do these product-column keys (e.g. a stored month history set's `dimensionKeys`) differ from the current mapping?
+ * Returns the differing keys, or null when they match / no keys are given.
+ */
+export function dimensionKeyDrift(
+  keys: string[],
+  dims: SalesDimensionMapping[],
+): { missing: string[]; extra: string[] } | null {
+  if (keys.length === 0) return null;
+  const fileKeys = new Set(keys);
   const mapKeys = new Set(dims.map((d) => d.key));
   const missing = [...mapKeys].filter((k) => !fileKeys.has(k));
   const extra = [...fileKeys].filter((k) => !mapKeys.has(k));
@@ -222,16 +234,17 @@ export function includeExcludeConflicts(f: SalesKpiFilter): IncludeExcludeConfli
 }
 
 /**
- * Entries (by index) that match NO combo of the loaded file — computed live, without a Test call. Returns null when
- * the combo list is unavailable or was capped (≥ SALES_IMPORT_MAX_DIMENSION_COMBOS), because then "not in the list"
- * does not prove "not in the file".
+ * Entries (by index) that match NO combo of the loaded source — computed live, without a Test call. Returns null when
+ * the combo list is unavailable or was capped (≥ SALES_IMPORT_MAX_DIMENSION_COMBOS, or `capped` when the source says
+ * so), because then "not in the list" does not prove "not in the file".
  */
 export function entriesNotInCombos(
   f: SalesKpiFilter,
   combos: Array<{ dims: DimMatch }> | null | undefined,
   maxCombos: number,
+  capped = false,
 ): { anyOf: number[]; noneOf: number[] } | null {
-  if (!combos || combos.length === 0 || combos.length >= maxCombos) return null;
+  if (capped || !combos || combos.length === 0 || combos.length >= maxCombos) return null;
   const miss = (list: FilterList) => listOf(f, list).flatMap((e, i) => (combos.some((c) => entryMatchesDims(e, c.dims)) ? [] : [i]));
   return { anyOf: miss('anyOf'), noneOf: miss('noneOf') };
 }

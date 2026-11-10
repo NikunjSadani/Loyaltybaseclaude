@@ -8,6 +8,7 @@ import type {
   ApplyRequest,
   ApplyResult,
   SalesColumnMapping,
+  SalesHistoryCombos,
   SalesImportCombos,
   SalesImportDetail,
   SalesImportList,
@@ -44,6 +45,24 @@ export const salesImportApi = {
   testKpi: (req: SalesKpiTestRequest) => api.post<SalesKpiTestResult>(`${BASE}/kpis/test`, req),
   segmentOptions: () => api.get<SalesSegmentOptions>(`${BASE}/segment-options`),
   combos: (importId: string | 'latest' = 'latest') => api.get<SalesImportCombos>(`${BASE}/${id(importId)}/combos`),
+  /**
+   * Product combos from the STORED month history: one month, or the N most recent stored months (1..12). Takes an
+   * AbortSignal so the picker can cancel a superseded request. Plain fetch because the SHARED api client takes no signal
+   * (adding one there is a platform-wide change, held for the owner); errors follow its conventions (403 message).
+   */
+  historyCombos: async (q: { month: string } | { lastMonths: number }, signal?: AbortSignal): Promise<ApiResponse<SalesHistoryCombos>> => {
+    const qs = 'month' in q ? `month=${id(q.month)}` : `lastMonths=${q.lastMonths}`;
+    try {
+      const res = await fetch(`${BASE}/history-combos?${qs}`, { method: 'GET', signal, headers: authHeader() });
+      let body: { success?: boolean; data?: SalesHistoryCombos; error?: string; message?: string } | null = null;
+      try { body = await res.json(); } catch { body = null; }
+      if (res.status === 403) return { success: false, error: body?.error ?? "You don't have permission to do that", status: 403 };
+      if (!res.ok || !body) return { success: false, error: body?.error ?? body?.message ?? (res.statusText || `HTTP ${res.status}`), status: res.status };
+      return body as ApiResponse<SalesHistoryCombos>;
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Network error' };
+    }
+  },
 
   // Imports
   list: (cursor?: string | null, limit = 20) =>

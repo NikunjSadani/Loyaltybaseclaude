@@ -38,6 +38,7 @@ import { computeMonthRows, sumOwnedValues, unitsToNumber, type MonthComputation 
 import { loadLastApplied } from './last-applied';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
 import { blockedReasonFor, monthSummariesOf } from './sales-preview.service';
+import { insertMonthCombosSql } from '../kpi/month-combos';
 
 /**
  * Interactive-transaction timeout of a month write (apply / recalculate): the OutletSalesRecord merge plus the month
@@ -314,6 +315,14 @@ export class SalesApplyService {
           LEFT JOIN unnest(${histCodes}::text[], ${histIds}::text[]) AS r(code, id) ON r.code = a."outletCode"
          WHERE a."importId" = ${w.sourceImportId} AND a."month" = ${month}`);
       const t2 = Date.now();
+      // The month's combos summary (plan §10c, audit M1): replaced from the lines just written, in this transaction, with
+      // ONE INSERT … SELECT … GROUP BY (dimKey is the stable key of dims, 1:1). Stamped with the same sourceImportId /
+      // appliedAt as the set header below, so a reader can detect (and rebuild) a summary that is not this set's
+      // (re-check L-a). The KPI picker's "Stored month(s)" source reads only this table. Recalculate does not change the
+      // history, so not this either.
+      await tx.$executeRaw(Prisma.sql`DELETE FROM "sales_month_history_combos" WHERE "clientId" = ${clientId} AND "month" = ${month}`);
+      const comboRows = await tx.$executeRaw(insertMonthCombosSql(clientId, month, w.sourceImportId, now));
+      const t3 = Date.now();
       // The set's header: what the lines are, and the mapping they were parsed with (recalculate checks it).
       const header = {
         sourceImportId: w.sourceImportId,
@@ -322,6 +331,9 @@ export class SalesApplyService {
         mappingFingerprint: w.mapping?.fingerprint ?? null,
         dimensionKeys: w.mapping?.dimensionKeys ?? [],
         lineRows: Number(inserted),
+        // The combos summary written above is this set's (§10c): stamped in the same transaction.
+        combosSourceImportId: w.sourceImportId,
+        combosAppliedAt: now,
       };
       await tx.salesMonthHistorySet.upsert({
         where: { clientId_month: { clientId, month } },
@@ -329,7 +341,7 @@ export class SalesApplyService {
         update: header,
       });
       this.log.log(
-        JSON.stringify({ msg: 'sales-import month history written', clientId, month, deletedRows: Number(deleted), insertedRows: Number(inserted), deleteMs: t1 - t0, insertMs: t2 - t1 }),
+        JSON.stringify({ msg: 'sales-import month history written', clientId, month, deletedRows: Number(deleted), insertedRows: Number(inserted), comboRows: Number(comboRows), deleteMs: t1 - t0, insertMs: t2 - t1, combosMs: t3 - t2 }),
       );
     }
 

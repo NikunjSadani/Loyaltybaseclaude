@@ -921,7 +921,7 @@ with `source: HISTORY` (importId = the history's source import). The history its
 
 **Retention.** Per-import aggregates / raw parts / unmatched.csv: 30 days after the import finishes (unchanged). Month
 history: `SALES_MONTH_HISTORY_RETENTION_YEARS` = 10 — the retention sweep (list / worker drain / idle drain) deletes
-history months (lines AND set headers) older than 10 years before the current IST month.
+history months (lines, set headers AND the §10c combos summary) older than 10 years before the current IST month.
 
 **Final-check hardening (migration `20261112130000_sales_month_history_sets`, additive; backfills headers):**
 - **Set header** `sales_month_history_sets` (unique clientId+month): sourceImportId, appliedAt, appliedById, the
@@ -943,6 +943,84 @@ history months (lines AND set headers) older than 10 years before the current IS
 - **Month-write budget:** apply / recalculate transactions have an explicit `APPLY_TX_TIMEOUT_MS` = 300 s; the history
   DELETE + one set-based INSERT … SELECT log `{msg:'sales-import month history written', deletedRows, insertedRows,
   deleteMs, insertMs}` so the real-scale timing can be measured and the bound adjusted.
+
+## 10c. Extras (branch `feat/sales-import-extras`, 2026-11-10; audit fixes same day)
+**KPI product picker from stored month history.** `GET admin/sales-import/history-combos?month=YYYY-MM` or
+`?lastMonths=N` (1..`SALES_HISTORY_COMBOS_MAX_MONTHS` = 12, default 1; never both) — targets:read + the feature-flag gate
+(`assertSalesImportAccess`), tenant-scoped, on the config controller (static segment, before `GET :id`). "Last N" = the N
+most recent months WITH stored history (read from `sales_month_history_sets`, not calendar months). Response
+`SalesHistoryCombos` = the `SalesImportCombos` lists (`dimensionCombos` + `dimensionValues`, same caps: top 2,000 combos /
+200 values per key by |₹|) + `months`, `availableMonths` (newest first, for the picker), `dimensionKeys` (union of the
+covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct count), `refreshingMonths` (see below).
+- **Combos summary (audit M1).** New table `sales_month_history_combos` (migration
+  `20261112140000_sales_month_history_combos`, additive, backfills every stored month): one row per (tenant, month,
+  product combo) — clientId, month, dims, dimKey, `keyHash = md5(dimKey)` (unique with clientId + month), amountPaise /
+  qtyPico as NUMERIC(38,0) (a month total can exceed BIGINT pico-cases), lines, and the history set it summarises
+  (`sourceImportId`, `appliedAt` = the set header's). Every APPLY replaces the month's rows in the SAME transaction, right
+  after the history INSERT, with ONE `INSERT … SELECT … FROM sales_month_histories WHERE month GROUP BY dimKey, dims`
+  (`kpi/month-combos.ts`, shared with the rebuild; dimKey is 1:1 with dims, no array_agg; the apply log line adds
+  `comboRows`, `combosMs`). Recalculate does not change the history, so it does not touch the summary. The 10-year
+  retention deletes summary rows with the history.
+- **Summary stamp on the set header (re-check L1).** `sales_month_history_sets.combosSourceImportId` /
+  `combosAppliedAt` record which set the month's summary was built from; written in the SAME transaction as the summary
+  (apply: in the header upsert; rebuild: an UPDATE guarded by the set it read). Staleness is a header-row comparison
+  (`IS DISTINCT FROM` sourceImportId / appliedAt) — the summary rows are never scanned to decide it. Migration
+  `20261112140000` (edited in place, not applied to any shared DB) adds the columns and stamps every backfilled month.
+- **Read path = strictly read-only (re-check M1/M2).** GET history-combos runs ONE `SET TRANSACTION READ ONLY`
+  transaction under `SET LOCAL statement_timeout = 10000` (`HISTORY_COMBOS_STATEMENT_TIMEOUT_MS`; tx bound 45 s): the
+  set headers (with their stamp) are read INSIDE it, then two aggregate statements ONE AFTER THE OTHER over the summary.
+  It never writes and never takes the month lock. Per month (from the stamp): current → summary; stale (summary from
+  another set, e.g. an older revision re-applied during a deploy) → the old summary; missing (never summarised) → the
+  stored lines read-only, but ONLY when the month has ≤ `HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS` = 50,000 line rows (a
+  bigger month contributes no combos until rebuilt — it would not fit the 10 s timeout). Stale and missing months are
+  listed in `SalesHistoryCombos.refreshingMonths`. 503 copy: statement timeout → "Reading the stored months took too
+  long. Try fewer months, or try again in a few minutes."; P2028 (no transaction could start) → "The server is busy right
+  now. Try again in a moment."
+- **Background repair.** `refreshStaleMonthCombos(db, log, limits)` (`kpi/month-combos.ts`, via
+  `SalesImportRetentionService.refreshHistoryCombos`) lists months whose header stamp ≠ the set (bounded), and rebuilds
+  each in ITS OWN transaction: `SET LOCAL statement_timeout = 25000` (re-check L2: below the 30 s close / reopen and
+  60 s target-upload waiters on the month lock), `pg_try_advisory_xact_lock` on the apply's month key (busy → skip),
+  re-check after the lock, DELETE + the INSERT … SELECT + the header stamp. Never on a user request. Limits per caller:
+  | caller | months / run | no new month after | per-month tx |
+  |---|---|---|---|
+  | job worker (after the sweep; stops starting months on SIGTERM) | 12 | 5 min | 110 s |
+  | Cloud Scheduler drain (idle) — `COMBOS_REFRESH_HTTP_LIMITS` | 2 | 45 s | 30 s |
+  | API inline runner drain | 2 | 60 s | 30 s |
+  On the HTTP path the refresh ends within ~70 s worst case, so the request (incl. the retention sweep) stays inside the
+  scheduler's 170 s attempt deadline (§14) and nothing is left running after the response (the API runs with CPU
+  throttling). A month that does not fit its bounds is retried by the next run. Logs
+  `{found, rebuilt, busy, fresh, failed, skipped}`.
+- **FE:** the product-set builder has a source selector (Latest file / Stored month(s) → most recent, last 3/6/12, or one
+  month); a change of the month select is debounced 300 ms and a superseded request is aborted (`historyCombos(q,
+  signal)` uses plain fetch with the shared client's error conventions — 403 → "You don't have permission to do that" —
+  because adding a signal to the SHARED `api.get` is a platform-wide change held for the owner's approval). Combos pin only the keys their stored lines carry
+  (`comboEntry`, unchanged rule); a drift note compares the stored `dimensionKeys` (fallback: the combos' keys) with the
+  current mapping and flags months read with different columns; the live "never appears" check uses the selected source
+  and is off when the list is capped (`totalCombos > dimensionCombos.length`, or ≥ 2,000 for the file). "Test" still runs
+  against the latest file (copy says so). Months in `refreshingMonths` get a status notice "The product list for <month> is
+  being refreshed in the background — reload in a few minutes" with a Reload button; while it shows, the list is polled
+  every 60 s (`HISTORY_REFRESH_POLL_MS`; a failed poll keeps the list; stops when current / on unmount).
+- Not verified against a real DB yet (SQL unit-tested for shape only) — run the migration + picker on staging before
+  relying on it; check the `comboRows` / `combosMs` apply log at real scale.
+
+**Graceful worker stop.** Cloud Run Jobs send SIGTERM, then SIGKILL ~10 s later. `ingest/worker-stop.ts` (no imports;
+loaded before the heap decision): on SIGTERM / SIGINT the worker stops claiming (`drainImports`), the processor destroys
+the current input stream and RELEASES its claim — `updateMany WHERE id, status PROCESSING, claimToken` → `QUEUED`,
+`claimToken`/`heartbeatAt`/`startedAt` null, progress 0 (`queuedAt` kept). The stop itself never marks it FAILED (any error
+after a stop request is released, not failed).
+- **Attempts (audit H1).** Only an EARLY stop (within `STOP_RESTORES_ATTEMPT_WITHIN_MS` = 10 min of the run's start — a
+  deploy / scale-down) restores `attempts` to its pre-claim value. A later stop (e.g. the 3600 s task timeout on a file
+  that never finishes, or a stalled read) COUNTS the attempt, so after `SALES_IMPORT_MAX_ATTEMPTS` the next claim ends it
+  FAILED: "Processing was attempted N times without finishing (it took too long or was stopped repeatedly)…". Without
+  this an always-timing-out import would be handed back forever and block every later import (claims are oldest-first).
+- The READY transaction is a critical section: a stop arriving during it is ignored (it commits; a SIGKILL rolls it back
+  whole); the forced exit at `WORKER_STOP_DEADLINE_MS` = 8 s is skipped while it runs, and when it ends after the deadline
+  a `WORKER_STOP_AFTER_CRITICAL_MS` = 1 s forced exit is re-armed (audit L2).
+- A stopped worker exits `WORKER_STOP_EXIT_CODE` = 143 (also after a clean release) so Cloud Run's task retry picks the
+  handed-back import up promptly (audit L1); the retention sweep is skipped when stopping. The final log reports
+  `finished` / `released` / `superseded` separately (`processClaimed` returns the outcome; audit L3).
+- The heap re-exec parent forwards SIGTERM / SIGINT to the child and mirrors its exit code. No infra change. (The inline
+  runner in the API process is unchanged: a killed inline run is still recovered by the stale-heartbeat reclaim.)
 
 ## 11. Lane tasks (TDD: write the test first, see it fail, implement, see it pass; run `cd api && npx jest src/sales-import` or `cd platform && npx vitest run src/app/admin/sales-import src/lib/sales-import`)
 
@@ -1007,13 +1085,16 @@ error message; reprocess deletes old aggregates first; duplicate sha sets `dupli
 **I-7 Claim loop and worker entry** `ingest/claim.ts` (raw SQL of §7.1.1, with a spec against mocked `$queryRaw`) and
 `api/src/sales-import/worker.main.ts`:
 ```ts
+// (as built, §10c: heap re-exec + SIGTERM handling around this; see worker.main.ts / ingest/worker-stop.ts)
 async function main() {
+  const stop = new WorkerStop(); installWorkerSignals({ stop, on, exit, log });
   const app = await NestFactory.createApplicationContext(SalesImportWorkerModule, { bufferLogs: true });
   const proc = app.get(SalesImportProcessorService);
-  let n = 0;
-  for (let row = await proc.claimNext(); row; row = await proc.claimNext()) { await proc.processClaimed(row); n++; }
+  const drained = await drainImports(proc, stop); // { finished, released, superseded }
+  const retention = stop.requested ? null : await app.get(SalesImportRetentionService).sweep({ limit: 50 });
   await app.close();
-  console.log(JSON.stringify({ msg: 'sales-import worker done', processed: n }));
+  console.log(JSON.stringify({ msg: 'sales-import worker done', ...drained, retention, stoppedBy: stop.reason }));
+  if (stop.requested) process.exit(143);
 }
 main().catch((e) => { console.error(e); process.exit(1); });
 ```
@@ -1239,9 +1320,12 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
   real file only ~8 % headroom under the heap backstop).
   Memory budget at that setting (§7.1 step 11): old space 1,700 MB → V8 heap_size_limit ≈ 1,892 MB on node:24; heap
   backstop trips at 1,275 MiB of used heap; shared-strings cap 400 MiB; real file peak ≈ 1.06 GB heap / 1.32 GB RSS.
-- **REQUIRED (audit fix round M3/S5; also retries GCS deletions of purged imports):** Cloud Scheduler hitting `POST /v1/sales-import/drain` every 10 min with header
+- **REQUIRED (audit fix round M3/S5; also retries GCS deletions of purged imports; §10c combos-summary repair):** Cloud Scheduler hitting `POST /v1/sales-import/drain` every 10 min with header
   `x-drain-secret` (+ secret `SALES_IMPORT_DRAIN_SECRET` on the API service). It recovers an import whose worker died
   (heartbeat-stale PROCESSING is reclaimed on the next kick) and, when nothing is queued, drives the retention sweep.
+- **Scheduler attempt deadline:** create that job with an explicit `--attempt-deadline=170s` (gcloud scheduler jobs create
+  http … --attempt-deadline=170s). The idle drain runs the retention sweep + the combos-summary repair with the HTTP
+  limits (§10c: ≤ 2 months, ≤ ~70 s), so it finishes inside it.
 - **Migration ordering (L3):** `20261111120000_sales_import_hardening` (and every sales-import migration) must be applied
   BEFORE the new API revision serves. Verified in the workflows: `deploy-staging.yml` and `deploy.yml` both run the
   `gifsy-migrate[-staging]` Cloud Run job with `--execute-now --wait` in the SAME job, BEFORE the `gcloud run deploy`
@@ -1250,7 +1334,7 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
 - GCS: parts + unmatched under `sales-imports/<clientId>/<importId>/`. The API deletes parts 30 days after READY (lazy, on list) or
   immediately on DELETE. Bucket lifecycle is unchanged.
 - **Retention (current):** per-import data (raw parts, per-run unmatched.csv, aggregates, sample rows) 30 days after the
-  import finishes; abandoned uploads after 24 h; the month history (`sales_month_histories`, §10b) 10 years.
+  import finishes; abandoned uploads after 24 h; the month history (`sales_month_histories`, §10b, + its `sales_month_history_combos` summary, §10c) 10 years.
 
 ---
 

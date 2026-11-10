@@ -43,15 +43,19 @@ export interface WorkerHeapDeps {
   spawn: (cmd: string, args: string[], opts: { stdio: 'inherit'; env: NodeJS.ProcessEnv }) => {
     on(ev: 'exit', cb: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
     on(ev: 'error', cb: (err: Error) => void): unknown;
+    kill(signal: NodeJS.Signals): unknown;
   };
   exit: (code: number) => void;
   log: (line: string) => void;
   error: (line: string) => void;
+  /** Registers a process signal handler (re-exec parent: forwards SIGTERM / SIGINT to the child — plan §10c). */
+  onSignal: (signal: 'SIGTERM' | 'SIGINT', cb: () => void) => void;
 }
 
 /**
- * Apply the decision. Returns true when THIS process should run the worker. Re-exec: spawns the child with the flag and
- * mirrors its exit code; a spawn error (L-2) is logged as structured JSON and exits 1. Imports only Node built-ins, so
+ * Apply the decision. Returns true when THIS process should run the worker. Re-exec: spawns the child with the flag,
+ * forwards SIGTERM / SIGINT to it, and mirrors its exit code; a spawn error (L-2) is logged as structured JSON and exits
+ * 1. Imports only Node built-ins, so
  * the re-executing parent never loads Nest / Prisma / ExcelJS (L-1: worker.main.ts imports those only after this).
  */
 export function ensureWorkerHeap(deps: WorkerHeapDeps): boolean {
@@ -65,6 +69,14 @@ export function ensureWorkerHeap(deps: WorkerHeapDeps): boolean {
   deps.log(JSON.stringify({ msg: 'sales-import worker: heap below the floor; re-executing with the configured heap', execArgv: d.execArgv }));
   const child = deps.spawn(deps.execPath, [...d.execArgv, ...deps.argv.slice(1)], { stdio: 'inherit', env: { ...deps.env, ...d.env } });
   child.on('exit', (code, signal) => deps.exit(code ?? (signal ? 1 : 0)));
+  // Cloud Run signals PID 1 (this parent). Forward it so the child stops gracefully (releases its claim); the parent
+  // keeps running until the child exits and then mirrors its exit code (a handler suppresses the default termination).
+  for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+    deps.onSignal(sig, () => {
+      deps.log(JSON.stringify({ msg: 'sales-import worker: forwarding signal to the re-executed child', signal: sig }));
+      child.kill(sig);
+    });
+  }
   child.on('error', (err) => {
     deps.error(JSON.stringify({ msg: 'sales-import worker: re-exec failed', error: err?.message ?? String(err) }));
     deps.exit(1);
