@@ -13,7 +13,7 @@ import { GiftFulfilmentChannel, PayoutMode, Prisma, RedemptionStatus } from '@pr
 import { PrismaService } from '../prisma/prisma.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
-import { claimOtpAttempt, refundOtpAttempt } from '../common/otp-attempt';
+import { claimOtpAttempt, markOtpUsed, refundOtpAttempt } from '../common/otp-attempt';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -1688,8 +1688,11 @@ export class RewardsService {
         throw new ConflictException('Order is no longer awaiting confirmation');
       }
 
-      // Consume the OTP INSIDE the tx so a later failure rolls it back for retry.
-      await tx.otpCode.update({ where: { id: otpId }, data: { verifiedAt: new Date() } });
+      // Consume the OTP INSIDE the tx so a later failure rolls it back for retry — CONDITIONALLY, so an
+      // OTP another request already consumed aborts this tx (no debit).
+      if (!(await markOtpUsed(tx, otpId))) {
+        throw new UnauthorizedException('No active OTP found. Please restart the redemption.');
+      }
 
       // Debit the OUTLET's wallet via the canonical write-path (passbook + ledger).
       await this.wallet.debitRedeem(
@@ -2298,8 +2301,11 @@ export class RewardsService {
       }
 
       // M1 — consume the OTP INSIDE the tx so a later failure (insufficient
-      // balance, oversold stock) rolls the OTP back and the user can retry.
-      await tx.otpCode.update({ where: { id: otpId }, data: { verifiedAt: new Date() } });
+      // balance, oversold stock) rolls the OTP back and the user can retry. CONDITIONAL: an OTP
+      // another request already consumed aborts this tx (no debit).
+      if (!(await markOtpUsed(tx, otpId))) {
+        throw new UnauthorizedException('No active OTP found. Please restart the redemption.');
+      }
 
       // Debit via the canonical wallet write-path (passbook + ledger). Throws 400
       // on insufficient balance → whole tx (incl. the claim) rolls back.
@@ -3335,6 +3341,7 @@ export class RewardsService {
       orderBy: { createdAt: 'desc' },
     });
     if (!record) {
+      await this.throwIfOrderAlreadyConfirmed(orderId);
       throw new UnauthorizedException('No active OTP found. Please restart the redemption.');
     }
     if (record.attempts >= record.maxAttempts) {
@@ -3348,6 +3355,7 @@ export class RewardsService {
     // parallel guesses that all read the same `attempts` can't exceed maxAttempts; a losing claim is
     // refused with the existing "too many attempts" error and its code is never compared.
     if (!(await claimOtpAttempt(this.prisma, record))) {
+      await this.throwIfOrderAlreadyConfirmed(orderId);
       throw new UnauthorizedException('Too many attempts — please restart the redemption.');
     }
 
@@ -3364,6 +3372,19 @@ export class RewardsService {
     // transaction, so a failed debit leaves the OTP retryable) — give the claimed attempt back.
     await refundOtpAttempt(this.prisma, record.id);
     return record.id;
+  }
+
+  /**
+   * Double-tap: the OTP is gone / its claim lost because a parallel confirm of the SAME order already
+   * consumed it. If that order has left PENDING, answer with the confirm's own conflict (what the
+   * winner's twin would have hit at the order claim) instead of a misleading "too many attempts".
+   * The order was already loaded + authorised by the caller; this re-read only picks the message.
+   */
+  private async throwIfOrderAlreadyConfirmed(orderId: string): Promise<void> {
+    const current = await this.prisma.redemptionOrder.findFirst({ where: { id: orderId }, select: { status: true } });
+    if (current && current.status !== 'PENDING') {
+      throw new ConflictException('Order is no longer awaiting confirmation');
+    }
   }
 
   /** 6-digit OTP (100000–999999) via CSPRNG — see common/otp.ts (AF-10). */

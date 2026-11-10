@@ -24,7 +24,7 @@ import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import { EventKey } from '../notification-templates/notification-templates.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
-import { claimOtpAttempt } from '../common/otp-attempt';
+import { claimOtpAttempt, markOtpUsed } from '../common/otp-attempt';
 import { sniffFileType } from '../common/file-signature';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { isActivePhoneConflict } from '../common/phone-conflict';
@@ -478,9 +478,17 @@ export class KycService {
   async sendConsentOtp(user: JwtPayload, dto: { submissionId: string; mobile: string }): Promise<{ success: boolean; expiresIn: number }> {
     const submission = await this.prisma.kycSubmission.findFirst({
       where: { id: dto.submissionId, userId: user.sub, user: { clientId: user.clientId } },
-      select: { id: true, partnerId: true },
+      select: { id: true, partnerId: true, proposedPartner: true, partner: { select: { phone: true } } },
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
+
+    // Bind the consent OTP to THIS submission's outlet owner: the number must be the one persisted on
+    // the submission (re-KYC → the proposed phone; new outlet → the partner's phone), never an
+    // arbitrary body value. The rep's form sends that same number, so the honest flow is unchanged.
+    const ownerPhone = this.consentOwnerPhone(submission);
+    if (!ownerPhone || ownerPhone !== this.phoneLast10(dto.mobile)) {
+      throw new BadRequestException('This mobile number does not match the outlet owner on this KYC.');
+    }
 
     // Group-aware phone re-validation (partner-child owner groups): a grouped sibling
     // that legitimately shares the group phone was ALLOWED at create() time — this gate
@@ -502,7 +510,7 @@ export class KycService {
       phoneEnforced: uniquenessPolicy.phone,
     });
 
-    const mobile = dto.mobile.replace(/\D/g, '').slice(-10);
+    const mobile = ownerPhone;
     const otp = this.generateOtpCode();
 
     // One active consent OTP per number.
@@ -514,6 +522,8 @@ export class KycService {
         phone: mobile,
         code: otp,
         purpose: 'KYC_CONSENT',
+        // Bound to the submission — consent() only accepts the OTP issued for THIS submission.
+        referenceId: submission.id,
         expiresAt: new Date(Date.now() + 10 * 60 * 1000),
         maxAttempts: 3,
       },
@@ -3955,12 +3965,26 @@ export class KycService {
 
   // ─── POST /v1/kyc/consent ────────────────────────────────────────────────────
   async consent(user: JwtPayload, dto: ConsentKycDto) {
-    const { submissionId, mobile, otp } = dto;
+    const { submissionId, otp } = dto;
+
+    // Load the submission FIRST (caller + tenant scoped) — the OTP is bound to it and to its outlet
+    // owner's phone, normalised exactly as sendConsentOtp stored it.
+    const submission = await this.prisma.kycSubmission.findFirst({
+      where: { id: submissionId, userId: user.sub, user: { clientId: user.clientId } },
+      include: {
+        // For post-consent routing + notifications (owner name, outlet name, program) + the owner phone.
+        partner: { select: { ownerName: true, phone: true, outlets: { select: { name: true, programName: true }, take: 1 } } },
+      },
+    });
+    if (!submission) throw new NotFoundException('KYC submission not found');
+    const mobile = this.consentOwnerPhone(submission);
+    if (!mobile || mobile !== this.phoneLast10(dto.mobile)) throw new UnauthorizedOtp('OTP not found or expired');
 
     const otpRecord = await this.prisma.otpCode.findFirst({
       where: {
         phone: mobile,
         purpose: 'KYC_CONSENT',
+        referenceId: submission.id,
         verifiedAt: null,
         expiresAt: { gt: new Date() },
       },
@@ -3991,23 +4015,12 @@ export class KycService {
       throw new UnauthorizedOtp(`Invalid OTP. ${remaining} attempt(s) remaining.`);
     }
 
-    // Mark OTP as verified.
+    // Mark OTP as verified — CONDITIONALLY: a parallel correct consent that lost the race gets the
+    // not-found 401 and writes nothing (one OTP → at most one ConsentRecord / routing).
     const verifiedAt = new Date();
-    await this.prisma.otpCode.update({
-      where: { id: otpRecord.id },
-      data: { verifiedAt },
-    });
-
-    // Verify the submission belongs to this user (tenant-scoped for consistency
-    // with the rest of the service — userId alone is already single-tenant).
-    const submission = await this.prisma.kycSubmission.findFirst({
-      where: { id: submissionId, userId: user.sub, user: { clientId: user.clientId } },
-      include: {
-        // For post-consent routing + notifications (owner name, outlet name, program).
-        partner: { select: { ownerName: true, outlets: { select: { name: true, programName: true }, take: 1 } } },
-      },
-    });
-    if (!submission) throw new NotFoundException('KYC submission not found');
+    if (!(await markOtpUsed(this.prisma, otpRecord.id, verifiedAt))) {
+      throw new UnauthorizedOtp('OTP not found or expired');
+    }
 
     // ── Task 3.5: Write a durable ConsentRecord on successful OTP verification ─
     // Idempotency note: if consent() is called twice for the same submission we
@@ -4034,12 +4047,15 @@ export class KycService {
     // double-routing, double-notify, or duplicate "submitted" WhatsApp.
     if (submission.status === 'DRAFT') {
       const { status: routedStatus, escalatedFrom } = await this.resolveInitialRouting(user);
-      await this.prisma.kycSubmission.update({
-        where: { id: submissionId },
+      // ATOMIC DRAFT→routed: only the consent that actually moves the row out of DRAFT writes the
+      // history row + notifies (a racing consent sees count 0 and stops here).
+      const routed = await this.prisma.kycSubmission.updateMany({
+        where: { id: submissionId, status: 'DRAFT' },
         // submittedAt = the consent moment: the KYC only truly reaches the approver now,
         // so approver SLA/aging starts here.
         data: { status: routedStatus as never, escalatedFrom, submittedAt: verifiedAt },
       });
+      if (routed.count !== 1) return { verified: true, submissionId };
       await this.prisma.kycStatusHistory.create({
         data: {
           kycSubmissionId: submissionId,
@@ -4084,6 +4100,23 @@ export class KycService {
     }
 
     return { verified: true, submissionId };
+  }
+
+  /**
+   * The outlet-owner phone a consent OTP must go to, normalised to 10 digits: a re-KYC's PROPOSED phone
+   * (what the rep entered; applied only at approval), else the submission partner's phone. null when
+   * the submission carries no usable owner phone.
+   */
+  private consentOwnerPhone(sub: {
+    proposedPartner?: Prisma.JsonValue | null;
+    partner?: { phone?: string | null } | null;
+  }): string | null {
+    const proposed = sub.proposedPartner && typeof sub.proposedPartner === 'object' && !Array.isArray(sub.proposedPartner)
+      ? (sub.proposedPartner as Record<string, unknown>).phone
+      : undefined;
+    const raw = typeof proposed === 'string' && proposed.trim() ? proposed : sub.partner?.phone ?? '';
+    const digits = this.phoneLast10(raw);
+    return digits.length === 10 ? digits : null;
   }
 
   // ─── POST /v1/kyc/not-interested ─────────────────────────────────────────────

@@ -197,6 +197,8 @@ describe('RewardsService', () => {
     mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
     // Claim-before-compare: each OTP verify claims one attempt atomically first — default: the claim wins.
     mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 1 });
+    // The double-tap tests install a counting implementation (orderReads) — never let it leak.
+    mockPrisma.redemptionOrder.findFirst.mockReset();
     mockPrisma.auditLog.create.mockResolvedValue({ id: 'audit1' });
     mockPrisma.outlet.findMany.mockResolvedValue([]); // default: no extra outlet-keyed assignments
     mockPrisma.salesUser.findMany.mockResolvedValue([]); // default: no edges → downline = caller only
@@ -1490,6 +1492,58 @@ describe('RewardsService', () => {
       expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
     });
 
+    it('#3: the in-tx OTP consume is CONDITIONAL — already used → "No active OTP", tx aborts, no debit', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(pendingOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000),
+      });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+      mockPrisma.otpCode.updateMany.mockImplementation(async ({ data }: any) =>
+        (data?.verifiedAt ? { count: 0 } : { count: 1 }));
+      const err = await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }).catch((e) => e);
+      expect(err).toBeInstanceOf(UnauthorizedException);
+      expect(err.message).toBe('No active OTP found. Please restart the redemption.');
+      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
+        where: { id: 'otp1', verifiedAt: null }, data: { verifiedAt: expect.any(Date) },
+      });
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('#4 double-tap: claim lost but the order is already CONFIRMED → Conflict "Order is no longer awaiting confirmation"', async () => {
+      // 1st read = the confirm's own order load; any re-read after the lost claim sees CONFIRMED.
+      // (An implementation, not a Once-queue: clearAllMocks never drains Once values → no leak.)
+      orderReads(pendingOrder, { status: 'CONFIRMED' });
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000),
+      });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+      mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 0 });
+      const err = await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }).catch((e) => e);
+      expect(err).toBeInstanceOf(ConflictException);
+      expect(err.message).toBe('Order is no longer awaiting confirmation');
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('#4 double-tap: OTP already consumed (no active row) and order CONFIRMED → the same Conflict', async () => {
+      orderReads(pendingOrder, { status: 'CONFIRMED' });
+      mockPrisma.otpCode.findFirst.mockResolvedValue(null);
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+      const err = await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }).catch((e) => e);
+      expect(err).toBeInstanceOf(ConflictException);
+      expect(err.message).toBe('Order is no longer awaiting confirmation');
+    });
+
+    it('#4: a lost claim on a still-PENDING order keeps "Too many attempts"', async () => {
+      orderReads(pendingOrder, { status: 'PENDING' });
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000),
+      });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+      mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 0 });
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .rejects.toThrow('Too many attempts — please restart the redemption.');
+    });
+
     it('claim-before-compare: a CORRECT code gives its claimed attempt back (a failed debit can be retried as before)', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(pendingOrder);
       mockPrisma.otpCode.findFirst.mockResolvedValue({
@@ -1599,7 +1653,9 @@ describe('RewardsService', () => {
 
       const claimOrder = mockPrisma.redemptionOrder.updateMany.mock.invocationCallOrder[0];
       const histOrder = mockPrisma.redemptionStatusHistory.create.mock.invocationCallOrder[0];
-      const otpOrder = mockPrisma.otpCode.update.mock.invocationCallOrder[0];
+      // The OTP consume is now the CONDITIONAL updateMany carrying verifiedAt (#3).
+      const markIdx = mockPrisma.otpCode.updateMany.mock.calls.findIndex((c: any[]) => c[0]?.data?.verifiedAt);
+      const otpOrder = mockPrisma.otpCode.updateMany.mock.invocationCallOrder[markIdx];
       const debitOrder = mockWallet.debitRedeem.mock.invocationCallOrder[0];
       expect(claimOrder).toBeLessThan(histOrder);
       expect(histOrder).toBeLessThan(otpOrder);
@@ -1617,9 +1673,9 @@ describe('RewardsService', () => {
 
       const res = await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
 
-      // OTP marked verified.
-      expect(mockPrisma.otpCode.update).toHaveBeenCalledWith({
-        where: { id: 'otp1' }, data: { verifiedAt: expect.any(Date) },
+      // OTP marked verified — conditionally (#3).
+      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
+        where: { id: 'otp1', verifiedAt: null }, data: { verifiedAt: expect.any(Date) },
       });
       // Debit goes through WalletService with the tx client + order ref.
       expect(mockWallet.debitRedeem).toHaveBeenCalledWith(
@@ -2549,6 +2605,30 @@ describe('RewardsService', () => {
       expect(msgs.filter((m) => m === 'Too many attempts — please restart the redemption.')).toHaveLength(97);
       expect(msgs).not.toContain('OK');
       expect(row.attempts).toBe(3);
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('#4 double-tap (sales-assisted): lost claim on an already-CONFIRMED order → Conflict', async () => {
+      wireConfirm();
+      orderReads(pendingOrder, { status: 'CONFIRMED' });
+      mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 0 });
+      const err = await service.confirmRedeemForOutlet(sales, {
+        orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
+      }).catch((e) => e);
+      expect(err).toBeInstanceOf(ConflictException);
+      expect(err.message).toBe('Order is no longer awaiting confirmation');
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('#3 (sales-assisted): the in-tx OTP consume is conditional — already used → "No active OTP", no debit', async () => {
+      wireConfirm();
+      mockPrisma.otpCode.updateMany.mockImplementation(async ({ data }: any) =>
+        (data?.verifiedAt ? { count: 0 } : { count: 1 }));
+      const err = await service.confirmRedeemForOutlet(sales, {
+        orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
+      }).catch((e) => e);
+      expect(err).toBeInstanceOf(UnauthorizedException);
+      expect(err.message).toBe('No active OTP found. Please restart the redemption.');
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
 
@@ -5926,4 +6006,10 @@ function simulateOtpClaims(updateMany: jest.Mock, maxAttempts = 3) {
     return { count: 1 };
   });
   return state;
+}
+
+/** redemptionOrder.findFirst: the first call returns `first`, every later call `rest` (double-tap re-read). */
+function orderReads(first: unknown, rest: unknown) {
+  let n = 0;
+  mockPrisma.redemptionOrder.findFirst.mockImplementation(async () => (n++ === 0 ? first : rest));
 }

@@ -617,6 +617,40 @@ describe('AuthService', () => {
       expect(dbAttempts).toBe(3);
     });
 
+    it('#1: looks up ONLY the LOGIN-purpose OTP for the phone (never a redemption/KYC/scheme row)', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue(null);
+      await expect(service.verifyOtp(phone, '1234', clientId)).rejects.toThrow('No active OTP found');
+      expect(mockPrisma.otpCode.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+        where: { phone, purpose: 'LOGIN', verifiedAt: null },
+      }));
+    });
+
+    it('#3: marks the OTP used CONDITIONALLY (verifiedAt: null) — a lost mark is "No active OTP", no session', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
+      mockPrisma.otpCode.updateMany.mockImplementation(async ({ data }: any) =>
+        (data?.verifiedAt ? { count: 0 } : { count: 1 }));
+      mockPrisma.userSession.create.mockClear();
+      await expect(service.verifyOtp(phone, '1234', clientId)).rejects.toThrow('No active OTP found');
+      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
+        where: { id: 'otp_1', verifiedAt: null }, data: { verifiedAt: expect.any(Date) },
+      });
+      expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
+    });
+
+    it('#3: two parallel CORRECT verifies of one OTP → exactly one session', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
+      const row = simulateOtpRow(mockPrisma.otpCode.updateMany);
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'user_1', role: 'RETAILER', clientId, status: 'ACTIVE' });
+      mockPrisma.userSession.create.mockClear();
+      mockPrisma.userSession.create.mockResolvedValue({ id: 'sess_1' });
+      const results = await Promise.allSettled([1, 2].map(() => service.verifyOtp(phone, '1234', clientId)));
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      const rejected = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+      expect((rejected.reason as Error).message).toContain('No active OTP found');
+      expect(row.marks).toBe(1);
+      expect(mockPrisma.userSession.create).toHaveBeenCalledTimes(1);
+    });
+
     it('should lock OTP after 3 failed attempts', async () => {
       mockPrisma.otpCode.findFirst.mockResolvedValue({ ...validOtp, attempts: 3 });
       await expect(service.verifyOtp(phone, '9999', clientId)).rejects.toThrow('Too many attempts');
@@ -1496,3 +1530,27 @@ describe('AuthService', () => {
     });
   });
 });
+
+/**
+ * A one-OtpCode-row fake for updateMany (2026-11-10): honours the claim (attempts < max, unverified),
+ * the refund (decrement) and the conditional "mark used" (verifiedAt: null → set once). Interleaves
+ * callers so parallel verifies race exactly as they would against the DB's row-level serialisation.
+ */
+function simulateOtpRow(updateMany: jest.Mock, maxAttempts = 3) {
+  const row = { attempts: 0, verifiedAt: null as Date | null, marks: 0 };
+  updateMany.mockImplementation(async ({ where, data }: any) => {
+    await new Promise((r) => setImmediate(r));
+    if (data?.verifiedAt) {
+      if (where?.verifiedAt === null && row.verifiedAt) return { count: 0 };
+      row.verifiedAt = data.verifiedAt; row.marks++; return { count: 1 };
+    }
+    if (data?.attempts?.increment) {
+      if (row.verifiedAt && where?.verifiedAt === null) return { count: 0 };
+      if (row.attempts < (where?.attempts?.lt ?? maxAttempts)) { row.attempts++; return { count: 1 }; }
+      return { count: 0 };
+    }
+    if (data?.attempts?.decrement) { if (row.attempts > 0) row.attempts--; return { count: 1 }; }
+    return { count: 1 };
+  });
+  return row;
+}
