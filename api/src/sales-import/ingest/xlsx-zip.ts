@@ -17,7 +17,7 @@
  */
 import { PassThrough, Readable, Transform, pipeline } from 'node:stream';
 import { createInflateRaw } from 'node:zlib';
-import * as v8 from 'node:v8';
+import { sharedStringsCapBytes } from './heap-budget';
 
 export interface ZipEntryInfo {
   name: string;
@@ -120,12 +120,12 @@ const SHEET_RE = /^xl\/worksheets\/sheet(\d+)\.xml$/;
 /** S4 bounds on what the declared (central-directory) sizes may expand to. */
 export const XLSX_MAX_TOTAL_UNCOMPRESSED = 4 * 1024 ** 3; // 4 GiB across the entries we read
 export const XLSX_MAX_SHARED_STRINGS_UNCOMPRESSED = 512 * 1024 ** 2; // exceljs caches the whole table in memory
-/** …and never more than this share of the configured V8 heap (audit M2): the cache lives in the same heap as the maps. */
-export const XLSX_SHARED_STRINGS_HEAP_SHARE = 0.25;
-
-/** The effective shared-strings cap for this process: min(512 MiB, 25 % of V8's heap_size_limit). */
-export function sharedStringsCap(heapLimit = v8.getHeapStatistics().heap_size_limit): number {
-  return Math.min(XLSX_MAX_SHARED_STRINGS_UNCOMPRESSED, Math.floor(heapLimit * XLSX_SHARED_STRINGS_HEAP_SHARE));
+/**
+ * The effective shared-strings cap for this process: min(512 MiB, the heap budget's cap = min(400 MiB, 25 % of the
+ * configured OLD-SPACE size)) — the cache lives in the same heap as the aggregation maps (heap-budget.ts).
+ */
+export function sharedStringsCap(oldSpace?: number): number {
+  return Math.min(XLSX_MAX_SHARED_STRINGS_UNCOMPRESSED, sharedStringsCapBytes(oldSpace));
 }
 
 export interface XlsxReadPlan {
@@ -300,7 +300,9 @@ export function resequencedXlsxStream(
             await write(b);
           }
         } catch (err) {
-          if (err instanceof XlsxFileError) throw err;
+          // The consumer destroyed the output (e.g. the heap backstop aborting the read): not a file problem — rethrow
+          // unchanged so it is never reported as "corrupt" (audit M-2).
+          if (err instanceof XlsxFileError || out.destroyed) throw err;
           throw new XlsxFileError(`The .xlsx file is corrupt: "${e.name}" could not be unpacked (${(err as Error)?.message ?? err}).`);
         }
       }
@@ -316,7 +318,8 @@ export function resequencedXlsxStream(
   };
   run().catch((err: unknown) => {
     const e = err instanceof Error ? err : new Error(String(err));
-    if (e instanceof XlsxFileError) onError?.(e); // not when the consumer simply stopped reading
+    // Only a genuine file problem is reported — never anything after the consumer destroyed the output (audit M-2).
+    if (e instanceof XlsxFileError && !out.destroyed) onError?.(e);
     if (!out.destroyed) out.destroy(e);
   });
   return out;

@@ -33,3 +33,41 @@ export function decideWorkerHeap(heapLimitBytes: number, env: NodeJS.ProcessEnv,
     env: { [WORKER_HEAP_REEXEC_ENV]: '1' },
   };
 }
+
+export interface WorkerHeapDeps {
+  heapLimit: number;
+  env: NodeJS.ProcessEnv;
+  execArgv: readonly string[];
+  argv: readonly string[];
+  execPath: string;
+  spawn: (cmd: string, args: string[], opts: { stdio: 'inherit'; env: NodeJS.ProcessEnv }) => {
+    on(ev: 'exit', cb: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
+    on(ev: 'error', cb: (err: Error) => void): unknown;
+  };
+  exit: (code: number) => void;
+  log: (line: string) => void;
+  error: (line: string) => void;
+}
+
+/**
+ * Apply the decision. Returns true when THIS process should run the worker. Re-exec: spawns the child with the flag and
+ * mirrors its exit code; a spawn error (L-2) is logged as structured JSON and exits 1. Imports only Node built-ins, so
+ * the re-executing parent never loads Nest / Prisma / ExcelJS (L-1: worker.main.ts imports those only after this).
+ */
+export function ensureWorkerHeap(deps: WorkerHeapDeps): boolean {
+  const d = decideWorkerHeap(deps.heapLimit, deps.env, deps.execArgv);
+  if (d.kind === 'ok') return true;
+  if (d.kind === 'fail') {
+    deps.error(JSON.stringify({ msg: d.message }));
+    deps.exit(1);
+    return false;
+  }
+  deps.log(JSON.stringify({ msg: 'sales-import worker: heap below the floor; re-executing with the configured heap', execArgv: d.execArgv }));
+  const child = deps.spawn(deps.execPath, [...d.execArgv, ...deps.argv.slice(1)], { stdio: 'inherit', env: { ...deps.env, ...d.env } });
+  child.on('exit', (code, signal) => deps.exit(code ?? (signal ? 1 : 0)));
+  child.on('error', (err) => {
+    deps.error(JSON.stringify({ msg: 'sales-import worker: re-exec failed', error: err?.message ?? String(err) }));
+    deps.exit(1);
+  });
+  return false;
+}

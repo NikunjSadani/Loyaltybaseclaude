@@ -3,6 +3,7 @@ import { Readable } from 'node:stream';
 import type { SalesImport } from '@prisma/client';
 import type { SalesColumnMapping } from '../sales-import.contract';
 import { AGGREGATE_CHUNK, HeapGuard, SalesImportProcessorService } from './sales-import-processor.service';
+import { heapTripBytes } from './heap-budget';
 import { partKey, unmatchedCsvKey } from './parts-file';
 import { SALES_IMPORT_PART_SIZE } from '../sales-import.contract';
 import { mappingFingerprint } from './mapping-fingerprint';
@@ -498,9 +499,9 @@ describe('HeapGuard (re-check M4)', () => {
       { used_heap_size: base.heap_size_limit, total_available_size: base.heap_size_limit }, // over → second strike
     ];
     let i = 0;
+    const g = new HeapGuard(); // computes its trip budget BEFORE the stats are mocked
     const spy = jest.spyOn(v8, 'getHeapStatistics').mockImplementation(() => ({ ...base, ...seq[i++] }));
     try {
-      const g = new HeapGuard();
       expect([g.overLimit(), g.overLimit(), g.overLimit(), g.overLimit(), g.overLimit(), g.overLimit()]).toEqual([false, false, false, false, false, true]);
     } finally {
       spy.mockRestore();
@@ -509,7 +510,7 @@ describe('HeapGuard (re-check M4)', () => {
 });
 
 describe('HeapGuard cadence + threshold (real-DB finding 1)', () => {
-  it('checks every 2,000 rows AND at least every 2 s; trips at 75 % of the configured heap limit', () => {
+  it('checks every 2,000 rows AND at least every 2 s; trips at a FIXED used-heap budget (75 % of the old-space size)', () => {
     const g = new HeapGuard();
     const t0 = Date.now();
     expect(g.due(1_999, t0)).toBe(false);
@@ -521,14 +522,18 @@ describe('HeapGuard cadence + threshold (real-DB finding 1)', () => {
     expect(g.due(4_002, t0 + 2_300)).toBe(true);
     const v8 = jest.requireActual('node:v8') as typeof import('node:v8');
     const base = v8.getHeapStatistics();
-    const at = (frac: number) => ({ ...base, used_heap_size: Math.round(base.heap_size_limit * frac), total_available_size: base.heap_size_limit });
-    let next = at(0.74);
+    const MiB = 1024 * 1024;
+    const trip = heapTripBytes(1700 * MiB); // the job's --max-old-space-size=1700 → 1,275 MiB of USED heap
+    expect(trip).toBe(1275 * MiB);
+    // heap_size_limit is irrelevant (node:24 gives ≈ 1,892 MB for old-space 1700): only used heap vs the budget counts
+    const at = (used: number) => ({ ...base, heap_size_limit: 1892 * MiB, used_heap_size: used });
+    let next = at(1060 * MiB); // the real file's measured peak
     const spy = jest.spyOn(v8, 'getHeapStatistics').mockImplementation(() => next);
     try {
-      const h = new HeapGuard();
-      expect([h.overLimit(), h.overLimit()]).toEqual([false, false]); // 74 %: never
-      next = at(0.76);
-      expect([h.overLimit(), h.overLimit()]).toEqual([false, true]); // 76 %: second consecutive check trips
+      const h = new HeapGuard(trip);
+      expect([h.overLimit(), h.overLimit()]).toEqual([false, false]); // real-file peak: never
+      next = at(1300 * MiB); // above 1,275 MiB, still far below 75 % of heap_size_limit (1,419 MiB)
+      expect([h.overLimit(), h.overLimit()]).toEqual([false, true]); // second consecutive check trips
     } finally {
       spy.mockRestore();
     }
@@ -551,4 +556,38 @@ describe('heap backstop outside the row loop (audit M2)', () => {
     expect(final().data.status).toBe('FAILED');
     expect(final().data.error).toMatch(/too large to process in one go/);
   }, 15_000);
+});
+
+describe('audit M-2: heap abort during an xlsx read reports "too large", never "corrupt"', () => {
+  it('the backstop trips while the re-sequencer is mid-copy → FAILED with the too-large message', async () => {
+    const file = await exceljsWorkbook([['Data', [['Invoice Date', 'Customer Code', 'Customer', 'Code', 'Group', 'Net Amt', 'Qty'],
+      ...Array.from({ length: 300 }, (_, i) => [new Date(Date.UTC(2026, 9, 3)), `O${i}`, 'S', 'P', 500, 1, 1])]]]);
+    const { svc, row, final, storage } = setup({ file, kind: 'XLSX' });
+    const fake = storage as unknown as { openReadStream: (k: string, r?: { start?: number; end?: number }) => Readable };
+    const real = fake.openReadStream.bind(storage);
+    // whole-part reads (the hash pass, the zip directory) are normal; the ranged entry copies trickle for many seconds
+    fake.openReadStream = (k, r) => {
+      const s = real(k, r);
+      if (!r || (r.end ?? 0) - (r.start ?? 0) < 4096) return s;
+      return Readable.from((async function* () {
+        for await (const c of s) {
+          for (let i = 0; i < (c as Buffer).length; i += 64) {
+            await new Promise((res) => setTimeout(res, 40));
+            yield (c as Buffer).subarray(i, i + 64);
+          }
+        }
+      })());
+    };
+    const v8 = jest.requireActual('node:v8') as typeof import('node:v8');
+    const base = v8.getHeapStatistics();
+    const spy = jest.spyOn(v8, 'getHeapStatistics').mockImplementation(() => ({ ...base, used_heap_size: base.heap_size_limit }));
+    try {
+      await svc.processClaimed(row);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(final().data.status).toBe('FAILED');
+    expect(final().data.error).toMatch(/too large to process in one go/);
+    expect(final().data.error).not.toMatch(/corrupt|could not be read/);
+  }, 20_000);
 });

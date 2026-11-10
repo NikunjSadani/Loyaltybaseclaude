@@ -33,6 +33,7 @@ import {
   parseInvoiceDateDetailed,
   classifyDecimal,
   picoToCases,
+  picoToThousandths,
   stableDimKey,
   toPaise,
   toPico,
@@ -373,10 +374,28 @@ export class SalesAggregator {
     }
   }
 
+  /**
+   * Audit L-4: the frozen month summary rounds quantities the way preview / apply do — per matched OUTLET and per
+   * unmatched CUSTOMER, each to 3 dp, then summed — so the import detail page and the preview show the same numbers.
+   */
+  private roundedQuantities(month: string): { matched: number; unmatched: number } {
+    let matched = 0n;
+    for (const [code, byDim] of this.aggs.get(month) ?? []) {
+      if (this.roster.get(code) === undefined) continue;
+      let pico = 0n;
+      for (const v of byDim.values()) pico += v.qtyPico;
+      matched += picoToThousandths(pico);
+    }
+    let unmatched = 0n;
+    for (const u of this.unmatchedMap.get(month)?.values() ?? []) unmatched += picoToThousandths(u.qtyPico);
+    return { matched: Number(matched) / 1000, unmatched: Number(unmatched) / 1000 };
+  }
+
   result(): AggregatorResult {
     const monthSummaries: MonthSummary[] = [...this.months.entries()]
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([month, m]) => ({
+      .map(([month, m]) => ({ month, m, q: this.roundedQuantities(month) }))
+      .map(({ month, m, q }) => ({
         month,
         firstDate: m.firstDate,
         lastDate: m.lastDate,
@@ -384,9 +403,9 @@ export class SalesAggregator {
         matchedOutlets: m.matchedOutlets.size,
         unmatchedCustomers: m.unmatchedCustomers.size,
         matchedAmountRupees: rupees(m.matchedPaise),
-        matchedQuantity: cases(m.matchedPico),
+        matchedQuantity: q.matched,
         unmatchedAmountRupees: rupees(m.unmatchedPaise),
-        unmatchedQuantity: cases(m.unmatchedPico),
+        unmatchedQuantity: q.unmatched,
       }));
 
     const dimensionValues: SalesDimensionValues = {};

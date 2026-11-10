@@ -208,6 +208,10 @@ export function divRoundHalfAway(n: bigint, d: bigint): bigint {
 export function paiseToRupees(paise: bigint): number {
   return Number(paise) / 100;
 }
+/** Pico-cases → thousandths of a case, rounded once (the unit a stored 3-dp quantity has). */
+export function picoToThousandths(pico: bigint): bigint {
+  return divRoundHalfAway(pico, QTY_SCALE / 1000n);
+}
 export function picoToCases(pico: bigint): number {
   return Number(divRoundHalfAway(pico, QTY_SCALE / 1000n)) / 1000;
 }

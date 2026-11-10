@@ -251,3 +251,14 @@ describe('SalesAggregator — final check L1 (bounded keys)', () => {
     expect(r.aggregateCount).toBe(1);
   });
 });
+
+describe('SalesAggregator — month summary quantities rounded like preview / apply (audit L-4)', () => {
+  it('matched = Σ per-outlet 3-dp values, unmatched = Σ per-customer 3-dp values', () => {
+    const a = new SalesAggregator(MAP, IDX, roster(['O1', 'O2']), TODAY);
+    a.push(row('O1', '2026-10-03', 'X', '500', 1, '0.0005'), 2);
+    a.push(row('O2', '2026-10-03', 'X', '500', 1, '0.0005'), 3);
+    a.push(row('U1', '2026-10-03', 'X', '500', 1, '0.0005'), 4);
+    a.push(row('U2', '2026-10-03', 'Y', '500', 1, '0.0005'), 5);
+    expect(a.result().monthSummaries[0]).toMatchObject({ matchedQuantity: 0.002, unmatchedQuantity: 0.002 }); // raw: 0.001 each
+  });
+});

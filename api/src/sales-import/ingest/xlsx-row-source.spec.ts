@@ -280,14 +280,41 @@ describe('re-check H1: the fail-fast race retains nothing per row', () => {
 });
 
 describe('shared-strings cap follows the heap (audit M2)', () => {
-  it('min(512 MiB, 25 % of the V8 heap limit); planXlsxRead enforces the effective cap', async () => {
+  it('min(400 MiB, 25 % of the OLD-SPACE size) — audit M-1; planXlsxRead enforces the effective cap', async () => {
     const { sharedStringsCap } = jest.requireActual('./xlsx-zip') as typeof import('./xlsx-zip');
-    expect(sharedStringsCap(1700 * 1024 ** 2)).toBe(425 * 1024 ** 2);
-    expect(sharedStringsCap(4096 * 1024 ** 2)).toBe(XLSX_MAX_SHARED_STRINGS_UNCOMPRESSED);
+    expect(sharedStringsCap(1700 * 1024 ** 2)).toBe(400 * 1024 ** 2); // the job (not 425 / 473 MiB)
+    expect(sharedStringsCap(1000 * 1024 ** 2)).toBe(250 * 1024 ** 2);
+    expect(sharedStringsCap(4096 * 1024 ** 2)).toBeLessThan(XLSX_MAX_SHARED_STRINGS_UNCOMPRESSED);
     const cd = readZipCentralDirectory(await exceljsWorkbook([['Data', ROWS]]), 0);
     if (cd.kind !== 'ok') throw new Error(cd.kind);
     const sst = cd.entries.find((e) => e.name === 'xl/sharedStrings.xml')!;
     expect(() => planXlsxRead(cd.entries, { sharedStrings: sst.uncompressedSize - 1 })).toThrow(/shared-text table is too large/);
     expect(() => planXlsxRead(cd.entries, { sharedStrings: sst.uncompressedSize })).not.toThrow();
+  });
+});
+
+describe('audit M-2: a consumer abort is never reported as a corrupt file', () => {
+  it('destroying the re-sequenced stream mid-copy (heap backstop) does not call onError, whatever the copy does next', async () => {
+    const buf = await exceljsWorkbook([['Data', syntheticSheetRows(400)]]);
+    const base = bufferRangeSource(buf, 256);
+    // ranged reads trickle: the copy is guaranteed to be mid-entry (and to write again) after the destroy
+    const slow = {
+      read: base.read,
+      stream: (s: number, e: number) =>
+        Readable.from((async function* () {
+          for await (const c of base.stream(s, e)) {
+            await new Promise((r) => setTimeout(r, 5));
+            yield c as Buffer;
+          }
+        })()),
+    };
+    const plan = planXlsxRead(await loadCentralDirectory(base, buf.length, 4096));
+    const errors: Error[] = [];
+    const out = resequencedXlsxStream(slow, plan, undefined, (e) => errors.push(e));
+    out.on('error', () => undefined);
+    await new Promise<void>((resolve) => out.once('data', () => resolve()));
+    out.destroy(new Error('The file is too large to process in one go.'));
+    await new Promise((r) => setTimeout(r, 300)); // let the copy loop hit its next write on the destroyed stream
+    expect(errors).toEqual([]);
   });
 });

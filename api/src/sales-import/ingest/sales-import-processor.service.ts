@@ -13,6 +13,7 @@ import {
   SALES_IMPORT_SAMPLE_ROWS,
   type SalesColumnMapping,
 } from '../sales-import.contract';
+import { HEAP_TRIP_SHARE_OF_OLD_SPACE, heapTripBytes } from './heap-budget';
 import { AggregatorLimitError, SalesAggregator, type AggregatorResult, type DecimalEvidenceSummary } from './aggregator';
 import { claimNextImport } from './claim';
 import { CsvLimitError, csvRows } from './csv-row-source';
@@ -36,17 +37,18 @@ const MAX_PREHEADER_ROWS = 1000;
 const FINAL_TX_TIMEOUT_MS = 30 * 60_000;
 
 /**
- * Memory backstop (plan §7.1 step 11; real-DB finding 1). The real run showed V8 can die in GC at ~82 % of its heap
- * limit, so the guard trips at 75 % of `heap_size_limit` (relative to whatever NODE_OPTIONS configures: the job runs with
- * --max-old-space-size=1700 on 2 GiB, so ≈ 1.27 GB vs the real file's measured ≈ 1.06 GB heap peak), checked every
- * 2,000 rows AND at least every 2 s, and only after TWO consecutive over-threshold checks.
+ * Memory backstop (plan §7.1 step 11; real-DB finding 1; audit M-1). The guard trips at a FIXED used-heap budget of
+ * 75 % of the configured OLD-SPACE size (heap-budget.ts) — not a fraction of heap_size_limit, which is larger than the
+ * old space (1700 → limit ≈ 1,892 MB on node:24). With --max-old-space-size=1700 on the 2 GiB job that is 1,275 MiB of
+ * used heap vs the real file's measured ≈ 1.06 GB peak. Checked every 2,000 rows AND at least every 2 s, and only after
+ * TWO consecutive over-threshold checks.
  */
-export const HEAP_GUARD_FRACTION = 0.75;
+export const HEAP_GUARD_FRACTION = HEAP_TRIP_SHARE_OF_OLD_SPACE; // of the OLD-SPACE size (heap-budget.ts), not heap_size_limit
 export const HEAP_CHECK_ROWS = 2_000;
 export const HEAP_CHECK_MS = 2_000;
 
 /**
- * Reads V8's own heap statistics (used size vs heap_size_limit, and what is still available) and reports "over" only
+ * Reads V8's own heap statistics (USED heap vs the fixed trip budget) and reports "over" only
  * after TWO consecutive over-threshold checks — a transient peak that the next GC clears never fails an import.
  * `due(rows)` decides when to check: every HEAP_CHECK_ROWS rows or HEAP_CHECK_MS, whichever comes first.
  */
@@ -55,7 +57,8 @@ export class HeapGuard {
   private lastCheckAt = Date.now();
   private lastCheckRows = 0;
   constructor(
-    private readonly fraction = HEAP_GUARD_FRACTION,
+    /** Used-heap bytes at which to trip: 75 % of the configured old-space size (heap-budget.ts; audit M-1). */
+    private readonly tripBytes = heapTripBytes(),
     private readonly everyRows = HEAP_CHECK_ROWS,
     private readonly everyMs = HEAP_CHECK_MS,
   ) {}
@@ -73,7 +76,7 @@ export class HeapGuard {
   /** USED heap only (audit L1: committed / available space is not a reliable signal) vs the limit. */
   overLimit(): boolean {
     const h = v8.getHeapStatistics();
-    this.strikes = h.used_heap_size > h.heap_size_limit * this.fraction ? this.strikes + 1 : 0;
+    this.strikes = h.used_heap_size > this.tripBytes ? this.strikes + 1 : 0;
     return this.strikes >= 2;
   }
 
@@ -409,13 +412,25 @@ export class SalesImportProcessorService {
     const xlsxFailure: { error: Error | null } = { error: null };
     if (row.fileKind === 'XLSX') {
       if (opts.hash) {
-        // Sequential hash pass (cheap; the parse below reads only the needed zip entries, by range).
-        for await (const c of parts.stream()) {
-          opts.hash.update(c as Buffer);
-          hashedBytes += (c as Buffer).length;
-          beat();
-          checkClaim();
+        // Sequential hash pass (cheap; the parse below reads only the needed zip entries, by range). Abortable by the
+        // heap timer like the parse itself.
+        const hs = parts.stream();
+        prog.abortSource = (e: Error) => {
+          if (!hs.destroyed) hs.destroy(e);
+        };
+        try {
+          for await (const c of hs) {
+            opts.hash.update(c as Buffer);
+            hashedBytes += (c as Buffer).length;
+            beat();
+            checkClaim();
+            if (prog.heapTripped) throw tooLarge();
+          }
+        } catch (e) {
           if (prog.heapTripped) throw tooLarge();
+          throw e;
+        } finally {
+          prog.abortSource = null;
         }
       }
       const plan = planXlsxRead(await loadCentralDirectory(parts, size));
@@ -463,7 +478,15 @@ export class SalesImportProcessorService {
         decimal = opts.decimal ?? resolveDecimalSeparator(mapping?.decimalSeparator, csvDelimiter);
         return { decimal, collectDecimalEvidence: opts.collectDecimalEvidence === true };
       };
-      const outcome = await this.parse(row, mapping, roster, rows, onRow, aggOpts, xlsxFailure);
+      let outcome: ParseOutcome;
+      try {
+        outcome = await this.parse(row, mapping, roster, rows, onRow, aggOpts, xlsxFailure);
+      } catch (e) {
+        // Audit M-2: when the heap backstop aborted the read, THAT is the reason — whatever the reader reported while
+        // its input was being torn down (e.g. "re-sequenced stream closed" / a "corrupt" wrap) is a consequence.
+        if (prog.heapTripped) throw tooLarge();
+        throw e;
+      }
       if (prog.heapTripped) throw tooLarge();
       return { outcome, hashedBytes, decimal };
     } finally {

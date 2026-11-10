@@ -484,16 +484,23 @@ with whole-brand entries and exclusions. The §6.2 model expresses this directly
     Exceeding any cap → FAILED with a readable message (never an OOM).
     **Revised after the real-DB / real-file run (2026-11-10):** the real 205 MB file peaked at heap ≈ 1.06 GB / RSS ≈ 1.32 GB;
     a leaky build died in GC at ≈ 1.30 GB of a ≈ 1.58 GB limit (≈ 82 %) without the old 85 % / 10k-row guard firing. Now:
-    job heap `--max-old-space-size=1700` on the 2 GiB job (V8 heap_size_limit ≈ 1.7 GB, RSS headroom ≈ 300 MB); the guard
-    trips at **75 % of heap_size_limit** (≈ 1.27 GB — the real file uses ≈ 83 % of that) after two consecutive
-    over-threshold checks, checked every **2,000 rows and at least every 2 s**. The threshold is relative to whatever
-    limit is configured, so changing NODE_OPTIONS moves it with it.
+    job heap `--max-old-space-size=1700` on the 2 GiB job. NOTE (audit of fe04e04, M-1): that flag sizes the OLD space
+    only — on node:24-alpine V8's heap_size_limit becomes ≈ 1,892 MB, so a fraction of heap_size_limit trips far too late
+    in a 2 GiB container. The budget is therefore FIXED bytes derived from the old-space size (`ingest/heap-budget.ts`):
+    the guard trips at **75 % of the old-space size = 1,275 MiB of USED heap** (the real file peaks at ≈ 1.06 GB ≈ 83 % of
+    that, > 15 % margin) after two consecutive over-threshold checks, checked every **2,000 rows (since the last check)
+    and at least every 2 s**. The old-space size is read from the process flags (execArgv over NODE_OPTIONS), else
+    estimated as 90 % of heap_size_limit.
     **Enforced, not just documented (audit M1/M2):** the job args carry `--max-old-space-size=1700` (§14), and
     `worker.main.ts` checks V8's heap limit at startup — below 1,600 MB it re-executes itself once with the flag, and fails
     fast with a clear log if the heap is still too small. The guard runs from every row AND from an unref'd 2 s timer, so
     phases without rows (exceljs building shared strings, the aggregate write loop, the unmatched.csv build) are covered;
     a trip destroys the current input stream and ends the import FAILED with the readable message. Only USED heap counts.
-    The xlsx shared-strings cap is min(512 MiB, 25 % of the heap limit) — 425 MiB at 1,700 MB.
+    The xlsx shared-strings cap is min(400 MiB, 25 % of the old-space size) — **400 MiB** for the job. The worker's startup
+    heap check imports only Node built-ins; Nest / Prisma / ExcelJS load after it, so a re-executing parent stays tiny.
+    A heap abort is always reported as "too large" (never as a "corrupt" xlsx: the re-sequencer does not report errors
+    after its output was destroyed, and the parse checks the abort flag first). The import detail page's month summary
+    rounds quantities per outlet / per customer exactly like the preview (audit L-4).
     Displayed quantities follow the stored values too: preview matched quantity = Σ per-outlet 3-dp values, unmatched =
     Σ per-customer 3-dp values; the KPI tester sums per-outlet stored values (audit L2/L3).
 
@@ -1221,6 +1228,8 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
   `IMPORT_ID` env). See §10a.5 (to verify on staging with the owner's go).
 - Job env: `NODE_OPTIONS=--max-old-space-size=1700` (2 GiB job; real-DB finding 1 — see §7.1 step 11. The earlier 1536 left the
   real file only ~8 % headroom under the heap backstop).
+  Memory budget at that setting (§7.1 step 11): old space 1,700 MB → V8 heap_size_limit ≈ 1,892 MB on node:24; heap
+  backstop trips at 1,275 MiB of used heap; shared-strings cap 400 MiB; real file peak ≈ 1.06 GB heap / 1.32 GB RSS.
 - **REQUIRED (audit fix round M3/S5; also retries GCS deletions of purged imports):** Cloud Scheduler hitting `POST /v1/sales-import/drain` every 10 min with header
   `x-drain-secret` (+ secret `SALES_IMPORT_DRAIN_SECRET` on the API service). It recovers an import whose worker died
   (heartbeat-stale PROCESSING is reclaimed on the next kick) and, when nothing is queued, drives the retention sweep.

@@ -8,13 +8,11 @@
  * (the api Dockerfile asserts the file exists). Claims imports until none is claimable, then exits 0.
  * OWNER: Lane I (task I-7). Lane-0 skeleton: claimNext() returns null → "processed: 0".
  */
+// L-1: ONLY Node built-ins + the tiny heap helper are imported up front. Nest / Prisma / ExcelJS / Storage are loaded
+// dynamically after the heap decision, so a parent that re-executes itself never loads them.
 import { spawn } from 'node:child_process';
 import * as v8 from 'node:v8';
-import { NestFactory } from '@nestjs/core';
-import { decideWorkerHeap } from './ingest/worker-heap';
-import { SalesImportWorkerModule } from './ingest/sales-import-worker.module';
-import { SalesImportProcessorService } from './ingest/sales-import-processor.service';
-import { SalesImportRetentionService } from './ingest/sales-import-retention.service';
+import { ensureWorkerHeap } from './ingest/worker-heap';
 
 // Same BigInt JSON rule as main.ts (paise/micro BigInt must never crash a JSON.stringify).
 (BigInt.prototype as unknown as { toJSON: () => number }).toJSON = function () {
@@ -22,17 +20,22 @@ import { SalesImportRetentionService } from './ingest/sales-import-retention.ser
 };
 
 async function main(): Promise<void> {
-  const heap = decideWorkerHeap(v8.getHeapStatistics().heap_size_limit, process.env, process.execArgv);
-  if (heap.kind === 'fail') {
-    console.error(JSON.stringify({ msg: heap.message }));
-    process.exit(1);
-  }
-  if (heap.kind === 'reexec') {
-    console.log(JSON.stringify({ msg: 'sales-import worker: heap below the floor; re-executing with the configured heap', execArgv: heap.execArgv }));
-    const child = spawn(process.execPath, [...heap.execArgv, ...process.argv.slice(1)], { stdio: 'inherit', env: { ...process.env, ...heap.env } });
-    child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
-    return;
-  }
+  const run = ensureWorkerHeap({
+    heapLimit: v8.getHeapStatistics().heap_size_limit,
+    env: process.env,
+    execArgv: process.execArgv,
+    argv: process.argv,
+    execPath: process.execPath,
+    spawn: (cmd, args, opts) => spawn(cmd, args, opts),
+    exit: (code) => process.exit(code),
+    log: (l) => console.log(l),
+    error: (l) => console.error(l),
+  });
+  if (!run) return;
+  const { NestFactory } = await import('@nestjs/core');
+  const { SalesImportWorkerModule } = await import('./ingest/sales-import-worker.module');
+  const { SalesImportProcessorService } = await import('./ingest/sales-import-processor.service');
+  const { SalesImportRetentionService } = await import('./ingest/sales-import-retention.service');
   const app = await NestFactory.createApplicationContext(SalesImportWorkerModule, { bufferLogs: true });
   const proc = app.get(SalesImportProcessorService);
   let processed = 0;
