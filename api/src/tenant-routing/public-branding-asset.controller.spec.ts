@@ -1,6 +1,11 @@
 import { NotFoundException, StreamableFile } from '@nestjs/common';
 import { Readable } from 'node:stream';
+import { Test } from '@nestjs/testing';
 import { PublicBrandingAssetController } from './public-branding-asset.controller';
+import { TenantRoutingModule } from './tenant-routing.module';
+import { TenantRoutingService } from './tenant-routing.service';
+import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
 
 const KEY = 'branding/bajaj/2026-11/5d3daa20-92f7-4ff8-8d2e-8ff59a429201-bajaj-logo.png';
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d]);
@@ -18,14 +23,16 @@ function setup(obj: { bytes: Buffer; contentType?: string; size?: number } | nul
     downloadBytes: jest.fn().mockResolvedValue(
       obj ? { bytes: obj.bytes, contentType: obj.contentType ?? 'image/png' } : null,
     ),
+    downloadObject: jest.fn().mockResolvedValue(obj ? obj.bytes : null),
     openReadStream: jest.fn((_k: string, range?: { start?: number; end?: number }) => {
       if (!obj) throw new Error('missing');
       const b = range ? obj.bytes.subarray(range.start ?? 0, (range.end ?? obj.bytes.length - 1) + 1) : obj.bytes;
       return Readable.from([b]);
     }),
   };
-  const controller = new PublicBrandingAssetController(storage as any);
-  return { storage, controller };
+  const routing = { isKnownTenantSlug: jest.fn().mockResolvedValue(true) };
+  const controller = new PublicBrandingAssetController(storage as any, routing as any);
+  return { storage, controller, routing };
 }
 
 function mockRes() {
@@ -41,6 +48,19 @@ async function bodyOf(file: StreamableFile): Promise<Buffer> {
 }
 
 describe('PublicBrandingAssetController', () => {
+  it('Nest DI wires the module (controller + TenantRoutingService with its optional clock)', async () => {
+    const findMany = jest.fn().mockResolvedValue([{ id: 'bajaj' }]);
+    const mod = await Test.createTestingModule({ imports: [TenantRoutingModule] })
+      .useMocker((token) => {
+        if (token === PrismaService) return { client: { findMany } };
+        if (token === StorageService) return {};
+        return undefined;
+      })
+      .compile();
+    expect(mod.get(PublicBrandingAssetController)).toBeInstanceOf(PublicBrandingAssetController);
+    await expect(mod.get(TenantRoutingService).isKnownTenantSlug('bajaj')).resolves.toBe(true);
+  });
+
   it('is @Public() and @SkipThrottle() (the IP throttler sees the frontend egress IP, not users)', () => {
     const handler = PublicBrandingAssetController.prototype.get;
     expect(Reflect.getMetadata('isPublic', handler)).toBe(true);
@@ -72,7 +92,26 @@ describe('PublicBrandingAssetController', () => {
     expect(await bodyOf(out)).toEqual(PNG);
     expect(headers['Content-Type']).toBe('image/png');
     expect(storage.statObject).toHaveBeenCalledTimes(1);
-    expect(storage.downloadBytes).toHaveBeenCalledTimes(1);
+    expect(storage.downloadObject).toHaveBeenCalledTimes(1);
+  });
+
+  it('a small cold miss costs ONE metadata call + ONE direct download (no second stat)', async () => {
+    const { controller, storage } = setup({ bytes: PNG });
+    await controller.get(KEY, mockRes().res);
+    expect(storage.statObject).toHaveBeenCalledTimes(1);
+    expect(storage.downloadObject).toHaveBeenCalledWith(KEY);
+    expect(storage.downloadBytes).not.toHaveBeenCalled(); // (it re-reads metadata)
+  });
+
+  it('404s (negative-cached) a key whose slug is not a known tenant, before any storage call', async () => {
+    const { controller, storage, routing } = setup({ bytes: PNG });
+    routing.isKnownTenantSlug.mockResolvedValue(false);
+    await expect(controller.get(KEY, mockRes().res)).rejects.toBeInstanceOf(NotFoundException);
+    await expect(controller.get(KEY, mockRes().res)).rejects.toBeInstanceOf(NotFoundException);
+    expect(routing.isKnownTenantSlug).toHaveBeenCalledTimes(1);
+    expect(routing.isKnownTenantSlug).toHaveBeenCalledWith('bajaj');
+    expect(storage.statObject).not.toHaveBeenCalled();
+    expect(storage.openReadStream).not.toHaveBeenCalled();
   });
 
   it('remembers a 404 briefly so a repeated missing key does not hit storage each time', async () => {
@@ -87,7 +126,7 @@ describe('PublicBrandingAssetController', () => {
     const { controller, storage } = setup({ bytes: big });
     const { res, headers } = mockRes();
     const out = await controller.get(KEY, res);
-    expect(storage.downloadBytes).not.toHaveBeenCalled();
+    expect(storage.downloadObject).not.toHaveBeenCalled();
     expect(storage.openReadStream).toHaveBeenCalledWith(KEY, { start: 0, end: 15 });
     expect(storage.openReadStream).toHaveBeenLastCalledWith(KEY);
     expect(headers['Content-Type']).toBe('image/png');
@@ -98,10 +137,76 @@ describe('PublicBrandingAssetController', () => {
     expect(storage.statObject).toHaveBeenCalledTimes(2);
   });
 
+  describe('large-object stream error (GCS fails mid-stream)', () => {
+    const GCS_ERR = new Error('No such object: gifsy-platform-files/branding/bajaj/2026-11/x.png');
+
+    async function streamed() {
+      const big = Buffer.concat([PNG, Buffer.alloc(600 * 1024, 7)]);
+      const { controller } = setup({ bytes: big });
+      return controller.get(KEY, mockRes().res);
+    }
+
+    function errRes(headersSent: boolean) {
+      const headers: Record<string, string> = {
+        'Content-Type': 'image/png',
+        'Content-Length': '614412',
+        'Content-Disposition': 'inline',
+        'Cache-Control': 'public, max-age=31536000, immutable',
+        'X-Content-Type-Options': 'nosniff',
+      };
+      let body = '';
+      const res: any = {
+        headersSent,
+        destroyed: false,
+        statusCode: 200,
+        removeHeader: jest.fn((k: string) => delete headers[k]),
+        setHeader: jest.fn((k: string, v: string) => (headers[k] = v)),
+        end: jest.fn((b?: string) => (body += b ?? '')),
+        send: jest.fn((b?: string) => (body += b ?? '')),
+        destroy: jest.fn(),
+      };
+      return { res, headers, body: () => body };
+    }
+
+    it('before headers are sent: bare 404, no-store, image/length headers removed, NO storage error text', async () => {
+      const out = await streamed();
+      const { res, headers, body } = errRes(false);
+      out.errorHandler(GCS_ERR, res);
+      expect(res.statusCode).toBe(404);
+      expect(headers['Cache-Control']).toBe('no-store');
+      expect(headers['Content-Length']).toBeUndefined();
+      expect(headers['Content-Disposition']).toBeUndefined();
+      expect(headers['Content-Type']).toBe('application/json; charset=utf-8');
+      expect(body()).not.toMatch(/gifsy-platform-files|No such object/);
+      expect(JSON.parse(body())).toEqual({ success: false, error: 'Not found' });
+      expect(res.send).not.toHaveBeenCalled();
+      expect(res.destroy).not.toHaveBeenCalled();
+    });
+
+    it('after headers were sent: the connection is destroyed (no truncated "complete" image), no error text', async () => {
+      const out = await streamed();
+      const { res, body } = errRes(true);
+      out.errorHandler(GCS_ERR, res);
+      expect(res.destroy).toHaveBeenCalled();
+      expect(res.end).not.toHaveBeenCalled();
+      expect(res.send).not.toHaveBeenCalled();
+      expect(body()).toBe('');
+    });
+
+    it('an already-destroyed response is left alone', async () => {
+      const out = await streamed();
+      const { res } = errRes(false);
+      res.destroyed = true;
+      out.errorHandler(GCS_ERR, res);
+      expect(res.end).not.toHaveBeenCalled();
+      expect(res.destroy).not.toHaveBeenCalled();
+    });
+  });
+
   it('404s an object over the 5 MB cap WITHOUT reading any bytes', async () => {
     const { controller, storage } = setup({ bytes: PNG, size: 5 * MB + 1 });
     await expect(controller.get(KEY, mockRes().res)).rejects.toBeInstanceOf(NotFoundException);
-    expect(storage.downloadBytes).not.toHaveBeenCalled();
+    expect(storage.downloadObject).not.toHaveBeenCalled();
     expect(storage.openReadStream).not.toHaveBeenCalled();
   });
 
@@ -123,7 +228,7 @@ describe('PublicBrandingAssetController', () => {
     const { controller, storage } = setup({ bytes: PNG });
     await expect(controller.get(key as any, mockRes().res)).rejects.toBeInstanceOf(NotFoundException);
     expect(storage.statObject).not.toHaveBeenCalled();
-    expect(storage.downloadBytes).not.toHaveBeenCalled();
+    expect(storage.downloadObject).not.toHaveBeenCalled();
     expect(storage.openReadStream).not.toHaveBeenCalled();
   });
 

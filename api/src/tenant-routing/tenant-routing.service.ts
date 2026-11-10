@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { toServableBrandingUrl } from '../storage/branding-asset';
 
@@ -30,9 +30,56 @@ export interface TenantRoutingResponse {
   tenants: PublicTenantRoute[];
 }
 
+/** How long the known-slug set (isKnownTenantSlug) is reused before a re-query. */
+const SLUG_SET_TTL_MS = 60_000;
+/** An unknown slug triggers one re-query only if the set is at least this old. */
+const SLUG_SET_MISS_REQUERY_MS = 5_000;
+
 @Injectable()
 export class TenantRoutingService {
-  constructor(private readonly prisma: PrismaService) {}
+  private slugSet: { slugs: Set<string>; at: number } | null = null;
+  private slugLoad: Promise<void> | null = null;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    // Test seam only (no provider registers this token → Nest injects undefined → Date.now).
+    @Optional() @Inject('TENANT_ROUTING_CLOCK') private readonly now: () => number = Date.now,
+  ) {}
+
+  /**
+   * Whether `slug` is an existing tenant (ANY status — the Gifsy console previews an
+   * INACTIVE tenant's uploaded branding too). Used by the public branding-asset route to
+   * 404 keys for non-existent tenants BEFORE any storage call. One cached `select id` query
+   * (60s TTL, coalesced); an unknown slug re-queries once if the set is > 5s old so a tenant
+   * created moments ago is found. FAILS OPEN (true) when the set cannot be loaded: this is a
+   * load-shedding filter — the key-shape validation is the security boundary.
+   */
+  async isKnownTenantSlug(slug: string): Promise<boolean> {
+    if (!this.slugSet || this.now() - this.slugSet.at > SLUG_SET_TTL_MS) await this.loadSlugs();
+    if (!this.slugSet) return true; // could not load → fail open
+    if (this.slugSet.slugs.has(slug)) return true;
+    if (this.now() - this.slugSet.at >= SLUG_SET_MISS_REQUERY_MS) {
+      await this.loadSlugs();
+      return this.slugSet?.slugs.has(slug) ?? true;
+    }
+    return false;
+  }
+
+  private loadSlugs(): Promise<void> {
+    if (this.slugLoad) return this.slugLoad;
+    this.slugLoad = this.prisma.client
+      .findMany({ select: { id: true } })
+      .then((rows) => {
+        this.slugSet = { slugs: new Set(rows.map((r) => r.id)), at: this.now() };
+      })
+      .catch(() => {
+        // Keep any last-good set; with none, isKnownTenantSlug fails open.
+      })
+      .finally(() => {
+        this.slugLoad = null;
+      });
+    return this.slugLoad;
+  }
 
   /**
    * Public, unauthenticated tenant-routing table. The Next.js edge proxy calls

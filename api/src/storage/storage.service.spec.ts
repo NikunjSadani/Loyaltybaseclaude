@@ -119,6 +119,21 @@ describe('StorageService', () => {
     });
   });
 
+  describe('downloadObject', () => {
+    it('downloads the bytes directly, with no metadata round-trip', async () => {
+      const file = { getMetadata: jest.fn(), download: jest.fn().mockResolvedValue([Buffer.from('abc')]) };
+      (service as unknown as { storage: unknown }).storage = { bucket: () => ({ file: () => file }) };
+      await expect(service.downloadObject('branding/x')).resolves.toEqual(Buffer.from('abc'));
+      expect(file.getMetadata).not.toHaveBeenCalled();
+    });
+
+    it('returns null (never throws) on a read error', async () => {
+      const file = { download: jest.fn().mockRejectedValue(new Error('gone')) };
+      (service as unknown as { storage: unknown }).storage = { bucket: () => ({ file: () => file }) };
+      await expect(service.downloadObject('branding/x')).resolves.toBeNull();
+    });
+  });
+
   describe('large-object helpers (Sales Import)', () => {
     function stubBucket() {
       const written: Buffer[] = [];

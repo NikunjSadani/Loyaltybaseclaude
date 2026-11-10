@@ -27,7 +27,9 @@
  *    band, call `refreshIfStale()` (via the proxy's `waitUntil`) to swap in fresh
  *    data for the NEXT request.
  *  - `invalidate()` marks the snapshot stale so the next `refreshIfStale()`
- *    refetches (last-good is kept for reads until the refetch lands — SWR).
+ *    refetches (last-good is kept for reads until the refetch lands — SWR). NOTE: it has
+ *    no production caller — tenant create/edit runs in the API, a different process — so
+ *    freshness relies on the 60s TTL + the render-path refreshOnMiss, never on invalidate.
  *  - Defensive fetch: AbortController timeout, try/catch, and on ANY failure the
  *    last-good snapshot (or null) is kept and at most a warning is logged. A
  *    backend outage must NOT break tenant resolution — the registry carries it.
@@ -81,11 +83,17 @@ const MISS_REFRESH_MIN_INTERVAL_MS = 5_000;
 /** Upper bound a render ever waits on a miss refresh (belt-and-braces over FETCH_TIMEOUT_MS). */
 const MISS_REFRESH_MAX_WAIT_MS = 2_000;
 /**
- * After a FAILED fetch (timeout / network / non-OK / malformed), no refresh of any kind
- * (warm, SWR, miss) is attempted for this long — so a down API costs one ≤2s fetch per 30s
- * per instance, not one per render. `invalidate()` (an operator edit) bypasses it.
+ * After a FAILED fetch (timeout / network / non-OK / malformed) no new refresh of any kind
+ * (warm, SWR, miss) is STARTED for a while, so a down API isn't retried on every render:
+ *  - WITH a last-good snapshot: 30s (renders keep using last-good meanwhile).
+ *  - With NO snapshot (cold instance): only ~3s — without a snapshot, DB-only tenants (e.g.
+ *    Bajaj, absent from CLIENT_REGISTRY) 404 at the proxy / render with default branding,
+ *    so a single cold-API timeout must not lock them out for 30s. (refreshOnMiss's own 5s
+ *    floor still applies.)
+ * Any success clears it. (invalidate() bypasses it, but has no production caller today.)
  */
 const FAILURE_BACKOFF_MS = 30_000;
+const COLD_FAILURE_BACKOFF_MS = 3_000;
 
 /** The branding fields we accept from the endpoint (whitelist — no secrets). */
 const BRANDING_FIELDS: (keyof PublicBranding)[] = [
@@ -112,7 +120,8 @@ let lastFailedAt = Number.NEGATIVE_INFINITY;
 
 /** True while inside the post-failure backoff window (and no operator invalidate is pending). */
 function inFailureBackoff(): boolean {
-  return !forcedStale && Date.now() - lastFailedAt < FAILURE_BACKOFF_MS;
+  const window = snapshot === null ? COLD_FAILURE_BACKOFF_MS : FAILURE_BACKOFF_MS;
+  return !forcedStale && Date.now() - lastFailedAt < window;
 }
 
 /**
@@ -257,9 +266,12 @@ function startRefresh(): Promise<void> {
 }
 
 /**
- * Force the next `refreshIfStale()` to refetch (e.g. after a client create/edit
- * server action changes routing/branding). The last-good snapshot is kept for
+ * Force the next `refreshIfStale()` to refetch. The last-good snapshot is kept for
  * SYNC reads until the refetch lands (stale-while-revalidate).
+ *
+ * NOT reachable in production today: tenant create/edit happens in the API (a separate
+ * process), and no Next server action calls this — so nothing in this app may rely on it
+ * for freshness (that is the 60s TTL + refreshOnMiss). Kept for a future same-process caller.
  */
 export function invalidate(): void {
   forcedStale = true;

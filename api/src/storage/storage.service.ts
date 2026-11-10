@@ -148,6 +148,20 @@ export class StorageService {
     }
   }
 
+  /**
+   * Download an object's bytes directly (no metadata round-trip), or null on any read
+   * error. For callers that already sized the object via statObject.
+   */
+  async downloadObject(key: string): Promise<Buffer | null> {
+    try {
+      const [buf] = await this.storage.bucket(this.bucket).file(key).download();
+      return buf;
+    } catch (err) {
+      this.logger.warn(`downloadObject: failed to read ${key}: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
   /** Delete an object. */
   async deleteFile(key: string): Promise<void> {
     await this.storage.bucket(this.bucket).file(key).delete();

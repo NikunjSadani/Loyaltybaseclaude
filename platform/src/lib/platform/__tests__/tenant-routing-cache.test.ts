@@ -232,13 +232,13 @@ describe('fail-safe fetch', () => {
 });
 
 describe('failure backoff — a down API is not retried on every render', () => {
-  it('after a failed fetch, refreshIfStale/ensureWarm do not refetch for 30s, then retry', async () => {
+  it('NO snapshot yet (cold instance): only a SHORT ~3s backoff, so DB-only tenants recover fast', async () => {
     const f = vi.fn().mockRejectedValue(new Error('down'));
     vi.stubGlobal('fetch', f);
     await ensureWarm();
     expect(f).toHaveBeenCalledTimes(1);
 
-    now += 29_999;
+    now += 2_999;
     await ensureWarm();
     await refreshIfStale();
     expect(f).toHaveBeenCalledTimes(1);
@@ -246,12 +246,26 @@ describe('failure backoff — a down API is not retried on every render', () => 
 
     now += 2;
     f.mockResolvedValue({ ok: true, json: async () => GOOD_PAYLOAD });
-    await refreshIfStale();
+    await ensureWarm();
     expect(f).toHaveBeenCalledTimes(2);
     expect(getRoutingSnapshot()).not.toBeNull();
   });
 
-  it('a stale-but-present snapshot keeps last-good and backs off after a failed refresh', async () => {
+  it('NO snapshot yet: refreshOnMiss is still allowed once the 5s miss floor passes', async () => {
+    const f = vi.fn().mockRejectedValueOnce(new Error('cold timeout'));
+    vi.stubGlobal('fetch', f);
+    await ensureWarm(); // the one cold-API timeout
+    now += 5_001;
+    f.mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: { tenants: [{ slug: 'bajaj', status: 'ACTIVE', domains: [], branding: { displayName: 'Bajaj' } }] } }),
+    });
+    await refreshOnMiss();
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(getRoutingSnapshot()?.slugToBranding.get('bajaj')).toEqual({ displayName: 'Bajaj' });
+  });
+
+  it('WITH a last-good snapshot: a failed refresh backs off the full 30s (SWR + miss), last-good kept', async () => {
     const f = mockFetchResolving(GOOD_PAYLOAD);
     await refreshIfStale();
     const good = getRoutingSnapshot();
@@ -261,8 +275,12 @@ describe('failure backoff — a down API is not retried on every render', () => 
     expect(f).toHaveBeenCalledTimes(2);
     now += 10_000;
     await refreshIfStale();
+    await refreshOnMiss();
     expect(f).toHaveBeenCalledTimes(2); // backing off
     expect(getRoutingSnapshot()).toBe(good);
+    now += 20_001;
+    await refreshIfStale();
+    expect(f).toHaveBeenCalledTimes(3);
   });
 
   it('a success clears the backoff (normal 60s TTL resumes)', async () => {
@@ -277,7 +295,9 @@ describe('failure backoff — a down API is not retried on every render', () => 
     expect(f).toHaveBeenCalledTimes(3);
   });
 
-  it('invalidate() (an operator edit) bypasses the backoff', async () => {
+  // invalidate() has no production caller today (tenant create/edit runs in the API, not a
+  // Next server action); this pins its contract for any future same-process caller.
+  it('invalidate() bypasses the backoff', async () => {
     const f = vi.fn().mockRejectedValue(new Error('down'));
     vi.stubGlobal('fetch', f);
     await refreshIfStale();
@@ -314,7 +334,7 @@ describe('refreshOnMiss — awaited, coalesced, throttled, bounded, never throws
     expect(f).toHaveBeenCalledTimes(1);
   });
 
-  it('throttles repeated misses (5s floor; 30s after a failure) even when fetches keep failing', async () => {
+  it('throttles repeated misses to one fetch per 5s even when fetches keep failing (no snapshot)', async () => {
     const f = vi.fn().mockRejectedValue(new Error('down'));
     vi.stubGlobal('fetch', f);
     await refreshOnMiss();
@@ -323,10 +343,7 @@ describe('refreshOnMiss — awaited, coalesced, throttled, bounded, never throws
     expect(f).toHaveBeenCalledTimes(1);
     expect(getRoutingSnapshot()).toBeNull(); // failure → unchanged (registry fallback)
     now += 5_001;
-    await refreshOnMiss(); // the 30s failure backoff also applies to misses
-    expect(f).toHaveBeenCalledTimes(1);
-    now += 25_000;
-    await refreshOnMiss();
+    await refreshOnMiss(); // no snapshot → only the short backoff, so the 5s floor governs
     expect(f).toHaveBeenCalledTimes(2);
   });
 

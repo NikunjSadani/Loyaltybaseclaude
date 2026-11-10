@@ -239,4 +239,53 @@ describe('TenantRoutingService', () => {
       expect(res.tenants[0].branding.logoUrl).toBe(kyc);
     });
   });
+
+  describe('isKnownTenantSlug (branding-asset load shedding)', () => {
+    function svcWith(idsSeq: Array<string[] | Error>) {
+      const findMany = jest.fn();
+      for (const ids of idsSeq) {
+        if (ids instanceof Error) findMany.mockRejectedValueOnce(ids);
+        else findMany.mockResolvedValueOnce(ids.map((id) => ({ id })));
+      }
+      let t = 1_000_000;
+      const svc = new TenantRoutingService({ client: { findMany } } as any, () => t);
+      return { svc, findMany, advance: (ms: number) => (t += ms) };
+    }
+
+    it('answers from ONE cached query of every Client id (any status: the console previews INACTIVE too)', async () => {
+      const { svc, findMany } = svcWith([['bajaj', 'deoleo']]);
+      await expect(svc.isKnownTenantSlug('bajaj')).resolves.toBe(true);
+      await expect(svc.isKnownTenantSlug('deoleo')).resolves.toBe(true);
+      expect(findMany).toHaveBeenCalledTimes(1);
+      expect(findMany.mock.calls[0][0]).toEqual({ select: { id: true } });
+    });
+
+    it('an unknown slug re-queries once (a tenant created moments ago) when the set is > 5s old, else 404s', async () => {
+      const { svc, findMany, advance } = svcWith([['deoleo'], ['deoleo', 'fresh']]);
+      await expect(svc.isKnownTenantSlug('ghost')).resolves.toBe(false); // just loaded: no re-query
+      expect(findMany).toHaveBeenCalledTimes(1);
+      advance(6_000);
+      await expect(svc.isKnownTenantSlug('fresh')).resolves.toBe(true);
+      expect(findMany).toHaveBeenCalledTimes(2);
+    });
+
+    it('refreshes the set after its 60s TTL', async () => {
+      const { svc, findMany, advance } = svcWith([['deoleo'], ['deoleo']]);
+      await svc.isKnownTenantSlug('deoleo');
+      advance(61_000);
+      await svc.isKnownTenantSlug('deoleo');
+      expect(findMany).toHaveBeenCalledTimes(2);
+    });
+
+    it('fails OPEN when the slug set cannot be loaded (a load filter, not the security boundary)', async () => {
+      const { svc } = svcWith([new Error('db down')]);
+      await expect(svc.isKnownTenantSlug('bajaj')).resolves.toBe(true);
+    });
+
+    it('coalesces concurrent loads onto one query', async () => {
+      const { svc, findMany } = svcWith([['bajaj']]);
+      await Promise.all([svc.isKnownTenantSlug('bajaj'), svc.isKnownTenantSlug('bajaj')]);
+      expect(findMany).toHaveBeenCalledTimes(1);
+    });
+  });
 });
