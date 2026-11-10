@@ -40,6 +40,7 @@ import { CreateSalesImportUploadDto, ListSalesImportsQueryDto } from './ingest/s
  *   POST   admin/sales-import/:id/complete                targets:upload
  *   POST   admin/sales-import/:id/reprocess               targets:upload
  *   POST   admin/sales-import/:id/cancel                  targets:upload (QUEUED / stalled PROCESSING → CANCELLED)
+ *   POST   admin/sales-import/:id/reprocess-as-new        targets:upload (applied + mapping changed → NEW import)
  *   DELETE admin/sales-import/:id                         targets:upload
  *   GET    admin/sales-import                             targets:read
  *   GET    admin/sales-import/:id                         targets:read
@@ -104,6 +105,14 @@ export class SalesImportController {
   async reprocess(@CurrentUser() user: JwtPayload, @Param('id') id: string): Promise<SalesImportSummary> {
     await this.gate(user, true);
     return this.uploads.reprocess(user, id);
+  }
+
+  /** Applied import + changed mapping → a NEW import from the same stored file (re-audit M3). Returns the NEW summary. */
+  @Post(':id/reprocess-as-new')
+  @RequirePermission('targets:upload')
+  async reprocessAsNew(@CurrentUser() user: JwtPayload, @Param('id') id: string): Promise<SalesImportSummary> {
+    await this.gate(user, true);
+    return this.uploads.reprocessAsNew(user, id);
   }
 
   @Post(':id/cancel')

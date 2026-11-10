@@ -191,11 +191,24 @@ describe('SalesMonthClosedGuard (D-1)', () => {
     return { guard: new SalesMonthClosedGuard(prisma as never), prisma };
   }
   const handler = (name: string) => ({ [name]: function () {} })[name];
-  const ctx = (period: unknown, where: 'body' | 'query' = 'query', user: JwtPayload = clientAdmin, route = 'export') =>
-    ({
+  /** A fake response: `finish(status)` simulates the handler having sent its response. */
+  const makeRes = () => {
+    const listeners: Array<() => void> = [];
+    const res = { statusCode: 200, once: (_ev: string, cb: () => void) => listeners.push(cb), finish: (status = 200) => { res.statusCode = status; listeners.forEach((l) => l()); } };
+    return res;
+  };
+  let lastRes = makeRes();
+  const ctx = (period: unknown, where: 'body' | 'query' = 'query', user: JwtPayload = clientAdmin, route = 'export') => {
+    lastRes = makeRes();
+    const res = lastRes;
+    return {
       getHandler: () => handler(route),
-      switchToHttp: () => ({ getRequest: () => ({ user, body: where === 'body' ? { period } : {}, query: where === 'query' ? { period } : {} }) }),
-    }) as unknown as ExecutionContext;
+      switchToHttp: () => ({
+        getRequest: () => ({ user, body: where === 'body' ? { period } : {}, query: where === 'query' ? { period } : {} }),
+        getResponse: () => res,
+      }),
+    } as unknown as ExecutionContext;
+  };
 
   it('flag OFF and no importer data for the month (Deoleo) → allow; month table never read, nothing recorded', async () => {
     const { guard, prisma } = guardWith({ walletModule: true });
@@ -210,13 +223,21 @@ describe('SalesMonthClosedGuard (D-1)', () => {
     await expect(guardWith({}, { state: 'CLOSED', closedAt: AT }, true).guard.canActivate(ctx(PREV))).resolves.toBe(true);
   });
 
-  it('M5: an allowed export / report is recorded as an EXPORT on the month (reopen warns); commit is not (it makes a CreditBatch)', async () => {
+  it('M5/L4: a SUCCESSFUL export / report is recorded as an EXPORT after the response finishes; a failed one and commit are not', async () => {
     const { guard, prisma } = guardWith({ salesImport: true });
     await guard.canActivate(ctx(OLD, 'query', clientAdmin, 'previewReport'));
+    expect(prisma.auditLog.create).not.toHaveBeenCalled(); // nothing before the handler ran
+    lastRes.finish(500);
+    expect(prisma.auditLog.create).not.toHaveBeenCalled(); // the export failed → not recorded
+    await guard.canActivate(ctx(OLD, 'query', clientAdmin, 'previewReport'));
+    lastRes.finish(200);
+    await new Promise((r) => setImmediate(r));
     expect(prisma.auditLog.create.mock.calls[0][0].data).toEqual(expect.objectContaining({
       action: 'EXPORT', entityType: 'SALES_MONTH', entityId: `t1:${OLD}`, actorId: 'ca', metadata: expect.objectContaining({ route: 'previewReport' }),
     }));
     await guard.canActivate(ctx(OLD, 'body', clientAdmin, 'commit'));
+    lastRes.finish(201);
+    await new Promise((r) => setImmediate(r));
     expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
   });
 
@@ -231,13 +252,29 @@ describe('SalesMonthClosedGuard (D-1)', () => {
     await expect(guardWith({ salesImport: true }).guard.canActivate(ctx(OLD))).resolves.toBe(true);
   });
 
-  it('M5: a DB error while checking fails CLOSED (503) — never an unchecked export', async () => {
-    const prisma = {
-      client: { findUnique: jest.fn(async () => { throw new Error('db'); }) },
-      salesImportApply: { findFirst: jest.fn(async () => null) },
-      salesMonthStatus: { findUnique: jest.fn() },
-    };
-    await expect(new SalesMonthClosedGuard(prisma as never).canActivate(ctx(CUR))).rejects.toBeInstanceOf(ServiceUnavailableException);
+  const failing = () => jest.fn(async () => { throw new Error('db'); });
+
+  it('L3: a tenant that never used Sales Import is NEVER blocked by a failed read (fails OPEN — Deoleo)', async () => {
+    // flag read fails, no apply for the month
+    const a = { client: { findUnique: failing() }, salesImportApply: { findFirst: jest.fn(async () => null) }, salesMonthStatus: { findUnique: failing() } };
+    await expect(new SalesMonthClosedGuard(a as never).canActivate(ctx(CUR))).resolves.toBe(true);
+    // flag OFF and the apply lookup fails
+    const b = { client: { findUnique: jest.fn(async () => ({ status: 'ACTIVE', features: {} })) }, salesImportApply: { findFirst: failing() }, salesMonthStatus: { findUnique: failing() } };
+    await expect(new SalesMonthClosedGuard(b as never).canActivate(ctx(CUR))).resolves.toBe(true);
+    // both reads fail
+    const c = { client: { findUnique: failing() }, salesImportApply: { findFirst: failing() }, salesMonthStatus: { findUnique: failing() } };
+    await expect(new SalesMonthClosedGuard(c as never).canActivate(ctx(CUR))).resolves.toBe(true);
+    // flag OFF: the apply lookup comes AFTER the flag read and the month table is never touched
+    expect(b.client.findUnique.mock.invocationCallOrder[0]).toBeLessThan(b.salesImportApply.findFirst.mock.invocationCallOrder[0]);
+    expect(b.salesMonthStatus.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('L3: once Sales Import is involved (flag ON, or importer data for the month), a failed month read fails CLOSED (503)', async () => {
+    const on = { client: { findUnique: jest.fn(async () => ({ status: 'ACTIVE', features: { salesImport: true } })) }, salesImportApply: { findFirst: jest.fn() }, salesMonthStatus: { findUnique: failing() } };
+    await expect(new SalesMonthClosedGuard(on as never).canActivate(ctx(PREV))).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(on.salesImportApply.findFirst).not.toHaveBeenCalled(); // flag ON → no need to look for applies
+    const data = { client: { findUnique: failing() }, salesImportApply: { findFirst: jest.fn(async () => ({ id: 'a1' })) }, salesMonthStatus: { findUnique: failing() } };
+    await expect(new SalesMonthClosedGuard(data as never).canActivate(ctx(PREV))).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 
   it('malformed period → allow (the route pipe rejects it)', async () => {

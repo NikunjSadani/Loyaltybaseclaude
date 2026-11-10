@@ -4,7 +4,8 @@
  * differ ("reprocess the file"), because the aggregates were built under the old reading of the file (a different
  * amount column, dimension, date order, decimal separator…).
  *
- * Only what changes the PARSED NUMBERS is hashed (dimension LABELS are display text and are ignored); headers are
+ * Only what changes the PARSED NUMBERS is hashed (dimension LABELS and the outlet-NAME column — it only feeds
+ * unmatched.csv — are ignored); headers are
  * compared after normalizeHeader, exactly as the parser matches them.
  */
 import { createHash } from 'node:crypto';
@@ -23,7 +24,6 @@ export function mappingFingerprint(m: SalesColumnMapping | null | undefined): st
     h(m.sheetName ?? null),
     m.headerRow ?? 'auto',
     h(m.outletCode),
-    h(m.outletName ?? null),
     h(m.invoiceDate),
     h(m.amount ?? null),
     h(m.quantity ?? null),

@@ -12,10 +12,16 @@ ALTER TABLE "sales_imports" ADD COLUMN "queuedAt" TIMESTAMP(3);
 -- S5: raw parts / unmatched.csv / aggregates / sample rows purged (retention).
 ALTER TABLE "sales_imports" ADD COLUMN "purgedAt" TIMESTAMP(3);
 
--- H3: quantities are accumulated at 1e-12 (pico-cases) instead of 1e-6 so per-line rounding cannot drift
--- a monthly total. Existing rows (dev only; the feature is unreleased) are rescaled in place.
+-- S5: GCS objects are deleted AFTER the purge is marked (no GCS I/O inside a transaction); the sweep retries.
+ALTER TABLE "sales_imports" ADD COLUMN "filesPurgedAt" TIMESTAMP(3);
+-- "Reprocess as a new import" for an applied import whose mapping changed: the new import's source.
+ALTER TABLE "sales_imports" ADD COLUMN "reprocessedFromId" TEXT;
+
+-- H3: quantities are accumulated at 1e-12 (pico-cases) instead of 1e-6 so per-line rounding cannot drift a monthly
+-- total. Aggregates written before this migration belong to imports with no mappingFingerprint, which preview/apply
+-- can never use (they must be reprocessed), so they are DELETED rather than rescaled (dev data only; unreleased).
+DELETE FROM "sales_import_aggregates";
 ALTER TABLE "sales_import_aggregates" RENAME COLUMN "qtyMicro" TO "qtyPico";
-UPDATE "sales_import_aggregates" SET "qtyPico" = "qtyPico" * 1000000;
 
 -- S5 retention sweep + per-tenant in-flight cap.
 CREATE INDEX "sales_imports_status_finishedAt_idx" ON "sales_imports"("status", "finishedAt");

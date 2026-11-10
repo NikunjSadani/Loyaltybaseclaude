@@ -219,3 +219,32 @@ describe('cell flattening', () => {
     expect(denseCells(undefined)).toEqual([]);
   });
 });
+
+describe('re-audit M2: inflated bytes are enforced against the declared sizes', () => {
+  async function consume(stream: Readable): Promise<void> {
+    for await (const _ of stream) void _;
+  }
+  async function tampered(name: string, delta: number) {
+    const buf = await exceljsWorkbook([['Data', ROWS]]);
+    const src = bufferRangeSource(buf);
+    const entries = (await loadCentralDirectory(src, buf.length)).map((e) => (e.name === name ? { ...e, uncompressedSize: e.uncompressedSize + delta } : e));
+    return { src, plan: planXlsxRead(entries) };
+  }
+
+  it.each(['xl/worksheets/sheet1.xml', 'xl/sharedStrings.xml'])('%s inflating to MORE than declared → XlsxFileError (zip bomb), reported via onError', async (name) => {
+    const { src, plan } = await tampered(name, -10);
+    const errors: Error[] = [];
+    await expect(consume(resequencedXlsxStream(src, plan, undefined, (e) => errors.push(e)))).rejects.toThrow(/unpacks to more than its declared/);
+    expect(errors[0]).toBeInstanceOf(XlsxFileError);
+  });
+
+  it('inflating to LESS than declared → XlsxFileError (corrupt)', async () => {
+    const { src, plan } = await tampered('xl/worksheets/sheet1.xml', +10);
+    await expect(consume(resequencedXlsxStream(src, plan))).rejects.toThrow(/not the declared/);
+  });
+
+  it('honest sizes still read end to end (entries are handed to exceljs STORED)', async () => {
+    const buf = await exceljsWorkbook([['Data', ROWS]]);
+    expectSyntheticRows(await readViaResequencer(buf));
+  });
+});

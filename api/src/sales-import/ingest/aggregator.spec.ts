@@ -218,3 +218,20 @@ describe('SalesAggregator', () => {
     expect(() => big.push(row('O1', '2026-10-03', 'X', '500', 1, '9000001'), 2)).toThrow(AggregatorLimitError);
   });
 });
+
+describe('SalesAggregator — re-audit memory bound', () => {
+  it('aggregate + unmatched entries are bounded COMBINED (a hostile file fails readably, not with an OOM)', () => {
+    const a = new SalesAggregator(MAP, IDX, roster([]), TODAY, '.', { maxTracked: 3 });
+    a.push(row('U1', '2026-10-03', 'X', '500', 1, 1), 2); // 1 aggregate + 1 unmatched
+    expect(() => a.push(row('U2', '2026-10-03', 'X', '500', 1, 1), 3)).toThrow(/too large to process in one go/);
+  });
+
+  it('collects decimal evidence only when asked (auto mode)', () => {
+    const on = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY, '.', {}, { collectDecimalEvidence: true });
+    on.push(row('O1', '2026-10-03', 'X', '500', '0.500', '2.000'), 2);
+    expect(on.result().decimalEvidence).toEqual({ dot: 1, comma: 0, ambiguous: 1, examples: { dot: '0.500', ambiguous: '2.000' } });
+    const off = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY);
+    off.push(row('O1', '2026-10-03', 'X', '500', '0.500', '2.000'), 2);
+    expect(off.result().decimalEvidence).toEqual({ dot: 0, comma: 0, ambiguous: 0, examples: {} });
+  });
+});

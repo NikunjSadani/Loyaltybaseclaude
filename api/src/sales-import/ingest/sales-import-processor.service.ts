@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma, type SalesImport } from '@prisma/client';
 import { createHash, randomUUID } from 'node:crypto';
+import * as v8 from 'node:v8';
 import { Readable, Transform, pipeline } from 'node:stream';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StorageService } from '../../storage/storage.service';
@@ -12,12 +13,12 @@ import {
   SALES_IMPORT_SAMPLE_ROWS,
   type SalesColumnMapping,
 } from '../sales-import.contract';
-import { AggregatorLimitError, SalesAggregator, type AggregatorResult } from './aggregator';
+import { AggregatorLimitError, SalesAggregator, type AggregatorResult, type DecimalEvidenceSummary } from './aggregator';
 import { claimNextImport } from './claim';
 import { CsvLimitError, csvRows } from './csv-row-source';
 import { HEADER_SCAN_ROWS, resolveHeader, type SourceRow } from './header';
 import { mappingFingerprint } from './mapping-fingerprint';
-import { normalizeHeader, resolveDecimalSeparator } from './normalize';
+import { normalizeHeader, resolveDecimalSeparator, type DecimalSeparator } from './normalize';
 import { PartsFile, unmatchedCsvKey } from './parts-file';
 import { loadRoster } from './roster';
 import { unmatchedCsvLines } from './unmatched-csv';
@@ -34,8 +35,46 @@ const MAX_PREHEADER_ROWS = 1000;
 /** The final READY write (delete + insert all aggregates) runs in ONE transaction; generous for ~2M rows. */
 const FINAL_TX_TIMEOUT_MS = 30 * 60_000;
 
+/** Memory backstop: fail the import readably when the heap passes this fraction of V8's limit (checked every N rows). */
+const HEAP_GUARD_FRACTION = 0.85;
+const HEAP_CHECK_ROWS = 10_000;
+
 /** A problem with the FILE (shown to the admin verbatim). */
 class FileProblem extends Error {}
+
+interface AggregatorReadOptions {
+  decimal: DecimalSeparator;
+  collectDecimalEvidence: boolean;
+}
+
+type ParseOutcome =
+  | { kind: 'needsMapping'; reason: string; detectedHeaders: string[][] | null }
+  | { kind: 'ok'; result: AggregatorResult; detectedHeaders: string[][] };
+
+/**
+ * 'auto' decimal separator (H1 re-audit), decided ONCE per file from the text measure values: unambiguous evidence for
+ * exactly one separator decides; evidence for BOTH, or only ambiguous values ("2.000": 2 or 2000?) → NEEDS_MAPPING with a
+ * clear reason — never a guess. No separator anywhere → the starting separator (it changes nothing).
+ */
+export function decideDecimal(ev: DecimalEvidenceSummary, start: DecimalSeparator): { decimal: DecimalSeparator } | { needsMapping: string } {
+  if (ev.dot > 0 && ev.comma > 0) {
+    return {
+      needsMapping:
+        `The amount / quantity values use both "." and "," as the decimal separator (e.g. "${ev.examples.dot}" and "${ev.examples.comma}"). ` +
+        'Fix the file, or choose the decimal separator in Sales Import settings, then Reprocess.',
+    };
+  }
+  if (ev.dot > 0) return { decimal: '.' };
+  if (ev.comma > 0) return { decimal: ',' };
+  if (ev.ambiguous > 0) {
+    return {
+      needsMapping:
+        `Choose the decimal separator in Sales Import settings, then Reprocess: values like "${ev.examples.ambiguous}" could mean ` +
+        'a whole number with a thousands separator or a decimal, and nothing else in the file tells which.',
+    };
+  }
+  return { decimal: start };
+}
 /** This worker's claim was superseded (reprocess / cancel / reclaim): stop, write nothing. */
 export class ClaimLostError extends Error {}
 
@@ -84,7 +123,8 @@ export function detectedHeadersOf(head: SourceRow[], headerIdx: number | null): 
  * unreadable / oversized file, unexpected error — message, no stack).
  * M2: only the claim whose RANDOM `claimToken` is still on the row may heartbeat or finalise; a heartbeat that matches
  * nothing (reprocessed / cancelled / reclaimed) aborts the run without writing. The READY write (delete old aggregates,
- * insert new ones, flip to READY, unmatched.csv) is ONE transaction holding the row lock, guarded by the token.
+ * insert new ones, flip to READY) is ONE transaction holding the row lock, guarded by the token (unmatched.csv is
+ * written to GCS just before it, never inside it).
  */
 @Injectable()
 export class SalesImportProcessorService {
@@ -160,63 +200,134 @@ export class SalesImportProcessorService {
 
     // Progress + heartbeat (single in-flight write; never blocks the parse). A heartbeat that matches no row means the
     // claim is gone (reprocess / cancel / reclaim): the parse loop stops at the next row.
-    let bytesRead = 0;
-    let rowsSeen = 0;
-    let lastBeatAt = Date.now();
-    let lastBeatRows = 0;
+    const prog = { bytesRead: 0, rowsSeen: 0, lastBeatAt: Date.now(), lastBeatRows: 0, writing: false, lost: false };
     let inflight: Promise<unknown> = Promise.resolve();
-    let writing = false;
-    let lost = false;
-    const beat = (force = false) => {
+    const beat = () => {
       const now = Date.now();
-      if (!force && (writing || (now - lastBeatAt < HEARTBEAT_MS && rowsSeen - lastBeatRows < HEARTBEAT_ROWS))) return;
-      lastBeatAt = now;
-      lastBeatRows = rowsSeen;
-      writing = true;
+      if (prog.writing || (now - prog.lastBeatAt < HEARTBEAT_MS && prog.rowsSeen - prog.lastBeatRows < HEARTBEAT_ROWS)) return;
+      prog.lastBeatAt = now;
+      prog.lastBeatRows = prog.rowsSeen;
+      prog.writing = true;
       inflight = this.prisma.salesImport
         .updateMany({
           where: this.ownWhere(row),
-          data: { rowsRead: rowsSeen, bytesRead: BigInt(Math.min(size, bytesRead)), heartbeatAt: new Date() },
+          data: { rowsRead: prog.rowsSeen, bytesRead: BigInt(Math.min(size, prog.bytesRead)), heartbeatAt: new Date() },
         })
         .then((r) => {
-          if (r.count === 0) lost = true;
+          if (r.count === 0) prog.lost = true;
         })
         .catch((e: unknown) => this.logger.warn(`sales-import ${row.id} heartbeat failed: ${(e as Error).message}`))
-        .finally(() => (writing = false));
+        .finally(() => (prog.writing = false));
     };
     const checkClaim = () => {
-      if (lost) throw new ClaimLostError();
+      if (prog.lost) throw new ClaimLostError();
+    };
+    const heapCap = v8.getHeapStatistics().heap_size_limit * HEAP_GUARD_FRACTION;
+    const onRow = () => {
+      prog.rowsSeen++;
+      beat();
+      checkClaim();
+      // Memory backstop (plan §7.1 step 11): fail readably before an OOM kill, whatever the shape of the file.
+      if (prog.rowsSeen % HEAP_CHECK_ROWS === 0 && process.memoryUsage().heapUsed > heapCap) {
+        throw new FileProblem('The file is too large to process in one go. Split it by month and upload the parts separately.');
+      }
     };
 
-    // ── Source rows + sha256 of the whole upload ──
+    // ── Pass 1: sha256 of the whole upload + parse (+ decimal-separator evidence when the mapping says 'auto') ──
+    const setting = mapping?.decimalSeparator ?? 'auto';
     const hash = createHash('sha256');
+    const p1 = await this.parsePass(row, mapping, roster.byNormalizedCode, parts, size, prog, beat, checkClaim, onRow, {
+      hash,
+      collectDecimalEvidence: setting === 'auto',
+    });
+    await inflight;
+    checkClaim();
+    let outcome = p1.outcome;
+    if (outcome.kind === 'ok' && p1.hashedBytes !== size) {
+      throw new FileProblem(`The uploaded file is incomplete (${p1.hashedBytes} of ${size} bytes stored). Upload it again.`);
+    }
+
+    // ── 'auto' decimal separator: decided ONCE per file from the evidence; never guessed (H1 re-audit) ──
+    if (outcome.kind === 'ok' && setting === 'auto') {
+      const decision = decideDecimal(outcome.result.decimalEvidence, p1.decimal);
+      if ('needsMapping' in decision) {
+        outcome = { kind: 'needsMapping', reason: decision.needsMapping, detectedHeaders: outcome.detectedHeaders };
+      } else if (decision.decimal !== p1.decimal) {
+        // Pass 1 read text numbers with the other separator: read the file again with the decided one.
+        prog.rowsSeen = 0;
+        const p2 = await this.parsePass(row, mapping, roster.byNormalizedCode, parts, size, prog, beat, checkClaim, onRow, {
+          decimal: decision.decimal,
+        });
+        await inflight;
+        checkClaim();
+        outcome = p2.outcome;
+      }
+    }
+
+    if (outcome.kind === 'needsMapping') {
+      await this.finish(row, {
+        status: 'NEEDS_MAPPING',
+        error: outcome.reason,
+        detectedHeaders: (outcome.detectedHeaders ?? Prisma.DbNull) as Prisma.InputJsonValue,
+        rowsRead: 0,
+        rowsSkipped: 0,
+      });
+      return;
+    }
+    await this.writeReady(row, mapping!, outcome.result, outcome.detectedHeaders, hash.digest('hex'), size);
+  }
+
+  /** One streaming read of the stored file (pass 1 also hashes it). Always releases its streams. */
+  private async parsePass(
+    row: SalesImport,
+    mapping: SalesColumnMapping | null,
+    roster: Map<string, string>,
+    parts: PartsFile,
+    size: number,
+    prog: { bytesRead: number },
+    beat: () => void,
+    checkClaim: () => void,
+    onRow: () => void,
+    opts: { hash?: ReturnType<typeof createHash>; decimal?: DecimalSeparator; collectDecimalEvidence?: boolean },
+  ): Promise<{ outcome: ParseOutcome; hashedBytes: number; decimal: DecimalSeparator }> {
     let hashedBytes = 0;
     let csvDelimiter: string | null = null;
     let source: Readable;
     let rows: AsyncGenerator<SourceRow>;
+    const xlsxFailure: { error: Error | null } = { error: null };
     if (row.fileKind === 'XLSX') {
-      // Sequential hash pass (cheap; the parse below reads only the needed zip entries, by range).
-      for await (const c of parts.stream()) {
-        hash.update(c as Buffer);
-        hashedBytes += (c as Buffer).length;
-        beat();
-        checkClaim();
+      if (opts.hash) {
+        // Sequential hash pass (cheap; the parse below reads only the needed zip entries, by range).
+        for await (const c of parts.stream()) {
+          opts.hash.update(c as Buffer);
+          hashedBytes += (c as Buffer).length;
+          beat();
+          checkClaim();
+        }
       }
       const plan = planXlsxRead(await loadCentralDirectory(parts, size));
       const scale = plan.totalCompressedBytes > 0 ? size / plan.totalCompressedBytes : 1;
       let copied = 0;
-      source = resequencedXlsxStream(parts, plan, (n) => {
-        copied += n;
-        bytesRead = Math.round(copied * scale);
-        beat();
-      });
+      source = resequencedXlsxStream(
+        parts,
+        plan,
+        (n) => {
+          copied += n;
+          prog.bytesRead = Math.round(copied * scale);
+          beat();
+        },
+        (e) => (xlsxFailure.error = e),
+      );
       rows = xlsxRows(source, mapping?.sheetName ?? null);
     } else {
+      const hash = opts.hash;
       const tee = new Transform({
         transform(chunk: Buffer, _enc, cb) {
-          hash.update(chunk);
-          hashedBytes += chunk.length;
-          bytesRead = hashedBytes;
+          if (hash) {
+            hash.update(chunk);
+            hashedBytes += chunk.length;
+          }
+          prog.bytesRead = Math.max(prog.bytesRead, hashedBytes);
           beat();
           cb(null, chunk);
         },
@@ -226,32 +337,17 @@ export class SalesImportProcessorService {
       source = pipeline(parts.stream(), tee, () => undefined);
       rows = csvRows(source, undefined, { onDelimiter: (d) => (csvDelimiter = d) });
     }
-
+    let decimal: DecimalSeparator = opts.decimal ?? '.';
     try {
-      const outcome = await this.parse(row, mapping, roster.byNormalizedCode, rows, () => csvDelimiter, () => {
-        rowsSeen++;
-        beat();
-        checkClaim();
-      });
-      await inflight;
-      checkClaim();
-      if (outcome.kind === 'needsMapping') {
-        await this.finish(row, {
-          status: 'NEEDS_MAPPING',
-          error: outcome.reason,
-          detectedHeaders: (outcome.detectedHeaders ?? Prisma.DbNull) as Prisma.InputJsonValue,
-          rowsRead: 0,
-          rowsSkipped: 0,
-        });
-        return;
-      }
-      if (hashedBytes !== size) {
-        throw new FileProblem(`The uploaded file is incomplete (${hashedBytes} of ${size} bytes stored). Upload it again.`);
-      }
-      await this.writeReady(row, mapping!, outcome.result, outcome.detectedHeaders, hash.digest('hex'), size);
+      // Called when the header is resolved (the CSV delimiter is known by then): how the aggregator reads text numbers.
+      const aggOpts = () => {
+        decimal = opts.decimal ?? resolveDecimalSeparator(mapping?.decimalSeparator, csvDelimiter);
+        return { decimal, collectDecimalEvidence: opts.collectDecimalEvidence === true };
+      };
+      const outcome = await this.parse(row, mapping, roster, rows, onRow, aggOpts, xlsxFailure);
+      return { outcome, hashedBytes, decimal };
     } finally {
       if (!source.destroyed) source.destroy();
-      await inflight;
     }
   }
 
@@ -260,12 +356,10 @@ export class SalesImportProcessorService {
     mapping: SalesColumnMapping | null,
     roster: Map<string, string>,
     rows: AsyncGenerator<SourceRow>,
-    delimiter: () => string | null,
     onRow: () => void,
-  ): Promise<
-    | { kind: 'needsMapping'; reason: string; detectedHeaders: string[][] | null }
-    | { kind: 'ok'; result: AggregatorResult; detectedHeaders: string[][] }
-  > {
+    aggOpts: () => AggregatorReadOptions,
+    xlsxFailure: { error: Error | null },
+  ): Promise<ParseOutcome> {
     const head: SourceRow[] = [];
     let aggregator: SalesAggregator | null = null;
     let detectedHeaders: string[][] = [];
@@ -282,12 +376,14 @@ export class SalesImportProcessorService {
         head.push(r.cells.length > SALES_IMPORT_MAX_COLUMNS ? { rowNo: r.rowNo, cells: r.cells.slice(0, SALES_IMPORT_MAX_COLUMNS) } : r);
         const enough = want === null ? head.length >= HEADER_SCAN_ROWS : r.rowNo >= want || head.length >= MAX_PREHEADER_ROWS;
         if (!enough) continue;
-        const decided = this.decideHeader(mapping, head, roster, delimiter());
+        const decided = this.decideHeader(mapping, head, roster, aggOpts);
         detectedHeaders = decided.detectedHeaders;
         if (decided.kind === 'needsMapping') return decided;
         aggregator = decided.aggregator;
       }
-    } catch (e) {
+    } catch (err) {
+      // M2: a size violation detected by the xlsx re-sequencer is the root cause, whatever exceljs wrapped it in.
+      const e = xlsxFailure.error ?? err;
       if (e instanceof XlsxSheetNotFoundError) return { kind: 'needsMapping', reason: e.message, detectedHeaders: null };
       if (e instanceof XlsxFileError || e instanceof FileProblem || e instanceof AggregatorLimitError || e instanceof ClaimLostError) throw e;
       if (e instanceof CsvLimitError) throw new FileProblem(`The CSV file could not be read: ${e.message}`);
@@ -298,9 +394,10 @@ export class SalesImportProcessorService {
           : `The CSV file could not be read: ${detail}`,
       );
     }
+    if (xlsxFailure.error) throw xlsxFailure.error;
     if (!aggregator) {
       // The file ended inside the header-scan window.
-      const decided = this.decideHeader(mapping, head, roster, delimiter());
+      const decided = this.decideHeader(mapping, head, roster, aggOpts);
       if (decided.kind === 'needsMapping') return decided;
       aggregator = decided.aggregator;
       detectedHeaders = decided.detectedHeaders;
@@ -312,7 +409,7 @@ export class SalesImportProcessorService {
     mapping: SalesColumnMapping | null,
     head: SourceRow[],
     roster: Map<string, string>,
-    csvDelimiter: string | null,
+    aggOpts: () => AggregatorReadOptions,
   ):
     | { kind: 'needsMapping'; reason: string; detectedHeaders: string[][] }
     | { kind: 'ok'; aggregator: SalesAggregator; detectedHeaders: string[][] } {
@@ -326,15 +423,15 @@ export class SalesImportProcessorService {
     if (head.length === 0) return { kind: 'needsMapping', reason: 'The file has no rows.', detectedHeaders: [] };
     const res = resolveHeader(head, mapping);
     if (res.needsMapping) return { kind: 'needsMapping', reason: res.reason, detectedHeaders: detectedHeadersOf(head, null) };
-    const decimal = resolveDecimalSeparator(mapping.decimalSeparator, csvDelimiter);
-    const agg = new SalesAggregator(mapping, res.colIdx, roster, undefined, decimal);
+    const { decimal, collectDecimalEvidence } = aggOpts();
+    const agg = new SalesAggregator(mapping, res.colIdx, roster, undefined, decimal, {}, { collectDecimalEvidence });
     for (const r of head.slice(res.headerRowIdx + 1)) agg.push(r.cells, r.rowNo);
     return { kind: 'ok', aggregator: agg, detectedHeaders: detectedHeadersOf(head, res.headerRowIdx) };
   }
 
   /**
    * The READY write (M2): ONE transaction that first re-locks the row by its claim token (a superseded worker finds
-   * nothing → ClaimLostError, nothing written), then replaces the aggregates, stores unmatched.csv and flips the row to
+   * nothing → ClaimLostError, nothing written), then replaces the aggregates and flips the row to
    * READY with a new processingVersion (M7) and the mapping fingerprint (H2). A preview/apply can never observe a
    * half-written aggregate set, and a reprocess/cancel arriving meanwhile gets 409 busy (its NOWAIT lock fails).
    */
@@ -346,6 +443,9 @@ export class SalesImportProcessorService {
     sha256: string,
     size: number,
   ): Promise<void> {
+    // GCS I/O never runs inside a DB transaction (re-audit M1). Written first: if the claim turns out to be lost below,
+    // the object is an orphan under this import's own prefix and goes with its delete / retention purge.
+    await this.storage.uploadStream(unmatchedCsvKey(row.gcsPrefix), Readable.from(unmatchedCsvLines(result.unmatched())), 'text/csv; charset=utf-8');
     await this.prisma.$transaction(
       async (tx) => {
         const own = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
@@ -374,8 +474,6 @@ export class SalesImportProcessorService {
           }
         }
         if (batch.length) await tx.salesImportAggregate.createMany({ data: batch });
-
-        await this.storage.uploadStream(unmatchedCsvKey(row.gcsPrefix), Readable.from(unmatchedCsvLines(result.unmatched())), 'text/csv; charset=utf-8');
 
         const duplicate = await tx.salesImport.findFirst({
           where: { clientId: row.clientId, contentSha256: sha256, status: 'READY', id: { not: row.id }, createdAt: { lte: row.createdAt } },

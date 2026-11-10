@@ -30,6 +30,7 @@ import {
   normalizeOutletCode,
   paiseToRupees,
   parseInvoiceDateDetailed,
+  classifyDecimal,
   picoToCases,
   stableDimKey,
   toPaise,
@@ -88,16 +89,33 @@ interface ComboAcc {
  */
 export const TRACKED_VALUES_PER_DIM = 20_000;
 export const TRACKED_COMBOS = 50_000;
-/** Hard memory bounds (S4): exceeding one fails the import with a readable message. */
-export const MAX_AGGREGATE_KEYS = 2_000_000;
-export const MAX_UNMATCHED_KEYS = 2_000_000;
+/**
+ * Hard memory bounds (S4; budget in plan §7.1 step 11): exceeding one fails the import with a readable message long
+ * before the 1.5 GB heap is at risk. Measured ≈ 0.4 KB of heap per tracked entry (aggregate or unmatched) incl. Map
+ * overhead and BigInts; 1.8 M entries ≈ 720 MB + exceljs shared strings (≤ ~350 MB) + the code set (≤ ~50 MB).
+ * The real 205 MB file needs ≈ 0.6 M aggregate + 0.4 M unmatched entries and ≈ 0.2 M codes.
+ */
+export const MAX_AGGREGATE_KEYS = 1_500_000;
+export const MAX_UNMATCHED_KEYS = 900_000;
+export const MAX_TRACKED_ENTRIES = 1_800_000; // aggregates + unmatched, combined
+/** Customer names kept for unmatched.csv are truncated to this many characters (memory bound). */
+export const UNMATCHED_NAME_CHARS = 80;
 /** |Σ quantity| of one aggregate row must fit the BIGINT pico-cases column (±9.2e18 / 1e12). */
 export const MAX_AGGREGATE_CASES = 9_000_000n;
 
 /** The file exceeds a memory bound of the worker (message shown to the admin verbatim). */
 export class AggregatorLimitError extends Error {}
 
+/** 'auto' decimal-separator evidence from TEXT measure cells (counts + one example each). */
+export interface DecimalEvidenceSummary {
+  dot: number;
+  comma: number;
+  ambiguous: number;
+  examples: { dot?: string; comma?: string; ambiguous?: string };
+}
+
 export interface AggregatorResult {
+  decimalEvidence: DecimalEvidenceSummary;
   rowsRead: number;
   rowsSkipped: number;
   errorSamples: SalesImportErrorSample[];
@@ -142,6 +160,9 @@ export class SalesAggregator {
   private readonly maxCodes: number;
   private readonly maxAggregates: number;
   private readonly maxUnmatched: number;
+  private readonly maxTracked: number;
+  private readonly collectEvidence: boolean;
+  private readonly evidence: DecimalEvidenceSummary = { dot: 0, comma: 0, ambiguous: 0, examples: {} };
 
   constructor(
     private readonly mapping: SalesColumnMapping,
@@ -152,11 +173,15 @@ export class SalesAggregator {
     /** Decimal separator of TEXT amount/quantity cells (L1). */
     private readonly decimal: DecimalSeparator = '.',
     /** Overridable memory bounds (tests use small ones). */
-    limits: Partial<{ maxCodes: number; maxAggregates: number; maxUnmatched: number }> = {},
+    limits: Partial<{ maxCodes: number; maxAggregates: number; maxUnmatched: number; maxTracked: number }> = {},
+    /** 'auto' decimal mode: record evidence from text measure cells so the processor can decide once per file. */
+    opts: { collectDecimalEvidence?: boolean } = {},
   ) {
     this.maxCodes = limits.maxCodes ?? SALES_IMPORT_MAX_DISTINCT_CODES;
     this.maxAggregates = limits.maxAggregates ?? MAX_AGGREGATE_KEYS;
     this.maxUnmatched = limits.maxUnmatched ?? MAX_UNMATCHED_KEYS;
+    this.maxTracked = limits.maxTracked ?? MAX_TRACKED_ENTRIES;
+    this.collectEvidence = opts.collectDecimalEvidence === true;
     this.dimKeys = (mapping.dimensions ?? []).map((d) => d.key);
     for (const k of this.dimKeys) this.values.set(k, new Map());
     this.headers = {
@@ -172,10 +197,27 @@ export class SalesAggregator {
     if (this.errors.length < SALES_IMPORT_MAX_ERROR_SAMPLES) this.errors.push({ row: rowNo, column, reason });
   }
 
+  private observe(v: unknown): void {
+    const e = classifyDecimal(v);
+    if (e === 'none') return;
+    this.evidence[e]++;
+    if (this.evidence.examples[e] === undefined) this.evidence.examples[e] = String(v).trim().slice(0, 30);
+  }
+
+  private tooMany(): AggregatorLimitError {
+    return new AggregatorLimitError(
+      `The file is too large to process in one go (more than ${fmt(this.maxTracked)} month × customer × product and unmatched-customer entries). Split the file by month, or check the dimension / outlet-code columns.`,
+    );
+  }
+
   push(cells: unknown[], rowNo: number): void {
     if (cells.every((c) => c === null || c === undefined || (typeof c === 'string' && c.trim() === ''))) return;
     this.rowsRead++;
     const idx = this.idx;
+    if (this.collectEvidence) {
+      if (idx.amount !== null) this.observe(cells[idx.amount]);
+      if (idx.quantity !== null) this.observe(cells[idx.quantity]);
+    }
 
     const code = normalizeOutletCode(cells[idx.outletCode]);
     if (code === '') return this.skip(rowNo, this.headers.outletCode, 'blank outlet code');
@@ -254,6 +296,7 @@ export class SalesAggregator {
       if (pico > MAX_PICO || pico < -MAX_PICO) {
         throw new AggregatorLimitError(`Row ${rowNo}: the quantity exceeds ${fmt(MAX_AGGREGATE_CASES)} cases. Check the quantity column.`);
       }
+      if (this.aggregateCount + this.unmatchedCount >= this.maxTracked) throw this.tooMany();
       byDim.set(dimKey, { amountPaise: paise, qtyPico: pico, lines: 1 });
       this.aggregateCount++;
       if (!this.dimsByKey.has(dimKey)) this.dimsByKey.set(dimKey, dims);
@@ -272,7 +315,7 @@ export class SalesAggregator {
       let ub = this.unmatchedMap.get(month);
       if (!ub) this.unmatchedMap.set(month, (ub = new Map()));
       const u = ub.get(code);
-      const name = idx.outletName !== null ? String(cells[idx.outletName] ?? '').trim().slice(0, 200) : '';
+      const name = idx.outletName !== null ? String(cells[idx.outletName] ?? '').trim().slice(0, UNMATCHED_NAME_CHARS) : '';
       if (u) {
         u.amountPaise += paise;
         u.qtyPico += pico;
@@ -284,6 +327,7 @@ export class SalesAggregator {
             `The file has more than ${fmt(this.maxUnmatched)} unmatched customer × month entries. Check the outlet-code column mapping.`,
           );
         }
+        if (this.aggregateCount + this.unmatchedCount >= this.maxTracked) throw this.tooMany();
         this.unmatchedCount++;
         ub.set(code, { month, code, name, amountPaise: paise, qtyPico: pico, lines: 1 });
       }
@@ -348,6 +392,7 @@ export class SalesAggregator {
     const dimsByKey = this.dimsByKey;
     const unmatchedMap = this.unmatchedMap;
     return {
+      decimalEvidence: { ...this.evidence, examples: { ...this.evidence.examples } },
       rowsRead: this.rowsRead,
       rowsSkipped: this.rowsSkipped,
       errorSamples: [...this.errors],

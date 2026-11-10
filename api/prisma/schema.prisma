@@ -3083,7 +3083,9 @@ model SalesImport {
   claimToken       String? // random per claim; only the current claim may heartbeat / finalise (M2)
   processingVersion Int     @default(0) // bumped on every READY (ApplyRequest.processingVersion, M7)
   queuedAt         DateTime? // last time the import entered QUEUED (complete / reprocess)
-  purgedAt         DateTime? // retention purge done (raw parts, unmatched.csv, aggregates, sample rows)
+  purgedAt         DateTime? // retention purge MARKED (aggregates + sample rows removed in that tx)
+  filesPurgedAt    DateTime? // GCS objects (parts, unmatched.csv) deleted — after the marking commit; retried by the sweep
+  reprocessedFromId String?  // created by POST :id/reprocess-as-new from this (applied) import's stored file
   bytesRead        BigInt    @default(0)
   rowsRead         Int       @default(0)
   rowsSkipped      Int       @default(0)

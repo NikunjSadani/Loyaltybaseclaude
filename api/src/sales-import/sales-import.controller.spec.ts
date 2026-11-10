@@ -106,6 +106,7 @@ describe('SalesImportController', () => {
     expect(route('complete')).toEqual([1, ':id/complete', 'targets:upload']);
     expect(route('reprocess')).toEqual([1, ':id/reprocess', 'targets:upload']);
     expect(route('cancel')).toEqual([1, ':id/cancel', 'targets:upload']);
+    expect(route('reprocessAsNew')).toEqual([1, ':id/reprocess-as-new', 'targets:upload']);
     expect(route('remove')).toEqual([3, ':id', 'targets:upload']);
     expect(route('list')).toEqual([0, '/', 'targets:read']);
     expect(route('get')).toEqual([0, ':id', 'targets:read']);

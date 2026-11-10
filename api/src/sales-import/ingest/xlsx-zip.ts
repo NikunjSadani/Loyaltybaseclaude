@@ -15,7 +15,8 @@
  * header (sizes/CRC from the central directory, no data descriptor) + the ORIGINAL compressed bytes,
  * copied verbatim by ranged reads. Nothing is decompressed or buffered by us, and every sheet streams.
  */
-import { PassThrough, Readable } from 'node:stream';
+import { PassThrough, Readable, Transform, pipeline } from 'node:stream';
+import { createInflateRaw } from 'node:zlib';
 
 export interface ZipEntryInfo {
   name: string;
@@ -221,10 +222,21 @@ export interface RangeSource {
 }
 
 /**
- * The re-sequenced zip as ONE Readable. `onBytes` sees every compressed byte copied (progress).
+ * The re-sequenced zip as ONE Readable. `onBytes` sees every compressed byte read (progress); `onError` receives the
+ * root cause when the stream fails (exceljs may wrap or swallow it).
  * Backpressure-correct: each entry's data is piped and awaited before the next starts.
+ *
+ * Re-audit M2 (zip bombs): every entry is INFLATED HERE and handed to exceljs as a STORED entry whose size is the
+ * central directory's declared uncompressedSize — so the bytes exceljs (and its shared-strings cache) can ever see are
+ * bounded by the declared sizes that planXlsxRead already capped. An entry that inflates to MORE than declared is
+ * aborted the moment it passes the limit; one that inflates to LESS is rejected as corrupt.
  */
-export function resequencedXlsxStream(src: RangeSource, plan: XlsxReadPlan, onBytes?: (n: number) => void): Readable {
+export function resequencedXlsxStream(
+  src: RangeSource,
+  plan: XlsxReadPlan,
+  onBytes?: (n: number) => void,
+  onError?: (e: Error) => void,
+): Readable {
   const out = new PassThrough({ highWaterMark: 1024 * 1024 });
   // Resolves on 'drain'; rejects once the consumer destroyed the stream (early stop / error), so the
   // copy loop ends and its GCS read streams are released instead of waiting forever.
@@ -254,13 +266,37 @@ export function resequencedXlsxStream(src: RangeSource, plan: XlsxReadPlan, onBy
       const lh = await src.read(e.localHeaderOffset, e.localHeaderOffset + 30);
       if (lh.length < 30 || lh.readUInt32LE(0) !== SIG_LOCAL) throw new XlsxFileError('The .xlsx file is corrupt (bad local header).');
       const dataStart = e.localHeaderOffset + 30 + lh.readUInt16LE(26) + lh.readUInt16LE(28);
-      await write(localHeader(e.name, e.method, e.crc32, e.compressedSize, e.uncompressedSize));
+      const declared = e.uncompressedSize;
+      await write(localHeader(e.name, 0, e.crc32, declared, declared));
+      let produced = 0;
       if (e.compressedSize > 0) {
-        for await (const chunk of src.stream(dataStart, dataStart + e.compressedSize)) {
-          const b = chunk as Buffer;
-          onBytes?.(b.length);
-          await write(b);
+        const counted = new Transform({
+          transform(chunk: Buffer, _enc, cb) {
+            onBytes?.(chunk.length);
+            cb(null, chunk);
+          },
+        });
+        const raw = src.stream(dataStart, dataStart + e.compressedSize);
+        const data: Readable =
+          e.method === 8 ? pipeline(raw, counted, createInflateRaw(), () => undefined) : pipeline(raw, counted, () => undefined);
+        try {
+          for await (const chunk of data) {
+            const b = chunk as Buffer;
+            produced += b.length;
+            if (produced > declared) {
+              throw new XlsxFileError(
+                `The .xlsx file is damaged or unsafe: "${e.name}" unpacks to more than its declared ${declared} bytes. Save a fresh copy (or a CSV) and upload that.`,
+              );
+            }
+            await write(b);
+          }
+        } catch (err) {
+          if (err instanceof XlsxFileError) throw err;
+          throw new XlsxFileError(`The .xlsx file is corrupt: "${e.name}" could not be unpacked (${(err as Error)?.message ?? err}).`);
         }
+      }
+      if (produced !== declared) {
+        throw new XlsxFileError(`The .xlsx file is corrupt: "${e.name}" unpacks to ${produced} bytes, not the declared ${declared}.`);
       }
     }
     // A bare end-of-central-directory record: unzipper's Parse ends cleanly on it.
@@ -270,7 +306,9 @@ export function resequencedXlsxStream(src: RangeSource, plan: XlsxReadPlan, onBy
     out.end();
   };
   run().catch((err: unknown) => {
-    if (!out.destroyed) out.destroy(err instanceof Error ? err : new Error(String(err)));
+    const e = err instanceof Error ? err : new Error(String(err));
+    if (e instanceof XlsxFileError) onError?.(e); // not when the consumer simply stopped reading
+    if (!out.destroyed) out.destroy(e);
   });
   return out;
 }

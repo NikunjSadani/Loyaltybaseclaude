@@ -86,44 +86,88 @@ function scaleDecimal(text: string, scale: number): bigint | null {
 }
 
 /**
- * Decimal separator of TEXT cells (L1). '.' = "1,234.56" (',' = thousands); ',' = "1.234,56" ('.' and spaces =
- * thousands). Numeric cells (xlsx numbers) never use it.
+ * Decimal separator of TEXT cells. '.' = "1,234.56" / "12,34,567.89" (',' only as valid thousands grouping);
+ * ',' = "1.234,56" ('.' only as valid thousands grouping). Numeric cells (xlsx numbers) never use it.
+ * A value whose separators CONTRADICT the mode ("1,5" in '.' mode, "1,234.56" or "0.500" in ',' mode) is INVALID —
+ * skipped and counted, never re-interpreted.
  */
 export type DecimalSeparator = '.' | ',';
 
-/** The effective separator for a run: an explicit profile value wins; 'auto' → ',' only for a ';'-delimited CSV. */
+/**
+ * The separator a run STARTS with. An explicit profile value is final. 'auto' starts with ',' for a ';'-delimited CSV,
+ * else '.', and is then decided once per file from evidence (classifyDecimal) — see SalesImportProcessorService.
+ */
 export function resolveDecimalSeparator(setting: 'auto' | '.' | ',' | null | undefined, csvDelimiter: string | null): DecimalSeparator {
   if (setting === '.' || setting === ',') return setting;
   return csvDelimiter === ';' ? ',' : '.';
 }
 
-/** "12.500" / "1.234.567" / "(1.234)" / "1.234-": dots that can only be thousands grouping. */
-const THOUSANDS_DOTS_RE = /^[+-]?\(?\d{1,3}(\.\d{3})+\)?-?$/;
+/** Thousands grouping that is valid in '.' mode: Western "1,234,567" or Indian "12,34,567" (no leading zero). */
+const DOT_MODE_GROUPED = /^(?:[1-9]\d{0,2}(?:,\d{3})+|[1-9]\d?(?:,\d{2})*,\d{3})(?:\.\d*)?$/;
+/** Thousands grouping that is valid in ',' mode: "1.234.567" (no leading zero), optional ",decimals". */
+const COMMA_MODE_GROUPED = /^[1-9]\d{0,2}(?:\.\d{3})+(?:,\d*)?$/;
 
-/** A cell value → the decimal text to parse, or null for blank / non-numeric types. */
+/** Split off the sign forms we accept: leading +/-, accounting "(40.00)", ERP trailing minus "40.00-". */
+function signAndCore(s: string): { neg: boolean; core: string } {
+  const paren = /^\((.*)\)$/.exec(s);
+  if (paren) return { neg: true, core: paren[1] };
+  if (/^[^-].*-$/.test(s)) return { neg: true, core: s.slice(0, -1) };
+  if (s.startsWith('-')) return { neg: true, core: s.slice(1) };
+  if (s.startsWith('+')) return { neg: false, core: s.slice(1) };
+  return { neg: false, core: s };
+}
+
+function stripText(v: string): string {
+  return v.replace(/[\s ₹]/g, '');
+}
+
+/**
+ * Evidence a TEXT measure value gives about the file's decimal separator (used only in 'auto'):
+ *  - 'dot' / 'comma': only one reading is possible ("1,234.56", "0.500", "1.5", "1,234,567" → dot; "1.234,56", "1,5",
+ *    "0,500", "1.234.567" → comma);
+ *  - 'ambiguous': one separator followed by exactly three digits with a non-zero integer part ("2.000", "1,234") —
+ *    2 or 2000?;
+ *  - 'none': no separator (or not a number at all).
+ */
+export type DecimalEvidence = 'dot' | 'comma' | 'ambiguous' | 'none';
+export function classifyDecimal(v: unknown): DecimalEvidence {
+  if (typeof v !== 'string') return 'none';
+  const { core } = signAndCore(stripText(v));
+  if (!/^[\d.,]+$/.test(core) || !/\d/.test(core)) return 'none';
+  const dots = core.split('.').length - 1;
+  const commas = core.split(',').length - 1;
+  if (dots === 0 && commas === 0) return 'none';
+  if (dots > 0 && commas > 0) return core.lastIndexOf('.') > core.lastIndexOf(',') ? 'dot' : 'comma';
+  const sep = dots > 0 ? '.' : ',';
+  const count = dots > 0 ? dots : commas;
+  if (count > 1) return sep === '.' ? 'comma' : 'dot'; // repeated → can only be thousands grouping
+  const [intPart, frac] = core.split(sep);
+  if (frac.length !== 3 || intPart === '' || intPart.startsWith('0')) return sep === '.' ? 'dot' : 'comma';
+  return 'ambiguous';
+}
+
+/** A cell value → the decimal text to parse ('invalid' = present but unparsable in this mode), or null for blank. */
 function numericText(v: unknown, decimal: DecimalSeparator = '.'): string | null {
   if (v === null || v === undefined) return null;
   if (typeof v === 'number') return Number.isFinite(v) ? String(v) : null;
   if (typeof v === 'bigint') return v.toString();
   if (typeof v !== 'string') return null;
-  let s = v.replace(/[\s\u00a0₹]/g, '');
+  const s = stripText(v);
   if (s === '') return null;
+  const { neg, core: raw } = signAndCore(s);
+  let core = raw;
   if (decimal === ',') {
-    // "1.234,56" → "1234.56". A dot-only value is accepted only when it can only be thousands grouping
-    // ("12.500" = 12500); "1234.5" in a decimal-comma file is ambiguous → invalid (skipped with a reason,
-    // never silently read 100× too large).
-    if (!s.includes(',') && s.includes('.') && !THOUSANDS_DOTS_RE.test(s)) return 'invalid';
-    s = s.replace(/\./g, '');
-    if (s.split(',').length > 2) return 'invalid';
-    s = s.replace(',', '.');
-  } else {
-    s = s.replace(/,/g, '');
+    if (core.includes('.')) {
+      if (!COMMA_MODE_GROUPED.test(core)) return 'invalid'; // a '.' that is not thousands grouping contradicts ','
+      core = core.replace(/\./g, '');
+    }
+    if (core.split(',').length > 2) return 'invalid';
+    core = core.replace(',', '.');
+  } else if (core.includes(',')) {
+    if (!DOT_MODE_GROUPED.test(core)) return 'invalid'; // a ',' that is not thousands grouping contradicts '.'
+    core = core.replace(/,/g, '');
   }
-  // Accounting negatives: "(40.00)" and the ERP trailing minus "40.00-".
-  const paren = /^\((.*)\)$/.exec(s);
-  if (paren) s = `-${paren[1]}`;
-  else if (/^[^-].*-$/.test(s)) s = `-${s.slice(0, -1)}`;
-  return s;
+  return neg ? `-${core}` : core;
 }
 
 function toScaled(v: unknown, scale: number, decimal: DecimalSeparator): bigint | null {

@@ -20,6 +20,7 @@ import {
   SALES_IMPORT_PART_SIZE,
   type CreateSalesImportUploadResult,
   type MonthSummary,
+  type SalesColumnMapping,
   type SalesDimensionCombo,
   type SalesDimensionValues,
   type SalesImportCombos,
@@ -32,6 +33,7 @@ import {
   type SalesImportSummary,
 } from '../sales-import.contract';
 import { isStalled, lockImportRow, rethrowBusy, IMPORT_BUSY_MESSAGE, type LockedImport } from './import-lock';
+import { mappingFingerprint } from './mapping-fingerprint';
 import { expectedPartSize, partCountFor, partKey, unmatchedCsvKey } from './parts-file';
 import { SalesImportRetentionService } from './sales-import-retention.service';
 import { SalesImportRunnerService } from './sales-import-runner.service';
@@ -39,8 +41,6 @@ import { SalesImportRunnerService } from './sales-import-runner.service';
 const REPROCESSABLE: SalesImportStatus[] = ['READY', 'NEEDS_MAPPING', 'FAILED'];
 export const SALES_IMPORT_LIST_DEFAULT_LIMIT = 20;
 export const SALES_IMPORT_LIST_MAX_LIMIT = 50;
-/** complete() waits at most this long for in-flight part uploads holding the row (S8). */
-const COMPLETE_LOCK_TIMEOUT = '30s';
 
 /**
  * Fields reset when an import goes (back) to QUEUED. `claimToken: null` invalidates any worker still holding the old
@@ -87,6 +87,8 @@ const SUMMARY_SELECT = {
   queuedAt: true,
   purgedAt: true,
   gcsPrefix: true,
+  mappingFingerprint: true,
+  reprocessedFromId: true,
 } satisfies Prisma.SalesImportSelect;
 type SummaryRow = Prisma.SalesImportGetPayload<{ select: typeof SUMMARY_SELECT }>;
 
@@ -189,30 +191,29 @@ export class SalesImportUploadService {
 
   /**
    * Idempotent per (import, n): a retried part overwrites the same object; the count is re-derived.
-   * S8: holds FOR KEY SHARE on the import row for the whole store, so complete() (FOR UPDATE) waits for in-flight
-   * parts, and a part arriving after complete sees QUEUED → 409 WITHOUT touching any stored part.
+   * Re-audit M1/L2: NO transaction around the GCS write (the API shares a small DB pool with live tenants) — check the
+   * state, store the part, then ONE guarded update (`WHERE status = 'UPLOADING'`). A part that lands after complete /
+   * cancel gets 409 and no stored part is ever deleted (complete verified every part's size before queueing).
    */
   async putPart(user: JwtPayload, id: string, nRaw: string, file: { buffer: Buffer; size: number } | undefined): Promise<SalesImportPartResult> {
     if (!/^\d{1,6}$/.test(nRaw)) throw new BadRequestException('Part number must be a non-negative integer.');
     const n = Number(nRaw);
-    return this.prisma.$transaction(
-      async (tx) => {
-        const row = await lockImportRow(tx, id, user.clientId, 'KEY SHARE');
-        if (!row) throw new NotFoundException('Sales import not found.');
-        if (row.status !== 'UPLOADING') throw new ConflictException(`This import is ${row.status}; parts can only be added while UPLOADING.`);
-        if (n >= row.partCount) throw new BadRequestException(`Part number must be between 0 and ${row.partCount - 1}.`);
-        if (!file?.buffer) throw new BadRequestException('Attach the part as multipart field "file".');
-        const expected = expectedPartSize(Number(row.sizeBytes), n);
-        if (file.buffer.length !== expected) {
-          throw new BadRequestException(`Part ${n} must be exactly ${expected} bytes (got ${file.buffer.length}).`);
-        }
-        await this.storage.uploadFile(file.buffer, partKey(row.gcsPrefix, n), 'application/octet-stream');
-        const received = (await this.listedParts(row)).size;
-        await tx.salesImport.update({ where: { id: row.id }, data: { partsReceived: received } });
-        return { partsReceived: received };
-      },
-      { timeout: 120_000, maxWait: 10_000 },
-    );
+    const row = await this.find(user, id);
+    if (row.status !== 'UPLOADING') throw new ConflictException(`This import is ${row.status}; parts can only be added while UPLOADING.`);
+    if (n >= row.partCount) throw new BadRequestException(`Part number must be between 0 and ${row.partCount - 1}.`);
+    if (!file?.buffer) throw new BadRequestException('Attach the part as multipart field "file".');
+    const expected = expectedPartSize(Number(row.sizeBytes), n);
+    if (file.buffer.length !== expected) {
+      throw new BadRequestException(`Part ${n} must be exactly ${expected} bytes (got ${file.buffer.length}).`);
+    }
+    await this.storage.uploadFile(file.buffer, partKey(row.gcsPrefix, n), 'application/octet-stream');
+    const received = (await this.listedParts(row)).size;
+    const upd = await this.prisma.salesImport.updateMany({
+      where: { id: row.id, clientId: user.clientId, status: 'UPLOADING' },
+      data: { partsReceived: received },
+    });
+    if (upd.count === 0) throw new ConflictException('This import is no longer accepting parts (it was completed or cancelled meanwhile).');
+    return { partsReceived: received };
   }
 
   private async listedParts(row: Pick<LockedImport, 'gcsPrefix' | 'partCount'>): Promise<Map<number, number>> {
@@ -225,34 +226,108 @@ export class SalesImportUploadService {
     return out;
   }
 
+  /** Every part present with its exact size (400 naming the problem otherwise). */
+  private async verifyParts(row: Pick<LockedImport, 'gcsPrefix' | 'partCount' | 'sizeBytes'>): Promise<void> {
+    const size = Number(row.sizeBytes);
+    const parts = await this.listedParts(row);
+    const missing: number[] = [];
+    const wrong: number[] = [];
+    let total = 0;
+    for (let n = 0; n < row.partCount; n++) {
+      const got = parts.get(n);
+      if (got === undefined) missing.push(n);
+      else if (got !== expectedPartSize(size, n)) wrong.push(n);
+      else total += got;
+    }
+    if (missing.length) throw new BadRequestException(`Upload incomplete: missing part(s) ${missing.slice(0, 20).join(', ')}${missing.length > 20 ? '…' : ''}.`);
+    if (wrong.length || total !== size) throw new BadRequestException(`Upload corrupted: part(s) ${wrong.slice(0, 20).join(', ')} have the wrong size. Upload the file again.`);
+  }
+
+  /** UPLOADING → QUEUED in ONE short guarded transaction (state update + audit); false when the state moved on. */
+  private async queue(user: JwtPayload, row: Pick<LockedImport, 'id' | 'partCount' | 'sizeBytes'>, detail: Record<string, unknown>): Promise<boolean> {
+    return this.prisma
+      .$transaction(async (tx) => {
+        const upd = await tx.salesImport.updateMany({
+          where: { id: row.id, clientId: user.clientId, status: 'UPLOADING' },
+          data: { ...resetForQueue(), partsReceived: row.partCount },
+        });
+        if (upd.count === 0) return false;
+        await this.audit(tx, user, 'UPDATE', row.id, { sizeBytes: Number(row.sizeBytes), partCount: row.partCount, ...detail });
+        return true;
+      })
+      .catch(rethrowBusy);
+  }
+
+  /**
+   * Re-audit M1/L1/L2: verification (GCS listing + first-bytes check) runs OUTSIDE any transaction; the UPLOADING →
+   * QUEUED flip is one guarded update. A part racing it either landed before the listing (counted) or gets 409.
+   */
   async complete(user: JwtPayload, id: string): Promise<SalesImportSummary> {
-    await this.prisma.$transaction(
-      async (tx) => {
-        await tx.$executeRaw(Prisma.sql`SELECT set_config('lock_timeout', ${COMPLETE_LOCK_TIMEOUT}, true)`);
-        const row = await lockImportRow(tx, id, user.clientId, 'UPDATE');
-        if (!row) throw new NotFoundException('Sales import not found.');
-        if (row.status !== 'UPLOADING') throw new ConflictException(`This import is already ${row.status}.`);
-        const size = Number(row.sizeBytes);
-        const parts = await this.listedParts(row);
-        const missing: number[] = [];
-        const wrong: number[] = [];
-        let total = 0;
-        for (let n = 0; n < row.partCount; n++) {
-          const got = parts.get(n);
-          if (got === undefined) missing.push(n);
-          else if (got !== expectedPartSize(size, n)) wrong.push(n);
-          else total += got;
-        }
-        if (missing.length) throw new BadRequestException(`Upload incomplete: missing part(s) ${missing.slice(0, 20).join(', ')}${missing.length > 20 ? '…' : ''}.`);
-        if (wrong.length || total !== size) throw new BadRequestException(`Upload corrupted: part(s) ${wrong.slice(0, 20).join(', ')} have the wrong size. Upload the file again.`);
-        await this.checkContent(row);
-        await tx.salesImport.update({ where: { id: row.id }, data: { ...resetForQueue(), partsReceived: row.partCount } });
-        await this.audit(tx, user, 'UPDATE', row.id, { action: 'complete', sizeBytes: size, partCount: row.partCount });
-      },
-      { timeout: 60_000, maxWait: 10_000 },
-    );
+    const row = await this.find(user, id);
+    if (row.status !== 'UPLOADING') throw new ConflictException(`This import is already ${row.status}.`);
+    await this.verifyParts(row);
+    await this.checkContent(row);
+    if (!(await this.queue(user, row, { action: 'complete' }))) {
+      throw new ConflictException('This import changed state; refresh and try again.');
+    }
     await this.runner.kick();
     return this.summaryOf(await this.find(user, id));
+  }
+
+  /**
+   * "Reprocess as a new import" (re-audit M3): an APPLIED import cannot be reprocessed in place (its aggregates are the
+   * record of what was written), so once the column mapping has changed it would be stranded. This creates a NEW import
+   * from the same stored file — parts copied server-side in GCS, outside any transaction — and queues it; the old import
+   * stays untouched as the record. 409 when the import is not applied (use Reprocess), the mapping is unchanged, it was
+   * purged, or a live re-import of it already exists.
+   */
+  async reprocessAsNew(user: JwtPayload, id: string): Promise<SalesImportSummary> {
+    const old = await this.find(user, id);
+    if (old.purgedAt) throw new ConflictException("This import's file was deleted after the retention period. Upload the file again.");
+    if (old.status !== 'READY') throw new ConflictException(`Only a READY import can be re-imported (this one is ${old.status}).`);
+    if ((await this.appliedCount(this.prisma, old.id)) === 0) {
+      throw new ConflictException('This import was never applied; use Reprocess instead.');
+    }
+    if (old.mappingFingerprint === (await this.currentFingerprint(user.clientId))) {
+      throw new ConflictException('The column mapping has not changed since this file was processed; there is nothing to re-import.');
+    }
+    const child = (await this.liveChildren(user.clientId, [old.id])).get(old.id);
+    if (child) throw new ConflictException(`This file is already being re-imported (import ${child}).`);
+
+    const newId = randomUUID();
+    const gcsPrefix = `sales-imports/${user.clientId}/${newId}/`;
+    await this.prisma.$transaction(async (tx) => {
+      await tx.salesImport.create({
+        data: {
+          id: newId,
+          clientId: user.clientId,
+          uploadedById: user.sub,
+          originalFilename: old.originalFilename,
+          fileKind: old.fileKind,
+          sizeBytes: old.sizeBytes,
+          partCount: old.partCount,
+          gcsPrefix,
+          status: 'UPLOADING',
+          reprocessedFromId: old.id,
+        },
+      });
+      await this.audit(tx, user, 'CREATE', newId, { action: 'reprocess-as-new', fromImportId: old.id });
+    });
+    const fresh = { id: newId, gcsPrefix, partCount: old.partCount, sizeBytes: old.sizeBytes };
+    try {
+      for (let n = 0; n < old.partCount; n++) await this.storage.copyFile(partKey(old.gcsPrefix, n), partKey(gcsPrefix, n));
+      await this.verifyParts(fresh);
+    } catch (e) {
+      // Don't leave a half-copied import behind: cancel + purge it (files deleted after the marking commit).
+      await this.retention.purgeImport(newId, user.clientId, { cancel: true }).catch(() => undefined);
+      this.logger.warn(`sales-import ${old.id}: re-import copy failed: ${(e as Error)?.message}`);
+      throw new ConflictException('The stored file could not be copied for the re-import (it may have been deleted). Upload the file again.');
+    }
+    if (!(await this.queue(user, fresh, { action: 'complete', fromImportId: old.id }))) {
+      throw new ConflictException('The re-import changed state; refresh and try again.');
+    }
+    await this.runner.kick();
+    return this.summaryOf(await this.find(user, newId));
   }
 
   /** First-bytes sanity check: an .xlsx is a zip; a .csv is UTF-8 text. */
@@ -320,10 +395,8 @@ export class SalesImportUploadService {
     const r = await this.retention.purgeImport(id, user.clientId, {
       cancel: true,
       check: async (row, tx) => {
-        if (row.status === 'QUEUED' || isStalled(row)) {
-          if ((await this.appliedCount(tx, row.id)) > 0) return 'A month was already applied from this import; it cannot be cancelled.';
-          return null;
-        }
+        if ((await this.appliedCount(tx, row.id)) > 0) return 'A month was already applied from this import; it cannot be cancelled.';
+        if (row.status === 'QUEUED' || isStalled(row)) return null;
         if (row.status === 'PROCESSING') return 'This import is being processed and still making progress. It can be cancelled if it shows no progress for 10 minutes.';
         return `Only a QUEUED or stalled import can be cancelled (this one is ${row.status}).`;
       },
@@ -377,12 +450,44 @@ export class SalesImportUploadService {
     return new Set(rows.map((r) => r.importId));
   }
 
-  private async summaryOf(row: SummaryRow): Promise<SalesImportSummary> {
-    const [names, applied] = await Promise.all([this.names([row.uploadedById]), this.appliedSet([row.id])]);
-    return this.toSummary(row, names, applied.has(row.id));
+  /** The tenant's CURRENT column-mapping fingerprint (null without a profile). */
+  private async currentFingerprint(clientId: string): Promise<string | null> {
+    const p = await this.prisma.salesImportProfile.findUnique({ where: { clientId }, select: { columnMapping: true } });
+    return mappingFingerprint((p?.columnMapping ?? null) as SalesColumnMapping | null);
   }
 
-  toSummary(row: SummaryRow, names: Map<string, string>, applied: boolean, now = Date.now()): SalesImportSummary {
+  /** Ids (of `ids`) that already have a live "reprocess as new" child (not CANCELLED / FAILED). */
+  private async liveChildren(clientId: string, ids: string[]): Promise<Map<string, string>> {
+    if (!ids.length) return new Map();
+    const rows = await this.prisma.salesImport.findMany({
+      where: { clientId, reprocessedFromId: { in: ids }, status: { notIn: ['CANCELLED', 'FAILED'] } },
+      select: { id: true, reprocessedFromId: true },
+    });
+    return new Map(rows.map((r) => [r.reprocessedFromId!, r.id]));
+  }
+
+  private async summaries(clientId: string, rows: SummaryRow[]): Promise<SalesImportSummary[]> {
+    const ids = rows.map((r) => r.id);
+    const [names, applied, fp, children] = await Promise.all([
+      this.names(rows.map((r) => r.uploadedById)),
+      this.appliedSet(ids),
+      this.currentFingerprint(clientId),
+      this.liveChildren(clientId, ids),
+    ]);
+    return rows.map((r) => this.toSummary(r, names, applied.has(r.id), { currentFingerprint: fp, hasLiveChild: children.has(r.id) }));
+  }
+
+  private async summaryOf(row: SummaryRow): Promise<SalesImportSummary> {
+    return (await this.summaries(row.clientId, [row]))[0];
+  }
+
+  toSummary(
+    row: SummaryRow,
+    names: Map<string, string>,
+    applied: boolean,
+    ctx: { currentFingerprint: string | null; hasLiveChild: boolean } = { currentFingerprint: null, hasLiveChild: false },
+    now = Date.now(),
+  ): SalesImportSummary {
     const size = Number(row.sizeBytes);
     const bytesRead = Number(row.bytesRead);
     const status = row.status as SalesImportStatus;
@@ -408,11 +513,14 @@ export class SalesImportUploadService {
       uploadedBy: names.get(row.uploadedById) ?? 'Unknown user',
       queuedAt: row.queuedAt ? row.queuedAt.toISOString() : null,
       heartbeatAt: row.heartbeatAt ? row.heartbeatAt.toISOString() : null,
+      reprocessedFromId: row.reprocessedFromId,
       stalled,
       applied,
       purgedAt: row.purgedAt ? row.purgedAt.toISOString() : null,
       canReprocess: !applied && !purged && (REPROCESSABLE.includes(status) || stalled),
-      canCancel: status === 'QUEUED' || stalled,
+      canReprocessAsNew:
+        applied && !purged && status === 'READY' && !ctx.hasLiveChild && row.mappingFingerprint !== ctx.currentFingerprint,
+      canCancel: !applied && (status === 'QUEUED' || stalled),
       canDelete: !applied && !(status === 'PROCESSING' && !stalled),
     };
   }
@@ -434,9 +542,8 @@ export class SalesImportUploadService {
       ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
     });
     const page = rows.slice(0, limit);
-    const [names, applied] = await Promise.all([this.names(page.map((r) => r.uploadedById)), this.appliedSet(page.map((r) => r.id))]);
     return {
-      items: page.map((r) => this.toSummary(r, names, applied.has(r.id))),
+      items: await this.summaries(user.clientId, page),
       nextCursor: rows.length > limit ? page[page.length - 1].id : null,
     };
   }
@@ -463,7 +570,7 @@ export class SalesImportUploadService {
     const select = { id: true, dimensionValues: true, dimensionCombos: true } satisfies Prisma.SalesImportSelect;
     const row =
       id === 'latest'
-        ? await this.prisma.salesImport.findFirst({ where: { clientId: user.clientId, status: 'READY' }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select })
+        ? await this.prisma.salesImport.findFirst({ where: { clientId: user.clientId, status: 'READY', purgedAt: null }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select })
         : await this.prisma.salesImport.findFirst({ where: { id, clientId: user.clientId }, select });
     if (!row) throw new NotFoundException(id === 'latest' ? 'No processed sales file yet.' : 'Sales import not found.');
     return {

@@ -388,3 +388,90 @@ describe('SalesImportProcessorService — audit fix round', () => {
     expect(final().data.error).toMatch(/longer than .* characters/);
   });
 });
+
+describe('SalesImportProcessorService — re-audit H1 (auto decimal separator decided once per file)', () => {
+  const HDR = 'Invoice Date;Customer Code;Customer;Code;Group;Net Amt;Qty';
+  const csv = (...lines: string[]) => Buffer.from([HDR, ...lines].join('\n'));
+  const written = (prisma: { salesImportAggregate: { createMany: jest.Mock } }) =>
+    prisma.salesImportAggregate.createMany.mock.calls.flatMap((c) => c[0].data as Array<Record<string, unknown>>);
+
+  it("';' file with '2.000' cases and '0.500' rupees → '.' decided from evidence (re-read): 2 cases, ₹0.50 — not 2000 / ₹500", async () => {
+    const { svc, prisma, row, final } = setup({ file: csv('03-10-2026;O1;S;P;500;0.500;2.000') });
+    await svc.processClaimed(row);
+    expect(final().data.status).toBe('READY');
+    expect(written(prisma)).toEqual([expect.objectContaining({ outletCode: 'O1', amountPaise: 50n, qtyPico: 2_000_000_000_000n })]);
+    expect(final().data.rowsSkipped).toBe(0);
+  });
+
+  it("';' file with '1,234.56' → ₹1,234.56 (not ₹1.23)", async () => {
+    const { svc, prisma, row, final } = setup({ file: csv('03-10-2026;O1;S;P;500;1,234.56;1') });
+    await svc.processClaimed(row);
+    expect(final().data.status).toBe('READY');
+    expect(written(prisma)[0]).toMatchObject({ amountPaise: 123456n, qtyPico: 1_000_000_000_000n });
+  });
+
+  it("';' file whose only separators are ambiguous ('2.000') → NEEDS_MAPPING 'choose the decimal separator', never a guess", async () => {
+    const { svc, prisma, row, final } = setup({ file: csv('03-10-2026;O1;S;P;500;7;2.000', '04-10-2026;O1;S;P;500;8;1.500') });
+    await svc.processClaimed(row);
+    expect(final().data.status).toBe('NEEDS_MAPPING');
+    expect(final().data.error).toMatch(/Choose the decimal separator.*"2\.000"/);
+    expect(prisma.salesImportAggregate.createMany).not.toHaveBeenCalled();
+  });
+
+  it("a file mixing '1,5' and '0.5' → NEEDS_MAPPING naming both", async () => {
+    const { svc, row, final } = setup({ file: csv('03-10-2026;O1;S;P;500;1,5;1', '04-10-2026;O1;S;P;500;0.5;1') });
+    await svc.processClaimed(row);
+    expect(final().data).toMatchObject({ status: 'NEEDS_MAPPING' });
+    expect(final().data.error).toMatch(/both "\." and ","/);
+  });
+
+  it("explicit ',' mode: a contradicting '1,234.56' is INVALID (skipped + counted), never re-read; '2.000' = 2000 as configured", async () => {
+    const { svc, prisma, row, final } = setup({
+      file: csv('03-10-2026;O1;S;P;500;1,234.56;1', '04-10-2026;O1;S;P;500;2.000;1'),
+      mapping: { ...MAPPING, decimalSeparator: ',' },
+    });
+    await svc.processClaimed(row);
+    expect(final().data).toMatchObject({ status: 'READY', rowsSkipped: 1, errorSamples: [{ row: 2, column: 'NET AMT', reason: 'invalid amount' }] });
+    expect(written(prisma)[0]).toMatchObject({ amountPaise: 200000n });
+  });
+
+  it("explicit '.' mode: '1,5' is INVALID, not 15", async () => {
+    const { svc, row, final } = setup({ file: csv('03-10-2026;O1;S;P;500;1,5;1'), mapping: { ...MAPPING, decimalSeparator: '.' } });
+    await svc.processClaimed(row);
+    expect(final().data).toMatchObject({ status: 'READY', rowsSkipped: 1 });
+  });
+});
+
+describe('SalesImportProcessorService — re-audit memory / M2', () => {
+  it('a heap past the guard fails the import readably (FileProblem) instead of an OOM kill', async () => {
+    const lines = ['Invoice Date,Customer Code,Customer,Code,Group,Net Amt,Qty'];
+    for (let i = 0; i < 10_050; i++) lines.push('03-10-2026,O1,S,P,500,1,1');
+    const { svc, row, final } = setup({ file: Buffer.from(lines.join('\n')) });
+    const real = process.memoryUsage;
+    const spy = jest.spyOn(process, 'memoryUsage').mockImplementation(() => ({ ...real.call(process), heapUsed: Number.MAX_SAFE_INTEGER }));
+    try {
+      await svc.processClaimed(row);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(final().data).toMatchObject({ status: 'FAILED' });
+    expect(final().data.error).toMatch(/too large to process/);
+  });
+
+  it('M2: an xlsx entry inflating beyond its declared size → FAILED with the readable xlsx message', async () => {
+    const good = await exceljsWorkbook([['Data', [['Invoice Date', 'Customer Code', 'Customer', 'Code', 'Group', 'Net Amt', 'Qty'], [new Date(Date.UTC(2026, 9, 3)), 'O1', 'S', 'P', 500, 1, 1]]]]);
+    // Shrink the declared size of the sheet in the CENTRAL DIRECTORY (what the worker trusts) by patching the bytes.
+    const buf = Buffer.from(good);
+    const name = Buffer.from('xl/worksheets/sheet1.xml');
+    for (let p = buf.length - 22; p >= 0; p--) {
+      if (buf.readUInt32LE(p) === 0x02014b50 && buf.subarray(p + 46, p + 46 + name.length).equals(name)) {
+        buf.writeUInt32LE(buf.readUInt32LE(p + 24) - 20, p + 24);
+        break;
+      }
+    }
+    const { svc, row, final } = setup({ file: buf, kind: 'XLSX' });
+    await svc.processClaimed(row);
+    expect(final().data.status).toBe('FAILED');
+    expect(final().data.error).toMatch(/unpacks to more than its declared/);
+  });
+});

@@ -5,6 +5,7 @@ import {
   parseInvoiceDate,
   parseInvoiceDateDetailed,
   stableDimKey,
+  classifyDecimal,
   picoToCases,
   paiseToRupees,
   resolveDecimalSeparator,
@@ -222,4 +223,31 @@ describe('paiseToRupees / picoToCases (single source for BigInt → wire numbers
     expect(picoToCases(-1_234_500_000_000n)).toBe(-1.235);
     expect(picoToCases(1_234_499_999_999n)).toBe(1.234);
   });
+});
+
+describe('decimal separator — re-audit H1 (classify for auto; contradictions are INVALID in explicit modes)', () => {
+  it.each([
+    ['1,234.56', 'dot'], ['0.500', 'dot'], ['1.5', 'dot'], ['.5', 'dot'], ['1,234,567', 'dot'], ['12,34,567.89', 'dot'], ['(1,234.50)', 'dot'],
+    ['1.234,56', 'comma'], ['1,5', 'comma'], ['0,500', 'comma'], ['1.234.567', 'comma'], ['-12,345', 'ambiguous'],
+    ['2.000', 'ambiguous'], ['1,234', 'ambiguous'], ['12.500', 'ambiguous'],
+    ['7', 'none'], ['', 'none'], ['abc', 'none'], [12.5, 'none'], [null, 'none'],
+  ])('classifyDecimal(%p) → %p', (v, e) => expect(classifyDecimal(v)).toBe(e));
+
+  it.each([
+    // '.' mode: a ',' must be valid thousands grouping, else INVALID (never "1,5" → 15)
+    ['1,234.56', '.', 123456n],
+    ['12,34,567.89', '.', 123456789n],
+    ['0.500', '.', 50n],
+    ['1,5', '.', null],
+    ['1.234,56', '.', null],
+    ['0,500', '.', null],
+    ['1,23', '.', null],
+    // ',' mode: a '.' must be valid thousands grouping, else INVALID (never "1,234.56" → 1.23, "0.500" → 500)
+    ['1.234,56', ',', 123456n],
+    ['2.000', ',', 200000n],
+    ['1,234.56', ',', null],
+    ['0.500', ',', null],
+    ['1.5', ',', null],
+    ['1234.5', ',', null],
+  ])("toPaise(%p, '%s') → %p", (v, mode, out) => expect(toPaise(v, mode as ',' | '.')).toBe(out));
 });

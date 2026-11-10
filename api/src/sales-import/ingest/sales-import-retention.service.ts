@@ -24,9 +24,13 @@ export interface PurgeOptions {
 }
 
 /**
- * Data retention for Sales Import (audit S5). Purging an import deletes its GCS prefix (raw parts + unmatched.csv),
- * its aggregates (they hold every customer's per-month sales, matched or not) and the sample data rows of
- * `detectedHeaders` (the header row is kept), then stamps `purgedAt`. SalesImportApply history is untouched.
+ * Data retention for Sales Import (audit S5). Purging an import is two steps (re-audit M1: no GCS I/O inside a DB
+ * transaction — the API shares a small connection pool with live tenants):
+ *   1. under `FOR UPDATE NOWAIT` on the import row, in ONE short transaction: delete its aggregates (every customer's
+ *      per-month sales), keep only the header row of `detectedHeaders`, stamp `purgedAt` (+ CANCELLED when asked);
+ *   2. after the commit: delete its GCS prefix (raw parts + unmatched.csv) and stamp `filesPurgedAt`. A failure here is
+ *      logged and retried by the next sweep (rows with purgedAt set and filesPurgedAt null). Idempotent.
+ * SalesImportApply history is untouched.
  *
  *   - finished imports (READY / NEEDS_MAPPING / FAILED / CANCELLED): purged SALES_IMPORT_RETENTION_DAYS after finishedAt;
  *   - abandoned uploads (UPLOADING older than SALES_IMPORT_ABANDONED_UPLOAD_HOURS): CANCELLED + purged.
@@ -49,15 +53,12 @@ export class SalesImportRetentionService {
    */
   async purgeImport(id: string, clientId: string, opts: PurgeOptions = {}): Promise<PurgeOutcome> {
     try {
-      return await this.prisma.$transaction(
+      const outcome = await this.prisma.$transaction(
         async (tx): Promise<PurgeOutcome> => {
           const row = await lockImportRow(tx, id, clientId, 'UPDATE NOWAIT');
           if (!row) return 'notFound';
           const refusal = opts.check ? await opts.check(row, tx) : null;
           if (refusal) return { refused: refusal };
-          const prefix = `sales-imports/${clientId}/${id}/`;
-          if (row.gcsPrefix === prefix) await this.storage.deletePrefix(prefix);
-          else this.logger.error(`sales-import ${id}: unexpected gcsPrefix "${row.gcsPrefix}", storage cleanup skipped`);
           await tx.salesImportAggregate.deleteMany({ where: { importId: id } });
           const cur = await tx.salesImport.findUnique({ where: { id }, select: { detectedHeaders: true } });
           const header = Array.isArray(cur?.detectedHeaders) && Array.isArray((cur!.detectedHeaders as unknown[])[0])
@@ -68,6 +69,7 @@ export class SalesImportRetentionService {
             where: { id },
             data: {
               purgedAt: now,
+              filesPurgedAt: null,
               detectedHeaders: header ? (header as Prisma.InputJsonValue) : Prisma.DbNull,
               ...(opts.cancel ? { status: 'CANCELLED', finishedAt: row.finishedAt ?? now, claimToken: null } : {}),
             },
@@ -77,9 +79,27 @@ export class SalesImportRetentionService {
         },
         { timeout: 120_000, maxWait: 10_000 },
       );
+      if (outcome === 'purged') await this.deleteFiles(id, clientId);
+      return outcome;
     } catch (e) {
       if (isLockNotAvailable(e)) return 'busy';
       throw e;
+    }
+  }
+
+  /** Step 2 (outside any transaction): delete the import's GCS prefix, then stamp filesPurgedAt. Never throws. */
+  async deleteFiles(id: string, clientId: string): Promise<boolean> {
+    try {
+      const row = await this.prisma.salesImport.findFirst({ where: { id, clientId }, select: { gcsPrefix: true } });
+      if (!row) return false;
+      const prefix = `sales-imports/${clientId}/${id}/`;
+      if (row.gcsPrefix === prefix) await this.storage.deletePrefix(prefix);
+      else this.logger.error(`sales-import ${id}: unexpected gcsPrefix "${row.gcsPrefix}", storage cleanup skipped`);
+      await this.prisma.salesImport.updateMany({ where: { id, clientId, purgedAt: { not: null } }, data: { filesPurgedAt: new Date() } });
+      return true;
+    } catch (e) {
+      this.logger.warn(`sales-import ${id}: file cleanup failed (the next sweep retries): ${(e as Error)?.message}`);
+      return false;
     }
   }
 
@@ -90,6 +110,13 @@ export class SalesImportRetentionService {
     const tenant = opts.clientId ? { clientId: opts.clientId } : {};
     const out = { abandoned: 0, purged: 0 };
     try {
+      // Retry file deletions that failed after an earlier purge was marked.
+      const pendingFiles = await this.prisma.salesImport.findMany({
+        where: { ...tenant, purgedAt: { not: null }, filesPurgedAt: null },
+        select: { id: true, clientId: true },
+        take: limit,
+      });
+      for (const p of pendingFiles) await this.deleteFiles(p.id, p.clientId);
       const abandonedBefore = new Date(now.getTime() - SALES_IMPORT_ABANDONED_UPLOAD_HOURS * 3_600_000);
       const abandoned = await this.prisma.salesImport.findMany({
         where: { ...tenant, status: 'UPLOADING', createdAt: { lt: abandonedBefore } },

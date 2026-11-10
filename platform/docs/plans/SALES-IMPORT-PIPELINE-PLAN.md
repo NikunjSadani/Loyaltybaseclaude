@@ -471,7 +471,17 @@ with whole-brand entries and exclusions. The §6.2 model expresses this directly
 10. End: `createMany` aggregates in chunks of 5,000 (delete existing aggregates for the import first, so a reprocess is idempotent).
     Upload `unmatched.csv`. Set `contentSha256`, `duplicateOfId` (earlier READY import, same tenant and sha), `monthSummaries`,
     `rosterHash`, `mappingSnapshot`, READY. On any throw → FAILED with a message (no stack).
-11. Memory budget: Maps ≤ ~150 MB at 635k rows; exceljs shared-strings cache ≤ ~300 MB ⇒ 2Gi is comfortable.
+11. Memory budget (REVISED in the re-audit: since M6 the worker aggregates EVERY customer, not only the ~6.5k roster
+    outlets). Heap is capped at 1.5 GB (`NODE_OPTIONS=--max-old-space-size=1536`, §14). Measured in spike (a) ≈ 0.4 KB of
+    heap per tracked entry (Map entry + BigInts + key strings). Budget:
+    - exceljs shared-strings cache ≤ ~350 MB (sharedStrings.xml itself capped at 512 MB unpacked; the cache is smaller);
+    - tracked entries (aggregates + unmatched rows) ≤ **1.8 M combined** (aggregates ≤ 1.5 M, unmatched ≤ 0.9 M) ≈ 720 MB;
+    - distinct customer codes ≤ **600 k** (`SALES_IMPORT_MAX_DISTINCT_CODES`) ≈ 50 MB; unmatched names ≤ 80 chars;
+    - ⇒ ≈ 1.1 GB worst case < 1.5 GB. The real 205 MB file needs ≈ 0.6 M aggregates + 0.4 M unmatched rows and ≈ 0.2 M
+      codes (≈ 55 % of the entry budget); a 300 MB file of the same shape ≈ 80 %.
+    - Backstop: every 10k rows the worker compares `heapUsed` with 85 % of V8's heap limit and fails the import with
+      "too large to process in one go — split it by month" before an OOM kill, whatever the file's shape.
+    Exceeding any cap → FAILED with a readable message (never an OOM).
 
 ### 7.2 Apply (Lane K), per month, ONE interactive transaction (`timeout: 120_000`)
 ```ts
@@ -768,7 +778,7 @@ Additive migration `20261111120000_sales_import_hardening` (touches only the two
 - **H1/S1/S2 locking:** apply holds the import row `FOR SHARE` (after the month advisory lock) and re-checks READY /
   not purged / processingVersion; reprocess / cancel / delete / retention purge take `FOR UPDATE NOWAIT` → 409 "busy"
   while an apply (or the worker's final write) holds it; reprocess and delete refuse once any SalesImportApply exists.
-  Helpers in `ingest/import-lock.ts`.
+  Helpers in `ingest/import-lock.ts`. (Purge's GCS delete moved after the commit in §10a.9.)
 - **H2:** `SalesImport.mappingFingerprint` (only parse-relevant fields; labels ignored) vs the current profile → every
   month blocked ("Reprocess the file first"); profile PUT refuses removing/re-pointing the amount/quantity column while an
   enabled KPI uses that measure.
@@ -785,8 +795,8 @@ Additive migration `20261111120000_sales_import_hardening` (touches only the two
   closed, all four routes); allowed exports/reports are recorded as AuditLog `EXPORT` on `SALES_MONTH <client>:<month>`;
   reopen → 409 unless `acknowledgeDownstream` when credit batches (any status, `period`) or recorded exports exist;
   `SalesMonthRow.downstream`, `SalesMonthReopenResult.warnings`.
-- **M6** the worker aggregates EVERY customer code (normalized), capped at 1,000,000 distinct codes / 2,000,000
-  aggregate keys / 2,000,000 unmatched keys (readable FAILED); preview/apply map codes onto the CURRENT roster
+- **M6** the worker aggregates EVERY customer code (normalized), capped (readable FAILED; caps revised in §10a.9 /
+  §7.1 step 11); preview/apply map codes onto the CURRENT roster
   (`normalizedRosterIndex`, shared with the worker). `ROSTER_CHANGED`, `rosterHashMatches` and the roster-hash helpers
   are gone (`rosterHash` column kept, unused); preview shows `rosterOutletsAddedSinceProcessing` and recomputes the
   matched/unmatched figures live.
@@ -801,10 +811,39 @@ Additive migration `20261111120000_sales_import_hardening` (touches only the two
   aggregates and sample rows purged 30 days after finishedAt (READY / NEEDS_MAPPING / FAILED / CANCELLED; lazy on list,
   on every worker / inline drain and idle drain call); UPLOADING > 24 h → CANCELLED + purged; ≤ 3 UPLOADING per tenant.
   **S6** audit rows (entityType `SALES_IMPORT`) for create-upload, complete, reprocess, delete, cancel, unmatched.csv.
-  **S7** `SalesImportPartGuard` runs flag/operator/state checks before the multipart body is buffered. **S8** parts hold
-  `FOR KEY SHARE`, complete `FOR UPDATE` (30 s lock timeout); a late part → 409 without deleting stored parts.
+  **S7** `SalesImportPartGuard` runs flag/operator/state checks before the multipart body is buffered. **S8** a late part
+  → 409 without deleting stored parts (locking replaced by guarded updates in §10a.9).
 - Product-set blanks: a TEXT `''` filter value is an exact "column is empty" match (save + tester); an entry whose every
   value is blank, or a non-text blank, is rejected. `SalesImportSummary.queuedAt` added.
+
+### 10a.9 Independent re-audit fixes (backend, 2026-11-10) — binding
+Contract commits `7b4677e` (reprocess-as-new) + `26dceff` (600k distinct-code cap). Same migration
+`20261111120000_sales_import_hardening` (unreleased) now also adds `filesPurgedAt`, `reprocessedFromId`, and DELETES the
+old aggregate rows instead of rescaling them (they belonged to imports without a fingerprint, never usable).
+- **H1 decimals.** `'auto'` is decided ONCE per file from evidence in the text amount/quantity cells (`classifyDecimal`):
+  a value with both separators decides by order; "0.500", "1.5", "1,234,567" → '.', "1,5", "0,500", "1.234.567" → ',';
+  "2.000" / "1,234" are ambiguous. Pass 1 reads with the starting separator (',' for a ';' CSV, else '.') and collects the
+  evidence; if the evidence decides the other separator the file is read again (pass 2). Evidence for BOTH, or ONLY
+  ambiguous values → NEEDS_MAPPING ("choose the decimal separator"), never a guess. In explicit '.' / ',' mode a value
+  whose separators contradict the mode ("1,5" in '.', "1,234.56" or "0.500" in ',') is INVALID — skipped and counted.
+- **M1 / L1 / L2 — no GCS I/O inside DB transactions** (the API shares a 10-connection pool with live tenants): putPart
+  checks the state, stores the part, then one guarded update (`WHERE status='UPLOADING'`, 409 otherwise, parts never
+  deleted); complete verifies parts + first bytes outside any tx, then one short guarded UPLOADING → QUEUED + audit tx;
+  purge marks (aggregates, sample rows, `purgedAt`) under `FOR UPDATE NOWAIT`, deletes the GCS prefix AFTER the commit
+  and stamps `filesPurgedAt` (a failure is retried by the next sweep); the worker writes unmatched.csv before its final
+  transaction. The part/part/complete row-lock interplay is gone.
+- **M2 xlsx bombs.** The re-sequencer inflates every entry itself and hands exceljs STORED entries of exactly the
+  declared size; inflating past the declared `uncompressedSize` (sheets AND sharedStrings) aborts immediately, inflating
+  short is "corrupt". exceljs input errors are now caught and raced (they used to hang the worker).
+- **M3.** The fingerprint ignores the outlet-NAME column. An APPLIED import whose mapping changed is no longer stranded:
+  `canReprocessAsNew` + `POST admin/sales-import/:id/reprocess-as-new` create a NEW import (`reprocessedFromId`) whose
+  parts are server-side GCS copies, queued like a fresh upload; the old import stays as the record. 409 when not applied
+  (use Reprocess), mapping unchanged, purged, or a live re-import exists.
+- **L3 D-1 guard** reads the client flag first; flag OFF and no Sales Import apply for the month → allow; if involvement
+  cannot be shown because a read failed it fails OPEN (Deoleo can never get a Sales-Import 503); fail-closed (503) only
+  once involvement is known. **L4** EXPORT is recorded when the response FINISHES with a 2xx (a response hook in the
+  guard — no further points-compute controller edits). **L5** `combos('latest')` skips purged imports. **canCancel** is
+  false for applied imports. **Memory:** §7.1 step 11 (combined entry cap, 600k codes, heap backstop).
 
 ## 11. Lane tasks (TDD: write the test first, see it fail, implement, see it pass; run `cd api && npx jest src/sales-import` or `cd platform && npx vitest run src/app/admin/sales-import src/lib/sales-import`)
 
@@ -1098,7 +1137,7 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
   calls `jobs:run` with NO overrides (the plan's design), or `roles/run.jobsExecutorWithOverrides` if it passes overrides (e.g. an
   `IMPORT_ID` env). See §10a.5 (to verify on staging with the owner's go).
 - Job env: `NODE_OPTIONS=--max-old-space-size=1536` (so V8 collects before the 2Gi container limit; §10a.4).
-- **REQUIRED (audit fix round M3/S5):** Cloud Scheduler hitting `POST /v1/sales-import/drain` every 10 min with header
+- **REQUIRED (audit fix round M3/S5; also retries GCS deletions of purged imports):** Cloud Scheduler hitting `POST /v1/sales-import/drain` every 10 min with header
   `x-drain-secret` (+ secret `SALES_IMPORT_DRAIN_SECRET` on the API service). It recovers an import whose worker died
   (heartbeat-stale PROCESSING is reclaimed on the next kick) and, when nothing is queued, drives the retention sweep.
 - **Migration ordering (L3):** `20261111120000_sales_import_hardening` (and every sales-import migration) must be applied

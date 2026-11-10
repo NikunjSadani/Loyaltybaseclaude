@@ -160,6 +160,12 @@ export class StorageService {
     await this.storage.bucket(this.bucket).deleteFiles({ prefix, force: true });
   }
 
+  /** Server-side copy of one object to another key in the same bucket (no bytes pass through the API). */
+  async copyFile(fromKey: string, toKey: string): Promise<void> {
+    const bucket = this.storage.bucket(this.bucket);
+    await bucket.file(fromKey).copy(bucket.file(toKey));
+  }
+
   /** Upload from a stream without buffering it (non-resumable, like uploadFile). */
   async uploadStream(key: string, source: Readable, contentType: string): Promise<string> {
     const file = this.storage.bucket(this.bucket).file(key);
