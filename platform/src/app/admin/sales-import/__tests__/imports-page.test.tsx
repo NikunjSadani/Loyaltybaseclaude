@@ -42,7 +42,7 @@ function item(over: Partial<SalesImportSummary> = {}): SalesImportSummary {
     id: 'i1', status: 'READY', originalFilename: 'oct.xlsx', fileKind: 'XLSX', sizeBytes: 2 * 1024 * 1024, partCount: 1,
     partsReceived: 1, bytesRead: 0, rowsRead: 635430, rowsSkipped: 2, progressPct: null, duplicateOfId: null, error: null,
     detectedHeaders: null, createdAt: '2026-11-01T10:00:00.000Z', finishedAt: null, uploadedBy: 'Asha',
-    heartbeatAt: null, stalled: false, applied: false, purgedAt: null, canReprocess: true, canCancel: false, canDelete: true,
+    queuedAt: null, heartbeatAt: null, stalled: false, applied: false, purgedAt: null, canReprocess: true, canCancel: false, canDelete: true,
     ...over,
   };
 }

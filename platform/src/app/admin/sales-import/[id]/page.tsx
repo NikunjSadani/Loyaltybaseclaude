@@ -52,8 +52,8 @@ function useImportDetail(importId: string | undefined) {
   const [queuedTooLong, setQueuedTooLong] = useState(false);
   const [tick, setTick] = useState(0);
   const seqRef = useRef(0);
-  // There is no server "queued at" timestamp; this counts from when THIS page first saw the import queued, so the
-  // "waiting for more than 2 minutes" notice is a lower bound (it is never shown too early).
+  // Prefer the server's `queuedAt`; fall back to when THIS page first saw the import queued (a lower bound,
+  // never shown too early) if the server did not send one.
   const queuedSinceRef = useRef<number | null>(null);
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
@@ -79,7 +79,9 @@ function useImportDetail(importId: string | undefined) {
       if (r.data.status === 'QUEUED') {
         const now = Date.now();
         if (queuedSinceRef.current === null) queuedSinceRef.current = now;
-        setQueuedTooLong(now - queuedSinceRef.current > QUEUED_TOO_LONG_MS);
+        const serverQueued = r.data.queuedAt ? Date.parse(r.data.queuedAt) : NaN;
+        const since = Number.isFinite(serverQueued) ? serverQueued : queuedSinceRef.current;
+        setQueuedTooLong(now - since > QUEUED_TOO_LONG_MS);
       } else {
         queuedSinceRef.current = null;
         setQueuedTooLong(false);
