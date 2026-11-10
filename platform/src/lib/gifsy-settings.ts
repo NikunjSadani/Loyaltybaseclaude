@@ -78,6 +78,7 @@ interface ServerSettings {
   uniquenessPolicy?:      GifsySettings['uniquenessPolicy'];
   /** The policy as STORED (uniquenessPolicy is the derived/enforced value). */
   uniquenessPolicyStored?: GifsySettings['uniquenessPolicyStored'];
+  otpTemplates?:          GifsySettings['otpTemplates'];
 }
 
 // ── in-memory store (seeded synchronously from the localStorage cache) ────────
@@ -141,6 +142,7 @@ function fromServer(srv: ServerSettings, prev: GifsySettings): GifsySettings {
     // admin save base to the DEFAULTS on a legacy server and a save would wipe e.g. bank=true.)
     uniquenessPolicyStored: srv.uniquenessPolicyStored ?? srv.uniquenessPolicy
                             ?? prev.uniquenessPolicyStored ?? prev.uniquenessPolicy,
+    otpTemplates:           srv.otpTemplates           ?? prev.otpTemplates,
   };
 }
 
@@ -198,6 +200,9 @@ const SAVE_KEY_MAP: Partial<Record<keyof GifsySettings, string>> = {
   visibilityConfig:       'visibilityConfig',
   // Identity/payout uniqueness — nested REPLACE-WHOLE key; always PUT the complete object.
   uniquenessPolicy:       'uniquenessPolicy',
+  // Per-purpose OTP SMS template ids — nested REPLACE-WHOLE key; always PUT the complete
+  // four-purpose map (the backend 400s a partial map or a non-24-hex id).
+  otpTemplates:           'otpTemplates',
 };
 
 /**

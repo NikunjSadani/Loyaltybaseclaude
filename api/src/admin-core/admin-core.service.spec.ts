@@ -1165,6 +1165,44 @@ describe('AdminCoreService', () => {
       expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
     });
 
+    // ── B11: per-tenant OTP SMS templates (otpTemplates) via the generic settings PUT ──
+    describe('otpTemplates validation', () => {
+      const HEX_A = '6a391d46aaaaaaaaaaaaaaaa';
+      const HEX_B = '6A391CF2BBBBBBBBBBBBBBBB';
+
+      it('persists a complete map of 24-hex IDs / empty strings (trimmed) + writes the generic audit row', async () => {
+        await service.upsertSetting(gifsy, {
+          key: 'otpTemplates',
+          value: { login: ` ${HEX_A} `, redemptionSelf: HEX_A, kycConsent: HEX_B, redemptionSales: '' },
+        });
+        const call = mockPrisma.programSetting.upsert.mock.calls[0][0];
+        expect(call.where).toEqual({ clientId_settingKey: { clientId: 'deoleo', settingKey: 'otpTemplates' } });
+        const expected = { login: HEX_A, redemptionSelf: HEX_A, kycConsent: HEX_B, redemptionSales: '' };
+        expect(call.update.settingValue).toEqual(expected);
+        expect(call.create.settingValue).toEqual(expected);
+        const audit = mockPrisma.auditLog.create.mock.calls[0][0].data;
+        expect(audit.entityType).toBe('PROGRAM_SETTINGS');
+        expect(audit.metadata).toEqual({ key: 'otpTemplates', value: expected });
+        expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
+      });
+
+      it.each([
+        ['a non-hex ID', { login: 'not-a-template-id-000000', redemptionSelf: '', kycConsent: '', redemptionSales: '' }],
+        ['a 23-char ID', { login: HEX_A.slice(1), redemptionSelf: '', kycConsent: '', redemptionSales: '' }],
+        ['a non-string value', { login: 123, redemptionSelf: '', kycConsent: '', redemptionSales: '' }],
+        ['an unknown purpose key', { login: '', redemptionSelf: '', kycConsent: '', redemptionSales: '', signup: '' }],
+        ['a missing purpose (partial map would wipe it)', { login: HEX_A }],
+        ['a non-object value', 'abc'],
+        ['an array value', [HEX_A]],
+      ])('REJECTS %s with 400 and does not persist', async (_label, value) => {
+        await expect(
+          service.upsertSetting(gifsy, { key: 'otpTemplates', value }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+        expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+      });
+    });
+
     it('leaves non-SLA keys untouched (no coercion)', async () => {
       await service.upsertSetting(gifsy, { key: 'programName', value: 'My Program' });
       const call = mockPrisma.programSetting.upsert.mock.calls[0][0];

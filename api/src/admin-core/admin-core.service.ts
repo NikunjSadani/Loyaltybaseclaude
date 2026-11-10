@@ -9,7 +9,7 @@ import { Prisma, KycStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { TenantService } from '../tenant/tenant.service';
-import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { TenantSettingsService, OtpTemplatePurpose, OtpTemplatesSettings } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { businessHoursBetween, isValidIsoDate } from '../common/business-hours';
 import { isActivePhoneConflict, ACTIVE_PHONE_IN_USE_MSG } from '../common/phone-conflict';
@@ -1002,6 +1002,53 @@ export class AdminCoreService {
     'slaTargetHours',
   ]);
 
+  /** The four OTP purposes a tenant can map to its own MSG91 template (mirrors OtpTemplatePurpose). */
+  private static readonly OTP_TEMPLATE_PURPOSES: readonly OtpTemplatePurpose[] = [
+    'login',
+    'redemptionSelf',
+    'kycConsent',
+    'redemptionSales',
+  ];
+
+  /** A MSG91 template id is a 24-character hex string (e.g. Deoleo's `6a391d46…`). */
+  private static readonly MSG91_TEMPLATE_ID_RE = /^[0-9a-f]{24}$/i;
+
+  /**
+   * Strictly validate an `otpTemplates` settings write → the normalised complete map, or throw a
+   * 400. Exactly the four purposes; each a string, trimmed, either '' (use the global template) or
+   * a 24-hex MSG91 template id.
+   */
+  static validateOtpTemplates(value: unknown): OtpTemplatesSettings {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new BadRequestException('otpTemplates must be an object with login, redemptionSelf, kycConsent and redemptionSales.');
+    }
+    const v = value as Record<string, unknown>;
+    const purposes = AdminCoreService.OTP_TEMPLATE_PURPOSES as readonly string[];
+    for (const k of Object.keys(v)) {
+      if (!purposes.includes(k)) {
+        throw new BadRequestException(`otpTemplates.${k} is not a known OTP purpose.`);
+      }
+    }
+    const out = {} as OtpTemplatesSettings;
+    for (const p of AdminCoreService.OTP_TEMPLATE_PURPOSES) {
+      if (!(p in v)) {
+        throw new BadRequestException(`otpTemplates.${p} is missing — send all four purposes ('' = use the global template).`);
+      }
+      const raw = v[p];
+      if (typeof raw !== 'string') {
+        throw new BadRequestException(`otpTemplates.${p} must be a string.`);
+      }
+      const id = raw.trim();
+      if (id !== '' && !AdminCoreService.MSG91_TEMPLATE_ID_RE.test(id)) {
+        throw new BadRequestException(
+          `otpTemplates.${p} must be a 24-character MSG91 template id (0-9, a-f) or empty to use the global template.`,
+        );
+      }
+      out[p] = id;
+    }
+    return out;
+  }
+
   // ── National holiday calendar (platform-global) ────────────────────────────
   // The KYC review-SLA counts only business hours (Mon–Fri) and PAUSES on this calendar
   // (owner decision 2026-08-10). Storage + defaults + the SLA date-set live in the shared
@@ -1214,6 +1261,16 @@ export class AdminCoreService {
       const explicitlyOff =
         dto.value === false || dto.value === 'false' || dto.value === 0 || dto.value === '0';
       dto.value = !explicitlyOff;
+    }
+
+    // Key-specific guard: otpTemplates (per-tenant, per-purpose MSG91 OTP template IDs, read by
+    // TenantSettingsService.getOtpTemplateId at every OTP send site). REPLACE-WHOLE nested key, so the
+    // value MUST be the COMPLETE map — exactly the four purposes, no more, no less (a partial map
+    // would silently reset an omitted purpose to the global template). Each value is a trimmed
+    // string that is either '' (= use the global MSG91_OTP_TEMPLATE_ID) or a 24-hex MSG91 template id.
+    // A bad value is a 400 — a typo'd id would make that tenant's OTP sends fail at MSG91.
+    if (dto.key === 'otpTemplates') {
+      dto.value = AdminCoreService.validateOtpTemplates(dto.value);
     }
 
     // VPA safeguard — manual (typed) UPI entry ⇄ STORED UPI-ID uniqueness (uniquenessPolicyStored, NOT

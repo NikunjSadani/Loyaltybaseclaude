@@ -569,6 +569,19 @@ export interface GifsySettings {
     bank:  boolean;
     upi:   boolean;
   };
+  /**
+   * Per-tenant, per-purpose MSG91 OTP template ids (program_settings `otpTemplates`). Each is ''
+   * (= use the global MSG91_OTP_TEMPLATE_ID) or a 24-hex template id. REPLACE-WHOLE nested key —
+   * always save the complete four-purpose map. GIFSY_ADMIN-editable (Settings → OTP SMS templates).
+   */
+  otpTemplates?: OtpTemplates;
+}
+
+export interface OtpTemplates {
+  login:           string;
+  redemptionSelf:  string;
+  kycConsent:      string;
+  redemptionSales: string;
 }
 
 // ─── INR Payout Ledger Entry (Retailer / Sub-Stockist / MT) ──────────────────
