@@ -61,6 +61,10 @@ const mockPrisma = {
   outlet: {
     findMany: jest.fn(),
   },
+  // E1 — enabled outlet types for KpiDef.outletType validation.
+  outletTypeClientConfig: {
+    findMany: jest.fn(),
+  },
   // The upload persistence now calls prisma.* DIRECTLY (batch create + chunked
   // $transaction([...upserts])), not tx.* inside an interactive callback — so these
   // reuse the SAME jest.fns as mockTx, letting existing `mockTx.*` assertions and the
@@ -313,6 +317,66 @@ describe('TargetsService', () => {
       await service.upsertKpi(admin, dto);
 
       expect(mockTx.kpiDef.updateMany).not.toHaveBeenCalled();
+    });
+
+    // ── E1: KpiDef.outletType ──
+    describe('outletType (E1)', () => {
+      beforeEach(() => {
+        mockTx.kpiDef.upsert.mockResolvedValue(kpiRow);
+        mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+          { outletType: { code: 'SSS' } },
+          { outletType: { code: 'WHOLESALER' } },
+        ]);
+      });
+
+      it('omitted → create null, update leaves the column untouched, no outlet-type lookup', async () => {
+        await service.upsertKpi(admin, { code: 'MONTH_TGT', label: 'Month Target' });
+        const arg = mockTx.kpiDef.upsert.mock.calls[0][0];
+        expect(arg.create.outletType).toBeNull();
+        expect(arg.update).not.toHaveProperty('outletType');
+        expect(mockPrisma.outletTypeClientConfig.findMany).not.toHaveBeenCalled();
+      });
+
+      it('an enabled code (any case) is stored as the canonical code on create + update', async () => {
+        await service.upsertKpi(admin, { code: 'RLP_TGT', label: 'RLP Target', outletType: 'sss' });
+        const lookup = mockPrisma.outletTypeClientConfig.findMany.mock.calls[0][0];
+        expect(lookup.where).toEqual({ clientId: 'deoleo', isEnabled: true, outletType: { isActive: true } });
+        const arg = mockTx.kpiDef.upsert.mock.calls[0][0];
+        expect(arg.create.outletType).toBe('SSS');
+        expect(arg.update.outletType).toBe('SSS');
+      });
+
+      it('null or blank → SHARED (null) on update, clearing a previous type', async () => {
+        await service.upsertKpi(admin, { code: 'RLP_TGT', label: 'RLP Target', outletType: null });
+        await service.upsertKpi(admin, { code: 'RLP_TGT', label: 'RLP Target', outletType: '  ' });
+        expect(mockTx.kpiDef.upsert.mock.calls[0][0].update.outletType).toBeNull();
+        expect(mockTx.kpiDef.upsert.mock.calls[1][0].update.outletType).toBeNull();
+        expect(mockPrisma.outletTypeClientConfig.findMany).not.toHaveBeenCalled();
+      });
+
+      it('L2: an update re-sending the STORED (now-disabled) outletType is not re-validated and leaves it untouched', async () => {
+        mockPrisma.kpiDef.findFirst.mockResolvedValueOnce({ outletType: 'SUB_STOCKIST' });
+        await service.upsertKpi(admin, { code: 'OLD_KPI', label: 'Renamed', outletType: 'SUB_STOCKIST' });
+        expect(mockPrisma.outletTypeClientConfig.findMany).not.toHaveBeenCalled();
+        const arg = mockTx.kpiDef.upsert.mock.calls[0][0];
+        expect(arg.update).not.toHaveProperty('outletType');
+        expect(arg.update.label).toBe('Renamed');
+      });
+
+      it('L2: a CHANGED outletType on update is still validated', async () => {
+        mockPrisma.kpiDef.findFirst.mockResolvedValueOnce({ outletType: null });
+        await expect(
+          service.upsertKpi(admin, { code: 'OLD_KPI', label: 'x', outletType: 'NOPE' }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('a code that is not an enabled outlet type of the tenant → 400, nothing written', async () => {
+        await expect(
+          service.upsertKpi(admin, { code: 'X', label: 'X', outletType: 'RETAILER' }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(mockTx.kpiDef.upsert).not.toHaveBeenCalled();
+        expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      });
     });
   });
 

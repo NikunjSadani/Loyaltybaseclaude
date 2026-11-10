@@ -21,6 +21,7 @@ import {
 } from '@/lib/visibility-capture-mode'
 import { useAdminSession } from '@/lib/admin-session'
 import { useAssumedContext } from '@/lib/use-assumed-context'
+import { OtpTemplatesCard } from '@/components/admin/otp-templates-card'
 
 interface Settings {
   holdingPeriodDays: number
@@ -988,6 +989,10 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* ── OTP SMS templates (B11) — per-tenant, so only for a GIFSY_ADMIN assumed into a tenant
+          (the settings PUT writes the assumed tenant's program_settings row; audited). ── */}
+      {assumedGifsy && <OtpTemplatesCard />}
 
       {/* KYC SLA */}
       <Card data-testid="kyc-sla-card">

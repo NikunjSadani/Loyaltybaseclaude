@@ -12,6 +12,7 @@ describe('HubbleWebhookController', () => {
   beforeEach(() => {
     process.env = { ...OLD_ENV };
     delete process.env.HUBBLE_WEBHOOK_SECRET;
+    delete process.env.HUBBLE_WEBHOOK_SECRET_STAGING;
     delete process.env.DATABASE_URL; // avoid the gifsy_prod hard-refuse in isFixedOtpAllowed
   });
   afterAll(() => {
@@ -28,13 +29,49 @@ describe('HubbleWebhookController', () => {
   const sign = (secret: string, raw: Buffer) =>
     createHmac('sha256', secret).update(raw).digest('base64');
 
-  it('dev-bypasses (no secret, non-prod) and reconciles by referenceId', async () => {
+  it('F3 fail-closed: NO secret configured → 403 even on non-prod with FIXED_OTP allowed (no reconcile)', async () => {
     process.env.NODE_ENV = 'test';
+    process.env.ALLOW_FIXED_OTP = 'true';
+    process.env.FIXED_OTP = '123456';
     const { controller, reconcile } = make();
     const payload = { referenceId: 'ord_1' };
-    const res = await controller.webhook(req(payload), payload, undefined);
-    expect(reconcile).toHaveBeenCalledWith('ord_1');
-    expect(res).toEqual({ ok: true, reconciled: true, outcome: 'DELIVERED' });
+    await expect(controller.webhook(req(payload), payload, undefined)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it('F3 fail-closed: a whitespace-only secret counts as NOT configured', async () => {
+    process.env.HUBBLE_WEBHOOK_SECRET = '   ';
+    const { controller, reconcile } = make();
+    const payload = { referenceId: 'ord_1b' };
+    const r = req(payload);
+    await expect(
+      controller.webhook(r, payload, sign('   ', (r as { rawBody: Buffer }).rawBody)),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it('F3: falls back to HUBBLE_WEBHOOK_SECRET_STAGING when the neutral name is unset', async () => {
+    process.env.HUBBLE_WEBHOOK_SECRET_STAGING = 'stg-secret';
+    const { controller, reconcile } = make();
+    const payload = { referenceId: 'ord_1c' };
+    const r = req(payload);
+    await controller.webhook(r, payload, sign('stg-secret', (r as { rawBody: Buffer }).rawBody));
+    expect(reconcile).toHaveBeenCalledWith('ord_1c');
+  });
+
+  it('F3: the neutral HUBBLE_WEBHOOK_SECRET wins over the *_STAGING fallback', async () => {
+    process.env.HUBBLE_WEBHOOK_SECRET = 'prod-secret';
+    process.env.HUBBLE_WEBHOOK_SECRET_STAGING = 'stg-secret';
+    const { controller, reconcile } = make();
+    const payload = { referenceId: 'ord_1d' };
+    const r = req(payload);
+    await expect(
+      controller.webhook(r, payload, sign('stg-secret', (r as { rawBody: Buffer }).rawBody)),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    await controller.webhook(r, payload, sign('prod-secret', (r as { rawBody: Buffer }).rawBody));
+    expect(reconcile).toHaveBeenCalledWith('ord_1d');
   });
 
   it('accepts a valid X-Verify signature when the secret is set', async () => {

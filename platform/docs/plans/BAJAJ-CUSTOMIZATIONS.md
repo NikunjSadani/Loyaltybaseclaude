@@ -22,9 +22,14 @@ Bajaj change. Last updated: 2026-10-29.
 - **Secrets (staging):** `HUBBLE_CLIENT_ID_STAGING` / `HUBBLE_CLIENT_SECRET_STAGING` /
   `WebhookHubbleStaging`→`HUBBLE_WEBHOOK_SECRET` (all in GCP Secret Manager, project `gifsy-platform`).
   Webhook URL: `https://gifsy-api-staging-4d4n5mc6yq-el.a.run.app/v1/hubble/webhook` (enforcing X-Verify).
-- **Open items:** rotate the Hubble Client Secret (was shared in a screenshot); PROD wiring
-  (prod creds + required `HUBBLE_WEBHOOK_SECRET` fail-closed in `deploy.yml` + base URL
-  `api.myhubble.money`); static-egress-IP decision (prod min-instances=1 already warm).
+- **Prod wiring (branch `feat/bajaj-prod-gaps`, 2026-11-10, not yet released):** the code reads the
+  env-neutral `HUBBLE_CLIENT_ID` / `HUBBLE_CLIENT_SECRET` / `HUBBLE_WEBHOOK_SECRET` (falling back to
+  the `*_STAGING` names, so staging is unchanged); the webhook is fail-closed everywhere (no dev-bypass);
+  prod `deploy.yml` binds the three secrets + `HUBBLE_BASE_URL=https://api.myhubble.money`.
+  Prod webhook URL (confirm the Cloud Run URL first): `https://gifsy-api-4d4n5mc6yq-el.a.run.app/v1/hubble/webhook`.
+  Owner steps (secrets MUST exist before the prod deploy): `BAJAJ-PROD-GO-LIVE-CHECKLIST.md` § F3 runbook.
+- **Open items:** rotate the Hubble Client Secret (was shared in a screenshot); create the prod
+  secrets + register the prod webhook (runbook above); static-egress-IP decision (prod min-instances=1 already warm).
 
 ## 2. VOUCHER_ISSUED notification — voucher code to the owner (ALL tenants, not Bajaj-only)
 - **What:** when a voucher code is issued (Hubble auto-issue OR manual fulfilment), send the

@@ -1165,6 +1165,100 @@ describe('AdminCoreService', () => {
       expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
     });
 
+    // ── B11: per-tenant OTP SMS templates — dedicated GIFSY_ADMIN-only path ──
+    describe('otpTemplates (B11)', () => {
+      const HEX_A = '6a391d46aaaaaaaaaaaaaaaa';
+      const HEX_B = '6a391cf2bbbbbbbbbbbbbbbb';
+      const NEW   = '0123456789abcdef01234567';
+      const DEOLEO_ROW = { login: HEX_A, redemptionSelf: HEX_A, kycConsent: HEX_B, redemptionSales: HEX_B };
+      const assumed = { ...gifsy, assumed: true } as JwtPayload;
+
+      it('M1: the GENERIC PUT /v1/admin/settings REJECTS an otpTemplates write (staff with write_finance cannot reach it)', async () => {
+        await expect(
+          service.upsertSetting(gifsyStaff, { key: 'otpTemplates', value: DEOLEO_ROW }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        await expect(
+          service.upsertSetting(gifsy, { key: 'otpTemplates', value: DEOLEO_ROW }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+      });
+
+      it('M3: GET reads the STORED row (Deoleo values as-is) and echoes the loaded clientId', async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: DEOLEO_ROW });
+        const res = await service.getOtpTemplates(assumed);
+        expect(mockPrisma.programSetting.findUnique).toHaveBeenCalledWith({
+          where: { clientId_settingKey: { clientId: 'deoleo', settingKey: 'otpTemplates' } },
+          select: { settingValue: true },
+        });
+        expect(res).toEqual({ clientId: 'deoleo', templates: DEOLEO_ROW, stored: true });
+      });
+
+      it('M3: GET with no row → all empty, stored:false; a DB read error PROPAGATES (never a silent empty map)', async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValueOnce(null);
+        expect(await service.getOtpTemplates(assumed)).toEqual({
+          clientId: 'deoleo',
+          templates: { login: '', redemptionSelf: '', kycConsent: '', redemptionSales: '' },
+          stored: false,
+        });
+        mockPrisma.programSetting.findUnique.mockRejectedValueOnce(new Error('db down'));
+        await expect(service.getOtpTemplates(assumed)).rejects.toThrow('db down');
+      });
+
+      it("M3: Deoleo's login template survives a partial save (only the changed purpose is merged onto the stored row)", async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: DEOLEO_ROW });
+        await service.saveOtpTemplates(assumed, { clientId: 'deoleo', changes: { redemptionSales: ` ${NEW} ` } });
+        const call = mockPrisma.programSetting.upsert.mock.calls[0][0];
+        const expected = { ...DEOLEO_ROW, redemptionSales: NEW };
+        expect(call.where).toEqual({ clientId_settingKey: { clientId: 'deoleo', settingKey: 'otpTemplates' } });
+        expect(call.update.settingValue).toEqual(expected);
+        expect(call.update.settingValue.login).toBe(HEX_A);
+        const audit = mockPrisma.auditLog.create.mock.calls[0][0].data;
+        expect(audit.entityType).toBe('PROGRAM_SETTINGS');
+        expect(audit.metadata).toEqual({ key: 'otpTemplates', value: expected });
+        expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
+      });
+
+      it('M3: an untouched stored value is never re-validated or blanked (no stored row → others stay "")', async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValue(null);
+        await service.saveOtpTemplates(assumed, { clientId: 'deoleo', changes: { login: NEW } });
+        expect(mockPrisma.programSetting.upsert.mock.calls[0][0].update.settingValue).toEqual({
+          login: NEW, redemptionSelf: '', kycConsent: '', redemptionSales: '',
+        });
+      });
+
+      it('M2: a clientId different from the current (assumed) tenant → 409, nothing read or written', async () => {
+        await expect(
+          service.saveOtpTemplates(assumed, { clientId: 'bajaj', changes: { login: NEW } }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(mockPrisma.programSetting.findUnique).not.toHaveBeenCalled();
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+      });
+
+      it('rejects an un-assumed (platform) GIFSY session on both GET and PUT', async () => {
+        await expect(service.getOtpTemplates(gifsy)).rejects.toBeInstanceOf(BadRequestException);
+        await expect(
+          service.saveOtpTemplates(gifsy, { clientId: 'deoleo', changes: { login: NEW } }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it.each([
+        ['a non-hex ID', { login: 'not-a-template-id-000000' }],
+        ['a 23-char ID', { login: NEW.slice(1) }],
+        ['a non-string value', { login: 123 }],
+        ['an unknown purpose key', { signup: NEW }],
+        ['no change at all', {}],
+        ['a non-object value', 'abc'],
+        ['an array value', [NEW]],
+      ])('REJECTS %s with 400 and does not persist', async (_label, changes) => {
+        mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: DEOLEO_ROW });
+        await expect(
+          service.saveOtpTemplates(assumed, { clientId: 'deoleo', changes: changes as never }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+        expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+      });
+    });
+
     it('leaves non-SLA keys untouched (no coercion)', async () => {
       await service.upsertSetting(gifsy, { key: 'programName', value: 'My Program' });
       const call = mockPrisma.programSetting.upsert.mock.calls[0][0];

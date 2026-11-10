@@ -85,14 +85,41 @@ export class HubbleService {
     return (raw || 'https://api.dev.myhubble.money').replace(/\/+$/, '');
   }
 
+  /** Logged once per instance when only half of a credential pair is present. */
+  private halfPairWarned = false;
+
+  /**
+   * Resolve the client id + secret as a PAIR — never one from each set. If EITHER environment-neutral
+   * name (prod binds HUBBLE_CLIENT_ID / HUBBLE_CLIENT_SECRET) is set, the neutral pair is used; otherwise
+   * the legacy `*_STAGING` pair (what staging binds), so staging keeps working unchanged. A blank value
+   * counts as unset. A half-present pair resolves to "not configured" (manual-fulfilment fallback) and
+   * logs a clear error naming the missing variable (never a value). Hubble credentials are PLATFORM-level
+   * (one Hubble account); per-tenant enablement is the hubbleVoucherEnabled flag.
+   */
+  private creds(): { clientId?: string; clientSecret?: string } {
+    const read = (k: string) => this.config.get<string>(k)?.trim() || undefined;
+    const nId = read('HUBBLE_CLIENT_ID');
+    const nSecret = read('HUBBLE_CLIENT_SECRET');
+    const useNeutral = !!(nId || nSecret);
+    const clientId = useNeutral ? nId : read('HUBBLE_CLIENT_ID_STAGING');
+    const clientSecret = useNeutral ? nSecret : read('HUBBLE_CLIENT_SECRET_STAGING');
+    if (!!clientId !== !!clientSecret && !this.halfPairWarned) {
+      this.halfPairWarned = true;
+      const suffix = useNeutral ? '' : '_STAGING';
+      const missing = clientId ? `HUBBLE_CLIENT_SECRET${suffix}` : `HUBBLE_CLIENT_ID${suffix}`;
+      this.logger.error(
+        `Hubble credentials are half-configured: ${missing} is missing while its pair is set — Hubble is treated as NOT configured (manual fulfilment).`,
+      );
+    }
+    return clientId && clientSecret ? { clientId, clientSecret } : {};
+  }
+
   private clientId(): string | undefined {
-    // TODO(prod): resolve prod creds (HUBBLE_CLIENT_ID / _PROD) once prod onboarding
-    // is done. Staging is wired now; prod secrets are a later, deliberate step.
-    return this.config.get<string>('HUBBLE_CLIENT_ID_STAGING')?.trim();
+    return this.creds().clientId;
   }
 
   private clientSecret(): string | undefined {
-    return this.config.get<string>('HUBBLE_CLIENT_SECRET_STAGING')?.trim();
+    return this.creds().clientSecret;
   }
 
   /**

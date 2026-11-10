@@ -152,10 +152,12 @@ jobs:
       #     Create those two Secret Manager secrets before the next deploy or gcloud will error.
       #   • HUBBLE_WEBHOOK_SECRET is wired below from the WebhookHubbleStaging secret, so the webhook
       #     ENFORCES Hubble's X-Verify HMAC on staging too (its value must equal the portal's Webhook
-      #     Signature). Remove this mapping to fall back to dev-bypass (ALLOW_FIXED_OTP=true here).
-      #   • TODO(prod): add HUBBLE_BASE_URL=https://api.myhubble.money + prod HUBBLE_CLIENT_ID/SECRET
-      #     and a REQUIRED HUBBLE_WEBHOOK_SECRET (fail-closed on prod) to deploy.yml. Do NOT add prod
-      #     secrets here.
+      #     Signature). The webhook is FAIL-CLOSED everywhere (no dev-bypass): removing this mapping
+      #     makes every Hubble webhook call 403.
+      #   • The code reads the env-neutral HUBBLE_CLIENT_ID / HUBBLE_CLIENT_SECRET first and falls back
+      #     to the *_STAGING names below, so staging is unchanged. PROD binds the neutral names in
+      #     deploy.yml (HUBBLE_CLIENT_ID / HUBBLE_CLIENT_SECRET / HUBBLE_WEBHOOK_SECRET + base URL
+      #     https://api.myhubble.money). Do NOT add prod secrets here.
       - name: Deploy API to Cloud Run staging
         run: |
           gcloud run deploy gifsy-api-staging \
@@ -203,7 +205,8 @@ jobs:
   # ── Build & Deploy Frontend (staging) ────────────────────────────────────────
   deploy-frontend-staging:
     name: Deploy Frontend → gifsy-frontend-staging
-    needs: test
+    # Same ordering as prod: never ship a new frontend against an API deploy that failed.
+    needs: [test, deploy-api-staging]
     runs-on: ubuntu-latest
     permissions:
       contents: read

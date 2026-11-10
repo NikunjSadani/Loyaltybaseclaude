@@ -335,7 +335,7 @@ describe('GifsyService', () => {
       }));
 
       const res = await service.updateClient(gifsy, 'bajaj', { features: { hubbleVoucherEnabled: true } });
-      const feats = res.features as Record<string, boolean>;
+      const feats = res.features as unknown as Record<string, boolean>;
       expect(feats.hubbleVoucherEnabled).toBe(true);
       // Full console set is present (coerced), not a partial projection.
       expect(feats.rbacEnforcement).toBe(false);
@@ -361,7 +361,7 @@ describe('GifsyService', () => {
       const written = mockPrisma.client.update.mock.calls[0][0].data.features;
       expect(written).toEqual({ walletModule: true, catalogueMrpSlash: true });
       // Projected: echoed true on the return payload.
-      const feats = res.features as Record<string, boolean>;
+      const feats = res.features as unknown as Record<string, boolean>;
       expect(feats.catalogueMrpSlash).toBe(true);
     });
 
@@ -376,7 +376,7 @@ describe('GifsyService', () => {
       }));
 
       const res = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
-      const feats = res.features as Record<string, boolean>;
+      const feats = res.features as unknown as Record<string, boolean>;
       expect(feats.catalogueMrpSlash).toBe(false);
     });
 
@@ -392,7 +392,7 @@ describe('GifsyService', () => {
         branding: {}, features: data.features,
       }));
       const onRes = await service.updateClient(gifsy, 'bajaj', { features: { captureBankAtRedemption: true } });
-      expect((onRes.features as Record<string, boolean>).captureBankAtRedemption).toBe(true);
+      expect((onRes.features as unknown as Record<string, boolean>).captureBankAtRedemption).toBe(true);
 
       mockPrisma.client.findFirst.mockResolvedValueOnce({
         id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
@@ -403,7 +403,7 @@ describe('GifsyService', () => {
         branding: {}, features: data.features,
       }));
       const offRes = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
-      expect((offRes.features as Record<string, boolean>).captureBankAtRedemption).toBe(false);
+      expect((offRes.features as unknown as Record<string, boolean>).captureBankAtRedemption).toBe(false);
     });
 
     it("offer tiles: round-trips offerTiles through the PATCH projection; defaults OFF for a tenant that never set it", async () => {
@@ -416,7 +416,7 @@ describe('GifsyService', () => {
         branding: {}, features: data.features,
       }));
       const onRes = await service.updateClient(gifsy, 'bajaj', { features: { offerTiles: true } });
-      expect((onRes.features as Record<string, boolean>).offerTiles).toBe(true);
+      expect((onRes.features as unknown as Record<string, boolean>).offerTiles).toBe(true);
 
       mockPrisma.client.findFirst.mockResolvedValueOnce({
         id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
@@ -427,7 +427,7 @@ describe('GifsyService', () => {
         branding: {}, features: data.features,
       }));
       const offRes = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
-      expect((offRes.features as Record<string, boolean>).offerTiles).toBe(false);
+      expect((offRes.features as unknown as Record<string, boolean>).offerTiles).toBe(false);
     });
 
     it("sales import: round-trips salesImport through the PATCH projection; defaults OFF for a tenant that never set it", async () => {
@@ -440,7 +440,7 @@ describe('GifsyService', () => {
         branding: {}, features: data.features,
       }));
       const onRes = await service.updateClient(gifsy, 'bajaj', { features: { salesImport: true } });
-      expect((onRes.features as Record<string, boolean>).salesImport).toBe(true);
+      expect((onRes.features as unknown as Record<string, boolean>).salesImport).toBe(true);
 
       mockPrisma.client.findFirst.mockResolvedValueOnce({
         id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
@@ -451,7 +451,7 @@ describe('GifsyService', () => {
         branding: {}, features: data.features,
       }));
       const offRes = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
-      expect((offRes.features as Record<string, boolean>).salesImport).toBe(false);
+      expect((offRes.features as unknown as Record<string, boolean>).salesImport).toBe(false);
     });
 
     it('F1: deep-merges the nested features.partnerApp so a partial PATCH keeps sibling flags', async () => {
@@ -481,6 +481,113 @@ describe('GifsyService', () => {
       expect(written).toEqual({
         walletModule: true,
         partnerApp: { showSchemes: false, showInvoices: true, showWallet: true },
+      });
+    });
+
+    // ── B2 (Bajaj prod go-live): behaviour flags via the SAME features PATCH path ──
+    it('B2: a behaviour-flag PATCH merges ONE key and every other stored key survives (incl. nested partnerApp)', async () => {
+      const stored = {
+        walletModule: true,
+        kycApprovalFlow: true,
+        kycAddressProofWaiver: true,
+        soDeclarationKyc: true,
+        hubbleVoucherEnabled: false,
+        partnerApp: { showLeaderboard: true },
+        visibilityCaptureMode: 'PHOTO_APPROVAL',
+      };
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: stored,
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: data.features,
+      }));
+
+      const res = await service.updateClient(gifsy, 'bajaj', { features: { outletMasterGeo: true } });
+
+      const written = mockPrisma.client.update.mock.calls[0][0].data.features;
+      expect(written).toEqual({ ...stored, outletMasterGeo: true });
+      // The response echoes BOTH behaviour flags + the effective partnerApp block.
+      const feats = res.features as Record<string, unknown>;
+      expect(feats.outletMasterGeo).toBe(true);
+      expect(feats.soDeclarationKyc).toBe(true);
+      expect(feats.partnerApp).toEqual({
+        showSchemes: true, showInvoices: false, showWallet: true, showTeam: true, showLeaderboard: true,
+      });
+    });
+
+    it('B2: a tenant that never set the behaviour flags projects them OFF (Deoleo-style blob unchanged)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: { walletModule: true, kycAddressProofWaiver: true },
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: { walletModule: true, kycAddressProofWaiver: true }, ...data,
+      }));
+
+      const res = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
+
+      // A status-only PATCH never writes the features blob at all.
+      expect(mockPrisma.client.update.mock.calls[0][0].data.features).toBeUndefined();
+      const feats = res.features as Record<string, unknown>;
+      expect(feats.outletMasterGeo).toBe(false);
+      expect(feats.soDeclarationKyc).toBe(false);
+    });
+
+    it('B3: rejects a partnerApp PATCH with an unknown key or a non-boolean value (nothing written)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: {},
+      });
+      await expect(
+        service.updateClient(gifsy, 'bajaj', { features: { partnerApp: { showRanks: true } } as never }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      await expect(
+        service.updateClient(gifsy, 'bajaj', { features: { partnerApp: { showLeaderboard: 'true' } } as never }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      await expect(
+        service.updateClient(gifsy, 'bajaj', { features: { partnerApp: [true] } as never }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.client.update).not.toHaveBeenCalled();
+    });
+
+    it('L3: a non-boolean value for a known module/behaviour flag → 400 (a string "false" would read as ON)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: {},
+      });
+      for (const features of [{ outletMasterGeo: 'false' }, { hubbleVoucherEnabled: 1 }, { walletModule: null }]) {
+        await expect(
+          service.updateClient(gifsy, 'bajaj', { features } as never),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      }
+      await expect(
+        service.createClient(gifsy, { slug: 'newco', internalName: 'N', features: { soDeclarationKyc: 'yes' } } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.client.update).not.toHaveBeenCalled();
+      expect(mockPrisma.client.create).not.toHaveBeenCalled();
+    });
+
+    it('B3: a partial partnerApp PATCH (showLeaderboard only) keeps the stored sibling tab keys', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: { walletModule: true, partnerApp: { showTeam: false } },
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: data.features,
+      }));
+
+      const res = await service.updateClient(gifsy, 'bajaj', { features: { partnerApp: { showLeaderboard: true } } as never });
+
+      expect(mockPrisma.client.update.mock.calls[0][0].data.features).toEqual({
+        walletModule: true,
+        partnerApp: { showTeam: false, showLeaderboard: true },
+      });
+      expect((res.features as unknown as { partnerApp: Record<string, boolean> }).partnerApp).toEqual({
+        showSchemes: true, showInvoices: false, showWallet: true, showTeam: false, showLeaderboard: true,
       });
     });
   });
@@ -548,6 +655,24 @@ describe('GifsyService', () => {
     it('throws NotFound when the slug has no client row', async () => {
       mockPrisma.client.findUnique.mockResolvedValue(null);
       await expect(service.getClientDetail(gifsy, 'nope')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('B2/B3: projects the behaviour flags + the EFFECTIVE partnerApp (runtime defaults when unset)', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: { outletMasterGeo: true, partnerApp: { showLeaderboard: true } },
+        approvalHierarchy: {}, notifications: {}, invoicing: {}, wallet: {},
+      });
+      mockPrisma.clientDomain.findMany.mockResolvedValue([]);
+
+      const detail = await service.getClientDetail(gifsy, 'bajaj');
+
+      expect(detail.features.outletMasterGeo).toBe(true);
+      expect(detail.features.soDeclarationKyc).toBe(false);
+      // Unset keys resolve to the partner shell's runtime defaults (FE DEFAULT_CLIENT_CONFIG).
+      expect(detail.features.partnerApp).toEqual({
+        showSchemes: true, showInvoices: false, showWallet: true, showTeam: true, showLeaderboard: true,
+      });
     });
 
     it('projects the JSON config blocks into a full ClientConfig-shaped detail', async () => {
