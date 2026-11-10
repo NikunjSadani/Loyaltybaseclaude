@@ -3181,15 +3181,17 @@ model SalesMonthHistory {
 /// by the retention sweep. The KPI picker's "Stored month(s)" source aggregates THIS table (thousands of rows per month),
 /// never the line rows. Sums are NUMERIC: a combo's month total over every customer can exceed BIGINT pico-cases.
 model SalesMonthHistoryCombo {
-  id          BigInt  @id @default(autoincrement())
-  clientId    String
-  month       String // YYYY-MM
-  dims        Json
-  dimKey      String
-  keyHash     String // md5(dimKey) — bounded unique key (dimKey can exceed the index row size)
-  amountPaise Decimal @db.Decimal(38, 0)
-  qtyPico     Decimal @db.Decimal(38, 0)
-  lines       Int
+  id             BigInt   @id @default(autoincrement())
+  clientId       String
+  month          String // YYYY-MM
+  dims           Json
+  dimKey         String
+  keyHash        String // md5(dimKey) — bounded unique key (dimKey can exceed the index row size)
+  amountPaise    Decimal  @db.Decimal(38, 0)
+  qtyPico        Decimal  @db.Decimal(38, 0)
+  lines          Int
+  sourceImportId String // the history set it summarises (= SalesMonthHistorySet.sourceImportId)
+  appliedAt      DateTime // = SalesMonthHistorySet.appliedAt; a mismatch → the reader rebuilds the month (re-check L-a)
 
   @@unique([clientId, month, keyHash])
   @@index([month])

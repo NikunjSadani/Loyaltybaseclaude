@@ -444,9 +444,14 @@ describe('month history', () => {
     const ins = sql.filter((q) => q.text.includes('INSERT INTO "sales_month_history_combos"'));
     expect(ins).toHaveLength(1);
     expect(ins[0].text).toContain('FROM "sales_month_histories" h');
-    expect(ins[0].text).toMatch(/GROUP BY h."clientId", h."month", h."dimKey"$/);
+    // re-check L-b: plain GROUP BY on dimKey + dims (1:1), no array_agg
+    expect(ins[0].text).toMatch(/GROUP BY h."clientId", h."month", h."dimKey", h."dims"\s*$/);
+    expect(ins[0].text).not.toContain('array_agg');
     expect(ins[0].text).toContain('md5(h."dimKey")');
-    expect(ins[0].values).toEqual(['t1', PREV]);
+    // re-check L-a: stamped with the set it summarises — the SAME sourceImportId / appliedAt as the set header
+    const header = (db.salesMonthHistorySet.upsert.mock.calls[0] as unknown as [{ create: { sourceImportId: string; appliedAt: Date } }])[0];
+    expect(ins[0].values).toEqual(['imp1', header.create.appliedAt.toISOString(), 't1', PREV]);
+    expect(header.create.sourceImportId).toBe('imp1');
     expect(db.log.indexOf('history.insert')).toBeLessThan(db.log.indexOf('combos.delete'));
     expect(db.log.indexOf('combos.insert')).toBeLessThan(db.log.indexOf('apply.create'));
     expect(db.$transaction).toHaveBeenCalledTimes(1);

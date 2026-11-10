@@ -38,6 +38,7 @@ import { computeMonthRows, sumOwnedValues, unitsToNumber, type MonthComputation 
 import { loadLastApplied } from './last-applied';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
 import { blockedReasonFor, monthSummariesOf } from './sales-preview.service';
+import { insertMonthCombosSql } from '../kpi/month-combos';
 
 /**
  * Interactive-transaction timeout of a month write (apply / recalculate): the OutletSalesRecord merge plus the month
@@ -315,16 +316,12 @@ export class SalesApplyService {
          WHERE a."importId" = ${w.sourceImportId} AND a."month" = ${month}`);
       const t2 = Date.now();
       // The month's combos summary (plan §10c, audit M1): replaced from the lines just written, in this transaction, with
-      // ONE INSERT … SELECT … GROUP BY (dimKey ↔ dims is 1:1 within a month: one import, one mapping). The KPI picker's
-      // "Stored month(s)" source reads only this table. Recalculate does not change the history, so not this either.
+      // ONE INSERT … SELECT … GROUP BY (dimKey is the stable key of dims, 1:1). Stamped with the same sourceImportId /
+      // appliedAt as the set header below, so a reader can detect (and rebuild) a summary that is not this set's
+      // (re-check L-a). The KPI picker's "Stored month(s)" source reads only this table. Recalculate does not change the
+      // history, so not this either.
       await tx.$executeRaw(Prisma.sql`DELETE FROM "sales_month_history_combos" WHERE "clientId" = ${clientId} AND "month" = ${month}`);
-      const comboRows = await tx.$executeRaw(Prisma.sql`
-        INSERT INTO "sales_month_history_combos" ("clientId","month","dims","dimKey","keyHash","amountPaise","qtyPico","lines")
-        SELECT h."clientId", h."month", (array_agg(h."dims"))[1], h."dimKey", md5(h."dimKey"),
-               SUM(h."amountPaise"), SUM(h."qtyPico"), SUM(h."lines")::int
-          FROM "sales_month_histories" h
-         WHERE h."clientId" = ${clientId} AND h."month" = ${month}
-         GROUP BY h."clientId", h."month", h."dimKey"`);
+      const comboRows = await tx.$executeRaw(insertMonthCombosSql(clientId, month, w.sourceImportId, now));
       const t3 = Date.now();
       // The set's header: what the lines are, and the mapping they were parsed with (recalculate checks it).
       const header = {

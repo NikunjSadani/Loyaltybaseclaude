@@ -9,17 +9,32 @@ import { HISTORY_COMBOS_STATEMENT_TIMEOUT_MS, SalesHistoryCombosService } from '
  * existing caps), run sequentially in one transaction under SET LOCAL statement_timeout; the history line rows are never
  * read.
  */
+const AT = new Date('2026-11-01T10:00:00.000Z');
+const set = (month: string, dimensionKeys: string[], over: Partial<{ sourceImportId: string; appliedAt: Date; lineRows: number }> = {}) =>
+  ({ month, dimensionKeys, sourceImportId: `imp-${month}`, appliedAt: AT, lineRows: 10, ...over });
 const SETS = [
-  { month: '2026-10', dimensionKeys: ['brand', 'size'] },
-  { month: '2026-09', dimensionKeys: ['brand', 'size'] },
-  { month: '2026-08', dimensionKeys: ['brand'] },
-  { month: '2026-07', dimensionKeys: ['brand', 'size'] },
+  set('2026-10', ['brand', 'size']),
+  set('2026-09', ['brand', 'size']),
+  set('2026-08', ['brand']),
+  set('2026-07', ['brand', 'size']),
 ];
+type Head = { month: string; srcMin: string; srcMax: string; atMin: Date; atMax: Date };
+/** Summary heads that match the set headers (nothing stale). */
+const headsOf = (sets: typeof SETS): Head[] =>
+  sets.map((s) => ({ month: s.month, srcMin: s.sourceImportId, srcMax: s.sourceImportId, atMin: s.appliedAt, atMax: s.appliedAt }));
 
-function make(opts: { sets?: typeof SETS; combos?: unknown[]; values?: unknown[]; fail?: Error } = {}) {
+function make(opts: { sets?: typeof SETS; combos?: unknown[]; values?: unknown[]; fail?: Error; failCode?: string; heads?: Head[] } = {}) {
   const queries: Prisma.Sql[] = [];
+  const headQueries: Prisma.Sql[] = [];
+  const writes: Prisma.Sql[] = [];
   const order: string[] = [];
+  const sets = opts.sets ?? SETS;
   const $queryRaw = jest.fn().mockImplementation(async (q: Prisma.Sql) => {
+    if (/GROUP BY c\."month"/.test(q.sql)) {
+      headQueries.push(q);
+      order.push('heads');
+      return opts.heads ?? headsOf(sets);
+    }
     const n = queries.push(q);
     order.push(`start${n}`);
     await new Promise((r) => setImmediate(r)); // a parallel second query would start before this one ends
@@ -29,15 +44,29 @@ function make(opts: { sets?: typeof SETS; combos?: unknown[]; values?: unknown[]
   });
   const tx = {
     $executeRawUnsafe: jest.fn(async (s: string) => { order.push(`set:${s}`); return 0; }),
+    $executeRaw: jest.fn(async (q: Prisma.Sql) => {
+      writes.push(q);
+      order.push(/pg_advisory_xact_lock/.test(q.sql) ? 'lock' : /^\s*DELETE/.test(q.sql) ? 'delete' : 'insert');
+      return 3;
+    }),
     $queryRaw,
+    salesMonthHistorySet: {
+      findUnique: jest.fn(async ({ where }: { where: { clientId_month: { month: string } } }) => {
+        const s = sets.find((x) => x.month === where.clientId_month.month);
+        return s ? { sourceImportId: s.sourceImportId, appliedAt: s.appliedAt } : null;
+      }),
+    },
   };
   const prisma = {
-    salesMonthHistorySet: { findMany: jest.fn().mockResolvedValue(opts.sets ?? SETS) },
+    salesMonthHistorySet: { findMany: jest.fn().mockResolvedValue(sets) },
     salesMonthHistory: { findMany: jest.fn(), groupBy: jest.fn() },
     $queryRaw, // same fn: a read outside the transaction would show up too
-    $transaction: jest.fn(async (cb: (t: typeof tx) => unknown) => cb(tx)),
+    $transaction: jest.fn(async (cb: (t: typeof tx) => unknown) => {
+      if (opts.failCode) throw Object.assign(new Error('Transaction API error: Unable to start a transaction in the given time.'), { code: opts.failCode });
+      return cb(tx);
+    }),
   };
-  return { svc: new SalesHistoryCombosService(prisma as never), prisma, queries, order };
+  return { svc: new SalesHistoryCombosService(prisma as never), prisma, queries, headQueries, writes, order, tx };
 }
 
 describe('SalesHistoryCombosService', () => {
@@ -89,7 +118,7 @@ describe('SalesHistoryCombosService', () => {
     // Two aggregate statements over the SUMMARY table, scoped by tenant + the chosen months, GROUP BY in SQL with a LIMIT /
     // rank cap — one after the other, after SET LOCAL statement_timeout, inside one transaction (audit M1).
     expect(queries).toHaveLength(2);
-    expect(order).toEqual([`set:SET LOCAL statement_timeout = ${HISTORY_COMBOS_STATEMENT_TIMEOUT_MS}`, 'start1', 'end1', 'start2', 'end2']);
+    expect(order).toEqual([`set:SET LOCAL statement_timeout = ${HISTORY_COMBOS_STATEMENT_TIMEOUT_MS}`, 'heads', 'start1', 'end1', 'start2', 'end2']);
     expect(HISTORY_COMBOS_STATEMENT_TIMEOUT_MS).toBe(10_000);
     for (const q of queries) {
       expect(q.sql).toMatch(/FROM "sales_month_history_combos" c/);
@@ -137,6 +166,50 @@ describe('SalesHistoryCombosService', () => {
       dimensionValues: {}, dimensionCombos: [], totalCombos: 0,
     });
     expect(b.prisma.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('L-a: summaries matching the set headers are read as they are (no lock, no rewrite)', async () => {
+    const { svc, writes, headQueries } = make();
+    await svc.combos('t1', { lastMonths: '3' });
+    expect(writes).toEqual([]);
+    expect(headQueries).toHaveLength(1);
+    expect(headQueries[0].sql).toMatch(/FROM "sales_month_history_combos" c/);
+    expect(headQueries[0].values).toEqual(['t1', ['2026-10', '2026-09', '2026-08']]);
+  });
+
+  it('L-a: a month whose summary is missing or from another set is rebuilt under the month lock before the reads', async () => {
+    const heads = headsOf(SETS).filter((h) => h.month !== '2026-08') // 2026-08: missing (set has lines)
+      .map((h) => (h.month === '2026-10' ? { ...h, srcMax: 'imp-OLD' } : h)) // 2026-10: rows of two sets
+      .map((h) => (h.month === '2026-09' ? { ...h, atMin: new Date(AT.getTime() - 1), atMax: new Date(AT.getTime() - 1) } : h)); // re-applied since
+    const { svc, writes, order, tx } = make({ heads });
+    await svc.combos('t1', { lastMonths: '4' });
+    // 2026-07 matches → untouched; the three stale months rebuilt in month order, each: lock → delete → insert
+    expect(order.slice(0, 2)).toEqual([`set:SET LOCAL statement_timeout = ${HISTORY_COMBOS_STATEMENT_TIMEOUT_MS}`, 'heads']);
+    expect(order.slice(2, 11)).toEqual(['lock', 'delete', 'insert', 'lock', 'delete', 'insert', 'lock', 'delete', 'insert']);
+    expect(order.slice(11)).toEqual(['start1', 'end1', 'start2', 'end2']);
+    const locks = writes.filter((w) => /pg_advisory_xact_lock/.test(w.sql)).map((w) => w.values[0]);
+    expect(locks).toEqual(['sales-month:t1:2026-08', 'sales-month:t1:2026-09', 'sales-month:t1:2026-10']);
+    const inserts = writes.filter((w) => /INSERT INTO "sales_month_history_combos"/.test(w.sql));
+    expect(inserts[0].sql).toMatch(/GROUP BY h\."clientId", h\."month", h\."dimKey", h\."dims"/);
+    // stamped with the header as re-read after the lock
+    expect(inserts.map((w) => w.values)).toEqual([
+      ['imp-2026-08', AT.toISOString(), 't1', '2026-08'],
+      ['imp-2026-09', AT.toISOString(), 't1', '2026-09'],
+      ['imp-2026-10', AT.toISOString(), 't1', '2026-10'],
+    ]);
+    expect(tx.salesMonthHistorySet.findUnique).toHaveBeenCalledTimes(3);
+  });
+
+  it('L-a: a set without lines and without summary rows is not "stale"', async () => {
+    const sets = [set('2026-10', ['brand'], { lineRows: 0 })];
+    const { svc, writes } = make({ sets, heads: [] });
+    await svc.combos('t1', {});
+    expect(writes).toEqual([]);
+  });
+
+  it('L-d: no transaction could be started (P2028, pool busy) → the same friendly 503', async () => {
+    const { svc } = make({ failCode: 'P2028' });
+    await expect(svc.combos('t1', { lastMonths: '3' })).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 
   it('a statement timeout → 503 with a readable message; other errors propagate', async () => {

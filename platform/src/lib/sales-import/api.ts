@@ -47,7 +47,8 @@ export const salesImportApi = {
   combos: (importId: string | 'latest' = 'latest') => api.get<SalesImportCombos>(`${BASE}/${id(importId)}/combos`),
   /**
    * Product combos from the STORED month history: one month, or the N most recent stored months (1..12). Takes an
-   * AbortSignal so the picker can cancel a superseded request (plain fetch: the shared api client has no signal).
+   * AbortSignal so the picker can cancel a superseded request. Plain fetch because the SHARED api client takes no signal
+   * (adding one there is a platform-wide change, held for the owner); errors follow its conventions (403 message).
    */
   historyCombos: async (q: { month: string } | { lastMonths: number }, signal?: AbortSignal): Promise<ApiResponse<SalesHistoryCombos>> => {
     const qs = 'month' in q ? `month=${id(q.month)}` : `lastMonths=${q.lastMonths}`;
@@ -55,7 +56,8 @@ export const salesImportApi = {
       const res = await fetch(`${BASE}/history-combos?${qs}`, { method: 'GET', signal, headers: authHeader() });
       let body: { success?: boolean; data?: SalesHistoryCombos; error?: string; message?: string } | null = null;
       try { body = await res.json(); } catch { body = null; }
-      if (!res.ok || !body) return { success: false, error: body?.error ?? body?.message ?? `HTTP ${res.status}`, status: res.status };
+      if (res.status === 403) return { success: false, error: body?.error ?? "You don't have permission to do that", status: 403 };
+      if (!res.ok || !body) return { success: false, error: body?.error ?? body?.message ?? (res.statusText || `HTTP ${res.status}`), status: res.status };
       return body as ApiResponse<SalesHistoryCombos>;
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'Network error' };
