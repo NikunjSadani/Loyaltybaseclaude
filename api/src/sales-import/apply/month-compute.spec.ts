@@ -30,3 +30,16 @@ describe('computeMonthRows — totals are the sum of the STORED per-outlet value
     expect(comp.stats[0]).toMatchObject({ total: 0, outletsNonZero: 0, outletsNegative: 0 });
   });
 });
+
+describe('computeMonthRows — matched / unmatched quantity rounded per outlet / per customer (audit L3)', () => {
+  it('matched = Σ per-outlet 3-dp values; unmatched = Σ per-customer 3-dp values', async () => {
+    const comp = await computeMonthRows(
+      pager([agg(1, 'O1', 500_000_000n), agg(2, 'O2', 500_000_000n), agg(3, 'U1', 500_000_000n), agg(4, 'U2', 500_000_000n), agg(5, 'U2', 1n)]),
+      defs,
+      roster,
+    );
+    expect(comp.split.matchedQtyThousandths).toBe(2n); // 0.001 + 0.001 (raw 0.001)
+    expect(comp.split.unmatchedQtyThousandths).toBe(2n);
+    expect(comp.split.matchedPico).toBe(1_000_000_000n); // raw kept for reference
+  });
+});

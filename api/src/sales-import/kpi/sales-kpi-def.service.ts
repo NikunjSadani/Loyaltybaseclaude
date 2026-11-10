@@ -18,13 +18,13 @@ import {
   SALES_KPI_MEASURES,
   definitionsHash,
   entryMatches,
-  measureToNumber,
   outletInScope,
   redundantAnyOfEntries,
   validateAndNormalizeFilter,
   type KpiDefLite,
 } from './sales-kpi.helper';
 import { forEachAggregatePage, loadRosterMeta, resolveReadyImport, rosterIndexOf } from './sales-import-data';
+import { storedUnits, unitsToNumber } from '../apply/month-compute';
 
 /**
  * M4: the tester memoises everything per DISTINCT product combo (dimKey) — the KPI match vector (shared by every
@@ -317,18 +317,21 @@ export class SalesKpiDefService {
     for (const month of [...perMonth.keys()].sort()) {
       const acc = perMonth.get(month)!;
       matchedLines += acc.matchedLines;
+      // Same rule as preview / apply (real-DB finding 2 / audit L2): totals are sums of the per-outlet STORED values,
+      // and "non-zero" is judged on the stored (rounded) value.
       let paise = 0n;
-      let pico = 0n;
+      let thousandths = 0n;
       let nonZero = 0;
       for (const code of acc.outletCodes()) {
-        paise += acc.rawSum(code, 0);
-        pico += acc.rawSum(code, 1);
-        if (acc.rawSum(code, measureIdx) !== 0n) nonZero++;
+        const units = [storedUnits(acc.rawSum(code, 0), 'AMOUNT'), storedUnits(acc.rawSum(code, 1), 'QUANTITY')];
+        paise += units[0];
+        thousandths += units[1];
+        if (units[measureIdx] !== 0n) nonZero++;
       }
       months.push({
         month,
-        totalAmountRupees: measureToNumber(paise, 'AMOUNT'),
-        totalQuantity: measureToNumber(pico, 'QUANTITY'),
+        totalAmountRupees: unitsToNumber(paise, 'AMOUNT'),
+        totalQuantity: unitsToNumber(thousandths, 'QUANTITY'),
         outletsNonZero: nonZero,
       });
     }

@@ -20,9 +20,9 @@ import {
 } from '../kpi/sales-import-data';
 import type { KpiDefLite } from '../kpi/sales-kpi.helper';
 import { rosterOutletWhere } from '../ingest/roster';
-import { paiseToRupees, picoToCases } from '../ingest/normalize';
+import { paiseToRupees } from '../ingest/normalize';
 import { monthLabel, resolveMonthState } from '../months/month-state';
-import { computeMonthRows, sumOwnedValues } from './month-compute';
+import { computeMonthRows, sumOwnedValues, unitsToNumber } from './month-compute';
 import { loadLastApplied } from './last-applied';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
 
@@ -148,9 +148,9 @@ export class SalesPreviewService {
       matchedOutlets: comp.split.matchedOutlets,
       unmatchedCustomers: comp.split.unmatchedCustomers,
       matchedAmountRupees: paiseToRupees(comp.split.matchedPaise),
-      matchedQuantity: picoToCases(comp.split.matchedPico),
+      matchedQuantity: unitsToNumber(comp.split.matchedQtyThousandths, 'QUANTITY'),
       unmatchedAmountRupees: paiseToRupees(comp.split.unmatchedPaise),
-      unmatchedQuantity: picoToCases(comp.split.unmatchedPico),
+      unmatchedQuantity: unitsToNumber(comp.split.unmatchedQtyThousandths, 'QUANTITY'),
       monthState: state.state,
       canApply: blockedReason === null,
       ...(blockedReason ? { blockedReason } : {}),

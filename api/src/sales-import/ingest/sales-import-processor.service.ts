@@ -53,31 +53,63 @@ export const HEAP_CHECK_MS = 2_000;
 export class HeapGuard {
   private strikes = 0;
   private lastCheckAt = Date.now();
+  private lastCheckRows = 0;
   constructor(
     private readonly fraction = HEAP_GUARD_FRACTION,
     private readonly everyRows = HEAP_CHECK_ROWS,
     private readonly everyMs = HEAP_CHECK_MS,
   ) {}
 
-  /** Is a check due at this row count? */
+  /** Is a check due? Relative to the LAST check (audit L1): ≥ everyRows rows since, or ≥ everyMs elapsed. */
   due(rows: number, now = Date.now()): boolean {
-    if (rows % this.everyRows === 0 || now - this.lastCheckAt >= this.everyMs) {
+    if (rows - this.lastCheckRows >= this.everyRows || now - this.lastCheckAt >= this.everyMs) {
       this.lastCheckAt = now;
+      this.lastCheckRows = rows;
       return true;
     }
     return false;
   }
 
+  /** USED heap only (audit L1: committed / available space is not a reliable signal) vs the limit. */
   overLimit(): boolean {
     const h = v8.getHeapStatistics();
-    const over = h.used_heap_size > h.heap_size_limit * this.fraction || h.total_available_size < h.heap_size_limit * (1 - this.fraction);
-    this.strikes = over ? this.strikes + 1 : 0;
+    this.strikes = h.used_heap_size > h.heap_size_limit * this.fraction ? this.strikes + 1 : 0;
     return this.strikes >= 2;
+  }
+
+  /** due() && overLimit() — the one entry point for the row hook and the timer, so checks stay spaced. */
+  check(rows: number, now = Date.now()): boolean {
+    return this.due(rows, now) && this.overLimit();
   }
 }
 
 /** A problem with the FILE (shown to the admin verbatim). */
 class FileProblem extends Error {}
+
+const tooLarge = () => new FileProblem('The file is too large to process in one go. Split it by month and upload the parts separately.');
+
+/** Progress / heartbeat / abort state of one run. */
+interface Prog {
+  bytesRead: number;
+  rowsSeen: number;
+  lastBeatAt: number;
+  lastBeatRows: number;
+  writing: boolean;
+  lost: boolean;
+  /** The heap backstop fired: every loop throws tooLarge() at its next check. */
+  heapTripped: boolean;
+  /** Destroys the current pass's input stream (set while a pass runs). */
+  abortSource: ((e: Error) => void) | null;
+}
+
+/** Re-yields `lines`, checking `check` every 10,000 lines (the unmatched.csv build can run long without rows). */
+function* guardedLines(lines: Iterable<string>, check: () => void): Generator<string> {
+  let n = 0;
+  for (const l of lines) {
+    if (++n % 10_000 === 0) check();
+    yield l;
+  }
+}
 
 interface AggregatorReadOptions {
   decimal: DecimalSeparator;
@@ -237,7 +269,10 @@ export class SalesImportProcessorService {
 
     // Progress + heartbeat (single in-flight write; never blocks the parse). A heartbeat that matches no row means the
     // claim is gone (reprocess / cancel / reclaim): the parse loop stops at the next row.
-    const prog = { bytesRead: 0, rowsSeen: 0, lastBeatAt: Date.now(), lastBeatRows: 0, writing: false, lost: false };
+    const prog: Prog = {
+      bytesRead: 0, rowsSeen: 0, lastBeatAt: Date.now(), lastBeatRows: 0, writing: false, lost: false,
+      heapTripped: false, abortSource: null,
+    };
     let inflight: Promise<unknown> = Promise.resolve();
     const beat = () => {
       const now = Date.now();
@@ -259,17 +294,49 @@ export class SalesImportProcessorService {
     const checkClaim = () => {
       if (prog.lost) throw new ClaimLostError();
     };
+    // Memory backstop (plan §7.1 step 11). Checked from every row AND from an unref'd timer (audit M2), so phases with
+    // no rows — exceljs building its shared-strings table, the aggregate write loop, the unmatched.csv build — are
+    // guarded too. A trip sets a flag (row / write loops throw on it) and destroys the current input stream.
     const heapGuard = new HeapGuard();
+    const trip = () => {
+      if (prog.heapTripped) return;
+      prog.heapTripped = true;
+      prog.abortSource?.(tooLarge());
+    };
+    const heapTimer = setInterval(() => {
+      if (!prog.heapTripped && heapGuard.check(prog.rowsSeen)) trip();
+    }, HEAP_CHECK_MS);
+    heapTimer.unref();
+    const checkHeap = () => {
+      if (prog.heapTripped) throw tooLarge();
+    };
     const onRow = () => {
       prog.rowsSeen++;
       beat();
       checkClaim();
-      // Memory backstop (plan §7.1 step 11): fail readably before an OOM kill, whatever the shape of the file.
-      if (heapGuard.due(prog.rowsSeen) && heapGuard.overLimit()) {
-        throw new FileProblem('The file is too large to process in one go. Split it by month and upload the parts separately.');
-      }
+      if (heapGuard.check(prog.rowsSeen)) trip();
+      checkHeap();
     };
+    try {
+      await this.runPasses(row, mapping, roster, parts, size, prog, beat, checkClaim, onRow, checkHeap, () => inflight);
+    } finally {
+      clearInterval(heapTimer);
+    }
+  }
 
+  private async runPasses(
+    row: SalesImport,
+    mapping: SalesColumnMapping | null,
+    roster: { byNormalizedCode: Map<string, string> },
+    parts: PartsFile,
+    size: number,
+    prog: Prog,
+    beat: () => void,
+    checkClaim: () => void,
+    onRow: () => void,
+    checkHeap: () => void,
+    inflightNow: () => Promise<unknown>,
+  ): Promise<void> {
     // ── Pass 1: sha256 of the whole upload + parse (+ decimal-separator evidence when the mapping says 'auto') ──
     const setting = mapping?.decimalSeparator ?? 'auto';
     const hash = createHash('sha256');
@@ -277,7 +344,7 @@ export class SalesImportProcessorService {
       hash,
       collectDecimalEvidence: setting === 'auto',
     });
-    await inflight;
+    await inflightNow();
     checkClaim();
     const startDecimal = pass1.decimal;
     let outcome: ParseOutcome | null = pass1.outcome;
@@ -301,7 +368,7 @@ export class SalesImportProcessorService {
         const pass2 = await this.parsePass(row, mapping, roster.byNormalizedCode, parts, size, prog, beat, checkClaim, onRow, {
           decimal: decision.decimal,
         });
-        await inflight;
+        await inflightNow();
         checkClaim();
         outcome = pass2.outcome;
       }
@@ -317,7 +384,8 @@ export class SalesImportProcessorService {
       });
       return;
     }
-    await this.writeReady(row, mapping!, outcome.result, outcome.detectedHeaders, hash.digest('hex'), size);
+    checkHeap();
+    await this.writeReady(row, mapping!, outcome.result, outcome.detectedHeaders, hash.digest('hex'), size, checkHeap);
   }
 
   /** One streaming read of the stored file (pass 1 also hashes it). Always releases its streams. */
@@ -327,7 +395,7 @@ export class SalesImportProcessorService {
     roster: Map<string, string>,
     parts: PartsFile,
     size: number,
-    prog: { bytesRead: number },
+    prog: Prog,
     beat: () => void,
     checkClaim: () => void,
     onRow: () => void,
@@ -347,6 +415,7 @@ export class SalesImportProcessorService {
           hashedBytes += (c as Buffer).length;
           beat();
           checkClaim();
+          if (prog.heapTripped) throw tooLarge();
         }
       }
       const plan = planXlsxRead(await loadCentralDirectory(parts, size));
@@ -383,6 +452,11 @@ export class SalesImportProcessorService {
       rows = csvRows(source, undefined, { onDelimiter: (d) => (csvDelimiter = d) });
     }
     let decimal: DecimalSeparator = opts.decimal ?? '.';
+    // The heap timer aborts the read by destroying the input stream with the readable error (audit M2).
+    prog.abortSource = (e: Error) => {
+      if (!source.destroyed) source.destroy(e);
+    };
+    if (prog.heapTripped) prog.abortSource(tooLarge());
     try {
       // Called when the header is resolved (the CSV delimiter is known by then): how the aggregator reads text numbers.
       const aggOpts = () => {
@@ -390,8 +464,10 @@ export class SalesImportProcessorService {
         return { decimal, collectDecimalEvidence: opts.collectDecimalEvidence === true };
       };
       const outcome = await this.parse(row, mapping, roster, rows, onRow, aggOpts, xlsxFailure);
+      if (prog.heapTripped) throw tooLarge();
       return { outcome, hashedBytes, decimal };
     } finally {
+      prog.abortSource = null;
       if (!source.destroyed) source.destroy();
     }
   }
@@ -487,11 +563,12 @@ export class SalesImportProcessorService {
     detectedHeaders: string[][],
     sha256: string,
     size: number,
+    checkHeap: () => void = () => undefined,
   ): Promise<void> {
     // GCS I/O never runs inside a DB transaction (re-audit M1). Written first: if the claim turns out to be lost below,
     // the object is an orphan under this import's own prefix and goes with its delete / retention purge.
     const csvKey = unmatchedCsvKey(row.gcsPrefix, row.claimToken!);
-    await this.storage.uploadStream(csvKey, Readable.from(unmatchedCsvLines(result.unmatched())), 'text/csv; charset=utf-8');
+    await this.storage.uploadStream(csvKey, Readable.from(guardedLines(unmatchedCsvLines(result.unmatched()), checkHeap)), 'text/csv; charset=utf-8');
     await this.prisma.$transaction(
       async (tx) => {
         const own = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
@@ -514,6 +591,7 @@ export class SalesImportProcessorService {
             lines: a.lines,
           });
           if (batch.length >= AGGREGATE_CHUNK) {
+            checkHeap();
             await tx.salesImportAggregate.createMany({ data: batch });
             batch = [];
             await tx.salesImport.update({ where: { id: row.id }, data: { heartbeatAt: new Date() } });

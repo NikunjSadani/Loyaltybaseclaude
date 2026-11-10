@@ -29,9 +29,13 @@ export interface MonthRosterSplit {
   matchedOutlets: number;
   matchedPaise: bigint;
   matchedPico: bigint;
+  /** Σ over matched OUTLETS of each outlet's quantity rounded to 3 dp (thousandths) — consistent with the KPI totals. */
+  matchedQtyThousandths: bigint;
   unmatchedCustomers: number;
   unmatchedPaise: bigint;
   unmatchedPico: bigint;
+  /** Σ over unmatched CUSTOMER CODES of each code's quantity rounded to 3 dp (thousandths). */
+  unmatchedQtyThousandths: bigint;
 }
 
 export interface MonthComputation {
@@ -57,8 +61,12 @@ export async function computeMonthRows(
   const matched = new Set<string>();
   const unmatched = new Set<string>();
   const split: MonthRosterSplit = {
-    matchedOutlets: 0, matchedPaise: 0n, matchedPico: 0n, unmatchedCustomers: 0, unmatchedPaise: 0n, unmatchedPico: 0n,
+    matchedOutlets: 0, matchedPaise: 0n, matchedPico: 0n, matchedQtyThousandths: 0n,
+    unmatchedCustomers: 0, unmatchedPaise: 0n, unmatchedPico: 0n, unmatchedQtyThousandths: 0n,
   };
+  // Per outlet / per customer quantity, so the displayed totals round each one ONCE like the stored values do.
+  const matchedQty = new Map<string, bigint>();
+  const unmatchedQty = new Map<string, bigint>();
   await pager((page) => {
     for (const a of page) {
       const code = index.get(a.outletCode);
@@ -66,16 +74,20 @@ export async function computeMonthRows(
         unmatched.add(a.outletCode);
         split.unmatchedPaise += a.amountPaise;
         split.unmatchedPico += a.qtyPico;
+        unmatchedQty.set(a.outletCode, (unmatchedQty.get(a.outletCode) ?? 0n) + a.qtyPico);
         continue;
       }
       matched.add(code);
       split.matchedPaise += a.amountPaise;
       split.matchedPico += a.qtyPico;
+      matchedQty.set(code, (matchedQty.get(code) ?? 0n) + a.qtyPico);
       acc.add(code, a, a.dimKey);
     }
   });
   split.matchedOutlets = matched.size;
   split.unmatchedCustomers = unmatched.size;
+  for (const v of matchedQty.values()) split.matchedQtyThousandths += storedUnits(v, 'QUANTITY');
+  for (const v of unmatchedQty.values()) split.unmatchedQtyThousandths += storedUnits(v, 'QUANTITY');
 
   const stats: MonthKpiStat[] = defs.map((d) => ({ kpiCode: d.kpiCode, totalRaw: 0n, total: 0, outletsNonZero: 0, outletsNegative: 0 }));
   const storedSums = defs.map(() => 0n);

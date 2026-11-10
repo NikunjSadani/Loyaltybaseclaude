@@ -30,11 +30,11 @@ import {
 } from '../kpi/sales-import-data';
 import { filterDimKeys, type KpiDefLite } from '../kpi/sales-kpi.helper';
 import { mappingFingerprint } from '../ingest/mapping-fingerprint';
-import { paiseToRupees, picoToCases } from '../ingest/normalize';
+import { paiseToRupees } from '../ingest/normalize';
 import { lockImportRow } from '../ingest/import-lock';
 import { SQL_NOW_UTC, sqlUtc } from '../sql-time';
 import { isMonthKey, monthLabel, resolveMonthState } from '../months/month-state';
-import { computeMonthRows, sumOwnedValues, type MonthComputation } from './month-compute';
+import { computeMonthRows, sumOwnedValues, unitsToNumber, type MonthComputation } from './month-compute';
 import { loadLastApplied } from './last-applied';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
 import { blockedReasonFor, monthSummariesOf } from './sales-preview.service';
@@ -424,9 +424,9 @@ export class SalesApplyService {
       matchedOutlets: comp.split.matchedOutlets,
       unmatchedCustomers: comp.split.unmatchedCustomers,
       matchedAmountRupees: paiseToRupees(comp.split.matchedPaise),
-      matchedQuantity: picoToCases(comp.split.matchedPico),
+      matchedQuantity: unitsToNumber(comp.split.matchedQtyThousandths, 'QUANTITY'),
       unmatchedAmountRupees: paiseToRupees(comp.split.unmatchedPaise),
-      unmatchedQuantity: picoToCases(comp.split.unmatchedPico),
+      unmatchedQuantity: unitsToNumber(comp.split.unmatchedQtyThousandths, 'QUANTITY'),
       zeroFillOutlets: comp.zeroFillOutlets,
       outletsAffected: outletsAffected(existing, comp.rows, owned),
       warnings,

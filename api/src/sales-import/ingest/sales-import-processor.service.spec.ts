@@ -486,20 +486,22 @@ describe('SalesImportProcessorService — re-audit memory / M2', () => {
 });
 
 describe('HeapGuard (re-check M4)', () => {
-  it('fails only after TWO consecutive over-threshold checks, from V8 heap statistics (used vs limit, or too little available)', () => {
+  it('fails only after TWO consecutive over-threshold checks of USED heap vs the limit (committed / available space ignored — audit L1)', () => {
     const v8 = jest.requireActual('node:v8') as typeof import('node:v8');
     const base = v8.getHeapStatistics();
     const seq = [
       { used_heap_size: base.heap_size_limit, total_available_size: base.heap_size_limit }, // over (used)
       { used_heap_size: 1, total_available_size: base.heap_size_limit }, // fine → resets
       { used_heap_size: base.heap_size_limit, total_available_size: base.heap_size_limit }, // over
-      { used_heap_size: 1, total_available_size: 1 }, // over (nothing left) → second strike
+      { used_heap_size: 1, total_available_size: 1 }, // little "available" but used heap is low → NOT over (resets)
+      { used_heap_size: base.heap_size_limit, total_available_size: base.heap_size_limit }, // over
+      { used_heap_size: base.heap_size_limit, total_available_size: base.heap_size_limit }, // over → second strike
     ];
     let i = 0;
     const spy = jest.spyOn(v8, 'getHeapStatistics').mockImplementation(() => ({ ...base, ...seq[i++] }));
     try {
       const g = new HeapGuard();
-      expect([g.overLimit(), g.overLimit(), g.overLimit(), g.overLimit()]).toEqual([false, false, false, true]);
+      expect([g.overLimit(), g.overLimit(), g.overLimit(), g.overLimit(), g.overLimit(), g.overLimit()]).toEqual([false, false, false, false, false, true]);
     } finally {
       spy.mockRestore();
     }
@@ -514,6 +516,9 @@ describe('HeapGuard cadence + threshold (real-DB finding 1)', () => {
     expect(g.due(2_000, t0)).toBe(true); // row cadence
     expect(g.due(2_001, t0 + 1_000)).toBe(false);
     expect(g.due(2_002, t0 + 2_100)).toBe(true); // time cadence (slow rows)
+    // audit L1: the row trigger is relative to the LAST check, not a multiple of 2,000
+    expect(g.due(4_001, t0 + 2_200)).toBe(false); // 1,999 rows since the last check
+    expect(g.due(4_002, t0 + 2_300)).toBe(true);
     const v8 = jest.requireActual('node:v8') as typeof import('node:v8');
     const base = v8.getHeapStatistics();
     const at = (frac: number) => ({ ...base, used_heap_size: Math.round(base.heap_size_limit * frac), total_available_size: base.heap_size_limit });
@@ -528,4 +533,22 @@ describe('HeapGuard cadence + threshold (real-DB finding 1)', () => {
       spy.mockRestore();
     }
   });
+});
+
+describe('heap backstop outside the row loop (audit M2)', () => {
+  it('a phase with NO rows (input stalls) is still guarded: the timer trips, the input is destroyed, FAILED readable', async () => {
+    const { svc, row, final, storage } = setup({ file: Buffer.from(CSV) });
+    // the part stream never produces a byte (like exceljs building a huge shared-strings table before row 1)
+    (storage as unknown as { openReadStream: () => Readable }).openReadStream = () => new Readable({ read() {} });
+    const v8 = jest.requireActual('node:v8') as typeof import('node:v8');
+    const base = v8.getHeapStatistics();
+    const spy = jest.spyOn(v8, 'getHeapStatistics').mockImplementation(() => ({ ...base, used_heap_size: base.heap_size_limit }));
+    try {
+      await svc.processClaimed(row);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(final().data.status).toBe('FAILED');
+    expect(final().data.error).toMatch(/too large to process in one go/);
+  }, 15_000);
 });

@@ -278,3 +278,16 @@ describe('re-check H1: the fail-fast race retains nothing per row', () => {
     await expect(ff.guard(Promise.resolve(1))).rejects.toThrow('input broke');
   });
 });
+
+describe('shared-strings cap follows the heap (audit M2)', () => {
+  it('min(512 MiB, 25 % of the V8 heap limit); planXlsxRead enforces the effective cap', async () => {
+    const { sharedStringsCap } = jest.requireActual('./xlsx-zip') as typeof import('./xlsx-zip');
+    expect(sharedStringsCap(1700 * 1024 ** 2)).toBe(425 * 1024 ** 2);
+    expect(sharedStringsCap(4096 * 1024 ** 2)).toBe(XLSX_MAX_SHARED_STRINGS_UNCOMPRESSED);
+    const cd = readZipCentralDirectory(await exceljsWorkbook([['Data', ROWS]]), 0);
+    if (cd.kind !== 'ok') throw new Error(cd.kind);
+    const sst = cd.entries.find((e) => e.name === 'xl/sharedStrings.xml')!;
+    expect(() => planXlsxRead(cd.entries, { sharedStrings: sst.uncompressedSize - 1 })).toThrow(/shared-text table is too large/);
+    expect(() => planXlsxRead(cd.entries, { sharedStrings: sst.uncompressedSize })).not.toThrow();
+  });
+});

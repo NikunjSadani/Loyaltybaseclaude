@@ -306,3 +306,25 @@ describe('audit fix round — profile / tester', () => {
       .rejects.toThrow(/too many to test/);
   });
 });
+
+describe('KPI tester totals = sum of per-outlet STORED values (audit L2)', () => {
+  it('two outlets of 0.0005 cases → 0.002 (as stored), non-zero judged on the stored value', async () => {
+    const db = txDb();
+    db.salesImport.findFirst.mockResolvedValue({ id: 'imp1', status: 'READY', purgedAt: null });
+    db.outlet.findMany.mockResolvedValue([
+      { outletCode: 'O1', name: 'O1', programName: null, outletType: { code: 'R' } },
+      { outletCode: 'O2', name: 'O2', programName: null, outletType: { code: 'R' } },
+      { outletCode: 'O3', name: 'O3', programName: null, outletType: { code: 'R' } },
+    ]);
+    const row = (id: number, code: string, qtyPico: bigint) =>
+      ({ id: BigInt(id), month: '2026-09', outletCode: code, dims: {}, dimKey: '{}', amountPaise: 0n, qtyPico, lines: 1 });
+    const rows = [row(1, 'O1', 500_000_000n), row(2, 'O2', 500_000_000n), row(3, 'O3', 400_000_000n)];
+    db.salesImportAggregate.findMany.mockImplementation(async ({ where, take }: { where: { id?: { gt: bigint } }; take: number }) =>
+      rows.filter((r) => !where.id || r.id > where.id.gt).slice(0, take));
+    const r = await new SalesKpiDefService(db as never).test(user, {
+      importId: 'imp1',
+      definition: { kpiCode: 'K', measure: 'QUANTITY', filter: {}, outletTypes: [], programs: [], enabled: true, order: 0 } as never,
+    });
+    expect(r.months).toEqual([{ month: '2026-09', totalAmountRupees: 0, totalQuantity: 0.002, outletsNonZero: 2 }]);
+  });
+});

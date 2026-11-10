@@ -17,6 +17,7 @@
  */
 import { PassThrough, Readable, Transform, pipeline } from 'node:stream';
 import { createInflateRaw } from 'node:zlib';
+import * as v8 from 'node:v8';
 
 export interface ZipEntryInfo {
   name: string;
@@ -119,6 +120,13 @@ const SHEET_RE = /^xl\/worksheets\/sheet(\d+)\.xml$/;
 /** S4 bounds on what the declared (central-directory) sizes may expand to. */
 export const XLSX_MAX_TOTAL_UNCOMPRESSED = 4 * 1024 ** 3; // 4 GiB across the entries we read
 export const XLSX_MAX_SHARED_STRINGS_UNCOMPRESSED = 512 * 1024 ** 2; // exceljs caches the whole table in memory
+/** …and never more than this share of the configured V8 heap (audit M2): the cache lives in the same heap as the maps. */
+export const XLSX_SHARED_STRINGS_HEAP_SHARE = 0.25;
+
+/** The effective shared-strings cap for this process: min(512 MiB, 25 % of V8's heap_size_limit). */
+export function sharedStringsCap(heapLimit = v8.getHeapStatistics().heap_size_limit): number {
+  return Math.min(XLSX_MAX_SHARED_STRINGS_UNCOMPRESSED, Math.floor(heapLimit * XLSX_SHARED_STRINGS_HEAP_SHARE));
+}
 
 export interface XlsxReadPlan {
   entries: ZipEntryInfo[]; // in the order to emit
@@ -127,7 +135,8 @@ export interface XlsxReadPlan {
 }
 
 /** Pick and order the entries exceljs needs. Throws XlsxFileError for a file that can't be a workbook. */
-export function planXlsxRead(entries: ZipEntryInfo[]): XlsxReadPlan {
+export function planXlsxRead(entries: ZipEntryInfo[], limits: { sharedStrings?: number } = {}): XlsxReadPlan {
+  const sharedCap = limits.sharedStrings ?? sharedStringsCap();
   const byName = new Map(entries.map((e) => [e.name, e]));
   const workbook = byName.get('xl/workbook.xml');
   const rels = byName.get('xl/_rels/workbook.xml.rels');
@@ -147,9 +156,9 @@ export function planXlsxRead(entries: ZipEntryInfo[]): XlsxReadPlan {
     if (e.flags & 0x0001) throw new XlsxFileError('The .xlsx file is encrypted. Save an unprotected copy and upload that.');
     if (e.method !== 0 && e.method !== 8) throw new XlsxFileError(`The .xlsx file uses an unsupported compression method (${e.method}).`);
   }
-  if (shared && shared.uncompressedSize > XLSX_MAX_SHARED_STRINGS_UNCOMPRESSED) {
+  if (shared && shared.uncompressedSize > sharedCap) {
     throw new XlsxFileError(
-      `The .xlsx file's shared-text table is too large (${Math.round(shared.uncompressedSize / 1024 ** 2)} MB unpacked; the limit is ${XLSX_MAX_SHARED_STRINGS_UNCOMPRESSED / 1024 ** 2} MB). Save it as CSV (UTF-8) and upload that.`,
+      `The .xlsx file's shared-text table is too large (${Math.round(shared.uncompressedSize / 1024 ** 2)} MB unpacked; the limit is ${Math.floor(sharedCap / 1024 ** 2)} MB). Save it as CSV (UTF-8) and upload that.`,
     );
   }
   const totalUncompressed = chosen.reduce((s, e) => s + e.uncompressedSize, 0);
