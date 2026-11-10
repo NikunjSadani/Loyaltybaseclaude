@@ -36,7 +36,7 @@ vi.mock('@/lib/auth-refresh', async (importActual) => {
 });
 
 import { NextRequest } from 'next/server';
-import { proxy } from '@/proxy';
+import { proxy, config as proxyConfig } from '@/proxy';
 import { resolveTenantSync } from '@/lib/platform/tenant-resolution';
 import { jwtVerify } from 'jose';
 import { refreshTokensViaBackend } from '@/lib/auth-refresh';
@@ -140,6 +140,73 @@ describe('proxy — Step 1: tenant resolution', () => {
     // For the rewrite branch these two are set on the RESPONSE headers directly.
     expect(res.headers.get('x-tenant-slug')).toBe('nope');
     expect(res.headers.get('x-tenant-valid')).toBe('false');
+  });
+
+  // ── Internal-header spoofing: ONLY the proxy may set the headers render code trusts ──
+  const SPOOF = {
+    'x-tenant-slug': 'bajaj',
+    'x-tenant-valid': 'true',
+    'x-tenant-color': '#ff0000',
+    'x-tenant-name': 'Evil',
+    'x-user-id': 'attacker',
+    'x-user-role': 'GIFSY_ADMIN',
+    'x-partner-id': 'p-evil',
+    'x-pathname': '/sales/evil',
+  };
+  /** Header names Next will apply to the forwarded request (absent → header removed). */
+  const overridden = (res: Response) =>
+    (res.headers.get('x-middleware-override-headers') ?? '').split(',').map((h) => h.trim());
+
+  it('a client-sent x-tenant-slug (and every other internal header) is replaced by the proxy own values', async () => {
+    mockResolve.mockReturnValue(VALID_TENANT);
+    const res = await run(makeReq(MANIFEST, { headers: SPOOF }));
+    expect(fwd(res, 'x-tenant-slug')).toBe('deoleo');
+    expect(fwd(res, 'x-tenant-valid')).toBe('true');
+    expect(fwd(res, 'x-pathname')).toBe(MANIFEST);
+    for (const h of ['x-tenant-color', 'x-tenant-name', 'x-user-id', 'x-user-role', 'x-partner-id']) {
+      expect(fwd(res, h)).toBeNull();
+      expect(overridden(res)).not.toContain(h);
+    }
+  });
+
+  it('unknown-host 404 rewrite: a spoofed x-tenant-slug is NOT forwarded to the render', async () => {
+    mockResolve.mockReturnValue({ slug: 'nope', config: null });
+    const res = await run(makeReq('/admin', { headers: SPOOF }));
+    expect(new URL(res.headers.get('x-middleware-rewrite') as string).pathname).toBe('/not-found');
+    for (const h of ['x-tenant-slug', 'x-tenant-valid', 'x-user-id', 'x-user-role', 'x-partner-id']) {
+      expect(fwd(res, h)).toBeNull();
+      expect(overridden(res)).not.toContain(h);
+    }
+  });
+
+  // curl -H 'x-tenant-slug: deoleo' https://unknown.gifsy.in/ → /not-found with NO tenant slug
+  // forwarded, so getTenantConfig() renders DEFAULT_CLIENT_CONFIG (not Deoleo's branding).
+  it("unknown host + client 'x-tenant-slug: deoleo' → /not-found, no slug/valid forwarded", async () => {
+    mockResolve.mockReturnValue({ slug: 'unknown', config: null });
+    const res = await run(
+      makeReq('/auth/login', { host: 'unknown.gifsy.in', headers: { 'x-tenant-slug': 'deoleo', 'x-tenant-valid': 'true' } }),
+    );
+    expect(new URL(res.headers.get('x-middleware-rewrite') as string).pathname).toBe('/not-found');
+    expect(fwd(res, 'x-tenant-slug')).toBeNull();
+    expect(fwd(res, 'x-tenant-valid')).toBeNull();
+    expect(overridden(res)).not.toContain('x-tenant-slug');
+    expect(overridden(res)).not.toContain('x-tenant-valid');
+  });
+
+  it('bare domain: a spoofed x-tenant-slug is overwritten with ""', async () => {
+    mockResolve.mockReturnValue({ slug: null, config: null });
+    const res = await run(makeReq(MANIFEST, { headers: SPOOF }));
+    expect(fwd(res, 'x-tenant-slug')).toBe('');
+    expect(fwd(res, 'x-tenant-valid')).toBe('false');
+  });
+
+  it('public (pre-auth) paths never forward client-sent identity headers', async () => {
+    const res = await run(makeReq('/auth/login', { headers: SPOOF }));
+    expect(isNext(res)).toBe(true);
+    for (const h of ['x-user-id', 'x-user-role', 'x-partner-id']) {
+      expect(fwd(res, h)).toBeNull();
+      expect(overridden(res)).not.toContain(h);
+    }
   });
 
   it('forwards x-pathname so the root layout can gate PWA <head>', async () => {
@@ -449,3 +516,25 @@ describe('proxy — /api/* keeps 401ing (XHR SessionExpiryGuard path unchanged)'
     expect(mockRefresh).not.toHaveBeenCalled();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe('proxy — matcher static exclusions', () => {
+  // The matcher is a single negative-lookahead path regex; compile it the same way to check
+  // which static paths bypass the proxy (and so load pre-auth on the sign-in page).
+  const re = new RegExp(`^${proxyConfig.matcher[0]}$`);
+
+  it('public/Logos/* (the actual committed folder, capital L) bypasses the proxy like brand/', () => {
+    expect(re.test('/Logos/bajaj.png')).toBe(false);
+    expect(re.test('/Logos/deoleo.png')).toBe(false);
+    expect(re.test('/logos/deoleo.svg')).toBe(false);
+    expect(re.test('/brand/deoleo-wordmark-white.png')).toBe(false);
+  });
+
+  it('app routes (incl. the public branding-asset API) still run through the proxy', () => {
+    expect(re.test('/auth/login')).toBe(true);
+    expect(re.test('/admin/dashboard')).toBe(true);
+    expect(re.test('/api/public/branding-assets')).toBe(true);
+    expect(re.test('/LogosEvil')).toBe(true);
+  });
+});
+
