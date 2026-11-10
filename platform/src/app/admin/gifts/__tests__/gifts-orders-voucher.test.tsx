@@ -196,9 +196,25 @@ describe('GIFVC — voucher handling', () => {
     expect(optionValues(advanceSelect())).toEqual(['PROCESSING', 'CANCELLED', 'RETURNED']);
   });
 
+  it('GIFVC10c: never-placed reasons hide "Retry with Hubble" (nothing to re-read) but keep "Fulfil manually"', async () => {
+    installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null,
+      hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INVALID_AMOUNT' }]);
+    const row = await openRow('RDM-1');
+    expect(within(row).queryByRole('button', { name: /retry with hubble/i })).toBeNull();
+    expect(within(row).getByRole('button', { name: /fulfil manually/i })).toBeInTheDocument();
+  });
+
+  it('GIFVC10d: a whitespace-only code is "no code" (no code shown, refund targets kept)', async () => {
+    installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: '   ' }]);
+    const row = await openRow('RDM-1');
+    expect(within(row).queryByTestId('order-voucher-code')).toBeNull();
+    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    expect(optionValues(advanceSelect())).toEqual(['PROCESSING', 'CANCELLED', 'RETURNED']);
+  });
+
   it('GIFVC11: "Retry with Hubble" POSTs hubble-reconcile and re-fetches', async () => {
     const calls = installFetch(
-      [{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_NOT_CONFIGURED' }],
+      [{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE' }],
       (url, init) => (url === '/api/rewards/orders/o1/hubble-reconcile' && init?.method === 'POST' ? jsonOk({ orderId: 'o1', outcome: 'DELIVERED' }) : undefined),
     );
     const row = await openRow('RDM-1');

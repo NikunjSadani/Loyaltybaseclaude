@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PayoutMode, Prisma, RedemptionStatus } from '@prisma/client';
+import { noIssuedVoucherGuard } from './order-status-transition';
 
 /**
  * VOUCHER WRITE INVARIANT (owner money rule) — the ONE server-side gate every MANUAL voucher write
@@ -23,7 +24,8 @@ import { PayoutMode, Prisma, RedemptionStatus } from '@prisma/client';
  *  - a cash redemption (UPI / BANK_TRANSFER) → 400 (cash never carries a voucher code);
  *  - a code when one is stored  → 400 (no overwrite); a provider change then counts as one too;
  *  - a code cancelled with the vendor ANYWHERE in the tenant (normalised sha256 in
- *    cancelled_voucher_codes — the caller looks it up) → 400;
+ *    cancelled_voucher_codes) → 400 — checked by the caller INSIDE its write transaction under a
+ *    (tenant, code) advisory lock (assertVoucherCodeReusableInTx), so a concurrent cancel can't race;
  *  - a NEW code only on a paid, open order: CONFIRMED / PROCESSING / DISPATCHED with
  *    pointsDeducted > 0 — and the write is a compare-and-set on exactly that, the provider read
  *    and the row's updatedAt, so ANY concurrent write (refund, vendor-cancel, other edit) makes it
@@ -76,8 +78,6 @@ export interface VoucherOrderState {
 }
 
 export interface VoucherWriteOptions {
-  /** The caller's tenant-wide lookup: is the incoming code a previously cancelled one? */
-  cancelledCodeReused?: boolean;
   /** A GIFSY_ADMIN's explicit, reasoned manual fulfilment of a Hubble-handed order. */
   manualOverride?: { reason: string; actorId: string; at: Date } | null;
 }
@@ -116,6 +116,10 @@ const metaObj = (m: Prisma.JsonValue | null | undefined): Record<string, unknown
 export function hasHubbleMarkers(order: { voucherProvider?: string | null; metadata?: Prisma.JsonValue | null }): boolean {
   if (isHubbleProvider(order.voucherProvider)) return true;
   const m = metaObj(order.metadata);
+  // An OPEN reconcile flag always counts — even after a manual override / release: a later flag
+  // (e.g. HUBBLE_SUCCESS_MANUAL_CODE_PRESENT — Hubble issued on top of the manual code) must keep
+  // the order refund-blocked and visible to ops.
+  if (m.hubbleNeedsReconcile === true) return true;
   // Ops took it over (manual override) or released it (Hubble definitively failed and the manual
   // code was cancelled with the vendor) — audited; it is a plain order from here on.
   if (m.hubbleStatus === 'MANUAL_OVERRIDE' || m.hubbleStatus === 'RELEASED') return false;
@@ -222,7 +226,7 @@ export function planVoucherWrite(
   }
   // Anything that changes the voucher on an order that already holds a code is a replace.
   if (storedCode !== null) throw new BadRequestException(VOUCHER_ALREADY_ISSUED_MESSAGE);
-  if (codeChanges && opts.cancelledCodeReused) throw new BadRequestException(VOUCHER_REUSED_MESSAGE);
+  // (Tenant-wide cancelled-code reuse is checked INSIDE the write tx: assertVoucherCodeReusableInTx.)
   if (!VOUCHER_WRITABLE_STATUSES.includes(order.status as RedemptionStatus) || !(order.pointsDeducted > 0)) {
     throw new BadRequestException(VOUCHER_STATUS_MESSAGE);
   }
@@ -244,7 +248,8 @@ export function planVoucherWrite(
     } as Prisma.InputJsonValue;
   }
   const and: Prisma.RedemptionOrderWhereInput[] = [
-    { OR: [{ voucherCode: null }, { voucherCode: '' }] },
+    // "No code" exactly as read (a legacy whitespace-only value is pinned verbatim — no 409 loop).
+    noIssuedVoucherGuard(order.voucherCode),
     { status: { in: [...VOUCHER_WRITABLE_STATUSES] } },
     { pointsDeducted: { gt: 0 } },
     // The provider read is part of the claim too (a concurrent Hubble stamp loses).
@@ -256,6 +261,37 @@ export function planVoucherWrite(
   // a Hubble stamp) bumps @updatedAt → this write loses.
   if (order.updatedAt) and.push({ updatedAt: order.updatedAt });
   return { data, guard: { AND: and }, issuesNewCode: codeChanges, overridden: !!override };
+}
+
+/**
+ * Serialise every write of a given code in a tenant (issue vs "Voucher cancelled with vendor"):
+ * a transaction-scoped advisory lock on (tenant, code hash). Call it FIRST inside the write tx,
+ * in BOTH the cancel tx and every new-code tx, so a cancel that commits concurrently is always
+ * seen by the reuse check that follows (READ COMMITTED re-reads after the lock is granted).
+ */
+export async function lockVoucherCode(
+  tx: { $executeRaw: (query: TemplateStringsArray, ...values: unknown[]) => Promise<number> },
+  clientId: string,
+  code: string,
+): Promise<void> {
+  const key = `voucher:${clientId}:${hashVoucherCode(code)}`;
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+}
+
+/**
+ * INSIDE the write transaction: lock the (tenant, code) key, then refuse a code cancelled with the
+ * vendor anywhere in the tenant. Closes the check-then-write race with a concurrent cancel.
+ */
+export async function assertVoucherCodeReusableInTx(
+  tx: {
+    $executeRaw: (query: TemplateStringsArray, ...values: unknown[]) => Promise<number>;
+    cancelledVoucherCode: { findFirst: (a: Prisma.CancelledVoucherCodeFindFirstArgs) => Promise<unknown> };
+  },
+  clientId: string,
+  code: string,
+): Promise<void> {
+  await lockVoucherCode(tx, clientId, code);
+  if (await isCancelledVoucherCode(tx, clientId, code)) throw new BadRequestException(VOUCHER_REUSED_MESSAGE);
 }
 
 /** Tenant-wide reuse lookup (only queried when a code is actually being written). */

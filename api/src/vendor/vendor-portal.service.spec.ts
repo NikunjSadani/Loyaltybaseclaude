@@ -8,6 +8,8 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockPrisma = {
+  // (tenant, code) advisory lock taken by voucher issuance (voucher-write-guard lockVoucherCode).
+  $executeRaw: jest.fn().mockResolvedValue(1),
   // Tenant-wide cancelled-voucher reuse guard (voucher-write-guard.ts) — default: never cancelled.
   cancelledVoucherCode: { findFirst: jest.fn().mockResolvedValue(null), createMany: jest.fn().mockResolvedValue({ count: 1 }) },
   vendor: { findFirst: jest.fn() },
@@ -398,6 +400,15 @@ describe('VendorPortalService', () => {
         expect(data.voucherCode).toBe('SAME-STATUS-1');
         expect(where.fulfilledByVendorId).toBe('v1');
         expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
+      });
+
+      it('same-status transition with ONLY tracking applies it via updateFulfilment (not dropped)', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ status: 'DISPATCHED' }));
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        const res = await service.transition(vendor, 'o1', { toStatus: 'DISPATCHED', trackingNumber: 'TRK-V', trackingUrl: 'https://t/v' } as never);
+        expect(res.skipped).toBe(true);
+        expect(mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].data).toMatchObject({ trackingNumber: 'TRK-V', trackingUrl: 'https://t/v' });
       });
 
       it('a code cancelled elsewhere in the tenant is refused for a vendor too', async () => {

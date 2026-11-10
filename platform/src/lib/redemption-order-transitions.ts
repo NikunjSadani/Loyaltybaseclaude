@@ -45,9 +45,9 @@ export const HUBBLE_NEVER_PLACED_REASONS: ReadonlySet<string> = new Set([
   'HUBBLE_INVALID_AMOUNT',
 ]);
 
-/** Mirrors the backend `hasIssuedVoucher` (null / '' = none). */
+/** Mirrors the backend `hasIssuedVoucher` (null / '' / whitespace-only = none). */
 export function hasIssuedVoucher(code: string | null | undefined): boolean {
-  return code != null && code !== '';
+  return typeof code === 'string' && code.trim() !== '';
 }
 
 /**

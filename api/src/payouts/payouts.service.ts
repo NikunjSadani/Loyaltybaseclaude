@@ -16,7 +16,7 @@ import { rupeesToPaise } from '../common/money';
 import { monthYearIST, formatDateIST, istDayRangeFilter, istDateKey } from '../common/ist-date';
 import { parsePayoutUtrUpload } from './payout-utr.helpers';
 import {
-  NO_ISSUED_VOUCHER_GUARD,
+  noIssuedVoucherGuard,
   hasIssuedVoucher,
   transitionOrderStatus,
 } from '../rewards/order-status-transition';
@@ -899,7 +899,7 @@ export class PayoutsService {
               // The claims ALSO carry the no-issued-voucher guard, so a code set after our read
               // still blocks the refund and the FAILED flip atomically.
               const refundClaim = await tx.redemptionOrder.updateMany({
-                where: { id: orderId, pointsDeducted: { gt: 0 }, ...NO_ISSUED_VOUCHER_GUARD },
+                where: { id: orderId, pointsDeducted: { gt: 0 }, ...noIssuedVoucherGuard(order.voucherCode) },
                 data: { pointsDeducted: 0 },
               });
               if (refundClaim.count > 0) {
@@ -921,7 +921,7 @@ export class PayoutsService {
               if (order.status !== RedemptionStatus.FAILED) {
                 await transitionOrderStatus(tx, {
                   orderId,
-                  guard: { status: { not: RedemptionStatus.FAILED }, ...NO_ISSUED_VOUCHER_GUARD },
+                  guard: { status: { not: RedemptionStatus.FAILED }, ...noIssuedVoucherGuard(order.voucherCode) },
                   fromStatus: order.status,
                   toStatus: RedemptionStatus.FAILED,
                   changedById: user.sub,

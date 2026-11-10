@@ -46,7 +46,7 @@ import { useAdminSession } from '@/lib/admin-session';
 import { redemptionModeLabel, canonicalRedemptionMode, CASH_REDEMPTION_MODES } from '@/lib/redemption-mode';
 import { usePermissions } from '@/lib/use-permissions';
 import { derivePointsCost, parseRupeesToPaise } from '@/lib/gift-catalogue';
-import { nextStatusOptions, hasIssuedVoucher, REFUND_TARGETS } from '@/lib/redemption-order-transitions';
+import { nextStatusOptions, hasIssuedVoucher, REFUND_TARGETS, HUBBLE_NEVER_PLACED_REASONS } from '@/lib/redemption-order-transitions';
 import type { GifsySettings } from '@/types';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
@@ -1279,6 +1279,8 @@ const HUBBLE_REASON_LABEL: Record<string, string> = {
   HUBBLE_UNEXPECTED: 'Unexpected Hubble error',
   HUBBLE_SUCCESS_MANUAL_CODE_PRESENT: 'Hubble issued a voucher on top of a manual code',
   HUBBLE_FAILED_VOUCHER_PRESENT: 'Hubble failed but a code is on the order',
+  HUBBLE_PROCESSING_AFTER_MANUAL: 'Hubble processing after a manual takeover',
+  HUBBLE_PROCESSING_CLAIM_LOST: 'Order changed while Hubble was processing',
 };
 const hubbleReasonLabel = (r?: string | null) =>
   !r ? 'Needs review' : HUBBLE_REASON_LABEL[r] ?? (r.startsWith('HUBBLE_UNKNOWN_STATUS') ? 'Unknown Hubble status' : r);
@@ -1334,6 +1336,9 @@ function OrderRow({
   const [cancelErr, setCancelErr] = useState('');
   // Hubble ops exits (GIFSY_ADMIN): "Retry with Hubble" + "Fulfil manually" (reasoned override).
   const needsReconcile = order.hubbleNeedsReconcile === true;
+  // "Retry with Hubble" only re-reads an EXISTING Hubble order — pointless when none was ever placed
+  // (not configured / invalid amount); those keep refund + "Fulfil manually".
+  const canRetryHubble = needsReconcile && !HUBBLE_NEVER_PLACED_REASONS.has(order.hubbleReconcileReason ?? '');
   const [retryBusy, setRetryBusy] = useState(false);
   const [retryMsg, setRetryMsg] = useState('');
   const [manualOpen, setManualOpen] = useState(false);
@@ -1455,7 +1460,7 @@ function OrderRow({
             {order.status}
           </span>
           {/* View-only viewers never receive the code — the server sends only an "issued" flag. */}
-          {order.voucherCode ? (
+          {hasIssuedVoucher(order.voucherCode) ? (
             <span className="block mt-1 text-[10px] font-mono text-emerald-600" data-testid="order-voucher-code">
               {order.voucherCode}
             </span>
@@ -1502,14 +1507,16 @@ function OrderRow({
               )}
               {canCancelVoucher && needsReconcile && (
                 <>
-                  <button
-                    onClick={retryWithHubble}
-                    disabled={retryBusy}
-                    aria-busy={retryBusy}
-                    className="text-[10px] font-semibold text-[var(--brand-primary)] hover:underline disabled:opacity-50"
-                  >
-                    {retryBusy ? 'Retrying…' : 'Retry with Hubble'}
-                  </button>
+                  {canRetryHubble && (
+                    <button
+                      onClick={retryWithHubble}
+                      disabled={retryBusy}
+                      aria-busy={retryBusy}
+                      className="text-[10px] font-semibold text-[var(--brand-primary)] hover:underline disabled:opacity-50"
+                    >
+                      {retryBusy ? 'Retrying…' : 'Retry with Hubble'}
+                    </button>
+                  )}
                   {!voucherIssued && (
                     <button
                       onClick={() => { setManualOpen((o) => !o); setManualErr(''); }}

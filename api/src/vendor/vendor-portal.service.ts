@@ -15,7 +15,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { assertVendorPriceBounds, VendorPriceError } from './vendor-pricing.helper';
 import { applyVendorPiiRetention } from './vendor-pii.helper';
 import { transitionOrderStatusOrConflict } from '../rewards/order-status-transition';
-import { combineGuards, isCancelledVoucherCode, planVoucherWrite } from '../rewards/voucher-write-guard';
+import { assertVoucherCodeReusableInTx, combineGuards, planVoucherWrite } from '../rewards/voucher-write-guard';
 import { notifyVoucherIssued, recordVoucherIssuedAudit } from '../rewards/voucher-issuance';
 import {
   parseVendorUploadBuffer,
@@ -628,9 +628,7 @@ export class VendorPortalService {
     // VOUCHER WRITE INVARIANT (shared with Gifsy paths): no clear / blank / overwrite of a stored
     // code, a new code only on a paid open order — CAS carried on the write below.
     const voucherInput = { voucherCode: dto.voucherCode, voucherProvider: dto.voucherProvider };
-    const voucherPlan = planVoucherWrite(existing, voucherInput, {
-      cancelledCodeReused: await this.cancelledCodeReused(scope.clientId, voucherInput.voucherCode),
-    });
+    const voucherPlan = planVoucherWrite(existing, voucherInput);
 
     // GUARDED write (compare-and-set): the "open + assigned to me" checks above come from a
     // read, so a concurrent close (DELIVERED/RETURNED/CANCELLED/FAILED by Gifsy, a UTR upload,
@@ -638,6 +636,10 @@ export class VendorPortalService {
     // overwritten. The same predicates are re-asserted atomically on the write; count 0 → 409.
     // A NEW voucher code is audited in the same tx (no code without its audit row).
     await this.prisma.$transaction(async (tx) => {
+      // Tenant-wide cancelled-code check INSIDE the tx under the (tenant, code) advisory lock.
+      if (voucherPlan.issuesNewCode && voucherPlan.data.voucherCode) {
+        await assertVoucherCodeReusableInTx(tx, scope.clientId, voucherPlan.data.voucherCode);
+      }
       const claim = await tx.redemptionOrder.updateMany({
         where: {
           id,
@@ -676,12 +678,6 @@ export class VendorPortalService {
   }
 
   /** Hubble-eligibility (async half of the voucher guard) — only when a voucher field is sent. */
-  /** Tenant-wide reuse guard: was this code cancelled with the vendor anywhere in the tenant? */
-  private cancelledCodeReused(clientId: string, code: string | null | undefined): Promise<boolean> {
-    if (code === undefined) return Promise.resolve(false);
-    return isCancelledVoucherCode(this.prisma, clientId, code);
-  }
-
   private notifyIssued(orderId: string, clientId: string): Promise<void> {
     return notifyVoucherIssued(
       { prisma: this.prisma, notifications: this.notifications, logger: this.logger },
@@ -720,10 +716,17 @@ export class VendorPortalService {
       // retention), never the raw order (Wave-2 audit HIGH#1). A voucher code/provider sent with
       // it is NOT dropped: it is applied through the guarded non-status write (updateFulfilment —
       // same invariant, CAS, audit + member notification), exactly like the Gifsy path.
-      if (dto.voucherCode !== undefined || dto.voucherProvider !== undefined) {
+      if (
+        dto.voucherCode !== undefined ||
+        dto.voucherProvider !== undefined ||
+        dto.trackingNumber !== undefined ||
+        dto.trackingUrl !== undefined
+      ) {
         const updated = await this.updateFulfilment(user, id, {
           voucherCode: dto.voucherCode,
           voucherProvider: dto.voucherProvider,
+          trackingNumber: dto.trackingNumber,
+          trackingUrl: dto.trackingUrl,
         } as VendorFulfilmentDto);
         return { order: updated, skipped: true as const };
       }
@@ -745,9 +748,7 @@ export class VendorPortalService {
 
     // VOUCHER WRITE INVARIANT (shared with Gifsy paths) — see voucher-write-guard.ts.
     const voucherInput = { voucherCode: dto.voucherCode, voucherProvider: dto.voucherProvider };
-    const voucherPlan = planVoucherWrite(order, voucherInput, {
-      cancelledCodeReused: await this.cancelledCodeReused(scope.clientId, voucherInput.voucherCode),
-    });
+    const voucherPlan = planVoucherWrite(order, voucherInput);
 
     // BUG-1: a DIGITAL_VOUCHER order cannot be marked DELIVERED without a voucher code —
     // the member would have nothing to redeem. Check the EFFECTIVE channel/code (the value
@@ -784,6 +785,9 @@ export class VendorPortalService {
     // or Gifsy moving/cancelling the order meanwhile) makes the loser a 409, never a second
     // write/history row. The claim is also re-pinned to THIS vendor's assignment.
     await this.prisma.$transaction(async (tx) => {
+      if (voucherPlan.issuesNewCode && voucherPlan.data.voucherCode) {
+        await assertVoucherCodeReusableInTx(tx, scope.clientId, voucherPlan.data.voucherCode);
+      }
       await transitionOrderStatusOrConflict(tx, {
         orderId: id,
         expectedFrom: fromStatus,
