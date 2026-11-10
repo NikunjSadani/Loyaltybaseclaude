@@ -87,20 +87,17 @@ export class SalesKpiDefService {
    * the KPI editor's scope multi-selects. Shape: `{ outletTypes: [{code, name}], programs: string[] }` (both sorted).
    */
   async segmentOptions(clientId: string): Promise<SalesSegmentOptions> {
-    const [types, programs] = await Promise.all([
-      this.prisma.outlet.findMany({
-        where: { clientId, deletedAt: null },
-        distinct: ['outletTypeId'],
-        select: { outletType: { select: { code: true, name: true } } },
-      }),
-      this.prisma.outlet.findMany({
-        where: { clientId, deletedAt: null, programName: { not: null } },
-        distinct: ['programName'],
-        select: { programName: true },
-      }),
+    // groupBy = SQL GROUP BY (Prisma's `distinct` dedupes in Node after fetching every outlet row — final check H1).
+    const [typeGroups, programs] = await Promise.all([
+      this.prisma.outlet.groupBy({ by: ['outletTypeId'], where: { clientId, deletedAt: null } }),
+      this.prisma.outlet.groupBy({ by: ['programName'], where: { clientId, deletedAt: null, programName: { not: null } } }),
     ]);
+    const typeIds = typeGroups.map((g) => g.outletTypeId).filter((x): x is string => !!x);
+    const types = typeIds.length
+      ? await this.prisma.outletType.findMany({ where: { id: { in: typeIds } }, select: { code: true, name: true } })
+      : [];
     const byCode = new Map<string, string>();
-    for (const t of types) if (t.outletType?.code) byCode.set(t.outletType.code, t.outletType.name);
+    for (const t of types) if (t.code) byCode.set(t.code, t.name);
     return {
       outletTypes: [...byCode.entries()].map(([code, name]) => ({ code, name })).sort((a, b) => a.code.localeCompare(b.code)),
       programs: [...new Set(programs.map((p) => (p.programName ?? '').trim()).filter((p) => p !== ''))].sort((a, b) => a.localeCompare(b)),

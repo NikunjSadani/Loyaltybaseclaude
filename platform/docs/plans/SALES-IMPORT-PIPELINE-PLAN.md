@@ -891,7 +891,23 @@ with `source: HISTORY` (importId = the history's source import). The history its
 
 **Retention.** Per-import aggregates / raw parts / unmatched.csv: 30 days after the import finishes (unchanged). Month
 history: `SALES_MONTH_HISTORY_RETENTION_YEARS` = 10 — the retention sweep (list / worker drain / idle drain) deletes
-history months older than 10 years before the current IST month.
+history months (lines AND set headers) older than 10 years before the current IST month.
+
+**Final-check hardening (migration `20261112130000_sales_month_history_sets`, additive; backfills headers):**
+- **Set header** `sales_month_history_sets` (unique clientId+month): sourceImportId, appliedAt, appliedById, the
+  `mappingFingerprint` and `dimensionKeys` the lines were parsed with, lineRows. Written in the apply transaction. Month
+  lists (`SalesMonthRow.hasHistory…`) and recalculate read ONLY this table — never the line rows (Prisma `distinct` is
+  applied in Node after fetching every row, so it is not used on large tables anywhere in the module; the other two
+  former uses — applies per import, outlet segment options — are SQL `groupBy` now).
+- **Recalculate vs mapping drift:** an enabled KPI filtering on a dimension key the stored set lacks → `canApply=false`
+  with the KPI and key named (the POST refuses too); a different mapping fingerprint with every used key present →
+  `MAPPING_CHANGED` warning only.
+- **Bounded keys:** history uniqueness is `(clientId, month, keyHash)` with `keyHash = md5(customerCode ‖ chr(31) ‖
+  dimKey)`; ingest skips (and counts) rows whose dimension value or outlet code exceeds
+  `SALES_IMPORT_MAX_DIM_VALUE_CHARS` (200).
+- **Month-write budget:** apply / recalculate transactions have an explicit `APPLY_TX_TIMEOUT_MS` = 300 s; the history
+  DELETE + one set-based INSERT … SELECT log `{msg:'sales-import month history written', deletedRows, insertedRows,
+  deleteMs, insertMs}` so the real-scale timing can be measured and the bound adjusted.
 
 ## 11. Lane tasks (TDD: write the test first, see it fail, implement, see it pass; run `cd api && npx jest src/sales-import` or `cd platform && npx vitest run src/app/admin/sales-import src/lib/sales-import`)
 

@@ -45,16 +45,19 @@ export async function downstreamArtifacts(
 
 type HistoryMeta = { sourceImportId: string; appliedAt: Date };
 
-/** The stored month history (SalesMonthHistory) per month: which import it holds and when it was applied. */
+/**
+ * The stored month history per month: which import it holds and when it was applied. Reads the small per-month HEADER
+ * table (sales_month_history_sets, unique (clientId, month)) — never the line rows (final check H1: Prisma's `distinct`
+ * is applied in Node, so a `distinct` over sales_month_histories fetched every line of every month).
+ */
 export async function historyMetaByMonth(
-  db: Pick<Prisma.TransactionClient, 'salesMonthHistory'>,
+  db: Pick<Prisma.TransactionClient, 'salesMonthHistorySet'>,
   clientId: string,
   months: string[],
 ): Promise<Map<string, HistoryMeta>> {
   if (months.length === 0) return new Map();
-  const rows = await db.salesMonthHistory.findMany({
+  const rows = await db.salesMonthHistorySet.findMany({
     where: { clientId, month: { in: months } },
-    distinct: ['month'],
     select: { month: true, sourceImportId: true, appliedAt: true },
   });
   return new Map(rows.map((r) => [r.month, { sourceImportId: r.sourceImportId, appliedAt: r.appliedAt }]));

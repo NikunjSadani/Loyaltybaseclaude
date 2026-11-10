@@ -40,7 +40,9 @@ function db(rows: Array<Record<string, unknown>> = [], downstream: { batches?: A
       groupBy: jest.fn(async () => (downstream.exports ?? []).map((e) => ({ entityId: `t1:${e.month}`, _count: { _all: e.n } }))),
     },
     creditBatch: { groupBy: jest.fn(async () => (downstream.batches ?? []).map((b) => ({ period: b.period, _count: { _all: b.n } }))) },
-    salesMonthHistory: { findMany: jest.fn(async () => (downstream.history ?? []) as Array<Record<string, unknown>>) },
+    salesMonthHistorySet: { findMany: jest.fn(async () => (downstream.history ?? []) as Array<Record<string, unknown>>) },
+    // the LINE table must never be read for month lists (final check H1)
+    salesMonthHistory: { findMany: jest.fn(() => { throw new Error('month lists must not read history lines'); }) },
     user: { findMany: jest.fn(async () => [{ id: 'ca', name: 'Client Admin' }]) },
     $executeRaw: jest.fn(async (q: Prisma.Sql) => { log.push(`lock:${q.values[0]}`); return 1; }),
   };
@@ -127,7 +129,13 @@ describe('SalesMonthsService (K-4)', () => {
     const rows = await new SalesMonthsService(d as never).list('t1');
     expect(rows[1]).toEqual(expect.objectContaining({ month: PREV, hasHistory: true, historySourceImportId: 'imp9', historyAppliedAt: AT.toISOString() }));
     expect(rows[0].hasHistory).toBe(false);
-    expect(d.salesMonthHistory.findMany.mock.calls[0][0]).toEqual(expect.objectContaining({ where: { clientId: 't1', month: { in: expect.arrayContaining([PREV, CUR]) } }, distinct: ['month'] }));
+    // H1 (final check): ONE query on the per-month HEADER table — no Prisma `distinct` (it dedupes in Node after
+    // fetching every row) and no read of the line table at all.
+    expect(d.salesMonthHistorySet.findMany).toHaveBeenCalledTimes(1);
+    const q = d.salesMonthHistorySet.findMany.mock.calls[0][0];
+    expect(q).toEqual({ where: { clientId: 't1', month: { in: expect.arrayContaining([PREV, CUR]) } }, select: { month: true, sourceImportId: true, appliedAt: true } });
+    expect(q.distinct).toBeUndefined();
+    expect(d.salesMonthHistory.findMany).not.toHaveBeenCalled();
     await expect(new SalesMonthsService(d as never).list('t1', '2026-13')).rejects.toBeInstanceOf(BadRequestException);
   });
 });

@@ -11,6 +11,7 @@ import {
   type ApplyRequest,
   type ApplyResult,
   type MonthSummary,
+  type SalesColumnMapping,
   type SalesMonthRecalcPreview,
   type SalesMonthRecalcRequest,
   type SalesMonthWarning,
@@ -27,7 +28,8 @@ import {
   rosterIndexOf,
   type RosterOutlet,
 } from '../kpi/sales-import-data';
-import type { KpiDefLite } from '../kpi/sales-kpi.helper';
+import { filterDimKeys, type KpiDefLite } from '../kpi/sales-kpi.helper';
+import { mappingFingerprint } from '../ingest/mapping-fingerprint';
 import { paiseToRupees, picoToCases } from '../ingest/normalize';
 import { lockImportRow } from '../ingest/import-lock';
 import { isMonthKey, monthLabel, resolveMonthState } from '../months/month-state';
@@ -35,6 +37,13 @@ import { computeMonthRows, sumOwnedValues, type MonthComputation } from './month
 import { loadLastApplied } from './last-applied';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
 import { blockedReasonFor, monthSummariesOf } from './sales-preview.service';
+
+/**
+ * Interactive-transaction timeout of a month write (apply / recalculate): the OutletSalesRecord merge plus the month
+ * history DELETE + INSERT … SELECT of every customer line (≈ 300k rows for the real file). The history step logs its
+ * durations ('sales-import month history written') so this bound can be checked at real scale (final check L2).
+ */
+export const APPLY_TX_TIMEOUT_MS = 300_000;
 
 /** Rows per bulk INSERT … unnest statement (plan §7.2: ~6.5k outlets → 2 statements). */
 export const APPLY_CHUNK = 3250;
@@ -188,6 +197,7 @@ export class SalesApplyService {
         }
         const roster = await loadRosterMeta(tx, clientId);
         const comp = await computeMonthRows(importPager(tx, importId, month), defs, roster);
+        const snap = await tx.salesImport.findFirst({ where: { id: importId, clientId }, select: { mappingSnapshot: true } });
         return this.writeMonth(tx, user, {
           month,
           source: 'IMPORT',
@@ -199,9 +209,13 @@ export class SalesApplyService {
           state,
           roster,
           comp,
+          mapping: {
+            fingerprint: imp.mappingFingerprint,
+            dimensionKeys: ((snap?.mappingSnapshot as unknown as SalesColumnMapping | null)?.dimensions ?? []).map((d) => d.key),
+          },
         });
       },
-      { timeout: 120_000, maxWait: 10_000 },
+      { timeout: APPLY_TX_TIMEOUT_MS, maxWait: 10_000 },
     );
   }
 
@@ -225,6 +239,8 @@ export class SalesApplyService {
       state: ReturnType<typeof resolveMonthState>;
       roster: Map<string, RosterOutlet>;
       comp: MonthComputation;
+      /** IMPORT only: the mapping the lines were parsed with (stored on the history set header). */
+      mapping?: { fingerprint: string | null; dimensionKeys: string[] };
     },
   ): Promise<ApplyMonthResult> {
     const clientId = user.clientId;
@@ -283,15 +299,37 @@ export class SalesApplyService {
       const index = rosterIndexOf(w.roster);
       const histCodes = [...index.keys()];
       const histIds = histCodes.map((c) => w.roster.get(index.get(c)!)?.id ?? null);
-      await tx.$executeRaw(Prisma.sql`DELETE FROM "sales_month_histories" WHERE "clientId" = ${clientId} AND "month" = ${month}`);
-      await tx.$executeRaw(Prisma.sql`
+      // ONE set-based INSERT … SELECT (no per-row round trips). Durations are logged so the month write can be measured
+      // at real scale (final check L2); the transaction timeout of this path is APPLY_TX_TIMEOUT_MS.
+      const t0 = Date.now();
+      const deleted = await tx.$executeRaw(Prisma.sql`DELETE FROM "sales_month_histories" WHERE "clientId" = ${clientId} AND "month" = ${month}`);
+      const t1 = Date.now();
+      const inserted = await tx.$executeRaw(Prisma.sql`
         INSERT INTO "sales_month_histories"
-          ("clientId","month","customerCode","outletId","dims","dimKey","amountPaise","qtyPico","lines","sourceImportId","appliedAt","appliedById")
-        SELECT ${clientId}, a."month", a."outletCode", r.id, a."dims", a."dimKey", a."amountPaise", a."qtyPico", a."lines",
-               ${w.sourceImportId}, ${now}, ${user.sub}
+          ("clientId","month","customerCode","outletId","dims","dimKey","keyHash","amountPaise","qtyPico","lines","sourceImportId","appliedAt","appliedById")
+        SELECT ${clientId}, a."month", a."outletCode", r.id, a."dims", a."dimKey", md5(a."outletCode" || chr(31) || a."dimKey"),
+               a."amountPaise", a."qtyPico", a."lines", ${w.sourceImportId}, ${now}, ${user.sub}
           FROM "sales_import_aggregates" a
           LEFT JOIN unnest(${histCodes}::text[], ${histIds}::text[]) AS r(code, id) ON r.code = a."outletCode"
          WHERE a."importId" = ${w.sourceImportId} AND a."month" = ${month}`);
+      const t2 = Date.now();
+      // The set's header: what the lines are, and the mapping they were parsed with (recalculate checks it).
+      const header = {
+        sourceImportId: w.sourceImportId,
+        appliedAt: now,
+        appliedById: user.sub,
+        mappingFingerprint: w.mapping?.fingerprint ?? null,
+        dimensionKeys: w.mapping?.dimensionKeys ?? [],
+        lineRows: Number(inserted),
+      };
+      await tx.salesMonthHistorySet.upsert({
+        where: { clientId_month: { clientId, month } },
+        create: { clientId, month, ...header },
+        update: header,
+      });
+      this.log.log(
+        JSON.stringify({ msg: 'sales-import month history written', clientId, month, deletedRows: Number(deleted), insertedRows: Number(inserted), deleteMs: t1 - t0, insertMs: t2 - t1 }),
+      );
     }
 
     // 5. Apply record + month pointer + audit.
@@ -368,7 +406,9 @@ export class SalesApplyService {
     if (replacesManualValues(existing, owned, last ? { createdAt: last.at, ownedCodes: last.ownedCodes } : null, SALES_IMPORT_BATCH_STATUS)) {
       warnings.push('REPLACES_MANUAL_VALUES');
     }
-    const blockedReason = blockedReasonFor({ month, defsCount: defs.length, mappingChanged: false, state });
+    const set = historySetCheck(meta, defs, await this.currentFingerprint(clientId));
+    if (set.mappingChanged) warnings.push('MAPPING_CHANGED');
+    const blockedReason = blockedReasonFor({ month, defsCount: defs.length, mappingChanged: false, state }) ?? set.blocked;
     const labels = new Map(
       (await this.prisma.kpiDef.findMany({ where: { clientId, code: { in: owned } }, select: { code: true, label: true } })).map((k) => [k.code, k.label]),
     );
@@ -429,7 +469,9 @@ export class SalesApplyService {
         const state = resolveMonthState(month, currentMonthKey(), override);
         const { rows: defRows, defs, hash } = await this.kpiDefs.enabled(clientId, tx);
         if (hash !== body.expectedDefinitionsHash) throw new ConflictException('KPI definitions changed since the preview. Refresh the preview and try again.');
-        const blocked = blockedReasonFor({ month, defsCount: defs.length, mappingChanged: false, state });
+        const blocked =
+          blockedReasonFor({ month, defsCount: defs.length, mappingChanged: false, state }) ??
+          historySetCheck(meta, defs, null).blocked;
         if (blocked) throw new ConflictException(blocked);
         const roster = await loadRosterMeta(tx, clientId);
         const comp = await computeMonthRows(historyPager(tx, clientId, month), defs, roster);
@@ -446,9 +488,40 @@ export class SalesApplyService {
           comp,
         });
       },
-      { timeout: 120_000, maxWait: 10_000 },
+      { timeout: APPLY_TX_TIMEOUT_MS, maxWait: 10_000 },
     );
   }
+
+  private async currentFingerprint(clientId: string): Promise<string | null> {
+    const p = await this.prisma.salesImportProfile.findUnique({ where: { clientId }, select: { columnMapping: true } });
+    return mappingFingerprint((p?.columnMapping ?? null) as SalesColumnMapping | null);
+  }
+}
+
+/**
+ * Final check M1: can the CURRENT KPI definitions be evaluated on a month's stored lines? Blocked when an enabled KPI
+ * filters on a dimension key the stored lines do not have (it would silently match nothing → zeros); MAPPING_CHANGED
+ * warning when the mapping changed since but every used dimension is present. (`currentFingerprint` null = skip the
+ * warning check.)
+ */
+export function historySetCheck(
+  meta: { mappingFingerprint: string | null; dimensionKeys: string[] },
+  defs: readonly KpiDefLite[],
+  currentFingerprint: string | null,
+): { blocked: string | null; mappingChanged: boolean } {
+  const have = new Set(meta.dimensionKeys);
+  const missing: string[] = [];
+  for (const d of defs) {
+    const absent = filterDimKeys(d.filter).filter((k) => !have.has(k));
+    if (absent.length) missing.push(`${d.kpiCode} (${absent.join(', ')})`);
+  }
+  if (missing.length) {
+    return {
+      blocked: `These KPIs use dimensions that this month's stored lines do not have: ${missing.join('; ')}. Apply a file processed with the current mapping instead.`,
+      mappingChanged: false,
+    };
+  }
+  return { blocked: null, mappingChanged: currentFingerprint !== null && meta.mappingFingerprint !== currentFingerprint };
 }
 
 /**

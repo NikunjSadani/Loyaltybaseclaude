@@ -490,11 +490,8 @@ export class SalesImportUploadService {
 
   private async appliedSet(ids: string[]): Promise<Set<string>> {
     if (!ids.length) return new Set();
-    const rows = await this.prisma.salesImportApply.findMany({
-      where: { importId: { in: ids } },
-      select: { importId: true },
-      distinct: ['importId'],
-    });
+    // groupBy = SQL GROUP BY (Prisma `distinct` would fetch every apply row and dedupe in Node).
+    const rows = await this.prisma.salesImportApply.groupBy({ by: ['importId'], where: { importId: { in: ids } } });
     return new Set(rows.map((r) => r.importId));
   }
 

@@ -14,6 +14,7 @@
 import {
   SALES_IMPORT_MAX_DIMENSION_COMBOS,
   SALES_IMPORT_MAX_DIMENSION_VALUES,
+  SALES_IMPORT_MAX_DIM_VALUE_CHARS,
   SALES_IMPORT_MAX_DISTINCT_CODES,
   SALES_IMPORT_MAX_ERROR_SAMPLES,
   type MonthSummary,
@@ -157,6 +158,7 @@ export class SalesAggregator {
   private rowsSkipped = 0;
   private readonly dimKeys: string[];
   private readonly headers: Record<string, string>;
+  private readonly dimHeaders: Record<string, string> = {};
   private readonly maxCodes: number;
   private readonly maxAggregates: number;
   private readonly maxUnmatched: number;
@@ -184,6 +186,7 @@ export class SalesAggregator {
     this.collectEvidence = opts.collectDecimalEvidence === true;
     this.dimKeys = (mapping.dimensions ?? []).map((d) => d.key);
     for (const k of this.dimKeys) this.values.set(k, new Map());
+    for (const d of mapping.dimensions ?? []) this.dimHeaders[d.key] = normalizeHeader(d.header);
     this.headers = {
       outletCode: normalizeHeader(mapping.outletCode),
       invoiceDate: normalizeHeader(mapping.invoiceDate),
@@ -221,6 +224,9 @@ export class SalesAggregator {
 
     const code = normalizeOutletCode(cells[idx.outletCode]);
     if (code === '') return this.skip(rowNo, this.headers.outletCode, 'blank outlet code');
+    if (code.length > SALES_IMPORT_MAX_DIM_VALUE_CHARS) {
+      return this.skip(rowNo, this.headers.outletCode, `outlet code longer than ${SALES_IMPORT_MAX_DIM_VALUE_CHARS} characters`);
+    }
 
     const d = parseInvoiceDateDetailed(cells[idx.invoiceDate], this.mapping.dateOrder, this.todayIso);
     if (!('date' in d)) return this.skip(rowNo, this.headers.invoiceDate, d.reason);
@@ -247,7 +253,14 @@ export class SalesAggregator {
     }
 
     const dims: Record<string, string> = {};
-    for (const k of this.dimKeys) dims[k] = normalizeDim(cells[idx.dims[k]]);
+    for (const k of this.dimKeys) {
+      const v = normalizeDim(cells[idx.dims[k]]);
+      // Final check L1: bounded keys (aggregates, history, combos) — an over-long product value is a data error.
+      if (v.length > SALES_IMPORT_MAX_DIM_VALUE_CHARS) {
+        return this.skip(rowNo, this.dimHeaders[k], `${k} value longer than ${SALES_IMPORT_MAX_DIM_VALUE_CHARS} characters`);
+      }
+      dims[k] = v;
+    }
     const dimKey = stableDimKey(dims);
 
     // Bounds first, so a rejected file never half-updates the counters.

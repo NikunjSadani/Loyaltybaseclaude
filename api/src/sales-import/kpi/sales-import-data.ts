@@ -134,9 +134,19 @@ export function historyPager(db: Db, clientId: string, month: string, pageSize =
   };
 }
 
-/** The month's stored history: which import it holds and when it was applied (null = no history). */
-export async function monthHistoryMeta(db: Db, clientId: string, month: string): Promise<{ sourceImportId: string; appliedAt: Date } | null> {
-  return db.salesMonthHistory.findFirst({ where: { clientId, month }, select: { sourceImportId: true, appliedAt: true } });
+export interface MonthHistoryMeta {
+  sourceImportId: string;
+  appliedAt: Date;
+  mappingFingerprint: string | null;
+  dimensionKeys: string[];
+}
+
+/** The month's stored history set header (sales_month_history_sets; null = no history). One indexed row. */
+export async function monthHistoryMeta(db: Db, clientId: string, month: string): Promise<MonthHistoryMeta | null> {
+  return db.salesMonthHistorySet.findUnique({
+    where: { clientId_month: { clientId, month } },
+    select: { sourceImportId: true, appliedAt: true, mappingFingerprint: true, dimensionKeys: true },
+  });
 }
 
 /**

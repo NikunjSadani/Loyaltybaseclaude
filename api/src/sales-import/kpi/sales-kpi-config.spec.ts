@@ -234,14 +234,19 @@ describe('SalesKpiDefService (K-2)', () => {
     });
   });
 
-  it('segmentOptions: distinct, tenant-scoped, sorted', async () => {
+  it('segmentOptions: distinct via SQL GROUP BY (never fetches every outlet), tenant-scoped, sorted', async () => {
     const db = txDb();
-    db.outlet.findMany
-      .mockResolvedValueOnce([{ outletType: { code: 'WHOLESALER', name: 'Wholesaler' } }, { outletType: { code: 'RETAIL', name: 'Retail' } }])
+    db.outlet.groupBy = jest
+      .fn()
+      .mockResolvedValueOnce([{ outletTypeId: 'ty1' }, { outletTypeId: 'ty2' }, { outletTypeId: null }])
       .mockResolvedValueOnce([{ programName: 'Gold ' }, { programName: 'Bronze' }, { programName: '' }]);
+    db.outletType = { findMany: jest.fn(async () => [{ code: 'WHOLESALER', name: 'Wholesaler' }, { code: 'RETAIL', name: 'Retail' }]) };
     const r = await new SalesKpiDefService(db as never).segmentOptions('t1');
     expect(r).toEqual({ outletTypes: [{ code: 'RETAIL', name: 'Retail' }, { code: 'WHOLESALER', name: 'Wholesaler' }], programs: ['Bronze', 'Gold'] });
-    for (const c of db.outlet.findMany.mock.calls) expect(c[0].where).toEqual(expect.objectContaining({ clientId: 't1', deletedAt: null }));
+    expect(db.outlet.groupBy.mock.calls.map((c: Array<{ by: string[] }>) => c[0].by)).toEqual([['outletTypeId'], ['programName']]);
+    for (const c of db.outlet.groupBy.mock.calls) expect(c[0].where).toEqual(expect.objectContaining({ clientId: 't1', deletedAt: null }));
+    expect(db.outletType.findMany).toHaveBeenCalledWith({ where: { id: { in: ['ty1', 'ty2'] } }, select: { code: true, name: true } });
+    expect(db.outlet.findMany).not.toHaveBeenCalled();
   });
 });
 

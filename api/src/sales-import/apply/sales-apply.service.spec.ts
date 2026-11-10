@@ -64,6 +64,8 @@ function makeDb(opts: {
   /** Stored month history (SalesMonthHistory rows, aggregate-shaped with customerCode). */
   history?: Array<Record<string, unknown>>;
   historyAppliedAt?: Date;
+  /** The stored set's header: mapping fingerprint + dimension keys its lines were parsed with. */
+  historySet?: { mappingFingerprint?: string | null; dimensionKeys?: string[] };
   profile?: SalesColumnMapping;
   rosterAdded?: number;
 } = {}) {
@@ -79,6 +81,7 @@ function makeDb(opts: {
   const imp: Record<string, unknown> & { monthSummaries: unknown; processingVersion: number } = {
     id: 'imp1', clientId: 't1', status: 'READY', createdAt: AT, finishedAt: AT, purgedAt: null,
     processingVersion: VERSION, mappingFingerprint: mappingFingerprint(MAPPING),
+    mappingSnapshot: MAPPING,
     monthSummaries: months.map((m) => summary(m)),
   };
   const lastImp = { id: 'imp0', monthSummaries: months.map((m) => summary(m, { lastDate: opts.lastApply?.lastDate ?? `${m}-28` })) };
@@ -91,8 +94,19 @@ function makeDb(opts: {
         where.clientId !== 't1' ? null : where.id === 'imp0' ? lastImp : !where.id || where.id === 'imp1' ? imp : null),
     },
     salesImportProfile: { findUnique: jest.fn(async () => ({ columnMapping: opts.profile ?? MAPPING })) },
+    salesMonthHistorySet: {
+      findUnique: jest.fn(async () =>
+        opts.history
+          ? {
+              sourceImportId: 'imp0',
+              appliedAt: opts.historyAppliedAt ?? AT,
+              mappingFingerprint: opts.historySet?.mappingFingerprint === undefined ? mappingFingerprint(MAPPING) : opts.historySet.mappingFingerprint,
+              dimensionKeys: opts.historySet?.dimensionKeys ?? ['dimA', 'dimB'],
+            }
+          : null),
+      upsert: jest.fn(async (a: unknown) => { log.push('history.set'); return a; }),
+    },
     salesMonthHistory: {
-      findFirst: jest.fn(async () => (opts.history ? { sourceImportId: 'imp0', appliedAt: opts.historyAppliedAt ?? AT } : null)),
       findMany: jest.fn(async ({ where, take }: { where: { month: string; id?: { gt: bigint } }; take: number }) =>
         (opts.history ?? []).filter((h) => h.month === where.month && (!where.id || (h.id as bigint) > where.id.gt)).slice(0, take)),
     },
@@ -311,7 +325,7 @@ describe('SalesApplyService', () => {
     const db = makeDb();
     const r = await services(db).apply.apply(user, 'imp1', body([PREV]));
     expect(r.results).toEqual([{ month: PREV, ok: true, applyId: 'apply1', outletsWritten: 3, outletsZeroFilled: 1 }]);
-    expect(db.log).toEqual(['lock', 'import.share', 'batch.create', 'insert', 'strip', 'history.delete', 'history.insert', 'apply.create', 'status.upsert', 'audit']);
+    expect(db.log).toEqual(['lock', 'import.share', 'batch.create', 'insert', 'strip', 'history.delete', 'history.insert', 'history.set', 'apply.create', 'status.upsert', 'audit']);
 
     const sql = sqlCalls(db);
     expect(sql[0].values).toEqual([`sales-month:t1:${PREV}`]);
@@ -409,6 +423,11 @@ describe('month history', () => {
     const ins = sql.find((q) => q.text.includes('INSERT INTO "sales_month_histories"'))!;
     expect(ins.text).toContain('FROM "sales_import_aggregates" a');
     expect(ins.text).toContain('LEFT JOIN unnest('); // unmatched codes kept, outletId null
+    expect(ins.text).toContain('md5(a."outletCode" || chr(31) || a."dimKey")'); // bounded unique key (final check L1)
+    // the set header records the source import + the mapping its lines were parsed with (final check M1)
+    const header = (db.salesMonthHistorySet.upsert.mock.calls[0] as unknown as [{ where: unknown; create: Record<string, unknown> }])[0];
+    expect(header.where).toEqual({ clientId_month: { clientId: 't1', month: PREV } });
+    expect(header.create).toEqual(expect.objectContaining({ sourceImportId: 'imp1', mappingFingerprint: mappingFingerprint(MAPPING), dimensionKeys: ['dimA', 'dimB'], appliedById: 'u1' }));
     expect(ins.values).toEqual(expect.arrayContaining(['t1', 'imp1', 'u1', ['O1', 'O2', 'O3'], ['id-O1', 'id-O2', 'id-O3'], PREV]));
     expect(db.log.indexOf('history.delete')).toBeLessThan(db.log.indexOf('history.insert'));
     expect(db.log.indexOf('history.insert')).toBeLessThan(db.log.indexOf('apply.create'));
@@ -450,6 +469,32 @@ describe('month history', () => {
     const audit = (db.auditLog.create.mock.calls[0] as unknown as [{ data: { newValues: Record<string, unknown> } }])[0].data;
     expect(audit.newValues).toEqual(expect.objectContaining({ source: 'HISTORY', importId: 'imp0' }));
     expect(sqlCalls(db)[1].values).toContainEqual(['O1', 'O2', 'O3']);
+  });
+
+  it('final check M1: a KPI using a dimension the stored lines lack BLOCKS recalculation; a changed mapping with all dims present only WARNS', async () => {
+    const missing = makeDb({ history: HISTORY, historySet: { dimensionKeys: ['dimB'] } }); // OWN_AMT filters on dimA
+    const p = await services(missing).apply.recalcPreview('t1', PREV);
+    expect(p.canApply).toBe(false);
+    expect(p.blockedReason).toMatch(/OWN_AMT \(dimA\)/);
+    await expect(services(missing).apply.recalculate(user, PREV, { expectedDefinitionsHash: HASH, expectedHistoryAppliedAt: AT.toISOString() }))
+      .rejects.toThrow(/OWN_AMT \(dimA\)/);
+    expect(missing.salesUploadBatch.create).not.toHaveBeenCalled();
+
+    const changed = makeDb({ history: HISTORY, historySet: { mappingFingerprint: 'an-older-mapping' } });
+    const q = await services(changed).apply.recalcPreview('t1', PREV);
+    expect(q.canApply).toBe(true);
+    expect(q.warnings).toContain('MAPPING_CHANGED');
+    const same = await services(makeDb({ history: HISTORY })).apply.recalcPreview('t1', PREV);
+    expect(same.warnings).not.toContain('MAPPING_CHANGED');
+  });
+
+  it('final check L2: the history write logs its delete / insert durations and row counts', async () => {
+    const db = makeDb();
+    const svc = services(db).apply;
+    const logSpy = jest.spyOn((svc as unknown as { log: { log: (m: string) => void } }).log, 'log').mockImplementation(() => undefined);
+    await svc.apply(user, 'imp1', { months: [PREV], expectedDefinitionsHash: HASH, processingVersion: VERSION });
+    const line = logSpy.mock.calls.map((c) => String(c[0])).find((m) => m.includes('month history written'))!;
+    expect(JSON.parse(line)).toEqual(expect.objectContaining({ clientId: 't1', month: PREV, deleteMs: expect.any(Number), insertMs: expect.any(Number), insertedRows: 1 }));
   });
 
   it('recalculate refuses: CLOSED month, stale history / definitions (409), no history (404), bad body (400)', async () => {

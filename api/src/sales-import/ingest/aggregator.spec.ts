@@ -235,3 +235,19 @@ describe('SalesAggregator — re-audit memory bound', () => {
     expect(off.result().decimalEvidence).toEqual({ dot: 0, comma: 0, ambiguous: 0, examples: {} });
   });
 });
+
+describe('SalesAggregator — final check L1 (bounded keys)', () => {
+  it('a dimension value or outlet code longer than 200 characters skips the row with a reason (counted)', () => {
+    const a = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY);
+    a.push(row('O1', '2026-10-03', 'X'.repeat(201), '500', 1, 1), 2);
+    a.push(row('C'.repeat(201), '2026-10-03', 'X', '500', 1, 1), 3);
+    a.push(row('O1', '2026-10-03', 'X'.repeat(200), '500', 1, 1), 4); // exactly 200 is fine
+    const r = a.result();
+    expect(r.rowsSkipped).toBe(2);
+    expect(r.errorSamples).toEqual([
+      { row: 2, column: 'A', reason: 'dimA value longer than 200 characters' },
+      { row: 3, column: 'CODE', reason: 'outlet code longer than 200 characters' },
+    ]);
+    expect(r.aggregateCount).toBe(1);
+  });
+});

@@ -3162,6 +3162,7 @@ model SalesMonthHistory {
   outletId       String? // the roster outlet at apply time (null = unmatched then)
   dims           Json
   dimKey         String
+  keyHash        String // md5(customerCode || chr(31) || dimKey) — bounded unique key (raw text could exceed index row size)
   amountPaise    BigInt
   qtyPico        BigInt
   lines          Int
@@ -3169,10 +3170,27 @@ model SalesMonthHistory {
   appliedAt      DateTime
   appliedById    String
 
-  @@unique([clientId, month, customerCode, dimKey])
+  @@unique([clientId, month, keyHash])
   @@index([clientId, month, id])
   @@index([month])
   @@map("sales_month_histories")
+}
+
+/// Header of a month's history set (one per tenant × month): month lists read this, never the line rows; recalculate
+/// checks the current KPIs' dimension keys against `dimensionKeys` (plan §10b).
+model SalesMonthHistorySet {
+  id                 String   @id @default(cuid())
+  clientId           String
+  month              String
+  sourceImportId     String
+  appliedAt          DateTime
+  appliedById        String
+  mappingFingerprint String? // the column mapping the lines were parsed with (SalesImport.mappingFingerprint)
+  dimensionKeys      String[] @default([]) // that mapping's dimension keys
+  lineRows           Int      @default(0)
+
+  @@unique([clientId, month])
+  @@map("sales_month_history_sets")
 }
 
 /// Explicit override of the implicit open/closed month rule (plan §7.3).

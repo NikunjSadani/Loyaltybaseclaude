@@ -113,9 +113,9 @@ export class SalesImportRetentionService {
   async purgeOldHistory(opts: { clientId?: string; currentMonth?: string } = {}): Promise<number> {
     try {
       const cutoff = shiftMonthKey(opts.currentMonth ?? currentMonthKey(), -12 * SALES_MONTH_HISTORY_RETENTION_YEARS);
-      const r = await this.prisma.salesMonthHistory.deleteMany({
-        where: { ...(opts.clientId ? { clientId: opts.clientId } : {}), month: { lt: cutoff } },
-      });
+      const where = { ...(opts.clientId ? { clientId: opts.clientId } : {}), month: { lt: cutoff } };
+      const r = await this.prisma.salesMonthHistory.deleteMany({ where });
+      await this.prisma.salesMonthHistorySet.deleteMany({ where });
       return r.count;
     } catch (e) {
       this.logger.warn(`sales-import history retention failed: ${(e as Error).message}`);
