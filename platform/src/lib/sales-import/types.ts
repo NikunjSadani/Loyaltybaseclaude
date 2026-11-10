@@ -8,7 +8,7 @@
  *
  * Conventions:
  *   - Every money/quantity number crossing the wire is a plain JS number in RUPEES / CASES
- *     (2 dp / up to 6 dp). BigInt paise / micro-units stay inside the backend (DB + accumulators).
+ *     (2 dp / 3 dp). BigInt paise / pico-cases (×1e12) stay inside the backend (DB + accumulators).
  *   - Dates are ISO strings; months are 'YYYY-MM' (IST calendar month).
  *   - All routes live under backend `/v1` (FE calls `/api/...`), envelope = ApiResponse<T>.
  */
@@ -38,6 +38,21 @@ export const SALES_IMPORT_MAX_DIMENSION_COMBOS = 2000;
 export const SALES_IMPORT_STALE_HEARTBEAT_MINUTES = 10;
 /** attempts > this → FAILED (§7.1.1). */
 export const SALES_IMPORT_MAX_ATTEMPTS = 3;
+/** Max UPLOADING imports per tenant at once (POST uploads → 409 beyond it). */
+export const SALES_IMPORT_MAX_INFLIGHT_UPLOADS = 3;
+/** Raw parts, unmatched.csv, aggregates and sample rows are purged this long after an import finishes. */
+export const SALES_IMPORT_RETENTION_DAYS = 30;
+/** An UPLOADING import older than this is abandoned: CANCELLED + purged. */
+export const SALES_IMPORT_ABANDONED_UPLOAD_HOURS = 24;
+/** Header detection reads at most this many columns per row (wider rows are truncated). */
+export const SALES_IMPORT_MAX_COLUMNS = 300;
+/** detectedHeaders = the header row + at most this many sample rows, each cell ≤ SALES_IMPORT_SAMPLE_CELL_CHARS. */
+export const SALES_IMPORT_SAMPLE_ROWS = 3;
+export const SALES_IMPORT_SAMPLE_CELL_CHARS = 50;
+/** A file with more distinct customer codes than this fails with a readable message. */
+export const SALES_IMPORT_MAX_DISTINCT_CODES = 1_000_000;
+/** QUANTITY KPI values (and every cases number on the wire) are rounded to this many decimals. */
+export const SALES_KPI_QUANTITY_DECIMALS = 3;
 
 // ─── Status / enums ─────────────────────────────────────────────────────────────
 
@@ -67,6 +82,12 @@ export interface SalesColumnMapping {
   quantity?: string | null;
   dimensions: SalesDimensionMapping[]; // ≤ SALES_IMPORT_MAX_DIMENSIONS
   dateOrder: 'DMY' | 'MDY' | 'YMD';    // for TEXT dates only (real date cells are unambiguous)
+  /**
+   * Decimal separator of TEXT amount/quantity cells (numeric xlsx cells are unaffected). Absent = 'auto':
+   * ',' when the CSV delimiter is ';' (European export: "1.234,56"), else '.'. With ',', '.' and spaces are
+   * thousands separators.
+   */
+  decimalSeparator?: 'auto' | '.' | ',';
 }
 
 // ─── KPI definitions (SalesKpiDefinition) ───────────────────────────────────────
@@ -125,6 +146,15 @@ export interface SalesSegmentOptions {
 
 // ─── Imports ────────────────────────────────────────────────────────────────────
 
+/**
+ * Import lifecycle routes (all return SalesImportSummary):
+ *   POST   :id/reprocess  READY | NEEDS_MAPPING | FAILED | stalled PROCESSING → QUEUED. 409 once applied / purged /
+ *                         while an apply is running.
+ *   POST   :id/cancel     QUEUED | stalled PROCESSING → CANCELLED (the worker notices and stops). 409 otherwise.
+ *   DELETE :id            never-applied import → CANCELLED + files/aggregates purged. 409 once applied / live PROCESSING.
+ * POST uploads → 409 when SALES_IMPORT_MAX_INFLIGHT_UPLOADS imports are already UPLOADING.
+ */
+
 /** POST admin/sales-import/uploads body. */
 export interface CreateSalesImportUploadRequest {
   filename: string;  // must end .xlsx / .csv
@@ -155,10 +185,26 @@ export interface SalesImportSummary {
   progressPct: number | null;        // bytesRead / sizeBytes while PROCESSING
   duplicateOfId: string | null;
   error: string | null;
-  detectedHeaders: string[][] | null; // NEEDS_MAPPING only
+  /**
+   * [headerRow, ...≤ SALES_IMPORT_SAMPLE_ROWS sample rows] (≤ SALES_IMPORT_MAX_COLUMNS cells, each
+   * ≤ SALES_IMPORT_SAMPLE_CELL_CHARS chars). For NEEDS_MAPPING the header row is the best guess. Only
+   * GET :id fills it (the LIST always returns null); the sample rows are returned only to callers holding
+   * targets:upload (others get just [headerRow]); null once the import is purged.
+   */
+  detectedHeaders: string[][] | null;
   createdAt: string;
   finishedAt: string | null;
   uploadedBy: string;                 // display name
+  heartbeatAt: string | null;
+  /** PROCESSING with a heartbeat older than SALES_IMPORT_STALE_HEARTBEAT_MINUTES (worker died): can be cancelled/reprocessed. */
+  stalled: boolean;
+  /** At least one month was applied from this import: it can no longer be reprocessed, cancelled or deleted. */
+  applied: boolean;
+  /** Raw file + aggregates purged (retention); preview/apply/reprocess/unmatched.csv are no longer possible. */
+  purgedAt: string | null;
+  canReprocess: boolean; // READY / NEEDS_MAPPING / FAILED, or stalled PROCESSING; never applied; not purged
+  canCancel: boolean;    // QUEUED, or stalled PROCESSING (POST :id/cancel)
+  canDelete: boolean;    // never applied and not live PROCESSING (DELETE = cancel + purge files/aggregates)
 }
 
 /** GET admin/sales-import list response. */
@@ -210,13 +256,17 @@ export interface SalesImportCombos {
 
 // ─── Preview / apply ────────────────────────────────────────────────────────────
 
+/**
+ * OLDER_THAN_LAST_APPLIED = this file's latest invoice date in the month (MonthPreview.lastDate) is EARLIER than
+ * the latest invoice date of the import last applied to the month (MonthPreview.lastApplied.lastInvoiceDate).
+ * (ROSTER_CHANGED was removed: apply maps the file's customer codes to the roster CURRENT at apply time.)
+ */
 export type SalesMonthWarning =
   | 'STARTS_AFTER_FIRST'
   | 'ENDS_BEFORE_MONTH_END'
   | 'OLDER_THAN_LAST_APPLIED'
   | 'REPLACES_MANUAL_VALUES'
-  | 'NEGATIVE_VALUES'
-  | 'ROSTER_CHANGED';
+  | 'NEGATIVE_VALUES';
 
 export interface MonthPreviewKpi {
   kpiCode: string;
@@ -229,28 +279,41 @@ export interface MonthPreviewKpi {
   outletsNegative: number;
 }
 
-export interface MonthPreview extends MonthSummary { // live, per GET
+/**
+ * Live, per GET. The matched/unmatched figures inherited from MonthSummary (matchedOutlets, matchedAmountRupees,
+ * matchedQuantity, unmatchedCustomers, unmatchedAmountRupees, unmatchedQuantity) are RECOMPUTED against the roster
+ * current at preview time (apply uses the roster current at apply time). firstDate/lastDate/lines are the file's.
+ */
+export interface MonthPreview extends MonthSummary {
   monthState: SalesMonthState;
   canApply: boolean;
   blockedReason?: string;
   warnings: SalesMonthWarning[];
   zeroFillOutlets: number; // programme outlets with no lines → 0
   kpis: MonthPreviewKpi[];
-  lastApplied: { importId: string; at: string; byName: string } | null;
+  /** lastInvoiceDate = that import's latest invoice date in this month (compare with this file's lastDate). */
+  lastApplied: { importId: string; at: string; byName: string; lastInvoiceDate: string | null } | null;
 }
 
 export interface SalesImportPreview {
   importId: string;
   definitionsHash: string;
-  rosterHashMatches: boolean;
+  /** Send back as ApplyRequest.processingVersion; changes whenever the import is (re)processed. */
+  processingVersion: number;
+  /** The column mapping changed since this file was processed: every month is blocked until it is reprocessed. */
+  mappingChanged: boolean;
+  /** Informational: live roster outlets created after this file was processed (they ARE included in preview/apply). */
+  rosterOutletsAddedSinceProcessing: number;
   months: MonthPreview[];
 }
 
 export interface ApplyRequest {
   months: string[];                          // each must be OPEN + present in the file
   expectedDefinitionsHash: string;           // TOCTOU guard (409 on mismatch)
+  /** SalesImportPreview.processingVersion the admin reviewed (409 when the import was reprocessed since). */
+  processingVersion: number;
   acknowledgePartialMonths?: string[];       // required for months with STARTS_AFTER_FIRST/ENDS_BEFORE_MONTH_END
-  acknowledgeOlderThanLastApplied?: boolean; // required if any month has OLDER_THAN_LAST_APPLIED
+  acknowledgeOlderThanLastApplied?: boolean; // required if any month has OLDER_THAN_LAST_APPLIED (re-checked under the month lock)
 }
 export interface ApplyMonthResult {
   month: string;
@@ -276,6 +339,20 @@ export interface SalesMonthRow {
   lastAppliedImportId: string | null;
   canClose: boolean;
   canReopen: boolean;
+  /**
+   * Points artefacts already produced for this month: credit batches (any status) for the period and points-compute
+   * export / report downloads. Non-zero → reopening needs SalesMonthReopenRequest.acknowledgeDownstream.
+   */
+  downstream: { creditBatches: number; exports: number };
+}
+
+/** POST admin/sales-months/:month/reopen body. Without the ack, reopen → 409 when `downstream` is non-zero. */
+export interface SalesMonthReopenRequest {
+  acknowledgeDownstream?: boolean;
+}
+/** POST admin/sales-months/:month/reopen response; `warnings` lists the downstream artefacts that may now diverge. */
+export interface SalesMonthReopenResult extends SalesMonthRow {
+  warnings: string[];
 }
 
 // ─── Drain (Cloud Scheduler fallback) ───────────────────────────────────────────
