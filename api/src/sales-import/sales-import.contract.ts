@@ -50,7 +50,7 @@ export const SALES_IMPORT_MAX_COLUMNS = 300;
 export const SALES_IMPORT_SAMPLE_ROWS = 3;
 export const SALES_IMPORT_SAMPLE_CELL_CHARS = 50;
 /** A file with more distinct customer codes than this fails with a readable message. */
-export const SALES_IMPORT_MAX_DISTINCT_CODES = 1_000_000;
+export const SALES_IMPORT_MAX_DISTINCT_CODES = 600_000; // memory budget: plan §7.1 step 11
 /** QUANTITY KPI values (and every cases number on the wire) are rounded to this many decimals. */
 export const SALES_KPI_QUANTITY_DECIMALS = 3;
 
