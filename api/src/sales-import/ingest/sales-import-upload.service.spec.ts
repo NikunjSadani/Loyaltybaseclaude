@@ -15,7 +15,7 @@ import {
   GCS_DELETE_TIMEOUT_MS, HISTORY_PURGE_CHUNK_ROWS, HISTORY_PURGE_STATEMENT_TIMEOUT_MS, HISTORY_PURGE_TX_TIMEOUT_MS, PURGE_STATEMENT_TIMEOUT_MS, PURGE_STEP_MS,
   SalesImportRetentionService,
 } from './sales-import-retention.service';
-import { SalesImportUploadService } from './sales-import-upload.service';
+import { LIST_SWEEP_START_WINDOW_MS, SalesImportUploadService } from './sales-import-upload.service';
 
 const USER = { sub: 'u1', role: 'CLIENT_ADMIN', clientId: 't1', phone: '', name: 'Admin' };
 const OTHER = { ...USER, clientId: 't2' };
@@ -727,5 +727,48 @@ describe('SalesImportUploadService — final re-check fixes', () => {
     await expect(h2.svc.reprocessAsNew(USER, id2)).rejects.toThrow(/could not be copied/);
     const child2 = [...h2.rows.values()].find((r) => (r as unknown as { reprocessedFromId: string }).reprocessedFromId === id2)!;
     expect(child2.status).toBe('CANCELLED'); // never left as a live child blocking a retry
+  });
+});
+
+describe('retention re-check L3 / L4', () => {
+  it('L3: the import-list GET sweep skips the 10-year history delete and starts no step after its 10 s window', async () => {
+    const h = harness();
+    const spy = jest.spyOn(h.retention, 'sweep');
+    await h.svc.list(USER, {});
+    const opts = spy.mock.calls[0][0]!;
+    expect(opts).toEqual(expect.objectContaining({ clientId: 't1', history: false, stopStartingAfter: expect.any(Number) }));
+    expect(opts.stopStartingAfter! - Date.now()).toBeLessThanOrEqual(LIST_SWEEP_START_WINDOW_MS);
+    const raw = h.prisma.$executeRaw.mock.calls.map((c) => (c[0] as unknown as { strings: string[] }).strings.join('?'));
+    expect(raw.some((s) => s.includes('sales_month_histories'))).toBe(false);
+    // past the window nothing new starts (an expired import is left for the drains)
+    const { importId: id } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 1 });
+    Object.assign(h.rows.get(id)!, { status: 'FAILED', finishedAt: new Date(Date.now() - 40 * 86_400_000) });
+    await expect(h.retention.sweep({ clientId: 't1', stopStartingAfter: Date.now() - 1 })).resolves.toEqual({ abandoned: 0, purged: 0 });
+    // the drains / worker (no flag) still run it
+    await h.retention.sweep({});
+    const after = h.prisma.$executeRaw.mock.calls.map((c) => (c[0] as unknown as { strings: string[] }).strings.join('?'));
+    expect(after.some((s) => s.includes('DELETE FROM "sales_month_histories"'))).toBe(true);
+  });
+
+  it('L4: a GCS prefix whose delete is still running (timed out but not settled) is not deleted a second time', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    try {
+      const h = harness();
+      const { importId: id } = await h.svc.createUpload(USER, { filename: 'a.csv', sizeBytes: 1 });
+      let finish: () => void = () => undefined;
+      h.storage.deletePrefix.mockImplementationOnce(() => new Promise<void>((r) => { finish = r; }));
+      const first = h.retention.deleteFiles(id, 't1');
+      await jest.advanceTimersByTimeAsync(GCS_DELETE_TIMEOUT_MS);
+      await expect(first).resolves.toBe(false); // gave up waiting
+      h.storage.deletePrefix.mockClear();
+      await expect(h.retention.deleteFiles(id, 't1')).resolves.toBe(false); // still in flight → skipped
+      expect(h.storage.deletePrefix).not.toHaveBeenCalled();
+      finish(); // the client call settles
+      await jest.advanceTimersByTimeAsync(0);
+      await expect(h.retention.deleteFiles(id, 't1')).resolves.toBe(true);
+      expect(h.storage.deletePrefix).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

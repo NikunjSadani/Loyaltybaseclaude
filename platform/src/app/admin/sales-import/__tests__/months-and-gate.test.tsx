@@ -11,7 +11,7 @@ import type { SalesMonthRecalcPreview, SalesMonthRow } from '@/lib/sales-import/
 const roleRef = { current: 'CLIENT_ADMIN' };
 vi.mock('@/lib/admin-session', () => ({ useAdminSession: () => ({ role: roleRef.current }) }));
 
-const apiMock = vi.hoisted(() => ({ months: vi.fn(), closeMonth: vi.fn(), reopenMonth: vi.fn(), recalcPreview: vi.fn(), recalculate: vi.fn() }));
+const apiMock = vi.hoisted(() => ({ months: vi.fn(), closeMonth: vi.fn(), reopenMonth: vi.fn(), recalcPreview: vi.fn(), recalculate: vi.fn(), rebuildProductList: vi.fn() }));
 const perms = vi.hoisted(() => ({ granted: true }));
 vi.mock('@/lib/use-permissions', () => ({
   usePermissions: () => ({ role: 'CLIENT_ADMIN', permissions: [], ready: true, error: false, retry: () => {}, has: () => perms.granted }),
@@ -25,7 +25,7 @@ function row(over: Partial<SalesMonthRow>): SalesMonthRow {
   return {
     month: '2026-10', state: 'OPEN', implicit: true, closedAt: null, closedBy: null, lastAppliedAt: '2026-11-02T05:00:00.000Z',
     lastAppliedImportId: 'i1', canClose: true, canReopen: false, downstream: { creditBatches: 0, exports: 0 },
-    hasHistory: false, historySourceImportId: null, historyAppliedAt: null, ...over,
+    hasHistory: false, historySourceImportId: null, historyAppliedAt: null, productListCurrent: true, ...over,
   };
 }
 const ok = <T,>(data: T) => ({ success: true as const, data });
@@ -283,5 +283,55 @@ describe('SalesImportFeatureGate', () => {
     expect(window.confirm).toHaveBeenCalledTimes(1);
     expect(await screen.findByRole('alert')).toHaveTextContent('September 2026 was not reopened: September 2026 is already open.');
     expect(apiMock.months).toHaveBeenCalledTimes(2); // re-fetched
+  });
+});
+
+describe('months page — Rebuild product list (§10c)', () => {
+  it('only a month with history whose product list is not current offers it (OPEN or CLOSED); confirm → rebuilt, row updated', async () => {
+    apiMock.months.mockResolvedValue(ok([
+      row({ month: '2026-10', hasHistory: true, productListCurrent: true }),
+      row({ month: '2026-09', state: 'CLOSED', canClose: false, hasHistory: true, productListCurrent: false }),
+      row({ month: '2026-08', hasHistory: false }),
+    ]));
+    apiMock.rebuildProductList.mockResolvedValue(ok(row({ month: '2026-09', state: 'CLOSED', canClose: false, hasHistory: true, productListCurrent: true })));
+    await act(async () => { render(<MonthsPage />); });
+    expect(screen.queryByTestId('rebuild-product-list-2026-10')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('rebuild-product-list-2026-08')).not.toBeInTheDocument();
+    const btn = screen.getByRole('button', { name: 'Rebuild the product list for September 2026' });
+    await act(async () => { fireEvent.click(btn); });
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringMatching(/doesn't change any figures/));
+    expect(apiMock.rebuildProductList).toHaveBeenCalledWith('2026-09');
+    expect(screen.getByRole('status')).toHaveTextContent('The product list for September 2026 is rebuilt. No figures changed.');
+    expect(screen.queryByTestId('rebuild-product-list-2026-09')).not.toBeInTheDocument();
+  });
+
+  it('cancel changes nothing; a refused rebuild shows the server reason; no button without targets:upload', async () => {
+    apiMock.months.mockResolvedValue(ok([row({ month: '2026-09', hasHistory: true, productListCurrent: false })]));
+    vi.spyOn(window, 'confirm').mockReturnValueOnce(false);
+    await act(async () => { render(<MonthsPage />); });
+    await act(async () => { fireEvent.click(screen.getByTestId('rebuild-product-list-2026-09')); });
+    expect(apiMock.rebuildProductList).not.toHaveBeenCalled();
+    apiMock.rebuildProductList.mockResolvedValue({ success: false, error: 'September 2026 is busy (a sales file is being applied, or the list is very large). Try again in a few minutes.', status: 409 });
+    await act(async () => { fireEvent.click(screen.getByTestId('rebuild-product-list-2026-09')); });
+    expect(screen.getByRole('alert')).toHaveTextContent('The product list for September 2026 was not rebuilt: September 2026 is busy');
+  });
+
+  it('no Rebuild button without targets:upload', async () => {
+    perms.granted = false;
+    apiMock.months.mockResolvedValue(ok([row({ month: '2026-09', hasHistory: true, productListCurrent: false })]));
+    await act(async () => { render(<MonthsPage />); });
+    expect(screen.queryByTestId('rebuild-product-list-2026-09')).not.toBeInTheDocument();
+  });
+
+  it('?month=YYYY-MM (link from the KPI picker) lists from that month on, so an older month is shown', async () => {
+    window.history.pushState({}, '', '/admin/sales-import/months?month=2025-12');
+    try {
+      apiMock.months.mockResolvedValue(ok([row({ month: '2025-12', hasHistory: true, productListCurrent: false })]));
+      await act(async () => { render(<MonthsPage />); });
+      expect(apiMock.months).toHaveBeenCalledWith('2025-12');
+      expect(screen.getByTestId('rebuild-product-list-2025-12')).toBeInTheDocument();
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
   });
 });

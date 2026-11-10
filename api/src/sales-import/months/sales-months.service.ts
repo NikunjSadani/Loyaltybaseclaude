@@ -1,10 +1,16 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
-import type { Prisma, SalesMonthStatus } from '@prisma/client';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma, type SalesMonthStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import type { JwtPayload } from '../../common/decorators/current-user.decorator';
 import { lockSalesMonth } from '../../common/sales-kpi-ownership';
 import { currentMonthKey } from '../../targets/targets.helpers';
-import type { SalesMonthReopenRequest, SalesMonthReopenResult, SalesMonthRow } from '../sales-import.contract';
+import type {
+  SalesMonthRebuildProductListResult,
+  SalesMonthReopenRequest,
+  SalesMonthReopenResult,
+  SalesMonthRow,
+} from '../sales-import.contract';
+import { classifyMonthSummaries, insertMonthCombosSql } from '../kpi/month-combos';
 import { isMonthKey, monthLabel, resolveMonthState, shiftMonthKey } from './month-state';
 
 /** Max months one list call returns. */
@@ -43,7 +49,20 @@ export async function downstreamArtifacts(
   return out;
 }
 
-type HistoryMeta = { sourceImportId: string; appliedAt: Date };
+type HistoryMeta = {
+  sourceImportId: string;
+  appliedAt: Date;
+  lineRows: number;
+  combosSourceImportId: string | null;
+  combosAppliedAt: Date | null;
+};
+
+/**
+ * "Rebuild product list" runs at apply scale (§10c): the month write itself allows 300 s, so a month's summary rebuild
+ * gets 240 s per statement (incl. the wait for the month lock) and 280 s for the transaction.
+ */
+export const REBUILD_PRODUCT_LIST_STATEMENT_TIMEOUT_MS = 240_000;
+export const REBUILD_PRODUCT_LIST_TX_TIMEOUT_MS = 280_000;
 
 /**
  * The stored month history per month: which import it holds and when it was applied. Reads the small per-month HEADER
@@ -58,9 +77,9 @@ export async function historyMetaByMonth(
   if (months.length === 0) return new Map();
   const rows = await db.salesMonthHistorySet.findMany({
     where: { clientId, month: { in: months } },
-    select: { month: true, sourceImportId: true, appliedAt: true },
+    select: { month: true, sourceImportId: true, appliedAt: true, lineRows: true, combosSourceImportId: true, combosAppliedAt: true },
   });
-  return new Map(rows.map((r) => [r.month, { sourceImportId: r.sourceImportId, appliedAt: r.appliedAt }]));
+  return new Map(rows.map((r) => [r.month, r]));
 }
 
 export function downstreamWarnings(month: string, d: Downstream): string[] {
@@ -191,6 +210,61 @@ export class SalesMonthsService {
     return { ...this.toRow(month, currentMonthKey(), row, await this.userNames([row.closedById]), downstream, history), warnings };
   }
 
+  /**
+   * "Rebuild product list" (§10c): side-effect-free on figures — under the SAME blocking month lock as apply, in one
+   * transaction, DELETE the month's combos summary and rebuild it FROM the stored history lines, then stamp the header
+   * with its own source. Allowed for OPEN and CLOSED months (no achievement / KPI value / history line changes). Audited.
+   */
+  async rebuildProductList(user: JwtPayload, month: string): Promise<SalesMonthRebuildProductListResult> {
+    if (!isMonthKey(month)) throw new BadRequestException('month must be YYYY-MM.');
+    const clientId = user.clientId;
+    try {
+      await this.prisma.$transaction(
+        async (tx) => {
+          // Constant (SET takes no bind parameters); bounds the lock wait and every statement below.
+          await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${REBUILD_PRODUCT_LIST_STATEMENT_TIMEOUT_MS}`);
+          await lockSalesMonth(tx, clientId, month);
+          const header = await tx.salesMonthHistorySet.findUnique({
+            where: { clientId_month: { clientId, month } },
+            select: { sourceImportId: true, appliedAt: true, combosSourceImportId: true, combosAppliedAt: true },
+          });
+          if (!header) throw new NotFoundException(`${monthLabel(month)} has no stored sales lines.`);
+          await tx.$executeRaw(Prisma.sql`DELETE FROM "sales_month_history_combos" WHERE "clientId" = ${clientId} AND "month" = ${month}`);
+          const combos = await tx.$executeRaw(insertMonthCombosSql(clientId, month, header.sourceImportId, header.appliedAt));
+          await tx.salesMonthHistorySet.update({
+            where: { clientId_month: { clientId, month } },
+            data: { combosSourceImportId: header.sourceImportId, combosAppliedAt: header.appliedAt },
+          });
+          await tx.auditLog.create({
+            data: {
+              action: 'UPDATE',
+              entityType: 'SALES_MONTH',
+              entityId: `${clientId}:${month}`,
+              actorId: user.sub,
+              oldValues: { combosSourceImportId: header.combosSourceImportId, combosAppliedAt: header.combosAppliedAt?.toISOString() ?? null },
+              newValues: { action: 'rebuild-product-list', combos: Number(combos), sourceImportId: header.sourceImportId },
+              metadata: { clientId, month, action: 'rebuild-product-list' },
+            },
+          });
+        },
+        { timeout: REBUILD_PRODUCT_LIST_TX_TIMEOUT_MS, maxWait: 10_000 },
+      );
+    } catch (e) {
+      if (e instanceof NotFoundException) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/statement timeout|canceling statement|57014|expired|already closed|P2028/i.test(msg) || (e as { code?: unknown })?.code === 'P2028') {
+        throw new ConflictException(`${monthLabel(month)} is busy (a sales file is being applied, or the list is very large). Try again in a few minutes.`);
+      }
+      throw e;
+    }
+    const [row, downstream, history] = await Promise.all([
+      this.prisma.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month } } }),
+      downstreamArtifacts(this.prisma, clientId, [month]),
+      historyMetaByMonth(this.prisma, clientId, [month]),
+    ]);
+    return this.toRow(month, currentMonthKey(), row, await this.userNames([row?.closedById]), downstream.get(month), history.get(month));
+  }
+
   private toRow(
     month: string,
     current: string,
@@ -215,6 +289,7 @@ export class SalesMonthsService {
       hasHistory: !!history,
       historySourceImportId: history?.sourceImportId ?? null,
       historyAppliedAt: history ? history.appliedAt.toISOString() : null,
+      productListCurrent: !history || ['current', 'empty'].includes(classifyMonthSummaries([{ month, ...history }]).get(month)!),
     };
   }
 

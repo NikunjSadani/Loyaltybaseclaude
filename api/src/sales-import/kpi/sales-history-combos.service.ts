@@ -13,6 +13,8 @@ import {
 import { paiseToRupees, picoToCases } from '../ingest/normalize';
 import { isMonthKey } from '../months/month-state';
 import { classifyMonthSummaries } from './month-combos';
+import { currentMonthKey } from '../../targets/targets.helpers';
+import { shiftMonthKey } from '../months/month-state';
 
 export interface SalesHistoryCombosQuery {
   month?: string;
@@ -98,8 +100,10 @@ export class SalesHistoryCombosService {
           await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
           // Constant, not user input (SET takes no bind parameters).
           await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${HISTORY_COMBOS_STATEMENT_TIMEOUT_MS}`);
+          // Months older than the 10-year retention are being deleted by the sweep: never offered or read.
+          const cutoff = shiftMonthKey(currentMonthKey(), -12 * SALES_MONTH_HISTORY_RETENTION_YEARS);
           const sets = await tx.salesMonthHistorySet.findMany({
-            where: { clientId },
+            where: { clientId, month: { gte: cutoff } },
             select: {
               month: true, dimensionKeys: true, sourceImportId: true, appliedAt: true, lineRows: true,
               combosSourceImportId: true, combosAppliedAt: true,

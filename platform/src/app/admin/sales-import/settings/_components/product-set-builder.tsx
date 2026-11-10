@@ -286,10 +286,13 @@ export function ProductSetBuilder({
         <p role="status" className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2" data-testid="product-set-unavailable">
           {history.data.unavailableMonths.length === 1 ? 'The product list for ' : 'The product lists for '}
           {history.data.unavailableMonths.map(monthLabel).join(', ')}{' '}
-          {history.data.unavailableMonths.length === 1 ? "isn't" : "aren't"} available — re-apply{' '}
-          {history.data.unavailableMonths.length === 1 ? 'the month' : 'those months'} (
-          <Link href="/admin/sales-import/months" className="underline font-medium">Months page</Link>) to rebuild it.
-          {history.data.months.length > history.data.unavailableMonths.length ? ' The list below leaves it out.' : ''}
+          {history.data.unavailableMonths.length === 1 ? "isn't" : "aren't"} available — open{' '}
+          <Link href={`/admin/sales-import/months?month=${encodeURIComponent(history.data.unavailableMonths[0])}`} className="underline font-medium">Months</Link>
+          {' '}and choose {"'Rebuild product list'"} {history.data.unavailableMonths.length === 1 ? '' : 'for each '}(it doesn&apos;t
+          change any figures).
+          {history.data.months.length > history.data.unavailableMonths.length
+            ? (history.data.unavailableMonths.length === 1 ? ' The list below leaves it out.' : ' The list below leaves them out.')
+            : ''}
         </p>
       )}
 

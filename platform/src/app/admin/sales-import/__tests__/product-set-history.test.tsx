@@ -167,9 +167,18 @@ describe('product set builder — stored month history source', () => {
       await act(async () => { fireEvent.change(sel, { target: { value: 'last:3' } }); });
       const note = await screen.findByTestId('product-set-unavailable');
       expect(note).toHaveAttribute('role', 'status');
-      expect(note).toHaveTextContent("The product list for September 2026 isn't available — re-apply the month (Months page) to rebuild it.");
-      expect(within(note).getByRole('link', { name: 'Months page' })).toHaveAttribute('href', '/admin/sales-import/months');
-      expect(note).not.toHaveTextContent(/refresh|minutes/i);
+      expect(note).toHaveTextContent(
+        "The product list for September 2026 isn't available — open Months and choose 'Rebuild product list' (it doesn't change any figures). The list below leaves it out.",
+      );
+      expect(within(note).getByRole('link', { name: 'Months' })).toHaveAttribute('href', '/admin/sales-import/months?month=2026-09');
+      expect(note).not.toHaveTextContent(/refresh|minutes|re-apply/i);
+      // L1: plural wording
+      apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, months: ['2026-08', '2026-09', '2026-10'], unavailableMonths: ['2026-08', '2026-09'] }));
+      await act(async () => { fireEvent.change(sel, { target: { value: 'last:6' } }); });
+      await waitFor(() => expect(screen.getByTestId('product-set-unavailable')).toHaveTextContent(
+        "The product lists for August 2026, September 2026 aren't available — open Months and choose 'Rebuild product list' for each (it doesn't change any figures). The list below leaves them out.",
+      ));
+      expect(within(screen.getByTestId('product-set-unavailable')).getByRole('link', { name: 'Months' })).toHaveAttribute('href', '/admin/sales-import/months?month=2026-08');
       // nothing polls: the list is fetched again only when the user changes something
       const calls = apiMock.historyCombos.mock.calls.length;
       await act(async () => { vi.advanceTimersByTime(10 * 60_000); });

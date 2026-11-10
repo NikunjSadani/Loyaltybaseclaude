@@ -122,13 +122,26 @@ export class SalesImportRetentionService {
     }
   }
 
+  /** GCS prefixes whose delete is still running (a timed-out one keeps going in the client): never start a second. */
+  private readonly deletingPrefixes = new Set<string>();
+
   /** Step 2 (outside any transaction): delete the import's GCS prefix, then stamp filesPurgedAt. Never throws. */
   async deleteFiles(id: string, clientId: string): Promise<boolean> {
     try {
       const row = await this.prisma.salesImport.findFirst({ where: { id, clientId }, select: { gcsPrefix: true } });
       if (!row) return false;
       const prefix = `sales-imports/${clientId}/${id}/`;
-      if (row.gcsPrefix === prefix) await withTimeout(this.storage.deletePrefix(prefix), GCS_DELETE_TIMEOUT_MS, 'GCS delete');
+      if (row.gcsPrefix === prefix) {
+        if (this.deletingPrefixes.has(prefix)) {
+          this.logger.warn(`sales-import ${id}: a delete of its files is still running; skipped (the next sweep checks again)`);
+          return false;
+        }
+        this.deletingPrefixes.add(prefix);
+        const del = this.storage.deletePrefix(prefix);
+        // The prefix is "in flight" until the CLIENT call settles — not when our timeout gives up on it.
+        void del.then(() => undefined, () => undefined).finally(() => this.deletingPrefixes.delete(prefix));
+        await withTimeout(del, GCS_DELETE_TIMEOUT_MS, 'GCS delete');
+      }
       else this.logger.error(`sales-import ${id}: unexpected gcsPrefix "${row.gcsPrefix}", storage cleanup skipped`);
       await this.prisma.salesImport.updateMany({ where: { id, clientId, purgedAt: { not: null } }, data: { filesPurgedAt: new Date() } });
       return true;
@@ -180,12 +193,24 @@ export class SalesImportRetentionService {
    * Cloud Scheduler drain passes start + 150 s): no step is STARTED unless its worst case still ends by the deadline
    * (re-check M2) — the rest waits for the next sweep.
    */
-  async sweep(opts: { clientId?: string; limit?: number; now?: Date; deadline?: number } = {}): Promise<{ abandoned: number; purged: number }> {
+  async sweep(opts: {
+    clientId?: string;
+    limit?: number;
+    now?: Date;
+    /** Hard: no step starts unless its WORST case ends by then (the Cloud Scheduler drain). */
+    deadline?: number;
+    /** Soft: no NEW step starts after this time (the import-list GET keeps its inline sweep short). */
+    stopStartingAfter?: number;
+    /** Run the 10-year history delete (default true; the import-list GET passes false — drains / worker do it). */
+    history?: boolean;
+  } = {}): Promise<{ abandoned: number; purged: number }> {
     const now = opts.now ?? new Date();
     const limit = opts.limit ?? 5;
     const tenant = opts.clientId ? { clientId: opts.clientId } : {};
     const out = { abandoned: 0, purged: 0 };
-    const fits = (stepMs: number) => opts.deadline === undefined || this.clock() + stepMs <= opts.deadline;
+    const fits = (stepMs: number) =>
+      (opts.deadline === undefined || this.clock() + stepMs <= opts.deadline) &&
+      (opts.stopStartingAfter === undefined || this.clock() < opts.stopStartingAfter);
     try {
       // Retry file deletions that failed after an earlier purge was marked.
       const pendingFiles = await this.prisma.salesImport.findMany({
@@ -233,7 +258,7 @@ export class SalesImportRetentionService {
       this.logger.warn(`sales-import retention sweep failed: ${(e as Error).message}`);
     }
     // 10-year month history (cheap indexed delete; usually nothing).
-    if (fits(HISTORY_PURGE_STEP_MS)) await this.purgeOldHistory({ clientId: opts.clientId });
+    if (opts.history !== false && fits(HISTORY_PURGE_STEP_MS)) await this.purgeOldHistory({ clientId: opts.clientId });
     return out;
   }
 }

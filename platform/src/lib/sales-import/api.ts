@@ -19,6 +19,7 @@ import type {
   SalesKpiDefinitionPatch,
   SalesKpiTestRequest,
   SalesKpiTestResult,
+  SalesMonthRebuildProductListResult,
   SalesMonthRecalcPreview,
   SalesMonthRecalcRequest,
   SalesMonthRecalcResult,
@@ -88,6 +89,8 @@ export const salesImportApi = {
     return api.get<SalesMonthRow[]>(`${MONTHS}${qs ? `?${qs}` : ''}`);
   },
   closeMonth: (month: string) => api.post<SalesMonthRow>(`${MONTHS}/${id(month)}/close`, {}),
+  /** Rebuilds the month's stored product list (KPI picker source) from its stored lines — changes no figures. */
+  rebuildProductList: (month: string) => api.post<SalesMonthRebuildProductListResult>(`${MONTHS}/${id(month)}/rebuild-product-list`, {}),
   /** What "Recalculate from stored history" would write for an OPEN month (404 = no stored history). */
   recalcPreview: (month: string) => api.get<SalesMonthRecalcPreview>(`${MONTHS}/${id(month)}/recalculate/preview`),
   /** Rewrites the month's importer-owned KPIs from stored history (409 when a token is stale). */

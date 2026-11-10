@@ -41,6 +41,8 @@ import { SalesImportRunnerService } from './sales-import-runner.service';
 const REPROCESSABLE: SalesImportStatus[] = ['READY', 'NEEDS_MAPPING', 'FAILED'];
 export const SALES_IMPORT_LIST_DEFAULT_LIMIT = 20;
 export const SALES_IMPORT_LIST_MAX_LIMIT = 50;
+/** The import-list GET's inline retention sweep starts no new step after this long. */
+export const LIST_SWEEP_START_WINDOW_MS = 10_000;
 
 /**
  * Fields reset when an import goes (back) to QUEUED. `claimToken: null` invalidates any worker still holding the old
@@ -573,7 +575,8 @@ export class SalesImportUploadService {
   async list(user: JwtPayload, q: { cursor?: string; limit?: number }): Promise<SalesImportList> {
     const limit = Math.min(SALES_IMPORT_LIST_MAX_LIMIT, Math.max(1, Math.trunc(Number(q.limit ?? SALES_IMPORT_LIST_DEFAULT_LIMIT)) || SALES_IMPORT_LIST_DEFAULT_LIMIT));
     // S5: lazy retention for this tenant (bounded; never throws).
-    await this.retention.sweep({ clientId: user.clientId, limit: 3 });
+    // Inline on a GET: only the cheap import steps, started within 10 s; the 10-year history delete runs on the drains.
+    await this.retention.sweep({ clientId: user.clientId, limit: 3, history: false, stopStartingAfter: Date.now() + LIST_SWEEP_START_WINDOW_MS });
     const where: Prisma.SalesImportWhereInput = { clientId: user.clientId, status: { not: 'CANCELLED' } };
     if (q.cursor) {
       const c = await this.prisma.salesImport.findFirst({ where: { id: q.cursor, clientId: user.clientId }, select: { id: true } });
