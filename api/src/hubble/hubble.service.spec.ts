@@ -67,6 +67,23 @@ describe('HubbleService', () => {
     expect(loginBody).toEqual({ clientId: 'prod-cid', clientSecret: 'prod-secret' });
   });
 
+  it('L1: a half-present NEUTRAL pair never mixes with *_STAGING → not configured + one clear error log', () => {
+    const svc = makeService({ HUBBLE_CLIENT_ID: 'prod-cid' }); // staging pair still present
+    const errSpy = jest.spyOn((svc as unknown as { logger: { error: (m: string) => void } }).logger, 'error').mockImplementation(() => undefined);
+    expect(svc.isConfigured()).toBe(false);
+    expect(svc.isConfigured()).toBe(false);
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    expect(errSpy.mock.calls[0][0]).toContain('HUBBLE_CLIENT_SECRET is missing');
+    expect(errSpy.mock.calls[0][0]).not.toContain('prod-cid');
+  });
+
+  it('L1: a half-present STAGING pair (no neutral) → not configured + names the missing *_STAGING var', () => {
+    const svc = makeService({ HUBBLE_CLIENT_SECRET_STAGING: undefined });
+    const errSpy = jest.spyOn((svc as unknown as { logger: { error: (m: string) => void } }).logger, 'error').mockImplementation(() => undefined);
+    expect(svc.isConfigured()).toBe(false);
+    expect(errSpy.mock.calls[0][0]).toContain('HUBBLE_CLIENT_SECRET_STAGING is missing');
+  });
+
   it('F3: blank neutral names fall back to *_STAGING (staging keeps working unchanged)', async () => {
     fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
     fetchMock.mockResolvedValueOnce(jsonRes(404, undefined));

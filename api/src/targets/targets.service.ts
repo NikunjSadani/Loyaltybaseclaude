@@ -131,8 +131,19 @@ export class TargetsService {
     const { code, label, unit, isPrimary, hasNameOverride, nameOverrideLabel, order, rollup, enabled } =
       dto;
     // E1 — outletType: undefined = leave as-is (create → null); null/'' = shared (all types);
-    // a code must be one of the tenant's ENABLED outlet types (stored as the canonical code).
-    const outletType = await this.resolveKpiOutletType(user.clientId, dto.outletType);
+    // a code must be one of the tenant's ENABLED outlet types (stored as the canonical code). An UPDATE
+    // that re-sends the row's CURRENT value is a no-op and is NOT re-validated (so editing e.g. a label
+    // never fails just because that outlet type was disabled after the KPI was tagged).
+    let outletTypeInput = dto.outletType;
+    if (outletTypeInput !== undefined) {
+      const current = await this.prisma.kpiDef.findFirst({
+        where: { clientId: user.clientId, code },
+        select: { outletType: true },
+      });
+      const norm = (v: string | null | undefined) => ((v ?? '').trim() === '' ? null : (v as string).trim());
+      if (current && norm(current.outletType) === norm(outletTypeInput)) outletTypeInput = undefined;
+    }
+    const outletType = await this.resolveKpiOutletType(user.clientId, outletTypeInput);
 
     // Invariant: at most ONE primary KpiDef per tenant. The upsert is keyed by
     // (clientId, code), so when this write makes a KPI primary we first demote

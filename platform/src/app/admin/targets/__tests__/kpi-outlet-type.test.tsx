@@ -4,7 +4,8 @@
  *
  * KO1: existing KPIs (outletType null) show "All"; a typed KPI shows the tenant's display label
  * KO2: Add KPI with an outlet type POSTs outletType = the code (from the tenant's enabled types)
- * KO3: Edit sends ONLY the whitelisted fields (no id/clientId/timestamps) and keeps outletType null
+ * KO3: Edit sends ONLY the whitelisted fields (no id/clientId/timestamps); an unchanged outletType is omitted
+ * KO4: Edit that changes the outlet type sends it
  */
 
 import React, { act } from 'react';
@@ -77,10 +78,21 @@ describe('KPI outlet type (E1)', () => {
     fireEvent.click(screen.getByRole('button', { name: /Save Changes/ }));
     await waitFor(() => expect(postMock).toHaveBeenCalledTimes(1));
     const body = postMock.mock.calls[0][1] as Record<string, unknown>;
+    // Unchanged outletType is OMITTED (backend leaves the stored value alone, no re-validation).
     expect(Object.keys(body).sort()).toEqual([
-      'code', 'enabled', 'hasNameOverride', 'isPrimary', 'label', 'nameOverrideLabel', 'order', 'outletType', 'rollup', 'unit',
+      'code', 'enabled', 'hasNameOverride', 'isPrimary', 'label', 'nameOverrideLabel', 'order', 'rollup', 'unit',
     ]);
-    expect(body.outletType).toBeNull();
     expect(body.code).toBe('MONTH_TGT');
+  });
+
+  it('KO4: Edit that CHANGES the outlet type sends it (typed → All sends null)', async () => {
+    await renderPage();
+    fireEvent.click(screen.getAllByTitle('Edit')[1]); // RLP_LINES (SSS)
+    fireEvent.change(screen.getByTestId('kpi-outlet-type-select'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save Changes/ }));
+    await waitFor(() => expect(postMock).toHaveBeenCalledTimes(1));
+    const body = postMock.mock.calls[0][1] as Record<string, unknown>;
+    expect(body.code).toBe('RLP_LINES');
+    expect(body.outletType).toBeNull();
   });
 });

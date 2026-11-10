@@ -133,6 +133,28 @@ function consoleFeatures(features: Record<string, unknown>) {
 }
 
 /**
+ * The console-known boolean feature keys (module toggles + runtime behaviour flags). A PATCH/create
+ * value for any of these MUST be a real boolean — a string "false" would be truthy at every `!!` read
+ * site and silently turn the feature ON. Unknown keys are left alone (the blob carries other config).
+ */
+const BOOLEAN_FEATURE_KEYS = [
+  'visibilityInvoiceModule', 'kycApprovalFlow', 'campaignEnrollmentForm', 'salesTeamApp', 'walletModule',
+  'referralModule', 'selfEnrollmentAllowed', 'nonKycOutletCampaigns', 'multiLevelApproval', 'rbacEnforcement',
+  'hubbleVoucherEnabled', 'rlpBscView', 'catalogueMrpSlash', 'partnerDashboardV2', 'captureBankAtRedemption',
+  'offerTiles', 'salesImport', 'outletMasterGeo', 'soDeclarationKyc', 'kycAddressProofWaiver',
+] as const;
+
+function assertValidFeatures(incoming: Record<string, unknown> | undefined): void {
+  if (!incoming) return;
+  for (const k of BOOLEAN_FEATURE_KEYS) {
+    if (k in incoming && typeof incoming[k] !== 'boolean') {
+      throw new BadRequestException(`features.${k} must be true or false.`);
+    }
+  }
+  assertValidPartnerApp(incoming.partnerApp);
+}
+
+/**
  * Validate an incoming PATCH `features.partnerApp` (when present): a plain object whose keys are
  * the five known tab keys and whose values are booleans. Anything else is a 400 — the block is
  * read by the partner shell, so a typo'd key or a string "false" must never be persisted.
@@ -576,7 +598,7 @@ export class GifsyService {
    */
   async createClient(user: JwtPayload, dto: CreateClientDto) {
     this.assertGifsy(user);
-    assertValidPartnerApp((dto.features as Record<string, unknown> | undefined)?.partnerApp);
+    assertValidFeatures(dto.features as Record<string, unknown> | undefined);
 
     // Reserved slugs: `gifsy` is the PLATFORM sentinel — a tenant with that slug would
     // give its CLIENT_ADMIN a `clientId==='gifsy'`, satisfying the platform-context gate
@@ -738,7 +760,7 @@ export class GifsyService {
     if (dto.features !== undefined) {
       const existingFeatures = (existing.features ?? {}) as Record<string, unknown>;
       const incoming = dto.features as Record<string, unknown>;
-      assertValidPartnerApp(incoming.partnerApp);
+      assertValidFeatures(incoming);
       const features: Record<string, unknown> = { ...existingFeatures, ...incoming };
       const incomingPartnerApp = incoming.partnerApp;
       if (

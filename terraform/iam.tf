@@ -39,6 +39,20 @@ resource "google_project_iam_member" "deployer_storage_admin" {
   member  = "serviceAccount:${google_service_account.deployer.email}"
 }
 
+# Deploy PREFLIGHT (.github/workflows/deploy.yml, "Preflight — required Secret Manager secrets exist"):
+# the deployer checks that each secret the API deploy binds has an ENABLED latest version via
+# `gcloud secrets versions describe` — METADATA ONLY. roles/secretmanager.viewer grants secrets.get/list +
+# versions.get/list and NOT secretmanager.versions.access, so the deployer still cannot read any value.
+# One-time owner grant before the next prod deploy (equivalent, non-authoritative member binding):
+#   gcloud projects add-iam-policy-binding gifsy-platform \
+#     --member="serviceAccount:gifsy-deployer@gifsy-platform.iam.gserviceaccount.com" \
+#     --role="roles/secretmanager.viewer"
+resource "google_project_iam_member" "deployer_secret_viewer" {
+  project = var.project_id
+  role    = "roles/secretmanager.viewer"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
 # Required for terraform apply to enable GCP APIs via google_project_service resources.
 # Grant this once manually before first apply:
 #   gcloud projects add-iam-policy-binding gifsy-platform \

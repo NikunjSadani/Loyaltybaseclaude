@@ -1,12 +1,13 @@
 /// <reference types="vitest/globals" />
 /**
- * OTP SMS templates card (B11).
+ * OTP SMS templates card (B11) — dedicated GIFSY_ADMIN-only endpoint.
  *
- * OT1: a Deoleo-style stored row displays as-is; empty purposes say "Using the global template";
- *      nothing is saved without an edit (Save disabled)
- * OT2: editing one purpose saves the COMPLETE map (unchanged purposes keep their stored ids)
+ * OT1: shows the STORED row as-is (Deoleo-style); empty purposes say "Using the global template";
+ *      Save disabled until an edit
+ * OT2: editing ONE purpose sends { clientId: <loaded tenant>, changes: { <only that purpose> } }
  * OT3: a non-24-hex id blocks Save client-side
- * OT4: a server refusal surfaces its message and keeps the draft
+ * OT4: a server refusal (409 brand changed) surfaces its message and keeps the draft
+ * OT5: a failed READ shows the error + Retry and offers no inputs/Save; Retry recovers
  */
 
 import React, { act } from 'react';
@@ -14,18 +15,23 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 const getMock = vi.fn();
-const saveMock = vi.fn();
-vi.mock('@/lib/api-client', () => ({ api: { get: (...a: unknown[]) => getMock(...a) } }));
-vi.mock('@/lib/gifsy-settings', () => ({ saveGifsySettingsDetailed: (...a: unknown[]) => saveMock(...a) }));
+const putMock = vi.fn();
+vi.mock('@/lib/api-client', () => ({
+  api: {
+    get: (...a: unknown[]) => getMock(...a),
+    put: (...a: unknown[]) => putMock(...a),
+  },
+}));
 
 import { OtpTemplatesCard } from '../otp-templates-card';
 
 const LOGIN = '6a391d46aaaaaaaaaaaaaaaa';
 const KYC   = '6a391cf2bbbbbbbbbbbbbbbb';
 const NEW   = '0123456789abcdef01234567';
+const DEOLEO = { login: LOGIN, redemptionSelf: LOGIN, kycConsent: KYC, redemptionSales: '' };
 
-async function renderCard(otpTemplates: unknown) {
-  getMock.mockResolvedValue({ success: true, data: { otpTemplates } });
+async function renderCard(templates: unknown, clientId = 'deoleo') {
+  getMock.mockResolvedValue({ success: true, data: { clientId, templates, stored: true } });
   await act(async () => { render(<OtpTemplatesCard />); });
   await screen.findByTestId('otp-tpl-login');
 }
@@ -34,35 +40,30 @@ describe('OtpTemplatesCard', () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
   it('OT1: shows the stored row as-is, marks empty purposes as global, Save disabled until an edit', async () => {
-    await renderCard({ login: LOGIN, redemptionSelf: LOGIN, kycConsent: KYC, redemptionSales: '' });
-    expect(getMock).toHaveBeenCalledWith('/api/settings');
+    await renderCard(DEOLEO);
+    expect(getMock).toHaveBeenCalledWith('/api/admin/settings/otp-templates');
     expect(screen.getByTestId('otp-tpl-login')).toHaveValue(LOGIN);
     expect(screen.getByTestId('otp-tpl-kycConsent')).toHaveValue(KYC);
     expect(screen.getByTestId('otp-tpl-redemptionSales')).toHaveValue('');
     expect(screen.getByTestId('otp-tpl-redemptionSales-global')).toBeInTheDocument();
     expect(screen.queryByTestId('otp-tpl-login-global')).toBeNull();
     expect(screen.getByTestId('otp-templates-save')).toBeDisabled();
-    expect(saveMock).not.toHaveBeenCalled();
+    expect(putMock).not.toHaveBeenCalled();
   });
 
-  it('OT2: editing one purpose saves the complete four-purpose map', async () => {
-    saveMock.mockResolvedValue({ ok: true });
-    await renderCard({ login: LOGIN, redemptionSelf: LOGIN, kycConsent: KYC, redemptionSales: '' });
+  it('OT2: editing one purpose sends only that change, bound to the loaded tenant', async () => {
+    putMock.mockResolvedValue({ success: true, data: { clientId: 'deoleo', templates: { ...DEOLEO, redemptionSales: NEW } } });
+    await renderCard(DEOLEO);
     fireEvent.change(screen.getByTestId('otp-tpl-redemptionSales'), { target: { value: ` ${NEW} ` } });
     fireEvent.click(screen.getByTestId('otp-templates-save'));
-    await waitFor(() => expect(saveMock).toHaveBeenCalledTimes(1));
-    expect(saveMock.mock.calls[0][0]).toEqual({
-      otpTemplates: { login: LOGIN, redemptionSelf: LOGIN, kycConsent: KYC, redemptionSales: NEW },
-    });
+    await waitFor(() => expect(putMock).toHaveBeenCalledTimes(1));
+    expect(putMock.mock.calls[0]).toEqual([
+      '/api/admin/settings/otp-templates',
+      { clientId: 'deoleo', changes: { redemptionSales: NEW } },
+    ]);
     await waitFor(() => expect(screen.getByTestId('otp-templates-save')).toBeDisabled());
-  });
-
-  it('OT2b: an unset tenant (no row) shows all four empty → global', async () => {
-    await renderCard(undefined);
-    for (const k of ['login', 'redemptionSelf', 'kycConsent', 'redemptionSales']) {
-      expect(screen.getByTestId(`otp-tpl-${k}`)).toHaveValue('');
-      expect(screen.getByTestId(`otp-tpl-${k}-global`)).toBeInTheDocument();
-    }
+    // Login template untouched on screen.
+    expect(screen.getByTestId('otp-tpl-login')).toHaveValue(LOGIN);
   });
 
   it('OT3: a non-24-hex id blocks Save', async () => {
@@ -72,12 +73,26 @@ describe('OtpTemplatesCard', () => {
     expect(screen.getByTestId('otp-templates-save')).toBeDisabled();
   });
 
-  it('OT4: a server refusal shows its message and keeps the draft', async () => {
-    saveMock.mockResolvedValue({ ok: false, error: 'otpTemplates.login must be a 24-character MSG91 template id' });
-    await renderCard({ login: '', redemptionSelf: '', kycConsent: '', redemptionSales: '' });
-    fireEvent.change(screen.getByTestId('otp-tpl-login'), { target: { value: NEW } });
+  it('OT4: a 409 (brand changed in another tab) shows the server message and keeps the draft', async () => {
+    putMock.mockResolvedValue({ success: false, status: 409, error: 'The brand changed in another tab since this card loaded — reload the page and try again.' });
+    await renderCard(DEOLEO);
+    fireEvent.change(screen.getByTestId('otp-tpl-redemptionSales'), { target: { value: NEW } });
     fireEvent.click(screen.getByTestId('otp-templates-save'));
-    await waitFor(() => expect(screen.getByTestId('otp-templates-error')).toHaveTextContent('24-character'));
-    expect(screen.getByTestId('otp-tpl-login')).toHaveValue(NEW);
+    await waitFor(() => expect(screen.getByTestId('otp-templates-error')).toHaveTextContent('brand changed'));
+    expect(screen.getByTestId('otp-tpl-redemptionSales')).toHaveValue(NEW);
+  });
+
+  it('OT5: a failed READ shows error + Retry, no inputs/Save; Retry recovers', async () => {
+    getMock.mockResolvedValueOnce({ success: false, error: 'Internal server error' });
+    await act(async () => { render(<OtpTemplatesCard />); });
+    await screen.findByTestId('otp-templates-load-error');
+    expect(screen.queryByTestId('otp-tpl-login')).toBeNull();
+    expect(screen.queryByTestId('otp-templates-save')).toBeNull();
+
+    getMock.mockResolvedValueOnce({ success: true, data: { clientId: 'deoleo', templates: DEOLEO, stored: true } });
+    fireEvent.click(screen.getByTestId('otp-templates-retry'));
+    await screen.findByTestId('otp-tpl-login');
+    expect(screen.getByTestId('otp-tpl-login')).toHaveValue(LOGIN);
+    expect(screen.queryByTestId('otp-templates-load-error')).toBeNull();
   });
 });

@@ -354,6 +354,22 @@ describe('TargetsService', () => {
         expect(mockPrisma.outletTypeClientConfig.findMany).not.toHaveBeenCalled();
       });
 
+      it('L2: an update re-sending the STORED (now-disabled) outletType is not re-validated and leaves it untouched', async () => {
+        mockPrisma.kpiDef.findFirst.mockResolvedValueOnce({ outletType: 'SUB_STOCKIST' });
+        await service.upsertKpi(admin, { code: 'OLD_KPI', label: 'Renamed', outletType: 'SUB_STOCKIST' });
+        expect(mockPrisma.outletTypeClientConfig.findMany).not.toHaveBeenCalled();
+        const arg = mockTx.kpiDef.upsert.mock.calls[0][0];
+        expect(arg.update).not.toHaveProperty('outletType');
+        expect(arg.update.label).toBe('Renamed');
+      });
+
+      it('L2: a CHANGED outletType on update is still validated', async () => {
+        mockPrisma.kpiDef.findFirst.mockResolvedValueOnce({ outletType: null });
+        await expect(
+          service.upsertKpi(admin, { code: 'OLD_KPI', label: 'x', outletType: 'NOPE' }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
       it('a code that is not an enabled outlet type of the tenant → 400, nothing written', async () => {
         await expect(
           service.upsertKpi(admin, { code: 'X', label: 'X', outletType: 'RETAILER' }),

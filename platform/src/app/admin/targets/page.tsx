@@ -56,7 +56,9 @@ type UpsertPayload = Omit<KpiDef, 'id'>;
  * The exact body POST /api/admin/kpis accepts. The backend ValidationPipe is forbidNonWhitelisted,
  * so the edit form must NEVER echo the row's own id / clientId / timestamps (that 400s the save).
  */
-function toUpsertBody(f: UpsertPayload): UpsertPayload {
+function toUpsertBody(f: UpsertPayload, original?: UpsertPayload): UpsertPayload {
+  const outletType = f.outletType ? f.outletType : null;
+  const originalOutletType = original ? (original.outletType ? original.outletType : null) : undefined;
   return {
     code:              f.code,
     label:             f.label,
@@ -67,7 +69,9 @@ function toUpsertBody(f: UpsertPayload): UpsertPayload {
     order:             f.order,
     rollup:            f.rollup ?? 'SUM',
     enabled:           f.enabled,
-    outletType:        f.outletType ? f.outletType : null,
+    // Omitted on an EDIT that did not change it (the backend then leaves the stored value alone and does
+    // not re-validate it); sent on create and whenever the operator changed it.
+    ...(original && outletType === originalOutletType ? {} : { outletType }),
   };
 }
 
@@ -398,7 +402,7 @@ export default function AdminTargetsPage() {
   const handleSave = async (payload: UpsertPayload) => {
     setSaving(true);
     setSaveError('');
-    const res = await api.post<KpiDef>('/api/admin/kpis', toUpsertBody(payload));
+    const res = await api.post<KpiDef>('/api/admin/kpis', toUpsertBody(payload, editing ?? undefined));
     if (res.success) {
       setFormOpen(false);
       setEditing(null);

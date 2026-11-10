@@ -205,7 +205,8 @@ jobs:
   # ── Build & Deploy Frontend (staging) ────────────────────────────────────────
   deploy-frontend-staging:
     name: Deploy Frontend → gifsy-frontend-staging
-    needs: test
+    # Same ordering as prod: never ship a new frontend against an API deploy that failed.
+    needs: [test, deploy-api-staging]
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -1129,7 +1129,7 @@ function LiveSwitchRow({
         type="button"
         role="switch"
         aria-checked={enabled}
-        aria-label={`${enabled ? 'Disable' : 'Enable'} ${label}`}
+        aria-label={label}
         aria-busy={pending}
         disabled={disabled}
         onClick={onToggle}

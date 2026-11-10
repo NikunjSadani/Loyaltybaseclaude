@@ -5,6 +5,7 @@ import {
   IsEmail,
   IsEnum,
   IsInt,
+  IsObject,
   IsOptional,
   IsString,
   Matches,
@@ -41,6 +42,24 @@ export class UpsertSettingDto {
   @IsOptional()
   @IsString()
   description?: string;
+}
+
+/**
+ * DTO for PUT /v1/admin/settings/otp-templates (B11, GIFSY_ADMIN-only).
+ *   clientId — the tenant the card LOADED (GET returns it). The server rejects a mismatch with the
+ *              caller's current (assumed) tenant with 409, so a save can never land on a brand that was
+ *              switched in another tab after the card loaded.
+ *   changes  — ONLY the purposes the operator edited ({ login?, redemptionSelf?, kycConsent?,
+ *              redemptionSales? }); merged server-side onto the freshly-read STORED row, so untouched
+ *              purposes can never be blanked. Values are strictly validated in the service.
+ */
+export class SaveOtpTemplatesDto {
+  @IsString()
+  @MinLength(1)
+  clientId!: string;
+
+  @IsObject()
+  changes!: Record<string, unknown>;
 }
 
 /**

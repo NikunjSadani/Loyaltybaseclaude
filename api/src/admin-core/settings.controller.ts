@@ -4,6 +4,7 @@ import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decor
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import {
+  SaveOtpTemplatesDto,
   SetHolidaysDto,
   SetPointsExpiryDto,
   SetReportRecipientsDto,
@@ -40,6 +41,24 @@ export class AdminSettingsController {
   @RequirePermission('tenancy:write_finance')
   upsert(@CurrentUser() user: JwtPayload, @Body() dto: UpsertSettingDto) {
     return this.svc.upsertSetting(user, dto);
+  }
+
+  /**
+   * GET/PUT /v1/admin/settings/otp-templates — per-tenant OTP SMS templates (B11). GIFSY_ADMIN-ONLY:
+   * deliberately NO @RequirePermission, so a GIFSY_STAFF (whose only gate is a held permission) can
+   * never reach these routes — same owner-only posture as tdsStatutory / notificationTemplates /
+   * pointsEngine. The generic PUT above is fenced off for the `otpTemplates` key at the data boundary.
+   */
+  @Get('otp-templates')
+  @Roles('GIFSY_ADMIN')
+  getOtpTemplates(@CurrentUser() user: JwtPayload) {
+    return this.svc.getOtpTemplates(user);
+  }
+
+  @Put('otp-templates')
+  @Roles('GIFSY_ADMIN')
+  saveOtpTemplates(@CurrentUser() user: JwtPayload, @Body() dto: SaveOtpTemplatesDto) {
+    return this.svc.saveOtpTemplates(user, dto);
   }
 
   @Get('config')

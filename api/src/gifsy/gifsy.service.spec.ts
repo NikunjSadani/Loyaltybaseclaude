@@ -553,6 +553,23 @@ describe('GifsyService', () => {
       expect(mockPrisma.client.update).not.toHaveBeenCalled();
     });
 
+    it('L3: a non-boolean value for a known module/behaviour flag → 400 (a string "false" would read as ON)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: {},
+      });
+      for (const features of [{ outletMasterGeo: 'false' }, { hubbleVoucherEnabled: 1 }, { walletModule: null }]) {
+        await expect(
+          service.updateClient(gifsy, 'bajaj', { features } as never),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      }
+      await expect(
+        service.createClient(gifsy, { slug: 'newco', internalName: 'N', features: { soDeclarationKyc: 'yes' } } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.client.update).not.toHaveBeenCalled();
+      expect(mockPrisma.client.create).not.toHaveBeenCalled();
+    });
+
     it('B3: a partial partnerApp PATCH (showLeaderboard only) keeps the stored sibling tab keys', async () => {
       mockPrisma.client.findFirst.mockResolvedValue({
         id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),

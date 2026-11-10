@@ -88,6 +88,8 @@ describe('Behaviour flags (B2)', () => {
     const row = await screen.findByTestId('behaviour-flag-outletMasterGeo');
     const toggle = within(row).getByRole('switch');
     expect(toggle).toHaveAttribute('aria-checked', 'false');
+    // L4: a plain name — state is carried by aria-checked, not baked into the label.
+    expect(toggle).toHaveAttribute('aria-label', 'Outlet master Lat/Long + 200 m geo-fence');
     fireEvent.click(toggle);
 
     await waitFor(() => expect(patchSpy).toHaveBeenCalledTimes(1));
