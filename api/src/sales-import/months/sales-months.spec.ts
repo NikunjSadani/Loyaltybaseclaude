@@ -14,6 +14,7 @@ import { SalesImportApplyController } from '../sales-import-apply.controller';
 import { REBUILD_PRODUCT_LIST_STATEMENT_TIMEOUT_MS, REBUILD_PRODUCT_LIST_TX_TIMEOUT_MS, SalesMonthsService } from './sales-months.service';
 import { SalesMonthClosedGuard } from './sales-month-closed.guard';
 import { shiftMonthKey } from './month-state';
+import { SALES_MONTH_HISTORY_RETENTION_YEARS } from '../sales-import.contract';
 
 const CUR = currentMonthKey();
 const PREV = shiftMonthKey(CUR, -1);
@@ -353,7 +354,7 @@ describe('Rebuild product list (§10c) + productListCurrent', () => {
     expect(missing[1].productListCurrent).toBe(false);
   });
 
-  function rebuildDb(header: Record<string, unknown> | null, opts: { closed?: boolean; fail?: Error } = {}) {
+  function rebuildDb(header: Record<string, unknown> | null, opts: { closed?: boolean; fail?: Error; purgedMeanwhile?: boolean } = {}) {
     const d = db(opts.closed ? [{ month: OLD, state: 'CLOSED', closedAt: AT, closedById: 'ca', lastAppliedAt: AT, lastAppliedImportId: 'imp9' }] : []);
     const order: string[] = [];
     d.$executeRawUnsafe = jest.fn(async (s: string) => { order.push(s); return 0; });
@@ -364,7 +365,7 @@ describe('Rebuild product list (§10c) + productListCurrent', () => {
       return 42;
     });
     d.salesMonthHistorySet.findUnique = jest.fn(async () => header);
-    d.salesMonthHistorySet.update = jest.fn(async (a: unknown) => { order.push('stamp'); return a; });
+    d.salesMonthHistorySet.updateMany = jest.fn(async () => { order.push('stamp'); return { count: opts.purgedMeanwhile ? 0 : 1 }; });
     // the row is re-read AFTER the rebuild: the header then carries the stamp written by update()
     d.salesMonthHistorySet.findMany = jest.fn(async () => (header ? [HIST({ month: OLD })] : []));
     d.auditLog.create = jest.fn(async () => { order.push('audit'); return {}; });
@@ -381,8 +382,8 @@ describe('Rebuild product list (§10c) + productListCurrent', () => {
     const insert = d.$executeRaw.mock.calls.map((c: unknown[]) => c[0] as Prisma.Sql).find((q: Prisma.Sql) => /INSERT INTO "sales_month_history_combos"/.test(q.sql))!;
     expect(insert.sql).toMatch(/FROM "sales_month_histories" h/);
     expect(insert.values).toEqual(['imp9', AT.toISOString(), 't1', OLD]);
-    expect(d.salesMonthHistorySet.update).toHaveBeenCalledWith({
-      where: { clientId_month: { clientId: 't1', month: OLD } }, data: { combosSourceImportId: 'imp9', combosAppliedAt: AT },
+    expect(d.salesMonthHistorySet.updateMany).toHaveBeenCalledWith({
+      where: { clientId: 't1', month: OLD }, data: { combosSourceImportId: 'imp9', combosAppliedAt: AT },
     });
     expect(d.auditLog.create.mock.calls[0][0].data).toEqual(expect.objectContaining({
       entityType: 'SALES_MONTH', entityId: `t1:${OLD}`, actorId: 'ca',
@@ -403,6 +404,17 @@ describe('Rebuild product list (§10c) + productListCurrent', () => {
     await expect(new SalesMonthsService(rebuildDb(null).d as never).rebuildProductList(clientAdmin, '2026-13')).rejects.toBeInstanceOf(BadRequestException);
     const busy = rebuildDb({ sourceImportId: 'imp9', appliedAt: AT }, { fail: new Error('canceling statement due to statement timeout') });
     await expect(new SalesMonthsService(busy.d as never).rebuildProductList(clientAdmin, PREV)).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('L1: a month below the 10-year retention cutoff → 404 before any lock; a header purged meanwhile → 404 (rolled back)', async () => {
+    const cutoff = shiftMonthKey(CUR, -12 * SALES_MONTH_HISTORY_RETENTION_YEARS);
+    const old = rebuildDb({ sourceImportId: 'imp9', appliedAt: AT });
+    await expect(new SalesMonthsService(old.d as never).rebuildProductList(clientAdmin, shiftMonthKey(cutoff, -1))).rejects.toBeInstanceOf(NotFoundException);
+    expect(old.d.$transaction).not.toHaveBeenCalled();
+    const raced = rebuildDb({ sourceImportId: 'imp9', appliedAt: AT }, { purgedMeanwhile: true });
+    await expect(new SalesMonthsService(raced.d as never).rebuildProductList(clientAdmin, PREV)).rejects.toBeInstanceOf(NotFoundException);
+    expect(raced.order).toContain('stamp');
+    expect(raced.order).not.toContain('audit'); // thrown before the audit → the whole tx rolls back
   });
 
   it('controller: targets:upload, gate first (flag off → 403)', async () => {

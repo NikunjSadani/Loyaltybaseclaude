@@ -4,10 +4,12 @@ import { sqlUtc } from '../sql-time';
 /**
  * The per-month combos summary (plan §10c): sales_month_history_combos, one row per (tenant, month, product combo). The
  * month's set header (sales_month_history_sets) records which history set the summary was built from
- * (`combosSourceImportId` + `combosAppliedAt`), written by the apply in the SAME transaction as the summary.
- *   - WRITE: only the apply, right after the history INSERT (insertMonthCombosSql + the header stamp). There is no
- *     background rebuild (lead decision 2026-11-10): a summary can only be missing / stale if an OLDER revision applied
- *     the month during the deploy that introduced this table; re-applying the month rebuilds it.
+ * (`combosSourceImportId` + `combosAppliedAt`), written in the SAME transaction as the summary.
+ *   - WRITE (two writers, both under the month lock): (1) the apply, right after the history INSERT; (2) the explicit
+ *     "Rebuild product list" action — POST admin/sales-months/:month/rebuild-product-list (SalesMonthsService
+ *     .rebuildProductList), which rebuilds the summary from the stored lines and re-stamps the header (no figures change).
+ *     There is no background rebuild (lead decision 2026-11-10): a summary can only be missing / stale if an OLDER
+ *     revision applied the month during the deploy that introduced this table.
  *   - READ: GET history-combos — strictly read-only (classifyMonthSummaries decides summary vs stored lines).
  */
 

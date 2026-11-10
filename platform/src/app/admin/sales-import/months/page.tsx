@@ -10,7 +10,8 @@
  * month shows the action disabled ("Gifsy must reopen this month first").
  * "Rebuild product list" (targets:upload, §10c): a month with stored history whose product list (the KPI picker's
  * "Stored month(s)" source) is not current (productListCurrent false) — OPEN or CLOSED; it changes no figures.
- * `?month=YYYY-MM` (link from the KPI picker) makes sure that month is in the list (read after mount, never in render).
+ * `?from=YYYY-MM[&to=YYYY-MM]` (link from the KPI picker) lists that range so every month it names is shown (read after
+ * mount, never in render; `to` is clamped at the current IST month).
  */
 import React, { useCallback, useEffect, useState } from 'react';
 import { Calculator, Lock, LockOpen, RefreshCw, RotateCcw } from 'lucide-react';
@@ -38,10 +39,14 @@ export default function SalesMonthsPage() {
   useEffect(() => {
     let cancelled = false;
     setError(null);
-    // ?month= from the KPI picker: list from that month on, so an older month is shown too (window read in the effect).
-    const focus = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('month') : null;
-    const from = focus && /^\d{4}-(0[1-9]|1[0-2])$/.test(focus) ? focus : undefined;
-    (from ? salesImportApi.months(from) : salesImportApi.months()).then((r) => {
+    // ?from=&to= from the KPI picker: list that range so every month it names is shown (window / clock read in the effect).
+    const qs = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+    const valid = (m: string | null | undefined) => (m && /^\d{4}-(0[1-9]|1[0-2])$/.test(m) ? m : undefined);
+    const from = valid(qs?.get('from'));
+    const nowIst = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 7);
+    const rawTo = valid(qs?.get('to'));
+    const to = rawTo && from ? (rawTo > nowIst ? nowIst : rawTo) : undefined;
+    (from ? (to && to >= from ? salesImportApi.months(from, to) : salesImportApi.months(from)) : salesImportApi.months()).then((r) => {
       if (cancelled) return;
       if (r.success) setRows([...r.data].sort((a, b) => b.month.localeCompare(a.month)));
       else setError(r.error);

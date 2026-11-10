@@ -41,6 +41,26 @@ type AddFn = (raw: Array<Record<string, unknown>>, opts?: NormalizeOptions) => v
 type ComboList = Pick<SalesImportCombos, 'dimensionValues' | 'dimensionCombos'>;
 type Source = 'latest' | 'history';
 
+/** The Months page lists at most this many months per request (backend MAX_MONTH_RANGE). */
+export const MONTHS_PAGE_MAX_RANGE = 36;
+
+const monthIndex = (m: string) => Number(m.slice(0, 4)) * 12 + Number(m.slice(5, 7)) - 1;
+
+/**
+ * Link to the Months page showing EVERY unavailable month (so each one's "Rebuild product list" button is visible):
+ * from the oldest to the newest. A span longer than the page's range links from the newest one on. (Stored months are
+ * never in the future, and the Months page also clamps `to` at the current month.)
+ */
+export function monthsPageLinkFor(unavailableMonths: string[]): string {
+  const sorted = [...unavailableMonths].sort();
+  const oldest = sorted[0];
+  const newest = sorted[sorted.length - 1];
+  const q = monthIndex(newest) - monthIndex(oldest) + 1 > MONTHS_PAGE_MAX_RANGE
+    ? `from=${encodeURIComponent(newest)}`
+    : `from=${encodeURIComponent(oldest)}&to=${encodeURIComponent(newest)}`;
+  return `/admin/sales-import/months?${q}`;
+}
+
 /** A change of the stored-months select waits this long before it is fetched (quick changes send one request). */
 export const HISTORY_SELECT_DEBOUNCE_MS = 300;
 
@@ -287,7 +307,7 @@ export function ProductSetBuilder({
           {history.data.unavailableMonths.length === 1 ? 'The product list for ' : 'The product lists for '}
           {history.data.unavailableMonths.map(monthLabel).join(', ')}{' '}
           {history.data.unavailableMonths.length === 1 ? "isn't" : "aren't"} available — open{' '}
-          <Link href={`/admin/sales-import/months?month=${encodeURIComponent(history.data.unavailableMonths[0])}`} className="underline font-medium">Months</Link>
+          <Link href={monthsPageLinkFor(history.data.unavailableMonths)} className="underline font-medium">Months</Link>
           {' '}and choose {"'Rebuild product list'"} {history.data.unavailableMonths.length === 1 ? '' : 'for each '}(it doesn&apos;t
           change any figures).
           {history.data.months.length > history.data.unavailableMonths.length

@@ -19,7 +19,7 @@ vi.mock('next/link', () => ({
 }));
 
 import { KpiEditor } from '../settings/_components/kpi-editor';
-import { HISTORY_SELECT_DEBOUNCE_MS } from '../settings/_components/product-set-builder';
+import { HISTORY_SELECT_DEBOUNCE_MS, MONTHS_PAGE_MAX_RANGE, monthsPageLinkFor } from '../settings/_components/product-set-builder';
 
 const MAPPING: SalesColumnMapping = {
   sheetName: null, headerRow: 'auto', outletCode: 'CUST', outletName: null, invoiceDate: 'DATE', amount: 'AMT',
@@ -170,7 +170,7 @@ describe('product set builder — stored month history source', () => {
       expect(note).toHaveTextContent(
         "The product list for September 2026 isn't available — open Months and choose 'Rebuild product list' (it doesn't change any figures). The list below leaves it out.",
       );
-      expect(within(note).getByRole('link', { name: 'Months' })).toHaveAttribute('href', '/admin/sales-import/months?month=2026-09');
+      expect(within(note).getByRole('link', { name: 'Months' })).toHaveAttribute('href', '/admin/sales-import/months?from=2026-09&to=2026-09');
       expect(note).not.toHaveTextContent(/refresh|minutes|re-apply/i);
       // L1: plural wording
       apiMock.historyCombos.mockResolvedValue(ok({ ...HISTORY, months: ['2026-08', '2026-09', '2026-10'], unavailableMonths: ['2026-08', '2026-09'] }));
@@ -178,7 +178,7 @@ describe('product set builder — stored month history source', () => {
       await waitFor(() => expect(screen.getByTestId('product-set-unavailable')).toHaveTextContent(
         "The product lists for August 2026, September 2026 aren't available — open Months and choose 'Rebuild product list' for each (it doesn't change any figures). The list below leaves them out.",
       ));
-      expect(within(screen.getByTestId('product-set-unavailable')).getByRole('link', { name: 'Months' })).toHaveAttribute('href', '/admin/sales-import/months?month=2026-08');
+      expect(within(screen.getByTestId('product-set-unavailable')).getByRole('link', { name: 'Months' })).toHaveAttribute('href', '/admin/sales-import/months?from=2026-08&to=2026-09');
       // nothing polls: the list is fetched again only when the user changes something
       const calls = apiMock.historyCombos.mock.calls.length;
       await act(async () => { vi.advanceTimersByTime(10 * 60_000); });
@@ -226,5 +226,15 @@ describe('product set builder — stored month history source', () => {
   it('read-only viewers cannot switch the source (the editor fieldset is disabled)', () => {
     renderEditor({ canEdit: false, initial: { ...NEW, id: 'k1' } });
     expect(screen.getByRole('radio', { name: 'Stored month(s)' })).toBeDisabled();
+  });
+});
+
+describe('monthsPageLinkFor (L3: every unavailable month visible on the Months page)', () => {
+  it('from the oldest to the newest; a span longer than the page range links from the newest', () => {
+    expect(monthsPageLinkFor(['2026-09'])).toBe('/admin/sales-import/months?from=2026-09&to=2026-09');
+    expect(monthsPageLinkFor(['2026-09', '2025-02', '2026-01'])).toBe('/admin/sales-import/months?from=2025-02&to=2026-09');
+    expect(MONTHS_PAGE_MAX_RANGE).toBe(36);
+    expect(monthsPageLinkFor(['2023-10', '2026-09'])).toBe('/admin/sales-import/months?from=2023-10&to=2026-09'); // exactly 36
+    expect(monthsPageLinkFor(['2023-09', '2026-09'])).toBe('/admin/sales-import/months?from=2026-09'); // 37 → newest
   });
 });

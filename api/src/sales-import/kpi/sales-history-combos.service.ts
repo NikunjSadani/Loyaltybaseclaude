@@ -30,7 +30,8 @@ export const HISTORY_COMBOS_TX_TIMEOUT_MS = 45_000;
 /**
  * Months without a CURRENT summary (missing / stale) are read from their stored lines only while their line rows add up
  * to at most this many (a cap on the SUM across those months, newest first): more would not fit the statement timeout,
- * so the rest are listed in `unavailableMonths` with no combos (re-applying the month rebuilds its summary).
+ * so the rest are listed in `unavailableMonths` with no combos (the Months page's "Rebuild product list" action —
+ * POST admin/sales-months/:month/rebuild-product-list — rebuilds their summary).
  */
 export const HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS = 50_000;
 /** 503 copy (re-check M2: accurate for both causes). */
@@ -75,7 +76,8 @@ function sourceRows(clientId: string, summaryMonths: string[], lineMonths: strin
  * by |₹|). The summary state comes from the set header's stamp: a CURRENT summary is read; a month whose summary is
  * missing or from another set (only if an older revision applied it during the deploy introducing the summary) is read
  * from its stored lines while those months total ≤ HISTORY_COMBOS_LINE_FALLBACK_MAX_ROWS rows, newest first; the rest are
- * returned in `unavailableMonths` (no combos — the FE says to re-apply the month). There is no background rebuild.
+ * returned in `unavailableMonths` (no combos — the FE says: "The product list for <month> isn't available — open Months
+ * and choose 'Rebuild product list' (it doesn't change any figures)."). There is no background rebuild.
  */
 @Injectable()
 export class SalesHistoryCombosService {

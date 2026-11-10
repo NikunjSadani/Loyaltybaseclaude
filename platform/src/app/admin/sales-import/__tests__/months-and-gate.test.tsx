@@ -323,13 +323,31 @@ describe('months page — Rebuild product list (§10c)', () => {
     expect(screen.queryByTestId('rebuild-product-list-2026-09')).not.toBeInTheDocument();
   });
 
-  it('?month=YYYY-MM (link from the KPI picker) lists from that month on, so an older month is shown', async () => {
-    window.history.pushState({}, '', '/admin/sales-import/months?month=2025-12');
+  it('?from=&to= (link from the KPI picker) lists exactly that range so every named month is shown; to is clamped at now', async () => {
+    window.history.pushState({}, '', '/admin/sales-import/months?from=2024-03&to=2025-12');
     try {
-      apiMock.months.mockResolvedValue(ok([row({ month: '2025-12', hasHistory: true, productListCurrent: false })]));
+      apiMock.months.mockResolvedValue(ok([row({ month: '2025-12', hasHistory: true, productListCurrent: false }), row({ month: '2024-03', hasHistory: true, productListCurrent: false })]));
+      await act(async () => { render(<MonthsPage />); });
+      expect(apiMock.months).toHaveBeenCalledWith('2024-03', '2025-12');
+      expect(screen.getByTestId('rebuild-product-list-2025-12')).toBeInTheDocument();
+      expect(screen.getByTestId('rebuild-product-list-2024-03')).toBeInTheDocument();
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+    const nowIst = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 7);
+    window.history.pushState({}, '', '/admin/sales-import/months?from=2025-12&to=2999-01');
+    try {
+      apiMock.months.mockClear();
+      await act(async () => { render(<MonthsPage />); });
+      expect(apiMock.months).toHaveBeenCalledWith('2025-12', nowIst);
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+    window.history.pushState({}, '', '/admin/sales-import/months?from=2025-12'); // from only (span too long)
+    try {
+      apiMock.months.mockClear();
       await act(async () => { render(<MonthsPage />); });
       expect(apiMock.months).toHaveBeenCalledWith('2025-12');
-      expect(screen.getByTestId('rebuild-product-list-2025-12')).toBeInTheDocument();
     } finally {
       window.history.pushState({}, '', '/');
     }

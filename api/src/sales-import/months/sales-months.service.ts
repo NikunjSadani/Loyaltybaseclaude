@@ -10,6 +10,7 @@ import type {
   SalesMonthReopenResult,
   SalesMonthRow,
 } from '../sales-import.contract';
+import { SALES_MONTH_HISTORY_RETENTION_YEARS } from '../sales-import.contract';
 import { classifyMonthSummaries, insertMonthCombosSql } from '../kpi/month-combos';
 import { isMonthKey, monthLabel, resolveMonthState, shiftMonthKey } from './month-state';
 
@@ -217,6 +218,10 @@ export class SalesMonthsService {
    */
   async rebuildProductList(user: JwtPayload, month: string): Promise<SalesMonthRebuildProductListResult> {
     if (!isMonthKey(month)) throw new BadRequestException('month must be YYYY-MM.');
+    // A month past the 10-year retention is being deleted by the sweep: nothing to rebuild (the same cutoff as the reader).
+    if (month < shiftMonthKey(currentMonthKey(), -12 * SALES_MONTH_HISTORY_RETENTION_YEARS)) {
+      throw new NotFoundException(`${monthLabel(month)} has no stored sales lines.`);
+    }
     const clientId = user.clientId;
     try {
       await this.prisma.$transaction(
@@ -231,10 +236,12 @@ export class SalesMonthsService {
           if (!header) throw new NotFoundException(`${monthLabel(month)} has no stored sales lines.`);
           await tx.$executeRaw(Prisma.sql`DELETE FROM "sales_month_history_combos" WHERE "clientId" = ${clientId} AND "month" = ${month}`);
           const combos = await tx.$executeRaw(insertMonthCombosSql(clientId, month, header.sourceImportId, header.appliedAt));
-          await tx.salesMonthHistorySet.update({
-            where: { clientId_month: { clientId, month } },
+          // updateMany: a retention purge between the read and here leaves no header → 404, and the tx rolls back.
+          const stamped = await tx.salesMonthHistorySet.updateMany({
+            where: { clientId, month },
             data: { combosSourceImportId: header.sourceImportId, combosAppliedAt: header.appliedAt },
           });
+          if (stamped.count === 0) throw new NotFoundException(`${monthLabel(month)} has no stored sales lines.`);
           await tx.auditLog.create({
             data: {
               action: 'UPDATE',
