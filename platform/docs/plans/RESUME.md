@@ -88,7 +88,21 @@ UPI money fixes (code on `backup/wip-20261105-batt`). _(The React #418 hydration
   (metadata only) that `HUBBLE_CLIENT_ID`, `HUBBLE_CLIENT_SECRET`, `HUBBLE_WEBHOOK_SECRET` exist with an ENABLED latest version, which needs
   `roles/secretmanager.viewer` on `gifsy-deployer` (terraform/iam.tf; one-time gcloud grant in BAJAJ-PROD-GO-LIVE-CHECKLIST.md F3 runbook step 0).
   Missing either → the deploy stops at step 1 BEFORE the image build + migrations, prod untouched (frontend now `needs: deploy-api`). The owner
-  creates the 3 Hubble secrets themselves (values never in chat). The staging deploy has no such preflight.
+  creates the 3 Hubble secrets themselves (values never in chat). The staging deploy (on `feat/sales-import`) now has the same
+  metadata-only preflight for `SALES_IMPORT_DRAIN_SECRET_STAGING` as its first step (before build + migrate) — same viewer grant.
+- **⚠️ Sales Import in PROD needs infra the owner approves at release:** prod worker Cloud Run Job + API env
+  (`SALES_IMPORT_RUNNER=job`, `SALES_IMPORT_JOB`, `GCP_PROJECT`) + Secret Manager `SALES_IMPORT_DRAIN_SECRET` (+ add it to the
+  prod preflight) + `run.jobsExecutor` binding + Cloud Scheduler drain. `deploy.yml` has none of it yet. Safety net (integration
+  audit M1, on `feat/sales-import`): while the runner is not configured (`SALES_IMPORT_RUNNER` unset/`none`, or `job` without
+  `SALES_IMPORT_JOB`+project; `inline` counts as configured for local/dev) the API refuses to switch `features.salesImport` ON
+  (console PATCH + new-client create → 400 "Sales Import can't be switched on here yet: the background processor isn't set up in
+  this environment.", shown next to the console toggle) and refuses upload / complete / reprocess for a tenant already ON.
+- **Sales Import integration-audit follow-ups (2026-11-10, `feat/sales-import`):** L4 — a KPI whose `KpiDef.outletType` is set is
+  written by apply / recalculate / the tester ONLY for outlets of that type (intersected with the definition's outlet types;
+  other outlets get no key — blank, not 0), the type is part of `definitionsHash`, and the KPI editor warns when the two scopes
+  disagree. L3 — `wipe-tenant-data.ts` wipes the 9 sales-import tables (GCS `sales-imports/<clientId>/` is NOT removed by the
+  script — PROD-DATA-WIPE.md §1). L5 (not fixed, note only): the sales-import migration folder names are dated 2026-11-10..12,
+  i.e. partly future-dated relative to the day they were written; harmless for `migrate deploy` ordering, leave as is.
 - Owner preferences captured this session: implementation plans in the "zero-context engineer, bite-sized TDD tasks,
   exact files, frequent commits" format; ask ONE multiple-choice question per message; Claude orchestrates (agents build,
   Claude gates + independent review + runtime-verify).
