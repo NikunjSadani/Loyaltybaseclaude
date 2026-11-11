@@ -25,6 +25,8 @@ interface ApiOrder {
   redemptionMode?: string | null;          // GIFT_CARD | VOUCHER | PHYSICAL_GIFT | BANK_TRANSFER | UPI
   totalPointsCost: number;
   voucherCode?: string | null;
+  /** Card PIN for a card number + PIN gift card (member's own order only). */
+  voucherPin?: string | null;
   voucherProvider?: string | null;
   trackingNumber?: string | null;
   trackingUrl?: string | null;
@@ -49,6 +51,7 @@ interface Order {
   status: string;
   redemptionMode?: string | null;
   voucherCode?: string | null;
+  voucherPin?: string | null;
   voucherProvider?: string | null;
   trackingNumber?: string | null;
   trackingUrl?: string | null;
@@ -85,6 +88,7 @@ function mapApiOrder(o: ApiOrder): Order {
     status:          o.status,
     redemptionMode:  o.redemptionMode ?? null,
     voucherCode:     o.voucherCode ?? null,
+    voucherPin:      o.voucherPin?.trim() ? o.voucherPin : null,
     voucherProvider: o.voucherProvider ?? null,
     trackingNumber:  o.trackingNumber ?? null,
     trackingUrl:     o.trackingUrl ?? null,
@@ -122,12 +126,12 @@ function brandLabel(rewardName: string): string {
 
 /* ─── Voucher code block with copy-to-clipboard ───────────────────────────── */
 
-function VoucherCodeBlock({ code, brand }: { code: string; brand?: string | null }) {
+function CopyButton({ value, testId, label }: { value: string; testId: string; label: string }) {
   const [copied, setCopied] = useState(false);
 
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(code);
+      await navigator.clipboard.writeText(value);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -136,28 +140,61 @@ function VoucherCodeBlock({ code, brand }: { code: string; brand?: string | null
   };
 
   return (
+    <button
+      type="button"
+      data-testid={testId}
+      aria-label={label}
+      onClick={copy}
+      className="flex items-center gap-1 shrink-0 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-white border border-emerald-200 text-emerald-700 hover:bg-emerald-100 transition-colors"
+    >
+      {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+      {copied ? 'Copied' : 'Copy'}
+    </button>
+  );
+}
+
+/**
+ * The member's voucher. A number-only / PIN-only card shows one "Voucher Code" row (unchanged); a
+ * card number + PIN gift card shows "Card no." and "PIN", each with its own copy button.
+ */
+function VoucherCodeBlock({ code, pin, brand }: { code: string; pin?: string | null; brand?: string | null }) {
+  return (
     <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2.5">
       <div className="flex items-center gap-1.5 mb-1.5">
         <Ticket className="h-3.5 w-3.5 text-emerald-700" />
         <p className="text-[10px] font-semibold text-emerald-700 uppercase tracking-wide">
-          Voucher Code{brand ? ` · ${brand}` : ''}
+          {pin ? 'Gift Card' : 'Voucher Code'}{brand ? ` · ${brand}` : ''}
         </p>
       </div>
-      <div className="flex items-center gap-2">
-        <code data-testid="voucher-code" className="flex-1 font-mono text-sm font-bold text-gray-900 break-all">
-          {code}
-        </code>
-        <button
-          type="button"
-          data-testid="copy-voucher-btn"
-          aria-label="Copy voucher code"
-          onClick={copy}
-          className="flex items-center gap-1 shrink-0 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-white border border-emerald-200 text-emerald-700 hover:bg-emerald-100 transition-colors"
-        >
-          {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-          {copied ? 'Copied' : 'Copy'}
-        </button>
-      </div>
+      {pin ? (
+        <div className="space-y-2">
+          <div>
+            <p className="text-[10px] font-medium text-emerald-700/80 mb-0.5">Card no.</p>
+            <div className="flex items-center gap-2">
+              <code data-testid="voucher-code" className="flex-1 font-mono text-sm font-bold text-gray-900 break-all">
+                {code}
+              </code>
+              <CopyButton value={code} testId="copy-voucher-btn" label="Copy card number" />
+            </div>
+          </div>
+          <div>
+            <p className="text-[10px] font-medium text-emerald-700/80 mb-0.5">PIN</p>
+            <div className="flex items-center gap-2">
+              <code data-testid="voucher-pin" className="flex-1 font-mono text-sm font-bold text-gray-900 break-all">
+                {pin}
+              </code>
+              <CopyButton value={pin} testId="copy-voucher-pin-btn" label="Copy PIN" />
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <code data-testid="voucher-code" className="flex-1 font-mono text-sm font-bold text-gray-900 break-all">
+            {code}
+          </code>
+          <CopyButton value={code} testId="copy-voucher-btn" label="Copy voucher code" />
+        </div>
+      )}
     </div>
   );
 }
@@ -348,7 +385,7 @@ export default function OrdersPage() {
 
                   {/* Voucher code (GIFT_CARD / VOUCHER, once confirmed) */}
                   {showVoucher && order.voucherCode && (
-                    <VoucherCodeBlock code={order.voucherCode} brand={brandLabel(order.rewardName)} />
+                    <VoucherCodeBlock code={order.voucherCode} pin={order.voucherPin} brand={brandLabel(order.rewardName)} />
                   )}
 
                   {/* Physical-gift tracking (member-safe: courier name + tracking only) */}

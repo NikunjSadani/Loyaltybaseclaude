@@ -5,18 +5,19 @@
  * amount"); this is the matching UX so a decimal never even reaches the server.
  *
  * Rules (the field never displays a decimal, and "750.5" / "750,5" can never become "7505"):
- *   - DECIMAL MARK: "." always; "," whenever it can't be a thousands separator — i.e. it is NOT
- *     followed by a digit group (3 digits, or the Indian 2-digit lakh/crore group followed by
- *     another ","). So a "," typed at the END of the value is a decimal mark (we can't know a
- *     group will follow), as is "750,5"; "1,250" and "1,25,000" pasted are separators.
- *   - Inserting text (typed key, Android beforeinput, paste) splices it at the selection and
- *     keeps only the whole-rupee part: "1.5" over a selected "500" → "1"; paste "750,5" → "750".
- *   - FRACTION STATE: after a decimal mark is entered at the END of a non-empty value, the
- *     digits typed next are fractional and are dropped. It works on desktop (keydown) and on
- *     Android on-screen keyboards (keydown "Unidentified" → beforeinput data, and a final
- *     change-event guard). It ends on any delete (beforeinput inputType "delete*", Backspace /
- *     Delete, or a change that isn't a pure digit append), a cursor move, paste, or blur. It
- *     never starts on an empty field.
+ *   - "." is ALWAYS a decimal mark and is blocked as typed: it and the digits typed after it are
+ *     dropped (FRACTION STATE — desktop keydown, Android beforeinput / "Unidentified" keydown, and
+ *     a final change-event guard). The fraction state ends on any delete, a cursor move, paste or
+ *     blur, and never starts on an empty field.
+ *   - "," WHILE TYPING is kept as-is (never truncates): "1," stays "1,", then "1,250" stays
+ *     "1,250" — we can't know yet whether a digit group will follow. It is INTERPRETED on blur /
+ *     commit (Enter) and on paste: a "," that forms valid thousands / Indian grouping is a
+ *     separator ("1,250" → 1250, "1,25,000" → 125000); any other "," is a decimal mark → the
+ *     digits after it are dropped ("750,5" → 750). A caller that reads the value while the field
+ *     may still be focused (submit, live previews) MUST read it through wholeRupeeAmount /
+ *     wholeRupeesFromText, which apply the same interpretation.
+ *   - Pasted text is spliced at the selection and interpreted at once: "1.5" over a selected
+ *     "500" → "1"; paste "750,5" → "750"; paste "1,25,000" → "125000".
  *   - "e" "E" "+" "-" are refused.
  */
 
@@ -47,6 +48,24 @@ export function wholeRupeesFromText(text: string): string {
   return (brk === -1 ? t : t.slice(0, brk)).replace(/\D/g, '');
 }
 
+/**
+ * The committed whole-rupee NUMBER of a field value (0 when empty). Use wherever a caller reads
+ * the amount — a still-focused field may hold "1,250" (→ 1250) or "750,5" (→ 750).
+ */
+export function wholeRupeeAmount(text: string): number {
+  return parseInt(wholeRupeesFromText(text), 10) || 0;
+}
+
+/**
+ * The typing-time display: digits and "," only, truncated at the first "." (leading "," on an
+ * otherwise empty value dropped). Never interprets a ",".
+ */
+function typingDisplay(text: string): string {
+  const t = text ?? '';
+  const dot = t.indexOf('.');
+  return (dot === -1 ? t : t.slice(0, dot)).replace(/[^\d,]/g, '').replace(/^,+/, '');
+}
+
 const REFUSED_KEYS = new Set(['e', 'E', '+', '-']);
 const PASSIVE_KEYS = new Set(['Tab', 'Shift', 'Control', 'Alt', 'Meta', 'Enter', 'Unidentified', 'Process', 'CapsLock']);
 
@@ -58,32 +77,46 @@ type WrNode = HTMLInputElement & { __wrBeforeInput?: (ev: InputEvent) => void };
 
 /**
  * Props for a controlled whole-rupee <input>: spread onto the element and render `value`
- * yourself. `onValue` receives the sanitised digit string.
+ * yourself. `onValue` receives the field text — digits, plus (only while the user is still
+ * typing) any "," they typed. Blur / Enter commits it to plain digits. Read amounts through
+ * wholeRupeeAmount.
  */
 export function wholeRupeeInputProps(onValue: (digits: string) => void) {
-  const emit = (el: HTMLInputElement, digits: string) => {
-    el.dataset.last = digits;
-    onValue(digits);
+  const emit = (el: HTMLInputElement, display: string) => {
+    el.dataset.last = display;
+    onValue(display);
   };
 
   /**
-   * Splice `text` into the field at its selection and emit the whole-rupee result. If the
-   * insertion introduces a decimal break at the END of the resulting text (nothing after the
-   * inserted piece) and something remains, enter the fraction state.
+   * Splice `text` into the field at its selection. TYPED text keeps "," as-is; a "." truncates
+   * there and — when at the END of the result with something left — enters the fraction state.
+   * PASTED text is interpreted immediately (wholeRupeesFromText).
    */
-  const insert = (el: HTMLInputElement, text: string) => {
+  const insert = (el: HTMLInputElement, text: string, mode: 'type' | 'paste') => {
     const value = el.value;
     const start = el.selectionStart ?? value.length;
     const end = el.selectionEnd ?? value.length;
     const before = value.slice(0, start);
     const after = value.slice(end);
     const spliced = before + text + after;
-    const digits = wholeRupeesFromText(spliced);
-    const brk = decimalBreakIndex(spliced);
-    const breakInInsert = brk !== -1 && brk >= before.length && brk < before.length + text.length;
-    if (breakInInsert && after === '' && digits !== '') startFraction(el);
+    if (mode === 'paste') {
+      endFraction(el); // a paste never leaves the field waiting to swallow digits
+      emit(el, wholeRupeesFromText(spliced));
+      return;
+    }
+    const display = typingDisplay(spliced);
+    const dot = spliced.indexOf('.');
+    const dotInInsert = dot !== -1 && dot >= before.length && dot < before.length + text.length;
+    if (dotInInsert && after === '' && display !== '') startFraction(el);
     else endFraction(el);
-    emit(el, digits);
+    emit(el, display);
+  };
+
+  /** Blur / Enter: interpret every "," (separator vs decimal mark) → plain digits. */
+  const commit = (el: HTMLInputElement) => {
+    endFraction(el);
+    const committed = wholeRupeesFromText(el.value);
+    if (committed !== el.value) emit(el, committed);
   };
 
   const onNativeBeforeInput = (el: HTMLInputElement, ev: InputEvent) => {
@@ -91,17 +124,19 @@ export function wholeRupeeInputProps(onValue: (digits: string) => void) {
     if (inputType.startsWith('delete')) { endFraction(el); return; }
     const data = ev.data;
     if (typeof data !== 'string' || data === '') return;
-    if (/[.,]/.test(data)) {
+    if (inputType === 'insertFromPaste') {
       ev.preventDefault();
-      insert(el, data);
+      insert(el, data, 'paste');
+      return;
+    }
+    if (/[.,eE+-]/.test(data)) {
+      ev.preventDefault();
+      if (inFraction(el)) return;
+      const cleaned = data.replace(/[eE+-]/g, '');
+      if (cleaned) insert(el, cleaned, 'type');
       return;
     }
     if (inFraction(el) && /^\d+$/.test(data)) { ev.preventDefault(); return; }
-    if (/[eE+\-]/.test(data)) {
-      ev.preventDefault();
-      const digits = data.replace(/\D/g, '');
-      if (digits) insert(el, digits);
-    }
   };
 
   return {
@@ -113,13 +148,15 @@ export function wholeRupeeInputProps(onValue: (digits: string) => void) {
       const el = e.currentTarget;
       if (e.key === '.' || e.key === ',') {
         e.preventDefault();
-        insert(el, e.key);
+        if (inFraction(el)) return; // already swallowing a fraction
+        insert(el, e.key, 'type');
         return;
       }
       if (inFraction(el)) {
         if (/^\d$/.test(e.key)) { e.preventDefault(); return; }
         if (!PASSIVE_KEYS.has(e.key)) endFraction(el); // Backspace, Delete, arrows, Home/End…
       }
+      if (e.key === 'Enter') commit(el);
       if (REFUSED_KEYS.has(e.key)) e.preventDefault();
     },
     // Android / IME: keydown is "Unidentified", but the NATIVE beforeinput event carries the
@@ -134,36 +171,34 @@ export function wholeRupeeInputProps(onValue: (digits: string) => void) {
         el.addEventListener('beforeinput', (ev) => (el as WrNode).__wrBeforeInput?.(ev as InputEvent));
       }
     },
-    onBlur: (e: React.FocusEvent<HTMLInputElement>) => endFraction(e.currentTarget),
+    onBlur: (e: React.FocusEvent<HTMLInputElement>) => commit(e.currentTarget),
     onPaste: (e: React.ClipboardEvent<HTMLInputElement>) => {
       e.preventDefault();
-      const el = e.currentTarget;
-      insert(el, e.clipboardData.getData('text'));
-      endFraction(el); // a paste never leaves the field waiting to swallow digits
+      insert(e.currentTarget, e.clipboardData.getData('text'), 'paste');
     },
     // Last line of defence (any input path the handlers above didn't see).
     onChange: (e: React.ChangeEvent<HTMLInputElement>) => {
       const el = e.target;
       const raw = el.value;
       const last = el.dataset.last ?? '';
-      const brk = decimalBreakIndex(raw);
-      if (brk !== -1) {
-        const digits = wholeRupeesFromText(raw);
-        // The mark was typed at the end → swallow the fraction that follows.
-        if (brk === raw.length - 1 && digits !== '') startFraction(el);
+      const dot = raw.indexOf('.');
+      if (dot !== -1) {
+        const display = typingDisplay(raw);
+        // The "." was typed at the end → swallow the fraction that follows.
+        if (dot === raw.length - 1 && display !== '') startFraction(el);
         else endFraction(el);
-        emit(el, digits);
+        emit(el, display);
         return;
       }
       if (inFraction(el)) {
-        // Pure digit APPEND after a decimal mark → those are fractional digits: drop them.
-        if (raw.length > last.length && raw.startsWith(last) && /^\d+$/.test(raw.slice(last.length))) {
+        // Pure digit / "," APPEND after a "." → fractional: drop it.
+        if (raw.length > last.length && raw.startsWith(last) && /^[\d,]+$/.test(raw.slice(last.length))) {
           emit(el, last);
           return;
         }
         endFraction(el);
       }
-      emit(el, wholeRupeesFromText(raw));
+      emit(el, typingDisplay(raw));
     },
   };
 }

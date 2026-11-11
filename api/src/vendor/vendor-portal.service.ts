@@ -55,6 +55,8 @@ const VENDOR_ORDER_SELECT = {
   trackingNumber: true,
   trackingUrl: true,
   voucherCode: true,
+  // Same visibility as voucherCode: the vendor fulfils (and may have entered) the card.
+  voucherPin: true,
   voucherProvider: true,
   podUrl: true,
   dispatchedAt: true,
@@ -553,6 +555,7 @@ export class VendorPortalService {
       trackingNumber: row.trackingNumber,
       trackingUrl: row.trackingUrl,
       voucherCode: row.voucherCode,
+      voucherPin: row.voucherPin ?? null,
       voucherProvider: row.voucherProvider,
       podUrl: row.podUrl,
       delivery,
@@ -615,7 +618,7 @@ export class VendorPortalService {
         status: { not: RedemptionStatus.PENDING },
       },
       select: {
-        id: true, status: true, voucherCode: true, voucherProvider: true, pointsDeducted: true,
+        id: true, status: true, voucherCode: true, voucherPin: true, voucherProvider: true, pointsDeducted: true,
         redemptionMode: true, metadata: true, updatedAt: true, rewardId: true,
       },
     });
@@ -627,7 +630,11 @@ export class VendorPortalService {
     }
     // VOUCHER WRITE INVARIANT (shared with Gifsy paths): no clear / blank / overwrite of a stored
     // code, a new code only on a paid open order — CAS carried on the write below.
-    const voucherInput = { voucherCode: dto.voucherCode, voucherProvider: dto.voucherProvider };
+    const voucherInput = {
+      voucherCode: dto.voucherCode,
+      voucherProvider: dto.voucherProvider,
+      voucherPin: dto.voucherPin,
+    };
     const voucherPlan = planVoucherWrite(existing, voucherInput);
 
     // GUARDED write (compare-and-set): the "open + assigned to me" checks above come from a
@@ -667,6 +674,7 @@ export class VendorPortalService {
           actorId: user.sub,
           orderId: id,
           code: voucherPlan.data.voucherCode,
+          pin: voucherPlan.data.voucherPin ?? null,
           provider: voucherPlan.data.voucherProvider ?? existing.voucherProvider,
           path: 'PATCH /vendor/orders/:id/fulfilment',
         });
@@ -718,12 +726,14 @@ export class VendorPortalService {
       // same invariant, CAS, audit + member notification), exactly like the Gifsy path.
       if (
         dto.voucherCode !== undefined ||
+        dto.voucherPin !== undefined ||
         dto.voucherProvider !== undefined ||
         dto.trackingNumber !== undefined ||
         dto.trackingUrl !== undefined
       ) {
         const updated = await this.updateFulfilment(user, id, {
           voucherCode: dto.voucherCode,
+          voucherPin: dto.voucherPin,
           voucherProvider: dto.voucherProvider,
           trackingNumber: dto.trackingNumber,
           trackingUrl: dto.trackingUrl,
@@ -747,7 +757,11 @@ export class VendorPortalService {
     }
 
     // VOUCHER WRITE INVARIANT (shared with Gifsy paths) — see voucher-write-guard.ts.
-    const voucherInput = { voucherCode: dto.voucherCode, voucherProvider: dto.voucherProvider };
+    const voucherInput = {
+      voucherCode: dto.voucherCode,
+      voucherProvider: dto.voucherProvider,
+      voucherPin: dto.voucherPin,
+    };
     const voucherPlan = planVoucherWrite(order, voucherInput);
 
     // BUG-1: a DIGITAL_VOUCHER order cannot be marked DELIVERED without a voucher code —
@@ -802,6 +816,7 @@ export class VendorPortalService {
           actorId: user.sub,
           orderId: id,
           code: voucherPlan.data.voucherCode,
+          pin: voucherPlan.data.voucherPin ?? null,
           provider: voucherPlan.data.voucherProvider ?? order.voucherProvider,
           path: 'POST /vendor/orders/:id/transition',
         });

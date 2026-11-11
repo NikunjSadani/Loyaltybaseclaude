@@ -241,6 +241,8 @@ export interface FulfilmentDraft {
   trackingUrl: string;
   supplierOrderRef: string;
   voucherCode: string;
+  /** Optional card PIN (card number + PIN gift cards). */
+  voucherPin: string;
   voucherProvider: string;
 }
 
@@ -252,6 +254,7 @@ export function emptyFulfilmentDraft(order?: Partial<GiftOrderDetail>): Fulfilme
     trackingUrl: order?.trackingUrl ?? '',
     supplierOrderRef: order?.supplierOrderRef ?? '',
     voucherCode: order?.voucherCode ?? '',
+    voucherPin: order?.voucherPin ?? '',
     voucherProvider: order?.voucherProvider ?? '',
   };
 }
@@ -269,6 +272,10 @@ export interface FulfilmentValidation {
  */
 export function validateFulfilment(d: FulfilmentDraft): FulfilmentValidation {
   if (!d.fulfilmentChannel) return { ok: false, error: 'Pick a fulfilment channel.' };
+  // Mirrors the backend (voucher-write-guard): a PIN needs its card number.
+  if (d.voucherPin.trim() && !d.voucherCode.trim()) {
+    return { ok: false, error: 'Enter the card number before the PIN' };
+  }
   return { ok: true };
 }
 
@@ -284,7 +291,7 @@ export function resetNonApplicableFields(d: FulfilmentDraft): FulfilmentDraft {
     return { ...d, logisticsPartner: '', trackingNumber: '', trackingUrl: '', supplierOrderRef: '' };
   }
   // A physical channel carries no voucher — drop voucher fields.
-  return { ...d, voucherCode: '', voucherProvider: '' };
+  return { ...d, voucherCode: '', voucherPin: '', voucherProvider: '' };
 }
 
 /**
@@ -308,6 +315,9 @@ export function buildFulfilmentPayload(d: FulfilmentDraft): Record<string, unkno
     supplierOrderRef: orNull(d.supplierOrderRef),
     voucherCode: orNull(d.voucherCode),
     voucherProvider: orNull(d.voucherProvider),
+    // The PIN is optional: sent only when entered (never a null "clear" — the backend clears a
+    // PIN only with "Voucher cancelled with vendor"). It needs a voucher code alongside.
+    ...(d.voucherPin.trim() ? { voucherPin: d.voucherPin.trim() } : {}),
   };
 }
 
@@ -348,6 +358,8 @@ export interface GiftOrderDetail extends GiftOrderSummary {
   trackingUrl?: string | null;
   supplierOrderRef?: string | null;
   voucherCode?: string | null;
+  /** Card PIN (card number + PIN gift cards) — fulfilling operators / the fulfilling vendor only. */
+  voucherPin?: string | null;
   voucherProvider?: string | null;
   logisticsPartner?: string | null;
   /** Internal "fulfilled by" — ops/tenant only, never shown on the member tile. */

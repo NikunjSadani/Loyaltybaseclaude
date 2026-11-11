@@ -109,6 +109,7 @@ describe('fulfilment payload', () => {
       trackingUrl: '',
       supplierOrderRef: '403-123',
       voucherCode: '',
+      voucherPin: '',
       voucherProvider: '',
     });
     // Every field is present; a blanked field is null (not omitted) so a stale value can
@@ -122,6 +123,18 @@ describe('fulfilment payload', () => {
       voucherCode: null,
       voucherProvider: null,
     });
+  });
+
+  it('PIN: sent trimmed only when entered (never a null clear); a PIN without a code fails validation', () => {
+    const base = { ...emptyFulfilmentDraft(), fulfilmentChannel: 'DIGITAL_VOUCHER' };
+    expect(buildFulfilmentPayload({ ...base, voucherCode: 'CARD-1', voucherPin: '  4821 ' }).voucherPin).toBe('4821');
+    expect('voucherPin' in buildFulfilmentPayload({ ...base, voucherCode: 'CARD-1', voucherPin: '  ' })).toBe(false);
+    expect(validateFulfilment({ ...base, voucherPin: '4821' })).toEqual({
+      ok: false,
+      error: 'Enter the card number before the PIN',
+    });
+    expect(validateFulfilment({ ...base, voucherCode: 'CARD-1', voucherPin: '4821' }).ok).toBe(true);
+    expect(emptyFulfilmentDraft({ id: 'o', status: 'CONFIRMED', createdAt: '', voucherPin: '99' }).voucherPin).toBe('99');
   });
 
   it('knows a digital-voucher channel', () => {
@@ -139,6 +152,7 @@ describe('channel toggle field reset', () => {
     trackingUrl: 'https://t.example/TRK1',
     supplierOrderRef: '403-123',
     voucherCode: 'AMZ-1',
+    voucherPin: '',
     voucherProvider: 'Amazon Pay',
   };
 
@@ -155,6 +169,7 @@ describe('channel toggle field reset', () => {
   it('switching to a physical channel drops the voucher fields (keeps shipping fields)', () => {
     const out = resetNonApplicableFields(physical);
     expect(out.voucherCode).toBe('');
+    expect(out.voucherPin).toBe('');
     expect(out.voucherProvider).toBe('');
     expect(out.trackingNumber).toBe('TRK1');
     expect(out.logisticsPartner).toBe('Delhivery');

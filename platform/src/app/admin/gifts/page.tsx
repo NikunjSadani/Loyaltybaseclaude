@@ -49,7 +49,7 @@ import { derivePointsCost, parseRupeesToPaise } from '@/lib/gift-catalogue';
 import { nextStatusOptions, hasIssuedVoucher, REFUND_TARGETS, HUBBLE_NEVER_PLACED_REASONS } from '@/lib/redemption-order-transitions';
 import type { GifsySettings } from '@/types';
 import { pointsForAmount, type HubbleProductLookup } from '@/lib/hubble-product';
-import { wholeRupeeInputProps } from '@/lib/whole-rupee-input';
+import { wholeRupeeAmount, wholeRupeeInputProps } from '@/lib/whole-rupee-input';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
 
@@ -105,6 +105,9 @@ interface OrderItem {
   redemptionMode?: PayoutMode | string | null;
   totalPointsCost: number;
   voucherCode?: string | null;
+  /** Card PIN (card number + PIN gift cards). Only fulfilling operators receive it — the server
+   *  nulls it (with the code) for CLIENT_ADMIN / read-only staff, who see "Voucher issued" only. */
+  voucherPin?: string | null;
   /** True when the server withheld the code (voucherCode null) — CLIENT_ADMIN / read-only staff. */
   voucherCodeMasked?: boolean;
   /** Server indicator that a code is issued, for viewers who don't receive the code itself. */
@@ -610,7 +613,7 @@ function ItemModal({
     });
 
   const addCustomAmount = () => {
-    const amt = parseInt(customAmount, 10);
+    const amt = wholeRupeeAmount(customAmount);
     const p = hubbleData?.product;
     let err = '';
     if (!Number.isInteger(amt) || amt <= 0) err = 'Enter a whole-rupee amount';
@@ -1521,6 +1524,8 @@ function CatalogueTab() {
 interface TransitionDraft {
   toStatus: string;
   voucherCode: string;
+  /** Optional card PIN — sent only together with a voucher code. */
+  voucherPin: string;
   voucherProvider: string;
   trackingNumber: string;
   trackingUrl: string;
@@ -1530,7 +1535,7 @@ interface TransitionDraft {
 /** Fields of a transition / voucher-cancel response's order that the queue row displays. */
 type OrderPatch = Pick<OrderItem, 'id'> &
   Partial<Pick<OrderItem,
-    'status' | 'voucherCode' | 'voucherProvider' | 'trackingNumber' | 'trackingUrl' | 'updatedAt'
+    'status' | 'voucherCode' | 'voucherPin' | 'voucherProvider' | 'trackingNumber' | 'trackingUrl' | 'updatedAt'
     | 'hubbleNeedsReconcile' | 'hubbleReconcileReason'>>;
 
 /** Human copy for the backend's Hubble reconcile reasons (fallback: the raw code). */
@@ -1554,7 +1559,7 @@ const FORWARD_VOUCHER_TARGETS = new Set(['PROCESSING', 'DISPATCHED', 'DELIVERED'
 /** A fresh draft for `toStatus` — every target-specific field starts EMPTY, so a value typed for
  *  one target can never ride along on another (e.g. a code typed, then switched to CANCELLED). */
 function blankDraft(toStatus: string, notes = ''): TransitionDraft {
-  return { toStatus, voucherCode: '', voucherProvider: '', trackingNumber: '', trackingUrl: '', notes };
+  return { toStatus, voucherCode: '', voucherPin: '', voucherProvider: '', trackingNumber: '', trackingUrl: '', notes };
 }
 
 function OrderRow({
@@ -1608,6 +1613,7 @@ function OrderRow({
   const [manualOpen, setManualOpen] = useState(false);
   const [manualCode, setManualCode] = useState('');
   const [manualProvider, setManualProvider] = useState('');
+  const [manualPin, setManualPin] = useState('');
   const [manualReason, setManualReason] = useState('');
   const [manualBusy, setManualBusy] = useState(false);
   const [manualErr, setManualErr] = useState('');
@@ -1633,6 +1639,7 @@ function OrderRow({
     try {
       const body: Record<string, unknown> = { voucherCode: code, manualOverride: true, overrideReason: reason };
       if (manualProvider.trim()) body.voucherProvider = manualProvider.trim();
+      if (manualPin.trim()) body.voucherPin = manualPin.trim();
       const res = await apiJson<{ order?: OrderPatch } | null>(`/api/rewards/orders/${order.id}`, {
         method: 'PATCH',
         body: JSON.stringify(body),
@@ -1641,6 +1648,7 @@ function OrderRow({
       onTransitioned({
         id: order.id,
         voucherCode: res?.order?.voucherCode ?? code,
+        voucherPin: res?.order?.voucherPin ?? (manualPin.trim() || null),
         voucherProvider: res?.order?.voucherProvider ?? (manualProvider.trim() || 'Manual'),
         hubbleNeedsReconcile: false,
         hubbleReconcileReason: null,
@@ -1668,6 +1676,11 @@ function OrderRow({
     // never a hidden leftover (a code must never ride on a refund move).
     if (advancingForwardWithVoucher) {
       if (draft.voucherCode.trim())     body.voucherCode = draft.voucherCode.trim();
+      if (draft.voucherPin.trim()) {
+        // Mirrors the backend rule: a PIN needs its card number.
+        if (!draft.voucherCode.trim()) { setBusy(false); setErr('Enter the card number before the PIN'); return; }
+        body.voucherPin = draft.voucherPin.trim();
+      }
       if (draft.voucherProvider.trim()) body.voucherProvider = draft.voucherProvider.trim();
     }
     if (advancingToDispatched) {
@@ -1701,7 +1714,7 @@ function OrderRow({
       });
       setCancelOpen(false);
       // The code is cleared server-side → the row re-keys and refund targets appear.
-      onTransitioned(res?.order?.id ? res.order : { id: order.id, voucherCode: null, voucherProvider: null });
+      onTransitioned(res?.order?.id ? res.order : { id: order.id, voucherCode: null, voucherPin: null, voucherProvider: null });
     } catch (e) {
       setCancelErr(e instanceof Error ? e.message : 'Could not record the cancellation');
     } finally {
@@ -1725,9 +1738,16 @@ function OrderRow({
           </span>
           {/* View-only viewers never receive the code — the server sends only an "issued" flag. */}
           {hasIssuedVoucher(order.voucherCode) ? (
-            <span className="block mt-1 text-[10px] font-mono text-emerald-600" data-testid="order-voucher-code">
-              {order.voucherCode}
-            </span>
+            <>
+              <span className="block mt-1 text-[10px] font-mono text-emerald-600" data-testid="order-voucher-code">
+                {order.voucherCode}
+              </span>
+              {order.voucherPin && (
+                <span className="block text-[10px] font-mono text-emerald-600" data-testid="order-voucher-pin">
+                  PIN {order.voucherPin}
+                </span>
+              )}
+            </>
           ) : order.voucherIssued ? (
             <span className="block mt-1 text-[10px] font-semibold text-emerald-600" data-testid="order-voucher-code">
               Voucher issued
@@ -1811,6 +1831,18 @@ function OrderRow({
                     id={`mo-code-${order.id}`}
                     value={manualCode}
                     onChange={(e) => setManualCode(e.target.value)}
+                    className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-700" htmlFor={`mo-pin-${order.id}`}>PIN (optional)</label>
+                  <input
+                    id={`mo-pin-${order.id}`}
+                    value={manualPin}
+                    onChange={(e) => setManualPin(e.target.value)}
+                    maxLength={64}
+                    autoComplete="off"
+                    placeholder="Card + PIN only"
                     className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
                   />
                 </div>
@@ -1920,6 +1952,7 @@ function OrderRow({
                     <span className="text-xs font-medium text-gray-700">Voucher code</span>
                     <p className="text-sm font-mono text-gray-700 px-3 py-2" data-testid="voucher-code-readonly">
                       {order.voucherCode}
+                      {order.voucherPin ? <span className="ml-2 text-gray-500">PIN {order.voucherPin}</span> : null}
                     </p>
                   </div>
                 )}
@@ -1932,6 +1965,18 @@ function OrderRow({
                         value={draft.voucherCode}
                         onChange={(e) => setDraft((d) => ({ ...d, voucherCode: e.target.value }))}
                         placeholder="AMZ-XXXX"
+                        className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-gray-700" htmlFor={`vc-pin-${order.id}`}>PIN (optional)</label>
+                      <input
+                        id={`vc-pin-${order.id}`}
+                        value={draft.voucherPin}
+                        onChange={(e) => setDraft((d) => ({ ...d, voucherPin: e.target.value }))}
+                        maxLength={64}
+                        autoComplete="off"
+                        placeholder="Card + PIN only"
                         className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
                       />
                     </div>
@@ -2218,7 +2263,7 @@ function FulfilmentQueue({
     const filter = statusRef.current;
     const leaves = filter !== 'all' && updated.status != null && updated.status !== filter;
     const patch: Partial<OrderItem> = {};
-    for (const k of ['status', 'voucherCode', 'voucherProvider', 'trackingNumber', 'trackingUrl', 'updatedAt', 'hubbleNeedsReconcile', 'hubbleReconcileReason'] as const) {
+    for (const k of ['status', 'voucherCode', 'voucherPin', 'voucherProvider', 'trackingNumber', 'trackingUrl', 'updatedAt', 'hubbleNeedsReconcile', 'hubbleReconcileReason'] as const) {
       if (updated[k] !== undefined) (patch as Record<string, unknown>)[k] = updated[k];
     }
     setOrders((prev) => (leaves

@@ -25,7 +25,7 @@ import { useTenantFeatures } from '@/lib/tenant-features';
 import { BankOrUpiSection, type PaymentMode, type UpiCaptureMethod } from '@/components/bank-or-upi-section';
 import { isValidUpiId } from '@/lib/upi-utils';
 import { pinnedPaymentMode, type OutletPaymentType } from '@/lib/payment-type';
-import { wholeRupeeInputProps } from '@/lib/whole-rupee-input';
+import { wholeRupeeAmount, wholeRupeeInputProps } from '@/lib/whole-rupee-input';
 import { pointsForAmount } from '@/lib/hubble-product';
 
 /* ─── Partner cash beneficiary (from GET /api/auth/me) ─────────────────────────
@@ -712,7 +712,7 @@ function VoucherRedeemSheet({
   // Hubble "choose from amounts" voucher (e.g. a fixed-denomination brand): the member picks one
   // of the admin-chosen amounts — no free typing. Server re-validates the amount is in the list.
   const amountOptions = !isFixed && voucher.amountOptions?.length ? voucher.amountOptions : null;
-  const freeAmt   = parseInt(amount, 10) || 0;
+  const freeAmt   = wholeRupeeAmount(amount); // "1,250" while typing → 1250; "750,5" → 750
   // FREE_AMOUNT: points required = ₹amount × conversionRate, with the SERVER's exact rounding
   // (Math.round, rewards.service redeem) so the preview, the balance check and the debit agree.
   // (At an integer rate — e.g. 1 — this is identical to the previous Math.ceil.)
@@ -971,7 +971,7 @@ function CashPayoutSheet({
   const minInr    = hasRate ? Math.ceil(minPoints / conversionRate) : 0;
   const maxInr    = hasRate ? Math.floor(myBalance / conversionRate) : null;
 
-  const inrAmt    = parseInt(amount, 10) || 0;
+  const inrAmt    = wholeRupeeAmount(amount);
   // Preview points with the REAL conversionRate (matches the backend), not localStorage.
   const ptsNeeded = Math.ceil(inrAmt * conversionRate);
 

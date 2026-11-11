@@ -151,11 +151,47 @@ export function maskVoucherCode(code: string): string {
  */
 export function hiddenVoucherFields(code: string | null | undefined): {
   voucherCode: null;
+  voucherPin: null;
   voucherIssued: boolean;
   voucherCodeMasked: boolean;
 } {
   const issued = code != null && code !== '';
-  return { voucherCode: null, voucherIssued: issued, voucherCodeMasked: issued };
+  // The PIN is hidden exactly like the code (no character, no "has PIN" hint).
+  return { voucherCode: null, voucherPin: null, voucherIssued: issued, voucherCodeMasked: issued };
+}
+
+/** Sales hierarchy roles (mirrors rewards.controller SALES_ROLES). */
+const SALES_VIEWER_ROLES: ReadonlySet<string> = new Set([
+  'SALES_HO',
+  'SALES_STATE_HEAD',
+  'SALES_ASM',
+  'SALES_SO',
+  'SALES_ISR',
+]);
+
+/**
+ * OWNER RULE: a sales rep NEVER sees a voucher card number or PIN, on ANY route — even if their
+ * login were ever to resolve to a partner. The bearer credential belongs to the outlet owner only.
+ */
+export function isSalesViewer(role: string | null | undefined): boolean {
+  return !!role && SALES_VIEWER_ROLES.has(role);
+}
+
+/**
+ * The member-facing credentials of a Hubble voucher:
+ *  - code = card number if present, else the PIN (a PIN-only card's PIN IS its code);
+ *  - pin  = the PIN ONLY when BOTH a card number and a PIN are present (card+PIN products such as
+ *           CARD_AND_PIN_NO_SECURED) — otherwise null (number-only / PIN-only: unchanged).
+ * Values are trimmed; blank counts as absent.
+ */
+export function hubbleVoucherCredentials(voucher: HubbleVoucher | undefined | null): {
+  code: string | null;
+  pin: string | null;
+} {
+  if (!voucher) return { code: null, pin: null };
+  const num = (voucher.cardNumber ?? '').toString().trim();
+  const pin = (voucher.cardPin ?? '').toString().trim();
+  return { code: num || pin || null, pin: num && pin ? pin : null };
 }
 
 /** Operator-console projection of an order's Hubble reconcile state (from metadata). */
@@ -262,6 +298,7 @@ const MEMBER_ORDER_SELECT = {
   totalPointsCost: true,
   quantity: true,
   voucherCode: true,
+  voucherPin: true,
   voucherProvider: true,
   trackingNumber: true,
   trackingUrl: true,
@@ -810,6 +847,7 @@ export class RewardsService {
           totalPointsCost: true,
           quantity: true,
           voucherCode: true,
+          voucherPin: true,
           voucherProvider: true,
           trackingNumber: true,
           trackingUrl: true,
@@ -842,7 +880,10 @@ export class RewardsService {
     // other viewer (CLIENT_ADMIN, read-only staff) gets NO character of it: voucherCode null +
     // voucherIssued/voucherCodeMasked true.
     const memberView = !this.isGifsy(user) && !tenantAdmin;
-    const hideCodes = !memberView && !(await this.canSeeFullVoucherCode(user));
+    // Card number + PIN: member (own) and fulfilling operator only. A SALES rep never — even on the
+    // member branch (their login resolves to no partner today; this pins it regardless).
+    const hideCodes =
+      isSalesViewer(user.role) || (!memberView && !(await this.canSeeFullVoucherCode(user)));
     const mapped = orders.map(({ metadata, ...o }) => ({
       ...o,
       ...(hideCodes ? hiddenVoucherFields(o.voucherCode) : {}),
@@ -899,6 +940,10 @@ export class RewardsService {
       throw new ForbiddenException('Forbidden');
     }
 
+    // A SALES rep never gets the card number / PIN (defence in depth — see isSalesViewer).
+    if (isSalesViewer(user.role)) {
+      return { order: { ...order, ...hiddenVoucherFields(order.voucherCode) } };
+    }
     return { order };
   }
 
@@ -988,7 +1033,11 @@ export class RewardsService {
     // "Voucher cancelled with vendor" clears one), never on a Hubble-handed order (unless a
     // GIFSY_ADMIN's reasoned manual override) or a cash order, never a code cancelled anywhere in
     // the tenant, a new code only on a paid open order.
-    const voucherInput = { voucherCode: dto.voucherCode, voucherProvider: dto.voucherProvider };
+    const voucherInput = {
+      voucherCode: dto.voucherCode,
+      voucherProvider: dto.voucherProvider,
+      voucherPin: dto.voucherPin,
+    };
     const voucherPlan = planVoucherWrite(
       existingOrder,
       voucherInput,
@@ -1027,6 +1076,7 @@ export class RewardsService {
           actorId: user.sub,
           orderId: id,
           code: voucherPlan.data.voucherCode,
+          pin: voucherPlan.data.voucherPin ?? null,
           provider: voucherPlan.data.voucherProvider ?? existingOrder.voucherProvider,
           path: 'PATCH /rewards/orders/:id',
           overrideReason: voucherPlan.overridden ? dto.overrideReason?.trim() : null,
@@ -2670,12 +2720,14 @@ export class RewardsService {
     if (order.status === toStatus) {
       if (
         dto.voucherCode !== undefined ||
+        dto.voucherPin !== undefined ||
         dto.voucherProvider !== undefined ||
         dto.trackingNumber !== undefined ||
         dto.trackingUrl !== undefined
       ) {
         const res = await this.updateOrder(user, id, {
           voucherCode: dto.voucherCode,
+          voucherPin: dto.voucherPin,
           voucherProvider: dto.voucherProvider,
           trackingNumber: dto.trackingNumber,
           trackingUrl: dto.trackingUrl,
@@ -2772,7 +2824,11 @@ export class RewardsService {
 
     // VOUCHER WRITE INVARIANT (every edge): no clear / blank, no overwrite of a stored code, a new
     // code only on a paid open order — and the status claim carries the voucher CAS.
-    const voucherInput = { voucherCode: dto.voucherCode, voucherProvider: dto.voucherProvider };
+    const voucherInput = {
+      voucherCode: dto.voucherCode,
+      voucherProvider: dto.voucherProvider,
+      voucherPin: dto.voucherPin,
+    };
     const voucherPlan = planVoucherWrite(
       order,
       voucherInput,
@@ -2841,6 +2897,7 @@ export class RewardsService {
           actorId: user.sub,
           orderId: id,
           code: voucherPlan.data.voucherCode,
+          pin: voucherPlan.data.voucherPin ?? null,
           provider: voucherPlan.data.voucherProvider ?? order.voucherProvider,
           path: 'POST /rewards/orders/:id/transition',
           overrideReason: voucherPlan.overridden ? dto.overrideReason?.trim() : null,
@@ -2999,6 +3056,8 @@ export class RewardsService {
         },
         data: {
           voucherCode: null,
+          // The PIN belongs to the cancelled card — cleared with it (never reuse-checked).
+          voucherPin: null,
           voucherProvider: null,
           // HUBBLE_FAILED_VOUCHER_PRESENT: Hubble definitively FAILED (no Hubble voucher exists) and
           // the only code was this manual one — once it is cancelled the order is a plain order
@@ -3043,7 +3102,7 @@ export class RewardsService {
       `order ${order.orderNumber}: voucher (${masked}) recorded cancelled with vendor by ${user.sub}`,
     );
     // voucherCode: null states the post-condition explicitly (the row's code was just cleared).
-    return { order: { ...updated, voucherCode: null } };
+    return { order: { ...updated, voucherCode: null, voucherPin: null } };
   }
 
   /**
@@ -3218,6 +3277,7 @@ export class RewardsService {
           await this.transitionOrder(user, order.id, {
             toStatus: r.newStatus as UpdatableOrderStatus,
             voucherCode: r.voucherCode,
+            voucherPin: r.voucherPin,
             voucherProvider: r.voucherProvider,
             trackingNumber: r.trackingNumber,
             trackingUrl: r.trackingUrl,
@@ -3228,6 +3288,7 @@ export class RewardsService {
           // template re-uploaded) — skip it so the success count isn't inflated.
           if (
             !r.voucherCode &&
+            !r.voucherPin &&
             !r.voucherProvider &&
             !r.trackingNumber &&
             !r.trackingUrl
@@ -3237,6 +3298,7 @@ export class RewardsService {
           }
           await this.updateOrder(user, order.id, {
             voucherCode: r.voucherCode,
+            voucherPin: r.voucherPin,
             voucherProvider: r.voucherProvider,
             trackingNumber: r.trackingNumber,
             trackingUrl: r.trackingUrl,
@@ -3431,6 +3493,7 @@ export class RewardsService {
     // confirmed/processed/returned — sourced from the authoritative status history).
     const stampFor = (status: string) =>
       order.statusHistory.find((h) => h.toStatus === status)?.createdAt ?? null;
+    const canSeeCodes = await this.canSeeFullVoucherCode(user);
 
     return {
       id: order.id,
@@ -3450,8 +3513,12 @@ export class RewardsService {
       trackingUrl: order.trackingUrl,
       supplierOrderRef: order.supplierOrderRef,
       voucherCode: order.voucherCode,
+      voucherPin: order.voucherPin,
       voucherProvider: order.voucherProvider,
       fulfilledByVendorId: order.fulfilledByVendorId,
+      // The route already requires rewards:manage_orders (= canSeeFullVoucherCode); defence in
+      // depth: any other operator gets neither the card number nor the PIN.
+      ...(canSeeCodes ? {} : hiddenVoucherFields(order.voucherCode)),
       fulfilledByVendorName: order.fulfilledByVendor?.name ?? null,
       delivery,
       statusHistory,
@@ -4090,7 +4157,7 @@ export class RewardsService {
     actorId?: string,
   ): Promise<void> {
     const voucher = (body.vouchers ?? [])[0];
-    const voucherCode = this.primaryVoucherCode(voucher);
+    const { code: voucherCode, pin: voucherPin } = hubbleVoucherCredentials(voucher);
     if (!voucherCode) {
       // SUCCESS with no usable code is anomalous — do NOT flip to DELIVERED without a
       // code (would break the DIGITAL_VOUCHER delivered invariant). Leave pending.
@@ -4119,6 +4186,9 @@ export class RewardsService {
         data: {
           fulfilmentChannel: GiftFulfilmentChannel.DIGITAL_VOUCHER,
           voucherCode,
+          // Card+PIN product (e.g. CARD_AND_PIN_NO_SECURED): the PIN rides in the SAME guarded
+          // claim as the card number — never one without the other. Null for number-/PIN-only cards.
+          voucherPin,
           voucherProvider: 'Hubble',
           supplierOrderRef: body.id ?? body.orderId ?? null,
           deliveredAt: now,
@@ -4351,14 +4421,6 @@ export class RewardsService {
     return { ...base, ...patch } as Prisma.InputJsonValue;
   }
 
-  /** The primary member-facing code: card number, else PIN. */
-  private primaryVoucherCode(voucher: HubbleVoucher | undefined): string | null {
-    if (!voucher) return null;
-    const num = (voucher.cardNumber ?? '').toString().trim();
-    const pin = (voucher.cardPin ?? '').toString().trim();
-    return num || pin || null;
-  }
-
   /** Build the metadata blob persisted on a delivered Hubble order (full card detail). */
   private buildHubbleVoucherMetadata(
     voucher: HubbleVoucher | undefined,
@@ -4371,11 +4433,10 @@ export class RewardsService {
         id: voucher?.id ?? null,
         cardType: voucher?.cardType ?? null,
         // AUDIT-FIX (PII): the card number / PIN are the SPENDABLE secret. The member
-        // receives them via the order's voucherCode (member-scoped select); we deliberately
-        // do NOT duplicate them into metadata, which operator order-reads return in full.
-        // Non-sensitive fields only here. ⚠️ OWNER-VERIFY: Amazon Pay free-denomination is
-        // assumed to be a single claim code (no separate PIN). If a product ever returns a
-        // distinct PIN the member needs, add a member-facing field for it.
+        // receives them via the order's voucherCode + voucherPin columns (member-scoped
+        // select; card+PIN products store the PIN in voucherPin — hubbleVoucherCredentials).
+        // We deliberately do NOT duplicate either into metadata, which operator order-reads
+        // return in full. Non-sensitive fields only here.
         validTill: voucher?.validTill ?? null,
         amount: voucher?.amount ?? null,
       },

@@ -9,10 +9,12 @@
  *
  * Layout (single header row, then one row per order):
  *   Order Number | Reward | Mode | Current Status |
- *   Voucher Code | Voucher Provider | Tracking Number | Tracking URL | New Status
+ *   Voucher Code | Voucher PIN | Voucher Provider | Tracking Number | Tracking URL | New Status
  *
- * The first four columns are the locked context the ops user reads; the last five
- * are blank fill columns. `Order Number` is the row key.
+ * The first four columns are the locked context the ops user reads; the last six
+ * are blank fill columns. `Order Number` is the row key. `Voucher PIN` is OPTIONAL (card number
+ * + PIN gift cards only) and text-formatted so a leading-zero PIN survives Excel; the parser is
+ * header-based, so a sheet downloaded before the column existed still uploads unchanged.
  */
 
 import * as XLSX from 'xlsx';
@@ -28,6 +30,7 @@ export const FULFILMENT_COLS = [
   'Mode',
   'Current Status',
   'Voucher Code',
+  'Voucher PIN',
   'Voucher Provider',
   'Tracking Number',
   'Tracking URL',
@@ -56,6 +59,7 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
     o.mode,
     o.currentStatus,
     '', // Voucher Code
+    '', // Voucher PIN (optional)
     '', // Voucher Provider
     '', // Tracking Number
     '', // Tracking URL
@@ -63,12 +67,20 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
   ]);
 
   const ws = aoaToSheetSafe([header, ...dataRows]);
+  // Text-format the PIN fill cells (Excel would otherwise turn "0123" into the number 123).
+  const pinCol = FULFILMENT_COLS.indexOf('Voucher PIN');
+  for (let r = 1; r <= dataRows.length; r++) {
+    const ref = XLSX.utils.encode_cell({ r, c: pinCol });
+    const cellObj = ws[ref] as XLSX.CellObject | undefined;
+    if (cellObj) cellObj.z = '@';
+  }
   ws['!cols'] = [
     { wch: 22 }, // Order Number
     { wch: 28 }, // Reward
     { wch: 14 }, // Mode
     { wch: 16 }, // Current Status
     { wch: 22 }, // Voucher Code
+    { wch: 14 }, // Voucher PIN
     { wch: 18 }, // Voucher Provider
     { wch: 20 }, // Tracking Number
     { wch: 28 }, // Tracking URL
@@ -88,6 +100,8 @@ export interface ParsedFulfilmentRow {
   rowIndex: number;
   orderNumber: string;
   voucherCode?: string;
+  /** Optional card PIN (card number + PIN gift cards). */
+  voucherPin?: string;
   voucherProvider?: string;
   trackingNumber?: string;
   trackingUrl?: string;
@@ -135,6 +149,7 @@ export function parseFulfilmentUploadBuffer(buffer: Buffer | ArrayBuffer): Parse
   }
 
   const voucherCodeCol = idxOf('Voucher Code');
+  const voucherPinCol = idxOf('Voucher PIN');
   const voucherProviderCol = idxOf('Voucher Provider');
   const trackingNumberCol = idxOf('Tracking Number');
   const trackingUrlCol = idxOf('Tracking URL');
@@ -161,6 +176,7 @@ export function parseFulfilmentUploadBuffer(buffer: Buffer | ArrayBuffer): Parse
       rowIndex: ri + 1,
       orderNumber,
       voucherCode: cell(voucherCodeCol),
+      voucherPin: cell(voucherPinCol),
       voucherProvider: cell(voucherProviderCol),
       trackingNumber: cell(trackingNumberCol),
       trackingUrl: cell(trackingUrlCol),

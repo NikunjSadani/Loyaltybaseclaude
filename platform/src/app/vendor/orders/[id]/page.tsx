@@ -277,7 +277,7 @@ function FulfilmentForm({
 
   useEffect(() => {
     setDraft(emptyFulfilmentDraft(order));
-  }, [order.id, order.fulfilmentChannel, order.trackingNumber, order.voucherCode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [order.id, order.fulfilmentChannel, order.trackingNumber, order.voucherCode, order.voucherPin]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const set = <K extends keyof FulfilmentDraft>(k: K, v: FulfilmentDraft[K]) =>
     setDraft((d) => ({ ...d, [k]: v }));
@@ -351,17 +351,34 @@ function FulfilmentForm({
       </div>
 
       {voucher ? (
-        <div className="space-y-1">
-          <label className="text-xs font-medium text-gray-700 flex items-center gap-1.5">
-            <Ticket className="w-3.5 h-3.5 text-amber-500" /> Voucher code
-          </label>
-          <input
-            value={draft.voucherCode}
-            onChange={(e) => set('voucherCode', e.target.value)}
-            placeholder="AMZ-XXXX-XXXX"
-            data-testid="ff-voucher-code"
-            className={inputCls}
-          />
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="space-y-1 sm:col-span-2">
+            <label className="text-xs font-medium text-gray-700 flex items-center gap-1.5">
+              <Ticket className="w-3.5 h-3.5 text-amber-500" /> Voucher code / card no.
+            </label>
+            <input
+              value={draft.voucherCode}
+              onChange={(e) => set('voucherCode', e.target.value)}
+              placeholder="AMZ-XXXX-XXXX"
+              data-testid="ff-voucher-code"
+              className={inputCls}
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-gray-700" htmlFor="ff-voucher-pin">
+              PIN <span className="text-gray-400 font-normal">(optional)</span>
+            </label>
+            <input
+              id="ff-voucher-pin"
+              value={draft.voucherPin}
+              onChange={(e) => set('voucherPin', e.target.value)}
+              placeholder="Only for card + PIN"
+              maxLength={64}
+              autoComplete="off"
+              data-testid="ff-voucher-pin"
+              className={inputCls}
+            />
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

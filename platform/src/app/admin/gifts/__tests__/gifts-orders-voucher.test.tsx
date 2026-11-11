@@ -96,6 +96,35 @@ describe('GIFVC — voucher handling', () => {
     expect(body).toEqual({ toStatus: 'PROCESSING', voucherCode: 'AMZ-NEW-5678' });
   });
 
+  it('GIFVC2b: an optional PIN typed with the code is sent alongside it (trimmed)', async () => {
+    const calls = installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null }]);
+    const row = await openRow('RDM-1');
+    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    await userEvent.type(screen.getByLabelText('Voucher code'), '6001220012345678');
+    await userEvent.type(screen.getByLabelText('PIN (optional)'), ' 482913 ');
+    await userEvent.click(screen.getByRole('button', { name: /confirm → PROCESSING/i }));
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith('/transition'))).toBe(true));
+    const body = JSON.parse(String(calls.find((c) => c.url.endsWith('/transition'))!.init!.body));
+    expect(body).toEqual({ toStatus: 'PROCESSING', voucherCode: '6001220012345678', voucherPin: '482913' });
+  });
+
+  it('GIFVC2c: a PIN without a card number is refused client-side (no request)', async () => {
+    const calls = installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null }]);
+    const row = await openRow('RDM-1');
+    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    await userEvent.type(screen.getByLabelText('PIN (optional)'), '4829');
+    await userEvent.click(screen.getByRole('button', { name: /confirm → PROCESSING/i }));
+    expect(await screen.findByText('Enter the card number before the PIN')).toBeInTheDocument();
+    expect(calls.some((c) => c.url.endsWith('/transition'))).toBe(false);
+  });
+
+  it('GIFVC2d: a fulfilling operator sees the stored card number AND PIN on the row', async () => {
+    installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'DELIVERED', voucherCode: '6001220012345678', voucherPin: '482913', voucherProvider: 'Gifsy' }]);
+    const row = await openRow('RDM-1');
+    expect(within(row).getByTestId('order-voucher-code')).toHaveTextContent('6001220012345678');
+    expect(within(row).getByTestId('order-voucher-pin')).toHaveTextContent('PIN 482913');
+  });
+
   it('GIFVC3: an order that already has a code shows it READ-ONLY (no editable input) and hides refund targets', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: 'AMZN-1234-5678-WXYZ', voucherProvider: 'Gifsy' }]);
     const row = await openRow('RDM-1');
@@ -164,6 +193,7 @@ describe('GIFVC — voucher handling', () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, voucherIssued: true, voucherCodeMasked: true }]);
     const row = await openRow('RDM-1');
     expect(within(row).getByTestId('order-voucher-code')).toHaveTextContent('Voucher issued');
+    expect(within(row).queryByTestId('order-voucher-pin')).toBeNull();
     expect(within(row).queryByRole('button', { name: /advance/i })).toBeNull();
   });
 

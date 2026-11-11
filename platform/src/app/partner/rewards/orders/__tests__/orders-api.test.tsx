@@ -128,6 +128,29 @@ describe('OR — Orders API wiring (live data)', () => {
     expect(screen.queryByText(/Hubble/i)).toBeNull();
   });
 
+  it('OR6c: a card number + PIN gift card shows "Card no." and "PIN", each with its own copy button', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    stubOrders([{ ...VOUCHER_ORDER, voucherCode: '6001220012345678', voucherPin: '482913', voucherProvider: 'Hubble' }]);
+    render(<OrdersPage />);
+    expect(await screen.findByTestId('voucher-code')).toHaveTextContent('6001220012345678');
+    expect(screen.getByTestId('voucher-pin')).toHaveTextContent('482913');
+    expect(screen.getByText('Card no.')).toBeInTheDocument();
+    expect(screen.getByText('PIN')).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('copy-voucher-pin-btn'));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('482913'));
+    await userEvent.click(screen.getByTestId('copy-voucher-btn'));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('6001220012345678'));
+  });
+
+  it('OR6d: a number-only voucher (no PIN) renders exactly as before — no PIN row', async () => {
+    stubOrders([{ ...VOUCHER_ORDER, voucherPin: null }]);
+    render(<OrdersPage />);
+    expect(await screen.findByText(/Voucher Code/)).toBeInTheDocument();
+    expect(screen.queryByTestId('voucher-pin')).toBeNull();
+    expect(screen.queryByText('Card no.')).toBeNull();
+  });
+
   it('OR7: PHYSICAL_GIFT order renders a tracking link to the tracking URL', async () => {
     stubOrders([PHYSICAL_ORDER]);
     render(<OrdersPage />);

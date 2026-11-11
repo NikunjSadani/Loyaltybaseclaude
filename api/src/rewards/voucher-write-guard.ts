@@ -30,6 +30,13 @@ import { noIssuedVoucherGuard } from './order-status-transition';
  *    pointsDeducted > 0 — and the write is a compare-and-set on exactly that, the provider read
  *    and the row's updatedAt, so ANY concurrent write (refund, vendor-cancel, other edit) makes it
  *    lose (0 rows → 409).
+ *
+ * VOUCHER PIN (card+PIN gift cards — optional, written only together with its code):
+ *  - omitted / blank            → no PIN (the field is optional; blank is never a "clear");
+ *  - a PIN with no code supplied and none stored → 400 "Enter the card number before the PIN";
+ *  - a PIN that differs from the stored one on an order that already holds a code → 400 (a
+ *    replace — same rule as the code; only "Voucher cancelled with vendor" clears both);
+ *  - identical to the stored PIN → no-op. The PIN is NEVER uniqueness/reuse-checked.
  */
 
 export const VOUCHER_WRITABLE_STATUSES: readonly RedemptionStatus[] = [
@@ -58,6 +65,7 @@ export const OVERRIDE_NOT_NEEDED_MESSAGE =
   'Manual fulfilment override is only for orders that were sent to Hubble.';
 export const OVERRIDE_NEEDS_CODE_MESSAGE = 'A manual fulfilment override must set a voucher code.';
 export const OVERRIDE_REASON_MESSAGE = 'A reason is required for a manual fulfilment override.';
+export const VOUCHER_PIN_NEEDS_CODE_MESSAGE = 'Enter the card number before the PIN';
 
 /** Default provider label for a manual override that names none. */
 export const MANUAL_OVERRIDE_PROVIDER = 'Manual';
@@ -65,12 +73,16 @@ export const MANUAL_OVERRIDE_PROVIDER = 'Manual';
 export interface VoucherWriteInput {
   voucherCode?: string | null;
   voucherProvider?: string | null;
+  /** Optional card PIN (card+PIN products). Blank = no PIN. */
+  voucherPin?: string | null;
 }
 
 export interface VoucherOrderState {
   status: RedemptionStatus | string;
   voucherCode: string | null;
   voucherProvider: string | null;
+  /** Stored PIN (optional: legacy readers / fixtures omit it → treated as none). */
+  voucherPin?: string | null;
   pointsDeducted: number;
   redemptionMode?: PayoutMode | string | null;
   metadata?: Prisma.JsonValue | null;
@@ -84,7 +96,7 @@ export interface VoucherWriteOptions {
 
 export interface VoucherWritePlan {
   /** Only the columns that actually change. Spread into the write's `data`. */
-  data: { voucherCode?: string; voucherProvider?: string; metadata?: Prisma.InputJsonValue };
+  data: { voucherCode?: string; voucherPin?: string; voucherProvider?: string; metadata?: Prisma.InputJsonValue };
   /** Claim predicate to AND into the write's `where` (null = no voucher write → no extra guard). */
   guard: Prisma.RedemptionOrderWhereInput | null;
   /** True when this write sets a NEW code (caller audits + notifies the member). */
@@ -193,7 +205,9 @@ export function planVoucherWrite(
   const none: VoucherWritePlan = { data, guard: null, issuesNewCode: false, overridden: false };
   const override = opts.manualOverride ?? null;
   if (override && !override.reason.trim()) throw new BadRequestException(OVERRIDE_REASON_MESSAGE);
-  if (input.voucherCode === undefined && input.voucherProvider === undefined) {
+  // Blank PIN = not supplied (optional field — never a "clear").
+  const pin = norm(input.voucherPin ?? undefined) ?? undefined;
+  if (input.voucherCode === undefined && input.voucherProvider === undefined && pin === undefined) {
     if (override) throw new BadRequestException(OVERRIDE_NEEDS_CODE_MESSAGE);
     return none;
   }
@@ -203,6 +217,11 @@ export function planVoucherWrite(
 
   const storedCode = norm(order.voucherCode);
   const storedProvider = norm(order.voucherProvider);
+  const storedPin = norm(order.voucherPin);
+  // A PIN needs its card number: supplied on this write, or already on the order.
+  if (pin !== undefined && (input.voucherCode === undefined || isBlank(input.voucherCode)) && storedCode === null) {
+    throw new BadRequestException(VOUCHER_PIN_NEEDS_CODE_MESSAGE);
+  }
   const code = input.voucherCode === undefined ? undefined : norm(input.voucherCode)!;
   let provider = input.voucherProvider === undefined ? undefined : norm(input.voucherProvider)!;
 
@@ -216,7 +235,8 @@ export function planVoucherWrite(
     if (provider === undefined || isHubbleProvider(provider)) provider = MANUAL_OVERRIDE_PROVIDER;
   }
   const providerChanges = provider !== undefined && provider !== storedProvider;
-  if (!codeChanges && !providerChanges) return none; // idempotent re-send (trimmed compare)
+  const pinChanges = pin !== undefined && pin !== storedPin;
+  if (!codeChanges && !providerChanges && !pinChanges) return none; // idempotent re-send (trimmed compare)
 
   // Handed to Hubble: the integration owns it — only a reasoned GIFSY_ADMIN override may proceed.
   if (!override && hasHubbleMarkers(order)) throw new BadRequestException(HUBBLE_PROVIDER_MESSAGE);
@@ -232,6 +252,8 @@ export function planVoucherWrite(
   }
 
   if (codeChanges) data.voucherCode = code;
+  // Reaching here means no code is stored, so a PIN can only land together with a NEW code.
+  if (pinChanges) data.voucherPin = pin;
   if (providerChanges) data.voucherProvider = provider;
   if (override) {
     // Ops took the order over from Hubble: clear the reconcile flag, record who/why/when.

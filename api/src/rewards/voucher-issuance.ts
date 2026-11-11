@@ -13,6 +13,24 @@ import type { EventKey } from '../notification-templates/notification-templates.
 
 type Db = Prisma.TransactionClient | { auditLog: Prisma.TransactionClient['auditLog'] };
 
+/**
+ * A WhatsApp template variable must be ONE line: no newline / tab, and never 4+ consecutive
+ * spaces (Meta rejects the send). Collapse every whitespace run to a single space and trim.
+ */
+export function whatsappSafeVar(v: string): string {
+  return v.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * The `code` variable for an order: the code alone (byte-identical to the pre-PIN behaviour) when
+ * there is no PIN; "<code> | PIN: <pin>" (single line) for a card number + PIN gift card.
+ */
+export function voucherCodeVar(code: string, pin: string | null | undefined): string {
+  const p = typeof pin === 'string' ? whatsappSafeVar(pin) : '';
+  if (!p) return code;
+  return `${whatsappSafeVar(code)} | PIN: ${p}`;
+}
+
 /** "••••" + last 4 for an 8+ char code, else fully masked — audit/log display only. */
 export function maskVoucherCodeForAudit(code: string): string {
   const t = code.trim();
@@ -29,6 +47,8 @@ export async function recordVoucherIssuedAudit(
     provider?: string | null;
     /** Set when a GIFSY_ADMIN manually fulfilled a Hubble-handed order (the ops exit). */
     overrideReason?: string | null;
+    /** The PIN written alongside the code (card+PIN voucher) — audited MASKED only, never in clear. */
+    pin?: string | null;
   },
 ): Promise<void> {
   await db.auditLog.create({
@@ -41,6 +61,8 @@ export async function recordVoucherIssuedAudit(
         event: 'VOUCHER_ISSUED_MANUAL',
         path: args.path,
         voucherCode: maskVoucherCodeForAudit(args.code),
+        // Only the FACT of a PIN, fully masked like a short code — the PIN itself is never logged.
+        ...(args.pin ? { voucherPin: '••••' } : {}),
         voucherProvider: args.provider ?? null,
         ...(args.overrideReason ? { manualOverride: true, overrideReason: args.overrideReason } : {}),
       },
@@ -66,7 +88,12 @@ export async function programLabelFor(
   }
 }
 
-/** Send the member their VOUCHER_ISSUED notification. Best-effort: never throws. */
+/**
+ * Send the member their VOUCHER_ISSUED notification (`voucher_code` template). Best-effort: never
+ * throws. No PIN on the order → vars + body byte-identical to the pre-PIN behaviour. A card number
+ * + PIN order → the SAME event/template (the contract stays 5 vars) with {{5}} `code` =
+ * "<code> | PIN: <pin>" (single line), and bell/SMS body "Your <name> card no: <code> · PIN: <pin>".
+ */
 export async function notifyVoucherIssued(
   deps: {
     prisma: {
@@ -84,6 +111,7 @@ export async function notifyVoucherIssued(
       where: { id: orderId },
       select: {
         voucherCode: true,
+        voucherPin: true,
         valuePaise: true,
         orderNumber: true,
         reward: { select: { name: true } },
@@ -91,6 +119,7 @@ export async function notifyVoucherIssued(
       },
     })) as {
       voucherCode: string | null;
+      voucherPin?: string | null;
       valuePaise: bigint | null;
       reward?: { name?: string } | null;
       partner?: { userId?: string | null; phone?: string | null; ownerName?: string | null } | null;
@@ -101,6 +130,7 @@ export async function notifyVoucherIssued(
     const program = await programLabelFor(deps.prisma, clientId);
     const amount = o.valuePaise != null ? `₹${(Number(o.valuePaise) / 100).toLocaleString('en-IN')}` : '';
     const voucherName = o.reward?.name ?? 'voucher';
+    const pin = typeof o.voucherPin === 'string' && o.voucherPin.trim() ? o.voucherPin.trim() : null;
 
     await deps.notifications.notifyUserWithChannels({
       clientId,
@@ -112,10 +142,12 @@ export async function notifyVoucherIssued(
         amount,
         program,
         voucherName,
-        code: o.voucherCode,
+        code: voucherCodeVar(o.voucherCode, pin),
       },
       subject: 'Your voucher code',
-      body: `Your ${voucherName} code: ${o.voucherCode}`,
+      body: pin
+        ? `Your ${voucherName} card no: ${o.voucherCode} · PIN: ${pin}`
+        : `Your ${voucherName} code: ${o.voucherCode}`,
       url: '/partner/rewards/orders',
       event: 'VOUCHER_ISSUED',
     });

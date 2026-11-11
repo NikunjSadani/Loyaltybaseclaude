@@ -390,6 +390,34 @@ describe('VendorPortalService', () => {
         );
       });
 
+      it('updateFulfilment: a card number + PIN lands in the same guarded write; the member is told both; the PIN is never audited', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open());
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        mockPrisma.redemptionOrder.findUnique.mockResolvedValueOnce({
+          voucherCode: '6001220012345678', voucherPin: '482913', valuePaise: 50000n, orderNumber: 'D-26-1',
+          reward: { name: 'Croma 500' }, partner: { userId: 'm1', phone: '9', ownerName: 'A' },
+        });
+        mockPrisma.client.findUnique.mockResolvedValueOnce({ branding: { displayName: 'Bajaj' }, internalName: 'bajaj' });
+        await service.updateFulfilment(vendor, 'o1', { voucherCode: '6001220012345678', voucherPin: ' 482913 ' } as never);
+        const { data } = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+        expect(data).toMatchObject({ voucherCode: '6001220012345678', voucherPin: '482913' });
+        expect(JSON.stringify(mockPrisma.auditLog.create.mock.calls)).not.toContain('482913');
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(expect.objectContaining({
+          eventKey: 'VOUCHER_ISSUED',
+          body: 'Your Croma 500 card no: 6001220012345678 · PIN: 482913',
+          vars: expect.objectContaining({ code: '6001220012345678 | PIN: 482913' }),
+        }));
+      });
+
+      it('updateFulfilment: a PIN without a card number → 400, no write', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open());
+        await expect(service.updateFulfilment(vendor, 'o1', { voucherPin: '4829' } as never))
+          .rejects.toThrow('Enter the card number before the PIN');
+        expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      });
+
       it('same-status transition WITH a new code applies it via the guarded updateFulfilment (not dropped)', async () => {
         grantScope();
         mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ status: 'PROCESSING' }));

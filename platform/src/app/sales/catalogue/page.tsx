@@ -13,7 +13,7 @@ import { type GiftCatalogueItem, GIFT_CATALOGUE } from '@/lib/gifts';
 import { api } from '@/lib/api-client';
 import { isDeliveryDefaults, type DeliveryDefaults } from '@/lib/partner-identity';
 import { applyAddressPrefill, type AddressForm, type TouchedFields } from '@/lib/address-prefill';
-import { wholeRupeeInputProps } from '@/lib/whole-rupee-input';
+import { wholeRupeeAmount, wholeRupeeInputProps } from '@/lib/whole-rupee-input';
 import { pointsForAmount } from '@/lib/hubble-product';
 
 type GiftItem = GiftCatalogueItem;
@@ -323,14 +323,14 @@ function CatalogueInner() {
     // FREE_AMOUNT (variable) vouchers / bank transfers require a ₹ amount — without it the backend
     // rejects redeem-for-outlet with "amount (₹) is required for a variable-amount voucher".
     const freeAmount = isFreeAmountGift(selectedGift);
-    const amountNum = Number(redeem.amount);
+    const amountNum = wholeRupeeAmount(redeem.amount);
     const options = selectedGift.amountOptions?.length ? selectedGift.amountOptions : null;
     if (freeAmount && options && !options.includes(amountNum)) {
       setRedeem((r) => ({ ...r, error: 'Choose one of the available amounts.' }));
       return;
     }
     // Whole rupees only (the input already strips decimals; this guards any other path).
-    if (freeAmount && (!redeem.amount.trim() || !Number.isInteger(amountNum) || amountNum <= 0)) {
+    if (freeAmount && (!Number.isInteger(amountNum) || amountNum <= 0)) {
       setRedeem((r) => ({ ...r, error: 'Enter a whole-rupee amount (₹) to redeem for this outlet.' }));
       return;
     }
@@ -850,7 +850,7 @@ function CatalogueInner() {
                       isFreeAmountGift(selectedGift) &&
                       (selectedGift.amountOptions?.length
                         ? !selectedGift.amountOptions.includes(Number(redeem.amount))
-                        : !(Number(redeem.amount) > 0))
+                        : !(wholeRupeeAmount(redeem.amount) > 0))
                     }
                     onClick={sendOtp}
                   >
@@ -948,7 +948,7 @@ function CatalogueInner() {
                     <div className="w-full bg-gray-50 rounded-xl p-4 text-left space-y-2">
                       {[
                         { label: 'Item',            value: selectedGift.name },
-                        { label: 'Amount',          value: redeem.amount.trim() ? `₹${redeem.amount}` : '—' },
+                        { label: 'Amount',          value: wholeRupeeAmount(redeem.amount) > 0 ? `₹${wholeRupeeAmount(redeem.amount)}` : '—' },
                         { label: 'Current balance', value: `${redeem.outlet.balance.toLocaleString()} pts` },
                       ].map((r) => (
                         <div key={r.label} className="flex justify-between text-sm">

@@ -1662,6 +1662,9 @@ model RedemptionOrder {
   trackingNumber       String?
   trackingUrl          String?
   voucherCode          String?
+  /// Gift-card PIN for card+PIN products (card number in voucherCode). Null for number-only / PIN-only cards.
+  /// Same visibility as voucherCode (member + fulfilling Gifsy operator only); never uniqueness-checked.
+  voucherPin           String?
   voucherProvider      String?
   dispatchedAt         DateTime?
   deliveredAt          DateTime?
