@@ -8,7 +8,7 @@
 > but with a per-tenant flag defaulting OFF, Deoleo behaves exactly as it does today. Precedent: `catalogueMrpSlash` and
 > `captureBankAtRedemption` both shipped as "PLATFORM-WIDE, Bajaj-flagged, Deoleo byte-identical".
 >
-> **Status:** BUILT on a worktree branch (2026-11-06), NOT pushed / NOT on staging yet. Owner-approved PLATFORM-WIDE.
+> **Status:** ✅ SHIPPED to prod (in cutovers #56–#58, 2026-11; see `GO-LIVE-ISSUE-LIST.md`). _(Was: built on a worktree branch 2026-11-06.)_ Owner-approved PLATFORM-WIDE.
 > Shipped: `api/src/partner/delivery-defaults.helper.ts` (pure selector), `deliveryDefaults` on `GET /partner/me`
 > (read from the existing primary-outlet query, no extra query), `usePartnerIdentity().deliveryDefaults`,
 > `platform/src/lib/address-prefill.ts` (`applyAddressPrefill`; moved from `app/partner/rewards/` on 2026-11-07 so the

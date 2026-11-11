@@ -1,5 +1,10 @@
 # Runbook — Production Cutover (`develop` → `main` = prod deploy)
 
+> ⚠️ **Current procedure (2026-11-11):** prod deploy is MANUAL ("Deploy — Production (main)" → Run). From the #59 + Sales
+> Import release on, every prod deploy has a **PREFLIGHT** (3 Hubble secrets must exist) and this release has a
+> **"prepare main" checklist** — both in [`PROD-CUTOVER-RECORD.md`](PROD-CUTOVER-RECORD.md) (top sections). The
+> 2026-06-30 procedure below is the historical first cutover.
+
 > # ✅ EXECUTED & COMPLETE — 2026-06-30
 > **This cutover was executed and is COMPLETE on 2026-06-30.** Prod `main` HEAD moved `b3ab2e0` → **`2fa020c`**;
 > both prod services (`gifsy-api`, `gifsy-frontend`) serve `2fa020c`; prod `/health` = 200. The 8 additive migrations

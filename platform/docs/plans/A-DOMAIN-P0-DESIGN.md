@@ -105,6 +105,12 @@ and swaps the backend `whatsapp-kyc.config.ts` reader to it (in-code map as fall
   subdomain heuristic → else **fail-closed** (404/platform home) in prod/staging; **dev keeps the
   `deoleo` default**. After the registry is retired (P5), the ladder is DB → heuristic → fail-closed.
 - Flag `TENANT_ROUTING_SOURCE=db|registry` gates which is authoritative (instant rollback).
+- **Fixes 2026-11-11 (on staging `7c85d9fd`, NOT yet on prod):** the SSR render path now keeps its routing snapshot fresh
+  (render-side tenant refresh with a cold-start backoff) — prod rendered a NEW tenant (`bajajloyalty.gifsy.in`) as the generic
+  "LoyaltyBase" shell because the render side never saw it; uploaded branding images are served through a public, validated
+  API route (prod returned 403 on them); the proxy strips client-sent internal headers (spoofable) and exempts `public/Logos`
+  from its matcher. Staging-verified: Deoleo + Bajaj login pages render their own branding; branding-route probes 404, other
+  `/api/public` 401, `/Logos/bajaj.png` 200.
 
 ## 6. `GET /v1/tenants/routing` — the public routing endpoint (contract)
 

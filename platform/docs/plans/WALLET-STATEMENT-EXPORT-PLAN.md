@@ -7,7 +7,7 @@
 > It can't be done per tenant: the wallet page, the ledger page and the passbook service are single shared code paths,
 > and the fixes below (missing Balance, broken `--50` sign, 20-row truncation) are defects in that shared code.
 > There's no per-tenant config to hang this on, and adding a flag just to hide a correctness fix would be YAGNI.
-> **Status: BUILT + independently reviewed (2026-11-06) on branch `worktree-agent-aa3654f9fde6b0c8a`, NOT pushed.
+> **Status: ✅ SHIPPED to prod in cutover #57 (`ff45f6b`, 2026-11-07).** Built + independently reviewed 2026-11-06 on branch `worktree-agent-aa3654f9fde6b0c8a`.
 > D9 final (owner, 2026-11-06): KEEP the interim PDF text — "Rs." for ₹ and names in English letters only (see §D9
 > FINDING). Approved as PLATFORM-WIDE by the owner; §OWNER DECISIONS (final) override anything below where they differ.**
 > Task 0 (staging DB chain audit) still to be run before the push. No schema change, no migration, no new npm

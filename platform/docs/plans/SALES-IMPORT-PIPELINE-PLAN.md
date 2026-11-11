@@ -1,16 +1,18 @@
 # Sales Import Pipeline — Implementation Plan (DMS invoice-line file → monthly KPI achievements)
 
-> **Status (2026-11-10):** P0–P3 COMPLETE on branch `feat/sales-import` (worktree `.claude/worktrees/sales-import`, merged locally with
-> develop `af155bb`, NOT pushed). P3 hardening = 3 audit rounds + 3 re-checks, all findings fixed (§10a.8–§10a.10); month history +
-> "Recalculate from stored history" added (§10b). Real-file proof on a throwaway local Postgres: 635,427 rows; Oct ₹586,716,492.12 /
-> 170,312.543 cases; Nov ₹34,439,896.87 / 10,085.354 cases — exact vs an independent calculation; worker ~3 min, heap peak ~1.06 GB;
-> apply Oct ~12–16 s. Full gates on the combined branch: api jest 4,996 · platform vitest 3,510 (+87 skipped) · build + tsc green.
-> **Next = P4 staging (§13.2):** owner APPROVED (2026-11-10) the push to develop + staging infra (job `gifsy-sales-import-staging`,
-> secret `SALES_IMPORT_DRAIN_SECRET_STAGING` — create it BEFORE the push, `run.jobsExecutor` binding, 10-min Scheduler drain).
-> Prod infra = a separate owner OK at release; the owner releases this TOGETHER with batch #59 in one prod release.
-> Extras in progress on `feat/sales-import-extras` (KPI picker from month history; graceful worker SIGTERM).
-> Owner also approved (2026-11-10, platform-wide) the upload guard on logout / brand-switch / exit-tenant / log-out-all-devices
-> (force mode, 5 s timeout; no behaviour change when no upload runs). **Read §10a first** for deviations and file ownership.
+> **Status (2026-11-11): P0–P3 COMPLETE · P4 STAGING DONE — LIVE on staging since develop `7c85d9fd` (2026-11-11), NOT on prod.**
+> Shipped to staging as part of one release with batch #59 (+ Bajaj prod config screens, branding/routing fixes, per-user rate limits,
+> OTP hardening); the owner releases it to prod TOGETHER with #59. Includes the extras (§10c): month history product-list summary +
+> **"Rebuild product list"**, KPI picker from month history, reprocess-as-new, graceful worker stop (SIGTERM, exit 143), and the runner
+> safety net (`salesImport` can't be switched ON where `SALES_IMPORT_RUNNER` isn't configured). Staging infra CREATED (§14). **Staging
+> run on the REAL DMS file (2026-11-11):** 214.7 MB in 52 parts through the real UI pipeline → the job started <1 s after complete, ran
+> 8 m 28 s → READY import `6b681de7-1495-4129-9471-0fdc73a58e3b`: 635,427 rows (1 skipped); Oct ₹586,716,492.12 / 170,312.546 cases
+> (per-outlet 3-dp rounding; raw 170,312.543); Nov ₹34,439,896.87 / 10,085.335 cases (raw 10,085.354); Oct matched 4,874 outlets
+> ₹136,984,266.33. **NOT applied** — apply is blocked until bajaj importer-owned KPIs exist (owner supplies D-8/D-9, §17). Drain endpoint
+> 403 without the secret, 200 from the Scheduler. Local real-file proof (throwaway Postgres) was exact to the paisa vs an independent
+> calculation; the scratchpad copies of the file are deleted. **Prod:** infra NOT created — separate owner OK at release (§14); until
+> then the API refuses to switch `salesImport` ON in prod. Owner approved (2026-11-10, platform-wide) the upload guard on logout /
+> brand-switch / exit-tenant / log-out-all-devices (force mode, 5 s timeout). **Read §10a first** for deviations and file ownership.
 > Owner decisions (final): D-1 = A (guard), D-3 = A (`exceljs`), D-4 = A (Cloud Run Job), D-5 = A (reuse `targets:*`).
 > **Classification:** ⚠️ **PLATFORM-WIDE but TENANT-GATED.** The owner approved it as such: new shared module + schema +
 > two small, data-gated edits to the shared manual achievement upload. It is dormant for every tenant until the
@@ -761,7 +763,7 @@ needed. Task 0-5a's pass criterion (< 10 min, < 1.5 GB) is met. Without the heap
 run), so set the cap. ⚠️ Lane I: Cloud Run's filesystem is in-memory. If a file puts `sharedStrings.xml` AFTER the worksheet in the zip,
 exceljs may buffer the sheet. Cover that order in the I-4 tests and fail with a readable message rather than an OOM.
 
-### 10a.5 Spike (b): IAM to start a Cloud Run Job execution from the API (docs-checked 2026-11-09; TO VERIFY on staging)
+### 10a.5 Spike (b): IAM to start a Cloud Run Job execution from the API (docs-checked 2026-11-09; VERIFIED on staging 2026-11-11)
 From the Cloud Run IAM roles reference (docs.cloud.google.com/run/docs/reference/iam/roles) and the "Execute jobs" page:
 - `run.jobs.run` (execute, NO overrides) is in `roles/run.invoker`, `roles/run.jobsExecutor`, `roles/run.jobsExecutorWithOverrides`,
   `roles/run.developer`, `roles/run.admin`.
@@ -772,8 +774,8 @@ From the Cloud Run IAM roles reference (docs.cloud.google.com/run/docs/reference
   no-override design (the job claims QUEUED rows itself), `roles/run.jobsExecutor` is enough. Bind on the job, not the project, so the
   API SA cannot start the migrate/seed jobs.
 - `iam.serviceAccounts.actAs` is not listed for executing a job (it applies to deploy/update). It is moot anyway: the job runs as the same
-  `gifsy-api-sa`. Still to verify on staging, with the owner's go for the binding: `POST …/jobs/{job}:run` from the API → HTTP 200 and
-  an execution created.
+  `gifsy-api-sa`. **Verified on staging 2026-11-11** (binding owner-approved): with `roles/run.jobsExecutor` only, the API started the job
+  execution <1 s after the real upload completed (no overrides needed).
 
 ### 10a.6 What the lanes must know before starting
 - Run `npm ci` in `api/` and `platform/`, then `npx prisma generate` in `api/` (tsc needs the new models).
@@ -975,9 +977,9 @@ covered sets' keys), `dimensionKeysDiffer`, `totalCombos` (uncapped distinct cou
   stamp is an `updateMany`; count 0 → 404 and the transaction rolls back); a statement timeout (e.g. the lock wait
   behind a long apply) → 409 "busy, try again".
   `SalesMonthRow.productListCurrent` (false only with history and a summary not from it) drives the Months-page button.
-- **Migration note.** `20261112140000` was EDITED IN PLACE several times on this branch; as of 2026-11-10 it exists only
-  on the local branches `feat/sales-import-extras` and `feat/sales-import` (not on `develop` / `main` or any remote), so
-  no shared database has applied it. **A local DB that applied an older version must be reset** (`prisma migrate reset`
+- **Migration note.** `20261112140000` was EDITED IN PLACE several times on this branch; as of 2026-11-10 it existed only
+  on local branches; since 2026-11-11 its FINAL version is on `develop` and applied to the staging DB (not on `main`/prod). It
+  must not be edited again. **A local DB that applied an older version must be reset** (`prisma migrate reset`
   on the local dev DB) before applying this one.
 - **Read path = strictly read-only.** GET history-combos runs ONE `SET TRANSACTION READ ONLY` transaction under
   `SET LOCAL statement_timeout = 10000` (`HISTORY_COMBOS_STATEMENT_TIMEOUT_MS`; tx bound 45 s): the set headers (with their
@@ -1297,9 +1299,11 @@ upload → READY → preview → apply → check My Targets/target card show the
 open month export → 409 (if D-1=A). Screenshot evidence for each step.
 
 ### 13.2 Staging checklist (owner approves push + infra first)
-- [ ] Job `gifsy-sales-import-staging` deployed; API env `SALES_IMPORT_RUNNER=job`, `SALES_IMPORT_JOB`, `GCP_PROJECT`; IAM binding applied.
-- [ ] Deoleo staging smoke unchanged (achievement upload, targets, engine preview).
-- [ ] Bajaj staging: `salesImport` ON; mapping entered (Appendix A); KpiDefs exist (D-9); definitions entered.
+_Status 2026-11-11: infra + real-file ingest DONE on staging (`7c85d9fd`); apply / close / engine steps WAIT for the bajaj importer-owned
+KPIs (owner D-8/D-9). Synthetic-file steps not run on staging (covered by tests + the local runtime pass)._
+- [x] Job `gifsy-sales-import-staging` deployed; API env `SALES_IMPORT_RUNNER=job`, `SALES_IMPORT_JOB`, `GCP_PROJECT`; IAM binding applied (2026-11-11).
+- [x] Deoleo staging login renders its own branding; `salesImport` stays OFF for deoleo (achievement-upload/engine smoke not re-run).
+- [ ] Bajaj staging: `salesImport` ON ✅; mapping entered ✅ (CUSTOMER CODE / CUSTOMER / INVOICE DATE / NET AMT / QTY (CASES); dims CODE→brand, CLUB SKU→skuGroup); KpiDefs (D-9) + definitions ⏳ owner.
 - [ ] **Synthetic small file** (generator `api/scripts/make-synthetic-sales.ts`, CSV + xlsx, ~2k lines over 2 months, real staging outlet codes +
       50 unknown codes + returns + a partial month starting the 5th + 3 bad dates). Expect exact totals (the generator prints them) and
       exact unmatched/skip counts, all warnings visible, partial-month ack required.
@@ -1307,7 +1311,7 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
 - [ ] Apply, then manual achievement upload with an owned KPI column → `skippedImporterOwnedKpis` notice; owned values unchanged; non-owned values updated.
 - [ ] Delete that manual batch → manual keys gone, owned keys intact.
 - [ ] Close previous month → can't tick it; CLIENT_ADMIN can't reopen; GIFSY_ADMIN reopens → audit rows present for apply/close/reopen.
-- [ ] **Real file (~200 MB, 635k rows), uploaded by the owner through the UI** (the file is not in the repo): upload time, job duration,
+- [~] **Real file — INGEST DONE 2026-11-11** (214.7 MB, 52 parts; job 8 m 28 s; READY `6b681de7…`; totals in the status header; Oct matched 4,874 outlets). Apply time + dashboards ⏳ (no importer-owned KPIs yet). Original item: **Real file (~200 MB, 635k rows), uploaded by the owner through the UI** (the file is not in the repo): upload time, job duration,
       peak memory (Cloud Run job metrics), matched ≈ 77% of programme outlets, ~199k unmatched customers, month split correct, ₹ totals tie to
       the DMS file's own pivot (owner supplies the control totals per month), apply time per month < 30 s, dashboards render.
 - [ ] Engine: author the §9 rule (draft → simulate → publish), close the month, preview → export; spot-check 5 wholesalers by hand
@@ -1318,6 +1322,14 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
 ---
 
 ## 14. Infra changes (owner-gated, D-4)
+> **Status 2026-11-11 — STAGING DONE, PROD PENDING the owner.** Staging (owner-approved 2026-11-10/11): secret
+> `SALES_IMPORT_DRAIN_SECRET_STAGING`; Cloud Run Job `gifsy-sales-import-staging` (args `--max-old-space-size=1700
+> dist/sales-import/worker.main.js`, 2Gi, 1 CPU, 3600 s, 1 retry; deployed by `deploy-staging.yml`, serves `staging-7c85d9fd`);
+> `roles/run.jobsExecutor` for `gifsy-api-sa` on that job (no overrides needed); Cloud Scheduler `sales-import-drain-staging`
+> (`*/10` Asia/Kolkata, `--attempt-deadline=170s`, header `x-drain-secret`) — verified 200 from the Scheduler, 403 without the
+> secret. `roles/secretmanager.viewer` granted to `gifsy-deployer` for the staging preflight (redundant; over-privilege review open).
+> **Prod:** none of it exists and `deploy.yml` has no worker step — job + API env + `SALES_IMPORT_DRAIN_SECRET` (+ prod preflight) +
+> `run.jobsExecutor` + Scheduler need a separate owner OK at release. Until then `salesImport` can't be switched ON in prod.
 - `deploy-staging.yml` (after the migrate step `:98-109`) and later `deploy.yml`:
   `gcloud run jobs deploy gifsy-sales-import-staging --image=…api:staging-${sha} --region … --command=node
   --args=--max-old-space-size=1700,dist/sales-import/worker.main.js --memory=2Gi --cpu=1 --task-timeout=3600 --max-retries=1 --tasks=1
@@ -1328,7 +1340,7 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
   `SALES_IMPORT_DRAIN_SECRET` if the Scheduler fallback is wanted).
 - `terraform/iam.tf`: `google_cloud_run_v2_job_iam_member` for `gifsy-api-sa` on the job: `roles/run.jobsExecutor` if the runner
   calls `jobs:run` with NO overrides (the plan's design), or `roles/run.jobsExecutorWithOverrides` if it passes overrides (e.g. an
-  `IMPORT_ID` env). See §10a.5 (to verify on staging with the owner's go).
+  `IMPORT_ID` env). See §10a.5 (verified on staging 2026-11-11 with `roles/run.jobsExecutor`).
 - Job env: `NODE_OPTIONS=--max-old-space-size=1700` (2 GiB job; real-DB finding 1 — see §7.1 step 11. The earlier 1536 left the
   real file only ~8 % headroom under the heap backstop).
   Memory budget at that setting (§7.1 step 11): old space 1,700 MB → V8 heap_size_limit ≈ 1,892 MB on node:24; heap
@@ -1343,7 +1355,7 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
   BEFORE the new API revision serves. Verified in the workflows: `deploy-staging.yml` and `deploy.yml` both run the
   `gifsy-migrate[-staging]` Cloud Run job with `--execute-now --wait` in the SAME job, BEFORE the `gcloud run deploy`
   step, so a failed migration fails the job and the API is not deployed. The worker job (`gifsy-sales-import[-staging]`)
-  deploy step (added for staging in `deploy-staging.yml` on this branch; the prod `deploy.yml` step is still owner-gated) must also come AFTER the migrate step.
+  deploy step (in `deploy-staging.yml`, live on develop since 2026-11-11; the prod `deploy.yml` step is still owner-gated) must also come AFTER the migrate step.
 - GCS: parts + unmatched under `sales-imports/<clientId>/<importId>/`. The API deletes parts 30 days after READY (lazy, on list) or
   immediately on DELETE. Bucket lifecycle is unchanged.
 - **Retention (current):** per-import data (raw parts, per-run unmatched.csv, aggregates, sample rows) 30 days after the
@@ -1382,9 +1394,9 @@ open month export → 409 (if D-1=A). Screenshot evidence for each step.
 - New RBAC permission keys (D-5 A).
 
 ## 17. Open questions (to the owner)
-_(Status 2026-11-10: Q1–Q3 DECIDED — D-1 = A, D-3 = A, D-4 = A; staging infra approved 2026-11-10, prod infra = separate OK at release.
-Q7 decided = 30 days for per-import data (§14). Q4–Q5 still open: the owner supplies points per case, monthly cap, KPI list and focus sets
-(BSC wholesalers only) when configuring Bajaj on staging.)_
+_(Status 2026-11-11: Q1–Q3 DECIDED — D-1 = A, D-3 = A, D-4 = A; staging infra approved + CREATED 2026-11-10/11, prod infra = separate OK at release.
+Q7 decided = 30 days for per-import data (§14). Q4–Q5 still open and now BLOCKING the staging apply of the real import `6b681de7…`: the
+owner supplies points per case, monthly cap, KPI list and focus sets (BSC wholesalers only).)_
 
 1. ~~D-1: approve the 4-decorator engine guard (A), or no engine edit (B)?~~ Decided: A.
 2. ~~D-3: approve adding `exceljs` (or go CSV-only)?~~ Decided: A.
