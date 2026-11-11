@@ -19,7 +19,6 @@ import {
   assertVoucherCodeReusableInTx,
   canFillStoredVoucher,
   combineGuards,
-  planChannelWrite,
   planVoucherWrite,
   rethrowUnlessIdempotentPinRace,
   withPinRaceRetry,
@@ -532,8 +531,10 @@ export class VendorPortalService {
    * PRIVACY INVARIANT (decision #15): this DELIBERATELY OMITS the 194R cost basis —
    * `valuePaise`, `pointsDeducted`, `totalPointsCost`, `sellingValuePaise`, `metadata`,
    * `sourceType`, `moderationStatus`. The console mapper emits `valuePaise`; the vendor
-   * view must NOT. (VENDOR_ORDER_SELECT already never selects those columns; this mapper
-   * is the second line of defence so no future select-widening leaks them.)
+   * view must NOT. VENDOR_ORDER_SELECT does select `pointsDeducted` and `metadata` — read ONLY
+   * to derive `voucherFillable` (paid? handed to Hubble?) — but they are never returned: this
+   * mapper is an explicit WHITELIST (no row spread), so neither those nor any future
+   * select-widening reach the vendor.
    */
   private toVendorOrderView(row: VendorOrderRowRetained) {
     const address = [
@@ -569,7 +570,9 @@ export class VendorPortalService {
       voucherPin: row.voucherPin ?? null,
       voucherProvider: row.voucherProvider,
       // The server would accept a set-once PIN / provider on the stored code (F4 — one rule).
-      voucherFillable: canFillStoredVoucher(row),
+      // Must equal exactly what the VENDOR write paths accept: updateFulfilment + transition refuse
+      // every VENDOR_TERMINAL_STATUS (incl. DELIVERED, which Gifsy still fills) before planning.
+      voucherFillable: !VENDOR_TERMINAL_STATUSES.includes(row.status) && canFillStoredVoucher(row),
       podUrl: row.podUrl,
       delivery,
       piiWithheld: row.piiWithheld,
@@ -637,7 +640,7 @@ export class VendorPortalService {
       },
       select: {
         id: true, status: true, voucherCode: true, voucherPin: true, voucherProvider: true, pointsDeducted: true,
-        redemptionMode: true, metadata: true, updatedAt: true, rewardId: true, fulfilmentChannel: true,
+        redemptionMode: true, metadata: true, updatedAt: true, rewardId: true,
       },
     });
     if (!existing) throw new NotFoundException('Order not found');
@@ -654,8 +657,6 @@ export class VendorPortalService {
       voucherPin: dto.voucherPin,
     };
     const voucherPlan = planVoucherWrite(existing, voucherInput);
-    // CHANNEL INVARIANT: no switch to a physical channel while a voucher code is stored.
-    const channelGuard = planChannelWrite(existing, dto.fulfilmentChannel);
 
     // GUARDED write (compare-and-set): the "open + assigned to me" checks above come from a
     // read, so a concurrent close (DELIVERED/RETURNED/CANCELLED/FAILED by Gifsy, a UTR upload,
@@ -673,7 +674,7 @@ export class VendorPortalService {
           fulfilledByVendorId: scope.vendorId,
           partner: { clientId: scope.clientId },
           status: { notIn: [...VENDOR_TERMINAL_STATUSES, RedemptionStatus.PENDING] },
-          ...(combineGuards(voucherPlan.guard, channelGuard) ?? {}),
+          ...(voucherPlan.guard ?? {}),
         },
         data: {
           trackingNumber: dto.trackingNumber,
@@ -805,8 +806,6 @@ export class VendorPortalService {
       voucherPin: dto.voucherPin,
     };
     const voucherPlan = planVoucherWrite(order, voucherInput);
-    // CHANNEL INVARIANT: no switch to a physical channel while a voucher code is stored.
-    const channelGuard = planChannelWrite(order, dto.fulfilmentChannel);
 
     // BUG-1: a DIGITAL_VOUCHER order cannot be marked DELIVERED without a voucher code —
     // the member would have nothing to redeem. Check the EFFECTIVE channel/code (the value
@@ -849,7 +848,7 @@ export class VendorPortalService {
       await transitionOrderStatusOrConflict(tx, {
         orderId: id,
         expectedFrom: fromStatus,
-        extraGuard: combineGuards({ fulfilledByVendorId: scope.vendorId }, voucherPlan.guard, channelGuard),
+        extraGuard: combineGuards({ fulfilledByVendorId: scope.vendorId }, voucherPlan.guard),
         toStatus,
         data,
         changedById: user.sub,

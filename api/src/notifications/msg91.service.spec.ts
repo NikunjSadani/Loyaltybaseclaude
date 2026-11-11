@@ -3,6 +3,7 @@
 // the missing-authKey dev bypass, and the failure throws.
 // Run: npx jest src/notifications/msg91.service.spec.ts
 
+import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as nodemailer from 'nodemailer';
 import { Msg91Service } from './msg91.service';
@@ -271,6 +272,46 @@ describe('Msg91Service.sendSms (v5 flow)', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
     await expect(service.sendSms('9000000001', 'dlt-tpl-1', {})).rejects.toThrow(/timeout/i);
+  });
+
+  it('a provider error echoing a flagged secret is withheld (thrown + logged); the phone is logged as last 4 only', async () => {
+    const CODE = '6001220012345678';
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ type: 'error', message: `invalid var code=${CODE}` }),
+    }) as unknown as typeof fetch;
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    const logged: string[] = [];
+    jest.spyOn((service as unknown as { logger: Logger }).logger, 'error').mockImplementation((m: unknown) => {
+      logged.push(String(m));
+    });
+    const err = await service.sendSms('9000000001', 'dlt-tpl-1', { code: CODE }, { secretValues: [CODE] }).catch((e: Error) => e);
+    expect(String(err)).toContain('details withheld');
+    expect(String(err)).not.toContain(CODE);
+    expect(logged.join(' | ')).not.toContain(CODE);
+    expect(logged.join(' | ')).not.toContain('9000000001');
+    expect(logged.join(' | ')).toContain('••••0001');
+  });
+
+  it('a non-JSON response → a generic reason (HTTP n), never the body snippet', async () => {
+    const CODE = '6001220012345678';
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => {
+        throw new SyntaxError(`Unexpected token '<', "<html>bad ${CODE}" is not valid JSON`);
+      },
+    }) as unknown as typeof fetch;
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    jest.spyOn((service as unknown as { logger: Logger }).logger, 'error').mockImplementation(() => undefined);
+    const smsErr = await service.sendSms('9000000001', 'dlt-tpl-1', { code: CODE }).catch((e: Error) => e);
+    expect(String(smsErr)).toContain('MSG91 returned a non-JSON response (HTTP 502)');
+    expect(String(smsErr)).not.toMatch(/html|not valid JSON/);
+    expect(String(smsErr)).not.toContain(CODE);
+    const waErr = await service.sendWhatsappTemplate('9000000001', 'voucher_code', [CODE]).catch((e: Error) => e);
+    expect(String(waErr)).toContain('MSG91 returned a non-JSON response (HTTP 502)');
+    expect(String(waErr)).not.toContain(CODE);
   });
 });
 

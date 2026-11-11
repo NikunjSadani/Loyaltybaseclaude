@@ -751,11 +751,14 @@ function VoucherRedeemSheet({
 
   // Step 1: create the order + trigger OTP. FREE_AMOUNT sends `amount`.
   const handleSendOtp = async () => {
+    // The amount is checked FIRST (an invalid amount shows "Check the amount" on this very tap,
+    // even when consent is also missing — then both are shown).
+    const amountOk = !amtInvalid || amountField.checkBeforeSubmit();
     // Vendor-PII consent is a hard gate for vendor-sourced items (decision #15).
     if (needConsent && !consent) {
       toast.error('Please agree to share your delivery details to continue'); return;
     }
-    if (amtInvalid && !amountField.checkBeforeSubmit()) return; // "Check the amount" — never sent
+    if (!amountOk) return; // "Check the amount" — never sent
     // Freeze what THIS order is created with (the field is locked from here on).
     const frozenAmount = isFixed ? fixedPts : freeAmt;
     setSubmitting(true);
@@ -917,7 +920,7 @@ function VoucherRedeemSheet({
                   )}
                   placeholder={`${minFreeAmount}`}
                   value={amount}
-                  // Whole rupees only (typed "." blocked; "750,5" / a pasted decimal → "Check the amount").
+                  // Whole rupees only: "750.5" / "750,5" / a pasted decimal stay visible → "Check the amount" on commit.
                   {...amountField.inputProps}
                   // Locked once the OTP is sent — the order already carries this amount.
                   disabled={otpSent}
@@ -1149,7 +1152,7 @@ function CashPayoutSheet({
                   amtInvalidShown || amountHint ? 'border-red-300' : 'border-gray-200')}
                 placeholder={`${minInr}`}
                 value={amount}
-                // Whole rupees only (typed "." blocked; "750,5" / a pasted decimal → "Check the amount").
+                // Whole rupees only: "750.5" / "750,5" / a pasted decimal stay visible → "Check the amount" on commit.
                 {...amountField.inputProps}
                 // Locked once the OTP is sent — the payout order already carries this amount.
                 disabled={otpSent}

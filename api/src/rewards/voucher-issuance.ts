@@ -43,12 +43,6 @@ export function maskVoucherCodeForAudit(code: string | null | undefined): string
   return t.length >= VOUCHER_MASK_MIN_LENGTH ? `••••${t.slice(-4)}` : '••••';
 }
 
-/**
- * What a stored (persisted) copy of the WhatsApp/SMS `code` var shows in place of the PIN. Plain
- * ASCII (no bullets): the SMS leg sends from that stored row, and a GSM-7 SMS can't carry "•".
- */
-export const MASKED_PIN = 'see My Orders';
-
 export async function recordVoucherIssuedAudit(
   db: Db,
   args: {
@@ -109,7 +103,10 @@ export async function programLabelFor(
  * {{5}} `code` = "<code> | PIN: <pin>" (single line), but NO persisted copy holds the PIN:
  *  - bell/push/SMS body = "Your <name> voucher is ready — card no. and PIN are in My Orders.";
  *  - every STORED vars copy (IN_APP/PUSH variables, the SMS queue row) gets `maskedVars.code` =
- *    "<code> | PIN: see My Orders" (ASCII — the dormant SMS leg, which sends from its stored row, sends it masked);
+ *    the CODE ONLY (single line, no PIN text) — the dormant SMS leg sends from its stored row, and
+ *    a DLT variable has a tight length cap, so the var carries nothing but the code. FUTURE DLT
+ *    TEMPLATE: the "PIN, if any, is in My Orders" wording belongs in the registered template's
+ *    FIXED text, never in the {#var#};
  *  - the code, the PIN and the combined value are passed as secrets, so a delivery-failure reason
  *    (MessageDeliveryReceipt.failureReason, shown to CLIENT_ADMIN) and the send-failure logs are
  *    scrubbed to "••••". (Secrets are passed on the no-PIN path too — the code alone.)
@@ -167,7 +164,8 @@ export async function notifyVoucherIssued(
         voucherName,
         code: combined,
       },
-      ...(pin ? { maskedVars: { code: voucherCodeVar(o.voucherCode, MASKED_PIN) } } : {}),
+      // Stored copies + the SMS var: the code only (DLT var limit) — see the doc comment above.
+      ...(pin ? { maskedVars: { code: whatsappSafeVar(o.voucherCode) } } : {}),
       // Raw AND single-line forms (a provider may echo either); de-duplicated.
       secretValues: pin
         ? [...new Set([combined, o.voucherCode, whatsappSafeVar(o.voucherCode), pin, whatsappSafeVar(pin)])]

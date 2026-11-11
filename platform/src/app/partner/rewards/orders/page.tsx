@@ -128,21 +128,33 @@ function brandLabel(rewardName: string): string {
 
 function CopyButton({ value, testId, label }: { value: string; testId: string; label: string }) {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  // ONE pending timer per button: every tap clears the previous one, so an old "reset to idle"
+  // can never cut a newer message short.
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const later = (fn: () => void, ms: number) => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(fn, ms);
+  };
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
 
   const copy = async () => {
-    // A new tap always starts fresh (a previous "Copy failed" hint is cleared).
+    // A new tap always starts fresh (a previous "Copied" / "Copy failed" is cleared).
+    if (timer.current) clearTimeout(timer.current);
     setState('idle');
     try {
       if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
       await navigator.clipboard.writeText(value);
       setState('copied');
-      setTimeout(() => setState((s) => (s === 'copied' ? 'idle' : s)), 2000);
+      later(() => setState('idle'), 2000);
     } catch {
       // Clipboard blocked / unavailable (insecure context, old WebView): say so, and the value
-      // itself stays user-selectable (select-all) so a long-press copies it.
-      setState('failed');
-      // The failure hint clears itself after ~4 s (or on the next tap, above).
-      setTimeout(() => setState((s) => (s === 'failed' ? 'idle' : s)), 4000);
+      // itself stays user-selectable (select-all) so a long-press copies it. Set on the NEXT tick
+      // so the live region really goes empty first — a repeated failure is announced again.
+      later(() => {
+        setState('failed');
+        // The failure hint clears itself after ~4 s (or on the next tap, above).
+        later(() => setState('idle'), 4000);
+      }, 0);
     }
   };
 

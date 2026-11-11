@@ -122,21 +122,27 @@ describe('GIFVC — voucher handling', () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'DELIVERED', voucherCode: '6001220012345678', voucherPin: '482913', voucherProvider: 'Gifsy' }]);
     const row = await openRow('RDM-1');
     expect(within(row).getByTestId('order-voucher-code')).toHaveTextContent('6001220012345678');
-    // The PIN is masked behind a per-row "Show" toggle (aria-pressed), hidden by default.
+    // The PIN is masked behind a per-row "Show PIN" toggle, hidden by default.
     const pin = within(row).getByTestId('order-voucher-pin');
     expect(pin).toHaveTextContent('PIN ••••');
     expect(pin).not.toHaveTextContent('482913');
-    // FIXED accessible name (never flips to "Hide"); the state is aria-pressed only.
+    // Label-flip pattern: the accessible name CONTAINS the visible text ("Show PIN" / "Hide PIN");
+    // no aria-pressed (a flipping name + a pressed state double-announces).
     const toggle = within(pin).getByRole('button', { name: 'Show PIN for order RDM-1' });
-    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    expect(toggle).toHaveTextContent('Show PIN');
+    expect(toggle).not.toHaveAttribute('aria-pressed');
     await userEvent.click(toggle);
-    expect(pin).toHaveTextContent('PIN 482913');
-    expect(within(pin).getByRole('button', { name: 'Show PIN for order RDM-1' })).toHaveAttribute('aria-pressed', 'true');
-    expect(within(pin).queryByRole('button', { name: /hide/i })).toBeNull();
+    expect(pin).toHaveTextContent('482913');
+    const hide = within(pin).getByRole('button', { name: 'Hide PIN for order RDM-1' });
+    expect(hide).toHaveTextContent('Hide PIN');
+    expect(hide).not.toHaveAttribute('aria-pressed');
+    await userEvent.click(hide);
+    expect(pin).not.toHaveTextContent('482913');
+    expect(within(pin).getByRole('button', { name: 'Show PIN for order RDM-1' })).toBeInTheDocument();
   });
 
   it('GIFVC2e: a stored code WITHOUT a PIN offers a set-once PIN box on a forward move and sends only the PIN', async () => {
-    const calls = installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Gifsy' }]);
+    const calls = installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Gifsy', voucherFillable: true }]);
     const row = await openRow('RDM-1');
     await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
     expect(screen.getByTestId('voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
@@ -147,6 +153,15 @@ describe('GIFVC — voucher handling', () => {
     await waitFor(() => expect(calls.some((c) => c.url.endsWith('/transition'))).toBe(true));
     const body = JSON.parse(String(calls.find((c) => c.url.endsWith('/transition'))!.init!.body));
     expect(body).toEqual({ toStatus: 'DISPATCHED', voucherPin: '9911' });
+  });
+
+  it('item 14: the row PIN box follows the SERVER voucherFillable — false (e.g. unpaid / cash / Hubble) → no PIN box', async () => {
+    installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Gifsy', voucherFillable: false }]);
+    const row = await openRow('RDM-1');
+    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    expect(screen.getByTestId('voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
+    expect(screen.queryByLabelText('PIN (if the card has one)')).toBeNull();
+    expect(screen.queryByText('Add the PIN for this card — it can be saved once')).toBeNull();
   });
 
   it('GIFVC2f: a stored PIN is read-only + masked in the advance form (no PIN input)', async () => {

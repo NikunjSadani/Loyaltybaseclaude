@@ -521,7 +521,7 @@ function CatalogueInner() {
                           {gift.amountOptions?.length ? `From ₹${gift.amountOptions[0].toLocaleString('en-IN')}` : 'You set the amount'}
                         </span>
                       ) : (
-                        <span className="text-sm font-bold text-[var(--brand-primary)]">{gift.points.toLocaleString()} pts</span>
+                        <span className="text-sm font-bold text-[var(--brand-primary)]">{gift.points.toLocaleString('en-IN')} pts</span>
                       )}
                       <span className="text-[10px] text-[var(--brand-primary)] font-medium">View details →</span>
                     </div>
@@ -621,7 +621,7 @@ function CatalogueInner() {
                             </>
                           ) : (
                             <>
-                              <p className="text-2xl font-bold text-[var(--brand-primary)]">{selectedGift.points.toLocaleString()} pts</p>
+                              <p className="text-2xl font-bold text-[var(--brand-primary)]">{selectedGift.points.toLocaleString('en-IN')} pts</p>
                               <p className="text-xs text-gray-400 mt-0.5">Required to redeem</p>
                             </>
                           )}
@@ -684,7 +684,7 @@ function CatalogueInner() {
                       {isFreeAmountGift(selectedGift) ? (
                         <p className="text-xs text-gray-400 font-medium">Amount you enter</p>
                       ) : (
-                        <p className="text-xs text-[var(--brand-primary)] font-bold">{selectedGift.points.toLocaleString()} pts</p>
+                        <p className="text-xs text-[var(--brand-primary)] font-bold">{selectedGift.points.toLocaleString('en-IN')} pts</p>
                       )}
                     </div>
                   </div>
@@ -709,7 +709,7 @@ function CatalogueInner() {
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-medium text-gray-900 truncate">{o.name}</p>
-                          <p className="text-xs text-gray-400">Balance: {o.balance.toLocaleString()} pts</p>
+                          <p className="text-xs text-gray-400">Balance: {o.balance.toLocaleString('en-IN')} pts</p>
                         </div>
                         {!canAfford && <span className="text-[10px] text-red-400 shrink-0 font-medium">Insufficient</span>}
                         {canAfford && <ChevronRight className="h-4 w-4 text-gray-300 shrink-0" />}
@@ -730,7 +730,7 @@ function CatalogueInner() {
                       {isFreeAmountGift(selectedGift) ? (
                         <p className="text-xs text-gray-400 font-medium">Amount you enter</p>
                       ) : (
-                        <p className="text-xs text-[var(--brand-primary)] font-bold">{selectedGift.points.toLocaleString()} pts</p>
+                        <p className="text-xs text-[var(--brand-primary)] font-bold">{selectedGift.points.toLocaleString('en-IN')} pts</p>
                       )}
                     </div>
                   </div>
@@ -782,7 +782,7 @@ function CatalogueInner() {
                       </div>
                       <div className="flex items-center justify-between pt-1">
                         <span className="text-xs text-gray-500">Current balance</span>
-                        <span className="text-sm text-gray-800">{redeem.outlet.balance.toLocaleString()} pts</span>
+                        <span className="text-sm text-gray-800">{redeem.outlet.balance.toLocaleString('en-IN')} pts</span>
                       </div>
                     </div>
                   ) : isFreeAmountGift(selectedGift) ? (
@@ -791,10 +791,11 @@ function CatalogueInner() {
                       <input
                         id="redeem-amount"
                         value={redeem.amount}
-                        // Whole rupees only (typed "." blocked; "750,5" / a pasted decimal → "Check the amount").
+                        // Whole rupees only: "750.5" / "750,5" / a pasted decimal stay visible and are
+                        // invalid on commit ("Check the amount — whole rupees only"), never shrunk.
                         {...wholeRupeeInputProps(
                           (v) => setRedeem((r) => ({ ...r, amount: v, amountFlagged: false, error: '' })),
-                          { onCommit: (bad) => setRedeem((r) => ({ ...r, amountFlagged: bad })) },
+                          { onCommit: (bad) => setRedeem((r) => ({ ...r, amountFlagged: bad })), value: redeem.amount },
                         )}
                         // Locked once the OTP is sent — the order already carries this amount.
                         disabled={redeem.otpSent}
@@ -812,15 +813,15 @@ function CatalogueInner() {
                       </p>
                       <div className="flex items-center justify-between pt-1">
                         <span className="text-xs text-gray-500">Current balance</span>
-                        <span className="text-sm text-gray-800">{redeem.outlet.balance.toLocaleString()} pts</span>
+                        <span className="text-sm text-gray-800">{redeem.outlet.balance.toLocaleString('en-IN')} pts</span>
                       </div>
                     </div>
                   ) : (
                     <div className="bg-gray-50 rounded-xl p-4 space-y-2">
                       {[
-                        { label: 'Current balance',  value: redeem.outlet.balance.toLocaleString(),                                 color: 'text-gray-800' },
-                        { label: 'Points to deduct', value: `− ${selectedGift.points.toLocaleString()}`,                            color: 'text-red-500'  },
-                        { label: 'Balance after',    value: (redeem.outlet.balance - selectedGift.points).toLocaleString(),          color: 'text-[var(--brand-primary)] font-bold' },
+                        { label: 'Current balance',  value: redeem.outlet.balance.toLocaleString('en-IN'),                                 color: 'text-gray-800' },
+                        { label: 'Points to deduct', value: `− ${selectedGift.points.toLocaleString('en-IN')}`,                            color: 'text-red-500'  },
+                        { label: 'Balance after',    value: (redeem.outlet.balance - selectedGift.points).toLocaleString('en-IN'),          color: 'text-[var(--brand-primary)] font-bold' },
                       ].map((r) => (
                         <div key={r.label} className="flex items-center justify-between">
                           <span className="text-xs text-gray-500">{r.label}</span>
@@ -1014,7 +1015,7 @@ function CatalogueInner() {
                               { label: 'Points deducted', value: `−${redeem.sentPoints.toLocaleString('en-IN')} pts` },
                               { label: 'New balance',     value: `${(redeem.outlet.balance - redeem.sentPoints).toLocaleString('en-IN')} pts` },
                             ]
-                          : [{ label: 'Current balance', value: `${redeem.outlet.balance.toLocaleString()} pts` }]),
+                          : [{ label: 'Current balance', value: `${redeem.outlet.balance.toLocaleString('en-IN')} pts` }]),
                       ].map((r) => (
                         <div key={r.label} className="flex justify-between text-sm">
                           <span className="text-gray-500">{r.label}</span>
@@ -1027,8 +1028,8 @@ function CatalogueInner() {
                     <div className="w-full bg-gray-50 rounded-xl p-4 text-left space-y-2">
                       {[
                         { label: 'Item',            value: selectedGift.name },
-                        { label: 'Points deducted', value: `−${(redeem.sentPoints ?? selectedGift.points).toLocaleString()}`, cls: 'text-red-500 font-bold' },
-                        { label: 'New balance',     value: `${(redeem.outlet.balance - (redeem.sentPoints ?? selectedGift.points)).toLocaleString()} pts`, cls: 'text-[var(--brand-primary)] font-bold' },
+                        { label: 'Points deducted', value: `−${(redeem.sentPoints ?? selectedGift.points).toLocaleString('en-IN')}`, cls: 'text-red-500 font-bold' },
+                        { label: 'New balance',     value: `${(redeem.outlet.balance - (redeem.sentPoints ?? selectedGift.points)).toLocaleString('en-IN')} pts`, cls: 'text-[var(--brand-primary)] font-bold' },
                       ].map((r) => (
                         <div key={r.label} className="flex justify-between text-sm">
                           <span className="text-gray-500">{r.label}</span>
@@ -1068,7 +1069,7 @@ function CatalogueInner() {
                   >
                     {isFreeAmountGift(selectedGift)
                       ? 'Redeem'
-                      : `Redeem for ${selectedGift.points.toLocaleString()} pts`}
+                      : `Redeem for ${selectedGift.points.toLocaleString('en-IN')} pts`}
                   </Button>
                 ) : (
                   <Button variant="outline" className="w-full" disabled>Out of Stock</Button>

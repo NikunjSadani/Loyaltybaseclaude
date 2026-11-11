@@ -14,7 +14,9 @@ import { MaskedPin } from './masked-pin';
  *  - the set-once "Add the PIN for this card" box appears ONLY when the server would accept it —
  *    `fillable` (server-computed `voucherFillable`: paid, CONFIRMED…DELIVERED, not Hubble, not
  *    cash). Otherwise there is no PIN box for a stored code;
- *  - with no stored code, the code + optional PIN are entered together (the backend checks status).
+ *  - with no stored code, the code + optional PIN are entered together (the backend checks status);
+ *  - `readOnly` (a PHYSICAL channel holding a stored code): only the stored card no. / PIN are
+ *    shown, read-only — the code is never hidden whatever the channel; no input boxes.
  * Labels: "Card no. / code" and "PIN (if the card has one)".
  */
 export function VoucherFulfilmentFields({
@@ -22,6 +24,7 @@ export function VoucherFulfilmentFields({
   storedPin,
   orderNumber,
   fillable = false,
+  readOnly = false,
   draft,
   set,
   inputCls,
@@ -32,6 +35,8 @@ export function VoucherFulfilmentFields({
   orderNumber?: string | null;
   /** Server: a set-once PIN may still be added to the stored code (GiftOrderDetail.voucherFillable). */
   fillable?: boolean;
+  /** Show only the stored values (no code / PIN inputs) — used on a physical channel. */
+  readOnly?: boolean;
   draft: FulfilmentDraft;
   set: <K extends keyof FulfilmentDraft>(k: K, v: FulfilmentDraft[K]) => void;
   inputCls: string;
@@ -39,7 +44,8 @@ export function VoucherFulfilmentFields({
   const code = storedCode?.trim() ? storedCode.trim() : null;
   const pin = storedPin?.trim() ? storedPin.trim() : null;
   // No PIN box for a stored code the server would not take a PIN on.
-  const pinBox = !pin && (!code || fillable);
+  const pinBox = !readOnly && !pin && (!code || fillable);
+  if (readOnly && !code) return null;
   return (
     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
       <div className="space-y-1 sm:col-span-2">

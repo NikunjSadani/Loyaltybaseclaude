@@ -3,8 +3,8 @@
  * Sales-assisted redeem — amounts (owner 2026-11-11).
  *  SA1: a Hubble "choose from amounts" gift card shows the amounts as buttons (with points at the
  *       tenant rate from /me) — no free typing — and posts the chosen amount.
- *  SA2: a free-amount item's ₹ input is whole-rupee only (typed "750.5" → 750; a pasted
- *       "1,250.75" → "Check the amount", nothing sent) and posts an integer.
+ *  SA2: a free-amount item's ₹ input is whole-rupee only (a typed "750.5" or a pasted "1,250.75"
+ *       stays visible → "Check the amount — whole rupees only", nothing sent) and posts an integer.
  *  SA4: once the OTP is sent the amount is frozen: success shows the ORDER's amount; "Change
  *       amount" returns to an unlocked field (fresh redeem).
  *  SA3: a catalogue WITHOUT a list item never calls /api/auth/me (no extra request for e.g. Deoleo).
@@ -105,7 +105,7 @@ describe('sales catalogue — redemption amounts', () => {
     expect(send).toBeEnabled();
     // F2: the next keystroke hides the message (never shown mid-typing)…
     await user.type(input, '5');
-    expect(input.value).toBe('1,250.755'); // F7a: a flagged text is edited verbatim
+    expect(input.value).toBe('1,250.755'); // an invalid text is edited verbatim
     expect(screen.queryByRole('alert')).toBeNull();
     // …and a tap on Send OTP commits: the message is back, nothing is sent.
     fireEvent.click(send);
@@ -113,7 +113,12 @@ describe('sales catalogue — redemption amounts', () => {
     expect(posts).toHaveLength(0);
     await user.clear(input);
     await user.type(input, '750.5');
-    expect(input.value).toBe('750');
+    expect(input.value).toBe('750.5'); // a typed "." is never swallowed — the amount is never changed
+    fireEvent.click(screen.getByRole('button', { name: /Send OTP/ }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount — whole rupees only');
+    expect(posts).toHaveLength(0);
+    await user.clear(input);
+    await user.type(input, '750');
 
     fireEvent.click(screen.getByRole('button', { name: /Send OTP/ }));
     await waitFor(() => expect(posts).toHaveLength(1));

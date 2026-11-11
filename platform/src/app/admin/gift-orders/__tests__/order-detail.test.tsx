@@ -120,23 +120,33 @@ describe('Gift order detail', () => {
     expect(screen.queryByText('Add the PIN for this card — it can be saved once')).toBeNull();
   });
 
-  it('F5: with a stored code the physical channels are disabled with the reason (and never switched to)', async () => {
+  it('a stored code: EVERY channel is selectable; on a physical channel the code + PIN stay visible read-only; Save sends no voucher clear', async () => {
     get.mockResolvedValue({
       success: true,
-      data: orderWith({ fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: 'CARD-1111-2222', voucherProvider: 'Croma', voucherFillable: true }),
+      data: orderWith({ fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: 'CARD-1111-2222', voucherProvider: 'Croma', voucherPin: '4455', voucherFillable: true }),
     });
+    patch.mockResolvedValue({ success: true, data: {} });
     render(<GiftOrderDetailPage />);
     await screen.findByText('DEO-26-000123');
-    const msg = "This order has a voucher code. Use 'Voucher cancelled with vendor' before switching to a physical channel.";
-    expect(screen.getByTestId('ff-channel-hint')).toHaveTextContent(msg);
     const select = screen.getByTestId('ff-channel') as HTMLSelectElement;
-    expect(select).toHaveAttribute('aria-describedby', 'ff-channel-hint');
-    const opt = (v: string) => Array.from(select.options).find((o) => o.value === v)!;
-    expect(opt('GIFSY_WAREHOUSE').disabled).toBe(true);
-    expect(opt('DIGITAL_VOUCHER').disabled).toBe(false);
+    expect(Array.from(select.options).every((o) => !o.disabled)).toBe(true);
+    expect(screen.queryByTestId('ff-channel-hint')).toBeNull();
     fireEvent.change(select, { target: { value: 'GIFSY_WAREHOUSE' } });
-    expect(select.value).toBe('DIGITAL_VOUCHER');
-    // the stored (locked) values stay on screen
+    expect(select.value).toBe('GIFSY_WAREHOUSE');
+    // Never hidden: the stored code (and the masked PIN) are shown read-only on the physical channel.
+    expect(screen.getByTestId('ff-voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
+    expect(screen.getByTestId('ff-voucher-pin-readonly')).toBeInTheDocument();
+    expect(screen.queryByTestId('ff-voucher-code')).toBeNull();
+    expect(screen.queryByTestId('ff-voucher-pin')).toBeNull();
+    expect(screen.getByTestId('ff-tracking-number')).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId('ff-tracking-number'), { target: { value: 'TRK-9' } });
+    fireEvent.click(screen.getByTestId('ff-save'));
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+    expect(patch.mock.calls[0][1]).toMatchObject({ fulfilmentChannel: 'GIFSY_WAREHOUSE', trackingNumber: 'TRK-9' });
+    expect(patch.mock.calls[0][1]).not.toHaveProperty('voucherCode');
+    expect(patch.mock.calls[0][1]).not.toHaveProperty('voucherPin');
+    // Back on DIGITAL_VOUCHER the stored values are restored (F1).
+    fireEvent.change(select, { target: { value: 'DIGITAL_VOUCHER' } });
     expect(screen.getByTestId('ff-voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
     expect(screen.getByTestId('ff-voucher-provider')).toHaveValue('Croma');
   });

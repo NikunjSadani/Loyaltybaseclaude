@@ -48,7 +48,6 @@ import {
   lockVoucherCode,
   isHubbleIssuedCode,
   isHubbleNeverPlaced,
-  planChannelWrite,
   planVoucherWrite,
   rethrowUnlessIdempotentPinRace,
   VOUCHER_WRITE_CONFLICT_MESSAGE,
@@ -866,6 +865,8 @@ export class RewardsService {
           partner: { select: { id: true, businessName: true } },
           // Read for the operator-only Hubble reconcile flags below; NEVER returned as-is.
           metadata: true,
+          // Read ONLY to derive the operator-only `voucherFillable` below; never returned.
+          pointsDeducted: true,
         },
         skip,
         // One extra row tells us whether another page exists (it is never returned).
@@ -889,12 +890,15 @@ export class RewardsService {
     // member branch (their login resolves to no partner today; this pins it regardless).
     const hideCodes =
       isSalesViewer(user.role) || (!memberView && !(await this.canSeeFullVoucherCode(user)));
-    const mapped = orders.map(({ metadata, ...o }) => ({
+    const mapped = orders.map(({ metadata, pointsDeducted, ...o }) => ({
       ...o,
       ...(hideCodes ? hiddenVoucherFields(o.voucherCode) : {}),
       // Operator console only: a Hubble order stuck for ops ("Needs reconcile" + reason). The raw
       // metadata blob (redeem snapshot etc.) is never returned to anyone from this list.
       ...(memberView ? {} : hubbleReconcileFlags(metadata)),
+      // Fulfilling operator only (sees the code): the server would accept a set-once PIN / provider
+      // on the stored code (F4 — one rule, canFillStoredVoucher; the console row's PIN box uses it).
+      ...(memberView || hideCodes ? {} : { voucherFillable: canFillStoredVoucher({ ...o, pointsDeducted, metadata }) }),
       returnedAt: o.status === 'RETURNED' ? o.updatedAt : null,
     }));
 
@@ -1053,9 +1057,6 @@ export class RewardsService {
       voucherInput,
       this.voucherWriteOptions(user, dto),
     );
-    // CHANNEL INVARIANT: no switch to a physical channel while a voucher code is stored (400); a
-    // switch on a code-less order carries a "still no code" claim (a concurrent issue → 409).
-    const channelGuard = planChannelWrite(existingOrder, dto.fulfilmentChannel);
     const data = {
       trackingNumber: dto.trackingNumber,
       trackingUrl: dto.trackingUrl,
@@ -1068,14 +1069,14 @@ export class RewardsService {
       podUrl: dto.podUrl,
     };
 
-    const guard = combineGuards(voucherPlan.guard, channelGuard);
-    if (!guard) {
+    if (!voucherPlan.guard) {
       const order = await this.prisma.redemptionOrder.update({ where: { id }, data });
       return { order };
     }
     // Setting a NEW code: compare-and-set on "no code stored + paid open order + row version" so a
     // concurrent refund / vendor-cancel / other write makes this lose (409) instead of overwriting.
     // The issuance audit row lands in the SAME tx (no code without its audit).
+    const guard = voucherPlan.guard;
     const order = await this.prisma.$transaction(async (tx) => {
       // Tenant-wide reuse check INSIDE the tx under a (tenant, code) advisory lock — a concurrent
       // "Voucher cancelled with vendor" of the same code can't slip between check and write.
@@ -2870,8 +2871,6 @@ export class RewardsService {
       voucherInput,
       this.voucherWriteOptions(user, dto),
     );
-    // CHANNEL INVARIANT: no switch to a physical channel while a voucher code is stored.
-    const channelGuard = planChannelWrite(order, dto.fulfilmentChannel);
 
     // BUG-1 — a DIGITAL_VOUCHER order cannot be marked DELIVERED without an actual voucher
     // code to deliver. The effective channel is the stored one unless this transition
@@ -2924,11 +2923,7 @@ export class RewardsService {
         expectedFrom: fromStatus,
         // A refund only lands if NO voucher code is on the row at write time (a code set
         // concurrently after our read → 0 rows → 409, no refund).
-        extraGuard: combineGuards(
-          isRefundTarget ? noIssuedVoucherGuard(order.voucherCode) : null,
-          voucherPlan.guard,
-          channelGuard,
-        ),
+        extraGuard: combineGuards(isRefundTarget ? noIssuedVoucherGuard(order.voucherCode) : null, voucherPlan.guard),
         toStatus,
         data,
         changedById: user.sub,

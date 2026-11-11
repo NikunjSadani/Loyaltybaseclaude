@@ -163,6 +163,37 @@ describe('OR — Orders API wiring (live data)', () => {
     }
   });
 
+  it('item 11: a REPEATED failure is re-announced (the region empties, then says it again); an old timer never cuts the new hint short', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('NotAllowedError'));
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    stubOrders([VOUCHER_ORDER]);
+    render(<OrdersPage />);
+    const btn = await screen.findByTestId('copy-voucher-btn');
+    const status = screen.getByTestId('copy-voucher-btn-status');
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await userEvent.click(btn);
+      await waitFor(() => expect(status).toHaveTextContent('Copy failed'));
+      await act(async () => { vi.advanceTimersByTime(3000); }); // 1 s left on the first hint
+      const seen: string[] = [];
+      const obs = new MutationObserver(() => seen.push(status.textContent ?? ''));
+      obs.observe(status, { childList: true, characterData: true, subtree: true });
+      await userEvent.click(btn);
+      await waitFor(() => expect(status).toHaveTextContent('Copy failed'));
+      obs.disconnect();
+      // The region went EMPTY and then carried the hint again → a screen reader announces it again.
+      expect(seen).toContain('');
+      expect(seen[seen.length - 1]).toContain('Copy failed');
+      // The FIRST tap's 4 s timer was cleared: 1.5 s later the new hint is still there.
+      await act(async () => { vi.advanceTimersByTime(1500); });
+      expect(status).toHaveTextContent('Copy failed');
+      await act(async () => { vi.advanceTimersByTime(3000); });
+      expect(status).not.toHaveTextContent('Copy failed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('OR6b: voucher line shows the reward BRAND, never the back-end aggregator (e.g. Hubble)', async () => {
     stubOrders([{ ...VOUCHER_ORDER, reward: { id: 'r1', name: 'Amazon Voucher', imageUrls: [] }, voucherProvider: 'Hubble' }]);
     render(<OrdersPage />);

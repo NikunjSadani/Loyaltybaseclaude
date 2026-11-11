@@ -273,34 +273,19 @@ export interface StoredVoucher {
 
 const hasText = (v: string | null | undefined) => typeof v === 'string' && v.trim() !== '';
 
-/** Same message the backend returns (voucher-write-guard VOUCHER_CHANNEL_SWITCH_MESSAGE). */
-export const VOUCHER_CHANNEL_SWITCH_MESSAGE =
-  "This order has a voucher code. Use 'Voucher cancelled with vendor' before switching to a physical channel.";
-
-/**
- * True when switching this order to `channel` is refused because a voucher code is STORED (mirrors
- * the backend planChannelWrite: only a move AWAY from DIGITAL_VOUCHER to a physical channel).
- */
-export function isChannelSwitchBlocked(stored: StoredVoucher & { fulfilmentChannel?: string | null }, channel: string): boolean {
-  if (!hasText(stored.voucherCode)) return false;
-  if (!channel || isVoucherChannel(channel)) return false;
-  return channel !== (stored.fulfilmentChannel ?? '');
-}
-
 /**
  * A fulfilment update needs at minimum a channel. A physical channel should carry a
  * tracking number OR a supplier order ref; a digital voucher should carry a code. We
  * WARN (not hard-block beyond the channel) so an operator can save a channel first
  * and add tracking later — the backend remains the source of truth.
- * `stored` = the order as saved: a STORED code counts as "card number present" for the PIN rule,
- * and a switch to a physical channel while a code is stored is refused (as the backend does).
+ * `stored` = the order as saved: a STORED code counts as "card number present" for the PIN rule.
+ * Any channel may be chosen with a stored code (a physical gift card carries a card no. / PIN too).
  */
 export function validateFulfilment(
   d: FulfilmentDraft,
-  stored: StoredVoucher & { fulfilmentChannel?: string | null } = {},
+  stored: StoredVoucher = {},
 ): FulfilmentValidation {
   if (!d.fulfilmentChannel) return { ok: false, error: 'Pick a fulfilment channel.' };
-  if (isChannelSwitchBlocked(stored, d.fulfilmentChannel)) return { ok: false, error: VOUCHER_CHANNEL_SWITCH_MESSAGE };
   // Mirrors the backend (voucher-write-guard): a PIN needs its card number (typed or stored).
   if (d.voucherPin.trim() && !d.voucherCode.trim() && !hasText(stored.voucherCode)) {
     return { ok: false, error: 'Enter the card number before the PIN' };

@@ -718,7 +718,7 @@ describe('HD — choose-from-amounts voucher', () => {
 });
 
 describe('WR — whole-rupee typed amounts (vouchers + cash)', () => {
-  it('WR-P1: a free-amount voucher input turns typed "750.5" into 750 and posts an integer', async () => {
+  it('WR-P1: a typed "750.5" stays visible and is INVALID — the tap says "Check the amount — whole rupees only", nothing is sent', async () => {
     const fetchMock = vi.fn().mockImplementation((url: string) => {
       if (url.includes('/api/rewards/redeem')) return Promise.resolve(redeemOk());
       if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWith([FREE_AMOUNT_VOUCHER]));
@@ -732,13 +732,37 @@ describe('WR — whole-rupee typed amounts (vouchers + cash)', () => {
 
     const input = (await screen.findByLabelText(/voucher amount/i)) as HTMLInputElement;
     await user.type(input, '750.5');
-    expect(input.value).toBe('750');
+    expect(input.value).toBe('750.5'); // never silently shrunk to 750
+    await user.click(screen.getByRole('button', { name: /send otp/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount — whole rupees only');
+    expect(fetchMock.mock.calls.some(([u]) => u === '/api/rewards/redeem')).toBe(false);
+    // Fixed to a whole amount → posts the integer.
+    await user.clear(input);
+    await user.type(input, '750');
     await user.click(screen.getByRole('button', { name: /send otp/i }));
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(([u]) => u === '/api/rewards/redeem');
       expect(call).toBeTruthy();
       expect(JSON.parse((call![1] as RequestInit).body as string).amount).toBe(750);
     });
+  });
+
+  it('item 12: on a consent-gated voucher an invalid amount shows "Check the amount" on the FIRST tap (with the consent prompt)', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/rewards/redeem')) return Promise.resolve(redeemOk());
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWith([{ ...FREE_AMOUNT_VOUCHER, requiresConsent: true }]));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /vouchers/i }));
+    await user.click(await screen.findByText('Flexi Voucher'));
+    const input = (await screen.findByLabelText(/voucher amount/i)) as HTMLInputElement;
+    await user.type(input, '750.5');
+    await user.click(screen.getByRole('button', { name: /send otp/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount — whole rupees only');
+    expect(fetchMock.mock.calls.some(([u]) => u === '/api/rewards/redeem')).toBe(false);
   });
 
   it('WR-P2: the cash payout input flags a pasted "1,250.75" ("Check the amount"; the tap explains, never sends); "Rs. 1,250" → 1250', async () => {
@@ -758,7 +782,7 @@ describe('WR — whole-rupee typed amounts (vouchers + cash)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount');
     expect(input).toHaveAttribute('aria-invalid', 'true');
     // F6: not disabled — a tap re-shows the reason and sends nothing.
-    const btn = screen.getByRole('button', { name: 'Check the amount' });
+    const btn = screen.getByRole('button', { name: 'Check the amount — whole rupees only' });
     expect(btn).toBeEnabled();
     // F2: the next keystroke hides the alert; the live hint is never role="alert".
     await user.type(input, '1');

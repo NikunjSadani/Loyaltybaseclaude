@@ -353,6 +353,70 @@ describe('VendorPortalService', () => {
         expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
       });
 
+      it('voucherFillable parity: true EXACTLY when the vendor updateFulfilment / transition would accept a PIN add', async () => {
+        const base = open({ voucherCode: 'VEND-CODE-4321', voucherProvider: 'Croma', voucherPin: null, redemptionMode: 'GIFT_CARD', metadata: {} });
+        const cases: Record<string, unknown>[] = [
+          base,
+          { ...base, status: 'CONFIRMED' },
+          { ...base, status: 'DISPATCHED' },
+          // Gifsy still fills a DELIVERED order; the vendor may not (closed to the vendor).
+          { ...base, status: 'DELIVERED' },
+          { ...base, status: 'RETURNED' },
+          { ...base, status: 'FAILED' },
+          { ...base, status: 'CANCELLED' },
+          { ...base, pointsDeducted: 0 },
+          { ...base, voucherProvider: 'Hubble' },
+          { ...base, metadata: { hubbleStatus: 'SUCCESS' } },
+          { ...base, redemptionMode: 'UPI' },
+          { ...base, voucherCode: null },
+        ];
+        for (const row of cases) {
+          for (const path of ['fulfilment', 'transition'] as const) {
+            if (path === 'transition' && row.status !== 'DISPATCHED') continue; // DISPATCHED→DELIVERED is the one vendor PIN-carrying move tested here
+            jest.clearAllMocks();
+            mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
+            grantScope();
+            mockPrisma.redemptionOrder.findFirst.mockResolvedValue(row);
+            const view = (await service.getOrder(vendor, 'o1')) as { voucherFillable: boolean };
+            const attempt =
+              path === 'fulfilment'
+                ? service.updateFulfilment(vendor, 'o1', { voucherPin: '42' } as never)
+                : service.transition(vendor, 'o1', { toStatus: 'DELIVERED', voucherPin: '42' } as never);
+            await attempt.catch(() => undefined);
+            const accepted = mockPrisma.redemptionOrder.updateMany.mock.calls.some(
+              (c: unknown[]) => (c[0] as { data?: { voucherPin?: string } }).data?.voucherPin === '42',
+            );
+            expect({ status: row.status, path, fillable: view.voucherFillable }).toEqual({
+              status: row.status,
+              path,
+              fillable: accepted,
+            });
+          }
+        }
+        // Sanity: the base (PROCESSING, paid, manual code, no PIN) is fillable.
+        jest.clearAllMocks();
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(base);
+        expect(((await service.getOrder(vendor, 'o1')) as { voucherFillable: boolean }).voucherFillable).toBe(true);
+      });
+
+      it('the vendor order view never carries pointsDeducted / metadata (selected only to derive voucherFillable)', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(
+          open({ voucherCode: 'VEND-CODE-4321', metadata: { fulfilmentChannel: 'BRAND', hubbleStatus: null }, valuePaise: 50000 }),
+        );
+        const view = (await service.getOrder(vendor, 'o1')) as Record<string, unknown>;
+        expect(view).not.toHaveProperty('pointsDeducted');
+        expect(view).not.toHaveProperty('metadata');
+        expect(view).not.toHaveProperty('valuePaise');
+        expect(view).toHaveProperty('voucherFillable');
+        const list = await (mockPrisma.redemptionOrder.findMany.mockResolvedValue([
+          open({ voucherCode: 'VEND-CODE-4321', metadata: {} }),
+        ]), service.listOrders(vendor));
+        expect(list.items[0]).not.toHaveProperty('pointsDeducted');
+        expect(list.items[0]).not.toHaveProperty('metadata');
+      });
+
       it('updateFulfilment: a code on an unpaid order → 400, no write', async () => {
         grantScope();
         mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ pointsDeducted: 0 }));
@@ -407,7 +471,7 @@ describe('VendorPortalService', () => {
           eventKey: 'VOUCHER_ISSUED',
           body: 'Your Croma 500 voucher is ready — card no. and PIN are in My Orders.',
           vars: expect.objectContaining({ code: '6001220012345678 | PIN: 482913' }),
-          maskedVars: { code: '6001220012345678 | PIN: see My Orders' },
+          maskedVars: { code: '6001220012345678' },
         }));
       });
 
@@ -542,13 +606,15 @@ describe('VendorPortalService', () => {
         await expect(service.updateFulfilment(vendor, 'o1', { voucherPin: '7788' } as never)).rejects.toBeInstanceOf(ConflictException);
       });
 
-      it('B7: a coded order cannot be switched to a physical channel (fulfilment + transition) → 400, no write', async () => {
+      it('a coded order MAY switch to a physical channel (physical gift cards carry codes) — no voucher claim', async () => {
         grantScope();
-        const msg = "This order has a voucher code. Use 'Voucher cancelled with vendor' before switching to a physical channel.";
         mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ voucherCode: 'VEND-CODE-4321', fulfilmentChannel: 'DIGITAL_VOUCHER' }));
-        await expect(service.updateFulfilment(vendor, 'o1', { fulfilmentChannel: 'BRAND' } as never)).rejects.toThrow(msg);
-        await expect(service.transition(vendor, 'o1', { toStatus: 'DISPATCHED', fulfilmentChannel: 'GIFSY_WAREHOUSE' } as never)).rejects.toThrow(msg);
-        expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        await service.updateFulfilment(vendor, 'o1', { fulfilmentChannel: 'BRAND' } as never).catch(() => undefined);
+        const call = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+        expect(call.data).toMatchObject({ fulfilmentChannel: 'BRAND' });
+        expect(call.data).not.toHaveProperty('voucherCode');
+        expect(JSON.stringify(call.where)).not.toContain('voucherCode');
       });
 
       it.each([

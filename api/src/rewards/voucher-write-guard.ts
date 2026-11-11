@@ -55,8 +55,8 @@ import { noIssuedVoucherGuard } from './order-status-transition';
  * row and, if the stored code is unchanged and the stored PIN now EQUALS the requested PIN, treats it
  * as a successful no-op (pinRaceIsIdempotent) — no second audit row or notification.
  *
- * CHANNEL: a write that moves the fulfilment channel AWAY from DIGITAL_VOUCHER (to a physical
- * channel) while a code is stored → 400 (VOUCHER_CHANNEL_SWITCH_MESSAGE) — see planChannelWrite.
+ * CHANNEL: deliberately NOT restricted — a physical gift card carrying a card number / PIN is
+ * legitimate on any fulfilment channel, so a stored code never blocks a channel change.
  */
 
 export const VOUCHER_WRITABLE_STATUSES: readonly RedemptionStatus[] = [
@@ -95,8 +95,6 @@ export const VOUCHER_PIN_STATUS_MESSAGE =
 /** Same cap as the DTOs' @MaxLength(64) on voucherPin. */
 export const VOUCHER_PIN_MAX_LENGTH = 64;
 export const VOUCHER_PIN_TOO_LONG_MESSAGE = `The voucher PIN must be at most ${VOUCHER_PIN_MAX_LENGTH} characters.`;
-export const VOUCHER_CHANNEL_SWITCH_MESSAGE =
-  "This order has a voucher code. Use 'Voucher cancelled with vendor' before switching to a physical channel.";
 
 /** Statuses on which a PIN may be ADDED to an already-stored code (set-once). */
 export const VOUCHER_PIN_ADDABLE_STATUSES: readonly RedemptionStatus[] = [
@@ -448,26 +446,6 @@ export async function withPinRaceRetry<T>(run: () => Promise<T>): Promise<T> {
     if (e instanceof PinRaceResolvedError) return run();
     throw e;
   }
-}
-
-const DIGITAL_VOUCHER_CHANNEL = 'DIGITAL_VOUCHER';
-
-/**
- * CHANNEL INVARIANT (owner rule): an order holding a voucher code can't be switched to a physical
- * channel — the code would be orphaned on a "shipped" order. Ops must record "Voucher cancelled with
- * vendor" (clears the code) first. Only a CHANGE of channel is checked (re-sending the stored channel
- * is a no-op), and only a move to a non-DIGITAL_VOUCHER channel.
- * Returns the claim to AND into the write (still no code at write time) when the write switches to a
- * physical channel — so a code issued concurrently makes the switch lose (409) — else null.
- */
-export function planChannelWrite(
-  order: { voucherCode: string | null; fulfilmentChannel?: string | null },
-  channel: string | null | undefined,
-): Prisma.RedemptionOrderWhereInput | null {
-  if (channel === undefined || channel === null) return null;
-  if (channel === DIGITAL_VOUCHER_CHANNEL || channel === (order.fulfilmentChannel ?? null)) return null;
-  if (norm(order.voucherCode) !== null) throw new BadRequestException(VOUCHER_CHANNEL_SWITCH_MESSAGE);
-  return noIssuedVoucherGuard(order.voucherCode);
 }
 
 /**

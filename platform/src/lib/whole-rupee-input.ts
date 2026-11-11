@@ -4,29 +4,26 @@
  * only. The backend enforces the same rule (RedeemDto.amount @IsInt → 400 "Enter a whole-rupee
  * amount"); this is the matching UX so a decimal never even reaches the server.
  *
- * Rules (owner 2026-11-11: "decimal values should not be accepted" — a value is NEVER silently
- * shrunk, e.g. "1,2" must not become ₹1):
- *   - "." is ALWAYS a decimal mark and is blocked as typed: it and the digits typed after it are
- *     dropped (FRACTION STATE — desktop keydown, Android beforeinput / "Unidentified" keydown, and
- *     a final change-event guard). The fraction state ends on any delete, a cursor move, paste or
- *     blur, and never starts on an empty field.
- *   - "," WHILE TYPING is kept as-is (never truncates), and the caret stays where it was typed:
- *     "1," stays "1,", then "1,250" stays "1,250". It is INTERPRETED on blur / commit (Enter) and
- *     on paste: valid thousands ("1,250", "12,500", "125,000") or Indian grouping ("1,25,000")
- *     → plain digits; ANY other comma pattern ("750,5", "1,2", "1,", "1,2345") is INVALID — the raw
- *     text is KEPT, onCommit(true) fires, and callers show WHOLE_RUPEE_INVALID_MESSAGE ("Check the
- *     amount") and disable submit. wholeRupeeAmount returns null for such text (never a guess).
- *   - Pasted text: a leading currency marker is stripped ("Rs. 1,250", "Rs.1,250", "₹ 1,250",
- *     "INR 1250" → 1250), a trailing "/-" and a zero fraction (".0" / ".00") are accepted
+ * Rules (owner 2026-11-11: decimals are NEVER accepted and an amount is NEVER silently changed —
+ * "1,2" must not become ₹1, "750.5" must not become ₹750):
+ *   - WHILE TYPING only digits, "," and "." are accepted (a letter / space / "e" "+" "-" key is
+ *     refused). Nothing typed is ever dropped, truncated or rewritten: "." and "," stay in the text
+ *     exactly where they were typed ("750.5" stays "750.5", "1," stays "1,").
+ *   - The text is INTERPRETED on commit — blur / Enter / a tap on submit — and on paste: a plain
+ *     number, valid thousands ("1,250", "12,500", "125,000") or Indian grouping ("1,25,000") →
+ *     plain digits (a grouped number must start with 1-9: "0,500" / "00,500" are invalid); ANY
+ *     other text ("750.5", "750,5", "1,2", "1,", "1,2345") is INVALID — the raw text is KEPT,
+ *     onCommit(true) fires, callers show WHOLE_RUPEE_INVALID_MESSAGE and refuse to submit.
+ *     wholeRupeeAmount returns null for such text (never a guess).
+ *   - Currency text comes in ONLY via paste: a leading marker is stripped ("Rs. 1,250", "Rs.1,250",
+ *     "₹ 1,250", "INR 1250" → 1250); a trailing "/-" and a zero fraction (".0" / ".00") are accepted
  *     ("₹1,250.00", "1,250.0", "1,250/-", "Rs 1250/-" → 1250); it is spliced at the selection and
- *     interpreted at once. Any other decimal ("₹1,250.50", "1.5") is INVALID ("Check the amount").
- *   - FLAGGED: text that was committed / pasted as INVALID stays exactly as the user sees it while
- *     they edit it — no keystroke (",", ".", a digit) is ever rewritten or truncated — until the
- *     text becomes valid again (then normal typing rules resume).
- *   - The Android onChange fallback REJECTS a "." keystroke (the previous value is kept) — it never
- *     truncates at the "."; a "." appended at the end also starts the fraction state.
- *   - A multi-character insert (Android suggestion / IME) containing "." is treated like a paste.
- *   - "e" "E" "+" "-" are refused.
+ *     interpreted at once. Any other decimal ("₹1,250.50", "1.5") is INVALID.
+ *   - A multi-character insert that is NOT a paste (IME composition, keyboard suggestion /
+ *     autocorrect replacing the word) is applied by the browser itself and the resulting value is
+ *     then checked like any edit (never re-spliced at the caret — no duplicated text). An edit that
+ *     would ADD a character other than a digit / "," / "." is refused (the current text is kept);
+ *     deleting characters is always allowed.
  *
  * "CHECK THE AMOUNT" UX — one rule for every caller (partner voucher + cash sheets, sales
  * catalogue, admin custom amount), via useWholeRupeeField (or the same semantics by hand):
@@ -39,18 +36,18 @@
  *     aria-live="polite" (not alerts — they change on every keystroke).
  */
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type React from 'react';
 
 /** Shown by every caller when the committed amount text is not a valid whole-rupee amount. */
-export const WHOLE_RUPEE_INVALID_MESSAGE = 'Check the amount';
+export const WHOLE_RUPEE_INVALID_MESSAGE = 'Check the amount — whole rupees only';
 
 const CURRENCY_PREFIX = /^\s*(?:₹|rs\.?|inr)\s*/i;
 const PLAIN_DIGITS = /^\d+$/;
-/** Thousands grouping: 1,250 · 12,500 · 125,000 · 1,250,000. */
-const WESTERN_GROUPING = /^\d{1,3}(?:,\d{3})+$/;
-/** Indian grouping: 1,250 · 1,25,000 · 12,34,567. */
-const INDIAN_GROUPING = /^\d{1,2}(?:,\d{2})*,\d{3}$/;
+/** Thousands grouping: 1,250 · 12,500 · 125,000 · 1,250,000 (first group starts 1-9: never "0,500"). */
+const WESTERN_GROUPING = /^[1-9]\d{0,2}(?:,\d{3})+$/;
+/** Indian grouping: 1,250 · 1,25,000 · 12,34,567 (first group starts 1-9: never "00,500"). */
+const INDIAN_GROUPING = /^[1-9]\d?(?:,\d{2})*,\d{3}$/;
 
 /** Strip a leading currency marker ("₹", "Rs", "Rs.", "INR" — any case) and surrounding space. */
 export function stripCurrencyPrefix(text: string): string {
@@ -94,132 +91,83 @@ export function wholeRupeeAmount(text: string): number | null {
   return d === '' ? 0 : parseInt(d, 10);
 }
 
-/**
- * The typing-time display: digits and "," only, truncated at the first "." (leading "," on an
- * otherwise empty value dropped). Never interprets a ",".
- */
-function typingDisplay(text: string): string {
-  const t = text ?? '';
-  const dot = t.indexOf('.');
-  return (dot === -1 ? t : t.slice(0, dot)).replace(/[^\d,]/g, '').replace(/^,+/, '');
+/** Characters a keystroke may add while typing. */
+const TYPABLE = /^[\d.,]$/;
+/** The characters of `text` that a keystroke could NOT have typed (letters, spaces, ₹, …). */
+const untypable = (text: string) => text.replace(/[\d.,]/g, '');
+/** True when `sub` is a subsequence of `full` (characters only removed — never added). */
+function isSubsequence(sub: string, full: string): boolean {
+  let i = 0;
+  for (const ch of full) if (i < sub.length && sub[i] === ch) i++;
+  return i === sub.length;
 }
-
-const REFUSED_KEYS = new Set(['e', 'E', '+', '-']);
-const PASSIVE_KEYS = new Set(['Tab', 'Shift', 'Control', 'Alt', 'Meta', 'Enter', 'Unidentified', 'Process', 'CapsLock']);
-
-function startFraction(el: HTMLInputElement) { el.dataset.fraction = '1'; }
-function endFraction(el: HTMLInputElement) { delete el.dataset.fraction; }
-const inFraction = (el: HTMLInputElement) => el.dataset.fraction === '1';
-/** The field holds text that was committed / pasted INVALID — edits are never rewritten. */
-function flag(el: HTMLInputElement) { el.dataset.invalid = '1'; endFraction(el); }
-const isFlagged = (el: HTMLInputElement) => el.dataset.invalid === '1';
 
 type WrNode = HTMLInputElement & { __wrBeforeInput?: (ev: InputEvent) => void };
 
 /**
  * Props for a controlled whole-rupee <input>: spread onto the element and render `value`
- * yourself. `onValue` receives the field text — digits, plus (while typing) any "," typed. Blur /
- * Enter / paste COMMITS it: a valid amount becomes plain digits; an invalid one is KEPT as typed
- * and `opts.onCommit(true)` fires (callers then show WHOLE_RUPEE_INVALID_MESSAGE — derive it as
- * `committed && isWholeRupeeInvalid(value)` — and disable submit while wholeRupeeAmount is null).
+ * yourself. `onValue` receives the field text exactly as typed. Blur / Enter / paste COMMITS it: a
+ * valid amount becomes plain digits; an invalid one is KEPT as typed and `opts.onCommit(true)`
+ * fires (callers then show WHOLE_RUPEE_INVALID_MESSAGE and refuse to submit while
+ * wholeRupeeAmount is null). Pass `opts.value` (the controlled value) so a refused edit restores
+ * the CURRENT text — never a stale one from before a programmatic reset.
  */
 export function wholeRupeeInputProps(
   onValue: (text: string) => void,
-  opts: { onCommit?: (invalid: boolean) => void } = {},
+  opts: {
+    onCommit?: (invalid: boolean) => void;
+    value?: string;
+    ref?: (el: HTMLInputElement | null) => void;
+  } = {},
 ) {
-  const emit = (el: HTMLInputElement, display: string) => {
-    el.dataset.last = display;
-    // A flagged (invalid) text un-flags as soon as it is a valid amount again.
-    if (isFlagged(el) && wholeRupeeDigits(display) !== null) delete el.dataset.invalid;
-    onValue(display);
+  const emit = (el: HTMLInputElement, text: string) => {
+    el.dataset.last = text;
+    onValue(text);
   };
+  /** The text currently held (the controlled value when given, else the last text emitted). */
+  const current = (el: HTMLInputElement) => opts.value ?? el.dataset.last ?? '';
 
-  /**
-   * Splice `text` into the field at its selection. TYPED text keeps "," as-is (caret kept right
-   * after the insert); a "." truncates there and — when at the END of the result with something
-   * left — enters the fraction state. PASTED text (currency marker stripped) is interpreted at once.
-   */
-  const insert = (el: HTMLInputElement, text: string, mode: 'type' | 'paste') => {
+  /** PASTED text (currency marker stripped) is spliced at the selection and interpreted at once. */
+  const paste = (el: HTMLInputElement, text: string) => {
     const value = el.value;
     const start = el.selectionStart ?? value.length;
     const end = el.selectionEnd ?? value.length;
-    const before = value.slice(0, start);
-    const after = value.slice(end);
-    if (mode === 'paste') {
-      endFraction(el); // a paste never leaves the field waiting to swallow digits
-      const spliced = before + stripCurrencyPrefix(text) + after;
-      const digits = wholeRupeeDigits(spliced);
-      if (digits === null) {
-        flag(el);
-        emit(el, spliced); // keep what was pasted — the caller shows "Check the amount"
-        opts.onCommit?.(true);
-      } else {
-        delete el.dataset.invalid;
-        emit(el, digits);
-        opts.onCommit?.(false);
-      }
-      return;
+    const spliced = value.slice(0, start) + stripCurrencyPrefix(text) + value.slice(end);
+    const digits = wholeRupeeDigits(spliced);
+    if (digits === null) {
+      emit(el, spliced); // keep what was pasted — the caller shows "Check the amount"
+      opts.onCommit?.(true);
+    } else {
+      emit(el, digits);
+      opts.onCommit?.(false);
     }
-    const spliced = before + text + after;
-    const display = typingDisplay(spliced);
-    const dot = spliced.indexOf('.');
-    const dotInInsert = dot !== -1 && dot >= before.length && dot < before.length + text.length;
-    if (dotInInsert && after === '' && display !== '') startFraction(el);
-    else endFraction(el);
-    // Write the DOM value + caret BEFORE the state update: React then finds the node already
-    // holding the new value and leaves it (and the caret) alone — a "," typed mid-value keeps the
-    // caret right after it instead of jumping to the end.
-    const caret = Math.min(typingDisplay(before + text).length, display.length);
-    if (el.value !== display) el.value = display;
-    try { el.setSelectionRange(caret, caret); } catch { /* detached / not focusable — ignore */ }
-    emit(el, display);
   };
 
-  /** Blur / Enter: a valid amount → plain digits; an invalid one is kept and flagged. */
+  /** Blur / Enter: a valid amount → plain digits; an invalid one is kept exactly as typed. */
   const commit = (el: HTMLInputElement) => {
-    endFraction(el);
     const digits = wholeRupeeDigits(el.value);
     if (digits === null) {
-      flag(el);
       opts.onCommit?.(true);
       return;
     }
-    delete el.dataset.invalid;
     if (digits !== el.value) emit(el, digits);
     opts.onCommit?.(false);
   };
 
-  const onNativeBeforeInput = (el: HTMLInputElement, ev: InputEvent) => {
+  const onNativeBeforeInput = (ev: InputEvent, el: HTMLInputElement) => {
     const inputType = ev.inputType ?? '';
-    if (inputType.startsWith('delete')) { endFraction(el); return; }
+    if (inputType.startsWith('delete')) return;
     const data = ev.data;
     if (typeof data !== 'string' || data === '') return;
     if (inputType === 'insertFromPaste') {
       ev.preventDefault();
-      insert(el, data, 'paste');
+      paste(el, data);
       return;
     }
-    // A multi-character insert carrying a "." (keyboard suggestion / IME) is a paste: kept and
-    // interpreted — never truncated at the ".".
-    if (data.length > 1 && data.includes('.')) {
-      ev.preventDefault();
-      insert(el, data, 'paste');
-      return;
-    }
-    if (isFlagged(el)) {
-      // Editing a flagged text: let the browser insert as typed (onChange keeps it verbatim);
-      // only e / E / + / - stay refused.
-      if (/[eE+-]/.test(data)) ev.preventDefault();
-      return;
-    }
-    if (/[.,eE+-]/.test(data)) {
-      ev.preventDefault();
-      if (inFraction(el)) return;
-      const cleaned = data.replace(/[eE+-]/g, '');
-      if (cleaned) insert(el, cleaned, 'type');
-      return;
-    }
-    if (inFraction(el) && /^\d+$/.test(data)) { ev.preventDefault(); return; }
+    // A single typed character: digits , . only. A MULTI-character insert (IME composition,
+    // suggestion / autocorrect replacing the word) is left to the browser — onChange then checks
+    // the resulting value (never re-spliced here, which would duplicate the replaced word).
+    if (data.length === 1 && !TYPABLE.test(data)) ev.preventDefault();
   };
 
   return {
@@ -228,33 +176,23 @@ export function wholeRupeeInputProps(
     pattern: '[0-9]*',
     autoComplete: 'off',
     onKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => {
-      const el = e.currentTarget;
-      if (isFlagged(el)) {
-        // Editing a flagged (invalid) text: nothing is rewritten — the browser inserts as typed.
-        if (e.key === 'Enter') commit(el);
-        if (REFUSED_KEYS.has(e.key)) e.preventDefault();
+      if (e.key === 'Enter') {
+        commit(e.currentTarget);
         return;
       }
-      if (e.key === '.' || e.key === ',') {
+      // A printable key that isn't a digit / "," / "." is refused (shortcuts like Ctrl+V pass).
+      if (e.key.length === 1 && !TYPABLE.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
-        if (inFraction(el)) return; // already swallowing a fraction
-        insert(el, e.key, 'type');
-        return;
       }
-      if (inFraction(el)) {
-        if (/^\d$/.test(e.key)) { e.preventDefault(); return; }
-        if (!PASSIVE_KEYS.has(e.key)) endFraction(el); // Backspace, Delete, arrows, Home/End…
-      }
-      if (e.key === 'Enter') commit(el);
-      if (REFUSED_KEYS.has(e.key)) e.preventDefault();
     },
     // Android / IME: keydown is "Unidentified", but the NATIVE beforeinput event carries the
     // inserted text + inputType. React's synthetic onBeforeInput does not expose native
     // beforeinput, so the listener is bound on the element itself (once), reading the latest
     // handler off the node so a re-render never leaves a stale closure behind.
     ref: (el: HTMLInputElement | null) => {
+      opts.ref?.(el);
       if (!el) return;
-      (el as WrNode).__wrBeforeInput = (ev: InputEvent) => onNativeBeforeInput(el, ev);
+      (el as WrNode).__wrBeforeInput = (ev: InputEvent) => onNativeBeforeInput(ev, el);
       if (!el.dataset.wrBound) {
         el.dataset.wrBound = '1';
         el.addEventListener('beforeinput', (ev) => (el as WrNode).__wrBeforeInput?.(ev as InputEvent));
@@ -263,36 +201,20 @@ export function wholeRupeeInputProps(
     onBlur: (e: React.FocusEvent<HTMLInputElement>) => commit(e.currentTarget),
     onPaste: (e: React.ClipboardEvent<HTMLInputElement>) => {
       e.preventDefault();
-      insert(e.currentTarget, e.clipboardData.getData('text'), 'paste');
+      paste(e.currentTarget, e.clipboardData.getData('text'));
     },
-    // Last line of defence (any input path the handlers above didn't see).
+    // Every edit lands here (desktop keys, Android, IME, autocorrect): the text is kept verbatim
+    // unless the edit ADDED a character a keystroke can't type — then the current text is kept.
     onChange: (e: React.ChangeEvent<HTMLInputElement>) => {
       const el = e.target;
       const raw = el.value;
-      const last = el.dataset.last ?? '';
-      if (isFlagged(el)) {
-        // A flagged text is edited VERBATIM (minus e / E / +) — never truncated or rewritten.
-        emit(el, raw.replace(/[eE+]/g, ''));
+      const prev = current(el);
+      const extra = untypable(raw);
+      if (extra !== '' && !isSubsequence(extra, untypable(prev))) {
+        emit(el, prev);
         return;
       }
-      const dot = raw.indexOf('.');
-      if (dot !== -1) {
-        // A "." keystroke is REJECTED: the previous value is kept (React restores the field) —
-        // never truncated at the ".". Appended at the end → swallow the fraction that follows.
-        if (dot === raw.length - 1 && raw.slice(0, -1) === last && last !== '') startFraction(el);
-        else endFraction(el);
-        emit(el, last);
-        return;
-      }
-      if (inFraction(el)) {
-        // Pure digit / "," APPEND after a "." → fractional: drop it.
-        if (raw.length > last.length && raw.startsWith(last) && /^[\d,]+$/.test(raw.slice(last.length))) {
-          emit(el, last);
-          return;
-        }
-        endFraction(el);
-      }
-      emit(el, typingDisplay(raw));
+      emit(el, raw);
     },
   };
 }
@@ -305,16 +227,17 @@ export function wholeRupeeInputProps(
  *  - `inputProps`: spread onto the <input> (with `value`);
  *  - `checkBeforeSubmit()`: call first in the submit handler — false (and the message shown) when
  *    the text is invalid, so the submit button never needs to be disabled for that reason;
- *  - `reset(text?)`: set the text programmatically (clears the message).
+ *  - `reset(text?)`: set the text programmatically (clears the message and the node's last text).
  */
 export function useWholeRupeeField(initial = '') {
   const [value, setValue] = useState(initial);
   const [flagged, setFlagged] = useState(false);
+  const elRef = useRef<HTMLInputElement | null>(null);
   const amount = wholeRupeeAmount(value);
   const invalid = amount === null;
   const inputProps = wholeRupeeInputProps(
     (text) => { setValue(text); setFlagged(false); },
-    { onCommit: (bad) => setFlagged(bad) },
+    { onCommit: (bad) => setFlagged(bad), value, ref: (el) => { elRef.current = el; } },
   );
   return {
     value,
@@ -326,6 +249,11 @@ export function useWholeRupeeField(initial = '') {
       if (invalid) { setFlagged(true); return false; }
       return true;
     },
-    reset: (text = '') => { setValue(text); setFlagged(false); },
+    reset: (text = '') => {
+      // Forget the node's last-emitted text too, so no path can ever restore a pre-reset value.
+      if (elRef.current) delete elRef.current.dataset.last;
+      setValue(text);
+      setFlagged(false);
+    },
   };
 }

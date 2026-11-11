@@ -109,6 +109,8 @@ interface OrderItem {
   /** Card PIN (card number + PIN gift cards). Only fulfilling operators receive it — the server
    *  nulls it (with the code) for CLIENT_ADMIN / read-only staff, who see "Voucher issued" only. */
   voucherPin?: string | null;
+  /** Server (fulfilling operator only): a set-once PIN / provider may still be added to the stored code. */
+  voucherFillable?: boolean;
   /** True when the server withheld the code (voucherCode null) — CLIENT_ADMIN / read-only staff. */
   voucherCodeMasked?: boolean;
   /** Server indicator that a code is issued, for viewers who don't receive the code itself. */
@@ -1682,9 +1684,11 @@ function OrderRow({
     isVoucher && !voucherIssued && !isHubble && !needsReconcile && FORWARD_VOUCHER_TARGETS.has(draft.toStatus);
   const advancingToDispatched = draft.toStatus === 'DISPATCHED';
   // SET-ONCE PIN: a code is stored (and visible to this operator) but no PIN yet → the PIN box is
-  // offered on a forward move; once a PIN is saved it is read-only (masked).
+  // offered on a forward move ONLY when the server says it would take it (`voucherFillable` —
+  // canFillStoredVoucher: paid, addable status, not Hubble, not cash; one rule, no client mirror).
+  // Once a PIN is saved it is read-only (masked).
   const addingPinToStoredCode =
-    isVoucher && hasIssuedVoucher(order.voucherCode) && !order.voucherPin && !isHubble && !needsReconcile &&
+    isVoucher && hasIssuedVoucher(order.voucherCode) && !order.voucherPin && order.voucherFillable === true &&
     FORWARD_VOUCHER_TARGETS.has(draft.toStatus);
 
   const submit = async () => {

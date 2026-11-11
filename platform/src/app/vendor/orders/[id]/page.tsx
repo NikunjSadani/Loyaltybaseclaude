@@ -32,8 +32,6 @@ import {
   buildFulfilmentPayload,
   resetNonApplicableFields,
   validateFulfilment,
-  isChannelSwitchBlocked,
-  VOUCHER_CHANNEL_SWITCH_MESSAGE,
   isVoucherChannel,
   buildTimeline,
   statusLabel,
@@ -285,16 +283,13 @@ function FulfilmentForm({
   const set = <K extends keyof FulfilmentDraft>(k: K, v: FulfilmentDraft[K]) =>
     setDraft((d) => ({ ...d, [k]: v }));
 
-  // A stored voucher code blocks a switch to a physical channel (the backend 400s it too); back on
-  // DIGITAL_VOUCHER the STORED (locked) values are restored — a round-trip never blanks them.
+  // Any channel may be chosen — a physical gift card legitimately carries a card no. / PIN. Back on
+  // DIGITAL_VOUCHER the STORED (locked) values are restored — a round-trip never blanks them, and a
+  // stored code is shown read-only on EVERY channel (below), so it is never hidden.
   const setChannel = (v: string) => {
-    if (isChannelSwitchBlocked(order, v)) {
-      setValidationErr(VOUCHER_CHANNEL_SWITCH_MESSAGE);
-      return;
-    }
     setDraft((d) => resetNonApplicableFields({ ...d, fulfilmentChannel: v }, order));
   };
-  const channelLocked = GIFT_FULFILMENT_CHANNELS.some((c) => isChannelSwitchBlocked(order, c.value));
+  const storedCode = !!order.voucherCode?.trim();
   // Provider: locked once a code is stored, UNLESS the stored provider is empty and the server
   // still takes a set-once fill (voucherFillable). A locked value is read from the STORED order.
   const providerLocked =
@@ -333,19 +328,13 @@ function FulfilmentForm({
             value={draft.fulfilmentChannel}
             onChange={(e) => setChannel(e.target.value)}
             data-testid="ff-channel"
-            aria-describedby={channelLocked ? 'ff-channel-hint' : undefined}
             className={`${inputCls} appearance-none bg-white`}
           >
             <option value="">— Select channel —</option>
             {GIFT_FULFILMENT_CHANNELS.map((c) => (
-              <option key={c.value} value={c.value} disabled={isChannelSwitchBlocked(order, c.value)}>{c.label}</option>
+              <option key={c.value} value={c.value}>{c.label}</option>
             ))}
           </select>
-          {channelLocked && (
-            <p id="ff-channel-hint" className="text-[11px] text-gray-500" data-testid="ff-channel-hint">
-              {VOUCHER_CHANNEL_SWITCH_MESSAGE}
-            </p>
-          )}
         </div>
         <div className="space-y-1">
           <label className="text-xs font-medium text-gray-700">
@@ -386,6 +375,19 @@ function FulfilmentForm({
           inputCls={inputCls}
         />
       ) : (
+        <>
+        {storedCode && (
+          // A physical channel never hides the STORED card no. / PIN — shown read-only.
+          <VoucherFulfilmentFields
+            readOnly
+            storedCode={order.voucherCode}
+            storedPin={order.voucherPin}
+            orderNumber={order.orderNumber}
+            draft={draft}
+            set={set}
+            inputCls={inputCls}
+          />
+        )}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-1">
             <label className="text-xs font-medium text-gray-700">Tracking number</label>
@@ -418,6 +420,7 @@ function FulfilmentForm({
             />
           </div>
         </div>
+        </>
       )}
 
       {validationErr && (

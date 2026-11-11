@@ -7,9 +7,10 @@ import { useState } from 'react';
  * "Show" toggle. The state is local to the mounted row, so it re-hides on any navigation /
  * remount. The member's own orders page shows the PIN openly (they need it) and does NOT use this.
  *
- * Accessibility: the toggle's accessible name is FIXED — "Show PIN for order <orderNumber>" (or
- * "Show PIN for the card" without an order number) — and its state is conveyed ONLY by
- * aria-pressed (a name that flips "Show"/"Hide" on a pressed toggle double-announces the state).
+ * Accessibility — the LABEL-FLIP pattern (no aria-pressed: a flipping name PLUS a pressed state
+ * double-announces it): the visible text is "Show PIN" / "Hide PIN" and the accessible name
+ * CONTAINS it ("Show PIN for order <orderNumber>" / "Hide PIN for order <orderNumber>", or
+ * "… for the card" without an order number) — so voice-control users can say what they see.
  */
 export function MaskedPin({
   pin,
@@ -21,13 +22,14 @@ export function MaskedPin({
   pin: string;
   /** Visible label before the value. */
   label?: string;
-  /** Names the toggle for screen readers: "Show PIN for order <orderNumber>". */
+  /** Names the toggle for screen readers: "Show PIN for order <orderNumber>" / "Hide PIN for …". */
   orderNumber?: string | null;
   className?: string;
   testId?: string;
 }) {
   const [shown, setShown] = useState(false);
-  const accessibleName = orderNumber?.trim() ? `Show PIN for order ${orderNumber.trim()}` : 'Show PIN for the card';
+  const visible = shown ? 'Hide PIN' : 'Show PIN';
+  const accessibleName = `${visible} ${orderNumber?.trim() ? `for order ${orderNumber.trim()}` : 'for the card'}`;
   return (
     <span className={className} data-testid={testId}>
       {label}{' '}
@@ -36,12 +38,11 @@ export function MaskedPin({
       </span>{' '}
       <button
         type="button"
-        aria-pressed={shown}
         aria-label={accessibleName}
         onClick={() => setShown((s) => !s)}
         className="ml-1 text-[10px] font-semibold underline text-gray-600 hover:text-gray-900"
       >
-        {shown ? 'Hide' : 'Show'}
+        {visible}
       </button>
     </span>
   );

@@ -12,10 +12,8 @@ import {
   PinRaceResolvedError,
   canFillStoredVoucher,
   pinRaceIsIdempotent,
-  planChannelWrite,
   planVoucherWrite,
   rethrowUnlessIdempotentPinRace,
-  VOUCHER_CHANNEL_SWITCH_MESSAGE,
   withPinRaceRetry,
   VOUCHER_PIN_ALREADY_SAVED_MESSAGE,
   VOUCHER_PIN_NEEDS_CODE_MESSAGE,
@@ -210,25 +208,6 @@ describe('canFillStoredVoucher (F4 — the server-computed voucherFillable the U
   });
 });
 
-describe('planChannelWrite (B7 — no physical channel while a code is stored)', () => {
-  it('a stored code + a switch to a physical channel → 400; DIGITAL_VOUCHER / same channel / omitted → no-op', () => {
-    const coded = { voucherCode: 'C-1', fulfilmentChannel: 'DIGITAL_VOUCHER' };
-    for (const ch of ['GIFSY_WAREHOUSE', 'BRAND', 'FULFILLED_BY_AMAZON']) {
-      expect(() => planChannelWrite(coded, ch)).toThrow(VOUCHER_CHANNEL_SWITCH_MESSAGE);
-    }
-    expect(() => planChannelWrite({ voucherCode: 'C-1', fulfilmentChannel: null }, 'BRAND')).toThrow(VOUCHER_CHANNEL_SWITCH_MESSAGE);
-    expect(planChannelWrite(coded, 'DIGITAL_VOUCHER')).toBeNull();
-    expect(planChannelWrite(coded, undefined)).toBeNull();
-    // A legacy physical-channel order with a code re-sending its own channel is not a switch.
-    expect(planChannelWrite({ voucherCode: 'C-1', fulfilmentChannel: 'BRAND' }, 'BRAND')).toBeNull();
-  });
-  it('no code → the switch carries a "still no code" claim', () => {
-    expect(planChannelWrite({ voucherCode: null, fulfilmentChannel: 'DIGITAL_VOUCHER' }, 'BRAND')).toEqual({
-      OR: [{ voucherCode: null }, { voucherCode: '' }],
-    });
-  });
-});
-
 describe('notifyVoucherIssued — card + PIN via the one voucher_code template', () => {
   const deps = (order: Record<string, unknown>) => {
     const notifyUserWithChannels = jest.fn().mockResolvedValue(undefined);
@@ -281,8 +260,10 @@ describe('notifyVoucherIssued — card + PIN via the one voucher_code template',
     expect(call.body).toBe('Your Croma Gift Card voucher is ready — card no. and PIN are in My Orders.');
     expect(call.subject).toBe('Your voucher code');
     // Every PERSISTED copy of the vars uses the masked value.
-    expect(call.maskedVars).toEqual({ code: '6001 2200 1234 | PIN: see My Orders' });
+    expect(call.maskedVars).toEqual({ code: '6001 2200 1234' });
     expect(JSON.stringify(call.maskedVars)).not.toMatch(/48|29/);
+    // The SMS/stored code var is the code ONLY — no PIN text (DLT var length cap).
+    expect(call.maskedVars.code).not.toMatch(/PIN|My Orders/i);
     // B6: the stored / SMS value is plain ASCII (GSM-7 safe) — no bullets.
     expect(call.maskedVars.code).toMatch(/^[ -~]+$/);
     // Secrets for the failure-reason scrub: the combined value, the code and the PIN.

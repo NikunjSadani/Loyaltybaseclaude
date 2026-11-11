@@ -880,6 +880,32 @@ describe('RewardsService', () => {
       }
     });
 
+    it('item 14: the fulfilling operator list row carries server voucherFillable (canFillStoredVoucher); member + CLIENT_ADMIN never get it, nor pointsDeducted', async () => {
+      const at = new Date('2026-10-01T10:00:00.000Z');
+      const rows = [
+        { id: 'o1', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Croma', redemptionMode: 'GIFT_CARD', pointsDeducted: 500, metadata: {}, createdAt: at, updatedAt: at },
+        { id: 'o2', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Croma', redemptionMode: 'GIFT_CARD', pointsDeducted: 0, metadata: {}, createdAt: at, updatedAt: at },
+        { id: 'o3', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Hubble', redemptionMode: 'GIFT_CARD', pointsDeducted: 500, metadata: { hubbleStatus: 'SUCCESS' }, createdAt: at, updatedAt: at },
+        { id: 'o4', status: 'RETURNED', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Croma', redemptionMode: 'GIFT_CARD', pointsDeducted: 500, metadata: {}, createdAt: at, updatedAt: at },
+      ];
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue(rows);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(rows.length);
+
+      const g = await service.listOrders(gifsy, {});
+      expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].select).toMatchObject({ pointsDeducted: true });
+      expect((g.orders as Array<{ voucherFillable?: boolean }>).map((o) => o.voucherFillable)).toEqual([true, false, false, false]);
+      for (const o of g.orders) expect(o).not.toHaveProperty('pointsDeducted');
+
+      for (const viewer of [partner, clientAdminA]) {
+        const res = await service.listOrders(viewer, {});
+        for (const o of res.orders) {
+          expect(o).not.toHaveProperty('voucherFillable');
+          expect(o).not.toHaveProperty('pointsDeducted');
+        }
+      }
+    });
+
     it('ListOrdersQueryDto caps limit at 500 (500 ok, 501 rejected; default 20 unchanged)', async () => {
       const errs = async (q: Record<string, unknown>) =>
         validate(plainToInstance(ListOrdersQueryDto, q)).then((e) => e.map((x) => x.property));
@@ -4267,30 +4293,19 @@ describe('RewardsService', () => {
         .rejects.toThrow("A voucher code is already issued; use 'Voucher cancelled with vendor' first.");
     });
 
-    it('B7: switching a coded order to a PHYSICAL channel is a 400 (PATCH + transition); no write', async () => {
-      const msg = "This order has a voucher code. Use 'Voucher cancelled with vendor' before switching to a physical channel.";
+    it('a coded order MAY switch to a physical channel (physical gift cards carry codes/PINs) — no voucher claim', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(
-        paid({ voucherCode: 'CARD-1111-2222', fulfilmentChannel: 'DIGITAL_VOUCHER' }),
+        paid({ voucherCode: 'CARD-1111-2222', voucherPin: '4455', fulfilmentChannel: 'DIGITAL_VOUCHER' }),
       );
-      await expect(service.updateOrder(gifsy, 'o1', { fulfilmentChannel: 'GIFSY_WAREHOUSE' as never })).rejects.toThrow(msg);
-      await expect(
-        service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.PROCESSING, fulfilmentChannel: 'BRAND' as never }),
-      ).rejects.toThrow(msg);
+      mockPrisma.redemptionOrder.update.mockResolvedValueOnce({ id: 'o1', fulfilmentChannel: 'GIFSY_WAREHOUSE' });
+      await service.updateOrder(gifsy, 'o1', { fulfilmentChannel: 'GIFSY_WAREHOUSE' as never });
       expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
-      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
-      // Re-sending DIGITAL_VOUCHER (the stored channel) is fine.
-      mockPrisma.redemptionOrder.update.mockResolvedValueOnce({ id: 'o1' });
-      await service.updateOrder(gifsy, 'o1', { fulfilmentChannel: 'DIGITAL_VOUCHER' as never, trackingNumber: 'T' });
-      expect(mockPrisma.redemptionOrder.update).toHaveBeenCalledTimes(1);
-    });
-
-    it('B7: switching a CODE-LESS order to a physical channel carries a "still no code" claim (a concurrent issue → 409)', async () => {
-      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid({ fulfilmentChannel: 'DIGITAL_VOUCHER' }));
-      mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 });
-      await expect(service.updateOrder(gifsy, 'o1', { fulfilmentChannel: 'GIFSY_WAREHOUSE' as never })).rejects.toThrow(ConflictException);
-      expect(mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].where).toMatchObject({
-        OR: [{ voucherCode: null }, { voucherCode: '' }],
-      });
+      const call = mockPrisma.redemptionOrder.update.mock.calls[0][0];
+      expect(call.where).toEqual({ id: 'o1' });
+      expect(call.data).toMatchObject({ fulfilmentChannel: 'GIFSY_WAREHOUSE' });
+      // The stored code / PIN are never touched by a channel change.
+      expect(call.data).not.toHaveProperty('voucherCode');
+      expect(call.data).not.toHaveProperty('voucherPin');
     });
 
     it('bulk upload: a Voucher Code / PIN cell stored as a NUMBER is a row error and is not applied', async () => {

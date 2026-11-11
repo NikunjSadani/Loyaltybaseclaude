@@ -54,7 +54,7 @@ const notify = (svc: NotificationsService) =>
     eventKey: 'VOUCHER_ISSUED',
     recipientPhone: '9990000001',
     vars: { ownerName: 'Asha', amount: '₹500', program: 'Bajaj Loyalty', voucherName: 'Croma', code: COMBINED },
-    maskedVars: { code: `${CODE} | PIN: see My Orders` },
+    maskedVars: { code: CODE },
     secretValues: [COMBINED, CODE, PIN],
     subject: 'Your voucher code',
     body: 'Your Croma voucher is ready — card no. and PIN are in My Orders.',
@@ -78,7 +78,7 @@ describe('NotificationsService — secret vars', () => {
     expect(queueRows.map((r) => r.channel)).toEqual(['IN_APP', 'PUSH', 'SMS']);
     for (const row of queueRows) expect(JSON.stringify(row)).not.toContain(PIN);
     const sms = queueRows.find((r) => r.channel === 'SMS')!;
-    expect(sms.variables).toMatchObject({ code: `${CODE} | PIN: see My Orders` });
+    expect(sms.variables).toMatchObject({ code: CODE });
     expect(send).toHaveBeenCalledWith(
       '9990000001',
       'voucher_code',
@@ -135,6 +135,25 @@ describe('scrubSecrets', () => {
     expect(scrubSecrets(`url ?code=${encodeURIComponent(COMBINED)}`, [COMBINED])).toBe(SCRUBBED_PROVIDER_ERROR);
     expect(scrubSecrets('form code=6001+2200+1234', ['6001 2200 1234'])).toBe(SCRUBBED_PROVIDER_ERROR);
     expect(scrubSecrets('code amz-abc-123 rejected', ['AMZ-ABC-123'])).toBe(SCRUBBED_PROVIDER_ERROR);
+  });
+
+  it('matches a SEPARATOR-STRIPPED echo of a secret of 8+ chars (spaces / dashes removed)', () => {
+    expect(scrubSecrets('invalid value 600122001234', ['6001 2200 1234'])).toBe(SCRUBBED_PROVIDER_ERROR);
+    expect(scrubSecrets('invalid value AMZABC12', ['AMZ-ABC-12'])).toBe(SCRUBBED_PROVIDER_ERROR);
+    // Still token-bounded, and a short secret (< 8) gets no stripped form.
+    expect(scrubSecrets('ref X600122001234 ok', ['6001 2200 1234'])).toBe('ref X600122001234 ok');
+    expect(scrubSecrets('ref 1234 ok', ['12-34'])).toBe('ref 1234 ok');
+  });
+
+  it('matches a TRUNCATED echo: any 8+ char prefix of a 12+ char secret at the start of a token', () => {
+    expect(scrubSecrets('bad param "60012200…"', ['6001220012345678'])).toBe(SCRUBBED_PROVIDER_ERROR);
+    expect(scrubSecrets('bad param 600122001', ['6001220012345678'])).toBe(SCRUBBED_PROVIDER_ERROR);
+    // The truncated echo of the separator-stripped form too.
+    expect(scrubSecrets('value=60012200', ['6001 2200 1234 5678'])).toBe(SCRUBBED_PROVIDER_ERROR);
+    // Not at a token start → no match; a 7-char prefix → no match; a secret < 12 chars → no prefix rule.
+    expect(scrubSecrets('ref X60012200 ok', ['6001220012345678'])).toBe('ref X60012200 ok');
+    expect(scrubSecrets('ref 6001220 ok', ['6001220012345678'])).toBe('ref 6001220 ok');
+    expect(scrubSecrets('ref ABCDEFGH ok', ['ABCDEFGHIJK'])).toBe('ref ABCDEFGH ok');
   });
 
   it('accepts any input: null/undefined → "", objects JSON-stringified, Errors stringified, never throws', () => {
