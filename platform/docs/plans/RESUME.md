@@ -84,6 +84,10 @@ UPI money fixes (code on `backup/wip-20261105-batt`). _(The React #418 hydration
   cleanup deletes a concurrent redeem's fresh OTP; My Orders page fetches only the newest 20 orders; wallet payout list caps
   at 100 rows.
 - **TDS 194R:** `e8c3f463` reverted the VENDOR_IMPORT exclusion on `main` only — still present on `develop`. Standing rule (2026-11-10): every "prepare main" KEEPS the revert (`git diff <prev-main> HEAD -- api/src/tds/` empty).
+- **OTP hardening deploy note (this release):** KYC consent OTPs are now bound to the submission (stored with its id + the owner's
+  normalised phone). Consent OTPs already sent before the deploy have no submission id → verifying them returns "OTP not found or
+  expired"; the rep taps **Resend** (OTPs expire in 10 min, so the window is tiny). Login now only accepts LOGIN-purpose OTPs; the hourly
+  per-phone login cap counts LOGIN OTPs only; every OTP verify claims an attempt atomically before comparing.
 - **⚠️ PROD DEPLOY PREFLIGHT (from the #59 + Sales Import release on, EVERY prod deploy, Deoleo-only ones too):** `deploy.yml` first step checks
   (metadata only) that `HUBBLE_CLIENT_ID`, `HUBBLE_CLIENT_SECRET`, `HUBBLE_WEBHOOK_SECRET` exist with an ENABLED latest version, which needs
   `roles/secretmanager.viewer` on `gifsy-deployer` (terraform/iam.tf; one-time gcloud grant in BAJAJ-PROD-GO-LIVE-CHECKLIST.md F3 runbook step 0).
