@@ -4,56 +4,68 @@
  * only. The backend enforces the same rule (RedeemDto.amount @IsInt → 400 "Enter a whole-rupee
  * amount"); this is the matching UX so a decimal never even reaches the server.
  *
- * Rules (the field never displays a decimal, and "750.5" / "750,5" can never become "7505"):
+ * Rules (owner 2026-11-11: "decimal values should not be accepted" — a value is NEVER silently
+ * shrunk, e.g. "1,2" must not become ₹1):
  *   - "." is ALWAYS a decimal mark and is blocked as typed: it and the digits typed after it are
  *     dropped (FRACTION STATE — desktop keydown, Android beforeinput / "Unidentified" keydown, and
  *     a final change-event guard). The fraction state ends on any delete, a cursor move, paste or
  *     blur, and never starts on an empty field.
- *   - "," WHILE TYPING is kept as-is (never truncates): "1," stays "1,", then "1,250" stays
- *     "1,250" — we can't know yet whether a digit group will follow. It is INTERPRETED on blur /
- *     commit (Enter) and on paste: a "," that forms valid thousands / Indian grouping is a
- *     separator ("1,250" → 1250, "1,25,000" → 125000); any other "," is a decimal mark → the
- *     digits after it are dropped ("750,5" → 750). A caller that reads the value while the field
- *     may still be focused (submit, live previews) MUST read it through wholeRupeeAmount /
- *     wholeRupeesFromText, which apply the same interpretation.
- *   - Pasted text is spliced at the selection and interpreted at once: "1.5" over a selected
- *     "500" → "1"; paste "750,5" → "750"; paste "1,25,000" → "125000".
+ *   - "," WHILE TYPING is kept as-is (never truncates), and the caret stays where it was typed:
+ *     "1," stays "1,", then "1,250" stays "1,250". It is INTERPRETED on blur / commit (Enter) and
+ *     on paste: valid thousands ("1,250", "12,500", "125,000") or Indian grouping ("1,25,000")
+ *     → plain digits; ANY other comma pattern ("750,5", "1,2", "1,", "1,2345") is INVALID — the raw
+ *     text is KEPT, onCommit(true) fires, and callers show WHOLE_RUPEE_INVALID_MESSAGE ("Check the
+ *     amount") and disable submit. wholeRupeeAmount returns null for such text (never a guess).
+ *   - Pasted text: a leading currency marker is stripped ("Rs. 1,250", "Rs.1,250", "₹ 1,250",
+ *     "INR 1250" → 1250), it is spliced at the selection and interpreted at once; a pasted decimal
+ *     ("₹1,250.50", "1.5") is INVALID ("Check the amount") — consistent with "." being blocked.
  *   - "e" "E" "+" "-" are refused.
  */
 
 import type React from 'react';
 
-/**
- * Index of the decimal break in `text`: the first "." or the first "," that is not a thousands
- * separator, else -1. A "," is a separator only when followed by exactly 3 digits (then a non-
- * digit or the end), or by 2 digits and another "," (Indian grouping: 1,25,000).
- */
-export function decimalBreakIndex(text: string): number {
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '.') return i;
-    if (c === ',') {
-      const rest = text.slice(i + 1);
-      const isGroup = /^\d{3}(?!\d)/.test(rest) || /^\d{2},/.test(rest);
-      if (!isGroup) return i;
-    }
-  }
-  return -1;
-}
+/** Shown by every caller when the committed amount text is not a valid whole-rupee amount. */
+export const WHOLE_RUPEE_INVALID_MESSAGE = 'Check the amount';
 
-/** The whole-rupee digits in arbitrary text ('' when none). Truncates at the decimal break. */
-export function wholeRupeesFromText(text: string): string {
-  const t = text ?? '';
-  const brk = decimalBreakIndex(t);
-  return (brk === -1 ? t : t.slice(0, brk)).replace(/\D/g, '');
+const CURRENCY_PREFIX = /^\s*(?:₹|rs\.?|inr)\s*/i;
+const PLAIN_DIGITS = /^\d+$/;
+/** Thousands grouping: 1,250 · 12,500 · 125,000 · 1,250,000. */
+const WESTERN_GROUPING = /^\d{1,3}(?:,\d{3})+$/;
+/** Indian grouping: 1,250 · 1,25,000 · 12,34,567. */
+const INDIAN_GROUPING = /^\d{1,2}(?:,\d{2})*,\d{3}$/;
+
+/** Strip a leading currency marker ("₹", "Rs", "Rs.", "INR" — any case) and surrounding space. */
+export function stripCurrencyPrefix(text: string): string {
+  return (text ?? '').replace(CURRENCY_PREFIX, '').trim();
 }
 
 /**
- * The committed whole-rupee NUMBER of a field value (0 when empty). Use wherever a caller reads
- * the amount — a still-focused field may hold "1,250" (→ 1250) or "750,5" (→ 750).
+ * The plain digits of a whole-rupee amount text: '' when empty, the digits when the text is a
+ * plain number or a valid thousands / Indian grouping, and null when it is anything else (a
+ * decimal, a stray comma, letters). Never guesses.
  */
-export function wholeRupeeAmount(text: string): number {
-  return parseInt(wholeRupeesFromText(text), 10) || 0;
+export function wholeRupeeDigits(text: string): string | null {
+  const t = stripCurrencyPrefix(text);
+  if (t === '') return '';
+  if (PLAIN_DIGITS.test(t)) return t;
+  if (WESTERN_GROUPING.test(t) || INDIAN_GROUPING.test(t)) return t.replace(/,/g, '');
+  return null;
+}
+
+/** True when the text is NOT a valid whole-rupee amount (empty is not invalid — just empty). */
+export function isWholeRupeeInvalid(text: string): boolean {
+  return wholeRupeeDigits(text) === null;
+}
+
+/**
+ * The whole-rupee NUMBER of a field value: 0 when empty, null when the text is not a valid
+ * whole-rupee amount ("750,5", "1,", "1.5") — callers must treat null as "can't submit". Use
+ * wherever a caller reads the amount (a still-focused field may hold "1,250" → 1250).
+ */
+export function wholeRupeeAmount(text: string): number | null {
+  const d = wholeRupeeDigits(text);
+  if (d === null) return null;
+  return d === '' ? 0 : parseInt(d, 10);
 }
 
 /**
@@ -77,20 +89,24 @@ type WrNode = HTMLInputElement & { __wrBeforeInput?: (ev: InputEvent) => void };
 
 /**
  * Props for a controlled whole-rupee <input>: spread onto the element and render `value`
- * yourself. `onValue` receives the field text — digits, plus (only while the user is still
- * typing) any "," they typed. Blur / Enter commits it to plain digits. Read amounts through
- * wholeRupeeAmount.
+ * yourself. `onValue` receives the field text — digits, plus (while typing) any "," typed. Blur /
+ * Enter / paste COMMITS it: a valid amount becomes plain digits; an invalid one is KEPT as typed
+ * and `opts.onCommit(true)` fires (callers then show WHOLE_RUPEE_INVALID_MESSAGE — derive it as
+ * `committed && isWholeRupeeInvalid(value)` — and disable submit while wholeRupeeAmount is null).
  */
-export function wholeRupeeInputProps(onValue: (digits: string) => void) {
+export function wholeRupeeInputProps(
+  onValue: (text: string) => void,
+  opts: { onCommit?: (invalid: boolean) => void } = {},
+) {
   const emit = (el: HTMLInputElement, display: string) => {
     el.dataset.last = display;
     onValue(display);
   };
 
   /**
-   * Splice `text` into the field at its selection. TYPED text keeps "," as-is; a "." truncates
-   * there and — when at the END of the result with something left — enters the fraction state.
-   * PASTED text is interpreted immediately (wholeRupeesFromText).
+   * Splice `text` into the field at its selection. TYPED text keeps "," as-is (caret kept right
+   * after the insert); a "." truncates there and — when at the END of the result with something
+   * left — enters the fraction state. PASTED text (currency marker stripped) is interpreted at once.
    */
   const insert = (el: HTMLInputElement, text: string, mode: 'type' | 'paste') => {
     const value = el.value;
@@ -98,25 +114,44 @@ export function wholeRupeeInputProps(onValue: (digits: string) => void) {
     const end = el.selectionEnd ?? value.length;
     const before = value.slice(0, start);
     const after = value.slice(end);
-    const spliced = before + text + after;
     if (mode === 'paste') {
       endFraction(el); // a paste never leaves the field waiting to swallow digits
-      emit(el, wholeRupeesFromText(spliced));
+      const spliced = before + stripCurrencyPrefix(text) + after;
+      const digits = wholeRupeeDigits(spliced);
+      if (digits === null) {
+        emit(el, spliced); // keep what was pasted — the caller shows "Check the amount"
+        opts.onCommit?.(true);
+      } else {
+        emit(el, digits);
+        opts.onCommit?.(false);
+      }
       return;
     }
+    const spliced = before + text + after;
     const display = typingDisplay(spliced);
     const dot = spliced.indexOf('.');
     const dotInInsert = dot !== -1 && dot >= before.length && dot < before.length + text.length;
     if (dotInInsert && after === '' && display !== '') startFraction(el);
     else endFraction(el);
+    // Write the DOM value + caret BEFORE the state update: React then finds the node already
+    // holding the new value and leaves it (and the caret) alone — a "," typed mid-value keeps the
+    // caret right after it instead of jumping to the end.
+    const caret = Math.min(typingDisplay(before + text).length, display.length);
+    if (el.value !== display) el.value = display;
+    try { el.setSelectionRange(caret, caret); } catch { /* detached / not focusable — ignore */ }
     emit(el, display);
   };
 
-  /** Blur / Enter: interpret every "," (separator vs decimal mark) → plain digits. */
+  /** Blur / Enter: a valid amount → plain digits; an invalid one is kept and flagged. */
   const commit = (el: HTMLInputElement) => {
     endFraction(el);
-    const committed = wholeRupeesFromText(el.value);
-    if (committed !== el.value) emit(el, committed);
+    const digits = wholeRupeeDigits(el.value);
+    if (digits === null) {
+      opts.onCommit?.(true);
+      return;
+    }
+    if (digits !== el.value) emit(el, digits);
+    opts.onCommit?.(false);
   };
 
   const onNativeBeforeInput = (el: HTMLInputElement, ev: InputEvent) => {

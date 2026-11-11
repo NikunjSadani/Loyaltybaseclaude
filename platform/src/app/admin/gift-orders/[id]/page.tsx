@@ -31,10 +31,10 @@ import {
   CheckCircle2,
   XCircle,
   ExternalLink,
-  Ticket,
   ShieldAlert,
 } from 'lucide-react';
 import { api } from '@/lib/api-client';
+import { VoucherFulfilmentFields } from '@/components/operator/voucher-fulfilment-fields';
 import { Modal } from '@/components/ui/modal';
 import {
   type GiftOrderDetail,
@@ -336,7 +336,10 @@ function FulfilmentForm({
               onChange={(e) => set('voucherProvider', e.target.value)}
               placeholder="e.g. Amazon Pay"
               data-testid="ff-voucher-provider"
-              className={inputCls}
+              // Locked with the stored code: a provider change on an issued voucher is a replace (400).
+              readOnly={!!order.voucherCode?.trim()}
+              aria-readonly={!!order.voucherCode?.trim() || undefined}
+              className={`${inputCls} read-only:bg-gray-50 read-only:text-gray-600`}
             />
           ) : (
             <input
@@ -351,35 +354,14 @@ function FulfilmentForm({
       </div>
 
       {voucher ? (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div className="space-y-1 sm:col-span-2">
-            <label className="text-xs font-medium text-gray-700 flex items-center gap-1.5">
-              <Ticket className="w-3.5 h-3.5 text-amber-500" /> Voucher code / card no.
-            </label>
-            <input
-              value={draft.voucherCode}
-              onChange={(e) => set('voucherCode', e.target.value)}
-              placeholder="AMZ-XXXX-XXXX"
-              data-testid="ff-voucher-code"
-              className={inputCls}
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs font-medium text-gray-700" htmlFor="ff-voucher-pin">
-              PIN <span className="text-gray-400 font-normal">(optional)</span>
-            </label>
-            <input
-              id="ff-voucher-pin"
-              value={draft.voucherPin}
-              onChange={(e) => set('voucherPin', e.target.value)}
-              placeholder="Only for card + PIN"
-              maxLength={64}
-              autoComplete="off"
-              data-testid="ff-voucher-pin"
-              className={inputCls}
-            />
-          </div>
-        </div>
+        // Stored code → read-only; PIN editable only while none is stored (set-once), else masked.
+        <VoucherFulfilmentFields
+          storedCode={order.voucherCode}
+          storedPin={order.voucherPin}
+          draft={draft}
+          set={set}
+          inputCls={inputCls}
+        />
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-1">

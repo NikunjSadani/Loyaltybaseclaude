@@ -31,11 +31,20 @@ export function voucherCodeVar(code: string, pin: string | null | undefined): st
   return `${whatsappSafeVar(code)} | PIN: ${p}`;
 }
 
-/** "••••" + last 4 for an 8+ char code, else fully masked — audit/log display only. */
-export function maskVoucherCodeForAudit(code: string): string {
-  const t = code.trim();
-  return t.length >= 8 ? `••••${t.slice(-4)}` : '••••';
+/**
+ * Codes shorter than this are FULLY masked in audit rows / app logs: a last-4 hint on a short code
+ * (e.g. an 8-char code) gives away half of it. At 12+ the visible tail is at most a third.
+ */
+export const VOUCHER_MASK_MIN_LENGTH = 12;
+
+/** "••••" + last 4 for a 12+ char code, else fully "••••" — audit/log display only. */
+export function maskVoucherCodeForAudit(code: string | null | undefined): string {
+  const t = typeof code === 'string' ? code.trim() : '';
+  return t.length >= VOUCHER_MASK_MIN_LENGTH ? `••••${t.slice(-4)}` : '••••';
 }
+
+/** What a stored (persisted) copy of the WhatsApp/SMS `code` var shows when a PIN exists. */
+export const MASKED_PIN = '••••';
 
 export async function recordVoucherIssuedAudit(
   db: Db,
@@ -49,6 +58,8 @@ export async function recordVoucherIssuedAudit(
     overrideReason?: string | null;
     /** The PIN written alongside the code (card+PIN voucher) — audited MASKED only, never in clear. */
     pin?: string | null;
+    /** Audit event name (default VOUCHER_ISSUED_MANUAL; a set-once PIN add is VOUCHER_PIN_ADDED_MANUAL). */
+    event?: string;
   },
 ): Promise<void> {
   await db.auditLog.create({
@@ -58,7 +69,7 @@ export async function recordVoucherIssuedAudit(
       entityType: 'REDEMPTION_ORDER',
       entityId: args.orderId,
       metadata: {
-        event: 'VOUCHER_ISSUED_MANUAL',
+        event: args.event ?? 'VOUCHER_ISSUED_MANUAL',
         path: args.path,
         voucherCode: maskVoucherCodeForAudit(args.code),
         // Only the FACT of a PIN, fully masked like a short code — the PIN itself is never logged.
@@ -91,8 +102,16 @@ export async function programLabelFor(
 /**
  * Send the member their VOUCHER_ISSUED notification (`voucher_code` template). Best-effort: never
  * throws. No PIN on the order → vars + body byte-identical to the pre-PIN behaviour. A card number
- * + PIN order → the SAME event/template (the contract stays 5 vars) with {{5}} `code` =
- * "<code> | PIN: <pin>" (single line), and bell/SMS body "Your <name> card no: <code> · PIN: <pin>".
+ * + PIN order → the SAME event/template (the contract stays 5 vars): the WhatsApp SEND carries
+ * {{5}} `code` = "<code> | PIN: <pin>" (single line), but NO persisted copy holds the PIN:
+ *  - bell/push/SMS body = "Your <name> voucher is ready — card no. and PIN are in My Orders.";
+ *  - every STORED vars copy (IN_APP/PUSH variables, the SMS queue row) gets `maskedVars.code` =
+ *    "<code> | PIN: ••••" (so the dormant SMS leg, which sends from its stored row, sends it masked);
+ *  - the code, the PIN and the combined value are passed as secrets, so a delivery-failure reason
+ *    (MessageDeliveryReceipt.failureReason, shown to CLIENT_ADMIN) and the send-failure logs are
+ *    scrubbed to "••••". (Secrets are passed on the no-PIN path too — the code alone.)
+ * Called on a NEW code AND when a PIN is added later to an already-issued code (set-once) — the
+ * member then receives the voucher again, now with the PIN.
  */
 export async function notifyVoucherIssued(
   deps: {
@@ -131,6 +150,7 @@ export async function notifyVoucherIssued(
     const amount = o.valuePaise != null ? `₹${(Number(o.valuePaise) / 100).toLocaleString('en-IN')}` : '';
     const voucherName = o.reward?.name ?? 'voucher';
     const pin = typeof o.voucherPin === 'string' && o.voucherPin.trim() ? o.voucherPin.trim() : null;
+    const combined = voucherCodeVar(o.voucherCode, pin);
 
     await deps.notifications.notifyUserWithChannels({
       clientId,
@@ -142,11 +162,16 @@ export async function notifyVoucherIssued(
         amount,
         program,
         voucherName,
-        code: voucherCodeVar(o.voucherCode, pin),
+        code: combined,
       },
+      ...(pin ? { maskedVars: { code: voucherCodeVar(o.voucherCode, MASKED_PIN) } } : {}),
+      // Raw AND single-line forms (a provider may echo either); de-duplicated.
+      secretValues: pin
+        ? [...new Set([combined, o.voucherCode, whatsappSafeVar(o.voucherCode), pin, whatsappSafeVar(pin)])]
+        : [o.voucherCode],
       subject: 'Your voucher code',
       body: pin
-        ? `Your ${voucherName} card no: ${o.voucherCode} · PIN: ${pin}`
+        ? `Your ${voucherName} voucher is ready — card no. and PIN are in My Orders.`
         : `Your ${voucherName} code: ${o.voucherCode}`,
       url: '/partner/rewards/orders',
       event: 'VOUCHER_ISSUED',

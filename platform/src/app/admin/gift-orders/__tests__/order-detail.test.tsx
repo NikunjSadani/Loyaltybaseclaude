@@ -80,16 +80,48 @@ describe('Gift order detail', () => {
     await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
     const [url, body] = patch.mock.calls[0];
     expect(url).toBe('/api/admin/gift-orders/o1/fulfilment');
-    // Full editable set is sent; unfilled fields ride as null so the backend can clear them.
+    // Full SHIPPING set is sent (unfilled → null so the backend can clear them); blank voucher
+    // fields are OMITTED — a null voucherCode / voucherProvider is a backend 400.
     expect(body).toEqual({
       fulfilmentChannel: 'GIFSY_WAREHOUSE',
       logisticsPartner: 'Delhivery',
       trackingNumber: 'TRK-77',
       trackingUrl: null,
       supplierOrderRef: null,
-      voucherCode: null,
-      voucherProvider: null,
     });
+  });
+
+  it('OD2b: a stored code is read-only; with no PIN yet the PIN box is offered once (hint) and Save sends it', async () => {
+    get.mockResolvedValue({
+      success: true,
+      data: orderWith({ fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: 'CARD-1111-2222', voucherProvider: 'Croma', voucherPin: null }),
+    });
+    patch.mockResolvedValue({ success: true, data: {} });
+    render(<GiftOrderDetailPage />);
+    await screen.findByText('DEO-26-000123');
+    expect(screen.getByTestId('ff-voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
+    expect(screen.queryByTestId('ff-voucher-code')).toBeNull();
+    expect(screen.getByTestId('ff-voucher-provider')).toHaveAttribute('readonly');
+    expect(screen.getByText('Add the PIN for this card — it can be saved once')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('PIN (if the card has one)'), { target: { value: ' 4455 ' } });
+    fireEvent.click(screen.getByTestId('ff-save'));
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+    expect(patch.mock.calls[0][1]).toMatchObject({ voucherCode: 'CARD-1111-2222', voucherPin: '4455', voucherProvider: 'Croma' });
+  });
+
+  it('OD2c: a stored PIN is read-only and masked behind "Show" (default hidden)', async () => {
+    get.mockResolvedValue({
+      success: true,
+      data: orderWith({ fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: 'CARD-1111-2222', voucherPin: '4455' }),
+    });
+    render(<GiftOrderDetailPage />);
+    await screen.findByText('DEO-26-000123');
+    expect(screen.queryByTestId('ff-voucher-pin')).toBeNull();
+    const pin = screen.getByTestId('ff-voucher-pin-readonly');
+    expect(pin).toHaveTextContent('PIN ••••');
+    expect(pin).not.toHaveTextContent('4455');
+    fireEvent.click(screen.getByRole('button', { name: 'Show PIN' }));
+    expect(pin).toHaveTextContent('4455');
   });
 
   it('OD6: blanking a pre-filled tracking number sends null so the stale value is cleared', async () => {

@@ -679,9 +679,22 @@ export class VendorPortalService {
           path: 'PATCH /vendor/orders/:id/fulfilment',
         });
       }
+      if (voucherPlan.addsPin && existing.voucherCode) {
+        // Set-once PIN added to an already-issued code — audited masked (never the PIN).
+        await recordVoucherIssuedAudit(tx, {
+          actorId: user.sub,
+          orderId: id,
+          code: existing.voucherCode,
+          pin: voucherPlan.data.voucherPin ?? null,
+          provider: existing.voucherProvider,
+          path: 'PATCH /vendor/orders/:id/fulfilment',
+          event: 'VOUCHER_PIN_ADDED_MANUAL',
+        });
+      }
     });
-    // The member gets their code, exactly as the Gifsy transition path sends it.
-    if (voucherPlan.issuesNewCode) await this.notifyIssued(id, scope.clientId);
+    // The member gets their code, exactly as the Gifsy transition path sends it (and again, with
+    // the PIN, when a PIN is added later to the issued code).
+    if (voucherPlan.issuesNewCode || voucherPlan.addsPin) await this.notifyIssued(id, scope.clientId);
     return this.getOrder(user, id);
   }
 
@@ -821,13 +834,25 @@ export class VendorPortalService {
           path: 'POST /vendor/orders/:id/transition',
         });
       }
+      if (voucherPlan.addsPin && order.voucherCode) {
+        await recordVoucherIssuedAudit(tx, {
+          actorId: user.sub,
+          orderId: id,
+          code: order.voucherCode,
+          pin: voucherPlan.data.voucherPin ?? null,
+          provider: order.voucherProvider,
+          path: 'POST /vendor/orders/:id/transition',
+          event: 'VOUCHER_PIN_ADDED_MANUAL',
+        });
+      }
     });
-    if (voucherPlan.issuesNewCode) await this.notifyIssued(id, scope.clientId);
+    const voucherNotified = voucherPlan.issuesNewCode || voucherPlan.addsPin;
+    if (voucherNotified) await this.notifyIssued(id, scope.clientId);
 
     // Member notification on the customer-visible milestones (same path as Gifsy) — unless this
     // same move just issued the code, whose VOUCHER_ISSUED message supersedes it (as on Gifsy).
     if (
-      !voucherPlan.issuesNewCode &&
+      !voucherNotified &&
       (toStatus === RedemptionStatus.DISPATCHED || toStatus === RedemptionStatus.DELIVERED)
     ) {
       const partner = await this.prisma.channelPartner.findFirst({

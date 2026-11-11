@@ -68,15 +68,15 @@ describe('GIFVC — voucher handling', () => {
     await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
 
     expect(advanceSelect().value).toBe('PROCESSING');
-    await userEvent.type(screen.getByLabelText('Voucher code'), 'AMZ-TYPED-1234');
+    await userEvent.type(screen.getByLabelText('Card no. / code'), 'AMZ-TYPED-1234');
     await userEvent.type(screen.getByLabelText('Provider'), 'Gifsy');
 
     await userEvent.selectOptions(advanceSelect(), 'CANCELLED');
-    expect(screen.queryByLabelText('Voucher code')).toBeNull();
+    expect(screen.queryByLabelText('Card no. / code')).toBeNull();
     // Back to PROCESSING → the previously typed code is gone (fresh draft per target).
     await userEvent.selectOptions(advanceSelect(), 'PROCESSING');
-    expect((screen.getByLabelText('Voucher code') as HTMLInputElement).value).toBe('');
-    await userEvent.type(screen.getByLabelText('Voucher code'), 'AMZ-TYPED-1234');
+    expect((screen.getByLabelText('Card no. / code') as HTMLInputElement).value).toBe('');
+    await userEvent.type(screen.getByLabelText('Card no. / code'), 'AMZ-TYPED-1234');
     await userEvent.selectOptions(advanceSelect(), 'CANCELLED');
 
     await userEvent.click(screen.getByRole('button', { name: /confirm → CANCELLED/i }));
@@ -89,7 +89,7 @@ describe('GIFVC — voucher handling', () => {
     const calls = installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null }]);
     const row = await openRow('RDM-1');
     await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
-    await userEvent.type(screen.getByLabelText('Voucher code'), 'AMZ-NEW-5678');
+    await userEvent.type(screen.getByLabelText('Card no. / code'), 'AMZ-NEW-5678');
     await userEvent.click(screen.getByRole('button', { name: /confirm → PROCESSING/i }));
     await waitFor(() => expect(calls.some((c) => c.url.endsWith('/transition'))).toBe(true));
     const body = JSON.parse(String(calls.find((c) => c.url.endsWith('/transition'))!.init!.body));
@@ -100,8 +100,8 @@ describe('GIFVC — voucher handling', () => {
     const calls = installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null }]);
     const row = await openRow('RDM-1');
     await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
-    await userEvent.type(screen.getByLabelText('Voucher code'), '6001220012345678');
-    await userEvent.type(screen.getByLabelText('PIN (optional)'), ' 482913 ');
+    await userEvent.type(screen.getByLabelText('Card no. / code'), '6001220012345678');
+    await userEvent.type(screen.getByLabelText('PIN (if the card has one)'), ' 482913 ');
     await userEvent.click(screen.getByRole('button', { name: /confirm → PROCESSING/i }));
     await waitFor(() => expect(calls.some((c) => c.url.endsWith('/transition'))).toBe(true));
     const body = JSON.parse(String(calls.find((c) => c.url.endsWith('/transition'))!.init!.body));
@@ -112,7 +112,7 @@ describe('GIFVC — voucher handling', () => {
     const calls = installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null }]);
     const row = await openRow('RDM-1');
     await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
-    await userEvent.type(screen.getByLabelText('PIN (optional)'), '4829');
+    await userEvent.type(screen.getByLabelText('PIN (if the card has one)'), '4829');
     await userEvent.click(screen.getByRole('button', { name: /confirm → PROCESSING/i }));
     expect(await screen.findByText('Enter the card number before the PIN')).toBeInTheDocument();
     expect(calls.some((c) => c.url.endsWith('/transition'))).toBe(false);
@@ -122,7 +122,37 @@ describe('GIFVC — voucher handling', () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'DELIVERED', voucherCode: '6001220012345678', voucherPin: '482913', voucherProvider: 'Gifsy' }]);
     const row = await openRow('RDM-1');
     expect(within(row).getByTestId('order-voucher-code')).toHaveTextContent('6001220012345678');
-    expect(within(row).getByTestId('order-voucher-pin')).toHaveTextContent('PIN 482913');
+    // The PIN is masked behind a per-row "Show" toggle (aria-pressed), hidden by default.
+    const pin = within(row).getByTestId('order-voucher-pin');
+    expect(pin).toHaveTextContent('PIN ••••');
+    expect(pin).not.toHaveTextContent('482913');
+    const toggle = within(pin).getByRole('button', { name: 'Show PIN' });
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await userEvent.click(toggle);
+    expect(pin).toHaveTextContent('PIN 482913');
+    expect(within(pin).getByRole('button', { name: 'Hide PIN' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('GIFVC2e: a stored code WITHOUT a PIN offers a set-once PIN box on a forward move and sends only the PIN', async () => {
+    const calls = installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Gifsy' }]);
+    const row = await openRow('RDM-1');
+    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    expect(screen.getByTestId('voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
+    expect(screen.queryByLabelText('Card no. / code')).toBeNull(); // the stored code is not editable
+    expect(screen.getByText('Add the PIN for this card — it can be saved once')).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText('PIN (if the card has one)'), ' 9911 ');
+    await userEvent.click(screen.getByRole('button', { name: /confirm → DISPATCHED/i }));
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith('/transition'))).toBe(true));
+    const body = JSON.parse(String(calls.find((c) => c.url.endsWith('/transition'))!.init!.body));
+    expect(body).toEqual({ toStatus: 'DISPATCHED', voucherPin: '9911' });
+  });
+
+  it('GIFVC2f: a stored PIN is read-only + masked in the advance form (no PIN input)', async () => {
+    installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: '9911', voucherProvider: 'Gifsy' }]);
+    const row = await openRow('RDM-1');
+    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    expect(screen.queryByLabelText('PIN (if the card has one)')).toBeNull();
+    expect(screen.getByTestId('voucher-pin-readonly')).toHaveTextContent('PIN ••••');
   });
 
   it('GIFVC3: an order that already has a code shows it READ-ONLY (no editable input) and hides refund targets', async () => {
@@ -131,14 +161,14 @@ describe('GIFVC — voucher handling', () => {
     await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
     expect(optionValues(advanceSelect())).toEqual(['PROCESSING']); // CANCELLED / RETURNED hidden
     expect(screen.getByTestId('voucher-code-readonly')).toHaveTextContent('AMZN-1234-5678-WXYZ');
-    expect(screen.queryByLabelText('Voucher code')).toBeNull();
+    expect(screen.queryByLabelText('Card no. / code')).toBeNull();
   });
 
   it('GIFVC4: a Hubble order never offers voucher inputs nor the vendor-cancel action', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, voucherProvider: 'Hubble' }]);
     const row = await openRow('RDM-1');
     await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
-    expect(screen.queryByLabelText('Voucher code')).toBeNull();
+    expect(screen.queryByLabelText('Card no. / code')).toBeNull();
     expect(screen.queryByRole('button', { name: /voucher cancelled with vendor/i })).toBeNull();
   });
 
@@ -204,7 +234,7 @@ describe('GIFVC — voucher handling', () => {
     await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
     expect(optionValues(advanceSelect())).toEqual(['PROCESSING']);
     // No editable code input either (a code is already issued).
-    expect(screen.queryByLabelText('Voucher code')).toBeNull();
+    expect(screen.queryByLabelText('Card no. / code')).toBeNull();
   });
 
   it('GIFVC10: a stuck Hubble order shows "Needs reconcile" + reason and hides refund targets', async () => {
@@ -214,7 +244,7 @@ describe('GIFVC — voucher handling', () => {
     expect(within(row).getByTestId('hubble-needs-reconcile')).toHaveTextContent('Needs reconcile · Hubble state unknown');
     await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
     expect(optionValues(advanceSelect())).toEqual(['PROCESSING']);
-    expect(screen.queryByLabelText('Voucher code')).toBeNull(); // no plain manual code on a Hubble order
+    expect(screen.queryByLabelText('Card no. / code')).toBeNull(); // no plain manual code on a Hubble order
   });
 
   it('GIFVC10b: a "Hubble not configured" order (never placed) keeps its refund targets', async () => {
@@ -265,7 +295,7 @@ describe('GIFVC — voucher handling', () => {
     await userEvent.click(within(row).getByRole('button', { name: /fulfil manually/i }));
     const confirm = screen.getByRole('button', { name: /confirm manual fulfilment/i });
     expect(confirm).toBeDisabled();
-    await userEvent.type(screen.getByLabelText('Voucher code *'), 'POOL-7777');
+    await userEvent.type(screen.getByLabelText('Card no. / code *'), 'POOL-7777');
     expect(confirm).toBeDisabled(); // reason still required
     await userEvent.type(screen.getByLabelText('Reason *'), 'Hubble down');
     await userEvent.click(confirm);

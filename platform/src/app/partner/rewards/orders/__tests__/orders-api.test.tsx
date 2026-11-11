@@ -118,6 +118,22 @@ describe('OR — Orders API wiring (live data)', () => {
     const btn = await screen.findByTestId('copy-voucher-btn');
     await userEvent.click(btn);
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('AMZ-GIFT-7788-CODE'));
+    // A polite live region announces it.
+    expect(screen.getByTestId('copy-voucher-btn-status')).toHaveAttribute('aria-live', 'polite');
+    await waitFor(() => expect(screen.getByTestId('copy-voucher-btn-status')).toHaveTextContent('Copied'));
+  });
+
+  it('OR6e: a clipboard failure says "Copy failed — long-press to copy" (visible + announced); the value is selectable', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('NotAllowedError'));
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    stubOrders([VOUCHER_ORDER]);
+    render(<OrdersPage />);
+    await userEvent.click(await screen.findByTestId('copy-voucher-btn'));
+    const status = screen.getByTestId('copy-voucher-btn-status');
+    await waitFor(() => expect(status).toHaveTextContent('Copy failed — long-press to copy'));
+    expect(status).toHaveAttribute('aria-live', 'polite');
+    expect(status).not.toHaveClass('sr-only'); // visible, not only announced
+    expect(screen.getByTestId('voucher-code')).toHaveClass('select-all');
   });
 
   it('OR6b: voucher line shows the reward BRAND, never the back-end aggregator (e.g. Hubble)', async () => {

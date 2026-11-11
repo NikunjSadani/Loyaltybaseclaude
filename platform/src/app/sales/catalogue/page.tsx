@@ -13,7 +13,7 @@ import { type GiftCatalogueItem, GIFT_CATALOGUE } from '@/lib/gifts';
 import { api } from '@/lib/api-client';
 import { isDeliveryDefaults, type DeliveryDefaults } from '@/lib/partner-identity';
 import { applyAddressPrefill, type AddressForm, type TouchedFields } from '@/lib/address-prefill';
-import { wholeRupeeAmount, wholeRupeeInputProps } from '@/lib/whole-rupee-input';
+import { WHOLE_RUPEE_INVALID_MESSAGE, isWholeRupeeInvalid, wholeRupeeAmount, wholeRupeeInputProps } from '@/lib/whole-rupee-input';
 import { pointsForAmount } from '@/lib/hubble-product';
 
 type GiftItem = GiftCatalogueItem;
@@ -49,6 +49,10 @@ interface RedeemState {
   otpResendCountdown: number;
   /** ₹ amount for a FREE_AMOUNT (variable) voucher/bank-transfer redemption; '' otherwise. */
   amount: string;
+  /** The amount text was committed (blur / Enter / paste) — only then is "Check the amount" shown. */
+  amountCommitted: boolean;
+  /** The ₹ amount the ORDER was created with (frozen at OTP-send; null before / for FIXED items). */
+  sentAmount: number | null;
   /** PHYSICAL_GIFT delivery address — ONLY what the rep typed (+ `addrTouched` marks every edited
    *  field). The shown address is DERIVED via applyAddressPrefill from the target outlet's
    *  deliveryDefaults, so the pre-fill never overwrites typing or a deliberate clear. */
@@ -63,7 +67,7 @@ const EMPTY_ADDRESS: AddressForm = { line1: '', city: '', state: '', pincode: ''
 
 const INITIAL_REDEEM: RedeemState = {
   outlet: null, orderId: '', otpSending: false, otpSent: false, otp: '',
-  verifying: false, error: '', otpResendCountdown: 0, amount: '',
+  verifying: false, error: '', otpResendCountdown: 0, amount: '', amountCommitted: false, sentAmount: null,
   addrTyped: EMPTY_ADDRESS, addrTouched: {}, recipientName: '', recipientTouched: false,
 };
 
@@ -323,13 +327,20 @@ function CatalogueInner() {
     // FREE_AMOUNT (variable) vouchers / bank transfers require a ₹ amount — without it the backend
     // rejects redeem-for-outlet with "amount (₹) is required for a variable-amount voucher".
     const freeAmount = isFreeAmountGift(selectedGift);
-    const amountNum = wholeRupeeAmount(redeem.amount);
+    // A resend after the OTP was sent re-uses the FROZEN amount (the field is locked meanwhile).
+    const parsedAmount = redeem.otpSent && redeem.sentAmount != null ? redeem.sentAmount : wholeRupeeAmount(redeem.amount);
+    if (freeAmount && parsedAmount === null) {
+      // "750,5" / "1,2" / a pasted decimal — never guessed, never sent.
+      setRedeem((r) => ({ ...r, amountCommitted: true, error: WHOLE_RUPEE_INVALID_MESSAGE }));
+      return;
+    }
+    const amountNum = parsedAmount ?? 0;
     const options = selectedGift.amountOptions?.length ? selectedGift.amountOptions : null;
     if (freeAmount && options && !options.includes(amountNum)) {
       setRedeem((r) => ({ ...r, error: 'Choose one of the available amounts.' }));
       return;
     }
-    // Whole rupees only (the input already strips decimals; this guards any other path).
+    // Whole rupees only (the input already blocks decimals; this guards any other path).
     if (freeAmount && (!Number.isInteger(amountNum) || amountNum <= 0)) {
       setRedeem((r) => ({ ...r, error: 'Enter a whole-rupee amount (₹) to redeem for this outlet.' }));
       return;
@@ -365,11 +376,21 @@ function CatalogueInner() {
       },
     );
     if (res.success && res.data?.orderId) {
-      setRedeem((r) => ({ ...r, otpSending: false, otpSent: true, orderId: res.data.orderId, otp: '', otpResendCountdown: 30 }));
+      setRedeem((r) => ({
+        ...r, otpSending: false, otpSent: true, orderId: res.data.orderId, otp: '', otpResendCountdown: 30,
+        sentAmount: freeAmount ? amountNum : null,
+      }));
       setSheetStep('otp');
     } else {
       setRedeem((r) => ({ ...r, otpSending: false, error: res.success ? 'Could not start redemption.' : res.error }));
     }
+  };
+
+  // "Change amount" (or Back) from the OTP step: abandon this OTP and return to the amount — the
+  // next Send OTP starts a fresh redeem (a new order) with the new amount.
+  const changeAmount = () => {
+    setRedeem((r) => ({ ...r, otpSent: false, orderId: '', otp: '', otpResendCountdown: 0, sentAmount: null, error: '' }));
+    setSheetStep('confirm');
   };
 
   const verifyOtp = async () => {
@@ -404,6 +425,9 @@ function CatalogueInner() {
       setRedeem((r) => ({ ...r, verifying: false, error: res.error || 'Invalid or expired OTP. Please try again.' }));
     }
   };
+
+  // "Check the amount" — only once the typed amount was committed (blur / Enter / paste).
+  const amountInvalidShown = redeem.amountCommitted && isWholeRupeeInvalid(redeem.amount);
 
   const maskedMobile = (m: string) => `****${m.slice(-4)}`;
 
@@ -519,12 +543,11 @@ function CatalogueInner() {
               <div className="flex items-center gap-2">
                 {sheetStep !== 'detail' && sheetStep !== 'success' && (
                   <button
-                    onClick={() => setSheetStep(
+                    onClick={() => (sheetStep === 'otp' ? changeAmount() : setSheetStep(
                       sheetStep === 'select_outlet' ? 'detail'
                         : sheetStep === 'confirm' ? (preOutlet ? 'detail' : 'select_outlet')
-                        : sheetStep === 'otp' ? 'confirm'
                         : 'detail'
-                    )}
+                    ))}
                     className="p-1 rounded-full hover:bg-gray-100 text-gray-400 -ml-1"
                   >
                     <ChevronLeft className="h-4 w-4" />
@@ -730,7 +753,7 @@ function CatalogueInner() {
                               type="button"
                               aria-pressed={selected}
                               aria-label={`₹${amt.toLocaleString('en-IN')}${pts != null ? `, ${pts.toLocaleString('en-IN')} points` : ''}${tooLow ? ' (below the minimum)' : ''}`}
-                              disabled={tooLow}
+                              disabled={tooLow || redeem.otpSent}
                               onClick={() => setRedeem((r) => ({ ...r, amount: String(amt), error: '' }))}
                               className={`rounded-xl border-2 px-2 py-2 text-center transition-all disabled:opacity-40 ${
                                 selected ? 'border-[var(--brand-primary)] bg-white' : 'border-gray-200 bg-white hover:border-gray-300'
@@ -757,11 +780,21 @@ function CatalogueInner() {
                       <input
                         id="redeem-amount"
                         value={redeem.amount}
-                        // Whole rupees only (typed "." blocked; pasted "750.5" → "750").
-                        {...wholeRupeeInputProps((v) => setRedeem((r) => ({ ...r, amount: v, error: '' })))}
+                        // Whole rupees only (typed "." blocked; "750,5" / a pasted decimal → "Check the amount").
+                        {...wholeRupeeInputProps(
+                          (v) => setRedeem((r) => ({ ...r, amount: v, error: '' })),
+                          { onCommit: () => setRedeem((r) => ({ ...r, amountCommitted: true })) },
+                        )}
+                        // Locked once the OTP is sent — the order already carries this amount.
+                        disabled={redeem.otpSent}
+                        aria-invalid={amountInvalidShown ? true : undefined}
+                        aria-describedby={amountInvalidShown ? 'redeem-amount-error' : undefined}
                         placeholder="Enter ₹ amount"
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
+                        className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)] ${amountInvalidShown ? 'border-red-300' : 'border-gray-300'}`}
                       />
+                      {amountInvalidShown && (
+                        <p id="redeem-amount-error" role="alert" className="text-xs text-red-500">{WHOLE_RUPEE_INVALID_MESSAGE}</p>
+                      )}
                       <p className="text-[11px] text-gray-400">
                         Points are calculated from this amount at the tenant conversion rate on confirmation
                         (subject to the reward’s min/max limits).
@@ -838,7 +871,7 @@ function CatalogueInner() {
                     </p>
                   </div>
 
-                  {redeem.error && (
+                  {redeem.error && !(amountInvalidShown && redeem.error === WHOLE_RUPEE_INVALID_MESSAGE) && (
                     <p className="text-xs text-red-600 text-center">{redeem.error}</p>
                   )}
 
@@ -850,7 +883,7 @@ function CatalogueInner() {
                       isFreeAmountGift(selectedGift) &&
                       (selectedGift.amountOptions?.length
                         ? !selectedGift.amountOptions.includes(Number(redeem.amount))
-                        : !(wholeRupeeAmount(redeem.amount) > 0))
+                        : !((wholeRupeeAmount(redeem.amount) ?? 0) > 0))
                     }
                     onClick={sendOtp}
                   >
@@ -880,6 +913,18 @@ function CatalogueInner() {
                       Code sent to <strong>{maskedMobile(redeem.outlet.mobile)}</strong>
                     </p>
                     <p className="text-[10px] text-gray-400">Ask the outlet owner to share the OTP received</p>
+                    {redeem.sentAmount != null && (
+                      <p className="text-xs text-gray-600">
+                        Amount: <strong>₹{redeem.sentAmount.toLocaleString('en-IN')}</strong>{' '}
+                        <button
+                          type="button"
+                          onClick={changeAmount}
+                          className="text-[var(--brand-primary)] font-medium underline"
+                        >
+                          Change amount
+                        </button>
+                      </p>
+                    )}
                   </div>
 
                   <div className="space-y-1.5">
@@ -948,7 +993,8 @@ function CatalogueInner() {
                     <div className="w-full bg-gray-50 rounded-xl p-4 text-left space-y-2">
                       {[
                         { label: 'Item',            value: selectedGift.name },
-                        { label: 'Amount',          value: wholeRupeeAmount(redeem.amount) > 0 ? `₹${wholeRupeeAmount(redeem.amount)}` : '—' },
+                        // The amount the ORDER was created with (frozen at OTP-send), never the live field.
+                        { label: 'Amount',          value: redeem.sentAmount != null && redeem.sentAmount > 0 ? `₹${redeem.sentAmount}` : '—' },
                         { label: 'Current balance', value: `${redeem.outlet.balance.toLocaleString()} pts` },
                       ].map((r) => (
                         <div key={r.label} className="flex justify-between text-sm">

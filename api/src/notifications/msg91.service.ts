@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as nodemailer from 'nodemailer';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
+import { scrubSecrets } from './scrub-secrets';
 
 /**
  * Shared MSG91 OTP provider. Sends OTPs synchronously via the MSG91 v5 OTP API.
@@ -152,8 +153,11 @@ export class Msg91Service {
     phone: string,
     templateName: string,
     bodyValues: string[],
-    opts?: { crqid?: string; languageCode?: string },
+    opts?: { crqid?: string; languageCode?: string; secretValues?: string[] },
   ): Promise<{ requestId: string | null }> {
+    // A provider error can echo template values back — scrub caller-flagged secrets (a voucher
+    // code / PIN) from the logged + thrown reason. No secrets → text unchanged.
+    const scrub = (t: string) => scrubSecrets(t, opts?.secretValues);
     const authKey = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
     // The integrated WhatsApp number registered with MSG91 for this platform.
     // Configurable via MSG91_WHATSAPP_NUMBER; defaults to the Deoleo-integrated number.
@@ -230,7 +234,7 @@ export class Msg91Service {
       const reason =
         (e as Error)?.name === 'TimeoutError'
           ? 'MSG91 did not respond within 10s (timeout — check MSG91 IP whitelisting / egress)'
-          : String(e);
+          : scrub(String(e));
       this.logger.error(
         `MSG91 WhatsApp template "${templateName}" request failed for ••••${phone.slice(-4)}: ${reason}`,
       );
@@ -250,7 +254,7 @@ export class Msg91Service {
       data?: { request_id?: string; requestId?: string };
     };
     if (!res.ok || json?.type === 'error') {
-      const reason = json?.message ?? `HTTP ${res.status}`;
+      const reason = scrub(json?.message ?? `HTTP ${res.status}`);
       this.logger.error(
         `MSG91 WhatsApp template "${templateName}" failed for ••••${phone.slice(-4)}: ${reason}`,
       );

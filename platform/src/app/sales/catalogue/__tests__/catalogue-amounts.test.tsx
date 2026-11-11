@@ -3,8 +3,10 @@
  * Sales-assisted redeem — amounts (owner 2026-11-11).
  *  SA1: a Hubble "choose from amounts" gift card shows the amounts as buttons (with points at the
  *       tenant rate from /me) — no free typing — and posts the chosen amount.
- *  SA2: a free-amount item's ₹ input is whole-rupee only (typed "750.5" → 750; pasted
- *       "1,250.75" → 1250) and posts an integer.
+ *  SA2: a free-amount item's ₹ input is whole-rupee only (typed "750.5" → 750; a pasted
+ *       "1,250.75" → "Check the amount", nothing sent) and posts an integer.
+ *  SA4: once the OTP is sent the amount is frozen: success shows the ORDER's amount; "Change
+ *       amount" returns to an unlocked field (fresh redeem).
  *  SA3: a catalogue WITHOUT a list item never calls /api/auth/me (no extra request for e.g. Deoleo).
  *
  * Run: npx vitest run src/app/sales/catalogue/__tests__/catalogue-amounts.test.tsx
@@ -96,7 +98,9 @@ describe('sales catalogue — redemption amounts', () => {
     const user = userEvent.setup();
     await user.click(input);
     await user.paste('1,250.75');
-    expect(input.value).toBe('1250');
+    expect(input.value).toBe('1,250.75'); // never shrunk
+    expect(screen.getByRole('alert')).toHaveTextContent('Check the amount');
+    expect(screen.getByRole('button', { name: /Send OTP/ })).toBeDisabled();
     await user.clear(input);
     await user.type(input, '750.5');
     expect(input.value).toBe('750');
@@ -104,6 +108,26 @@ describe('sales catalogue — redemption amounts', () => {
     fireEvent.click(screen.getByRole('button', { name: /Send OTP/ }));
     await waitFor(() => expect(posts).toHaveLength(1));
     expect(posts[0]).toMatchObject({ rewardId: 'amz-1', amount: 750 });
+  });
+
+  it('SA4: after the OTP is sent the ORDER amount is shown; "Change amount" returns to an unlocked field', async () => {
+    const { posts } = mockFetch([FREE_ITEM]);
+    await openConfirm(/Amazon Any/);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('Amount to redeem (₹)'), '900');
+    fireEvent.click(screen.getByRole('button', { name: /Send OTP/ }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]).toMatchObject({ amount: 900 });
+    expect(await screen.findByText('₹900')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Change amount' }));
+    const input = screen.getByLabelText('Amount to redeem (₹)') as HTMLInputElement;
+    expect(input).toBeEnabled();
+    expect(input.value).toBe('900');
+    await user.clear(input);
+    await user.type(input, '1200');
+    fireEvent.click(screen.getByRole('button', { name: /Send OTP/ }));
+    await waitFor(() => expect(posts).toHaveLength(2)); // a fresh redeem with the new amount
+    expect(posts[1]).toMatchObject({ amount: 1200 });
   });
 
   it('SA3: no list item → /api/auth/me is never requested', async () => {

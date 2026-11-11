@@ -53,6 +53,7 @@ import {
 } from './voucher-write-guard';
 import {
   notifyVoucherIssued as notifyVoucherIssuedShared,
+  maskVoucherCodeForAudit,
   programLabelFor,
   recordVoucherIssuedAudit,
 } from './voucher-issuance';
@@ -136,13 +137,13 @@ export function encodeOrderCursor(createdAt: Date, id: string): string {
 }
 
 /**
- * Mask a voucher code for a non-fulfilling viewer: "••••" + the last 4 characters, but only
- * for a code of 8+ chars (the tail is then at most half the code); a shorter code is fully
- * masked so it can never be reconstructed from the hint. Never reversible.
+ * Mask a voucher code for an audit row / app log: "••••" + the last 4 characters only for a code
+ * of 12+ chars (the tail is then at most a third of it); a shorter code is fully masked so it can
+ * never be reconstructed from the hint. Never reversible. ONE rule — delegates to
+ * maskVoucherCodeForAudit (voucher-issuance.ts).
  */
 export function maskVoucherCode(code: string): string {
-  const trimmed = code.trim();
-  return trimmed.length >= 8 ? `••••${trimmed.slice(-4)}` : '••••';
+  return maskVoucherCodeForAudit(code);
 }
 
 /**
@@ -1082,11 +1083,24 @@ export class RewardsService {
           overrideReason: voucherPlan.overridden ? dto.overrideReason?.trim() : null,
         });
       }
+      if (voucherPlan.addsPin && existingOrder.voucherCode) {
+        // Set-once PIN added to an already-issued code — audited masked (never the PIN).
+        await recordVoucherIssuedAudit(tx, {
+          actorId: user.sub,
+          orderId: id,
+          code: existingOrder.voucherCode,
+          pin: voucherPlan.data.voucherPin ?? null,
+          provider: existingOrder.voucherProvider,
+          path: 'PATCH /rewards/orders/:id',
+          event: 'VOUCHER_PIN_ADDED_MANUAL',
+        });
+      }
       return tx.redemptionOrder.findUniqueOrThrow({ where: { id } });
     });
     // Same member notification transitionOrder sends when a code is first issued — under the
-    // ORDER's tenant (branding / templates), never the caller's.
-    if (voucherPlan.issuesNewCode) await this.notifyVoucherIssued(id, orderClientId);
+    // ORDER's tenant (branding / templates), never the caller's. A PIN added later to an issued
+    // code re-sends it so the owner receives the PIN.
+    if (voucherPlan.issuesNewCode || voucherPlan.addsPin) await this.notifyVoucherIssued(id, orderClientId);
     return { order };
   }
 
@@ -2903,6 +2917,17 @@ export class RewardsService {
           overrideReason: voucherPlan.overridden ? dto.overrideReason?.trim() : null,
         });
       }
+      if (voucherPlan.addsPin && order.voucherCode) {
+        await recordVoucherIssuedAudit(tx, {
+          actorId: user.sub,
+          orderId: id,
+          code: order.voucherCode,
+          pin: voucherPlan.data.voucherPin ?? null,
+          provider: order.voucherProvider,
+          path: 'POST /rewards/orders/:id/transition',
+          event: 'VOUCHER_PIN_ADDED_MANUAL',
+        });
+      }
 
       // M2 — refund at most ONCE: atomically claim the debited points
       // (pointsDeducted > 0 → 0). Only the tx that wins the claim re-credits, so
@@ -2931,7 +2956,9 @@ export class RewardsService {
 
     // A voucher code assigned on THIS transition (null → set) — computed before the milestone notify
     // so a single action never fires BOTH a generic milestone bell AND the VOUCHER_ISSUED code bell.
-    const voucherNewlyIssued = !order.voucherCode && !!updated.voucherCode;
+    // A set-once PIN added to an already-issued code counts too: the member is re-sent the voucher
+    // (now with the PIN), which supersedes the milestone bell exactly like a new code.
+    const voucherNewlyIssued = (!order.voucherCode && !!updated.voucherCode) || voucherPlan.addsPin;
 
     // Notify the partner on the customer-visible milestones — UNLESS this same transition just issued
     // the voucher code, in which case the VOUCHER_ISSUED message below supersedes the generic milestone.
@@ -3086,7 +3113,7 @@ export class RewardsService {
             orderNumber: order.orderNumber,
             status: order.status,
             reason: why,
-            clearedVoucherCode: masked, // "••••" + last 4 (fully masked if < 8 chars)
+            clearedVoucherCode: masked, // "••••" + last 4 (fully masked if < 12 chars)
             clearedVoucherProvider: order.voucherProvider ?? null,
           },
         },
@@ -3248,6 +3275,12 @@ export class RewardsService {
     const scope = tenantScope(user);
 
     for (const r of parsed.rows) {
+      // A parse-level row error (e.g. a Voucher Code / PIN cell Excel stored as a NUMBER — its
+      // leading zeros / digits may already be lost) — collected, the row is NOT applied.
+      if (r.error) {
+        errors.push({ row: r.rowIndex, orderNumber: r.orderNumber, message: r.error });
+        continue;
+      }
       try {
         // Resolve the order in-scope; collect (don't throw) on a miss/cross-tenant.
         const order = await this.prisma.redemptionOrder.findFirst({

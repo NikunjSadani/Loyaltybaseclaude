@@ -295,12 +295,18 @@ export function resetNonApplicableFields(d: FulfilmentDraft): FulfilmentDraft {
 }
 
 /**
- * Build the PATCH /fulfilment body. We send the FULL editable field set every time —
- * a field the operator blanked is sent as `null` so the backend clears it (a stale
+ * Build the PATCH /fulfilment body. We send the full editable SHIPPING field set every time —
+ * a shipping field the operator blanked is sent as `null` so the backend clears it (a stale
  * tracking number must be correctable, not silently retained). `null` (not `''`) is
  * used so it passes the backend's `@IsOptional() @IsUrl()` on trackingUrl and clears
  * the nullable column; empty strings would trip URL validation. The channel is always
  * present (validation requires it).
+ *
+ * VOUCHER fields are different: a stored voucher code / provider can NEVER be cleared by this
+ * write (only "Voucher cancelled with vendor" does) — the backend rejects a null / blank one
+ * (DTO `@ValidateIf(v !== undefined) @IsString` + voucher-write-guard VOUCHER_BLANK), which used to
+ * 400 every save of a physical order. So a blank voucherCode / voucherProvider / voucherPin is
+ * OMITTED (= "no change"), never sent as null.
  */
 export function buildFulfilmentPayload(d: FulfilmentDraft): Record<string, unknown> {
   const orNull = (s: string) => {
@@ -313,10 +319,10 @@ export function buildFulfilmentPayload(d: FulfilmentDraft): Record<string, unkno
     trackingNumber: orNull(d.trackingNumber),
     trackingUrl: orNull(d.trackingUrl),
     supplierOrderRef: orNull(d.supplierOrderRef),
-    voucherCode: orNull(d.voucherCode),
-    voucherProvider: orNull(d.voucherProvider),
-    // The PIN is optional: sent only when entered (never a null "clear" — the backend clears a
-    // PIN only with "Voucher cancelled with vendor"). It needs a voucher code alongside.
+    // Voucher fields: sent only when entered (never a null "clear" — see above). The PIN needs a
+    // voucher code alongside (or one already stored on the order).
+    ...(d.voucherCode.trim() ? { voucherCode: d.voucherCode.trim() } : {}),
+    ...(d.voucherProvider.trim() ? { voucherProvider: d.voucherProvider.trim() } : {}),
     ...(d.voucherPin.trim() ? { voucherPin: d.voucherPin.trim() } : {}),
   };
 }

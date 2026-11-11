@@ -8,8 +8,17 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import * as XLSX from 'xlsx';
 import { hubbleVoucherCredentials, isSalesViewer } from './rewards.service';
-import { planVoucherWrite, VOUCHER_PIN_NEEDS_CODE_MESSAGE } from './voucher-write-guard';
 import {
+  planVoucherWrite,
+  VOUCHER_PIN_ALREADY_SAVED_MESSAGE,
+  VOUCHER_PIN_NEEDS_CODE_MESSAGE,
+  VOUCHER_PIN_STATUS_MESSAGE,
+  VOUCHER_PIN_TOO_LONG_MESSAGE,
+  VOUCHER_ALREADY_ISSUED_MESSAGE,
+  HUBBLE_PROVIDER_MESSAGE,
+} from './voucher-write-guard';
+import {
+  maskVoucherCodeForAudit,
   notifyVoucherIssued,
   recordVoucherIssuedAudit,
   voucherCodeVar,
@@ -19,6 +28,7 @@ import {
   buildFulfilmentTemplateBuffer,
   FULFILMENT_COLS,
   parseFulfilmentUploadBuffer,
+  VOUCHER_CELL_NUMBER_MESSAGE,
 } from './rewards-fulfilment.helpers';
 import { VendorFulfilmentDto, VendorTransitionDto } from '../vendor/dto/vendor.dto';
 import { VARIABLE_CONTRACTS, defaultConfig } from '../notification-templates/notification-templates.config';
@@ -61,10 +71,48 @@ describe('planVoucherWrite — PIN', () => {
     expect(() => planVoucherWrite(paid, { voucherPin: '99' })).toThrow(VOUCHER_PIN_NEEDS_CODE_MESSAGE);
     expect(() => planVoucherWrite(paid, { voucherPin: '99', voucherProvider: 'X' })).toThrow(BadRequestException);
   });
-  it('a different PIN on an issued code is a replace (400); the same PIN is a no-op', () => {
+  it('a different PIN on an issued code with a saved PIN → 400 (PIN-specific); the same PIN is a no-op', () => {
     const issued = { ...paid, voucherCode: 'C-1', voucherPin: '99' };
-    expect(() => planVoucherWrite(issued, { voucherPin: '11' })).toThrow(/already issued/);
+    expect(() => planVoucherWrite(issued, { voucherPin: '11' })).toThrow(VOUCHER_PIN_ALREADY_SAVED_MESSAGE);
+    expect(() => planVoucherWrite(issued, { voucherCode: 'C-1', voucherPin: '11' })).toThrow(VOUCHER_PIN_ALREADY_SAVED_MESSAGE);
     expect(planVoucherWrite(issued, { voucherCode: 'C-1', voucherPin: '99' }).guard).toBeNull();
+    expect(planVoucherWrite(issued, { voucherPin: ' 99 ' }).guard).toBeNull();
+  });
+  it('SET-ONCE: a code is stored and no PIN yet → the PIN may be added (with or without the same code)', () => {
+    const updatedAt = new Date(Date.now() - 60_000);
+    const issued = { ...paid, voucherCode: 'C-1', voucherPin: null, updatedAt };
+    for (const input of [{ voucherPin: ' 42 ' }, { voucherCode: ' C-1 ', voucherPin: '42' }]) {
+      const plan = planVoucherWrite(issued, input);
+      expect(plan.data).toEqual({ voucherPin: '42' });
+      expect(plan.addsPin).toBe(true);
+      expect(plan.issuesNewCode).toBe(false);
+      // The CAS pins the stored code, a still-null PIN and the row version → two writers can't both set it.
+      expect(plan.guard).toEqual({
+        AND: [
+          { voucherCode: 'C-1' },
+          { voucherPin: null },
+          { status: { in: ['CONFIRMED', 'PROCESSING', 'DISPATCHED', 'DELIVERED'] } },
+          { pointsDeducted: { gt: 0 } },
+          { updatedAt },
+        ],
+      });
+    }
+  });
+  it('SET-ONCE: allowed on a DELIVERED order; refused on a returned / refunded one', () => {
+    const delivered = { ...paid, status: 'DELIVERED', voucherCode: 'C-1' };
+    expect(planVoucherWrite(delivered, { voucherPin: '42' }).addsPin).toBe(true);
+    expect(() => planVoucherWrite({ ...delivered, status: 'RETURNED' }, { voucherPin: '42' })).toThrow(VOUCHER_PIN_STATUS_MESSAGE);
+    expect(() => planVoucherWrite({ ...delivered, pointsDeducted: 0 }, { voucherPin: '42' })).toThrow(VOUCHER_PIN_STATUS_MESSAGE);
+  });
+  it('SET-ONCE: a PIN with a DIFFERENT code / provider is still a code replace; a Hubble order stays integration-owned', () => {
+    const issued = { ...paid, voucherCode: 'C-1', voucherProvider: 'Gifsy' };
+    expect(() => planVoucherWrite(issued, { voucherCode: 'C-2', voucherPin: '42' })).toThrow(VOUCHER_ALREADY_ISSUED_MESSAGE);
+    expect(() => planVoucherWrite(issued, { voucherProvider: 'Other', voucherPin: '42' })).toThrow(VOUCHER_ALREADY_ISSUED_MESSAGE);
+    expect(() => planVoucherWrite({ ...issued, voucherProvider: 'Hubble' }, { voucherPin: '42' })).toThrow(HUBBLE_PROVIDER_MESSAGE);
+  });
+  it('a PIN longer than 64 → 400 (covers the bulk sheet, which skips the DTO); 64 is fine', () => {
+    expect(() => planVoucherWrite(paid, { voucherCode: 'C-1', voucherPin: 'x'.repeat(65) })).toThrow(VOUCHER_PIN_TOO_LONG_MESSAGE);
+    expect(planVoucherWrite(paid, { voucherCode: 'C-1', voucherPin: 'x'.repeat(64) }).data.voucherPin).toHaveLength(64);
   });
 });
 
@@ -97,6 +145,8 @@ describe('notifyVoucherIssued — card + PIN via the one voucher_code template',
       eventKey: 'VOUCHER_ISSUED',
       recipientPhone: '9000000001',
       vars: { ownerName: 'Asha', amount: '₹500', program: 'Bajaj Loyalty', voucherName: 'Croma Gift Card', code: 'AMZ-1234' },
+      // Only the failure-scrub hint is new; nothing the member receives (or any stored row) changes.
+      secretValues: ['AMZ-1234'],
       subject: 'Your voucher code',
       body: 'Your Croma Gift Card code: AMZ-1234',
       url: '/partner/rewards/orders',
@@ -114,7 +164,16 @@ describe('notifyVoucherIssued — card + PIN via the one voucher_code template',
     expect(call.vars.code).not.toMatch(/[\n\t]| {4,}/);
     expect(call.vars).not.toHaveProperty('pin');
     expect(call.vars.program).toBe('Bajaj Loyalty'); // same programLabelFor value as today
-    expect(call.body).toBe('Your Croma Gift Card card no: 6001 2200\t1234 · PIN: 48\n29');
+    // Bell / push / SMS body never carries the PIN.
+    expect(call.body).toBe('Your Croma Gift Card voucher is ready — card no. and PIN are in My Orders.');
+    expect(call.subject).toBe('Your voucher code');
+    // Every PERSISTED copy of the vars uses the masked value.
+    expect(call.maskedVars).toEqual({ code: '6001 2200 1234 | PIN: ••••' });
+    expect(JSON.stringify(call.maskedVars)).not.toMatch(/48|29/);
+    // Secrets for the failure-reason scrub: the combined value, the code and the PIN.
+    expect(call.secretValues).toEqual([
+      '6001 2200 1234 | PIN: 48 29', '6001 2200\t1234', '6001 2200 1234', '48\n29', '48 29',
+    ]);
   });
 
   it('the WhatsApp/SMS contract stays 5 vars; Deoleo default config for VOUCHER_ISSUED unchanged', () => {
@@ -141,6 +200,21 @@ describe('recordVoucherIssuedAudit — PIN never logged', () => {
     expect(meta.voucherCode).toBe('••••5678');
     expect(JSON.stringify(meta)).not.toContain('482913');
   });
+  it('mask: last 4 only for a 12+ char code; shorter codes fully masked', () => {
+    expect(maskVoucherCodeForAudit('123456789012')).toBe('••••9012');
+    expect(maskVoucherCodeForAudit('12345678901')).toBe('••••');
+    expect(maskVoucherCodeForAudit('AMZ-1234')).toBe('••••');
+    expect(maskVoucherCodeForAudit('')).toBe('••••');
+  });
+  it('a set-once PIN add is audited under its own event, PIN masked', async () => {
+    const create = jest.fn().mockResolvedValue({});
+    await recordVoucherIssuedAudit({ auditLog: { create } } as never, {
+      actorId: 'a', orderId: 'o1', code: 'C-1', pin: '9911', path: 'X', event: 'VOUCHER_PIN_ADDED_MANUAL',
+    });
+    const meta = create.mock.calls[0][0].data.metadata;
+    expect(meta).toMatchObject({ event: 'VOUCHER_PIN_ADDED_MANUAL', voucherCode: '••••', voucherPin: '••••' });
+    expect(JSON.stringify(meta)).not.toContain('9911');
+  });
   it('no PIN → no voucherPin key (audit row unchanged)', async () => {
     const create = jest.fn().mockResolvedValue({});
     await recordVoucherIssuedAudit({ auditLog: { create } } as never, { actorId: 'a', orderId: 'o1', code: 'C', path: 'X' });
@@ -156,6 +230,22 @@ describe('bulk fulfilment sheet — optional Voucher PIN column', () => {
     const col = FULFILMENT_COLS.indexOf('Voucher PIN');
     expect(ws[XLSX.utils.encode_cell({ r: 0, c: col })].v).toBe('Voucher PIN');
     expect(ws[XLSX.utils.encode_cell({ r: 1, c: col })].z).toBe('@');
+    // The Voucher Code column is text-formatted too (a 16-digit card number must not become 6.0E+15).
+    expect(ws[XLSX.utils.encode_cell({ r: 1, c: FULFILMENT_COLS.indexOf('Voucher Code') })].z).toBe('@');
+  });
+  it('a Voucher Code / PIN cell stored as a NUMBER → row error (not applied); text cells parse', () => {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+      ['Order Number', 'Voucher Code', 'Voucher PIN'],
+      ['RDM-1', 6001220012345678, ''],
+      ['RDM-2', 'C-2', 123],
+      ['RDM-3', '0042', '0099'],
+    ]), 'Fulfilment');
+    const { rows } = parseFulfilmentUploadBuffer(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer);
+    expect(rows[0]).toEqual({ rowIndex: 2, orderNumber: 'RDM-1', error: VOUCHER_CELL_NUMBER_MESSAGE });
+    expect(rows[1]).toEqual({ rowIndex: 3, orderNumber: 'RDM-2', error: VOUCHER_CELL_NUMBER_MESSAGE });
+    expect(rows[2]).toMatchObject({ orderNumber: 'RDM-3', voucherCode: '0042', voucherPin: '0099' });
+    expect(rows[2].error).toBeUndefined();
   });
   it('parses the PIN; a sheet WITHOUT the column (downloaded earlier) still parses', () => {
     const sheet = (rows: unknown[][]) => {

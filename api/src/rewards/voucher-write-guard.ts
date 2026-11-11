@@ -34,9 +34,16 @@ import { noIssuedVoucherGuard } from './order-status-transition';
  * VOUCHER PIN (card+PIN gift cards — optional, written only together with its code):
  *  - omitted / blank            → no PIN (the field is optional; blank is never a "clear");
  *  - a PIN with no code supplied and none stored → 400 "Enter the card number before the PIN";
- *  - a PIN that differs from the stored one on an order that already holds a code → 400 (a
- *    replace — same rule as the code; only "Voucher cancelled with vendor" clears both);
- *  - identical to the stored PIN → no-op. The PIN is NEVER uniqueness/reuse-checked.
+ *  - SET-ONCE: a code is stored and NO PIN yet → the PIN may be added (with or without re-sending
+ *    the same code), on a CONFIRMED / PROCESSING / DISPATCHED / DELIVERED paid order — a
+ *    compare-and-set on { the stored code, voucherPin still null, row version } so two writers
+ *    can't both set it (the loser gets 409). The caller audits it (masked) and re-sends the
+ *    member's voucher notification so the owner receives the PIN;
+ *  - a PIN that differs from an already-stored PIN → 400 (VOUCHER_PIN_ALREADY_SAVED_MESSAGE — only
+ *    "Voucher cancelled with vendor" clears/replaces it);
+ *  - identical to the stored PIN → no-op. The PIN is NEVER uniqueness/reuse-checked;
+ *  - longer than VOUCHER_PIN_MAX_LENGTH → 400 (enforced HERE too, so the bulk sheet path — which
+ *    never passes through the DTO — is covered).
  */
 
 export const VOUCHER_WRITABLE_STATUSES: readonly RedemptionStatus[] = [
@@ -66,6 +73,19 @@ export const OVERRIDE_NOT_NEEDED_MESSAGE =
 export const OVERRIDE_NEEDS_CODE_MESSAGE = 'A manual fulfilment override must set a voucher code.';
 export const OVERRIDE_REASON_MESSAGE = 'A reason is required for a manual fulfilment override.';
 export const VOUCHER_PIN_NEEDS_CODE_MESSAGE = 'Enter the card number before the PIN';
+export const VOUCHER_PIN_ALREADY_SAVED_MESSAGE =
+  "A PIN is already saved for this voucher; use 'Voucher cancelled with vendor' to replace it.";
+export const VOUCHER_PIN_STATUS_MESSAGE =
+  'A PIN can only be added to a paid order that is confirmed, processing, dispatched or delivered.';
+/** Same cap as the DTOs' @MaxLength(64) on voucherPin. */
+export const VOUCHER_PIN_MAX_LENGTH = 64;
+export const VOUCHER_PIN_TOO_LONG_MESSAGE = `The voucher PIN must be at most ${VOUCHER_PIN_MAX_LENGTH} characters.`;
+
+/** Statuses on which a PIN may be ADDED to an already-stored code (set-once). */
+export const VOUCHER_PIN_ADDABLE_STATUSES: readonly RedemptionStatus[] = [
+  ...VOUCHER_WRITABLE_STATUSES,
+  RedemptionStatus.DELIVERED,
+];
 
 /** Default provider label for a manual override that names none. */
 export const MANUAL_OVERRIDE_PROVIDER = 'Manual';
@@ -101,6 +121,11 @@ export interface VoucherWritePlan {
   guard: Prisma.RedemptionOrderWhereInput | null;
   /** True when this write sets a NEW code (caller audits + notifies the member). */
   issuesNewCode: boolean;
+  /**
+   * True when this write ADDS a PIN to an already-stored code (set-once). The caller audits it
+   * (masked) and re-sends the member's voucher notification so the owner gets the PIN.
+   */
+  addsPin: boolean;
   /** True when this write is a manual override of a Hubble-handed order. */
   overridden: boolean;
 }
@@ -202,11 +227,12 @@ export function planVoucherWrite(
   opts: VoucherWriteOptions = {},
 ): VoucherWritePlan {
   const data: VoucherWritePlan['data'] = {};
-  const none: VoucherWritePlan = { data, guard: null, issuesNewCode: false, overridden: false };
+  const none: VoucherWritePlan = { data, guard: null, issuesNewCode: false, addsPin: false, overridden: false };
   const override = opts.manualOverride ?? null;
   if (override && !override.reason.trim()) throw new BadRequestException(OVERRIDE_REASON_MESSAGE);
   // Blank PIN = not supplied (optional field — never a "clear").
   const pin = norm(input.voucherPin ?? undefined) ?? undefined;
+  if (pin !== undefined && pin.length > VOUCHER_PIN_MAX_LENGTH) throw new BadRequestException(VOUCHER_PIN_TOO_LONG_MESSAGE);
   if (input.voucherCode === undefined && input.voucherProvider === undefined && pin === undefined) {
     if (override) throw new BadRequestException(OVERRIDE_NEEDS_CODE_MESSAGE);
     return none;
@@ -244,8 +270,26 @@ export function planVoucherWrite(
   if (order.redemptionMode && CASH_PAYOUT_MODES.has(order.redemptionMode)) {
     throw new BadRequestException(VOUCHER_CASH_MESSAGE);
   }
-  // Anything that changes the voucher on an order that already holds a code is a replace.
-  if (storedCode !== null) throw new BadRequestException(VOUCHER_ALREADY_ISSUED_MESSAGE);
+  // A code change (or a provider change) on an order that already holds a code is a replace.
+  if (storedCode !== null && (codeChanges || providerChanges)) throw new BadRequestException(VOUCHER_ALREADY_ISSUED_MESSAGE);
+  if (storedCode !== null) {
+    // Only the PIN changes here (pinChanges). SET-ONCE: a stored PIN is never replaced.
+    if (storedPin !== null) throw new BadRequestException(VOUCHER_PIN_ALREADY_SAVED_MESSAGE);
+    if (!VOUCHER_PIN_ADDABLE_STATUSES.includes(order.status as RedemptionStatus) || !(order.pointsDeducted > 0)) {
+      throw new BadRequestException(VOUCHER_PIN_STATUS_MESSAGE);
+    }
+    data.voucherPin = pin;
+    const pinAnd: Prisma.RedemptionOrderWhereInput[] = [
+      // The code exactly as read (a concurrent "Voucher cancelled with vendor" clears it → loses).
+      { voucherCode: order.voucherCode },
+      // Set-once: the PIN is still empty as read (a legacy whitespace-only value pinned verbatim).
+      order.voucherPin == null ? { voucherPin: null } : { voucherPin: order.voucherPin },
+      { status: { in: [...VOUCHER_PIN_ADDABLE_STATUSES] } },
+      { pointsDeducted: { gt: 0 } },
+    ];
+    if (order.updatedAt) pinAnd.push({ updatedAt: order.updatedAt });
+    return { data, guard: { AND: pinAnd }, issuesNewCode: false, addsPin: true, overridden: false };
+  }
   // (Tenant-wide cancelled-code reuse is checked INSIDE the write tx: assertVoucherCodeReusableInTx.)
   if (!VOUCHER_WRITABLE_STATUSES.includes(order.status as RedemptionStatus) || !(order.pointsDeducted > 0)) {
     throw new BadRequestException(VOUCHER_STATUS_MESSAGE);
@@ -282,7 +326,7 @@ export function planVoucherWrite(
   // Optimistic lock on the row version as read: ANY write in between (a vendor-cancel, a refund,
   // a Hubble stamp) bumps @updatedAt → this write loses.
   if (order.updatedAt) and.push({ updatedAt: order.updatedAt });
-  return { data, guard: { AND: and }, issuesNewCode: codeChanges, overridden: !!override };
+  return { data, guard: { AND: and }, issuesNewCode: codeChanges, addsPin: false, overridden: !!override };
 }
 
 /**

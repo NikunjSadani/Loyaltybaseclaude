@@ -7,29 +7,57 @@ import React, { useState } from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect } from 'vitest';
-import { wholeRupeeAmount, wholeRupeeInputProps, wholeRupeesFromText } from '../whole-rupee-input';
+import {
+  WHOLE_RUPEE_INVALID_MESSAGE,
+  isWholeRupeeInvalid,
+  wholeRupeeAmount,
+  wholeRupeeDigits,
+  wholeRupeeInputProps,
+} from '../whole-rupee-input';
 
 function Harness() {
   const [v, setV] = useState('');
-  return <input aria-label="amt" value={v} {...wholeRupeeInputProps(setV)} />;
+  const [committed, setCommitted] = useState(false);
+  const showError = committed && isWholeRupeeInvalid(v);
+  return (
+    <>
+      <input
+        aria-label="amt"
+        aria-invalid={showError || undefined}
+        value={v}
+        {...wholeRupeeInputProps(setV, { onCommit: () => setCommitted(true) })}
+      />
+      {showError && <p role="alert">{WHOLE_RUPEE_INVALID_MESSAGE}</p>}
+      <button disabled={!((wholeRupeeAmount(v) ?? 0) > 0)}>Redeem</button>
+    </>
+  );
 }
 
-describe('WR — wholeRupeesFromText', () => {
+describe('WR — wholeRupeeDigits (never guesses)', () => {
   it.each([
-    ['750.5', '750'],
-    ['1,250.75', '1250'],
-    ['₹ 900', '900'],
-    ['7e2', '72'],
-    ['.5', ''],
     ['', ''],
-    ['750,5', '750'],
-    ['750,', '750'],
-    ['1,25,000', '125000'],
+    ['750', '750'],
     ['1,250', '1250'],
-    ['12,50', '12'],
+    ['12,500', '12500'],
+    ['125,000', '125000'],
+    ['1,250,000', '1250000'],
+    ['1,25,000', '125000'],
+    ['12,34,567', '1234567'],
+    ['Rs. 1,250', '1250'],
+    ['Rs.1,250', '1250'],
+    ['₹ 1,250', '1250'],
+    ['INR 1250', '1250'],
+    ['rs 900', '900'],
   ])('%s → %s', (input, out) => {
-    expect(wholeRupeesFromText(input)).toBe(out);
+    expect(wholeRupeeDigits(input)).toBe(out);
   });
+  it.each(['750,5', '750,', '1,', '1,2', '12,50', '1,2345', '750.5', '₹1,250.50', '1,250.75', '.5', '7e2', 'abc', '1 250'])(
+    '%s → invalid (null)',
+    (input) => {
+      expect(wholeRupeeDigits(input)).toBeNull();
+      expect(isWholeRupeeInvalid(input)).toBe(true);
+    },
+  );
 });
 
 describe('WR — wholeRupeeInputProps', () => {
@@ -47,15 +75,31 @@ describe('WR — wholeRupeeInputProps', () => {
     expect(el.value).toBe('71');
   });
 
-  it('WR3: pasting "750.5" yields "750"; pasting "1,250.75" yields "1250"', async () => {
+  it('WR3: pasting a decimal ("750.5", "₹1,250.50") keeps the text, shows "Check the amount", disables submit', async () => {
     render(<Harness />);
     const el = screen.getByLabelText('amt') as HTMLInputElement;
     await userEvent.click(el);
     await userEvent.paste('750.5');
-    expect(el.value).toBe('750');
+    expect(el.value).toBe('750.5'); // never shrunk to 750
+    expect(screen.getByRole('alert')).toHaveTextContent('Check the amount');
+    expect(screen.getByRole('button', { name: 'Redeem' })).toBeDisabled();
+    expect(wholeRupeeAmount(el.value)).toBeNull();
     await userEvent.clear(el);
-    await userEvent.paste('1,250.75');
-    expect(el.value).toBe('1250');
+    await userEvent.paste('₹1,250.50');
+    expect(el.value).toBe('1,250.50');
+    expect(screen.getByRole('alert')).toHaveTextContent('Check the amount');
+  });
+
+  it('WR3b: pasting "Rs. 1,250" / "Rs.1,250" / "₹ 1,250" / "INR 1250" → 1250, no error', async () => {
+    render(<Harness />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    for (const text of ['Rs. 1,250', 'Rs.1,250', '₹ 1,250', 'INR 1250']) {
+      await userEvent.clear(el);
+      await userEvent.paste(text);
+      expect(el.value).toBe('1250');
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Redeem' })).toBeEnabled();
+    }
   });
 
   it('WR4: "e", "+", "-" are refused', async () => {
@@ -77,14 +121,43 @@ describe('WR — wholeRupeeInputProps', () => {
     expect(el.value).toBe('1250');
   });
 
-  it('L1: typing "750,5" then blur → 750 (a non-grouping "," is a decimal mark, never "7505")', async () => {
+  it('L1: typing "750,5" then blur → kept as typed, "Check the amount", Redeem disabled (never 750 / 7505)', async () => {
     render(<Harness />);
     const el = screen.getByLabelText('amt') as HTMLInputElement;
     await userEvent.type(el, '750,5');
     expect(el.value).toBe('750,5');
-    expect(wholeRupeeAmount(el.value)).toBe(750);
+    expect(wholeRupeeAmount(el.value)).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull(); // not flagged while still typing
     fireEvent.blur(el);
-    expect(el.value).toBe('750');
+    expect(el.value).toBe('750,5');
+    expect(el).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByRole('alert')).toHaveTextContent('Check the amount');
+    expect(screen.getByRole('button', { name: 'Redeem' })).toBeDisabled();
+  });
+
+  it('L1: "1,2" on blur is invalid (never shrinks to ₹1); fixing it to "1,250" clears the error', async () => {
+    render(<Harness />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    await userEvent.type(el, '1,2');
+    fireEvent.blur(el);
+    expect(el.value).toBe('1,2');
+    expect(screen.getByRole('alert')).toHaveTextContent('Check the amount');
+    await userEvent.type(el, '50');
+    expect(screen.queryByRole('alert')).toBeNull();
+    fireEvent.blur(el);
+    expect(el.value).toBe('1250');
+    expect(screen.getByRole('button', { name: 'Redeem' })).toBeEnabled();
+  });
+
+  it('caret: a "," typed mid-value keeps the caret right after it', async () => {
+    render(<Harness />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    await userEvent.type(el, '1250');
+    el.setSelectionRange(1, 1);
+    await userEvent.keyboard(',');
+    expect(el.value).toBe('1,250');
+    expect(el.selectionStart).toBe(2);
+    expect(el.selectionEnd).toBe(2);
   });
 
   it('L1: Enter commits like blur ("1,25,000" typed → 125000)', async () => {
@@ -102,7 +175,7 @@ describe('WR — wholeRupeeInputProps', () => {
     expect(el.value).toBe('125000');
   });
 
-  it('L1 (Android): change "750," then "7505" keeps the comma ("750,5"); blur commits 750', () => {
+  it('L1 (Android): change "750," then "7505" keeps the comma ("750,5"); blur keeps it + flags it', () => {
     render(<Harness />);
     const el = screen.getByLabelText('amt') as HTMLInputElement;
     fireEvent.change(el, { target: { value: '750' } });
@@ -112,7 +185,8 @@ describe('WR — wholeRupeeInputProps', () => {
     fireEvent.change(el, { target: { value: '750,5' } });
     expect(el.value).toBe('750,5');
     fireEvent.blur(el);
-    expect(el.value).toBe('750');
+    expect(el.value).toBe('750,5');
+    expect(screen.getByRole('alert')).toHaveTextContent('Check the amount');
   });
 
   it('L1 (Android beforeinput): data "," is inserted as-is (no fraction state); data "." starts it; delete ends it', () => {
@@ -146,14 +220,15 @@ describe('WR — wholeRupeeInputProps', () => {
     expect(el.value).toBe('7');
   });
 
-  it('RC-L3: inserting "1.5" over a selected "500" splices at the selection → "1"', async () => {
+  it('RC-L3: inserting "1.5" over a selected "500" splices at the selection (paste → invalid; typed → "1")', async () => {
     render(<Harness />);
     const el = screen.getByLabelText('amt') as HTMLInputElement;
     fireEvent.change(el, { target: { value: '500' } });
     el.focus();
     el.setSelectionRange(0, 3);
     await userEvent.paste('1.5');
-    expect(el.value).toBe('1'); // paste path
+    expect(el.value).toBe('1.5'); // paste path: a pasted decimal is flagged, never shrunk
+    expect(screen.getByRole('alert')).toHaveTextContent('Check the amount');
     // same splice via an Android-style beforeinput insert
     fireEvent.change(el, { target: { value: '500' } });
     el.setSelectionRange(0, 3);
@@ -189,9 +264,9 @@ describe('WR — wholeRupeeInputProps', () => {
 
   it.each([
     ['1,250', 1250],
-    ['750,5', 750],
+    ['750,5', null],
     ['1,25,000', 125000],
-    ['1,', 1],
+    ['1,', null],
     ['', 0],
   ])('wholeRupeeAmount(%s) → %s', (input, out) => {
     expect(wholeRupeeAmount(input)).toBe(out);

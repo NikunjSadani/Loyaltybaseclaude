@@ -127,29 +127,38 @@ function brandLabel(rewardName: string): string {
 /* ─── Voucher code block with copy-to-clipboard ───────────────────────────── */
 
 function CopyButton({ value, testId, label }: { value: string; testId: string; label: string }) {
-  const [copied, setCopied] = useState(false);
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
 
   const copy = async () => {
     try {
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
       await navigator.clipboard.writeText(value);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setState('copied');
+      setTimeout(() => setState((s) => (s === 'copied' ? 'idle' : s)), 2000);
     } catch {
-      // Clipboard unavailable (e.g. insecure context) — leave state unchanged.
+      // Clipboard blocked / unavailable (insecure context, old WebView): say so, and the value
+      // itself stays user-selectable (select-all) so a long-press copies it.
+      setState('failed');
     }
   };
 
   return (
-    <button
-      type="button"
-      data-testid={testId}
-      aria-label={label}
-      onClick={copy}
-      className="flex items-center gap-1 shrink-0 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-white border border-emerald-200 text-emerald-700 hover:bg-emerald-100 transition-colors"
-    >
-      {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-      {copied ? 'Copied' : 'Copy'}
-    </button>
+    <span className="flex flex-col items-end shrink-0">
+      <button
+        type="button"
+        data-testid={testId}
+        aria-label={label}
+        onClick={copy}
+        className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-white border border-emerald-200 text-emerald-700 hover:bg-emerald-100 transition-colors"
+      >
+        {state === 'copied' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+        {state === 'copied' ? 'Copied' : 'Copy'}
+      </button>
+      {/* Announced politely to screen readers ("Copied" / the failure hint); the failure is visible too. */}
+      <span aria-live="polite" role="status" data-testid={`${testId}-status`} className={state === 'failed' ? 'mt-0.5 text-[10px] text-red-600' : 'sr-only'}>
+        {state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed — long-press to copy' : ''}
+      </span>
+    </span>
   );
 }
 
@@ -171,7 +180,7 @@ function VoucherCodeBlock({ code, pin, brand }: { code: string; pin?: string | n
           <div>
             <p className="text-[10px] font-medium text-emerald-700/80 mb-0.5">Card no.</p>
             <div className="flex items-center gap-2">
-              <code data-testid="voucher-code" className="flex-1 font-mono text-sm font-bold text-gray-900 break-all">
+              <code data-testid="voucher-code" className="flex-1 font-mono text-sm font-bold text-gray-900 break-all select-all">
                 {code}
               </code>
               <CopyButton value={code} testId="copy-voucher-btn" label="Copy card number" />
@@ -180,7 +189,7 @@ function VoucherCodeBlock({ code, pin, brand }: { code: string; pin?: string | n
           <div>
             <p className="text-[10px] font-medium text-emerald-700/80 mb-0.5">PIN</p>
             <div className="flex items-center gap-2">
-              <code data-testid="voucher-pin" className="flex-1 font-mono text-sm font-bold text-gray-900 break-all">
+              <code data-testid="voucher-pin" className="flex-1 font-mono text-sm font-bold text-gray-900 break-all select-all">
                 {pin}
               </code>
               <CopyButton value={pin} testId="copy-voucher-pin-btn" label="Copy PIN" />
@@ -189,7 +198,7 @@ function VoucherCodeBlock({ code, pin, brand }: { code: string; pin?: string | n
         </div>
       ) : (
         <div className="flex items-center gap-2">
-          <code data-testid="voucher-code" className="flex-1 font-mono text-sm font-bold text-gray-900 break-all">
+          <code data-testid="voucher-code" className="flex-1 font-mono text-sm font-bold text-gray-900 break-all select-all">
             {code}
           </code>
           <CopyButton value={code} testId="copy-voucher-btn" label="Copy voucher code" />

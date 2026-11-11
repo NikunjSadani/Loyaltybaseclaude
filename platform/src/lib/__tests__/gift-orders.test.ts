@@ -101,7 +101,7 @@ describe('fulfilment payload', () => {
     expect(validateFulfilment({ ...emptyFulfilmentDraft(), fulfilmentChannel: 'GIFSY_WAREHOUSE' }).ok).toBe(true);
   });
 
-  it('sends the FULL editable field set, trimming values and nulling blanks so the backend clears them', () => {
+  it('sends the full SHIPPING field set (blanks → null so the backend clears them) but OMITS blank voucher fields', () => {
     const body = buildFulfilmentPayload({
       fulfilmentChannel: 'FULFILLED_BY_AMAZON',
       logisticsPartner: '  Amazon Logistics  ',
@@ -112,17 +112,32 @@ describe('fulfilment payload', () => {
       voucherPin: '',
       voucherProvider: '',
     });
-    // Every field is present; a blanked field is null (not omitted) so a stale value can
+    // Every shipping field is present; a blanked one is null (not omitted) so a stale value can
     // be cleared. null (not '') keeps the backend's @IsOptional() @IsUrl() on trackingUrl happy.
+    // Blank voucher fields are OMITTED: the backend 400s a null voucherCode / voucherProvider
+    // (a stored code is only cleared by "Voucher cancelled with vendor") — that broke every save.
     expect(body).toEqual({
       fulfilmentChannel: 'FULFILLED_BY_AMAZON',
       logisticsPartner: 'Amazon Logistics',
       trackingNumber: 'TRK1',
       trackingUrl: null,
       supplierOrderRef: '403-123',
-      voucherCode: null,
-      voucherProvider: null,
     });
+    expect(Object.values(body)).not.toContain(undefined);
+  });
+
+  it('sends entered voucher fields trimmed (a re-sent stored code is a backend no-op)', () => {
+    const body = buildFulfilmentPayload({
+      fulfilmentChannel: 'DIGITAL_VOUCHER',
+      logisticsPartner: '',
+      trackingNumber: '',
+      trackingUrl: '',
+      supplierOrderRef: '',
+      voucherCode: ' CARD-1 ',
+      voucherPin: ' 12 ',
+      voucherProvider: ' Croma ',
+    });
+    expect(body).toMatchObject({ voucherCode: 'CARD-1', voucherPin: '12', voucherProvider: 'Croma' });
   });
 
   it('PIN: sent trimmed only when entered (never a null clear); a PIN without a code fails validation', () => {
