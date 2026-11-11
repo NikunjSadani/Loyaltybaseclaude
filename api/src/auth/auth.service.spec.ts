@@ -24,7 +24,7 @@ const mockPrisma = {
   // findUnique added for refreshToken's post-mint sessionsInvalidBefore re-read (1b);
   // defaults to undefined so the guard is a no-op unless a test opts in.
   user:    { findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), findUnique: jest.fn() },
-  otpCode: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn(), deleteMany: jest.fn(), count: jest.fn() },
+  otpCode: { create: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn(), deleteMany: jest.fn(), count: jest.fn() },
   userSession: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
   client:  { findFirst: jest.fn() },
   auditLog: { create: jest.fn() },
@@ -423,6 +423,8 @@ describe('AuthService', () => {
       mockPrisma.$queryRaw.mockReset();
       mockPrisma.$queryRaw.mockResolvedValue([{ attempts: 1 }]);
       mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 1 });
+      // A refused claim re-reads the row for the honest message — default: still live (cap spent).
+      mockPrisma.otpCode.findUnique.mockResolvedValue({ expiresAt: new Date(Date.now() + 60_000), verifiedAt: null });
     });
 
     it('should return access + refresh tokens on correct OTP', async () => {
@@ -632,6 +634,21 @@ describe('AuthService', () => {
       // the correct code did not mark the OTP verified / mint a session
       expect(mockPrisma.otpCode.update).not.toHaveBeenCalled();
       expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
+    });
+
+    it('L1 wording: a lost claim on a code that EXPIRED meanwhile → "OTP expired", not "Too many attempts"', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
+      mockPrisma.$queryRaw.mockResolvedValue([]);
+      mockPrisma.otpCode.findUnique.mockResolvedValue({ expiresAt: new Date(Date.now() - 1000), verifiedAt: null });
+      await expect(service.verifyOtp(phone, '1234', clientId)).rejects.toThrow('OTP expired — please request a new one.');
+      expect(mockPrisma.otpCode.findUnique).toHaveBeenCalledWith({ where: { id: 'otp_1' }, select: { expiresAt: true, verifiedAt: true } });
+    });
+
+    it('L1 wording: a lost claim on a code that is GONE (pruned) → "No active OTP found"', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
+      mockPrisma.$queryRaw.mockResolvedValue([]);
+      mockPrisma.otpCode.findUnique.mockResolvedValue(null);
+      await expect(service.verifyOtp(phone, '1234', clientId)).rejects.toThrow('No active OTP found for this number. Please request a new OTP.');
     });
 
     it('L1 concurrency: 100 parallel guesses on one OTP (all reading attempts=0) -> only maxAttempts are evaluated', async () => {

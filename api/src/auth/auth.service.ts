@@ -13,7 +13,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
-import { claimOtpAttempt, markOtpUsed } from '../common/otp-attempt';
+import { claimOtpAttempt, markOtpUsed, whyOtpClaimRefused } from '../common/otp-attempt';
 import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
 import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
 import { ALL_PERMISSIONS } from '../common/rbac/permissions';
@@ -331,6 +331,10 @@ export class AuthService {
     // losing claim is never compared (even a correct code), so it cannot mint a session.
     const claimed = await claimOtpAttempt(this.prisma, record);
     if (claimed === null) {
+      // Refused: re-read so a code superseded/expired or pruned meanwhile gets the honest message (L1).
+      const why = await whyOtpClaimRefused(this.prisma, record.id);
+      if (why === 'EXPIRED') throw new UnauthorizedException('OTP expired — please request a new one.');
+      if (why === 'GONE') throw new UnauthorizedException('No active OTP found for this number. Please request a new OTP.');
       throw new ForbiddenException('Too many attempts — please request a new OTP.');
     }
 

@@ -24,7 +24,7 @@ import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import { EventKey } from '../notification-templates/notification-templates.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
-import { claimOtpAttempt, markOtpUsed } from '../common/otp-attempt';
+import { claimOtpAttempt, markOtpUsed, whyOtpClaimRefused } from '../common/otp-attempt';
 import { sniffFileType } from '../common/file-signature';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { isActivePhoneConflict } from '../common/phone-conflict';
@@ -181,7 +181,13 @@ const PAYOUT_CHANGED_AFTER_SUBMIT_MESSAGE =
  * never blocked by a sibling's sends.
  */
 export const KYC_CONSENT_OTP_MAX_PER_WINDOW = 5;
-/** Rolling window for the KYC consent OTP send cap, in hours. */
+/**
+ * Overall ceiling on top of the per-outlet cap (owner decision 2026-11-11): at most this many
+ * KYC_CONSENT sends per normalised phone per rolling window ACROSS ALL outlets/submissions of the
+ * caller's tenant — bounds a group owner's number even when many sibling outlets are onboarded.
+ */
+export const KYC_CONSENT_OTP_MAX_PER_PHONE_WINDOW = 15;
+/** Rolling window for the KYC consent OTP send caps, in hours. */
 export const KYC_CONSENT_OTP_WINDOW_HOURS = 1;
 
 /** Outcome for a single submission in a bulk-verify commit. */
@@ -530,14 +536,20 @@ export class KycService {
     // ALL Cloud Run instances; login / redemption / scheme OTPs have their own budgets. Skipped only
     // when the fixed-OTP dev/staging bypass is active, so UAT/e2e can resend freely — like the login cap.
     //
-    // Audit M2: count → supersede → create run in ONE transaction holding a transaction-scoped
-    // advisory lock on (phone, partner), so concurrent sends serialise (no check-then-create race
-    // letting a burst past the cap). The SMS goes out only after the transaction commits.
+    // On top of it, an overall ceiling of KYC_CONSENT_OTP_MAX_PER_PHONE_WINDOW sends per phone per
+    // window across ALL outlets/submissions of the caller's tenant (owner decision 2026-11-11).
+    //
+    // Audit M2: count → supersede → create run in ONE transaction holding transaction-scoped
+    // advisory locks, so concurrent sends serialise (no check-then-create race letting a burst past
+    // a cap). Lock ORDER is fixed — the phone-wide lock FIRST, then the (phone, partner) lock — and
+    // this is the only taker of either key, so two sends can never deadlock. The SMS goes out only
+    // after the transaction commits.
     const fixedOtpActive = isFixedOtpAllowed() && !!process.env.FIXED_OTP;
     const scopeKey = submission.partnerId ?? `submission:${submission.id}`;
     const otp = this.generateOtpCode();
 
     const otpRow = await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`kyc-consent-otp-phone:${mobile}`}, 0))`;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`kyc-consent-otp:${mobile}:${scopeKey}`}, 0))`;
 
       // Every submission of this outlet (incl. this one) — the OTP rows reference them by id.
@@ -555,6 +567,32 @@ export class KycService {
           // Distinct structured line (the login cap logs event 'otp.send_cap'). Masked — never log the raw number.
           this.logger.warn(
             `[kyc-consent-otp-send-cap] ${JSON.stringify({ event: 'kyc_consent_otp.send_cap', phone: `******${mobile.slice(-4)}`, partnerId: submission.partnerId, submissionId: submission.id, recentSends, max: KYC_CONSENT_OTP_MAX_PER_WINDOW, windowHours: KYC_CONSENT_OTP_WINDOW_HOURS })}`,
+          );
+          throw new HttpException(
+            'Too many OTPs sent to this number. Please try again later.',
+            HttpStatus.TOO_MANY_REQUESTS,
+          );
+        }
+
+        // Per-phone ceiling within the caller's tenant: this phone's KYC_CONSENT rows in the window
+        // (a handful — each outlet is itself capped), kept only when their referenceId is a submission
+        // of THIS tenant (OtpCode has no tenant column; the submission → user carries clientId).
+        const phoneRows = await tx.otpCode.findMany({
+          where: { phone: mobile, purpose: 'KYC_CONSENT', createdAt: { gte: windowStart } },
+          select: { referenceId: true },
+        });
+        const phoneRefs = [...new Set(phoneRows.map((r) => r.referenceId).filter((r): r is string => !!r))];
+        const tenantRefs = phoneRefs.length === 0 ? new Set<string>() : new Set(
+          (await tx.kycSubmission.findMany({
+            where: { id: { in: phoneRefs }, user: { clientId: user.clientId } },
+            select: { id: true },
+          })).map((s) => s.id),
+        );
+        const phoneSends = phoneRows.filter((r) => !!r.referenceId && tenantRefs.has(r.referenceId)).length;
+        if (phoneSends >= KYC_CONSENT_OTP_MAX_PER_PHONE_WINDOW) {
+          // Distinct structured line for the phone-wide ceiling. Masked — never log the raw number.
+          this.logger.warn(
+            `[kyc-consent-otp-send-cap-phone] ${JSON.stringify({ event: 'kyc_consent_otp.send_cap_phone', phone: `******${mobile.slice(-4)}`, clientId: user.clientId, submissionId: submission.id, recentSends: phoneSends, max: KYC_CONSENT_OTP_MAX_PER_PHONE_WINDOW, windowHours: KYC_CONSENT_OTP_WINDOW_HOURS })}`,
           );
           throw new HttpException(
             'Too many OTPs sent to this number. Please try again later.',
@@ -4061,6 +4099,9 @@ export class KycService {
     // compared, so parallel guesses can't exceed maxAttempts; a losing claim gets the same 429 as above.
     const claimed = await claimOtpAttempt(this.prisma, otpRecord);
     if (claimed === null) {
+      // Refused: re-read so a code superseded/expired or pruned meanwhile gets the honest message (L1).
+      const why = await whyOtpClaimRefused(this.prisma, otpRecord.id);
+      if (why !== 'SPENT') throw new UnauthorizedOtp('OTP not found or expired');
       throw new HttpException(
         'OTP locked due to too many attempts. Request a new OTP.',
         HttpStatus.TOO_MANY_REQUESTS,

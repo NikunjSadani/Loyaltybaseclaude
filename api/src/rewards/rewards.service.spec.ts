@@ -51,7 +51,7 @@ const mockPrisma = {
   wallet: { findFirst: jest.fn() },
   // trackOrder reads the order's refund (CREDIT_REVERSAL) wallet row — order-timeline D5.
   walletTransaction: { findFirst: jest.fn() },
-  otpCode: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn(), deleteMany: jest.fn() },
+  otpCode: { findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn(), deleteMany: jest.fn() },
   rewardCategory: {
     findFirst: jest.fn(),
     findMany: jest.fn(),
@@ -199,6 +199,8 @@ describe('RewardsService', () => {
     // … RETURNING "attempts"` via $queryRaw) — default: the claim wins as attempt 1; every other raw
     // query (order-number scan) keeps its empty-rows default.
     mockPrisma.$queryRaw.mockImplementation(async (q: any) => (isOtpClaim(q) ? [{ attempts: 1 }] : []));
+    // A refused claim re-reads the row for the honest message — default: still live (cap spent).
+    mockPrisma.otpCode.findUnique.mockResolvedValue({ expiresAt: new Date(Date.now() + 60_000), verifiedAt: null });
     mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 1 });
     // The double-tap tests install a counting implementation (orderReads) — never let it leak.
     mockPrisma.redemptionOrder.findFirst.mockReset();
@@ -1492,6 +1494,30 @@ describe('RewardsService', () => {
       expect(err.message).toBe('Too many attempts — please restart the redemption.');
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
       expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('L1 wording: a lost claim on a code that EXPIRED meanwhile → "OTP expired", no debit', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(pendingOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000),
+      });
+      refuseOtpClaims();
+      mockPrisma.otpCode.findUnique.mockResolvedValue({ expiresAt: new Date(Date.now() - 1000), verifiedAt: null });
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .rejects.toThrow('OTP expired — please restart the redemption.');
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('L1 wording: a lost claim on a code that is GONE → "No active OTP found", no debit', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(pendingOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000),
+      });
+      refuseOtpClaims();
+      mockPrisma.otpCode.findUnique.mockResolvedValue(null);
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .rejects.toThrow('No active OTP found. Please restart the redemption.');
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
 
     it('#3: the in-tx OTP consume is CONDITIONAL — already used → "No active OTP", tx aborts, no debit', async () => {

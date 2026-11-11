@@ -1,4 +1,4 @@
-import { claimOtpAttempt, refundOtpAttempt } from './otp-attempt';
+import { claimOtpAttempt, refundOtpAttempt, whyOtpClaimRefused } from './otp-attempt';
 
 type Row = { id: string; attempts: number; maxAttempts: number; verifiedAt: Date | null };
 
@@ -73,5 +73,20 @@ describe('claimOtpAttempt / refundOtpAttempt', () => {
     expect(row.attempts).toBe(0);
     await refundOtpAttempt(db, 'o1');
     expect(row.attempts).toBe(0);
+  });
+
+  it('whyOtpClaimRefused: GONE when the row is missing, EXPIRED when expired, SPENT when live or verified', async () => {
+    const findUnique = jest.fn();
+    const db = { otpCode: { findUnique } } as any;
+    const now = new Date();
+    findUnique.mockResolvedValueOnce(null);
+    await expect(whyOtpClaimRefused(db, 'o1', now)).resolves.toBe('GONE');
+    findUnique.mockResolvedValueOnce({ expiresAt: new Date(now.getTime() - 1), verifiedAt: null });
+    await expect(whyOtpClaimRefused(db, 'o1', now)).resolves.toBe('EXPIRED');
+    findUnique.mockResolvedValueOnce({ expiresAt: new Date(now.getTime() + 60_000), verifiedAt: null });
+    await expect(whyOtpClaimRefused(db, 'o1', now)).resolves.toBe('SPENT');
+    findUnique.mockResolvedValueOnce({ expiresAt: new Date(now.getTime() - 1), verifiedAt: now });
+    await expect(whyOtpClaimRefused(db, 'o1', now)).resolves.toBe('SPENT'); // consumed by a parallel verify
+    expect(findUnique).toHaveBeenCalledWith({ where: { id: 'o1' }, select: { expiresAt: true, verifiedAt: true } });
   });
 });

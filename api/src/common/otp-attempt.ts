@@ -38,6 +38,22 @@ export async function claimOtpAttempt(
   return rows.length > 0 ? Number(rows[0].attempts) : null;
 }
 
+/** Why a claim was refused: attempts spent (or consumed by a parallel verify) / now expired / row gone. */
+export type OtpClaimRefusal = 'SPENT' | 'EXPIRED' | 'GONE';
+
+/**
+ * After claimOtpAttempt returns null, re-read the row to pick the HONEST message (audit L1 wording):
+ * a code that was superseded (expired) or pruned between the site's read and its claim must get the
+ * site's existing "expired / not found" copy, not "too many attempts". A verified row (a parallel
+ * correct verify consumed it) and a spent row keep each site's existing message ('SPENT').
+ */
+export async function whyOtpClaimRefused(db: OtpAttemptDb, id: string, now: Date = new Date()): Promise<OtpClaimRefusal> {
+  const row = await db.otpCode.findUnique({ where: { id }, select: { expiresAt: true, verifiedAt: true } });
+  if (!row) return 'GONE';
+  if (row.verifiedAt) return 'SPENT';
+  return row.expiresAt <= now ? 'EXPIRED' : 'SPENT';
+}
+
 /**
  * Give back a claimed attempt after a CORRECT code, for flows where a correct code must not consume
  * an attempt (the redemption confirm leaves the OTP unverified until its debit transaction commits,
