@@ -150,6 +150,13 @@ UPI money fixes (code on `backup/wip-20261105-batt`). _(The React #418 hydration
 
 ## ▶▶ WHAT'S NEXT
 - **Live next steps = 📍 STATE 2026-11-11 at the top** (release LIVE on staging `7c85d9fd` → owner staging UAT → owner creates prod Hubble secrets → decide prod Sales Import infra → prepare main → manual prod deploy + post-deploy checks → Bajaj October points).
+- 🔜 **FAST FOLLOW-UP #1 (owner 2026-11-11 — build ONLY after this release is on prod and closed): KPI ↔ Program / Sub-Program link.**
+  Today `KpiDef` is tenant-wide (only an optional `outletType` tag); there is NO program link. Interim workaround = upload
+  targets only for that program's outlets (blank cells = no target, excluded from achieved counts; compute rules +
+  dashboards already filter by Program/Sub-Program). Proposed (⚠️ PLATFORM-WIDE — owner approved the idea, not yet the build):
+  optional Program/Sub-Program multi-select on each KPI (blank = all programs → Deoleo byte-identical); target upload rejects
+  a value for an outlet outside the KPI's program (row error); partner/sales/dashboard views show the KPI only for outlets in
+  its program; roll-ups respect it. Mirror the `outletType` pattern (additive nullable column).
 - ✅ _(Shipped in #57, 2026-11-07 — kept for reference.)_ **Wallet statement export (PLATFORM-WIDE, owner-approved 2026-11-06).** New
   `GET /v1/wallet/statement` + `GET /v1/kyc/:id/ledger/statement` (shared `points-statement.helper`: stored-balance chain,
   opening/closing, D10 tie-out warn); partner wallet + sales ledger get one Download → Excel/PDF picker with a Balance
