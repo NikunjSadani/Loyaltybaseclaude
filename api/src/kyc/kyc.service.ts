@@ -4002,7 +4002,8 @@ export class KycService {
     // refused on the prod DB). Permanent path is the real MSG91 code stored above.
     // Claim-before-compare (common/otp-attempt): the attempt is claimed ATOMICALLY before the code is
     // compared, so parallel guesses can't exceed maxAttempts; a losing claim gets the same 429 as above.
-    if (!(await claimOtpAttempt(this.prisma, otpRecord))) {
+    const claimed = await claimOtpAttempt(this.prisma, otpRecord);
+    if (claimed === null) {
       throw new HttpException(
         'OTP locked due to too many attempts. Request a new OTP.',
         HttpStatus.TOO_MANY_REQUESTS,
@@ -4011,7 +4012,8 @@ export class KycService {
     const fixedOtp = isFixedOtpAllowed() ? process.env.FIXED_OTP : undefined;
     const otpMatches = otpRecord.code === otp || (!!fixedOtp && otp === fixedOtp);
     if (!otpMatches) {
-      const remaining = otpRecord.maxAttempts - otpRecord.attempts - 1;
+      // From the atomic claim's post-increment value — exact under parallel guesses (not the stale read).
+      const remaining = Math.max(0, otpRecord.maxAttempts - claimed);
       throw new UnauthorizedOtp(`Invalid OTP. ${remaining} attempt(s) remaining.`);
     }
 

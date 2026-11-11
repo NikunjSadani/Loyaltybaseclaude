@@ -107,6 +107,8 @@ const mockPrisma = {
   // calendar loader (loadHolidaySet) reads the single national-holidays row via findFirst.
   programSetting: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
+  // The OTP attempt claim (common/otp-attempt) is ONE `UPDATE "otp_codes" … RETURNING "attempts"`.
+  $queryRaw: jest.fn(),
 };
 
 const mockNotifications = {
@@ -237,6 +239,7 @@ describe('KycService', () => {
     // Reset every table op but PRESERVE $transaction's impl (cb → mockTx).
     for (const [key, val] of Object.entries(mockPrisma)) {
       if (key === '$transaction') continue;
+      if (typeof val === 'function') { (val as jest.Mock).mockReset(); continue; } // $queryRaw
       for (const fn of Object.values(val as Record<string, unknown>)) {
         (fn as jest.Mock).mockReset();
       }
@@ -253,6 +256,8 @@ describe('KycService', () => {
     mockPrisma.payoutTransaction.findMany.mockResolvedValue([]);
     // Claim-before-compare: consent() claims one OTP attempt atomically first — default: the claim wins
     // (set AFTER the reset loop above, which wipes every mockPrisma op).
+    // The claim returns the post-increment attempts value — default: this is attempt 1.
+    mockPrisma.$queryRaw.mockResolvedValue([{ attempts: 1 }]);
     mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 1 });
     // #3: the DRAFT→routed transition is a guarded updateMany — default: it wins.
     mockPrisma.kycSubmission.updateMany.mockResolvedValue({ count: 1 });
@@ -5674,21 +5679,30 @@ describe('KycService', () => {
 
     it('claim-before-compare: a wrong code claims atomically (no read-then-write) and keeps the 401 copy', async () => {
       mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o3', code: '999999', attempts: 1, maxAttempts: 3 });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([{ attempts: 2 }]); // this claim = attempt 2
       const err = await service
         .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
         .catch((e) => e);
       expect(err.getStatus()).toBe(401);
       expect(err.message).toBe('Invalid OTP. 1 attempt(s) remaining.');
-      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
-        where: { id: 'o3', verifiedAt: null, attempts: { lt: 3 } },
-        data: { attempts: { increment: 1 } },
-      });
+      expect(mockPrisma.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.$queryRaw.mock.calls[0][0].values).toEqual(['o3', 3]);
       expect(mockPrisma.otpCode.update).not.toHaveBeenCalled();
+    });
+
+    it('exact remaining: computed from the claim post-increment value, not the earlier (stale) read', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o3', code: '999999', attempts: 0, maxAttempts: 3 });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([{ attempts: 3 }]); // two parallel guesses claimed first
+      const err = await service
+        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
+        .catch((e) => e);
+      expect(err.getStatus()).toBe(401);
+      expect(err.message).toBe('Invalid OTP. 0 attempt(s) remaining.');
     });
 
     it('claim-before-compare: a lost claim → the existing 429 "OTP locked…", the right code is never accepted', async () => {
       mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o4', code: '111111', attempts: 0, maxAttempts: 3 });
-      mockPrisma.otpCode.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([]); // claim refused: no row updated
       const err = await service
         .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' })
         .catch((e) => e);
@@ -5758,7 +5772,7 @@ describe('KycService', () => {
         id: 's1', status: 'DRAFT', userId: 'user1', proposedPartner: null, partner: { phone: '9000000001', ownerName: 'O', outlets: [] },
       });
       mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'o9', code: '111111', attempts: 0, maxAttempts: 3 });
-      const row = simulateOtpRow(mockPrisma.otpCode.updateMany);
+      const row = simulateOtpRow(mockPrisma);
       let routed = 0;
       mockPrisma.kycSubmission.updateMany.mockImplementation(async () => {
         await new Promise((r) => setImmediate(r));
@@ -5780,12 +5794,18 @@ describe('KycService', () => {
       mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'o5', code: '111111', attempts: 0, maxAttempts: 3 });
       // (submission = the describe default: owner phone 9000000001, already routed)
       mockPrisma.consentRecord.create.mockResolvedValue({ id: 'cr1' });
-      const row = simulateOtpClaims(mockPrisma.otpCode.updateMany);
+      const row = simulateOtpClaims(mockPrisma);
       const otps = Array.from({ length: 100 }, (_, i) => (i === 99 ? '111111' : String(200000 + i)));
       const results = await Promise.allSettled(otps.map((otp) =>
         service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp })));
       const msgs = results.map((r) => (r.status === 'rejected' ? (r.reason as Error).message : 'OK'));
       expect(msgs.filter((m) => m.startsWith('Invalid OTP'))).toHaveLength(3);
+      // Exact remaining per winner, from each claim's post-increment value (was "2 …" for all three).
+      expect(msgs.filter((m) => m.startsWith('Invalid OTP')).sort()).toEqual([
+        'Invalid OTP. 0 attempt(s) remaining.',
+        'Invalid OTP. 1 attempt(s) remaining.',
+        'Invalid OTP. 2 attempt(s) remaining.',
+      ]);
       expect(msgs.filter((m) => m === 'OTP locked due to too many attempts. Request a new OTP.')).toHaveLength(97);
       expect(msgs).not.toContain('OK');
       expect(row.attempts).toBe(3);
@@ -7597,14 +7617,16 @@ describe('KycService', () => {
  * Claim-before-compare (2026-11-10): simulate the OtpCode row's atomic conditional increment — the
  * ONLY serialisation point — so N parallel verifies that all READ attempts=0 can be exercised.
  */
-function simulateOtpClaims(updateMany: jest.Mock, maxAttempts = 3) {
+function simulateOtpClaims(db: { $queryRaw: jest.Mock; otpCode: { updateMany: jest.Mock } }, maxAttempts = 3) {
   const state = { attempts: 0 };
-  updateMany.mockImplementation(async ({ where, data }: any) => {
+  // The claim: ONE `UPDATE "otp_codes" … WHERE … "attempts" < $2 RETURNING "attempts"` (values [id, max]).
+  db.$queryRaw.mockImplementation(async (q: any) => {
     await new Promise((r) => setImmediate(r)); // interleave the parallel callers
-    if (data?.attempts?.increment) {
-      if (state.attempts < (where?.attempts?.lt ?? maxAttempts)) { state.attempts++; return { count: 1 }; }
-      return { count: 0 };
-    }
+    if (state.attempts < (q.values?.[1] ?? maxAttempts)) { state.attempts++; return [{ attempts: state.attempts }]; }
+    return [];
+  });
+  db.otpCode.updateMany.mockImplementation(async ({ data }: any) => {
+    await new Promise((r) => setImmediate(r));
     if (data?.attempts?.decrement) { if (state.attempts > 0) state.attempts--; return { count: 1 }; }
     return { count: 1 };
   });
@@ -7616,8 +7638,16 @@ function simulateOtpClaims(updateMany: jest.Mock, maxAttempts = 3) {
  * the refund (decrement) and the conditional "mark used" (verifiedAt: null → set once). Interleaves
  * callers so parallel verifies race exactly as they would against the DB's row-level serialisation.
  */
-function simulateOtpRow(updateMany: jest.Mock, maxAttempts = 3) {
+function simulateOtpRow(db: { $queryRaw: jest.Mock; otpCode: { updateMany: jest.Mock } }, maxAttempts = 3) {
   const row = { attempts: 0, verifiedAt: null as Date | null, marks: 0 };
+  // The claim: ONE `UPDATE … WHERE id AND verifiedAt IS NULL AND attempts < $max RETURNING attempts`.
+  db.$queryRaw.mockImplementation(async (q: any) => {
+    await new Promise((r) => setImmediate(r));
+    if (row.verifiedAt || !(row.attempts < (q.values?.[1] ?? maxAttempts))) return [];
+    row.attempts++;
+    return [{ attempts: row.attempts }];
+  });
+  const updateMany = db.otpCode.updateMany;
   updateMany.mockImplementation(async ({ where, data }: any) => {
     await new Promise((r) => setImmediate(r));
     if (data?.verifiedAt) {

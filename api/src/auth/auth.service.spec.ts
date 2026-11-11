@@ -34,6 +34,8 @@ const mockPrisma = {
   outlet: { count: jest.fn() },
   // TenantSettingsService reads this (no rows -> typed defaults, conversionRate = env).
   programSetting: { findMany: jest.fn().mockResolvedValue([]) },
+  // The OTP attempt claim (common/otp-attempt) is ONE `UPDATE … RETURNING "attempts"` via $queryRaw.
+  $queryRaw: jest.fn(),
 };
 
 const gifsyOp = { sub: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' } as any;
@@ -416,7 +418,10 @@ describe('AuthService', () => {
     beforeEach(() => {
       (mockPrisma as any).channelPartner = { findFirst: jest.fn() };
       (mockPrisma as any).outlet = { count: jest.fn() };
-      // L1: each attempt is claimed atomically before the code is compared -- default: claim wins.
+      // L1: each attempt is claimed atomically before the code is compared -- default: the claim wins
+      // as the FIRST attempt (the claim returns the post-increment attempts value).
+      mockPrisma.$queryRaw.mockReset();
+      mockPrisma.$queryRaw.mockResolvedValue([{ attempts: 1 }]);
       mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 1 });
     });
 
@@ -592,10 +597,9 @@ describe('AuthService', () => {
       mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 1 });
 
       await expect(service.verifyOtp(phone, '9999', clientId)).rejects.toThrow('Invalid OTP. 2 attempts remaining.');
-      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
-        where: { id: 'otp_1', verifiedAt: null, attempts: { lt: 3 } },
-        data:  { attempts: { increment: 1 } },
-      });
+      // ONE conditional UPDATE … RETURNING bound to this row + its cap
+      expect(mockPrisma.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.$queryRaw.mock.calls[0][0].values).toEqual(['otp_1', 3]);
       // never the old read-then-write absolute value
       expect(mockPrisma.otpCode.update).not.toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ attempts: expect.anything() }) }),
@@ -604,15 +608,24 @@ describe('AuthService', () => {
 
     it('remaining-attempts copy is unchanged ("1 attempt" / "0 attempts remaining")', async () => {
       mockPrisma.otpCode.findFirst.mockResolvedValue({ ...validOtp, attempts: 2 });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([{ attempts: 3 }]);
       await expect(service.verifyOtp(phone, '9999', clientId)).rejects.toThrow('Invalid OTP. 0 attempts remaining.');
       mockPrisma.otpCode.findFirst.mockResolvedValue({ ...validOtp, attempts: 1 });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([{ attempts: 2 }]);
       await expect(service.verifyOtp(phone, '9999', clientId)).rejects.toThrow('Invalid OTP. 1 attempt remaining.');
+    });
+
+    it('exact remaining: computed from the claim post-increment value, not the earlier (stale) read', async () => {
+      // The read said attempts=0, but two parallel guesses claimed first -> this claim is attempt 3.
+      mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
+      mockPrisma.$queryRaw.mockResolvedValueOnce([{ attempts: 3 }]);
+      await expect(service.verifyOtp(phone, '9999', clientId)).rejects.toThrow('Invalid OTP. 0 attempts remaining.');
     });
 
     it('L1: an attempt whose atomic claim loses (count 0) is "Too many attempts" and is NEVER compared -- even the right code', async () => {
       // A stale read (attempts 0) passes the cheap pre-check, but the DB says the cap is already spent.
       mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
-      mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 0 });
+      mockPrisma.$queryRaw.mockResolvedValue([]); // claim refused: no row updated
       mockPrisma.otpCode.update.mockClear();
       mockPrisma.userSession.create.mockClear();
       await expect(service.verifyOtp(phone, '1234', clientId)).rejects.toThrow('Too many attempts');
@@ -625,10 +638,11 @@ describe('AuthService', () => {
       // The conditional increment is the ONLY serialisation point -- simulate the DB row.
       let dbAttempts = 0;
       mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp); // every request reads the stale 0
-      mockPrisma.otpCode.updateMany.mockImplementation(async ({ where }: any) => {
+      mockPrisma.$queryRaw.mockImplementation(async (q: any) => {
         await new Promise((r) => setImmediate(r)); // interleave
-        if (dbAttempts < where.attempts.lt) { dbAttempts++; return { count: 1 }; }
-        return { count: 0 };
+        const max = q.values[1];
+        if (dbAttempts < max) { dbAttempts++; return [{ attempts: dbAttempts }]; }
+        return [];
       });
       mockPrisma.userSession.create.mockClear();
       // The real code is the LAST guess -- after the cap is spent it must NOT log in.
@@ -637,6 +651,12 @@ describe('AuthService', () => {
       const msgs = results.map((r) => (r.status === 'rejected' ? (r.reason as Error).message : 'OK'));
       expect(msgs.filter((m) => m.startsWith('Invalid OTP')).length).toBe(3);
       expect(msgs.filter((m) => m.startsWith('Too many attempts')).length).toBe(97);
+      // Exact remaining per winner (the old stale read said "2 attempts remaining" to all three).
+      expect(msgs.filter((m) => m.startsWith('Invalid OTP')).sort()).toEqual([
+        'Invalid OTP. 0 attempts remaining.',
+        'Invalid OTP. 1 attempt remaining.',
+        'Invalid OTP. 2 attempts remaining.',
+      ]);
       expect(msgs).not.toContain('OK');
       expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
       expect(dbAttempts).toBe(3);
@@ -664,7 +684,7 @@ describe('AuthService', () => {
 
     it('#3: two parallel CORRECT verifies of one OTP → exactly one session', async () => {
       mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
-      const row = simulateOtpRow(mockPrisma.otpCode.updateMany);
+      const row = simulateOtpRow(mockPrisma);
       mockPrisma.user.findFirst.mockResolvedValue({ id: 'user_1', role: 'RETAILER', clientId, status: 'ACTIVE' });
       mockPrisma.userSession.create.mockClear();
       mockPrisma.userSession.create.mockResolvedValue({ id: 'sess_1' });
@@ -1561,8 +1581,17 @@ describe('AuthService', () => {
  * the refund (decrement) and the conditional "mark used" (verifiedAt: null → set once). Interleaves
  * callers so parallel verifies race exactly as they would against the DB's row-level serialisation.
  */
-function simulateOtpRow(updateMany: jest.Mock, maxAttempts = 3) {
+function simulateOtpRow(db: { $queryRaw: jest.Mock; otpCode: { updateMany: jest.Mock } }, maxAttempts = 3) {
   const row = { attempts: 0, verifiedAt: null as Date | null, marks: 0 };
+  // The claim: ONE `UPDATE … WHERE id AND verifiedAt IS NULL AND attempts < $max RETURNING attempts`.
+  db.$queryRaw.mockImplementation(async (q: any) => {
+    await new Promise((r) => setImmediate(r));
+    const max = q.values?.[1] ?? maxAttempts;
+    if (row.verifiedAt || !(row.attempts < max)) return [];
+    row.attempts++;
+    return [{ attempts: row.attempts }];
+  });
+  const updateMany = db.otpCode.updateMany;
   updateMany.mockImplementation(async ({ where, data }: any) => {
     await new Promise((r) => setImmediate(r));
     if (data?.verifiedAt) {

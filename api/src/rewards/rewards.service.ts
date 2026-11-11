@@ -3354,7 +3354,8 @@ export class RewardsService {
     // Claim-before-compare (common/otp-attempt): claim one attempt ATOMICALLY before comparing, so
     // parallel guesses that all read the same `attempts` can't exceed maxAttempts; a losing claim is
     // refused with the existing "too many attempts" error and its code is never compared.
-    if (!(await claimOtpAttempt(this.prisma, record))) {
+    const claimed = await claimOtpAttempt(this.prisma, record);
+    if (claimed === null) {
       await this.throwIfOrderAlreadyConfirmed(orderId);
       throw new UnauthorizedException('Too many attempts — please restart the redemption.');
     }
@@ -3362,7 +3363,8 @@ export class RewardsService {
     const fixedOtp = isFixedOtpAllowed() ? process.env.FIXED_OTP : undefined;
     const isCorrect = fixedOtp ? otp === fixedOtp : otp === record.code;
     if (!isCorrect) {
-      const remaining = record.maxAttempts - record.attempts - 1;
+      // From the atomic claim's post-increment value — exact under parallel guesses (not the stale read).
+      const remaining = Math.max(0, record.maxAttempts - claimed);
       throw new UnauthorizedException(
         `Invalid OTP. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`,
       );

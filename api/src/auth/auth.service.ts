@@ -329,14 +329,16 @@ export class AuthService {
     // ~100 concurrent guesses through before it reached maxAttempts (audit L1). The conditional
     // increment is the single serialisation point — only maxAttempts claims can ever win, and a
     // losing claim is never compared (even a correct code), so it cannot mint a session.
-    if (!(await claimOtpAttempt(this.prisma, record))) {
+    const claimed = await claimOtpAttempt(this.prisma, record);
+    if (claimed === null) {
       throw new ForbiddenException('Too many attempts — please request a new OTP.');
     }
 
     const isCorrect = fixedOtp ? otp === fixedOtp : otp === record.code;
 
     if (!isCorrect) {
-      const remaining = record.maxAttempts - record.attempts - 1;
+      // From the atomic claim's post-increment value — exact under parallel guesses (not the stale read).
+      const remaining = Math.max(0, record.maxAttempts - claimed);
       throw new UnauthorizedException(`Invalid OTP. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`);
     }
 

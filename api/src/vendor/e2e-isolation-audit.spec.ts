@@ -50,8 +50,11 @@ const mockPrisma = {
   redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), count: jest.fn() },
   redemptionStatusHistory: { create: jest.fn() },
   channelPartner: { findFirst: jest.fn() },
-  // updateMany: the claim-before-compare OTP attempt (common/otp-attempt) — the claim wins by default.
+  // updateMany: the OTP attempt give-back / conditional mark-used (common/otp-attempt).
   otpCode: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+  // The claim-before-compare OTP attempt is ONE `UPDATE "otp_codes" … RETURNING "attempts"` — the claim
+  // wins by default as attempt 1.
+  $queryRaw: jest.fn().mockResolvedValue([{ attempts: 1 }]),
   client: { findMany: jest.fn(), findFirst: jest.fn() },
   user: { findMany: jest.fn(), create: jest.fn() },
   auditLog: { create: jest.fn().mockResolvedValue({}) },

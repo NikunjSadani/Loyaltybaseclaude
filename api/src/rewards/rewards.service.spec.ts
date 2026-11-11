@@ -195,7 +195,10 @@ describe('RewardsService', () => {
     mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
     mockPrisma.rewardCatalog.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
-    // Claim-before-compare: each OTP verify claims one attempt atomically first — default: the claim wins.
+    // Claim-before-compare: each OTP verify claims one attempt atomically first (ONE `UPDATE "otp_codes"
+    // … RETURNING "attempts"` via $queryRaw) — default: the claim wins as attempt 1; every other raw
+    // query (order-number scan) keeps its empty-rows default.
+    mockPrisma.$queryRaw.mockImplementation(async (q: any) => (isOtpClaim(q) ? [{ attempts: 1 }] : []));
     mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 1 });
     // The double-tap tests install a counting implementation (orderReads) — never let it leak.
     mockPrisma.redemptionOrder.findFirst.mockReset();
@@ -1466,10 +1469,9 @@ describe('RewardsService', () => {
 
       await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '000000' }))
         .rejects.toThrow('Invalid OTP. 2 attempts remaining.');
-      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
-        where: { id: 'otp1', verifiedAt: null, attempts: { lt: 3 } },
-        data: { attempts: { increment: 1 } },
-      });
+      const claims = mockPrisma.$queryRaw.mock.calls.filter((c: any[]) => isOtpClaim(c[0]));
+      expect(claims).toHaveLength(1);
+      expect(claims[0][0].values).toEqual(['otp1', 3]);
       // the claim is never refunded on a miss
       expect(mockPrisma.otpCode.updateMany).not.toHaveBeenCalledWith(
         expect.objectContaining({ data: { attempts: { decrement: 1 } } }),
@@ -1482,7 +1484,7 @@ describe('RewardsService', () => {
       mockPrisma.otpCode.findFirst.mockResolvedValue({
         id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000),
       });
-      mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 0 });
+      refuseOtpClaims();
       mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
 
       const err = await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }).catch((e) => e);
@@ -1517,7 +1519,7 @@ describe('RewardsService', () => {
         id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000),
       });
       mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
-      mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 0 });
+      refuseOtpClaims();
       const err = await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }).catch((e) => e);
       expect(err).toBeInstanceOf(ConflictException);
       expect(err.message).toBe('Order is no longer awaiting confirmation');
@@ -1539,7 +1541,7 @@ describe('RewardsService', () => {
         id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000),
       });
       mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
-      mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 0 });
+      refuseOtpClaims();
       await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
         .rejects.toThrow('Too many attempts — please restart the redemption.');
     });
@@ -1565,12 +1567,18 @@ describe('RewardsService', () => {
         id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000),
       });
       mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
-      const row = simulateOtpClaims(mockPrisma.otpCode.updateMany);
+      const row = simulateOtpClaims(mockPrisma);
 
       const otps = Array.from({ length: 100 }, (_, i) => (i === 99 ? '123456' : String(200000 + i)));
       const results = await Promise.allSettled(otps.map((otp) => service.confirmRedeem(partner, { orderId: 'o1', otp })));
       const msgs = results.map((r) => (r.status === 'rejected' ? (r.reason as Error).message : 'OK'));
       expect(msgs.filter((m) => m.startsWith('Invalid OTP'))).toHaveLength(3);
+      // Exact remaining per winner, from each claim's post-increment value (was "2 …" for all three).
+      expect(msgs.filter((m) => m.startsWith('Invalid OTP')).sort()).toEqual([
+        'Invalid OTP. 0 attempts remaining.',
+        'Invalid OTP. 1 attempt remaining.',
+        'Invalid OTP. 2 attempts remaining.',
+      ]);
       expect(msgs.filter((m) => m === 'Too many attempts — please restart the redemption.')).toHaveLength(97);
       expect(msgs).not.toContain('OK');
       expect(row.attempts).toBe(3);
@@ -2596,12 +2604,18 @@ describe('RewardsService', () => {
 
     it('claim-before-compare: 100 parallel sales-assisted confirms, right code LAST → no success, no debit', async () => {
       wireConfirm();
-      const row = simulateOtpClaims(mockPrisma.otpCode.updateMany);
+      const row = simulateOtpClaims(mockPrisma);
       const otps = Array.from({ length: 100 }, (_, i) => (i === 99 ? '123456' : String(200000 + i)));
       const results = await Promise.allSettled(otps.map((otp) =>
         service.confirmRedeemForOutlet(sales, { orderId: 'o-out', otp, targetPartnerId: 'cp-out' })));
       const msgs = results.map((r) => (r.status === 'rejected' ? (r.reason as Error).message : 'OK'));
       expect(msgs.filter((m) => m.startsWith('Invalid OTP'))).toHaveLength(3);
+      // Exact remaining per winner, from each claim's post-increment value (was "2 …" for all three).
+      expect(msgs.filter((m) => m.startsWith('Invalid OTP')).sort()).toEqual([
+        'Invalid OTP. 0 attempts remaining.',
+        'Invalid OTP. 1 attempt remaining.',
+        'Invalid OTP. 2 attempts remaining.',
+      ]);
       expect(msgs.filter((m) => m === 'Too many attempts — please restart the redemption.')).toHaveLength(97);
       expect(msgs).not.toContain('OK');
       expect(row.attempts).toBe(3);
@@ -2611,7 +2625,7 @@ describe('RewardsService', () => {
     it('#4 double-tap (sales-assisted): lost claim on an already-CONFIRMED order → Conflict', async () => {
       wireConfirm();
       orderReads(pendingOrder, { status: 'CONFIRMED' });
-      mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 0 });
+      refuseOtpClaims();
       const err = await service.confirmRedeemForOutlet(sales, {
         orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
       }).catch((e) => e);
@@ -2634,7 +2648,7 @@ describe('RewardsService', () => {
 
     it('claim-before-compare: sales-assisted lost claim → existing 401 "Too many attempts", no debit', async () => {
       wireConfirm();
-      mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 0 });
+      refuseOtpClaims();
       const err = await service.confirmRedeemForOutlet(sales, {
         orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
       }).catch((e) => e);
@@ -5994,18 +6008,31 @@ describe('RewardsService', () => {
  * Claim-before-compare (2026-11-10): simulate the OtpCode row's atomic conditional increment — the
  * ONLY serialisation point — so N parallel verifies that all READ attempts=0 can be exercised.
  */
-function simulateOtpClaims(updateMany: jest.Mock, maxAttempts = 3) {
+function simulateOtpClaims(db: { $queryRaw: jest.Mock; otpCode: { updateMany: jest.Mock } }, maxAttempts = 3) {
   const state = { attempts: 0 };
-  updateMany.mockImplementation(async ({ where, data }: any) => {
+  // The claim: ONE `UPDATE "otp_codes" … WHERE … "attempts" < $2 RETURNING "attempts"` (values [id, max]).
+  db.$queryRaw.mockImplementation(async (q: any) => {
+    if (!isOtpClaim(q)) return [];
     await new Promise((r) => setImmediate(r)); // interleave the parallel callers
-    if (data?.attempts?.increment) {
-      if (state.attempts < (where?.attempts?.lt ?? maxAttempts)) { state.attempts++; return { count: 1 }; }
-      return { count: 0 };
-    }
+    if (state.attempts < (q.values?.[1] ?? maxAttempts)) { state.attempts++; return [{ attempts: state.attempts }]; }
+    return [];
+  });
+  db.otpCode.updateMany.mockImplementation(async ({ data }: any) => {
+    await new Promise((r) => setImmediate(r));
     if (data?.attempts?.decrement) { if (state.attempts > 0) state.attempts--; return { count: 1 }; }
     return { count: 1 };
   });
   return state;
+}
+
+/** Is this $queryRaw call the OTP attempt claim (common/otp-attempt)? */
+function isOtpClaim(q: any): boolean {
+  return typeof q?.text === 'string' && q.text.includes('UPDATE "otp_codes"');
+}
+
+/** The OTP attempt claim is refused (cap spent / already verified); other raw queries keep [] rows. */
+function refuseOtpClaims() {
+  mockPrisma.$queryRaw.mockImplementation(async () => []);
 }
 
 /** redemptionOrder.findFirst: the first call returns `first`, every later call `rest` (double-tap re-read). */

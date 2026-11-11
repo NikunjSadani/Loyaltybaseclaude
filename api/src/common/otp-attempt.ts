@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 
 /**
  * Claim-before-compare for OTP verification (audit 2026-11-10).
@@ -11,17 +11,27 @@ import type { Prisma } from '@prisma/client';
  * "too many attempts" error and its code is never looked at.
  */
 type OtpAttemptDb = Pick<Prisma.TransactionClient, 'otpCode'>;
+type OtpClaimDb = Pick<Prisma.TransactionClient, '$queryRaw'>;
 
-/** true → this request may compare the code (one attempt consumed); false → cap spent / OTP used. */
+/**
+ * Claim one attempt ATOMICALLY and return the row's POST-increment `attempts` value (1..maxAttempts),
+ * or null when the claim is refused (cap spent / OTP already verified / row gone).
+ *
+ * ONE statement — the conditional increment and the read of its result happen together, so the value
+ * returned is exactly this request's attempt number even under parallel guesses (2026-11-11). Callers
+ * compute "N attempts remaining" as `maxAttempts - claimed`, never from the earlier (possibly stale) read.
+ * `updatedAt` is set as Prisma's @updatedAt would (UTC wall-clock, matching how Prisma stores DateTime).
+ */
 export async function claimOtpAttempt(
-  db: OtpAttemptDb,
+  db: OtpClaimDb,
   record: { id: string; maxAttempts: number },
-): Promise<boolean> {
-  const { count } = await db.otpCode.updateMany({
-    where: { id: record.id, verifiedAt: null, attempts: { lt: record.maxAttempts } },
-    data:  { attempts: { increment: 1 } },
-  });
-  return count > 0;
+): Promise<number | null> {
+  const rows = await db.$queryRaw<Array<{ attempts: number }>>(Prisma.sql`
+    UPDATE "otp_codes"
+       SET "attempts" = "attempts" + 1, "updatedAt" = (now() AT TIME ZONE 'UTC')
+     WHERE "id" = ${record.id} AND "verifiedAt" IS NULL AND "attempts" < ${record.maxAttempts}
+    RETURNING "attempts"`);
+  return rows.length > 0 ? Number(rows[0].attempts) : null;
 }
 
 /**
