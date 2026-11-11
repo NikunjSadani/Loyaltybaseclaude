@@ -22,6 +22,11 @@ describe('WR — wholeRupeesFromText', () => {
     ['7e2', '72'],
     ['.5', ''],
     ['', ''],
+    ['750,5', '750'],
+    ['750,', '750'],
+    ['1,25,000', '125000'],
+    ['1,250', '1250'],
+    ['12,50', '12'],
   ])('%s → %s', (input, out) => {
     expect(wholeRupeesFromText(input)).toBe(out);
   });
@@ -53,11 +58,71 @@ describe('WR — wholeRupeeInputProps', () => {
     expect(el.value).toBe('1250');
   });
 
-  it('WR4: "e", "+", "-", "," are refused', async () => {
+  it('WR4: "e", "+", "-" are refused', async () => {
     render(<Harness />);
     const el = screen.getByLabelText('amt') as HTMLInputElement;
-    await userEvent.type(el, '1e+-,2');
+    await userEvent.type(el, '1e+-2');
     expect(el.value).toBe('12');
+  });
+
+  it('RC-L1: typing "750,5" yields 750 — a "," at the END is a decimal mark, never "7505"', async () => {
+    render(<Harness />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    await userEvent.type(el, '750,5');
+    expect(el.value).toBe('750');
+  });
+
+  it('RC-L1 (Android): change "750," then "7505" (keydown "Unidentified") → stays 750', () => {
+    render(<Harness />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    fireEvent.change(el, { target: { value: '750' } });
+    fireEvent.keyDown(el, { key: 'Unidentified' });
+    fireEvent.change(el, { target: { value: '750,' } });
+    expect(el.value).toBe('750');
+    fireEvent.keyDown(el, { key: 'Unidentified' });
+    fireEvent.change(el, { target: { value: '7505' } });
+    expect(el.value).toBe('750');
+  });
+
+  it('RC-L1/L2 (Android beforeinput): data "," at the end starts the fraction; inputType "deleteContentBackward" ends it', () => {
+    render(<Harness />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    fireEvent.change(el, { target: { value: '750' } });
+    el.setSelectionRange(3, 3);
+    const bi = (data: string | null, inputType: string) =>
+      fireEvent(el, new InputEvent('beforeinput', { data, inputType, bubbles: true, cancelable: true }));
+    bi(',', 'insertText');
+    expect(el.value).toBe('750');
+    expect(el.dataset.fraction).toBe('1');
+    // a digit insert while in the fraction state is refused (cancelled)
+    expect(bi('5', 'insertText')).toBe(false);
+    bi(null, 'deleteContentBackward');
+    expect(el.dataset.fraction).toBeUndefined();
+  });
+
+  it('RC-L2: a "." or "," on an EMPTY field does not start the fraction state (".5" → "5")', async () => {
+    render(<Harness />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    await userEvent.type(el, '.5');
+    expect(el.value).toBe('5');
+    await userEvent.clear(el);
+    await userEvent.type(el, ',7');
+    expect(el.value).toBe('7');
+  });
+
+  it('RC-L3: inserting "1.5" over a selected "500" splices at the selection → "1"', async () => {
+    render(<Harness />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    fireEvent.change(el, { target: { value: '500' } });
+    el.focus();
+    el.setSelectionRange(0, 3);
+    await userEvent.paste('1.5');
+    expect(el.value).toBe('1'); // paste path
+    // same splice via an Android-style beforeinput insert
+    fireEvent.change(el, { target: { value: '500' } });
+    el.setSelectionRange(0, 3);
+    fireEvent(el, new InputEvent('beforeinput', { data: '1.5', inputType: 'insertText', bubbles: true, cancelable: true }));
+    expect(el.value).toBe('1'); // beforeinput path
   });
 
   it('WR6 (Android, keydown "Unidentified"): change events "750." then "7505" → stays 750; a deletion ends the fraction', () => {
@@ -77,7 +142,7 @@ describe('WR — wholeRupeeInputProps', () => {
     expect(el.value).toBe('751');
   });
 
-  it('WR7 (Android): an on-screen "," is stripped (thousands separator), never kept', () => {
+  it('WR7 (Android): a "," that IS a thousands separator ("1,250") is stripped, never kept', () => {
     render(<Harness />);
     const el = screen.getByLabelText('amt') as HTMLInputElement;
     fireEvent.change(el, { target: { value: '1,250' } });

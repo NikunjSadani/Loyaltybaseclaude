@@ -116,6 +116,7 @@ const mockHubble = {
     productId: 'amz-1', name: 'Amazon Pay', denominationType: 'FLEXIBLE', denominations: [],
     minValue: 1, maxValue: 100000, maxVouchersPerOrder: 10,
   }),
+  getProductForRedeem: jest.fn().mockResolvedValue(null),
 };
 
 // Per-tenant settings. Defaults are LENIENT (rate 1, no min-floor, all channels on) so the

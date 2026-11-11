@@ -339,6 +339,65 @@ export class HubbleService {
     return product;
   }
 
+  /** REDEEM-time lookup budget (incl. any login) — a member must never wait on a slow Hubble. */
+  readonly redeemLookupBudgetMs = 2_500;
+  /** After a failed/slow redeem-time lookup, skip the check for this long (never blocks). */
+  readonly redeemNegativeTtlMs = 60_000;
+  private readonly redeemSkipUntil = new Map<string, number>();
+  private readonly redeemInFlight = new Map<string, Promise<HubbleProduct | null>>();
+
+  /**
+   * REDEEM-time product lookup: best-effort, fast, never throws. Returns the product, or null
+   * meaning "skip the check" (Hubble not configured, not found, an error, or no answer within
+   * redeemLookupBudgetMs). A miss is negatively cached for redeemNegativeTtlMs, so during a
+   * Hubble outage only the first redemption per product waits the 2.5 s budget and the rest
+   * skip straight away. Concurrent lookups for one product share a single request. The
+   * underlying request keeps its normal 15 s timeout in the background (a late success still
+   * fills the positive cache). Issuance and the admin editor keep using getProduct().
+   */
+  async getProductForRedeem(productId: string): Promise<HubbleProduct | null> {
+    const id = (productId ?? '').trim();
+    const cached = this.productCache.get(id);
+    if (cached && Date.now() < cached.expiresAt) return cached.product;
+    const skipUntil = this.redeemSkipUntil.get(id);
+    if (skipUntil && Date.now() < skipUntil) return null;
+    const inFlight = this.redeemInFlight.get(id);
+    if (inFlight) return inFlight;
+
+    const run = (async (): Promise<HubbleProduct | null> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const lookup = this.getProduct(id).then(
+        (p) => p as HubbleProduct | null,
+        (e) => {
+          if (!(e instanceof HubbleNotConfiguredError)) {
+            this.logger.warn(`[hubble] redeem-time product lookup failed for ${id}: ${e}`);
+          }
+          return null;
+        },
+      );
+      const budget = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), this.redeemLookupBudgetMs);
+        (timer as { unref?: () => void }).unref?.();
+      });
+      try {
+        const result = await Promise.race([lookup, budget]);
+        if (result === 'timeout') {
+          this.logger.warn(`[hubble] redeem-time product lookup for ${id} exceeded ${this.redeemLookupBudgetMs} ms — check skipped`);
+          this.redeemSkipUntil.set(id, Date.now() + this.redeemNegativeTtlMs);
+          return null;
+        }
+        if (result === null && this.isConfigured()) {
+          this.redeemSkipUntil.set(id, Date.now() + this.redeemNegativeTtlMs);
+        }
+        return result;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    })().finally(() => this.redeemInFlight.delete(id));
+    this.redeemInFlight.set(id, run);
+    return run;
+  }
+
   private normaliseProduct(id: string, root: Record<string, unknown>): HubbleProduct {
     const data =
       root.data && typeof root.data === 'object' && !Array.isArray(root.data)

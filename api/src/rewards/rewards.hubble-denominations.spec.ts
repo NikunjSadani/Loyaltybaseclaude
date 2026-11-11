@@ -68,6 +68,8 @@ const mockHubble = {
   placeOrder: jest.fn(),
   getOrderByReference: jest.fn(),
   getProduct: jest.fn(),
+  // Redeem-time fast lookup: delegates to getProduct; any error → null ("skip the check").
+  getProductForRedeem: jest.fn(),
 };
 const SETTINGS = () => ({
   conversionRate: 1,
@@ -134,6 +136,8 @@ describe('Hubble per-brand amounts + whole-rupee redemption amounts', () => {
     mockHubble.getProduct.mockReset();
     // Default live brand: FLEXIBLE ₹1–₹1,00,000 (never blocks); cases override.
     mockHubble.getProduct.mockResolvedValue({ ...FLEX_PRODUCT, minValue: 1, maxValue: 100000 });
+    mockHubble.getProductForRedeem.mockImplementation((id: string) =>
+      Promise.resolve().then(() => mockHubble.getProduct(id)).catch(() => null));
     mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
     mockPrisma.redemptionOrder.findFirst.mockReset();
@@ -613,6 +617,30 @@ describe('Hubble per-brand amounts + whole-rupee redemption amounts', () => {
         await service.redeem(bajajPartner, { rewardId: 'r-fk', amount: 300 });
         expect(mockPrisma.redemptionOrder.create).toHaveBeenCalledTimes(1);
       }
+    });
+
+    it('L4 wording: a non-whole-rupee fixed price → "must be a whole-rupee amount"; a FLEXIBLE brand with no limits gets no fake range', async () => {
+      flagOn();
+      const fixedPrice = (sellingValuePaise: number) => listItem({
+        pointsCost: 500, minRedemptionPoints: null, maxRedemptionPoints: null, sellingValuePaise,
+        metadata: { hubbleProductId: 'amz-1' },
+      });
+      mockHubble.getProduct.mockResolvedValue(FLEX_PRODUCT);
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedPrice(75050));
+      await expect(service.redeem(bajajPartner, { rewardId: 'r-fk', quantity: 1 }))
+        .rejects.toThrow('This gift card must be a whole-rupee amount.');
+      // FLEXIBLE with NO limits and a valid whole rupee → issuable → order created (no range text needed).
+      mockHubble.getProduct.mockResolvedValue({ ...FLEX_PRODUCT, minValue: null, maxValue: null });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedPrice(50000));
+      await service.redeem(bajajPartner, { rewardId: 'r-fk', quantity: 1 });
+      expect(mockPrisma.redemptionOrder.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('the redeem-time check uses the FAST lookup (getProductForRedeem), never the 15 s one', async () => {
+      flagOn();
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(listItem());
+      await service.redeem(bajajPartner, { rewardId: 'r-fk', amount: 300 });
+      expect(mockHubble.getProductForRedeem).toHaveBeenCalledWith('fk-1');
     });
 
     it('the sales-assisted path gets the same live check', async () => {

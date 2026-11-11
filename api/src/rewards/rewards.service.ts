@@ -1197,27 +1197,32 @@ export class RewardsService {
    * and an un-provisioned environment falls back to manual fulfilment).
    */
   private async assertHubbleCanIssue(productId: string, amount: number): Promise<void> {
-    let product: HubbleProduct;
-    try {
-      product = await this.hubble.getProduct(productId);
-    } catch (e) {
-      this.logger.warn(`[hubble] redeem-time product lookup failed for ${productId} (not blocking): ${e}`);
-      return;
-    }
+    // Fast, single-flight, never-throwing lookup (2.5 s budget + 60 s negative cache): null =
+    // Hubble slow / down / not configured / not found → skip the check (issuance + Hubble still
+    // validate). A member never waits on a Hubble outage at redeem time.
+    const product = await this.hubble.getProductForRedeem(productId);
+    if (!product) return;
     if (product.denominationType === 'FIXED' && product.denominations.length === 0) return;
     if (isAmountIssuable(product, amount)) return;
     const fmt = (n: number) => `₹${n.toLocaleString('en-IN')}`;
+    if (!Number.isInteger(amount) || amount <= 0) {
+      throw new BadRequestException('This gift card must be a whole-rupee amount.');
+    }
     if (product.denominationType === 'FIXED') {
       throw new BadRequestException(
         `${fmt(amount)} isn't available for this gift card right now. Available: ${product.denominations.map(fmt).join(', ')}.`,
       );
     }
+    const { minValue, maxValue } = product;
+    if (minValue == null && maxValue == null) {
+      throw new BadRequestException(`This gift card can't be issued for ${fmt(amount)} right now.`);
+    }
     const range =
-      product.minValue != null && product.maxValue != null
-        ? `between ${fmt(product.minValue)} and ${fmt(product.maxValue)}`
-        : product.minValue != null
-          ? `of at least ${fmt(product.minValue)}`
-          : `of at most ${fmt(product.maxValue ?? 0)}`;
+      minValue != null && maxValue != null
+        ? `between ${fmt(minValue)} and ${fmt(maxValue)}`
+        : minValue != null
+          ? `of at least ${fmt(minValue)}`
+          : `of at most ${fmt(maxValue!)}`;
     throw new BadRequestException(`This gift card can only be issued for an amount ${range}.`);
   }
 
