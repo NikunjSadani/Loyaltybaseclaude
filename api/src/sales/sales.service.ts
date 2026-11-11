@@ -2230,7 +2230,11 @@ export class SalesService {
             partner && isReEntry
               ? {
                   partnerName: partner.businessName,
-                  mobile: outlet.phone ?? partner.phone ?? '',
+                  // The OWNER phone (partner) first: for a non-flagged mobile the re-KYC lock pins the
+                  // submission to partner.phone and the consent OTP must go to that same number
+                  // (kyc.service sendConsentOtp binds to it) — prefilling outlet.phone would lock the
+                  // rep onto a number the server then rejects.
+                  mobile: partner.phone ?? outlet.phone ?? '',
                   gstNumber: partner.gstNumber ?? '',
                   panNumber: partner.panNumber ?? '',
                   address: fullAddress,
