@@ -110,6 +110,12 @@ const mockHubble = {
   isConfigured: jest.fn().mockReturnValue(true),
   placeOrder: jest.fn(),
   getOrderByReference: jest.fn(),
+  // Per-brand amounts: issuance re-checks a FIXED brand's denominations. Default = a
+  // FLEXIBLE brand (never blocks), so the legacy issuance tests are unaffected.
+  getProduct: jest.fn().mockResolvedValue({
+    productId: 'amz-1', name: 'Amazon Pay', denominationType: 'FLEXIBLE', denominations: [],
+    minValue: 1, maxValue: 100000, maxVouchersPerOrder: 10,
+  }),
 };
 
 // Per-tenant settings. Defaults are LENIENT (rate 1, no min-floor, all channels on) so the

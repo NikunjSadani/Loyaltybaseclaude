@@ -48,6 +48,8 @@ import { usePermissions } from '@/lib/use-permissions';
 import { derivePointsCost, parseRupeesToPaise } from '@/lib/gift-catalogue';
 import { nextStatusOptions, hasIssuedVoucher, REFUND_TARGETS, HUBBLE_NEVER_PLACED_REASONS } from '@/lib/redemption-order-transitions';
 import type { GifsySettings } from '@/types';
+import { pointsForAmount, type HubbleProductLookup } from '@/lib/hubble-product';
+import { wholeRupeeInputProps } from '@/lib/whole-rupee-input';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
 
@@ -85,7 +87,11 @@ interface CatalogItem {
   termsAndConditions?: string | null;
   sortOrder?: number | null;
   // Item config blob. Carries the Hubble auto-issuance productId (GIFT_CARD only).
-  metadata?: { hubbleProductId?: string | null } | null;
+  metadata?: {
+    hubbleProductId?: string | null;
+    /** Hubble "choose from amounts": the ₹ amounts members pick from (whole rupees). */
+    hubbleDenominations?: number[] | null;
+  } | null;
 }
 
 interface Pagination { page: number; limit: number; total: number; pages: number }
@@ -482,6 +488,8 @@ interface ItemFormState {
   status: CatalogStatus;
   /** Hubble Money productId — enables auto-issuance for a GIFT_CARD item (optional). */
   hubbleProductId: string;
+  /** Hubble "choose from amounts" — the ₹ amounts members may pick (ascending). [] = not used. */
+  hubbleDenominations: number[];
 }
 
 function blankItemForm(categoryId: string): ItemFormState {
@@ -494,8 +502,17 @@ function blankItemForm(categoryId: string): ItemFormState {
     stockTracked: false, stockQuantity: 0,
     termsAndConditions: '', status: 'ACTIVE',
     hubbleProductId: '',
+    hubbleDenominations: [],
   };
 }
+
+type HubbleLoadState =
+  | { status: 'idle' }
+  | { status: 'loading'; forId: string }
+  | { status: 'ok'; forId: string; data: HubbleProductLookup }
+  | { status: 'error'; forId: string; error: string };
+
+const fmtInr = (n: number) => `₹${n.toLocaleString('en-IN')}`;
 
 function ItemModal({
   editing, categories, conversionRate, onSave, onClose, saving,
@@ -537,6 +554,9 @@ function ItemModal({
       termsAndConditions: editing.termsAndConditions ?? '',
       status: editing.status,
       hubbleProductId: editing.metadata?.hubbleProductId ?? '',
+      hubbleDenominations: Array.isArray(editing.metadata?.hubbleDenominations)
+        ? editing.metadata!.hubbleDenominations!.filter((n) => Number.isInteger(n) && n > 0)
+        : [],
     };
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -547,10 +567,86 @@ function ItemModal({
   const set = <K extends keyof ItemFormState>(k: K, v: ItemFormState[K]) =>
     setForm((f) => ({ ...f, [k]: v }));
 
+  // ── Hubble "Load from Hubble" (brand type + amounts) ──────────────────────────────
+  const [hubbleLoad, setHubbleLoad] = useState<HubbleLoadState>({ status: 'idle' });
+  const [customAmount, setCustomAmount] = useState('');
+  const hubbleId = form.hubbleProductId.trim();
+  // A result is only shown for the id it was loaded for (editing the id makes it stale).
+  const hubbleResult = hubbleLoad.status !== 'idle' && hubbleLoad.forId === hubbleId ? hubbleLoad : null;
+  const hubbleData = hubbleResult?.status === 'ok' ? hubbleResult.data : null;
+
+  const loadFromHubble = useCallback(async (productId: string) => {
+    if (!productId) return;
+    setHubbleLoad({ status: 'loading', forId: productId });
+    try {
+      const data = await apiJson<HubbleProductLookup>(
+        `/api/admin/rewards/hubble-products/${encodeURIComponent(productId)}`,
+      );
+      const p = data?.product;
+      if (
+        !p || (p.denominationType !== 'FIXED' && p.denominationType !== 'FLEXIBLE') ||
+        !Array.isArray(p.denominations) || typeof data.conversionRate !== 'number'
+      ) {
+        throw new Error('Hubble returned an unexpected response for this product.');
+      }
+      setHubbleLoad({ status: 'ok', forId: productId, data });
+    } catch (e) {
+      setHubbleLoad({ status: 'error', forId: productId, error: (e as Error).message || 'Could not load from Hubble' });
+    }
+  }, []);
+
+  // Editing an item that already has a Hubble product → load it once so the admin sees the
+  // brand's real amounts next to the saved choice (after mount; never during render).
+  const initialHubbleId = useRef(editing?.redemptionMode === 'GIFT_CARD' ? (editing.metadata?.hubbleProductId ?? '').trim() : '');
+  useEffect(() => {
+    if (initialHubbleId.current) void loadFromHubble(initialHubbleId.current);
+  }, [loadFromHubble]);
+
+  const toggleDenomination = (amt: number) =>
+    setForm((f) => {
+      const has = f.hubbleDenominations.includes(amt);
+      const next = has ? f.hubbleDenominations.filter((d) => d !== amt) : [...f.hubbleDenominations, amt];
+      return { ...f, hubbleDenominations: next.sort((a, b) => a - b) };
+    });
+
+  const addCustomAmount = () => {
+    const amt = parseInt(customAmount, 10);
+    const p = hubbleData?.product;
+    let err = '';
+    if (!Number.isInteger(amt) || amt <= 0) err = 'Enter a whole-rupee amount';
+    else if (p?.minValue != null && amt < p.minValue) err = `Hubble's minimum for this brand is ${fmtInr(p.minValue)}`;
+    else if (p?.maxValue != null && amt > p.maxValue) err = `Hubble's maximum for this brand is ${fmtInr(p.maxValue)}`;
+    else if (hubbleData && amt < hubbleData.minVoucherFreeAmount) err = `Below this program's minimum voucher amount (${fmtInr(hubbleData.minVoucherFreeAmount)})`;
+    if (err) { setErrors((e) => ({ ...e, hubbleDenominations: err })); return; }
+    setErrors(({ hubbleDenominations: _drop, ...rest }) => rest);
+    setForm((f) => (f.hubbleDenominations.includes(amt)
+      ? f
+      : { ...f, hubbleDenominations: [...f.hubbleDenominations, amt].sort((a, b) => a - b) }));
+    setCustomAmount('');
+  };
+
+  /** FLEXIBLE brand → use Hubble's limits as the free range (in points at the live rate). */
+  const applyHubbleRange = () => {
+    if (!hubbleData) return;
+    const { product, conversionRate: rate } = hubbleData;
+    const minInr = Math.max(product.minValue ?? 1, hubbleData.minVoucherFreeAmount || 0);
+    setForm((f) => ({
+      ...f,
+      voucherMode: 'FREE_AMOUNT',
+      hubbleDenominations: [],
+      minRedemptionPoints: String(Math.ceil(minInr * rate)),
+      maxRedemptionPoints: product.maxValue != null ? String(Math.floor(product.maxValue * rate)) : f.maxRedemptionPoints,
+    }));
+  };
+
   const isCashMode = CASH_REDEMPTION_MODES.has(form.redemptionMode);
   // Free-amount config is available for gift cards and cash modes (UPI / BANK_TRANSFER).
   const canFreeAmount = supportsFreeAmount(form.redemptionMode);
-  const isFreeAmount = canFreeAmount && form.voucherMode === 'FREE_AMOUNT';
+  // Hubble "choose from amounts": a GIFT_CARD with a productId and at least one chosen amount.
+  // The backend stores it as a variable-amount item whose points band derives from the list.
+  const usesAmountList =
+    form.redemptionMode === 'GIFT_CARD' && !!hubbleId && form.hubbleDenominations.length > 0;
+  const isFreeAmount = canFreeAmount && form.voucherMode === 'FREE_AMOUNT' && !usesAmountList;
 
   // PURE DERIVE: for a FIXED item the points cost is DERIVED server-side from the ₹ selling
   // value × the tenant conversion rate. Show a read-only preview of that derivation when the
@@ -567,7 +663,17 @@ function ItemModal({
     if (!form.categoryId) e.categoryId = 'Pick a category';
     if (!form.code.trim()) e.code = 'Code is required';
     if (!form.name.trim()) e.name = 'Name is required';
-    if (isFreeAmount) {
+    if (usesAmountList) {
+      // Amounts come from the Hubble list (the server re-validates against the live brand);
+      // no points band or selling value is entered for this kind of item.
+    } else if (
+      isFreeAmount &&
+      form.redemptionMode === 'GIFT_CARD' &&
+      hubbleData?.product.denominationType === 'FIXED'
+    ) {
+      // A typed range can't be honoured by a fixed-denomination brand (₹277 would be refused).
+      e.hubbleDenominations = `${hubbleData.product.name} only issues fixed amounts — tick the amounts to offer instead of a free range.`;
+    } else if (isFreeAmount) {
       const min = parseInt(form.minRedemptionPoints);
       const max = parseInt(form.maxRedemptionPoints);
       if (!min || min < 1) e.minRedemptionPoints = 'Min must be ≥ 1 for a free-amount item';
@@ -614,16 +720,23 @@ function ItemModal({
     // (even empty, to CLEAR) whenever editing a gift card; a blank disables auto-issuance.
     if (form.redemptionMode === 'GIFT_CARD') {
       payload.hubbleProductId = form.hubbleProductId.trim();
+      // Hubble amounts list: send it when used; send [] to CLEAR a previously saved list;
+      // otherwise omit (a non-Hubble item's payload is unchanged).
+      if (usesAmountList) payload.hubbleDenominations = form.hubbleDenominations;
+      else if ((editing?.metadata?.hubbleDenominations?.length ?? 0) > 0) payload.hubbleDenominations = [];
     }
     if (form.mrpRupees.trim()) {
       payload.mrpPaise = Math.round(parseFloat(form.mrpRupees) * 100);
     }
     // Optional ₹ selling value (cost basis). Blank = leave unset. The backend bounds it
     // (sellingValuePaise <= mrpPaise) and uses it for the rate-independent slash + 194R freeze.
-    if (form.sellingValueRupees.trim()) {
+    if (form.sellingValueRupees.trim() && !usesAmountList) {
       payload.sellingValuePaise = Math.round(parseFloat(form.sellingValueRupees) * 100);
     }
-    if (isFreeAmount) {
+    if (usesAmountList) {
+      // The backend derives the points band from the chosen amounts × the tenant rate —
+      // no min/max is sent (it would be overridden anyway).
+    } else if (isFreeAmount) {
       // Pure derive: pointsCost is NOT sent (the backend keeps it 0 for a banded item);
       // the admin sets the points band. forbidNonWhitelisted would 400 a stray pointsCost.
       payload.minRedemptionPoints = parseInt(form.minRedemptionPoints);
@@ -748,6 +861,13 @@ function ItemModal({
                   {isCashMode ? 'Cash Payout Configuration' : 'Voucher Configuration'}
                 </p>
               </div>
+              {usesAmountList ? (
+                <p className="text-xs text-amber-900" data-testid="amount-list-note">
+                  Members choose from the Hubble amounts selected below
+                  ({form.hubbleDenominations.map(fmtInr).join(' · ')}). Points = amount × this program&apos;s conversion rate.
+                </p>
+              ) : (
+              <>
               <div className="flex gap-3">
                 {(['FIXED', 'FREE_AMOUNT'] as VoucherMode[]).map((t) => (
                   <button
@@ -771,6 +891,8 @@ function ItemModal({
                   ? 'Fixed points cost paid out as cash.'
                   : 'Fixed face value redeemed for a set points cost.'}
               </p>
+              </>
+              )}
 
               {isFreeAmount && (
                 <div className="grid grid-cols-2 gap-4">
@@ -808,23 +930,152 @@ function ItemModal({
               <label className="text-xs font-medium text-gray-700">
                 Hubble product ID <span className="text-gray-400 font-normal">(auto-issue voucher)</span>
               </label>
-              <input
-                value={form.hubbleProductId}
-                onChange={(e) => set('hubbleProductId', e.target.value)}
-                placeholder="e.g. amazon-pay-product-id (leave blank for manual fulfilment)"
-                className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
-              />
+              <div className="flex gap-2">
+                <input
+                  value={form.hubbleProductId}
+                  onChange={(e) => set('hubbleProductId', e.target.value)}
+                  placeholder="e.g. amazon-pay-product-id (leave blank for manual fulfilment)"
+                  aria-label="Hubble product ID"
+                  className="flex-1 min-w-0 text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+                />
+                <button
+                  type="button"
+                  onClick={() => void loadFromHubble(hubbleId)}
+                  disabled={!hubbleId || hubbleResult?.status === 'loading'}
+                  className="shrink-0 inline-flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-xl border border-gray-200 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${hubbleResult?.status === 'loading' ? 'animate-spin' : ''}`} />
+                  {hubbleResult?.status === 'loading' ? 'Loading…' : 'Load from Hubble'}
+                </button>
+              </div>
               <p className="text-[10px] text-gray-400">
                 Set the Hubble Money productId to auto-issue this voucher on redemption
                 (enabled only for tenants with the Hubble feature on). Blank = manual fulfilment.
+                Use “Load from Hubble” to see the amounts this brand can issue.
               </p>
+
+              {hubbleResult?.status === 'error' && (
+                <p role="alert" className="flex items-start gap-1.5 text-xs text-red-600">
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                  {hubbleResult.error}
+                </p>
+              )}
+
+              {hubbleData && (
+                <div className="mt-2 rounded-xl border border-blue-100 bg-blue-50/60 p-3 space-y-3" data-testid="hubble-product-panel">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-gray-900">{hubbleData.product.name}</p>
+                    <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-white border border-blue-200 text-blue-700">
+                      {hubbleData.product.denominationType === 'FIXED' ? 'Fixed amounts' : 'Flexible amount'}
+                    </span>
+                  </div>
+
+                  {hubbleData.product.denominationType === 'FIXED' ? (
+                    hubbleData.product.denominations.length === 0 ? (
+                      <p className="text-xs text-red-600">Hubble lists no issuable amounts for this brand right now.</p>
+                    ) : (
+                      <fieldset className="space-y-1.5">
+                        <legend className="text-xs text-gray-700 mb-1">
+                          This brand only issues these amounts. Tick the ones members can choose:
+                        </legend>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                          {hubbleData.product.denominations.map((amt) => {
+                            const belowFloor = amt < (hubbleData.minVoucherFreeAmount || 0);
+                            const checked = form.hubbleDenominations.includes(amt);
+                            return (
+                              <label
+                                key={amt}
+                                className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 text-xs bg-white ${
+                                  belowFloor ? 'opacity-50 border-gray-100' : checked ? 'border-blue-400' : 'border-gray-200'
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  disabled={belowFloor && !checked}
+                                  onChange={() => toggleDenomination(amt)}
+                                  aria-label={`Offer ${fmtInr(amt)}`}
+                                />
+                                <span className="font-semibold text-gray-900">{fmtInr(amt)}</span>
+                                <span className="text-gray-400 ml-auto">
+                                  {belowFloor ? 'below min' : `${fmtPts(pointsForAmount(amt, hubbleData.conversionRate))} pts`}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                        {(hubbleData.minVoucherFreeAmount || 0) > 0 && (
+                          <p className="text-[10px] text-gray-500">
+                            Amounts below this program&apos;s minimum voucher amount ({fmtInr(hubbleData.minVoucherFreeAmount)}) can&apos;t be offered.
+                          </p>
+                        )}
+                      </fieldset>
+                    )
+                  ) : (
+                    <div className="space-y-2">
+                      <p className="text-xs text-gray-700">
+                        Hubble issues any whole-rupee amount from{' '}
+                        <strong>{hubbleData.product.minValue != null ? fmtInr(hubbleData.product.minValue) : '—'}</strong> to{' '}
+                        <strong>{hubbleData.product.maxValue != null ? fmtInr(hubbleData.product.maxValue) : '—'}</strong>.
+                        Let members type an amount in a range, or offer specific amounts.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={applyHubbleRange}
+                        className="text-xs font-medium px-3 py-1.5 rounded-lg border border-blue-200 bg-white text-blue-700 hover:bg-blue-50"
+                      >
+                        Use Hubble&apos;s range (members type an amount)
+                      </button>
+                      <div className="flex gap-2 items-center">
+                        <input
+                          value={customAmount}
+                          {...wholeRupeeInputProps(setCustomAmount)}
+                          placeholder="e.g. 500"
+                          aria-label="Amount to offer"
+                          className="w-28 text-sm border border-gray-200 rounded-lg px-2 py-1.5 bg-white"
+                        />
+                        <button
+                          type="button"
+                          onClick={addCustomAmount}
+                          disabled={!customAmount}
+                          className="text-xs font-medium px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50"
+                        >
+                          Add amount
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* The chosen amounts (always visible, even before / without a Hubble load). */}
+              {form.hubbleDenominations.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 pt-1" aria-label="Amounts offered">
+                  {form.hubbleDenominations.map((amt) => (
+                    <span key={amt} className="inline-flex items-center gap-1 text-xs bg-white border border-gray-200 rounded-full pl-2 pr-1 py-0.5">
+                      {fmtInr(amt)}
+                      <button
+                        type="button"
+                        onClick={() => toggleDenomination(amt)}
+                        aria-label={`Remove ${fmtInr(amt)}`}
+                        className="p-0.5 rounded-full hover:bg-gray-100 text-gray-400"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              {errors.hubbleDenominations && (
+                <p className="text-xs text-red-500">{errors.hubbleDenominations}</p>
+              )}
             </div>
           )}
 
           {/* Pricing (not shown for free-amount vouchers). Pure derive: the member's points
               cost is DERIVED from the ₹ selling value × the tenant conversion rate — there is
               no manual points input. Selling value is the required price driver. */}
-          {!isFreeAmount && (
+          {!isFreeAmount && !usesAmountList && (
             <div className="space-y-3">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">

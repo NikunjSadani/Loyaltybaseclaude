@@ -4,7 +4,7 @@
 // Run: npx jest src/hubble/hubble.service.spec.ts
 
 import { ConfigService } from '@nestjs/config';
-import { HubbleService } from './hubble.service';
+import { HubbleNotConfiguredError, HubbleProductNotFoundError, HubbleService } from './hubble.service';
 
 const CONFIG: Record<string, string> = {
   HUBBLE_BASE_URL: 'https://api.dev.myhubble.money',
@@ -204,5 +204,95 @@ describe('HubbleService', () => {
     await expect(
       svc.placeOrder({ productId: 'p', referenceId: 'r1', amount: 500, denominationDetails: [{ denomination: 500, quantity: 1 }] }),
     ).rejects.toThrow(/Hubble auth failed \(HTTP 401\)/);
+  });
+
+  // ── getProduct: GET /v1/partners/products/:id (shape confirmed against staging 2026-11-11) ──
+  describe('getProduct', () => {
+    // Real staging shape (Flipkart, FLEXIBLE) — amountRestrictions carries the limits.
+    const FLEX_BODY = {
+      id: '01GMMNJECTDZAG2YS61K58HVG8', status: 'ACTIVE', title: 'Flipkart', denominationType: 'FLEXIBLE',
+      amountRestrictions: {
+        minAmount: 10, maxAmount: 50000, minOrderAmount: 10, maxOrderAmount: 50000,
+        minVoucherAmount: 10, maxVoucherAmount: 10000, maxVouchersPerOrder: 10,
+        maxVouchersPerDenomination: null, maxDenominationsPerOrder: null, denominations: null,
+      },
+    };
+    const FIXED_BODY = {
+      id: 'fk-fixed', status: 'ACTIVE', title: 'Flipkart', denominationType: 'FIXED',
+      amountRestrictions: {
+        minOrderAmount: 50, maxOrderAmount: 20000, minVoucherAmount: 150, maxVoucherAmount: 10000,
+        maxVouchersPerOrder: 10, denominations: [10000, 150, 175, 300, 1250, 2500, 5000, 7500, 30000],
+      },
+    };
+
+    it('normalises a FLEXIBLE product (single-voucher min/max = tighter of voucher + order limits)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
+      fetchMock.mockResolvedValueOnce(jsonRes(200, FLEX_BODY));
+      const p = await makeService().getProduct('01GMMNJECTDZAG2YS61K58HVG8');
+      expect(fetchMock.mock.calls[1][0]).toBe('https://api.dev.myhubble.money/v1/partners/products/01GMMNJECTDZAG2YS61K58HVG8');
+      expect(fetchMock.mock.calls[1][1].method).toBe('GET');
+      expect(p).toEqual({
+        productId: '01GMMNJECTDZAG2YS61K58HVG8', name: 'Flipkart', denominationType: 'FLEXIBLE',
+        denominations: [], minValue: 10, maxValue: 10000, maxVouchersPerOrder: 10,
+      });
+    });
+
+    it('normalises a FIXED product: denominations sorted, de-duplicated, outside the order limits dropped', async () => {
+      fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
+      fetchMock.mockResolvedValueOnce(jsonRes(200, FIXED_BODY));
+      const p = await makeService().getProduct('fk-fixed');
+      expect(p.denominationType).toBe('FIXED');
+      // 30000 > maxOrderAmount 20000 → not issuable as a single voucher → dropped.
+      expect(p.denominations).toEqual([150, 175, 300, 1250, 2500, 5000, 7500, 10000]);
+      expect(p.minValue).toBe(150);
+      expect(p.maxValue).toBe(10000);
+    });
+
+    it('caches the product for ~10 minutes (a second call makes no HTTP request)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
+      fetchMock.mockResolvedValueOnce(jsonRes(200, FLEX_BODY));
+      const svc = makeService();
+      await svc.getProduct('01GMMNJECTDZAG2YS61K58HVG8');
+      await svc.getProduct('01GMMNJECTDZAG2YS61K58HVG8');
+      expect(fetchMock).toHaveBeenCalledTimes(2); // login + one GET
+    });
+
+    it('404 → HubbleProductNotFoundError', async () => {
+      fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
+      fetchMock.mockResolvedValueOnce(jsonRes(404, { message: 'nope' }));
+      await expect(makeService().getProduct('x')).rejects.toBeInstanceOf(HubbleProductNotFoundError);
+    });
+
+    it('400 E102 "Brand is not active" (what staging returns for an unknown/inactive id) → HubbleProductNotFoundError', async () => {
+      fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
+      fetchMock.mockResolvedValueOnce(jsonRes(400, { id: 'E102', code: 'OPERATION_NOT_ALLOWED', message: 'Brand is not active' }));
+      await expect(makeService().getProduct('x')).rejects.toBeInstanceOf(HubbleProductNotFoundError);
+    });
+
+    it('an INACTIVE product → HubbleProductNotFoundError (vouchers cannot be generated)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
+      fetchMock.mockResolvedValueOnce(jsonRes(200, { ...FLEX_BODY, status: 'INACTIVE' }));
+      await expect(makeService().getProduct('x')).rejects.toBeInstanceOf(HubbleProductNotFoundError);
+    });
+
+    it('not configured → HubbleNotConfiguredError, no HTTP', async () => {
+      const svc = makeService({ HUBBLE_CLIENT_ID_STAGING: undefined });
+      await expect(svc.getProduct('x')).rejects.toBeInstanceOf(HubbleNotConfiguredError);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('a 5xx throws a generic error (not cached)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
+      fetchMock.mockResolvedValueOnce(jsonRes(503, {}));
+      const svc = makeService();
+      await expect(svc.getProduct('x')).rejects.toThrow(/HTTP 503/);
+      fetchMock.mockResolvedValueOnce(jsonRes(200, FLEX_BODY));
+      await expect(svc.getProduct('x')).resolves.toMatchObject({ denominationType: 'FLEXIBLE' });
+    });
+
+    it('rejects an unsafe productId before any HTTP call', async () => {
+      await expect(makeService().getProduct('../orders')).rejects.toBeInstanceOf(HubbleProductNotFoundError);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
   });
 });

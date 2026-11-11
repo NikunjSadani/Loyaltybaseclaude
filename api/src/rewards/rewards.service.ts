@@ -83,7 +83,21 @@ import {
   buildFulfilmentTemplateBuffer,
   parseFulfilmentUploadBuffer,
 } from './rewards-fulfilment.helpers';
-import { HubbleService, HubbleOrderResult, HubbleVoucher } from '../hubble/hubble.service';
+import {
+  HubbleNotConfiguredError,
+  HubbleOrderResult,
+  HubbleProduct,
+  HubbleProductNotFoundError,
+  HubbleService,
+  HubbleVoucher,
+} from '../hubble/hubble.service';
+import {
+  extractHubbleDenominations,
+  isAmountIssuable,
+  memberHubbleFields,
+  normaliseHubbleDenominations,
+  validateHubbleItemAmounts,
+} from './hubble-catalog.helpers';
 
 /**
  * Rewards & Redemption — ported from platform/src/app/api/rewards/* onto /v1.
@@ -439,6 +453,8 @@ export class RewardsService {
         select: {
           ...MEMBER_CATALOG_SELECT,
           sourceType: true,
+          // Read TRANSIENTLY to project the Hubble amount options; the raw blob is stripped below.
+          metadata: true,
           ...(mrpSlashEnabled ? { mrpPaise: true, sellingValuePaise: true } : {}),
         },
       }),
@@ -459,7 +475,7 @@ export class RewardsService {
       // whether or not they were selected (a no-op strip when absent).
       const row = item as typeof item & { mrpPaise?: number | null; sellingValuePaise?: number | null };
       const slashPoints = mrpSlashEnabled ? this.computeSlashPoints(row) : null;
-      const { category, sourceType, mrpPaise: _mrp, sellingValuePaise: _sv, ...rest } = row;
+      const { category, sourceType, metadata, mrpPaise: _mrp, sellingValuePaise: _sv, ...rest } = row;
       return {
         ...rest,
         category: category?.name,
@@ -467,6 +483,8 @@ export class RewardsService {
         requiresConsent: sourceType === 'VENDOR',
         isAffordable: userBalance >= row.pointsCost,
         ...(mrpSlashEnabled ? { slashPoints } : {}),
+        // Hubble "choose from amounts" items only ({} otherwise → non-Hubble response unchanged).
+        ...memberHubbleFields(metadata, row.redemptionMode),
       };
     });
 
@@ -501,6 +519,8 @@ export class RewardsService {
       select: {
         ...MEMBER_CATALOG_SELECT,
         sourceType: true,
+        // Read TRANSIENTLY to project the Hubble amount options; the raw blob is stripped below.
+        metadata: true,
         ...(mrpSlashEnabled ? { mrpPaise: true, sellingValuePaise: true } : {}),
       },
     });
@@ -523,12 +543,13 @@ export class RewardsService {
     // cost-basis columns so the member never sees the raw origin OR the cost basis.
     const row = item as typeof item & { mrpPaise?: number | null; sellingValuePaise?: number | null };
     const slashPoints = mrpSlashEnabled ? this.computeSlashPoints(row) : null;
-    const { sourceType, mrpPaise: _mrp, sellingValuePaise: _sv, ...rest } = row;
+    const { sourceType, metadata, mrpPaise: _mrp, sellingValuePaise: _sv, ...rest } = row;
     return {
       item: {
         ...rest,
         requiresConsent: sourceType === 'VENDOR',
         ...(mrpSlashEnabled ? { slashPoints } : {}),
+        ...memberHubbleFields(metadata, row.redemptionMode),
       },
     };
   }
@@ -597,6 +618,7 @@ export class RewardsService {
         reward: {
           select: {
             ...MEMBER_CATALOG_SELECT,
+            metadata: true, // transient — Hubble amount options only; stripped below
             ...(mrpSlashEnabled ? { mrpPaise: true, sellingValuePaise: true } : {}),
           },
         },
@@ -610,12 +632,13 @@ export class RewardsService {
         sellingValuePaise?: number | null;
       };
       const slashPoints = mrpSlashEnabled ? this.computeSlashPoints(reward) : null;
-      const { category, mrpPaise: _mrp, sellingValuePaise: _sv, ...rest } = reward;
+      const { category, metadata, mrpPaise: _mrp, sellingValuePaise: _sv, ...rest } = reward;
       return {
         ...rest,
         category: category?.name,
         wishlistedAt: r.createdAt,
         ...(mrpSlashEnabled ? { slashPoints } : {}),
+        ...memberHubbleFields(metadata, reward.redemptionMode),
       };
     });
 
@@ -1106,6 +1129,54 @@ export class RewardsService {
     return sent;
   }
 
+  /**
+   * Hubble redeem-time guard — shared by redeem() and redeemForOutlet(), run BEFORE any
+   * order/points move. Returns null for every non-Hubble item WITHOUT a DB read (no
+   * productId on the item → short-circuit), so a non-Hubble tenant (Deoleo) is unchanged.
+   * For a Hubble-backed GIFT_CARD (productId + tenant flag ON):
+   *   - quantity must be 1 (we place ONE voucher of the order value — 2 × ₹500 would be sent
+   *     as a single ₹1,000 denomination, which a FIXED brand may not issue);
+   *   - a variable-amount item takes whole rupees only, and when the admin chose a list of
+   *     amounts (metadata.hubbleDenominations) the amount must be one of them.
+   * `amountPaise` is the chosen face value to freeze on the order (so confirm-time valuePaise —
+   * and therefore the Hubble order amount — is EXACTLY the chosen amount at any conversion rate).
+   * `fromList` = the amount was validated against the admin list (the points band is skipped).
+   */
+  private async resolveHubbleRedeem(
+    clientId: string,
+    item: {
+      redemptionMode: PayoutMode;
+      metadata: Prisma.JsonValue | null;
+      pointsCost: number;
+      minRedemptionPoints: number | null;
+      maxRedemptionPoints: number | null;
+    },
+    amount: number | undefined,
+    quantity: number,
+  ): Promise<{ amountPaise: number | null; fromList: boolean } | null> {
+    if (item.redemptionMode !== PayoutMode.GIFT_CARD) return null;
+    if (!this.extractHubbleProductId(item.metadata)) return null;
+    if (!(await this.isHubbleEnabledForTenant(clientId))) return null;
+    if (quantity !== 1) {
+      throw new BadRequestException('This gift card is issued one per redemption — redeem a quantity of 1.');
+    }
+    if (!this.isFreeAmount(item) || amount == null) {
+      // Fixed-price item (face value = selling value), or no amount (the caller's
+      // "amount (₹) is required" check reports that).
+      return { amountPaise: null, fromList: false };
+    }
+    if (!Number.isInteger(amount) || amount <= 0) {
+      throw new BadRequestException('Enter a whole-rupee amount');
+    }
+    const denoms = extractHubbleDenominations(item.metadata);
+    if (denoms.length && !denoms.includes(amount)) {
+      throw new BadRequestException(
+        `Choose one of the available amounts: ${denoms.map((d) => `₹${d.toLocaleString('en-IN')}`).join(', ')}.`,
+      );
+    }
+    return { amountPaise: amount * 100, fromList: denoms.length > 0 };
+  }
+
   /** True when the item is a FREE_AMOUNT (variable-amount) voucher. */
   private isFreeAmount(item: { pointsCost: number; minRedemptionPoints: number | null; maxRedemptionPoints: number | null }): boolean {
     return (
@@ -1277,6 +1348,10 @@ export class RewardsService {
       throw new BadRequestException('This redemption channel is currently unavailable.');
     }
 
+    // Hubble gift-card guard (quantity 1, whole rupees, one of the admin-chosen amounts) —
+    // BEFORE any points move. null (no DB read) for every non-Hubble item.
+    const hubbleRedeem = await this.resolveHubbleRedeem(user.clientId, item, dto.amount, quantity);
+
     // Points cost: FREE_AMOUNT = round(amount × rate) bounded by min/max; else pointsCost × qty.
     let requiredPoints: number;
     if (this.isFreeAmount(item)) {
@@ -1286,7 +1361,10 @@ export class RewardsService {
       requiredPoints = Math.round(dto.amount * rate);
       const min = item.minRedemptionPoints as number;
       const max = item.maxRedemptionPoints as number;
-      if (requiredPoints < min || requiredPoints > max) {
+      // An amount already validated against the admin's Hubble amount list skips the stored
+      // points band (that band only mirrors the list's min/max at the save-time rate, so a later
+      // rate change must not lock members out of a listed amount). The global floor still applies.
+      if (!hubbleRedeem?.fromList && (requiredPoints < min || requiredPoints > max)) {
         throw new BadRequestException(
           `Amount out of range. Allowed: ${min}–${max} points, requested: ${requiredPoints}`,
         );
@@ -1346,8 +1424,14 @@ export class RewardsService {
     // self-confirm path (confirmRedeem) can also refuse it once the outlet type's sales-assisted
     // redemption is disabled (closes the disable-mid-flight residual — the OTP sits on the outlet's
     // own phone, so without this the owner could complete a rep-staged order via self-confirm).
+    // (c) a Hubble variable-amount gift card freezes the CHOSEN face value instead (see
+    // resolveHubbleRedeem) so the Hubble order amount is exactly what the outlet picked.
     const giftMetadata: Prisma.InputJsonValue = {
-      ...(item.sellingValuePaise != null ? { sellingValuePaiseSnapshot: item.sellingValuePaise } : {}),
+      ...(hubbleRedeem?.amountPaise != null
+        ? { sellingValuePaiseSnapshot: hubbleRedeem.amountPaise }
+        : item.sellingValuePaise != null
+          ? { sellingValuePaiseSnapshot: item.sellingValuePaise }
+          : {}),
       salesInitiatedById: user.sub,
     };
 
@@ -1891,6 +1975,10 @@ export class RewardsService {
       throw new BadRequestException('This redemption channel is currently unavailable.');
     }
 
+    // Hubble gift-card guard (quantity 1, whole rupees, one of the admin-chosen amounts) —
+    // BEFORE any points move. null (no DB read) for every non-Hubble item.
+    const hubbleRedeem = await this.resolveHubbleRedeem(user.clientId, item, dto.amount, quantity);
+
     // Points cost: FREE_AMOUNT = round(amount × rate) bounded by min/max; else pointsCost × qty.
     let requiredPoints: number;
     if (this.isFreeAmount(item)) {
@@ -1900,7 +1988,10 @@ export class RewardsService {
       requiredPoints = Math.round(dto.amount * rate);
       const min = item.minRedemptionPoints as number;
       const max = item.maxRedemptionPoints as number;
-      if (requiredPoints < min || requiredPoints > max) {
+      // An amount already validated against the admin's Hubble amount list skips the stored
+      // points band (that band only mirrors the list's min/max at the save-time rate, so a later
+      // rate change must not lock members out of a listed amount). The global floor still applies.
+      if (!hubbleRedeem?.fromList && (requiredPoints < min || requiredPoints > max)) {
         throw new BadRequestException(
           `Amount out of range. Allowed: ${min}–${max} points, requested: ${requiredPoints}`,
         );
@@ -1958,10 +2049,14 @@ export class RewardsService {
     // Gift value snapshot (decision §14): freeze the gift's ₹ selling price onto the
     // order at redeem so a later price/rate change never re-values it. Null for
     // non-gift / variable-amount items → confirm falls back to points ÷ rate.
+    // A Hubble variable-amount gift card freezes the CHOSEN face value (resolveHubbleRedeem) so
+    // the Hubble order amount is exactly what the member picked, at any conversion rate.
     const giftMetadata =
-      item.sellingValuePaise != null
-        ? ({ sellingValuePaiseSnapshot: item.sellingValuePaise } as Prisma.InputJsonValue)
-        : undefined;
+      hubbleRedeem?.amountPaise != null
+        ? ({ sellingValuePaiseSnapshot: hubbleRedeem.amountPaise } as Prisma.InputJsonValue)
+        : item.sellingValuePaise != null
+          ? ({ sellingValuePaiseSnapshot: item.sellingValuePaise } as Prisma.InputJsonValue)
+          : undefined;
 
     // C2 — bind the OTP to exactly ONE order. A user may have only one redemption
     // awaiting confirmation at a time: superseding any abandoned PENDING orders
@@ -3414,6 +3509,78 @@ export class RewardsService {
   // PROCESSING + flagged for reconcile; the webhook or an ops reconcile resolves it.
   // ───────────────────────────────────────────────────────────────────────────
 
+  /** Map a HubbleService product-lookup error to an admin-readable HTTP error. */
+  private hubbleProductHttpError(e: unknown, productId: string): Error {
+    if (e instanceof HubbleNotConfiguredError) {
+      return new ServiceUnavailableException(
+        'Hubble is not configured in this environment, so the brand and its amounts cannot be loaded.',
+      );
+    }
+    if (e instanceof HubbleProductNotFoundError) {
+      return new NotFoundException(
+        `No active Hubble product with ID "${productId}". Check the product ID in the Hubble partner portal.`,
+      );
+    }
+    this.logger.error(`[hubble] product lookup failed for ${productId}: ${e}`);
+    return new ServiceUnavailableException('Could not reach Hubble to load this brand — try again in a minute.');
+  }
+
+  /**
+   * GET /v1/admin/rewards/hubble-products/:productId — the catalogue editor's "Load from
+   * Hubble". Returns the normalised product plus the tenant conversion rate + minimum voucher
+   * amount (so the editor can show points per amount and grey out amounts below the floor).
+   * Hubble-enabled tenants only.
+   */
+  async getHubbleProductForAdmin(user: JwtPayload, productId: string) {
+    if (!(await this.isHubbleEnabledForTenant(user.clientId))) {
+      throw new BadRequestException('Hubble gift cards are not enabled for this program.');
+    }
+    let product: HubbleProduct;
+    try {
+      product = await this.hubble.getProduct(productId);
+    } catch (e) {
+      throw this.hubbleProductHttpError(e, productId);
+    }
+    const settings = await this.tenantSettings.getEffectiveSettings(user.clientId);
+    return {
+      product,
+      conversionRate: settings.conversionRate,
+      minVoucherFreeAmount: settings.minVoucherFreeAmount,
+    };
+  }
+
+  /**
+   * Save-time check of a Hubble GIFT_CARD item against the LIVE product (see
+   * validateHubbleItemAmounts). Returns the derived points band for an amounts list, else null.
+   * Hubble not configured in this environment: an amounts list is refused (it can't be
+   * verified); an item WITHOUT a list is saved unchecked, as before (an un-provisioned
+   * environment falls back to manual fulfilment at confirm anyway).
+   */
+  private async checkHubbleItemAgainstProduct(
+    clientId: string,
+    productId: string,
+    input: {
+      denominations: number[] | null;
+      minRedemptionPoints: number | null | undefined;
+      maxRedemptionPoints: number | null | undefined;
+      sellingValuePaise: number | null | undefined;
+    },
+  ): Promise<{ minRedemptionPoints: number; maxRedemptionPoints: number } | null> {
+    let product: HubbleProduct;
+    try {
+      product = await this.hubble.getProduct(productId);
+    } catch (e) {
+      if (e instanceof HubbleNotConfiguredError && !input.denominations?.length) return null;
+      throw this.hubbleProductHttpError(e, productId);
+    }
+    const settings = await this.tenantSettings.getEffectiveSettings(clientId);
+    return validateHubbleItemAmounts(product, {
+      ...input,
+      conversionRate: settings.conversionRate,
+      minVoucherFreeAmount: settings.minVoucherFreeAmount,
+    });
+  }
+
   /** Pull a non-empty Hubble productId out of a RewardCatalog.metadata blob. */
   private extractHubbleProductId(metadata: unknown): string | null {
     if (!metadata || typeof metadata !== 'object') return null;
@@ -3630,6 +3797,19 @@ export class RewardsService {
         return await this.applyHubbleBody(order, recovered, actorId);
       }
 
+      // DEFENCE IN DEPTH (per-brand denominations): never send Hubble an amount it can't
+      // issue. (a) the admin's amount list on the item; (b) for a FIXED Hubble brand, the
+      // brand's live denominations. Either miss → the existing HUBBLE_INVALID_AMOUNT
+      // never-placed path (left for ops; refundable because nothing reached Hubble). A product
+      // lookup FAILURE does not block issuance — Hubble itself still validates (FAILED → refund).
+      if (!(await this.isHubbleAmountIssuable(productId, amount, order.reward?.metadata))) {
+        this.logger.error(
+          `[hubble] order ${order.orderNumber} amount ₹${amount} is not an issuable amount for product ${productId} — not placed; left for ops`,
+        );
+        await this.markHubblePendingReconcile(order.id, 'HUBBLE_INVALID_AMOUNT');
+        return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+      }
+
       // Place the order (referenceId = our order id = the idempotency key). On ANY
       // thrown error, recover authoritative state by referenceId before deciding.
       let body: HubbleOrderResult | null;
@@ -3756,6 +3936,30 @@ export class RewardsService {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Issuance-time amount check (see issueHubbleVoucherForOrder). false ⇒ do NOT call Hubble.
+   * The item's admin list is authoritative when present; a FIXED brand's live denominations
+   * are checked too. FLEXIBLE brands are not pre-checked here (Hubble rejects → FAILED →
+   * auto-refund, the existing behaviour); a lookup error never blocks issuance.
+   */
+  private async isHubbleAmountIssuable(
+    productId: string,
+    amount: number,
+    itemMetadata: Prisma.JsonValue | undefined,
+  ): Promise<boolean> {
+    const list = extractHubbleDenominations(itemMetadata);
+    if (list.length && !list.includes(amount)) return false;
+    let product: HubbleProduct;
+    try {
+      product = await this.hubble.getProduct(productId);
+    } catch (e) {
+      this.logger.warn(`[hubble] product lookup failed for ${productId} (issuance proceeds; Hubble validates): ${e}`);
+      return true;
+    }
+    if (product.denominationType === 'FIXED' && !isAmountIssuable(product, amount)) return false;
+    return true;
   }
 
   /** valuePaise → whole rupees for the Hubble order amount (Amazon free-denomination). */
@@ -4286,7 +4490,35 @@ export class RewardsService {
     });
     if (!category) throw new BadRequestException('Category not found in this tenant');
 
-    this.assertRedemptionRange(dto.minRedemptionPoints, dto.maxRedemptionPoints);
+    // ── Hubble per-brand amounts (GIFT_CARD + Hubble-enabled tenant only) ──────────────
+    // The productId is honoured ONLY for a Hubble-enabled tenant (byte-identical guard below);
+    // the flag is read ONLY when a productId was actually sent, so a non-Hubble tenant's create
+    // does no extra read. A Hubble GIFT_CARD is validated against the LIVE Hubble product, and an
+    // admin amounts list derives the points band (overriding any client-sent band).
+    const hubbleProductId = dto.hubbleProductId?.trim() || null;
+    const hubbleOn = hubbleProductId ? await this.isHubbleEnabledForTenant(user.clientId) : false;
+    const isHubbleGiftCard = !!hubbleProductId && hubbleOn && dto.redemptionMode === PayoutMode.GIFT_CARD;
+    const hubbleDenoms = dto.hubbleDenominations?.length
+      ? normaliseHubbleDenominations(dto.hubbleDenominations)
+      : null;
+    if (hubbleDenoms && !isHubbleGiftCard) {
+      throw new BadRequestException(
+        'Gift card amounts can only be chosen for a Hubble gift card (Hubble enabled for this program and a Hubble product ID set).',
+      );
+    }
+    let minRedemptionPoints = dto.minRedemptionPoints;
+    let maxRedemptionPoints = dto.maxRedemptionPoints;
+    if (isHubbleGiftCard) {
+      const band = await this.checkHubbleItemAgainstProduct(user.clientId, hubbleProductId!, {
+        denominations: hubbleDenoms,
+        minRedemptionPoints,
+        maxRedemptionPoints,
+        sellingValuePaise: dto.sellingValuePaise ?? null,
+      });
+      if (band) ({ minRedemptionPoints, maxRedemptionPoints } = band);
+    }
+
+    this.assertRedemptionRange(minRedemptionPoints, maxRedemptionPoints);
 
     // Selling value can't exceed MRP when both are supplied (price integrity + an honest
     // slash: slashPoints only shows when mrp > selling, so an inverted pair is a config error).
@@ -4296,8 +4528,8 @@ export class RewardsService {
     // item carries a min/max band and keeps pointsCost 0; everything else is FIXED and its
     // pointsCost is DERIVED from the ₹ selling value × the tenant conversion rate.
     const pointsCost = await this.resolveAdminPointsCost(user.clientId, {
-      minRedemptionPoints: dto.minRedemptionPoints,
-      maxRedemptionPoints: dto.maxRedemptionPoints,
+      minRedemptionPoints,
+      maxRedemptionPoints,
       deriveFromSellingValuePaise: dto.sellingValuePaise ?? null,
       // No stored fallback on CREATE: a FIXED item MUST supply a selling value.
       keepPointsCost: null,
@@ -4308,8 +4540,8 @@ export class RewardsService {
     // complete [min, max] range — reject a half-configured one (see the helper).
     this.assertFreeAmountComplete(
       pointsCost,
-      dto.minRedemptionPoints,
-      dto.maxRedemptionPoints,
+      minRedemptionPoints,
+      maxRedemptionPoints,
     );
 
     // Code unique within the tenant (among non-deleted items).
@@ -4331,8 +4563,11 @@ export class RewardsService {
     // never carry a hubbleProductId, so isHubbleEligible short-circuits for its items with
     // NO tenant-flag DB read — keeping the query profile identical, not just the behaviour.
     const hubbleMetadata =
-      dto.hubbleProductId?.trim() && (await this.isHubbleEnabledForTenant(user.clientId))
-        ? ({ hubbleProductId: dto.hubbleProductId.trim() } as Prisma.InputJsonValue)
+      hubbleProductId && hubbleOn
+        ? ({
+            hubbleProductId,
+            ...(hubbleDenoms ? { hubbleDenominations: hubbleDenoms } : {}),
+          } as Prisma.InputJsonValue)
         : undefined;
 
     const item = await this.prisma.rewardCatalog.create({
@@ -4351,8 +4586,9 @@ export class RewardsService {
         sellingValuePaise: dto.sellingValuePaise,
         redemptionMode: dto.redemptionMode,
         status,
-        minRedemptionPoints: dto.minRedemptionPoints,
-        maxRedemptionPoints: dto.maxRedemptionPoints,
+        // = the DTO band, except a Hubble amounts list derives it (see above).
+        minRedemptionPoints,
+        maxRedemptionPoints,
         stockQuantity: dto.stockQuantity,
         termsAndConditions: dto.termsAndConditions,
         sortOrder: dto.sortOrder ?? 0,
@@ -4381,17 +4617,81 @@ export class RewardsService {
     // DTO means "leave unchanged" (Prisma skips it); an explicit null/value is written —
     // so mirror that here (a bare `??` would collapse an explicit null into the stored
     // value and let a max-clearing PATCH slip a free-amount voucher into a broken state).
-    const effMin =
+    let effMin =
       dto.minRedemptionPoints !== undefined ? dto.minRedemptionPoints : existing.minRedemptionPoints;
-    const effMax =
+    let effMax =
       dto.maxRedemptionPoints !== undefined ? dto.maxRedemptionPoints : existing.maxRedemptionPoints;
-    this.assertRedemptionRange(effMin, effMax);
 
     // Validate the EFFECTIVE selling value vs MRP (payload value if present, else stored),
     // so a PATCH that raises selling value above MRP — or lowers MRP below it — is rejected.
     const effSellingValue =
       dto.sellingValuePaise !== undefined ? dto.sellingValuePaise : existing.sellingValuePaise;
     const effMrp = dto.mrpPaise !== undefined ? dto.mrpPaise : existing.mrpPaise;
+
+    // ── Hubble per-brand amounts (see createCatalogItem) ────────────────────────────────
+    // Resolve the EFFECTIVE productId / mode / amounts list after this PATCH. The tenant flag is
+    // read only when a productId is being set or one is already stored (never for a non-Hubble
+    // item). The live-product check runs only when a Hubble-relevant value actually CHANGES, so
+    // an unrelated edit (name, stock, T&C) never depends on Hubble being reachable.
+    const existingProductId = this.extractHubbleProductId(existing.metadata);
+    const existingDenoms = extractHubbleDenominations(existing.metadata);
+    let hubbleOn: boolean | null = null;
+    let effProductId: string | null;
+    if (dto.hubbleProductId !== undefined) {
+      const v = dto.hubbleProductId.trim();
+      hubbleOn = v ? await this.isHubbleEnabledForTenant(user.clientId) : false;
+      effProductId = v && hubbleOn ? v : null;
+    } else {
+      effProductId = existingProductId;
+    }
+    const effMode = dto.redemptionMode ?? existing.redemptionMode;
+    let effDenoms: number[] =
+      dto.hubbleDenominations === undefined
+        ? existingDenoms
+        : dto.hubbleDenominations.length
+          ? normaliseHubbleDenominations(dto.hubbleDenominations)
+          : [];
+    if (effProductId && hubbleOn === null && (effDenoms.length || dto.hubbleDenominations !== undefined)) {
+      hubbleOn = await this.isHubbleEnabledForTenant(user.clientId);
+    }
+    const isHubbleGiftCard = !!effProductId && effMode === PayoutMode.GIFT_CARD;
+    if (dto.hubbleDenominations?.length && !(isHubbleGiftCard && hubbleOn)) {
+      throw new BadRequestException(
+        'Gift card amounts can only be chosen for a Hubble gift card (Hubble enabled for this program and a Hubble product ID set).',
+      );
+    }
+    // An amounts list only lives alongside a Hubble GIFT_CARD productId — drop it otherwise.
+    if (!isHubbleGiftCard) effDenoms = [];
+    const sameList = (a: number[], b: number[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+    const hubbleRelevantChange =
+      effProductId !== existingProductId ||
+      !sameList(effDenoms, existingDenoms) ||
+      effMin !== existing.minRedemptionPoints ||
+      effMax !== existing.maxRedemptionPoints ||
+      effSellingValue !== existing.sellingValuePaise ||
+      effMode !== existing.redemptionMode;
+    if (isHubbleGiftCard && hubbleRelevantChange) {
+      if (hubbleOn === null) hubbleOn = await this.isHubbleEnabledForTenant(user.clientId);
+      if (hubbleOn) {
+        const band = await this.checkHubbleItemAgainstProduct(user.clientId, effProductId!, {
+          denominations: effDenoms.length ? effDenoms : null,
+          minRedemptionPoints: effMin,
+          maxRedemptionPoints: effMax,
+          sellingValuePaise: effSellingValue,
+        });
+        if (band) {
+          effMin = band.minRedemptionPoints;
+          effMax = band.maxRedemptionPoints;
+        }
+      }
+    }
+    // The band to WRITE: a derived Hubble band overrides; otherwise the DTO value as before
+    // (undefined = leave unchanged).
+    const bandDerived = effDenoms.length > 0 && isHubbleGiftCard && hubbleRelevantChange && hubbleOn === true;
+    const writeMin = bandDerived ? effMin : dto.minRedemptionPoints;
+    const writeMax = bandDerived ? effMax : dto.maxRedemptionPoints;
+
+    this.assertRedemptionRange(effMin, effMax);
     this.assertSellingValueBounds(effSellingValue, effMrp);
 
     // PURE DERIVE (non-breaking transition). FREE_AMOUNT (a min/max band) keeps pointsCost 0.
@@ -4433,17 +4733,24 @@ export class RewardsService {
     // unchanged; a non-empty value sets metadata.hubbleProductId; an empty string
     // removes it (merge-preserving any other metadata keys). No schema change.
     let metadataUpdate: Prisma.InputJsonValue | undefined;
-    if (dto.hubbleProductId !== undefined) {
+    const denomsChanged = !sameList(effDenoms, existingDenoms);
+    if (dto.hubbleProductId !== undefined || denomsChanged) {
       const base =
         existing.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)
           ? { ...(existing.metadata as Record<string, unknown>) }
           : {};
-      const v = dto.hubbleProductId.trim();
-      // AUDIT-FIX (byte-identical): SET a productId only for a Hubble-enabled tenant (Bajaj);
-      // for any other tenant, or an empty value, CLEAR it. Clearing is always allowed, so a
-      // non-Hubble tenant can never end up with a hubbleProductId on an item.
-      if (v && (await this.isHubbleEnabledForTenant(user.clientId))) base.hubbleProductId = v;
-      else delete base.hubbleProductId;
+      if (dto.hubbleProductId !== undefined) {
+        // AUDIT-FIX (byte-identical): SET a productId only for a Hubble-enabled tenant (Bajaj);
+        // for any other tenant, or an empty value, CLEAR it. Clearing is always allowed, so a
+        // non-Hubble tenant can never end up with a hubbleProductId on an item. (effProductId
+        // already encodes exactly that rule.)
+        if (effProductId) base.hubbleProductId = effProductId;
+        else delete base.hubbleProductId;
+      }
+      if (denomsChanged) {
+        if (effDenoms.length) base.hubbleDenominations = effDenoms;
+        else delete base.hubbleDenominations;
+      }
       metadataUpdate = base as Prisma.InputJsonValue;
     }
 
@@ -4468,8 +4775,9 @@ export class RewardsService {
         // FIXED item (or a FREE→FIXED transition) force them null so a direct-API PATCH
         // can't leave stale [min,max] on the row; for a FREE item write the DTO value
         // (undefined = keep existing, which the guard has already validated as complete).
-        minRedemptionPoints: pointsCost === 0 ? dto.minRedemptionPoints : null,
-        maxRedemptionPoints: pointsCost === 0 ? dto.maxRedemptionPoints : null,
+        // (A Hubble amounts list writes its derived band — writeMin/writeMax.)
+        minRedemptionPoints: pointsCost === 0 ? writeMin : null,
+        maxRedemptionPoints: pointsCost === 0 ? writeMax : null,
         stockQuantity: dto.stockQuantity,
         termsAndConditions: dto.termsAndConditions,
         sortOrder: dto.sortOrder,

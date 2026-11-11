@@ -13,6 +13,8 @@ import { type GiftCatalogueItem, GIFT_CATALOGUE } from '@/lib/gifts';
 import { api } from '@/lib/api-client';
 import { isDeliveryDefaults, type DeliveryDefaults } from '@/lib/partner-identity';
 import { applyAddressPrefill, type AddressForm, type TouchedFields } from '@/lib/address-prefill';
+import { wholeRupeeInputProps } from '@/lib/whole-rupee-input';
+import { pointsForAmount } from '@/lib/hubble-product';
 
 type GiftItem = GiftCatalogueItem;
 
@@ -133,6 +135,8 @@ function CatalogueInner() {
   const [selectedGift, setSelectedGift] = useState<GiftItem | null>(null);
   const [sheetStep,    setSheetStep]    = useState<SheetStep | null>(null);
   const [redeem,       setRedeem]       = useState<RedeemState>({ ...INITIAL_REDEEM, outlet: null });
+  // Tenant points-per-₹ (from /me) — only loaded when a "choose from amounts" item exists.
+  const [conversionRate, setConversionRate] = useState<number | null>(null);
 
   const preOutlet = useMemo(
     () => preselectedId ? outlets.find((o) => o.kycId === preselectedId || o.id === preselectedId) ?? null : null,
@@ -180,6 +184,8 @@ function CatalogueInner() {
       // FREE_AMOUNT band (points) — needed so the sales-assisted redeem can collect a ₹ amount
       // for variable vouchers/bank transfers (the backend requires `amount` for these).
       minRedemptionPoints?: number | null; maxRedemptionPoints?: number | null;
+      // Hubble "choose from amounts" gift card (absent otherwise).
+      amountOptions?: number[] | null;
     }
     interface ApiCatalogResponse { items: ApiCatalogItem[] }
     api.get<ApiCatalogResponse>('/api/rewards/catalog')
@@ -209,9 +215,20 @@ function CatalogueInner() {
               redemptionMode:      item.redemptionMode ?? null,
               minRedemptionPoints: item.minRedemptionPoints ?? null,
               maxRedemptionPoints: item.maxRedemptionPoints ?? null,
+              ...(item.amountOptions?.length ? { amountOptions: item.amountOptions } : {}),
             };
           });
           setGifts(mapped);
+          // Points per listed amount need the tenant rate — fetched ONLY when the catalogue has a
+          // "choose from amounts" item (never for a tenant without one).
+          if (mapped.some((g) => g.amountOptions?.length)) {
+            api.get<{ conversionRate?: number }>('/api/auth/me')
+              .then((me) => {
+                const r = me.success ? me.data?.conversionRate : undefined;
+                if (typeof r === 'number' && Number.isFinite(r) && r > 0) setConversionRate(r);
+              })
+              .catch(() => {});
+          }
         } else {
           setGifts([]);
         }
@@ -303,8 +320,14 @@ function CatalogueInner() {
     // rejects redeem-for-outlet with "amount (₹) is required for a variable-amount voucher".
     const freeAmount = isFreeAmountGift(selectedGift);
     const amountNum = Number(redeem.amount);
-    if (freeAmount && (!redeem.amount.trim() || !Number.isFinite(amountNum) || amountNum <= 0)) {
-      setRedeem((r) => ({ ...r, error: 'Enter the amount (₹) to redeem for this outlet.' }));
+    const options = selectedGift.amountOptions?.length ? selectedGift.amountOptions : null;
+    if (freeAmount && options && !options.includes(amountNum)) {
+      setRedeem((r) => ({ ...r, error: 'Choose one of the available amounts.' }));
+      return;
+    }
+    // Whole rupees only (the input already strips decimals; this guards any other path).
+    if (freeAmount && (!redeem.amount.trim() || !Number.isInteger(amountNum) || amountNum <= 0)) {
+      setRedeem((r) => ({ ...r, error: 'Enter a whole-rupee amount (₹) to redeem for this outlet.' }));
       return;
     }
     // PHYSICAL_GIFT: the backend REQUIRES a full deliveryAddress (else 400). Same rules as the
@@ -455,7 +478,9 @@ function CatalogueInner() {
                     <p className="text-[10px] text-gray-400 line-clamp-1">{gift.description}</p>
                     <div className="mt-2 pt-2 border-t border-gray-50 flex items-center justify-between">
                       {isFreeAmountGift(gift) ? (
-                        <span className="text-sm font-bold text-[var(--brand-primary)]">You set the amount</span>
+                        <span className="text-sm font-bold text-[var(--brand-primary)]">
+                          {gift.amountOptions?.length ? `From ₹${gift.amountOptions[0].toLocaleString('en-IN')}` : 'You set the amount'}
+                        </span>
                       ) : (
                         <span className="text-sm font-bold text-[var(--brand-primary)]">{gift.points.toLocaleString()} pts</span>
                       )}
@@ -550,7 +575,11 @@ function CatalogueInner() {
                           {isFreeAmountGift(selectedGift) ? (
                             <>
                               <p className="text-2xl font-bold text-[var(--brand-primary)]">You choose the amount</p>
-                              <p className="text-xs text-gray-400 mt-0.5">Redeemed as a ₹ amount</p>
+                              <p className="text-xs text-gray-400 mt-0.5">
+                                {selectedGift.amountOptions?.length
+                                  ? `Available: ${selectedGift.amountOptions.map((a) => `₹${a.toLocaleString('en-IN')}`).join(' · ')}`
+                                  : 'Redeemed as a ₹ amount'}
+                              </p>
                             </>
                           ) : (
                             <>
@@ -682,16 +711,48 @@ function CatalogueInner() {
                   </div>
 
                   {/* FREE_AMOUNT (variable) → collect the ₹ amount; FIXED → show the points breakdown. */}
-                  {isFreeAmountGift(selectedGift) ? (
+                  {isFreeAmountGift(selectedGift) && selectedGift.amountOptions?.length ? (
+                    /* Hubble "choose from amounts": one button per amount (+ its points); no typing. */
+                    <div className="bg-gray-50 rounded-xl p-4 space-y-2">
+                      <p className="text-xs text-gray-500">Choose an amount</p>
+                      <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Voucher amount">
+                        {selectedGift.amountOptions.map((amt) => {
+                          const selected = Number(redeem.amount) === amt;
+                          const pts = conversionRate != null ? pointsForAmount(amt, conversionRate) : null;
+                          return (
+                            <button
+                              key={amt}
+                              type="button"
+                              role="radio"
+                              aria-checked={selected}
+                              onClick={() => setRedeem((r) => ({ ...r, amount: String(amt), error: '' }))}
+                              className={`rounded-xl border-2 px-2 py-2 text-center transition-all ${
+                                selected ? 'border-[var(--brand-primary)] bg-white' : 'border-gray-200 bg-white hover:border-gray-300'
+                              }`}
+                            >
+                              <span className="block text-sm font-bold text-gray-900">₹{amt.toLocaleString('en-IN')}</span>
+                              {pts != null && (
+                                <span className={`block text-[10px] ${pts > redeem.outlet!.balance ? 'text-red-500' : 'text-gray-500'}`}>
+                                  {pts.toLocaleString('en-IN')} pts
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="flex items-center justify-between pt-1">
+                        <span className="text-xs text-gray-500">Current balance</span>
+                        <span className="text-sm text-gray-800">{redeem.outlet.balance.toLocaleString()} pts</span>
+                      </div>
+                    </div>
+                  ) : isFreeAmountGift(selectedGift) ? (
                     <div className="bg-gray-50 rounded-xl p-4 space-y-2">
                       <label className="block text-xs text-gray-500" htmlFor="redeem-amount">Amount to redeem (₹)</label>
                       <input
                         id="redeem-amount"
-                        type="number"
-                        inputMode="numeric"
-                        min={1}
                         value={redeem.amount}
-                        onChange={(e) => setRedeem((r) => ({ ...r, amount: e.target.value, error: '' }))}
+                        // Whole rupees only (typed "." blocked; pasted "750.5" → "750").
+                        {...wholeRupeeInputProps((v) => setRedeem((r) => ({ ...r, amount: v, error: '' })))}
                         placeholder="Enter ₹ amount"
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
                       />
@@ -779,7 +840,12 @@ function CatalogueInner() {
                     variant="primary"
                     className="w-full"
                     loading={redeem.otpSending}
-                    disabled={isFreeAmountGift(selectedGift) && !(Number(redeem.amount) > 0)}
+                    disabled={
+                      isFreeAmountGift(selectedGift) &&
+                      (selectedGift.amountOptions?.length
+                        ? !selectedGift.amountOptions.includes(Number(redeem.amount))
+                        : !(Number(redeem.amount) > 0))
+                    }
                     onClick={sendOtp}
                   >
                     Send OTP &amp; Proceed

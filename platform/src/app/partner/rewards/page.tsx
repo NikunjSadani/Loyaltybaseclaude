@@ -25,6 +25,8 @@ import { useTenantFeatures } from '@/lib/tenant-features';
 import { BankOrUpiSection, type PaymentMode, type UpiCaptureMethod } from '@/components/bank-or-upi-section';
 import { isValidUpiId } from '@/lib/upi-utils';
 import { pinnedPaymentMode, type OutletPaymentType } from '@/lib/payment-type';
+import { wholeRupeeInputProps } from '@/lib/whole-rupee-input';
+import { pointsForAmount } from '@/lib/hubble-product';
 
 /* ─── Partner cash beneficiary (from GET /api/auth/me) ─────────────────────────
    The partner's real, on-file KYC payout details + the tenant conversionRate.
@@ -78,6 +80,11 @@ interface CatalogueItem {
   /** Min/max redeemable points for FREE_AMOUNT vouchers (server-validated). */
   minRedemptionPoints?: number | null;
   maxRedemptionPoints?: number | null;
+  /**
+   * Hubble "choose from amounts" voucher: the ₹ amounts the member may pick (whole rupees,
+   * ascending). Present only for such items; the redeem sheet shows buttons, not a text input.
+   */
+  amountOptions?: number[];
   categorySort?: number | null;
   /**
    * Rate-INDEPENDENT catalogue MRP-slash, in POINTS, computed SERVER-SIDE
@@ -122,6 +129,8 @@ interface ApiCatalogItem {
   maxRedemptionPoints?: number | null;
   /** Rate-independent MRP-slash in points, computed server-side (flag-gated). See CatalogueItem.slashPoints. */
   slashPoints?: number | null;
+  /** Hubble "choose from amounts" — see CatalogueItem.amountOptions. Absent for every other item. */
+  amountOptions?: number[] | null;
   categorySort?: number | null;
   /** See CatalogueItem.requiresConsent — vendor-sourced items set this true (BE-exposed). */
   requiresConsent?: boolean | null;
@@ -182,6 +191,7 @@ function mapCatalogItem(item: ApiCatalogItem): CatalogueItem {
     fixedAmount:  item.fixedAmount ?? (voucherType === 'FIXED' ? item.pointsCost : undefined),
     minRedemptionPoints: item.minRedemptionPoints ?? null,
     maxRedemptionPoints: item.maxRedemptionPoints ?? null,
+    ...(voucherType === 'FREE_AMOUNT' && item.amountOptions?.length ? { amountOptions: item.amountOptions } : {}),
     slashPoints:  item.slashPoints ?? null,
     // DPDP consent gate — FAIL CLOSED for deliverable (physical) items: redeeming one
     // shares the member's delivery name/address/phone with a third-party fulfilment
@@ -216,7 +226,8 @@ function isFreeAmount(
   return item.points === 0 && (item.minRedemptionPoints != null || item.maxRedemptionPoints != null);
 }
 
-type AffordabilityItem = Pick<CatalogueItem, 'points' | 'voucherType' | 'minRedemptionPoints'>;
+type AffordabilityItem = Pick<CatalogueItem, 'points' | 'voucherType' | 'minRedemptionPoints'> &
+  Partial<Pick<CatalogueItem, 'amountOptions'>>;
 /** Pass the LIVE rate (the page's `effectiveRate`), the same one the voucher sheet uses. */
 type AffordabilitySettings = { minVoucherFreeAmount: number; pointsConversionRate: number };
 
@@ -234,6 +245,12 @@ type AffordabilitySettings = { minVoucherFreeAmount: number; pointsConversionRat
 export function pointsRequired(item: AffordabilityItem, settings: AffordabilitySettings): number {
   if (item.voucherType !== 'FREE_AMOUNT') return item.points;
   const floorPoints = Math.round(settings.minVoucherFreeAmount * settings.pointsConversionRate);
+  // "Choose from amounts" (Hubble): the cheapest LISTED amount at the live rate is the real
+  // minimum (the stored band mirrors it at the save-time rate; the backend uses the list).
+  if (item.amountOptions?.length) {
+    const cheapest = item.amountOptions.find((a) => a >= settings.minVoucherFreeAmount) ?? item.amountOptions[0];
+    return Math.max(pointsForAmount(cheapest, settings.pointsConversionRate), floorPoints);
+  }
   return Math.max(item.minRedemptionPoints ?? 0, floorPoints);
 }
 
@@ -692,9 +709,17 @@ function VoucherRedeemSheet({
 
   const isFixed   = voucher.voucherType === 'FIXED';
   const fixedPts  = isFixed ? voucher.points : 0;
+  // Hubble "choose from amounts" voucher (e.g. a fixed-denomination brand): the member picks one
+  // of the admin-chosen amounts — no free typing. Server re-validates the amount is in the list.
+  const amountOptions = !isFixed && voucher.amountOptions?.length ? voucher.amountOptions : null;
   const freeAmt   = parseInt(amount, 10) || 0;
   // FREE_AMOUNT: points required = ₹amount × conversionRate (server re-validates vs min/max).
-  const ptsNeeded = isFixed ? fixedPts : Math.ceil(freeAmt * conversionRate);
+  // A listed amount uses the server's exact rule (Math.round) so the preview matches the debit.
+  const ptsNeeded = isFixed
+    ? fixedPts
+    : amountOptions
+      ? pointsForAmount(freeAmt, conversionRate)
+      : Math.ceil(freeAmt * conversionRate);
   const canAfford = myBalance >= ptsNeeded && (isFixed || freeAmt >= minFreeAmount);
 
   // Client-side UX validation for FREE_AMOUNT (server is authoritative).
@@ -783,7 +808,7 @@ function VoucherRedeemSheet({
             </div>
             <div>
               <p className="text-xs text-gray-400">{voucher.brand}</p>
-              <h3 className="text-base font-bold text-gray-900">{isFixed ? `${fmtInr(fixedPts)} Voucher` : 'Voucher — Any Amount'}</h3>
+              <h3 className="text-base font-bold text-gray-900">{isFixed ? `${fmtInr(fixedPts)} Voucher` : amountOptions ? 'Voucher — Choose an amount' : 'Voucher — Any Amount'}</h3>
               <p className="text-xs text-gray-500">{voucher.description}</p>
             </div>
           </div>
@@ -804,8 +829,51 @@ function VoucherRedeemSheet({
             </div>
           )}
 
+          {/* Choose-from-amounts: one button per amount (with its points); no typing. */}
+          {amountOptions && (
+            <div>
+              <p className="text-xs font-medium text-gray-600 mb-2">Choose an amount *</p>
+              <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Voucher amount">
+                {amountOptions.map((amt) => {
+                  const pts = pointsForAmount(amt, conversionRate);
+                  const selected = freeAmt === amt;
+                  const tooLow = amt < minFreeAmount;
+                  const tooMuch = pts > myBalance;
+                  return (
+                    <button
+                      key={amt}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      disabled={otpSent || tooLow}
+                      onClick={() => setAmount(String(amt))}
+                      className={cn(
+                        'rounded-xl border-2 px-2 py-2 text-center transition-all disabled:opacity-40',
+                        selected
+                          ? 'border-[var(--brand-primary)] bg-[var(--brand-primary)]/5'
+                          : 'border-gray-200 hover:border-gray-300',
+                      )}
+                    >
+                      <span className="block text-sm font-bold text-gray-900">{fmtInr(amt)}</span>
+                      <span className={cn('block text-[10px]', tooMuch ? 'text-red-500' : 'text-gray-500')}>
+                        {formatPoints(pts)} pts
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              {freeAmt > 0 && (
+                <p className={cn('text-xs mt-2 font-medium', myBalance >= ptsNeeded ? 'text-emerald-600' : 'text-red-500')}>
+                  {myBalance >= ptsNeeded
+                    ? `= ${ptsNeeded} pts · ${formatPoints(myBalance - ptsNeeded)} pts remaining after`
+                    : `Needs ${formatPoints(ptsNeeded)} pts — you have ${formatPoints(myBalance)}`}
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Free amount: input */}
-          {!isFixed && (
+          {!isFixed && !amountOptions && (
             <div>
               <label className="text-xs font-medium text-gray-600 block mb-1">
                 Amount to redeem * <span className="text-gray-400 font-normal">(min {fmtInr(minFreeAmount)})</span>
@@ -819,8 +887,8 @@ function VoucherRedeemSheet({
                   )}
                   placeholder={`${minFreeAmount}`}
                   value={amount}
-                  onChange={e => setAmount(e.target.value.replace(/\D/g, ''))}
-                  inputMode="numeric"
+                  // Whole rupees only (typed "." blocked; pasted "750.5" → "750").
+                  {...wholeRupeeInputProps(setAmount)}
                   aria-label="Voucher amount"
                 />
               </div>
@@ -851,9 +919,11 @@ function VoucherRedeemSheet({
           <div className="pt-3 border-t border-gray-100">
             {!otpSent ? (
               <Button variant="primary" className="w-full" loading={submitting}
-                disabled={!canAfford || !!amountError || (!isFixed && freeAmt < minFreeAmount) || (needConsent && !consent)}
+                disabled={!canAfford || !!amountError || (!isFixed && freeAmt < minFreeAmount) || (!!amountOptions && !amountOptions.includes(freeAmt)) || (needConsent && !consent)}
                 onClick={handleSendOtp}>
-                {!isFixed && freeAmt > 0 && freeAmt < minFreeAmount
+                {amountOptions && !amountOptions.includes(freeAmt)
+                  ? 'Choose an amount'
+                  : !isFixed && freeAmt > 0 && freeAmt < minFreeAmount
                   ? `Min ${fmtInr(minFreeAmount)} required`
                   : myBalance < ptsNeeded
                   ? 'Insufficient balance'
@@ -1006,8 +1076,8 @@ function CashPayoutSheet({
                   amountError ? 'border-red-300' : 'border-gray-200')}
                 placeholder={`${minInr}`}
                 value={amount}
-                onChange={e => setAmount(e.target.value.replace(/\D/g, ''))}
-                inputMode="numeric"
+                // Whole rupees only (typed "." blocked; pasted "750.5" → "750").
+                {...wholeRupeeInputProps(setAmount)}
                 aria-label="Payout amount"
               />
             </div>
@@ -1916,7 +1986,9 @@ export default function RewardsPage() {
                       </button>
                       {/* FREE_AMOUNT badge */}
                       {gift.voucherType === 'FREE_AMOUNT' && (
-                        <span className="absolute bottom-2 left-2 text-[9px] font-bold bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full">Any Amount</span>
+                        <span className="absolute bottom-2 left-2 text-[9px] font-bold bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full">
+                          {gift.amountOptions?.length ? 'Choose Amount' : 'Any Amount'}
+                        </span>
                       )}
                       {!canAfford && (
                         <div className="absolute inset-0 flex items-end justify-center pb-2">
@@ -1932,7 +2004,9 @@ export default function RewardsPage() {
                       <p className="text-xs font-semibold text-gray-900 leading-snug line-clamp-2 flex-1">{gift.name}</p>
                       <div className="mt-2 pt-2 border-t border-gray-50 flex items-center justify-between">
                         {isFreeAmount(gift) ? (
-                          <span className="text-sm font-bold text-[var(--brand-primary)]">You set the amount</span>
+                          <span className="text-sm font-bold text-[var(--brand-primary)]">
+                            {gift.amountOptions?.length ? `From ${fmtInr(gift.amountOptions[0])}` : 'You set the amount'}
+                          </span>
                         ) : (
                           <span className="flex flex-col leading-none">
                             {mrpPoints != null && (
