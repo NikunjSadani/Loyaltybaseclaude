@@ -8,6 +8,7 @@ import {
   ConflictException,
   ForbiddenException,
   HttpException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -82,7 +83,7 @@ const mockPrisma = {
   },
   kycStatusHistory: { create: jest.fn(), findMany: jest.fn() },
   kycDocument: { create: jest.fn(), findUnique: jest.fn() },
-  otpCode: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn(), deleteMany: jest.fn() },
+  otpCode: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn(), deleteMany: jest.fn(), count: jest.fn() },
   outlet: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   // reviewQueue/reviewDump resolve each row's per-tenant outlet-type displayName (scoped to the
   // submission's own tenant). Default [] (set in beforeEach after the reset loop) → empty map →
@@ -259,6 +260,8 @@ describe('KycService', () => {
     // The claim returns the post-increment attempts value — default: this is attempt 1.
     mockPrisma.$queryRaw.mockResolvedValue([{ attempts: 1 }]);
     mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 1 });
+    // sendConsentOtp's per-number send cap: no recent KYC_CONSENT sends by default.
+    mockPrisma.otpCode.count.mockResolvedValue(0);
     // #3: the DRAFT→routed transition is a guarded updateMany — default: it wins.
     mockPrisma.kycSubmission.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
@@ -7407,6 +7410,16 @@ describe('KycService', () => {
   // ─── sendConsentOtp (the previously-missing OTP send) + phone validation ───────
   describe('sendConsentOtp', () => {
     const dto = { submissionId: 'sub1', mobile: '7795096288' };
+    // The send cap is skipped under the FIXED_OTP bypass — pin it OFF here (restored after).
+    const envKeys = ['NODE_ENV', 'FIXED_OTP', 'DATABASE_URL', 'ALLOW_FIXED_OTP'] as const;
+    const savedEnv: Record<string, string | undefined> = {};
+    beforeEach(() => { for (const k of envKeys) savedEnv[k] = process.env[k]; delete process.env.FIXED_OTP; });
+    afterEach(() => {
+      for (const k of envKeys) {
+        if (savedEnv[k] === undefined) delete process.env[k];
+        else process.env[k] = savedEnv[k];
+      }
+    });
 
     beforeEach(() => {
       // #2: the owner phone persisted on the submission = the number the rep's form sends.
@@ -7486,6 +7499,122 @@ describe('KycService', () => {
       expect(mockPrisma.otpCode.create.mock.calls[0][0].data.phone).toBe('7795096288');
       const other = await service.sendConsentOtp(partner, { submissionId: 'sub1', mobile: '9000000009' }).catch((e) => e);
       expect(other).toBeInstanceOf(BadRequestException);
+    });
+
+    // ── Per-number send cap: 5 KYC_CONSENT sends per normalised phone per rolling hour ──────────
+    /**
+     * Simulates otp_codes for the cap: count() honours phone + purpose + createdAt >= gte exactly as
+     * the DB would, and create() appends a row stamped with the (fake) clock. `seed` pre-loads rows.
+     */
+    function otpTable(seed: Array<{ phone: string; purpose: string; createdAt: Date }> = []) {
+      const rows = [...seed];
+      mockPrisma.otpCode.count.mockImplementation(async ({ where }: any) =>
+        rows.filter((r) => r.phone === where.phone && r.purpose === where.purpose && r.createdAt >= where.createdAt.gte).length);
+      mockPrisma.otpCode.create.mockImplementation(async ({ data }: any) => {
+        rows.push({ phone: data.phone, purpose: data.purpose, createdAt: new Date() });
+        return { id: `otp${rows.length}` };
+      });
+      return rows;
+    }
+    const CAP_MSG = 'Too many OTPs sent to this number. Please wait an hour before trying again.';
+
+    it('cap: 5 sends in the hour succeed, the 6th → 429 with the clear message; nothing created or sent', async () => {
+      otpTable();
+      for (let i = 0; i < 5; i++) await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(5);
+      const err = await service.sendConsentOtp(partner, dto).catch((e) => e);
+      expect(err).toBeInstanceOf(HttpException);
+      expect(err.getStatus()).toBe(429);
+      expect(err.message).toBe(CAP_MSG);
+      expect(mockPrisma.otpCode.create).toHaveBeenCalledTimes(5);
+      expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(5);
+      // counted on the NORMALISED number + KYC_CONSENT + a 1-hour window
+      const where = mockPrisma.otpCode.count.mock.calls[0][0].where;
+      expect(where.phone).toBe('7795096288');
+      expect(where.purpose).toBe('KYC_CONSENT');
+      expect(Math.abs(Date.now() - 60 * 60 * 1000 - where.createdAt.gte.getTime())).toBeLessThan(5000);
+    });
+
+    it('cap: logs a distinct masked structured line (last 4 only) when it refuses', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      try {
+        otpTable(Array.from({ length: 5 }, () => ({ phone: '7795096288', purpose: 'KYC_CONSENT', createdAt: new Date() })));
+        await service.sendConsentOtp(partner, dto).catch(() => undefined);
+        const line = warn.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith('[kyc-consent-otp-send-cap]'));
+        expect(line).toBeDefined();
+        const payload = JSON.parse(line!.replace('[kyc-consent-otp-send-cap] ', ''));
+        expect(payload).toEqual({ event: 'kyc_consent_otp.send_cap', phone: '******6288', recentSends: 5, max: 5, windowHours: 1 });
+        expect(line).not.toContain('7795096288');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('cap: other OTP purposes to the same number do not count', async () => {
+      otpTable([
+        ...Array.from({ length: 5 }, () => ({ phone: '7795096288', purpose: 'LOGIN', createdAt: new Date() })),
+        ...Array.from({ length: 5 }, () => ({ phone: '7795096288', purpose: 'REDEMPTION_CONFIRM', createdAt: new Date() })),
+      ]);
+      await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(1);
+    });
+
+    it('cap: other numbers do not count', async () => {
+      otpTable(Array.from({ length: 5 }, () => ({ phone: '9000000009', purpose: 'KYC_CONSENT', createdAt: new Date() })));
+      await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+    });
+
+    it('cap: the window rolls — sends older than an hour no longer count', async () => {
+      jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+      try {
+        const t0 = new Date();
+        jest.setSystemTime(t0);
+        otpTable();
+        for (let i = 0; i < 5; i++) await service.sendConsentOtp(partner, dto);
+        await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+        jest.setSystemTime(new Date(t0.getTime() + 59 * 60 * 1000)); // still inside the hour
+        await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+        jest.setSystemTime(new Date(t0.getTime() + 60 * 60 * 1000 + 1000)); // all 5 aged out
+        await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('cap: honours the FIXED_OTP bypass exactly like the login cap (no count, a 6th send still goes)', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.FIXED_OTP = '123456';
+      process.env.DATABASE_URL = 'postgresql://u:p@127.0.0.1:5433/gifsy_dev';
+      otpTable(Array.from({ length: 5 }, () => ({ phone: '7795096288', purpose: 'KYC_CONSENT', createdAt: new Date() })));
+      await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      expect(mockPrisma.otpCode.count).not.toHaveBeenCalled();
+    });
+
+    it('cap: still enforced on the prod DB even if FIXED_OTP is set (bypass hard-refused there)', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.FIXED_OTP = '123456';
+      process.env.DATABASE_URL = 'postgresql://u:p@10.0.0.1:5432/gifsy_prod';
+      otpTable(Array.from({ length: 5 }, () => ({ phone: '7795096288', purpose: 'KYC_CONSENT', createdAt: new Date() })));
+      await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+    });
+
+    it('supersedes (EXPIRES, not deletes) the earlier unverified consent OTPs so the cap can count them', async () => {
+      otpTable();
+      await service.sendConsentOtp(partner, dto);
+      expect(mockPrisma.otpCode.deleteMany).not.toHaveBeenCalled();
+      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
+        where: { phone: '7795096288', purpose: 'KYC_CONSENT', verifiedAt: null, expiresAt: { gt: expect.any(Date) } },
+        data: { expiresAt: expect.any(Date) },
+      });
+      // superseded BEFORE the new row is created (the new row is never expired by it)
+      const supersedeAt = mockPrisma.otpCode.updateMany.mock.invocationCallOrder[0];
+      expect(supersedeAt).toBeLessThan(mockPrisma.otpCode.create.mock.invocationCallOrder[0]);
+    });
+
+    it('cap: a refused send (number not the owner) never reaches the count', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', partnerId: 'cp1', proposedPartner: null, partner: { phone: '9876500000' } });
+      await service.sendConsentOtp(partner, dto).catch(() => undefined);
+      expect(mockPrisma.otpCode.count).not.toHaveBeenCalled();
     });
   });
 
