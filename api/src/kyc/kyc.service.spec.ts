@@ -8,6 +8,7 @@ import {
   ConflictException,
   ForbiddenException,
   HttpException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -82,7 +83,7 @@ const mockPrisma = {
   },
   kycStatusHistory: { create: jest.fn(), findMany: jest.fn() },
   kycDocument: { create: jest.fn(), findUnique: jest.fn() },
-  otpCode: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn(), deleteMany: jest.fn() },
+  otpCode: { findFirst: jest.fn(), findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn(), deleteMany: jest.fn(), count: jest.fn() },
   outlet: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   // reviewQueue/reviewDump resolve each row's per-tenant outlet-type displayName (scoped to the
   // submission's own tenant). Default [] (set in beforeEach after the reset loop) → empty map →
@@ -107,6 +108,10 @@ const mockPrisma = {
   // calendar loader (loadHolidaySet) reads the single national-holidays row via findFirst.
   programSetting: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
+  // The OTP attempt claim (common/otp-attempt) is ONE `UPDATE "otp_codes" … RETURNING "attempts"`.
+  $queryRaw: jest.fn(),
+  // sendConsentOtp's per-(phone, outlet) advisory lock (pg_advisory_xact_lock) inside its transaction.
+  $executeRaw: jest.fn(),
 };
 
 const mockNotifications = {
@@ -237,6 +242,7 @@ describe('KycService', () => {
     // Reset every table op but PRESERVE $transaction's impl (cb → mockTx).
     for (const [key, val] of Object.entries(mockPrisma)) {
       if (key === '$transaction') continue;
+      if (typeof val === 'function') { (val as jest.Mock).mockReset(); continue; } // $queryRaw
       for (const fn of Object.values(val as Record<string, unknown>)) {
         (fn as jest.Mock).mockReset();
       }
@@ -253,7 +259,13 @@ describe('KycService', () => {
     mockPrisma.payoutTransaction.findMany.mockResolvedValue([]);
     // Claim-before-compare: consent() claims one OTP attempt atomically first — default: the claim wins
     // (set AFTER the reset loop above, which wipes every mockPrisma op).
+    // The claim returns the post-increment attempts value — default: this is attempt 1.
+    mockPrisma.$queryRaw.mockResolvedValue([{ attempts: 1 }]);
     mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 1 });
+    // A refused claim re-reads the row for the honest message — default: still live (cap spent).
+    mockPrisma.otpCode.findUnique.mockResolvedValue({ expiresAt: new Date(Date.now() + 60_000), verifiedAt: null });
+    // sendConsentOtp's per-number send cap: no recent KYC_CONSENT sends by default.
+    mockPrisma.otpCode.count.mockResolvedValue(0);
     // #3: the DRAFT→routed transition is a guarded updateMany — default: it wins.
     mockPrisma.kycSubmission.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
@@ -5674,21 +5686,30 @@ describe('KycService', () => {
 
     it('claim-before-compare: a wrong code claims atomically (no read-then-write) and keeps the 401 copy', async () => {
       mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o3', code: '999999', attempts: 1, maxAttempts: 3 });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([{ attempts: 2 }]); // this claim = attempt 2
       const err = await service
         .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
         .catch((e) => e);
       expect(err.getStatus()).toBe(401);
       expect(err.message).toBe('Invalid OTP. 1 attempt(s) remaining.');
-      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
-        where: { id: 'o3', verifiedAt: null, attempts: { lt: 3 } },
-        data: { attempts: { increment: 1 } },
-      });
+      expect(mockPrisma.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.$queryRaw.mock.calls[0][0].values).toEqual(['o3', 3]);
       expect(mockPrisma.otpCode.update).not.toHaveBeenCalled();
+    });
+
+    it('exact remaining: computed from the claim post-increment value, not the earlier (stale) read', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o3', code: '999999', attempts: 0, maxAttempts: 3 });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([{ attempts: 3 }]); // two parallel guesses claimed first
+      const err = await service
+        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
+        .catch((e) => e);
+      expect(err.getStatus()).toBe(401);
+      expect(err.message).toBe('Invalid OTP. 0 attempt(s) remaining.');
     });
 
     it('claim-before-compare: a lost claim → the existing 429 "OTP locked…", the right code is never accepted', async () => {
       mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o4', code: '111111', attempts: 0, maxAttempts: 3 });
-      mockPrisma.otpCode.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([]); // claim refused: no row updated
       const err = await service
         .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' })
         .catch((e) => e);
@@ -5696,6 +5717,25 @@ describe('KycService', () => {
       expect(err.message).toBe('OTP locked due to too many attempts. Request a new OTP.');
       expect(mockPrisma.otpCode.update).not.toHaveBeenCalled(); // never marked verified
       expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
+    });
+
+    it('L1 wording: a lost claim on a code superseded/EXPIRED meanwhile → 401 "OTP not found or expired"', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o4', code: '111111', attempts: 0, maxAttempts: 3 });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([]);
+      mockPrisma.otpCode.findUnique.mockResolvedValueOnce({ expiresAt: new Date(Date.now() - 1000), verifiedAt: null });
+      const err = await service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
+      expect(err.getStatus()).toBe(401);
+      expect(err.message).toBe('OTP not found or expired');
+      expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
+    });
+
+    it('L1 wording: a lost claim on a code that is GONE → 401 "OTP not found or expired"', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o4', code: '111111', attempts: 0, maxAttempts: 3 });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([]);
+      mockPrisma.otpCode.findUnique.mockResolvedValueOnce(null);
+      const err = await service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
+      expect(err.getStatus()).toBe(401);
+      expect(err.message).toBe('OTP not found or expired');
     });
 
     it('#2: verify looks up the OTP bound to THIS submission + its normalised owner phone', async () => {
@@ -5758,7 +5798,7 @@ describe('KycService', () => {
         id: 's1', status: 'DRAFT', userId: 'user1', proposedPartner: null, partner: { phone: '9000000001', ownerName: 'O', outlets: [] },
       });
       mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'o9', code: '111111', attempts: 0, maxAttempts: 3 });
-      const row = simulateOtpRow(mockPrisma.otpCode.updateMany);
+      const row = simulateOtpRow(mockPrisma);
       let routed = 0;
       mockPrisma.kycSubmission.updateMany.mockImplementation(async () => {
         await new Promise((r) => setImmediate(r));
@@ -5780,12 +5820,18 @@ describe('KycService', () => {
       mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'o5', code: '111111', attempts: 0, maxAttempts: 3 });
       // (submission = the describe default: owner phone 9000000001, already routed)
       mockPrisma.consentRecord.create.mockResolvedValue({ id: 'cr1' });
-      const row = simulateOtpClaims(mockPrisma.otpCode.updateMany);
+      const row = simulateOtpClaims(mockPrisma);
       const otps = Array.from({ length: 100 }, (_, i) => (i === 99 ? '111111' : String(200000 + i)));
       const results = await Promise.allSettled(otps.map((otp) =>
         service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp })));
       const msgs = results.map((r) => (r.status === 'rejected' ? (r.reason as Error).message : 'OK'));
       expect(msgs.filter((m) => m.startsWith('Invalid OTP'))).toHaveLength(3);
+      // Exact remaining per winner, from each claim's post-increment value (was "2 …" for all three).
+      expect(msgs.filter((m) => m.startsWith('Invalid OTP')).sort()).toEqual([
+        'Invalid OTP. 0 attempt(s) remaining.',
+        'Invalid OTP. 1 attempt(s) remaining.',
+        'Invalid OTP. 2 attempt(s) remaining.',
+      ]);
       expect(msgs.filter((m) => m === 'OTP locked due to too many attempts. Request a new OTP.')).toHaveLength(97);
       expect(msgs).not.toContain('OK');
       expect(row.attempts).toBe(3);
@@ -7387,6 +7433,16 @@ describe('KycService', () => {
   // ─── sendConsentOtp (the previously-missing OTP send) + phone validation ───────
   describe('sendConsentOtp', () => {
     const dto = { submissionId: 'sub1', mobile: '7795096288' };
+    // The send cap is skipped under the FIXED_OTP bypass — pin it OFF here (restored after).
+    const envKeys = ['NODE_ENV', 'FIXED_OTP', 'DATABASE_URL', 'ALLOW_FIXED_OTP'] as const;
+    const savedEnv: Record<string, string | undefined> = {};
+    beforeEach(() => { for (const k of envKeys) savedEnv[k] = process.env[k]; delete process.env.FIXED_OTP; });
+    afterEach(() => {
+      for (const k of envKeys) {
+        if (savedEnv[k] === undefined) delete process.env[k];
+        else process.env[k] = savedEnv[k];
+      }
+    });
 
     beforeEach(() => {
       // #2: the owner phone persisted on the submission = the number the rep's form sends.
@@ -7396,6 +7452,15 @@ describe('KycService', () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue(null);
       mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
       mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
+      // The send's count + supersede + create run in ONE transaction under an advisory lock: run the
+      // callback against mockPrisma itself (so the otpCode mocks above apply). Restored after.
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+      mockPrisma.otpCode.findMany.mockResolvedValue([]); // per-phone ceiling: no recent sends by default
+      mockPrisma.$executeRaw.mockResolvedValue(1);
+      mockPrisma.$transaction.mockImplementation(async (cb: (tx: any) => unknown) => cb(mockPrisma));
+    });
+    afterEach(() => {
+      mockPrisma.$transaction.mockImplementation(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx));
     });
 
     it('creates a KYC_CONSENT OtpCode and sends it via MSG91 (global env template when unset)', async () => {
@@ -7466,6 +7531,399 @@ describe('KycService', () => {
       expect(mockPrisma.otpCode.create.mock.calls[0][0].data.phone).toBe('7795096288');
       const other = await service.sendConsentOtp(partner, { submissionId: 'sub1', mobile: '9000000009' }).catch((e) => e);
       expect(other).toBeInstanceOf(BadRequestException);
+    });
+
+    // ── Send cap: 5 KYC_CONSENT sends per (normalised phone, OUTLET PARTNER) per rolling hour ────
+    // Keyed on the outlet partner (every KYC submission of that partnerId), so a fresh DRAFT for the
+    // same outlet never resets the budget; group siblings are distinct partners → independent.
+    type OtpRow = { phone: string; purpose: string; referenceId: string | null; createdAt: Date };
+    /**
+     * Submissions by id → partnerId (tenant 'deoleo' unless listed in `otherTenant`);
+     * kycSubmission.findFirst/findMany answer from it — the per-outlet lookup (where.partnerId) and
+     * the per-phone ceiling's tenant lookup (where.id IN … AND user.clientId).
+     */
+    function subs(map: Record<string, string | null>, otherTenant: string[] = []) {
+      const tenantOf = (id: string) => (otherTenant.includes(id) ? 'other' : 'deoleo');
+      mockPrisma.kycSubmission.findFirst.mockImplementation(async ({ where }: any) =>
+        (where.id in map ? { id: where.id, partnerId: map[where.id], proposedPartner: null, partner: { phone: '7795096288' } } : null));
+      mockPrisma.kycSubmission.findMany.mockImplementation(async ({ where }: any) => {
+        if (where.id?.in) {
+          return (where.id.in as string[]).filter((id) => id in map && tenantOf(id) === where.user.clientId).map((id) => ({ id }));
+        }
+        return Object.entries(map).filter(([, p]) => p !== null && p === where.partnerId).map(([id]) => ({ id }));
+      });
+    }
+    /**
+     * Simulates otp_codes for the cap: count() honours phone + purpose + referenceId IN (…) +
+     * createdAt >= gte exactly as the DB would, and create() appends a row stamped with the (fake)
+     * clock. Both yield a tick, so unserialised parallel sends WOULD interleave check-then-create.
+     */
+    function otpTable(seed: OtpRow[] = []) {
+      const rows = [...seed];
+      const refOk = (r: OtpRow, w: any) => (w.referenceId?.in ? w.referenceId.in.includes(r.referenceId) : r.referenceId === w.referenceId);
+      mockPrisma.otpCode.count.mockImplementation(async ({ where }: any) => {
+        await new Promise((r) => setImmediate(r));
+        return rows.filter((r) => r.phone === where.phone && r.purpose === where.purpose && refOk(r, where)
+          && r.createdAt >= where.createdAt.gte).length;
+      });
+      mockPrisma.otpCode.findMany.mockImplementation(async ({ where }: any) => {
+        await new Promise((r) => setImmediate(r));
+        return rows.filter((r) => r.phone === where.phone && r.purpose === where.purpose && r.createdAt >= where.createdAt.gte)
+          .map((r) => ({ referenceId: r.referenceId }));
+      });
+      mockPrisma.otpCode.create.mockImplementation(async ({ data }: any) => {
+        await new Promise((r) => setImmediate(r));
+        rows.push({ phone: data.phone, purpose: data.purpose, referenceId: data.referenceId ?? null, createdAt: new Date() });
+        return { id: `otp${rows.length}` };
+      });
+      return rows;
+    }
+    const sends = (n: number, over: Partial<OtpRow> = {}): OtpRow[] =>
+      Array.from({ length: n }, () => ({ phone: '7795096288', purpose: 'KYC_CONSENT', referenceId: 'sub1', createdAt: new Date(), ...over }));
+    const CAP_MSG = 'Too many OTPs sent to this number. Please try again later.';
+
+    it('cap: 5 sends for outlet A succeed, the 6th → 429 with the clear message; nothing created or sent', async () => {
+      subs({ sub1: 'cp1' });
+      otpTable();
+      for (let i = 0; i < 5; i++) await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(5);
+      const err = await service.sendConsentOtp(partner, dto).catch((e) => e);
+      expect(err).toBeInstanceOf(HttpException);
+      expect(err.getStatus()).toBe(429);
+      expect(err.message).toBe(CAP_MSG);
+      expect(mockPrisma.otpCode.create).toHaveBeenCalledTimes(5);
+      expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(5);
+      // counted on the NORMALISED number + KYC_CONSENT + every submission of THIS outlet + a 1-hour window
+      const where = mockPrisma.otpCode.count.mock.calls[0][0].where;
+      expect(where.phone).toBe('7795096288');
+      expect(where.purpose).toBe('KYC_CONSENT');
+      expect(where.referenceId).toEqual({ in: ['sub1'] });
+      expect(mockPrisma.kycSubmission.findMany).toHaveBeenCalledWith({ where: { partnerId: 'cp1' }, select: { id: true } });
+      expect(Math.abs(Date.now() - 60 * 60 * 1000 - where.createdAt.gte.getTime())).toBeLessThan(5000);
+    });
+
+    it('M1: a FRESH DRAFT for the SAME outlet does not reset the budget (6th send still 429)', async () => {
+      subs({ sub1: 'cp1', subDraft2: 'cp1' });
+      otpTable(sends(5)); // outlet cp1 spent its budget on sub1
+      const err = await service.sendConsentOtp(partner, { submissionId: 'subDraft2', mobile: '7795096288' }).catch((e) => e);
+      expect(err.getStatus()).toBe(429);
+      expect(err.message).toBe(CAP_MSG);
+      expect(mockMsg91.sendOtp).not.toHaveBeenCalled();
+    });
+
+    it('cap: a 6th send for the SAME number for a sibling OUTLET (another partner, group onboarding) is allowed', async () => {
+      subs({ sub1: 'cp1', sub2: 'cp2' });
+      const rows = otpTable(sends(5)); // outlet A (cp1) is at its cap
+      await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+      await expect(service.sendConsentOtp(partner, { submissionId: 'sub2', mobile: '7795096288' }))
+        .resolves.toEqual({ success: true, expiresIn: 600 });
+      expect(rows.filter((r) => r.referenceId === 'sub2')).toHaveLength(1);
+      // …and the sibling has its own full budget of 5.
+      for (let i = 0; i < 4; i++) await service.sendConsentOtp(partner, { submissionId: 'sub2', mobile: '7795096288' });
+      await expect(service.sendConsentOtp(partner, { submissionId: 'sub2', mobile: '7795096288' }))
+        .rejects.toMatchObject({ message: CAP_MSG });
+    });
+
+    it('cap: with no partner on the submission it falls back to the submission alone', async () => {
+      subs({ sub1: null });
+      otpTable(sends(5));
+      await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+      expect(mockPrisma.kycSubmission.findMany).not.toHaveBeenCalled();
+      expect(mockPrisma.otpCode.count.mock.calls[0][0].where.referenceId).toEqual({ in: ['sub1'] });
+    });
+
+    it('M2: count + supersede + create run in ONE transaction under an advisory lock on (phone, partner)', async () => {
+      subs({ sub1: 'cp1' });
+      otpTable();
+      await service.sendConsentOtp(partner, dto);
+      expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+      // TWO locks, always in the same order (phone-wide first, then per-outlet) → no deadlock.
+      expect(mockPrisma.$executeRaw).toHaveBeenCalledTimes(2);
+      const [strings, ...values] = mockPrisma.$executeRaw.mock.calls[0];
+      expect((strings as string[]).join('?')).toContain('pg_advisory_xact_lock(hashtextextended(');
+      expect(values).toEqual(['kyc-consent-otp-phone:7795096288']);
+      const [strings2, ...values2] = mockPrisma.$executeRaw.mock.calls[1];
+      expect((strings2 as string[]).join('?')).toContain('pg_advisory_xact_lock(hashtextextended(');
+      expect(values2).toEqual(['kyc-consent-otp:7795096288:cp1']);
+      const lockAt = mockPrisma.$executeRaw.mock.invocationCallOrder[1];
+      expect(lockAt).toBeLessThan(mockPrisma.otpCode.count.mock.invocationCallOrder[0]);
+      expect(lockAt).toBeLessThan(mockPrisma.otpCode.create.mock.invocationCallOrder[0]);
+      // the SMS goes out only after the transaction (never while holding the lock)
+      expect(mockMsg91.sendOtp.mock.invocationCallOrder[0]).toBeGreaterThan(mockPrisma.otpCode.create.mock.invocationCallOrder[0]);
+    });
+
+    it('M2: 20 PARALLEL sends for one (number, outlet) → exactly 5 succeed, 15 get 429', async () => {
+      subs({ sub1: 'cp1' });
+      const rows = otpTable();
+      // Advisory-lock fake, KEYED like pg: $executeRaw(key) waits for that key's previous holder; a
+      // transaction releases every lock it took when its callback settles (xact-scoped locks).
+      const tails = new Map<string, Promise<void>>();
+      mockPrisma.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) => {
+        const releases: Array<() => void> = [];
+        const tx = new Proxy(mockPrisma, {
+          get(t, p) {
+            if (p === '$executeRaw') {
+              return async (_s: TemplateStringsArray, key: string) => {
+                const prev = tails.get(key) ?? Promise.resolve();
+                tails.set(key, new Promise<void>((r) => { releases.push(r); }));
+                await prev;
+                return 1;
+              };
+            }
+            return (t as any)[p];
+          },
+        });
+        try { return await cb(tx); } finally { releases.forEach((r) => r()); }
+      });
+      const results = await Promise.allSettled(Array.from({ length: 20 }, () => service.sendConsentOtp(partner, dto)));
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(5);
+      const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+      expect(rejected).toHaveLength(15);
+      rejected.forEach((r) => expect((r.reason as HttpException).getStatus()).toBe(429));
+      expect(rows).toHaveLength(5);
+      expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(5);
+    });
+
+    it('cap: logs a distinct masked structured line (last 4 only, partner + submission) when it refuses', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      try {
+        subs({ sub1: 'cp1' });
+        otpTable(sends(5));
+        await service.sendConsentOtp(partner, dto).catch(() => undefined);
+        const line = warn.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith('[kyc-consent-otp-send-cap]'));
+        expect(line).toBeDefined();
+        const payload = JSON.parse(line!.replace('[kyc-consent-otp-send-cap] ', ''));
+        expect(payload).toEqual({ event: 'kyc_consent_otp.send_cap', phone: '******6288', partnerId: 'cp1', submissionId: 'sub1', recentSends: 5, max: 5, windowHours: 1 });
+        expect(line).not.toContain('7795096288');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('cap: other OTP purposes to the same number do not count', async () => {
+      subs({ sub1: 'cp1' });
+      otpTable([
+        ...sends(5, { purpose: 'LOGIN', referenceId: null }),
+        ...sends(5, { purpose: 'REDEMPTION_CONFIRM', referenceId: 'sub1' }), // even a colliding referenceId
+      ]);
+      await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(1);
+    });
+
+    it('cap: other numbers do not count', async () => {
+      subs({ sub1: 'cp1' });
+      otpTable(sends(5, { phone: '9000000009' })); // same submission id, another number
+      await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+    });
+
+    it('cap: the window rolls — sends older than an hour no longer count', async () => {
+      jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+      try {
+        const t0 = new Date();
+        jest.setSystemTime(t0);
+        subs({ sub1: 'cp1' });
+        otpTable();
+        for (let i = 0; i < 5; i++) await service.sendConsentOtp(partner, dto);
+        await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+        jest.setSystemTime(new Date(t0.getTime() + 59 * 60 * 1000)); // still inside the hour
+        await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+        jest.setSystemTime(new Date(t0.getTime() + 60 * 60 * 1000 + 1000)); // all 5 aged out
+        await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('cap: honours the FIXED_OTP bypass exactly like the login cap (no count, a 6th send still goes)', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.FIXED_OTP = '123456';
+      process.env.DATABASE_URL = 'postgresql://u:p@127.0.0.1:5433/gifsy_dev';
+      subs({ sub1: 'cp1' });
+      otpTable(sends(5));
+      await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      expect(mockPrisma.otpCode.count).not.toHaveBeenCalled();
+      expect(mockPrisma.otpCode.findMany).not.toHaveBeenCalled(); // nor the per-phone ceiling
+    });
+
+    // ── Per-PHONE ceiling: 15 KYC_CONSENT sends per normalised phone per hour within the tenant ─────
+    const PHONE_SUBS = { s1: 'p1', s2: 'p2', s3: 'p3', s4: 'p4' };
+    const sendTo = (submissionId: string) => service.sendConsentOtp(partner, { submissionId, mobile: '7795096288' });
+
+    it('phone ceiling: 3 outlets × 5 = 15 sends ok, the 16th (a 4th outlet) → 429 same message', async () => {
+      subs(PHONE_SUBS);
+      otpTable();
+      for (const s of ['s1', 's2', 's3']) {
+        for (let i = 0; i < 5; i++) await expect(sendTo(s)).resolves.toEqual({ success: true, expiresIn: 600 });
+      }
+      expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(15);
+      const err = await sendTo('s4').catch((e) => e);
+      expect(err.getStatus()).toBe(429);
+      expect(err.message).toBe(CAP_MSG);
+      expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(15);
+      // the ceiling reads this phone's KYC_CONSENT rows in the window, then keeps only THIS tenant's submissions
+      const w = mockPrisma.otpCode.findMany.mock.calls[0][0];
+      expect(w).toMatchObject({ where: { phone: '7795096288', purpose: 'KYC_CONSENT' }, select: { referenceId: true } });
+      const tenantLookup = mockPrisma.kycSubmission.findMany.mock.calls.find((c: any[]) => c[0].where.id);
+      expect(tenantLookup![0].where.user).toEqual({ clientId: 'deoleo' });
+    });
+
+    it('phone ceiling: the per-outlet 5 still applies underneath it', async () => {
+      subs(PHONE_SUBS);
+      otpTable();
+      for (let i = 0; i < 5; i++) await sendTo('s1');
+      await expect(sendTo('s1')).rejects.toMatchObject({ message: CAP_MSG });
+      await expect(sendTo('s2')).resolves.toEqual({ success: true, expiresIn: 600 });
+    });
+
+    it('phone ceiling: logs a distinct masked line (event kyc_consent_otp.send_cap_phone)', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      try {
+        subs(PHONE_SUBS);
+        otpTable([...sends(5, { referenceId: 's1' }), ...sends(5, { referenceId: 's2' }), ...sends(5, { referenceId: 's3' })]);
+        await sendTo('s4').catch(() => undefined);
+        const line = warn.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith('[kyc-consent-otp-send-cap-phone]'));
+        expect(line).toBeDefined();
+        const payload = JSON.parse(line!.replace('[kyc-consent-otp-send-cap-phone] ', ''));
+        expect(payload).toEqual({ event: 'kyc_consent_otp.send_cap_phone', phone: '******6288', clientId: 'deoleo', submissionId: 's4', recentSends: 15, max: 15, windowHours: 1 });
+        expect(line).not.toContain('7795096288');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('phone ceiling: another tenant\'s sends to the same number do not count', async () => {
+      subs({ ...PHONE_SUBS, x1: 'q1', x2: 'q2', x3: 'q3' }, ['x1', 'x2', 'x3']);
+      otpTable([...sends(5, { referenceId: 'x1' }), ...sends(5, { referenceId: 'x2' }), ...sends(5, { referenceId: 'x3' })]);
+      await expect(sendTo('s4')).resolves.toEqual({ success: true, expiresIn: 600 });
+    });
+
+    it('phone ceiling: honours the FIXED_OTP bypass (16th send still goes)', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.FIXED_OTP = '123456';
+      process.env.DATABASE_URL = 'postgresql://u:p@127.0.0.1:5433/gifsy_dev';
+      subs(PHONE_SUBS);
+      otpTable([...sends(5, { referenceId: 's1' }), ...sends(5, { referenceId: 's2' }), ...sends(5, { referenceId: 's3' })]);
+      await expect(sendTo('s4')).resolves.toEqual({ success: true, expiresIn: 600 });
+    });
+
+    it('phone ceiling: 30 PARALLEL sends across 4 outlets → exactly 15 succeed', async () => {
+      subs(PHONE_SUBS);
+      const rows = otpTable();
+      const tails = new Map<string, Promise<void>>();
+      mockPrisma.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) => {
+        const releases: Array<() => void> = [];
+        const tx = new Proxy(mockPrisma, {
+          get(t, p) {
+            if (p === '$executeRaw') {
+              return async (_s: TemplateStringsArray, key: string) => {
+                const prev = tails.get(key) ?? Promise.resolve();
+                tails.set(key, new Promise<void>((r) => { releases.push(r); }));
+                await prev;
+                return 1;
+              };
+            }
+            return (t as any)[p];
+          },
+        });
+        try { return await cb(tx); } finally { releases.forEach((r) => r()); }
+      });
+      const targets = Array.from({ length: 30 }, (_, i) => ['s1', 's2', 's3', 's4'][i % 4]);
+      const results = await Promise.allSettled(targets.map((s) => sendTo(s)));
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(15);
+      expect(rows).toHaveLength(15);
+    });
+
+    it('cap: still enforced on the prod DB even if FIXED_OTP is set (bypass hard-refused there)', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.FIXED_OTP = '123456';
+      process.env.DATABASE_URL = 'postgresql://u:p@10.0.0.1:5432/gifsy_prod';
+      subs({ sub1: 'cp1' });
+      otpTable(sends(5));
+      await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+    });
+
+    it('supersedes (EXPIRES, not deletes) the OUTLET\'s earlier unverified consent OTPs (any of its submissions)', async () => {
+      subs({ sub1: 'cp1', subOldDraft: 'cp1', subSibling: 'cp2' });
+      otpTable();
+      await service.sendConsentOtp(partner, dto);
+      expect(mockPrisma.otpCode.deleteMany).not.toHaveBeenCalled();
+      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
+        where: {
+          phone: '7795096288', purpose: 'KYC_CONSENT', referenceId: { in: ['sub1', 'subOldDraft'] },
+          verifiedAt: null, expiresAt: { gt: expect.any(Date) },
+        },
+        data: { expiresAt: expect.any(Date) },
+      });
+      // superseded BEFORE the new row is created (the new row is never expired by it)
+      const supersedeAt = mockPrisma.otpCode.updateMany.mock.invocationCallOrder[0];
+      expect(supersedeAt).toBeLessThan(mockPrisma.otpCode.create.mock.invocationCallOrder[0]);
+    });
+
+    it('group siblings: sending B\'s OTP never invalidates A\'s code; resending A (or a fresh A draft) does', async () => {
+      // A small otp_codes table honouring the where-clauses the send (supersede/create) and the
+      // consent verify (findFirst / claim / mark-used) actually issue.
+      type Row = { id: string; phone: string; code: string; purpose: string; referenceId: string; expiresAt: Date; verifiedAt: Date | null; attempts: number; maxAttempts: number; createdAt: Date };
+      const rows: Row[] = [];
+      let seq = 0;
+      const refOk = (r: Row, w: any) => (!('referenceId' in w)) || (w.referenceId?.in ? w.referenceId.in.includes(r.referenceId) : r.referenceId === w.referenceId);
+      const live = (r: Row, w: any) => r.phone === w.phone && r.purpose === w.purpose && refOk(r, w)
+        && (!('verifiedAt' in w) || (w.verifiedAt === null ? r.verifiedAt === null : true))
+        && (!w.expiresAt?.gt || r.expiresAt > w.expiresAt.gt);
+      mockPrisma.otpCode.count.mockResolvedValue(0);
+      mockPrisma.otpCode.create.mockImplementation(async ({ data }: any) => {
+        const r: Row = { id: `o${++seq}`, createdAt: new Date(Date.now() + seq), verifiedAt: null, attempts: 0, ...data };
+        rows.push(r);
+        return r;
+      });
+      mockPrisma.otpCode.updateMany.mockImplementation(async ({ where, data }: any) => {
+        if (where.id) { // conditional mark-used
+          const r = rows.find((x) => x.id === where.id && (where.verifiedAt !== null || x.verifiedAt === null));
+          if (!r) return { count: 0 };
+          Object.assign(r, data);
+          return { count: 1 };
+        }
+        const hit = rows.filter((r) => live(r, where)); // supersede
+        hit.forEach((r) => Object.assign(r, data));
+        return { count: hit.length };
+      });
+      mockPrisma.otpCode.findFirst.mockImplementation(async ({ where }: any) =>
+        rows.filter((r) => live(r, where)).sort((a, b) => +b.createdAt - +a.createdAt)[0] ?? null);
+      // Two sibling OUTLETS (distinct partners) sharing the owner phone, plus a fresh draft of A.
+      const partnerOf: Record<string, string> = { subA: 'cpA', subB: 'cpB', subA2: 'cpA' };
+      const sub = (id: string) => ({
+        id, partnerId: partnerOf[id], proposedPartner: null, status: 'SUBMITTED', userId: 'user1',
+        partner: { phone: '7795096288', ownerName: 'O', outlets: [] },
+      });
+      mockPrisma.kycSubmission.findFirst.mockImplementation(async ({ where }: any) => sub(where.id));
+      mockPrisma.kycSubmission.findMany.mockImplementation(async ({ where }: any) =>
+        Object.keys(partnerOf).filter((k) => partnerOf[k] === where.partnerId).map((id) => ({ id })));
+      mockPrisma.consentRecord.create.mockResolvedValue({ id: 'cr' });
+      const codeOf = (n: number) => mockMsg91.sendOtp.mock.calls[n][1] as string;
+
+      await service.sendConsentOtp(partner, { submissionId: 'subA', mobile: '7795096288' });
+      const codeA1 = codeOf(0);
+      await service.sendConsentOtp(partner, { submissionId: 'subB', mobile: '7795096288' });
+      // B's send did not expire A's live code → A verifies with it.
+      await expect(service.consent(partner, { submissionId: 'subA', mobile: '7795096288', otp: codeA1 }))
+        .resolves.toEqual({ verified: true, submissionId: 'subA' });
+
+      // Resend A: then a FRESH DRAFT of the same outlet A supersedes it (one active per number+outlet).
+      await service.sendConsentOtp(partner, { submissionId: 'subA', mobile: '7795096288' });
+      const codeA2 = codeOf(2);
+      await service.sendConsentOtp(partner, { submissionId: 'subA2', mobile: '7795096288' });
+      const rowA2 = rows.find((r) => r.code === codeA2 && r.referenceId === 'subA')!;
+      expect(rowA2.expiresAt.getTime()).toBeLessThanOrEqual(Date.now()); // A's earlier code is now invalid
+      const err = await service.consent(partner, { submissionId: 'subA', mobile: '7795096288', otp: codeA2 }).catch((e) => e);
+      expect(err.getStatus()).toBe(401);
+      // B's code is still live throughout.
+      const rowB = rows.find((r) => r.referenceId === 'subB')!;
+      expect(rowB.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    });
+
+    it('cap: a refused send (number not the owner) never reaches the count', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', partnerId: 'cp1', proposedPartner: null, partner: { phone: '9876500000' } });
+      await service.sendConsentOtp(partner, dto).catch(() => undefined);
+      expect(mockPrisma.otpCode.count).not.toHaveBeenCalled();
     });
   });
 
@@ -7597,14 +8055,16 @@ describe('KycService', () => {
  * Claim-before-compare (2026-11-10): simulate the OtpCode row's atomic conditional increment — the
  * ONLY serialisation point — so N parallel verifies that all READ attempts=0 can be exercised.
  */
-function simulateOtpClaims(updateMany: jest.Mock, maxAttempts = 3) {
+function simulateOtpClaims(db: { $queryRaw: jest.Mock; otpCode: { updateMany: jest.Mock } }, maxAttempts = 3) {
   const state = { attempts: 0 };
-  updateMany.mockImplementation(async ({ where, data }: any) => {
+  // The claim: ONE `UPDATE "otp_codes" … WHERE … "attempts" < $2 RETURNING "attempts"` (values [id, max]).
+  db.$queryRaw.mockImplementation(async (q: any) => {
     await new Promise((r) => setImmediate(r)); // interleave the parallel callers
-    if (data?.attempts?.increment) {
-      if (state.attempts < (where?.attempts?.lt ?? maxAttempts)) { state.attempts++; return { count: 1 }; }
-      return { count: 0 };
-    }
+    if (state.attempts < (q.values?.[1] ?? maxAttempts)) { state.attempts++; return [{ attempts: state.attempts }]; }
+    return [];
+  });
+  db.otpCode.updateMany.mockImplementation(async ({ data }: any) => {
+    await new Promise((r) => setImmediate(r));
     if (data?.attempts?.decrement) { if (state.attempts > 0) state.attempts--; return { count: 1 }; }
     return { count: 1 };
   });
@@ -7616,8 +8076,16 @@ function simulateOtpClaims(updateMany: jest.Mock, maxAttempts = 3) {
  * the refund (decrement) and the conditional "mark used" (verifiedAt: null → set once). Interleaves
  * callers so parallel verifies race exactly as they would against the DB's row-level serialisation.
  */
-function simulateOtpRow(updateMany: jest.Mock, maxAttempts = 3) {
+function simulateOtpRow(db: { $queryRaw: jest.Mock; otpCode: { updateMany: jest.Mock } }, maxAttempts = 3) {
   const row = { attempts: 0, verifiedAt: null as Date | null, marks: 0 };
+  // The claim: ONE `UPDATE … WHERE id AND verifiedAt IS NULL AND attempts < $max RETURNING attempts`.
+  db.$queryRaw.mockImplementation(async (q: any) => {
+    await new Promise((r) => setImmediate(r));
+    if (row.verifiedAt || !(row.attempts < (q.values?.[1] ?? maxAttempts))) return [];
+    row.attempts++;
+    return [{ attempts: row.attempts }];
+  });
+  const updateMany = db.otpCode.updateMany;
   updateMany.mockImplementation(async ({ where, data }: any) => {
     await new Promise((r) => setImmediate(r));
     if (data?.verifiedAt) {

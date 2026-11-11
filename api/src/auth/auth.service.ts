@@ -13,7 +13,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
-import { claimOtpAttempt, markOtpUsed } from '../common/otp-attempt';
+import { claimOtpAttempt, markOtpUsed, whyOtpClaimRefused } from '../common/otp-attempt';
 import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
 import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
 import { ALL_PERMISSIONS } from '../common/rbac/permissions';
@@ -329,14 +329,20 @@ export class AuthService {
     // ~100 concurrent guesses through before it reached maxAttempts (audit L1). The conditional
     // increment is the single serialisation point — only maxAttempts claims can ever win, and a
     // losing claim is never compared (even a correct code), so it cannot mint a session.
-    if (!(await claimOtpAttempt(this.prisma, record))) {
+    const claimed = await claimOtpAttempt(this.prisma, record);
+    if (claimed === null) {
+      // Refused: re-read so a code superseded/expired or pruned meanwhile gets the honest message (L1).
+      const why = await whyOtpClaimRefused(this.prisma, record.id);
+      if (why === 'EXPIRED') throw new UnauthorizedException('OTP expired — please request a new one.');
+      if (why === 'GONE') throw new UnauthorizedException('No active OTP found for this number. Please request a new OTP.');
       throw new ForbiddenException('Too many attempts — please request a new OTP.');
     }
 
     const isCorrect = fixedOtp ? otp === fixedOtp : otp === record.code;
 
     if (!isCorrect) {
-      const remaining = record.maxAttempts - record.attempts - 1;
+      // From the atomic claim's post-increment value — exact under parallel guesses (not the stale read).
+      const remaining = Math.max(0, record.maxAttempts - claimed);
       throw new UnauthorizedException(`Invalid OTP. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`);
     }
 

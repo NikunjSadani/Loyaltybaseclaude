@@ -13,7 +13,7 @@ import { GiftFulfilmentChannel, PayoutMode, Prisma, RedemptionStatus } from '@pr
 import { PrismaService } from '../prisma/prisma.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
-import { claimOtpAttempt, markOtpUsed, refundOtpAttempt } from '../common/otp-attempt';
+import { claimOtpAttempt, markOtpUsed, refundOtpAttempt, whyOtpClaimRefused } from '../common/otp-attempt';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -3354,15 +3354,21 @@ export class RewardsService {
     // Claim-before-compare (common/otp-attempt): claim one attempt ATOMICALLY before comparing, so
     // parallel guesses that all read the same `attempts` can't exceed maxAttempts; a losing claim is
     // refused with the existing "too many attempts" error and its code is never compared.
-    if (!(await claimOtpAttempt(this.prisma, record))) {
+    const claimed = await claimOtpAttempt(this.prisma, record);
+    if (claimed === null) {
       await this.throwIfOrderAlreadyConfirmed(orderId);
+      // Refused: re-read so a code superseded/expired or pruned meanwhile gets the honest message (L1).
+      const why = await whyOtpClaimRefused(this.prisma, record.id);
+      if (why === 'EXPIRED') throw new UnauthorizedException('OTP expired — please restart the redemption.');
+      if (why === 'GONE') throw new UnauthorizedException('No active OTP found. Please restart the redemption.');
       throw new UnauthorizedException('Too many attempts — please restart the redemption.');
     }
 
     const fixedOtp = isFixedOtpAllowed() ? process.env.FIXED_OTP : undefined;
     const isCorrect = fixedOtp ? otp === fixedOtp : otp === record.code;
     if (!isCorrect) {
-      const remaining = record.maxAttempts - record.attempts - 1;
+      // From the atomic claim's post-increment value — exact under parallel guesses (not the stale read).
+      const remaining = Math.max(0, record.maxAttempts - claimed);
       throw new UnauthorizedException(
         `Invalid OTP. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`,
       );

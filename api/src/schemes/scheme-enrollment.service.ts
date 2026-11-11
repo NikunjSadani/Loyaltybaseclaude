@@ -18,7 +18,7 @@ import { platformWide, isGifsyOperator } from '../common/tenant-scope';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { descendantSalesUserIds, SalesUserEdge } from '../sales/sales-hierarchy-access.helper';
 import { generateNumericOtp } from '../common/otp';
-import { claimOtpAttempt, markOtpUsed } from '../common/otp-attempt';
+import { claimOtpAttempt, markOtpUsed, whyOtpClaimRefused } from '../common/otp-attempt';
 import { startOfIstDay, endOfIstDay, istDayRangeFilter } from '../common/ist-date';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { sniffFileType } from '../common/file-signature';
@@ -783,13 +783,18 @@ export class SchemeEnrollmentService {
     }
     // Claim-before-compare (common/otp-attempt): claim the attempt ATOMICALLY before comparing, so
     // parallel guesses can't exceed maxAttempts; a losing claim gets the same 429 as above.
-    if (!(await claimOtpAttempt(this.prisma, rec))) {
+    const claimed = await claimOtpAttempt(this.prisma, rec);
+    if (claimed === null) {
+      // Refused: re-read so a code superseded/expired or pruned meanwhile gets the honest message (L1).
+      const why = await whyOtpClaimRefused(this.prisma, rec.id);
+      if (why !== 'SPENT') throw new HttpException('OTP not found or expired', HttpStatus.UNAUTHORIZED);
       throw new HttpException('OTP locked due to too many attempts. Request a new OTP.', HttpStatus.TOO_MANY_REQUESTS);
     }
     const fixedOtp = isFixedOtpAllowed() ? process.env.FIXED_OTP : undefined;
     const matches = rec.code === dto.otp || (!!fixedOtp && dto.otp === fixedOtp);
     if (!matches) {
-      const remaining = rec.maxAttempts - rec.attempts - 1;
+      // From the atomic claim's post-increment value — exact under parallel guesses (not the stale read).
+      const remaining = Math.max(0, rec.maxAttempts - claimed);
       throw new HttpException(`Invalid OTP. ${remaining} attempt(s) remaining.`, HttpStatus.UNAUTHORIZED);
     }
     // Conditional consume: a parallel correct verify that lost the race gets the not-found 401.
