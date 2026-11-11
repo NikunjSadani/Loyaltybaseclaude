@@ -174,7 +174,11 @@ const KYC_EVENT_ROUTING: Record<string, { eventKey?: EventKey; subject: string }
 const PAYOUT_CHANGED_AFTER_SUBMIT_MESSAGE =
   "The outlet's payment details changed after this KYC was submitted — reject it and submit a new re-KYC";
 
-/** KYC consent OTP per-number send cap (sendConsentOtp): at most this many sends per rolling window. */
+/**
+ * KYC consent OTP send cap (sendConsentOtp): at most this many sends per (normalised phone, KYC
+ * submission) per rolling window. Per SUBMISSION so group onboarding (sibling outlets sharing one
+ * owner phone) is never blocked by another submission's sends.
+ */
 export const KYC_CONSENT_OTP_MAX_PER_WINDOW = 5;
 /** Rolling window for the KYC consent OTP send cap, in hours. */
 export const KYC_CONSENT_OTP_WINDOW_HOURS = 1;
@@ -517,21 +521,24 @@ export class KycService {
 
     const mobile = ownerPhone;
 
-    // Per-number send cap (2026-11-11) — mirrors the LOGIN cap in auth.service sendOtp: a DB COUNT over
-    // a rolling window, so it holds across ALL Cloud Run instances (in-memory throttles are
-    // per-instance). Counts only KYC_CONSENT sends to this normalised number (login / redemption /
-    // scheme OTPs have their own budgets). Skipped only when the fixed-OTP dev/staging bypass is
-    // active, so UAT/e2e can resend freely — exactly like the login cap.
+    // Per-(number, submission) send cap (2026-11-11, owner decision) — mirrors the LOGIN cap in
+    // auth.service sendOtp: a DB COUNT over a rolling window, so it holds across ALL Cloud Run
+    // instances (in-memory throttles are per-instance). Counts only KYC_CONSENT sends to this
+    // normalised number FOR THIS SUBMISSION (OtpCode.referenceId = submission id): group onboarding
+    // — sibling outlets sharing one owner phone, each its own submission — is never blocked by
+    // another submission's sends; login / redemption / scheme OTPs have their own budgets. Skipped
+    // only when the fixed-OTP dev/staging bypass is active, so UAT/e2e can resend freely — exactly
+    // like the login cap.
     const fixedOtpActive = isFixedOtpAllowed() && !!process.env.FIXED_OTP;
     if (!fixedOtpActive) {
       const windowStart = new Date(Date.now() - KYC_CONSENT_OTP_WINDOW_HOURS * 60 * 60 * 1000);
       const recentSends = await this.prisma.otpCode.count({
-        where: { phone: mobile, purpose: 'KYC_CONSENT', createdAt: { gte: windowStart } },
+        where: { phone: mobile, purpose: 'KYC_CONSENT', referenceId: submission.id, createdAt: { gte: windowStart } },
       });
       if (recentSends >= KYC_CONSENT_OTP_MAX_PER_WINDOW) {
         // Distinct structured line (the login cap logs event 'otp.send_cap'). Masked — never log the raw number.
         this.logger.warn(
-          `[kyc-consent-otp-send-cap] ${JSON.stringify({ event: 'kyc_consent_otp.send_cap', phone: `******${mobile.slice(-4)}`, recentSends, max: KYC_CONSENT_OTP_MAX_PER_WINDOW, windowHours: KYC_CONSENT_OTP_WINDOW_HOURS })}`,
+          `[kyc-consent-otp-send-cap] ${JSON.stringify({ event: 'kyc_consent_otp.send_cap', phone: `******${mobile.slice(-4)}`, submissionId: submission.id, recentSends, max: KYC_CONSENT_OTP_MAX_PER_WINDOW, windowHours: KYC_CONSENT_OTP_WINDOW_HOURS })}`,
         );
         throw new HttpException(
           'Too many OTPs sent to this number. Please wait an hour before trying again.',
@@ -542,9 +549,9 @@ export class KycService {
 
     const otp = this.generateOtpCode();
 
-    // One active consent OTP per number: SUPERSEDE (expire) the number's earlier unverified consent
-    // OTPs instead of deleting them — the rows must survive so the send cap above can count actual
-    // sends. consent() only accepts an unexpired row, so an expired one is inert (same effect as the
+    // One active consent OTP per number (unchanged semantics): SUPERSEDE (expire) the number's
+    // earlier unverified consent OTPs instead of deleting them — the rows must survive so the send
+    // cap above can count actual sends. consent() only accepts an unexpired row, so an expired one is inert (same effect as the
     // old delete). Rows age out via the global expired-OTP cleanup in auth.service sendOtp.
     await this.prisma.otpCode.updateMany({
       where: { phone: mobile, purpose: 'KYC_CONSENT', verifiedAt: null, expiresAt: { gt: new Date() } },
