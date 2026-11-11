@@ -670,6 +670,8 @@ describe('SalesService', () => {
       // city/state behaviour unchanged.
       expect(existingKyc.city).toBe('Delhi');
       expect(existingKyc.state).toBe('DL');
+      // Mobile prefills the OWNER (partner) phone, not outlet.phone — the consent OTP is bound to it.
+      expect(existingKyc.mobile).toBe('888');
     });
 
     it("re-KYC prefill: accountHolderName defaults to '' (never undefined) when partner.bankAccountHolder is null", async () => {

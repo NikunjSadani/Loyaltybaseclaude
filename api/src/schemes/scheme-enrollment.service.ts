@@ -18,7 +18,7 @@ import { platformWide, isGifsyOperator } from '../common/tenant-scope';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { descendantSalesUserIds, SalesUserEdge } from '../sales/sales-hierarchy-access.helper';
 import { generateNumericOtp } from '../common/otp';
-import { claimOtpAttempt } from '../common/otp-attempt';
+import { claimOtpAttempt, markOtpUsed } from '../common/otp-attempt';
 import { startOfIstDay, endOfIstDay, istDayRangeFilter } from '../common/ist-date';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { sniffFileType } from '../common/file-signature';
@@ -792,7 +792,10 @@ export class SchemeEnrollmentService {
       const remaining = rec.maxAttempts - rec.attempts - 1;
       throw new HttpException(`Invalid OTP. ${remaining} attempt(s) remaining.`, HttpStatus.UNAUTHORIZED);
     }
-    await this.prisma.otpCode.update({ where: { id: rec.id }, data: { verifiedAt: new Date() } });
+    // Conditional consume: a parallel correct verify that lost the race gets the not-found 401.
+    if (!(await markOtpUsed(this.prisma, rec.id))) {
+      throw new HttpException('OTP not found or expired', HttpStatus.UNAUTHORIZED);
+    }
     return { verified: true, phone };
   }
 

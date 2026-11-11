@@ -36,3 +36,16 @@ export async function refundOtpAttempt(db: OtpAttemptDb, id: string): Promise<vo
     data:  { attempts: { decrement: 1 } },
   });
 }
+
+/**
+ * Consume (mark used) an OTP CONDITIONALLY — only if no one else consumed it first. Returns false when
+ * the row is already verified, so two parallel correct submissions can never both succeed (each site
+ * then raises its existing "OTP not found / no active OTP" error). Works with a transaction client.
+ */
+export async function markOtpUsed(db: OtpAttemptDb, id: string, at: Date = new Date()): Promise<boolean> {
+  const { count } = await db.otpCode.updateMany({
+    where: { id, verifiedAt: null },
+    data:  { verifiedAt: at },
+  });
+  return count === 1;
+}

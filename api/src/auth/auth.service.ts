@@ -13,7 +13,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
-import { claimOtpAttempt } from '../common/otp-attempt';
+import { claimOtpAttempt, markOtpUsed } from '../common/otp-attempt';
 import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
 import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
 import { ALL_PERMISSIONS } from '../common/rbac/permissions';
@@ -229,7 +229,9 @@ export class AuthService {
 
     if (!fixedOtpActive) {
       const recentSends = await this.prisma.otpCode.count({
-        where: { phone: cleanPhone, createdAt: { gte: windowStart } },
+        // LOGIN-only: KYC-consent / redemption / scheme OTPs sent to the same number are their own
+        // flows (each with its own limits) and must not eat this number's login budget.
+        where: { phone: cleanPhone, purpose: 'LOGIN', createdAt: { gte: windowStart } },
       });
       if (recentSends >= OTP_MAX_PER_WINDOW) {
         // Distinct from the throttler's "throttle.rejected" line (IdentityThrottlerGuard): this is the
@@ -296,8 +298,12 @@ export class AuthService {
   ): Promise<{ accessToken: string; refreshToken: string; user: Partial<User> }> {
     const cleanPhone = phone.replace(/\D/g, '');
 
+    // LOGIN-purpose only: the phone may also hold an unverified REDEMPTION_CONFIRM / KYC_CONSENT /
+    // scheme OTP, and a login attempt must never read (or burn attempts on) one of those. `purpose` is
+    // a NOT NULL enum and sendOtp always writes 'LOGIN', so there are no legacy null-purpose login rows.
+    // (OtpCode has no tenant column — the tenant is enforced by the user lookup below.)
     const record = await this.prisma.otpCode.findFirst({
-      where:   { phone: cleanPhone, verifiedAt: null },
+      where:   { phone: cleanPhone, purpose: 'LOGIN', verifiedAt: null },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -334,11 +340,10 @@ export class AuthService {
       throw new UnauthorizedException(`Invalid OTP. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`);
     }
 
-    // Mark OTP as used
-    await this.prisma.otpCode.update({
-      where: { id: record.id },
-      data:  { verifiedAt: new Date() },
-    });
+    // Mark OTP as used — CONDITIONALLY, so two parallel correct submissions can't both mint a session.
+    if (!(await markOtpUsed(this.prisma, record.id))) {
+      throw new UnauthorizedException('No active OTP found for this number. Please request a new OTP.');
+    }
 
     // Resolve the login user — TWO-STEP so it is DETERMINISTIC now that ACTIVE + INACTIVE
     // rows can share a phone (deactivation frees the number: it flips status→INACTIVE while

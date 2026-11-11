@@ -506,10 +506,33 @@ describe('SchemeEnrollmentService', () => {
         where: { id: 'otpE', verifiedAt: null, attempts: { lt: 3 } },
         data: { attempts: { increment: 1 } },
       });
-      expect(mockPrisma.otpCode.update).not.toHaveBeenCalled();
+      expect(mockPrisma.otpCode.updateMany.mock.calls.filter((c: any[]) => c[0]?.data?.verifiedAt)).toHaveLength(0);
 
       await expect(verify('424242')).resolves.toEqual({ verified: true, phone: '9812345678' });
-      expect(mockPrisma.otpCode.update).toHaveBeenCalledWith({ where: { id: 'otpE' }, data: { verifiedAt: expect.any(Date) } });
+      // consumed CONDITIONALLY (#3)
+      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({ where: { id: 'otpE', verifiedAt: null }, data: { verifiedAt: expect.any(Date) } });
+    });
+
+    it('#3 verify OTP: the "mark used" is conditional — already used → 401 "OTP not found or expired"', async () => {
+      primeSalesStandalone(rosterRow);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'otpE', code: '424242', attempts: 0, maxAttempts: 3 });
+      mockPrisma.otpCode.updateMany.mockImplementation(async ({ data }: any) =>
+        (data?.verifiedAt ? { count: 0 } : { count: 1 }));
+      const err = await verify('424242').catch((e) => e);
+      expect(err.getStatus()).toBe(401);
+      expect(err.message).toBe('OTP not found or expired');
+      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
+        where: { id: 'otpE', verifiedAt: null }, data: { verifiedAt: expect.any(Date) },
+      });
+    });
+
+    it('#3 verify OTP: two parallel CORRECT verifies → exactly one succeeds', async () => {
+      primeSalesStandalone(rosterRow);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'otpE', code: '424242', attempts: 0, maxAttempts: 3 });
+      const row = simulateOtpRow(mockPrisma.otpCode.updateMany);
+      const results = await Promise.allSettled([verify('424242'), verify('424242')]);
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      expect(row.marks).toBe(1);
     });
 
     it('verify OTP: a lost claim → the existing 429 "OTP locked…" and the right code is NOT accepted', async () => {
@@ -519,7 +542,7 @@ describe('SchemeEnrollmentService', () => {
       const err = await verify('424242').catch((e) => e);
       expect(err.getStatus()).toBe(429);
       expect(err.message).toBe('OTP locked due to too many attempts. Request a new OTP.');
-      expect(mockPrisma.otpCode.update).not.toHaveBeenCalled();
+      expect(mockPrisma.otpCode.updateMany.mock.calls.filter((c: any[]) => c[0]?.data?.verifiedAt)).toHaveLength(0); // never marked verified
     });
 
     it('verify OTP: 100 parallel guesses (all reading attempts=0), right code LAST → never verified', async () => {
@@ -534,7 +557,7 @@ describe('SchemeEnrollmentService', () => {
       expect(msgs.filter((m) => m === 'OTP locked due to too many attempts. Request a new OTP.')).toHaveLength(97);
       expect(msgs).not.toContain('OK');
       expect(row.attempts).toBe(3);
-      expect(mockPrisma.otpCode.update).not.toHaveBeenCalled();
+      expect(mockPrisma.otpCode.updateMany.mock.calls.filter((c: any[]) => c[0]?.data?.verifiedAt)).toHaveLength(0); // never marked verified
     });
 
     it('submit records the roster number (a client-typed field/mobile is ignored)', async () => {
@@ -1247,4 +1270,28 @@ function simulateOtpClaims(updateMany: jest.Mock, maxAttempts = 3) {
     return { count: 1 };
   });
   return state;
+}
+
+/**
+ * A one-OtpCode-row fake for updateMany (2026-11-10): honours the claim (attempts < max, unverified),
+ * the refund (decrement) and the conditional "mark used" (verifiedAt: null → set once). Interleaves
+ * callers so parallel verifies race exactly as they would against the DB's row-level serialisation.
+ */
+function simulateOtpRow(updateMany: jest.Mock, maxAttempts = 3) {
+  const row = { attempts: 0, verifiedAt: null as Date | null, marks: 0 };
+  updateMany.mockImplementation(async ({ where, data }: any) => {
+    await new Promise((r) => setImmediate(r));
+    if (data?.verifiedAt) {
+      if (where?.verifiedAt === null && row.verifiedAt) return { count: 0 };
+      row.verifiedAt = data.verifiedAt; row.marks++; return { count: 1 };
+    }
+    if (data?.attempts?.increment) {
+      if (row.verifiedAt && where?.verifiedAt === null) return { count: 0 };
+      if (row.attempts < (where?.attempts?.lt ?? maxAttempts)) { row.attempts++; return { count: 1 }; }
+      return { count: 0 };
+    }
+    if (data?.attempts?.decrement) { if (row.attempts > 0) row.attempts--; return { count: 1 }; }
+    return { count: 1 };
+  });
+  return row;
 }
