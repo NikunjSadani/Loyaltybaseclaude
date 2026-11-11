@@ -513,6 +513,71 @@ describe('CASH — Cash Payout tab (real beneficiary, free-amount)', () => {
     });
   });
 
+  it('CASH5: the amount locks once the OTP is sent; success shows the ORDER amount; "Change amount" restarts', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/auth/me')) return Promise.resolve(meWithBank());
+      if (url.includes('/api/rewards/redeem/confirm')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { orderId: 'ord-c', status: 'CONFIRMED', message: 'ok' } }) });
+      }
+      if (url.includes('/api/rewards/redeem')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ success: true, data: { orderId: 'ord-c', orderNumber: 'RDM-C', requiredPoints: 600, message: 'OTP sent' } }),
+        });
+      }
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWithCash());
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /cash payout/i }));
+    await user.click(await screen.findByRole('button', { name: /redeem for cash/i }));
+    const input = (await screen.findByLabelText(/payout amount/i)) as HTMLInputElement;
+    await user.type(input, '600');
+    await user.click(screen.getByRole('button', { name: /redeem ₹600/i }));
+    await screen.findByLabelText('OTP');
+    expect(input).toBeDisabled(); // locked: the order already carries ₹600
+
+    // "Change amount" unlocks and abandons the OTP (a fresh redeem next time).
+    await user.click(screen.getByRole('button', { name: 'Change amount' }));
+    expect(screen.queryByLabelText('OTP')).toBeNull();
+    expect(input).toBeEnabled();
+
+    await user.click(screen.getByRole('button', { name: /redeem ₹600/i }));
+    await user.type(await screen.findByLabelText('OTP'), '123456');
+    await user.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText(/₹600 will be paid to/)).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([u]) => u === '/api/rewards/redeem')).toHaveLength(2);
+  });
+
+  it('F3: success copy uses the SERVER requiredPoints from redeem-init (not the local calc)', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/auth/me')) return Promise.resolve(meWithBank());
+      if (url.includes('/api/rewards/redeem/confirm')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { orderId: 'ord-c', status: 'CONFIRMED', message: 'ok' } }) });
+      }
+      if (url.includes('/api/rewards/redeem')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ success: true, data: { orderId: 'ord-c', orderNumber: 'RDM-C', requiredPoints: 777, message: 'OTP sent' } }),
+        });
+      }
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWithCash());
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /cash payout/i }));
+    await user.click(await screen.findByRole('button', { name: /redeem for cash/i }));
+    await user.type(await screen.findByLabelText(/payout amount/i), '600');
+    await user.click(screen.getByRole('button', { name: /redeem ₹600/i }));
+    await user.type(await screen.findByLabelText('OTP'), '123456');
+    await user.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText(/777 pts deducted/)).toBeInTheDocument();
+  });
+
   it('CASH4: with NO bank/UPI on file, shows the complete-KYC empty-state and hides the form', async () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
       if (url.includes('/api/auth/me')) return Promise.resolve(meEmpty());
@@ -653,7 +718,7 @@ describe('HD — choose-from-amounts voucher', () => {
 });
 
 describe('WR — whole-rupee typed amounts (vouchers + cash)', () => {
-  it('WR-P1: a free-amount voucher input turns typed "750.5" into 750 and posts an integer', async () => {
+  it('WR-P1: a typed "750.5" stays visible and is INVALID — the tap says "Check the amount — whole rupees only", nothing is sent', async () => {
     const fetchMock = vi.fn().mockImplementation((url: string) => {
       if (url.includes('/api/rewards/redeem')) return Promise.resolve(redeemOk());
       if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWith([FREE_AMOUNT_VOUCHER]));
@@ -667,7 +732,13 @@ describe('WR — whole-rupee typed amounts (vouchers + cash)', () => {
 
     const input = (await screen.findByLabelText(/voucher amount/i)) as HTMLInputElement;
     await user.type(input, '750.5');
-    expect(input.value).toBe('750');
+    expect(input.value).toBe('750.5'); // never silently shrunk to 750
+    await user.click(screen.getByRole('button', { name: /send otp/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount — whole rupees only');
+    expect(fetchMock.mock.calls.some(([u]) => u === '/api/rewards/redeem')).toBe(false);
+    // Fixed to a whole amount → posts the integer.
+    await user.clear(input);
+    await user.type(input, '750');
     await user.click(screen.getByRole('button', { name: /send otp/i }));
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(([u]) => u === '/api/rewards/redeem');
@@ -676,7 +747,25 @@ describe('WR — whole-rupee typed amounts (vouchers + cash)', () => {
     });
   });
 
-  it('WR-P2: the cash payout input turns a pasted "1,250.75" into 1250', async () => {
+  it('item 12: on a consent-gated voucher an invalid amount shows "Check the amount" on the FIRST tap (with the consent prompt)', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/rewards/redeem')) return Promise.resolve(redeemOk());
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWith([{ ...FREE_AMOUNT_VOUCHER, requiresConsent: true }]));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /vouchers/i }));
+    await user.click(await screen.findByText('Flexi Voucher'));
+    const input = (await screen.findByLabelText(/voucher amount/i)) as HTMLInputElement;
+    await user.type(input, '750.5');
+    await user.click(screen.getByRole('button', { name: /send otp/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount — whole rupees only');
+    expect(fetchMock.mock.calls.some(([u]) => u === '/api/rewards/redeem')).toBe(false);
+  });
+
+  it('WR-P2: the cash payout input flags a pasted "1,250.75" ("Check the amount"; the tap explains, never sends); "Rs. 1,250" → 1250', async () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
       if (url.includes('/api/auth/me')) return Promise.resolve(meWithBank());
       if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWithCash());
@@ -689,7 +778,22 @@ describe('WR — whole-rupee typed amounts (vouchers + cash)', () => {
     const input = (await screen.findByLabelText(/payout amount/i)) as HTMLInputElement;
     await user.click(input);
     await user.paste('1,250.75');
+    expect(input.value).toBe('1,250.75'); // never shrunk to 1250
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount');
+    expect(input).toHaveAttribute('aria-invalid', 'true');
+    // F6: not disabled — a tap re-shows the reason and sends nothing.
+    const btn = screen.getByRole('button', { name: 'Check the amount — whole rupees only' });
+    expect(btn).toBeEnabled();
+    // F2: the next keystroke hides the alert; the live hint is never role="alert".
+    await user.type(input, '1');
+    expect(screen.queryByRole('alert')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Redeem' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount');
+    expect((fetch as unknown as { mock: { calls: [string][] } }).mock.calls.some(([u]) => u === '/api/rewards/redeem')).toBe(false);
+    await user.clear(input);
+    await user.paste('Rs. 1,250');
     expect(input.value).toBe('1250');
+    expect(screen.queryByRole('alert')).toBeNull();
     expect(input).toHaveAttribute('inputmode', 'numeric');
   });
 });

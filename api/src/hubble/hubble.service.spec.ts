@@ -309,6 +309,52 @@ describe('HubbleService', () => {
       await expect(svc.getProduct('x')).resolves.toMatchObject({ denominationType: 'FLEXIBLE' });
     });
 
+    describe('getProductForRedeem (re-check M1: fast, single-flight, negative cache, never throws)', () => {
+      const fast = (svc: HubbleService, budgetMs = 30) => {
+        (svc as unknown as { redeemLookupBudgetMs: number }).redeemLookupBudgetMs = budgetMs;
+        return svc;
+      };
+
+      it('a hung Hubble → null after the budget (not 15 s), then the next 60 s skip WITHOUT any request', async () => {
+        fetchMock.mockImplementation(() => new Promise(() => undefined)); // login never answers
+        const svc = fast(makeService());
+        const t0 = Date.now();
+        await expect(svc.getProductForRedeem('fk-fixed')).resolves.toBeNull();
+        expect(Date.now() - t0).toBeLessThan(1000);
+        const callsAfterFirst = fetchMock.mock.calls.length;
+        await expect(svc.getProductForRedeem('fk-fixed')).resolves.toBeNull();
+        expect(fetchMock.mock.calls.length).toBe(callsAfterFirst); // negative cache: no new request
+      });
+
+      it('concurrent lookups for one product share ONE request (single-flight)', async () => {
+        fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
+        fetchMock.mockResolvedValueOnce(jsonRes(200, FIXED_BODY));
+        const svc = fast(makeService(), 2000);
+        const [a, b, c] = await Promise.all([
+          svc.getProductForRedeem('fk-fixed'), svc.getProductForRedeem('fk-fixed'), svc.getProductForRedeem('fk-fixed'),
+        ]);
+        expect(a?.denominationType).toBe('FIXED');
+        expect(b).toBe(a);
+        expect(c).toBe(a);
+        expect(fetchMock).toHaveBeenCalledTimes(2); // one login + one GET
+      });
+
+      it('an error (5xx / not found) → null, never throws; not configured → null with no request', async () => {
+        fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
+        fetchMock.mockResolvedValueOnce(jsonRes(503, {}));
+        await expect(fast(makeService(), 2000).getProductForRedeem('x')).resolves.toBeNull();
+        fetchMock.mockClear();
+        await expect(makeService({ HUBBLE_CLIENT_ID_STAGING: undefined }).getProductForRedeem('x')).resolves.toBeNull();
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it('the redeem budget is 2.5 s and the negative cache 60 s (issuance keeps getProduct + 15 s)', () => {
+        const svc = makeService();
+        expect(svc.redeemLookupBudgetMs).toBe(2500);
+        expect(svc.redeemNegativeTtlMs).toBe(60000);
+      });
+    });
+
     it('rejects an unsafe productId before any HTTP call', async () => {
       await expect(makeService().getProduct('../orders')).rejects.toBeInstanceOf(HubbleProductNotFoundError);
       expect(fetchMock).not.toHaveBeenCalled();

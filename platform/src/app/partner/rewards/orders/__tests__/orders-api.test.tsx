@@ -12,7 +12,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import OrdersPage from '../page';
@@ -118,6 +118,80 @@ describe('OR — Orders API wiring (live data)', () => {
     const btn = await screen.findByTestId('copy-voucher-btn');
     await userEvent.click(btn);
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('AMZ-GIFT-7788-CODE'));
+    // A polite live region announces it.
+    expect(screen.getByTestId('copy-voucher-btn-status')).toHaveAttribute('aria-live', 'polite');
+    await waitFor(() => expect(screen.getByTestId('copy-voucher-btn-status')).toHaveTextContent('Copied'));
+  });
+
+  it('OR6e: a clipboard failure says "Copy failed — long-press to copy" (visible + announced); the value is selectable', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('NotAllowedError'));
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    stubOrders([VOUCHER_ORDER]);
+    render(<OrdersPage />);
+    await userEvent.click(await screen.findByTestId('copy-voucher-btn'));
+    const status = screen.getByTestId('copy-voucher-btn-status');
+    await waitFor(() => expect(status).toHaveTextContent('Copy failed — long-press to copy'));
+    expect(status).toHaveAttribute('aria-live', 'polite');
+    expect(status).not.toHaveClass('sr-only'); // visible, not only announced
+    expect(screen.getByTestId('voucher-code')).toHaveClass('select-all');
+  });
+
+  it('OR6f: the "Copy failed" hint clears after ~4 s, and a new tap starts fresh', async () => {
+    const writeText = vi.fn().mockRejectedValueOnce(new Error('NotAllowedError')).mockResolvedValueOnce(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    stubOrders([VOUCHER_ORDER]);
+    render(<OrdersPage />);
+    const btn = await screen.findByTestId('copy-voucher-btn');
+    const status = screen.getByTestId('copy-voucher-btn-status');
+    await userEvent.click(btn);
+    await waitFor(() => expect(status).toHaveTextContent('Copy failed'));
+    // next tap: the failure is replaced (here by a successful copy)
+    await userEvent.click(btn);
+    await waitFor(() => expect(status).toHaveTextContent('Copied'));
+    expect(status).not.toHaveTextContent('Copy failed');
+    // and on its own after ~4 s
+    writeText.mockRejectedValueOnce(new Error('NotAllowedError'));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await userEvent.click(btn);
+      await waitFor(() => expect(status).toHaveTextContent('Copy failed'));
+      await act(async () => { vi.advanceTimersByTime(4100); });
+      expect(status).toHaveTextContent('');
+      expect(status).not.toHaveTextContent('Copy failed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('item 11: a REPEATED failure is re-announced (the region empties, then says it again); an old timer never cuts the new hint short', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('NotAllowedError'));
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    stubOrders([VOUCHER_ORDER]);
+    render(<OrdersPage />);
+    const btn = await screen.findByTestId('copy-voucher-btn');
+    const status = screen.getByTestId('copy-voucher-btn-status');
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await userEvent.click(btn);
+      await waitFor(() => expect(status).toHaveTextContent('Copy failed'));
+      await act(async () => { vi.advanceTimersByTime(3000); }); // 1 s left on the first hint
+      const seen: string[] = [];
+      const obs = new MutationObserver(() => seen.push(status.textContent ?? ''));
+      obs.observe(status, { childList: true, characterData: true, subtree: true });
+      await userEvent.click(btn);
+      await waitFor(() => expect(status).toHaveTextContent('Copy failed'));
+      obs.disconnect();
+      // The region went EMPTY and then carried the hint again → a screen reader announces it again.
+      expect(seen).toContain('');
+      expect(seen[seen.length - 1]).toContain('Copy failed');
+      // The FIRST tap's 4 s timer was cleared: 1.5 s later the new hint is still there.
+      await act(async () => { vi.advanceTimersByTime(1500); });
+      expect(status).toHaveTextContent('Copy failed');
+      await act(async () => { vi.advanceTimersByTime(3000); });
+      expect(status).not.toHaveTextContent('Copy failed');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('OR6b: voucher line shows the reward BRAND, never the back-end aggregator (e.g. Hubble)', async () => {
@@ -126,6 +200,29 @@ describe('OR — Orders API wiring (live data)', () => {
     // "Amazon Voucher" → brand "Amazon"; the aggregator name must not leak to the partner.
     expect(await screen.findByText(/Voucher Code\s*·\s*Amazon/)).toBeInTheDocument();
     expect(screen.queryByText(/Hubble/i)).toBeNull();
+  });
+
+  it('OR6c: a card number + PIN gift card shows "Card no." and "PIN", each with its own copy button', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    stubOrders([{ ...VOUCHER_ORDER, voucherCode: '6001220012345678', voucherPin: '482913', voucherProvider: 'Hubble' }]);
+    render(<OrdersPage />);
+    expect(await screen.findByTestId('voucher-code')).toHaveTextContent('6001220012345678');
+    expect(screen.getByTestId('voucher-pin')).toHaveTextContent('482913');
+    expect(screen.getByText('Card no.')).toBeInTheDocument();
+    expect(screen.getByText('PIN')).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('copy-voucher-pin-btn'));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('482913'));
+    await userEvent.click(screen.getByTestId('copy-voucher-btn'));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('6001220012345678'));
+  });
+
+  it('OR6d: a number-only voucher (no PIN) renders exactly as before — no PIN row', async () => {
+    stubOrders([{ ...VOUCHER_ORDER, voucherPin: null }]);
+    render(<OrdersPage />);
+    expect(await screen.findByText(/Voucher Code/)).toBeInTheDocument();
+    expect(screen.queryByTestId('voucher-pin')).toBeNull();
+    expect(screen.queryByText('Card no.')).toBeNull();
   });
 
   it('OR7: PHYSICAL_GIFT order renders a tracking link to the tracking URL', async () => {

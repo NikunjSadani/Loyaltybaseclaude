@@ -8,6 +8,9 @@ import { Msg91Service } from '../notifications/msg91.service';
 
 const BATCH_SIZE = 50;
 
+/** SMS template variables that carry a secret (the VOUCHER_ISSUED `code` = the voucher code). */
+const SECRET_SMS_VARS = ['code'] as const;
+
 /**
  * Delivery worker — drains QUEUED `NotificationQueue` rows and dispatches them:
  *   - the PUSH leg (channel='PUSH') via the Web Push sender;
@@ -152,18 +155,18 @@ export class PushDeliveryWorker {
           // Non-null by the select filter above; assert for the type checker. crqid is passed only
           // when a receipt exists (keeps the no-receipt call byte-identical to the prior 3-arg send).
           // Destructure defensively (`?? {}`) so a caller/mock returning no object never throws.
-          const sendRes = receipt
-            ? await this.msg91.sendSms(
-                row.recipientPhone!,
-                row.templateId!,
-                this.smsVariables(row.variables),
-                { crqid: receipt.crqid },
-              )
-            : await this.msg91.sendSms(
-                row.recipientPhone!,
-                row.templateId!,
-                this.smsVariables(row.variables),
-              );
+          // A voucher `code` var is flagged as a secret so a provider error echoing it is withheld
+          // from the thrown reason (→ this row's log, the receipt failureReason, app logs).
+          const smsVars = this.smsVariables(row.variables);
+          const secretValues = SECRET_SMS_VARS.map((k) => smsVars[k]).filter((v): v is string => !!v?.trim());
+          const opts = {
+            ...(receipt ? { crqid: receipt.crqid } : {}),
+            ...(secretValues.length ? { secretValues } : {}),
+          };
+          const sendRes =
+            Object.keys(opts).length > 0
+              ? await this.msg91.sendSms(row.recipientPhone!, row.templateId!, smsVars, opts)
+              : await this.msg91.sendSms(row.recipientPhone!, row.templateId!, smsVars);
           const requestId = (sendRes ?? {}).requestId ?? null;
           // The send SUCCEEDED (billed). Flip the receipt QUEUED→SENT FIRST (best-effort, guarded,
           // never throws) — done before the queue post-writes so that even if a queue write below

@@ -450,7 +450,12 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
       await userEvent.click(within(panel).getByRole('button', { name: /add amount/i }));
       expect(await scope.findByText(/minimum for this brand is ₹500/i)).toBeInTheDocument();
       await userEvent.clear(amt);
-      await userEvent.type(amt, '1000.5'); // decimal swallowed → 1000
+      await userEvent.type(amt, '1000.5'); // a decimal is never swallowed — refused, nothing added
+      await userEvent.click(within(panel).getByRole('button', { name: /add amount/i }));
+      expect(await within(panel).findByText('Check the amount — whole rupees only')).toHaveAttribute('role', 'alert');
+      expect(scope.queryByRole('button', { name: 'Remove ₹1,000' })).toBeNull();
+      await userEvent.clear(amt);
+      await userEvent.type(amt, '1000');
       await userEvent.click(within(panel).getByRole('button', { name: /add amount/i }));
       expect(scope.getByRole('button', { name: 'Remove ₹1,000' })).toBeInTheDocument();
 
@@ -478,6 +483,16 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
         .toHaveTextContent("Hubble didn't return its amounts — enter the amounts Hubble shows for this brand");
 
       const amt = within(panel).getByLabelText('Amount to offer');
+      // F2/F6: an invalid amount never disables "Add amount" — the tap shows "Check the amount" (and
+      // adds nothing); the next keystroke hides it.
+      await userEvent.type(amt, '1,2');
+      const addBtn = within(panel).getByRole('button', { name: /add amount/i });
+      expect(addBtn).toBeEnabled();
+      await userEvent.click(addBtn);
+      expect(await within(panel).findByText('Check the amount — whole rupees only')).toHaveAttribute('role', 'alert');
+      await userEvent.type(amt, '5');
+      expect(within(panel).queryByText('Check the amount — whole rupees only')).toBeNull();
+      await userEvent.clear(amt);
       await userEvent.type(amt, '175'); // below the ₹200 program minimum
       await userEvent.click(within(panel).getByRole('button', { name: /add amount/i }));
       expect(await scope.findByText(/below this program's minimum voucher amount/i)).toBeInTheDocument();

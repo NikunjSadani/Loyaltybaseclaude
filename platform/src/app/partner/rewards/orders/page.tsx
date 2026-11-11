@@ -25,6 +25,8 @@ interface ApiOrder {
   redemptionMode?: string | null;          // GIFT_CARD | VOUCHER | PHYSICAL_GIFT | BANK_TRANSFER | UPI
   totalPointsCost: number;
   voucherCode?: string | null;
+  /** Card PIN for a card number + PIN gift card (member's own order only). */
+  voucherPin?: string | null;
   voucherProvider?: string | null;
   trackingNumber?: string | null;
   trackingUrl?: string | null;
@@ -49,6 +51,7 @@ interface Order {
   status: string;
   redemptionMode?: string | null;
   voucherCode?: string | null;
+  voucherPin?: string | null;
   voucherProvider?: string | null;
   trackingNumber?: string | null;
   trackingUrl?: string | null;
@@ -85,6 +88,7 @@ function mapApiOrder(o: ApiOrder): Order {
     status:          o.status,
     redemptionMode:  o.redemptionMode ?? null,
     voucherCode:     o.voucherCode ?? null,
+    voucherPin:      o.voucherPin?.trim() ? o.voucherPin : null,
     voucherProvider: o.voucherProvider ?? null,
     trackingNumber:  o.trackingNumber ?? null,
     trackingUrl:     o.trackingUrl ?? null,
@@ -122,42 +126,100 @@ function brandLabel(rewardName: string): string {
 
 /* ─── Voucher code block with copy-to-clipboard ───────────────────────────── */
 
-function VoucherCodeBlock({ code, brand }: { code: string; brand?: string | null }) {
-  const [copied, setCopied] = useState(false);
+function CopyButton({ value, testId, label }: { value: string; testId: string; label: string }) {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  // ONE pending timer per button: every tap clears the previous one, so an old "reset to idle"
+  // can never cut a newer message short.
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const later = (fn: () => void, ms: number) => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(fn, ms);
+  };
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
 
   const copy = async () => {
+    // A new tap always starts fresh (a previous "Copied" / "Copy failed" is cleared).
+    if (timer.current) clearTimeout(timer.current);
+    setState('idle');
     try {
-      await navigator.clipboard.writeText(code);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
+      await navigator.clipboard.writeText(value);
+      setState('copied');
+      later(() => setState('idle'), 2000);
     } catch {
-      // Clipboard unavailable (e.g. insecure context) — leave state unchanged.
+      // Clipboard blocked / unavailable (insecure context, old WebView): say so, and the value
+      // itself stays user-selectable (select-all) so a long-press copies it. Set on the NEXT tick
+      // so the live region really goes empty first — a repeated failure is announced again.
+      later(() => {
+        setState('failed');
+        // The failure hint clears itself after ~4 s (or on the next tap, above).
+        later(() => setState('idle'), 4000);
+      }, 0);
     }
   };
 
+  return (
+    <span className="flex flex-col items-end shrink-0">
+      <button
+        type="button"
+        data-testid={testId}
+        aria-label={label}
+        onClick={copy}
+        className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-white border border-emerald-200 text-emerald-700 hover:bg-emerald-100 transition-colors"
+      >
+        {state === 'copied' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+        {state === 'copied' ? 'Copied' : 'Copy'}
+      </button>
+      {/* Announced politely to screen readers ("Copied" / the failure hint); the failure is visible too. */}
+      <span aria-live="polite" role="status" data-testid={`${testId}-status`} className={state === 'failed' ? 'mt-0.5 text-[10px] text-red-600' : 'sr-only'}>
+        {state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed — long-press to copy' : ''}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * The member's voucher. A number-only / PIN-only card shows one "Voucher Code" row (unchanged); a
+ * card number + PIN gift card shows "Card no." and "PIN", each with its own copy button.
+ */
+function VoucherCodeBlock({ code, pin, brand }: { code: string; pin?: string | null; brand?: string | null }) {
   return (
     <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2.5">
       <div className="flex items-center gap-1.5 mb-1.5">
         <Ticket className="h-3.5 w-3.5 text-emerald-700" />
         <p className="text-[10px] font-semibold text-emerald-700 uppercase tracking-wide">
-          Voucher Code{brand ? ` · ${brand}` : ''}
+          {pin ? 'Gift Card' : 'Voucher Code'}{brand ? ` · ${brand}` : ''}
         </p>
       </div>
-      <div className="flex items-center gap-2">
-        <code data-testid="voucher-code" className="flex-1 font-mono text-sm font-bold text-gray-900 break-all">
-          {code}
-        </code>
-        <button
-          type="button"
-          data-testid="copy-voucher-btn"
-          aria-label="Copy voucher code"
-          onClick={copy}
-          className="flex items-center gap-1 shrink-0 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-white border border-emerald-200 text-emerald-700 hover:bg-emerald-100 transition-colors"
-        >
-          {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-          {copied ? 'Copied' : 'Copy'}
-        </button>
-      </div>
+      {pin ? (
+        <div className="space-y-2">
+          <div>
+            <p className="text-[10px] font-medium text-emerald-700/80 mb-0.5">Card no.</p>
+            <div className="flex items-center gap-2">
+              <code data-testid="voucher-code" className="flex-1 font-mono text-sm font-bold text-gray-900 break-all select-all">
+                {code}
+              </code>
+              <CopyButton value={code} testId="copy-voucher-btn" label="Copy card number" />
+            </div>
+          </div>
+          <div>
+            <p className="text-[10px] font-medium text-emerald-700/80 mb-0.5">PIN</p>
+            <div className="flex items-center gap-2">
+              <code data-testid="voucher-pin" className="flex-1 font-mono text-sm font-bold text-gray-900 break-all select-all">
+                {pin}
+              </code>
+              <CopyButton value={pin} testId="copy-voucher-pin-btn" label="Copy PIN" />
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <code data-testid="voucher-code" className="flex-1 font-mono text-sm font-bold text-gray-900 break-all select-all">
+            {code}
+          </code>
+          <CopyButton value={code} testId="copy-voucher-btn" label="Copy voucher code" />
+        </div>
+      )}
     </div>
   );
 }
@@ -348,7 +410,7 @@ export default function OrdersPage() {
 
                   {/* Voucher code (GIFT_CARD / VOUCHER, once confirmed) */}
                   {showVoucher && order.voucherCode && (
-                    <VoucherCodeBlock code={order.voucherCode} brand={brandLabel(order.rewardName)} />
+                    <VoucherCodeBlock code={order.voucherCode} pin={order.voucherPin} brand={brandLabel(order.rewardName)} />
                   )}
 
                   {/* Physical-gift tracking (member-safe: courier name + tracking only) */}

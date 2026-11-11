@@ -13,7 +13,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
-import { RewardsService, decodeOrderCursor, encodeOrderCursor, maskVoucherCode } from './rewards.service';
+import { RewardsService, decodeOrderCursor, encodeOrderCursor, hiddenVoucherFields, maskVoucherCode } from './rewards.service';
 import { hashVoucherCode } from './voucher-write-guard';
 import { PrismaService } from '../prisma/prisma.service';
 import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
@@ -66,7 +66,7 @@ const mockPrisma = {
     update: jest.fn(),
     updateMany: jest.fn(),
   },
-  redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findUniqueOrThrow: jest.fn() },
+  redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findUniqueOrThrow: jest.fn(), findUnique: jest.fn() },
   // Persistent partner wishlist (getWishlist / addToWishlist / removeFromWishlist).
   partnerWishlist: { findMany: jest.fn(), upsert: jest.fn(), deleteMany: jest.fn() },
   redemptionStatusHistory: { create: jest.fn() },
@@ -116,6 +116,7 @@ const mockHubble = {
     productId: 'amz-1', name: 'Amazon Pay', denominationType: 'FLEXIBLE', denominations: [],
     minValue: 1, maxValue: 100000, maxVouchersPerOrder: 10,
   }),
+  getProductForRedeem: jest.fn().mockResolvedValue(null),
 };
 
 // Per-tenant settings. Defaults are LENIENT (rate 1, no min-floor, all channels on) so the
@@ -884,6 +885,32 @@ describe('RewardsService', () => {
       }
     });
 
+    it('item 14: the fulfilling operator list row carries server voucherFillable (canFillStoredVoucher); member + CLIENT_ADMIN never get it, nor pointsDeducted', async () => {
+      const at = new Date('2026-10-01T10:00:00.000Z');
+      const rows = [
+        { id: 'o1', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Croma', redemptionMode: 'GIFT_CARD', pointsDeducted: 500, metadata: {}, createdAt: at, updatedAt: at },
+        { id: 'o2', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Croma', redemptionMode: 'GIFT_CARD', pointsDeducted: 0, metadata: {}, createdAt: at, updatedAt: at },
+        { id: 'o3', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Hubble', redemptionMode: 'GIFT_CARD', pointsDeducted: 500, metadata: { hubbleStatus: 'SUCCESS' }, createdAt: at, updatedAt: at },
+        { id: 'o4', status: 'RETURNED', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Croma', redemptionMode: 'GIFT_CARD', pointsDeducted: 500, metadata: {}, createdAt: at, updatedAt: at },
+      ];
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue(rows);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(rows.length);
+
+      const g = await service.listOrders(gifsy, {});
+      expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].select).toMatchObject({ pointsDeducted: true });
+      expect((g.orders as Array<{ voucherFillable?: boolean }>).map((o) => o.voucherFillable)).toEqual([true, false, false, false]);
+      for (const o of g.orders) expect(o).not.toHaveProperty('pointsDeducted');
+
+      for (const viewer of [partner, clientAdminA]) {
+        const res = await service.listOrders(viewer, {});
+        for (const o of res.orders) {
+          expect(o).not.toHaveProperty('voucherFillable');
+          expect(o).not.toHaveProperty('pointsDeducted');
+        }
+      }
+    });
+
     it('ListOrdersQueryDto caps limit at 500 (500 ok, 501 rejected; default 20 unchanged)', async () => {
       const errs = async (q: Record<string, unknown>) =>
         validate(plainToInstance(ListOrdersQueryDto, q)).then((e) => e.map((x) => x.property));
@@ -895,10 +922,11 @@ describe('RewardsService', () => {
       expect(plainToInstance(ListOrdersQueryDto, {}).limit).toBe(20);
     });
 
-    it('maskVoucherCode: last 4 only for 8+ chars, never the full code', () => {
-      expect(maskVoucherCode('12345678')).toBe('••••5678');
-      expect(maskVoucherCode('  ABCDEFGHIJ  ')).toBe('••••GHIJ');
-      expect(maskVoucherCode('1234567')).toBe('••••');
+    it('maskVoucherCode: last 4 only for 12+ chars, never the full code', () => {
+      expect(maskVoucherCode('123456789012')).toBe('••••9012');
+      expect(maskVoucherCode('  ABCDEFGHIJKL  ')).toBe('••••IJKL');
+      expect(maskVoucherCode('12345678901')).toBe('••••');
+      expect(maskVoucherCode('12345678')).toBe('••••');
       expect(maskVoucherCode('')).toBe('••••');
     });
 
@@ -3635,7 +3663,7 @@ describe('RewardsService', () => {
             id: 'o1', voucherCode: 'AMZN-1234-5678-WXYZ',
             OR: [{ voucherProvider: null }, { NOT: { voucherProvider: { equals: 'hubble', mode: 'insensitive' } } }],
           },
-          data: { voucherCode: null, voucherProvider: null },
+          data: { voucherCode: null, voucherPin: null, voucherProvider: null },
         });
         // Tenant-wide reuse record: sha256 of the NORMALISED code (never the code itself).
         expect(mockPrisma.cancelledVoucherCode.createMany).toHaveBeenCalledWith({
@@ -3989,6 +4017,428 @@ describe('RewardsService', () => {
 
       const g = await service.getOrder(gifsy, 'o1');
       expect((g.order as { voucherCode: string }).voucherCode).toBe('AMZN-1234-5678-WXYZ');
+    });
+  });
+
+  // ─── Voucher PIN (card number + PIN gift cards) — visibility matrix ───────────────────────────
+  describe('voucher PIN visibility (card + PIN gift cards)', () => {
+    const staff: JwtPayload = { sub: 'st1', role: 'GIFSY_STAFF', clientId: 'deoleo', assumed: true, gifsyRoleId: 'role-1', phone: '9990004444', name: '' };
+    const clientAdmin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '9990002222', name: '' };
+    const at = new Date();
+    const row = {
+      id: 'o1', partnerId: 'cp1', status: 'DELIVERED', voucherCode: '6001220012345678', voucherPin: '482913',
+      voucherProvider: 'Hubble', createdAt: at, updatedAt: at,
+    };
+    const leaks = (res: unknown) => {
+      const body = JSON.stringify(res);
+      return ['6001220012345678', '5678', '482913'].some((frag) => body.includes(frag));
+    };
+    afterEach(() => mockPrisma.redemptionOrder.findFirst.mockReset());
+
+    it('hiddenVoucherFields nulls the PIN with the code (no "has PIN" hint)', () => {
+      expect(hiddenVoucherFields('6001220012345678')).toEqual({
+        voucherCode: null, voucherPin: null, voucherIssued: true, voucherCodeMasked: true,
+      });
+      expect(hiddenVoucherFields(null)).toEqual({
+        voucherCode: null, voucherPin: null, voucherIssued: false, voucherCodeMasked: false,
+      });
+    });
+
+    it('listOrders: CLIENT_ADMIN + read-only GIFSY_STAFF get NEITHER card number nor PIN — only the issued flag', async () => {
+      mockGifsyRoles.getPermissions.mockResolvedValue(new Set(['rewards:read']));
+      for (const u of [clientAdmin, staff]) {
+        mockPrisma.redemptionOrder.findMany.mockResolvedValue([row]);
+        mockPrisma.redemptionOrder.count.mockResolvedValue(1);
+        const res = await service.listOrders(u, {});
+        expect(res.orders[0]).toMatchObject({ voucherCode: null, voucherPin: null, voucherIssued: true });
+        expect(leaks(res)).toBe(false);
+      }
+    });
+
+    it('listOrders: the member (own orders), GIFSY_ADMIN and a fulfilling GIFSY_STAFF get BOTH', async () => {
+      mockGifsyRoles.getPermissions.mockResolvedValue(new Set(['rewards:read', 'rewards:manage_orders']));
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      for (const u of [partner, gifsy, staff]) {
+        mockPrisma.redemptionOrder.findMany.mockResolvedValue([row]);
+        mockPrisma.redemptionOrder.count.mockResolvedValue(1);
+        const res = await service.listOrders(u, {});
+        expect(res.orders[0]).toMatchObject({ voucherCode: '6001220012345678', voucherPin: '482913' });
+      }
+      // The member select asks for the PIN column.
+      expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].select.voucherPin).toBe(true);
+    });
+
+    it('SALES rep NEVER gets the card number or PIN from listOrders — even if their login resolved to a partner', async () => {
+      // Worst case: the rep's login resolves to an outlet (cp1) whose order holds a card + PIN.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([row]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(1);
+      for (const role of ['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR']) {
+        const res = await service.listOrders({ ...sales, role }, {});
+        expect(res.orders[0]).toMatchObject({ voucherCode: null, voucherPin: null });
+        expect(leaks(res)).toBe(false);
+      }
+    });
+
+    it('SALES rep NEVER gets the card number or PIN from getOrder (member branch)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(row);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      const res = await service.getOrder(sales, 'o1');
+      expect(res.order).toMatchObject({ voucherCode: null, voucherPin: null });
+      expect(leaks(res)).toBe(false);
+    });
+
+    it('getOrder: the member gets card number + PIN (member-safe select includes voucherPin)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(row);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      const res = await service.getOrder(partner, 'o1');
+      expect(res.order).toMatchObject({ voucherCode: '6001220012345678', voucherPin: '482913' });
+      expect(mockPrisma.redemptionOrder.findFirst.mock.calls[0][0].select.voucherPin).toBe(true);
+    });
+
+    it('getOrder (operator branch): read-only staff get neither; GIFSY_ADMIN gets both', async () => {
+      mockGifsyRoles.getPermissions.mockResolvedValue(new Set(['rewards:read']));
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ ...row, reward: null, partner: null });
+      const s = await service.getOrder(staff, 'o1');
+      expect(s.order).toMatchObject({ voucherCode: null, voucherPin: null, voucherIssued: true });
+      expect(leaks(s)).toBe(false);
+      const g = await service.getOrder(gifsy, 'o1');
+      expect(g.order).toMatchObject({ voucherCode: '6001220012345678', voucherPin: '482913' });
+    });
+
+    it('getFulfilmentOrder (dispatch console): a fulfilling operator gets the PIN; a non-fulfilling one gets neither', async () => {
+      const detail = {
+        ...row, orderNumber: 'RDM-1', redemptionMode: 'GIFT_CARD', quantity: 1, totalPointsCost: 500,
+        valuePaise: 50000n, reward: { name: 'Amazon' }, partner: { businessName: 'S', clientId: null },
+        fulfilledByVendor: null, statusHistory: [],
+      };
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(detail);
+      const g = await service.getFulfilmentOrder(gifsy, 'o1');
+      expect(g).toMatchObject({ voucherCode: '6001220012345678', voucherPin: '482913' });
+      mockGifsyRoles.getPermissions.mockResolvedValue(new Set(['rewards:read']));
+      const s = await service.getFulfilmentOrder(staff, 'o1');
+      expect(s).toMatchObject({ voucherCode: null, voucherPin: null });
+      expect(leaks(s)).toBe(false);
+    });
+  });
+
+  // ─── Voucher PIN — manual issuance paths, cancel, bulk upload, Hubble, sales confirm ──────────
+  describe('voucher PIN writes (card + PIN gift cards)', () => {
+    const paid = (extra: Record<string, unknown> = {}) => ({
+      id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'RDM-p', pointsDeducted: 500,
+      redemptionMode: 'GIFT_CARD', voucherCode: null, voucherPin: null, voucherProvider: null,
+      partner: { clientId: 'deoleo' }, ...extra,
+    });
+    afterEach(() => {
+      mockPrisma.redemptionOrder.findFirst.mockReset();
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockReset();
+    });
+
+    it('updateOrder: a code + PIN lands in ONE guarded write (PIN trimmed); the audit masks the PIN', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid());
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1' });
+      await service.updateOrder(gifsy, 'o1', { voucherCode: '6001220012345678', voucherPin: ' 482913 ' });
+      const call = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+      expect(call.data).toMatchObject({ voucherCode: '6001220012345678', voucherPin: '482913' });
+      expect(call.where.AND).toEqual(expect.arrayContaining([{ OR: [{ voucherCode: null }, { voucherCode: '' }] }]));
+      const audit = JSON.stringify(mockPrisma.auditLog.create.mock.calls[0][0]);
+      expect(audit).toContain('"voucherPin":"••••"');
+      expect(audit).not.toContain('482913');
+    });
+
+    it('updateOrder: a code WITHOUT a PIN writes no PIN column (number-only manual voucher unchanged)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid());
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1' });
+      await service.updateOrder(gifsy, 'o1', { voucherCode: 'AMZ-ONLY-1234', voucherPin: '   ' });
+      const data = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].data;
+      expect(data.voucherCode).toBe('AMZ-ONLY-1234');
+      expect(data).not.toHaveProperty('voucherPin');
+    });
+
+    it('a PIN without a card number is a 400 "Enter the card number before the PIN" (PATCH + transition), no write', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid());
+      await expect(service.updateOrder(gifsy, 'o1', { voucherPin: '4829' }))
+        .rejects.toThrow('Enter the card number before the PIN');
+      await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.PROCESSING, voucherPin: '4829' }))
+        .rejects.toThrow('Enter the card number before the PIN');
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+    });
+
+    it('changing a SAVED PIN is a 400 (PIN-specific message); re-sending the same PIN is a no-op', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid({ voucherCode: 'CARD-1111-2222', voucherPin: '1111' }));
+      await expect(service.updateOrder(gifsy, 'o1', { voucherPin: '9999' }))
+        .rejects.toThrow("A PIN is already saved for this voucher; use 'Voucher cancelled with vendor' to replace it.");
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1' });
+      await service.updateOrder(gifsy, 'o1', { voucherCode: 'CARD-1111-2222', voucherPin: '1111', trackingNumber: 'T' });
+      const data = mockPrisma.redemptionOrder.update.mock.calls[0][0].data;
+      expect(data).not.toHaveProperty('voucherPin');
+      expect(data).not.toHaveProperty('voucherCode');
+    });
+
+    it('SET-ONCE: adding a PIN to an issued code (DELIVERED, member already notified) → guarded write, masked audit, voucher re-sent', async () => {
+      const updatedAt = new Date(Date.now() - 5 * 60_000);
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(
+        paid({ status: 'DELIVERED', voucherCode: 'CARD-1111-2222', voucherProvider: 'Croma', updatedAt }),
+      );
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1' });
+      const notify = jest
+        .spyOn(service as unknown as { notifyVoucherIssued: (a: string, b: string) => Promise<void> }, 'notifyVoucherIssued')
+        .mockResolvedValue(undefined);
+      await service.updateOrder(gifsy, 'o1', { voucherCode: 'CARD-1111-2222', voucherPin: ' 4455 ' });
+      const call = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+      expect(call.data).toMatchObject({ voucherPin: '4455' });
+      expect(call.data).not.toHaveProperty('voucherCode');
+      // Two writers can't both set it: the claim pins the code, a still-null PIN and the row version.
+      expect(call.where.AND).toEqual(
+        expect.arrayContaining([{ voucherCode: 'CARD-1111-2222' }, { voucherPin: null }, { updatedAt }]),
+      );
+      const audit = JSON.stringify(mockPrisma.auditLog.create.mock.calls[0][0]);
+      expect(audit).toContain('VOUCHER_PIN_ADDED_MANUAL');
+      expect(audit).not.toContain('4455');
+      expect(notify).toHaveBeenCalledWith('o1', 'deoleo');
+      notify.mockRestore();
+    });
+
+    it('SET-ONCE: the losing concurrent PIN writer gets a 409, no audit, no notification', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid({ voucherCode: 'CARD-1111-2222' }));
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 });
+      const notify = jest
+        .spyOn(service as unknown as { notifyVoucherIssued: (a: string, b: string) => Promise<void> }, 'notifyVoucherIssued')
+        .mockResolvedValue(undefined);
+      await expect(service.updateOrder(gifsy, 'o1', { voucherPin: '4455' })).rejects.toThrow(ConflictException);
+      expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+      expect(notify).not.toHaveBeenCalled();
+      notify.mockRestore();
+    });
+
+    const spyNotify = () =>
+      jest
+        .spyOn(service as unknown as { notifyVoucherIssued: (a: string, b: string) => Promise<void> }, 'notifyVoucherIssued')
+        .mockResolvedValue(undefined);
+
+    it('B4 double submit: losing to an IDENTICAL PIN is a successful no-op (no 409, no audit, no notification)', async () => {
+      const updatedAt = new Date(Date.now() - 60_000);
+      mockPrisma.redemptionOrder.findFirst
+        .mockResolvedValueOnce(paid({ status: 'DELIVERED', voucherCode: 'CARD-1111-2222', updatedAt }))
+        // the retry re-reads: the winner stored the same PIN
+        .mockResolvedValueOnce(paid({ status: 'DELIVERED', voucherCode: 'CARD-1111-2222', voucherPin: '4455' }));
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockPrisma.redemptionOrder.findUnique.mockResolvedValueOnce({ voucherCode: 'CARD-1111-2222', voucherPin: '4455' });
+      mockPrisma.redemptionOrder.update.mockResolvedValueOnce({ id: 'o1', voucherPin: '4455' });
+      const notify = spyNotify();
+      await expect(service.updateOrder(gifsy, 'o1', { voucherCode: 'CARD-1111-2222', voucherPin: ' 4455 ' })).resolves.toBeDefined();
+      expect(mockPrisma.redemptionOrder.update.mock.calls[0][0].data).not.toHaveProperty('voucherPin');
+      expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+      expect(notify).not.toHaveBeenCalled();
+      notify.mockRestore();
+    });
+
+    it('B4: losing to a DIFFERENT PIN (or a cleared code) stays a 409', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid({ voucherCode: 'CARD-1111-2222' }));
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockPrisma.redemptionOrder.findUnique.mockResolvedValueOnce({ voucherCode: 'CARD-1111-2222', voucherPin: '9999' });
+      await expect(service.updateOrder(gifsy, 'o1', { voucherPin: '4455' })).rejects.toThrow(ConflictException);
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockPrisma.redemptionOrder.findUnique.mockResolvedValueOnce({ voucherCode: null, voucherPin: null });
+      await expect(service.updateOrder(gifsy, 'o1', { voucherPin: '4455' })).rejects.toThrow(ConflictException);
+      expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('B4 transition double submit: the loser re-reads, sees the same PIN + moved status → skipped no-op, no notifications', async () => {
+      mockPrisma.redemptionOrder.findFirst
+        .mockResolvedValueOnce(paid({ status: 'DISPATCHED', voucherCode: 'CARD-1111-2222', fulfilmentChannel: 'DIGITAL_VOUCHER' }))
+        .mockResolvedValueOnce(paid({ status: 'DELIVERED', voucherCode: 'CARD-1111-2222', voucherPin: '4455', fulfilmentChannel: 'DIGITAL_VOUCHER' }))
+        .mockResolvedValueOnce(paid({ status: 'DELIVERED', voucherCode: 'CARD-1111-2222', voucherPin: '4455', fulfilmentChannel: 'DIGITAL_VOUCHER' }));
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockPrisma.redemptionOrder.findUnique.mockResolvedValueOnce({ voucherCode: 'CARD-1111-2222', voucherPin: '4455' });
+      mockPrisma.redemptionOrder.update.mockResolvedValueOnce({ id: 'o1' });
+      const notify = spyNotify();
+      const res = await service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DELIVERED, voucherPin: '4455' });
+      expect(res).toMatchObject({ skipped: true });
+      expect(notify).not.toHaveBeenCalled();
+      expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+      expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+      notify.mockRestore();
+    });
+
+    it('B1: a PIN ADDED on a status change sends BOTH the re-sent voucher AND the ORDER_DELIVERED milestone (with tracking)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(
+        paid({ status: 'DISPATCHED', voucherCode: 'CARD-1111-2222', fulfilmentChannel: 'DIGITAL_VOUCHER' }),
+      );
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValue({
+        id: 'o1', status: 'DELIVERED', voucherCode: 'CARD-1111-2222', voucherPin: '4455', pointsDeducted: 500,
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce({ userId: 'u-owner', phone: '9990000001', ownerName: 'Asha' });
+      const notify = spyNotify();
+      await service.transitionOrder(gifsy, 'o1', {
+        toStatus: UpdatableOrderStatus.DELIVERED, voucherPin: '4455', trackingNumber: 'TRK-9',
+      });
+      expect(notify).toHaveBeenCalledWith('o1', 'deoleo');
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(
+        expect.objectContaining({ eventKey: 'ORDER_DELIVERED', vars: expect.objectContaining({ trackingId: 'TRK-9' }) }),
+      );
+      notify.mockRestore();
+    });
+
+    it('B1: a NEW code issued on a status change still suppresses the milestone (VOUCHER_ISSUED supersedes it)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid({ status: 'PROCESSING' }));
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValue({
+        id: 'o1', status: 'DISPATCHED', voucherCode: 'CARD-9', pointsDeducted: 500,
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce({ userId: 'u-owner', phone: '9990000001', ownerName: 'Asha' });
+      const notify = spyNotify();
+      await service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DISPATCHED, voucherCode: 'CARD-9' });
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+      notify.mockRestore();
+    });
+
+    it('B5: a provider may be SET ONCE on a stored code whose provider is NULL (CAS incl. voucherProvider null), no audit / notify', async () => {
+      const updatedAt = new Date(Date.now() - 60_000);
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid({ voucherCode: 'CARD-1111-2222', updatedAt }));
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1' });
+      const notify = spyNotify();
+      await service.updateOrder(gifsy, 'o1', { voucherCode: 'CARD-1111-2222', voucherProvider: 'Croma' });
+      const call = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+      expect(call.data).toMatchObject({ voucherProvider: 'Croma' });
+      expect(call.data).not.toHaveProperty('voucherCode');
+      expect(call.where.AND).toEqual(
+        expect.arrayContaining([{ voucherCode: 'CARD-1111-2222' }, { voucherProvider: null }, { updatedAt }]),
+      );
+      expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+      expect(notify).not.toHaveBeenCalled();
+      notify.mockRestore();
+    });
+
+    it('B5: provider + PIN together on a stored code with no provider → one CAS write; changing a SET provider stays 400', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValueOnce(paid({ voucherCode: 'CARD-1111-2222' }));
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1' });
+      const notify = spyNotify();
+      await service.updateOrder(gifsy, 'o1', { voucherProvider: 'Croma', voucherPin: '4455' });
+      const call = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+      expect(call.data).toMatchObject({ voucherProvider: 'Croma', voucherPin: '4455' });
+      expect(call.where.AND).toEqual(expect.arrayContaining([{ voucherPin: null }, { voucherProvider: null }]));
+      expect(notify).toHaveBeenCalledTimes(1);
+      notify.mockRestore();
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValueOnce(paid({ voucherCode: 'CARD-1111-2222', voucherProvider: 'Gifsy' }));
+      await expect(service.updateOrder(gifsy, 'o1', { voucherProvider: 'Croma' }))
+        .rejects.toThrow("A voucher code is already issued; use 'Voucher cancelled with vendor' first.");
+    });
+
+    it('a coded order MAY switch to a physical channel (physical gift cards carry codes/PINs) — no voucher claim', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(
+        paid({ voucherCode: 'CARD-1111-2222', voucherPin: '4455', fulfilmentChannel: 'DIGITAL_VOUCHER' }),
+      );
+      mockPrisma.redemptionOrder.update.mockResolvedValueOnce({ id: 'o1', fulfilmentChannel: 'GIFSY_WAREHOUSE' });
+      await service.updateOrder(gifsy, 'o1', { fulfilmentChannel: 'GIFSY_WAREHOUSE' as never });
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      const call = mockPrisma.redemptionOrder.update.mock.calls[0][0];
+      expect(call.where).toEqual({ id: 'o1' });
+      expect(call.data).toMatchObject({ fulfilmentChannel: 'GIFSY_WAREHOUSE' });
+      // The stored code / PIN are never touched by a channel change.
+      expect(call.data).not.toHaveProperty('voucherCode');
+      expect(call.data).not.toHaveProperty('voucherPin');
+    });
+
+    it('bulk upload: a Voucher Code / PIN cell stored as a NUMBER is a row error and is not applied', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const XLSX = require('xlsx');
+      const ws = XLSX.utils.aoa_to_sheet([
+        ['Order Number', 'Voucher Code', 'Voucher PIN'],
+        ['RDM-p', 6001220012345678, ''],
+        ['RDM-q', 'CARD-1', 42],
+        ['RDM-r', 'CARD-2', '0042'],
+      ]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Fulfilment');
+      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+      const spy = jest.spyOn(service, 'updateOrder').mockResolvedValue({ order: {} } as never);
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'o1' });
+      const res = await service.uploadFulfilment(gifsy, { buffer, originalname: 'f.xlsx' } as Express.Multer.File);
+      expect(res.succeeded).toBe(1);
+      expect(res.errors).toEqual([
+        { row: 2, orderNumber: 'RDM-p', message: 'Voucher Code/PIN must be entered as text — format the column as Text and re-type it' },
+        { row: 3, orderNumber: 'RDM-q', message: 'Voucher Code/PIN must be entered as text — format the column as Text and re-type it' },
+      ]);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith(gifsy, 'o1', expect.objectContaining({ voucherCode: 'CARD-2', voucherPin: '0042' }));
+      spy.mockRestore();
+    });
+
+    it('transitionOrder: a code + PIN on a forward move is written with the status claim', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid());
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValue({ id: 'o1', status: 'PROCESSING', voucherCode: 'CARD-9', pointsDeducted: 500 });
+      await service.transitionOrder(gifsy, 'o1', {
+        toStatus: UpdatableOrderStatus.PROCESSING, voucherCode: 'CARD-9', voucherPin: '7777',
+      });
+      const claim = mockPrisma.redemptionOrder.updateMany.mock.calls.find(
+        ([a]) => (a as { data?: { status?: string } }).data?.status === 'PROCESSING',
+      );
+      expect((claim![0] as { data: Record<string, unknown> }).data).toMatchObject({ voucherCode: 'CARD-9', voucherPin: '7777' });
+    });
+
+    it('"Voucher cancelled with vendor" clears the PIN with the code (and the response carries neither)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...paid({ voucherCode: 'CARD-1111-2222', voucherPin: '1111', voucherProvider: 'Gifsy' }), metadata: {},
+      });
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValueOnce({ id: 'o1', status: 'CONFIRMED', voucherProvider: null });
+      const res = await service.voucherCancelledWithVendor(gifsy, 'o1', 'vendor ref 1');
+      expect(mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].data).toMatchObject({ voucherCode: null, voucherPin: null });
+      expect(res.order).toMatchObject({ voucherCode: null, voucherPin: null });
+      expect(JSON.stringify(mockPrisma.auditLog.create.mock.calls)).not.toContain('1111');
+    });
+
+    it('bulk upload: the optional "Voucher PIN" column is applied with the code (non-status row)', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const XLSX = require('xlsx');
+      const ws = XLSX.utils.aoa_to_sheet([
+        ['Order Number', 'Reward', 'Mode', 'Current Status', 'Voucher Code', 'Voucher PIN', 'Voucher Provider', 'Tracking Number', 'Tracking URL', 'New Status'],
+        ['RDM-p', 'X', 'GIFT_CARD', 'CONFIRMED', 'CARD-55', '0042', '', '', '', ''],
+      ]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Fulfilment');
+      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+      const spy = jest.spyOn(service, 'updateOrder').mockResolvedValue({ order: {} } as never);
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'o1' });
+      const res = await service.uploadFulfilment(gifsy, { buffer, originalname: 'f.xlsx' } as Express.Multer.File);
+      expect(res.succeeded).toBe(1);
+      expect(spy).toHaveBeenCalledWith(gifsy, 'o1', expect.objectContaining({ voucherCode: 'CARD-55', voucherPin: '0042' }));
+      spy.mockRestore();
+    });
+
+    it('UpdateOrderDto / TransitionOrderDto: voucherPin optional, trimmed, max 64', async () => {
+      const errs = async (cls: new () => object, o: Record<string, unknown>) =>
+        validate(plainToInstance(cls, o)).then((e) => e.map((x) => x.property));
+      expect(await errs(UpdateOrderDto, { voucherCode: 'C', voucherPin: '1234' })).toEqual([]);
+      expect(await errs(UpdateOrderDto, { voucherCode: 'C', voucherPin: 'x'.repeat(65) })).toEqual(['voucherPin']);
+      expect(await errs(TransitionOrderDto, { toStatus: 'PROCESSING', voucherPin: 'x'.repeat(64) })).toEqual([]);
+      expect((plainToInstance(UpdateOrderDto, { voucherPin: '  12 ' }) as { voucherPin: string }).voucherPin).toBe('12');
+    });
+
+    it('SALES confirm (redeem-for-outlet, Hubble branch) response never carries a voucher code or PIN', async () => {
+      // confirmRedeemForOutlet returns finishHubbleConfirm's { orderId, status, message } on the
+      // Hubble branch (and the same three keys on the manual branch) — pinned on the shared helper.
+      const svc = service as unknown as {
+        issueHubbleVoucherForOrder: (...a: unknown[]) => Promise<string>;
+        finishHubbleConfirm: (o: unknown, c: unknown) => Promise<Record<string, unknown>>;
+      };
+      const issue = jest.spyOn(svc, 'issueHubbleVoucherForOrder').mockResolvedValue('DELIVERED');
+      const res = await svc.finishHubbleConfirm(
+        { id: 'o1' },
+        { clientId: 'deoleo', actorId: 'salesUser1', notifyUserId: 'u', recipientPhone: null, ownerName: 'O', rewardName: 'R', points: 1 },
+      );
+      expect(Object.keys(res).sort()).toEqual(['message', 'orderId', 'status']);
+      issue.mockRestore();
     });
   });
 
@@ -5429,6 +5879,32 @@ describe('RewardsService', () => {
           }),
         );
         expect(mockWallet.reverse).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        // [label, voucher, expected voucherCode, expected voucherPin]
+        ['card number + PIN (CARD_AND_PIN_NO_SECURED) → code = number, PIN stored',
+          { cardType: 'CARD_AND_PIN_NO_SECURED', cardNumber: ' 6001220012345678 ', cardPin: ' 482913 ' }, '6001220012345678', '482913'],
+        ['number only (CARD_NUMBER_SECURED) → unchanged, no PIN',
+          { cardType: 'CARD_NUMBER_SECURED', cardNumber: 'CARD-123', cardPin: null }, 'CARD-123', null],
+        ['PIN only → the PIN IS the code (unchanged), no separate PIN',
+          { cardType: 'PIN_SECURED', cardNumber: '', cardPin: 'PIN-777' }, 'PIN-777', null],
+      ])('SUCCESS %s', async (_label, voucher, code, pin) => {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(loadedOrder());
+        mockHubble.placeOrder.mockResolvedValue({ status: 'SUCCESS', id: 'hub-1', vouchers: [{ id: 'v1', ...voucher }] });
+        const out = await service.issueHubbleVoucherForOrder('o1', 'deoleo', 'actor1');
+        expect(out).toBe('DELIVERED');
+        const deliverCall = mockPrisma.redemptionOrder.updateMany.mock.calls.find(
+          ([arg]) => (arg as { data?: { status?: string } })?.data?.status === 'DELIVERED',
+        );
+        const data = (deliverCall![0] as { data: Record<string, unknown> }).data;
+        // Same guarded claim carries the code AND the PIN.
+        expect(data.voucherCode).toBe(code);
+        expect(data.voucherPin).toBe(pin);
+        // Neither the PIN nor the card number is duplicated into metadata.
+        const meta = JSON.stringify(data.metadata);
+        expect(meta).not.toContain('482913');
+        expect(meta).not.toContain('6001220012345678');
       });
 
       it('PROCESSING → marks PROCESSING (pending external), no refund', async () => {

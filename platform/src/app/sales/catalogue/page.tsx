@@ -13,7 +13,7 @@ import { type GiftCatalogueItem, GIFT_CATALOGUE } from '@/lib/gifts';
 import { api } from '@/lib/api-client';
 import { isDeliveryDefaults, type DeliveryDefaults } from '@/lib/partner-identity';
 import { applyAddressPrefill, type AddressForm, type TouchedFields } from '@/lib/address-prefill';
-import { wholeRupeeInputProps } from '@/lib/whole-rupee-input';
+import { WHOLE_RUPEE_INVALID_MESSAGE, isWholeRupeeInvalid, wholeRupeeAmount, wholeRupeeInputProps } from '@/lib/whole-rupee-input';
 import { pointsForAmount } from '@/lib/hubble-product';
 
 type GiftItem = GiftCatalogueItem;
@@ -49,6 +49,16 @@ interface RedeemState {
   otpResendCountdown: number;
   /** ₹ amount for a FREE_AMOUNT (variable) voucher/bank-transfer redemption; '' otherwise. */
   amount: string;
+  /**
+   * The last commit (blur / Enter / paste / a tap on Send OTP) found the amount text INVALID —
+   * "Check the amount" shows while this is set; cleared on the next edit (never shown mid-typing).
+   * Same rule as useWholeRupeeField (lib/whole-rupee-input).
+   */
+  amountFlagged: boolean;
+  /** The ₹ amount the ORDER was created with (frozen at OTP-send; null before / for FIXED items). */
+  sentAmount: number | null;
+  /** The points the ORDER debits — the SERVER's requiredPoints from redeem-init (frozen at OTP-send). */
+  sentPoints: number | null;
   /** PHYSICAL_GIFT delivery address — ONLY what the rep typed (+ `addrTouched` marks every edited
    *  field). The shown address is DERIVED via applyAddressPrefill from the target outlet's
    *  deliveryDefaults, so the pre-fill never overwrites typing or a deliberate clear. */
@@ -63,7 +73,7 @@ const EMPTY_ADDRESS: AddressForm = { line1: '', city: '', state: '', pincode: ''
 
 const INITIAL_REDEEM: RedeemState = {
   outlet: null, orderId: '', otpSending: false, otpSent: false, otp: '',
-  verifying: false, error: '', otpResendCountdown: 0, amount: '',
+  verifying: false, error: '', otpResendCountdown: 0, amount: '', amountFlagged: false, sentAmount: null, sentPoints: null,
   addrTyped: EMPTY_ADDRESS, addrTouched: {}, recipientName: '', recipientTouched: false,
 };
 
@@ -323,14 +333,21 @@ function CatalogueInner() {
     // FREE_AMOUNT (variable) vouchers / bank transfers require a ₹ amount — without it the backend
     // rejects redeem-for-outlet with "amount (₹) is required for a variable-amount voucher".
     const freeAmount = isFreeAmountGift(selectedGift);
-    const amountNum = Number(redeem.amount);
+    // A resend after the OTP was sent re-uses the FROZEN amount (the field is locked meanwhile).
+    const parsedAmount = redeem.otpSent && redeem.sentAmount != null ? redeem.sentAmount : wholeRupeeAmount(redeem.amount);
+    if (freeAmount && parsedAmount === null) {
+      // "750,5" / "1,2" / a pasted decimal — never guessed, never sent.
+      setRedeem((r) => ({ ...r, amountFlagged: true, error: '' }));
+      return;
+    }
+    const amountNum = parsedAmount ?? 0;
     const options = selectedGift.amountOptions?.length ? selectedGift.amountOptions : null;
     if (freeAmount && options && !options.includes(amountNum)) {
       setRedeem((r) => ({ ...r, error: 'Choose one of the available amounts.' }));
       return;
     }
-    // Whole rupees only (the input already strips decimals; this guards any other path).
-    if (freeAmount && (!redeem.amount.trim() || !Number.isInteger(amountNum) || amountNum <= 0)) {
+    // Whole rupees only (the input already blocks decimals; this guards any other path).
+    if (freeAmount && (!Number.isInteger(amountNum) || amountNum <= 0)) {
       setRedeem((r) => ({ ...r, error: 'Enter a whole-rupee amount (₹) to redeem for this outlet.' }));
       return;
     }
@@ -355,7 +372,7 @@ function CatalogueInner() {
       };
     }
     setRedeem((r) => ({ ...r, otpSending: true, error: '' }));
-    const res = await api.post<{ orderId: string; orderNumber: string }>(
+    const res = await api.post<{ orderId: string; orderNumber: string; requiredPoints?: number }>(
       '/api/rewards/redeem-for-outlet',
       {
         rewardId: selectedGift.id,
@@ -365,11 +382,26 @@ function CatalogueInner() {
       },
     );
     if (res.success && res.data?.orderId) {
-      setRedeem((r) => ({ ...r, otpSending: false, otpSent: true, orderId: res.data.orderId, otp: '', otpResendCountdown: 30 }));
+      setRedeem((r) => ({
+        ...r, otpSending: false, otpSent: true, orderId: res.data.orderId, otp: '', otpResendCountdown: 30,
+        sentAmount: freeAmount ? amountNum : null,
+        // The SERVER's requiredPoints (what the order debits); a resend keeps the first value; the
+        // item's fixed points only if the server sent none.
+        sentPoints: typeof res.data.requiredPoints === 'number' && Number.isFinite(res.data.requiredPoints)
+          ? res.data.requiredPoints
+          : r.sentPoints ?? (freeAmount ? null : selectedGift.points),
+      }));
       setSheetStep('otp');
     } else {
       setRedeem((r) => ({ ...r, otpSending: false, error: res.success ? 'Could not start redemption.' : res.error }));
     }
+  };
+
+  // "Change amount" (or Back) from the OTP step: abandon this OTP and return to the amount — the
+  // next Send OTP starts a fresh redeem (a new order) with the new amount.
+  const changeAmount = () => {
+    setRedeem((r) => ({ ...r, otpSent: false, orderId: '', otp: '', otpResendCountdown: 0, sentAmount: null, sentPoints: null, error: '' }));
+    setSheetStep('confirm');
   };
 
   const verifyOtp = async () => {
@@ -404,6 +436,9 @@ function CatalogueInner() {
       setRedeem((r) => ({ ...r, verifying: false, error: res.error || 'Invalid or expired OTP. Please try again.' }));
     }
   };
+
+  // "Check the amount" — only after a commit that found the text invalid; cleared on the next edit.
+  const amountInvalidShown = redeem.amountFlagged && isWholeRupeeInvalid(redeem.amount);
 
   const maskedMobile = (m: string) => `****${m.slice(-4)}`;
 
@@ -486,7 +521,7 @@ function CatalogueInner() {
                           {gift.amountOptions?.length ? `From ₹${gift.amountOptions[0].toLocaleString('en-IN')}` : 'You set the amount'}
                         </span>
                       ) : (
-                        <span className="text-sm font-bold text-[var(--brand-primary)]">{gift.points.toLocaleString()} pts</span>
+                        <span className="text-sm font-bold text-[var(--brand-primary)]">{gift.points.toLocaleString('en-IN')} pts</span>
                       )}
                       <span className="text-[10px] text-[var(--brand-primary)] font-medium">View details →</span>
                     </div>
@@ -519,12 +554,11 @@ function CatalogueInner() {
               <div className="flex items-center gap-2">
                 {sheetStep !== 'detail' && sheetStep !== 'success' && (
                   <button
-                    onClick={() => setSheetStep(
+                    onClick={() => (sheetStep === 'otp' ? changeAmount() : setSheetStep(
                       sheetStep === 'select_outlet' ? 'detail'
                         : sheetStep === 'confirm' ? (preOutlet ? 'detail' : 'select_outlet')
-                        : sheetStep === 'otp' ? 'confirm'
                         : 'detail'
-                    )}
+                    ))}
                     className="p-1 rounded-full hover:bg-gray-100 text-gray-400 -ml-1"
                   >
                     <ChevronLeft className="h-4 w-4" />
@@ -587,7 +621,7 @@ function CatalogueInner() {
                             </>
                           ) : (
                             <>
-                              <p className="text-2xl font-bold text-[var(--brand-primary)]">{selectedGift.points.toLocaleString()} pts</p>
+                              <p className="text-2xl font-bold text-[var(--brand-primary)]">{selectedGift.points.toLocaleString('en-IN')} pts</p>
                               <p className="text-xs text-gray-400 mt-0.5">Required to redeem</p>
                             </>
                           )}
@@ -650,7 +684,7 @@ function CatalogueInner() {
                       {isFreeAmountGift(selectedGift) ? (
                         <p className="text-xs text-gray-400 font-medium">Amount you enter</p>
                       ) : (
-                        <p className="text-xs text-[var(--brand-primary)] font-bold">{selectedGift.points.toLocaleString()} pts</p>
+                        <p className="text-xs text-[var(--brand-primary)] font-bold">{selectedGift.points.toLocaleString('en-IN')} pts</p>
                       )}
                     </div>
                   </div>
@@ -675,7 +709,7 @@ function CatalogueInner() {
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-medium text-gray-900 truncate">{o.name}</p>
-                          <p className="text-xs text-gray-400">Balance: {o.balance.toLocaleString()} pts</p>
+                          <p className="text-xs text-gray-400">Balance: {o.balance.toLocaleString('en-IN')} pts</p>
                         </div>
                         {!canAfford && <span className="text-[10px] text-red-400 shrink-0 font-medium">Insufficient</span>}
                         {canAfford && <ChevronRight className="h-4 w-4 text-gray-300 shrink-0" />}
@@ -696,7 +730,7 @@ function CatalogueInner() {
                       {isFreeAmountGift(selectedGift) ? (
                         <p className="text-xs text-gray-400 font-medium">Amount you enter</p>
                       ) : (
-                        <p className="text-xs text-[var(--brand-primary)] font-bold">{selectedGift.points.toLocaleString()} pts</p>
+                        <p className="text-xs text-[var(--brand-primary)] font-bold">{selectedGift.points.toLocaleString('en-IN')} pts</p>
                       )}
                     </div>
                   </div>
@@ -730,7 +764,7 @@ function CatalogueInner() {
                               type="button"
                               aria-pressed={selected}
                               aria-label={`₹${amt.toLocaleString('en-IN')}${pts != null ? `, ${pts.toLocaleString('en-IN')} points` : ''}${tooLow ? ' (below the minimum)' : ''}`}
-                              disabled={tooLow}
+                              disabled={tooLow || redeem.otpSent}
                               onClick={() => setRedeem((r) => ({ ...r, amount: String(amt), error: '' }))}
                               className={`rounded-xl border-2 px-2 py-2 text-center transition-all disabled:opacity-40 ${
                                 selected ? 'border-[var(--brand-primary)] bg-white' : 'border-gray-200 bg-white hover:border-gray-300'
@@ -748,7 +782,7 @@ function CatalogueInner() {
                       </div>
                       <div className="flex items-center justify-between pt-1">
                         <span className="text-xs text-gray-500">Current balance</span>
-                        <span className="text-sm text-gray-800">{redeem.outlet.balance.toLocaleString()} pts</span>
+                        <span className="text-sm text-gray-800">{redeem.outlet.balance.toLocaleString('en-IN')} pts</span>
                       </div>
                     </div>
                   ) : isFreeAmountGift(selectedGift) ? (
@@ -757,26 +791,37 @@ function CatalogueInner() {
                       <input
                         id="redeem-amount"
                         value={redeem.amount}
-                        // Whole rupees only (typed "." blocked; pasted "750.5" → "750").
-                        {...wholeRupeeInputProps((v) => setRedeem((r) => ({ ...r, amount: v, error: '' })))}
+                        // Whole rupees only: "750.5" / "750,5" / a pasted decimal stay visible and are
+                        // invalid on commit ("Check the amount — whole rupees only"), never shrunk.
+                        {...wholeRupeeInputProps(
+                          (v) => setRedeem((r) => ({ ...r, amount: v, amountFlagged: false, error: '' })),
+                          { onCommit: (bad) => setRedeem((r) => ({ ...r, amountFlagged: bad })), value: redeem.amount },
+                        )}
+                        // Locked once the OTP is sent — the order already carries this amount.
+                        disabled={redeem.otpSent}
+                        aria-invalid={amountInvalidShown ? true : undefined}
+                        aria-describedby={amountInvalidShown ? 'redeem-amount-error' : undefined}
                         placeholder="Enter ₹ amount"
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
+                        className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)] ${amountInvalidShown ? 'border-red-300' : 'border-gray-300'}`}
                       />
+                      {amountInvalidShown && (
+                        <p id="redeem-amount-error" role="alert" className="text-xs text-red-500">{WHOLE_RUPEE_INVALID_MESSAGE}</p>
+                      )}
                       <p className="text-[11px] text-gray-400">
                         Points are calculated from this amount at the tenant conversion rate on confirmation
                         (subject to the reward’s min/max limits).
                       </p>
                       <div className="flex items-center justify-between pt-1">
                         <span className="text-xs text-gray-500">Current balance</span>
-                        <span className="text-sm text-gray-800">{redeem.outlet.balance.toLocaleString()} pts</span>
+                        <span className="text-sm text-gray-800">{redeem.outlet.balance.toLocaleString('en-IN')} pts</span>
                       </div>
                     </div>
                   ) : (
                     <div className="bg-gray-50 rounded-xl p-4 space-y-2">
                       {[
-                        { label: 'Current balance',  value: redeem.outlet.balance.toLocaleString(),                                 color: 'text-gray-800' },
-                        { label: 'Points to deduct', value: `− ${selectedGift.points.toLocaleString()}`,                            color: 'text-red-500'  },
-                        { label: 'Balance after',    value: (redeem.outlet.balance - selectedGift.points).toLocaleString(),          color: 'text-[var(--brand-primary)] font-bold' },
+                        { label: 'Current balance',  value: redeem.outlet.balance.toLocaleString('en-IN'),                                 color: 'text-gray-800' },
+                        { label: 'Points to deduct', value: `− ${selectedGift.points.toLocaleString('en-IN')}`,                            color: 'text-red-500'  },
+                        { label: 'Balance after',    value: (redeem.outlet.balance - selectedGift.points).toLocaleString('en-IN'),          color: 'text-[var(--brand-primary)] font-bold' },
                       ].map((r) => (
                         <div key={r.label} className="flex items-center justify-between">
                           <span className="text-xs text-gray-500">{r.label}</span>
@@ -846,11 +891,13 @@ function CatalogueInner() {
                     variant="primary"
                     className="w-full"
                     loading={redeem.otpSending}
+                    // An INVALID amount text never disables the button (it can't say why): the tap
+                    // commits and shows "Check the amount" instead of sending.
                     disabled={
                       isFreeAmountGift(selectedGift) &&
                       (selectedGift.amountOptions?.length
                         ? !selectedGift.amountOptions.includes(Number(redeem.amount))
-                        : !(Number(redeem.amount) > 0))
+                        : !isWholeRupeeInvalid(redeem.amount) && !((wholeRupeeAmount(redeem.amount) ?? 0) > 0))
                     }
                     onClick={sendOtp}
                   >
@@ -880,6 +927,18 @@ function CatalogueInner() {
                       Code sent to <strong>{maskedMobile(redeem.outlet.mobile)}</strong>
                     </p>
                     <p className="text-[10px] text-gray-400">Ask the outlet owner to share the OTP received</p>
+                    {redeem.sentAmount != null && (
+                      <p className="text-xs text-gray-600">
+                        Amount: <strong>₹{redeem.sentAmount.toLocaleString('en-IN')}</strong>{' '}
+                        <button
+                          type="button"
+                          onClick={changeAmount}
+                          className="text-[var(--brand-primary)] font-medium underline"
+                        >
+                          Change amount
+                        </button>
+                      </p>
+                    )}
                   </div>
 
                   <div className="space-y-1.5">
@@ -948,8 +1007,15 @@ function CatalogueInner() {
                     <div className="w-full bg-gray-50 rounded-xl p-4 text-left space-y-2">
                       {[
                         { label: 'Item',            value: selectedGift.name },
-                        { label: 'Amount',          value: redeem.amount.trim() ? `₹${redeem.amount}` : '—' },
-                        { label: 'Current balance', value: `${redeem.outlet.balance.toLocaleString()} pts` },
+                        // The amount the ORDER was created with (frozen at OTP-send), never the live field.
+                        { label: 'Amount',          value: redeem.sentAmount != null && redeem.sentAmount > 0 ? `₹${redeem.sentAmount.toLocaleString('en-IN')}` : '—' },
+                        // The SERVER's requiredPoints frozen at OTP-send (never re-derived from the field).
+                        ...(redeem.sentPoints != null
+                          ? [
+                              { label: 'Points deducted', value: `−${redeem.sentPoints.toLocaleString('en-IN')} pts` },
+                              { label: 'New balance',     value: `${(redeem.outlet.balance - redeem.sentPoints).toLocaleString('en-IN')} pts` },
+                            ]
+                          : [{ label: 'Current balance', value: `${redeem.outlet.balance.toLocaleString('en-IN')} pts` }]),
                       ].map((r) => (
                         <div key={r.label} className="flex justify-between text-sm">
                           <span className="text-gray-500">{r.label}</span>
@@ -962,8 +1028,8 @@ function CatalogueInner() {
                     <div className="w-full bg-gray-50 rounded-xl p-4 text-left space-y-2">
                       {[
                         { label: 'Item',            value: selectedGift.name },
-                        { label: 'Points deducted', value: `−${selectedGift.points.toLocaleString()}`, cls: 'text-red-500 font-bold' },
-                        { label: 'New balance',     value: `${(redeem.outlet.balance - selectedGift.points).toLocaleString()} pts`, cls: 'text-[var(--brand-primary)] font-bold' },
+                        { label: 'Points deducted', value: `−${(redeem.sentPoints ?? selectedGift.points).toLocaleString('en-IN')}`, cls: 'text-red-500 font-bold' },
+                        { label: 'New balance',     value: `${(redeem.outlet.balance - (redeem.sentPoints ?? selectedGift.points)).toLocaleString('en-IN')} pts`, cls: 'text-[var(--brand-primary)] font-bold' },
                       ].map((r) => (
                         <div key={r.label} className="flex justify-between text-sm">
                           <span className="text-gray-500">{r.label}</span>
@@ -1003,7 +1069,7 @@ function CatalogueInner() {
                   >
                     {isFreeAmountGift(selectedGift)
                       ? 'Redeem'
-                      : `Redeem for ${selectedGift.points.toLocaleString()} pts`}
+                      : `Redeem for ${selectedGift.points.toLocaleString('en-IN')} pts`}
                   </Button>
                 ) : (
                   <Button variant="outline" className="w-full" disabled>Out of Stock</Button>

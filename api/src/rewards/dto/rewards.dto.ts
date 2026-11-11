@@ -13,6 +13,7 @@ import {
   IsUrl,
   Length,
   Matches,
+  MaxLength,
   Max,
   Min,
   MinLength,
@@ -169,6 +170,14 @@ export class UpdateOrderDto {
   @IsString()
   @Matches(/\S/, { message: 'voucherCode cannot be blank' })
   voucherCode?: string;
+
+  // Optional card PIN (card number + PIN gift cards). Trimmed; blank = no PIN. A PIN needs its card
+  // number (400 otherwise — voucher-write-guard). Same visibility as voucherCode; never reuse-checked.
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @MaxLength(64)
+  voucherPin?: string;
 
   // undefined = no change. null / blank is REJECTED: a stored voucher code is only ever cleared
   // by POST /rewards/orders/:id/voucher-cancelled (voucher-write-guard.ts enforces it too).
@@ -366,6 +375,14 @@ export class TransitionOrderDto {
   @IsString()
   @Matches(/\S/, { message: 'voucherCode cannot be blank' })
   voucherCode?: string;
+
+  // Optional card PIN (card number + PIN gift cards). Trimmed; blank = no PIN. A PIN needs its card
+  // number (400 otherwise — voucher-write-guard). Same visibility as voucherCode; never reuse-checked.
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @MaxLength(64)
+  voucherPin?: string;
 
   // undefined = no change. null / blank is REJECTED: a stored voucher code is only ever cleared
   // by POST /rewards/orders/:id/voucher-cancelled (voucher-write-guard.ts enforces it too).

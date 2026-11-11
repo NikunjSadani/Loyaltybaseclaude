@@ -49,7 +49,8 @@ import { derivePointsCost, parseRupeesToPaise } from '@/lib/gift-catalogue';
 import { nextStatusOptions, hasIssuedVoucher, REFUND_TARGETS, HUBBLE_NEVER_PLACED_REASONS } from '@/lib/redemption-order-transitions';
 import type { GifsySettings } from '@/types';
 import { pointsForAmount, type HubbleProductLookup } from '@/lib/hubble-product';
-import { wholeRupeeInputProps } from '@/lib/whole-rupee-input';
+import { WHOLE_RUPEE_INVALID_MESSAGE, useWholeRupeeField } from '@/lib/whole-rupee-input';
+import { MaskedPin } from '@/components/operator/masked-pin';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
 
@@ -105,6 +106,11 @@ interface OrderItem {
   redemptionMode?: PayoutMode | string | null;
   totalPointsCost: number;
   voucherCode?: string | null;
+  /** Card PIN (card number + PIN gift cards). Only fulfilling operators receive it — the server
+   *  nulls it (with the code) for CLIENT_ADMIN / read-only staff, who see "Voucher issued" only. */
+  voucherPin?: string | null;
+  /** Server (fulfilling operator only): a set-once PIN / provider may still be added to the stored code. */
+  voucherFillable?: boolean;
   /** True when the server withheld the code (voucherCode null) — CLIENT_ADMIN / read-only staff. */
   voucherCodeMasked?: boolean;
   /** Server indicator that a code is issued, for viewers who don't receive the code itself. */
@@ -569,7 +575,12 @@ function ItemModal({
 
   // ── Hubble "Load from Hubble" (brand type + amounts) ──────────────────────────────
   const [hubbleLoad, setHubbleLoad] = useState<HubbleLoadState>({ status: 'idle' });
-  const [customAmount, setCustomAmount] = useState('');
+  // "750,5" / "1,2" / a pasted decimal → "Check the amount" (never shrunk to a guess) — the shared
+  // rule: shown only after a commit (blur / Enter / paste / an "Add amount" tap) that found the text
+  // invalid, cleared on the next edit; the button is not disabled for it.
+  const customAmountField = useWholeRupeeField();
+  const customAmount = customAmountField.value;
+  const customAmountInvalidShown = customAmountField.showInvalid;
   const hubbleId = form.hubbleProductId.trim();
   // A result is only shown for the id it was loaded for (editing the id makes it stale).
   const hubbleResult = hubbleLoad.status !== 'idle' && hubbleLoad.forId === hubbleId ? hubbleLoad : null;
@@ -610,7 +621,8 @@ function ItemModal({
     });
 
   const addCustomAmount = () => {
-    const amt = parseInt(customAmount, 10);
+    if (!customAmountField.checkBeforeSubmit()) return; // "Check the amount" — not added
+    const amt = customAmountField.amount ?? 0;
     const p = hubbleData?.product;
     let err = '';
     if (!Number.isInteger(amt) || amt <= 0) err = 'Enter a whole-rupee amount';
@@ -622,27 +634,34 @@ function ItemModal({
     setForm((f) => (f.hubbleDenominations.includes(amt)
       ? f
       : { ...f, hubbleDenominations: [...f.hubbleDenominations, amt].sort((a, b) => a - b) }));
-    setCustomAmount('');
+    customAmountField.reset();
   };
 
   /** Manual "add an amount" row (FLEXIBLE brand, or a FIXED brand whose list Hubble didn't return). */
   const customAmountRow = (
-    <div className="flex gap-2 items-center">
-      <input
-        value={customAmount}
-        {...wholeRupeeInputProps(setCustomAmount)}
-        placeholder="e.g. 500"
-        aria-label="Amount to offer"
-        className="w-28 text-sm border border-gray-200 rounded-lg px-2 py-1.5 bg-white"
-      />
-      <button
-        type="button"
-        onClick={addCustomAmount}
-        disabled={!customAmount}
-        className="text-xs font-medium px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50"
-      >
-        Add amount
-      </button>
+    <div className="space-y-1">
+      <div className="flex gap-2 items-center">
+        <input
+          value={customAmount}
+          {...customAmountField.inputProps}
+          placeholder="e.g. 500"
+          aria-label="Amount to offer"
+          aria-invalid={customAmountInvalidShown ? true : undefined}
+          aria-describedby={customAmountInvalidShown ? 'custom-amount-error' : undefined}
+          className={`w-28 text-sm border rounded-lg px-2 py-1.5 bg-white ${customAmountInvalidShown ? 'border-red-300' : 'border-gray-200'}`}
+        />
+        <button
+          type="button"
+          onClick={addCustomAmount}
+          disabled={!customAmount}
+          className="text-xs font-medium px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50"
+        >
+          Add amount
+        </button>
+      </div>
+      {customAmountInvalidShown && (
+        <p id="custom-amount-error" role="alert" className="text-xs text-red-600">{WHOLE_RUPEE_INVALID_MESSAGE}</p>
+      )}
     </div>
   );
 
@@ -1521,6 +1540,8 @@ function CatalogueTab() {
 interface TransitionDraft {
   toStatus: string;
   voucherCode: string;
+  /** Optional card PIN — sent only together with a voucher code. */
+  voucherPin: string;
   voucherProvider: string;
   trackingNumber: string;
   trackingUrl: string;
@@ -1530,7 +1551,7 @@ interface TransitionDraft {
 /** Fields of a transition / voucher-cancel response's order that the queue row displays. */
 type OrderPatch = Pick<OrderItem, 'id'> &
   Partial<Pick<OrderItem,
-    'status' | 'voucherCode' | 'voucherProvider' | 'trackingNumber' | 'trackingUrl' | 'updatedAt'
+    'status' | 'voucherCode' | 'voucherPin' | 'voucherProvider' | 'trackingNumber' | 'trackingUrl' | 'updatedAt'
     | 'hubbleNeedsReconcile' | 'hubbleReconcileReason'>>;
 
 /** Human copy for the backend's Hubble reconcile reasons (fallback: the raw code). */
@@ -1554,7 +1575,7 @@ const FORWARD_VOUCHER_TARGETS = new Set(['PROCESSING', 'DISPATCHED', 'DELIVERED'
 /** A fresh draft for `toStatus` — every target-specific field starts EMPTY, so a value typed for
  *  one target can never ride along on another (e.g. a code typed, then switched to CANCELLED). */
 function blankDraft(toStatus: string, notes = ''): TransitionDraft {
-  return { toStatus, voucherCode: '', voucherProvider: '', trackingNumber: '', trackingUrl: '', notes };
+  return { toStatus, voucherCode: '', voucherPin: '', voucherProvider: '', trackingNumber: '', trackingUrl: '', notes };
 }
 
 function OrderRow({
@@ -1608,6 +1629,7 @@ function OrderRow({
   const [manualOpen, setManualOpen] = useState(false);
   const [manualCode, setManualCode] = useState('');
   const [manualProvider, setManualProvider] = useState('');
+  const [manualPin, setManualPin] = useState('');
   const [manualReason, setManualReason] = useState('');
   const [manualBusy, setManualBusy] = useState(false);
   const [manualErr, setManualErr] = useState('');
@@ -1633,6 +1655,7 @@ function OrderRow({
     try {
       const body: Record<string, unknown> = { voucherCode: code, manualOverride: true, overrideReason: reason };
       if (manualProvider.trim()) body.voucherProvider = manualProvider.trim();
+      if (manualPin.trim()) body.voucherPin = manualPin.trim();
       const res = await apiJson<{ order?: OrderPatch } | null>(`/api/rewards/orders/${order.id}`, {
         method: 'PATCH',
         body: JSON.stringify(body),
@@ -1641,6 +1664,7 @@ function OrderRow({
       onTransitioned({
         id: order.id,
         voucherCode: res?.order?.voucherCode ?? code,
+        voucherPin: res?.order?.voucherPin ?? (manualPin.trim() || null),
         voucherProvider: res?.order?.voucherProvider ?? (manualProvider.trim() || 'Manual'),
         hubbleNeedsReconcile: false,
         hubbleReconcileReason: null,
@@ -1659,6 +1683,13 @@ function OrderRow({
   const advancingForwardWithVoucher =
     isVoucher && !voucherIssued && !isHubble && !needsReconcile && FORWARD_VOUCHER_TARGETS.has(draft.toStatus);
   const advancingToDispatched = draft.toStatus === 'DISPATCHED';
+  // SET-ONCE PIN: a code is stored (and visible to this operator) but no PIN yet → the PIN box is
+  // offered on a forward move ONLY when the server says it would take it (`voucherFillable` —
+  // canFillStoredVoucher: paid, addable status, not Hubble, not cash; one rule, no client mirror).
+  // Once a PIN is saved it is read-only (masked).
+  const addingPinToStoredCode =
+    isVoucher && hasIssuedVoucher(order.voucherCode) && !order.voucherPin && order.voucherFillable === true &&
+    FORWARD_VOUCHER_TARGETS.has(draft.toStatus);
 
   const submit = async () => {
     if (!draft.toStatus) return;
@@ -1668,8 +1699,15 @@ function OrderRow({
     // never a hidden leftover (a code must never ride on a refund move).
     if (advancingForwardWithVoucher) {
       if (draft.voucherCode.trim())     body.voucherCode = draft.voucherCode.trim();
+      if (draft.voucherPin.trim()) {
+        // Mirrors the backend rule: a PIN needs its card number.
+        if (!draft.voucherCode.trim()) { setBusy(false); setErr('Enter the card number before the PIN'); return; }
+        body.voucherPin = draft.voucherPin.trim();
+      }
       if (draft.voucherProvider.trim()) body.voucherProvider = draft.voucherProvider.trim();
     }
+    // A PIN added to the already-stored code (the backend sets it once, CAS on a null PIN).
+    if (addingPinToStoredCode && draft.voucherPin.trim()) body.voucherPin = draft.voucherPin.trim();
     if (advancingToDispatched) {
       if (draft.trackingNumber.trim()) body.trackingNumber = draft.trackingNumber.trim();
       if (draft.trackingUrl.trim())    body.trackingUrl = draft.trackingUrl.trim();
@@ -1701,7 +1739,7 @@ function OrderRow({
       });
       setCancelOpen(false);
       // The code is cleared server-side → the row re-keys and refund targets appear.
-      onTransitioned(res?.order?.id ? res.order : { id: order.id, voucherCode: null, voucherProvider: null });
+      onTransitioned(res?.order?.id ? res.order : { id: order.id, voucherCode: null, voucherPin: null, voucherProvider: null });
     } catch (e) {
       setCancelErr(e instanceof Error ? e.message : 'Could not record the cancellation');
     } finally {
@@ -1725,9 +1763,20 @@ function OrderRow({
           </span>
           {/* View-only viewers never receive the code — the server sends only an "issued" flag. */}
           {hasIssuedVoucher(order.voucherCode) ? (
-            <span className="block mt-1 text-[10px] font-mono text-emerald-600" data-testid="order-voucher-code">
-              {order.voucherCode}
-            </span>
+            <>
+              <span className="block mt-1 text-[10px] font-mono text-emerald-600" data-testid="order-voucher-code">
+                {order.voucherCode}
+              </span>
+              {order.voucherPin && (
+                // Hidden behind a per-row "Show" toggle (operators — never shown in clear by default).
+                <MaskedPin
+                  pin={order.voucherPin}
+                  orderNumber={order.orderNumber}
+                  className="block text-[10px] text-emerald-600"
+                  testId="order-voucher-pin"
+                />
+              )}
+            </>
           ) : order.voucherIssued ? (
             <span className="block mt-1 text-[10px] font-semibold text-emerald-600" data-testid="order-voucher-code">
               Voucher issued
@@ -1806,11 +1855,22 @@ function OrderRow({
               </p>
               <div className="flex flex-wrap gap-3">
                 <div className="space-y-1">
-                  <label className="text-xs font-medium text-gray-700" htmlFor={`mo-code-${order.id}`}>Voucher code *</label>
+                  <label className="text-xs font-medium text-gray-700" htmlFor={`mo-code-${order.id}`}>Card no. / code *</label>
                   <input
                     id={`mo-code-${order.id}`}
                     value={manualCode}
                     onChange={(e) => setManualCode(e.target.value)}
+                    className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-700" htmlFor={`mo-pin-${order.id}`}>PIN (if the card has one)</label>
+                  <input
+                    id={`mo-pin-${order.id}`}
+                    value={manualPin}
+                    onChange={(e) => setManualPin(e.target.value)}
+                    maxLength={64}
+                    autoComplete="off"
                     className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
                   />
                 </div>
@@ -1916,22 +1976,60 @@ function OrderRow({
                   </select>
                 </div>
                 {isVoucher && voucherIssued && FORWARD_VOUCHER_TARGETS.has(draft.toStatus) && (
-                  <div className="space-y-1">
-                    <span className="text-xs font-medium text-gray-700">Voucher code</span>
-                    <p className="text-sm font-mono text-gray-700 px-3 py-2" data-testid="voucher-code-readonly">
-                      {order.voucherCode}
-                    </p>
-                  </div>
+                  <>
+                    <div className="space-y-1">
+                      {/* A stored code is read-only (only "Voucher cancelled with vendor" clears it). */}
+                      <span className="text-xs font-medium text-gray-700">Card no. / code</span>
+                      <p className="text-sm font-mono text-gray-700 px-3 py-2" data-testid="voucher-code-readonly">
+                        {order.voucherCode}
+                      </p>
+                    </div>
+                    {order.voucherPin ? (
+                      <div className="space-y-1">
+                        <span className="text-xs font-medium text-gray-700">PIN (if the card has one)</span>
+                        <p className="text-sm text-gray-700 px-3 py-2">
+                          <MaskedPin pin={order.voucherPin} label="PIN" orderNumber={order.orderNumber} testId="voucher-pin-readonly" />
+                        </p>
+                      </div>
+                    ) : addingPinToStoredCode ? (
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-gray-700" htmlFor={`vc-pin-${order.id}`}>PIN (if the card has one)</label>
+                        <input
+                          id={`vc-pin-${order.id}`}
+                          value={draft.voucherPin}
+                          onChange={(e) => setDraft((d) => ({ ...d, voucherPin: e.target.value }))}
+                          maxLength={64}
+                          autoComplete="off"
+                          aria-describedby={`vc-pin-hint-${order.id}`}
+                          className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+                        />
+                        <p id={`vc-pin-hint-${order.id}`} className="text-[10px] text-gray-500">
+                          Add the PIN for this card — it can be saved once
+                        </p>
+                      </div>
+                    ) : null}
+                  </>
                 )}
                 {advancingForwardWithVoucher && (
                   <>
                     <div className="space-y-1">
-                      <label className="text-xs font-medium text-gray-700" htmlFor={`vc-code-${order.id}`}>Voucher code</label>
+                      <label className="text-xs font-medium text-gray-700" htmlFor={`vc-code-${order.id}`}>Card no. / code</label>
                       <input
                         id={`vc-code-${order.id}`}
                         value={draft.voucherCode}
                         onChange={(e) => setDraft((d) => ({ ...d, voucherCode: e.target.value }))}
                         placeholder="AMZ-XXXX"
+                        className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-gray-700" htmlFor={`vc-pin-${order.id}`}>PIN (if the card has one)</label>
+                      <input
+                        id={`vc-pin-${order.id}`}
+                        value={draft.voucherPin}
+                        onChange={(e) => setDraft((d) => ({ ...d, voucherPin: e.target.value }))}
+                        maxLength={64}
+                        autoComplete="off"
                         className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
                       />
                     </div>
@@ -2126,7 +2224,9 @@ function FulfilmentQueue({
   // Focus target after a load-more: the first newly-appended row (keyboard/screen-reader users
   // otherwise lose their place when the "Load more" button unmounts on the last page).
   const focusOrderIdRef = useRef<string | null>(null);
-  const tableRef = useRef<HTMLTableSectionElement>(null);
+  /** Per-order sequence of voucherFillable re-reads — only the latest one is applied. */
+  const fillableSeqRef = useRef<Record<string, number>>({});
+  const tableRef =useRef<HTMLTableSectionElement>(null);
 
   /**
    * (Re)load the queue from the top with `limit` rows (one page on a filter change; the current
@@ -2218,13 +2318,26 @@ function FulfilmentQueue({
     const filter = statusRef.current;
     const leaves = filter !== 'all' && updated.status != null && updated.status !== filter;
     const patch: Partial<OrderItem> = {};
-    for (const k of ['status', 'voucherCode', 'voucherProvider', 'trackingNumber', 'trackingUrl', 'updatedAt', 'hubbleNeedsReconcile', 'hubbleReconcileReason'] as const) {
+    for (const k of ['status', 'voucherCode', 'voucherPin', 'voucherProvider', 'trackingNumber', 'trackingUrl', 'updatedAt', 'hubbleNeedsReconcile', 'hubbleReconcileReason'] as const) {
       if (updated[k] !== undefined) (patch as Record<string, unknown>)[k] = updated[k];
     }
+    // `voucherFillable` (may the set-once PIN be added?) is SERVER-derived (canFillStoredVoucher)
+    // and the transition / PATCH / voucher-cancel responses don't carry it — so the in-place row
+    // drops the stale value (PIN box hidden, never a stale "yes") and re-reads it from the server.
+    if (!leaves) patch.voucherFillable = undefined;
     setOrders((prev) => (leaves
       ? prev.filter((o) => o.id !== updated.id)
       : prev.map((o) => (o.id === updated.id ? { ...o, ...patch } : o))));
-    if (leaves) setTotal((t) => (t == null ? t : Math.max(0, t - 1)));
+    if (leaves) { setTotal((t) => (t == null ? t : Math.max(0, t - 1))); return; }
+    const seq = (fillableSeqRef.current[updated.id] ?? 0) + 1;
+    fillableSeqRef.current[updated.id] = seq;
+    void apiJson<{ voucherFillable?: boolean } | null>(`/api/admin/gift-orders/${updated.id}`)
+      .then((d) => {
+        if (fillableSeqRef.current[updated.id] !== seq || typeof d?.voucherFillable !== 'boolean') return;
+        const fillable = d.voucherFillable;
+        setOrders((prev) => prev.map((o) => (o.id === updated.id ? { ...o, voucherFillable: fillable } : o)));
+      })
+      .catch(() => { /* stays hidden — Refresh re-reads it from the list */ });
   }, [refreshOrders]);
 
   // Header count: the SERVER total, but never fewer than the rows actually on screen.
