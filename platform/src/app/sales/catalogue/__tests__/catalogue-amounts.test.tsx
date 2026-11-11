@@ -23,7 +23,7 @@ vi.mock('next/navigation', () => ({
 const LIST_ITEM = {
   id: 'fk-1', name: 'Flipkart Card', pointsCost: 0, description: 'Flipkart gift card',
   imageUrls: null, status: 'ACTIVE', stockQuantity: null, redemptionMode: 'GIFT_CARD',
-  minRedemptionPoints: 300, maxRedemptionPoints: 1250, amountOptions: [300, 1250],
+  minRedemptionPoints: 300, maxRedemptionPoints: 1250, amountOptions: [300, 600, 1250],
 };
 const FREE_ITEM = {
   id: 'amz-1', name: 'Amazon Any', pointsCost: 0, description: 'Amazon gift card',
@@ -48,7 +48,7 @@ function mockFetch(items: unknown[]) {
     }
     if (url.includes('/api/rewards/catalog')) return ok({ items });
     if (url.includes('/api/sales/outlets')) return ok({ outlets: [OUTLET] });
-    if (url.includes('/api/auth/me')) return ok({ conversionRate: 2 });
+    if (url.includes('/api/auth/me')) return ok({ conversionRate: 2, settings: { minVoucherFreeAmount: 500 } });
     return ok({});
   }));
   return { posts, urls };
@@ -72,12 +72,16 @@ describe('sales catalogue — redemption amounts', () => {
     const { posts } = mockFetch([LIST_ITEM]);
     await openConfirm(/Flipkart Card/);
 
-    expect(screen.getByRole('radiogroup', { name: /voucher amount/i })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /voucher amount/i })).toBeInTheDocument();
     expect(screen.queryByLabelText('Amount to redeem (₹)')).not.toBeInTheDocument();
     expect(await screen.findByText('2,500 pts')).toBeInTheDocument(); // ₹1,250 × 2
     expect(screen.getByRole('button', { name: /Send OTP/ })).toBeDisabled();
 
-    fireEvent.click(screen.getByRole('radio', { name: /₹1,250/ }));
+    // ₹300 is below the ₹500 program minimum → greyed out (disabled), like the partner sheet.
+    expect(await screen.findByRole('button', { name: /^₹300, 600 points \(below the minimum\)/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /^₹600, 1,200 points$/ })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: /^₹1,250, 2,500 points$/ }));
+    expect(screen.getByRole('button', { name: /^₹1,250, 2,500 points$/ })).toHaveAttribute('aria-pressed', 'true');
     fireEvent.click(screen.getByRole('button', { name: /Send OTP/ }));
     await waitFor(() => expect(posts).toHaveLength(1));
     expect(posts[0]).toEqual({ rewardId: 'fk-1', targetPartnerId: 'p1', amount: 1250 });

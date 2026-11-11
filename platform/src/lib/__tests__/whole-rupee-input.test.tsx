@@ -4,7 +4,7 @@
  * Typing or pasting "750.5" must never leave a decimal (or "7505") in the field.
  */
 import React, { useState } from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect } from 'vitest';
 import { wholeRupeeInputProps, wholeRupeesFromText } from '../whole-rupee-input';
@@ -58,6 +58,30 @@ describe('WR — wholeRupeeInputProps', () => {
     const el = screen.getByLabelText('amt') as HTMLInputElement;
     await userEvent.type(el, '1e+-,2');
     expect(el.value).toBe('12');
+  });
+
+  it('WR6 (Android, keydown "Unidentified"): change events "750." then "7505" → stays 750; a deletion ends the fraction', () => {
+    render(<Harness />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    for (const v of ['7', '75', '750']) fireEvent.change(el, { target: { value: v } });
+    fireEvent.keyDown(el, { key: 'Unidentified' });
+    fireEvent.change(el, { target: { value: '750.' } });
+    expect(el.value).toBe('750');
+    fireEvent.keyDown(el, { key: 'Unidentified' });
+    fireEvent.change(el, { target: { value: '7505' } });
+    expect(el.value).toBe('750'); // never 7505
+    fireEvent.change(el, { target: { value: '75055' } });
+    expect(el.value).toBe('750');
+    fireEvent.change(el, { target: { value: '75' } }); // backspace (a deletion) ends the fraction state
+    fireEvent.change(el, { target: { value: '751' } });
+    expect(el.value).toBe('751');
+  });
+
+  it('WR7 (Android): an on-screen "," is stripped (thousands separator), never kept', () => {
+    render(<Harness />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    fireEvent.change(el, { target: { value: '1,250' } });
+    expect(el.value).toBe('1250');
   });
 
   it('WR5: numeric keypad hints are set', () => {

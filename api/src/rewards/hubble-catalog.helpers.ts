@@ -52,10 +52,21 @@ export function memberHubbleFields(
   return denoms.length ? { amountOptions: denoms } : {};
 }
 
-/** True when Hubble can issue ONE voucher of `amount` rupees for this product. */
+/** A FIXED brand whose face values Hubble did not return — the list is UNKNOWN, not empty. */
+export function isFixedListUnknown(product: HubbleProduct): boolean {
+  return product.denominationType === 'FIXED' && product.denominations.length === 0;
+}
+
+/**
+ * True when Hubble can issue ONE voucher of `amount` rupees for this product. FIXED with a known
+ * list → must be on it; FIXED with an UNKNOWN list → any whole rupee within the known min/max
+ * (Hubble validates the face value itself); FLEXIBLE → whole rupee within min–max.
+ */
 export function isAmountIssuable(product: HubbleProduct, amount: number): boolean {
   if (!Number.isInteger(amount) || amount <= 0) return false;
-  if (product.denominationType === 'FIXED') return product.denominations.includes(amount);
+  if (product.denominationType === 'FIXED' && !isFixedListUnknown(product)) {
+    return product.denominations.includes(amount);
+  }
   if (product.minValue != null && amount < product.minValue) return false;
   if (product.maxValue != null && amount > product.maxValue) return false;
   return true;
@@ -65,7 +76,7 @@ function describeProductAmounts(product: HubbleProduct): string {
   if (product.denominationType === 'FIXED') {
     return product.denominations.length
       ? `fixed amounts only: ${product.denominations.map(fmt).join(', ')}`
-      : 'no issuable amounts';
+      : "fixed amounts only (Hubble didn't return them — enter the amounts Hubble shows for this brand)";
   }
   const lo = product.minValue != null ? fmt(product.minValue) : 'any';
   const hi = product.maxValue != null ? fmt(product.maxValue) : 'any';

@@ -713,13 +713,10 @@ function VoucherRedeemSheet({
   // of the admin-chosen amounts — no free typing. Server re-validates the amount is in the list.
   const amountOptions = !isFixed && voucher.amountOptions?.length ? voucher.amountOptions : null;
   const freeAmt   = parseInt(amount, 10) || 0;
-  // FREE_AMOUNT: points required = ₹amount × conversionRate (server re-validates vs min/max).
-  // A listed amount uses the server's exact rule (Math.round) so the preview matches the debit.
-  const ptsNeeded = isFixed
-    ? fixedPts
-    : amountOptions
-      ? pointsForAmount(freeAmt, conversionRate)
-      : Math.ceil(freeAmt * conversionRate);
+  // FREE_AMOUNT: points required = ₹amount × conversionRate, with the SERVER's exact rounding
+  // (Math.round, rewards.service redeem) so the preview, the balance check and the debit agree.
+  // (At an integer rate — e.g. 1 — this is identical to the previous Math.ceil.)
+  const ptsNeeded = isFixed ? fixedPts : pointsForAmount(freeAmt, conversionRate);
   const canAfford = myBalance >= ptsNeeded && (isFixed || freeAmt >= minFreeAmount);
 
   // Client-side UX validation for FREE_AMOUNT (server is authoritative).
@@ -729,8 +726,8 @@ function VoucherRedeemSheet({
   const maxAffordableInr = hasRate ? Math.floor(myBalance / conversionRate) : null;
   const amountError = !isFixed && freeAmt > 0 && freeAmt < minFreeAmount
     ? `Minimum redemption is ${fmtInr(minFreeAmount)}`
-    : !isFixed && maxAffordableInr !== null && freeAmt > maxAffordableInr
-    ? `Exceeds your balance (max ${fmtInr(maxAffordableInr)})`
+    : !isFixed && hasRate && freeAmt > 0 && ptsNeeded > myBalance
+    ? `Exceeds your balance (max ${fmtInr(maxAffordableInr ?? 0)})`
     : '';
 
   // Step 1: create the order + trigger OTP. FREE_AMOUNT sends `amount`.
@@ -833,7 +830,7 @@ function VoucherRedeemSheet({
           {amountOptions && (
             <div>
               <p className="text-xs font-medium text-gray-600 mb-2">Choose an amount *</p>
-              <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Voucher amount">
+              <div className="grid grid-cols-3 gap-2" role="group" aria-label="Voucher amount">
                 {amountOptions.map((amt) => {
                   const pts = pointsForAmount(amt, conversionRate);
                   const selected = freeAmt === amt;
@@ -843,8 +840,8 @@ function VoucherRedeemSheet({
                     <button
                       key={amt}
                       type="button"
-                      role="radio"
-                      aria-checked={selected}
+                      aria-pressed={selected}
+                      aria-label={`${fmtInr(amt)}, ${formatPoints(pts)} points${tooLow ? ' (below the minimum)' : ''}`}
                       disabled={otpSent || tooLow}
                       onClick={() => setAmount(String(amt))}
                       className={cn(

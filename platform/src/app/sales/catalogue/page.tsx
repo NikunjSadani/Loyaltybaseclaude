@@ -135,8 +135,10 @@ function CatalogueInner() {
   const [selectedGift, setSelectedGift] = useState<GiftItem | null>(null);
   const [sheetStep,    setSheetStep]    = useState<SheetStep | null>(null);
   const [redeem,       setRedeem]       = useState<RedeemState>({ ...INITIAL_REDEEM, outlet: null });
-  // Tenant points-per-₹ (from /me) — only loaded when a "choose from amounts" item exists.
+  // Tenant points-per-₹ + minimum voucher amount (from /me) — only loaded when a "choose from
+  // amounts" item exists (amounts below the minimum are shown greyed out, like the partner sheet).
   const [conversionRate, setConversionRate] = useState<number | null>(null);
+  const [minVoucherAmount, setMinVoucherAmount] = useState(0);
 
   const preOutlet = useMemo(
     () => preselectedId ? outlets.find((o) => o.kycId === preselectedId || o.id === preselectedId) ?? null : null,
@@ -222,10 +224,12 @@ function CatalogueInner() {
           // Points per listed amount need the tenant rate — fetched ONLY when the catalogue has a
           // "choose from amounts" item (never for a tenant without one).
           if (mapped.some((g) => g.amountOptions?.length)) {
-            api.get<{ conversionRate?: number }>('/api/auth/me')
+            api.get<{ conversionRate?: number; settings?: { minVoucherFreeAmount?: number } }>('/api/auth/me')
               .then((me) => {
                 const r = me.success ? me.data?.conversionRate : undefined;
                 if (typeof r === 'number' && Number.isFinite(r) && r > 0) setConversionRate(r);
+                const floor = me.success ? me.data?.settings?.minVoucherFreeAmount : undefined;
+                if (typeof floor === 'number' && Number.isFinite(floor) && floor > 0) setMinVoucherAmount(floor);
               })
               .catch(() => {});
           }
@@ -715,18 +719,20 @@ function CatalogueInner() {
                     /* Hubble "choose from amounts": one button per amount (+ its points); no typing. */
                     <div className="bg-gray-50 rounded-xl p-4 space-y-2">
                       <p className="text-xs text-gray-500">Choose an amount</p>
-                      <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Voucher amount">
+                      <div className="grid grid-cols-3 gap-2" role="group" aria-label="Voucher amount">
                         {selectedGift.amountOptions.map((amt) => {
                           const selected = Number(redeem.amount) === amt;
                           const pts = conversionRate != null ? pointsForAmount(amt, conversionRate) : null;
+                          const tooLow = amt < minVoucherAmount;
                           return (
                             <button
                               key={amt}
                               type="button"
-                              role="radio"
-                              aria-checked={selected}
+                              aria-pressed={selected}
+                              aria-label={`₹${amt.toLocaleString('en-IN')}${pts != null ? `, ${pts.toLocaleString('en-IN')} points` : ''}${tooLow ? ' (below the minimum)' : ''}`}
+                              disabled={tooLow}
                               onClick={() => setRedeem((r) => ({ ...r, amount: String(amt), error: '' }))}
-                              className={`rounded-xl border-2 px-2 py-2 text-center transition-all ${
+                              className={`rounded-xl border-2 px-2 py-2 text-center transition-all disabled:opacity-40 ${
                                 selected ? 'border-[var(--brand-primary)] bg-white' : 'border-gray-200 bg-white hover:border-gray-300'
                               }`}
                             >

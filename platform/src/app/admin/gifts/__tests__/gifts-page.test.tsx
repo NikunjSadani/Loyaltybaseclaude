@@ -426,7 +426,7 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
       await userEvent.type(scope.getByPlaceholderText('100'), '100');
       await userEvent.type(scope.getByPlaceholderText('e.g. 5000'), '10000');
       await userEvent.click(scope.getByRole('button', { name: /add reward/i }));
-      expect(await scope.findByText(/only issues fixed amounts — tick the amounts/i)).toBeInTheDocument();
+      expect(await scope.findByText(/only issues fixed amounts — choose the amounts/i)).toBeInTheDocument();
       expect(calls.some((c) => c.url.startsWith('/api/admin/rewards/catalog') && c.init?.method === 'POST')).toBe(false);
     });
 
@@ -459,6 +459,37 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
         const post = calls.find((c) => c.url.startsWith('/api/admin/rewards/catalog') && c.init?.method === 'POST');
         expect(post).toBeTruthy();
         expect(JSON.parse(String(post!.init!.body)).hubbleDenominations).toEqual([1000]);
+      });
+    });
+
+    it("GIF20: FIXED brand whose list Hubble didn't return → says so and allows manual whole-rupee amounts (≥ program minimum)", async () => {
+      const UNKNOWN = { ...FIXED_LOOKUP, product: { ...FIXED_LOOKUP.product, denominations: [] } };
+      const { calls } = installFetch((url) =>
+        url.startsWith('/api/admin/rewards/hubble-products/fk-1') ? jsonOk(UNKNOWN) : undefined,
+      );
+      render(<AdminGiftsPage />);
+      const scope = await openAdd();
+      await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'FK');
+      await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'Flipkart');
+      await userEvent.type(scope.getByPlaceholderText(/amazon-pay-product-id/i), 'fk-1');
+      await userEvent.click(scope.getByRole('button', { name: /load from hubble/i }));
+      const panel = await scope.findByTestId('hubble-product-panel');
+      expect(within(panel).getByTestId('fixed-list-unknown'))
+        .toHaveTextContent("Hubble didn't return its amounts — enter the amounts Hubble shows for this brand");
+
+      const amt = within(panel).getByLabelText('Amount to offer');
+      await userEvent.type(amt, '175'); // below the ₹200 program minimum
+      await userEvent.click(within(panel).getByRole('button', { name: /add amount/i }));
+      expect(await scope.findByText(/below this program's minimum voucher amount/i)).toBeInTheDocument();
+      await userEvent.clear(amt);
+      await userEvent.type(amt, '300');
+      await userEvent.click(within(panel).getByRole('button', { name: /add amount/i }));
+
+      await userEvent.click(scope.getByRole('button', { name: /add reward/i }));
+      await waitFor(() => {
+        const post = calls.find((c) => c.url.startsWith('/api/admin/rewards/catalog') && c.init?.method === 'POST');
+        expect(post).toBeTruthy();
+        expect(JSON.parse(String(post!.init!.body)).hubbleDenominations).toEqual([300]);
       });
     });
 

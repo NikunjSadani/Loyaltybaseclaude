@@ -79,7 +79,11 @@ export interface HubbleProduct {
   productId: string;
   name: string;
   denominationType: 'FIXED' | 'FLEXIBLE';
-  /** FIXED: the issuable face values (rupees, ascending). FLEXIBLE: []. */
+  /**
+   * FIXED: the issuable face values (rupees, ascending); [] for a FIXED brand means Hubble did
+   * NOT return its list — treat as UNKNOWN (admin enters the amounts; Hubble validates).
+   * FLEXIBLE: [].
+   */
   denominations: number[];
   /** Smallest single-voucher value Hubble will issue (rupees). */
   minValue: number | null;
@@ -365,13 +369,37 @@ export class HubbleService {
 
     let denominations: number[] = [];
     if (typeRaw === 'FIXED') {
-      const raw = Array.isArray(r.denominations) ? r.denominations : [];
-      denominations = [...new Set(
-        raw
-          .map(num)
-          .filter((x): x is number => x != null && Number.isInteger(x))
-          .filter((x) => (minValue == null || x >= minValue) && (maxValue == null || x <= maxValue)),
-      )].sort((a, b) => a - b);
+      // PRIMARY (confirmed shape): amountRestrictions.denominations = number[]. Tolerated
+      // alternatives (the docs and live payloads disagree in places): numeric strings, objects
+      // ({value|amount|denomination|faceValue}), and the list under data.denominations or
+      // data.variantDetails. The first source that yields any value wins. An EMPTY result means
+      // "Hubble didn't tell us" — callers treat it as UNKNOWN (never as "nothing issuable").
+      const toAmount = (v: unknown): number | null => {
+        if (typeof v === 'number') return num(v);
+        if (typeof v === 'string' && /^\s*\d+(\.\d+)?\s*$/.test(v)) return num(Number(v));
+        if (v && typeof v === 'object' && !Array.isArray(v)) {
+          const o = v as Record<string, unknown>;
+          for (const k of ['value', 'amount', 'denomination', 'faceValue', 'price']) {
+            const a = toAmount(o[k]);
+            if (a != null) return a;
+          }
+        }
+        return null;
+      };
+      const sources = [r.denominations, data.denominations, data.variantDetails];
+      for (const src of sources) {
+        if (!Array.isArray(src)) continue;
+        const parsed = [...new Set(
+          src
+            .map(toAmount)
+            .filter((x): x is number => x != null && Number.isInteger(x))
+            .filter((x) => (minValue == null || x >= minValue) && (maxValue == null || x <= maxValue)),
+        )].sort((a, b) => a - b);
+        if (parsed.length) {
+          denominations = parsed;
+          break;
+        }
+      }
     }
     const name = String(data.title ?? data.name ?? id);
     const maxV = r.maxVouchersPerOrder;
