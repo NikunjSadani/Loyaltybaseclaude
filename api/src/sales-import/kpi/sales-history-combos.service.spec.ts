@@ -70,6 +70,10 @@ function make(opts: { sets?: SetRow[]; combos?: unknown[]; values?: unknown[]; f
 
 const PREAMBLE = ['SET TRANSACTION READ ONLY', `SET LOCAL statement_timeout = ${HISTORY_COMBOS_STATEMENT_TIMEOUT_MS}`, 'sets'];
 
+// Timed out at jest's 5 s default under full-suite CPU load (2026-11-11; 11/11 pass alone in ~9 s). A red suite
+// skips the staging deploy, so give real headroom.
+jest.setTimeout(30_000);
+
 describe('SalesHistoryCombosService', () => {
   it('validates the query: month XOR lastMonths, YYYY-MM, 1..12', async () => {
     const { svc, prisma } = make();
