@@ -634,13 +634,14 @@ describe('HD — choose-from-amounts voucher', () => {
     expect(card).toHaveTextContent('Choose Amount');
 
     await user.click(card);
-    expect(await screen.findByRole('radiogroup', { name: /voucher amount/i })).toBeInTheDocument();
+    expect(await screen.findByRole('group', { name: /voucher amount/i })).toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: /voucher amount/i })).not.toBeInTheDocument();
     // Nothing chosen yet → cannot send.
     expect(screen.getByRole('button', { name: /choose an amount/i })).toBeDisabled();
 
-    await user.click(screen.getByRole('radio', { name: /₹1,250/ }));
-    expect(screen.getByRole('radio', { name: /₹1,250/ })).toHaveAttribute('aria-checked', 'true');
+    await user.click(screen.getByRole('button', { name: /^₹1,250, 1,250 points/ }));
+    expect(screen.getByRole('button', { name: /^₹1,250, 1,250 points/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /^₹300, 300 points/ })).toHaveAttribute('aria-pressed', 'false');
     await user.click(screen.getByRole('button', { name: /send otp/i }));
 
     await waitFor(() => {

@@ -54,6 +54,15 @@ describe('hubble-catalog helpers', () => {
     expect(isAmountIssuable(FLEX, 10001)).toBe(false);
   });
 
+  it('M1: a FIXED brand with an UNKNOWN list accepts any whole rupee within its known bounds', () => {
+    const unknown = { ...FIXED, denominations: [] };
+    expect(isAmountIssuable(unknown, 277)).toBe(true);
+    expect(isAmountIssuable(unknown, 277.5)).toBe(false);
+    expect(isAmountIssuable(unknown, 100)).toBe(false); // below minValue 150
+    expect(validateHubbleItemAmounts(unknown, { ...base, denominations: [200, 400] }))
+      .toEqual({ minRedemptionPoints: 200, maxRedemptionPoints: 400 });
+  });
+
   describe('validateHubbleItemAmounts', () => {
     it('FIXED + chosen subset → band derived from min/max × rate', () => {
       expect(validateHubbleItemAmounts(FIXED, { ...base, denominations: [150, 300, 1250], conversionRate: 2 }))

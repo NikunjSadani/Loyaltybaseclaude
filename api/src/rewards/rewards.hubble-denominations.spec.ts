@@ -132,6 +132,8 @@ describe('Hubble per-brand amounts + whole-rupee redemption amounts', () => {
     mockPrisma.client.findFirst.mockResolvedValue({ features: {} });
     mockHubble.isConfigured.mockReturnValue(true);
     mockHubble.getProduct.mockReset();
+    // Default live brand: FLEXIBLE ₹1–₹1,00,000 (never blocks); cases override.
+    mockHubble.getProduct.mockResolvedValue({ ...FLEX_PRODUCT, minValue: 1, maxValue: 100000 });
     mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
     mockPrisma.redemptionOrder.findFirst.mockReset();
@@ -475,37 +477,64 @@ describe('Hubble per-brand amounts + whole-rupee redemption amounts', () => {
     });
   });
 
-  // ─── Issuance defence in depth ───
+  // ─── Issuance defence in depth (audit M2: reads the ORDER; a miss is refunded at once) ───
   describe('issueHubbleVoucherForOrder — amount defence', () => {
     const order = (over: Record<string, unknown> = {}) => ({
       id: 'o1', orderNumber: 'RDM-1', partnerId: 'cp1', status: 'CONFIRMED', voucherCode: null,
-      pointsDeducted: 300, valuePaise: 30000n, redemptionMode: 'GIFT_CARD', metadata: {},
+      pointsDeducted: 300, valuePaise: 30000n, quantity: 1, redemptionMode: 'GIFT_CARD',
+      metadata: { sellingValuePaiseSnapshot: 30000 },
       partner: { clientId: 'bajaj' },
       reward: { metadata: { hubbleProductId: 'fk-1', hubbleDenominations: [150, 300] } },
       ...over,
     });
-    const flagged = () =>
+    const failedClaim = () =>
       mockPrisma.redemptionOrder.updateMany.mock.calls
-        .map(([a]) => a as { data?: { metadata?: Record<string, unknown> } })
-        .find((a) => a.data?.metadata?.hubbleReconcileReason === 'HUBBLE_INVALID_AMOUNT')
-      ?? mockPrisma.redemptionOrder.update.mock.calls
-        .map(([a]) => a as { data?: { metadata?: Record<string, unknown> } })
-        .find((a) => a.data?.metadata?.hubbleReconcileReason === 'HUBBLE_INVALID_AMOUNT');
+        .map(([a]) => a as { data?: { status?: string } })
+        .find((a) => a.data?.status === 'FAILED');
 
-    it('amount not in the item list → never placed (HUBBLE_INVALID_AMOUNT)', async () => {
-      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(order({ valuePaise: 27700n }));
-      const out = await service.issueHubbleVoucherForOrder('o1', 'bajaj', 'a1');
-      expect(out).toBe('PENDING_RECONCILE');
-      expect(mockHubble.placeOrder).not.toHaveBeenCalled();
-      expect(flagged()).toBeDefined();
-    });
-
-    it('FIXED brand and the amount is not a live denomination → never placed', async () => {
+    it('FIXED brand and the amount is not a live denomination → never placed, refunded NOW (FAILED_REFUNDED)', async () => {
       mockHubble.getProduct.mockResolvedValue({ ...FIXED_PRODUCT, denominations: [150, 175] });
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(order());
       const out = await service.issueHubbleVoucherForOrder('o1', 'bajaj', 'a1');
-      expect(out).toBe('PENDING_RECONCILE');
+      expect(out).toBe('FAILED_REFUNDED');
       expect(mockHubble.placeOrder).not.toHaveBeenCalled();
+      expect(mockWallet.reverse).toHaveBeenCalledWith('cp1', 300, expect.objectContaining({ referenceId: 'o1' }), expect.anything());
+      expect(failedClaim()).toBeDefined();
+    });
+
+    it('the order value drifted from its frozen face value → never placed, refunded', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(order({ valuePaise: 27700n }));
+      const out = await service.issueHubbleVoucherForOrder('o1', 'bajaj', 'a1');
+      expect(out).toBe('FAILED_REFUNDED');
+      expect(mockHubble.placeOrder).not.toHaveBeenCalled();
+    });
+
+    it("an admin editing the item's list AFTER the order does not block it (the ORDER is checked, not the item)", async () => {
+      mockHubble.getProduct.mockResolvedValue(FIXED_PRODUCT);
+      mockHubble.placeOrder.mockResolvedValue({ status: 'PROCESSING', id: 'h1', vouchers: [] });
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(order({
+        reward: { metadata: { hubbleProductId: 'fk-1', hubbleDenominations: [1250] } }, // ₹300 removed since
+      }));
+      await service.issueHubbleVoucherForOrder('o1', 'bajaj', 'a1');
+      expect(mockHubble.placeOrder).toHaveBeenCalledWith(expect.objectContaining({ amount: 300 }));
+    });
+
+    it('a FIXED brand whose list Hubble did not return is UNKNOWN → placed (Hubble validates)', async () => {
+      mockHubble.getProduct.mockResolvedValue({ ...FIXED_PRODUCT, denominations: [] });
+      mockHubble.placeOrder.mockResolvedValue({ status: 'PROCESSING', id: 'h1', vouchers: [] });
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(order());
+      await service.issueHubbleVoucherForOrder('o1', 'bajaj', 'a1');
+      expect(mockHubble.placeOrder).toHaveBeenCalled();
+    });
+
+    it('a legacy order with quantity 2 (frozen ₹500 × 2) is consistent and still placed', async () => {
+      mockHubble.placeOrder.mockResolvedValue({ status: 'PROCESSING', id: 'h1', vouchers: [] });
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(order({
+        valuePaise: 100000n, quantity: 2, metadata: { sellingValuePaiseSnapshot: 50000 },
+        reward: { metadata: { hubbleProductId: 'amz-1' } },
+      }));
+      await service.issueHubbleVoucherForOrder('o1', 'bajaj', 'a1');
+      expect(mockHubble.placeOrder).toHaveBeenCalledWith(expect.objectContaining({ amount: 1000 }));
     });
 
     it('a valid amount is placed as ONE voucher of that denomination', async () => {
@@ -529,9 +558,112 @@ describe('Hubble per-brand amounts + whole-rupee redemption amounts', () => {
     it('a FLEXIBLE brand is not pre-checked against its min/max (existing FAILED → refund path)', async () => {
       mockHubble.getProduct.mockResolvedValue(FLEX_PRODUCT);
       mockHubble.placeOrder.mockResolvedValue({ status: 'PROCESSING', id: 'h1', vouchers: [] });
-      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(order({ valuePaise: 27700n, reward: { metadata: { hubbleProductId: 'amz-1' } } }));
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(order({
+        valuePaise: 27700n, metadata: { sellingValuePaiseSnapshot: 27700 }, reward: { metadata: { hubbleProductId: 'amz-1' } },
+      }));
       await service.issueHubbleVoucherForOrder('o1', 'bajaj', 'a1');
       expect(mockHubble.placeOrder).toHaveBeenCalled();
+    });
+  });
+
+  // ─── Redeem-time LIVE brand check (audit M2 + L1): 400 before any debit ───
+  describe('redeem — live Hubble brand check', () => {
+    it('FIXED brand no longer issues a listed amount → 400 naming what is available, no order', async () => {
+      flagOn();
+      mockHubble.getProduct.mockResolvedValue({ ...FIXED_PRODUCT, denominations: [150, 1250] });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(listItem());
+      await expect(service.redeem(bajajPartner, { rewardId: 'r-fk', amount: 300 }))
+        .rejects.toThrow("₹300 isn't available for this gift card right now. Available: ₹150, ₹1,250.");
+      expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+    });
+
+    it("L1: FLEXIBLE brand without a list enforces Hubble's RUPEE min (₹277 on Amazon ₹500+) → 400, no order", async () => {
+      flagOn();
+      mockHubble.getProduct.mockResolvedValue(FLEX_PRODUCT);
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(listItem({
+        minRedemptionPoints: 1, maxRedemptionPoints: 10000, metadata: { hubbleProductId: 'amz-1' },
+      }));
+      await expect(service.redeem(bajajPartner, { rewardId: 'r-fk', amount: 277 }))
+        .rejects.toThrow('This gift card can only be issued for an amount between ₹500 and ₹10,000.');
+      expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+    });
+
+    it('fixed-price Hubble item whose selling value the brand cannot issue → 400 before any order', async () => {
+      flagOn();
+      mockHubble.getProduct.mockResolvedValue(FIXED_PRODUCT);
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(listItem({
+        pointsCost: 500, minRedemptionPoints: null, maxRedemptionPoints: null, sellingValuePaise: 50000,
+        metadata: { hubbleProductId: 'fk-1' },
+      }));
+      await expect(service.redeem(bajajPartner, { rewardId: 'r-fk', quantity: 1 })).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+    });
+
+    it('a lookup failure / Hubble not configured / unknown FIXED list never blocks the redeem', async () => {
+      flagOn();
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(listItem());
+      const setups = [
+        () => mockHubble.getProduct.mockRejectedValue(new Error('timeout')),
+        () => mockHubble.getProduct.mockRejectedValue(new HubbleNotConfiguredError()),
+        () => mockHubble.getProduct.mockResolvedValue({ ...FIXED_PRODUCT, denominations: [] }),
+      ];
+      for (const setup of setups) {
+        setup();
+        mockPrisma.redemptionOrder.create.mockClear();
+        await service.redeem(bajajPartner, { rewardId: 'r-fk', amount: 300 });
+        expect(mockPrisma.redemptionOrder.create).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it('the sales-assisted path gets the same live check', async () => {
+      flagOn();
+      mockHubble.getProduct.mockResolvedValue(FLEX_PRODUCT);
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp-out', userId: 'ou1', user: { id: 'ou1', phone: '9000000000' } });
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(listItem({
+        minRedemptionPoints: 1, maxRedemptionPoints: 10000, metadata: { hubbleProductId: 'amz-1' },
+      }));
+      await expect(service.redeemForOutlet(bajajSales, { rewardId: 'r-fk', amount: 100, targetPartnerId: 'cp-out' }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── Audit M1 (unknown FIXED list) + L4 (explicit fixed-price PATCH) ───
+  describe('catalogue — unknown FIXED list + explicit fixed-price PATCH', () => {
+    it('M1: FIXED brand whose list Hubble did not return → admin-entered amounts accepted (whole rupees, ≥ tenant minimum)', async () => {
+      flagOn();
+      mockSettings.minVoucherFreeAmount = 200;
+      mockHubble.getProduct.mockResolvedValue({ ...FIXED_PRODUCT, denominations: [] });
+      mockPrisma.rewardCategory.findFirst.mockResolvedValue({ id: 'c1' });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null);
+      mockPrisma.rewardCatalog.create.mockResolvedValue({ id: 'r-new' });
+      const base = { categoryId: 'c1', code: 'FK', name: 'Flipkart', redemptionMode: 'GIFT_CARD' as const, hubbleProductId: 'fk-1' };
+      await service.createCatalogItem(bajajAdmin, { ...base, hubbleDenominations: [300, 200] });
+      expect(mockPrisma.rewardCatalog.create.mock.calls[0][0].data.metadata)
+        .toEqual({ hubbleProductId: 'fk-1', hubbleDenominations: [200, 300] });
+      await expect(service.createCatalogItem(bajajAdmin, { ...base, code: 'FK2', hubbleDenominations: [175] }))
+        .rejects.toThrow(/below this program's minimum/);
+      await expect(service.createCatalogItem(bajajAdmin, { ...base, code: 'FK3', minRedemptionPoints: 100, maxRedemptionPoints: 1000 }))
+        .rejects.toThrow(/enter the amounts Hubble shows/);
+    });
+
+    it('L4: PATCH with min/max explicitly null + a selling value (no amounts field) clears the list → fixed price', async () => {
+      flagOn();
+      mockHubble.getProduct.mockResolvedValue(FIXED_PRODUCT);
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({ ...listItem(), code: 'FK', mrpPaise: null });
+      mockPrisma.rewardCatalog.update.mockResolvedValue({ id: 'r-fk' });
+      await service.updateCatalogItem(bajajAdmin, 'r-fk', {
+        minRedemptionPoints: null as unknown as undefined,
+        maxRedemptionPoints: null as unknown as undefined,
+        sellingValuePaise: 30000,
+      });
+      const data = mockPrisma.rewardCatalog.update.mock.calls[0][0].data;
+      expect(data.metadata).toEqual({ hubbleProductId: 'fk-1' });
+      expect(data.pointsCost).toBe(300);
+      expect(data.minRedemptionPoints).toBeNull();
+      expect(data.maxRedemptionPoints).toBeNull();
     });
   });
 });

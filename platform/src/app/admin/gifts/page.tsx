@@ -625,6 +625,27 @@ function ItemModal({
     setCustomAmount('');
   };
 
+  /** Manual "add an amount" row (FLEXIBLE brand, or a FIXED brand whose list Hubble didn't return). */
+  const customAmountRow = (
+    <div className="flex gap-2 items-center">
+      <input
+        value={customAmount}
+        {...wholeRupeeInputProps(setCustomAmount)}
+        placeholder="e.g. 500"
+        aria-label="Amount to offer"
+        className="w-28 text-sm border border-gray-200 rounded-lg px-2 py-1.5 bg-white"
+      />
+      <button
+        type="button"
+        onClick={addCustomAmount}
+        disabled={!customAmount}
+        className="text-xs font-medium px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50"
+      >
+        Add amount
+      </button>
+    </div>
+  );
+
   /** FLEXIBLE brand → use Hubble's limits as the free range (in points at the live rate). */
   const applyHubbleRange = () => {
     if (!hubbleData) return;
@@ -672,7 +693,7 @@ function ItemModal({
       hubbleData?.product.denominationType === 'FIXED'
     ) {
       // A typed range can't be honoured by a fixed-denomination brand (₹277 would be refused).
-      e.hubbleDenominations = `${hubbleData.product.name} only issues fixed amounts — tick the amounts to offer instead of a free range.`;
+      e.hubbleDenominations = `${hubbleData.product.name} only issues fixed amounts — choose the amounts to offer instead of a free range.`;
     } else if (isFreeAmount) {
       const min = parseInt(form.minRedemptionPoints);
       const max = parseInt(form.maxRedemptionPoints);
@@ -972,7 +993,15 @@ function ItemModal({
 
                   {hubbleData.product.denominationType === 'FIXED' ? (
                     hubbleData.product.denominations.length === 0 ? (
-                      <p className="text-xs text-red-600">Hubble lists no issuable amounts for this brand right now.</p>
+                      /* Hubble didn't return this FIXED brand's face values — UNKNOWN, not "none":
+                         the admin enters them by hand (whole rupees, ≥ program minimum); Hubble still
+                         validates each order. */
+                      <div className="space-y-2">
+                        <p className="text-xs text-amber-800" data-testid="fixed-list-unknown">
+                          Hubble didn&apos;t return its amounts — enter the amounts Hubble shows for this brand.
+                        </p>
+                        {customAmountRow}
+                      </div>
                     ) : (
                       <fieldset className="space-y-1.5">
                         <legend className="text-xs text-gray-700 mb-1">
@@ -1026,23 +1055,7 @@ function ItemModal({
                       >
                         Use Hubble&apos;s range (members type an amount)
                       </button>
-                      <div className="flex gap-2 items-center">
-                        <input
-                          value={customAmount}
-                          {...wholeRupeeInputProps(setCustomAmount)}
-                          placeholder="e.g. 500"
-                          aria-label="Amount to offer"
-                          className="w-28 text-sm border border-gray-200 rounded-lg px-2 py-1.5 bg-white"
-                        />
-                        <button
-                          type="button"
-                          onClick={addCustomAmount}
-                          disabled={!customAmount}
-                          className="text-xs font-medium px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50"
-                        >
-                          Add amount
-                        </button>
-                      </div>
+                      {customAmountRow}
                     </div>
                   )}
                 </div>

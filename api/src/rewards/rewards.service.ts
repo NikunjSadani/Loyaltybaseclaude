@@ -1150,19 +1150,28 @@ export class RewardsService {
       pointsCost: number;
       minRedemptionPoints: number | null;
       maxRedemptionPoints: number | null;
+      sellingValuePaise?: number | null;
     },
     amount: number | undefined,
     quantity: number,
   ): Promise<{ amountPaise: number | null; fromList: boolean } | null> {
     if (item.redemptionMode !== PayoutMode.GIFT_CARD) return null;
-    if (!this.extractHubbleProductId(item.metadata)) return null;
+    const productId = this.extractHubbleProductId(item.metadata);
+    if (!productId) return null;
     if (!(await this.isHubbleEnabledForTenant(clientId))) return null;
     if (quantity !== 1) {
       throw new BadRequestException('This gift card is issued one per redemption — redeem a quantity of 1.');
     }
-    if (!this.isFreeAmount(item) || amount == null) {
-      // Fixed-price item (face value = selling value), or no amount (the caller's
-      // "amount (₹) is required" check reports that).
+    if (!this.isFreeAmount(item)) {
+      // Fixed-price item: its face value is the selling value — refuse up front when the brand
+      // can't issue it right now (instead of debiting, then failing + refunding at issuance).
+      if (item.sellingValuePaise != null && item.sellingValuePaise > 0) {
+        await this.assertHubbleCanIssue(productId, item.sellingValuePaise / 100);
+      }
+      return { amountPaise: null, fromList: false };
+    }
+    if (amount == null) {
+      // The caller's "amount (₹) is required" check reports this.
       return { amountPaise: null, fromList: false };
     }
     if (!Number.isInteger(amount) || amount <= 0) {
@@ -1174,7 +1183,42 @@ export class RewardsService {
         `Choose one of the available amounts: ${denoms.map((d) => `₹${d.toLocaleString('en-IN')}`).join(', ')}.`,
       );
     }
+    // The LIVE brand (cached): a FIXED brand's current face values / a FLEXIBLE brand's RUPEE
+    // min–max — so the member gets a 400 BEFORE any debit, not a refund after it.
+    await this.assertHubbleCanIssue(productId, amount);
     return { amountPaise: amount * 100, fromList: denoms.length > 0 };
+  }
+
+  /**
+   * Redeem-time live-brand check (cached product lookup). Throws a member-readable 400 when the
+   * brand can't issue ONE voucher of `amount` rupees right now: FIXED with a KNOWN list → must be
+   * on it; FLEXIBLE → within Hubble's rupee min–max. Lookup failure / Hubble not configured / a
+   * FIXED brand whose list Hubble didn't return → no block here (issuance + Hubble still validate,
+   * and an un-provisioned environment falls back to manual fulfilment).
+   */
+  private async assertHubbleCanIssue(productId: string, amount: number): Promise<void> {
+    let product: HubbleProduct;
+    try {
+      product = await this.hubble.getProduct(productId);
+    } catch (e) {
+      this.logger.warn(`[hubble] redeem-time product lookup failed for ${productId} (not blocking): ${e}`);
+      return;
+    }
+    if (product.denominationType === 'FIXED' && product.denominations.length === 0) return;
+    if (isAmountIssuable(product, amount)) return;
+    const fmt = (n: number) => `₹${n.toLocaleString('en-IN')}`;
+    if (product.denominationType === 'FIXED') {
+      throw new BadRequestException(
+        `${fmt(amount)} isn't available for this gift card right now. Available: ${product.denominations.map(fmt).join(', ')}.`,
+      );
+    }
+    const range =
+      product.minValue != null && product.maxValue != null
+        ? `between ${fmt(product.minValue)} and ${fmt(product.maxValue)}`
+        : product.minValue != null
+          ? `of at least ${fmt(product.minValue)}`
+          : `of at most ${fmt(product.maxValue ?? 0)}`;
+    throw new BadRequestException(`This gift card can only be issued for an amount ${range}.`);
   }
 
   /** True when the item is a FREE_AMOUNT (variable-amount) voucher. */
@@ -3798,16 +3842,22 @@ export class RewardsService {
       }
 
       // DEFENCE IN DEPTH (per-brand denominations): never send Hubble an amount it can't
-      // issue. (a) the admin's amount list on the item; (b) for a FIXED Hubble brand, the
-      // brand's live denominations. Either miss → the existing HUBBLE_INVALID_AMOUNT
-      // never-placed path (left for ops; refundable because nothing reached Hubble). A product
-      // lookup FAILURE does not block issuance — Hubble itself still validates (FAILED → refund).
-      if (!(await this.isHubbleAmountIssuable(productId, amount, order.reward?.metadata))) {
+      // issue. Checks the ORDER (its frozen face value — never the item's CURRENT list, which an
+      // admin may have edited since) against the brand's live FIXED denominations. A miss means
+      // NOTHING reached Hubble, so refund NOW (the same atomic refund as a Hubble FAILED) — the
+      // member sees "could not issue, points refunded", never a stuck "being issued". A product
+      // lookup FAILURE (or a FIXED brand whose list Hubble didn't return) never blocks issuance —
+      // Hubble itself still validates (FAILED → refund).
+      if (!(await this.isHubbleAmountIssuable(productId, amount, order))) {
         this.logger.error(
-          `[hubble] order ${order.orderNumber} amount ₹${amount} is not an issuable amount for product ${productId} — not placed; left for ops`,
+          `[hubble] order ${order.orderNumber} amount ₹${amount} is not an issuable amount for product ${productId} — not placed; refunding`,
         );
-        await this.markHubblePendingReconcile(order.id, 'HUBBLE_INVALID_AMOUNT');
-        return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+        const refunded = await this.refundAndFailHubble(
+          order,
+          `₹${amount} is not an amount this brand can issue right now (not sent to Hubble)`,
+          actorId,
+        );
+        return refunded ? this.HUBBLE_OUTCOME.FAILED_REFUNDED : this.HUBBLE_OUTCOME.PENDING_RECONCILE;
       }
 
       // Place the order (referenceId = our order id = the idempotency key). On ANY
@@ -3940,17 +3990,24 @@ export class RewardsService {
 
   /**
    * Issuance-time amount check (see issueHubbleVoucherForOrder). false ⇒ do NOT call Hubble.
-   * The item's admin list is authoritative when present; a FIXED brand's live denominations
-   * are checked too. FLEXIBLE brands are not pre-checked here (Hubble rejects → FAILED →
-   * auto-refund, the existing behaviour); a lookup error never blocks issuance.
+   * Reads the ORDER only: (a) the amount must equal the face value frozen on the order at
+   * redeem (sellingValuePaiseSnapshot, when present) — a mismatch means the value drifted and
+   * must not be sent; (b) for a FIXED brand with a KNOWN live list, the amount must be on it.
+   * Not pre-checked (Hubble validates; FAILED → auto-refund): FLEXIBLE brands, a FIXED brand
+   * whose list Hubble didn't return, or any lookup error.
    */
   private async isHubbleAmountIssuable(
     productId: string,
     amount: number,
-    itemMetadata: Prisma.JsonValue | undefined,
+    order: { metadata: Prisma.JsonValue | null; quantity?: number | null },
   ): Promise<boolean> {
-    const list = extractHubbleDenominations(itemMetadata);
-    if (list.length && !list.includes(amount)) return false;
+    const meta = order.metadata;
+    const snap =
+      meta && typeof meta === 'object' && !Array.isArray(meta)
+        ? (meta as Record<string, unknown>).sellingValuePaiseSnapshot
+        : undefined;
+    const qty = order.quantity && order.quantity > 0 ? order.quantity : 1;
+    if (typeof snap === 'number' && snap > 0 && snap * qty !== amount * 100) return false;
     let product: HubbleProduct;
     try {
       product = await this.hubble.getProduct(productId);
@@ -3958,7 +4015,13 @@ export class RewardsService {
       this.logger.warn(`[hubble] product lookup failed for ${productId} (issuance proceeds; Hubble validates): ${e}`);
       return true;
     }
-    if (product.denominationType === 'FIXED' && !isAmountIssuable(product, amount)) return false;
+    if (
+      product.denominationType === 'FIXED' &&
+      product.denominations.length > 0 &&
+      !isAmountIssuable(product, amount)
+    ) {
+      return false;
+    }
     return true;
   }
 
@@ -4645,9 +4708,17 @@ export class RewardsService {
       effProductId = existingProductId;
     }
     const effMode = dto.redemptionMode ?? existing.redemptionMode;
+    // An explicit FIXED-PRICE payload (min AND max explicitly null + a selling value) with no
+    // amounts field means "this is a fixed-price item now" → the list is cleared, consistently
+    // with the band being cleared (otherwise a stale list would re-derive a band over it).
+    const explicitFixedPrice =
+      dto.hubbleDenominations === undefined &&
+      dto.minRedemptionPoints === null &&
+      dto.maxRedemptionPoints === null &&
+      dto.sellingValuePaise != null;
     let effDenoms: number[] =
       dto.hubbleDenominations === undefined
-        ? existingDenoms
+        ? explicitFixedPrice ? [] : existingDenoms
         : dto.hubbleDenominations.length
           ? normaliseHubbleDenominations(dto.hubbleDenominations)
           : [];

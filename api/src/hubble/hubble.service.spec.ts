@@ -248,6 +248,25 @@ describe('HubbleService', () => {
       expect(p.maxValue).toBe(10000);
     });
 
+    it.each([
+      ['numeric strings', { amountRestrictions: { ...FIXED_BODY.amountRestrictions, denominations: ['300', '150', 'x'] } }],
+      ['objects {value|amount|denomination}', { amountRestrictions: { ...FIXED_BODY.amountRestrictions, denominations: [{ value: 300 }, { amount: '150' }, { denomination: 1250 }] } }],
+      ['variantDetails fallback when the primary list is null', { amountRestrictions: { ...FIXED_BODY.amountRestrictions, denominations: null }, variantDetails: [{ amount: 150 }, { value: 300 }, { faceValue: 1250 }] }],
+    ])('M1: FIXED denominations tolerated as %s', async (_label, over) => {
+      fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
+      fetchMock.mockResolvedValueOnce(jsonRes(200, { ...FIXED_BODY, ...over }));
+      const p = await makeService().getProduct('fk-fixed');
+      expect(p.denominations.slice(0, 2)).toEqual([150, 300]);
+    });
+
+    it('M1: a FIXED brand with no parseable list → denominations [] (UNKNOWN; callers let Hubble validate)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
+      fetchMock.mockResolvedValueOnce(jsonRes(200, { ...FIXED_BODY, amountRestrictions: { ...FIXED_BODY.amountRestrictions, denominations: null } }));
+      const p = await makeService().getProduct('fk-fixed');
+      expect(p.denominationType).toBe('FIXED');
+      expect(p.denominations).toEqual([]);
+    });
+
     it('caches the product for ~10 minutes (a second call makes no HTTP request)', async () => {
       fetchMock.mockResolvedValueOnce(jsonRes(200, LOGIN_OK));
       fetchMock.mockResolvedValueOnce(jsonRes(200, FLEX_BODY));
