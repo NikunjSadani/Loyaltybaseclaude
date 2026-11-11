@@ -2224,7 +2224,9 @@ function FulfilmentQueue({
   // Focus target after a load-more: the first newly-appended row (keyboard/screen-reader users
   // otherwise lose their place when the "Load more" button unmounts on the last page).
   const focusOrderIdRef = useRef<string | null>(null);
-  const tableRef = useRef<HTMLTableSectionElement>(null);
+  /** Per-order sequence of voucherFillable re-reads — only the latest one is applied. */
+  const fillableSeqRef = useRef<Record<string, number>>({});
+  const tableRef =useRef<HTMLTableSectionElement>(null);
 
   /**
    * (Re)load the queue from the top with `limit` rows (one page on a filter change; the current
@@ -2319,10 +2321,23 @@ function FulfilmentQueue({
     for (const k of ['status', 'voucherCode', 'voucherPin', 'voucherProvider', 'trackingNumber', 'trackingUrl', 'updatedAt', 'hubbleNeedsReconcile', 'hubbleReconcileReason'] as const) {
       if (updated[k] !== undefined) (patch as Record<string, unknown>)[k] = updated[k];
     }
+    // `voucherFillable` (may the set-once PIN be added?) is SERVER-derived (canFillStoredVoucher)
+    // and the transition / PATCH / voucher-cancel responses don't carry it — so the in-place row
+    // drops the stale value (PIN box hidden, never a stale "yes") and re-reads it from the server.
+    if (!leaves) patch.voucherFillable = undefined;
     setOrders((prev) => (leaves
       ? prev.filter((o) => o.id !== updated.id)
       : prev.map((o) => (o.id === updated.id ? { ...o, ...patch } : o))));
-    if (leaves) setTotal((t) => (t == null ? t : Math.max(0, t - 1)));
+    if (leaves) { setTotal((t) => (t == null ? t : Math.max(0, t - 1))); return; }
+    const seq = (fillableSeqRef.current[updated.id] ?? 0) + 1;
+    fillableSeqRef.current[updated.id] = seq;
+    void apiJson<{ voucherFillable?: boolean } | null>(`/api/admin/gift-orders/${updated.id}`)
+      .then((d) => {
+        if (fillableSeqRef.current[updated.id] !== seq || typeof d?.voucherFillable !== 'boolean') return;
+        const fillable = d.voucherFillable;
+        setOrders((prev) => prev.map((o) => (o.id === updated.id ? { ...o, voucherFillable: fillable } : o)));
+      })
+      .catch(() => { /* stays hidden — Refresh re-reads it from the list */ });
   }, [refreshOrders]);
 
   // Header count: the SERVER total, but never fewer than the rows actually on screen.

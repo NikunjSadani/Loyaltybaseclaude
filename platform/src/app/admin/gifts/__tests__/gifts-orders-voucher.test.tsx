@@ -164,6 +164,37 @@ describe('GIFVC — voucher handling', () => {
     expect(screen.queryByText('Add the PIN for this card — it can be saved once')).toBeNull();
   });
 
+  it('item 3: after a transition the row re-reads voucherFillable from the SERVER (never keeps the stale list value)', async () => {
+    let fillable = false;
+    const calls = installFetch(
+      [{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Gifsy', voucherFillable: true }],
+      (url, init) => {
+        if (url === '/api/rewards/orders/o1/transition' && init?.method === 'POST') {
+          return jsonOk({ order: { id: 'o1', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: null, voucherProvider: 'Gifsy' } });
+        }
+        if (url === '/api/admin/gift-orders/o1') return jsonOk({ id: 'o1', voucherFillable: fillable });
+        return undefined;
+      },
+    );
+    const row = await openRow('RDM-1');
+    await userEvent.click(within(row).getByRole('button', { name: /advance/i }));
+    expect(screen.getByText('Add the PIN for this card — it can be saved once')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /confirm → PROCESSING/i }));
+    await waitFor(() => expect(calls.some((c) => c.url === '/api/admin/gift-orders/o1')).toBe(true));
+    // Server now says NOT fillable → the stale list `true` must not offer the PIN box.
+    const after = (await screen.findByText('RDM-1')).closest('tr') as HTMLElement;
+    await userEvent.click(within(after).getByRole('button', { name: /advance/i }));
+    expect(screen.getByTestId('voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
+    expect(screen.queryByText('Add the PIN for this card — it can be saved once')).toBeNull();
+    // …and the reverse: a later update where the server says fillable → the PIN box returns.
+    fillable = true;
+    await userEvent.click(screen.getByRole('button', { name: /confirm → DISPATCHED/i }));
+    await waitFor(() => expect(calls.filter((c) => c.url === '/api/admin/gift-orders/o1').length).toBe(2));
+    const again = (await screen.findByText('RDM-1')).closest('tr') as HTMLElement;
+    await userEvent.click(within(again).getByRole('button', { name: /advance/i }));
+    expect(await screen.findByText('Add the PIN for this card — it can be saved once')).toBeInTheDocument();
+  });
+
   it('GIFVC2f: a stored PIN is read-only + masked in the advance form (no PIN input)', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'PROCESSING', voucherCode: 'CARD-1111-2222', voucherPin: '9911', voucherProvider: 'Gifsy' }]);
     const row = await openRow('RDM-1');

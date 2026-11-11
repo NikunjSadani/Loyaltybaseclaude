@@ -295,9 +295,68 @@ describe('WR — wholeRupeeInputProps', () => {
     fireEvent.change(el, { target: { value: '1250.' } });
     expect(el.value).toBe('1250.');
     expect(wholeRupeeAmount(el.value)).toBeNull();
-    // A replacement that would add letters is refused (the current text is kept).
+    // A multi-char replacement holding letters is treated like a paste: kept + flagged invalid.
     fireEvent.change(el, { target: { value: 'twelve' } });
-    expect(el.value).toBe('1250.');
+    expect(el.value).toBe('twelve');
+    expect(screen.getByRole('alert')).toHaveTextContent('Check the amount');
+    // A SINGLE added letter is still refused.
+    fireEvent.change(el, { target: { value: '' } });
+    fireEvent.change(el, { target: { value: '5' } });
+    fireEvent.change(el, { target: { value: '5x' } });
+    expect(el.value).toBe('5');
+  });
+
+  it.each([
+    ['₹1,250', '1250'],
+    ['Rs 1250', '1250'],
+    ['Rs. 1,250.00/-', '1250'],
+    ['1,25,000', '125000'],
+  ])('Android clipboard chip: insertText %s (no paste event) → normalised like a paste → %s', (text, out) => {
+    render(<HookHarness onSubmit={() => undefined} />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    // The chip arrives as a multi-char insertText: not cancelled by beforeinput…
+    expect(fireEvent(el, new InputEvent('beforeinput', { data: text, inputType: 'insertText', bubbles: true, cancelable: true }))).toBe(true);
+    // …the browser applies it, and onChange interprets the inserted run.
+    fireEvent.change(el, { target: { value: text } });
+    expect(el.value).toBe(out);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('Android clipboard chip: an invalid multi-char insert ("₹1,250.50") is kept (marker stripped) + flagged', () => {
+    render(<HookHarness onSubmit={() => undefined} />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    fireEvent.change(el, { target: { value: '₹1,250.50' } });
+    expect(el.value).toBe('1,250.50');
+    expect(screen.getByRole('alert')).toHaveTextContent('Check the amount');
+  });
+
+  it('Android clipboard chip: spliced where it landed ("12" + chip "₹1,250" at the end → 121250)', () => {
+    render(<Harness />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    fireEvent.change(el, { target: { value: '1' } });
+    fireEvent.change(el, { target: { value: '12' } });
+    fireEvent.change(el, { target: { value: '12₹1,250' } });
+    expect(el.value).toBe('121250');
+  });
+
+  it('a REFUSED keystroke keeps the "Check the amount" flag; a real edit clears it', async () => {
+    render(<HookHarness onSubmit={() => undefined} />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    await userEvent.type(el, '750.5');
+    fireEvent.blur(el);
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    // Change path (Android): a single letter added → refused, text kept, flag kept.
+    fireEvent.change(el, { target: { value: '750.5x' } });
+    expect(el.value).toBe('750.5');
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    // Keydown path: a refused letter key changes nothing either.
+    await userEvent.type(el, 'q');
+    expect(el.value).toBe('750.5');
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    // A real edit clears it.
+    await userEvent.type(el, '{Backspace}');
+    expect(el.value).toBe('750.');
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('RC-L3: pasting "1.5" over a selected "500" splices at the selection → kept + invalid', async () => {
@@ -350,7 +409,8 @@ describe('WR — wholeRupeeInputProps', () => {
   it('WR7 (Android): a "," that IS a thousands separator ("1,250") is kept while typing and stripped on blur', () => {
     render(<Harness />);
     const el = screen.getByLabelText('amt') as HTMLInputElement;
-    fireEvent.change(el, { target: { value: '1,250' } });
+    // Key by key (one char per change — a multi-char insert is paste-normalised at once instead).
+    for (const v of ['1', '1,', '1,2', '1,25', '1,250']) fireEvent.change(el, { target: { value: v } });
     expect(el.value).toBe('1,250');
     fireEvent.blur(el);
     expect(el.value).toBe('1250');

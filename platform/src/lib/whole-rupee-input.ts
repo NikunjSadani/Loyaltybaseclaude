@@ -19,11 +19,14 @@
  *     "₹ 1,250", "INR 1250" → 1250); a trailing "/-" and a zero fraction (".0" / ".00") are accepted
  *     ("₹1,250.00", "1,250.0", "1,250/-", "Rs 1250/-" → 1250); it is spliced at the selection and
  *     interpreted at once. Any other decimal ("₹1,250.50", "1.5") is INVALID.
- *   - A multi-character insert that is NOT a paste (IME composition, keyboard suggestion /
- *     autocorrect replacing the word) is applied by the browser itself and the resulting value is
- *     then checked like any edit (never re-spliced at the caret — no duplicated text). An edit that
- *     would ADD a character other than a digit / "," / "." is refused (the current text is kept);
- *     deleting characters is always allowed.
+ *   - A multi-character insert that is NOT a paste event (Android clipboard-chip paste arriving as
+ *     insertText "₹1,250" / "Rs 1250", IME composition, keyboard suggestion / autocorrect) is
+ *     applied by the browser itself (never re-spliced at the caret — no duplicated text); onChange
+ *     then finds the inserted run and treats it EXACTLY like a paste (currency marker stripped,
+ *     interpreted at once: valid → plain digits, invalid → kept + "Check the amount").
+ *   - A single-character edit that would ADD a character other than a digit / "," / "." is refused
+ *     (the current text is kept, and a shown "Check the amount" stays — a refused key is not an
+ *     edit); deleting characters is always allowed.
  *
  * "CHECK THE AMOUNT" UX — one rule for every caller (partner voucher + cash sheets, sales
  * catalogue, admin custom amount), via useWholeRupeeField (or the same semantics by hand):
@@ -102,7 +105,20 @@ function isSubsequence(sub: string, full: string): boolean {
   return i === sub.length;
 }
 
-type WrNode = HTMLInputElement & { __wrBeforeInput?: (ev: InputEvent) => void };
+/**
+ * The run of characters a single change inserted: `next` = before + inserted + after, where
+ * before / after are the longest common prefix / suffix shared with `prev` (non-overlapping).
+ */
+function insertedRun(prev: string, next: string): { before: string; inserted: string; after: string } {
+  let p = 0;
+  const max = Math.min(prev.length, next.length);
+  while (p < max && prev[p] === next[p]) p++;
+  let s = 0;
+  while (s < max - p && prev[prev.length - 1 - s] === next[next.length - 1 - s]) s++;
+  return { before: next.slice(0, p), inserted: next.slice(p, next.length - s), after: next.slice(next.length - s) };
+}
+
+type WrNode =HTMLInputElement & { __wrBeforeInput?: (ev: InputEvent) => void };
 
 /**
  * Props for a controlled whole-rupee <input>: spread onto the element and render `value`
@@ -132,7 +148,11 @@ export function wholeRupeeInputProps(
     const value = el.value;
     const start = el.selectionStart ?? value.length;
     const end = el.selectionEnd ?? value.length;
-    const spliced = value.slice(0, start) + stripCurrencyPrefix(text) + value.slice(end);
+    interpret(el, value.slice(0, start) + stripCurrencyPrefix(text) + value.slice(end));
+  };
+
+  /** Paste semantics for an already-spliced text: valid → plain digits; invalid → kept + flagged. */
+  const interpret = (el: HTMLInputElement, spliced: string) => {
     const digits = wholeRupeeDigits(spliced);
     if (digits === null) {
       emit(el, spliced); // keep what was pasted — the caller shows "Check the amount"
@@ -165,8 +185,8 @@ export function wholeRupeeInputProps(
       return;
     }
     // A single typed character: digits , . only. A MULTI-character insert (IME composition,
-    // suggestion / autocorrect replacing the word) is left to the browser — onChange then checks
-    // the resulting value (never re-spliced here, which would duplicate the replaced word).
+    // suggestion / autocorrect, Android clipboard chip) is left to the browser — onChange then
+    // treats the inserted run like a paste (never re-spliced here, which would duplicate text).
     if (data.length === 1 && !TYPABLE.test(data)) ev.preventDefault();
   };
 
@@ -209,9 +229,19 @@ export function wholeRupeeInputProps(
       const el = e.target;
       const raw = el.value;
       const prev = current(el);
+      // A single change that INSERTED more than one character (Android clipboard-chip paste
+      // arrives as insertText "₹1,250" with no paste event; a keyboard suggestion) is treated
+      // like a paste: currency marker stripped, spliced where it landed, interpreted at once.
+      const ins = insertedRun(prev, raw);
+      if (ins.inserted.length > 1) {
+        interpret(el, ins.before + stripCurrencyPrefix(ins.inserted) + ins.after);
+        return;
+      }
       const extra = untypable(raw);
       if (extra !== '' && !isSubsequence(extra, untypable(prev))) {
-        emit(el, prev);
+        // REFUSED: restore the current text WITHOUT reporting a change — the value did not
+        // change, so a shown "Check the amount" flag must stay (only a real edit clears it).
+        el.value = prev;
         return;
       }
       emit(el, raw);
