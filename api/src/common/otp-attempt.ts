@@ -15,7 +15,10 @@ type OtpClaimDb = Pick<Prisma.TransactionClient, '$queryRaw'>;
 
 /**
  * Claim one attempt ATOMICALLY and return the row's POST-increment `attempts` value (1..maxAttempts),
- * or null when the claim is refused (cap spent / OTP already verified / row gone).
+ * or null when the claim is refused (cap spent / OTP already verified / EXPIRED / row gone).
+ * The expiry guard (audit L1) means a code superseded (expired) by a parallel resend between a site's
+ * read and its claim can never be claimed; every caller already refuses an expired row before claiming,
+ * so honest flows are unchanged. `expiresAt` is stored as UTC wall-clock (Prisma DateTime).
  *
  * ONE statement — the conditional increment and the read of its result happen together, so the value
  * returned is exactly this request's attempt number even under parallel guesses (2026-11-11). Callers
@@ -30,6 +33,7 @@ export async function claimOtpAttempt(
     UPDATE "otp_codes"
        SET "attempts" = "attempts" + 1, "updatedAt" = (now() AT TIME ZONE 'UTC')
      WHERE "id" = ${record.id} AND "verifiedAt" IS NULL AND "attempts" < ${record.maxAttempts}
+       AND "expiresAt" > (now() AT TIME ZONE 'UTC')
     RETURNING "attempts"`);
   return rows.length > 0 ? Number(rows[0].attempts) : null;
 }

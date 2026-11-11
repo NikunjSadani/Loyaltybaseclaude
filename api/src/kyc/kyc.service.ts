@@ -175,9 +175,10 @@ const PAYOUT_CHANGED_AFTER_SUBMIT_MESSAGE =
   "The outlet's payment details changed after this KYC was submitted — reject it and submit a new re-KYC";
 
 /**
- * KYC consent OTP send cap (sendConsentOtp): at most this many sends per (normalised phone, KYC
- * submission) per rolling window. Per SUBMISSION so group onboarding (sibling outlets sharing one
- * owner phone) is never blocked by another submission's sends.
+ * KYC consent OTP send cap (sendConsentOtp): at most this many sends per (normalised phone, OUTLET
+ * PARTNER — all its KYC submissions) per rolling window. Per outlet so a fresh draft never resets the
+ * budget, while group onboarding (sibling outlets = distinct partners sharing one owner phone) is
+ * never blocked by a sibling's sends.
  */
 export const KYC_CONSENT_OTP_MAX_PER_WINDOW = 5;
 /** Rolling window for the KYC consent OTP send cap, in hours. */
@@ -521,54 +522,68 @@ export class KycService {
 
     const mobile = ownerPhone;
 
-    // Per-(number, submission) send cap (2026-11-11, owner decision) — mirrors the LOGIN cap in
-    // auth.service sendOtp: a DB COUNT over a rolling window, so it holds across ALL Cloud Run
-    // instances (in-memory throttles are per-instance). Counts only KYC_CONSENT sends to this
-    // normalised number FOR THIS SUBMISSION (OtpCode.referenceId = submission id): group onboarding
-    // — sibling outlets sharing one owner phone, each its own submission — is never blocked by
-    // another submission's sends; login / redemption / scheme OTPs have their own budgets. Skipped
-    // only when the fixed-OTP dev/staging bypass is active, so UAT/e2e can resend freely — exactly
-    // like the login cap.
+    // Send cap + supersede, keyed on (normalised phone, OUTLET PARTNER) — owner decision 2026-11-11 +
+    // audit M1: every KYC submission of this outlet's partnerId shares one budget, so creating a fresh
+    // DRAFT for the same outlet (drafts are unlimited) can never reset it; group siblings are distinct
+    // partners, so they stay independent. Without a partner yet, the submission alone is the scope.
+    // Mirrors the LOGIN cap in auth.service sendOtp: a DB COUNT over a rolling window, holding across
+    // ALL Cloud Run instances; login / redemption / scheme OTPs have their own budgets. Skipped only
+    // when the fixed-OTP dev/staging bypass is active, so UAT/e2e can resend freely — like the login cap.
+    //
+    // Audit M2: count → supersede → create run in ONE transaction holding a transaction-scoped
+    // advisory lock on (phone, partner), so concurrent sends serialise (no check-then-create race
+    // letting a burst past the cap). The SMS goes out only after the transaction commits.
     const fixedOtpActive = isFixedOtpAllowed() && !!process.env.FIXED_OTP;
-    if (!fixedOtpActive) {
-      const windowStart = new Date(Date.now() - KYC_CONSENT_OTP_WINDOW_HOURS * 60 * 60 * 1000);
-      const recentSends = await this.prisma.otpCode.count({
-        where: { phone: mobile, purpose: 'KYC_CONSENT', referenceId: submission.id, createdAt: { gte: windowStart } },
-      });
-      if (recentSends >= KYC_CONSENT_OTP_MAX_PER_WINDOW) {
-        // Distinct structured line (the login cap logs event 'otp.send_cap'). Masked — never log the raw number.
-        this.logger.warn(
-          `[kyc-consent-otp-send-cap] ${JSON.stringify({ event: 'kyc_consent_otp.send_cap', phone: `******${mobile.slice(-4)}`, submissionId: submission.id, recentSends, max: KYC_CONSENT_OTP_MAX_PER_WINDOW, windowHours: KYC_CONSENT_OTP_WINDOW_HOURS })}`,
-        );
-        throw new HttpException(
-          'Too many OTPs sent to this number. Please wait an hour before trying again.',
-          HttpStatus.TOO_MANY_REQUESTS,
-        );
-      }
-    }
-
+    const scopeKey = submission.partnerId ?? `submission:${submission.id}`;
     const otp = this.generateOtpCode();
 
-    // One active consent OTP per (number, submission) — owner decision 2026-11-11: SUPERSEDE (expire)
-    // THIS submission's earlier unverified consent OTPs to this number, never a sibling's — group
-    // onboarding (outlets sharing an owner phone, each its own submission) must not have B's send
-    // invalidate A's code. Expired, not deleted: the rows must survive so the send cap above can count
-    // actual sends; consent() only accepts an unexpired row bound to its submission, so an expired one
-    // is inert. Rows age out via the global expired-OTP cleanup in auth.service sendOtp.
-    await this.prisma.otpCode.updateMany({
-      where: { phone: mobile, purpose: 'KYC_CONSENT', referenceId: submission.id, verifiedAt: null, expiresAt: { gt: new Date() } },
-      data:  { expiresAt: new Date() },
-    });
-    const otpRow = await this.prisma.otpCode.create({
-      data: {
-        phone: mobile,
-        code: otp,
-        purpose: 'KYC_CONSENT',
-        // Bound to the submission — consent() only accepts the OTP issued for THIS submission.
-        referenceId: submission.id,
-        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-        maxAttempts: 3,
-      },
+    const otpRow = await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`kyc-consent-otp:${mobile}:${scopeKey}`}, 0))`;
+
+      // Every submission of this outlet (incl. this one) — the OTP rows reference them by id.
+      const refIds = submission.partnerId
+        ? (await tx.kycSubmission.findMany({ where: { partnerId: submission.partnerId }, select: { id: true } })).map((s) => s.id)
+        : [];
+      if (!refIds.includes(submission.id)) refIds.push(submission.id);
+
+      if (!fixedOtpActive) {
+        const windowStart = new Date(Date.now() - KYC_CONSENT_OTP_WINDOW_HOURS * 60 * 60 * 1000);
+        const recentSends = await tx.otpCode.count({
+          where: { phone: mobile, purpose: 'KYC_CONSENT', referenceId: { in: refIds }, createdAt: { gte: windowStart } },
+        });
+        if (recentSends >= KYC_CONSENT_OTP_MAX_PER_WINDOW) {
+          // Distinct structured line (the login cap logs event 'otp.send_cap'). Masked — never log the raw number.
+          this.logger.warn(
+            `[kyc-consent-otp-send-cap] ${JSON.stringify({ event: 'kyc_consent_otp.send_cap', phone: `******${mobile.slice(-4)}`, partnerId: submission.partnerId, submissionId: submission.id, recentSends, max: KYC_CONSENT_OTP_MAX_PER_WINDOW, windowHours: KYC_CONSENT_OTP_WINDOW_HOURS })}`,
+          );
+          throw new HttpException(
+            'Too many OTPs sent to this number. Please try again later.',
+            HttpStatus.TOO_MANY_REQUESTS,
+          );
+        }
+      }
+
+      // One active consent OTP per (number, outlet): SUPERSEDE (expire) this outlet's earlier
+      // unverified consent OTPs to this number — across ALL its submissions (a fresh draft replaces
+      // the old draft's code) but never a sibling outlet's. Expired, not deleted: the rows must
+      // survive so the cap above can count actual sends; consent() only accepts an unexpired row
+      // bound to its submission, so an expired one is inert. Rows age out via the global expired-OTP
+      // cleanup in auth.service sendOtp.
+      await tx.otpCode.updateMany({
+        where: { phone: mobile, purpose: 'KYC_CONSENT', referenceId: { in: refIds }, verifiedAt: null, expiresAt: { gt: new Date() } },
+        data:  { expiresAt: new Date() },
+      });
+      return tx.otpCode.create({
+        data: {
+          phone: mobile,
+          code: otp,
+          purpose: 'KYC_CONSENT',
+          // Bound to the submission — consent() only accepts the OTP issued for THIS submission.
+          referenceId: submission.id,
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          maxAttempts: 3,
+        },
+      });
     });
 
     // Real send in prod; a no-op when FIXED_OTP is honored (msg91 service handles it).

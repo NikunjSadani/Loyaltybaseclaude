@@ -34,7 +34,8 @@ describe('claimOtpAttempt / refundOtpAttempt', () => {
     const sql = q.text.replace(/\s+/g, ' ').trim();
     expect(sql).toBe(
       'UPDATE "otp_codes" SET "attempts" = "attempts" + 1, "updatedAt" = (now() AT TIME ZONE \'UTC\') ' +
-      'WHERE "id" = $1 AND "verifiedAt" IS NULL AND "attempts" < $2 RETURNING "attempts"',
+      'WHERE "id" = $1 AND "verifiedAt" IS NULL AND "attempts" < $2 ' +
+      'AND "expiresAt" > (now() AT TIME ZONE \'UTC\') RETURNING "attempts"',
     );
     expect(q.values).toEqual(['o1', 3]);
   });
