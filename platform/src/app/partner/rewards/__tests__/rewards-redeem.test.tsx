@@ -592,3 +592,103 @@ describe('FA — FREE_AMOUNT cards show "You set the amount", FIXED show "{point
     expect(card).not.toHaveTextContent('You set the amount');
   });
 });
+
+/* ════════════════════════════════════════════════════════════════════════════
+   HD — Hubble "choose from amounts" vouchers + WR — whole-rupee amount inputs
+   (owner 2026-11-11). A fixed-denomination brand offers buttons, never free typing;
+   every typed redemption amount is whole rupees only (all tenants).            */
+
+const LIST_VOUCHER = {
+  ...FREE_AMOUNT_VOUCHER,
+  id: 'fk1',
+  name: 'Flipkart Gift Card',
+  minRedemptionPoints: 300,
+  maxRedemptionPoints: 1250,
+  amountOptions: [300, 1250],
+};
+
+function redeemOk() {
+  return {
+    ok: true,
+    json: () => Promise.resolve({
+      success: true,
+      data: { orderId: 'ord-x', orderNumber: 'RDM-X', requiredPoints: 1, message: 'OTP sent' },
+    }),
+  };
+}
+
+describe('HD — choose-from-amounts voucher', () => {
+  it('HD1: card shows "From ₹300"; the sheet offers the amounts as buttons (no text input) and posts the chosen one', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/rewards/redeem')) return Promise.resolve(redeemOk());
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWith([LIST_VOUCHER]));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /vouchers/i }));
+
+    const card = (await screen.findByText('Flipkart Gift Card')).closest('[role="button"]') as HTMLElement;
+    expect(card).toHaveTextContent('From ₹300');
+    expect(card).toHaveTextContent('Choose Amount');
+
+    await user.click(card);
+    expect(await screen.findByRole('radiogroup', { name: /voucher amount/i })).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: /voucher amount/i })).not.toBeInTheDocument();
+    // Nothing chosen yet → cannot send.
+    expect(screen.getByRole('button', { name: /choose an amount/i })).toBeDisabled();
+
+    await user.click(screen.getByRole('radio', { name: /₹1,250/ }));
+    expect(screen.getByRole('radio', { name: /₹1,250/ })).toHaveAttribute('aria-checked', 'true');
+    await user.click(screen.getByRole('button', { name: /send otp/i }));
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) => u === '/api/rewards/redeem');
+      expect(call).toBeTruthy();
+      expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({ rewardId: 'fk1', amount: 1250 });
+    });
+  });
+});
+
+describe('WR — whole-rupee typed amounts (vouchers + cash)', () => {
+  it('WR-P1: a free-amount voucher input turns typed "750.5" into 750 and posts an integer', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/rewards/redeem')) return Promise.resolve(redeemOk());
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWith([FREE_AMOUNT_VOUCHER]));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /vouchers/i }));
+    await user.click(await screen.findByText('Flexi Voucher'));
+
+    const input = (await screen.findByLabelText(/voucher amount/i)) as HTMLInputElement;
+    await user.type(input, '750.5');
+    expect(input.value).toBe('750');
+    await user.click(screen.getByRole('button', { name: /send otp/i }));
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) => u === '/api/rewards/redeem');
+      expect(call).toBeTruthy();
+      expect(JSON.parse((call![1] as RequestInit).body as string).amount).toBe(750);
+    });
+  });
+
+  it('WR-P2: the cash payout input turns a pasted "1,250.75" into 1250', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/auth/me')) return Promise.resolve(meWithBank());
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWithCash());
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    }));
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /cash payout/i }));
+    await user.click(await screen.findByRole('button', { name: /redeem for cash/i }));
+    const input = (await screen.findByLabelText(/payout amount/i)) as HTMLInputElement;
+    await user.click(input);
+    await user.paste('1,250.75');
+    expect(input.value).toBe('1250');
+    expect(input).toHaveAttribute('inputmode', 'numeric');
+  });
+});

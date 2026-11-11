@@ -71,4 +71,12 @@ describe('AFF — isWithinPoints / pointsRequired affordability rule', () => {
     expect(pointsRequired({ points: 750, voucherType: 'FIXED' }, { minVoucherFreeAmount: 250, pointsConversionRate: 3 })).toBe(750);
     expect(pointsRequired({ points: 750 }, { minVoucherFreeAmount: 250, pointsConversionRate: 3 })).toBe(750);
   });
+
+  it('AFF9: a Hubble "choose from amounts" voucher needs its cheapest redeemable LISTED amount at the live rate', () => {
+    const item = { points: 0, voucherType: 'FREE_AMOUNT' as const, minRedemptionPoints: 150, amountOptions: [150, 300, 1250] };
+    // Rate 2 now (band was saved at rate 1) → 150 × 2 = 300 points, not the stale 150.
+    expect(pointsRequired(item, { minVoucherFreeAmount: 0, pointsConversionRate: 2 })).toBe(300);
+    // A ₹200 floor skips the ₹150 option → the cheapest redeemable is ₹300.
+    expect(pointsRequired(item, { minVoucherFreeAmount: 200, pointsConversionRate: 1 })).toBe(300);
+  });
 });

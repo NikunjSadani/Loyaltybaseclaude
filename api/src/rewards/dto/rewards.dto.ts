@@ -1,5 +1,6 @@
 import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsEnum,
@@ -264,11 +265,16 @@ export class RedeemDto {
    * FREE_AMOUNT vouchers only (item.pointsCost === 0 + min/max set): the ₹ value
    * the partner wants. requiredPoints = round(amount × conversionRate), validated
    * vs [minRedemptionPoints, maxRedemptionPoints]. Ignored for FIXED items.
+   *
+   * WHOLE RUPEES ONLY (owner decision 2026-11-11, ALL tenants, vouchers AND cash): a
+   * decimal (750.5) is a 400 "Enter a whole-rupee amount" at the DTO gate, before any
+   * points move. (A fractional amount previously reached Hubble as an un-issuable value
+   * and produced fractional cash payouts.)
    */
   @IsOptional()
   @Type(() => Number)
-  @IsNumber()
-  @IsPositive()
+  @IsInt({ message: 'Enter a whole-rupee amount' })
+  @IsPositive({ message: 'Enter a whole-rupee amount' })
   amount?: number;
 
   /** REQUIRED for PHYSICAL_GIFT; optional otherwise (enforced in the service). */
@@ -661,6 +667,20 @@ export class CreateRewardCatalogDto {
   @IsOptional()
   @IsString()
   hubbleProductId?: string;
+
+  /**
+   * Hubble GIFT_CARD only: the whole-rupee amounts to OFFER (subset of the brand's Hubble
+   * denominations for a FIXED brand; values inside its min–max for a FLEXIBLE one). Validated
+   * against the live Hubble product on save; persisted to metadata.hubbleDenominations. The
+   * item is stored as a variable-amount item whose points band derives from the list, and a
+   * redemption must pick one of these amounts.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsInt({ each: true, message: 'Gift card amounts must be whole rupees' })
+  @IsPositive({ each: true, message: 'Gift card amounts must be greater than 0' })
+  hubbleDenominations?: number[];
 }
 
 /** PATCH /v1/admin/rewards/catalog/:id — all fields optional. */
@@ -752,4 +772,15 @@ export class UpdateRewardCatalogDto {
   @IsOptional()
   @IsString()
   hubbleProductId?: string;
+
+  /**
+   * See CreateRewardCatalogDto.hubbleDenominations. `undefined` leaves the stored list
+   * unchanged; `[]` CLEARS it (the item goes back to the band / fixed price in this payload).
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsInt({ each: true, message: 'Gift card amounts must be whole rupees' })
+  @IsPositive({ each: true, message: 'Gift card amounts must be greater than 0' })
+  hubbleDenominations?: number[];
 }

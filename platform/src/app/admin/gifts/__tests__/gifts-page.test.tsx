@@ -349,6 +349,172 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
     expect(hubbleField.value).toBe('amz-stored');
   });
 
+  describe('GIF-H — per-brand Hubble amounts', () => {
+    const FIXED_LOOKUP = {
+      product: {
+        productId: 'fk-1', name: 'Flipkart', denominationType: 'FIXED',
+        denominations: [150, 300, 1250], minValue: 150, maxValue: 10000, maxVouchersPerOrder: 10,
+      },
+      conversionRate: 2,
+      minVoucherFreeAmount: 200,
+    };
+    const FLEX_LOOKUP = {
+      product: {
+        productId: 'amz-1', name: 'Amazon Pay', denominationType: 'FLEXIBLE',
+        denominations: [], minValue: 500, maxValue: 10000, maxVouchersPerOrder: 10,
+      },
+      conversionRate: 1,
+      minVoucherFreeAmount: 0,
+    };
+
+    async function openAdd() {
+      const addButtons = await screen.findAllByRole('button', { name: /add reward/i });
+      await userEvent.click(addButtons[addButtons.length - 1]);
+      const dialog = await screen.findByText('Add Reward', { selector: 'h2' });
+      return within(dialog.closest('div.relative') as HTMLElement);
+    }
+
+    it('GIF15: FIXED brand → "Load from Hubble" shows its amounts (points each, below-minimum disabled); ticked amounts are saved as hubbleDenominations', async () => {
+      const { calls } = installFetch((url) =>
+        url.startsWith('/api/admin/rewards/hubble-products/fk-1') ? jsonOk(FIXED_LOOKUP) : undefined,
+      );
+      render(<AdminGiftsPage />);
+      const scope = await openAdd();
+      await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'FK');
+      await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'Flipkart');
+      await userEvent.type(scope.getByPlaceholderText(/amazon-pay-product-id/i), 'fk-1');
+      await userEvent.click(scope.getByRole('button', { name: /load from hubble/i }));
+
+      const panel = await scope.findByTestId('hubble-product-panel');
+      expect(within(panel).getByText('Flipkart')).toBeInTheDocument();
+      expect(within(panel).getByText(/fixed amounts/i)).toBeInTheDocument();
+      // ₹150 is below the ₹200 program minimum → disabled; ₹300 = 600 pts at rate 2.
+      expect(within(panel).getByRole('checkbox', { name: 'Offer ₹150' })).toBeDisabled();
+      expect(within(panel).getByText('600 pts')).toBeInTheDocument();
+
+      await userEvent.click(within(panel).getByRole('checkbox', { name: 'Offer ₹1,250' }));
+      await userEvent.click(within(panel).getByRole('checkbox', { name: 'Offer ₹300' }));
+      // The selling-value / range inputs are gone — the amounts drive the item.
+      expect(scope.queryByPlaceholderText('500')).not.toBeInTheDocument();
+      expect(scope.getByTestId('amount-list-note')).toHaveTextContent('₹300 · ₹1,250');
+
+      await userEvent.click(scope.getByRole('button', { name: /add reward/i }));
+      await waitFor(() => {
+        const post = calls.find((c) => c.url.startsWith('/api/admin/rewards/catalog') && c.init?.method === 'POST');
+        expect(post).toBeTruthy();
+        const body = JSON.parse(String(post!.init!.body));
+        expect(body.hubbleProductId).toBe('fk-1');
+        expect(body.hubbleDenominations).toEqual([300, 1250]);
+        expect(body).not.toHaveProperty('minRedemptionPoints');
+        expect(body).not.toHaveProperty('maxRedemptionPoints');
+        expect(body).not.toHaveProperty('sellingValuePaise');
+      });
+    });
+
+    it('GIF16: FIXED brand + a typed Free-amount range is refused in the editor (no POST)', async () => {
+      const { calls } = installFetch((url) =>
+        url.startsWith('/api/admin/rewards/hubble-products/fk-1') ? jsonOk(FIXED_LOOKUP) : undefined,
+      );
+      render(<AdminGiftsPage />);
+      const scope = await openAdd();
+      await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'FK');
+      await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'Flipkart');
+      await userEvent.type(scope.getByPlaceholderText(/amazon-pay-product-id/i), 'fk-1');
+      await userEvent.click(scope.getByRole('button', { name: /load from hubble/i }));
+      await scope.findByTestId('hubble-product-panel');
+      await userEvent.click(scope.getByRole('button', { name: /free amount/i }));
+      await userEvent.type(scope.getByPlaceholderText('100'), '100');
+      await userEvent.type(scope.getByPlaceholderText('e.g. 5000'), '10000');
+      await userEvent.click(scope.getByRole('button', { name: /add reward/i }));
+      expect(await scope.findByText(/only issues fixed amounts — tick the amounts/i)).toBeInTheDocument();
+      expect(calls.some((c) => c.url.startsWith('/api/admin/rewards/catalog') && c.init?.method === 'POST')).toBe(false);
+    });
+
+    it('GIF17: FLEXIBLE brand → shows the min–max and lets the admin add specific whole-rupee amounts inside it', async () => {
+      const { calls } = installFetch((url) =>
+        url.startsWith('/api/admin/rewards/hubble-products/amz-1') ? jsonOk(FLEX_LOOKUP) : undefined,
+      );
+      render(<AdminGiftsPage />);
+      const scope = await openAdd();
+      await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'AMZ');
+      await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'Amazon');
+      await userEvent.type(scope.getByPlaceholderText(/amazon-pay-product-id/i), 'amz-1');
+      await userEvent.click(scope.getByRole('button', { name: /load from hubble/i }));
+      const panel = await scope.findByTestId('hubble-product-panel');
+      expect(within(panel).getByText(/flexible amount/i)).toBeInTheDocument();
+      expect(panel).toHaveTextContent('₹500');
+      expect(panel).toHaveTextContent('₹10,000');
+
+      const amt = within(panel).getByLabelText('Amount to offer');
+      await userEvent.type(amt, '250');
+      await userEvent.click(within(panel).getByRole('button', { name: /add amount/i }));
+      expect(await scope.findByText(/minimum for this brand is ₹500/i)).toBeInTheDocument();
+      await userEvent.clear(amt);
+      await userEvent.type(amt, '1000.5'); // decimal swallowed → 1000
+      await userEvent.click(within(panel).getByRole('button', { name: /add amount/i }));
+      expect(scope.getByRole('button', { name: 'Remove ₹1,000' })).toBeInTheDocument();
+
+      await userEvent.click(scope.getByRole('button', { name: /add reward/i }));
+      await waitFor(() => {
+        const post = calls.find((c) => c.url.startsWith('/api/admin/rewards/catalog') && c.init?.method === 'POST');
+        expect(post).toBeTruthy();
+        expect(JSON.parse(String(post!.init!.body)).hubbleDenominations).toEqual([1000]);
+      });
+    });
+
+    it('GIF18: a Hubble lookup error is shown honestly (e.g. product not found / not configured)', async () => {
+      installFetch((url) =>
+        url.startsWith('/api/admin/rewards/hubble-products/')
+          ? Promise.resolve({
+              ok: false, status: 404,
+              json: () => Promise.resolve({ success: false, error: 'No active Hubble product with ID "bad-id".' }),
+            })
+          : undefined,
+      );
+      render(<AdminGiftsPage />);
+      const scope = await openAdd();
+      await userEvent.type(scope.getByPlaceholderText(/amazon-pay-product-id/i), 'bad-id');
+      await userEvent.click(scope.getByRole('button', { name: /load from hubble/i }));
+      expect(await scope.findByRole('alert')).toHaveTextContent('No active Hubble product with ID "bad-id".');
+      expect(scope.queryByTestId('hubble-product-panel')).not.toBeInTheDocument();
+    });
+
+    it('GIF19: editing a saved list item auto-loads the brand, shows the saved amounts, and clearing them sends []', async () => {
+      const LIST_ITEM = {
+        ...CATALOG_ITEMS[0], id: 'r-fk', pointsCost: 0, minRedemptionPoints: 300, maxRedemptionPoints: 2500,
+        metadata: { hubbleProductId: 'fk-1', hubbleDenominations: [300, 1250] },
+      };
+      const { calls } = installFetch((url, init) => {
+        if (url.startsWith('/api/admin/rewards/hubble-products/fk-1')) return jsonOk(FIXED_LOOKUP);
+        if (url.startsWith('/api/admin/rewards/catalog') && (!init?.method || init.method === 'GET')) {
+          return jsonOk({ items: [LIST_ITEM], pagination: { page: 1, limit: 200, total: 1, pages: 1 } });
+        }
+        return undefined;
+      });
+      render(<AdminGiftsPage />);
+      await userEvent.click(await screen.findByRole('button', { name: /edit reward/i }));
+      const dialog = await screen.findByText('Edit Reward', { selector: 'h2' });
+      const scope = within(dialog.closest('div.relative') as HTMLElement);
+      const panel = await scope.findByTestId('hubble-product-panel');
+      expect(within(panel).getByRole('checkbox', { name: 'Offer ₹300' })).toBeChecked();
+      expect(within(panel).getByRole('checkbox', { name: 'Offer ₹1,250' })).toBeChecked();
+      expect(calls.some((c) => c.url === '/api/admin/rewards/hubble-products/fk-1')).toBe(true);
+
+      // Untick both → the item falls back to a normal voucher; the save sends [] to clear the list.
+      await userEvent.click(within(panel).getByRole('checkbox', { name: 'Offer ₹300' }));
+      await userEvent.click(within(panel).getByRole('checkbox', { name: 'Offer ₹1,250' }));
+      // The stored shape is variable-amount → switch to Fixed and price it at ₹300 instead.
+      await userEvent.click(scope.getByRole('button', { name: /🎯 fixed/i }));
+      await userEvent.type(scope.getByPlaceholderText('500'), '300');
+      await userEvent.click(scope.getByRole('button', { name: /save/i }));
+      await waitFor(() => {
+        const patch = calls.find((c) => c.url.startsWith('/api/admin/rewards/catalog/r-fk') && c.init?.method === 'PATCH');
+        expect(patch).toBeTruthy();
+        expect(JSON.parse(String(patch!.init!.body)).hubbleDenominations).toEqual([]);
+      });
+    });
+  });
+
   it('GIF13: entering a Selling value (₹) includes sellingValuePaise in the create payload', async () => {
     const { calls } = installFetch();
     render(<AdminGiftsPage />);
