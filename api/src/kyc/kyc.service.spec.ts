@@ -7618,17 +7618,78 @@ describe('KycService', () => {
       await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
     });
 
-    it('supersedes (EXPIRES, not deletes) the earlier unverified consent OTPs so the cap can count them', async () => {
+    it('supersedes (EXPIRES, not deletes) THIS submission\'s earlier unverified consent OTPs so the cap can count them', async () => {
       otpTable();
       await service.sendConsentOtp(partner, dto);
       expect(mockPrisma.otpCode.deleteMany).not.toHaveBeenCalled();
       expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
-        where: { phone: '7795096288', purpose: 'KYC_CONSENT', verifiedAt: null, expiresAt: { gt: expect.any(Date) } },
+        where: { phone: '7795096288', purpose: 'KYC_CONSENT', referenceId: 'sub1', verifiedAt: null, expiresAt: { gt: expect.any(Date) } },
         data: { expiresAt: expect.any(Date) },
       });
       // superseded BEFORE the new row is created (the new row is never expired by it)
       const supersedeAt = mockPrisma.otpCode.updateMany.mock.invocationCallOrder[0];
       expect(supersedeAt).toBeLessThan(mockPrisma.otpCode.create.mock.invocationCallOrder[0]);
+    });
+
+    it('group siblings: sending B\'s OTP never invalidates A\'s code; resending A does (one active OTP per number+submission)', async () => {
+      // A small otp_codes table honouring the where-clauses the send (supersede/create) and the
+      // consent verify (findFirst / claim / mark-used) actually issue.
+      type Row = { id: string; phone: string; code: string; purpose: string; referenceId: string; expiresAt: Date; verifiedAt: Date | null; attempts: number; maxAttempts: number; createdAt: Date };
+      const rows: Row[] = [];
+      let seq = 0;
+      const live = (r: Row, w: any) => r.phone === w.phone && r.purpose === w.purpose
+        && (!('referenceId' in w) || r.referenceId === w.referenceId)
+        && (!('verifiedAt' in w) || (w.verifiedAt === null ? r.verifiedAt === null : true))
+        && (!w.expiresAt?.gt || r.expiresAt > w.expiresAt.gt);
+      mockPrisma.otpCode.count.mockResolvedValue(0);
+      mockPrisma.otpCode.create.mockImplementation(async ({ data }: any) => {
+        const r: Row = { id: `o${++seq}`, createdAt: new Date(Date.now() + seq), verifiedAt: null, attempts: 0, ...data };
+        rows.push(r);
+        return r;
+      });
+      mockPrisma.otpCode.updateMany.mockImplementation(async ({ where, data }: any) => {
+        if (where.id) { // conditional mark-used
+          const r = rows.find((x) => x.id === where.id && (where.verifiedAt !== null || x.verifiedAt === null));
+          if (!r) return { count: 0 };
+          Object.assign(r, data);
+          return { count: 1 };
+        }
+        const hit = rows.filter((r) => live(r, where)); // supersede
+        hit.forEach((r) => Object.assign(r, data));
+        return { count: hit.length };
+      });
+      mockPrisma.otpCode.findFirst.mockImplementation(async ({ where }: any) =>
+        rows.filter((r) => live(r, where)).sort((a, b) => +b.createdAt - +a.createdAt)[0] ?? null);
+      // Two sibling submissions sharing the owner phone (send + consent shapes).
+      const sub = (id: string) => ({
+        id, partnerId: null, proposedPartner: null, status: 'SUBMITTED', userId: 'user1',
+        partner: { phone: '7795096288', ownerName: 'O', outlets: [] },
+      });
+      mockPrisma.kycSubmission.findFirst.mockImplementation(async ({ where }: any) => sub(where.id));
+      mockPrisma.consentRecord.create.mockResolvedValue({ id: 'cr' });
+      const codeOf = (n: number) => mockMsg91.sendOtp.mock.calls[n][1] as string;
+
+      await service.sendConsentOtp(partner, { submissionId: 'subA', mobile: '7795096288' });
+      const codeA1 = codeOf(0);
+      await service.sendConsentOtp(partner, { submissionId: 'subB', mobile: '7795096288' });
+      // B's send did not expire A's live code → A verifies with it.
+      await expect(service.consent(partner, { submissionId: 'subA', mobile: '7795096288', otp: codeA1 }))
+        .resolves.toEqual({ verified: true, submissionId: 'subA' });
+
+      // Resend A twice: the first resend's code is superseded by the second (one active per number+submission).
+      await service.sendConsentOtp(partner, { submissionId: 'subA', mobile: '7795096288' });
+      const codeA2 = codeOf(2);
+      await service.sendConsentOtp(partner, { submissionId: 'subA', mobile: '7795096288' });
+      const codeA3 = codeOf(3);
+      const rowA2 = rows.find((r) => r.code === codeA2 && r.referenceId === 'subA')!;
+      expect(rowA2.expiresAt.getTime()).toBeLessThanOrEqual(Date.now()); // A's earlier code is now invalid
+      if (codeA2 !== codeA3) {
+        const err = await service.consent(partner, { submissionId: 'subA', mobile: '7795096288', otp: codeA2 }).catch((e) => e);
+        expect(err.getStatus()).toBe(401);
+      }
+      // B's code is still live throughout.
+      const rowB = rows.find((r) => r.referenceId === 'subB')!;
+      expect(rowB.expiresAt.getTime()).toBeGreaterThan(Date.now());
     });
 
     it('cap: a refused send (number not the owner) never reaches the count', async () => {

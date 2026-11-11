@@ -549,12 +549,14 @@ export class KycService {
 
     const otp = this.generateOtpCode();
 
-    // One active consent OTP per number (unchanged semantics): SUPERSEDE (expire) the number's
-    // earlier unverified consent OTPs instead of deleting them — the rows must survive so the send
-    // cap above can count actual sends. consent() only accepts an unexpired row, so an expired one is inert (same effect as the
-    // old delete). Rows age out via the global expired-OTP cleanup in auth.service sendOtp.
+    // One active consent OTP per (number, submission) — owner decision 2026-11-11: SUPERSEDE (expire)
+    // THIS submission's earlier unverified consent OTPs to this number, never a sibling's — group
+    // onboarding (outlets sharing an owner phone, each its own submission) must not have B's send
+    // invalidate A's code. Expired, not deleted: the rows must survive so the send cap above can count
+    // actual sends; consent() only accepts an unexpired row bound to its submission, so an expired one
+    // is inert. Rows age out via the global expired-OTP cleanup in auth.service sendOtp.
     await this.prisma.otpCode.updateMany({
-      where: { phone: mobile, purpose: 'KYC_CONSENT', verifiedAt: null, expiresAt: { gt: new Date() } },
+      where: { phone: mobile, purpose: 'KYC_CONSENT', referenceId: submission.id, verifiedAt: null, expiresAt: { gt: new Date() } },
       data:  { expiresAt: new Date() },
     });
     const otpRow = await this.prisma.otpCode.create({
