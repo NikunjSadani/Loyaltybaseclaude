@@ -267,6 +267,31 @@ describe('AuthService', () => {
       expect(mockPrisma.otpCode.create).not.toHaveBeenCalled();
     });
 
+    it('AF-10: the hourly cap counts ONLY LOGIN OTPs for the phone (KYC consent / redemption rows do not count)', async () => {
+      // Simulate the DB: 5 KYC_CONSENT + 5 REDEMPTION_CONFIRM rows in the window, 0 LOGIN rows.
+      const rows = [
+        ...Array.from({ length: 5 }, () => ({ purpose: 'KYC_CONSENT' })),
+        ...Array.from({ length: 5 }, () => ({ purpose: 'REDEMPTION_CONFIRM' })),
+      ];
+      mockPrisma.otpCode.count.mockImplementation(async ({ where }: any) =>
+        rows.filter((r) => where.purpose === undefined || r.purpose === where.purpose).length);
+      mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp_1' });
+      await expect(service.sendOtp('9876543210', 'SMS')).resolves.toMatchObject({ success: true });
+      expect(mockPrisma.otpCode.count.mock.calls[0][0].where).toMatchObject({ phone: '9876543210', purpose: 'LOGIN' });
+    });
+
+    it('AF-10: LOGIN rows still count — 5 LOGIN OTPs in the window → 429', async () => {
+      const rows = [
+        ...Array.from({ length: 5 }, () => ({ purpose: 'LOGIN' })),
+        ...Array.from({ length: 3 }, () => ({ purpose: 'KYC_CONSENT' })),
+      ];
+      mockPrisma.otpCode.count.mockImplementation(async ({ where }: any) =>
+        rows.filter((r) => where.purpose === undefined || r.purpose === where.purpose).length);
+      await expect(service.sendOtp('9876543210', 'SMS')).rejects.toMatchObject({ status: 429 });
+      expect(mockPrisma.otpCode.create).not.toHaveBeenCalled();
+    });
+
     it('AF-10: the DB-cap 429 logs its OWN distinct line ([otp-send-cap]) with a masked phone', async () => {
       const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
       try {

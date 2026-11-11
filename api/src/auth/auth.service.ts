@@ -229,7 +229,9 @@ export class AuthService {
 
     if (!fixedOtpActive) {
       const recentSends = await this.prisma.otpCode.count({
-        where: { phone: cleanPhone, createdAt: { gte: windowStart } },
+        // LOGIN-only: KYC-consent / redemption / scheme OTPs sent to the same number are their own
+        // flows (each with its own limits) and must not eat this number's login budget.
+        where: { phone: cleanPhone, purpose: 'LOGIN', createdAt: { gte: windowStart } },
       });
       if (recentSends >= OTP_MAX_PER_WINDOW) {
         // Distinct from the throttler's "throttle.rejected" line (IdentityThrottlerGuard): this is the
