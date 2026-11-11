@@ -12,7 +12,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import OrdersPage from '../page';
@@ -134,6 +134,33 @@ describe('OR — Orders API wiring (live data)', () => {
     expect(status).toHaveAttribute('aria-live', 'polite');
     expect(status).not.toHaveClass('sr-only'); // visible, not only announced
     expect(screen.getByTestId('voucher-code')).toHaveClass('select-all');
+  });
+
+  it('OR6f: the "Copy failed" hint clears after ~4 s, and a new tap starts fresh', async () => {
+    const writeText = vi.fn().mockRejectedValueOnce(new Error('NotAllowedError')).mockResolvedValueOnce(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    stubOrders([VOUCHER_ORDER]);
+    render(<OrdersPage />);
+    const btn = await screen.findByTestId('copy-voucher-btn');
+    const status = screen.getByTestId('copy-voucher-btn-status');
+    await userEvent.click(btn);
+    await waitFor(() => expect(status).toHaveTextContent('Copy failed'));
+    // next tap: the failure is replaced (here by a successful copy)
+    await userEvent.click(btn);
+    await waitFor(() => expect(status).toHaveTextContent('Copied'));
+    expect(status).not.toHaveTextContent('Copy failed');
+    // and on its own after ~4 s
+    writeText.mockRejectedValueOnce(new Error('NotAllowedError'));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await userEvent.click(btn);
+      await waitFor(() => expect(status).toHaveTextContent('Copy failed'));
+      await act(async () => { vi.advanceTimersByTime(4100); });
+      expect(status).toHaveTextContent('');
+      expect(status).not.toHaveTextContent('Copy failed');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('OR6b: voucher line shows the reward BRAND, never the back-end aggregator (e.g. Hubble)', async () => {

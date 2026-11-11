@@ -141,6 +141,33 @@ describe('Msg91Service.sendWhatsappTemplate', () => {
       service.sendWhatsappTemplate('9000000001', 'deoleo_kyc_approval', ['Owner', 'Program']),
     ).rejects.toThrow(/timeout/i);
   });
+
+  it('a non-string provider message (object / null) never throws in the scrub; secrets withhold the whole reason', async () => {
+    const service = new Msg91Service(makeConfig({ MSG91_AUTH_KEY: 'key-123' }));
+    // Object message → JSON-stringified into the reason.
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({ type: 'error', message: { errors: ['bad param'] } }),
+    }) as unknown as typeof fetch;
+    await expect(
+      service.sendWhatsappTemplate('9000000001', 'voucher_code', ['A', 'B'], { secretValues: ['482913'] }),
+    ).rejects.toThrow(/bad param/);
+    // null message → falls back to the HTTP status.
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false, status: 502, json: async () => ({ type: 'error', message: null }),
+    }) as unknown as typeof fetch;
+    await expect(
+      service.sendWhatsappTemplate('9000000001', 'voucher_code', ['A', 'B'], { secretValues: ['482913'] }),
+    ).rejects.toThrow(/HTTP 502/);
+    // An object message echoing the PIN → the whole reason is withheld (never the PIN).
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({ type: 'error', message: { value: 'PIN: 482913' } }),
+    }) as unknown as typeof fetch;
+    const err = await service
+      .sendWhatsappTemplate('9000000001', 'voucher_code', ['A', 'B'], { secretValues: ['482913'] })
+      .catch((e: Error) => e);
+    expect(String(err)).toMatch(/details withheld/);
+    expect(String(err)).not.toContain('482913');
+  });
 });
 
 // Unit tests for Msg91Service.sendSms — the MSG91 v5 FLOW API (DLT template) path. Covers the

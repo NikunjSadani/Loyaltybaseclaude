@@ -25,7 +25,7 @@ import { useTenantFeatures } from '@/lib/tenant-features';
 import { BankOrUpiSection, type PaymentMode, type UpiCaptureMethod } from '@/components/bank-or-upi-section';
 import { isValidUpiId } from '@/lib/upi-utils';
 import { pinnedPaymentMode, type OutletPaymentType } from '@/lib/payment-type';
-import { WHOLE_RUPEE_INVALID_MESSAGE, wholeRupeeAmount, wholeRupeeInputProps } from '@/lib/whole-rupee-input';
+import { WHOLE_RUPEE_INVALID_MESSAGE, useWholeRupeeField } from '@/lib/whole-rupee-input';
 import { pointsForAmount } from '@/lib/hubble-product';
 
 /* ─── Partner cash beneficiary (from GET /api/auth/me) ─────────────────────────
@@ -343,8 +343,13 @@ function ConsentCheckbox({
 interface RedeemInitResult {
   orderId: string;
   orderNumber: string;
-  requiredPoints: number;
+  requiredPoints?: number;
   message: string;
+}
+
+/** The SERVER's requiredPoints from redeem-init when present (a finite number ≥ 0), else the local calc. */
+function serverPoints(required: unknown, fallback: number): number {
+  return typeof required === 'number' && Number.isFinite(required) && required >= 0 ? required : fallback;
 }
 
 /* ─── Image / emoji display ──────────────────────────────────────────────── */
@@ -697,7 +702,10 @@ function VoucherRedeemSheet({
   onRedeemed: (pts: number) => void;
 }) {
   const toast = useToast();
-  const [amount,     setAmount]     = useState('');
+  // Whole-rupee amount + the shared "Check the amount" rule (shown only after a commit that found
+  // the text invalid; cleared on the next edit; the submit tap commits instead of being disabled).
+  const amountField = useWholeRupeeField();
+  const amount = amountField.value;
   const [otp,        setOtp]        = useState('');
   const [otpSent,    setOtpSent]    = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -713,13 +721,13 @@ function VoucherRedeemSheet({
   // of the admin-chosen amounts — no free typing. Server re-validates the amount is in the list.
   const amountOptions = !isFixed && voucher.amountOptions?.length ? voucher.amountOptions : null;
   // "1,250" while typing → 1250; "750,5" / "1,2" → null (invalid — never guessed, never shrunk).
-  const parsedAmt = wholeRupeeAmount(amount);
-  const amtInvalid = !isFixed && parsedAmt === null;
+  const parsedAmt = amountField.amount;
+  const amtInvalid = !isFixed && !amountOptions && parsedAmt === null;
   const freeAmt   = parsedAmt ?? 0;
-  // The typed amount was committed (blur / Enter / paste) — only then is "Check the amount" shown.
-  const [amtCommitted, setAmtCommitted] = useState(false);
-  // The amount + points the ORDER was created with (frozen at OTP-send): the success copy and the
-  // local balance use these, never the live field.
+  const amtInvalidShown = amtInvalid && amountField.showInvalid;
+  // The amount + points the ORDER was created with (frozen at OTP-send — the points are the
+  // SERVER's requiredPoints from redeem-init): the success copy and the local balance use these,
+  // never the live field.
   const [sentFor, setSentFor] = useState<{ amount: number; pts: number } | null>(null);
   // FREE_AMOUNT: points required = ₹amount × conversionRate, with the SERVER's exact rounding
   // (Math.round, rewards.service redeem) so the preview, the balance check and the debit agree.
@@ -732,8 +740,9 @@ function VoucherRedeemSheet({
   // (which would yield Infinity/NaN in the balance hint). null => unknown cap.
   const hasRate = Number.isFinite(conversionRate) && conversionRate > 0;
   const maxAffordableInr = hasRate ? Math.floor(myBalance / conversionRate) : null;
-  const amountError = amtInvalid && amtCommitted
-    ? WHOLE_RUPEE_INVALID_MESSAGE
+  // Live minimum / balance hint (polite — not an alert; the invalid-amount alert is separate).
+  const amountHint = amtInvalid
+    ? ''
     : !isFixed && freeAmt > 0 && freeAmt < minFreeAmount
     ? `Minimum redemption is ${fmtInr(minFreeAmount)}`
     : !isFixed && hasRate && freeAmt > 0 && ptsNeeded > myBalance
@@ -746,20 +755,21 @@ function VoucherRedeemSheet({
     if (needConsent && !consent) {
       toast.error('Please agree to share your delivery details to continue'); return;
     }
-    if (amtInvalid) { setAmtCommitted(true); return; } // "Check the amount" — never sent
+    if (amtInvalid && !amountField.checkBeforeSubmit()) return; // "Check the amount" — never sent
     // Freeze what THIS order is created with (the field is locked from here on).
-    const frozen = { amount: isFixed ? fixedPts : freeAmt, pts: ptsNeeded };
+    const frozenAmount = isFixed ? fixedPts : freeAmt;
     setSubmitting(true);
     const consentFields = needConsent ? { consent: true } : {};
     const payload: RedeemPayload = isFixed
       ? { rewardId: voucher.id, quantity: 1, ...consentFields }
-      : { rewardId: voucher.id, amount: frozen.amount, ...consentFields };
+      : { rewardId: voucher.id, amount: frozenAmount, ...consentFields };
     const result = await api.post<RedeemInitResult>('/api/rewards/redeem', payload);
     setSubmitting(false);
     if (!result.success) {
       toast.error(result.error || 'Could not start redemption'); return;
     }
-    setSentFor(frozen);
+    // The SERVER's requiredPoints (what the order debits); the local calc only if it is absent.
+    setSentFor({ amount: frozenAmount, pts: serverPoints(result.data?.requiredPoints, ptsNeeded) });
     setOrderId(result.data.orderId);
     setOtpSent(true);
   };
@@ -866,7 +876,7 @@ function VoucherRedeemSheet({
                       aria-pressed={selected}
                       aria-label={`${fmtInr(amt)}, ${formatPoints(pts)} points${tooLow ? ' (below the minimum)' : ''}`}
                       disabled={otpSent || tooLow}
-                      onClick={() => setAmount(String(amt))}
+                      onClick={() => amountField.reset(String(amt))}
                       className={cn(
                         'rounded-xl border-2 px-2 py-2 text-center transition-all disabled:opacity-40',
                         selected
@@ -903,25 +913,28 @@ function VoucherRedeemSheet({
                 <input
                   className={cn(
                     'w-full border rounded-xl pl-7 pr-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]',
-                    amountError ? 'border-red-300' : 'border-gray-200',
+                    amtInvalidShown || amountHint ? 'border-red-300' : 'border-gray-200',
                   )}
                   placeholder={`${minFreeAmount}`}
                   value={amount}
                   // Whole rupees only (typed "." blocked; "750,5" / a pasted decimal → "Check the amount").
-                  {...wholeRupeeInputProps(setAmount, { onCommit: () => setAmtCommitted(true) })}
+                  {...amountField.inputProps}
                   // Locked once the OTP is sent — the order already carries this amount.
                   disabled={otpSent}
-                  aria-invalid={amtInvalid && amtCommitted ? true : undefined}
-                  aria-describedby={amountError ? 'voucher-amount-error' : undefined}
+                  aria-invalid={amtInvalidShown || !!amountHint ? true : undefined}
+                  aria-describedby={amtInvalidShown ? 'voucher-amount-error' : amountHint ? 'voucher-amount-hint' : undefined}
                   aria-label="Voucher amount"
                 />
               </div>
-              {amountError && <p id="voucher-amount-error" role="alert" className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{amountError}</p>}
-              {freeAmt >= minFreeAmount && !amountError && (
-                <p className="text-xs text-emerald-600 mt-1 font-medium">
-                  = {ptsNeeded} pts · {formatPoints(myBalance - ptsNeeded)} pts remaining after
-                </p>
-              )}
+              {amtInvalidShown && <p id="voucher-amount-error" role="alert" className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{WHOLE_RUPEE_INVALID_MESSAGE}</p>}
+              <div aria-live="polite">
+                {amountHint && <p id="voucher-amount-hint" className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{amountHint}</p>}
+                {freeAmt >= minFreeAmount && !amtInvalid && !amountHint && (
+                  <p className="text-xs text-emerald-600 mt-1 font-medium">
+                    = {ptsNeeded} pts · {formatPoints(myBalance - ptsNeeded)} pts remaining after
+                  </p>
+                )}
+              </div>
             </div>
           )}
 
@@ -952,9 +965,11 @@ function VoucherRedeemSheet({
           <div className="pt-3 border-t border-gray-100">
             {!otpSent ? (
               <Button variant="primary" className="w-full" loading={submitting}
-                disabled={amtInvalid || !canAfford || !!amountError || (!isFixed && freeAmt < minFreeAmount) || (!!amountOptions && !amountOptions.includes(freeAmt)) || (needConsent && !consent)}
+                // An INVALID amount text never disables the button (it can't say why): the tap
+                // commits and shows "Check the amount" instead of sending.
+                disabled={!amtInvalid && (!canAfford || !!amountHint || (!isFixed && freeAmt < minFreeAmount) || (!!amountOptions && !amountOptions.includes(freeAmt)) || (needConsent && !consent))}
                 onClick={handleSendOtp}>
-                {amtInvalid && amtCommitted
+                {amtInvalidShown
                   ? WHOLE_RUPEE_INVALID_MESSAGE
                   : amountOptions && !amountOptions.includes(freeAmt)
                   ? 'Choose an amount'
@@ -996,7 +1011,9 @@ function CashPayoutSheet({
   onRedeemed: (pts: number) => void;
 }) {
   const toast = useToast();
-  const [amount,     setAmount]     = useState('');
+  // Whole-rupee amount + the shared "Check the amount" rule (see useWholeRupeeField).
+  const amountField = useWholeRupeeField();
+  const amount = amountField.value;
   const [otp,        setOtp]        = useState('');
   const [otpSent,    setOtpSent]    = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -1010,34 +1027,36 @@ function CashPayoutSheet({
   const maxInr    = hasRate ? Math.floor(myBalance / conversionRate) : null;
 
   // "1,250" → 1250; "750,5" / "1,2" / a pasted decimal → null (invalid — never guessed / shrunk).
-  const parsedAmt = wholeRupeeAmount(amount);
+  const parsedAmt = amountField.amount;
   const amtInvalid = parsedAmt === null;
   const inrAmt    = parsedAmt ?? 0;
-  const [amtCommitted, setAmtCommitted] = useState(false);
-  // The ₹ + points the payout ORDER was created with (frozen at OTP-send) — success copy + balance.
+  const amtInvalidShown = amtInvalid && amountField.showInvalid;
+  // The ₹ + points the payout ORDER was created with (frozen at OTP-send; points = the SERVER's
+  // requiredPoints from redeem-init) — success copy + balance.
   const [sentFor, setSentFor] = useState<{ amount: number; pts: number } | null>(null);
   // Preview points with the REAL conversionRate (matches the backend), not localStorage.
   const ptsNeeded = Math.ceil(inrAmt * conversionRate);
 
-  const amountError = amtInvalid && amtCommitted
-    ? WHOLE_RUPEE_INVALID_MESSAGE
+  // Live minimum / balance hint (polite — not an alert; the invalid-amount alert is separate).
+  const amountHint = amtInvalid
+    ? ''
     : inrAmt > 0 && inrAmt < minInr
     ? `Minimum redemption is ${fmtInr(minInr)}`
     : maxInr !== null && inrAmt > maxInr
     ? `Exceeds balance (max ${fmtInr(maxInr)})`
     : '';
 
-  const canProceed = !amtInvalid && inrAmt >= minInr && !amountError && myBalance >= ptsNeeded;
+  const canProceed = !amtInvalid && inrAmt >= minInr && !amountHint && myBalance >= ptsNeeded;
 
   const handleSendOtp = async () => {
     if (!rewardId) { toast.error('Cash payout is not available right now'); return; }
-    if (amtInvalid) { setAmtCommitted(true); return; }
-    const frozen = { amount: inrAmt, pts: ptsNeeded };
+    if (amtInvalid && !amountField.checkBeforeSubmit()) return; // "Check the amount" — never sent
+    const frozenAmount = inrAmt;
     setSubmitting(true);
-    const result = await api.post<RedeemInitResult>('/api/rewards/redeem', { rewardId, amount: frozen.amount });
+    const result = await api.post<RedeemInitResult>('/api/rewards/redeem', { rewardId, amount: frozenAmount });
     setSubmitting(false);
     if (!result.success) { toast.error(result.error || 'Could not start payout'); return; }
-    setSentFor(frozen);
+    setSentFor({ amount: frozenAmount, pts: serverPoints(result.data?.requiredPoints, ptsNeeded) });
     setOrderId(result.data.orderId);
     setOtpSent(true);
   };
@@ -1127,24 +1146,27 @@ function CashPayoutSheet({
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-bold text-gray-500">₹</span>
               <input
                 className={cn('w-full border rounded-xl pl-7 pr-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]',
-                  amountError ? 'border-red-300' : 'border-gray-200')}
+                  amtInvalidShown || amountHint ? 'border-red-300' : 'border-gray-200')}
                 placeholder={`${minInr}`}
                 value={amount}
                 // Whole rupees only (typed "." blocked; "750,5" / a pasted decimal → "Check the amount").
-                {...wholeRupeeInputProps(setAmount, { onCommit: () => setAmtCommitted(true) })}
+                {...amountField.inputProps}
                 // Locked once the OTP is sent — the payout order already carries this amount.
                 disabled={otpSent}
-                aria-invalid={amtInvalid && amtCommitted ? true : undefined}
-                aria-describedby={amountError ? 'payout-amount-error' : undefined}
+                aria-invalid={amtInvalidShown || !!amountHint ? true : undefined}
+                aria-describedby={amtInvalidShown ? 'payout-amount-error' : amountHint ? 'payout-amount-hint' : undefined}
                 aria-label="Payout amount"
               />
             </div>
-            {amountError && <p id="payout-amount-error" role="alert" className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{amountError}</p>}
-            {inrAmt >= minInr && !amountError && (
-              <p className="text-xs text-emerald-600 mt-1 font-medium">
-                = {ptsNeeded} pts · {formatPoints(myBalance - ptsNeeded)} pts remaining after
-              </p>
-            )}
+            {amtInvalidShown && <p id="payout-amount-error" role="alert" className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{WHOLE_RUPEE_INVALID_MESSAGE}</p>}
+            <div aria-live="polite">
+              {amountHint && <p id="payout-amount-hint" className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{amountHint}</p>}
+              {inrAmt >= minInr && !amtInvalid && !amountHint && (
+                <p className="text-xs text-emerald-600 mt-1 font-medium">
+                  = {ptsNeeded} pts · {formatPoints(myBalance - ptsNeeded)} pts remaining after
+                </p>
+              )}
+            </div>
           </div>
 
           {/* OTP field */}
@@ -1167,10 +1189,11 @@ function CashPayoutSheet({
 
           <div className="pt-3 border-t border-gray-100">
             {!otpSent ? (
-              <Button variant="primary" className="w-full" loading={submitting} disabled={!canProceed} onClick={handleSendOtp}>
+              // An INVALID amount text never disables the button: the tap shows "Check the amount".
+              <Button variant="primary" className="w-full" loading={submitting} disabled={!amtInvalid && !canProceed} onClick={handleSendOtp}>
                 {amtInvalid
-                  ? (amtCommitted ? WHOLE_RUPEE_INVALID_MESSAGE : 'Redeem')
-                  : !canProceed && inrAmt > 0 ? amountError || 'Insufficient balance' : `Redeem ${inrAmt ? fmtInr(inrAmt) : ''}`}
+                  ? (amtInvalidShown ? WHOLE_RUPEE_INVALID_MESSAGE : 'Redeem')
+                  : !canProceed && inrAmt > 0 ? amountHint || 'Insufficient balance' : `Redeem ${inrAmt ? fmtInr(inrAmt) : ''}`}
               </Button>
             ) : (
               <div className="flex gap-3">

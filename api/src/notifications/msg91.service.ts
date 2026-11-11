@@ -97,7 +97,8 @@ export class Msg91Service {
     // store whatever is present. Best-effort correlation aid — null if absent (never affects send).
     const json = await res.json() as {
       type?: string;
-      message?: string;
+      /** Usually a string, but a provider can send an object / array / null — scrub handles any. */
+      message?: unknown;
       request_id?: string;
       requestId?: string;
       data?: { request_id?: string; requestId?: string };
@@ -156,8 +157,9 @@ export class Msg91Service {
     opts?: { crqid?: string; languageCode?: string; secretValues?: string[] },
   ): Promise<{ requestId: string | null }> {
     // A provider error can echo template values back — scrub caller-flagged secrets (a voucher
-    // code / PIN) from the logged + thrown reason. No secrets → text unchanged.
-    const scrub = (t: string) => scrubSecrets(t, opts?.secretValues);
+    // code / PIN) from the logged + thrown reason: ANY match withholds the whole reason. Accepts any
+    // value (a provider `message` may be an object / null). No secrets → text unchanged.
+    const scrub = (t: unknown) => scrubSecrets(t, opts?.secretValues);
     const authKey = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
     // The integrated WhatsApp number registered with MSG91 for this platform.
     // Configurable via MSG91_WHATSAPP_NUMBER; defaults to the Deoleo-integrated number.
@@ -234,7 +236,7 @@ export class Msg91Service {
       const reason =
         (e as Error)?.name === 'TimeoutError'
           ? 'MSG91 did not respond within 10s (timeout — check MSG91 IP whitelisting / egress)'
-          : scrub(String(e));
+          : scrub(e);
       this.logger.error(
         `MSG91 WhatsApp template "${templateName}" request failed for ••••${phone.slice(-4)}: ${reason}`,
       );
@@ -248,13 +250,14 @@ export class Msg91Service {
     // is a best-effort correlation aid — the primary key is the crqid echoed on the webhook.
     const json = (await res.json()) as {
       type?: string;
-      message?: string;
+      /** Usually a string, but a provider can send an object / array / null — scrub handles any. */
+      message?: unknown;
       request_id?: string;
       requestId?: string;
       data?: { request_id?: string; requestId?: string };
     };
     if (!res.ok || json?.type === 'error') {
-      const reason = scrub(json?.message ?? `HTTP ${res.status}`);
+      const reason = scrub(json?.message ?? `HTTP ${res.status}`) || `HTTP ${res.status}`;
       this.logger.error(
         `MSG91 WhatsApp template "${templateName}" failed for ••••${phone.slice(-4)}: ${reason}`,
       );
@@ -480,7 +483,8 @@ export class Msg91Service {
     // for the status-by-requestID poll (the primary key is the crqid echoed on the DLR webhook).
     const json = (await res.json()) as {
       type?: string;
-      message?: string;
+      /** Usually a string, but a provider can send an object / array / null — scrub handles any. */
+      message?: unknown;
       request_id?: string;
       requestId?: string;
       data?: { request_id?: string; requestId?: string };

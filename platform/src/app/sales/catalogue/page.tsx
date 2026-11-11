@@ -49,10 +49,16 @@ interface RedeemState {
   otpResendCountdown: number;
   /** ₹ amount for a FREE_AMOUNT (variable) voucher/bank-transfer redemption; '' otherwise. */
   amount: string;
-  /** The amount text was committed (blur / Enter / paste) — only then is "Check the amount" shown. */
-  amountCommitted: boolean;
+  /**
+   * The last commit (blur / Enter / paste / a tap on Send OTP) found the amount text INVALID —
+   * "Check the amount" shows while this is set; cleared on the next edit (never shown mid-typing).
+   * Same rule as useWholeRupeeField (lib/whole-rupee-input).
+   */
+  amountFlagged: boolean;
   /** The ₹ amount the ORDER was created with (frozen at OTP-send; null before / for FIXED items). */
   sentAmount: number | null;
+  /** The points the ORDER debits — the SERVER's requiredPoints from redeem-init (frozen at OTP-send). */
+  sentPoints: number | null;
   /** PHYSICAL_GIFT delivery address — ONLY what the rep typed (+ `addrTouched` marks every edited
    *  field). The shown address is DERIVED via applyAddressPrefill from the target outlet's
    *  deliveryDefaults, so the pre-fill never overwrites typing or a deliberate clear. */
@@ -67,7 +73,7 @@ const EMPTY_ADDRESS: AddressForm = { line1: '', city: '', state: '', pincode: ''
 
 const INITIAL_REDEEM: RedeemState = {
   outlet: null, orderId: '', otpSending: false, otpSent: false, otp: '',
-  verifying: false, error: '', otpResendCountdown: 0, amount: '', amountCommitted: false, sentAmount: null,
+  verifying: false, error: '', otpResendCountdown: 0, amount: '', amountFlagged: false, sentAmount: null, sentPoints: null,
   addrTyped: EMPTY_ADDRESS, addrTouched: {}, recipientName: '', recipientTouched: false,
 };
 
@@ -331,7 +337,7 @@ function CatalogueInner() {
     const parsedAmount = redeem.otpSent && redeem.sentAmount != null ? redeem.sentAmount : wholeRupeeAmount(redeem.amount);
     if (freeAmount && parsedAmount === null) {
       // "750,5" / "1,2" / a pasted decimal — never guessed, never sent.
-      setRedeem((r) => ({ ...r, amountCommitted: true, error: WHOLE_RUPEE_INVALID_MESSAGE }));
+      setRedeem((r) => ({ ...r, amountFlagged: true, error: '' }));
       return;
     }
     const amountNum = parsedAmount ?? 0;
@@ -366,7 +372,7 @@ function CatalogueInner() {
       };
     }
     setRedeem((r) => ({ ...r, otpSending: true, error: '' }));
-    const res = await api.post<{ orderId: string; orderNumber: string }>(
+    const res = await api.post<{ orderId: string; orderNumber: string; requiredPoints?: number }>(
       '/api/rewards/redeem-for-outlet',
       {
         rewardId: selectedGift.id,
@@ -379,6 +385,11 @@ function CatalogueInner() {
       setRedeem((r) => ({
         ...r, otpSending: false, otpSent: true, orderId: res.data.orderId, otp: '', otpResendCountdown: 30,
         sentAmount: freeAmount ? amountNum : null,
+        // The SERVER's requiredPoints (what the order debits); a resend keeps the first value; the
+        // item's fixed points only if the server sent none.
+        sentPoints: typeof res.data.requiredPoints === 'number' && Number.isFinite(res.data.requiredPoints)
+          ? res.data.requiredPoints
+          : r.sentPoints ?? (freeAmount ? null : selectedGift.points),
       }));
       setSheetStep('otp');
     } else {
@@ -389,7 +400,7 @@ function CatalogueInner() {
   // "Change amount" (or Back) from the OTP step: abandon this OTP and return to the amount — the
   // next Send OTP starts a fresh redeem (a new order) with the new amount.
   const changeAmount = () => {
-    setRedeem((r) => ({ ...r, otpSent: false, orderId: '', otp: '', otpResendCountdown: 0, sentAmount: null, error: '' }));
+    setRedeem((r) => ({ ...r, otpSent: false, orderId: '', otp: '', otpResendCountdown: 0, sentAmount: null, sentPoints: null, error: '' }));
     setSheetStep('confirm');
   };
 
@@ -426,8 +437,8 @@ function CatalogueInner() {
     }
   };
 
-  // "Check the amount" — only once the typed amount was committed (blur / Enter / paste).
-  const amountInvalidShown = redeem.amountCommitted && isWholeRupeeInvalid(redeem.amount);
+  // "Check the amount" — only after a commit that found the text invalid; cleared on the next edit.
+  const amountInvalidShown = redeem.amountFlagged && isWholeRupeeInvalid(redeem.amount);
 
   const maskedMobile = (m: string) => `****${m.slice(-4)}`;
 
@@ -782,8 +793,8 @@ function CatalogueInner() {
                         value={redeem.amount}
                         // Whole rupees only (typed "." blocked; "750,5" / a pasted decimal → "Check the amount").
                         {...wholeRupeeInputProps(
-                          (v) => setRedeem((r) => ({ ...r, amount: v, error: '' })),
-                          { onCommit: () => setRedeem((r) => ({ ...r, amountCommitted: true })) },
+                          (v) => setRedeem((r) => ({ ...r, amount: v, amountFlagged: false, error: '' })),
+                          { onCommit: (bad) => setRedeem((r) => ({ ...r, amountFlagged: bad })) },
                         )}
                         // Locked once the OTP is sent — the order already carries this amount.
                         disabled={redeem.otpSent}
@@ -871,7 +882,7 @@ function CatalogueInner() {
                     </p>
                   </div>
 
-                  {redeem.error && !(amountInvalidShown && redeem.error === WHOLE_RUPEE_INVALID_MESSAGE) && (
+                  {redeem.error && (
                     <p className="text-xs text-red-600 text-center">{redeem.error}</p>
                   )}
 
@@ -879,11 +890,13 @@ function CatalogueInner() {
                     variant="primary"
                     className="w-full"
                     loading={redeem.otpSending}
+                    // An INVALID amount text never disables the button (it can't say why): the tap
+                    // commits and shows "Check the amount" instead of sending.
                     disabled={
                       isFreeAmountGift(selectedGift) &&
                       (selectedGift.amountOptions?.length
                         ? !selectedGift.amountOptions.includes(Number(redeem.amount))
-                        : !((wholeRupeeAmount(redeem.amount) ?? 0) > 0))
+                        : !isWholeRupeeInvalid(redeem.amount) && !((wholeRupeeAmount(redeem.amount) ?? 0) > 0))
                     }
                     onClick={sendOtp}
                   >
@@ -994,8 +1007,14 @@ function CatalogueInner() {
                       {[
                         { label: 'Item',            value: selectedGift.name },
                         // The amount the ORDER was created with (frozen at OTP-send), never the live field.
-                        { label: 'Amount',          value: redeem.sentAmount != null && redeem.sentAmount > 0 ? `₹${redeem.sentAmount}` : '—' },
-                        { label: 'Current balance', value: `${redeem.outlet.balance.toLocaleString()} pts` },
+                        { label: 'Amount',          value: redeem.sentAmount != null && redeem.sentAmount > 0 ? `₹${redeem.sentAmount.toLocaleString('en-IN')}` : '—' },
+                        // The SERVER's requiredPoints frozen at OTP-send (never re-derived from the field).
+                        ...(redeem.sentPoints != null
+                          ? [
+                              { label: 'Points deducted', value: `−${redeem.sentPoints.toLocaleString('en-IN')} pts` },
+                              { label: 'New balance',     value: `${(redeem.outlet.balance - redeem.sentPoints).toLocaleString('en-IN')} pts` },
+                            ]
+                          : [{ label: 'Current balance', value: `${redeem.outlet.balance.toLocaleString()} pts` }]),
                       ].map((r) => (
                         <div key={r.label} className="flex justify-between text-sm">
                           <span className="text-gray-500">{r.label}</span>
@@ -1008,8 +1027,8 @@ function CatalogueInner() {
                     <div className="w-full bg-gray-50 rounded-xl p-4 text-left space-y-2">
                       {[
                         { label: 'Item',            value: selectedGift.name },
-                        { label: 'Points deducted', value: `−${selectedGift.points.toLocaleString()}`, cls: 'text-red-500 font-bold' },
-                        { label: 'New balance',     value: `${(redeem.outlet.balance - selectedGift.points).toLocaleString()} pts`, cls: 'text-[var(--brand-primary)] font-bold' },
+                        { label: 'Points deducted', value: `−${(redeem.sentPoints ?? selectedGift.points).toLocaleString()}`, cls: 'text-red-500 font-bold' },
+                        { label: 'New balance',     value: `${(redeem.outlet.balance - (redeem.sentPoints ?? selectedGift.points)).toLocaleString()} pts`, cls: 'text-[var(--brand-primary)] font-bold' },
                       ].map((r) => (
                         <div key={r.label} className="flex justify-between text-sm">
                           <span className="text-gray-500">{r.label}</span>

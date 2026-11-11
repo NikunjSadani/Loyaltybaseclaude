@@ -43,8 +43,11 @@ export function maskVoucherCodeForAudit(code: string | null | undefined): string
   return t.length >= VOUCHER_MASK_MIN_LENGTH ? `••••${t.slice(-4)}` : '••••';
 }
 
-/** What a stored (persisted) copy of the WhatsApp/SMS `code` var shows when a PIN exists. */
-export const MASKED_PIN = '••••';
+/**
+ * What a stored (persisted) copy of the WhatsApp/SMS `code` var shows in place of the PIN. Plain
+ * ASCII (no bullets): the SMS leg sends from that stored row, and a GSM-7 SMS can't carry "•".
+ */
+export const MASKED_PIN = 'see My Orders';
 
 export async function recordVoucherIssuedAudit(
   db: Db,
@@ -106,7 +109,7 @@ export async function programLabelFor(
  * {{5}} `code` = "<code> | PIN: <pin>" (single line), but NO persisted copy holds the PIN:
  *  - bell/push/SMS body = "Your <name> voucher is ready — card no. and PIN are in My Orders.";
  *  - every STORED vars copy (IN_APP/PUSH variables, the SMS queue row) gets `maskedVars.code` =
- *    "<code> | PIN: ••••" (so the dormant SMS leg, which sends from its stored row, sends it masked);
+ *    "<code> | PIN: see My Orders" (ASCII — the dormant SMS leg, which sends from its stored row, sends it masked);
  *  - the code, the PIN and the combined value are passed as secrets, so a delivery-failure reason
  *    (MessageDeliveryReceipt.failureReason, shown to CLIENT_ADMIN) and the send-failure logs are
  *    scrubbed to "••••". (Secrets are passed on the no-PIN path too — the code alone.)

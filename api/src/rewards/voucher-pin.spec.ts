@@ -3,13 +3,20 @@
  * write guard, the member notification (one `voucher_code` template, single-line code var), the
  * masked audit, the bulk-sheet column, and the vendor DTO.
  */
-import { BadRequestException, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Logger } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import * as XLSX from 'xlsx';
 import { hubbleVoucherCredentials, isSalesViewer } from './rewards.service';
 import {
+  PinRaceResolvedError,
+  canFillStoredVoucher,
+  pinRaceIsIdempotent,
+  planChannelWrite,
   planVoucherWrite,
+  rethrowUnlessIdempotentPinRace,
+  VOUCHER_CHANNEL_SWITCH_MESSAGE,
+  withPinRaceRetry,
   VOUCHER_PIN_ALREADY_SAVED_MESSAGE,
   VOUCHER_PIN_NEEDS_CODE_MESSAGE,
   VOUCHER_PIN_STATUS_MESSAGE,
@@ -114,6 +121,112 @@ describe('planVoucherWrite — PIN', () => {
     expect(() => planVoucherWrite(paid, { voucherCode: 'C-1', voucherPin: 'x'.repeat(65) })).toThrow(VOUCHER_PIN_TOO_LONG_MESSAGE);
     expect(planVoucherWrite(paid, { voucherCode: 'C-1', voucherPin: 'x'.repeat(64) }).data.voucherPin).toHaveLength(64);
   });
+  it('B5: a provider may be set ONCE on a stored code whose provider is empty (with or without a PIN)', () => {
+    const updatedAt = new Date(Date.now() - 60_000);
+    const issued = { ...paid, voucherCode: 'C-1', updatedAt };
+    const only = planVoucherWrite(issued, { voucherProvider: ' Croma ' });
+    expect(only.data).toEqual({ voucherProvider: 'Croma' });
+    expect(only).toMatchObject({ issuesNewCode: false, addsPin: false, setsProvider: true });
+    expect(only.guard).toEqual({
+      AND: [
+        { voucherCode: 'C-1' },
+        { voucherProvider: null },
+        { status: { in: ['CONFIRMED', 'PROCESSING', 'DISPATCHED', 'DELIVERED'] } },
+        { pointsDeducted: { gt: 0 } },
+        { updatedAt },
+      ],
+    });
+    const both = planVoucherWrite(issued, { voucherCode: 'C-1', voucherProvider: 'Croma', voucherPin: '42' });
+    expect(both.data).toEqual({ voucherPin: '42', voucherProvider: 'Croma' });
+    expect(both.addsPin).toBe(true);
+    expect(both.guard!.AND).toEqual(expect.arrayContaining([{ voucherPin: null }, { voucherProvider: null }]));
+    // A blank-string stored provider is pinned verbatim in the CAS.
+    expect(planVoucherWrite({ ...issued, voucherProvider: '' }, { voucherProvider: 'Croma' }).guard!.AND)
+      .toEqual(expect.arrayContaining([{ voucherProvider: '' }]));
+    // Changing a SET provider stays a replace; 'Hubble' is never hand-set; refunded orders refuse.
+    expect(() => planVoucherWrite({ ...issued, voucherProvider: 'Gifsy' }, { voucherProvider: 'Croma' })).toThrow(VOUCHER_ALREADY_ISSUED_MESSAGE);
+    expect(() => planVoucherWrite(issued, { voucherProvider: 'Hubble' })).toThrow(BadRequestException);
+    expect(() => planVoucherWrite({ ...issued, status: 'RETURNED' }, { voucherProvider: 'Croma' })).toThrow(BadRequestException);
+  });
+});
+
+describe('pinRaceIsIdempotent (B4 — lost PIN CAS on a double submit)', () => {
+  const read = { voucherCode: 'C-1' };
+  it('identical PIN on the same code → idempotent; anything else → not', () => {
+    const plan = { addsPin: true };
+    expect(pinRaceIsIdempotent(plan, read, { voucherPin: ' 42 ' }, { voucherCode: 'C-1', voucherPin: '42' })).toBe(true);
+    expect(pinRaceIsIdempotent(plan, read, { voucherCode: 'C-1', voucherPin: '42' }, { voucherCode: 'C-1', voucherPin: '42' })).toBe(true);
+    expect(pinRaceIsIdempotent(plan, read, { voucherPin: '42' }, { voucherCode: 'C-1', voucherPin: '43' })).toBe(false);
+    expect(pinRaceIsIdempotent(plan, read, { voucherPin: '42' }, { voucherCode: 'C-2', voucherPin: '42' })).toBe(false);
+    expect(pinRaceIsIdempotent(plan, read, { voucherPin: '42' }, { voucherCode: null, voucherPin: null })).toBe(false);
+    expect(pinRaceIsIdempotent(plan, read, { voucherPin: '42' }, null)).toBe(false);
+    expect(pinRaceIsIdempotent({ addsPin: false }, read, { voucherPin: '42' }, { voucherCode: 'C-1', voucherPin: '42' })).toBe(false);
+  });
+  it('withPinRaceRetry runs once more ONLY on PinRaceResolvedError (a 409 if it ever escapes)', async () => {
+    const run = jest.fn().mockRejectedValueOnce(new PinRaceResolvedError()).mockResolvedValueOnce('ok');
+    await expect(withPinRaceRetry(run)).resolves.toBe('ok');
+    expect(run).toHaveBeenCalledTimes(2);
+    const other = jest.fn().mockRejectedValue(new ConflictException('x'));
+    await expect(withPinRaceRetry(other)).rejects.toThrow('x');
+    expect(other).toHaveBeenCalledTimes(1);
+    expect(new PinRaceResolvedError()).toBeInstanceOf(ConflictException);
+  });
+  it('rethrowUnlessIdempotentPinRace: re-read errors keep the original 409', async () => {
+    const e = new ConflictException('lost');
+    await expect(
+      rethrowUnlessIdempotentPinRace(e, { addsPin: true }, read, { voucherPin: '42' }, () => {
+        throw new Error('db down');
+      }),
+    ).rejects.toBe(e);
+    await expect(
+      rethrowUnlessIdempotentPinRace(e, { addsPin: true }, read, { voucherPin: '42' }, async () => ({ voucherCode: 'C-1', voucherPin: '42' })),
+    ).rejects.toBeInstanceOf(PinRaceResolvedError);
+  });
+});
+
+describe('canFillStoredVoucher (F4 — the server-computed voucherFillable the UIs use)', () => {
+  const base = { status: 'DELIVERED', voucherCode: 'C-1', voucherProvider: 'Croma', pointsDeducted: 10, redemptionMode: 'GIFT_CARD', metadata: {} };
+  it('agrees with planVoucherWrite: true exactly when a PIN add would be accepted', () => {
+    const cases = [
+      base,
+      { ...base, status: 'RETURNED' },
+      { ...base, pointsDeducted: 0 },
+      { ...base, voucherProvider: 'Hubble' },
+      { ...base, metadata: { hubbleStatus: 'SUCCESS' } },
+      { ...base, redemptionMode: 'UPI' },
+      { ...base, voucherCode: null },
+      { ...base, status: 'CONFIRMED' },
+    ];
+    for (const c of cases) {
+      let accepted = true;
+      try {
+        accepted = planVoucherWrite({ ...c, voucherPin: null }, { voucherPin: '42' }).addsPin;
+      } catch {
+        accepted = false;
+      }
+      expect(canFillStoredVoucher(c)).toBe(accepted);
+    }
+    expect(canFillStoredVoucher(base)).toBe(true);
+  });
+});
+
+describe('planChannelWrite (B7 — no physical channel while a code is stored)', () => {
+  it('a stored code + a switch to a physical channel → 400; DIGITAL_VOUCHER / same channel / omitted → no-op', () => {
+    const coded = { voucherCode: 'C-1', fulfilmentChannel: 'DIGITAL_VOUCHER' };
+    for (const ch of ['GIFSY_WAREHOUSE', 'BRAND', 'FULFILLED_BY_AMAZON']) {
+      expect(() => planChannelWrite(coded, ch)).toThrow(VOUCHER_CHANNEL_SWITCH_MESSAGE);
+    }
+    expect(() => planChannelWrite({ voucherCode: 'C-1', fulfilmentChannel: null }, 'BRAND')).toThrow(VOUCHER_CHANNEL_SWITCH_MESSAGE);
+    expect(planChannelWrite(coded, 'DIGITAL_VOUCHER')).toBeNull();
+    expect(planChannelWrite(coded, undefined)).toBeNull();
+    // A legacy physical-channel order with a code re-sending its own channel is not a switch.
+    expect(planChannelWrite({ voucherCode: 'C-1', fulfilmentChannel: 'BRAND' }, 'BRAND')).toBeNull();
+  });
+  it('no code → the switch carries a "still no code" claim', () => {
+    expect(planChannelWrite({ voucherCode: null, fulfilmentChannel: 'DIGITAL_VOUCHER' }, 'BRAND')).toEqual({
+      OR: [{ voucherCode: null }, { voucherCode: '' }],
+    });
+  });
 });
 
 describe('notifyVoucherIssued — card + PIN via the one voucher_code template', () => {
@@ -168,8 +281,10 @@ describe('notifyVoucherIssued — card + PIN via the one voucher_code template',
     expect(call.body).toBe('Your Croma Gift Card voucher is ready — card no. and PIN are in My Orders.');
     expect(call.subject).toBe('Your voucher code');
     // Every PERSISTED copy of the vars uses the masked value.
-    expect(call.maskedVars).toEqual({ code: '6001 2200 1234 | PIN: ••••' });
+    expect(call.maskedVars).toEqual({ code: '6001 2200 1234 | PIN: see My Orders' });
     expect(JSON.stringify(call.maskedVars)).not.toMatch(/48|29/);
+    // B6: the stored / SMS value is plain ASCII (GSM-7 safe) — no bullets.
+    expect(call.maskedVars.code).toMatch(/^[ -~]+$/);
     // Secrets for the failure-reason scrub: the combined value, the code and the PIN.
     expect(call.secretValues).toEqual([
       '6001 2200 1234 | PIN: 48 29', '6001 2200\t1234', '6001 2200 1234', '48\n29', '48 29',

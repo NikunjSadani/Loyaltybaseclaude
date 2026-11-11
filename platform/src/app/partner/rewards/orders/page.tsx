@@ -130,6 +130,8 @@ function CopyButton({ value, testId, label }: { value: string; testId: string; l
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
 
   const copy = async () => {
+    // A new tap always starts fresh (a previous "Copy failed" hint is cleared).
+    setState('idle');
     try {
       if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
       await navigator.clipboard.writeText(value);
@@ -139,6 +141,8 @@ function CopyButton({ value, testId, label }: { value: string; testId: string; l
       // Clipboard blocked / unavailable (insecure context, old WebView): say so, and the value
       // itself stays user-selectable (select-all) so a long-press copies it.
       setState('failed');
+      // The failure hint clears itself after ~4 s (or on the next tap, above).
+      setTimeout(() => setState((s) => (s === 'failed' ? 'idle' : s)), 4000);
     }
   };
 

@@ -49,7 +49,7 @@ import { derivePointsCost, parseRupeesToPaise } from '@/lib/gift-catalogue';
 import { nextStatusOptions, hasIssuedVoucher, REFUND_TARGETS, HUBBLE_NEVER_PLACED_REASONS } from '@/lib/redemption-order-transitions';
 import type { GifsySettings } from '@/types';
 import { pointsForAmount, type HubbleProductLookup } from '@/lib/hubble-product';
-import { WHOLE_RUPEE_INVALID_MESSAGE, isWholeRupeeInvalid, wholeRupeeAmount, wholeRupeeInputProps } from '@/lib/whole-rupee-input';
+import { WHOLE_RUPEE_INVALID_MESSAGE, useWholeRupeeField } from '@/lib/whole-rupee-input';
 import { MaskedPin } from '@/components/operator/masked-pin';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
@@ -573,11 +573,12 @@ function ItemModal({
 
   // ── Hubble "Load from Hubble" (brand type + amounts) ──────────────────────────────
   const [hubbleLoad, setHubbleLoad] = useState<HubbleLoadState>({ status: 'idle' });
-  const [customAmount, setCustomAmount] = useState('');
-  const [customAmountCommitted, setCustomAmountCommitted] = useState(false);
-  // "750,5" / "1,2" / a pasted decimal → "Check the amount" (never shrunk to a guess).
-  const customAmountInvalid = isWholeRupeeInvalid(customAmount);
-  const customAmountInvalidShown = customAmountCommitted && customAmountInvalid;
+  // "750,5" / "1,2" / a pasted decimal → "Check the amount" (never shrunk to a guess) — the shared
+  // rule: shown only after a commit (blur / Enter / paste / an "Add amount" tap) that found the text
+  // invalid, cleared on the next edit; the button is not disabled for it.
+  const customAmountField = useWholeRupeeField();
+  const customAmount = customAmountField.value;
+  const customAmountInvalidShown = customAmountField.showInvalid;
   const hubbleId = form.hubbleProductId.trim();
   // A result is only shown for the id it was loaded for (editing the id makes it stale).
   const hubbleResult = hubbleLoad.status !== 'idle' && hubbleLoad.forId === hubbleId ? hubbleLoad : null;
@@ -618,9 +619,8 @@ function ItemModal({
     });
 
   const addCustomAmount = () => {
-    const parsed = wholeRupeeAmount(customAmount);
-    if (parsed === null) { setCustomAmountCommitted(true); return; } // "Check the amount" — not added
-    const amt = parsed;
+    if (!customAmountField.checkBeforeSubmit()) return; // "Check the amount" — not added
+    const amt = customAmountField.amount ?? 0;
     const p = hubbleData?.product;
     let err = '';
     if (!Number.isInteger(amt) || amt <= 0) err = 'Enter a whole-rupee amount';
@@ -632,8 +632,7 @@ function ItemModal({
     setForm((f) => (f.hubbleDenominations.includes(amt)
       ? f
       : { ...f, hubbleDenominations: [...f.hubbleDenominations, amt].sort((a, b) => a - b) }));
-    setCustomAmount('');
-    setCustomAmountCommitted(false);
+    customAmountField.reset();
   };
 
   /** Manual "add an amount" row (FLEXIBLE brand, or a FIXED brand whose list Hubble didn't return). */
@@ -642,7 +641,7 @@ function ItemModal({
       <div className="flex gap-2 items-center">
         <input
           value={customAmount}
-          {...wholeRupeeInputProps(setCustomAmount, { onCommit: () => setCustomAmountCommitted(true) })}
+          {...customAmountField.inputProps}
           placeholder="e.g. 500"
           aria-label="Amount to offer"
           aria-invalid={customAmountInvalidShown ? true : undefined}
@@ -652,7 +651,7 @@ function ItemModal({
         <button
           type="button"
           onClick={addCustomAmount}
-          disabled={!customAmount || customAmountInvalid}
+          disabled={!customAmount}
           className="text-xs font-medium px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50"
         >
           Add amount
@@ -1768,6 +1767,7 @@ function OrderRow({
                 // Hidden behind a per-row "Show" toggle (operators — never shown in clear by default).
                 <MaskedPin
                   pin={order.voucherPin}
+                  orderNumber={order.orderNumber}
                   className="block text-[10px] text-emerald-600"
                   testId="order-voucher-pin"
                 />
@@ -1984,7 +1984,7 @@ function OrderRow({
                       <div className="space-y-1">
                         <span className="text-xs font-medium text-gray-700">PIN (if the card has one)</span>
                         <p className="text-sm text-gray-700 px-3 py-2">
-                          <MaskedPin pin={order.voucherPin} label="PIN" testId="voucher-pin-readonly" />
+                          <MaskedPin pin={order.voucherPin} label="PIN" orderNumber={order.orderNumber} testId="voucher-pin-readonly" />
                         </p>
                       </div>
                     ) : addingPinToStoredCode ? (

@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PayoutMode, Prisma, RedemptionStatus } from '@prisma/client';
 import { noIssuedVoucherGuard } from './order-status-transition';
@@ -44,6 +44,19 @@ import { noIssuedVoucherGuard } from './order-status-transition';
  *  - identical to the stored PIN → no-op. The PIN is NEVER uniqueness/reuse-checked;
  *  - longer than VOUCHER_PIN_MAX_LENGTH → 400 (enforced HERE too, so the bulk sheet path — which
  *    never passes through the DTO — is covered).
+ *
+ * VOUCHER PROVIDER on an order that already holds a code:
+ *  - stored provider NULL / blank → it may be SET ONCE (with or without a PIN add), on the same
+ *    statuses as a PIN add, as a compare-and-set that includes `voucherProvider: null` (as read) so
+ *    two writers can't both set it. No audit / notification for a provider-only set (a label);
+ *  - stored provider non-null and different → 400 (VOUCHER_ALREADY_ISSUED_MESSAGE — a replace).
+ *
+ * LOST PIN RACE (double submit): when a PIN-add compare-and-set loses (409), the caller re-reads the
+ * row and, if the stored code is unchanged and the stored PIN now EQUALS the requested PIN, treats it
+ * as a successful no-op (pinRaceIsIdempotent) — no second audit row or notification.
+ *
+ * CHANNEL: a write that moves the fulfilment channel AWAY from DIGITAL_VOUCHER (to a physical
+ * channel) while a code is stored → 400 (VOUCHER_CHANNEL_SWITCH_MESSAGE) — see planChannelWrite.
  */
 
 export const VOUCHER_WRITABLE_STATUSES: readonly RedemptionStatus[] = [
@@ -75,11 +88,15 @@ export const OVERRIDE_REASON_MESSAGE = 'A reason is required for a manual fulfil
 export const VOUCHER_PIN_NEEDS_CODE_MESSAGE = 'Enter the card number before the PIN';
 export const VOUCHER_PIN_ALREADY_SAVED_MESSAGE =
   "A PIN is already saved for this voucher; use 'Voucher cancelled with vendor' to replace it.";
+export const VOUCHER_PROVIDER_STATUS_MESSAGE =
+  'A provider can only be added to a paid order that is confirmed, processing, dispatched or delivered.';
 export const VOUCHER_PIN_STATUS_MESSAGE =
   'A PIN can only be added to a paid order that is confirmed, processing, dispatched or delivered.';
 /** Same cap as the DTOs' @MaxLength(64) on voucherPin. */
 export const VOUCHER_PIN_MAX_LENGTH = 64;
 export const VOUCHER_PIN_TOO_LONG_MESSAGE = `The voucher PIN must be at most ${VOUCHER_PIN_MAX_LENGTH} characters.`;
+export const VOUCHER_CHANNEL_SWITCH_MESSAGE =
+  "This order has a voucher code. Use 'Voucher cancelled with vendor' before switching to a physical channel.";
 
 /** Statuses on which a PIN may be ADDED to an already-stored code (set-once). */
 export const VOUCHER_PIN_ADDABLE_STATUSES: readonly RedemptionStatus[] = [
@@ -126,6 +143,8 @@ export interface VoucherWritePlan {
    * (masked) and re-sends the member's voucher notification so the owner gets the PIN.
    */
   addsPin: boolean;
+  /** True when this write sets a provider on a stored code whose provider was empty (set-once). */
+  setsProvider?: boolean;
   /** True when this write is a manual override of a Hubble-handed order. */
   overridden: boolean;
 }
@@ -270,25 +289,41 @@ export function planVoucherWrite(
   if (order.redemptionMode && CASH_PAYOUT_MODES.has(order.redemptionMode)) {
     throw new BadRequestException(VOUCHER_CASH_MESSAGE);
   }
-  // A code change (or a provider change) on an order that already holds a code is a replace.
-  if (storedCode !== null && (codeChanges || providerChanges)) throw new BadRequestException(VOUCHER_ALREADY_ISSUED_MESSAGE);
+  // A code change on an order that already holds a code is a replace; so is changing a provider
+  // that is already set. (Setting a provider where none is stored is a set-once fill — below.)
+  if (storedCode !== null && (codeChanges || (providerChanges && storedProvider !== null))) {
+    throw new BadRequestException(VOUCHER_ALREADY_ISSUED_MESSAGE);
+  }
   if (storedCode !== null) {
-    // Only the PIN changes here (pinChanges). SET-ONCE: a stored PIN is never replaced.
-    if (storedPin !== null) throw new BadRequestException(VOUCHER_PIN_ALREADY_SAVED_MESSAGE);
+    // Only the PIN and/or an empty provider change here. SET-ONCE: a stored PIN is never replaced.
+    if (pinChanges && storedPin !== null) throw new BadRequestException(VOUCHER_PIN_ALREADY_SAVED_MESSAGE);
     if (!VOUCHER_PIN_ADDABLE_STATUSES.includes(order.status as RedemptionStatus) || !(order.pointsDeducted > 0)) {
-      throw new BadRequestException(VOUCHER_PIN_STATUS_MESSAGE);
+      throw new BadRequestException(pinChanges ? VOUCHER_PIN_STATUS_MESSAGE : VOUCHER_PROVIDER_STATUS_MESSAGE);
     }
-    data.voucherPin = pin;
-    const pinAnd: Prisma.RedemptionOrderWhereInput[] = [
+    const fillAnd: Prisma.RedemptionOrderWhereInput[] = [
       // The code exactly as read (a concurrent "Voucher cancelled with vendor" clears it → loses).
       { voucherCode: order.voucherCode },
-      // Set-once: the PIN is still empty as read (a legacy whitespace-only value pinned verbatim).
-      order.voucherPin == null ? { voucherPin: null } : { voucherPin: order.voucherPin },
-      { status: { in: [...VOUCHER_PIN_ADDABLE_STATUSES] } },
-      { pointsDeducted: { gt: 0 } },
     ];
-    if (order.updatedAt) pinAnd.push({ updatedAt: order.updatedAt });
-    return { data, guard: { AND: pinAnd }, issuesNewCode: false, addsPin: true, overridden: false };
+    if (pinChanges) {
+      data.voucherPin = pin;
+      // Set-once: the PIN is still empty as read (a legacy whitespace-only value pinned verbatim).
+      fillAnd.push(order.voucherPin == null ? { voucherPin: null } : { voucherPin: order.voucherPin });
+    }
+    if (providerChanges) {
+      data.voucherProvider = provider;
+      // Set-once: the provider is still empty exactly as read (a concurrent set loses).
+      fillAnd.push(order.voucherProvider == null ? { voucherProvider: null } : { voucherProvider: order.voucherProvider });
+    }
+    fillAnd.push({ status: { in: [...VOUCHER_PIN_ADDABLE_STATUSES] } }, { pointsDeducted: { gt: 0 } });
+    if (order.updatedAt) fillAnd.push({ updatedAt: order.updatedAt });
+    return {
+      data,
+      guard: { AND: fillAnd },
+      issuesNewCode: false,
+      addsPin: pinChanges,
+      setsProvider: providerChanges,
+      overridden: false,
+    };
   }
   // (Tenant-wide cancelled-code reuse is checked INSIDE the write tx: assertVoucherCodeReusableInTx.)
   if (!VOUCHER_WRITABLE_STATUSES.includes(order.status as RedemptionStatus) || !(order.pointsDeducted > 0)) {
@@ -327,6 +362,112 @@ export function planVoucherWrite(
   // a Hubble stamp) bumps @updatedAt → this write loses.
   if (order.updatedAt) and.push({ updatedAt: order.updatedAt });
   return { data, guard: { AND: and }, issuesNewCode: codeChanges, addsPin: false, overridden: !!override };
+}
+
+/**
+ * True when planVoucherWrite would ACCEPT a set-once fill (a PIN and/or an empty provider) on this
+ * order's STORED code: a code is stored, the order is not handed to Hubble, not cash, on a
+ * PIN-addable status and paid. Exposed to the fulfilment UIs (as `voucherFillable`) so they only
+ * offer the "Add the PIN…" box when the server would take it — one rule, no FE mirror to drift.
+ * (Whether a PIN / provider is ALREADY stored is checked by the caller per field.)
+ */
+export function canFillStoredVoucher(order: {
+  status: RedemptionStatus | string;
+  voucherCode: string | null;
+  voucherProvider?: string | null;
+  pointsDeducted?: number | null;
+  redemptionMode?: PayoutMode | string | null;
+  metadata?: Prisma.JsonValue | null;
+}): boolean {
+  if (norm(order.voucherCode) === null) return false;
+  if (hasHubbleMarkers(order)) return false;
+  if (order.redemptionMode && CASH_PAYOUT_MODES.has(order.redemptionMode)) return false;
+  if (!VOUCHER_PIN_ADDABLE_STATUSES.includes(order.status as RedemptionStatus)) return false;
+  return (order.pointsDeducted ?? 0) > 0;
+}
+
+/**
+ * LOST PIN RACE (double submit of the same PIN): the PIN-add compare-and-set matched 0 rows. Given
+ * the row RE-READ after the loss, true when the code is still the one read and the stored PIN now
+ * equals the requested PIN — the other writer saved exactly what this one wanted, so the caller
+ * treats it as a successful no-op (retrying once: the PIN is then idempotent — no audit, no
+ * notification). Anything else (a different PIN, a cleared/changed code, the row gone) stays a 409.
+ */
+export function pinRaceIsIdempotent(
+  plan: Pick<VoucherWritePlan, 'addsPin'>,
+  read: { voucherCode: string | null },
+  input: VoucherWriteInput,
+  current: { voucherCode: string | null; voucherPin?: string | null } | null | undefined,
+): boolean {
+  if (!plan.addsPin || !current) return false;
+  const wanted = norm(input.voucherPin ?? undefined);
+  const code = norm(current.voucherCode);
+  if (wanted === null || code === null) return false;
+  if (input.voucherCode !== undefined && norm(input.voucherCode) !== code) return false;
+  return code === norm(read.voucherCode) && norm(current.voucherPin) === wanted;
+}
+
+/**
+ * Thrown by a write path whose PIN-add lost to an identical concurrent PIN add (pinRaceIsIdempotent).
+ * withPinRaceRetry catches it and runs the write ONCE more — the PIN is then an idempotent no-op
+ * (no audit, no notification). It IS a 409, so if it ever escapes (a second identical race) the
+ * caller still sees the normal conflict.
+ */
+export class PinRaceResolvedError extends ConflictException {
+  constructor() {
+    super(VOUCHER_WRITE_CONFLICT_MESSAGE);
+  }
+}
+
+/**
+ * In a write path's catch: a ConflictException on a PIN-add plan → re-read the row; when the
+ * identical PIN is now stored on the same code, throw PinRaceResolvedError (→ retried as a no-op).
+ * Otherwise rethrow the original error unchanged.
+ */
+export async function rethrowUnlessIdempotentPinRace(
+  e: unknown,
+  plan: Pick<VoucherWritePlan, 'addsPin'>,
+  read: { voucherCode: string | null },
+  input: VoucherWriteInput,
+  reread: () => Promise<{ voucherCode: string | null; voucherPin?: string | null } | null>,
+): Promise<never> {
+  if (e instanceof ConflictException && !(e instanceof PinRaceResolvedError) && plan.addsPin) {
+    const current = await Promise.resolve()
+      .then(reread)
+      .catch(() => null);
+    if (pinRaceIsIdempotent(plan, read, input, current)) throw new PinRaceResolvedError();
+  }
+  throw e;
+}
+
+/** Run a manual voucher write; on PinRaceResolvedError run it exactly once more. */
+export async function withPinRaceRetry<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (e) {
+    if (e instanceof PinRaceResolvedError) return run();
+    throw e;
+  }
+}
+
+const DIGITAL_VOUCHER_CHANNEL = 'DIGITAL_VOUCHER';
+
+/**
+ * CHANNEL INVARIANT (owner rule): an order holding a voucher code can't be switched to a physical
+ * channel — the code would be orphaned on a "shipped" order. Ops must record "Voucher cancelled with
+ * vendor" (clears the code) first. Only a CHANGE of channel is checked (re-sending the stored channel
+ * is a no-op), and only a move to a non-DIGITAL_VOUCHER channel.
+ * Returns the claim to AND into the write (still no code at write time) when the write switches to a
+ * physical channel — so a code issued concurrently makes the switch lose (409) — else null.
+ */
+export function planChannelWrite(
+  order: { voucherCode: string | null; fulfilmentChannel?: string | null },
+  channel: string | null | undefined,
+): Prisma.RedemptionOrderWhereInput | null {
+  if (channel === undefined || channel === null) return null;
+  if (channel === DIGITAL_VOUCHER_CHANNEL || channel === (order.fulfilmentChannel ?? null)) return null;
+  if (norm(order.voucherCode) !== null) throw new BadRequestException(VOUCHER_CHANNEL_SWITCH_MESSAGE);
+  return noIssuedVoucherGuard(order.voucherCode);
 }
 
 /**

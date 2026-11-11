@@ -478,6 +478,16 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
         .toHaveTextContent("Hubble didn't return its amounts — enter the amounts Hubble shows for this brand");
 
       const amt = within(panel).getByLabelText('Amount to offer');
+      // F2/F6: an invalid amount never disables "Add amount" — the tap shows "Check the amount" (and
+      // adds nothing); the next keystroke hides it.
+      await userEvent.type(amt, '1,2');
+      const addBtn = within(panel).getByRole('button', { name: /add amount/i });
+      expect(addBtn).toBeEnabled();
+      await userEvent.click(addBtn);
+      expect(await within(panel).findByText('Check the amount')).toHaveAttribute('role', 'alert');
+      await userEvent.type(amt, '5');
+      expect(within(panel).queryByText('Check the amount')).toBeNull();
+      await userEvent.clear(amt);
       await userEvent.type(amt, '175'); // below the ₹200 program minimum
       await userEvent.click(within(panel).getByRole('button', { name: /add amount/i }));
       expect(await scope.findByText(/below this program's minimum voucher amount/i)).toBeInTheDocument();

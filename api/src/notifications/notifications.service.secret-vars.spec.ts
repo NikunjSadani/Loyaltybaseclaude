@@ -6,7 +6,7 @@
 // Run: npx jest src/notifications/notifications.service.secret-vars.spec.ts
 
 import { NotificationsService } from './notifications.service';
-import { scrubSecrets } from './scrub-secrets';
+import { scrubSecrets, SCRUBBED_PROVIDER_ERROR } from './scrub-secrets';
 import { Msg91Service } from './msg91.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ResolvedChannelConfig } from '../notification-templates/notification-templates.config';
@@ -54,7 +54,7 @@ const notify = (svc: NotificationsService) =>
     eventKey: 'VOUCHER_ISSUED',
     recipientPhone: '9990000001',
     vars: { ownerName: 'Asha', amount: '₹500', program: 'Bajaj Loyalty', voucherName: 'Croma', code: COMBINED },
-    maskedVars: { code: `${CODE} | PIN: ••••` },
+    maskedVars: { code: `${CODE} | PIN: see My Orders` },
     secretValues: [COMBINED, CODE, PIN],
     subject: 'Your voucher code',
     body: 'Your Croma voucher is ready — card no. and PIN are in My Orders.',
@@ -78,7 +78,7 @@ describe('NotificationsService — secret vars', () => {
     expect(queueRows.map((r) => r.channel)).toEqual(['IN_APP', 'PUSH', 'SMS']);
     for (const row of queueRows) expect(JSON.stringify(row)).not.toContain(PIN);
     const sms = queueRows.find((r) => r.channel === 'SMS')!;
-    expect(sms.variables).toMatchObject({ code: `${CODE} | PIN: ••••` });
+    expect(sms.variables).toMatchObject({ code: `${CODE} | PIN: see My Orders` });
     expect(send).toHaveBeenCalledWith(
       '9990000001',
       'voucher_code',
@@ -92,7 +92,8 @@ describe('NotificationsService — secret vars', () => {
     const { svc, receiptUpdates } = makeSvc(send);
     await expect(notify(svc)).resolves.toBeUndefined();
     const failed = receiptUpdates.find((u) => u.status === 'FAILED')!;
-    expect(failed.failureReason).toBe('Error: Failed to send WhatsApp template voucher_code: invalid param "••••" (pin ••••)');
+    // ANY secret in the reason withholds the WHOLE reason (no partial mask).
+    expect(failed.failureReason).toBe(SCRUBBED_PROVIDER_ERROR);
     expect(String(failed.failureReason)).not.toContain(CODE);
     expect(String(failed.failureReason)).not.toContain(PIN);
   });
@@ -111,9 +112,41 @@ describe('NotificationsService — secret vars', () => {
 });
 
 describe('scrubSecrets', () => {
-  it('replaces longest first, ignores blanks, leaves text without secrets unchanged', () => {
-    expect(scrubSecrets(`x ${COMBINED} y ${CODE}`, [CODE, COMBINED, '', null, '   '])).toBe('x •••• y ••••');
+  it('any secret match withholds the WHOLE text; blanks ignored; no match → unchanged', () => {
+    expect(scrubSecrets(`x ${COMBINED} y`, [CODE, COMBINED, '', null, '   '])).toBe(SCRUBBED_PROVIDER_ERROR);
+    expect(scrubSecrets(`bad pin ${PIN}.`, [PIN])).toBe(SCRUBBED_PROVIDER_ERROR);
     expect(scrubSecrets('nothing here', [CODE])).toBe('nothing here');
     expect(scrubSecrets('abc', undefined)).toBe('abc');
+    expect(scrubSecrets('abc', ['', '  ', null])).toBe('abc');
+  });
+
+  it('matches secrets as TOKENS only (not inside a longer alphanumeric run)', () => {
+    expect(scrubSecrets('ref 148291300 failed', ['4829'])).toBe('ref 148291300 failed');
+    expect(scrubSecrets('ref X4829 failed', ['4829'])).toBe('ref X4829 failed');
+    expect(scrubSecrets('pin=4829&x=1', ['4829'])).toBe(SCRUBBED_PROVIDER_ERROR);
+    expect(scrubSecrets('4829', ['4829'])).toBe(SCRUBBED_PROVIDER_ERROR);
+    expect(scrubSecrets('"4829"', ['4829'])).toBe(SCRUBBED_PROVIDER_ERROR);
+  });
+
+  it('matches the JSON-escaped and URL-encoded forms of a secret (and case-insensitively)', () => {
+    const pinWithNewline = '48\n29';
+    expect(scrubSecrets(JSON.stringify({ message: `bad ${pinWithNewline}` }), [pinWithNewline])).toBe(SCRUBBED_PROVIDER_ERROR);
+    expect(scrubSecrets('a"b\\"c', ['b"c'])).toBe(SCRUBBED_PROVIDER_ERROR);
+    expect(scrubSecrets(`url ?code=${encodeURIComponent(COMBINED)}`, [COMBINED])).toBe(SCRUBBED_PROVIDER_ERROR);
+    expect(scrubSecrets('form code=6001+2200+1234', ['6001 2200 1234'])).toBe(SCRUBBED_PROVIDER_ERROR);
+    expect(scrubSecrets('code amz-abc-123 rejected', ['AMZ-ABC-123'])).toBe(SCRUBBED_PROVIDER_ERROR);
+  });
+
+  it('accepts any input: null/undefined → "", objects JSON-stringified, Errors stringified, never throws', () => {
+    expect(scrubSecrets(null, [PIN])).toBe('');
+    expect(scrubSecrets(undefined, [PIN])).toBe('');
+    expect(scrubSecrets({ code: 400, detail: 'bad template' }, [PIN])).toBe('{"code":400,"detail":"bad template"}');
+    expect(scrubSecrets({ detail: `pin ${PIN}` }, [PIN])).toBe(SCRUBBED_PROVIDER_ERROR);
+    expect(scrubSecrets(new Error('boom'), [PIN])).toBe('Error: boom');
+    expect(scrubSecrets(42, [])).toBe('42');
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(() => scrubSecrets(circular, [PIN])).not.toThrow();
+    expect(scrubSecrets(BigInt(7), [PIN])).toBe('7');
   });
 });

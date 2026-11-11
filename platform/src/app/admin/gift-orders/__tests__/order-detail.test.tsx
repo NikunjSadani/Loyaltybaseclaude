@@ -94,7 +94,7 @@ describe('Gift order detail', () => {
   it('OD2b: a stored code is read-only; with no PIN yet the PIN box is offered once (hint) and Save sends it', async () => {
     get.mockResolvedValue({
       success: true,
-      data: orderWith({ fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: 'CARD-1111-2222', voucherProvider: 'Croma', voucherPin: null }),
+      data: orderWith({ fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: 'CARD-1111-2222', voucherProvider: 'Croma', voucherPin: null, voucherFillable: true }),
     });
     patch.mockResolvedValue({ success: true, data: {} });
     render(<GiftOrderDetailPage />);
@@ -109,6 +109,54 @@ describe('Gift order detail', () => {
     expect(patch.mock.calls[0][1]).toMatchObject({ voucherCode: 'CARD-1111-2222', voucherPin: '4455', voucherProvider: 'Croma' });
   });
 
+  it('F4: a stored code the server would NOT take a PIN on (voucherFillable false — e.g. Hubble / unpaid / closed) shows no PIN box', async () => {
+    get.mockResolvedValue({
+      success: true,
+      data: orderWith({ fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: 'CARD-1111-2222', voucherProvider: 'Hubble', voucherPin: null, voucherFillable: false }),
+    });
+    render(<GiftOrderDetailPage />);
+    await screen.findByText('DEO-26-000123');
+    expect(screen.queryByTestId('ff-voucher-pin')).toBeNull();
+    expect(screen.queryByText('Add the PIN for this card — it can be saved once')).toBeNull();
+  });
+
+  it('F5: with a stored code the physical channels are disabled with the reason (and never switched to)', async () => {
+    get.mockResolvedValue({
+      success: true,
+      data: orderWith({ fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: 'CARD-1111-2222', voucherProvider: 'Croma', voucherFillable: true }),
+    });
+    render(<GiftOrderDetailPage />);
+    await screen.findByText('DEO-26-000123');
+    const msg = "This order has a voucher code. Use 'Voucher cancelled with vendor' before switching to a physical channel.";
+    expect(screen.getByTestId('ff-channel-hint')).toHaveTextContent(msg);
+    const select = screen.getByTestId('ff-channel') as HTMLSelectElement;
+    expect(select).toHaveAttribute('aria-describedby', 'ff-channel-hint');
+    const opt = (v: string) => Array.from(select.options).find((o) => o.value === v)!;
+    expect(opt('GIFSY_WAREHOUSE').disabled).toBe(true);
+    expect(opt('DIGITAL_VOUCHER').disabled).toBe(false);
+    fireEvent.change(select, { target: { value: 'GIFSY_WAREHOUSE' } });
+    expect(select.value).toBe('DIGITAL_VOUCHER');
+    // the stored (locked) values stay on screen
+    expect(screen.getByTestId('ff-voucher-code-readonly')).toHaveTextContent('CARD-1111-2222');
+    expect(screen.getByTestId('ff-voucher-provider')).toHaveValue('Croma');
+  });
+
+  it('F1/B5: a stored code with NO provider → provider is a set-once editable box (when fillable)', async () => {
+    get.mockResolvedValue({
+      success: true,
+      data: orderWith({ fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: 'CARD-1111-2222', voucherProvider: null, voucherFillable: true }),
+    });
+    patch.mockResolvedValue({ success: true, data: {} });
+    render(<GiftOrderDetailPage />);
+    await screen.findByText('DEO-26-000123');
+    const provider = screen.getByTestId('ff-voucher-provider');
+    expect(provider).not.toHaveAttribute('readonly');
+    fireEvent.change(provider, { target: { value: 'Croma' } });
+    fireEvent.click(screen.getByTestId('ff-save'));
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+    expect(patch.mock.calls[0][1]).toMatchObject({ voucherProvider: 'Croma' });
+  });
+
   it('OD2c: a stored PIN is read-only and masked behind "Show" (default hidden)', async () => {
     get.mockResolvedValue({
       success: true,
@@ -120,7 +168,7 @@ describe('Gift order detail', () => {
     const pin = screen.getByTestId('ff-voucher-pin-readonly');
     expect(pin).toHaveTextContent('PIN ••••');
     expect(pin).not.toHaveTextContent('4455');
-    fireEvent.click(screen.getByRole('button', { name: 'Show PIN' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Show PIN for order DEO-26-000123' }));
     expect(pin).toHaveTextContent('4455');
   });
 

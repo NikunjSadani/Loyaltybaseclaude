@@ -126,11 +126,13 @@ describe('GIFVC — voucher handling', () => {
     const pin = within(row).getByTestId('order-voucher-pin');
     expect(pin).toHaveTextContent('PIN ••••');
     expect(pin).not.toHaveTextContent('482913');
-    const toggle = within(pin).getByRole('button', { name: 'Show PIN' });
+    // FIXED accessible name (never flips to "Hide"); the state is aria-pressed only.
+    const toggle = within(pin).getByRole('button', { name: 'Show PIN for order RDM-1' });
     expect(toggle).toHaveAttribute('aria-pressed', 'false');
     await userEvent.click(toggle);
     expect(pin).toHaveTextContent('PIN 482913');
-    expect(within(pin).getByRole('button', { name: 'Hide PIN' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(pin).getByRole('button', { name: 'Show PIN for order RDM-1' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(pin).queryByRole('button', { name: /hide/i })).toBeNull();
   });
 
   it('GIFVC2e: a stored code WITHOUT a PIN offers a set-once PIN box on a forward move and sends only the PIN', async () => {

@@ -15,7 +15,15 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { assertVendorPriceBounds, VendorPriceError } from './vendor-pricing.helper';
 import { applyVendorPiiRetention } from './vendor-pii.helper';
 import { transitionOrderStatusOrConflict } from '../rewards/order-status-transition';
-import { assertVoucherCodeReusableInTx, combineGuards, planVoucherWrite } from '../rewards/voucher-write-guard';
+import {
+  assertVoucherCodeReusableInTx,
+  canFillStoredVoucher,
+  combineGuards,
+  planChannelWrite,
+  planVoucherWrite,
+  rethrowUnlessIdempotentPinRace,
+  withPinRaceRetry,
+} from '../rewards/voucher-write-guard';
 import { notifyVoucherIssued, recordVoucherIssuedAudit } from '../rewards/voucher-issuance';
 import {
   parseVendorUploadBuffer,
@@ -58,6 +66,9 @@ const VENDOR_ORDER_SELECT = {
   // Same visibility as voucherCode: the vendor fulfils (and may have entered) the card.
   voucherPin: true,
   voucherProvider: true,
+  // Read only to derive `voucherFillable` (never surfaced in the vendor view).
+  pointsDeducted: true,
+  metadata: true,
   podUrl: true,
   dispatchedAt: true,
   deliveredAt: true,
@@ -557,6 +568,8 @@ export class VendorPortalService {
       voucherCode: row.voucherCode,
       voucherPin: row.voucherPin ?? null,
       voucherProvider: row.voucherProvider,
+      // The server would accept a set-once PIN / provider on the stored code (F4 — one rule).
+      voucherFillable: canFillStoredVoucher(row),
       podUrl: row.podUrl,
       delivery,
       piiWithheld: row.piiWithheld,
@@ -608,6 +621,11 @@ export class VendorPortalService {
 
   /** PATCH /vendor/orders/:id/fulfilment — vendor-scoped NON-STATUS update. */
   async updateFulfilment(user: JwtPayload, id: string, dto: VendorFulfilmentDto) {
+    // A lost PIN-add race against an IDENTICAL PIN (double submit) is retried once as a no-op.
+    return withPinRaceRetry(() => this.updateFulfilmentOnce(user, id, dto));
+  }
+
+  private async updateFulfilmentOnce(user: JwtPayload, id: string, dto: VendorFulfilmentDto) {
     const scope = await this.resolveScope(user);
     const existing = await this.prisma.redemptionOrder.findFirst({
       // Hidden while PENDING (pre-payment, LOW#6).
@@ -619,7 +637,7 @@ export class VendorPortalService {
       },
       select: {
         id: true, status: true, voucherCode: true, voucherPin: true, voucherProvider: true, pointsDeducted: true,
-        redemptionMode: true, metadata: true, updatedAt: true, rewardId: true,
+        redemptionMode: true, metadata: true, updatedAt: true, rewardId: true, fulfilmentChannel: true,
       },
     });
     if (!existing) throw new NotFoundException('Order not found');
@@ -636,6 +654,8 @@ export class VendorPortalService {
       voucherPin: dto.voucherPin,
     };
     const voucherPlan = planVoucherWrite(existing, voucherInput);
+    // CHANNEL INVARIANT: no switch to a physical channel while a voucher code is stored.
+    const channelGuard = planChannelWrite(existing, dto.fulfilmentChannel);
 
     // GUARDED write (compare-and-set): the "open + assigned to me" checks above come from a
     // read, so a concurrent close (DELIVERED/RETURNED/CANCELLED/FAILED by Gifsy, a UTR upload,
@@ -653,7 +673,7 @@ export class VendorPortalService {
           fulfilledByVendorId: scope.vendorId,
           partner: { clientId: scope.clientId },
           status: { notIn: [...VENDOR_TERMINAL_STATUSES, RedemptionStatus.PENDING] },
-          ...(voucherPlan.guard ?? {}),
+          ...(combineGuards(voucherPlan.guard, channelGuard) ?? {}),
         },
         data: {
           trackingNumber: dto.trackingNumber,
@@ -691,7 +711,11 @@ export class VendorPortalService {
           event: 'VOUCHER_PIN_ADDED_MANUAL',
         });
       }
-    });
+    }).catch((e: unknown) =>
+      rethrowUnlessIdempotentPinRace(e, voucherPlan, existing, voucherInput, () =>
+        this.prisma.redemptionOrder.findUnique({ where: { id }, select: { voucherCode: true, voucherPin: true } }),
+      ),
+    );
     // The member gets their code, exactly as the Gifsy transition path sends it (and again, with
     // the PIN, when a PIN is added later to the issued code).
     if (voucherPlan.issuesNewCode || voucherPlan.addsPin) await this.notifyIssued(id, scope.clientId);
@@ -714,6 +738,11 @@ export class VendorPortalService {
    * NEVER touches points/valuePaise/wallet.
    */
   async transition(user: JwtPayload, id: string, dto: VendorTransitionDto) {
+    // A lost PIN-add race against an IDENTICAL PIN (double submit) is retried once as a no-op.
+    return withPinRaceRetry(() => this.transitionOnce(user, id, dto));
+  }
+
+  private async transitionOnce(user: JwtPayload, id: string, dto: VendorTransitionDto) {
     const scope = await this.resolveScope(user);
     const order = await this.prisma.redemptionOrder.findFirst({
       // Hidden while PENDING (pre-payment, LOW#6).
@@ -776,6 +805,8 @@ export class VendorPortalService {
       voucherPin: dto.voucherPin,
     };
     const voucherPlan = planVoucherWrite(order, voucherInput);
+    // CHANNEL INVARIANT: no switch to a physical channel while a voucher code is stored.
+    const channelGuard = planChannelWrite(order, dto.fulfilmentChannel);
 
     // BUG-1: a DIGITAL_VOUCHER order cannot be marked DELIVERED without a voucher code —
     // the member would have nothing to redeem. Check the EFFECTIVE channel/code (the value
@@ -818,7 +849,7 @@ export class VendorPortalService {
       await transitionOrderStatusOrConflict(tx, {
         orderId: id,
         expectedFrom: fromStatus,
-        extraGuard: combineGuards({ fulfilledByVendorId: scope.vendorId }, voucherPlan.guard),
+        extraGuard: combineGuards({ fulfilledByVendorId: scope.vendorId }, voucherPlan.guard, channelGuard),
         toStatus,
         data,
         changedById: user.sub,
@@ -845,14 +876,19 @@ export class VendorPortalService {
           event: 'VOUCHER_PIN_ADDED_MANUAL',
         });
       }
-    });
-    const voucherNotified = voucherPlan.issuesNewCode || voucherPlan.addsPin;
-    if (voucherNotified) await this.notifyIssued(id, scope.clientId);
+    }).catch((e: unknown) =>
+      rethrowUnlessIdempotentPinRace(e, voucherPlan, order, voucherInput, () =>
+        this.prisma.redemptionOrder.findUnique({ where: { id }, select: { voucherCode: true, voucherPin: true } }),
+      ),
+    );
+    // Re-send the voucher on a NEW code or a PIN added to the issued code.
+    if (voucherPlan.issuesNewCode || voucherPlan.addsPin) await this.notifyIssued(id, scope.clientId);
 
     // Member notification on the customer-visible milestones (same path as Gifsy) — unless this
-    // same move just issued the code, whose VOUCHER_ISSUED message supersedes it (as on Gifsy).
+    // same move just issued a NEW code, whose VOUCHER_ISSUED message supersedes it (as on Gifsy).
+    // A PIN added to an already-issued code does NOT suppress it: the member gets both.
     if (
-      !voucherNotified &&
+      !voucherPlan.issuesNewCode &&
       (toStatus === RedemptionStatus.DISPATCHED || toStatus === RedemptionStatus.DELIVERED)
     ) {
       const partner = await this.prisma.channelPartner.findFirst({

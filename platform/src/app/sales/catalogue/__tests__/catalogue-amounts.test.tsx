@@ -100,7 +100,17 @@ describe('sales catalogue — redemption amounts', () => {
     await user.paste('1,250.75');
     expect(input.value).toBe('1,250.75'); // never shrunk
     expect(screen.getByRole('alert')).toHaveTextContent('Check the amount');
-    expect(screen.getByRole('button', { name: /Send OTP/ })).toBeDisabled();
+    // F6: the button is NOT disabled for an invalid amount — a tap shows the reason, sends nothing.
+    const send = screen.getByRole('button', { name: /Send OTP/ });
+    expect(send).toBeEnabled();
+    // F2: the next keystroke hides the message (never shown mid-typing)…
+    await user.type(input, '5');
+    expect(input.value).toBe('1,250.755'); // F7a: a flagged text is edited verbatim
+    expect(screen.queryByRole('alert')).toBeNull();
+    // …and a tap on Send OTP commits: the message is back, nothing is sent.
+    fireEvent.click(send);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the amount');
+    expect(posts).toHaveLength(0);
     await user.clear(input);
     await user.type(input, '750.5');
     expect(input.value).toBe('750');
@@ -108,6 +118,34 @@ describe('sales catalogue — redemption amounts', () => {
     fireEvent.click(screen.getByRole('button', { name: /Send OTP/ }));
     await waitFor(() => expect(posts).toHaveLength(1));
     expect(posts[0]).toMatchObject({ rewardId: 'amz-1', amount: 750 });
+  });
+
+  it('F3: the success screen uses the SERVER requiredPoints frozen at OTP-send (points deducted + new balance, en-IN ₹)', async () => {
+    const posts: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const ok = (data: unknown) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ success: true, data }) });
+      if (url.includes('/api/rewards/redeem-for-outlet/confirm')) { posts.push(url); return ok({ orderId: 'ord-1', status: 'CONFIRMED', message: 'ok' }); }
+      if (url.includes('/api/rewards/redeem-for-outlet')) {
+        posts.push(String(init?.body));
+        return ok({ orderId: 'ord-1', orderNumber: 'BAJ-26-000001', requiredPoints: 2468 });
+      }
+      if (url.includes('/api/rewards/catalog')) return ok({ items: [FREE_ITEM] });
+      if (url.includes('/api/sales/outlets')) return ok({ outlets: [OUTLET] });
+      return ok({});
+    }));
+    await openConfirm(/Amazon Any/);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('Amount to redeem (₹)'), '1234');
+    fireEvent.click(screen.getByRole('button', { name: /Send OTP/ }));
+    await screen.findByText('OTP sent to outlet');
+    const otp = document.querySelector('input[maxlength="6"]') as HTMLInputElement;
+    fireEvent.change(otp, { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: /Verify & Redeem/ }));
+    expect(await screen.findByText('Redemption Successful!')).toBeInTheDocument();
+    expect(screen.getByText('₹1,234')).toBeInTheDocument();
+    expect(screen.getByText('−2,468 pts')).toBeInTheDocument();
+    expect(screen.getByText(`${(50000 - 2468).toLocaleString('en-IN')} pts`)).toBeInTheDocument();
   });
 
   it('SA4: after the OTP is sent the ORDER amount is shown; "Change amount" returns to an unlocked field', async () => {

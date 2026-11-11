@@ -43,6 +43,8 @@ import {
   buildFulfilmentPayload,
   resetNonApplicableFields,
   validateFulfilment,
+  isChannelSwitchBlocked,
+  VOUCHER_CHANNEL_SWITCH_MESSAGE,
   nextStatusOptions,
   isTerminalStatus,
   confirmCopyFor,
@@ -282,13 +284,25 @@ function FulfilmentForm({
 
   // Changing the channel between physical and digital-voucher clears the fields that no
   // longer apply, so a stale tracking number never rides along with a new voucher code.
-  const setChannel = (v: string) =>
-    setDraft((d) => resetNonApplicableFields({ ...d, fulfilmentChannel: v }));
+  // A stored voucher code blocks a switch to a physical channel (the backend 400s it too); back on
+  // DIGITAL_VOUCHER the STORED (locked) values are restored — a round-trip never blanks them.
+  const setChannel = (v: string) => {
+    if (isChannelSwitchBlocked(order, v)) {
+      setValidationErr(VOUCHER_CHANNEL_SWITCH_MESSAGE);
+      return;
+    }
+    setDraft((d) => resetNonApplicableFields({ ...d, fulfilmentChannel: v }, order));
+  };
+  const channelLocked = GIFT_FULFILMENT_CHANNELS.some((c) => isChannelSwitchBlocked(order, c.value));
+  // Provider: locked once a code is stored, UNLESS the stored provider is empty and the server
+  // still takes a set-once fill (voucherFillable). A locked value is read from the STORED order.
+  const providerLocked =
+    !!order.voucherCode?.trim() && (!!order.voucherProvider?.trim() || !order.voucherFillable);
 
   const voucher = isVoucherChannel(draft.fulfilmentChannel);
 
   const save = async () => {
-    const v = validateFulfilment(draft);
+    const v = validateFulfilment(draft, order);
     if (!v.ok) {
       setValidationErr(v.error ?? 'Invalid input');
       return;
@@ -318,13 +332,19 @@ function FulfilmentForm({
             value={draft.fulfilmentChannel}
             onChange={(e) => setChannel(e.target.value)}
             data-testid="ff-channel"
+            aria-describedby={channelLocked ? 'ff-channel-hint' : undefined}
             className={`${inputCls} appearance-none bg-white`}
           >
             <option value="">— Select channel —</option>
             {GIFT_FULFILMENT_CHANNELS.map((c) => (
-              <option key={c.value} value={c.value}>{c.label}</option>
+              <option key={c.value} value={c.value} disabled={isChannelSwitchBlocked(order, c.value)}>{c.label}</option>
             ))}
           </select>
+          {channelLocked && (
+            <p id="ff-channel-hint" className="text-[11px] text-gray-500" data-testid="ff-channel-hint">
+              {VOUCHER_CHANNEL_SWITCH_MESSAGE}
+            </p>
+          )}
         </div>
         <div className="space-y-1">
           <label className="text-xs font-medium text-gray-700">
@@ -332,13 +352,13 @@ function FulfilmentForm({
           </label>
           {voucher ? (
             <input
-              value={draft.voucherProvider}
+              value={providerLocked ? (order.voucherProvider ?? '') : draft.voucherProvider}
               onChange={(e) => set('voucherProvider', e.target.value)}
               placeholder="e.g. Amazon Pay"
               data-testid="ff-voucher-provider"
               // Locked with the stored code: a provider change on an issued voucher is a replace (400).
-              readOnly={!!order.voucherCode?.trim()}
-              aria-readonly={!!order.voucherCode?.trim() || undefined}
+              readOnly={providerLocked}
+              aria-readonly={providerLocked || undefined}
               className={`${inputCls} read-only:bg-gray-50 read-only:text-gray-600`}
             />
           ) : (
@@ -358,6 +378,8 @@ function FulfilmentForm({
         <VoucherFulfilmentFields
           storedCode={order.voucherCode}
           storedPin={order.voucherPin}
+          fillable={order.voucherFillable === true}
+          orderNumber={order.orderNumber}
           draft={draft}
           set={set}
           inputCls={inputCls}

@@ -169,7 +169,7 @@ describe('Vendor order detail', () => {
     expect(screen.queryByTestId('ff-voucher-code')).toBeNull();
     expect(screen.queryByTestId('ff-voucher-pin')).toBeNull();
     expect(screen.getByTestId('ff-voucher-pin-readonly')).toHaveTextContent('PIN ••••');
-    expect(screen.getByRole('button', { name: 'Show PIN' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: 'Show PIN for order DEO-26-000123' })).toHaveAttribute('aria-pressed', 'false');
   });
 
   it('OD4: a PROCESSING order offers ONLY Dispatched (no cancel/return/failed)', async () => {

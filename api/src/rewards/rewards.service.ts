@@ -40,6 +40,7 @@ import {
   transitionOrderStatusOrConflict,
 } from './order-status-transition';
 import {
+  canFillStoredVoucher,
   combineGuards,
   hasHubbleMarkers,
   hashVoucherCode,
@@ -47,9 +48,12 @@ import {
   lockVoucherCode,
   isHubbleIssuedCode,
   isHubbleNeverPlaced,
+  planChannelWrite,
   planVoucherWrite,
+  rethrowUnlessIdempotentPinRace,
   VOUCHER_WRITE_CONFLICT_MESSAGE,
   VoucherWriteOptions,
+  withPinRaceRetry,
 } from './voucher-write-guard';
 import {
   notifyVoucherIssued as notifyVoucherIssuedShared,
@@ -1019,6 +1023,11 @@ export class RewardsService {
    * fulfilment upload reuses this same non-status write.
    */
   async updateOrder(user: JwtPayload, id: string, dto: UpdateOrderDto) {
+    // A lost PIN-add race against an IDENTICAL PIN (double submit) is retried once as a no-op.
+    return withPinRaceRetry(() => this.updateOrderOnce(user, id, dto));
+  }
+
+  private async updateOrderOnce(user: JwtPayload, id: string, dto: UpdateOrderDto) {
     // GIFSY-only is enforced by @Roles on the controller; tenant scope re-checked
     // here by partner.clientId (§12). platformWide OWNER → cross-tenant console.
     const scope = tenantScope(user);
@@ -1044,6 +1053,9 @@ export class RewardsService {
       voucherInput,
       this.voucherWriteOptions(user, dto),
     );
+    // CHANNEL INVARIANT: no switch to a physical channel while a voucher code is stored (400); a
+    // switch on a code-less order carries a "still no code" claim (a concurrent issue → 409).
+    const channelGuard = planChannelWrite(existingOrder, dto.fulfilmentChannel);
     const data = {
       trackingNumber: dto.trackingNumber,
       trackingUrl: dto.trackingUrl,
@@ -1056,14 +1068,14 @@ export class RewardsService {
       podUrl: dto.podUrl,
     };
 
-    if (!voucherPlan.guard) {
+    const guard = combineGuards(voucherPlan.guard, channelGuard);
+    if (!guard) {
       const order = await this.prisma.redemptionOrder.update({ where: { id }, data });
       return { order };
     }
     // Setting a NEW code: compare-and-set on "no code stored + paid open order + row version" so a
     // concurrent refund / vendor-cancel / other write makes this lose (409) instead of overwriting.
     // The issuance audit row lands in the SAME tx (no code without its audit).
-    const guard = voucherPlan.guard;
     const order = await this.prisma.$transaction(async (tx) => {
       // Tenant-wide reuse check INSIDE the tx under a (tenant, code) advisory lock — a concurrent
       // "Voucher cancelled with vendor" of the same code can't slip between check and write.
@@ -1096,7 +1108,11 @@ export class RewardsService {
         });
       }
       return tx.redemptionOrder.findUniqueOrThrow({ where: { id } });
-    });
+    }).catch((e: unknown) =>
+      rethrowUnlessIdempotentPinRace(e, voucherPlan, existingOrder, voucherInput, () =>
+        this.prisma.redemptionOrder.findUnique({ where: { id }, select: { voucherCode: true, voucherPin: true } }),
+      ),
+    );
     // Same member notification transitionOrder sends when a code is first issued — under the
     // ORDER's tenant (branding / templates), never the caller's. A PIN added later to an issued
     // code re-sends it so the owner receives the PIN.
@@ -2712,6 +2728,12 @@ export class RewardsService {
    * Inline voucher/tracking entry rides on this call (per-order fulfilment).
    */
   async transitionOrder(user: JwtPayload, id: string, dto: TransitionOrderDto) {
+    // A lost PIN-add race against an IDENTICAL PIN (double submit) is retried once: the PIN is then
+    // an idempotent no-op, and the status move either already happened (→ the skipped path) or runs.
+    return withPinRaceRetry(() => this.transitionOrderOnce(user, id, dto));
+  }
+
+  private async transitionOrderOnce(user: JwtPayload, id: string, dto: TransitionOrderDto) {
     // Tenant scope by partner.clientId (§12 — partner.user.clientId misses login-less
     // sibling outlets). platformWide (un-assumed OWNER) → cross-tenant, which powers
     // the Gifsy fulfilment console; an assumed operator is pinned to that tenant.
@@ -2848,6 +2870,8 @@ export class RewardsService {
       voucherInput,
       this.voucherWriteOptions(user, dto),
     );
+    // CHANNEL INVARIANT: no switch to a physical channel while a voucher code is stored.
+    const channelGuard = planChannelWrite(order, dto.fulfilmentChannel);
 
     // BUG-1 — a DIGITAL_VOUCHER order cannot be marked DELIVERED without an actual voucher
     // code to deliver. The effective channel is the stored one unless this transition
@@ -2900,7 +2924,11 @@ export class RewardsService {
         expectedFrom: fromStatus,
         // A refund only lands if NO voucher code is on the row at write time (a code set
         // concurrently after our read → 0 rows → 409, no refund).
-        extraGuard: combineGuards(isRefundTarget ? noIssuedVoucherGuard(order.voucherCode) : null, voucherPlan.guard),
+        extraGuard: combineGuards(
+          isRefundTarget ? noIssuedVoucherGuard(order.voucherCode) : null,
+          voucherPlan.guard,
+          channelGuard,
+        ),
         toStatus,
         data,
         changedById: user.sub,
@@ -2952,13 +2980,19 @@ export class RewardsService {
         }
       }
       return moved;
-    });
+    }).catch((e: unknown) =>
+      rethrowUnlessIdempotentPinRace(e, voucherPlan, order, voucherInput, () =>
+        this.prisma.redemptionOrder.findUnique({ where: { id }, select: { voucherCode: true, voucherPin: true } }),
+      ),
+    );
 
     // A voucher code assigned on THIS transition (null → set) — computed before the milestone notify
-    // so a single action never fires BOTH a generic milestone bell AND the VOUCHER_ISSUED code bell.
-    // A set-once PIN added to an already-issued code counts too: the member is re-sent the voucher
-    // (now with the PIN), which supersedes the milestone bell exactly like a new code.
-    const voucherNewlyIssued = (!order.voucherCode && !!updated.voucherCode) || voucherPlan.addsPin;
+    // so a single action never fires BOTH a generic milestone bell AND the VOUCHER_ISSUED code bell
+    // (the code message supersedes the milestone). A set-once PIN ADDED to an already-issued code is
+    // different: the code was already delivered, so the member gets BOTH the re-sent voucher (now
+    // with the PIN) AND the normal milestone (with tracking) for the status change.
+    const voucherNewlyIssued = !order.voucherCode && !!updated.voucherCode;
+    const voucherResent = voucherNewlyIssued || voucherPlan.addsPin;
 
     // Notify the partner on the customer-visible milestones — UNLESS this same transition just issued
     // the voucher code, in which case the VOUCHER_ISSUED message below supersedes the generic milestone.
@@ -2997,9 +3031,10 @@ export class RewardsService {
     }
 
     // Manual voucher fulfilment: a code was JUST assigned (null → set) on this transition, at
-    // whatever status ops issues it. Send the owner the code (bell + WhatsApp `voucher_code`).
-    // Fires once (guarded on the prior value) and only for the outlet owner. Best-effort.
-    if (voucherNewlyIssued) {
+    // whatever status ops issues it — or a PIN was just added to the issued code. Send the owner the
+    // code (bell + WhatsApp `voucher_code`). Fires once (guarded on the prior value / the set-once
+    // PIN claim) and only for the outlet owner. Best-effort.
+    if (voucherResent) {
       await this.notifyVoucherIssued(id, orderClientId);
     }
 
@@ -3548,6 +3583,9 @@ export class RewardsService {
       voucherCode: order.voucherCode,
       voucherPin: order.voucherPin,
       voucherProvider: order.voucherProvider,
+      // The server would accept a set-once PIN / provider on the stored code (F4 — one rule; the
+      // console offers the "Add the PIN…" box only then).
+      voucherFillable: canFillStoredVoucher(order),
       fulfilledByVendorId: order.fulfilledByVendorId,
       // The route already requires rewards:manage_orders (= canSeeFullVoucherCode); defence in
       // depth: any other operator gets neither the card number nor the PIN.

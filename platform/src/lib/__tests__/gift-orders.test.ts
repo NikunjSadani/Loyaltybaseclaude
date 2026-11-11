@@ -19,6 +19,8 @@ import {
   emptyGiftOrderFilters,
   buildFulfilmentPayload,
   resetNonApplicableFields,
+  isChannelSwitchBlocked,
+  VOUCHER_CHANNEL_SWITCH_MESSAGE,
   validateFulfilment,
   emptyFulfilmentDraft,
   isVoucherChannel,
@@ -188,6 +190,29 @@ describe('channel toggle field reset', () => {
     expect(out.voucherProvider).toBe('');
     expect(out.trackingNumber).toBe('TRK1');
     expect(out.logisticsPartner).toBe('Delhivery');
+  });
+
+  it('F1: a channel round-trip restores the STORED (locked) code / provider / PIN — never blanks them', () => {
+    const stored = { voucherCode: 'CARD-1', voucherProvider: 'Croma', voucherPin: '4821' };
+    const away = resetNonApplicableFields({ ...physical, voucherCode: 'CARD-1' }, stored);
+    expect(away.voucherCode).toBe('');
+    const back = resetNonApplicableFields({ ...away, fulfilmentChannel: 'DIGITAL_VOUCHER' }, stored);
+    expect(back).toMatchObject({ voucherCode: 'CARD-1', voucherProvider: 'Croma', voucherPin: '4821' });
+  });
+
+  it('F1: the PIN rule counts a STORED code as "card number present"; F5: a coded order cannot switch to physical', () => {
+    const d = { ...emptyFulfilmentDraft(), fulfilmentChannel: 'DIGITAL_VOUCHER', voucherPin: '4821' };
+    expect(validateFulfilment(d).ok).toBe(false);
+    expect(validateFulfilment(d, { voucherCode: 'CARD-1', fulfilmentChannel: 'DIGITAL_VOUCHER' }).ok).toBe(true);
+    const stored = { voucherCode: 'CARD-1', fulfilmentChannel: 'DIGITAL_VOUCHER' };
+    expect(isChannelSwitchBlocked(stored, 'GIFSY_WAREHOUSE')).toBe(true);
+    expect(isChannelSwitchBlocked(stored, 'DIGITAL_VOUCHER')).toBe(false);
+    expect(isChannelSwitchBlocked({ voucherCode: null, fulfilmentChannel: 'DIGITAL_VOUCHER' }, 'BRAND')).toBe(false);
+    // A legacy physical order holding a code re-saving its own channel is not a switch.
+    expect(isChannelSwitchBlocked({ voucherCode: 'CARD-1', fulfilmentChannel: 'BRAND' }, 'BRAND')).toBe(false);
+    expect(validateFulfilment({ ...emptyFulfilmentDraft(), fulfilmentChannel: 'BRAND' }, stored)).toEqual({
+      ok: false, error: VOUCHER_CHANNEL_SWITCH_MESSAGE,
+    });
   });
 
   it('a cleared shipping field then rides the payload as null (backend clears it)', () => {

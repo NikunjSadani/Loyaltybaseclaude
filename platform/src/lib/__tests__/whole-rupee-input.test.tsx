@@ -220,7 +220,7 @@ describe('WR — wholeRupeeInputProps', () => {
     expect(el.value).toBe('7');
   });
 
-  it('RC-L3: inserting "1.5" over a selected "500" splices at the selection (paste → invalid; typed → "1")', async () => {
+  it('RC-L3: inserting "1.5" over a selected "500" splices at the selection (paste or a multi-char insert → kept + invalid)', async () => {
     render(<Harness />);
     const el = screen.getByLabelText('amt') as HTMLInputElement;
     fireEvent.change(el, { target: { value: '500' } });
@@ -233,7 +233,73 @@ describe('WR — wholeRupeeInputProps', () => {
     fireEvent.change(el, { target: { value: '500' } });
     el.setSelectionRange(0, 3);
     fireEvent(el, new InputEvent('beforeinput', { data: '1.5', inputType: 'insertText', bubbles: true, cancelable: true }));
-    expect(el.value).toBe('1'); // beforeinput path
+    expect(el.value).toBe('1.5'); // F7: a multi-char insert carrying "." is a paste — never truncated to "1"
+    expect(wholeRupeeAmount(el.value)).toBeNull();
+  });
+
+  it.each([
+    ['₹1,250.00', '1250'],
+    ['1,250.0', '1250'],
+    ['1,250/-', '1250'],
+    ['Rs 1250/-', '1250'],
+    ['Rs. 1,250.00/-', '1250'],
+  ])('F7c: pasted %s → accepted as whole %s', async (text, out) => {
+    render(<Harness />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    await userEvent.click(el);
+    await userEvent.paste(text);
+    expect(el.value).toBe(out);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it.each(['1,250.5', '1,250.000', '1.05', '1250/-x'])('F7c: %s stays invalid', (text) => {
+    expect(wholeRupeeAmount(text)).toBeNull();
+  });
+
+  it('F7a: a FLAGGED invalid text is edited verbatim — typing "5" / "." / "," never rewrites or shrinks it', async () => {
+    render(<Harness />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    await userEvent.click(el);
+    await userEvent.paste('750.5');
+    expect(el.value).toBe('750.5');
+    await userEvent.type(el, '5');
+    expect(el.value).toBe('750.55'); // NOT "750" / "7505"
+    await userEvent.type(el, '.');
+    expect(el.value).toBe('750.55.');
+    await userEvent.type(el, ',');
+    expect(el.value).toBe('750.55.,');
+    expect(wholeRupeeAmount(el.value)).toBeNull();
+    // Android change path while flagged: kept verbatim too.
+    fireEvent.change(el, { target: { value: '750.555' } });
+    expect(el.value).toBe('750.555');
+  });
+
+  it('F7a: the flag ends once the text is valid — then normal typing rules resume', async () => {
+    render(<Harness />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    await userEvent.type(el, '1,2');
+    fireEvent.blur(el); // committed invalid → flagged
+    expect(el.dataset.invalid).toBe('1');
+    await userEvent.type(el, '50');
+    expect(el.value).toBe('1,250');
+    expect(el.dataset.invalid).toBeUndefined();
+    await userEvent.type(el, '.9');
+    expect(el.value).toBe('1,250'); // "." blocked again (fraction dropped)
+  });
+
+  it('F7b (Android onChange): a "." typed MID-value is rejected (previous value kept), never truncated', () => {
+    render(<Harness />);
+    const el = screen.getByLabelText('amt') as HTMLInputElement;
+    for (const v of ['1', '12', '125', '1250']) fireEvent.change(el, { target: { value: v } });
+    fireEvent.keyDown(el, { key: 'Unidentified' });
+    fireEvent.change(el, { target: { value: '12.50' } });
+    expect(el.value).toBe('1250'); // NOT "12"
+    expect(el.dataset.fraction).toBeUndefined();
+    // a "." appended at the end is also rejected (value kept) and swallows the next digit
+    fireEvent.change(el, { target: { value: '1250.' } });
+    expect(el.value).toBe('1250');
+    fireEvent.change(el, { target: { value: '12505' } });
+    expect(el.value).toBe('1250');
   });
 
   it('WR6 (Android, keydown "Unidentified"): change events "750." then "7505" → stays 750; a deletion ends the fraction', () => {

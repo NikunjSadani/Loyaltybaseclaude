@@ -264,16 +264,45 @@ export interface FulfilmentValidation {
   error?: string;
 }
 
+/** What is already STORED on the order (the server's truth — not the editable draft). */
+export interface StoredVoucher {
+  voucherCode?: string | null;
+  voucherPin?: string | null;
+  voucherProvider?: string | null;
+}
+
+const hasText = (v: string | null | undefined) => typeof v === 'string' && v.trim() !== '';
+
+/** Same message the backend returns (voucher-write-guard VOUCHER_CHANNEL_SWITCH_MESSAGE). */
+export const VOUCHER_CHANNEL_SWITCH_MESSAGE =
+  "This order has a voucher code. Use 'Voucher cancelled with vendor' before switching to a physical channel.";
+
+/**
+ * True when switching this order to `channel` is refused because a voucher code is STORED (mirrors
+ * the backend planChannelWrite: only a move AWAY from DIGITAL_VOUCHER to a physical channel).
+ */
+export function isChannelSwitchBlocked(stored: StoredVoucher & { fulfilmentChannel?: string | null }, channel: string): boolean {
+  if (!hasText(stored.voucherCode)) return false;
+  if (!channel || isVoucherChannel(channel)) return false;
+  return channel !== (stored.fulfilmentChannel ?? '');
+}
+
 /**
  * A fulfilment update needs at minimum a channel. A physical channel should carry a
  * tracking number OR a supplier order ref; a digital voucher should carry a code. We
  * WARN (not hard-block beyond the channel) so an operator can save a channel first
  * and add tracking later — the backend remains the source of truth.
+ * `stored` = the order as saved: a STORED code counts as "card number present" for the PIN rule,
+ * and a switch to a physical channel while a code is stored is refused (as the backend does).
  */
-export function validateFulfilment(d: FulfilmentDraft): FulfilmentValidation {
+export function validateFulfilment(
+  d: FulfilmentDraft,
+  stored: StoredVoucher & { fulfilmentChannel?: string | null } = {},
+): FulfilmentValidation {
   if (!d.fulfilmentChannel) return { ok: false, error: 'Pick a fulfilment channel.' };
-  // Mirrors the backend (voucher-write-guard): a PIN needs its card number.
-  if (d.voucherPin.trim() && !d.voucherCode.trim()) {
+  if (isChannelSwitchBlocked(stored, d.fulfilmentChannel)) return { ok: false, error: VOUCHER_CHANNEL_SWITCH_MESSAGE };
+  // Mirrors the backend (voucher-write-guard): a PIN needs its card number (typed or stored).
+  if (d.voucherPin.trim() && !d.voucherCode.trim() && !hasText(stored.voucherCode)) {
     return { ok: false, error: 'Enter the card number before the PIN' };
   }
   return { ok: true };
@@ -284,11 +313,19 @@ export function validateFulfilment(d: FulfilmentDraft): FulfilmentValidation {
  * non-applicable fields must be cleared so we never persist (and show the member) a
  * stale tracking number under a new voucher code, or vice-versa. Pure so the toggle
  * handler + a unit test can share it.
+ * Back on DIGITAL_VOUCHER, the STORED (locked) voucher values are restored from `stored` — a
+ * channel round-trip never blanks a locked code / provider / PIN.
  */
-export function resetNonApplicableFields(d: FulfilmentDraft): FulfilmentDraft {
+export function resetNonApplicableFields(d: FulfilmentDraft, stored: StoredVoucher = {}): FulfilmentDraft {
   if (isVoucherChannel(d.fulfilmentChannel)) {
-    // Digital voucher ships no parcel — drop all shipping fields.
-    return { ...d, logisticsPartner: '', trackingNumber: '', trackingUrl: '', supplierOrderRef: '' };
+    // Digital voucher ships no parcel — drop all shipping fields; restore the stored voucher values.
+    return {
+      ...d,
+      logisticsPartner: '', trackingNumber: '', trackingUrl: '', supplierOrderRef: '',
+      ...(hasText(stored.voucherCode) ? { voucherCode: stored.voucherCode!.trim() } : {}),
+      ...(hasText(stored.voucherProvider) ? { voucherProvider: stored.voucherProvider!.trim() } : {}),
+      ...(hasText(stored.voucherPin) ? { voucherPin: stored.voucherPin!.trim() } : {}),
+    };
   }
   // A physical channel carries no voucher — drop voucher fields.
   return { ...d, voucherCode: '', voucherPin: '', voucherProvider: '' };
@@ -367,6 +404,11 @@ export interface GiftOrderDetail extends GiftOrderSummary {
   /** Card PIN (card number + PIN gift cards) — fulfilling operators / the fulfilling vendor only. */
   voucherPin?: string | null;
   voucherProvider?: string | null;
+  /**
+   * Server-computed: a set-once PIN / provider may still be added to the STORED code (paid, on an
+   * addable status, not Hubble, not cash). The "Add the PIN…" box is offered only when true.
+   */
+  voucherFillable?: boolean;
   logisticsPartner?: string | null;
   /** Internal "fulfilled by" — ops/tenant only, never shown on the member tile. */
   fulfilledByVendorId?: string | null;
