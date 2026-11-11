@@ -98,10 +98,11 @@ describe('xlsxRows over the re-sequenced stream', () => {
     }
   });
 
-  it('documents the exceljs trap the re-sequencer avoids: raw out-of-order input fails', async () => {
-    // exceljs defers the sheet to a temp file and then crashes (or would OOM on a big file).
-    await expect(readDirect(sheetjsWorkbook([['Data', ROWS]]))).rejects.toBeDefined();
-  });
+  // Removed 2026-11-11: a test asserting that RAW out-of-order input makes exceljs FAIL. That is the library's
+  // own behaviour and it is platform-dependent — it rejects on Windows but resolved on the Linux CI runner, which
+  // turned the suite red and skipped the staging deploy. Our code never feeds exceljs raw out-of-order input (it
+  // always goes through the re-sequencer, covered by the tests above), so the trap is documented in xlsx-zip.ts
+  // instead of being asserted here.
 
   it('picks the FIRST sheet in workbook order by default, or the named sheet (case/space-insensitive)', async () => {
     const buf = await exceljsWorkbook([
