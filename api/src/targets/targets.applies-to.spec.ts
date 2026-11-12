@@ -465,6 +465,137 @@ function rawWrites(prisma: { $executeRaw: jest.Mock }) {
   });
 }
 
+describe('TargetsService — deleteAchievementBatch keeps stored out-of-scope values (OWNER DECISION)', () => {
+  const MONTH = '2026-10';
+  const scopedKpis = () => [kpiRow(KPIS[0]), kpiRow(KPIS[2], { programs: ['Gold'] })];
+
+  /** prisma mock whose interactive $transaction runs the callback with the same mock (tx = prisma). */
+  function setup(opts: {
+    kpis: unknown[];
+    owned?: string[];
+    rows?: Array<{ outletCode: string; kpiValues: Record<string, unknown> }>;
+    batches?: Array<{ id: string; month: string; status?: string }>;
+  }) {
+    const rows = opts.rows ?? [];
+    const batches = opts.batches ?? [];
+    const prisma: any = {
+      kpiDef: { findMany: jest.fn().mockResolvedValue(opts.kpis) },
+      outlet: {
+        findMany: jest.fn().mockResolvedValue([
+          outletRow({ ...OUTLETS[0], program: 'Gold' }), // O1: CONSISTENCY in scope
+          outletRow({ ...OUTLETS[1], program: 'Silver' }), // O2: CONSISTENCY OUT of scope
+        ]),
+      },
+      salesKpiDefinition: { findMany: jest.fn().mockResolvedValue((opts.owned ?? []).map((kpiCode) => ({ kpiCode }))) },
+      salesUploadBatch: {
+        findFirst: jest.fn(async ({ where }: any) => {
+          if (where.id === 'b1' && where.clientId) return { id: 'b1', clientId: 't1', status: 'COMPLETED', acceptedCount: rows.length };
+          const pool = batches.filter(
+            (b) =>
+              (!where.month || b.month === where.month) &&
+              (!where.status || (b.status ?? 'COMPLETED') === where.status) &&
+              (!where.id?.not || b.id !== where.id.not),
+          );
+          return pool[0] ? { id: pool[0].id } : null;
+        }),
+        delete: jest.fn().mockResolvedValue({}),
+      },
+      outletSalesRecord: {
+        findMany: jest.fn(async ({ distinct }: any) => (distinct ? [{ month: MONTH }] : rows)),
+        count: jest.fn().mockResolvedValue(1),
+      },
+      $executeRaw: jest.fn().mockResolvedValue(1),
+      $transaction: jest.fn(),
+    };
+    prisma.$transaction.mockImplementation((cb: (t: unknown) => unknown) => cb(prisma));
+    const service = new TargetsService(prisma as never, {} as never, {} as never);
+    // Only the carry-over UPDATEs (skip the advisory lock statements).
+    const updates = () =>
+      prisma.$executeRaw.mock.calls
+        .filter((c: unknown[]) => sqlText(c).includes('UPDATE "outlet_sales_records"'))
+        .map((c: unknown[]) => {
+          const v = sqlValues(c);
+          return { keep: v.find((x) => Array.isArray(x)), holder: v[1], codes: v[v.length - 1] };
+        });
+    return { service, prisma, updates };
+  }
+
+  it('UNSCOPED tenant (Deoleo): identical plain cascade delete — no transaction, no raw SQL, no outlet read', async () => {
+    const { service, prisma } = setup({ kpis: [kpiRow(KPIS[0]), kpiRow(KPIS[2])] });
+    await expect(service.deleteAchievementBatch(admin, 'b1')).resolves.toEqual({ deleted: true, id: 'b1', removedRecords: 0 });
+    expect(prisma.salesUploadBatch.delete).toHaveBeenCalledWith({ where: { id: 'b1' } });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+    expect(prisma.outlet.findMany).not.toHaveBeenCalled();
+  });
+
+  it('SCOPED: a row carrying an out-of-scope value keeps ONLY that value, re-pointed to the latest other same-month batch', async () => {
+    const { service, prisma, updates } = setup({
+      kpis: scopedKpis(),
+      rows: [
+        { outletCode: 'O1', kpiValues: { MONTH_TGT: 1, CONSISTENCY: 2 } }, // all in scope → goes with the batch
+        { outletCode: 'O2', kpiValues: { MONTH_TGT: 3, CONSISTENCY: 4 } }, // CONSISTENCY out of scope → kept
+      ],
+      batches: [{ id: 'b0', month: MONTH }],
+    });
+    const res = await service.deleteAchievementBatch(admin, 'b1');
+    expect(updates()).toEqual([{ keep: ['CONSISTENCY'], holder: 'b0', codes: ['O2'] }]);
+    expect(prisma.salesUploadBatch.delete).toHaveBeenCalledWith({ where: { id: 'b1' } });
+    expect(res).toEqual({ deleted: true, id: 'b1', removedRecords: 1 }); // O1 removed by the cascade
+    // the month is advisory-locked inside the same transaction
+    expect(prisma.$executeRaw.mock.calls.some((c: unknown[]) => sqlText(c).includes('pg_advisory_xact_lock'))).toBe(true);
+  });
+
+  it('SCOPED: no same-month batch → held by the latest other batch of the tenant', async () => {
+    const { service, updates } = setup({
+      kpis: scopedKpis(),
+      rows: [{ outletCode: 'O2', kpiValues: { CONSISTENCY: 4 } }],
+      batches: [{ id: 'bOld', month: '2026-08' }],
+    });
+    await service.deleteAchievementBatch(admin, 'b1');
+    expect(updates()).toEqual([{ keep: ['CONSISTENCY'], holder: 'bOld', codes: ['O2'] }]);
+  });
+
+  it('SCOPED: no other batch anywhere → 409 and NOTHING is deleted (the values are never removed)', async () => {
+    const { service, prisma, updates } = setup({
+      kpis: scopedKpis(),
+      rows: [{ outletCode: 'O2', kpiValues: { MONTH_TGT: 3, CONSISTENCY: 4 } }],
+      batches: [],
+    });
+    await expect(service.deleteAchievementBatch(admin, 'b1')).rejects.toThrow(/cannot be deleted/);
+    expect(updates()).toEqual([]);
+    expect(prisma.salesUploadBatch.delete).not.toHaveBeenCalled();
+  });
+
+  it('SCOPED: rows with nothing out of scope → plain cascade inside the transaction (no UPDATE, no holder needed)', async () => {
+    const { service, prisma, updates } = setup({
+      kpis: scopedKpis(),
+      rows: [{ outletCode: 'O1', kpiValues: { MONTH_TGT: 1, CONSISTENCY: 2 } }, { outletCode: 'O2', kpiValues: { MONTH_TGT: 3 } }],
+      batches: [],
+    });
+    await service.deleteAchievementBatch(admin, 'b1');
+    expect(updates()).toEqual([]);
+    expect(prisma.salesUploadBatch.delete).toHaveBeenCalledWith({ where: { id: 'b1' } });
+  });
+
+  it('SCOPED + importer-owned: owned keys → importer batch (owned rule); out-of-scope keys → a manual holder', async () => {
+    const { service, updates } = setup({
+      kpis: [...scopedKpis(), kpiRow(KPIS[1])],
+      owned: ['FOCUS_PACK_1'],
+      rows: [
+        { outletCode: 'O2', kpiValues: { MONTH_TGT: 3, CONSISTENCY: 4, FOCUS_PACK_1: 5 } }, // owned + oos
+        { outletCode: 'O1', kpiValues: { MONTH_TGT: 1, FOCUS_PACK_1: 6 } }, // owned only
+      ],
+      batches: [{ id: 'imp', month: MONTH, status: 'SALES_IMPORT' }, { id: 'b0', month: MONTH }],
+    });
+    await service.deleteAchievementBatch(admin, 'b1');
+    expect(updates()).toEqual([
+      { keep: ['CONSISTENCY', 'FOCUS_PACK_1'], holder: 'imp', codes: ['O2'] },
+      { keep: ['FOCUS_PACK_1'], holder: 'imp', codes: ['O1'] },
+    ]);
+  });
+});
+
 describe('TargetsService — upsertKpi APPLIES-TO scope (§4)', () => {
   it('create with arrays: types canonical, programs → settings / most-common-live spelling, legacy column null', async () => {
     const { service, tx } = makeService();

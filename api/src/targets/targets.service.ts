@@ -1372,6 +1372,16 @@ export class TargetsService {
     // Owned-tenant branch: deleting a MANUAL batch must not take importer-owned values with it (the
     // schema cascade would delete whole rows). Never runs for a tenant without owned KPIs.
     const owned = await importerOwnedKpiCodes(this.prisma, user.clientId);
+
+    // APPLIES-TO (OWNER DECISION, audit #3): deleting a batch must NOT remove stored values of KPIs that are OUT OF
+    // SCOPE for the row's outlet (the same rule as a re-upload). Only a scope-enforced tenant reaches this branch;
+    // an all-unscoped tenant (Deoleo) keeps the exact pre-scope paths below.
+    const carryScope = await this.outOfScopeCarryScope(user.clientId);
+    if (carryScope) {
+      const removedRecords = await this.deleteManualBatchKeepingCarried(user.clientId, id, owned, carryScope);
+      return { deleted: true, id, removedRecords };
+    }
+
     if (owned.length > 0) {
       // L4: report the rows ACTUALLY removed (rows that kept importer-owned values were re-pointed, not deleted).
       const removedRecords = await this.deleteManualBatchKeepingOwned(user.clientId, id, owned);
@@ -1417,6 +1427,121 @@ export class TargetsService {
                AND "kpiValues" ?| ${owned}::text[]`);
         }
         // What the cascade below removes = the rows still pointing at this batch after the re-pointing above.
+        const removed = await tx.outletSalesRecord.count({ where: { clientId, batchId } });
+        await tx.salesUploadBatch.delete({ where: { id: batchId } });
+        return removed;
+      },
+      { timeout: 60_000, maxWait: 10_000 },
+    );
+  }
+
+  /**
+   * The per-outlet out-of-scope KPI codes (same predicate as the upload carry-over: enabled KPIs × the outlet's
+   * CURRENT facets), or `null` for a tenant with no scoped KPI (→ the caller keeps its pre-scope path).
+   */
+  private async outOfScopeCarryScope(
+    clientId: string,
+  ): Promise<{ outOfScopeCodes: (outletCode: string) => string[] } | null> {
+    const kpiRows = await this.prisma.kpiDef.findMany({ where: { clientId, enabled: true } });
+    if (!kpiScopeEnforced(kpiRows)) return null;
+    const outlets = await this.prisma.outlet.findMany({
+      where: { clientId, deletedAt: null },
+      select: { outletCode: true, outletType: { select: { code: true } }, programName: true, programCategory: true },
+    });
+    return this.parseScope(kpiRows, outlets);
+  }
+
+  /**
+   * Scope-enforced variant of the batch delete (one transaction; months advisory-locked like the owned path). Per
+   * row of the batch, the keys that SURVIVE are:
+   *   • importer-owned keys — only when the month has a SALES_IMPORT batch (exactly the owned-path rule), held by
+   *     that importer batch;
+   *   • keys of KPIs OUT OF SCOPE for the row's outlet (never owned) — always, held by the latest OTHER batch of the
+   *     same month, else the latest other batch of the tenant (any status — a Sales Import apply keeps non-owned
+   *     keys and the row's batchId). If the tenant has NO other batch, there is nowhere to keep them → 409 and
+   *     nothing changes (the owner rule forbids deleting them).
+   * A row with surviving keys keeps ONLY those keys and is re-pointed; every other row goes with the batch cascade.
+   * Rows are updated per (holder × surviving-key set) group — a handful of statements, not one per row.
+   */
+  private async deleteManualBatchKeepingCarried(
+    clientId: string,
+    batchId: string,
+    owned: string[],
+    scope: { outOfScopeCodes: (outletCode: string) => string[] },
+  ): Promise<number> {
+    const ownedSet = new Set(owned);
+    return this.prisma.$transaction(
+      async (tx) => {
+        const monthRows = await tx.outletSalesRecord.findMany({
+          where: { clientId, batchId },
+          select: { month: true },
+          distinct: ['month'],
+        });
+        const months = monthRows.map((r) => r.month).sort();
+        for (const month of months) {
+          await lockSalesMonth(tx, clientId, month);
+        }
+        let tenantFallback: { id: string } | null | undefined;
+        for (const month of months) {
+          const importerBatch =
+            owned.length > 0
+              ? await tx.salesUploadBatch.findFirst({
+                  where: { clientId, month, status: SALES_IMPORT_BATCH_STATUS },
+                  orderBy: { createdAt: 'desc' },
+                  select: { id: true },
+                })
+              : null;
+          let monthHolder: { id: string } | null | undefined;
+          const holderForCarried = async (): Promise<string> => {
+            if (monthHolder === undefined) {
+              monthHolder = await tx.salesUploadBatch.findFirst({
+                where: { clientId, month, id: { not: batchId } },
+                orderBy: { createdAt: 'desc' },
+                select: { id: true },
+              });
+            }
+            if (monthHolder) return monthHolder.id;
+            if (tenantFallback === undefined) {
+              tenantFallback = await tx.salesUploadBatch.findFirst({
+                where: { clientId, id: { not: batchId } },
+                orderBy: { createdAt: 'desc' },
+                select: { id: true },
+              });
+            }
+            if (tenantFallback) return tenantFallback.id;
+            throw new ConflictException(
+              'This upload batch is the only one left holding values for KPIs that do not apply to some of its outlets. ' +
+                'Those values are kept by design, so this batch cannot be deleted.',
+            );
+          };
+
+          const rows = await tx.outletSalesRecord.findMany({
+            where: { clientId, batchId, month },
+            select: { outletCode: true, kpiValues: true },
+          });
+          const groups = new Map<string, { holder: string; keep: string[]; codes: string[] }>();
+          for (const r of rows) {
+            const keys = new Set(kpiCodeKeys((r.kpiValues ?? {}) as Record<string, unknown>));
+            const keepOwned = importerBatch ? owned.filter((k) => keys.has(k)) : [];
+            const keepOos = scope.outOfScopeCodes(r.outletCode).filter((k) => keys.has(k) && !ownedSet.has(k));
+            if (keepOwned.length === 0 && keepOos.length === 0) continue;
+            const holder = keepOwned.length > 0 ? importerBatch!.id : await holderForCarried();
+            const keep = [...keepOwned, ...keepOos].sort();
+            const gk = `${holder}|${keep.join(',')}`;
+            const g = groups.get(gk) ?? { holder, keep, codes: [] };
+            g.codes.push(r.outletCode);
+            groups.set(gk, g);
+          }
+          for (const g of groups.values()) {
+            await tx.$executeRaw(Prisma.sql`
+              UPDATE "outlet_sales_records"
+                 SET "kpiValues" = ${ownedSubsetSql(Prisma.sql`"kpiValues"`, g.keep)},
+                     "batchId"   = ${g.holder},
+                     "updatedAt" = ${SQL_NOW_UTC}
+               WHERE "clientId" = ${clientId} AND "batchId" = ${batchId} AND "month" = ${month}
+                 AND "outletCode" = ANY(${g.codes}::text[])`);
+          }
+        }
         const removed = await tx.outletSalesRecord.count({ where: { clientId, batchId } });
         await tx.salesUploadBatch.delete({ where: { id: batchId } });
         return removed;

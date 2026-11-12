@@ -145,6 +145,10 @@ function UploadHistory({ refreshKey }: { refreshKey: number }) {
       if (res.ok && body.success) {
         setBatches(prev => prev.filter(b => b.id !== batchId));
         setDeleteError(null);
+      } else if (res.status === 409 && typeof body.error === 'string' && body.error) {
+        // A business refusal (e.g. the batch is the last one holding values for out-of-scope KPIs, or it
+        // belongs to Sales Import) — retrying won't help, so show the server's reason verbatim.
+        setDeleteError(body.error);
       } else {
         setDeleteError('Could not delete this upload — please try again.');
       }

@@ -91,4 +91,29 @@ describe('achievements page — Sales Import ownership', () => {
     expect(await screen.findByText('Upload Result')).toBeInTheDocument();
     expect(screen.queryByTestId('ignored-out-of-scope')).not.toBeInTheDocument();
   });
+  it('batch delete refused with 409 → the server reason is shown verbatim (not "try again")', async () => {
+    const reason = 'This upload batch is the only one left holding values for KPIs that do not apply to some of its outlets.';
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'DELETE') return json({ success: false, error: reason }, 409);
+      if (url.startsWith('/api/admin/achievements/batches')) return json({ success: true, data: [batch({})] });
+      return json({ success: true, data: [] });
+    }));
+    render(<SalesUploadPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /Delete/ }));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Yes, delete' })); });
+    expect(await screen.findByText(reason)).toBeInTheDocument();
+    expect(screen.queryByText(/please try again/)).not.toBeInTheDocument();
+  });
+
+  it('batch delete failing with a non-409 keeps the generic retry message', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'DELETE') return json({ success: false, error: 'boom' }, 500);
+      if (url.startsWith('/api/admin/achievements/batches')) return json({ success: true, data: [batch({})] });
+      return json({ success: true, data: [] });
+    }));
+    render(<SalesUploadPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /Delete/ }));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Yes, delete' })); });
+    expect(await screen.findByText('Could not delete this upload — please try again.')).toBeInTheDocument();
+  });
 });
