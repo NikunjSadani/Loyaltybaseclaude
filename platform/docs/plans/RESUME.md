@@ -19,7 +19,7 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 > PIN are in My Orders", no PIN stored in any notification. ⚠️ TEST DATA LEFT FOR OWNER UAT (clean up after): temp reward
 > `cmwcybras000e01s6wb2zvzur` "ZZ PIN test card (staging, temporary)" + Sai Trader (9000000300) order in `pin-state.json`
 > (PROCESSING, card TESTCARD…, PIN 0042, 250 pts debited) → cleanup = voucher-cancelled → CANCELLED (refund) → reward DISCONTINUED.
-> On-screen checks (partner My Orders PIN, Gifsy "Show PIN", amount box, physical fulfilment save) = owner UAT.
+> On-screen checks DONE 2026-11-12 (owner said go ahead): Deoleo partner My Orders shows Card no.+PIN w/ Copy; Gifsy dispatch PIN masked → Show/Hide PIN; Bajaj SO catalogue "750.5" → "Check the amount — whole rupees only", Send OTP sends nothing, "1,250" → 1250; Bajaj physical order BAJAJ-26-000026 fulfilment save (Gifsy warehouse + TESTTRK12345) → 200 (old 400 bug fixed). Owner: LEAVE the Deoleo test data. ⚠️ Bajaj order BAJAJ-26-000031 (Boat ₹500, pera sakti canteen, placed by SO 8058006912, owner-approved outlet) is HUBBLE_INDETERMINATE: Hubble SANDBOX (api.dev.myhubble.money) auth returned 502 — Hubble-side outage; points held. When the sandbox is back → Gifsy reconcile it → see whether Boat returns card+PIN.
 >
 > **⏸ STOP-OVER 2026-11-11 night (owner asleep) — superseded by the line above.** Branch `feat/sales-import` (worktree
 > `.claude/worktrees/sales-import`) HEAD = merge `defc6087` = everything below + the **Hubble per-brand amounts + whole-rupee
