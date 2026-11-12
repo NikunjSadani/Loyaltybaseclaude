@@ -127,6 +127,31 @@ describe('KYCID — Admin KYC detail API wiring', () => {
     expect(screen.queryByText(/KYC ID:/)).not.toBeInTheDocument(); // old CUID label removed
   });
 
+  it('KYCID8: OTHER docs are labelled from metadata.label / fileName; other types unchanged', async () => {
+    const submission = {
+      ...MOCK_SUBMISSION,
+      documents: [
+        { id: 'd1', documentType: 'PAN_CARD', fileName: 'pan-scan.jpg', status: 'SUBMITTED' },
+        { id: 'd2', documentType: 'OTHER', fileName: 'Counter photo.jpg', status: 'SUBMITTED' },
+        { id: 'd3', documentType: 'OTHER', fileName: 'ID proof (Voter ID).pdf',
+          metadata: { label: 'Voter ID card' }, status: 'SUBMITTED' },
+        { id: 'd4', documentType: 'OTHER', fileName: null, status: 'SUBMITTED' },
+      ],
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: { submission } }),
+    }));
+    render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
+    // Tabs + checklist both render the label → at least one match each.
+    expect((await screen.findAllByText('Counter photo')).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Voter ID card').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Other document').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('PAN CARD').length).toBeGreaterThan(0);   // non-OTHER unchanged
+    expect(screen.queryByText('ID proof (Voter ID)')).not.toBeInTheDocument(); // metadata.label wins
+    expect(screen.queryByText('OTHER')).not.toBeInTheDocument();
+  });
+
   it('KYCID6: the not-found state back link also points to /admin/kyc', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: false,

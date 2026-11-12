@@ -18,6 +18,7 @@ import {
 import Link from 'next/link';
 import { Spinner } from '@/components/ui/spinner';
 import { KYCReviewer } from '@/components/admin/kyc-reviewer';
+import { kycDocDisplayLabel } from '@/lib/kyc-doc-label';
 import {
   hasReKycFlags, reKycRemarks, flaggedLabels, flaggedDocTypes, type ReKycFlags,
 } from '@/lib/rekyc-fields';
@@ -158,7 +159,8 @@ interface ApiKycDetail {
     addressLine1?: string | null; addressLine2?: string | null;
     city?: string | null; state?: string | null; pincode?: string | null;
   } | null;
-  documents?: { id: string; documentType: string; fileUrl?: string; viewUrl?: string | null; status: string }[];
+  documents?: { id: string; documentType: string; fileUrl?: string; viewUrl?: string | null; status: string;
+    fileName?: string | null; metadata?: unknown }[];
   verificationItems?: { fieldKey: string; decision: string; remark?: string | null; source?: string | null }[];
   statusHistory?: { id: string; toStatus: string; createdAt: string; notes?: string | null }[];
   // SO Declaration variant (Bajaj). Absent/STANDARD for every other submission.
@@ -514,7 +516,8 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     documents: (s.documents ?? []).map(d => ({
       id:     d.id,
       type:   d.documentType.toLowerCase(),
-      label:  d.documentType.replace(/_/g, ' '),
+      // OTHER (e.g. imported Bajaj docs) → metadata.label / fileName; every other type unchanged.
+      label:  kycDocDisplayLabel(d, (t) => t.replace(/_/g, ' ')),
       // viewUrl is the signed (or fail-closed null) read URL; never fall back to the
       // raw private GCS fileUrl (renders a 403/broken image) — use the placeholder.
       url:    d.viewUrl ?? `https://placehold.co/600x400/e2e8f0/1a1a2e?text=${d.documentType}`,
