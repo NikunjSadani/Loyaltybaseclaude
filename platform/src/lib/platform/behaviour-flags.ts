@@ -41,7 +41,7 @@ export const BEHAVIOUR_FLAG_META: Record<BehaviourFlagKey, BehaviourFlagMeta> = 
       title: 'Allow payouts without PAN?',
       points: [
         'Partners with no PAN on file will be paid the FULL amount — nothing is withheld from them.',
-        'Pending no-PAN payments already sitting in SUBMITTED or FAILED payout batches will be included the next time those batches are processed.',
+        "Pending no-PAN payments in batches that haven't been paid yet (draft, submitted or failed) will be included the next time those batches are processed.",
         "The TDS at the no-PAN rate is a company-borne liability — it is shown in the TDS reports as 'NO PAN ON FILE' and has to be deposited by the company.",
       ],
       confirmLabel: 'Yes, allow payouts without PAN',

@@ -8,7 +8,7 @@
  */
 
 import React, { act } from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 vi.mock('@/lib/auth-client', () => ({ getToken: () => null }));
@@ -40,6 +40,33 @@ async function submitFromFeatures() {
 }
 
 describe('New-client wizard — behaviour flags', () => {
+  it('W4: Cancel on the allowPayoutWithoutPan confirm leaves it OFF; turning it OFF again needs no confirm', async () => {
+    const postSpy = vi.fn();
+    stubFetch(postSpy);
+    await walkToFeatures();
+    const sw = screen.getByTestId('wizard-behaviour-flag-allowPayoutWithoutPan');
+    fireEvent.click(sw);
+    fireEvent.click(within(await screen.findByTestId('behaviour-flag-confirm')).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument());
+    expect(sw).toHaveAttribute('aria-checked', 'false');
+    // ON (confirmed) then OFF (no dialog)
+    fireEvent.click(sw);
+    fireEvent.click(within(await screen.findByTestId('behaviour-flag-confirm')).getByRole('button', { name: 'Yes, allow payouts without PAN' }));
+    await waitFor(() => expect(sw).toHaveAttribute('aria-checked', 'true'));
+    fireEvent.click(sw);
+    expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument();
+    expect(sw).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('W5: other behaviour flags flip immediately in the wizard (no confirm)', async () => {
+    stubFetch(vi.fn());
+    await walkToFeatures();
+    const sw = screen.getByTestId('wizard-behaviour-flag-soDeclarationKyc');
+    fireEvent.click(sw);
+    expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument();
+    expect(sw).toHaveAttribute('aria-checked', 'true');
+  });
+
   beforeEach(() => { vi.clearAllMocks(); });
 
   it('W1: untouched → POSTed features carry no behaviour keys', async () => {
@@ -78,7 +105,11 @@ describe('New-client wizard — behaviour flags', () => {
     const sw = screen.getByTestId('wizard-behaviour-flag-allowPayoutWithoutPan');
     expect(sw).toHaveAttribute('aria-checked', 'false');
     fireEvent.click(sw);
-    expect(sw).toHaveAttribute('aria-checked', 'true');
+    // Switching ON asks first (same dialog as the client page); nothing flips until confirmed.
+    const dialog = await screen.findByTestId('behaviour-flag-confirm');
+    expect(sw).toHaveAttribute('aria-checked', 'false');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Yes, allow payouts without PAN' }));
+    await waitFor(() => expect(sw).toHaveAttribute('aria-checked', 'true'));
     await submitFromFeatures();
     await waitFor(() => expect(postSpy).toHaveBeenCalledTimes(1));
     const features = postSpy.mock.calls[0][0].features as Record<string, unknown>;

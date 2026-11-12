@@ -170,12 +170,26 @@ function readFirstSheet(ab: ArrayBufferLike): unknown[][] {
 }
 
 /**
+ * Conventional "no PAN" values on TDS uploads / stored rows: blank, PANNOTAVBL, PANAPPLIED,
+ * PANINVALID, NA, N/A and the `__NO_PAN__` sentinel (case-insensitive, trimmed). A no-PAN row is
+ * attributed to its deductee via its Outlet Code (see TdsService).
+ */
+export const NO_PAN_MARKERS = ['PANNOTAVBL', 'PANAPPLIED', 'PANINVALID', 'NA', 'N/A', '__NO_PAN__'] as const;
+export function isNoPanMarker(pan: string | null | undefined): boolean {
+  const v = String(pan ?? '').trim().toUpperCase();
+  return v === '' || (NO_PAN_MARKERS as readonly string[]).includes(v);
+}
+/** Stored form of any no-PAN marker on an upload row. */
+export const NO_PAN_STORED = '__NO_PAN__';
+
+/**
  * Parse an off-platform 194R upload xlsx.
  * Expected columns (row 0 = header): Date · PAN · Outlet Code · Amount (₹)
  *
  * Validation per row:
  *   - Date: required + parseable
- *   - PAN: required, non-empty → uppercase + trim
+ *   - PAN: uppercase + trim; a no-PAN marker (blank, PANNOTAVBL, PANAPPLIED, PANINVALID, NA, N/A,
+ *     __NO_PAN__) is stored as __NO_PAN__ and attributed via the Outlet Code
  *   - Outlet Code: optional
  *   - Amount (₹): required, positive number → rupeesToPaise → BigInt
  *
@@ -220,14 +234,12 @@ export function parseOffPlatformUpload(ab: ArrayBufferLike): {
       continue;
     }
 
-    // PAN — required, non-empty
-    const rawPan = colPan >= 0 ? String(row[colPan] ?? '').trim().toUpperCase() : '';
-    if (!rawPan) {
-      errors.push({ row: rowNum, message: `Row ${rowNum}: PAN is required and must not be blank` });
-      continue;
-    }
+    // PAN — a real PAN, or a no-PAN marker (blank / PANNOTAVBL / PANAPPLIED / PANINVALID / NA /
+    // N/A / __NO_PAN__) stored as __NO_PAN__ and attributed to its deductee via the Outlet Code.
+    const cellPan = colPan >= 0 ? String(row[colPan] ?? '').trim().toUpperCase() : '';
+    const rawPan = isNoPanMarker(cellPan) ? NO_PAN_STORED : cellPan;
 
-    // Outlet Code — optional
+    // Outlet Code — optional (identifies the deductee of a no-PAN row)
     const rawOutlet = colOutlet >= 0 ? String(row[colOutlet] ?? '').trim() : '';
     const outletCode = rawOutlet || null;
 
@@ -262,7 +274,8 @@ export function parseOffPlatformUpload(ab: ArrayBufferLike): {
  *
  * Validation per row:
  *   - Date: required + parseable
- *   - PAN: required, non-empty → uppercase + trim
+ *   - PAN: uppercase + trim; a no-PAN marker (blank, PANNOTAVBL, PANAPPLIED, PANINVALID, NA, N/A,
+ *     __NO_PAN__) is stored as __NO_PAN__ and attributed via the Outlet Code
  *   - Outlet Code: optional
  *   - Amount (₹): required, positive number → paise
  */
@@ -305,11 +318,9 @@ export function parseDepositUpload(ab: ArrayBufferLike): {
     const rawOutlet = colOutlet >= 0 ? String(row[colOutlet] ?? '').trim() : '';
     const outletCode = rawOutlet || null;
 
-    const rawPan = colPan >= 0 ? String(row[colPan] ?? '').trim().toUpperCase() : '';
-    if (!rawPan) {
-      errors.push({ row: rowNum, message: `Row ${rowNum}: PAN is required and must not be blank` });
-      continue;
-    }
+    // PAN — a real PAN, or a no-PAN marker (stored as __NO_PAN__; matched via the Outlet Code).
+    const cellPan = colPan >= 0 ? String(row[colPan] ?? '').trim().toUpperCase() : '';
+    const rawPan = isNoPanMarker(cellPan) ? NO_PAN_STORED : cellPan;
 
     const rawAmount = colAmount >= 0 ? row[colAmount] : undefined;
     const amountRupees = typeof rawAmount === 'number' ? rawAmount

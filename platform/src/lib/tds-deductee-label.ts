@@ -13,7 +13,14 @@ export interface NoPanDeductee {
  * "NO PAN ON FILE · <name> (<outlet codes>)"; the bare `__NO_PAN__` key holds only identity-less
  * (unattributed) amounts, e.g. a no-PAN deposit uploaded without an Outlet Code.
  */
-export function deducteeCellLabel(row: { panNumber: string; noPanDeductee?: NoPanDeductee }): string {
+export function deducteeCellLabel(row: {
+  panNumber: string;
+  noPanDeductee?: NoPanDeductee;
+  unlinkedNoPanDeposit?: boolean;
+}): string {
+  // Identity-less no-PAN deposits (e.g. older pooled deposits uploaded without an Outlet Code):
+  // shown with outstanding 0; the summary totals net them against the total no-PAN liability.
+  if (row.unlinkedNoPanDeposit) return 'Earlier no-PAN deposits (not linked to a partner)';
   if (row.noPanDeductee) {
     const d = row.noPanDeductee;
     const codes = d.outletCodes.length ? ` (${d.outletCodes.join(', ')})` : '';

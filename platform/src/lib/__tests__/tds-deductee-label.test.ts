@@ -22,6 +22,12 @@ describe('deducteeCellLabel', () => {
     ).toBe('NO PAN ON FILE · Unknown');
   });
 
+  it('labels the "Earlier no-PAN deposits" row', () => {
+    expect(deducteeCellLabel({ panNumber: '__NO_PAN__', unlinkedNoPanDeposit: true })).toBe(
+      'Earlier no-PAN deposits (not linked to a partner)',
+    );
+  });
+
   it('labels the bare unattributed bucket', () => {
     expect(deducteeCellLabel({ panNumber: '__NO_PAN__' })).toBe('NO PAN ON FILE (unattributed)');
   });

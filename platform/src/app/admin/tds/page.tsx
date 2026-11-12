@@ -34,6 +34,7 @@ import { deducteeCellLabel, type NoPanDeductee } from '@/lib/tds-deductee-label'
 interface Tds194RRow {
   panNumber:        string;
   noPanDeductee?:   NoPanDeductee;
+  unlinkedNoPanDeposit?: boolean;
   baseFyTotalPaise: number | string;
   liabilityPaise:   number | string;
   depositedPaise:   number | string;
@@ -55,6 +56,7 @@ interface Tds194RResponse {
 interface Tds194CRow {
   panNumber:               string;
   noPanDeductee?:          NoPanDeductee;
+  unlinkedNoPanDeposit?: boolean;
   entityType:              string;
   maxSinglePaise:          number | string;
   thresholdMet:            boolean;

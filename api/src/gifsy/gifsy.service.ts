@@ -741,6 +741,29 @@ export class GifsyService {
     // immediately rather than after the 5-min TTL.
     this.tenant.invalidateCache(client.id);
 
+    // Audit trail (log-only, best-effort): the tenant's INITIAL features blob as created.
+    const initialFeatures = (client.features ?? {}) as Record<string, unknown>;
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          actorId: user.sub,
+          action: 'CREATE',
+          entityType: 'ClientFeatures',
+          entityId: client.id,
+          newValues: initialFeatures as Prisma.InputJsonValue,
+          metadata: {
+            slug: client.id,
+            changedKeys: Object.keys(initialFeatures),
+            actorRole: user.role,
+          } as Prisma.InputJsonValue,
+        },
+      });
+    } catch (err: unknown) {
+      this.logger.warn(
+        `features audit log write failed for new client ${client.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     const branding = (client.branding ?? {}) as Record<string, unknown>;
     const features = (client.features ?? {}) as Record<string, unknown>;
     return {
@@ -811,8 +834,19 @@ export class GifsyService {
     // unlisted flags). `features.partnerApp` is a NESTED object (showSchemes/
     // showInvoices/showWallet/showTeam/showLeaderboard), so a shallow spread of a
     // partial `partnerApp` would wipe its sibling flags — deep-merge it explicitly.
+    // The merge itself runs INSIDE the update transaction, on the blob re-read under a row lock
+    // (see mergeFeaturesLocked below) — so two concurrent PATCHes serialise, neither loses the
+    // other's key, and the audit before→after is exactly this PATCH's change. Validate the incoming
+    // shape up-front (cheap 400 before any DB work).
     if (dto.features !== undefined) {
-      const existingFeatures = (existing.features ?? {}) as Record<string, unknown>;
+      assertValidFeatures(dto.features as Record<string, unknown>, (existing.features ?? {}) as Record<string, unknown>);
+    }
+    const featuresAudit: { before: Record<string, unknown> | null } = { before: null };
+    const mergeFeaturesLocked = async (db: Prisma.TransactionClient) => {
+      if (dto.features === undefined) return;
+      await db.$executeRaw`SELECT 1 FROM "clients" WHERE id = ${slug} FOR UPDATE`;
+      const locked = await db.client.findFirst({ where: { id: slug }, select: { features: true } });
+      const existingFeatures = (locked?.features ?? {}) as Record<string, unknown>;
       const incoming = dto.features as Record<string, unknown>;
       assertValidFeatures(incoming, existingFeatures);
       const features: Record<string, unknown> = { ...existingFeatures, ...incoming };
@@ -827,8 +861,9 @@ export class GifsyService {
           ...(incomingPartnerApp as Record<string, unknown>),
         };
       }
+      featuresAudit.before = existingFeatures;
       data.features = features as Prisma.InputJsonValue;
-    }
+    };
 
     // Notifications: deep-merge the provided keys over the existing blob. The
     // nested `templateIds` is itself deep-merged so unspecified template ids —
@@ -856,9 +891,11 @@ export class GifsyService {
     // invariant); the scalar/JSON update rides in the same tx so a domain clash
     // rolls the whole PATCH back. Without domains, keep the plain single update.
     const client =
-      dto.domains !== undefined
+      dto.domains !== undefined || dto.features !== undefined
         ? await this.prisma.$transaction(async (tx) => {
+            await mergeFeaturesLocked(tx);
             const updated = await tx.client.update({ where: { id: slug }, data });
+            if (dto.domains === undefined) return updated;
             // Always keep the canonical `<slug>.gifsy.in` in the set so a PATCH can
             // never leave a tenant with zero domains (unroutable). Deduped downstream.
             const canonical = `${slug}${TENANT_DOMAIN_SUFFIX}`;
@@ -876,9 +913,10 @@ export class GifsyService {
     // feature key (module toggles, behaviour flags such as allowPayoutWithoutPan, partnerApp tabs).
     // Best-effort AFTER the committed update: an audit write failure is logged, never surfaced,
     // so the PATCH behaves exactly as before.
-    if (dto.features !== undefined) {
+    if (dto.features !== undefined && featuresAudit.before !== null) {
+      // before = the blob read under the row lock in the same tx; after = what that tx wrote.
       const changes = diffFeatureKeys(
-        (existing.features ?? {}) as Record<string, unknown>,
+        featuresAudit.before,
         (client.features ?? {}) as Record<string, unknown>,
       );
       const changedKeys = Object.keys(changes);

@@ -13,7 +13,7 @@ import type { ClientConfig, FeatureKey, FeatureFlags } from '@/lib/platform/clie
 import { OutletTypeConfigSection } from '@/components/admin/outlet-type-config-section';
 import { BEHAVIOUR_FLAG_META, BEHAVIOUR_FLAG_KEYS, type BehaviourFlagKey } from '@/lib/platform/behaviour-flags';
 import { getToken } from '@/lib/auth-client';
-import { Modal } from '@/components/ui/modal';
+import { BehaviourFlagConfirm } from '@/components/operator/behaviour-flag-confirm';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Feature metadata — label + description for each toggle
@@ -1181,7 +1181,6 @@ function BehaviourFlagsSection({
   const [error, setError] = useState<string | null>(null);
   // A flag with `confirmOn` meta asks before switching ON (never before switching OFF).
   const [confirmKey, setConfirmKey] = useState<BehaviourFlagKey | null>(null);
-  const confirmMeta = confirmKey ? BEHAVIOUR_FLAG_META[confirmKey].confirmOn : undefined;
 
   const save = async (key: BehaviourFlagKey, next: boolean) => {
     if (saving) return;
@@ -1230,39 +1229,16 @@ function BehaviourFlagsSection({
       <p className="text-xs text-white/30 pt-1 px-1">
         Changes save immediately and apply to this tenant only. Other tenants are unaffected.
       </p>
-      <Modal
-        open={!!confirmKey && !!confirmMeta}
-        onOpenChange={(open) => { if (!open) setConfirmKey(null); }}
-        title={confirmMeta?.title ?? ''}
-        description={`Tenant: ${config.internalName}`}
-      >
-        <div data-testid="behaviour-flag-confirm" className="space-y-4">
-          <ul className="list-disc pl-5 space-y-2 text-sm text-gray-700">
-            {confirmMeta?.points.map((pt) => <li key={pt}>{pt}</li>)}
-          </ul>
-          <div className="flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => setConfirmKey(null)}
-              className="px-4 py-2 rounded-lg text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              disabled={saving}
-              onClick={() => {
-                const key = confirmKey;
-                setConfirmKey(null);
-                if (key) void save(key, true);
-              }}
-              className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
-            >
-              {confirmMeta?.confirmLabel}
-            </button>
-          </div>
-        </div>
-      </Modal>
+      <BehaviourFlagConfirm
+        flagKey={confirmKey}
+        tenantLabel={`Tenant: ${config.internalName}`}
+        busy={saving}
+        onCancel={() => setConfirmKey(null)}
+        onConfirm={(key) => {
+          setConfirmKey(null);
+          void save(key, true);
+        }}
+      />
     </div>
   );
 }

@@ -408,7 +408,8 @@ describe('TdsService', () => {
 
       const rows = await service.compute194C(FY);
 
-      expect(rows[0].panNumber).toBe('__NO_PAN__:cp1');
+      // 194C no-PAN is keyed per OUTLET (credits-rail granularity).
+      expect(rows[0].panNumber).toMatch(/^__NO_PAN__:outlet:.*:outlet1$/);
       // 12000000 * 20 / 80 = 3000000; round(3000000) = 3000000
       expect(rows[0].liabilityPaise).toBe(3_000_000n);
       expect(rows[0].liabilityNoThresholdPaise).toBe(3_000_000n);

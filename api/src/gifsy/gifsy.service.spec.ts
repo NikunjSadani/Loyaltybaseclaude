@@ -33,6 +33,8 @@ const mockPrisma = {
     update: jest.fn(),
   },
   $transaction: jest.fn(),
+  // updateClient takes a row lock (SELECT … FOR UPDATE) before merging features.
+  $executeRaw: jest.fn(),
 };
 
 const mockStorage = {
@@ -501,12 +503,13 @@ describe('GifsyService', () => {
       });
 
       it('switching OFF, and re-sending ON for a tenant already ON, are never blocked (other toggles keep working)', async () => {
-        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ salesImport: true }));
+        // updateClient reads the row twice: a pre-check read + the locked re-read inside the tx.
+        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ salesImport: true })).mockResolvedValueOnce(tenant({ salesImport: true }));
         echoUpdate();
         const off = await service.updateClient(gifsy, 'bajaj', { features: { salesImport: false } });
         expect((off.features as unknown as Record<string, boolean>).salesImport).toBe(false);
 
-        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ salesImport: true }));
+        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ salesImport: true })).mockResolvedValueOnce(tenant({ salesImport: true }));
         echoUpdate();
         const again = await service.updateClient(gifsy, 'bajaj', { features: { salesImport: true, walletModule: true } });
         expect((again.features as unknown as Record<string, boolean>).salesImport).toBe(true);
@@ -748,6 +751,47 @@ describe('GifsyService', () => {
       mockPrisma.auditLog.create.mockRejectedValue(new Error('db down'));
       const res = await service.updateClient(gifsy, 'bajaj', { features: { allowPayoutWithoutPan: true } });
       expect((res.features as Record<string, unknown>).allowPayoutWithoutPan).toBe(true);
+    });
+
+    it('AUDIT (16): before/after come from the row LOCKED inside the update tx (a concurrent PATCH that landed after the pre-read is respected)', async () => {
+      // Pre-read sees {} but by the time the lock is taken another PATCH has set walletModule=true.
+      mockPrisma.client.findFirst
+        .mockResolvedValueOnce(bajajRow({}))
+        .mockResolvedValueOnce(bajajRow({ walletModule: true }));
+      mockPrisma.client.update.mockImplementation(async ({ data }) => bajajRow(data.features));
+      mockPrisma.auditLog.create.mockResolvedValue({});
+
+      await service.updateClient(gifsy, 'bajaj', { features: { allowPayoutWithoutPan: true } });
+
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
+      expect(mockPrisma.$executeRaw).toHaveBeenCalled(); // SELECT … FOR UPDATE
+      // the concurrent key survives the merge …
+      expect(mockPrisma.client.update.mock.calls[0][0].data.features).toEqual({ walletModule: true, allowPayoutWithoutPan: true });
+      // … and the audit shows ONLY this PATCH's change
+      const { oldValues, newValues } = mockPrisma.auditLog.create.mock.calls[0][0].data;
+      expect(oldValues).toEqual({ allowPayoutWithoutPan: null });
+      expect(newValues).toEqual({ allowPayoutWithoutPan: true });
+    });
+
+    it('AUDIT (13): createClient writes one AuditLog row with the initial features', async () => {
+      mockPrisma.client.create.mockImplementation(async ({ data }) => ({
+        id: data.id, internalName: data.internalName, status: 'ONBOARDING', onboardedAt: new Date(), branding: {}, features: data.features,
+      }));
+      mockPrisma.auditLog.create.mockResolvedValue({});
+      mockPrisma.client.findUnique.mockResolvedValue(null);
+      mockPrisma.client.findMany.mockResolvedValue([]);
+      mockPrisma.outletType.findMany.mockResolvedValue([]);
+      mockPrisma.clientDomain.findFirst.mockResolvedValue(null);
+      await service.createClient(gifsy, { slug: 'newco', internalName: 'NewCo', features: { walletModule: true, allowPayoutWithoutPan: true } } as never);
+      const call = mockPrisma.auditLog.create.mock.calls.find((c) => c[0].data.entityType === 'ClientFeatures');
+      expect(call).toBeDefined();
+      expect(call![0].data).toMatchObject({
+        actorId: 'admin1',
+        action: 'CREATE',
+        entityId: 'newco',
+        newValues: { walletModule: true, allowPayoutWithoutPan: true },
+        metadata: { slug: 'newco', actorRole: 'GIFSY_ADMIN' },
+      });
     });
 
     it('diffFeatureKeys: only changed keys, absent ↔ null, nested partnerApp per sub-key', () => {

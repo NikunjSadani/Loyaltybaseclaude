@@ -26,6 +26,15 @@ import * as XLSX from 'xlsx';
  *     outcome is recorded here must never be blocked. Such a row still needs a valid UTR/reference
  *     and a positive amount; "Off-platform note" is optional free text. Y is only meaningful on a
  *     PAID row (Y on a FAILED row is an error).
+ *   - OFF-PLATFORM (Y) rows — "never block recording an outside payment, never create a double
+ *     benefit":
+ *       · the reference may be any 1–60 chars of letters/digits/space and / - . _ : #
+ *         (cheque no., "CASH 12-Nov", "NEFT/HDFC/123"); non-Y rows keep the strict UTR rule;
+ *       · a reference may repeat across transactions of the SAME partner (in this upload or in
+ *         history) but never across different partners;
+ *       · optional "Amount paid (₹)": if filled it must equal the payout amount exactly; blank =
+ *         the full amount;
+ *       · rejected when the linked redemption was cancelled / its points refunded.
  */
 
 const UTR_RE = /^[A-Z0-9]{8,22}$/i;
@@ -53,7 +62,18 @@ export const PAYOUT_UTR_HEADERS = [
   'Status',
   'Paid outside platform (Y/N)',
   'Off-platform note',
+  'Amount paid (₹)',
 ] as const;
+
+/** Header of the optional "amount actually paid" column (checked only on off-platform rows). */
+export const AMOUNT_PAID_HEADER = 'Amount paid (₹)';
+/** Off-platform reference: 1–60 chars of letters, digits, space and / - . _ : # */
+const OFF_PLATFORM_REF_RE = /^[A-Za-z0-9 /\-._:#]{1,60}$/;
+/** Per-row error when the linked redemption is cancelled/returned/failed or its points refunded. */
+export const ORDER_REFUNDED_ERROR =
+  "This redemption was cancelled and its points refunded — it can't be marked paid";
+/** Per-row error when an off-platform row's "Amount paid (₹)" differs from the payout amount. */
+export const AMOUNT_MISMATCH_ERROR = "Amount paid doesn't match the payout amount";
 
 /** Header of the optional "paid outside the platform" flag column (Y/N). */
 export const PAID_OFF_PLATFORM_HEADER = 'Paid outside platform (Y/N)';
@@ -83,6 +103,16 @@ export interface PayoutUtrRow {
   offPlatformNote: string;
 }
 
+/** Per-transaction context the service supplies to run the guards. */
+export interface PayoutUtrTxnInfo {
+  status: string;
+  amountPaise: bigint | number;
+  /** Owner partner — references may repeat only within the same partner (off-platform rows). */
+  partnerId?: string;
+  /** Linked redemption is CANCELLED/RETURNED/FAILED or its points were refunded. */
+  orderRefunded?: boolean;
+}
+
 export interface PayoutUtrParseResult {
   headerError: string | null;
   rows: PayoutUtrRow[];
@@ -107,7 +137,20 @@ export interface ParsePayoutUtrCtx {
    * Current status + amount of each batch transaction. When supplied, the PROCESS-FIRST guard
    * runs (see the header comment). Omitted → no status guard (pure-parser callers/tests).
    */
-  txnInfo?: Map<string, { status: string; amountPaise: bigint | number }>;
+  txnInfo?: Map<string, PayoutUtrTxnInfo>;
+  /**
+   * Upper-cased reference → the partner ids already using it (history). Lets an off-platform row
+   * reuse a reference of the SAME partner. Omitted → any history reuse is rejected.
+   */
+  knownUtrPartners?: Map<string, Set<string>>;
+}
+
+/** "1,500.00" / "₹1500" / 1500 → paise, or null when not a number. */
+function parseRupeesToPaise(raw: string | number): number | null {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? Math.round(raw * 100) : null;
+  const cleaned = raw.replace(/[₹,\s]/g, '');
+  if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) return null;
+  return Math.round(parseFloat(cleaned) * 100);
 }
 
 function emptyResult(headerError: string | null): PayoutUtrParseResult {
@@ -141,7 +184,7 @@ export function parsePayoutUtrUpload(
   buffer: ArrayBufferLike,
   ctx: ParsePayoutUtrCtx,
 ): PayoutUtrParseResult {
-  const { batchTxnIds, knownUtrs, txnInfo } = ctx;
+  const { batchTxnIds, knownUtrs, txnInfo, knownUtrPartners } = ctx;
 
   if (batchTxnIds.size === 0) {
     return emptyResult('No payout transactions found in this batch.');
@@ -176,6 +219,7 @@ export function parsePayoutUtrUpload(
   // Optional off-platform columns (older templates without them → every row is "N").
   const offPlatformIdx = headers.indexOf(PAID_OFF_PLATFORM_HEADER);
   const offNoteIdx = headers.indexOf(OFF_PLATFORM_NOTE_HEADER);
+  const amountPaidIdx = headers.indexOf(AMOUNT_PAID_HEADER);
 
   if (txnIdIdx === -1 || statusIdx === -1) {
     return emptyResult(
@@ -183,7 +227,23 @@ export function parsePayoutUtrUpload(
     );
   }
 
-  const seenUtrs = new Set<string>();
+  // Pre-pass: every PAID reference in this upload → the rows using it (Y-ness + partner), so the
+  // in-upload duplicate rule is order-independent: a reference may repeat ONLY when every row using
+  // it is an off-platform (Y) row of the SAME partner.
+  const refUses = new Map<string, Array<{ y: boolean; partnerId: string | undefined }>>();
+  for (let rIdx = 1; rIdx < allRows.length; rIdx++) {
+    const r = allRows[rIdx];
+    const st = normaliseStatus(String(r[statusIdx] ?? ''));
+    const ref = utrIdx !== -1 ? String(r[utrIdx] ?? '').trim().toUpperCase() : '';
+    if (st !== 'PAID' || !ref) continue;
+    const id = String(r[txnIdIdx] ?? '').trim();
+    const y = offPlatformIdx !== -1 && normaliseYesNo(String(r[offPlatformIdx] ?? '')) === true;
+    const list = refUses.get(ref) ?? [];
+    list.push({ y, partnerId: txnInfo?.get(id)?.partnerId });
+    refUses.set(ref, list);
+  }
+
+  const seenRefs = new Set<string>();
   const rows: PayoutUtrRow[] = [];
   let paidCount = 0;
   let failedCount = 0;
@@ -196,6 +256,7 @@ export function parsePayoutUtrUpload(
     const remarksRaw = remarksIdx !== -1 ? String(row[remarksIdx] ?? '').trim() : '';
     const offPlatformRaw = offPlatformIdx !== -1 ? String(row[offPlatformIdx] ?? '').trim() : '';
     const offNoteRaw = offNoteIdx !== -1 ? String(row[offNoteIdx] ?? '').trim() : '';
+    const amountPaidRaw = amountPaidIdx !== -1 ? row[amountPaidIdx] ?? '' : '';
     const offPlatform = normaliseYesNo(offPlatformRaw);
 
     // Fully blank line → ignore entirely (not even counted).
@@ -232,9 +293,31 @@ export function parsePayoutUtrUpload(
       errors.push(`Status must be PAID or FAILED (got "${statusRaw}").`);
     }
 
+    const info = txnId ? txnInfo?.get(txnId) : undefined;
+
     if (outcome === 'PAID') {
       if (!utrRaw) {
         errors.push('UTR is required for a PAID transaction.');
+      } else if (offPlatform === true) {
+        // OFF-PLATFORM reference: relaxed format; reuse allowed only within the same partner.
+        if (!OFF_PLATFORM_REF_RE.test(utrRaw)) {
+          errors.push(
+            `Reference "${utrRaw}" is not valid (1–60 characters: letters, digits, space and / - . _ : #).`,
+          );
+        }
+        const normRef = utrRaw.toUpperCase();
+        const partnerId = info?.partnerId;
+        const historyOwners = knownUtrPartners?.get(normRef);
+        const historyConflict = knownUtrPartners
+          ? !!historyOwners && (!partnerId || [...historyOwners].some((p) => p !== partnerId))
+          : knownUtrs.has(normRef);
+        if (historyConflict) {
+          errors.push(`Reference "${utrRaw}" has already been used for a different partner.`);
+        }
+        const uses = refUses.get(normRef) ?? [];
+        if (uses.length > 1 && !uses.every((u) => u.y && !!partnerId && u.partnerId === partnerId)) {
+          errors.push(`Reference "${utrRaw}" appears more than once in this upload for a different partner or a non-off-platform row.`);
+        }
       } else {
         if (!isValidUtr(utrRaw)) {
           errors.push(
@@ -245,12 +328,13 @@ export function parsePayoutUtrUpload(
         if (knownUtrs.has(normUtr)) {
           errors.push(`UTR "${utrRaw}" has already been used.`);
         }
-        if (seenUtrs.has(normUtr)) {
+        // Unchanged rule for non-off-platform rows: the FIRST use in the file is fine, every later
+        // use of the same reference (by any row) is a duplicate.
+        if (seenRefs.has(normUtr)) {
           errors.push(`UTR "${utrRaw}" appears more than once in this upload.`);
-        } else if (errors.length === 0) {
-          seenUtrs.add(normUtr);
         }
       }
+      seenRefs.add(utrRaw.toUpperCase());
     }
 
     if (offPlatform === 'INVALID') {
@@ -261,7 +345,6 @@ export function parsePayoutUtrUpload(
 
     // PROCESS-FIRST guard (service-supplied txnInfo): PAID needs a processed transaction unless
     // the row records an off-platform payment (which must still carry a positive amount).
-    const info = txnId ? txnInfo?.get(txnId) : undefined;
     if (info && outcome === 'PAID') {
       const processed = (PROCESSED_PAYOUT_STATUSES as readonly string[]).includes(info.status);
       const unprocessed = (UNPROCESSED_PAYOUT_STATUSES as readonly string[]).includes(info.status);
@@ -270,6 +353,18 @@ export function parsePayoutUtrUpload(
       }
       if ((processed || unprocessed) && offPlatform === true && !(Number(info.amountPaise) > 0)) {
         errors.push('Cannot record an off-platform payment for a transaction with no valid amount.');
+      }
+      if (offPlatform === true && info.orderRefunded) {
+        errors.push(ORDER_REFUNDED_ERROR);
+      }
+    }
+
+    // Optional "Amount paid (₹)" — checked ONLY on off-platform rows: if filled it must equal the
+    // payout amount exactly (blank = the full amount). Non-Y rows ignore the column.
+    if (outcome === 'PAID' && offPlatform === true && String(amountPaidRaw).trim() !== '') {
+      const paidPaise = parseRupeesToPaise(amountPaidRaw as string | number);
+      if (paidPaise === null || !info || paidPaise !== Number(info.amountPaise)) {
+        errors.push(AMOUNT_MISMATCH_ERROR);
       }
     }
 

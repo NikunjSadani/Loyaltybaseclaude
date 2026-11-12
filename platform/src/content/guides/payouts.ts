@@ -111,7 +111,12 @@ You can watch each batch's state on **Payout Status** (Confirmed = credited/paid
 **Step 4 — Record the UTRs** — **The operator does:** Download the batch's UTR template, fill **UTR** + **Status** (PAID / FAILED), upload it.
 - **The system does:** Flips each to **Success** or **Failed**.
 - **Process first:** a row can be marked **PAID** only if that transaction was **processed** in the batch (status **Initiated**). A still-**Pending** transaction is refused with *"This payment wasn't processed in a batch — process the batch first, or mark it 'Paid outside platform' if it was paid outside Gifsy."*
-- **Paid outside Gifsy?** If the money genuinely went out another way (cheque, a manual bank transfer, …) and you are only recording it, put **Y** in **"Paid outside platform (Y/N)"** (plus an optional **"Off-platform note"**). The row still needs a UTR / reference. It is accepted, marked as paid off-platform, and logged in the audit trail.
+- **Paid outside Gifsy?** If the money genuinely went out another way (cheque, cash, a manual bank transfer, …) and you are only recording it, put **Y** in **"Paid outside platform (Y/N)"** (plus an optional **"Off-platform note"**). Rules for a **Y** row:
+  - **Reference** — any reference up to 60 characters (letters, digits, spaces and / - . _ : #), e.g. *004521*, *CASH 12-Nov*, *NEFT/HDFC/123*. The same reference can be used for several payments **of the same partner**, never for a different partner.
+  - **"Amount paid (₹)"** (optional) — if you fill it, it must equal the payout amount exactly; leave it blank to mean "paid in full".
+  - A payment whose redemption was **cancelled and its points refunded** can't be marked paid.
+  - The partner's bank/UPI details are **not** marked verified by an off-platform payment.
+  - It is accepted even if the partner has no PAN / KYC isn't approved (the money already went out), and the audit trail records which of those checks it skipped.
 
 ✅ **Done** = the transaction shows **Success**.
 

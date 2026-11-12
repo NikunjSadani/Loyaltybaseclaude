@@ -143,7 +143,7 @@ describe('Behaviour flags — allowPayoutWithoutPan (BF3)', () => {
     const dialog = await screen.findByTestId('behaviour-flag-confirm');
     expect(screen.getByText('Allow payouts without PAN?')).toBeInTheDocument();
     expect(within(dialog).getByText(/paid the FULL amount/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/SUBMITTED or FAILED payout batches will be included the next time/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/batches that haven't been paid yet \(draft, submitted or failed\) will be included the next time/)).toBeInTheDocument();
     expect(within(dialog).getByText(/company-borne liability/)).toBeInTheDocument();
     expect(patchSpy).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Yes, allow payouts without PAN' }));
