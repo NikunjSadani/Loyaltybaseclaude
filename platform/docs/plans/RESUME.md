@@ -12,6 +12,31 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ## 📍 STATE 2026-11-11 — read this FIRST
 
+> **📍 2026-11-12 (afternoon) — WHAT'S IN FLIGHT (read first):**
+> 1. ✅ **Bajaj outlet/KYC/document import LIVE on prod + verified** (6,491 outlets, 22,621 docs in our storage, 19 owner
+>    groups) — full record + correction runbook: `BAJAJ-PROD-OUTLET-IMPORT.md`. Correction file sent to owner for Bajaj.
+> 2. 🔧 **Next release (branch `feat/payout-without-pan`, worktree `.claude/worktrees/payout-no-pan`, NOT pushed):**
+>    Bajaj-only flag `allowPayoutWithoutPan` (processBatch no-PAN exclusion gated); UTR upload "Paid outside platform (Y/N)"
+>    + note + optional amount (free-form refs, never on bank-sent rows, never for refunded orders, no bank-detail verify);
+>    process-first rule (all tenants, owner-approved); per-partner no-PAN 194R / per-outlet 194C TDS; strict PAN on TDS
+>    uploads (blank rejected; PANNOTAVBL etc. + Outlet Code); features audit log + confirm dialog; KYC review labels for
+>    OTHER docs ("Counter photo" etc.); **credits upload rounds points AND ₹ payouts half-up to WHOLE units** (owner rule).
+>    4 dual-audit rounds; last nit round in progress → full gates → Bajaj staging role test → owner deploys.
+> 3. 🔧 **Fast follow-ups #1+#2+#3 building in parallel** (branch `feat/applies-to`, worktree `.claude/worktrees/applies-to`):
+>    one shared "applies-to" scope {outletTypes[], programs[], subPrograms[]} for KPIs (multi-type + program/sub-program)
+>    and Visibility (program/sub-program). Owner approved ALL ★ decisions — plan `APPLIES-TO-TARGETING-PLAN.md`
+>    (on that branch). WP-0 contract in progress → WP-A/B/C parallel → audit → gates → Deoleo no-change proof → Bajaj staging.
+> 4. **Owner prod setup for Bajaj (UI):** steps 1–9 done (flags, sub-programs incl. TOT, settings, points engine ON, 2 client
+>    admins, KPIs = TOTAL(primary)/ADHO/NON ADHO/FOCUS BRAND/FOCUS BRAND 2/LINES — note: NOT staging's codes, visibility).
+>    Owner renaming credit field "Target Achievement" → "Monthly Achievement" (deactivate + recreate; no rename feature).
+>    Remaining: credit fields (10), points rule with prod KPI codes (11), sales-import mapping (12), catalogue fixes after
+>    Hubble whitelist (13), offers (14). Hubble prod: owner says dynamic IP allowed, but login still 401 "not whitelisted"
+>    (request id 01M777QKR7CCTB2VHQXGX2WZZ2) → chase Hubble.
+> 5. **Rounding rule (owner):** cases/values may be decimal; points and ₹ payouts are credited in WHOLE units, rounded
+>    half-up ONCE at the end. Points engine already does this; credits upload fixed in (2).
+> 6. Staging leftovers: Bajaj order BAJAJ-26-000031 held (Hubble sandbox was 502 — reconcile/cancel); Deoleo staging
+>    "ZZ PIN test card" + Sai Trader order kept on purpose (owner).
+
 > **🚀 2026-11-12 ~09:10 IST: PROD CUTOVER #59 DONE — prod = `a18cc932`** (main = develop `dd27888b` + TDS revert kept; full
 > gates 5,456 / 3,706 green on that SHA; on-demand prod DB backup `1794452768704` taken first). api + frontend + `gifsy-sales-import`
 > job all serve `a18cc932`; owner dispatched the deploy. Post-deploy DONE: `run.jobsExecutor` on `gifsy-sales-import` for
@@ -182,7 +207,7 @@ UPI money fixes (code on `backup/wip-20261105-batt`). _(The React #418 hydration
 
 ## ▶▶ WHAT'S NEXT
 - **Live next steps = 📍 STATE 2026-11-11 at the top** (release LIVE on staging `7c85d9fd` → owner staging UAT → owner creates prod Hubble secrets → decide prod Sales Import infra → prepare main → manual prod deploy + post-deploy checks → Bajaj October points).
-- 🔜 **FAST FOLLOW-UP #1 (owner 2026-11-11 — build ONLY after this release is on prod and closed): KPI ↔ Program / Sub-Program link.**
+- 🔧 **FAST FOLLOW-UPS #1 KPI↔Program/Sub-Program + #2 KPI outlet-type multi-select + #3 Visibility by Program/Sub-Program — BUILDING since 2026-11-12 (owner asked to run in parallel; all ★ decisions approved), branch `feat/applies-to`, plan `APPLIES-TO-TARGETING-PLAN.md`. Original #1 note:**
   Today `KpiDef` is tenant-wide (only an optional `outletType` tag); there is NO program link. Interim workaround = upload
   targets only for that program's outlets (blank cells = no target, excluded from achieved counts; compute rules +
   dashboards already filter by Program/Sub-Program). Proposed (⚠️ PLATFORM-WIDE — owner approved the idea, not yet the build):
