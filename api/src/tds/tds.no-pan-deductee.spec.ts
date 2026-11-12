@@ -193,11 +193,11 @@ describe('TdsService — per-deductee no-PAN', () => {
     expect(pan.noPanDeductee).toBeUndefined();
   });
 
-  it('194R: a no-PAN deposit (marker + lower-case Outlet Code) nets against THAT deductee; a legacy pooled one goes to "Earlier no-PAN deposits", netted only in totals', async () => {
+  it('194R: a no-PAN deposit (lower-case Outlet Code) nets against THAT deductee; a legacy pooled one is its own "Earlier" row (outstanding −deposit); totals = Σ rows', async () => {
     wire([{ id: 'big', pan: null, owner: 'Big', outlets: ['B1'] }]);
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('B1', 'f1', 2_500_000n)]);
     mockPrisma.tdsDeposit.findMany.mockResolvedValue([
-      { panNumber: 'PANNOTAVBL', outletCode: 'b1', amountPaise: 600_000n },
+      { panNumber: '__NO_PAN__', outletCode: 'b1', amountPaise: 600_000n }, // marker stored by the upload
       { panNumber: '__NO_PAN__', outletCode: null, amountPaise: 100_000n }, // legacy pooled deposit
     ]);
     const rows = await service.compute194R(CLIENT, FY);
@@ -206,7 +206,7 @@ describe('TdsService — per-deductee no-PAN', () => {
     expect(big.outstandingPaise).toBe(25_000n);
     const earlier = rows.find((r) => r.unlinkedNoPanDeposit)!;
     expect(earlier).toMatchObject({
-      panNumber: '__NO_PAN__', baseFyTotalPaise: 0n, liabilityPaise: 0n, depositedPaise: 100_000n, outstandingPaise: 0n,
+      panNumber: '__NO_PAN__:unlinked-deposits', baseFyTotalPaise: 0n, liabilityPaise: 0n, depositedPaise: 100_000n, outstandingPaise: -100_000n,
     });
     expect(earlier.noPanDeductee).toBeUndefined();
     // totals: outstanding = liability − every deposit (the pooled deposit nets against no-PAN liability)
@@ -216,23 +216,38 @@ describe('TdsService — per-deductee no-PAN', () => {
     expect(summary.totalOutstandingPaise).toBe(625_000n - 700_000n);
   });
 
-  it('194R (item 12): a tenant with NO no-PAN base — a bare __NO_PAN__ deposit changes nothing (rows + summary as before)', async () => {
+  it('194R (R3-2): an unlinked no-PAN deposit ALWAYS shows, even on a PAN-only tenant; totals = Σ rows', async () => {
     wire([{ id: 'cp1', pan: 'ABCDE1234F', owner: 'A', outlets: ['O1'] }]);
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('O1', 'f1', 2_100_000n)]);
-    const before = await service.summary194R(CLIENT, FY);
-    const beforeRows = await service.compute194R(CLIENT, FY);
     mockPrisma.tdsDeposit.findMany.mockResolvedValue([{ panNumber: '__NO_PAN__', outletCode: null, amountPaise: 100_000n }]);
-    expect(await service.compute194R(CLIENT, FY)).toEqual(beforeRows);
-    expect(await service.summary194R(CLIENT, FY)).toEqual(before);
+    const rows = await service.compute194R(CLIENT, FY);
+    expect(rows.find((r) => r.unlinkedNoPanDeposit)).toMatchObject({ depositedPaise: 100_000n, outstandingPaise: -100_000n });
+    const sum = await service.summary194R(CLIENT, FY);
+    expect(sum.totalDepositedPaise).toBe(rows.reduce((x, r) => x + r.depositedPaise, 0n));
+    expect(sum.totalOutstandingPaise).toBe(rows.reduce((x, r) => x + r.outstandingPaise, 0n));
+    expect(sum.totalOutstandingPaise).toBe(sum.totalLiabilityPaise - sum.totalDepositedPaise);
+    expect(sum.rowCount).toBe(2);
   });
 
-  it('194R: an identity-less no-PAN BASE (no outlet code) keeps the old bare-bucket behaviour and the pooled deposit nets on it', async () => {
+  it('194R: an identity-less no-PAN BASE (no outlet code) stays a bare row; an unlinked deposit is its own row', async () => {
     wire([]);
-    mockPrisma.tdsOffPlatformEntry.findMany.mockResolvedValue([{ panNumber: 'NA', outletCode: null, amountPaise: 2_500_000n }]);
+    mockPrisma.tdsOffPlatformEntry.findMany.mockResolvedValue([{ panNumber: '__NO_PAN__', outletCode: null, amountPaise: 2_500_000n }]);
     mockPrisma.tdsDeposit.findMany.mockResolvedValue([{ panNumber: '', outletCode: null, amountPaise: 100_000n }]);
     const rows = await service.compute194R(CLIENT, FY);
     expect(rows).toEqual([
-      { panNumber: '__NO_PAN__', fyLabel: FY, baseFyTotalPaise: 2_500_000n, liabilityPaise: 625_000n, depositedPaise: 100_000n, outstandingPaise: 525_000n },
+      { panNumber: '__NO_PAN__', fyLabel: FY, baseFyTotalPaise: 2_500_000n, liabilityPaise: 625_000n, depositedPaise: 0n, outstandingPaise: 625_000n },
+      { panNumber: '__NO_PAN__:unlinked-deposits', fyLabel: FY, baseFyTotalPaise: 0n, liabilityPaise: 0n, depositedPaise: 100_000n, outstandingPaise: -100_000n, unlinkedNoPanDeposit: true },
+    ]);
+  });
+
+  it('194R (R3-3): a no-PAN off-platform entry whose outlet owner HAS a PAN counts under that PAN (deposit too)', async () => {
+    wire([{ id: 'cpP', pan: 'ABCDE1234F', owner: 'P', outlets: ['OP'] }]);
+    mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('OP', 'f1', 1_000_000n)]);
+    mockPrisma.tdsOffPlatformEntry.findMany.mockResolvedValue([{ panNumber: '__NO_PAN__', outletCode: 'op', amountPaise: 1_500_000n }]);
+    mockPrisma.tdsDeposit.findMany.mockResolvedValue([{ panNumber: '__NO_PAN__', outletCode: 'OP', amountPaise: 50_000n }]);
+    const rows = await service.compute194R(CLIENT, FY);
+    expect(rows).toEqual([
+      { panNumber: 'ABCDE1234F', fyLabel: FY, baseFyTotalPaise: 2_500_000n, liabilityPaise: 277_800n, depositedPaise: 50_000n, outstandingPaise: 227_800n },
     ]);
   });
 
@@ -240,7 +255,7 @@ describe('TdsService — per-deductee no-PAN', () => {
     wire([{ id: 'cpX', pan: null, owner: 'X', outlets: ['OX'] }]);
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('OX', 'f1', 1_000_000n)]);
     mockPrisma.tdsOffPlatformEntry.findMany.mockResolvedValue([
-      { panNumber: 'PANAPPLIED', outletCode: 'ox', amountPaise: 1_500_000n },
+      { panNumber: '__NO_PAN__', outletCode: 'ox', amountPaise: 1_500_000n },
     ]);
     const rows = await service.compute194R(CLIENT, FY);
     expect(rows).toHaveLength(1);
@@ -249,14 +264,16 @@ describe('TdsService — per-deductee no-PAN', () => {
     expect(rows[0].liabilityPaise).toBe(625_000n);
   });
 
-  it('194R (item 10): PAN-like markers on a partner (NA / PANINVALID) are treated as no PAN', async () => {
+  it('194R (R3-4): STORED partner PANs are never reinterpreted — "NA"/"PANINVALID" stay as given; only blank / __NO_PAN__ mean no PAN', async () => {
     wire([
       { id: 'n1', pan: 'NA', owner: 'N1', outlets: ['A1'] },
       { id: 'n2', pan: 'PANINVALID', owner: 'N2', outlets: ['A2'] },
+      { id: 'n3', pan: '__NO_PAN__', owner: 'N3', outlets: ['A3'] },
+      { id: 'n4', pan: '  ', owner: 'N4', outlets: ['A4'] },
     ]);
-    mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('A1', 'f1', 500_000n), entry('A2', 'f1', 500_000n)]);
+    mockPrisma.creditPayoutEntry.findMany.mockResolvedValue(['A1', 'A2', 'A3', 'A4'].map((o) => entry(o, 'f1', 500_000n)));
     const rows = await service.compute194R(CLIENT, FY);
-    expect(rows.map((r) => r.panNumber).sort()).toEqual(['__NO_PAN__:n1', '__NO_PAN__:n2']);
+    expect(rows.map((r) => r.panNumber).sort()).toEqual(['NA', 'PANINVALID', '__NO_PAN__:n3', '__NO_PAN__:n4']);
   });
 
   it('194R: Deoleo-style tenant (PAN partners only) — identical rows, no extra queries', async () => {
@@ -360,8 +377,9 @@ describe('TdsService — per-deductee no-PAN', () => {
     wire([{ id: 'a', pan: null, owner: 'A', outlets: ['OA', 'DUP'] }], [], [{ outletCode: 'DUP', clientId: 'other', partnerId: null }]);
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('OA', 'vis', 12_000_000n), entry('DUP', 'vis', 12_000_000n)]);
     mockPrisma.tdsDeposit.findMany.mockResolvedValue([
-      { panNumber: 'N/A', outletCode: 'oa', clientId: null, amountPaise: 1_000_000n },  // unique → OA
-      { panNumber: '', outletCode: 'DUP', clientId: null, amountPaise: 500_000n },      // 2 tenants → unlinked
+      { panNumber: '__NO_PAN__', outletCode: 'oa', clientId: null, amountPaise: 1_000_000n }, // unique → OA
+      { panNumber: '__NO_PAN__', outletCode: 'DUP', clientId: null, amountPaise: 500_000n },  // 2 tenants → unlinked
+      { panNumber: '__NO_PAN__', outletCode: 'DUP', clientId: 'other', amountPaise: 70_000n }, // tenant given → other:DUP (no base) → unlinked
     ]);
     const rows = await service.compute194C(FY);
     const oa = rows.find((r) => r.panNumber === `__NO_PAN__:outlet:${CLIENT}:OA`)!;
@@ -369,12 +387,23 @@ describe('TdsService — per-deductee no-PAN', () => {
     const dup = rows.find((r) => r.panNumber === `__NO_PAN__:outlet:${CLIENT}:DUP`)!;
     expect(dup.depositedPaise).toBe(0n);
     const earlier = rows.find((r) => r.unlinkedNoPanDeposit)!;
-    expect(earlier).toMatchObject({ depositedPaise: 500_000n, outstandingPaise: 0n });
+    expect(earlier).toMatchObject({ depositedPaise: 570_000n, outstandingPaise: -570_000n });
     const sum = await service.summary194C(FY);
     expect(sum.totalOutstandingPaise).toBe(sum.totalLiabilityPaise - sum.totalDepositedPaise - sum.totalWithheldPaise);
   });
 
-  it('export194R: the "Earlier no-PAN deposits" row is labelled, outstanding 0, and the Summary nets it', async () => {
+  it('194C (R3-4): a WITHHELD-only no-PAN key keeps its own row (withheld never drops out)', async () => {
+    mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis', clientId: CLIENT }]);
+    wire([{ id: 'p', pan: 'ABCDE1234F', owner: 'P', outlets: ['OP'], entityType: 'COMPANY' }]);
+    mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('OP', 'vis', 12_000_000n)]);
+    mockPrisma.tdsDeductionEntry.findMany.mockResolvedValue([{ panNumber: '', tdsDeductedThisPaise: 40_000n }]);
+    const rows = await service.compute194C(FY);
+    expect(rows.find((r) => r.panNumber === '__NO_PAN__')).toMatchObject({ withheldPaise: 40_000n, outstandingPaise: -40_000n, liabilityPaise: 0n });
+    const sum = await service.summary194C(FY);
+    expect(sum.totalWithheldPaise).toBe(40_000n);
+  });
+
+  it('export194R: the "Earlier no-PAN deposits" row is labelled (outstanding −deposit) and the Summary = Σ rows', async () => {
     wire([{ id: 'big', pan: null, owner: 'Big', outlets: ['B1'] }]);
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('B1', 'f1', 2_500_000n)]);
     mockPrisma.tdsDeposit.findMany.mockResolvedValue([{ panNumber: '__NO_PAN__', outletCode: null, amountPaise: 100_000n }]);
@@ -382,7 +411,9 @@ describe('TdsService — per-deductee no-PAN', () => {
     const rows = parseSheet(buffer);
     const earlier = rows.find((r) => r['Deductee Name'] === 'Earlier no-PAN deposits (not linked to a partner)')!;
     expect(earlier['Already Deposited (₹)']).toBe('1000.00');
-    expect(earlier['Outstanding (₹)']).toBe('0.00');
+    // The shared xlsx writer prefixes any string starting with "-" with an apostrophe (formula-injection
+    // guard) — the same as every other negative Outstanding cell in this export.
+    expect(earlier['Outstanding (₹)']).toBe("'-1000.00");
     const summary = parseSheet(buffer, 1);
     expect(summary.find((r) => r.Field === 'Total Outstanding (₹)')!.Value).toBe('5250.00'); // 6250 − 1000
   });

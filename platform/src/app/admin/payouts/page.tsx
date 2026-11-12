@@ -42,6 +42,10 @@ interface UtrUploadResult {
   failedCount: number;
   /** PAID rows recorded as paid OUTSIDE the platform ("Paid outside platform" = Y). */
   offPlatformCount: number;
+  /** Rows for transactions that were ALREADY paid — never applied; flagged as a possible double payment. */
+  alreadyPaid: Array<{ rowNum: number; txnId: string; notice: string }>;
+  /** Non-blocking notices, e.g. ignored (unrecognised) columns. */
+  warnings: string[];
   skipped: UtrSkippedRow[];
   blockedOrders: UtrBlockedOrder[];
 }
@@ -380,6 +384,9 @@ export default function PayoutsPage() {
         failedCount: json.data.failedCount,
         // Older API builds omit `offPlatformCount` — treat as none.
         offPlatformCount: Number(json.data.offPlatformCount) || 0,
+        // Older API builds omit these — treat as none.
+        alreadyPaid: Array.isArray(json.data.alreadyPaid) ? json.data.alreadyPaid : [],
+        warnings: Array.isArray(json.data.warnings) ? json.data.warnings : [],
         // Older API builds omit `skipped` — treat as none.
         skipped: Array.isArray(json.data.skipped) ? json.data.skipped : [],
         // Older API builds omit `blockedOrders` — treat as none.
@@ -737,6 +744,27 @@ export default function PayoutsPage() {
                       ? ` (${utrUploadResult.offPlatformCount} recorded as paid outside the platform)`
                       : ''
                   }, ${utrUploadResult.failedCount} failed.`}
+                </div>
+              )}
+              {utrUploadResult && (utrUploadResult.alreadyPaid.length > 0 || utrUploadResult.warnings.length > 0) && (
+                <div
+                  role="alert"
+                  data-testid="utr-already-paid"
+                  className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-800 flex items-start gap-2"
+                >
+                  <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                  <div>
+                    {utrUploadResult.alreadyPaid.length > 0 && (
+                      <ul className="space-y-0.5">
+                        {utrUploadResult.alreadyPaid.map((a) => (
+                          <li key={`${a.rowNum}-${a.txnId}`}>
+                            Row {a.rowNum} <span className="font-mono">({a.txnId})</span>: {a.notice}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {utrUploadResult.warnings.map((w) => <p key={w}>{w}</p>)}
+                  </div>
                 </div>
               )}
               {/* Rows NOT applied because an overlapping upload already updated that payout.

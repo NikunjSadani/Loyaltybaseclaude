@@ -101,23 +101,42 @@ describe('TDS helpers — parseOffPlatformUpload', () => {
     expect(row.entryDate).toBeInstanceOf(Date);
   });
 
-  it('accepts a blank PAN / no-PAN marker as a no-PAN row (stored __NO_PAN__, keeps the Outlet Code)', () => {
+  it('rejects a BLANK PAN with the guidance message (blank is never treated as no-PAN)', () => {
+    const ab = buildXlsxBuffer([validHeader, ['2025-08-15', '', 'OUT001', 500]]);
+    const { result, rows } = parseOffPlatformUpload(ab);
+    expect(result.failed).toBe(1);
+    expect(rows).toHaveLength(0);
+    expect(result.errors[0].message).toBe('Row 2: PAN is required — enter the PAN, or PANNOTAVBL if the deductee has none');
+  });
+
+  it('accepts explicit no-PAN markers (stored __NO_PAN__) only WITH an Outlet Code', () => {
     const ab = buildXlsxBuffer([
       validHeader,
-      ['2025-08-15', '', 'OUT001', 500],
       ['2025-08-15', 'PANNOTAVBL', 'OUT002', 500],
       ['2025-08-15', 'panapplied', 'OUT003', 500],
       ['2025-08-15', 'PANINVALID', 'OUT004', 500],
       ['2025-08-15', 'NA', 'OUT005', 500],
       ['2025-08-15', 'n/a', 'OUT006', 500],
       ['2025-08-15', '__NO_PAN__', 'OUT007', 500],
+      ['2025-08-15', 'PANNOTAVBL', '', 500], // no outlet → rejected
     ]);
     const { result, rows } = parseOffPlatformUpload(ab);
-
-    expect(result.failed).toBe(0);
-    expect(rows).toHaveLength(7);
+    expect(rows).toHaveLength(6);
     expect(rows.every((r) => r.panNumber === '__NO_PAN__')).toBe(true);
-    expect(rows.map((r) => r.outletCode)).toEqual(['OUT001', 'OUT002', 'OUT003', 'OUT004', 'OUT005', 'OUT006', 'OUT007']);
+    expect(result.failed).toBe(1);
+    expect(result.errors[0].message).toMatch(/Row 8: Outlet Code is required for a no-PAN \(PANNOTAVBL\) row/);
+  });
+
+  it('accepts the PAN header variants "PAN No" / "PAN Number"; a file with NO PAN column is rejected whole', () => {
+    for (const h of ['PAN No', 'PAN No.', 'pan number']) {
+      const ab = buildXlsxBuffer([['Date', h, 'Outlet Code', 'Amount (₹)'], ['2025-08-15', 'ABCDE1234F', '', 500]]);
+      expect(parseOffPlatformUpload(ab).rows).toHaveLength(1);
+    }
+    const ab = buildXlsxBuffer([['Date', 'PAN Card', 'Outlet Code', 'Amount (₹)'], ['2025-08-15', 'ABCDE1234F', '', 500], ['2025-08-16', '', 'O1', 5]]);
+    const { result, rows } = parseOffPlatformUpload(ab);
+    expect(rows).toHaveLength(0);
+    expect(result.failed).toBe(2);
+    expect(result.errors).toEqual([{ row: 1, message: expect.stringMatching(/no "PAN" column/) }]);
   });
 
   it('rejects a row with zero amount', () => {
@@ -206,15 +225,23 @@ describe('TDS helpers — parseDepositUpload', () => {
     expect(rows[0].outletCode).toBe('OUT002');
   });
 
-  it('accepts a blank PAN / marker in a deposit as a no-PAN deposit (stored __NO_PAN__)', () => {
+  it('deposit: blank PAN rejected; an explicit marker with an Outlet Code is a no-PAN deposit; Client column read', () => {
     const ab = buildXlsxBuffer([
-      depositHeader,
-      ['2025-09-10', 'OUT002', '', 2500],
-      ['2025-09-10', 'OUT003', 'PANNOTAVBL', 2500],
+      ['Date', 'Outlet Code', 'PAN', 'Amount (₹)', 'Client'],
+      ['2025-09-10', 'OUT002', '', 2500, ''],
+      ['2025-09-10', 'OUT003', 'PANNOTAVBL', 2500, 'bajaj'],
     ]);
     const { result, rows } = parseDepositUpload(ab);
-    expect(result.failed).toBe(0);
-    expect(rows.map((r) => [r.panNumber, r.outletCode])).toEqual([['__NO_PAN__', 'OUT002'], ['__NO_PAN__', 'OUT003']]);
+    expect(result.failed).toBe(1);
+    expect(result.errors[0].message).toMatch(/PAN is required — enter the PAN, or PANNOTAVBL/);
+    expect(rows.map((r) => [r.panNumber, r.outletCode, r.clientSlug])).toEqual([['__NO_PAN__', 'OUT003', 'bajaj']]);
+  });
+
+  it('deposit: a file with no PAN column is rejected whole', () => {
+    const ab = buildXlsxBuffer([['Date', 'Outlet Code', 'Amount (₹)'], ['2025-09-10', 'OUT002', 2500]]);
+    const { result, rows } = parseDepositUpload(ab);
+    expect(rows).toHaveLength(0);
+    expect(result.errors[0].message).toMatch(/no "PAN" column/);
   });
 });
 
@@ -316,21 +343,38 @@ describe('TdsService — uploadOffPlatform', () => {
     expect(data[1].amountPaise).toBe(100000n); // ₹1000
   });
 
-  it('apply=true with a blank-PAN row: stored as a no-PAN (__NO_PAN__) row with its Outlet Code; an invalid amount still fails', async () => {
+  it('apply=true: a blank-PAN row is rejected; a marker row whose Outlet Code is in this client is stored; an unknown code is rejected', async () => {
+    mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'OUT001', clientId: CLIENT_ID, partnerId: 'cpN' }]);
+    mockPrisma.channelPartner.findMany.mockResolvedValue([{ id: 'cpN', panNumber: null }]);
     const ab = buildXlsxBuffer([
       validHeader,
-      ['2025-08-15', '', 'OUT001', 500],     // blank PAN → no-PAN row
-      ['2025-09-01', 'ABCDE1234F', '', 500], // valid
-      ['2025-09-01', 'ABCDE1234F', '', 0],   // invalid amount → rejected
+      ['2025-08-15', '', 'OUT001', 500],            // blank PAN → rejected
+      ['2025-08-15', 'PANNOTAVBL', 'out001', 500],  // marker + known outlet (case-insensitive) → stored
+      ['2025-08-15', 'PANNOTAVBL', 'NOPE', 500],    // marker + unknown outlet → rejected
+      ['2025-09-01', 'ABCDE1234F', '', 500],        // valid PAN row
     ]);
     const result = await service.uploadOffPlatform(CLIENT_ID, USER_ID, multerFile(ab), true);
 
-    expect(result.failed).toBe(1);
+    expect(result.failed).toBe(2);
     expect(result.succeeded).toBe(2);
-
+    expect(result.errors.map((e) => e.message)).toEqual([
+      'Row 2: PAN is required — enter the PAN, or PANNOTAVBL if the deductee has none',
+      'Row 4: Outlet Code "NOPE" not found in this client',
+    ]);
     const callArg = mockPrisma.tdsOffPlatformEntry.createMany.mock.calls[0][0];
     expect(callArg.data).toHaveLength(2);
-    expect(callArg.data[0]).toMatchObject({ panNumber: '__NO_PAN__', outletCode: 'OUT001' });
+    expect(callArg.data[0]).toMatchObject({ panNumber: '__NO_PAN__', outletCode: 'out001' });
+  });
+
+  it('a marker row whose outlet owner HAS a PAN on file is kept and flagged in warnings', async () => {
+    mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'OUT001', clientId: CLIENT_ID, partnerId: 'cpP' }]);
+    mockPrisma.channelPartner.findMany.mockResolvedValue([{ id: 'cpP', panNumber: 'ABCDE1234F' }]);
+    const ab = buildXlsxBuffer([validHeader, ['2025-08-15', 'NA', 'OUT001', 500]]);
+    const result = await service.uploadOffPlatform(CLIENT_ID, USER_ID, multerFile(ab), false);
+    expect(result.failed).toBe(0);
+    expect(result.warnings).toEqual([
+      { row: 2, message: 'Row 2: PAN found on file for outlet OUT001 — counted under that PAN' },
+    ]);
   });
 
   it('apply=true with zero rows (all invalid) does NOT call createMany', async () => {
@@ -497,15 +541,39 @@ describe('TdsService — uploadDeposit', () => {
     expect(mockPrisma.tdsDeposit.createMany).not.toHaveBeenCalled();
   });
 
-  it('194C deposit: blank PAN is accepted as a no-PAN deposit (stored __NO_PAN__ with its Outlet Code)', async () => {
-    const ab = buildXlsxBuffer([
-      depositHeader,
-      ['2025-09-15', 'OUT9', '', 5000],
-    ]);
+  it('194C deposit: blank PAN rejected', async () => {
+    const ab = buildXlsxBuffer([depositHeader, ['2025-09-15', 'OUT9', '', 5000]]);
     const result = await service.uploadDeposit('194C', null, USER_ID, multerFile(ab), true);
-    expect(result.failed).toBe(0);
+    expect(result.failed).toBe(1);
+    expect(mockPrisma.tdsDeposit.createMany).not.toHaveBeenCalled();
+  });
+
+  it('194C no-PAN deposit: an ambiguous Outlet Code needs the Client column; with it the row stores the outlet tenant', async () => {
+    mockPrisma.outlet.findMany.mockResolvedValue([
+      { outletCode: 'OUT9', clientId: 'bajaj', partnerId: null },
+      { outletCode: 'OUT9', clientId: 'deoleo', partnerId: null },
+    ]);
+    const amb = buildXlsxBuffer([['Date', 'Outlet Code', 'PAN', 'Amount (₹)', 'Client'], ['2025-09-15', 'OUT9', 'PANNOTAVBL', 5000, '']]);
+    const r1 = await service.uploadDeposit('194C', null, USER_ID, multerFile(amb), false);
+    expect(r1.failed).toBe(1);
+    expect(r1.errors[0].message).toBe('Row 2: Outlet Code "OUT9" exists in more than one client — add the "Client" column (client slug) for this row');
+
+    const ok = buildXlsxBuffer([['Date', 'Outlet Code', 'PAN', 'Amount (₹)', 'Client'], ['2025-09-15', 'out9', 'PANNOTAVBL', 5000, 'BAJAJ']]);
+    const r2 = await service.uploadDeposit('194C', null, USER_ID, multerFile(ok), true);
+    expect(r2.failed).toBe(0);
     const data = mockPrisma.tdsDeposit.createMany.mock.calls[0][0].data;
-    expect(data[0]).toMatchObject({ panNumber: '__NO_PAN__', outletCode: 'OUT9', section: 'SEC_194C' });
+    expect(data[0]).toMatchObject({ panNumber: '__NO_PAN__', outletCode: 'out9', section: 'SEC_194C', clientId: 'bajaj' });
+    // 194C dedup is not scoped by clientId (a no-PAN row now carries its outlet's tenant)
+    expect(mockPrisma.tdsDeposit.findMany.mock.calls.at(-1)![0].where).not.toHaveProperty('clientId');
+  });
+
+  it('194C deposit template carries the optional Client column; 194R does not', () => {
+    const read = (b: Buffer) => {
+      const wb = XLSX.read(b, { type: 'buffer' });
+      return XLSX.utils.sheet_to_json<string[]>(wb.Sheets[wb.SheetNames[0]], { header: 1 })[0];
+    };
+    expect(read(service.depositTemplate('194C'))).toEqual(['Date', 'Outlet Code', 'PAN', 'Amount (₹)', 'Client']);
+    expect(read(service.depositTemplate())).toEqual(['Date', 'Outlet Code', 'PAN', 'Amount (₹)']);
   });
 
   it('deposit uploadBatchId differs for DIFFERENT files, matches for IDENTICAL files', async () => {

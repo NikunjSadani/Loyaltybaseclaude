@@ -202,14 +202,18 @@ export class TdsController {
   // ─── P6.5b: TDS deposit upload ────────────────────────────────────────────
 
   /**
-   * GET /v1/admin/tds/deposits/template
-   * Returns a blank .xlsx with columns: Date · Outlet Code · PAN · Amount (₹)
+   * GET /v1/admin/tds/deposits/template[?section=194C]
+   * Returns a blank .xlsx with columns: Date · Outlet Code · PAN · Amount (₹); the 194C template
+   * adds an optional "Client" column (client slug — disambiguates a no-PAN row's Outlet Code).
    * Roles: CLIENT_ADMIN or GIFSY_ADMIN.
    */
   @Get('deposits/template')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
-  getDepositTemplate(@Res({ passthrough: true }) res: Response): StreamableFile {
-    const buffer = this.tds.depositTemplate();
+  getDepositTemplate(
+    @Res({ passthrough: true }) res: Response,
+    @Query('section') section?: string,
+  ): StreamableFile {
+    const buffer = this.tds.depositTemplate(section === '194C' ? '194C' : '194R');
     res.setHeader('Content-Disposition', 'attachment; filename="tds-deposit-template.xlsx"');
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

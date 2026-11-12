@@ -18,6 +18,9 @@ import {
   parsePayoutUtrUpload,
   NOT_PROCESSED_ERROR,
   ORDER_REFUNDED_ERROR,
+  alreadySentToBankError,
+  normaliseRef,
+  type KnownRefUse,
   type PayoutUtrTxnInfo,
 } from './payout-utr.helpers';
 
@@ -27,6 +30,22 @@ const ORDER_REFUNDED_STATUSES: RedemptionStatus[] = [
   RedemptionStatus.RETURNED,
   RedemptionStatus.FAILED,
 ];
+/** providerResponse.paidOffPlatform === true (set when a payment was recorded as paid outside Gifsy). */
+function isPaidOffPlatform(providerResponse: unknown): boolean {
+  return (
+    !!providerResponse &&
+    typeof providerResponse === 'object' &&
+    (providerResponse as Record<string, unknown>).paidOffPlatform === true
+  );
+}
+
+/** The mode-required beneficiary fields are missing on the frozen snapshot. */
+function missingBeneficiary(t: { payoutMode: string; upiId: string | null; bankAccountNumber: string | null; ifscCode: string | null }): boolean {
+  if (t.payoutMode === 'UPI') return !t.upiId;
+  if (t.payoutMode === 'BANK_TRANSFER') return !t.bankAccountNumber || !t.ifscCode;
+  return false;
+}
+
 /** True when the linked order is cancelled/returned/failed or its points were refunded (M2 claim → 0). */
 function isOrderRefunded(o: { status?: RedemptionStatus | string | null; pointsDeducted?: number | null } | null | undefined): boolean {
   if (!o) return false;
@@ -726,6 +745,9 @@ export class PayoutsService {
         upiId: true,
         bankAccountNumber: true,
         ifscCode: true,
+        // For the "already marked paid on <date> (<off-platform|bank>)" notice.
+        completedAt: true,
+        providerResponse: true,
       },
     });
 
@@ -740,20 +762,22 @@ export class PayoutsService {
     // detection), upper-cased to match the parser's normalisation.
     const usedUtrs = await this.prisma.payoutTransaction.findMany({
       where: { batch: { clientId: user.clientId }, providerRefId: { not: null } },
-      select: { providerRefId: true, partnerId: true },
+      select: { providerRefId: true, partnerId: true, providerResponse: true },
     });
     const knownUtrs = new Set<string>(
       usedUtrs
         .filter((t) => t.providerRefId != null)
         .map((t) => t.providerRefId!.toUpperCase()),
     );
-    const knownUtrPartners = new Map<string, Set<string>>();
+    // NORMALISED reference → every past use (partner + was it an off-platform record?). A Y row may
+    // reuse only its own partner's off-platform references, never a genuine bank UTR.
+    const knownRefs = new Map<string, KnownRefUse[]>();
     for (const t of usedUtrs) {
       if (t.providerRefId == null) continue;
-      const k = t.providerRefId.toUpperCase();
-      const set = knownUtrPartners.get(k) ?? new Set<string>();
-      if (t.partnerId) set.add(t.partnerId);
-      knownUtrPartners.set(k, set);
+      const k = normaliseRef(t.providerRefId);
+      const list = knownRefs.get(k) ?? [];
+      list.push({ partnerId: t.partnerId ?? null, offPlatform: isPaidOffPlatform(t.providerResponse) });
+      knownRefs.set(k, list);
     }
 
     // Linked redemption state — an off-platform PAID must never "pay" an order whose points were
@@ -778,10 +802,18 @@ export class PayoutsService {
           amountPaise: t.amountPaise,
           partnerId: t.partnerId,
           orderRefunded: t.redemptionOrderId ? isOrderRefunded(orderById.get(t.redemptionOrderId)) : false,
+          paidOn: t.completedAt ? istDateKey(t.completedAt) : undefined,
+          paidOffPlatform: isPaidOffPlatform(t.providerResponse),
         },
       ]),
     );
-    const parseResult = parsePayoutUtrUpload(ab, { batchTxnIds, knownUtrs, txnInfo, knownUtrPartners });
+    const parseResult = parsePayoutUtrUpload(ab, {
+      batchTxnIds,
+      knownUtrs,
+      txnInfo,
+      knownRefs,
+      batchRef: batch.batchCode ?? batchId,
+    });
 
     // Preview unless apply=true.
     if (!apply) {
@@ -922,6 +954,15 @@ export class PayoutsService {
           continue;
         }
         const offPlatform = row.outcome === 'PAID' && row.paidOffPlatform;
+        if (offPlatform && !unprocessed) {
+          skipped.push({
+            rowNum: row.rowNum,
+            txnId: txn.id,
+            outcome: row.outcome,
+            reason: alreadySentToBankError(batch.batchCode ?? batchId),
+          });
+          continue;
+        }
         if (offPlatform && txn.redemptionOrderId) {
           const order = await tx.redemptionOrder.findFirst({
             where: { id: txn.redemptionOrderId },
@@ -995,7 +1036,11 @@ export class PayoutsService {
                   source: 'PAYOUT_UTR_UPLOAD',
                   paidOffPlatform: true,
                   // Processing gates this payment bypassed because it was paid outside Gifsy.
-                  bypassedGates: bypassedGatesByPartner.get(txn.partnerId) ?? [],
+                  bypassedGates: [
+                    ...(bypassedGatesByPartner.get(txn.partnerId) ?? []),
+                    ...(unprocessed ? ['notProcessed'] : []),
+                    ...(missingBeneficiary(txn) ? ['missingBeneficiaryFields'] : []),
+                  ],
                 },
               },
             });
@@ -1229,7 +1274,18 @@ export class PayoutsService {
       }
     }
 
-    return { applied: true, paidCount, failedCount, reversedCount, offPlatformCount, skipped, blockedOrders };
+    return {
+      applied: true,
+      paidCount,
+      failedCount,
+      reversedCount,
+      offPlatformCount,
+      skipped,
+      blockedOrders,
+      // Rows for already-SUCCESS transactions — reported (possible double payment), never applied.
+      alreadyPaid: parseResult.alreadyPaid,
+      warnings: parseResult.warnings,
+    };
   }
 
   // ───────────────────────────────────────────────────────────────────────────

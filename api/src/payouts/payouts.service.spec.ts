@@ -1088,7 +1088,7 @@ describe('PayoutsService', () => {
           metadata: {
             batchId: 'b1', batchCode: 'PB-1', source: 'PAYOUT_UTR_UPLOAD', paidOffPlatform: true,
             // Gates bypassed by design are recorded (partner p1 here: no PAN, no KYC submission).
-            bypassedGates: ['noPan', 'kycNotApproved:NO_SUBMISSION'],
+            bypassedGates: ['noPan', 'kycNotApproved:NO_SUBMISSION', 'notProcessed', 'missingBeneficiaryFields'],
           },
         },
       });
@@ -1159,7 +1159,7 @@ describe('PayoutsService', () => {
     type Preview = { parseResult: { canProceed: boolean; rows: Array<{ txnId: string; status: string; errors: string[] }> } };
     async function preview(
       txns: Array<Record<string, unknown>>,
-      history: Array<{ providerRefId: string; partnerId: string }>,
+      history: Array<{ providerRefId: string; partnerId: string; providerResponse?: unknown }>,
       rows: Parameters<typeof buildOff2>[0],
       orders: Array<Record<string, unknown>> = [],
     ): Promise<Preview['parseResult']> {
@@ -1205,7 +1205,7 @@ describe('PayoutsService', () => {
     it('OFF-2: same reference allowed for the SAME partner (history + this upload), rejected across partners', async () => {
       const r = await preview(
         [pendingTxn({ id: 'a', partnerId: 'p1' }), pendingTxn({ id: 'b', partnerId: 'p1' }), pendingTxn({ id: 'c', partnerId: 'p2' })],
-        [{ providerRefId: 'CHQ 777', partnerId: 'p1' }],
+        [{ providerRefId: 'CHQ 777', partnerId: 'p1', providerResponse: { paidOffPlatform: true } }],
         [
           { txnId: 'a', utr: 'chq 777', status: 'PAID', off: 'Y' },
           { txnId: 'b', utr: 'CHQ 777', status: 'PAID', off: 'Y' },
@@ -1218,10 +1218,10 @@ describe('PayoutsService', () => {
 
       const ok = await preview(
         [pendingTxn({ id: 'a', partnerId: 'p1' }), pendingTxn({ id: 'b', partnerId: 'p1' })],
-        [{ providerRefId: 'CHQ 777', partnerId: 'p1' }],
+        [{ providerRefId: 'CHQ 777', partnerId: 'p1', providerResponse: { paidOffPlatform: true } }],
         [
           { txnId: 'a', utr: 'CHQ 777', status: 'PAID', off: 'Y' },
-          { txnId: 'b', utr: 'CHQ 777', status: 'PAID', off: 'Y' },
+          { txnId: 'b', utr: 'chq-777', status: 'PAID', off: 'Y' }, // normalised → same reference
         ],
       );
       expect(ok.canProceed).toBe(true);
@@ -1302,12 +1302,14 @@ describe('PayoutsService', () => {
       ]);
       await service.uploadPayoutUtr(gifsy, 'b1', buildOff2([{ txnId: 'txnP', utr: 'CASH 1', status: 'PAID', off: 'Y' }]), true);
       const meta = mockTx.auditLog.create.mock.calls[0][0].data.metadata;
-      expect(meta.bypassedGates).toEqual(['noPan', 'kycNotApproved:REJECTED', 'partnerInactive', 'partnerDeleted']);
+      expect(meta.bypassedGates).toEqual([
+        'noPan', 'kycNotApproved:REJECTED', 'partnerInactive', 'partnerDeleted', 'notProcessed', 'missingBeneficiaryFields',
+      ]);
       // a clean partner records an empty list
       jest.clearAllMocks();
       mockTx.payoutTransaction.updateMany.mockResolvedValue({ count: 1 });
       mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
-      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([pendingTxn()]).mockResolvedValueOnce([]);
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([pendingTxn({ upiId: 'p1@upi' })]).mockResolvedValueOnce([]);
       mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce([]);
       mockPrisma.channelPartner.findMany.mockResolvedValueOnce([
         { id: 'p1', panNumber: 'ABCDE1234F', isActive: true, deletedAt: null, kycSubmissions: [
@@ -1315,7 +1317,84 @@ describe('PayoutsService', () => {
         ] },
       ]);
       await service.uploadPayoutUtr(gifsy, 'b1', buildOff2([{ txnId: 'txnP', utr: 'CASH 2', status: 'PAID', off: 'Y' }]), true);
-      expect(mockTx.auditLog.create.mock.calls[0][0].data.metadata.bypassedGates).toEqual([]);
+      // clean partner + UPI present → only the inherent "notProcessed" (a Y row is by definition unprocessed)
+      expect(mockTx.auditLog.create.mock.calls[0][0].data.metadata.bypassedGates).toEqual(['notProcessed']);
+    });
+
+    // ── Round-3 audit ──────────────────────────────────────────────────────────────
+    it('R3-5: "Y" on a tx already sent to the bank (INITIATED) is rejected, naming the batch', async () => {
+      const r = await preview(
+        [pendingTxn({ id: 'a', status: 'INITIATED' }), pendingTxn({ id: 'b', status: 'PROCESSING', partnerId: 'p2' })],
+        [],
+        [
+          { txnId: 'a', utr: 'CASH 1', status: 'PAID', off: 'Y' },
+          { txnId: 'b', utr: 'CASH 2', status: 'PAID', off: 'Y' },
+        ],
+      );
+      const msg = 'This payment was already sent to the bank in batch PB-1. Only mark it paid outside the platform after the bank payment is confirmed failed/returned.';
+      expect(errorsOf(r, 'a')).toEqual([msg]);
+      expect(errorsOf(r, 'b')).toEqual([msg]);
+    });
+
+    it('R3-6: a row for an already-SUCCESS tx is a visible notice (preview + apply result), never applied', async () => {
+      const paidAt = new Date(Date.now() - 3 * 86_400_000);
+      const success = pendingTxn({ id: 's1', status: 'SUCCESS', completedAt: paidAt, providerResponse: { paidOffPlatform: true } });
+      const r = (await preview([success], [], [{ txnId: 's1', utr: 'UTR99998888', status: 'PAID' }])) as unknown as {
+        canProceed: boolean; alreadyPaid: Array<{ notice: string }>; rows: Array<{ status: string }>;
+      };
+      expect(r.rows[0].status).toBe('SKIP');
+      expect(r.alreadyPaid[0].notice).toMatch(/^Already marked paid on \d{4}-\d{2}-\d{2} \(off-platform\) — check for a double payment$/);
+      expect(r.canProceed).toBe(true); // a no-op re-upload stays applicable (idempotent)
+
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([pendingTxn({ id: 's1', status: 'SUCCESS', completedAt: paidAt, providerResponse: null })])
+        .mockResolvedValueOnce([]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce([]);
+      const res = (await service.uploadPayoutUtr(gifsy, 'b1', buildOff2([{ txnId: 's1', status: 'FAILED' }]), true)) as {
+        alreadyPaid: Array<{ notice: string }>;
+      };
+      expect(res.alreadyPaid[0].notice).toMatch(/\(bank\) — check for a double payment$/);
+      expect(mockTx.payoutTransaction.updateMany).not.toHaveBeenCalled();
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('R3-7: references are compared normalised; a Y row may not reuse a genuine bank UTR (any partner)', async () => {
+      const r = await preview(
+        [pendingTxn({ id: 'a', partnerId: 'p1' }), pendingTxn({ id: 'b', status: 'INITIATED', partnerId: 'p2' })],
+        [{ providerRefId: 'UTR12345678', partnerId: 'p1', providerResponse: null }],
+        [
+          { txnId: 'a', utr: 'utr-1234 5678', status: 'PAID', off: 'Y' }, // same partner, but it was a bank UTR
+          { txnId: 'b', utr: 'utr12345678', status: 'PAID' },              // non-Y duplicate (case-insensitive)
+        ],
+      );
+      expect(errorsOf(r, 'a').join(' ')).toMatch(/already used as a bank UTR/);
+      expect(errorsOf(r, 'b').join(' ')).toMatch(/has already been used/);
+    });
+
+    it('R3-8: "Amount paid (₹)" accepts ₹ / Rs / Rs. / INR prefixes and commas; unknown headers are listed as ignored', async () => {
+      const txns = ['a', 'b', 'c', 'd'].map((id, i) => pendingTxn({ id, partnerId: `p${i}` }));
+      const r = await preview(txns, [], [
+        { txnId: 'a', utr: 'R-A', status: 'PAID', off: 'Y', amt: 'Rs 1,500' },
+        { txnId: 'b', utr: 'R-B', status: 'PAID', off: 'Y', amt: 'Rs. 1500.00' },
+        { txnId: 'c', utr: 'R-C', status: 'PAID', off: 'Y', amt: 'INR 1,500' },
+        { txnId: 'd', utr: 'R-D', status: 'PAID', off: 'Y', amt: '₹1,500' },
+      ]);
+      for (const id of ['a', 'b', 'c', 'd']) expect(errorsOf(r, id)).toEqual([]);
+
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([pendingTxn()]).mockResolvedValueOnce([]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce([]);
+      const ws = XLSX.utils.aoa_to_sheet([
+        ['Transaction ID', 'UTR', 'Status', 'Paid outside platfrom (Y/N)'], // typo'd header
+        ['txnP', 'UTR12345678', 'FAILED', 'Y'],
+      ]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'UTR Upload');
+      const res = (await service.uploadPayoutUtr(
+        gifsy, 'b1', { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File, false,
+      )) as { parseResult: { warnings: string[] } };
+      expect(res.parseResult.warnings).toEqual(['Ignored columns (not recognised): "Paid outside platfrom (Y/N)"']);
     });
 
     it('template carries the three optional off-platform columns, blank', async () => {

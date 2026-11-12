@@ -100,11 +100,13 @@ export function buildOffPlatformTemplate(): Buffer {
 
 /**
  * Build a blank .xlsx template for the TDS deposit upload.
- * Columns: Date · Outlet Code · PAN · Amount (₹)
+ * Columns: Date · Outlet Code · PAN · Amount (₹)  (+ optional "Client" for the 194C template — the
+ * client slug that disambiguates a no-PAN row's Outlet Code across tenants).
  */
-export function buildDepositTemplate(): Buffer {
+export function buildDepositTemplate(section: '194R' | '194C' = '194R'): Buffer {
   const wb = XLSX.utils.book_new();
-  const header = XLSX.utils.aoa_to_sheet([['Date', 'Outlet Code', 'PAN', 'Amount (₹)']]);
+  const cols = ['Date', 'Outlet Code', 'PAN', 'Amount (₹)', ...(section === '194C' ? ['Client'] : [])];
+  const header = XLSX.utils.aoa_to_sheet([cols]);
   XLSX.utils.book_append_sheet(wb, header, 'TDS Deposits');
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 }
@@ -116,6 +118,8 @@ export interface ParsedOffPlatformRow {
   panNumber: string;
   outletCode: string | null;
   amountPaise: bigint;
+  /** Sheet row number (header = row 1) — for row-level upload messages. */
+  rowNum?: number;
 }
 
 export interface ParsedDepositRow {
@@ -123,6 +127,10 @@ export interface ParsedDepositRow {
   outletCode: string | null;
   panNumber: string;
   amountPaise: bigint;
+  /** Optional "Client" column (client slug) — 194C no-PAN rows only. */
+  clientSlug?: string | null;
+  /** Sheet row number (header = row 1) — for row-level upload messages. */
+  rowNum?: number;
 }
 
 // ─── Parse helpers ───────────────────────────────────────────────────────────
@@ -170,17 +178,52 @@ function readFirstSheet(ab: ArrayBufferLike): unknown[][] {
 }
 
 /**
- * Conventional "no PAN" values on TDS uploads / stored rows: blank, PANNOTAVBL, PANAPPLIED,
- * PANINVALID, NA, N/A and the `__NO_PAN__` sentinel (case-insensitive, trimmed). A no-PAN row is
- * attributed to its deductee via its Outlet Code (see TdsService).
+ * EXPLICIT "no PAN" markers accepted in an UPLOAD cell: PANNOTAVBL, PANAPPLIED, PANINVALID, NA, N/A
+ * and the `__NO_PAN__` sentinel (case-insensitive, trimmed). A BLANK cell is NOT a marker — it is
+ * rejected ("PAN is required…"). A marker row must carry an Outlet Code that resolves to an outlet
+ * (checked by TdsService on upload). Marker recognition applies ONLY to upload cells — stored PANs
+ * are never reinterpreted.
  */
 export const NO_PAN_MARKERS = ['PANNOTAVBL', 'PANAPPLIED', 'PANINVALID', 'NA', 'N/A', '__NO_PAN__'] as const;
 export function isNoPanMarker(pan: string | null | undefined): boolean {
   const v = String(pan ?? '').trim().toUpperCase();
-  return v === '' || (NO_PAN_MARKERS as readonly string[]).includes(v);
+  return v !== '' && (NO_PAN_MARKERS as readonly string[]).includes(v);
 }
 /** Stored form of any no-PAN marker on an upload row. */
 export const NO_PAN_STORED = '__NO_PAN__';
+/** Per-row error for a blank PAN cell. */
+export const PAN_REQUIRED_ERROR = 'PAN is required — enter the PAN, or PANNOTAVBL if the deductee has none';
+/** Whole-file error when no PAN column header is present. */
+export const PAN_COLUMN_MISSING_ERROR =
+  'The file has no "PAN" column (accepted headers: PAN, PAN No, PAN Number). Please use the template — no rows were read.';
+
+/** Index of the PAN column: "PAN", "PAN No", "PAN No.", "PAN Number" (case/spacing-insensitive). */
+function findPanColumn(header: string[]): number {
+  return header.findIndex((h) => {
+    const v = h.replace(/\./g, '').replace(/\s+/g, ' ').trim();
+    return v === 'pan' || v === 'pan no' || v === 'pan number';
+  });
+}
+
+/** Whole-file rejection result (no rows read). */
+function wholeFileError(dataRows: number, message: string): UploadResult {
+  return { processed: dataRows, succeeded: 0, skipped: 0, failed: dataRows, errors: [{ row: 1, message }] };
+}
+
+/**
+ * Shared PAN-cell rule for both TDS uploads. Returns the stored PAN or a per-row error message:
+ *   blank → error; marker → __NO_PAN__ (Outlet Code required); otherwise the upper-cased PAN.
+ */
+function readPanCell(cell: string, outletCode: string | null, rowNum: number): { pan: string } | { error: string } {
+  if (!cell) return { error: `Row ${rowNum}: ${PAN_REQUIRED_ERROR}` };
+  if (isNoPanMarker(cell)) {
+    if (!outletCode) {
+      return { error: `Row ${rowNum}: Outlet Code is required for a no-PAN (${cell}) row — it identifies the deductee` };
+    }
+    return { pan: NO_PAN_STORED };
+  }
+  return { pan: cell };
+}
 
 /**
  * Parse an off-platform 194R upload xlsx.
@@ -188,8 +231,9 @@ export const NO_PAN_STORED = '__NO_PAN__';
  *
  * Validation per row:
  *   - Date: required + parseable
- *   - PAN: uppercase + trim; a no-PAN marker (blank, PANNOTAVBL, PANAPPLIED, PANINVALID, NA, N/A,
- *     __NO_PAN__) is stored as __NO_PAN__ and attributed via the Outlet Code
+ *   - PAN: required (blank → "PAN is required — enter the PAN, or PANNOTAVBL…"); an explicit
+ *     marker (PANNOTAVBL, PANAPPLIED, PANINVALID, NA, N/A, __NO_PAN__) is stored as __NO_PAN__
+ *     and needs an Outlet Code. No PAN column at all → the whole file is rejected.
  *   - Outlet Code: optional
  *   - Amount (₹): required, positive number → rupeesToPaise → BigInt
  *
@@ -210,9 +254,11 @@ export function parseOffPlatformUpload(ab: ArrayBufferLike): {
   // Header detection (row 0) — find column indices
   const header = (data[0] as unknown[]).map((h) => String(h ?? '').trim().toLowerCase());
   const colDate = header.findIndex((h) => h === 'date');
-  const colPan = header.findIndex((h) => h === 'pan');
+  const colPan = findPanColumn(header);
   const colOutlet = header.findIndex((h) => h.includes('outlet'));
   const colAmount = header.findIndex((h) => h.includes('amount'));
+  // No PAN column → reject the WHOLE file (never default every row to no-PAN).
+  if (colPan === -1) return { result: wholeFileError(data.length - 1, PAN_COLUMN_MISSING_ERROR), rows: [] };
 
   const errors: UploadRowError[] = [];
   const accepted: ParsedOffPlatformRow[] = [];
@@ -234,14 +280,18 @@ export function parseOffPlatformUpload(ab: ArrayBufferLike): {
       continue;
     }
 
-    // PAN — a real PAN, or a no-PAN marker (blank / PANNOTAVBL / PANAPPLIED / PANINVALID / NA /
-    // N/A / __NO_PAN__) stored as __NO_PAN__ and attributed to its deductee via the Outlet Code.
-    const cellPan = colPan >= 0 ? String(row[colPan] ?? '').trim().toUpperCase() : '';
-    const rawPan = isNoPanMarker(cellPan) ? NO_PAN_STORED : cellPan;
-
-    // Outlet Code — optional (identifies the deductee of a no-PAN row)
+    // Outlet Code — optional for a PAN row; REQUIRED for a no-PAN marker row (identifies the deductee)
     const rawOutlet = colOutlet >= 0 ? String(row[colOutlet] ?? '').trim() : '';
     const outletCode = rawOutlet || null;
+
+    // PAN — required. A real PAN, or an explicit no-PAN marker (PANNOTAVBL / PANAPPLIED /
+    // PANINVALID / NA / N/A / __NO_PAN__) stored as __NO_PAN__. Blank → rejected.
+    const panRead = readPanCell(String(row[colPan] ?? '').trim().toUpperCase(), outletCode, rowNum);
+    if ('error' in panRead) {
+      errors.push({ row: rowNum, message: panRead.error });
+      continue;
+    }
+    const rawPan = panRead.pan;
 
     // Amount (₹) → paise
     const rawAmount = colAmount >= 0 ? row[colAmount] : undefined;
@@ -253,7 +303,7 @@ export function parseOffPlatformUpload(ab: ArrayBufferLike): {
     }
 
     const amountPaise = toPaiseBigInt(rupeesToPaise(amountRupees));
-    accepted.push({ entryDate, panNumber: rawPan, outletCode, amountPaise });
+    accepted.push({ entryDate, panNumber: rawPan, outletCode, amountPaise, rowNum });
   }
 
   return {
@@ -274,8 +324,9 @@ export function parseOffPlatformUpload(ab: ArrayBufferLike): {
  *
  * Validation per row:
  *   - Date: required + parseable
- *   - PAN: uppercase + trim; a no-PAN marker (blank, PANNOTAVBL, PANAPPLIED, PANINVALID, NA, N/A,
- *     __NO_PAN__) is stored as __NO_PAN__ and attributed via the Outlet Code
+ *   - PAN: required (blank → "PAN is required — enter the PAN, or PANNOTAVBL…"); an explicit
+ *     marker (PANNOTAVBL, PANAPPLIED, PANINVALID, NA, N/A, __NO_PAN__) is stored as __NO_PAN__
+ *     and needs an Outlet Code. No PAN column at all → the whole file is rejected.
  *   - Outlet Code: optional
  *   - Amount (₹): required, positive number → paise
  */
@@ -294,8 +345,11 @@ export function parseDepositUpload(ab: ArrayBufferLike): {
   const header = (data[0] as unknown[]).map((h) => String(h ?? '').trim().toLowerCase());
   const colDate = header.findIndex((h) => h === 'date');
   const colOutlet = header.findIndex((h) => h.includes('outlet'));
-  const colPan = header.findIndex((h) => h === 'pan');
+  const colPan = findPanColumn(header);
   const colAmount = header.findIndex((h) => h.includes('amount'));
+  // Optional "Client" (client slug) — used by 194C no-PAN rows to pick the outlet's tenant.
+  const colClient = header.findIndex((h) => h === 'client' || h === 'client slug');
+  if (colPan === -1) return { result: wholeFileError(data.length - 1, PAN_COLUMN_MISSING_ERROR), rows: [] };
 
   const errors: UploadRowError[] = [];
   const accepted: ParsedDepositRow[] = [];
@@ -318,9 +372,14 @@ export function parseDepositUpload(ab: ArrayBufferLike): {
     const rawOutlet = colOutlet >= 0 ? String(row[colOutlet] ?? '').trim() : '';
     const outletCode = rawOutlet || null;
 
-    // PAN — a real PAN, or a no-PAN marker (stored as __NO_PAN__; matched via the Outlet Code).
-    const cellPan = colPan >= 0 ? String(row[colPan] ?? '').trim().toUpperCase() : '';
-    const rawPan = isNoPanMarker(cellPan) ? NO_PAN_STORED : cellPan;
+    // PAN — required; explicit no-PAN marker → __NO_PAN__ (Outlet Code required). Blank → rejected.
+    const panRead = readPanCell(String(row[colPan] ?? '').trim().toUpperCase(), outletCode, rowNum);
+    if ('error' in panRead) {
+      errors.push({ row: rowNum, message: panRead.error });
+      continue;
+    }
+    const rawPan = panRead.pan;
+    const clientSlug = colClient >= 0 ? String(row[colClient] ?? '').trim() || null : null;
 
     const rawAmount = colAmount >= 0 ? row[colAmount] : undefined;
     const amountRupees = typeof rawAmount === 'number' ? rawAmount
@@ -331,7 +390,7 @@ export function parseDepositUpload(ab: ArrayBufferLike): {
     }
 
     const amountPaise = toPaiseBigInt(rupeesToPaise(amountRupees));
-    accepted.push({ depositDate, outletCode, panNumber: rawPan, amountPaise });
+    accepted.push({ depositDate, outletCode, panNumber: rawPan, amountPaise, clientSlug, rowNum });
   }
 
   return {

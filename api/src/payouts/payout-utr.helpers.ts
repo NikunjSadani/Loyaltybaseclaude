@@ -34,8 +34,21 @@ import * as XLSX from 'xlsx';
  *         history) but never across different partners;
  *       · optional "Amount paid (₹)": if filled it must equal the payout amount exactly; blank =
  *         the full amount;
- *       · rejected when the linked redemption was cancelled / its points refunded.
+ *       · rejected when the linked redemption was cancelled / its points refunded;
+ *       · rejected on a transaction already sent to the bank in a processed batch (INITIATED /
+ *         PROCESSING) — only after the bank payment is confirmed failed/returned;
+ *       · may not reuse a reference that was used as a genuine bank UTR (non-Y) anywhere.
+ *   - REFERENCES are compared NORMALISED (upper-case, all whitespace and / - . _ : # removed) for
+ *     duplicate detection; they are stored as typed.
+ *   - A row for a transaction that is ALREADY SUCCESS is never silently skipped: it becomes a
+ *     notice "Already marked paid on <date> (<off-platform|bank>) — check for a double payment".
+ *   - Unknown column headers are listed in `warnings` (ignored, never applied).
  */
+
+/** Duplicate-detection form of a UTR / reference: upper-case, whitespace and / - . _ : # removed. */
+export function normaliseRef(ref: string): string {
+  return ref.toUpperCase().replace(/[\s/\-._:#]/g, '');
+}
 
 const UTR_RE = /^[A-Z0-9]{8,22}$/i;
 
@@ -83,6 +96,16 @@ export const OFF_PLATFORM_NOTE_HEADER = 'Off-platform note';
 export const PROCESSED_PAYOUT_STATUSES = ['INITIATED', 'PROCESSING'] as const;
 /** Statuses still awaiting processing — PAID only with "Paid outside platform" = Y. */
 export const UNPROCESSED_PAYOUT_STATUSES = ['PENDING', 'HOLD'] as const;
+/** Per-row error: "Paid outside platform" = Y on a transaction already sent to the bank. */
+export function alreadySentToBankError(batchRef: string): string {
+  return `This payment was already sent to the bank in batch ${batchRef}. Only mark it paid outside the platform after the bank payment is confirmed failed/returned.`;
+}
+
+/** Per-row notice for a transaction that is already SUCCESS. */
+export function alreadyPaidNotice(paidOn: string, offPlatform: boolean): string {
+  return `Already marked paid on ${paidOn} (${offPlatform ? 'off-platform' : 'bank'}) — check for a double payment`;
+}
+
 /** Per-row error for a PAID row on an unprocessed transaction without the off-platform flag. */
 export const NOT_PROCESSED_ERROR =
   "This payment wasn't processed in a batch — process the batch first, or mark it 'Paid outside platform' if it was paid outside Gifsy.";
@@ -101,6 +124,8 @@ export interface PayoutUtrRow {
   paidOffPlatform: boolean;
   /** "Off-platform note" free text (blank when not given). */
   offPlatformNote: string;
+  /** Set on a row for an already-SUCCESS transaction (status SKIP; never applied). */
+  notice?: string;
 }
 
 /** Per-transaction context the service supplies to run the guards. */
@@ -111,6 +136,16 @@ export interface PayoutUtrTxnInfo {
   partnerId?: string;
   /** Linked redemption is CANCELLED/RETURNED/FAILED or its points were refunded. */
   orderRefunded?: boolean;
+  /** For a SUCCESS transaction: when it was marked paid (display date) and how. */
+  paidOn?: string;
+  paidOffPlatform?: boolean;
+}
+
+/** One past use of a reference (history), for the off-platform reuse rules. */
+export interface KnownRefUse {
+  partnerId: string | null;
+  /** true = recorded as paid OUTSIDE the platform; false = a genuine bank UTR. */
+  offPlatform: boolean;
 }
 
 export interface PayoutUtrParseResult {
@@ -118,6 +153,10 @@ export interface PayoutUtrParseResult {
   rows: PayoutUtrRow[];
   hasErrors: boolean;
   canProceed: boolean;
+  /** Non-blocking notices, e.g. "Ignored columns: …". */
+  warnings: string[];
+  /** Rows for already-SUCCESS transactions (rowNum + notice) — reported, never applied. */
+  alreadyPaid: Array<{ rowNum: number; txnId: string; notice: string }>;
   summary: {
     total: number;
     ok: number;
@@ -143,12 +182,22 @@ export interface ParsePayoutUtrCtx {
    * reuse a reference of the SAME partner. Omitted → any history reuse is rejected.
    */
   knownUtrPartners?: Map<string, Set<string>>;
+  /**
+   * NORMALISED reference → every past use (partner + off-platform?). Supersedes knownUtrPartners
+   * when given (the service always passes it).
+   */
+  knownRefs?: Map<string, KnownRefUse[]>;
+  /** Shown in the "already sent to the bank in batch …" error. */
+  batchRef?: string;
 }
 
-/** "1,500.00" / "₹1500" / 1500 → paise, or null when not a number. */
-function parseRupeesToPaise(raw: string | number): number | null {
+/** "1,500.00" / "₹1500" / "Rs 1,500" / "Rs. 1500" / "INR 1500" / 1500 → paise, or null. */
+export function parseRupeesToPaise(raw: string | number): number | null {
   if (typeof raw === 'number') return Number.isFinite(raw) ? Math.round(raw * 100) : null;
-  const cleaned = raw.replace(/[₹,\s]/g, '');
+  const cleaned = raw
+    .trim()
+    .replace(/^(₹|rs\.?|inr)\s*/i, '')
+    .replace(/[,\s]/g, '');
   if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) return null;
   return Math.round(parseFloat(cleaned) * 100);
 }
@@ -159,6 +208,8 @@ function emptyResult(headerError: string | null): PayoutUtrParseResult {
     rows: [],
     hasErrors: false,
     canProceed: false,
+    warnings: [],
+    alreadyPaid: [],
     summary: { total: 0, ok: 0, skipped: 0, errors: 0, paidCount: 0, failedCount: 0 },
   };
 }
@@ -184,7 +235,8 @@ export function parsePayoutUtrUpload(
   buffer: ArrayBufferLike,
   ctx: ParsePayoutUtrCtx,
 ): PayoutUtrParseResult {
-  const { batchTxnIds, knownUtrs, txnInfo, knownUtrPartners } = ctx;
+  const { batchTxnIds, knownUtrs, txnInfo, knownUtrPartners, knownRefs, batchRef } = ctx;
+  const knownNormUtrs = new Set([...knownUtrs].map(normaliseRef));
 
   if (batchTxnIds.size === 0) {
     return emptyResult('No payout transactions found in this batch.');
@@ -227,6 +279,15 @@ export function parsePayoutUtrUpload(
     );
   }
 
+  // Unknown / typo'd headers are IGNORED — listed so a mistyped "Paid outside platform" column can't
+  // silently drop the flag.
+  const knownHeaders = new Set<string>([...PAYOUT_UTR_HEADERS, 'Remarks']);
+  const ignored = headers.filter((h) => h !== '' && !knownHeaders.has(h));
+  const warnings: string[] = ignored.length
+    ? [`Ignored columns (not recognised): ${ignored.map((h) => `"${h}"`).join(', ')}`]
+    : [];
+  const alreadyPaid: PayoutUtrParseResult['alreadyPaid'] = [];
+
   // Pre-pass: every PAID reference in this upload → the rows using it (Y-ness + partner), so the
   // in-upload duplicate rule is order-independent: a reference may repeat ONLY when every row using
   // it is an off-platform (Y) row of the SAME partner.
@@ -234,7 +295,7 @@ export function parsePayoutUtrUpload(
   for (let rIdx = 1; rIdx < allRows.length; rIdx++) {
     const r = allRows[rIdx];
     const st = normaliseStatus(String(r[statusIdx] ?? ''));
-    const ref = utrIdx !== -1 ? String(r[utrIdx] ?? '').trim().toUpperCase() : '';
+    const ref = utrIdx !== -1 ? normaliseRef(String(r[utrIdx] ?? '').trim()) : '';
     if (st !== 'PAID' || !ref) continue;
     const id = String(r[txnIdIdx] ?? '').trim();
     const y = offPlatformIdx !== -1 && normaliseYesNo(String(r[offPlatformIdx] ?? '')) === true;
@@ -281,6 +342,26 @@ export function parsePayoutUtrUpload(
       continue;
     }
 
+    // Already SUCCESS → a NOTICE, never applied and never silent (possible double payment).
+    const infoEarly = txnId ? txnInfo?.get(txnId) : undefined;
+    if (infoEarly?.status === 'SUCCESS' && (outcome === 'PAID' || outcome === 'FAILED')) {
+      const notice = alreadyPaidNotice(infoEarly.paidOn ?? 'an earlier date', !!infoEarly.paidOffPlatform);
+      alreadyPaid.push({ rowNum: rIdx + 1, txnId, notice });
+      rows.push({
+        rowNum: rIdx + 1,
+        txnId,
+        outcome: null,
+        utr: utrRaw,
+        status: 'SKIP',
+        remarks: notice,
+        errors: [],
+        paidOffPlatform: offPlatform === true,
+        offPlatformNote: offNoteRaw,
+        notice,
+      });
+      continue;
+    }
+
     const errors: string[] = [];
 
     if (!txnId) {
@@ -305,14 +386,23 @@ export function parsePayoutUtrUpload(
             `Reference "${utrRaw}" is not valid (1–60 characters: letters, digits, space and / - . _ : #).`,
           );
         }
-        const normRef = utrRaw.toUpperCase();
+        const normRef = normaliseRef(utrRaw);
         const partnerId = info?.partnerId;
-        const historyOwners = knownUtrPartners?.get(normRef);
-        const historyConflict = knownUtrPartners
-          ? !!historyOwners && (!partnerId || [...historyOwners].some((p) => p !== partnerId))
-          : knownUtrs.has(normRef);
-        if (historyConflict) {
-          errors.push(`Reference "${utrRaw}" has already been used for a different partner.`);
+        if (knownRefs) {
+          const past = knownRefs.get(normRef) ?? [];
+          if (past.some((u) => !u.offPlatform)) {
+            errors.push(`Reference "${utrRaw}" was already used as a bank UTR — it can't be reused for an off-platform payment.`);
+          } else if (past.some((u) => !partnerId || u.partnerId !== partnerId)) {
+            errors.push(`Reference "${utrRaw}" has already been used for a different partner.`);
+          }
+        } else {
+          const historyOwners = knownUtrPartners?.get(normRef);
+          const historyConflict = knownUtrPartners
+            ? !!historyOwners && (!partnerId || [...historyOwners].some((p) => p !== partnerId))
+            : knownNormUtrs.has(normRef);
+          if (historyConflict) {
+            errors.push(`Reference "${utrRaw}" has already been used for a different partner.`);
+          }
         }
         const uses = refUses.get(normRef) ?? [];
         if (uses.length > 1 && !uses.every((u) => u.y && !!partnerId && u.partnerId === partnerId)) {
@@ -324,8 +414,8 @@ export function parsePayoutUtrUpload(
             `UTR "${utrRaw}" is not valid (must be 8–22 alphanumeric characters).`,
           );
         }
-        const normUtr = utrRaw.toUpperCase();
-        if (knownUtrs.has(normUtr)) {
+        const normUtr = normaliseRef(utrRaw);
+        if (knownNormUtrs.has(normUtr) || (knownRefs?.has(normUtr) ?? false)) {
           errors.push(`UTR "${utrRaw}" has already been used.`);
         }
         // Unchanged rule for non-off-platform rows: the FIRST use in the file is fine, every later
@@ -334,7 +424,7 @@ export function parsePayoutUtrUpload(
           errors.push(`UTR "${utrRaw}" appears more than once in this upload.`);
         }
       }
-      seenRefs.add(utrRaw.toUpperCase());
+      seenRefs.add(normaliseRef(utrRaw));
     }
 
     if (offPlatform === 'INVALID') {
@@ -350,6 +440,11 @@ export function parsePayoutUtrUpload(
       const unprocessed = (UNPROCESSED_PAYOUT_STATUSES as readonly string[]).includes(info.status);
       if (unprocessed && offPlatform !== true) {
         errors.push(NOT_PROCESSED_ERROR);
+      }
+      // Already sent to the bank in a processed batch — marking it paid outside would risk paying
+      // twice. Only after the bank payment is confirmed failed/returned.
+      if (processed && offPlatform === true) {
+        errors.push(alreadySentToBankError(batchRef ?? 'this batch'));
       }
       if ((processed || unprocessed) && offPlatform === true && !(Number(info.amountPaise) > 0)) {
         errors.push('Cannot record an off-platform payment for a transaction with no valid amount.');
@@ -400,7 +495,11 @@ export function parsePayoutUtrUpload(
     headerError: null,
     rows,
     hasErrors: errCount > 0,
-    canProceed: okCount > 0 && errCount === 0,
+    // An upload whose only rows are "already paid" notices still proceeds (a no-op re-upload stays
+    // idempotent) — the notices are returned in the result, never swallowed.
+    canProceed: (okCount > 0 || alreadyPaid.length > 0) && errCount === 0,
+    warnings,
+    alreadyPaid,
     summary: {
       total: okCount + errCount,
       ok: okCount,

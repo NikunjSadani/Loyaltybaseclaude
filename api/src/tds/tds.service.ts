@@ -35,7 +35,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
-  isNoPanMarker,
   fyFromLabel,
   fyLabelForPeriod,
   periodWindowForFy,
@@ -55,7 +54,7 @@ import {
 } from './tds.helpers';
 import { TdsStatutoryConfigService } from './tds-statutory.config.service';
 import { withholdingTdsPaise } from './tds-methodology.helper';
-import type { UploadResult } from './dto/tds.dto';
+import type { UploadResult, UploadRowError } from './dto/tds.dto';
 import { buildXlsx } from '../common/xlsx';
 import { paiseToRupees } from '../common/money';
 
@@ -81,14 +80,17 @@ export const noPanOutletKey = (clientId: string, outletCode: string): string =>
 export const isNoPanKey = (key: string): boolean =>
   key === NO_PAN_KEY || key.startsWith(`${NO_PAN_KEY}:`);
 /**
- * A raw PAN value that denotes "no PAN": blank, a `__NO_PAN__…` sentinel, or a conventional marker
- * (PANNOTAVBL / PANAPPLIED / PANINVALID / NA / N/A) — see tds.helpers isNoPanMarker.
+ * A STORED PAN value that means "no PAN": blank, or the `__NO_PAN__…` sentinel the upload parsers
+ * write for an explicit marker. Stored values such as 'NA' / 'PANNOTAVBL' on a partner or on an
+ * older row are NOT reinterpreted — marker recognition happens only on upload cells (tds.helpers).
  */
 const isNoPanCell = (pan: string | null | undefined): boolean =>
-  isNoPanMarker(pan) || isNoPanKey(String(pan).trim().toUpperCase());
+  !pan || !pan.trim() || isNoPanKey(pan.trim().toUpperCase());
 
 /** Label of the row holding no-PAN deposits that cannot be linked to a deductee. */
 export const UNLINKED_NO_PAN_DEPOSIT_LABEL = 'Earlier no-PAN deposits (not linked to a partner)';
+/** Row key of that row (distinct from the identity-less base bucket '__NO_PAN__'). */
+export const UNLINKED_NO_PAN_DEPOSIT_KEY = `${NO_PAN_KEY}:unlinked-deposits`;
 
 /**
  * Export "Deductee Name" for a no-PAN row: "<owner/business name> (NO PAN ON FILE)" for a
@@ -101,19 +103,17 @@ function noPanDeducteeName(d: NoPanDeductee | undefined, unlinked?: boolean): st
 }
 
 /**
- * Totals over 194R/194C rows. The "Earlier no-PAN deposits" row (outstanding 0 on the row) is
- * netted HERE: total outstanding = Σ row outstanding − Σ unlinked deposits, so
- * total outstanding = total liability − total deposited (− withheld), exactly as with the old pool.
+ * Totals over 194R/194C rows — always exactly Σ rows. (The "Earlier no-PAN deposits" row carries
+ * its deposit as a negative outstanding, so total outstanding = total liability − total deposited.)
  */
 function summariseRows(
-  rows: Array<{ baseFyTotalPaise: bigint; liabilityPaise: bigint; depositedPaise: bigint; outstandingPaise: bigint; unlinkedNoPanDeposit?: true }>,
+  rows: Array<{ baseFyTotalPaise: bigint; liabilityPaise: bigint; depositedPaise: bigint; outstandingPaise: bigint }>,
 ) {
-  const unlinked = rows.filter((r) => r.unlinkedNoPanDeposit).reduce((s, r) => s + r.depositedPaise, 0n);
   return {
     totalBasePaise: rows.reduce((s, r) => s + r.baseFyTotalPaise, 0n),
     totalLiabilityPaise: rows.reduce((s, r) => s + r.liabilityPaise, 0n),
     totalDepositedPaise: rows.reduce((s, r) => s + r.depositedPaise, 0n),
-    totalOutstandingPaise: rows.reduce((s, r) => s + r.outstandingPaise, 0n) - unlinked,
+    totalOutstandingPaise: rows.reduce((s, r) => s + r.outstandingPaise, 0n),
     rowCount: rows.length,
   };
 }
@@ -131,9 +131,8 @@ export interface TdsRow194R {
   panNumber: string; // a PAN, a per-deductee `__NO_PAN__:…` key, or the unattributed '__NO_PAN__'
   noPanDeductee?: NoPanDeductee;
   /**
-   * The "Earlier no-PAN deposits (not linked to a partner)" row: no base, no liability, its
-   * deposit shown with outstanding 0 — and netted against the total no-PAN liability in every
-   * summary (summarise194R), so tenant totals = Σ liability − Σ deposited, as before.
+   * The "Earlier no-PAN deposits (not linked to a partner)" row: no base, no liability, the
+   * deposit with outstanding = −deposit. Always present when such deposits exist; totals = Σ rows.
    */
   unlinkedNoPanDeposit?: true;
   fyLabel: string;
@@ -397,18 +396,23 @@ export class TdsService {
       .filter((r) => isNoPanCell(r.panNumber) && r.outletCode?.trim())
       .map((r) => r.outletCode!.trim());
     const outletsByCode = await this.outletsByCodeCI(noPanCodes, clientId);
-    const noPanKeyForCode = (code: string | null | undefined): string | null => {
+    const ownerPans = await this.ownerPansOf(outletsByCode);
+    // Outlet → deductee key: the owner's PAN when one is ON FILE (the amount counts under that PAN —
+    // flagged on upload), else the owner's own no-PAN key (owner-less outlet → per-outlet key).
+    const keyForCode = (code: string | null | undefined): string | null => {
       const c = code?.trim();
       if (!c) return null;
       const matches = outletsByCode.get(c.toUpperCase()) ?? [];
       if (matches.length !== 1) return null;
       const o = matches[0];
+      const pan = o.partnerId ? ownerPans.get(o.partnerId) : null;
+      if (pan) return pan;
       return o.partnerId ? noPanPartnerKey(o.partnerId) : noPanOutletKey(o.clientId, o.outletCode);
     };
 
     for (const e of offPlatform) {
-      // No-PAN off-platform benefit → the outlet owner's own deductee key (bare bucket if unlinkable).
-      addToPan(e.panNumber, e.amountPaise, isNoPanCell(e.panNumber) ? (noPanKeyForCode(e.outletCode) ?? undefined) : undefined);
+      // No-PAN off-platform benefit → the outlet owner's PAN / own deductee key (bare bucket if unlinkable).
+      addToPan(e.panNumber, e.amountPaise, isNoPanCell(e.panNumber) ? (keyForCode(e.outletCode) ?? undefined) : undefined);
     }
 
     const deposited = new Map<string, bigint>();
@@ -419,10 +423,10 @@ export class TdsService {
         deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
         continue;
       }
-      // No-PAN deposit: its deductee's row when it has one this FY; otherwise (no Outlet Code,
-      // unknown code, or a deductee with no base) it joins the identity-less pool.
-      const key = noPanKeyForCode(d.outletCode);
-      if (key && accum.has(key)) deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
+      // No-PAN deposit: the owner's PAN row (like any PAN deposit), or its no-PAN deductee's row when
+      // it has one this FY; otherwise (no Outlet Code / unknown code / no base) → "Earlier" row.
+      const key = keyForCode(d.outletCode);
+      if (key && (!isNoPanKey(key) || accum.has(key))) deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
       else unlinkedNoPanDepositPaise += d.amountPaise;
     }
 
@@ -446,15 +450,17 @@ export class TdsService {
         outstandingPaise,
       });
     }
-    this.placeUnlinkedNoPanDeposits(rows, unlinkedNoPanDepositPaise, (dep) => ({
-      panNumber: NO_PAN_KEY,
-      fyLabel,
-      baseFyTotalPaise: 0n,
-      liabilityPaise: 0n,
-      depositedPaise: dep,
-      outstandingPaise: 0n,
-      unlinkedNoPanDeposit: true as const,
-    }));
+    if (unlinkedNoPanDepositPaise > 0n) {
+      rows.push({
+        panNumber: UNLINKED_NO_PAN_DEPOSIT_KEY,
+        fyLabel,
+        baseFyTotalPaise: 0n,
+        liabilityPaise: 0n,
+        depositedPaise: unlinkedNoPanDepositPaise,
+        outstandingPaise: -unlinkedNoPanDepositPaise,
+        unlinkedNoPanDeposit: true as const,
+      });
+    }
     await this.attachNoPanDeductees(rows, clientId);
 
     // Sort: threshold-met first (descending by base), then below-threshold
@@ -471,26 +477,23 @@ export class TdsService {
   }
 
   /**
-   * Identity-less no-PAN deposits (legacy pooled deposits / no Outlet Code / a deductee with no base
-   * this FY) — exactly as the old single '__NO_PAN__' bucket treated them:
-   *   - an identity-less no-PAN BASE row exists → the deposit nets on that row (as before);
-   *   - else some no-PAN deductee exists → one "Earlier no-PAN deposits (not linked to a partner)"
-   *     row (outstanding 0; summaries net it against the total no-PAN liability);
-   *   - else (no no-PAN base at all) → dropped, as before — totals byte-identical.
+   * owner partnerId → its PAN, for owners of the given outlets that have a REAL PAN on file
+   * (blank / `__NO_PAN__` excluded). No query when there are no owners.
    */
-  private placeUnlinkedNoPanDeposits<R extends { panNumber: string; depositedPaise: bigint; outstandingPaise: bigint }>(
-    rows: R[],
-    unlinkedPaise: bigint,
-    makeRow: (deposited: bigint) => R,
-  ): void {
-    if (unlinkedPaise === 0n) return;
-    const bare = rows.find((r) => r.panNumber === NO_PAN_KEY);
-    if (bare) {
-      bare.depositedPaise += unlinkedPaise;
-      bare.outstandingPaise -= unlinkedPaise;
-      return;
+  private async ownerPansOf(
+    outletsByCode: Map<string, Array<{ partnerId: string | null }>>,
+  ): Promise<Map<string, string>> {
+    const ids = [...new Set([...outletsByCode.values()].flat().map((o) => o.partnerId).filter((x): x is string => !!x))];
+    const out = new Map<string, string>();
+    if (!ids.length) return out;
+    const owners = await this.prisma.channelPartner.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, panNumber: true },
+    });
+    for (const o of owners) {
+      if (!isNoPanCell(o.panNumber)) out.set(o.id, o.panNumber!.trim().toUpperCase());
     }
-    if (rows.some((r) => isNoPanKey(r.panNumber))) rows.push(makeRow(unlinkedPaise));
+    return out;
   }
 
   /** Summary for 194R: totals across all PAN rows. */
@@ -662,6 +665,7 @@ export class TdsService {
       deposits.filter((d) => isNoPanCell(d.panNumber) && d.outletCode?.trim()).map((d) => d.outletCode!.trim()),
       null,
     );
+    const ownerPans194C = await this.ownerPansOf(outletsByCode);
     const deposited = new Map<string, bigint>();
     let unlinkedNoPanDepositPaise = 0n;
     for (const d of deposits) {
@@ -673,8 +677,12 @@ export class TdsService {
       const oc = d.outletCode?.trim();
       const candidates = oc ? (outletsByCode.get(oc.toUpperCase()) ?? []) : [];
       const scoped = d.clientId ? candidates.filter((c) => c.clientId === d.clientId) : candidates;
-      const key = scoped.length === 1 ? noPanOutletKey(scoped[0].clientId, scoped[0].outletCode) : null;
-      if (key && accum.has(key)) deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
+      let key: string | null = null;
+      if (scoped.length === 1) {
+        const o = scoped[0];
+        key = (o.partnerId ? ownerPans194C.get(o.partnerId) : undefined) ?? noPanOutletKey(o.clientId, o.outletCode);
+      }
+      if (key && (!isNoPanKey(key) || accum.has(key))) deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
       else unlinkedNoPanDepositPaise += d.amountPaise;
     }
 
@@ -818,23 +826,46 @@ export class TdsService {
         });
       }
     }
-    this.placeUnlinkedNoPanDeposits(rows, unlinkedNoPanDepositPaise, (dep) => ({
-      panNumber: NO_PAN_KEY,
-      entityType: 'OTHERS',
-      fyLabel,
-      baseFyTotalPaise: 0n,
-      maxSinglePaise: 0n,
-      thresholdMet: false,
-      liabilityPaise: 0n,
-      liabilityNoThresholdPaise: 0n,
-      depositedPaise: dep,
-      outstandingPaise: 0n,
-      methodology: null,
-      withheldPaise: 0n,
-      recoveredPaise: 0n,
-      recoveryByTenant: [],
-      unlinkedNoPanDeposit: true as const,
-    }));
+    // WITHHELD-only no-PAN keys (legacy blank-PAN deduction rows) keep their own row so a withheld
+    // amount never drops out (outstanding = −withheld).
+    for (const [key, w] of withheld) {
+      if (!isNoPanKey(key) || accum.has(key)) continue;
+      rows.push({
+        panNumber: key,
+        entityType: 'OTHERS',
+        fyLabel,
+        baseFyTotalPaise: 0n,
+        maxSinglePaise: 0n,
+        thresholdMet: false,
+        liabilityPaise: 0n,
+        liabilityNoThresholdPaise: 0n,
+        depositedPaise: 0n,
+        outstandingPaise: -w,
+        methodology: null,
+        withheldPaise: w,
+        recoveredPaise: recovered.get(key) ?? 0n,
+        recoveryByTenant: [],
+      });
+    }
+    if (unlinkedNoPanDepositPaise > 0n) {
+      rows.push({
+        panNumber: UNLINKED_NO_PAN_DEPOSIT_KEY,
+        entityType: 'OTHERS',
+        fyLabel,
+        baseFyTotalPaise: 0n,
+        maxSinglePaise: 0n,
+        thresholdMet: false,
+        liabilityPaise: 0n,
+        liabilityNoThresholdPaise: 0n,
+        depositedPaise: unlinkedNoPanDepositPaise,
+        outstandingPaise: -unlinkedNoPanDepositPaise,
+        methodology: null,
+        withheldPaise: 0n,
+        recoveredPaise: 0n,
+        recoveryByTenant: [],
+        unlinkedNoPanDeposit: true as const,
+      });
+    }
     await this.attachNoPanDeductees(rows, null);
 
     // Sort descending by base
@@ -858,7 +889,7 @@ export class TdsService {
     clientId: string | null,
   ): Promise<void> {
     const parse = (key: string): { partnerId: string } | { clientId: string; outletCode: string } | null => {
-      if (!key.startsWith(`${NO_PAN_KEY}:`)) return null;
+      if (!key.startsWith(`${NO_PAN_KEY}:`) || key === UNLINKED_NO_PAN_DEPOSIT_KEY) return null;
       const rest = key.slice(NO_PAN_KEY.length + 1);
       if (rest.startsWith('outlet:')) {
         const [cid, ...codeParts] = rest.slice('outlet:'.length).split(':');
@@ -994,8 +1025,8 @@ export class TdsService {
   }
 
   /** Return a blank xlsx Buffer for the TDS deposit upload template. */
-  depositTemplate(): Buffer {
-    return buildDepositTemplate();
+  depositTemplate(section: '194R' | '194C' = '194R'): Buffer {
+    return buildDepositTemplate(section);
   }
 
   // ─── 6.5b: Off-platform 194R upload ─────────────────────────────────────────
@@ -1032,7 +1063,11 @@ export class TdsService {
       file.buffer.byteOffset + file.buffer.byteLength,
     );
 
-    const { result, rows } = parseOffPlatformUpload(ab);
+    const parsed = parseOffPlatformUpload(ab);
+    const result = parsed.result;
+    // No-PAN marker rows must name an outlet of THIS tenant (and are flagged when that outlet's
+    // owner has a PAN on file — the amount then counts under that PAN).
+    const rows = await this.validateNoPanUploadRows(parsed.rows, result, { clientId, section: '194R' });
 
     if (!apply || rows.length === 0) {
       return result;
@@ -1147,7 +1182,9 @@ export class TdsService {
       file.buffer.byteOffset + file.buffer.byteLength,
     );
 
-    const { result, rows } = parseDepositUpload(ab);
+    const parsed = parseDepositUpload(ab);
+    const result = parsed.result;
+    const rows = await this.validateNoPanUploadRows(parsed.rows, result, { clientId, section });
 
     if (!apply || rows.length === 0) {
       return result;
@@ -1157,11 +1194,12 @@ export class TdsService {
     const depositorType = section === '194R' ? 'CLIENT' : 'GIFSY';
     const uploadBatchId = depositFileHash(rows);
 
-    // Rows already present for this file's batch id (same file re-upload → all).
+    // Rows already present for this file's batch id (same file re-upload → all). A 194C no-PAN row
+    // stores the outlet's TENANT (resolved on upload), so 194C dedup is not scoped by clientId.
     const existing = await this.prisma.tdsDeposit.findMany({
       where: {
         section: prismaSection,
-        clientId: clientId ?? null,
+        ...(section === '194C' ? {} : { clientId: clientId ?? null }),
         uploadBatchId,
       },
       select: {
@@ -1207,7 +1245,9 @@ export class TdsService {
         data: toInsert.map((r) => ({
           section: prismaSection,
           depositorType: depositorType as 'CLIENT' | 'GIFSY',
-          clientId: clientId ?? undefined,
+          // 194C (platform) rows keep clientId null, EXCEPT a no-PAN row: it records the tenant of
+          // the outlet it was resolved to, so the deductee stays unambiguous later.
+          clientId: (r as { resolvedClientId?: string }).resolvedClientId ?? clientId ?? undefined,
           depositDate: r.depositDate,
           panNumber: r.panNumber,
           outletCode: r.outletCode ?? undefined,
@@ -1235,6 +1275,79 @@ export class TdsService {
       amountPaise.toString(),
       outletCode ?? '',
     ].join('|');
+  }
+
+  /**
+   * Upload-time checks for no-PAN marker rows (stored panNumber `__NO_PAN__`):
+   *   - the Outlet Code must resolve (case-insensitively) to an outlet — of THIS tenant for 194R;
+   *     for 194C (platform-wide) of the row's "Client" when given, else of the single tenant that
+   *     has that code — an ambiguous code asks for the Client column; unknown → per-row error;
+   *   - when the outlet's owner HAS a PAN on file, the row is kept and flagged in `warnings`
+   *     ("PAN found on file for outlet X — counted under that PAN").
+   * Rejected rows are removed and counted as failed. PAN rows pass through untouched (no query).
+   */
+  private async validateNoPanUploadRows<
+    R extends { panNumber: string; outletCode: string | null; clientSlug?: string | null },
+  >(
+    rows: R[],
+    result: UploadResult,
+    scope: { clientId: string | null; section: '194R' | '194C' },
+  ): Promise<Array<R & { resolvedClientId?: string }>> {
+    const noPan = rows.filter((r) => r.panNumber === NO_PAN_KEY);
+    if (noPan.length === 0) return rows;
+    const tenant = scope.section === '194R' ? scope.clientId : null;
+    const byCode = await this.outletsByCodeCI(noPan.map((r) => r.outletCode ?? ''), tenant);
+    const ownerIds = [...new Set([...byCode.values()].flat().map((o) => o.partnerId).filter((x): x is string => !!x))];
+    const owners = ownerIds.length
+      ? await this.prisma.channelPartner.findMany({ where: { id: { in: ownerIds } }, select: { id: true, panNumber: true } })
+      : [];
+    const ownerPan = new Map(owners.map((o) => [o.id, o.panNumber]));
+
+    const out: Array<R & { resolvedClientId?: string }> = [];
+    const warnings: UploadRowError[] = result.warnings ?? [];
+    rows.forEach((r) => {
+      if (r.panNumber !== NO_PAN_KEY) {
+        out.push(r);
+        return;
+      }
+      // Row number in the sheet: parsers keep file order; recover it from the row's position.
+      const rowNum = this.sheetRowOf(r);
+      const code = (r.outletCode ?? '').trim();
+      let candidates = byCode.get(code.toUpperCase()) ?? [];
+      if (scope.section === '194C' && r.clientSlug) {
+        candidates = candidates.filter((c) => c.clientId.toLowerCase() === r.clientSlug!.toLowerCase());
+      }
+      const fail = (message: string) => {
+        result.errors.push({ row: rowNum, message: `Row ${rowNum}: ${message}` });
+        result.failed += 1;
+        result.succeeded -= 1;
+      };
+      if (candidates.length === 0) {
+        fail(
+          scope.section === '194C' && r.clientSlug
+            ? `Outlet Code "${code}" not found for client "${r.clientSlug}"`
+            : `Outlet Code "${code}" not found${scope.section === '194R' ? ' in this client' : ''}`,
+        );
+        return;
+      }
+      if (candidates.length > 1) {
+        fail(`Outlet Code "${code}" exists in more than one client — add the "Client" column (client slug) for this row`);
+        return;
+      }
+      const o = candidates[0];
+      const pan = o.partnerId ? ownerPan.get(o.partnerId) : null;
+      if (pan && pan.trim() && !isNoPanKey(pan.trim().toUpperCase())) {
+        warnings.push({ row: rowNum, message: `Row ${rowNum}: PAN found on file for outlet ${o.outletCode} — counted under that PAN` });
+      }
+      out.push(scope.section === '194C' ? { ...r, resolvedClientId: o.clientId } : r);
+    });
+    if (warnings.length) result.warnings = warnings;
+    return out;
+  }
+
+  /** Sheet row number carried by the parsers on each accepted row (header = row 1). */
+  private sheetRowOf(r: object): number {
+    return (r as { rowNum?: number }).rowNum ?? 0;
   }
 
   // ─── 6.5c: Excel reference exports ──────────────────────────────────────────

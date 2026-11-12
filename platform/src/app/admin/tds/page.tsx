@@ -78,13 +78,20 @@ interface Tds194CResponse {
   rows: Tds194CRow[];
 }
 
+/** Backend row messages are `{ row, message }` objects (older builds: plain strings). */
+type UploadRowMessage = string | { row: number; message: string };
+
 interface UploadResult {
   processed: number;
   succeeded: number;
   skipped:   number;
   failed:    number;
-  errors:    string[];
+  errors:    UploadRowMessage[];
+  /** Non-blocking notices, e.g. "PAN found on file for outlet X — counted under that PAN". */
+  warnings?: UploadRowMessage[];
 }
+
+const rowMessageText = (m: UploadRowMessage): string => (typeof m === 'string' ? m : m.message);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -355,7 +362,16 @@ function UploadPanel({
             <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 max-h-40 overflow-y-auto space-y-1">
               <p className="text-xs font-semibold text-amber-800">Errors ({preview.errors.length})</p>
               {preview.errors.slice(0, 20).map((e, i) => (
-                <p key={i} className="text-xs text-amber-700">• {e}</p>
+                <p key={i} className="text-xs text-amber-700">• {rowMessageText(e)}</p>
+              ))}
+            </div>
+          )}
+
+          {(preview.warnings?.length ?? 0) > 0 && (
+            <div data-testid="tds-upload-warnings" className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 max-h-40 overflow-y-auto space-y-1">
+              <p className="text-xs font-semibold text-blue-800">Notes ({preview.warnings!.length})</p>
+              {preview.warnings!.slice(0, 20).map((w, i) => (
+                <p key={i} className="text-xs text-blue-700">• {rowMessageText(w)}</p>
               ))}
             </div>
           )}
@@ -773,7 +789,7 @@ export default function AdminTdsPage() {
             <UploadPanel
               key={depositSection} // remount when section changes so state resets
               title={`Deposit Upload — ${depositSection}`}
-              templateUrl="/api/admin/tds/deposits/template"
+              templateUrl={`/api/admin/tds/deposits/template?section=${depositSection}`}
               templateFilename={`tds-deposits-${depositSection.toLowerCase()}-template.xlsx`}
               uploadUrlFn={(apply) =>
                 `/api/admin/tds/deposits/upload?section=${depositSection}&apply=${apply}`

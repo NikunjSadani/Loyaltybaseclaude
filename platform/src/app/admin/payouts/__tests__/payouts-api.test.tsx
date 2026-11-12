@@ -143,6 +143,19 @@ describe('PAY — UTR upload skipped rows', () => {
     await screen.findByText(/UTR applied:/);
   }
 
+  it('PAY-DUP: lists rows for already-paid transactions (possible double payment) and ignored columns', async () => {
+    stubUtrFlow({
+      applied: true, paidCount: 0, failedCount: 0, reversedCount: 0, offPlatformCount: 0,
+      skipped: [], blockedOrders: [],
+      alreadyPaid: [{ rowNum: 4, txnId: 'txn-z', notice: 'Already marked paid on 2026-11-09 (bank) — check for a double payment' }],
+      warnings: ['Ignored columns (not recognised): "Paid outside platfrom (Y/N)"'],
+    });
+    await uploadFile();
+    const box = await screen.findByTestId('utr-already-paid');
+    expect(within(box).getByText(/Already marked paid on 2026-11-09 \(bank\) — check for a double payment/)).toBeInTheDocument();
+    expect(within(box).getByText('Ignored columns (not recognised): "Paid outside platfrom (Y/N)"')).toBeInTheDocument();
+  });
+
   it('PAY-OFF: shows how many PAID rows were recorded as paid outside the platform', async () => {
     stubUtrFlow({
       applied: true, paidCount: 3, failedCount: 1, reversedCount: 0, offPlatformCount: 2,
