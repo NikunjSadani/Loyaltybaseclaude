@@ -1408,6 +1408,50 @@ export class CreditsService {
     return total;
   }
 
+  /**
+   * Approved PAYOUT reversal of an unpaid entry that carried a DEDUCT withholding: append the
+   * compensating NEGATIVE TdsDeductionEntry (same shape as uploadUtr's FAILED path). Idempotent:
+   * the offset is capped at the entry's NET ledger withholding (Σ tdsDeductedThisPaise for this
+   * creditPayoutEntryId), so an entry already offset (net ≤ 0) gets nothing. The PAN is the one
+   * the payout was ORIGINALLY deducted under (newest positive row). Returns the amount offset.
+   */
+  private async offsetWithholdingOnReversal(
+    tx: Prisma.TransactionClient,
+    clientId: string,
+    e: { id: string; outletId: string; period: string; tdsSection: TdsSection; tdsDeductedPaise: bigint },
+  ): Promise<bigint> {
+    const ledger = await tx.tdsDeductionEntry.findMany({
+      where: { creditPayoutEntryId: e.id },
+      orderBy: { createdAt: 'desc' },
+      select: { panNumber: true, tdsDeductedThisPaise: true },
+    });
+    const net = ledger.reduce((s, r) => s + r.tdsDeductedThisPaise, 0n);
+    const pan = ledger.find((r) => r.tdsDeductedThisPaise > 0n && r.panNumber)?.panNumber ?? null;
+    const amount = net < e.tdsDeductedPaise ? net : e.tdsDeductedPaise;
+    if (amount <= 0n || !pan) return 0n;
+    await tx.tdsDeductionEntry.createMany({
+      data: [
+        {
+          clientId,
+          panNumber: pan,
+          section: e.tdsSection,
+          fyLabel: this.fyForPeriod(e.period).fyLabel,
+          creditPayoutEntryId: e.id,
+          outletCode: e.outletId,
+          eventBasePaise: 0n,
+          cumulativeBasePaise: 0n,
+          tdsRate: new Prisma.Decimal(0),
+          tdsDueCumulativePaise: 0n,
+          tdsDeductedPriorPaise: 0n,
+          // The ONLY load-bearing field: negative to cancel the reversed payout's withholding.
+          tdsDeductedThisPaise: -amount,
+          carryForwardPaise: 0n,
+        },
+      ],
+    });
+    return amount;
+  }
+
   /** Σ of live reversals for (batch, outlet, field): PENDING → requested, APPROVED/PARTIAL → approved. */
   private async reversedSoFar(
     tx: Prisma.TransactionClient,
@@ -2641,6 +2685,48 @@ export class CreditsService {
                 // permanently remove from payability by marking REVERSED with downloadId=null.
                 // REVERSED is the correct terminal status — GLM-2 excludes REVERSED from
                 // re-banking, whereas FAILED is considered bank-rejected and re-bankable.
+                const withheld = payoutEntry.tdsDeductedPaise ?? 0n;
+                if (withheld > 0n && payoutEntry.tdsSection) {
+                  // A DOWNLOADED-but-unpaid entry carries a DEDUCT withholding stamped at download
+                  // (+ its TdsDeductionEntry). The cash never leaves, so — exactly like the FAILED
+                  // path in uploadUtr — reset the stamp AND append a compensating negative ledger
+                  // row, else priorDeducted stays inflated and the PAN is under-withheld later.
+                  // GUARDED on the stamp we read: if a concurrent UTR apply already moved/offset
+                  // it (count 0), we never write a second offset.
+                  const claimedEntry = await tx.creditPayoutEntry.updateMany({
+                    where: { id: payoutEntry.id, status: payoutEntry.status, tdsDeductedPaise: withheld },
+                    data: { status: 'REVERSED', downloadId: null, tdsDeductedPaise: 0n },
+                  });
+                  if (claimedEntry.count === 1) {
+                    const offset = await this.offsetWithholdingOnReversal(tx, user.clientId, {
+                      id: payoutEntry.id,
+                      outletId: payoutEntry.outletId,
+                      period: payoutEntry.period,
+                      tdsSection: payoutEntry.tdsSection,
+                      tdsDeductedPaise: withheld,
+                    });
+                    reversedCount++;
+                    entryNotes.push(
+                      `entry ${payoutEntry.id} (was ${payoutEntry.status}) → REVERSED` +
+                        (offset > 0n ? ` (withheld TDS ₹${(Number(offset) / 100).toFixed(2)} offset)` : ''),
+                    );
+                    continue;
+                  }
+                  // Changed under us — act on its CURRENT state (its withholding, if any, was
+                  // already reversed by whoever moved it).
+                  const fresh = await tx.creditPayoutEntry.findFirst({
+                    where: { id: payoutEntry.id },
+                    select: { status: true, amountPaise: true },
+                  });
+                  if (!fresh || fresh.status === 'REVERSED') continue;
+                  if (fresh.status === 'PAID') {
+                    paidReceivablePaise += Number(fresh.amountPaise);
+                    entryNotes.push(
+                      `entry ${payoutEntry.id} (PAID ₹${(Number(fresh.amountPaise) / 100).toFixed(2)}) → recoverable receivable`,
+                    );
+                    continue;
+                  }
+                }
                 await tx.creditPayoutEntry.update({
                   where: { id: payoutEntry.id },
                   data: { status: 'REVERSED', downloadId: null },

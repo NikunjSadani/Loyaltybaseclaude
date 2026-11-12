@@ -63,7 +63,7 @@ const mockTx = {
     count: jest.fn().mockResolvedValue(0),
     create: jest.fn(),
   },
-  creditPayoutEntry: { createMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+  creditPayoutEntry: { createMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn() },
   // downloadCode is now generated INSIDE the download tx (tx.creditPayoutDownload.count) under PDLOCK.
   creditPayoutDownload: { create: jest.fn(), update: jest.fn(), count: jest.fn().mockResolvedValue(0) },
   creditReversal: {
@@ -182,7 +182,7 @@ describe('CreditsService', () => {
       id: 'b1',
       status: 'CONFIRMED',
       rows: [
-        { outletId: 'O1', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 1_000_000 },
+        { outletId: 'O1', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 100_000_000 },
         { outletId: 'O1', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 1_000_000 },
       ],
     });
@@ -1163,6 +1163,101 @@ describe('CreditsService', () => {
       expect(mockTx.creditReversal.update).toHaveBeenCalledWith({
         where: { id: 'r1' },
         data: { shortfallPaise: BigInt(10000) },
+      });
+    });
+
+    // ── Approved PAYOUT reversal of a DOWNLOADED-but-unpaid entry: offset its withheld TDS ──
+    describe('withheld-TDS offset on reversal (mirrors the uploadUtr FAILED path)', () => {
+      // ₹20,000 visibility payout downloaded (PROCESSING) with ₹400 of 194C withheld at download.
+      const reversalRow = {
+        id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(2_000_000),
+        awardType: 'PAYOUT', outletId: 'O1', fieldId: 'f1', batchId: 'b1',
+      };
+      const processingEntry = {
+        id: 'pe1', status: 'PROCESSING', outletId: 'O1', amountPaise: 2_000_000n,
+        tdsDeductedPaise: 40_000n, tdsSection: 'SEC_194C', period: '2026-05',
+      };
+
+      it('₹400 short-deduction: the entry is REVERSED with its stamp cleared AND a −₹400 TdsDeductionEntry is written under the ORIGINAL PAN', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(reversalRow);
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([processingEntry]);
+        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([
+          { panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 40_000n },
+        ]);
+
+        const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 });
+
+        // Guarded on the stamp we read; clears the stamp.
+        expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
+          where: { id: 'pe1', status: 'PROCESSING', tdsDeductedPaise: 40_000n },
+          data: { status: 'REVERSED', downloadId: null, tdsDeductedPaise: 0n },
+        });
+        expect(mockTx.creditPayoutEntry.update).not.toHaveBeenCalled();
+        expect(mockTx.tdsDeductionEntry.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { creditPayoutEntryId: 'pe1' } }),
+        );
+        expect(mockTx.tdsDeductionEntry.createMany).toHaveBeenCalledTimes(1);
+        const [row] = mockTx.tdsDeductionEntry.createMany.mock.calls[0][0].data;
+        expect(row).toMatchObject({
+          clientId: 'deoleo',
+          panNumber: 'ABCDE1234F',
+          section: 'SEC_194C',
+          creditPayoutEntryId: 'pe1',
+          outletCode: 'O1',
+          eventBasePaise: 0n,
+          tdsDeductedThisPaise: -40_000n,
+        });
+        expect(typeof row.fyLabel).toBe('string');
+        expect(res.clawbackShortfall).toBe(0); // cash never left → no receivable
+        expect(res.payoutClawbackNote).toContain('withheld TDS ₹400.00 offset');
+      });
+
+      it('idempotent: an entry whose withholding is ALREADY offset in the ledger (net 0) gets no second offset', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(reversalRow);
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([processingEntry]);
+        mockTx.tdsDeductionEntry.findMany.mockResolvedValue([
+          { panNumber: null, tdsDeductedThisPaise: -40_000n },
+          { panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 40_000n },
+        ]);
+        await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 });
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+      });
+
+      it('concurrent UTR apply already moved the entry (guarded update count 0 → FAILED): plain REVERSED, NO second offset', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(reversalRow);
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([processingEntry]);
+        mockTx.creditPayoutEntry.updateMany.mockResolvedValue({ count: 0 });
+        mockTx.creditPayoutEntry.findFirst.mockResolvedValue({ status: 'FAILED', amountPaise: 2_000_000n });
+        await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 });
+        expect(mockTx.creditPayoutEntry.update).toHaveBeenCalledWith({
+          where: { id: 'pe1' },
+          data: { status: 'REVERSED', downloadId: null },
+        });
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+      });
+
+      it('concurrent UTR apply marked it PAID meanwhile: recorded as a receivable, not REVERSED, no offset', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(reversalRow);
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([processingEntry]);
+        mockTx.creditPayoutEntry.updateMany.mockResolvedValue({ count: 0 });
+        mockTx.creditPayoutEntry.findFirst.mockResolvedValue({ status: 'PAID', amountPaise: 2_000_000n });
+        const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 });
+        expect(mockTx.creditPayoutEntry.update).not.toHaveBeenCalled();
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+        expect(res.clawbackShortfall).toBe(2_000_000);
+      });
+
+      it('Deoleo parity: an unpaid entry with NO withholding takes the unchanged path (plain update, no ledger read/write)', async () => {
+        mockPrisma.creditReversal.findFirst.mockResolvedValue(reversalRow);
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([{ ...processingEntry, tdsDeductedPaise: 0n }]);
+        await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 2_000_000 });
+        expect(mockTx.creditPayoutEntry.update).toHaveBeenCalledWith({
+          where: { id: 'pe1' },
+          data: { status: 'REVERSED', downloadId: null },
+        });
+        expect(mockTx.creditPayoutEntry.updateMany).not.toHaveBeenCalled();
+        expect(mockTx.tdsDeductionEntry.findMany).not.toHaveBeenCalled();
+        expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
       });
     });
   });
