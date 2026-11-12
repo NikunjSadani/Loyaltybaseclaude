@@ -63,6 +63,7 @@ On top of those, the platform has a **tax & invoicing layer** (TDS, self-billed 
 
 **Step 1 — Upload the spreadsheet** *(Credits & Payouts → Upload Credits)*
 - **The operator does:** Download the template, fill in each outlet and amount, and upload it.
+- **Whole units only:** points and ₹ payouts are credited in whole units. A decimal amount is rounded **half-up** (199.5 → 200, 199.4 → 199; ₹199.50 → ₹200). The preview lists every rounded amount ("199.5 → 200") before you confirm; an amount that rounds to 0 is skipped.
 - **The system does:** Creates a **batch** marked **Pending confirm**. Nothing is paid or credited yet — this is just a draft.
 
 ![Upload Credits screen](/guides/payouts/upload.png)

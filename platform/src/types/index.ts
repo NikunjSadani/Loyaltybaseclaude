@@ -984,6 +984,11 @@ export interface CreditUploadRow {
    * POINTS rows: whole points (a count, NOT money — no ×100).
    */
   amount:    number;
+  /**
+   * The amount exactly as typed (points, or RUPEES for PAYOUT rows) — present ONLY when the
+   * parser rounded it half-up to a whole unit (e.g. 199.5 → amount 200 / 20000 paise). Display-only.
+   */
+  originalAmount?: number;
   narration: string;
   awardType: 'POINTS' | 'PAYOUT';
   status:    'OK' | 'ERROR' | 'SKIP';
@@ -1006,6 +1011,8 @@ export interface CreditParseResult {
     totalPoints:       number;
     /** Total payout in integer paise (e.g. 1000000 = ₹10,000.00). */
     totalPayoutPaise:  number;
+    /** OK rows whose typed amount was rounded half-up to a whole unit. */
+    rounded:           number;
   };
 }
 

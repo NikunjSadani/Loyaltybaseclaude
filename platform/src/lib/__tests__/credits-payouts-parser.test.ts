@@ -152,7 +152,7 @@ describe('B — Valid upload', () => {
     expect(okRow?.narration).toBe('Great performance');
   });
 
-  it('B5: 1 decimal place is accepted (e.g. 100.5)', async () => {
+  it('B5: a decimal amount is accepted and rounded half-up to whole points (100.5 → 101)', async () => {
     const { parseCreditUpload } = await import('../credits-payouts-parser');
     const buf = buildXlsx(
       makeHeaders([FIELD_VOL]),
@@ -160,7 +160,8 @@ describe('B — Valid upload', () => {
     );
     const result = parseCreditUpload(buf, DEFAULT_OPTS);
     const okRow = result.rows.find((r) => r.status === 'OK');
-    expect(okRow?.amount).toBe(100.5);
+    expect(okRow?.amount).toBe(101);
+    expect(okRow?.originalAmount).toBe(100.5);
   });
 });
 
@@ -218,16 +219,17 @@ describe('D — Amount validation', () => {
     expect(errRow!.errors.join(' ')).toMatch(/negative/i);
   });
 
-  it('D2: more than 1 decimal place → ERROR (e.g. 100.55)', async () => {
+  it('D2: any number of decimals is accepted (100.55 → 101) — no "decimal" error any more', async () => {
     const { parseCreditUpload } = await import('../credits-payouts-parser');
     const buf = buildXlsx(
       makeHeaders([FIELD_VOL]),
       [['WS-001', 'Anand Wholesale', 100.55, '']],
     );
     const result = parseCreditUpload(buf, DEFAULT_OPTS);
-    const errRow = result.rows.find((r) => r.outletId === 'WS-001' && r.status === 'ERROR');
-    expect(errRow).toBeDefined();
-    expect(errRow!.errors.join(' ')).toMatch(/decimal/i);
+    const row = result.rows.find((r) => r.outletId === 'WS-001');
+    expect(row?.status).toBe('OK');
+    expect(row?.amount).toBe(101);
+    expect(row?.errors.join(' ')).not.toMatch(/decimal/i);
   });
 
   it('D3: amount exceeding points safety cap → ERROR', async () => {
@@ -499,5 +501,106 @@ describe('G — Summary totals', () => {
     const result = parseCreditUpload(buf, DEFAULT_OPTS);
     expect(result.summary.totalPoints).toBe(0);
     expect(result.summary.totalPayoutPaise).toBe(0);
+  });
+});
+
+// ─── H — Whole-unit rounding (owner rule 2026-11-12) ─────────────────────────
+
+describe('H — Whole-unit rounding (half-up)', () => {
+  it('H1: POINTS 199.5 → 200 and 199.4 → 199; totals use rounded values', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL, FIELD_VIS]),
+      [['WS-001', 'Anand Wholesale', 199.5, 199.4, '', '']],
+    );
+    const result = parseCreditUpload(buf, DEFAULT_OPTS);
+    const vol = result.rows.find((r) => r.fieldId === 'f_vol')!;
+    const vis = result.rows.find((r) => r.fieldId === 'f_vis')!;
+    expect(vol.status).toBe('OK');
+    expect(vol.amount).toBe(200);
+    expect(vol.originalAmount).toBe(199.5);
+    expect(vis.amount).toBe(199);
+    expect(vis.originalAmount).toBe(199.4);
+    expect(result.summary.totalPoints).toBe(399);
+    expect(result.summary.rounded).toBe(2);
+  });
+
+  it('H2: PAYOUT ₹199.5 → ₹200 = 20000 paise (always whole rupees); ₹199.4 → 19900', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL, FIELD_VIS]),
+      [['RT-001', 'Sharma Store', 199.5, 199.4, '', '']],
+    );
+    const result = parseCreditUpload(buf, DEFAULT_OPTS);
+    const vol = result.rows.find((r) => r.fieldId === 'f_vol')!;
+    const vis = result.rows.find((r) => r.fieldId === 'f_vis')!;
+    expect(vol.awardType).toBe('PAYOUT');
+    expect(vol.amount).toBe(20000);
+    expect(vol.originalAmount).toBe(199.5);
+    expect(vis.amount).toBe(19900);
+    expect(result.summary.totalPayoutPaise).toBe(39900);
+    expect(result.rows.every((r) => r.awardType !== 'PAYOUT' || r.amount % 100 === 0)).toBe(true);
+  });
+
+  it('H3: the safety cap applies to the ROUNDED value', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL, FIELD_VIS]),
+      [['WS-001', 'Anand Wholesale', 1000.4, 1000.5, '', '']],
+    );
+    const result = parseCreditUpload(buf, { ...DEFAULT_OPTS, safetyCapPoints: 1000 });
+    const under = result.rows.find((r) => r.fieldId === 'f_vol')!;   // 1000.4 → 1000 = at cap → OK
+    const over  = result.rows.find((r) => r.fieldId === 'f_vis')!;   // 1000.5 → 1001 > cap → ERROR
+    expect(under.status).toBe('OK');
+    expect(under.amount).toBe(1000);
+    expect(over.status).toBe('ERROR');
+    expect(over.errors.join(' ')).toMatch(/rounds to 1001.*safety cap of 1000/);
+  });
+
+  it('H4: a positive amount that rounds to 0 is SKIPPED (nothing to credit), not an error', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL]),
+      [['WS-001', 'Anand Wholesale', 0.4, '']],
+    );
+    const result = parseCreditUpload(buf, DEFAULT_OPTS);
+    expect(result.rows[0].status).toBe('SKIP');
+    expect(result.rows[0].skipReason).toMatch(/rounds to 0/);
+    expect(result.summary.errors).toBe(0);
+    expect(result.canProceed).toBe(false);
+  });
+
+  it('H5: negatives and non-numbers are still rejected', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL, FIELD_VIS]),
+      [['WS-001', 'Anand Wholesale', -0.4, 'abc', '', '']],
+    );
+    const result = parseCreditUpload(buf, DEFAULT_OPTS);
+    expect(result.rows.map((r) => r.status)).toEqual(['ERROR', 'ERROR']);
+  });
+
+  it('H6: whole-number (Deoleo-style) uploads are byte-identical — no originalAmount key, rounded = 0', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL]),
+      [['WS-001', 'Anand Wholesale', 500, 'May'], ['RT-001', 'Sharma Store', 250, '']],
+    );
+    const result = parseCreditUpload(buf, DEFAULT_OPTS);
+    expect(result.summary.rounded).toBe(0);
+    expect(result.rows.map((r) => JSON.stringify(r))).toEqual([
+      JSON.stringify({ rowNum: 3, outletId: 'WS-001', outletName: 'Anand Wholesale', fieldId: 'f_vol', fieldName: 'Volume',
+        amount: 500, narration: 'May', awardType: 'POINTS', status: 'OK', errors: [] }),
+      JSON.stringify({ rowNum: 4, outletId: 'RT-001', outletName: 'Sharma Store', fieldId: 'f_vol', fieldName: 'Volume',
+        amount: 25000, narration: '', awardType: 'PAYOUT', status: 'OK', errors: [] }),
+    ]);
+    expect(result.summary.totalPoints).toBe(500);
+    expect(result.summary.totalPayoutPaise).toBe(25000);
+  });
+
+  it('H7: the old "Maximum 1 decimal allowed" rule is gone from the parser', () => {
+    const code = src('lib/credits-payouts-parser.ts');
+    expect(code).not.toMatch(/Maximum 1 decimal/);
+    expect(code).not.toMatch(/moreThanOneDecimal/);
   });
 });

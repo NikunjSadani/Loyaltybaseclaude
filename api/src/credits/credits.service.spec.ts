@@ -1692,6 +1692,48 @@ describe('CreditsService', () => {
       });
     });
 
+    // ── Whole-unit amounts (owner rule 2026-11-12: points + ₹ credited in whole units) ──
+
+    describe('whole-unit amounts', () => {
+      beforeEach(() => {
+        mockCreditsPayouts.safetyCapPoints = 50000;
+        mockCreditsPayouts.safetyCapInr = 100000;
+        mockTx.creditBatch.create.mockResolvedValue({ id: 'b1' });
+        pinDate('2026-06-10T08:00:00.000Z');
+      });
+
+      it('rejects a PAYOUT row that is not whole rupees (₹199.50 = 19950 paise)', async () => {
+        const dto = batchDto('2026-06', CreditAwardType.PAYOUT, 19950);
+        await expect(service.createBatch(admin, dto)).rejects.toThrow(/Payout amounts must be whole rupees/);
+        expect(mockTx.creditBatch.create).not.toHaveBeenCalled();
+      });
+
+      it('accepts a whole-rupee PAYOUT row (₹200 = 20000 paise)', async () => {
+        await expect(service.createBatch(admin, batchDto('2026-06', CreditAwardType.PAYOUT, 20000))).resolves.toBeDefined();
+      });
+
+      it('rejects a fractional POINTS row on the service path (engine/direct callers bypass the DTO pipe)', async () => {
+        const dto = batchDto('2026-06', CreditAwardType.POINTS, 199.5);
+        await expect(service.createBatch(admin, dto)).rejects.toThrow(/Points must be whole numbers/);
+      });
+
+      it('ignores non-OK rows', async () => {
+        const dto = batchDto('2026-06', CreditAwardType.PAYOUT, 19950);
+        (dto.rows[0] as unknown as { status: string }).status = 'ERROR';
+        await expect(service.createBatch(admin, dto)).resolves.toBeDefined();
+      });
+
+      it('confirmBatch refuses a legacy PENDING batch holding fractional-rupee paise (before any write)', async () => {
+        mockPrisma.creditBatch.findFirst.mockResolvedValue({
+          id: 'b1', status: 'PENDING_CONFIRM', period: '2026-06', uploadedBy: 'admin1',
+          totalOutlets: 1, totalPoints: 0, totalPayoutPaise: BigInt(19950),
+          rows: [{ outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F', amount: 19950, narration: '', awardType: 'PAYOUT', status: 'OK' }],
+        });
+        await expect(service.confirmBatch(admin, 'b1')).rejects.toThrow(/Payout amounts must be whole rupees/);
+        expect(mockTx.creditPayoutEntry.createMany).not.toHaveBeenCalled();
+      });
+    });
+
     // ── Month cutoff (createBatch) ────────────────────────────────────────────────
 
     describe('month cutoff window', () => {

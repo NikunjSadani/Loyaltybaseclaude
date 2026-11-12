@@ -813,6 +813,33 @@ export class CreditsService {
     }
   }
 
+  /**
+   * Whole-unit safety net (owner rule 2026-11-12): points AND ₹ payouts are credited in WHOLE
+   * units only. The upload parser rounds half-up before sending; this rejects anything that
+   * bypassed it (direct API call, an older client, a legacy PENDING batch). POINTS rows must
+   * be integers; PAYOUT rows (integer paise) must be a multiple of 100 (= whole rupees).
+   * Only OK rows are checked — ERROR/SKIP rows carry no live award.
+   */
+  private assertWholeUnitAmounts(
+    rows: { outletId: string; outletName?: string; fieldName?: string; amount: number; awardType: string; status: string }[],
+  ): void {
+    for (const r of rows) {
+      if (r.status !== 'OK') continue;
+      const who = `${r.outletName ?? r.outletId} (${r.outletId})${r.fieldName ? ` / field "${r.fieldName}"` : ''}`;
+      if (r.awardType === 'PAYOUT') {
+        if (!Number.isInteger(r.amount) || r.amount % 100 !== 0) {
+          throw new BadRequestException(
+            `Payout amounts must be whole rupees — row for ${who} has ₹${(r.amount / 100).toFixed(2)}.`,
+          );
+        }
+      } else if (r.awardType === 'POINTS') {
+        if (!Number.isInteger(r.amount)) {
+          throw new BadRequestException(`Points must be whole numbers — row for ${who} has ${r.amount}.`);
+        }
+      }
+    }
+  }
+
   // ─── Code generators ───────────────────────────────────────────────────────
 
   /** Batch code: CB-YYYY-MM-NNN (per client + period). */
@@ -908,6 +935,7 @@ export class CreditsService {
       creditsPayouts.safetyCapPoints,
       creditsPayouts.safetyCapInr,
     );
+    this.assertWholeUnitAmounts(dto.rows);
 
     // Generate the code + create UNDER a per-(clientId, period) advisory lock so concurrent
     // createBatch calls for the same tenant/period serialize into sequential codes (batchCode is
@@ -1004,6 +1032,10 @@ export class CreditsService {
       awardType: string;
       status: string;
     }[];
+
+    // Whole-unit safety net on confirm too: a PENDING batch stored before the rounding rule
+    // (e.g. ₹199.5 = 19950 paise) must be re-uploaded, never credited with fractional units.
+    this.assertWholeUnitAmounts(rows);
 
     const payoutRows = rows.filter((r) => r.awardType === 'PAYOUT' && r.status === 'OK');
     // amount > 0: creditEarn rejects non-positive amounts; a 0/negative POINTS row

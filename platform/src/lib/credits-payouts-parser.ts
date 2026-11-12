@@ -9,8 +9,10 @@
  *  2. Outlet must be active
  *  3. Zero or blank value → SKIP (not an error)
  *  4. Negative value → ERROR
- *  5. More than 1 decimal place → ERROR
- *  6. Amount exceeds safety cap → ERROR
+ *  5. Any number of decimals is accepted, then ROUNDED HALF-UP to a whole unit (owner rule
+ *     2026-11-12: points AND ₹ payouts are credited in whole units — 199.5 → 200, 199.4 → 199).
+ *     A positive value that rounds to 0 → SKIP (nothing to credit).
+ *  6. ROUNDED amount exceeds safety cap → ERROR
  *  7. Duplicate outlet+field in the same upload → ERROR on second occurrence
  *  8. Field configured as NA for this outlet type → SKIP
  *
@@ -34,14 +36,15 @@ export interface ParseCreditUploadOpts {
   safetyCapInr:    number;
 }
 
-// ─── Decimal validation ───────────────────────────────────────────────────────
+// ─── Whole-unit rounding ──────────────────────────────────────────────────────
 
-/** Returns true if the number has more than 1 decimal place. */
-function moreThanOneDecimal(n: number): boolean {
-  const str = n.toString();
-  const dotIndex = str.indexOf('.');
-  if (dotIndex === -1) return false;
-  return str.length - dotIndex - 1 > 1;
+/**
+ * Round a non-negative amount HALF-UP to a whole unit (199.5 → 200, 199.4 → 199).
+ * Math.round is half-up for the non-negative values that reach here (negatives are
+ * rejected first). The backend independently rejects any non-whole amount.
+ */
+export function roundHalfUpWhole(n: number): number {
+  return Math.round(n);
 }
 
 // ─── Parser ───────────────────────────────────────────────────────────────────
@@ -69,7 +72,7 @@ export function parseCreditUpload(
       rows:        [],
       hasErrors:   false,
       canProceed:  false,
-      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0 },
+      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0, rounded: 0 },
     };
   }
 
@@ -80,7 +83,7 @@ export function parseCreditUpload(
       rows:        [],
       hasErrors:   false,
       canProceed:  false,
-      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0 },
+      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0, rounded: 0 },
     };
   }
 
@@ -98,7 +101,7 @@ export function parseCreditUpload(
       rows:        [],
       hasErrors:   false,
       canProceed:  false,
-      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0 },
+      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0, rounded: 0 },
     };
   }
 
@@ -113,7 +116,7 @@ export function parseCreditUpload(
       rows:        [],
       hasErrors:   false,
       canProceed:  false,
-      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0 },
+      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0, rounded: 0 },
     };
   }
 
@@ -213,15 +216,32 @@ export function parseCreditUpload(
         if (numVal < 0) {
           errors.push(`Amount cannot be negative (got ${numVal}).`);
         }
-        // More than 1 decimal place
-        if (moreThanOneDecimal(numVal)) {
-          errors.push(`Amount "${strVal}" has more than 1 decimal place. Maximum 1 decimal allowed.`);
-        }
-        // Safety cap
+        // Safety cap — applied to the ROUNDED whole amount (what is actually credited).
         const cap = awardType === 'POINTS' ? safetyCapPoints : safetyCapInr;
-        if (numVal > cap) {
-          errors.push(`Amount ${numVal} exceeds the safety cap of ${cap} for ${awardType === 'POINTS' ? 'points' : '₹'}.`);
+        const roundedForCap = roundHalfUpWhole(numVal);
+        if (roundedForCap > cap) {
+          const shown = roundedForCap !== numVal ? `${numVal} (rounds to ${roundedForCap})` : `${numVal}`;
+          errors.push(`Amount ${shown} exceeds the safety cap of ${cap} for ${awardType === 'POINTS' ? 'points' : '₹'}.`);
         }
+      }
+
+      // A positive amount that rounds to 0 (e.g. 0.4) credits nothing → SKIP, not an error.
+      if (errors.length === 0 && !isNaN(numVal) && roundHalfUpWhole(numVal) === 0) {
+        rows.push({
+          rowNum:    rIdx + 1,
+          outletId,
+          outletName: outletName || (outlet?.name ?? outletId),
+          fieldId:   field.id,
+          fieldName: field.name,
+          amount:    0,
+          originalAmount: numVal,
+          narration: rawNarr,
+          awardType: awardType === 'PAYOUT' ? 'PAYOUT' : 'POINTS',
+          status:    'SKIP',
+          errors:    [],
+          skipReason: `Value ${numVal} rounds to 0 — amounts are credited in whole units, so nothing is credited for this row.`,
+        });
+        continue;
       }
 
       // Duplicate check
@@ -232,7 +252,9 @@ export function parseCreditUpload(
         seen.add(dedupKey);
       }
 
-      const amount = isNaN(numVal) ? 0 : numVal;
+      // Whole units only: points and rupees are both rounded half-up before crediting.
+      const amount = isNaN(numVal) ? 0 : roundHalfUpWhole(numVal);
+      const wasRounded = !isNaN(numVal) && amount !== numVal;
       const status: 'OK' | 'ERROR' = errors.length > 0 ? 'ERROR' : 'OK';
       // awardType at this point is always POINTS or PAYOUT (NA was handled above)
       const resolvedAwardType: 'POINTS' | 'PAYOUT' = awardType === 'PAYOUT' ? 'PAYOUT' : 'POINTS';
@@ -241,8 +263,8 @@ export function parseCreditUpload(
         if (resolvedAwardType === 'POINTS') {
           totalPoints += amount;
         } else {
-          // PAYOUT rows: the user entered rupees; convert to integer paise for the payload.
-          // Store paise in the row so the POST body is already in paise.
+          // PAYOUT rows: the user entered rupees (now rounded to whole rupees); convert to
+          // integer paise for the payload — always a multiple of 100.
           totalPayoutPaise += rupeesToPaise(amount);
         }
       }
@@ -258,6 +280,9 @@ export function parseCreditUpload(
         fieldId:   field.id,
         fieldName: field.name,
         amount:    storedAmount,
+        // Only present when rounding changed the value (as typed: points or RUPEES), so a
+        // whole-number upload's payload is byte-identical to before.
+        ...(wasRounded ? { originalAmount: numVal } : {}),
         narration: rawNarr,
         awardType: resolvedAwardType,
         status,
@@ -269,6 +294,7 @@ export function parseCreditUpload(
   const okCount      = rows.filter((r) => r.status === 'OK').length;
   const skippedCount = rows.filter((r) => r.status === 'SKIP').length;
   const errorCount   = rows.filter((r) => r.status === 'ERROR').length;
+  const roundedCount = rows.filter((r) => r.status === 'OK' && r.originalAmount !== undefined).length;
   const hasErrors    = errorCount > 0;
 
   return {
@@ -283,6 +309,7 @@ export function parseCreditUpload(
       errors:         errorCount,
       totalPoints,
       totalPayoutPaise,
+      rounded:        roundedCount,
     },
   };
 }

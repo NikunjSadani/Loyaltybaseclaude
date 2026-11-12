@@ -58,6 +58,16 @@ export class UploadRowDto {
   @IsInt()
   amount!: number;
 
+  /**
+   * The amount exactly as typed in the upload (points, or RUPEES for PAYOUT rows), before
+   * the parser rounded it half-up to a whole unit. Display/audit only — every money path
+   * reads `amount`. Optional: absent on rows from older clients and the points engine.
+   */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  originalAmount?: number;
+
   @IsOptional()
   @IsString()
   narration: string = '';
