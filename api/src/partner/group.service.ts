@@ -8,6 +8,8 @@ import { kpiCodeKeys, NAMES_KEY } from '../targets/targets.helpers';
 import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
 import { GroupVisibilityQueryDto } from './dto/group.dto';
 import { istMonthKey, istDateKey } from '../common/ist-date';
+import { AppliesToOutletFacets } from '../common/applies-to/applies-to';
+import { kpiAppliesToOutlet, outletPrimaryFallback } from '../sales/outlet-kpi-scope.helper';
 
 /**
  * GroupService — Wave 3 read-only PARENT GROUP OVERVIEW (a consolidated wallet
@@ -226,7 +228,8 @@ export class GroupService {
         where: { parentId, clientId, deletedAt: null },
         // outletType resolves from the AUTHORITATIVE Outlet.outletType.code (Phase 1 root-fix),
         // NOT the stale OutletTarget.outletType snapshot.
-        select: { outletCode: true, outletType: { select: { code: true } } },
+        // programName/programCategory = the APPLIES-TO program facets (per-outlet KPI scope, D6).
+        select: { outletCode: true, programName: true, programCategory: true, outletType: { select: { code: true } } },
       }),
     ]);
 
@@ -238,6 +241,13 @@ export class GroupService {
 
     // outletCode → current (authoritative) outlet-type code, for the per-outlet projection below.
     const outletTypeByCode = new Map(outlets.map((o) => [o.outletCode, o.outletType?.code]));
+    // outletCode → APPLIES-TO facets (current outlet attributes — D9 live evaluation).
+    const facetsByCode = new Map<string, AppliesToOutletFacets>(
+      outlets.map((o) => [
+        o.outletCode,
+        { outletType: o.outletType?.code ?? null, program: o.programName ?? null, subProgram: o.programCategory ?? null },
+      ]),
+    );
 
     if (outletCodes.length === 0) {
       return { available: true as const, parent: parentInfo, period: q?.period ?? null, kpiTotals: [], outlets: [] };
@@ -270,13 +280,20 @@ export class GroupService {
       }),
       this.prisma.kpiDef.findMany({
         where: { clientId },
-        select: { code: true, label: true, unit: true, isPrimary: true },
+        select: {
+          code: true, label: true, unit: true, isPrimary: true, order: true,
+          outletType: true, outletTypes: true, programs: true, subPrograms: true,
+        },
       }),
     ]);
 
     const kpiLabel = new Map(kpiRows.map((k) => [k.code, k.label]));
     const kpiUnit = new Map(kpiRows.map((k) => [k.code, k.unit]));
     const kpiPrimary = new Map(kpiRows.map((k) => [k.code, k.isPrimary]));
+    // APPLIES-TO (D6): each outlet row is a single-outlet view → a KPI out of THAT outlet's scope is
+    // hidden (and so not summed into the group totals, which add up the displayed rows); the
+    // outlet's primary falls back to its first in-scope KPI. Unscoped KPIs → unchanged.
+    const kpiDefByCode = new Map(kpiRows.map((k) => [k.code, k]));
 
     const targetIndex = new Map(targetRows.map((r) => [r.outletCode, r]));
     const achievementIndex = new Map(achievementRows.map((r) => [r.outletCode, r]));
@@ -299,7 +316,14 @@ export class GroupService {
 
       const names = ((targetValues as Record<string, unknown>)[NAMES_KEY] ?? {}) as Record<string, string>;
 
-      const allKpiCodes = new Set([...kpiCodeKeys(targetValues), ...kpiCodeKeys(kpiValues)]);
+      const facets = facetsByCode.get(outletCode) ?? {};
+      const allKpiCodes = new Set(
+        [...kpiCodeKeys(targetValues), ...kpiCodeKeys(kpiValues)].filter((code) => {
+          const def = kpiDefByCode.get(code);
+          return !def || kpiAppliesToOutlet(def, facets); // D6: hide an out-of-scope KPI
+        }),
+      );
+      const primaryFallback = outletPrimaryFallback(kpiRows, facets);
 
       const kpis = [...allKpiCodes].map((code) => {
         const target = Object.prototype.hasOwnProperty.call(targetValues, code) ? targetValues[code] : null;
@@ -322,7 +346,8 @@ export class GroupService {
 
         const name = names[code] || kpiLabel.get(code) || code;
         const unit = kpiUnit.get(code) ?? '';
-        const isPrimary = kpiPrimary.get(code) ?? false;
+        const isPrimary =
+          primaryFallback !== null ? code === primaryFallback : (kpiPrimary.get(code) ?? false);
 
         return { code, name, target, achieved, pace, unit, isPrimary };
       });

@@ -22,7 +22,7 @@ const mockPrisma = {
   auditLog: { create: jest.fn() },
   visibilityForm: { findUnique: jest.fn(), upsert: jest.fn() },
   visibilityFormVersion: { findUnique: jest.fn(), create: jest.fn() },
-  outlet: { findMany: jest.fn() },
+  outlet: { findMany: jest.fn(), groupBy: jest.fn() },
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   $transaction: jest.fn((arg: any) => (Array.isArray(arg) ? Promise.all(arg) : arg(mockPrisma))),
 };
@@ -188,6 +188,77 @@ describe('VisibilityAdminService', () => {
         { name: { contains: 'shop', mode: 'insensitive' } },
         { outletCode: { contains: 'shop', mode: 'insensitive' } },
       ]);
+    });
+  });
+
+  // ── APPLIES-TO: programs / subPrograms (D12, plan §4) ─────────────────────────────────────
+  describe('APPLIES-TO programs / subPrograms', () => {
+    const settingsWith = (vc: Record<string, unknown>) => ({
+      visibilityConfig: { ...defaultConfig, programs: [], subPrograms: [], ...vc },
+      outletPrograms: ['RLP', 'BSC'],
+      outletCategories: ['Urban'],
+    });
+    const stored = () => mockPrisma.programSetting.upsert.mock.calls[0][0].update.settingValue;
+    beforeEach(() => {
+      mockPrisma.programSetting.upsert.mockResolvedValue({ id: 'ps1' });
+      mockPrisma.outlet.groupBy.mockResolvedValue([]);
+    });
+
+    it('ABSENT keys carry over the stored lists (stale tab never wipes them), without re-validation', async () => {
+      mockSettings.getEffectiveSettings.mockResolvedValue(settingsWith({ programs: ['Legacy Prog'], subPrograms: ['Urban'] }));
+      await service.setConfig(user, defaultConfig as never);
+      expect(stored().programs).toEqual(['Legacy Prog']);
+      expect(stored().subPrograms).toEqual(['Urban']);
+      expect(mockPrisma.outlet.groupBy).not.toHaveBeenCalled();
+      expect(mockSettings.invalidate).toHaveBeenCalledWith('t1'); // fresh read before carry-over
+    });
+
+    it('an explicit [] clears the facet (key omitted from the stored JSON = all)', async () => {
+      mockSettings.getEffectiveSettings.mockResolvedValue(settingsWith({ programs: ['RLP'] }));
+      await service.setConfig(user, { ...defaultConfig, programs: [] } as never);
+      expect(stored()).not.toHaveProperty('programs');
+    });
+
+    it('canonicalises to the settings spelling (ci) and falls back to the most common live spelling', async () => {
+      mockSettings.getEffectiveSettings.mockResolvedValue(settingsWith({}));
+      mockPrisma.outlet.groupBy.mockResolvedValue([
+        { programCategory: 'rural', _count: { _all: 2 } },
+        { programCategory: 'Rural', _count: { _all: 9 } },
+      ]);
+      await service.setConfig(user, { ...defaultConfig, programs: [' rlp '], subPrograms: ['RURAL', 'urban'] } as never);
+      expect(stored().programs).toEqual(['RLP']);
+      expect(stored().subPrograms).toEqual(['Rural', 'Urban']);
+      expect(mockPrisma.outlet.groupBy.mock.calls[0][0].where).toEqual({ clientId: 't1', deletedAt: null, programCategory: { not: null } });
+    });
+
+    it('an unknown value → 400 listing the allowed values; nothing persisted', async () => {
+      mockSettings.getEffectiveSettings.mockResolvedValue(settingsWith({}));
+      await expect(service.setConfig(user, { ...defaultConfig, programs: ['Nope'] } as never))
+        .rejects.toThrow(/Unknown program: Nope\. Allowed: BSC, RLP/);
+      expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+
+    it('UNSCOPED tenant (no lists anywhere) stores exactly the pre-scope JSON', async () => {
+      mockSettings.getEffectiveSettings.mockResolvedValue(settingsWith({}));
+      await service.setConfig(user, defaultConfig as never);
+      expect(stored()).toEqual({
+        outletScope: ['SSS', 'SSS_TOT'], frequencyPerMonth: 2, allowedSalesLevels: ['SO'],
+        geoFence: { enabled: true, radiusMeters: 50 },
+      });
+    });
+
+    it('listOutletsInScope: programs narrow via AND (base where intact); empty lists → where unchanged', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      mockSettings.getEffectiveSettings.mockResolvedValue(settingsWith({ programs: ['RLP'] }));
+      await service.listOutletsInScope('t1', {});
+      const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+      expect(where.AND[0].outletType).toEqual({ code: { in: ['SSS', 'SSS_TOT'] } });
+      expect(where.AND[1]).toEqual({ AND: [{ OR: [{ programName: { equals: 'RLP', mode: 'insensitive' } }] }] });
+
+      mockPrisma.outlet.findMany.mockClear();
+      mockSettings.getEffectiveSettings.mockResolvedValue(settingsWith({}));
+      await service.listOutletsInScope('t1', {});
+      expect(mockPrisma.outlet.findMany.mock.calls[0][0].where).not.toHaveProperty('AND');
     });
   });
 });

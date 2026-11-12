@@ -15,27 +15,65 @@ import type {
   SalesSegmentOptions,
 } from '@/lib/sales-import/types';
 import { ProductSetBuilder } from './product-set-builder';
+import { ScopeMultiSelect, sameScopeValue } from '@/components/admin/scope-multi-select';
+import type { AppliesTo } from '@/lib/applies-to';
+import { kpiScopeOf } from '@/lib/kpi-scope-core';
 
 export interface TenantKpi {
   code: string; label: string; unit: string; enabled: boolean;
-  /** KpiDef.outletType: the KPI is for this outlet type only (null/absent = every type). */
+  /** DEPRECATED KpiDef.outletType (one release): the KPI is for this outlet type only (null/absent = every type). */
   outletType?: string | null;
+  /** KpiDef applies-to scope (APPLIES-TO-TARGETING-PLAN §0); empty facet = all. Absent on older payloads. */
+  outletTypes?: string[];
+  programs?: string[];
+  subPrograms?: string[];
+}
+
+type KpiScopeSource = Pick<TenantKpi, 'code' | 'outletType' | 'outletTypes' | 'programs' | 'subPrograms'>;
+
+/** Compares one facet of the KPI scope with the definition's choice. */
+function facetConflict(kpiList: string[], chosenRaw: string[]): { disjoint: boolean; extras: string[] } | null {
+  if (kpiList.length === 0) return null;
+  const chosen: string[] = [];
+  for (const c of chosenRaw.map((x) => x.trim()).filter(Boolean)) if (!chosen.some((x) => sameScopeValue(x, c))) chosen.push(c);
+  if (chosen.length === 0) return null;
+  const extras = chosen.filter((c) => !kpiList.some((k) => sameScopeValue(k, c)));
+  if (extras.length === 0) return null;
+  return { disjoint: extras.length === chosen.length, extras };
 }
 
 /**
- * L4: Sales Import writes a type-tagged KPI only for outlets of the KPI's own type, intersected with the definition's
- * outlet-type scope. Returns the operator-facing warning when the two scopes disagree (null when they agree).
+ * L4 (generalised for applies-to): Sales Import writes a scoped KPI only for outlets inside the KPI's own scope,
+ * intersected with the definition's outlet-type / programme scope. Returns the operator-facing warning when the two
+ * scopes disagree (null when they agree or either side is unrestricted on the compared facets).
  */
-export function scopeConflictWarning(kpi: Pick<TenantKpi, 'code' | 'outletType'> | undefined, outletTypes: string[]): string | null {
-  const kpiType = (kpi?.outletType ?? '').trim().toUpperCase();
-  if (!kpiType) return null;
-  const chosen = [...new Set(outletTypes.map((t) => t.trim().toUpperCase()).filter(Boolean))];
-  if (chosen.length === 0 || (chosen.length === 1 && chosen[0] === kpiType)) return null;
-  if (!chosen.includes(kpiType)) {
-    return `The KPI ${kpi!.code} is set up for ${kpiType} outlets only, but this scope lists ${chosen.join(', ')}. No outlet will get a value. Add ${kpiType} or clear the outlet types.`;
+export function scopeConflictWarning(kpi: KpiScopeSource | undefined, outletTypes: string[], programs: string[] = []): string | null {
+  if (!kpi) return null;
+  const s = kpiScopeOf(kpi);
+  const t = facetConflict(s.outletTypes, outletTypes);
+  const p = facetConflict(s.programs, programs);
+  const types = s.outletTypes.join(', ');
+  const progs = s.programs.join(', ');
+  const chosenTypes = [...new Set(outletTypes.map((x) => x.trim().toUpperCase()).filter(Boolean))];
+  if (t?.disjoint) {
+    return `The KPI ${kpi.code} is set up for ${types} outlets only, but this scope lists ${chosenTypes.join(', ')}. No outlet will get a value. Add ${s.outletTypes.join(' or ')} or clear the outlet types.`;
   }
-  const others = chosen.filter((t) => t !== kpiType);
-  return `The KPI ${kpi!.code} is set up for ${kpiType} outlets only, so ${others.join(', ')} outlets will not get a value.`;
+  if (p?.disjoint) {
+    return `The KPI ${kpi.code} applies only to the programme${s.programs.length > 1 ? 's' : ''} ${progs}, but this scope lists ${programs.join(', ')}. No outlet will get a value. Add ${s.programs.join(' or ')} or clear the programmes.`;
+  }
+  const parts: string[] = [];
+  if (t) parts.push(`The KPI ${kpi.code} is set up for ${types} outlets only, so ${t.extras.map((x) => x.toUpperCase()).join(', ')} outlets will not get a value.`);
+  if (p) parts.push(`The KPI ${kpi.code} applies only to the programme${s.programs.length > 1 ? 's' : ''} ${progs}, so outlets in ${p.extras.join(', ')} will not get a value.`);
+  return parts.length ? parts.join(' ') : null;
+}
+
+/** "WHOLESALER outlets in programme Gold with sub-programme Lite" — or null for an unscoped KPI. */
+function describeKpiScope(s: AppliesTo): string | null {
+  if (!s.outletTypes.length && !s.programs.length && !s.subPrograms.length) return null;
+  const parts = [s.outletTypes.length ? `${s.outletTypes.join(', ')} outlets` : 'outlets'];
+  if (s.programs.length) parts.push(`in programme ${s.programs.join(' / ')}`);
+  if (s.subPrograms.length) parts.push(`with sub-programme ${s.subPrograms.join(' / ')}`);
+  return parts.join(' ');
 }
 
 /** Everything a Test result depends on: the product set AND the outlet-type / programme scope. */
@@ -70,41 +108,6 @@ function TokenInput({ label, values, onChange, placeholder }: { label: string; v
           className="px-2 py-1 text-xs border border-gray-300 rounded-md w-48" />
       </div>
     </div>
-  );
-}
-
-const sameValue = (a: string, b: string) => a.trim().toUpperCase() === b.trim().toUpperCase();
-
-/**
- * Checkbox multi-select over the tenant's real outlet types / programmes (GET segment-options). The backend matches
- * scope case- and space-insensitively (and upper-cases outlet types on save), so selection is compared the same way.
- * A saved value that is no longer offered (e.g. its outlets were deleted) stays listed, ticked, so it can be removed.
- */
-function ScopeMultiSelect({ label, options, values, onChange }: {
-  label: string;
-  options: Array<{ value: string; label: string }>;
-  values: string[];
-  onChange(v: string[]): void;
-}) {
-  const stale = values.filter((v) => !options.some((o) => sameValue(o.value, v)));
-  const rows = [...options, ...stale.map((v) => ({ value: v, label: `${v} (no outlets now)` }))];
-  const isOn = (v: string) => values.some((x) => sameValue(x, v));
-  function toggle(v: string) {
-    onChange(isOn(v) ? values.filter((x) => !sameValue(x, v)) : [...values, v]);
-  }
-  return (
-    <fieldset>
-      <legend className="text-xs font-medium text-gray-700">{label}</legend>
-      <div className="mt-1 max-h-40 overflow-y-auto rounded-md border border-gray-200 px-2 py-1.5 space-y-1">
-        {rows.map((o) => (
-          <label key={o.value} className="flex items-center gap-2 text-xs text-gray-800">
-            <input type="checkbox" checked={isOn(o.value)} onChange={() => toggle(o.value)} />
-            {o.label}
-          </label>
-        ))}
-      </div>
-      {values.length > 0 && <p className="mt-1 text-[11px] text-gray-500">{values.length} selected</p>}
-    </fieldset>
   );
 }
 
@@ -146,8 +149,15 @@ export function KpiEditor({
 
   const options = tenantKpis.filter((k) => k.enabled && (k.code === def.kpiCode || !ownedCodes.includes(k.code)));
   const selectedKpi = tenantKpis.find((k) => k.code === def.kpiCode);
-  const selectedKpiType = (selectedKpi?.outletType ?? '').trim().toUpperCase() || null;
-  const scopeWarning = scopeConflictWarning(selectedKpi, def.outletTypes);
+  const selectedKpiScope = kpiScopeOf(selectedKpi);
+  const selectedKpiScopeText = describeKpiScope(selectedKpiScope);
+  const scopeWarning = scopeConflictWarning(selectedKpi, def.outletTypes, def.programs);
+  // Informational note: the KPI's own scope narrows outlets further than the definition says.
+  const kpiScopeNarrows = Boolean(selectedKpiScopeText) && (
+    (selectedKpiScope.outletTypes.length > 0 && def.outletTypes.length === 0)
+    || (selectedKpiScope.programs.length > 0 && def.programs.length === 0)
+    || selectedKpiScope.subPrograms.length > 0
+  );
   let noOptionsText: string | null = null;
   if (options.length === 0 && !editing && !tenantKpisError) {
     if (tenantKpis.length === 0) noOptionsText = 'This programme has no KPIs yet. Create one under Targets first, then come back.';
@@ -259,9 +269,9 @@ export function KpiEditor({
           {scopeWarning}
         </p>
       )}
-      {!scopeWarning && selectedKpiType && def.outletTypes.length === 0 && (
+      {!scopeWarning && kpiScopeNarrows && (
         <p data-testid="kpi-scope-kpi-type" className="-mt-2 text-[11px] text-gray-500">
-          The KPI {def.kpiCode} is set up for {selectedKpiType} outlets only, so only those outlets get a value.
+          The KPI {def.kpiCode} is set up for {selectedKpiScopeText} only, so only those outlets get a value.
         </p>
       )}
       </fieldset>

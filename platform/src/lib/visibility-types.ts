@@ -190,6 +190,10 @@ export interface VisibilityConfig {
   allowedSalesLevels: string[];
   /** Geo-fence policy on capture (D10). */
   geoFence: VisibilityGeoFence;
+  /** APPLIES-TO: narrow the in-scope outlets to these Outlet.programName values; empty/absent = every program. */
+  programs?: string[];
+  /** APPLIES-TO: narrow to these Outlet.programCategory (Sub-Program) values; empty/absent = every sub-program. */
+  subPrograms?: string[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

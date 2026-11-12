@@ -47,6 +47,8 @@ const mockTx = {
   salesUploadBatch:   { create: jest.fn(), findFirst: jest.fn(), delete: jest.fn() },
   outletSalesRecord:  { upsert: jest.fn(), findMany: jest.fn(), count: jest.fn() },
   $executeRaw:        jest.fn(),
+  // APPLIES-TO: upsertKpi writes an AuditLog row (in the same tx) when a KPI's scope changes.
+  auditLog:           { create: jest.fn() },
 };
 
 const mockPrisma = {
@@ -1398,7 +1400,9 @@ describe('TargetsService — Sales Import ownership (K-7)', () => {
       expect(mockPrisma.$executeRaw).not.toHaveBeenCalled();
       expect(mockPrisma.outletSalesRecord.findMany).not.toHaveBeenCalled();
       expect(Object.keys(result).sort()).toEqual(
-        ['acceptedCount', 'batchId', 'month', 'monthsInBatch', 'rejectedCount', 'rows', 'totalRows'].sort(),
+        // APPLIES-TO D1 adds `ignoredOutOfScope` (always present; 0 for an unscoped tenant) — the
+        // owner-approved upload summary field the upload screen displays.
+        ['acceptedCount', 'batchId', 'ignoredOutOfScope', 'month', 'monthsInBatch', 'rejectedCount', 'rows', 'totalRows'].sort(),
       );
       expect('skippedImporterOwnedKpis' in result).toBe(false);
     });

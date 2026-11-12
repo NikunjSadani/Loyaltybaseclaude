@@ -18,6 +18,7 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -53,6 +54,93 @@ import {
   OutletLike,
 } from './targets.helpers';
 import { SQL_NOW_UTC } from '../sales-import/sql-time';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import {
+  AppliesTo,
+  APPLIES_TO_FACETS,
+  AppliesToFacet,
+  KpiScopeLike,
+  appliesToOutlet,
+  emptyAppliesTo,
+  isUnscoped,
+  kpiAppliesTo,
+  legacyOutletTypeOf,
+  normalizeAppliesTo,
+} from '../common/applies-to/applies-to';
+import { appliesToOutletWhere } from '../common/applies-to/applies-to.prisma';
+
+/**
+ * APPLIES-TO (plan D1/D2): does this tenant's KPI set need scope ENFORCEMENT on templates /
+ * uploads / pace? Only when some KPI has programs / sub-programs or 2+ outlet types. A tenant whose
+ * KPIs are all unscoped (Deoleo) or carry at most the legacy single outlet type keeps EXACTLY the
+ * pre-APPLIES-TO behaviour (byte-identical template, no out-of-scope ignoring) — the legacy
+ * single-type tag never affected templates/uploads before, and must not start to now.
+ */
+export function kpiScopeEnforced(kpis: ReadonlyArray<KpiScopeLike>): boolean {
+  return kpis.some((k) => {
+    const s = kpiAppliesTo(k);
+    return !isUnscoped(s) && legacyOutletTypeOf(s) === null;
+  });
+}
+
+/** One scope-option value: settings-list entry or a live-only outlet value (APPLIES-TO §6). */
+export interface ScopeOptionValue {
+  value: string;
+  inSettings: boolean;
+}
+
+/** GET /v1/admin/kpis/scope-options response (WP-C codes against this exact shape). */
+export interface KpiScopeOptions {
+  outletTypes: { code: string; label: string }[];
+  programs: ScopeOptionValue[];
+  subPrograms: ScopeOptionValue[];
+}
+
+/**
+ * Merge a tenant settings list with the distinct LIVE outlet values (ci). Settings entries come
+ * first in settings order (settings spelling, inSettings:true); live-only values follow, sorted,
+ * each in its most common live spelling (ties → alphabetical), inSettings:false.
+ */
+export function mergeScopeOptions(
+  settingsList: ReadonlyArray<string>,
+  live: ReadonlyArray<{ value: string | null; count: number }>,
+): ScopeOptionValue[] {
+  const out: ScopeOptionValue[] = [];
+  const seen = new Set<string>();
+  for (const raw of settingsList) {
+    const v = (raw ?? '').trim();
+    if (!v || seen.has(v.toUpperCase())) continue;
+    seen.add(v.toUpperCase());
+    out.push({ value: v, inSettings: true });
+  }
+  const best = new Map<string, { value: string; count: number }>();
+  for (const l of live) {
+    const v = (l.value ?? '').trim();
+    if (!v) continue;
+    const key = v.toUpperCase();
+    if (seen.has(key)) continue;
+    const cur = best.get(key);
+    if (!cur || l.count > cur.count || (l.count === cur.count && v < cur.value)) best.set(key, { value: v, count: l.count });
+  }
+  const liveOnly = [...best.values()].map((b) => b.value).sort((a, b) => a.localeCompare(b));
+  for (const v of liveOnly) out.push({ value: v, inSettings: false });
+  return out;
+}
+
+/** Live, addressable outlet universe for the scope-count (mirrors program-health / visibility universes). */
+const LIVE_OUTLET_WHERE = (clientId: string): Prisma.OutletWhereInput => ({
+  clientId,
+  deletedAt: null,
+  deactivatedAt: null,
+  // notIn drops NULL rows (Prisma/SQL NULL semantics) → OR-in the null case (pending outlets).
+  OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
+});
+
+const sameCiSet = (a: ReadonlyArray<string>, b: ReadonlyArray<string>): boolean => {
+  const A = new Set(a.map((x) => x.trim().toUpperCase()));
+  const B = new Set(b.map((x) => x.trim().toUpperCase()));
+  return A.size === B.size && [...A].every((x) => B.has(x));
+};
 
 // ── Deoleo default KPI seeds (ported from platform/src/lib/platform/tenant-kpi-config.ts) ──
 
@@ -104,7 +192,14 @@ export class TargetsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly salesNotifications: SalesNotificationsService,
+    // @Global TenantModule provides it in the app; @Optional so unit-test modules that only provide
+    // Prisma keep compiling (falls back to a local instance over the same Prisma — fresh reads).
+    @Optional() private readonly tenantSettings?: TenantSettingsService,
   ) {}
+
+  private settingsService(): TenantSettingsService {
+    return this.tenantSettings ?? new TenantSettingsService(this.prisma);
+  }
 
   // ─── KpiDef: list ──────────────────────────────────────────────────────────
 
@@ -130,20 +225,13 @@ export class TargetsService {
   async upsertKpi(user: JwtPayload, dto: UpsertKpiDefDto) {
     const { code, label, unit, isPrimary, hasNameOverride, nameOverrideLabel, order, rollup, enabled } =
       dto;
-    // E1 — outletType: undefined = leave as-is (create → null); null/'' = shared (all types);
-    // a code must be one of the tenant's ENABLED outlet types (stored as the canonical code). An UPDATE
-    // that re-sends the row's CURRENT value is a no-op and is NOT re-validated (so editing e.g. a label
-    // never fails just because that outlet type was disabled after the KPI was tagged).
-    let outletTypeInput = dto.outletType;
-    if (outletTypeInput !== undefined) {
-      const current = await this.prisma.kpiDef.findFirst({
-        where: { clientId: user.clientId, code },
-        select: { outletType: true },
-      });
-      const norm = (v: string | null | undefined) => ((v ?? '').trim() === '' ? null : (v as string).trim());
-      if (current && norm(current.outletType) === norm(outletTypeInput)) outletTypeInput = undefined;
-    }
-    const outletType = await this.resolveKpiOutletType(user.clientId, outletTypeInput);
+    // APPLIES-TO scope (plan §4; E1 generalised). Each facet: omitted = unchanged (create → []).
+    // `outletTypes` wins over the legacy single `outletType` (null/'' = all types). An UPDATE whose
+    // resulting scope equals the STORED scope is a no-op and is NOT re-validated (so relabelling never
+    // fails because an outlet type was disabled / a program renamed after the KPI was scoped); on a
+    // change only the CHANGED facets are validated. The legacy column is dual-written.
+    const scope = await this.resolveKpiScopeWrite(user.clientId, code, dto);
+    const scopeData = scope?.write;
 
     // Invariant: at most ONE primary KpiDef per tenant. The upsert is keyed by
     // (clientId, code), so when this write makes a KPI primary we first demote
@@ -162,7 +250,7 @@ export class TargetsService {
           });
         }
 
-        return tx.kpiDef.upsert({
+        const row = await tx.kpiDef.upsert({
           where: { clientId_code: { clientId: user.clientId, code } },
           create: {
             clientId: user.clientId,
@@ -175,7 +263,10 @@ export class TargetsService {
             order: order ?? 0,
             rollup: rollup ?? 'SUM',
             enabled: enabled ?? true,
-            outletType: outletType ?? null,
+            outletType: scopeData?.outletType ?? null,
+            ...(scopeData
+              ? { outletTypes: scopeData.outletTypes, programs: scopeData.programs, subPrograms: scopeData.subPrograms }
+              : {}),
           },
           update: {
             label,
@@ -186,9 +277,25 @@ export class TargetsService {
             ...(order !== undefined ? { order } : {}),
             ...(rollup !== undefined ? { rollup } : {}),
             ...(enabled !== undefined ? { enabled } : {}),
-            ...(outletType !== undefined ? { outletType } : {}),
+            ...(scopeData ? scopeData : {}),
           },
         });
+
+        // AuditLog ONLY when the scope actually changed (never for a no-op resend / label edit).
+        if (scope?.audit) {
+          await tx.auditLog.create({
+            data: {
+              action: scope.audit.before ? 'UPDATE' : 'CREATE',
+              entityType: 'KPI_DEF',
+              entityId: row.id,
+              actorId: user.sub,
+              oldValues: (scope.audit.before ?? undefined) as unknown as Prisma.InputJsonValue | undefined,
+              newValues: scope.audit.after as unknown as Prisma.InputJsonValue,
+              metadata: { clientId: user.clientId, kpiCode: code, change: 'kpi-scope' },
+            },
+          });
+        }
+        return row;
       });
     } catch (error) {
       if (
@@ -204,33 +311,172 @@ export class TargetsService {
   }
 
   /**
-   * E1 — resolve a KPI's outletType write. `undefined` → undefined (no change); null / blank →
-   * null (SHARED, every outlet type — the value every existing KPI has); otherwise the value must
-   * match (case-insensitively) one of the tenant's ENABLED, active outlet type codes and the
-   * canonical code is returned, because consumers (kpisForOutletType) compare it with `===`
-   * against Outlet.outletType.code. Anything else is a 400.
+   * APPLIES-TO write resolution for upsertKpi. Returns undefined when no scope field was sent or the
+   * resulting scope equals the stored one (no-op: nothing validated, nothing written, no audit).
+   * Otherwise validates the CHANGED facets, canonicalises them and returns the 4-column write + the
+   * audit payload (audit only when the scope differs from what was stored / a non-empty create).
    */
-  private async resolveKpiOutletType(
+  private async resolveKpiScopeWrite(
     clientId: string,
-    raw: string | null | undefined,
-  ): Promise<string | null | undefined> {
-    if (raw === undefined) return undefined;
-    const wanted = (raw ?? '').trim();
-    if (wanted === '') return null;
+    code: string,
+    dto: UpsertKpiDefDto,
+  ): Promise<
+    | {
+        write: { outletType: string | null; outletTypes: string[]; programs: string[]; subPrograms: string[] };
+        audit: { before: AppliesTo | null; after: AppliesTo } | null;
+      }
+    | undefined
+  > {
+    const touched =
+      dto.outletTypes !== undefined ||
+      dto.programs !== undefined ||
+      dto.subPrograms !== undefined ||
+      dto.outletType !== undefined;
+    if (!touched) return undefined;
+
+    const current = await this.prisma.kpiDef.findFirst({
+      where: { clientId, code },
+      select: { outletType: true, outletTypes: true, programs: true, subPrograms: true },
+    });
+    const before = current ? kpiAppliesTo(current) : emptyAppliesTo();
+
+    const legacyTypes =
+      dto.outletType === undefined
+        ? undefined
+        : (dto.outletType ?? '').trim() === ''
+          ? []
+          : [dto.outletType as string];
+    const requested = normalizeAppliesTo({
+      outletTypes: dto.outletTypes ?? legacyTypes ?? before.outletTypes,
+      programs: dto.programs ?? before.programs,
+      subPrograms: dto.subPrograms ?? before.subPrograms,
+    });
+
+    const changed = APPLIES_TO_FACETS.filter((f) => !sameCiSet(requested[f], before[f]));
+    if (current && changed.length === 0) return undefined; // unchanged resend → no-op, not re-validated
+
+    const after: AppliesTo = { ...before };
+    for (const f of changed) after[f] = await this.canonicalScopeFacet(clientId, f, requested[f]);
+    // Facets not changed keep their stored values (already canonical when written).
+    const write = {
+      outletType: legacyOutletTypeOf(after),
+      outletTypes: after.outletTypes,
+      programs: after.programs,
+      subPrograms: after.subPrograms,
+    };
+    const scopeChanged = current ? changed.length > 0 : !isUnscoped(after);
+    return { write, audit: scopeChanged ? { before: current ? before : null, after } : null };
+  }
+
+  /**
+   * Validate + canonicalise one scope facet (plan §4, D8). Empty → []. outletTypes ⊆ the tenant's
+   * ENABLED, active outlet type codes (canonical code). programs / subPrograms ⊆ (settings list ∪
+   * distinct live outlet values), ci, canonicalised to the settings spelling (fallback: the most
+   * common live spelling). Anything else → 400 listing the allowed values.
+   */
+  private async canonicalScopeFacet(clientId: string, facet: AppliesToFacet, values: string[]): Promise<string[]> {
+    if (values.length === 0) return [];
+    let allowed: string[];
+    let label: string;
+    if (facet === 'outletTypes') {
+      allowed = await this.enabledOutletTypeCodes(clientId);
+      label = 'outlet type';
+    } else {
+      const opts = await this.programFacetOptions(clientId, facet);
+      allowed = opts.map((o) => o.value);
+      label = facet === 'programs' ? 'program' : 'sub-program';
+    }
+    const byKey = new Map(allowed.map((a) => [a.trim().toUpperCase(), a]));
+    const out: string[] = [];
+    const bad: string[] = [];
+    for (const v of values) {
+      const hit = byKey.get(v.trim().toUpperCase());
+      if (hit === undefined) bad.push(v);
+      else if (!out.includes(hit)) out.push(hit);
+    }
+    if (bad.length > 0) {
+      throw new BadRequestException(
+        `${facet}: ${bad.map((b) => `"${b}"`).join(', ')} ${bad.length === 1 ? 'is not a known' : 'are not known'} ${label}${bad.length === 1 ? '' : 's'} for this tenant` +
+          (allowed.length ? ` (allowed: ${allowed.join(', ')}).` : ` (no ${label}s are configured).`) +
+          ` Leave it empty for a KPI that applies to every ${label}.`,
+      );
+    }
+    return out;
+  }
+
+  /** The tenant's ENABLED, active outlet type codes (the E1 validation set). */
+  private async enabledOutletTypeCodes(clientId: string): Promise<string[]> {
     const rows = await this.prisma.outletTypeClientConfig.findMany({
       where: { clientId, isEnabled: true, outletType: { isActive: true } },
       select: { outletType: { select: { code: true } } },
     });
-    const codes = rows.map((r) => r.outletType.code);
-    const match = codes.find((c) => c.toUpperCase() === wanted.toUpperCase());
-    if (!match) {
-      throw new BadRequestException(
-        `outletType "${wanted}" is not an enabled outlet type for this tenant` +
-          (codes.length ? ` (enabled: ${codes.join(', ')}).` : ' (no outlet types are enabled).') +
-          ' Leave it empty for a KPI that applies to all outlet types.',
-      );
-    }
-    return match;
+    return rows.map((r) => r.outletType.code);
+  }
+
+  /**
+   * programs ↔ settings `outletPrograms` ∪ live Outlet.programName; subPrograms ↔ settings
+   * `outletCategories` ∪ live Outlet.programCategory (non-deleted outlets of the tenant).
+   */
+  private async programFacetOptions(
+    clientId: string,
+    facet: 'programs' | 'subPrograms',
+  ): Promise<ScopeOptionValue[]> {
+    const settings = await this.settingsService().getEffectiveSettings(clientId, { fresh: true });
+    const settingsList = facet === 'programs' ? settings.outletPrograms : settings.outletCategories;
+    const live =
+      facet === 'programs'
+        ? (
+            await this.prisma.outlet.groupBy({
+              by: ['programName'],
+              where: { clientId, deletedAt: null, programName: { not: null } },
+              _count: { _all: true },
+            })
+          ).map((g) => ({ value: g.programName, count: g._count._all }))
+        : (
+            await this.prisma.outlet.groupBy({
+              by: ['programCategory'],
+              where: { clientId, deletedAt: null, programCategory: { not: null } },
+              _count: { _all: true },
+            })
+          ).map((g) => ({ value: g.programCategory, count: g._count._all }));
+    return mergeScopeOptions(settingsList ?? [], live);
+  }
+
+  // ─── KpiDef: scope options + matching-outlet count (APPLIES-TO §6) ─────────
+
+  /** GET /v1/admin/kpis/scope-options — the KPI form's three multi-select option lists. */
+  async scopeOptions(user: JwtPayload): Promise<KpiScopeOptions> {
+    const [types, programs, subPrograms] = await Promise.all([
+      this.settingsService().getOutletTypes(user.clientId),
+      this.programFacetOptions(user.clientId, 'programs'),
+      this.programFacetOptions(user.clientId, 'subPrograms'),
+    ]);
+    return {
+      outletTypes: types.map((t) => ({ code: t.code, label: t.label })),
+      programs,
+      subPrograms,
+    };
+  }
+
+  /**
+   * GET /v1/admin/kpis/scope-count?outletTypes=A,B&programs=..&subPrograms=.. — how many LIVE outlets
+   * (non-deleted, not deactivated, not NOT_INTERESTED / PARKED — the dashboard universe; NEVER an
+   * `isActive` proxy, which would drop every KYC-pending outlet) the given scope matches. Empty = all.
+   */
+  async scopeCount(
+    user: JwtPayload,
+    q: { outletTypes?: string; programs?: string; subPrograms?: string },
+  ): Promise<{ count: number }> {
+    const split = (v?: string) => (v ?? '').split(',').map((x) => x.trim()).filter((x) => x !== '');
+    const scope = normalizeAppliesTo({
+      outletTypes: split(q.outletTypes),
+      programs: split(q.programs),
+      subPrograms: split(q.subPrograms),
+    });
+    const count = await this.prisma.outlet.count({
+      where: { AND: [LIVE_OUTLET_WHERE(user.clientId), appliesToOutletWhere(scope)] },
+    });
+    return { count };
   }
 
   // ─── KpiDef: set primary (MOVES the single primary) ──────────────────────────
@@ -313,6 +559,13 @@ export class TargetsService {
     return { seeded: DEOLEO_DEFAULT_KPIS.length };
   }
 
+  // ─── APPLIES-TO scope hooks for templates / uploads (D1/D2) ──────────────────
+
+  /** code → effective KPI scope, for the scope-enforced (kpiScopeEnforced) paths only. */
+  private static kpiScopeMap(kpiRows: ReadonlyArray<KpiScopeLike & { code: string }>): Map<string, AppliesTo> {
+    return new Map(kpiRows.map((k) => [k.code, kpiAppliesTo(k)]));
+  }
+
   // ─── Template download ──────────────────────────────────────────────────────
 
   /**
@@ -372,7 +625,43 @@ export class TargetsService {
       outletType: o.outletType.code,
     }));
 
+    // APPLIES-TO D2: only a tenant with an enforced KPI scope gets the scoped layout; every other
+    // tenant (Deoleo: all unscoped) takes the unchanged 3-arg call → byte-identical template.
+    if (kpiScopeEnforced(kpiRows)) {
+      return this.scopedTemplate(kpiRows, kpis, months, outlets);
+    }
     return generateTargetTemplateBuffer(kpis, months, outletList);
+  }
+
+  /** D2 scoped template: Program / Sub-Program info columns + `N/A` in out-of-scope value cells. */
+  private scopedTemplate(
+    kpiRows: ReadonlyArray<KpiScopeLike & { code: string }>,
+    kpis: KpiDefLike[],
+    months: string[],
+    outlets: ReadonlyArray<{
+      outletCode: string;
+      name: string;
+      programName: string | null;
+      programCategory: string | null;
+      outletType: { code: string };
+    }>,
+  ): Buffer {
+    const scopes = TargetsService.kpiScopeMap(kpiRows);
+    const outletList: OutletLike[] = outlets.map((o) => ({
+      outletCode: o.outletCode,
+      name: o.name,
+      outletType: o.outletType.code,
+      program: o.programName ?? null,
+      subProgram: o.programCategory ?? null,
+    }));
+    return generateTargetTemplateBuffer(kpis, months, outletList, {
+      scope: {
+        isInScope: (o, code) => {
+          const sc = scopes.get(code);
+          return !sc || appliesToOutlet(sc, { outletType: o.outletType, program: o.program, subProgram: o.subProgram });
+        },
+      },
+    });
   }
 
   /**
@@ -543,10 +832,18 @@ export class TargetsService {
     // ── Fetch all non-deleted outlet codes ────────────────────────────────────
     // Targets can be uploaded for any outlet regardless of KYC/active state
     // (only soft-deleted are excluded).
+    // APPLIES-TO D1: the scope facets are only read for a scope-enforced tenant (else the query is unchanged).
+    const scopeEnforced = kpiScopeEnforced(kpiRows);
     const outlets = await this.prisma.outlet.findMany({
       where: { clientId: user.clientId, deletedAt: null },
-      select: { outletCode: true, name: true, outletType: { select: { code: true } } },
+      select: {
+        outletCode: true,
+        name: true,
+        outletType: { select: { code: true } },
+        ...(scopeEnforced ? { programName: true, programCategory: true } : {}),
+      },
     });
+    const parseScope = scopeEnforced ? this.parseScope(kpiRows, outlets) : undefined;
 
     const knownOutletCodes = new Set(outlets.map((o) => o.outletCode));
     const outletMeta = new Map(
@@ -568,7 +865,9 @@ export class TargetsService {
     // throw — surface a clean 400 rather than a 500 from the global filter.
     let parseResult: ReturnType<typeof parseTargetUploadBuffer>;
     try {
-      parseResult = parseTargetUploadBuffer(file.buffer, kpis, knownOutletCodes);
+      parseResult = parseScope
+        ? parseTargetUploadBuffer(file.buffer, kpis, knownOutletCodes, { scope: parseScope })
+        : parseTargetUploadBuffer(file.buffer, kpis, knownOutletCodes);
     } catch {
       throw new BadRequestException('Invalid or corrupted xlsx file');
     }
@@ -676,12 +975,35 @@ export class TargetsService {
       totalRows,
       acceptedCount,
       rejectedCount,
+      // APPLIES-TO D1: numeric values dropped as out of the KPI's scope (always present; 0 when none).
+      ignoredOutOfScope: parseResult.summary.ignoredOutOfScope,
       // The GROUND TRUTH of what was actually persisted this upload: one OutletTarget
       // upsert per (outlet, writable-month) with ≥1 non-blank KPI. This is the number
       // the confirmation message reports — `acceptedCount` can be higher because it
       // counts parse-valid rows for LOCKED past months too, which are not written.
       savedCount:    targetOps.length,
       rows:          parseResult.rows,
+    };
+  }
+
+  /** D1 parser hook: outletCode × KPI code → in the KPI's scope (by the outlet's CURRENT facets). */
+  private parseScope(
+    kpiRows: ReadonlyArray<KpiScopeLike & { code: string }>,
+    outlets: ReadonlyArray<{ outletCode: string; outletType: { code: string }; programName?: string | null; programCategory?: string | null }>,
+  ): { isInScope: (outletCode: string, kpiCode: string) => boolean } {
+    const scopes = TargetsService.kpiScopeMap(kpiRows);
+    const facets = new Map(
+      outlets.map((o) => [
+        o.outletCode,
+        { outletType: o.outletType.code, program: o.programName ?? null, subProgram: o.programCategory ?? null },
+      ]),
+    );
+    return {
+      isInScope: (outletCode, kpiCode) => {
+        const sc = scopes.get(kpiCode);
+        const f = facets.get(outletCode);
+        return !sc || !f || appliesToOutlet(sc, f);
+      },
     };
   }
 
@@ -757,6 +1079,10 @@ export class TargetsService {
       outletType: o.outletType.code,
     }));
 
+    // APPLIES-TO D2 — same rule as the target template (unscoped tenant → unchanged 3-arg call).
+    if (kpiScopeEnforced(kpiRows)) {
+      return this.scopedTemplate(kpiRows, kpis, [month], outlets);
+    }
     return generateTargetTemplateBuffer(kpis, [month], outletList);
   }
 
@@ -796,10 +1122,18 @@ export class TargetsService {
     // ── Fetch all non-deleted outlet codes ────────────────────────────────────
     // Achievements can be uploaded for any outlet regardless of KYC/active state
     // (only soft-deleted are excluded).
+    // APPLIES-TO D1: the scope facets are only read for a scope-enforced tenant (else the query is unchanged).
+    const scopeEnforced = kpiScopeEnforced(kpiRows);
     const outlets = await this.prisma.outlet.findMany({
       where: { clientId: user.clientId, deletedAt: null },
-      select: { outletCode: true, name: true, outletType: { select: { code: true } } },
+      select: {
+        outletCode: true,
+        name: true,
+        outletType: { select: { code: true } },
+        ...(scopeEnforced ? { programName: true, programCategory: true } : {}),
+      },
     });
+    const parseScope = scopeEnforced ? this.parseScope(kpiRows, outlets) : undefined;
 
     const knownOutletCodes = new Set(outlets.map((o) => o.outletCode));
     const outletMeta = new Map(
@@ -838,7 +1172,9 @@ export class TargetsService {
 
     let parseResult: ReturnType<typeof parseTargetUploadBuffer>;
     try {
-      parseResult = parseTargetUploadBuffer(file.buffer, parseKpis, knownOutletCodes);
+      parseResult = parseScope
+        ? parseTargetUploadBuffer(file.buffer, parseKpis, knownOutletCodes, { scope: parseScope })
+        : parseTargetUploadBuffer(file.buffer, parseKpis, knownOutletCodes);
     } catch {
       throw new BadRequestException('Invalid or corrupted xlsx file');
     }
@@ -941,6 +1277,8 @@ export class TargetsService {
       totalRows,
       acceptedCount,
       rejectedCount,
+      // APPLIES-TO D1: numeric values dropped as out of the KPI's scope (always present; 0 when none).
+      ignoredOutOfScope: parseResult.summary.ignoredOutOfScope,
       rows:          parseResult.rows,
       // Additive, ONLY for tenants with importer-owned KPIs (absent otherwise → Deoleo response unchanged).
       ...(skippedImporterOwnedKpis !== undefined ? { skippedImporterOwnedKpis } : {}),
@@ -1076,8 +1414,9 @@ export class TargetsService {
       ...(q.outletCode ? { outletCode: q.outletCode } : {}),
     };
 
-    // Fetch both sides in parallel — they may not have identical outlet sets
-    const [targetRows, achievementRows] = await Promise.all([
+    // Fetch both sides in parallel — they may not have identical outlet sets. The KPI scopes ride
+    // along for the APPLIES-TO annotation (D3: stored values are NEVER hidden, only flagged).
+    const [targetRows, achievementRows, kpiScopeRows] = await Promise.all([
       this.prisma.outletTarget.findMany({
         where: whereBase,
         select: { outletCode: true, outletName: true, targetValues: true },
@@ -1086,7 +1425,13 @@ export class TargetsService {
         where: whereBase,
         select: { outletCode: true, kpiValues: true },
       }),
+      this.prisma.kpiDef.findMany({
+        where: { clientId: user.clientId, enabled: true },
+        select: { code: true, outletType: true, outletTypes: true, programs: true, subPrograms: true },
+      }),
     ]);
+    // Only a scope-enforced tenant is annotated (Deoleo / legacy-only tenants: response unchanged).
+    const paceScopes = kpiScopeEnforced(kpiScopeRows ?? []) ? TargetsService.kpiScopeMap(kpiScopeRows) : null;
 
     // Index by outletCode
     const targetIndex = new Map(targetRows.map((r) => [r.outletCode, r]));
@@ -1107,10 +1452,23 @@ export class TargetsService {
             outletCode: { in: [...allOutletCodes] },
             deletedAt: null,
           },
-          select: { outletCode: true, outletType: { select: { code: true } } },
+          select: {
+            outletCode: true,
+            outletType: { select: { code: true } },
+            ...(paceScopes ? { programName: true, programCategory: true } : {}),
+          },
         })
       : [];
     const outletTypeByCode = new Map(outletTypeRows.map((o) => [o.outletCode, o.outletType?.code]));
+    const outletFacetsByCode = new Map(
+      outletTypeRows.map((o) => {
+        const r = o as typeof o & { programName?: string | null; programCategory?: string | null };
+        return [
+          o.outletCode,
+          { outletType: o.outletType?.code ?? null, program: r.programName ?? null, subProgram: r.programCategory ?? null },
+        ];
+      }),
+    );
 
     const results: Array<{
       outletCode: string;
@@ -1122,6 +1480,8 @@ export class TargetsService {
         target: number | null;
         achieved: number | null;
         pace: number | null;
+        /** APPLIES-TO: present (true) ONLY when the KPI's scope excludes this outlet; values still shown (D3). */
+        outOfScope?: true;
       }>;
     }> = [];
 
@@ -1145,7 +1505,9 @@ export class TargetsService {
         target: number | null;
         achieved: number | null;
         pace: number | null;
+        outOfScope?: true;
       }> = [];
+      const facets = outletFacetsByCode.get(outletCode);
 
       for (const code of allKpiCodes) {
         const target   = Object.prototype.hasOwnProperty.call(targetValues, code)
@@ -1161,7 +1523,12 @@ export class TargetsService {
           pace = achieved / target;
         }
 
-        kpis.push({ code, target, achieved, pace });
+        const sc = paceScopes?.get(code);
+        if (sc && facets && !appliesToOutlet(sc, facets)) {
+          kpis.push({ code, target, achieved, pace, outOfScope: true });
+        } else {
+          kpis.push({ code, target, achieved, pace });
+        }
       }
 
       results.push({

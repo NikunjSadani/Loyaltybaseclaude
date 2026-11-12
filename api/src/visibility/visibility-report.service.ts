@@ -13,6 +13,7 @@ import { currentWindowKey, isWindowClosed } from './visibility-window.helper';
 import { readMediaValue } from './visibility-form.helper';
 import { evaluatePhotoFence, haversineMeters } from './geo-fence.helper';
 import { isGifsyOperator } from '../common/tenant-scope';
+import { VisibilityProgramScopeLike, withVisibilityProgramWhere } from './visibility-scope.helper';
 
 /**
  * VisibilityReportService — Visibility (POSM) coverage reporting + export (Stream B,
@@ -48,16 +49,23 @@ export class VisibilityReportService {
   private addressableInScopeWhere(
     clientId: string,
     outletScope: string[],
+    programCfg?: VisibilityProgramScopeLike | null,
   ): Prisma.OutletWhereInput {
-    return {
-      clientId,
-      deletedAt: null,
-      deactivatedAt: null,
-      // Exclude NOT_INTERESTED (declined) AND PARKED (admin-removed from pipeline) from the
-      // visibility universe. notIn drops NULLs → the {null} branch keeps normal outlets.
-      OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
-      outletType: { code: { in: outletScope } },
-    };
+    // APPLIES-TO (D9/D12): the optional programs/subPrograms narrowing is merged here, the ONE
+    // builder both the denominator AND the numerator use — so they always move together
+    // (numerator ⊆ denominator invariant). Unscoped config → the exact pre-scope where.
+    return withVisibilityProgramWhere(
+      {
+        clientId,
+        deletedAt: null,
+        deactivatedAt: null,
+        // Exclude NOT_INTERESTED (declined) AND PARKED (admin-removed from pipeline) from the
+        // visibility universe. notIn drops NULLs → the {null} branch keeps normal outlets.
+        OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
+        outletType: { code: { in: outletScope } },
+      },
+      programCfg,
+    );
   }
 
   /** Shared coverage computation for a given window (or the current window). */
@@ -71,7 +79,7 @@ export class VisibilityReportService {
       config.outletScope.length === 0
         ? 0
         : await this.prisma.outlet.count({
-            where: this.addressableInScopeWhere(clientId, config.outletScope),
+            where: this.addressableInScopeWhere(clientId, config.outletScope, config),
           });
 
     // M2 — the status buckets MUST be intersected with the SAME addressable∩scope outlet
@@ -83,7 +91,7 @@ export class VisibilityReportService {
       where: {
         clientId,
         windowKey: key,
-        outlet: this.addressableInScopeWhere(clientId, config.outletScope),
+        outlet: this.addressableInScopeWhere(clientId, config.outletScope, config),
       },
       _count: { _all: true },
     });

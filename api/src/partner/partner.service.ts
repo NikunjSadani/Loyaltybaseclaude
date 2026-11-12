@@ -36,6 +36,8 @@ import {
 } from '../common/payment-type.helper';
 import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
 import { pickDeliveryDefaults, DeliveryDefaults } from './delivery-defaults.helper';
+import { AppliesToOutletFacets } from '../common/applies-to/applies-to';
+import { kpiAppliesToOutlet, outletPrimaryFallback } from '../sales/outlet-kpi-scope.helper';
 
 /**
  * Partner self-service — ported from platform/src/app/api/partner/* onto /v1.
@@ -372,7 +374,8 @@ export class PartnerService {
       },
       // outletType resolves from the AUTHORITATIVE Outlet.outletType.code (Phase 1 root-fix),
       // NOT the stale OutletTarget.outletType snapshot which only refreshes on re-upload.
-      select: { outletCode: true, outletType: { select: { code: true } } },
+      // programName/programCategory = the APPLIES-TO program facets (per-outlet KPI scope, D6).
+      select: { outletCode: true, programName: true, programCategory: true, outletType: { select: { code: true } } },
     });
 
     if (outlets.length === 0) return { period: q.period ?? null, outlets: [] };
@@ -381,6 +384,13 @@ export class PartnerService {
 
     // outletCode → current (authoritative) outlet-type code, for the per-outlet projection below.
     const outletTypeByCode = new Map(outlets.map((o) => [o.outletCode, o.outletType?.code]));
+    // outletCode → APPLIES-TO facets (current outlet attributes — D9 live evaluation).
+    const facetsByCode = new Map<string, AppliesToOutletFacets>(
+      outlets.map((o) => [
+        o.outletCode,
+        { outletType: o.outletType?.code ?? null, program: o.programName ?? null, subProgram: o.programCategory ?? null },
+      ]),
+    );
 
     // ── Determine the month to query ──────────────────────────────────────────
     // If the caller passes a period, use it.  Otherwise, find the most-recent
@@ -416,7 +426,10 @@ export class PartnerService {
       }),
       this.prisma.kpiDef.findMany({
         where: { clientId: user.clientId },
-        select: { code: true, label: true, unit: true, isPrimary: true },
+        select: {
+          code: true, label: true, unit: true, isPrimary: true, order: true,
+          outletType: true, outletTypes: true, programs: true, subPrograms: true,
+        },
       }),
     ]);
 
@@ -426,6 +439,10 @@ export class PartnerService {
     const kpiLabel   = new Map(kpiRows.map((k) => [k.code, k.label]));
     const kpiUnit    = new Map(kpiRows.map((k) => [k.code, k.unit]));
     const kpiPrimary = new Map(kpiRows.map((k) => [k.code, k.isPrimary]));
+    // APPLIES-TO (D6): each outlet card is a single-outlet view → a KPI out of THAT outlet's scope is
+    // hidden; when the tenant primary is out of scope the outlet's first in-scope KPI is its primary.
+    // Unscoped KPIs have no predicate → every row/flag is exactly as before (Deoleo byte-identical).
+    const kpiDefByCode = new Map(kpiRows.map((k) => [k.code, k]));
 
     const targetIndex      = new Map(targetRows.map((r) => [r.outletCode, r]));
     const achievementIndex = new Map(achievementRows.map((r) => [r.outletCode, r]));
@@ -450,10 +467,14 @@ export class PartnerService {
 
         // Enumerate KPI codes from both sides, EXCLUDING the reserved `__names`
         // key so it can never surface as a phantom KPI row.
-        const allKpiCodes = new Set([
-          ...kpiCodeKeys(targetValues),
-          ...kpiCodeKeys(kpiValues),
-        ]);
+        const facets = facetsByCode.get(outletCode) ?? {};
+        const allKpiCodes = new Set(
+          [...kpiCodeKeys(targetValues), ...kpiCodeKeys(kpiValues)].filter((code) => {
+            const def = kpiDefByCode.get(code);
+            return !def || kpiAppliesToOutlet(def, facets); // D6: hide an out-of-scope KPI
+          }),
+        );
+        const primaryFallback = outletPrimaryFallback(kpiRows, facets);
 
         const kpis = [...allKpiCodes].map((code) => {
           const target  = Object.prototype.hasOwnProperty.call(targetValues, code)
@@ -473,7 +494,8 @@ export class PartnerService {
           // label (else the raw code as a last resort).
           const name = names[code] || kpiLabel.get(code) || code;
           const unit = kpiUnit.get(code) ?? '';
-          const isPrimary = kpiPrimary.get(code) ?? false;
+          const isPrimary =
+            primaryFallback !== null ? code === primaryFallback : (kpiPrimary.get(code) ?? false);
 
           return { code, name, target, achieved, pace, unit, isPrimary };
         });
@@ -519,7 +541,7 @@ export class PartnerService {
 
     const outlets = await this.prisma.outlet.findMany({
       where: { partnerId, clientId: user.clientId },
-      select: { outletCode: true },
+      select: { outletCode: true, programName: true, programCategory: true, outletType: { select: { code: true } } },
     });
     const outletCodes = outlets.map((o) => o.outletCode);
     if (outletCodes.length === 0) return { kpiCode: null, kpiName: null, unit: null, trend: [] };
@@ -527,11 +549,23 @@ export class PartnerService {
     // Pick the KPI to trend. The caller (dashboard) passes the SAME primary KPI
     // its hero headline resolved, so the chart and the hero never disagree; when
     // it's absent/unknown, fall back to the flagged primary, then the first KPI.
-    const kpiDefs = await this.prisma.kpiDef.findMany({
+    const allKpiDefs = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId },
-      select: { code: true, label: true, unit: true, isPrimary: true },
+      select: {
+        code: true, label: true, unit: true, isPrimary: true,
+        outletType: true, outletTypes: true, programs: true, subPrograms: true,
+      },
       orderBy: { code: 'asc' },
     });
+    // APPLIES-TO (D6): only KPIs that apply to at least ONE of the partner's outlets are candidates
+    // (so the primary falls back to an in-scope KPI). Unscoped KPIs always qualify → for an unscoped
+    // tenant this is the full list in the same order (byte-identical).
+    const outletFacets = outlets.map((o) => ({
+      outletType: o.outletType?.code ?? null,
+      program: o.programName ?? null,
+      subProgram: o.programCategory ?? null,
+    }));
+    const kpiDefs = allKpiDefs.filter((k) => outletFacets.some((f) => kpiAppliesToOutlet(k, f)));
     const primary =
       (kpiCode && kpiDefs.find((k) => k.code === kpiCode)) ||
       kpiDefs.find((k) => k.isPrimary) ||

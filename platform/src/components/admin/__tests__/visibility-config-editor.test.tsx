@@ -6,10 +6,12 @@
  * VISCFG2: toggling an outlet type + a sales level is reflected in the saved block.
  * VISCFG3: describeWindows renders the D6 window preview per frequency.
  * VISCFG4: geo-fence on + a form with NO location → red warning + save blocked (M4).
+ * VISCFG5: APPLIES-TO programs / subPrograms hydrate, round-trip, and drive the in-scope count.
+ * VISCFG6: an older config without the keys saves explicit [] (unscoped = every program); options error is shown.
  */
 
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 const getConfig = vi.fn();
@@ -26,9 +28,24 @@ vi.mock('@/lib/visibility', () => ({
   rewriteMediaViewPath: (p: string) => p.replace(/^\/v1\//, '/api/'),
 }));
 
+const apiGet = vi.fn();
+vi.mock('@/lib/api-client', () => ({ api: { get: (...a: unknown[]) => apiGet(...a) } }));
+
+const SCOPE_OPTIONS = {
+  outletTypes: [{ code: 'SSS', label: 'RLP' }],
+  programs: [{ value: 'Unnati', inSettings: true }, { value: 'Pragati', inSettings: true }],
+  subPrograms: [{ value: 'Lite', inSettings: true }, { value: 'Legacy', inSettings: false }],
+};
+
 import { VisibilityConfigEditor, describeWindows } from '../VisibilityConfigEditor';
 
 beforeEach(() => {
+  apiGet.mockReset();
+  apiGet.mockImplementation(async (url: string) => {
+    if (url === '/api/admin/kpis/scope-options') return { success: true, data: SCOPE_OPTIONS };
+    if (url.startsWith('/api/admin/kpis/scope-count')) return { success: true, data: { count: url.includes('programs=') ? 7 : 40 } };
+    return { success: false, error: 'unexpected' };
+  });
   getConfig.mockReset();
   setConfig.mockReset();
   getForm.mockReset();
@@ -113,5 +130,40 @@ describe('VISCFG — VisibilityConfigEditor', () => {
     expect(saveBtn).toBeDisabled();
     fireEvent.click(saveBtn);
     expect(setConfig).not.toHaveBeenCalled();
+  });
+
+  it('VISCFG5: programs / subPrograms hydrate, round-trip on save, and drive the in-scope count', async () => {
+    getConfig.mockResolvedValue({
+      success: true,
+      data: { outletScope: ['SSS'], frequencyPerMonth: 1, allowedSalesLevels: ['SO'], geoFence: { enabled: false, radiusMeters: 50 },
+        programs: ['Unnati'], subPrograms: [] },
+    });
+    render(<VisibilityConfigEditor />);
+    const progs = await screen.findByRole('group', { name: 'Programs (optional)' });
+    expect(await within(progs).findByRole('checkbox', { name: 'Unnati' })).toBeChecked();
+    const subs = screen.getByRole('group', { name: 'Sub-Programs (optional)' });
+    expect(within(subs).getByRole('checkbox', { name: /Legacy.*not in settings list/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('visibility-scope-count')).toHaveTextContent('7 matching outlets right now.'));
+    expect(apiGet).toHaveBeenCalledWith('/api/admin/kpis/scope-count?outletTypes=SSS&programs=Unnati');
+
+    fireEvent.click(within(subs).getByRole('checkbox', { name: 'Lite' }));
+    fireEvent.click(screen.getByRole('button', { name: /save configuration/i }));
+    await waitFor(() => expect(setConfig).toHaveBeenCalledTimes(1));
+    expect(setConfig.mock.calls[0][0]).toMatchObject({ outletScope: ['SSS'], programs: ['Unnati'], subPrograms: ['Lite'] });
+  });
+
+  it('VISCFG6: an older config (no keys) saves [] for both; no count without an outlet type; options error shown', async () => {
+    apiGet.mockImplementation(async () => ({ success: false, error: 'Nope' }));
+    getConfig.mockResolvedValue({
+      success: true,
+      data: { outletScope: [], frequencyPerMonth: 1, allowedSalesLevels: ['SO'], geoFence: { enabled: false, radiusMeters: 50 } },
+    });
+    render(<VisibilityConfigEditor />);
+    expect(await screen.findByTestId('scope-options-error')).toHaveTextContent('Nope');
+    expect(screen.queryByTestId('visibility-scope-count')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('SSS'));
+    fireEvent.click(screen.getByRole('button', { name: /save configuration/i }));
+    await waitFor(() => expect(setConfig).toHaveBeenCalledTimes(1));
+    expect(setConfig.mock.calls[0][0]).toMatchObject({ programs: [], subPrograms: [] });
   });
 });

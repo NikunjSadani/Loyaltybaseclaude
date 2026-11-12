@@ -14,13 +14,16 @@ import {
   descendantSalesUserIds,
   immediateReporteeForOutlet,
 } from './sales-hierarchy-access.helper';
-import { kpisForOutletType, primaryKpiForOutletType } from './sales-kpi-type.helper';
+import { kpisForScopeFilter, primaryKpiFor } from './sales-kpi-type.helper';
+import { AppliesToOutletFacets, appliesToFilter, kpiAppliesTo } from '../common/applies-to/applies-to';
+import { kpiOutletPredicate } from './outlet-kpi-scope.helper';
 import { kpiCodeKeys, currentMonthKey } from '../targets/targets.helpers';
 import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 // READ-ONLY reuse of the visibility window-key math (pure helper, no DI) — the VISIBILITY
 // pseudo-KPI's "current window" MUST use the same formula the capture/notify services use.
 import { currentWindowKey } from '../visibility/visibility-window.helper';
+import { VisibilityProgramScopeLike, visibilityProgramMatches } from '../visibility/visibility-scope.helper';
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import { pickDeliveryDefaults } from '../partner/delivery-defaults.helper';
 
@@ -81,12 +84,18 @@ export type OutletScopeInfo = {
   typeCode: string;
   typeName: string;
   program: string;
+  /** Outlet.programCategory ('' when blank) — the APPLIES-TO sub-program facet. Internal only. */
+  subProgram: string;
   status: string;
   isActive: boolean;
 };
 
 /** KYC states that are terminal (no further rep action) — drives the kycPending count. */
 const TERMINAL_KYC = ['APPROVED', 'REJECTED', 'NOT_INTERESTED'];
+
+/** KpiDef scope columns selected wherever a sales view resolves a KPI set / per-outlet scope. */
+const KPI_SCOPE_SELECT = { outletType: true, outletTypes: true, programs: true, subPrograms: true } as const;
+
 
 /**
  * THE shared "target-met" roll-up for a subtree of sales users — the SINGLE source of truth for
@@ -334,6 +343,10 @@ export class SalesService {
             // include ALL assigned outlets (see the where-clause comment) — do NOT let
             // isActive leak into those.
             isActive: true,
+            // APPLIES-TO facets — read only to skip outlets where the primary KPI is out of scope.
+            programName: true,
+            programCategory: true,
+            outletType: { select: { code: true } },
             partner: {
               select: {
                 kycSubmissions: {
@@ -348,29 +361,45 @@ export class SalesService {
       },
     });
 
-    // salesUserId → list of its assigned active outlets (id, code, isActive, latest
-    // status). A partner-less outlet has no KYC submission → NOT_STARTED (pending
-    // action). `isActive` is carried so the target-% aggregation can restrict to
-    // approved+active outlets WITHOUT disturbing the all-inclusive counts.
-    type OutletInfo = { id: string; outletCode: string | null; isActive: boolean; status: string };
-    const outletsByUser = new Map<string, OutletInfo[]>();
-    for (const a of assignments) {
-      if (!a.outlet) continue;
-      const status = a.outlet.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED';
-      const arr = outletsByUser.get(a.salesUserId) ?? [];
-      arr.push({ id: a.outlet.id, outletCode: a.outlet.outletCode, isActive: !!a.outlet.isActive, status });
-      outletsByUser.set(a.salesUserId, arr);
-    }
-
     // ── 3. Primary KPI + current-month target/achieved maps, ONCE. ────────────
     // Same DETERMINISTIC primary pick (isPrimary, else first by code) and current
     // month as getLeaderboard, so team targets reconcile with the leaderboard.
     const kpiDefs = await this.prisma.kpiDef.findMany({
       where: { clientId },
-      select: { code: true, isPrimary: true },
+      select: { code: true, isPrimary: true, ...KPI_SCOPE_SELECT },
       orderBy: { code: 'asc' },
     });
-    const primaryCode = (kpiDefs.find((k) => k.isPrimary) ?? kpiDefs[0])?.code ?? null;
+    const primaryDef = kpiDefs.find((k) => k.isPrimary) ?? kpiDefs[0];
+    const primaryCode = primaryDef?.code ?? null;
+    // APPLIES-TO (D7, mirrors getLeaderboard): outlets where the tenant primary is OUT of scope are
+    // skipped from the target-% sums. Unscoped primary → undefined → nothing skipped (byte-identical).
+    const primaryInScope = kpiOutletPredicate(primaryDef);
+
+    // salesUserId → list of its assigned active outlets (id, code, isActive, latest
+    // status). A partner-less outlet has no KYC submission → NOT_STARTED (pending
+    // action). `isActive` is carried so the target-% aggregation can restrict to
+    // approved+active outlets WITHOUT disturbing the all-inclusive counts.
+    type OutletInfo = { id: string; outletCode: string | null; isActive: boolean; status: string; primaryInScope: boolean };
+    const outletsByUser = new Map<string, OutletInfo[]>();
+    for (const a of assignments) {
+      if (!a.outlet) continue;
+      const status = a.outlet.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED';
+      const arr = outletsByUser.get(a.salesUserId) ?? [];
+      arr.push({
+        id: a.outlet.id,
+        outletCode: a.outlet.outletCode,
+        isActive: !!a.outlet.isActive,
+        status,
+        primaryInScope: primaryInScope
+          ? primaryInScope({
+              outletType: a.outlet.outletType?.code,
+              program: a.outlet.programName,
+              subProgram: a.outlet.programCategory,
+            })
+          : true,
+      });
+      outletsByUser.set(a.salesUserId, arr);
+    }
     const month = this.reportMonth();
     const [targetMap, achMap] = await this.primaryMapsForMonth(clientId, month, primaryCode);
 
@@ -391,7 +420,7 @@ export class SalesService {
         for (const o of outletsByUser.get(sid) ?? []) {
           if (outletIds.has(o.id)) continue; // dedupe across multiple assignees
           outletIds.add(o.id);
-          if (o.isActive && o.outletCode) activeCodes.add(o.outletCode); // KPI set only
+          if (o.isActive && o.outletCode && o.primaryInScope) activeCodes.add(o.outletCode); // KPI set only
           if (o.status === 'APPROVED') kycDone++;
           if (!TERMINAL.includes(o.status)) kycPending++;
         }
@@ -457,12 +486,24 @@ export class SalesService {
     });
 
     // KPI catalogue → the KPI filter options + the metric. Enabled only, configured order.
-    const kpiDefs = await this.prisma.kpiDef.findMany({
+    const allKpiDefs = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId, enabled: true },
-      select: { code: true, label: true, isPrimary: true, order: true },
+      select: { code: true, label: true, isPrimary: true, order: true, ...KPI_SCOPE_SELECT },
       orderBy: [{ order: 'asc' }, { code: 'asc' }],
     });
+    const typeF = opts.outletType && opts.outletType !== 'ALL' ? opts.outletType : null;
+    const progF = opts.program && opts.program !== 'ALL' ? opts.program : null;
+    // APPLIES-TO D7: the KPI list honours the outletType AND program filters (fixes the KPI list
+    // previously ignoring the type filter). DB order is preserved (filter only) and a KPI whose
+    // scope is empty always passes, so a tenant with only unscoped KPIs (Deoleo) gets the exact
+    // same list for every filter combination.
+    const kpiDefs = allKpiDefs.filter((k) =>
+      appliesToFilter(kpiAppliesTo(k), { outletType: typeF, program: progF }),
+    );
     const primaryCode = (kpiDefs.find((k) => k.isPrimary) ?? kpiDefs[0])?.code ?? null;
+    // NOTE (D3): the per-KPI roll-ups below read STORED values as-is — scope is enforced at write
+    // (uploads ignore out-of-scope cells) and at KPI-list building (above), never by masking stored
+    // values at read time.
     const kpiCode = opts.kpi && kpiDefs.some((k) => k.code === opts.kpi) ? opts.kpi : primaryCode;
 
     // VISIBILITY pseudo-KPI gate — resolved ONCE, up front. When the tenant has visibility OFF,
@@ -530,8 +571,6 @@ export class SalesService {
       .sort((x, y) => x.name.localeCompare(y.name));
     filterOptions.programs = [...programSet].sort();
 
-    const typeF = opts.outletType && opts.outletType !== 'ALL' ? opts.outletType : null;
-    const progF = opts.program && opts.program !== 'ALL' ? opts.program : null;
     const passes = (o: OutletScopeInfo) =>
       (!typeF || o.typeCode === typeF) && (!progF || o.program === progF);
 
@@ -550,10 +589,13 @@ export class SalesService {
     // Numerator: of those, outlets with an APPROVED VisibilityCapture in the CURRENT window.
     // One findMany over the root subtree's outlet ids (windowKey + status filtered) — no N+1.
     let visScope: string[] = [];
+    // APPLIES-TO (D12): visibility programs/subPrograms narrow the type scope further (empty = all).
+    let visProgramCfg: VisibilityProgramScopeLike | null = null;
     const approvedVisOutletIds = new Set<string>();
     if (visibilityEnabled) {
       const cfg = (await this.tenantSettings.getEffectiveSettings(user.clientId)).visibilityConfig;
       visScope = cfg.outletScope ?? [];
+      visProgramCfg = cfg;
       // REUSE the capture/notify services' exact window-key math (frequency-driven IST windows).
       const windowKey = currentWindowKey(new Date(), cfg.frequencyPerMonth);
       const allOutletIds = new Set<string>();
@@ -585,6 +627,8 @@ export class SalesService {
           if (o.status !== 'APPROVED') continue; // KYC-approved
           if (!o.isActive) continue; // active
           if (!visScope.includes(o.typeCode)) continue; // in visibility scope
+          // program / sub-program narrowing (no-op when the config sets neither)
+          if (!visibilityProgramMatches(visProgramCfg, { program: o.program, subProgram: o.subProgram })) continue;
           den++;
           if (approvedVisOutletIds.has(o.id)) num++; // current-window APPROVED capture
         }
@@ -821,6 +865,8 @@ export class SalesService {
             // counts/metrics never read it, so a visibility-disabled tenant stays byte-identical.
             isActive: true,
             programName: true,
+            // APPLIES-TO sub-program facet (KPI scope + visibility subPrograms). Internal only.
+            programCategory: true,
             outletType: { select: { code: true, name: true } },
             partner: {
               select: { kycSubmissions: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true } } },
@@ -842,6 +888,7 @@ export class SalesService {
         typeCode: o.outletType?.code ?? '',
         typeName: o.outletType?.name ?? o.outletType?.code ?? '',
         program: o.programName ?? '',
+        subProgram: o.programCategory ?? '',
         status: o.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED',
         isActive: !!o.isActive,
       };
@@ -898,22 +945,23 @@ export class SalesService {
     // each KPI's values (INR → compact ₹, else the unit suffix).
     const kpiDefs = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId, enabled: true },
-      select: { code: true, label: true, unit: true, isPrimary: true, order: true, outletType: true },
+      select: { code: true, label: true, unit: true, isPrimary: true, order: true, ...KPI_SCOPE_SELECT },
       orderBy: [{ order: 'asc' }, { code: 'asc' }],
     });
     const typeF = opts.outletType && opts.outletType !== 'ALL' ? opts.outletType : null;
     const progF = opts.program && opts.program !== 'ALL' ? opts.program : null;
-    // The KPI set applicable to this outlet type (shared + type-specific), resolved the SAME way the
-    // rest of the sales dashboard does (kpisForOutletType) — do NOT invent a second source. This is
-    // the selectable list the FE's KPI dropdown renders.
-    const applicableKpis = kpisForOutletType(kpiDefs, typeF);
+    // The KPI set applicable to this view filter (outlet type AND program — APPLIES-TO D7), resolved
+    // the SAME way the rest of the sales dashboard does (kpisForScopeFilter) — do NOT invent a second
+    // source. This is the selectable list the FE's KPI dropdown renders.
+    const scopeFilter = { outletType: typeF, program: progF };
+    const applicableKpis = kpisForScopeFilter(kpiDefs, scopeFilter);
     const kpiList = applicableKpis.map((k) => ({ code: k.code, label: k.label, unit: k.unit ?? '' }));
     // Scored KPI: the caller's `kpi` when it's a valid code in the applicable set; else the primary
     // default (so an omitted `kpi` keeps today's exact behaviour / the unchanged initial view).
-    // primaryKpiForOutletType resolves the primary within the SAME filtered set.
+    // primaryKpiFor resolves the primary within the SAME filtered set.
     const selected =
       (opts.kpi ? applicableKpis.find((k) => k.code === opts.kpi) : undefined) ??
-      primaryKpiForOutletType(kpiDefs, typeF);
+      primaryKpiFor(kpiDefs, scopeFilter);
 
     const emptyBucket = () => ({
       monthlySale: 0,
@@ -1350,12 +1398,12 @@ export class SalesService {
   private async subtreeOutletCodes(
     user: JwtPayload,
     outletType?: string,
-  ): Promise<{ all: string[]; active: string[] }> {
+  ): Promise<{ all: string[]; active: string[]; facets: Map<string, AppliesToOutletFacets> }> {
     const su = await this.prisma.salesUser.findFirst({
       where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
       select: { id: true },
     });
-    if (!su) return { all: [], active: [] };
+    if (!su) return { all: [], active: [], facets: new Map() };
     const edges = await this.prisma.salesUser.findMany({
       where: { user: { clientId: user.clientId }, deletedAt: null },
       select: { id: true, reportingToId: true },
@@ -1363,20 +1411,39 @@ export class SalesService {
     const subtreeIds = [...descendantSalesUserIds(su.id, edges)];
     const assignments = await this.prisma.salesUserAssignment.findMany({
       where: { salesUserId: { in: subtreeIds }, unassignedAt: null, outletId: { not: null } },
-      select: { outlet: { select: { outletCode: true, isActive: true, outletType: { select: { code: true } } } } },
+      select: {
+        outlet: {
+          select: {
+            outletCode: true,
+            isActive: true,
+            // APPLIES-TO facets (per-outlet KPI scope) — inert for unscoped KPIs.
+            programName: true,
+            programCategory: true,
+            outletType: { select: { code: true } },
+          },
+        },
+      },
     });
     // Only filter when a concrete type is requested; absent / 'ALL' → no filter (byte-identical).
     const typeF = outletType && outletType !== 'ALL' ? outletType : null;
     const all = new Set<string>();
     const active = new Set<string>();
+    const facets = new Map<string, AppliesToOutletFacets>();
     for (const a of assignments) {
       const code = a.outlet?.outletCode;
       if (!code) continue;
       if (typeF && a.outlet?.outletType?.code !== typeF) continue;
       all.add(code);
       if (a.outlet?.isActive) active.add(code);
+      if (!facets.has(code)) {
+        facets.set(code, {
+          outletType: a.outlet?.outletType?.code ?? null,
+          program: a.outlet?.programName ?? null,
+          subProgram: a.outlet?.programCategory ?? null,
+        });
+      }
     }
-    return { all: [...all], active: [...active] };
+    return { all: [...all], active: [...active], facets };
   }
 
   /**
@@ -1408,7 +1475,7 @@ export class SalesService {
       this.prisma.outletSalesRecord.findMany({ where: { ...whereBase, month }, select: { outletCode: true, kpiValues: true } }),
       this.prisma.kpiDef.findMany({
         where: { clientId: user.clientId },
-        select: { code: true, label: true, unit: true, isPrimary: true, order: true, rollup: true, outletType: true },
+        select: { code: true, label: true, unit: true, isPrimary: true, order: true, rollup: true, ...KPI_SCOPE_SELECT },
       }),
     ]);
 
@@ -1419,12 +1486,14 @@ export class SalesService {
     const allOutletCodes = new Set([...targetByOutlet.keys(), ...achByOutlet.keys()]);
 
     // Per-type KPI SET: when a concrete outletType is requested, the card shows only that type's KPI
-    // set (shared/null KPIs + that-type KPIs) — else RLP's KPIs would render over BSC outlets. When
-    // omitted / 'ALL', `kpisForOutletType` is a no-op (all KpiDefs) → Deoleo byte-identical.
+    // set (shared/unscoped KPIs + KPIs whose APPLIES-TO scope admits the type) — else RLP's KPIs would
+    // render over BSC outlets. When omitted / 'ALL', `kpisForScopeFilter` is a no-op (all KpiDefs) →
+    // Deoleo byte-identical.
     const typeF = outletType && outletType !== 'ALL' ? outletType : null;
-    const scopedKpis = kpisForOutletType(kpiRows, typeF);
+    const scopedKpis = kpisForScopeFilter(kpiRows, { outletType: typeF });
     const kpiMeta = new Map(scopedKpis.map((k) => [k.code, k]));
     const allowedCodes = new Set(scopedKpis.map((k) => k.code));
+    // D3: the sums below read STORED values as-is (scope is enforced at write + KPI-list building).
     const codes = new Set<string>();
     // Restrict the KPI columns to the type's set ONLY when a type filter is active; with no filter,
     // keep the prior behaviour (any code present in the data surfaces, even one with no KpiDef).
@@ -1448,7 +1517,7 @@ export class SalesService {
       } else {
         // SUM — numerically identical to the prior sum-across-outlets behavior.
         for (const oc of allOutletCodes) {
-          target += Number(targetByOutlet.get(oc)?.[code]) || 0;
+          target +=Number(targetByOutlet.get(oc)?.[code]) || 0;
           achieved += Number(achByOutlet.get(oc)?.[code]) || 0;
         }
       }
@@ -1490,8 +1559,8 @@ export class SalesService {
     // DETAIL view — must list ALL assigned outlets (incl. PENDING / not-interested),
     // not just approved+active. Use the `all` code set (contrast getTargets, which
     // aggregates the hero-card KPI over the `active` set only).
-    const { all: outletCodes } = await this.subtreeOutletCodes(user);
-    return this.readOutletTargets(user.clientId, outletCodes, period);
+    const { all: outletCodes, facets } = await this.subtreeOutletCodes(user);
+    return this.readOutletTargets(user.clientId, outletCodes, period, facets);
   }
 
   /**
@@ -1505,12 +1574,32 @@ export class SalesService {
     await this.assertCanViewMember(user, memberId);
     const assignments = await this.prisma.salesUserAssignment.findMany({
       where: { salesUserId: memberId, unassignedAt: null, outletId: { not: null } },
-      select: { outlet: { select: { outletCode: true } } },
+      select: {
+        outlet: {
+          select: {
+            outletCode: true,
+            // APPLIES-TO facets for the per-cell KPI scope ("—" for an out-of-scope KPI).
+            programName: true,
+            programCategory: true,
+            outletType: { select: { code: true } },
+          },
+        },
+      },
     });
     const outletCodes = [...new Set(
       assignments.map((a) => a.outlet?.outletCode).filter((c): c is string => !!c),
     )];
-    return this.readOutletTargets(user.clientId, outletCodes, period);
+    const facets = new Map<string, AppliesToOutletFacets>();
+    for (const a of assignments) {
+      const o = a.outlet;
+      if (!o?.outletCode || facets.has(o.outletCode)) continue;
+      facets.set(o.outletCode, {
+        outletType: o.outletType?.code ?? null,
+        program: o.programName ?? null,
+        subProgram: o.programCategory ?? null,
+      });
+    }
+    return this.readOutletTargets(user.clientId, outletCodes, period, facets);
   }
 
   /**
@@ -1545,7 +1634,12 @@ export class SalesService {
    * OutletTarget.targetValues ⋈ OutletSalesRecord.kpiValues ⋈ KpiDef, and returns
    * { period, kpiColumns (primary-first), rows keyed by outletCode }.
    */
-  private async readOutletTargets(clientId: string, outletCodes: string[], period?: string) {
+  private async readOutletTargets(
+    clientId: string,
+    outletCodes: string[],
+    period?: string,
+    facets?: Map<string, AppliesToOutletFacets>,
+  ) {
     if (outletCodes.length === 0) return { period: null, kpiColumns: [], rows: [] };
 
     const month = this.reportMonth(period);
@@ -1556,9 +1650,12 @@ export class SalesService {
       this.prisma.outletSalesRecord.findMany({ where: whereBase, select: { outletCode: true, kpiValues: true } }),
       this.prisma.kpiDef.findMany({
         where: { clientId },
-        select: { code: true, label: true, unit: true, isPrimary: true, order: true, rollup: true },
+        select: { code: true, label: true, unit: true, isPrimary: true, order: true, rollup: true, ...KPI_SCOPE_SELECT },
       }),
     ]);
+    // D6 multi-outlet table: an (outlet, KPI) cell where the KPI is out of the outlet's scope is "—"
+    // (all-null). Unscoped KPIs have no predicate → every cell is read exactly as before.
+    const kpiPred = new Map(kpiRows.map((k) => [k.code, kpiOutletPredicate(k)] as const));
 
     const tIdx = new Map(targetRows.map((r) => [r.outletCode, (r.targetValues ?? {}) as Record<string, number>]));
     const aIdx = new Map(achRows.map((r) => [r.outletCode, (r.kpiValues ?? {}) as Record<string, number>]));
@@ -1573,6 +1670,11 @@ export class SalesService {
       const kv = aIdx.get(code) ?? {};
       const kpis: Record<string, { target: number | null; achieved: number | null; pace: number | null }> = {};
       for (const c of new Set([...kpiCodeKeys(tv), ...kpiCodeKeys(kv)])) {
+        const pred = kpiPred.get(c);
+        if (pred && !pred(facets?.get(code) ?? {})) {
+          kpis[c] = { target: null, achieved: null, pace: null }; // KPI not applicable → "—"
+          continue;
+        }
         const target = Object.prototype.hasOwnProperty.call(tv, c) ? (Number(tv[c]) || 0) : null;
         const achieved = Object.prototype.hasOwnProperty.call(kv, c) ? (Number(kv[c]) || 0) : null;
         const pace = target !== null && target !== 0 && achieved !== null ? achieved / target : null;
@@ -1669,14 +1771,29 @@ export class SalesService {
     const month = this.reportMonth();
     const kpiRows = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId },
-      select: { code: true, label: true, unit: true, isPrimary: true, order: true, rollup: true, outletType: true },
+      select: { code: true, label: true, unit: true, isPrimary: true, order: true, rollup: true, ...KPI_SCOPE_SELECT },
     });
     // A single-outlet view is a RAW per-outlet series → force SUM (and ignore program + outletType).
     const singleOutlet = !!outlet;
-    // Per-type KPI SET for the DASHBOARD view: trend only a KPI from the requested type's set (shared
-    // + that-type KPIs). Single-outlet ignores the toggle; omitted/'ALL' → all KpiDefs (byte-identical).
+    // Per-type/program KPI SET for the DASHBOARD view: trend only a KPI applicable to the requested
+    // outlet type AND program (APPLIES-TO D7; unscoped KPIs always ride along). Single-outlet ignores
+    // the toggles; omitted/'ALL' → all KpiDefs (byte-identical).
     const typeF = !singleOutlet && outletType && outletType !== 'ALL' ? outletType : null;
-    const scopedKpis = kpisForOutletType(kpiRows, typeF);
+    const progF = !singleOutlet && program && program !== 'ALL' ? program : null;
+    // Apply the outletType filter to the aggregate (dashboard) scope only; a single-outlet view
+    // authorizes against the FULL subtree, so leave it unfiltered there (byte-identical to today).
+    // (Loaded before the KPI pick — the single-outlet view needs the outlet's facets for D6.)
+    const { all, active, facets } = await this.subtreeOutletCodes(user, singleOutlet ? undefined : outletType);
+    let scopedKpis = kpisForScopeFilter(kpiRows, { outletType: typeF, program: progF });
+    if (singleOutlet && all.includes(outlet!)) {
+      // D6 single-outlet view: only the KPIs in THIS outlet's scope; the default falls back to the
+      // outlet's first in-scope KPI. Unscoped KPIs always apply → unchanged for unscoped tenants.
+      const f = facets.get(outlet!) ?? {};
+      scopedKpis = scopedKpis.filter((k) => {
+        const p = kpiOutletPredicate(k);
+        return !p || p(f);
+      });
+    }
     const byCode = new Map(scopedKpis.map((k) => [k.code, k]));
     // Default KPI = primary, else the first by configured order — same basis as getTargets.
     const ordered = [...scopedKpis].sort(
@@ -1688,9 +1805,6 @@ export class SalesService {
     const base = { kpiCode: meta?.code ?? null, kpiName: meta?.label ?? null, unit: meta?.unit ?? '', rollup };
 
     if (!meta) return { ...base, trend: this.emptyTrend(month) };
-    // Apply the outletType filter to the aggregate (dashboard) scope only; a single-outlet view
-    // authorizes against the FULL subtree, so leave it unfiltered there (byte-identical to today).
-    const { all, active } = await this.subtreeOutletCodes(user, singleOutlet ? undefined : outletType);
 
     let outletCodes: string[];
     if (singleOutlet) {
@@ -1858,9 +1972,39 @@ export class SalesService {
         unassignedAt: null,
         outletId: { not: null },
       },
-      select: { salesUserId: true, outlet: { select: { outletCode: true, isActive: true } } },
+      select: {
+        salesUserId: true,
+        outlet: {
+          select: {
+            outletCode: true,
+            isActive: true,
+            // APPLIES-TO facets — read only to skip outlets where the primary is out of scope.
+            programName: true,
+            programCategory: true,
+            outletType: { select: { code: true } },
+          },
+        },
+      },
     });
+
+    // ── 5. The primary KPI (isPrimary, else the first KpiDef). ────────────────
+    // orderBy code so the pick is DETERMINISTIC even if a tenant mis-configures
+    // more than one isPrimary KpiDef (otherwise `find` would depend on row order).
+    const kpiDefs = await this.prisma.kpiDef.findMany({
+      where: { clientId: user.clientId },
+      select: { code: true, isPrimary: true, ...KPI_SCOPE_SELECT },
+      orderBy: { code: 'asc' },
+    });
+    const primaryDef = kpiDefs.find((k) => k.isPrimary) ?? kpiDefs[0];
+    const primaryCode = primaryDef?.code ?? null;
+    // APPLIES-TO D7: the leaderboard keeps the TENANT primary but skips outlets where it is out of
+    // scope from the target/achieved sums (activeOutlets still counts every approved+active outlet).
+    // Unscoped primary → undefined → nothing skipped (byte-identical).
+    const primaryInScope = kpiOutletPredicate(primaryDef);
+
     const outletCodesByUser = new Map<string, string[]>();
+    // Same per-user codes, restricted to outlets where the primary is in scope (the score sums).
+    const scoredCodesByUser = primaryInScope ? new Map<string, string[]>() : outletCodesByUser;
     for (const a of assignments) {
       const code = a.outlet?.outletCode;
       if (!code) continue;
@@ -1868,17 +2012,19 @@ export class SalesService {
       const arr = outletCodesByUser.get(a.salesUserId) ?? [];
       arr.push(code);
       outletCodesByUser.set(a.salesUserId, arr);
+      if (
+        primaryInScope &&
+        primaryInScope({
+          outletType: a.outlet.outletType?.code,
+          program: a.outlet.programName,
+          subProgram: a.outlet.programCategory,
+        })
+      ) {
+        const s = scoredCodesByUser.get(a.salesUserId) ?? [];
+        s.push(code);
+        scoredCodesByUser.set(a.salesUserId, s);
+      }
     }
-
-    // ── 5. The primary KPI (isPrimary, else the first KpiDef). ────────────────
-    // orderBy code so the pick is DETERMINISTIC even if a tenant mis-configures
-    // more than one isPrimary KpiDef (otherwise `find` would depend on row order).
-    const kpiDefs = await this.prisma.kpiDef.findMany({
-      where: { clientId: user.clientId },
-      select: { code: true, isPrimary: true },
-      orderBy: { code: 'asc' },
-    });
-    const primaryCode = (kpiDefs.find((k) => k.isPrimary) ?? kpiDefs[0])?.code ?? null;
 
     // ── 6. Both months' primary target/achieved per outletCode. ───────────────
     const currMonth = this.reportMonth(safePeriod);
@@ -1891,7 +2037,7 @@ export class SalesService {
       const subtreeIds = descendantSalesUserIds(candidateId, edges);
       let total = 0;
       for (const sid of subtreeIds) {
-        for (const code of outletCodesByUser.get(sid) ?? []) total += map.get(code) ?? 0;
+        for (const code of scoredCodesByUser.get(sid) ?? []) total += map.get(code) ?? 0;
       }
       return total;
     };

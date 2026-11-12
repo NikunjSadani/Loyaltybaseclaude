@@ -232,6 +232,52 @@ describe('PointsEngineService', () => {
       // Never reached the supersede transaction / status flip.
       expect(mockPrisma.pointsRule.update).not.toHaveBeenCalled();
     });
+
+    // ── APPLIES-TO D5: publish gate on a rule/KPI scope that can never overlap ──────────────
+    const scopedKpi = (s: Record<string, unknown>) => ({
+      code: 'CASES_SOLD', outletType: null, outletTypes: [], programs: [], subPrograms: [], ...s,
+    });
+
+    it('D5: 400 when the rule program (GOLD) is DISJOINT from the KPI programs scope', async () => {
+      mockPrisma.pointsRule.findFirst.mockResolvedValue(row({ id: 'row_v2', status: 'draft' }));
+      mockPrisma.kpiDef.findMany.mockResolvedValue([scopedKpi({ programs: ['SILVER'] })]);
+      await expect(service.publish(clientAdmin, 'row_v2')).rejects.toThrow(/never overlaps.*CASES_SOLD/);
+      expect(mockPrisma.pointsRule.update).not.toHaveBeenCalled();
+    });
+
+    it('D5: 400 when a HARD outletType segmentFilter is disjoint from the KPI outlet types', async () => {
+      mockPrisma.pointsRule.findFirst.mockResolvedValue(row({
+        id: 'row_v2', status: 'draft',
+        pipeline: [{ type: 'segmentFilter', id: 's1', field: 'outletType', allow: ['WHOLESALER'], onFail: 'zero' }] as never,
+      }));
+      mockPrisma.kpiDef.findMany.mockResolvedValue([scopedKpi({ outletTypes: ['SSS'] })]);
+      await expect(service.publish(clientAdmin, 'row_v2')).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('D5: publishes when the scopes overlap (ci), a soft filter is ignored, or the rule is any-program', async () => {
+      mockPrisma.pointsRule.findMany.mockResolvedValue([]);
+      mockPrisma.pointsRule.update.mockResolvedValue(row({ id: 'row_v2', status: 'published' }));
+      // overlap (case-insensitive) + a SOFT (skipNode) outletType filter does not restrict
+      mockPrisma.pointsRule.findFirst.mockResolvedValue(row({
+        id: 'row_v2', status: 'draft',
+        pipeline: [{ type: 'segmentFilter', id: 's1', field: 'outletType', allow: ['WHOLESALER'], onFail: 'skipNode' }] as never,
+      }));
+      mockPrisma.kpiDef.findMany.mockResolvedValue([scopedKpi({ programs: ['gold', 'SILVER'], outletTypes: ['SSS'] })]);
+      await expect(service.publish(clientAdmin, 'row_v2')).resolves.toBeDefined();
+      // any-program rule vs a program-scoped KPI → overlap
+      mockPrisma.pointsRule.findFirst.mockResolvedValue(row({ id: 'row_v2', status: 'draft', program: null,
+        attachsTo: { scope: 'program_kpi', program: null, programCategory: null, kpiCode: 'CASES_SOLD' } as never }));
+      mockPrisma.kpiDef.findMany.mockResolvedValue([scopedKpi({ programs: ['SILVER'] })]);
+      await expect(service.publish(clientAdmin, 'row_v2')).resolves.toBeDefined();
+    });
+
+    it('D5: an UNSCOPED KPI (Deoleo) never triggers the gate (pre-scope behaviour)', async () => {
+      mockPrisma.pointsRule.findFirst.mockResolvedValue(row({ id: 'row_v2', status: 'draft' }));
+      mockPrisma.pointsRule.findMany.mockResolvedValue([]);
+      mockPrisma.pointsRule.update.mockResolvedValue(row({ id: 'row_v2', status: 'published' }));
+      mockPrisma.kpiDef.findMany.mockResolvedValue([scopedKpi({})]);
+      await expect(service.publish(clientAdmin, 'row_v2')).resolves.toBeDefined();
+    });
   });
 
   // ── tenant scoping ─────────────────────────────────────────────────────────────

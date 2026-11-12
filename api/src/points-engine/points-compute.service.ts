@@ -44,12 +44,17 @@ import type {
 import type { ComputeCommitResult, ComputePreview, ComputePreviewRow } from './points-compute.types';
 import type { PointsRule } from '@prisma/client';
 import { UploadRowDto, UploadRowStatus } from '../credits/dto/credits.dto';
+import type { AppliesToOutletFacets } from '../common/applies-to/applies-to';
+import { kpiOutletPredicate } from '../sales/outlet-kpi-scope.helper';
 
 /** The reserved non-KPI key inside a targetValues/kpiValues JSON (custom display names). */
 const NAMES_KEY = '__names';
 
 /** CreditBatch.sourceKind tag for batches created by the direct-credit path (idempotency + provenance). */
 const POINTS_ENGINE_SOURCE = 'POINTS_ENGINE';
+
+/** APPLIES-TO D5: SKIP reason for an (outlet, KPI) pair outside the KPI's scope (exact owner wording). */
+export const KPI_SCOPE_SKIP_REASON = 'KPI not applicable to this outlet (KPI scope)';
 
 @Injectable()
 export class PointsComputeService {
@@ -124,7 +129,7 @@ export class PointsComputeService {
     if (activeKpiCodes.length === 0) return emptyPreview;
 
     // ── 2. Load inputs (one query per source; map by outletCode; NO N+1) ────────────────────
-    const [outlets, salesRows, targetRows] = await Promise.all([
+    const [outlets, salesRows, targetRows, kpiScopeRows] = await Promise.all([
       this.prisma.outlet.findMany({
         where: {
           clientId,
@@ -149,7 +154,19 @@ export class PointsComputeService {
         where: { clientId, month: period },
         select: { outletCode: true, targetValues: true },
       }),
+      // APPLIES-TO scope of each active KPI (D5) — one query, keyed by code below.
+      this.prisma.kpiDef.findMany({
+        where: { clientId, code: { in: activeKpiCodes } },
+        select: { code: true, outletType: true, outletTypes: true, programs: true, subPrograms: true },
+      }),
     ]);
+    // kpiCode → per-outlet scope predicate; absent for unscoped (or unknown) KPIs → never SKIPs, so an
+    // unscoped tenant's preview is byte-identical. Uses the outlet's CURRENT attributes (D9/D10).
+    const kpiScopePred = new Map<string, (o: AppliesToOutletFacets) => boolean>();
+    for (const k of kpiScopeRows ?? []) {
+      const p = kpiOutletPredicate(k);
+      if (p) kpiScopePred.set(k.code, p);
+    }
 
     const salesByCode = new Map(
       salesRows.map((r) => [r.outletCode, normalizeValues(r.kpiValues)]),
@@ -212,6 +229,13 @@ export class PointsComputeService {
           achievement,
           target,
         };
+
+        // D5: an (outlet, KPI) pair outside the KPI's APPLIES-TO scope is never computed.
+        const inScope = kpiScopePred.get(kpiCode);
+        if (inScope && !inScope({ outletType: segment.outletType, program, subProgram: programCategory })) {
+          rows.push({ ...base, status: 'SKIP', reason: KPI_SCOPE_SKIP_REASON });
+          continue;
+        }
 
         const rule = await resolveRule(program, programCategory, kpiCode);
         if (!rule) {

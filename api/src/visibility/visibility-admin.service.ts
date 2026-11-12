@@ -14,6 +14,7 @@ import {
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { validateFormSchema } from './visibility-form.helper';
 import { SetVisibilityConfigDto, ScopeOutletsQueryDto } from './dto/visibility-admin.dto';
+import { resolveVisibilityProgramLists, withVisibilityProgramWhere } from './visibility-scope.helper';
 
 /**
  * VisibilityAdminService — GIFSY_ADMIN authoring for the Visibility (POSM) feature:
@@ -79,11 +80,28 @@ export class VisibilityAdminService {
     await this.assertEnabled(clientId);
     await this.assertPhotoMode(clientId);
 
+    // APPLIES-TO (plan §4): programs / subPrograms — an ABSENT key carries over the stored list (a
+    // stale editor tab must never wipe it); a present key is validated + canonicalised (400 on an
+    // unknown value). They are written ONLY when non-empty (the settings overlay defaults an absent
+    // key to [] = all), so a tenant that never sets them stores exactly the pre-scope JSON.
+    // Fresh read (cache busted) so the carry-over never copies a ≤5-min-stale list from another instance.
+    this.tenantSettings.invalidate(clientId);
+    const current = await this.tenantSettings.getEffectiveSettings(clientId);
+    const lists = await resolveVisibilityProgramLists(
+      this.prisma,
+      clientId,
+      current,
+      { programs: dto.programs, subPrograms: dto.subPrograms },
+      current.visibilityConfig,
+    );
+
     const value: Prisma.InputJsonValue = {
       outletScope: dto.outletScope,
       frequencyPerMonth: dto.frequencyPerMonth,
       allowedSalesLevels: dto.allowedSalesLevels,
       geoFence: { enabled: dto.geoFence.enabled, radiusMeters: dto.geoFence.radiusMeters },
+      ...(lists.programs.length ? { programs: lists.programs } : {}),
+      ...(lists.subPrograms.length ? { subPrograms: lists.subPrograms } : {}),
     };
 
     const setting = await this.prisma.programSetting.upsert({
@@ -196,7 +214,8 @@ export class VisibilityAdminService {
     }
 
     const outlets = await this.prisma.outlet.findMany({
-      where,
+      // APPLIES-TO (D12): programs/subPrograms narrow the type scope (no-op → `where` unchanged).
+      where: withVisibilityProgramWhere(where, config),
       select: {
         id: true,
         outletCode: true,

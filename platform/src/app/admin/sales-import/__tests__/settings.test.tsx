@@ -295,7 +295,7 @@ describe('KPI editor — product set (audit fixes)', () => {
 
   it('a Test result goes stale when the outlet scope changes', async () => {
     apiMock.testKpi.mockResolvedValue(ok({ months: [], unmatchedEntries: { anyOf: [], noneOf: [] }, redundantEntries: { anyOf: [] }, matchedLines: 4 }));
-    renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X' }, segments: { outletTypes: [{ code: 'RETAILER', name: 'Retailer' }], programs: [] } });
+    renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X' }, segments: { outletTypes: [{ code: 'RETAILER', name: 'Retailer' }], programs: [], subPrograms: [] } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Test against latest import/ })); });
     expect(screen.getByTestId('kpi-test-result')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('checkbox', { name: 'Retailer (RETAILER)' }));
@@ -334,6 +334,7 @@ describe('KPI editor — outlet scope', () => {
   const SEG = {
     outletTypes: [{ code: 'RETAILER', name: 'Retailer' }, { code: 'WHOLESALER', name: 'Wholesaler' }],
     programs: ['Gold', 'Silver'],
+    subPrograms: [] as string[],
   };
 
   it('outlet types and programmes are multi-selects fed by segment-options; save sends the picked codes', async () => {
@@ -363,7 +364,7 @@ describe('KPI editor — outlet scope', () => {
   });
 
   it('falls back to free text when the list is empty or unavailable', () => {
-    renderEditor({ segments: { outletTypes: [], programs: ['Gold'] } });
+    renderEditor({ segments: { outletTypes: [], programs: ['Gold'], subPrograms: [] } });
     expect(screen.getByRole('textbox', { name: /Only these outlet types/ })).toBeInTheDocument();
     expect(screen.getByRole('group', { name: /Only these programmes/ })).toBeInTheDocument();
   });
@@ -378,7 +379,8 @@ describe('KPI editor — outlet scope', () => {
 describe('KPI editor — L4: the KPI\'s own outlet type (KpiDef.outletType) vs the definition scope', () => {
   const SEG = {
     outletTypes: [{ code: 'RETAILER', name: 'Retailer' }, { code: 'WHOLESALER', name: 'Wholesaler' }],
-    programs: [],
+    programs: [] as string[],
+    subPrograms: [] as string[],
   };
   const TYPED = [{ code: 'KPI_W', label: 'KPI W', unit: '₹', enabled: true, outletType: 'WHOLESALER' }, ...KPIS];
 
@@ -403,6 +405,25 @@ describe('KPI editor — L4: the KPI\'s own outlet type (KpiDef.outletType) vs t
     expect(screen.getByTestId('kpi-scope-conflict')).toHaveTextContent(/RETAILER outlets will not get a value/);
     fireEvent.click(within(types).getByRole('checkbox', { name: 'Retailer (RETAILER)' })); // untick → agree
     expect(screen.queryByTestId('kpi-scope-conflict')).not.toBeInTheDocument();
+  });
+
+  it('APPLIES-TO: the warning generalises to the KPI outletTypes[] and programs[] (arrays win over legacy)', () => {
+    const k = { code: 'K', outletType: null, outletTypes: ['SSS', 'WHOLESALER'], programs: ['Unnati'], subPrograms: [] };
+    expect(scopeConflictWarning(k, ['sss'])).toBeNull();
+    expect(scopeConflictWarning(k, ['RETAILER'])).toMatch(/SSS, WHOLESALER outlets only.*No outlet will get a value. Add SSS or WHOLESALER/);
+    expect(scopeConflictWarning(k, [], ['unnati'])).toBeNull();
+    expect(scopeConflictWarning(k, [], ['Pragati'])).toMatch(/applies only to the programme Unnati.*No outlet will get a value/);
+    expect(scopeConflictWarning(k, ['SSS', 'RETAILER'], ['Unnati', 'Pragati']))
+      .toMatch(/RETAILER outlets will not get a value.*outlets in Pragati will not get a value/);
+    // legacy single type still honoured when the arrays are absent
+    expect(scopeConflictWarning({ code: 'K', outletType: 'WHOLESALER' }, ['RETAILER'])).toMatch(/No outlet will get a value/);
+  });
+
+  it('APPLIES-TO: a KPI scoped by sub-programme shows the informational note', () => {
+    const SUB = [{ code: 'KPI_S', label: 'KPI S', unit: '₹', enabled: true, outletType: null, outletTypes: [], programs: ['Unnati'], subPrograms: ['Lite'] }, ...KPIS];
+    renderEditor({ segments: SEG, tenantKpis: SUB, initial: { ...NEW, kpiCode: 'KPI_S', programs: ['Unnati'] } });
+    expect(screen.queryByTestId('kpi-scope-conflict')).not.toBeInTheDocument();
+    expect(screen.getByTestId('kpi-scope-kpi-type')).toHaveTextContent('outlets in programme Unnati with sub-programme Lite only');
   });
 
   it('a shared KPI (no outletType) never shows the warning', () => {

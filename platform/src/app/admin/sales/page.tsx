@@ -10,6 +10,7 @@ import { DEOLEO_DEFAULT_KPIS } from '@/lib/platform/tenant-kpi-config';
 import type { TenantKpiDef } from '@/lib/platform/tenant-kpi-config';
 import { formatMonth } from '@/lib/targets';
 import { SALES_IMPORT_BATCH_STATUS } from '@/lib/sales-import/types';
+import { IgnoredOutOfScopeNotice } from '@/components/admin/ignored-out-of-scope-notice';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -62,6 +63,8 @@ interface UploadResult {
   rows:          UploadResultRow[];
   /** Sales Import: KPI columns in the file that are importer-owned and were NOT written (absent for most tenants). */
   skippedImporterOwnedKpis?: string[];
+  /** APPLIES-TO D1: values ignored because the KPI does not apply to that outlet (absent on older API builds). */
+  ignoredOutOfScope?: number;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -719,6 +722,11 @@ export default function SalesUploadPage() {
               </span>
             </div>
           )}
+
+          <IgnoredOutOfScopeNotice
+            count={uploadResult.ignoredOutOfScope}
+            rows={uploadResult.rows.filter(r => r.status === 'accepted')}
+          />
 
           {/* Skipped / rejected rows from backend */}
           {uploadResult.rows.filter(r => r.status !== 'accepted').length > 0 && (

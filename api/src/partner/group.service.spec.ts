@@ -604,3 +604,49 @@ describe('GroupService.getLeaderboardRollup', () => {
     expect(mockPrisma.leaderboardEntry.findMany).not.toHaveBeenCalled();
   });
 });
+
+// ── APPLIES-TO D6: each outlet row is a single-outlet view ─────────────────────────────────────
+describe('GroupService.getTargetsRollup — APPLIES-TO KPI scope', () => {
+  function prime(kpis: unknown[]) {
+    mockPrisma.channelPartner.findFirst
+      .mockResolvedValueOnce({ id: 'parent1' })
+      .mockResolvedValueOnce({ groupId: 'parent1' })
+      .mockResolvedValueOnce({ businessName: 'HQ', ownerName: 'Boss' });
+    mockPrisma.outlet.findMany.mockResolvedValueOnce([
+      { outletCode: 'OUT-1', programName: 'RLP', programCategory: null, outletType: { code: 'SSS' } },
+      { outletCode: 'OUT-2', programName: 'BSC', programCategory: null, outletType: { code: 'SSS' } },
+    ]);
+    mockPrisma.outletTarget.findMany.mockResolvedValueOnce([
+      { outletCode: 'OUT-1', outletName: 'One', targetValues: { PRI: 100, B: 10 } },
+      { outletCode: 'OUT-2', outletName: 'Two', targetValues: { PRI: 200, B: 20 } }, // PRI stale on a BSC outlet
+    ]);
+    mockPrisma.outletSalesRecord.findMany.mockResolvedValueOnce([]);
+    mockPrisma.kpiDef.findMany.mockResolvedValueOnce(kpis);
+  }
+  const u = { outletType: null, outletTypes: [], programs: [], subPrograms: [] };
+
+  it('hides an out-of-scope KPI per outlet, excludes it from group totals, and falls back the primary', async () => {
+    prime([
+      { code: 'PRI', label: 'Pri', unit: '', isPrimary: true, order: 1, ...u, programs: ['RLP'] },
+      { code: 'B', label: 'B', unit: '', isPrimary: false, order: 2, ...u },
+    ]);
+    const r: any = await makeService().getTargetsRollup(user, { period: '2026-05' });
+    if (!r.available) throw new Error('unreachable');
+    const one = r.outlets.find((o: any) => o.outletCode === 'OUT-1')!;
+    const two = r.outlets.find((o: any) => o.outletCode === 'OUT-2')!;
+    expect(one.kpis.map((k: any) => [k.code, k.isPrimary])).toEqual([['PRI', true], ['B', false]]);
+    expect(two.kpis.map((k: any) => [k.code, k.isPrimary])).toEqual([['B', true]]); // fallback primary
+    expect(r.kpiTotals.find((k: any) => k.code === 'PRI')!.target).toBe(100); // OUT-2's stale 200 not summed
+  });
+
+  it('UNSCOPED tenant (Deoleo) → every KPI shown on every outlet with the tenant flags', async () => {
+    prime([
+      { code: 'PRI', label: 'Pri', unit: '', isPrimary: true, order: 1, ...u },
+      { code: 'B', label: 'B', unit: '', isPrimary: false, order: 2, ...u },
+    ]);
+    const r: any = await makeService().getTargetsRollup(user, { period: '2026-05' });
+    if (!r.available) throw new Error('unreachable');
+    for (const o of r.outlets) expect(o.kpis.map((k: any) => [k.code, k.isPrimary])).toEqual([['PRI', true], ['B', false]]);
+    expect(r.kpiTotals.find((k: any) => k.code === 'PRI')!.target).toBe(300);
+  });
+});

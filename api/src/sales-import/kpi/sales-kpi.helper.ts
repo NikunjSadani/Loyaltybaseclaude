@@ -9,10 +9,19 @@
  *     (₹ exact at 2 dp; cases rounded to SALES_KPI_QUANTITY_DECIMALS = 3 — H3).
  *   - Outlet scope: a definition with non-empty outletTypes/programs that does not cover the outlet → the key is
  *     OMITTED (blank ≠ 0, the engine's null policy). An in-scope outlet with no matching lines → 0 (full rewrite).
- *   - L4: the KPI's OWN type tag (KpiDef.outletType, `kpiOutletType`) is a further scope: when set, only outlets of that
- *     type are in scope, intersected with outletTypes when both are set (an empty intersection = no outlet).
+ *   - L4 / APPLIES-TO §5: the KPI's OWN scope (KpiDef outletTypes / programs / subPrograms via `kpiScope`, else the
+ *     legacy KpiDef.outletType via `kpiOutletType`) is a further scope, INTERSECTED with the definition's scope
+ *     (`intersectAppliesTo`; a disjoint pair = no outlet). Matching is common/applies-to `appliesToOutlet` (trimmed,
+ *     ci, D4: a non-empty facet + a blank outlet value is out).
  */
 import { createHash } from 'node:crypto';
+import {
+  type AppliesTo,
+  appliesToOutlet,
+  canonicalScopeKey,
+  intersectAppliesTo,
+  kpiAppliesTo,
+} from '../../common/applies-to/applies-to';
 import { normalizeDim, paiseToRupees, picoToCases } from '../ingest/normalize';
 import {
   SALES_IMPORT_DIM_KEY_PATTERN,
@@ -39,14 +48,18 @@ export interface KpiDefLite {
   filter: SalesKpiFilter;
   outletTypes: string[];
   programs: string[];
-  /** KpiDef.outletType of the target KPI (null/undefined = a shared KPI, every outlet type). */
+  /** DEPRECATED legacy KpiDef.outletType of the target KPI (null/undefined = shared). Used only when `kpiScope` is unscoped. */
   kpiOutletType?: string | null;
+  /** APPLIES-TO scope of the target KPI (KpiDef outletTypes / programs / subPrograms). Wins over `kpiOutletType` when non-empty. */
+  kpiScope?: Partial<AppliesTo> | null;
 }
 
-/** Outlet facets used for scope (Outlet.outletType.code, Outlet.programName). */
+/** Outlet facets used for scope (Outlet.outletType.code, Outlet.programName, Outlet.programCategory). */
 export interface OutletScopeMeta {
   outletType: string | null;
   program: string | null;
+  /** Outlet.programCategory (Sub-Program). Absent = blank (out of any non-empty subPrograms scope, D4). */
+  subProgram?: string | null;
 }
 
 // ─── Matching ────────────────────────────────────────────────────────────────
@@ -69,24 +82,38 @@ export function lineMatches(dims: Record<string, string>, filter: SalesKpiFilter
   return true;
 }
 
-function scopeHas(list: string[], value: string | null): boolean {
-  if (list.length === 0) return true;
-  if (value === null || value === undefined) return false;
-  const v = String(value).trim().toUpperCase();
-  return list.some((x) => String(x).trim().toUpperCase() === v);
+type ScopeDef = Pick<KpiDefLite, 'outletTypes' | 'programs' | 'kpiOutletType' | 'kpiScope'>;
+
+/** The target KPI's own scope: `kpiScope` arrays when any is non-empty, else the legacy `kpiOutletType`. */
+export function kpiOwnScope(def: Pick<KpiDefLite, 'kpiOutletType' | 'kpiScope'>): AppliesTo {
+  return kpiAppliesTo({
+    outletType: def.kpiOutletType ?? null,
+    outletTypes: def.kpiScope?.outletTypes ?? [],
+    programs: def.kpiScope?.programs ?? [],
+    subPrograms: def.kpiScope?.subPrograms ?? [],
+  });
 }
 
-/** Is the outlet within the definition's optional outlet-type / programme scope? */
-export function outletInScope(
-  def: Pick<KpiDefLite, 'outletTypes' | 'programs' | 'kpiOutletType'>,
-  meta: OutletScopeMeta,
-): boolean {
-  const kpiType = (def.kpiOutletType ?? '').trim();
-  return (
-    (kpiType === '' || scopeHas([kpiType], meta.outletType)) &&
-    scopeHas(def.outletTypes ?? [], meta.outletType) &&
-    scopeHas(def.programs ?? [], meta.program)
-  );
+// Effective scope per definition object (defs are immutable once built; 400k aggregates × N defs never re-normalise).
+const effectiveScopeCache = new WeakMap<object, AppliesTo | null>();
+
+/**
+ * The definition's effective scope = its own outletTypes / programs ∩ the target KPI's scope (`intersectAppliesTo`).
+ * null = disjoint → the definition writes NO outlet.
+ */
+export function effectiveDefScope(def: ScopeDef): AppliesTo | null {
+  const hit = effectiveScopeCache.get(def);
+  if (hit !== undefined) return hit;
+  const eff = intersectAppliesTo({ outletTypes: def.outletTypes ?? [], programs: def.programs ?? [] }, kpiOwnScope(def));
+  effectiveScopeCache.set(def, eff);
+  return eff;
+}
+
+/** Is the outlet within the definition's optional scope (intersected with the target KPI's own scope)? */
+export function outletInScope(def: ScopeDef, meta: OutletScopeMeta): boolean {
+  const eff = effectiveDefScope(def);
+  if (eff === null) return false;
+  return appliesToOutlet(eff, { outletType: meta.outletType, program: meta.program, subProgram: meta.subProgram ?? null });
 }
 
 // ─── Measures ────────────────────────────────────────────────────────────────
@@ -347,8 +374,10 @@ export function definitionsHash(
       filter: d.filter ?? {},
       outletTypes: [...(d.outletTypes ?? [])].sort(),
       programs: [...(d.programs ?? [])].sort(),
-      // L4: only present for a type-tagged KPI, so every shared-KPI hash is unchanged (undefined keys are dropped).
-      kpiOutletType: (d.kpiOutletType ?? '').trim().toUpperCase() || undefined,
+      // L4 / APPLIES-TO §5: the KPI's own scope via canonicalScopeKey — unscoped → nothing (every shared-KPI hash is
+      // unchanged), exactly one type & no programs → the legacy `kpiOutletType: TYPE` (every type-tagged hash is
+      // unchanged), anything else → `kpiScope: {sorted, UPPERCASED}`.
+      ...canonicalScopeKey(kpiOwnScope(d)),
     }))
     .sort((a, b) => (a.kpiCode < b.kpiCode ? -1 : a.kpiCode > b.kpiCode ? 1 : 0));
   return createHash('sha256').update(stableStringify(canon)).digest('hex');

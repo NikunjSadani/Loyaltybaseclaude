@@ -64,6 +64,9 @@ export interface SetVisibilityConfigInput {
   frequencyPerMonth: number;
   allowedSalesLevels: string[];
   geoFence: { enabled: boolean; radiusMeters: number };
+  /** APPLIES-TO (optional): program / sub-program narrowing; empty = all. An ABSENT key is carried over by the backend. */
+  programs?: string[];
+  subPrograms?: string[];
 }
 
 /** PUT /form — replace the versioned capture form. */

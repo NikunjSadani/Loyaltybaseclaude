@@ -146,6 +146,8 @@ describe('K-9 — the §9 BSC rule through the real engine, on importer-written 
           CASES.filter((c) => c.target !== null).map((c) => ({ outletCode: c.code, targetValues: { 'MONTH TARGET': c.target } }))),
       },
       creditField: { findMany: jest.fn(async () => [{ id: 'f1', name: 'BSC Points', isActive: true, outletTypeAwards: { WHOLESALER: 'POINTS', SSS: 'POINTS' } }]) },
+      // APPLIES-TO KPI scope lookup (points-compute D5); [] = no scoped KPI → pre-scope behaviour.
+      kpiDef: { findMany: jest.fn().mockResolvedValue([]) },
     };
     const svc = new PointsComputeService(
       prisma as never,

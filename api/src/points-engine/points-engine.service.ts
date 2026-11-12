@@ -37,6 +37,12 @@ import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide } from '../common/tenant-scope';
 import { validateRule } from './points-engine.helper';
+import {
+  AppliesTo,
+  intersectAppliesTo,
+  kpiAppliesTo,
+  normalizeAppliesTo,
+} from '../common/applies-to/applies-to';
 import type {
   AwardType,
   PipelineNode,
@@ -377,7 +383,7 @@ export class PointsEngineService {
     if (refs.length === 0) return;
     const defs = await this.prisma.kpiDef.findMany({
       where: { clientId, enabled: true, code: { in: refs } },
-      select: { code: true },
+      select: { code: true, outletType: true, outletTypes: true, programs: true, subPrograms: true },
     });
     const known = new Set(defs.map((d) => d.code));
     const missing = refs.filter((c) => !known.has(c));
@@ -385,6 +391,28 @@ export class PointsEngineService {
       throw new BadRequestException(
         `These KPI codes are not enabled KPIs for this tenant: ${missing.join(', ')}. ` +
           'Use existing KPI codes from the Target Field Configuration — a typo would silently credit 0.',
+      );
+    }
+
+    // APPLIES-TO D5: a rule whose program / programCategory (and hard outlet-type filter, if any) can
+    // never overlap a referenced KPI's scope would SKIP every outlet at compute time — block it at
+    // publish. An unscoped KPI or an any-program rule always overlaps → unscoped tenants unaffected.
+    const ruleScope = ruleAppliesTo(config);
+    const disjoint = defs
+      .filter((d) => intersectAppliesTo(ruleScope, kpiAppliesTo(d)) === null)
+      .map((d) => {
+        const s = kpiAppliesTo(d);
+        const parts = [
+          s.outletTypes.length ? `outlet types ${s.outletTypes.join('/')}` : '',
+          s.programs.length ? `programs ${s.programs.join('/')}` : '',
+          s.subPrograms.length ? `sub-programs ${s.subPrograms.join('/')}` : '',
+        ].filter(Boolean);
+        return `${d.code} (applies to ${parts.join('; ')})`;
+      });
+    if (disjoint.length > 0) {
+      throw new BadRequestException(
+        `This rule's program / sub-program / outlet type never overlaps the scope of: ${disjoint.join(', ')}. ` +
+          'No outlet could ever earn under it — change the rule attachment or the KPI scope.',
       );
     }
   }
@@ -482,6 +510,35 @@ function formatDate(d: Date): string {
  * or `achievement:CODE`), `target:CODE`, and `pct:CODE`. Mirrors the evaluator's source parsing
  * (points-engine.helper resolveRaw). `segment:*` is an outlet attribute, not a KPI, so it is excluded.
  */
+/**
+ * The outlets a rule can EVER pay, as an AppliesTo (APPLIES-TO D5): its attachment program /
+ * programCategory (null = any), narrowed by any HARD (`onFail: 'zero'`) segmentFilter on
+ * `outletType` / `program` / `programCategory` (a soft skipNode/passthrough filter restricts nothing).
+ * Several hard filters on one field intersect. Used only for the publish-time disjointness check.
+ */
+export function ruleAppliesTo(config: PointsRuleConfig): AppliesTo {
+  let scope: AppliesTo = normalizeAppliesTo({
+    programs: config.attachsTo?.program ? [config.attachsTo.program] : [],
+    subPrograms: config.attachsTo?.programCategory ? [config.attachsTo.programCategory] : [],
+  });
+  const facetOf: Record<string, keyof AppliesTo> = {
+    outlettype: 'outletTypes',
+    program: 'programs',
+    programcategory: 'subPrograms',
+  };
+  for (const node of config.pipeline ?? []) {
+    if (node.type !== 'segmentFilter' || node.onFail !== 'zero') continue;
+    const facet = facetOf[String(node.field ?? '').trim().toLowerCase()];
+    if (!facet || !Array.isArray(node.allow) || node.allow.length === 0) continue;
+    const filterScope: Partial<AppliesTo> = { [facet]: node.allow };
+    const next = intersectAppliesTo(scope, filterScope);
+    // A self-contradictory rule (its own filters disjoint) is not this check's concern — keep the
+    // last non-empty scope so the KPI check still runs on something meaningful.
+    if (next) scope = next;
+  }
+  return scope;
+}
+
 function collectKpiRefs(config: PointsRuleConfig): string[] {
   const out = new Set<string>();
   if (config.attachsTo?.kpiCode) out.add(config.attachsTo.kpiCode);

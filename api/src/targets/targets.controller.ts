@@ -55,6 +55,7 @@ import {
   ListAchievementsQueryDto,
   PaceQueryDto,
   AchievementTemplateQueryDto,
+  KpiScopeCountQueryDto,
 } from './dto/targets.dto';
 
 // ─── KPI CRUD ─────────────────────────────────────────────────────────────────
@@ -69,6 +70,29 @@ export class KpisController {
   @RequirePermission('targets:read')
   listKpis(@CurrentUser() user: JwtPayload, @Query() q: ListKpisQueryDto) {
     return this.targets.listKpis(user, q);
+  }
+
+  /**
+   * GET /v1/admin/kpis/scope-options — APPLIES-TO KPI form options (tenant-scoped):
+   * `{ outletTypes: {code,label}[], programs: {value,inSettings}[], subPrograms: {value,inSettings}[] }`.
+   * Static path, so it never collides with the `:id/...` routes below.
+   */
+  @Get('scope-options')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('targets:read')
+  scopeOptions(@CurrentUser() user: JwtPayload) {
+    return this.targets.scopeOptions(user);
+  }
+
+  /**
+   * GET /v1/admin/kpis/scope-count?outletTypes=A,B&programs=..&subPrograms=.. — `{ count }` of LIVE
+   * outlets of the caller's tenant matching that scope (empty facet = all).
+   */
+  @Get('scope-count')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('targets:read')
+  scopeCount(@CurrentUser() user: JwtPayload, @Query() q: KpiScopeCountQueryDto) {
+    return this.targets.scopeCount(user, q);
   }
 
   /**

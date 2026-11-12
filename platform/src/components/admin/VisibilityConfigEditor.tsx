@@ -9,6 +9,8 @@
  *   - frequencyPerMonth  : 1–4 captures/month → windows (with a live window preview).
  *   - allowedSalesLevels : which SalesHierarchyLevel.code values may capture.
  *   - geoFence           : { enabled, radiusMeters } capture geo-fence policy.
+ *   - programs / subPrograms (APPLIES-TO, optional): narrow the in-scope outlet types further by
+ *     Outlet.programName / programCategory; empty = every program / sub-program (D12).
  *
  * The WHOLE block is saved via `visibilityApi.setConfig` (REPLACE-WHOLE PUT /config).
  * Cloned-and-adapted from the Scheme admin UX; it does NOT import the scheme feature.
@@ -23,6 +25,9 @@ import { formCapturesLocation, type VisibilityConfig } from '@/lib/visibility-ty
 import { MASTER_OUTLET_TYPES } from '@/lib/platform/outlet-types';
 import { ROLE_LABELS, type SalesRole } from '@/lib/sales-role';
 import { WINDOW_STARTS } from '@/lib/visibility-window';
+import { ScopeMultiSelect } from '@/components/admin/scope-multi-select';
+import { MatchingOutletCount, ScopeOptionsStatus } from '@/components/admin/applies-to-fields';
+import { useScopeOptions, valueOptions } from '@/lib/kpi-scope';
 
 const SALES_LEVELS: SalesRole[] = ['XSR', 'SO', 'ASM', 'RSM', 'ZNM', 'NSM'];
 
@@ -31,7 +36,11 @@ const DEFAULT_CONFIG: VisibilityConfig = {
   frequencyPerMonth: 1,
   allowedSalesLevels: [],
   geoFence: { enabled: false, radiusMeters: 50 },
+  programs: [],
+  subPrograms: [],
 };
+
+const strList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 
 /** Human window preview for a frequency, e.g. 2× → "[1–15] [16–end]" (D6). */
 export function describeWindows(freq: number): string {
@@ -75,6 +84,8 @@ export function VisibilityConfigEditor() {
           enabled: !!d?.geoFence?.enabled,
           radiusMeters: d?.geoFence?.radiusMeters ?? 50,
         },
+        programs: strList(d?.programs),
+        subPrograms: strList(d?.subPrograms),
       });
     } else {
       setLoadError(res.error);
@@ -105,6 +116,11 @@ export function VisibilityConfigEditor() {
         : [...c.allowedSalesLevels, code],
     }));
 
+  const scopeOpts = useScopeOptions(!loading && !loadError);
+  const programs = config.programs ?? [];
+  const subPrograms = config.subPrograms ?? [];
+  const optsLoaded = Boolean(scopeOpts.data);
+
   const windowPreview = useMemo(() => describeWindows(config.frequencyPerMonth), [config.frequencyPerMonth]);
 
   // Geo-fence enabled but the active form produces NO device location = the fence can never
@@ -129,6 +145,8 @@ export function VisibilityConfigEditor() {
       frequencyPerMonth: config.frequencyPerMonth,
       allowedSalesLevels: config.allowedSalesLevels,
       geoFence: { enabled: config.geoFence.enabled, radiusMeters: radius },
+      programs,
+      subPrograms,
     });
     setSaving(false);
     if (res.success) setMsg({ kind: 'ok', text: 'Visibility configuration saved.' });
@@ -174,6 +192,37 @@ export function VisibilityConfigEditor() {
             );
           })}
         </div>
+      </div>
+
+      {/* Program / Sub-Program narrowing (APPLIES-TO, optional) */}
+      <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3" data-testid="visibility-program-scope">
+        <div className="flex items-center gap-2">
+          <Layers className="w-4 h-4 text-[var(--brand-primary)]" />
+          <p className="text-sm font-semibold text-gray-800">Narrow by program (optional)</p>
+        </div>
+        <p className="text-xs text-gray-500">
+          Only outlets of the types above that are also in these programs / sub-programs must capture.
+          Leave a list empty for every program / sub-program.
+        </p>
+        <ScopeOptionsStatus loading={scopeOpts.loading && !optsLoaded} error={scopeOpts.error} onRetry={scopeOpts.retry} />
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <ScopeMultiSelect label="Programs (optional)" values={programs}
+            options={valueOptions(scopeOpts.data?.programs ?? [])}
+            staleSuffix={optsLoaded ? '(not offered now)' : ''}
+            emptyText={scopeOpts.loading ? 'Loading…' : scopeOpts.error ? 'List unavailable.' : 'No programs yet.'}
+            onChange={(v) => setConfig((c) => ({ ...c, programs: v }))} />
+          <ScopeMultiSelect label="Sub-Programs (optional)" values={subPrograms}
+            options={valueOptions(scopeOpts.data?.subPrograms ?? [])}
+            staleSuffix={optsLoaded ? '(not offered now)' : ''}
+            emptyText={scopeOpts.loading ? 'Loading…' : scopeOpts.error ? 'List unavailable.' : 'No sub-programs yet.'}
+            onChange={(v) => setConfig((c) => ({ ...c, subPrograms: v }))} />
+        </div>
+        {config.outletScope.length > 0 && (
+          <MatchingOutletCount
+            scope={{ outletTypes: config.outletScope, programs, subPrograms }}
+            testId="visibility-scope-count"
+          />
+        )}
       </div>
 
       {/* Frequency */}

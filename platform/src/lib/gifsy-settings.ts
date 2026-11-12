@@ -51,6 +51,8 @@ export const DEFAULT_SETTINGS: GifsySettings = {
     frequencyPerMonth:  1,
     allowedSalesLevels: [],
     geoFence:           { enabled: false, radiusMeters: 50 },
+    programs:           [],
+    subPrograms:        [],
   },
   // Identity/payout uniqueness — default preserves today's behaviour (GST + phone enforced;
   // bank/UPI were never checked). PAN + GST are always DB-enforced regardless of the flags.

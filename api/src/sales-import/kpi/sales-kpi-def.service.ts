@@ -25,6 +25,7 @@ import {
 } from './sales-kpi.helper';
 import { forEachAggregatePage, loadRosterMeta, resolveReadyImport, rosterIndexOf } from './sales-import-data';
 import { storedUnits, unitsToNumber } from '../apply/month-compute';
+import type { KpiScopeLike } from '../../common/applies-to/applies-to';
 
 /**
  * M4: the tester memoises everything per DISTINCT product combo (dimKey) — the KPI match vector (shared by every
@@ -46,9 +47,13 @@ export function toDto(row: SalesKpiDefinition): SalesKpiDefinitionDto {
   };
 }
 
+/**
+ * `kpi` = the TARGET KpiDef's scope columns (null = unknown KPI → shared). The lite def carries both the legacy
+ * `kpiOutletType` and the APPLIES-TO `kpiScope`; `kpiOwnScope` resolves them exactly like `kpiAppliesTo`.
+ */
 export function toLite(
   row: Pick<SalesKpiDefinition, 'kpiCode' | 'measure' | 'filter' | 'outletTypes' | 'programs'>,
-  kpiOutletType: string | null = null,
+  kpi: KpiScopeLike | null = null,
 ): KpiDefLite {
   return {
     kpiCode: row.kpiCode,
@@ -56,22 +61,36 @@ export function toLite(
     filter: (row.filter ?? {}) as SalesKpiFilter,
     outletTypes: row.outletTypes ?? [],
     programs: row.programs ?? [],
-    kpiOutletType,
+    kpiOutletType: (kpi?.outletType ?? '').trim() || null,
+    kpiScope: {
+      outletTypes: [...(kpi?.outletTypes ?? [])],
+      programs: [...(kpi?.programs ?? [])],
+      subPrograms: [...(kpi?.subPrograms ?? [])],
+    },
   };
 }
 
 /**
- * L4: the target KPIs' own type tags (KpiDef.outletType; null = shared KPI) for the given codes. A type-tagged KPI is only
- * written for outlets of that type — intersected with the definition's outletTypes (see outletInScope).
+ * L4 / APPLIES-TO: the target KPIs' own scope columns (legacy outletType + outletTypes / programs / subPrograms) for the
+ * given codes. A scoped KPI is only written for outlets in its scope — intersected with the definition's own scope
+ * (see outletInScope).
  */
-export async function kpiOutletTypesOf(
+export async function kpiScopesOf(
   db: Pick<Prisma.TransactionClient, 'kpiDef'>,
   clientId: string,
   codes: readonly string[],
-): Promise<Map<string, string | null>> {
+): Promise<Map<string, KpiScopeLike>> {
   if (codes.length === 0) return new Map();
-  const rows = await db.kpiDef.findMany({ where: { clientId, code: { in: [...codes] } }, select: { code: true, outletType: true } });
-  return new Map(rows.map((r) => [r.code, (r.outletType ?? '').trim() || null]));
+  const rows = await db.kpiDef.findMany({
+    where: { clientId, code: { in: [...codes] } },
+    select: { code: true, outletType: true, outletTypes: true, programs: true, subPrograms: true },
+  });
+  return new Map(
+    rows.map((r) => [
+      r.code,
+      { outletType: r.outletType ?? null, outletTypes: r.outletTypes ?? [], programs: r.programs ?? [], subPrograms: r.subPrograms ?? [] },
+    ]),
+  );
 }
 
 function strList(v: unknown, field: string): string[] {
@@ -95,22 +114,24 @@ export class SalesKpiDefService {
       orderBy: [{ order: 'asc' }, { kpiCode: 'asc' }],
     });
     const enabled = rows.filter((r) => r.enabled);
-    const types = await kpiOutletTypesOf(this.prisma, clientId, enabled.map((r) => r.kpiCode));
+    const scopes = await kpiScopesOf(this.prisma, clientId, enabled.map((r) => r.kpiCode));
     return {
       definitions: rows.map(toDto),
-      definitionsHash: definitionsHash(enabled.map((r) => toLite(r, types.get(r.kpiCode) ?? null))),
+      definitionsHash: definitionsHash(enabled.map((r) => toLite(r, scopes.get(r.kpiCode) ?? null))),
     };
   }
 
   /**
-   * GET segment-options — the tenant's DISTINCT outlet-type codes and programme names among non-deleted outlets, for
-   * the KPI editor's scope multi-selects. Shape: `{ outletTypes: [{code, name}], programs: string[] }` (both sorted).
+   * GET segment-options — the tenant's DISTINCT outlet-type codes, programme names and sub-programme names
+   * (Outlet.programCategory) among non-deleted outlets, for the KPI editor's scope multi-selects / scope hints.
+   * Shape: `{ outletTypes: [{code, name}], programs: string[], subPrograms: string[] }` (all sorted).
    */
   async segmentOptions(clientId: string): Promise<SalesSegmentOptions> {
     // groupBy = SQL GROUP BY (Prisma's `distinct` dedupes in Node after fetching every outlet row — final check H1).
-    const [typeGroups, programs] = await Promise.all([
+    const [typeGroups, programs, subPrograms] = await Promise.all([
       this.prisma.outlet.groupBy({ by: ['outletTypeId'], where: { clientId, deletedAt: null } }),
       this.prisma.outlet.groupBy({ by: ['programName'], where: { clientId, deletedAt: null, programName: { not: null } } }),
+      this.prisma.outlet.groupBy({ by: ['programCategory'], where: { clientId, deletedAt: null, programCategory: { not: null } } }),
     ]);
     const typeIds = typeGroups.map((g) => g.outletTypeId).filter((x): x is string => !!x);
     const types = typeIds.length
@@ -121,6 +142,9 @@ export class SalesKpiDefService {
     return {
       outletTypes: [...byCode.entries()].map(([code, name]) => ({ code, name })).sort((a, b) => a.code.localeCompare(b.code)),
       programs: [...new Set(programs.map((p) => (p.programName ?? '').trim()).filter((p) => p !== ''))].sort((a, b) => a.localeCompare(b)),
+      subPrograms: [...new Set(subPrograms.map((p) => (p.programCategory ?? '').trim()).filter((p) => p !== ''))].sort((a, b) =>
+        a.localeCompare(b),
+      ),
     };
   }
 
@@ -130,10 +154,10 @@ export class SalesKpiDefService {
       where: { clientId, enabled: true },
       orderBy: [{ order: 'asc' }, { kpiCode: 'asc' }],
     });
-    // L4: each def carries its KPI's own type tag, so preview / apply / recalculate all scope it the same way (and a
-    // tag change moves the hash → a stale preview's apply is refused).
-    const types = await kpiOutletTypesOf(db, clientId, rows.map((r) => r.kpiCode));
-    const defs = rows.map((r) => toLite(r, types.get(r.kpiCode) ?? null));
+    // L4 / APPLIES-TO: each def carries its KPI's own scope, so preview / apply / recalculate all scope it the same way
+    // (and a scope change moves the hash → a stale preview's apply is refused).
+    const scopes = await kpiScopesOf(db, clientId, rows.map((r) => r.kpiCode));
+    const defs = rows.map((r) => toLite(r, scopes.get(r.kpiCode) ?? null));
     return { rows, defs, hash: definitionsHash(defs) };
   }
 
@@ -295,11 +319,14 @@ export class SalesKpiDefService {
     const noneHit = rawNone.map(() => false);
 
     const draftCode = typeof req.definition.kpiCode === 'string' ? req.definition.kpiCode.trim() : '';
+    // L4 / APPLIES-TO: the tester shows what apply would write, so the target KPI's own scope applies here too.
+    const kpiScope = draftCode ? ((await kpiScopesOf(this.prisma, clientId, [draftCode])).get(draftCode) ?? null) : null;
+    const own = toLite({ kpiCode: draftCode, measure, filter: {}, outletTypes: [], programs: [] }, kpiScope);
     const scope = {
       outletTypes: strList(req.definition.outletTypes, 'outletTypes'),
       programs: strList(req.definition.programs, 'programs'),
-      // L4: the tester shows what apply would write, so the target KPI's own type tag applies here too.
-      kpiOutletType: draftCode ? ((await kpiOutletTypesOf(this.prisma, clientId, [draftCode])).get(draftCode) ?? null) : null,
+      kpiOutletType: own.kpiOutletType,
+      kpiScope: own.kpiScope,
     };
     // Both measures over the SAME set, so the author sees ₹ and cases together (§6.2a "Duplicate as cases KPI").
     const defs: KpiDefLite[] = [

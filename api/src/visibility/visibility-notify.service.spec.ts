@@ -195,4 +195,24 @@ describe('VisibilityNotifyService', () => {
       select: { clientId: true },
     });
   });
+
+  // ── APPLIES-TO (D12): only nudge about outlets inside the program/sub-program narrowing ─────
+  it('APPLIES-TO: programs/subPrograms AND onto the unchanged pending where; unscoped → no AND', async () => {
+    mockPrisma.outlet.findMany.mockResolvedValue([]);
+    mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...config, programs: ['RLP'], subPrograms: ['Urban'] } });
+    await service.runWeeklyReminder();
+    const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+    expect(where.AND[0]).toMatchObject({ clientId: 't1', outletType: { code: { in: ['SSS'] } } });
+    expect(where.AND[0].NOT).toBeDefined();
+    expect(where.AND[1]).toEqual({
+      AND: [
+        { OR: [{ programName: { equals: 'RLP', mode: 'insensitive' } }] },
+        { OR: [{ programCategory: { equals: 'Urban', mode: 'insensitive' } }] },
+      ],
+    });
+    mockPrisma.outlet.findMany.mockClear();
+    mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...config, programs: [], subPrograms: [] } });
+    await service.runWeeklyReminder();
+    expect(mockPrisma.outlet.findMany.mock.calls[0][0].where).not.toHaveProperty('AND');
+  });
 });

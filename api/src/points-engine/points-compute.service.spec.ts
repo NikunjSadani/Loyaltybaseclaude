@@ -24,6 +24,8 @@ const mockPrisma = {
   creditBatch: { create: jest.fn(), update: jest.fn(), findFirst: jest.fn(), count: jest.fn() },
   wallet: { update: jest.fn() },
   creditField: { findMany: jest.fn() },
+  // APPLIES-TO KPI scope lookup (D5). Default [] = no scoped KPI → pre-scope behaviour.
+  kpiDef: { findMany: jest.fn() },
   $transaction: jest.fn(),
 };
 
@@ -97,6 +99,7 @@ describe('PointsComputeService (Wave 1 — read-only preview)', () => {
     mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
     mockPrisma.outletTarget.findMany.mockResolvedValue([]);
     mockPrisma.outlet.findMany.mockResolvedValue([]);
+    mockPrisma.kpiDef.findMany.mockResolvedValue([]);
     // Default output field: active, POINTS-classified for outlet type SSS (the fixture's type) → OK rows
     // survive the live-classification reconciliation. Individual tests override to prove demotion.
     mockPrisma.creditField.findMany.mockResolvedValue([
@@ -510,5 +513,74 @@ describe('PointsComputeService (Wave 1 — read-only preview)', () => {
       expect(res.outcome).toBeUndefined();
       expectNoWrite();
     });
+  });
+});
+
+// ── APPLIES-TO D5: out-of-scope (outlet, KPI) pair → SKIP with the exact owner reason ─────────────
+describe('PointsComputeService — APPLIES-TO KPI scope (D5)', () => {
+  let service: PointsComputeService;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockSettings.getEffectiveSettings.mockResolvedValue({ pointsEngine: { enabled: true, directCreditEnabled: false } });
+    mockPrisma.pointsRule.findMany.mockResolvedValue([{ kpiCode: 'CASES_SOLD' }]);
+    mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+      { outletCode: 'O1', kpiValues: { CASES_SOLD: 100 } },
+      { outletCode: 'O2', kpiValues: { CASES_SOLD: 100 } },
+    ]);
+    mockPrisma.outletTarget.findMany.mockResolvedValue([]);
+    mockPrisma.creditField.findMany.mockResolvedValue([
+      { id: 'cf1', name: 'Q1 Reward', isActive: true, outletTypeAwards: { SSS: 'POINTS' } },
+    ]);
+    mockEngine.getActiveForAttachment.mockResolvedValue(ruleRow({ program: null, attachsTo: { scope: 'program_kpi', program: null, programCategory: null, kpiCode: 'CASES_SOLD' } as never }));
+    // O1 = GOLD/Urban, O2 = SILVER/Rural (both SSS).
+    mockPrisma.outlet.findMany.mockResolvedValue([
+      { ...outletRow('O1', 'GOLD'), programCategory: 'Urban' },
+      { ...outletRow('O2', 'SILVER'), programCategory: 'Rural' },
+    ]);
+    service = new PointsComputeService(
+      mockPrisma as unknown as PrismaService,
+      mockEngine as unknown as PointsEngineService,
+      mockSettings as unknown as TenantSettingsService,
+      mockCredits as unknown as CreditsService,
+    );
+  });
+
+  it('a KPI scoped to program GOLD → the SILVER outlet is SKIP with the exact reason; GOLD computes OK', async () => {
+    mockPrisma.kpiDef.findMany.mockResolvedValue([
+      { code: 'CASES_SOLD', outletType: null, outletTypes: [], programs: ['gold'], subPrograms: [] },
+    ]);
+    const p = await service.previewCompute(clientAdmin, { period: '2026-02' });
+    const o1 = p.rows.find((r) => r.outletCode === 'O1')!;
+    const o2 = p.rows.find((r) => r.outletCode === 'O2')!;
+    expect(o1.status).toBe('OK');
+    expect(o1.points).toBe(200);
+    expect(o2.status).toBe('SKIP');
+    expect(o2.reason).toBe('KPI not applicable to this outlet (KPI scope)');
+    expect(o2.points).toBeUndefined();
+    expect(p.counts).toEqual({ total: 2, ok: 1, skip: 1, error: 0, noRule: 0 });
+    // The scope lookup is tenant-pinned and limited to the active KPI codes.
+    expect(mockPrisma.kpiDef.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo', code: { in: ['CASES_SOLD'] } });
+    // The skipped pair never resolves a rule (one rule lookup for GOLD only).
+    expect(mockEngine.getActiveForAttachment).toHaveBeenCalledTimes(1);
+  });
+
+  it('sub-program + legacy outletType scopes also SKIP (AND across facets)', async () => {
+    mockPrisma.kpiDef.findMany.mockResolvedValue([
+      { code: 'CASES_SOLD', outletType: null, outletTypes: ['SSS'], programs: [], subPrograms: ['Rural'] },
+    ]);
+    const p = await service.previewCompute(clientAdmin, { period: '2026-02' });
+    expect(p.rows.find((r) => r.outletCode === 'O1')!.status).toBe('SKIP');
+    expect(p.rows.find((r) => r.outletCode === 'O2')!.status).toBe('OK');
+  });
+
+  it('UNSCOPED KPI (Deoleo) → identical preview to a run with no KpiDef scope row at all', async () => {
+    mockPrisma.kpiDef.findMany.mockResolvedValue([]);
+    const baseline = await service.previewCompute(clientAdmin, { period: '2026-02' });
+    mockPrisma.kpiDef.findMany.mockResolvedValue([
+      { code: 'CASES_SOLD', outletType: null, outletTypes: [], programs: [], subPrograms: [] },
+    ]);
+    const unscoped = await service.previewCompute(clientAdmin, { period: '2026-02' });
+    expect(unscoped).toEqual(baseline);
+    expect(unscoped.rows.every((r) => r.status === 'OK')).toBe(true);
   });
 });

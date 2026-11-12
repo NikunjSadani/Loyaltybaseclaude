@@ -68,4 +68,24 @@ describe('achievements page — Sales Import ownership', () => {
     expect(screen.queryByText('Sales Import')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Delete/ })).toBeInTheDocument();
   });
+
+  it('APPLIES-TO D1: shows "N values ignored (KPI not applicable…)" with the saved rows remarks', async () => {
+    stubFetch({ batches: [], upload: uploadResult({
+      ignoredOutOfScope: 2,
+      rows: [{ rowIndex: 3, outletCode: 'O1', status: 'accepted', remarks: 'Ignored (KPI not applicable): KPI_A, KPI_B' }],
+    }) });
+    render(<SalesUploadPage />);
+    await upload();
+    const notice = await screen.findByTestId('ignored-out-of-scope');
+    expect(notice).toHaveTextContent('2 values ignored (KPI not applicable to that outlet)');
+    expect(notice).toHaveTextContent('Row 3 — O1: Ignored (KPI not applicable): KPI_A, KPI_B');
+  });
+
+  it('APPLIES-TO D1: no notice for ignoredOutOfScope 0', async () => {
+    stubFetch({ batches: [], upload: uploadResult({ ignoredOutOfScope: 0 }) });
+    render(<SalesUploadPage />);
+    await upload();
+    expect(await screen.findByText('Upload Result')).toBeInTheDocument();
+    expect(screen.queryByTestId('ignored-out-of-scope')).not.toBeInTheDocument();
+  });
 });

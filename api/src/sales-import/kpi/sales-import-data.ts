@@ -64,12 +64,25 @@ export const MAPPING_CHANGED_REASON =
 export async function loadRosterMeta(db: Db, clientId: string): Promise<Map<string, RosterOutlet>> {
   const outlets = await db.outlet.findMany({
     where: rosterOutletWhere(clientId),
-    select: { id: true, outletCode: true, name: true, programName: true, outletType: { select: { code: true } } },
+    select: {
+      id: true,
+      outletCode: true,
+      name: true,
+      programName: true,
+      programCategory: true, // APPLIES-TO: Sub-Program facet of a KPI's scope
+      outletType: { select: { code: true } },
+    },
   });
   return new Map(
     outlets.map((o) => [
       o.outletCode,
-      { id: o.id, name: o.name, outletType: o.outletType?.code ?? null, program: o.programName ?? null },
+      {
+        id: o.id,
+        name: o.name,
+        outletType: o.outletType?.code ?? null,
+        program: o.programName ?? null,
+        subProgram: o.programCategory ?? null,
+      },
     ]),
   );
 }

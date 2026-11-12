@@ -65,6 +65,41 @@ export interface OutletLike {
   outletCode: string;
   name: string;
   outletType: string;    // outletType.code
+  /** Outlet.programName — only read by a SCOPED template (APPLIES-TO D2). */
+  program?: string | null;
+  /** Outlet.programCategory (Sub-Program) — only read by a SCOPED template (APPLIES-TO D2). */
+  subProgram?: string | null;
+}
+
+// ── APPLIES-TO scope (plan D1/D2) ─────────────────────────────────────────────
+
+/**
+ * Info columns a SCOPED template adds right after `Outlet Type` (D2). They sit before the first
+ * month block, so the parser (which reads KPI columns only inside month blocks, by label) ignores
+ * them on upload.
+ */
+export const SCOPE_INFO_COLS = ['Program', 'Sub-Program'] as const;
+
+/** Cell text pre-filled into an out-of-scope (outlet, KPI) value cell of a scoped template (D2). */
+export const OUT_OF_SCOPE_CELL = 'N/A' as const;
+
+/**
+ * Template scope hook. When passed, the template is the SCOPED layout (Program / Sub-Program
+ * info columns + `N/A` in every out-of-scope value cell). When absent, the template is
+ * byte-identical to the pre-APPLIES-TO layout.
+ */
+export interface TemplateScopeOptions {
+  isInScope: (outlet: OutletLike, kpiCode: string) => boolean;
+}
+
+/**
+ * Parser scope hook (D1). When passed, a numeric value in an out-of-scope (outlet, KPI) cell is
+ * IGNORED (not stored), the row is kept, the row remark lists the ignored KPI codes and
+ * `summary.ignoredOutOfScope` counts the ignored cells. Non-numeric cells (e.g. the template's
+ * `N/A`) are ignored silently, exactly like today.
+ */
+export interface ParseScopeOptions {
+  isInScope: (outletCode: string, kpiCode: string) => boolean;
 }
 
 // ── Row status ────────────────────────────────────────────────────────────────
@@ -101,6 +136,8 @@ export interface ParseResult {
     total: number;
     accepted: number;
     rejected: number;
+    /** Numeric values dropped because the (outlet, KPI) pair is out of the KPI's scope (D1). 0 when unscoped. */
+    ignoredOutOfScope: number;
   };
 }
 
@@ -181,13 +218,20 @@ export const FIXED_COLS = ['Outlet ID', 'Outlet Name', 'Outlet Type'] as const;
  * @param kpis    The tenant's KpiDef rows (only enabled ones are used).
  * @param months  YYYY-MM strings, e.g. ['2026-07', '2026-08'].
  * @param outlets Outlet roster for the pre-filled rows.
+ * @param opts    Optional APPLIES-TO scope (D2). Absent → the layout is byte-identical to the
+ *                pre-scope template. Present → `Program` / `Sub-Program` info columns follow
+ *                `Outlet Type` and every out-of-scope (outlet, KPI) value cell is pre-filled `N/A`.
  */
 export function generateTargetTemplateBuffer(
   kpis: KpiDefLike[],
   months: string[],
   outlets: OutletLike[],
+  opts?: { scope?: TemplateScopeOptions },
 ): Buffer {
   const enabled = getEnabledKpis(kpis);
+  const scope = opts?.scope;
+  // Identity columns: the shared FIXED_COLS, plus the D2 info columns ONLY for a scoped template.
+  const fixedCols: readonly string[] = scope ? [...FIXED_COLS, ...SCOPE_INFO_COLS] : FIXED_COLS;
 
   // A KPI emits a "name override" column (a per-outlet custom display name) ONLY
   // when it is explicitly configured with hasNameOverride + a nameOverrideLabel.
@@ -202,7 +246,7 @@ export function generateTargetTemplateBuffer(
   const blockWidth = enabled.length + overrideCount;
 
   // ── Row 1: month group headers ──────────────────────────────────────────────
-  const row1: (string | number)[] = Array(FIXED_COLS.length).fill('');
+  const row1: (string | number)[] = Array(fixedCols.length).fill('');
   for (const month of months) {
     const [year, mm] = month.split('-');
     const abbr = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][
@@ -216,7 +260,7 @@ export function generateTargetTemplateBuffer(
   // ── Row 2: column headers ────────────────────────────────────────────────────
   // For each KPI emit its value-label column; immediately AFTER it (adjacent,
   // value-first) emit the nameOverrideLabel header when the KPI has an override.
-  const row2: string[] = [...FIXED_COLS];
+  const row2: string[] = [...fixedCols];
   for (let mi = 0; mi < months.length; mi++) {
     for (const kpi of enabled) {
       row2.push(kpi.label);
@@ -226,6 +270,19 @@ export function generateTargetTemplateBuffer(
 
   // ── Data rows (pre-filled outlet info; KPI + name cells blank) ─────────────
   const dataRows = outlets.map((o) => {
+    if (scope) {
+      // Scoped layout (D2): info columns + `N/A` in each out-of-scope VALUE cell. The adjacent
+      // name-override cell stays blank (a typed name there is ignored on upload anyway).
+      const row: (string | number)[] = [o.outletCode, o.name, o.outletType, o.program ?? '', o.subProgram ?? ''];
+      const inScope = enabled.map((k) => scope.isInScope(o, k.code));
+      for (let mi = 0; mi < months.length; mi++) {
+        enabled.forEach((kpi, ki) => {
+          row.push(inScope[ki] ? '' : OUT_OF_SCOPE_CELL);
+          if (hasOverrideCol(kpi)) row.push('');
+        });
+      }
+      return row;
+    }
     const row: (string | number)[] = [o.outletCode, o.name, o.outletType];
     for (let mi = 0; mi < months.length; mi++) {
       for (let ci = 0; ci < blockWidth; ci++) row.push('');
@@ -241,6 +298,7 @@ export function generateTargetTemplateBuffer(
     { wch: 24 }, // Outlet Name
     { wch: 16 }, // Outlet Type
   ];
+  if (scope) colWidths.push({ wch: 20 }, { wch: 20 }); // Program, Sub-Program
   for (let mi = 0; mi < months.length; mi++) {
     for (const kpi of enabled) {
       colWidths.push({ wch: kpi.isPrimary ? 14 : 18 });
@@ -251,7 +309,7 @@ export function generateTargetTemplateBuffer(
 
   // Merge month group header cells (row 1) across the full (wider) block.
   const merges: XLSX.Range[] = [];
-  let colOffset = FIXED_COLS.length;
+  let colOffset = fixedCols.length;
   for (let mi = 0; mi < months.length; mi++) {
     merges.push({
       s: { r: 0, c: colOffset },
@@ -495,7 +553,10 @@ export function parseTargetUploadBuffer(
   buffer: Buffer | ArrayBuffer,
   kpis: KpiDefLike[],
   knownOutletCodes: Set<string>,
+  opts?: { scope?: ParseScopeOptions },
 ): ParseResult {
+  const scope = opts?.scope;
+  let ignoredOutOfScope = 0;
   const enabled = getEnabledKpis(kpis);
 
   // label → code map (for resolving uploaded VALUE headers back to KPI codes)
@@ -671,6 +732,8 @@ export function parseTargetUploadBuffer(
 
     // ── Read KPI values per month block ───────────────────────────────────────
     let hasAnyValue = false;
+    // D1: KPI codes whose numeric value was ignored for this row (out of the KPI's scope).
+    const ignoredCodes = new Set<string>();
 
     for (let bi = 0; bi < monthBlocks.length; bi++) {
       const { month } = monthBlocks[bi];
@@ -687,6 +750,20 @@ export function parseTargetUploadBuffer(
 
         // CRITICAL: blank / null / undefined / empty string → omit the key
         if (rawVal === null || rawVal === undefined || String(rawVal).trim() === '') continue;
+
+        // D1 (scoped tenants only): an out-of-scope (outlet, KPI) cell is IGNORED — value and name.
+        // Only a NUMERIC value counts as "ignored" (the template's `N/A` is just non-numeric).
+        if (scope && !scope.isInScope(outletCode, code)) {
+          if (kind === 'value') {
+            const n =
+              typeof rawVal === 'number' ? rawVal : parseFloat(String(rawVal).trim().replace(/,/g, ''));
+            if (isFinite(n)) {
+              ignoredCodes.add(code);
+              ignoredOutOfScope++;
+            }
+          }
+          continue;
+        }
 
         if (kind === 'name') {
           // Override-name column: a free-text per-outlet display name. SheetJS may
@@ -726,10 +803,17 @@ export function parseTargetUploadBuffer(
       }
     }
 
+    const ignoredRemark =
+      ignoredCodes.size > 0
+        ? `Ignored value(s) for KPI(s) not applicable to this outlet: ${[...ignoredCodes].join(', ')}`
+        : '';
     if (!hasAnyValue) {
       parsedRow.status  = 'skipped_blank';
-      parsedRow.remarks = 'All KPI cells blank — row skipped';
+      parsedRow.remarks = ignoredRemark
+        ? `No applicable KPI values — row skipped. ${ignoredRemark}`
+        : 'All KPI cells blank — row skipped';
     } else {
+      if (ignoredRemark) parsedRow.remarks = ignoredRemark;
       // Merge into acceptedTargets
       for (const [month, kpiMap] of Object.entries(parsedRow.monthTargets)) {
         if (!acceptedTargets[month]) acceptedTargets[month] = {};
@@ -746,6 +830,6 @@ export function parseTargetUploadBuffer(
   return {
     rows,
     acceptedTargets,
-    summary: { total: rows.length, accepted, rejected },
+    summary: { total: rows.length, accepted, rejected, ignoredOutOfScope },
   };
 }
