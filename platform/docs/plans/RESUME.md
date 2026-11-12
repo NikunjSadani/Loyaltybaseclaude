@@ -12,6 +12,16 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ## 📍 STATE 2026-11-11 — read this FIRST
 
+> **🚀 2026-11-12 ~09:10 IST: PROD CUTOVER #59 DONE — prod = `a18cc932`** (main = develop `dd27888b` + TDS revert kept; full
+> gates 5,456 / 3,706 green on that SHA; on-demand prod DB backup `1794452768704` taken first). api + frontend + `gifsy-sales-import`
+> job all serve `a18cc932`; owner dispatched the deploy. Post-deploy DONE: `run.jobsExecutor` on `gifsy-sales-import` for
+> gifsy-api-sa; Scheduler `sales-import-drain` (*/10 IST, 170 s, x-drain-secret) created — test run 200, no-secret 403;
+> per-number OTP throttle PROVEN on prod (same number: 6th → 429; 8 different numbers from same IP → none throttled);
+> no ERROR logs post-deploy; deoleo / deoleoloyalty / bajajloyalty hosts serve the right login. **Still open:** Hubble prod IP
+> allow-list removal (Hubble) → re-run read-only prod lookup → "Load from Hubble" on prod; Hubble SANDBOX 502 → reconcile Bajaj
+> staging order BAJAJ-26-000031; Bajaj prod flags (offerTiles/outletMasterGeo/soDeclarationKyc) via console = owner; Bajaj KPI
+> config → October points. Then FAST FOLLOW-UP #1 (KPI↔Program link).
+>
 > **✅ 2026-11-12: release `dd27888b` PUSHED + LIVE ON STAGING** (api + frontend serving `dd27888b`; full gates 5,457 / 3,706 green).
 > Real-login API matrix on staging PASSED (Deoleo): ₹750.5 → 400 "Enter a whole-rupee amount"; card no. issued then PIN added
 > once (same PIN = no-op, different = 400, 65 chars = 400); partner list/detail show code+PIN, track has no PIN; SALES_ISR list
