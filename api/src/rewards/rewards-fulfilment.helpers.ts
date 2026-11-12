@@ -9,10 +9,12 @@
  *
  * Layout (single header row, then one row per order):
  *   Order Number | Reward | Mode | Current Status |
- *   Voucher Code | Voucher Provider | Tracking Number | Tracking URL | New Status
+ *   Voucher Code | Voucher PIN | Voucher Provider | Tracking Number | Tracking URL | New Status
  *
- * The first four columns are the locked context the ops user reads; the last five
- * are blank fill columns. `Order Number` is the row key.
+ * The first four columns are the locked context the ops user reads; the last six
+ * are blank fill columns. `Order Number` is the row key. `Voucher PIN` is OPTIONAL (card number
+ * + PIN gift cards only) and text-formatted so a leading-zero PIN survives Excel; the parser is
+ * header-based, so a sheet downloaded before the column existed still uploads unchanged.
  */
 
 import * as XLSX from 'xlsx';
@@ -28,11 +30,19 @@ export const FULFILMENT_COLS = [
   'Mode',
   'Current Status',
   'Voucher Code',
+  'Voucher PIN',
   'Voucher Provider',
   'Tracking Number',
   'Tracking URL',
   'New Status',
 ] as const;
+
+/** Fill columns that must be TEXT cells (a number cell has already lost leading zeros / digits). */
+export const TEXT_FILL_COLS = ['Voucher Code', 'Voucher PIN'] as const;
+
+/** Row error for a Voucher Code / PIN cell Excel stored as a number. */
+export const VOUCHER_CELL_NUMBER_MESSAGE =
+  'Voucher Code/PIN must be entered as text — format the column as Text and re-type it';
 
 // ── Template build ────────────────────────────────────────────────────────────
 
@@ -56,6 +66,7 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
     o.mode,
     o.currentStatus,
     '', // Voucher Code
+    '', // Voucher PIN (optional)
     '', // Voucher Provider
     '', // Tracking Number
     '', // Tracking URL
@@ -63,12 +74,23 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
   ]);
 
   const ws = aoaToSheetSafe([header, ...dataRows]);
+  // Text-format the Voucher Code + PIN fill cells (Excel would otherwise turn "0123" into the
+  // number 123, or a 16-digit card number into 6.001E+15 with its last digits zeroed).
+  for (const label of TEXT_FILL_COLS) {
+    const col = FULFILMENT_COLS.indexOf(label);
+    for (let r = 1; r <= dataRows.length; r++) {
+      const ref = XLSX.utils.encode_cell({ r, c: col });
+      const cellObj = ws[ref] as XLSX.CellObject | undefined;
+      if (cellObj) cellObj.z = '@';
+    }
+  }
   ws['!cols'] = [
     { wch: 22 }, // Order Number
     { wch: 28 }, // Reward
     { wch: 14 }, // Mode
     { wch: 16 }, // Current Status
     { wch: 22 }, // Voucher Code
+    { wch: 14 }, // Voucher PIN
     { wch: 18 }, // Voucher Provider
     { wch: 20 }, // Tracking Number
     { wch: 28 }, // Tracking URL
@@ -88,11 +110,18 @@ export interface ParsedFulfilmentRow {
   rowIndex: number;
   orderNumber: string;
   voucherCode?: string;
+  /** Optional card PIN (card number + PIN gift cards). */
+  voucherPin?: string;
   voucherProvider?: string;
   trackingNumber?: string;
   trackingUrl?: string;
   /** The target status the ops user wants to set; blank = no status change. */
   newStatus?: string;
+  /**
+   * A parse-level problem with this row (e.g. a Voucher Code / PIN cell stored as a NUMBER): the
+   * caller collects it as a row error and does NOT apply the row.
+   */
+  error?: string;
 }
 
 export interface ParseFulfilmentResult {
@@ -115,6 +144,9 @@ export function parseFulfilmentUploadBuffer(buffer: Buffer | ArrayBuffer): Parse
   const rawAoa = XLSX.utils.sheet_to_json<(string | number | null | undefined)[]>(ws, {
     header: 1,
     defval: null,
+    // RAW cell values (explicit, it is the default): a number cell stays a JS number so the
+    // Voucher Code / PIN number-cell check below can tell it from a text cell.
+    raw: true,
   });
 
   // A valid template always has the header row plus at least one data row.
@@ -135,6 +167,7 @@ export function parseFulfilmentUploadBuffer(buffer: Buffer | ArrayBuffer): Parse
   }
 
   const voucherCodeCol = idxOf('Voucher Code');
+  const voucherPinCol = idxOf('Voucher PIN');
   const voucherProviderCol = idxOf('Voucher Provider');
   const trackingNumberCol = idxOf('Tracking Number');
   const trackingUrlCol = idxOf('Tracking URL');
@@ -157,10 +190,21 @@ export function parseFulfilmentUploadBuffer(buffer: Buffer | ArrayBuffer): Parse
     const orderNumber = cell(orderCol);
     if (!orderNumber) continue; // skip rows with no key
 
+    // sheet_to_json is read RAW (the default), so a numeric cell arrives as a JS number while a
+    // text cell (incl. a text-formatted "0123") arrives as a string. A number in the code / PIN
+    // column means Excel already converted it (leading zeros dropped, long numbers rounded) — the
+    // value can't be trusted, so the row is refused rather than issuing a corrupted voucher.
+    const isNumberCell = (ci: number) => ci >= 0 && ci < row.length && typeof row[ci] === 'number';
+    if (isNumberCell(voucherCodeCol) || isNumberCell(voucherPinCol)) {
+      rows.push({ rowIndex: ri + 1, orderNumber, error: VOUCHER_CELL_NUMBER_MESSAGE });
+      continue;
+    }
+
     rows.push({
       rowIndex: ri + 1,
       orderNumber,
       voucherCode: cell(voucherCodeCol),
+      voucherPin: cell(voucherPinCol),
       voucherProvider: cell(voucherProviderCol),
       trackingNumber: cell(trackingNumberCol),
       trackingUrl: cell(trackingUrlCol),

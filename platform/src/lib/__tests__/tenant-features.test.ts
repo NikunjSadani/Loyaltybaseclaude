@@ -48,4 +48,18 @@ describe('normalizeFeatures', () => {
     // Non-boolean junk falls back to the default (OFF).
     expect(normalizeFeatures({ captureBankAtRedemption: 'yes' }).captureBankAtRedemption).toBe(false);
   });
+
+  it('carries the offerTiles flag, defaulting OFF (This month\'s offers admin dormant)', () => {
+    expect(DEFAULT_FEATURES.offerTiles).toBe(false);
+    expect(normalizeFeatures({}).offerTiles).toBe(false);
+    expect(normalizeFeatures({ offerTiles: true }).offerTiles).toBe(true);
+    expect(normalizeFeatures({ offerTiles: 'yes' }).offerTiles).toBe(false);
+  });
+
+  it('carries the salesImport flag, defaulting OFF', () => {
+    expect(DEFAULT_FEATURES.salesImport).toBe(false);
+    expect(normalizeFeatures({}).salesImport).toBe(false);
+    expect(normalizeFeatures({ salesImport: true }).salesImport).toBe(true);
+    expect(normalizeFeatures({ salesImport: 'yes' }).salesImport).toBe(false);
+  });
 });

@@ -47,3 +47,15 @@ export function tenantScope(user: JwtPayload): string | undefined {
 export function isGifsyOperator(user: JwtPayload): boolean {
   return user.role === 'GIFSY_ADMIN' || user.role === 'GIFSY_STAFF';
 }
+
+/**
+ * Is this caller a TENANT administrator (a client's own admin — never a Gifsy operator)?
+ *
+ * Use for READ paths where a tenant admin gets the admin (all-partners) view of its OWN
+ * tenant. Scope such reads by `user.clientId` from the JWT ONLY — never platform-wide, never
+ * a header-supplied tenant/partner. MIS_USER is deliberately NOT included: it is a separate
+ * read-only observer persona, so opt it in per surface rather than by default here.
+ */
+export function isTenantAdmin(user: JwtPayload): boolean {
+  return user.role === 'CLIENT_ADMIN';
+}

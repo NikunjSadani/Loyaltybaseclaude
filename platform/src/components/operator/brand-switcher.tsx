@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Building2, ChevronDown, Loader2, ArrowRight } from 'lucide-react';
 import { assumeTenant } from '@/lib/auth-client';
+import { runSessionChangeGuards } from '@/lib/session-change-guards';
 import { isStaleDeploymentError, recoverFromStaleDeployment } from '@/lib/stale-deploy';
 
 interface Brand {
@@ -86,6 +87,9 @@ export function BrandSwitcher({ variant = 'menu' }: { variant?: Variant } = {}) 
   const pick = useCallback(async (slug: string) => {
     if (switchingRef.current) return; // ignore a second click before state flushes (L5)
     switchingRef.current = true;
+    // Something in flight in this tab (e.g. a Sales Import upload) may veto or clean up first. No guard
+    // registered (the usual case) → resolves true immediately, behaviour unchanged.
+    if (!(await runSessionChangeGuards('switch-brand'))) { switchingRef.current = false; return; }
     setSwitching(slug);
     setSwitchError(null);
     try {

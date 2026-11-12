@@ -18,6 +18,9 @@ import { randomUUID } from 'node:crypto';
  *   - Order:  POST {base}/v1/partners/orders → ALWAYS HTTP 201; branch on BODY.status
  *             (SUCCESS | PROCESSING | FAILED). referenceId = our idempotency key.
  *   - Status: GET  {base}/v1/partners/orders/by-reference/:referenceId (recovery).
+ *   - Product: GET {base}/v1/partners/products/:productId → { id, status, title,
+ *             denominationType FIXED|FLEXIBLE, amountRestrictions{…} } (confirmed on
+ *             staging 2026-11-11; an unknown/inactive id → HTTP 400 E102). See getProduct.
  *
  * Secrets are read from config and NEVER logged (no token, clientSecret, or card
  * data ever reaches a log line). Every call is bounded by a timeout so a hung Hubble
@@ -65,8 +68,52 @@ export interface PlaceOrderParams {
   customerDetails?: unknown | null;
 }
 
+/**
+ * A Hubble product (brand/SKU), normalised from GET /v1/partners/products/:productId.
+ * CONFIRMED against staging (2026-11-11): the limits live under `amountRestrictions`
+ * ({min,max}{Order,Voucher}Amount, maxVouchersPerOrder, denominations — null for FLEXIBLE).
+ * Amounts are RUPEES. We always order ONE voucher, so the single-voucher bounds are the
+ * tighter of the voucher and order limits, and FIXED denominations outside them are dropped.
+ */
+export interface HubbleProduct {
+  productId: string;
+  name: string;
+  denominationType: 'FIXED' | 'FLEXIBLE';
+  /**
+   * FIXED: the issuable face values (rupees, ascending); [] for a FIXED brand means Hubble did
+   * NOT return its list — treat as UNKNOWN (admin enters the amounts; Hubble validates).
+   * FLEXIBLE: [].
+   */
+  denominations: number[];
+  /** Smallest single-voucher value Hubble will issue (rupees). */
+  minValue: number | null;
+  /** Largest single-voucher value Hubble will issue (rupees). */
+  maxValue: number | null;
+  maxVouchersPerOrder: number | null;
+}
+
+/** Hubble credentials are not present in this environment. */
+export class HubbleNotConfiguredError extends Error {
+  constructor() {
+    super('Hubble is not configured in this environment');
+    this.name = 'HubbleNotConfiguredError';
+  }
+}
+
+/** No such product on Hubble, or it is INACTIVE (vouchers cannot be generated). */
+export class HubbleProductNotFoundError extends Error {
+  constructor(productId: string, detail?: string) {
+    super(`Hubble product ${productId} was not found or is not active${detail ? ` (${detail})` : ''}`);
+    this.name = 'HubbleProductNotFoundError';
+  }
+}
+
 @Injectable()
 export class HubbleService {
+  /** Product lookups are cached briefly — catalogue edits + issuance re-checks hit the same ids. */
+  private readonly productCacheTtlMs = 10 * 60 * 1000;
+  private readonly productCache = new Map<string, { product: HubbleProduct; expiresAt: number }>();
+
   private readonly logger = new Logger(HubbleService.name);
 
   /** In-memory token cache. Per Cloud Run instance; a cold instance re-auths once. */
@@ -85,14 +132,41 @@ export class HubbleService {
     return (raw || 'https://api.dev.myhubble.money').replace(/\/+$/, '');
   }
 
+  /** Logged once per instance when only half of a credential pair is present. */
+  private halfPairWarned = false;
+
+  /**
+   * Resolve the client id + secret as a PAIR — never one from each set. If EITHER environment-neutral
+   * name (prod binds HUBBLE_CLIENT_ID / HUBBLE_CLIENT_SECRET) is set, the neutral pair is used; otherwise
+   * the legacy `*_STAGING` pair (what staging binds), so staging keeps working unchanged. A blank value
+   * counts as unset. A half-present pair resolves to "not configured" (manual-fulfilment fallback) and
+   * logs a clear error naming the missing variable (never a value). Hubble credentials are PLATFORM-level
+   * (one Hubble account); per-tenant enablement is the hubbleVoucherEnabled flag.
+   */
+  private creds(): { clientId?: string; clientSecret?: string } {
+    const read = (k: string) => this.config.get<string>(k)?.trim() || undefined;
+    const nId = read('HUBBLE_CLIENT_ID');
+    const nSecret = read('HUBBLE_CLIENT_SECRET');
+    const useNeutral = !!(nId || nSecret);
+    const clientId = useNeutral ? nId : read('HUBBLE_CLIENT_ID_STAGING');
+    const clientSecret = useNeutral ? nSecret : read('HUBBLE_CLIENT_SECRET_STAGING');
+    if (!!clientId !== !!clientSecret && !this.halfPairWarned) {
+      this.halfPairWarned = true;
+      const suffix = useNeutral ? '' : '_STAGING';
+      const missing = clientId ? `HUBBLE_CLIENT_SECRET${suffix}` : `HUBBLE_CLIENT_ID${suffix}`;
+      this.logger.error(
+        `Hubble credentials are half-configured: ${missing} is missing while its pair is set — Hubble is treated as NOT configured (manual fulfilment).`,
+      );
+    }
+    return clientId && clientSecret ? { clientId, clientSecret } : {};
+  }
+
   private clientId(): string | undefined {
-    // TODO(prod): resolve prod creds (HUBBLE_CLIENT_ID / _PROD) once prod onboarding
-    // is done. Staging is wired now; prod secrets are a later, deliberate step.
-    return this.config.get<string>('HUBBLE_CLIENT_ID_STAGING')?.trim();
+    return this.creds().clientId;
   }
 
   private clientSecret(): string | undefined {
-    return this.config.get<string>('HUBBLE_CLIENT_SECRET_STAGING')?.trim();
+    return this.creds().clientSecret;
   }
 
   /**
@@ -233,6 +307,170 @@ export class HubbleService {
       throw new Error(`Hubble getOrderByReference HTTP ${status}`);
     }
     return this.normaliseOrderBody(json);
+  }
+
+  /**
+   * Fetch + normalise one product (brand). Read-only. Cached ~10 min per productId (only
+   * successful ACTIVE lookups are cached). Throws HubbleNotConfiguredError (no creds),
+   * HubbleProductNotFoundError (404 / 400 E102 "Brand is not active" / status INACTIVE /
+   * malformed id), or a generic Error for anything else (5xx, timeout, unparseable body).
+   */
+  async getProduct(productId: string): Promise<HubbleProduct> {
+    const id = (productId ?? '').trim();
+    // Hubble ids are ULIDs; refuse anything that could alter the request path.
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new HubbleProductNotFoundError(id || '(blank)');
+    if (!this.isConfigured()) throw new HubbleNotConfiguredError();
+
+    const cached = this.productCache.get(id);
+    if (cached && Date.now() < cached.expiresAt) return cached.product;
+
+    const { status, json } = await this.authedFetch('GET', `/v1/partners/products/${encodeURIComponent(id)}`);
+    const body = (json ?? {}) as Record<string, unknown>;
+    if (status === 404) throw new HubbleProductNotFoundError(id);
+    if (status === 400) {
+      const code = String(body.id ?? '');
+      const msg = String(body.message ?? '');
+      if (code === 'E102' || /not active|not found/i.test(msg)) throw new HubbleProductNotFoundError(id, msg || code);
+    }
+    if (status < 200 || status >= 300) throw new Error(`Hubble getProduct HTTP ${status}`);
+
+    const product = this.normaliseProduct(id, body);
+    this.productCache.set(id, { product, expiresAt: Date.now() + this.productCacheTtlMs });
+    return product;
+  }
+
+  /** REDEEM-time lookup budget (incl. any login) — a member must never wait on a slow Hubble. */
+  readonly redeemLookupBudgetMs = 2_500;
+  /** After a failed/slow redeem-time lookup, skip the check for this long (never blocks). */
+  readonly redeemNegativeTtlMs = 60_000;
+  private readonly redeemSkipUntil = new Map<string, number>();
+  private readonly redeemInFlight = new Map<string, Promise<HubbleProduct | null>>();
+
+  /**
+   * REDEEM-time product lookup: best-effort, fast, never throws. Returns the product, or null
+   * meaning "skip the check" (Hubble not configured, not found, an error, or no answer within
+   * redeemLookupBudgetMs). A miss is negatively cached for redeemNegativeTtlMs, so during a
+   * Hubble outage only the first redemption per product waits the 2.5 s budget and the rest
+   * skip straight away. Concurrent lookups for one product share a single request. The
+   * underlying request keeps its normal 15 s timeout in the background (a late success still
+   * fills the positive cache). Issuance and the admin editor keep using getProduct().
+   */
+  async getProductForRedeem(productId: string): Promise<HubbleProduct | null> {
+    const id = (productId ?? '').trim();
+    const cached = this.productCache.get(id);
+    if (cached && Date.now() < cached.expiresAt) return cached.product;
+    const skipUntil = this.redeemSkipUntil.get(id);
+    if (skipUntil && Date.now() < skipUntil) return null;
+    const inFlight = this.redeemInFlight.get(id);
+    if (inFlight) return inFlight;
+
+    const run = (async (): Promise<HubbleProduct | null> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const lookup = this.getProduct(id).then(
+        (p) => p as HubbleProduct | null,
+        (e) => {
+          if (!(e instanceof HubbleNotConfiguredError)) {
+            this.logger.warn(`[hubble] redeem-time product lookup failed for ${id}: ${e}`);
+          }
+          return null;
+        },
+      );
+      const budget = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), this.redeemLookupBudgetMs);
+        (timer as { unref?: () => void }).unref?.();
+      });
+      try {
+        const result = await Promise.race([lookup, budget]);
+        if (result === 'timeout') {
+          this.logger.warn(`[hubble] redeem-time product lookup for ${id} exceeded ${this.redeemLookupBudgetMs} ms — check skipped`);
+          this.redeemSkipUntil.set(id, Date.now() + this.redeemNegativeTtlMs);
+          return null;
+        }
+        if (result === null && this.isConfigured()) {
+          this.redeemSkipUntil.set(id, Date.now() + this.redeemNegativeTtlMs);
+        }
+        return result;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    })().finally(() => this.redeemInFlight.delete(id));
+    this.redeemInFlight.set(id, run);
+    return run;
+  }
+
+  private normaliseProduct(id: string, root: Record<string, unknown>): HubbleProduct {
+    const data =
+      root.data && typeof root.data === 'object' && !Array.isArray(root.data)
+        ? (root.data as Record<string, unknown>)
+        : root;
+    if (String(data.status ?? 'ACTIVE').toUpperCase() !== 'ACTIVE') {
+      throw new HubbleProductNotFoundError(id, 'INACTIVE');
+    }
+    const typeRaw = String(data.denominationType ?? '').toUpperCase();
+    if (typeRaw !== 'FIXED' && typeRaw !== 'FLEXIBLE') {
+      throw new Error(`Hubble product ${id} has an unknown denominationType "${typeRaw}"`);
+    }
+    const r = (data.amountRestrictions && typeof data.amountRestrictions === 'object'
+      ? data.amountRestrictions
+      : {}) as Record<string, unknown>;
+    const num = (v: unknown): number | null =>
+      typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null;
+    const minOf = (...v: (number | null)[]) => {
+      const xs = v.filter((x): x is number => x != null);
+      return xs.length ? Math.max(...xs) : null; // the TIGHTER lower bound
+    };
+    const maxOf = (...v: (number | null)[]) => {
+      const xs = v.filter((x): x is number => x != null);
+      return xs.length ? Math.min(...xs) : null; // the TIGHTER upper bound
+    };
+    const minValue = minOf(num(r.minVoucherAmount), num(r.minOrderAmount) ?? num(r.minAmount));
+    const maxValue = maxOf(num(r.maxVoucherAmount), num(r.maxOrderAmount) ?? num(r.maxAmount));
+
+    let denominations: number[] = [];
+    if (typeRaw === 'FIXED') {
+      // PRIMARY (confirmed shape): amountRestrictions.denominations = number[]. Tolerated
+      // alternatives (the docs and live payloads disagree in places): numeric strings, objects
+      // ({value|amount|denomination|faceValue}), and the list under data.denominations or
+      // data.variantDetails. The first source that yields any value wins. An EMPTY result means
+      // "Hubble didn't tell us" — callers treat it as UNKNOWN (never as "nothing issuable").
+      const toAmount = (v: unknown): number | null => {
+        if (typeof v === 'number') return num(v);
+        if (typeof v === 'string' && /^\s*\d+(\.\d+)?\s*$/.test(v)) return num(Number(v));
+        if (v && typeof v === 'object' && !Array.isArray(v)) {
+          const o = v as Record<string, unknown>;
+          for (const k of ['value', 'amount', 'denomination', 'faceValue', 'price']) {
+            const a = toAmount(o[k]);
+            if (a != null) return a;
+          }
+        }
+        return null;
+      };
+      const sources = [r.denominations, data.denominations, data.variantDetails];
+      for (const src of sources) {
+        if (!Array.isArray(src)) continue;
+        const parsed = [...new Set(
+          src
+            .map(toAmount)
+            .filter((x): x is number => x != null && Number.isInteger(x))
+            .filter((x) => (minValue == null || x >= minValue) && (maxValue == null || x <= maxValue)),
+        )].sort((a, b) => a - b);
+        if (parsed.length) {
+          denominations = parsed;
+          break;
+        }
+      }
+    }
+    const name = String(data.title ?? data.name ?? id);
+    const maxV = r.maxVouchersPerOrder;
+    return {
+      productId: id,
+      name,
+      denominationType: typeRaw as 'FIXED' | 'FLEXIBLE',
+      denominations,
+      minValue,
+      maxValue,
+      maxVouchersPerOrder: typeof maxV === 'number' && Number.isFinite(maxV) ? maxV : null,
+    };
   }
 
   /** Normalise the (possibly nested under `data`) order body into HubbleOrderResult. */

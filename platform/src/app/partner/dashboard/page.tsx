@@ -29,6 +29,7 @@ import { formatLastUpdated, getLastSalesUploadDate } from '@/lib/sales-upload-ut
 import { authHeader } from '@/lib/api-client';
 import { istDateKey, istMonthKey } from '@/lib/ist-date';
 import { usePartnerIdentity } from '@/lib/partner-identity';
+import { OffersSection } from '@/components/partner/offers/offers-section';
 
 /* ─── Real-data model ────────────────────────────────────────────────────────
    The dashboard hero consumes the SAME endpoints as the Targets page
@@ -910,6 +911,10 @@ export default function PartnerDashboard() {
   // same fetch — so there is no duplicate request and no v2=false→true flash (the page's
   // loading gate already waits on identity.loading).
   const v2 = !!identity.features?.partnerDashboardV2;
+  // offerTiles — the tenant switch for the WHOLE "This month's offers" feature (admin page AND
+  // partner tiles). Read from the SAME identity features as v2 (no localStorage, no extra request);
+  // OFF ⇒ OffersSection is never mounted, so a flag-off tenant (Deoleo) makes ZERO offers requests.
+  const offersOn = !!identity.features?.offerTiles;
 
   // Touch / swipe state
   const touchStartX = React.useRef<number | null>(null);
@@ -1134,6 +1139,12 @@ export default function PartnerDashboard() {
              Target-vs-Achievement chart above, so the card would duplicate it there. Reuses the
              aggKpis the page already loaded (no extra fetch); self-hides when the outlet has no KPIs. ── */}
       {v2 && <TargetAchievementCard aggKpis={aggKpis} />}
+
+      {/* ── 2c. THIS MONTH'S OFFERS — BOTH variants, ONLY when the tenant's offerTiles flag is ON
+             (flag OFF ⇒ not mounted, no request ⇒ Deoleo byte-identical). Self-fetching and
+             self-hiding when no active tile matches this outlet. Below Target Achievement (v2) /
+             the Target-vs-Achievement chart (non-v2). ── */}
+      {offersOn && <OffersSection />}
 
       {/* ── 3. QUICK ACTIONS ── */}
       <QuickActions outletType={outletType} />

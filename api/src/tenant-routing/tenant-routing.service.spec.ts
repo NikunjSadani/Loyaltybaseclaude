@@ -179,4 +179,113 @@ describe('TenantRoutingService', () => {
     expect(res.tenants).toEqual([]);
     expect(domainFindMany).not.toHaveBeenCalled();
   });
+
+  describe('branding asset URLs (private-bucket → public route, read-time)', () => {
+    const DEOLEO_BRANDING = {
+      displayName: 'Deoleo',
+      primaryColor: '#16a34a',
+      logoUrl: '/logos/deoleo.svg',
+      wordmarkWhiteUrl: '/brand/deoleo-wordmark-white.png',
+      wordmarkColorUrl: '/brand/deoleo-wordmark-color.png',
+      faviconUrl: '/favicons/deoleo.ico',
+    };
+    const G = 'https://storage.googleapis.com/gifsy-platform-files/';
+    const LOGO = 'branding/bajaj/2026-11/5d3daa20-92f7-4ff8-8d2e-8ff59a429201-bajaj-logo.png';
+    const WM = 'branding/bajaj/2026-11/3c151c05-c912-4a86-a24c-ae1b270826c4-bajaj-wordmark-white.png';
+
+    let prevBucket: string | undefined;
+    beforeEach(() => {
+      prevBucket = process.env.GCS_BUCKET;
+      delete process.env.GCS_BUCKET;
+    });
+    afterEach(() => {
+      if (prevBucket === undefined) delete process.env.GCS_BUCKET;
+      else process.env.GCS_BUCKET = prevBucket;
+    });
+
+    it('maps stored storage.googleapis.com/<bucket>/branding/... URLs to the public route (Bajaj prod rows)', async () => {
+      const { prisma } = makePrisma(
+        [{ id: 'bajaj', status: 'ACTIVE', branding: {
+          displayName: 'Bajaj Consumer Care Ltd', primaryColor: '#430441',
+          logoUrl: G + LOGO, wordmarkWhiteUrl: G + WM,
+        } }],
+        [],
+      );
+      const res = await new TenantRoutingService(prisma).getRouting();
+      expect(res.tenants[0].branding).toEqual({
+        displayName: 'Bajaj Consumer Care Ltd',
+        primaryColor: '#430441',
+        logoUrl: `/api/public/branding-assets?key=${encodeURIComponent(LOGO)}`,
+        wordmarkWhiteUrl: `/api/public/branding-assets?key=${encodeURIComponent(WM)}`,
+      });
+    });
+
+    it('Deoleo static branding is returned BYTE-FOR-BYTE unchanged', async () => {
+      const { prisma } = makePrisma(
+        [{ id: 'deoleo', status: 'ACTIVE', branding: { ...DEOLEO_BRANDING } }],
+        [{ clientId: 'deoleo', domain: 'deoleoloyalty.gifsy.in', isPrimary: true }],
+      );
+      const res = await new TenantRoutingService(prisma).getRouting();
+      expect(JSON.stringify(res.tenants[0].branding)).toBe(JSON.stringify(DEOLEO_BRANDING));
+    });
+
+    it('leaves a non-branding prefix on the same bucket untouched (never re-pointed at the public route)', async () => {
+      const kyc = G + 'kyc/2026-11/5d3daa20-92f7-4ff8-8d2e-8ff59a429201-pan.png';
+      const { prisma } = makePrisma(
+        [{ id: 'acme', status: 'ACTIVE', branding: { displayName: 'A', primaryColor: '#000000', logoUrl: kyc } }],
+        [],
+      );
+      const res = await new TenantRoutingService(prisma).getRouting();
+      expect(res.tenants[0].branding.logoUrl).toBe(kyc);
+    });
+  });
+
+  describe('isKnownTenantSlug (branding-asset load shedding)', () => {
+    function svcWith(idsSeq: Array<string[] | Error>) {
+      const findMany = jest.fn();
+      for (const ids of idsSeq) {
+        if (ids instanceof Error) findMany.mockRejectedValueOnce(ids);
+        else findMany.mockResolvedValueOnce(ids.map((id) => ({ id })));
+      }
+      let t = 1_000_000;
+      const svc = new TenantRoutingService({ client: { findMany } } as any, () => t);
+      return { svc, findMany, advance: (ms: number) => (t += ms) };
+    }
+
+    it('answers from ONE cached query of every Client id (any status: the console previews INACTIVE too)', async () => {
+      const { svc, findMany } = svcWith([['bajaj', 'deoleo']]);
+      await expect(svc.isKnownTenantSlug('bajaj')).resolves.toBe(true);
+      await expect(svc.isKnownTenantSlug('deoleo')).resolves.toBe(true);
+      expect(findMany).toHaveBeenCalledTimes(1);
+      expect(findMany.mock.calls[0][0]).toEqual({ select: { id: true } });
+    });
+
+    it('an unknown slug re-queries once (a tenant created moments ago) when the set is > 5s old, else 404s', async () => {
+      const { svc, findMany, advance } = svcWith([['deoleo'], ['deoleo', 'fresh']]);
+      await expect(svc.isKnownTenantSlug('ghost')).resolves.toBe(false); // just loaded: no re-query
+      expect(findMany).toHaveBeenCalledTimes(1);
+      advance(6_000);
+      await expect(svc.isKnownTenantSlug('fresh')).resolves.toBe(true);
+      expect(findMany).toHaveBeenCalledTimes(2);
+    });
+
+    it('refreshes the set after its 60s TTL', async () => {
+      const { svc, findMany, advance } = svcWith([['deoleo'], ['deoleo']]);
+      await svc.isKnownTenantSlug('deoleo');
+      advance(61_000);
+      await svc.isKnownTenantSlug('deoleo');
+      expect(findMany).toHaveBeenCalledTimes(2);
+    });
+
+    it('fails OPEN when the slug set cannot be loaded (a load filter, not the security boundary)', async () => {
+      const { svc } = svcWith([new Error('db down')]);
+      await expect(svc.isKnownTenantSlug('bajaj')).resolves.toBe(true);
+    });
+
+    it('coalesces concurrent loads onto one query', async () => {
+      const { svc, findMany } = svcWith([['bajaj']]);
+      await Promise.all([svc.isKnownTenantSlug('bajaj'), svc.isKnownTenantSlug('bajaj')]);
+      expect(findMany).toHaveBeenCalledTimes(1);
+    });
+  });
 });

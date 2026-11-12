@@ -49,6 +49,20 @@ export class CapturePayoutDetailsDto {
   })
   upiId?: string;
 
+  /**
+   * Confirm-entry for a MANUALLY typed UPI ID (same trim as upiId). Required by the service — and
+   * must match upiId case/space-insensitively — when upiCaptureMethod === 'MANUAL'. Not persisted.
+   */
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  upiIdConfirm?: string;
+
+  /** How the UPI ID was captured: 'QR' (scanned) | 'MANUAL' (typed). Absent → NULL (unknown). */
+  @IsOptional()
+  @IsIn(['QR', 'MANUAL'])
+  upiCaptureMethod?: 'QR' | 'MANUAL';
+
   /** GCS key of the cancelled-cheque uploaded via POST /v1/partner/documents (bank mode). */
   @IsOptional()
   @IsString()

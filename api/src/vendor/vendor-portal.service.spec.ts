@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { RedemptionStatus } from '@prisma/client';
 import { VendorPortalService } from './vendor-portal.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -8,12 +8,18 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockPrisma = {
+  // (tenant, code) advisory lock taken by voucher issuance (voucher-write-guard lockVoucherCode).
+  $executeRaw: jest.fn().mockResolvedValue(1),
+  // Tenant-wide cancelled-voucher reuse guard (voucher-write-guard.ts) — default: never cancelled.
+  cancelledVoucherCode: { findFirst: jest.fn().mockResolvedValue(null), createMany: jest.fn().mockResolvedValue({ count: 1 }) },
   vendor: { findFirst: jest.fn() },
   vendorTenantGrant: { findFirst: jest.fn() },
   giftCategory: { findFirst: jest.fn(), findMany: jest.fn() },
   rewardCategory: { findFirst: jest.fn(), create: jest.fn() },
   rewardCatalog: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn() },
-  redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn() },
+  redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findUniqueOrThrow: jest.fn() },
+  // programLabel + Hubble-eligibility reads (voucher issuance helpers).
+  client: { findUnique: jest.fn(), findFirst: jest.fn() },
   redemptionStatusHistory: { create: jest.fn() },
   channelPartner: { findFirst: jest.fn() },
   auditLog: { create: jest.fn().mockResolvedValue({}) },
@@ -38,6 +44,11 @@ describe('VendorPortalService', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     mockTenantSettings.getConversionRate.mockResolvedValue(1);
+    // Status write = compare-and-set claim; wins by default (race tests override).
+    mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.redemptionOrder.findUniqueOrThrow.mockImplementation(
+      async ({ where }: { where: { id: string } }) => ({ id: where.id }),
+    );
     const mod: TestingModule = await Test.createTestingModule({
       providers: [
         VendorPortalService,
@@ -215,7 +226,21 @@ describe('VendorPortalService', () => {
       await expect(
         service.transition(vendor, 'o1', { toStatus: 'CANCELLED' as never }),
       ).rejects.toBeInstanceOf(BadRequestException);
-      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('transition can never refund a voucher order with an issued code (every refund edge rejected, no write)', async () => {
+      grantScope();
+      for (const toStatus of ['CANCELLED', 'RETURNED', 'FAILED']) {
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+          id: 'o1', status: 'DISPATCHED', partnerId: 'cp1', orderNumber: 'D-26-1',
+          voucherCode: 'AMZN-1234-5678', voucherProvider: 'Gifsy',
+        });
+        await expect(
+          service.transition(vendor, 'o1', { toStatus: toStatus as never }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      }
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
     });
 
     it('transition CONFIRMED→PROCESSING succeeds without touching points/valuePaise', async () => {
@@ -223,7 +248,7 @@ describe('VendorPortalService', () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'D-26-1' });
       mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'PROCESSING' });
       await service.transition(vendor, 'o1', { toStatus: 'PROCESSING' as never });
-      const data = mockPrisma.redemptionOrder.update.mock.calls[0][0].data;
+      const data = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].data;
       expect(data.status).toBe('PROCESSING');
       expect(data).not.toHaveProperty('valuePaise');
       expect(data).not.toHaveProperty('pointsDeducted');
@@ -235,7 +260,7 @@ describe('VendorPortalService', () => {
       mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'DISPATCHED' });
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'member1', phone: '9990000000', ownerName: 'Asha' });
       await service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never, trackingNumber: 'TRK1' });
-      expect(mockPrisma.redemptionOrder.update.mock.calls[0][0].data.dispatchedAt).toBeInstanceOf(Date);
+      expect(mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].data.dispatchedAt).toBeInstanceOf(Date);
       expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalled();
     });
 
@@ -246,8 +271,9 @@ describe('VendorPortalService', () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
       await service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never, trackingNumber: 'TRK1', notes: 'n1' });
       expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
-      expect(mockPrisma.redemptionOrder.update).toHaveBeenCalledWith({
-        where: { id: 'o1' },
+      // Compare-and-set on the status READ (PROCESSING), re-pinned to this vendor.
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
+        where: { id: 'o1', fulfilledByVendorId: 'v1', status: 'PROCESSING' },
         data: expect.objectContaining({ status: 'DISPATCHED', trackingNumber: 'TRK1', dispatchedAt: expect.any(Date) }),
       });
       expect(mockPrisma.redemptionStatusHistory.create).toHaveBeenCalledTimes(1);
@@ -261,7 +287,7 @@ describe('VendorPortalService', () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'o1', status: 'DISPATCHED', partnerId: 'cp1', orderNumber: 'D-26-1' });
       const res = await service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never });
       expect((res as { skipped?: boolean }).skipped).toBe(true);
-      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
     });
 
     it('transition response is the MEMBER-SAFE projection — no valuePaise/pointsDeducted/metadata (HIGH#1)', async () => {
@@ -294,7 +320,7 @@ describe('VendorPortalService', () => {
       await expect(
         service.transition(vendor, 'o1', { toStatus: 'PROCESSING' as never }),
       ).rejects.toBeInstanceOf(BadRequestException);
-      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
     });
 
     it('updateFulfilment BLOCKS a CLOSED (terminal) order (MED#4b)', async () => {
@@ -304,6 +330,363 @@ describe('VendorPortalService', () => {
         service.updateFulfilment(vendor, 'o1', { trackingNumber: 'TRK9' } as never),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+    });
+
+    // VOUCHER WRITE INVARIANT (shared voucher-write-guard): a vendor can never clear / blank /
+    // overwrite a stored code, nor write one on an unpaid order; a new code is a CAS.
+    describe('voucher write invariant (vendor)', () => {
+      const open = (extra: Record<string, unknown> = {}) => ({
+        id: 'o1', status: 'PROCESSING', partnerId: 'cp1', orderNumber: 'D-26-1', pointsDeducted: 500,
+        voucherCode: null, voucherProvider: null, fulfilledByVendorId: 'v1', ...extra,
+      });
+      afterEach(() => mockPrisma.redemptionOrder.findFirst.mockReset());
+
+      it.each([
+        ['clear (null)', { voucherCode: null }],
+        ['blank', { voucherCode: '  ' }],
+        ['overwrite', { voucherCode: 'OTHER-0000' }],
+      ])('updateFulfilment %s on a stored code → 400, no write', async (_n, dto) => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ voucherCode: 'AMZ-STORED-1234', voucherProvider: 'Vendor' }));
+        await expect(service.updateFulfilment(vendor, 'o1', dto as never)).rejects.toBeInstanceOf(BadRequestException);
+        expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('voucherFillable parity: true EXACTLY when the vendor updateFulfilment / transition would accept a PIN add', async () => {
+        const base = open({ voucherCode: 'VEND-CODE-4321', voucherProvider: 'Croma', voucherPin: null, redemptionMode: 'GIFT_CARD', metadata: {} });
+        const cases: Record<string, unknown>[] = [
+          base,
+          { ...base, status: 'CONFIRMED' },
+          { ...base, status: 'DISPATCHED' },
+          // Gifsy still fills a DELIVERED order; the vendor may not (closed to the vendor).
+          { ...base, status: 'DELIVERED' },
+          { ...base, status: 'RETURNED' },
+          { ...base, status: 'FAILED' },
+          { ...base, status: 'CANCELLED' },
+          { ...base, pointsDeducted: 0 },
+          { ...base, voucherProvider: 'Hubble' },
+          { ...base, metadata: { hubbleStatus: 'SUCCESS' } },
+          { ...base, redemptionMode: 'UPI' },
+          { ...base, voucherCode: null },
+        ];
+        for (const row of cases) {
+          for (const path of ['fulfilment', 'transition'] as const) {
+            if (path === 'transition' && row.status !== 'DISPATCHED') continue; // DISPATCHED→DELIVERED is the one vendor PIN-carrying move tested here
+            jest.clearAllMocks();
+            mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
+            grantScope();
+            mockPrisma.redemptionOrder.findFirst.mockResolvedValue(row);
+            const view = (await service.getOrder(vendor, 'o1')) as { voucherFillable: boolean };
+            const attempt =
+              path === 'fulfilment'
+                ? service.updateFulfilment(vendor, 'o1', { voucherPin: '42' } as never)
+                : service.transition(vendor, 'o1', { toStatus: 'DELIVERED', voucherPin: '42' } as never);
+            await attempt.catch(() => undefined);
+            const accepted = mockPrisma.redemptionOrder.updateMany.mock.calls.some(
+              (c: unknown[]) => (c[0] as { data?: { voucherPin?: string } }).data?.voucherPin === '42',
+            );
+            expect({ status: row.status, path, fillable: view.voucherFillable }).toEqual({
+              status: row.status,
+              path,
+              fillable: accepted,
+            });
+          }
+        }
+        // Sanity: the base (PROCESSING, paid, manual code, no PIN) is fillable.
+        jest.clearAllMocks();
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(base);
+        expect(((await service.getOrder(vendor, 'o1')) as { voucherFillable: boolean }).voucherFillable).toBe(true);
+      });
+
+      it('the vendor order view never carries pointsDeducted / metadata (selected only to derive voucherFillable)', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(
+          open({ voucherCode: 'VEND-CODE-4321', metadata: { fulfilmentChannel: 'BRAND', hubbleStatus: null }, valuePaise: 50000 }),
+        );
+        const view = (await service.getOrder(vendor, 'o1')) as Record<string, unknown>;
+        expect(view).not.toHaveProperty('pointsDeducted');
+        expect(view).not.toHaveProperty('metadata');
+        expect(view).not.toHaveProperty('valuePaise');
+        expect(view).toHaveProperty('voucherFillable');
+        const list = await (mockPrisma.redemptionOrder.findMany.mockResolvedValue([
+          open({ voucherCode: 'VEND-CODE-4321', metadata: {} }),
+        ]), service.listOrders(vendor));
+        expect(list.items[0]).not.toHaveProperty('pointsDeducted');
+        expect(list.items[0]).not.toHaveProperty('metadata');
+      });
+
+      it('updateFulfilment: a code on an unpaid order → 400, no write', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ pointsDeducted: 0 }));
+        await expect(service.updateFulfilment(vendor, 'o1', { voucherCode: 'NEW-1' } as never))
+          .rejects.toThrow(/only be issued on a confirmed, paid order/);
+        expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('updateFulfilment: a NEW code carries the voucher CAS alongside the vendor scope', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open());
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        await service.updateFulfilment(vendor, 'o1', { voucherCode: 'NEW-1' } as never);
+        const { where, data } = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+        expect(data.voucherCode).toBe('NEW-1');
+        expect(where.fulfilledByVendorId).toBe('v1');
+        expect(where.AND).toEqual(expect.arrayContaining([{ OR: [{ voucherCode: null }, { voucherCode: '' }] }]));
+      });
+
+      it('updateFulfilment: a NEW code writes a masked AuditLog row and sends the member VOUCHER_ISSUED', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open());
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        mockPrisma.redemptionOrder.findUnique.mockResolvedValueOnce({
+          voucherCode: 'VEND-CODE-4321', valuePaise: 50000n, orderNumber: 'D-26-1',
+          reward: { name: 'Amazon 500' }, partner: { userId: 'm1', phone: '9', ownerName: 'A' },
+        });
+        mockPrisma.client.findUnique.mockResolvedValueOnce({ branding: { displayName: 'Bajaj' }, internalName: 'bajaj' });
+        await service.updateFulfilment(vendor, 'o1', { voucherCode: 'VEND-CODE-4321' } as never);
+        const audit = mockPrisma.auditLog.create.mock.calls.find((c) => c[0]?.data?.metadata?.event === 'VOUCHER_ISSUED_MANUAL')?.[0];
+        expect(audit?.data).toMatchObject({ actorId: vendor.sub, entityId: 'o1' });
+        expect(audit?.data.metadata).toMatchObject({ path: 'PATCH /vendor/orders/:id/fulfilment', voucherCode: '••••4321' });
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(
+          expect.objectContaining({ eventKey: 'VOUCHER_ISSUED', userId: 'm1' }),
+        );
+      });
+
+      it('updateFulfilment: a card number + PIN lands in the same guarded write; the member is told both; the PIN is never audited', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open());
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        mockPrisma.redemptionOrder.findUnique.mockResolvedValueOnce({
+          voucherCode: '6001220012345678', voucherPin: '482913', valuePaise: 50000n, orderNumber: 'D-26-1',
+          reward: { name: 'Croma 500' }, partner: { userId: 'm1', phone: '9', ownerName: 'A' },
+        });
+        mockPrisma.client.findUnique.mockResolvedValueOnce({ branding: { displayName: 'Bajaj' }, internalName: 'bajaj' });
+        await service.updateFulfilment(vendor, 'o1', { voucherCode: '6001220012345678', voucherPin: ' 482913 ' } as never);
+        const { data } = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+        expect(data).toMatchObject({ voucherCode: '6001220012345678', voucherPin: '482913' });
+        expect(JSON.stringify(mockPrisma.auditLog.create.mock.calls)).not.toContain('482913');
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(expect.objectContaining({
+          eventKey: 'VOUCHER_ISSUED',
+          body: 'Your Croma 500 voucher is ready — card no. and PIN are in My Orders.',
+          vars: expect.objectContaining({ code: '6001220012345678 | PIN: 482913' }),
+          maskedVars: { code: '6001220012345678' },
+        }));
+      });
+
+      it('updateFulfilment: SET-ONCE — a PIN added to the issued code is guarded on a null PIN, audited masked, and re-sends the voucher', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ status: 'DISPATCHED', voucherCode: 'VEND-CODE-4321', voucherPin: null }));
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        mockPrisma.redemptionOrder.findUnique.mockResolvedValueOnce({
+          voucherCode: 'VEND-CODE-4321', voucherPin: '7788', valuePaise: 50000n, orderNumber: 'D-26-1',
+          reward: { name: 'Croma 500' }, partner: { userId: 'm1', phone: '9', ownerName: 'A' },
+        });
+        mockPrisma.client.findUnique.mockResolvedValueOnce({ branding: { displayName: 'Bajaj' }, internalName: 'bajaj' });
+        await service.updateFulfilment(vendor, 'o1', { voucherPin: '7788' } as never);
+        const { where, data } = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+        expect(data).toMatchObject({ voucherPin: '7788' });
+        expect(data).not.toHaveProperty('voucherCode');
+        expect(where.AND).toEqual(expect.arrayContaining([{ voucherCode: 'VEND-CODE-4321' }, { voucherPin: null }]));
+        const audit = mockPrisma.auditLog.create.mock.calls.find((c) => c[0]?.data?.metadata?.event === 'VOUCHER_PIN_ADDED_MANUAL')?.[0];
+        expect(audit?.data.metadata).toMatchObject({ voucherCode: '••••4321', voucherPin: '••••' });
+        expect(JSON.stringify(mockPrisma.auditLog.create.mock.calls)).not.toContain('7788');
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(expect.objectContaining({ eventKey: 'VOUCHER_ISSUED' }));
+      });
+
+      it('updateFulfilment: changing a saved PIN → 400 PIN-specific, no write', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ voucherCode: 'VEND-CODE-4321', voucherPin: '7788' }));
+        await expect(service.updateFulfilment(vendor, 'o1', { voucherPin: '1111' } as never))
+          .rejects.toThrow('A PIN is already saved for this voucher');
+        expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('updateFulfilment: a PIN without a card number → 400, no write', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open());
+        await expect(service.updateFulfilment(vendor, 'o1', { voucherPin: '4829' } as never))
+          .rejects.toThrow('Enter the card number before the PIN');
+        expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('same-status transition WITH a new code applies it via the guarded updateFulfilment (not dropped)', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ status: 'PROCESSING' }));
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        const res = await service.transition(vendor, 'o1', { toStatus: 'PROCESSING', voucherCode: 'SAME-STATUS-1' } as never);
+        expect(res.skipped).toBe(true);
+        const { where, data } = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+        expect(data.voucherCode).toBe('SAME-STATUS-1');
+        expect(where.fulfilledByVendorId).toBe('v1');
+        expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
+      });
+
+      it('same-status transition with ONLY tracking applies it via updateFulfilment (not dropped)', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ status: 'DISPATCHED' }));
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        const res = await service.transition(vendor, 'o1', { toStatus: 'DISPATCHED', trackingNumber: 'TRK-V', trackingUrl: 'https://t/v' } as never);
+        expect(res.skipped).toBe(true);
+        expect(mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].data).toMatchObject({ trackingNumber: 'TRK-V', trackingUrl: 'https://t/v' });
+      });
+
+      it('a code cancelled elsewhere in the tenant is refused for a vendor too', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open());
+        mockPrisma.cancelledVoucherCode.findFirst.mockResolvedValueOnce({ id: 'cv' });
+        await expect(service.updateFulfilment(vendor, 'o1', { voucherCode: 'OLD-1' } as never)).rejects.toThrow(/can't be reused/);
+        expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('updateFulfilment: a Hubble-managed order refuses a vendor code', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ metadata: { hubbleStatus: 'PROCESSING' } }));
+        await expect(service.updateFulfilment(vendor, 'o1', { voucherCode: 'NEW-1' } as never)).rejects.toThrow(/Hubble integration/);
+        expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('B1: transition that ADDS a PIN sends BOTH the re-sent voucher AND the ORDER_DELIVERED milestone (with tracking)', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(
+          open({ status: 'DISPATCHED', voucherCode: 'VEND-CODE-4321', voucherPin: null, fulfilmentChannel: 'DIGITAL_VOUCHER' }),
+        );
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
+        mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValue({ id: 'o1', status: 'DELIVERED' });
+        mockPrisma.redemptionOrder.findUnique.mockResolvedValueOnce({
+          voucherCode: 'VEND-CODE-4321', voucherPin: '7788', valuePaise: 50000n, orderNumber: 'D-26-1',
+          reward: { name: 'Croma 500' }, partner: { userId: 'm1', phone: '9', ownerName: 'A' },
+        });
+        mockPrisma.client.findUnique.mockResolvedValueOnce({ branding: { displayName: 'Bajaj' }, internalName: 'bajaj' });
+        mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'm1', phone: '9', ownerName: 'A' });
+        await service.transition(vendor, 'o1', { toStatus: 'DELIVERED', voucherPin: '7788', trackingNumber: 'TRK-1' } as never);
+        const events = mockNotifications.notifyUserWithChannels.mock.calls.map((c) => c[0].eventKey);
+        expect(events).toEqual(expect.arrayContaining(['VOUCHER_ISSUED', 'ORDER_DELIVERED']));
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(
+          expect.objectContaining({ eventKey: 'ORDER_DELIVERED', vars: expect.objectContaining({ trackingId: 'TRK-1' }) }),
+        );
+      });
+
+      it('B1: transition that issues a NEW code still sends only VOUCHER_ISSUED (milestone suppressed)', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ status: 'PROCESSING' }));
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
+        mockPrisma.redemptionOrder.findUniqueOrThrow.mockResolvedValue({ id: 'o1', status: 'DISPATCHED' });
+        mockPrisma.redemptionOrder.findUnique.mockResolvedValueOnce({
+          voucherCode: 'NEW-CODE-1', valuePaise: 50000n, orderNumber: 'D-26-1',
+          reward: { name: 'Amazon 500' }, partner: { userId: 'm1', phone: '9', ownerName: 'A' },
+        });
+        mockPrisma.client.findUnique.mockResolvedValueOnce({ branding: { displayName: 'Bajaj' }, internalName: 'bajaj' });
+        mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'm1', phone: '9', ownerName: 'A' });
+        await service.transition(vendor, 'o1', { toStatus: 'DISPATCHED', voucherCode: 'NEW-CODE-1' } as never);
+        const events = mockNotifications.notifyUserWithChannels.mock.calls.map((c) => c[0].eventKey);
+        expect(events).toEqual(['VOUCHER_ISSUED']);
+      });
+
+      it('B4: a double-submitted identical PIN — the loser re-reads the same PIN and succeeds as a no-op (no audit, no notify)', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst
+          .mockResolvedValueOnce(open({ status: 'DISPATCHED', voucherCode: 'VEND-CODE-4321', voucherPin: null }))
+          .mockResolvedValueOnce(open({ status: 'DISPATCHED', voucherCode: 'VEND-CODE-4321', voucherPin: '7788' }))
+          .mockResolvedValue(open({ status: 'DISPATCHED', voucherCode: 'VEND-CODE-4321', voucherPin: '7788' }));
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
+        mockPrisma.redemptionOrder.findUnique.mockResolvedValueOnce({ voucherCode: 'VEND-CODE-4321', voucherPin: '7788' });
+        await expect(service.updateFulfilment(vendor, 'o1', { voucherPin: '7788' } as never)).resolves.toBeDefined();
+        expect(mockPrisma.redemptionOrder.updateMany.mock.calls[1][0].data).not.toHaveProperty('voucherPin');
+        expect(mockPrisma.auditLog.create.mock.calls.some((c) => c[0]?.data?.metadata?.event === 'VOUCHER_PIN_ADDED_MANUAL')).toBe(false);
+        expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+      });
+
+      it('B4: losing to a DIFFERENT PIN stays a 409', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ status: 'DISPATCHED', voucherCode: 'VEND-CODE-4321', voucherPin: null }));
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 0 });
+        mockPrisma.redemptionOrder.findUnique.mockResolvedValueOnce({ voucherCode: 'VEND-CODE-4321', voucherPin: '1111' });
+        await expect(service.updateFulfilment(vendor, 'o1', { voucherPin: '7788' } as never)).rejects.toBeInstanceOf(ConflictException);
+      });
+
+      it('a coded order MAY switch to a physical channel (physical gift cards carry codes) — no voucher claim', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ voucherCode: 'VEND-CODE-4321', fulfilmentChannel: 'DIGITAL_VOUCHER' }));
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        await service.updateFulfilment(vendor, 'o1', { fulfilmentChannel: 'BRAND' } as never).catch(() => undefined);
+        const call = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+        expect(call.data).toMatchObject({ fulfilmentChannel: 'BRAND' });
+        expect(call.data).not.toHaveProperty('voucherCode');
+        expect(JSON.stringify(call.where)).not.toContain('voucherCode');
+      });
+
+      it.each([
+        ['clear (null)', { voucherCode: null }],
+        ['overwrite', { voucherCode: 'OTHER-0000' }],
+      ])('transition → DELIVERED with %s on a stored code → 400, no write', async (_n, extra) => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ status: 'DISPATCHED', voucherCode: 'AMZ-STORED-1234' }));
+        await expect(service.transition(vendor, 'o1', { toStatus: 'DELIVERED', ...extra } as never))
+          .rejects.toBeInstanceOf(BadRequestException);
+        expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      });
+    });
+
+    // Concurrency: the open/assigned checks come from a read; the write must re-assert them
+    // atomically so a close / reassignment that lands between read and write is never overwritten.
+    describe('updateFulfilment guarded write (read-then-write race)', () => {
+      const dto = { trackingNumber: 'TRK9' } as never;
+
+      it('writes via a CAS that re-asserts open + this vendor + this tenant', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst
+          .mockResolvedValueOnce({ id: 'o1', status: 'PROCESSING' }) // the pre-check read
+          .mockResolvedValueOnce({ id: 'o1', status: 'PROCESSING' }); // getOrder re-read
+        mockPrisma.redemptionOrder.updateMany.mockResolvedValueOnce({ count: 1 });
+        await service.updateFulfilment(vendor, 'o1', dto);
+        expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+        expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledTimes(1);
+        const { where, data } = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0];
+        expect(where).toEqual({
+          id: 'o1',
+          fulfilledByVendorId: 'v1',
+          partner: { clientId: 'deoleo' },
+          status: {
+            notIn: expect.arrayContaining(['DELIVERED', 'RETURNED', 'CANCELLED', 'FAILED', 'PENDING']),
+          },
+        });
+        expect(data).toMatchObject({ trackingNumber: 'TRK9' });
+      });
+
+      // Evaluate the write's where-clause against the row's CURRENT (post-race) state.
+      const rowNow = (row: { status: string; fulfilledByVendorId: string; clientId: string }) =>
+        async ({ where }: {
+          where: { fulfilledByVendorId?: string; partner?: { clientId: string }; status?: { notIn?: string[] } };
+        }) => {
+          const ok =
+            (where.fulfilledByVendorId === undefined || where.fulfilledByVendorId === row.fulfilledByVendorId) &&
+            (where.partner === undefined || where.partner.clientId === row.clientId) &&
+            !(where.status?.notIn ?? []).includes(row.status);
+          return { count: ok ? 1 : 0 };
+        };
+
+      it('order CLOSED concurrently (open on read, now DELIVERED) → 409, no write applied, no re-read', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValueOnce({ id: 'o1', status: 'DISPATCHED' });
+        mockPrisma.redemptionOrder.updateMany.mockImplementationOnce(
+          rowNow({ status: 'DELIVERED', fulfilledByVendorId: 'v1', clientId: 'deoleo' }),
+        );
+        const err = await service.updateFulfilment(vendor, 'o1', dto).catch((e) => e);
+        expect(err).toBeInstanceOf(ConflictException);
+        expect(err.message).toBe('Order status changed — refresh and try again');
+        expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledTimes(1);
+      });
+
+      it('order REASSIGNED to another vendor concurrently (now v2) → 409', async () => {
+        grantScope();
+        mockPrisma.redemptionOrder.findFirst.mockResolvedValueOnce({ id: 'o1', status: 'CONFIRMED' });
+        mockPrisma.redemptionOrder.updateMany.mockImplementationOnce(
+          rowNow({ status: 'CONFIRMED', fulfilledByVendorId: 'v2', clientId: 'deoleo' }),
+        );
+        await expect(service.updateFulfilment(vendor, 'o1', dto)).rejects.toBeInstanceOf(ConflictException);
+      });
     });
 
     it('listOrders + getOrder EXCLUDE PENDING (pre-payment) orders (LOW#6)', async () => {
@@ -395,7 +778,7 @@ describe('VendorPortalService', () => {
       await expect(
         service.transition(vendor, 'o1', { toStatus: 'DELIVERED' as never }),
       ).rejects.toBeInstanceOf(BadRequestException);
-      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
     });
 
     it('transition → DELIVERED on a DIGITAL_VOUCHER order SUCCEEDS with a code on the dto (BUG-1)', async () => {
@@ -403,7 +786,7 @@ describe('VendorPortalService', () => {
       mockPrisma.redemptionOrder.findFirst
         .mockResolvedValueOnce({
           id: 'o1', status: 'DISPATCHED', partnerId: 'cp1', orderNumber: 'D-26-1',
-          fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: null,
+          fulfilmentChannel: 'DIGITAL_VOUCHER', voucherCode: null, pointsDeducted: 500,
         })
         .mockResolvedValueOnce({
           id: 'o1', status: 'DELIVERED', deliveredAt: new Date(), cancelledAt: null,
@@ -415,7 +798,7 @@ describe('VendorPortalService', () => {
         toStatus: 'DELIVERED' as never,
         voucherCode: 'AMZ-1234',
       });
-      expect(mockPrisma.redemptionOrder.update).toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalled();
       expect(res.order.status).toBe('DELIVERED');
     });
 
@@ -433,7 +816,87 @@ describe('VendorPortalService', () => {
       mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'DELIVERED' });
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'm1', phone: '9', ownerName: 'A' });
       await service.transition(vendor, 'o1', { toStatus: 'DELIVERED' as never });
-      expect(mockPrisma.redemptionOrder.update).toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalled();
+    });
+
+    // ── Race guard: compare-and-set on the status the vendor READ ────────────────
+    describe('compare-and-set race guard', () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let row: Record<string, any>;
+      afterEach(() => {
+        mockPrisma.redemptionOrder.findFirst.mockReset();
+        mockPrisma.redemptionOrder.updateMany.mockReset();
+      });
+      const installOrderRow = (initial: Record<string, unknown>) => {
+        row = { ...initial };
+        const snapshot = { ...initial };
+        // Every pre-tx read (transition lookup AND the post-write getOrder projection) sees
+        // the same stale snapshot; only updateMany consults the LIVE row.
+        mockPrisma.redemptionOrder.findFirst.mockImplementation(async () => ({
+          ...snapshot, updatedAt: new Date(), reward: null, statusHistory: [],
+        }));
+        mockPrisma.redemptionOrder.updateMany.mockImplementation(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          async ({ where, data }: { where: any; data: Record<string, unknown> }) => {
+            if (where.id !== row.id) return { count: 0 };
+            if ('status' in where && where.status !== row.status) return { count: 0 };
+            if ('fulfilledByVendorId' in where && where.fulfilledByVendorId !== row.fulfilledByVendorId) {
+              return { count: 0 };
+            }
+            for (const [k, v] of Object.entries(data)) if (v !== undefined) row[k] = v;
+            return { count: 1 };
+          },
+        );
+      };
+      const vendorOrder = (status: string) => ({
+        id: 'o1', status, partnerId: 'cp1', orderNumber: 'D-26-1', fulfilledByVendorId: 'v1',
+      });
+
+      it('two concurrent DISPATCHED (double click) → exactly one wins, loser 409, ONE history row + ONE notification', async () => {
+        grantScope();
+        installOrderRow(vendorOrder('PROCESSING'));
+        mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'm1', phone: '9', ownerName: 'A' });
+
+        const results = await Promise.allSettled([
+          service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never }),
+          service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never }),
+        ]);
+
+        expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+        const lost = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+        expect(lost).toHaveLength(1);
+        expect(lost[0].reason).toBeInstanceOf(ConflictException);
+        expect(lost[0].reason.getStatus()).toBe(409);
+        expect(lost[0].reason.message).toBe('Order status changed — refresh and try again');
+        expect(mockPrisma.redemptionStatusHistory.create).toHaveBeenCalledTimes(1);
+        expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+        expect(row.status).toBe('DISPATCHED');
+      });
+
+      it('a STALE read (Gifsy cancelled the order meanwhile) → 409, no write, no history, no notification', async () => {
+        grantScope();
+        installOrderRow(vendorOrder('PROCESSING'));
+        row.status = 'CANCELLED'; // moved by Gifsy after the vendor's read
+
+        await expect(
+          service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(row.status).toBe('CANCELLED');
+        expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
+        expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+      });
+
+      it('an order RE-ASSIGNED to another vendor after the read → 409 (claim re-pinned to this vendor)', async () => {
+        grantScope();
+        installOrderRow(vendorOrder('PROCESSING'));
+        row.fulfilledByVendorId = 'v2';
+
+        await expect(
+          service.transition(vendor, 'o1', { toStatus: 'DISPATCHED' as never }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(row.status).toBe('PROCESSING');
+        expect(mockPrisma.redemptionStatusHistory.create).not.toHaveBeenCalled();
+      });
     });
   });
 });

@@ -22,6 +22,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 // pseudo-KPI's "current window" MUST use the same formula the capture/notify services use.
 import { currentWindowKey } from '../visibility/visibility-window.helper';
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
+import { pickDeliveryDefaults } from '../partner/delivery-defaults.helper';
 
 /**
  * Relation filter that FULLY hides admin-PARKED outlets from sales reps: an outlet whose
@@ -32,7 +33,7 @@ import { resolveTenantFeatures } from '../common/tenant-features.helper';
  * normal outlet (kycIntent null) or a NOT_INTERESTED outlet would vanish too. The OR-wrap with
  * `{ kycIntent: null }` KEEPS those and drops ONLY the PARKED ones.
  */
-const NOT_PARKED_OUTLET = {
+export const NOT_PARKED_OUTLET = {
   OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' as const } }],
 };
 
@@ -2108,6 +2109,8 @@ export class SalesService {
               select: {
                 id: true,
                 phone: true,
+                // Sales-assisted physical-gift redeem: seeds the editable "Recipient name".
+                ownerName: true,
                 // Prior-KYC fields — surfaced so the new-KYC wizard can pre-fill
                 // when a senior/admin rejected the submission and the rep re-enters.
                 businessName: true,
@@ -2118,6 +2121,7 @@ export class SalesService {
                 bankAccountHolder: true,
                 ifscCode: true,
                 upiId: true,
+                upiCaptureMethod: true,
                 // Capture-bank-at-redemption: gate the payout prefill on this so a self-captured,
                 // not-yet-paid (UNVERIFIED/NEEDS_RECAPTURE) rail is NOT leaked into the rep's re-KYC form.
                 paymentDetailsStatus: true,
@@ -2226,7 +2230,11 @@ export class SalesService {
             partner && isReEntry
               ? {
                   partnerName: partner.businessName,
-                  mobile: outlet.phone ?? partner.phone ?? '',
+                  // The OWNER phone (partner) first: for a non-flagged mobile the re-KYC lock pins the
+                  // submission to partner.phone and the consent OTP must go to that same number
+                  // (kyc.service sendConsentOtp binds to it) — prefilling outlet.phone would lock the
+                  // rep onto a number the server then rejects.
+                  mobile: partner.phone ?? outlet.phone ?? '',
                   gstNumber: partner.gstNumber ?? '',
                   panNumber: partner.panNumber ?? '',
                   address: fullAddress,
@@ -2238,6 +2246,19 @@ export class SalesService {
                   accountHolderName: payoutVerified ? (partner.bankAccountHolder ?? '') : '',
                   ifscCode: payoutVerified ? (partner.ifscCode ?? '') : '',
                   upiId: payoutVerified ? (partner.upiId ?? '') : '',
+                  // How the stored UPI was captured ('QR' | 'MANUAL' | null = legacy/unknown).
+                  upiCaptureMethod: payoutVerified ? (partner.upiCaptureMethod ?? null) : null,
+                  // The partner's CURRENT payout rail — FE contract: the re-KYC wizard defaults its
+                  // payment method to this. Payouts route UPI-first, so a visible UPI wins; else a
+                  // visible bank account; else null. Same visibility gate as the payout fields above
+                  // (a hidden self-captured rail never surfaces, not even as its mode).
+                  paymentMode: !payoutVerified
+                    ? null
+                    : partner.upiId?.trim()
+                      ? ('upi' as const)
+                      : partner.bankAccountNumber?.trim()
+                        ? ('bank' as const)
+                        : null,
                 }
               : null;
 
@@ -2258,6 +2279,10 @@ export class SalesService {
                 bankAccountHolder: groupInfo.identity.bankAccountHolder ?? '',
                 ifscCode: groupInfo.identity.ifscCode ?? '',
                 upiId: groupInfo.identity.upiId ?? '',
+                // How the group's UPI was captured ('QR' | 'MANUAL' | null = legacy/unknown) — travels
+                // with the UPI it describes, under the SAME payout-verified gating (resolveGroupIdentity
+                // blanks both when the group source's payout is unverified).
+                upiCaptureMethod: groupInfo.identity.upiCaptureMethod ?? null,
                 // PAN = the authoritative group PAN (what the child's PAN is locked to + the backend
                 // enforces via checkPanMatchesGroup). Aligning the displayed PAN with the lock avoids a
                 // self-contradictory payload when the identity source carries no PAN but a sibling does.
@@ -2318,6 +2343,13 @@ export class SalesService {
             existingKyc,
             // Owner-group pre-fill (approved parent only) — undefined when ungrouped/unapproved.
             parentPrefill,
+            // Sales-assisted physical-gift redeem (PLATFORM-WIDE, owner-approved): THIS outlet's
+            // address on file pre-fills the rep's delivery form — the same pickDeliveryDefaults as
+            // /partner/me (junk placeholders + invalid pincodes → null; null when nothing usable).
+            // Scoped like every field here: only outlets in the caller's tenant + downline.
+            deliveryDefaults: pickDeliveryDefaults(outlet),
+            // Seeds the editable "Recipient name" (the outlet's own owner, else the partner's).
+            ownerName: outlet.ownerName?.trim() || partner?.ownerName?.trim() || null,
             targetPct: 0,
           };
         })

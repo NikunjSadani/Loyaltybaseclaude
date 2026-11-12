@@ -24,6 +24,9 @@ import {
 import type { EntityType, GSTRegistrationType } from '@/lib/invoice';
 import { SoDeclarationView } from '@/components/so-declaration-view';
 import type { SoDeclarationData } from '@/lib/so-declaration';
+import { UpiCaptureMethodBadge, effectiveUpiCaptureMethod } from '@/components/kyc/upi-capture-method-badge';
+import type { UpiCaptureMethod } from '@/components/bank-or-upi-section';
+import { REMOVED_RAIL_NOTICE, asPayoutRail, isRemovalConsistent, type PayoutRail } from '@/lib/payout-rail';
 
 // ─── 7-field verification types (shared with approvals page) ─────────────────
 
@@ -112,6 +115,10 @@ interface ApiKycDetail {
   // proposed PAN differs from the group PAN, so approving DETACHES the outlet from its owner
   // group (re-establishes it as an independent shop). Default false / absent = normal.
   willLeaveGroup?: boolean;
+  // R10: the payout rail a re-KYC APPROVAL clears on the live partner ('upi' | 'bank'), or null
+  // when nothing is removed. A rail NAME, never a value — exposed even when the values are hidden.
+  // Absent on an older backend (→ the per-field removal diff stands on its own).
+  removedRail?: 'upi' | 'bank' | null;
   // Gifsy-set classification (current stored values; null until an admin saves them).
   entityType?: EntityType | null;
   gstRegistrationType?: GSTRegistrationType | null;
@@ -132,6 +139,7 @@ interface ApiKycDetail {
     address?: string | null; city?: string | null; state?: string | null; pincode?: string | null;
     bankName?: string | null; bankAccountNumber?: string | null; bankAccountHolder?: string | null;
     ifscCode?: string | null; upiId?: string | null; paymentMode?: string | null;
+    upiCaptureMethod?: UpiCaptureMethod | null;
     outlets?: { name?: string; outletCode: string; phone?: string;
       requiredPaymentType?: 'BANK' | 'UPI' | 'ANY' | null;
       addressLine1?: string | null; addressLine2?: string | null;
@@ -145,6 +153,7 @@ interface ApiKycDetail {
     gstNumber?: string | null; panNumber?: string | null;
     bankName?: string | null; bankAccountNumber?: string | null; bankAccountHolder?: string | null;
     ifscCode?: string | null; upiId?: string | null; paymentMode?: string | null;
+    upiCaptureMethod?: UpiCaptureMethod | null;
     // Outlet address is staged the same way and applied to the live outlet only at approval.
     addressLine1?: string | null; addressLine2?: string | null;
     city?: string | null; state?: string | null; pincode?: string | null;
@@ -189,6 +198,8 @@ type KycDetailShape = {
   salesUser: string; territory: string; region: string;
   submittedDate: string; status: string;
   bankName: string; accountNumber: string; ifscCode: string; upiId: string;
+  // How the (effective, proposed-overlaid) UPI ID was captured; null = unknown/legacy.
+  upiCaptureMethod: UpiCaptureMethod | null;
   // Outlet-master mandated payout method (primary outlet); '' when unset.
   requiredPaymentType: '' | 'BANK' | 'UPI' | 'ANY';
   pennyDropStatus: 'verified' | 'failed' | 'pending';
@@ -206,6 +217,8 @@ type KycDetailShape = {
   // Wave-4: true iff approving this re-KYC detaches the outlet from its owner group
   // (proposed PAN differs from the group PAN). Drives the group-leave warning banner.
   willLeaveGroup: boolean;
+  // R10: the rail approval removes (value-free notice), or null.
+  removedRail: PayoutRail | null;
   // Gifsy classification (current stored values; null until saved). Seeds the two selects.
   entityType: EntityType | null;
   gstRegistrationType: GSTRegistrationType | null;
@@ -227,7 +240,8 @@ type ProposedFieldKey =
   | 'bankName' | 'bankAccountNumber' | 'bankAccountHolder' | 'ifscCode' | 'upiId' | 'paymentMode'
   | 'address';
 
-interface ProposedFieldChange { proposed: string; current: string }
+/** `removed` = the re-KYC switches payout rail, so approval CLEARS this field (proposed is ''). */
+interface ProposedFieldChange { proposed: string; current: string; removed?: boolean }
 type ProposedChanges = Partial<Record<ProposedFieldKey, ProposedFieldChange>>;
 
 /** Partner SCALAR keys diffed field-for-field (address is handled separately, below). */
@@ -235,6 +249,12 @@ const PROPOSED_FIELD_KEYS: Exclude<ProposedFieldKey, 'address'>[] = [
   'businessName', 'ownerName', 'phone', 'gstNumber', 'panNumber',
   'bankName', 'bankAccountNumber', 'bankAccountHolder', 'ifscCode', 'upiId', 'paymentMode',
 ];
+
+/** Payout-rail keys a re-KYC can CLEAR at approval: the backend sends the key with an explicit
+ *  `null` when the proposal sets the OTHER rail (exclusive payout rails). */
+const REMOVABLE_PAYOUT_KEYS: ReadonlySet<ProposedFieldKey> = new Set<ProposedFieldKey>([
+  'bankName', 'bankAccountNumber', 'bankAccountHolder', 'ifscCode', 'upiId',
+]);
 
 const PROPOSED_FIELD_LABELS: Record<ProposedFieldKey, string> = {
   businessName: 'Firm Name', ownerName: 'Owner Name', phone: 'Mobile',
@@ -282,23 +302,35 @@ function computeAddressChange(
 
 /**
  * Diff the PROPOSED (re-KYC-staged) identity/payout values against the still-live
- * partner values. Only a field whose proposed value is a non-empty string AND differs
- * from the current value is returned (an absent/empty proposed key = "untouched", matching
- * the backend apply semantics). Both sides are already role-masked by the backend, so a
- * masked caller only sees a diff when the unmasked-last-4 differs — acceptable; the Gifsy
- * admin (unmasked) sees the full diff. Returns undefined when nothing changed / no re-KYC.
+ * partner values. A field whose proposed value is a non-empty string AND differs from the
+ * current value is a change; an absent/empty proposed key = "untouched" (backend apply
+ * semantics). A payout-rail key PRESENT with an explicit `null` while the current value is
+ * non-empty is a REMOVAL (the re-KYC sets the other rail → approval clears this one). Both
+ * sides are already role-masked by the backend, so a masked caller only sees a diff when the
+ * unmasked-last-4 differs — acceptable; the Gifsy admin (unmasked) sees the full diff.
+ * When the backend sends `removedRail` (hasRemovedRail) it is AUTHORITATIVE for removals: a
+ * per-field "Will be removed" row is kept only for that rail's columns, so the per-field rows can
+ * never contradict the value-free removed-rail notice. Returns undefined when nothing changed.
  */
 function computeProposedChanges(
   partner: Record<string, unknown> | null | undefined,
   proposed: Record<string, unknown> | null | undefined,
+  hasRemovedRail = false,
+  removedRail: PayoutRail | null = null,
 ): ProposedChanges | undefined {
   if (!proposed) return undefined;
   const out: ProposedChanges = {};
   for (const k of PROPOSED_FIELD_KEYS) {
     const pv = proposed[k];
-    if (typeof pv !== 'string' || pv.length === 0) continue;
     const cv = partner?.[k];
     const cur = typeof cv === 'string' ? cv : '';
+    if (pv === null && k in proposed && REMOVABLE_PAYOUT_KEYS.has(k)) {
+      if (cur.length > 0 && isRemovalConsistent(k, hasRemovedRail, removedRail)) {
+        out[k] = { proposed: '', current: cur, removed: true };
+      }
+      continue;
+    }
+    if (typeof pv !== 'string' || pv.length === 0) continue;
     if (pv !== cur) out[k] = { proposed: pv, current: cur };
   }
   return Object.keys(out).length ? out : undefined;
@@ -307,12 +339,33 @@ function computeProposedChanges(
 /**
  * Render a field value. When `change` is present the PROPOSED (new) value the reviewer is
  * approving is shown as the primary value with a "Proposed change" badge and the old value
- * beneath ("was: …"). When absent, the field renders exactly as before (no visual noise).
+ * beneath ("was: …"). A REMOVAL shows the current value struck through with a "Will be removed
+ * on approval" badge. When absent, the field renders exactly as before (no visual noise).
  */
 function ProposedFieldValue({
   change, children, mono = false,
 }: { change?: ProposedFieldChange; children: ReactNode; mono?: boolean }): ReactNode {
   if (!change) return children;
+  if (change.removed) {
+    return (
+      <span className="flex flex-col gap-0.5" data-testid="proposed-change">
+        <span className="flex items-center gap-1.5 flex-wrap">
+          <del
+            data-testid="proposed-removal-value"
+            className={`text-gray-500 line-through ${mono ? 'font-mono' : ''}`}
+          >
+            {change.current}
+          </del>
+          <span
+            data-testid="proposed-removal-badge"
+            className="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full whitespace-nowrap font-sans"
+          >
+            Will be removed on approval
+          </span>
+        </span>
+      </span>
+    );
+  }
   return (
     <span className="flex flex-col gap-0.5" data-testid="proposed-change">
       <span className="flex items-center gap-1.5 flex-wrap">
@@ -385,7 +438,11 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
   // Re-KYC staged changes: scalar identity/payout diff + the outlet-address diff (current
   // address lives on outlets[0], not the partner scalars → diffed separately).
   const proposedRaw = s.proposedPartner as Record<string, unknown> | null | undefined;
-  const scalarChanges = computeProposedChanges(s.partner as Record<string, unknown> | null | undefined, proposedRaw);
+  const hasRemovedRail = 'removedRail' in s;
+  const removedRail = asPayoutRail(s.removedRail);
+  const scalarChanges = computeProposedChanges(
+    s.partner as Record<string, unknown> | null | undefined, proposedRaw, hasRemovedRail, removedRail,
+  );
   const addressChange = computeAddressChange(
     s.partner?.outlets?.[0] as Record<string, unknown> | null | undefined,
     proposedRaw,
@@ -401,6 +458,7 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     proposedChanges,
     parentVerified:   s.parentVerified ?? undefined,
     willLeaveGroup:   s.willLeaveGroup === true,
+    removedRail,
     entityType:       s.entityType ?? null,
     gstRegistrationType: s.gstRegistrationType ?? null,
     classificationLock: s.classificationLock ?? null,
@@ -441,6 +499,7 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     accountNumber:    s.partner?.bankAccountNumber ?? '',
     ifscCode:         s.partner?.ifscCode ?? '',
     upiId:            s.partner?.upiId ?? '',
+    upiCaptureMethod: effectiveUpiCaptureMethod(s.partner, proposedRaw),
     requiredPaymentType: s.partner?.outlets?.[0]?.requiredPaymentType ?? '',
     pennyDropStatus:  'pending',
     agreementStatus:  'pending',
@@ -945,10 +1004,15 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
             <p className="font-semibold text-amber-800">Re-KYC — proposed changes awaiting approval</p>
             <p className="text-amber-700 text-xs mt-0.5">
               The values below marked <span className="font-medium">Proposed change</span> are the NEW values
-              approval will apply (the previous value is shown as &ldquo;was …&rdquo;). Changed:{' '}
+              approval will apply (the previous value is shown as &ldquo;was …&rdquo;)
+              {Object.values(kyc.proposedChanges).some((c) => c?.removed) && (
+                <>; values marked <span className="font-medium">Will be removed on approval</span> are cleared</>
+              )}. Changed:{' '}
               <span className="font-medium">
                 {(Object.keys(kyc.proposedChanges) as ProposedFieldKey[])
-                  .map((k) => PROPOSED_FIELD_LABELS[k]).join(', ')}
+                  .map((k) => (kyc.proposedChanges?.[k]?.removed
+                    ? `${PROPOSED_FIELD_LABELS[k]} (removed)`
+                    : PROPOSED_FIELD_LABELS[k])).join(', ')}
               </span>
             </p>
           </div>
@@ -1195,6 +1259,18 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
                 </span>
               )}
             </h2>
+            {/* R10: value-free removed-rail notice (same copy as the approvals queue). Shown even
+                when the live values are hidden; the per-field "Will be removed" rows below are
+                filtered to this rail, so the two never disagree. */}
+            {kyc.removedRail && (
+              <p
+                data-testid="kyc-detail-removed-rail"
+                className="mb-3 flex items-start gap-1.5 rounded-lg bg-amber-50 border border-amber-200 px-2.5 py-1.5 text-xs text-amber-700"
+              >
+                <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-px" />
+                {REMOVED_RAIL_NOTICE[kyc.removedRail]}
+              </p>
+            )}
             <div className="space-y-2 text-xs">
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">Bank</span>
@@ -1232,6 +1308,8 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
                   <span className="text-gray-500 w-24 flex-shrink-0">UPI ID</span>
                   <span className="font-mono text-gray-800">
                     <ProposedFieldValue change={kyc.proposedChanges?.upiId} mono>{kyc.upiId}</ProposedFieldValue>
+                    {/* No capture-method badge on a UPI that approval will remove. */}
+                    {!kyc.proposedChanges?.upiId?.removed && <UpiCaptureMethodBadge method={kyc.upiCaptureMethod} />}
                     <VerifiedOnParentBadge verified={kyc.parentVerified?.upiId} />
                   </span>
                 </div>

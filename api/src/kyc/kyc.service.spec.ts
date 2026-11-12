@@ -8,6 +8,7 @@ import {
   ConflictException,
   ForbiddenException,
   HttpException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -60,6 +61,9 @@ const mockTx = {
   // $executeRaw is the advisory-lock primitive acquireIdentityLocks issues inside create()'s
   // tx (partner-child owner groups) BEFORE the uniqueness check. A no-op mock here.
   $executeRaw: jest.fn(),
+  // F2: applyBridgeOutcome row-locks the partner (SELECT … FOR UPDATE) and reads the payout columns +
+  // status from the LOCKED row. Primed per test (seedReKycApprove mirrors the live partner).
+  $queryRaw: jest.fn(),
 };
 
 const mockPrisma = {
@@ -73,12 +77,13 @@ const mockPrisma = {
     findMany: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
+    updateMany: jest.fn(),
     count: jest.fn(),
     groupBy: jest.fn(),
   },
   kycStatusHistory: { create: jest.fn(), findMany: jest.fn() },
   kycDocument: { create: jest.fn(), findUnique: jest.fn() },
-  otpCode: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn(), deleteMany: jest.fn() },
+  otpCode: { findFirst: jest.fn(), findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn(), deleteMany: jest.fn(), count: jest.fn() },
   outlet: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   // reviewQueue/reviewDump resolve each row's per-tenant outlet-type displayName (scoped to the
   // submission's own tenant). Default [] (set in beforeEach after the reset loop) → empty map →
@@ -103,6 +108,10 @@ const mockPrisma = {
   // calendar loader (loadHolidaySet) reads the single national-holidays row via findFirst.
   programSetting: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
+  // The OTP attempt claim (common/otp-attempt) is ONE `UPDATE "otp_codes" … RETURNING "attempts"`.
+  $queryRaw: jest.fn(),
+  // sendConsentOtp's per-(phone, outlet) advisory lock (pg_advisory_xact_lock) inside its transaction.
+  $executeRaw: jest.fn(),
 };
 
 const mockNotifications = {
@@ -123,6 +132,8 @@ let mockKycOtpTemplateId: string | undefined = undefined;
 // Tenant UPI gate consumed by the create() payout-mandate guard. Default OFF (mirrors the
 // EffectiveSettings default salesApp.upiEnabled=false); UPI tests flip it per case.
 let mockUpiEnabled = false;
+// Tenant manual-UPI-entry opt-in (salesApp.upiManualEntry) — gates a MANUAL upiCaptureMethod. Default OFF.
+let mockUpiManualEntry = false;
 // Parent-child owner-group uniqueness policy consumed by create()/sendConsentOtp (phone flag)
 // and checkGroupUniqueness (gst/bank/upi flags). Default mirrors the EffectiveSettings default
 // (gst+phone enforced; bank/upi off). Group tests flip fields per case.
@@ -131,7 +142,7 @@ let mockKycGstinRequired = false; // default OFF here so the pre-existing blank-
 const mockTenantSettings = {
   getOtpTemplateId: jest.fn(async () => mockKycOtpTemplateId),
   getEffectiveSettings: jest.fn(async () => ({
-    salesApp: { upiEnabled: mockUpiEnabled },
+    salesApp: { upiEnabled: mockUpiEnabled, upiManualEntry: mockUpiManualEntry },
     uniquenessPolicy: mockUniquenessPolicy,
     kycGstinRequired: mockKycGstinRequired,
   })),
@@ -199,6 +210,7 @@ describe('KycService', () => {
     jest.clearAllMocks();
     mockKycOtpTemplateId = undefined; // default: no per-tenant override (global env template)
     mockUpiEnabled = false; // default: tenant UPI gate OFF (payout-mandate guard)
+    mockUpiManualEntry = false; // default: manual UPI entry OFF
     mockKycGstinRequired = false; // default: GSTIN not compulsory in these tests unless a test opts in
     mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false }; // default policy
     // clearAllMocks does not drain mockResolvedValueOnce queues nor clear a
@@ -230,6 +242,7 @@ describe('KycService', () => {
     // Reset every table op but PRESERVE $transaction's impl (cb → mockTx).
     for (const [key, val] of Object.entries(mockPrisma)) {
       if (key === '$transaction') continue;
+      if (typeof val === 'function') { (val as jest.Mock).mockReset(); continue; } // $queryRaw
       for (const fn of Object.values(val as Record<string, unknown>)) {
         (fn as jest.Mock).mockReset();
       }
@@ -244,6 +257,17 @@ describe('KycService', () => {
     // definition-level defaults). Payout-specific tests override with mockResolvedValueOnce.
     mockPrisma.outlet.findMany.mockResolvedValue([]);
     mockPrisma.payoutTransaction.findMany.mockResolvedValue([]);
+    // Claim-before-compare: consent() claims one OTP attempt atomically first — default: the claim wins
+    // (set AFTER the reset loop above, which wipes every mockPrisma op).
+    // The claim returns the post-increment attempts value — default: this is attempt 1.
+    mockPrisma.$queryRaw.mockResolvedValue([{ attempts: 1 }]);
+    mockPrisma.otpCode.updateMany.mockResolvedValue({ count: 1 });
+    // A refused claim re-reads the row for the honest message — default: still live (cap spent).
+    mockPrisma.otpCode.findUnique.mockResolvedValue({ expiresAt: new Date(Date.now() + 60_000), verifiedAt: null });
+    // sendConsentOtp's per-number send cap: no recent KYC_CONSENT sends by default.
+    mockPrisma.otpCode.count.mockResolvedValue(0);
+    // #3: the DRAFT→routed transition is a guarded updateMany — default: it wins.
+    mockPrisma.kycSubmission.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
     mockPrisma.walletTransaction.findMany.mockResolvedValue([]);
     // Default: no per-tenant outlet-type displayName (reviewQueue/reviewDump) → empty map →
@@ -723,7 +747,9 @@ describe('KycService', () => {
         status: 'DRAFT',
         userId: 'isr1',
         submittedAt: new Date('2026-06-30T00:00:00Z'),
-        partner: { ownerName: 'Owner', outlets: [{ name: 'Store', programName: 'Olive Oil' }] },
+        proposedPartner: null,
+        // #2: the consent OTP is bound to the submission's owner phone (= the consent mobile).
+        partner: { ownerName: 'Owner', phone: '9000000001', outlets: [{ name: 'Store', programName: 'Olive Oil' }] },
       });
       mockPrisma.consentRecord.create.mockResolvedValueOnce({ id: 'cr1' });
       mockPrisma.kycSubmission.update.mockResolvedValueOnce({});
@@ -739,8 +765,8 @@ describe('KycService', () => {
       mockPrisma.salesUser.findFirst.mock.calls
         .map((c) => c[0].where)
         .filter((w: Record<string, unknown>) => w.clientId !== undefined && w.user === undefined);
-    /** The data written by the routing kycSubmission.update: { status, escalatedFrom, submittedAt }. */
-    const routedUpdate = () => mockPrisma.kycSubmission.update.mock.calls[0][0].data;
+    /** The data written by the (atomic, DRAFT-guarded) routing updateMany: { status, escalatedFrom, submittedAt }. */
+    const routedUpdate = () => mockPrisma.kycSubmission.updateMany.mock.calls[0][0].data;
 
     it('submitter with no SalesUser record → status SUBMITTED, escalatedFrom null', async () => {
       // resolveInitialRouting: no SalesUser → SUBMITTED
@@ -1371,6 +1397,600 @@ describe('KycService', () => {
       const res = await service.create(so, { ...dtoBase, gstNumber: '', paymentMode: 'bank' } as never);
       expect(res).toMatchObject({ submissionId: 'sub-1' });
     });
+
+    // ── VPA safeguards: exclusive payout rail + upiCaptureMethod ──────────────────
+    it('F2: BOTH rails + paymentMode=bank → accepted; the UPI is IGNORED (old cached FE sends all five)', async () => {
+      mockUpiEnabled = true;
+      primeHappy('ANY');
+      const res = await service.create(so, {
+        ...dtoBase, ...bankFields, upiId: 'acme@upi', upiCaptureMethod: 'QR', paymentMode: 'bank',
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub1' });
+      const data = mockTx.channelPartner.create.mock.calls[0][0].data;
+      expect(data).toMatchObject({ bankAccountNumber: '50100', ifscCode: 'HDFC0001', paymentMode: 'bank' });
+      expect(data.upiId).toBeUndefined();
+      expect(data.upiCaptureMethod).toBeUndefined();
+    });
+
+    it('F2: BOTH rails + paymentMode=upi → accepted; the bank rail is IGNORED', async () => {
+      mockUpiEnabled = true;
+      primeHappy('ANY');
+      await service.create(so, {
+        ...dtoBase, ...bankFields, upiId: 'acme@upi', paymentMode: 'upi',
+      } as never);
+      const data = mockTx.channelPartner.create.mock.calls[0][0].data;
+      expect(data).toMatchObject({ upiId: 'acme@upi', paymentMode: 'upi' });
+      expect(data.bankName).toBeUndefined();
+      expect(data.bankAccountNumber).toBeUndefined();
+      expect(data.ifscCode).toBeUndefined();
+    });
+
+    it('F2: BOTH rails with NO paymentMode (mode pinned by the mandate) → 400, nothing written', async () => {
+      primeToGuard('BANK'); // BANK mandate pins bank, but the body is ambiguous
+      await expect(
+        service.create(so, { ...dtoBase, ...bankFields, upiId: 'acme@upi' } as never),
+      ).rejects.toThrow('Provide either UPI or bank details, not both');
+      expect(mockTx.channelPartner.create).not.toHaveBeenCalled();
+      expect(mockTx.kycSubmission.create).not.toHaveBeenCalled();
+    });
+
+    it('F5: UPI + IFSC only (no account number) is NOT both rails — IFSC alone is not a bank rail', async () => {
+      mockUpiEnabled = true;
+      primeHappy('UPI'); // UPI mandate pins upi (no paymentMode in the body)
+      const res = await service.create(so, {
+        ...dtoBase, ifscCode: 'HDFC0001', upiId: 'acme@upi',
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub1' });
+      const data = mockTx.channelPartner.create.mock.calls[0][0].data;
+      expect(data.upiId).toBe('acme@upi');
+      expect(data.ifscCode).toBeUndefined();
+    });
+
+    it('whitespace-only UPI alongside bank details counts as ABSENT → OK', async () => {
+      primeHappy('BANK');
+      const res = await service.create(so, {
+        ...dtoBase, ...bankFields, upiId: '   ', paymentMode: 'bank',
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub1' });
+      const data = mockTx.channelPartner.create.mock.calls[0][0].data;
+      expect(data.upiId).toBeUndefined();
+      expect(data.upiCaptureMethod).toBeUndefined();
+      expect(data.bankAccountNumber).toBe('50100');
+    });
+
+    it('UPI-only create persists upiCaptureMethod and NO bank rail', async () => {
+      mockUpiEnabled = true;
+      primeHappy('ANY');
+      await service.create(so, {
+        ...dtoBase, bankName: 'Leftover Bank', paymentMode: 'upi', upiId: 'Acme@UPI', upiCaptureMethod: 'QR',
+      } as never);
+      const data = mockTx.channelPartner.create.mock.calls[0][0].data;
+      expect(data).toMatchObject({ upiId: 'acme@upi', upiCaptureMethod: 'QR', paymentMode: 'upi' });
+      // The other rail is dropped (stored NULL) — a stray bankName never rides along.
+      expect(data.bankName).toBeUndefined();
+      expect(data.bankAccountNumber).toBeUndefined();
+      expect(data.ifscCode).toBeUndefined();
+    });
+
+    it('omitted unused-method fields (FE contract) are accepted for bank and UPI', async () => {
+      mockUpiManualEntry = true;
+      primeHappy('BANK');
+      await expect(
+        service.create(so, { ...dtoBase, ...bankFields, paymentMode: 'bank' } as never),
+      ).resolves.toMatchObject({ submissionId: 'sub1' });
+      mockUpiEnabled = true;
+      primeHappy('UPI');
+      await expect(
+        service.create(so, { ...dtoBase, paymentMode: 'upi', upiId: 'acme@upi', upiCaptureMethod: 'MANUAL' } as never),
+      ).resolves.toMatchObject({ submissionId: 'sub1' });
+    });
+
+    it('F7: a MANUAL UPI capture is rejected when the tenant has manual entry OFF (400, nothing written)', async () => {
+      mockUpiEnabled = true;
+      mockUpiManualEntry = false;
+      primeToGuard('UPI');
+      await expect(
+        service.create(so, { ...dtoBase, paymentMode: 'upi', upiId: 'acme@upi', upiCaptureMethod: 'MANUAL' } as never),
+      ).rejects.toThrow('Manual UPI entry is not enabled');
+      expect(mockTx.channelPartner.create).not.toHaveBeenCalled();
+    });
+
+    it('F7: a MANUAL method riding along an IGNORED UPI (bank mode) is not checked and not persisted', async () => {
+      mockUpiEnabled = true;
+      mockUpiManualEntry = false;
+      primeHappy('ANY');
+      await service.create(so, {
+        ...dtoBase, ...bankFields, upiId: 'acme@upi', upiCaptureMethod: 'MANUAL', paymentMode: 'bank',
+      } as never);
+      const data = mockTx.channelPartner.create.mock.calls[0][0].data;
+      expect(data.upiCaptureMethod).toBeUndefined();
+      expect(data.upiId).toBeUndefined();
+    });
+
+    /** Prime a re-KYC (existing partner) create() through to the staged DRAFT. */
+    const primeReKyc = (
+      reKycFlags: Record<string, boolean>,
+      stored: Record<string, unknown>,
+      requiredPaymentType = 'ANY',
+    ) => {
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-1', clientId: 'deoleo', partnerId: 'cp-existing',
+        outletCode: 'OUT-1', outletType: { code: 'SSS' },
+        requiredPaymentType,
+        reKycFlags,
+        addressLine1: 'addr1', city: 'X', state: 'Y', pincode: '110011',
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.channelPartner.findUnique.mockResolvedValueOnce({
+        ownerName: 'Acme', phone: '9000000000', gstNumber: null, panNumber: null,
+        bankName: null, bankAccountHolder: null, bankAccountNumber: null, ifscCode: null, upiId: null,
+        ...stored,
+      });
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'cp-existing' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-1' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+    };
+    const stagedProposal = () => mockTx.kycSubmission.create.mock.calls[0][0].data.proposedPartner;
+    const PAYOUT_KEYS = [
+      'bankName', 'bankAccountNumber', 'bankAccountHolder', 'ifscCode', 'upiId', 'upiCaptureMethod', 'paymentMode', 'payoutRail',
+    ];
+
+    it('re-KYC switching bank → UPI stages payoutRail=upi and drops the stored bank rail from the proposal', async () => {
+      mockUpiEnabled = true;
+      mockUpiManualEntry = true;
+      // only the UPI is re-capturable; bank is pinned to stored
+      primeReKyc({ upiId: true }, { bankName: 'B', bankAccountHolder: 'H', bankAccountNumber: '123', ifscCode: 'IFSC0001' });
+      // The FE pre-fills the (pinned) bank fields; they are NOT "submitted" (not flagged) → no 400.
+      const res = await service.create(so, {
+        ...dtoBase, bankName: 'B', accountNumber: '123', ifscCode: 'IFSC0001',
+        paymentMode: 'upi', upiId: 'new@upi', upiCaptureMethod: 'MANUAL',
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-1' });
+      const proposed = stagedProposal();
+      expect(proposed).toMatchObject({ payoutRail: 'upi', upiId: 'new@upi', upiCaptureMethod: 'MANUAL', paymentMode: 'upi' });
+      expect(proposed.bankAccountNumber).toBeUndefined();
+      expect(proposed.ifscCode).toBeUndefined();
+    });
+
+    it('F1: a re-KYC flagged ONLY for gstNumber on a BOTH-rails partner stages NO payout fields and NO payoutRail', async () => {
+      mockUpiEnabled = true;
+      primeReKyc(
+        { gstNumber: true },
+        { bankName: 'B', bankAccountHolder: 'H', bankAccountNumber: '123', ifscCode: 'IFSC0001', upiId: 'old@upi' },
+      );
+      // The FE echoes the stored (locked) payout values + a mode — they must not become a proposal.
+      await service.create(so, {
+        ...dtoBase, gstNumber: '29ABCDE1234F1Z5',
+        bankName: 'B', accountNumber: '123', ifscCode: 'IFSC0001', upiId: 'old@upi', paymentMode: 'bank',
+      } as never);
+      const proposed = stagedProposal();
+      expect(proposed.gstNumber).toBe('29ABCDE1234F1Z5');
+      for (const k of PAYOUT_KEYS) expect(proposed[k]).toBeUndefined();
+    });
+
+    it('R4b: bankName-only flag (bank partner, bank mode) → IN-RAIL edit: only bankName staged, no rail/mode/clear', async () => {
+      primeReKyc({ bankName: true }, { bankName: 'Old Bank', bankAccountHolder: 'H', bankAccountNumber: '123', ifscCode: 'IFSC0001' }, 'BANK');
+      await service.create(so, {
+        ...dtoBase, bankName: 'New Bank', accountNumber: '123', ifscCode: 'IFSC0001', paymentMode: 'bank',
+      } as never);
+      const proposed = stagedProposal();
+      expect(proposed.bankName).toBe('New Bank');
+      // Locked routing fields are never echoed back; no switch → no payoutRail / paymentMode.
+      for (const k of PAYOUT_KEYS.filter((x) => x !== 'bankName')) expect(proposed[k]).toBeUndefined();
+    });
+
+    it('R4b: bankName-only flag on a BOTH-rails partner + paymentMode bank → accepted, no clear, no switch', async () => {
+      mockUpiEnabled = true;
+      primeReKyc(
+        { bankName: true },
+        { bankName: 'Old Bank', bankAccountHolder: 'H', bankAccountNumber: '123', ifscCode: 'IFSC0001', upiId: 'shop@upi' },
+      );
+      const res = await service.create(so, {
+        ...dtoBase, bankName: 'New Bank', accountNumber: '123', ifscCode: 'IFSC0001', paymentMode: 'bank',
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-1' });
+      const proposed = stagedProposal();
+      expect(proposed.bankName).toBe('New Bank');
+      expect(proposed.payoutRail).toBeUndefined(); // → approval clears NOTHING (UPI kept)
+      expect(proposed.paymentMode).toBeUndefined(); // → mode NOT switched
+      expect(proposed.upiId).toBeUndefined();
+    });
+
+    it('R4b: bankName-only flag on a UPI-only partner + paymentMode bank → bank UNREACHABLE → live UPI kept, nothing staged (no 400)', async () => {
+      mockUpiEnabled = true;
+      primeReKyc({ bankName: true }, { upiId: 'shop@upi' });
+      const res = await service.create(so, { ...dtoBase, bankName: 'New Bank', paymentMode: 'bank' } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-1' });
+      for (const k of PAYOUT_KEYS) expect(stagedProposal()[k]).toBeUndefined(); // never strips the UPI
+    });
+
+    it('R4b: flagged accountNumber ONLY (IFSC locked, none stored) on a UPI-only partner + bank → falls back to the live UPI (no 400)', async () => {
+      mockUpiEnabled = true;
+      primeReKyc({ accountNumber: true }, { upiId: 'shop@upi' });
+      const res = await service.create(so, {
+        ...dtoBase, accountNumber: '50100', ifscCode: 'HDFC0001', paymentMode: 'bank',
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-1' });
+      for (const k of PAYOUT_KEYS) expect(stagedProposal()[k]).toBeUndefined();
+    });
+
+    it('R4b: flagged accountNumber ONLY on a BANK partner → only the account staged; payoutRail=bank (rep set C routing)', async () => {
+      primeReKyc({ accountNumber: true }, { bankName: 'B', bankAccountNumber: '111', ifscCode: 'HDFC0001' });
+      await service.create(so, {
+        ...dtoBase, bankName: 'B', accountNumber: '222', ifscCode: 'HDFC0001', paymentMode: 'bank',
+      } as never);
+      const proposed = stagedProposal();
+      expect(proposed).toMatchObject({ bankAccountNumber: '222', payoutRail: 'bank', paymentMode: 'bank' });
+      // locked fields are never echoed back
+      for (const k of ['ifscCode', 'bankName', 'upiId']) expect(proposed[k]).toBeUndefined();
+    });
+
+    it('FIX 2: a staged bank rail completed by a LOCKED IFSC records the carried IFSC in payoutCarried (not as ifscCode)', async () => {
+      primeReKyc({ accountNumber: true }, { bankName: 'B', bankAccountNumber: '111', ifscCode: 'HDFC0001' });
+      await service.create(so, {
+        ...dtoBase, bankName: 'B', accountNumber: '222', ifscCode: 'HDFC0001', paymentMode: 'bank',
+      } as never);
+      const proposed = stagedProposal();
+      expect(proposed.payoutCarried).toEqual({ ifscCode: 'HDFC0001' });
+      expect(proposed.ifscCode).toBeUndefined(); // still never a writable/staged value
+    });
+
+    it('FIX 2: both routing fields rep-entered → nothing carried (no payoutCarried key)', async () => {
+      primeReKyc({ accountNumber: true, ifscCode: true }, { bankName: 'B', bankAccountNumber: '111', ifscCode: 'HDFC0001' });
+      await service.create(so, {
+        ...dtoBase, bankName: 'B', accountNumber: '222', ifscCode: 'ICIC0002', paymentMode: 'bank',
+      } as never);
+      const proposed = stagedProposal();
+      expect(proposed).toMatchObject({ bankAccountNumber: '222', ifscCode: 'ICIC0002', payoutRail: 'bank' });
+      expect(proposed.payoutCarried).toBeUndefined();
+    });
+
+    it('FIX 2: no rail staged (IN-RAIL bankName edit) → no payoutCarried', async () => {
+      primeReKyc({ bankName: true }, { bankName: 'Old Bank', bankAccountNumber: '123', ifscCode: 'IFSC0001' }, 'BANK');
+      await service.create(so, {
+        ...dtoBase, bankName: 'New Bank', accountNumber: '123', ifscCode: 'IFSC0001', paymentMode: 'bank',
+      } as never);
+      expect(stagedProposal().payoutCarried).toBeUndefined();
+    });
+
+    it('R4c: flagged accountNumber ONLY on a partner with NO IFSC → bank unreachable, no live rail → 201, nothing staged', async () => {
+      primeReKyc({ accountNumber: true }, { bankAccountNumber: '111', ifscCode: null });
+      const res = await service.create(so, { ...dtoBase, accountNumber: '222', paymentMode: 'bank' } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-1' });
+      for (const k of PAYOUT_KEYS) expect(stagedProposal()[k]).toBeUndefined();
+    });
+
+    it('R4a/R4c: blanket re-KYC choosing bank with an account number but NO IFSC → 400 naming only the IFSC', async () => {
+      // A blanket re-KYC (no field flags) makes every field editable → the rep CAN fix it.
+      mockUpiEnabled = true;
+      primeReKyc({}, { upiId: 'shop@upi' });
+      await expect(
+        service.create(so, { ...dtoBase, bankName: 'B', accountNumber: '222', paymentMode: 'bank' } as never),
+      ).rejects.toThrow('Enter the IFSC');
+      expect(mockTx.kycSubmission.create).not.toHaveBeenCalled();
+    });
+
+    it('R4: BLANKET re-KYC switching UPI → bank with a complete bank rail → payoutRail=bank (UPI cleared at approval)', async () => {
+      mockUpiEnabled = true;
+      primeReKyc({}, { upiId: 'shop@upi' });
+      await service.create(so, {
+        ...dtoBase, bankName: 'HDFC', accountHolderName: 'H', accountNumber: '50100', ifscCode: 'HDFC0001', paymentMode: 'bank',
+      } as never);
+      const proposed = stagedProposal();
+      expect(proposed).toMatchObject({
+        payoutRail: 'bank', paymentMode: 'bank', bankName: 'HDFC', bankAccountNumber: '50100', ifscCode: 'HDFC0001',
+      });
+      expect(proposed.upiId).toBeUndefined();
+      // The SAME helper the approval apply uses clears the UPI rail for this proposal.
+      const { effectiveProposedPayout } = jest.requireActual('../common/payout-rail.helper');
+      expect(effectiveProposedPayout(proposed, {}).clears).toEqual({ upiId: null, upiCaptureMethod: null });
+    });
+
+    it('R4: flagged accountNumber + ifscCode on a UPI partner → switch to bank; only the EDITABLE bank fields are staged', async () => {
+      mockUpiEnabled = true;
+      primeReKyc({ accountNumber: true, ifscCode: true }, { upiId: 'shop@upi', bankName: 'Stale Bank' });
+      await service.create(so, {
+        ...dtoBase, bankName: 'Stale Bank', accountNumber: '50100', ifscCode: 'HDFC0001', paymentMode: 'bank',
+      } as never);
+      const proposed = stagedProposal();
+      expect(proposed).toMatchObject({ payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100', ifscCode: 'HDFC0001' });
+      expect(proposed.bankName).toBeUndefined(); // locked → never echoed
+    });
+
+    it('R4d: flagged upiId + bankName, rep keeps bank → the other rail\'s flag is IGNORED (no 400); only bankName staged, no rail', async () => {
+      mockUpiEnabled = true;
+      primeReKyc(
+        { upiId: true, bankName: true },
+        { bankName: 'B', bankAccountNumber: '111', ifscCode: 'HDFC0001' },
+      );
+      const res = await service.create(so, {
+        ...dtoBase, bankName: 'New B', accountNumber: '111', ifscCode: 'HDFC0001', paymentMode: 'bank',
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-1' });
+      const proposed = stagedProposal();
+      expect(proposed.bankName).toBe('New B');
+      for (const k of PAYOUT_KEYS.filter((x) => x !== 'bankName')) expect(proposed[k]).toBeUndefined();
+    });
+
+    it('R4e: mode PINNED by the outlet mandate (no paymentMode in the body) still stages paymentMode = the rail', async () => {
+      mockUpiEnabled = true;
+      primeReKyc({ upiId: true }, { upiId: 'old@upi' }, 'UPI');
+      await service.create(so, { ...dtoBase, upiId: 'new@upi', upiCaptureMethod: 'QR' } as never);
+      expect(stagedProposal()).toMatchObject({ payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi' });
+    });
+
+    it('R4e: brand-new KYC with a PINNED mode (no paymentMode in the body) persists paymentMode = the rail', async () => {
+      primeHappy('BANK');
+      await service.create(so, { ...dtoBase, ...bankFields } as never);
+      expect(mockTx.channelPartner.create.mock.calls[0][0].data.paymentMode).toBe('bank');
+    });
+
+    // ── R6 / R7 — manual-entry gate + capture-method preservation ─────────────────────────────
+    it('R6: re-KYC re-submitting the STORED UPI as MANUAL with manual entry OFF → accepted, stored method kept (key omitted)', async () => {
+      mockUpiEnabled = true;
+      mockUpiManualEntry = false;
+      primeReKyc({ upiId: true }, { upiId: 'shop@upi', upiCaptureMethod: 'QR' });
+      const res = await service.create(so, {
+        ...dtoBase, paymentMode: 'upi', upiId: 'Shop@UPI', upiCaptureMethod: 'MANUAL',
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-1' });
+      const proposed = stagedProposal();
+      expect(proposed.upiId).toBe('shop@upi');
+      expect(proposed.upiCaptureMethod).toBeUndefined(); // undefined → dropped by the JSON column → untouched at apply
+    });
+
+    it('R6: a NEW typed UPI with manual entry OFF → 400 after an UNCACHED settings re-read', async () => {
+      mockUpiEnabled = true;
+      mockUpiManualEntry = false;
+      primeReKyc({ upiId: true }, { upiId: 'shop@upi' });
+      await expect(
+        service.create(so, { ...dtoBase, paymentMode: 'upi', upiId: 'other@upi', upiCaptureMethod: 'MANUAL' } as never),
+      ).rejects.toThrow('Manual UPI entry is not enabled');
+      expect(mockTenantSettings.getEffectiveSettings).toHaveBeenCalledWith('deoleo', { fresh: true });
+    });
+
+    it('R6: a just-enabled manual flag (stale cache OFF, fresh read ON) is NOT rejected', async () => {
+      mockUpiEnabled = true;
+      mockUpiManualEntry = false;
+      primeHappy('UPI');
+      (mockTenantSettings.getEffectiveSettings as jest.Mock).mockImplementation(async (_c: string, opts?: { fresh?: boolean }) => ({
+        salesApp: { upiEnabled: true, upiManualEntry: !!opts?.fresh },
+        uniquenessPolicy: mockUniquenessPolicy,
+        kycGstinRequired: false,
+      }));
+      try {
+        await service.create(so, { ...dtoBase, paymentMode: 'upi', upiId: 'new@upi', upiCaptureMethod: 'MANUAL' } as never);
+        expect(mockTx.channelPartner.create.mock.calls[0][0].data.upiCaptureMethod).toBe('MANUAL');
+      } finally {
+        (mockTenantSettings.getEffectiveSettings as jest.Mock).mockImplementation(async () => ({
+          salesApp: { upiEnabled: mockUpiEnabled, upiManualEntry: mockUpiManualEntry },
+          uniquenessPolicy: mockUniquenessPolicy,
+          kycGstinRequired: mockKycGstinRequired,
+        }));
+      }
+    });
+
+    it('R7: re-submitted stored UPI with NO upiCaptureMethod (old cached FE) keeps the stored method (not nulled)', async () => {
+      mockUpiEnabled = true;
+      primeReKyc({ upiId: true }, { upiId: 'shop@upi', upiCaptureMethod: 'QR' });
+      await service.create(so, { ...dtoBase, paymentMode: 'upi', upiId: 'shop@upi' } as never);
+      expect(stagedProposal().upiCaptureMethod).toBeUndefined(); // dropped by JSON → stored method untouched
+    });
+
+    it('R7: a CHANGED UPI with no method → explicit null (a stale method never describes a different UPI)', async () => {
+      mockUpiEnabled = true;
+      primeReKyc({ upiId: true }, { upiId: 'shop@upi', upiCaptureMethod: 'QR' });
+      await service.create(so, { ...dtoBase, paymentMode: 'upi', upiId: 'other@upi' } as never);
+      const proposed = stagedProposal();
+      expect(proposed.upiId).toBe('other@upi');
+      expect(proposed.upiCaptureMethod).toBeNull();
+    });
+
+    // ── Re-KYC rail rules: "the server never rejects for something the rep cannot fix" ──────────
+    it('DEOLEO: UPI off, mandate BANK, live bank, upiId flagged → 201, nothing staged, nothing cleared', async () => {
+      mockUpiEnabled = false;
+      primeReKyc(
+        { upiId: true },
+        { bankName: 'B', bankAccountHolder: 'H', bankAccountNumber: '111', ifscCode: 'HDFC0001' },
+        'BANK',
+      );
+      const res = await service.create(so, {
+        ...dtoBase, bankName: 'B', accountHolderName: 'H', accountNumber: '111', ifscCode: 'HDFC0001',
+        upiId: 'typed@upi', paymentMode: 'bank',
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-1' });
+      const proposed = stagedProposal();
+      for (const k of PAYOUT_KEYS) expect(proposed[k]).toBeUndefined();
+      const { effectiveProposedPayout } = jest.requireActual('../common/payout-rail.helper');
+      expect(effectiveProposedPayout(proposed, { upiId: true }, { bankAccountNumber: '111', ifscCode: 'HDFC0001' }).clears).toEqual({});
+    });
+
+    it('RE-KYC TABLE: every flag combo × live rail × tenant UPI × mandate — no 400 the rep cannot fix', async () => {
+      const helper = jest.requireActual('../common/payout-rail.helper');
+      type Rail = 'upi' | 'bank';
+      const FLAG_SETS: Record<string, Record<string, boolean>> = {
+        blanket: {},
+        upiId: { upiId: true },
+        accountNumber: { accountNumber: true },
+        ifscCode: { ifscCode: true },
+        'account+IFSC': { accountNumber: true, ifscCode: true },
+        bankName: { bankName: true },
+        holder: { accountHolderName: true },
+        cheque: { cancelledCheque: true },
+        'upi+account+IFSC': { upiId: true, accountNumber: true, ifscCode: true },
+        gst: { gstNumber: true },
+      };
+      const LIVE: Record<string, Record<string, string>> = {
+        'upi-only': { upiId: 'live@upi' },
+        'bank-only': { bankName: 'LB', bankAccountHolder: 'LH', bankAccountNumber: '111', ifscCode: 'LIVE0001' },
+        both: { upiId: 'live@upi', bankName: 'LB', bankAccountHolder: 'LH', bankAccountNumber: '111', ifscCode: 'LIVE0001' },
+      };
+      // ChannelPartner column → DTO field
+      const COL: Record<string, string> = {
+        bankName: 'bankName', bankAccountHolder: 'accountHolderName', bankAccountNumber: 'accountNumber',
+        ifscCode: 'ifscCode', upiId: 'upiId',
+      };
+      const NEW: Record<string, string> = {
+        upiId: 'new@upi', accountNumber: '222', ifscCode: 'NEWB0001', bankName: 'NB', accountHolderName: 'NH',
+      };
+      const RAIL_FIELDS: Record<Rail, string[]> = {
+        upi: ['upiId'], bank: ['bankName', 'accountHolderName', 'accountNumber', 'ifscCode'],
+      };
+      const failures: string[] = [];
+      const results: Record<string, number> = { ok: 0, fixable400: 0 };
+
+      for (const [flagName, flags] of Object.entries(FLAG_SETS)) {
+        for (const [liveName, live] of Object.entries(LIVE)) {
+          for (const upiOn of [true, false]) {
+            for (const mandate of ['ANY', 'BANK']) {
+              mockUpiEnabled = upiOn;
+              mockUpiManualEntry = true;
+              const editable = helper.payoutFieldEditability(false, flags) as (f: string) => boolean;
+              const storedDto = {
+                upiId: live.upiId, accountNumber: live.bankAccountNumber, ifscCode: live.ifscCode,
+              };
+              const allowed = (r: Rail) => r === 'bank' || (upiOn && mandate === 'ANY');
+              const usable = (r: Rail) => allowed(r) && helper.isPayoutRailReachable(r, editable, storedDto);
+              // The FE default mode = the server's own resolution with no mode sent (else bank).
+              const feDefault: Rail =
+                helper.resolveReKycPayoutRail({
+                  requestedMode: undefined,
+                  mandateMode: mandate === 'BANK' || !upiOn ? 'bank' : null,
+                  isRailAllowed: allowed, editable, stored: storedDto,
+                }) ?? 'bank';
+              const requests: Array<Rail | undefined> = [undefined, 'upi', 'bank'];
+              for (const requested of requests) {
+                const formMode: Rail = requested ?? feDefault;
+                for (const fill of ['mode-only', 'all-editable'] as const) {
+                  // FE prefill: locked fields carry the stored value; editable fields of the form mode
+                  // (or every editable payout field) carry the rep's new value.
+                  const body: Record<string, unknown> = {
+                    ...dtoBase, gstNumber: '29ABCDE1234F1Z5', upiCaptureMethod: 'QR',
+                    ...(requested ? { paymentMode: requested } : {}),
+                  };
+                  for (const [col, f] of Object.entries(COL)) if (!editable(f as never)) body[f] = live[col] ?? '';
+                  const fillFields = fill === 'mode-only' ? RAIL_FIELDS[formMode] : Object.keys(NEW);
+                  for (const f of fillFields) if (editable(f as never)) body[f] = NEW[f];
+
+                  // persistent (not Once) mocks so an early throw never leaks into the next case
+                  mockPrisma.outlet.findFirst.mockResolvedValue({
+                    id: 'outlet-1', clientId: 'deoleo', partnerId: 'cp-existing', outletCode: 'OUT-1',
+                    outletType: { code: 'SSS' }, requiredPaymentType: mandate, reKycFlags: flags,
+                    addressLine1: 'addr1', city: 'X', state: 'Y', pincode: '110011',
+                  });
+                  mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+                  mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+                  mockPrisma.channelPartner.findUnique.mockResolvedValue({
+                    ownerName: 'Acme', phone: '9000000000', gstNumber: null, panNumber: null,
+                    bankName: null, bankAccountHolder: null, bankAccountNumber: null, ifscCode: null, upiId: null,
+                    upiCaptureMethod: null, ...live,
+                  });
+                  mockPrisma.kycSubmission.findFirst.mockResolvedValue(null);
+                  mockTx.channelPartner.update.mockResolvedValue({ id: 'cp-existing' });
+                  mockTx.outlet.update.mockResolvedValue({});
+                  mockTx.kycSubmission.findFirst.mockResolvedValue(null);
+                  mockTx.kycSubmission.create.mockClear();
+                  mockTx.kycSubmission.create.mockResolvedValue({ id: 'sub-1' });
+                  mockPrisma.kycStatusHistory.create.mockResolvedValue({});
+
+                  const label = `${flagName} | live=${liveName} | upi=${upiOn ? 'on' : 'off'} | mandate=${mandate} | req=${requested ?? '-'} | ${fill}`;
+                  try {
+                    await service.create(so, body as never);
+                    results.ok++;
+                    const p = mockTx.kycSubmission.create.mock.calls[0][0].data.proposedPartner as Record<string, unknown>;
+                    // invariants: never a locked value staged; payoutRail only with a staged routing field of it
+                    for (const [col, f] of Object.entries(COL)) {
+                      if (p[col] !== undefined && !editable(f as never)) failures.push(`${label}: staged LOCKED ${col}`);
+                    }
+                    if (p.payoutRail) {
+                      const routing = p.payoutRail === 'upi' ? ['upiId'] : ['bankAccountNumber', 'ifscCode'];
+                      if (!routing.some((c) => p[c] !== undefined)) failures.push(`${label}: payoutRail without routing`);
+                      if (!allowed(p.payoutRail as Rail)) failures.push(`${label}: forbidden rail ${String(p.payoutRail)}`);
+                    }
+                    if (!upiOn && p.upiId !== undefined) failures.push(`${label}: staged a UPI on a UPI-off tenant`);
+                  } catch (e) {
+                    const msg = (e as Error).message;
+                    // A 400 is acceptable ONLY when the rep picked an UNUSABLE mode and filled just that
+                    // mode's fields, and the message names an EDITABLE routing field of the fallback rail.
+                    const pickedUsable = requested ? usable(requested) : true;
+                    const fixable =
+                      fill === 'mode-only' && !pickedUsable &&
+                      ((msg === 'Enter a UPI ID' && editable('upiId')) ||
+                        (/account number/.test(msg) && editable('accountNumber')) ||
+                        (/IFSC/.test(msg) && editable('ifscCode')));
+                    if (fixable) results.fixable400++;
+                    else failures.push(`${label}: ${msg}`);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      expect(failures).toEqual([]);
+      // 10 flag sets × 3 live rails × 2 tenant-UPI × 2 mandates × 3 requests × 2 fills
+      expect(results.ok + results.fixable400).toBe(720);
+    });
+
+    // ── M1 — a UPI write uses a FRESH settings read for uniqueness ──────────────────────────────
+    it('M1: stale cache (UPI uniqueness OFF) but fresh read ON → a duplicate UPI is rejected', async () => {
+      mockUpiEnabled = true;
+      mockUpiManualEntry = true;
+      (mockTenantSettings.getEffectiveSettings as jest.Mock).mockImplementation(
+        async (_c: string, opts?: { fresh?: boolean }) => ({
+          salesApp: { upiEnabled: true, upiManualEntry: true },
+          uniquenessPolicy: { gst: true, phone: true, bank: false, upi: !!opts?.fresh },
+          kycGstinRequired: false,
+        }),
+      );
+      try {
+        primeReKyc({ upiId: true }, { upiId: 'old@upi' });
+        // checkGroupUniqueness's UPI probe → another partner already holds the UPI
+        mockTx.channelPartner.findMany.mockImplementation(async (args: { where?: Record<string, unknown> }) =>
+          args?.where && 'upiId' in args.where ? [{ id: 'cp-other', isParent: false, outlets: [{ parentId: null }] }] : [],
+        );
+        await expect(
+          service.create(so, { ...dtoBase, paymentMode: 'upi', upiId: 'dup@upi', upiCaptureMethod: 'QR' } as never),
+        ).rejects.toThrow(/UPI.*already registered/);
+        expect(mockTenantSettings.getEffectiveSettings).toHaveBeenCalledWith('deoleo', { fresh: true });
+        expect(mockTx.kycSubmission.create).not.toHaveBeenCalled();
+      } finally {
+        (mockTenantSettings.getEffectiveSettings as jest.Mock).mockImplementation(async () => ({
+          salesApp: { upiEnabled: mockUpiEnabled, upiManualEntry: mockUpiManualEntry },
+          uniquenessPolicy: mockUniquenessPolicy,
+          kycGstinRequired: mockKycGstinRequired,
+        }));
+      }
+    });
+
+    // ── L3 — no method sent + UPI equal to the group prefill → keep the group's method ───────────
+    it('L3: brand-new grouped child, UPI == group UPI, no upiCaptureMethod sent → the group method (QR) is kept', async () => {
+      mockUpiEnabled = true;
+      mockUpiManualEntry = false;
+      primeHappy('UPI');
+      mockPrisma.outlet.findFirst.mockReset();
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-1', clientId: 'deoleo', partnerId: null, parentId: 'parent-1',
+        outletCode: 'OUT-1', outletType: { code: 'SSS' }, requiredPaymentType: 'UPI',
+      });
+      // channelPartner.findFirst: phone-clash (null), then the group-identity parent read (L3)
+      mockPrisma.channelPartner.findFirst.mockReset();
+      mockPrisma.channelPartner.findFirst.mockImplementation(async (args: { where?: { id?: string } }) =>
+        args?.where?.id === 'parent-1'
+          ? {
+              onboardedAt: new Date(), businessName: 'P', ownerName: 'P', gstNumber: null, panNumber: null,
+              bankName: null, bankAccountNumber: null, bankAccountHolder: null, ifscCode: null,
+              upiId: 'group@upi', upiCaptureMethod: 'QR', paymentDetailsStatus: 'VERIFIED',
+            }
+          : null,
+      );
+      await service.create(so, { ...dtoBase, paymentMode: 'upi', upiId: 'Group@UPI' } as never);
+      expect(mockTx.channelPartner.create.mock.calls[0][0].data).toMatchObject({ upiId: 'group@upi', upiCaptureMethod: 'QR' });
+    });
   });
 
   // ─── create() re-KYC LOCK (backend-enforced field/doc lock on resubmit) ───────
@@ -1389,7 +2009,7 @@ describe('KycService', () => {
       accountHolderName: 'Suresh',
       accountNumber: '50100',
       ifscCode: 'HDFC0001',
-      upiId: 'suresh@upi',
+      // No upiId: a BANK-mandate submission carrying a UPI too is rejected (VPA safeguard).
     };
 
     /** The CURRENTLY-stored partner values (keyed by DB column names). */
@@ -1456,11 +2076,18 @@ describe('KycService', () => {
     const persistedDocTypes = () =>
       mockPrisma.kycDocument.create.mock.calls.map((c) => c[0].data.documentType);
 
+    const expectNoTextLockLoad = () => {
+      for (const [args] of mockPrisma.channelPartner.findUnique.mock.calls) {
+        expect(Object.keys(args.select).sort()).toEqual(['bankAccountNumber', 'ifscCode', 'upiCaptureMethod', 'upiId']);
+      }
+    };
+
     it('no flags → the full form is editable (lock does NOT load stored, passes through)', async () => {
       primeReentry(null);
       await service.create(so, { ...baseDto, partnerName: 'Changed Name' } as never);
-      // hasReKycFlags(null) === false → the stored-partner load is skipped entirely.
-      expect(mockPrisma.channelPartner.findUnique).not.toHaveBeenCalled();
+      // hasReKycFlags(null) === false → the stored-TEXT lock load is skipped (only the payout routing
+      // columns are read, for the re-KYC rail rules — never the identity/text columns).
+      expectNoTextLockLoad();
       // The DTO change flows straight through.
       expect(partnerUpdateData().ownerName).toBe('Changed Name');
     });
@@ -1468,7 +2095,7 @@ describe('KycService', () => {
     it('blanket re-KYC (all-false flags) → treated as no-flags, full form editable', async () => {
       primeReentry({ mobileNumber: false, remarks: '' });
       await service.create(so, { ...baseDto, mobile: '9111111111' } as never);
-      expect(mockPrisma.channelPartner.findUnique).not.toHaveBeenCalled();
+      expectNoTextLockLoad();
       expect(partnerUpdateData().phone).toBe('9111111111');
     });
 
@@ -1609,9 +2236,12 @@ describe('KycService', () => {
       accountNumber: '50100',
       ifscCode: 'HDFC0001',
     };
+    // The same submission WITHOUT the bank rail — a UPI-mode submission must not also carry bank
+    // details (VPA safeguard: "Provide either UPI or bank details, not both").
+    const { bankName: _bn, accountNumber: _an, ifscCode: _ifsc, ...groupedNoBank } = groupedDto;
 
     /** Prime a GROUPED (parentId set), partner-less create() up to the tx writes. */
-    const primeGroupedCreate = (opts?: { parentPan?: string | null }) => {
+    const primeGroupedCreate = (opts?: { parentPan?: string | null; requiredPaymentType?: string }) => {
       mockPrisma.outlet.findFirst.mockResolvedValueOnce({
         id: 'outlet-2',
         clientId: 'deoleo',
@@ -1619,7 +2249,7 @@ describe('KycService', () => {
         parentId: 'parent-1', // grouped
         outletCode: 'OUT-2',
         outletType: { code: 'SSS' },
-        requiredPaymentType: 'BANK',
+        requiredPaymentType: opts?.requiredPaymentType ?? 'BANK',
       });
       mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null); // phone partner-clash
       mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);      // employee-clash
@@ -1687,7 +2317,7 @@ describe('KycService', () => {
       mockPrisma.kycDocument.create.mockResolvedValue({});
     };
 
-    it('allows a grouped sibling to SHARE GST / bank / UPI with an in-group sibling', async () => {
+    it('allows a grouped sibling to SHARE GST / bank with an in-group sibling', async () => {
       mockUniquenessPolicy = { gst: true, phone: true, bank: true, upi: true }; // all enforced
       primeGroupedCreate();
       // Every identity clash resolves to a SAME-GROUP sibling (parentId === our group) → allowed.
@@ -1699,10 +2329,65 @@ describe('KycService', () => {
       const res = await service.create(so, {
         ...groupedDto,
         gstNumber: '29ABCDE1234F1Z5',
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-2', status: 'DRAFT' });
+      expect(mockTx.channelPartner.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('allows a grouped sibling to SHARE GST / UPI with an in-group sibling (UPI mode)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: true, upi: true }; // all enforced
+      mockUpiEnabled = true;
+      primeGroupedCreate({ requiredPaymentType: 'UPI' });
+      mockTx.channelPartner.findMany.mockImplementation(async (args: any) => {
+        if (args?.where?.partnerCode) return [];
+        return [{ id: 'sibling-1', outlets: [{ parentId: 'parent-1' }] }];
+      });
+      const res = await service.create(so, {
+        ...groupedNoBank,
+        gstNumber: '29ABCDE1234F1Z5',
+        paymentMode: 'upi',
         upiId: 'sib@upi',
       } as never);
       expect(res).toMatchObject({ submissionId: 'sub-2', status: 'DRAFT' });
       expect(mockTx.channelPartner.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('R6: a grouped child submitting the INHERITED group UPI as MANUAL with manual entry OFF → accepted, group method kept', async () => {
+      mockUpiEnabled = true;
+      mockUpiManualEntry = false;
+      primeGroupedCreate({ requiredPaymentType: 'UPI' });
+      // The approved parent = the group identity the form was prefilled from.
+      mockPrisma.channelPartner.findFirst.mockImplementation(async (args: any) =>
+        args?.where?.id === 'parent-1'
+          ? {
+              onboardedAt: new Date(), businessName: 'Group', ownerName: 'Owner', gstNumber: null, panNumber: null,
+              bankName: null, bankAccountNumber: null, bankAccountHolder: null, ifscCode: null,
+              upiId: 'group@upi', upiCaptureMethod: 'QR', paymentDetailsStatus: 'VERIFIED',
+            }
+          : null,
+      );
+      const res = await service.create(so, {
+        ...groupedNoBank, paymentMode: 'upi', upiId: 'Group@UPI', upiCaptureMethod: 'MANUAL',
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-2' });
+      expect(mockTx.channelPartner.create.mock.calls[0][0].data).toMatchObject({
+        upiId: 'group@upi', upiCaptureMethod: 'QR',
+      });
+    });
+
+    it('R6: a grouped child typing a DIFFERENT UPI as MANUAL with manual entry OFF → 400', async () => {
+      mockUpiEnabled = true;
+      mockUpiManualEntry = false;
+      primeGroupedCreate({ requiredPaymentType: 'UPI' });
+      mockPrisma.channelPartner.findFirst.mockImplementation(async (args: any) =>
+        args?.where?.id === 'parent-1'
+          ? { onboardedAt: new Date(), upiId: 'group@upi', upiCaptureMethod: 'QR', paymentDetailsStatus: 'VERIFIED' }
+          : null,
+      );
+      await expect(
+        service.create(so, { ...groupedNoBank, paymentMode: 'upi', upiId: 'mine@upi', upiCaptureMethod: 'MANUAL' } as never),
+      ).rejects.toThrow('Manual UPI entry is not enabled');
+      expect(mockTx.channelPartner.create).not.toHaveBeenCalled();
     });
 
     it('BLOCKS a GST that belongs to an outlet OUTSIDE the group', async () => {
@@ -1733,13 +2418,14 @@ describe('KycService', () => {
 
     it('BLOCKS a UPI that belongs to an outlet OUTSIDE the group (policy upi ON)', async () => {
       mockUniquenessPolicy = { gst: false, phone: true, bank: false, upi: true };
-      primeGroupedCreate();
+      mockUpiEnabled = true;
+      primeGroupedCreate({ requiredPaymentType: 'UPI' });
       mockTx.channelPartner.findMany.mockImplementation(async (args: any) => {
         if (args?.where?.partnerCode) return [];
         return [{ id: 'outsider', outlets: [{ parentId: 'other-group' }] }];
       });
       await expect(
-        service.create(so, { ...groupedDto, upiId: 'x@upi' } as never),
+        service.create(so, { ...groupedNoBank, paymentMode: 'upi', upiId: 'x@upi' } as never),
       ).rejects.toThrow(/UPI ID is already registered to another outlet outside this group/i);
       expect(mockTx.channelPartner.create).not.toHaveBeenCalled();
     });
@@ -1823,8 +2509,7 @@ describe('KycService', () => {
         return [{ id: 'outsider', outlets: [] }];
       });
       const res = await service.create(so, {
-        ...groupedDto, // bank fields present
-        upiId: 'x@upi',
+        ...groupedDto, // bank fields present (a UPI alongside would now 400 — VPA safeguard)
       } as never);
       expect(res).toMatchObject({ submissionId: 'sub-2' });
     });
@@ -2077,7 +2762,7 @@ describe('KycService', () => {
       mockUpiEnabled = true;
       primeCarryForward({ requiredPaymentType: 'UPI' });
       await service.create(so, {
-        ...groupedDto, panNumber: 'ABCDE1234F', gstNumber: '29ABCDE1234F1Z5', paymentMode: 'upi', upiId: 'child@upi',
+        ...groupedNoBank, panNumber: 'ABCDE1234F', gstNumber: '29ABCDE1234F1Z5', paymentMode: 'upi', upiId: 'child@upi',
       } as never);
       expect(createdDocs().find((d) => d.documentType === 'CANCELLED_CHEQUE')).toBeUndefined();
       mockUpiEnabled = false;
@@ -2124,7 +2809,7 @@ describe('KycService', () => {
       primeCarryForward({ requiredPaymentType: 'UPI' });
       // paymentMode upi + upiId == GROUP_SOURCE.upiId ('owner@upi') → PAYMENT inherits on the UPI match.
       await service.create(so, {
-        ...groupedDto, panNumber: 'ABCDE1234F', gstNumber: '29ABCDE1234F1Z5', paymentMode: 'upi', upiId: 'owner@upi',
+        ...groupedNoBank, panNumber: 'ABCDE1234F', gstNumber: '29ABCDE1234F1Z5', paymentMode: 'upi', upiId: 'owner@upi',
       } as never);
       const items = inheritedItems();
       const payment = items.find((i) => i.fieldKey === 'PAYMENT');
@@ -2137,7 +2822,7 @@ describe('KycService', () => {
       mockUpiEnabled = true;
       primeCarryForward({ requiredPaymentType: 'UPI' });
       await service.create(so, {
-        ...groupedDto, panNumber: 'ABCDE1234F', gstNumber: '29ABCDE1234F1Z5', paymentMode: 'upi', upiId: 'different@upi',
+        ...groupedNoBank, panNumber: 'ABCDE1234F', gstNumber: '29ABCDE1234F1Z5', paymentMode: 'upi', upiId: 'different@upi',
       } as never);
       const keys = inheritedItems().map((i) => i.fieldKey);
       expect(keys).not.toContain('PAYMENT');
@@ -2591,7 +3276,8 @@ describe('KycService', () => {
         status: 'DRAFT',
         userId: 'owner1',
         submittedAt: new Date('2026-06-30T00:00:00Z'),
-        partner: { ownerName: 'Acme Owner', outlets: [{ name: 'Acme Store', programName: 'Olive Oil' }] },
+        proposedPartner: null,
+        partner: { ownerName: 'Acme Owner', phone: '9000000001', outlets: [{ name: 'Acme Store', programName: 'Olive Oil' }] },
       });
       mockPrisma.consentRecord.create.mockResolvedValueOnce({ id: 'cr1' });
       // The DRAFT path now routes after the OTP: resolveInitialRouting (→ SUBMITTED),
@@ -2826,6 +3512,23 @@ describe('KycService', () => {
       const res = await service.list(partner, {});
       expect(res.submissions[0].status).toBe('RE_KYC_REQUIRED'); // reKycFlags → override
       expect(res.submissions[1].status).toBe('APPROVED');        // no flags → unchanged
+    });
+
+    it('FIX 2: never ships the internal proposedPartner.payoutCarried bookkeeping (other proposal keys kept)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([
+        {
+          id: 's1', status: 'PENDING_GIFSY', partner: null,
+          proposedPartner: { payoutRail: 'bank', bankAccountNumber: '222', payoutCarried: { ifscCode: 'HDFC0001' } },
+        },
+        { id: 's2', status: 'PENDING_GIFSY', partner: null, proposedPartner: null },
+      ]);
+      mockPrisma.kycSubmission.count.mockResolvedValue(2);
+      mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
+      const res = await service.list(partner, {});
+      const p0 = (res.submissions[0] as { proposedPartner: Record<string, unknown> }).proposedPartner;
+      expect(p0).toEqual({ payoutRail: 'bank', bankAccountNumber: '222' });
+      expect((res.submissions[1] as { proposedPartner: unknown }).proposedPartner).toBeNull();
     });
 
     it('hides a DRAFT from another user but returns the caller’s OWN DRAFT (owner 2026-08-11)', async () => {
@@ -3182,6 +3885,29 @@ describe('KycService', () => {
       });
       // Credit payouts MUST be keyed on the outlet CODE, not the Outlet PK.
       expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].where.outletId).toEqual({ in: ['O1'] });
+    });
+
+    it('fix/list-caps: the sales ledger returns EVERY payout row past the old 100-cap (totals sum every row)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'sss1', partnerId: 'p1',
+        partner: { clientId: 'deoleo', businessName: 'B', phone: 'p', outlets: [{ outletCode: 'O1' }], wallets: [] },
+      });
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([{ outletCode: 'O1' }]);
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([]);
+      const base = Date.now(); // relative dates — never a hardcoded future date
+      const rows = Array.from({ length: 150 }, (_, i) => ({
+        id: `ce${i}`, period: '2026-05', fieldName: 'Visibility', amountPaise: 1000n,
+        narration: '', status: i % 3 === 0 ? 'PENDING' : 'PAID', utr: null,
+        paidAt: null, createdAt: new Date(base - i * 60_000),
+      }));
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValueOnce(rows);
+
+      const res = await service.ledger(sss, 's1');
+
+      expect(res.payouts).toHaveLength(150);
+      expect(res.payouts.map((p) => p.id)).toEqual(rows.map((r) => r.id)); // newest-first unchanged
+      expect(res.payouts.reduce((s, p) => s + p.payoutAmountPaise, 0)).toBe(150 * 1000);
+      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].take).toBeUndefined();
     });
 
     it('forbids the ledger read when the outlet is NOT assigned into the subtree (unrelated SO preserved)', async () => {
@@ -3754,7 +4480,16 @@ describe('KycService', () => {
      */
     const seedReKycApprove = (
       proposed: Record<string, unknown>,
-      opts: { appliedPhone?: string } = {},
+      opts: {
+        appliedPhone?: string;
+        // VPA safeguard tests: the outlet's re-KYC flags + the LIVE partner payout columns.
+        reKycFlags?: Record<string, boolean> | null;
+        live?: Record<string, unknown>;
+        // F2: the ROW-LOCKED partner's payout columns/status read inside the approval tx. Defaults to
+        // the snapshot (`live`); a test overrides it to simulate a concurrent capture committing between
+        // the reviewer's view (snapshot) and the approval's row lock.
+        locked?: Record<string, unknown>;
+      } = {},
     ) => {
       const partner = {
         userId: 'owner-9',
@@ -3764,8 +4499,18 @@ describe('KycService', () => {
         gstRegistrationType: 'REGULAR',
         ownerName: 'Old Owner',
         phone: CURRENT_PHONE,
-        outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, parentId: null, reKycFlags: null }],
+        ...(opts.live ?? {}),
+        outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, parentId: null, reKycFlags: opts.reKycFlags ?? null }],
       };
+      const lockedSrc = { ...partner, ...(opts.locked ?? {}) } as Record<string, unknown>;
+      mockTx.$queryRaw.mockResolvedValueOnce([
+        {
+          upiId: lockedSrc.upiId ?? null,
+          bankAccountNumber: lockedSrc.bankAccountNumber ?? null,
+          ifscCode: lockedSrc.ifscCode ?? null,
+          paymentDetailsStatus: lockedSrc.paymentDetailsStatus ?? 'VERIFIED',
+        },
+      ]);
       const subRow = {
         id: 's1', userId: 'user1', status: 'PENDING_GIFSY', partnerId: 'p1',
         proposedPartner: proposed, user: { name: 'n', phone: 'p' }, partner,
@@ -3824,6 +4569,316 @@ describe('KycService', () => {
           panNumber: 'ABCDE1234F', // PAN still upper-cased + trimmed
         }),
       });
+    });
+
+    // ── VPA safeguards: exclusive payout rail at apply ──────────────────────────
+    const applyData = () => mockTx.channelPartner.update.mock.calls[0][0].data;
+    const approveWith = async (proposed: Record<string, unknown>, opts: Parameters<typeof seedReKycApprove>[1] = {}) => {
+      seedReKycApprove(proposed, opts);
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'p1' });
+      await service.approve(gifsy, 's1');
+      return applyData();
+    };
+    const BOTH_RAILS_LIVE = {
+      upiId: 'old@upi', upiCaptureMethod: 'QR',
+      bankName: 'Live Bank', bankAccountHolder: 'H', bankAccountNumber: '111222', ifscCode: 'LIVE0001',
+    };
+
+    it('payout-editable re-KYC switching UPI → bank: bank written, upiId + upiCaptureMethod nulled, UNVERIFIED → VERIFIED', async () => {
+      const data = await approveWith(
+        { payoutRail: 'bank', paymentMode: 'bank', bankName: 'HDFC', bankAccountNumber: '50100123', ifscCode: 'HDFC0001' },
+        { live: { upiId: 'old@upi', paymentDetailsStatus: 'UNVERIFIED' } },
+      );
+      expect(data).toMatchObject({
+        bankAccountNumber: '50100123', ifscCode: 'HDFC0001', paymentMode: 'bank',
+        upiId: null, upiCaptureMethod: null,
+      });
+      // FIX A: the approval WROTE a rail on an UNVERIFIED partner → reviewer approval verifies it.
+      expect(data.paymentDetailsStatus).toBe('VERIFIED');
+      // Only the routing columns — the cheque evidence key is never touched by the KYC apply (F6).
+      expect(data.payoutChequeFileKey).toBeUndefined();
+    });
+
+    it('re-KYC applying UPI after bank → bank ROUTING rail nulled, cheque evidence key KEPT (F6), method recorded', async () => {
+      const data = await approveWith(
+        { payoutRail: 'upi', paymentMode: 'upi', upiId: 'New@UPI', upiCaptureMethod: 'MANUAL' },
+        { live: { bankAccountNumber: '50100', ifscCode: 'HDFC0001' } },
+      );
+      expect(data).toMatchObject({
+        upiId: 'new@upi', upiCaptureMethod: 'MANUAL', paymentMode: 'upi',
+        bankName: null, bankAccountHolder: null, bankAccountNumber: null, ifscCode: null,
+      });
+      expect(data.paymentDetailsStatus).toBeUndefined();
+      expect(data.payoutChequeFileKey).toBeUndefined();
+    });
+
+    it('FIX A: a re-KYC approval that WRITES a rail promotes an UNVERIFIED / NEEDS_RECAPTURE partner to VERIFIED', async () => {
+      for (const status of ['UNVERIFIED', 'NEEDS_RECAPTURE']) {
+        jest.clearAllMocks();
+        const data = await approveWith(
+          { payoutRail: 'upi', paymentMode: 'upi', upiId: 'brand-new@upi', upiCaptureMethod: 'QR' },
+          { live: { upiId: 'self@upi', paymentDetailsStatus: status } },
+        );
+        expect(data.upiId).toBe('brand-new@upi');
+        expect(data.paymentDetailsStatus).toBe('VERIFIED');
+      }
+    });
+
+    it('F1: NEEDS_RECAPTURE partner + BANK re-KYC with the IFSC LOCKED (completed from live) → rail written, status NOT promoted', async () => {
+      for (const status of ['UNVERIFIED', 'NEEDS_RECAPTURE']) {
+        jest.clearAllMocks();
+        const data = await approveWith(
+          { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123' },
+          {
+            live: { upiId: 'old@upi', bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001', paymentDetailsStatus: status },
+            reKycFlags: { accountNumber: true },
+          },
+        );
+        // The rail IS applied (complete merged over the locked IFSC) and the other rail cleared…
+        expect(data).toMatchObject({ bankAccountNumber: '50100123', paymentMode: 'bank', upiId: null });
+        // …but the reviewer never saw the IFSC as part of the proposal → not a verification.
+        expect('paymentDetailsStatus' in data).toBe(false);
+      }
+    });
+
+    it('F1: BANK re-KYC with BOTH routing fields STAGED (rep-entered) on a NEEDS_RECAPTURE partner → VERIFIED', async () => {
+      const data = await approveWith(
+        { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123', ifscCode: 'HDFC0002' },
+        {
+          live: { bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001', paymentDetailsStatus: 'NEEDS_RECAPTURE' },
+          reKycFlags: { accountNumber: true, ifscCode: true },
+        },
+      );
+      expect(data).toMatchObject({ bankAccountNumber: '50100123', ifscCode: 'HDFC0002', paymentDetailsStatus: 'VERIFIED' });
+    });
+
+    it('F2: the VERIFIED rule reads the ROW-LOCKED status, not the snapshot (snapshot NEEDS_RECAPTURE, locked VERIFIED → no status write)', async () => {
+      const data = await approveWith(
+        { payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi', upiCaptureMethod: 'QR' },
+        { live: { upiId: 'old@upi', paymentDetailsStatus: 'NEEDS_RECAPTURE' }, locked: { paymentDetailsStatus: 'VERIFIED' } },
+      );
+      expect(data.upiId).toBe('new@upi');
+      expect('paymentDetailsStatus' in data).toBe(false);
+      // The lock is a SELECT … FOR UPDATE on channel_partners for THIS partner.
+      const [strings, ...values] = mockTx.$queryRaw.mock.calls[0];
+      expect((strings as string[]).join('?')).toMatch(/FROM channel_partners WHERE id = \? FOR UPDATE/);
+      expect(values).toEqual(['p1']);
+    });
+
+    it('FIX A: an already-VERIFIED partner is never re-written (status key absent)', async () => {
+      const data = await approveWith(
+        { payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi', upiCaptureMethod: 'QR' },
+        { live: { upiId: 'old@upi', paymentDetailsStatus: 'VERIFIED' } },
+      );
+      expect(data.upiId).toBe('new@upi');
+      expect('paymentDetailsStatus' in data).toBe(false);
+    });
+
+    it('FIX A: NO rail written (identity-only re-KYC) on a NEEDS_RECAPTURE / UNVERIFIED partner → status unchanged', async () => {
+      for (const status of ['UNVERIFIED', 'NEEDS_RECAPTURE']) {
+        jest.clearAllMocks();
+        const data = await approveWith(
+          { gstNumber: '29ABCDE1234F1Z5', bankName: 'Renamed Bank' },
+          { live: { bankAccountNumber: '111', ifscCode: 'HDFC0001', paymentDetailsStatus: status }, reKycFlags: { gstNumber: true, bankName: true } },
+        );
+        expect(data.gstNumber).toBe('29ABCDE1234F1Z5');
+        expect('paymentDetailsStatus' in data).toBe(false);
+      }
+    });
+
+    it('FIX A: LEGACY draft (no payoutRail) writing a UPI on a NEEDS_RECAPTURE partner → status unchanged', async () => {
+      const data = await approveWith(
+        { paymentMode: 'upi', upiId: 'shop@upi' },
+        { live: { upiId: 'old@upi', paymentDetailsStatus: 'NEEDS_RECAPTURE' }, reKycFlags: null },
+      );
+      expect(data.upiId).toBe('shop@upi'); // legacy write-back still happens…
+      expect('paymentDetailsStatus' in data).toBe(false); // …but it never verifies
+    });
+
+    /** F2: seed an approval whose staged explicit rail is INCOMPLETE over the LOCKED row → expect a 409, nothing written. */
+    const expectPayoutChanged409 = async (proposed: Record<string, unknown>, opts: Parameters<typeof seedReKycApprove>[1]) => {
+      seedReKycApprove(proposed, opts);
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'p1' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      const err = await service.approve(gifsy, 's1').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as Error).message).toBe(
+        "The outlet's payment details changed after this KYC was submitted — reject it and submit a new re-KYC",
+      );
+      // Nothing of the re-KYC is applied (the tx — incl. the status flip — rolls back on the throw):
+      // no partner write (identity / payout / status), no address write, no activation, no notify.
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+      expect(mockTx.outlet.updateMany).not.toHaveBeenCalled();
+      expect(mockTx.wallet.create).not.toHaveBeenCalled();
+      expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+    };
+
+    it('F2: a concurrent capture between the reviewer view and approval made the staged rail incomplete → 409, nothing written', async () => {
+      // Reviewer saw: bank partner (account OLD123 + IFSC HDFC0001), staged new account (IFSC locked).
+      // Before the approval locked the row, the partner self-captured a UPI (bank rail nulled).
+      await expectPayoutChanged409(
+        { payoutRail: 'bank', paymentMode: 'bank', bankName: 'HDFC', bankAccountNumber: '50100123', addressLine1: 'New Addr' },
+        {
+          live: { bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001', paymentDetailsStatus: 'NEEDS_RECAPTURE' },
+          locked: { upiId: 'self@upi', bankAccountNumber: null, ifscCode: null, paymentDetailsStatus: 'UNVERIFIED' },
+          reKycFlags: { accountNumber: true, bankName: true },
+        },
+      );
+    });
+
+    it('F2: the snapshot alone (no change) still decides nothing — locked row complete → approval proceeds', async () => {
+      // Control for the test above: same staged proposal, the locked row still carries the IFSC → applied.
+      const data = await approveWith(
+        { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123' },
+        {
+          live: { bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001' },
+          reKycFlags: { accountNumber: true },
+        },
+      );
+      expect(data).toMatchObject({ bankAccountNumber: '50100123', paymentMode: 'bank' });
+    });
+
+    it('F2 (replaces FIX B silent drop): staged bank rail INCOMPLETE after merge (locked IFSC vanished) → 409, nothing written', async () => {
+      await expectPayoutChanged409(
+        { payoutRail: 'bank', paymentMode: 'bank', bankName: 'HDFC', bankAccountNumber: '50100123' },
+        { live: { upiId: 'old@upi', ifscCode: null, paymentDetailsStatus: 'NEEDS_RECAPTURE' }, reKycFlags: { accountNumber: true, bankName: true } },
+      );
+    });
+
+    it('R4a/F2: a staged payoutRail=bank WITHOUT an IFSC anywhere → 409 (never a half rail, UPI kept)', async () => {
+      await expectPayoutChanged409(
+        { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100' },
+        { live: { upiId: 'old@upi' } },
+      );
+    });
+
+    // ── FIX 2 ("changed, not just vanished"): a CARRIED (locked) routing value that CHANGED on the
+    //    row-locked partner between draft and approval → 409 (the rail would route to an unreviewed
+    //    beneficiary: staged account + someone else's IFSC). ──
+    it('FIX 2: carried IFSC CHANGED between draft and approval (rail still complete) → 409, nothing written', async () => {
+      await expectPayoutChanged409(
+        { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123', payoutCarried: { ifscCode: 'HDFC0001' } },
+        {
+          live: { bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001', paymentDetailsStatus: 'NEEDS_RECAPTURE' },
+          // A self-capture re-wrote the bank rail with a DIFFERENT IFSC → still complete, but changed.
+          locked: { bankAccountNumber: '777888', ifscCode: 'ICIC0009', paymentDetailsStatus: 'UNVERIFIED' },
+          reKycFlags: { accountNumber: true },
+        },
+      );
+    });
+
+    it('FIX 2: carried IFSC UNCHANGED (case/space-normalized compare) → approves; payoutCarried never written to the partner', async () => {
+      const data = await approveWith(
+        { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123', payoutCarried: { ifscCode: ' hdfc0001 ' } },
+        { live: { bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001' }, reKycFlags: { accountNumber: true } },
+      );
+      expect(data).toMatchObject({ bankAccountNumber: '50100123', paymentMode: 'bank' });
+      expect('payoutCarried' in data).toBe(false);
+    });
+
+    it('FIX 2: LEGACY draft (no payoutCarried) whose locked IFSC changed → approves exactly as before', async () => {
+      const data = await approveWith(
+        { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123' },
+        {
+          live: { bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001' },
+          locked: { ifscCode: 'ICIC0009' },
+          reKycFlags: { accountNumber: true },
+        },
+      );
+      expect(data).toMatchObject({ bankAccountNumber: '50100123', paymentMode: 'bank' });
+    });
+
+    it('LOCK CONFLICT: a Postgres deadlock (40P01) on the approval row lock → the clean payout-changed 409', async () => {
+      seedReKycApprove({ payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi' }, { live: { upiId: 'old@upi' } });
+      mockTx.$queryRaw.mockReset();
+      mockTx.$queryRaw.mockRejectedValueOnce(
+        Object.assign(new Error('Raw query failed. Code: `40P01`. Message: `deadlock detected`'), {
+          code: 'P2010',
+          meta: { code: '40P01' },
+        }),
+      );
+      const err = await service.approve(gifsy, 's1').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ConflictException);
+      expect((err as Error).message).toMatch(/payment details changed after this KYC was submitted/);
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+    });
+
+    it('LOCK CONFLICT: P2034 on the identity advisory lock → 409 (not a raw 500)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: true, upi: true }; // UPI identity lock taken
+      seedReKycApprove({ payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi' }, { live: { upiId: 'old@upi' } });
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      mockTx.$executeRaw.mockRejectedValueOnce(Object.assign(new Error('write conflict or a deadlock'), { code: 'P2034' }));
+      const err = await service.approve(gifsy, 's1').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ConflictException);
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+    });
+
+    it('LOCK ORDER: approval locks the partner row (FOR UPDATE) BEFORE the identity advisory locks', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: true, upi: true }; // UPI identity lock taken
+      await approveWith({ payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi' }, { live: { upiId: 'old@upi' } });
+      expect(mockTx.$executeRaw).toHaveBeenCalled();
+      const rowLockAt = mockTx.$queryRaw.mock.invocationCallOrder[0];
+      for (const at of mockTx.$executeRaw.mock.invocationCallOrder) expect(rowLockAt).toBeLessThan(at);
+    });
+
+    it('F1: GST-only re-KYC (new draft, no payout staged) on a BOTH-rails partner → upiId AND bank untouched', async () => {
+      const data = await approveWith(
+        { gstNumber: '29ABCDE1234F1Z5', businessName: 'Acme' },
+        { live: BOTH_RAILS_LIVE, reKycFlags: { gstNumber: true } },
+      );
+      expect(data.gstNumber).toBe('29ABCDE1234F1Z5');
+      for (const k of ['upiId', 'upiCaptureMethod', 'bankName', 'bankAccountHolder', 'bankAccountNumber', 'ifscCode', 'paymentMode', 'payoutChequeFileKey', 'paymentDetailsStatus']) {
+        expect(data[k]).toBeUndefined();
+      }
+    });
+
+    it('F1: LEGACY draft (no payoutRail) GST-only re-KYC that ECHOED both rails → no payout key written, nothing cleared', async () => {
+      const data = await approveWith(
+        {
+          gstNumber: '29ABCDE1234F1Z5', paymentMode: 'bank',
+          upiId: 'old@upi', bankName: 'Stale Bank', bankAccountHolder: 'H', bankAccountNumber: '999', ifscCode: 'OLD0001',
+        },
+        { live: BOTH_RAILS_LIVE, reKycFlags: { gstNumber: true } },
+      );
+      expect(data.gstNumber).toBe('29ABCDE1234F1Z5');
+      for (const k of ['upiId', 'upiCaptureMethod', 'bankName', 'bankAccountHolder', 'bankAccountNumber', 'ifscCode', 'paymentMode', 'paymentDetailsStatus']) {
+        expect(data[k]).toBeUndefined();
+      }
+    });
+
+    it('F1: LEGACY draft flagged for upiId only → writes the staged UPI (+mode), skips the locked bank echoes, clears nothing', async () => {
+      const data = await approveWith(
+        { paymentMode: 'upi', upiId: 'shop@upi', bankName: 'Old', bankAccountNumber: '999', ifscCode: 'OLD0001' },
+        { live: BOTH_RAILS_LIVE, reKycFlags: { upiId: true } },
+      );
+      expect(data).toMatchObject({ upiId: 'shop@upi', paymentMode: 'upi' });
+      expect(data.bankName).toBeUndefined();
+      expect(data.bankAccountNumber).toBeUndefined();
+      expect(data.ifscCode).toBeUndefined();
+      expect(data.paymentDetailsStatus).toBeUndefined();
+    });
+
+    it('F1: LEGACY draft with NO field flags (editability unknown) → HEAD write-back: staged keys written, NOTHING inferred/cleared', async () => {
+      const data = await approveWith(
+        { paymentMode: 'upi', upiId: 'shop@upi', bankName: 'Old', bankAccountNumber: '999', ifscCode: 'OLD0001' },
+        { live: BOTH_RAILS_LIVE, reKycFlags: null },
+      );
+      expect(data).toMatchObject({
+        upiId: 'shop@upi', paymentMode: 'upi', bankName: 'Old', bankAccountNumber: '999', ifscCode: 'OLD0001',
+      });
+      expect(data.upiCaptureMethod).toBeUndefined();
+      expect(data.bankAccountHolder).toBeUndefined();
+      expect(data.paymentDetailsStatus).toBeUndefined();
+    });
+
+    it('a legacy draft whose mode rail is EMPTY sets nothing → clears nothing (never strips the only working rail)', async () => {
+      const data = await approveWith({ paymentMode: 'bank', gstNumber: '29ABCDE1234F1Z5' }); // bank mode, no bank values
+      expect(data.upiId).toBeUndefined();
+      expect(data.upiCaptureMethod).toBeUndefined();
+      expect(data.bankAccountNumber).toBeUndefined();
     });
 
     it('APPLIES the staged outlet ADDRESS to the PRIMARY outlet at approval (same tx as the identity apply)', async () => {
@@ -3940,6 +4995,8 @@ describe('KycService', () => {
       mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 7 });
       mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
       mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      // F2: the row-locked partner payout read (no payout columns live here).
+      mockTx.$queryRaw.mockResolvedValueOnce([{ upiId: null, bankAccountNumber: null, ifscCode: null, paymentDetailsStatus: 'VERIFIED' }]);
       // resolveGroupPan's parent PAN read is now findFirst (FIX 5); resolveGroupClassification also
       // reads findFirst (parent → no classification here → no lock). Route by id → group PAN.
       mockTx.channelPartner.findFirst.mockImplementation(async (args: any) =>
@@ -4044,6 +5101,8 @@ describe('KycService', () => {
       mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 7 });
       mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
       mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      // F2: the row-locked partner payout read (no payout columns live here).
+      mockTx.$queryRaw.mockResolvedValueOnce([{ upiId: null, bankAccountNumber: null, ifscCode: null, paymentDetailsStatus: 'VERIFIED' }]);
       mockTx.channelPartner.findMany.mockResolvedValue([]); // standalone uniqueness → clean
       // resolveGroupPan's parent PAN read is now findFirst (FIX 5); route by id → group PAN.
       mockTx.channelPartner.findFirst.mockImplementation(async (args: any) =>
@@ -4541,10 +5600,21 @@ describe('KycService', () => {
   });
 
   describe('consent', () => {
+    // #2: consent() loads the (caller + tenant scoped) submission FIRST and binds the OTP to its
+    // owner phone — default: an already-routed submission whose owner phone is the consent mobile
+    // used below (DRAFT-routing cases opt in explicitly).
+    beforeEach(() => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', status: 'SUBMITTED', userId: 'user1', proposedPartner: null,
+        partner: { ownerName: 'O', phone: '9000000001', outlets: [] },
+      });
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+    });
+
     it('throws 401 when no valid OTP exists', async () => {
       mockPrisma.otpCode.findFirst.mockResolvedValue(null);
       const err = await service
-        .consent(partner, { submissionId: 's1', mobile: '9000000000', otp: '123456' })
+        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '123456' })
         .catch((e) => e);
       expect(err).toBeInstanceOf(HttpException);
       expect(err.getStatus()).toBe(401);
@@ -4558,11 +5628,10 @@ describe('KycService', () => {
         maxAttempts: 3,
       });
       mockPrisma.otpCode.update.mockResolvedValue({});
-      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 's1' });
       mockPrisma.consentRecord.create.mockResolvedValue({ id: 'cr1' });
       const res = await service.consent(partner, {
         submissionId: 's1',
-        mobile: '9000000000',
+        mobile: '9000000001',
         otp: '123456',
       });
       expect(res).toEqual({ verified: true, submissionId: 's1' });
@@ -4578,7 +5647,10 @@ describe('KycService', () => {
         maxAttempts: 3,
       });
       mockPrisma.otpCode.update.mockResolvedValueOnce({});
-      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({ id: 'sub-consent-1' });
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 'sub-consent-1', status: 'SUBMITTED', userId: 'user1', proposedPartner: null,
+        partner: { ownerName: 'O', phone: '9000000001', outlets: [] },
+      });
       mockPrisma.consentRecord.create.mockResolvedValueOnce({ id: 'cr-1' });
 
       await service.consent(partner, { submissionId: 'sub-consent-1', mobile: '9000000001', otp: '111111' });
@@ -4609,6 +5681,160 @@ describe('KycService', () => {
 
       expect(err).toBeInstanceOf(HttpException);
       expect(err.getStatus()).toBe(401);
+      expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
+    });
+
+    it('claim-before-compare: a wrong code claims atomically (no read-then-write) and keeps the 401 copy', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o3', code: '999999', attempts: 1, maxAttempts: 3 });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([{ attempts: 2 }]); // this claim = attempt 2
+      const err = await service
+        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
+        .catch((e) => e);
+      expect(err.getStatus()).toBe(401);
+      expect(err.message).toBe('Invalid OTP. 1 attempt(s) remaining.');
+      expect(mockPrisma.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.$queryRaw.mock.calls[0][0].values).toEqual(['o3', 3]);
+      expect(mockPrisma.otpCode.update).not.toHaveBeenCalled();
+    });
+
+    it('exact remaining: computed from the claim post-increment value, not the earlier (stale) read', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o3', code: '999999', attempts: 0, maxAttempts: 3 });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([{ attempts: 3 }]); // two parallel guesses claimed first
+      const err = await service
+        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
+        .catch((e) => e);
+      expect(err.getStatus()).toBe(401);
+      expect(err.message).toBe('Invalid OTP. 0 attempt(s) remaining.');
+    });
+
+    it('claim-before-compare: a lost claim → the existing 429 "OTP locked…", the right code is never accepted', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o4', code: '111111', attempts: 0, maxAttempts: 3 });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([]); // claim refused: no row updated
+      const err = await service
+        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' })
+        .catch((e) => e);
+      expect(err.getStatus()).toBe(429);
+      expect(err.message).toBe('OTP locked due to too many attempts. Request a new OTP.');
+      expect(mockPrisma.otpCode.update).not.toHaveBeenCalled(); // never marked verified
+      expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
+    });
+
+    it('L1 wording: a lost claim on a code superseded/EXPIRED meanwhile → 401 "OTP not found or expired"', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o4', code: '111111', attempts: 0, maxAttempts: 3 });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([]);
+      mockPrisma.otpCode.findUnique.mockResolvedValueOnce({ expiresAt: new Date(Date.now() - 1000), verifiedAt: null });
+      const err = await service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
+      expect(err.getStatus()).toBe(401);
+      expect(err.message).toBe('OTP not found or expired');
+      expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
+    });
+
+    it('L1 wording: a lost claim on a code that is GONE → 401 "OTP not found or expired"', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o4', code: '111111', attempts: 0, maxAttempts: 3 });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([]);
+      mockPrisma.otpCode.findUnique.mockResolvedValueOnce(null);
+      const err = await service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
+      expect(err.getStatus()).toBe(401);
+      expect(err.message).toBe('OTP not found or expired');
+    });
+
+    it('#2: verify looks up the OTP bound to THIS submission + its normalised owner phone', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1', status: 'SUBMITTED', userId: 'user1', proposedPartner: null, partner: { phone: '+919000000001', ownerName: 'O', outlets: [] },
+      });
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o6', code: '111111', attempts: 0, maxAttempts: 3 });
+      mockPrisma.consentRecord.create.mockResolvedValueOnce({ id: 'cr' });
+      await service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' });
+      expect(mockPrisma.otpCode.findFirst.mock.calls[0][0].where).toMatchObject({
+        phone: '9000000001', purpose: 'KYC_CONSENT', referenceId: 's1', verifiedAt: null,
+      });
+    });
+
+    it('#2: verify with a mobile that is not the submission\'s owner → 401, no OTP read, no consent', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1', status: 'DRAFT', userId: 'user1', proposedPartner: null, partner: { phone: '9000000002', ownerName: 'O', outlets: [] },
+      });
+      const err = await service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
+      expect(err.getStatus()).toBe(401);
+      expect(err.message).toBe('OTP not found or expired');
+      expect(mockPrisma.otpCode.findFirst).not.toHaveBeenCalled();
+      expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
+    });
+
+    it('#3: the "mark used" is conditional — already used → 401 "OTP not found or expired", no consent record', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1', status: 'DRAFT', userId: 'user1', proposedPartner: null, partner: { phone: '9000000001', ownerName: 'O', outlets: [] },
+      });
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o7', code: '111111', attempts: 0, maxAttempts: 3 });
+      mockPrisma.otpCode.updateMany.mockImplementation(async ({ data }: any) =>
+        (data?.verifiedAt ? { count: 0 } : { count: 1 }));
+      const err = await service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
+      expect(err.getStatus()).toBe(401);
+      expect(err.message).toBe('OTP not found or expired');
+      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
+        where: { id: 'o7', verifiedAt: null }, data: { verifiedAt: expect.any(Date) },
+      });
+      expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
+    });
+
+    it('#3: the DRAFT→routed transition is atomic — a lost transition writes no history and sends no notification', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1', status: 'DRAFT', userId: 'user1', proposedPartner: null, partner: { phone: '9000000001', ownerName: 'O', outlets: [] },
+      });
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o8', code: '111111', attempts: 0, maxAttempts: 3 });
+      mockPrisma.consentRecord.create.mockResolvedValueOnce({ id: 'cr' });
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.kycSubmission.updateMany.mockResolvedValueOnce({ count: 0 }); // another consent routed it first
+      await service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' });
+      expect(mockPrisma.kycSubmission.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: 's1', status: 'DRAFT' },
+      }));
+      expect(mockPrisma.kycStatusHistory.create).not.toHaveBeenCalled();
+      expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+    });
+
+    it('#3: two parallel CORRECT consents → ONE consent record, ONE routing, ONE notification', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', status: 'DRAFT', userId: 'user1', proposedPartner: null, partner: { phone: '9000000001', ownerName: 'O', outlets: [] },
+      });
+      mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'o9', code: '111111', attempts: 0, maxAttempts: 3 });
+      const row = simulateOtpRow(mockPrisma);
+      let routed = 0;
+      mockPrisma.kycSubmission.updateMany.mockImplementation(async () => {
+        await new Promise((r) => setImmediate(r));
+        return routed++ === 0 ? { count: 1 } : { count: 0 };
+      });
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      mockPrisma.consentRecord.create.mockResolvedValue({ id: 'cr' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValue({});
+      const results = await Promise.allSettled([1, 2].map(() =>
+        service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' })));
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      expect(row.marks).toBe(1);
+      expect(mockPrisma.consentRecord.create).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.kycStatusHistory.create).toHaveBeenCalledTimes(1);
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+    });
+
+    it('claim-before-compare: 100 parallel consents (all reading attempts=0), right code LAST → no consent', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'o5', code: '111111', attempts: 0, maxAttempts: 3 });
+      // (submission = the describe default: owner phone 9000000001, already routed)
+      mockPrisma.consentRecord.create.mockResolvedValue({ id: 'cr1' });
+      const row = simulateOtpClaims(mockPrisma);
+      const otps = Array.from({ length: 100 }, (_, i) => (i === 99 ? '111111' : String(200000 + i)));
+      const results = await Promise.allSettled(otps.map((otp) =>
+        service.consent(partner, { submissionId: 's1', mobile: '9000000001', otp })));
+      const msgs = results.map((r) => (r.status === 'rejected' ? (r.reason as Error).message : 'OK'));
+      expect(msgs.filter((m) => m.startsWith('Invalid OTP'))).toHaveLength(3);
+      // Exact remaining per winner, from each claim's post-increment value (was "2 …" for all three).
+      expect(msgs.filter((m) => m.startsWith('Invalid OTP')).sort()).toEqual([
+        'Invalid OTP. 0 attempt(s) remaining.',
+        'Invalid OTP. 1 attempt(s) remaining.',
+        'Invalid OTP. 2 attempt(s) remaining.',
+      ]);
+      expect(msgs.filter((m) => m === 'OTP locked due to too many attempts. Request a new OTP.')).toHaveLength(97);
+      expect(msgs).not.toContain('OK');
+      expect(row.attempts).toBe(3);
       expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
     });
 
@@ -4916,54 +6142,55 @@ describe('KycService', () => {
     });
   });
 
-  // ── FIX 1: PATCH /v1/kyc/:id → APPROVED must not bypass the classification gate ──
-  describe('update() PATCH status=APPROVED classification gate (FIX 1)', () => {
-    /** Prime update() up to the tx classification check + the status write. */
-    const seedPatchApprove = (partner: Record<string, unknown> | null) => {
-      // Outer tenant-scoped load (no partner include).
-      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({ id: 's1', status: 'PENDING_GIFSY', userId: 'u1' });
-      // The in-tx classification load (partnerId + partner classification + primary outlet parentId).
-      mockTx.kycSubmission.findFirst.mockResolvedValueOnce({ partnerId: partner ? 'p1' : null, partner });
-      mockTx.kycSubmission.update.mockResolvedValueOnce({ id: 's1', status: 'APPROVED' });
-      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
-    };
-
-    it('BLOCKS PATCH status=APPROVED when classification is null and there is NO group lock (no status write)', async () => {
-      seedPatchApprove({ clientId: 'deoleo', entityType: null, gstRegistrationType: null, outlets: [{ parentId: null }] });
+  // ── PATCH /v1/kyc/:id → status=APPROVED is REFUSED (it would bypass applyBridgeOutcome) ──
+  describe('update() PATCH status=APPROVED is refused (approval bypass guard)', () => {
+    it('REJECTS PATCH status=APPROVED with 400 "Use the KYC review flow to approve" — no read, no tx, no write', async () => {
+      const p = service.update(gifsy, 's1', { status: 'APPROVED' } as never);
+      await expect(p).rejects.toBeInstanceOf(BadRequestException);
       await expect(service.update(gifsy, 's1', { status: 'APPROVED' } as never)).rejects.toThrow(
-        /Set Entity Type and GST Registration Type/i,
+        'Use the KYC review flow to approve',
       );
+      expect(mockPrisma.kycSubmission.findFirst).not.toHaveBeenCalled();
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      expect(mockTx.kycSubmission.update).not.toHaveBeenCalled();
+      expect(mockTx.kycStatusHistory.create).not.toHaveBeenCalled();
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+    });
+
+    it('REJECTS status=APPROVED even when combined with reviewerNotes (nothing partially written)', async () => {
+      await expect(
+        service.update(gifsy, 's1', { status: 'APPROVED', reviewerNotes: 'ok' } as never),
+      ).rejects.toThrow('Use the KYC review flow to approve');
       expect(mockTx.kycSubmission.update).not.toHaveBeenCalled();
     });
 
-    it('ALLOWS PATCH status=APPROVED when classification is already set', async () => {
-      seedPatchApprove({ clientId: 'deoleo', entityType: 'COMPANY', gstRegistrationType: 'REGULAR', outlets: [{ parentId: null }] });
-      await service.update(gifsy, 's1', { status: 'APPROVED' } as never);
-      expect(mockTx.kycSubmission.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: expect.objectContaining({ status: 'APPROVED' }) }),
+    it('still ALLOWS a non-APPROVED status change (REJECTED + reason) — writes status + history, unchanged', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({ id: 's1', status: 'PENDING_GIFSY', userId: 'u1' });
+      mockTx.kycSubmission.update.mockResolvedValueOnce({ id: 's1', status: 'REJECTED' });
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      await service.update(gifsy, 's1', { status: 'REJECTED', rejectionReason: 'blurry' } as never);
+      expect(mockTx.kycSubmission.update).toHaveBeenCalledWith({
+        where: { id: 's1' },
+        data: { status: 'REJECTED', rejectionReason: 'blurry' },
+      });
+      expect(mockTx.kycStatusHistory.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ fromStatus: 'PENDING_GIFSY', toStatus: 'REJECTED', notes: 'blurry' }),
+      });
+    });
+
+    it('still requires a reason for REJECTED (unchanged 400)', async () => {
+      await expect(service.update(gifsy, 's1', { status: 'REJECTED' } as never)).rejects.toThrow(
+        /Rejection reason is mandatory/,
       );
     });
 
-    it('ALLOWS PATCH status=APPROVED for a grouped child with null classification when the group has a lock (auto-persists it)', async () => {
-      seedPatchApprove({ clientId: 'deoleo', entityType: null, gstRegistrationType: null, outlets: [{ parentId: 'parent-1' }] });
-      // resolveGroupClassification (tx) → APPROVED parent lock.
-      mockTx.channelPartner.findFirst.mockResolvedValueOnce({ onboardedAt: new Date(), entityType: 'COMPANY', gstRegistrationType: 'REGULAR' });
-      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'p1' });
-      await service.update(gifsy, 's1', { status: 'APPROVED' } as never);
-      expect(mockTx.channelPartner.update).toHaveBeenCalledWith({
-        where: { id: 'p1' },
-        data: { entityType: 'COMPANY', gstRegistrationType: 'REGULAR' },
-      });
-      expect(mockTx.kycSubmission.update).toHaveBeenCalled();
-    });
-
-    it('does NOT run the classification gate for a non-APPROVED PATCH (e.g. reviewerNotes only)', async () => {
+    it('still ALLOWS a reviewerNotes-only PATCH (no status, no history row)', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({ id: 's1', status: 'PENDING_GIFSY', userId: 'u1' });
       mockTx.kycSubmission.update.mockResolvedValueOnce({ id: 's1' });
       await service.update(gifsy, 's1', { reviewerNotes: 'note' } as never);
-      // No →APPROVED transition → no in-tx classification load.
       expect(mockTx.kycSubmission.findFirst).not.toHaveBeenCalled();
-      expect(mockTx.kycSubmission.update).toHaveBeenCalled();
+      expect(mockTx.kycSubmission.update).toHaveBeenCalledWith({ where: { id: 's1' }, data: { reviewerNotes: 'note' } });
+      expect(mockTx.kycStatusHistory.create).not.toHaveBeenCalled();
     });
   });
 
@@ -5111,6 +6338,155 @@ describe('KycService', () => {
       expect(res.submission.proposedPartner?.panNumber).toBe('****234F');
       expect(res.submission.proposedPartner?.gstNumber).toBe('****R1ZM');
       expect(res.submission.proposedPartner?.bankAccountNumber).toBe('****9012');
+    });
+
+    // ── F3: getOne presents the proposal EXACTLY as approval applies it ──────────
+    const getOneWith = async (row: Record<string, unknown>) => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1', userId: 'admin1', documents: [], statusHistory: [],
+        user: { id: 'admin1', name: 'Admin', phone: '9000000002', role: 'GIFSY_ADMIN' },
+        ...row,
+      });
+      const res = (await service.getOne(gifsy, 's1')) as { submission: { proposedPartner: Record<string, unknown> | null } };
+      return res.submission.proposedPartner as Record<string, unknown>;
+    };
+    const livePartner = (extra: Record<string, unknown> = {}, reKycFlags: unknown = null) => ({
+      ...fullPartner,
+      upiId: null, ifscCode: 'HDFC0001', bankName: 'HDFC', bankAccountHolder: 'K',
+      payoutChequeFileKey: 'kyc/deoleo/cheque.jpg', paymentDetailsStatus: 'VERIFIED',
+      outlets: [{ id: 'o1', isPrimary: true, parentId: null, reKycFlags }],
+      ...extra,
+    });
+
+    it('F3: a re-KYC setting the UPI rail returns the bank ROUTING fields as explicit null (= will be removed)', async () => {
+      const proposed = await getOneWith({
+        partner: livePartner(),
+        proposedPartner: { payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi', upiCaptureMethod: 'QR' },
+      });
+      expect(proposed).toMatchObject({
+        upiId: 'new@upi', upiCaptureMethod: 'QR',
+        bankName: null, bankAccountNumber: null, bankAccountHolder: null, ifscCode: null,
+      });
+      // Evidence, not routing → never presented as removed.
+      expect('payoutChequeFileKey' in proposed).toBe(false);
+    });
+
+    it('F3: a re-KYC setting the bank rail returns upiId + upiCaptureMethod as explicit null', async () => {
+      const proposed = await getOneWith({
+        partner: livePartner({ upiId: 'old@upi', upiCaptureMethod: 'MANUAL' }),
+        proposedPartner: { payoutRail: 'bank', paymentMode: 'bank', bankName: 'SBI', bankAccountNumber: '777', ifscCode: 'SBIN0001' },
+      });
+      expect(proposed).toMatchObject({ bankAccountNumber: '777', upiId: null, upiCaptureMethod: null });
+    });
+
+    // M2 — getOne exposes removedRail exactly like the review queue, from the UNHIDDEN live partner.
+    const removedRailOf = async (row: Record<string, unknown>) => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1', userId: 'admin1', documents: [], statusHistory: [],
+        user: { id: 'admin1', name: 'Admin', phone: '9000000002', role: 'GIFSY_ADMIN' },
+        ...row,
+      });
+      const res = (await service.getOne(gifsy, 's1')) as {
+        submission: { removedRail: string | null; partner: Record<string, unknown> | null };
+      };
+      return res.submission;
+    };
+
+    it("M2: getOne.removedRail = 'upi' for a bank switch even when the live UPI is HIDDEN (UNVERIFIED)", async () => {
+      const sub = await removedRailOf({
+        partner: livePartner({ upiId: 'self@upi', paymentDetailsStatus: 'UNVERIFIED' }),
+        proposedPartner: { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '777', ifscCode: 'SBIN0001' },
+      });
+      expect(sub.removedRail).toBe('upi');
+      expect(sub.partner?.upiId).toBeNull(); // the hidden VALUE is still not exposed
+    });
+
+    it("M2: getOne.removedRail = 'bank' for a UPI switch; null for no proposal / nothing to remove", async () => {
+      expect(
+        (await removedRailOf({ partner: livePartner(), proposedPartner: { payoutRail: 'upi', paymentMode: 'upi', upiId: 'n@upi' } })).removedRail,
+      ).toBe('bank');
+      expect((await removedRailOf({ partner: livePartner(), proposedPartner: null })).removedRail).toBeNull();
+      expect(
+        (await removedRailOf({
+          partner: livePartner({ bankAccountNumber: null, ifscCode: null, bankName: null, bankAccountHolder: null, upiId: 'o@upi' }),
+          proposedPartner: { payoutRail: 'upi', paymentMode: 'upi', upiId: 'n@upi' },
+        })).removedRail,
+      ).toBeNull();
+    });
+
+    it('F3: a LEGACY draft is filtered by the outlet re-KYC flags (locked payout echoes dropped, nothing nulled)', async () => {
+      const proposed = await getOneWith({
+        partner: livePartner({}, { gstNumber: true }),
+        proposedPartner: { gstNumber: 'NEWGST1234Z', paymentMode: 'bank', bankAccountNumber: '999', upiId: 'stale@upi' },
+      });
+      expect(proposed.gstNumber).toBe('NEWGST1234Z');
+      for (const k of ['bankAccountNumber', 'upiId', 'paymentMode', 'bankName', 'ifscCode']) {
+        expect(proposed[k] ?? undefined).toBeUndefined();
+      }
+    });
+
+    it('FIX B (M3): getOne presents an INCOMPLETE staged bank rail (locked IFSC vanished) as approval writes it — no account / IFSC / mode, nothing nulled', async () => {
+      const proposed = await getOneWith({
+        partner: livePartner({ upiId: 'old@upi', ifscCode: null }, { accountNumber: true }),
+        proposedPartner: { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '999000' },
+      });
+      expect(proposed.bankAccountNumber ?? undefined).toBeUndefined();
+      expect(proposed.ifscCode ?? undefined).toBeUndefined();
+      expect(proposed.paymentMode ?? undefined).toBeUndefined();
+      expect('upiId' in proposed).toBe(false); // not presented as "will be removed"
+    });
+
+    it('FIX 2: getOne never presents the internal payoutCarried bookkeeping (a possibly hidden live value)', async () => {
+      const proposed = await getOneWith({
+        partner: livePartner({ bankAccountNumber: '111', ifscCode: 'HDFC0001' }, { accountNumber: true }),
+        proposedPartner: { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '999000', payoutCarried: { ifscCode: 'HDFC0001' } },
+      });
+      expect(proposed.bankAccountNumber).toBe('999000');
+      expect('payoutCarried' in proposed).toBe(false);
+    });
+
+    // R3 — the reviewer must SEE what they approve, even on an UNVERIFIED / NEEDS_RECAPTURE partner.
+    const getOneFull = async (row: Record<string, unknown>, caller: JwtPayload = gifsy) => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1', userId: 'admin1', documents: [], statusHistory: [],
+        user: { id: 'admin1', name: 'Admin', phone: '9000000002', role: 'GIFSY_ADMIN' },
+        ...row,
+      });
+      return (await service.getOne(caller, 's1')) as {
+        submission: { proposedPartner: Record<string, unknown> | null; partner: Record<string, unknown> | null };
+      };
+    };
+
+    it('R3: getOne shows the rep-entered PROPOSED payout (+ "will be removed" nulls) on an UNVERIFIED partner; LIVE stays hidden', async () => {
+      for (const status of ['UNVERIFIED', 'NEEDS_RECAPTURE']) {
+        const res = await getOneFull({
+          partner: livePartner({ paymentDetailsStatus: status, bankAccountNumber: '5555666677778888' }),
+          proposedPartner: { payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi', upiCaptureMethod: 'QR', gstNumber: 'G1' },
+        });
+        expect(res.submission.proposedPartner).toMatchObject({
+          gstNumber: 'G1', paymentMode: 'upi', upiId: 'new@upi', upiCaptureMethod: 'QR',
+          // explicit null = "will be removed at approval"
+          bankName: null, bankAccountNumber: null, bankAccountHolder: null, ifscCode: null,
+        });
+        // The LIVE self-captured rail is still hidden.
+        expect(res.submission.partner).toMatchObject({
+          bankName: null, bankAccountNumber: null, ifscCode: null, upiId: null, payoutChequeFileKey: null,
+        });
+      }
+    });
+
+    it('R3: a masked caller sees the PROPOSED account number last-4-masked on an UNVERIFIED partner (same convention as live)', async () => {
+      const res = await getOneFull(
+        {
+          userId: 'someone-else',
+          partner: livePartner({ paymentDetailsStatus: 'UNVERIFIED' }),
+          proposedPartner: { payoutRail: 'bank', paymentMode: 'bank', bankName: 'SBI', bankAccountNumber: '123456789012', ifscCode: 'SBIN0001' },
+        },
+        mis,
+      );
+      expect(res.submission.proposedPartner).toMatchObject({
+        bankName: 'SBI', bankAccountNumber: '****9012', ifscCode: 'SBIN0001', upiId: null,
+      });
     });
   });
 
@@ -5495,6 +6871,57 @@ describe('KycService', () => {
       expect(entry.address).not.toContain('x');
     });
 
+    it('VPA safeguard: a re-KYC setting the UPI rail shows the stale bank rail CLEARED + the capture method', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
+        {
+          id: 'SUB-Q-RAIL',
+          boardPhotoLat: null,
+          boardPhotoLng: null,
+          proposedPartner: { payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi', upiCaptureMethod: 'QR' },
+          user: { name: 'Owner A', phone: '9820100001', clientId: 'deoleo' },
+          partner: {
+            businessName: 'Kumar Store', ownerName: 'Kumar', phone: '9820100001',
+            gstNumber: 'G', panNumber: 'P',
+            bankName: 'HDFC', bankAccountNumber: '50100', bankAccountHolder: 'Kumar', ifscCode: 'HDFC0001',
+            upiId: null, upiCaptureMethod: null, paymentMode: 'bank',
+            outlets: [{ outletCode: 'OUT-Q-RAIL', name: 'Kumar Store', addressLine1: 'x', addressLine2: null, city: 'M', state: 'MH', pincode: '400058', programName: 'Gold', outletType: { name: 'SSS' } }],
+          },
+          verificationItems: [],
+        },
+      ]);
+
+      const entry = (await service.reviewQueue(gifsy)).entries[0];
+      expect(entry).toMatchObject({
+        upiId: 'new@upi', upiCaptureMethod: 'QR', paymentMode: 'upi',
+        bankName: null, accountNumber: null, ifscCode: null, accountHolderName: null,
+      });
+    });
+
+    it('VPA safeguard: a LEGACY re-KYC flagged only for GST shows the LIVE bank/UPI, not its locked stale echoes', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
+        {
+          id: 'SUB-Q-LEGACY',
+          boardPhotoLat: null,
+          boardPhotoLng: null,
+          proposedPartner: { gstNumber: 'NEWG', paymentMode: 'upi', upiId: 'stale@upi', bankAccountNumber: '999', ifscCode: 'OLD0001' },
+          user: { name: 'Owner A', phone: '9820100001', clientId: 'deoleo' },
+          partner: {
+            businessName: 'Kumar Store', ownerName: 'Kumar', phone: '9820100001',
+            gstNumber: 'G', panNumber: 'P',
+            bankName: 'HDFC', bankAccountNumber: '50100', bankAccountHolder: 'Kumar', ifscCode: 'HDFC0001',
+            upiId: 'live@upi', upiCaptureMethod: 'QR', paymentMode: 'bank',
+            outlets: [{ outletCode: 'OUT-Q-LEG', name: 'Kumar Store', addressLine1: 'x', addressLine2: null, city: 'M', state: 'MH', pincode: '400058', programName: 'Gold', outletType: { name: 'SSS' }, reKycFlags: { gstNumber: true } }],
+          },
+          verificationItems: [],
+        },
+      ]);
+
+      const entry = (await service.reviewQueue(gifsy)).entries[0];
+      expect(entry).toMatchObject({
+        upiId: 'live@upi', paymentMode: 'bank', accountNumber: '50100', ifscCode: 'HDFC0001',
+      });
+    });
+
     it('defaults missing verification fields to PENDING', async () => {
       mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
         {
@@ -5599,6 +7026,132 @@ describe('KycService', () => {
       const entry = (await service.reviewQueue(gifsy)).entries[0];
       expect(entry.bankName).toBe('HDFC');
       expect(entry.upiId).toBe('kumar@upi');
+    });
+
+    it('FIX B (M3): review-queue shows an INCOMPLETE staged bank rail exactly as approval writes it (live account/IFSC/mode, UPI kept)', async () => {
+      const base = queuePartner('VERIFIED');
+      const row = {
+        ...base,
+        // Locked IFSC vanished from the live partner after the draft.
+        partner: { ...base.partner, ifscCode: null, outlets: [{ ...base.partner.outlets[0], reKycFlags: { accountNumber: true } }] },
+        proposedPartner: { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '999000' },
+      };
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([row]);
+      const entry = (await service.reviewQueue(gifsy)).entries[0];
+      expect(entry.accountNumber).toBe('50100'); // live — the staged account is NOT written
+      expect(entry.paymentMode).toBe('bank'); // live mode — NOT the staged one
+      expect(entry.upiId).toBe('kumar@upi'); // nothing cleared
+    });
+
+    // R3 — the LIVE rails are hidden BEFORE the proposal is overlaid, so the rep-entered PROPOSED
+    // payout (what the reviewer approves) still shows on an UNVERIFIED / NEEDS_RECAPTURE partner.
+    it('R3: review-queue SHOWS the proposed payout on an UNVERIFIED partner; unproposed live rails stay hidden', async () => {
+      const row = {
+        ...queuePartner('UNVERIFIED'),
+        proposedPartner: { payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi', upiCaptureMethod: 'QR' },
+      };
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([row]);
+      const entry = (await service.reviewQueue(gifsy)).entries[0];
+      expect(entry).toMatchObject({ upiId: 'new@upi', upiCaptureMethod: 'QR', paymentMode: 'upi' });
+      // Bank rail: cleared by the switch → null (and the live self-captured value never shows).
+      expect(entry.accountNumber).toBeNull();
+      expect(entry.bankName).toBeNull();
+    });
+
+    it('R3: an IN-RAIL proposal on a NEEDS_RECAPTURE partner shows only the proposed field; the hidden live account stays null', async () => {
+      const row = {
+        ...queuePartner('NEEDS_RECAPTURE'),
+        partner: { ...queuePartner('NEEDS_RECAPTURE').partner, outlets: [{ ...queuePartner('x').partner.outlets[0], reKycFlags: { bankName: true } }] },
+        proposedPartner: { bankName: 'New Bank' },
+      };
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([row]);
+      const entry = (await service.reviewQueue(gifsy)).entries[0];
+      expect(entry.bankName).toBe('New Bank');
+      expect(entry.accountNumber).toBeNull();
+      expect(entry.upiId).toBeNull();
+    });
+
+    it('R3: rejected export overlays the proposal AFTER hiding the live rails (proposed UPI in the sheet)', async () => {
+      const row = {
+        ...queuePartner('UNVERIFIED'),
+        createdAt: new Date(), submittedAt: new Date(), reviewedAt: new Date(), rejectionReason: 'x',
+        statusHistory: [],
+        proposedPartner: { payoutRail: 'upi', paymentMode: 'upi', upiId: 'proposed@upi' },
+      };
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([row]);
+      const buf = await service.rejectedExport(gifsy);
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const XLSX = require('xlsx');
+      const wb = XLSX.read(buf, { type: 'buffer' });
+      const cells = JSON.stringify(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 }));
+      expect(cells).toContain('proposed@upi');
+      expect(cells).not.toContain('kumar@upi'); // live self-captured UPI stays hidden
+      expect(cells).not.toContain('50100');     // live self-captured account stays hidden
+    });
+
+    // R10 — removedRail = which rail approval will CLEAR on the live partner (null when nothing goes).
+    describe('R10: review-queue removedRail', () => {
+      const entryFor = async (status: string | undefined, live: Record<string, unknown>, proposed: unknown, flags: unknown = null) => {
+        const base = queuePartner(status);
+        mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
+          {
+            ...base,
+            partner: {
+              ...base.partner,
+              bankName: null, bankAccountNumber: null, bankAccountHolder: null, ifscCode: null, upiId: null,
+              ...live,
+              outlets: [{ ...base.partner.outlets[0], reKycFlags: flags }],
+            },
+            proposedPartner: proposed,
+          },
+        ]);
+        return (await service.reviewQueue(gifsy)).entries[0];
+      };
+
+      it("switch to UPI on a partner holding a bank rail → 'bank'", async () => {
+        const e = await entryFor('VERIFIED', { bankAccountNumber: '50100', ifscCode: 'HDFC0001' },
+          { payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi' });
+        expect(e.removedRail).toBe('bank');
+      });
+
+      it("switch to bank on a partner holding a UPI → 'upi' — exposed even when the live values are HIDDEN (UNVERIFIED)", async () => {
+        const e = await entryFor('UNVERIFIED', { upiId: 'self@upi' },
+          { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '777', ifscCode: 'SBIN0001' });
+        expect(e.removedRail).toBe('upi');
+        expect(e.upiId).toBeNull(); // the hidden VALUE is still not exposed
+      });
+
+      it('null when the cleared rail is already empty on the live partner', async () => {
+        const e = await entryFor('VERIFIED', { upiId: 'same@upi' }, { payoutRail: 'upi', paymentMode: 'upi', upiId: 'new@upi' });
+        expect(e.removedRail).toBeNull();
+      });
+
+      it('null for an in-rail / legacy / incomplete-rail proposal and for a brand-new KYC (no proposal)', async () => {
+        const live = { upiId: 'old@upi', bankAccountNumber: '50100', ifscCode: 'HDFC0001' };
+        expect((await entryFor('VERIFIED', live, { bankName: 'New Bank' }, { bankName: true })).removedRail).toBeNull();
+        expect((await entryFor('VERIFIED', live, { paymentMode: 'upi', upiId: 'x@upi' }, null)).removedRail).toBeNull();
+        // incomplete even merged over the live partner (no live IFSC) → nothing cleared
+        expect(
+          (await entryFor('VERIFIED', { upiId: 'old@upi', bankAccountNumber: '50100' }, { payoutRail: 'bank', bankAccountNumber: '1' })).removedRail,
+        ).toBeNull();
+        expect((await entryFor('VERIFIED', live, null)).removedRail).toBeNull();
+      });
+
+      it("a staged account number + the LIVE IFSC (IFSC locked, not staged) is COMPLETE → 'upi' (the apply clears it too)", async () => {
+        const live = { upiId: 'old@upi', bankAccountNumber: '50100', ifscCode: 'HDFC0001' };
+        expect((await entryFor('VERIFIED', live, { payoutRail: 'bank', bankAccountNumber: '1' }, { accountNumber: true })).removedRail).toBe('upi');
+      });
+    });
+
+    it('R8: getOne loads only NON-deleted outlets, primary-first (matches the approval/queue loads)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1', userId: 'admin1', partner: null, documents: [], statusHistory: [],
+        user: { id: 'admin1', name: 'Admin', phone: '9', role: 'GIFSY_ADMIN' },
+      });
+      await service.getOne(gifsy, 's1');
+      const outlets = mockPrisma.kycSubmission.findFirst.mock.calls[0][0].include.partner.include.outlets;
+      expect(outlets.where).toEqual({ deletedAt: null });
+      expect(outlets.orderBy).toEqual([{ isPrimary: 'desc' }, { createdAt: 'asc' }]);
     });
 
     it('selects paymentDetailsStatus in the review-queue partner select (so the gate has a value)', async () => {
@@ -5880,14 +7433,34 @@ describe('KycService', () => {
   // ─── sendConsentOtp (the previously-missing OTP send) + phone validation ───────
   describe('sendConsentOtp', () => {
     const dto = { submissionId: 'sub1', mobile: '7795096288' };
+    // The send cap is skipped under the FIXED_OTP bypass — pin it OFF here (restored after).
+    const envKeys = ['NODE_ENV', 'FIXED_OTP', 'DATABASE_URL', 'ALLOW_FIXED_OTP'] as const;
+    const savedEnv: Record<string, string | undefined> = {};
+    beforeEach(() => { for (const k of envKeys) savedEnv[k] = process.env[k]; delete process.env.FIXED_OTP; });
+    afterEach(() => {
+      for (const k of envKeys) {
+        if (savedEnv[k] === undefined) delete process.env[k];
+        else process.env[k] = savedEnv[k];
+      }
+    });
 
     beforeEach(() => {
-      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', partnerId: null });
+      // #2: the owner phone persisted on the submission = the number the rep's form sends.
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', partnerId: null, proposedPartner: null, partner: { phone: '7795096288' } });
       mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
       mockPrisma.salesUser.findFirst.mockReset();
       mockPrisma.salesUser.findFirst.mockResolvedValue(null);
       mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
       mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
+      // The send's count + supersede + create run in ONE transaction under an advisory lock: run the
+      // callback against mockPrisma itself (so the otpCode mocks above apply). Restored after.
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+      mockPrisma.otpCode.findMany.mockResolvedValue([]); // per-phone ceiling: no recent sends by default
+      mockPrisma.$executeRaw.mockResolvedValue(1);
+      mockPrisma.$transaction.mockImplementation(async (cb: (tx: any) => unknown) => cb(mockPrisma));
+    });
+    afterEach(() => {
+      mockPrisma.$transaction.mockImplementation(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx));
     });
 
     it('creates a KYC_CONSENT OtpCode and sends it via MSG91 (global env template when unset)', async () => {
@@ -5922,7 +7495,7 @@ describe('KycService', () => {
     });
 
     it('excludes the submission\'s own partner so Re-KYC of the same outlet does not self-collide', async () => {
-      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', partnerId: 'cpSelf' });
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', partnerId: 'cpSelf', proposedPartner: null, partner: { phone: '7795096288' } });
       await service.sendConsentOtp(partner, dto);
       const where = mockPrisma.channelPartner.findFirst.mock.calls[0][0].where;
       expect(where.id).toEqual({ not: 'cpSelf' });
@@ -5931,6 +7504,426 @@ describe('KycService', () => {
     it('404s when the submission is not the caller\'s', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValue(null);
       await expect(service.sendConsentOtp(partner, dto)).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('#2: refuses a mobile that is NOT the submission\'s outlet-owner phone — nothing created or sent', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', partnerId: 'cp1', proposedPartner: null, partner: { phone: '9876500000' } });
+      const err = await service.sendConsentOtp(partner, dto).catch((e) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect(err.message).toBe('This mobile number does not match the outlet owner on this KYC.');
+      expect(mockPrisma.otpCode.create).not.toHaveBeenCalled();
+      expect(mockMsg91.sendOtp).not.toHaveBeenCalled();
+    });
+
+    it('#2: binds the OTP to the submission + the NORMALISED owner phone (a stored "+91 …" phone works)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', partnerId: 'cp1', proposedPartner: null, partner: { phone: '+91 77950 96288' } });
+      await service.sendConsentOtp(partner, dto);
+      const created = mockPrisma.otpCode.create.mock.calls[0][0].data;
+      expect(created).toMatchObject({ phone: '7795096288', purpose: 'KYC_CONSENT', referenceId: 'sub1' });
+      expect(mockMsg91.sendOtp).toHaveBeenCalledWith('7795096288', expect.any(String), 'SMS', undefined);
+    });
+
+    it('#2: a re-KYC sends to the PROPOSED owner phone (the number the rep entered), not the live one', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 'sub1', partnerId: 'cpSelf', proposedPartner: { phone: '7795096288' }, partner: { phone: '9000000009' },
+      });
+      await service.sendConsentOtp(partner, dto);
+      expect(mockPrisma.otpCode.create.mock.calls[0][0].data.phone).toBe('7795096288');
+      const other = await service.sendConsentOtp(partner, { submissionId: 'sub1', mobile: '9000000009' }).catch((e) => e);
+      expect(other).toBeInstanceOf(BadRequestException);
+    });
+
+    // ── Send cap: 5 KYC_CONSENT sends per (normalised phone, OUTLET PARTNER) per rolling hour ────
+    // Keyed on the outlet partner (every KYC submission of that partnerId), so a fresh DRAFT for the
+    // same outlet never resets the budget; group siblings are distinct partners → independent.
+    type OtpRow = { phone: string; purpose: string; referenceId: string | null; createdAt: Date };
+    /**
+     * Submissions by id → partnerId (tenant 'deoleo' unless listed in `otherTenant`);
+     * kycSubmission.findFirst/findMany answer from it — the per-outlet lookup (where.partnerId) and
+     * the per-phone ceiling's tenant lookup (where.id IN … AND user.clientId).
+     */
+    function subs(map: Record<string, string | null>, otherTenant: string[] = []) {
+      const tenantOf = (id: string) => (otherTenant.includes(id) ? 'other' : 'deoleo');
+      mockPrisma.kycSubmission.findFirst.mockImplementation(async ({ where }: any) =>
+        (where.id in map ? { id: where.id, partnerId: map[where.id], proposedPartner: null, partner: { phone: '7795096288' } } : null));
+      mockPrisma.kycSubmission.findMany.mockImplementation(async ({ where }: any) => {
+        if (where.id?.in) {
+          return (where.id.in as string[]).filter((id) => id in map && tenantOf(id) === where.user.clientId).map((id) => ({ id }));
+        }
+        return Object.entries(map).filter(([, p]) => p !== null && p === where.partnerId).map(([id]) => ({ id }));
+      });
+    }
+    /**
+     * Simulates otp_codes for the cap: count() honours phone + purpose + referenceId IN (…) +
+     * createdAt >= gte exactly as the DB would, and create() appends a row stamped with the (fake)
+     * clock. Both yield a tick, so unserialised parallel sends WOULD interleave check-then-create.
+     */
+    function otpTable(seed: OtpRow[] = []) {
+      const rows = [...seed];
+      const refOk = (r: OtpRow, w: any) => (w.referenceId?.in ? w.referenceId.in.includes(r.referenceId) : r.referenceId === w.referenceId);
+      mockPrisma.otpCode.count.mockImplementation(async ({ where }: any) => {
+        await new Promise((r) => setImmediate(r));
+        return rows.filter((r) => r.phone === where.phone && r.purpose === where.purpose && refOk(r, where)
+          && r.createdAt >= where.createdAt.gte).length;
+      });
+      mockPrisma.otpCode.findMany.mockImplementation(async ({ where }: any) => {
+        await new Promise((r) => setImmediate(r));
+        return rows.filter((r) => r.phone === where.phone && r.purpose === where.purpose && r.createdAt >= where.createdAt.gte)
+          .map((r) => ({ referenceId: r.referenceId }));
+      });
+      mockPrisma.otpCode.create.mockImplementation(async ({ data }: any) => {
+        await new Promise((r) => setImmediate(r));
+        rows.push({ phone: data.phone, purpose: data.purpose, referenceId: data.referenceId ?? null, createdAt: new Date() });
+        return { id: `otp${rows.length}` };
+      });
+      return rows;
+    }
+    const sends = (n: number, over: Partial<OtpRow> = {}): OtpRow[] =>
+      Array.from({ length: n }, () => ({ phone: '7795096288', purpose: 'KYC_CONSENT', referenceId: 'sub1', createdAt: new Date(), ...over }));
+    const CAP_MSG = 'Too many OTPs sent to this number. Please try again later.';
+
+    it('cap: 5 sends for outlet A succeed, the 6th → 429 with the clear message; nothing created or sent', async () => {
+      subs({ sub1: 'cp1' });
+      otpTable();
+      for (let i = 0; i < 5; i++) await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(5);
+      const err = await service.sendConsentOtp(partner, dto).catch((e) => e);
+      expect(err).toBeInstanceOf(HttpException);
+      expect(err.getStatus()).toBe(429);
+      expect(err.message).toBe(CAP_MSG);
+      expect(mockPrisma.otpCode.create).toHaveBeenCalledTimes(5);
+      expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(5);
+      // counted on the NORMALISED number + KYC_CONSENT + every submission of THIS outlet + a 1-hour window
+      const where = mockPrisma.otpCode.count.mock.calls[0][0].where;
+      expect(where.phone).toBe('7795096288');
+      expect(where.purpose).toBe('KYC_CONSENT');
+      expect(where.referenceId).toEqual({ in: ['sub1'] });
+      expect(mockPrisma.kycSubmission.findMany).toHaveBeenCalledWith({ where: { partnerId: 'cp1' }, select: { id: true } });
+      expect(Math.abs(Date.now() - 60 * 60 * 1000 - where.createdAt.gte.getTime())).toBeLessThan(5000);
+    });
+
+    it('M1: a FRESH DRAFT for the SAME outlet does not reset the budget (6th send still 429)', async () => {
+      subs({ sub1: 'cp1', subDraft2: 'cp1' });
+      otpTable(sends(5)); // outlet cp1 spent its budget on sub1
+      const err = await service.sendConsentOtp(partner, { submissionId: 'subDraft2', mobile: '7795096288' }).catch((e) => e);
+      expect(err.getStatus()).toBe(429);
+      expect(err.message).toBe(CAP_MSG);
+      expect(mockMsg91.sendOtp).not.toHaveBeenCalled();
+    });
+
+    it('cap: a 6th send for the SAME number for a sibling OUTLET (another partner, group onboarding) is allowed', async () => {
+      subs({ sub1: 'cp1', sub2: 'cp2' });
+      const rows = otpTable(sends(5)); // outlet A (cp1) is at its cap
+      await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+      await expect(service.sendConsentOtp(partner, { submissionId: 'sub2', mobile: '7795096288' }))
+        .resolves.toEqual({ success: true, expiresIn: 600 });
+      expect(rows.filter((r) => r.referenceId === 'sub2')).toHaveLength(1);
+      // …and the sibling has its own full budget of 5.
+      for (let i = 0; i < 4; i++) await service.sendConsentOtp(partner, { submissionId: 'sub2', mobile: '7795096288' });
+      await expect(service.sendConsentOtp(partner, { submissionId: 'sub2', mobile: '7795096288' }))
+        .rejects.toMatchObject({ message: CAP_MSG });
+    });
+
+    it('cap: with no partner on the submission it falls back to the submission alone', async () => {
+      subs({ sub1: null });
+      otpTable(sends(5));
+      await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+      expect(mockPrisma.kycSubmission.findMany).not.toHaveBeenCalled();
+      expect(mockPrisma.otpCode.count.mock.calls[0][0].where.referenceId).toEqual({ in: ['sub1'] });
+    });
+
+    it('M2: count + supersede + create run in ONE transaction under an advisory lock on (phone, partner)', async () => {
+      subs({ sub1: 'cp1' });
+      otpTable();
+      await service.sendConsentOtp(partner, dto);
+      expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+      // TWO locks, always in the same order (phone-wide first, then per-outlet) → no deadlock.
+      expect(mockPrisma.$executeRaw).toHaveBeenCalledTimes(2);
+      const [strings, ...values] = mockPrisma.$executeRaw.mock.calls[0];
+      expect((strings as string[]).join('?')).toContain('pg_advisory_xact_lock(hashtextextended(');
+      expect(values).toEqual(['kyc-consent-otp-phone:7795096288']);
+      const [strings2, ...values2] = mockPrisma.$executeRaw.mock.calls[1];
+      expect((strings2 as string[]).join('?')).toContain('pg_advisory_xact_lock(hashtextextended(');
+      expect(values2).toEqual(['kyc-consent-otp:7795096288:cp1']);
+      const lockAt = mockPrisma.$executeRaw.mock.invocationCallOrder[1];
+      expect(lockAt).toBeLessThan(mockPrisma.otpCode.count.mock.invocationCallOrder[0]);
+      expect(lockAt).toBeLessThan(mockPrisma.otpCode.create.mock.invocationCallOrder[0]);
+      // the SMS goes out only after the transaction (never while holding the lock)
+      expect(mockMsg91.sendOtp.mock.invocationCallOrder[0]).toBeGreaterThan(mockPrisma.otpCode.create.mock.invocationCallOrder[0]);
+    });
+
+    it('M2: 20 PARALLEL sends for one (number, outlet) → exactly 5 succeed, 15 get 429', async () => {
+      subs({ sub1: 'cp1' });
+      const rows = otpTable();
+      // Advisory-lock fake, KEYED like pg: $executeRaw(key) waits for that key's previous holder; a
+      // transaction releases every lock it took when its callback settles (xact-scoped locks).
+      const tails = new Map<string, Promise<void>>();
+      mockPrisma.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) => {
+        const releases: Array<() => void> = [];
+        const tx = new Proxy(mockPrisma, {
+          get(t, p) {
+            if (p === '$executeRaw') {
+              return async (_s: TemplateStringsArray, key: string) => {
+                const prev = tails.get(key) ?? Promise.resolve();
+                tails.set(key, new Promise<void>((r) => { releases.push(r); }));
+                await prev;
+                return 1;
+              };
+            }
+            return (t as any)[p];
+          },
+        });
+        try { return await cb(tx); } finally { releases.forEach((r) => r()); }
+      });
+      const results = await Promise.allSettled(Array.from({ length: 20 }, () => service.sendConsentOtp(partner, dto)));
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(5);
+      const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+      expect(rejected).toHaveLength(15);
+      rejected.forEach((r) => expect((r.reason as HttpException).getStatus()).toBe(429));
+      expect(rows).toHaveLength(5);
+      expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(5);
+    });
+
+    it('cap: logs a distinct masked structured line (last 4 only, partner + submission) when it refuses', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      try {
+        subs({ sub1: 'cp1' });
+        otpTable(sends(5));
+        await service.sendConsentOtp(partner, dto).catch(() => undefined);
+        const line = warn.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith('[kyc-consent-otp-send-cap]'));
+        expect(line).toBeDefined();
+        const payload = JSON.parse(line!.replace('[kyc-consent-otp-send-cap] ', ''));
+        expect(payload).toEqual({ event: 'kyc_consent_otp.send_cap', phone: '******6288', partnerId: 'cp1', submissionId: 'sub1', recentSends: 5, max: 5, windowHours: 1 });
+        expect(line).not.toContain('7795096288');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('cap: other OTP purposes to the same number do not count', async () => {
+      subs({ sub1: 'cp1' });
+      otpTable([
+        ...sends(5, { purpose: 'LOGIN', referenceId: null }),
+        ...sends(5, { purpose: 'REDEMPTION_CONFIRM', referenceId: 'sub1' }), // even a colliding referenceId
+      ]);
+      await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(1);
+    });
+
+    it('cap: other numbers do not count', async () => {
+      subs({ sub1: 'cp1' });
+      otpTable(sends(5, { phone: '9000000009' })); // same submission id, another number
+      await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+    });
+
+    it('cap: the window rolls — sends older than an hour no longer count', async () => {
+      jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+      try {
+        const t0 = new Date();
+        jest.setSystemTime(t0);
+        subs({ sub1: 'cp1' });
+        otpTable();
+        for (let i = 0; i < 5; i++) await service.sendConsentOtp(partner, dto);
+        await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+        jest.setSystemTime(new Date(t0.getTime() + 59 * 60 * 1000)); // still inside the hour
+        await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+        jest.setSystemTime(new Date(t0.getTime() + 60 * 60 * 1000 + 1000)); // all 5 aged out
+        await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('cap: honours the FIXED_OTP bypass exactly like the login cap (no count, a 6th send still goes)', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.FIXED_OTP = '123456';
+      process.env.DATABASE_URL = 'postgresql://u:p@127.0.0.1:5433/gifsy_dev';
+      subs({ sub1: 'cp1' });
+      otpTable(sends(5));
+      await expect(service.sendConsentOtp(partner, dto)).resolves.toEqual({ success: true, expiresIn: 600 });
+      expect(mockPrisma.otpCode.count).not.toHaveBeenCalled();
+      expect(mockPrisma.otpCode.findMany).not.toHaveBeenCalled(); // nor the per-phone ceiling
+    });
+
+    // ── Per-PHONE ceiling: 15 KYC_CONSENT sends per normalised phone per hour within the tenant ─────
+    const PHONE_SUBS = { s1: 'p1', s2: 'p2', s3: 'p3', s4: 'p4' };
+    const sendTo = (submissionId: string) => service.sendConsentOtp(partner, { submissionId, mobile: '7795096288' });
+
+    it('phone ceiling: 3 outlets × 5 = 15 sends ok, the 16th (a 4th outlet) → 429 same message', async () => {
+      subs(PHONE_SUBS);
+      otpTable();
+      for (const s of ['s1', 's2', 's3']) {
+        for (let i = 0; i < 5; i++) await expect(sendTo(s)).resolves.toEqual({ success: true, expiresIn: 600 });
+      }
+      expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(15);
+      const err = await sendTo('s4').catch((e) => e);
+      expect(err.getStatus()).toBe(429);
+      expect(err.message).toBe(CAP_MSG);
+      expect(mockMsg91.sendOtp).toHaveBeenCalledTimes(15);
+      // the ceiling reads this phone's KYC_CONSENT rows in the window, then keeps only THIS tenant's submissions
+      const w = mockPrisma.otpCode.findMany.mock.calls[0][0];
+      expect(w).toMatchObject({ where: { phone: '7795096288', purpose: 'KYC_CONSENT' }, select: { referenceId: true } });
+      const tenantLookup = mockPrisma.kycSubmission.findMany.mock.calls.find((c: any[]) => c[0].where.id);
+      expect(tenantLookup![0].where.user).toEqual({ clientId: 'deoleo' });
+    });
+
+    it('phone ceiling: the per-outlet 5 still applies underneath it', async () => {
+      subs(PHONE_SUBS);
+      otpTable();
+      for (let i = 0; i < 5; i++) await sendTo('s1');
+      await expect(sendTo('s1')).rejects.toMatchObject({ message: CAP_MSG });
+      await expect(sendTo('s2')).resolves.toEqual({ success: true, expiresIn: 600 });
+    });
+
+    it('phone ceiling: logs a distinct masked line (event kyc_consent_otp.send_cap_phone)', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      try {
+        subs(PHONE_SUBS);
+        otpTable([...sends(5, { referenceId: 's1' }), ...sends(5, { referenceId: 's2' }), ...sends(5, { referenceId: 's3' })]);
+        await sendTo('s4').catch(() => undefined);
+        const line = warn.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith('[kyc-consent-otp-send-cap-phone]'));
+        expect(line).toBeDefined();
+        const payload = JSON.parse(line!.replace('[kyc-consent-otp-send-cap-phone] ', ''));
+        expect(payload).toEqual({ event: 'kyc_consent_otp.send_cap_phone', phone: '******6288', clientId: 'deoleo', submissionId: 's4', recentSends: 15, max: 15, windowHours: 1 });
+        expect(line).not.toContain('7795096288');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('phone ceiling: another tenant\'s sends to the same number do not count', async () => {
+      subs({ ...PHONE_SUBS, x1: 'q1', x2: 'q2', x3: 'q3' }, ['x1', 'x2', 'x3']);
+      otpTable([...sends(5, { referenceId: 'x1' }), ...sends(5, { referenceId: 'x2' }), ...sends(5, { referenceId: 'x3' })]);
+      await expect(sendTo('s4')).resolves.toEqual({ success: true, expiresIn: 600 });
+    });
+
+    it('phone ceiling: honours the FIXED_OTP bypass (16th send still goes)', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.FIXED_OTP = '123456';
+      process.env.DATABASE_URL = 'postgresql://u:p@127.0.0.1:5433/gifsy_dev';
+      subs(PHONE_SUBS);
+      otpTable([...sends(5, { referenceId: 's1' }), ...sends(5, { referenceId: 's2' }), ...sends(5, { referenceId: 's3' })]);
+      await expect(sendTo('s4')).resolves.toEqual({ success: true, expiresIn: 600 });
+    });
+
+    it('phone ceiling: 30 PARALLEL sends across 4 outlets → exactly 15 succeed', async () => {
+      subs(PHONE_SUBS);
+      const rows = otpTable();
+      const tails = new Map<string, Promise<void>>();
+      mockPrisma.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) => {
+        const releases: Array<() => void> = [];
+        const tx = new Proxy(mockPrisma, {
+          get(t, p) {
+            if (p === '$executeRaw') {
+              return async (_s: TemplateStringsArray, key: string) => {
+                const prev = tails.get(key) ?? Promise.resolve();
+                tails.set(key, new Promise<void>((r) => { releases.push(r); }));
+                await prev;
+                return 1;
+              };
+            }
+            return (t as any)[p];
+          },
+        });
+        try { return await cb(tx); } finally { releases.forEach((r) => r()); }
+      });
+      const targets = Array.from({ length: 30 }, (_, i) => ['s1', 's2', 's3', 's4'][i % 4]);
+      const results = await Promise.allSettled(targets.map((s) => sendTo(s)));
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(15);
+      expect(rows).toHaveLength(15);
+    });
+
+    it('cap: still enforced on the prod DB even if FIXED_OTP is set (bypass hard-refused there)', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.FIXED_OTP = '123456';
+      process.env.DATABASE_URL = 'postgresql://u:p@10.0.0.1:5432/gifsy_prod';
+      subs({ sub1: 'cp1' });
+      otpTable(sends(5));
+      await expect(service.sendConsentOtp(partner, dto)).rejects.toMatchObject({ message: CAP_MSG });
+    });
+
+    it('supersedes (EXPIRES, not deletes) the OUTLET\'s earlier unverified consent OTPs (any of its submissions)', async () => {
+      subs({ sub1: 'cp1', subOldDraft: 'cp1', subSibling: 'cp2' });
+      otpTable();
+      await service.sendConsentOtp(partner, dto);
+      expect(mockPrisma.otpCode.deleteMany).not.toHaveBeenCalled();
+      expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
+        where: {
+          phone: '7795096288', purpose: 'KYC_CONSENT', referenceId: { in: ['sub1', 'subOldDraft'] },
+          verifiedAt: null, expiresAt: { gt: expect.any(Date) },
+        },
+        data: { expiresAt: expect.any(Date) },
+      });
+      // superseded BEFORE the new row is created (the new row is never expired by it)
+      const supersedeAt = mockPrisma.otpCode.updateMany.mock.invocationCallOrder[0];
+      expect(supersedeAt).toBeLessThan(mockPrisma.otpCode.create.mock.invocationCallOrder[0]);
+    });
+
+    it('group siblings: sending B\'s OTP never invalidates A\'s code; resending A (or a fresh A draft) does', async () => {
+      // A small otp_codes table honouring the where-clauses the send (supersede/create) and the
+      // consent verify (findFirst / claim / mark-used) actually issue.
+      type Row = { id: string; phone: string; code: string; purpose: string; referenceId: string; expiresAt: Date; verifiedAt: Date | null; attempts: number; maxAttempts: number; createdAt: Date };
+      const rows: Row[] = [];
+      let seq = 0;
+      const refOk = (r: Row, w: any) => (!('referenceId' in w)) || (w.referenceId?.in ? w.referenceId.in.includes(r.referenceId) : r.referenceId === w.referenceId);
+      const live = (r: Row, w: any) => r.phone === w.phone && r.purpose === w.purpose && refOk(r, w)
+        && (!('verifiedAt' in w) || (w.verifiedAt === null ? r.verifiedAt === null : true))
+        && (!w.expiresAt?.gt || r.expiresAt > w.expiresAt.gt);
+      mockPrisma.otpCode.count.mockResolvedValue(0);
+      mockPrisma.otpCode.create.mockImplementation(async ({ data }: any) => {
+        const r: Row = { id: `o${++seq}`, createdAt: new Date(Date.now() + seq), verifiedAt: null, attempts: 0, ...data };
+        rows.push(r);
+        return r;
+      });
+      mockPrisma.otpCode.updateMany.mockImplementation(async ({ where, data }: any) => {
+        if (where.id) { // conditional mark-used
+          const r = rows.find((x) => x.id === where.id && (where.verifiedAt !== null || x.verifiedAt === null));
+          if (!r) return { count: 0 };
+          Object.assign(r, data);
+          return { count: 1 };
+        }
+        const hit = rows.filter((r) => live(r, where)); // supersede
+        hit.forEach((r) => Object.assign(r, data));
+        return { count: hit.length };
+      });
+      mockPrisma.otpCode.findFirst.mockImplementation(async ({ where }: any) =>
+        rows.filter((r) => live(r, where)).sort((a, b) => +b.createdAt - +a.createdAt)[0] ?? null);
+      // Two sibling OUTLETS (distinct partners) sharing the owner phone, plus a fresh draft of A.
+      const partnerOf: Record<string, string> = { subA: 'cpA', subB: 'cpB', subA2: 'cpA' };
+      const sub = (id: string) => ({
+        id, partnerId: partnerOf[id], proposedPartner: null, status: 'SUBMITTED', userId: 'user1',
+        partner: { phone: '7795096288', ownerName: 'O', outlets: [] },
+      });
+      mockPrisma.kycSubmission.findFirst.mockImplementation(async ({ where }: any) => sub(where.id));
+      mockPrisma.kycSubmission.findMany.mockImplementation(async ({ where }: any) =>
+        Object.keys(partnerOf).filter((k) => partnerOf[k] === where.partnerId).map((id) => ({ id })));
+      mockPrisma.consentRecord.create.mockResolvedValue({ id: 'cr' });
+      const codeOf = (n: number) => mockMsg91.sendOtp.mock.calls[n][1] as string;
+
+      await service.sendConsentOtp(partner, { submissionId: 'subA', mobile: '7795096288' });
+      const codeA1 = codeOf(0);
+      await service.sendConsentOtp(partner, { submissionId: 'subB', mobile: '7795096288' });
+      // B's send did not expire A's live code → A verifies with it.
+      await expect(service.consent(partner, { submissionId: 'subA', mobile: '7795096288', otp: codeA1 }))
+        .resolves.toEqual({ verified: true, submissionId: 'subA' });
+
+      // Resend A: then a FRESH DRAFT of the same outlet A supersedes it (one active per number+outlet).
+      await service.sendConsentOtp(partner, { submissionId: 'subA', mobile: '7795096288' });
+      const codeA2 = codeOf(2);
+      await service.sendConsentOtp(partner, { submissionId: 'subA2', mobile: '7795096288' });
+      const rowA2 = rows.find((r) => r.code === codeA2 && r.referenceId === 'subA')!;
+      expect(rowA2.expiresAt.getTime()).toBeLessThanOrEqual(Date.now()); // A's earlier code is now invalid
+      const err = await service.consent(partner, { submissionId: 'subA', mobile: '7795096288', otp: codeA2 }).catch((e) => e);
+      expect(err.getStatus()).toBe(401);
+      // B's code is still live throughout.
+      const rowB = rows.find((r) => r.referenceId === 'subB')!;
+      expect(rowB.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    });
+
+    it('cap: a refused send (number not the owner) never reaches the count', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', partnerId: 'cp1', proposedPartner: null, partner: { phone: '9876500000' } });
+      await service.sendConsentOtp(partner, dto).catch(() => undefined);
+      expect(mockPrisma.otpCode.count).not.toHaveBeenCalled();
     });
   });
 
@@ -5957,7 +7950,9 @@ describe('KycService', () => {
         id: 'o1', code: '999999', attempts: 0, maxAttempts: 3,
       });
       mockPrisma.otpCode.update.mockResolvedValue({});
-      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', userId: 'user1' });
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 'sub1', userId: 'user1', status: 'SUBMITTED', proposedPartner: null, partner: { phone: '7795096288' },
+      });
       mockPrisma.consentRecord.create.mockResolvedValue({ id: 'c1' });
 
       // Stored code is 999999 but the user enters the fixed 123456 → accepted.
@@ -6055,3 +8050,55 @@ describe('KycService', () => {
     });
   });
 });
+
+/**
+ * Claim-before-compare (2026-11-10): simulate the OtpCode row's atomic conditional increment — the
+ * ONLY serialisation point — so N parallel verifies that all READ attempts=0 can be exercised.
+ */
+function simulateOtpClaims(db: { $queryRaw: jest.Mock; otpCode: { updateMany: jest.Mock } }, maxAttempts = 3) {
+  const state = { attempts: 0 };
+  // The claim: ONE `UPDATE "otp_codes" … WHERE … "attempts" < $2 RETURNING "attempts"` (values [id, max]).
+  db.$queryRaw.mockImplementation(async (q: any) => {
+    await new Promise((r) => setImmediate(r)); // interleave the parallel callers
+    if (state.attempts < (q.values?.[1] ?? maxAttempts)) { state.attempts++; return [{ attempts: state.attempts }]; }
+    return [];
+  });
+  db.otpCode.updateMany.mockImplementation(async ({ data }: any) => {
+    await new Promise((r) => setImmediate(r));
+    if (data?.attempts?.decrement) { if (state.attempts > 0) state.attempts--; return { count: 1 }; }
+    return { count: 1 };
+  });
+  return state;
+}
+
+/**
+ * A one-OtpCode-row fake for updateMany (2026-11-10): honours the claim (attempts < max, unverified),
+ * the refund (decrement) and the conditional "mark used" (verifiedAt: null → set once). Interleaves
+ * callers so parallel verifies race exactly as they would against the DB's row-level serialisation.
+ */
+function simulateOtpRow(db: { $queryRaw: jest.Mock; otpCode: { updateMany: jest.Mock } }, maxAttempts = 3) {
+  const row = { attempts: 0, verifiedAt: null as Date | null, marks: 0 };
+  // The claim: ONE `UPDATE … WHERE id AND verifiedAt IS NULL AND attempts < $max RETURNING attempts`.
+  db.$queryRaw.mockImplementation(async (q: any) => {
+    await new Promise((r) => setImmediate(r));
+    if (row.verifiedAt || !(row.attempts < (q.values?.[1] ?? maxAttempts))) return [];
+    row.attempts++;
+    return [{ attempts: row.attempts }];
+  });
+  const updateMany = db.otpCode.updateMany;
+  updateMany.mockImplementation(async ({ where, data }: any) => {
+    await new Promise((r) => setImmediate(r));
+    if (data?.verifiedAt) {
+      if (where?.verifiedAt === null && row.verifiedAt) return { count: 0 };
+      row.verifiedAt = data.verifiedAt; row.marks++; return { count: 1 };
+    }
+    if (data?.attempts?.increment) {
+      if (row.verifiedAt && where?.verifiedAt === null) return { count: 0 };
+      if (row.attempts < (where?.attempts?.lt ?? maxAttempts)) { row.attempts++; return { count: 1 }; }
+      return { count: 0 };
+    }
+    if (data?.attempts?.decrement) { if (row.attempts > 0) row.attempts--; return { count: 1 }; }
+    return { count: 1 };
+  });
+  return row;
+}

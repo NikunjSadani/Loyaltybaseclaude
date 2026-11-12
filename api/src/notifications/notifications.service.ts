@@ -1,4 +1,5 @@
 import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { scrubSecrets } from './scrub-secrets';
 import { ModuleRef } from '@nestjs/core';
 import { randomBytes } from 'node:crypto';
 import { NotificationChannel, Prisma } from '@prisma/client';
@@ -60,6 +61,19 @@ export interface NotifyUserWithChannelsParams {
    * variable contracts (VARIABLE_CONTRACTS[eventKey]); an absent name resolves to ''.
    */
   vars?: Record<string, string | number | null | undefined>;
+  /**
+   * Values used INSTEAD of `vars[name]` in every PERSISTED copy of the vars — the IN_APP/PUSH
+   * variables blob and the SMS queue row (the SMS drainer sends from that row, so the SMS carries
+   * the masked value). The WhatsApp SEND still uses `vars`. Use for a var that must never be stored
+   * in clear (e.g. a gift-card PIN).
+   */
+  maskedVars?: Record<string, string>;
+  /**
+   * Secret strings (e.g. a voucher code, its PIN, a combined "code | PIN" value) scrubbed to "••••"
+   * from anything this method stores or logs about a failed send — MessageDeliveryReceipt.failureReason
+   * (shown to CLIENT_ADMIN in the delivery report) and the warn log. Never alters what is sent.
+   */
+  secretValues?: (string | null | undefined)[];
   subject?: string;
   body: string;
   url?: string;
@@ -72,6 +86,8 @@ export interface NotifyUserWithChannelsParams {
    */
   includeFreeChannels?: boolean;
 }
+
+export { scrubSecrets };
 
 /** One item in the bell feed. */
 export interface FeedItem {
@@ -235,7 +251,7 @@ export class NotificationsService implements OnModuleInit {
         body: params.body,
         url: params.url,
         event: params.event,
-        variables: params.vars ? this.stringifyVars(params.vars) : undefined,
+        variables: params.vars ? this.stringifyVars({ ...params.vars, ...(params.maskedVars ?? {}) }) : undefined,
       });
     }
 
@@ -280,7 +296,10 @@ export class NotificationsService implements OnModuleInit {
 
     // (c) SMS leg — enqueue a QUEUED row for the drainer. Gated on master + mode + template + phone.
     if (cfg.masterSms && (cfg.mode === 'SMS' || cfg.mode === 'BOTH') && cfg.smsTemplateId && phone) {
-      const smsVariables = this.mapNamedVars(contract?.sms ?? [], params.vars);
+      const smsVariables = this.mapNamedVars(
+        contract?.sms ?? [],
+        params.vars ? { ...params.vars, ...(params.maskedVars ?? {}) } : params.vars,
+      );
       await this.enqueue({
         userId: params.userId,
         channel: 'SMS',
@@ -308,6 +327,9 @@ export class NotificationsService implements OnModuleInit {
       const orderedWhatsapp = (contract?.whatsapp ?? []).map((name) =>
         this.varToString(params.vars?.[name]),
       );
+      const secrets = (params.secretValues ?? []).filter(
+        (v): v is string => typeof v === 'string' && v.trim() !== '',
+      );
 
       // ── Additive per-message delivery receipt (Wave 2 — DELIVERY-STATUS-REPORTING-SCOPE.md) ──
       // Create a MessageDeliveryReceipt QUEUED FIRST with a generated crqid, then pass {crqid} to
@@ -329,20 +351,27 @@ export class NotificationsService implements OnModuleInit {
         const sendRes = receipt
           ? await this.msg91.sendWhatsappTemplate(phone, cfg.whatsappTemplate, orderedWhatsapp, {
               crqid: receipt.crqid,
+              ...(secrets.length ? { secretValues: secrets } : {}),
             })
-          : await this.msg91.sendWhatsappTemplate(phone, cfg.whatsappTemplate, orderedWhatsapp);
+          : secrets.length
+            ? await this.msg91.sendWhatsappTemplate(phone, cfg.whatsappTemplate, orderedWhatsapp, {
+                secretValues: secrets,
+              })
+            : await this.msg91.sendWhatsappTemplate(phone, cfg.whatsappTemplate, orderedWhatsapp);
         const requestId = (sendRes ?? {}).requestId ?? null;
         // Send SUCCEEDED (billed). Flip QUEUED→SENT (best-effort, guarded, never throws) so a billed
         // message's receipt can never be downgraded to FAILED by the catch below.
         await this.markWhatsappReceiptSent(receipt, requestId);
       } catch (e) {
         // Non-critical: a WhatsApp delivery failure must NEVER fail the caller's domain path.
+        // Scrubbed: a provider error can echo the template values back (a voucher code / PIN).
+        const reason = scrubSecrets(String(e), secrets);
         this.logger.warn(
-          `[notifications] WhatsApp send failed for ${params.userId} (${params.eventKey}, template ${cfg.whatsappTemplate}): ${e}`,
+          `[notifications] WhatsApp send failed for ${params.userId} (${params.eventKey}, template ${cfg.whatsappTemplate}): ${reason}`,
         );
         // Guarded (QUEUED-only): only an UNBILLED send (the send itself threw, receipt still QUEUED)
         // flips to FAILED. A billed send is already SENT → no-op → never downgraded.
-        await this.markWhatsappReceiptFailed(receipt, String(e));
+        await this.markWhatsappReceiptFailed(receipt, reason);
       }
     }
   }

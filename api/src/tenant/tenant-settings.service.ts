@@ -67,6 +67,7 @@ export interface SalesAppSettings {
   ledgerLabel:              string;
   /** When true, the sales KYC form offers UPI as a payout option. Default false = bank-only. */
   upiEnabled:               boolean;
+  upiManualEntry: boolean;
 }
 // NOTE: the former `redeemGiftWholesalerOnly` binary was replaced by the per-outlet-type
 // `OutletTypeClientConfig.salesAssistedRedeemEnabled` flag (see sales-redeem-eligibility.ts).
@@ -210,6 +211,13 @@ export interface EffectiveSettings {
    */
   uniquenessPolicy:       UniquenessPolicySettings;
   /**
+   * The uniqueness policy AS STORED (before the Fix B `upiManualEntry` derivation). Read-only
+   * view for the admin settings UI so it edits/saves the stored value, never the derived one
+   * (prevents a write-back that would persist upi=true). Enforcement MUST read
+   * `uniquenessPolicy` (derived), never this field.
+   */
+  uniquenessPolicyStored: UniquenessPolicySettings;
+  /**
    * Visibility (POSM) capture configuration — outlet scope, monthly frequency, allowed
    * sales levels + geo-fence (design D5/D6/D8/D10). REPLACE-WHOLE nested key (see contract
    * below). Default = empty scope + empty levels + freq 1 + geo-fence off (radius 50m).
@@ -334,7 +342,7 @@ export class TenantSettingsService {
       // GSTIN compulsory by default (opt-out); a tenant with unregistered outlets is turned OFF.
       kycGstinRequired:       true,
       redemptionChannels:     { physicalGifts: true, vouchers: true, bankTransfer: true },
-      salesApp:               { ledgerLabel: 'Wallet', upiEnabled: false },
+      salesApp:               { ledgerLabel: 'Wallet', upiEnabled: false, upiManualEntry: false },
       creditsPayouts: {
         monthCutoffDay:  28,
         safetyCapPoints: 50000,
@@ -357,6 +365,8 @@ export class TenantSettingsService {
       // Uniqueness policy — default preserves today's behaviour (GST + phone enforced;
       // bank/UPI were never checked). Deoleo turns bank/UPI on via a per-tenant override.
       uniquenessPolicy: { gst: true, phone: true, bank: false, upi: false },
+      // Stored-view copy of the default policy (separate object — never share the reference).
+      uniquenessPolicyStored: { gst: true, phone: true, bank: false, upi: false },
       // Visibility (POSM) config — default is dormant: no outlets in scope, no allowed
       // levels, one window/month, geo-fence off (suggested 50m radius). A GIFSY admin
       // configures scope/levels/geo before the feature is meaningful for a tenant.
@@ -382,9 +392,13 @@ export class TenantSettingsService {
     };
   }
 
-  /** The full typed settings for a tenant (cached). */
-  async getEffectiveSettings(clientId: string): Promise<EffectiveSettings> {
-    const cached = this.cache.get(clientId);
+  /**
+   * The full typed settings for a tenant (cached). `opts.fresh` bypasses the per-instance cache read
+   * (the DB is re-read and the cache refreshed) — for a gate that must not reject on a ≤5-min-stale
+   * copy after the flag was just flipped on another instance.
+   */
+  async getEffectiveSettings(clientId: string, opts?: { fresh?: boolean }): Promise<EffectiveSettings> {
+    const cached = opts?.fresh ? undefined : this.cache.get(clientId);
     if (cached && Date.now() - cached.cachedAt < this.CACHE_TTL_MS) {
       return cached.settings;
     }
@@ -621,6 +635,7 @@ export class TenantSettingsService {
               ledgerLabel: typeof v.ledgerLabel === 'string' && v.ledgerLabel.trim()
                 ? v.ledgerLabel : base.salesApp.ledgerLabel,
               upiEnabled: this.bool(v.upiEnabled, base.salesApp.upiEnabled),
+              upiManualEntry: this.bool(v.upiManualEntry, base.salesApp.upiManualEntry),
             };
           }
           break;
@@ -723,6 +738,14 @@ export class TenantSettingsService {
           break; // unknown key — ignore (admin settings store holds other keys too)
       }
     }
+
+    // Fix B — manual UPI entry forces UPI uniqueness even when the policy flag is off: a
+    // hand-typed VPA can collide, so dedup must run. QR-only tenants are unaffected. Placed
+    // after the loop so out.salesApp and out.uniquenessPolicy are both final regardless of row order.
+    // Snapshot the STORED policy first so the admin UI can show/save it without writing back
+    // the derived value.
+    out.uniquenessPolicyStored = { ...out.uniquenessPolicy };
+    out.uniquenessPolicy.upi = out.uniquenessPolicy.upi || out.salesApp.upiManualEntry;
 
     return out;
   }

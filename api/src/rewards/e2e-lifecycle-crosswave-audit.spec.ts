@@ -146,6 +146,8 @@ jest.mock('../common/reward-account.helper', () => ({
 }));
 
 const mockPrisma = {
+  // Tenant-wide cancelled-voucher reuse guard (voucher-write-guard.ts) — default: never cancelled.
+  cancelledVoucherCode: { findFirst: jest.fn().mockResolvedValue(null), createMany: jest.fn().mockResolvedValue({ count: 1 }) },
   channelPartner: { findFirst: jest.fn() },
   wallet: { findFirst: jest.fn() },
   rewardCatalog: {
@@ -160,8 +162,11 @@ const mockPrisma = {
     findFirst: jest.fn(),
     update: jest.fn(),
     updateMany: jest.fn(),
+    findUniqueOrThrow: jest.fn(),
   },
   redemptionStatusHistory: { create: jest.fn() },
+  // Manual voucher issuance writes an AuditLog row (voucher-issuance.ts).
+  auditLog: { create: jest.fn() },
   giftCategory: { findFirst: jest.fn(), count: jest.fn(), delete: jest.fn() },
   giftMaster: { count: jest.fn() },
   $executeRaw: jest.fn().mockResolvedValue(1),
@@ -205,13 +210,25 @@ describe('transition state-machine + channel-required-fields (service level)', (
       ],
     }).compile();
     rewards = mod.get(RewardsService);
-    mockPrisma.redemptionOrder.update.mockImplementation(async ({ data }: never) => ({
+    // The status write is a compare-and-set `updateMany where { id, status }` (wins here),
+    // followed by an in-tx re-read; the refund claim (`where { pointsDeducted }`) loses (count 0).
+    let lastStatusWrite: Record<string, unknown> = {};
+    mockPrisma.redemptionOrder.updateMany.mockImplementation(
+      async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        if ('status' in where) {
+          lastStatusWrite = data;
+          return { count: 1 };
+        }
+        return { count: 0 };
+      },
+    );
+    mockPrisma.redemptionOrder.findUniqueOrThrow.mockImplementation(async () => ({
       id: 'o1',
       partnerId: 'cp1',
       orderNumber: 'DEOLEO-26-000001',
-      ...(data as object),
+      pointsDeducted: 0,
+      ...lastStatusWrite,
     }));
-    mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 0 });
     mockPrisma.redemptionStatusHistory.create.mockResolvedValue({ id: 'h1' });
     mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'u1', phone: '9', ownerName: 'O' });
   });
@@ -225,7 +242,7 @@ describe('transition state-machine + channel-required-fields (service level)', (
     await expect(
       rewards.transitionOrder(gifsy, 'o1', { toStatus: 'PROCESSING' as never }),
     ).rejects.toBeInstanceOf(BadRequestException);
-    expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+    expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
   });
 
   it('REJECTS reviving a terminal CANCELLED order (CANCELLED→PROCESSING)', async () => {
@@ -254,7 +271,7 @@ describe('transition state-machine + channel-required-fields (service level)', (
     await expect(
       rewards.transitionOrder(gifsy, 'o1', { toStatus: 'DELIVERED' as never }),
     ).rejects.toBeInstanceOf(BadRequestException);
-    expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+    expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
   });
 
   it('BUG-1 FIXED: DELIVERED is ALLOWED once a voucher code is supplied on the transition', async () => {
@@ -268,7 +285,13 @@ describe('transition state-machine + channel-required-fields (service level)', (
       voucherCode: 'AMZN-XYZ-123',
     });
     // The effective voucher code (supplied on the call) satisfies the channel guard.
-    expect(mockPrisma.redemptionOrder.update).toHaveBeenCalled();
+    // The status CAS also carries the voucher-write CAS (no code stored + paid open order).
+    const where = mockPrisma.redemptionOrder.updateMany.mock.calls[0][0].where;
+    expect(where).toMatchObject({ id: 'o1', status: 'DISPATCHED' });
+    expect(where.AND).toEqual(expect.arrayContaining([
+      { OR: [{ voucherCode: null }, { voucherCode: '' }] },
+      { pointsDeducted: { gt: 0 } },
+    ]));
     expect(res.order.status).toBe('DELIVERED');
   });
 });

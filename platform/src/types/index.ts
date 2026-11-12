@@ -494,6 +494,8 @@ export interface GifsySettings {
     // "Sales-Assisted Redemption" flag (OutletTypeClientConfig.salesAssistedRedeemEnabled).
     /** When true, the sales KYC form offers UPI as a payout option. Default: false (bank-only). */
     upiEnabled?: boolean;
+    /** When true, the UPI ID may be typed manually (in addition to QR scan). Default: false (QR scan only). */
+    upiManualEntry?: boolean;
   };
   /** Credits & Payouts bulk upload module settings */
   creditsPayouts?: {
@@ -555,6 +557,30 @@ export interface GifsySettings {
     bank:  boolean;
     upi:   boolean;
   };
+  /**
+   * The uniqueness policy as STORED (what the admin last saved). `uniquenessPolicy` above is the
+   * DERIVED/enforced value (upi forced true while salesApp.upiManualEntry is on). Admin
+   * display + save base MUST use this, never the derived value, so a save can't persist a
+   * derived upi=true. Same shape as `uniquenessPolicy`.
+   */
+  uniquenessPolicyStored?: {
+    gst:   boolean;
+    phone: boolean;
+    bank:  boolean;
+    upi:   boolean;
+  };
+}
+
+/**
+ * Per-tenant, per-purpose MSG91 OTP template ids (program_settings `otpTemplates`). Each is ''
+ * (= use the global MSG91_OTP_TEMPLATE_ID) or a 24-hex template id. Edited ONLY via the dedicated
+ * GIFSY_ADMIN-only GET/PUT /api/admin/settings/otp-templates (Settings → OTP SMS templates card).
+ */
+export interface OtpTemplates {
+  login:           string;
+  redemptionSelf:  string;
+  kycConsent:      string;
+  redemptionSales: string;
 }
 
 // ─── INR Payout Ledger Entry (Retailer / Sub-Stockist / MT) ──────────────────

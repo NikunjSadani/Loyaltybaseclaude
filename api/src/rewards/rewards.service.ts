@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -12,6 +13,7 @@ import { GiftFulfilmentChannel, PayoutMode, Prisma, RedemptionStatus } from '@pr
 import { PrismaService } from '../prisma/prisma.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
+import { claimOtpAttempt, markOtpUsed, refundOtpAttempt, whyOtpClaimRefused } from '../common/otp-attempt';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -24,9 +26,40 @@ import { resolveEffectiveKycStatus, isPartnerPayable } from '../kyc/kyc-eligibil
 import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { isLoyaltyEnabledForPartner } from '../common/loyalty-eligibility';
 import { isSalesRedeemEnabledForPartner } from '../common/sales-redeem-eligibility';
-import { isGifsyOperator, tenantScope } from '../common/tenant-scope';
+import { isGifsyOperator, isTenantAdmin, tenantScope } from '../common/tenant-scope';
+import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
+import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
+import { NOT_PARKED_OUTLET } from '../sales/sales.service';
 import { generateTenantOrderNumber } from './order-number.helper';
-import { supersedePendingOrders, transitionOrderStatus } from './order-status-transition';
+import {
+  noIssuedVoucherGuard,
+  VOUCHER_ISSUED_REFUND_BLOCK_MESSAGE,
+  hasIssuedVoucher,
+  supersedePendingOrders,
+  transitionOrderStatus,
+  transitionOrderStatusOrConflict,
+} from './order-status-transition';
+import {
+  canFillStoredVoucher,
+  combineGuards,
+  hasHubbleMarkers,
+  hashVoucherCode,
+  assertVoucherCodeReusableInTx,
+  lockVoucherCode,
+  isHubbleIssuedCode,
+  isHubbleNeverPlaced,
+  planVoucherWrite,
+  rethrowUnlessIdempotentPinRace,
+  VOUCHER_WRITE_CONFLICT_MESSAGE,
+  VoucherWriteOptions,
+  withPinRaceRetry,
+} from './voucher-write-guard';
+import {
+  notifyVoucherIssued as notifyVoucherIssuedShared,
+  maskVoucherCodeForAudit,
+  programLabelFor,
+  recordVoucherIssuedAudit,
+} from './voucher-issuance';
 import { derivePointsCost } from './derive-points-cost.helper';
 import { computeFrozenValuePaise } from './gift-value.helper';
 import { computeDispatchSla } from '../common/dispatch-sla';
@@ -54,7 +87,21 @@ import {
   buildFulfilmentTemplateBuffer,
   parseFulfilmentUploadBuffer,
 } from './rewards-fulfilment.helpers';
-import { HubbleService, HubbleOrderResult, HubbleVoucher } from '../hubble/hubble.service';
+import {
+  HubbleNotConfiguredError,
+  HubbleOrderResult,
+  HubbleProduct,
+  HubbleProductNotFoundError,
+  HubbleService,
+  HubbleVoucher,
+} from '../hubble/hubble.service';
+import {
+  extractHubbleDenominations,
+  isAmountIssuable,
+  memberHubbleFields,
+  normaliseHubbleDenominations,
+  validateHubbleItemAmounts,
+} from './hubble-catalog.helpers';
 
 /**
  * Rewards & Redemption — ported from platform/src/app/api/rewards/* onto /v1.
@@ -83,6 +130,104 @@ export const DISPATCH_SLA_BUSINESS_HOURS = 48;
  * v1; the exact legal wording is an owner/legal deliverable.
  */
 export const VENDOR_PII_CONSENT_VERSION = 'v1-2026-08';
+
+/**
+ * Opaque keyset cursor for listOrders — base64url of `<createdAt ISO>|<id>` (the same
+ * encoding the notifications feed uses). Decode returns null for anything malformed.
+ */
+export function encodeOrderCursor(createdAt: Date, id: string): string {
+  return Buffer.from(`${createdAt.toISOString()}|${id}`).toString('base64url');
+}
+
+/**
+ * Mask a voucher code for an audit row / app log: "••••" + the last 4 characters only for a code
+ * of 12+ chars (the tail is then at most a third of it); a shorter code is fully masked so it can
+ * never be reconstructed from the hint. Never reversible. ONE rule — delegates to
+ * maskVoucherCodeForAudit (voucher-issuance.ts).
+ */
+export function maskVoucherCode(code: string): string {
+  return maskVoucherCodeForAudit(code);
+}
+
+/**
+ * The order-read projection for a viewer who must NOT see a voucher code: no character of it,
+ * only whether one is issued. Spread over the row (overrides voucherCode).
+ */
+export function hiddenVoucherFields(code: string | null | undefined): {
+  voucherCode: null;
+  voucherPin: null;
+  voucherIssued: boolean;
+  voucherCodeMasked: boolean;
+} {
+  const issued = code != null && code !== '';
+  // The PIN is hidden exactly like the code (no character, no "has PIN" hint).
+  return { voucherCode: null, voucherPin: null, voucherIssued: issued, voucherCodeMasked: issued };
+}
+
+/** Sales hierarchy roles (mirrors rewards.controller SALES_ROLES). */
+const SALES_VIEWER_ROLES: ReadonlySet<string> = new Set([
+  'SALES_HO',
+  'SALES_STATE_HEAD',
+  'SALES_ASM',
+  'SALES_SO',
+  'SALES_ISR',
+]);
+
+/**
+ * OWNER RULE: a sales rep NEVER sees a voucher card number or PIN, on ANY route — even if their
+ * login were ever to resolve to a partner. The bearer credential belongs to the outlet owner only.
+ */
+export function isSalesViewer(role: string | null | undefined): boolean {
+  return !!role && SALES_VIEWER_ROLES.has(role);
+}
+
+/**
+ * The member-facing credentials of a Hubble voucher:
+ *  - code = card number if present, else the PIN (a PIN-only card's PIN IS its code);
+ *  - pin  = the PIN ONLY when BOTH a card number and a PIN are present (card+PIN products such as
+ *           CARD_AND_PIN_NO_SECURED) — otherwise null (number-only / PIN-only: unchanged).
+ * Values are trimmed; blank counts as absent.
+ */
+export function hubbleVoucherCredentials(voucher: HubbleVoucher | undefined | null): {
+  code: string | null;
+  pin: string | null;
+} {
+  if (!voucher) return { code: null, pin: null };
+  const num = (voucher.cardNumber ?? '').toString().trim();
+  const pin = (voucher.cardPin ?? '').toString().trim();
+  return { code: num || pin || null, pin: num && pin ? pin : null };
+}
+
+/** Operator-console projection of an order's Hubble reconcile state (from metadata). */
+export function hubbleReconcileFlags(metadata: unknown): {
+  hubbleNeedsReconcile: boolean;
+  hubbleReconcileReason: string | null;
+} {
+  const m = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+    ? (metadata as Record<string, unknown>)
+    : {};
+  // A manual override sets hubbleNeedsReconcile false; a LATER flag (e.g. Hubble succeeded on top
+  // of the manual code) sets it true again and must surface.
+  const needs = m.hubbleNeedsReconcile === true;
+  return {
+    hubbleNeedsReconcile: needs,
+    hubbleReconcileReason: needs && typeof m.hubbleReconcileReason === 'string' ? m.hubbleReconcileReason : null,
+  };
+}
+
+export function decodeOrderCursor(cursor: string): { createdAt: Date; id: string } | null {
+  try {
+    const raw = Buffer.from(cursor, 'base64url').toString('utf8');
+    const sep = raw.indexOf('|');
+    if (sep < 0) return null;
+    const createdAt = new Date(raw.slice(0, sep));
+    const id = raw.slice(sep + 1);
+    if (Number.isNaN(createdAt.getTime()) || !id) return null;
+    return { createdAt, id };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Member-catalogue VENDOR visibility filter (review CRITICAL #2 — the suspend/revoke
@@ -157,6 +302,7 @@ const MEMBER_ORDER_SELECT = {
   totalPointsCost: true,
   quantity: true,
   voucherCode: true,
+  voucherPin: true,
   voucherProvider: true,
   trackingNumber: true,
   trackingUrl: true,
@@ -192,6 +338,8 @@ interface HubbleLoadedOrder {
   valuePaise: bigint | null;
   redemptionMode: PayoutMode;
   metadata: Prisma.JsonValue;
+  /** Row version as loaded — the PROCESSING claim pins it (optional: test fixtures omit it). */
+  updatedAt?: Date | null;
   reward: { metadata: Prisma.JsonValue } | null;
 }
 
@@ -216,7 +364,25 @@ export class RewardsService {
     private readonly notifications: NotificationsService,
     private readonly msg91: Msg91Service,
     private readonly hubble: HubbleService,
+    // @Global RbacModule — always present in the app. @Optional only so unit-test modules that
+    // don't wire it still construct; absent → staff is treated as NOT permitted (fail closed).
+    @Optional() private readonly gifsyRoles?: GifsyRoleService,
   ) {}
+
+  /**
+   * May this OPERATOR see a full voucher code (a spendable bearer credential)? Only those who
+   * fulfil orders: GIFSY_ADMIN, or GIFSY_STAFF whose resolved GifsyRole grants
+   * rewards:manage_orders. Everyone else on an operator/admin read (CLIENT_ADMIN, read-only
+   * staff) gets the "issued" indicator only. (The member's OWN orders are a separate path.)
+   */
+  private async canSeeFullVoucherCode(user: JwtPayload): Promise<boolean> {
+    if (user.role === 'GIFSY_ADMIN') return true;
+    if (user.role === 'GIFSY_STAFF' && this.gifsyRoles) {
+      const perms = await this.gifsyRoles.getPermissions(user.gifsyRoleId);
+      return perms.has('rewards:manage_orders');
+    }
+    return false;
+  }
 
   private isGifsy(user: JwtPayload): boolean {
     // RBAC Option-X: GIFSY_STAFF (permission-gated) is a platform operator
@@ -328,6 +494,8 @@ export class RewardsService {
         select: {
           ...MEMBER_CATALOG_SELECT,
           sourceType: true,
+          // Read TRANSIENTLY to project the Hubble amount options; the raw blob is stripped below.
+          metadata: true,
           ...(mrpSlashEnabled ? { mrpPaise: true, sellingValuePaise: true } : {}),
         },
       }),
@@ -348,7 +516,7 @@ export class RewardsService {
       // whether or not they were selected (a no-op strip when absent).
       const row = item as typeof item & { mrpPaise?: number | null; sellingValuePaise?: number | null };
       const slashPoints = mrpSlashEnabled ? this.computeSlashPoints(row) : null;
-      const { category, sourceType, mrpPaise: _mrp, sellingValuePaise: _sv, ...rest } = row;
+      const { category, sourceType, metadata, mrpPaise: _mrp, sellingValuePaise: _sv, ...rest } = row;
       return {
         ...rest,
         category: category?.name,
@@ -356,6 +524,8 @@ export class RewardsService {
         requiresConsent: sourceType === 'VENDOR',
         isAffordable: userBalance >= row.pointsCost,
         ...(mrpSlashEnabled ? { slashPoints } : {}),
+        // Hubble "choose from amounts" items only ({} otherwise → non-Hubble response unchanged).
+        ...memberHubbleFields(metadata, row.redemptionMode),
       };
     });
 
@@ -390,6 +560,8 @@ export class RewardsService {
       select: {
         ...MEMBER_CATALOG_SELECT,
         sourceType: true,
+        // Read TRANSIENTLY to project the Hubble amount options; the raw blob is stripped below.
+        metadata: true,
         ...(mrpSlashEnabled ? { mrpPaise: true, sellingValuePaise: true } : {}),
       },
     });
@@ -412,12 +584,13 @@ export class RewardsService {
     // cost-basis columns so the member never sees the raw origin OR the cost basis.
     const row = item as typeof item & { mrpPaise?: number | null; sellingValuePaise?: number | null };
     const slashPoints = mrpSlashEnabled ? this.computeSlashPoints(row) : null;
-    const { sourceType, mrpPaise: _mrp, sellingValuePaise: _sv, ...rest } = row;
+    const { sourceType, metadata, mrpPaise: _mrp, sellingValuePaise: _sv, ...rest } = row;
     return {
       item: {
         ...rest,
         requiresConsent: sourceType === 'VENDOR',
         ...(mrpSlashEnabled ? { slashPoints } : {}),
+        ...memberHubbleFields(metadata, row.redemptionMode),
       },
     };
   }
@@ -486,6 +659,7 @@ export class RewardsService {
         reward: {
           select: {
             ...MEMBER_CATALOG_SELECT,
+            metadata: true, // transient — Hubble amount options only; stripped below
             ...(mrpSlashEnabled ? { mrpPaise: true, sellingValuePaise: true } : {}),
           },
         },
@@ -499,12 +673,13 @@ export class RewardsService {
         sellingValuePaise?: number | null;
       };
       const slashPoints = mrpSlashEnabled ? this.computeSlashPoints(reward) : null;
-      const { category, mrpPaise: _mrp, sellingValuePaise: _sv, ...rest } = reward;
+      const { category, metadata, mrpPaise: _mrp, sellingValuePaise: _sv, ...rest } = reward;
       return {
         ...rest,
         category: category?.name,
         wishlistedAt: r.createdAt,
         ...(mrpSlashEnabled ? { slashPoints } : {}),
+        ...memberHubbleFields(metadata, reward.redemptionMode),
       };
     });
 
@@ -578,19 +753,41 @@ export class RewardsService {
     return { success: true, wishlisted: false, rewardId };
   }
 
-  /** GET /v1/rewards/orders — paginated redemption orders (own only for non-admins). */
+  /**
+   * GET /v1/rewards/orders — paginated redemption orders (own only for partners/sales; the
+   * whole tenant for a Gifsy operator; the caller's OWN tenant for a CLIENT_ADMIN, view-only).
+   *
+   * Two paging modes over ONE stable order (createdAt DESC, id DESC — the id tie-break makes
+   * equal-timestamp rows page deterministically):
+   *   • page/limit (offset) — the legacy mode the admin Gift-Catalogue console uses; unchanged.
+   *   • cursor (keyset)     — the partner My Orders "Load more": rows strictly after the cursor,
+   *     so a row added at the top, or one leaving the member view mid-scroll (D4 hide), can never
+   *     duplicate or skip a row across pages.
+   * Both return `nextCursor` (null on the last page). `pagination.total` always counts the FULL
+   * filtered set (cursor excluded) so "N orders" stays the true total.
+   */
   async listOrders(user: JwtPayload, q: ListOrdersQueryDto, requestedPartnerId?: string) {
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
-    const skip = (page - 1) * limit;
+    const cursor = q.cursor ? decodeOrderCursor(q.cursor) : null;
+    if (q.cursor && !cursor) throw new BadRequestException('Invalid cursor');
+    const skip = cursor ? 0 : (page - 1) * limit;
 
     // Tenant scope by the partner's own clientId column (NOT partner.user.clientId):
     // a login-less sibling has no linked user, so a user-relation scope would hide
     // the switched sibling's orders. partner.clientId is authoritative for both.
+    // Tenant admin (CLIENT_ADMIN) → the VIEW-ONLY admin list of its OWN tenant's orders (all
+    // partners, no D4 exclusion — same rows a Gifsy operator sees for that tenant). Scoped
+    // strictly by the JWT clientId; the x-active-partner-id header is ignored. Fail closed on a
+    // blank clientId: `partner: { clientId: undefined }` would drop the tenant filter entirely.
+    const tenantAdmin = !this.isGifsy(user) && isTenantAdmin(user);
+    if (tenantAdmin && !user.clientId) {
+      throw new ForbiddenException('No tenant context for this admin.');
+    }
     const where: Prisma.RedemptionOrderWhereInput = {
       partner: { clientId: user.clientId },
     };
-    if (!this.isGifsy(user)) {
+    if (!this.isGifsy(user) && !tenantAdmin) {
       // Non-admins see only the ACTIVE partner's orders (own by default, or a
       // switched sibling named by x-active-partner-id — re-authorized here).
       const activePartnerId = await this.resolveActive(user, requestedPartnerId);
@@ -627,9 +824,25 @@ export class RewardsService {
     // and delivery PII, and never returns the BigInt valuePaise. logisticsPartner (the
     // courier name) IS member-safe and included. Also serves the legacy /admin/gifts
     // console, which reads a strict subset of these fields.
-    const [orders, total] = await Promise.all([
+    // Keyset predicate lives ONLY on the page query — the count keeps the base `where` so the
+    // total is the whole filtered set (and the D4 exclusion still applies to both).
+    const pageWhere: Prisma.RedemptionOrderWhereInput = cursor
+      ? {
+          AND: [
+            where,
+            {
+              OR: [
+                { createdAt: { lt: cursor.createdAt } },
+                { createdAt: cursor.createdAt, id: { lt: cursor.id } },
+              ],
+            },
+          ],
+        }
+      : where;
+
+    const [rows, total] = await Promise.all([
       this.prisma.redemptionOrder.findMany({
-        where,
+        where: pageWhere,
         select: {
           id: true,
           orderNumber: true,
@@ -638,6 +851,7 @@ export class RewardsService {
           totalPointsCost: true,
           quantity: true,
           voucherCode: true,
+          voucherPin: true,
           voucherProvider: true,
           trackingNumber: true,
           trackingUrl: true,
@@ -649,23 +863,49 @@ export class RewardsService {
           updatedAt: true,
           reward: { select: { id: true, name: true, imageUrls: true, redemptionMode: true } },
           partner: { select: { id: true, businessName: true } },
+          // Read for the operator-only Hubble reconcile flags below; NEVER returned as-is.
+          metadata: true,
+          // Read ONLY to derive the operator-only `voucherFillable` below; never returned.
+          pointsDeducted: true,
         },
         skip,
-        take: limit,
-        orderBy: { createdAt: 'desc' },
+        // One extra row tells us whether another page exists (it is never returned).
+        take: limit + 1,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       this.prisma.redemptionOrder.count({ where }),
     ]);
 
+    const hasMore = rows.length > limit;
+    const orders = hasMore ? rows.slice(0, limit) : rows;
+    const last = orders[orders.length - 1];
+
     // No dedicated returnedAt column — surface it (member-safe) when the order is RETURNED.
-    const mapped = orders.map((o) => ({
+    // VOUCHER CODES: a code is a spendable bearer credential. The member's OWN list keeps it; on
+    // the operator/admin view only a fulfilling operator (canSeeFullVoucherCode) gets it — every
+    // other viewer (CLIENT_ADMIN, read-only staff) gets NO character of it: voucherCode null +
+    // voucherIssued/voucherCodeMasked true.
+    const memberView = !this.isGifsy(user) && !tenantAdmin;
+    // Card number + PIN: member (own) and fulfilling operator only. A SALES rep never — even on the
+    // member branch (their login resolves to no partner today; this pins it regardless).
+    const hideCodes =
+      isSalesViewer(user.role) || (!memberView && !(await this.canSeeFullVoucherCode(user)));
+    const mapped = orders.map(({ metadata, pointsDeducted, ...o }) => ({
       ...o,
+      ...(hideCodes ? hiddenVoucherFields(o.voucherCode) : {}),
+      // Operator console only: a Hubble order stuck for ops ("Needs reconcile" + reason). The raw
+      // metadata blob (redeem snapshot etc.) is never returned to anyone from this list.
+      ...(memberView ? {} : hubbleReconcileFlags(metadata)),
+      // Fulfilling operator only (sees the code): the server would accept a set-once PIN / provider
+      // on the stored code (F4 — one rule, canFillStoredVoucher; the console row's PIN box uses it).
+      ...(memberView || hideCodes ? {} : { voucherFillable: canFillStoredVoucher({ ...o, pointsDeducted, metadata }) }),
       returnedAt: o.status === 'RETURNED' ? o.updatedAt : null,
     }));
 
     return {
       orders: mapped,
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+      nextCursor: hasMore && last ? encodeOrderCursor(last.createdAt, last.id) : null,
     };
   }
 
@@ -688,6 +928,10 @@ export class RewardsService {
         },
       });
       if (!order) throw new NotFoundException('Order not found');
+      // Read-only staff get the "issued" indicator, never the code itself.
+      if (!(await this.canSeeFullVoucherCode(user))) {
+        return { order: { ...order, ...hiddenVoucherFields(order.voucherCode) } };
+      }
       return { order };
     }
 
@@ -705,6 +949,10 @@ export class RewardsService {
       throw new ForbiddenException('Forbidden');
     }
 
+    // A SALES rep never gets the card number / PIN (defence in depth — see isSalesViewer).
+    if (isSalesViewer(user.role)) {
+      return { order: { ...order, ...hiddenVoucherFields(order.voucherCode) } };
+    }
     return { order };
   }
 
@@ -779,31 +1027,118 @@ export class RewardsService {
    * fulfilment upload reuses this same non-status write.
    */
   async updateOrder(user: JwtPayload, id: string, dto: UpdateOrderDto) {
+    // A lost PIN-add race against an IDENTICAL PIN (double submit) is retried once as a no-op.
+    return withPinRaceRetry(() => this.updateOrderOnce(user, id, dto));
+  }
+
+  private async updateOrderOnce(user: JwtPayload, id: string, dto: UpdateOrderDto) {
     // GIFSY-only is enforced by @Roles on the controller; tenant scope re-checked
     // here by partner.clientId (§12). platformWide OWNER → cross-tenant console.
     const scope = tenantScope(user);
     const existingOrder = await this.prisma.redemptionOrder.findFirst({
       where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
+      include: { partner: { select: { clientId: true } } },
     });
     if (!existingOrder) throw new NotFoundException('Order not found');
+    // The ORDER's tenant (a platform-wide Gifsy caller's own clientId is 'gifsy').
+    const orderClientId = existingOrder.partner?.clientId ?? user.clientId;
 
-    const order = await this.prisma.redemptionOrder.update({
-      where: { id },
-      data: {
-        trackingNumber: dto.trackingNumber,
-        trackingUrl: dto.trackingUrl,
-        voucherCode: dto.voucherCode,
-        voucherProvider: dto.voucherProvider,
-        notes: dto.notes,
-        // Dispatch fields (§5) — non-status console/bulk edits.
-        fulfilmentChannel: dto.fulfilmentChannel,
-        logisticsPartner: dto.logisticsPartner,
-        supplierOrderRef: dto.supplierOrderRef,
-        podUrl: dto.podUrl,
-      },
-    });
+    // VOUCHER WRITE INVARIANT: no clear / blank, no overwrite of a stored code (only
+    // "Voucher cancelled with vendor" clears one), never on a Hubble-handed order (unless a
+    // GIFSY_ADMIN's reasoned manual override) or a cash order, never a code cancelled anywhere in
+    // the tenant, a new code only on a paid open order.
+    const voucherInput = {
+      voucherCode: dto.voucherCode,
+      voucherProvider: dto.voucherProvider,
+      voucherPin: dto.voucherPin,
+    };
+    const voucherPlan = planVoucherWrite(
+      existingOrder,
+      voucherInput,
+      this.voucherWriteOptions(user, dto),
+    );
+    const data = {
+      trackingNumber: dto.trackingNumber,
+      trackingUrl: dto.trackingUrl,
+      ...voucherPlan.data,
+      notes: dto.notes,
+      // Dispatch fields (§5) — non-status console/bulk edits.
+      fulfilmentChannel: dto.fulfilmentChannel,
+      logisticsPartner: dto.logisticsPartner,
+      supplierOrderRef: dto.supplierOrderRef,
+      podUrl: dto.podUrl,
+    };
 
+    if (!voucherPlan.guard) {
+      const order = await this.prisma.redemptionOrder.update({ where: { id }, data });
+      return { order };
+    }
+    // Setting a NEW code: compare-and-set on "no code stored + paid open order + row version" so a
+    // concurrent refund / vendor-cancel / other write makes this lose (409) instead of overwriting.
+    // The issuance audit row lands in the SAME tx (no code without its audit).
+    const guard = voucherPlan.guard;
+    const order = await this.prisma.$transaction(async (tx) => {
+      // Tenant-wide reuse check INSIDE the tx under a (tenant, code) advisory lock — a concurrent
+      // "Voucher cancelled with vendor" of the same code can't slip between check and write.
+      if (voucherPlan.issuesNewCode && voucherPlan.data.voucherCode) {
+        await assertVoucherCodeReusableInTx(tx, orderClientId, voucherPlan.data.voucherCode);
+      }
+      const claim = await tx.redemptionOrder.updateMany({ where: { id, ...guard }, data });
+      if (claim.count === 0) throw new ConflictException(VOUCHER_WRITE_CONFLICT_MESSAGE);
+      if (voucherPlan.issuesNewCode && voucherPlan.data.voucherCode) {
+        await recordVoucherIssuedAudit(tx, {
+          actorId: user.sub,
+          orderId: id,
+          code: voucherPlan.data.voucherCode,
+          pin: voucherPlan.data.voucherPin ?? null,
+          provider: voucherPlan.data.voucherProvider ?? existingOrder.voucherProvider,
+          path: 'PATCH /rewards/orders/:id',
+          overrideReason: voucherPlan.overridden ? dto.overrideReason?.trim() : null,
+        });
+      }
+      if (voucherPlan.addsPin && existingOrder.voucherCode) {
+        // Set-once PIN added to an already-issued code — audited masked (never the PIN).
+        await recordVoucherIssuedAudit(tx, {
+          actorId: user.sub,
+          orderId: id,
+          code: existingOrder.voucherCode,
+          pin: voucherPlan.data.voucherPin ?? null,
+          provider: existingOrder.voucherProvider,
+          path: 'PATCH /rewards/orders/:id',
+          event: 'VOUCHER_PIN_ADDED_MANUAL',
+        });
+      }
+      return tx.redemptionOrder.findUniqueOrThrow({ where: { id } });
+    }).catch((e: unknown) =>
+      rethrowUnlessIdempotentPinRace(e, voucherPlan, existingOrder, voucherInput, () =>
+        this.prisma.redemptionOrder.findUnique({ where: { id }, select: { voucherCode: true, voucherPin: true } }),
+      ),
+    );
+    // Same member notification transitionOrder sends when a code is first issued — under the
+    // ORDER's tenant (branding / templates), never the caller's. A PIN added later to an issued
+    // code re-sends it so the owner receives the PIN.
+    if (voucherPlan.issuesNewCode || voucherPlan.addsPin) await this.notifyVoucherIssued(id, orderClientId);
     return { order };
+  }
+
+  /**
+   * The identity half of the voucher guard:
+   *  - manual override (the ops exit for a Hubble-handed order): GIFSY_ADMIN only, reason required.
+   */
+  private voucherWriteOptions(
+    user: JwtPayload,
+    dto: { manualOverride?: boolean; overrideReason?: string },
+  ): VoucherWriteOptions {
+    let manualOverride: VoucherWriteOptions['manualOverride'] = null;
+    if (dto.manualOverride === true) {
+      if (user.role !== 'GIFSY_ADMIN') {
+        throw new ForbiddenException('Only a Gifsy admin can manually fulfil an order sent to Hubble.');
+      }
+      manualOverride = { reason: (dto.overrideReason ?? '').trim(), actorId: user.sub, at: new Date() };
+    }
+    // The tenant-wide cancelled-code check runs INSIDE each write transaction (under an advisory
+    // lock — assertVoucherCodeReusableInTx), not here, so it can't race a concurrent cancel.
+    return { manualOverride };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -875,6 +1210,103 @@ export class RewardsService {
     return sent;
   }
 
+  /**
+   * Hubble redeem-time guard — shared by redeem() and redeemForOutlet(), run BEFORE any
+   * order/points move. Returns null for every non-Hubble item WITHOUT a DB read (no
+   * productId on the item → short-circuit), so a non-Hubble tenant (Deoleo) is unchanged.
+   * For a Hubble-backed GIFT_CARD (productId + tenant flag ON):
+   *   - quantity must be 1 (we place ONE voucher of the order value — 2 × ₹500 would be sent
+   *     as a single ₹1,000 denomination, which a FIXED brand may not issue);
+   *   - a variable-amount item takes whole rupees only, and when the admin chose a list of
+   *     amounts (metadata.hubbleDenominations) the amount must be one of them.
+   * `amountPaise` is the chosen face value to freeze on the order (so confirm-time valuePaise —
+   * and therefore the Hubble order amount — is EXACTLY the chosen amount at any conversion rate).
+   * `fromList` = the amount was validated against the admin list (the points band is skipped).
+   */
+  private async resolveHubbleRedeem(
+    clientId: string,
+    item: {
+      redemptionMode: PayoutMode;
+      metadata: Prisma.JsonValue | null;
+      pointsCost: number;
+      minRedemptionPoints: number | null;
+      maxRedemptionPoints: number | null;
+      sellingValuePaise?: number | null;
+    },
+    amount: number | undefined,
+    quantity: number,
+  ): Promise<{ amountPaise: number | null; fromList: boolean } | null> {
+    if (item.redemptionMode !== PayoutMode.GIFT_CARD) return null;
+    const productId = this.extractHubbleProductId(item.metadata);
+    if (!productId) return null;
+    if (!(await this.isHubbleEnabledForTenant(clientId))) return null;
+    if (quantity !== 1) {
+      throw new BadRequestException('This gift card is issued one per redemption — redeem a quantity of 1.');
+    }
+    if (!this.isFreeAmount(item)) {
+      // Fixed-price item: its face value is the selling value — refuse up front when the brand
+      // can't issue it right now (instead of debiting, then failing + refunding at issuance).
+      if (item.sellingValuePaise != null && item.sellingValuePaise > 0) {
+        await this.assertHubbleCanIssue(productId, item.sellingValuePaise / 100);
+      }
+      return { amountPaise: null, fromList: false };
+    }
+    if (amount == null) {
+      // The caller's "amount (₹) is required" check reports this.
+      return { amountPaise: null, fromList: false };
+    }
+    if (!Number.isInteger(amount) || amount <= 0) {
+      throw new BadRequestException('Enter a whole-rupee amount');
+    }
+    const denoms = extractHubbleDenominations(item.metadata);
+    if (denoms.length && !denoms.includes(amount)) {
+      throw new BadRequestException(
+        `Choose one of the available amounts: ${denoms.map((d) => `₹${d.toLocaleString('en-IN')}`).join(', ')}.`,
+      );
+    }
+    // The LIVE brand (cached): a FIXED brand's current face values / a FLEXIBLE brand's RUPEE
+    // min–max — so the member gets a 400 BEFORE any debit, not a refund after it.
+    await this.assertHubbleCanIssue(productId, amount);
+    return { amountPaise: amount * 100, fromList: denoms.length > 0 };
+  }
+
+  /**
+   * Redeem-time live-brand check (cached product lookup). Throws a member-readable 400 when the
+   * brand can't issue ONE voucher of `amount` rupees right now: FIXED with a KNOWN list → must be
+   * on it; FLEXIBLE → within Hubble's rupee min–max. Lookup failure / Hubble not configured / a
+   * FIXED brand whose list Hubble didn't return → no block here (issuance + Hubble still validate,
+   * and an un-provisioned environment falls back to manual fulfilment).
+   */
+  private async assertHubbleCanIssue(productId: string, amount: number): Promise<void> {
+    // Fast, single-flight, never-throwing lookup (2.5 s budget + 60 s negative cache): null =
+    // Hubble slow / down / not configured / not found → skip the check (issuance + Hubble still
+    // validate). A member never waits on a Hubble outage at redeem time.
+    const product = await this.hubble.getProductForRedeem(productId);
+    if (!product) return;
+    if (product.denominationType === 'FIXED' && product.denominations.length === 0) return;
+    if (isAmountIssuable(product, amount)) return;
+    const fmt = (n: number) => `₹${n.toLocaleString('en-IN')}`;
+    if (!Number.isInteger(amount) || amount <= 0) {
+      throw new BadRequestException('This gift card must be a whole-rupee amount.');
+    }
+    if (product.denominationType === 'FIXED') {
+      throw new BadRequestException(
+        `${fmt(amount)} isn't available for this gift card right now. Available: ${product.denominations.map(fmt).join(', ')}.`,
+      );
+    }
+    const { minValue, maxValue } = product;
+    if (minValue == null && maxValue == null) {
+      throw new BadRequestException(`This gift card can't be issued for ${fmt(amount)} right now.`);
+    }
+    const range =
+      minValue != null && maxValue != null
+        ? `between ${fmt(minValue)} and ${fmt(maxValue)}`
+        : minValue != null
+          ? `of at least ${fmt(minValue)}`
+          : `of at most ${fmt(maxValue!)}`;
+    throw new BadRequestException(`This gift card can only be issued for an amount ${range}.`);
+  }
+
   /** True when the item is a FREE_AMOUNT (variable-amount) voucher. */
   private isFreeAmount(item: { pointsCost: number; minRedemptionPoints: number | null; maxRedemptionPoints: number | null }): boolean {
     return (
@@ -917,7 +1349,8 @@ export class RewardsService {
   // ───────────────────────────────────────────────────────────────────────────
   // B1 / #50-E — SALES-ASSISTED redemption (redeem ON BEHALF OF an outlet).
   //
-  // A sales user redeems for an OUTLET they are actively assigned to. Points,
+  // A sales user redeems for an OUTLET actively assigned to them OR to anyone in
+  // their reporting downline (the same scope as GET /v1/sales/outlets). Points,
   // the wallet debit, and the order all belong to the OUTLET — the sales user is
   // only the operator (recorded for audit). The OTP is sent to the OUTLET's phone
   // (owner decision: the outlet consents; the rep submits the code the outlet
@@ -926,7 +1359,8 @@ export class RewardsService {
   //
   // Scoping shape is the PROVEN sales-on-behalf guard from schemes.service.ts:
   //   caller SalesUser in tenant → target ChannelPartner in tenant → active
-  //   salesUserAssignment(salesUserId + partnerId + unassignedAt null).
+  //   salesUserAssignment(salesUserId ∈ caller's downline + outletId of a live,
+  //   non-PARKED outlet of this partner + unassignedAt null) — the outlet-list scope.
   // ───────────────────────────────────────────────────────────────────────────
 
   /**
@@ -951,24 +1385,31 @@ export class RewardsService {
     });
     if (!partner) throw new NotFoundException('Outlet not found in this tenant');
 
-    // 3. Caller must have an ACTIVE assignment to this outlet. Assignments may be
-    //    keyed by partnerId (admin re-assign / seed) OR by outletId (the master
-    //    outlet-upload path, where partnerId is null at upload time — the partner
-    //    is attached later at KYC and not backfilled). Accept EITHER so the guard
-    //    matches real production assignments, not just the seeded shape.
-    const partnerOutlets = await this.prisma.outlet.findMany({
-      where: { partnerId: targetPartnerId, deletedAt: null },
-      select: { id: true },
+    // 3. The outlet must have an ACTIVE assignment to the caller OR to anyone in the
+    //    caller's reporting DOWNLINE — EXACTLY the scope GET /v1/sales/outlets
+    //    (SalesService.getMyOutlets) lists: same tenant-scoped edge query, same
+    //    descendantSalesUserIds walk. A manager may therefore redeem for any outlet
+    //    he can see; a leaf rep's subtree is just himself (unchanged). There is no
+    //    role-based tenant-wide branch here, mirroring getMyOutlets (MIS_USER is not
+    //    a sales role and is already rejected at the controller @Roles gate).
+    //    F5 — the ASSIGNMENT must match the list row-for-row (SalesService.buildOutlets):
+    //    an OUTLET-keyed assignment (outletId non-null) whose outlet belongs to this
+    //    partner, is not deleted and is NOT admin-PARKED (the SAME NOT_PARKED_OUTLET
+    //    filter the list uses). A partnerId-only assignment (outletId null — legacy /
+    //    seed shape; both live assignment writers key on outletId) never appears in the
+    //    list, so it no longer authorizes; nor does a PARKED outlet the rep cannot see.
+    //    Same rule for reps and managers.
+    const edges = await this.prisma.salesUser.findMany({
+      where: { user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true, reportingToId: true },
     });
-    const outletIds = partnerOutlets.map((o) => o.id);
+    const subtreeIds = [...descendantSalesUserIds(callerSalesUser.id, edges)];
     const assignment = await this.prisma.salesUserAssignment.findFirst({
       where: {
-        salesUserId: callerSalesUser.id,
+        salesUserId: { in: subtreeIds },
         unassignedAt: null,
-        OR: [
-          { partnerId: targetPartnerId },
-          ...(outletIds.length ? [{ outletId: { in: outletIds } }] : []),
-        ],
+        outletId: { not: null },
+        outlet: { partnerId: targetPartnerId, deletedAt: null, ...NOT_PARKED_OUTLET },
       },
       select: { id: true },
     });
@@ -1037,6 +1478,10 @@ export class RewardsService {
       throw new BadRequestException('This redemption channel is currently unavailable.');
     }
 
+    // Hubble gift-card guard (quantity 1, whole rupees, one of the admin-chosen amounts) —
+    // BEFORE any points move. null (no DB read) for every non-Hubble item.
+    const hubbleRedeem = await this.resolveHubbleRedeem(user.clientId, item, dto.amount, quantity);
+
     // Points cost: FREE_AMOUNT = round(amount × rate) bounded by min/max; else pointsCost × qty.
     let requiredPoints: number;
     if (this.isFreeAmount(item)) {
@@ -1046,7 +1491,10 @@ export class RewardsService {
       requiredPoints = Math.round(dto.amount * rate);
       const min = item.minRedemptionPoints as number;
       const max = item.maxRedemptionPoints as number;
-      if (requiredPoints < min || requiredPoints > max) {
+      // An amount already validated against the admin's Hubble amount list skips the stored
+      // points band (that band only mirrors the list's min/max at the save-time rate, so a later
+      // rate change must not lock members out of a listed amount). The global floor still applies.
+      if (!hubbleRedeem?.fromList && (requiredPoints < min || requiredPoints > max)) {
         throw new BadRequestException(
           `Amount out of range. Allowed: ${min}–${max} points, requested: ${requiredPoints}`,
         );
@@ -1106,8 +1554,14 @@ export class RewardsService {
     // self-confirm path (confirmRedeem) can also refuse it once the outlet type's sales-assisted
     // redemption is disabled (closes the disable-mid-flight residual — the OTP sits on the outlet's
     // own phone, so without this the owner could complete a rep-staged order via self-confirm).
+    // (c) a Hubble variable-amount gift card freezes the CHOSEN face value instead (see
+    // resolveHubbleRedeem) so the Hubble order amount is exactly what the outlet picked.
     const giftMetadata: Prisma.InputJsonValue = {
-      ...(item.sellingValuePaise != null ? { sellingValuePaiseSnapshot: item.sellingValuePaise } : {}),
+      ...(hubbleRedeem?.amountPaise != null
+        ? { sellingValuePaiseSnapshot: hubbleRedeem.amountPaise }
+        : item.sellingValuePaise != null
+          ? { sellingValuePaiseSnapshot: item.sellingValuePaise }
+          : {}),
       salesInitiatedById: user.sub,
     };
 
@@ -1205,7 +1659,12 @@ export class RewardsService {
       // NEVER mask the user-facing 503 (audit A-2a F5).
       try {
         await this.prisma.$transaction(async (tx) => {
-          await tx.otpCode.deleteMany({ where: { userId: otpUserId, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null } });
+          // Delete ONLY the OTP row THIS request created (by id). A login/outlet-wide delete
+          // would also wipe a CONCURRENT redeem's fresh OTP (created after ours), stranding it.
+          // Guarded on a set id: Prisma treats `id: undefined` as NO filter (= delete all).
+          if (otpCodeId) {
+            await tx.otpCode.deleteMany({ where: { id: otpCodeId, verifiedAt: null } });
+          }
           // PENDING-guarded: never cancels (or writes history for) an order that a concurrent
           // confirm already CONFIRMED or a later redeem already superseded.
           await transitionOrderStatus(tx, {
@@ -1443,8 +1902,11 @@ export class RewardsService {
         throw new ConflictException('Order is no longer awaiting confirmation');
       }
 
-      // Consume the OTP INSIDE the tx so a later failure rolls it back for retry.
-      await tx.otpCode.update({ where: { id: otpId }, data: { verifiedAt: new Date() } });
+      // Consume the OTP INSIDE the tx so a later failure rolls it back for retry — CONDITIONALLY, so an
+      // OTP another request already consumed aborts this tx (no debit).
+      if (!(await markOtpUsed(tx, otpId))) {
+        throw new UnauthorizedException('No active OTP found. Please restart the redemption.');
+      }
 
       // Debit the OUTLET's wallet via the canonical write-path (passbook + ledger).
       await this.wallet.debitRedeem(
@@ -1643,6 +2105,10 @@ export class RewardsService {
       throw new BadRequestException('This redemption channel is currently unavailable.');
     }
 
+    // Hubble gift-card guard (quantity 1, whole rupees, one of the admin-chosen amounts) —
+    // BEFORE any points move. null (no DB read) for every non-Hubble item.
+    const hubbleRedeem = await this.resolveHubbleRedeem(user.clientId, item, dto.amount, quantity);
+
     // Points cost: FREE_AMOUNT = round(amount × rate) bounded by min/max; else pointsCost × qty.
     let requiredPoints: number;
     if (this.isFreeAmount(item)) {
@@ -1652,7 +2118,10 @@ export class RewardsService {
       requiredPoints = Math.round(dto.amount * rate);
       const min = item.minRedemptionPoints as number;
       const max = item.maxRedemptionPoints as number;
-      if (requiredPoints < min || requiredPoints > max) {
+      // An amount already validated against the admin's Hubble amount list skips the stored
+      // points band (that band only mirrors the list's min/max at the save-time rate, so a later
+      // rate change must not lock members out of a listed amount). The global floor still applies.
+      if (!hubbleRedeem?.fromList && (requiredPoints < min || requiredPoints > max)) {
         throw new BadRequestException(
           `Amount out of range. Allowed: ${min}–${max} points, requested: ${requiredPoints}`,
         );
@@ -1710,10 +2179,14 @@ export class RewardsService {
     // Gift value snapshot (decision §14): freeze the gift's ₹ selling price onto the
     // order at redeem so a later price/rate change never re-values it. Null for
     // non-gift / variable-amount items → confirm falls back to points ÷ rate.
+    // A Hubble variable-amount gift card freezes the CHOSEN face value (resolveHubbleRedeem) so
+    // the Hubble order amount is exactly what the member picked, at any conversion rate.
     const giftMetadata =
-      item.sellingValuePaise != null
-        ? ({ sellingValuePaiseSnapshot: item.sellingValuePaise } as Prisma.InputJsonValue)
-        : undefined;
+      hubbleRedeem?.amountPaise != null
+        ? ({ sellingValuePaiseSnapshot: hubbleRedeem.amountPaise } as Prisma.InputJsonValue)
+        : item.sellingValuePaise != null
+          ? ({ sellingValuePaiseSnapshot: item.sellingValuePaise } as Prisma.InputJsonValue)
+          : undefined;
 
     // C2 — bind the OTP to exactly ONE order. A user may have only one redemption
     // awaiting confirmation at a time: superseding any abandoned PENDING orders
@@ -1797,7 +2270,12 @@ export class RewardsService {
       // NEVER mask the user-facing 503 (audit A-2a F5).
       try {
         await this.prisma.$transaction(async (tx) => {
-          await tx.otpCode.deleteMany({ where: { userId: user.sub, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null } });
+          // Delete ONLY the OTP row THIS request created (by id). A login-wide delete would
+          // also wipe a CONCURRENT redeem's fresh OTP (created after ours), stranding it.
+          // Guarded on a set id: Prisma treats `id: undefined` as NO filter (= delete all).
+          if (otpCodeId) {
+            await tx.otpCode.deleteMany({ where: { id: otpCodeId, verifiedAt: null } });
+          }
           // PENDING-guarded: never cancels (or writes history for) an order that a concurrent
           // confirm already CONFIRMED or a later redeem already superseded.
           await transitionOrderStatus(tx, {
@@ -2048,8 +2526,11 @@ export class RewardsService {
       }
 
       // M1 — consume the OTP INSIDE the tx so a later failure (insufficient
-      // balance, oversold stock) rolls the OTP back and the user can retry.
-      await tx.otpCode.update({ where: { id: otpId }, data: { verifiedAt: new Date() } });
+      // balance, oversold stock) rolls the OTP back and the user can retry. CONDITIONAL: an OTP
+      // another request already consumed aborts this tx (no debit).
+      if (!(await markOtpUsed(tx, otpId))) {
+        throw new UnauthorizedException('No active OTP found. Please restart the redemption.');
+      }
 
       // Debit via the canonical wallet write-path (passbook + ledger). Throws 400
       // on insufficient balance → whole tx (incl. the claim) rolls back.
@@ -2248,20 +2729,50 @@ export class RewardsService {
    * Inline voucher/tracking entry rides on this call (per-order fulfilment).
    */
   async transitionOrder(user: JwtPayload, id: string, dto: TransitionOrderDto) {
+    // A lost PIN-add race against an IDENTICAL PIN (double submit) is retried once: the PIN is then
+    // an idempotent no-op, and the status move either already happened (→ the skipped path) or runs.
+    return withPinRaceRetry(() => this.transitionOrderOnce(user, id, dto));
+  }
+
+  private async transitionOrderOnce(user: JwtPayload, id: string, dto: TransitionOrderDto) {
     // Tenant scope by partner.clientId (§12 — partner.user.clientId misses login-less
     // sibling outlets). platformWide (un-assumed OWNER) → cross-tenant, which powers
     // the Gifsy fulfilment console; an assumed operator is pinned to that tenant.
     const scope = tenantScope(user);
     const order = await this.prisma.redemptionOrder.findFirst({
       where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
+      include: { partner: { select: { clientId: true } } },
     });
     if (!order) throw new NotFoundException('Order not found');
+    // The ORDER's tenant — notifications/templates + the tenant-wide cancelled-code lookup.
+    const orderClientId = order.partner?.clientId ?? user.clientId;
 
     const toStatus = dto.toStatus as unknown as RedemptionStatus;
 
     // IDEMPOTENT (§12): a request for the CURRENT state is a no-op — skip the
     // transition AND the member notification (de-dupes bulk re-uploads / retries).
+    // Fill values supplied alongside (voucher code/provider, tracking number/URL — e.g. a bulk sheet
+    // row whose New Status is the current one) are NOT silently dropped: they are applied through
+    // the guarded non-status write (updateOrder — same voucher invariant, audit + notification).
     if (order.status === toStatus) {
+      if (
+        dto.voucherCode !== undefined ||
+        dto.voucherPin !== undefined ||
+        dto.voucherProvider !== undefined ||
+        dto.trackingNumber !== undefined ||
+        dto.trackingUrl !== undefined
+      ) {
+        const res = await this.updateOrder(user, id, {
+          voucherCode: dto.voucherCode,
+          voucherPin: dto.voucherPin,
+          voucherProvider: dto.voucherProvider,
+          trackingNumber: dto.trackingNumber,
+          trackingUrl: dto.trackingUrl,
+          manualOverride: dto.manualOverride,
+          overrideReason: dto.overrideReason,
+        });
+        return { order: res.order, skipped: true as const };
+      }
       return { order, skipped: true as const };
     }
 
@@ -2326,13 +2837,40 @@ export class RewardsService {
     // (CANCELLED / RETURNED / FAILED) would re-credit the points while the voucher stays
     // live → double benefit; it would also clobber a DELIVERED order under a confirm↔webhook
     // race. Block it: Hubble failures auto-refund via the issuance path, never here.
-    // (Deoleo / non-Hubble orders have no voucherProvider='Hubble' → unaffected.)
-    if (order.voucherProvider === 'Hubble' && isRefundTarget) {
+    // (Deoleo / non-Hubble orders carry no Hubble marker → unaffected.)
+    // Any Hubble marker (not just provider='Hubble'): an order handed to Hubble may hold a live
+    // voucher Hubble issued (INDETERMINATE / PROCESSING_NOT_FOUND …) — never refund it by hand.
+    // Ops exits: "Retry with Hubble" (reconcile) or a GIFSY_ADMIN "Fulfil manually" override.
+    // EXCEPT an order whose only Hubble trace proves nothing was ever placed (NOT_CONFIGURED /
+    // INVALID_AMOUNT, no code): Hubble never held a voucher, so a manual refund is safe.
+    if (hasHubbleMarkers(order) && isRefundTarget && !isHubbleNeverPlaced(order)) {
       throw new BadRequestException(
-        'A Hubble-issued voucher cannot be cancelled, returned or failed manually; ' +
-          'it is non-reversible once issued.',
+        'An order sent to Hubble cannot be cancelled, returned or failed manually ' +
+          '(a Hubble voucher may exist). Retry with Hubble, or fulfil it manually.',
       );
     }
+
+    // ISSUED-VOUCHER REFUND BLOCK (owner money rule, ALL providers): a refund edge on an order
+    // holding a voucher code (stored, or supplied on this very call) would refund the points
+    // while the member keeps a live code. Ops must record "Voucher cancelled with vendor" first
+    // (clears the code under audit). Covers the console, the dispatch controller and the bulk
+    // fulfilment upload — all three route through here. The claim below re-checks it atomically.
+    if (isRefundTarget && (hasIssuedVoucher(order.voucherCode) || hasIssuedVoucher(dto.voucherCode))) {
+      throw new BadRequestException(VOUCHER_ISSUED_REFUND_BLOCK_MESSAGE);
+    }
+
+    // VOUCHER WRITE INVARIANT (every edge): no clear / blank, no overwrite of a stored code, a new
+    // code only on a paid open order — and the status claim carries the voucher CAS.
+    const voucherInput = {
+      voucherCode: dto.voucherCode,
+      voucherProvider: dto.voucherProvider,
+      voucherPin: dto.voucherPin,
+    };
+    const voucherPlan = planVoucherWrite(
+      order,
+      voucherInput,
+      this.voucherWriteOptions(user, dto),
+    );
 
     // BUG-1 — a DIGITAL_VOUCHER order cannot be marked DELIVERED without an actual voucher
     // code to deliver. The effective channel is the stored one unless this transition
@@ -2351,9 +2889,8 @@ export class RewardsService {
     }
 
     const now = new Date();
-    const data: Omit<Prisma.RedemptionOrderUpdateInput, 'status'> = {
-      voucherCode: dto.voucherCode,
-      voucherProvider: dto.voucherProvider,
+    const data: Omit<Prisma.RedemptionOrderUpdateManyMutationInput, 'status'> = {
+      ...voucherPlan.data, // only a validated NEW code/provider — never a clear or an overwrite
       trackingNumber: dto.trackingNumber,
       trackingUrl: dto.trackingUrl,
       notes: dto.notes,
@@ -2373,13 +2910,56 @@ export class RewardsService {
     if (toStatus === RedemptionStatus.RETURNED) data.valuePaise = 0n;
 
     const updated = await this.prisma.$transaction(async (tx) => {
+      // Tenant-wide cancelled-code check under the (tenant, code) advisory lock (no row write).
+      if (voucherPlan.issuesNewCode && voucherPlan.data.voucherCode) {
+        await assertVoucherCodeReusableInTx(tx, orderClientId, voucherPlan.data.voucherCode);
+      }
+      // RACE GUARD (FIRST write in the tx): compare-and-set the status on the `fromStatus` we
+      // read + validated above. A concurrent transition / stale read that already moved the
+      // order makes this claim match 0 rows → 409, rolling back the whole tx — so the loser
+      // writes NO history row and runs NO refund. The winner holds the row lock from here on.
+      const moved = await transitionOrderStatusOrConflict(tx, {
+        orderId: id,
+        expectedFrom: fromStatus,
+        // A refund only lands if NO voucher code is on the row at write time (a code set
+        // concurrently after our read → 0 rows → 409, no refund).
+        extraGuard: combineGuards(isRefundTarget ? noIssuedVoucherGuard(order.voucherCode) : null, voucherPlan.guard),
+        toStatus,
+        data,
+        changedById: user.sub,
+        notes: dto.notes,
+      });
+      if (voucherPlan.issuesNewCode && voucherPlan.data.voucherCode) {
+        await recordVoucherIssuedAudit(tx, {
+          actorId: user.sub,
+          orderId: id,
+          code: voucherPlan.data.voucherCode,
+          pin: voucherPlan.data.voucherPin ?? null,
+          provider: voucherPlan.data.voucherProvider ?? order.voucherProvider,
+          path: 'POST /rewards/orders/:id/transition',
+          overrideReason: voucherPlan.overridden ? dto.overrideReason?.trim() : null,
+        });
+      }
+      if (voucherPlan.addsPin && order.voucherCode) {
+        await recordVoucherIssuedAudit(tx, {
+          actorId: user.sub,
+          orderId: id,
+          code: order.voucherCode,
+          pin: voucherPlan.data.voucherPin ?? null,
+          provider: order.voucherProvider,
+          path: 'POST /rewards/orders/:id/transition',
+          event: 'VOUCHER_PIN_ADDED_MANUAL',
+        });
+      }
+
       // M2 — refund at most ONCE: atomically claim the debited points
       // (pointsDeducted > 0 → 0). Only the tx that wins the claim re-credits, so
-      // two concurrent refund-bound transitions can't double-refund.
+      // two concurrent refund-bound transitions can't double-refund. The amount is the
+      // in-tx value read under the row lock (not the pre-tx read).
       // STOCK: intentionally NOT restored here (owner decision 2026-08-19) — a
       // confirmed redemption consumes its stock unit permanently; cancel / return
       // / failed refunds POINTS only. See the STOCK RULE note near the catalog CRUD.
-      if (isRefundTarget) {
+      if (isRefundTarget && moved.pointsDeducted > 0) {
         const refundClaim = await tx.redemptionOrder.updateMany({
           where: { id, pointsDeducted: { gt: 0 } },
           data: { pointsDeducted: 0 },
@@ -2387,26 +2967,27 @@ export class RewardsService {
         if (refundClaim.count > 0) {
           await this.wallet.reverse(
             order.partnerId,
-            order.pointsDeducted,
+            moved.pointsDeducted,
             { referenceId: id, description: `Refund ${order.orderNumber}` },
             tx,
           );
+          return { ...moved, pointsDeducted: 0 };
         }
       }
-
-      return transitionOrderStatus(tx, {
-        orderId: id,
-        fromStatus,
-        toStatus,
-        data,
-        changedById: user.sub,
-        notes: dto.notes,
-      });
-    });
+      return moved;
+    }).catch((e: unknown) =>
+      rethrowUnlessIdempotentPinRace(e, voucherPlan, order, voucherInput, () =>
+        this.prisma.redemptionOrder.findUnique({ where: { id }, select: { voucherCode: true, voucherPin: true } }),
+      ),
+    );
 
     // A voucher code assigned on THIS transition (null → set) — computed before the milestone notify
-    // so a single action never fires BOTH a generic milestone bell AND the VOUCHER_ISSUED code bell.
+    // so a single action never fires BOTH a generic milestone bell AND the VOUCHER_ISSUED code bell
+    // (the code message supersedes the milestone). A set-once PIN ADDED to an already-issued code is
+    // different: the code was already delivered, so the member gets BOTH the re-sent voucher (now
+    // with the PIN) AND the normal milestone (with tracking) for the status change.
     const voucherNewlyIssued = !order.voucherCode && !!updated.voucherCode;
+    const voucherResent = voucherNewlyIssued || voucherPlan.addsPin;
 
     // Notify the partner on the customer-visible milestones — UNLESS this same transition just issued
     // the voucher code, in which case the VOUCHER_ISSUED message below supersedes the generic milestone.
@@ -2426,7 +3007,7 @@ export class RewardsService {
         // direct SMS enqueue is removed; the ORDER_* paid channels default OFF until a tenant
         // enables them. Best-effort: never throws into the transition path.
         await this.notifications.notifyUserWithChannels({
-          clientId: user.clientId,
+          clientId: orderClientId, // the ORDER's tenant (a platform-wide Gifsy caller is 'gifsy')
           userId: partner.userId,
           eventKey: `ORDER_${toStatus}` as EventKey,
           recipientPhone: partner.phone ?? null,
@@ -2445,13 +3026,176 @@ export class RewardsService {
     }
 
     // Manual voucher fulfilment: a code was JUST assigned (null → set) on this transition, at
-    // whatever status ops issues it. Send the owner the code (bell + WhatsApp `voucher_code`).
-    // Fires once (guarded on the prior value) and only for the outlet owner. Best-effort.
-    if (voucherNewlyIssued) {
-      await this.notifyVoucherIssued(id, user.clientId);
+    // whatever status ops issues it — or a PIN was just added to the issued code. Send the owner the
+    // code (bell + WhatsApp `voucher_code`). Fires once (guarded on the prior value / the set-once
+    // PIN claim) and only for the outlet owner. Best-effort.
+    if (voucherResent) {
+      await this.notifyVoucherIssued(id, orderClientId);
     }
 
     return { order: updated };
+  }
+
+  /**
+   * POST /v1/rewards/orders/:id/voucher-cancelled — "Voucher cancelled with vendor" (GIFSY_ADMIN).
+   *
+   * Records that ops cancelled the issued voucher with its vendor, CLEARING the code (+ provider)
+   * so the issued-voucher refund block lifts and a refund transition becomes possible. One tx:
+   *   1. compare-and-set on the CURRENT code (`updateMany where { id, voucherCode: <read> }`):
+   *      a double-click / concurrent edit makes the loser match 0 rows → 409, no audit row;
+   *   2. an AuditLog row (who = actorId, when = createdAt, reason, last 4 of the cleared code —
+   *      NEVER the full code; it is a bearer credential).
+   * Status is NOT changed (the refund is a separate, normal transition), so no member timeline row.
+   * Hubble-issued vouchers are refused: Hubble has no cancel/clawback (they stay non-reversible).
+   */
+  async voucherCancelledWithVendor(user: JwtPayload, id: string, reason: string) {
+    // Owner rule: GIFSY_ADMIN only (the route's @Roles would otherwise admit a permissioned
+    // GIFSY_STAFF via RolesGuard deferral) — never CLIENT_ADMIN / vendors.
+    if (user.role !== 'GIFSY_ADMIN') {
+      throw new ForbiddenException('Only a Gifsy admin can record a vendor voucher cancellation.');
+    }
+    const why = (reason ?? '').trim();
+    if (!why) throw new BadRequestException('A reason is required.');
+
+    const scope = tenantScope(user);
+    const order = await this.prisma.redemptionOrder.findFirst({
+      where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
+      select: {
+        id: true, orderNumber: true, status: true, voucherCode: true, voucherProvider: true, metadata: true,
+        partner: { select: { clientId: true } },
+      },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (!hasIssuedVoucher(order.voucherCode)) {
+      throw new ConflictException('This order has no voucher code to cancel — refresh and try again.');
+    }
+    // Only a code HUBBLE ISSUED is non-reversible. A MANUAL code on an order whose only Hubble
+    // trace is an ops flag (HUBBLE_SUCCESS_MANUAL_CODE_PRESENT / HUBBLE_FAILED_VOUCHER_PRESENT, or
+    // a manual-fulfilment override) is a normal vendor voucher and may be cancelled.
+    if (isHubbleIssuedCode(order)) {
+      throw new BadRequestException(
+        'A Hubble-issued voucher cannot be cancelled with the vendor; it is non-reversible once issued.',
+      );
+    }
+    const orderClientId = order.partner?.clientId ?? user.clientId;
+    const meta = (order.metadata && typeof order.metadata === 'object' && !Array.isArray(order.metadata)
+      ? order.metadata
+      : {}) as Record<string, unknown>;
+    const releaseHubble: Prisma.InputJsonValue | null =
+      meta.hubbleReconcileReason === 'HUBBLE_FAILED_VOUCHER_PRESENT'
+        ? ({
+            ...meta,
+            hubbleNeedsReconcile: false,
+            hubbleStatus: 'RELEASED',
+            hubbleReleasedAt: new Date().toISOString(),
+            hubbleReleasedBy: user.sub,
+          } as Prisma.InputJsonValue)
+        : null;
+
+    const code = order.voucherCode as string;
+    // Never the full code anywhere (audit / logs): the same last-4 mask the tenant-admin list uses.
+    const masked = maskVoucherCode(code);
+    const updated = await this.prisma.$transaction(async (tx) => {
+      // Same (tenant, code) advisory lock every issuance takes before its reuse check — so an
+      // issuance racing this cancel either sees the recorded hash or finishes before it.
+      await lockVoucherCode(tx, orderClientId, code);
+      const claim = await tx.redemptionOrder.updateMany({
+        // CAS on the code read AND never a Hubble voucher (a provider stamped concurrently loses).
+        // OR-wrapped: a bare `{ not: 'Hubble' }` would also drop NULL-provider rows (SQL NULL).
+        where: {
+          id,
+          voucherCode: code,
+          OR: [
+            { voucherProvider: null },
+            // Case-insensitive "not Hubble" (NULL handled by the branch above).
+            { NOT: { voucherProvider: { equals: 'hubble', mode: 'insensitive' } } },
+          ],
+        },
+        data: {
+          voucherCode: null,
+          // The PIN belongs to the cancelled card — cleared with it (never reuse-checked).
+          voucherPin: null,
+          voucherProvider: null,
+          // HUBBLE_FAILED_VOUCHER_PRESENT: Hubble definitively FAILED (no Hubble voucher exists) and
+          // the only code was this manual one — once it is cancelled the order is a plain order
+          // again, so release the Hubble flag (otherwise the refund block would dead-end it).
+          // HUBBLE_SUCCESS_MANUAL_CODE_PRESENT stays flagged: Hubble DID issue a voucher.
+          ...(releaseHubble ? { metadata: releaseHubble } : {}),
+        },
+      });
+      if (claim.count === 0) {
+        throw new ConflictException('The voucher code changed — refresh and try again.');
+      }
+      // Remember the cancelled code TENANT-WIDE (sha256 of the normalised code — never the code)
+      // so no stale sheet / request can re-issue it on ANY order of this tenant.
+      await tx.cancelledVoucherCode.createMany({
+        data: [{ clientId: orderClientId, codeHash: hashVoucherCode(code), orderId: id, cancelledById: user.sub }],
+        skipDuplicates: true,
+      });
+      await tx.auditLog.create({
+        data: {
+          actorId: user.sub,
+          action: 'UPDATE',
+          entityType: 'REDEMPTION_ORDER',
+          entityId: id,
+          metadata: {
+            event: 'VOUCHER_CANCELLED_WITH_VENDOR',
+            orderNumber: order.orderNumber,
+            status: order.status,
+            reason: why,
+            clearedVoucherCode: masked, // "••••" + last 4 (fully masked if < 12 chars)
+            clearedVoucherProvider: order.voucherProvider ?? null,
+          },
+        },
+      });
+      // The response never carries the code (cleared anyway) — no voucherCode in the select.
+      return tx.redemptionOrder.findUniqueOrThrow({
+        where: { id },
+        select: { id: true, status: true, voucherProvider: true, updatedAt: true },
+      });
+    });
+
+    this.logger.log(
+      `order ${order.orderNumber}: voucher (${masked}) recorded cancelled with vendor by ${user.sub}`,
+    );
+    // voucherCode: null states the post-condition explicitly (the row's code was just cleared).
+    return { order: { ...updated, voucherCode: null, voucherPin: null } };
+  }
+
+  /**
+   * POST /v1/rewards/orders/:id/hubble-reconcile — "Retry with Hubble" (GIFSY_ADMIN only): the ops
+   * exit for an order flagged hubbleNeedsReconcile. Runs the EXISTING webhook reconcile
+   * (get-by-reference → apply the authoritative Hubble state idempotently; never places a new
+   * Hubble order, never refunds off a miss) for this one order, and audits who ran it + the outcome.
+   */
+  async retryHubbleReconcile(user: JwtPayload, id: string) {
+    if (user.role !== 'GIFSY_ADMIN') {
+      throw new ForbiddenException('Only a Gifsy admin can retry a Hubble reconcile.');
+    }
+    const scope = tenantScope(user);
+    const order = await this.prisma.redemptionOrder.findFirst({
+      where: { id, ...(scope ? { partner: { clientId: scope } } : {}) },
+      select: { id: true, orderNumber: true, status: true, metadata: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    const before = (order.metadata as Record<string, unknown> | null)?.hubbleReconcileReason ?? null;
+    const outcome = await this.reconcileHubbleOrder(order.id);
+    await this.prisma.auditLog.create({
+      data: {
+        actorId: user.sub,
+        action: 'UPDATE',
+        entityType: 'REDEMPTION_ORDER',
+        entityId: order.id,
+        metadata: {
+          event: 'HUBBLE_RECONCILE_RETRY',
+          orderNumber: order.orderNumber,
+          statusBefore: order.status,
+          reconcileReasonBefore: before as Prisma.InputJsonValue,
+          outcome,
+        },
+      },
+    });
+    return { orderId: order.id, outcome };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -2561,6 +3305,12 @@ export class RewardsService {
     const scope = tenantScope(user);
 
     for (const r of parsed.rows) {
+      // A parse-level row error (e.g. a Voucher Code / PIN cell Excel stored as a NUMBER — its
+      // leading zeros / digits may already be lost) — collected, the row is NOT applied.
+      if (r.error) {
+        errors.push({ row: r.rowIndex, orderNumber: r.orderNumber, message: r.error });
+        continue;
+      }
       try {
         // Resolve the order in-scope; collect (don't throw) on a miss/cross-tenant.
         const order = await this.prisma.redemptionOrder.findFirst({
@@ -2590,6 +3340,7 @@ export class RewardsService {
           await this.transitionOrder(user, order.id, {
             toStatus: r.newStatus as UpdatableOrderStatus,
             voucherCode: r.voucherCode,
+            voucherPin: r.voucherPin,
             voucherProvider: r.voucherProvider,
             trackingNumber: r.trackingNumber,
             trackingUrl: r.trackingUrl,
@@ -2600,6 +3351,7 @@ export class RewardsService {
           // template re-uploaded) — skip it so the success count isn't inflated.
           if (
             !r.voucherCode &&
+            !r.voucherPin &&
             !r.voucherProvider &&
             !r.trackingNumber &&
             !r.trackingUrl
@@ -2609,6 +3361,7 @@ export class RewardsService {
           }
           await this.updateOrder(user, order.id, {
             voucherCode: r.voucherCode,
+            voucherPin: r.voucherPin,
             voucherProvider: r.voucherProvider,
             trackingNumber: r.trackingNumber,
             trackingUrl: r.trackingUrl,
@@ -2803,6 +3556,7 @@ export class RewardsService {
     // confirmed/processed/returned — sourced from the authoritative status history).
     const stampFor = (status: string) =>
       order.statusHistory.find((h) => h.toStatus === status)?.createdAt ?? null;
+    const canSeeCodes = await this.canSeeFullVoucherCode(user);
 
     return {
       id: order.id,
@@ -2822,8 +3576,15 @@ export class RewardsService {
       trackingUrl: order.trackingUrl,
       supplierOrderRef: order.supplierOrderRef,
       voucherCode: order.voucherCode,
+      voucherPin: order.voucherPin,
       voucherProvider: order.voucherProvider,
+      // The server would accept a set-once PIN / provider on the stored code (F4 — one rule; the
+      // console offers the "Add the PIN…" box only then).
+      voucherFillable: canFillStoredVoucher(order),
       fulfilledByVendorId: order.fulfilledByVendorId,
+      // The route already requires rewards:manage_orders (= canSeeFullVoucherCode); defence in
+      // depth: any other operator gets neither the card number nor the PIN.
+      ...(canSeeCodes ? {} : hiddenVoucherFields(order.voucherCode)),
       fulfilledByVendorName: order.fulfilledByVendor?.name ?? null,
       delivery,
       statusHistory,
@@ -2841,7 +3602,7 @@ export class RewardsService {
   /**
    * Validate the unverified REDEMPTION_CONFIRM OTP issued for a SPECIFIC order and return its id.
    * Self-contained (does NOT reuse auth.verifyOtp, which auto-registers users).
-   * Bumps attempts + 401 on a miss. Does NOT set verifiedAt — the caller marks it
+   * Claims an attempt atomically before comparing (401 on a miss; a correct code gets it back). Does NOT set verifiedAt — the caller marks it
    * INSIDE the confirm transaction so a failed debit rolls the OTP back (M1).
    * FIXED_OTP is honoured ONLY outside production — a dev backdoor on a money
    * confirm must never be live in prod (H2).
@@ -2857,6 +3618,7 @@ export class RewardsService {
       orderBy: { createdAt: 'desc' },
     });
     if (!record) {
+      await this.throwIfOrderAlreadyConfirmed(orderId);
       throw new UnauthorizedException('No active OTP found. Please restart the redemption.');
     }
     if (record.attempts >= record.maxAttempts) {
@@ -2866,20 +3628,46 @@ export class RewardsService {
       throw new UnauthorizedException('OTP expired — please restart the redemption.');
     }
 
+    // Claim-before-compare (common/otp-attempt): claim one attempt ATOMICALLY before comparing, so
+    // parallel guesses that all read the same `attempts` can't exceed maxAttempts; a losing claim is
+    // refused with the existing "too many attempts" error and its code is never compared.
+    const claimed = await claimOtpAttempt(this.prisma, record);
+    if (claimed === null) {
+      await this.throwIfOrderAlreadyConfirmed(orderId);
+      // Refused: re-read so a code superseded/expired or pruned meanwhile gets the honest message (L1).
+      const why = await whyOtpClaimRefused(this.prisma, record.id);
+      if (why === 'EXPIRED') throw new UnauthorizedException('OTP expired — please restart the redemption.');
+      if (why === 'GONE') throw new UnauthorizedException('No active OTP found. Please restart the redemption.');
+      throw new UnauthorizedException('Too many attempts — please restart the redemption.');
+    }
+
     const fixedOtp = isFixedOtpAllowed() ? process.env.FIXED_OTP : undefined;
     const isCorrect = fixedOtp ? otp === fixedOtp : otp === record.code;
     if (!isCorrect) {
-      await this.prisma.otpCode.update({
-        where: { id: record.id },
-        data: { attempts: record.attempts + 1 },
-      });
-      const remaining = record.maxAttempts - record.attempts - 1;
+      // From the atomic claim's post-increment value — exact under parallel guesses (not the stale read).
+      const remaining = Math.max(0, record.maxAttempts - claimed);
       throw new UnauthorizedException(
         `Invalid OTP. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`,
       );
     }
 
+    // A correct code did not consume an attempt before (verifiedAt is only set inside the confirm
+    // transaction, so a failed debit leaves the OTP retryable) — give the claimed attempt back.
+    await refundOtpAttempt(this.prisma, record.id);
     return record.id;
+  }
+
+  /**
+   * Double-tap: the OTP is gone / its claim lost because a parallel confirm of the SAME order already
+   * consumed it. If that order has left PENDING, answer with the confirm's own conflict (what the
+   * winner's twin would have hit at the order claim) instead of a misleading "too many attempts".
+   * The order was already loaded + authorised by the caller; this re-read only picks the message.
+   */
+  private async throwIfOrderAlreadyConfirmed(orderId: string): Promise<void> {
+    const current = await this.prisma.redemptionOrder.findFirst({ where: { id: orderId }, select: { status: true } });
+    if (current && current.status !== 'PENDING') {
+      throw new ConflictException('Order is no longer awaiting confirmation');
+    }
   }
 
   /** 6-digit OTP (100000–999999) via CSPRNG — see common/otp.ts (AF-10). */
@@ -2908,6 +3696,78 @@ export class RewardsService {
   // voucher that was actually issued (Hubble has no cancel). We leave the order
   // PROCESSING + flagged for reconcile; the webhook or an ops reconcile resolves it.
   // ───────────────────────────────────────────────────────────────────────────
+
+  /** Map a HubbleService product-lookup error to an admin-readable HTTP error. */
+  private hubbleProductHttpError(e: unknown, productId: string): Error {
+    if (e instanceof HubbleNotConfiguredError) {
+      return new ServiceUnavailableException(
+        'Hubble is not configured in this environment, so the brand and its amounts cannot be loaded.',
+      );
+    }
+    if (e instanceof HubbleProductNotFoundError) {
+      return new NotFoundException(
+        `No active Hubble product with ID "${productId}". Check the product ID in the Hubble partner portal.`,
+      );
+    }
+    this.logger.error(`[hubble] product lookup failed for ${productId}: ${e}`);
+    return new ServiceUnavailableException('Could not reach Hubble to load this brand — try again in a minute.');
+  }
+
+  /**
+   * GET /v1/admin/rewards/hubble-products/:productId — the catalogue editor's "Load from
+   * Hubble". Returns the normalised product plus the tenant conversion rate + minimum voucher
+   * amount (so the editor can show points per amount and grey out amounts below the floor).
+   * Hubble-enabled tenants only.
+   */
+  async getHubbleProductForAdmin(user: JwtPayload, productId: string) {
+    if (!(await this.isHubbleEnabledForTenant(user.clientId))) {
+      throw new BadRequestException('Hubble gift cards are not enabled for this program.');
+    }
+    let product: HubbleProduct;
+    try {
+      product = await this.hubble.getProduct(productId);
+    } catch (e) {
+      throw this.hubbleProductHttpError(e, productId);
+    }
+    const settings = await this.tenantSettings.getEffectiveSettings(user.clientId);
+    return {
+      product,
+      conversionRate: settings.conversionRate,
+      minVoucherFreeAmount: settings.minVoucherFreeAmount,
+    };
+  }
+
+  /**
+   * Save-time check of a Hubble GIFT_CARD item against the LIVE product (see
+   * validateHubbleItemAmounts). Returns the derived points band for an amounts list, else null.
+   * Hubble not configured in this environment: an amounts list is refused (it can't be
+   * verified); an item WITHOUT a list is saved unchecked, as before (an un-provisioned
+   * environment falls back to manual fulfilment at confirm anyway).
+   */
+  private async checkHubbleItemAgainstProduct(
+    clientId: string,
+    productId: string,
+    input: {
+      denominations: number[] | null;
+      minRedemptionPoints: number | null | undefined;
+      maxRedemptionPoints: number | null | undefined;
+      sellingValuePaise: number | null | undefined;
+    },
+  ): Promise<{ minRedemptionPoints: number; maxRedemptionPoints: number } | null> {
+    let product: HubbleProduct;
+    try {
+      product = await this.hubble.getProduct(productId);
+    } catch (e) {
+      if (e instanceof HubbleNotConfiguredError && !input.denominations?.length) return null;
+      throw this.hubbleProductHttpError(e, productId);
+    }
+    const settings = await this.tenantSettings.getEffectiveSettings(clientId);
+    return validateHubbleItemAmounts(product, {
+      ...input,
+      conversionRate: settings.conversionRate,
+      minVoucherFreeAmount: settings.minVoucherFreeAmount,
+    });
+  }
 
   /** Pull a non-empty Hubble productId out of a RewardCatalog.metadata blob. */
   private extractHubbleProductId(metadata: unknown): string | null {
@@ -3024,17 +3884,7 @@ export class RewardsService {
    * Reads the client's branding display name (falls back to internalName, then the slug).
    */
   private async programLabel(clientId: string): Promise<string> {
-    try {
-      const c = await this.prisma.client.findUnique({
-        where: { id: clientId },
-        select: { branding: true, internalName: true },
-      });
-      const brand = ((c?.branding ?? {}) as Record<string, unknown>).displayName;
-      const name = typeof brand === 'string' && brand.trim() ? brand.trim() : c?.internalName ?? clientId;
-      return `${name} Loyalty`;
-    } catch {
-      return 'Loyalty';
-    }
+    return programLabelFor(this.prisma, clientId);
   }
 
   /**
@@ -3048,45 +3898,12 @@ export class RewardsService {
    * notification failure must never throw into a flow whose voucher is already live.
    */
   private async notifyVoucherIssued(orderId: string, clientId: string): Promise<void> {
-    try {
-      const o = await this.prisma.redemptionOrder.findUnique({
-        where: { id: orderId },
-        select: {
-          voucherCode: true,
-          valuePaise: true,
-          orderNumber: true,
-          reward: { select: { name: true } },
-          partner: { select: { userId: true, phone: true, ownerName: true } },
-        },
-      });
-      // Nothing to send without a code and a login user to deliver the bell to.
-      if (!o?.voucherCode || !o.partner?.userId) return;
-
-      const program = await this.programLabel(clientId);
-      const amount =
-        o.valuePaise != null ? `₹${(Number(o.valuePaise) / 100).toLocaleString('en-IN')}` : '';
-      const voucherName = o.reward?.name ?? 'voucher';
-
-      await this.notifications.notifyUserWithChannels({
-        clientId,
-        userId: o.partner.userId,
-        eventKey: 'VOUCHER_ISSUED' as EventKey,
-        recipientPhone: o.partner.phone ?? null,
-        vars: {
-          ownerName: o.partner.ownerName ?? 'Partner',
-          amount,
-          program,
-          voucherName,
-          code: o.voucherCode,
-        },
-        subject: 'Your voucher code',
-        body: `Your ${voucherName} code: ${o.voucherCode}`,
-        url: '/partner/rewards/orders',
-        event: 'VOUCHER_ISSUED',
-      });
-    } catch (e) {
-      this.logger.error(`[voucher] VOUCHER_ISSUED notify failed for order ${orderId} (non-fatal): ${e}`);
-    }
+    // Shared with the vendor portal (voucher-issuance.ts) so every issuance path notifies alike.
+    await notifyVoucherIssuedShared(
+      { prisma: this.prisma, notifications: this.notifications, logger: this.logger },
+      orderId,
+      clientId,
+    );
   }
 
   /** The outcome of an auto-issuance attempt. */
@@ -3168,6 +3985,25 @@ export class RewardsService {
         return await this.applyHubbleBody(order, recovered, actorId);
       }
 
+      // DEFENCE IN DEPTH (per-brand denominations): never send Hubble an amount it can't
+      // issue. Checks the ORDER (its frozen face value — never the item's CURRENT list, which an
+      // admin may have edited since) against the brand's live FIXED denominations. A miss means
+      // NOTHING reached Hubble, so refund NOW (the same atomic refund as a Hubble FAILED) — the
+      // member sees "could not issue, points refunded", never a stuck "being issued". A product
+      // lookup FAILURE (or a FIXED brand whose list Hubble didn't return) never blocks issuance —
+      // Hubble itself still validates (FAILED → refund).
+      if (!(await this.isHubbleAmountIssuable(productId, amount, order))) {
+        this.logger.error(
+          `[hubble] order ${order.orderNumber} amount ₹${amount} is not an issuable amount for product ${productId} — not placed; refunding`,
+        );
+        const refunded = await this.refundAndFailHubble(
+          order,
+          `₹${amount} is not an amount this brand can issue right now (not sent to Hubble)`,
+          actorId,
+        );
+        return refunded ? this.HUBBLE_OUTCOME.FAILED_REFUNDED : this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+      }
+
       // Place the order (referenceId = our order id = the idempotency key). On ANY
       // thrown error, recover authoritative state by referenceId before deciding.
       let body: HubbleOrderResult | null;
@@ -3196,12 +4032,14 @@ export class RewardsService {
         }
         if (body === null) {
           // Definitively never placed (404 on recovery) → safe to refund.
-          await this.refundAndFailHubble(
+          // Blocked (a voucher code is on the order) → NOT refunded: report pending, never
+          // "points refunded" to the member.
+          const refunded = await this.refundAndFailHubble(
             order,
             'Hubble order was not placed (not found on recovery)',
             actorId,
           );
-          return this.HUBBLE_OUTCOME.FAILED_REFUNDED;
+          return refunded ? this.HUBBLE_OUTCOME.FAILED_REFUNDED : this.HUBBLE_OUTCOME.PENDING_RECONCILE;
         }
       }
 
@@ -3294,6 +4132,43 @@ export class RewardsService {
     return false;
   }
 
+  /**
+   * Issuance-time amount check (see issueHubbleVoucherForOrder). false ⇒ do NOT call Hubble.
+   * Reads the ORDER only: (a) the amount must equal the face value frozen on the order at
+   * redeem (sellingValuePaiseSnapshot, when present) — a mismatch means the value drifted and
+   * must not be sent; (b) for a FIXED brand with a KNOWN live list, the amount must be on it.
+   * Not pre-checked (Hubble validates; FAILED → auto-refund): FLEXIBLE brands, a FIXED brand
+   * whose list Hubble didn't return, or any lookup error.
+   */
+  private async isHubbleAmountIssuable(
+    productId: string,
+    amount: number,
+    order: { metadata: Prisma.JsonValue | null; quantity?: number | null },
+  ): Promise<boolean> {
+    const meta = order.metadata;
+    const snap =
+      meta && typeof meta === 'object' && !Array.isArray(meta)
+        ? (meta as Record<string, unknown>).sellingValuePaiseSnapshot
+        : undefined;
+    const qty = order.quantity && order.quantity > 0 ? order.quantity : 1;
+    if (typeof snap === 'number' && snap > 0 && snap * qty !== amount * 100) return false;
+    let product: HubbleProduct;
+    try {
+      product = await this.hubble.getProduct(productId);
+    } catch (e) {
+      this.logger.warn(`[hubble] product lookup failed for ${productId} (issuance proceeds; Hubble validates): ${e}`);
+      return true;
+    }
+    if (
+      product.denominationType === 'FIXED' &&
+      product.denominations.length > 0 &&
+      !isAmountIssuable(product, amount)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
   /** valuePaise → whole rupees for the Hubble order amount (Amazon free-denomination). */
   private hubbleAmountRupees(order: { valuePaise: bigint | null }): number | null {
     if (order.valuePaise == null) return null;
@@ -3326,12 +4201,12 @@ export class RewardsService {
       return this.HUBBLE_OUTCOME.PROCESSING;
     }
     if (status === 'FAILED') {
-      await this.refundAndFailHubble(
+      const refunded = await this.refundAndFailHubble(
         order,
         body.failureReason ?? 'Hubble reported FAILED',
         actorId,
       );
-      return this.HUBBLE_OUTCOME.FAILED_REFUNDED;
+      return refunded ? this.HUBBLE_OUTCOME.FAILED_REFUNDED : this.HUBBLE_OUTCOME.PENDING_RECONCILE;
     }
     // Unknown status → treat as still-pending (safer than refunding).
     this.logger.warn(
@@ -3354,7 +4229,7 @@ export class RewardsService {
     actorId?: string,
   ): Promise<void> {
     const voucher = (body.vouchers ?? [])[0];
-    const voucherCode = this.primaryVoucherCode(voucher);
+    const { code: voucherCode, pin: voucherPin } = hubbleVoucherCredentials(voucher);
     if (!voucherCode) {
       // SUCCESS with no usable code is anomalous — do NOT flip to DELIVERED without a
       // code (would break the DIGITAL_VOUCHER delivered invariant). Leave pending.
@@ -3366,11 +4241,16 @@ export class RewardsService {
     }
 
     const now = new Date();
-    await this.prisma.$transaction(async (tx) => {
+    const won = await this.prisma.$transaction(async (tx) => {
       // Shared transition: claim + the (fromStatus null) DELIVERED history row, only when won.
-      await transitionOrderStatus(tx, {
+      // NO_ISSUED_VOUCHER_GUARD: never overwrite a code already on the order (e.g. ops issued one
+      // manually) — that would silently double-issue. A lost claim is checked below.
+      return transitionOrderStatus(tx, {
         orderId: order.id,
-        guard: { status: { in: [RedemptionStatus.CONFIRMED, RedemptionStatus.PROCESSING] } },
+        guard: {
+          status: { in: [RedemptionStatus.CONFIRMED, RedemptionStatus.PROCESSING] },
+          ...noIssuedVoucherGuard(order.voucherCode),
+        },
         fromStatus: null,
         toStatus: RedemptionStatus.DELIVERED,
         changedById: actorId ?? null,
@@ -3378,6 +4258,9 @@ export class RewardsService {
         data: {
           fulfilmentChannel: GiftFulfilmentChannel.DIGITAL_VOUCHER,
           voucherCode,
+          // Card+PIN product (e.g. CARD_AND_PIN_NO_SECURED): the PIN rides in the SAME guarded
+          // claim as the card number — never one without the other. Null for number-/PIN-only cards.
+          voucherPin,
           voucherProvider: 'Hubble',
           supplierOrderRef: body.id ?? body.orderId ?? null,
           deliveredAt: now,
@@ -3390,6 +4273,25 @@ export class RewardsService {
         },
       }); // count 0 = already resolved by a concurrent apply — no-op (no history row)
     });
+    if (won.count === 0) {
+      // Lost: either a concurrent apply already delivered it (fine), or a MANUAL code is on the
+      // still-open order — Hubble issued a 2nd voucher. Never overwrite; flag it for ops loudly.
+      const now2 = await this.prisma.redemptionOrder.findFirst({
+        where: { id: order.id },
+        select: { status: true, voucherCode: true, voucherProvider: true },
+      });
+      if (
+        now2 &&
+        hasIssuedVoucher(now2.voucherCode) &&
+        (now2.status === RedemptionStatus.CONFIRMED || now2.status === RedemptionStatus.PROCESSING)
+      ) {
+        this.logger.error(
+          `[hubble] order ${order.orderNumber}: Hubble SUCCESS but a manual voucher code is already on the order — NOT overwritten; flagged for ops (possible double issuance)`,
+        );
+        await this.markHubblePendingReconcile(order.id, 'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT');
+      }
+      return;
+    }
     this.logger.log(`[hubble] order ${order.orderNumber} voucher issued + marked DELIVERED`);
   }
 
@@ -3399,10 +4301,30 @@ export class RewardsService {
     body: HubbleOrderResult,
     actorId?: string,
   ): Promise<void> {
-    await this.prisma.$transaction(async (tx) => {
-      await transitionOrderStatus(tx, {
+    // Ops already took this order over (manual override / release) or a code is already on it:
+    // Hubble reporting PROCESSING now must NOT re-stamp provider='Hubble' over the manual state —
+    // flag it for ops (possible double issuance) instead.
+    const meta = (order.metadata && typeof order.metadata === 'object' && !Array.isArray(order.metadata)
+      ? order.metadata
+      : {}) as Record<string, unknown>;
+    if (hasIssuedVoucher(order.voucherCode) || meta.hubbleStatus === 'MANUAL_OVERRIDE' || meta.hubbleStatus === 'RELEASED') {
+      this.logger.error(
+        `[hubble] order ${order.orderNumber}: Hubble PROCESSING but the order was taken over manually / holds a code — NOT re-stamped; flagged for ops`,
+      );
+      await this.markHubblePendingReconcile(order.id, 'HUBBLE_PROCESSING_AFTER_MANUAL');
+      return;
+    }
+    const claim = await this.prisma.$transaction(async (tx) => {
+      return transitionOrderStatus(tx, {
         orderId: order.id,
-        guard: { status: RedemptionStatus.CONFIRMED },
+        // No code on the row (as read), and the row unchanged since that read (updatedAt CAS): a
+        // concurrent manual override / release / code write — which would change the hubbleStatus
+        // or code this decision was based on — makes the claim lose instead of being overwritten.
+        guard: {
+          status: RedemptionStatus.CONFIRMED,
+          ...noIssuedVoucherGuard(order.voucherCode),
+          ...(order.updatedAt ? { updatedAt: order.updatedAt } : {}),
+        },
         fromStatus: RedemptionStatus.CONFIRMED,
         toStatus: RedemptionStatus.PROCESSING,
         changedById: actorId ?? null,
@@ -3418,6 +4340,21 @@ export class RewardsService {
         },
       });
     });
+    if (claim.count === 0) {
+      // Lost: benign if a concurrent apply already moved it on; otherwise something changed under
+      // us (manual takeover, a code, a status move) — never overwrite, flag for ops.
+      const now = await this.prisma.redemptionOrder.findFirst({
+        where: { id: order.id },
+        select: { status: true },
+      });
+      if (now?.status !== RedemptionStatus.PROCESSING && now?.status !== RedemptionStatus.DELIVERED) {
+        this.logger.error(
+          `[hubble] order ${order.orderNumber}: Hubble PROCESSING claim lost (order changed meanwhile) — flagged for ops`,
+        );
+        await this.markHubblePendingReconcile(order.id, 'HUBBLE_PROCESSING_CLAIM_LOST');
+      }
+      return;
+    }
     this.logger.log(`[hubble] order ${order.orderNumber} marked PROCESSING (awaiting Hubble)`);
   }
 
@@ -3431,8 +4368,10 @@ export class RewardsService {
     order: HubbleLoadedOrder,
     reason: string,
     actorId?: string,
-  ): Promise<void> {
-    await this.prisma.$transaction(async (tx) => {
+  ): Promise<boolean> {
+    // Returns true when THIS call moved the order to FAILED (points refunded if still debited);
+    // false when it did not (already terminal, or BLOCKED by an issued voucher code).
+    const flip = await this.prisma.$transaction(async (tx) => {
       // AUDIT-FIX (money): refund ONLY while the order is still non-terminal. Folding the
       // status predicate into the SAME atomic claim as the pointsDeducted zeroing means a
       // voucher already DELIVERED (points legitimately spent) can never also be refunded —
@@ -3448,6 +4387,8 @@ export class RewardsService {
               RedemptionStatus.PENDING,
             ],
           },
+          // Issued-voucher refund block: never refund while a code is on the order.
+          ...noIssuedVoucherGuard(order.voucherCode),
         },
         data: { pointsDeducted: 0 },
       });
@@ -3463,7 +4404,7 @@ export class RewardsService {
       // Shared transition: the FAILED history row is now written only when the flip wins
       // (previously unconditional → a repeat failure on an already-terminal order added a
       // stray FAILED row, even on a DELIVERED voucher).
-      await transitionOrderStatus(tx, {
+      return transitionOrderStatus(tx, {
         orderId: order.id,
         guard: {
           status: {
@@ -3473,6 +4414,8 @@ export class RewardsService {
               RedemptionStatus.PENDING,
             ],
           },
+          // …and never mark it FAILED either (it would strand a live code on a "failed" order).
+          ...noIssuedVoucherGuard(order.voucherCode),
         },
         fromStatus: null,
         toStatus: RedemptionStatus.FAILED,
@@ -3486,7 +4429,29 @@ export class RewardsService {
         },
       });
     });
+    if (flip.count === 0) {
+      // Not flipped: already terminal (idempotent repeat — fine), OR a voucher code is on the
+      // still-open order (the guarded claims refused to refund/fail it) → flag for ops, loudly.
+      const now = await this.prisma.redemptionOrder.findFirst({
+        where: { id: order.id },
+        select: { status: true, voucherCode: true },
+      });
+      if (
+        now &&
+        hasIssuedVoucher(now.voucherCode) &&
+        (now.status === RedemptionStatus.CONFIRMED ||
+          now.status === RedemptionStatus.PROCESSING ||
+          now.status === RedemptionStatus.PENDING)
+      ) {
+        this.logger.error(
+          `[hubble] order ${order.orderNumber}: Hubble failure (${reason}) but a voucher code is on the order — NOT refunded/failed; flagged for ops`,
+        );
+        await this.markHubblePendingReconcile(order.id, 'HUBBLE_FAILED_VOUCHER_PRESENT');
+      }
+      return false;
+    }
     this.logger.warn(`[hubble] order ${order.orderNumber} FAILED + points refunded: ${reason}`);
+    return true;
   }
 
   /** Flag an order as needing reconcile (money held pending webhook / ops), no status flip. */
@@ -3528,14 +4493,6 @@ export class RewardsService {
     return { ...base, ...patch } as Prisma.InputJsonValue;
   }
 
-  /** The primary member-facing code: card number, else PIN. */
-  private primaryVoucherCode(voucher: HubbleVoucher | undefined): string | null {
-    if (!voucher) return null;
-    const num = (voucher.cardNumber ?? '').toString().trim();
-    const pin = (voucher.cardPin ?? '').toString().trim();
-    return num || pin || null;
-  }
-
   /** Build the metadata blob persisted on a delivered Hubble order (full card detail). */
   private buildHubbleVoucherMetadata(
     voucher: HubbleVoucher | undefined,
@@ -3548,11 +4505,10 @@ export class RewardsService {
         id: voucher?.id ?? null,
         cardType: voucher?.cardType ?? null,
         // AUDIT-FIX (PII): the card number / PIN are the SPENDABLE secret. The member
-        // receives them via the order's voucherCode (member-scoped select); we deliberately
-        // do NOT duplicate them into metadata, which operator order-reads return in full.
-        // Non-sensitive fields only here. ⚠️ OWNER-VERIFY: Amazon Pay free-denomination is
-        // assumed to be a single claim code (no separate PIN). If a product ever returns a
-        // distinct PIN the member needs, add a member-facing field for it.
+        // receives them via the order's voucherCode + voucherPin columns (member-scoped
+        // select; card+PIN products store the PIN in voucherPin — hubbleVoucherCredentials).
+        // We deliberately do NOT duplicate either into metadata, which operator order-reads
+        // return in full. Non-sensitive fields only here.
         validTill: voucher?.validTill ?? null,
         amount: voucher?.amount ?? null,
       },
@@ -3735,7 +4691,35 @@ export class RewardsService {
     });
     if (!category) throw new BadRequestException('Category not found in this tenant');
 
-    this.assertRedemptionRange(dto.minRedemptionPoints, dto.maxRedemptionPoints);
+    // ── Hubble per-brand amounts (GIFT_CARD + Hubble-enabled tenant only) ──────────────
+    // The productId is honoured ONLY for a Hubble-enabled tenant (byte-identical guard below);
+    // the flag is read ONLY when a productId was actually sent, so a non-Hubble tenant's create
+    // does no extra read. A Hubble GIFT_CARD is validated against the LIVE Hubble product, and an
+    // admin amounts list derives the points band (overriding any client-sent band).
+    const hubbleProductId = dto.hubbleProductId?.trim() || null;
+    const hubbleOn = hubbleProductId ? await this.isHubbleEnabledForTenant(user.clientId) : false;
+    const isHubbleGiftCard = !!hubbleProductId && hubbleOn && dto.redemptionMode === PayoutMode.GIFT_CARD;
+    const hubbleDenoms = dto.hubbleDenominations?.length
+      ? normaliseHubbleDenominations(dto.hubbleDenominations)
+      : null;
+    if (hubbleDenoms && !isHubbleGiftCard) {
+      throw new BadRequestException(
+        'Gift card amounts can only be chosen for a Hubble gift card (Hubble enabled for this program and a Hubble product ID set).',
+      );
+    }
+    let minRedemptionPoints = dto.minRedemptionPoints;
+    let maxRedemptionPoints = dto.maxRedemptionPoints;
+    if (isHubbleGiftCard) {
+      const band = await this.checkHubbleItemAgainstProduct(user.clientId, hubbleProductId!, {
+        denominations: hubbleDenoms,
+        minRedemptionPoints,
+        maxRedemptionPoints,
+        sellingValuePaise: dto.sellingValuePaise ?? null,
+      });
+      if (band) ({ minRedemptionPoints, maxRedemptionPoints } = band);
+    }
+
+    this.assertRedemptionRange(minRedemptionPoints, maxRedemptionPoints);
 
     // Selling value can't exceed MRP when both are supplied (price integrity + an honest
     // slash: slashPoints only shows when mrp > selling, so an inverted pair is a config error).
@@ -3745,8 +4729,8 @@ export class RewardsService {
     // item carries a min/max band and keeps pointsCost 0; everything else is FIXED and its
     // pointsCost is DERIVED from the ₹ selling value × the tenant conversion rate.
     const pointsCost = await this.resolveAdminPointsCost(user.clientId, {
-      minRedemptionPoints: dto.minRedemptionPoints,
-      maxRedemptionPoints: dto.maxRedemptionPoints,
+      minRedemptionPoints,
+      maxRedemptionPoints,
       deriveFromSellingValuePaise: dto.sellingValuePaise ?? null,
       // No stored fallback on CREATE: a FIXED item MUST supply a selling value.
       keepPointsCost: null,
@@ -3757,8 +4741,8 @@ export class RewardsService {
     // complete [min, max] range — reject a half-configured one (see the helper).
     this.assertFreeAmountComplete(
       pointsCost,
-      dto.minRedemptionPoints,
-      dto.maxRedemptionPoints,
+      minRedemptionPoints,
+      maxRedemptionPoints,
     );
 
     // Code unique within the tenant (among non-deleted items).
@@ -3780,8 +4764,11 @@ export class RewardsService {
     // never carry a hubbleProductId, so isHubbleEligible short-circuits for its items with
     // NO tenant-flag DB read — keeping the query profile identical, not just the behaviour.
     const hubbleMetadata =
-      dto.hubbleProductId?.trim() && (await this.isHubbleEnabledForTenant(user.clientId))
-        ? ({ hubbleProductId: dto.hubbleProductId.trim() } as Prisma.InputJsonValue)
+      hubbleProductId && hubbleOn
+        ? ({
+            hubbleProductId,
+            ...(hubbleDenoms ? { hubbleDenominations: hubbleDenoms } : {}),
+          } as Prisma.InputJsonValue)
         : undefined;
 
     const item = await this.prisma.rewardCatalog.create({
@@ -3800,8 +4787,9 @@ export class RewardsService {
         sellingValuePaise: dto.sellingValuePaise,
         redemptionMode: dto.redemptionMode,
         status,
-        minRedemptionPoints: dto.minRedemptionPoints,
-        maxRedemptionPoints: dto.maxRedemptionPoints,
+        // = the DTO band, except a Hubble amounts list derives it (see above).
+        minRedemptionPoints,
+        maxRedemptionPoints,
         stockQuantity: dto.stockQuantity,
         termsAndConditions: dto.termsAndConditions,
         sortOrder: dto.sortOrder ?? 0,
@@ -3830,17 +4818,89 @@ export class RewardsService {
     // DTO means "leave unchanged" (Prisma skips it); an explicit null/value is written —
     // so mirror that here (a bare `??` would collapse an explicit null into the stored
     // value and let a max-clearing PATCH slip a free-amount voucher into a broken state).
-    const effMin =
+    let effMin =
       dto.minRedemptionPoints !== undefined ? dto.minRedemptionPoints : existing.minRedemptionPoints;
-    const effMax =
+    let effMax =
       dto.maxRedemptionPoints !== undefined ? dto.maxRedemptionPoints : existing.maxRedemptionPoints;
-    this.assertRedemptionRange(effMin, effMax);
 
     // Validate the EFFECTIVE selling value vs MRP (payload value if present, else stored),
     // so a PATCH that raises selling value above MRP — or lowers MRP below it — is rejected.
     const effSellingValue =
       dto.sellingValuePaise !== undefined ? dto.sellingValuePaise : existing.sellingValuePaise;
     const effMrp = dto.mrpPaise !== undefined ? dto.mrpPaise : existing.mrpPaise;
+
+    // ── Hubble per-brand amounts (see createCatalogItem) ────────────────────────────────
+    // Resolve the EFFECTIVE productId / mode / amounts list after this PATCH. The tenant flag is
+    // read only when a productId is being set or one is already stored (never for a non-Hubble
+    // item). The live-product check runs only when a Hubble-relevant value actually CHANGES, so
+    // an unrelated edit (name, stock, T&C) never depends on Hubble being reachable.
+    const existingProductId = this.extractHubbleProductId(existing.metadata);
+    const existingDenoms = extractHubbleDenominations(existing.metadata);
+    let hubbleOn: boolean | null = null;
+    let effProductId: string | null;
+    if (dto.hubbleProductId !== undefined) {
+      const v = dto.hubbleProductId.trim();
+      hubbleOn = v ? await this.isHubbleEnabledForTenant(user.clientId) : false;
+      effProductId = v && hubbleOn ? v : null;
+    } else {
+      effProductId = existingProductId;
+    }
+    const effMode = dto.redemptionMode ?? existing.redemptionMode;
+    // An explicit FIXED-PRICE payload (min AND max explicitly null + a selling value) with no
+    // amounts field means "this is a fixed-price item now" → the list is cleared, consistently
+    // with the band being cleared (otherwise a stale list would re-derive a band over it).
+    const explicitFixedPrice =
+      dto.hubbleDenominations === undefined &&
+      dto.minRedemptionPoints === null &&
+      dto.maxRedemptionPoints === null &&
+      dto.sellingValuePaise != null;
+    let effDenoms: number[] =
+      dto.hubbleDenominations === undefined
+        ? explicitFixedPrice ? [] : existingDenoms
+        : dto.hubbleDenominations.length
+          ? normaliseHubbleDenominations(dto.hubbleDenominations)
+          : [];
+    if (effProductId && hubbleOn === null && (effDenoms.length || dto.hubbleDenominations !== undefined)) {
+      hubbleOn = await this.isHubbleEnabledForTenant(user.clientId);
+    }
+    const isHubbleGiftCard = !!effProductId && effMode === PayoutMode.GIFT_CARD;
+    if (dto.hubbleDenominations?.length && !(isHubbleGiftCard && hubbleOn)) {
+      throw new BadRequestException(
+        'Gift card amounts can only be chosen for a Hubble gift card (Hubble enabled for this program and a Hubble product ID set).',
+      );
+    }
+    // An amounts list only lives alongside a Hubble GIFT_CARD productId — drop it otherwise.
+    if (!isHubbleGiftCard) effDenoms = [];
+    const sameList = (a: number[], b: number[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+    const hubbleRelevantChange =
+      effProductId !== existingProductId ||
+      !sameList(effDenoms, existingDenoms) ||
+      effMin !== existing.minRedemptionPoints ||
+      effMax !== existing.maxRedemptionPoints ||
+      effSellingValue !== existing.sellingValuePaise ||
+      effMode !== existing.redemptionMode;
+    if (isHubbleGiftCard && hubbleRelevantChange) {
+      if (hubbleOn === null) hubbleOn = await this.isHubbleEnabledForTenant(user.clientId);
+      if (hubbleOn) {
+        const band = await this.checkHubbleItemAgainstProduct(user.clientId, effProductId!, {
+          denominations: effDenoms.length ? effDenoms : null,
+          minRedemptionPoints: effMin,
+          maxRedemptionPoints: effMax,
+          sellingValuePaise: effSellingValue,
+        });
+        if (band) {
+          effMin = band.minRedemptionPoints;
+          effMax = band.maxRedemptionPoints;
+        }
+      }
+    }
+    // The band to WRITE: a derived Hubble band overrides; otherwise the DTO value as before
+    // (undefined = leave unchanged).
+    const bandDerived = effDenoms.length > 0 && isHubbleGiftCard && hubbleRelevantChange && hubbleOn === true;
+    const writeMin = bandDerived ? effMin : dto.minRedemptionPoints;
+    const writeMax = bandDerived ? effMax : dto.maxRedemptionPoints;
+
+    this.assertRedemptionRange(effMin, effMax);
     this.assertSellingValueBounds(effSellingValue, effMrp);
 
     // PURE DERIVE (non-breaking transition). FREE_AMOUNT (a min/max band) keeps pointsCost 0.
@@ -3882,17 +4942,24 @@ export class RewardsService {
     // unchanged; a non-empty value sets metadata.hubbleProductId; an empty string
     // removes it (merge-preserving any other metadata keys). No schema change.
     let metadataUpdate: Prisma.InputJsonValue | undefined;
-    if (dto.hubbleProductId !== undefined) {
+    const denomsChanged = !sameList(effDenoms, existingDenoms);
+    if (dto.hubbleProductId !== undefined || denomsChanged) {
       const base =
         existing.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)
           ? { ...(existing.metadata as Record<string, unknown>) }
           : {};
-      const v = dto.hubbleProductId.trim();
-      // AUDIT-FIX (byte-identical): SET a productId only for a Hubble-enabled tenant (Bajaj);
-      // for any other tenant, or an empty value, CLEAR it. Clearing is always allowed, so a
-      // non-Hubble tenant can never end up with a hubbleProductId on an item.
-      if (v && (await this.isHubbleEnabledForTenant(user.clientId))) base.hubbleProductId = v;
-      else delete base.hubbleProductId;
+      if (dto.hubbleProductId !== undefined) {
+        // AUDIT-FIX (byte-identical): SET a productId only for a Hubble-enabled tenant (Bajaj);
+        // for any other tenant, or an empty value, CLEAR it. Clearing is always allowed, so a
+        // non-Hubble tenant can never end up with a hubbleProductId on an item. (effProductId
+        // already encodes exactly that rule.)
+        if (effProductId) base.hubbleProductId = effProductId;
+        else delete base.hubbleProductId;
+      }
+      if (denomsChanged) {
+        if (effDenoms.length) base.hubbleDenominations = effDenoms;
+        else delete base.hubbleDenominations;
+      }
       metadataUpdate = base as Prisma.InputJsonValue;
     }
 
@@ -3917,8 +4984,9 @@ export class RewardsService {
         // FIXED item (or a FREE→FIXED transition) force them null so a direct-API PATCH
         // can't leave stale [min,max] on the row; for a FREE item write the DTO value
         // (undefined = keep existing, which the guard has already validated as complete).
-        minRedemptionPoints: pointsCost === 0 ? dto.minRedemptionPoints : null,
-        maxRedemptionPoints: pointsCost === 0 ? dto.maxRedemptionPoints : null,
+        // (A Hubble amounts list writes its derived band — writeMin/writeMax.)
+        minRedemptionPoints: pointsCost === 0 ? writeMin : null,
+        maxRedemptionPoints: pointsCost === 0 ? writeMax : null,
         stockQuantity: dto.stockQuantity,
         termsAndConditions: dto.termsAndConditions,
         sortOrder: dto.sortOrder,

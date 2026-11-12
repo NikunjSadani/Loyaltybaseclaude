@@ -1,6 +1,8 @@
 # Per-Photo Geotag — capture GPS at each photo (schemes + visibility) — plan
 
-> ## ✅ BUILT + GATED + DUAL-AUDITED — on develop `ee00dd2` (2026-08-01), awaiting staging data-path verify + owner real-phone smoke.
+> ## ✅ IN PROD (status 2026-11-10) — `ee00dd2` is an ancestor of `origin/main` (rode cutover #23, 2026-08-03; part of the current prod release `e98f047`). Still DORMANT for every tenant (visibility not activated). The owner real-phone smoke below is NOT recorded — do it before activating visibility for a tenant.
+>
+> _(Original build note, 2026-08-01:)_ BUILT + GATED + DUAL-AUDITED on develop `ee00dd2`.
 > **NO DB migration** (per-photo geo `{key, geo:{lat,lng,accuracy,capturedAt}}` rides in the existing `formValues` JSON;
 > the visibility geo columns became aggregates). Backward-compatible (bare-string media values + legacy single-GPS captures
 > behave identically). Built as 6 disjoint streams (shared contract → FE capture / builders / backend geo-fence / review-report),
@@ -10,7 +12,7 @@
 > link (`viewMediaByToken`) no longer 404s geotagged scheme photos; (L) pin/distance aligned to the same (worst) photo; (L)
 > stale comment. New pure helper `api/src/visibility/geo-fence.helper.ts` (`evaluatePhotoFence`/`haversineMeters`/`isValidGeo`)
 > unit-spec'd (18 tests). **▶ REMAINING:** staging synthetic data-path verify (geo-fence pass/fail/unverifiable + admin display +
-> report) → **owner ~10-min real-phone smoke** (shoot 2 photos, confirm each geotagged + the fence verdict) → prod cutover.
+> report) → **owner ~10-min real-phone smoke** (shoot 2 photos, confirm each geotagged + the fence verdict) → prod cutover. _(Prod cutover done; smoke still not recorded.)_
 > **⚠️ OPEN owner posture decision (D1 residual):** a fence-required photo with NO GPS fix is flagged `GEO_UNVERIFIABLE` (surfaced
 > to the Gifsy approver), NOT hard-blocked — the legacy single-GPS path hard-blocks a missing fix. Owner to confirm keep-flag vs
 > tighten-to-hard-block (one-line change) at smoke.

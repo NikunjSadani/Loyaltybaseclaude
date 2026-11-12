@@ -22,7 +22,7 @@ vi.mock('next/headers', () => ({
 vi.mock('@/lib/platform/tenant-resolution', () => ({ resolveTenant: async () => ({ slug: 'deoleo' }) }));
 vi.mock('@/lib/platform/edge-trust', () => ({ resolveTrustedHost: () => 'deoleo.gifsy.in' }));
 
-import { verifyOTP } from '@/app/auth/login/actions';
+import { sendOTP, verifyOTP } from '@/app/auth/login/actions';
 
 function jwtWithExp(expSecs: number): string {
   const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
@@ -53,5 +53,44 @@ describe('verifyOTP — cookie TTLs', () => {
     const tokenMaxAge = setOf('token')?.opts.maxAge ?? 0;
     expect(tokenMaxAge).toBeGreaterThan(REFRESH_SECS - 5);
     expect(tokenMaxAge).toBeLessThanOrEqual(REFRESH_SECS);
+  });
+});
+
+/**
+ * 429 copy (2026-11-10). The API answers a throttler refusal with the raw Nest text
+ * "ThrottlerException: Too Many Requests", which the login page used to toast verbatim. Map it to
+ * friendly copy; the per-phone HOURLY DB cap returns its own clear message, which is kept as-is.
+ */
+describe('login actions — 429 copy', () => {
+  const FRIENDLY = 'Too many attempts. Please wait a minute and try again.';
+  const DB_CAP = 'Too many OTP requests for this number. Please wait a while before trying again.';
+  const respond = (status: number, body: unknown) =>
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: status < 400, status, json: () => Promise.resolve(body) }));
+
+  it('sendOTP: throttler 429 → friendly copy, never the raw ThrottlerException text', async () => {
+    respond(429, { success: false, error: 'ThrottlerException: Too Many Requests' });
+    const res = await sendOTP('9830011252', 'SMS');
+    expect(res).toEqual({ success: false, error: FRIENDLY });
+  });
+
+  it('verifyOTP: throttler 429 → friendly copy', async () => {
+    respond(429, { success: false, error: 'ThrottlerException: Too Many Requests' });
+    const res = await verifyOTP('9830011252', '123456');
+    expect(res).toEqual({ success: false, error: FRIENDLY });
+  });
+
+  it('sendOTP: 429 with no/unknown body → friendly copy', async () => {
+    respond(429, {});
+    expect((await sendOTP('9830011252', 'SMS')).error).toBe(FRIENDLY);
+  });
+
+  it('sendOTP: the per-phone hourly DB cap keeps its own message', async () => {
+    respond(429, { success: false, error: DB_CAP });
+    expect((await sendOTP('9830011252', 'SMS')).error).toBe(DB_CAP);
+  });
+
+  it('non-429 errors are unchanged (e.g. 401 no-account)', async () => {
+    respond(401, { success: false, error: 'No account found. Please contact your sales representative to complete KYC first.' });
+    expect((await sendOTP('9830011252', 'SMS')).error).toBe('No account found. Please contact your sales representative to complete KYC first.');
   });
 });

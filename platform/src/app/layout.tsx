@@ -71,8 +71,8 @@ export default async function RootLayout({
         <meta name="theme-color" content={config.branding.primaryColor} />
         {/* Per-tenant browser-tab favicon — the tenant's brand mark (same art as
             the installed-app icons). A console-provisioned tenant (§A-DOMAIN, no
-            committed static assets under public/icons/<slug>/) sets an absolute GCS
-            faviconUrl in its DB branding → prefer it. A legacy in-code tenant's
+            committed static assets under public/icons/<slug>/) has an uploaded
+            faviconUrl served by the public /api/public/branding-assets route → prefer it. A legacy in-code tenant's
             faviconUrl is a local /favicons/<slug>.ico path that was never committed
             (real art lives at /icons/<slug>/favicon.ico) → fall back to the static
             slug path. See resolveFaviconIcoHref. The 192 png stays slug-based (no

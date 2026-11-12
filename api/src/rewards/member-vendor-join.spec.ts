@@ -19,6 +19,8 @@ jest.mock('../common/reward-account.helper', () => ({
 }));
 
 const mockPrisma = {
+  // Tenant-wide cancelled-voucher reuse guard (voucher-write-guard.ts) — default: never cancelled.
+  cancelledVoucherCode: { findFirst: jest.fn().mockResolvedValue(null), createMany: jest.fn().mockResolvedValue({ count: 1 }) },
   channelPartner: { findFirst: jest.fn() },
   wallet: { findFirst: jest.fn() },
   // Per-outlet-type Loyalty gate (isLoyaltyEnabledForPartner): no outlet row → helper

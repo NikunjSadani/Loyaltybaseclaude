@@ -6,10 +6,11 @@
  * PAY2: renders batch code from API response
  * PAY3: renders transaction partner name from API response
  * PAY4: shows error message when fetch fails
+ * PAY5/6: UTR upload result lists rows skipped by an overlapping upload (row number + reason)
  */
 
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import PayoutsPage from '../page';
 
@@ -106,5 +107,83 @@ describe('PAY — Admin Payouts API wiring', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network error')));
     render(<PayoutsPage />);
     expect(await screen.findByText(/failed to load/i)).toBeInTheDocument();
+  });
+});
+
+/* UTR upload result: rows skipped because an overlapping upload already updated the payout
+ * (compare-and-set loser) are listed per row with the sheet row number + reason. */
+describe('PAY — UTR upload skipped rows', () => {
+  function stubUtrFlow(applyData: unknown) {
+    const submitted = [{ ...MOCK_BATCHES[0], status: 'SUBMITTED' }];
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      const u = String(url);
+      let body: unknown = { success: true, data: {} };
+      if (u.includes('/utr?apply=true')) {
+        body = { success: true, data: applyData };
+      } else if (u.includes('/api/payouts/batches')) {
+        body = { success: true, data: { batches: submitted, pagination: { page: 1, limit: 20, total: 1, pages: 1 } } };
+      } else if (u.includes('/api/payouts/fund')) {
+        body = { success: true, data: MOCK_FUND };
+      } else if (u.includes('/api/payouts/transactions')) {
+        body = { success: true, data: { transactions: MOCK_TRANSACTIONS, pagination: { page: 1, limit: 20, total: 1, pages: 1 } } };
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+    }));
+  }
+
+  async function uploadFile() {
+    render(<PayoutsPage />);
+    await screen.findByText('Upload Filled UTR');
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(['x'], 'utr.xlsx', {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    fireEvent.change(input, { target: { files: [file] } });
+    await screen.findByText(/UTR applied:/);
+  }
+
+  it('PAY5: lists each skipped row (row number + reason) alongside the applied counts', async () => {
+    stubUtrFlow({
+      applied: true, paidCount: 1, failedCount: 0, reversedCount: 0,
+      skipped: [
+        { rowNum: 3, txnId: 'txn-a', outcome: 'FAILED', reason: 'Payout already updated by another upload' },
+        { rowNum: 5, txnId: 'txn-c', outcome: 'PAID', reason: 'Payout already updated by another upload' },
+      ],
+    });
+    await uploadFile();
+    expect(screen.getByText(/UTR applied: 1 paid, 0 failed/)).toBeInTheDocument();
+    const box = await screen.findByTestId('utr-skipped');
+    expect(within(box).getByText('2 rows not applied')).toBeInTheDocument();
+    const items = within(box).getAllByRole('listitem').map((li) => li.textContent);
+    expect(items).toEqual([
+      'Row 3 (txn-a): Payout already updated by another upload',
+      'Row 5 (txn-c): Payout already updated by another upload',
+    ]);
+  });
+
+  it('PAY7: FAILED rows whose order holds a voucher code are listed as "not refunded" (order left unchanged)', async () => {
+    stubUtrFlow({
+      applied: true, paidCount: 0, failedCount: 1, reversedCount: 0, skipped: [],
+      blockedOrders: [
+        { rowNum: 4, txnId: 'txn-b', orderId: 'o9', orderNumber: 'RDM-9',
+          reason: 'A voucher code is on this order — points not refunded and order left unchanged; needs ops review' },
+      ],
+    });
+    await uploadFile();
+    const box = await screen.findByTestId('utr-blocked-orders');
+    expect(within(box).getByText('1 order not refunded (voucher code on the order)')).toBeInTheDocument();
+    expect(within(box).getByRole('listitem').textContent).toBe(
+      'Row 4 (RDM-9): A voucher code is on this order — points not refunded and order left unchanged; needs ops review',
+    );
+    // No "rows not applied" header when only blocked orders are present.
+    expect(screen.queryByText(/rows? not applied/)).not.toBeInTheDocument();
+  });
+
+  it('PAY6: no skipped block when nothing was skipped (or an older API omits the field)', async () => {
+    stubUtrFlow({ applied: true, paidCount: 2, failedCount: 1, reversedCount: 1 });
+    await uploadFile();
+    expect(screen.getByText(/UTR applied: 2 paid, 1 failed/)).toBeInTheDocument();
+    expect(screen.queryByTestId('utr-skipped')).not.toBeInTheDocument();
   });
 });

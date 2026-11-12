@@ -28,6 +28,12 @@ export class ListTransactionsQueryDto {
   @IsString()
   partnerId?: string;
 
+  // The admin Payouts page lists one batch's transactions via ?batchId= (it was sent
+  // but rejected by forbidNonWhitelisted, so a batch's table was always empty).
+  @IsOptional()
+  @IsString()
+  batchId?: string;
+
   // When true, return only unbatched waiting transactions (batchId null + PENDING)
   // so an operator can see what's eligible for the batch-from-pending sweep.
   @IsOptional()

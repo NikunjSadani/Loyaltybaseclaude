@@ -70,6 +70,19 @@ export interface FeatureFlags {
   // toggle (included in FeatureKey). Default OFF; Deoleo stays OFF. See
   // platform/docs/plans/PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md.
   captureBankAtRedemption: boolean;
+  // This month's offers: the switch for the WHOLE feature. When ON, the admin console shows the
+  // "This Month's Offers" page (nav + /admin/offers route) where the tenant publishes display-only
+  // offer tiles, AND the partner dashboard mounts the "This month's offers" section (which then
+  // shows only published, currently valid tiles matching the outlet). When OFF, neither appears and
+  // the partner dashboard makes no offers request. This IS a gifsy-console toggle (included in
+  // FeatureKey). Default OFF; Deoleo stays OFF. See platform/docs/plans/OFFER-TILES-PLAN.md.
+  offerTiles: boolean;
+  // Sales Import (DMS invoice-line file → importer-owned monthly KPI achievements). When ON, the admin
+  // console shows the Sales Import pages (upload, preview/apply per month, month close, column mapping
+  // and KPI definitions). The backend 403s every Sales Import route when OFF. This IS a gifsy-console
+  // toggle (included in FeatureKey). Default OFF; Deoleo stays OFF. See
+  // platform/docs/plans/SALES-IMPORT-PIPELINE-PLAN.md.
+  salesImport: boolean;
 
   // Partner app tab visibility (CLIENT_ADMIN cannot change these)
   partnerApp: {

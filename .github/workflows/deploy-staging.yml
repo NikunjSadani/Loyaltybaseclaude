@@ -78,6 +78,26 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
+      # PREFLIGHT — runs FIRST, before the image build and BEFORE the staging DB migrations (mirrors deploy.yml).
+      # The "Deploy API to Cloud Run staging" step binds SALES_IMPORT_DRAIN_SECRET_STAGING via --set-secrets; if
+      # it is missing that step fails AFTER migrations already ran. Fail HERE instead, with nothing changed.
+      # METADATA-ONLY: `gcloud secrets versions describe` reads a version's state, NEVER its value. The deployer
+      # SA (GCP_SA_KEY = gifsy-deployer) needs roles/secretmanager.viewer (metadata only) — terraform/iam.tf
+      # `deployer_secret_viewer`; one-time grant in platform/docs/plans/BAJAJ-PROD-GO-LIVE-CHECKLIST.md § F3 runbook.
+      - name: Preflight — required Secret Manager secrets exist (metadata only)
+        run: |
+          missing=0
+          for s in SALES_IMPORT_DRAIN_SECRET_STAGING; do
+            state="$(gcloud secrets versions describe latest --secret="$s" --project="${{ env.PROJECT_ID }}" --format='value(state)' 2>/dev/null || true)"
+            if [ "$state" != "ENABLED" ]; then
+              echo "::error::Secret Manager secret '$s' is missing, has no ENABLED latest version, or is not visible to the deployer SA (needs roles/secretmanager.viewer). Create it (owner, console) BEFORE deploying — see SALES-IMPORT-PIPELINE-PLAN.md §14 / BAJAJ-PROD-GO-LIVE-CHECKLIST.md § F3 runbook. Nothing was built, migrated or deployed."
+              missing=1
+            else
+              echo "ok: $s (latest version ENABLED)"
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
 
@@ -108,15 +128,56 @@ jobs:
             --service-account=gifsy-api-sa@gifsy-platform.iam.gserviceaccount.com \
             --execute-now --wait
 
+      # SALES IMPORT worker (plan SALES-IMPORT-PIPELINE-PLAN.md §14, D-4). Deploy-only (NO --execute-now):
+      # the API starts executions via the Cloud Run Admin API `jobs/gifsy-sales-import-staging:run`
+      # (SALES_IMPORT_RUNNER=job, no overrides) and the Cloud Scheduler drain is the fallback.
+      #   • Runs AFTER the migrate step (sales-import migrations must be applied before the worker can run)
+      #     and BEFORE the API deploy, with the SAME image tag as the API — the worker never runs a stale image.
+      #   • Network / Cloud SQL / service-account wiring is copied from gifsy-migrate-staging above. The job
+      #     runs as gifsy-api-sa (already has cloudsql.client, secretAccessor, storage.objectAdmin).
+      #   • Heap: 2Gi job, node --max-old-space-size=1700 (worker.main.ts also enforces it via worker-heap.ts).
+      #   • ONE-TIME infra (owner-gated, NOT done by this workflow): IAM binding roles/run.jobsExecutor for
+      #     gifsy-api-sa ON THIS JOB (after the first deploy creates it), the SALES_IMPORT_DRAIN_SECRET_STAGING
+      #     secret, and the Cloud Scheduler drain job. Without the IAM binding the API's kick 403s, logs a
+      #     warning and the import stays QUEUED (fail-safe) — it never breaks the API.
+      - name: Deploy Sales Import worker job (staging)
+        run: |
+          gcloud run jobs deploy gifsy-sales-import-staging \
+            --image=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:staging-${{ github.sha }} \
+            --region=${{ env.REGION }} \
+            --command=node \
+            --args=--max-old-space-size=1700,dist/sales-import/worker.main.js \
+            --memory=2Gi \
+            --cpu=1 \
+            --task-timeout=3600 \
+            --max-retries=1 \
+            --tasks=1 \
+            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},NODE_OPTIONS=--max-old-space-size=1700" \
+            --set-secrets="DATABASE_URL=DATABASE_URL_STAGING:latest,GCS_BUCKET=GCS_BUCKET:latest,GCP_PROJECT_ID=GCP_PROJECT_ID:latest" \
+            --network=gifsy-vpc \
+            --subnet=gifsy-subnet-asia-south1 \
+            --vpc-egress=private-ranges-only \
+            --set-cloudsql-instances=${{ env.SQL_INSTANCE }} \
+            --service-account=gifsy-api-sa@gifsy-platform.iam.gserviceaccount.com
+
+      # SALES IMPORT (API side): SALES_IMPORT_RUNNER=job + SALES_IMPORT_JOB + GCP_PROJECT (read by
+      # api/src/sales-import/ingest/sales-import-runner.service.ts; GCP_REGION is already set) and
+      # SALES_IMPORT_DRAIN_SECRET (read by sales-import-drain.controller.ts; fail-closed 403 when unset).
+      #   ⚠️ The Secret Manager secret SALES_IMPORT_DRAIN_SECRET_STAGING MUST exist (and gifsy-api-sa must be able
+      #   to read it) BEFORE this lands on develop — a --set-secrets reference to a missing secret fails this
+      #   whole API deploy step (the staging API, incl. Deoleo staging UAT, stays on its previous revision).
+      #
       # HUBBLE MONEY (Bajaj-only GIFT_CARD auto-issuance):
       #   • HUBBLE_BASE_URL + HUBBLE_CLIENT_ID_STAGING / HUBBLE_CLIENT_SECRET_STAGING are wired below.
       #     Create those two Secret Manager secrets before the next deploy or gcloud will error.
       #   • HUBBLE_WEBHOOK_SECRET is wired below from the WebhookHubbleStaging secret, so the webhook
       #     ENFORCES Hubble's X-Verify HMAC on staging too (its value must equal the portal's Webhook
-      #     Signature). Remove this mapping to fall back to dev-bypass (ALLOW_FIXED_OTP=true here).
-      #   • TODO(prod): add HUBBLE_BASE_URL=https://api.myhubble.money + prod HUBBLE_CLIENT_ID/SECRET
-      #     and a REQUIRED HUBBLE_WEBHOOK_SECRET (fail-closed on prod) to deploy.yml. Do NOT add prod
-      #     secrets here.
+      #     Signature). The webhook is FAIL-CLOSED everywhere (no dev-bypass): removing this mapping
+      #     makes every Hubble webhook call 403.
+      #   • The code reads the env-neutral HUBBLE_CLIENT_ID / HUBBLE_CLIENT_SECRET first and falls back
+      #     to the *_STAGING names below, so staging is unchanged. PROD binds the neutral names in
+      #     deploy.yml (HUBBLE_CLIENT_ID / HUBBLE_CLIENT_SECRET / HUBBLE_WEBHOOK_SECRET + base URL
+      #     https://api.myhubble.money). Do NOT add prod secrets here.
       - name: Deploy API to Cloud Run staging
         run: |
           gcloud run deploy gifsy-api-staging \
@@ -137,7 +198,7 @@ jobs:
             --subnet=gifsy-subnet-asia-south1 \
             --vpc-egress=private-ranges-only \
             --startup-probe=httpGet.path=/health/ready,httpGet.port=4000,initialDelaySeconds=0,periodSeconds=5,timeoutSeconds=3,failureThreshold=30 \
-            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=60m,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,FIXED_OTP=123456,ALLOW_FIXED_OTP=true,PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in,REPORTS_FROM_EMAIL=reports@notify.gifsy.in,HUBBLE_BASE_URL=https://api.dev.myhubble.money" \
+            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=60m,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,FIXED_OTP=123456,ALLOW_FIXED_OTP=true,PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in,REPORTS_FROM_EMAIL=reports@notify.gifsy.in,HUBBLE_BASE_URL=https://api.dev.myhubble.money,SALES_IMPORT_RUNNER=job,SALES_IMPORT_JOB=gifsy-sales-import-staging,GCP_PROJECT=${{ env.PROJECT_ID }}" \
             --set-secrets="\
               DATABASE_URL=DATABASE_URL_STAGING:latest,\
               JWT_SECRET=JWT_SECRET_STAGING:latest,\
@@ -158,12 +219,14 @@ jobs:
               EXPIRE_SWEEP_SECRET=EXPIRE_SWEEP_SECRET_STAGING:latest,\
               KYC_CLEANUP_SECRET=KYC_CLEANUP_SECRET_STAGING:latest,\
               VISIBILITY_REMINDER_SECRET=VISIBILITY_REMINDER_SECRET_STAGING:latest,\
+              SALES_IMPORT_DRAIN_SECRET=SALES_IMPORT_DRAIN_SECRET_STAGING:latest,\
               CORS_ORIGINS=CORS_ORIGINS_STAGING:latest"
 
   # ── Build & Deploy Frontend (staging) ────────────────────────────────────────
   deploy-frontend-staging:
     name: Deploy Frontend → gifsy-frontend-staging
-    needs: test
+    # Same ordering as prod: never ship a new frontend against an API deploy that failed.
+    needs: [test, deploy-api-staging]
     runs-on: ubuntu-latest
     permissions:
       contents: read

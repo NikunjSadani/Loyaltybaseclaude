@@ -38,6 +38,10 @@ jest.mock('../common/reward-account.helper', () => ({
 
 // ── Shared Prisma mock ────────────────────────────────────────────────────────
 const mockPrisma = {
+  // (tenant, code) advisory lock taken by voucher issuance (voucher-write-guard lockVoucherCode).
+  $executeRaw: jest.fn().mockResolvedValue(1),
+  // Tenant-wide cancelled-voucher reuse guard (voucher-write-guard.ts) — default: never cancelled.
+  cancelledVoucherCode: { findFirst: jest.fn().mockResolvedValue(null), createMany: jest.fn().mockResolvedValue({ count: 1 }) },
   vendor: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn() },
   vendorTenantGrant: { findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
   giftCategory: { findFirst: jest.fn(), findMany: jest.fn() },
@@ -46,7 +50,11 @@ const mockPrisma = {
   redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), count: jest.fn() },
   redemptionStatusHistory: { create: jest.fn() },
   channelPartner: { findFirst: jest.fn() },
-  otpCode: { findFirst: jest.fn(), update: jest.fn() },
+  // updateMany: the OTP attempt give-back / conditional mark-used (common/otp-attempt).
+  otpCode: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+  // The claim-before-compare OTP attempt is ONE `UPDATE "otp_codes" … RETURNING "attempts"` — the claim
+  // wins by default as attempt 1.
+  $queryRaw: jest.fn().mockResolvedValue([{ attempts: 1 }]),
   client: { findMany: jest.fn(), findFirst: jest.fn() },
   user: { findMany: jest.fn(), create: jest.fn() },
   auditLog: { create: jest.fn().mockResolvedValue({}) },

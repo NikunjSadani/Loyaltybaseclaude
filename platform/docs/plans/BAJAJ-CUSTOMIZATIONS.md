@@ -1,9 +1,20 @@
 # Bajaj — Customizations & Change Log (living doc)
 
 Single source of truth for every change **exclusive to, or driven by, the Bajaj tenant**
-(slug `bajaj`; staging host `uat-bajaj.gifsy.in`; canonical/prod `bajaj.gifsy.in`).
+(slug `bajaj`; staging host `uat-bajaj.gifsy.in`; prod hosts `bajajloyalty.gifsy.in` (primary) + `bajaj.gifsy.in`).
 Keep Deoleo + all other tenants byte-identical. Update this doc in the SAME pass as any
-Bajaj change. Last updated: 2026-10-29.
+Bajaj change. Last updated: 2026-11-11.
+
+> **📍 STATE 2026-11-11.** **Prod:** tenant `bajaj` created by the owner 2026-11-10 — status ONBOARDING; domains
+> `bajajloyalty.gifsy.in` (primary) + `bajaj.gifsy.in`; invoice prefix `TGSL-BCCL-`; 12 feature flags; logo + white wordmark
+> uploaded. Until the next prod release, prod renders the generic "LoyaltyBase" shell on `bajajloyalty.gifsy.in` and the uploaded
+> logo URLs return 403 (both fixed in the release). **Staging:** the release (develop `7c85d9fd`, 2026-11-11) carries the Bajaj prod
+> config screens (behaviour flags, partner-app tabs, OTP templates card GIFSY_ADMIN-only, `KpiDef.outletType`, KPI edit fix), Hubble
+> env-neutral creds + prod deploy preflight, branding/tenant-routing fixes and Sales Import (`salesImport` ON for bajaj on staging;
+> real DMS file ingested → READY import `6b681de7-1495-4129-9471-0fdc73a58e3b`, NOT applied until the bajaj importer-owned KPIs
+> exist — owner D-8/D-9). Staging-verified: Bajaj + Deoleo login pages render their own branding; OTP templates guards (409 wrong
+> brand / 400 bad id / 403 generic PUT); KPI edit 201. Remaining prod steps: `BAJAJ-PROD-GO-LIVE-CHECKLIST.md`. Bajaj TDS import
+> still BLOCKED on vendor PANs.
 
 > ⚠️ **Architectural caveat (applies to everything below):** several Bajaj behaviors are keyed
 > on the literal `slug === 'bajaj'` (e.g. `employee-hierarchy.ts:85`). This is brittle — it
@@ -22,9 +33,15 @@ Bajaj change. Last updated: 2026-10-29.
 - **Secrets (staging):** `HUBBLE_CLIENT_ID_STAGING` / `HUBBLE_CLIENT_SECRET_STAGING` /
   `WebhookHubbleStaging`→`HUBBLE_WEBHOOK_SECRET` (all in GCP Secret Manager, project `gifsy-platform`).
   Webhook URL: `https://gifsy-api-staging-4d4n5mc6yq-el.a.run.app/v1/hubble/webhook` (enforcing X-Verify).
-- **Open items:** rotate the Hubble Client Secret (was shared in a screenshot); PROD wiring
-  (prod creds + required `HUBBLE_WEBHOOK_SECRET` fail-closed in `deploy.yml` + base URL
-  `api.myhubble.money`); static-egress-IP decision (prod min-instances=1 already warm).
+- **Prod wiring (`feat/bajaj-prod-gaps`, 2026-11-10; on develop/staging since `7c85d9fd` 2026-11-11; NOT on prod yet):** the code reads the
+  env-neutral `HUBBLE_CLIENT_ID` / `HUBBLE_CLIENT_SECRET` / `HUBBLE_WEBHOOK_SECRET` (falling back to
+  the `*_STAGING` names, so staging is unchanged); the webhook is fail-closed everywhere (no dev-bypass);
+  prod `deploy.yml` binds the three secrets + `HUBBLE_BASE_URL=https://api.myhubble.money`.
+  Prod webhook URL (confirm the Cloud Run URL first): `https://gifsy-api-4d4n5mc6yq-el.a.run.app/v1/hubble/webhook`.
+  Owner steps (secrets MUST exist before the prod deploy): `BAJAJ-PROD-GO-LIVE-CHECKLIST.md` § F3 runbook.
+- **Open items:** rotate the Hubble Client Secret (was shared in a screenshot); create the prod
+  secrets BEFORE the prod deploy (the deploy preflight stops at step 1 otherwise; the deployer's
+  `secretmanager.viewer` grant is done) + register the prod webhook (runbook above); static-egress-IP decision (prod min-instances=1 already warm).
 
 ## 2. VOUCHER_ISSUED notification — voucher code to the owner (ALL tenants, not Bajaj-only)
 - **What:** when a voucher code is issued (Hubble auto-issue OR manual fulfilment), send the
@@ -32,7 +49,7 @@ Bajaj change. Last updated: 2026-10-29.
   (vars: ownerName, amount `₹N`, program `<tenant> Loyalty`, voucherName, code). Transactional
   (exempt from the WhatsApp master switch, like OTP); disable-able per tenant via the panel.
 - **Scope:** owner chose **all tenants, all vouchers** (incl. live Deoleo manual fulfilment).
-- **Status:** ✅ Built, independently audited, fixes applied, **gates green. NOT pushed** (UAT hold).
+- **Status:** ✅ Built, independently audited, fixes applied, gates green — **SHIPPED: on `main`/prod** (`ed16d51d`, then `9b90e82a` defaulted VOUCHER_ISSUED to both channels platform-wide). _(Was "NOT pushed, UAT hold" in 2026-10.)_
 - **Pre-push:** explicit nod that the Deoleo manual-voucher notification is intended; confirm the
   `voucher_code` template is approved on each sending MSG91 number.
 

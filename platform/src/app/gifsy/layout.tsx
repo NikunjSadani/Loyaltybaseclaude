@@ -109,7 +109,7 @@ export default function GifsyLayout({ children }: { children: React.ReactNode })
               Platform Home
             </Link>
           )}
-          <button onClick={logout} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-white/40 hover:text-red-400 hover:bg-red-500/10 transition-colors">
+          <button onClick={() => { void logout(); }} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-white/40 hover:text-red-400 hover:bg-red-500/10 transition-colors">
             <LogOut className="w-4 h-4" />
             Sign Out
           </button>

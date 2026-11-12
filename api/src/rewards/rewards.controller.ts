@@ -12,6 +12,7 @@ import {
   SalesRedeemDto,
   TransitionOrderDto,
   UpdateOrderDto,
+  VoucherCancelledWithVendorDto,
   WishlistAddDto,
 } from './dto/rewards.dto';
 
@@ -158,8 +159,9 @@ export class RewardsController {
   }
 
   // Orders reads are multi-audience + self-scoping in the service (partner → own,
-  // GIFSY → all-tenant, others → empty; getOrder additionally throws Forbidden for
-  // a non-owner non-GIFSY). Intentionally NOT @Roles-gated: the admin Gift-Catalogue
+  // GIFSY → all-tenant, CLIENT_ADMIN → its OWN tenant's orders, all partners — the view-only
+  // admin Fulfilment list; others → empty; getOrder additionally throws Forbidden for a
+  // non-owner non-GIFSY). Intentionally NOT @Roles-gated: the admin Gift-Catalogue
   // Fulfilment tab (CLIENT_ADMIN) also reads this, and gating it to partners 403'd
   // that page. Safety is the service-layer scoping, not a role allowlist here.
   @Get('orders')
@@ -215,5 +217,32 @@ export class RewardsController {
     @Body() dto: TransitionOrderDto,
   ) {
     return this.rewards.transitionOrder(user, id, dto);
+  }
+
+  /**
+   * GIFSY_ADMIN-only "Voucher cancelled with vendor": clears the issued voucher code (CAS on the
+   * current code, audited with the reason + a masked code) so a refund transition is allowed.
+   * The service re-checks GIFSY_ADMIN (RolesGuard would otherwise admit a permissioned staff).
+   */
+  @Post('orders/:id/voucher-cancelled')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('rewards:manage_orders')
+  voucherCancelledWithVendor(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: VoucherCancelledWithVendorDto,
+  ) {
+    return this.rewards.voucherCancelledWithVendor(user, id, dto.reason);
+  }
+
+  /**
+   * GIFSY_ADMIN-only "Retry with Hubble": re-runs the idempotent Hubble reconcile for one flagged
+   * order (audited). The service re-checks GIFSY_ADMIN.
+   */
+  @Post('orders/:id/hubble-reconcile')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('rewards:manage_orders')
+  retryHubbleReconcile(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.rewards.retryHubbleReconcile(user, id);
   }
 }

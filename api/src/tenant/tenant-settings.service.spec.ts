@@ -29,7 +29,7 @@ describe('TenantSettingsService', () => {
     expect(s.minVoucherFreeAmount).toBe(250);
     expect(s.paceAmberThreshold).toBe(10);
     expect(s.redemptionChannels).toEqual({ physicalGifts: true, vouchers: true, bankTransfer: true });
-    expect(s.salesApp).toEqual({ ledgerLabel: 'Wallet', upiEnabled: false });
+    expect(s.salesApp).toEqual({ ledgerLabel: 'Wallet', upiEnabled: false, upiManualEntry: false });
     expect(s.creditsPayouts.notifyEmails).toEqual([]);
     // Master visibility switch defaults OFF (opt-in per tenant).
     expect(s.visibilityEnabled).toBe(false);
@@ -48,6 +48,24 @@ describe('TenantSettingsService', () => {
       makePrisma([{ settingKey: 'kycGstinRequired', settingValue: 'no' }]),
     ).getEffectiveSettings('deoleo');
     expect(bad.kycGstinRequired).toBe(true);
+  });
+
+  it('getEffectiveSettings({fresh:true}) bypasses the per-instance cache and refreshes it (R6)', async () => {
+    const rows: { settingKey: string; settingValue: unknown }[] = [
+      { settingKey: 'salesApp', settingValue: { upiManualEntry: false } },
+    ];
+    const prisma = makePrisma(rows);
+    prisma.programSetting.findMany.mockImplementation(() => Promise.resolve([...rows]));
+    const svc = new TenantSettingsService(prisma);
+    expect((await svc.getEffectiveSettings('bajaj')).salesApp.upiManualEntry).toBe(false);
+    // Flag flipped ON by a write served on ANOTHER instance — this instance's cache is stale.
+    rows[0] = { settingKey: 'salesApp', settingValue: { upiManualEntry: true } };
+    expect((await svc.getEffectiveSettings('bajaj')).salesApp.upiManualEntry).toBe(false); // cached
+    expect((await svc.getEffectiveSettings('bajaj', { fresh: true })).salesApp.upiManualEntry).toBe(true);
+    expect(prisma.programSetting.findMany).toHaveBeenCalledTimes(2);
+    // …and the fresh read refreshed the cache for subsequent plain reads.
+    expect((await svc.getEffectiveSettings('bajaj')).salesApp.upiManualEntry).toBe(true);
+    expect(prisma.programSetting.findMany).toHaveBeenCalledTimes(2);
   });
 
   describe('getVisibilityEnabledUncached', () => {
@@ -104,6 +122,70 @@ describe('TenantSettingsService', () => {
       makePrisma([{ settingKey: 'visibilityEnabled', settingValue: 'yes' }]),
     ).getEffectiveSettings('deoleo');
     expect(bad.visibilityEnabled).toBe(false);
+  });
+
+  it('overlays salesApp.upiManualEntry=true; a partial salesApp PUT keeps the default (false)', async () => {
+    const on = await new TenantSettingsService(
+      makePrisma([{ settingKey: 'salesApp', settingValue: { upiManualEntry: true } }]),
+    ).getEffectiveSettings('deoleo');
+    expect(on.salesApp.upiManualEntry).toBe(true);
+
+    // A partial salesApp overlay that omits upiManualEntry keeps the default (false).
+    const partial = await new TenantSettingsService(
+      makePrisma([{ settingKey: 'salesApp', settingValue: { upiEnabled: true } }]),
+    ).getEffectiveSettings('deoleo');
+    expect(partial.salesApp.upiManualEntry).toBe(false);
+  });
+
+  it('Fix B — salesApp.upiManualEntry=true FORCES uniquenessPolicy.upi=true even when the policy flag is off', async () => {
+    // Manual UPI entry can collide (a hand-typed VPA), so dedup must run regardless of the
+    // uniqueness policy flag. upiManualEntry=true + upi=false → effective upi flipped to true.
+    const forced = await new TenantSettingsService(
+      makePrisma([
+        { settingKey: 'salesApp',         settingValue: { upiManualEntry: true } },
+        { settingKey: 'uniquenessPolicy', settingValue: { gst: true, phone: true, bank: false, upi: false } },
+      ]),
+    ).getEffectiveSettings('deoleo');
+    expect(forced.uniquenessPolicy.upi).toBe(true);
+
+    // QR-only tenant (upiManualEntry=false) with upi=false → effective upi stays false (unaffected).
+    const unaffected = await new TenantSettingsService(
+      makePrisma([
+        { settingKey: 'salesApp',         settingValue: { upiManualEntry: false } },
+        { settingKey: 'uniquenessPolicy', settingValue: { gst: true, phone: true, bank: false, upi: false } },
+      ]),
+    ).getEffectiveSettings('deoleo');
+    expect(unaffected.uniquenessPolicy.upi).toBe(false);
+  });
+
+  it('uniquenessPolicyStored exposes the STORED policy (pre-Fix-B) while uniquenessPolicy stays derived', async () => {
+    // stored upi=false + upiManualEntry=true → derived upi=true, stored view upi=false
+    // (so the admin UI never writes the derived value back).
+    const derived = await new TenantSettingsService(
+      makePrisma([
+        { settingKey: 'salesApp',         settingValue: { upiManualEntry: true } },
+        { settingKey: 'uniquenessPolicy', settingValue: { gst: true, phone: true, bank: true, upi: false } },
+      ]),
+    ).getEffectiveSettings('deoleo');
+    expect(derived.uniquenessPolicy.upi).toBe(true);
+    expect(derived.uniquenessPolicyStored.upi).toBe(false);
+    expect(derived.uniquenessPolicyStored).toEqual({ gst: true, phone: true, bank: true, upi: false });
+    // Separate objects — mutating one never leaks into the other.
+    expect(derived.uniquenessPolicyStored).not.toBe(derived.uniquenessPolicy);
+
+    // stored upi=true → both true.
+    const storedOn = await new TenantSettingsService(
+      makePrisma([
+        { settingKey: 'salesApp',         settingValue: { upiManualEntry: true } },
+        { settingKey: 'uniquenessPolicy', settingValue: { gst: true, phone: true, bank: false, upi: true } },
+      ]),
+    ).getEffectiveSettings('deoleo');
+    expect(storedOn.uniquenessPolicy.upi).toBe(true);
+    expect(storedOn.uniquenessPolicyStored.upi).toBe(true);
+
+    // No rows → stored view equals the default policy.
+    const none = await new TenantSettingsService(makePrisma([])).getEffectiveSettings('deoleo');
+    expect(none.uniquenessPolicyStored).toEqual({ gst: true, phone: true, bank: false, upi: false });
   });
 
   it('derives the default conversionRate from POINTS_CONVERSION_RATE env', async () => {

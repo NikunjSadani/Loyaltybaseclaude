@@ -8,7 +8,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, KycFieldKey, KycDocumentType, KycFieldSource, KycStatus, EntityType, GstRegistrationType } from '@prisma/client';
+import { Prisma, KycFieldKey, KycDocumentType, KycFieldSource, KycStatus, EntityType, GstRegistrationType, PaymentDetailsStatus } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as XLSX from 'xlsx';
@@ -24,6 +24,7 @@ import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import { EventKey } from '../notification-templates/notification-templates.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
+import { claimOtpAttempt, markOtpUsed, whyOtpClaimRefused } from '../common/otp-attempt';
 import { sniffFileType } from '../common/file-signature';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { isActivePhoneConflict } from '../common/phone-conflict';
@@ -73,6 +74,7 @@ import {
 import {
   checkGroupUniqueness,
   acquireIdentityLocks,
+  isLockConflictError,
   normalizeIdentityValue,
   resolveGroupPan,
   resolveGroupIdentity,
@@ -81,6 +83,26 @@ import {
   acquireGroupClassificationLock,
   type CarryForwardDoc,
 } from '../common/partner-group.helper';
+import {
+  PayoutRail,
+  type PayoutField,
+  PAYOUT_RAIL_FIELDS,
+  PAYOUT_ROUTING_FIELDS,
+  asUpiCaptureMethod,
+  carriedPayoutRouting,
+  carriesBothPayoutRails,
+  effectiveProposedPayout,
+  payoutCarriedChanged,
+  PAYOUT_CARRIED_KEY,
+  stripPayoutCarried,
+  incompletePayoutRailMessage,
+  payoutFieldEditability,
+  payoutRailFor,
+  isPayoutRailFullyStaged,
+  resolveProposedPayoutRail,
+  resolveReKycPayout,
+  resolveUpiCaptureMethod,
+} from '../common/payout-rail.helper';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide, isGifsyOperator } from '../common/tenant-scope';
@@ -147,6 +169,26 @@ const KYC_EVENT_ROUTING: Record<string, { eventKey?: EventKey; subject: string }
   KYC_RE_UPLOAD_REQUIRED: { subject: 'KYC re-upload required' },
   KYC_RE_KYC_REQUIRED: { subject: 'Re-KYC required' },
 };
+
+/** 409 refusing a re-KYC approval whose payout details changed after submission (F2 / FIX 2 / lock conflict). */
+const PAYOUT_CHANGED_AFTER_SUBMIT_MESSAGE =
+  "The outlet's payment details changed after this KYC was submitted — reject it and submit a new re-KYC";
+
+/**
+ * KYC consent OTP send cap (sendConsentOtp): at most this many sends per (normalised phone, OUTLET
+ * PARTNER — all its KYC submissions) per rolling window. Per outlet so a fresh draft never resets the
+ * budget, while group onboarding (sibling outlets = distinct partners sharing one owner phone) is
+ * never blocked by a sibling's sends.
+ */
+export const KYC_CONSENT_OTP_MAX_PER_WINDOW = 5;
+/**
+ * Overall ceiling on top of the per-outlet cap (owner decision 2026-11-11): at most this many
+ * KYC_CONSENT sends per normalised phone per rolling window ACROSS ALL outlets/submissions of the
+ * caller's tenant — bounds a group owner's number even when many sibling outlets are onboarded.
+ */
+export const KYC_CONSENT_OTP_MAX_PER_PHONE_WINDOW = 15;
+/** Rolling window for the KYC consent OTP send caps, in hours. */
+export const KYC_CONSENT_OTP_WINDOW_HOURS = 1;
 
 /** Outcome for a single submission in a bulk-verify commit. */
 export interface BulkVerifySubmissionResult {
@@ -452,9 +494,17 @@ export class KycService {
   async sendConsentOtp(user: JwtPayload, dto: { submissionId: string; mobile: string }): Promise<{ success: boolean; expiresIn: number }> {
     const submission = await this.prisma.kycSubmission.findFirst({
       where: { id: dto.submissionId, userId: user.sub, user: { clientId: user.clientId } },
-      select: { id: true, partnerId: true },
+      select: { id: true, partnerId: true, proposedPartner: true, partner: { select: { phone: true } } },
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
+
+    // Bind the consent OTP to THIS submission's outlet owner: the number must be the one persisted on
+    // the submission (re-KYC → the proposed phone; new outlet → the partner's phone), never an
+    // arbitrary body value. The rep's form sends that same number, so the honest flow is unchanged.
+    const ownerPhone = this.consentOwnerPhone(submission);
+    if (!ownerPhone || ownerPhone !== this.phoneLast10(dto.mobile)) {
+      throw new BadRequestException('This mobile number does not match the outlet owner on this KYC.');
+    }
 
     // Group-aware phone re-validation (partner-child owner groups): a grouped sibling
     // that legitimately shares the group phone was ALLOWED at create() time — this gate
@@ -476,21 +526,102 @@ export class KycService {
       phoneEnforced: uniquenessPolicy.phone,
     });
 
-    const mobile = dto.mobile.replace(/\D/g, '').slice(-10);
+    const mobile = ownerPhone;
+
+    // Send cap + supersede, keyed on (normalised phone, OUTLET PARTNER) — owner decision 2026-11-11 +
+    // audit M1: every KYC submission of this outlet's partnerId shares one budget, so creating a fresh
+    // DRAFT for the same outlet (drafts are unlimited) can never reset it; group siblings are distinct
+    // partners, so they stay independent. Without a partner yet, the submission alone is the scope.
+    // Mirrors the LOGIN cap in auth.service sendOtp: a DB COUNT over a rolling window, holding across
+    // ALL Cloud Run instances; login / redemption / scheme OTPs have their own budgets. Skipped only
+    // when the fixed-OTP dev/staging bypass is active, so UAT/e2e can resend freely — like the login cap.
+    //
+    // On top of it, an overall ceiling of KYC_CONSENT_OTP_MAX_PER_PHONE_WINDOW sends per phone per
+    // window across ALL outlets/submissions of the caller's tenant (owner decision 2026-11-11).
+    //
+    // Audit M2: count → supersede → create run in ONE transaction holding transaction-scoped
+    // advisory locks, so concurrent sends serialise (no check-then-create race letting a burst past
+    // a cap). Lock ORDER is fixed — the phone-wide lock FIRST, then the (phone, partner) lock — and
+    // this is the only taker of either key, so two sends can never deadlock. The SMS goes out only
+    // after the transaction commits.
+    const fixedOtpActive = isFixedOtpAllowed() && !!process.env.FIXED_OTP;
+    const scopeKey = submission.partnerId ?? `submission:${submission.id}`;
     const otp = this.generateOtpCode();
 
-    // One active consent OTP per number.
-    await this.prisma.otpCode.deleteMany({
-      where: { phone: mobile, purpose: 'KYC_CONSENT', verifiedAt: null },
-    });
-    const otpRow = await this.prisma.otpCode.create({
-      data: {
-        phone: mobile,
-        code: otp,
-        purpose: 'KYC_CONSENT',
-        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-        maxAttempts: 3,
-      },
+    const otpRow = await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`kyc-consent-otp-phone:${mobile}`}, 0))`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`kyc-consent-otp:${mobile}:${scopeKey}`}, 0))`;
+
+      // Every submission of this outlet (incl. this one) — the OTP rows reference them by id.
+      const refIds = submission.partnerId
+        ? (await tx.kycSubmission.findMany({ where: { partnerId: submission.partnerId }, select: { id: true } })).map((s) => s.id)
+        : [];
+      if (!refIds.includes(submission.id)) refIds.push(submission.id);
+
+      if (!fixedOtpActive) {
+        const windowStart = new Date(Date.now() - KYC_CONSENT_OTP_WINDOW_HOURS * 60 * 60 * 1000);
+        const recentSends = await tx.otpCode.count({
+          where: { phone: mobile, purpose: 'KYC_CONSENT', referenceId: { in: refIds }, createdAt: { gte: windowStart } },
+        });
+        if (recentSends >= KYC_CONSENT_OTP_MAX_PER_WINDOW) {
+          // Distinct structured line (the login cap logs event 'otp.send_cap'). Masked — never log the raw number.
+          this.logger.warn(
+            `[kyc-consent-otp-send-cap] ${JSON.stringify({ event: 'kyc_consent_otp.send_cap', phone: `******${mobile.slice(-4)}`, partnerId: submission.partnerId, submissionId: submission.id, recentSends, max: KYC_CONSENT_OTP_MAX_PER_WINDOW, windowHours: KYC_CONSENT_OTP_WINDOW_HOURS })}`,
+          );
+          throw new HttpException(
+            'Too many OTPs sent to this number. Please try again later.',
+            HttpStatus.TOO_MANY_REQUESTS,
+          );
+        }
+
+        // Per-phone ceiling within the caller's tenant: this phone's KYC_CONSENT rows in the window
+        // (a handful — each outlet is itself capped), kept only when their referenceId is a submission
+        // of THIS tenant (OtpCode has no tenant column; the submission → user carries clientId).
+        const phoneRows = await tx.otpCode.findMany({
+          where: { phone: mobile, purpose: 'KYC_CONSENT', createdAt: { gte: windowStart } },
+          select: { referenceId: true },
+        });
+        const phoneRefs = [...new Set(phoneRows.map((r) => r.referenceId).filter((r): r is string => !!r))];
+        const tenantRefs = phoneRefs.length === 0 ? new Set<string>() : new Set(
+          (await tx.kycSubmission.findMany({
+            where: { id: { in: phoneRefs }, user: { clientId: user.clientId } },
+            select: { id: true },
+          })).map((s) => s.id),
+        );
+        const phoneSends = phoneRows.filter((r) => !!r.referenceId && tenantRefs.has(r.referenceId)).length;
+        if (phoneSends >= KYC_CONSENT_OTP_MAX_PER_PHONE_WINDOW) {
+          // Distinct structured line for the phone-wide ceiling. Masked — never log the raw number.
+          this.logger.warn(
+            `[kyc-consent-otp-send-cap-phone] ${JSON.stringify({ event: 'kyc_consent_otp.send_cap_phone', phone: `******${mobile.slice(-4)}`, clientId: user.clientId, submissionId: submission.id, recentSends: phoneSends, max: KYC_CONSENT_OTP_MAX_PER_PHONE_WINDOW, windowHours: KYC_CONSENT_OTP_WINDOW_HOURS })}`,
+          );
+          throw new HttpException(
+            'Too many OTPs sent to this number. Please try again later.',
+            HttpStatus.TOO_MANY_REQUESTS,
+          );
+        }
+      }
+
+      // One active consent OTP per (number, outlet): SUPERSEDE (expire) this outlet's earlier
+      // unverified consent OTPs to this number — across ALL its submissions (a fresh draft replaces
+      // the old draft's code) but never a sibling outlet's. Expired, not deleted: the rows must
+      // survive so the cap above can count actual sends; consent() only accepts an unexpired row
+      // bound to its submission, so an expired one is inert. Rows age out via the global expired-OTP
+      // cleanup in auth.service sendOtp.
+      await tx.otpCode.updateMany({
+        where: { phone: mobile, purpose: 'KYC_CONSENT', referenceId: { in: refIds }, verifiedAt: null, expiresAt: { gt: new Date() } },
+        data:  { expiresAt: new Date() },
+      });
+      return tx.otpCode.create({
+        data: {
+          phone: mobile,
+          code: otp,
+          purpose: 'KYC_CONSENT',
+          // Bound to the submission — consent() only accepts the OTP issued for THIS submission.
+          referenceId: submission.id,
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          maxAttempts: 3,
+        },
+      });
     });
 
     // Real send in prod; a no-op when FIXED_OTP is honored (msg91 service handles it).
@@ -649,6 +780,7 @@ export class KycService {
       bankAccountHolder: null,
       ifscCode: null,
       upiId: null,
+      upiCaptureMethod: null,
       payoutChequeFileKey: null,
     };
   }
@@ -667,12 +799,24 @@ export class KycService {
   private overlayProposedIdentity<T extends object>(
     partner: T | null,
     proposedPartner: Prisma.JsonValue | null | undefined,
+    // The RAW (never display-hidden) live partner — effectiveProposedPayout judges a staged rail's
+    // completeness over it, exactly as the apply does. Defaults to `partner` (un-hidden callers).
+    rawLivePartner: object | null = partner,
   ): T | null {
     if (!partner || !proposedPartner || typeof proposedPartner !== 'object' || Array.isArray(proposedPartner)) {
       return partner;
     }
-    const prop = proposedPartner as Record<string, unknown>;
     const cur = partner as Record<string, unknown>;
+    // VPA safeguard: present EXACTLY what approval applies (effectiveProposedPayout — the SAME helper
+    // the apply uses): a legacy draft's locked payout echoes are dropped (→ live value shown), and the
+    // rail a new draft sets clears the other rail. Re-KYC flags come from the primary outlet (outlets[0],
+    // the outlet the approval reads them from).
+    const firstOutlet = Array.isArray(cur.outlets) ? (cur.outlets[0] as Record<string, unknown> | undefined) : undefined;
+    const { proposal: prop, clears } = effectiveProposedPayout(
+      proposedPartner as Record<string, unknown>,
+      firstOutlet?.reKycFlags,
+      rawLivePartner as Record<string, unknown> | null,
+    );
     const pick = (k: string): unknown =>
       typeof prop[k] === 'string' && (prop[k] as string).length > 0 ? prop[k] : cur[k];
 
@@ -706,8 +850,43 @@ export class KycService {
       bankAccountHolder: pick('bankAccountHolder'),
       ifscCode: pick('ifscCode'),
       upiId: pick('upiId'),
+      // Present key (value or explicit null) wins, else the live value — mirrors the apply.
+      upiCaptureMethod:
+        'upiCaptureMethod' in prop ? asUpiCaptureMethod(prop.upiCaptureMethod) : (cur.upiCaptureMethod ?? null),
       paymentMode: pick('paymentMode'),
+      // VPA safeguard: show the EFFECTIVE post-approval rails — the rail this re-KYC sets clears the
+      // other one at apply, so the reviewer never sees a stale rail. Empty for legacy/payout-locked drafts.
+      ...clears,
     } as T;
+  }
+
+  /**
+   * R10 — the rail a re-KYC APPROVAL will actually CLEAR on the live partner: the OTHER rail of the
+   * proposal's effective (explicit, complete) payoutRail — via effectiveProposedPayout, the SAME
+   * helper the apply uses — but only when the LIVE partner holds a non-empty value in one of the
+   * columns that clear nulls. Null when no rail is set (legacy / in-rail / payout-locked draft,
+   * brand-new KYC) or the cleared rail is already empty. Pass the RAW (un-hidden) live partner.
+   */
+  private removedRailFor(
+    livePartner: object | null | undefined,
+    proposedPartner: Prisma.JsonValue | null | undefined,
+  ): PayoutRail | null {
+    if (!livePartner || !proposedPartner || typeof proposedPartner !== 'object' || Array.isArray(proposedPartner)) {
+      return null;
+    }
+    const live = livePartner as Record<string, unknown>;
+    const firstOutlet = Array.isArray(live.outlets) ? (live.outlets[0] as Record<string, unknown> | undefined) : undefined;
+    const { rail, clears } = effectiveProposedPayout(
+      proposedPartner as Record<string, unknown>,
+      firstOutlet?.reKycFlags,
+      live,
+    );
+    if (!rail) return null;
+    // upiCaptureMethod is provenance metadata, not a rail value — a lone method never counts.
+    const removesSomething = Object.keys(clears).some(
+      (k) => k !== 'upiCaptureMethod' && typeof live[k] === 'string' && (live[k] as string).trim() !== '',
+    );
+    return removesSomething ? (rail === 'upi' ? 'bank' : 'upi') : null;
   }
 
   /**
@@ -1153,6 +1332,7 @@ export class KycService {
         bankAccountHolder?: string;
         ifscCode?: string;
         upiId?: string;
+        upiCaptureMethod?: string | null;
         paymentMode?: string;
       };
     },
@@ -1476,6 +1656,13 @@ export class KycService {
       upiId: dto.upiId,
     };
     let text = incomingText;
+    // The LIVE partner's RAW payout columns (re-KYC only) — read by the re-KYC rail rules (live rail,
+    // reachability; resolveReKycPayout) and the UPI capture-method rules (stored UPI + its recorded
+    // method). Loaded below for EVERY re-KYC (field-flagged: with the text lock; blanket: on its own).
+    let storedPayout:
+      | { upiId: string | null; upiCaptureMethod: string | null; bankAccountNumber: string | null; ifscCode: string | null }
+      | null
+      | undefined;
     if (outlet.partnerId && hasReKycFlags(reKycFlags)) {
       // Load the CURRENTLY-PERSISTED values, keyed by the SAME dtoField names. Stored
       // columns VERIFIED against the Prisma models (schema.prisma):
@@ -1488,9 +1675,15 @@ export class KycService {
         select: {
           ownerName: true, phone: true, gstNumber: true, panNumber: true,
           bankName: true, bankAccountHolder: true, bankAccountNumber: true,
-          ifscCode: true, upiId: true,
+          ifscCode: true, upiId: true, upiCaptureMethod: true,
         },
       });
+      storedPayout = {
+        upiId: storedPartner?.upiId ?? null,
+        upiCaptureMethod: storedPartner?.upiCaptureMethod ?? null,
+        bankAccountNumber: storedPartner?.bankAccountNumber ?? null,
+        ifscCode: storedPartner?.ifscCode ?? null,
+      };
       const stored: Record<string, unknown> = {
         partnerName: storedPartner?.ownerName,
         mobile: storedPartner?.phone,
@@ -1515,76 +1708,105 @@ export class KycService {
           `re-KYC lock: ignored changes to non-flagged fields [${lock.blocked.join(', ')}] on outlet ${outlet.outletCode}`,
         );
       }
+    } else if (outlet.partnerId) {
+      // BLANKET re-KYC (no field flags): nothing is locked, but the re-KYC rail rules still need the
+      // live partner's RAW payout columns (live rail / reachability / stored-UPI capture method).
+      const sp = await this.prisma.channelPartner.findUnique({
+        where: { id: outlet.partnerId },
+        select: { upiId: true, upiCaptureMethod: true, bankAccountNumber: true, ifscCode: true },
+      });
+      storedPayout = sp
+        ? {
+            upiId: sp.upiId ?? null,
+            upiCaptureMethod: sp.upiCaptureMethod ?? null,
+            bankAccountNumber: sp.bankAccountNumber ?? null,
+            ifscCode: sp.ifscCode ?? null,
+          }
+        : null;
     }
 
-    // ── PAYOUT MANDATE (per-outlet requiredPaymentType) — AUTHORITATIVE GUARD ────
-    // The outlet's requiredPaymentType pins which payout method a KYC submission may
-    // capture. The FE gates this too, but the BACKEND is authoritative: reject a
-    // submission whose paymentMode violates the mandate (or the tenant UPI gate), and
-    // require the matching payout fields. This runs on first submit AND on re-KYC
-    // resubmit (same create() path), so a mandate-violating resubmission is also
-    // rejected. Field validation uses the re-KYC-LOCKED `text` (the values actually
-    // persisted), so a resubmit that pins non-flagged bank fields back to stored still
-    // satisfies the guard.
+    // ── PAYOUT MANDATE (per-outlet requiredPaymentType) ──────────────────────────
+    // The outlet's requiredPaymentType pins which payout method a KYC submission may capture.
+    //  • BRAND-NEW KYC: the BACKEND is authoritative — reject a submission whose paymentMode
+    //    violates the mandate (or the tenant UPI gate), an ambiguous body, and missing payout
+    //    fields (every field is editable, so each 400 is fixable from the form).
+    //  • RE-KYC (outlet already has a partner): "the server never rejects for something the rep
+    //    cannot fix in the form" — the mandate / mode / field rules are applied by resolveReKycPayout
+    //    below, which falls back to the partner's live rail instead of 400-ing an unusable request.
     const requiredType = outlet.requiredPaymentType;
     // Tenant UPI gate: UPI is never usable when salesApp.upiEnabled is false.
     // (`salesApp` was resolved once from getEffectiveSettings above.)
     const upiEnabled = salesApp.upiEnabled;
-
-    // Resolve the effective payout mode: prefer the DTO's explicit mode (the FE always
-    // sends it); otherwise derive it only when the mandate pins exactly one mode. Never
-    // silently default when the mode is genuinely ambiguous (ANY with no mode sent).
-    let effectiveMode: PaymentMode | undefined = dto.paymentMode;
-    if (!effectiveMode) {
-      const pinned = pinnedPaymentMode(requiredType, upiEnabled);
-      if (!pinned) {
-        throw new BadRequestException(
-          'A payment method (bank or UPI) must be selected for this outlet.',
-        );
-      }
-      effectiveMode = pinned;
-    }
-
-    // Validate the effective mode against the mandate + tenant UPI gate.
-    if (!isPaymentModeAllowed(requiredType, effectiveMode, upiEnabled)) {
-      const allowed = allowedPaymentModes(requiredType, upiEnabled);
-      const label =
-        allowed.length > 1 ? 'bank or UPI' : allowed[0] === 'upi' ? 'UPI' : 'bank';
-      throw new BadRequestException(
-        `This outlet requires payout by ${label}; the submitted payment method is not permitted.`,
-      );
-    }
-
-    // Enforce the required payout FIELDS for the effective mode, validated against the
-    // (re-KYC-locked) values that will actually be persisted. The cancelled-cheque doc
-    // is gated by the FE; the backend validates the text fields here.
+    const isReKyc = !!outlet.partnerId;
     const isFilled = (v: unknown): boolean => typeof v === 'string' && v.trim() !== '';
-    // A payout field is only ENFORCEABLE when the rep can actually provide it THIS submission:
-    // on first submit everything is editable; on a re-KYC resubmit only FLAGGED fields are
-    // editable (non-flagged fields are locked to stored). Never demand a locked-empty field
-    // the rep is unable to fill — that would deadlock the resubmission (e.g. a legacy UPI
-    // outlet back-filled to requiredPaymentType=BANK whose bank fields were never captured
-    // and aren't flagged for re-entry). First submit / flagged fields are still fully enforced.
-    const reKycActive = !!outlet.partnerId && hasReKycFlags(reKycFlags);
+    // A field is only ENFORCEABLE when the rep can actually provide it THIS submission: on first
+    // submit everything is editable; on a field-flagged re-KYC only FLAGGED fields are editable
+    // (non-flagged fields are locked to stored). Never demand a locked-empty field the rep is unable
+    // to fill — that would deadlock the resubmission.
+    const reKycActive = isReKyc && hasReKycFlags(reKycFlags);
     const canProvide = (field: string): boolean =>
       !reKycActive || (reKycFlags as Record<string, unknown> | null)?.[field] === true;
-    if (effectiveMode === 'bank') {
-      const missing = (
-        [
-          ['bankName', text.bankName],
-          ['accountNumber', text.accountNumber],
-          ['ifscCode', text.ifscCode],
-        ] as const
-      )
-        .filter(([k, v]) => !isFilled(v) && canProvide(k))
-        .map(([k]) => k);
-      if (missing.length) {
+
+    // Resolve the effective payout mode (brand-new): prefer the DTO's explicit mode (the FE always
+    // sends it); otherwise derive it only when the mandate pins exactly one mode. Never silently
+    // default when the mode is genuinely ambiguous (ANY with no mode sent). A re-KYC resolves its
+    // rail in resolveReKycPayout below (effectiveMode is reassigned there).
+    let effectiveMode: PaymentMode | undefined = dto.paymentMode;
+    if (!isReKyc) {
+      if (!effectiveMode) {
+        const pinned = pinnedPaymentMode(requiredType, upiEnabled);
+        if (!pinned) {
+          throw new BadRequestException(
+            'A payment method (bank or UPI) must be selected for this outlet.',
+          );
+        }
+        effectiveMode = pinned;
+      }
+
+      // Validate the effective mode against the mandate + tenant UPI gate.
+      if (!isPaymentModeAllowed(requiredType, effectiveMode, upiEnabled)) {
+        const allowed = allowedPaymentModes(requiredType, upiEnabled);
+        const label =
+          allowed.length > 1 ? 'bank or UPI' : allowed[0] === 'upi' ? 'UPI' : 'bank';
         throw new BadRequestException(
-          `Bank payout requires: ${missing.join(', ')}.`,
+          `This outlet requires payout by ${label}; the submitted payment method is not permitted.`,
         );
       }
-    } else if (!isFilled(text.upiId) && canProvide('upiId')) {
-      throw new BadRequestException('UPI payout requires a upiId.');
+
+      // ── VPA SAFEGUARD: EXCLUSIVE PAYOUT RAIL ─────────────────────────────────
+      // Payouts route UPI-first, so a partner holding BOTH a UPI and bank details is always paid on
+      // the UPI — even when the rep chose Bank. When the body names a `paymentMode`, THAT rail is
+      // authoritative and the other rail's fields are simply IGNORED (old cached frontends send all
+      // five payout fields whichever mode is picked) — they are never persisted (see partnerDetails).
+      // Only a body with NO paymentMode that CARRIES both rails (empty/whitespace = absent; a bank
+      // rail needs an account number AND an IFSC — isCompletePayoutRail) is ambiguous → 400.
+      if (
+        !dto.paymentMode &&
+        carriesBothPayoutRails({ upiId: dto.upiId, accountNumber: dto.accountNumber, ifscCode: dto.ifscCode })
+      ) {
+        throw new BadRequestException('Provide either UPI or bank details, not both');
+      }
+
+      // Enforce the required payout FIELDS for the effective mode. The cancelled-cheque doc is gated
+      // by the FE; the backend validates the text fields here.
+      if (effectiveMode === 'bank') {
+        const missing = (
+          [
+            ['bankName', text.bankName],
+            ['accountNumber', text.accountNumber],
+            ['ifscCode', text.ifscCode],
+          ] as const
+        )
+          .filter(([, v]) => !isFilled(v))
+          .map(([k]) => k);
+        if (missing.length) {
+          throw new BadRequestException(
+            `Bank payout requires: ${missing.join(', ')}.`,
+          );
+        }
+      } else if (!isFilled(text.upiId)) {
+        throw new BadRequestException('UPI payout requires a upiId.');
+      }
     }
 
     // ── GSTIN COMPULSORY (per-tenant Gifsy-toggle, default ON) ─────────────────
@@ -1621,19 +1843,122 @@ export class KycService {
       v: unknown,
     ): string | undefined => normalizeIdentityValue(field, v as string | null | undefined) ?? undefined;
 
+    // ── VPA SAFEGUARD — RAIL RULES: which payout fields this submission may SET ─────────────────
+    //  • BRAND-NEW KYC: exactly one COMPLETE rail (the mandate guard above already 400'd anything
+    //    missing); paymentMode selects it; all of that rail's fields are persisted, the other rail's
+    //    fields are ignored (never persisted).
+    //  • RE-KYC (blanket or field-flagged) — resolveReKycPayout, the SINGLE source of truth the sales
+    //    form mirrors. Principle: the server never rejects for something the rep cannot fix in the form.
+    //      a. C = body.paymentMode ?? mandate when that rail is permitted (mandate + tenant UPI gate)
+    //         AND REACHABLE (each routing field editable or already stored); else the partner's LIVE
+    //         rail (when permitted); else null → no payout keys staged. Never a 400.
+    //      b. C reachable but incomplete → 400 naming ONLY the missing EDITABLE routing field(s).
+    //      c. Only the EDITABLE, non-empty fields of C are staged — never a locked/stored value (a
+    //         stored, possibly hidden self-captured value never rides a proposal). Flagged fields of
+    //         the other rail are ignored.
+    //      d. payoutRail + paymentMode = C only when a ROUTING field of C is staged — only then does
+    //         approval clear the other rail (effectiveProposedPayout keys on payoutRail).
+    let payoutRail: PayoutRail | undefined;
+    let stagedPayoutFields: readonly PayoutField[] = [];
+    if (!isReKyc) {
+      const chosenRail: PayoutRail = effectiveMode === 'upi' ? 'upi' : 'bank';
+      payoutRail = payoutRailFor(chosenRail, {
+        upiId: text.upiId,
+        accountNumber: text.accountNumber,
+        ifscCode: text.ifscCode,
+      });
+      if (!payoutRail) {
+        throw new BadRequestException(incompletePayoutRailMessage(chosenRail, PAYOUT_ROUTING_FIELDS[chosenRail]));
+      }
+      stagedPayoutFields = PAYOUT_RAIL_FIELDS[payoutRail];
+    } else {
+      const decision = resolveReKycPayout({
+        requestedMode: dto.paymentMode,
+        mandateMode: pinnedPaymentMode(requiredType, upiEnabled),
+        isRailAllowed: (r) => isPaymentModeAllowed(requiredType, r, upiEnabled),
+        editable: payoutFieldEditability(false, reKycFlags),
+        submitted: {
+          upiId: text.upiId,
+          accountNumber: text.accountNumber,
+          ifscCode: text.ifscCode,
+          bankName: text.bankName,
+          accountHolderName: text.accountHolderName,
+        },
+        stored: {
+          upiId: storedPayout?.upiId,
+          accountNumber: storedPayout?.bankAccountNumber,
+          ifscCode: storedPayout?.ifscCode,
+        },
+      });
+      if (decision.error) throw new BadRequestException(decision.error);
+      // The rail this re-KYC is evaluated against (null = nothing payout-related staged).
+      effectiveMode = decision.rail ?? undefined;
+      payoutRail = decision.payoutRail ?? undefined;
+      stagedPayoutFields = decision.stageFields;
+    }
+    // Is this DTO payout field staged/persisted by this submission?
+    const stages = (k: PayoutField): boolean => stagedPayoutFields.includes(k);
+    const setsUpi = stages('upiId');
+
+    // ── VPA SAFEGUARD — UPI capture method + manual-entry gate (R6/R7) + fresh settings (M1) ──────
+    // Whenever this submission WRITES a UPI, the tenant settings are re-read UNCACHED ONCE and that
+    // fresh copy drives BOTH the manual-entry gate (a just-enabled flag is never refused from a stale
+    // per-instance cache) AND the UPI uniqueness lock/check below (a just-enabled UPI-uniqueness
+    // policy is never skipped from a stale cache).
+    // A UPI being SET whose canonical value equals the partner's STORED UPI (re-KYC) or the GROUP UPI
+    // the form was prefilled from is not a fresh capture: it keeps that prior's recorded method when
+    // no usable method was sent (old cached FE sends none) or when a MANUAL claim arrives with manual
+    // entry OFF. Only a genuinely NEW typed UPI is rejected when manual entry is OFF.
+    let upiCaptureMethod: string | null | undefined;
+    let identityPolicy = uniquenessPolicy;
+    if (setsUpi) {
+      const fresh = await this.tenantSettings.getEffectiveSettings(user.clientId, { fresh: true });
+      identityPolicy = fresh.uniquenessPolicy;
+      const manualAllowed = fresh.salesApp.upiManualEntry;
+      const submittedUpi = normalizeIdentityValue('upi', text.upiId as string | null | undefined);
+      const storedMatch =
+        storedPayout && submittedUpi != null && normalizeIdentityValue('upi', storedPayout.upiId) === submittedUpi
+          ? storedPayout
+          : null;
+      const sentMethod = asUpiCaptureMethod(dto.upiCaptureMethod);
+      const explicitMethod = sentMethod === 'QR' || (sentMethod === 'MANUAL' && manualAllowed);
+      let prior: { upiCaptureMethod?: unknown } | null = storedMatch;
+      // L3: no usable method sent (none / MANUAL with manual entry OFF) → the group-prefill UPI's
+      // recorded method is kept when the UPI equals it.
+      if (!prior && !explicitMethod && outlet.parentId) {
+        const gi = await resolveGroupIdentity(this.prisma, user.clientId, outlet.parentId);
+        if (gi && submittedUpi != null && normalizeIdentityValue('upi', gi.upiId) === submittedUpi) prior = gi;
+      }
+      if (!prior && sentMethod === 'MANUAL' && !manualAllowed) {
+        throw new BadRequestException('Manual UPI entry is not enabled');
+      }
+      // An UNCHANGED stored UPI keeping its stored method → key omitted (untouched at apply; on a
+      // re-KYC the stored row already carries it). Otherwise the resolved method is written.
+      upiCaptureMethod =
+        storedMatch && !explicitMethod
+          ? undefined
+          : resolveUpiCaptureMethod(dto.upiCaptureMethod, manualAllowed, prior);
+    }
+
     const partnerDetails = {
       businessName: text.partnerName as string,
       ownerName: text.partnerName as string,
       phone: text.mobile as string,
       gstNumber: persistIdentity('gst', text.gstNumber),
       panNumber: persistIdentity('pan', text.panNumber),
-      bankName: (text.bankName as string | undefined) ?? undefined,
-      bankAccountNumber: persistIdentity('bank', text.accountNumber),
-      bankAccountHolder: (text.accountHolderName as string | undefined) ?? undefined,
-      ifscCode: (text.ifscCode as string | undefined) ?? undefined,
-      upiId: persistIdentity('upi', text.upiId),
-      // paymentMode is not a re-KYC-flagged field → always taken from the DTO.
-      paymentMode: dto.paymentMode ?? undefined,
+      bankName: stages('bankName') ? ((text.bankName as string | undefined) ?? undefined) : undefined,
+      bankAccountNumber: stages('accountNumber') ? persistIdentity('bank', text.accountNumber) : undefined,
+      bankAccountHolder: stages('accountHolderName')
+        ? ((text.accountHolderName as string | undefined) ?? undefined)
+        : undefined,
+      ifscCode: stages('ifscCode') ? ((text.ifscCode as string | undefined) ?? undefined) : undefined,
+      upiId: setsUpi && stages('upiId') ? persistIdentity('upi', text.upiId) : undefined,
+      // How the UPI was captured (R6/R7 above) — only when this submission sets the UPI rail. A UPI
+      // that is unchanged and keeps its recorded method → omitted (untouched at apply).
+      upiCaptureMethod,
+      // paymentMode = the rail this submission SETS (also when the outlet mandate pinned the mode and
+      // the body carried none). A re-KYC that sets no routing field of C never changes the mode.
+      paymentMode: payoutRail,
     };
 
     // Identity details for the GROUP-AWARE uniqueness gate — built from the LOCKED/effective
@@ -1847,10 +2172,11 @@ export class KycService {
       //   The lock is transaction-scoped (auto-released on commit/rollback) and keyed on the SAME
       //   normalized values the check + write use. For PAN/GST it backstops the partial-unique DB
       //   index; for bank/UPI (no DB rule — tenant-configurable) it is the ONLY race guard.
+      // `identityPolicy` = the FRESH (uncached) policy whenever this submission writes a UPI (M1).
       await acquireIdentityLocks(tx, {
         clientId: user.clientId,
         details: groupUniquenessDetails,
-        policy: uniquenessPolicy,
+        policy: identityPolicy,
       });
 
       // 3a-0. GROUP-AWARE IDENTITY UNIQUENESS (partner-child owner groups). For the BRAND-NEW branch
@@ -1887,7 +2213,7 @@ export class KycService {
         clientId: user.clientId,
         ourParentId: effectiveParentId,
         details: groupUniquenessDetails,
-        policy: uniquenessPolicy,
+        policy: identityPolicy,
         exceptPartnerId: outlet.partnerId ?? null,
       });
       if (violation) throw new BadRequestException(violation.message);
@@ -1926,6 +2252,18 @@ export class KycService {
         // updates). Address is applied to the PRIMARY outlet at approval (applyBridgeOutcome).
         proposedSnapshot = {
           ...partnerDetails,
+          // VPA safeguard: the rail this re-KYC sets → applyBridgeOutcome clears the OTHER rail on
+          // the live partner at approval. Absent (payout fields locked / rail empty → undefined, dropped
+          // by JSON) → no payout keys are staged and approval writes/clears nothing payout-related.
+          payoutRail,
+          // FIX 2: the routing values of the staged rail CARRIED from the live partner (a LOCKED field
+          // completing the rail — never rep-entered). Approval refuses (409) when any of them differs on
+          // the row-locked partner ("changed, not just vanished"). Internal bookkeeping: never written
+          // to the partner, stripped from every reviewer/rep surface (stripPayoutCarried). Absent when
+          // no rail is staged or every routing field is rep-entered (dropped by JSON as undefined).
+          [PAYOUT_CARRIED_KEY]: payoutRail
+            ? carriedPayoutRouting(payoutRail, partnerDetails as Record<string, unknown>, storedPayout)
+            : undefined,
           addressLine1: text.address as string,
           city: text.city as string,
           state: text.state as string,
@@ -2564,7 +2902,8 @@ export class KycService {
         !isKycInFlight(s.status) && s.partner?.outlets?.some((o) => isReKycPending(o.reKycFlags))
           ? ('RE_KYC_REQUIRED' as (typeof s)['status'])
           : s.status;
-      return { ...rest, status, gifsyEnteredAt };
+      // FIX 2: never ship the internal payoutCarried bookkeeping (it may hold a hidden live value).
+      return { ...rest, proposedPartner: stripPayoutCarried(rest.proposedPartner), status, gifsyEnteredAt };
     });
 
     return {
@@ -2591,7 +2930,9 @@ export class KycService {
         user: { select: { id: true, name: true, phone: true, role: true } },
         // partner.outlets[].outletCode is the human "outlet ID" surfaced in the detail header
         // (KYC is partner-keyed; the enrolled outlet's code lives on the partner's outlets).
-        partner: { include: { outlets: { select: {
+        // `deletedAt: null` + the primary-first order below MATCH the approval/queue loads, so
+        // outlets[0] (whose reKycFlags filter a legacy draft's payout echoes) is the SAME outlet here.
+        partner: { include: { outlets: { where: { deletedAt: null }, select: {
           id: true, name: true, outletCode: true, phone: true,
           // parentId → the owner-GROUP parent (isParent ChannelPartner). Used to fetch the
           // approved parent's identity/payout values for the per-field "verified on parent"
@@ -2650,9 +2991,6 @@ export class KycService {
     // JOB B: hide the payout rails on this detail view unless the live partner is VERIFIED
     // (redemption-captured-but-unpaid details stay hidden until a payout confirms them). Default
     // VERIFIED → every existing/KYC-captured record (and all of Deoleo) is unchanged.
-    const payoutUnverified = this.isPayoutHidden(
-      (submission.partner as { paymentDetailsStatus?: unknown } | null)?.paymentDetailsStatus,
-    );
     const partner = submission.partner
       ? this.hidePayoutUnlessVerified(this.maskPartnerSensitiveFields(submission.partner, masked))
       : null;
@@ -2705,17 +3043,38 @@ export class KycService {
     // proposed PAN/GST/bank to a masked (sales-reviewer) caller. Null for a brand-new KYC.
     // FE follow-up (orchestrator): the KYC detail page should render this `proposedPartner` diff for a
     // re-KYC (current vs proposed) — the live `partner` no longer reflects the pending change at draft time.
+    // VPA safeguard (F3) — present the proposal EXACTLY as approval applies it, the same way the
+    // queue overlay does (effectiveProposedPayout, keyed on the primary outlet's re-KYC flags =
+    // detailOutlets[0], the approval's outlets[0]): a legacy draft's locked payout echoes are dropped,
+    // and when this re-KYC sets a rail the OTHER rail's routing columns are included as explicit
+    // `null`. FE CONTRACT: a proposed key PRESENT with value null = "will be removed at approval";
+    // an ABSENT key = unchanged.
     const proposedRaw = submission.proposedPartner;
-    const proposedMasked =
+    const proposedEffective =
       proposedRaw && typeof proposedRaw === 'object' && !Array.isArray(proposedRaw)
-        ? this.maskPartnerSensitiveFields(proposedRaw as Record<string, unknown>, masked)
+        ? (() => {
+            const eff = effectiveProposedPayout(
+              proposedRaw as Record<string, unknown>,
+              detailOutlets[0]?.reKycFlags,
+              // RAW live partner (pre-mask / pre-hide) — the same completeness basis as the apply.
+              submission.partner as unknown as Record<string, unknown> | null,
+            );
+            return { ...eff.proposal, ...eff.clears };
+          })()
         : null;
-    // JOB B: the staged proposed payout values are gated on the LIVE partner's status too, so an
-    // UNVERIFIED (redemption-captured) partner never surfaces payout rails via the proposed diff.
-    const proposedPartner =
-      proposedMasked && payoutUnverified
-        ? this.hidePayoutUnlessVerified({ ...proposedMasked, paymentDetailsStatus: 'UNVERIFIED' })
-        : proposedMasked;
+    // M2 — which rail approval will CLEAR ('upi' | 'bank' | null), computed EXACTLY like the review
+    // queue (removedRailFor) from the UNHIDDEN live partner. A rail NAME, never a value, so the detail
+    // page can show a value-free removal notice even when the live payout values are hidden/masked.
+    const removedRail = this.removedRailFor(submission.partner, submission.proposedPartner);
+    const proposedMasked = proposedEffective
+      ? this.maskPartnerSensitiveFields(proposedEffective, masked)
+      : null;
+    // R3 — the reviewer must SEE what they approve: the staged proposal carries ONLY rep-entered
+    // payout values (create() never stages a locked/stored echo; legacy echoes are filtered by
+    // effectiveProposedPayout), so it is shown even when the LIVE partner payout is UNVERIFIED /
+    // NEEDS_RECAPTURE (incl. the explicit-null "will be removed" keys). The LIVE self-captured values
+    // stay hidden on `partner` above (hidePayoutUnlessVerified); PII masking applies as for `partner`.
+    const proposedPartner = proposedMasked;
 
     // ── Stream C: per-field "verified on parent" signal ──────────────────────
     // When a child outlet was grouped-BEFORE-KYC (Outlet.parentId set) under an APPROVED parent
@@ -2838,6 +3197,7 @@ export class KycService {
         ...submission,
         partner,
         proposedPartner,
+        removedRail,
         documents,
         reKycFlags,
         parentVerified,
@@ -2984,6 +3344,16 @@ export class KycService {
 
     const { status, rejectionReason, reviewerNotes } = dto;
 
+    // APPROVAL BYPASS GUARD: PATCH is a raw status writer. A status=APPROVED here would skip
+    // applyBridgeOutcome entirely — the re-KYC apply, payout-rail / verify rules, the partner row
+    // lock + identity locks + group-uniqueness re-check, activation and wallet creation. No caller
+    // (platform UI, e2e, scripts) sends APPROVED through this route; approval goes through the KYC
+    // review flow (POST /:id/approve, /:id/verify, bulk-verify) which all funnel into applyBridgeOutcome.
+    // Refuse it outright (400) BEFORE any read/write; every other PATCH behaviour is unchanged.
+    if (status === 'APPROVED') {
+      throw new BadRequestException('Use the KYC review flow to approve');
+    }
+
     // Reason is mandatory for REJECTED and RE_UPLOAD_REQUIRED.
     if ((status === 'REJECTED' || status === 'RE_UPLOAD_REQUIRED') && !rejectionReason) {
       throw new BadRequestException(
@@ -2997,38 +3367,8 @@ export class KycService {
     if (!submission) throw new NotFoundException('KYC submission not found');
 
     const updated = await this.prisma.$transaction(async (tx) => {
-      // FIX 1 (gate bypass): PATCH is a raw status writer and PATCH_STATUSES includes 'APPROVED', so a
-      // direct PATCH status=APPROVED would otherwise skip the compulsory classification gate + one-per-
-      // org invariant that applyBridgeOutcome enforces (and that unclassified partner would then seed
-      // resolveGroupIdentity). Apply the SAME classification path here for a →APPROVED transition:
-      // auto-inherit/overwrite the owner-group lock, then throw the same 400 if still unclassified.
-      // (Deliberately NOT adding activation/wallet here — that pre-existing PATCH gap is out of scope.)
-      if (status === 'APPROVED') {
-        const withPartner = await tx.kycSubmission.findFirst({
-          where: { id },
-          select: {
-            partnerId: true,
-            partner: {
-              select: {
-                clientId: true,
-                entityType: true,
-                gstRegistrationType: true,
-                outlets: {
-                  where: { deletedAt: null },
-                  orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
-                  take: 1,
-                  select: { parentId: true },
-                },
-              },
-            },
-          },
-        });
-        if (withPartner) {
-          await this.ensureGroupClassification(tx, withPartner);
-          this.assertClassificationSet(withPartner.partner);
-        }
-      }
-
+      // (status=APPROVED never reaches here — refused at the top of update(); the old in-tx
+      // classification gate for a PATCH approval is therefore gone.)
       const result = await tx.kycSubmission.update({
         where: { id },
         data: {
@@ -3053,7 +3393,8 @@ export class KycService {
       return result;
     });
 
-    return { submission: updated };
+    // FIX 2: never ship the internal payoutCarried bookkeeping.
+    return { submission: { ...updated, proposedPartner: stripPayoutCarried(updated.proposedPartner) } };
   }
 
   // ─── POST /v1/kyc/:id/first-approve ──────────────────────────────────────────
@@ -3719,12 +4060,26 @@ export class KycService {
 
   // ─── POST /v1/kyc/consent ────────────────────────────────────────────────────
   async consent(user: JwtPayload, dto: ConsentKycDto) {
-    const { submissionId, mobile, otp } = dto;
+    const { submissionId, otp } = dto;
+
+    // Load the submission FIRST (caller + tenant scoped) — the OTP is bound to it and to its outlet
+    // owner's phone, normalised exactly as sendConsentOtp stored it.
+    const submission = await this.prisma.kycSubmission.findFirst({
+      where: { id: submissionId, userId: user.sub, user: { clientId: user.clientId } },
+      include: {
+        // For post-consent routing + notifications (owner name, outlet name, program) + the owner phone.
+        partner: { select: { ownerName: true, phone: true, outlets: { select: { name: true, programName: true }, take: 1 } } },
+      },
+    });
+    if (!submission) throw new NotFoundException('KYC submission not found');
+    const mobile = this.consentOwnerPhone(submission);
+    if (!mobile || mobile !== this.phoneLast10(dto.mobile)) throw new UnauthorizedOtp('OTP not found or expired');
 
     const otpRecord = await this.prisma.otpCode.findFirst({
       where: {
         phone: mobile,
         purpose: 'KYC_CONSENT',
+        referenceId: submission.id,
         verifiedAt: null,
         expiresAt: { gt: new Date() },
       },
@@ -3740,34 +4095,32 @@ export class KycService {
     }
     // FIXED_OTP is a dev/staging-only bypass (gated by isFixedOtpAllowed; always
     // refused on the prod DB). Permanent path is the real MSG91 code stored above.
+    // Claim-before-compare (common/otp-attempt): the attempt is claimed ATOMICALLY before the code is
+    // compared, so parallel guesses can't exceed maxAttempts; a losing claim gets the same 429 as above.
+    const claimed = await claimOtpAttempt(this.prisma, otpRecord);
+    if (claimed === null) {
+      // Refused: re-read so a code superseded/expired or pruned meanwhile gets the honest message (L1).
+      const why = await whyOtpClaimRefused(this.prisma, otpRecord.id);
+      if (why !== 'SPENT') throw new UnauthorizedOtp('OTP not found or expired');
+      throw new HttpException(
+        'OTP locked due to too many attempts. Request a new OTP.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
     const fixedOtp = isFixedOtpAllowed() ? process.env.FIXED_OTP : undefined;
     const otpMatches = otpRecord.code === otp || (!!fixedOtp && otp === fixedOtp);
     if (!otpMatches) {
-      await this.prisma.otpCode.update({
-        where: { id: otpRecord.id },
-        data: { attempts: { increment: 1 } },
-      });
-      const remaining = otpRecord.maxAttempts - otpRecord.attempts - 1;
+      // From the atomic claim's post-increment value — exact under parallel guesses (not the stale read).
+      const remaining = Math.max(0, otpRecord.maxAttempts - claimed);
       throw new UnauthorizedOtp(`Invalid OTP. ${remaining} attempt(s) remaining.`);
     }
 
-    // Mark OTP as verified.
+    // Mark OTP as verified — CONDITIONALLY: a parallel correct consent that lost the race gets the
+    // not-found 401 and writes nothing (one OTP → at most one ConsentRecord / routing).
     const verifiedAt = new Date();
-    await this.prisma.otpCode.update({
-      where: { id: otpRecord.id },
-      data: { verifiedAt },
-    });
-
-    // Verify the submission belongs to this user (tenant-scoped for consistency
-    // with the rest of the service — userId alone is already single-tenant).
-    const submission = await this.prisma.kycSubmission.findFirst({
-      where: { id: submissionId, userId: user.sub, user: { clientId: user.clientId } },
-      include: {
-        // For post-consent routing + notifications (owner name, outlet name, program).
-        partner: { select: { ownerName: true, outlets: { select: { name: true, programName: true }, take: 1 } } },
-      },
-    });
-    if (!submission) throw new NotFoundException('KYC submission not found');
+    if (!(await markOtpUsed(this.prisma, otpRecord.id, verifiedAt))) {
+      throw new UnauthorizedOtp('OTP not found or expired');
+    }
 
     // ── Task 3.5: Write a durable ConsentRecord on successful OTP verification ─
     // Idempotency note: if consent() is called twice for the same submission we
@@ -3794,12 +4147,15 @@ export class KycService {
     // double-routing, double-notify, or duplicate "submitted" WhatsApp.
     if (submission.status === 'DRAFT') {
       const { status: routedStatus, escalatedFrom } = await this.resolveInitialRouting(user);
-      await this.prisma.kycSubmission.update({
-        where: { id: submissionId },
+      // ATOMIC DRAFT→routed: only the consent that actually moves the row out of DRAFT writes the
+      // history row + notifies (a racing consent sees count 0 and stops here).
+      const routed = await this.prisma.kycSubmission.updateMany({
+        where: { id: submissionId, status: 'DRAFT' },
         // submittedAt = the consent moment: the KYC only truly reaches the approver now,
         // so approver SLA/aging starts here.
         data: { status: routedStatus as never, escalatedFrom, submittedAt: verifiedAt },
       });
+      if (routed.count !== 1) return { verified: true, submissionId };
       await this.prisma.kycStatusHistory.create({
         data: {
           kycSubmissionId: submissionId,
@@ -3844,6 +4200,23 @@ export class KycService {
     }
 
     return { verified: true, submissionId };
+  }
+
+  /**
+   * The outlet-owner phone a consent OTP must go to, normalised to 10 digits: a re-KYC's PROPOSED phone
+   * (what the rep entered; applied only at approval), else the submission partner's phone. null when
+   * the submission carries no usable owner phone.
+   */
+  private consentOwnerPhone(sub: {
+    proposedPartner?: Prisma.JsonValue | null;
+    partner?: { phone?: string | null } | null;
+  }): string | null {
+    const proposed = sub.proposedPartner && typeof sub.proposedPartner === 'object' && !Array.isArray(sub.proposedPartner)
+      ? (sub.proposedPartner as Record<string, unknown>).phone
+      : undefined;
+    const raw = typeof proposed === 'string' && proposed.trim() ? proposed : sub.partner?.phone ?? '';
+    const digits = this.phoneLast10(raw);
+    return digits.length === 10 ? digits : null;
   }
 
   // ─── POST /v1/kyc/not-interested ─────────────────────────────────────────────
@@ -4534,6 +4907,15 @@ export class KycService {
         // a submission may not reach APPROVED until BOTH are set (GIFSY-stage requirement).
         entityType: EntityType | null;
         gstRegistrationType: GstRegistrationType | null;
+        // The LIVE payout routing columns (every caller loads the partner via `include`, i.e. all
+        // scalars): a re-KYC proposal stages only EDITABLE payout fields, so whether its payoutRail
+        // is complete (→ clears the other rail) is judged over these (effectiveProposedPayout).
+        upiId?: string | null;
+        bankAccountNumber?: string | null;
+        ifscCode?: string | null;
+        // The LIVE payout-verification status: an approval that WRITES a rail promotes a
+        // NEEDS_RECAPTURE / UNVERIFIED partner to VERIFIED (reviewer approval = verification).
+        paymentDetailsStatus?: PaymentDetailsStatus | null;
         outlets: Array<{
           id: string;
           // The outlet's GROUP key — its owner group (parentId) for the re-KYC apply's
@@ -4580,14 +4962,82 @@ export class KycService {
       // approval tx rolls back → the re-KYC is NOT approved and the partner is left untouched.
       // Runs BEFORE the login-phone-sync below so that block reads the freshly-applied contact phone.
       if (submission.partnerId && submission.partner && submission.proposedPartner) {
-        const proposed = submission.proposedPartner as Record<string, unknown>;
+        // VPA SAFEGUARD — what this re-KYC does to the payout columns (effectiveProposedPayout, the SAME
+        // helper the reviewer overlay/detail use):
+        //  • NEW draft with an explicit `payoutRail` (the rep set a routing field of that rail) that is
+        //    COMPLETE merged over the LIVE partner: write the staged rail's fields and clear the OTHER
+        //    rail; that rail is excluded from the uniqueness lock/check below (it will not exist).
+        //  • NO payoutRail: nothing inferred, nothing cleared. A LEGACY draft's staged payout keys are
+        //    kept only where the outlet's re-KYC flags (outlets[0].reKycFlags — still set until this
+        //    approval clears them) say the rep could edit them; no field flags → unchanged write-back.
+        //
+        // F2 (race): never decide from the UNLOCKED snapshot `submission.partner` (loaded before this
+        // point — a concurrent redemption self-capture can rewrite the payout columns / status in
+        // between). Row-lock the partner FOR UPDATE inside this approval tx and read the payout routing
+        // columns + paymentDetailsStatus FROM THE LOCKED ROW; every payout decision below (rail
+        // completeness, the other-rail clear, the VERIFIED rule) uses these values. The lock is held to
+        // commit, so the write below cannot interleave with a capture (whose own write is conditioned on
+        // the values its gate read — partner.service capturePayoutDetails, F3).
+        // A lock-conflict abort (P2034 / Postgres 40P01 deadlock / 40001) on the payout lock steps
+        // below (partner row lock, identity advisory locks, the partner write) → the SAME clean 409 as
+        // the payout-changed refusal, never a raw 500. Lock order = partner row FIRST, identity locks
+        // SECOND (partner.service capturePayoutDetails takes them in the same order).
+        const lockStep = <T>(p: Promise<T>): Promise<T> =>
+          p.catch((e: unknown) => {
+            if (isLockConflictError(e)) throw new ConflictException(PAYOUT_CHANGED_AFTER_SUBMIT_MESSAGE);
+            throw e;
+          });
+        const lockedRows = await lockStep(
+          tx.$queryRaw<
+            Array<{
+              upiId: string | null;
+              bankAccountNumber: string | null;
+              ifscCode: string | null;
+              paymentDetailsStatus: string | null;
+            }>
+          >`SELECT "upiId", "bankAccountNumber", "ifscCode", "paymentDetailsStatus"::text AS "paymentDetailsStatus"
+          FROM channel_partners WHERE id = ${submission.partnerId} FOR UPDATE`,
+        );
+        const lockedPayout = lockedRows?.[0];
+        if (!lockedPayout) throw new NotFoundException('Outlet not found');
+        const rawProposed = submission.proposedPartner as Record<string, unknown>;
+        // FIX 2 ("changed, not just vanished"): a routing value the draft CARRIED from the live partner
+        // (a LOCKED field completing the staged rail — recorded as proposal.payoutCarried at create)
+        // that now DIFFERS on the locked row means the outlet's payout details changed after this KYC
+        // was submitted (e.g. a self-capture replaced the IFSC). Applying the staged account over the
+        // new IFSC would route money to a beneficiary nobody reviewed → refuse the WHOLE approval (409,
+        // tx rolls back). Legacy drafts without payoutCarried → no check (unchanged behaviour).
+        if (payoutCarriedChanged(rawProposed, lockedPayout)) {
+          throw new ConflictException(PAYOUT_CHANGED_AFTER_SUBMIT_MESSAGE);
+        }
+        const payout = effectiveProposedPayout(rawProposed, submission.partner.outlets[0]?.reKycFlags, {
+          ...(submission.partner as unknown as Record<string, unknown>),
+          upiId: lockedPayout.upiId,
+          bankAccountNumber: lockedPayout.bankAccountNumber,
+          ifscCode: lockedPayout.ifscCode,
+        });
+        // F2: a staged explicit rail that is INCOMPLETE over the LOCKED live partner means the outlet's
+        // payout details changed after this KYC was submitted (e.g. a locked IFSC vanished via a
+        // self-capture). Never silently drop it (the old FIX-B path) — the reviewer approved something
+        // that can no longer be applied as seen. Refuse the WHOLE approval (409 → tx rolls back: status
+        // flip, identity, address — nothing is approved). The bulk Excel commit surfaces it as the row's error.
+        if (resolveProposedPayoutRail(rawProposed) != null && payout.rail == null) {
+          throw new ConflictException(PAYOUT_CHANGED_AFTER_SUBMIT_MESSAGE);
+        }
+        const proposed = payout.proposal;
+        const payoutRail = payout.rail;
         const asStr = (v: unknown): string | undefined =>
           typeof v === 'string' && v.length > 0 ? v : undefined;
         const clientId = submission.partner.clientId;
         // The outlet's group (parentId) for the group-aware uniqueness check. A re-KYC partner owns
         // exactly the outlet under review; the loaded primary outlet carries its group key.
         const ourParentId = submission.partner.outlets[0]?.parentId ?? null;
-        const { uniquenessPolicy } = await this.tenantSettings.getEffectiveSettings(clientId);
+        // M1: when this approval WRITES a UPI, read the settings UNCACHED so a just-enabled UPI
+        // uniqueness policy is never skipped from a stale per-instance cache.
+        const writesUpi = payoutRail !== 'bank' && normalizeIdentityValue('upi', asStr(proposed.upiId)) != null;
+        const { uniquenessPolicy } = writesUpi
+          ? await this.tenantSettings.getEffectiveSettings(clientId, { fresh: true })
+          : await this.tenantSettings.getEffectiveSettings(clientId);
 
         // GROUP-LEAVE via re-KYC (Wave-4, Option A) — recomputed AUTHORITATIVELY here against the
         // LIVE group PAN (not the draft-time value): a grouped child whose proposed PAN != the group's
@@ -4628,10 +5078,10 @@ export class KycService {
         const identityDetails = {
           gstNumber: asStr(proposed.gstNumber) ?? null,
           panNumber: asStr(proposed.panNumber) ?? null,
-          bankAccountNumber: asStr(proposed.bankAccountNumber) ?? null,
-          upiId: asStr(proposed.upiId) ?? null,
+          bankAccountNumber: payoutRail === 'upi' ? null : (asStr(proposed.bankAccountNumber) ?? null),
+          upiId: payoutRail === 'bank' ? null : (asStr(proposed.upiId) ?? null),
         };
-        await acquireIdentityLocks(tx, { clientId, details: identityDetails, policy: uniquenessPolicy });
+        await lockStep(acquireIdentityLocks(tx, { clientId, details: identityDetails, policy: uniquenessPolicy }));
         const violation = await checkGroupUniqueness(tx, {
           clientId,
           // Departure → validate as STANDALONE (effectiveParentId=null) so the changed PAN is allowed
@@ -4651,7 +5101,24 @@ export class KycService {
         // staged with a mixed-case UPI BEFORE this normalizer change, approved AFTER, would otherwise
         // persist the raw mixed-case value while the check compared lowercase → divergence. A
         // normalized-empty value maps to `undefined` (not null) to preserve "undefined = untouched".
-        await tx.channelPartner.update({
+        // paymentDetailsStatus (owner decision): when this approval actually WRITES a payout rail
+        // (payout.rail non-null ⇔ the staged chosen rail is COMPLETE merged over the live partner — the
+        // same condition under which the other rail is cleared) AND the partner is currently
+        // NEEDS_RECAPTURE / UNVERIFIED, promote it to VERIFIED: the reviewer approved the visible
+        // proposed details, which counts as verification. Without this a stale "needs re-capture" mark
+        // would let the partner's redemption self-capture (partner.service capturePayoutDetails gate)
+        // overwrite reviewer-approved details. Never touched otherwise — no rail written (incl. an
+        // incomplete rail, payout-locked or legacy drafts) or already VERIFIED → status unchanged.
+        // F1: ONLY when EVERY routing field of the rail is in the STAGED proposal (rep-entered, hence
+        // visible to the reviewer). A rail completed from a LOCKED live value (e.g. account number
+        // staged, IFSC carried from the partner) is still written, but its approval does not verify the
+        // beneficiary → status unchanged. The status is the LOCKED row's (F2), never the snapshot's.
+        const liveStatus = lockedPayout.paymentDetailsStatus;
+        const verifiesPayout =
+          payoutRail != null &&
+          isPayoutRailFullyStaged(payoutRail, rawProposed) &&
+          (liveStatus === PaymentDetailsStatus.NEEDS_RECAPTURE || liveStatus === PaymentDetailsStatus.UNVERIFIED);
+        await lockStep(tx.channelPartner.update({
           where: { id: submission.partnerId },
           data: {
             businessName: asStr(proposed.businessName),
@@ -4664,9 +5131,18 @@ export class KycService {
             bankAccountHolder: asStr(proposed.bankAccountHolder),
             ifscCode: asStr(proposed.ifscCode),
             upiId: normalizeIdentityValue('upi', asStr(proposed.upiId)) ?? undefined,
+            // Present key (value or explicit null) → written; absent key → untouched.
+            upiCaptureMethod:
+              'upiCaptureMethod' in proposed ? asUpiCaptureMethod(proposed.upiCaptureMethod) : undefined,
             paymentMode: asStr(proposed.paymentMode),
+            // EXCLUSIVE RAIL: setting UPI nulls the bank rail; setting bank nulls the UPI rail. Spread
+            // LAST so a stale pinned value for the other rail in the proposal can never survive.
+            // Payout-ROUTING columns only — KYC document / cheque evidence (incl. the redemption
+            // payoutChequeFileKey) is untouched. Empty when no rail is set (legacy / payout-locked).
+            ...payout.clears,
+            ...(verifiesPayout ? { paymentDetailsStatus: PaymentDetailsStatus.VERIFIED } : {}),
           },
-        });
+        }));
 
         // (iv) APPLY the staged OUTLET ADDRESS (stage-at-approval, same model as the identity/payout
         // fields above). The submitted address lives on the Outlet, not the ChannelPartner; a re-KYC
@@ -5199,6 +5675,7 @@ export class KycService {
             bankAccountHolder: true,
             ifscCode: true,
             upiId: true,
+            upiCaptureMethod: true,
             paymentMode: true,
             // JOB B: drives the hide-unless-VERIFIED payout gate on this emitter.
             paymentDetailsStatus: true,
@@ -5209,6 +5686,9 @@ export class KycService {
               take: 1,
               select: {
                 outletCode: true,
+                // VPA safeguard: the re-KYC flags filter a LEGACY draft's locked payout echoes in the overlay
+                // (effectiveProposedPayout) exactly as the approval apply does.
+                reKycFlags: true,
                 name: true,
                 addressLine1: true,
                 addressLine2: true,
@@ -5234,9 +5714,11 @@ export class KycService {
     const entries = submissions.map((s) => {
       // Overlay the re-KYC PROPOSED values (stage-at-approval) so the queue shows what's UNDER
       // REVIEW, not the stale live-partner values (which a re-KYC only overwrites at approval).
-      // JOB B: null the payout rails unless VERIFIED (default VERIFIED → unchanged for every
-      // existing/KYC-captured record + Deoleo; only redemption-captured-but-unpaid rows hide).
-      const p = this.hidePayoutUnlessVerified(this.overlayProposedIdentity(s.partner, s.proposedPartner));
+      // JOB B: null the LIVE payout rails unless VERIFIED (default VERIFIED → unchanged for every
+      // existing/KYC-captured record + Deoleo; only redemption-captured-but-unpaid rows hide) BEFORE
+      // overlaying — so the rep-entered PROPOSED payout values (R3: what the reviewer approves) still
+      // show on an UNVERIFIED partner, while its self-captured live values stay hidden.
+      const p = this.overlayProposedIdentity(this.hidePayoutUnlessVerified(s.partner), s.proposedPartner, s.partner);
       const o = p?.outlets[0];
       const typeDisplay = typeDisplayByClient.get(s.user.clientId) ?? EMPTY_TYPE_DISPLAY;
       const holder = p?.bankAccountHolder?.trim().toLowerCase();
@@ -5265,6 +5747,11 @@ export class KycService {
         accountNumber: p?.bankAccountNumber ?? null,
         ifscCode: p?.ifscCode ?? null,
         upiId: p?.upiId ?? null,
+        upiCaptureMethod: p?.upiCaptureMethod ?? null,
+        // R10 — which rail approval will CLEAR ('upi' | 'bank'), or null when nothing on the LIVE
+        // partner is actually removed. Computed from the RAW live partner (a rail name, not a value,
+        // so it is exposed even when the live values themselves are hidden).
+        removedRail: this.removedRailFor(s.partner, s.proposedPartner),
         boardGeo:
           s.boardPhotoLat != null && s.boardPhotoLng != null
             ? { lat: Number(s.boardPhotoLat), lng: Number(s.boardPhotoLng) }
@@ -5313,6 +5800,9 @@ export class KycService {
               take: 1,
               select: {
                 outletCode: true,
+                // VPA safeguard: the re-KYC flags filter a LEGACY draft's locked payout echoes in the overlay
+                // (effectiveProposedPayout) exactly as the approval apply does.
+                reKycFlags: true,
                 name: true,
                 addressLine1: true,
                 addressLine2: true,
@@ -5338,9 +5828,11 @@ export class KycService {
     for (const s of submissions) {
       // Overlay the re-KYC PROPOSED values (stage-at-approval) so the export reflects what's UNDER
       // REVIEW, not the stale live-partner values (a re-KYC only overwrites the partner at approval).
-      // JOB B: null the payout rails unless VERIFIED (default VERIFIED → unchanged for every
-      // existing/KYC-captured record + Deoleo; only redemption-captured-but-unpaid rows hide).
-      const p = this.hidePayoutUnlessVerified(this.overlayProposedIdentity(s.partner, s.proposedPartner));
+      // JOB B: null the LIVE payout rails unless VERIFIED (default VERIFIED → unchanged for every
+      // existing/KYC-captured record + Deoleo; only redemption-captured-but-unpaid rows hide) BEFORE
+      // overlaying — so the rep-entered PROPOSED payout values (R3: what the reviewer approves) still
+      // show on an UNVERIFIED partner, while its self-captured live values stay hidden.
+      const p = this.overlayProposedIdentity(this.hidePayoutUnlessVerified(s.partner), s.proposedPartner, s.partner);
       const o = p?.outlets[0];
       const typeDisplay = typeDisplayByClient.get(s.user.clientId) ?? EMPTY_TYPE_DISPLAY;
       const holder = p?.bankAccountHolder?.trim().toLowerCase();
@@ -5426,6 +5918,9 @@ export class KycService {
               take: 1,
               select: {
                 outletCode: true,
+                // VPA safeguard: the re-KYC flags filter a LEGACY draft's locked payout echoes in the overlay
+                // (effectiveProposedPayout) exactly as the approval apply does.
+                reKycFlags: true,
                 name: true,
                 addressLine1: true,
                 addressLine2: true,
@@ -5462,9 +5957,11 @@ export class KycService {
     const rows: RejectedKycRow[] = submissions.map((s) => {
       // A rejected re-KYC's proposed values were never applied to the live partner; the reviewer
       // rejected the PROPOSED payload, so overlay it here to show what was actually submitted/rejected.
-      // JOB B: null the payout rails unless VERIFIED (default VERIFIED → unchanged for every
-      // existing/KYC-captured record + Deoleo; only redemption-captured-but-unpaid rows hide).
-      const p = this.hidePayoutUnlessVerified(this.overlayProposedIdentity(s.partner, s.proposedPartner));
+      // JOB B: null the LIVE payout rails unless VERIFIED (default VERIFIED → unchanged for every
+      // existing/KYC-captured record + Deoleo; only redemption-captured-but-unpaid rows hide) BEFORE
+      // overlaying — so the rep-entered PROPOSED payout values (R3: what the reviewer approves) still
+      // show on an UNVERIFIED partner, while its self-captured live values stay hidden.
+      const p = this.overlayProposedIdentity(this.hidePayoutUnlessVerified(s.partner), s.proposedPartner, s.partner);
       const o = p?.outlets[0];
       const hist = s.statusHistory[0];
       const rejectedAt = hist?.createdAt ?? s.reviewedAt ?? null;

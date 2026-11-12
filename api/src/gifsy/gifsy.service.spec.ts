@@ -335,7 +335,7 @@ describe('GifsyService', () => {
       }));
 
       const res = await service.updateClient(gifsy, 'bajaj', { features: { hubbleVoucherEnabled: true } });
-      const feats = res.features as Record<string, boolean>;
+      const feats = res.features as unknown as Record<string, boolean>;
       expect(feats.hubbleVoucherEnabled).toBe(true);
       // Full console set is present (coerced), not a partial projection.
       expect(feats.rbacEnforcement).toBe(false);
@@ -361,7 +361,7 @@ describe('GifsyService', () => {
       const written = mockPrisma.client.update.mock.calls[0][0].data.features;
       expect(written).toEqual({ walletModule: true, catalogueMrpSlash: true });
       // Projected: echoed true on the return payload.
-      const feats = res.features as Record<string, boolean>;
+      const feats = res.features as unknown as Record<string, boolean>;
       expect(feats.catalogueMrpSlash).toBe(true);
     });
 
@@ -376,7 +376,7 @@ describe('GifsyService', () => {
       }));
 
       const res = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
-      const feats = res.features as Record<string, boolean>;
+      const feats = res.features as unknown as Record<string, boolean>;
       expect(feats.catalogueMrpSlash).toBe(false);
     });
 
@@ -392,7 +392,7 @@ describe('GifsyService', () => {
         branding: {}, features: data.features,
       }));
       const onRes = await service.updateClient(gifsy, 'bajaj', { features: { captureBankAtRedemption: true } });
-      expect((onRes.features as Record<string, boolean>).captureBankAtRedemption).toBe(true);
+      expect((onRes.features as unknown as Record<string, boolean>).captureBankAtRedemption).toBe(true);
 
       mockPrisma.client.findFirst.mockResolvedValueOnce({
         id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
@@ -403,7 +403,128 @@ describe('GifsyService', () => {
         branding: {}, features: data.features,
       }));
       const offRes = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
-      expect((offRes.features as Record<string, boolean>).captureBankAtRedemption).toBe(false);
+      expect((offRes.features as unknown as Record<string, boolean>).captureBankAtRedemption).toBe(false);
+    });
+
+    it("offer tiles: round-trips offerTiles through the PATCH projection; defaults OFF for a tenant that never set it", async () => {
+      mockPrisma.client.findFirst.mockResolvedValueOnce({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: { walletModule: true },
+      });
+      mockPrisma.client.update.mockImplementationOnce(async ({ data }) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: data.features,
+      }));
+      const onRes = await service.updateClient(gifsy, 'bajaj', { features: { offerTiles: true } });
+      expect((onRes.features as unknown as Record<string, boolean>).offerTiles).toBe(true);
+
+      mockPrisma.client.findFirst.mockResolvedValueOnce({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: { walletModule: true },
+      });
+      mockPrisma.client.update.mockImplementationOnce(async ({ data }) => ({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: data.features,
+      }));
+      const offRes = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
+      expect((offRes.features as unknown as Record<string, boolean>).offerTiles).toBe(false);
+    });
+
+    it("sales import: round-trips salesImport through the PATCH projection; defaults OFF for a tenant that never set it", async () => {
+      mockPrisma.client.findFirst.mockResolvedValueOnce({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: { walletModule: true },
+      });
+      mockPrisma.client.update.mockImplementationOnce(async ({ data }) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: data.features,
+      }));
+      const savedRunner = process.env.SALES_IMPORT_RUNNER;
+      process.env.SALES_IMPORT_RUNNER = 'inline'; // M1: switching ON needs a configured runner
+      let onRes;
+      try {
+        onRes = await service.updateClient(gifsy, 'bajaj', { features: { salesImport: true } });
+      } finally {
+        if (savedRunner === undefined) delete process.env.SALES_IMPORT_RUNNER;
+        else process.env.SALES_IMPORT_RUNNER = savedRunner;
+      }
+      expect((onRes.features as unknown as Record<string, boolean>).salesImport).toBe(true);
+
+      mockPrisma.client.findFirst.mockResolvedValueOnce({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: { walletModule: true },
+      });
+      mockPrisma.client.update.mockImplementationOnce(async ({ data }) => ({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: data.features,
+      }));
+      const offRes = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
+      expect((offRes.features as unknown as Record<string, boolean>).salesImport).toBe(false);
+    });
+
+    describe('M1: salesImport cannot be switched ON while the background processor is not configured', () => {
+      const RUNNER_KEYS = ['SALES_IMPORT_RUNNER', 'SALES_IMPORT_JOB', 'GCP_PROJECT', 'GCP_PROJECT_ID'] as const;
+      const saved: Record<string, string | undefined> = {};
+      const MSG = "Sales Import can't be switched on here yet: the background processor isn't set up in this environment.";
+      beforeEach(() => {
+        for (const k of RUNNER_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+      });
+      afterEach(() => {
+        for (const k of RUNNER_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+      });
+      const tenant = (features: Record<string, unknown>) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'), branding: {}, features,
+      });
+      const echoUpdate = () =>
+        mockPrisma.client.update.mockImplementationOnce(async ({ data }) => ({ ...tenant({}), features: data.features }));
+
+      it.each([
+        ['unset', {}],
+        ["'none'", { SALES_IMPORT_RUNNER: 'none' }],
+        ['job without SALES_IMPORT_JOB', { SALES_IMPORT_RUNNER: 'job', GCP_PROJECT: 'p' }],
+      ])('PATCH ON with the runner %s → 400 with the operator message; nothing written', async (_l, env) => {
+        Object.assign(process.env, env);
+        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ walletModule: true }));
+        const p = service.updateClient(gifsy, 'bajaj', { features: { salesImport: true } });
+        await expect(p).rejects.toBeInstanceOf(BadRequestException);
+        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ walletModule: true }));
+        await expect(service.updateClient(gifsy, 'bajaj', { features: { salesImport: true } })).rejects.toThrow(MSG);
+        expect(mockPrisma.client.update).not.toHaveBeenCalled();
+      });
+
+      it('PATCH ON with a job runner fully configured → allowed', async () => {
+        Object.assign(process.env, { SALES_IMPORT_RUNNER: 'job', SALES_IMPORT_JOB: 'gifsy-sales-import', GCP_PROJECT: 'p' });
+        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({}));
+        echoUpdate();
+        const res = await service.updateClient(gifsy, 'bajaj', { features: { salesImport: true } });
+        expect((res.features as unknown as Record<string, boolean>).salesImport).toBe(true);
+      });
+
+      it('switching OFF, and re-sending ON for a tenant already ON, are never blocked (other toggles keep working)', async () => {
+        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ salesImport: true }));
+        echoUpdate();
+        const off = await service.updateClient(gifsy, 'bajaj', { features: { salesImport: false } });
+        expect((off.features as unknown as Record<string, boolean>).salesImport).toBe(false);
+
+        mockPrisma.client.findFirst.mockResolvedValueOnce(tenant({ salesImport: true }));
+        echoUpdate();
+        const again = await service.updateClient(gifsy, 'bajaj', { features: { salesImport: true, walletModule: true } });
+        expect((again.features as unknown as Record<string, boolean>).salesImport).toBe(true);
+      });
+
+      it('an unrelated toggle on a tenant without salesImport (e.g. Deoleo) is unaffected', async () => {
+        mockPrisma.client.findFirst.mockResolvedValueOnce({ ...tenant({ walletModule: true }), id: 'deoleo' });
+        echoUpdate();
+        const res = await service.updateClient(gifsy, 'deoleo', { features: { offerTiles: true } });
+        expect((res.features as unknown as Record<string, boolean>).offerTiles).toBe(true);
+      });
+
+      it('createClient with features.salesImport=true → 400 before any DB write', async () => {
+        await expect(
+          service.createClient(gifsy, { slug: 'newco', internalName: 'N', features: { salesImport: true } } as never),
+        ).rejects.toThrow(MSG);
+        expect(mockPrisma.client.create).not.toHaveBeenCalled();
+      });
     });
 
     it('F1: deep-merges the nested features.partnerApp so a partial PATCH keeps sibling flags', async () => {
@@ -433,6 +554,113 @@ describe('GifsyService', () => {
       expect(written).toEqual({
         walletModule: true,
         partnerApp: { showSchemes: false, showInvoices: true, showWallet: true },
+      });
+    });
+
+    // ── B2 (Bajaj prod go-live): behaviour flags via the SAME features PATCH path ──
+    it('B2: a behaviour-flag PATCH merges ONE key and every other stored key survives (incl. nested partnerApp)', async () => {
+      const stored = {
+        walletModule: true,
+        kycApprovalFlow: true,
+        kycAddressProofWaiver: true,
+        soDeclarationKyc: true,
+        hubbleVoucherEnabled: false,
+        partnerApp: { showLeaderboard: true },
+        visibilityCaptureMode: 'PHOTO_APPROVAL',
+      };
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: stored,
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: data.features,
+      }));
+
+      const res = await service.updateClient(gifsy, 'bajaj', { features: { outletMasterGeo: true } });
+
+      const written = mockPrisma.client.update.mock.calls[0][0].data.features;
+      expect(written).toEqual({ ...stored, outletMasterGeo: true });
+      // The response echoes BOTH behaviour flags + the effective partnerApp block.
+      const feats = res.features as Record<string, unknown>;
+      expect(feats.outletMasterGeo).toBe(true);
+      expect(feats.soDeclarationKyc).toBe(true);
+      expect(feats.partnerApp).toEqual({
+        showSchemes: true, showInvoices: false, showWallet: true, showTeam: true, showLeaderboard: true,
+      });
+    });
+
+    it('B2: a tenant that never set the behaviour flags projects them OFF (Deoleo-style blob unchanged)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: { walletModule: true, kycAddressProofWaiver: true },
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: { walletModule: true, kycAddressProofWaiver: true }, ...data,
+      }));
+
+      const res = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
+
+      // A status-only PATCH never writes the features blob at all.
+      expect(mockPrisma.client.update.mock.calls[0][0].data.features).toBeUndefined();
+      const feats = res.features as Record<string, unknown>;
+      expect(feats.outletMasterGeo).toBe(false);
+      expect(feats.soDeclarationKyc).toBe(false);
+    });
+
+    it('B3: rejects a partnerApp PATCH with an unknown key or a non-boolean value (nothing written)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: {},
+      });
+      await expect(
+        service.updateClient(gifsy, 'bajaj', { features: { partnerApp: { showRanks: true } } as never }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      await expect(
+        service.updateClient(gifsy, 'bajaj', { features: { partnerApp: { showLeaderboard: 'true' } } as never }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      await expect(
+        service.updateClient(gifsy, 'bajaj', { features: { partnerApp: [true] } as never }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.client.update).not.toHaveBeenCalled();
+    });
+
+    it('L3: a non-boolean value for a known module/behaviour flag → 400 (a string "false" would read as ON)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: {},
+      });
+      for (const features of [{ outletMasterGeo: 'false' }, { hubbleVoucherEnabled: 1 }, { walletModule: null }]) {
+        await expect(
+          service.updateClient(gifsy, 'bajaj', { features } as never),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      }
+      await expect(
+        service.createClient(gifsy, { slug: 'newco', internalName: 'N', features: { soDeclarationKyc: 'yes' } } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.client.update).not.toHaveBeenCalled();
+      expect(mockPrisma.client.create).not.toHaveBeenCalled();
+    });
+
+    it('B3: a partial partnerApp PATCH (showLeaderboard only) keeps the stored sibling tab keys', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: { walletModule: true, partnerApp: { showTeam: false } },
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: data.features,
+      }));
+
+      const res = await service.updateClient(gifsy, 'bajaj', { features: { partnerApp: { showLeaderboard: true } } as never });
+
+      expect(mockPrisma.client.update.mock.calls[0][0].data.features).toEqual({
+        walletModule: true,
+        partnerApp: { showTeam: false, showLeaderboard: true },
+      });
+      expect((res.features as unknown as { partnerApp: Record<string, boolean> }).partnerApp).toEqual({
+        showSchemes: true, showInvoices: false, showWallet: true, showTeam: false, showLeaderboard: true,
       });
     });
   });
@@ -502,6 +730,24 @@ describe('GifsyService', () => {
       await expect(service.getClientDetail(gifsy, 'nope')).rejects.toBeInstanceOf(NotFoundException);
     });
 
+    it('B2/B3: projects the behaviour flags + the EFFECTIVE partnerApp (runtime defaults when unset)', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: { outletMasterGeo: true, partnerApp: { showLeaderboard: true } },
+        approvalHierarchy: {}, notifications: {}, invoicing: {}, wallet: {},
+      });
+      mockPrisma.clientDomain.findMany.mockResolvedValue([]);
+
+      const detail = await service.getClientDetail(gifsy, 'bajaj');
+
+      expect(detail.features.outletMasterGeo).toBe(true);
+      expect(detail.features.soDeclarationKyc).toBe(false);
+      // Unset keys resolve to the partner shell's runtime defaults (FE DEFAULT_CLIENT_CONFIG).
+      expect(detail.features.partnerApp).toEqual({
+        showSchemes: true, showInvoices: false, showWallet: true, showTeam: true, showLeaderboard: true,
+      });
+    });
+
     it('projects the JSON config blocks into a full ClientConfig-shaped detail', async () => {
       mockPrisma.client.findUnique.mockResolvedValue({
         id: 'deoleo',
@@ -533,6 +779,32 @@ describe('GifsyService', () => {
       expect(detail.invoicing.sellerLegalName).toBe('Tech Gifsy Solutions Limited');
       expect(detail.wallet.redemptionModes).toEqual(['UPI', 'NEFT']);
       expect(detail.wallet.pointsExpiryDays).toBeNull();
+    });
+
+    it('maps legacy private-bucket branding URLs to the public route; Deoleo static paths unchanged', async () => {
+      const prev = process.env.GCS_BUCKET;
+      delete process.env.GCS_BUCKET;
+      try {
+        const LOGO = 'branding/bajaj/2026-11/5d3daa20-92f7-4ff8-8d2e-8ff59a429201-bajaj-logo.png';
+        mockPrisma.client.findUnique.mockResolvedValue({
+          id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+          branding: {
+            logoUrl: `https://storage.googleapis.com/gifsy-platform-files/${LOGO}`,
+            wordmarkWhiteUrl: '/brand/deoleo-wordmark-white.png',
+            faviconUrl: '/favicons/deoleo.ico',
+          },
+          features: {}, approvalHierarchy: {}, notifications: {}, invoicing: {}, wallet: {},
+        });
+        mockPrisma.clientDomain.findMany.mockResolvedValue([]);
+        const detail = await service.getClientDetail(gifsy, 'bajaj');
+        expect(detail.branding.logoUrl).toBe(`/api/public/branding-assets?key=${encodeURIComponent(LOGO)}`);
+        expect(detail.branding.wordmarkWhiteUrl).toBe('/brand/deoleo-wordmark-white.png');
+        expect(detail.branding.wordmarkColorUrl).toBe('');
+        expect(detail.branding.faviconUrl).toBe('/favicons/deoleo.ico');
+      } finally {
+        if (prev === undefined) delete process.env.GCS_BUCKET;
+        else process.env.GCS_BUCKET = prev;
+      }
     });
 
     it('returns a complete shape even when every config blob is empty', async () => {
@@ -1018,21 +1290,17 @@ describe('GifsyService', () => {
         ...baseClient(),
         branding: data.branding,
       }));
-      mockStorage.generateKey.mockReturnValue('branding/deoleo/2026-07/uuid-logo.png');
-      mockStorage.uploadFile.mockResolvedValue(
-        'https://storage.googleapis.com/b/branding/deoleo/2026-07/uuid-logo.png',
-      );
+      const key = 'branding/deoleo/2026-07/5d3daa20-92f7-4ff8-8d2e-8ff59a429201-logo.png';
+      mockStorage.generateKey.mockReturnValue(key);
+      mockStorage.uploadFile.mockResolvedValue(`https://storage.googleapis.com/b/${key}`);
 
       const res = await service.uploadBrandingAsset(gifsy, 'deoleo', pngFile, 'logo');
 
-      expect(res.url).toBe('https://storage.googleapis.com/b/branding/deoleo/2026-07/uuid-logo.png');
+      // The PUBLIC same-origin route URL (the bucket is private → a GCS URL 403s pre-login).
+      expect(res.url).toBe(`/api/public/branding-assets?key=${encodeURIComponent(key)}`);
       expect(mockStorage.generateKey).toHaveBeenCalledWith('branding/deoleo', 'logo.png');
       // Trusted (sniffed) mime, not the client's claim.
-      expect(mockStorage.uploadFile).toHaveBeenCalledWith(
-        PNG_BYTES,
-        'branding/deoleo/2026-07/uuid-logo.png',
-        'image/png',
-      );
+      expect(mockStorage.uploadFile).toHaveBeenCalledWith(PNG_BYTES, key, 'image/png');
       const written = mockPrisma.client.update.mock.calls[0][0].data.branding;
       expect(written.logoUrl).toBe(res.url);
       expect(written.displayName).toBe('Deoleo'); // branding merge preserved
@@ -1044,7 +1312,8 @@ describe('GifsyService', () => {
         ...baseClient(),
         branding: data.branding,
       }));
-      mockStorage.generateKey.mockReturnValue('branding/deoleo/k.png');
+      const key = 'branding/deoleo/2026-07/5d3daa20-92f7-4ff8-8d2e-8ff59a429201-f.png';
+      mockStorage.generateKey.mockReturnValue(key);
       mockStorage.uploadFile.mockResolvedValue('https://cdn/fav.png');
 
       await service.uploadBrandingAsset(
@@ -1055,7 +1324,64 @@ describe('GifsyService', () => {
       );
 
       const written = mockPrisma.client.update.mock.calls[0][0].data.branding;
-      expect(written.faviconUrl).toBe('https://cdn/fav.png');
+      expect(written.faviconUrl).toBe(`/api/public/branding-assets?key=${encodeURIComponent(key)}`);
+    });
+
+    it('derives the stored extension from the SNIFFED type, not the client filename', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue(baseClient());
+      mockPrisma.client.update.mockImplementation(async ({ data }: { data: { branding: unknown } }) => ({
+        ...baseClient(),
+        branding: data.branding,
+      }));
+      mockStorage.generateKey.mockReturnValue('branding/deoleo/2026-07/5d3daa20-92f7-4ff8-8d2e-8ff59a429201-My_Logo.png');
+      mockStorage.uploadFile.mockResolvedValue('x');
+      await service.uploadBrandingAsset(
+        gifsy,
+        'deoleo',
+        { buffer: PNG_BYTES, size: PNG_BYTES.length, originalname: 'My Logo.p ng' } as Express.Multer.File,
+        'logo',
+      );
+      expect(mockStorage.generateKey).toHaveBeenCalledWith('branding/deoleo', 'My Logo.png');
+    });
+
+    it('caps a very long client filename at 100 chars (key stays servable)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue(baseClient());
+      mockPrisma.client.update.mockImplementation(async ({ data }: { data: { branding: unknown } }) => ({
+        ...baseClient(),
+        branding: data.branding,
+      }));
+      mockStorage.generateKey.mockReturnValue('branding/deoleo/2026-07/5d3daa20-92f7-4ff8-8d2e-8ff59a429201-x.png');
+      mockStorage.uploadFile.mockResolvedValue('x');
+      await service.uploadBrandingAsset(
+        gifsy,
+        'deoleo',
+        { buffer: PNG_BYTES, size: PNG_BYTES.length, originalname: `${'a'.repeat(400)}.png` } as Express.Multer.File,
+        'logo',
+      );
+      expect(mockStorage.generateKey).toHaveBeenCalledWith('branding/deoleo', `${'a'.repeat(100)}.png`);
+    });
+
+    it('refuses (and never uploads) when the derived key would not be servable by the public route', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue(baseClient());
+      mockStorage.generateKey.mockReturnValue('branding/deoleo/not-a-valid-shape.png');
+      await expect(
+        service.uploadBrandingAsset(gifsy, 'deoleo', pngFile, 'logo'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockStorage.uploadFile).not.toHaveBeenCalled();
+    });
+
+    it('rejects a TIFF (a sniffable image no <img> renders)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue(baseClient());
+      const tiff = Buffer.from([0x49, 0x49, 0x2a, 0x00, 1, 2, 3, 4]);
+      await expect(
+        service.uploadBrandingAsset(
+          gifsy,
+          'deoleo',
+          { buffer: tiff, size: tiff.length, originalname: 'x.tif' } as Express.Multer.File,
+          'logo',
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockStorage.uploadFile).not.toHaveBeenCalled();
     });
 
     it('rejects a non-image (PDF) even with a valid magic signature', async () => {

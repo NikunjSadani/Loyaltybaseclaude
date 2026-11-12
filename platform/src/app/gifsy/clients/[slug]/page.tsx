@@ -11,6 +11,7 @@ import {
 import { validateTenantDomain, normalizeTenantDomain, TENANT_DOMAIN_SUFFIX, tenantSiteUrl } from '@/lib/platform/platform-admin';
 import type { ClientConfig, FeatureKey, FeatureFlags } from '@/lib/platform/client-config';
 import { OutletTypeConfigSection } from '@/components/admin/outlet-type-config-section';
+import { BEHAVIOUR_FLAG_META, BEHAVIOUR_FLAG_KEYS, type BehaviourFlagKey } from '@/lib/platform/behaviour-flags';
 import { getToken } from '@/lib/auth-client';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -33,6 +34,8 @@ const FEATURE_META: Record<FeatureKey, { label: string; description: string }> =
   catalogueMrpSlash:        { label: 'Catalogue MRP Slash', description: "Show each item's MRP (converted to points at the tenant's rate) as a struck-through list price above the redeem points. Only appears where an MRP is set and is above the redeem price." },
   partnerDashboardV2:       { label: 'Partner Dashboard V2 (Trade)', description: "Bajaj trade partner dashboard: hides the trend chart, enlarges the points balance + Redeem, shows a 'to go' banner in the hero, and adds a this-month-vs-last-month primary-KPI card." },
   captureBankAtRedemption:  { label: 'Capture bank/UPI at redemption', description: 'Let a wholesaler with no beneficiary on file add bank/UPI in-flow at Redeem → Cash (same form/rules as KYC). Captured details stay hidden from Store Information until a payout on them completes.' },
+  offerTiles:               { label: "This month's offers", description: "Turns on the whole offers feature: the This Month's Offers admin page and the offer tiles on the partner dashboard. When off, partners see no offers section." },
+  salesImport:              { label: 'Sales Import (DMS file)', description: "Upload the distributor invoice-line file to compute importer-owned KPI achievements per month. Leave OFF unless the tenant's column mapping and KPIs are configured." },
 };
 
 const FEATURE_KEYS = Object.keys(FEATURE_META) as FeatureKey[];
@@ -162,8 +165,11 @@ interface ClientPatchBody {
   primaryColor?: string;
   supportEmail?: string;
   supportPhone?: string;
-  /** Feature-flag toggles — merged key-by-key into the tenant's features blob by the backend. */
-  features?: Partial<Record<FeatureKey, boolean>>;
+  /** Feature-flag toggles — merged key-by-key into the tenant's features blob by the backend.
+   *  `partnerApp` is nested and deep-merged server-side (send only the keys being changed). */
+  features?: Partial<Record<FeatureKey | BehaviourFlagKey, boolean>> & {
+    partnerApp?: Partial<FeatureFlags['partnerApp']>;
+  };
 }
 
 /** Shape returned by the PATCH endpoint (subset we merge back into local config).
@@ -177,7 +183,7 @@ interface ClientPatchResponse {
   primaryColor?: string;
   supportEmail?: string;
   supportPhone?: string;
-  features?: Record<string, boolean>;
+  features?: Partial<FeatureFlags>;
 }
 
 function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) {
@@ -205,7 +211,7 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
    * then merges the returned client back into local state. Unlike the in-memory
    * sections below, this is durable.
    */
-  const saveClient = useCallback(async (patch: ClientPatchBody): Promise<boolean> => {
+  const saveClientDetailed = useCallback(async (patch: ClientPatchBody): Promise<{ ok: boolean; error?: string }> => {
     setSaving(true);
     setSaveError(null);
     try {
@@ -240,21 +246,35 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
         // Feature toggles: start from prev, fold in the server's returned blob, then let the
         // SUBMITTED patch win last — we know exactly which keys we just changed, so a partial
         // server projection can never silently revert a toggle (undefined patch.features → no-op).
+        // `partnerApp` is NESTED: deep-merge it in the same order (prev → server → submitted) so a
+        // partial tab PATCH never replaces the whole block with just the one changed key.
         features: {
           ...prev.features,
           ...((updated.features ?? {}) as Partial<FeatureFlags>),
           ...((patch.features ?? {}) as Partial<FeatureFlags>),
+          partnerApp: {
+            ...prev.features.partnerApp,
+            ...(updated.features?.partnerApp ?? {}),
+            ...(patch.features?.partnerApp ?? {}),
+          },
         },
       }));
       flashSaved();
-      return true;
+      return { ok: true };
     } catch (e) {
-      setSaveError(e instanceof Error ? e.message : 'Save failed');
-      return false;
+      const msg = e instanceof Error ? e.message : 'Save failed';
+      setSaveError(msg);
+      return { ok: false, error: msg };
     } finally {
       setSaving(false);
     }
   }, [config.slug, flashSaved]);
+
+  /** Boolean form for the sections that show their own generic message. */
+  const saveClient = useCallback(
+    async (patch: ClientPatchBody): Promise<boolean> => (await saveClientDetailed(patch)).ok,
+    [saveClientDetailed],
+  );
 
   /**
    * REAL persistence for the tenant's custom-domain set. The backend RECONCILES
@@ -463,7 +483,17 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
       </Section>
 
       <Section icon={Shield} title="Feature Flags" defaultOpen>
-        <FeatureFlagsSection config={config} onSave={saveClient} saving={saving} />
+        <FeatureFlagsSection config={config} onSave={saveClientDetailed} saving={saving} />
+      </Section>
+
+      {/* Runtime BEHAVIOUR flags (not modules) — same PATCH features path, one key at a time */}
+      <Section icon={Power} title="Behaviour flags" defaultOpen>
+        <BehaviourFlagsSection config={config} onSave={saveClient} saving={saving} />
+      </Section>
+
+      {/* Partner-app tab visibility (features.partnerApp) — same PATCH, nested deep-merge */}
+      <Section icon={Users} title="Partner app tabs">
+        <PartnerAppTabsSection config={config} onSave={saveClient} saving={saving} />
       </Section>
 
       <Section icon={Users} title="Partner Classes">
@@ -1014,7 +1044,7 @@ function FeatureFlagsSection({
   saving,
 }: {
   config: ClientConfig;
-  onSave: (patch: ClientPatchBody) => Promise<boolean>;
+  onSave: (patch: ClientPatchBody) => Promise<{ ok: boolean; error?: string }>;
   saving: boolean;
 }) {
   const [pendingKey, setPendingKey] = useState<FeatureKey | null>(null);
@@ -1025,8 +1055,15 @@ function FeatureFlagsSection({
     setPendingKey(key);
     setError(null);
     try {
-      const ok = await onSave({ features: { [key]: next } });
-      if (!ok) setError(`Couldn't update "${FEATURE_META[key].label}". Nothing was changed — please try again.`);
+      const res = await onSave({ features: { [key]: next } });
+      // M1: show the server's reason when it gave one (e.g. Sales Import can't be switched on in this environment).
+      if (!res.ok) {
+        setError(
+          res.error && res.error !== 'Save failed'
+            ? `Couldn't update "${FEATURE_META[key].label}": ${res.error}`
+            : `Couldn't update "${FEATURE_META[key].label}". Nothing was changed — please try again.`,
+        );
+      }
     } finally {
       setPendingKey(null);
     }
@@ -1075,6 +1112,193 @@ function FeatureFlagsSection({
 
       <p className="text-xs text-white/30 pt-1 px-1">
         Changes save immediately and apply to this tenant only. Other tenants are unaffected.
+      </p>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared live switch row (immediate save) — used by Behaviour flags + Partner app tabs
+// ─────────────────────────────────────────────────────────────────────────────
+
+function LiveSwitchRow({
+  label, description, enabled, pending, disabled, onToggle, testId,
+}: {
+  label: string;
+  description: string;
+  enabled: boolean;
+  pending: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+  testId?: string;
+}) {
+  return (
+    <div data-testid={testId} className="flex items-center gap-4 px-4 py-3 rounded-xl bg-white/5 border border-white/5">
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-white">{label}</p>
+        <p className="text-xs text-white/40 mt-0.5">{description}</p>
+      </div>
+      {pending && <span className="text-xs text-white/40 shrink-0">Saving…</span>}
+      <button
+        type="button"
+        role="switch"
+        aria-checked={enabled}
+        aria-label={label}
+        aria-busy={pending}
+        disabled={disabled}
+        onClick={onToggle}
+        className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+          enabled ? 'bg-green-500/80' : 'bg-white/15'
+        }`}
+      >
+        <span
+          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+            enabled ? 'translate-x-6' : 'translate-x-1'
+          }`}
+        />
+      </button>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Behaviour flags section (B2) — runtime flags that are NOT console modules
+// ─────────────────────────────────────────────────────────────────────────────
+
+// outletMasterGeo / soDeclarationKyc are deliberately excluded from FeatureKey (they change how an
+// existing flow behaves rather than switching a module on), so they get their own section. Same
+// REAL persistence as the module toggles: PATCH { features: { <key>: bool } } — the backend merges
+// one key at a time (every other stored flag survives). A failed save leaves the switch unchanged.
+function BehaviourFlagsSection({
+  config, onSave, saving,
+}: {
+  config: ClientConfig;
+  onSave: (patch: ClientPatchBody) => Promise<boolean>;
+  saving: boolean;
+}) {
+  const [pendingKey, setPendingKey] = useState<BehaviourFlagKey | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const toggle = async (key: BehaviourFlagKey, next: boolean) => {
+    if (saving) return;
+    setPendingKey(key);
+    setError(null);
+    try {
+      const ok = await onSave({ features: { [key]: next } });
+      if (!ok) setError(`Couldn't update "${BEHAVIOUR_FLAG_META[key].label}". Nothing was changed — please try again.`);
+    } finally {
+      setPendingKey(null);
+    }
+  };
+
+  return (
+    <div className="pt-2 space-y-2">
+      <p className="text-xs text-white/40 px-1">
+        These change how an existing flow behaves for this tenant. Both are OFF unless switched on here.
+      </p>
+      {BEHAVIOUR_FLAG_KEYS.map((key) => {
+        const enabled = config.features[key] === true;
+        return (
+          <LiveSwitchRow
+            key={key}
+            testId={`behaviour-flag-${key}`}
+            label={BEHAVIOUR_FLAG_META[key].label}
+            description={BEHAVIOUR_FLAG_META[key].description}
+            enabled={enabled}
+            pending={pendingKey === key}
+            disabled={saving}
+            onToggle={() => toggle(key, !enabled)}
+          />
+        );
+      })}
+      {error && (
+        <p data-testid="behaviour-flags-error" role="alert" className="text-xs text-red-400 pt-1 px-1">{error}</p>
+      )}
+      <p className="text-xs text-white/30 pt-1 px-1">
+        Changes save immediately and apply to this tenant only. Other tenants are unaffected.
+      </p>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Partner app tabs section (B3) — features.partnerApp
+// ─────────────────────────────────────────────────────────────────────────────
+
+type PartnerAppKey = keyof FeatureFlags['partnerApp'];
+
+// Every key is shown with its EFFECTIVE value (the backend detail resolves an unset key to the
+// partner shell's runtime default). Only keys the partner app actually READS are switchable —
+// today that is `showLeaderboard` (the Ranking / Leaderboard nav entry + page gate). The other four
+// are stored but no partner screen reads them (the Wallet tab follows the Wallet Module flag, the
+// Activations/Targets entries are always shown), so they are displayed read-only rather than offered
+// as switches that would change nothing. A switch saves ONLY its own key (nested deep-merge server-side).
+const PARTNER_APP_META: Record<PartnerAppKey, { label: string; description: string; live: boolean }> = {
+  showLeaderboard: { label: 'Leaderboard / Ranking tab', description: 'Shows the Ranking tab (mobile) and Leaderboard entry (desktop) in the partner app, ranked by the primary KPI.', live: true },
+  showSchemes:     { label: 'Schemes tab',  description: 'Stored only — the partner app does not read this today (the Activations entry is always shown).', live: false },
+  showInvoices:    { label: 'Invoices tab', description: 'Stored only — the partner app does not read this today.', live: false },
+  showWallet:      { label: 'Wallet tab',   description: 'Stored only — the Wallet tab follows the Wallet Module flag above.', live: false },
+  showTeam:        { label: 'Team tab',     description: 'Stored only — the partner app does not read this today.', live: false },
+};
+
+const PARTNER_APP_KEYS = Object.keys(PARTNER_APP_META) as PartnerAppKey[];
+
+function PartnerAppTabsSection({
+  config, onSave, saving,
+}: {
+  config: ClientConfig;
+  onSave: (patch: ClientPatchBody) => Promise<boolean>;
+  saving: boolean;
+}) {
+  const [pendingKey, setPendingKey] = useState<PartnerAppKey | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const pa = config.features.partnerApp;
+
+  const toggle = async (key: PartnerAppKey, next: boolean) => {
+    if (saving) return;
+    setPendingKey(key);
+    setError(null);
+    try {
+      const ok = await onSave({ features: { partnerApp: { [key]: next } } });
+      if (!ok) setError(`Couldn't update "${PARTNER_APP_META[key].label}". Nothing was changed — please try again.`);
+    } finally {
+      setPendingKey(null);
+    }
+  };
+
+  return (
+    <div className="pt-2 space-y-2">
+      {PARTNER_APP_KEYS.filter((k) => PARTNER_APP_META[k].live).map((key) => {
+        const enabled = pa?.[key] === true;
+        return (
+          <LiveSwitchRow
+            key={key}
+            testId={`partner-app-${key}`}
+            label={PARTNER_APP_META[key].label}
+            description={PARTNER_APP_META[key].description}
+            enabled={enabled}
+            pending={pendingKey === key}
+            disabled={saving}
+            onToggle={() => toggle(key, !enabled)}
+          />
+        );
+      })}
+      <div className="grid grid-cols-2 gap-2 pt-1">
+        {PARTNER_APP_KEYS.filter((k) => !PARTNER_APP_META[k].live).map((key) => (
+          <div key={key} data-testid={`partner-app-${key}`} className="px-3 py-2 rounded-lg bg-white/[0.03] border border-white/5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-white/60">{PARTNER_APP_META[key].label}</span>
+              <span className="text-xs font-mono text-white/50">{pa?.[key] ? 'On' : 'Off'}</span>
+            </div>
+            <p className="text-[11px] text-white/30 mt-0.5">{PARTNER_APP_META[key].description}</p>
+          </div>
+        ))}
+      </div>
+      {error && (
+        <p data-testid="partner-app-error" role="alert" className="text-xs text-red-400 pt-1 px-1">{error}</p>
+      )}
+      <p className="text-xs text-white/30 pt-1 px-1">
+        Values shown are the effective ones (defaults when never set). Changes save immediately for this tenant only.
       </p>
     </div>
   );

@@ -36,6 +36,8 @@ import {
   Store,
   Send,
   Calculator,
+  BadgePercent,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useTenantFeatures } from '@/lib/tenant-features';
@@ -182,6 +184,14 @@ const ALL_NAV_ITEMS = [
   },
   { href: '/admin/tickets',  label: 'Tickets',          icon: TicketCheck,   featureFlag: null },
   { href: '/admin/banners',  label: 'Banners',          icon: Megaphone,     featureFlag: null },
+  // This month's offers — per-tenant partner-dashboard offer tiles. Tenant feature `offerTiles`
+  // (default OFF → dormant everywhere) AND GIFSY_ADMIN (assumed) + CLIENT_ADMIN only (same two
+  // roles as the BE @Roles + the admin/offers/layout.tsx guard).
+  { href: '/admin/offers', label: "This Month's Offers", icon: BadgePercent, featureFlag: 'offerTiles' as const, offersAdmin: true },
+  // Sales Import (DMS invoice-line file → importer-owned KPI achievements). Tenant feature `salesImport` (default
+  // OFF → dormant everywhere, Deoleo unchanged) AND GIFSY_ADMIN (assumed) + CLIENT_ADMIN only — the same two roles
+  // as the BE @Roles + the admin/sales-import/layout.tsx guard. See SALES-IMPORT-PIPELINE-PLAN §11 F-2.
+  { href: '/admin/sales-import', label: 'Sales Import', icon: FileSpreadsheet, featureFlag: 'salesImport' as const, salesImportAdmin: true },
   { href: '/admin/reports',  label: 'Reports',          icon: FileBarChart2, featureFlag: null },
   { href: '/admin/app-adoption', label: 'App Adoption', icon: Smartphone,    featureFlag: null },
   // Help & Guides — internal operating guides for the Gifsy ops team. gifsyOnly: shown to
@@ -257,6 +267,12 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         // deliveryReport items (Delivery Status) — same two roles as giftDisbursal: GIFSY_ADMIN
         // (all tenants / assumed) + CLIENT_ADMIN (own tenant); hidden from GIFSY_STAFF + MIS_USER.
         if ((item as { deliveryReport?: boolean }).deliveryReport
+          && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'CLIENT_ADMIN') return false;
+        // offersAdmin items (This Month's Offers) — same two roles; also gated on featureFlag below.
+        if ((item as { offersAdmin?: boolean }).offersAdmin
+          && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'CLIENT_ADMIN') return false;
+        // salesImportAdmin items (Sales Import) — same two roles; also gated on featureFlag below.
+        if ((item as { salesImportAdmin?: boolean }).salesImportAdmin
           && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'CLIENT_ADMIN') return false;
         // tenantReportOnly items (Scheme Reports) are hidden from GIFSY_ADMIN, who
         // gets the full management + report surface under Scheme Management instead.

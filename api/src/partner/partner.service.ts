@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
 } from '@nestjs/common';
@@ -21,10 +22,13 @@ import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import {
   acquireIdentityLocks,
   checkGroupUniqueness,
+  isLockConflictError,
   normalizeIdentityValue,
   resolveActivePartnerId,
+  resolveGroupIdentity,
   resolveOperableContexts,
 } from '../common/partner-group.helper';
+import { asUpiCaptureMethod, resolveUpiCaptureMethod } from '../common/payout-rail.helper';
 import {
   allowedPaymentModes,
   isPaymentModeAllowed,
@@ -313,7 +317,7 @@ export class PartnerService {
   }
 
   /**
-   * GET /v1/partner/payouts — the caller's own payout history (most recent 100).
+   * GET /v1/partner/payouts — the caller's own FULL payout history (no row cap).
    * Scoped to the caller's channel partner within the tenant; returns an empty
    * list when the caller has no channel partner.
    */
@@ -326,7 +330,7 @@ export class PartnerService {
     // Delegated to the shared builder so the partner wallet + the sales outlet
     // ledger (kyc.service.ledger) can never drift — it does the exact two-rail
     // union (redemption by partnerId + credit by outlet CODE), status mapping,
-    // FAILED/REVERSED exclusion, newest-first sort and 100-cap.
+    // FAILED/REVERSED exclusion and newest-first sort — the complete history, uncapped.
     const payouts = await buildPayoutStatement(
       this.prisma,
       user.clientId,
@@ -737,6 +741,7 @@ export class PartnerService {
         bankAccountNumber: true,
         ifscCode: true,
         upiId: true,
+        upiCaptureMethod: true,
         paymentDetailsStatus: true,
         outlets: {
           where: { deletedAt: null },
@@ -768,10 +773,15 @@ export class PartnerService {
     const requiredType = partner.outlets[0]?.requiredPaymentType ?? OutletPaymentType.ANY;
     const ourParentId = partner.outlets[0]?.parentId ?? null;
 
-    const { salesApp, uniquenessPolicy } =
-      await this.tenantSettings.getEffectiveSettings(user.clientId);
-    const upiEnabled = salesApp.upiEnabled;
     const mode: PaymentMode = dto.paymentMode;
+    // M1: a UPI capture WRITES a upiId → read the settings UNCACHED ONCE and use that copy for BOTH
+    // the manual-entry gate and the UPI uniqueness lock/check below (a just-enabled flag / policy is
+    // never refused or skipped from a stale per-instance cache). A bank capture keeps the cached read.
+    const { salesApp, uniquenessPolicy } =
+      mode === 'upi'
+        ? await this.tenantSettings.getEffectiveSettings(user.clientId, { fresh: true })
+        : await this.tenantSettings.getEffectiveSettings(user.clientId);
+    const upiEnabled = salesApp.upiEnabled;
 
     // 1. Mode must satisfy the outlet mandate + tenant UPI gate (identical to kyc.service.create).
     if (!isPaymentModeAllowed(requiredType, mode, upiEnabled)) {
@@ -805,53 +815,134 @@ export class PartnerService {
       throw new BadRequestException('UPI payout requires a UPI ID.');
     }
 
+    // 2b. VPA safeguard — UPI capture method + manual-entry gate (mirrors kyc.service.create, R6/R7).
+    //  Manual (typed) UPI entry is a per-tenant opt-in and the server is the authority — but a UPI
+    //  that canonically EQUALS the partner's stored UPI, or the group UPI it was prefilled from, is not
+    //  a fresh manual capture: it is accepted and keeps that prior's recorded method (also when no
+    //  method was sent by an old cached FE). The settings were read UNCACHED above for a UPI capture
+    //  (M1), so a just-enabled flag is never refused from a stale per-instance cache.
+    let upiCaptureMethod: string | null = null;
+    if (mode === 'upi') {
+      const submittedUpi = normalizeIdentityValue('upi', dto.upiId);
+      let prior: { upiCaptureMethod?: unknown } | null =
+        submittedUpi != null && normalizeIdentityValue('upi', partner.upiId) === submittedUpi ? partner : null;
+      const manualAllowed = salesApp.upiManualEntry;
+      const sentMethod = asUpiCaptureMethod(dto.upiCaptureMethod);
+      const explicitMethod = sentMethod === 'QR' || (sentMethod === 'MANUAL' && manualAllowed);
+      // L3: no usable method sent (none / MANUAL with manual entry OFF) → a UPI equal to the group
+      // prefill keeps the group's recorded method.
+      if (!prior && !explicitMethod && ourParentId) {
+        const gi = await resolveGroupIdentity(this.prisma, user.clientId, ourParentId);
+        if (gi && submittedUpi != null && normalizeIdentityValue('upi', gi.upiId) === submittedUpi) prior = gi;
+      }
+      if (!prior && sentMethod === 'MANUAL' && !manualAllowed) {
+        throw new BadRequestException('Manual UPI entry is not enabled');
+      }
+      upiCaptureMethod = resolveUpiCaptureMethod(dto.upiCaptureMethod, manualAllowed, prior);
+      if (
+        asUpiCaptureMethod(dto.upiCaptureMethod) === 'MANUAL' &&
+        manualAllowed &&
+        normalizeIdentityValue('upi', dto.upiIdConfirm) !== submittedUpi
+      ) {
+        // VPA safeguard: a TYPED UPI ID must be confirmed by re-entry (case/space-insensitive — the
+        // same canonical form we persist). A scanned (QR) UPI needs no confirmation.
+        throw new BadRequestException('UPI IDs do not match');
+      }
+    }
+
     // 3. Normalized identity values (the SAME canonical form KYC persists AND locks/checks on).
     const bankAcct = mode === 'bank' ? normalizeIdentityValue('bank', dto.accountNumber) : null;
     const upi = mode === 'upi' ? normalizeIdentityValue('upi', dto.upiId) : null;
 
-    // 4. Atomic: advisory-lock the identity value(s) → re-check group-uniqueness → write. bank/UPI
-    //    have NO DB unique index, so this lock + check is their ONLY race guard (mirrors kyc.service).
-    await this.prisma.$transaction(async (tx) => {
-      await acquireIdentityLocks(tx, {
-        clientId: user.clientId,
-        details: { bankAccountNumber: bankAcct, upiId: upi },
-        policy: uniquenessPolicy,
-      });
-      const violation = await checkGroupUniqueness(tx, {
-        clientId: user.clientId,
-        ourParentId,
-        details: { bankAccountNumber: bankAcct, upiId: upi },
-        policy: uniquenessPolicy,
-        exceptPartnerId: partnerId,
-      });
-      if (violation) throw new BadRequestException(violation.message);
+    // 4. Atomic: row-lock the partner → re-run the overwrite gate on the LOCKED row → advisory-lock the
+    //    identity value(s) → re-check group-uniqueness → conditional write. bank/UPI have NO DB unique
+    //    index, so the identity lock + check is their ONLY race guard (mirrors kyc.service).
+    //    LOCK ORDER (deadlock fix): the partner row FIRST, identity advisory locks SECOND — the SAME
+    //    order as the re-KYC approval (kyc.service applyBridgeOutcome: SELECT … FOR UPDATE on
+    //    channel_partners, then acquireIdentityLocks). The opposite order let a capture holding an
+    //    identity lock wait on the partner row an approval held while that approval waited on the
+    //    capture's identity lock → Postgres deadlock (40P01) → a raw 500.
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw<
+          Array<{
+            upiId: string | null;
+            bankAccountNumber: string | null;
+            ifscCode: string | null;
+            paymentDetailsStatus: string | null;
+          }>
+        >`SELECT "upiId", "bankAccountNumber", "ifscCode", "paymentDetailsStatus"::text AS "paymentDetailsStatus"
+          FROM channel_partners WHERE id = ${partnerId} FOR UPDATE`;
+        const locked = lockedRows?.[0];
+        if (!locked) throw new ForbiddenException('No operable outlet for this login.');
+        // The overwrite gate, re-run on the ROW-LOCKED values (the gate above read an unlocked snapshot;
+        // a re-KYC approval may have committed a VERIFIED rail in between). Same rule, same message.
+        const lockedHasBeneficiary = !!(locked.upiId || (locked.bankAccountNumber && locked.ifscCode));
+        if (lockedHasBeneficiary && locked.paymentDetailsStatus !== PaymentDetailsStatus.NEEDS_RECAPTURE) {
+          throw new BadRequestException(
+            'Payout details are already on file for this outlet and cannot be changed here.',
+          );
+        }
+        await acquireIdentityLocks(tx, {
+          clientId: user.clientId,
+          details: { bankAccountNumber: bankAcct, upiId: upi },
+          policy: uniquenessPolicy,
+        });
+        const violation = await checkGroupUniqueness(tx, {
+          clientId: user.clientId,
+          ourParentId,
+          details: { bankAccountNumber: bankAcct, upiId: upi },
+          policy: uniquenessPolicy,
+          exceptPartnerId: partnerId,
+        });
+        if (violation) throw new BadRequestException(violation.message);
 
-      await tx.channelPartner.update({
-        where: { id: partnerId },
-        data:
-          mode === 'bank'
-            ? {
-                paymentMode: 'bank',
-                bankName: dto.bankName!.trim(),
-                bankAccountHolder: dto.accountHolderName?.trim() || null,
-                bankAccountNumber: bankAcct,
-                ifscCode: dto.ifscCode!.trim().toUpperCase(),
-                upiId: null, // clear the other rail so a payout can't misroute to a stale UPI
-                payoutChequeFileKey: dto.chequeFileKey!,
-                paymentDetailsStatus: PaymentDetailsStatus.UNVERIFIED,
-              }
-            : {
-                paymentMode: 'upi',
-                upiId: upi,
-                bankName: null,
-                bankAccountHolder: null,
-                bankAccountNumber: null,
-                ifscCode: null,
-                payoutChequeFileKey: null,
-                paymentDetailsStatus: PaymentDetailsStatus.UNVERIFIED,
-              },
+        // F3 (race, belt-and-braces): the row is now locked above, but the write stays CONDITIONED on
+        // exactly the status + routing values the UNLOCKED gate read (and that the UPI capture-method
+        // prior was derived from): if any changed before the lock, 0 rows match → 409, nothing written.
+        const { count } = await tx.channelPartner.updateMany({
+          where: {
+            id: partnerId,
+            clientId: user.clientId,
+            paymentDetailsStatus: partner.paymentDetailsStatus,
+            upiId: partner.upiId ?? null,
+            bankAccountNumber: partner.bankAccountNumber ?? null,
+            ifscCode: partner.ifscCode ?? null,
+          },
+          data:
+            mode === 'bank'
+              ? {
+                  paymentMode: 'bank',
+                  bankName: dto.bankName!.trim(),
+                  bankAccountHolder: dto.accountHolderName?.trim() || null,
+                  bankAccountNumber: bankAcct,
+                  ifscCode: dto.ifscCode!.trim().toUpperCase(),
+                  upiId: null, // clear the other rail so a payout can't misroute to a stale UPI
+                  upiCaptureMethod: null,
+                  payoutChequeFileKey: dto.chequeFileKey!,
+                  paymentDetailsStatus: PaymentDetailsStatus.UNVERIFIED,
+                }
+              : {
+                  paymentMode: 'upi',
+                  upiId: upi,
+                  upiCaptureMethod,
+                  bankName: null,
+                  bankAccountHolder: null,
+                  bankAccountNumber: null,
+                  ifscCode: null,
+                  payoutChequeFileKey: null,
+                  paymentDetailsStatus: PaymentDetailsStatus.UNVERIFIED,
+                },
+        });
+        if (count === 0) {
+          throw new ConflictException('Payout details changed — please refresh');
+        }
       });
-    });
+    } catch (e) {
+      // A lock-conflict abort (P2034 / Postgres 40P01 deadlock / 40001) → the same clean 409, never a 500.
+      if (isLockConflictError(e)) throw new ConflictException('Payout details changed — please refresh');
+      throw e;
+    }
 
     return {
       ok: true,

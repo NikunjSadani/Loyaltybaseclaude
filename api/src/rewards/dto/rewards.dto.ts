@@ -1,5 +1,6 @@
 import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsEnum,
@@ -12,10 +13,12 @@ import {
   IsUrl,
   Length,
   Matches,
+  MaxLength,
   Max,
   Min,
   MinLength,
   ValidateNested,
+  ValidateIf,
 } from 'class-validator';
 import {
   GiftFulfilmentChannel,
@@ -85,6 +88,18 @@ export class AdminListCatalogQueryDto extends ListCatalogQueryDto {
   categoryId?: string;
 }
 
+/** POST /v1/rewards/orders/:id/voucher-cancelled — "Voucher cancelled with vendor" (GIFSY_ADMIN). */
+export class VoucherCancelledWithVendorDto {
+  /** Why / vendor reference — required, trimmed, stored in the audit log. */
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @Length(1, 500)
+  reason!: string;
+}
+
+/** Hard cap on GET /v1/rewards/orders `limit` (one request never reads more rows than this). */
+export const ORDERS_LIST_MAX_LIMIT = 500;
+
 /** Orders listing filters — mirror the source GET /api/rewards/orders params. */
 export class ListOrdersQueryDto {
   @IsOptional()
@@ -97,11 +112,27 @@ export class ListOrdersQueryDto {
   @Min(1)
   page?: number = 1;
 
+  /**
+   * Page size. Capped at ORDERS_LIST_MAX_LIMIT (500): the partner My Orders uses the default 20,
+   * the admin Fulfilment queue pages by 100 and re-fetches at most a 500-row window on refresh.
+   */
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(ORDERS_LIST_MAX_LIMIT)
   limit?: number = 20;
+
+  /**
+   * Keyset cursor (opaque, from a previous page's `nextCursor`) — the partner My Orders
+   * "Load more". When present it REPLACES `page` (offset): rows strictly older than the
+   * cursor on (createdAt DESC, id DESC), stable under inserts and under rows leaving the
+   * member view mid-scroll. Absent → the legacy page/offset mode (admin console) unchanged.
+   */
+  @IsOptional()
+  @IsString()
+  @Length(1, 200)
+  cursor?: string;
 }
 
 /**
@@ -133,13 +164,42 @@ export class UpdateOrderDto {
   @IsUrl()
   trackingUrl?: string;
 
-  @IsOptional()
+  // undefined = no change. null / blank is REJECTED: a stored voucher code is only ever cleared
+  // by POST /rewards/orders/:id/voucher-cancelled (voucher-write-guard.ts enforces it too).
+  @ValidateIf((_o, v) => v !== undefined)
   @IsString()
+  @Matches(/\S/, { message: 'voucherCode cannot be blank' })
   voucherCode?: string;
 
+  // Optional card PIN (card number + PIN gift cards). Trimmed; blank = no PIN. A PIN needs its card
+  // number (400 otherwise — voucher-write-guard). Same visibility as voucherCode; never reuse-checked.
   @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
+  @MaxLength(64)
+  voucherPin?: string;
+
+  // undefined = no change. null / blank is REJECTED: a stored voucher code is only ever cleared
+  // by POST /rewards/orders/:id/voucher-cancelled (voucher-write-guard.ts enforces it too).
+  @ValidateIf((_o, v) => v !== undefined)
+  @IsString()
+  @Matches(/\S/, { message: 'voucherProvider cannot be blank' })
   voucherProvider?: string;
+
+  /**
+   * GIFSY_ADMIN-only MANUAL FULFILMENT OVERRIDE of an order that was sent to Hubble (the ops exit
+   * for hubbleNeedsReconcile): must carry a new voucherCode + overrideReason. Every other voucher
+   * rule still applies (no overwrite, status, points, cash, tenant-wide reuse). Audited.
+   */
+  @IsOptional()
+  @IsBoolean()
+  manualOverride?: boolean;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @Length(1, 500)
+  overrideReason?: string;
 
   @IsOptional()
   @IsString()
@@ -214,11 +274,16 @@ export class RedeemDto {
    * FREE_AMOUNT vouchers only (item.pointsCost === 0 + min/max set): the ₹ value
    * the partner wants. requiredPoints = round(amount × conversionRate), validated
    * vs [minRedemptionPoints, maxRedemptionPoints]. Ignored for FIXED items.
+   *
+   * WHOLE RUPEES ONLY (owner decision 2026-11-11, ALL tenants, vouchers AND cash): a
+   * decimal (750.5) is a 400 "Enter a whole-rupee amount" at the DTO gate, before any
+   * points move. (A fractional amount previously reached Hubble as an un-issuable value
+   * and produced fractional cash payouts.)
    */
   @IsOptional()
   @Type(() => Number)
-  @IsNumber()
-  @IsPositive()
+  @IsInt({ message: 'Enter a whole-rupee amount' })
+  @IsPositive({ message: 'Enter a whole-rupee amount' })
   amount?: number;
 
   /** REQUIRED for PHYSICAL_GIFT; optional otherwise (enforced in the service). */
@@ -304,13 +369,42 @@ export class TransitionOrderDto {
   @IsEnum(UpdatableOrderStatus)
   toStatus!: UpdatableOrderStatus;
 
-  @IsOptional()
+  // undefined = no change. null / blank is REJECTED: a stored voucher code is only ever cleared
+  // by POST /rewards/orders/:id/voucher-cancelled (voucher-write-guard.ts enforces it too).
+  @ValidateIf((_o, v) => v !== undefined)
   @IsString()
+  @Matches(/\S/, { message: 'voucherCode cannot be blank' })
   voucherCode?: string;
 
+  // Optional card PIN (card number + PIN gift cards). Trimmed; blank = no PIN. A PIN needs its card
+  // number (400 otherwise — voucher-write-guard). Same visibility as voucherCode; never reuse-checked.
   @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
+  @MaxLength(64)
+  voucherPin?: string;
+
+  // undefined = no change. null / blank is REJECTED: a stored voucher code is only ever cleared
+  // by POST /rewards/orders/:id/voucher-cancelled (voucher-write-guard.ts enforces it too).
+  @ValidateIf((_o, v) => v !== undefined)
+  @IsString()
+  @Matches(/\S/, { message: 'voucherProvider cannot be blank' })
   voucherProvider?: string;
+
+  /**
+   * GIFSY_ADMIN-only MANUAL FULFILMENT OVERRIDE of an order that was sent to Hubble (the ops exit
+   * for hubbleNeedsReconcile): must carry a new voucherCode + overrideReason. Every other voucher
+   * rule still applies (no overwrite, status, points, cash, tenant-wide reuse). Audited.
+   */
+  @IsOptional()
+  @IsBoolean()
+  manualOverride?: boolean;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @Length(1, 500)
+  overrideReason?: string;
 
   @IsOptional()
   @IsString()
@@ -590,6 +684,20 @@ export class CreateRewardCatalogDto {
   @IsOptional()
   @IsString()
   hubbleProductId?: string;
+
+  /**
+   * Hubble GIFT_CARD only: the whole-rupee amounts to OFFER (subset of the brand's Hubble
+   * denominations for a FIXED brand; values inside its min–max for a FLEXIBLE one). Validated
+   * against the live Hubble product on save; persisted to metadata.hubbleDenominations. The
+   * item is stored as a variable-amount item whose points band derives from the list, and a
+   * redemption must pick one of these amounts.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsInt({ each: true, message: 'Gift card amounts must be whole rupees' })
+  @IsPositive({ each: true, message: 'Gift card amounts must be greater than 0' })
+  hubbleDenominations?: number[];
 }
 
 /** PATCH /v1/admin/rewards/catalog/:id — all fields optional. */
@@ -681,4 +789,15 @@ export class UpdateRewardCatalogDto {
   @IsOptional()
   @IsString()
   hubbleProductId?: string;
+
+  /**
+   * See CreateRewardCatalogDto.hubbleDenominations. `undefined` leaves the stored list
+   * unchanged; `[]` CLEARS it (the item goes back to the band / fixed price in this payload).
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsInt({ each: true, message: 'Gift card amounts must be whole rupees' })
+  @IsPositive({ each: true, message: 'Gift card amounts must be greater than 0' })
+  hubbleDenominations?: number[];
 }

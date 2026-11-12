@@ -9,13 +9,27 @@
 |---|---|---|---|---|
 | **Local dev** (where we build/verify) | your machine — FE `:3000` (`next dev`), API `:4000` (`node dist/main.js`) | `gifsy_dev` | **`gifsy-db-dev`** — a **separate, isolated** Cloud SQL instance (Postgres 15, db-f1-micro, asia-south1-b, **public IP 34.14.195.38**, conn `gifsy-platform:asia-south1:gifsy-db-dev`), via Auth Proxy on `127.0.0.1:5433` | n/a (local) |
 | **Staging** | Cloud Run `gifsy-api-staging` + staging FE | `gifsy_staging` | **shared** instance `gifsy_db` (POSTGRES_15) — *same physical instance as prod* | **push to `develop`** → `deploy-staging.yml` (auto) |
-| **Production** | Cloud Run (prod) | `gifsy_prod` | **shared** instance `gifsy_db` | **push to `main`** → `deploy.yml` (GitHub Environment "production" **required-reviewer gate**) |
+| **Production** | Cloud Run (prod) | `gifsy_prod` | **shared** instance `gifsy_db` | **MANUAL** — GitHub Actions → "Deploy — Production (main)" → Run (`deploy.yml` is `workflow_dispatch`-only; a push to `main` does not deploy). From the #59 + Sales Import release on, its first step is a **PREFLIGHT** (3 Hubble secrets must exist) — `runbooks/PROD-CUTOVER-RECORD.md` |
 
 **Key facts (the ones that bite):**
 - **Local dev is the only isolated DB instance.** Staging + prod share one Cloud SQL instance (different databases). `gifsy_dev` is on its own instance.
-- **Staging auto-deploys from every `develop` push.** As of 2026-06-19 our P0.5/P0.6 work is **6 commits AHEAD of `origin/develop` (unpushed)** → **staging does NOT have it yet**; staging is at the last-pushed state. Pushing `develop` deploys everything to staging.
+- **Staging auto-deploys from every `develop` push** — but only when the test job is green (`needs: test`; a red suite silently skips the deploy). As of 2026-11-11 staging serves `staging-7c85d9fd` (api, frontend and the Sales Import worker job). The staging deploy's first step is a metadata-only preflight for `SALES_IMPORT_DRAIN_SECRET_STAGING`.
 - **Prod is never pushed by us** (`main`, approval-gated). Never point dev at prod; never `prisma migrate dev` (resets `gifsy_dev`).
 - **DB migrations (2026-06-20):** schema applies from one squashed Prisma **baseline** via `prisma migrate deploy` run as an **in-VPC Cloud Run Job** (the shared instance is private-IP). **Staging auto-migrates** on every `develop` push (`gifsy-migrate-staging` in `deploy-staging.yml`, before the new revision serves); **prod is gated** (`gifsy-migrate` job + a one-time P3005 baseline reconcile). `gifsy_dev` is unchanged — db-push / surgical-SQL via the proxy. Full model: [`MIGRATIONS.md`](MIGRATIONS.md).
+
+## Staging Sales Import infra (created 2026-11-10/11, owner-approved)
+
+| Piece | Value |
+|---|---|
+| Secret | `SALES_IMPORT_DRAIN_SECRET_STAGING` (Secret Manager; bound to the staging API; checked by the staging deploy preflight) |
+| Worker | Cloud Run Job `gifsy-sales-import-staging` — `node --max-old-space-size=1700 dist/sales-import/worker.main.js`, 2Gi, 1 CPU, task timeout 3600 s, 1 retry; deployed by `deploy-staging.yml` after the migrate step (same image as the API) |
+| API env | `SALES_IMPORT_RUNNER=job`, `SALES_IMPORT_JOB=gifsy-sales-import-staging`, `GCP_PROJECT` |
+| IAM | `roles/run.jobsExecutor` for `gifsy-api-sa` on that job; `roles/secretmanager.viewer` for `gifsy-deployer` (redundant — the deployer already has editor + secretmanager.admin + projectIamAdmin; over-privilege review OPEN) |
+| Scheduler | `sales-import-drain-staging` — `*/10 * * * *` Asia/Kolkata, `POST /v1/sales-import/drain`, header `x-drain-secret`, attempt deadline 170 s (403 without the secret; 200 from the Scheduler) |
+| Tenant flag | `salesImport` ON for **bajaj (staging) only**; Deoleo OFF |
+
+**Prod has none of this** — the prod job, env, `SALES_IMPORT_DRAIN_SECRET`, IAM binding and Scheduler need a separate owner OK at release; until
+then the API refuses to switch `salesImport` ON in prod. Detail: `SALES-IMPORT-PIPELINE-PLAN.md` §14.
 
 ## Staging host convention (`uat-<slug>.gifsy.in`)
 
@@ -60,7 +74,7 @@ Staging serves every tenant under a **single-label** `uat-<slug>.gifsy.in` host 
 ## Local-vs-staging differences that break despite identical code
 
 Comprehensive testing is done on **local dev** (fast iteration); **staging is the final pre-prod confirmation** because these differ:
-- **`FIXED_OTP` on staging — RE-ENABLED for fast UAT (2026-06-22):** staging uses **`FIXED_OTP=123456`** (every login/redemption OTP is `123456`; no real SMS). Gated by `isFixedOtpAllowed` (`api/src/common/fixed-otp.ts`): honored only when `ALLOW_FIXED_OTP=true` **AND** the DB is `gifsy_staging`, and **hard-refused whenever the DB is `gifsy_prod`** — so prod can never be backdoored even if the flag leaks. Set via `deploy-staging.yml` (staging workflow only). **To revert staging to real MSG91 OTP, unset `ALLOW_FIXED_OTP` there.** Local dev uses `FIXED_OTP=123456` too. **Prod has NO `FIXED_OTP`** (real MSG91 only, `NODE_ENV=production`); an independent security audit confirmed prod stays safe even under a fat-fingered `ALLOW_FIXED_OTP`. ⚠️ MSG91 secrets must be saved **without a UTF-8 BOM** — a BOM on `MSG91_AUTH_KEY` 500'd OTP (fixed: secret re-saved + defensive `.trim()` in `msg91.service`).
+- **`FIXED_OTP` on staging — RE-ENABLED for fast UAT (2026-06-22):** staging uses **`FIXED_OTP=123456`** (every login/redemption OTP is `123456`; no real SMS). Gated by `isFixedOtpAllowed` (`api/src/common/fixed-otp.ts`): honored only when `ALLOW_FIXED_OTP=true` **AND** the DB is `gifsy_staging`, and **hard-refused whenever the DB is `gifsy_prod`** — so prod can never be backdoored even if the flag leaks. Set via `deploy-staging.yml` (staging workflow only). **To revert staging to real MSG91 OTP, unset `ALLOW_FIXED_OTP` there.** Local dev uses `FIXED_OTP=123456` too. **Prod has NO `FIXED_OTP`** (real MSG91 only, `NODE_ENV=production`); an independent security audit confirmed prod stays safe even under a fat-fingered `ALLOW_FIXED_OTP`. ⚠️ **`FIXED_OTP` also DISABLES rate limiting on staging** (`ThrottlerModule` `skipIf` is true whenever `FIXED_OTP` is set, and only outside `NODE_ENV=production`) — so the per-phone/per-user throttler (`IdentityThrottlerGuard`, 2026-11-11 release: per-phone send/verify keys, refresh 1000/min, friendly 429 copy, LOGIN-only hourly send cap) can only be proven on **prod** (6× the same unregistered number → the 6th returns 429; 8 different numbers → none). ⚠️ MSG91 secrets must be saved **without a UTF-8 BOM** — a BOM on `MSG91_AUTH_KEY` 500'd OTP (fixed: secret re-saved + defensive `.trim()` in `msg91.service`).
 - **`resolveClientId(host)`**: `localhost`→`deoleo` locally; real subdomains on staging → different tenant resolution. *(Exactly why the GIFSY-login bug #39 can't be fully exercised locally.)*
 - **Secrets/config** (JWT, GCS, `DATABASE_URL` via Cloud SQL socket) come from Secret Manager on staging vs `.env` locally.
 - **Build**: local `next dev` (HMR) vs the `output:standalone` production Docker build on staging.

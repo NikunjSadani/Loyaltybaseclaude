@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, useId } from 'react';
 import {
   Gift, Search, CheckCircle,
   Shield, Package, Truck, Zap, Heart,
@@ -19,11 +19,14 @@ import { formatPoints, maskAccountNumber } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import { api } from '@/lib/api-client';
 import { usePartnerIdentity, type DeliveryDefaults } from '@/lib/partner-identity';
-import { applyAddressPrefill, type AddressForm, type TouchedFields } from './address-prefill';
+import { applyAddressPrefill, type AddressForm, type TouchedFields } from '@/lib/address-prefill';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { useTenantFeatures } from '@/lib/tenant-features';
-import { BankOrUpiSection, type PaymentMode } from '@/components/bank-or-upi-section';
+import { BankOrUpiSection, type PaymentMode, type UpiCaptureMethod } from '@/components/bank-or-upi-section';
+import { isValidUpiId } from '@/lib/upi-utils';
 import { pinnedPaymentMode, type OutletPaymentType } from '@/lib/payment-type';
+import { WHOLE_RUPEE_INVALID_MESSAGE, useWholeRupeeField } from '@/lib/whole-rupee-input';
+import { pointsForAmount } from '@/lib/hubble-product';
 
 /* ─── Partner cash beneficiary (from GET /api/auth/me) ─────────────────────────
    The partner's real, on-file KYC payout details + the tenant conversionRate.
@@ -77,6 +80,11 @@ interface CatalogueItem {
   /** Min/max redeemable points for FREE_AMOUNT vouchers (server-validated). */
   minRedemptionPoints?: number | null;
   maxRedemptionPoints?: number | null;
+  /**
+   * Hubble "choose from amounts" voucher: the ₹ amounts the member may pick (whole rupees,
+   * ascending). Present only for such items; the redeem sheet shows buttons, not a text input.
+   */
+  amountOptions?: number[];
   categorySort?: number | null;
   /**
    * Rate-INDEPENDENT catalogue MRP-slash, in POINTS, computed SERVER-SIDE
@@ -121,6 +129,8 @@ interface ApiCatalogItem {
   maxRedemptionPoints?: number | null;
   /** Rate-independent MRP-slash in points, computed server-side (flag-gated). See CatalogueItem.slashPoints. */
   slashPoints?: number | null;
+  /** Hubble "choose from amounts" — see CatalogueItem.amountOptions. Absent for every other item. */
+  amountOptions?: number[] | null;
   categorySort?: number | null;
   /** See CatalogueItem.requiresConsent — vendor-sourced items set this true (BE-exposed). */
   requiresConsent?: boolean | null;
@@ -181,6 +191,7 @@ function mapCatalogItem(item: ApiCatalogItem): CatalogueItem {
     fixedAmount:  item.fixedAmount ?? (voucherType === 'FIXED' ? item.pointsCost : undefined),
     minRedemptionPoints: item.minRedemptionPoints ?? null,
     maxRedemptionPoints: item.maxRedemptionPoints ?? null,
+    ...(voucherType === 'FREE_AMOUNT' && item.amountOptions?.length ? { amountOptions: item.amountOptions } : {}),
     slashPoints:  item.slashPoints ?? null,
     // DPDP consent gate — FAIL CLOSED for deliverable (physical) items: redeeming one
     // shares the member's delivery name/address/phone with a third-party fulfilment
@@ -215,7 +226,8 @@ function isFreeAmount(
   return item.points === 0 && (item.minRedemptionPoints != null || item.maxRedemptionPoints != null);
 }
 
-type AffordabilityItem = Pick<CatalogueItem, 'points' | 'voucherType' | 'minRedemptionPoints'>;
+type AffordabilityItem = Pick<CatalogueItem, 'points' | 'voucherType' | 'minRedemptionPoints'> &
+  Partial<Pick<CatalogueItem, 'amountOptions'>>;
 /** Pass the LIVE rate (the page's `effectiveRate`), the same one the voucher sheet uses. */
 type AffordabilitySettings = { minVoucherFreeAmount: number; pointsConversionRate: number };
 
@@ -233,6 +245,12 @@ type AffordabilitySettings = { minVoucherFreeAmount: number; pointsConversionRat
 export function pointsRequired(item: AffordabilityItem, settings: AffordabilitySettings): number {
   if (item.voucherType !== 'FREE_AMOUNT') return item.points;
   const floorPoints = Math.round(settings.minVoucherFreeAmount * settings.pointsConversionRate);
+  // "Choose from amounts" (Hubble): the cheapest LISTED amount at the live rate is the real
+  // minimum (the stored band mirrors it at the save-time rate; the backend uses the list).
+  if (item.amountOptions?.length) {
+    const cheapest = item.amountOptions.find((a) => a >= settings.minVoucherFreeAmount) ?? item.amountOptions[0];
+    return Math.max(pointsForAmount(cheapest, settings.pointsConversionRate), floorPoints);
+  }
   return Math.max(item.minRedemptionPoints ?? 0, floorPoints);
 }
 
@@ -325,8 +343,13 @@ function ConsentCheckbox({
 interface RedeemInitResult {
   orderId: string;
   orderNumber: string;
-  requiredPoints: number;
+  requiredPoints?: number;
   message: string;
+}
+
+/** The SERVER's requiredPoints from redeem-init when present (a finite number ≥ 0), else the local calc. */
+function serverPoints(required: unknown, fallback: number): number {
+  return typeof required === 'number' && Number.isFinite(required) && required >= 0 ? required : fallback;
 }
 
 /* ─── Image / emoji display ──────────────────────────────────────────────── */
@@ -679,7 +702,10 @@ function VoucherRedeemSheet({
   onRedeemed: (pts: number) => void;
 }) {
   const toast = useToast();
-  const [amount,     setAmount]     = useState('');
+  // Whole-rupee amount + the shared "Check the amount" rule (shown only after a commit that found
+  // the text invalid; cleared on the next edit; the submit tap commits instead of being disabled).
+  const amountField = useWholeRupeeField();
+  const amount = amountField.value;
   const [otp,        setOtp]        = useState('');
   const [otpSent,    setOtpSent]    = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -691,9 +717,22 @@ function VoucherRedeemSheet({
 
   const isFixed   = voucher.voucherType === 'FIXED';
   const fixedPts  = isFixed ? voucher.points : 0;
-  const freeAmt   = parseInt(amount, 10) || 0;
-  // FREE_AMOUNT: points required = ₹amount × conversionRate (server re-validates vs min/max).
-  const ptsNeeded = isFixed ? fixedPts : Math.ceil(freeAmt * conversionRate);
+  // Hubble "choose from amounts" voucher (e.g. a fixed-denomination brand): the member picks one
+  // of the admin-chosen amounts — no free typing. Server re-validates the amount is in the list.
+  const amountOptions = !isFixed && voucher.amountOptions?.length ? voucher.amountOptions : null;
+  // "1,250" while typing → 1250; "750,5" / "1,2" → null (invalid — never guessed, never shrunk).
+  const parsedAmt = amountField.amount;
+  const amtInvalid = !isFixed && !amountOptions && parsedAmt === null;
+  const freeAmt   = parsedAmt ?? 0;
+  const amtInvalidShown = amtInvalid && amountField.showInvalid;
+  // The amount + points the ORDER was created with (frozen at OTP-send — the points are the
+  // SERVER's requiredPoints from redeem-init): the success copy and the local balance use these,
+  // never the live field.
+  const [sentFor, setSentFor] = useState<{ amount: number; pts: number } | null>(null);
+  // FREE_AMOUNT: points required = ₹amount × conversionRate, with the SERVER's exact rounding
+  // (Math.round, rewards.service redeem) so the preview, the balance check and the debit agree.
+  // (At an integer rate — e.g. 1 — this is identical to the previous Math.ceil.)
+  const ptsNeeded = isFixed ? fixedPts : pointsForAmount(freeAmt, conversionRate);
   const canAfford = myBalance >= ptsNeeded && (isFixed || freeAmt >= minFreeAmount);
 
   // Client-side UX validation for FREE_AMOUNT (server is authoritative).
@@ -701,30 +740,50 @@ function VoucherRedeemSheet({
   // (which would yield Infinity/NaN in the balance hint). null => unknown cap.
   const hasRate = Number.isFinite(conversionRate) && conversionRate > 0;
   const maxAffordableInr = hasRate ? Math.floor(myBalance / conversionRate) : null;
-  const amountError = !isFixed && freeAmt > 0 && freeAmt < minFreeAmount
+  // Live minimum / balance hint (polite — not an alert; the invalid-amount alert is separate).
+  const amountHint = amtInvalid
+    ? ''
+    : !isFixed && freeAmt > 0 && freeAmt < minFreeAmount
     ? `Minimum redemption is ${fmtInr(minFreeAmount)}`
-    : !isFixed && maxAffordableInr !== null && freeAmt > maxAffordableInr
-    ? `Exceeds your balance (max ${fmtInr(maxAffordableInr)})`
+    : !isFixed && hasRate && freeAmt > 0 && ptsNeeded > myBalance
+    ? `Exceeds your balance (max ${fmtInr(maxAffordableInr ?? 0)})`
     : '';
 
   // Step 1: create the order + trigger OTP. FREE_AMOUNT sends `amount`.
   const handleSendOtp = async () => {
+    // The amount is checked FIRST (an invalid amount shows "Check the amount" on this very tap,
+    // even when consent is also missing — then both are shown).
+    const amountOk = !amtInvalid || amountField.checkBeforeSubmit();
     // Vendor-PII consent is a hard gate for vendor-sourced items (decision #15).
     if (needConsent && !consent) {
       toast.error('Please agree to share your delivery details to continue'); return;
     }
+    if (!amountOk) return; // "Check the amount" — never sent
+    // Freeze what THIS order is created with (the field is locked from here on).
+    const frozenAmount = isFixed ? fixedPts : freeAmt;
     setSubmitting(true);
     const consentFields = needConsent ? { consent: true } : {};
     const payload: RedeemPayload = isFixed
       ? { rewardId: voucher.id, quantity: 1, ...consentFields }
-      : { rewardId: voucher.id, amount: freeAmt, ...consentFields };
+      : { rewardId: voucher.id, amount: frozenAmount, ...consentFields };
     const result = await api.post<RedeemInitResult>('/api/rewards/redeem', payload);
     setSubmitting(false);
     if (!result.success) {
       toast.error(result.error || 'Could not start redemption'); return;
     }
+    // The SERVER's requiredPoints (what the order debits); the local calc only if it is absent.
+    setSentFor({ amount: frozenAmount, pts: serverPoints(result.data?.requiredPoints, ptsNeeded) });
     setOrderId(result.data.orderId);
     setOtpSent(true);
+  };
+
+  // "Change amount" (or Back) after the OTP was sent: abandon this OTP and start a fresh redeem —
+  // the next Send OTP creates a new order with the new amount.
+  const handleChangeAmount = () => {
+    setOtpSent(false);
+    setOtp('');
+    setOrderId(null);
+    setSentFor(null);
   };
 
   // Step 2: confirm with OTP.
@@ -747,7 +806,7 @@ function VoucherRedeemSheet({
       onClose();
       return;
     }
-    onRedeemed(ptsNeeded);
+    onRedeemed(sentFor?.pts ?? ptsNeeded);
     setSuccess(true);
   };
 
@@ -766,9 +825,9 @@ function VoucherRedeemSheet({
           </div>
           <div>
             <p className="text-sm text-gray-500 mt-1">
-              {isFixed ? `${voucher.brand} voucher (${fmtInr(fixedPts)})` : `${voucher.brand} voucher (${fmtInr(freeAmt)})`} is being processed. Your voucher code will appear under Orders.
+              {`${voucher.brand} voucher (${fmtInr(sentFor?.amount ?? (isFixed ? fixedPts : freeAmt))})`} is being processed. Your voucher code will appear under Orders.
             </p>
-            <p className="text-xs text-gray-400 mt-1">{ptsNeeded} pts deducted from your balance.</p>
+            <p className="text-xs text-gray-400 mt-1">{sentFor?.pts ?? ptsNeeded} pts deducted from your balance.</p>
           </div>
           <Button variant="primary" className="w-full" onClick={onClose}>Done</Button>
         </div>
@@ -782,7 +841,7 @@ function VoucherRedeemSheet({
             </div>
             <div>
               <p className="text-xs text-gray-400">{voucher.brand}</p>
-              <h3 className="text-base font-bold text-gray-900">{isFixed ? `${fmtInr(fixedPts)} Voucher` : 'Voucher — Any Amount'}</h3>
+              <h3 className="text-base font-bold text-gray-900">{isFixed ? `${fmtInr(fixedPts)} Voucher` : amountOptions ? 'Voucher — Choose an amount' : 'Voucher — Any Amount'}</h3>
               <p className="text-xs text-gray-500">{voucher.description}</p>
             </div>
           </div>
@@ -803,8 +862,51 @@ function VoucherRedeemSheet({
             </div>
           )}
 
+          {/* Choose-from-amounts: one button per amount (with its points); no typing. */}
+          {amountOptions && (
+            <div>
+              <p className="text-xs font-medium text-gray-600 mb-2">Choose an amount *</p>
+              <div className="grid grid-cols-3 gap-2" role="group" aria-label="Voucher amount">
+                {amountOptions.map((amt) => {
+                  const pts = pointsForAmount(amt, conversionRate);
+                  const selected = freeAmt === amt;
+                  const tooLow = amt < minFreeAmount;
+                  const tooMuch = pts > myBalance;
+                  return (
+                    <button
+                      key={amt}
+                      type="button"
+                      aria-pressed={selected}
+                      aria-label={`${fmtInr(amt)}, ${formatPoints(pts)} points${tooLow ? ' (below the minimum)' : ''}`}
+                      disabled={otpSent || tooLow}
+                      onClick={() => amountField.reset(String(amt))}
+                      className={cn(
+                        'rounded-xl border-2 px-2 py-2 text-center transition-all disabled:opacity-40',
+                        selected
+                          ? 'border-[var(--brand-primary)] bg-[var(--brand-primary)]/5'
+                          : 'border-gray-200 hover:border-gray-300',
+                      )}
+                    >
+                      <span className="block text-sm font-bold text-gray-900">{fmtInr(amt)}</span>
+                      <span className={cn('block text-[10px]', tooMuch ? 'text-red-500' : 'text-gray-500')}>
+                        {formatPoints(pts)} pts
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              {freeAmt > 0 && (
+                <p className={cn('text-xs mt-2 font-medium', myBalance >= ptsNeeded ? 'text-emerald-600' : 'text-red-500')}>
+                  {myBalance >= ptsNeeded
+                    ? `= ${ptsNeeded} pts · ${formatPoints(myBalance - ptsNeeded)} pts remaining after`
+                    : `Needs ${formatPoints(ptsNeeded)} pts — you have ${formatPoints(myBalance)}`}
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Free amount: input */}
-          {!isFixed && (
+          {!isFixed && !amountOptions && (
             <div>
               <label className="text-xs font-medium text-gray-600 block mb-1">
                 Amount to redeem * <span className="text-gray-400 font-normal">(min {fmtInr(minFreeAmount)})</span>
@@ -814,21 +916,28 @@ function VoucherRedeemSheet({
                 <input
                   className={cn(
                     'w-full border rounded-xl pl-7 pr-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]',
-                    amountError ? 'border-red-300' : 'border-gray-200',
+                    amtInvalidShown || amountHint ? 'border-red-300' : 'border-gray-200',
                   )}
                   placeholder={`${minFreeAmount}`}
                   value={amount}
-                  onChange={e => setAmount(e.target.value.replace(/\D/g, ''))}
-                  inputMode="numeric"
+                  // Whole rupees only: "750.5" / "750,5" / a pasted decimal stay visible → "Check the amount" on commit.
+                  {...amountField.inputProps}
+                  // Locked once the OTP is sent — the order already carries this amount.
+                  disabled={otpSent}
+                  aria-invalid={amtInvalidShown || !!amountHint ? true : undefined}
+                  aria-describedby={amtInvalidShown ? 'voucher-amount-error' : amountHint ? 'voucher-amount-hint' : undefined}
                   aria-label="Voucher amount"
                 />
               </div>
-              {amountError && <p className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{amountError}</p>}
-              {freeAmt >= minFreeAmount && !amountError && (
-                <p className="text-xs text-emerald-600 mt-1 font-medium">
-                  = {ptsNeeded} pts · {formatPoints(myBalance - ptsNeeded)} pts remaining after
-                </p>
-              )}
+              {amtInvalidShown && <p id="voucher-amount-error" role="alert" className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{WHOLE_RUPEE_INVALID_MESSAGE}</p>}
+              <div aria-live="polite">
+                {amountHint && <p id="voucher-amount-hint" className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{amountHint}</p>}
+                {freeAmt >= minFreeAmount && !amtInvalid && !amountHint && (
+                  <p className="text-xs text-emerald-600 mt-1 font-medium">
+                    = {ptsNeeded} pts · {formatPoints(myBalance - ptsNeeded)} pts remaining after
+                  </p>
+                )}
+              </div>
             </div>
           )}
 
@@ -839,6 +948,15 @@ function VoucherRedeemSheet({
           {otpSent && (
             <div className="space-y-2">
               <p className="text-xs text-gray-500 flex items-center gap-1"><Phone className="h-3.5 w-3.5" /> OTP sent to your registered mobile</p>
+              {!isFixed && (
+                <button
+                  type="button"
+                  className="text-xs font-medium text-[var(--brand-primary)] underline"
+                  onClick={handleChangeAmount}
+                >
+                  Change amount
+                </button>
+              )}
               <input
                 className="w-full border border-gray-200 rounded-xl px-3 py-3 text-center font-mono text-lg tracking-[0.4em] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20"
                 placeholder="· · · · · ·" maxLength={6} value={otp}
@@ -850,9 +968,15 @@ function VoucherRedeemSheet({
           <div className="pt-3 border-t border-gray-100">
             {!otpSent ? (
               <Button variant="primary" className="w-full" loading={submitting}
-                disabled={!canAfford || !!amountError || (!isFixed && freeAmt < minFreeAmount) || (needConsent && !consent)}
+                // An INVALID amount text never disables the button (it can't say why): the tap
+                // commits and shows "Check the amount" instead of sending.
+                disabled={!amtInvalid && (!canAfford || !!amountHint || (!isFixed && freeAmt < minFreeAmount) || (!!amountOptions && !amountOptions.includes(freeAmt)) || (needConsent && !consent))}
                 onClick={handleSendOtp}>
-                {!isFixed && freeAmt > 0 && freeAmt < minFreeAmount
+                {amtInvalidShown
+                  ? WHOLE_RUPEE_INVALID_MESSAGE
+                  : amountOptions && !amountOptions.includes(freeAmt)
+                  ? 'Choose an amount'
+                  : !isFixed && freeAmt > 0 && freeAmt < minFreeAmount
                   ? `Min ${fmtInr(minFreeAmount)} required`
                   : myBalance < ptsNeeded
                   ? 'Insufficient balance'
@@ -860,7 +984,7 @@ function VoucherRedeemSheet({
               </Button>
             ) : (
               <div className="flex gap-3">
-                <Button variant="outline" className="flex-1" onClick={() => setOtpSent(false)}>← Back</Button>
+                <Button variant="outline" className="flex-1" onClick={handleChangeAmount}>← Back</Button>
                 <Button variant="primary" className="flex-1" loading={submitting} disabled={otp.length < 6} onClick={handleConfirm}>Confirm</Button>
               </div>
             )}
@@ -890,7 +1014,9 @@ function CashPayoutSheet({
   onRedeemed: (pts: number) => void;
 }) {
   const toast = useToast();
-  const [amount,     setAmount]     = useState('');
+  // Whole-rupee amount + the shared "Check the amount" rule (see useWholeRupeeField).
+  const amountField = useWholeRupeeField();
+  const amount = amountField.value;
   const [otp,        setOtp]        = useState('');
   const [otpSent,    setOtpSent]    = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -903,26 +1029,47 @@ function CashPayoutSheet({
   const minInr    = hasRate ? Math.ceil(minPoints / conversionRate) : 0;
   const maxInr    = hasRate ? Math.floor(myBalance / conversionRate) : null;
 
-  const inrAmt    = parseInt(amount, 10) || 0;
+  // "1,250" → 1250; "750,5" / "1,2" / a pasted decimal → null (invalid — never guessed / shrunk).
+  const parsedAmt = amountField.amount;
+  const amtInvalid = parsedAmt === null;
+  const inrAmt    = parsedAmt ?? 0;
+  const amtInvalidShown = amtInvalid && amountField.showInvalid;
+  // The ₹ + points the payout ORDER was created with (frozen at OTP-send; points = the SERVER's
+  // requiredPoints from redeem-init) — success copy + balance.
+  const [sentFor, setSentFor] = useState<{ amount: number; pts: number } | null>(null);
   // Preview points with the REAL conversionRate (matches the backend), not localStorage.
   const ptsNeeded = Math.ceil(inrAmt * conversionRate);
 
-  const amountError = inrAmt > 0 && inrAmt < minInr
+  // Live minimum / balance hint (polite — not an alert; the invalid-amount alert is separate).
+  const amountHint = amtInvalid
+    ? ''
+    : inrAmt > 0 && inrAmt < minInr
     ? `Minimum redemption is ${fmtInr(minInr)}`
     : maxInr !== null && inrAmt > maxInr
     ? `Exceeds balance (max ${fmtInr(maxInr)})`
     : '';
 
-  const canProceed = inrAmt >= minInr && !amountError && myBalance >= ptsNeeded;
+  const canProceed = !amtInvalid && inrAmt >= minInr && !amountHint && myBalance >= ptsNeeded;
 
   const handleSendOtp = async () => {
     if (!rewardId) { toast.error('Cash payout is not available right now'); return; }
+    if (amtInvalid && !amountField.checkBeforeSubmit()) return; // "Check the amount" — never sent
+    const frozenAmount = inrAmt;
     setSubmitting(true);
-    const result = await api.post<RedeemInitResult>('/api/rewards/redeem', { rewardId, amount: inrAmt });
+    const result = await api.post<RedeemInitResult>('/api/rewards/redeem', { rewardId, amount: frozenAmount });
     setSubmitting(false);
     if (!result.success) { toast.error(result.error || 'Could not start payout'); return; }
+    setSentFor({ amount: frozenAmount, pts: serverPoints(result.data?.requiredPoints, ptsNeeded) });
     setOrderId(result.data.orderId);
     setOtpSent(true);
+  };
+
+  // "Change amount" / Back after the OTP was sent → a fresh redeem (a new order on the next send).
+  const handleChangeAmount = () => {
+    setOtpSent(false);
+    setOtp('');
+    setOrderId(null);
+    setSentFor(null);
   };
 
   const handleConfirm = async () => {
@@ -934,7 +1081,7 @@ function CashPayoutSheet({
     );
     setSubmitting(false);
     if (!result.success) { toast.error(result.error || 'Could not confirm payout'); return; }
-    onRedeemed(ptsNeeded);
+    onRedeemed(sentFor?.pts ?? ptsNeeded);
     setSuccess(true);
   };
 
@@ -960,9 +1107,9 @@ function CashPayoutSheet({
           </div>
           <div>
             <p className="text-sm text-gray-500 mt-1">
-              {fmtInr(inrAmt)} will be paid to {payoutTarget} within 2–3 working days.
+              {fmtInr(sentFor?.amount ?? inrAmt)} will be paid to {payoutTarget} within 2–3 working days.
             </p>
-            <p className="text-xs text-gray-400 mt-1">{ptsNeeded} pts deducted. You will receive a WhatsApp confirmation once paid.</p>
+            <p className="text-xs text-gray-400 mt-1">{sentFor?.pts ?? ptsNeeded} pts deducted. You will receive a WhatsApp confirmation once paid.</p>
           </div>
           <Button variant="primary" className="w-full" onClick={onClose}>Done</Button>
         </div>
@@ -1002,26 +1149,40 @@ function CashPayoutSheet({
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-bold text-gray-500">₹</span>
               <input
                 className={cn('w-full border rounded-xl pl-7 pr-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]',
-                  amountError ? 'border-red-300' : 'border-gray-200')}
+                  amtInvalidShown || amountHint ? 'border-red-300' : 'border-gray-200')}
                 placeholder={`${minInr}`}
                 value={amount}
-                onChange={e => setAmount(e.target.value.replace(/\D/g, ''))}
-                inputMode="numeric"
+                // Whole rupees only: "750.5" / "750,5" / a pasted decimal stay visible → "Check the amount" on commit.
+                {...amountField.inputProps}
+                // Locked once the OTP is sent — the payout order already carries this amount.
+                disabled={otpSent}
+                aria-invalid={amtInvalidShown || !!amountHint ? true : undefined}
+                aria-describedby={amtInvalidShown ? 'payout-amount-error' : amountHint ? 'payout-amount-hint' : undefined}
                 aria-label="Payout amount"
               />
             </div>
-            {amountError && <p className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{amountError}</p>}
-            {inrAmt >= minInr && !amountError && (
-              <p className="text-xs text-emerald-600 mt-1 font-medium">
-                = {ptsNeeded} pts · {formatPoints(myBalance - ptsNeeded)} pts remaining after
-              </p>
-            )}
+            {amtInvalidShown && <p id="payout-amount-error" role="alert" className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{WHOLE_RUPEE_INVALID_MESSAGE}</p>}
+            <div aria-live="polite">
+              {amountHint && <p id="payout-amount-hint" className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{amountHint}</p>}
+              {inrAmt >= minInr && !amtInvalid && !amountHint && (
+                <p className="text-xs text-emerald-600 mt-1 font-medium">
+                  = {ptsNeeded} pts · {formatPoints(myBalance - ptsNeeded)} pts remaining after
+                </p>
+              )}
+            </div>
           </div>
 
           {/* OTP field */}
           {otpSent && (
             <div className="space-y-2">
               <p className="text-xs text-gray-500 flex items-center gap-1"><Phone className="h-3.5 w-3.5" /> OTP sent to your registered mobile</p>
+              <button
+                type="button"
+                className="text-xs font-medium text-[var(--brand-primary)] underline"
+                onClick={handleChangeAmount}
+              >
+                Change amount
+              </button>
               <input className="w-full border border-gray-200 rounded-xl px-3 py-3 text-center font-mono text-lg tracking-[0.4em] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20"
                 placeholder="· · · · · ·" maxLength={6} value={otp}
                 onChange={e => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric"
@@ -1031,12 +1192,15 @@ function CashPayoutSheet({
 
           <div className="pt-3 border-t border-gray-100">
             {!otpSent ? (
-              <Button variant="primary" className="w-full" loading={submitting} disabled={!canProceed} onClick={handleSendOtp}>
-                {!canProceed && inrAmt > 0 ? amountError || 'Insufficient balance' : `Redeem ${inrAmt ? fmtInr(inrAmt) : ''}`}
+              // An INVALID amount text never disables the button: the tap shows "Check the amount".
+              <Button variant="primary" className="w-full" loading={submitting} disabled={!amtInvalid && !canProceed} onClick={handleSendOtp}>
+                {amtInvalid
+                  ? (amtInvalidShown ? WHOLE_RUPEE_INVALID_MESSAGE : 'Redeem')
+                  : !canProceed && inrAmt > 0 ? amountHint || 'Insufficient balance' : `Redeem ${inrAmt ? fmtInr(inrAmt) : ''}`}
               </Button>
             ) : (
               <div className="flex gap-3">
-                <Button variant="outline" className="flex-1" onClick={() => setOtpSent(false)}>← Back</Button>
+                <Button variant="outline" className="flex-1" onClick={handleChangeAmount}>← Back</Button>
                 <Button variant="primary" className="flex-1" loading={submitting} disabled={otp.length < 6} onClick={handleConfirm}>Confirm</Button>
               </div>
             )}
@@ -1063,6 +1227,10 @@ function CashPayoutSheet({
    Both POSTs are same-origin, so the edge proxy injects `x-active-partner-id` from
    the httpOnly `active_partner_id` cookie exactly as the redeem calls on this page
    do (the FE never sets that header — the proxy strips any inbound value). */
+
+/** Type-it-twice mismatch copy — also keys the confirm input's aria-invalid/describedby. */
+const UPI_MISMATCH_ERROR = 'UPI IDs do not match';
+
 function PayoutCaptureSheet({
   requiredPaymentType,
   onCaptured,
@@ -1083,6 +1251,12 @@ function PayoutCaptureSheet({
   const [accountNumber,     setAccountNumber]     = useState('');
   const [ifscCode,          setIfscCode]          = useState('');
   const [upiId,             setUpiId]             = useState('');
+  // VPA safeguards: how the UPI ID was captured (QR vs typed) + the type-it-twice confirm
+  // value (only used/sent when the ID was typed — a scanned ID has no typo risk).
+  const [upiCaptureMethod,  setUpiCaptureMethod]  = useState<UpiCaptureMethod | null>(null);
+  const [upiIdConfirm,      setUpiIdConfirm]      = useState('');
+  const upiConfirmInputId = useId();
+  const captureErrorId = useId();
   const [chequeFile,        setChequeFile]        = useState<File | null>(null);
   const [chequeFileKey,     setChequeFileKey]     = useState<string | null>(null);
   const [uploadingCheque,   setUploadingCheque]   = useState(false);
@@ -1153,8 +1327,27 @@ function PayoutCaptureSheet({
       if (!chequeFileKey) {
         setError('Please upload a cancelled cheque'); return;
       }
-    } else if (!upiId) {
-      setError('Please scan your UPI QR code to continue'); return;
+    }
+    // Trim once: a padded/whitespace-only manual entry must hit the EMPTY-state copy (not
+    // "valid"), and the trimmed value is what's validated AND sent.
+    const upi = upiId.trim();
+    if (effectiveMode === 'upi') {
+      if (!upi) {
+        setError(
+          getGifsySettings().salesApp?.upiManualEntry === true
+            ? 'Enter or scan your UPI ID to continue'
+            : 'Please scan your UPI QR code to continue',
+        );
+        return;
+      }
+      if (!isValidUpiId(upi)) {
+        setError('Enter a valid UPI ID'); return;
+      }
+      // Type-it-twice: a hand-typed ID must be re-entered identically (case/space-insensitive;
+      // the server enforces the same rule). Blocks BEFORE any POST.
+      if (upiCaptureMethod === 'MANUAL' && upiIdConfirm.trim().toLowerCase() !== upi.toLowerCase()) {
+        setError(UPI_MISMATCH_ERROR); return;
+      }
     }
 
     setSubmitting(true);
@@ -1168,7 +1361,14 @@ function PayoutCaptureSheet({
             ifscCode:          ifscCode.trim(),
             chequeFileKey,
           }
-        : { paymentMode: 'upi' as const, upiId };
+        // UPI mode sends ONLY the UPI fields (no bank fields); bank mode above sends no upiId.
+        // upiCaptureMethod is sent when known; upiIdConfirm only for a typed (MANUAL) ID.
+        : {
+            paymentMode: 'upi' as const,
+            upiId: upi,
+            ...(upiCaptureMethod ? { upiCaptureMethod } : {}),
+            ...(upiCaptureMethod === 'MANUAL' ? { upiIdConfirm: upiIdConfirm.trim() } : {}),
+          };
     const result = await api.post('/api/partner/payout-details', payload);
     setSubmitting(false);
     if (!result.success) {
@@ -1204,6 +1404,11 @@ function PayoutCaptureSheet({
         onFieldChange={onFieldChange}
         upiId={upiId}
         onUpiChange={setUpiId}
+        onUpiCaptureMethodChange={(m) => {
+          setUpiCaptureMethod(m);
+          // A scanned or cleared ID needs no confirmation — drop any stale confirm text.
+          if (m !== 'MANUAL') setUpiIdConfirm('');
+        }}
       >
         {/* Cancelled-cheque upload — rendered only in bank mode (BankOrUpiSection gates children
             to bank mode, mirroring KYC). File-picker (camera-or-gallery), NOT a forced live camera. */}
@@ -1256,8 +1461,43 @@ function PayoutCaptureSheet({
         </div>
       </BankOrUpiSection>
 
+      {/* Type-it-twice confirm — only for a hand-typed UPI ID (QR captures skip it). Same
+          keyboard attrs as the manual input. Paste is deliberately ALLOWED: partners copy their
+          VPA from their UPI app, and a paste block is bypassable anyway (keyboard clipboard
+          chips) — the second entry is the requirement. A mismatch error is linked to this
+          input (aria-invalid + aria-describedby) so assistive tech announces it in place. */}
+      {effectiveMode === 'upi' && upiCaptureMethod === 'MANUAL' && (
+        <div>
+          <label htmlFor={upiConfirmInputId} className="text-xs font-medium text-gray-600 block mb-1">
+            Re-enter UPI ID *
+          </label>
+          <input
+            id={upiConfirmInputId}
+            data-testid="manual-upi-confirm-input"
+            className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)] bg-white"
+            placeholder="Type the UPI ID again"
+            value={upiIdConfirm}
+            onChange={(e) => setUpiIdConfirm(e.target.value)}
+            aria-required="true"
+            aria-invalid={error === UPI_MISMATCH_ERROR ? true : undefined}
+            aria-describedby={error === UPI_MISMATCH_ERROR ? captureErrorId : undefined}
+            autoComplete="off"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            inputMode="email"
+            maxLength={100}
+          />
+        </div>
+      )}
+
       {error && (
-        <p data-testid="payout-capture-error" className="text-xs text-red-600 flex items-start gap-1.5">
+        <p
+          id={captureErrorId}
+          role="alert"
+          data-testid="payout-capture-error"
+          className="text-xs text-red-600 flex items-start gap-1.5"
+        >
           <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           {error}
         </p>
@@ -1839,7 +2079,9 @@ export default function RewardsPage() {
                       </button>
                       {/* FREE_AMOUNT badge */}
                       {gift.voucherType === 'FREE_AMOUNT' && (
-                        <span className="absolute bottom-2 left-2 text-[9px] font-bold bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full">Any Amount</span>
+                        <span className="absolute bottom-2 left-2 text-[9px] font-bold bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full">
+                          {gift.amountOptions?.length ? 'Choose Amount' : 'Any Amount'}
+                        </span>
                       )}
                       {!canAfford && (
                         <div className="absolute inset-0 flex items-end justify-center pb-2">
@@ -1855,7 +2097,9 @@ export default function RewardsPage() {
                       <p className="text-xs font-semibold text-gray-900 leading-snug line-clamp-2 flex-1">{gift.name}</p>
                       <div className="mt-2 pt-2 border-t border-gray-50 flex items-center justify-between">
                         {isFreeAmount(gift) ? (
-                          <span className="text-sm font-bold text-[var(--brand-primary)]">You set the amount</span>
+                          <span className="text-sm font-bold text-[var(--brand-primary)]">
+                            {gift.amountOptions?.length ? `From ${fmtInr(gift.amountOptions[0])}` : 'You set the amount'}
+                          </span>
                         ) : (
                           <span className="flex flex-col leading-none">
                             {mrpPoints != null && (

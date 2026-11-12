@@ -69,10 +69,19 @@ export function accessCookieMaxAge(token: string): number {
   return ACCESS_MAX_AGE_FALLBACK;
 }
 
+/** Backoff before each retry of a 429'd refresh (ms). Bounded so a page navigation never stalls. */
+const REFRESH_429_BACKOFF_MS = [300, 900];
+/** Cap on a server-sent Retry-After (ms). */
+const REFRESH_429_MAX_WAIT_MS = 2_000;
+
 /**
  * Exchange a (single-use, rotating) refresh token for a fresh access + refresh pair via the
  * backend. Returns the new tokens on success, or `null` on ANY failure (network error, non-2xx,
  * or a missing access token in the body).
+ *
+ * A 429 is "retry later", NOT "session dead": the backend's throttler rejects BEFORE the refresh
+ * token is looked at, so the same token is still valid — retry it (bounded backoff, honouring a
+ * short Retry-After) instead of returning null, which both callers turn into a bounce to login.
  *
  * On failure the caller MUST leave the existing cookies intact: with the backend returning the
  * successor tokens on a contended/just-rotated refresh (multi-tab / parallel page requests),
@@ -83,17 +92,29 @@ export async function refreshTokensViaBackend(
   refreshToken: string,
 ): Promise<{ accessToken: string; refreshToken?: string } | null> {
   try {
-    const res = await fetch(`${API_URL}/v1/auth/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refreshToken }),
-      signal: AbortSignal.timeout(12_000),
-    });
-    const body = await res.json().catch(() => null);
-    const accessToken: string | undefined = body?.data?.accessToken;
-    const newRefresh: string | undefined = body?.data?.refreshToken;
-    if (!res.ok || !accessToken) return null;
-    return { accessToken, refreshToken: newRefresh };
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(`${API_URL}/v1/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken }),
+        signal: AbortSignal.timeout(12_000),
+      });
+      if (res.status === 429 && attempt < REFRESH_429_BACKOFF_MS.length) {
+        const retryAfterSecs = Number(res.headers?.get?.('Retry-After'));
+        const wait = Number.isFinite(retryAfterSecs) && retryAfterSecs > 0
+          ? Math.min(retryAfterSecs * 1000, REFRESH_429_MAX_WAIT_MS)
+          : REFRESH_429_BACKOFF_MS[attempt];
+        // Release the unread 429 body first so its connection isn't held open across the wait.
+        await res.body?.cancel().catch(() => {});
+        await new Promise((resolve) => setTimeout(resolve, wait));
+        continue;
+      }
+      const body = await res.json().catch(() => null);
+      const accessToken: string | undefined = body?.data?.accessToken;
+      const newRefresh: string | undefined = body?.data?.refreshToken;
+      if (!res.ok || !accessToken) return null;
+      return { accessToken, refreshToken: newRefresh };
+    }
   } catch {
     return null;
   }

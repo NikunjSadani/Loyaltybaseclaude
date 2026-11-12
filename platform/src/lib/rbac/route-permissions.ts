@@ -83,6 +83,8 @@ export const ROUTE_PERMISSIONS: Record<string, string> = {
 
   // Engagement (banners)
   '/admin/banners':                  'engagement:read',
+  // Engagement (offer tiles — "This month's offers")
+  '/admin/offers':                   'engagement:read',
 
   // Reporting & analytics
   '/admin/reports':                  'reports:read',

@@ -59,6 +59,8 @@ const mockTenant = { resolveClient: jest.fn(), invalidateCache: jest.fn() };
 const mockTenantSettings = {
   invalidate: jest.fn(),
   getVisibilityEnabledUncached: jest.fn().mockResolvedValue(true),
+  // VPA safeguard (salesApp.upiManualEntry guard) reads the STORED uniqueness policy.
+  getEffectiveSettings: jest.fn(),
 };
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
@@ -1006,6 +1008,124 @@ describe('AdminCoreService', () => {
       expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
     });
 
+    // ── VPA safeguard: manual UPI entry requires STORED UPI-ID uniqueness ──
+    describe('salesApp.upiManualEntry guard', () => {
+      const stored = (upi: boolean, upiManualEntry = false) =>
+        mockTenantSettings.getEffectiveSettings.mockResolvedValueOnce({
+          // The DERIVED policy may already read upi=true (it ORs in upiManualEntry) — the guard
+          // must ignore it and use the STORED value.
+          uniquenessPolicy: { gst: true, phone: true, bank: false, upi: true },
+          uniquenessPolicyStored: { gst: true, phone: true, bank: false, upi },
+          salesApp: { ledgerLabel: 'Wallet', upiEnabled: true, upiManualEntry },
+        });
+
+      it('rejects turning manual entry ON while STORED UPI uniqueness is OFF (400, nothing written)', async () => {
+        stored(false);
+        await expect(
+          service.upsertSetting(gifsy, {
+            key: 'salesApp',
+            value: { ledgerLabel: 'Wallet', upiEnabled: true, upiManualEntry: true },
+          }),
+        ).rejects.toThrow('Turn on UPI ID uniqueness first');
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+        // Cache busted first so the check reads the DB, not a stale copy.
+        expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
+      });
+
+      it('allows turning manual entry ON when STORED UPI uniqueness is ON', async () => {
+        stored(true);
+        await service.upsertSetting(gifsy, {
+          key: 'salesApp',
+          value: { ledgerLabel: 'Wallet', upiEnabled: true, upiManualEntry: true },
+        });
+        expect(mockPrisma.programSetting.upsert).toHaveBeenCalled();
+      });
+
+      it('always allows turning manual entry OFF (no policy read needed)', async () => {
+        await service.upsertSetting(gifsy, {
+          key: 'salesApp',
+          value: { ledgerLabel: 'Wallet', upiEnabled: true, upiManualEntry: false },
+        });
+        expect(mockTenantSettings.getEffectiveSettings).not.toHaveBeenCalled();
+        expect(mockPrisma.programSetting.upsert).toHaveBeenCalled();
+      });
+
+      // F8 — only an OFF→ON TRANSITION is gated (previous value read fresh from the DB).
+      it('allows re-saving salesApp with manual entry ALREADY ON even if stored UPI uniqueness reads OFF (not a transition)', async () => {
+        stored(false, true);
+        await service.upsertSetting(gifsy, {
+          key: 'salesApp',
+          value: { ledgerLabel: 'Points', upiEnabled: true, upiManualEntry: true },
+        });
+        expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
+        expect(mockPrisma.programSetting.upsert).toHaveBeenCalled();
+      });
+
+      it('rejects uniquenessPolicy.upi=false while manual entry is STORED ON (400, nothing written)', async () => {
+        stored(true, true);
+        await expect(
+          service.upsertSetting(gifsy, {
+            key: 'uniquenessPolicy',
+            value: { gst: true, phone: true, bank: true, upi: false },
+          }),
+        ).rejects.toThrow('Turn off UPI Manual Entry first');
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+        expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
+      });
+
+      it('rejects a uniquenessPolicy write that OMITS upi (replace-whole → OFF) while manual entry is ON', async () => {
+        stored(true, true);
+        await expect(
+          service.upsertSetting(gifsy, { key: 'uniquenessPolicy', value: { gst: true, phone: true, bank: true } }),
+        ).rejects.toThrow('Turn off UPI Manual Entry first');
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+      });
+
+      it('allows uniquenessPolicy.upi=false when manual entry is stored OFF', async () => {
+        stored(true, false);
+        await service.upsertSetting(gifsy, {
+          key: 'uniquenessPolicy',
+          value: { gst: true, phone: true, bank: false, upi: false },
+        });
+        expect(mockPrisma.programSetting.upsert).toHaveBeenCalled();
+      });
+
+      it('allows a uniquenessPolicy write keeping upi=true without reading settings', async () => {
+        await service.upsertSetting(gifsy, {
+          key: 'uniquenessPolicy',
+          value: { gst: true, phone: true, bank: false, upi: true },
+        });
+        expect(mockTenantSettings.getEffectiveSettings).not.toHaveBeenCalled();
+        expect(mockPrisma.programSetting.upsert).toHaveBeenCalled();
+      });
+
+      // R9 — recovery from an INVALID stored state (manual entry ON while stored upi uniqueness OFF).
+      it('R9: invalid stored state (manual ON, upi OFF) → a uniquenessPolicy write turning upi ON is allowed', async () => {
+        // Stored state is irrelevant: the ON direction is never read nor gated.
+        await service.upsertSetting(gifsy, {
+          key: 'uniquenessPolicy',
+          value: { gst: true, phone: true, bank: false, upi: true },
+        });
+        expect(mockTenantSettings.getEffectiveSettings).not.toHaveBeenCalled();
+        expect(mockPrisma.programSetting.upsert).toHaveBeenCalledWith(
+          expect.objectContaining({
+            update: expect.objectContaining({ settingValue: { gst: true, phone: true, bank: false, upi: true } }),
+          }),
+        );
+      });
+
+      it('R9: invalid stored state (manual ON, upi OFF) → a write keeping upi OFF is still rejected', async () => {
+        stored(false, true);
+        await expect(
+          service.upsertSetting(gifsy, {
+            key: 'uniquenessPolicy',
+            value: { gst: true, phone: true, bank: false, upi: false },
+          }),
+        ).rejects.toThrow('Turn off UPI Manual Entry first');
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+      });
+    });
+
     it('persists gifsySlaTargetHours as a normalised integer, tenant-scoped', async () => {
       await service.upsertSetting(gifsy, { key: 'gifsySlaTargetHours', value: '120' });
       const call = mockPrisma.programSetting.upsert.mock.calls[0][0];
@@ -1043,6 +1163,100 @@ describe('AdminCoreService', () => {
         service.upsertSetting(gifsy, { key: 'gifsySlaTargetHours', value: 'abc' }),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+
+    // ── B11: per-tenant OTP SMS templates — dedicated GIFSY_ADMIN-only path ──
+    describe('otpTemplates (B11)', () => {
+      const HEX_A = '6a391d46aaaaaaaaaaaaaaaa';
+      const HEX_B = '6a391cf2bbbbbbbbbbbbbbbb';
+      const NEW   = '0123456789abcdef01234567';
+      const DEOLEO_ROW = { login: HEX_A, redemptionSelf: HEX_A, kycConsent: HEX_B, redemptionSales: HEX_B };
+      const assumed = { ...gifsy, assumed: true } as JwtPayload;
+
+      it('M1: the GENERIC PUT /v1/admin/settings REJECTS an otpTemplates write (staff with write_finance cannot reach it)', async () => {
+        await expect(
+          service.upsertSetting(gifsyStaff, { key: 'otpTemplates', value: DEOLEO_ROW }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        await expect(
+          service.upsertSetting(gifsy, { key: 'otpTemplates', value: DEOLEO_ROW }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+      });
+
+      it('M3: GET reads the STORED row (Deoleo values as-is) and echoes the loaded clientId', async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: DEOLEO_ROW });
+        const res = await service.getOtpTemplates(assumed);
+        expect(mockPrisma.programSetting.findUnique).toHaveBeenCalledWith({
+          where: { clientId_settingKey: { clientId: 'deoleo', settingKey: 'otpTemplates' } },
+          select: { settingValue: true },
+        });
+        expect(res).toEqual({ clientId: 'deoleo', templates: DEOLEO_ROW, stored: true });
+      });
+
+      it('M3: GET with no row → all empty, stored:false; a DB read error PROPAGATES (never a silent empty map)', async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValueOnce(null);
+        expect(await service.getOtpTemplates(assumed)).toEqual({
+          clientId: 'deoleo',
+          templates: { login: '', redemptionSelf: '', kycConsent: '', redemptionSales: '' },
+          stored: false,
+        });
+        mockPrisma.programSetting.findUnique.mockRejectedValueOnce(new Error('db down'));
+        await expect(service.getOtpTemplates(assumed)).rejects.toThrow('db down');
+      });
+
+      it("M3: Deoleo's login template survives a partial save (only the changed purpose is merged onto the stored row)", async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: DEOLEO_ROW });
+        await service.saveOtpTemplates(assumed, { clientId: 'deoleo', changes: { redemptionSales: ` ${NEW} ` } });
+        const call = mockPrisma.programSetting.upsert.mock.calls[0][0];
+        const expected = { ...DEOLEO_ROW, redemptionSales: NEW };
+        expect(call.where).toEqual({ clientId_settingKey: { clientId: 'deoleo', settingKey: 'otpTemplates' } });
+        expect(call.update.settingValue).toEqual(expected);
+        expect(call.update.settingValue.login).toBe(HEX_A);
+        const audit = mockPrisma.auditLog.create.mock.calls[0][0].data;
+        expect(audit.entityType).toBe('PROGRAM_SETTINGS');
+        expect(audit.metadata).toEqual({ key: 'otpTemplates', value: expected });
+        expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
+      });
+
+      it('M3: an untouched stored value is never re-validated or blanked (no stored row → others stay "")', async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValue(null);
+        await service.saveOtpTemplates(assumed, { clientId: 'deoleo', changes: { login: NEW } });
+        expect(mockPrisma.programSetting.upsert.mock.calls[0][0].update.settingValue).toEqual({
+          login: NEW, redemptionSelf: '', kycConsent: '', redemptionSales: '',
+        });
+      });
+
+      it('M2: a clientId different from the current (assumed) tenant → 409, nothing read or written', async () => {
+        await expect(
+          service.saveOtpTemplates(assumed, { clientId: 'bajaj', changes: { login: NEW } }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(mockPrisma.programSetting.findUnique).not.toHaveBeenCalled();
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+      });
+
+      it('rejects an un-assumed (platform) GIFSY session on both GET and PUT', async () => {
+        await expect(service.getOtpTemplates(gifsy)).rejects.toBeInstanceOf(BadRequestException);
+        await expect(
+          service.saveOtpTemplates(gifsy, { clientId: 'deoleo', changes: { login: NEW } }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it.each([
+        ['a non-hex ID', { login: 'not-a-template-id-000000' }],
+        ['a 23-char ID', { login: NEW.slice(1) }],
+        ['a non-string value', { login: 123 }],
+        ['an unknown purpose key', { signup: NEW }],
+        ['no change at all', {}],
+        ['a non-object value', 'abc'],
+        ['an array value', [NEW]],
+      ])('REJECTS %s with 400 and does not persist', async (_label, changes) => {
+        mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: DEOLEO_ROW });
+        await expect(
+          service.saveOtpTemplates(assumed, { clientId: 'deoleo', changes: changes as never }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+        expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+      });
     });
 
     it('leaves non-SLA keys untouched (no coercion)', async () => {

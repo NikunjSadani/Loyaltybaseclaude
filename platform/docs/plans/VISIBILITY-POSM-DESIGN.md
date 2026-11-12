@@ -214,7 +214,7 @@ only once live).
 
 ## 16. AS-BUILT + STATUS (authoritative — 2026-07-27)
 
-**✅ BUILT + dual-audited + fully gated. Committed `2e28ac4` on develop. NOT pushed.**
+**✅ BUILT + dual-audited + fully gated. Committed `2e28ac4` on develop — since SHIPPED: LIVE in prod from cutover #16 (dormant per tenant until `visibilityConfig` is set).**
 Gate: **api `nest build` 0 · jest 86 suites / 1931 · FE `tsc` 0 · vitest 207 files / 2014.**
 
 ### DB (migration `20260727120000_visibility_posm_rebuild`, guarded destructive)

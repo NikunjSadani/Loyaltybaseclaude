@@ -670,6 +670,8 @@ describe('SalesService', () => {
       // city/state behaviour unchanged.
       expect(existingKyc.city).toBe('Delhi');
       expect(existingKyc.state).toBe('DL');
+      // Mobile prefills the OWNER (partner) phone, not outlet.phone — the consent OTP is bound to it.
+      expect(existingKyc.mobile).toBe('888');
     });
 
     it("re-KYC prefill: accountHolderName defaults to '' (never undefined) when partner.bankAccountHolder is null", async () => {
@@ -714,6 +716,53 @@ describe('SalesService', () => {
       expect(existingKyc.accountHolderName).toBe('');
       expect(existingKyc.address).toBe('');
       expect(existingKyc.pincode).toBe('');
+      // R5: no rail at all → paymentMode null.
+      expect(existingKyc.paymentMode).toBeNull();
+    });
+
+    describe('R5 — existingKyc.paymentMode = the partner CURRENT rail (re-KYC wizard default)', () => {
+      const primeReentryPartner = (p: Record<string, unknown>) => {
+        mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
+        mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'caller-su', reportingToId: null }]);
+        mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+          {
+            outlet: {
+              id: 'o1', outletCode: 'OC1', name: 'Outlet 1', phone: '999',
+              addressLine1: null, addressLine2: null, city: 'Delhi', district: 'C', state: 'DL', pincode: null,
+              outletType: { code: 'RETAIL' },
+              partner: {
+                id: 'cp1', phone: '888', businessName: 'Acme', gstNumber: null, panNumber: null,
+                bankName: null, bankAccountNumber: null, bankAccountHolder: null, ifscCode: null, upiId: null,
+                wallets: [],
+                kycSubmissions: [
+                  { id: 'k1', status: 'REJECTED', createdAt: new Date('2024-06-01T00:00:00.000Z'), rejectionReason: null },
+                ],
+                ...p,
+              },
+            },
+          },
+        ]);
+      };
+
+      it("a visible UPI → 'upi' (UPI-first, even when a bank account is also on file)", async () => {
+        primeReentryPartner({ upiId: 'shop@upi', bankAccountNumber: '123', ifscCode: 'HDFC0001' });
+        const res = await service.getMyOutlets(caller);
+        expect(res.outlets[0].existingKyc!.paymentMode).toBe('upi');
+      });
+
+      it("bank only → 'bank'", async () => {
+        primeReentryPartner({ bankAccountNumber: '123', ifscCode: 'HDFC0001' });
+        const res = await service.getMyOutlets(caller);
+        expect(res.outlets[0].existingKyc!.paymentMode).toBe('bank');
+      });
+
+      it('an UNVERIFIED / NEEDS_RECAPTURE (hidden) rail → null, like the payout fields', async () => {
+        for (const status of ['UNVERIFIED', 'NEEDS_RECAPTURE']) {
+          primeReentryPartner({ upiId: 'self@upi', paymentDetailsStatus: status });
+          const res = await service.getMyOutlets(caller);
+          expect(res.outlets[0].existingKyc).toMatchObject({ upiId: '', paymentMode: null });
+        }
+      });
     });
 
     it('FULLY hides admin-PARKED outlets via a null-safe OR-wrap (drops PARKED, keeps null + NOT_INTERESTED)', async () => {
@@ -819,6 +868,46 @@ describe('SalesService', () => {
       });
     });
 
+    // F9 — the group's upiCaptureMethod travels with the UPI it prefills, under the SAME
+    // payout-verified gating (resolveGroupIdentity blanks both for an unverified source).
+    const primeApprovedParent = (extra: Record<string, unknown>) => {
+      primeCaller();
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        groupedOutlet({ onboardedAt: new Date('2024-01-01T00:00:00.000Z') }),
+      ]);
+      mockPrisma.channelPartner.findFirst.mockImplementation(({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(where.id
+          ? {
+              onboardedAt: new Date('2024-01-01T00:00:00.000Z'),
+              businessName: 'Group Owner Co', ownerName: 'Group Owner',
+              gstNumber: '07AAACT9811F1Z9', panNumber: 'AAACT9811F',
+              bankName: null, bankAccountNumber: null, bankAccountHolder: null,
+              ifscCode: null, upiId: 'owner@upi',
+              ...extra,
+            }
+          : null),
+      );
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({ panNumber: 'AAACT9811F' });
+    };
+
+    it('F9: parentPrefill carries the group UPI upiCaptureMethod alongside the UPI', async () => {
+      primeApprovedParent({ upiCaptureMethod: 'MANUAL', paymentDetailsStatus: 'VERIFIED' });
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0].parentPrefill).toMatchObject({ upiId: 'owner@upi', upiCaptureMethod: 'MANUAL' });
+    });
+
+    it('F9: parentPrefill blanks upiCaptureMethod with the UPI when the group source payout is UNVERIFIED', async () => {
+      primeApprovedParent({ upiCaptureMethod: 'QR', paymentDetailsStatus: 'UNVERIFIED' });
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0].parentPrefill).toMatchObject({ upiId: '', upiCaptureMethod: null });
+    });
+
+    it('F9: a legacy group UPI with no recorded method prefills upiCaptureMethod null', async () => {
+      primeApprovedParent({});
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0].parentPrefill).toMatchObject({ upiId: 'owner@upi', upiCaptureMethod: null });
+    });
+
     it('OMITS parentPrefill when the group has nothing verified (unapproved parent, no approved sibling)', async () => {
       primeCaller();
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([groupedOutlet({ onboardedAt: null })]);
@@ -892,6 +981,93 @@ describe('SalesService', () => {
       const prefill = res.outlets[0].parentPrefill!;
       expect(prefill.gstCertInheritable).toBe(false);
       expect(prefill.chequeInheritable).toBe(false);
+    });
+
+    // ── Sales-assisted physical-gift redeem: delivery-address pre-fill (PLATFORM-WIDE) ──
+    // The rep's redeem form pre-fills from the TARGET outlet's address on file — the same
+    // pickDeliveryDefaults (junk-placeholder cleaning + valid-pincode rule) as /partner/me.
+    const addrOutlet = (over: Record<string, unknown>) => ({
+      salesUserId: 'caller-su',
+      outlet: {
+        id: 'o1', outletCode: 'OC1', name: 'Shop One', phone: '9830011252',
+        addressLine1: '12 MG Road', addressLine2: null, city: 'Pune', district: 'West',
+        state: 'Maharashtra', pincode: '411001', ownerName: null,
+        outletType: { code: 'BSC' },
+        partner: {
+          id: 'cp1', phone: '9830011252', ownerName: 'Asha Patil',
+          wallets: [{ redeemablePoints: 5000 }],
+          kycSubmissions: [{ id: 'k1', status: 'APPROVED', createdAt: new Date('2024-05-01T00:00:00.000Z') }],
+        },
+        ...over,
+      },
+    });
+
+    it('DA1: surfaces deliveryDefaults from the outlet address on file + the owner name for the recipient', async () => {
+      primeCaller();
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([addrOutlet({ addressLine2: 'Near Bus Stand' })]);
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0].deliveryDefaults).toEqual({
+        line1: '12 MG Road, Near Bus Stand', city: 'Pune', state: 'Maharashtra', pincode: '411001',
+      });
+      expect(res.outlets[0].ownerName).toBe('Asha Patil');
+      // Read from the EXISTING assignment query (no extra outlet query) — partner.ownerName selected.
+      const include = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].include;
+      expect(include.outlet.include.partner.select.ownerName).toBe(true);
+      expect(mockPrisma.outlet.findMany).not.toHaveBeenCalled();
+    });
+
+    it('DA2: junk placeholders (-, NA, 0) and an invalid pincode become null — never pre-filled', async () => {
+      primeCaller();
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        addrOutlet({ addressLine1: '-', addressLine2: 'NA', pincode: '0', city: 'Pune', state: 'n/a' }),
+      ]);
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0].deliveryDefaults).toEqual({ line1: null, city: 'Pune', state: null, pincode: null });
+    });
+
+    it('DA3: nothing usable on file → deliveryDefaults null; the outlet\'s own ownerName wins over the partner\'s', async () => {
+      primeCaller();
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        addrOutlet({ addressLine1: null, city: ' ', state: '.', pincode: null, ownerName: 'Outlet Owner' }),
+      ]);
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0].deliveryDefaults).toBeNull();
+      expect(res.outlets[0].ownerName).toBe('Outlet Owner');
+    });
+
+    it('DA4 (scoping): a rep never receives the address of an outlet outside their downline', async () => {
+      // Tree: caller-su → isr1 (caller's downline); other-mgr → isr2 (a SIBLING branch).
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su', subordinates: [] });
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'caller-su', reportingToId: null, userId: 'u-c' },
+        { id: 'isr1', reportingToId: 'caller-su', userId: 'u-1' },
+        { id: 'other-mgr', reportingToId: null, userId: 'u-o' },
+        { id: 'isr2', reportingToId: 'other-mgr', userId: 'u-2' },
+      ]);
+      // Fake DB: honour the salesUserId scope the service asks for.
+      const rows = [
+        { ...addrOutlet({ id: 'o-mine', addressLine1: 'Mine Street' }), salesUserId: 'isr1' },
+        { ...addrOutlet({ id: 'o-foreign', addressLine1: 'Foreign Street' }), salesUserId: 'isr2' },
+      ];
+      mockPrisma.salesUserAssignment.findMany.mockImplementationOnce(({ where }: { where: { salesUserId: { in: string[] } } }) =>
+        Promise.resolve(rows.filter((r) => where.salesUserId.in.includes(r.salesUserId))),
+      );
+
+      const res = await service.getMyOutlets(caller);
+      const scope = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where.salesUserId.in;
+      expect([...scope].sort()).toEqual(['caller-su', 'isr1']);
+      expect(res.outlets.map((o: { id: string }) => o.id)).toEqual(['o-mine']);
+      expect(JSON.stringify(res)).not.toContain('Foreign Street');
+    });
+
+    it('DA5 (tenant scoping): a cross-tenant / non-sales caller gets no outlets and no addresses', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      const res = await service.getMyOutlets(caller);
+      expect(res).toEqual({ outlets: [], members: [] });
+      expect(mockPrisma.salesUser.findFirst.mock.calls[0][0].where).toMatchObject({
+        userId: 'user-mgr', user: { clientId: 'deoleo' },
+      });
+      expect(mockPrisma.salesUserAssignment.findMany).not.toHaveBeenCalled();
     });
   });
 

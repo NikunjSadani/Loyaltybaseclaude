@@ -38,6 +38,15 @@ export class UpsertKpiDefDto {
   @IsBoolean()
   @IsOptional()
   enabled?: boolean;
+
+  /**
+   * Per-outlet-TYPE tag (E1). Omitted → unchanged on update / null (all types) on create.
+   * null or '' → SHARED (applies to every outlet type). A code → that type only; it must be one of
+   * the tenant's ENABLED outlet type codes (validated in TargetsService.upsertKpi; 400 otherwise).
+   */
+  @IsString()
+  @IsOptional()
+  outletType?: string | null;
 }
 
 export class ListKpisQueryDto {

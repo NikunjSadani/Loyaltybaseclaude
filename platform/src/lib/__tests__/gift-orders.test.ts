@@ -101,7 +101,7 @@ describe('fulfilment payload', () => {
     expect(validateFulfilment({ ...emptyFulfilmentDraft(), fulfilmentChannel: 'GIFSY_WAREHOUSE' }).ok).toBe(true);
   });
 
-  it('sends the FULL editable field set, trimming values and nulling blanks so the backend clears them', () => {
+  it('sends the full SHIPPING field set (blanks → null so the backend clears them) but OMITS blank voucher fields', () => {
     const body = buildFulfilmentPayload({
       fulfilmentChannel: 'FULFILLED_BY_AMAZON',
       logisticsPartner: '  Amazon Logistics  ',
@@ -109,19 +109,47 @@ describe('fulfilment payload', () => {
       trackingUrl: '',
       supplierOrderRef: '403-123',
       voucherCode: '',
+      voucherPin: '',
       voucherProvider: '',
     });
-    // Every field is present; a blanked field is null (not omitted) so a stale value can
+    // Every shipping field is present; a blanked one is null (not omitted) so a stale value can
     // be cleared. null (not '') keeps the backend's @IsOptional() @IsUrl() on trackingUrl happy.
+    // Blank voucher fields are OMITTED: the backend 400s a null voucherCode / voucherProvider
+    // (a stored code is only cleared by "Voucher cancelled with vendor") — that broke every save.
     expect(body).toEqual({
       fulfilmentChannel: 'FULFILLED_BY_AMAZON',
       logisticsPartner: 'Amazon Logistics',
       trackingNumber: 'TRK1',
       trackingUrl: null,
       supplierOrderRef: '403-123',
-      voucherCode: null,
-      voucherProvider: null,
     });
+    expect(Object.values(body)).not.toContain(undefined);
+  });
+
+  it('sends entered voucher fields trimmed (a re-sent stored code is a backend no-op)', () => {
+    const body = buildFulfilmentPayload({
+      fulfilmentChannel: 'DIGITAL_VOUCHER',
+      logisticsPartner: '',
+      trackingNumber: '',
+      trackingUrl: '',
+      supplierOrderRef: '',
+      voucherCode: ' CARD-1 ',
+      voucherPin: ' 12 ',
+      voucherProvider: ' Croma ',
+    });
+    expect(body).toMatchObject({ voucherCode: 'CARD-1', voucherPin: '12', voucherProvider: 'Croma' });
+  });
+
+  it('PIN: sent trimmed only when entered (never a null clear); a PIN without a code fails validation', () => {
+    const base = { ...emptyFulfilmentDraft(), fulfilmentChannel: 'DIGITAL_VOUCHER' };
+    expect(buildFulfilmentPayload({ ...base, voucherCode: 'CARD-1', voucherPin: '  4821 ' }).voucherPin).toBe('4821');
+    expect('voucherPin' in buildFulfilmentPayload({ ...base, voucherCode: 'CARD-1', voucherPin: '  ' })).toBe(false);
+    expect(validateFulfilment({ ...base, voucherPin: '4821' })).toEqual({
+      ok: false,
+      error: 'Enter the card number before the PIN',
+    });
+    expect(validateFulfilment({ ...base, voucherCode: 'CARD-1', voucherPin: '4821' }).ok).toBe(true);
+    expect(emptyFulfilmentDraft({ id: 'o', status: 'CONFIRMED', createdAt: '', voucherPin: '99' }).voucherPin).toBe('99');
   });
 
   it('knows a digital-voucher channel', () => {
@@ -139,6 +167,7 @@ describe('channel toggle field reset', () => {
     trackingUrl: 'https://t.example/TRK1',
     supplierOrderRef: '403-123',
     voucherCode: 'AMZ-1',
+    voucherPin: '',
     voucherProvider: 'Amazon Pay',
   };
 
@@ -155,9 +184,31 @@ describe('channel toggle field reset', () => {
   it('switching to a physical channel drops the voucher fields (keeps shipping fields)', () => {
     const out = resetNonApplicableFields(physical);
     expect(out.voucherCode).toBe('');
+    expect(out.voucherPin).toBe('');
     expect(out.voucherProvider).toBe('');
     expect(out.trackingNumber).toBe('TRK1');
     expect(out.logisticsPartner).toBe('Delhivery');
+  });
+
+  it('F1: a channel round-trip restores the STORED (locked) code / provider / PIN — never blanks them', () => {
+    const stored = { voucherCode: 'CARD-1', voucherProvider: 'Croma', voucherPin: '4821' };
+    const away = resetNonApplicableFields({ ...physical, voucherCode: 'CARD-1' }, stored);
+    expect(away.voucherCode).toBe('');
+    const back = resetNonApplicableFields({ ...away, fulfilmentChannel: 'DIGITAL_VOUCHER' }, stored);
+    expect(back).toMatchObject({ voucherCode: 'CARD-1', voucherProvider: 'Croma', voucherPin: '4821' });
+  });
+
+  it('F1: the PIN rule counts a STORED code as "card number present"; any channel is valid with a stored code', () => {
+    const d = { ...emptyFulfilmentDraft(), fulfilmentChannel: 'DIGITAL_VOUCHER', voucherPin: '4821' };
+    expect(validateFulfilment(d).ok).toBe(false);
+    expect(validateFulfilment(d, { voucherCode: 'CARD-1' }).ok).toBe(true);
+    // A physical gift card carries a card no. / PIN too — a switch to a physical channel is fine.
+    for (const ch of ['GIFSY_WAREHOUSE', 'BRAND', 'FULFILLED_BY_AMAZON']) {
+      expect(validateFulfilment({ ...emptyFulfilmentDraft(), fulfilmentChannel: ch }, { voucherCode: 'CARD-1' })).toEqual({ ok: true });
+    }
+    // …and the switch never sends a blank "clear" of the stored code.
+    const away = resetNonApplicableFields({ ...emptyFulfilmentDraft(), voucherCode: 'CARD-1', fulfilmentChannel: 'BRAND' }, { voucherCode: 'CARD-1' });
+    expect(buildFulfilmentPayload(away)).not.toHaveProperty('voucherCode');
   });
 
   it('a cleared shipping field then rides the payload as null (backend clears it)', () => {

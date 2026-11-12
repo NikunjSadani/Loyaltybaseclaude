@@ -94,10 +94,12 @@ const mockTx = {
   kycStatusHistory: { create: jest.fn() },
   auditLog: { create: jest.fn() },
   user: { findUnique: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
-  channelPartner: { findUnique: jest.fn() },
+  channelPartner: { findUnique: jest.fn(), update: jest.fn() },
   userSession: { updateMany: jest.fn() },
   wallet: { findFirst: jest.fn(), create: jest.fn() },
   outlet: { update: jest.fn(), updateMany: jest.fn() },
+  // F2: the re-KYC apply row-locks the partner (SELECT … FOR UPDATE) and reads its payout columns.
+  $queryRaw: jest.fn(),
 };
 
 const mockPrisma = {
@@ -290,6 +292,34 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
       expect(result.results[0].outcome).toBe('error');
       expect(result.results[0].detail).toMatch(/Set Entity Type and GST Registration Type/i);
       expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('F2: a re-KYC row whose staged payout rail became INCOMPLETE (concurrent capture) → that ROW errors with the 409 message, nothing written', async () => {
+      mockTx.kycSubmission.findFirst.mockResolvedValue({
+        id: SUB_ID, userId: 'user-1', partnerId: 'partner-1', status: 'PENDING_GIFSY',
+        user: { name: 'Suresh', phone: '9820100001' },
+        // Reviewer's view: bank partner with the IFSC on file; the rep staged a new account (IFSC locked).
+        proposedPartner: { payoutRail: 'bank', paymentMode: 'bank', bankAccountNumber: '50100123' },
+        partner: {
+          clientId: 'deoleo', entityType: 'INDIVIDUAL', gstRegistrationType: 'REGULAR',
+          bankAccountNumber: 'OLD123', ifscCode: 'HDFC0001', paymentDetailsStatus: 'NEEDS_RECAPTURE',
+          outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, parentId: null, reKycFlags: { accountNumber: true } }],
+        },
+      });
+      // The ROW-LOCKED partner: a self-capture switched it to UPI (bank rail nulled) after the view.
+      mockTx.$queryRaw.mockResolvedValueOnce([
+        { upiId: 'self@upi', bankAccountNumber: null, ifscCode: null, paymentDetailsStatus: 'UNVERIFIED' },
+      ]);
+      const file = { buffer: makeXlsx([allApproveRow(SUB_ID)]), size: 1 } as Express.Multer.File;
+      const result = await service.bulkVerify(gifsy, file, true) as { results: Array<{ outcome: string; detail?: string }> };
+      expect(result.results[0].outcome).toBe('error');
+      expect(result.results[0].detail).toBe(
+        "The outlet's payment details changed after this KYC was submitted — reject it and submit a new re-KYC",
+      );
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+      expect(mockTx.user.update).not.toHaveBeenCalled();
+      expect(mockTx.wallet.create).not.toHaveBeenCalled();
+      expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
     });
 
     it('activates the user (User.status → ACTIVE)', async () => {

@@ -18,6 +18,32 @@ import {
 import { Spinner } from '@/components/ui/spinner';
 import { authHeader } from '@/lib/api-client';
 
+/* ─── UTR upload result (payouts.service.ts uploadPayoutUtr) ───────────────── */
+
+/** A row whose payout was already moved to SUCCESS/FAILED by an overlapping upload — not applied. */
+interface UtrSkippedRow {
+  rowNum: number;
+  txnId: string;
+  outcome: 'PAID' | 'FAILED';
+  reason: string;
+}
+
+/** A FAILED row whose ORDER holds a voucher code: payout marked FAILED, order left untouched. */
+interface UtrBlockedOrder {
+  rowNum: number;
+  txnId: string;
+  orderId: string;
+  orderNumber: string;
+  reason: string;
+}
+
+interface UtrUploadResult {
+  paidCount: number;
+  failedCount: number;
+  skipped: UtrSkippedRow[];
+  blockedOrders: UtrBlockedOrder[];
+}
+
 /* ─── Batch status types (REAL schema from payouts.service.ts) ──────────────── */
 
 type PayoutBatchStatus =
@@ -153,7 +179,7 @@ export default function PayoutsPage() {
   const [utrDownloadErr, setUtrDownloadErr] = useState<string | null>(null);
   const [utrUploading,   setUtrUploading]   = useState(false);
   const [utrUploadErr,   setUtrUploadErr]   = useState<string | null>(null);
-  const [utrUploadResult, setUtrUploadResult] = useState<{ paidCount: number; failedCount: number } | null>(null);
+  const [utrUploadResult, setUtrUploadResult] = useState<UtrUploadResult | null>(null);
   const [recoDownloading, setRecoDownloading] = useState(false);
   const [recoDownloadErr, setRecoDownloadErr] = useState<string | null>(null);
   const utrFileRef = useRef<HTMLInputElement>(null);
@@ -347,7 +373,14 @@ export default function PayoutsPage() {
         setUtrUploadErr(json.error ?? `HTTP ${res.status}`);
         return;
       }
-      setUtrUploadResult({ paidCount: json.data.paidCount, failedCount: json.data.failedCount });
+      setUtrUploadResult({
+        paidCount: json.data.paidCount,
+        failedCount: json.data.failedCount,
+        // Older API builds omit `skipped` — treat as none.
+        skipped: Array.isArray(json.data.skipped) ? json.data.skipped : [],
+        // Older API builds omit `blockedOrders` — treat as none.
+        blockedOrders: Array.isArray(json.data.blockedOrders) ? json.data.blockedOrders : [],
+      });
       // Reload to reflect updated transaction statuses.
       load();
     } catch (err) {
@@ -696,6 +729,50 @@ export default function PayoutsPage() {
                 <div className="bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-xs text-green-700 flex items-start gap-2">
                   <CheckCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                   UTR applied: {utrUploadResult.paidCount} paid, {utrUploadResult.failedCount} failed.
+                </div>
+              )}
+              {/* Rows NOT applied because an overlapping upload already updated that payout.
+                  Listed per row (sheet row number + reason) like row errors, so a mixed result
+                  can't read as "all applied". */}
+              {utrUploadResult && (utrUploadResult.skipped.length > 0 || utrUploadResult.blockedOrders.length > 0) && (
+                <div
+                  role="status"
+                  data-testid="utr-skipped"
+                  className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800 flex items-start gap-2"
+                >
+                  <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                  <div>
+                    {utrUploadResult.skipped.length > 0 && (
+                      <>
+                        <p className="font-semibold">
+                          {utrUploadResult.skipped.length} row{utrUploadResult.skipped.length === 1 ? '' : 's'} not applied
+                        </p>
+                        <ul className="mt-1 space-y-0.5">
+                          {utrUploadResult.skipped.map((s) => (
+                            <li key={`${s.rowNum}-${s.txnId}`}>
+                              Row {s.rowNum} <span className="font-mono text-amber-700">({s.txnId})</span>: {s.reason}
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                    {/* Payout marked FAILED, but the ORDER holds a voucher code → not refunded,
+                        order left unchanged for ops (issued-voucher refund block). */}
+                    {utrUploadResult.blockedOrders.length > 0 && (
+                      <div data-testid="utr-blocked-orders" className={utrUploadResult.skipped.length > 0 ? 'mt-2' : ''}>
+                        <p className="font-semibold">
+                          {utrUploadResult.blockedOrders.length} order{utrUploadResult.blockedOrders.length === 1 ? '' : 's'} not refunded (voucher code on the order)
+                        </p>
+                        <ul className="mt-1 space-y-0.5">
+                          {utrUploadResult.blockedOrders.map((b) => (
+                            <li key={`${b.rowNum}-${b.orderId}`}>
+                              Row {b.rowNum} <span className="font-mono text-amber-700">({b.orderNumber})</span>: {b.reason}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
               {utrDownloadErr && (

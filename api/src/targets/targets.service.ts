@@ -23,6 +23,14 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { randomUUID } from 'node:crypto';
+import {
+  SALES_IMPORT_BATCH_STATUS,
+  achievementHeaderLabels,
+  importerOwnedKpiCodes,
+  lockSalesMonth,
+  ownedSubsetSql,
+} from '../common/sales-kpi-ownership';
 import {
   ListKpisQueryDto,
   UpsertKpiDefDto,
@@ -44,6 +52,7 @@ import {
   KpiDefLike,
   OutletLike,
 } from './targets.helpers';
+import { SQL_NOW_UTC } from '../sales-import/sql-time';
 
 // ── Deoleo default KPI seeds (ported from platform/src/lib/platform/tenant-kpi-config.ts) ──
 
@@ -121,6 +130,20 @@ export class TargetsService {
   async upsertKpi(user: JwtPayload, dto: UpsertKpiDefDto) {
     const { code, label, unit, isPrimary, hasNameOverride, nameOverrideLabel, order, rollup, enabled } =
       dto;
+    // E1 — outletType: undefined = leave as-is (create → null); null/'' = shared (all types);
+    // a code must be one of the tenant's ENABLED outlet types (stored as the canonical code). An UPDATE
+    // that re-sends the row's CURRENT value is a no-op and is NOT re-validated (so editing e.g. a label
+    // never fails just because that outlet type was disabled after the KPI was tagged).
+    let outletTypeInput = dto.outletType;
+    if (outletTypeInput !== undefined) {
+      const current = await this.prisma.kpiDef.findFirst({
+        where: { clientId: user.clientId, code },
+        select: { outletType: true },
+      });
+      const norm = (v: string | null | undefined) => ((v ?? '').trim() === '' ? null : (v as string).trim());
+      if (current && norm(current.outletType) === norm(outletTypeInput)) outletTypeInput = undefined;
+    }
+    const outletType = await this.resolveKpiOutletType(user.clientId, outletTypeInput);
 
     // Invariant: at most ONE primary KpiDef per tenant. The upsert is keyed by
     // (clientId, code), so when this write makes a KPI primary we first demote
@@ -152,6 +175,7 @@ export class TargetsService {
             order: order ?? 0,
             rollup: rollup ?? 'SUM',
             enabled: enabled ?? true,
+            outletType: outletType ?? null,
           },
           update: {
             label,
@@ -162,6 +186,7 @@ export class TargetsService {
             ...(order !== undefined ? { order } : {}),
             ...(rollup !== undefined ? { rollup } : {}),
             ...(enabled !== undefined ? { enabled } : {}),
+            ...(outletType !== undefined ? { outletType } : {}),
           },
         });
       });
@@ -176,6 +201,36 @@ export class TargetsService {
       }
       throw error;
     }
+  }
+
+  /**
+   * E1 — resolve a KPI's outletType write. `undefined` → undefined (no change); null / blank →
+   * null (SHARED, every outlet type — the value every existing KPI has); otherwise the value must
+   * match (case-insensitively) one of the tenant's ENABLED, active outlet type codes and the
+   * canonical code is returned, because consumers (kpisForOutletType) compare it with `===`
+   * against Outlet.outletType.code. Anything else is a 400.
+   */
+  private async resolveKpiOutletType(
+    clientId: string,
+    raw: string | null | undefined,
+  ): Promise<string | null | undefined> {
+    if (raw === undefined) return undefined;
+    const wanted = (raw ?? '').trim();
+    if (wanted === '') return null;
+    const rows = await this.prisma.outletTypeClientConfig.findMany({
+      where: { clientId, isEnabled: true, outletType: { isActive: true } },
+      select: { outletType: { select: { code: true } } },
+    });
+    const codes = rows.map((r) => r.outletType.code);
+    const match = codes.find((c) => c.toUpperCase() === wanted.toUpperCase());
+    if (!match) {
+      throw new BadRequestException(
+        `outletType "${wanted}" is not an enabled outlet type for this tenant` +
+          (codes.length ? ` (enabled: ${codes.join(', ')}).` : ' (no outlet types are enabled).') +
+          ' Leave it empty for a KPI that applies to all outlet types.',
+      );
+    }
+    return match;
   }
 
   // ─── KpiDef: set primary (MOVES the single primary) ──────────────────────────
@@ -651,7 +706,7 @@ export class TargetsService {
     }
 
     // Enabled KPIs for the tenant — same query as the target template path.
-    const kpiRows = await this.prisma.kpiDef.findMany({
+    let kpiRows = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId, enabled: true },
       orderBy: [{ order: 'asc' }, { code: 'asc' }],
     });
@@ -660,6 +715,18 @@ export class TargetsService {
       throw new BadRequestException(
         'No enabled KPIs found for this tenant. Seed KPIs first via POST /v1/admin/kpis/seed-defaults.',
       );
+    }
+
+    // Sales Import source ownership (§7.4): importer-owned KPIs get no column in the manual template.
+    // A tenant with no SalesKpiDefinition (Deoleo, every tenant today) → [] → this block never runs.
+    const owned = await importerOwnedKpiCodes(this.prisma, user.clientId);
+    if (owned.length > 0) {
+      kpiRows = kpiRows.filter((k) => !owned.includes(k.code));
+      if (kpiRows.length === 0) {
+        throw new BadRequestException(
+          'Every enabled KPI is fed by Sales Import, so there is nothing to upload manually.',
+        );
+      }
     }
 
     // All non-deleted outlets — identical query to getTemplateBuffer (no mocks).
@@ -750,9 +817,28 @@ export class TargetsService {
       enabled: k.enabled,
     }));
 
+    // Sales Import source ownership (§7.4). Importer-owned KPI columns are NOT accepted here: they are
+    // dropped from the parse (unknown labels are already skipped by the parser) and reported back.
+    // A tenant with no SalesKpiDefinition (Deoleo, every tenant today) → [] → the existing path, unchanged.
+    const owned = await importerOwnedKpiCodes(this.prisma, user.clientId);
+    let parseKpis = kpis;
+    let skippedImporterOwnedKpis: string[] | undefined;
+    if (owned.length > 0) {
+      parseKpis = kpis.filter((k) => !owned.includes(k.code));
+      if (parseKpis.length === 0) {
+        throw new BadRequestException(
+          'Every enabled KPI is fed by Sales Import, so there is nothing to upload manually.',
+        );
+      }
+      const headerLabels = achievementHeaderLabels(file.buffer);
+      skippedImporterOwnedKpis = kpis
+        .filter((k) => owned.includes(k.code) && headerLabels.has(k.label.toLowerCase().trim()))
+        .map((k) => k.code);
+    }
+
     let parseResult: ReturnType<typeof parseTargetUploadBuffer>;
     try {
-      parseResult = parseTargetUploadBuffer(file.buffer, kpis, knownOutletCodes);
+      parseResult = parseTargetUploadBuffer(file.buffer, parseKpis, knownOutletCodes);
     } catch {
       throw new BadRequestException('Invalid or corrupted xlsx file');
     }
@@ -801,6 +887,25 @@ export class TargetsService {
 
         const meta = outletMeta.get(outletCode);
 
+        // Sales Import ownership: the row's importer-owned keys SURVIVE the manual rewrite. The carry-over
+        // is done inside the statement (no read-then-write window vs a concurrent apply). Never runs for a
+        // tenant without owned KPIs.
+        if (owned.length > 0) {
+          salesOps.push(
+            this.prisma.$executeRaw(Prisma.sql`
+              INSERT INTO "outlet_sales_records"
+                ("id","clientId","outletCode","outletName","month","kpiValues","batchId","createdAt","updatedAt")
+              VALUES (${randomUUID()}, ${user.clientId}, ${outletCode}, ${meta?.name ?? outletCode}, ${month},
+                      ${JSON.stringify(kpiMap)}::jsonb, ${batch.id}, ${SQL_NOW_UTC}, ${SQL_NOW_UTC})
+              ON CONFLICT ("clientId","outletCode","month") DO UPDATE SET
+                "kpiValues"  = ${ownedSubsetSql(Prisma.sql`"outlet_sales_records"."kpiValues"`, owned)} || EXCLUDED."kpiValues",
+                "outletName" = EXCLUDED."outletName",
+                "batchId"    = EXCLUDED."batchId",
+                "updatedAt"  = ${SQL_NOW_UTC}`),
+          );
+          continue;
+        }
+
         salesOps.push(
           this.prisma.outletSalesRecord.upsert({
             where: {
@@ -837,6 +942,8 @@ export class TargetsService {
       acceptedCount,
       rejectedCount,
       rows:          parseResult.rows,
+      // Additive, ONLY for tenants with importer-owned KPIs (absent otherwise → Deoleo response unchanged).
+      ...(skippedImporterOwnedKpis !== undefined ? { skippedImporterOwnedKpis } : {}),
     };
   }
 
@@ -865,8 +972,66 @@ export class TargetsService {
     });
     if (!batch) throw new NotFoundException('Upload batch not found');
 
+    // Sales Import (§7.4): an importer batch is managed by Sales Import only (no tenant without the
+    // feature can have one — Deoleo never does).
+    if (batch.status === SALES_IMPORT_BATCH_STATUS) {
+      throw new ConflictException('This batch was written by Sales Import; manage it there.');
+    }
+
+    // Owned-tenant branch: deleting a MANUAL batch must not take importer-owned values with it (the
+    // schema cascade would delete whole rows). Never runs for a tenant without owned KPIs.
+    const owned = await importerOwnedKpiCodes(this.prisma, user.clientId);
+    if (owned.length > 0) {
+      // L4: report the rows ACTUALLY removed (rows that kept importer-owned values were re-pointed, not deleted).
+      const removedRecords = await this.deleteManualBatchKeepingOwned(user.clientId, id, owned);
+      return { deleted: true, id, removedRecords };
+    }
+
     await this.prisma.salesUploadBatch.delete({ where: { id } });
     return { deleted: true, id, removedRecords: batch.acceptedCount };
+  }
+
+  /**
+   * One transaction, per month of the batch's rows (advisory-locked with the same key as a Sales Import apply /
+   * close, in sorted order): rows of this batch that carry an importer-owned key keep ONLY their owned keys and
+   * are re-pointed to that month's latest SALES_IMPORT batch; then the batch is deleted and the cascade removes
+   * the rows that held only manual data. A month with no SALES_IMPORT batch has never been applied, so its
+   * owned-key values are themselves manual data (written before the KPI became importer-owned) → they go too.
+   */
+  private async deleteManualBatchKeepingOwned(clientId: string, batchId: string, owned: string[]): Promise<number> {
+    return this.prisma.$transaction(
+      async (tx) => {
+        const monthRows = await tx.outletSalesRecord.findMany({
+          where: { clientId, batchId },
+          select: { month: true },
+          distinct: ['month'],
+        });
+        const months = monthRows.map((r) => r.month).sort();
+        for (const month of months) {
+          await lockSalesMonth(tx, clientId, month);
+        }
+        for (const month of months) {
+          const importerBatch = await tx.salesUploadBatch.findFirst({
+            where: { clientId, month, status: SALES_IMPORT_BATCH_STATUS },
+            orderBy: { createdAt: 'desc' },
+            select: { id: true },
+          });
+          if (!importerBatch) continue;
+          await tx.$executeRaw(Prisma.sql`
+            UPDATE "outlet_sales_records"
+               SET "kpiValues" = ${ownedSubsetSql(Prisma.sql`"kpiValues"`, owned)},
+                   "batchId"   = ${importerBatch.id},
+                   "updatedAt" = ${SQL_NOW_UTC}
+             WHERE "clientId" = ${clientId} AND "batchId" = ${batchId} AND "month" = ${month}
+               AND "kpiValues" ?| ${owned}::text[]`);
+        }
+        // What the cascade below removes = the rows still pointing at this batch after the re-pointing above.
+        const removed = await tx.outletSalesRecord.count({ where: { clientId, batchId } });
+        await tx.salesUploadBatch.delete({ where: { id: batchId } });
+        return removed;
+      },
+      { timeout: 60_000, maxWait: 10_000 },
+    );
   }
 
   // ─── List achievement rows ──────────────────────────────────────────────────

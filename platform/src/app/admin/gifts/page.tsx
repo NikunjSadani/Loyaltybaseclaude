@@ -12,9 +12,15 @@
  *                 PATCH/DELETE /api/admin/rewards/categories/:id
  *     Catalog:    GET/POST /api/admin/rewards/catalog,
  *                 PATCH/DELETE /api/admin/rewards/catalog/:id
- *     Orders:     GET /api/rewards/orders (admin sees all tenant orders),
- *                 POST /api/rewards/orders/:id/transition (guarded edge-map)
- *     Bulk fulfilment:
+ *     Orders:     GET /api/rewards/orders — a Gifsy operator sees the tenant's orders; a
+ *                 CLIENT_ADMIN a VIEW-ONLY list of its own tenant's orders (voucher codes
+ *                 MASKED server-side); other roles (e.g. MIS_USER) get no order list here.
+ *                 Server-side status filter, keyset "Load more" via nextCursor, count =
+ *                 server pagination.total.
+ *                 POST /api/rewards/orders/:id/transition (guarded edge-map; Gifsy only)
+ *                 POST /api/rewards/orders/:id/voucher-cancelled ("Voucher cancelled with
+ *                 vendor" — GIFSY_ADMIN only; clears an issued code so a refund is allowed)
+ *     Bulk fulfilment (Gifsy only):
  *                 GET  /api/admin/rewards/fulfilment/template  (xlsx blob)
  *                 POST /api/admin/rewards/fulfilment/upload    (multipart "file")
  *
@@ -37,9 +43,14 @@ import { authHeader } from '@/lib/api-client';
 import { GiftImageUpload } from '@/components/GiftImageUpload';
 import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings';
 import { useAdminSession } from '@/lib/admin-session';
-import { redemptionModeLabel, canonicalRedemptionMode } from '@/lib/redemption-mode';
+import { redemptionModeLabel, canonicalRedemptionMode, CASH_REDEMPTION_MODES } from '@/lib/redemption-mode';
+import { usePermissions } from '@/lib/use-permissions';
 import { derivePointsCost, parseRupeesToPaise } from '@/lib/gift-catalogue';
+import { nextStatusOptions, hasIssuedVoucher, REFUND_TARGETS, HUBBLE_NEVER_PLACED_REASONS } from '@/lib/redemption-order-transitions';
 import type { GifsySettings } from '@/types';
+import { pointsForAmount, type HubbleProductLookup } from '@/lib/hubble-product';
+import { WHOLE_RUPEE_INVALID_MESSAGE, useWholeRupeeField } from '@/lib/whole-rupee-input';
+import { MaskedPin } from '@/components/operator/masked-pin';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
 
@@ -77,7 +88,11 @@ interface CatalogItem {
   termsAndConditions?: string | null;
   sortOrder?: number | null;
   // Item config blob. Carries the Hubble auto-issuance productId (GIFT_CARD only).
-  metadata?: { hubbleProductId?: string | null } | null;
+  metadata?: {
+    hubbleProductId?: string | null;
+    /** Hubble "choose from amounts": the ₹ amounts members pick from (whole rupees). */
+    hubbleDenominations?: number[] | null;
+  } | null;
 }
 
 interface Pagination { page: number; limit: number; total: number; pages: number }
@@ -91,6 +106,18 @@ interface OrderItem {
   redemptionMode?: PayoutMode | string | null;
   totalPointsCost: number;
   voucherCode?: string | null;
+  /** Card PIN (card number + PIN gift cards). Only fulfilling operators receive it — the server
+   *  nulls it (with the code) for CLIENT_ADMIN / read-only staff, who see "Voucher issued" only. */
+  voucherPin?: string | null;
+  /** Server (fulfilling operator only): a set-once PIN / provider may still be added to the stored code. */
+  voucherFillable?: boolean;
+  /** True when the server withheld the code (voucherCode null) — CLIENT_ADMIN / read-only staff. */
+  voucherCodeMasked?: boolean;
+  /** Server indicator that a code is issued, for viewers who don't receive the code itself. */
+  voucherIssued?: boolean;
+  /** Operator view: the order was sent to Hubble and needs ops (retry or manual fulfilment). */
+  hubbleNeedsReconcile?: boolean;
+  hubbleReconcileReason?: string | null;
   voucherProvider?: string | null;
   trackingNumber?: string | null;
   trackingUrl?: string | null;
@@ -111,7 +138,7 @@ interface FulfilmentUploadResult {
 // The two cash modes (UPI / BANK_TRANSFER) are unified into a single "Cash Payout"
 // option. The canonical STORED value is BANK_TRANSFER; existing stored-UPI items are
 // normalised to this option when editing (see ItemModal) and still behave as cash
-// (CASH_MODES / supportsFreeAmount recognise BOTH values). No enum/data migration —
+// (CASH_REDEMPTION_MODES / supportsFreeAmount recognise BOTH values). No enum/data migration —
 // the real payout rail follows the partner's on-file beneficiary (backend).
 const REDEMPTION_MODES: { value: PayoutMode; label: string }[] = [
   { value: 'GIFT_CARD',      label: 'Gift Card / Voucher' },
@@ -141,21 +168,11 @@ const ORDER_STATUS_BADGE: Record<string, string> = {
   REVERSED:   'bg-gray-50 text-gray-500 border-gray-200',
 };
 
-/** Guarded next-status options keyed by current status (mirrors the backend edge-map). */
-const NEXT_STATUS: Record<string, string[]> = {
-  PENDING:    ['CONFIRMED', 'CANCELLED'],
-  CONFIRMED:  ['PROCESSING', 'CANCELLED'],
-  PROCESSING: ['DISPATCHED', 'FAILED', 'CANCELLED'],
-  DISPATCHED: ['DELIVERED', 'RETURNED'],
-};
-
 const VOUCHER_LIKE = new Set<PayoutMode | string>(['GIFT_CARD']);
 
-/** Cash payout modes (points → INR) — these also support a free-amount minimum. */
-const CASH_MODES = new Set<PayoutMode | string>(['UPI', 'BANK_TRANSFER']);
-/** Modes that support the FIXED / FREE_AMOUNT toggle + min/max config. */
+/** Modes that support the FIXED / FREE_AMOUNT toggle + min/max config (gift cards + cash payouts). */
 function supportsFreeAmount(mode: PayoutMode | string): boolean {
-  return mode === 'GIFT_CARD' || CASH_MODES.has(mode);
+  return mode === 'GIFT_CARD' || CASH_REDEMPTION_MODES.has(mode);
 }
 
 function fmtPts(n: number) { return n.toLocaleString('en-IN'); }
@@ -477,6 +494,8 @@ interface ItemFormState {
   status: CatalogStatus;
   /** Hubble Money productId — enables auto-issuance for a GIFT_CARD item (optional). */
   hubbleProductId: string;
+  /** Hubble "choose from amounts" — the ₹ amounts members may pick (ascending). [] = not used. */
+  hubbleDenominations: number[];
 }
 
 function blankItemForm(categoryId: string): ItemFormState {
@@ -489,8 +508,17 @@ function blankItemForm(categoryId: string): ItemFormState {
     stockTracked: false, stockQuantity: 0,
     termsAndConditions: '', status: 'ACTIVE',
     hubbleProductId: '',
+    hubbleDenominations: [],
   };
 }
+
+type HubbleLoadState =
+  | { status: 'idle' }
+  | { status: 'loading'; forId: string }
+  | { status: 'ok'; forId: string; data: HubbleProductLookup }
+  | { status: 'error'; forId: string; error: string };
+
+const fmtInr = (n: number) => `₹${n.toLocaleString('en-IN')}`;
 
 function ItemModal({
   editing, categories, conversionRate, onSave, onClose, saving,
@@ -532,6 +560,9 @@ function ItemModal({
       termsAndConditions: editing.termsAndConditions ?? '',
       status: editing.status,
       hubbleProductId: editing.metadata?.hubbleProductId ?? '',
+      hubbleDenominations: Array.isArray(editing.metadata?.hubbleDenominations)
+        ? editing.metadata!.hubbleDenominations!.filter((n) => Number.isInteger(n) && n > 0)
+        : [],
     };
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -542,10 +573,120 @@ function ItemModal({
   const set = <K extends keyof ItemFormState>(k: K, v: ItemFormState[K]) =>
     setForm((f) => ({ ...f, [k]: v }));
 
-  const isCashMode = CASH_MODES.has(form.redemptionMode);
+  // ── Hubble "Load from Hubble" (brand type + amounts) ──────────────────────────────
+  const [hubbleLoad, setHubbleLoad] = useState<HubbleLoadState>({ status: 'idle' });
+  // "750,5" / "1,2" / a pasted decimal → "Check the amount" (never shrunk to a guess) — the shared
+  // rule: shown only after a commit (blur / Enter / paste / an "Add amount" tap) that found the text
+  // invalid, cleared on the next edit; the button is not disabled for it.
+  const customAmountField = useWholeRupeeField();
+  const customAmount = customAmountField.value;
+  const customAmountInvalidShown = customAmountField.showInvalid;
+  const hubbleId = form.hubbleProductId.trim();
+  // A result is only shown for the id it was loaded for (editing the id makes it stale).
+  const hubbleResult = hubbleLoad.status !== 'idle' && hubbleLoad.forId === hubbleId ? hubbleLoad : null;
+  const hubbleData = hubbleResult?.status === 'ok' ? hubbleResult.data : null;
+
+  const loadFromHubble = useCallback(async (productId: string) => {
+    if (!productId) return;
+    setHubbleLoad({ status: 'loading', forId: productId });
+    try {
+      const data = await apiJson<HubbleProductLookup>(
+        `/api/admin/rewards/hubble-products/${encodeURIComponent(productId)}`,
+      );
+      const p = data?.product;
+      if (
+        !p || (p.denominationType !== 'FIXED' && p.denominationType !== 'FLEXIBLE') ||
+        !Array.isArray(p.denominations) || typeof data.conversionRate !== 'number'
+      ) {
+        throw new Error('Hubble returned an unexpected response for this product.');
+      }
+      setHubbleLoad({ status: 'ok', forId: productId, data });
+    } catch (e) {
+      setHubbleLoad({ status: 'error', forId: productId, error: (e as Error).message || 'Could not load from Hubble' });
+    }
+  }, []);
+
+  // Editing an item that already has a Hubble product → load it once so the admin sees the
+  // brand's real amounts next to the saved choice (after mount; never during render).
+  const initialHubbleId = useRef(editing?.redemptionMode === 'GIFT_CARD' ? (editing.metadata?.hubbleProductId ?? '').trim() : '');
+  useEffect(() => {
+    if (initialHubbleId.current) void loadFromHubble(initialHubbleId.current);
+  }, [loadFromHubble]);
+
+  const toggleDenomination = (amt: number) =>
+    setForm((f) => {
+      const has = f.hubbleDenominations.includes(amt);
+      const next = has ? f.hubbleDenominations.filter((d) => d !== amt) : [...f.hubbleDenominations, amt];
+      return { ...f, hubbleDenominations: next.sort((a, b) => a - b) };
+    });
+
+  const addCustomAmount = () => {
+    if (!customAmountField.checkBeforeSubmit()) return; // "Check the amount" — not added
+    const amt = customAmountField.amount ?? 0;
+    const p = hubbleData?.product;
+    let err = '';
+    if (!Number.isInteger(amt) || amt <= 0) err = 'Enter a whole-rupee amount';
+    else if (p?.minValue != null && amt < p.minValue) err = `Hubble's minimum for this brand is ${fmtInr(p.minValue)}`;
+    else if (p?.maxValue != null && amt > p.maxValue) err = `Hubble's maximum for this brand is ${fmtInr(p.maxValue)}`;
+    else if (hubbleData && amt < hubbleData.minVoucherFreeAmount) err = `Below this program's minimum voucher amount (${fmtInr(hubbleData.minVoucherFreeAmount)})`;
+    if (err) { setErrors((e) => ({ ...e, hubbleDenominations: err })); return; }
+    setErrors(({ hubbleDenominations: _drop, ...rest }) => rest);
+    setForm((f) => (f.hubbleDenominations.includes(amt)
+      ? f
+      : { ...f, hubbleDenominations: [...f.hubbleDenominations, amt].sort((a, b) => a - b) }));
+    customAmountField.reset();
+  };
+
+  /** Manual "add an amount" row (FLEXIBLE brand, or a FIXED brand whose list Hubble didn't return). */
+  const customAmountRow = (
+    <div className="space-y-1">
+      <div className="flex gap-2 items-center">
+        <input
+          value={customAmount}
+          {...customAmountField.inputProps}
+          placeholder="e.g. 500"
+          aria-label="Amount to offer"
+          aria-invalid={customAmountInvalidShown ? true : undefined}
+          aria-describedby={customAmountInvalidShown ? 'custom-amount-error' : undefined}
+          className={`w-28 text-sm border rounded-lg px-2 py-1.5 bg-white ${customAmountInvalidShown ? 'border-red-300' : 'border-gray-200'}`}
+        />
+        <button
+          type="button"
+          onClick={addCustomAmount}
+          disabled={!customAmount}
+          className="text-xs font-medium px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50"
+        >
+          Add amount
+        </button>
+      </div>
+      {customAmountInvalidShown && (
+        <p id="custom-amount-error" role="alert" className="text-xs text-red-600">{WHOLE_RUPEE_INVALID_MESSAGE}</p>
+      )}
+    </div>
+  );
+
+  /** FLEXIBLE brand → use Hubble's limits as the free range (in points at the live rate). */
+  const applyHubbleRange = () => {
+    if (!hubbleData) return;
+    const { product, conversionRate: rate } = hubbleData;
+    const minInr = Math.max(product.minValue ?? 1, hubbleData.minVoucherFreeAmount || 0);
+    setForm((f) => ({
+      ...f,
+      voucherMode: 'FREE_AMOUNT',
+      hubbleDenominations: [],
+      minRedemptionPoints: String(Math.ceil(minInr * rate)),
+      maxRedemptionPoints: product.maxValue != null ? String(Math.floor(product.maxValue * rate)) : f.maxRedemptionPoints,
+    }));
+  };
+
+  const isCashMode = CASH_REDEMPTION_MODES.has(form.redemptionMode);
   // Free-amount config is available for gift cards and cash modes (UPI / BANK_TRANSFER).
   const canFreeAmount = supportsFreeAmount(form.redemptionMode);
-  const isFreeAmount = canFreeAmount && form.voucherMode === 'FREE_AMOUNT';
+  // Hubble "choose from amounts": a GIFT_CARD with a productId and at least one chosen amount.
+  // The backend stores it as a variable-amount item whose points band derives from the list.
+  const usesAmountList =
+    form.redemptionMode === 'GIFT_CARD' && !!hubbleId && form.hubbleDenominations.length > 0;
+  const isFreeAmount = canFreeAmount && form.voucherMode === 'FREE_AMOUNT' && !usesAmountList;
 
   // PURE DERIVE: for a FIXED item the points cost is DERIVED server-side from the ₹ selling
   // value × the tenant conversion rate. Show a read-only preview of that derivation when the
@@ -562,7 +703,17 @@ function ItemModal({
     if (!form.categoryId) e.categoryId = 'Pick a category';
     if (!form.code.trim()) e.code = 'Code is required';
     if (!form.name.trim()) e.name = 'Name is required';
-    if (isFreeAmount) {
+    if (usesAmountList) {
+      // Amounts come from the Hubble list (the server re-validates against the live brand);
+      // no points band or selling value is entered for this kind of item.
+    } else if (
+      isFreeAmount &&
+      form.redemptionMode === 'GIFT_CARD' &&
+      hubbleData?.product.denominationType === 'FIXED'
+    ) {
+      // A typed range can't be honoured by a fixed-denomination brand (₹277 would be refused).
+      e.hubbleDenominations = `${hubbleData.product.name} only issues fixed amounts — choose the amounts to offer instead of a free range.`;
+    } else if (isFreeAmount) {
       const min = parseInt(form.minRedemptionPoints);
       const max = parseInt(form.maxRedemptionPoints);
       if (!min || min < 1) e.minRedemptionPoints = 'Min must be ≥ 1 for a free-amount item';
@@ -609,16 +760,23 @@ function ItemModal({
     // (even empty, to CLEAR) whenever editing a gift card; a blank disables auto-issuance.
     if (form.redemptionMode === 'GIFT_CARD') {
       payload.hubbleProductId = form.hubbleProductId.trim();
+      // Hubble amounts list: send it when used; send [] to CLEAR a previously saved list;
+      // otherwise omit (a non-Hubble item's payload is unchanged).
+      if (usesAmountList) payload.hubbleDenominations = form.hubbleDenominations;
+      else if ((editing?.metadata?.hubbleDenominations?.length ?? 0) > 0) payload.hubbleDenominations = [];
     }
     if (form.mrpRupees.trim()) {
       payload.mrpPaise = Math.round(parseFloat(form.mrpRupees) * 100);
     }
     // Optional ₹ selling value (cost basis). Blank = leave unset. The backend bounds it
     // (sellingValuePaise <= mrpPaise) and uses it for the rate-independent slash + 194R freeze.
-    if (form.sellingValueRupees.trim()) {
+    if (form.sellingValueRupees.trim() && !usesAmountList) {
       payload.sellingValuePaise = Math.round(parseFloat(form.sellingValueRupees) * 100);
     }
-    if (isFreeAmount) {
+    if (usesAmountList) {
+      // The backend derives the points band from the chosen amounts × the tenant rate —
+      // no min/max is sent (it would be overridden anyway).
+    } else if (isFreeAmount) {
       // Pure derive: pointsCost is NOT sent (the backend keeps it 0 for a banded item);
       // the admin sets the points band. forbidNonWhitelisted would 400 a stray pointsCost.
       payload.minRedemptionPoints = parseInt(form.minRedemptionPoints);
@@ -743,6 +901,13 @@ function ItemModal({
                   {isCashMode ? 'Cash Payout Configuration' : 'Voucher Configuration'}
                 </p>
               </div>
+              {usesAmountList ? (
+                <p className="text-xs text-amber-900" data-testid="amount-list-note">
+                  Members choose from the Hubble amounts selected below
+                  ({form.hubbleDenominations.map(fmtInr).join(' · ')}). Points = amount × this program&apos;s conversion rate.
+                </p>
+              ) : (
+              <>
               <div className="flex gap-3">
                 {(['FIXED', 'FREE_AMOUNT'] as VoucherMode[]).map((t) => (
                   <button
@@ -766,6 +931,8 @@ function ItemModal({
                   ? 'Fixed points cost paid out as cash.'
                   : 'Fixed face value redeemed for a set points cost.'}
               </p>
+              </>
+              )}
 
               {isFreeAmount && (
                 <div className="grid grid-cols-2 gap-4">
@@ -803,23 +970,144 @@ function ItemModal({
               <label className="text-xs font-medium text-gray-700">
                 Hubble product ID <span className="text-gray-400 font-normal">(auto-issue voucher)</span>
               </label>
-              <input
-                value={form.hubbleProductId}
-                onChange={(e) => set('hubbleProductId', e.target.value)}
-                placeholder="e.g. amazon-pay-product-id (leave blank for manual fulfilment)"
-                className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
-              />
+              <div className="flex gap-2">
+                <input
+                  value={form.hubbleProductId}
+                  onChange={(e) => set('hubbleProductId', e.target.value)}
+                  placeholder="e.g. amazon-pay-product-id (leave blank for manual fulfilment)"
+                  aria-label="Hubble product ID"
+                  className="flex-1 min-w-0 text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+                />
+                <button
+                  type="button"
+                  onClick={() => void loadFromHubble(hubbleId)}
+                  disabled={!hubbleId || hubbleResult?.status === 'loading'}
+                  className="shrink-0 inline-flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-xl border border-gray-200 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${hubbleResult?.status === 'loading' ? 'animate-spin' : ''}`} />
+                  {hubbleResult?.status === 'loading' ? 'Loading…' : 'Load from Hubble'}
+                </button>
+              </div>
               <p className="text-[10px] text-gray-400">
                 Set the Hubble Money productId to auto-issue this voucher on redemption
                 (enabled only for tenants with the Hubble feature on). Blank = manual fulfilment.
+                Use “Load from Hubble” to see the amounts this brand can issue.
               </p>
+
+              {hubbleResult?.status === 'error' && (
+                <p role="alert" className="flex items-start gap-1.5 text-xs text-red-600">
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                  {hubbleResult.error}
+                </p>
+              )}
+
+              {hubbleData && (
+                <div className="mt-2 rounded-xl border border-blue-100 bg-blue-50/60 p-3 space-y-3" data-testid="hubble-product-panel">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-gray-900">{hubbleData.product.name}</p>
+                    <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full bg-white border border-blue-200 text-blue-700">
+                      {hubbleData.product.denominationType === 'FIXED' ? 'Fixed amounts' : 'Flexible amount'}
+                    </span>
+                  </div>
+
+                  {hubbleData.product.denominationType === 'FIXED' ? (
+                    hubbleData.product.denominations.length === 0 ? (
+                      /* Hubble didn't return this FIXED brand's face values — UNKNOWN, not "none":
+                         the admin enters them by hand (whole rupees, ≥ program minimum); Hubble still
+                         validates each order. */
+                      <div className="space-y-2">
+                        <p className="text-xs text-amber-800" data-testid="fixed-list-unknown">
+                          Hubble didn&apos;t return its amounts — enter the amounts Hubble shows for this brand.
+                        </p>
+                        {customAmountRow}
+                      </div>
+                    ) : (
+                      <fieldset className="space-y-1.5">
+                        <legend className="text-xs text-gray-700 mb-1">
+                          This brand only issues these amounts. Tick the ones members can choose:
+                        </legend>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                          {hubbleData.product.denominations.map((amt) => {
+                            const belowFloor = amt < (hubbleData.minVoucherFreeAmount || 0);
+                            const checked = form.hubbleDenominations.includes(amt);
+                            return (
+                              <label
+                                key={amt}
+                                className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 text-xs bg-white ${
+                                  belowFloor ? 'opacity-50 border-gray-100' : checked ? 'border-blue-400' : 'border-gray-200'
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  disabled={belowFloor && !checked}
+                                  onChange={() => toggleDenomination(amt)}
+                                  aria-label={`Offer ${fmtInr(amt)}`}
+                                />
+                                <span className="font-semibold text-gray-900">{fmtInr(amt)}</span>
+                                <span className="text-gray-400 ml-auto">
+                                  {belowFloor ? 'below min' : `${fmtPts(pointsForAmount(amt, hubbleData.conversionRate))} pts`}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                        {(hubbleData.minVoucherFreeAmount || 0) > 0 && (
+                          <p className="text-[10px] text-gray-500">
+                            Amounts below this program&apos;s minimum voucher amount ({fmtInr(hubbleData.minVoucherFreeAmount)}) can&apos;t be offered.
+                          </p>
+                        )}
+                      </fieldset>
+                    )
+                  ) : (
+                    <div className="space-y-2">
+                      <p className="text-xs text-gray-700">
+                        Hubble issues any whole-rupee amount from{' '}
+                        <strong>{hubbleData.product.minValue != null ? fmtInr(hubbleData.product.minValue) : '—'}</strong> to{' '}
+                        <strong>{hubbleData.product.maxValue != null ? fmtInr(hubbleData.product.maxValue) : '—'}</strong>.
+                        Let members type an amount in a range, or offer specific amounts.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={applyHubbleRange}
+                        className="text-xs font-medium px-3 py-1.5 rounded-lg border border-blue-200 bg-white text-blue-700 hover:bg-blue-50"
+                      >
+                        Use Hubble&apos;s range (members type an amount)
+                      </button>
+                      {customAmountRow}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* The chosen amounts (always visible, even before / without a Hubble load). */}
+              {form.hubbleDenominations.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 pt-1" aria-label="Amounts offered">
+                  {form.hubbleDenominations.map((amt) => (
+                    <span key={amt} className="inline-flex items-center gap-1 text-xs bg-white border border-gray-200 rounded-full pl-2 pr-1 py-0.5">
+                      {fmtInr(amt)}
+                      <button
+                        type="button"
+                        onClick={() => toggleDenomination(amt)}
+                        aria-label={`Remove ${fmtInr(amt)}`}
+                        className="p-0.5 rounded-full hover:bg-gray-100 text-gray-400"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              {errors.hubbleDenominations && (
+                <p className="text-xs text-red-500">{errors.hubbleDenominations}</p>
+              )}
             </div>
           )}
 
           {/* Pricing (not shown for free-amount vouchers). Pure derive: the member's points
               cost is DERIVED from the ₹ selling value × the tenant conversion rate — there is
               no manual points input. Selling value is the required price driver. */}
-          {!isFreeAmount && (
+          {!isFreeAmount && !usesAmountList && (
             <div className="space-y-3">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
@@ -1252,42 +1540,187 @@ function CatalogueTab() {
 interface TransitionDraft {
   toStatus: string;
   voucherCode: string;
+  /** Optional card PIN — sent only together with a voucher code. */
+  voucherPin: string;
   voucherProvider: string;
   trackingNumber: string;
   trackingUrl: string;
   notes: string;
 }
 
-function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned: () => void }) {
-  const options = NEXT_STATUS[order.status] ?? [];
-  const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState<TransitionDraft>({
-    toStatus: options[0] ?? '', voucherCode: '', voucherProvider: '',
-    trackingNumber: '', trackingUrl: '', notes: '',
+/** Fields of a transition / voucher-cancel response's order that the queue row displays. */
+type OrderPatch = Pick<OrderItem, 'id'> &
+  Partial<Pick<OrderItem,
+    'status' | 'voucherCode' | 'voucherPin' | 'voucherProvider' | 'trackingNumber' | 'trackingUrl' | 'updatedAt'
+    | 'hubbleNeedsReconcile' | 'hubbleReconcileReason'>>;
+
+/** Human copy for the backend's Hubble reconcile reasons (fallback: the raw code). */
+const HUBBLE_REASON_LABEL: Record<string, string> = {
+  HUBBLE_NOT_CONFIGURED: 'Hubble not configured',
+  HUBBLE_INVALID_AMOUNT: 'Amount not issuable on Hubble',
+  HUBBLE_SUCCESS_NO_CODE: 'Hubble succeeded without a code',
+  HUBBLE_PROCESSING_NOT_FOUND: 'Hubble has no record of this order',
+  HUBBLE_INDETERMINATE: 'Hubble state unknown',
+  HUBBLE_UNEXPECTED: 'Unexpected Hubble error',
+  HUBBLE_SUCCESS_MANUAL_CODE_PRESENT: 'Hubble issued a voucher on top of a manual code',
+  HUBBLE_FAILED_VOUCHER_PRESENT: 'Hubble failed but a code is on the order',
+  HUBBLE_PROCESSING_AFTER_MANUAL: 'Hubble processing after a manual takeover',
+  HUBBLE_PROCESSING_CLAIM_LOST: 'Order changed while Hubble was processing',
+};
+const hubbleReasonLabel = (r?: string | null) =>
+  !r ? 'Needs review' : HUBBLE_REASON_LABEL[r] ?? (r.startsWith('HUBBLE_UNKNOWN_STATUS') ? 'Unknown Hubble status' : r);
+
+const FORWARD_VOUCHER_TARGETS = new Set(['PROCESSING', 'DISPATCHED', 'DELIVERED']);
+
+/** A fresh draft for `toStatus` — every target-specific field starts EMPTY, so a value typed for
+ *  one target can never ride along on another (e.g. a code typed, then switched to CANCELLED). */
+function blankDraft(toStatus: string, notes = ''): TransitionDraft {
+  return { toStatus, voucherCode: '', voucherPin: '', voucherProvider: '', trackingNumber: '', trackingUrl: '', notes };
+}
+
+function OrderRow({
+  order, onTransitioned, canManage, canCancelVoucher,
+}: {
+  order: OrderItem;
+  onTransitioned: (updated: OrderPatch | null) => void;
+  /** Gifsy operator → Advance controls; a tenant admin's list is VIEW-ONLY (no action column). */
+  canManage: boolean;
+  /** GIFSY_ADMIN only — may record "Voucher cancelled with vendor". */
+  canCancelVoucher: boolean;
+}) {
+  const voucherIssued = hasIssuedVoucher(order.voucherCode) || order.voucherIssued === true;
+  const isHubble = (order.voucherProvider ?? '').trim().toLowerCase() === 'hubble';
+  const options = nextStatusOptions({
+    status: order.status,
+    redemptionMode: order.redemptionMode ?? order.reward?.redemptionMode ?? null,
+    voucherProvider: order.voucherProvider ?? null,
+    voucherCode: order.voucherCode ?? null,
+    voucherIssued: order.voucherIssued,
+    hubbleNeedsReconcile: order.hubbleNeedsReconcile,
+    hubbleReconcileReason: order.hubbleReconcileReason,
   });
+  // Refund edges the backend would allow for this status, hidden ONLY because a code is issued —
+  // the "Voucher cancelled with vendor" action is what unlocks them.
+  const refundBlockedByVoucher =
+    voucherIssued && !isHubble &&
+    nextStatusOptions({
+      status: order.status,
+      redemptionMode: order.redemptionMode ?? order.reward?.redemptionMode ?? null,
+      voucherProvider: order.voucherProvider ?? null,
+      voucherCode: null,
+    }).some((s) => REFUND_TARGETS.has(s));
+
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState<TransitionDraft>(() => blankDraft(options[0] ?? ''));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  // "Voucher cancelled with vendor" — inline reason prompt.
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelReason, setCancelReason] = useState('');
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [cancelErr, setCancelErr] = useState('');
+  // Hubble ops exits (GIFSY_ADMIN): "Retry with Hubble" + "Fulfil manually" (reasoned override).
+  const needsReconcile = order.hubbleNeedsReconcile === true;
+  // "Retry with Hubble" only re-reads an EXISTING Hubble order — pointless when none was ever placed
+  // (not configured / invalid amount); those keep refund + "Fulfil manually".
+  const canRetryHubble = needsReconcile && !HUBBLE_NEVER_PLACED_REASONS.has(order.hubbleReconcileReason ?? '');
+  const [retryBusy, setRetryBusy] = useState(false);
+  const [retryMsg, setRetryMsg] = useState('');
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualCode, setManualCode] = useState('');
+  const [manualProvider, setManualProvider] = useState('');
+  const [manualPin, setManualPin] = useState('');
+  const [manualReason, setManualReason] = useState('');
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualErr, setManualErr] = useState('');
+
+  const retryWithHubble = async () => {
+    setRetryBusy(true); setRetryMsg('');
+    try {
+      const res = await apiJson<{ outcome?: string } | null>(`/api/rewards/orders/${order.id}/hubble-reconcile`, { method: 'POST' });
+      setRetryMsg(`Hubble: ${res?.outcome ?? 'done'}`);
+      onTransitioned(null); // the outcome may move status / code → re-fetch the window
+    } catch (e) {
+      setRetryMsg(e instanceof Error ? e.message : 'Retry failed');
+    } finally {
+      setRetryBusy(false);
+    }
+  };
+
+  const fulfilManually = async () => {
+    const code = manualCode.trim();
+    const reason = manualReason.trim();
+    if (!code || !reason) { setManualErr('A voucher code and a reason are required.'); return; }
+    setManualBusy(true); setManualErr('');
+    try {
+      const body: Record<string, unknown> = { voucherCode: code, manualOverride: true, overrideReason: reason };
+      if (manualProvider.trim()) body.voucherProvider = manualProvider.trim();
+      if (manualPin.trim()) body.voucherPin = manualPin.trim();
+      const res = await apiJson<{ order?: OrderPatch } | null>(`/api/rewards/orders/${order.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      });
+      setManualOpen(false);
+      onTransitioned({
+        id: order.id,
+        voucherCode: res?.order?.voucherCode ?? code,
+        voucherPin: res?.order?.voucherPin ?? (manualPin.trim() || null),
+        voucherProvider: res?.order?.voucherProvider ?? (manualProvider.trim() || 'Manual'),
+        hubbleNeedsReconcile: false,
+        hubbleReconcileReason: null,
+      });
+    } catch (e) {
+      setManualErr(e instanceof Error ? e.message : 'Manual fulfilment failed');
+    } finally {
+      setManualBusy(false);
+    }
+  };
 
   const isVoucher = VOUCHER_LIKE.has(order.redemptionMode ?? order.reward?.redemptionMode ?? '');
-  const advancingToConfirmed = draft.toStatus === 'CONFIRMED';
+  // The voucher code is captured on a FORWARD move (PENDING→CONFIRMED is the member's OTP, not a
+  // console edge). Only when NO code is on the order yet (an existing code is shown read-only)
+  // and never for Hubble (auto-issued by the integration).
+  const advancingForwardWithVoucher =
+    isVoucher && !voucherIssued && !isHubble && !needsReconcile && FORWARD_VOUCHER_TARGETS.has(draft.toStatus);
   const advancingToDispatched = draft.toStatus === 'DISPATCHED';
+  // SET-ONCE PIN: a code is stored (and visible to this operator) but no PIN yet → the PIN box is
+  // offered on a forward move ONLY when the server says it would take it (`voucherFillable` —
+  // canFillStoredVoucher: paid, addable status, not Hubble, not cash; one rule, no client mirror).
+  // Once a PIN is saved it is read-only (masked).
+  const addingPinToStoredCode =
+    isVoucher && hasIssuedVoucher(order.voucherCode) && !order.voucherPin && order.voucherFillable === true &&
+    FORWARD_VOUCHER_TARGETS.has(draft.toStatus);
 
   const submit = async () => {
     if (!draft.toStatus) return;
     setBusy(true); setErr('');
     const body: Record<string, unknown> = { toStatus: draft.toStatus };
-    if (draft.voucherCode.trim())     body.voucherCode = draft.voucherCode.trim();
-    if (draft.voucherProvider.trim()) body.voucherProvider = draft.voucherProvider.trim();
-    if (draft.trackingNumber.trim())  body.trackingNumber = draft.trackingNumber.trim();
-    if (draft.trackingUrl.trim())     body.trackingUrl = draft.trackingUrl.trim();
-    if (draft.notes.trim())           body.notes = draft.notes.trim();
+    // Target-specific fields are sent ONLY when their inputs are on screen for THIS target —
+    // never a hidden leftover (a code must never ride on a refund move).
+    if (advancingForwardWithVoucher) {
+      if (draft.voucherCode.trim())     body.voucherCode = draft.voucherCode.trim();
+      if (draft.voucherPin.trim()) {
+        // Mirrors the backend rule: a PIN needs its card number.
+        if (!draft.voucherCode.trim()) { setBusy(false); setErr('Enter the card number before the PIN'); return; }
+        body.voucherPin = draft.voucherPin.trim();
+      }
+      if (draft.voucherProvider.trim()) body.voucherProvider = draft.voucherProvider.trim();
+    }
+    // A PIN added to the already-stored code (the backend sets it once, CAS on a null PIN).
+    if (addingPinToStoredCode && draft.voucherPin.trim()) body.voucherPin = draft.voucherPin.trim();
+    if (advancingToDispatched) {
+      if (draft.trackingNumber.trim()) body.trackingNumber = draft.trackingNumber.trim();
+      if (draft.trackingUrl.trim())    body.trackingUrl = draft.trackingUrl.trim();
+    }
+    if (draft.notes.trim()) body.notes = draft.notes.trim();
     try {
-      await apiJson(`/api/rewards/orders/${order.id}/transition`, {
+      // Backend returns { order: <updated row> } (or { order, skipped } when already there).
+      const res = await apiJson<{ order?: OrderPatch } | null>(`/api/rewards/orders/${order.id}/transition`, {
         method: 'POST',
         body: JSON.stringify(body),
       });
       setOpen(false);
-      onTransitioned();
+      onTransitioned(res?.order?.id ? res.order : null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Transition failed');
     } finally {
@@ -1295,9 +1728,28 @@ function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned:
     }
   };
 
+  const submitVoucherCancelled = async () => {
+    const reason = cancelReason.trim();
+    if (!reason) { setCancelErr('Enter a reason (e.g. the vendor cancellation reference).'); return; }
+    setCancelBusy(true); setCancelErr('');
+    try {
+      const res = await apiJson<{ order?: OrderPatch } | null>(`/api/rewards/orders/${order.id}/voucher-cancelled`, {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      });
+      setCancelOpen(false);
+      // The code is cleared server-side → the row re-keys and refund targets appear.
+      onTransitioned(res?.order?.id ? res.order : { id: order.id, voucherCode: null, voucherPin: null, voucherProvider: null });
+    } catch (e) {
+      setCancelErr(e instanceof Error ? e.message : 'Could not record the cancellation');
+    } finally {
+      setCancelBusy(false);
+    }
+  };
+
   return (
     <>
-      <tr className="hover:bg-gray-50/50">
+      <tr className="hover:bg-gray-50/50 focus:outline-none focus:bg-gray-50" data-order-id={order.id} tabIndex={-1}>
         <td className="px-4 py-3">
           <p className="font-mono text-xs text-gray-600">{order.orderNumber ?? order.id.slice(-8)}</p>
         </td>
@@ -1309,29 +1761,205 @@ function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned:
           <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full border ${ORDER_STATUS_BADGE[order.status] ?? ORDER_STATUS_BADGE.REVERSED}`}>
             {order.status}
           </span>
-          {order.voucherCode && (
-            <span className="block mt-1 text-[10px] font-mono text-emerald-600">{order.voucherCode}</span>
-          )}
+          {/* View-only viewers never receive the code — the server sends only an "issued" flag. */}
+          {hasIssuedVoucher(order.voucherCode) ? (
+            <>
+              <span className="block mt-1 text-[10px] font-mono text-emerald-600" data-testid="order-voucher-code">
+                {order.voucherCode}
+              </span>
+              {order.voucherPin && (
+                // Hidden behind a per-row "Show" toggle (operators — never shown in clear by default).
+                <MaskedPin
+                  pin={order.voucherPin}
+                  orderNumber={order.orderNumber}
+                  className="block text-[10px] text-emerald-600"
+                  testId="order-voucher-pin"
+                />
+              )}
+            </>
+          ) : order.voucherIssued ? (
+            <span className="block mt-1 text-[10px] font-semibold text-emerald-600" data-testid="order-voucher-code">
+              Voucher issued
+            </span>
+          ) : null}
           {order.trackingNumber && (
             <span className="block mt-1 text-[10px] text-gray-500 flex items-center gap-1">
               <Truck className="h-2.5 w-2.5" />{order.trackingNumber}
             </span>
           )}
-        </td>
-        <td className="px-4 py-3 text-right">
-          {options.length > 0 ? (
-            <button
-              onClick={() => { setOpen((o) => !o); setErr(''); }}
-              className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50"
+          {needsReconcile && (
+            <span
+              className="block mt-1 text-[10px] font-semibold text-amber-700"
+              data-testid="hubble-needs-reconcile"
+              title={order.hubbleReconcileReason ?? undefined}
             >
-              {open ? 'Close' : 'Advance'}
-            </button>
-          ) : (
-            <span className="text-[10px] text-gray-300">—</span>
+              Needs reconcile · {hubbleReasonLabel(order.hubbleReconcileReason)}
+            </span>
           )}
         </td>
+        {canManage && (
+          <td className="px-4 py-3 text-right">
+            <div className="flex flex-col items-end gap-1">
+              {options.length > 0 ? (
+                <button
+                  onClick={() => { setOpen((o) => !o); setErr(''); }}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50"
+                >
+                  {open ? 'Close' : 'Advance'}
+                </button>
+              ) : (
+                <span className="text-[10px] text-gray-300">—</span>
+              )}
+              {canCancelVoucher && refundBlockedByVoucher && (
+                <button
+                  onClick={() => { setCancelOpen((o) => !o); setCancelErr(''); }}
+                  className="text-[10px] font-semibold text-red-600 hover:underline"
+                >
+                  Voucher cancelled with vendor…
+                </button>
+              )}
+              {canCancelVoucher && needsReconcile && (
+                <>
+                  {canRetryHubble && (
+                    <button
+                      onClick={retryWithHubble}
+                      disabled={retryBusy}
+                      aria-busy={retryBusy}
+                      className="text-[10px] font-semibold text-[var(--brand-primary)] hover:underline disabled:opacity-50"
+                    >
+                      {retryBusy ? 'Retrying…' : 'Retry with Hubble'}
+                    </button>
+                  )}
+                  {!voucherIssued && (
+                    <button
+                      onClick={() => { setManualOpen((o) => !o); setManualErr(''); }}
+                      className="text-[10px] font-semibold text-amber-700 hover:underline"
+                    >
+                      Fulfil manually…
+                    </button>
+                  )}
+                  {retryMsg && <span className="text-[10px] text-gray-500" role="status">{retryMsg}</span>}
+                </>
+              )}
+            </div>
+          </td>
+        )}
       </tr>
-      {open && (
+      {canManage && canCancelVoucher && needsReconcile && manualOpen && (
+        <tr>
+          <td colSpan={7} className="px-4 py-4 bg-amber-50/50">
+            <div className="space-y-2 max-w-2xl">
+              <p className="text-xs text-gray-700">
+                Fulfil this Hubble order manually: issue a voucher code yourself. This takes the order over from Hubble
+                and is logged with your reason. Use it only if Hubble did not issue a voucher.
+              </p>
+              <div className="flex flex-wrap gap-3">
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-700" htmlFor={`mo-code-${order.id}`}>Card no. / code *</label>
+                  <input
+                    id={`mo-code-${order.id}`}
+                    value={manualCode}
+                    onChange={(e) => setManualCode(e.target.value)}
+                    className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-700" htmlFor={`mo-pin-${order.id}`}>PIN (if the card has one)</label>
+                  <input
+                    id={`mo-pin-${order.id}`}
+                    value={manualPin}
+                    onChange={(e) => setManualPin(e.target.value)}
+                    maxLength={64}
+                    autoComplete="off"
+                    className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-700" htmlFor={`mo-prov-${order.id}`}>Provider</label>
+                  <input
+                    id={`mo-prov-${order.id}`}
+                    value={manualProvider}
+                    onChange={(e) => setManualProvider(e.target.value)}
+                    placeholder="Manual"
+                    className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+                  />
+                </div>
+              </div>
+              <label className="text-xs font-medium text-gray-700" htmlFor={`mo-reason-${order.id}`}>Reason *</label>
+              <input
+                id={`mo-reason-${order.id}`}
+                value={manualReason}
+                onChange={(e) => setManualReason(e.target.value)}
+                maxLength={500}
+                placeholder="e.g. Hubble down — issued from the Gifsy pool"
+                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+              />
+              {manualErr && (
+                <div className="flex items-center gap-2 text-xs text-red-600" role="alert">
+                  <XCircle className="w-3.5 h-3.5 shrink-0" /> {manualErr}
+                </div>
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={fulfilManually}
+                  disabled={manualBusy || !manualCode.trim() || !manualReason.trim()}
+                  className="px-4 py-2 bg-amber-600 text-white rounded-lg text-xs font-semibold hover:bg-amber-700 disabled:opacity-50"
+                >
+                  {manualBusy ? 'Saving…' : 'Confirm manual fulfilment'}
+                </button>
+                <button
+                  onClick={() => setManualOpen(false)}
+                  className="px-4 py-2 border border-gray-200 rounded-lg text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+      {canManage && canCancelVoucher && cancelOpen && (
+        <tr>
+          <td colSpan={7} className="px-4 py-4 bg-red-50/40">
+            <div className="space-y-2 max-w-2xl">
+              <p className="text-xs text-gray-700">
+                Record that voucher <span className="font-mono">{order.voucherCode}</span> was cancelled with the vendor.
+                This clears the code so the order can be refunded. It is logged with your reason.
+              </p>
+              <label className="text-xs font-medium text-gray-700" htmlFor={`vc-reason-${order.id}`}>Reason *</label>
+              <input
+                id={`vc-reason-${order.id}`}
+                value={cancelReason}
+                onChange={(e) => setCancelReason(e.target.value)}
+                placeholder="e.g. Vendor cancellation ref VC-123"
+                maxLength={500}
+                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+              />
+              {cancelErr && (
+                <div className="flex items-center gap-2 text-xs text-red-600" role="alert">
+                  <XCircle className="w-3.5 h-3.5 shrink-0" /> {cancelErr}
+                </div>
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={submitVoucherCancelled}
+                  disabled={cancelBusy || !cancelReason.trim()}
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg text-xs font-semibold hover:bg-red-700 disabled:opacity-50"
+                >
+                  {cancelBusy ? 'Saving…' : 'Confirm voucher cancelled'}
+                </button>
+                <button
+                  onClick={() => setCancelOpen(false)}
+                  className="px-4 py-2 border border-gray-200 rounded-lg text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+      {canManage && open && (
         <tr>
           <td colSpan={7} className="px-4 py-4 bg-gray-50/70">
             <div className="space-y-3 max-w-2xl">
@@ -1340,17 +1968,54 @@ function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned:
                   <label className="text-xs font-medium text-gray-700">Advance to</label>
                   <select
                     value={draft.toStatus}
-                    onChange={(e) => setDraft((d) => ({ ...d, toStatus: e.target.value }))}
+                    // A new target starts with EMPTY target-specific fields (notes kept).
+                    onChange={(e) => setDraft((d) => blankDraft(e.target.value, d.notes))}
                     className="text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:border-gray-400"
                   >
                     {options.map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
                 </div>
-                {advancingToConfirmed && isVoucher && (
+                {isVoucher && voucherIssued && FORWARD_VOUCHER_TARGETS.has(draft.toStatus) && (
                   <>
                     <div className="space-y-1">
-                      <label className="text-xs font-medium text-gray-700">Voucher code</label>
+                      {/* A stored code is read-only (only "Voucher cancelled with vendor" clears it). */}
+                      <span className="text-xs font-medium text-gray-700">Card no. / code</span>
+                      <p className="text-sm font-mono text-gray-700 px-3 py-2" data-testid="voucher-code-readonly">
+                        {order.voucherCode}
+                      </p>
+                    </div>
+                    {order.voucherPin ? (
+                      <div className="space-y-1">
+                        <span className="text-xs font-medium text-gray-700">PIN (if the card has one)</span>
+                        <p className="text-sm text-gray-700 px-3 py-2">
+                          <MaskedPin pin={order.voucherPin} label="PIN" orderNumber={order.orderNumber} testId="voucher-pin-readonly" />
+                        </p>
+                      </div>
+                    ) : addingPinToStoredCode ? (
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-gray-700" htmlFor={`vc-pin-${order.id}`}>PIN (if the card has one)</label>
+                        <input
+                          id={`vc-pin-${order.id}`}
+                          value={draft.voucherPin}
+                          onChange={(e) => setDraft((d) => ({ ...d, voucherPin: e.target.value }))}
+                          maxLength={64}
+                          autoComplete="off"
+                          aria-describedby={`vc-pin-hint-${order.id}`}
+                          className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+                        />
+                        <p id={`vc-pin-hint-${order.id}`} className="text-[10px] text-gray-500">
+                          Add the PIN for this card — it can be saved once
+                        </p>
+                      </div>
+                    ) : null}
+                  </>
+                )}
+                {advancingForwardWithVoucher && (
+                  <>
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-gray-700" htmlFor={`vc-code-${order.id}`}>Card no. / code</label>
                       <input
+                        id={`vc-code-${order.id}`}
                         value={draft.voucherCode}
                         onChange={(e) => setDraft((d) => ({ ...d, voucherCode: e.target.value }))}
                         placeholder="AMZ-XXXX"
@@ -1358,8 +2023,20 @@ function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned:
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="text-xs font-medium text-gray-700">Provider</label>
+                      <label className="text-xs font-medium text-gray-700" htmlFor={`vc-pin-${order.id}`}>PIN (if the card has one)</label>
                       <input
+                        id={`vc-pin-${order.id}`}
+                        value={draft.voucherPin}
+                        onChange={(e) => setDraft((d) => ({ ...d, voucherPin: e.target.value }))}
+                        maxLength={64}
+                        autoComplete="off"
+                        className="text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gray-400"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-gray-700" htmlFor={`vc-prov-${order.id}`}>Provider</label>
+                      <input
+                        id={`vc-prov-${order.id}`}
                         value={draft.voucherProvider}
                         onChange={(e) => setDraft((d) => ({ ...d, voucherProvider: e.target.value }))}
                         placeholder="Gifsy"
@@ -1419,11 +2096,114 @@ function OrderRow({ order, onTransitioned }: { order: OrderItem; onTransitioned:
 
 const ORDER_STATUS_FILTERS = ['all', 'PENDING', 'CONFIRMED', 'PROCESSING', 'DISPATCHED', 'DELIVERED', 'CANCELLED'];
 
+/** Orders fetched per "Load more" step (and the minimum window on a refresh). */
+const ORDERS_PAGE_SIZE = 100;
+/** Largest window a Refresh re-fetches in one request; deeper → reset to the first page. */
+const REFRESH_WINDOW_MAX = 500;
+
+interface OrdersPage { orders: OrderItem[]; pagination?: Pagination; nextCursor?: string | null }
+
+/**
+ * Build the GET /api/rewards/orders URL. The status filter is applied SERVER-side (the only
+ * filter this queue has), so the server `pagination.total` is the honest count for the view.
+ * `cursor` = the backend keyset cursor (createdAt DESC, id DESC) — stable under new orders
+ * landing at the top while the admin pages down, unlike page/offset.
+ */
+function ordersUrl(status: string, limit: number, cursor?: string | null): string {
+  const p = new URLSearchParams();
+  if (status !== 'all') p.set('status', status);
+  p.set('limit', String(limit));
+  if (cursor) p.set('cursor', cursor);
+  return `/api/rewards/orders?${p.toString()}`;
+}
+
+/** What the signed-in user may do on the Fulfilment tab. */
+type OrderAccess =
+  | { kind: 'loading' }
+  | { kind: 'permError'; retry: () => void }
+  | { kind: 'none' }
+  | { kind: 'view'; note: string }
+  | { kind: 'manage'; canCancelVoucher: boolean };
+
+/**
+ * Who may see / change orders here (mirrors the backend):
+ *  - GIFSY_ADMIN → manage (transition, bulk fulfilment, "Voucher cancelled with vendor");
+ *  - GIFSY_STAFF → manage only WITH the rewards:manage_orders grant (RolesGuard defers staff to
+ *    PermissionGuard), else a view-only list; the voucher-cancel action stays GIFSY_ADMIN-only;
+ *  - CLIENT_ADMIN → VIEW-ONLY list of its own tenant's orders (codes masked server-side);
+ *  - anyone else (e.g. MIS_USER) → no order list: GET /rewards/orders scopes them to their own
+ *    (non-existent) partner, so an empty table would be a lie.
+ * Unknown role (pre-hydration) / staff permissions still loading → render nothing yet.
+ */
+function resolveOrderAccess(p: Pick<UsePermissionsLike, 'role' | 'ready' | 'error' | 'has' | 'retry'>): OrderAccess {
+  if (!p.role) return { kind: 'loading' };
+  if (p.role === 'GIFSY_ADMIN') return { kind: 'manage', canCancelVoucher: true };
+  if (p.role === 'GIFSY_STAFF') {
+    if (p.error) return { kind: 'permError', retry: p.retry };
+    if (!p.ready) return { kind: 'loading' };
+    return p.has('rewards:manage_orders')
+      ? { kind: 'manage', canCancelVoucher: false }
+      : { kind: 'view', note: "View only — your role can't update order status." };
+  }
+  if (p.role === 'CLIENT_ADMIN') return { kind: 'view', note: 'View only — Gifsy updates order status.' };
+  return { kind: 'none' };
+}
+
+type UsePermissionsLike = ReturnType<typeof usePermissions>;
+
 function FulfilmentTab() {
+  const access = resolveOrderAccess(usePermissions());
+  if (access.kind === 'loading') {
+    return (
+      <div className="flex items-center justify-center py-16" aria-label="Loading">
+        <div className="w-6 h-6 border-2 border-gray-200 border-t-[var(--brand-primary)] rounded-full animate-spin" />
+      </div>
+    );
+  }
+  if (access.kind === 'permError') {
+    return (
+      <div className="flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700" role="alert">
+        <XCircle className="h-4 w-4 shrink-0" />
+        <span className="flex-1">Couldn&apos;t load your permissions.</span>
+        <button onClick={access.retry} className="px-2.5 py-1 text-xs font-semibold rounded-lg border border-red-200 bg-white hover:bg-red-50">
+          Retry
+        </button>
+      </div>
+    );
+  }
+  if (access.kind === 'none') {
+    return (
+      <div className="flex items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600" role="note">
+        <Info className="h-4 w-4 shrink-0" />
+        Redemption orders aren&apos;t available for your role here — ask your client admin or Gifsy.
+      </div>
+    );
+  }
+  return access.kind === 'manage'
+    ? <FulfilmentQueue canManage canCancelVoucher={access.canCancelVoucher} viewNote={null} />
+    : <FulfilmentQueue canManage={false} canCancelVoucher={false} viewNote={access.note} />;
+}
+
+function FulfilmentQueue({
+  canManage, canCancelVoucher, viewNote,
+}: {
+  canManage: boolean;
+  canCancelVoucher: boolean;
+  /** Shown when the list is view-only (null for an operator who can manage). */
+  viewNote: string | null;
+}) {
   const [orders, setOrders] = useState<OrderItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  // Server-side total for the current status filter (never derived from the loaded rows).
+  const [total, setTotal] = useState<number | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreErr, setLoadMoreErr] = useState('');
+  // Request generation: a filter change / refresh bumps it so an in-flight (stale) first-page
+  // or load-more response for the previous view can never overwrite or append into the new one.
+  const genRef = useRef(0);
 
   // Bulk
   const fileRef = useRef<HTMLInputElement>(null);
@@ -1433,22 +2213,137 @@ function FulfilmentTab() {
   const [uploadErr, setUploadErr] = useState('');
   const [result, setResult] = useState<FulfilmentUploadResult | null>(null);
 
-  const loadOrders = useCallback(async (status: string) => {
-    setLoading(true); setError('');
+  // Latest filter + loaded rows, read at CALL time by async callers (bulk upload, a row's
+  // transition) — their closures may predate a filter change / load-more.
+  const statusRef = useRef(statusFilter);
+  statusRef.current = statusFilter;
+  const ordersRef = useRef<OrderItem[]>(orders);
+  ordersRef.current = orders;
+  // Short note when a refresh had to shrink the window back to the first page.
+  const [refreshNote, setRefreshNote] = useState('');
+  // Focus target after a load-more: the first newly-appended row (keyboard/screen-reader users
+  // otherwise lose their place when the "Load more" button unmounts on the last page).
+  const focusOrderIdRef = useRef<string | null>(null);
+  /** Per-order sequence of voucherFillable re-reads — only the latest one is applied. */
+  const fillableSeqRef = useRef<Record<string, number>>({});
+  const tableRef =useRef<HTMLTableSectionElement>(null);
+
+  /**
+   * (Re)load the queue from the top with `limit` rows (one page on a filter change; the current
+   * window on a refresh). On FAILURE the previous view's rows/total/cursor are CLEARED — they
+   * may belong to another filter, and "Load more" must never continue a stale cursor.
+   */
+  const loadOrders = useCallback(async (status: string, limit = ORDERS_PAGE_SIZE) => {
+    const gen = ++genRef.current;
+    // Any in-flight load-more is now stale (its result is discarded) — release its spinner.
+    setLoading(true); setError(''); setLoadMoreErr(''); setLoadingMore(false);
     try {
-      const qs = status === 'all' ? '' : `?status=${encodeURIComponent(status)}`;
-      const data = await apiJson<{ orders: OrderItem[]; pagination?: Pagination }>(
-        `/api/rewards/orders${qs}${qs ? '&' : '?'}page=1&limit=100`,
-      );
+      const data = await apiJson<OrdersPage>(ordersUrl(status, limit));
+      if (gen !== genRef.current) return;
       setOrders(data.orders ?? []);
+      setTotal(data.pagination?.total ?? null);
+      setNextCursor(data.nextCursor ?? null);
     } catch (e) {
+      if (gen !== genRef.current) return;
+      setOrders([]);
+      setTotal(null);
+      setNextCursor(null);
       setError(e instanceof Error ? e.message : 'Failed to load orders');
     } finally {
-      setLoading(false);
+      if (gen === genRef.current) setLoading(false);
     }
   }, []);
 
-  useEffect(() => { loadOrders(statusFilter); }, [loadOrders, statusFilter]);
+  const loadMore = async () => {
+    if (!nextCursor || loadingMore) return;
+    const gen = genRef.current;
+    setLoadingMore(true); setLoadMoreErr('');
+    try {
+      const data = await apiJson<OrdersPage>(ordersUrl(statusFilter, ORDERS_PAGE_SIZE, nextCursor));
+      if (gen !== genRef.current) return;
+      const seen = new Set(ordersRef.current.map((o) => o.id));
+      const fresh = (data.orders ?? []).filter((o) => !seen.has(o.id));
+      focusOrderIdRef.current = fresh[0]?.id ?? null;
+      setOrders((prev) => {
+        const have = new Set(prev.map((o) => o.id));
+        return [...prev, ...fresh.filter((o) => !have.has(o.id))];
+      });
+      setTotal(data.pagination?.total ?? null);
+      setNextCursor(data.nextCursor ?? null);
+    } catch (e) {
+      if (gen !== genRef.current) return;
+      setLoadMoreErr(e instanceof Error ? e.message : 'Failed to load more orders');
+    } finally {
+      if (gen === genRef.current) setLoadingMore(false);
+    }
+  };
+
+  // Move focus to the first appended row once it renders.
+  useEffect(() => {
+    const id = focusOrderIdRef.current;
+    if (!id) return;
+    focusOrderIdRef.current = null;
+    const rows = tableRef.current?.querySelectorAll<HTMLElement>('tr[data-order-id]') ?? [];
+    Array.from(rows).find((r) => r.dataset.orderId === id)?.focus();
+  }, [orders]);
+
+  // Filter change → back to the first page. Also invalidates any in-flight load-more.
+  useEffect(() => { setRefreshNote(''); loadOrders(statusFilter); }, [loadOrders, statusFilter]);
+
+  /**
+   * Refresh (Refresh button / after a bulk upload): re-fetch the CURRENT filter's loaded window in
+   * one request, capped at REFRESH_WINDOW_MAX rows. Deeper than that → back to the first page (and
+   * say so) rather than one very large request. Reads filter + window from refs (call-time values).
+   */
+  const refreshOrders = useCallback(async () => {
+    const loaded = ordersRef.current.length;
+    if (loaded > REFRESH_WINDOW_MAX) {
+      setRefreshNote(`Reloaded the first ${ORDERS_PAGE_SIZE} orders — use "Load more" to page further.`);
+      await loadOrders(statusRef.current, ORDERS_PAGE_SIZE);
+    } else {
+      setRefreshNote('');
+      await loadOrders(statusRef.current, Math.max(ORDERS_PAGE_SIZE, loaded));
+    }
+  }, [loadOrders]);
+
+  /**
+   * A single-order transition: patch that row IN PLACE from the transition response (no window
+   * reload). If the row no longer matches the active status filter it leaves the view and the
+   * server total drops by one. No usable response → fall back to a refresh.
+   */
+  const applyOrderUpdate = useCallback((updated: OrderPatch | null) => {
+    if (!updated) { void refreshOrders(); return; }
+    const present = ordersRef.current.some((o) => o.id === updated.id);
+    if (!present) return; // the view changed since the transition started
+    const filter = statusRef.current;
+    const leaves = filter !== 'all' && updated.status != null && updated.status !== filter;
+    const patch: Partial<OrderItem> = {};
+    for (const k of ['status', 'voucherCode', 'voucherPin', 'voucherProvider', 'trackingNumber', 'trackingUrl', 'updatedAt', 'hubbleNeedsReconcile', 'hubbleReconcileReason'] as const) {
+      if (updated[k] !== undefined) (patch as Record<string, unknown>)[k] = updated[k];
+    }
+    // `voucherFillable` (may the set-once PIN be added?) is SERVER-derived (canFillStoredVoucher)
+    // and the transition / PATCH / voucher-cancel responses don't carry it — so the in-place row
+    // drops the stale value (PIN box hidden, never a stale "yes") and re-reads it from the server.
+    if (!leaves) patch.voucherFillable = undefined;
+    setOrders((prev) => (leaves
+      ? prev.filter((o) => o.id !== updated.id)
+      : prev.map((o) => (o.id === updated.id ? { ...o, ...patch } : o))));
+    if (leaves) { setTotal((t) => (t == null ? t : Math.max(0, t - 1))); return; }
+    const seq = (fillableSeqRef.current[updated.id] ?? 0) + 1;
+    fillableSeqRef.current[updated.id] = seq;
+    void apiJson<{ voucherFillable?: boolean } | null>(`/api/admin/gift-orders/${updated.id}`)
+      .then((d) => {
+        if (fillableSeqRef.current[updated.id] !== seq || typeof d?.voucherFillable !== 'boolean') return;
+        const fillable = d.voucherFillable;
+        setOrders((prev) => prev.map((o) => (o.id === updated.id ? { ...o, voucherFillable: fillable } : o)));
+      })
+      .catch(() => { /* stays hidden — Refresh re-reads it from the list */ });
+  }, [refreshOrders]);
+
+  // Header count: the SERVER total, but never fewer than the rows actually on screen.
+  const shownTotal = total == null ? null : Math.max(total, orders.length);
+  // Everything below is loaded (no cursor) yet the server counts more → newer orders arrived above.
+  const hasNewAbove = !loading && !nextCursor && total != null && total > orders.length;
 
   async function downloadTemplate() {
     setDownloading(true); setDownloadErr('');
@@ -1487,7 +2382,7 @@ function FulfilmentTab() {
         return;
       }
       setResult(json.data ?? null);
-      await loadOrders(statusFilter);
+      await refreshOrders();
     } catch (e) {
       setUploadErr(e instanceof Error ? e.message : 'Upload failed');
     } finally {
@@ -1503,7 +2398,13 @@ function FulfilmentTab() {
 
   return (
     <div className="space-y-5">
-      {/* Bulk fulfilment */}
+      {viewNote && (
+        <div className="flex items-center gap-2 rounded-xl border border-blue-100 bg-blue-50 px-4 py-2.5 text-xs text-blue-800" role="note">
+          <Info className="h-3.5 w-3.5 shrink-0" /> {viewNote}
+        </div>
+      )}
+      {/* Bulk fulfilment (Gifsy operators only — the template/upload endpoints are GIFSY-gated) */}
+      {canManage && (
       <div className="bg-white rounded-2xl border border-gray-100 shadow-sm px-6 py-5 space-y-4">
         <div className="flex items-center gap-3">
           <div className="p-2 rounded-xl bg-green-50">
@@ -1597,6 +2498,7 @@ function FulfilmentTab() {
           </div>
         )}
       </div>
+      )}
 
       {/* Orders queue */}
       <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
@@ -1604,7 +2506,21 @@ function FulfilmentTab() {
           <div className="flex items-center gap-2">
             <Package className="h-4 w-4 text-[var(--brand-primary)]" />
             <h2 className="text-sm font-bold text-gray-900">Redemption orders</h2>
-            <span className="text-xs text-gray-400">({orders.length})</span>
+            <span className="text-xs text-gray-400" data-testid="orders-count" aria-live="polite">
+              {shownTotal == null
+                ? ''
+                : orders.length < shownTotal
+                  ? `(showing ${fmtPts(orders.length)} of ${fmtPts(shownTotal)})`
+                  : `(${fmtPts(shownTotal)})`}
+            </span>
+            {hasNewAbove && (
+              <button
+                onClick={() => { void refreshOrders(); }}
+                className="text-[11px] font-semibold text-[var(--brand-primary)] hover:underline"
+              >
+                New orders — Refresh
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <select
@@ -1617,7 +2533,7 @@ function FulfilmentTab() {
               ))}
             </select>
             <button
-              onClick={() => loadOrders(statusFilter)}
+              onClick={() => { void refreshOrders(); }}
               className="p-2 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-50"
               aria-label="Refresh orders"
             >
@@ -1627,9 +2543,18 @@ function FulfilmentTab() {
         </div>
 
         {error && (
-          <div className="m-4 flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2 text-sm text-red-700">
-            <XCircle className="w-4 h-4 shrink-0" /> {error}
+          <div className="m-4 flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2 text-sm text-red-700" role="alert">
+            <XCircle className="w-4 h-4 shrink-0" /> <span className="flex-1">{error}</span>
+            <button
+              onClick={() => { void loadOrders(statusRef.current); }}
+              className="px-2.5 py-1 text-xs font-semibold rounded-lg border border-red-200 bg-white hover:bg-red-50"
+            >
+              Retry
+            </button>
           </div>
+        )}
+        {refreshNote && !error && (
+          <p className="mx-4 mt-3 text-xs text-gray-500" role="status">{refreshNote}</p>
         )}
 
         {loading ? (
@@ -1637,7 +2562,7 @@ function FulfilmentTab() {
             <div className="w-6 h-6 border-2 border-gray-200 border-t-[var(--brand-primary)] rounded-full animate-spin" />
           </div>
         ) : orders.length === 0 ? (
-          <p className="text-sm text-gray-400 text-center py-12">No orders in this view.</p>
+          error ? null : <p className="text-sm text-gray-400 text-center py-12">No orders in this view.</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -1649,15 +2574,43 @@ function FulfilmentTab() {
                   <th className="px-4 py-3 font-medium">Mode</th>
                   <th className="px-4 py-3 font-medium">Points</th>
                   <th className="px-4 py-3 font-medium">Status</th>
-                  <th className="px-4 py-3 font-medium text-right">Action</th>
+                  {canManage && <th className="px-4 py-3 font-medium text-right">Action</th>}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-50">
+              <tbody ref={tableRef} className="divide-y divide-gray-50">
+                {/* Keyed by id+status+voucher-presence so an in-place status change OR a cleared code
+                    remounts the row and its "Advance to" draft re-initialises from the NEW options. */}
                 {orders.map((o) => (
-                  <OrderRow key={o.id} order={o} onTransitioned={() => loadOrders(statusFilter)} />
+                  <OrderRow
+                    key={`${o.id}:${o.status}:${o.voucherCode || o.voucherIssued ? 'v' : '-'}:${o.hubbleNeedsReconcile ? 'r' : '-'}`}
+                    order={o}
+                    onTransitioned={applyOrderUpdate}
+                    canManage={canManage}
+                    canCancelVoucher={canCancelVoucher}
+                  />
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {!loading && orders.length > 0 && (nextCursor || loadMoreErr) && (
+          <div className="flex flex-col items-center gap-2 px-4 py-4 border-t border-gray-100">
+            {loadMoreErr && (
+              <div className="flex items-center gap-2 text-xs text-red-600" role="alert">
+                <XCircle className="w-3.5 h-3.5 shrink-0" /> {loadMoreErr}
+              </div>
+            )}
+            {nextCursor && (
+              <button
+                onClick={loadMore}
+                disabled={loadingMore}
+                aria-busy={loadingMore}
+                className="px-4 py-2 text-xs font-semibold rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                {loadingMore ? 'Loading…' : loadMoreErr ? 'Retry load more' : 'Load more orders'}
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -1668,6 +2621,18 @@ function FulfilmentTab() {
 /* ════════════════════════════════════════════════════════════════════════════
    Gifsy Settings panel (retained — localStorage settings, NOT the gift blob)
    ════════════════════════════════════════════════════════════════════════════ */
+
+/** The settings keys the Gifsy Settings panel actually edits — the ONLY keys its Save PUTs. */
+function pickPanelSettings(
+  s: GifsySettings,
+): Pick<GifsySettings, 'redemptionChannels' | 'pointsConversionRate' | 'minBankTransferAmount' | 'minVoucherFreeAmount'> {
+  return {
+    redemptionChannels:    s.redemptionChannels,
+    pointsConversionRate:  s.pointsConversionRate,
+    minBankTransferAmount: s.minBankTransferAmount,
+    minVoucherFreeAmount:  s.minVoucherFreeAmount,
+  };
+}
 
 function GifsySettingsPanel() {
   const [settings, setSettings] = useState<GifsySettings>(() => getGifsySettings());
@@ -1689,16 +2654,19 @@ function GifsySettingsPanel() {
     }
   };
 
+  // Save ONLY the keys this panel edits (redemption channels + conversion rate + the two minimum
+  // thresholds). Never PUT the whole settings snapshot: that would also write back the DERIVED
+  // uniquenessPolicy and a mount-time salesApp / creditsPayouts / visibilityConfig snapshot,
+  // clobbering changes made elsewhere since this panel mounted.
   const applyAndSave = (updater: (s: GifsySettings) => GifsySettings) => {
-    setSettings((prev) => {
-      const next = updater(prev);
-      void saveGifsySettings(next).then(flash);
-      return next;
-    });
+    const next = updater(settings);
+    setSettings(next);
+    // The only instant-save control here is the channel toggle → persist just that key.
+    void saveGifsySettings({ redemptionChannels: next.redemptionChannels }).then(flash);
   };
 
   const handleSave = () => {
-    void saveGifsySettings(settings).then(flash);
+    void saveGifsySettings(pickPanelSettings(settings)).then(flash);
   };
 
   return (

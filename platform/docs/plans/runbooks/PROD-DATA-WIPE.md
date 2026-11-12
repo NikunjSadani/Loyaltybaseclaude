@@ -28,6 +28,11 @@ The wipe deletes **only** rows owned by the tenant `clientId`s you name in
   registry itself), `OutletType`,
 - any **other tenant's** rows,
 - `TdsDeposit` rows with a **null** `clientId` (those are GIFSY/194C platform rows).
+- **object storage** (GCS). The script deletes DB rows only. The Sales Import tables (`sales_imports`,
+  `sales_import_aggregates`, `sales_import_applies`, `sales_import_profiles`, `sales_kpi_definitions`,
+  `sales_month_histories` / `_sets` / `_combos`, `sales_month_statuses`) ARE wiped, but the tenant's uploaded
+  sales files under the bucket prefix `sales-imports/<clientId>/` are not — remove that prefix separately
+  (owner-run, after the DB wipe) if the tenant used Sales Import.
 
 ---
 

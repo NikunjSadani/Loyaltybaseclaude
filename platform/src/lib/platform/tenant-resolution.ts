@@ -22,6 +22,7 @@ import type { BrandingConfig, ClientConfig } from './client-config';
 import {
   ensureWarm,
   getRoutingSnapshot,
+  refreshIfStale,
   type PublicBranding,
 } from './tenant-routing-cache';
 
@@ -294,6 +295,9 @@ export async function resolveTenant(hostname: string): Promise<ResolvedTenant> {
   // resolves to the right slug on the very first login/SSR of a fresh instance
   // instead of the bare label. Once warm this is instant; ensureWarm swallows its
   // own errors (registry fallback), so this can't reject.
-  await ensureWarm();
+  // Warm path: SWR refresh (never awaited) so a long-lived server instance doesn't freeze
+  // its snapshot at the first warm — ensureWarm alone no-ops forever once a snapshot exists.
+  if (getRoutingSnapshot() === null) await ensureWarm();
+  else void refreshIfStale();
   return resolveTenantSync(hostname);
 }

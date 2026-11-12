@@ -888,6 +888,9 @@ model ChannelPartner {
   bankAccountHolder   String?
   ifscCode            String?
   upiId               String?
+  // How the UPI ID was captured: 'QR' (scanned) | 'MANUAL' (typed, confirm-entry). NULL = legacy /
+  // unknown. Always written alongside upiId and nulled whenever upiId is nulled (exclusive rails).
+  upiCaptureMethod    String?
   paymentMode         String? // 'bank' | 'upi'
   // ── Payout-detail trust (capture-bank-at-redemption, docs/plans/PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md) ──
   // VERIFIED (default) = operator/KYC-captured OR payout-confirmed → shown in Store Info. Only the
@@ -1659,6 +1662,9 @@ model RedemptionOrder {
   trackingNumber       String?
   trackingUrl          String?
   voucherCode          String?
+  /// Gift-card PIN for card+PIN products (card number in voucherCode). Null for number-only / PIN-only cards.
+  /// Same visibility as voucherCode (member + fulfilling Gifsy operator only); never uniqueness-checked.
+  voucherPin           String?
   voucherProvider      String?
   dispatchedAt         DateTime?
   deliveredAt          DateTime?
@@ -3021,6 +3027,286 @@ model OutletTarget {
   @@map("outlet_targets")
 }
 
+// ─── MODULE: SALES IMPORT — DMS invoice-line file → importer-owned KPI achievements ───
+// Dormant unless features.salesImport === true (per tenant, default OFF; Deoleo OFF). Additive only:
+// no existing table is altered. The importer WRITES into the existing OutletSalesRecord.kpiValues
+// (only importer-owned KpiDef codes = an enabled SalesKpiDefinition row). Status columns are plain
+// Strings (not Prisma enums) so this stays an additive migration (same convention as KpiDef.rollup).
+// See platform/docs/plans/SALES-IMPORT-PIPELINE-PLAN.md.
+
+/// One per tenant: how to read THIS tenant's DMS file (SalesColumnMapping, plan §6.1).
+model SalesImportProfile {
+  id            String   @id @default(cuid())
+  clientId      String   @unique
+  columnMapping Json
+  updatedById   String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("sales_import_profiles")
+}
+
+/// Existence + enabled ⇒ the KPI is IMPORTER-OWNED (plan G4).
+model SalesKpiDefinition {
+  id          String   @id @default(cuid())
+  clientId    String
+  kpiCode     String // MUST be an enabled KpiDef.code of this tenant (validated on save)
+  measure     String // 'AMOUNT' | 'QUANTITY'
+  filter      Json // SalesKpiFilter (plan §6.2)
+  outletTypes String[] @default([]) // optional scope by Outlet.outletType.code; [] = all
+  programs    String[] @default([]) // optional scope by Outlet.programName; [] = all
+  enabled     Boolean  @default(true)
+  order       Int      @default(0)
+  updatedById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([clientId, kpiCode])
+  @@index([clientId])
+  @@map("sales_kpi_definitions")
+}
+
+model SalesImport {
+  id               String    @id @default(cuid())
+  clientId         String
+  uploadedById     String
+  originalFilename String
+  fileKind         String // 'XLSX' | 'CSV'
+  sizeBytes        BigInt
+  partCount        Int
+  partsReceived    Int       @default(0)
+  gcsPrefix        String // sales-imports/<clientId>/<id>/
+  status           String    @default("UPLOADING") // UPLOADING|QUEUED|PROCESSING|NEEDS_MAPPING|READY|FAILED|CANCELLED
+  contentSha256    String?
+  duplicateOfId    String? // earlier READY import with the same sha256 (same tenant)
+  mappingSnapshot  Json? // profile used for this run
+  detectedHeaders  Json? // [headerRow, ...<=3 sample rows], capped (SALES_IMPORT_MAX_COLUMNS / _SAMPLE_CELL_CHARS)
+  rosterHash       String? // UNUSED since the audit fix round (apply maps to the CURRENT roster); kept additive
+  mappingFingerprint String? // column mapping this run used (H2: preview/apply block on drift)
+  claimToken       String? // random per claim; only the current claim may heartbeat / finalise (M2)
+  processingVersion Int     @default(0) // bumped on every READY (ApplyRequest.processingVersion, M7)
+  queuedAt         DateTime? // last time the import entered QUEUED (complete / reprocess)
+  purgedAt         DateTime? // retention purge MARKED (aggregates + sample rows removed in that tx)
+  filesPurgedAt    DateTime? // GCS objects (parts, unmatched.csv) deleted — after the marking commit; retried by the sweep
+  reprocessedFromId String?  // created by POST :id/reprocess-as-new from this (applied) import's stored file
+  unmatchedCsvKey  String?  // GCS key of the READY run's unmatched.csv (per run; set in the READY transaction)
+  bytesRead        BigInt    @default(0)
+  rowsRead         Int       @default(0)
+  rowsSkipped      Int       @default(0)
+  errorSamples     Json? // ≤ 200 {row, column, reason}
+  monthSummaries   Json? // MonthSummary[] (plan §6.3)
+  dimensionValues  Json? // {dimKey: [{value, lines, amountPaise}]} top 200 per dim
+  dimensionCombos  Json? // [{dims, lines, amountRupees, quantity}] (contract shape) distinct full combos (≤ 2,000 by |₹|)
+  error            String?
+  attempts         Int       @default(0)
+  heartbeatAt      DateTime?
+  startedAt        DateTime?
+  finishedAt       DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  aggregates SalesImportAggregate[]
+  applies    SalesImportApply[]
+
+  @@index([clientId, createdAt])
+  @@index([status])
+  @@index([clientId, contentSha256])
+  @@index([status, finishedAt])
+  // NOTE: a PARTIAL unique index `sales_imports_reprocessedFromId_live_key` ON ("reprocessedFromId")
+  // WHERE "reprocessedFromId" IS NOT NULL AND "status" NOT IN ('CANCELLED', 'FAILED') — at most ONE live
+  // "reprocess as new" child per applied import — is defined in the migration 20261112120000_sales_month_history,
+  // not here (Prisma can't express partial indexes). Do NOT drop it: reprocessAsNew relies on it (P2002 → 409)
+  // as the last line behind its row lock.
+  @@map("sales_imports")
+}
+
+model SalesImportAggregate {
+  id          BigInt @id @default(autoincrement()) // keyset pagination key
+  importId    String
+  month       String // YYYY-MM (invoice calendar month)
+  outletCode  String
+  dims        Json // {"dimA":"X","dimB":"500"} normalized (plan §6.1)
+  dimKey      String // stable JSON of dims (sorted keys)
+  amountPaise BigInt // Σ amount in paise (signed, returns net off)
+  qtyPico     BigInt // Σ quantity × 1e12 (signed; exact per-line accumulation, H3)
+  lines       Int
+
+  import SalesImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  @@index([importId, month, id])
+  @@map("sales_import_aggregates")
+}
+
+/// Immutable history of every apply (audit + "what was written").
+model SalesImportApply {
+  id                  String   @id @default(cuid())
+  importId            String
+  clientId            String
+  month               String
+  appliedById         String
+  batchId             String // the SalesUploadBatch(status 'SALES_IMPORT') created for this apply
+  definitionsHash     String
+  definitionsSnapshot Json // frozen SalesKpiDefinition[] used
+  outletsWritten      Int
+  outletsZeroFilled   Int
+  totals              Json // {kpiCode: {before, after}}
+  source              String   @default("IMPORT") // IMPORT (a file) | HISTORY (recalculate from SalesMonthHistory)
+  createdAt           DateTime @default(now())
+
+  import SalesImport @relation(fields: [importId], references: [id], onDelete: Restrict)
+
+  @@index([clientId, month, createdAt])
+  @@map("sales_import_applies")
+}
+
+/// The FINAL applied file lines of a month (every customer code, matched or not), replaced by each apply and kept
+/// SALES_MONTH_HISTORY_RETENTION_YEARS (10) — the source for "Recalculate from stored history" after the per-import
+/// aggregates are purged (plan §10b). No FK to sales_imports on purpose: it outlives the import's data.
+model SalesMonthHistory {
+  id             BigInt   @id @default(autoincrement())
+  clientId       String
+  month          String // YYYY-MM
+  customerCode   String // normalizeOutletCode of the file cell (same as SalesImportAggregate.outletCode)
+  outletId       String? // the roster outlet at apply time (null = unmatched then)
+  dims           Json
+  dimKey         String
+  keyHash        String // md5(customerCode || chr(31) || dimKey) — bounded unique key (raw text could exceed index row size)
+  amountPaise    BigInt
+  qtyPico        BigInt
+  lines          Int
+  sourceImportId String
+  appliedAt      DateTime
+  appliedById    String
+
+  @@unique([clientId, month, keyHash])
+  @@index([clientId, month, id])
+  @@index([month])
+  @@map("sales_month_histories")
+}
+
+/// Per-month product-combo summary of SalesMonthHistory (plan §10c, audit M1): one row per distinct product combo of the
+/// month's stored lines, replaced in the SAME transaction as the history (INSERT … SELECT … GROUP BY) and deleted with it
+/// by the retention sweep. The KPI picker's "Stored month(s)" source aggregates THIS table (thousands of rows per month),
+/// never the line rows. Sums are NUMERIC: a combo's month total over every customer can exceed BIGINT pico-cases.
+model SalesMonthHistoryCombo {
+  id             BigInt   @id @default(autoincrement())
+  clientId       String
+  month          String // YYYY-MM
+  dims           Json
+  dimKey         String
+  keyHash        String // md5(dimKey) — bounded unique key (dimKey can exceed the index row size)
+  amountPaise    Decimal  @db.Decimal(38, 0)
+  qtyPico        Decimal  @db.Decimal(38, 0)
+  lines          Int
+  sourceImportId String // the history set it summarises (= SalesMonthHistorySet.sourceImportId)
+  appliedAt      DateTime // = SalesMonthHistorySet.appliedAt; a mismatch → the reader rebuilds the month (re-check L-a)
+
+  @@unique([clientId, month, keyHash])
+  @@index([month])
+  @@map("sales_month_history_combos")
+}
+
+/// Header of a month's history set (one per tenant × month): month lists read this, never the line rows; recalculate
+/// checks the current KPIs' dimension keys against `dimensionKeys` (plan §10b).
+model SalesMonthHistorySet {
+  id                 String   @id @default(cuid())
+  clientId           String
+  month              String
+  sourceImportId     String
+  appliedAt          DateTime
+  appliedById        String
+  mappingFingerprint String? // the column mapping the lines were parsed with (SalesImport.mappingFingerprint)
+  dimensionKeys      String[] @default([]) // that mapping's dimension keys
+  lineRows           Int      @default(0)
+  /// The history set the month's combos summary (sales_month_history_combos) was built from — written by the apply in
+  /// the same transaction as the summary. ≠ sourceImportId / appliedAt (or null) → the summary is not used (§10c).
+  combosSourceImportId String?
+  combosAppliedAt      DateTime?
+
+  @@unique([clientId, month])
+  @@map("sales_month_history_sets")
+}
+
+/// Explicit override of the implicit open/closed month rule (plan §7.3).
+model SalesMonthStatus {
+  id                  String    @id @default(cuid())
+  clientId            String
+  month               String
+  state               String // 'OPEN' | 'CLOSED'
+  closedAt            DateTime?
+  closedById          String?
+  reopenedAt          DateTime?
+  reopenedById        String?
+  lastAppliedImportId String?
+  lastAppliedAt       DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@unique([clientId, month])
+  @@map("sales_month_statuses")
+}
+
+// ─── MODULE: OFFER TILES — per-tenant "This month's offers" content (display-only) ───
+// Admin-authored tiles shown on the PARTNER dashboard. DISPLAY-ONLY: nothing here credits,
+// computes or reserves points. Value is identical for every outlet in the segment; only the
+// optional KPI progress (OutletTarget/OutletSalesRecord) is per-outlet, computed at read time.
+// Additive + dormant: gated by the per-tenant `features.offerTiles` flag (default OFF) AND zero
+// rows ⇒ the partner dashboard renders no section (Deoleo byte-identical).
+// See platform/docs/plans/OFFER-TILES-PLAN.md.
+
+// Declaration ORDER matters: `orderBy: { group: 'asc' }` sorts by Postgres enum declaration
+// order, so TARGET_REWARD ("Earn on your targets") must stay first.
+enum OfferGroup {
+  TARGET_REWARD // "Earn on your targets"
+  EXTRA_SCHEME // "Extra schemes this month"
+}
+
+enum OfferValueType {
+  POINTS
+  PERCENT
+  RUPEES
+  TEXT
+}
+
+model OfferTile {
+  id              String         @id @default(cuid())
+  clientId        String
+  group           OfferGroup
+  valueType       OfferValueType
+  // Exactly one of valueNumber / valueText is set (service-validated):
+  //   POINTS | PERCENT | RUPEES → valueNumber (> 0, ≤ 2 dp); TEXT → valueText (≤ 12 chars).
+  valueNumber     Decimal?       @db.Decimal(12, 2)
+  valueText       String?
+  unitLabel       String? // "per case"
+  product         String? // "ADHO 50 ml"
+  label           String // headline
+  details         String? // plain-text details / terms (bottom sheet)
+  validFrom       DateTime       @db.Date // IST calendar day, inclusive
+  validTo         DateTime       @db.Date // IST calendar day, inclusive
+  sortOrder       Int            @default(0)
+  isActive        Boolean        @default(true) // publish toggle; copies land FALSE (draft)
+  // Targeting — EMPTY array = "all". Matched case-insensitively against the outlet master.
+  programNames    String[]       @default([])
+  outletTypeCodes String[]       @default([]) // OutletType.code
+  zones           String[]       @default([])
+  states          String[]       @default([])
+  // Optional link to a tenant KPI (KpiDef.code) → per-outlet live progress.
+  kpiCode         String?
+  copiedFromId    String? // set by "Copy last month" (source tile id)
+  // 'YYYY-MM' target month of a copy-month run. Idempotency key with copiedFromId — NOT validFrom,
+  // which the admin may edit after copying (that used to let a re-copy duplicate the tile).
+  copiedToMonth   String?
+  createdById     String
+  updatedById     String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  deletedAt       DateTime?
+
+  @@index([clientId, deletedAt, validFrom, validTo])
+  @@index([clientId, copiedFromId, copiedToMonth])
+  @@map("offer_tiles")
+}
+
 // ─── MODULE: POINTS COMPUTE ENGINE (Wave 0) — versioned rule store ────────────
 // A PointsRule is a versioned, immutable config row that mirrors the shared
 // PointsRuleConfig contract (api/src/points-engine/points-engine.types.ts). A
@@ -3578,4 +3864,20 @@ enum GiftMasterStatus {
 enum GiftAmountType {
   FIXED
   FREE_AMOUNT
+}
+
+/// Voucher codes ops recorded as "Voucher cancelled with vendor" — sha256 of the NORMALISED code
+/// (trim + uppercase + no internal whitespace), never the code itself. Tenant-wide reuse guard:
+/// a cancelled code can never be issued again on ANY order of that tenant (voucher-write-guard.ts).
+model CancelledVoucherCode {
+  id            String   @id @default(cuid())
+  clientId      String
+  codeHash      String
+  orderId       String
+  cancelledById String?
+  createdAt     DateTime @default(now())
+
+  @@unique([clientId, codeHash])
+  @@index([orderId])
+  @@map("cancelled_voucher_codes")
 }

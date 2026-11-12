@@ -3,6 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { Storage } from '@google-cloud/storage';
 import { randomUUID } from 'node:crypto';
 import * as path from 'path';
+import type { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 /**
  * GCS object storage — the Nest port of platform/src/lib/s3.ts (function
@@ -132,8 +134,70 @@ export class StorageService {
     }
   }
 
+  /**
+   * Object size + stored content-type, or null when missing / unreadable (never throws).
+   * Lets a caller enforce a size cap BEFORE reading or streaming any bytes.
+   */
+  async statObject(key: string): Promise<{ size: number; contentType: string } | null> {
+    try {
+      const [meta] = await this.storage.bucket(this.bucket).file(key).getMetadata();
+      return { size: Number(meta.size ?? 0), contentType: meta.contentType || 'application/octet-stream' };
+    } catch (err) {
+      this.logger.warn(`statObject: failed to read metadata for ${key}: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Download an object's bytes directly (no metadata round-trip), or null on any read
+   * error. For callers that already sized the object via statObject.
+   */
+  async downloadObject(key: string): Promise<Buffer | null> {
+    try {
+      const [buf] = await this.storage.bucket(this.bucket).file(key).download();
+      return buf;
+    } catch (err) {
+      this.logger.warn(`downloadObject: failed to read ${key}: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
   /** Delete an object. */
   async deleteFile(key: string): Promise<void> {
     await this.storage.bucket(this.bucket).file(key).delete();
+  }
+
+  // ─── Large-object helpers (Sales Import: chunked uploads streamed by the worker) ───────────────
+  // Additive; signing-free (plain object read/write/list/delete via the runtime SA's objectAdmin).
+
+  /** Stream a private object, optionally a byte range (`end` INCLUSIVE, GCS semantics). */
+  openReadStream(key: string, range?: { start?: number; end?: number }): Readable {
+    const file = this.storage.bucket(this.bucket).file(key);
+    return range ? file.createReadStream({ start: range.start, end: range.end, validation: false }) : file.createReadStream();
+  }
+
+  /** Objects under a prefix, with their byte sizes. */
+  async listPrefix(prefix: string): Promise<Array<{ name: string; size: number }>> {
+    const [files] = await this.storage.bucket(this.bucket).getFiles({ prefix });
+    return files.map((f) => ({ name: f.name, size: Number(f.metadata?.size ?? 0) }));
+  }
+
+  /** Delete every object under a prefix (no-op when there are none). */
+  async deletePrefix(prefix: string): Promise<void> {
+    if (!prefix || !prefix.endsWith('/')) throw new Error(`deletePrefix: refusing a non-folder prefix "${prefix}"`);
+    await this.storage.bucket(this.bucket).deleteFiles({ prefix, force: true });
+  }
+
+  /** Server-side copy of one object to another key in the same bucket (no bytes pass through the API). */
+  async copyFile(fromKey: string, toKey: string): Promise<void> {
+    const bucket = this.storage.bucket(this.bucket);
+    await bucket.file(fromKey).copy(bucket.file(toKey));
+  }
+
+  /** Upload from a stream without buffering it (non-resumable, like uploadFile). */
+  async uploadStream(key: string, source: Readable, contentType: string): Promise<string> {
+    const file = this.storage.bucket(this.bucket).file(key);
+    await pipeline(source, file.createWriteStream({ resumable: false, contentType }));
+    return this.publicUrl(key);
   }
 }

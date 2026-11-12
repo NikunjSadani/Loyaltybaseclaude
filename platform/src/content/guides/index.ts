@@ -20,8 +20,9 @@ export interface Guide {
 // payouts.ts / tds.ts import only the `Guide` TYPE from here (erased at build) — no runtime cycle.
 import { payoutsGuide } from './payouts';
 import { tdsGuide } from './tds';
+import { offersGuide } from './offers';
 
-export const GUIDES: Guide[] = [payoutsGuide, tdsGuide];
+export const GUIDES: Guide[] = [payoutsGuide, tdsGuide, offersGuide];
 
 export function getGuide(slug: string): Guide | undefined {
   return GUIDES.find((g) => g.slug === slug);

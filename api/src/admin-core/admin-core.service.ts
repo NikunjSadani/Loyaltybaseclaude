@@ -9,7 +9,7 @@ import { Prisma, KycStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { TenantService } from '../tenant/tenant.service';
-import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { TenantSettingsService, OtpTemplatePurpose, OtpTemplatesSettings } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { businessHoursBetween, isValidIsoDate } from '../common/business-hours';
 import { isActivePhoneConflict, ACTIVE_PHONE_IN_USE_MSG } from '../common/phone-conflict';
@@ -48,6 +48,7 @@ import {
   UpdateUserDto,
 } from './dto/users.dto';
 import {
+  SaveOtpTemplatesDto,
   SetHolidaysDto,
   SetPointsExpiryDto,
   SetReportRecipientsDto,
@@ -1002,6 +1003,119 @@ export class AdminCoreService {
     'slaTargetHours',
   ]);
 
+  /** The four OTP purposes a tenant can map to its own MSG91 template (mirrors OtpTemplatePurpose). */
+  private static readonly OTP_TEMPLATE_PURPOSES: readonly OtpTemplatePurpose[] = [
+    'login',
+    'redemptionSelf',
+    'kycConsent',
+    'redemptionSales',
+  ];
+
+  /** A MSG91 template id is a 24-character hex string (e.g. Deoleo's `6a391d46…`). */
+  private static readonly MSG91_TEMPLATE_ID_RE = /^[0-9a-f]{24}$/i;
+
+  /**
+   * Strictly validate the purposes an operator CHANGED → normalised (trimmed) partial map, or a 400.
+   * At least one purpose; only the four known purposes; each a string that is '' (use the global
+   * template) or a 24-hex MSG91 template id.
+   */
+  static validateOtpTemplateChanges(changes: unknown): Partial<OtpTemplatesSettings> {
+    if (!changes || typeof changes !== 'object' || Array.isArray(changes)) {
+      throw new BadRequestException('changes must be an object of OTP purposes.');
+    }
+    const v = changes as Record<string, unknown>;
+    const purposes = AdminCoreService.OTP_TEMPLATE_PURPOSES as readonly string[];
+    const keys = Object.keys(v);
+    if (keys.length === 0) throw new BadRequestException('No OTP template was changed.');
+    const out: Partial<OtpTemplatesSettings> = {};
+    for (const k of keys) {
+      if (!purposes.includes(k)) {
+        throw new BadRequestException(`otpTemplates.${k} is not a known OTP purpose.`);
+      }
+      const raw = v[k];
+      if (typeof raw !== 'string') {
+        throw new BadRequestException(`otpTemplates.${k} must be a string.`);
+      }
+      const id = raw.trim();
+      if (id !== '' && !AdminCoreService.MSG91_TEMPLATE_ID_RE.test(id)) {
+        throw new BadRequestException(
+          `otpTemplates.${k} must be a 24-character MSG91 template id (0-9, a-f) or empty to use the global template.`,
+        );
+      }
+      out[k as OtpTemplatePurpose] = id;
+    }
+    return out;
+  }
+
+  /** Normalise a STORED otpTemplates row value → the complete map (missing / non-string → ''). */
+  private static storedOtpTemplates(value: unknown): OtpTemplatesSettings {
+    const v = (value && typeof value === 'object' && !Array.isArray(value) ? value : {}) as Record<string, unknown>;
+    const out = {} as OtpTemplatesSettings;
+    for (const p of AdminCoreService.OTP_TEMPLATE_PURPOSES) {
+      out[p] = typeof v[p] === 'string' ? (v[p] as string).trim() : '';
+    }
+    return out;
+  }
+
+  /** The OTP-templates card is per-tenant: an un-assumed (platform) session has no tenant to edit. */
+  private static assertTenantContext(user: JwtPayload): void {
+    if (user.role === 'GIFSY_ADMIN' && !user.assumed) {
+      throw new BadRequestException('Switch into a brand first — OTP SMS templates are per tenant.');
+    }
+  }
+
+  /**
+   * GET /v1/admin/settings/otp-templates — the caller-tenant's STORED otpTemplates row (NOT the
+   * fail-soft effective-settings view, which silently returns defaults on a read error: a card seeded
+   * from that would look "all empty" and a later save could blank a live template). A DB error
+   * propagates as an error, so the card shows Retry instead of an empty map. `clientId` is echoed so
+   * the save can be bound to the tenant that was loaded.
+   */
+  async getOtpTemplates(user: JwtPayload): Promise<{ clientId: string; templates: OtpTemplatesSettings; stored: boolean }> {
+    AdminCoreService.assertTenantContext(user);
+    const row = await this.prisma.programSetting.findUnique({
+      where: { clientId_settingKey: { clientId: user.clientId, settingKey: 'otpTemplates' } },
+      select: { settingValue: true },
+    });
+    return {
+      clientId: user.clientId,
+      templates: AdminCoreService.storedOtpTemplates(row?.settingValue),
+      stored: !!row,
+    };
+  }
+
+  /**
+   * PUT /v1/admin/settings/otp-templates — save ONLY the changed purposes, merged server-side onto the
+   * freshly-read STORED row (untouched purposes keep their stored ids, never blanked). Bound to the
+   * loaded tenant: a dto.clientId that differs from the caller's current tenant is a 409. Persists via
+   * upsertSetting (allowPlatformOnlyKey) so the PROGRAM_SETTINGS audit + cache bust fire as usual.
+   */
+  async saveOtpTemplates(user: JwtPayload, dto: SaveOtpTemplatesDto) {
+    AdminCoreService.assertTenantContext(user);
+    if (dto.clientId !== user.clientId) {
+      throw new ConflictException(
+        'The brand changed in another tab since this card loaded — reload the page and try again. Nothing was saved.',
+      );
+    }
+    const changes = AdminCoreService.validateOtpTemplateChanges(dto.changes);
+    const row = await this.prisma.programSetting.findUnique({
+      where: { clientId_settingKey: { clientId: user.clientId, settingKey: 'otpTemplates' } },
+      select: { settingValue: true },
+    });
+    const merged: OtpTemplatesSettings = { ...AdminCoreService.storedOtpTemplates(row?.settingValue), ...changes };
+    await this.upsertSetting(
+      user,
+      {
+        key: 'otpTemplates',
+        value: merged,
+        category: 'otp',
+        description: "Per-purpose MSG91 OTP template ids ('' = global MSG91_OTP_TEMPLATE_ID).",
+      },
+      { allowPlatformOnlyKey: true },
+    );
+    return { clientId: user.clientId, templates: merged };
+  }
+
   // ── National holiday calendar (platform-global) ────────────────────────────
   // The KYC review-SLA counts only business hours (Mon–Fri) and PAUSES on this calendar
   // (owner decision 2026-08-10). Storage + defaults + the SLA date-set live in the shared
@@ -1214,6 +1328,51 @@ export class AdminCoreService {
       const explicitlyOff =
         dto.value === false || dto.value === 'false' || dto.value === 0 || dto.value === '0';
       dto.value = !explicitlyOff;
+    }
+
+    // OWNER-ONLY auth config at the DATA boundary: the per-tenant OTP SMS templates (settingKey
+    // 'otpTemplates', read by TenantSettingsService.getOtpTemplateId at EVERY OTP send site incl. login)
+    // must ONLY be written through the dedicated GIFSY_ADMIN-only saveOtpTemplates (which validates,
+    // merges onto the stored row, binds to the loaded tenant and passes allowPlatformOnlyKey). Blocking it
+    // here stops the generic PUT /v1/admin/settings — reachable by a GIFSY_STAFF holding
+    // tenancy:write_finance — from rewriting a tenant's login OTP template. Mirrors tdsStatutory.
+    if (dto.key === 'otpTemplates' && !opts?.allowPlatformOnlyKey) {
+      throw new ForbiddenException(
+        'OTP SMS templates can only be changed via the dedicated OTP SMS templates card (Gifsy admin).',
+      );
+    }
+
+    // VPA safeguard — manual (typed) UPI entry ⇄ STORED UPI-ID uniqueness (uniquenessPolicyStored, NOT
+    // the derived uniquenessPolicy, which ORs in upiManualEntry itself). Both directions are checked
+    // against the PREVIOUS values read fresh from the DB (cache busted first, so never a ≤5-min-stale
+    // copy from another write on another instance):
+    //  (a) salesApp: reject ONLY an OFF→ON transition of upiManualEntry while stored UPI uniqueness
+    //      is OFF. Re-saving salesApp with manual entry already ON (e.g. editing the ledger label) is
+    //      not a transition and is allowed. Only an explicit boolean `true` turns it on (the reader's
+    //      strict `bool` semantics); turning it OFF / omitting it never needs the check.
+    //  (b) uniquenessPolicy: reject a write whose resulting stored `upi` is OFF while manual entry is
+    //      stored ON. The key is REPLACE-WHOLE and the reader's default upi is false, so anything other
+    //      than an explicit boolean `upi: true` (an explicit false, an omitted upi, a non-object) turns
+    //      it OFF.
+    const isPlainObj = (v: unknown): v is Record<string, unknown> =>
+      typeof v === 'object' && v !== null && !Array.isArray(v);
+    const turnsManualOn =
+      dto.key === 'salesApp' && isPlainObj(dto.value) && dto.value.upiManualEntry === true;
+    // A uniquenessPolicy write whose stored `upi` ends up ON is ALWAYS allowed (never read, never
+    // gated) — it is the recovery path out of an invalid stored state (manual entry ON with stored
+    // upi OFF); only the OFF direction is gated below.
+    const turnsUpiUniquenessOn =
+      dto.key === 'uniquenessPolicy' && isPlainObj(dto.value) && dto.value.upi === true;
+    const turnsUpiUniquenessOff = dto.key === 'uniquenessPolicy' && !turnsUpiUniquenessOn;
+    if (turnsManualOn || turnsUpiUniquenessOff) {
+      this.tenantSettings.invalidate(clientId);
+      const prev = await this.tenantSettings.getEffectiveSettings(clientId);
+      if (turnsManualOn && !prev.salesApp.upiManualEntry && !prev.uniquenessPolicyStored.upi) {
+        throw new BadRequestException('Turn on UPI ID uniqueness first');
+      }
+      if (turnsUpiUniquenessOff && prev.salesApp.upiManualEntry) {
+        throw new BadRequestException('Turn off UPI Manual Entry first');
+      }
     }
 
     // For the TDS policy (a money-path config), capture the PRIOR value BEFORE the write so

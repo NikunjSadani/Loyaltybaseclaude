@@ -35,6 +35,7 @@ export const DEFAULT_SETTINGS: GifsySettings = {
   salesApp: {
     ledgerLabel:              'Wallet',
     upiEnabled:               false,
+    upiManualEntry:           false,
   },
   creditsPayouts: {
     monthCutoffDay:  28,
@@ -54,6 +55,8 @@ export const DEFAULT_SETTINGS: GifsySettings = {
   // Identity/payout uniqueness — default preserves today's behaviour (GST + phone enforced;
   // bank/UPI were never checked). PAN + GST are always DB-enforced regardless of the flags.
   uniquenessPolicy: { gst: true, phone: true, bank: false, upi: false },
+  // The policy as STORED (admin display + save base). Same default as the derived policy.
+  uniquenessPolicyStored: { gst: true, phone: true, bank: false, upi: false },
 };
 
 /** Server `EffectiveSettings` shape (GET /v1/settings / me.settings). */
@@ -73,6 +76,8 @@ interface ServerSettings {
   outletCategories:       string[];
   visibilityConfig?:      GifsySettings['visibilityConfig'];
   uniquenessPolicy?:      GifsySettings['uniquenessPolicy'];
+  /** The policy as STORED (uniquenessPolicy is the derived/enforced value). */
+  uniquenessPolicyStored?: GifsySettings['uniquenessPolicyStored'];
 }
 
 // ── in-memory store (seeded synchronously from the localStorage cache) ────────
@@ -84,7 +89,15 @@ function loadCache(): GifsySettings {
   if (typeof window === 'undefined') return DEFAULT_SETTINGS;
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<GifsySettings>;
+      // A cache written before `uniquenessPolicyStored` existed: its policy came from a
+      // pre-derivation server, so it IS the stored one — never let the DEFAULT stand in for it.
+      if (!parsed.uniquenessPolicyStored && parsed.uniquenessPolicy) {
+        parsed.uniquenessPolicyStored = parsed.uniquenessPolicy;
+      }
+      return { ...DEFAULT_SETTINGS, ...parsed };
+    }
   } catch { /* ignore */ }
   return DEFAULT_SETTINGS;
 }
@@ -121,6 +134,13 @@ function fromServer(srv: ServerSettings, prev: GifsySettings): GifsySettings {
     outletCategories:       srv.outletCategories       ?? prev.outletCategories,
     visibilityConfig:       srv.visibilityConfig       ?? prev.visibilityConfig,
     uniquenessPolicy:       srv.uniquenessPolicy       ?? prev.uniquenessPolicy,
+    // STORED policy (admin display/save base). When a response carries a policy but NO stored
+    // field it is a legacy (pre-derivation) server, whose policy IS the stored one — so the
+    // response's policy beats the cached stored value. (prev.uniquenessPolicyStored is always
+    // seeded from DEFAULT_SETTINGS, so ranking it before srv.uniquenessPolicy would pin the
+    // admin save base to the DEFAULTS on a legacy server and a save would wipe e.g. bank=true.)
+    uniquenessPolicyStored: srv.uniquenessPolicyStored ?? srv.uniquenessPolicy
+                            ?? prev.uniquenessPolicyStored ?? prev.uniquenessPolicy,
   };
 }
 
@@ -190,16 +210,90 @@ const SAVE_KEY_MAP: Partial<Record<keyof GifsySettings, string>> = {
  * resetting any omitted sub-field to its default. Never PUT a single sub-field.
  */
 export async function saveGifsySettings(partial: Partial<GifsySettings>): Promise<boolean> {
-  const entries = Object.entries(partial) as [keyof GifsySettings, unknown][];
+  return (await saveGifsySettingsDetailed(partial)).ok;
+}
+
+type UniqPolicy = NonNullable<GifsySettings['uniquenessPolicy']>;
+
+function samePolicy(a: UniqPolicy | undefined, b: UniqPolicy | undefined): boolean {
+  if (!a || !b) return false;
+  return a.gst === b.gst && a.phone === b.phone && a.bank === b.bank && a.upi === b.upi;
+}
+
+/** The ENFORCED policy the server derives from a stored one (upi forced on by manual UPI entry). */
+function derivePolicy(stored: UniqPolicy, salesApp: GifsySettings['salesApp'] | undefined): UniqPolicy {
+  return { ...stored, upi: stored.upi || salesApp?.upiManualEntry === true };
+}
+
+/**
+ * True when `partial` is a whole-settings SNAPSHOT echo (it carries `uniquenessPolicyStored`,
+ * which no targeted save passes) whose `uniquenessPolicy` was NOT edited — i.e. it equals the
+ * snapshot's own derived policy, the current derived policy, or a stored policy. A TARGETED save
+ * (`{ uniquenessPolicy }` alone, e.g. the Settings uniqueness card) is always explicit.
+ */
+function isUnchangedPolicyEcho(partial: Partial<GifsySettings>): boolean {
+  const p = partial.uniquenessPolicy;
+  const snapStored = partial.uniquenessPolicyStored;
+  if (!p || !snapStored) return false;
+  return (
+    samePolicy(p, derivePolicy(snapStored, partial.salesApp ?? store.salesApp)) ||
+    samePolicy(p, store.uniquenessPolicy) ||
+    samePolicy(p, snapStored) ||
+    samePolicy(p, store.uniquenessPolicyStored)
+  );
+}
+
+/** Outcome of a settings save: `error` is the FIRST failing PUT's server message (e.g. the
+ *  backend's 400 "Turn off UPI Manual Entry first"), when one was returned. */
+export interface SaveSettingsResult { ok: boolean; error?: string }
+
+/**
+ * Same as `saveGifsySettings` (identical PUTs + local cache update on success) but also returns
+ * the server's error message on failure, so a caller can show WHY a save was refused instead of
+ * a fixed copy. `saveGifsySettings` delegates here, so both stay byte-identical in behaviour.
+ */
+export async function saveGifsySettingsDetailed(partial: Partial<GifsySettings>): Promise<SaveSettingsResult> {
+  // Never PUT the DERIVED (enforced) uniquenessPolicy back as the stored one: a caller that
+  // echoes a whole-settings SNAPSHOT (e.g. getGifsySettings()) carries the derived value, where
+  // upi is forced true while salesApp.upiManualEntry is on — persisting it would silently keep
+  // UPI uniqueness ON after manual entry is turned off. An unchanged echo is replaced by the
+  // STORED policy; an explicit (targeted, or edited) uniquenessPolicy is sent as-is.
+  const policyToSave = partial.uniquenessPolicy
+    ? (isUnchangedPolicyEcho(partial)
+        ? (store.uniquenessPolicyStored ?? partial.uniquenessPolicyStored ?? partial.uniquenessPolicy)
+        : partial.uniquenessPolicy)
+    : undefined;
+  const toSave: Partial<GifsySettings> = policyToSave ? { ...partial, uniquenessPolicy: policyToSave } : partial;
+  const entries = Object.entries(toSave) as [keyof GifsySettings, unknown][];
   let allOk = true;
+  let firstError: string | undefined;
   for (const [key, value] of entries) {
     const settingKey = SAVE_KEY_MAP[key];
     if (!settingKey) continue;
     const res = await api.put('/api/admin/settings', { key: settingKey, value });
-    if (!res.success) allOk = false;
+    if (!res.success) {
+      allOk = false;
+      if (firstError === undefined && res.error) firstError = res.error;
+    }
   }
-  if (allOk) writeCache({ ...store, ...partial });
-  return allOk;
+  if (allOk) {
+    const next: GifsySettings = { ...store, ...toSave };
+    // A snapshot's own `uniquenessPolicyStored` (not a saved key) must not overwrite the cache's.
+    if ('uniquenessPolicyStored' in partial) next.uniquenessPolicyStored = store.uniquenessPolicyStored;
+    // `uniquenessPolicy` is PUT as the STORED policy. Mirror it into `uniquenessPolicyStored` so
+    // the admin save base can never go stale, and re-derive the enforced value per the server
+    // contract (upi forced true while salesApp.upiManualEntry is on). This local update is the
+    // AUTHORITATIVE post-save state for the admin page: it deliberately does NOT refresh from
+    // GET /settings after a save, because the server's per-instance settings cache (5 min) can
+    // serve a pre-save snapshot from another instance and revert the page + the save base.
+    if (policyToSave) next.uniquenessPolicyStored = policyToSave;
+    if ((policyToSave || partial.salesApp) && next.uniquenessPolicyStored) {
+      const stored = next.uniquenessPolicyStored;
+      next.uniquenessPolicy = { ...stored, upi: stored.upi || next.salesApp?.upiManualEntry === true };
+    }
+    writeCache(next);
+  }
+  return allOk ? { ok: true } : { ok: false, ...(firstError ? { error: firstError } : {}) };
 }
 
 /** Reactive hook — re-renders on hydrate/save and refreshes from the server on mount. */

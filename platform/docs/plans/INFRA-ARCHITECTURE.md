@@ -71,6 +71,10 @@ attachment (they proxy `/api/*` → the backend and never touch the DB).
 > (GO-LIVE-ISSUE-LIST `GLm-5`), **not** a regression from removing Redis — Redis was never backing the
 > throttler. If cross-instance limits become necessary, back the throttler with the DB or another shared
 > store; that is a *new* build, not a restoration.
+> **Keying (2026-11-11, on staging, NOT yet on prod):** the throttler was keyed on `req.ip`, which behind the edge was ONE bucket for
+> every user (prod saw 220 send-otp 429s in Deoleo launch week). The release now on staging keys it per phone / per user
+> (`IdentityThrottlerGuard`; refresh 1000/min; friendly 429 copy). Still in-memory per instance. Staging can't exercise it
+> (`skipIf` when `FIXED_OTP`) — prove on prod after the release.
 >
 > **Residual cleanup — ✅ DONE (2026-07-22):** the dead `ioredis` / `@nestjs/cache-manager` /
 > `cache-manager` / `@types/ioredis` deps were removed from `api/package.json`, lockfile regenerated,

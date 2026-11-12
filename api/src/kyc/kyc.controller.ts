@@ -16,6 +16,7 @@ import {
 import { timingSafeEqual } from 'crypto';
 import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { SkipThrottle } from '@nestjs/throttler';
 import { KycService } from './kyc.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Public, Roles } from '../common/decorators/roles.decorator';
@@ -59,7 +60,12 @@ export class KycController {
    * KycService.viewDocument for the full security contract. Static path declared
    * before the `:id` route so Nest does not match it as an :id param.
    */
+  // @SkipThrottle (audit L3): a reviewer's gallery fires one GET per document through the Next
+  // rewrite (one shared IP), so the global 60/min bucket broke images for every reviewer at once.
+  // Each request is authorised SOLELY by an HS256-signed, short-lived, single-object token (bad
+  // token → bare 404 after one local verify), so — like gift-image — it is exempt.
   @Public()
+  @SkipThrottle()
   @Get('documents/view')
   async viewDocument(
     @Query('token') token: string,
@@ -253,7 +259,8 @@ export class KycController {
     return this.kyc.getOne(user, id);
   }
 
-  // PATCH is a Gifsy-side RAW status writer (PATCH_STATUSES incl. APPROVED/REJECTED), so it is
+  // PATCH is a Gifsy-side RAW status writer (PATCH_STATUSES incl. REJECTED etc.; status=APPROVED is
+  // REFUSED with 400 by the service — approval must run applyBridgeOutcome via the review flow), so it is
   // gated at the Gifsy-terminal tier `kyc:gifsy_approve` — the same tier as /approve, /verify,
   // /re-kyc — NOT the field-approver `kyc:approve`. This matters once RBAC Option-X makes routes
   // reachable by a GIFSY_STAFF: a field-tier `kyc:approve` grant must not drive a terminal status

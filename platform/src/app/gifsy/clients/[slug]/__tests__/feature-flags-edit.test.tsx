@@ -123,4 +123,21 @@ describe('Feature Flags editor (real PATCH persistence)', () => {
     // No optimistic desync — the switch stays OFF because local state never changed.
     expect(screen.getByRole('switch', { name: 'Enable Hubble Voucher Auto-Issue' })).toHaveAttribute('aria-checked', 'false');
   });
+
+  it('FF3 (M1): the server\'s reason is shown next to the toggle (Sales Import refused: no background processor here)', async () => {
+    const MSG = "Sales Import can't be switched on here yet: the background processor isn't set up in this environment.";
+    vi.stubGlobal('fetch', mockFetch(() => ({
+      status: 400, ok: false,
+      json: async () => ({ success: false, error: MSG }),
+    })));
+
+    await renderPage();
+    const toggle = await screen.findByRole('switch', { name: 'Enable Sales Import (DMS file)' });
+    fireEvent.click(toggle);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('feature-flags-error')).toHaveTextContent(MSG);
+    });
+    expect(screen.getByRole('switch', { name: 'Enable Sales Import (DMS file)' })).toHaveAttribute('aria-checked', 'false');
+  });
 });

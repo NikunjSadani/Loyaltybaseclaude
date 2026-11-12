@@ -2,7 +2,7 @@ import { Module }                   from '@nestjs/common';
 import { ConfigModule }             from '@nestjs/config';
 import { isFixedOtpAllowed }        from './common/fixed-otp';
 import { APP_GUARD, APP_INTERCEPTOR, APP_FILTER } from '@nestjs/core';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerModule }          from '@nestjs/throttler';
 import { ScheduleModule }           from '@nestjs/schedule';
 import { LoggerModule }             from 'nestjs-pino';
 import { buildLoggerParams }        from './common/logging/logger.config';
@@ -10,6 +10,7 @@ import { buildLoggerParams }        from './common/logging/logger.config';
 import { AppController }  from './app.controller';
 import { AppService }     from './app.service';
 import { JwtAuthGuard }   from './common/guards/jwt-auth.guard';
+import { IdentityThrottlerGuard } from './common/guards/identity-throttler.guard';
 import { RolesGuard }     from './common/guards/roles.guard';
 import { TenantGuard }    from './common/guards/tenant.guard';
 import { PermissionGuard } from './common/guards/permission.guard';
@@ -50,6 +51,8 @@ import { NotificationTemplatesModule } from './notification-templates/notificati
 import { PushModule }         from './push/push.module';
 import { WhatsappBroadcastsModule } from './whatsapp-broadcasts/whatsapp-broadcasts.module';
 import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
+import { OffersModule }       from './offers/offers.module';
+import { SalesImportModule }  from './sales-import/sales-import.module';
 // Phase S (S1): World-A domain modules deleted. The real domain (users, partners,
 // kyc, outlets, sales, wallet, payouts, schemes/campaigns, targets, admin, visibility,
 // leaderboard, notifications) is rebuilt from platform/lib as services in S3/S4.
@@ -66,7 +69,9 @@ import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
     ScheduleModule.forRoot(),
     // Rate limiting — applied globally; OTP endpoints have tighter limits set
     // directly on the controller with @Throttle({ default: { limit, ttl } }).
-    // Default here: 60 requests per minute per IP (generous for API consumers).
+    // Default here: 60 requests per minute per route per caller. The caller key is the IDENTITY
+    // (IdentityThrottlerGuard): user id for authenticated routes, body phone for the pre-auth OTP
+    // routes, IP otherwise — an IP key put every proxied login into one shared bucket.
     ThrottlerModule.forRoot({
       throttlers: [{
         name:  'default',
@@ -113,6 +118,10 @@ import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
     PushModule,
     WhatsappBroadcastsModule,
     TenantRoutingModule,
+    OffersModule,
+    // Sales Import (DMS invoice-line file → importer-owned KPI achievements). Dormant: every route
+    // 403s unless features.salesImport === true. platform/docs/plans/SALES-IMPORT-PIPELINE-PLAN.md.
+    SalesImportModule,
   ],
   controllers: [AppController],
   providers: [
@@ -121,8 +130,9 @@ import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
     // backend half of the contract lib/api-client.ts expects (replaces api-response.ts).
     { provide: APP_INTERCEPTOR, useClass: TransformInterceptor },
     { provide: APP_FILTER,      useClass: AllExceptionsFilter },
-    // Rate limiter applied before auth so bots can't enumerate tokens
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    // Rate limiter applied before auth so bots can't enumerate tokens. Identity-keyed (see
+    // IdentityThrottlerGuard) — it only computes the bucket key; it never changes an auth outcome.
+    { provide: APP_GUARD, useClass: IdentityThrottlerGuard },
     // Apply JWT auth globally — use @Public() to opt out
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },

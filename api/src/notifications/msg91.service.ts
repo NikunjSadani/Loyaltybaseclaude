@@ -2,6 +2,23 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as nodemailer from 'nodemailer';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
+import { scrubSecrets } from './scrub-secrets';
+
+/** Reason used when MSG91 answers with a body that isn't JSON (an HTML error page, a proxy page…). */
+export const msg91NonJsonReason = (status: number) => `MSG91 returned a non-JSON response (HTTP ${status})`;
+
+/**
+ * Parse an MSG91 response body. A non-JSON body is mapped to an error-shaped object carrying a
+ * GENERIC reason — never the parser's message, which embeds a snippet of the body (and a provider
+ * body can echo template values such as a voucher code / PIN).
+ */
+async function readMsg91Json(res: Response): Promise<unknown> {
+  try {
+    return await res.json();
+  } catch {
+    return { type: 'error', message: msg91NonJsonReason(res.status) };
+  }
+}
 
 /**
  * Shared MSG91 OTP provider. Sends OTPs synchronously via the MSG91 v5 OTP API.
@@ -94,9 +111,10 @@ export class Msg91Service {
     // body; the exact field name varies across docs (`request_id` / `requestId`, sometimes the
     // ~24-char handle is carried in `message` on the success body). We read the common shapes and
     // store whatever is present. Best-effort correlation aid — null if absent (never affects send).
-    const json = await res.json() as {
+    const json = (await readMsg91Json(res)) as {
       type?: string;
-      message?: string;
+      /** Usually a string, but a provider can send an object / array / null — scrub handles any. */
+      message?: unknown;
       request_id?: string;
       requestId?: string;
       data?: { request_id?: string; requestId?: string };
@@ -152,8 +170,12 @@ export class Msg91Service {
     phone: string,
     templateName: string,
     bodyValues: string[],
-    opts?: { crqid?: string; languageCode?: string },
+    opts?: { crqid?: string; languageCode?: string; secretValues?: string[] },
   ): Promise<{ requestId: string | null }> {
+    // A provider error can echo template values back — scrub caller-flagged secrets (a voucher
+    // code / PIN) from the logged + thrown reason: ANY match withholds the whole reason. Accepts any
+    // value (a provider `message` may be an object / null). No secrets → text unchanged.
+    const scrub = (t: unknown) => scrubSecrets(t, opts?.secretValues);
     const authKey = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
     // The integrated WhatsApp number registered with MSG91 for this platform.
     // Configurable via MSG91_WHATSAPP_NUMBER; defaults to the Deoleo-integrated number.
@@ -230,7 +252,7 @@ export class Msg91Service {
       const reason =
         (e as Error)?.name === 'TimeoutError'
           ? 'MSG91 did not respond within 10s (timeout — check MSG91 IP whitelisting / egress)'
-          : String(e);
+          : scrub(e);
       this.logger.error(
         `MSG91 WhatsApp template "${templateName}" request failed for ••••${phone.slice(-4)}: ${reason}`,
       );
@@ -242,15 +264,16 @@ export class Msg91Service {
     // body; the exact field name varies across docs (`request_id` / `requestId`, sometimes
     // nested under `data`). We read the common shapes and store whatever is present. This
     // is a best-effort correlation aid — the primary key is the crqid echoed on the webhook.
-    const json = (await res.json()) as {
+    const json = (await readMsg91Json(res)) as {
       type?: string;
-      message?: string;
+      /** Usually a string, but a provider can send an object / array / null — scrub handles any. */
+      message?: unknown;
       request_id?: string;
       requestId?: string;
       data?: { request_id?: string; requestId?: string };
     };
     if (!res.ok || json?.type === 'error') {
-      const reason = json?.message ?? `HTTP ${res.status}`;
+      const reason = scrub(json?.message ?? `HTTP ${res.status}`) || `HTTP ${res.status}`;
       this.logger.error(
         `MSG91 WhatsApp template "${templateName}" failed for ••••${phone.slice(-4)}: ${reason}`,
       );
@@ -305,7 +328,7 @@ export class Msg91Service {
         signal: AbortSignal.timeout(10_000),
       });
       if (!res.ok) return null;
-      const json = (await res.json()) as {
+      const json = (await readMsg91Json(res)) as {
         type?: string;
         status?: string;
         data?: { status?: string };
@@ -356,7 +379,7 @@ export class Msg91Service {
         signal: AbortSignal.timeout(10_000),
       });
       if (!res.ok) return null;
-      const json = (await res.json()) as {
+      const json = (await readMsg91Json(res)) as {
         type?: string;
         status?: string;
         data?: { status?: string } | Array<{ status?: string }>;
@@ -411,15 +434,21 @@ export class Msg91Service {
     phone: string,
     templateId: string,
     variables: Record<string, string> = {},
-    opts?: { crqid?: string },
+    opts?: { crqid?: string; secretValues?: string[] },
   ): Promise<{ requestId: string | null }> {
     const authKey = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
+    // Same secret handling as sendWhatsappTemplate: a provider error can echo template values (a
+    // voucher code) — ANY caller-flagged secret in the reason withholds the whole reason.
+    const scrub = (t: unknown) => scrubSecrets(t, opts?.secretValues);
+    // PII: the recipient is logged masked to the last 4.
+    const maskedPhone = `••••${phone.slice(-4)}`;
 
     // DEV bypass — same shape as sendOtp's missing-authKey path: a non-prod env without
-    // MSG91 configured logs and returns instead of throwing.
+    // MSG91 configured logs and returns instead of throwing. Only the variable NAMES are logged
+    // (a value can be a voucher code).
     if (!authKey) {
       this.logger.warn(
-        `[DEV] MSG91 not configured — SMS template "${templateId}" for ${phone} not sent (vars: ${JSON.stringify(variables)})`,
+        `[DEV] MSG91 not configured — SMS template "${templateId}" for ${maskedPhone} not sent (vars: ${Object.keys(variables).join(', ')})`,
       );
       return { requestId: null };
     }
@@ -464,8 +493,8 @@ export class Msg91Service {
       const reason =
         (e as Error)?.name === 'TimeoutError'
           ? 'MSG91 did not respond within 10s (timeout — check MSG91 IP whitelisting / egress)'
-          : String(e);
-      this.logger.error(`MSG91 SMS template "${templateId}" request failed for ${phone}: ${reason}`);
+          : scrub(e);
+      this.logger.error(`MSG91 SMS template "${templateId}" request failed for ${maskedPhone}: ${reason}`);
       throw new Error(`Failed to send SMS template ${templateId}: ${reason}`);
     }
 
@@ -474,16 +503,17 @@ export class Msg91Service {
     // the exact field name varies across docs (`request_id` / `requestId`, sometimes nested under
     // `data`). We read the common shapes and store whatever is present — best-effort correlation aid
     // for the status-by-requestID poll (the primary key is the crqid echoed on the DLR webhook).
-    const json = (await res.json()) as {
+    const json = (await readMsg91Json(res)) as {
       type?: string;
-      message?: string;
+      /** Usually a string, but a provider can send an object / array / null — scrub handles any. */
+      message?: unknown;
       request_id?: string;
       requestId?: string;
       data?: { request_id?: string; requestId?: string };
     };
     if (!res.ok || json?.type === 'error') {
-      const reason = json?.message ?? `HTTP ${res.status}`;
-      this.logger.error(`MSG91 SMS template "${templateId}" failed for ${phone}: ${reason}`);
+      const reason = scrub(json?.message ?? `HTTP ${res.status}`) || `HTTP ${res.status}`;
+      this.logger.error(`MSG91 SMS template "${templateId}" failed for ${maskedPhone}: ${reason}`);
       throw new Error(`Failed to send SMS template ${templateId}: ${reason}`);
     }
 

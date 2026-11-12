@@ -16,7 +16,8 @@ const mockTx = {
   fundReceipt: { create: jest.fn() },
   fundLedger: { create: jest.fn() },
   auditLog: { create: jest.fn() },
-  payoutTransaction: { update: jest.fn() },
+  // update: processBatch disbursement; updateMany: the UTR upload's compare-and-set terminal claim.
+  payoutTransaction: { update: jest.fn(), updateMany: jest.fn() },
   payoutBatch: { update: jest.fn() },
   redemptionOrder: {
     findFirst: jest.fn(),
@@ -26,8 +27,9 @@ const mockTx = {
   // Shared order-status transition writes the status-history row inside the same tx.
   redemptionStatusHistory: { create: jest.fn() },
   // capture-bank-at-redemption: the PAID/FAILED verify-stamp updates the partner's
-  // paymentDetailsStatus inside the disbursement tx (guarded on UNVERIFIED).
-  channelPartner: { updateMany: jest.fn() },
+  // paymentDetailsStatus inside the disbursement tx (guarded on UNVERIFIED). findFirst reads the
+  // partner's CURRENT upiId for the case-insensitive UPI snapshot match on PAID.
+  channelPartner: { updateMany: jest.fn(), findFirst: jest.fn() },
 };
 
 const mockPrisma = {
@@ -124,6 +126,22 @@ describe('PayoutsService', () => {
       await service.listTransactions(gifsy, { dateFrom: from, dateTo: to });
       const where = mockPrisma.payoutTransaction.findMany.mock.calls[0][0].where;
       expect(where.createdAt).toEqual({ gte: new Date(from), lte: new Date(to) });
+    });
+
+    it('filters to one batch via batchId, still tenant-scoped through the batch relation', async () => {
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([]);
+      mockPrisma.payoutTransaction.count.mockResolvedValue(0);
+      await service.listTransactions(gifsy, { batchId: 'b1' });
+      const where = mockPrisma.payoutTransaction.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({ batch: { clientId: 'deoleo' }, batchId: 'b1' });
+    });
+
+    it('ignores batchId when unbatched is set (unbatched pins batchId null)', async () => {
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([]);
+      mockPrisma.payoutTransaction.count.mockResolvedValue(0);
+      await service.listTransactions(gifsy, { unbatched: true, batchId: 'b1' });
+      const where = mockPrisma.payoutTransaction.findMany.mock.calls[0][0].where;
+      expect(where.batchId).toBeNull();
     });
 
     it('scopes unbatched by partner.clientId (not the null batch relation)', async () => {
@@ -785,6 +803,8 @@ describe('PayoutsService', () => {
       mockTx.redemptionOrder.update.mockResolvedValue({});
       mockTx.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
       mockTx.payoutTransaction.update.mockResolvedValue({});
+      // The terminal compare-and-set claim wins by default (no overlapping upload).
+      mockTx.payoutTransaction.updateMany.mockResolvedValue({ count: 1 });
       // FAILED path still reads the order inside the tx to reverse points.
       mockTx.redemptionOrder.findFirst.mockResolvedValue({ pointsDeducted: 500, partnerId: 'p1', orderNumber: 'RO-1' });
       // Flow-B payout WhatsApp: POST-COMMIT batch-reads — partner owner (bare 10-digit
@@ -833,9 +853,10 @@ describe('PayoutsService', () => {
         true,
       );
 
-      expect(res).toMatchObject({ applied: true, paidCount: 1, failedCount: 0, reversedCount: 0 });
-      expect(mockTx.payoutTransaction.update).toHaveBeenCalledWith({
-        where: { id: 'txn1' },
+      expect(res).toMatchObject({ applied: true, paidCount: 1, failedCount: 0, reversedCount: 0, skipped: [] });
+      // Compare-and-set on the exact non-terminal status read.
+      expect(mockTx.payoutTransaction.updateMany).toHaveBeenCalledWith({
+        where: { id: 'txn1', status: 'INITIATED' },
         data: expect.objectContaining({ status: 'SUCCESS', providerRefId: 'UTR12345678' }),
       });
       // Order completed; no reversal.
@@ -860,6 +881,7 @@ describe('PayoutsService', () => {
           },
         ])
         .mockResolvedValueOnce([]);
+      mockTx.channelPartner.findFirst.mockResolvedValue({ upiId: 'shop@upi' });
 
       await service.uploadPayoutUtr(
         gifsy,
@@ -868,6 +890,10 @@ describe('PayoutsService', () => {
         true,
       );
 
+      expect(mockTx.channelPartner.findFirst).toHaveBeenCalledWith({
+        where: { id: 'p1', paymentDetailsStatus: { in: ['UNVERIFIED', 'NEEDS_RECAPTURE'] } },
+        select: { upiId: true },
+      });
       expect(mockTx.channelPartner.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
@@ -880,32 +906,159 @@ describe('PayoutsService', () => {
       );
     });
 
-    it('FAILED → flags the partner NEEDS_RECAPTURE only when currently UNVERIFIED', async () => {
+    it('PAID → UPI snapshot match is CASE-INSENSITIVE (snapshot Shop@OKAXIS vs partner shop@okaxis → VERIFIED)', async () => {
       mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
       mockPrisma.payoutTransaction.findMany
         .mockResolvedValueOnce([
           {
             id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'UPI',
             partnerId: 'p1', redemptionOrderId: 'o1',
-            upiId: 'shop@upi', bankAccountNumber: null, ifscCode: null,
+            upiId: 'Shop@OKAXIS', bankAccountNumber: null, ifscCode: null,
+          },
+        ])
+        .mockResolvedValueOnce([]);
+      mockTx.channelPartner.findFirst.mockResolvedValue({ upiId: 'shop@okaxis' });
+
+      await service.uploadPayoutUtr(
+        gifsy,
+        'b1',
+        buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]),
+        true,
+      );
+
+      // CAS-guarded on the partner's EXACT stored value (not the mixed-case snapshot).
+      expect(mockTx.channelPartner.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: 'p1',
+          paymentDetailsStatus: { in: ['UNVERIFIED', 'NEEDS_RECAPTURE'] },
+          upiId: 'shop@okaxis',
+        },
+        data: expect.objectContaining({ paymentDetailsStatus: 'VERIFIED' }),
+      });
+    });
+
+    it('PAID → a DIFFERENT current UPI (re-captured, never paid) is NOT verified', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([
+          {
+            id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'UPI',
+            partnerId: 'p1', redemptionOrderId: 'o1',
+            upiId: 'shop@okaxis', bankAccountNumber: null, ifscCode: null,
+          },
+        ])
+        .mockResolvedValueOnce([]);
+      mockTx.channelPartner.findFirst.mockResolvedValue({ upiId: 'other@okaxis' });
+
+      await service.uploadPayoutUtr(
+        gifsy,
+        'b1',
+        buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]),
+        true,
+      );
+
+      expect(mockTx.channelPartner.updateMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ paymentDetailsStatus: 'VERIFIED' }),
+        }),
+      );
+    });
+
+    it('PAID → a snapshot with NO UPI and NO bank details never verifies (null must not match null)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([
+          {
+            id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'BANK_TRANSFER',
+            partnerId: 'p1', redemptionOrderId: 'o1',
+            upiId: null, bankAccountNumber: null, ifscCode: null,
+          },
+        ])
+        .mockResolvedValueOnce([]);
+
+      await service.uploadPayoutUtr(
+        gifsy,
+        'b1',
+        buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]),
+        true,
+      );
+
+      expect(mockTx.channelPartner.updateMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ paymentDetailsStatus: 'VERIFIED' }),
+        }),
+      );
+    });
+
+    // R2 — FAILED demotes UNVERIFIED → NEEDS_RECAPTURE only when the FAILED txn's rail (its frozen
+    // snapshot) is still the partner's CURRENT rail — mirroring the PAID snapshot match.
+    const primeFailed = (snap: { upiId: string | null; bankAccountNumber: string | null; ifscCode: string | null }) => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([
+          {
+            id: 'txn1', status: 'INITIATED', providerRefId: null,
+            payoutMode: snap.upiId ? 'UPI' : 'BANK_TRANSFER',
+            partnerId: 'p1', redemptionOrderId: 'o1', ...snap,
           },
         ])
         .mockResolvedValueOnce([]);
       mockTx.redemptionOrder.findFirst.mockResolvedValue({
         pointsDeducted: 0, partnerId: 'p1', orderNumber: 'o1',
       });
-
-      await service.uploadPayoutUtr(
-        gifsy,
-        'b1',
-        buildUpload([{ txnId: 'txn1', status: 'FAILED' }]),
-        true,
+    };
+    const runFailed = () =>
+      service.uploadPayoutUtr(gifsy, 'b1', buildUpload([{ txnId: 'txn1', status: 'FAILED' }]), true);
+    const demotions = () =>
+      mockTx.channelPartner.updateMany.mock.calls.filter(
+        (c: [{ data?: { paymentDetailsStatus?: string } }]) => c[0]?.data?.paymentDetailsStatus === 'NEEDS_RECAPTURE',
       );
 
-      expect(mockTx.channelPartner.updateMany).toHaveBeenCalledWith({
+    it('FAILED (UPI) → NEEDS_RECAPTURE when the snapshot UPI is the CURRENT UPI (case-insensitive, CAS on stored)', async () => {
+      primeFailed({ upiId: 'Shop@UPI', bankAccountNumber: null, ifscCode: null });
+      mockTx.channelPartner.findFirst.mockResolvedValue({ upiId: 'shop@upi' });
+      await runFailed();
+      expect(mockTx.channelPartner.findFirst).toHaveBeenCalledWith({
         where: { id: 'p1', paymentDetailsStatus: 'UNVERIFIED' },
+        select: { upiId: true },
+      });
+      expect(mockTx.channelPartner.updateMany).toHaveBeenCalledWith({
+        where: { id: 'p1', paymentDetailsStatus: 'UNVERIFIED', upiId: 'shop@upi' },
         data: { paymentDetailsStatus: 'NEEDS_RECAPTURE' },
       });
+    });
+
+    it('FAILED (UPI) on an OLD snapshot (partner re-captured a different UPI) → NO demotion', async () => {
+      primeFailed({ upiId: 'old@upi', bankAccountNumber: null, ifscCode: null });
+      mockTx.channelPartner.findFirst.mockResolvedValue({ upiId: 'new@upi' });
+      await runFailed();
+      expect(demotions()).toHaveLength(0);
+    });
+
+    it('FAILED (UPI) when the partner is not UNVERIFIED (e.g. VERIFIED / now bank) → NO demotion', async () => {
+      primeFailed({ upiId: 'shop@upi', bankAccountNumber: null, ifscCode: null });
+      mockTx.channelPartner.findFirst.mockResolvedValue(null); // status filter excludes it
+      await runFailed();
+      expect(demotions()).toHaveLength(0);
+    });
+
+    it('FAILED (bank) → NEEDS_RECAPTURE guarded on the snapshot account + IFSC being the CURRENT bank rail', async () => {
+      primeFailed({ upiId: null, bankAccountNumber: '50100', ifscCode: 'HDFC0001' });
+      await runFailed();
+      expect(mockTx.channelPartner.updateMany).toHaveBeenCalledWith({
+        where: { id: 'p1', paymentDetailsStatus: 'UNVERIFIED', bankAccountNumber: '50100', ifscCode: 'HDFC0001' },
+        data: { paymentDetailsStatus: 'NEEDS_RECAPTURE' },
+      });
+    });
+
+    it('FAILED with an incomplete bank snapshot (no IFSC) or no rail at all → NO demotion', async () => {
+      primeFailed({ upiId: null, bankAccountNumber: '50100', ifscCode: null });
+      await runFailed();
+      expect(demotions()).toHaveLength(0);
+      jest.clearAllMocks();
+      primeFailed({ upiId: null, bankAccountNumber: null, ifscCode: null });
+      await runFailed();
+      expect(demotions()).toHaveLength(0);
     });
 
     it('PAID → sends the payout-credit WhatsApp POST-COMMIT with the right ordered bodyValues (Flow B)', async () => {
@@ -1116,13 +1269,13 @@ describe('PayoutsService', () => {
       );
 
       expect(res).toMatchObject({ applied: true, paidCount: 0, failedCount: 1, reversedCount: 1 });
-      expect(mockTx.payoutTransaction.update).toHaveBeenCalledWith({
-        where: { id: 'txn1' },
+      expect(mockTx.payoutTransaction.updateMany).toHaveBeenCalledWith({
+        where: { id: 'txn1', status: 'INITIATED' },
         data: expect.objectContaining({ status: 'FAILED' }),
       });
-      // The exact M2 claim shape.
+      // The exact M2 claim shape — plus the issued-voucher refund block (no code on the order).
       expect(mockTx.redemptionOrder.updateMany).toHaveBeenCalledWith({
-        where: { id: 'o1', pointsDeducted: { gt: 0 } },
+        where: { id: 'o1', pointsDeducted: { gt: 0 }, OR: [{ voucherCode: null }, { voucherCode: '' }] },
         data: { pointsDeducted: 0 },
       });
       expect(mockWallet.reverse).toHaveBeenCalledWith(
@@ -1131,10 +1284,12 @@ describe('PayoutsService', () => {
         expect.objectContaining({ referenceId: 'o1' }),
         expect.anything(),
       );
-      expect(mockTx.redemptionOrder.update).toHaveBeenCalledWith({
-        where: { id: 'o1' },
+      // Order FAILED write is a guarded claim (never re-FAILs / never duplicates history).
+      expect(mockTx.redemptionOrder.updateMany).toHaveBeenCalledWith({
+        where: { id: 'o1', status: { not: 'FAILED' }, OR: [{ voucherCode: null }, { voucherCode: '' }] },
         data: { status: 'FAILED' },
       });
+      expect(mockTx.redemptionOrder.update).not.toHaveBeenCalled();
     });
 
     it('FAILED re-upload is a no-op when the claim finds 0 (idempotent reversal)', async () => {
@@ -1180,6 +1335,7 @@ describe('PayoutsService', () => {
       // Terminal txn → never re-processed.
       expect(res).toMatchObject({ paidCount: 0, failedCount: 0, reversedCount: 0 });
       expect(mockTx.payoutTransaction.update).not.toHaveBeenCalled();
+      expect(mockTx.payoutTransaction.updateMany).not.toHaveBeenCalled();
       expect(mockWallet.reverse).not.toHaveBeenCalled();
     });
 
@@ -1196,6 +1352,26 @@ describe('PayoutsService', () => {
       beforeEach(() => {
         mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
         mockTx.redemptionStatusHistory.create.mockResolvedValue({});
+      });
+
+      it('FAILED on an order holding a voucher code: order left untouched (no refund, no FAILED flip), reported + logged', async () => {
+        oneTxn();
+        mockTx.redemptionOrder.findFirst.mockResolvedValue({
+          pointsDeducted: 500, partnerId: 'p1', orderNumber: 'RO-1', status: 'CONFIRMED', voucherCode: 'ODD-CODE-1',
+        });
+        const errSpy = jest.spyOn((service as unknown as { logger: { error: (m: string) => void } }).logger, 'error');
+        const res = await service.uploadPayoutUtr(gifsy, 'b1', buildUpload([{ txnId: 'txn1', status: 'FAILED' }]), true);
+        expect(res).toMatchObject({ failedCount: 1, reversedCount: 0 });
+        // The ORDER is left exactly as is: no refund claim, no FAILED flip, no history row.
+        expect(mockTx.redemptionOrder.updateMany).not.toHaveBeenCalled();
+        expect(mockTx.redemptionStatusHistory.create).not.toHaveBeenCalled();
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+        // …and it is reported back for the admin payouts screen.
+        expect(res.blockedOrders).toEqual([
+          expect.objectContaining({ txnId: 'txn1', orderId: 'o1', orderNumber: 'RO-1', reason: expect.stringMatching(/voucher code/) }),
+        ]);
+        expect(errSpy.mock.calls.some(([m]) => /voucher code is on the order/.test(String(m)))).toBe(true);
+        expect(JSON.stringify(errSpy.mock.calls)).not.toContain('ODD-CODE-1');
       });
 
       it('PAID: the guarded DELIVERED claim is byte-identical and writes ONE DELIVERED history row (actor = uploader)', async () => {
@@ -1228,12 +1404,17 @@ describe('PayoutsService', () => {
         expect(res).toMatchObject({ applied: true, paidCount: 0, failedCount: 1, reversedCount: 1 });
         expect(mockTx.redemptionOrder.findFirst).toHaveBeenCalledWith({
           where: { id: 'o1' },
-          select: { pointsDeducted: true, partnerId: true, orderNumber: true, status: true },
+          select: { pointsDeducted: true, partnerId: true, orderNumber: true, status: true, voucherCode: true },
         });
         expect(mockWallet.reverse).toHaveBeenCalledTimes(1);
         expect(mockWallet.reverse).toHaveBeenCalledWith('p1', 500, { referenceId: 'o1', description: 'Reversal RO-1' }, mockTx);
-        expect(mockTx.redemptionOrder.update).toHaveBeenCalledTimes(1);
-        expect(mockTx.redemptionOrder.update).toHaveBeenCalledWith({ where: { id: 'o1' }, data: { status: 'FAILED' } });
+        // Two guarded claims on the order: the M2 refund claim, then the FAILED status claim.
+        expect(mockTx.redemptionOrder.updateMany).toHaveBeenCalledTimes(2);
+        expect(mockTx.redemptionOrder.updateMany).toHaveBeenLastCalledWith({
+          where: { id: 'o1', status: { not: 'FAILED' }, OR: [{ voucherCode: null }, { voucherCode: '' }] },
+          data: { status: 'FAILED' },
+        });
+        expect(mockTx.redemptionOrder.update).not.toHaveBeenCalled();
         expect(mockTx.redemptionStatusHistory.create).toHaveBeenCalledTimes(1);
         expect(mockTx.redemptionStatusHistory.create).toHaveBeenCalledWith({
           data: { orderId: 'o1', fromStatus: 'CONFIRMED', toStatus: 'FAILED', changedById: gifsy.sub, notes: null },
@@ -1256,6 +1437,190 @@ describe('PayoutsService', () => {
         await expect(
           service.uploadPayoutUtr(gifsy, 'b1', buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]), true),
         ).rejects.toThrow('db down');
+      });
+    });
+
+    // Deadlock avoidance: rows are claimed in txnId order (same lock order across uploads), but
+    // the reported rowNum stays the row's position in the uploaded file.
+    it('claims payouts in deterministic txnId order regardless of file order; skipped keeps the file rowNum', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      const txn = (id: string) => ({
+        id, status: 'INITIATED', providerRefId: null, payoutMode: 'UPI', partnerId: 'p1', redemptionOrderId: null,
+        upiId: null, bankAccountNumber: null, ifscCode: null,
+      });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([txn('txn-c'), txn('txn-a'), txn('txn-b')])
+        .mockResolvedValueOnce([]);
+      // txn-a lost its claim to an overlapping upload.
+      mockTx.payoutTransaction.updateMany.mockImplementation(async ({ where }: { where: { id: string } }) => ({
+        count: where.id === 'txn-a' ? 0 : 1,
+      }));
+
+      // File order c, a, b → sheet rows 2, 3, 4 (row 1 = header).
+      const res = await service.uploadPayoutUtr(
+        gifsy,
+        'b1',
+        buildUpload([
+          { txnId: 'txn-c', utr: 'UTRCCCC11111', status: 'PAID' },
+          { txnId: 'txn-a', utr: 'UTRAAAA11111', status: 'PAID' },
+          { txnId: 'txn-b', utr: 'UTRBBBB11111', status: 'PAID' },
+        ]),
+        true,
+      );
+
+      const claimOrder = mockTx.payoutTransaction.updateMany.mock.calls.map(
+        (c: [{ where: { id: string } }]) => c[0].where.id,
+      );
+      expect(claimOrder).toEqual(['txn-a', 'txn-b', 'txn-c']);
+      expect(res).toMatchObject({
+        paidCount: 2,
+        skipped: [{ rowNum: 3, txnId: 'txn-a', outcome: 'PAID', reason: 'Payout already updated by another upload' }],
+      });
+    });
+
+    // ── Overlapping uploads (read-before-tx race) ──
+    // A tiny stateful fake of the rows the upload tx touches. Each upload's pre-tx findMany is
+    // primed with a STALE snapshot (what it read before the other upload committed); the tx-side
+    // writes are evaluated against the CURRENT fake state — exactly what Postgres does when the
+    // losing tx's UPDATE re-checks its predicate after the winner commits.
+    describe('overlapping uploads for the same payout (compare-and-set)', () => {
+      type OrderRow = { id: string; status: string; pointsDeducted: number; partnerId: string; orderNumber: string };
+      let db: { payout: { id: string; status: string }; order: OrderRow; history: Array<{ toStatus: string }> };
+
+      const matchStatus = (actual: string, cond: unknown): boolean => {
+        if (cond === undefined) return true;
+        if (typeof cond === 'string') return actual === cond;
+        const c = cond as { not?: string; notIn?: string[]; in?: string[] };
+        if (c.not !== undefined && actual === c.not) return false;
+        if (c.notIn && c.notIn.includes(actual)) return false;
+        if (c.in && !c.in.includes(actual)) return false;
+        return true;
+      };
+
+      beforeEach(() => {
+        db = {
+          payout: { id: 'txn1', status: 'INITIATED' },
+          order: { id: 'o1', status: 'CONFIRMED', pointsDeducted: 500, partnerId: 'p1', orderNumber: 'RO-1' },
+          history: [],
+        };
+        mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+        mockTx.payoutTransaction.updateMany.mockImplementation(
+          async ({ where, data }: { where: { id: string; status?: string }; data: { status: string } }) => {
+            if (where.id !== db.payout.id || !matchStatus(db.payout.status, where.status)) return { count: 0 };
+            db.payout.status = data.status;
+            return { count: 1 };
+          },
+        );
+        mockTx.redemptionOrder.findFirst.mockImplementation(async () => ({ ...db.order }));
+        mockTx.redemptionOrder.updateMany.mockImplementation(
+          async ({ where, data }: {
+            where: { id: string; status?: unknown; pointsDeducted?: { gt: number } };
+            data: Partial<OrderRow>;
+          }) => {
+            if (where.id !== db.order.id) return { count: 0 };
+            if (where.pointsDeducted && !(db.order.pointsDeducted > where.pointsDeducted.gt)) return { count: 0 };
+            if (!matchStatus(db.order.status, where.status)) return { count: 0 };
+            Object.assign(db.order, data);
+            return { count: 1 };
+          },
+        );
+        mockTx.redemptionStatusHistory.create.mockImplementation(async ({ data }: { data: { toStatus: string } }) => {
+          db.history.push({ toStatus: data.toStatus });
+          return {};
+        });
+        // Post-commit WhatsApp reads the order's CURRENT points.
+        mockPrisma.redemptionOrder.findMany.mockImplementation(async () => [{ id: 'o1', pointsDeducted: db.order.pointsDeducted }]);
+      });
+      afterEach(() => {
+        mockTx.redemptionStatusHistory.create.mockReset();
+        mockPrisma.redemptionOrder.findMany.mockReset();
+        mockTx.payoutTransaction.updateMany.mockReset();
+      });
+
+      // Prime ONE upload's pre-tx reads with the given (possibly stale) payout status.
+      const primeRead = (status: string) =>
+        mockPrisma.payoutTransaction.findMany
+          .mockResolvedValueOnce([
+            {
+              id: 'txn1', status, providerRefId: null, payoutMode: 'UPI', partnerId: 'p1', redemptionOrderId: 'o1',
+              upiId: null, bankAccountNumber: null, ifscCode: null,
+            },
+          ])
+          .mockResolvedValueOnce([]);
+      const paid = () => buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]);
+      const failed = () => buildUpload([{ txnId: 'txn1', status: 'FAILED' }]);
+      const LOST = { rowNum: expect.any(Number), txnId: 'txn1', reason: 'Payout already updated by another upload' };
+
+      it('PAID wins, overlapping FAILED loses: partner paid, NO refund, order stays DELIVERED, one history row', async () => {
+        primeRead('INITIATED'); // upload A (PAID)
+        primeRead('INITIATED'); // upload B (FAILED) — read BEFORE A committed (stale)
+        const a = await service.uploadPayoutUtr(gifsy, 'b1', paid(), true);
+        const b = await service.uploadPayoutUtr(gifsy, 'b1', failed(), true);
+
+        expect(a).toMatchObject({ paidCount: 1, failedCount: 0, reversedCount: 0, skipped: [] });
+        expect(b).toMatchObject({ paidCount: 0, failedCount: 0, reversedCount: 0, skipped: [{ ...LOST, outcome: 'FAILED' }] });
+        expect(db.payout.status).toBe('SUCCESS');
+        expect(mockWallet.reverse).not.toHaveBeenCalled();
+        expect(db.order).toMatchObject({ status: 'DELIVERED', pointsDeducted: 500 });
+        expect(db.history).toEqual([{ toStatus: 'DELIVERED' }]);
+        // The loser ran NONE of its side effects: no order read, no NEEDS_RECAPTURE demote.
+        expect(mockTx.redemptionOrder.findFirst).not.toHaveBeenCalled();
+        expect(mockTx.channelPartner.updateMany).not.toHaveBeenCalledWith(
+          expect.objectContaining({ data: { paymentDetailsStatus: 'NEEDS_RECAPTURE' } }),
+        );
+      });
+
+      it('FAILED wins, overlapping PAID loses: refund exactly once, order FAILED, no DELIVERED, no payout WhatsApp', async () => {
+        primeRead('INITIATED'); // upload A (FAILED)
+        primeRead('INITIATED'); // upload B (PAID) — stale
+        const a = await service.uploadPayoutUtr(gifsy, 'b1', failed(), true);
+        const b = await service.uploadPayoutUtr(gifsy, 'b1', paid(), true);
+
+        expect(a).toMatchObject({ paidCount: 0, failedCount: 1, reversedCount: 1, skipped: [] });
+        expect(b).toMatchObject({ paidCount: 0, failedCount: 0, reversedCount: 0, skipped: [{ ...LOST, outcome: 'PAID' }] });
+        expect(db.payout.status).toBe('FAILED');
+        expect(mockWallet.reverse).toHaveBeenCalledTimes(1);
+        expect(mockWallet.reverse).toHaveBeenCalledWith('p1', 500, expect.objectContaining({ referenceId: 'o1' }), mockTx);
+        expect(db.order).toMatchObject({ status: 'FAILED', pointsDeducted: 0 });
+        expect(db.history).toEqual([{ toStatus: 'FAILED' }]);
+        // Loser gathered no WhatsApp and did not verify-stamp the partner.
+        expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
+        expect(mockTx.channelPartner.updateMany).not.toHaveBeenCalledWith(
+          expect.objectContaining({ data: expect.objectContaining({ paymentDetailsStatus: 'VERIFIED' }) }),
+        );
+      });
+
+      it('two overlapping FAILED uploads of the same file: refund once, ONE FAILED history row', async () => {
+        primeRead('INITIATED');
+        primeRead('INITIATED');
+        await service.uploadPayoutUtr(gifsy, 'b1', failed(), true);
+        const b = await service.uploadPayoutUtr(gifsy, 'b1', failed(), true);
+        expect(b).toMatchObject({ failedCount: 0, reversedCount: 0, skipped: [{ ...LOST, outcome: 'FAILED' }] });
+        expect(mockWallet.reverse).toHaveBeenCalledTimes(1);
+        expect(db.history).toEqual([{ toStatus: 'FAILED' }]);
+      });
+
+      it('sequential re-upload of the SAME file (fresh read sees terminal) is still a silent no-op', async () => {
+        primeRead('INITIATED');
+        await service.uploadPayoutUtr(gifsy, 'b1', failed(), true);
+        primeRead(db.payout.status); // fresh read → FAILED (terminal)
+        const again = await service.uploadPayoutUtr(gifsy, 'b1', failed(), true);
+        expect(again).toMatchObject({ paidCount: 0, failedCount: 0, reversedCount: 0, skipped: [] });
+        expect(mockWallet.reverse).toHaveBeenCalledTimes(1);
+        expect(db.history).toEqual([{ toStatus: 'FAILED' }]);
+      });
+
+      it('order FAILED write is guarded: an order that became FAILED after the in-tx read gets NO duplicate history row', async () => {
+        primeRead('INITIATED');
+        // The in-tx order read is stale (CONFIRMED) but the row is already FAILED in the DB.
+        db.order.status = 'FAILED';
+        db.order.pointsDeducted = 0;
+        mockTx.redemptionOrder.findFirst.mockImplementationOnce(async () => ({
+          ...db.order, status: 'CONFIRMED', pointsDeducted: 500,
+        }));
+        await service.uploadPayoutUtr(gifsy, 'b1', failed(), true);
+        expect(mockWallet.reverse).not.toHaveBeenCalled(); // M2 claim found pointsDeducted 0
+        expect(db.history).toEqual([]); // guarded FAILED claim lost → no phantom row
       });
     });
   });

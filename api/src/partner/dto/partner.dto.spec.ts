@@ -64,3 +64,27 @@ describe('CapturePayoutDetailsDto — upiId VPA validation', () => {
     expect(await upiErrors('   ')).toEqual([]);
   });
 });
+
+describe('CapturePayoutDetailsDto — VPA safeguards (upiCaptureMethod / upiIdConfirm)', () => {
+  const propErrors = async (plain: Record<string, unknown>, prop: string): Promise<string[]> => {
+    const errors = await validate(plainToInstance(CapturePayoutDetailsDto, { ...baseDto, ...plain }));
+    const e = errors.find((x) => x.property === prop);
+    return e ? Object.keys(e.constraints ?? {}) : [];
+  };
+
+  it('accepts upiCaptureMethod QR and MANUAL, and omitted', async () => {
+    expect(await propErrors({ upiCaptureMethod: 'QR' }, 'upiCaptureMethod')).toEqual([]);
+    expect(await propErrors({ upiCaptureMethod: 'MANUAL' }, 'upiCaptureMethod')).toEqual([]);
+    expect(await propErrors({}, 'upiCaptureMethod')).toEqual([]);
+  });
+
+  it("rejects upiCaptureMethod 'FOO'", async () => {
+    expect(await propErrors({ upiCaptureMethod: 'FOO' }, 'upiCaptureMethod')).toContain('isIn');
+  });
+
+  it('trims upiIdConfirm like upiId', async () => {
+    const dto = plainToInstance(CapturePayoutDetailsDto, { ...baseDto, upiIdConfirm: '  a@b ' });
+    expect(dto.upiIdConfirm).toBe('a@b');
+    expect(await propErrors({ upiIdConfirm: '  a@b ' }, 'upiIdConfirm')).toEqual([]);
+  });
+});

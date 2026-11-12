@@ -241,6 +241,8 @@ export interface FulfilmentDraft {
   trackingUrl: string;
   supplierOrderRef: string;
   voucherCode: string;
+  /** Optional card PIN (card number + PIN gift cards). */
+  voucherPin: string;
   voucherProvider: string;
 }
 
@@ -252,6 +254,7 @@ export function emptyFulfilmentDraft(order?: Partial<GiftOrderDetail>): Fulfilme
     trackingUrl: order?.trackingUrl ?? '',
     supplierOrderRef: order?.supplierOrderRef ?? '',
     voucherCode: order?.voucherCode ?? '',
+    voucherPin: order?.voucherPin ?? '',
     voucherProvider: order?.voucherProvider ?? '',
   };
 }
@@ -261,14 +264,32 @@ export interface FulfilmentValidation {
   error?: string;
 }
 
+/** What is already STORED on the order (the server's truth — not the editable draft). */
+export interface StoredVoucher {
+  voucherCode?: string | null;
+  voucherPin?: string | null;
+  voucherProvider?: string | null;
+}
+
+const hasText = (v: string | null | undefined) => typeof v === 'string' && v.trim() !== '';
+
 /**
  * A fulfilment update needs at minimum a channel. A physical channel should carry a
  * tracking number OR a supplier order ref; a digital voucher should carry a code. We
  * WARN (not hard-block beyond the channel) so an operator can save a channel first
  * and add tracking later — the backend remains the source of truth.
+ * `stored` = the order as saved: a STORED code counts as "card number present" for the PIN rule.
+ * Any channel may be chosen with a stored code (a physical gift card carries a card no. / PIN too).
  */
-export function validateFulfilment(d: FulfilmentDraft): FulfilmentValidation {
+export function validateFulfilment(
+  d: FulfilmentDraft,
+  stored: StoredVoucher = {},
+): FulfilmentValidation {
   if (!d.fulfilmentChannel) return { ok: false, error: 'Pick a fulfilment channel.' };
+  // Mirrors the backend (voucher-write-guard): a PIN needs its card number (typed or stored).
+  if (d.voucherPin.trim() && !d.voucherCode.trim() && !hasText(stored.voucherCode)) {
+    return { ok: false, error: 'Enter the card number before the PIN' };
+  }
   return { ok: true };
 }
 
@@ -277,23 +298,37 @@ export function validateFulfilment(d: FulfilmentDraft): FulfilmentValidation {
  * non-applicable fields must be cleared so we never persist (and show the member) a
  * stale tracking number under a new voucher code, or vice-versa. Pure so the toggle
  * handler + a unit test can share it.
+ * Back on DIGITAL_VOUCHER, the STORED (locked) voucher values are restored from `stored` — a
+ * channel round-trip never blanks a locked code / provider / PIN.
  */
-export function resetNonApplicableFields(d: FulfilmentDraft): FulfilmentDraft {
+export function resetNonApplicableFields(d: FulfilmentDraft, stored: StoredVoucher = {}): FulfilmentDraft {
   if (isVoucherChannel(d.fulfilmentChannel)) {
-    // Digital voucher ships no parcel — drop all shipping fields.
-    return { ...d, logisticsPartner: '', trackingNumber: '', trackingUrl: '', supplierOrderRef: '' };
+    // Digital voucher ships no parcel — drop all shipping fields; restore the stored voucher values.
+    return {
+      ...d,
+      logisticsPartner: '', trackingNumber: '', trackingUrl: '', supplierOrderRef: '',
+      ...(hasText(stored.voucherCode) ? { voucherCode: stored.voucherCode!.trim() } : {}),
+      ...(hasText(stored.voucherProvider) ? { voucherProvider: stored.voucherProvider!.trim() } : {}),
+      ...(hasText(stored.voucherPin) ? { voucherPin: stored.voucherPin!.trim() } : {}),
+    };
   }
   // A physical channel carries no voucher — drop voucher fields.
-  return { ...d, voucherCode: '', voucherProvider: '' };
+  return { ...d, voucherCode: '', voucherPin: '', voucherProvider: '' };
 }
 
 /**
- * Build the PATCH /fulfilment body. We send the FULL editable field set every time —
- * a field the operator blanked is sent as `null` so the backend clears it (a stale
+ * Build the PATCH /fulfilment body. We send the full editable SHIPPING field set every time —
+ * a shipping field the operator blanked is sent as `null` so the backend clears it (a stale
  * tracking number must be correctable, not silently retained). `null` (not `''`) is
  * used so it passes the backend's `@IsOptional() @IsUrl()` on trackingUrl and clears
  * the nullable column; empty strings would trip URL validation. The channel is always
  * present (validation requires it).
+ *
+ * VOUCHER fields are different: a stored voucher code / provider can NEVER be cleared by this
+ * write (only "Voucher cancelled with vendor" does) — the backend rejects a null / blank one
+ * (DTO `@ValidateIf(v !== undefined) @IsString` + voucher-write-guard VOUCHER_BLANK), which used to
+ * 400 every save of a physical order. So a blank voucherCode / voucherProvider / voucherPin is
+ * OMITTED (= "no change"), never sent as null.
  */
 export function buildFulfilmentPayload(d: FulfilmentDraft): Record<string, unknown> {
   const orNull = (s: string) => {
@@ -306,8 +341,11 @@ export function buildFulfilmentPayload(d: FulfilmentDraft): Record<string, unkno
     trackingNumber: orNull(d.trackingNumber),
     trackingUrl: orNull(d.trackingUrl),
     supplierOrderRef: orNull(d.supplierOrderRef),
-    voucherCode: orNull(d.voucherCode),
-    voucherProvider: orNull(d.voucherProvider),
+    // Voucher fields: sent only when entered (never a null "clear" — see above). The PIN needs a
+    // voucher code alongside (or one already stored on the order).
+    ...(d.voucherCode.trim() ? { voucherCode: d.voucherCode.trim() } : {}),
+    ...(d.voucherProvider.trim() ? { voucherProvider: d.voucherProvider.trim() } : {}),
+    ...(d.voucherPin.trim() ? { voucherPin: d.voucherPin.trim() } : {}),
   };
 }
 
@@ -348,7 +386,14 @@ export interface GiftOrderDetail extends GiftOrderSummary {
   trackingUrl?: string | null;
   supplierOrderRef?: string | null;
   voucherCode?: string | null;
+  /** Card PIN (card number + PIN gift cards) — fulfilling operators / the fulfilling vendor only. */
+  voucherPin?: string | null;
   voucherProvider?: string | null;
+  /**
+   * Server-computed: a set-once PIN / provider may still be added to the STORED code (paid, on an
+   * addable status, not Hubble, not cash). The "Add the PIN…" box is offered only when true.
+   */
+  voucherFillable?: boolean;
   logisticsPartner?: string | null;
   /** Internal "fulfilled by" — ops/tenant only, never shown on the member tile. */
   fulfilledByVendorId?: string | null;

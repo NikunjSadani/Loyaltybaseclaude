@@ -31,10 +31,10 @@ import {
   CheckCircle2,
   XCircle,
   ExternalLink,
-  Ticket,
   ShieldAlert,
 } from 'lucide-react';
 import { api } from '@/lib/api-client';
+import { VoucherFulfilmentFields } from '@/components/operator/voucher-fulfilment-fields';
 import { Modal } from '@/components/ui/modal';
 import {
   type GiftOrderDetail,
@@ -275,20 +275,29 @@ function FulfilmentForm({
   // Re-seed the draft when the order reloads (e.g. after a save or transition).
   useEffect(() => {
     setDraft(emptyFulfilmentDraft(order));
-  }, [order.id, order.fulfilmentChannel, order.trackingNumber, order.voucherCode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [order.id, order.fulfilmentChannel, order.trackingNumber, order.voucherCode, order.voucherPin]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const set = <K extends keyof FulfilmentDraft>(k: K, v: FulfilmentDraft[K]) =>
     setDraft((d) => ({ ...d, [k]: v }));
 
   // Changing the channel between physical and digital-voucher clears the fields that no
   // longer apply, so a stale tracking number never rides along with a new voucher code.
-  const setChannel = (v: string) =>
-    setDraft((d) => resetNonApplicableFields({ ...d, fulfilmentChannel: v }));
+  // Any channel may be chosen — a physical gift card legitimately carries a card no. / PIN. Back on
+  // DIGITAL_VOUCHER the STORED (locked) values are restored — a round-trip never blanks them, and a
+  // stored code is shown read-only on EVERY channel (below), so it is never hidden.
+  const setChannel = (v: string) => {
+    setDraft((d) => resetNonApplicableFields({ ...d, fulfilmentChannel: v }, order));
+  };
+  const storedCode = !!order.voucherCode?.trim();
+  // Provider: locked once a code is stored, UNLESS the stored provider is empty and the server
+  // still takes a set-once fill (voucherFillable). A locked value is read from the STORED order.
+  const providerLocked =
+    !!order.voucherCode?.trim() && (!!order.voucherProvider?.trim() || !order.voucherFillable);
 
   const voucher = isVoucherChannel(draft.fulfilmentChannel);
 
   const save = async () => {
-    const v = validateFulfilment(draft);
+    const v = validateFulfilment(draft, order);
     if (!v.ok) {
       setValidationErr(v.error ?? 'Invalid input');
       return;
@@ -332,11 +341,14 @@ function FulfilmentForm({
           </label>
           {voucher ? (
             <input
-              value={draft.voucherProvider}
+              value={providerLocked ? (order.voucherProvider ?? '') : draft.voucherProvider}
               onChange={(e) => set('voucherProvider', e.target.value)}
               placeholder="e.g. Amazon Pay"
               data-testid="ff-voucher-provider"
-              className={inputCls}
+              // Locked with the stored code: a provider change on an issued voucher is a replace (400).
+              readOnly={providerLocked}
+              aria-readonly={providerLocked || undefined}
+              className={`${inputCls} read-only:bg-gray-50 read-only:text-gray-600`}
             />
           ) : (
             <input
@@ -351,19 +363,30 @@ function FulfilmentForm({
       </div>
 
       {voucher ? (
-        <div className="space-y-1">
-          <label className="text-xs font-medium text-gray-700 flex items-center gap-1.5">
-            <Ticket className="w-3.5 h-3.5 text-amber-500" /> Voucher code
-          </label>
-          <input
-            value={draft.voucherCode}
-            onChange={(e) => set('voucherCode', e.target.value)}
-            placeholder="AMZ-XXXX-XXXX"
-            data-testid="ff-voucher-code"
-            className={inputCls}
-          />
-        </div>
+        // Stored code → read-only; PIN editable only while none is stored (set-once), else masked.
+        <VoucherFulfilmentFields
+          storedCode={order.voucherCode}
+          storedPin={order.voucherPin}
+          fillable={order.voucherFillable === true}
+          orderNumber={order.orderNumber}
+          draft={draft}
+          set={set}
+          inputCls={inputCls}
+        />
       ) : (
+        <>
+        {storedCode && (
+          // A physical channel never hides the STORED card no. / PIN — shown read-only.
+          <VoucherFulfilmentFields
+            readOnly
+            storedCode={order.voucherCode}
+            storedPin={order.voucherPin}
+            orderNumber={order.orderNumber}
+            draft={draft}
+            set={set}
+            inputCls={inputCls}
+          />
+        )}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-1">
             <label className="text-xs font-medium text-gray-700">Tracking number</label>
@@ -396,6 +419,7 @@ function FulfilmentForm({
             />
           </div>
         </div>
+        </>
       )}
 
       {validationErr && (

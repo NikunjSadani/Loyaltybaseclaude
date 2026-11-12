@@ -104,6 +104,17 @@ export class AdminRewardsController {
     return this.rewards.deleteCatalogItem(user, id);
   }
 
+  /**
+   * GET /v1/admin/rewards/hubble-products/:productId — "Load from Hubble" in the catalogue
+   * editor: the brand name, FIXED/FLEXIBLE type, issuable denominations / min–max. Same gate as
+   * editing the catalogue (rewards:manage_inventory); Hubble-enabled tenants only. Read-only.
+   */
+  @Get('hubble-products/:productId')
+  @RequirePermission('rewards:manage_inventory')
+  getHubbleProduct(@CurrentUser() user: JwtPayload, @Param('productId') productId: string) {
+    return this.rewards.getHubbleProductForAdmin(user, productId);
+  }
+
   // ─── Bulk fulfilment (P5.4b) — GIFSY-only ops download → fill → upload ────────
   //
   // These mirror the P4 targets template/upload endpoints (StreamableFile +

@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsArray,
   IsEnum,
@@ -7,8 +7,10 @@ import {
   IsString,
   IsUrl,
   Matches,
+  MaxLength,
   Min,
   MinLength,
+  ValidateIf,
 } from 'class-validator';
 import {
   GiftApprovalPolicy,
@@ -186,12 +188,26 @@ export class VendorFulfilmentDto {
   @IsUrl()
   trackingUrl?: string;
 
-  @IsOptional()
+  // undefined = no change. null / blank is REJECTED: a stored voucher code is only ever cleared
+  // by POST /rewards/orders/:id/voucher-cancelled (voucher-write-guard.ts enforces it too).
+  @ValidateIf((_o, v) => v !== undefined)
   @IsString()
+  @Matches(/\S/, { message: 'voucherCode cannot be blank' })
   voucherCode?: string;
 
+  // Optional card PIN (card number + PIN gift cards). Trimmed; blank = no PIN. A PIN needs its card
+  // number (400 otherwise — voucher-write-guard). Same visibility as voucherCode; never reuse-checked.
   @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
+  @MaxLength(64)
+  voucherPin?: string;
+
+  // undefined = no change. null / blank is REJECTED: a stored voucher code is only ever cleared
+  // by POST /rewards/orders/:id/voucher-cancelled (voucher-write-guard.ts enforces it too).
+  @ValidateIf((_o, v) => v !== undefined)
+  @IsString()
+  @Matches(/\S/, { message: 'voucherProvider cannot be blank' })
   voucherProvider?: string;
 
   @IsOptional()
@@ -230,12 +246,26 @@ export class VendorTransitionDto {
   @IsEnum(VendorTransitionStatus)
   toStatus!: VendorTransitionStatus;
 
-  @IsOptional()
+  // undefined = no change. null / blank is REJECTED: a stored voucher code is only ever cleared
+  // by POST /rewards/orders/:id/voucher-cancelled (voucher-write-guard.ts enforces it too).
+  @ValidateIf((_o, v) => v !== undefined)
   @IsString()
+  @Matches(/\S/, { message: 'voucherCode cannot be blank' })
   voucherCode?: string;
 
+  // Optional card PIN (card number + PIN gift cards). Trimmed; blank = no PIN. A PIN needs its card
+  // number (400 otherwise — voucher-write-guard). Same visibility as voucherCode; never reuse-checked.
   @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
+  @MaxLength(64)
+  voucherPin?: string;
+
+  // undefined = no change. null / blank is REJECTED: a stored voucher code is only ever cleared
+  // by POST /rewards/orders/:id/voucher-cancelled (voucher-write-guard.ts enforces it too).
+  @ValidateIf((_o, v) => v !== undefined)
+  @IsString()
+  @Matches(/\S/, { message: 'voucherProvider cannot be blank' })
   voucherProvider?: string;
 
   @IsOptional()

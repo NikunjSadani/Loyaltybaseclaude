@@ -15,6 +15,8 @@ describe('requiredPermissionForPath()', () => {
     expect(requiredPermissionForPath('/admin/gifts')).toBe('rewards:read');
     expect(requiredPermissionForPath('/admin/visibility')).toBe('visibility:read');
     expect(requiredPermissionForPath('/admin/credits-payouts')).toBe('credits:read');
+    // This month's offers — same engagement read permission as banners.
+    expect(requiredPermissionForPath('/admin/offers')).toBe('engagement:read');
   });
 
   it('prefers the MORE-specific child over the parent prefix', () => {

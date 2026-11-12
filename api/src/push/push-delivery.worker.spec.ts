@@ -125,6 +125,16 @@ describe('PushDeliveryWorker — SMS + PUSH drain legs', () => {
     expect(queue.rows[0].processedAt).toBeInstanceOf(Date);
   });
 
+  it('SMS leg: a voucher `code` var is passed to sendSms as a secret (provider-error scrub)', async () => {
+    const send = jest.fn().mockResolvedValue(undefined);
+    const row = makeRow({ recipientPhone: '9990000001', templateId: 'dlt-1', variables: { ownerName: 'Asha', code: 'CARD-1111-2222' } });
+    const { worker } = makeWorker([row], send);
+    await worker.drain();
+    expect(send).toHaveBeenCalledWith('9990000001', 'dlt-1', { ownerName: 'Asha', code: 'CARD-1111-2222' }, {
+      secretValues: ['CARD-1111-2222'],
+    });
+  });
+
   it('SMS leg: a send failure re-queues (retry bump) until maxRetries → terminal FAILED', async () => {
     const send = jest.fn().mockRejectedValue(new Error('MSG91 down'));
     const row = makeRow({ retryCount: 0, maxRetries: 2 });

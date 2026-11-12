@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { KycStatus, OutletKycIntent, OutletPaymentType, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
@@ -12,6 +12,7 @@ import {
   acquireIdentityLocks,
   checkGroupUniqueness,
   childSharesDetailWithGroup,
+  isLockConflictError,
   resolveUniquenessPolicy,
   type PartnerIdentityDetails,
   type UniquenessPolicy,
@@ -1084,14 +1085,44 @@ export class AdminOutletsService {
             // group + no enforced field colliding with an outlet outside it. A pre-KYC outlet
             // (no partner yet) has no details → passes trivially.
             const cp = existingByCode.get(outletCode)?.partner ?? null;
+            // LOCK ORDER (deadlock fix): this tx WRITES the outlet's channel_partners row — the
+            // outlet upsert below sets parentId, and the `outlet_group_id_sync` trigger then UPDATEs
+            // channel_partners.groupId for the outlet's partner. Every path that holds both the
+            // partner row and identity advisory locks must take them in ONE order: partner row
+            // FIRST, identity locks SECOND (kyc.service applyBridgeOutcome + partner.service
+            // capturePayoutDetails). Taking identity locks first here and the row (via the trigger)
+            // second could deadlock against a re-KYC approval / payout capture of the same partner.
+            // The identity values are read FROM THE LOCKED ROW (not the pre-tx snapshot) so the
+            // lock + check run on what is actually committed. Pre-KYC outlet (no partner) → nothing
+            // to lock, details stay null (passes trivially).
+            let locked: {
+              gstNumber: string | null;
+              panNumber: string | null;
+              bankAccountNumber: string | null;
+              upiId: string | null;
+            } | undefined;
+            if (cp?.id) {
+              const rows = await tx.$queryRaw<
+                Array<{
+                  gstNumber: string | null;
+                  panNumber: string | null;
+                  bankAccountNumber: string | null;
+                  upiId: string | null;
+                }>
+              >`SELECT "gstNumber", "panNumber", "bankAccountNumber", "upiId"
+                FROM channel_partners WHERE id = ${cp.id} FOR UPDATE`;
+              locked = rows?.[0];
+            }
+            const src = locked ?? cp;
             const details: PartnerIdentityDetails = {
-              gstNumber: cp?.gstNumber ?? null,
-              panNumber: cp?.panNumber ?? null,
-              bankAccountNumber: cp?.bankAccountNumber ?? null,
-              upiId: cp?.upiId ?? null,
+              gstNumber: src?.gstNumber ?? null,
+              panNumber: src?.panNumber ?? null,
+              bankAccountNumber: src?.bankAccountNumber ?? null,
+              upiId: src?.upiId ?? null,
             };
-            // Advisory-lock the enforced values FIRST, then re-check inside the lock so a
-            // concurrent writer of the same value serializes behind us (helper §acquireIdentityLocks).
+            // Advisory-lock the enforced values (AFTER the partner row lock above), then re-check
+            // inside the lock so a concurrent writer of the same value serializes behind us
+            // (helper §acquireIdentityLocks).
             await acquireIdentityLocks(tx, { clientId, details, policy });
             const violation = await checkGroupUniqueness(tx, {
               clientId,
@@ -1174,6 +1205,14 @@ export class AdminOutletsService {
             errors: [e.message],
           });
           continue;
+        }
+        // A lock-conflict abort (P2034 / Postgres 40P01 deadlock / 40001) → a clean 409, never a raw
+        // 500. Rows before this one are already committed (per-row tx); the upload is idempotent, so
+        // re-uploading the same file resumes safely.
+        if (isLockConflictError(e)) {
+          throw new ConflictException(
+            `Outlet ${outletCode} was being changed by another action at the same time — please re-upload the file.`,
+          );
         }
         throw e;
       }

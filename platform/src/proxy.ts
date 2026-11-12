@@ -53,6 +53,24 @@ const PUBLIC_PATHS = [
   '/favicon.ico',
 ]
 
+// EXACT-match public paths (no prefix matching). `/api/public/branding-assets` streams tenant
+// branding images (logo / wordmarks / favicon) that the SIGN-IN page and browser tab render
+// BEFORE login; the backend route is @Public and only ever serves validated `branding/` image
+// keys (api tenant-routing/public-branding-asset.controller.ts), so the edge must not 401 it.
+const PUBLIC_EXACT_PATHS = new Set(['/api/public/branding-assets'])
+
+/** Headers only the proxy may set on the forwarded request (any client-sent value is dropped). */
+const INTERNAL_REQUEST_HEADERS = [
+  'x-tenant-slug',
+  'x-tenant-valid',
+  'x-tenant-color', // legacy (no longer set, no reader) — still never trust a client value
+  'x-tenant-name',  // legacy (no longer set, no reader)
+  'x-pathname',
+  'x-user-id',
+  'x-user-role',
+  'x-partner-id',
+] as const
+
 export const ROLE_ROUTES: Record<string, string[]> = {
   '/admin/gifsy': ['GIFSY_ADMIN'],                                                // Gifsy-internal only — checked before /admin
   // GIFSY_STAFF is admitted to the /admin portal (their home is /gifsy, but an ASSUMED
@@ -69,6 +87,12 @@ export const ROLE_ROUTES: Record<string, string[]> = {
 export async function proxy(request: NextRequest, event: NextFetchEvent) {
   const { pathname } = request.nextUrl
   const headers = new Headers(request.headers)
+  // Strip every INTERNAL header a client could forge BEFORE anything else, so only this proxy
+  // can set the values render code / route handlers trust (x-tenant-slug drives
+  // getTenantConfig; x-user-* identity is only ever injected after JWT verification). Covers
+  // every branch — including the unknown-host /not-found rewrite and the PUBLIC_PATHS
+  // passthroughs, which previously forwarded a client-sent x-tenant-slug / x-user-* as-is.
+  for (const h of INTERNAL_REQUEST_HEADERS) headers.delete(h)
   // Expose the request path to Server Components (root layout reads this to gate the
   // per-portal PWA <head> meta to /sales + /partner only).
   headers.set('x-pathname', pathname)
@@ -138,7 +162,7 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
     return NextResponse.next({ request: { headers } })
   }
 
-  if (PUBLIC_PATHS.some(p => pathname.startsWith(p))) {
+  if (PUBLIC_EXACT_PATHS.has(pathname) || PUBLIC_PATHS.some(p => pathname.startsWith(p))) {
     return NextResponse.next({ request: { headers } })
   }
 
@@ -206,7 +230,7 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
   // is still valid. Silently refresh SERVER-SIDE so the user isn't bounced to login ~hourly.
   const refreshToken = request.cookies.get('refresh_token')?.value
   if (refreshToken) {
-    // A single refresh attempt. Parallel page requests may each land here; the backend's
+    // A single refresh (retried only on a 429, inside refreshTokensViaBackend). Parallel page requests may each land here; the backend's
     // rotation grace returns the successor tokens idempotently, so concurrent refreshes are safe.
     const refreshed = await refreshTokensViaBackend(refreshToken)
     if (refreshed) {
@@ -288,6 +312,9 @@ export const config = {
     // `brand/` holds the per-tenant wordmarks (public/brand/*.png) — the LOGIN page (no
     // token) renders them, so without this exclusion each wordmark 307s to /auth/login →
     // broken image on the sign-in screen.
-    '/((?!_next/static|_next/image|favicon.ico|logos/|favicons/|icons/|images/|brand/|sw.js|offline.html).*)',
+    // `Logos/` (capital L) is the folder actually committed under public/ (bajaj.png,
+    // deoleo*.png); the lowercase `logos/` entry matches nothing on a case-sensitive host,
+    // so without it a pre-auth request for /Logos/* was 307'd to /auth/login.
+    '/((?!_next/static|_next/image|favicon.ico|logos/|Logos/|favicons/|icons/|images/|brand/|sw.js|offline.html).*)',
   ],
 }

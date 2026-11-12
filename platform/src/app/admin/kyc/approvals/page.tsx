@@ -35,6 +35,8 @@ import { Button } from '@/components/ui/button'
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton'
 import { downloadBlob } from '@/lib/download'
 import { usePermissions } from '@/lib/use-permissions'
+import { UpiCaptureMethodBadge, asUpiCaptureMethod } from '@/components/kyc/upi-capture-method-badge'
+import type { UpiCaptureMethod } from '@/components/bank-or-upi-section'
 
 // ─── Local types ──────────────────────────────────────────────────────────────
 
@@ -75,6 +77,10 @@ interface KycApprovalEntry {
   accountNumber?: string | null
   ifscCode?: string | null
   upiId?: string | null
+  // How the UPI ID was captured (server overlays a re-KYC's proposed value); null = unknown.
+  upiCaptureMethod?: UpiCaptureMethod | null
+  // Which payout rail approval will CLEAR on the live partner (server-computed); null = nothing removed.
+  removedRail?: 'upi' | 'bank' | null
   nameMismatch?: boolean
   boardGeo?: { lat: number; lng: number } | null
   documents?: {
@@ -741,7 +747,22 @@ export default function KycApprovalsPage() {
                     <Fragment key="payment-upi">
                       <dt className="text-gray-500">Payment</dt>
                       <dd className="text-gray-700">
-                        {selected.paymentMode === 'upi' ? `UPI — ${selected.upiId ?? '—'}` : `Mode: ${selected.paymentMode ?? '—'}`}
+                        {selected.paymentMode === 'upi' ? (
+                          <>
+                            {`UPI — ${selected.upiId ?? '—'}`}
+                            {selected.upiId && <UpiCaptureMethodBadge method={asUpiCaptureMethod(selected.upiCaptureMethod)} />}
+                          </>
+                        ) : `Mode: ${selected.paymentMode ?? '—'}`}
+                      </dd>
+                    </Fragment>
+                  )}
+                  {selected.removedRail && (
+                    <Fragment key="payment-removed">
+                      <dt className="text-gray-500">Payment change</dt>
+                      <dd className="text-amber-700" data-testid="kyc-approval-removed-rail">
+                        {selected.removedRail === 'upi'
+                          ? 'The partner’s current UPI ID will be removed on approval'
+                          : 'The partner’s current bank details will be removed on approval'}
                       </dd>
                     </Fragment>
                   )}

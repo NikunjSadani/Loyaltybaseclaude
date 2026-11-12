@@ -4,7 +4,7 @@
 // Run: npx jest src/admin-outlets/parents.service.spec.ts
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { ParentsService } from './parents.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -27,6 +27,8 @@ const mockPrisma = {
   auditLog: { create: jest.fn() },
   // acquireIdentityLocks issues a raw advisory-lock statement inside the tx.
   $executeRaw: jest.fn(),
+  // approveParent row-locks the parent (SELECT … FOR UPDATE via $queryRaw) BEFORE the identity locks.
+  $queryRaw: jest.fn(),
   // createParent/approveParent/deactivateParent wrap their write(s) in one interactive tx.
   // The mock runs the callback with mockPrisma itself as the tx client (same model methods).
   $transaction: jest.fn(),
@@ -60,6 +62,14 @@ describe('ParentsService', () => {
     mockPrisma.outlet.count.mockResolvedValue(0); // no remaining children by default
     mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
     mockPrisma.$executeRaw.mockResolvedValue(1);
+    // Default locked-row read = the parent snapshot the test primed on channelPartner.findFirst.
+    mockPrisma.$queryRaw.mockImplementation(async () => {
+      const last = mockPrisma.channelPartner.findFirst.mock.results.at(-1);
+      const p = last ? await last.value : null;
+      return p
+        ? [{ gstNumber: p.gstNumber ?? null, panNumber: p.panNumber ?? null, bankAccountNumber: p.bankAccountNumber ?? null, upiId: p.upiId ?? null }]
+        : [];
+    });
     // Run the interactive-tx callback with mockPrisma acting as the tx client.
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: typeof mockPrisma) => unknown) =>
       fn(mockPrisma),
@@ -158,6 +168,32 @@ describe('ParentsService', () => {
       await expect(
         service.createParent(admin, { partnerCode: 'CPP01', panNumber: 'ZXCVB1234Z' }),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it.each([
+      ['P2034 on an identity lock', 'executeRaw', { code: 'P2034', message: 'write conflict or a deadlock' }],
+      ['40P01 deadlock on the insert', 'create', { code: 'P2010', meta: { code: '40P01' }, message: 'Raw query failed' }],
+      ['40001 serialization failure on the insert', 'create', { code: 'P2010', meta: { code: '40001' } }],
+    ])('maps a lock conflict (%s) on create to a clean 409 — never a raw 500, no audit row', async (_label, where, err) => {
+      mockPrisma.channelPartner.findUnique.mockResolvedValue(null);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([]);
+      mockPrisma.channelPartner.create.mockResolvedValue({ id: 'parent1' });
+      if (where === 'executeRaw') mockPrisma.$executeRaw.mockRejectedValueOnce(err);
+      if (where === 'create') mockPrisma.channelPartner.create.mockRejectedValueOnce(err);
+
+      await expect(
+        service.createParent(admin, { partnerCode: 'CPP01', panNumber: 'ZXCVB1234Z' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('a non-lock error on create still propagates unchanged (not mapped to 409)', async () => {
+      mockPrisma.channelPartner.findUnique.mockResolvedValue(null);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([]);
+      mockPrisma.channelPartner.create.mockRejectedValueOnce(new Error('connection reset'));
+      await expect(
+        service.createParent(admin, { partnerCode: 'CPP01', panNumber: 'ZXCVB1234Z' }),
+      ).rejects.toThrow('connection reset');
     });
 
     it('rejects a duplicate partnerCode', async () => {
@@ -270,6 +306,88 @@ describe('ParentsService', () => {
     it('throws NotFound for an unknown parent', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
       await expect(service.approveParent(admin, 'nope')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // ── LOCK ORDER (deadlock fix): parent row FIRST, identity advisory locks SECOND, write THIRD ──
+    const primeParent = () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({
+        id: 'parent1',
+        userId: null,
+        onboardedAt: null,
+        gstNumber: null,
+        panNumber: 'ZXCVB1234Z',
+        bankAccountNumber: null,
+        upiId: null,
+      });
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({ panNumber: 'ZXCVB1234Z' });
+      mockPrisma.channelPartner.findMany.mockResolvedValue([]);
+      mockPrisma.channelPartner.update.mockResolvedValue({ id: 'parent1' });
+    };
+
+    it('LOCK ORDER: row-locks the parent (SELECT … FOR UPDATE) BEFORE any identity advisory lock, and both BEFORE the write', async () => {
+      primeParent();
+      await service.approveParent(admin, 'parent1');
+
+      expect(mockPrisma.$queryRaw).toHaveBeenCalledTimes(1);
+      const [strings, ...values] = mockPrisma.$queryRaw.mock.calls[0];
+      expect((strings as string[]).join('?')).toMatch(/FROM channel_partners WHERE id = \? FOR UPDATE/);
+      expect(values).toEqual(['parent1']);
+
+      const rowLock = mockPrisma.$queryRaw.mock.invocationCallOrder[0];
+      const firstIdentityLock = mockPrisma.$executeRaw.mock.invocationCallOrder[0];
+      const write = mockPrisma.channelPartner.update.mock.invocationCallOrder[0];
+      expect(firstIdentityLock).toBeDefined();
+      expect(rowLock).toBeLessThan(firstIdentityLock);
+      expect(firstIdentityLock).toBeLessThan(write);
+    });
+
+    it('locks + checks + re-persists the identity values read FROM THE LOCKED ROW (not the pre-tx snapshot)', async () => {
+      primeParent();
+      // A concurrent writer committed a different PAN between the snapshot read and the row lock.
+      mockPrisma.$queryRaw.mockResolvedValueOnce([
+        { gstNumber: null, panNumber: 'qwert9876q', bankAccountNumber: null, upiId: null },
+      ]);
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({ panNumber: 'QWERT9876Q' });
+      // In-tx group-PAN reads of the parent (resolveGroupPan) see the committed value too.
+      mockPrisma.channelPartner.findFirst.mockReset();
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({
+          id: 'parent1', userId: null, onboardedAt: null, gstNumber: null,
+          panNumber: 'ZXCVB1234Z', bankAccountNumber: null, upiId: null,
+        })
+        .mockResolvedValue({ panNumber: 'QWERT9876Q', onboardedAt: new Date() });
+      await service.approveParent(admin, 'parent1');
+      expect(mockPrisma.channelPartner.update.mock.calls[0][0].data.panNumber).toBe('QWERT9876Q');
+      // The advisory lock key carries the LOCKED value.
+      const keys = mockPrisma.$executeRaw.mock.calls.map((c) => c.slice(1).join(','));
+      expect(keys.some((k) => k.includes('pan:QWERT9876Q'))).toBe(true);
+    });
+
+    it('NotFound when the parent row vanished before the row lock (no identity lock, no write)', async () => {
+      primeParent();
+      mockPrisma.$queryRaw.mockResolvedValueOnce([]);
+      await expect(service.approveParent(admin, 'parent1')).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockPrisma.$executeRaw).not.toHaveBeenCalled();
+      expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['P2034 on the row lock', 'queryRaw', { code: 'P2034', message: 'write conflict or a deadlock' }],
+      ['40P01 deadlock on an identity lock', 'executeRaw', { code: 'P2010', meta: { code: '40P01' }, message: 'Raw query failed' }],
+      ['40001 serialization failure on the write', 'update', { code: 'P2010', meta: { code: '40001' } }],
+    ])('maps a lock conflict (%s) to a clean 409 — never a raw 500', async (_label, where, err) => {
+      primeParent();
+      if (where === 'queryRaw') mockPrisma.$queryRaw.mockRejectedValueOnce(err);
+      if (where === 'executeRaw') mockPrisma.$executeRaw.mockRejectedValueOnce(err);
+      if (where === 'update') mockPrisma.channelPartner.update.mockRejectedValueOnce(err);
+      await expect(service.approveParent(admin, 'parent1')).rejects.toBeInstanceOf(ConflictException);
+      expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('a non-lock error still propagates unchanged (not mapped to 409)', async () => {
+      primeParent();
+      mockPrisma.channelPartner.update.mockRejectedValueOnce(new Error('connection reset'));
+      await expect(service.approveParent(admin, 'parent1')).rejects.toThrow('connection reset');
     });
   });
 

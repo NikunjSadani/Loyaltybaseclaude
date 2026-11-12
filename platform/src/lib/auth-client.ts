@@ -14,6 +14,7 @@
 
 import { assumeTenantAction, exitTenantAction, logoutAction } from './auth-actions';
 import { unsubscribeFromPush } from './pwa/push';
+import { runSessionChangeGuards } from './session-change-guards';
 
 const USER_KEY = 'user';
 const ASSUMED_BRAND_KEY = 'assumedBrand';
@@ -96,7 +97,12 @@ export function getRoleHome(role?: string | null): string {
 }
 
 /** Clear the session (httpOnly cookies server-side + local display state) and return to login. */
-export async function logout(): Promise<void> {
+export async function logout(opts: { force?: boolean } = {}): Promise<void> {
+  // Something in flight in this tab (e.g. a Sales Import upload) may ask the user first and clean up with the
+  // current session; "stay" cancels the logout. No guard registered (the usual case) → no prompt, unchanged.
+  // `force` (session already revoked, e.g. log out of all devices): never prompt, never vetoed — clean-up is
+  // best-effort and time-boxed, and the logout always completes.
+  if (!(await runSessionChangeGuards('logout', { force: opts.force }))) return;
   // Best-effort: drop this browser's push subscription BEFORE clearing the session
   // (the /api/push/unsubscribe call still carries the cookie here), so the next user
   // on this device never inherits the previous user's push notifications. No-ops if
@@ -158,10 +164,15 @@ export async function assumeTenant(clientId: string): Promise<{ brandName: strin
   return { brandName: res.brandName };
 }
 
-/** Exit the assumed tenant context and restore the gifsy (home) operator session. */
-export async function exitTenant(): Promise<void> {
+/**
+ * Exit the assumed tenant context and restore the gifsy (home) operator session. Returns false (nothing changed)
+ * when a session-change guard vetoed it (e.g. the operator chose to keep an in-flight Sales Import upload).
+ */
+export async function exitTenant(): Promise<boolean> {
+  if (!(await runSessionChangeGuards('switch-brand'))) return false;
   await exitTenantAction();
   if (typeof window !== 'undefined') {
     localStorage.removeItem(ASSUMED_BRAND_KEY);
   }
+  return true;
 }

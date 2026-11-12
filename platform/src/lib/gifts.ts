@@ -34,6 +34,9 @@ export interface GiftCatalogueItem {
    *  AND both bounds set — the redeemer supplies the ₹ amount, converted to points server-side. */
   minRedemptionPoints?: number | null;
   maxRedemptionPoints?: number | null;
+  /** Hubble "choose from amounts" gift card: the ₹ amounts (whole rupees, ascending) the redeemer
+   *  must pick from — no free typing. Absent for every other item. */
+  amountOptions?: number[];
 }
 
 const STORAGE_KEY = 'loyaltybase_gifts_v1';
