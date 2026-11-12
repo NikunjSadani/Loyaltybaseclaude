@@ -94,6 +94,9 @@ export class WalletService {
       // the wallet was NEGATIVE passes that pre-credit balance (< 0) so the reversal fully
       // undoes the credit. Values > 0 are treated as 0.
       debitFloor?: number;
+      // Optional WalletTransaction.metadata (e.g. a credit-batch credit's { fieldId, outletCode },
+      // so a later reversal can identify the EXACT credit it undoes). Omitted → column untouched.
+      metadata?: Prisma.InputJsonValue;
     },
   ): Promise<{ transactionId: string; newRedeemable: number; ledgerId: string }> {
     const {
@@ -112,6 +115,7 @@ export class WalletService {
       requireSufficientRedeemable = false,
       insufficientMessage = 'Insufficient wallet balance for debit',
       debitFloor = 0,
+      metadata,
     } = params;
     const floor = Math.min(0, debitFloor);
 
@@ -200,6 +204,7 @@ export class WalletService {
         referenceType,
         referenceId,
         description,
+        ...(metadata !== undefined ? { metadata } : {}),
       },
     });
 
@@ -689,6 +694,9 @@ export class WalletService {
       sourceType?: string | null;
       sourceId?: string | null;
       description?: string | null;
+      // Stored on the WalletTransaction (credit-batch confirm passes { fieldId, outletCode } so a
+      // reversal can find the EXACT credit it undoes). Omitted → nothing stored.
+      metadata?: Prisma.InputJsonValue;
     } = {},
     tx?: Prisma.TransactionClient,
   ) {
@@ -709,6 +717,7 @@ export class WalletService {
         sourceType: opts.sourceType ?? null,
         sourceId: opts.sourceId ?? null,
         description: opts.description ?? null,
+        ...(opts.metadata !== undefined ? { metadata: opts.metadata } : {}),
       });
     });
   }
@@ -894,38 +903,32 @@ export class WalletService {
       sourceType?: string | null;
       sourceId?: string | null;
       description?: string | null;
-      // The ORIGINAL credit being reversed, as its WalletTransaction reference (credit-batch
-      // POINTS: { referenceType: 'CREDIT_BATCH', referenceId: <batchId> }). When given, the
-      // clawback's floor is the wallet balance just before that credit was posted if it was
-      // NEGATIVE (so the reversal fully undoes the credit), else 0. Omitted / not found → 0.
-      originalCredit?: { referenceType: string; referenceId: string } | null;
+      // The ORIGINAL credit-batch credit being reversed: the batch id + the reversal's
+      // (outletCode, fieldId). The clawback's floor is the wallet balance just before THAT exact
+      // credit was posted if it was NEGATIVE (so the reversal fully undoes it), else 0. Omitted,
+      // not found or ambiguous → floor 0 (and the shortfall note says so).
+      originalCredit?: { batchId: string; outletCode: string; fieldId: string } | null;
     } = {},
     tx: Prisma.TransactionClient,
   ): Promise<{ transactionId: string; newRedeemable: number; ledgerId: string; shortfall: number }> {
     if (points <= 0) throw new BadRequestException('Clawback amount must be positive');
 
-    const wallet = await tx.wallet.findFirst({ where: { partnerId } });
+    const found = await tx.wallet.findFirst({ where: { partnerId }, select: { id: true } });
+    if (!found) throw new NotFoundException('Wallet not found for this partner');
+    // LOCK THE WALLET ROW for the rest of the caller's transaction (same as expireDuePoints), then
+    // re-read it: two concurrent clawbacks / a clawback racing a redemption serialise here, so the
+    // floor + shortfall below are computed from the balance the decrement actually applies to and
+    // the recorded balanceBefore/After chain stays exact.
+    await tx.$queryRaw`SELECT id FROM wallets WHERE id = ${found.id} FOR UPDATE`;
+    const wallet = await tx.wallet.findFirst({ where: { id: found.id } });
     if (!wallet) throw new NotFoundException('Wallet not found for this partner');
 
-    // Floor = min(0, balance just before the reversed credit was posted). A batch can post
-    // several credits to one wallet (one per field/row), written consecutively in the confirm
-    // tx; the EARLIEST is the wallet's balance before the batch — the lowest it can be legitimately
-    // returned to by reversing any of that batch's credits (decrement never exceeds `points`).
     let creditBalanceBefore: number | null = null;
-    let originalCreditMissing = false;
+    let creditLookupProblem: 'not found' | 'ambiguous' | null = null;
     if (opts.originalCredit) {
-      const original = await tx.walletTransaction.findFirst({
-        where: {
-          walletId: wallet.id,
-          transactionType: 'CREDIT_POINTS_EARNED',
-          referenceType: opts.originalCredit.referenceType,
-          referenceId: opts.originalCredit.referenceId,
-        },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        select: { balanceBefore: true },
-      });
-      if (original) creditBalanceBefore = original.balanceBefore;
-      else originalCreditMissing = true;
+      const r = await this.findOriginalBatchCredit(tx, wallet.id, partnerId, opts.originalCredit);
+      if (typeof r === 'number') creditBalanceBefore = r;
+      else creditLookupProblem = r;
     }
     const floor = Math.min(0, creditBalanceBefore ?? 0);
 
@@ -941,7 +944,7 @@ export class WalletService {
 
     let desc = opts.description ?? `Clawback: credit batch POINTS reversal`;
     if (shortfall > 0) {
-      const missingNote = originalCreditMissing ? ' (original credit not found — floored at 0)' : '';
+      const missingNote = creditLookupProblem ? ` (original credit ${creditLookupProblem} — floored at 0)` : '';
       if (floor < 0) {
         desc += ` [SHORTFALL: ${shortfall} pts not recovered — balance floored at ${floor}, its level before the reversed credit — owner review required]`;
       } else if (wallet.redeemablePoints < 0) {
@@ -966,6 +969,81 @@ export class WalletService {
     });
 
     return { ...movement, shortfall };
+  }
+
+  /**
+   * The balanceBefore of the EXACT credit-batch credit a reversal undoes — the CREDIT_POINTS_EARNED
+   * WalletTransaction this wallet received from batch `batchId` for the reversal's (outletCode,
+   * fieldId). Returns that balance, or 'not found' / 'ambiguous' (caller floors at 0 and says so).
+   *
+   * Identification, in order:
+   *  1. metadata — credits posted since 2026-11-12 carry { fieldId, outletCode } (confirmBatch).
+   *  2. legacy rows (no metadata) — replay the batch's stored `rows` exactly as confirmBatch
+   *     credited them: POINTS rows, status OK, amount > 0, for this partner's outlet code(s), in
+   *     row order; the k-th credit (createdAt, id order) is the k-th row. Accepted ONLY when the
+   *     counts match and every pair's amount agrees; otherwise 'ambiguous'.
+   * If the batch credited the same (outlet, field) more than once, the reversal covers their sum,
+   * so the floor is the balance before the FIRST of them.
+   */
+  private async findOriginalBatchCredit(
+    tx: Prisma.TransactionClient,
+    walletId: string,
+    partnerId: string,
+    ref: { batchId: string; outletCode: string; fieldId: string },
+  ): Promise<number | 'not found' | 'ambiguous'> {
+    const credits = await tx.walletTransaction.findMany({
+      where: {
+        walletId,
+        transactionType: 'CREDIT_POINTS_EARNED',
+        referenceType: 'CREDIT_BATCH',
+        referenceId: ref.batchId,
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: { id: true, balanceBefore: true, points: true, metadata: true },
+    });
+    if (credits.length === 0) return 'not found';
+
+    const metaOf = (m: Prisma.JsonValue | null | undefined) =>
+      m && typeof m === 'object' && !Array.isArray(m) ? (m as Record<string, unknown>) : null;
+    let matches: typeof credits;
+    if (credits.every((c) => typeof metaOf(c.metadata)?.fieldId === 'string')) {
+      matches = credits.filter((c) => {
+        const m = metaOf(c.metadata)!;
+        return m.fieldId === ref.fieldId && (m.outletCode == null || m.outletCode === ref.outletCode);
+      });
+    } else {
+      const batch = await tx.creditBatch.findFirst({
+        where: { id: ref.batchId },
+        select: { clientId: true, rows: true },
+      });
+      if (!batch || !Array.isArray(batch.rows)) return 'ambiguous';
+      const codes = new Set(
+        (
+          await tx.outlet.findMany({
+            where: { clientId: batch.clientId, partnerId },
+            select: { outletCode: true },
+          })
+        ).map((o) => o.outletCode),
+      );
+      type Row = { outletId?: string; fieldId?: string; amount?: number; awardType?: string; status?: string };
+      const credited = (batch.rows as Row[]).filter(
+        (r) =>
+          r &&
+          r.awardType === 'POINTS' &&
+          r.status === 'OK' &&
+          typeof r.amount === 'number' &&
+          r.amount > 0 &&
+          typeof r.outletId === 'string' &&
+          codes.has(r.outletId),
+      );
+      if (credited.length !== credits.length) return 'ambiguous';
+      if (credited.some((r, k) => r.amount !== credits[k].points)) return 'ambiguous';
+      matches = credits.filter(
+        (_c, k) => credited[k].fieldId === ref.fieldId && credited[k].outletId === ref.outletCode,
+      );
+    }
+    if (matches.length === 0) return 'not found';
+    return matches[0].balanceBefore;
   }
 
   // ─── Expiry sweep ────────────────────────────────────────────────────────────

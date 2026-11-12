@@ -70,7 +70,12 @@ const mockTx = {
     updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     findFirst: jest.fn(),
     update: jest.fn().mockResolvedValue({}),
+    // Over-reversal cap: live reversals for (batch, outlet, field) + reversal create in-tx.
+    findMany: jest.fn().mockResolvedValue([]),
+    create: jest.fn(),
   },
+  // Row locks (SELECT … FOR UPDATE) — batch row for the reversal cap.
+  $queryRaw: jest.fn().mockResolvedValue([]),
   // FIX-8: the visibility TDS plan now reads INSIDE the download $transaction (tx), so the
   // cross-tenant PAN aggregation runs behind the per-PAN advisory lock (tx.$executeRaw).
   outlet: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
@@ -171,7 +176,18 @@ describe('CreditsService', () => {
     };
     // Restore default resolved values that tests may override.
     mockTx.creditBatch.updateMany.mockResolvedValue({ count: 1 });
-    mockTx.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED' });
+    // Stored rows give the reversal cap something to check against: O1/f1 credited generously
+    // for both award types, so the legacy reversal tests are unaffected by the cap.
+    mockTx.creditBatch.findFirst.mockResolvedValue({
+      id: 'b1',
+      status: 'CONFIRMED',
+      rows: [
+        { outletId: 'O1', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 1_000_000 },
+        { outletId: 'O1', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 1_000_000 },
+      ],
+    });
+    mockTx.creditReversal.findMany.mockResolvedValue([]);
+    mockTx.$queryRaw.mockResolvedValue([]);
     mockTx.creditReversal.updateMany.mockResolvedValue({ count: 1 });
     mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED' });
     mockTx.creditReversal.update.mockResolvedValue({});
@@ -504,6 +520,8 @@ describe('CreditsService', () => {
           sourceType: 'CREDIT_FIELD',
           sourceId: 'f1',
           description: 'May bonus',
+          // Identifies the EXACT credit for a later per-(batch, outlet, field) reversal.
+          metadata: { fieldId: 'f1', outletCode: 'O1' },
         },
         mockTx,   // same tx — atomicity guaranteed
       );
@@ -815,24 +833,36 @@ describe('CreditsService', () => {
 
     it('blocks a duplicate pending reversal for the same outlet+field', async () => {
       mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
-      mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r-existing' });
+      mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r-existing' });
       const dto: CreateReversalDto = {
         outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
         awardType: CreditAwardType.PAYOUT, originalPaise: 10000, requestedPaise: 5000,
       };
       await expect(service.createReversal(admin, 'b1', dto)).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockTx.creditReversal.create).not.toHaveBeenCalled();
     });
 
-    it('creates the reversal scoped to tenant + requester', async () => {
+    it('creates the reversal scoped to tenant + requester; originalPaise is SERVER-derived from the stored batch rows', async () => {
       mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
-      mockPrisma.creditReversal.findFirst.mockResolvedValue(null);
-      mockPrisma.creditReversal.create.mockResolvedValue({ id: 'r1' });
+      mockTx.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1',
+        rows: [
+          { outletId: 'O1', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 10000 },
+          { outletId: 'O1', fieldId: 'f2', awardType: 'PAYOUT', status: 'OK', amount: 99999 }, // other field
+          { outletId: 'O2', fieldId: 'f1', awardType: 'PAYOUT', status: 'OK', amount: 99999 }, // other outlet
+          { outletId: 'O1', fieldId: 'f1', awardType: 'PAYOUT', status: 'ERROR', amount: 99999 }, // not credited
+        ],
+      });
+      mockTx.creditReversal.findFirst.mockResolvedValue(null);
+      mockTx.creditReversal.create.mockResolvedValue({ id: 'r1' });
       const dto: CreateReversalDto = {
         outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
         awardType: CreditAwardType.PAYOUT, originalPaise: 10000, requestedPaise: 5000,
       };
       await service.createReversal(admin, 'b1', dto);
-      const data = mockPrisma.creditReversal.create.mock.calls[0][0].data;
+      // The batch row is locked before the cap is evaluated.
+      expect(mockTx.$queryRaw).toHaveBeenCalled();
+      const data = mockTx.creditReversal.create.mock.calls[0][0].data;
       expect(data.clientId).toBe('deoleo');
       expect(data.requestedBy).toBe('admin1');
       expect(data.period).toBe('2026-05');
@@ -841,17 +871,68 @@ describe('CreditsService', () => {
       expect(data.requestedPaise).toBe(BigInt(5000));
     });
 
+    it('ignores an inflated client originalPaise — cap is the stored credited amount', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
+      mockTx.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 300 }],
+      });
+      mockTx.creditReversal.findFirst.mockResolvedValue(null);
+      const dto: CreateReversalDto = {
+        outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
+        awardType: CreditAwardType.POINTS, originalPaise: 5000, requestedPaise: 400, // only 300 was credited
+      };
+      await expect(service.createReversal(admin, 'b1', dto)).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockTx.creditReversal.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses a SECOND reversal of an already-approved credit (double clawback)', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
+      mockTx.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 300 }],
+      });
+      mockTx.creditReversal.findFirst.mockResolvedValue(null); // no PENDING one…
+      mockTx.creditReversal.findMany.mockResolvedValue([
+        { status: 'APPROVED', requestedPaise: 300n, approvedPaise: 300n }, // …but 300 already approved
+      ]);
+      const dto: CreateReversalDto = {
+        outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
+        awardType: CreditAwardType.POINTS, originalPaise: 300, requestedPaise: 300,
+      };
+      await expect(service.createReversal(admin, 'b1', dto)).rejects.toThrow(/exceeds the amount credited/);
+      expect(mockTx.creditReversal.create).not.toHaveBeenCalled();
+    });
+
+    it('allows a second PARTIAL reversal while Σ stays within the credited amount', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
+      mockTx.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 300 }],
+      });
+      mockTx.creditReversal.findFirst.mockResolvedValue(null);
+      mockTx.creditReversal.findMany.mockResolvedValue([{ status: 'PARTIAL', requestedPaise: 300n, approvedPaise: 100n }]);
+      mockTx.creditReversal.create.mockResolvedValue({ id: 'r2' });
+      const dto: CreateReversalDto = {
+        outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
+        awardType: CreditAwardType.POINTS, originalPaise: 300, requestedPaise: 200,
+      };
+      await service.createReversal(admin, 'b1', dto);
+      expect(mockTx.creditReversal.create).toHaveBeenCalledTimes(1);
+      // The live-reversal query covers pending + approved + partial for this exact key.
+      expect(mockTx.creditReversal.findMany.mock.calls[0][0].where).toMatchObject({
+        batchId: 'b1', outletId: 'O1', fieldId: 'f1', status: { in: ['PENDING_GIFSY', 'APPROVED', 'PARTIAL'] },
+      });
+    });
+
     it('translates a DB P2002 (pending-reversal unique index) into a clean 400', async () => {
       // The fast-path pre-check passes (no existing pending), but a concurrent
       // request already inserted one — the partial-unique index
       // `credit_reversals_pending_unique` rejects with P2002.
       mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
-      mockPrisma.creditReversal.findFirst.mockResolvedValue(null);
+      mockTx.creditReversal.findFirst.mockResolvedValue(null);
       const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
         code: 'P2002',
         clientVersion: 'test',
       });
-      mockPrisma.creditReversal.create.mockRejectedValue(p2002);
+      mockTx.creditReversal.create.mockRejectedValue(p2002);
       const dto: CreateReversalDto = {
         outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
         awardType: CreditAwardType.PAYOUT, originalPaise: 10000, requestedPaise: 5000,
@@ -932,11 +1013,43 @@ describe('CreditsService', () => {
           referenceId: 'r1',
           sourceType: 'CREDIT_FIELD',
           sourceId: 'f1',
-          // The original credit (posted by confirm as CREDIT_BATCH/<batchId>) sets the floor.
-          originalCredit: { referenceType: 'CREDIT_BATCH', referenceId: 'b1' },
+          // The EXACT original credit (batch + outlet + field) sets the floor.
+          originalCredit: { batchId: 'b1', outletCode: 'O1', fieldId: 'f1' },
         }),
         mockTx,   // same tx — atomic with status flip
       );
+    });
+
+    it('approve re-validates the cap server-side: refuses when Σ other approved + this > credited (no claim, no clawback)', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({
+        id: 'r2', status: 'PENDING_GIFSY', requestedPaise: BigInt(300), awardType: 'POINTS',
+        outletId: 'O1', fieldId: 'f1', batchId: 'b1',
+      });
+      mockTx.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1', rows: [{ outletId: 'O1', fieldId: 'f1', awardType: 'POINTS', status: 'OK', amount: 300 }],
+      });
+      // r1 (another reversal of the same credit) already approved for the full 300.
+      mockTx.creditReversal.findMany.mockResolvedValue([{ status: 'APPROVED', requestedPaise: 300n, approvedPaise: 300n }]);
+      mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
+      mockTx.wallet.findFirst.mockResolvedValue({ id: 'w1' });
+
+      await expect(
+        service.patchReversal(gifsy, 'r2', { action: ReversalAction.approve }),
+      ).rejects.toThrow(/exceeds the amount credited/);
+      expect(mockTx.creditReversal.updateMany).not.toHaveBeenCalled();
+      expect(mockWalletService.clawbackAward).not.toHaveBeenCalled();
+      // The other-reversals sum excludes THIS reversal.
+      expect(mockTx.creditReversal.findMany.mock.calls[0][0].where.id).toEqual({ not: 'r2' });
+    });
+
+    it('reject is never blocked by the cap', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({
+        id: 'r2', status: 'PENDING_GIFSY', requestedPaise: BigInt(300), awardType: 'POINTS',
+        outletId: 'O1', fieldId: 'f1', batchId: 'b1',
+      });
+      mockTx.creditBatch.findFirst.mockResolvedValue({ id: 'b1', rows: [] });
+      mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r2', status: 'REJECTED' });
+      await expect(service.patchReversal(gifsy, 'r2', { action: ReversalAction.reject })).resolves.toMatchObject({ status: 'REJECTED' });
     });
 
     it('does NOT call clawbackAward for PAYOUT reversal approval', async () => {

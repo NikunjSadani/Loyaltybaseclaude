@@ -1187,6 +1187,8 @@ export class CreditsService {
             sourceType: 'CREDIT_FIELD',
             sourceId: r.fieldId,
             description: r.narration ?? null,
+            // Identifies this EXACT credit for a later per-(batch, outlet, field) reversal.
+            metadata: { fieldId: r.fieldId, outletCode: r.outletId },
           },
           tx,
         );
@@ -1302,43 +1304,63 @@ export class CreditsService {
       );
     }
 
-    // Block a duplicate pending reversal for the same outlet+field in this batch.
-    const existingPending = await this.prisma.creditReversal.findFirst({
-      where: {
-        batchId: id,
-        clientId: user.clientId,
-        outletId: dto.outletId,
-        fieldId: dto.fieldId,
-        status: 'PENDING_GIFSY',
-      },
-    });
-    if (existingPending) {
-      throw new BadRequestException(
-        'A pending reversal already exists for this outlet and field in this batch',
-      );
-    }
-
-    // The pre-check above is the fast path, but a concurrent request can slip past
-    // it (read-then-write race). The DB partial-unique index
-    // `credit_reversals_pending_unique` on (batchId,outletId,fieldId) WHERE
-    // status='PENDING_GIFSY' is the authoritative guard — translate its P2002 into
-    // the same clean 400.
     try {
-      return await this.prisma.creditReversal.create({
-        data: {
-          clientId: user.clientId,
-          batchId: id,
-          outletId: dto.outletId,
-          outletName: dto.outletName,
-          fieldId: dto.fieldId,
-          fieldName: dto.fieldName,
-          period: batch.period,
-          awardType: dto.awardType,
-          // Store as BigInt paise (or whole points for POINTS awardType).
-          originalPaise: toPaiseBigInt(dto.originalPaise),
-          requestedPaise: toPaiseBigInt(dto.requestedPaise),
-          requestedBy: user.sub,
-        },
+      return await this.prisma.$transaction(async (tx) => {
+        // Serialise every reversal create/approve for this batch (batch row lock) so the
+        // Σ-reversed cap below can't be raced past by a concurrent create or approval.
+        const credited = await this.lockBatchCreditedAmount(
+          tx, id, user.clientId, dto.outletId, dto.fieldId, dto.awardType,
+        );
+
+        // Block a duplicate pending reversal for the same outlet+field in this batch.
+        const existingPending = await tx.creditReversal.findFirst({
+          where: {
+            batchId: id,
+            clientId: user.clientId,
+            outletId: dto.outletId,
+            fieldId: dto.fieldId,
+            status: 'PENDING_GIFSY',
+          },
+        });
+        if (existingPending) {
+          throw new BadRequestException(
+            'A pending reversal already exists for this outlet and field in this batch',
+          );
+        }
+
+        // Σ (approved + pending) reversals for this (batch, outlet, field) + this request must
+        // never exceed what the batch ACTUALLY credited for it (stored batch rows — never the
+        // client-supplied originalPaise), so the same credit can't be clawed back twice.
+        const alreadyReversed = await this.reversedSoFar(tx, id, dto.outletId, dto.fieldId);
+        const requested = toPaiseBigInt(dto.requestedPaise);
+        if (credited === 0n) {
+          throw new BadRequestException('Nothing was credited for this outlet and field in this batch');
+        }
+        if (alreadyReversed + requested > credited) {
+          throw new BadRequestException(
+            `Reversal exceeds the amount credited for this outlet and field in this batch (credited ${credited}, already reversed or pending ${alreadyReversed}, requested ${requested})`,
+          );
+        }
+
+        // The DB partial-unique index `credit_reversals_pending_unique` on
+        // (batchId,outletId,fieldId) WHERE status='PENDING_GIFSY' remains the authoritative
+        // duplicate-pending guard — its P2002 is translated into the same clean 400 below.
+        return await tx.creditReversal.create({
+          data: {
+            clientId: user.clientId,
+            batchId: id,
+            outletId: dto.outletId,
+            outletName: dto.outletName,
+            fieldId: dto.fieldId,
+            fieldName: dto.fieldName,
+            period: batch.period,
+            awardType: dto.awardType,
+            // Server-derived from the stored batch rows (BigInt paise, or whole points for POINTS).
+            originalPaise: credited,
+            requestedPaise: requested,
+            requestedBy: user.sub,
+          },
+        });
       });
     } catch (e) {
       if (
@@ -1351,6 +1373,63 @@ export class CreditsService {
       }
       throw e;
     }
+  }
+
+  /**
+   * Lock the batch row (FOR UPDATE, for the caller's tx) and return the amount the batch
+   * actually credited for (outlet, field, awardType) — Σ of its stored `rows` that confirm
+   * credited (status OK, amount > 0). PAYOUT in integer paise, POINTS in whole points.
+   */
+  private async lockBatchCreditedAmount(
+    tx: Prisma.TransactionClient,
+    batchId: string,
+    clientId: string,
+    outletId: string,
+    fieldId: string,
+    awardType: string,
+  ): Promise<bigint> {
+    await tx.$queryRaw`SELECT id FROM credit_batches WHERE id = ${batchId} FOR UPDATE`;
+    const batch = await tx.creditBatch.findFirst({
+      where: { id: batchId, clientId },
+      select: { rows: true },
+    });
+    const rows = (Array.isArray(batch?.rows) ? batch!.rows : []) as Array<{
+      outletId?: string; fieldId?: string; amount?: number; awardType?: string; status?: string;
+    }>;
+    let total = 0n;
+    for (const r of rows) {
+      if (
+        r && r.outletId === outletId && r.fieldId === fieldId && r.awardType === awardType &&
+        r.status === 'OK' && typeof r.amount === 'number' && r.amount > 0
+      ) {
+        total += toPaiseBigInt(r.amount);
+      }
+    }
+    return total;
+  }
+
+  /** Σ of live reversals for (batch, outlet, field): PENDING → requested, APPROVED/PARTIAL → approved. */
+  private async reversedSoFar(
+    tx: Prisma.TransactionClient,
+    batchId: string,
+    outletId: string,
+    fieldId: string,
+    excludeId?: string,
+  ): Promise<bigint> {
+    const live = await tx.creditReversal.findMany({
+      where: {
+        batchId,
+        outletId,
+        fieldId,
+        status: { in: ['PENDING_GIFSY', 'APPROVED', 'PARTIAL'] },
+        ...(excludeId ? { id: { not: excludeId } } : {}),
+      },
+      select: { status: true, requestedPaise: true, approvedPaise: true },
+    });
+    return live.reduce(
+      (s, r) => s + (r.status === 'PENDING_GIFSY' ? r.requestedPaise : (r.approvedPaise ?? 0n)),
+      0n,
+    );
   }
 
   // ─── GET /v1/admin/credits/eligible-outlets ────────────────────────────────
@@ -2426,6 +2505,22 @@ export class CreditsService {
         : null;
 
     return this.prisma.$transaction(async (tx) => {
+      // ── Over-reversal guard (approve) ─────────────────────────────────────
+      // Re-validated server-side at approval against the STORED batch rows, under the batch
+      // row lock (serialises concurrent approvals/creates for this batch): Σ other live
+      // reversals for (batch, outlet, field) + this approval ≤ the amount actually credited.
+      if (action === ReversalAction.approve) {
+        const credited = await this.lockBatchCreditedAmount(
+          tx, reversal.batchId, user.clientId, reversal.outletId, reversal.fieldId, reversal.awardType,
+        );
+        const others = await this.reversedSoFar(tx, reversal.batchId, reversal.outletId, reversal.fieldId, id);
+        if (others + (finalApprovedPaise ?? 0n) > credited) {
+          throw new BadRequestException(
+            `Approval exceeds the amount credited for this outlet and field in this batch (credited ${credited}, already reversed ${others}, approving ${finalApprovedPaise ?? 0n})`,
+          );
+        }
+      }
+
       // ── Concurrency guard ─────────────────────────────────────────────────
       // Only the first concurrent caller flips PENDING_GIFSY → newStatus (count===1).
       // A racing second call sees count===0 and throws, preventing double-debit.
@@ -2472,9 +2567,9 @@ export class CreditsService {
                   sourceType: 'CREDIT_FIELD',
                   sourceId: reversal.fieldId,
                   description: `Clawback for reversal ${id} — batch POINTS reversal`,
-                  // The credit being reversed (posted by confirm as CREDIT_BATCH/<batchId>):
-                  // a credit that landed on a NEGATIVE wallet is fully undone on reversal.
-                  originalCredit: { referenceType: 'CREDIT_BATCH', referenceId: reversal.batchId },
+                  // The EXACT credit being reversed (batch + outlet + field): a credit that
+                  // landed on a NEGATIVE wallet is fully undone on reversal.
+                  originalCredit: { batchId: reversal.batchId, outletCode: reversal.outletId, fieldId: reversal.fieldId },
                 },
                 tx,
               );
