@@ -1,6 +1,6 @@
 # Bajaj — production outlet / KYC / document import (runbook + record)
 
-**Status:** ✅ DONE on prod 2026-11-12 (~12:10 IST) and verified. Owner-approved at each step.
+**Status:** ✅ DONE on prod 2026-11-12 (~12:10 IST) and verified. Owner-approved at each step. Visibility history also ✅ DONE 2026-11-12 evening (§8).
 **Batch id:** `bajaj-prod-2026-11-12` · **Tenant:** `bajaj` · **DB:** `gifsy_prod` (instance `gifsy-db`)
 
 ## 1. Source and scope
@@ -47,6 +47,15 @@ Scripts: `gs://gifsy-platform-files/migrations/jobs/` (launched by a small boots
 ## 7. Applying Bajaj's corrections
 Correction list sent to the owner: `…\Files received\2026.11.04\Bajaj - data corrections needed - 2026-11-12.xlsx` (5,434 outlets need ≥1 fix; biggest: 5,187 PAN/GST numbers). When the corrected file arrives: run the data check → build a new manifest → (rehearse on a clone if large) → owner OK → backup → `bajaj-import-prod` with `MODE=FILL` → attach new docs → verifier.
 
-## 8. Still to do
-- Import the other files (targets/achievements history → Earn & Burn wallet → payout history → visibility), each check → rehearsal → owner OK → run → verify. Watch: rows for the 1,587 non-approved outlets have no outlet (count points on them).
+## 8. Visibility history — ✅ DONE on prod 2026-11-12 (~20:20 IST), verified
+- Source: `…\Files received\2026.11.04\12.11\Visibility Dump 25 TO 26 till 11th (1).xlsx` (sheets Data 25 / Data 26; 81,495 rows, Apr 2025 → 11 Nov 2026).
+- Rule (owner): only `Approved CISPL Status = Approved` (77,341; Rejected 2,962 + Partially Approved 1,191 excluded); only outlets on prod (65,462 rows / 3,897 outlets; 1,295 outlets not imported → skipped); 14,339 exact duplicate rows (Apr–Sep 2025, identical dates+photos) collapsed → **51,123 captures, 61,779 photos**. November 2026 included (owner).
+- Photos copied into OUR storage first: `visibility-media/bajaj/vendor-import/prod/bajaj-prod-vis-2026-11-12/<outletCode>/<YYYY-MM>_v<1|2>.<ext>` — 61,779 stored, 0 dead/errors (job `bajaj-prod-vis-rehost`, no DB). Staging copies live under a different prefix (never shared).
+- Captures: one `visibility_captures` row per outlet × month, status APPROVED, windowKey `YYYY-MM-P1`, form version + CAMERA field ids read from PROD config (Window 1 `wtk11hn` ← Visibility1, Window 2 `np9d0cc` ← Visibility2), receivedAt = entry date, reviewedAt = CISPL approval date (IST → UTC, unlike staging which is 5½ h off), approvedBy = Gifsy admin, no geo (vendor photos carry none). `ON CONFLICT DO NOTHING` — never overwrites a native capture (there were none). Pure proof: no points/payout/TDS.
+- Backup `1794494902117` → job `bajaj-prod-vis-captures` (DRY_RUN default) → verifier `bajaj-prod-vis-verify`: **PASS** — 51,123 = manifest field-by-field, 61,779 photo links all present, 0 money rows created.
+- Rollback = delete bajaj `visibility_captures` whose formValues reference this batch prefix (never delete the photo objects).
+- Scripts: scratchpad `prodimport/bajaj-prod-vis-*.job.js`; manifest `gs://gifsy-platform-files/migrations/bajaj-prod-visibility-manifest-2026-11-12.json`.
+
+## 9. Still to do
+- Import the other files (targets/achievements history → Earn & Burn wallet → payout history), each check → rehearsal → owner OK → run → verify. Watch: rows for the 1,587 non-approved outlets have no outlet (count points on them).
 - Then bulk Re-KYC flag (67 + flagged) and send Bajaj the correction file.
