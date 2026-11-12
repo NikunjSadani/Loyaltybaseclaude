@@ -923,12 +923,23 @@ export class WalletService {
     const wallet = await tx.wallet.findFirst({ where: { id: found.id } });
     if (!wallet) throw new NotFoundException('Wallet not found for this partner');
 
+    // ORDER-INDEPENDENT floor (a reversal fully undoes its credit, whatever order reversals run in):
+    //   floor(X) = min(0, balanceBefore(X) − Σ points already clawed back, AFTER X was posted, by
+    //              reversals of credits posted EARLIER than X on this wallet)
+    // balanceBefore(X) still contains those earlier credits; once they are reversed it must not.
+    // e.g. −841, f1 +500, f2 +300 → −41: reversing f1 then f2 and f2 then f1 both end at −841.
     let creditBalanceBefore: number | null = null;
     let creditLookupProblem: 'not found' | 'ambiguous' | null = null;
+    let reversedCreditTxId: string | null = null;
     if (opts.originalCredit) {
       const r = await this.findOriginalBatchCredit(tx, wallet.id, partnerId, opts.originalCredit);
-      if (typeof r === 'number') creditBalanceBefore = r;
-      else creditLookupProblem = r;
+      if (typeof r === 'string') {
+        creditLookupProblem = r;
+      } else {
+        reversedCreditTxId = r.id;
+        const earlierClawed = await this.clawedBackForEarlierCredits(tx, wallet.id, partnerId, r);
+        creditBalanceBefore = r.balanceBefore - earlierClawed;
+      }
     }
     const floor = Math.min(0, creditBalanceBefore ?? 0);
 
@@ -946,7 +957,7 @@ export class WalletService {
     if (shortfall > 0) {
       const missingNote = creditLookupProblem ? ` (original credit ${creditLookupProblem} — floored at 0)` : '';
       if (floor < 0) {
-        desc += ` [SHORTFALL: ${shortfall} pts not recovered — balance floored at ${floor}, its level before the reversed credit — owner review required]`;
+        desc += ` [SHORTFALL: ${shortfall} pts not recovered — balance floored at ${floor}, its level before the reversed credit (net of earlier reversed credits) — owner review required]`;
       } else if (wallet.redeemablePoints < 0) {
         desc += ` [SHORTFALL: ${shortfall} pts not recovered — wallet balance already negative (${wallet.redeemablePoints})${missingNote} — owner review required]`;
       } else {
@@ -966,15 +977,75 @@ export class WalletService {
       sourceType: opts.sourceType ?? null,
       sourceId: opts.sourceId ?? null,
       description: desc,
+      // Which credit this clawback reversed — read by later clawbacks' order-independent floor.
+      ...(reversedCreditTxId ? { metadata: { reversedCreditTxId } } : {}),
     });
 
     return { ...movement, shortfall };
   }
 
   /**
+   * Σ points actually removed (balanceBefore − balanceAfter, ≥ 0) by credit-reversal clawbacks on
+   * this wallet that ran AFTER credit `x` was posted and reversed a credit posted BEFORE `x`.
+   * (A clawback that ran before `x` was posted is already inside x.balanceBefore.) The reversed
+   * credit comes from the clawback's metadata.reversedCreditTxId, or — for clawbacks written
+   * before that existed — from its CreditReversal (batch, outlet, field) via the same exact-credit
+   * identification. An unresolvable legacy clawback contributes nothing (conservative: floor
+   * stays higher, never lower than the rule allows).
+   */
+  private async clawedBackForEarlierCredits(
+    tx: Prisma.TransactionClient,
+    walletId: string,
+    partnerId: string,
+    x: { id: string; createdAt: Date },
+  ): Promise<number> {
+    const before = (a: { createdAt: Date; id: string }, b: { createdAt: Date; id: string }) =>
+      a.createdAt.getTime() < b.createdAt.getTime() ||
+      (a.createdAt.getTime() === b.createdAt.getTime() && a.id < b.id);
+    const clawbacks = await tx.walletTransaction.findMany({
+      where: { walletId, transactionType: 'DEBIT_ADJUSTMENT', referenceType: 'CREDIT_REVERSAL' },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: { id: true, createdAt: true, balanceBefore: true, balanceAfter: true, referenceId: true, metadata: true },
+    });
+    let total = 0;
+    for (const c of clawbacks) {
+      if (!before(x, c)) continue; // ran before X was posted → already in X's balanceBefore
+      const removed = c.balanceBefore - c.balanceAfter;
+      if (removed <= 0) continue;
+      const meta =
+        c.metadata && typeof c.metadata === 'object' && !Array.isArray(c.metadata)
+          ? (c.metadata as Record<string, unknown>)
+          : null;
+      let credit: { id: string; createdAt: Date } | null = null;
+      if (typeof meta?.reversedCreditTxId === 'string') {
+        credit = await tx.walletTransaction.findFirst({
+          where: { id: meta.reversedCreditTxId, walletId },
+          select: { id: true, createdAt: true },
+        });
+      } else if (c.referenceId) {
+        const rev = await tx.creditReversal.findFirst({
+          where: { id: c.referenceId },
+          select: { batchId: true, outletId: true, fieldId: true },
+        });
+        if (rev) {
+          const r = await this.findOriginalBatchCredit(tx, walletId, partnerId, {
+            batchId: rev.batchId,
+            outletCode: rev.outletId,
+            fieldId: rev.fieldId,
+          });
+          if (typeof r !== 'string') credit = r;
+        }
+      }
+      if (credit && credit.id !== x.id && before(credit, x)) total += removed;
+    }
+    return total;
+  }
+
+  /**
    * The balanceBefore of the EXACT credit-batch credit a reversal undoes — the CREDIT_POINTS_EARNED
    * WalletTransaction this wallet received from batch `batchId` for the reversal's (outletCode,
-   * fieldId). Returns that balance, or 'not found' / 'ambiguous' (caller floors at 0 and says so).
+   * fieldId). Returns that credit ({ id, createdAt, balanceBefore }), or 'not found' / 'ambiguous'
+   * (caller floors at 0 and says so).
    *
    * Identification, in order:
    *  1. metadata — credits posted since 2026-11-12 carry { fieldId, outletCode } (confirmBatch).
@@ -990,7 +1061,7 @@ export class WalletService {
     walletId: string,
     partnerId: string,
     ref: { batchId: string; outletCode: string; fieldId: string },
-  ): Promise<number | 'not found' | 'ambiguous'> {
+  ): Promise<{ id: string; createdAt: Date; balanceBefore: number } | 'not found' | 'ambiguous'> {
     const credits = await tx.walletTransaction.findMany({
       where: {
         walletId,
@@ -999,7 +1070,7 @@ export class WalletService {
         referenceId: ref.batchId,
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      select: { id: true, balanceBefore: true, points: true, metadata: true },
+      select: { id: true, createdAt: true, balanceBefore: true, points: true, metadata: true },
     });
     if (credits.length === 0) return 'not found';
 
@@ -1043,7 +1114,8 @@ export class WalletService {
       );
     }
     if (matches.length === 0) return 'not found';
-    return matches[0].balanceBefore;
+    const m = matches[0];
+    return { id: m.id, createdAt: m.createdAt, balanceBefore: m.balanceBefore };
   }
 
   // ─── Expiry sweep ────────────────────────────────────────────────────────────
