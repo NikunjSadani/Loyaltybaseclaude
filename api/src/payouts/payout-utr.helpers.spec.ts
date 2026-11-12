@@ -2,7 +2,7 @@
 // Run: npx jest src/payouts/payout-utr.helpers.spec.ts
 
 import * as XLSX from 'xlsx';
-import { parsePayoutUtrUpload } from './payout-utr.helpers';
+import { parsePayoutUtrUpload, parseRupeesToPaise } from './payout-utr.helpers';
 
 /** Build a real .xlsx ArrayBuffer matching the template header layout. */
 function buildBuffer(
@@ -255,5 +255,23 @@ describe('parsePayoutUtrUpload — PROCESS-FIRST guard + Paid outside platform',
       knownUtrs: new Set<string>(),
     });
     expect(res.canProceed).toBe(true);
+  });
+});
+
+describe('parseRupeesToPaise — Excel float noise (audit of 0f5e9395)', () => {
+  it('rounds a noisy numeric half-paise UP (1.005 → 101, not 100)', () => {
+    expect(1.005 * 100).toBeLessThan(100.5); // the noise this guards against
+    expect(parseRupeesToPaise(1.005)).toBe(101);
+    expect(parseRupeesToPaise(14.499999999999998)).toBe(1450);
+  });
+
+  it('leaves clean / integer / non-finite inputs exactly as before', () => {
+    expect(parseRupeesToPaise(1500)).toBe(150000);
+    expect(parseRupeesToPaise(199.5)).toBe(19950);
+    expect(parseRupeesToPaise(Infinity)).toBeNull();
+    expect(parseRupeesToPaise(NaN)).toBeNull();
+    expect(parseRupeesToPaise(-12.34)).toBe(Math.round(-12.34 * 100));
+    expect(parseRupeesToPaise('1,500.00')).toBe(150000);
+    expect(parseRupeesToPaise('₹1.15')).toBe(115);
   });
 });

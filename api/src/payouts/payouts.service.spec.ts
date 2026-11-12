@@ -1404,10 +1404,30 @@ describe('PayoutsService', () => {
           { txnId: 'a', utr: 'UTR12345678', status: 'PAID' },
           { txnId: 'b', status: 'FAILED' },
         ],
-      )) as unknown as Preview['parseResult'] & { alreadyPaid: Array<{ txnId: string; notice: string }> };
+      )) as unknown as Preview['parseResult'] & {
+        alreadyPaid: Array<{ txnId: string; notice: string }>;
+        noChange: Array<{ rowNum: number; txnId: string; notice: string }>;
+      };
       expect(errorsOf(r, 'a').join(' ')).toMatch(/already recorded as failed — a bank UTR can't be applied/);
       expect(r.rows.find((x) => x.txnId === 'b')!.status).toBe('SKIP');
-      expect(r.alreadyPaid).toEqual([{ rowNum: 3, txnId: 'b', notice: 'Already recorded as reversed — no change' }]);
+      // Informational no-op → its own `noChange` category, never the double-payment `alreadyPaid` list.
+      expect(r.noChange).toEqual([{ rowNum: 3, txnId: 'b', notice: 'Already recorded as reversed — no change' }]);
+      expect(r.alreadyPaid).toEqual([]);
+    });
+
+    it('FA-1b: apply — a FAILED row on an already-FAILED tx is returned in noChange (not alreadyPaid), nothing written', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([pendingTxn({ id: 'f1', status: 'FAILED' })])
+        .mockResolvedValueOnce([]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce([]);
+      const res = (await service.uploadPayoutUtr(gifsy, 'b1', buildOff2([{ txnId: 'f1', status: 'FAILED' }]), true)) as {
+        alreadyPaid: unknown[]; noChange: Array<{ rowNum: number; txnId: string; notice: string }>;
+      };
+      expect(res.noChange).toEqual([{ rowNum: 2, txnId: 'f1', notice: 'Already recorded as failed — no change' }]);
+      expect(res.alreadyPaid).toEqual([]);
+      expect(mockTx.payoutTransaction.updateMany).not.toHaveBeenCalled();
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
     });
 
     it('FA-5: a bank UTR collides only with GENUINE bank UTRs, not with a normalised off-platform reference', async () => {

@@ -180,8 +180,9 @@ function mapDoc(d: {
   return {
     id: d.id ?? d.documentType,
     documentType: d.documentType,
-    // OTHER (e.g. imported Bajaj docs) → metadata.label / fileName; every other type unchanged.
-    label: kycDocDisplayLabel(d, docLabel, DOC_LABELS.OTHER),
+    // OTHER with a non-blank metadata.label (e.g. imported Bajaj docs) → that label; every
+    // other case renders docLabel(documentType) exactly as before.
+    label: kycDocDisplayLabel(d, docLabel),
     viewUrl: d.viewUrl ?? null,
   };
 }

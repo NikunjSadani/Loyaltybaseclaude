@@ -40,8 +40,9 @@ import * as XLSX from 'xlsx';
  *       · ALLOWED on a FAILED / REVERSED transaction (→ SUCCESS, audit bypassedGates incl.
  *         'previouslyFailed') unless the redemption's points were refunded (per-row error
  *         POINTS_ALREADY_REFUNDED_ERROR). A non-Y PAID row on such a transaction is an error; a
- *         FAILED row on it is a notice ("Already recorded as failed — no change"). No row is ever
- *         silently dropped: each is applied, an error, or a notice;
+ *         FAILED row on it is an informational no-op ("Already recorded as failed — no change",
+ *         returned in `noChange`, NOT in `alreadyPaid`). No row is ever silently dropped: each is
+ *         applied, an error, or a notice;
  *       · a non-Y (bank) UTR collides only with previously used GENUINE bank UTRs;
  *       · may not reuse a reference that was used as a genuine bank UTR (non-Y) anywhere.
  *   - REFERENCES are compared NORMALISED (upper-case, all whitespace and / - . _ : # removed) for
@@ -178,6 +179,12 @@ export interface PayoutUtrParseResult {
   warnings: string[];
   /** Rows for already-SUCCESS transactions (rowNum + notice) — reported, never applied. */
   alreadyPaid: Array<{ rowNum: number; txnId: string; notice: string }>;
+  /**
+   * Informational no-op rows — a FAILED row for a payout already FAILED / REVERSED (idempotent
+   * re-upload). Distinct from `alreadyPaid` (a possible double payment) so the UI can show them
+   * neutrally rather than as an alert. Never applied.
+   */
+  noChange: Array<{ rowNum: number; txnId: string; notice: string }>;
   summary: {
     total: number;
     ok: number;
@@ -214,7 +221,15 @@ export interface ParsePayoutUtrCtx {
 
 /** "1,500.00" / "₹1500" / "Rs 1,500" / "Rs. 1500" / "INR 1500" / 1500 → paise, or null. */
 export function parseRupeesToPaise(raw: string | number): number | null {
-  if (typeof raw === 'number') return Number.isFinite(raw) ? Math.round(raw * 100) : null;
+  // Numeric cells may be Excel formula results carrying float noise (1.005 rupees → 100.4999…
+  // paise). Trim to 12 significant digits before the half-up round so the half-paise rounds UP.
+  // Integers, negatives, non-finite and huge values are left exactly as before.
+  if (typeof raw === 'number') {
+    if (!Number.isFinite(raw)) return null;
+    const p = raw * 100;
+    const clean = p < 0 || Number.isInteger(p) || p >= 1e11 ? p : Number(p.toPrecision(12));
+    return Math.round(clean);
+  }
   const cleaned = raw
     .trim()
     .replace(/^(₹|rs\.?|inr)\s*/i, '')
@@ -231,6 +246,7 @@ function emptyResult(headerError: string | null): PayoutUtrParseResult {
     canProceed: false,
     warnings: [],
     alreadyPaid: [],
+    noChange: [],
     summary: { total: 0, ok: 0, skipped: 0, errors: 0, paidCount: 0, failedCount: 0 },
   };
 }
@@ -308,6 +324,7 @@ export function parsePayoutUtrUpload(
     ? [`Ignored columns (not recognised): ${ignored.map((h) => `"${h}"`).join(', ')}`]
     : [];
   const alreadyPaid: PayoutUtrParseResult['alreadyPaid'] = [];
+  const noChange: PayoutUtrParseResult['noChange'] = [];
 
   // Pre-pass: every PAID reference in this upload → the rows using it (Y-ness + partner), so the
   // in-upload duplicate rule is order-independent: a reference may repeat ONLY when every row using
@@ -383,14 +400,14 @@ export function parsePayoutUtrUpload(
       continue;
     }
     // A FAILED row for a payout that is already failed/reversed → a NOTICE (idempotent re-upload of
-    // the same report), never a silent skip. Listed with the other notices.
+    // the same report), never a silent skip. Listed in `noChange` (informational, not an alert).
     if (
       infoEarly &&
       outcome === 'FAILED' &&
       (PREVIOUSLY_FAILED_PAYOUT_STATUSES as readonly string[]).includes(infoEarly.status)
     ) {
       const notice = alreadyFailedNotice(infoEarly.status);
-      alreadyPaid.push({ rowNum: rIdx + 1, txnId, notice });
+      noChange.push({ rowNum: rIdx + 1, txnId, notice });
       rows.push({
         rowNum: rIdx + 1,
         txnId,
@@ -552,11 +569,12 @@ export function parsePayoutUtrUpload(
     headerError: null,
     rows,
     hasErrors: errCount > 0,
-    // An upload whose only rows are "already paid" notices still proceeds (a no-op re-upload stays
-    // idempotent) — the notices are returned in the result, never swallowed.
-    canProceed: (okCount > 0 || alreadyPaid.length > 0) && errCount === 0,
+    // An upload whose only rows are "already paid" / "no change" notices still proceeds (a no-op
+    // re-upload stays idempotent) — the notices are returned in the result, never swallowed.
+    canProceed: (okCount > 0 || alreadyPaid.length > 0 || noChange.length > 0) && errCount === 0,
     warnings,
     alreadyPaid,
+    noChange,
     summary: {
       total: okCount + errCount,
       ok: okCount,

@@ -14,6 +14,7 @@ import {
   FileSpreadsheet,
   Loader2,
   X,
+  Info,
 } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { authHeader } from '@/lib/api-client';
@@ -44,6 +45,8 @@ interface UtrUploadResult {
   offPlatformCount: number;
   /** Rows for transactions that were ALREADY paid — never applied; flagged as a possible double payment. */
   alreadyPaid: Array<{ rowNum: number; txnId: string; notice: string }>;
+  /** Informational no-op rows (e.g. a FAILED row for a payout already recorded as failed) — never applied. */
+  noChange: Array<{ rowNum: number; txnId: string; notice: string }>;
   /** Non-blocking notices, e.g. ignored (unrecognised) columns. */
   warnings: string[];
   skipped: UtrSkippedRow[];
@@ -386,6 +389,7 @@ export default function PayoutsPage() {
         offPlatformCount: Number(json.data.offPlatformCount) || 0,
         // Older API builds omit these — treat as none.
         alreadyPaid: Array.isArray(json.data.alreadyPaid) ? json.data.alreadyPaid : [],
+        noChange: Array.isArray(json.data.noChange) ? json.data.noChange : [],
         warnings: Array.isArray(json.data.warnings) ? json.data.warnings : [],
         // Older API builds omit `skipped` — treat as none.
         skipped: Array.isArray(json.data.skipped) ? json.data.skipped : [],
@@ -764,6 +768,28 @@ export default function PayoutsPage() {
                       </ul>
                     )}
                     {utrUploadResult.warnings.map((w) => <p key={w}>{w}</p>)}
+                  </div>
+                </div>
+              )}
+              {/* Informational no-op rows (already recorded as failed/reversed) — neutral, not an alert. */}
+              {utrUploadResult && utrUploadResult.noChange.length > 0 && (
+                <div
+                  role="status"
+                  data-testid="utr-no-change"
+                  className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs text-gray-700 flex items-start gap-2"
+                >
+                  <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-semibold">
+                      {utrUploadResult.noChange.length} row{utrUploadResult.noChange.length === 1 ? '' : 's'} already up to date — nothing changed
+                    </p>
+                    <ul className="mt-1 space-y-0.5">
+                      {utrUploadResult.noChange.map((n) => (
+                        <li key={`${n.rowNum}-${n.txnId}`}>
+                          Row {n.rowNum} <span className="font-mono">({n.txnId})</span>: {n.notice}
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                 </div>
               )}

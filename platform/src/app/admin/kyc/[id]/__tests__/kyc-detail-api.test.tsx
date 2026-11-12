@@ -127,7 +127,7 @@ describe('KYCID — Admin KYC detail API wiring', () => {
     expect(screen.queryByText(/KYC ID:/)).not.toBeInTheDocument(); // old CUID label removed
   });
 
-  it('KYCID8: OTHER docs are labelled from metadata.label / fileName; other types unchanged', async () => {
+  it('KYCID8: OTHER docs with metadata.label show it; OTHER without one renders "OTHER" as before', async () => {
     const submission = {
       ...MOCK_SUBMISSION,
       documents: [
@@ -135,7 +135,7 @@ describe('KYCID — Admin KYC detail API wiring', () => {
         { id: 'd2', documentType: 'OTHER', fileName: 'Counter photo.jpg', status: 'SUBMITTED' },
         { id: 'd3', documentType: 'OTHER', fileName: 'ID proof (Voter ID).pdf',
           metadata: { label: 'Voter ID card' }, status: 'SUBMITTED' },
-        { id: 'd4', documentType: 'OTHER', fileName: null, status: 'SUBMITTED' },
+        { id: 'd4', documentType: 'OTHER', fileName: null, metadata: { label: '  ' }, status: 'SUBMITTED' },
       ],
     };
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
@@ -144,12 +144,11 @@ describe('KYCID — Admin KYC detail API wiring', () => {
     }));
     render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
     // Tabs + checklist both render the label → at least one match each.
-    expect((await screen.findAllByText('Counter photo')).length).toBeGreaterThan(0);
-    expect(screen.getAllByText('Voter ID card').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('Other document').length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('Voter ID card')).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('OTHER').length).toBeGreaterThan(0);      // pre-existing label kept
     expect(screen.getAllByText('PAN CARD').length).toBeGreaterThan(0);   // non-OTHER unchanged
-    expect(screen.queryByText('ID proof (Voter ID)')).not.toBeInTheDocument(); // metadata.label wins
-    expect(screen.queryByText('OTHER')).not.toBeInTheDocument();
+    expect(screen.queryByText('Counter photo')).not.toBeInTheDocument(); // fileName never used
+    expect(screen.queryByText('ID proof (Voter ID)')).not.toBeInTheDocument();
   });
 
   it('KYCID6: the not-found state back link also points to /admin/kyc', async () => {

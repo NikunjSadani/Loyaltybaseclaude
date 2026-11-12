@@ -1307,6 +1307,8 @@ export class PayoutsService {
       blockedOrders,
       // Rows for already-SUCCESS transactions — reported (possible double payment), never applied.
       alreadyPaid: parseResult.alreadyPaid,
+      // Informational no-op rows (FAILED row on an already failed/reversed payout) — never applied.
+      noChange: parseResult.noChange,
       warnings: parseResult.warnings,
     };
   }

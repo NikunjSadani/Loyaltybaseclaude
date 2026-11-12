@@ -516,7 +516,8 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     documents: (s.documents ?? []).map(d => ({
       id:     d.id,
       type:   d.documentType.toLowerCase(),
-      // OTHER (e.g. imported Bajaj docs) → metadata.label / fileName; every other type unchanged.
+      // OTHER with a non-blank metadata.label (e.g. imported Bajaj docs) → that label; every
+      // other case renders the documentType label exactly as before.
       label:  kycDocDisplayLabel(d, (t) => t.replace(/_/g, ' ')),
       // viewUrl is the signed (or fail-closed null) read URL; never fall back to the
       // raw private GCS fileUrl (renders a 403/broken image) — use the placeholder.

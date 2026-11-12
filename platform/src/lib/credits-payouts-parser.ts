@@ -44,7 +44,22 @@ export interface ParseCreditUploadOpts {
  * rejected first). The backend independently rejects any non-whole amount.
  */
 export function roundHalfUpWhole(n: number): number {
-  return Math.round(n);
+  return Math.round(trimFloatNoise(n));
+}
+
+/**
+ * Strip binary floating-point noise from a typed/computed amount before rounding or display.
+ * Excel formula cells arrive as raw doubles (=116*12.5/100 → 14.499999999999998), which would
+ * otherwise round DOWN and show as "14.499999999999998" in the preview/report. Trimming to 12
+ * significant digits restores 14.5 (→ rounds half-up to 15).
+ *
+ * Only finite, non-negative, non-integer values below 1e11 are touched (12 significant digits
+ * then still keep every integer digit plus ≥1 decimal); NaN, ±Infinity, negatives (rejected
+ * upstream with the value as typed), integers and huge values are returned unchanged.
+ */
+export function trimFloatNoise(n: number): number {
+  if (!Number.isFinite(n) || n < 0 || Number.isInteger(n) || n >= 1e11) return n;
+  return Number(n.toPrecision(12));
 }
 
 // ─── Parser ───────────────────────────────────────────────────────────────────
@@ -207,7 +222,10 @@ export function parseCreditUpload(
       }
 
       // Parse numeric value
-      const numVal = Number(strVal.replace(/,/g, ''));
+      // Float noise trimmed up-front so the rounded amount, originalAmount ("Typed Amount" in
+      // the report / preview panel) and every message all use the clean value (14.5, not
+      // 14.499999999999998 from an Excel formula cell).
+      const numVal = trimFloatNoise(Number(strVal.replace(/,/g, '')));
 
       if (isNaN(numVal)) {
         errors.push(`Value "${strVal}" is not a valid number.`);

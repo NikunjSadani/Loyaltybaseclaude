@@ -604,3 +604,94 @@ describe('H — Whole-unit rounding (half-up)', () => {
     expect(code).not.toMatch(/moreThanOneDecimal/);
   });
 });
+
+// ─── I — Float noise trimmed before half-up rounding (audit of 0f5e9395) ─────
+
+describe('I — Excel float noise before half-up rounding', () => {
+  // Raw doubles as Excel formula cells deliver them (e.g. =116*12.5/100 → 14.499999999999998).
+  const NOISY: Array<[number, number, number]> = [
+    // [raw cell value, clean typed value, rounded whole]
+    [14.499999999999998, 14.5, 15],      // =116*12.5/100
+    [180 * 0.175, 31.5, 32],              // 31.499999999999996
+    [61.49999999999999, 61.5, 62],        // =410*0.15
+    [660 * 0.175, 115.5, 116],            // 115.49999999999999
+    [0.145 * 100, 14.5, 15],              // 14.499999999999998 (2.675-style decimal)
+    [1.005 * 1000, 1005, 1005],           // 1004.9999999999999 — noise only, nothing to round
+  ];
+
+  it('I1: roundHalfUpWhole / trimFloatNoise on noisy doubles', async () => {
+    const { roundHalfUpWhole, trimFloatNoise } = await import('../credits-payouts-parser');
+    for (const [raw, clean, whole] of NOISY) {
+      expect(trimFloatNoise(raw)).toBe(clean);
+      expect(roundHalfUpWhole(raw)).toBe(whole);
+    }
+    expect(roundHalfUpWhole(2.675)).toBe(3);
+    expect(roundHalfUpWhole(0.5)).toBe(1);
+    expect(roundHalfUpWhole(0.49)).toBe(0);
+  });
+
+  it('I2: edge values pass through trimFloatNoise unchanged (negatives, integers, huge, non-finite)', async () => {
+    const { trimFloatNoise } = await import('../credits-payouts-parser');
+    for (const v of [-14.499999999999998, -0.4, 0, 500, 1e11 + 0.5, 123456789012.345, 1e300,
+      Infinity, -Infinity, Number.MAX_SAFE_INTEGER]) {
+      expect(trimFloatNoise(v)).toBe(v);
+    }
+    expect(Number.isNaN(trimFloatNoise(NaN))).toBe(true);
+  });
+
+  it('I3: POINTS formula cell 14.499999999999998 → 15 pts, originalAmount shown as 14.5', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL, FIELD_VIS]),
+      [['WS-001', 'Anand Wholesale', 14.499999999999998, 660 * 0.175, '', '']],
+    );
+    const result = parseCreditUpload(buf, DEFAULT_OPTS);
+    const vol = result.rows.find((r) => r.fieldId === 'f_vol')!;
+    const vis = result.rows.find((r) => r.fieldId === 'f_vis')!;
+    expect(vol.status).toBe('OK');
+    expect(vol.amount).toBe(15);
+    expect(vol.originalAmount).toBe(14.5);
+    expect(vis.amount).toBe(116);
+    expect(vis.originalAmount).toBe(115.5);
+    expect(result.summary.totalPoints).toBe(131);
+  });
+
+  it('I4: PAYOUT formula cells round half-up to whole rupees (₹31.5 → ₹32, ₹61.5 → ₹62)', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL, FIELD_VIS]),
+      [['RT-001', 'Sharma Store', 180 * 0.175, 61.49999999999999, '', '']],
+    );
+    const result = parseCreditUpload(buf, DEFAULT_OPTS);
+    const vol = result.rows.find((r) => r.fieldId === 'f_vol')!;
+    const vis = result.rows.find((r) => r.fieldId === 'f_vis')!;
+    expect(vol.awardType).toBe('PAYOUT');
+    expect(vol.amount).toBe(3200);
+    expect(vol.originalAmount).toBe(31.5);
+    expect(vis.amount).toBe(6200);
+    expect(vis.originalAmount).toBe(61.5);
+    expect(result.summary.totalPayoutPaise).toBe(9400);
+  });
+
+  it('I5: 0.5 → 1 (OK); 0.49 → 0 (SKIP); a noise-only whole value records no originalAmount', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL, FIELD_VIS]),
+      [
+        ['WS-001', 'Anand Wholesale', 0.5, 0.49, '', ''],
+        ['WS-002', 'Bharat Traders', 1.005 * 1000, '', '', ''],
+      ],
+    );
+    const result = parseCreditUpload(buf, { ...DEFAULT_OPTS, outlets: [...DEFAULT_OPTS.outlets, { ...DEFAULT_OPTS.outlets[0], id: 'WS-002', name: 'Bharat Traders' }] });
+    const half = result.rows.find((r) => r.outletId === 'WS-001' && r.fieldId === 'f_vol')!;
+    const low = result.rows.find((r) => r.outletId === 'WS-001' && r.fieldId === 'f_vis')!;
+    const noise = result.rows.find((r) => r.outletId === 'WS-002' && r.fieldId === 'f_vol')!;
+    expect(half.status).toBe('OK');
+    expect(half.amount).toBe(1);
+    expect(low.status).toBe('SKIP');
+    expect(low.skipReason).toMatch(/0\.49 rounds to 0/);
+    expect(noise.status).toBe('OK');
+    expect(noise.amount).toBe(1005);
+    expect('originalAmount' in noise).toBe(false);
+  });
+});

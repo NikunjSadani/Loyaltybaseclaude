@@ -1,21 +1,21 @@
 /**
- * Display label for a KYC document of type OTHER.
+ * Display label for a KYC document.
  *
- * Imported (e.g. Bajaj-migrated) documents all carry documentType OTHER, but their
- * `metadata.label` / `fileName` holds the meaningful name ("Counter photo.jpg",
- * "ID proof (Voter ID).pdf"). Every non-OTHER type keeps its caller's existing label
- * untouched — callers only consult this for OTHER (Deoleo byte-identical).
+ * Imported (e.g. Bajaj-migrated) documents all carry documentType OTHER, with the
+ * meaningful name in `metadata.label` ("Counter photo", "Voter ID card"). For type OTHER
+ * the label is `metadata.label` ONLY when it is a non-blank string; in every other case
+ * (any non-OTHER type, or an OTHER doc without a usable metadata.label — e.g. every
+ * existing Deoleo document) the caller's pre-existing label is returned unchanged, so
+ * those pages render exactly what they rendered before. fileName is deliberately NOT used.
  */
-
-export const OTHER_DOC_FALLBACK_LABEL = 'Other document';
 
 export interface LabelableKycDoc {
   documentType: string;
-  fileName?: string | null;
   metadata?: unknown;
 }
 
-function metadataLabel(metadata: unknown): string | null {
+/** metadata.label when it is a non-blank string (trimmed), else null. */
+export function metadataLabel(metadata: unknown): string | null {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
   const label = (metadata as Record<string, unknown>).label;
   if (typeof label !== 'string') return null;
@@ -23,28 +23,17 @@ function metadataLabel(metadata: unknown): string | null {
   return trimmed || null;
 }
 
-function fileNameLabel(fileName: string | null | undefined): string | null {
-  if (typeof fileName !== 'string') return null;
-  // Drop any path prefix, then a trailing extension ("Counter photo.jpg" → "Counter photo").
-  const base = fileName.split(/[\\/]/).pop() ?? '';
-  const stem = base.replace(/\.[A-Za-z0-9]{1,5}$/, '').trim();
-  return stem || null;
-}
-
-/** Friendly label for an OTHER document: metadata.label → fileName sans extension → fallback. */
-export function otherDocLabel(d: LabelableKycDoc, fallback: string = OTHER_DOC_FALLBACK_LABEL): string {
-  return metadataLabel(d.metadata) ?? fileNameLabel(d.fileName) ?? fallback;
-}
-
 /**
- * The label to show for any KYC document. Non-OTHER types return `baseLabel(documentType)`
- * unchanged; OTHER resolves via {@link otherDocLabel}.
+ * The label to show for a KYC document: for OTHER with a non-blank metadata.label, that label;
+ * otherwise exactly `baseLabel(documentType)` (the page's existing label).
  */
 export function kycDocDisplayLabel(
   d: LabelableKycDoc,
   baseLabel: (documentType: string) => string,
-  otherFallback: string = OTHER_DOC_FALLBACK_LABEL,
 ): string {
-  if (d.documentType !== 'OTHER') return baseLabel(d.documentType);
-  return otherDocLabel(d, otherFallback);
+  if (d.documentType === 'OTHER') {
+    const fromMeta = metadataLabel(d.metadata);
+    if (fromMeta) return fromMeta;
+  }
+  return baseLabel(d.documentType);
 }
