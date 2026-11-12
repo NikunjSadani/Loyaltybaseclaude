@@ -1331,9 +1331,99 @@ describe('PayoutsService', () => {
           { txnId: 'b', utr: 'CASH 2', status: 'PAID', off: 'Y' },
         ],
       );
-      const msg = 'This payment was already sent to the bank in batch PB-1. Only mark it paid outside the platform after the bank payment is confirmed failed/returned.';
+      const msg = "This payment was already sent to the bank in batch PB-1 and its outcome isn't recorded yet. Record the bank result first: if the bank payment failed or was returned, upload it as FAILED. After that it can be marked 'Paid outside platform' = Y — unless its points were refunded when it failed.";
       expect(errorsOf(r, 'a')).toEqual([msg]);
       expect(errorsOf(r, 'b')).toEqual([msg]);
+    });
+
+    // ── Final audit of cc4d11be ────────────────────────────────────────────────────
+    const REFUNDED_MSG = "Points for this redemption were already refunded — it can't also be marked paid";
+
+    it('FA-1: "Y" on a FAILED/REVERSED tx — refunded order → explicit per-row error; unrefunded / no order → OK', async () => {
+      const r = await preview(
+        [
+          pendingTxn({ id: 'fRef', status: 'FAILED', redemptionOrderId: 'oF' }),                    // order FAILED → refunded
+          pendingTxn({ id: 'rRef', status: 'REVERSED', partnerId: 'p2', redemptionOrderId: 'oZ' }), // points 0 → refunded
+          pendingTxn({ id: 'fVch', status: 'FAILED', partnerId: 'p3', redemptionOrderId: 'oV' }),   // voucher-blocked, unrefunded
+          pendingTxn({ id: 'fNone', status: 'FAILED', partnerId: 'p4', redemptionOrderId: null }),  // no linked order
+        ],
+        [],
+        [
+          { txnId: 'fRef', utr: 'CASH A', status: 'PAID', off: 'Y' },
+          { txnId: 'rRef', utr: 'CASH B', status: 'PAID', off: 'Y' },
+          { txnId: 'fVch', utr: 'CASH C', status: 'PAID', off: 'Y' },
+          { txnId: 'fNone', utr: 'CASH D', status: 'PAID', off: 'Y' },
+        ],
+        [
+          { id: 'oF', status: 'FAILED', pointsDeducted: 500 },
+          { id: 'oZ', status: 'CONFIRMED', pointsDeducted: 0 },
+          { id: 'oV', status: 'PROCESSING', pointsDeducted: 500 },
+        ],
+      );
+      expect(errorsOf(r, 'fRef')).toEqual([REFUNDED_MSG]);
+      expect(errorsOf(r, 'rRef')).toEqual([REFUNDED_MSG]);
+      expect(errorsOf(r, 'fVch')).toEqual([]);
+      expect(errorsOf(r, 'fNone')).toEqual([]);
+      expect(r.rows.find((x) => x.txnId === 'fVch')!.status).toBe('OK');
+    });
+
+    it('FA-1: "Y" on a FAILED tx (unrefunded) APPLIES → SUCCESS with audit bypassedGates incl. previouslyFailed (never silently dropped)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([pendingTxn({ status: 'FAILED', upiId: 'p1@upi' })])
+        .mockResolvedValueOnce([]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce([{ id: 'o1', status: 'PROCESSING', pointsDeducted: 500 }]);
+      mockTx.redemptionOrder.findFirst.mockResolvedValueOnce({ status: 'PROCESSING', pointsDeducted: 500 });
+      const res = await service.uploadPayoutUtr(gifsy, 'b1', buildOff2([{ txnId: 'txnP', utr: 'CASH 9', status: 'PAID', off: 'Y' }]), true);
+      expect(res).toMatchObject({ applied: true, paidCount: 1, offPlatformCount: 1, skipped: [] });
+      const claim = mockTx.payoutTransaction.updateMany.mock.calls[0][0];
+      expect(claim.where).toEqual({ id: 'txnP', status: 'FAILED' });
+      expect(claim.data).toMatchObject({ status: 'SUCCESS', providerResponse: { paidOffPlatform: true, previousStatus: 'FAILED' } });
+      const meta = mockTx.auditLog.create.mock.calls[0][0].data.metadata;
+      expect(meta.bypassedGates).toContain('previouslyFailed');
+      expect(meta.bypassedGates).not.toContain('notProcessed');
+    });
+
+    it('FA-1: a refund landing between preview and apply on a FAILED tx is reported in skipped with the refunded message', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([pendingTxn({ status: 'FAILED' })]).mockResolvedValueOnce([]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce([{ id: 'o1', status: 'PROCESSING', pointsDeducted: 500 }]);
+      mockTx.redemptionOrder.findFirst.mockResolvedValueOnce({ status: 'FAILED', pointsDeducted: 0 });
+      const res = await service.uploadPayoutUtr(gifsy, 'b1', buildOff2([{ txnId: 'txnP', utr: 'CASH 9', status: 'PAID', off: 'Y' }]), true);
+      expect((res as { skipped: Array<{ reason: string }> }).skipped).toEqual([
+        expect.objectContaining({ rowNum: 2, reason: REFUNDED_MSG }),
+      ]);
+      expect(mockTx.payoutTransaction.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('FA-1: on a FAILED tx a bank UTR (no Y) is an explicit error and a FAILED row is a visible notice', async () => {
+      const r = (await preview(
+        [pendingTxn({ id: 'a', status: 'FAILED' }), pendingTxn({ id: 'b', status: 'REVERSED', partnerId: 'p2' })],
+        [],
+        [
+          { txnId: 'a', utr: 'UTR12345678', status: 'PAID' },
+          { txnId: 'b', status: 'FAILED' },
+        ],
+      )) as unknown as Preview['parseResult'] & { alreadyPaid: Array<{ txnId: string; notice: string }> };
+      expect(errorsOf(r, 'a').join(' ')).toMatch(/already recorded as failed — a bank UTR can't be applied/);
+      expect(r.rows.find((x) => x.txnId === 'b')!.status).toBe('SKIP');
+      expect(r.alreadyPaid).toEqual([{ rowNum: 3, txnId: 'b', notice: 'Already recorded as reversed — no change' }]);
+    });
+
+    it('FA-5: a bank UTR collides only with GENUINE bank UTRs, not with a normalised off-platform reference', async () => {
+      const r = await preview(
+        [pendingTxn({ id: 'a', status: 'INITIATED' }), pendingTxn({ id: 'b', status: 'INITIATED', partnerId: 'p2' })],
+        [
+          { providerRefId: 'CHQ-123456', partnerId: 'p9', providerResponse: { paidOffPlatform: true } }, // off-platform ref
+          { providerRefId: 'UTR99990000', partnerId: 'p8' },                                            // genuine bank UTR
+        ],
+        [
+          { txnId: 'a', utr: 'CHQ123456', status: 'PAID' },
+          { txnId: 'b', utr: 'utr99990000', status: 'PAID' },
+        ],
+      );
+      expect(errorsOf(r, 'a')).toEqual([]);
+      expect(errorsOf(r, 'b')).toEqual(['UTR "utr99990000" has already been used.']);
     });
 
     it('R3-6: a row for an already-SUCCESS tx is a visible notice (preview + apply result), never applied', async () => {

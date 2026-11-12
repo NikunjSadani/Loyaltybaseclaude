@@ -306,9 +306,9 @@ describe('TdsService — per-deductee no-PAN', () => {
     expect(big.PAN).toBe(''); // blank cell
     expect(big['Outlet Code']).toBe('B1, B2');
     expect(big['TDS Rate %']).toBe(20);
-    expect(big['TDS Amount (₹)']).toBe('6250.00');
+    expect(big['TDS Amount (₹)']).toBe(6250);
     const small = rows.find((r) => r['Deductee Name'] === 'Small Owner (NO PAN ON FILE)')!;
-    expect(small['TDS Amount (₹)']).toBe('0.00');
+    expect(small['TDS Amount (₹)']).toBe(0);
     const pan = rows.find((r) => r.PAN === 'ABCDE1234F')!;
     expect(pan['Deductee Name']).toBe('Pan Owner');
     expect(pan['Outlet Code']).toBe('');
@@ -410,12 +410,67 @@ describe('TdsService — per-deductee no-PAN', () => {
     const { buffer } = await service.export194R(CLIENT, FY);
     const rows = parseSheet(buffer);
     const earlier = rows.find((r) => r['Deductee Name'] === 'Earlier no-PAN deposits (not linked to a partner)')!;
-    expect(earlier['Already Deposited (₹)']).toBe('1000.00');
-    // The shared xlsx writer prefixes any string starting with "-" with an apostrophe (formula-injection
-    // guard) — the same as every other negative Outstanding cell in this export.
-    expect(earlier['Outstanding (₹)']).toBe("'-1000.00");
+    expect(earlier['Already Deposited (₹)']).toBe(1000);
+    // Money cells are written as NUMBERS (the formula-injection guard only touches text cells), so a
+    // negative outstanding is a real negative number — not the guarded text "'-1000.00".
+    expect(earlier['Outstanding (₹)']).toBe(-1000);
+    expect(typeof earlier['Outstanding (₹)']).toBe('number');
     const summary = parseSheet(buffer, 1);
-    expect(summary.find((r) => r.Field === 'Total Outstanding (₹)')!.Value).toBe('5250.00'); // 6250 − 1000
+    expect(summary.find((r) => r.Field === 'Total Outstanding (₹)')!.Value).toBe(5250); // 6250 − 1000
+  });
+
+  it('export194R (FA-3): text cells keep the formula-injection guard; money cells are numbers', async () => {
+    wire([{ id: 'evil', pan: null, owner: '=WEBSERVICE("x")', outlets: ['E1'] }]);
+    mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('E1', 'f1', 2_500_000n)]);
+    const { buffer } = await service.export194R(CLIENT, FY);
+    const row = parseSheet(buffer)[0];
+    expect(String(row['Deductee Name']).startsWith("'=")).toBe(true);
+    expect(row['Amount Paid (₹)']).toBe(25000);
+    expect(row['TDS Amount (₹)']).toBe(6250);
+  });
+
+  it('194R (FA-2): a no-PAN-marker deposit attributed to an owner PAN with NO base this FY still gets a row (base 0, outstanding −deposit)', async () => {
+    wire([
+      { id: 'cpP', pan: 'ABCDE1234F', owner: 'P', outlets: ['OP'] },
+      { id: 'cpQ', pan: 'QQQQQ1234Q', owner: 'Q', outlets: ['OQ'] },
+    ]);
+    mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('OQ', 'f1', 2_100_000n)]); // only Q has a base
+    mockPrisma.tdsDeposit.findMany.mockResolvedValue([{ panNumber: '__NO_PAN__', outletCode: 'op', amountPaise: 50_000n }]);
+    const rows = await service.compute194R(CLIENT, FY);
+    expect(rows.find((r) => r.panNumber === 'ABCDE1234F')).toEqual({
+      panNumber: 'ABCDE1234F', fyLabel: FY, baseFyTotalPaise: 0n, liabilityPaise: 0n, depositedPaise: 50_000n, outstandingPaise: -50_000n,
+    });
+    const sum = await service.summary194R(CLIENT, FY);
+    expect(sum.totalDepositedPaise).toBe(50_000n);
+  });
+
+  it('194C (FA-2): a no-PAN-marker deposit attributed to an owner PAN with NO base this FY still gets a row', async () => {
+    mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis', clientId: CLIENT }]);
+    wire([
+      { id: 'p', pan: 'ABCDE1234F', owner: 'P', outlets: ['OP'], entityType: 'COMPANY' },
+      { id: 'q', pan: 'QQQQQ1234Q', owner: 'Q', outlets: ['OQ'], entityType: 'COMPANY' },
+    ]);
+    mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('OQ', 'vis', 12_000_000n)]);
+    mockPrisma.tdsDeposit.findMany.mockResolvedValue([{ panNumber: '__NO_PAN__', outletCode: 'OP', clientId: CLIENT, amountPaise: 70_000n }]);
+    const rows = await service.compute194C(FY);
+    expect(rows.find((r) => r.panNumber === 'ABCDE1234F')).toMatchObject({
+      baseFyTotalPaise: 0n, liabilityPaise: 0n, depositedPaise: 70_000n, outstandingPaise: -70_000n,
+    });
+    expect(rows.filter((r) => r.panNumber === 'ABCDE1234F')).toHaveLength(1);
+  });
+
+  it('194C (FA-4): recovery-only AND withheld-only on the bare `__NO_PAN__` key → ONE merged row, recovered counted once', async () => {
+    mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis', clientId: CLIENT }]);
+    wire([{ id: 'a', pan: null, owner: 'A', outlets: ['OA'] }]); // a no-PAN row exists → recovery-only rows emitted
+    mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('OA', 'vis', 12_000_000n)]);
+    mockPrisma.tdsRecoveryEntry.findMany.mockResolvedValue([{ panNumber: '', clientId: CLIENT, tenantSharePaise: 25_000n }]);
+    mockPrisma.tdsDeductionEntry.findMany.mockResolvedValue([{ panNumber: '', tdsDeductedThisPaise: 40_000n }]);
+    const rows = await service.compute194C(FY);
+    const bare = rows.filter((r) => r.panNumber === '__NO_PAN__');
+    expect(bare).toHaveLength(1);
+    expect(bare[0]).toMatchObject({ withheldPaise: 40_000n, recoveredPaise: 25_000n, outstandingPaise: -40_000n });
+    const sum = await service.summary194C(FY);
+    expect(sum.totalWithheldPaise).toBe(40_000n);
   });
 
   it('194C: PAN-only (Deoleo-style) → no noPanDeductee, no extra outlet/partner queries', async () => {

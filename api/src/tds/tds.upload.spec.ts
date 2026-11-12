@@ -451,6 +451,23 @@ describe('TdsService — uploadOffPlatform', () => {
     expect(mockPrisma.tdsOffPlatformEntry.createMany).not.toHaveBeenCalled();
   });
 
+  it('FA-6: the duplicate-skip message names the parser\'s REAL sheet row (not the accepted-row index)', async () => {
+    const buf = buildXlsxBuffer([
+      validHeader,
+      ['not-a-date', 'ABCDE1234F', 'OUT001', 500],   // sheet row 2 → parse error (not in accepted rows)
+      ['2025-09-01', 'XYZPQ5678G', '', 1000],        // sheet row 3 → already uploaded
+    ]);
+    // Every accepted row "already exists" for this file's batch id.
+    mockPrisma.tdsOffPlatformEntry.findMany.mockImplementationOnce(async () => [
+      { panNumber: 'XYZPQ5678G', entryDate: new Date(Date.UTC(2025, 8, 1)), amountPaise: 100000n, outletCode: null },
+    ]);
+    const res = await service.uploadOffPlatform(CLIENT_ID, USER_ID, multerFile(buf), true);
+    expect(res.errors.some((e) => e.row === 2)).toBe(true);          // the parse error on row 2
+    const dup = res.errors.find((e) => /duplicate entry/i.test(e.message))!;
+    expect(dup.row).toBe(3);                                         // was idx+2 = 2 (wrong row)
+    expect(dup.message).toMatch(/^Row 3: skipped — duplicate entry/);
+  });
+
   it('a DIFFERENT file with the same PAN/date/amount still inserts (genuine repeat preserved)', async () => {
     // Earlier file's row exists, but under a DIFFERENT batch id. The new file
     // hashes differently, so the existing-row lookup (scoped to the new batch id)

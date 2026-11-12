@@ -36,7 +36,13 @@ import * as XLSX from 'xlsx';
  *         the full amount;
  *       · rejected when the linked redemption was cancelled / its points refunded;
  *       · rejected on a transaction already sent to the bank in a processed batch (INITIATED /
- *         PROCESSING) — only after the bank payment is confirmed failed/returned;
+ *         PROCESSING) whose outcome isn't recorded — record it FAILED first;
+ *       · ALLOWED on a FAILED / REVERSED transaction (→ SUCCESS, audit bypassedGates incl.
+ *         'previouslyFailed') unless the redemption's points were refunded (per-row error
+ *         POINTS_ALREADY_REFUNDED_ERROR). A non-Y PAID row on such a transaction is an error; a
+ *         FAILED row on it is a notice ("Already recorded as failed — no change"). No row is ever
+ *         silently dropped: each is applied, an error, or a notice;
+ *       · a non-Y (bank) UTR collides only with previously used GENUINE bank UTRs;
  *       · may not reuse a reference that was used as a genuine bank UTR (non-Y) anywhere.
  *   - REFERENCES are compared NORMALISED (upper-case, all whitespace and / - . _ : # removed) for
  *     duplicate detection; they are stored as typed.
@@ -96,9 +102,24 @@ export const OFF_PLATFORM_NOTE_HEADER = 'Off-platform note';
 export const PROCESSED_PAYOUT_STATUSES = ['INITIATED', 'PROCESSING'] as const;
 /** Statuses still awaiting processing — PAID only with "Paid outside platform" = Y. */
 export const UNPROCESSED_PAYOUT_STATUSES = ['PENDING', 'HOLD'] as const;
+/**
+ * Statuses of a transaction whose bank payment already FAILED / was REVERSED. "Paid outside
+ * platform" = Y may still record it as paid (SUCCESS) — unless its redemption points were refunded.
+ */
+export const PREVIOUSLY_FAILED_PAYOUT_STATUSES = ['FAILED', 'REVERSED'] as const;
+/** Per-row error: Y on a failed/reversed payout whose redemption points were already refunded. */
+export const POINTS_ALREADY_REFUNDED_ERROR =
+  "Points for this redemption were already refunded — it can't also be marked paid";
+/** Per-row error: a bank UTR (non-Y) on a failed/reversed payout. */
+export const PREVIOUSLY_FAILED_BANK_UTR_ERROR =
+  "This payment is already recorded as failed — a bank UTR can't be applied to it. If it was paid outside Gifsy, set 'Paid outside platform' = Y.";
+/** Per-row notice: a FAILED row for a payout that is already failed/reversed (no change). */
+export function alreadyFailedNotice(status: string): string {
+  return `Already recorded as ${status === 'REVERSED' ? 'reversed' : 'failed'} — no change`;
+}
 /** Per-row error: "Paid outside platform" = Y on a transaction already sent to the bank. */
 export function alreadySentToBankError(batchRef: string): string {
-  return `This payment was already sent to the bank in batch ${batchRef}. Only mark it paid outside the platform after the bank payment is confirmed failed/returned.`;
+  return `This payment was already sent to the bank in batch ${batchRef} and its outcome isn't recorded yet. Record the bank result first: if the bank payment failed or was returned, upload it as FAILED. After that it can be marked 'Paid outside platform' = Y — unless its points were refunded when it failed.`;
 }
 
 /** Per-row notice for a transaction that is already SUCCESS. */
@@ -361,6 +382,29 @@ export function parsePayoutUtrUpload(
       });
       continue;
     }
+    // A FAILED row for a payout that is already failed/reversed → a NOTICE (idempotent re-upload of
+    // the same report), never a silent skip. Listed with the other notices.
+    if (
+      infoEarly &&
+      outcome === 'FAILED' &&
+      (PREVIOUSLY_FAILED_PAYOUT_STATUSES as readonly string[]).includes(infoEarly.status)
+    ) {
+      const notice = alreadyFailedNotice(infoEarly.status);
+      alreadyPaid.push({ rowNum: rIdx + 1, txnId, notice });
+      rows.push({
+        rowNum: rIdx + 1,
+        txnId,
+        outcome: null,
+        utr: utrRaw,
+        status: 'SKIP',
+        remarks: notice,
+        errors: [],
+        paidOffPlatform: offPlatform === true,
+        offPlatformNote: offNoteRaw,
+        notice,
+      });
+      continue;
+    }
 
     const errors: string[] = [];
 
@@ -415,7 +459,14 @@ export function parsePayoutUtrUpload(
           );
         }
         const normUtr = normaliseRef(utrRaw);
-        if (knownNormUtrs.has(normUtr) || (knownRefs?.has(normUtr) ?? false)) {
+        // A bank UTR collides only with previously used GENUINE bank UTRs — never with a normalised
+        // off-platform reference (e.g. a cheque no. "CHQ-123456" must not block bank UTR CHQ123456).
+        // knownRefs (always passed by the service) carries the off-platform flag; without it, fall
+        // back to the flat knownUtrs set.
+        const usedAsBankUtr = knownRefs
+          ? (knownRefs.get(normUtr) ?? []).some((u) => !u.offPlatform)
+          : knownNormUtrs.has(normUtr);
+        if (usedAsBankUtr) {
           errors.push(`UTR "${utrRaw}" has already been used.`);
         }
         // Unchanged rule for non-off-platform rows: the FIRST use in the file is fine, every later
@@ -438,19 +489,25 @@ export function parsePayoutUtrUpload(
     if (info && outcome === 'PAID') {
       const processed = (PROCESSED_PAYOUT_STATUSES as readonly string[]).includes(info.status);
       const unprocessed = (UNPROCESSED_PAYOUT_STATUSES as readonly string[]).includes(info.status);
+      const previouslyFailed = (PREVIOUSLY_FAILED_PAYOUT_STATUSES as readonly string[]).includes(info.status);
       if (unprocessed && offPlatform !== true) {
         errors.push(NOT_PROCESSED_ERROR);
       }
-      // Already sent to the bank in a processed batch — marking it paid outside would risk paying
-      // twice. Only after the bank payment is confirmed failed/returned.
+      // Already sent to the bank in a processed batch with no recorded outcome — marking it paid
+      // outside now would risk paying twice. Record the bank result (FAILED) first.
       if (processed && offPlatform === true) {
         errors.push(alreadySentToBankError(batchRef ?? 'this batch'));
       }
-      if ((processed || unprocessed) && offPlatform === true && !(Number(info.amountPaise) > 0)) {
+      // Bank payment already FAILED / REVERSED: a bank UTR can't complete it; Y can — unless the
+      // redemption's points were refunded (that would be a double benefit).
+      if (previouslyFailed && offPlatform !== true) {
+        errors.push(PREVIOUSLY_FAILED_BANK_UTR_ERROR);
+      }
+      if ((processed || unprocessed || previouslyFailed) && offPlatform === true && !(Number(info.amountPaise) > 0)) {
         errors.push('Cannot record an off-platform payment for a transaction with no valid amount.');
       }
       if (offPlatform === true && info.orderRefunded) {
-        errors.push(ORDER_REFUNDED_ERROR);
+        errors.push(previouslyFailed ? POINTS_ALREADY_REFUNDED_ERROR : ORDER_REFUNDED_ERROR);
       }
     }
 

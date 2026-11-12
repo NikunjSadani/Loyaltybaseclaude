@@ -18,6 +18,7 @@ import {
   parsePayoutUtrUpload,
   NOT_PROCESSED_ERROR,
   ORDER_REFUNDED_ERROR,
+  POINTS_ALREADY_REFUNDED_ERROR,
   alreadySentToBankError,
   normaliseRef,
   type KnownRefUse,
@@ -934,9 +935,25 @@ export class PayoutsService {
         const txn = txnMap.get(row.txnId);
         if (!txn) continue;
 
-        // Idempotency: never re-process a payout transaction already in a terminal
-        // state. A re-upload of the same report falls through here as a no-op.
-        if (TERMINAL_PAYOUT.includes(txn.status)) continue;
+        // A payout whose bank payment FAILED / was REVERSED may still be recorded as paid OUTSIDE the
+        // platform ("Paid outside platform" = Y) — the parser already rejected it when the
+        // redemption's points were refunded (re-checked below inside the tx).
+        const previouslyFailed =
+          txn.status === PayoutStatus.FAILED || txn.status === PayoutStatus.REVERSED;
+        const offPlatformOnFailed = previouslyFailed && row.outcome === 'PAID' && row.paidOffPlatform;
+
+        // Idempotency: never re-process a payout transaction already in a terminal state. The parser
+        // turns such rows into notices/errors; anything still reaching here is reported in `skipped`
+        // (never dropped silently).
+        if (TERMINAL_PAYOUT.includes(txn.status) && !offPlatformOnFailed) {
+          skipped.push({
+            rowNum: row.rowNum,
+            txnId: txn.id,
+            outcome: row.outcome,
+            reason: `Payout is already ${String(txn.status).toLowerCase()} — no change`,
+          });
+          continue;
+        }
 
         // CONCURRENCY CLAIM (compare-and-set): the terminal check above is from a read taken
         // BEFORE this tx, so an overlapping upload (e.g. PAID vs FAILED for the same payout)
@@ -954,7 +971,7 @@ export class PayoutsService {
           continue;
         }
         const offPlatform = row.outcome === 'PAID' && row.paidOffPlatform;
-        if (offPlatform && !unprocessed) {
+        if (offPlatform && !unprocessed && !previouslyFailed) {
           skipped.push({
             rowNum: row.rowNum,
             txnId: txn.id,
@@ -969,7 +986,12 @@ export class PayoutsService {
             select: { status: true, pointsDeducted: true },
           });
           if (isOrderRefunded(order)) {
-            skipped.push({ rowNum: row.rowNum, txnId: txn.id, outcome: row.outcome, reason: ORDER_REFUNDED_ERROR });
+            skipped.push({
+              rowNum: row.rowNum,
+              txnId: txn.id,
+              outcome: row.outcome,
+              reason: previouslyFailed ? POINTS_ALREADY_REFUNDED_ERROR : ORDER_REFUNDED_ERROR,
+            });
             continue;
           }
         }
@@ -1039,6 +1061,7 @@ export class PayoutsService {
                   bypassedGates: [
                     ...(bypassedGatesByPartner.get(txn.partnerId) ?? []),
                     ...(unprocessed ? ['notProcessed'] : []),
+                    ...(previouslyFailed ? ['previouslyFailed'] : []),
                     ...(missingBeneficiary(txn) ? ['missingBeneficiaryFields'] : []),
                   ],
                 },

@@ -103,6 +103,15 @@ function noPanDeducteeName(d: NoPanDeductee | undefined, unlinked?: boolean): st
 }
 
 /**
+ * A rupee money cell for the TDS exports, written as a real NUMBER (2-dp) — never a string. Numbers
+ * bypass the formula-injection text guard (cellSafe only touches strings), so a negative outstanding
+ * exports as a real negative number (-1000) instead of the text "'-1000.00".
+ */
+function moneyCell(paise: bigint): number {
+  return Number(paiseToRupees(paise).toFixed(2));
+}
+
+/**
  * Totals over 194R/194C rows — always exactly Σ rows. (The "Earlier no-PAN deposits" row carries
  * its deposit as a negative outstanding, so total outstanding = total liability − total deposited.)
  */
@@ -417,6 +426,9 @@ export class TdsService {
 
     const deposited = new Map<string, bigint>();
     let unlinkedNoPanDepositPaise = 0n;
+    // Owner PANs that received a no-PAN-marker deposit but have NO base this FY — they still get a
+    // row (base 0, outstanding −deposit) so the deposit never drops out of the totals.
+    const depositOnlyPanKeys = new Set<string>();
     for (const d of deposits) {
       if (!isNoPanCell(d.panNumber)) {
         const key = d.panNumber.trim().toUpperCase();
@@ -426,8 +438,10 @@ export class TdsService {
       // No-PAN deposit: the owner's PAN row (like any PAN deposit), or its no-PAN deductee's row when
       // it has one this FY; otherwise (no Outlet Code / unknown code / no base) → "Earlier" row.
       const key = keyForCode(d.outletCode);
-      if (key && (!isNoPanKey(key) || accum.has(key))) deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
-      else unlinkedNoPanDepositPaise += d.amountPaise;
+      if (key && (!isNoPanKey(key) || accum.has(key))) {
+        deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
+        if (!isNoPanKey(key) && !accum.has(key)) depositOnlyPanKeys.add(key);
+      } else unlinkedNoPanDepositPaise += d.amountPaise;
     }
 
     // ── Build result rows ──
@@ -448,6 +462,17 @@ export class TdsService {
         liabilityPaise,
         depositedPaise,
         outstandingPaise,
+      });
+    }
+    for (const key of depositOnlyPanKeys) {
+      const depositedPaise = deposited.get(key) ?? 0n;
+      rows.push({
+        panNumber: key,
+        fyLabel,
+        baseFyTotalPaise: 0n,
+        liabilityPaise: 0n,
+        depositedPaise,
+        outstandingPaise: -depositedPaise,
       });
     }
     if (unlinkedNoPanDepositPaise > 0n) {
@@ -668,6 +693,8 @@ export class TdsService {
     const ownerPans194C = await this.ownerPansOf(outletsByCode);
     const deposited = new Map<string, bigint>();
     let unlinkedNoPanDepositPaise = 0n;
+    // Owner PANs that received a no-PAN-marker deposit but have NO base this FY (see 194R).
+    const depositOnlyPanKeys = new Set<string>();
     for (const d of deposits) {
       if (!isNoPanCell(d.panNumber)) {
         const key = d.panNumber.trim().toUpperCase();
@@ -682,8 +709,10 @@ export class TdsService {
         const o = scoped[0];
         key = (o.partnerId ? ownerPans194C.get(o.partnerId) : undefined) ?? noPanOutletKey(o.clientId, o.outletCode);
       }
-      if (key && (!isNoPanKey(key) || accum.has(key))) deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
-      else unlinkedNoPanDepositPaise += d.amountPaise;
+      if (key && (!isNoPanKey(key) || accum.has(key))) {
+        deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
+        if (!isNoPanKey(key) && !accum.has(key)) depositOnlyPanKeys.add(key);
+      } else unlinkedNoPanDepositPaise += d.amountPaise;
     }
 
     // ── DEDUCT already-collected: SUM TdsDeductionEntry.tdsDeductedThisPaise (section 194C, FY) ──
@@ -827,9 +856,17 @@ export class TdsService {
       }
     }
     // WITHHELD-only no-PAN keys (legacy blank-PAN deduction rows) keep their own row so a withheld
-    // amount never drops out (outstanding = −withheld).
+    // amount never drops out (outstanding = −withheld). When the recovery-only loop above already
+    // emitted a row for the SAME key (e.g. the bare `__NO_PAN__` bucket), MERGE into it — never two
+    // rows for one key, and the recovered amount is counted once.
     for (const [key, w] of withheld) {
       if (!isNoPanKey(key) || accum.has(key)) continue;
+      const existing = rows.find((r) => r.panNumber === key && !r.unlinkedNoPanDeposit);
+      if (existing) {
+        existing.withheldPaise += w;
+        existing.outstandingPaise -= w;
+        continue;
+      }
       rows.push({
         panNumber: key,
         entityType: 'OTHERS',
@@ -845,6 +882,31 @@ export class TdsService {
         withheldPaise: w,
         recoveredPaise: recovered.get(key) ?? 0n,
         recoveryByTenant: [],
+      });
+    }
+    // Deposit-only owner PANs (a no-PAN-marker deposit attributed to an owner PAN with no base
+    // this FY) → base 0, outstanding −deposit, so the deposit never drops out of the totals.
+    for (const key of depositOnlyPanKeys) {
+      const depositedPaise = deposited.get(key) ?? 0n;
+      const withheldPaise = withheld.get(key) ?? 0n;
+      const tenantMap = recoveryByTenant.get(key);
+      rows.push({
+        panNumber: key,
+        entityType: 'OTHERS',
+        fyLabel,
+        baseFyTotalPaise: 0n,
+        maxSinglePaise: 0n,
+        thresholdMet: false,
+        liabilityPaise: 0n,
+        liabilityNoThresholdPaise: 0n,
+        depositedPaise,
+        outstandingPaise: -depositedPaise - withheldPaise,
+        methodology: null,
+        withheldPaise,
+        recoveredPaise: recovered.get(key) ?? 0n,
+        recoveryByTenant: tenantMap
+          ? [...tenantMap.entries()].map(([clientId, tenantSharePaise]) => ({ clientId, tenantSharePaise }))
+          : [],
       });
     }
     if (unlinkedNoPanDepositPaise > 0n) {
@@ -1113,9 +1175,11 @@ export class TdsService {
       if (existingKeys.has(key)) {
         result.skipped += 1;
         result.succeeded -= 1;
+        // The parser's REAL sheet row (error rows before this one are not in `rows`, so idx is off).
+        const sheetRow = this.sheetRowOf(r) || idx + 2;
         result.errors.push({
-          row: idx + 2, // 1-based + header row
-          message: `Row ${idx + 2}: skipped — duplicate entry (already uploaded in this file)`,
+          row: sheetRow,
+          message: `Row ${sheetRow}: skipped — duplicate entry (already uploaded in this file)`,
         });
       } else {
         toInsert.push(r);
@@ -1231,9 +1295,11 @@ export class TdsService {
       if (existingKeys.has(key)) {
         result.skipped += 1;
         result.succeeded -= 1;
+        // The parser's REAL sheet row (error rows before this one are not in `rows`, so idx is off).
+        const sheetRow = this.sheetRowOf(r) || idx + 2;
         result.errors.push({
-          row: idx + 2,
-          message: `Row ${idx + 2}: skipped — duplicate entry (already uploaded in this file)`,
+          row: sheetRow,
+          message: `Row ${sheetRow}: skipped — duplicate entry (already uploaded in this file)`,
         });
       } else {
         toInsert.push(r);
@@ -1416,11 +1482,11 @@ export class TdsService {
         PAN: cellSafe(hasPan ? r.panNumber : ''),
         ...(withOutletCol ? { 'Outlet Code': cellSafe(r.noPanDeductee?.outletCodes.join(', ') ?? '') } : {}),
         Section: '194R',
-        'Amount Paid (₹)': paiseToRupees(r.baseFyTotalPaise).toFixed(2),
+        'Amount Paid (₹)': moneyCell(r.baseFyTotalPaise),
         'TDS Rate %': tdsRatePct,
-        'TDS Amount (₹)': paiseToRupees(r.liabilityPaise).toFixed(2),
-        'Already Deposited (₹)': paiseToRupees(r.depositedPaise).toFixed(2),
-        'Outstanding (₹)': paiseToRupees(r.outstandingPaise).toFixed(2),
+        'TDS Amount (₹)': moneyCell(r.liabilityPaise),
+        'Already Deposited (₹)': moneyCell(r.depositedPaise),
+        'Outstanding (₹)': moneyCell(r.outstandingPaise),
         FY: fyLabel,
       };
     });
@@ -1439,19 +1505,19 @@ export class TdsService {
       },
       {
         'Field': 'Total Amount Paid (₹)',
-        'Value': paiseToRupees(totalBase).toFixed(2),
+        'Value': moneyCell(totalBase),
       },
       {
         'Field': 'Total TDS Amount (₹)',
-        'Value': paiseToRupees(totalLiability).toFixed(2),
+        'Value': moneyCell(totalLiability),
       },
       {
         'Field': 'Total Already Deposited (₹)',
-        'Value': paiseToRupees(totalDeposited).toFixed(2),
+        'Value': moneyCell(totalDeposited),
       },
       {
         'Field': 'Total Outstanding (₹)',
-        'Value': paiseToRupees(totalOutstanding).toFixed(2),
+        'Value': moneyCell(totalOutstanding),
       },
       {
         'Field': 'FY',
@@ -1537,15 +1603,15 @@ export class TdsService {
         'Entity Type': cellSafe(r.entityType),
         Section: '194C',
         Methodology: cellSafe(r.methodology ?? ''),
-        'Amount Paid (₹)': paiseToRupees(r.baseFyTotalPaise).toFixed(2),
+        'Amount Paid (₹)': moneyCell(r.baseFyTotalPaise),
         'TDS Rate %': tdsRatePct,
-        'TDS — With Threshold (₹)': paiseToRupees(r.liabilityPaise).toFixed(2),
-        'TDS — No Threshold (₹)': paiseToRupees(r.liabilityNoThresholdPaise).toFixed(2),
+        'TDS — With Threshold (₹)': moneyCell(r.liabilityPaise),
+        'TDS — No Threshold (₹)': moneyCell(r.liabilityNoThresholdPaise),
         'Threshold Met (Y/N)': r.thresholdMet ? 'Y' : 'N',
-        'Already Deposited (₹)': paiseToRupees(r.depositedPaise).toFixed(2),
-        'TDS Withheld (Deduct) (₹)': paiseToRupees(r.withheldPaise).toFixed(2),
-        'TDS Recovered (Gross-Up) (₹)': paiseToRupees(r.recoveredPaise).toFixed(2),
-        'Outstanding (₹)': paiseToRupees(r.outstandingPaise).toFixed(2),
+        'Already Deposited (₹)': moneyCell(r.depositedPaise),
+        'TDS Withheld (Deduct) (₹)': moneyCell(r.withheldPaise),
+        'TDS Recovered (Gross-Up) (₹)': moneyCell(r.recoveredPaise),
+        'Outstanding (₹)': moneyCell(r.outstandingPaise),
         FY: fyLabel,
       };
     });
@@ -1560,7 +1626,7 @@ export class TdsService {
         'Deductee Name': cellSafe(deducteeName),
         ...(withOutletCol ? { 'Outlet Code': cellSafe(r.noPanDeductee?.outletCodes.join(', ') ?? '') } : {}),
         'Recovered From (Client)': cellSafe(rec.clientId),
-        'Recovery Amount (₹)': paiseToRupees(rec.tenantSharePaise).toFixed(2),
+        'Recovery Amount (₹)': moneyCell(rec.tenantSharePaise),
         FY: fyLabel,
       }));
     });
