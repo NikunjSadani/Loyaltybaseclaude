@@ -143,6 +143,17 @@ describe('PAY — UTR upload skipped rows', () => {
     await screen.findByText(/UTR applied:/);
   }
 
+  it('PAY-OFF: shows how many PAID rows were recorded as paid outside the platform', async () => {
+    stubUtrFlow({
+      applied: true, paidCount: 3, failedCount: 1, reversedCount: 0, offPlatformCount: 2,
+      skipped: [], blockedOrders: [],
+    });
+    await uploadFile();
+    expect(
+      screen.getByText('UTR applied: 3 paid (2 recorded as paid outside the platform), 1 failed.'),
+    ).toBeInTheDocument();
+  });
+
   it('PAY5: lists each skipped row (row number + reason) alongside the applied counts', async () => {
     stubUtrFlow({
       applied: true, paidCount: 1, failedCount: 0, reversedCount: 0,

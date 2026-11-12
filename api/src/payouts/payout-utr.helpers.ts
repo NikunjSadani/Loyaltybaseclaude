@@ -19,6 +19,13 @@ import * as XLSX from 'xlsx';
  *   - A PAID row's UTR must not collide with ctx.knownUtrs (a UTR already used by
  *     any payout transaction for this client) NOR appear twice in this upload.
  *   - A FAILED row needs no UTR; remarks/reason are captured for failureReason.
+ *   - PROCESS-FIRST GUARD (when ctx.txnInfo is supplied — the service always does): a PAID row
+ *     is accepted only for a transaction that went through batch processing (INITIATED /
+ *     PROCESSING). A still-PENDING (unprocessed) transaction is rejected UNLESS the row sets
+ *     "Paid outside platform (Y/N)" = Y — the owner's rule that payments made OUTSIDE Gifsy whose
+ *     outcome is recorded here must never be blocked. Such a row still needs a valid UTR/reference
+ *     and a positive amount; "Off-platform note" is optional free text. Y is only meaningful on a
+ *     PAID row (Y on a FAILED row is an error).
  */
 
 const UTR_RE = /^[A-Z0-9]{8,22}$/i;
@@ -44,7 +51,21 @@ export const PAYOUT_UTR_HEADERS = [
   'UPI ID',
   'UTR',
   'Status',
+  'Paid outside platform (Y/N)',
+  'Off-platform note',
 ] as const;
+
+/** Header of the optional "paid outside the platform" flag column (Y/N). */
+export const PAID_OFF_PLATFORM_HEADER = 'Paid outside platform (Y/N)';
+/** Header of the optional free-text note for an off-platform payment. */
+export const OFF_PLATFORM_NOTE_HEADER = 'Off-platform note';
+/** PayoutTransaction statuses that have passed batch processing (eligible for PAID). */
+export const PROCESSED_PAYOUT_STATUSES = ['INITIATED', 'PROCESSING'] as const;
+/** Statuses still awaiting processing — PAID only with "Paid outside platform" = Y. */
+export const UNPROCESSED_PAYOUT_STATUSES = ['PENDING', 'HOLD'] as const;
+/** Per-row error for a PAID row on an unprocessed transaction without the off-platform flag. */
+export const NOT_PROCESSED_ERROR =
+  "This payment wasn't processed in a batch — process the batch first, or mark it 'Paid outside platform' if it was paid outside Gifsy.";
 
 export type PayoutUtrOutcome = 'PAID' | 'FAILED';
 
@@ -56,6 +77,10 @@ export interface PayoutUtrRow {
   status: 'OK' | 'ERROR' | 'SKIP';
   remarks: string;
   errors: string[];
+  /** "Paid outside platform (Y/N)" = Y on this row. */
+  paidOffPlatform: boolean;
+  /** "Off-platform note" free text (blank when not given). */
+  offPlatformNote: string;
 }
 
 export interface PayoutUtrParseResult {
@@ -78,6 +103,11 @@ export interface ParsePayoutUtrCtx {
   batchTxnIds: Set<string>;
   /** Upper-cased UTRs already used by any of this client's payout transactions. */
   knownUtrs: Set<string>;
+  /**
+   * Current status + amount of each batch transaction. When supplied, the PROCESS-FIRST guard
+   * runs (see the header comment). Omitted → no status guard (pure-parser callers/tests).
+   */
+  txnInfo?: Map<string, { status: string; amountPaise: bigint | number }>;
 }
 
 function emptyResult(headerError: string | null): PayoutUtrParseResult {
@@ -88,6 +118,14 @@ function emptyResult(headerError: string | null): PayoutUtrParseResult {
     canProceed: false,
     summary: { total: 0, ok: 0, skipped: 0, errors: 0, paidCount: 0, failedCount: 0 },
   };
+}
+
+/** Normalise the "Paid outside platform (Y/N)" cell. Blank/N → false; Y → true; else INVALID. */
+function normaliseYesNo(raw: string): boolean | 'INVALID' {
+  const v = raw.trim().toUpperCase();
+  if (v === '' || v === 'N' || v === 'NO' || v === 'FALSE' || v === '0') return false;
+  if (v === 'Y' || v === 'YES' || v === 'TRUE' || v === '1') return true;
+  return 'INVALID';
 }
 
 /** Normalise a Status cell. Blank or "SKIP" → SKIP; PAID/FAILED synonyms map; else INVALID. */
@@ -103,7 +141,7 @@ export function parsePayoutUtrUpload(
   buffer: ArrayBufferLike,
   ctx: ParsePayoutUtrCtx,
 ): PayoutUtrParseResult {
-  const { batchTxnIds, knownUtrs } = ctx;
+  const { batchTxnIds, knownUtrs, txnInfo } = ctx;
 
   if (batchTxnIds.size === 0) {
     return emptyResult('No payout transactions found in this batch.');
@@ -135,6 +173,9 @@ export function parsePayoutUtrUpload(
   const statusIdx = headers.indexOf('Status');
   // Remarks is optional in the template; failureReason falls back to Status text.
   const remarksIdx = headers.indexOf('Remarks');
+  // Optional off-platform columns (older templates without them → every row is "N").
+  const offPlatformIdx = headers.indexOf(PAID_OFF_PLATFORM_HEADER);
+  const offNoteIdx = headers.indexOf(OFF_PLATFORM_NOTE_HEADER);
 
   if (txnIdIdx === -1 || statusIdx === -1) {
     return emptyResult(
@@ -153,6 +194,9 @@ export function parsePayoutUtrUpload(
     const utrRaw = utrIdx !== -1 ? String(row[utrIdx] ?? '').trim() : '';
     const statusRaw = String(row[statusIdx] ?? '').trim();
     const remarksRaw = remarksIdx !== -1 ? String(row[remarksIdx] ?? '').trim() : '';
+    const offPlatformRaw = offPlatformIdx !== -1 ? String(row[offPlatformIdx] ?? '').trim() : '';
+    const offNoteRaw = offNoteIdx !== -1 ? String(row[offNoteIdx] ?? '').trim() : '';
+    const offPlatform = normaliseYesNo(offPlatformRaw);
 
     // Fully blank line → ignore entirely (not even counted).
     if (!txnId && !statusRaw && !utrRaw) continue;
@@ -170,6 +214,8 @@ export function parsePayoutUtrUpload(
         status: 'SKIP',
         remarks: remarksRaw,
         errors: [],
+        paidOffPlatform: offPlatform === true,
+        offPlatformNote: offNoteRaw,
       });
       continue;
     }
@@ -207,6 +253,26 @@ export function parsePayoutUtrUpload(
       }
     }
 
+    if (offPlatform === 'INVALID') {
+      errors.push(`"${PAID_OFF_PLATFORM_HEADER}" must be Y or N (got "${offPlatformRaw}").`);
+    } else if (offPlatform === true && outcome === 'FAILED') {
+      errors.push(`"${PAID_OFF_PLATFORM_HEADER}" = Y can only be used on a PAID row.`);
+    }
+
+    // PROCESS-FIRST guard (service-supplied txnInfo): PAID needs a processed transaction unless
+    // the row records an off-platform payment (which must still carry a positive amount).
+    const info = txnId ? txnInfo?.get(txnId) : undefined;
+    if (info && outcome === 'PAID') {
+      const processed = (PROCESSED_PAYOUT_STATUSES as readonly string[]).includes(info.status);
+      const unprocessed = (UNPROCESSED_PAYOUT_STATUSES as readonly string[]).includes(info.status);
+      if (unprocessed && offPlatform !== true) {
+        errors.push(NOT_PROCESSED_ERROR);
+      }
+      if ((processed || unprocessed) && offPlatform === true && !(Number(info.amountPaise) > 0)) {
+        errors.push('Cannot record an off-platform payment for a transaction with no valid amount.');
+      }
+    }
+
     const finalOutcome: PayoutUtrOutcome | null =
       outcome === 'PAID' || outcome === 'FAILED' ? outcome : null;
     const status: 'OK' | 'ERROR' = errors.length > 0 ? 'ERROR' : 'OK';
@@ -226,6 +292,8 @@ export function parsePayoutUtrUpload(
       // re-upload; OK/SKIP rows keep any free-text remarks from the file.
       remarks: errors.length > 0 ? errors.join(' ') : remarksRaw,
       errors,
+      paidOffPlatform: offPlatform === true,
+      offPlatformNote: offNoteRaw,
     });
   }
 

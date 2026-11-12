@@ -180,3 +180,80 @@ describe('parsePayoutUtrUpload', () => {
     expect(row.utr).toBe('UTR12345678');
   });
 });
+
+describe('parsePayoutUtrUpload — PROCESS-FIRST guard + Paid outside platform', () => {
+  function buf(rows: (string | number)[][]): ArrayBufferLike {
+    const aoa = [['Transaction ID', 'UTR', 'Status', 'Paid outside platform (Y/N)', 'Off-platform note'], ...rows];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'UTR Upload');
+    const b = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+  }
+  const withInfo = (info: Record<string, { status: string; amountPaise: number }>) => ({
+    batchTxnIds: new Set(Object.keys(info)),
+    knownUtrs: new Set<string>(),
+    txnInfo: new Map(Object.entries(info)),
+  });
+
+  it('PENDING + PAID + blank flag → row error with the exact guidance text', () => {
+    const res = parsePayoutUtrUpload(buf([['t1', 'UTR12345678', 'PAID', '', '']]), withInfo({ t1: { status: 'PENDING', amountPaise: 100 } }));
+    expect(res.canProceed).toBe(false);
+    expect(res.rows[0].errors).toEqual([
+      "This payment wasn't processed in a batch — process the batch first, or mark it 'Paid outside platform' if it was paid outside Gifsy.",
+    ]);
+  });
+
+  it('HOLD is treated as unprocessed too', () => {
+    const res = parsePayoutUtrUpload(buf([['t1', 'UTR12345678', 'PAID', 'n', '']]), withInfo({ t1: { status: 'HOLD', amountPaise: 100 } }));
+    expect(res.rows[0].status).toBe('ERROR');
+  });
+
+  it('PENDING + PAID + "Y"/"yes" → OK, flagged, note kept', () => {
+    const res = parsePayoutUtrUpload(
+      buf([['t1', 'UTR12345678', 'PAID', 'Y', 'cash at depot'], ['t2', 'UTR87654321', 'PAID', 'yes', '']]),
+      withInfo({ t1: { status: 'PENDING', amountPaise: 100 }, t2: { status: 'PENDING', amountPaise: 100 } }),
+    );
+    expect(res.canProceed).toBe(true);
+    expect(res.rows.map((r) => [r.status, r.paidOffPlatform, r.offPlatformNote])).toEqual([
+      ['OK', true, 'cash at depot'],
+      ['OK', true, ''],
+    ]);
+  });
+
+  it('INITIATED / PROCESSING + PAID + blank → OK (unchanged path)', () => {
+    const res = parsePayoutUtrUpload(
+      buf([['t1', 'UTR12345678', 'PAID', '', ''], ['t2', 'UTR87654321', 'PAID', '', '']]),
+      withInfo({ t1: { status: 'INITIATED', amountPaise: 100 }, t2: { status: 'PROCESSING', amountPaise: 100 } }),
+    );
+    expect(res.canProceed).toBe(true);
+    expect(res.rows.every((r) => r.paidOffPlatform === false)).toBe(true);
+  });
+
+  it('"Y" on a FAILED row, or a non Y/N value → row error', () => {
+    const res = parsePayoutUtrUpload(
+      buf([['t1', '', 'FAILED', 'Y', ''], ['t2', 'UTR87654321', 'PAID', 'maybe', '']]),
+      withInfo({ t1: { status: 'INITIATED', amountPaise: 100 }, t2: { status: 'INITIATED', amountPaise: 100 } }),
+    );
+    expect(res.rows[0].errors).toEqual(['"Paid outside platform (Y/N)" = Y can only be used on a PAID row.']);
+    expect(res.rows[1].errors).toEqual(['"Paid outside platform (Y/N)" must be Y or N (got "maybe").']);
+  });
+
+  it('"Y" with a zero amount → row error', () => {
+    const res = parsePayoutUtrUpload(buf([['t1', 'UTR12345678', 'PAID', 'Y', '']]), withInfo({ t1: { status: 'PENDING', amountPaise: 0 } }));
+    expect(res.rows[0].errors).toEqual(['Cannot record an off-platform payment for a transaction with no valid amount.']);
+  });
+
+  it('FAILED on a PENDING tx needs no flag (guard is PAID-only)', () => {
+    const res = parsePayoutUtrUpload(buf([['t1', '', 'FAILED', '', '']]), withInfo({ t1: { status: 'PENDING', amountPaise: 100 } }));
+    expect(res.canProceed).toBe(true);
+  });
+
+  it('without txnInfo (pure callers) the guard does not run', () => {
+    const res = parsePayoutUtrUpload(buf([['t1', 'UTR12345678', 'PAID', '', '']]), {
+      batchTxnIds: new Set(['t1']),
+      knownUtrs: new Set<string>(),
+    });
+    expect(res.canProceed).toBe(true);
+  });
+});

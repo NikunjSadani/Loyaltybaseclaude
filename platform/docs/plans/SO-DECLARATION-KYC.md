@@ -115,9 +115,10 @@ Add (all optional, default STANDARD so existing callers unaffected):
 ## 8. Payout / TDS
 Correction (2026-11-12): the Redemption Payouts batch (`payouts.service.ts processBatch`) EXCLUDED any no-PAN partner,
 so no-PAN outlets could NOT be paid. Fixed tenant-scoped by the behaviour flag `features.allowPayoutWithoutPan`
-(Gifsy console → Behaviour flags; default OFF → every other tenant byte-identical). With it ON, no-PAN outlets pay
-normally; reported under existing 194R `__NO_PAN__` 20% bucket. PAN (if optionally entered) auto-routes to the
-PAN-keyed rate.
+(Gifsy console → Behaviour flags; default OFF → every other tenant byte-identical). With it ON, no-PAN outlets are paid
+in full; the 194R TDS at the no-PAN rate (20%) is company-borne and — since the same change — computed PER no-PAN
+deductee (`__NO_PAN__:<partnerId>`; threshold applies per partner, not to a pooled bucket). PAN (if optionally
+entered) auto-routes to the PAN-keyed rate.
 
 ## 9. Deoleo-safety invariants (MUST hold)
 - `kycVariant` defaults STANDARD everywhere; no STANDARD code path changes behaviour.

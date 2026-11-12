@@ -40,6 +40,8 @@ interface UtrBlockedOrder {
 interface UtrUploadResult {
   paidCount: number;
   failedCount: number;
+  /** PAID rows recorded as paid OUTSIDE the platform ("Paid outside platform" = Y). */
+  offPlatformCount: number;
   skipped: UtrSkippedRow[];
   blockedOrders: UtrBlockedOrder[];
 }
@@ -376,6 +378,8 @@ export default function PayoutsPage() {
       setUtrUploadResult({
         paidCount: json.data.paidCount,
         failedCount: json.data.failedCount,
+        // Older API builds omit `offPlatformCount` — treat as none.
+        offPlatformCount: Number(json.data.offPlatformCount) || 0,
         // Older API builds omit `skipped` — treat as none.
         skipped: Array.isArray(json.data.skipped) ? json.data.skipped : [],
         // Older API builds omit `blockedOrders` — treat as none.
@@ -728,7 +732,11 @@ export default function PayoutsPage() {
               {utrUploadResult && (
                 <div className="bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-xs text-green-700 flex items-start gap-2">
                   <CheckCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-                  UTR applied: {utrUploadResult.paidCount} paid, {utrUploadResult.failedCount} failed.
+                  {`UTR applied: ${utrUploadResult.paidCount} paid${
+                    utrUploadResult.offPlatformCount > 0
+                      ? ` (${utrUploadResult.offPlatformCount} recorded as paid outside the platform)`
+                      : ''
+                  }, ${utrUploadResult.failedCount} failed.`}
                 </div>
               )}
               {/* Rows NOT applied because an overlapping upload already updated that payout.

@@ -104,12 +104,14 @@ You can watch each batch's state on **Payout Status** (Confirmed = credited/paid
 - **The system does:** Debits their wallet points, freezes the rupee value, and creates a **payout transaction** marked **Pending**.
 
 **Step 2 — Batch and process** — **The operator does:** Create a batch, add the pending transactions, and **process** it.
-- **The system does:** Checks each one has KYC-approved status, a PAN, and bank details. Valid ones become **Initiated**; the rest are excluded until fixed.
+- **The system does:** Checks each one has KYC-approved status, a PAN, and bank details. Valid ones become **Initiated**; the rest are excluded until fixed. *(Exception: if the client has **"Allow payouts without PAN"** switched on — Gifsy console → client → Behaviour flags — a missing PAN no longer excludes the transaction. That partner is paid the full amount; the TDS at the no-PAN rate is a company-borne liability shown in the TDS reports as "NO PAN ON FILE".)*
 
 **Step 3 — Pay at the bank (offline)** — same as Flow A: the transfers happen at the bank.
 
-**Step 4 — Record the UTRs** — **The operator does:** Upload the UTRs.
+**Step 4 — Record the UTRs** — **The operator does:** Download the batch's UTR template, fill **UTR** + **Status** (PAID / FAILED), upload it.
 - **The system does:** Flips each to **Success** or **Failed**.
+- **Process first:** a row can be marked **PAID** only if that transaction was **processed** in the batch (status **Initiated**). A still-**Pending** transaction is refused with *"This payment wasn't processed in a batch — process the batch first, or mark it 'Paid outside platform' if it was paid outside Gifsy."*
+- **Paid outside Gifsy?** If the money genuinely went out another way (cheque, a manual bank transfer, …) and you are only recording it, put **Y** in **"Paid outside platform (Y/N)"** (plus an optional **"Off-platform note"**). The row still needs a UTR / reference. It is accepted, marked as paid off-platform, and logged in the audit trail.
 
 ✅ **Done** = the transaction shows **Success**.
 

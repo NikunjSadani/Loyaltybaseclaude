@@ -27,11 +27,13 @@ import {
 import { useAdminSession } from '@/lib/admin-session';
 import { authHeader } from '@/lib/api-client';
 import { formatINR } from '@/lib/money';
+import { deducteeCellLabel, type NoPanDeductee } from '@/lib/tds-deductee-label';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface Tds194RRow {
   panNumber:        string;
+  noPanDeductee?:   NoPanDeductee;
   baseFyTotalPaise: number | string;
   liabilityPaise:   number | string;
   depositedPaise:   number | string;
@@ -52,6 +54,7 @@ interface Tds194RResponse {
 
 interface Tds194CRow {
   panNumber:               string;
+  noPanDeductee?:          NoPanDeductee;
   entityType:              string;
   maxSinglePaise:          number | string;
   thresholdMet:            boolean;
@@ -612,7 +615,7 @@ export default function AdminTdsPage() {
                       <tbody className="divide-y divide-gray-100">
                         {r194.rows.map((row, i) => (
                           <tr key={i} className="hover:bg-gray-50 transition-colors">
-                            <td className="px-4 py-3 font-mono text-xs text-gray-800">{row.panNumber || '—'}</td>
+                            <td className="px-4 py-3 font-mono text-xs text-gray-800">{deducteeCellLabel(row)}</td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.baseFyTotalPaise))}</td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.liabilityPaise))}</td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.depositedPaise))}</td>
@@ -721,7 +724,7 @@ export default function AdminTdsPage() {
                       <tbody className="divide-y divide-gray-100">
                         {r194c.rows.map((row, i) => (
                           <tr key={i} className="hover:bg-gray-50 transition-colors">
-                            <td className="px-4 py-3 font-mono text-xs text-gray-800">{row.panNumber || '—'}</td>
+                            <td className="px-4 py-3 font-mono text-xs text-gray-800">{deducteeCellLabel(row)}</td>
                             <td className="px-4 py-3 text-xs text-gray-700">{row.entityType}</td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.maxSinglePaise))}</td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.liabilityPaise))}</td>

@@ -14,7 +14,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
 import { rupeesToPaise } from '../common/money';
 import { monthYearIST, formatDateIST, istDayRangeFilter, istDateKey } from '../common/ist-date';
-import { parsePayoutUtrUpload } from './payout-utr.helpers';
+import { parsePayoutUtrUpload, NOT_PROCESSED_ERROR } from './payout-utr.helpers';
 import {
   noIssuedVoucherGuard,
   hasIssuedVoucher,
@@ -426,8 +426,9 @@ export class PayoutsService {
       const validTransactions: typeof transactions = [];
 
       // Per-tenant behaviour flag (clients.features.allowPayoutWithoutPan, default OFF): when ON,
-      // a partner with no PAN on file is NOT excluded — the payout proceeds and TDS falls into the
-      // existing 194R no-PAN bucket (reported as "NO PAN ON FILE"). Every other check below stays.
+      // a partner with no PAN on file is NOT excluded. They are paid the full amount; the TDS at the
+      // no-PAN rate is a company-borne liability (the 194R engine keys it per no-PAN deductee) shown
+      // in the TDS reports as "NO PAN ON FILE". Every other check below stays.
       // Absent/false → the missing-PAN exclusion is byte-identical to before (e.g. Deoleo).
       const batchClient = await this.prisma.client.findUnique({
         where: { id: clientId },
@@ -626,6 +627,11 @@ export class PayoutsService {
       'UPI ID': t.upiId ?? '',
       UTR: '',
       Status: '',
+      // Optional: Y = this payment was made OUTSIDE Gifsy and is only being recorded here (the
+      // only way to mark a not-yet-processed PENDING transaction PAID). Blank/N = paid via the
+      // processed batch.
+      'Paid outside platform (Y/N)': '',
+      'Off-platform note': '',
     }));
 
     return {
@@ -647,6 +653,14 @@ export class PayoutsService {
    *             points change.
    *   - FAILED → PayoutTransaction FAILED (failureReason); linked RedemptionOrder
    *              points reversed ONCE (M2 claim) then → FAILED.
+   *
+   * PROCESS-FIRST guard (owner-approved, all tenants): PAID is accepted only for a transaction
+   * that went through processBatch (INITIATED/PROCESSING). A still-PENDING/HOLD transaction is
+   * rejected per row UNLESS the row sets "Paid outside platform (Y/N)" = Y — a payment made
+   * OUTSIDE Gifsy whose outcome is recorded here is never blocked: it still needs a valid UTR and
+   * a positive amount, is flagged in providerResponse { paidOffPlatform, note, … } and gets an
+   * AuditLog row in the same tx. FAILED rows are unaffected. (Historical VENDOR_IMPORT data lives on
+   * the CREDITS rail — CreditBatch.sourceKind — and never passes through this upload.)
    *
    * Idempotency: terminal PayoutTransactions (SUCCESS/FAILED/REVERSED) are skipped,
    * and the FAILED refund uses the exact M2 claim
@@ -678,6 +692,7 @@ export class PayoutsService {
       select: {
         id: true,
         status: true,
+        amountPaise: true,
         providerRefId: true,
         payoutMode: true,
         partnerId: true,
@@ -710,7 +725,11 @@ export class PayoutsService {
         .map((t) => t.providerRefId!.toUpperCase()),
     );
 
-    const parseResult = parsePayoutUtrUpload(ab, { batchTxnIds, knownUtrs });
+    // txnInfo turns on the PROCESS-FIRST guard: PAID only for a processed (INITIATED/PROCESSING)
+    // transaction, unless the row is marked "Paid outside platform" = Y (recorded off-platform
+    // payment — never blocked). Surfaced as per-row errors in the preview AND enforced on apply.
+    const txnInfo = new Map(transactions.map((t) => [t.id, { status: t.status, amountPaise: t.amountPaise }]));
+    const parseResult = parsePayoutUtrUpload(ab, { batchTxnIds, knownUtrs, txnInfo });
 
     // Preview unless apply=true.
     if (!apply) {
@@ -718,8 +737,18 @@ export class PayoutsService {
     }
 
     if (!parseResult.canProceed) {
+      // Name the failing rows (sheet row + reason, first 10) so the admin can fix the file — e.g.
+      // the PROCESS-FIRST guard's "This payment wasn't processed in a batch …" message.
+      const rowErrors = parseResult.rows
+        .filter((r) => r.status === 'ERROR')
+        .map((r) => `Row ${r.rowNum}: ${r.errors.join(' ')}`);
+      const detail = parseResult.headerError
+        ? ` ${parseResult.headerError}`
+        : rowErrors.length
+          ? ` ${rowErrors.slice(0, 10).join(' | ')}${rowErrors.length > 10 ? ` (+${rowErrors.length - 10} more)` : ''}`
+          : '';
       throw new BadRequestException(
-        'Cannot apply — parse result has errors or no valid rows',
+        `Cannot apply — parse result has errors or no valid rows.${detail}`,
       );
     }
 
@@ -734,6 +763,8 @@ export class PayoutsService {
     let paidCount = 0;
     let failedCount = 0;
     let reversedCount = 0;
+    // PAID rows recorded as paid OUTSIDE the platform ("Paid outside platform" = Y).
+    let offPlatformCount = 0;
     // Rows whose compare-and-set claim lost to an overlapping upload (see the claim below).
     const skipped: Array<{
       rowNum: number;
@@ -788,11 +819,36 @@ export class PayoutsService {
         // (count 0) skips the row with a row-level result and runs NONE of its side effects
         // (refund, order status, partner verify/demote, WhatsApp gather) — every side effect
         // below runs only for the winner, after its claim.
+        // Defence-in-depth for the PROCESS-FIRST guard (the parser already rejects it): a PAID
+        // row on a still-unprocessed transaction is only ever applied as an OFF-PLATFORM payment.
+        const unprocessed = txn.status === PayoutStatus.PENDING || txn.status === PayoutStatus.HOLD;
+        if (row.outcome === 'PAID' && unprocessed && !row.paidOffPlatform) {
+          skipped.push({ rowNum: row.rowNum, txnId: txn.id, outcome: row.outcome, reason: NOT_PROCESSED_ERROR });
+          continue;
+        }
+        const offPlatform = row.outcome === 'PAID' && row.paidOffPlatform;
+
         const claim = await tx.payoutTransaction.updateMany({
           where: { id: txn.id, status: txn.status },
           data:
             row.outcome === 'PAID'
-              ? { status: PayoutStatus.SUCCESS, providerRefId: row.utr, completedAt: now }
+              ? {
+                  status: PayoutStatus.SUCCESS,
+                  providerRefId: row.utr,
+                  completedAt: now,
+                  // Off-platform flag lives in the existing providerResponse JSON (no schema change).
+                  ...(offPlatform
+                    ? {
+                        providerResponse: {
+                          paidOffPlatform: true,
+                          note: row.offPlatformNote || null,
+                          recordedById: user.sub,
+                          recordedAt: now.toISOString(),
+                          previousStatus: txn.status,
+                        },
+                      }
+                    : {}),
+                }
               : {
                   status: PayoutStatus.FAILED,
                   failureReason: row.remarks || 'UTR report: FAILED',
@@ -810,6 +866,28 @@ export class PayoutsService {
 
         if (row.outcome === 'PAID') {
           paidCount++;
+
+          // Off-platform payment recorded on the platform → explicit audit row (who, which payout,
+          // prior status, reference, note) — written in the SAME tx as the status change.
+          if (offPlatform) {
+            offPlatformCount++;
+            await tx.auditLog.create({
+              data: {
+                actorId: user.sub,
+                action: 'UPDATE',
+                entityType: 'PayoutTransaction',
+                entityId: txn.id,
+                oldValues: { status: txn.status },
+                newValues: {
+                  status: PayoutStatus.SUCCESS,
+                  paidOffPlatform: true,
+                  providerRefId: row.utr,
+                  note: row.offPlatformNote || null,
+                },
+                metadata: { batchId, batchCode: batch.batchCode, source: 'PAYOUT_UTR_UPLOAD', paidOffPlatform: true },
+              },
+            });
+          }
 
           // Capture-bank-at-redemption: a COMPLETED payout verifies the partner's self-captured
           // bank/UPI so they surface in Store Information (docs/plans/PAYMENT-DETAILS-AT-REDEMPTION-DESIGN.md).
@@ -1035,7 +1113,7 @@ export class PayoutsService {
       }
     }
 
-    return { applied: true, paidCount, failedCount, reversedCount, skipped, blockedOrders };
+    return { applied: true, paidCount, failedCount, reversedCount, offPlatformCount, skipped, blockedOrders };
   }
 
   // ───────────────────────────────────────────────────────────────────────────

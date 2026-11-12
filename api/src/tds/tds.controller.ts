@@ -282,6 +282,8 @@ export class TdsController {
 function serializeRow194R(r: import('./tds.service').TdsRow194R) {
   return {
     panNumber: r.panNumber,
+    // Per-deductee no-PAN identity (name + outlet codes) — only present on such rows.
+    ...(r.noPanDeductee ? { noPanDeductee: r.noPanDeductee } : {}),
     fyLabel: r.fyLabel,
     baseFyTotalPaise: r.baseFyTotalPaise.toString(),
     liabilityPaise: r.liabilityPaise.toString(),
@@ -293,6 +295,7 @@ function serializeRow194R(r: import('./tds.service').TdsRow194R) {
 function serializeRow194C(r: import('./tds.service').TdsRow194C) {
   return {
     panNumber: r.panNumber,
+    ...(r.noPanDeductee ? { noPanDeductee: r.noPanDeductee } : {}),
     entityType: r.entityType,
     fyLabel: r.fyLabel,
     baseFyTotalPaise: r.baseFyTotalPaise.toString(),

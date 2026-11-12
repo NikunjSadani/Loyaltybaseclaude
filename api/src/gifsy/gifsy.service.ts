@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -156,6 +157,36 @@ const BOOLEAN_FEATURE_KEYS = [
   'allowPayoutWithoutPan',
 ] as const;
 
+/**
+ * Per-key diff of a tenant `features` blob for the console audit trail: `{ key: { before, after } }`
+ * for every key whose value changed (absent → undefined → recorded as null). The nested
+ * `partnerApp` block is diffed per sub-key as `partnerApp.<key>`. Generic for ALL feature keys.
+ */
+export function diffFeatureKeys(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): Record<string, { before: unknown; after: unknown }> {
+  const out: Record<string, { before: unknown; after: unknown }> = {};
+  const norm = (v: unknown) => (v === undefined ? null : v);
+  const same = (a: unknown, b: unknown) => JSON.stringify(norm(a)) === JSON.stringify(norm(b));
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const k of keys) {
+    if (k === 'partnerApp') {
+      const b = (before.partnerApp ?? {}) as Record<string, unknown>;
+      const a = (after.partnerApp ?? {}) as Record<string, unknown>;
+      const isObj = (v: unknown) => !!v && typeof v === 'object' && !Array.isArray(v);
+      if (isObj(before.partnerApp ?? {}) && isObj(after.partnerApp ?? {})) {
+        for (const sk of new Set([...Object.keys(b), ...Object.keys(a)])) {
+          if (!same(b[sk], a[sk])) out[`partnerApp.${sk}`] = { before: norm(b[sk]), after: norm(a[sk]) };
+        }
+        continue;
+      }
+    }
+    if (!same(before[k], after[k])) out[k] = { before: norm(before[k]), after: norm(after[k]) };
+  }
+  return out;
+}
+
 function assertValidFeatures(
   incoming: Record<string, unknown> | undefined,
   existing: Record<string, unknown> = {},
@@ -265,6 +296,8 @@ const HOSTNAME_RE =
 
 @Injectable()
 export class GifsyService {
+  private readonly logger = new Logger(GifsyService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
@@ -837,6 +870,40 @@ export class GifsyService {
     // Bust the resolveClient cache so an edited feature flag / status / branding
     // takes effect immediately rather than after the 5-min TTL.
     this.tenant.invalidateCache(slug);
+
+    // Audit trail for feature-flag changes (LOG-ONLY): one AuditLog row per PATCH that actually
+    // changed a features key — actor, tenant slug, before→after per changed key. Generic for every
+    // feature key (module toggles, behaviour flags such as allowPayoutWithoutPan, partnerApp tabs).
+    // Best-effort AFTER the committed update: an audit write failure is logged, never surfaced,
+    // so the PATCH behaves exactly as before.
+    if (dto.features !== undefined) {
+      const changes = diffFeatureKeys(
+        (existing.features ?? {}) as Record<string, unknown>,
+        (client.features ?? {}) as Record<string, unknown>,
+      );
+      const changedKeys = Object.keys(changes);
+      if (changedKeys.length > 0) {
+        try {
+          await this.prisma.auditLog.create({
+            data: {
+              actorId: user.sub,
+              action: 'UPDATE',
+              entityType: 'ClientFeatures',
+              entityId: slug,
+              oldValues: Object.fromEntries(changedKeys.map((k) => [k, changes[k].before])) as Prisma.InputJsonValue,
+              newValues: Object.fromEntries(changedKeys.map((k) => [k, changes[k].after])) as Prisma.InputJsonValue,
+              metadata: { slug, changedKeys, actorRole: user.role } as Prisma.InputJsonValue,
+            },
+          });
+        } catch (err: unknown) {
+          this.logger.warn(
+            `features audit log write failed for ${slug} (${changedKeys.join(', ')}): ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
+    }
 
     const branding = (client.branding ?? {}) as Record<string, unknown>;
     const features = (client.features ?? {}) as Record<string, unknown>;

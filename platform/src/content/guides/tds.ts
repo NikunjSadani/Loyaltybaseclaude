@@ -48,7 +48,8 @@ Set per client (default **194C + Gross-up**):
 
 - **Per-PAN, per-year cumulative:** all of an outlet-owner's benefits for the year add into one running total; the threshold applies to that **total**. Once crossed, TDS is due on the **whole** total (retroactive), and later payouts carry the catch-up.
 - **Rounding:** to the nearest whole rupee.
-- **No PAN:** rate is 20%; on the live payout path a no-PAN outlet is **paid in full** and it becomes a report-only reconciliation item.
+- **No PAN:** rate is 20%; on the live payout path a no-PAN outlet is **paid in full** and it becomes a report-only reconciliation item. Each no-PAN partner is its **own deductee** — the threshold and the 20% apply to *that partner's* yearly total (never to all no-PAN partners added together). Reports show them as **"Partner Name (NO PAN ON FILE)"** with their **Outlet Code**, PAN blank. To record a deposit for one, put \`__NO_PAN__\` in the PAN column **and** the partner's **Outlet Code** — without an Outlet Code it can't be matched and shows as "NO PAN ON FILE (unattributed)".
+- **Redemption payouts without PAN (per-client switch):** by default a partner with no PAN on file is **excluded** from a Redemption Payouts batch. A Gifsy admin can switch on **"Allow payouts without PAN"** for a client (client settings → Behaviour flags): those partners are then paid the full amount, and the TDS at the no-PAN rate is a **company-borne** liability shown in the TDS reports as "NO PAN ON FILE".
 - **194R is report-only at payout:** an incentive (194R) payout has **nothing withheld** from it — the platform *reports* what's due per PAN for the client's filing, and the client deposits it (recorded via a deposit upload). Actual withholding at payout only happens for **visibility (194C)** payouts.
 
 ## When it fires (trigger points)

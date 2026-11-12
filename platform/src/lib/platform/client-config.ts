@@ -35,9 +35,10 @@ export interface FeatureFlags {
   // download template (written to the existing Outlet.latitude/longitude). Bajaj-only; runtime
   // behaviour flag, NOT a console module toggle (excluded from FeatureKey below).
   outletMasterGeo: boolean;
-  // Redemption Payouts: when ON, a partner with no PAN on file is NOT excluded from a payout batch
-  // (TDS is then applied at the configured no-PAN rate and reported as "NO PAN ON FILE"). Bajaj-only;
-  // runtime behaviour flag, NOT a console module toggle (excluded from FeatureKey below).
+  // Redemption Payouts: when ON, a partner with no PAN on file is NOT excluded from a payout batch.
+  // They are paid the full amount; the TDS at the no-PAN rate is a company-borne liability shown in
+  // the TDS reports as "NO PAN ON FILE". Bajaj-only; runtime behaviour flag, NOT a console module
+  // toggle (excluded from FeatureKey below).
   allowPayoutWithoutPan: boolean;
   selfEnrollmentAllowed: boolean;   // Partners can self-accept schemes
   nonKycOutletCampaigns: boolean;   // Campaigns can target non-KYC outlets
