@@ -499,4 +499,148 @@ describe('TdsService — per-deductee no-PAN', () => {
     expect(row['Outlet Code']).toBe('OA');
     expect(row['TDS Rate %']).toBe(20);
   });
+
+  // ─── Deposit-only rows for ANY PAN (owner-approved 2026-11-12) ────────────────
+  // A deposit made in the FY for a PAN with no payouts in that FY (e.g. March's TDS deposited in
+  // April of the next FY) must appear as its own row and in the totals — for a direct PAN deposit
+  // exactly as for a no-PAN-marker deposit attributed to an owner PAN.
+
+  const sumRows = (rows: Array<{ baseFyTotalPaise: bigint; liabilityPaise: bigint; depositedPaise: bigint; outstandingPaise: bigint }>) => ({
+    base: rows.reduce((t, r) => t + r.baseFyTotalPaise, 0n),
+    liability: rows.reduce((t, r) => t + r.liabilityPaise, 0n),
+    deposited: rows.reduce((t, r) => t + r.depositedPaise, 0n),
+    outstanding: rows.reduce((t, r) => t + r.outstandingPaise, 0n),
+  });
+
+  it('194R DEP-1: a direct PAN deposit with NO payouts this FY → its own row (base 0, −deposit), PAN upper-cased; totals = Σ rows', async () => {
+    wire([
+      { id: 'cpP', pan: 'ABCDE1234F', owner: 'Prev FY', outlets: ['OP'] },
+      { id: 'cpQ', pan: 'QQQQQ1234Q', owner: 'Q', outlets: ['OQ'] },
+    ]);
+    mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('OQ', 'f1', 2_100_000n)]); // only Q paid this FY
+    mockPrisma.tdsDeposit.findMany.mockResolvedValue([
+      { panNumber: ' abcde1234f ', outletCode: null, amountPaise: 40_000n }, // lower-case, padded
+    ]);
+    const rows = await service.compute194R(CLIENT, FY);
+    expect(rows.filter((r) => r.panNumber === 'ABCDE1234F')).toEqual([
+      { panNumber: 'ABCDE1234F', fyLabel: FY, baseFyTotalPaise: 0n, liabilityPaise: 0n, depositedPaise: 40_000n, outstandingPaise: -40_000n },
+    ]);
+    const sum = await service.summary194R(CLIENT, FY);
+    const s = sumRows(rows);
+    expect(sum.totalDepositedPaise).toBe(40_000n);
+    expect(sum.totalDepositedPaise).toBe(s.deposited);
+    expect(sum.totalBasePaise).toBe(s.base);
+    expect(sum.totalLiabilityPaise).toBe(s.liability);
+    expect(sum.totalOutstandingPaise).toBe(s.outstanding);
+    expect(sum.rowCount).toBe(rows.length);
+
+    // Export: the deposit-only row is present with numeric money cells.
+    const { buffer } = await service.export194R(CLIENT, FY);
+    const xr = parseSheet(buffer).find((r) => r.PAN === 'ABCDE1234F')!;
+    expect(xr['Amount Paid (₹)']).toBe(0);
+    expect(xr['TDS Amount (₹)']).toBe(0);
+    expect(xr['Already Deposited (₹)']).toBe(400);
+    expect(xr['Outstanding (₹)']).toBe(-400);
+    const summary = parseSheet(buffer, 1);
+    expect(summary.find((r) => r.Field === 'Total Already Deposited (₹)')!.Value).toBe(400);
+  });
+
+  it('194R DEP-2: a PAN with payouts AND a deposit (case differs) → ONE row; direct + marker deposits to a deposit-only PAN → ONE row, summed', async () => {
+    wire([
+      { id: 'cpQ', pan: 'QQQQQ1234Q', owner: 'Q', outlets: ['OQ'] },
+      { id: 'cpP', pan: 'ABCDE1234F', owner: 'P', outlets: ['OP'] },
+    ]);
+    mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('OQ', 'f1', 2_100_000n)]);
+    mockPrisma.tdsDeposit.findMany.mockResolvedValue([
+      { panNumber: 'qqqqq1234q', outletCode: null, amountPaise: 10_000n },
+      { panNumber: 'ABCDE1234F', outletCode: null, amountPaise: 20_000n },
+      { panNumber: '__NO_PAN__', outletCode: 'op', amountPaise: 5_000n }, // owner P's PAN
+    ]);
+    const rows = await service.compute194R(CLIENT, FY);
+    const q = rows.filter((r) => r.panNumber === 'QQQQQ1234Q');
+    expect(q).toHaveLength(1);
+    expect(q[0].baseFyTotalPaise).toBe(2_100_000n);
+    expect(q[0].depositedPaise).toBe(10_000n);
+    expect(q[0].outstandingPaise).toBe(q[0].liabilityPaise - 10_000n);
+    const p = rows.filter((r) => r.panNumber === 'ABCDE1234F');
+    expect(p).toHaveLength(1);
+    expect(p[0]).toMatchObject({ baseFyTotalPaise: 0n, depositedPaise: 25_000n, outstandingPaise: -25_000n });
+    expect(rows).toHaveLength(2);
+    expect((await service.summary194R(CLIENT, FY)).totalDepositedPaise).toBe(35_000n);
+  });
+
+  it('194R DEP-3 (Deoleo case): every deposit PAN has payouts → exactly the payee rows, no extra row', async () => {
+    wire([
+      { id: 'cpA', pan: 'AAAAA1111A', owner: 'A', outlets: ['OA'] },
+      { id: 'cpB', pan: 'BBBBB2222B', owner: 'B', outlets: ['OB'] },
+    ]);
+    mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('OA', 'f1', 2_100_000n), entry('OB', 'f1', 900_000n)]);
+    mockPrisma.tdsDeposit.findMany.mockResolvedValue([{ panNumber: 'AAAAA1111A', outletCode: null, amountPaise: 50_000n }]);
+    const rows = await service.compute194R(CLIENT, FY);
+    expect(rows.map((r) => [r.panNumber, r.baseFyTotalPaise, r.depositedPaise])).toEqual([
+      ['AAAAA1111A', 2_100_000n, 50_000n],
+      ['BBBBB2222B', 900_000n, 0n],
+    ]);
+    for (const r of rows) {
+      expect(r.outstandingPaise).toBe(r.liabilityPaise - r.depositedPaise);
+      expect(Object.keys(r).sort()).toEqual(['baseFyTotalPaise', 'depositedPaise', 'fyLabel', 'liabilityPaise', 'outstandingPaise', 'panNumber']);
+    }
+  });
+
+  it('194C DEP-1: a direct PAN deposit with NO payouts this FY → its own row; export numeric; totals = Σ rows', async () => {
+    mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis', clientId: CLIENT }]);
+    wire([
+      { id: 'p', pan: 'ABCDE1234F', owner: 'P', outlets: ['OP'], entityType: 'COMPANY' },
+      { id: 'q', pan: 'QQQQQ1234Q', owner: 'Q', outlets: ['OQ'], entityType: 'COMPANY' },
+    ]);
+    mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('OQ', 'vis', 12_000_000n)]);
+    mockPrisma.tdsDeposit.findMany.mockResolvedValue([{ panNumber: 'abcde1234f', outletCode: null, clientId: null, amountPaise: 60_000n }]);
+    const rows = await service.compute194C(FY);
+    const p = rows.filter((r) => r.panNumber === 'ABCDE1234F');
+    expect(p).toHaveLength(1);
+    expect(p[0]).toMatchObject({
+      baseFyTotalPaise: 0n, liabilityPaise: 0n, liabilityNoThresholdPaise: 0n, thresholdMet: false,
+      depositedPaise: 60_000n, withheldPaise: 0n, outstandingPaise: -60_000n,
+    });
+    const sum = await service.summary194C(FY);
+    const s = sumRows(rows);
+    expect(sum.totalDepositedPaise).toBe(60_000n);
+    expect(sum.totalDepositedPaise).toBe(s.deposited);
+    expect(sum.totalBasePaise).toBe(s.base);
+    expect(sum.totalLiabilityPaise).toBe(s.liability);
+    expect(sum.totalOutstandingPaise).toBe(s.outstanding);
+    expect(sum.rowCount).toBe(rows.length);
+
+    const { buffer } = await service.export194C(FY);
+    const xr = parseSheet(buffer).find((r) => r.PAN === 'ABCDE1234F')!;
+    expect(xr['Amount Paid (₹)']).toBe(0);
+    expect(xr['Already Deposited (₹)']).toBe(600);
+    expect(xr['Outstanding (₹)']).toBe(-600);
+  });
+
+  it('194C DEP-2: a PAN with payouts AND a deposit → ONE row (no duplicate)', async () => {
+    mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis', clientId: CLIENT }]);
+    wire([{ id: 'q', pan: 'QQQQQ1234Q', owner: 'Q', outlets: ['OQ'], entityType: 'COMPANY' }]);
+    mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('OQ', 'vis', 12_000_000n)]);
+    mockPrisma.tdsDeposit.findMany.mockResolvedValue([{ panNumber: 'qqqqq1234q', outletCode: null, clientId: null, amountPaise: 30_000n }]);
+    const rows = await service.compute194C(FY);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ panNumber: 'QQQQQ1234Q', baseFyTotalPaise: 12_000_000n, depositedPaise: 30_000n });
+    expect(rows[0].outstandingPaise).toBe(rows[0].liabilityPaise - 30_000n);
+  });
+
+  it('194C DEP-3 (Deoleo case): every deposit PAN has payouts → exactly the payee rows', async () => {
+    mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis', clientId: CLIENT }]);
+    wire([
+      { id: 'a', pan: 'AAAAA1111A', owner: 'A', outlets: ['OA'], entityType: 'COMPANY' },
+      { id: 'b', pan: 'BBBBB2222B', owner: 'B', outlets: ['OB'], entityType: 'COMPANY' },
+    ]);
+    mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([entry('OA', 'vis', 12_000_000n), entry('OB', 'vis', 500_000n)]);
+    mockPrisma.tdsDeposit.findMany.mockResolvedValue([{ panNumber: 'AAAAA1111A', outletCode: null, clientId: null, amountPaise: 70_000n }]);
+    const rows = await service.compute194C(FY);
+    expect(rows.map((r) => [r.panNumber, r.baseFyTotalPaise, r.depositedPaise])).toEqual([
+      ['AAAAA1111A', 12_000_000n, 70_000n],
+      ['BBBBB2222B', 500_000n, 0n],
+    ]);
+  });
 });

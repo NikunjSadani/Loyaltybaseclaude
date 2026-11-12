@@ -426,13 +426,17 @@ export class TdsService {
 
     const deposited = new Map<string, bigint>();
     let unlinkedNoPanDepositPaise = 0n;
-    // Owner PANs that received a no-PAN-marker deposit but have NO base this FY — they still get a
-    // row (base 0, outstanding −deposit) so the deposit never drops out of the totals.
+    // PANs with a deposit in this FY but NO base this FY (e.g. March's TDS deposited in April of the
+    // next FY, nothing else paid) — whether the deposit names the PAN directly or is a no-PAN-marker
+    // deposit attributed to an owner PAN. They still get ONE row (base 0, outstanding −deposit) so
+    // the deposit never drops out of the rows or the totals. A PAN that also has a base this FY is
+    // never added here (its deposit lands on its normal row → no duplicate).
     const depositOnlyPanKeys = new Set<string>();
     for (const d of deposits) {
       if (!isNoPanCell(d.panNumber)) {
         const key = d.panNumber.trim().toUpperCase();
         deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
+        if (!accum.has(key)) depositOnlyPanKeys.add(key);
         continue;
       }
       // No-PAN deposit: the owner's PAN row (like any PAN deposit), or its no-PAN deductee's row when
@@ -693,12 +697,14 @@ export class TdsService {
     const ownerPans194C = await this.ownerPansOf(outletsByCode);
     const deposited = new Map<string, bigint>();
     let unlinkedNoPanDepositPaise = 0n;
-    // Owner PANs that received a no-PAN-marker deposit but have NO base this FY (see 194R).
+    // PANs with a deposit in this FY but NO base this FY — direct PAN deposits and no-PAN-marker
+    // deposits attributed to an owner PAN alike (see 194R). One row each, never a duplicate.
     const depositOnlyPanKeys = new Set<string>();
     for (const d of deposits) {
       if (!isNoPanCell(d.panNumber)) {
         const key = d.panNumber.trim().toUpperCase();
         deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
+        if (!accum.has(key)) depositOnlyPanKeys.add(key);
         continue;
       }
       const oc = d.outletCode?.trim();
@@ -884,7 +890,7 @@ export class TdsService {
         recoveryByTenant: [],
       });
     }
-    // Deposit-only owner PANs (a no-PAN-marker deposit attributed to an owner PAN with no base
+    // Deposit-only PANs (a deposit in this FY — direct or via a no-PAN marker's owner — with no base
     // this FY) → base 0, outstanding −deposit, so the deposit never drops out of the totals.
     for (const key of depositOnlyPanKeys) {
       const depositedPaise = deposited.get(key) ?? 0n;
