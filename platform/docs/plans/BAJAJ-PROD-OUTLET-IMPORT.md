@@ -63,6 +63,12 @@ Correction list sent to the owner: `…\Files received\2026.11.04\Bajaj - data c
 - **BLOCKER (owner decision 2026-11-12): import only AFTER the 194R `VENDOR_IMPORT` exclusion (`f6b0cf0`, reverted on main by `e8c3f46` at cutover #56) is back on prod** — ship it in the next prod release (do NOT keep the TDS revert when preparing main). Job refuses LIVE unless `TDS_RULE_LIVE=true`.
 - Job `bajaj-prod-payout-history` (guards EXPECTED_DB/CONFIRM_TENANT/EXPECTED_ROWS=48086/EXPECTED_PAISE=2890956070; idempotent per month), manifest `gs://gifsy-platform-files/migrations/bajaj-prod-payout-rlp-manifest-2026-11-12.json`. After release: backup → `DRY_RUN=false TDS_RULE_LIVE=true` → verify (counts/Σ per month, UTRs, 0 TDS rows, partner wallet "Lifetime payout").
 
-## 10. Still to do
+## 10. TDS already deducted by the vendor (FY 2026-27) — APPROVED as a PARTIAL import (owner 2026-11-12)
+- Source: `…\Files received\2026.11.04\TDS Calculation FY 2026-27.xlsx` — 124 outlet rows, all wholesaler points TDS (119 on prod = WHOLESALER/BSC; 5 not on prod: 16069, 27618, 451278 not in the master; 50333738, 50781620 CISPL blank). Monthly APR–SEP TDS per outlet, Σ ₹6,50,166; challans per month (no./value/date) Σ ₹10,47,030.
+- PAN on prod: 59 have it; 25 vendor-has-PAN but missing on prod (in the corrections list); 35 no PAN (20%) → needs the no-PAN TDS keys from the no-PAN release.
+- Plan: AFTER next release (no-PAN + 194R vendor-import rule) → payout history (§9) → Earn & Burn points → import per-outlet monthly TDS deducted for the 119, each tied to that month's challan. Left OUT until Bajaj sends retailer TDS: the ₹3.97 L challan remainder (likely retailer payout TDS) + the 5 outlets. Check before relying on it: re-keying no-PAN TDS rows to the PAN once corrections land.
+- Asked of Bajaj/vendor: outlet-wise TDS deducted + deposited Apr–Oct 2026 for retailer payouts AND wholesaler points (PAN + challan per outlet); confirm rows taxed on exactly 20,000 points (threshold is "exceeds").
+
+## 11. Still to do
 - Import the other files (targets/achievements history → Earn & Burn wallet), each check → rehearsal → owner OK → run → verify. Watch: rows for the 1,587 non-approved outlets have no outlet (count points on them).
 - Then bulk Re-KYC flag (67 + flagged) and send Bajaj the correction file.
