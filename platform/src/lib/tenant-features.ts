@@ -51,6 +51,7 @@ export function normalizeFeatures(raw: unknown): FeatureFlags {
     kycAddressProofWaiver:   bool(f.kycAddressProofWaiver,   d.kycAddressProofWaiver),
     soDeclarationKyc:        bool(f.soDeclarationKyc,        d.soDeclarationKyc),
     outletMasterGeo:         bool(f.outletMasterGeo,         d.outletMasterGeo),
+    allowPayoutWithoutPan:   bool(f.allowPayoutWithoutPan,   d.allowPayoutWithoutPan),
     campaignEnrollmentForm:  bool(f.campaignEnrollmentForm,  d.campaignEnrollmentForm),
     salesTeamApp:            bool(f.salesTeamApp,            d.salesTeamApp),
     walletModule:            bool(f.walletModule,            d.walletModule),

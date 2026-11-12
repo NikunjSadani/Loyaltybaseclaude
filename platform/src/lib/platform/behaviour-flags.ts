@@ -10,7 +10,7 @@
  */
 import type { FeatureFlags } from './client-config';
 
-export type BehaviourFlagKey = keyof Pick<FeatureFlags, 'outletMasterGeo' | 'soDeclarationKyc'>;
+export type BehaviourFlagKey = keyof Pick<FeatureFlags, 'outletMasterGeo' | 'soDeclarationKyc' | 'allowPayoutWithoutPan'>;
 
 export const BEHAVIOUR_FLAG_META: Record<BehaviourFlagKey, { label: string; description: string }> = {
   outletMasterGeo: {
@@ -22,6 +22,11 @@ export const BEHAVIOUR_FLAG_META: Record<BehaviourFlagKey, { label: string; desc
     label: 'SO-declaration KYC',
     description:
       "Offers the SO-declaration KYC variant: the full enrollment is still captured, but PAN/GST/GST certificate/address proof become optional and the SO and ASM sign a declaration instead (for owners who won't share documents).",
+  },
+  allowPayoutWithoutPan: {
+    label: 'Allow payouts without PAN',
+    description:
+      "Partners with no PAN on file can still be paid; TDS is applied at the no-PAN rate and shown as 'NO PAN ON FILE'.",
   },
 };
 

@@ -106,7 +106,7 @@ const PARTNER_APP_DEFAULTS: Record<(typeof PARTNER_APP_KEYS)[number], boolean> =
  * The full, coerced console projection of a tenant's `features` blob — shared by the
  * create / update / detail responses so they can never drift (a partial projection silently
  * reverts the un-echoed switches in the console until reload). Module flags + the two runtime
- * BEHAVIOUR flags (outletMasterGeo, soDeclarationKyc) coerce a missing key to false; the nested
+ * BEHAVIOUR flags (outletMasterGeo, soDeclarationKyc, allowPayoutWithoutPan) coerce a missing key to false; the nested
  * partnerApp block resolves each unset key to its effective runtime default. READ-ONLY: this
  * never writes, so a tenant's stored blob (e.g. Deoleo's) is untouched by it.
  */
@@ -138,6 +138,7 @@ function consoleFeatures(features: Record<string, unknown>) {
     // "Behaviour flags" section through this same PATCH features path.
     outletMasterGeo: !!features.outletMasterGeo,
     soDeclarationKyc: !!features.soDeclarationKyc,
+    allowPayoutWithoutPan: !!features.allowPayoutWithoutPan,
     partnerApp,
   };
 }
@@ -152,6 +153,7 @@ const BOOLEAN_FEATURE_KEYS = [
   'referralModule', 'selfEnrollmentAllowed', 'nonKycOutletCampaigns', 'multiLevelApproval', 'rbacEnforcement',
   'hubbleVoucherEnabled', 'rlpBscView', 'catalogueMrpSlash', 'partnerDashboardV2', 'captureBankAtRedemption',
   'offerTiles', 'salesImport', 'outletMasterGeo', 'soDeclarationKyc', 'kycAddressProofWaiver',
+  'allowPayoutWithoutPan',
 ] as const;
 
 function assertValidFeatures(

@@ -105,7 +105,7 @@ export default function OnboardClientPage() {
     supportPhone:  '',
     invoicePrefix: 'TGSL-',
     features:      { ...DEFAULT_FEATURES },
-    behaviourFlags: { outletMasterGeo: false, soDeclarationKyc: false },
+    behaviourFlags: { outletMasterGeo: false, soDeclarationKyc: false, allowPayoutWithoutPan: false },
   });
 
   const [slugErrors, setSlugErrors] = useState<string[]>([]);

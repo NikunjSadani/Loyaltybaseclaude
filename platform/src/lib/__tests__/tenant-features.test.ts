@@ -62,4 +62,11 @@ describe('normalizeFeatures', () => {
     expect(normalizeFeatures({ salesImport: true }).salesImport).toBe(true);
     expect(normalizeFeatures({ salesImport: 'yes' }).salesImport).toBe(false);
   });
+
+  it('carries the allowPayoutWithoutPan behaviour flag, defaulting OFF', () => {
+    expect(DEFAULT_FEATURES.allowPayoutWithoutPan).toBe(false);
+    expect(normalizeFeatures({}).allowPayoutWithoutPan).toBe(false);
+    expect(normalizeFeatures({ allowPayoutWithoutPan: true }).allowPayoutWithoutPan).toBe(true);
+    expect(normalizeFeatures({ allowPayoutWithoutPan: 'true' }).allowPayoutWithoutPan).toBe(false);
+  });
 });

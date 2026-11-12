@@ -113,8 +113,11 @@ Add (all optional, default STANDARD so existing callers unaffected):
   "Not required — SO Declaration" (muted), active only if evidence attached; classification pre-defaulted.
 
 ## 8. Payout / TDS
-No new code. No-PAN outlets pay normally; reported under existing 194R `__NO_PAN__` 20% bucket. PAN (if optionally
-entered) auto-routes to the PAN-keyed rate.
+Correction (2026-11-12): the Redemption Payouts batch (`payouts.service.ts processBatch`) EXCLUDED any no-PAN partner,
+so no-PAN outlets could NOT be paid. Fixed tenant-scoped by the behaviour flag `features.allowPayoutWithoutPan`
+(Gifsy console → Behaviour flags; default OFF → every other tenant byte-identical). With it ON, no-PAN outlets pay
+normally; reported under existing 194R `__NO_PAN__` 20% bucket. PAN (if optionally entered) auto-routes to the
+PAN-keyed rate.
 
 ## 9. Deoleo-safety invariants (MUST hold)
 - `kycVariant` defaults STANDARD everywhere; no STANDARD code path changes behaviour.

@@ -51,6 +51,8 @@ const mockPrisma = {
   },
   fundReceipt: { aggregate: jest.fn() },
   fundLedger: { findFirst: jest.fn() },
+  // processBatch reads the tenant's features (allowPayoutWithoutPan). Default (undefined) = flag OFF.
+  client: { findUnique: jest.fn() },
   tdsRecord: { create: jest.fn() },
   auditLog: { create: jest.fn() },
   // Flow-B payout WhatsApp batch-reads the partner owner (ownerName+phone) + the
@@ -339,6 +341,101 @@ describe('PayoutsService', () => {
       expect(res.steps.disbursement.flagged).toBe(0); // invalid tx excluded
       // Even with zero valid transactions, the batch finalises SUBMITTED (no gate).
       expect(res.status).toBe('SUBMITTED');
+    });
+
+    // ── allowPayoutWithoutPan (per-tenant behaviour flag, default OFF) ──────────
+
+    const noPanTx = (over: Record<string, unknown> = {}) => ({
+      id: 't-nopan', partnerId: 'p-nopan', amountPaise: 150000,
+      payoutMode: 'UPI', upiId: 'nopan@upi', bankAccountNumber: null, ifscCode: null,
+      partner: {
+        panNumber: null, isActive: true, deletedAt: null,
+        kycSubmissions: [{ status: 'APPROVED' }],
+      },
+      ...over,
+    });
+
+    it('allowPayoutWithoutPan ABSENT: no-PAN tx is excluded with the exact legacy error (regression)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { soDeclarationKyc: true } });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([noPanTx()]);
+
+      const res = await service.processBatch(gifsy, 'b1');
+      expect(res.steps.validation.errors).toEqual(['No PAN for partner p-nopan']);
+      expect(res.steps.validation.status).toBe('PASSED_WITH_WARNINGS');
+      expect(res.steps.disbursement.flagged).toBe(0);
+      expect(mockTx.payoutTransaction.update).not.toHaveBeenCalled();
+      // The flag is read for THIS batch's tenant only.
+      expect(mockPrisma.client.findUnique).toHaveBeenCalledWith({
+        where: { id: 'deoleo' },
+        select: { features: true },
+      });
+    });
+
+    it('allowPayoutWithoutPan=false / non-boolean / null features: still excluded (only strict true enables)', async () => {
+      for (const features of [{ allowPayoutWithoutPan: false }, { allowPayoutWithoutPan: 'true' }, null]) {
+        jest.clearAllMocks();
+        mockPrisma.payoutBatch.updateMany.mockResolvedValue({ count: 1 });
+        mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+        mockPrisma.client.findUnique.mockResolvedValue({ features });
+        mockPrisma.payoutTransaction.findMany.mockResolvedValue([noPanTx()]);
+        const res = await service.processBatch(gifsy, 'b1');
+        expect(res.steps.validation.errors).toEqual(['No PAN for partner p-nopan']);
+        expect(res.steps.disbursement.flagged).toBe(0);
+      }
+    });
+
+    it('allowPayoutWithoutPan ON: no-PAN tx is valid and flagged INITIATED alongside a PAN tx', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { allowPayoutWithoutPan: true } });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        noPanTx(),
+        noPanTx({ id: 't-blankpan', partnerId: 'p-blank', partner: {
+          panNumber: '', isActive: true, deletedAt: null, kycSubmissions: [{ status: 'APPROVED' }],
+        } }),
+        noPanTx({ id: 't-pan', partnerId: 'p-pan', partner: {
+          panNumber: 'ABCDE1234F', isActive: true, deletedAt: null, kycSubmissions: [{ status: 'APPROVED' }],
+        } }),
+      ]);
+
+      const res = await service.processBatch(gifsy, 'b1');
+      expect(res.steps.validation.errors).toEqual([]);
+      expect(res.steps.validation.status).toBe('PASSED');
+      expect(res.steps.disbursement.flagged).toBe(3);
+      expect(res.status).toBe('SUBMITTED');
+      const flaggedIds = mockTx.payoutTransaction.update.mock.calls.map((c) => c[0].where.id);
+      expect(flaggedIds).toEqual(['t-nopan', 't-blankpan', 't-pan']);
+      // Payouts still never withhold TDS (the TDS engine buckets no-PAN under __NO_PAN__).
+      expect(mockPrisma.tdsRecord.create).not.toHaveBeenCalled();
+    });
+
+    it('allowPayoutWithoutPan ON: every OTHER validation still excludes a no-PAN tx', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { allowPayoutWithoutPan: true } });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        noPanTx({ id: 't-amt', partnerId: 'p-amt', amountPaise: 0 }),
+        noPanTx({ id: 't-kyc', partnerId: 'p-kyc', partner: {
+          panNumber: null, isActive: true, deletedAt: null, kycSubmissions: [{ status: 'PENDING_ASM_APPROVAL' }],
+        } }),
+        noPanTx({ id: 't-inactive', partnerId: 'p-inactive', partner: {
+          panNumber: null, isActive: false, deletedAt: null, kycSubmissions: [{ status: 'APPROVED' }],
+        } }),
+        noPanTx({ id: 't-upi', partnerId: 'p-upi', upiId: null }),
+        noPanTx({ id: 't-bank', partnerId: 'p-bank', payoutMode: 'BANK_TRANSFER', upiId: null, ifscCode: 'HDFC0001234' }),
+      ]);
+
+      const res = await service.processBatch(gifsy, 'b1');
+      const errs = res.steps.validation.errors;
+      expect(errs.some((e) => /No PAN/.test(e))).toBe(false);
+      expect(errs).toEqual(expect.arrayContaining([
+        'Invalid amount for tx t-amt',
+        expect.stringMatching(/p-kyc KYC is not approved/),
+        expect.stringMatching(/p-inactive is ineligible \(PARTNER_INACTIVE\)/),
+        'Missing upiId for UPI transaction t-upi',
+        expect.stringMatching(/\[bankAccountNumber\] for BANK_TRANSFER transaction t-bank/),
+      ]));
+      expect(res.steps.disbursement.flagged).toBe(0);
+      expect(mockTx.payoutTransaction.update).not.toHaveBeenCalled();
     });
 
     it('resets a claimed batch to FAILED if a step throws (never strands it in PROCESSING)', async () => {
@@ -703,6 +800,26 @@ describe('PayoutsService', () => {
       expect(Buffer.isBuffer(res.buffer)).toBe(true);
       expect(res.buffer.length).toBeGreaterThan(0);
       expect(res.filename).toBe('payout-utr-PB-1.xlsx');
+    });
+
+    it("a no-PAN partner's transaction (allowPayoutWithoutPan ON) appears in the UTR template, PAN = N/A", async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-2' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 'txn-nopan', amountPaise: 150000, payoutMode: 'UPI', status: 'INITIATED',
+          partner: { businessName: 'No Pan Traders', panNumber: null },
+          beneficiaryName: 'Owner', bankAccountNumber: null, ifscCode: null, bankName: null, upiId: 'nopan@upi',
+        },
+      ]);
+      const res = await service.buildPayoutUtrTemplate(gifsy, 'b1');
+      expect(res.recordCount).toBe(1);
+      const wb = XLSX.read(res.buffer, { type: 'buffer' });
+      const rows = XLSX.utils.sheet_to_json<Record<string, string>>(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+      expect(rows[0]['Transaction ID']).toBe('txn-nopan');
+      expect(rows[0]['Partner Name']).toBe('No Pan Traders');
+      expect(rows[0].PAN).toBe('N/A');
+      expect(rows[0]['Amount (₹)']).toBe('1500.00');
+      expect(rows[0]['UPI ID']).toBe('nopan@upi');
     });
 
     it('export carries ALL beneficiary columns from the PayoutTransaction snapshot (blank where missing)', async () => {

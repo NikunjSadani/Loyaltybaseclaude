@@ -39,6 +39,7 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     kycAddressProofWaiver: false,
     soDeclarationKyc: false,
     outletMasterGeo: false,
+    allowPayoutWithoutPan: false,
     campaignEnrollmentForm: true,
     salesTeamApp: true,
     walletModule: true,

@@ -425,9 +425,20 @@ export class PayoutsService {
       steps.validation.count = transactions.length;
       const validTransactions: typeof transactions = [];
 
+      // Per-tenant behaviour flag (clients.features.allowPayoutWithoutPan, default OFF): when ON,
+      // a partner with no PAN on file is NOT excluded — the payout proceeds and TDS falls into the
+      // existing 194R no-PAN bucket (reported as "NO PAN ON FILE"). Every other check below stays.
+      // Absent/false → the missing-PAN exclusion is byte-identical to before (e.g. Deoleo).
+      const batchClient = await this.prisma.client.findUnique({
+        where: { id: clientId },
+        select: { features: true },
+      });
+      const allowPayoutWithoutPan =
+        (batchClient?.features as Record<string, unknown> | null)?.allowPayoutWithoutPan === true;
+
       for (const tx of transactions) {
         const errors: string[] = [];
-        if (!tx.partner?.panNumber) {
+        if (!allowPayoutWithoutPan && !tx.partner?.panNumber) {
           errors.push(`No PAN for partner ${tx.partnerId}`);
         }
         // amountPaise is BigInt from Prisma; compare as Number.

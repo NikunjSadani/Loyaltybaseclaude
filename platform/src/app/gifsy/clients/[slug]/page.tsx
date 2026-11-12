@@ -1165,7 +1165,7 @@ function LiveSwitchRow({
 // Behaviour flags section (B2) — runtime flags that are NOT console modules
 // ─────────────────────────────────────────────────────────────────────────────
 
-// outletMasterGeo / soDeclarationKyc are deliberately excluded from FeatureKey (they change how an
+// outletMasterGeo / soDeclarationKyc / allowPayoutWithoutPan are deliberately excluded from FeatureKey (they change how an
 // existing flow behaves rather than switching a module on), so they get their own section. Same
 // REAL persistence as the module toggles: PATCH { features: { <key>: bool } } — the backend merges
 // one key at a time (every other stored flag survives). A failed save leaves the switch unchanged.
@@ -1194,7 +1194,7 @@ function BehaviourFlagsSection({
   return (
     <div className="pt-2 space-y-2">
       <p className="text-xs text-white/40 px-1">
-        These change how an existing flow behaves for this tenant. Both are OFF unless switched on here.
+        These change how an existing flow behaves for this tenant. Each is OFF unless switched on here.
       </p>
       {BEHAVIOUR_FLAG_KEYS.map((key) => {
         const enabled = config.features[key] === true;

@@ -643,6 +643,55 @@ describe('GifsyService', () => {
       expect(mockPrisma.client.create).not.toHaveBeenCalled();
     });
 
+    it('allowPayoutWithoutPan: PATCH merges ONE key, every other stored flag survives, response echoes it', async () => {
+      const stored = {
+        walletModule: true,
+        outletMasterGeo: true,
+        soDeclarationKyc: true,
+        captureBankAtRedemption: true,
+        partnerApp: { showLeaderboard: true },
+        visibilityCaptureMode: 'PHOTO_APPROVAL',
+      };
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: stored,
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
+        branding: {}, features: data.features,
+      }));
+
+      const res = await service.updateClient(gifsy, 'bajaj', { features: { allowPayoutWithoutPan: true } });
+
+      expect(mockPrisma.client.update.mock.calls[0][0].data.features).toEqual({ ...stored, allowPayoutWithoutPan: true });
+      const feats = res.features as Record<string, unknown>;
+      expect(feats.allowPayoutWithoutPan).toBe(true);
+      expect(feats.outletMasterGeo).toBe(true);
+      expect(feats.soDeclarationKyc).toBe(true);
+      expect(feats.captureBankAtRedemption).toBe(true);
+    });
+
+    it('allowPayoutWithoutPan: absent → projected OFF; a non-boolean value → 400 (nothing written)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: { walletModule: true },
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'deoleo', internalName: 'Deoleo India', status: 'ACTIVE', onboardedAt: new Date('2025-01-01'),
+        branding: {}, features: { walletModule: true }, ...data,
+      }));
+      const res = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
+      expect((res.features as Record<string, unknown>).allowPayoutWithoutPan).toBe(false);
+
+      mockPrisma.client.update.mockClear();
+      for (const v of ['true', 1, null]) {
+        await expect(
+          service.updateClient(gifsy, 'deoleo', { features: { allowPayoutWithoutPan: v } } as never),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      }
+      expect(mockPrisma.client.update).not.toHaveBeenCalled();
+    });
+
     it('B3: a partial partnerApp PATCH (showLeaderboard only) keeps the stored sibling tab keys', async () => {
       mockPrisma.client.findFirst.mockResolvedValue({
         id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
