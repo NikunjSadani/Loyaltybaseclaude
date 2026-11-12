@@ -2975,7 +2975,18 @@ model KpiDef {
   //                   when that outlet type is in scope.
   // Deliberately NOT part of @@unique([clientId, code]) and NOT backfilled: a plain nullable,
   // defaultless additive column.
+  /// DEPRECATED (APPLIES-TO, 2026-11): superseded by `outletTypes`/`programs`/`subPrograms`. Kept one
+  /// release, dual-written = outletTypes[0] only when exactly one type and no programs/subPrograms,
+  /// else null. Drop in a later owner-approved migration.
   outletType        String?
+  // APPLIES-TO scope (platform/docs/plans/APPLIES-TO-TARGETING-PLAN.md §0): AND across facets,
+  // OR within; EMPTY = ALL; trimmed + case-insensitive matching. Resolve via
+  // common/applies-to `kpiAppliesTo` (arrays win; falls back to the legacy `outletType`).
+  //   outletTypes ↔ Outlet.outletType.code · programs ↔ Outlet.programName ·
+  //   subPrograms ↔ Outlet.programCategory. All default [] → every unscoped tenant byte-identical.
+  outletTypes       String[] @default([])
+  programs          String[] @default([])
+  subPrograms       String[] @default([])
   enabled           Boolean  @default(true)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
