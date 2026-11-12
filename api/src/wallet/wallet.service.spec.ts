@@ -1357,6 +1357,116 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
       expect(h.wallet.lifetimeEarned).toBe(100);   // monotonic — untouched
       expect(h.wallet.lifetimeRedeemed).toBe(0);
     });
+
+    // ── NEGATIVE-balance wallet: a debit must never ADD points ────────────────────────
+    it('NEG-1: wallet −841, +500 batch credit (→ −341), batch reversed → balance stays −341 (not 0); shortfall 500', async () => {
+      const h = buildHarness({
+        wallet: { redeemablePoints: -841, earnedPoints: 0, lifetimeEarned: 0 },
+        config: { expiryDays: 90 },
+      });
+      await h.service.creditEarn('cp1', 'deoleo', 500, {});
+      expect(h.wallet.redeemablePoints).toBe(-341);
+      const earnLot = h.rowsOfType('EARN')[0];
+      expect(earnLot.remainingPoints).toBe(500);
+
+      let result: any;
+      await h.store.$transaction(async (tx: any) => {
+        result = await h.service.clawbackAward('cp1', 500, { description: 'Clawback X' }, tx);
+      });
+
+      // Pre-fix: decrement = min(500, −341) = −341 → balance jumped to 0 and shortfall read 841.
+      expect(h.wallet.redeemablePoints).toBe(-341);  // unchanged — never increased
+      expect(result.newRedeemable).toBe(-341);
+      expect(result.shortfall).toBe(500);            // nothing could be recovered
+      // Passbook row: full −500 recorded, before/after both −341 (scalar did not move).
+      const wt = h.walletTxns[h.walletTxns.length - 1];
+      expect(wt).toMatchObject({ transactionType: 'DEBIT_ADJUSTMENT', points: -500, balanceBefore: -341, balanceAfter: -341 });
+      expect(wt.description).toBe(
+        'Clawback X [SHORTFALL: 500 pts not recovered — wallet balance already negative (-341) — owner review required]',
+      );
+      const adj = h.rowsOfType('ADJUST').find((r) => r.points === -500)!;
+      expect(adj.remainingPoints).toBe(0);
+      expect(adj.notes).toBe(wt.description);
+      // The reversed credit's lot is consumed, so it can never later be expired/spent.
+      expect(h.lot(earnLot.id)!.remainingPoints).toBe(0);
+      // Monotonic counters untouched by the clawback.
+      expect(h.wallet.lifetimeEarned).toBe(500);
+      expect(h.wallet.earnedPoints).toBe(500);
+      expect(h.wallet.lifetimeRedeemed).toBe(0);
+    });
+
+    it('NEG-2: partial recovery from a negative wallet is impossible — any clawback size leaves the balance unchanged', async () => {
+      for (const amt of [1, 100, 10_000]) {
+        const h = buildHarness({ wallet: { redeemablePoints: -50 } });
+        let result: any;
+        await h.store.$transaction(async (tx: any) => {
+          result = await h.service.clawbackAward('cp1', amt, {}, tx);
+        });
+        expect(h.wallet.redeemablePoints).toBe(-50);
+        expect(result.shortfall).toBe(amt);
+      }
+    });
+
+    it('NEG-3: expiry sweep on a negative wallet never raises the balance (lot fenced, no EXPIRE row)', async () => {
+      const h = buildHarness({
+        wallet: { redeemablePoints: -100 },
+        lots: [
+          { id: 'A', walletId: 'w1', transactionType: 'EARN', points: 40, remainingPoints: 40, expiresAt: daysFromNow(1), createdAt: daysFromNow(-10) },
+        ],
+      });
+      const res = await h.service.expireDuePoints({ now: daysFromNow(2) });
+      expect(res).toEqual({ expiredLots: 0, expiredPoints: 0 });
+      expect(h.wallet.redeemablePoints).toBe(-100);
+      expect(h.wallet.expiredPoints).toBe(0);
+      expect(h.rowsOfType('EXPIRE').length).toBe(0);
+    });
+
+    // ── Non-negative balances: byte-identical to the pre-fix behaviour ────────────────
+    it('POS-1: full cover (redeemable 80, clawback 50) → 30, shortfall 0, description unchanged, before/after 80/30', async () => {
+      const h = buildHarness({
+        wallet: { redeemablePoints: 80, earnedPoints: 80, lifetimeEarned: 80 },
+        lots: [
+          { id: 'A', walletId: 'w1', transactionType: 'EARN', points: 80, remainingPoints: 80, expiresAt: daysFromNow(30), createdAt: daysFromNow(-10) },
+        ],
+      });
+      let result: any;
+      await h.store.$transaction(async (tx: any) => {
+        result = await h.service.clawbackAward('cp1', 50, {}, tx);
+      });
+      expect(result.shortfall).toBe(0);
+      expect(h.wallet.redeemablePoints).toBe(30);
+      expect(h.lot('A')!.remainingPoints).toBe(30);
+      const wt = h.walletTxns[h.walletTxns.length - 1];
+      expect(wt).toMatchObject({ points: -50, balanceBefore: 80, balanceAfter: 30, description: 'Clawback: credit batch POINTS reversal' });
+    });
+
+    it('POS-2: partial cover keeps the original "already redeemed" shortfall text (redeemable 30, clawback 50)', async () => {
+      const h = buildHarness({ wallet: { redeemablePoints: 30 } });
+      let result: any;
+      await h.store.$transaction(async (tx: any) => {
+        result = await h.service.clawbackAward('cp1', 50, {}, tx);
+      });
+      expect(result.shortfall).toBe(20);
+      expect(h.wallet.redeemablePoints).toBe(0);
+      const wt = h.walletTxns[h.walletTxns.length - 1];
+      expect(wt).toMatchObject({ points: -50, balanceBefore: 30, balanceAfter: 0 });
+      expect(wt.description).toBe(
+        'Clawback: credit batch POINTS reversal [SHORTFALL: 20 pts already redeemed — owner review required]',
+      );
+    });
+
+    it('POS-3: zero balance (redeemable 0, clawback 25) → stays 0, shortfall 25, original text', async () => {
+      const h = buildHarness({ wallet: { redeemablePoints: 0 } });
+      let result: any;
+      await h.store.$transaction(async (tx: any) => {
+        result = await h.service.clawbackAward('cp1', 25, {}, tx);
+      });
+      expect(result.shortfall).toBe(25);
+      expect(h.wallet.redeemablePoints).toBe(0);
+      expect(h.walletTxns[h.walletTxns.length - 1].description).toBe(
+        'Clawback: credit batch POINTS reversal [SHORTFALL: 25 pts already redeemed — owner review required]',
+      );
+    });
   });
 
   // ── (8) the canonical invariant after a mixed sequence ───────────────────────────

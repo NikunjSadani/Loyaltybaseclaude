@@ -145,7 +145,11 @@ export class WalletService {
       // DEBIT_ADJUSTMENT (ledgerType ADJUST) only decrements redeemable.
     } else {
       // Floor redeemable at 0 — guards the expiry sweep against over-decrementing.
-      const decrement = Math.min(magnitude, balanceBefore);
+      // The outer Math.max(0, …) matters only when the balance is ALREADY NEGATIVE (e.g. a
+      // legacy/migrated wallet): min(magnitude, negative) is a NEGATIVE decrement, which would
+      // ADD points on a debit. Clamp to 0 → a debit never moves such a wallet up; the whole
+      // magnitude is then a shortfall. For balanceBefore >= 0 this is identical to before.
+      const decrement = Math.max(0, Math.min(magnitude, balanceBefore));
       data.redeemablePoints = { decrement };
       if (ledgerType === PointsLedgerType.REDEEM) {
         data.redeemedPoints = { increment: magnitude };
@@ -845,7 +849,9 @@ export class WalletService {
    * supplied transaction so it is atomic with the reversal status update.
    *
    * Invariant-aware decrement rules:
-   *  - redeemablePoints: decremented by min(points, redeemablePoints) — CLAMPED at 0.
+   *  - redeemablePoints: decremented by max(0, min(points, redeemablePoints)) — CLAMPED at 0,
+   *    and an already-NEGATIVE balance is left unchanged (never raised by a debit; the whole
+   *    amount is the shortfall).
    *    If the partner has already redeemed some of the awarded points, redeemablePoints
    *    may be < points. We clamp rather than throw so the reversal still lands; the
    *    shortfall is recorded in the ledger description for owner review.
@@ -865,7 +871,7 @@ export class WalletService {
    *   Do NOT silently ignore this — a cash settlement may be needed out-of-band.
    *
    * NOTE: this routes through applyMovement's floored-debit path (redeemable decrements by
-   * min(magnitude, balance); no lifetime/earned counter moves). The read of redeemablePoints
+   * max(0, min(magnitude, balance)); no lifetime/earned counter moves). The read of redeemablePoints
    * below is only to derive `shortfall` for the description — not a second balance write.
    */
   async clawbackAward(
@@ -890,19 +896,24 @@ export class WalletService {
     // are NEVER decremented (the locked wallet invariant): the wallet still records
     // that the points were earned; the reversal shows up as redeemablePoints dropping
     // plus a DEBIT_ADJUSTMENT ledger entry. applyMovement floors redeemable at 0.
-    const redeemableDecrement = Math.min(points, wallet.redeemablePoints);
+    // Must mirror applyMovement's floored decrement exactly (incl. the Math.max(0, …) clamp for
+    // an already-negative wallet, where NOTHING is removed and the whole amount is shortfall).
+    const redeemableDecrement = Math.max(0, Math.min(points, wallet.redeemablePoints));
     const shortfall = points - redeemableDecrement;
 
     let desc = opts.description ?? `Clawback: credit batch POINTS reversal`;
     if (shortfall > 0) {
-      desc += ` [SHORTFALL: ${shortfall} pts already redeemed — owner review required]`;
+      desc +=
+        wallet.redeemablePoints < 0
+          ? ` [SHORTFALL: ${shortfall} pts not recovered — wallet balance already negative (${wallet.redeemablePoints}) — owner review required]`
+          : ` [SHORTFALL: ${shortfall} pts already redeemed — owner review required]`;
     }
 
     const movement = await this.applyMovement(tx, {
       wallet,
       walletTxType: 'DEBIT_ADJUSTMENT',
       ledgerType: PointsLedgerType.ADJUST,
-      // passing -points is correct: applyMovement's internal decrement = min(magnitude, redeemableBefore)
+      // passing -points is correct: applyMovement's internal decrement = max(0, min(magnitude, redeemableBefore))
       points: -points,
       referenceType: opts.referenceType ?? null,
       referenceId: opts.referenceId ?? null,
