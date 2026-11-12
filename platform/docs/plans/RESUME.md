@@ -12,7 +12,16 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ## 📍 STATE 2026-11-11 — read this FIRST
 
-> **⏸ STOP-OVER 2026-11-11 night (owner asleep) — resume here.** Branch `feat/sales-import` (worktree
+> **✅ 2026-11-12: release `dd27888b` PUSHED + LIVE ON STAGING** (api + frontend serving `dd27888b`; full gates 5,457 / 3,706 green).
+> Real-login API matrix on staging PASSED (Deoleo): ₹750.5 → 400 "Enter a whole-rupee amount"; card no. issued then PIN added
+> once (same PIN = no-op, different = 400, 65 chars = 400); partner list/detail show code+PIN, track has no PIN; SALES_ISR list
+> empty + detail/track 403; CLIENT_ADMIN code/pin null + "issued"; Gifsy detail + dispatch show both; bell re-sent "card no. and
+> PIN are in My Orders", no PIN stored in any notification. ⚠️ TEST DATA LEFT FOR OWNER UAT (clean up after): temp reward
+> `cmwcybras000e01s6wb2zvzur` "ZZ PIN test card (staging, temporary)" + Sai Trader (9000000300) order in `pin-state.json`
+> (PROCESSING, card TESTCARD…, PIN 0042, 250 pts debited) → cleanup = voucher-cancelled → CANCELLED (refund) → reward DISCONTINUED.
+> On-screen checks (partner My Orders PIN, Gifsy "Show PIN", amount box, physical fulfilment save) = owner UAT.
+>
+> **⏸ STOP-OVER 2026-11-11 night (owner asleep) — superseded by the line above.** Branch `feat/sales-import` (worktree
 > `.claude/worktrees/sales-import`) HEAD = merge `defc6087` = everything below + the **Hubble per-brand amounts + whole-rupee
 > amounts + GIFT-CARD PIN** work (branch `feat/hubble-denominations` up to `2549e593`; 4 dual-audit rounds, all findings fixed;
 > owner-approved platform-wide). **NOT pushed** (push to develop needs the owner at the keyboard for the platform-wide hook).
