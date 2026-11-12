@@ -71,16 +71,13 @@ import { appliesToOutletWhere } from '../common/applies-to/applies-to.prisma';
 
 /**
  * APPLIES-TO (plan D1/D2): does this tenant's KPI set need scope ENFORCEMENT on templates /
- * uploads / pace? Only when some KPI has programs / sub-programs or 2+ outlet types. A tenant whose
- * KPIs are all unscoped (Deoleo) or carry at most the legacy single outlet type keeps EXACTLY the
- * pre-APPLIES-TO behaviour (byte-identical template, no out-of-scope ignoring) — the legacy
- * single-type tag never affected templates/uploads before, and must not start to now.
+ * uploads / pace? Whenever ANY KPI carries a non-empty scope — including the legacy single
+ * outlet type (OWNER DECISION 2026-11-12: a legacy single-type KPI is a REAL scope, enforced
+ * everywhere). Only a tenant whose KPIs are ALL unscoped (Deoleo) keeps EXACTLY the pre-APPLIES-TO
+ * behaviour (byte-identical template, no out-of-scope ignoring, no `ignoredOutOfScope` key).
  */
 export function kpiScopeEnforced(kpis: ReadonlyArray<KpiScopeLike>): boolean {
-  return kpis.some((k) => {
-    const s = kpiAppliesTo(k);
-    return !isUnscoped(s) && legacyOutletTypeOf(s) === null;
-  });
+  return kpis.some((k) => !isUnscoped(kpiAppliesTo(k)));
 }
 
 /** One scope-option value: settings-list entry or a live-only outlet value (APPLIES-TO §6). */
@@ -459,19 +456,21 @@ export class TargetsService {
   }
 
   /**
-   * GET /v1/admin/kpis/scope-count?outletTypes=A,B&programs=..&subPrograms=.. — how many LIVE outlets
+   * GET /v1/admin/kpis/scope-count?outletTypes=A&outletTypes=B&programs=..&subPrograms=.. (REPEATED
+   * params — never comma-split, so a value may contain a comma) — how many LIVE outlets
    * (non-deleted, not deactivated, not NOT_INTERESTED / PARKED — the dashboard universe; NEVER an
    * `isActive` proxy, which would drop every KYC-pending outlet) the given scope matches. Empty = all.
    */
   async scopeCount(
     user: JwtPayload,
-    q: { outletTypes?: string; programs?: string; subPrograms?: string },
+    q: { outletTypes?: string | string[]; programs?: string | string[]; subPrograms?: string | string[] },
   ): Promise<{ count: number }> {
-    const split = (v?: string) => (v ?? '').split(',').map((x) => x.trim()).filter((x) => x !== '');
+    // The DTO already arrays a single param; tolerate a bare string too (direct service callers).
+    const list = (v?: string | string[]) => (v === undefined ? [] : Array.isArray(v) ? v : [v]);
     const scope = normalizeAppliesTo({
-      outletTypes: split(q.outletTypes),
-      programs: split(q.programs),
-      subPrograms: split(q.subPrograms),
+      outletTypes: list(q.outletTypes),
+      programs: list(q.programs),
+      subPrograms: list(q.subPrograms),
     });
     const count = await this.prisma.outlet.count({
       where: { AND: [LIVE_OUTLET_WHERE(user.clientId), appliesToOutletWhere(scope)] },
@@ -975,8 +974,9 @@ export class TargetsService {
       totalRows,
       acceptedCount,
       rejectedCount,
-      // APPLIES-TO D1: numeric values dropped as out of the KPI's scope (always present; 0 when none).
-      ignoredOutOfScope: parseResult.summary.ignoredOutOfScope,
+      // APPLIES-TO D1: numeric values dropped as out of the KPI's scope — present ONLY for a tenant
+      // with a scoped KPI (an all-unscoped tenant's response stays byte-identical).
+      ...(scopeEnforced ? { ignoredOutOfScope: parseResult.summary.ignoredOutOfScope } : {}),
       // The GROUND TRUTH of what was actually persisted this upload: one OutletTarget
       // upsert per (outlet, writable-month) with ≥1 non-blank KPI. This is the number
       // the confirmation message reports — `acceptedCount` can be higher because it
@@ -1277,8 +1277,9 @@ export class TargetsService {
       totalRows,
       acceptedCount,
       rejectedCount,
-      // APPLIES-TO D1: numeric values dropped as out of the KPI's scope (always present; 0 when none).
-      ignoredOutOfScope: parseResult.summary.ignoredOutOfScope,
+      // APPLIES-TO D1: numeric values dropped as out of the KPI's scope — present ONLY for a tenant
+      // with a scoped KPI (an all-unscoped tenant's response stays byte-identical).
+      ...(scopeEnforced ? { ignoredOutOfScope: parseResult.summary.ignoredOutOfScope } : {}),
       rows:          parseResult.rows,
       // Additive, ONLY for tenants with importer-owned KPIs (absent otherwise → Deoleo response unchanged).
       ...(skippedImporterOwnedKpis !== undefined ? { skippedImporterOwnedKpis } : {}),
@@ -1415,7 +1416,9 @@ export class TargetsService {
     };
 
     // Fetch both sides in parallel — they may not have identical outlet sets. The KPI scopes ride
-    // along for the APPLIES-TO annotation (D3: stored values are NEVER hidden, only flagged).
+    // along so out-of-scope (outlet, KPI) pairs are EXCLUDED (OWNER DECISION 2026-11-12: every
+    // aggregate reader agrees — pace, sales screens, leaderboard, points compute give the same
+    // totals). Raw data EXPORTS still dump stored values (D3).
     const [targetRows, achievementRows, kpiScopeRows] = await Promise.all([
       this.prisma.outletTarget.findMany({
         where: whereBase,
@@ -1430,7 +1433,7 @@ export class TargetsService {
         select: { code: true, outletType: true, outletTypes: true, programs: true, subPrograms: true },
       }),
     ]);
-    // Only a scope-enforced tenant is annotated (Deoleo / legacy-only tenants: response unchanged).
+    // Only a tenant with a scoped KPI is filtered (all-unscoped tenant, e.g. Deoleo: response unchanged).
     const paceScopes = kpiScopeEnforced(kpiScopeRows ?? []) ? TargetsService.kpiScopeMap(kpiScopeRows) : null;
 
     // Index by outletCode
@@ -1480,8 +1483,6 @@ export class TargetsService {
         target: number | null;
         achieved: number | null;
         pace: number | null;
-        /** APPLIES-TO: present (true) ONLY when the KPI's scope excludes this outlet; values still shown (D3). */
-        outOfScope?: true;
       }>;
     }> = [];
 
@@ -1505,11 +1506,15 @@ export class TargetsService {
         target: number | null;
         achieved: number | null;
         pace: number | null;
-        outOfScope?: true;
       }> = [];
       const facets = outletFacetsByCode.get(outletCode);
 
       for (const code of allKpiCodes) {
+        // APPLIES-TO: a stored value for a KPI that does not apply to this outlet (by its CURRENT
+        // facets) is not part of the outlet's pace. A deleted / unknown outlet (no facets) is kept.
+        const sc = paceScopes?.get(code);
+        if (sc && facets && !appliesToOutlet(sc, facets)) continue;
+
         const target   = Object.prototype.hasOwnProperty.call(targetValues, code)
           ? targetValues[code]
           : null;
@@ -1523,12 +1528,7 @@ export class TargetsService {
           pace = achieved / target;
         }
 
-        const sc = paceScopes?.get(code);
-        if (sc && facets && !appliesToOutlet(sc, facets)) {
-          kpis.push({ code, target, achieved, pace, outOfScope: true });
-        } else {
-          kpis.push({ code, target, achieved, pace });
-        }
+        kpis.push({ code, target, achieved, pace });
       }
 
       results.push({

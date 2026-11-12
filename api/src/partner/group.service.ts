@@ -281,11 +281,14 @@ export class GroupService {
       this.prisma.kpiDef.findMany({
         where: { clientId },
         select: {
-          code: true, label: true, unit: true, isPrimary: true, order: true,
+          code: true, label: true, unit: true, isPrimary: true, order: true, enabled: true,
           outletType: true, outletTypes: true, programs: true, subPrograms: true,
         },
       }),
     ]);
+    // D6 primary fallback considers ENABLED KPIs only (a disabled KPI must never become an outlet's
+    // primary). Labels / units / flags still resolve over every KpiDef, exactly as before.
+    const enabledKpiRows = kpiRows.filter((k) => k.enabled !== false);
 
     const kpiLabel = new Map(kpiRows.map((k) => [k.code, k.label]));
     const kpiUnit = new Map(kpiRows.map((k) => [k.code, k.unit]));
@@ -323,7 +326,7 @@ export class GroupService {
           return !def || kpiAppliesToOutlet(def, facets); // D6: hide an out-of-scope KPI
         }),
       );
-      const primaryFallback = outletPrimaryFallback(kpiRows, facets);
+      const primaryFallback = outletPrimaryFallback(enabledKpiRows, facets);
 
       const kpis = [...allKpiCodes].map((code) => {
         const target = Object.prototype.hasOwnProperty.call(targetValues, code) ? targetValues[code] : null;

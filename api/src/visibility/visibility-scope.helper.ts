@@ -72,7 +72,9 @@ export interface VisibilityProgramLists {
  * Resolve the `programs` / `subPrograms` lists for a visibilityConfig WRITE:
  *   - a key ABSENT (undefined / null) in `requested` → CARRY OVER the stored list unchanged (stale-tab
  *     safety: an editor that predates these fields must never wipe them) — not re-validated;
- *   - a key present → must be a string array; trimmed + ci-deduped; every value must be in
+ *   - a key present → must be a string array; trimmed + ci-deduped; a value ALREADY STORED (ci) is
+ *     kept as stored and NOT re-validated (an unchanged resend of a now-stale value never 400s); every
+ *     NEW value must be in
  *     (tenant settings list ∪ distinct live outlet values), case-insensitively → else 400 listing the
  *     allowed values; each value is stored in the SETTINGS-LIST spelling, else the most common live
  *     outlet spelling (D8). An empty array clears the facet (= all).
@@ -98,13 +100,20 @@ export async function resolveVisibilityProgramLists(
     const wanted = normalizeAppliesTo({ [f.key]: raw })[f.key];
     if (wanted.length === 0) continue;
 
-    // ci key → canonical spelling: settings list first (wins), then live values by frequency.
-    const canon = new Map<string, string>();
+    // Values ALREADY STORED (ci) are kept in their stored spelling and NOT re-validated — the editor
+    // always resends the full lists, so a value that became stale after it was saved (program renamed
+    // in settings, last outlet moved away) must never make an unrelated save 400 (mirrors the KPI
+    // upsert's "unchanged resend is not re-validated"). Only NEWLY added values are validated.
+    const storedByKey = new Map(visibilityProgramScope(stored)[f.key].map((s) => [s.toUpperCase(), s]));
+    // ci key → canonical spelling of currently VALID values: settings list first (wins), then live
+    // values by frequency. Queried only when a NEW value is not already in the settings list.
+    const valid = new Map<string, string>();
     for (const v of settingsLists[f.settingsKey] ?? []) {
       const t = typeof v === 'string' ? v.trim() : '';
-      if (t && !canon.has(t.toUpperCase())) canon.set(t.toUpperCase(), t);
+      if (t && !valid.has(t.toUpperCase())) valid.set(t.toUpperCase(), t);
     }
-    if (wanted.some((v) => !canon.has(v.toUpperCase()))) {
+    const isNew = (v: string) => !storedByKey.has(v.toUpperCase());
+    if (wanted.some((v) => isNew(v) && !valid.has(v.toUpperCase()))) {
       const live = (await prisma.outlet.groupBy({
         by: [f.column],
         where: { clientId, deletedAt: null, [f.column]: { not: null } },
@@ -114,18 +123,19 @@ export async function resolveVisibilityProgramLists(
       for (const row of ranked) {
         const v = row[f.column];
         const t = typeof v === 'string' ? v.trim() : '';
-        if (t && !canon.has(t.toUpperCase())) canon.set(t.toUpperCase(), t);
+        if (t && !valid.has(t.toUpperCase())) valid.set(t.toUpperCase(), t);
       }
     }
-    const unknown = wanted.filter((v) => !canon.has(v.toUpperCase()));
+    const unknown = wanted.filter((v) => isNew(v) && !valid.has(v.toUpperCase()));
     if (unknown.length > 0) {
-      const allowed = [...canon.values()].sort((a, b) => a.localeCompare(b));
+      const allowed = [...valid.values()].sort((a, b) => a.localeCompare(b));
       throw new BadRequestException(
         `Unknown ${f.label}${unknown.length > 1 ? 's' : ''}: ${unknown.join(', ')}. ` +
           `Allowed: ${allowed.length ? allowed.join(', ') : '(none configured)'}.`,
       );
     }
-    out[f.key] = wanted.map((v) => canon.get(v.toUpperCase())!);
+    // Stored values keep their stored spelling; new ones take the canonical valid spelling.
+    out[f.key] = wanted.map((v) => storedByKey.get(v.toUpperCase()) ?? valid.get(v.toUpperCase())!);
   }
   return out;
 }

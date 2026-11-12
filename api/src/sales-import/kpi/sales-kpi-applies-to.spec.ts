@@ -121,3 +121,39 @@ describe('DB plumbing: kpiScopesOf / loadRosterMeta / computeMonthRows', () => {
     expect(comp.rows.map((r) => [r.outletCode, r.values])).toEqual([['O1', { K: 12 }]]); // O2 (blank sub-program) untouched
   });
 });
+
+describe('outletInScope compiled matcher ≡ appliesToOutlet(effectiveDefScope) (audit #10)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { appliesToOutlet } = require('../../common/applies-to/applies-to');
+  const defs: KpiDefLite[] = [
+    BASE,
+    AMT,
+    { ...BASE, kpiOutletType: 'SSS' }, // legacy single type = a REAL scope
+    { ...BASE, kpiScope: { outletTypes: [], programs: [' gold '], subPrograms: ['Tier A'] } },
+    { ...AMT, kpiScope: { outletTypes: ['SSS'], programs: [], subPrograms: [] } }, // disjoint
+    { ...AMT, outletTypes: ['wholesaler'], kpiScope: { outletTypes: ['WHOLESALER'], programs: ['GOLD'], subPrograms: [] } },
+  ];
+  const metas = [
+    { outletType: 'SSS', program: null },
+    { outletType: 'WHOLESALER', program: ' gold ', subProgram: 'tier a' },
+    { outletType: 'wholesaler', program: 'Gold', subProgram: '  ' },
+    { outletType: 'RETAILER', program: 'Silver', subProgram: 'Tier A' },
+    { outletType: null, program: 'Gold' },
+    { outletType: '  sss', program: '', subProgram: null },
+  ];
+  it('agrees on every (definition, outlet) pair, repeatedly (cache hit path)', () => {
+    for (let pass = 0; pass < 2; pass++) {
+      for (const d of defs) {
+        const eff = effectiveDefScope(d);
+        for (const m of metas) {
+          const expected = eff === null ? false : appliesToOutlet(eff, { outletType: m.outletType, program: m.program, subProgram: m.subProgram ?? null });
+          expect(outletInScope(d, m)).toBe(expected);
+        }
+      }
+    }
+  });
+  it('legacy single-type KPI excludes other types', () => {
+    expect(outletInScope({ ...BASE, kpiOutletType: 'SSS' }, { outletType: 'WHOLESALER', program: null })).toBe(false);
+    expect(outletInScope({ ...BASE, kpiOutletType: 'SSS' }, { outletType: 'sss', program: null })).toBe(true);
+  });
+});

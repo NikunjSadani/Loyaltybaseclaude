@@ -232,4 +232,20 @@ describe('VisibilityReportService', () => {
     });
     expect(mockPrisma.visibilityCapture.groupBy.mock.calls[0][0].where.outlet).toEqual(denWhere);
   });
+
+  it('APPLIES-TO: report carries programs / subPrograms ONLY when non-empty (unscoped response unchanged)', async () => {
+    mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...config, programs: [], subPrograms: [] } });
+    const plain = await service.tenantReport(clientAdmin, '2026-07-P1');
+    expect(Object.keys(plain).sort()).toEqual(['frequencyPerMonth', 'outletScope', 'summary', 'windowClosed', 'windowKey']);
+
+    mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...config, programs: ['RLP'], subPrograms: [] } });
+    const scoped = await service.tenantReport(clientAdmin, '2026-07-P1');
+    expect(scoped).toMatchObject({ outletScope: ['SSS'], programs: ['RLP'] });
+    expect(scoped).not.toHaveProperty('subPrograms');
+
+    mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...config, subPrograms: ['Urban'] } });
+    const sub = await service.tenantReport(clientAdmin, '2026-07-P1');
+    expect(sub).toMatchObject({ subPrograms: ['Urban'] });
+    expect(sub).not.toHaveProperty('programs');
+  });
 });

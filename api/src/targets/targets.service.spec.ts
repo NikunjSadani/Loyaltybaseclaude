@@ -1400,11 +1400,12 @@ describe('TargetsService — Sales Import ownership (K-7)', () => {
       expect(mockPrisma.$executeRaw).not.toHaveBeenCalled();
       expect(mockPrisma.outletSalesRecord.findMany).not.toHaveBeenCalled();
       expect(Object.keys(result).sort()).toEqual(
-        // APPLIES-TO D1 adds `ignoredOutOfScope` (always present; 0 for an unscoped tenant) — the
-        // owner-approved upload summary field the upload screen displays.
-        ['acceptedCount', 'batchId', 'ignoredOutOfScope', 'month', 'monthsInBatch', 'rejectedCount', 'rows', 'totalRows'].sort(),
+        // Byte-identical for an all-unscoped tenant: APPLIES-TO `ignoredOutOfScope` is ABSENT unless the
+        // tenant has a scoped KPI (mirrors the conditional `skippedImporterOwnedKpis`).
+        ['acceptedCount', 'batchId', 'month', 'monthsInBatch', 'rejectedCount', 'rows', 'totalRows'].sort(),
       );
       expect('skippedImporterOwnedKpis' in result).toBe(false);
+      expect('ignoredOutOfScope' in result).toBe(false);
     });
 
     it('buildAchievementTemplate: every enabled KPI keeps its column', async () => {

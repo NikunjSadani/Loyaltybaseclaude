@@ -34,8 +34,11 @@ import type { AppliesTo } from '@/lib/applies-to';
 import { FACET_NOUN, kpiScopeOf, scopeMismatches, type KpiScopeFieldsLike } from '@/lib/kpi-scope-core';
 
 /**
- * APPLIES-TO D5: a rule whose program / sub-program lies outside its KPI's scope never awards (compute SKIPs those
- * outlets) and the backend refuses to publish it. Non-blocking warning text, or null when they overlap.
+ * APPLIES-TO D5: mirrors the backend publish gate (points-engine.service assertKpiCodesExist), which checks ONLY the
+ * rule's ATTACHED KPI (bonus-input KPIs are never checked) and refuses to publish when
+ *   (a) the rule's program / sub-program lies outside that KPI's scope (compute would SKIP every outlet), or
+ *   (b) it matches a KPI scope value only ignoring case (rule matching is case-sensitive → it would never pay).
+ * Non-blocking warning text, or null when the backend would accept it.
  */
 export function ruleKpiScopeWarning(
   kpiCode: string,
@@ -44,9 +47,22 @@ export function ruleKpiScopeWarning(
 ): string | null {
   if (!kpiScope) return null;
   const mm = scopeMismatches(kpiScope, { programs: [attach.program], subPrograms: [attach.programCategory] });
-  if (!mm.length) return null;
-  const parts = mm.map((m) => `${FACET_NOUN[m.facet]} "${m.outside.join(', ')}" (the KPI applies only to ${m.kpiValues.join(', ')})`);
-  return `KPI ${kpiCode} does not apply to this rule's ${parts.join(' or ')}. Outlets there are skipped in compute, and publishing will be refused until the rule and the KPI scope overlap.`;
+  if (mm.length) {
+    const parts = mm.map((m) => `${FACET_NOUN[m.facet]} "${m.outside.join(', ')}" (the KPI applies only to ${m.kpiValues.join(', ')})`);
+    return `KPI ${kpiCode} does not apply to this rule's ${parts.join(' or ')}. Outlets there are skipped in compute, and publishing will be refused until the rule and the KPI scope overlap.`;
+  }
+  // (b) case-only: same value ignoring case, different spelling.
+  const caseOnly: string[] = [];
+  const check = (facet: 'programs' | 'subPrograms', raw: string | null | undefined) => {
+    const v = (raw ?? '').trim();
+    if (!v || kpiScope[facet].length === 0 || kpiScope[facet].includes(v)) return;
+    const canonical = kpiScope[facet].find((k) => k.trim().toUpperCase() === v.toUpperCase());
+    if (canonical !== undefined) caseOnly.push(`${FACET_NOUN[facet]} "${v}" must be spelled exactly "${canonical.trim()}"`);
+  };
+  check('programs', attach.program);
+  check('subPrograms', attach.programCategory);
+  if (!caseOnly.length) return null;
+  return `This rule's ${caseOnly.join(' and ')} to match KPI ${kpiCode}'s scope — rules match outlets case-sensitively, so publishing will be refused.`;
 }
 
 // Node types grouped by disclosure level for the "Add step" menu.

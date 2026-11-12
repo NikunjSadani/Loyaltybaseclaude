@@ -75,12 +75,15 @@ export function scopeKey(s: AppliesToInput): string {
   return JSON.stringify([norm(n.outletTypes), norm(n.programs), norm(n.subPrograms)]);
 }
 
-/** Query string for scope-count (empty facets omitted = "all"). */
+/**
+ * Query string for scope-count (empty facets omitted = "all"). Each value is its OWN repeated param
+ * (`programs=A&programs=B`) — never comma-joined, so a value containing a comma survives intact.
+ */
 export function scopeCountQuery(s: AppliesTo): string {
   const n = normalizeAppliesTo(s);
   const parts: string[] = [];
-  if (n.outletTypes.length) parts.push(`outletTypes=${n.outletTypes.map(encodeURIComponent).join(',')}`);
-  if (n.programs.length) parts.push(`programs=${n.programs.map(encodeURIComponent).join(',')}`);
-  if (n.subPrograms.length) parts.push(`subPrograms=${n.subPrograms.map(encodeURIComponent).join(',')}`);
+  for (const v of n.outletTypes) parts.push(`outletTypes=${encodeURIComponent(v)}`);
+  for (const v of n.programs) parts.push(`programs=${encodeURIComponent(v)}`);
+  for (const v of n.subPrograms) parts.push(`subPrograms=${encodeURIComponent(v)}`);
   return parts.length ? `?${parts.join('&')}` : '';
 }

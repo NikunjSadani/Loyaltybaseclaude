@@ -13,7 +13,7 @@ import { currentWindowKey, isWindowClosed } from './visibility-window.helper';
 import { readMediaValue } from './visibility-form.helper';
 import { evaluatePhotoFence, haversineMeters } from './geo-fence.helper';
 import { isGifsyOperator } from '../common/tenant-scope';
-import { VisibilityProgramScopeLike, withVisibilityProgramWhere } from './visibility-scope.helper';
+import { VisibilityProgramScopeLike, visibilityProgramScope, withVisibilityProgramWhere } from './visibility-scope.helper';
 
 /**
  * VisibilityReportService — Visibility (POSM) coverage reporting + export (Stream B,
@@ -114,12 +114,17 @@ export class VisibilityReportService {
       }
     })();
     const coveragePct = denominator > 0 ? Math.round((approved / denominator) * 1000) / 10 : 0;
+    // APPLIES-TO: surface the program / sub-program narrowing for the "Scope:" caption — ADDITIVE
+    // and ONLY when non-empty, so an unscoped tenant's (Deoleo's) response is byte-identical.
+    const programScope = visibilityProgramScope(config);
 
     return {
       windowKey: key,
       windowClosed: closed,
       frequencyPerMonth: freq,
       outletScope: config.outletScope,
+      ...(programScope.programs.length ? { programs: programScope.programs } : {}),
+      ...(programScope.subPrograms.length ? { subPrograms: programScope.subPrograms } : {}),
       summary: {
         denominator,
         captured: approved,

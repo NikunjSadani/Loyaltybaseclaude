@@ -1,13 +1,15 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * APPLIES-TO (platform/docs/plans/APPLIES-TO-TARGETING-PLAN.md §4, D1, D2, D3, D8) — WP-A targets coverage:
- *   • template golden: an unscoped tenant (Deoleo) AND a legacy single-outlet-type tenant get a template
- *     BYTE-IDENTICAL to the pre-APPLIES-TO one (sha256 pinned from the pre-change code at 7b3bb712);
- *   • scoped template: Program / Sub-Program info columns + `N/A` in out-of-scope value cells;
+ *   • template golden: an unscoped tenant (Deoleo) gets a template BYTE-IDENTICAL to the pre-APPLIES-TO
+ *     one (sha256 pinned from the pre-change code at 7b3bb712);
+ *   • scoped template: Program / Sub-Program info columns + `N/A` in out-of-scope value cells — incl. a
+ *     LEGACY single-outlet-type tenant (OWNER DECISION 2026-11-12: a legacy single type is a REAL scope);
  *   • parser: N/A round trip, out-of-scope numeric cell IGNORED (row kept, remark, ignoredOutOfScope);
- *   • uploads: ignoredOutOfScope always present (0 when unscoped), out-of-scope values never persisted;
+ *   • uploads: ignoredOutOfScope present ONLY for a tenant with a scoped KPI (absent when all unscoped),
+ *     out-of-scope values never persisted;
  *   • upsertKpi: arrays, legacy outletType, validation 400s, canonicalisation, no-op carry, AuditLog only on change;
- *   • scope-options / scope-count; getPace outOfScope flag (scoped tenants only).
+ *   • scope-options / scope-count (repeated params); getPace EXCLUDES out-of-scope pairs (scoped tenants only).
  */
 import { createHash } from 'node:crypto';
 import { BadRequestException } from '@nestjs/common';
@@ -154,8 +156,11 @@ describe('APPLIES-TO parser (D1/D2)', () => {
 });
 
 describe('kpiScopeEnforced / mergeScopeOptions', () => {
-  it('only programs / sub-programs / 2+ types enforce; unscoped and legacy single-type do not', () => {
-    expect(kpiScopeEnforced([{ outletType: null }, { outletType: 'SSS' }, { outletTypes: ['SSS'] }])).toBe(false);
+  it('ANY non-empty scope enforces (incl. legacy single type); only an all-unscoped KPI set does not', () => {
+    expect(kpiScopeEnforced([{ outletType: null }, { outletTypes: [], programs: [], subPrograms: [] }, { outletType: '  ' }])).toBe(false);
+    expect(kpiScopeEnforced([])).toBe(false);
+    expect(kpiScopeEnforced([{ outletType: null }, { outletType: 'SSS' }])).toBe(true); // legacy column only (pre-backfill)
+    expect(kpiScopeEnforced([{ outletTypes: ['SSS'] }])).toBe(true); // one type (post-backfill)
     expect(kpiScopeEnforced([{ outletTypes: ['SSS', 'WHOLESALER'] }])).toBe(true);
     expect(kpiScopeEnforced([{ programs: ['Gold'] }])).toBe(true);
     expect(kpiScopeEnforced([{ subPrograms: ['Tier A'] }])).toBe(true);
@@ -239,7 +244,7 @@ describe('TargetsService — APPLIES-TO templates (D2 golden + scoped)', () => {
     expect(sha(await service.buildAchievementTemplate(admin, '2025-06'))).toBe(GOLDEN_ACH_1M);
   });
 
-  it('GOLDEN: a LEGACY single-outlet-type tenant (KpiDef.outletType / one type) is byte-identical too', async () => {
+  it('LEGACY single-outlet-type tenant is ENFORCED: scoped layout + N/A on out-of-type cells (target + achievement)', async () => {
     const { service, prisma } = makeService();
     prisma.kpiDef.findMany.mockResolvedValue([
       kpiRow(KPIS[0]),
@@ -247,8 +252,20 @@ describe('TargetsService — APPLIES-TO templates (D2 golden + scoped)', () => {
       kpiRow(KPIS[2], { outletType: 'WHOLESALER' }), // pre-backfill shape (arrays empty)
     ]);
     prisma.outlet.findMany.mockResolvedValue(OUTLETS.map((o) => outletRow({ ...o, program: 'Gold', subProgram: 'Tier A' })));
-    expect(sha(await service.getTemplateBuffer(admin, { months: '2025-07,2025-08' }))).toBe(GOLDEN_TARGET_2M);
-    expect(sha(await service.buildAchievementTemplate(admin, '2025-06'))).toBe(GOLDEN_ACH_1M);
+    const tpl = await service.getTemplateBuffer(admin, { months: '2025-07' });
+    expect(sha(tpl)).not.toBe(GOLDEN_TARGET_2M);
+    const aoa = readAoa(tpl);
+    expect(aoa[1]).toEqual([
+      'Outlet ID', 'Outlet Name', 'Outlet Type', 'Program', 'Sub-Program',
+      'Month Target', 'Focus Pack - 1', 'Focus Pack 1 Name', 'Consistency Target',
+    ]);
+    // FOCUS_PACK_1 → SSS only; CONSISTENCY → WHOLESALER only; MONTH_TGT unscoped
+    expect(aoa[2]).toEqual(['O1', 'Alpha Stores', 'RETAILER', 'Gold', 'Tier A', null, 'N/A', null, 'N/A']);
+    expect(aoa[3]).toEqual(['O2', 'Beta Wholesale', 'WHOLESALER', 'Gold', 'Tier A', null, 'N/A', null, null]);
+    expect(aoa[4]).toEqual(['O3', 'Gamma', 'SSS', 'Gold', 'Tier A', null, null, null, 'N/A']);
+    const ach = readAoa(await service.buildAchievementTemplate(admin, '2025-06'));
+    expect(ach[1].slice(3, 5)).toEqual(['Program', 'Sub-Program']);
+    expect(ach[2]).toEqual(['O1', 'Alpha Stores', 'RETAILER', 'Gold', 'Tier A', null, 'N/A', null, 'N/A']);
   });
 
   it('SCOPED tenant: info columns + N/A from the outlet CURRENT facets', async () => {
@@ -288,23 +305,38 @@ describe('TargetsService — APPLIES-TO uploads (D1)', () => {
   }
   const two = [KPIS[0], KPIS[2]];
 
-  it('UNSCOPED tenant: outlet select unchanged, nothing ignored, ignoredOutOfScope: 0', async () => {
+  it('UNSCOPED tenant: outlet select unchanged, nothing ignored, NO ignoredOutOfScope key (targets + achievements)', async () => {
     const { service, prisma } = makeService();
     prisma.kpiDef.findMany.mockResolvedValue(two.map((k) => kpiRow(k)));
     prisma.outlet.findMany.mockResolvedValue([outletRow(OUTLETS[1])]);
     const r = await service.uploadTargets(admin, upload([['O2', 'Beta', 'WHOLESALER', 5, 6]], false));
     expect(prisma.outlet.findMany.mock.calls[0][0].select).toEqual({ outletCode: true, name: true, outletType: { select: { code: true } } });
-    expect(r.ignoredOutOfScope).toBe(0);
+    expect('ignoredOutOfScope' in r).toBe(false);
     expect(prisma.outletTarget.upsert.mock.calls[0][0].create.targetValues).toEqual({ MONTH_TGT: 5, CONSISTENCY: 6 });
+    const a = await service.uploadAchievements(admin, upload([['O2', 'Beta', 'WHOLESALER', 5, 6]], false));
+    expect('ignoredOutOfScope' in a).toBe(false);
   });
 
-  it('LEGACY single-type tenant: an out-of-type value is still stored exactly as before (no enforcement)', async () => {
+  it('LEGACY single-type tenant is ENFORCED: the out-of-type value is ignored + counted (targets + achievements)', async () => {
     const { service, prisma } = makeService();
     prisma.kpiDef.findMany.mockResolvedValue([kpiRow(KPIS[0]), kpiRow(KPIS[2], { outletType: 'SSS', outletTypes: ['SSS'] })]);
+    prisma.outlet.findMany.mockResolvedValue([outletRow(OUTLETS[1])]); // WHOLESALER
+    const r = await service.uploadTargets(admin, upload([['O2', 'Beta', 'WHOLESALER', '', '', 5, 6]], true));
+    expect(r.ignoredOutOfScope).toBe(1);
+    expect(prisma.outletTarget.upsert.mock.calls[0][0].create.targetValues).toEqual({ MONTH_TGT: 5 });
+    // pre-backfill shape (legacy column only) enforces the same way
+    prisma.kpiDef.findMany.mockResolvedValue([kpiRow(KPIS[0]), kpiRow(KPIS[2], { outletType: 'SSS' })]);
+    const a = await service.uploadAchievements(admin, upload([['O2', 'Beta', 'WHOLESALER', '', '', 7, 8]], true));
+    expect(a.ignoredOutOfScope).toBe(1);
+    expect(prisma.outletSalesRecord.upsert.mock.calls[0][0].create.kpiValues).toEqual({ MONTH_TGT: 7 });
+  });
+
+  it('SCOPED tenant with nothing out of scope still reports ignoredOutOfScope: 0', async () => {
+    const { service, prisma } = makeService();
+    prisma.kpiDef.findMany.mockResolvedValue([kpiRow(KPIS[0]), kpiRow(KPIS[2], { outletTypes: ['WHOLESALER'] })]);
     prisma.outlet.findMany.mockResolvedValue([outletRow(OUTLETS[1])]);
-    const r = await service.uploadTargets(admin, upload([['O2', 'Beta', 'WHOLESALER', 5, 6]], false));
+    const r = await service.uploadTargets(admin, upload([['O2', 'Beta', 'WHOLESALER', '', '', 5, 6]], true));
     expect(r.ignoredOutOfScope).toBe(0);
-    expect(prisma.outletTarget.upsert.mock.calls[0][0].create.targetValues).toEqual({ MONTH_TGT: 5, CONSISTENCY: 6 });
   });
 
   it('SCOPED tenant targets: out-of-scope cell ignored, row kept + remark, not persisted, counted', async () => {
@@ -454,7 +486,7 @@ describe('TargetsService — scope-options / scope-count', () => {
   it('scope-count: tenant LIVE universe (no isActive proxy, NULL-safe kycIntent) AND the scope where', async () => {
     const { service, prisma } = makeService();
     prisma.outlet.count.mockResolvedValue(42);
-    await expect(service.scopeCount(admin, { outletTypes: 'sss, WHOLESALER', programs: 'Gold', subPrograms: '' })).resolves.toEqual({ count: 42 });
+    await expect(service.scopeCount(admin, { outletTypes: ['sss', 'WHOLESALER'], programs: 'Gold', subPrograms: [''] })).resolves.toEqual({ count: 42 });
     const where = prisma.outlet.count.mock.calls[0][0].where;
     expect(where.AND[0]).toEqual({
       clientId: 't1', deletedAt: null, deactivatedAt: null,
@@ -462,6 +494,19 @@ describe('TargetsService — scope-options / scope-count', () => {
     });
     expect(JSON.stringify(where)).not.toContain('isActive');
     expect(where.AND[1].AND).toHaveLength(2); // types + programs (blank subPrograms = all)
+  });
+
+  it('scope-count: a value containing a comma is ONE value (never split)', async () => {
+    const { service, prisma } = makeService();
+    prisma.outlet.count.mockResolvedValue(3);
+    await service.scopeCount(admin, { programs: ['Gold, Plus', 'Silver'] });
+    const where = prisma.outlet.count.mock.calls[0][0].where;
+    expect(where.AND[1]).toEqual({
+      AND: [{ OR: [
+        { programName: { equals: 'Gold, Plus', mode: 'insensitive' } },
+        { programName: { equals: 'Silver', mode: 'insensitive' } },
+      ] }],
+    });
   });
 
   it('scope-count with no params = every live outlet', async () => {
@@ -472,7 +517,7 @@ describe('TargetsService — scope-options / scope-count', () => {
   });
 });
 
-describe('TargetsService — getPace APPLIES-TO annotation (D3: never hidden)', () => {
+describe('TargetsService — getPace APPLIES-TO (out-of-scope pairs EXCLUDED — every aggregate reader agrees)', () => {
   const setup = (kpiScopes: Record<string, unknown>[]) => {
     const ctx = makeService();
     ctx.prisma.outletTarget.findMany.mockResolvedValue([{ outletCode: 'O2', outletName: 'Beta', targetValues: { MONTH_TGT: 10, CONSISTENCY: 4 } }]);
@@ -482,20 +527,53 @@ describe('TargetsService — getPace APPLIES-TO annotation (D3: never hidden)', 
     return ctx;
   };
 
-  it('scoped tenant: the out-of-scope KPI keeps its stored values and gains outOfScope: true', async () => {
+  it('scoped tenant: the out-of-scope KPI is excluded from the outlet pace', async () => {
     const { service, prisma } = setup([{ code: 'MONTH_TGT', outletType: null }, { code: 'CONSISTENCY', programs: ['Gold'] }]);
     const res = await service.getPace(admin, { month: NEXT_MONTH });
-    expect(res.outlets[0].kpis).toEqual([
-      { code: 'MONTH_TGT', target: 10, achieved: null, pace: null },
-      { code: 'CONSISTENCY', target: 4, achieved: null, pace: null, outOfScope: true },
-    ]);
+    expect(res.outlets[0].kpis).toEqual([{ code: 'MONTH_TGT', target: 10, achieved: null, pace: null }]);
     expect(prisma.outlet.findMany.mock.calls[0][0].select).toEqual(expect.objectContaining({ programName: true, programCategory: true }));
   });
 
-  it('unscoped / legacy-only tenant: response and outlet query unchanged (no outOfScope key)', async () => {
-    const { service, prisma } = setup([{ code: 'MONTH_TGT', outletType: null }, { code: 'CONSISTENCY', outletType: 'SSS' }]);
+  it('legacy single-type tenant: the out-of-type KPI is excluded too', async () => {
+    const { service } = setup([{ code: 'MONTH_TGT', outletType: null }, { code: 'CONSISTENCY', outletType: 'SSS' }]);
     const res = await service.getPace(admin, { month: NEXT_MONTH });
-    expect(res.outlets[0].kpis.every((k) => !('outOfScope' in k))).toBe(true);
+    expect(res.outlets[0].kpis).toEqual([{ code: 'MONTH_TGT', target: 10, achieved: null, pace: null }]);
+  });
+
+  it('unscoped tenant: response and outlet query unchanged', async () => {
+    const { service, prisma } = setup([{ code: 'MONTH_TGT', outletType: null }, { code: 'CONSISTENCY', outletType: null }]);
+    const res = await service.getPace(admin, { month: NEXT_MONTH });
+    expect(res.outlets[0].kpis).toEqual([
+      { code: 'MONTH_TGT', target: 10, achieved: null, pace: null },
+      { code: 'CONSISTENCY', target: 4, achieved: null, pace: null },
+    ]);
     expect(prisma.outlet.findMany.mock.calls[0][0].select).toEqual({ outletCode: true, outletType: { select: { code: true } } });
+  });
+});
+
+describe('KpiScopeCountQueryDto — repeated query params (global ValidationPipe options)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { ValidationPipe } = require('@nestjs/common');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { KpiScopeCountQueryDto } = require('./dto/targets.dto');
+  const pipe = new ValidationPipe({
+    whitelist: true, forbidNonWhitelisted: true, transform: true, transformOptions: { enableImplicitConversion: true },
+  });
+  const run = (q: Record<string, unknown>) =>
+    pipe.transform(q, { type: 'query', metatype: KpiScopeCountQueryDto, data: '' });
+
+  it('a single param becomes a one-element array; a comma inside a value is kept', async () => {
+    await expect(run({ programs: 'Gold, Plus' })).resolves.toEqual(expect.objectContaining({ programs: ['Gold, Plus'] }));
+  });
+
+  it('repeated params stay an array; absent facets stay absent', async () => {
+    const out = await run({ outletTypes: ['SSS', 'WS'], subPrograms: 'Tier A' });
+    expect(out.outletTypes).toEqual(['SSS', 'WS']);
+    expect(out.subPrograms).toEqual(['Tier A']);
+    expect(out.programs).toBeUndefined();
+  });
+
+  it('unknown keys are still rejected', async () => {
+    await expect(run({ foo: 'x' })).rejects.toBeDefined();
   });
 });

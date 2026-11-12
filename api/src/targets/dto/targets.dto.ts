@@ -1,3 +1,4 @@
+import { Transform } from 'class-transformer';
 import { IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, Matches, Min } from 'class-validator';
 
 // ─── KpiDef DTOs ──────────────────────────────────────────────────────────────
@@ -71,19 +72,35 @@ export class UpsertKpiDefDto {
   subPrograms?: string[];
 }
 
-/** GET /v1/admin/kpis/scope-count query — comma-separated facet values; absent / blank = all. */
+/**
+ * A repeated query param (`programs=A&programs=B`) arrives as string[]; a single one as a string.
+ * Always an array afterwards. Values are NEVER split on ',' (a program name may contain a comma).
+ */
+export const toQueryArray = ({ value }: { value: unknown }): unknown =>
+  value === undefined || value === null ? undefined : Array.isArray(value) ? value : [value];
+
+/**
+ * GET /v1/admin/kpis/scope-count query — each facet is a REPEATED param
+ * (`?outletTypes=SSS&outletTypes=WS&programs=Gold`); absent / blank = all.
+ */
 export class KpiScopeCountQueryDto {
-  @IsString()
   @IsOptional()
-  outletTypes?: string;
+  @Transform(toQueryArray)
+  @IsArray()
+  @IsString({ each: true })
+  outletTypes?: string[];
 
-  @IsString()
   @IsOptional()
-  programs?: string;
+  @Transform(toQueryArray)
+  @IsArray()
+  @IsString({ each: true })
+  programs?: string[];
 
-  @IsString()
   @IsOptional()
-  subPrograms?: string;
+  @Transform(toQueryArray)
+  @IsArray()
+  @IsString({ each: true })
+  subPrograms?: string[];
 }
 
 export class ListKpisQueryDto {

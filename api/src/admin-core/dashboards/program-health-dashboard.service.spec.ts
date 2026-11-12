@@ -253,6 +253,54 @@ describe('ProgramHealthDashboardService', () => {
     expect(res.targetAchievement.primary?.kpiCode).toBe('VOL');
   });
 
+  describe('APPLIES-TO: out-of-scope (outlet, KPI) values are excluded from the rollup', () => {
+    const roster = [
+      { outletCode: 'O1', programName: 'RLP', programCategory: null, outletType: { code: 'SSS' } },
+      { outletCode: 'O2', programName: 'BSC', programCategory: null, outletType: { code: 'WHOLESALER' } },
+    ];
+    function wire(kpis: unknown[]) {
+      const rosterSelects: Record<string, unknown>[] = [];
+      mockPrisma.outlet.findMany.mockImplementation((args: { select?: Record<string, unknown> }) => {
+        if (args.select && 'partner' in args.select) return Promise.resolve([]);
+        rosterSelects.push(args.select ?? {});
+        // Unscoped path asks for { outletCode } only — return just that, like Prisma would.
+        return Promise.resolve(
+          args.select && 'programName' in args.select ? roster : roster.map((o) => ({ outletCode: o.outletCode })),
+        );
+      });
+      mockPrisma.kpiDef.findMany.mockResolvedValue(kpis);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', targetValues: { K: 100 } },
+        { outletCode: 'O2', targetValues: { K: 50 } }, // stale value on an out-of-scope outlet
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', kpiValues: { K: 60 } },
+        { outletCode: 'O2', kpiValues: { K: 50 } },
+      ]);
+      return rosterSelects;
+    }
+
+    it('legacy single-outlet-type KPI (SSS) → the WHOLESALER outlet\'s values are not summed', async () => {
+      wire([{ code: 'K', label: 'K', unit: '', isPrimary: true, outletType: 'SSS', outletTypes: [], programs: [], subPrograms: [] }]);
+      const res = await service.programHealth(user, PERIOD);
+      const k = res.targetAchievement.kpis[0];
+      expect(k).toMatchObject({ target: 100, achieved: 60, pct: 60 });
+    });
+
+    it('program-scoped KPI (rlp, ci) → only the RLP outlet counts', async () => {
+      wire([{ code: 'K', label: 'K', unit: '', isPrimary: true, outletType: null, outletTypes: [], programs: ['rlp'], subPrograms: [] }]);
+      const res = await service.programHealth(user, PERIOD);
+      expect(res.targetAchievement.kpis[0]).toMatchObject({ target: 100, achieved: 60 });
+    });
+
+    it('UNSCOPED tenant: every stored value summed and the roster query stays { outletCode } only', async () => {
+      const selects = wire([{ code: 'K', label: 'K', unit: '', isPrimary: true, outletType: null, outletTypes: [], programs: [], subPrograms: [] }]);
+      const res = await service.programHealth(user, PERIOD);
+      expect(res.targetAchievement.kpis[0]).toMatchObject({ target: 150, achieved: 110 });
+      expect(selects).toEqual([{ outletCode: true }]);
+    });
+  });
+
   it('groups completed redemptions by mode, excluding pending/failed/cancelled/returned', async () => {
     // The service's findMany WHERE already excludes the non-completed statuses, so the mock
     // returns only completed orders — we assert the grouping + value math.

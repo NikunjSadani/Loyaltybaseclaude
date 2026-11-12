@@ -2,7 +2,7 @@
  * APPLIES-TO targeting (APPLIES-TO-TARGETING-PLAN §6) — FE data helpers shared by the KPI form and the Visibility
  * config editor:
  *   GET /api/admin/kpis/scope-options → { outletTypes:{code,label}[], programs:{value,inSettings}[], subPrograms:{value,inSettings}[] }
- *   GET /api/admin/kpis/scope-count?outletTypes=A,B&programs=..&subPrograms=.. → { count }
+ *   GET /api/admin/kpis/scope-count?outletTypes=A&outletTypes=B&programs=..&subPrograms=.. (repeated params) → { count }
  * The backend is authoritative; these only drive pickers and a live "N matching outlets" preview.
  * Pure helpers (kpiScopeOf, scopeChipText, scopeMismatches, …) live in `@/lib/kpi-scope-core`.
  */

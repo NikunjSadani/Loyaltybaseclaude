@@ -85,7 +85,7 @@ export class KpisController {
   }
 
   /**
-   * GET /v1/admin/kpis/scope-count?outletTypes=A,B&programs=..&subPrograms=.. — `{ count }` of LIVE
+   * GET /v1/admin/kpis/scope-count?outletTypes=A&outletTypes=B&programs=..&subPrograms=.. (repeated params) — `{ count }` of LIVE
    * outlets of the caller's tenant matching that scope (empty facet = all).
    */
   @Get('scope-count')

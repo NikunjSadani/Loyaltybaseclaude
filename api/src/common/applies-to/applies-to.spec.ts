@@ -15,7 +15,7 @@ import {
   legacyOutletTypeOf,
   normalizeAppliesTo,
 } from './applies-to';
-import { appliesToOutletWhere } from './applies-to.prisma';
+import { appliesToOutletWhere, escapeLikeLiteral } from './applies-to.prisma';
 import { definitionsHash, KpiDefLite, stableStringify } from '../../sales-import/kpi/sales-kpi.helper';
 
 describe('applies-to helper', () => {
@@ -321,6 +321,21 @@ describe('applies-to helper', () => {
     it('only emits the non-empty facets', () => {
       expect(appliesToOutletWhere({ subPrograms: ['X'] })).toEqual({
         AND: [{ OR: [{ programCategory: { equals: 'X', mode: 'insensitive' } }] }],
+      });
+    });
+
+    // Prisma 7 compiles insensitive `equals` on PostgreSQL to `ILIKE $1` with the value verbatim, so
+    // LIKE metacharacters must be escaped or `SSS_TOT` would also match `SSSXTOT` (wildcard `_`).
+    it('escapes LIKE metacharacters (\\ % _) so the ILIKE is an exact ci equality', () => {
+      expect(escapeLikeLiteral('SSS_TOT')).toBe('SSS\\_TOT');
+      expect(escapeLikeLiteral('100% Gold\\x')).toBe('100\\% Gold\\\\x');
+      expect(escapeLikeLiteral('Plain Gold')).toBe('Plain Gold');
+      expect(appliesToOutletWhere({ outletTypes: ['sss_tot'], programs: ['A%'], subPrograms: ['_B'] })).toEqual({
+        AND: [
+          { outletType: { OR: [{ code: { equals: 'SSS\\_TOT', mode: 'insensitive' } }] } },
+          { OR: [{ programName: { equals: 'A\\%', mode: 'insensitive' } }] },
+          { OR: [{ programCategory: { equals: '\\_B', mode: 'insensitive' } }] },
+        ],
       });
     });
   });

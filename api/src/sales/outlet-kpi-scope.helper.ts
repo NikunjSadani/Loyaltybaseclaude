@@ -26,6 +26,23 @@ export function kpiOutletPredicate(
   return (o) => appliesToOutlet(scope, o);
 }
 
+/**
+ * code → per-outlet predicate for every SCOPED KpiDef (incl. a legacy single-outlet-type KPI), or
+ * `null` when every KPI is unscoped. Aggregate readers use it to EXCLUDE out-of-scope (outlet, KPI)
+ * stored values from their sums, so every screen agrees; `null` lets them skip the extra outlet
+ * facet load entirely (an all-unscoped tenant such as Deoleo keeps its exact pre-scope code path).
+ */
+export function scopedKpiPredicates<T extends KpiScopeLike & { code: string }>(
+  kpiDefs: ReadonlyArray<T>,
+): Map<string, (o: AppliesToOutletFacets) => boolean> | null {
+  const out = new Map<string, (o: AppliesToOutletFacets) => boolean>();
+  for (const k of kpiDefs) {
+    const p = kpiOutletPredicate(k);
+    if (p) out.set(k.code, p);
+  }
+  return out.size > 0 ? out : null;
+}
+
 /** True when KpiDef `k` applies to `outlet` (unscoped → always true). */
 export function kpiAppliesToOutlet(k: KpiScopeLike, outlet: AppliesToOutletFacets): boolean {
   const p = kpiOutletPredicate(k);

@@ -11,13 +11,12 @@
  *     OMITTED (blank ≠ 0, the engine's null policy). An in-scope outlet with no matching lines → 0 (full rewrite).
  *   - L4 / APPLIES-TO §5: the KPI's OWN scope (KpiDef outletTypes / programs / subPrograms via `kpiScope`, else the
  *     legacy KpiDef.outletType via `kpiOutletType`) is a further scope, INTERSECTED with the definition's scope
- *     (`intersectAppliesTo`; a disjoint pair = no outlet). Matching is common/applies-to `appliesToOutlet` (trimmed,
+ *     (`intersectAppliesTo`; a disjoint pair = no outlet). Matching follows common/applies-to `appliesToOutlet` (trimmed,
  *     ci, D4: a non-empty facet + a blank outlet value is out).
  */
 import { createHash } from 'node:crypto';
 import {
   type AppliesTo,
-  appliesToOutlet,
   canonicalScopeKey,
   intersectAppliesTo,
   kpiAppliesTo,
@@ -94,8 +93,21 @@ export function kpiOwnScope(def: Pick<KpiDefLite, 'kpiOutletType' | 'kpiScope'>)
   });
 }
 
-// Effective scope per definition object (defs are immutable once built; 400k aggregates × N defs never re-normalise).
+/**
+ * A definition's effective scope, COMPILED once: each non-empty facet as a Set of trimmed + UPPERCASED values
+ * (null = facet empty = every value). `null` overall = disjoint → the definition writes NO outlet.
+ */
+interface CompiledScope {
+  outletTypes: ReadonlySet<string> | null;
+  programs: ReadonlySet<string> | null;
+  subPrograms: ReadonlySet<string> | null;
+}
+
+// Per definition OBJECT (defs are immutable once built). Both the intersected AppliesTo and its compiled Sets are
+// computed on the first call only, so the 400k-aggregate × N-defs hot path does a WeakMap hit + ≤3 Set lookups per
+// outlet — never re-normalising / re-intersecting the scope.
 const effectiveScopeCache = new WeakMap<object, AppliesTo | null>();
+const compiledScopeCache = new WeakMap<object, CompiledScope | null>();
 
 /**
  * The definition's effective scope = its own outletTypes / programs ∩ the target KPI's scope (`intersectAppliesTo`).
@@ -109,11 +121,40 @@ export function effectiveDefScope(def: ScopeDef): AppliesTo | null {
   return eff;
 }
 
-/** Is the outlet within the definition's optional scope (intersected with the target KPI's own scope)? */
-export function outletInScope(def: ScopeDef, meta: OutletScopeMeta): boolean {
+const facetSet = (list: ReadonlyArray<string>): ReadonlySet<string> | null =>
+  list.length === 0 ? null : new Set(list.map((v) => v.trim().toUpperCase()));
+
+function compiledDefScope(def: ScopeDef): CompiledScope | null {
+  const hit = compiledScopeCache.get(def);
+  if (hit !== undefined) return hit;
   const eff = effectiveDefScope(def);
-  if (eff === null) return false;
-  return appliesToOutlet(eff, { outletType: meta.outletType, program: meta.program, subProgram: meta.subProgram ?? null });
+  const compiled =
+    eff === null
+      ? null
+      : { outletTypes: facetSet(eff.outletTypes), programs: facetSet(eff.programs), subPrograms: facetSet(eff.subPrograms) };
+  compiledScopeCache.set(def, compiled);
+  return compiled;
+}
+
+/** Same rule as common/applies-to `facetHasValue`: empty facet = all; D4 blank outlet value = out; trimmed + ci. */
+function facetAllows(set: ReadonlySet<string> | null, value: string | null | undefined): boolean {
+  if (set === null) return true;
+  const v = (value ?? '').trim();
+  return v !== '' && set.has(v.toUpperCase());
+}
+
+/**
+ * Is the outlet within the definition's optional scope (intersected with the target KPI's own scope)? Equivalent to
+ * `appliesToOutlet(effectiveDefScope(def), meta)` (pinned by spec) but against the compiled per-definition Sets.
+ */
+export function outletInScope(def: ScopeDef, meta: OutletScopeMeta): boolean {
+  const c = compiledDefScope(def);
+  if (c === null) return false;
+  return (
+    facetAllows(c.outletTypes, meta.outletType) &&
+    facetAllows(c.programs, meta.program) &&
+    facetAllows(c.subPrograms, meta.subProgram ?? null)
+  );
 }
 
 // ─── Measures ────────────────────────────────────────────────────────────────

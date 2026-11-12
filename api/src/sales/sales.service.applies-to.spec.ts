@@ -234,6 +234,93 @@ describe('SalesService — APPLIES-TO scope', () => {
     });
   });
 
+  // ── Aggregate readers EXCLUDE out-of-scope (outlet, KPI) values (owner 2026-11-12) ────────
+  // O1 = SSS (approved, target 100 / ach 100) · O2 = WHOLESALER (approved, stale target 100 / ach 0).
+  // A legacy single-type KPI `S` (outletType 'SSS') is a REAL scope → O2's values never count.
+  describe('aggregate readers exclude out-of-scope values (legacy single-type KPI = real scope)', () => {
+    const approved = { partner: { kycSubmissions: [{ status: 'APPROVED' }] } };
+    const assignments = [
+      { salesUserId: 'isr1', outlet: { id: 'o1', outletCode: 'O1', isActive: true, programName: 'RLP', programCategory: null, outletType: { code: 'SSS', name: 'Retailer' }, ...approved } },
+      { salesUserId: 'isr1', outlet: { id: 'o2', outletCode: 'O2', isActive: true, programName: 'BSC', programCategory: null, outletType: { code: 'WHOLESALER', name: 'Wholesaler' }, ...approved } },
+    ];
+    const cur = currentMonthKey();
+    function primeData() {
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', month: cur, targetValues: { S: 100 } },
+        { outletCode: 'O2', month: cur, targetValues: { S: 100 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', month: cur, kpiValues: { S: 100 } },
+        { outletCode: 'O2', month: cur, kpiValues: { S: 0 } },
+      ]);
+    }
+    function primeTeam(kpis: unknown[]) {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'root', user: { name: 'Root', phone: '' }, hierarchyLevel: { code: 'ASM', name: 'ASM', level: 3 },
+        subordinates: [{ id: 'isr1', employeeCode: 'I1', user: { name: 'ISR', phone: '' }, hierarchyLevel: { code: 'ISR', name: 'ISR' }, _count: { subordinates: 0 } }],
+      });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'root', reportingToId: null }, { id: 'isr1', reportingToId: 'root' }]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue(kpis);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue(assignments);
+      primeData();
+    }
+    const legacy = [kpi('S', { isPrimary: true, outletType: 'SSS' })];
+    const open = [kpi('S', { isPrimary: true })];
+
+    it('team-view SINGLE: the WHOLESALER outlet is not "with target" for the SSS-only KPI', async () => {
+      primeTeam(legacy);
+      const res: any = await service.getTeamView(caller, { kpi: 'S' });
+      expect(res.summary.avgTargetPct).toBe(100);
+      expect(res.summary.outlets).toBe(2); // population counts stay KPI-independent
+      expect(res.members[0]).toMatchObject({ outletsWithTarget: 1, outletsAchieved: 1, achievedPct: 100 });
+    });
+    it('team-view OVERVIEW: same exclusion per KPI', async () => {
+      primeTeam(legacy);
+      const res: any = await service.getTeamView(caller, {});
+      expect(res.members[0].kpiPercents.S).toBe(100);
+    });
+    it('team-view UNSCOPED: both outlets scored (Deoleo byte-identical)', async () => {
+      primeTeam(open);
+      const res: any = await service.getTeamView(caller, { kpi: 'S' });
+      expect(res.members[0]).toMatchObject({ outletsWithTarget: 2, outletsAchieved: 1, achievedPct: 50 });
+    });
+
+    it('trade-comparison: monthly sale / target / target-met exclude the out-of-scope outlet', async () => {
+      primeTeam(legacy);
+      const res: any = await service.getTradeComparison(caller, {});
+      expect(res.buckets.current).toEqual({ monthlySale: 100, monthlyTarget: 100, targetMet: { achieved: 1, withTarget: 1, pct: 100 } });
+      primeTeam(open);
+      const un: any = await service.getTradeComparison(caller, {});
+      expect(un.buckets.current).toEqual({ monthlySale: 100, monthlyTarget: 200, targetMet: { achieved: 1, withTarget: 2, pct: 50 } });
+    });
+
+    function primeHero(kpis: unknown[]) {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'su1', reportingToId: null }]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue(assignments.map((a) => ({ outlet: a.outlet })));
+      mockPrisma.kpiDef.findMany.mockResolvedValue(kpis.map((k: any) => ({ ...k, rollup: 'SUM' })));
+      primeData();
+    }
+    it('getTargets hero card + its trend exclude the out-of-scope outlet; unscoped sums both', async () => {
+      primeHero(legacy);
+      const res: any = await service.getTargets(caller, cur);
+      expect(res.kpis[0]).toMatchObject({ code: 'S', target: 100, achieved: 100 });
+      expect(res.trend[5]).toEqual({ month: cur, target: 100, achieved: 100 });
+      primeHero(open);
+      const un: any = await service.getTargets(caller, cur);
+      expect(un.kpis[0]).toMatchObject({ code: 'S', target: 200, achieved: 100 });
+      expect(un.trend[5]).toEqual({ month: cur, target: 200, achieved: 100 });
+    });
+    it('getTargetTrend dashboard view excludes the out-of-scope outlet; unscoped sums both', async () => {
+      primeHero(legacy);
+      const res = await service.getTargetTrend(caller, 'S');
+      expect(res.trend[5]).toEqual({ month: cur, target: 100, achieved: 100 });
+      primeHero(open);
+      const un = await service.getTargetTrend(caller, 'S');
+      expect(un.trend[5]).toEqual({ month: cur, target: 200, achieved: 100 });
+    });
+  });
+
   // ── leaderboard (D7) + team rollups (mirror) ─────────────────────────────────────────────
   describe('getLeaderboard skips outlets where the tenant primary is out of scope', () => {
     function wire(primary: Record<string, unknown>) {

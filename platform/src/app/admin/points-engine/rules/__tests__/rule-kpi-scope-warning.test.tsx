@@ -15,11 +15,11 @@ const scope = (o: Partial<{ outletTypes: string[]; programs: string[]; subProgra
 });
 
 describe('ruleKpiScopeWarning', () => {
-  it('no warning: unknown KPI, unscoped KPI, "any" program, or an overlapping (ci) program', () => {
+  it('no warning: unknown KPI, unscoped KPI, "any" program, or an exactly-spelled (trimmed) program', () => {
     expect(ruleKpiScopeWarning('K', undefined, { program: 'X' })).toBeNull();
     expect(ruleKpiScopeWarning('K', scope({}), { program: 'X' })).toBeNull();
     expect(ruleKpiScopeWarning('K', scope({ programs: ['Unnati'] }), { program: null })).toBeNull();
-    expect(ruleKpiScopeWarning('K', scope({ programs: ['Unnati'] }), { program: ' unnati ' })).toBeNull();
+    expect(ruleKpiScopeWarning('K', scope({ programs: ['Unnati'] }), { program: ' Unnati ' })).toBeNull();
     // outlet-type-only KPI scope never conflicts with a rule (rules attach by program / sub-program only)
     expect(ruleKpiScopeWarning('K', scope({ outletTypes: ['SSS'] }), { program: 'Unnati' })).toBeNull();
   });
@@ -34,5 +34,13 @@ describe('ruleKpiScopeWarning', () => {
       program: 'Pragati', programCategory: 'Max',
     });
     expect(both).toMatch(/program "Pragati".* or sub-program "Max"/);
+  });
+
+  it('case-only mismatch warns with the canonical spelling (the backend refuses to publish it)', () => {
+    const w = ruleKpiScopeWarning('RLP_VOL', scope({ programs: ['RLP'] }), { program: 'rlp' });
+    expect(w).toMatch(/program "rlp" must be spelled exactly "RLP"/);
+    expect(w).toMatch(/publishing will be refused/);
+    const sub = ruleKpiScopeWarning('K', scope({ subPrograms: ['Tier A'] }), { program: null, programCategory: 'tier a' });
+    expect(sub).toMatch(/sub-program "tier a" must be spelled exactly "Tier A"/);
   });
 });

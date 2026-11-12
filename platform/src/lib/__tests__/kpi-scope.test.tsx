@@ -45,12 +45,18 @@ describe('kpi-scope-core', () => {
     expect(partial[0]).toMatchObject({ outside: ['Pragati'], disjoint: false });
   });
 
-  it('scopeKey is order/case-insensitive; scopeCountQuery omits empty facets and encodes values', () => {
+  it('scopeKey is order/case-insensitive; scopeCountQuery omits empty facets and REPEATS each value', () => {
     expect(scopeKey(S({ programs: ['b', 'A'] }))).toBe(scopeKey(S({ programs: ['a', 'B'] })));
     expect(scopeKey(S({}))).not.toBe(scopeKey(S({ programs: ['A'] })));
     expect(scopeCountQuery(S({}))).toBe('');
     expect(scopeCountQuery(S({ outletTypes: ['sss', 'ws'], subPrograms: ['Lite & Co'] })))
-      .toBe('?outletTypes=SSS,WS&subPrograms=Lite%20%26%20Co');
+      .toBe('?outletTypes=SSS&outletTypes=WS&subPrograms=Lite%20%26%20Co');
+  });
+
+  it('scopeCountQuery keeps a value containing a comma as ONE param (no comma-joining)', () => {
+    const q = scopeCountQuery(S({ programs: ['Gold, Plus', 'Silver'] }));
+    expect(q).toBe('?programs=Gold%2C%20Plus&programs=Silver');
+    expect(new URLSearchParams(q.slice(1)).getAll('programs')).toEqual(['Gold, Plus', 'Silver']);
   });
 
   it('valueOptions badges values not in the settings list', () => {

@@ -65,6 +65,8 @@ describe('achievements page — Sales Import ownership', () => {
     await upload();
     expect(await screen.findByText('Upload Result')).toBeInTheDocument();
     expect(screen.queryByTestId('skipped-importer-owned-kpis')).not.toBeInTheDocument();
+    // an all-unscoped tenant's response has NO ignoredOutOfScope key → no notice
+    expect(screen.queryByTestId('ignored-out-of-scope')).not.toBeInTheDocument();
     expect(screen.queryByText('Sales Import')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Delete/ })).toBeInTheDocument();
   });

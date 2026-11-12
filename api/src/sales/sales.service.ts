@@ -16,7 +16,7 @@ import {
 } from './sales-hierarchy-access.helper';
 import { kpisForScopeFilter, primaryKpiFor } from './sales-kpi-type.helper';
 import { AppliesToOutletFacets, appliesToFilter, kpiAppliesTo } from '../common/applies-to/applies-to';
-import { kpiOutletPredicate } from './outlet-kpi-scope.helper';
+import { kpiOutletPredicate, scopedKpiPredicates } from './outlet-kpi-scope.helper';
 import { kpiCodeKeys, currentMonthKey } from '../targets/targets.helpers';
 import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -96,6 +96,17 @@ const TERMINAL_KYC = ['APPROVED', 'REJECTED', 'NOT_INTERESTED'];
 /** KpiDef scope columns selected wherever a sales view resolves a KPI set / per-outlet scope. */
 const KPI_SCOPE_SELECT = { outletType: true, outletTypes: true, programs: true, subPrograms: true } as const;
 
+/**
+ * APPLIES-TO: the `valueInScope` argument for aggregateTargetMet — "is KpiDef `k` in this outlet's
+ * scope?" over an OutletScopeInfo. `undefined` for an unscoped / unknown KPI (→ aggregate unchanged).
+ */
+export function scopeInfoPredicate(
+  k: Parameters<typeof kpiOutletPredicate>[0],
+): ((o: OutletScopeInfo) => boolean) | undefined {
+  const p = kpiOutletPredicate(k);
+  if (!p) return undefined;
+  return (o) => p({ outletType: o.typeCode, program: o.program, subProgram: o.subProgram });
+}
 
 /**
  * THE shared "target-met" roll-up for a subtree of sales users — the SINGLE source of truth for
@@ -115,6 +126,12 @@ export function aggregateTargetMet(
   aMap: Map<string, number>,
   outletsByUser: Map<string, OutletScopeInfo[]>,
   passes: (o: OutletScopeInfo) => boolean,
+  /**
+   * APPLIES-TO: is the SCORED KPI in this outlet's scope? When it returns false the outlet still
+   * counts in the KPI-independent population counts, but contributes NO target/achievement value
+   * (sums, withTarget, achieved). Omitted (every unscoped KPI) → exactly the pre-scope behaviour.
+   */
+  valueInScope?: (o: OutletScopeInfo) => boolean,
 ) {
   const seen = new Set<string>();
   let outlets = 0,
@@ -133,6 +150,7 @@ export function aggregateTargetMet(
       const approved = o.status === 'APPROVED';
       if (approved) kycDone++;
       if (!TERMINAL_KYC.includes(o.status)) kycPending++;
+      if (valueInScope && !valueInScope(o)) continue; // KPI not applicable here → no value
       // monthly-sale sum: the KPI's achievement over every passing outlet (trade-comparison only).
       // targetSum pairs the ₹ TARGET over the SAME outlet set (Achievement vs Target headline rows).
       if (o.code) {
@@ -501,9 +519,9 @@ export class SalesService {
       appliesToFilter(kpiAppliesTo(k), { outletType: typeF, program: progF }),
     );
     const primaryCode = (kpiDefs.find((k) => k.isPrimary) ?? kpiDefs[0])?.code ?? null;
-    // NOTE (D3): the per-KPI roll-ups below read STORED values as-is — scope is enforced at write
-    // (uploads ignore out-of-scope cells) and at KPI-list building (above), never by masking stored
-    // values at read time.
+    // NOTE: the per-KPI roll-ups below skip a stored value whose (outlet, KPI) pair is OUT of the
+    // KPI's scope (owner decision 2026-11-12: every screen gives the same totals); raw exports still
+    // dump stored values. Unscoped KPIs → no predicate → read exactly as before.
     const kpiCode = opts.kpi && kpiDefs.some((k) => k.code === opts.kpi) ? opts.kpi : primaryCode;
 
     // VISIBILITY pseudo-KPI gate — resolved ONCE, up front. When the tenant has visibility OFF,
@@ -577,11 +595,15 @@ export class SalesService {
     // Roll up one subtree's (deduped, filtered) outlets into counts + the outlets-achieved metric,
     // scored against the supplied target/achievement maps (the single KPI, or one KPI in overview).
     // Thin wrapper over the module-level aggregate so the ratio can NEVER diverge from trade-comparison.
+    // `code` (the scored KPI) excludes out-of-scope (outlet, KPI) values from the roll-up — the SAME
+    // rule every other reader applies; an unscoped KPI has no predicate → unchanged.
+    const valuePredByCode = new Map(kpiDefs.map((k) => [k.code, scopeInfoPredicate(k)] as const));
     const aggregate = (
       subtree: Set<string>,
       tMap: Map<string, number>,
       aMap: Map<string, number>,
-    ) => aggregateTargetMet(subtree, tMap, aMap, outletsByUser, passes);
+      code?: string | null,
+    ) => aggregateTargetMet(subtree, tMap, aMap, outletsByUser, passes, code ? valuePredByCode.get(code) : undefined);
 
     // ── VISIBILITY pseudo-KPI data (enabled tenants only; READ-ONLY from visibility) ──────────
     // Denominator (per subtree): in-scope (outletType ∈ visibilityConfig.outletScope), KYC-APPROVED
@@ -650,7 +672,7 @@ export class SalesService {
         let counts: ReturnType<typeof aggregate> | null = null;
         for (const code of codes) {
           const [tMap, aMap] = kpiMaps!.get(code) ?? [EMPTY, EMPTY];
-          const agg = aggregate(subtree, tMap, aMap);
+          const agg = aggregate(subtree, tMap, aMap, code);
           kpiPercents[code] = agg.pct;
           if (!counts) counts = agg; // outlets/kyc counts are identical across KPIs
         }
@@ -776,11 +798,11 @@ export class SalesService {
     }
 
     // ── SINGLE-KPI mode (shape unchanged; only `mode` is added for clean FE branching). ──────
-    const sum = aggregate(rootSubtree, targetMap, achMap);
+    const sum = aggregate(rootSubtree, targetMap, achMap, kpiCode);
     const summary = { outlets: sum.outlets, kycDone: sum.kycDone, kycPending: sum.kycPending, avgTargetPct: sum.pct };
 
     const members = directReports.map((m) => {
-      const agg = aggregate(memberSubtrees.get(m.id) ?? new Set<string>(), targetMap, achMap);
+      const agg = aggregate(memberSubtrees.get(m.id) ?? new Set<string>(), targetMap, achMap, kpiCode);
       return {
         id: m.id,
         name: m.user.name,
@@ -999,6 +1021,8 @@ export class SalesService {
     const { rootSubtree, outletsByUser } = await this.buildOutletScope(user.clientId, root.id);
     const passes = (o: OutletScopeInfo) =>
       (!typeF || o.typeCode === typeF) && (!progF || o.program === progF);
+    // Out-of-scope (outlet, selected KPI) values are excluded (same rule as team-view); unscoped → undefined.
+    const valueInScope = scopeInfoPredicate(selected);
 
     // Three consecutive months ending at the current reporting month: [m-2, m-1, m].
     const current = this.reportMonth();
@@ -1011,7 +1035,7 @@ export class SalesService {
     const perMonth = await Promise.all(
       months.map(async (m) => {
         const [tMap, aMap] = await this.primaryMapsForMonth(user.clientId, m, selected.code);
-        const agg = aggregateTargetMet(rootSubtree, tMap, aMap, outletsByUser, passes);
+        const agg = aggregateTargetMet(rootSubtree, tMap, aMap, outletsByUser, passes, valueInScope);
         return {
           month: m,
           monthlySale: agg.achievedSum,
@@ -1461,7 +1485,7 @@ export class SalesService {
     // live — so aggregate + count over the ACTIVE set, not every assigned outlet.
     // `outletType` (optional) scopes the subtree to one Outlet.outletType.code for the RLP/BSC
     // toggle; omitted → no type filter → byte-identical to today (Deoleo unchanged).
-    const { active: outletCodes } = await this.subtreeOutletCodes(user, outletType);
+    const { active: outletCodes, facets } = await this.subtreeOutletCodes(user, outletType);
     if (outletCodes.length === 0) return { period: null, outletCount: 0, kpis: [], trend: [] };
 
     // Month to report: the caller's period, else the CURRENT calendar month (owner
@@ -1493,12 +1517,20 @@ export class SalesService {
     const scopedKpis = kpisForScopeFilter(kpiRows, { outletType: typeF });
     const kpiMeta = new Map(scopedKpis.map((k) => [k.code, k]));
     const allowedCodes = new Set(scopedKpis.map((k) => k.code));
-    // D3: the sums below read STORED values as-is (scope is enforced at write + KPI-list building).
+    // APPLIES-TO: a stored value whose (outlet, KPI) pair is OUT of the KPI's scope (incl. a legacy
+    // single-outlet-type KPI) is excluded from every sum below — the same rule the team view, trade
+    // comparison, leaderboard, partner/group views and points compute apply. `preds` is null for an
+    // all-unscoped tenant (Deoleo) → the exact pre-scope loops.
+    const preds = scopedKpiPredicates(kpiRows);
+    const inScope = (oc: string, code: string): boolean => {
+      const p = preds?.get(code);
+      return !p || p(facets.get(oc) ?? {});
+    };
     const codes = new Set<string>();
     // Restrict the KPI columns to the type's set ONLY when a type filter is active; with no filter,
     // keep the prior behaviour (any code present in the data surfaces, even one with no KpiDef).
-    for (const tv of targetByOutlet.values()) for (const c of kpiCodeKeys(tv)) if (!typeF || allowedCodes.has(c)) codes.add(c);
-    for (const kv of achByOutlet.values()) for (const c of kpiCodeKeys(kv)) if (!typeF || allowedCodes.has(c)) codes.add(c);
+    for (const [oc, tv] of targetByOutlet) for (const c of kpiCodeKeys(tv)) if ((!typeF || allowedCodes.has(c)) && inScope(oc, c)) codes.add(c);
+    for (const [oc, kv] of achByOutlet) for (const c of kpiCodeKeys(kv)) if ((!typeF || allowedCodes.has(c)) && inScope(oc, c)) codes.add(c);
 
     const kpis = [...codes].map((code) => {
       const meta = kpiMeta.get(code);
@@ -1509,6 +1541,7 @@ export class SalesService {
         // Denominator = outlets that have a target for this KPI; numerator = those whose
         // achieved met/exceeded it. (The card then reads "X / Y outlets · Z%".)
         for (const oc of allOutletCodes) {
+          if (!inScope(oc, code)) continue;
           const t = Number(targetByOutlet.get(oc)?.[code]) || 0;
           if (t <= 0) continue;
           target += 1;
@@ -1517,6 +1550,7 @@ export class SalesService {
       } else {
         // SUM — numerically identical to the prior sum-across-outlets behavior.
         for (const oc of allOutletCodes) {
+          if (!inScope(oc, code)) continue;
           target +=Number(targetByOutlet.get(oc)?.[code]) || 0;
           achieved += Number(achByOutlet.get(oc)?.[code]) || 0;
         }
@@ -1542,7 +1576,8 @@ export class SalesService {
     const primaryKpi = kpis.find((k) => k.isPrimary) ?? kpis[0] ?? null;
     const trend = primaryKpi
       ? await this.buildKpiTrend(user.clientId, outletCodes, month, primaryKpi.code,
-          primaryKpi.rollup === 'OUTLET_COUNT' ? 'OUTLET_COUNT' : 'SUM')
+          primaryKpi.rollup === 'OUTLET_COUNT' ? 'OUTLET_COUNT' : 'SUM',
+          this.trendScopeFilter(kpiRows, primaryKpi.code, facets))
       : [];
 
     return { period: month, outletCount: outletCodes.length, kpis, trend };
@@ -1710,16 +1745,34 @@ export class SalesService {
    * getTargets' primary-KPI trend routes through this too; the SUM path is numerically identical
    * to the previous sum-only helper, so SUM-primary tenants are byte-identical.
    */
+  /**
+   * APPLIES-TO: the outlet filter for a KPI trend — `undefined` when the KPI is unscoped (trend reads
+   * every outlet exactly as before), else "is the KPI in scope for this outletCode?" over `facets`.
+   */
+  private trendScopeFilter(
+    kpiRows: ReadonlyArray<Parameters<typeof kpiOutletPredicate>[0] & { code: string }>,
+    kpiCode: string,
+    facets: Map<string, AppliesToOutletFacets>,
+  ): ((outletCode: string) => boolean) | undefined {
+    const p = kpiOutletPredicate(kpiRows.find((k) => k.code === kpiCode));
+    if (!p) return undefined;
+    return (oc) => p(facets.get(oc) ?? {});
+  }
+
   private async buildKpiTrend(
     clientId: string, outletCodes: string[], latestMonth: string,
     kpiCode: string, rollup: 'SUM' | 'OUTLET_COUNT',
+    outletInScope?: (outletCode: string) => boolean,
   ) {
     const months = this.monthsEndingAt(latestMonth);
     const where = { clientId, outletCode: { in: outletCodes }, month: { in: months } };
-    const [tRows, aRows] = await Promise.all([
+    const [tAll, aAll] = await Promise.all([
       this.prisma.outletTarget.findMany({ where, select: { outletCode: true, month: true, targetValues: true } }),
       this.prisma.outletSalesRecord.findMany({ where, select: { outletCode: true, month: true, kpiValues: true } }),
     ]);
+    // Out-of-scope (outlet, KPI) values never enter the trend (unscoped KPI → no filter).
+    const tRows = outletInScope ? tAll.filter((r) => outletInScope(r.outletCode)) : tAll;
+    const aRows = outletInScope ? aAll.filter((r) => outletInScope(r.outletCode)) : aAll;
     const valOf = (obj: unknown, code: string) => Number(((obj ?? {}) as Record<string, number>)[code]) || 0;
 
     if (rollup === 'OUTLET_COUNT') {
@@ -1829,7 +1882,9 @@ export class SalesService {
       }
     }
 
-    const trend = await this.buildKpiTrend(user.clientId, outletCodes, month, meta.code, rollup);
+    const trend = await this.buildKpiTrend(
+      user.clientId, outletCodes, month, meta.code, rollup, this.trendScopeFilter(kpiRows, meta.code, facets),
+    );
     return { ...base, trend };
   }
 

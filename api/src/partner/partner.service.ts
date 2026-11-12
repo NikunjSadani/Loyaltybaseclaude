@@ -427,11 +427,14 @@ export class PartnerService {
       this.prisma.kpiDef.findMany({
         where: { clientId: user.clientId },
         select: {
-          code: true, label: true, unit: true, isPrimary: true, order: true,
+          code: true, label: true, unit: true, isPrimary: true, order: true, enabled: true,
           outletType: true, outletTypes: true, programs: true, subPrograms: true,
         },
       }),
     ]);
+    // D6 primary fallback considers ENABLED KPIs only (a disabled KPI must never become an outlet's
+    // primary). Labels / units / flags still resolve over every KpiDef, exactly as before.
+    const enabledKpiRows = kpiRows.filter((k) => k.enabled !== false);
 
     // KPI code → generic label (the fallback when no per-outlet override is set),
     // plus unit + primary flag so the partner dashboard hero can pick THE primary
@@ -474,7 +477,7 @@ export class PartnerService {
             return !def || kpiAppliesToOutlet(def, facets); // D6: hide an out-of-scope KPI
           }),
         );
-        const primaryFallback = outletPrimaryFallback(kpiRows, facets);
+        const primaryFallback = outletPrimaryFallback(enabledKpiRows, facets);
 
         const kpis = [...allKpiCodes].map((code) => {
           const target  = Object.prototype.hasOwnProperty.call(targetValues, code)
@@ -574,9 +577,15 @@ export class PartnerService {
     if (!primary) return { kpiCode: null, kpiName: null, unit: null, trend: [] };
 
     const monthKeys = lastNMonths(span);
+    // APPLIES-TO: sum the trended KPI only over the partner outlets it APPLIES to (out-of-scope
+    // stored values are excluded everywhere, incl. a legacy single-outlet-type KPI). Unscoped KPI →
+    // every outlet, exactly as before.
+    const trendOutletCodes = outlets
+      .filter((_, i) => kpiAppliesToOutlet(primary, outletFacets[i]))
+      .map((o) => o.outletCode);
     const whereBase = {
       clientId: user.clientId,
-      outletCode: { in: outletCodes },
+      outletCode: { in: trendOutletCodes },
       month: { in: monthKeys },
     };
 

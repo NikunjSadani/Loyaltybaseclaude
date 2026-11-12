@@ -1032,6 +1032,16 @@ describe('AdminCoreService', () => {
         expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
       });
 
+      it('a STALE stored value resent unchanged is NOT re-validated (no 400, stored spelling kept)', async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: { ...base, programs: ['Old Prog'] } });
+        mockTenantSettings.getEffectiveSettings.mockResolvedValueOnce({ outletPrograms: ['RLP'], outletCategories: [] });
+        const groupBy = jest.fn().mockResolvedValue([]);
+        (mockPrisma as unknown as { outlet: { groupBy?: jest.Mock } }).outlet.groupBy = groupBy;
+        await service.upsertSetting(gifsy, { key: 'visibilityConfig', value: { ...base, programs: ['OLD PROG'] } });
+        expect(written().programs).toEqual(['Old Prog']);
+        expect(groupBy).not.toHaveBeenCalled();
+      });
+
       it('UNSCOPED tenant (nothing stored, nothing sent) → the value is persisted exactly as sent', async () => {
         mockPrisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: base });
         await service.upsertSetting(gifsy, { key: 'visibilityConfig', value: base });

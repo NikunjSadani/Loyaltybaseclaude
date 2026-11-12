@@ -649,4 +649,16 @@ describe('GroupService.getTargetsRollup — APPLIES-TO KPI scope', () => {
     for (const o of r.outlets) expect(o.kpis.map((k: any) => [k.code, k.isPrimary])).toEqual([['PRI', true], ['B', false]]);
     expect(r.kpiTotals.find((k: any) => k.code === 'PRI')!.target).toBe(300);
   });
+
+  it('primary fallback never picks a DISABLED KPI (audit #7)', async () => {
+    prime([
+      { code: 'PRI', label: 'Pri', unit: '', isPrimary: true, order: 1, enabled: true, ...u, programs: ['RLP'] },
+      { code: 'DIS', label: 'Dis', unit: '', isPrimary: false, order: 0, enabled: false, ...u },
+      { code: 'B', label: 'B', unit: '', isPrimary: false, order: 2, enabled: true, ...u },
+    ]);
+    const r: any = await makeService().getTargetsRollup(user, { period: '2026-05' });
+    if (!r.available) throw new Error('unreachable');
+    const two = r.outlets.find((o: any) => o.outletCode === 'OUT-2')!;
+    expect(two.kpis.map((k: any) => [k.code, k.isPrimary])).toEqual([['B', true]]);
+  });
 });

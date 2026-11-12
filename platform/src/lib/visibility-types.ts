@@ -682,6 +682,10 @@ export interface VisibilityReport {
   windowClosed: boolean;
   frequencyPerMonth: number;
   outletScope: string[];
+  /** APPLIES-TO program narrowing — present only when non-empty (absent = every program). */
+  programs?: string[];
+  /** APPLIES-TO sub-program narrowing — present only when non-empty (absent = every sub-program). */
+  subPrograms?: string[];
   summary: VisibilityCoverageSummary;
 }
 

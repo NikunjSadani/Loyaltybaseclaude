@@ -238,6 +238,18 @@ describe('VisibilityAdminService', () => {
       expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
     });
 
+    it('a STALE stored value resent unchanged is NOT re-validated (no 400); a NEW stale value still 400s', async () => {
+      // 'Old Prog' was valid when saved but is now in neither the settings list nor any live outlet.
+      mockSettings.getEffectiveSettings.mockResolvedValue(settingsWith({ programs: ['Old Prog'], subPrograms: [] }));
+      await service.setConfig(user, { ...defaultConfig, frequencyPerMonth: 3, programs: ['old prog', 'bsc'] } as never);
+      expect(stored().programs).toEqual(['Old Prog', 'BSC']); // stored spelling kept; new value canonicalised
+      expect(mockPrisma.outlet.groupBy).not.toHaveBeenCalled(); // no live lookup needed
+      mockPrisma.programSetting.upsert.mockClear();
+      await expect(service.setConfig(user, { ...defaultConfig, subPrograms: ['Gone'] } as never))
+        .rejects.toThrow(/Unknown sub-program: Gone\. Allowed: Urban\./);
+      expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+
     it('UNSCOPED tenant (no lists anywhere) stores exactly the pre-scope JSON', async () => {
       mockSettings.getEffectiveSettings.mockResolvedValue(settingsWith({}));
       await service.setConfig(user, defaultConfig as never);
