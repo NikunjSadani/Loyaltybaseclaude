@@ -79,6 +79,30 @@ function facetHasValue(list: ReadonlyArray<string>, value: string | null | undef
   return list.some((x) => x.trim().toUpperCase() === key);
 }
 
+/**
+ * Intersection of two scopes (outlets matched by BOTH) — mirror of the backend `intersectAppliesTo`. Per facet:
+ * empty ∩ X = X; X ∩ Y = the ci common values (a's spelling, a's order). `null` when DISJOINT (some facet is
+ * non-empty on both sides with no common value → no outlet can match both).
+ */
+export function intersectAppliesTo(a: AppliesToInput, b: AppliesToInput): AppliesTo | null {
+  const na = normalizeAppliesTo(a);
+  const nb = normalizeAppliesTo(b);
+  const out = emptyAppliesTo();
+  for (const f of ['outletTypes', 'programs', 'subPrograms'] as const) {
+    const la = na[f];
+    const lb = nb[f];
+    if (la.length === 0) out[f] = [...lb];
+    else if (lb.length === 0) out[f] = [...la];
+    else {
+      const keys = new Set(lb.map((x) => x.toUpperCase()));
+      const common = la.filter((x) => keys.has(x.toUpperCase()));
+      if (common.length === 0) return null;
+      out[f] = common;
+    }
+  }
+  return out;
+}
+
 /** Does `scope` apply to an outlet with these facet values? */
 export function appliesToOutlet(scope: AppliesToInput, outlet: AppliesToOutletFacets): boolean {
   const s = normalizeAppliesTo(scope);

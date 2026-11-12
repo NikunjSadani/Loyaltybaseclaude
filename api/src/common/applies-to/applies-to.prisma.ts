@@ -11,6 +11,8 @@ import { AppliesToInput, normalizeAppliesTo } from './applies-to';
  * Unescaped, `_` / `%` in a scope value would act as wildcards (e.g. type `SSS_TOT` would also match
  * `SSSXTOT`) and a `\` would start an escape — diverging from the exact ci compare of the pure helper.
  * Escaping `\`, `%`, `_` makes the ILIKE an exact case-insensitive equality.
+ * GUARDED by `applies-to.prisma.compiled.spec.ts`, which runs the real installed query compiler offline
+ * (stub adapter) and fails if the compiled shape ever stops being `ILIKE $n` with the value verbatim.
  */
 export function escapeLikeLiteral(v: string): string {
   return v.replace(/[\\%_]/g, (c) => `\\${c}`);

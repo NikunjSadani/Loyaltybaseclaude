@@ -2,7 +2,7 @@
  * APPLIES-TO targeting (APPLIES-TO-TARGETING-PLAN §6) — PURE FE helpers for KPI scope (no React, no network), safe to
  * import from any module. Builds on the WP-0 mirror `@/lib/applies-to`. Hooks live in `@/lib/kpi-scope`.
  */
-import { normalizeAppliesTo, type AppliesTo, type AppliesToInput } from '@/lib/applies-to';
+import { intersectAppliesTo, normalizeAppliesTo, type AppliesTo, type AppliesToInput } from '@/lib/applies-to';
 
 /** The KpiDef fields that carry scope (arrays new; single `outletType` DEPRECATED, one release). */
 export interface KpiScopeFieldsLike {
@@ -66,6 +66,41 @@ export function scopeMismatches(kpi: AppliesTo, chosen: Partial<Record<ScopeFace
     if (outside.length) out.push({ facet, outside, disjoint: outside.length === picked.length, kpiValues });
   }
   return out;
+}
+
+/** The parts of a points rule that decide which outlets it can ever pay (structural subset of the rule draft). */
+export interface RuleAudienceLike {
+  program?: string | null;
+  programCategory?: string | null;
+  pipeline?: ReadonlyArray<{ type: string; field?: unknown; allow?: unknown; onFail?: unknown }> | null;
+}
+
+const RULE_FILTER_FACET: Record<string, ScopeFacet> = {
+  outlettype: 'outletTypes',
+  program: 'programs',
+  programcategory: 'subPrograms',
+};
+
+/**
+ * The outlets a points rule can EVER pay, as an AppliesTo — FE mirror of the backend `ruleAppliesTo`
+ * (points-engine.service.ts): attachment program / programCategory (null = any), narrowed by every HARD
+ * (`onFail: 'zero'`) segmentFilter on outletType / program / programCategory (a soft skipNode / passthrough filter
+ * restricts nothing). Several hard filters on one field intersect; a self-contradictory filter is skipped (keeps the
+ * last non-empty scope), exactly like the backend.
+ */
+export function ruleScopeOf(rule: RuleAudienceLike): AppliesTo {
+  let scope: AppliesTo = normalizeAppliesTo({
+    programs: rule.program ? [rule.program] : [],
+    subPrograms: rule.programCategory ? [rule.programCategory] : [],
+  });
+  for (const node of rule.pipeline ?? []) {
+    if (node.type !== 'segmentFilter' || node.onFail !== 'zero') continue;
+    const facet = RULE_FILTER_FACET[String(node.field ?? '').trim().toLowerCase()];
+    if (!facet || !Array.isArray(node.allow) || node.allow.length === 0) continue;
+    const next = intersectAppliesTo(scope, { [facet]: node.allow });
+    if (next) scope = next;
+  }
+  return scope;
 }
 
 /** Canonical, order-insensitive key — "did the scope change?" and "is this count response still current?". */

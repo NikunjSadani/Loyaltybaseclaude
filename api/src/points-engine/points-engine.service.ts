@@ -397,32 +397,43 @@ export class PointsEngineService {
 
     // APPLIES-TO D5: only the rule's ATTACHED KPI decides which outlets the rule pays (compute SKIPs
     // an outlet where the attached KPI is out of scope). Bonus inputs (pct:/target:/achievement:/
-    // kpiCode) are just values read per outlet — a disjoint input scope is legitimate (it reads as
-    // absent → the input's nullAs), so they are NOT checked here. An unscoped attached KPI or an
-    // any-program rule always passes → unscoped tenants (Deoleo) are unaffected.
+    // kpiCode) are just values read per outlet — a disjoint input scope is legitimate: compute masks
+    // each input KPI's values by THAT KPI's scope for the outlet (points-compute.service maskByScope),
+    // so an out-of-scope input reads as absent → the input's nullAs. They are NOT checked here. An
+    // unscoped attached KPI or an any-program rule always passes → unscoped tenants (Deoleo) are unaffected.
     const attached = defs.find((d) => d.code === config.attachsTo?.kpiCode);
     if (!attached) return;
     const kpiScope = kpiAppliesTo(attached);
     if (isUnscoped(kpiScope)) return;
 
-    // Case-only mismatch: the engine matches rule segments to outlet values EXACTLY (case-sensitive),
-    // while the KPI scope matches case-insensitively. A rule value that equals a KPI scope value only
-    // ignoring case would pass an overlap check yet never pay → reject, naming the canonical spelling.
-    const caseIssues: string[] = [];
-    for (const { facet, label, values } of ruleSegmentValues(config)) {
-      const scopeVals = kpiScope[facet];
-      if (scopeVals.length === 0) continue;
-      for (const v of values) {
-        const t = v.trim();
-        if (scopeVals.includes(t)) continue;
-        const ci = scopeVals.find((s) => s.toUpperCase() === t.toUpperCase());
-        if (ci !== undefined) caseIssues.push(`Rule segment ${label} "${v}" must be spelled exactly "${ci}"`);
+    // Case-only mismatch: the engine matches rule segments to OUTLET values EXACTLY (case-sensitive),
+    // while the KPI scope (and the overlap check below) match case-insensitively. So a rule value that
+    // matches NO live outlet value exactly but matches one ignoring case would pass the overlap check
+    // yet never pay → reject, naming the LIVE outlet spelling(s) (what the engine actually compares
+    // against — not the KPI-scope / settings-list spelling, which may differ). A value that exactly
+    // matches a live outlet value is never rejected. Checked on the facets the KPI scopes.
+    const segs = ruleSegmentValues(config).filter((s) => s.values.length > 0 && kpiScope[s.facet].length > 0);
+    if (segs.length > 0) {
+      const live = await this.liveOutletSpellings(clientId, new Set(segs.map((s) => s.facet)));
+      const caseIssues: string[] = [];
+      for (const { facet, label, values } of segs) {
+        const liveVals = live[facet];
+        for (const v of values) {
+          const t = v.trim();
+          if (liveVals.includes(t)) continue;
+          const ci = liveVals.filter((s) => s.toUpperCase() === t.toUpperCase());
+          if (ci.length > 0) {
+            caseIssues.push(
+              `Rule segment ${label} "${v}" must be spelled exactly ${ci.map((s) => `"${s}"`).join(' or ')}`,
+            );
+          }
+        }
       }
-    }
-    if (caseIssues.length > 0) {
-      throw new BadRequestException(
-        `${caseIssues.join('; ')} to match the scope of KPI ${attached.code} — rule segments are matched to outlet values case-sensitively.`,
-      );
+      if (caseIssues.length > 0) {
+        throw new BadRequestException(
+          `${caseIssues.join('; ')} (as stored on this tenant's outlets) — rule segments are matched to outlet values case-sensitively, so KPI ${attached.code}'s outlets would never earn.`,
+        );
+      }
     }
 
     // Disjoint: the rule's program / programCategory (and hard outlet-type / program filters) can never
@@ -438,6 +449,39 @@ export class PointsEngineService {
           'No outlet could ever earn under it — change the rule attachment or the KPI scope.',
       );
     }
+  }
+
+  /**
+   * Distinct LIVE (non-deleted) outlet spellings per facet for a tenant — what the engine's exact
+   * segment match compares against: outlet type code, programName, programCategory. Only the requested
+   * facets are queried (one DISTINCT query each).
+   */
+  private async liveOutletSpellings(
+    clientId: string,
+    facets: Set<keyof AppliesTo>,
+  ): Promise<Record<keyof AppliesTo, string[]>> {
+    const out: Record<keyof AppliesTo, string[]> = { outletTypes: [], programs: [], subPrograms: [] };
+    const base = { clientId, deletedAt: null };
+    const uniq = (xs: Array<string | null | undefined>) =>
+      [...new Set(xs.map((x) => (x ?? '').trim()).filter(Boolean))];
+    await Promise.all([
+      facets.has('outletTypes')
+        ? this.prisma.outlet
+            .findMany({ where: base, distinct: ['outletTypeId'], select: { outletType: { select: { code: true } } } })
+            .then((rows) => { out.outletTypes = uniq(rows.map((r) => r.outletType?.code)); })
+        : null,
+      facets.has('programs')
+        ? this.prisma.outlet
+            .findMany({ where: base, distinct: ['programName'], select: { programName: true } })
+            .then((rows) => { out.programs = uniq(rows.map((r) => r.programName)); })
+        : null,
+      facets.has('subPrograms')
+        ? this.prisma.outlet
+            .findMany({ where: base, distinct: ['programCategory'], select: { programCategory: true } })
+            .then((rows) => { out.subPrograms = uniq(rows.map((r) => r.programCategory)); })
+        : null,
+    ]);
+    return out;
   }
 
   /** Build a PointsRuleConfig from server-owned identity + a create/update DTO. */

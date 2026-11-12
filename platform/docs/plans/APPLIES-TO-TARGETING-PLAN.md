@@ -43,6 +43,13 @@ visibility-capture.service.ts getSalesEligible 208-345 (where 293-301), status 3
 - **D11** Sub-programs independent of programs (AND).
 - **D12** Visibility still requires ≥1 outlet type; programs/subPrograms narrow further.
 
+### Audit round 2 (2026-11-12) — owner rules applied
+- **Every reader honours scope:** points compute masks each referenced input KPI (bonus `kpiCode`/`achievement:`/`target:`/`pct:`) by THAT KPI's scope per outlet (out-of-scope → absent → `nullAs`); offer-tile progress sums only segment outlets where the tile KPI applies (none → progress null).
+- **D1 refined (OWNER DECISION):** a re-upload NEVER deletes stored out-of-scope values — targets/achievements carry over the stored keys (and target `__names`) of every KPI out of scope for that outlet, in-statement (same mechanism as importer-owned keys). Mixed and all-out-of-scope rows both leave stored out-of-scope values untouched. UI copy says so.
+- **D5 case-only check** compares rule segment values to the LIVE outlet spellings (what the engine matches exactly) and names them; an exact live match is never rejected. FE RuleBuilder drops its case hint (no live spellings there) and now mirrors the backend `ruleAppliesTo` incl. hard segmentFilter nodes (`ruleScopeOf`).
+- **ILIKE escaping** guarded offline by `applies-to.prisma.compiled.spec.ts` (real query compiler, stub adapter).
+- **Visibility program lists:** every submitted value is stored in its canonical spelling (settings list → most common live); a stale value with no canonical keeps the submitted spelling — a case-only edit is never a silent no-op.
+
 ## 4. Write API
 `UpsertKpiDefDto` + optional `outletTypes?`, `programs?`, `subPrograms?` (`@IsOptional @IsArray @IsString({each})`). Legacy `outletType` accepted (→ `[outletType]`; arrays win). Omitted = unchanged; unchanged resend not re-validated. Validation: types ⊆ enabled tenant types (canonical codes); programs/subPrograms ⊆ (settings list ∪ distinct live outlet values), ci → 400 listing allowed values. AuditLog row only when scope changes. Visibility `setConfig` (and generic settings PUT): absent `programs`/`subPrograms` keys → carry over stored values (stale-tab safety).
 

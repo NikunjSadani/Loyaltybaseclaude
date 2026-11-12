@@ -2,8 +2,9 @@
 
 /**
  * APPLIES-TO D1: target / achievement uploads IGNORE a value for a KPI that does not apply to that outlet (the rest
- * of the row is kept; the row's remarks name the ignored KPIs). Renders nothing when the count is absent or 0, so
- * tenants without scoped KPIs see no change.
+ * of the row is kept; the row's remarks name the ignored KPIs). OWNER DECISION: a re-upload never deletes a value
+ * already stored for an out-of-scope KPI (the backend carries it over) — the copy says so. Renders nothing when the
+ * count is absent or 0, so tenants without scoped KPIs see no change.
  */
 import React from 'react';
 import { AlertTriangle } from 'lucide-react';
@@ -29,8 +30,9 @@ export function IgnoredOutOfScopeNotice({ count, rows = [] }: { count?: number |
       <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
       <div className="space-y-1 min-w-0">
         <p>
-          <strong>{count.toLocaleString('en-IN')}</strong> value{count !== 1 ? 's' : ''} ignored (KPI not applicable to
-          that outlet). Those cells were not saved; the other values in the same rows were.
+          <strong>{count.toLocaleString('en-IN')}</strong> value{count !== 1 ? 's' : ''} ignored because the KPI
+          doesn&apos;t apply to that outlet. Any value already stored for {count !== 1 ? 'those cells' : 'that cell'} is
+          unchanged (hidden on screens, kept in exports). Other values in the same rows were saved as usual.
         </p>
         {withRemarks.length > 0 && (
           <ul className="space-y-0.5" data-testid="ignored-out-of-scope-rows">

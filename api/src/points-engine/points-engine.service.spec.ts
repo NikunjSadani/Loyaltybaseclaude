@@ -25,6 +25,8 @@ const mockPrisma = {
     update: jest.fn(),
   },
   kpiDef: { findMany: jest.fn() },
+  // Live outlet spellings for the publish case-only check (DISTINCT per facet).
+  outlet: { findMany: jest.fn() },
   // $transaction(cb) runs the callback with a tx that reuses the same mocks.
   $transaction: jest.fn(),
 };
@@ -37,6 +39,17 @@ const clientAdmin: JwtPayload = {
 const owner: JwtPayload = {
   sub: 'u_owner', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '2', name: 'Owner',
 };
+
+// Live (non-deleted) outlet spellings returned by the DISTINCT queries, per facet.
+function setLiveOutlets(live: { outletTypes?: string[]; programs?: string[]; subPrograms?: string[] }) {
+  mockPrisma.outlet.findMany.mockImplementation(async (args: { distinct: string[] }) => {
+    const d = args.distinct[0];
+    if (d === 'outletTypeId') return (live.outletTypes ?? []).map((code) => ({ outletType: { code } }));
+    if (d === 'programName') return (live.programs ?? []).map((programName) => ({ programName }));
+    if (d === 'programCategory') return (live.subPrograms ?? []).map((programCategory) => ({ programCategory }));
+    return [];
+  });
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────────────
 function validDto(overrides: Record<string, unknown> = {}) {
@@ -85,6 +98,7 @@ describe('PointsEngineService', () => {
     // By default the referenced KPI (CASES_SOLD, from the fixtures) IS an enabled KpiDef, so publish's
     // KPI reconciliation passes. A dedicated test overrides this to assert a typo is rejected.
     mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'CASES_SOLD' }]);
+    setLiveOutlets({ outletTypes: ['SSS'], programs: ['GOLD', 'SILVER', 'RLP'], subPrograms: ['Tier A'] });
     mockPrisma.$transaction.mockImplementation(async (cb: (tx: typeof mockPrisma) => unknown) => cb(mockPrisma));
     service = new PointsEngineService(mockPrisma as unknown as PrismaService);
   });
@@ -305,7 +319,7 @@ describe('PointsEngineService', () => {
       expect(mockPrisma.pointsRule.update).not.toHaveBeenCalled();
     });
 
-    it('D5: 400 naming the canonical spelling when the rule program matches the KPI scope only case-insensitively', async () => {
+    it('D5: 400 naming the LIVE outlet spelling when the rule program matches outlets only case-insensitively', async () => {
       mockPrisma.pointsRule.findFirst.mockResolvedValue(row({ id: 'row_v2', status: 'draft', program: 'rlp',
         attachsTo: { scope: 'program_kpi', program: 'rlp', programCategory: null, kpiCode: 'CASES_SOLD' } as never }));
       mockPrisma.kpiDef.findMany.mockResolvedValue([scopedKpi({ programs: ['RLP'] })]);
@@ -313,6 +327,37 @@ describe('PointsEngineService', () => {
         'Rule segment program "rlp" must be spelled exactly "RLP"',
       );
       expect(mockPrisma.pointsRule.update).not.toHaveBeenCalled();
+      // Live spellings are read tenant-pinned from non-deleted outlets.
+      expect(mockPrisma.outlet.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo', deletedAt: null });
+    });
+
+    it('D5 (audit #4): names the LIVE outlet spelling, not the KPI-scope / settings spelling', async () => {
+      // KPI scope says "RLP" (settings spelling) but outlets actually store "Rlp" → the engine matches "Rlp".
+      setLiveOutlets({ programs: ['Rlp'] });
+      mockPrisma.pointsRule.findFirst.mockResolvedValue(row({ id: 'row_v2', status: 'draft', program: 'RLP',
+        attachsTo: { scope: 'program_kpi', program: 'RLP', programCategory: null, kpiCode: 'CASES_SOLD' } as never }));
+      mockPrisma.kpiDef.findMany.mockResolvedValue([scopedKpi({ programs: ['RLP'] })]);
+      await expect(service.publish(clientAdmin, 'row_v2')).rejects.toThrow(
+        'Rule segment program "RLP" must be spelled exactly "Rlp"',
+      );
+    });
+
+    it('D5 (audit #4): a value EXACTLY matching live outlets is never rejected, even if the KPI scope spells it differently', async () => {
+      setLiveOutlets({ programs: ['Rlp', 'GOLD'] });
+      mockPrisma.pointsRule.findMany.mockResolvedValue([]);
+      mockPrisma.pointsRule.update.mockResolvedValue(row({ id: 'row_v2', status: 'published' }));
+      mockPrisma.pointsRule.findFirst.mockResolvedValue(row({ id: 'row_v2', status: 'draft', program: 'Rlp',
+        attachsTo: { scope: 'program_kpi', program: 'Rlp', programCategory: null, kpiCode: 'CASES_SOLD' } as never }));
+      mockPrisma.kpiDef.findMany.mockResolvedValue([scopedKpi({ programs: ['RLP'] })]);
+      await expect(service.publish(clientAdmin, 'row_v2')).resolves.toBeDefined();
+    });
+
+    it('D5 (audit #4): lists every live spelling when outlets store several case variants', async () => {
+      setLiveOutlets({ programs: ['Rlp', 'RLp'] });
+      mockPrisma.pointsRule.findFirst.mockResolvedValue(row({ id: 'row_v2', status: 'draft', program: 'rlp',
+        attachsTo: { scope: 'program_kpi', program: 'rlp', programCategory: null, kpiCode: 'CASES_SOLD' } as never }));
+      mockPrisma.kpiDef.findMany.mockResolvedValue([scopedKpi({ programs: ['RLP'] })]);
+      await expect(service.publish(clientAdmin, 'row_v2')).rejects.toThrow('must be spelled exactly "Rlp" or "RLp"');
     });
 
     it('D5: 400 for a case-only mismatch in a HARD outletType segmentFilter too', async () => {
@@ -349,6 +394,8 @@ describe('PointsEngineService', () => {
       mockPrisma.pointsRule.update.mockResolvedValue(row({ id: 'row_v2', status: 'published' }));
       mockPrisma.kpiDef.findMany.mockResolvedValue([scopedKpi({})]);
       await expect(service.publish(clientAdmin, 'row_v2')).resolves.toBeDefined();
+      // No live-spelling lookup at all for an unscoped KPI (pre-scope query set).
+      expect(mockPrisma.outlet.findMany).not.toHaveBeenCalled();
     });
   });
 

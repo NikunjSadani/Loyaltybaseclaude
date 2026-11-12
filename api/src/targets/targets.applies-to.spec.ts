@@ -215,6 +215,7 @@ function makeService() {
     targetUploadBatch: { create: jest.fn().mockResolvedValue({ id: 'tb1' }) },
     salesUploadBatch: { create: jest.fn().mockResolvedValue({ id: 'sb1' }) },
     salesKpiDefinition: { findMany: jest.fn().mockResolvedValue([]) },
+    $executeRaw: jest.fn<any, any[]>(async () => 1),
     $transaction: jest.fn((arg: unknown) => (Array.isArray(arg) ? Promise.all(arg) : (arg as (t: typeof tx) => unknown)(tx))),
   };
   // groupBy: programName → live programs, programCategory → live sub-programs
@@ -323,12 +324,14 @@ describe('TargetsService — APPLIES-TO uploads (D1)', () => {
     prisma.outlet.findMany.mockResolvedValue([outletRow(OUTLETS[1])]); // WHOLESALER
     const r = await service.uploadTargets(admin, upload([['O2', 'Beta', 'WHOLESALER', '', '', 5, 6]], true));
     expect(r.ignoredOutOfScope).toBe(1);
-    expect(prisma.outletTarget.upsert.mock.calls[0][0].create.targetValues).toEqual({ MONTH_TGT: 5 });
+    // Written via the carry-over statement: only the in-scope value, and the stored CONSISTENCY is carried.
+    expect(rawWrites(prisma)).toEqual([{ table: 'outlet_targets', outletCode: 'O2', values: { MONTH_TGT: 5 }, carry: ['CONSISTENCY'] }]);
     // pre-backfill shape (legacy column only) enforces the same way
+    prisma.$executeRaw.mockClear();
     prisma.kpiDef.findMany.mockResolvedValue([kpiRow(KPIS[0]), kpiRow(KPIS[2], { outletType: 'SSS' })]);
     const a = await service.uploadAchievements(admin, upload([['O2', 'Beta', 'WHOLESALER', '', '', 7, 8]], true));
     expect(a.ignoredOutOfScope).toBe(1);
-    expect(prisma.outletSalesRecord.upsert.mock.calls[0][0].create.kpiValues).toEqual({ MONTH_TGT: 7 });
+    expect(rawWrites(prisma)).toEqual([{ table: 'outlet_sales_records', outletCode: 'O2', values: { MONTH_TGT: 7 }, carry: ['CONSISTENCY'] }]);
   });
 
   it('SCOPED tenant with nothing out of scope still reports ignoredOutOfScope: 0', async () => {
@@ -356,10 +359,13 @@ describe('TargetsService — APPLIES-TO uploads (D1)', () => {
     expect(r.ignoredOutOfScope).toBe(1);
     expect(r.acceptedCount).toBe(2);
     expect(r.rows.find((x) => x.outletCode === 'O2')!.remarks).toMatch(/CONSISTENCY/);
+    // O1 (everything in scope) → the plain upsert, unchanged.
     const writes = Object.fromEntries(
       prisma.outletTarget.upsert.mock.calls.map((c: [{ create: { outletCode: string; targetValues: unknown } }]) => [c[0].create.outletCode, c[0].create.targetValues]),
     );
-    expect(writes).toEqual({ O1: { MONTH_TGT: 1, CONSISTENCY: 2 }, O2: { MONTH_TGT: 3 } });
+    expect(writes).toEqual({ O1: { MONTH_TGT: 1, CONSISTENCY: 2 } });
+    // O2 (CONSISTENCY out of scope) → in-scope value written, stored CONSISTENCY carried over.
+    expect(rawWrites(prisma)).toEqual([{ table: 'outlet_targets', outletCode: 'O2', values: { MONTH_TGT: 3 }, carry: ['CONSISTENCY'] }]);
   });
 
   it('SCOPED tenant achievements: same rule + ignoredOutOfScope on the response', async () => {
@@ -368,9 +374,96 @@ describe('TargetsService — APPLIES-TO uploads (D1)', () => {
     prisma.outlet.findMany.mockResolvedValue([outletRow(OUTLETS[1])]); // WHOLESALER
     const r = await service.uploadAchievements(admin, upload([['O2', 'Beta', 'WHOLESALER', '', '', 7, 8]], true));
     expect(r.ignoredOutOfScope).toBe(1);
-    expect(prisma.outletSalesRecord.upsert.mock.calls[0][0].create.kpiValues).toEqual({ MONTH_TGT: 7 });
+    expect(prisma.outletSalesRecord.upsert).not.toHaveBeenCalled();
+    expect(rawWrites(prisma)).toEqual([{ table: 'outlet_sales_records', outletCode: 'O2', values: { MONTH_TGT: 7 }, carry: ['CONSISTENCY'] }]);
+  });
+
+  // ── OWNER DECISION (audit #3): a re-upload NEVER deletes stored out-of-scope values ─────────────
+  describe('re-upload preserves stored out-of-scope values (mixed + all-out-of-scope rows)', () => {
+    const scopedKpis = () => [kpiRow(KPIS[0]), kpiRow(KPIS[2], { programs: ['Gold'] })];
+    const silverO2 = () => [outletRow({ ...OUTLETS[1], program: 'Silver' })];
+
+    it('MIXED row (targets): the statement keeps the stored subset of every out-of-scope KPI, overlaid by the upload', async () => {
+      const { service, prisma } = makeService();
+      prisma.kpiDef.findMany.mockResolvedValue(scopedKpis());
+      prisma.outlet.findMany.mockResolvedValue(silverO2());
+      await service.uploadTargets(admin, upload([['O2', 'Beta', 'WHOLESALER', 'Silver', '', 3, 99]], true));
+      expect(prisma.outletTarget.upsert).not.toHaveBeenCalled();
+      const [call] = prisma.$executeRaw.mock.calls;
+      const sql = sqlText(call);
+      expect(sql).toContain('ON CONFLICT ("clientId","outletCode","month") DO UPDATE SET');
+      // stored subset (jsonb_each over the EXISTING row, keys = carry list) || EXCLUDED (the upload)
+      expect(sql).toMatch(/jsonb_each\("outlet_targets"\."targetValues"\)[\s\S]*\|\| EXCLUDED\."targetValues"/);
+      // custom names of carried KPIs survive too (merged under the uploaded names)
+      expect(sql).toContain(`COALESCE("outlet_targets"."targetValues"->'__names', '{}'::jsonb)`);
+      expect(sql).toContain(`jsonb_build_object('__names'`);
+      // the ignored 99 is never written
+      expect(sqlValues(call).some((v) => typeof v === 'string' && v.includes('99'))).toBe(false);
+      expect(rawWrites(prisma)).toEqual([{ table: 'outlet_targets', outletCode: 'O2', values: { MONTH_TGT: 3 }, carry: ['CONSISTENCY'] }]);
+    });
+
+    it('MIXED row (achievements): same carry-over (no __names handling)', async () => {
+      const { service, prisma } = makeService();
+      prisma.kpiDef.findMany.mockResolvedValue(scopedKpis());
+      prisma.outlet.findMany.mockResolvedValue(silverO2());
+      await service.uploadAchievements(admin, upload([['O2', 'Beta', 'WHOLESALER', 'Silver', '', 3, 99]], true));
+      const [call] = prisma.$executeRaw.mock.calls;
+      const sql = sqlText(call);
+      expect(sql).toMatch(/jsonb_each\("outlet_sales_records"\."kpiValues"\)[\s\S]*\|\| EXCLUDED\."kpiValues"/);
+      expect(sql).not.toContain('__names');
+      expect(rawWrites(prisma)).toEqual([{ table: 'outlet_sales_records', outletCode: 'O2', values: { MONTH_TGT: 3 }, carry: ['CONSISTENCY'] }]);
+    });
+
+    it('ALL-OUT-OF-SCOPE row: nothing is written at all → the stored row is untouched (targets + achievements)', async () => {
+      const { service, prisma } = makeService();
+      prisma.kpiDef.findMany.mockResolvedValue(scopedKpis());
+      prisma.outlet.findMany.mockResolvedValue(silverO2());
+      const r = await service.uploadTargets(admin, upload([['O2', 'Beta', 'WHOLESALER', 'Silver', '', '', 99]], true));
+      const a = await service.uploadAchievements(admin, upload([['O2', 'Beta', 'WHOLESALER', 'Silver', '', '', 99]], true));
+      expect(r.ignoredOutOfScope).toBe(1);
+      expect(a.ignoredOutOfScope).toBe(1);
+      expect(r.savedCount).toBe(0);
+      expect(prisma.$executeRaw).not.toHaveBeenCalled();
+      expect(prisma.outletTarget.upsert).not.toHaveBeenCalled();
+      expect(prisma.outletSalesRecord.upsert).not.toHaveBeenCalled();
+    });
+
+    it('importer-owned + out-of-scope codes are carried TOGETHER in one statement (achievements)', async () => {
+      const { service, prisma } = makeService();
+      prisma.salesKpiDefinition.findMany.mockResolvedValue([{ kpiCode: 'FOCUS_PACK_1' }]);
+      prisma.kpiDef.findMany.mockResolvedValue([...scopedKpis(), kpiRow(KPIS[1])]);
+      prisma.outlet.findMany.mockResolvedValue(silverO2());
+      await service.uploadAchievements(admin, upload([['O2', 'Beta', 'WHOLESALER', 'Silver', '', 3, 99]], true));
+      expect(rawWrites(prisma)).toEqual([
+        { table: 'outlet_sales_records', outletCode: 'O2', values: { MONTH_TGT: 3 }, carry: ['FOCUS_PACK_1', 'CONSISTENCY'] },
+      ]);
+    });
   });
 });
+
+// Prisma.Sql (tagged-template $executeRaw) → text with the bound values removed, and the bound values.
+// Nested Prisma.sql fragments are flattened by Prisma, so `.strings` / `.values` are the final statement.
+function sqlText(call: unknown[]): string {
+  return ((call[0] as { strings: readonly string[] }).strings ?? []).join('');
+}
+function sqlValues(call: unknown[]): unknown[] {
+  return (call[0] as { values?: unknown[] }).values ?? [];
+}
+/** Each raw carry-over write → { table, outletCode, uploaded values, carry list }. */
+function rawWrites(prisma: { $executeRaw: jest.Mock }) {
+  return prisma.$executeRaw.mock.calls.map((call: unknown[]) => {
+    const sql = sqlText(call);
+    const values = sqlValues(call);
+    const json = values.find((v) => typeof v === 'string' && v.startsWith('{')) as string;
+    const carry = values.find((v) => Array.isArray(v)) as string[];
+    return {
+      table: /INSERT INTO "(\w+)"/.exec(sql)![1],
+      outletCode: values[2],
+      values: JSON.parse(json),
+      carry,
+    };
+  });
+}
 
 describe('TargetsService — upsertKpi APPLIES-TO scope (§4)', () => {
   it('create with arrays: types canonical, programs → settings / most-common-live spelling, legacy column null', async () => {

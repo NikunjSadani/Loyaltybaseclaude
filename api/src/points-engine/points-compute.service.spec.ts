@@ -583,4 +583,79 @@ describe('PointsComputeService — APPLIES-TO KPI scope (D5)', () => {
     expect(unscoped).toEqual(baseline);
     expect(unscoped.rows.every((r) => r.status === 'OK')).toBe(true);
   });
+
+  // ── audit #1: bonus inputs are masked by THEIR OWN KPI scope ─────────────────────────────
+  // Attached CASES_SOLD is unscoped; the rule adds a bonus from LITRES (achievement + target:) which
+  // is scoped to GOLD. The SILVER outlet has STORED LITRES values — they must read as ABSENT.
+  describe('audit #1 — bonus inputs masked by their own KPI scope', () => {
+  const bonusRule = () =>
+    ruleRow({
+      program: null,
+      attachsTo: { scope: 'program_kpi', program: null, programCategory: null, kpiCode: 'CASES_SOLD' } as never,
+      inputs: [
+        { ref: 'value', kpiCode: 'CASES_SOLD', type: 'number', nullAs: 'reject' },
+        { ref: 'bonus', source: 'achievement:LITRES', type: 'number', nullAs: 'zero' },
+        { ref: 'bt', source: 'target:LITRES', type: 'number', nullAs: 'zero' },
+      ] as never,
+      pipeline: [{ type: 'formula', id: 'f1', output: 'set', expr: 'value + bonus + bt' }] as never,
+    });
+
+  beforeEach(() => {
+    mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+      { outletCode: 'O1', kpiValues: { CASES_SOLD: 100, LITRES: 10 } },
+      { outletCode: 'O2', kpiValues: { CASES_SOLD: 100, LITRES: 10 } },
+    ]);
+    mockPrisma.outletTarget.findMany.mockResolvedValue([
+      { outletCode: 'O1', targetValues: { LITRES: 5 } },
+      { outletCode: 'O2', targetValues: { LITRES: 5 } },
+    ]);
+    mockEngine.getActiveForAttachment.mockResolvedValue(bonusRule());
+  });
+
+  it('an out-of-scope BONUS input KPI reads as absent (nullAs) — its stored value is never used', async () => {
+    mockPrisma.kpiDef.findMany.mockResolvedValue([
+      { code: 'CASES_SOLD', outletType: null, outletTypes: [], programs: [], subPrograms: [] },
+      { code: 'LITRES', outletType: null, outletTypes: [], programs: ['GOLD'], subPrograms: [] },
+    ]);
+    const p = await service.previewCompute(clientAdmin, { period: '2026-02' });
+    expect(p.rows.find((r) => r.outletCode === 'O1')!.points).toBe(115); // 100 + 10 + 5 (LITRES in scope)
+    expect(p.rows.find((r) => r.outletCode === 'O2')!.points).toBe(100); // LITRES out of scope → 0 + 0
+    // Scopes are loaded for EVERY referenced KPI code (active + stored keys), not only the attached one.
+    const codes = mockPrisma.kpiDef.findMany.mock.calls[0][0].where.code.in as string[];
+    expect([...codes].sort()).toEqual(['CASES_SOLD', 'LITRES']);
+  });
+
+  it('an out-of-scope bonus input with nullAs=reject SKIPs the row (absent, not the stored value)', async () => {
+    mockEngine.getActiveForAttachment.mockResolvedValue(
+      ruleRow({
+        ...bonusRule(),
+        inputs: [
+          { ref: 'value', kpiCode: 'CASES_SOLD', type: 'number', nullAs: 'reject' },
+          { ref: 'p', source: 'pct:LITRES', type: 'number', nullAs: 'reject' },
+        ] as never,
+        pipeline: [{ type: 'formula', id: 'f1', output: 'set', expr: 'value + p' }] as never,
+      }),
+    );
+    mockPrisma.kpiDef.findMany.mockResolvedValue([
+      { code: 'LITRES', outletType: 'SSS', outletTypes: [], programs: [], subPrograms: ['Urban'] },
+    ]);
+    const p = await service.previewCompute(clientAdmin, { period: '2026-02' });
+    expect(p.rows.find((r) => r.outletCode === 'O1')!.points).toBe(300); // 100 + 200% of target
+    const o2 = p.rows.find((r) => r.outletCode === 'O2')!;
+    expect(o2.status).toBe('SKIP');
+    expect(o2.reason).toContain('pct:LITRES');
+  });
+
+  it('UNSCOPED bonus KPIs → identical preview to no KpiDef rows (Deoleo byte-identity)', async () => {
+    mockPrisma.kpiDef.findMany.mockResolvedValue([]);
+    const baseline = await service.previewCompute(clientAdmin, { period: '2026-02' });
+    mockPrisma.kpiDef.findMany.mockResolvedValue([
+      { code: 'CASES_SOLD', outletType: null, outletTypes: [], programs: [], subPrograms: [] },
+      { code: 'LITRES', outletType: '', outletTypes: [], programs: [], subPrograms: [] },
+    ]);
+    const unscoped = await service.previewCompute(clientAdmin, { period: '2026-02' });
+    expect(unscoped).toEqual(baseline);
+    expect(baseline.rows.every((r) => r.points === 115)).toBe(true);
+  });
+  });
 });

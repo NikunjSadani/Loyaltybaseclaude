@@ -30,39 +30,37 @@ import { NodeCard } from './NodeCard';
 import { SimulatorPanel } from './SimulatorPanel';
 import { SearchableSelect } from '@/components/ui/searchable-select';
 import { useGifsySettings } from '@/lib/gifsy-settings';
-import type { AppliesTo } from '@/lib/applies-to';
-import { FACET_NOUN, kpiScopeOf, scopeMismatches, type KpiScopeFieldsLike } from '@/lib/kpi-scope-core';
+import { intersectAppliesTo, isUnscoped, type AppliesTo } from '@/lib/applies-to';
+import {
+  FACET_NOUN, kpiScopeOf, ruleScopeOf, scopeMismatches, type KpiScopeFieldsLike, type RuleAudienceLike,
+} from '@/lib/kpi-scope-core';
 
 /**
  * APPLIES-TO D5: mirrors the backend publish gate (points-engine.service assertKpiCodesExist), which checks ONLY the
- * rule's ATTACHED KPI (bonus-input KPIs are never checked) and refuses to publish when
- *   (a) the rule's program / sub-program lies outside that KPI's scope (compute would SKIP every outlet), or
- *   (b) it matches a KPI scope value only ignoring case (rule matching is case-sensitive → it would never pay).
- * Non-blocking warning text, or null when the backend would accept it.
+ * rule's ATTACHED KPI (bonus-input KPIs are never checked). The rule's audience is computed exactly like the
+ * backend `ruleAppliesTo` — attachment program / sub-program PLUS every HARD (`onFail: zero`) segmentFilter on
+ * outlet type / program / sub-program (shared logic: `ruleScopeOf` in kpi-scope-core).
+ *   • DISJOINT from the KPI scope → the backend refuses to publish (compute would SKIP every outlet).
+ *   • PARTIAL overlap → publish is allowed, but outlets outside the KPI scope are skipped in compute.
+ * Case-only spelling is NOT hinted here: the backend checks it against the LIVE outlet spellings (which this
+ * builder does not have) and its 400 names the exact spelling to use — a hint from the settings-list / KPI-scope
+ * spelling could point at the wrong one.
+ * Non-blocking warning text, or null when the backend would accept it without skips.
  */
 export function ruleKpiScopeWarning(
   kpiCode: string,
   kpiScope: AppliesTo | undefined,
-  attach: { program?: string | null; programCategory?: string | null },
+  rule: RuleAudienceLike,
 ): string | null {
-  if (!kpiScope) return null;
-  const mm = scopeMismatches(kpiScope, { programs: [attach.program], subPrograms: [attach.programCategory] });
-  if (mm.length) {
-    const parts = mm.map((m) => `${FACET_NOUN[m.facet]} "${m.outside.join(', ')}" (the KPI applies only to ${m.kpiValues.join(', ')})`);
+  if (!kpiScope || isUnscoped(kpiScope)) return null;
+  const ruleScope = ruleScopeOf(rule);
+  const mm = scopeMismatches(kpiScope, ruleScope);
+  if (mm.length === 0) return null;
+  const parts = mm.map((m) => `${FACET_NOUN[m.facet]} "${m.outside.join(', ')}" (the KPI applies only to ${m.kpiValues.join(', ')})`);
+  if (intersectAppliesTo(ruleScope, kpiScope) === null) {
     return `KPI ${kpiCode} does not apply to this rule's ${parts.join(' or ')}. Outlets there are skipped in compute, and publishing will be refused until the rule and the KPI scope overlap.`;
   }
-  // (b) case-only: same value ignoring case, different spelling.
-  const caseOnly: string[] = [];
-  const check = (facet: 'programs' | 'subPrograms', raw: string | null | undefined) => {
-    const v = (raw ?? '').trim();
-    if (!v || kpiScope[facet].length === 0 || kpiScope[facet].includes(v)) return;
-    const canonical = kpiScope[facet].find((k) => k.trim().toUpperCase() === v.toUpperCase());
-    if (canonical !== undefined) caseOnly.push(`${FACET_NOUN[facet]} "${v}" must be spelled exactly "${canonical.trim()}"`);
-  };
-  check('programs', attach.program);
-  check('subPrograms', attach.programCategory);
-  if (!caseOnly.length) return null;
-  return `This rule's ${caseOnly.join(' and ')} to match KPI ${kpiCode}'s scope — rules match outlets case-sensitively, so publishing will be refused.`;
+  return `KPI ${kpiCode} does not apply to this rule's ${parts.join(' or ')}. Outlets there are skipped in compute; the rest can earn.`;
 }
 
 // Node types grouped by disclosure level for the "Add step" menu.
@@ -252,7 +250,10 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
   const programOptions = uniqOpts([...(settings.outletPrograms ?? []), draft.attachsTo.program]);
   const categoryOptions = uniqOpts([...(settings.outletCategories ?? []), draft.attachsTo.programCategory]);
   const kpiOptions = uniqOpts([...kpiCodes, draft.attachsTo.kpiCode]);
-  const kpiScopeWarning = ruleKpiScopeWarning(draft.attachsTo.kpiCode, kpiScopes[draft.attachsTo.kpiCode], draft.attachsTo);
+  const kpiScopeWarning = ruleKpiScopeWarning(draft.attachsTo.kpiCode, kpiScopes[draft.attachsTo.kpiCode], {
+    ...draft.attachsTo,
+    pipeline: draft.pipeline,
+  });
 
   // ── draft mutators ────────────────────────────────────────────────────────────
   const patch = (p: Partial<RuleConfigDraft>) => {

@@ -241,13 +241,46 @@ describe('VisibilityAdminService', () => {
     it('a STALE stored value resent unchanged is NOT re-validated (no 400); a NEW stale value still 400s', async () => {
       // 'Old Prog' was valid when saved but is now in neither the settings list nor any live outlet.
       mockSettings.getEffectiveSettings.mockResolvedValue(settingsWith({ programs: ['Old Prog'], subPrograms: [] }));
-      await service.setConfig(user, { ...defaultConfig, frequencyPerMonth: 3, programs: ['old prog', 'bsc'] } as never);
-      expect(stored().programs).toEqual(['Old Prog', 'BSC']); // stored spelling kept; new value canonicalised
-      expect(mockPrisma.outlet.groupBy).not.toHaveBeenCalled(); // no live lookup needed
+      await service.setConfig(user, { ...defaultConfig, frequencyPerMonth: 3, programs: ['Old Prog', 'bsc'] } as never);
+      expect(stored().programs).toEqual(['Old Prog', 'BSC']); // stale value accepted as sent; new value canonicalised
       mockPrisma.programSetting.upsert.mockClear();
       await expect(service.setConfig(user, { ...defaultConfig, subPrograms: ['Gone'] } as never))
         .rejects.toThrow(/Unknown sub-program: Gone\. Allowed: Urban\./);
       expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+
+    describe('audit #7: case-only edits are deterministic, never a silent no-op', () => {
+      it('a STORED value is re-canonicalised to the settings-list spelling on a case-only edit (rlp → Rlp stores "RLP")', async () => {
+        // Stored in a non-canonical spelling (e.g. saved before the settings list was edited).
+        mockSettings.getEffectiveSettings.mockResolvedValue(settingsWith({ programs: ['rlp'] }));
+        await service.setConfig(user, { ...defaultConfig, programs: ['Rlp'] } as never);
+        expect(stored().programs).toEqual(['RLP']); // canonical spelling, regardless of the submitted case
+        expect(mockPrisma.outlet.groupBy).not.toHaveBeenCalled(); // settings list already canonical → no live read
+      });
+
+      it('a stored value outside the settings list takes the most common LIVE spelling', async () => {
+        mockSettings.getEffectiveSettings.mockResolvedValue(settingsWith({ subPrograms: ['rural'] }));
+        mockPrisma.outlet.groupBy.mockResolvedValue([
+          { programCategory: 'rural', _count: { _all: 1 } },
+          { programCategory: 'Rural', _count: { _all: 9 } },
+        ]);
+        await service.setConfig(user, { ...defaultConfig, subPrograms: ['RURAL'] } as never);
+        expect(stored().subPrograms).toEqual(['Rural']);
+      });
+
+      it('a STALE stored value (no canonical anywhere) takes the SUBMITTED spelling — the edit applies', async () => {
+        mockSettings.getEffectiveSettings.mockResolvedValue(settingsWith({ programs: ['gold'] }));
+        await service.setConfig(user, { ...defaultConfig, programs: ['Gold'] } as never);
+        expect(stored().programs).toEqual(['Gold']);
+      });
+
+      it('the response returns the stored (canonical) config so the editor shows what was saved', async () => {
+        mockSettings.getEffectiveSettings
+          .mockResolvedValueOnce(settingsWith({ programs: ['rlp'] }))
+          .mockResolvedValueOnce(settingsWith({ programs: ['RLP'] }));
+        const res = await service.setConfig(user, { ...defaultConfig, programs: ['Rlp'] } as never);
+        expect((res.visibilityConfig as { programs: string[] }).programs).toEqual(['RLP']);
+      });
     });
 
     it('UNSCOPED tenant (no lists anywhere) stores exactly the pre-scope JSON', async () => {

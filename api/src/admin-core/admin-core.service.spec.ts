@@ -1032,14 +1032,21 @@ describe('AdminCoreService', () => {
         expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
       });
 
-      it('a STALE stored value resent unchanged is NOT re-validated (no 400, stored spelling kept)', async () => {
+      it('a STALE stored value is NOT re-validated (no 400); a case-only edit of it applies (submitted spelling)', async () => {
         mockPrisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: { ...base, programs: ['Old Prog'] } });
         mockTenantSettings.getEffectiveSettings.mockResolvedValueOnce({ outletPrograms: ['RLP'], outletCategories: [] });
         const groupBy = jest.fn().mockResolvedValue([]);
         (mockPrisma as unknown as { outlet: { groupBy?: jest.Mock } }).outlet.groupBy = groupBy;
         await service.upsertSetting(gifsy, { key: 'visibilityConfig', value: { ...base, programs: ['OLD PROG'] } });
-        expect(written().programs).toEqual(['Old Prog']);
-        expect(groupBy).not.toHaveBeenCalled();
+        // audit #7: no canonical spelling exists anywhere (stale) → the submitted spelling is stored (never a silent no-op).
+        expect(written().programs).toEqual(['OLD PROG']);
+      });
+
+      it('audit #7: a stored value is re-canonicalised to the settings spelling on a case-only edit', async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: { ...base, programs: ['rlp'] } });
+        mockTenantSettings.getEffectiveSettings.mockResolvedValueOnce({ outletPrograms: ['RLP'], outletCategories: [] });
+        await service.upsertSetting(gifsy, { key: 'visibilityConfig', value: { ...base, programs: ['Rlp'] } });
+        expect(written().programs).toEqual(['RLP']);
       });
 
       it('UNSCOPED tenant (nothing stored, nothing sent) → the value is persisted exactly as sent', async () => {

@@ -73,11 +73,15 @@ export interface VisibilityProgramLists {
  *   - a key ABSENT (undefined / null) in `requested` → CARRY OVER the stored list unchanged (stale-tab
  *     safety: an editor that predates these fields must never wipe them) — not re-validated;
  *   - a key present → must be a string array; trimmed + ci-deduped; a value ALREADY STORED (ci) is
- *     kept as stored and NOT re-validated (an unchanged resend of a now-stale value never 400s); every
- *     NEW value must be in
+ *     NOT re-validated (an unchanged resend of a now-stale value never 400s); every NEW value must be in
  *     (tenant settings list ∪ distinct live outlet values), case-insensitively → else 400 listing the
- *     allowed values; each value is stored in the SETTINGS-LIST spelling, else the most common live
- *     outlet spelling (D8). An empty array clears the facet (= all).
+ *     allowed values. An empty array clears the facet (= all).
+ *   - SPELLING (D8, deterministic — audit #7): EVERY submitted value (new OR already stored) is stored in
+ *     its CANONICAL spelling — the settings-list spelling, else the most common live outlet spelling.
+ *     Only a stored value that is no longer valid anywhere (stale) has no canonical spelling; it keeps the
+ *     SUBMITTED spelling, so a case-only edit (gold → Gold) is never a silent no-op. Matching is
+ *     case-insensitive, so spelling never changes which outlets are in scope. The response returns the
+ *     stored config, so the editor shows the canonical spelling that was actually saved.
  * The live-values query runs only when a requested value is not already in the settings list.
  */
 export async function resolveVisibilityProgramLists(
@@ -113,7 +117,9 @@ export async function resolveVisibilityProgramLists(
       if (t && !valid.has(t.toUpperCase())) valid.set(t.toUpperCase(), t);
     }
     const isNew = (v: string) => !storedByKey.has(v.toUpperCase());
-    if (wanted.some((v) => isNew(v) && !valid.has(v.toUpperCase()))) {
+    // Live values are needed whenever a submitted value (new OR stored) is not in the settings list —
+    // to validate a new value, and to canonicalise a stored one to its live spelling.
+    if (wanted.some((v) => !valid.has(v.toUpperCase()))) {
       const live = (await prisma.outlet.groupBy({
         by: [f.column],
         where: { clientId, deletedAt: null, [f.column]: { not: null } },
@@ -134,8 +140,8 @@ export async function resolveVisibilityProgramLists(
           `Allowed: ${allowed.length ? allowed.join(', ') : '(none configured)'}.`,
       );
     }
-    // Stored values keep their stored spelling; new ones take the canonical valid spelling.
-    out[f.key] = wanted.map((v) => storedByKey.get(v.toUpperCase()) ?? valid.get(v.toUpperCase())!);
+    // Canonical spelling wins for every value; a stale stored value (no canonical) keeps the submitted spelling.
+    out[f.key] = wanted.map((v) => valid.get(v.toUpperCase()) ?? v);
   }
   return out;
 }

@@ -71,7 +71,7 @@ describe('achievements page — Sales Import ownership', () => {
     expect(screen.getByRole('button', { name: /Delete/ })).toBeInTheDocument();
   });
 
-  it('APPLIES-TO D1: shows "N values ignored (KPI not applicable…)" with the saved rows remarks', async () => {
+  it('APPLIES-TO D1: shows "N values ignored because the KPI doesn\'t apply…" with the saved rows remarks', async () => {
     stubFetch({ batches: [], upload: uploadResult({
       ignoredOutOfScope: 2,
       rows: [{ rowIndex: 3, outletCode: 'O1', status: 'accepted', remarks: 'Ignored (KPI not applicable): KPI_A, KPI_B' }],
@@ -79,7 +79,8 @@ describe('achievements page — Sales Import ownership', () => {
     render(<SalesUploadPage />);
     await upload();
     const notice = await screen.findByTestId('ignored-out-of-scope');
-    expect(notice).toHaveTextContent('2 values ignored (KPI not applicable to that outlet)');
+    expect(notice).toHaveTextContent("2 values ignored because the KPI doesn't apply to that outlet.");
+    expect(notice).toHaveTextContent('Any value already stored for those cells is unchanged (hidden on screens, kept in exports).');
     expect(notice).toHaveTextContent('Row 3 — O1: Ignored (KPI not applicable): KPI_A, KPI_B');
   });
 

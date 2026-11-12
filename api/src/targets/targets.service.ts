@@ -924,6 +924,27 @@ export class TargetsService {
 
         const meta = outletMeta.get(outletCode);
 
+        // Owner decision (audit #3): a re-upload NEVER deletes stored values of KPIs that are out of scope
+        // for this outlet (their cells were ignored by the parser). Carry them over inside the statement.
+        // Only a scope-enforced tenant can have such codes → unscoped tenants (Deoleo) keep the plain upsert.
+        const carry = parseScope ? parseScope.outOfScopeCodes(outletCode) : [];
+        if (carry.length > 0) {
+          const col = Prisma.sql`"outlet_targets"."targetValues"`;
+          targetOps.push(
+            this.prisma.$executeRaw(Prisma.sql`
+              INSERT INTO "outlet_targets"
+                ("id","clientId","outletCode","outletName","month","targetValues","batchId","createdAt","updatedAt")
+              VALUES (${randomUUID()}, ${user.clientId}, ${outletCode}, ${meta?.name ?? outletCode}, ${month},
+                      ${JSON.stringify(kpiMap)}::jsonb, ${batch.id}, ${SQL_NOW_UTC}, ${SQL_NOW_UTC})
+              ON CONFLICT ("clientId","outletCode","month") DO UPDATE SET
+                "targetValues" = ${TargetsService.carryOverSql(col, Prisma.sql`EXCLUDED."targetValues"`, carry, true)},
+                "outletName"   = EXCLUDED."outletName",
+                "batchId"      = EXCLUDED."batchId",
+                "updatedAt"    = ${SQL_NOW_UTC}`),
+          );
+          continue;
+        }
+
         targetOps.push(
           this.prisma.outletTarget.upsert({
             where: {
@@ -990,7 +1011,10 @@ export class TargetsService {
   private parseScope(
     kpiRows: ReadonlyArray<KpiScopeLike & { code: string }>,
     outlets: ReadonlyArray<{ outletCode: string; outletType: { code: string }; programName?: string | null; programCategory?: string | null }>,
-  ): { isInScope: (outletCode: string, kpiCode: string) => boolean } {
+  ): {
+    isInScope: (outletCode: string, kpiCode: string) => boolean;
+    outOfScopeCodes: (outletCode: string) => string[];
+  } {
     const scopes = TargetsService.kpiScopeMap(kpiRows);
     const facets = new Map(
       outlets.map((o) => [
@@ -998,13 +1022,37 @@ export class TargetsService {
         { outletType: o.outletType.code, program: o.programName ?? null, subProgram: o.programCategory ?? null },
       ]),
     );
-    return {
-      isInScope: (outletCode, kpiCode) => {
-        const sc = scopes.get(kpiCode);
-        const f = facets.get(outletCode);
-        return !sc || !f || appliesToOutlet(sc, f);
-      },
+    const isInScope = (outletCode: string, kpiCode: string) => {
+      const sc = scopes.get(kpiCode);
+      const f = facets.get(outletCode);
+      return !sc || !f || appliesToOutlet(sc, f);
     };
+    return {
+      isInScope,
+      // Owner decision (audit #3): the KPI codes whose STORED values a re-upload must carry over untouched
+      // for this outlet — every enabled KPI that is out of scope for it (the parser ignores those cells).
+      outOfScopeCodes: (outletCode) => kpiRows.map((k) => k.code).filter((c) => !isInScope(outletCode, c)),
+    };
+  }
+
+  /**
+   * ON CONFLICT value expression for a manual re-upload that must PRESERVE some stored keys (`carry`):
+   * the stored subset for those keys, overlaid by the uploaded values. For targets, per-outlet custom
+   * names (`__names`) of carried KPIs are preserved the same way (merged under the uploaded names).
+   * Computed inside the statement (no read-then-write window).
+   */
+  private static carryOverSql(
+    column: Prisma.Sql,
+    incoming: Prisma.Sql,
+    carry: readonly string[],
+    withNames: boolean,
+  ): Prisma.Sql {
+    // `'__names'` is a SQL literal (= NAMES_KEY) — a bound param would leave `->` ambiguous (text vs int).
+    const base = Prisma.sql`(${ownedSubsetSql(column, carry)} || ${incoming})`;
+    if (!withNames) return base;
+    const carriedNames = ownedSubsetSql(Prisma.sql`COALESCE(${column}->'__names', '{}'::jsonb)`, carry);
+    return Prisma.sql`CASE WHEN ${carriedNames} = '{}'::jsonb THEN ${base}
+      ELSE ${base} || jsonb_build_object('__names', ${carriedNames} || COALESCE(${incoming}->'__names', '{}'::jsonb)) END`;
   }
 
   // ─── Achievement template download ──────────────────────────────────────────
@@ -1226,7 +1274,11 @@ export class TargetsService {
         // Sales Import ownership: the row's importer-owned keys SURVIVE the manual rewrite. The carry-over
         // is done inside the statement (no read-then-write window vs a concurrent apply). Never runs for a
         // tenant without owned KPIs.
-        if (owned.length > 0) {
+        // Owner decision (audit #3): stored values of KPIs OUT OF SCOPE for this outlet survive the same
+        // way (their cells were ignored by the parser). Only a scope-enforced tenant has such codes.
+        const oos = parseScope ? parseScope.outOfScopeCodes(outletCode) : [];
+        if (owned.length > 0 || oos.length > 0) {
+          const carry = [...new Set([...owned, ...oos])];
           salesOps.push(
             this.prisma.$executeRaw(Prisma.sql`
               INSERT INTO "outlet_sales_records"
@@ -1234,7 +1286,7 @@ export class TargetsService {
               VALUES (${randomUUID()}, ${user.clientId}, ${outletCode}, ${meta?.name ?? outletCode}, ${month},
                       ${JSON.stringify(kpiMap)}::jsonb, ${batch.id}, ${SQL_NOW_UTC}, ${SQL_NOW_UTC})
               ON CONFLICT ("clientId","outletCode","month") DO UPDATE SET
-                "kpiValues"  = ${ownedSubsetSql(Prisma.sql`"outlet_sales_records"."kpiValues"`, owned)} || EXCLUDED."kpiValues",
+                "kpiValues"  = ${TargetsService.carryOverSql(Prisma.sql`"outlet_sales_records"."kpiValues"`, Prisma.sql`EXCLUDED."kpiValues"`, carry, false)},
                 "outletName" = EXCLUDED."outletName",
                 "batchId"    = EXCLUDED."batchId",
                 "updatedAt"  = ${SQL_NOW_UTC}`),

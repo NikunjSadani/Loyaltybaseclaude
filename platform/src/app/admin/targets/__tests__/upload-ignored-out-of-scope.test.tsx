@@ -44,7 +44,11 @@ describe('target upload — ignoredOutOfScope', () => {
     render(<TargetUploadPage />);
     await upload();
     const notice = await screen.findByTestId('ignored-out-of-scope');
-    expect(notice).toHaveTextContent('1 value ignored (KPI not applicable to that outlet)');
+    expect(notice).toHaveTextContent("1 value ignored because the KPI doesn't apply to that outlet.");
+    // Honest copy (owner decision): stored values are never deleted by a re-upload.
+    expect(notice).toHaveTextContent(
+      'Any value already stored for that cell is unchanged (hidden on screens, kept in exports).',
+    );
     expect(notice).toHaveTextContent('Row 3 — O1: Ignored (KPI not applicable): UNNATI_VOL');
     expect(notice).not.toHaveTextContent('Row 4');
   });
