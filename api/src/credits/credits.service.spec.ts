@@ -914,6 +914,7 @@ describe('CreditsService', () => {
         awardType: 'POINTS',
         outletId: 'O1',
         fieldId: 'f1',
+        batchId: 'b1',
       });
       mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED' });
       // Outlet + wallet exist.
@@ -931,6 +932,8 @@ describe('CreditsService', () => {
           referenceId: 'r1',
           sourceType: 'CREDIT_FIELD',
           sourceId: 'f1',
+          // The original credit (posted by confirm as CREDIT_BATCH/<batchId>) sets the floor.
+          originalCredit: { referenceType: 'CREDIT_BATCH', referenceId: 'b1' },
         }),
         mockTx,   // same tx — atomic with status flip
       );

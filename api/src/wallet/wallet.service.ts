@@ -89,6 +89,11 @@ export class WalletService {
       // Caller-specific message for the guarded-insufficient reject, so a redemption
       // race reads "for redemption" while an admin debit reads "for debit".
       insufficientMessage?: string;
+      // FLOORED (non-guarded) debits only: the lowest balance the debit may take the wallet
+      // to. Default 0 (the historical floor). A clawback reversing a credit that landed while
+      // the wallet was NEGATIVE passes that pre-credit balance (< 0) so the reversal fully
+      // undoes the credit. Values > 0 are treated as 0.
+      debitFloor?: number;
     },
   ): Promise<{ transactionId: string; newRedeemable: number; ledgerId: string }> {
     const {
@@ -106,7 +111,9 @@ export class WalletService {
       sourceId = null,
       requireSufficientRedeemable = false,
       insufficientMessage = 'Insufficient wallet balance for debit',
+      debitFloor = 0,
     } = params;
+    const floor = Math.min(0, debitFloor);
 
     const isCredit = points > 0;
     const magnitude = Math.abs(points);
@@ -144,12 +151,13 @@ export class WalletService {
       }
       // DEBIT_ADJUSTMENT (ledgerType ADJUST) only decrements redeemable.
     } else {
-      // Floor redeemable at 0 — guards the expiry sweep against over-decrementing.
-      // The outer Math.max(0, …) matters only when the balance is ALREADY NEGATIVE (e.g. a
-      // legacy/migrated wallet): min(magnitude, negative) is a NEGATIVE decrement, which would
-      // ADD points on a debit. Clamp to 0 → a debit never moves such a wallet up; the whole
-      // magnitude is then a shortfall. For balanceBefore >= 0 this is identical to before.
-      const decrement = Math.max(0, Math.min(magnitude, balanceBefore));
+      // Floor redeemable at `floor` (0 unless a clawback passes a negative pre-credit balance) —
+      // guards the expiry sweep against over-decrementing. The outer Math.max(0, …) matters when
+      // the balance is already BELOW the floor (e.g. a negative legacy/migrated wallet):
+      // min(magnitude, balance − floor) would be a NEGATIVE decrement, which would ADD points on
+      // a debit. Clamp to 0 → a debit never moves such a wallet up; the whole magnitude is then a
+      // shortfall. For floor 0 and balanceBefore >= 0 this is identical to the original min().
+      const decrement = Math.max(0, Math.min(magnitude, balanceBefore - floor));
       data.redeemablePoints = { decrement };
       if (ledgerType === PointsLedgerType.REDEEM) {
         data.redeemedPoints = { increment: magnitude };
@@ -849,9 +857,12 @@ export class WalletService {
    * supplied transaction so it is atomic with the reversal status update.
    *
    * Invariant-aware decrement rules:
-   *  - redeemablePoints: decremented by max(0, min(points, redeemablePoints)) — CLAMPED at 0,
-   *    and an already-NEGATIVE balance is left unchanged (never raised by a debit; the whole
-   *    amount is the shortfall).
+   *  - redeemablePoints: decremented by max(0, min(points, redeemablePoints − floor)), where
+   *    floor = min(0, the balance just before the reversed credit was posted) — owner decision
+   *    2026-11-12: a reversal fully undoes a credit that landed on a NEGATIVE wallet (−841 +500
+   *    → −341, reverse → −841). Otherwise (or when `originalCredit` is omitted / not found) the
+   *    floor is 0. A balance already BELOW the floor is left unchanged (never raised by a debit;
+   *    the whole amount is the shortfall).
    *    If the partner has already redeemed some of the awarded points, redeemablePoints
    *    may be < points. We clamp rather than throw so the reversal still lands; the
    *    shortfall is recorded in the ledger description for owner review.
@@ -871,7 +882,7 @@ export class WalletService {
    *   Do NOT silently ignore this — a cash settlement may be needed out-of-band.
    *
    * NOTE: this routes through applyMovement's floored-debit path (redeemable decrements by
-   * max(0, min(magnitude, balance)); no lifetime/earned counter moves). The read of redeemablePoints
+   * max(0, min(magnitude, balance − floor)); no lifetime/earned counter moves). The read of redeemablePoints
    * below is only to derive `shortfall` for the description — not a second balance write.
    */
   async clawbackAward(
@@ -883,6 +894,11 @@ export class WalletService {
       sourceType?: string | null;
       sourceId?: string | null;
       description?: string | null;
+      // The ORIGINAL credit being reversed, as its WalletTransaction reference (credit-batch
+      // POINTS: { referenceType: 'CREDIT_BATCH', referenceId: <batchId> }). When given, the
+      // clawback's floor is the wallet balance just before that credit was posted if it was
+      // NEGATIVE (so the reversal fully undoes the credit), else 0. Omitted / not found → 0.
+      originalCredit?: { referenceType: string; referenceId: string } | null;
     } = {},
     tx: Prisma.TransactionClient,
   ): Promise<{ transactionId: string; newRedeemable: number; ledgerId: string; shortfall: number }> {
@@ -891,30 +907,57 @@ export class WalletService {
     const wallet = await tx.wallet.findFirst({ where: { partnerId } });
     if (!wallet) throw new NotFoundException('Wallet not found for this partner');
 
+    // Floor = min(0, balance just before the reversed credit was posted). A batch can post
+    // several credits to one wallet (one per field/row), written consecutively in the confirm
+    // tx; the EARLIEST is the wallet's balance before the batch — the lowest it can be legitimately
+    // returned to by reversing any of that batch's credits (decrement never exceeds `points`).
+    let creditBalanceBefore: number | null = null;
+    let originalCreditMissing = false;
+    if (opts.originalCredit) {
+      const original = await tx.walletTransaction.findFirst({
+        where: {
+          walletId: wallet.id,
+          transactionType: 'CREDIT_POINTS_EARNED',
+          referenceType: opts.originalCredit.referenceType,
+          referenceId: opts.originalCredit.referenceId,
+        },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        select: { balanceBefore: true },
+      });
+      if (original) creditBalanceBefore = original.balanceBefore;
+      else originalCreditMissing = true;
+    }
+    const floor = Math.min(0, creditBalanceBefore ?? 0);
+
     // A clawback reduces ONLY the spendable balance (redeemablePoints) — exactly like
     // a DEBIT_ADJUSTMENT. earnedPoints and every lifetime* counter are MONOTONIC and
     // are NEVER decremented (the locked wallet invariant): the wallet still records
     // that the points were earned; the reversal shows up as redeemablePoints dropping
-    // plus a DEBIT_ADJUSTMENT ledger entry. applyMovement floors redeemable at 0.
+    // plus a DEBIT_ADJUSTMENT ledger entry. applyMovement floors redeemable at `floor`.
     // Must mirror applyMovement's floored decrement exactly (incl. the Math.max(0, …) clamp for
-    // an already-negative wallet, where NOTHING is removed and the whole amount is shortfall).
-    const redeemableDecrement = Math.max(0, Math.min(points, wallet.redeemablePoints));
+    // a wallet already below the floor, where NOTHING is removed and the whole amount is shortfall).
+    const redeemableDecrement = Math.max(0, Math.min(points, wallet.redeemablePoints - floor));
     const shortfall = points - redeemableDecrement;
 
     let desc = opts.description ?? `Clawback: credit batch POINTS reversal`;
     if (shortfall > 0) {
-      desc +=
-        wallet.redeemablePoints < 0
-          ? ` [SHORTFALL: ${shortfall} pts not recovered — wallet balance already negative (${wallet.redeemablePoints}) — owner review required]`
-          : ` [SHORTFALL: ${shortfall} pts already redeemed — owner review required]`;
+      const missingNote = originalCreditMissing ? ' (original credit not found — floored at 0)' : '';
+      if (floor < 0) {
+        desc += ` [SHORTFALL: ${shortfall} pts not recovered — balance floored at ${floor}, its level before the reversed credit — owner review required]`;
+      } else if (wallet.redeemablePoints < 0) {
+        desc += ` [SHORTFALL: ${shortfall} pts not recovered — wallet balance already negative (${wallet.redeemablePoints})${missingNote} — owner review required]`;
+      } else {
+        desc += ` [SHORTFALL: ${shortfall} pts already redeemed${missingNote} — owner review required]`;
+      }
     }
 
     const movement = await this.applyMovement(tx, {
       wallet,
       walletTxType: 'DEBIT_ADJUSTMENT',
       ledgerType: PointsLedgerType.ADJUST,
-      // passing -points is correct: applyMovement's internal decrement = max(0, min(magnitude, redeemableBefore))
+      // passing -points is correct: applyMovement's internal decrement = max(0, min(magnitude, redeemableBefore − floor))
       points: -points,
+      debitFloor: floor,
       referenceType: opts.referenceType ?? null,
       referenceId: opts.referenceId ?? null,
       sourceType: opts.sourceType ?? null,

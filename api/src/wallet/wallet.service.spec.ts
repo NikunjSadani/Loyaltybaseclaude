@@ -1074,6 +1074,8 @@ function buildHarness(initial: InitialState = {}) {
         walletTxns.push(row);
         return row;
       },
+      findFirst: async ({ where, orderBy }: any = {}) =>
+        orderRows(walletTxns.filter((r) => matchWhere(r, where ?? {})), orderBy)[0] ?? null,
     },
     pointsLedger: {
       create: async ({ data }: any) => {
@@ -1359,7 +1361,7 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
     });
 
     // ── NEGATIVE-balance wallet: a debit must never ADD points ────────────────────────
-    it('NEG-1: wallet −841, +500 batch credit (→ −341), batch reversed → balance stays −341 (not 0); shortfall 500', async () => {
+    it('NEG-1 (no original-credit reference → floor 0): wallet −841, +500 (→ −341), clawback 500 → stays −341 (pre-fix bug jumped to 0); shortfall 500', async () => {
       const h = buildHarness({
         wallet: { redeemablePoints: -841, earnedPoints: 0, lifetimeEarned: 0 },
         config: { expiryDays: 90 },
@@ -1466,6 +1468,135 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
       expect(h.walletTxns[h.walletTxns.length - 1].description).toBe(
         'Clawback: credit batch POINTS reversal [SHORTFALL: 25 pts already redeemed — owner review required]',
       );
+    });
+
+    // ── Owner decision: a reversal fully undoes a credit that landed on a NEGATIVE wallet ──
+    // floor = min(0, balanceBefore of the original CREDIT_BATCH credit); not found → 0.
+    describe('reversal floor = balance before the reversed credit (when negative)', () => {
+      const ref = (batchId: string) => ({ referenceType: 'CREDIT_BATCH', referenceId: batchId });
+      const earn = (h: ReturnType<typeof buildHarness>, amt: number, batchId: string) =>
+        h.service.creditEarn('cp1', 'deoleo', amt, { referenceType: 'CREDIT_BATCH', referenceId: batchId });
+      const claw = async (h: ReturnType<typeof buildHarness>, amt: number, batchId: string) => {
+        let result: any;
+        await h.store.$transaction(async (tx: any) => {
+          result = await h.service.clawbackAward('cp1', amt, { originalCredit: ref(batchId) }, tx);
+        });
+        return result;
+      };
+      const lastWt = (h: ReturnType<typeof buildHarness>) => h.walletTxns[h.walletTxns.length - 1];
+
+      it('FLOOR-1: −841 +500 → −341, reverse → −841 (fully undone), shortfall 0, lot consumed', async () => {
+        const h = buildHarness({ wallet: { redeemablePoints: -841 }, config: { expiryDays: 90 } });
+        await earn(h, 500, 'b1');
+        expect(h.wallet.redeemablePoints).toBe(-341);
+        const lotId = h.rowsOfType('EARN')[0].id;
+        const res = await claw(h, 500, 'b1');
+        expect(h.wallet.redeemablePoints).toBe(-841);
+        expect(res.newRedeemable).toBe(-841);
+        expect(res.shortfall).toBe(0);
+        expect(lastWt(h)).toMatchObject({ points: -500, balanceBefore: -341, balanceAfter: -841, description: 'Clawback: credit batch POINTS reversal' });
+        expect(h.lot(lotId)!.remainingPoints).toBe(0);
+        expect(h.wallet.lifetimeEarned).toBe(500); // monotonic
+      });
+
+      it('FLOOR-2: credited while +300, spent to −10 by another debit, reverse 500 → stays −10 (floor 0), shortfall 500', async () => {
+        const h = buildHarness({ wallet: { redeemablePoints: 300 } });
+        await earn(h, 500, 'b1'); // balanceBefore +300 → floor 0
+        h.wallet.redeemablePoints = -10; // some other debit drove it to −10
+        const res = await claw(h, 500, 'b1');
+        expect(h.wallet.redeemablePoints).toBe(-10);
+        expect(res.shortfall).toBe(500);
+        expect(lastWt(h)).toMatchObject({ balanceBefore: -10, balanceAfter: -10 });
+        expect(lastWt(h).description).toBe(
+          'Clawback: credit batch POINTS reversal [SHORTFALL: 500 pts not recovered — wallet balance already negative (-10) — owner review required]',
+        );
+      });
+
+      it('FLOOR-3: −841 +500 → −341, +1000 → 659, reverse the 500 → 159, shortfall 0', async () => {
+        const h = buildHarness({ wallet: { redeemablePoints: -841 } });
+        await earn(h, 500, 'b1');
+        await earn(h, 1000, 'b2');
+        expect(h.wallet.redeemablePoints).toBe(659);
+        const res = await claw(h, 500, 'b1');
+        expect(h.wallet.redeemablePoints).toBe(159);
+        expect(res.shortfall).toBe(0);
+      });
+
+      it('FLOOR-4: the floor still limits — −841 +500 → −341, other debit to −600, reverse 500 → −841, shortfall 259', async () => {
+        const h = buildHarness({ wallet: { redeemablePoints: -841 } });
+        await earn(h, 500, 'b1');
+        h.wallet.redeemablePoints = -600;
+        const res = await claw(h, 500, 'b1');
+        expect(h.wallet.redeemablePoints).toBe(-841);
+        expect(res.shortfall).toBe(259);
+        expect(lastWt(h).description).toBe(
+          'Clawback: credit batch POINTS reversal [SHORTFALL: 259 pts not recovered — balance floored at -841, its level before the reversed credit — owner review required]',
+        );
+      });
+
+      it('FLOOR-5: several credits in one batch → floor is the balance before the batch (earliest credit)', async () => {
+        const h = buildHarness({ wallet: { redeemablePoints: -841 } });
+        await earn(h, 500, 'b1'); // −841 → −341
+        await earn(h, 200, 'b1'); // −341 → −141
+        const res = await claw(h, 500, 'b1'); // reverse the first → as if only +200 landed
+        expect(h.wallet.redeemablePoints).toBe(-641);
+        expect(res.shortfall).toBe(0);
+      });
+
+      it('FLOOR-6: original credit NOT found → floor 0 (current behaviour) and the note says so', async () => {
+        const h = buildHarness({ wallet: { redeemablePoints: -841 } });
+        await earn(h, 500, 'b1');
+        const res = await claw(h, 500, 'other-batch');
+        expect(h.wallet.redeemablePoints).toBe(-341);
+        expect(res.shortfall).toBe(500);
+        expect(lastWt(h).description).toBe(
+          'Clawback: credit batch POINTS reversal [SHORTFALL: 500 pts not recovered — wallet balance already negative (-341) (original credit not found — floored at 0) — owner review required]',
+        );
+      });
+
+      it('FLOOR-7: another wallet’s credit with the same batch id is never used as the floor', async () => {
+        const h = buildHarness({ wallet: { redeemablePoints: 0 } });
+        h.walletTxns.push({ id: 'x', walletId: 'w-other', transactionType: 'CREDIT_POINTS_EARNED', referenceType: 'CREDIT_BATCH', referenceId: 'b1', balanceBefore: -5000, createdAt: new Date(0) });
+        await earn(h, 100, 'b1'); // this wallet: balanceBefore 0
+        h.wallet.redeemablePoints = 40;
+        const res = await claw(h, 100, 'b1');
+        expect(h.wallet.redeemablePoints).toBe(0);
+        expect(res.shortfall).toBe(60);
+      });
+
+      // Positive cases with the original credit FOUND (balanceBefore >= 0 → floor 0): byte-identical.
+      it('POS-F1: 80 → reverse 50 → 30, shortfall 0, original description', async () => {
+        const h = buildHarness({ wallet: { redeemablePoints: 0 } });
+        await earn(h, 80, 'b1');
+        const res = await claw(h, 50, 'b1');
+        expect(h.wallet.redeemablePoints).toBe(30);
+        expect(res.shortfall).toBe(0);
+        expect(lastWt(h)).toMatchObject({ points: -50, balanceBefore: 80, balanceAfter: 30, description: 'Clawback: credit batch POINTS reversal' });
+      });
+
+      it('POS-F2: credited 50, spent to 30, reverse 50 → 0, shortfall 20, "already redeemed" text', async () => {
+        const h = buildHarness({ wallet: { redeemablePoints: 0 } });
+        await earn(h, 50, 'b1');
+        await h.service.debitRedeem('cp1', 20, { referenceId: 'o1' });
+        const res = await claw(h, 50, 'b1');
+        expect(h.wallet.redeemablePoints).toBe(0);
+        expect(res.shortfall).toBe(20);
+        expect(lastWt(h).description).toBe(
+          'Clawback: credit batch POINTS reversal [SHORTFALL: 20 pts already redeemed — owner review required]',
+        );
+      });
+
+      it('POS-F3: zero balance (credited 25, all redeemed) → reverse 25 → 0, shortfall 25, original text', async () => {
+        const h = buildHarness({ wallet: { redeemablePoints: 0 } });
+        await earn(h, 25, 'b1');
+        await h.service.debitRedeem('cp1', 25, { referenceId: 'o1' });
+        const res = await claw(h, 25, 'b1');
+        expect(h.wallet.redeemablePoints).toBe(0);
+        expect(res.shortfall).toBe(25);
+        expect(lastWt(h).description).toBe(
+          'Clawback: credit batch POINTS reversal [SHORTFALL: 25 pts already redeemed — owner review required]',
+        );
+      });
     });
   });
 

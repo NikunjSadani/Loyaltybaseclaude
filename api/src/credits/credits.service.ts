@@ -2472,6 +2472,9 @@ export class CreditsService {
                   sourceType: 'CREDIT_FIELD',
                   sourceId: reversal.fieldId,
                   description: `Clawback for reversal ${id} — batch POINTS reversal`,
+                  // The credit being reversed (posted by confirm as CREDIT_BATCH/<batchId>):
+                  // a credit that landed on a NEGATIVE wallet is fully undone on reversal.
+                  originalCredit: { referenceType: 'CREDIT_BATCH', referenceId: reversal.batchId },
                 },
                 tx,
               );
