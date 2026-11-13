@@ -59,17 +59,48 @@ export class TdsConfigController {
   @Put()
   @Roles('GIFSY_ADMIN')
   async set(@CurrentUser() user: JwtPayload, @Body() dto: SetTdsConfigDto) {
+    // PROD BUG FIX: an operator ASSUMED into a tenant always writes THAT tenant (the FE used to
+    // send its home clientId 'gifsy', so the save landed on 'gifsy' while GET read the tenant).
+    const clientId = await this.resolveWriteTarget(user, dto.clientId);
     const settingDto: UpsertSettingDto = {
       key: 'tdsPolicy',
       value: { section: dto.section, methodology: dto.methodology },
       category: 'tds',
-      description: 'Per-tenant TDS treatment for visibility-stream payouts (section + methodology).',
+      description: 'Per-tenant TDS treatment (section for visibility payouts; methodology for credit-upload payouts).',
     };
 
     // Write under the target tenant's scope; operator identity is preserved for the audit.
-    await this.adminCore.upsertSetting({ ...user, clientId: dto.clientId }, settingDto);
+    await this.adminCore.upsertSetting({ ...user, clientId }, settingDto);
 
-    return { clientId: dto.clientId, section: dto.section, methodology: dto.methodology };
+    return { clientId, section: dto.section, methodology: dto.methodology };
+  }
+
+  /**
+   * The tenant a per-tenant TDS config WRITE targets:
+   *  - ASSUMED operator (not platformWide) → ALWAYS the assumed tenant (user.clientId); a body
+   *    clientId that differs → 403 (never silently written elsewhere).
+   *  - un-assumed GIFSY → body clientId is REQUIRED (400 if missing).
+   * Either way the tenant must exist (404).
+   */
+  private async resolveWriteTarget(user: JwtPayload, bodyClientId: string | undefined): Promise<string> {
+    let clientId: string;
+    if (!platformWide(user)) {
+      if (bodyClientId && bodyClientId !== user.clientId) {
+        throw new ForbiddenException(
+          `You are working in "${user.clientId}" — this setting can only be changed for that tenant.`,
+        );
+      }
+      clientId = user.clientId;
+    } else {
+      if (!bodyClientId) {
+        throw new BadRequestException('clientId is required — choose the tenant to change.');
+      }
+      clientId = bodyClientId;
+    }
+    if (!(await this.tds.clientExists(clientId))) {
+      throw new NotFoundException(`Client "${clientId}" does not exist.`);
+    }
+    return clientId;
   }
 
   /**
@@ -99,9 +130,6 @@ export class TdsConfigController {
   @Put('imported-payouts')
   @Roles('GIFSY_ADMIN')
   async setImportedPayouts(@CurrentUser() user: JwtPayload, @Body() dto: SetImportedPayoutsConfigDto) {
-    if (!platformWide(user) && dto.clientId !== user.clientId) {
-      throw new ForbiddenException('You can only change this setting for the tenant you are working in.');
-    }
     const countFrom = dto.countFrom === null ? null : parseIsoCalendarDate(dto.countFrom);
     if (dto.countFrom !== null && countFrom === null) {
       throw new BadRequestException('countFrom must be a real calendar date (YYYY-MM-DD), or null to turn it off.');
@@ -112,9 +140,7 @@ export class TdsConfigController {
         throw new BadRequestException(`countFrom must be between ${min} and ${max} (today + 1 year).`);
       }
     }
-    if (!(await this.tds.clientExists(dto.clientId))) {
-      throw new NotFoundException(`Client "${dto.clientId}" does not exist.`);
-    }
+    const clientId = await this.resolveWriteTarget(user, dto.clientId);
     const settingDto: UpsertSettingDto = {
       key: TDS_IMPORTED_PAYOUTS_SETTING_KEY,
       value: { countFrom },
@@ -122,9 +148,9 @@ export class TdsConfigController {
       description:
         'Count imported (vendor) payouts paid on/after countFrom in the 194R report — liability only, no deduction.',
     };
-    await this.adminCore.upsertSetting({ ...user, clientId: dto.clientId }, settingDto, {
+    await this.adminCore.upsertSetting({ ...user, clientId }, settingDto, {
       allowPlatformOnlyKey: true,
     });
-    return { clientId: dto.clientId, countFrom };
+    return { clientId, countFrom };
   }
 }

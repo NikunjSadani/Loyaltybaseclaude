@@ -43,20 +43,29 @@ type Section = 'SEC_194R' | 'SEC_194C'
 type Methodology = 'DEDUCT' | 'GROSS_UP'
 
 /** Records PUT calls; GET resolves with the given effective policy (envelope-wrapped). */
-function stubFetch(policy: { clientId: string; section: Section; methodology: Methodology }) {
+function stubFetch(
+  policy: { clientId: string; section: Section; methodology: Methodology },
+  opts: { putIgnored?: boolean } = {},
+) {
   const puts: Array<{ url: string; body: unknown }> = []
+  // The "server": a successful PUT changes what the next GET returns (the page re-fetches after a
+  // save). `putIgnored` simulates the prod bug — the PUT "succeeds" but the tenant's value is unchanged.
+  let current = { ...policy }
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
     if (url === '/api/admin/tds/config' && (!init || (init.method ?? 'GET') === 'GET')) {
+      const data = { ...current }
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ success: true, data: policy }),
+        json: () => Promise.resolve({ success: true, data }),
       })
     }
     if (url === '/api/admin/tds/config' && init?.method === 'PUT') {
-      puts.push({ url, body: JSON.parse(init.body as string) })
+      const body = JSON.parse(init.body as string)
+      puts.push({ url, body })
+      if (!opts.putIgnored) current = { ...current, section: body.section, methodology: body.methodology }
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ success: true, data: JSON.parse(init.body as string) }),
+        json: () => Promise.resolve({ success: true, data: body }),
       })
     }
     return Promise.reject(new Error('unexpected fetch in test: ' + url))
@@ -104,6 +113,35 @@ describe('TDS Treatment config page', () => {
     fireEvent.click(screen.getByTestId('tds-section-sec_194r'))
     await waitFor(() => expect(puts).toHaveLength(2))
     expect(puts[1].body).toEqual({ clientId: 'gifsy', section: 'SEC_194R', methodology: 'DEDUCT' })
+  })
+
+  it('ASSUMED into bajaj (session clientId is the home "gifsy"): the PUT targets the GET tenant "bajaj"', async () => {
+    // PROD BUG: the page used to send session.clientId ('gifsy') → the policy was saved for 'gifsy'.
+    const { puts } = stubFetch({ clientId: 'bajaj', section: 'SEC_194C', methodology: 'GROSS_UP' })
+    render(<TdsConfigPage />)
+    expect(await screen.findByTestId('tds-config-tenant')).toHaveTextContent('bajaj')
+    const s194r = screen.getByTestId('tds-section-sec_194r')
+    await waitFor(() => expect(s194r).not.toBeDisabled())
+    fireEvent.click(s194r)
+    await waitFor(() => expect(puts).toHaveLength(1))
+    expect(puts[0].body).toEqual({ clientId: 'bajaj', section: 'SEC_194R', methodology: 'GROSS_UP' })
+    // Re-fetched after the save → shows the STORED value.
+    await waitFor(() => expect(screen.getByTestId('tds-saved-flash')).toBeInTheDocument())
+    expect(screen.getByTestId('tds-section-sec_194r')).toHaveAttribute('aria-checked', 'true')
+  })
+
+  it('after a save the page RE-FETCHES: if the stored value did not change it shows the stored value + an error (no false "Saved")', async () => {
+    const { puts, fetchMock } = stubFetch({ clientId: 'bajaj', section: 'SEC_194C', methodology: 'GROSS_UP' }, { putIgnored: true })
+    render(<TdsConfigPage />)
+    const s194r = await screen.findByTestId('tds-section-sec_194r')
+    await waitFor(() => expect(s194r).not.toBeDisabled())
+    fireEvent.click(s194r)
+    await waitFor(() => expect(puts).toHaveLength(1))
+    expect(await screen.findByTestId('tds-save-error')).toHaveTextContent('did not take effect')
+    expect(screen.getByTestId('tds-section-sec_194c')).toHaveAttribute('aria-checked', 'true')
+    expect(screen.queryByTestId('tds-saved-flash')).not.toBeInTheDocument()
+    const gets = fetchMock.mock.calls.filter(([u, i]) => u === '/api/admin/tds/config' && !(i as RequestInit | undefined)?.method)
+    expect(gets.length).toBe(2) // seed + post-save re-fetch
   })
 
   it('renders read-only/disabled toggles for CLIENT_ADMIN and never PUTs', async () => {

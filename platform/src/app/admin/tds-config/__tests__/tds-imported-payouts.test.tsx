@@ -31,13 +31,16 @@ function stub(
 ) {
   const puts: unknown[] = []
   let getCalls = 0
+  // The "server": a successful PUT changes what the next GET returns (the card re-fetches after save).
+  let current: { clientId: string; countFrom: string | null; malformed?: boolean; raw?: unknown } = { ...initial }
   vi.stubGlobal(
     'fetch',
     vi.fn((url: string, init?: RequestInit) => {
       if (url === URL && (init?.method ?? 'GET') === 'GET') {
         getCalls++
         if (opts.getFails || (opts.getFailsOnce && getCalls === 1)) return Promise.reject(new Error('down'))
-        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ success: true, data: initial }) })
+        const data = current
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ success: true, data }) })
       }
       if (url === URL && init?.method === 'PUT') {
         const body = JSON.parse(init.body as string)
@@ -45,7 +48,8 @@ function stub(
         if (opts.putFails) {
           return Promise.resolve({ ok: false, status: 403, json: () => Promise.resolve({ success: false, error: 'Forbidden' }) })
         }
-        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ success: true, data: body }) })
+        current = { clientId: body.clientId ?? current.clientId, countFrom: body.countFrom }
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ success: true, data: current }) })
       }
       return Promise.reject(new Error('unexpected ' + url))
     }),
@@ -58,7 +62,7 @@ describe('TdsImportedPayoutsCard', () => {
 
   it('OFF: shows the Off status; GIFSY switches it on with a date → PUT { clientId: loaded tenant, countFrom }', async () => {
     const { puts } = stub({ clientId: 'bajaj', countFrom: null })
-    render(<TdsImportedPayoutsCard clientId="gifsy" isGifsy />)
+    render(<TdsImportedPayoutsCard isGifsy />)
     expect(await screen.findByTestId('tds-imported-status')).toHaveTextContent(/Off/)
     const save = screen.getByTestId('tds-imported-save')
     expect(save).toBeDisabled() // no date yet
@@ -76,9 +80,28 @@ describe('TdsImportedPayoutsCard', () => {
     expect(screen.getByTestId('tds-imported-saved')).toHaveAttribute('role', 'status')
   })
 
+  it('targets the GET-returned tenant, never a session clientId; no tenant in the GET → PUT omits clientId (API pins it)', async () => {
+    const { puts } = stub({ clientId: '', countFrom: null })
+    render(<TdsImportedPayoutsCard isGifsy />)
+    fireEvent.change(await screen.findByTestId('tds-imported-date'), { target: { value: FY_START } })
+    fireEvent.click(screen.getByTestId('tds-imported-save'))
+    await waitFor(() => expect(puts).toHaveLength(1))
+    expect(puts[0]).toEqual({ countFrom: FY_START })
+    expect(JSON.stringify(puts[0])).not.toContain('gifsy')
+  })
+
+  it('after a save the card RE-FETCHES and shows the stored value', async () => {
+    const s = stub({ clientId: 'bajaj', countFrom: null })
+    render(<TdsImportedPayoutsCard isGifsy />)
+    fireEvent.change(await screen.findByTestId('tds-imported-date'), { target: { value: FY_START } })
+    fireEvent.click(screen.getByTestId('tds-imported-save'))
+    await waitFor(() => expect(s.getCalls()).toBe(2))
+    await waitFor(() => expect(screen.getByTestId('tds-imported-status')).toHaveTextContent(formatCountFrom(FY_START)))
+  })
+
   it('ON: "Switch off" asks to confirm; Cancel does nothing; "Yes, switch off" PUTs countFrom null', async () => {
     const { puts } = stub({ clientId: 'bajaj', countFrom: FY_START })
-    render(<TdsImportedPayoutsCard clientId="bajaj" isGifsy />)
+    render(<TdsImportedPayoutsCard isGifsy />)
     fireEvent.click(await screen.findByTestId('tds-imported-off'))
     expect(screen.getByTestId('tds-imported-off-confirm')).toBeInTheDocument()
     expect(puts).toHaveLength(0)
@@ -94,7 +117,7 @@ describe('TdsImportedPayoutsCard', () => {
 
   it('a date before the current FY shows the earlier-years warning and needs an explicit confirm', async () => {
     const { puts } = stub({ clientId: 'bajaj', countFrom: null })
-    render(<TdsImportedPayoutsCard clientId="bajaj" isGifsy />)
+    render(<TdsImportedPayoutsCard isGifsy />)
     fireEvent.change(await screen.findByTestId('tds-imported-date'), { target: { value: EARLIER } })
     const warning = screen.getByTestId('tds-imported-earlier-fy-warning')
     expect(warning).toHaveTextContent('this will also count imported payouts in earlier financial years')
@@ -112,7 +135,7 @@ describe('TdsImportedPayoutsCard', () => {
 
   it('inline validation: empty, before 2000-01-01 and after today + 1 year are rejected (no PUT)', async () => {
     const { puts } = stub({ clientId: 'bajaj', countFrom: FY_START })
-    render(<TdsImportedPayoutsCard clientId="bajaj" isGifsy />)
+    render(<TdsImportedPayoutsCard isGifsy />)
     const input = await screen.findByTestId('tds-imported-date')
     expect(input).toHaveAttribute('min', '2000-01-01')
     expect(input).toHaveAttribute('max', importedMaxDate())
@@ -134,7 +157,7 @@ describe('TdsImportedPayoutsCard', () => {
 
   it('malformed stored value: opens with the "invalid" banner; switching off clears it (PUT null)', async () => {
     const { puts } = stub({ clientId: 'bajaj', countFrom: null, malformed: true, raw: { countFrom: 'soon' } })
-    render(<TdsImportedPayoutsCard clientId="bajaj" isGifsy />)
+    render(<TdsImportedPayoutsCard isGifsy />)
     const banner = await screen.findByTestId('tds-imported-malformed')
     expect(banner).toHaveAttribute('role', 'alert')
     expect(banner).toHaveTextContent('The stored value is invalid')
@@ -149,7 +172,7 @@ describe('TdsImportedPayoutsCard', () => {
 
   it('malformed stored value: re-saving a valid date repairs it', async () => {
     const { puts } = stub({ clientId: 'bajaj', countFrom: null, malformed: true, raw: 42 })
-    render(<TdsImportedPayoutsCard clientId="bajaj" isGifsy />)
+    render(<TdsImportedPayoutsCard isGifsy />)
     await screen.findByTestId('tds-imported-malformed')
     fireEvent.change(screen.getByTestId('tds-imported-date'), { target: { value: FY_START } })
     const save = screen.getByTestId('tds-imported-save')
@@ -162,7 +185,7 @@ describe('TdsImportedPayoutsCard', () => {
 
   it('malformed stored value, tenant admin: banner asks a Gifsy Admin; no repair controls', async () => {
     stub({ clientId: 'bajaj', countFrom: null, malformed: true, raw: 'x' })
-    render(<TdsImportedPayoutsCard clientId="bajaj" isGifsy={false} />)
+    render(<TdsImportedPayoutsCard isGifsy={false} />)
     expect(await screen.findByTestId('tds-imported-malformed')).toHaveTextContent('Ask a Gifsy Admin')
     expect(screen.queryByTestId('tds-imported-malformed-off')).not.toBeInTheDocument()
     expect(screen.queryByTestId('tds-imported-date')).not.toBeInTheDocument()
@@ -170,7 +193,7 @@ describe('TdsImportedPayoutsCard', () => {
 
   it('tenant admin: read-only status, no editor, never PUTs', async () => {
     const { puts } = stub({ clientId: 'bajaj', countFrom: FY_START })
-    render(<TdsImportedPayoutsCard clientId="bajaj" isGifsy={false} />)
+    render(<TdsImportedPayoutsCard isGifsy={false} />)
     expect(await screen.findByTestId('tds-imported-status')).toHaveTextContent(/On/)
     expect(screen.getByTestId('tds-imported-readonly')).toBeInTheDocument()
     expect(screen.queryByTestId('tds-imported-date')).not.toBeInTheDocument()
@@ -179,7 +202,7 @@ describe('TdsImportedPayoutsCard', () => {
 
   it('load failure → explicit error (role=alert), no editor; Retry re-fetches and recovers', async () => {
     const s = stub({ clientId: 'bajaj', countFrom: null }, { getFailsOnce: true })
-    render(<TdsImportedPayoutsCard clientId="bajaj" isGifsy />)
+    render(<TdsImportedPayoutsCard isGifsy />)
     expect(await screen.findByTestId('tds-imported-load-error')).toHaveAttribute('role', 'alert')
     expect(screen.queryByTestId('tds-imported-status')).not.toBeInTheDocument()
     fireEvent.click(screen.getByTestId('tds-imported-retry'))
@@ -190,7 +213,7 @@ describe('TdsImportedPayoutsCard', () => {
 
   it('save failure → error shown (role=alert), status unchanged', async () => {
     stub({ clientId: 'bajaj', countFrom: null }, { putFails: true })
-    render(<TdsImportedPayoutsCard clientId="bajaj" isGifsy />)
+    render(<TdsImportedPayoutsCard isGifsy />)
     fireEvent.change(await screen.findByTestId('tds-imported-date'), { target: { value: FY_START } })
     fireEvent.click(screen.getByTestId('tds-imported-save'))
     expect(await screen.findByTestId('tds-imported-save-error')).toHaveAttribute('role', 'alert')
@@ -199,7 +222,7 @@ describe('TdsImportedPayoutsCard', () => {
 
   it('copy: liability is payer-borne for every client; later TDS goes in as deposits only', async () => {
     stub({ clientId: 'bajaj', countFrom: null })
-    render(<TdsImportedPayoutsCard clientId="bajaj" isGifsy />)
+    render(<TdsImportedPayoutsCard isGifsy />)
     const card = await screen.findByTestId('tds-imported-card')
     expect(card).toHaveTextContent('this liability is payer-borne for every client')
     expect(card).not.toHaveTextContent(/gross-up client/i)

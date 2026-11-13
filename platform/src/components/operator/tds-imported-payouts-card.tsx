@@ -73,9 +73,12 @@ function isRealDate(iso: string): boolean {
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d
 }
 
-export function TdsImportedPayoutsCard({ clientId, isGifsy }: { clientId: string; isGifsy: boolean }) {
-  // The tenant the stored value was LOADED for — the save always targets that same tenant.
-  const [tenantId, setTenantId] = useState(clientId)
+export function TdsImportedPayoutsCard({ isGifsy }: { isGifsy: boolean }) {
+  // The tenant the stored value was LOADED for (GET → data.clientId; the ASSUMED tenant for an
+  // assumed operator) — the save always targets that same tenant. Never the session's clientId
+  // (that is the operator's HOME 'gifsy' while assumed). Empty → the PUT omits clientId and the
+  // API pins it to the assumed tenant.
+  const [tenantId, setTenantId] = useState('')
   const [stored, setStored] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [touched, setTouched] = useState(false)
@@ -101,7 +104,7 @@ export function TdsImportedPayoutsCard({ clientId, isGifsy }: { clientId: string
       .then((res) => {
         if (cancelled) return
         if (res.success && res.data) {
-          setTenantId(res.data.clientId || clientId)
+          setTenantId(res.data.clientId || '')
           setMalformed(!!res.data.malformed)
           setMalformedRaw(res.data.malformed ? res.data.raw : undefined)
           setStored(res.data.countFrom ?? null)
@@ -121,7 +124,7 @@ export function TdsImportedPayoutsCard({ clientId, isGifsy }: { clientId: string
         if (!cancelled) setLoading(false)
       })
     return () => { cancelled = true }
-  }, [clientId])
+  }, [])
 
   useEffect(() => load(), [load])
 
@@ -130,7 +133,10 @@ export function TdsImportedPayoutsCard({ clientId, isGifsy }: { clientId: string
     setSaving(true)
     setSaveError(null)
     setSaved(false)
-    const res = await api.put<{ clientId: string; countFrom: string | null }>(ENDPOINT, { clientId: tenantId, countFrom: next })
+    const res = await api.put<{ clientId: string; countFrom: string | null }>(ENDPOINT, {
+      ...(tenantId ? { clientId: tenantId } : {}),
+      countFrom: next,
+    })
     setSaving(false)
     setConfirmingOff(false)
     if (!res.success) {
@@ -146,6 +152,8 @@ export function TdsImportedPayoutsCard({ clientId, isGifsy }: { clientId: string
     setEarlierFyConfirmed(false)
     setSaved(true)
     setTimeout(() => setSaved(false), 3000)
+    // Re-read the stored value so the card always shows what is ACTUALLY stored for this tenant.
+    load()
   }
 
   const maxDate = importedMaxDate()

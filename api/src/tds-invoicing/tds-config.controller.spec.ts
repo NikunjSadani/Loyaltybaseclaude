@@ -183,6 +183,39 @@ describe('TdsConfigController', () => {
       expect(res).toEqual({ clientId: 'deoleo', section: 'SEC_194C', methodology: 'DEDUCT' });
     });
 
+    // PROD BUG (owner, Bajaj): assumed operator's FE sent its HOME clientId 'gifsy' → the policy was
+    // written for 'gifsy' while GET read 'bajaj'. An assumed operator is now pinned to the assumed tenant.
+    const BAJAJ_ASSUMED: JwtPayload = { sub: 'op', role: 'GIFSY_ADMIN', clientId: 'bajaj', phone: '9', name: 'Op', assumed: true };
+    const body194R = { section: 'SEC_194R' as SetTdsConfigDto['section'], methodology: 'GROSS_UP' as SetTdsConfigDto['methodology'] };
+
+    it('ASSUMED into bajaj, body clientId "gifsy" (the old FE) → 403, nothing written', async () => {
+      await expect(controller.set(BAJAJ_ASSUMED, { clientId: 'gifsy', ...body194R })).rejects.toThrow(ForbiddenException);
+      await expect(controller.set(BAJAJ_ASSUMED, { clientId: 'gifsy', ...body194R })).rejects.toThrow(/working in "bajaj"/);
+      expect(adminCore.upsertSetting).not.toHaveBeenCalled();
+    });
+
+    it('ASSUMED into bajaj, no body clientId (or "bajaj") → writes bajaj', async () => {
+      const r1 = await controller.set(BAJAJ_ASSUMED, body194R);
+      const r2 = await controller.set(BAJAJ_ASSUMED, { clientId: 'bajaj', ...body194R });
+      expect(adminCore.upsertSetting.mock.calls.map((c) => c[0].clientId)).toEqual(['bajaj', 'bajaj']);
+      expect(r1).toEqual({ clientId: 'bajaj', section: 'SEC_194R', methodology: 'GROSS_UP' });
+      expect(r2.clientId).toBe('bajaj');
+    });
+
+    it('un-assumed GIFSY: body clientId required (400) and must exist (404)', async () => {
+      await expect(controller.set(GIFSY, body194R)).rejects.toThrow(BadRequestException);
+      tds.clientExists.mockResolvedValue(false);
+      await expect(controller.set(GIFSY, { clientId: 'nope', ...body194R })).rejects.toThrow(NotFoundException);
+      expect(adminCore.upsertSetting).not.toHaveBeenCalled();
+    });
+
+    it('imported-payouts PUT uses the same pinning: assumed + no clientId → assumed tenant; un-assumed + none → 400', async () => {
+      const res = await controller.setImportedPayouts(BAJAJ_ASSUMED, { countFrom: null });
+      expect(res).toEqual({ clientId: 'bajaj', countFrom: null });
+      expect(adminCore.upsertSetting.mock.calls[0][0].clientId).toBe('bajaj');
+      await expect(controller.setImportedPayouts(GIFSY, { countFrom: null })).rejects.toThrow(BadRequestException);
+    });
+
     it('SET is GIFSY_ADMIN-only; RolesGuard denies a CLIENT_ADMIN', () => {
       const roles = Reflect.getMetadata(ROLES_KEY, TdsConfigController.prototype.set);
       expect(roles).toEqual(['GIFSY_ADMIN']);
