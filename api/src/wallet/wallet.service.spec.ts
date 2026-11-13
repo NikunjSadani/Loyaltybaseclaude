@@ -1046,6 +1046,7 @@ function buildHarness(initial: InitialState = {}) {
     ...(initial.wallet ?? {}),
   };
   const walletTxns: AnyRow[] = [];
+  const rawWalletTxCreates: AnyRow[] = [];
   const auditLogs: AnyRow[] = [];
   const config = initial.config ?? null;
   const clientId = 'deoleo'; // the single tenant these FIFO tests operate under
@@ -1073,7 +1074,10 @@ function buildHarness(initial: InitialState = {}) {
     },
     walletTransaction: {
       create: async ({ data }: any) => {
-        const row = { id: `wt${++seq}`, createdAt: new Date(NOW.getTime() + seq), ...data };
+        rawWalletTxCreates.push(data);
+        // Deterministic ordering in tests: the service's under-lock createdAt stamp (asserted via
+        // rawWalletTxCreates) is replaced by a strictly increasing harness clock.
+        const row = { id: `wt${++seq}`, ...data, createdAt: new Date(NOW.getTime() + seq) };
         walletTxns.push(row);
         return row;
       },
@@ -1087,6 +1091,7 @@ function buildHarness(initial: InitialState = {}) {
     },
     outlet: {
       findMany: async ({ where }: any) => (initial.outlets ?? []).filter((o) => matchWhere(o, where ?? {})),
+      findFirst: async ({ where }: any) => (initial.outlets ?? []).find((o) => matchWhere(o, where ?? {})) ?? null,
     },
     creditReversal: {
       findFirst: async ({ where }: any) => (initial.reversals ?? []).find((r) => matchWhere(r, where ?? {})) ?? null,
@@ -1162,6 +1167,7 @@ function buildHarness(initial: InitialState = {}) {
     wallet: walletRow,
     ledger,
     walletTxns,
+    rawWalletTxCreates,
     auditLogs,
     lot: (id: string) => ledger.find((r) => r.id === id),
     spendableLots: () => ledger.filter((r) => SPENDABLE.includes(r.transactionType) && !r.isExpired),
@@ -1596,13 +1602,12 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
         expect(res.shortfall).toBe(400);
       });
 
-      it('EXACT-3: a field the batch never credited to this wallet → not found → floor 0 + note', async () => {
+      it('EXACT-3: a field the batch never credited to this wallet → not found → clawback REFUSED, wallet untouched', async () => {
         const h = buildHarness({ wallet: { redeemablePoints: -841 } });
         await earn(h, 500, 'b1', 'f1');
-        const res = await claw(h, 500, 'b1', 'f9');
+        await expect(claw(h, 500, 'b1', 'f9')).rejects.toThrow(/Cannot claw back: this partner's wallet has no credit/);
         expect(h.wallet.redeemablePoints).toBe(-341);
-        expect(res.shortfall).toBe(500);
-        expect(lastWt(h).description).toContain('(original credit not found — floored at 0)');
+        expect(h.walletTxns.filter((t) => t.transactionType === 'DEBIT_ADJUSTMENT')).toHaveLength(0);
       });
 
       // ── Legacy credits (posted before metadata existed) → replay the stored batch rows ──
@@ -1616,9 +1621,10 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
           { outletId: 'OC1', fieldId: 'f3', awardType: 'POINTS', status: 'ERROR', amount: 50 }, // not credited
           { outletId: 'OC1', fieldId: 'f2', awardType: 'POINTS', status: 'OK', amount: 300 },
         ];
+        const CONFIRMED = new Date(NOW.getTime() - 86_400_000);
         const base = {
-          batches: [{ id: 'b1', clientId: 'deoleo', rows: rowsB1 }],
-          outlets: [{ outletCode: 'OC1', partnerId: 'cp1', clientId: 'deoleo' }],
+          batches: [{ id: 'b1', clientId: 'deoleo', rows: rowsB1, confirmedAt: CONFIRMED }],
+          outlets: [{ outletCode: 'OC1', partnerId: 'cp1', clientId: 'deoleo', updatedAt: new Date(CONFIRMED.getTime() - 1000) }],
         };
 
         it('LEGACY-1: the counter-example resolves exactly via row replay (reverse B → floor 0, shortfall 300)', async () => {
@@ -1634,7 +1640,7 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
         it('LEGACY-2: −841 +500 (legacy) → −341, reverse → −841 (fully undone)', async () => {
           const h = buildHarness({
             wallet: { redeemablePoints: -841 },
-            batches: [{ id: 'b1', clientId: 'deoleo', rows: [rowsB1[0]] }],
+            batches: [{ id: 'b1', clientId: 'deoleo', rows: [rowsB1[0]], confirmedAt: CONFIRMED }],
             outlets: base.outlets,
           });
           await legacyEarn(h, 500, 'b1');
@@ -1643,10 +1649,23 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
           expect(res.shortfall).toBe(0);
         });
 
+        it('LEGACY-4: an outlet of this partner changed after the batch was confirmed (possible relink) → ambiguous → floor 0 + note', async () => {
+          const h = buildHarness({
+            wallet: { redeemablePoints: -841 },
+            batches: [{ id: 'b1', clientId: 'deoleo', rows: [rowsB1[0]], confirmedAt: CONFIRMED }],
+            outlets: [{ outletCode: 'OC1', partnerId: 'cp1', clientId: 'deoleo', updatedAt: new Date(CONFIRMED.getTime() + 1000) }],
+          });
+          await legacyEarn(h, 500, 'b1');
+          const res = await claw(h, 500, 'b1', 'f1');
+          expect(h.wallet.redeemablePoints).toBe(-341);
+          expect(res.shortfall).toBe(500);
+          expect(lastWt(h).description).toContain('(original credit ambiguous — floored at 0)');
+        });
+
         it('LEGACY-3: replay does not line up (amounts differ) → ambiguous → floor 0 + note', async () => {
           const h = buildHarness({
             wallet: { redeemablePoints: -841 },
-            batches: [{ id: 'b1', clientId: 'deoleo', rows: [{ ...rowsB1[0], amount: 499 }] }],
+            batches: [{ id: 'b1', clientId: 'deoleo', rows: [{ ...rowsB1[0], amount: 499 }], confirmedAt: CONFIRMED }],
             outlets: base.outlets,
           });
           await legacyEarn(h, 500, 'b1');
@@ -1659,7 +1678,8 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
 
       // ── Concurrency: the wallet row is locked before the balance is read ──────────
       it('LOCK-1: clawbackAward takes SELECT … FOR UPDATE on the wallet before reading the balance', async () => {
-        const h = buildHarness({ wallet: { redeemablePoints: 80 } });
+        const h = buildHarness({ wallet: { redeemablePoints: 0 } });
+        await earn(h, 80, 'b1');
         await claw(h, 50, 'b1');
         const call = (h.store.$queryRaw as jest.Mock).mock.calls[0];
         expect(call[0].join('?')).toMatch(/SELECT id FROM wallets WHERE id = \? FOR UPDATE/);
@@ -1722,6 +1742,46 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
         }
       });
 
+      // ── Floor clamp (audit BLOCKER): never below the lowest pre-credit balance involved ──
+      it('CLAMP-1 (Deoleo-reachable): 0, f1 +500, redeem 500, f2 +300 → reversing f1/f2 in EITHER order ends at 0, never −300', async () => {
+        for (const order of [['f1', 'f2'], ['f2', 'f1']]) {
+          const h = buildHarness({ wallet: { redeemablePoints: 0 } });
+          await earn(h, 500, 'b1', 'f1');
+          await h.service.debitRedeem('cp1', 500, { referenceId: 'o1' });
+          await earn(h, 300, 'b1', 'f2');
+          const amt = (f: string) => (f === 'f1' ? 500 : 300);
+          await claw(h, amt(order[0]), 'b1', order[0]);
+          await claw(h, amt(order[1]), 'b1', order[1]);
+          expect(h.wallet.redeemablePoints).toBe(0);
+          expect(Math.min(...h.walletTxns.map((t) => t.balanceAfter))).toBeGreaterThanOrEqual(0);
+        }
+      });
+
+      it('CLAMP-2: −100, E +500, redeem 400, X +300 → reversing E/X in EITHER order ends at −100', async () => {
+        for (const order of [['fE', 'fX'], ['fX', 'fE']]) {
+          const h = buildHarness({ wallet: { redeemablePoints: -100 } });
+          await earn(h, 500, 'b1', 'fE'); // 400, landed at −100
+          await h.service.debitRedeem('cp1', 400, { referenceId: 'o1' }); // 0
+          await earn(h, 300, 'b1', 'fX'); // 300, landed at 0
+          const amt = (f: string) => (f === 'fE' ? 500 : 300);
+          await claw(h, amt(order[0]), 'b1', order[0]);
+          await claw(h, amt(order[1]), 'b1', order[1]);
+          expect(h.wallet.redeemablePoints).toBe(-100);
+        }
+      });
+
+      it('STAMP: credit-batch credits and reversal clawbacks are written with an explicit createdAt (taken under the wallet lock); plain movements are not', async () => {
+        const h = buildHarness({ wallet: { redeemablePoints: 0 } });
+        await earn(h, 80, 'b1');
+        await h.service.debitRedeem('cp1', 10, { referenceId: 'o1' });
+        await claw(h, 50, 'b1');
+        const [credit, redeem, clawback] = h.rawWalletTxCreates;
+        expect(credit.createdAt).toBeInstanceOf(Date);
+        expect(redeem.createdAt).toBeUndefined(); // Deoleo's ordinary movements: unchanged create data
+        expect(clawback.createdAt).toBeInstanceOf(Date);
+        expect(clawback.createdAt.getTime()).toBeGreaterThanOrEqual(credit.createdAt.getTime());
+      });
+
       it('ORDER-4: a clawback that ran BEFORE the later credit was posted is not double-counted', async () => {
         const h = buildHarness({ wallet: { redeemablePoints: -841 } });
         await earn(h, 500, 'b1', 'f1'); // −341 (landed at −841)
@@ -1748,15 +1808,11 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
         expect(h.wallet.redeemablePoints).toBe(-841);
       });
 
-      it('FLOOR-6: original credit NOT found → floor 0 (current behaviour) and the note says so', async () => {
-        const h = buildHarness({ wallet: { redeemablePoints: -841 } });
-        await earn(h, 500, 'b1');
-        const res = await claw(h, 500, 'other-batch');
-        expect(h.wallet.redeemablePoints).toBe(-341);
-        expect(res.shortfall).toBe(500);
-        expect(lastWt(h).description).toBe(
-          'Clawback: credit batch POINTS reversal [SHORTFALL: 500 pts not recovered — wallet balance already negative (-341) (original credit not found — floored at 0) — owner review required]',
-        );
+      it('FLOOR-6: no credit from that batch on this wallet (e.g. outlet relinked) → clawback REFUSED, never debits the wrong wallet', async () => {
+        const h = buildHarness({ wallet: { redeemablePoints: 500 } });
+        await expect(claw(h, 500, 'other-batch')).rejects.toBeInstanceOf(BadRequestException);
+        expect(h.wallet.redeemablePoints).toBe(500);
+        expect(h.walletTxns).toHaveLength(0);
       });
 
       it('FLOOR-7: another wallet’s credit with the same batch id is never used as the floor', async () => {
@@ -1767,6 +1823,35 @@ describe('WalletService — FIFO points-expiry (remainingPoints)', () => {
         const res = await claw(h, 100, 'b1');
         expect(h.wallet.redeemablePoints).toBe(0);
         expect(res.shortfall).toBe(60);
+      });
+
+      describe('creditedPointsForBatchRow (POINTS reversal cap)', () => {
+        const call = (h: ReturnType<typeof buildHarness>, fieldId: string, outletCode = 'OC1', stored = 999n) =>
+          h.service.creditedPointsForBatchRow(h.store as any, { batchId: 'b1', clientId: 'deoleo', outletCode, fieldId, storedRowsAmount: stored });
+
+        it('metadata-era batch: Σ of the credits actually posted for (outlet, field)', async () => {
+          const h = buildHarness({ wallet: { redeemablePoints: 0 } });
+          await earn(h, 500, 'b1', 'f1');
+          await earn(h, 200, 'b1', 'f1');
+          await earn(h, 300, 'b1', 'f2');
+          expect(await call(h, 'f1')).toBe(700n);
+          expect(await call(h, 'f2')).toBe(300n);
+          expect(await call(h, 'f1', 'OTHER')).toBe(0n); // skipped / other outlet → nothing credited
+        });
+
+        it('legacy batch: stored rows only when the outlet\'s current partner received credits from it; else 0', async () => {
+          const withOutlet = buildHarness({
+            wallet: { redeemablePoints: 0 },
+            outlets: [{ outletCode: 'OC1', partnerId: 'cp1', clientId: 'deoleo' }],
+          });
+          await withOutlet.service.creditEarn('cp1', 'deoleo', 500, { referenceType: 'CREDIT_BATCH', referenceId: 'b1' });
+          expect(await call(withOutlet, 'f1')).toBe(999n);
+          const unlinked = buildHarness({ wallet: { redeemablePoints: 0 }, outlets: [] });
+          await unlinked.service.creditEarn('cp1', 'deoleo', 500, { referenceType: 'CREDIT_BATCH', referenceId: 'b1' });
+          expect(await call(unlinked, 'f1')).toBe(0n);
+          const noCredits = buildHarness({ wallet: { redeemablePoints: 0 } });
+          expect(await call(noCredits, 'f1')).toBe(0n);
+        });
       });
 
       // Positive cases with the original credit FOUND (balanceBefore >= 0 → floor 0): byte-identical.

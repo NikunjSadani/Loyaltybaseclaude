@@ -193,6 +193,16 @@ export class WalletService {
       updatedWallet = await tx.wallet.update({ where: { id: wallet.id }, data });
     }
 
+    // Movement timestamp for ORDER-SENSITIVE rows (credit-batch credits + reversal clawbacks, i.e.
+    // whenever `metadata` is passed): taken in app code HERE, after the wallet UPDATE above, i.e.
+    // while this tx holds the wallet's row lock. Any later movement on this wallet must wait for
+    // our commit before it can lock the row and take its own stamp, so per-wallet stamps follow
+    // the true movement order (up to cross-instance clock skew, ~ms with NTP-synced hosts; ties
+    // break on id). We do NOT rely on the column default: a DB-side now() is the TRANSACTION start
+    // time, so a long confirm tx that began before a clawback but locked the wallet after it would
+    // otherwise be stamped EARLIER than that clawback and misorder the reversal floor.
+    const movedAt = metadata !== undefined ? new Date() : undefined;
+
     const txRecord = await tx.walletTransaction.create({
       data: {
         walletId: wallet.id,
@@ -204,7 +214,7 @@ export class WalletService {
         referenceType,
         referenceId,
         description,
-        ...(metadata !== undefined ? { metadata } : {}),
+        ...(metadata !== undefined ? { metadata, createdAt: movedAt } : {}),
       },
     });
 
@@ -923,25 +933,38 @@ export class WalletService {
     const wallet = await tx.wallet.findFirst({ where: { id: found.id } });
     if (!wallet) throw new NotFoundException('Wallet not found for this partner');
 
-    // ORDER-INDEPENDENT floor (a reversal fully undoes its credit, whatever order reversals run in):
-    //   floor(X) = min(0, balanceBefore(X) − Σ points already clawed back, AFTER X was posted, by
-    //              reversals of credits posted EARLIER than X on this wallet)
-    // balanceBefore(X) still contains those earlier credits; once they are reversed it must not.
-    // e.g. −841, f1 +500, f2 +300 → −41: reversing f1 then f2 and f2 then f1 both end at −841.
-    let creditBalanceBefore: number | null = null;
-    let creditLookupProblem: 'not found' | 'ambiguous' | null = null;
+    // ORDER-INDEPENDENT floor — a reversal fully undoes its credit, whatever order reversals run in,
+    // and NEVER takes a wallet below the lowest balance any of the credits involved landed on:
+    //   own(X)   = min(0, balanceBefore(X))
+    //   removed  = Σ points already removed, AFTER X was posted, by clawbacks of credits E posted
+    //              EARLIER than X on this wallet (X's balanceBefore still contains those E)
+    //   floor(X) = removed > 0 ? max(own(X) − removed, min(own(X), min_E balanceBefore(E))) : own(X)
+    // The max(…) clamp keeps a wallet whose credits all landed on ≥ 0 at a floor of 0 (Deoleo):
+    //   0, f1 +500, redeem, f2 +300 → reversing f1 then f2 (or f2 then f1) ends at 0, never −300.
+    // e.g. −841, f1 +500, f2 +300 → −41: f1 then f2 and f2 then f1 both end at −841.
+    let floor = 0;
+    let creditLookupProblem: 'ambiguous' | null = null;
     let reversedCreditTxId: string | null = null;
     if (opts.originalCredit) {
       const r = await this.findOriginalBatchCredit(tx, wallet.id, partnerId, opts.originalCredit);
-      if (typeof r === 'string') {
-        creditLookupProblem = r;
+      if (r === 'not found') {
+        // This partner's wallet never received that credit (e.g. the outlet was relinked to another
+        // partner after the batch, or the row was skipped at confirm) — never debit the wrong wallet.
+        throw new BadRequestException(
+          `Cannot claw back: this partner's wallet has no credit from batch ${opts.originalCredit.batchId} for outlet ${opts.originalCredit.outletCode} / field ${opts.originalCredit.fieldId} (outlet relinked or row not credited) — settle it off-platform and reject this reversal`,
+        );
+      }
+      if (r === 'ambiguous') {
+        creditLookupProblem = 'ambiguous';
       } else {
         reversedCreditTxId = r.id;
-        const earlierClawed = await this.clawedBackForEarlierCredits(tx, wallet.id, partnerId, r);
-        creditBalanceBefore = r.balanceBefore - earlierClawed;
+        const own = Math.min(0, r.balanceBefore);
+        const { removed, minEarlierBalanceBefore } = await this.clawedBackForEarlierCredits(
+          tx, wallet.id, partnerId, r,
+        );
+        floor = removed > 0 ? Math.max(own - removed, Math.min(own, minEarlierBalanceBefore)) : own;
       }
     }
-    const floor = Math.min(0, creditBalanceBefore ?? 0);
 
     // A clawback reduces ONLY the spendable balance (redeemablePoints) — exactly like
     // a DEBIT_ADJUSTMENT. earnedPoints and every lifetime* counter are MONOTONIC and
@@ -978,7 +1001,8 @@ export class WalletService {
       sourceId: opts.sourceId ?? null,
       description: desc,
       // Which credit this clawback reversed — read by later clawbacks' order-independent floor.
-      ...(reversedCreditTxId ? { metadata: { reversedCreditTxId } } : {}),
+      // (Passing metadata also makes applyMovement stamp createdAt under the wallet lock.)
+      ...(opts.originalCredit ? { metadata: { reversedCreditTxId } } : {}),
     });
 
     return { ...movement, shortfall };
@@ -986,7 +1010,8 @@ export class WalletService {
 
   /**
    * Σ points actually removed (balanceBefore − balanceAfter, ≥ 0) by credit-reversal clawbacks on
-   * this wallet that ran AFTER credit `x` was posted and reversed a credit posted BEFORE `x`.
+   * this wallet that ran AFTER credit `x` was posted and reversed a credit posted BEFORE `x`, plus
+   * the lowest balanceBefore among those counted earlier credits (+∞ when none).
    * (A clawback that ran before `x` was posted is already inside x.balanceBefore.) The reversed
    * credit comes from the clawback's metadata.reversedCreditTxId, or — for clawbacks written
    * before that existed — from its CreditReversal (batch, outlet, field) via the same exact-credit
@@ -998,7 +1023,11 @@ export class WalletService {
     walletId: string,
     partnerId: string,
     x: { id: string; createdAt: Date },
-  ): Promise<number> {
+  ): Promise<{ removed: number; minEarlierBalanceBefore: number }> {
+    // Ordering = (createdAt, id). Every order-sensitive row (credit-batch credit / reversal
+    // clawback) written from 2026-11-13 has createdAt stamped by applyMovement UNDER the wallet row
+    // lock (see `movedAt`), so it follows the true per-wallet movement order. Older rows carry the
+    // column default and predate every stamped row, so mixed comparisons stay correct.
     const before = (a: { createdAt: Date; id: string }, b: { createdAt: Date; id: string }) =>
       a.createdAt.getTime() < b.createdAt.getTime() ||
       (a.createdAt.getTime() === b.createdAt.getTime() && a.id < b.id);
@@ -1008,6 +1037,7 @@ export class WalletService {
       select: { id: true, createdAt: true, balanceBefore: true, balanceAfter: true, referenceId: true, metadata: true },
     });
     let total = 0;
+    let minEarlierBalanceBefore = Number.POSITIVE_INFINITY;
     for (const c of clawbacks) {
       if (!before(x, c)) continue; // ran before X was posted → already in X's balanceBefore
       const removed = c.balanceBefore - c.balanceAfter;
@@ -1016,11 +1046,11 @@ export class WalletService {
         c.metadata && typeof c.metadata === 'object' && !Array.isArray(c.metadata)
           ? (c.metadata as Record<string, unknown>)
           : null;
-      let credit: { id: string; createdAt: Date } | null = null;
+      let credit: { id: string; createdAt: Date; balanceBefore: number } | null = null;
       if (typeof meta?.reversedCreditTxId === 'string') {
         credit = await tx.walletTransaction.findFirst({
           where: { id: meta.reversedCreditTxId, walletId },
-          select: { id: true, createdAt: true },
+          select: { id: true, createdAt: true, balanceBefore: true },
         });
       } else if (c.referenceId) {
         const rev = await tx.creditReversal.findFirst({
@@ -1036,23 +1066,29 @@ export class WalletService {
           if (typeof r !== 'string') credit = r;
         }
       }
-      if (credit && credit.id !== x.id && before(credit, x)) total += removed;
+      if (credit && credit.id !== x.id && before(credit, x)) {
+        total += removed;
+        minEarlierBalanceBefore = Math.min(minEarlierBalanceBefore, credit.balanceBefore);
+      }
     }
-    return total;
+    return { removed: total, minEarlierBalanceBefore };
   }
 
   /**
    * The balanceBefore of the EXACT credit-batch credit a reversal undoes — the CREDIT_POINTS_EARNED
    * WalletTransaction this wallet received from batch `batchId` for the reversal's (outletCode,
-   * fieldId). Returns that credit ({ id, createdAt, balanceBefore }), or 'not found' / 'ambiguous'
-   * (caller floors at 0 and says so).
+   * fieldId). Returns that credit ({ id, createdAt, balanceBefore }), 'not found' (the caller
+   * REFUSES the clawback — never debit a wallet that didn't receive the credit) or 'ambiguous'
+   * (legacy only; the caller floors at 0 and says so).
    *
    * Identification, in order:
    *  1. metadata — credits posted since 2026-11-12 carry { fieldId, outletCode } (confirmBatch).
    *  2. legacy rows (no metadata) — replay the batch's stored `rows` exactly as confirmBatch
    *     credited them: POINTS rows, status OK, amount > 0, for this partner's outlet code(s), in
-   *     row order; the k-th credit (createdAt, id order) is the k-th row. Accepted ONLY when the
-   *     counts match and every pair's amount agrees; otherwise 'ambiguous'.
+   *     row order; the k-th credit (createdAt, id order) is the k-th row. Accepted ONLY when none
+   *     of the partner's outlets changed since the batch was confirmed (so today's outlet→partner
+   *     mapping is the confirm-time one), the counts match and every pair's amount agrees;
+   *     otherwise 'ambiguous'.
    * If the batch credited the same (outlet, field) more than once, the reversal covers their sum,
    * so the floor is the balance before the FIRST of them.
    */
@@ -1085,17 +1121,19 @@ export class WalletService {
     } else {
       const batch = await tx.creditBatch.findFirst({
         where: { id: ref.batchId },
-        select: { clientId: true, rows: true },
+        select: { clientId: true, rows: true, confirmedAt: true },
       });
-      if (!batch || !Array.isArray(batch.rows)) return 'ambiguous';
-      const codes = new Set(
-        (
-          await tx.outlet.findMany({
-            where: { clientId: batch.clientId, partnerId },
-            select: { outletCode: true },
-          })
-        ).map((o) => o.outletCode),
-      );
+      const confirmedAt = batch?.confirmedAt ?? null;
+      if (!batch || !Array.isArray(batch.rows) || !confirmedAt) return 'ambiguous';
+      const outlets = await tx.outlet.findMany({
+        where: { clientId: batch.clientId, partnerId },
+        select: { outletCode: true, updatedAt: true },
+      });
+      // The replay maps rows by the partner's CURRENT outlets; that equals the confirm-time
+      // mapping only if none of those outlets changed since the batch was confirmed (a relink
+      // bumps Outlet.updatedAt). Otherwise the at-confirm owner is not derivable → ambiguous.
+      if (outlets.some((o) => o.updatedAt.getTime() > confirmedAt.getTime())) return 'ambiguous';
+      const codes = new Set(outlets.map((o) => o.outletCode));
       type Row = { outletId?: string; fieldId?: string; amount?: number; awardType?: string; status?: string };
       const credited = (batch.rows as Row[]).filter(
         (r) =>
@@ -1112,10 +1150,47 @@ export class WalletService {
       matches = credits.filter(
         (_c, k) => credited[k].fieldId === ref.fieldId && credited[k].outletId === ref.outletCode,
       );
+      if (matches.length === 0 && !codes.has(ref.outletCode)) return 'ambiguous';
     }
     if (matches.length === 0) return 'not found';
     const m = matches[0];
     return { id: m.id, createdAt: m.createdAt, balanceBefore: m.balanceBefore };
+  }
+
+  /**
+   * Points ACTUALLY credited to wallets by batch `batchId` for (outletCode, fieldId) — the cap
+   * for POINTS reversals (never the stored row amount alone: a row skipped at confirm because its
+   * outlet was unknown / unlinked credited nothing).
+   *  - Batches confirmed since credit metadata exists: Σ points of the batch's CREDIT_POINTS_EARNED
+   *    rows whose metadata is { fieldId, outletCode } (any wallet).
+   *  - Legacy batches (no credit metadata): `storedRowsAmount` only if the outlet's CURRENT partner's
+   *    wallet received at least one credit from this batch, else 0 (cannot attribute → refuse).
+   */
+  async creditedPointsForBatchRow(
+    tx: Prisma.TransactionClient,
+    a: { batchId: string; clientId: string; outletCode: string; fieldId: string; storedRowsAmount: bigint },
+  ): Promise<bigint> {
+    const credits = await tx.walletTransaction.findMany({
+      where: { transactionType: 'CREDIT_POINTS_EARNED', referenceType: 'CREDIT_BATCH', referenceId: a.batchId },
+      select: { walletId: true, points: true, metadata: true },
+    });
+    if (credits.length === 0) return 0n;
+    const metaOf = (m: Prisma.JsonValue | null | undefined) =>
+      m && typeof m === 'object' && !Array.isArray(m) ? (m as Record<string, unknown>) : null;
+    if (credits.some((c) => typeof metaOf(c.metadata)?.fieldId === 'string')) {
+      return credits.reduce((s, c) => {
+        const m = metaOf(c.metadata);
+        return m?.fieldId === a.fieldId && m?.outletCode === a.outletCode ? s + BigInt(c.points) : s;
+      }, 0n);
+    }
+    const outlet = await tx.outlet.findFirst({
+      where: { clientId: a.clientId, outletCode: a.outletCode },
+      select: { partnerId: true },
+    });
+    if (!outlet?.partnerId) return 0n;
+    const wallet = await tx.wallet.findFirst({ where: { partnerId: outlet.partnerId }, select: { id: true } });
+    if (!wallet || !credits.some((c) => c.walletId === wallet.id)) return 0n;
+    return a.storedRowsAmount;
   }
 
   // ─── Expiry sweep ────────────────────────────────────────────────────────────

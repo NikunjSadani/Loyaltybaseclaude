@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { Prisma, TdsMethodology, TdsSection } from '@prisma/client';
+import { CreditEntryStatus, Prisma, TdsMethodology, TdsSection } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
@@ -16,7 +16,7 @@ import { grossUpTdsPaise, rate194CFrom, rate194RFrom, TdsRate, type ResolvedTdsS
 import { TdsStatutoryConfigService } from '../tds/tds-statutory.config.service';
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { paiseToRupees, toPaiseBigInt } from '../common/money';
+import { formatINR, paiseToRupees, toPaiseBigInt } from '../common/money';
 import { monthYearIST, formatDateIST, IST_OFFSET_MIN } from '../common/ist-date';
 import { loadOutletTypeDisplayNames, labelFor } from '../common/outlet-type-display';
 import {
@@ -1331,14 +1331,15 @@ export class CreditsService {
         // Σ (approved + pending) reversals for this (batch, outlet, field) + this request must
         // never exceed what the batch ACTUALLY credited for it (stored batch rows — never the
         // client-supplied originalPaise), so the same credit can't be clawed back twice.
-        const alreadyReversed = await this.reversedSoFar(tx, id, dto.outletId, dto.fieldId);
+        const alreadyReversed = await this.reversedSoFar(tx, id, dto.outletId, dto.fieldId, dto.awardType);
         const requested = toPaiseBigInt(dto.requestedPaise);
         if (credited === 0n) {
           throw new BadRequestException('Nothing was credited for this outlet and field in this batch');
         }
         if (alreadyReversed + requested > credited) {
+          const f = (v: bigint) => this.fmtAward(dto.awardType, v);
           throw new BadRequestException(
-            `Reversal exceeds the amount credited for this outlet and field in this batch (credited ${credited}, already reversed or pending ${alreadyReversed}, requested ${requested})`,
+            `Reversal exceeds the amount credited for this outlet and field in this batch (credited ${f(credited)}, already reversed or pending ${f(alreadyReversed)}, requested ${f(requested)})`,
           );
         }
 
@@ -1355,7 +1356,8 @@ export class CreditsService {
             fieldName: dto.fieldName,
             period: batch.period,
             awardType: dto.awardType,
-            // Server-derived from the stored batch rows (BigInt paise, or whole points for POINTS).
+            // Server-derived (BigInt paise from the stored batch rows, or whole points ACTUALLY
+            // credited to wallets for POINTS) — never the client-supplied originalPaise.
             originalPaise: credited,
             requestedPaise: requested,
             requestedBy: user.sub,
@@ -1377,8 +1379,10 @@ export class CreditsService {
 
   /**
    * Lock the batch row (FOR UPDATE, for the caller's tx) and return the amount the batch
-   * actually credited for (outlet, field, awardType) — Σ of its stored `rows` that confirm
-   * credited (status OK, amount > 0). PAYOUT in integer paise, POINTS in whole points.
+   * actually credited for (outlet, field, awardType). PAYOUT (integer paise): Σ of its stored
+   * `rows` that confirm turned into payout entries (status OK, amount > 0). POINTS (whole points):
+   * what wallets ACTUALLY received (WalletService.creditedPointsForBatchRow) — a row skipped at
+   * confirm (outlet unknown / not linked) credited nothing and so can never be clawed back.
    */
   private async lockBatchCreditedAmount(
     tx: Prisma.TransactionClient,
@@ -1405,7 +1409,17 @@ export class CreditsService {
         total += toPaiseBigInt(r.amount);
       }
     }
+    if (awardType === 'POINTS') {
+      return this.walletService.creditedPointsForBatchRow(tx, {
+        batchId, clientId, outletCode: outletId, fieldId, storedRowsAmount: total,
+      });
+    }
     return total;
+  }
+
+  /** A reversal amount for humans: ₹ for PAYOUT (stored in paise), "pts" for POINTS. */
+  private fmtAward(awardType: string, v: bigint): string {
+    return awardType === 'PAYOUT' ? formatINR(v) : `${v} pts`;
   }
 
   /**
@@ -1452,12 +1466,16 @@ export class CreditsService {
     return amount;
   }
 
-  /** Σ of live reversals for (batch, outlet, field): PENDING → requested, APPROVED/PARTIAL → approved. */
+  /**
+   * Σ of live reversals for (batch, outlet, field, awardType): PENDING → requested,
+   * APPROVED/PARTIAL → approved. Filtered by awardType so points and paise never mix.
+   */
   private async reversedSoFar(
     tx: Prisma.TransactionClient,
     batchId: string,
     outletId: string,
     fieldId: string,
+    awardType: string,
     excludeId?: string,
   ): Promise<bigint> {
     const live = await tx.creditReversal.findMany({
@@ -1465,6 +1483,7 @@ export class CreditsService {
         batchId,
         outletId,
         fieldId,
+        awardType: awardType as Prisma.CreditReversalWhereInput['awardType'],
         status: { in: ['PENDING_GIFSY', 'APPROVED', 'PARTIAL'] },
         ...(excludeId ? { id: { not: excludeId } } : {}),
       },
@@ -2557,10 +2576,13 @@ export class CreditsService {
         const credited = await this.lockBatchCreditedAmount(
           tx, reversal.batchId, user.clientId, reversal.outletId, reversal.fieldId, reversal.awardType,
         );
-        const others = await this.reversedSoFar(tx, reversal.batchId, reversal.outletId, reversal.fieldId, id);
+        const others = await this.reversedSoFar(
+          tx, reversal.batchId, reversal.outletId, reversal.fieldId, reversal.awardType, id,
+        );
         if (others + (finalApprovedPaise ?? 0n) > credited) {
+          const f = (v: bigint) => this.fmtAward(reversal.awardType, v);
           throw new BadRequestException(
-            `Approval exceeds the amount credited for this outlet and field in this batch (credited ${credited}, already reversed ${others}, approving ${finalApprovedPaise ?? 0n})`,
+            `Approval exceeds the amount credited for this outlet and field in this batch (credited ${f(credited)}, already reversed ${f(others)}, approving ${f(finalApprovedPaise ?? 0n)})`,
           );
         }
       }
@@ -2626,134 +2648,131 @@ export class CreditsService {
       }
 
       // ── GLM-1: PAYOUT reversal → cash clawback ────────────────────────────
-      // A PAYOUT-type reversal means cash (not points) was (or will be) disbursed.
+      // A PAYOUT-type reversal means cash (not points) was (or will be) disbursed. It acts ONLY on
+      // THIS batch's entries for (outlet, field) — never another batch's top-up — and only up to
+      // the APPROVED amount, oldest entry first. Entries are whole: an approval that would need part
+      // of an entry is refused (approve the full entry amount, or reject).
       //
-      // WHY ITERATE ALL ENTRIES (not findFirst):
-      //   One outlet+field can legitimately produce MULTIPLE CreditPayoutEntry rows
-      //   across different batches (e.g. monthly top-ups). The old findFirst(orderBy
-      //   createdAt desc) clawed back only the LATEST entry — silently missing any
-      //   earlier outstanding entries for the same outlet+field+scope. We now iterate
-      //   ALL matching entries and apply the correct action to each.
-      //
-      // ACTION PER ENTRY:
-      //   PENDING / PROCESSING → status=REVERSED + downloadId=null (permanently
-      //     removed from payability — GLM-2's re-download excludes REVERSED entries).
-      //     IMPORTANT: must be REVERSED (not FAILED) so GLM-2 cannot resurrect them.
-      //     Cash never left; no receivable.
-      //   PAID → cash already disbursed; record its amount as a recoverable receivable
-      //     and accumulate into clawbackShortfall.
-      //   REVERSED → already clawed back (idempotent for a repeated reversal attempt);
-      //     skip silently.
-      //   FAILED → bank-rejected; cash never left; mark REVERSED to permanently
-      //     remove from payability (GLM-2 would otherwise re-bank it, which we do NOT
-      //     want after an approved reversal).
+      // ACTION PER ENTRY (each guarded on the status we read; a concurrent change is re-read):
+      //   PENDING / FAILED → status=REVERSED + downloadId=null (permanently out of payability —
+      //     GLM-2 re-banks FAILED, never REVERSED). Cash never left; no receivable. Any DEDUCT
+      //     withholding still stamped on it is cleared + offset in the TDS ledger (uploadUtr's
+      //     FAILED-path semantics).
+      //   PROCESSING → the bank file is already with the bank: REFUSE the approval ("record the
+      //     UTR/failure first") — reversing it here could still be paid, and its TDS offset would
+      //     then be wrong.
+      //   PAID → cash disbursed; its amount becomes a recoverable receivable (clawbackShortfall).
+      //   REVERSED → already done; skipped.
       let payoutClawbackNote: string | null = null;
       if (action === ReversalAction.approve && reversal.awardType === 'PAYOUT') {
-        const approvedPaiseNum = Number(finalApprovedPaise ?? 0n);
-        if (approvedPaiseNum > 0) {
-          // Find ALL CreditPayoutEntry rows for this outlet+field combination
-          // (tenant-scoped). outletId in the reversal is the outletCode (same as
-          // CreditPayoutEntry.outletId).
+        let remaining = finalApprovedPaise ?? 0n;
+        if (remaining > 0n) {
           const payoutEntries = await tx.creditPayoutEntry.findMany({
             where: {
               clientId: user.clientId,
+              batchId: reversal.batchId,
               outletId: reversal.outletId,
               fieldId: reversal.fieldId ?? undefined,
-              // Only actionable statuses: REVERSED is already done (idempotent),
-              // FAILED needs to be permanently removed (not re-bankable).
               status: { in: ['PENDING', 'PROCESSING', 'PAID', 'FAILED'] },
             },
-            orderBy: { createdAt: 'desc' },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
           });
 
           if (payoutEntries.length === 0) {
-            // No matching payout entries found: the award may have been reversed before
-            // confirmation or the entries were already deleted. Reversal lands cleanly.
-            payoutClawbackNote = `No matching PAYOUT entries found for outlet ${reversal.outletId} / field ${reversal.fieldId ?? 'any'}; reversal recorded with no cash action.`;
+            payoutClawbackNote = `No matching PAYOUT entries found for outlet ${reversal.outletId} / field ${reversal.fieldId ?? 'any'} in this batch; reversal recorded with no cash action.`;
           } else {
             let reversedCount = 0;
             let paidReceivablePaise = 0;
             const entryNotes: string[] = [];
+            const sentToBank = () =>
+              new BadRequestException(
+                'Payment already sent to the bank for this outlet and field (payout file downloaded, not yet reconciled) — record the UTR or the failure first, then approve the reversal',
+              );
 
             for (const payoutEntry of payoutEntries) {
-              if (
-                payoutEntry.status === 'PENDING' ||
-                payoutEntry.status === 'PROCESSING' ||
-                payoutEntry.status === 'FAILED'
-              ) {
-                // Cash not yet disbursed (PENDING/PROCESSING) OR bank-rejected (FAILED):
-                // permanently remove from payability by marking REVERSED with downloadId=null.
-                // REVERSED is the correct terminal status — GLM-2 excludes REVERSED from
-                // re-banking, whereas FAILED is considered bank-rejected and re-bankable.
-                const withheld = payoutEntry.tdsDeductedPaise ?? 0n;
-                if (withheld > 0n && payoutEntry.tdsSection) {
-                  // A DOWNLOADED-but-unpaid entry carries a DEDUCT withholding stamped at download
-                  // (+ its TdsDeductionEntry). The cash never leaves, so — exactly like the FAILED
-                  // path in uploadUtr — reset the stamp AND append a compensating negative ledger
-                  // row, else priorDeducted stays inflated and the PAN is under-withheld later.
-                  // GUARDED on the stamp we read: if a concurrent UTR apply already moved/offset
-                  // it (count 0), we never write a second offset.
-                  const claimedEntry = await tx.creditPayoutEntry.updateMany({
-                    where: { id: payoutEntry.id, status: payoutEntry.status, tdsDeductedPaise: withheld },
-                    data: { status: 'REVERSED', downloadId: null, tdsDeductedPaise: 0n },
-                  });
-                  if (claimedEntry.count === 1) {
-                    const offset = await this.offsetWithholdingOnReversal(tx, user.clientId, {
-                      id: payoutEntry.id,
-                      outletId: payoutEntry.outletId,
-                      period: payoutEntry.period,
-                      tdsSection: payoutEntry.tdsSection,
-                      tdsDeductedPaise: withheld,
-                    });
-                    reversedCount++;
-                    entryNotes.push(
-                      `entry ${payoutEntry.id} (was ${payoutEntry.status}) → REVERSED` +
-                        (offset > 0n ? ` (withheld TDS ₹${(Number(offset) / 100).toFixed(2)} offset)` : ''),
-                    );
-                    continue;
-                  }
-                  // Changed under us — act on its CURRENT state (its withholding, if any, was
-                  // already reversed by whoever moved it).
-                  const fresh = await tx.creditPayoutEntry.findFirst({
-                    where: { id: payoutEntry.id },
-                    select: { status: true, amountPaise: true },
-                  });
-                  if (!fresh || fresh.status === 'REVERSED') continue;
-                  if (fresh.status === 'PAID') {
-                    paidReceivablePaise += Number(fresh.amountPaise);
-                    entryNotes.push(
-                      `entry ${payoutEntry.id} (PAID ₹${(Number(fresh.amountPaise) / 100).toFixed(2)}) → recoverable receivable`,
-                    );
-                    continue;
-                  }
+              if (remaining <= 0n) break;
+              if (payoutEntry.status === 'PROCESSING') throw sentToBank();
+              if (payoutEntry.amountPaise > remaining) {
+                throw new BadRequestException(
+                  `A payout entry can't be partially reversed — approve ${formatINR(payoutEntry.amountPaise)} (the full entry) or reject this reversal`,
+                );
+              }
+              remaining -= payoutEntry.amountPaise;
+
+              let cur = {
+                status: payoutEntry.status as string,
+                amountPaise: payoutEntry.amountPaise,
+                tdsDeductedPaise: payoutEntry.tdsDeductedPaise ?? 0n,
+              };
+              let settled = false;
+              for (let attempt = 0; attempt < 3 && !settled; attempt++) {
+                if (cur.status === 'REVERSED') {
+                  entryNotes.push(`entry ${payoutEntry.id} already REVERSED`);
+                  settled = true;
+                  break;
                 }
-                await tx.creditPayoutEntry.update({
-                  where: { id: payoutEntry.id },
-                  data: { status: 'REVERSED', downloadId: null },
+                if (cur.status === 'PAID') {
+                  paidReceivablePaise += Number(cur.amountPaise);
+                  entryNotes.push(`entry ${payoutEntry.id} (PAID ${formatINR(cur.amountPaise)}) → recoverable receivable`);
+                  settled = true;
+                  break;
+                }
+                if (cur.status === 'PROCESSING') throw sentToBank();
+                // PENDING / FAILED — guarded on the status (and withholding stamp) we read, so a
+                // concurrent bank-file download / UTR apply can't be overwritten.
+                const offsetIt = cur.tdsDeductedPaise > 0n && !!payoutEntry.tdsSection;
+                const flip = await tx.creditPayoutEntry.updateMany({
+                  where: {
+                    id: payoutEntry.id,
+                    status: cur.status as CreditEntryStatus,
+                    ...(offsetIt ? { tdsDeductedPaise: cur.tdsDeductedPaise } : {}),
+                  },
+                  data: { status: 'REVERSED', downloadId: null, ...(offsetIt ? { tdsDeductedPaise: 0n } : {}) },
                 });
-                reversedCount++;
-                entryNotes.push(
-                  `entry ${payoutEntry.id} (was ${payoutEntry.status}) → REVERSED`,
-                );
-              } else if (payoutEntry.status === 'PAID') {
-                // Cash already disbursed: record a recoverable receivable (off-platform).
-                // Accumulate across all PAID entries for this outlet+field.
-                paidReceivablePaise += Number(payoutEntry.amountPaise);
-                entryNotes.push(
-                  `entry ${payoutEntry.id} (PAID ₹${(Number(payoutEntry.amountPaise) / 100).toFixed(2)}) → recoverable receivable`,
-                );
+                if (flip.count === 1) {
+                  const offset = offsetIt
+                    ? await this.offsetWithholdingOnReversal(tx, user.clientId, {
+                        id: payoutEntry.id,
+                        outletId: payoutEntry.outletId,
+                        period: payoutEntry.period,
+                        tdsSection: payoutEntry.tdsSection!,
+                        tdsDeductedPaise: cur.tdsDeductedPaise,
+                      })
+                    : 0n;
+                  reversedCount++;
+                  entryNotes.push(
+                    `entry ${payoutEntry.id} (was ${cur.status}) → REVERSED` +
+                      (offset > 0n ? ` (withheld TDS ${formatINR(offset)} offset)` : ''),
+                  );
+                  settled = true;
+                  break;
+                }
+                const fresh = await tx.creditPayoutEntry.findFirst({
+                  where: { id: payoutEntry.id },
+                  select: { status: true, amountPaise: true, tdsDeductedPaise: true },
+                });
+                if (!fresh) {
+                  settled = true;
+                  break;
+                }
+                cur = {
+                  status: fresh.status as string,
+                  amountPaise: fresh.amountPaise,
+                  tdsDeductedPaise: fresh.tdsDeductedPaise ?? 0n,
+                };
+              }
+              if (!settled) {
+                throw new BadRequestException('A payout entry changed while the reversal was being approved — please retry');
               }
             }
 
-            // clawbackShortfall is the aggregate of all PAID entries' amounts.
-            // This mirrors the POINTS-clawback shortfall pattern.
             if (paidReceivablePaise > 0) {
               clawbackShortfall = paidReceivablePaise;
             }
 
             payoutClawbackNote = [
-              `GLM-1 clawback: ${payoutEntries.length} entries processed`,
-              `(${reversedCount} reversed, ${paidReceivablePaise > 0 ? `₹${(paidReceivablePaise / 100).toFixed(2)} recoverable receivable` : 'no paid receivable'}).`,
+              `GLM-1 clawback: ${payoutEntries.length} entries considered`,
+              `(${reversedCount} reversed, ${paidReceivablePaise > 0 ? `${formatINR(BigInt(paidReceivablePaise))} recoverable receivable` : 'no paid receivable'}).`,
               ...entryNotes,
             ].join(' | ');
           }
