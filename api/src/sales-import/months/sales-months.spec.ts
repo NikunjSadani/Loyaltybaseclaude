@@ -13,7 +13,7 @@ import { SalesImportConfigController } from '../sales-import-config.controller';
 import { SalesImportApplyController } from '../sales-import-apply.controller';
 import { REBUILD_PRODUCT_LIST_STATEMENT_TIMEOUT_MS, REBUILD_PRODUCT_LIST_TX_TIMEOUT_MS, SalesMonthsService } from './sales-months.service';
 import { SalesMonthClosedGuard } from './sales-month-closed.guard';
-import { shiftMonthKey } from './month-state';
+import { monthLabel, shiftMonthKey } from './month-state';
 import { SALES_MONTH_HISTORY_RETENTION_YEARS } from '../sales-import.contract';
 
 const CUR = currentMonthKey();
@@ -30,9 +30,8 @@ function db(
     batches?: Array<{ period: string; n: number }>;
     exports?: Array<{ month: string; n: number }>;
     history?: Array<Record<string, unknown>>;
-    /** FOCUS-FROM-TARGETS: OutletTarget (month, batchId) pairs + the batches' upload times. */
-    targets?: Array<{ month: string; batchId: string; clientId?: string }>;
-    targetBatches?: Array<{ id: string; createdAt: Date; clientId?: string }>;
+    /** FOCUS-FROM-TARGETS: OutletTarget rows (month, when last written, optional targetValues with __names). */
+    targets?: Array<{ month: string; updatedAt?: Date; clientId?: string; targetValues?: Record<string, unknown> }>;
     acceptances?: Array<Record<string, unknown>>;
     focusDefs?: Array<Record<string, unknown>>;
   } = {},
@@ -58,16 +57,25 @@ function db(
     salesMonthHistory: { findMany: jest.fn(() => { throw new Error('month lists must not read history lines'); }) },
     user: { findMany: jest.fn(async () => [{ id: 'ca', name: 'Client Admin' }]) },
     outletTarget: {
-      groupBy: jest.fn(async ({ where }: { where: { clientId: string; month: { in: string[] } } }) =>
+      // GROUP BY month, MAX(updatedAt)
+      groupBy: jest.fn(async ({ where }: { where: { clientId: string; month: { in: string[] } } }) => {
+        const max = new Map<string, Date>();
+        for (const t of downstream.targets ?? []) {
+          if ((t.clientId ?? 't1') !== where.clientId || !where.month.in.includes(t.month) || !t.updatedAt) continue;
+          const cur = max.get(t.month);
+          if (!cur || t.updatedAt > cur) max.set(t.month, t.updatedAt);
+        }
+        return [...max.entries()].map(([month, updatedAt]) => ({ month, _max: { updatedAt } }));
+      }),
+      findMany: jest.fn(async ({ where }: { where: { clientId: string; month: string } }) =>
         (downstream.targets ?? [])
-          .filter((t) => (t.clientId ?? 't1') === where.clientId && where.month.in.includes(t.month))
-          .map((t) => ({ month: t.month, batchId: t.batchId }))),
+          .filter((t) => (t.clientId ?? 't1') === where.clientId && t.month === where.month)
+          .map((t) => ({ targetValues: t.targetValues ?? {} }))),
     },
-    targetUploadBatch: {
-      findMany: jest.fn(async ({ where }: { where: { clientId: string; id: { in: string[] } } }) =>
-        (downstream.targetBatches ?? []).filter((b) => (b.clientId ?? 't1') === where.clientId && where.id.in.includes(b.id))),
-    },
+    kpiDef: { findMany: jest.fn(async () => [{ code: 'FB1', label: 'Focus Brand 1' }]) },
     salesKpiDefinition: {
+      count: jest.fn(async ({ where }: { where: Record<string, unknown> }) =>
+        (downstream.focusDefs ?? []).filter((f) => Object.entries(where).every(([k, v]) => f[k] === v)).length),
       findFirst: jest.fn(async ({ where }: { where: Record<string, unknown> }) =>
         (downstream.focusDefs ?? []).find((f) => Object.entries(where).every(([k, v]) => f[k] === v)) ?? null),
     },
@@ -489,7 +497,9 @@ describe('FOCUS-FROM-TARGETS: months list flag + focus acceptances', () => {
   const AFTER = new Date(AT.getTime() + 3_600_000);
   const FOCUS_DEF = { clientId: 't1', kpiCode: 'FB1', enabled: true, productSource: 'TARGET_NAMES' };
 
-  it('targetsChangedSinceApply: a target upload newer than the last apply → true; older → false; never applied → false (batched, no N+1)', async () => {
+  const NAMES = (name: string) => ({ FB1: 1000, __names: { FB1: name } });
+
+  it('targetsChangedSinceApply: target ROWS written after the last apply → true; older → false; never applied → false (ONE GROUP BY, no N+1)', async () => {
     const OLDER = shiftMonthKey(CUR, -2);
     const d = db(
       [
@@ -497,14 +507,12 @@ describe('FOCUS-FROM-TARGETS: months list flag + focus acceptances', () => {
         { month: OLDER, state: 'OPEN', lastAppliedAt: AT, lastAppliedImportId: 'i1' },
       ],
       {
+        focusDefs: [FOCUS_DEF],
         targets: [
-          { month: PREV, batchId: 'b-old' }, { month: PREV, batchId: 'b-new' }, // multi-batch month: the NEWEST counts
-          { month: OLDER, batchId: 'b-old' },
-          { month: CUR, batchId: 'b-new' }, // never applied
-          { month: PREV, batchId: 'b-foreign', clientId: 't2' }, // another tenant's rows never count
-        ],
-        targetBatches: [
-          { id: 'b-old', createdAt: BEFORE }, { id: 'b-new', createdAt: AFTER }, { id: 'b-foreign', createdAt: AFTER, clientId: 't2' },
+          { month: PREV, updatedAt: BEFORE }, { month: PREV, updatedAt: AFTER }, // the LATEST row write counts
+          { month: OLDER, updatedAt: BEFORE },
+          { month: CUR, updatedAt: AFTER }, // never applied
+          { month: OLDER, updatedAt: AFTER, clientId: 't2' }, // another tenant's rows never count
         ],
       },
     );
@@ -512,12 +520,34 @@ describe('FOCUS-FROM-TARGETS: months list flag + focus acceptances', () => {
     const by = Object.fromEntries(rows.map((r) => [r.month, r.targetsChangedSinceApply]));
     expect(by).toEqual({ [CUR]: false, [PREV]: true, [OLDER]: false });
     expect(d.outletTarget.groupBy).toHaveBeenCalledTimes(1);
-    expect(d.targetUploadBatch.findMany).toHaveBeenCalledTimes(1);
-    expect(d.outletTarget.groupBy.mock.calls[0][0].where).toEqual({ clientId: 't1', month: { in: [OLDER, PREV, CUR] } });
+    expect(d.outletTarget.groupBy.mock.calls[0][0]).toEqual({
+      by: ['month'], where: { clientId: 't1', month: { in: [OLDER, PREV, CUR] } }, _max: { updatedAt: true },
+    });
+  });
+
+  it('audit follow-up (timing race): a chunk committed AFTER the apply is flagged even though its upload BATCH predates the apply', async () => {
+    // The upload stamps its batch at BEFORE, the apply ran at AT reading the first chunk only, the last chunk's rows
+    // were written at AFTER. Only the row times can tell.
+    const d = db([{ month: PREV, state: 'OPEN', lastAppliedAt: AT, lastAppliedImportId: 'i1' }], {
+      focusDefs: [FOCUS_DEF],
+      targets: [{ month: PREV, updatedAt: BEFORE }, { month: PREV, updatedAt: AFTER }],
+    });
+    const rows = await new SalesMonthsService(d as never).list('t1', PREV, PREV);
+    expect(rows[0].targetsChangedSinceApply).toBe(true);
+  });
+
+  it('audit follow-up (B-M1): without an enabled TARGET_NAMES KPI the flag is never set and the target table is not read', async () => {
+    const d = db([{ month: PREV, state: 'OPEN', lastAppliedAt: AT, lastAppliedImportId: 'i1' }], {
+      focusDefs: [{ clientId: 't1', kpiCode: 'TOTAL', enabled: true, productSource: 'FILTER' }, { ...FOCUS_DEF, enabled: false }, { ...FOCUS_DEF, clientId: 't2' }],
+      targets: [{ month: PREV, updatedAt: AFTER }],
+    });
+    const rows = await new SalesMonthsService(d as never).list('t1', PREV, PREV);
+    expect(rows[0].targetsChangedSinceApply).toBe(false);
+    expect(d.outletTarget.groupBy).not.toHaveBeenCalled();
   });
 
   it('accept: OPEN month, enabled TARGET_NAMES KPI, key normalized; month lock; audited once (idempotent); returns the list', async () => {
-    const d = db([], { focusDefs: [FOCUS_DEF] });
+    const d = db([], { focusDefs: [FOCUS_DEF], targets: [{ month: PREV, targetValues: NAMES('CNO & adho500') }] });
     const s = new SalesMonthsService(d as never);
     const out = await s.accept(clientAdmin, PREV, { kpiCode: 'FB1', key: ' adho 500 ' });
     expect(out).toEqual({ month: PREV, acceptances: [{ kpiCode: 'FB1', key: 'ADHO500', byName: 'Client Admin', at: AT.toISOString() }] });
@@ -529,6 +559,26 @@ describe('FOCUS-FROM-TARGETS: months list flag + focus acceptances', () => {
     await s.accept(clientAdmin, PREV, { kpiCode: 'FB1', key: 'ADHO500' }); // again → no second row / audit
     expect(d.salesFocusAcceptance.create).toHaveBeenCalledTimes(1);
     expect(d.auditLog.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('audit follow-up: accept refuses a key that is not a product name in THAT month’s target file for THAT KPI (400)', async () => {
+    const d = db([], {
+      focusDefs: [FOCUS_DEF],
+      targets: [
+        { month: PREV, targetValues: { ...NAMES('CNO & ADHO500'), __names: { FB1: 'CNO & ADHO500', FB2: 'NEWBRAND' } } },
+        { month: CUR, targetValues: NAMES('NEWBRAND') }, // another month
+        { month: PREV, targetValues: NAMES('NEWBRAND'), clientId: 't2' }, // another tenant
+      ],
+    });
+    const s = new SalesMonthsService(d as never);
+    await expect(s.accept(clientAdmin, PREV, { kpiCode: 'FB1', key: 'newbrand' })).rejects.toThrow(
+      `"NEWBRAND" is not a product name in the ${monthLabel(PREV)} target file for Focus Brand 1.`,
+    );
+    await expect(s.accept(clientAdmin, PREV, { kpiCode: 'FB1', key: 'ADHO' })).rejects.toBeInstanceOf(BadRequestException); // a prefix is not a token
+    expect(d.salesFocusAcceptance.create).not.toHaveBeenCalled();
+    await expect(s.accept(clientAdmin, PREV, { kpiCode: 'FB1', key: 'adho 500' })).resolves.toEqual(
+      expect.objectContaining({ acceptances: [expect.objectContaining({ key: 'ADHO500' })] }),
+    );
   });
 
   it('accept refuses: CLOSED month (409), not a TARGET_NAMES KPI (400), bad key / month (400)', async () => {

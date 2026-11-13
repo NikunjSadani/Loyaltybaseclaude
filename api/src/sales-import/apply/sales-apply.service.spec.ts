@@ -77,11 +77,15 @@ function makeDb(opts: {
   rosterAdded?: number;
   /** L4: KpiDef.outletType per KPI code (absent = a shared KPI). */
   kpiTypes?: Record<string, string | null>;
-  /** FOCUS-FROM-TARGETS: OutletTarget rows (any month) + their batches' upload times. */
-  targets?: Array<{ outletCode: string; month: string; targetValues: Record<string, unknown>; batchId: string }>;
+  /**
+   * FOCUS-FROM-TARGETS: OutletTarget rows (any month). A row's updatedAt (when it was written) = its own `updatedAt`, else
+   * its batch's time from `targetBatches`.
+   */
+  targets?: Array<{ outletCode: string; month: string; targetValues: Record<string, unknown>; batchId: string; updatedAt?: Date }>;
   targetBatches?: Array<{ id: string; createdAt: Date }>;
   /** Distinct product combos of the stored months (sales_month_history_combos). */
   historyCombos?: Array<Record<string, string>>;
+  historyCombosAfterApply?: Array<Record<string, string>>;
   acceptances?: Array<{ month: string; kpiCode: string; key: string; acceptedById: string; acceptedAt: Date }>;
   /** Extra KpiDef rows (code + label) beyond OWN_AMT / OWN_QTY. */
   extraKpis?: Array<{ code: string; label: string }>;
@@ -132,7 +136,9 @@ function makeDb(opts: {
       const text = q.strings.join('?');
       // FOCUS-FROM-TARGETS catalogue reads (only for a tenant with a TARGET_NAMES definition)
       if (text.includes('FROM "sales_month_history_combos"')) {
-        return (opts.historyCombos ?? []).map((d) => ({ dims: JSON.stringify(d) }));
+        // `historyCombosAfterApply`: what the stored product lists hold once a month's apply rewrote its own list
+        const combos = opts.historyCombosAfterApply && log.includes('combos.insert') ? opts.historyCombosAfterApply : (opts.historyCombos ?? []);
+        return combos.map((d) => ({ dims: JSON.stringify(d) }));
       }
       if (text.includes('FROM "sales_import_aggregates"')) {
         return [...new Set(aggs.map((a) => a.dimKey))].map((k) => ({ dims: k }));
@@ -151,7 +157,11 @@ function makeDb(opts: {
     },
     outletTarget: {
       findMany: jest.fn(async ({ where }: { where: { clientId: string; month: string } }) =>
-        where.clientId !== 't1' ? [] : (opts.targets ?? []).filter((t) => t.month === where.month)),
+        where.clientId !== 't1'
+          ? []
+          : (opts.targets ?? [])
+              .filter((t) => t.month === where.month)
+              .map((t) => ({ ...t, updatedAt: t.updatedAt ?? (opts.targetBatches ?? []).find((b) => b.id === t.batchId)?.createdAt ?? AT }))),
     },
     targetUploadBatch: {
       aggregate: jest.fn(async ({ where }: { where: { id: { in: string[] } } }) => {
@@ -658,6 +668,11 @@ describe('outletsAffected', () => {
     const rows = [{ outletCode: 'A', values: { K: 1 } }, { outletCode: 'B', values: { K: 2 } }, { outletCode: 'E', values: { K: 0 } }];
     expect(outletsAffected(existing, rows, ['K'])).toBe(3); // B, C, E
   });
+  it('audit follow-up: a new outlet with NO owned value is not counted (writeMonth does not create an empty record)', () => {
+    expect(outletsAffected([], [{ outletCode: 'N', values: {} }], ['K'])).toBe(0);
+    // an existing row that ends with no owned value still counts (its owned keys are stripped)
+    expect(outletsAffected([{ outletCode: 'X', kpiValues: { K: 1 } }], [{ outletCode: 'X', values: {} }], ['K'])).toBe(1);
+  });
 });
 
 // ─── FOCUS-FROM-TARGETS (design platform/docs/plans/FOCUS-FROM-TARGETS-DESIGN.md) — REAL focus-products ─────────────
@@ -811,6 +826,72 @@ describe('FOCUS-FROM-TARGETS: preview / apply / recalculate with products from t
     expect(before.months[0].reconciliation.targets.newerThanLastApply).toBe(false);
     const never = await services(fdb({ targetBatches: [{ id: 'tb1', createdAt: LATER }] })).preview.preview('t1', 'imp1');
     expect(never.months[0].reconciliation.targets.newerThanLastApply).toBe(false);
+  });
+
+  it('audit follow-up (timing): newerThanLastApply follows the target ROWS’ write time, not the upload batch’s', async () => {
+    // batch stamped BEFORE the apply, but a chunk of its rows committed AFTER it
+    const p = await services(
+      fdb({ lastApply: { lastDate: `${PREV}-28` }, targets: [tgt(PREV, 'O1', 10, 'P500'), { ...tgt(PREV, 'O2', 5, 'Q'), updatedAt: LATER }] }),
+    ).preview.preview('t1', 'imp1');
+    expect(p.months[0].reconciliation.targets.newerThanLastApply).toBe(true);
+    expect(p.months[0].reconciliation.targets.targetUploadedAt).toBe(LATER.toISOString());
+  });
+
+  it('audit follow-up (B-M1): without a TARGET_NAMES definition newerThanLastApply is never true (targets change no figure)', async () => {
+    const p = await services(
+      makeDb({ months: [PREV], lastApply: { lastDate: `${PREV}-28` }, targets: [tgt(PREV, 'O1', 10, 'P500')], targetBatches: [{ id: 'tb1', createdAt: LATER }] }),
+    ).preview.preview('t1', 'imp1');
+    expect(p.months[0].reconciliation.targets.newerThanLastApply).toBe(false);
+    expect(p.months[0].reconciliation.targets.targetUploadedAt).toBe(LATER.toISOString()); // still shown
+  });
+
+  it('audit follow-up: the reconciliation carries each KPI’s measure (targets + focus)', async () => {
+    const p = await services(fdb()).preview.preview('t1', 'imp1');
+    const rec = p.months[0].reconciliation;
+    expect(rec.targets.kpis.map((k) => [k.kpiCode, k.measure])).toEqual([['OWN_AMT', 'AMOUNT'], ['OWN_QTY', 'QUANTITY'], ['FOCUS', 'AMOUNT']]);
+    expect(rec.focus.map((f) => [f.kpiCode, f.measure])).toEqual([['FOCUS', 'AMOUNT']]);
+  });
+
+  it('audit follow-up: ONE catalogue per apply request — applying month A (which rewrites A’s product list) cannot unmatch month B', async () => {
+    // "R" is known only from a stored month's product list; month A's apply replaces the stored lists (mock: once a
+    // combos.insert ran, the stored lists no longer hold R). Re-reading the catalogue per month would block B after A
+    // was already written.
+    const R = { dimA: 'R', dimB: '1' };
+    const db = fdb({
+      months: [PREV, CUR],
+      historyCombos: [R],
+      historyCombosAfterApply: [],
+      targets: [tgt(PREV, 'O1', 10, 'P500'), tgt(PREV, 'O2', 5, 'R'), tgt(CUR, 'O1', 10, 'P500'), tgt(CUR, 'O2', 5, 'R')],
+    });
+    const p = await services(db).preview.preview('t1', 'imp1');
+    expect(p.months.map((m) => m.canApply)).toEqual([true, true]);
+    db.$queryRaw.mockClear();
+    const r = await services(db).apply.apply(user, 'imp1', applyBody(p, { months: [PREV, CUR] }));
+    expect(r.results.map((x) => x.ok)).toEqual([true, true]);
+    // loaded exactly once for the whole request (pre-check + both months' under-lock re-checks)
+    const texts = db.$queryRaw.mock.calls.map((c) => (c[0] as unknown as Prisma.Sql).strings.join('?'));
+    expect(texts.filter((t) => t.includes('FROM "sales_month_history_combos"'))).toHaveLength(1);
+    const importSql = texts.filter((t) => t.includes('FROM "sales_import_aggregates"'));
+    expect(importSql).toHaveLength(1);
+    // cheap distinct: DISTINCT ON dimKey, no per-row jsonb → text cast, still tenant-checked
+    expect(importSql[0]).toMatch(/SELECT DISTINCT ON \(a\."dimKey"\) a\."dims"/);
+    expect(importSql[0]).not.toMatch(/::text/);
+    expect(importSql[0]).toMatch(/"sales_imports"[\s\S]*"clientId"/);
+  });
+
+  it('audit follow-up: a TARGET_NAMES-only tenant never INSERTs an empty record; an existing record still loses its owned key', async () => {
+    const db = fdb({
+      defs: [FOCUS_DEF],
+      targets: [tgt(PREV, 'O1', 10, 'P500')], // O2 / O3: no name, no target → FOCUS omitted → no value at all
+      existing: [{ outletCode: 'O2', kpiValues: { FOCUS: 5, MANUAL: 1 }, batch: { status: 'SALES_IMPORT', createdAt: AT } }],
+    });
+    const p = await services(db).preview.preview('t1', 'imp1');
+    const r = await services(db).apply.apply(user, 'imp1', applyBody(p));
+    expect(r.results[0]).toEqual(expect.objectContaining({ ok: true, outletsWritten: 1, outletsZeroFilled: 0 }));
+    expect(writtenValues(db)).toEqual({ O1: { FOCUS: 100 } }); // no {} rows for O2 / O3
+    const strip = sqlCalls(db).find((q) => q.text.includes('NOT ("outletCode" = ANY'))!;
+    expect(strip.values).toContainEqual(['O1']); // O2 is not "written" → its FOCUS key is stripped (MANUAL kept by the SQL)
+    expect(db.salesUploadBatch.create.mock.calls[0][0].data).toEqual(expect.objectContaining({ totalRows: 1, acceptedCount: 1 }));
   });
 
   const hist = (id: number, code: string, dims: Record<string, string>, paise: bigint) => ({

@@ -93,7 +93,9 @@ export function buildFocusCatalogue(dimensionKeys: string[], combos: Iterable<Re
       [...set.entries()].sort((a, b) => cmp(a[0], b[0])).map(([, m]) => m),
     );
   }
-  return { dimensionKeys: keys, byKey, size: seenCombos.size };
+  // No product columns → no product can be named (every combo would be the empty prefix): an EMPTY catalogue, so the
+  // upload check reports NO_PRODUCT_LIST instead of "checked" with every token unmatched.
+  return { dimensionKeys: keys, byKey, size: keys.length === 0 ? 0 : seenCombos.size };
 }
 
 /** Resolve one token (no acceptance applied). */
@@ -230,6 +232,7 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
   const focus: MonthFocusKpi[] = [];
   const fpPerOutlet: Array<[string, string, string]> = [];
   const fpMissing: Array<[string, string]> = [];
+  const fpBlankNames: Array<[string, string, string]> = [];
   const fpAccepted = new Set<string>();
   const fpResolutions = new Map<string, unknown>(); // name key → its token resolutions
 
@@ -241,6 +244,7 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
     const unmatched = new Map<string, { token: string; outlets: Set<string> }>();
     const ambiguous = new Map<string, { token: string; candidates: DimMatch[]; outlets: Set<string> }>();
     const missing: string[] = [];
+    const separatorOnly = new Map<string, Set<string>>(); // name as written → outlets
 
     for (const [code, meta] of rosterSorted) {
       if (!outletInScope(def, meta)) continue;
@@ -250,6 +254,15 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
       const t = row?.values?.[kpiCode];
       const hasTarget = typeof t === 'number' && Number.isFinite(t);
       const tokens = name === '' ? [] : splitFocusName(name);
+      if (tokens.length === 0 && name !== '') {
+        // Audit follow-up: a written name made only of separators ("&", ",", " & ") is NOT "no name" — the operator
+        // wrote something that names no product. Always a blocker (target or not); key omitted.
+        let s = separatorOnly.get(name);
+        if (!s) separatorOnly.set(name, (s = new Set()));
+        s.add(code);
+        fpBlankNames.push([kpiCode, code, name]);
+        continue;
+      }
       if (tokens.length === 0) {
         // §4 rows 3–4: no name → key omitted; with a numeric target it is a blocker.
         if (hasTarget) {
@@ -344,6 +357,17 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
         message: `${outletsText(n)} ${plural(n, 'has', 'have')} a ${label} target but no product name in the target file.`,
       });
     }
+    // Same code (FOCUS_MISSING_NAME — cleared only by fixing the target file), its own message per name as written.
+    for (const [written, outlets] of [...separatorOnly.entries()].sort((a, b) => cmp(a[0], b[0]))) {
+      const n = outlets.size;
+      blockers.push({
+        code: 'FOCUS_MISSING_NAME',
+        kpiCode,
+        outlets: n,
+        sampleOutletCodes: sample(outlets),
+        message: `"${written}" in ${display} for ${outletsText(n)} has no product in it. Write the product name(s) in the target file.`,
+      });
+    }
 
     const names: FocusNameSummary[] = [...groups.values()].map((g) => {
       const name = [...g.spellings.entries()].sort((a, b) => b[1] - a[1] || cmp(a[0], b[0]))[0][0];
@@ -380,6 +404,7 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
     focus.push({
       kpiCode,
       label,
+      measure: def.measure,
       names,
       missingName: { outlets: missing.length, sampleOutletCodes: sample(missing) },
     });
@@ -400,6 +425,7 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
         resolutions: [...fpResolutions.entries()].sort((a, b) => cmp(a[0], b[0])),
         accepted: [...fpAccepted].sort(cmp),
         missing: [...fpMissing].sort(tupleCmp),
+        blankNames: [...fpBlankNames].sort(tupleCmp),
       }),
     )
     .digest('hex');
@@ -436,6 +462,7 @@ export function buildMonthReconciliation(args: {
 }): MonthReconciliation {
   const { input, resolution, comp, targetUploadedAt, ownedKpiCodes } = args;
   const numeric = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+  const measureOf = new Map(input.defs.map((d) => [d.kpiCode, d.measure]));
 
   const kpis = ownedKpiCodes.map((kpiCode) => {
     let outlets = 0;
@@ -451,6 +478,8 @@ export function buildMonthReconciliation(args: {
       label: (input.labelOf.get(kpiCode) ?? '').trim() || kpiCode,
       outletsWithTarget: outlets,
       totalTarget: round(total, 2),
+      // Owned KPIs are exactly the enabled definitions, so the measure is always known ('AMOUNT' is unreachable).
+      measure: measureOf.get(kpiCode) ?? 'AMOUNT',
     };
   });
 

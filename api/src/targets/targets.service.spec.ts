@@ -595,7 +595,7 @@ describe('TargetsService', () => {
         mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       } as Express.Multer.File;
       const result = await service.uploadTargets(admin, file);
-      expect(result.focusCheck).toEqual({ checked: false, reason: expect.stringMatching(/No Sales Import KPI/), months: [] });
+      expect(result.focusCheck).toEqual({ checked: false, reason: expect.stringMatching(/No Sales Import KPI/), reasonCode: 'NO_TARGET_NAMES_KPI', months: [] });
     });
 
     it('FOCUS-FROM-TARGETS: the focus check NEVER blocks the upload (a failing check → checked:false, rows still saved)', async () => {

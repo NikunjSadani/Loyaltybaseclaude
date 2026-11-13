@@ -31,7 +31,15 @@ export interface MonthFocusRun {
   targetUploadedAt: Date | null;
 }
 
-/** A lazily-loaded catalogue shared by every month of one request (only loaded when a TARGET_NAMES def exists). */
+/**
+ * A lazily-loaded catalogue shared by every month of one request (only loaded when a TARGET_NAMES def exists).
+ *
+ * The catalogue is REQUEST-SCOPED on purpose: applying month A rewrites A's stored product list
+ * (sales_month_history_combos) inside A's transaction, so a catalogue re-read for month B afterwards would differ from
+ * the one the operator previewed — B's names could turn UNMATCHED after A was already written (a half-applied request).
+ * Every month of one request (incl. the under-lock re-check) therefore resolves against the product lists as they were
+ * at the START of the request ∪ the import's own products. Targets and acceptances are still re-read under the lock.
+ */
 export function lazyCatalogue(load: () => Promise<FocusCatalogue>): () => Promise<FocusCatalogue> {
   let p: Promise<FocusCatalogue> | null = null;
   return () => (p ??= load());
@@ -78,7 +86,12 @@ export function reconcileMonth(
     targetUploadedAt: run.targetUploadedAt,
     ownedKpiCodes,
   });
-  return { ...rec, targets: { ...rec.targets, newerThanLastApply: targetsNewerThanApply(run.targetUploadedAt, lastAppliedAt) } };
+  // B-M1: only a TARGET_NAMES tenant's figures depend on the targets, so only then can "targets changed" be true.
+  const focusOn = hasTargetNamesDef(run.input.defs);
+  return {
+    ...rec,
+    targets: { ...rec.targets, newerThanLastApply: targetsNewerThanApply(run.targetUploadedAt, lastAppliedAt, focusOn) },
+  };
 }
 
 /** blockedReason for a month with focus blockers (null = none). Comes AFTER the existing reasons in precedence. */

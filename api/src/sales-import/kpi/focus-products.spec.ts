@@ -108,6 +108,11 @@ describe('buildFocusCatalogue', () => {
     expect(c.size).toBe(NOV_COMBOS.length);
     expect(buildFocusCatalogue(DIMS, []).size).toBe(0);
   });
+  it('audit follow-up: no dimension keys → size 0 and no keys (nothing can be named), whatever the combos', () => {
+    const c = buildFocusCatalogue([], NOV_COMBOS);
+    expect(c.size).toBe(0);
+    expect(c.byKey.size).toBe(0);
+  });
 });
 
 describe('resolveFocusToken', () => {
@@ -248,6 +253,47 @@ describe('resolveMonthFocus — design §4', () => {
     expect(res.focus[0].missingName).toEqual({ outlets: 2, sampleOutletCodes: ['R1', 'R2'] });
   });
 
+  it('audit follow-up: a name made only of separators is a FOCUS_MISSING_NAME blocker WITH or WITHOUT a target; key omitted', () => {
+    const res = resolveMonthFocus(
+      input({
+        defs: [tnDef(FB)],
+        targets: new Map([
+          ['R1', tr({ [FB]: 10 }, { [FB]: '&' })],
+          ['R2', tr({}, { [FB]: '&' })], // no numeric target — still a blocker (the operator wrote something)
+          ['W1', tr({ [FB]: 5 }, { [FB]: ' , && ' })],
+          ['W2', tr({ [FB]: 5 }, { [FB]: 'ADHO50' })],
+        ]),
+      }),
+    );
+    expect(res.blockers).toEqual([
+      {
+        code: 'FOCUS_MISSING_NAME',
+        kpiCode: FB,
+        outlets: 2,
+        sampleOutletCodes: ['R1', 'R2'],
+        message: '"&" in Focus Brand 1 (FOCUS BRAND) for 2 outlets has no product in it. Write the product name(s) in the target file.',
+      },
+      {
+        code: 'FOCUS_MISSING_NAME',
+        kpiCode: FB,
+        outlets: 1,
+        sampleOutletCodes: ['W1'],
+        message: '", &&" in Focus Brand 1 (FOCUS BRAND) for 1 outlet has no product in it. Write the product name(s) in the target file.',
+      },
+    ]);
+    expect([...res.outletFilters.get(FB)!.keys()]).toEqual(['W2']);
+    // not counted as "no name" (that is the target-without-name case)
+    expect(res.focus[0].missingName.outlets).toBe(0);
+    // the fingerprint sees the separator-only names
+    const clean = resolveMonthFocus(input({ defs: [tnDef(FB)], targets: new Map([['W2', tr({ [FB]: 5 }, { [FB]: 'ADHO50' })]]) }));
+    expect(res.fingerprint).not.toBe(clean.fingerprint);
+  });
+
+  it('audit follow-up: MonthFocusKpi carries the definition measure', () => {
+    const res = resolveMonthFocus(input({ defs: [tnDef(FB, 'PRODUCT_COUNT'), tnDef(FB2, 'QUANTITY')] }));
+    expect(res.focus.map((f) => [f.kpiCode, f.measure])).toEqual([[FB, 'PRODUCT_COUNT'], [FB2, 'QUANTITY']]);
+  });
+
   it('blockers group by (kpi, token key), count outlets, samples sorted and ≤ 20', () => {
     const roster = new Map<string, RosterOutlet>();
     const targets = new Map<string, MonthTargetRow>();
@@ -371,9 +417,9 @@ describe('end to end with computeMonthRows + buildMonthReconciliation (November 
     });
     expect(rec.targets).toEqual({
       kpis: [
-        { kpiCode: 'TOTAL', label: 'Total', outletsWithTarget: 1, totalTarget: 5000 },
-        { kpiCode: FB, label: 'Focus Brand 1', outletsWithTarget: 4, totalTarget: 2000 },
-        { kpiCode: FB2, label: 'Focus Brand 2', outletsWithTarget: 2, totalTarget: 400 },
+        { kpiCode: 'TOTAL', label: 'Total', outletsWithTarget: 1, totalTarget: 5000, measure: 'AMOUNT' },
+        { kpiCode: FB, label: 'Focus Brand 1', outletsWithTarget: 4, totalTarget: 2000, measure: 'AMOUNT' },
+        { kpiCode: FB2, label: 'Focus Brand 2', outletsWithTarget: 2, totalTarget: 400, measure: 'AMOUNT' },
       ],
       targetUploadedAt: '2026-11-07T10:00:00.000Z',
       newerThanLastApply: false,

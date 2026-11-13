@@ -3281,8 +3281,7 @@ model SalesFocusAcceptance {
   acceptedById String
   acceptedAt   DateTime @default(now())
 
-  @@unique([clientId, month, kpiCode, key])
-  @@index([clientId, month])
+  @@unique([clientId, month, kpiCode, key]) // its leading (clientId, month) serves the per-month reads
   @@map("sales_focus_acceptances")
 }
 

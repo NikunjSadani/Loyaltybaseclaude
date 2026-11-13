@@ -3,10 +3,10 @@
  * needs (lane B2). Every reader is keyed by clientId (tenant isolation). The pure logic lives in focus-products.ts.
  *
  *  - loadMonthTargets: the month's OutletTarget rows mapped onto the CURRENT roster (same normalized index as the
- *    aggregates) + the latest target upload time for the month.
- *  - latestTargetUploadByMonth: the same "latest target upload" for many months in two grouped queries (months list).
+ *    aggregates) + when the month's target rows were last written (MAX updatedAt).
+ *  - latestTargetWriteByMonth: the same "last written" for many months in one GROUP BY (months list).
  *  - loadFocusCatalogue: the profile's dimension keys (in profile order) over the DISTINCT product combos of every stored
- *    month (sales_month_history_combos) plus, for an import, the import's own aggregates — SQL GROUP BY, never Prisma
+ *    month (sales_month_history_combos) plus, for an import, the import's own aggregates — SQL DISTINCT ON, never Prisma
  *    `distinct` (which loads every row into Node).
  *  - loadFocusAcceptances: the month's "accepted — not sold yet" tokens with the acceptor's name.
  */
@@ -80,13 +80,14 @@ export function mapTargetsOntoRoster(
 export interface MonthTargetsLoad {
   /** ROSTER outlet code → the month's target row. */
   targets: Map<string, MonthTargetRow>;
-  /** Latest target upload batch that wrote a row of this month (null = no targets for the month). */
+  /** When the month's target ROWS were last written (MAX(updatedAt)); null = no targets for the month. */
   uploadedAt: Date | null;
 }
 
 /**
- * The month's targets. "Latest upload" = the newest TargetUploadBatch referenced by the month's OutletTarget rows (a
- * multi-month upload's batch row is labelled with its EARLIEST month only, so the batch's own `month` is not enough).
+ * The month's targets. "Last written" = MAX(outlet_targets."updatedAt") over the month's rows — NOT the upload batch's
+ * createdAt: the upload creates the batch row BEFORE its chunks commit, so an apply in between would read only part of
+ * the targets yet look newer than the batch (audit follow-up). A multi-month upload is covered too (per-row stamp).
  */
 export async function loadMonthTargets(
   db: Db,
@@ -96,42 +97,46 @@ export async function loadMonthTargets(
 ): Promise<MonthTargetsLoad> {
   const rows = await db.outletTarget.findMany({
     where: { clientId, month },
-    select: { outletCode: true, targetValues: true, batchId: true },
+    select: { outletCode: true, targetValues: true, updatedAt: true },
   });
-  const batchIds = [...new Set(rows.map((r) => r.batchId))];
   let uploadedAt: Date | null = null;
-  if (batchIds.length > 0) {
-    const agg = await db.targetUploadBatch.aggregate({ where: { clientId, id: { in: batchIds } }, _max: { createdAt: true } });
-    uploadedAt = agg._max.createdAt ?? null;
-  }
+  for (const r of rows) if (r.updatedAt && (!uploadedAt || r.updatedAt > uploadedAt)) uploadedAt = r.updatedAt;
   return { targets: mapTargetsOntoRoster(rows, roster), uploadedAt };
 }
 
-/** month → latest target upload (see loadMonthTargets) for many months: one GROUP BY + one batch read. */
-export async function latestTargetUploadByMonth(
-  db: Pick<Prisma.TransactionClient, 'outletTarget' | 'targetUploadBatch'>,
+/** month → when the month's target rows were last written (see loadMonthTargets), for many months in ONE GROUP BY. */
+export async function latestTargetWriteByMonth(
+  db: Pick<Prisma.TransactionClient, 'outletTarget'>,
   clientId: string,
   months: readonly string[],
 ): Promise<Map<string, Date>> {
   const out = new Map<string, Date>();
   if (months.length === 0) return out;
-  const pairs = await db.outletTarget.groupBy({ by: ['month', 'batchId'], where: { clientId, month: { in: [...months] } } });
-  const ids = [...new Set(pairs.map((p) => p.batchId))];
-  if (ids.length === 0) return out;
-  const batches = await db.targetUploadBatch.findMany({ where: { clientId, id: { in: ids } }, select: { id: true, createdAt: true } });
-  const at = new Map(batches.map((b) => [b.id, b.createdAt]));
-  for (const p of pairs) {
-    const t = at.get(p.batchId);
-    if (!t) continue;
-    const cur = out.get(p.month);
-    if (!cur || t > cur) out.set(p.month, t);
-  }
+  const groups = await db.outletTarget.groupBy({
+    by: ['month'],
+    where: { clientId, month: { in: [...months] } },
+    _max: { updatedAt: true },
+  });
+  for (const g of groups) if (g._max?.updatedAt) out.set(g.month, g._max.updatedAt);
   return out;
 }
 
-/** "Targets changed since the last apply": the month was applied and a target upload is newer than that apply. */
-export function targetsNewerThanApply(targetUploadedAt: Date | null | undefined, lastAppliedAt: Date | null | undefined): boolean {
-  return !!targetUploadedAt && !!lastAppliedAt && targetUploadedAt.getTime() > lastAppliedAt.getTime();
+/** Does the tenant have an ENABLED TARGET_NAMES definition (one count query)? */
+export async function tenantHasTargetNamesDef(db: Pick<Prisma.TransactionClient, 'salesKpiDefinition'>, clientId: string): Promise<boolean> {
+  const n = await db.salesKpiDefinition.count({ where: { clientId, enabled: true, productSource: 'TARGET_NAMES' } });
+  return n > 0;
+}
+
+/**
+ * "Targets changed since the last apply": the month was applied, its target rows were written after that apply, AND the
+ * tenant has an enabled TARGET_NAMES definition — without one, targets change no applied figure (B-M1), so never flag.
+ */
+export function targetsNewerThanApply(
+  targetWrittenAt: Date | null | undefined,
+  lastAppliedAt: Date | null | undefined,
+  focusOn: boolean,
+): boolean {
+  return focusOn && !!targetWrittenAt && !!lastAppliedAt && targetWrittenAt.getTime() > lastAppliedAt.getTime();
 }
 
 function parseDims(text: unknown): Record<string, string> | null {
@@ -155,17 +160,21 @@ export async function profileDimensionKeys(db: Db, clientId: string): Promise<st
 
 /**
  * design §3 catalogue: every stored month's distinct product combos (ALL months of the tenant) + for an import preview /
- * apply, the import's distinct aggregate combos. dimKey is the stable 1:1 key of dims, so GROUP BY dimKey = distinct.
+ * apply, the import's distinct aggregate combos. dimKey is the stable 1:1 key of dims, so one row per dimKey = distinct.
+ * `DISTINCT ON ("dimKey")` keeps one row per key without casting every row's jsonb to text (the old MIN(dims::text)
+ * did, for every aggregate of the import); the import read uses the aggregates' (importId, …) index for the WHERE and
+ * one sort on dimKey. Never Prisma `distinct` (that loads every row into Node).
  */
 export async function loadFocusCatalogue(db: Db, clientId: string, opts: { importId?: string } = {}): Promise<FocusCatalogue> {
   const dimensionKeys = await profileDimensionKeys(db, clientId);
   const history = await db.$queryRaw<Array<{ dims: unknown }>>(Prisma.sql`
-    SELECT MIN("dims"::text) AS "dims" FROM "sales_month_history_combos" WHERE "clientId" = ${clientId} GROUP BY "dimKey"`);
+    SELECT DISTINCT ON ("dimKey") "dims" FROM "sales_month_history_combos" WHERE "clientId" = ${clientId} ORDER BY "dimKey"`);
   const fromImport = opts.importId
     ? await db.$queryRaw<Array<{ dims: unknown }>>(Prisma.sql`
-        SELECT MIN(a."dims"::text) AS "dims" FROM "sales_import_aggregates" a
-          JOIN "sales_imports" i ON i."id" = a."importId" AND i."clientId" = ${clientId}
-         WHERE a."importId" = ${opts.importId} GROUP BY a."dimKey"`)
+        SELECT DISTINCT ON (a."dimKey") a."dims" FROM "sales_import_aggregates" a
+         WHERE a."importId" = ${opts.importId}
+           AND EXISTS (SELECT 1 FROM "sales_imports" i WHERE i."id" = ${opts.importId} AND i."clientId" = ${clientId})
+         ORDER BY a."dimKey"`)
     : [];
   const combos: Record<string, string>[] = [];
   for (const r of [...history, ...fromImport]) {

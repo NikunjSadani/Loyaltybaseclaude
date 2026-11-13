@@ -15,8 +15,15 @@ import type {
 import { SALES_MONTH_HISTORY_RETENTION_YEARS } from '../sales-import.contract';
 import { classifyMonthSummaries, insertMonthCombosSql } from '../kpi/month-combos';
 import { isMonthKey, monthLabel, resolveMonthState, shiftMonthKey } from './month-state';
-import { latestTargetUploadByMonth, listFocusAcceptances, targetsNewerThanApply } from '../kpi/focus-data';
-import { focusKey } from '../kpi/focus-products';
+import {
+  kpiLabelsOf,
+  latestTargetWriteByMonth,
+  listFocusAcceptances,
+  targetRowOf,
+  targetsNewerThanApply,
+  tenantHasTargetNamesDef,
+} from '../kpi/focus-data';
+import { focusKey, splitFocusName } from '../kpi/focus-products';
 
 /** Longest acceptance key accepted (a focus token key; real ones are a few characters). */
 export const FOCUS_ACCEPTANCE_MAX_KEY = 200;
@@ -124,7 +131,7 @@ export class SalesMonthsService {
     const [downstream, history, targetTimes] = await Promise.all([
       downstreamArtifacts(this.prisma, clientId, months),
       historyMetaByMonth(this.prisma, clientId, months),
-      latestTargetUploadByMonth(this.prisma, clientId, months),
+      this.targetChangeTimes(clientId, months),
     ]);
     return months
       .reverse()
@@ -166,7 +173,7 @@ export class SalesMonthsService {
     );
     const downstream = (await downstreamArtifacts(this.prisma, clientId, [month])).get(month);
     const history = (await historyMetaByMonth(this.prisma, clientId, [month])).get(month);
-    const targetAt = (await latestTargetUploadByMonth(this.prisma, clientId, [month])).get(month);
+    const targetAt = (await this.targetChangeTimes(clientId, [month])).get(month);
     return this.toRow(month, currentMonthKey(), row, await this.userNames([row.closedById]), downstream, history, targetAt);
   }
 
@@ -219,7 +226,7 @@ export class SalesMonthsService {
       { timeout: 30_000, maxWait: 10_000 },
     );
     const history = (await historyMetaByMonth(this.prisma, clientId, [month])).get(month);
-    const targetAt = (await latestTargetUploadByMonth(this.prisma, clientId, [month])).get(month);
+    const targetAt = (await this.targetChangeTimes(clientId, [month])).get(month);
     return { ...this.toRow(month, currentMonthKey(), row, await this.userNames([row.closedById]), downstream, history, targetAt), warnings };
   }
 
@@ -280,7 +287,7 @@ export class SalesMonthsService {
       this.prisma.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month } } }),
       downstreamArtifacts(this.prisma, clientId, [month]),
       historyMetaByMonth(this.prisma, clientId, [month]),
-      latestTargetUploadByMonth(this.prisma, clientId, [month]),
+      this.targetChangeTimes(clientId, [month]),
     ]);
     return this.toRow(
       month, currentMonthKey(), row, await this.userNames([row?.closedById]), downstream.get(month), history.get(month), targetTimes.get(month),
@@ -307,6 +314,7 @@ export class SalesMonthsService {
     await this.prisma.$transaction(
       async (tx) => {
         await this.lockOpenMonth(tx, clientId, month);
+        await this.assertKeyInMonthTargets(tx, clientId, month, kpiCode, key);
         const existing = await tx.salesFocusAcceptance.findUnique({ where: { clientId_month_kpiCode_key: { clientId, month, kpiCode, key } } });
         if (existing) return;
         const row = await tx.salesFocusAcceptance.create({ data: { clientId, month, kpiCode, key, acceptedById: user.sub } });
@@ -380,6 +388,27 @@ export class SalesMonthsService {
     return { kpiCode, key };
   }
 
+  /**
+   * Audit follow-up: only a product name that the month's target file actually carries for this KPI can be accepted
+   * (a stray key would sit in the table, silently pre-accepting a future typo). Cheap: the month's target rows' names for
+   * the KPI, split into tokens — no catalogue needed.
+   */
+  private async assertKeyInMonthTargets(
+    tx: Prisma.TransactionClient,
+    clientId: string,
+    month: string,
+    kpiCode: string,
+    key: string,
+  ): Promise<void> {
+    const rows = await tx.outletTarget.findMany({ where: { clientId, month }, select: { targetValues: true } });
+    for (const r of rows) {
+      const name = targetRowOf(r.targetValues).names[kpiCode];
+      if (name && splitFocusName(name).some((t) => focusKey(t) === key)) return;
+    }
+    const label = ((await kpiLabelsOf(tx, clientId, [kpiCode])).get(kpiCode) ?? '').trim() || kpiCode;
+    throw new BadRequestException(`"${key}" is not a product name in the ${monthLabel(month)} target file for ${label}.`);
+  }
+
   /** Month lock + the month must be OPEN (acceptances change what an apply / recalculate of the month would write). */
   private async lockOpenMonth(tx: Prisma.TransactionClient, clientId: string, month: string): Promise<void> {
     await lockSalesMonth(tx, clientId, month);
@@ -395,7 +424,7 @@ export class SalesMonthsService {
     names: Map<string, string>,
     downstream: Downstream = NO_DOWNSTREAM,
     history?: HistoryMeta,
-    /** Latest target upload for the month (latestTargetUploadByMonth). */
+    /** When the month's target rows were last written — ONLY for a tenant with a TARGET_NAMES KPI (targetChangeTimes). */
     targetUploadedAt?: Date,
   ): SalesMonthRow {
     const st = resolveMonthState(month, current, row);
@@ -416,8 +445,19 @@ export class SalesMonthsService {
       historyAppliedAt: history ? history.appliedAt.toISOString() : null,
       productListCurrent: !history || ['current', 'empty'].includes(classifyMonthSummaries([{ month, ...history }]).get(month)!),
       // FOCUS-FROM-TARGETS §11: targets uploaded after the month's last apply (apply or recalculate) → "recalculate".
-      targetsChangedSinceApply: targetsNewerThanApply(targetUploadedAt ?? null, row?.lastAppliedAt ?? null),
+      // targetChangeTimes is empty for a tenant without a TARGET_NAMES KPI (B-M1) → always false there.
+      targetsChangedSinceApply: targetsNewerThanApply(targetUploadedAt ?? null, row?.lastAppliedAt ?? null, targetUploadedAt !== undefined),
     };
+  }
+
+  /**
+   * FOCUS-FROM-TARGETS §11 / audit follow-up: month → when its target ROWS were last written (MAX updatedAt, one GROUP BY
+   * for every month) — but only when the tenant has an enabled TARGET_NAMES definition. Without one the targets change no
+   * applied figure, so "Targets changed — recalculate" must never show (and the target table is not read at all).
+   */
+  private async targetChangeTimes(clientId: string, months: string[]): Promise<Map<string, Date>> {
+    if (!(await tenantHasTargetNamesDef(this.prisma, clientId))) return new Map();
+    return latestTargetWriteByMonth(this.prisma, clientId, months);
   }
 
   private async userNames(ids: Array<string | null | undefined>): Promise<Map<string, string>> {

@@ -86,6 +86,43 @@ describe('SalesProfileService (K-1)', () => {
     await expect(new SalesProfileService(db as never).put(user, { ...MAPPING, dimensions: [MAPPING.dimensions[0]] })).rejects.toThrow(/K1 \(dimB\)/);
     expect(db.salesImportProfile.upsert).not.toHaveBeenCalled();
   });
+  describe('audit follow-up: product columns are frozen while a Lines (PRODUCT_COUNT) or "from the target file" KPI is enabled', () => {
+    function guarded(users: Array<{ kpiCode: string }>) {
+      const db = txDb();
+      db.salesKpiDefinition.findMany.mockImplementation(async ({ where }: { where: Record<string, unknown> }) =>
+        where.OR ? users : []);
+      db.kpiDef.findMany.mockImplementation(async ({ select }: { select: Record<string, boolean> }) =>
+        select.label ? [{ code: 'LINES', label: 'Lines' }, { code: 'FB1', label: 'Focus Brand 1' }] : []);
+      return db;
+    }
+    const [A, B] = MAPPING.dimensions;
+    it.each([
+      ['adding a column', [A, B, { key: 'dimC', label: 'C', header: 'PACK' }]],
+      ['removing a column', [A]],
+      ['reordering', [B, A]],
+      ['changing a key', [A, { ...B, key: 'dimZ' }]],
+      ['changing a heading', [A, { ...B, header: 'SKU GROUP' }]],
+    ])('%s → 400 naming the KPIs; nothing saved', async (_n, dimensions) => {
+      const db = guarded([{ kpiCode: 'FB1' }, { kpiCode: 'LINES' }]);
+      await expect(new SalesProfileService(db as never).put(user, { ...MAPPING, dimensions })).rejects.toThrow(
+        "Product columns can't be changed while 'Focus Brand 1' (FB1), 'Lines' (LINES) use them",
+      );
+      expect(db.salesImportProfile.upsert).not.toHaveBeenCalled();
+      const q = db.salesKpiDefinition.findMany.mock.calls.find((c: Array<{ where: Record<string, unknown> }>) => c[0].where.OR)![0];
+      expect(q.where).toEqual({ clientId: 't1', enabled: true, OR: [{ measure: 'PRODUCT_COUNT' }, { productSource: 'TARGET_NAMES' }] });
+    });
+    it('a label-only (or heading case/space) change is allowed', async () => {
+      const db = guarded([{ kpiCode: 'LINES' }]);
+      await new SalesProfileService(db as never).put(user, { ...MAPPING, dimensions: [{ ...A, label: 'Brand' }, { ...B, header: ' sku ' }] });
+      expect(db.salesImportProfile.upsert).toHaveBeenCalled();
+    });
+    it('no such KPI enabled → product columns may change', async () => {
+      const db = guarded([]);
+      await new SalesProfileService(db as never).put(user, { ...MAPPING, dimensions: [A] });
+      expect(db.salesImportProfile.upsert).toHaveBeenCalled();
+    });
+  });
+
   it('get returns null when unset', async () => {
     const db = txDb();
     db.salesImportProfile.findUnique.mockResolvedValue(null);
@@ -440,6 +477,16 @@ describe('SalesKpiDefService — productSource (FOCUS-FROM-TARGETS)', () => {
     await expect(s.create(user, dto({ productSource: 'TARGET_NAMES', filter: { noneOf: [{ dimA: 'P' }] } }) as never)).rejects.toBeInstanceOf(BadRequestException);
     await expect(s.create(user, dto({ kpiCode: 'K_NONAME', productSource: 'TARGET_NAMES' }) as never)).rejects.toThrow(
       'Turn on the per-outlet name column for this KPI in KPI settings first, so the target file can carry the product names.',
+    );
+    expect(db.salesKpiDefinition.create).not.toHaveBeenCalled();
+  });
+
+  it('audit follow-up: TARGET_NAMES needs at least one product column (same rule as PRODUCT_COUNT)', async () => {
+    const db = txDb();
+    db.kpiDef.findFirst.mockImplementation(async ({ where }: { where: { code: string } }) => named(where));
+    db.salesImportProfile.findUnique.mockResolvedValue({ columnMapping: { ...MAPPING, dimensions: [] } });
+    await expect(new SalesKpiDefService(db as never).create(user, dto({ productSource: 'TARGET_NAMES' }) as never)).rejects.toThrow(
+      /no product \(dimension\) columns, so a 'from the target file' KPI/,
     );
     expect(db.salesKpiDefinition.create).not.toHaveBeenCalled();
   });

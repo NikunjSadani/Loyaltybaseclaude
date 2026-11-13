@@ -43,6 +43,8 @@ export const TARGET_NAMES_NEEDS_NAME_COLUMN =
   'Turn on the per-outlet name column for this KPI in KPI settings first, so the target file can carry the product names.';
 export const TARGET_NAMES_FILTER_MUST_BE_EMPTY =
   "A KPI whose products come from the target file can't also have its own product list. Clear the product list first.";
+export const TARGET_NAMES_NEEDS_PRODUCT_COLUMNS =
+  "The column mapping has no product (dimension) columns, so a 'from the target file' KPI has no products to match the names against.";
 export const TARGET_NAMES_TEST_MESSAGE =
   "Test a 'from the target file' KPI on the month screen: its products differ per outlet and per month, so they are checked against each month's targets there.";
 
@@ -225,6 +227,9 @@ export class SalesKpiDefService {
         throw new BadRequestException(TARGET_NAMES_FILTER_MUST_BE_EMPTY);
       }
       if (!kpi.hasNameOverride || !(kpi.nameOverrideLabel ?? '').trim()) throw new BadRequestException(TARGET_NAMES_NEEDS_NAME_COLUMN);
+      // The names are matched against products = combinations of the product (dimension) columns; with none, nothing
+      // can ever match (same rule as PRODUCT_COUNT).
+      if (profile.dimensions.length === 0) throw new BadRequestException(TARGET_NAMES_NEEDS_PRODUCT_COLUMNS);
     }
 
     const order = dto.order === undefined || dto.order === null ? 0 : Number(dto.order);
