@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
-import { IsBoolean, IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { IsBoolean, IsInt, IsOptional, IsString, Min, Max } from 'class-validator';
+import { PAGE_SIZE_MAX } from '../../common/validators/page-size';
 
 /**
  * Query for GET /v1/admin/channel-partners — ported from
@@ -24,6 +25,7 @@ export class ListChannelPartnersQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(PAGE_SIZE_MAX)
   limit?: number = 20;
 }
 

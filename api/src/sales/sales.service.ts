@@ -26,6 +26,7 @@ import { currentWindowKey } from '../visibility/visibility-window.helper';
 import { VisibilityProgramScopeLike, visibilityProgramMatches } from '../visibility/visibility-scope.helper';
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import { pickDeliveryDefaults } from '../partner/delivery-defaults.helper';
+import { mapBounded } from '../common/map-bounded';
 
 /**
  * Relation filter that FULLY hides admin-PARKED outlets from sales reps: an outlet whose
@@ -2304,7 +2305,29 @@ export class SalesService {
         // to the rep it belongs to, so "filter by member" returns ALL their outlets.
         salesUser: { select: { userId: true } },
         outlet: {
-          include: {
+          // Memory-safety (2026-11-13): an explicit projection of ONLY the columns the row
+          // mapping below reads (was `include` = every Outlet column, incl. geo/JSON) — a top
+          // manager's list is the whole tenant (~6,500 rows), so per-row weight matters.
+          select: {
+            id: true,
+            parentId: true,
+            outletCode: true,
+            name: true,
+            phone: true,
+            ownerName: true,
+            addressLine1: true,
+            addressLine2: true,
+            city: true,
+            district: true,
+            state: true,
+            pincode: true,
+            programName: true,
+            programCategory: true,
+            distributorName: true,
+            distributorCode: true,
+            kycIntent: true,
+            reKycFlags: true,
+            requiredPaymentType: true,
             outletType: { select: { code: true } },
             partner: {
               select: {
@@ -2368,8 +2391,8 @@ export class SalesService {
       string,
       { identity: GroupIdentity; groupPan: string | null; gstCertInheritable: boolean; chequeInheritable: boolean } | null
     >(
-      await Promise.all(
-        groupParentIds.map(async (pid) => {
+      // Bounded fan-out (memory-safety): a top manager's list can hold hundreds of groups.
+      await mapBounded(groupParentIds, 8, async (pid) => {
           const identity = await resolveGroupIdentity(this.prisma, clientId, pid);
           if (!identity) return [pid, null] as const;
           const groupPan = await resolveGroupPan(this.prisma, clientId, pid);
@@ -2386,8 +2409,7 @@ export class SalesService {
               chequeInheritable: !!carryDocs.cancelledCheque,
             },
           ] as const;
-        }),
-      ),
+      }),
     );
 
     return (
