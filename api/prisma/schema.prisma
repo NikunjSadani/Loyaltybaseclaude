@@ -3574,6 +3574,11 @@ model CreditReversal {
   // (partner already redeemed them). reversed = approvedPaise - shortfallPaise.
   // The client settles `pending` off-platform; the platform does nothing with it.
   shortfallPaise BigInt               @default(0)
+  // PAYOUT reversals approved from 2026-11-13 (interim whole-entry rule): JSON array of the
+  // CreditPayoutEntry ids this reversal consumed (REVERSED, or PAID → receivable). No later
+  // reversal may consume them again. NULL = POINTS, not approved yet, or approved before the
+  // column existed (then every PAID entry of the outlet+field created by approvedAt counts).
+  consumedPayoutEntryIds Json?
   requestedBy    String
   requestedAt    DateTime             @default(now())
   approvedBy     String?
